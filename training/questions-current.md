@@ -1,0 +1,7 @@
+1. Our dashboard runs a query that groups every event by user and counts them over the last 90 days. It used to finish in 2 seconds but now takes 45 seconds as we've grown to 10 million rows. The table is in Postgres, same database we use for signups and billing. Why does adding more rows hurt this specific type of query so much worse than it hurts our normal product queries like "fetch the settings for user 123"?
+
+2. I keep hearing we should move our analytics to a "data warehouse" but we already have a database — isn't that what a database is? What would we actually get by having a second, separate database just for analytics, and wouldn't keeping two databases in sync just create more problems?
+
+3. Someone on my team said our analytics queries are slow because Postgres has to read the entire row just to add up one column — like scanning everyone's full profile just to total up a single field. Is that actually true, and if so, how would a different kind of database store things so it doesn't have to do that?
+
+4. We have 50 enterprise customers and each one wants a "usage analytics" page that shows their own data — things like how many active users they have per month, which features they use most, that kind of thing. Right now every time a customer opens that page it runs a fresh query against our main app database and it's getting really slow. What's the right way to think about fixing this — do we just add indexes, or is there something more fundamental we're doing wrong?
