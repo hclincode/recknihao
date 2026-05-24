@@ -1,44 +1,26 @@
-# Iter52 Questions
+# Iter53 Questions
 
 **Date**: 2026-05-24
-**Weakest topics**: Postgres-to-Iceberg ingestion (4.276, 52q), Multi-tenant analytics (4.270, 52q)
+**Weakest topics**: Multi-tenant analytics (4.270, 52q), Storage sizing and growth estimation (4.333, 3q)
 
 ---
 
-## Q1 — Postgres-to-Iceberg ingestion (CDC schema evolution)
+## Q1 — Multi-tenant analytics: resource group selectors and JWT token fields
 
-**Question**: We set up a Debezium pipeline that streams change events from our Postgres `events` table into Iceberg on MinIO. It's been running fine. Now one of our developers added a new column — `device_os VARCHAR(50)` — directly to the Postgres table with a plain `ALTER TABLE`. Nobody touched the pipeline. What actually happens? Does Debezium start failing? Does the Iceberg table break? Do we need to stop everything and manually add the column on the Iceberg side before we can resume, or does it handle it automatically somehow?
+**Question**: We set up per-tenant Trino roles and views to keep customers isolated from each other's data. But one of our bigger tenants keeps running huge queries that slow things down for everyone else. Someone on our team mentioned "resource groups" as a way to give that tenant its own memory and CPU limit so they can't starve everyone else. I found the Trino resource group JSON config and added a memory limit, but it's not doing anything — queries from that tenant still pile up and affect others.
 
-**Target topic**: Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling
-**Expected answer should cover**: Debezium detects the DDL change through Postgres WAL / logical replication slot and the schema registry (Confluent Schema Registry or Apicurio). The connector does NOT crash silently — it emits events with the new field if schema compatibility allows. The new column starts appearing in Debezium's Kafka messages as a new field; rows before the ALTER TABLE have the field as null. The Iceberg table does NOT automatically add the column — the Iceberg schema and the incoming Debezium message schema are now out of sync, and without intervention the Spark/Flink consumer writing to Iceberg will fail or silently drop the new field. The fix: run `ALTER TABLE <iceberg_table> ADD COLUMN device_os VARCHAR` in Spark SQL before the consumer resumes. Iceberg supports schema evolution natively — adding a column is metadata-only and non-breaking; existing rows read the new column as NULL. Order of operations: add the column in Iceberg FIRST, then let the consumer resume. You do not need to stop the Debezium connector or replay history — only the consumer writing to Iceberg needs to be paused briefly. Iceberg assigns each column a unique field ID internally, so renaming or reordering columns later is safe (Iceberg tracks by ID, not position).
+I think the problem is the selector. From what I can tell, the resource group config has a `selector` section that routes users into a group, but I don't know what field to match on. We use JWT tokens for auth — users get a JWT from our auth service and Trino validates it. The JWT has claims like `sub`, `tenant_id`, and `roles`. Which of those fields shows up in the Trino session so that the resource group selector can actually match on it, and how do I write the selector correctly?
+
+**Target topic**: Multi-tenant analytics: isolating customer data in SaaS
+**Expected answer should cover**: Trino maps the JWT `sub` claim to the Trino username — this is the principal identity that resource group selectors match on via `userRegex`. Roles and resource groups are separate mechanisms: assigning a Trino role to a user does nothing for resource group routing. The `userRegex` field in a selector is a Java regex matched against the JWT `sub` value. Example: if your tenant's service account has `sub` = `"tenant-acme"`, the selector would be `"userRegex": "tenant-acme"`. The resource group JSON structure: group definition with `softMemoryLimit`, `hardConcurrencyLimit`, `maxQueued`; selector pointing to that group. Queries that match no selector fall into the global/default pool — so mis-configured selectors silently fail (no error, wrong pool). Optionally: `clientTags` and `source` as alternative selector fields; `query.max-memory-per-node` as a per-query hard cap complementing resource groups.
 
 ---
 
-## Q2 — Analytical query patterns (week-over-week with LAG)
+## Q2 — Storage sizing: cost-per-event measurement for budget planning
 
-**Question**: Our product dashboard shows "weekly active users" — basically how many distinct users did something in a given week. Right now we just show the raw number. Our customers want to see the change from the previous week — like "+12% vs last week" or "−300 users vs last week." I know how to compute the weekly count with a GROUP BY, but I don't know how to pull in last week's number in the same query row so I can subtract them. Is there a clean way to do this in SQL without joining the table to itself twice?
+**Question**: Our product ingests events from customers — page views, API calls, feature usage, that kind of thing. Some event types are very high volume (millions per day from a single customer) and some are low volume. We're on on-prem MinIO so we're not paying per-GB like cloud S3, but we do care about disk cost because we're planning to buy more drives and we need to justify the budget.
 
-**Target topic**: Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL
-**Expected answer should cover**: This is the classic use case for the `LAG()` window function — it lets you reference the value from the previous row (previous week) without a self-join. Step 1: compute weekly active users with GROUP BY week using `date_trunc('week', occurred_at)` in Trino. Step 2: apply `LAG(wau, 1) OVER (ORDER BY week_start)` to pull the prior week's count. Step 3: compute delta as `wau - prior_wau` and percent change with `NULLIF(..., 0)` to avoid division-by-zero. Full example:
-```sql
-WITH weekly AS (
-  SELECT
-    date_trunc('week', occurred_at) AS week_start,
-    COUNT(DISTINCT user_id) AS wau
-  FROM iceberg.analytics.events
-  GROUP BY 1
-)
-SELECT
-  week_start,
-  wau,
-  LAG(wau, 1) OVER (ORDER BY week_start) AS prior_week_wau,
-  wau - LAG(wau, 1) OVER (ORDER BY week_start) AS wau_delta,
-  ROUND(
-    (wau - LAG(wau, 1) OVER (ORDER BY week_start)) * 100.0
-    / NULLIF(LAG(wau, 1) OVER (ORDER BY week_start), 0),
-    1
-  ) AS wau_pct_change
-FROM weekly
-ORDER BY week_start;
-```
-Explain `LAG(wau, 1)` in plain English: "look back 1 row in the ordered result — i.e., the previous week." First week's row will show NULL for prior_week_wau — that's expected. Mention `LEAD()` as the opposite (looks forward one row). Production note: partition filter on occurred_at so Trino can prune files rather than scanning all history.
+I want to build a simple spreadsheet model that answers: "if we start ingesting X events per month for a new customer, how many gigabytes will that add, and what does that cost us in hardware?" What numbers do I actually need to measure to build that model? Where do I look to find how many bytes one event takes up on disk, and is that number stable enough to use for forecasting, or does it change a lot?
+
+**Target topic**: Storage sizing and growth estimation for lakehouse workloads
+**Expected answer should cover**: Query the `$files` Iceberg metadata table to get `file_size_in_bytes` and `record_count` per Parquet file, then compute bytes-per-row = SUM(file_size_in_bytes) / SUM(record_count). The number varies by event type / schema width / compression codec, so measure per-event-type baseline. Simple formula: `parquet_bytes_per_row × monthly_row_count / 1e9 = GB per month`. Parquet columnar compression: high-cardinality columns (UUIDs, raw URLs) compress worse than low-cardinality columns (event_type, country), so the ratio isn't flat across event types. Practical guidance: measure on existing data, apply 20–30% buffer for file growth before compaction and metadata overhead. Iceberg 1.4.0+ default codec is Zstd (not Snappy) — mention that rewrite_data_files can retroactively apply Zstd to existing Snappy files if the table was created before 1.4.0. MinIO erasure coding overhead: EC:4+2 = ~1.5x raw disk (not 2x or 3x).

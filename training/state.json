@@ -1,7 +1,7 @@
 {
-  "iteration": 53,
+  "iteration": 54,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. All 20 topics PASSED. Iter52 avg 4.50. Resource 13 CDC schema evolution fixed: WAL relation messages are DDL detection (not schema registry); schema.evolution=basic is a sink connector setting. Added 'For CDC jobs (Pattern C)' subsection. Weakest topics for iter53: Multi-tenant (4.270, 52q), Postgres-to-Iceberg (4.275, 53q). Novel angles: (1) Multi-tenant: JWT sub claim → resource group selector; OPA integration. (2) Postgres-to-Iceberg: post-fix validation of CDC schema evolution; column TYPE CHANGE under CDC. (3) Storage sizing: cost-per-event formula; rewrite_data_files to switch codec. (4) Analytical patterns: NTILE percentile buckets; RANK vs DENSE_RANK."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. All 20 topics PASSED. Iter53 avg 4.00. Resource 05 fixed: 'userRegex' is fabricated — correct field is 'user'; added explicit callout. Resource 11 fixed: $files is file-level metadata — per-event-type GROUP BY added with partition column and base-table sampling approaches. Weakest topics for iter54: Multi-tenant (4.255, 53q), Postgres-to-Iceberg (4.275, 53q). Novel angles: (1) Multi-tenant: post-fix validation of 'user' selector field; OPA blocks system.runtime.queries. (2) Postgres-to-Iceberg: CDC schema evolution post-fix (relation messages); column TYPE CHANGE (INT → BIGINT). (3) Storage sizing: $files per-event-type post-fix with partition column. (4) Analytical patterns: NTILE for percentile distribution; RANK vs DENSE_RANK."
 }

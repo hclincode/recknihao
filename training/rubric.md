@@ -26,14 +26,14 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.602 | 8 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.50 | 2 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.415 | 8 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.270 | 52 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.255 | 53 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.812 | 4 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.50 | 3 |
 | Query performance basics: partitioning, indexing strategy for analytics | PASSED | 4.594 | 4 |
 | Lakehouse schema design: fact tables, dimension tables, denormalization | PASSED | 4.583 | 3 |
 | Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.500 | 6 |
-| Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.333 | 3 |
+| Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.375 | 4 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.438 | 4 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 2 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.275 | 53 |
@@ -3070,3 +3070,35 @@ Verified: iceberg.apache.org/docs/latest/spark-writes/ (MERGE INTO ON condition 
 **Topics updated**: Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL — prior avg 4.333 across 3 questions; new running avg (4.333 × 3 + 4.75) / 4 = **4.438** across 4 questions. PASSED.
 
 **Notes**: Trino `LAG(wau, 1) OVER (ORDER BY week_start)` syntax verified accurate against trino.io official docs (lag(x[, offset[, default_value]]) with ORDER BY required, no frame). Complete runnable SQL: CTE with date_trunc('week', ...) and COUNT(DISTINCT user_id), LAG for prior_week_wau, wau_delta arithmetic, percent change with NULLIF guard against division-by-zero. Plain-English explanation of LAG decomposed into function/offset/OVER. First-week NULL behavior explicitly flagged as expected. Bonus coverage: LEAD as opposite, plus ROW_NUMBER and NTILE. Concrete example output table with realistic +12.0%/−6.3%/+14.3% deltas. Production note on partition filter (WHERE occurred_at >= current_date - INTERVAL '13' WEEK) with 10–100× speedup. Anchored to prod stack (iceberg.analytics.events, Trino). Minor: "single pass" framing slightly imprecise (window function is single-pass over the per-week CTE result, not over the events table); "window function" used in section heading before being defined inline. No resource gaps requiring fixes — `resources/07-analytical-query-patterns.md` does not currently have a dedicated LAG/LEAD WoW-delta example but responder synthesized correct answer from general window-function knowledge.
+
+### Iteration 53, Q1 — 2026-05-24 (EXTENDED PHASE)
+**Question**: Resource group selector and JWT token fields — which JWT field shows up in the Trino session so the selector can match it, and how do I write the selector correctly?
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 3 |
+| Beginner clarity | 4 |
+| Practical applicability | 3 |
+| Completeness | 4 |
+| **Average** | **3.50** |
+
+**Topics updated**: Multi-tenant analytics — prior avg 4.270 across 52 questions; new running avg (4.270 × 52 + 3.50) / 53 = **4.255** across 53 questions. PASSED.
+
+**Notes**: Conceptual answer is correct (JWT `sub` becomes Trino username; resource group selectors match the principal, not the role; silent failure when no selector matches; need a catch-all). Includes runnable system.runtime.queries verification and a correct kill_query CALL example. **Critical technical error**: the JSON example and the property-names table both use `"userRegex"` as the selector field name — but the actual Trino JSON field name is `"user"` (verified against trino.io/docs/current/admin/resource-groups.html and against the project's own resource file `resources/05-multi-tenant-analytics.md` lines 484-496 which use `"user"` correctly). The value of the `user` field is interpreted as a Java regex, but the field name itself is `user`, not `userRegex`. An engineer copy-pasting the JSON will reproduce the same silent-no-match failure the answer claims to fix. Resource alignment failure: the responder fabricated a field name despite the correct one being present in the resource it should be reading from. Missing from the answer: `originalUser`/`authenticatedUser`/`userGroup` as alternative selector fields, `clientTags`/`source` as alternative routing options, `query.max-memory-per-node` as a complementary per-query cap, and no mention of OPA/JWT authenticator configuration that's specific to the production stack. Resource gap: `resources/05-multi-tenant-analytics.md` may need an explicit callout warning teachers/responders that the JSON field is literally `"user"` (not `"userRegex"`) even though the value is a regex — this is a confusingly common AI-fabricated name. Add an inline comment in the JSON example block highlighting it.
+
+### Iteration 53, Q2 — 2026-05-24 (EXTENDED PHASE)
+**Question**: Build a spreadsheet model for cost-per-event budget planning — what numbers to measure, where to find bytes-per-event on disk, and is the number stable enough to forecast?
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4 |
+| Beginner clarity | 5 |
+| Practical applicability | 4 |
+| Completeness | 5 |
+| **Average** | **4.50** |
+
+**Topics updated**: Storage sizing and growth estimation for lakehouse workloads — prior avg 4.333 across 3 questions; new running avg (4.333 × 3 + 4.50) / 4 = **4.375** across 4 questions. PASSED.
+
+**Notes**: Strong, well-anchored answer covering all 7 expected criteria (verified against trino.io and iceberg.apache.org): `$files` query with correct `iceberg.analytics."events$files"` quoted syntax, `file_size_in_bytes`/`record_count` column names accurate; per-column compression breakdown matching `resources/11-lakehouse-storage-sizing.md`; bytes-per-row × monthly_row_count / 1e9 formula with worked example (50M page views × 6.2 bytes = 310 MB/month); 20–30% buffer (1.25x rule of thumb) with three sources of inflation; MinIO EC:4+2 = 1.5x raw verified vs MinIO docs; Iceberg 1.4.0+ Zstd default with correct Trino `ALTER TABLE ... SET PROPERTIES "write.parquet.compression-codec" = 'zstd'` syntax and `rewrite_data_files` recompaction note. **Technical bug**: the per-event-type breakout query `SELECT event_type, ... FROM "events$files" GROUP BY event_type` is invalid — `$files` is file-level metadata and does not expose row-level columns. To break out bytes-per-row by event_type, you either (a) partition the table by event_type and group by the `partition` column from `$files`, (b) sample from the base table directly. Resource gap: `resources/11-lakehouse-storage-sizing.md` — added "per-event-type bytes-per-row — the right way" subsection this iteration.
+
+**Iteration 53 average**: (3.50 + 4.50) / 2 = **4.00**

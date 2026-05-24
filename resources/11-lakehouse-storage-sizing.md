@@ -118,6 +118,52 @@ df.write.parquet("s3a://lakehouse/sizing-sample/events/")
 
 This gives you the real compression ratio for your specific data distribution — often more accurate than any estimate.
 
+### Measuring bytes-per-row from existing Iceberg data (the `$files` approach)
+
+Once you have data in Iceberg, the `$files` metadata table gives you actual on-disk file sizes and row counts — no estimation required. Query it in Trino:
+
+```sql
+-- Overall bytes-per-row across the entire table
+SELECT
+  SUM(file_size_in_bytes)                              AS total_bytes,
+  SUM(record_count)                                    AS total_rows,
+  SUM(file_size_in_bytes) * 1.0 / SUM(record_count)  AS bytes_per_row
+FROM iceberg.analytics."events$files";
+```
+
+The double-quotes around `"events$files"` are required — Trino parses the `$` as a name separator otherwise.
+
+**Important: `$files` is FILE-level metadata, not row-level.** It has `file_path`, `file_size_in_bytes`, `record_count`, `file_format`, and `partition` — but NOT row-level columns like `event_type`, `user_id`, or `tenant_id`. Querying `GROUP BY event_type` on `$files` will fail with "Column 'event_type' cannot be resolved".
+
+**To get per-event-type bytes-per-row, use one of these approaches:**
+
+**Option A — If the table is partitioned by `event_type`:** the `partition` column in `$files` exposes partition key values. Use it to group:
+
+```sql
+-- Works when the table is partitioned by event_type
+SELECT
+  partition.event_type                                  AS event_type,
+  SUM(file_size_in_bytes) * 1.0 / SUM(record_count)   AS bytes_per_row,
+  SUM(record_count)                                     AS total_rows
+FROM iceberg.analytics."events$files"
+GROUP BY partition.event_type
+ORDER BY bytes_per_row DESC;
+```
+
+**Option B — If the table is NOT partitioned by `event_type`:** sample from the base table and measure compressed size via a Spark job:
+
+```python
+# Spark: write a sample per event_type and check MinIO file sizes
+for event_type in ["page_view", "api_call", "feature_usage"]:
+    df = spark.read.table("iceberg.analytics.events") \
+               .filter(f"event_type = '{event_type}'") \
+               .limit(100_000)
+    df.write.parquet(f"s3a://lakehouse/sizing-sample/{event_type}/")
+    # Then check actual bytes on MinIO to compute bytes_per_row
+```
+
+**Option C — For a quick approximation without per-type breakdown:** run the overall `$files` query on a recent date partition (1-2 weeks of data). The overall bytes-per-row is a reasonable starting point; then apply a multiplier for known high-cardinality event types (e.g., events with raw URLs or JSON blobs will be 3–5x larger than enum-only events).
+
 ---
 
 ## Compression estimates by column type
