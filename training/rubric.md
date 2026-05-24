@@ -34,9 +34,9 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Lakehouse schema design: fact tables, dimension tables, denormalization | PASSED | 4.583 | 3 |
 | Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.500 | 6 |
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.333 | 3 |
-| Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.333 | 3 |
+| Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.438 | 4 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 2 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.276 | 52 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.275 | 53 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.612 | 10 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 
@@ -3040,3 +3040,33 @@ Verified: iceberg.apache.org/docs/latest/spark-writes/ (MERGE INTO ON condition 
 **Notes**: Three-CTE structure (first_events → cohort_sizes → returns) is pedagogically strong and maps cleanly to the three conceptual steps. Correct Trino date_diff syntax. BETWEEN 1 AND N correctly excludes day-0 signup event. Incomplete-data filter (date_diff >= 90) present and well-explained. Percentage computation with ROUND answers the "what %" wording. Customization section and materialization recommendation both appropriate. Critical bug: `SUM(CASE WHEN ... THEN 1 ELSE 0 END)` counts event rows not distinct users — a user who fires 5 events in the 7-day window contributes 5 to returned_7d and 1 to total_users, producing retention > 100%. Correct idiom is `COUNT(DISTINCT CASE WHEN ... THEN e.user_id END)`. Resource gap: `resources/07-analytical-query-patterns.md` added a "Milestone-retention variant" section this iteration with the correct COUNT(DISTINCT CASE WHEN) idiom and an explicit callout that SUM(CASE WHEN ... THEN 1) double-counts repeat events.
 
 **Iteration 51 average**: (4.25 + 4.25) / 2 = **4.25**
+
+### Iteration 52, Q1 — 2026-05-24 (EXTENDED PHASE)
+**Question**: Debezium pipeline streaming from Postgres `events` to Iceberg on MinIO. Developer added `device_os VARCHAR(50)` directly to Postgres with plain ALTER TABLE. What happens — does Debezium fail, does Iceberg break, do we need to manually add the column?
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4 |
+| Beginner clarity | 4 |
+| Practical applicability | 5 |
+| Completeness | 4 |
+| **Average** | **4.25** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.276 across 52 questions; new running avg (4.276 × 52 + 4.25) / 53 = **4.275** across 53 questions. PASSED.
+
+**Notes**: Core mechanics correct: Iceberg ALTER TABLE ADD COLUMN is metadata-only (verified iceberg.apache.org/docs/latest/evolution/), old rows return NULL, column tracking is by field ID (rename/reorder safe). Correct order of operations: add column in Iceberg first, then resume consumer; Debezium connector itself does not need to be stopped. Runnable Spark SQL provided. Two technical imprecisions: (1) "Debezium detects the DDL via a schema registry (Confluent or Apicurio)" conflates two unrelated systems — Postgres does not emit DDL events through logical replication; Debezium detects schema changes via WAL **relation messages**, while the schema registry is for serialization payloads (Avro/Protobuf), NOT for DDL detection. (2) `schema.evolution=basic` is a Debezium **sink** connector setting (Iceberg sink, JDBC sink), not the Postgres **source** connector setting — engineers searching the source connector docs will not find it. Timing nuance missing: new column appears in Debezium events only after a relation message is triggered by post-ALTER row activity; pre-ALTER rows are not re-emitted. Consumer failure mode glossed over without naming which case to expect (schema-strict fail loud vs permissive drop silent). Recurring clarity gap: WAL, logical replication slot, schema registry without inline glosses. Resource gap: `resources/13-postgres-to-iceberg-ingestion.md` should add a "How Debezium actually detects DDL on Postgres (relation messages, not schema registry)" subsection and clarify that `schema.evolution=basic` is a sink-side setting.
+
+### Iteration 52, Q2 — 2026-05-24 (EXTENDED PHASE)
+**Question**: WAU dashboard wants "+12% vs last week" / "−300 users vs last week" — how to pull last week's count into the same row without a self-join.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 4 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL — prior avg 4.333 across 3 questions; new running avg (4.333 × 3 + 4.75) / 4 = **4.438** across 4 questions. PASSED.
+
+**Notes**: Trino `LAG(wau, 1) OVER (ORDER BY week_start)` syntax verified accurate against trino.io official docs (lag(x[, offset[, default_value]]) with ORDER BY required, no frame). Complete runnable SQL: CTE with date_trunc('week', ...) and COUNT(DISTINCT user_id), LAG for prior_week_wau, wau_delta arithmetic, percent change with NULLIF guard against division-by-zero. Plain-English explanation of LAG decomposed into function/offset/OVER. First-week NULL behavior explicitly flagged as expected. Bonus coverage: LEAD as opposite, plus ROW_NUMBER and NTILE. Concrete example output table with realistic +12.0%/−6.3%/+14.3% deltas. Production note on partition filter (WHERE occurred_at >= current_date - INTERVAL '13' WEEK) with 10–100× speedup. Anchored to prod stack (iceberg.analytics.events, Trino). Minor: "single pass" framing slightly imprecise (window function is single-pass over the per-week CTE result, not over the events table); "window function" used in section heading before being defined inline. No resource gaps requiring fixes — `resources/07-analytical-query-patterns.md` does not currently have a dedicated LAG/LEAD WoW-delta example but responder synthesized correct answer from general window-function knowledge.

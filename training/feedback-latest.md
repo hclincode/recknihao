@@ -1,93 +1,100 @@
-# Feedback — Iteration 51 (Extended Phase)
+# Feedback — Iteration 52 (Extended Phase)
 
 **Date**: 2026-05-24
 **Phase**: Extended (continuing until 2026-05-30 12:00 CST)
-**Iteration average**: 4.25
+**Iteration average**: 4.50
 **Status**: All 20 topics PASSED.
 
 ---
 
-## Iteration 51 score summary
+## Iteration 52 score summary
 
 | Question | Topic(s) | Score |
 |---|---|---|
-| Q1 — Storage sizing for MinIO migration (250 GB Postgres, 500M rows, 50M/month growth) | Storage sizing and growth estimation | 4.25 |
-| Q2 — Cohort retention query in Trino (7/30/90-day milestone pattern) | Analytical query patterns on Iceberg+Trino | 4.25 |
-| **Iteration average** | | **4.25** |
+| Q1 — Debezium CDC schema evolution: new column added to Postgres events table | Postgres-to-Iceberg ingestion | 4.25 |
+| Q2 — Week-over-week WAU change using LAG() window function in Trino | Analytical query patterns on Iceberg+Trino | 4.75 |
+| **Iteration average** | | **4.50** |
 
 ---
 
-## Topic score updates after iteration 51
+## Topic score updates after iteration 52
 
 | Topic | Prior avg | Prior q | New avg | New q | Change |
 |---|---|---|---|---|---|
-| Storage sizing and growth estimation | 4.375 | 2 | 4.333 | 3 | −0.042 (Q1 at 4.25) |
-| Analytical query patterns on Iceberg+Trino | 4.375 | 2 | 4.333 | 3 | −0.042 (Q2 at 4.25) |
+| Postgres-to-Iceberg ingestion | 4.276 | 52 | 4.275 | 53 | −0.001 (Q1 at 4.25) |
+| Analytical query patterns on Iceberg+Trino | 4.333 | 3 | 4.438 | 4 | +0.105 (Q2 at 4.75) |
 
-Both topics remain PASSED (well above 3.5).
+Both topics remain PASSED.
 
 ---
 
 ## What went well
 
-**Q2 pedagogical structure (4.25).** The three-CTE framing (first_events → cohort_sizes → returns) was strong and well-explained. Correct Trino `date_diff` syntax. `BETWEEN 1 AND 7` correctly excludes the day-0 signup event. Incomplete-data gotcha (`date_diff >= 90` filter) was present and explained. Sample output block helped orient the reader.
+**Q2 scored 4.75 — LAG() window function fully covered.** First test of the LAG/LEAD novel angle. The responder correctly:
+- Used `LAG(wau, 1) OVER (ORDER BY week_start)` with correct Trino syntax (verified against trino.io)
+- Provided `NULLIF(..., 0)` for division-by-zero protection
+- Explained `LAG()` in plain English ("look back 1 row in sorted order")
+- Called out first-week NULL as expected/correct
+- Mentioned `LEAD()` as the opposite
+- Added production partition-pruning note with `WHERE occurred_at >= current_date - INTERVAL '13' WEEK`
+- Included `ROW_NUMBER()` and `NTILE()` as bonus window functions
 
-**Q1 Postgres-baseline decomposition (4.25).** Correct identification of all Postgres overhead sources (indexes 30–50%, MVCC dead tuples, row headers). Runnable `pg_total_relation_size` / `pg_indexes_size` diagnostic query. Per-column Parquet compression breakdown. MinIO EC:4+2 = 1.5x overhead correctly stated. expire_snapshots operational trap included.
+**Q1 operational sequence correct (4.25).** The responder got the most actionable parts right: `ALTER TABLE ADD COLUMN` in Iceberg before resuming the consumer; Iceberg ADD COLUMN is metadata-only; Debezium source connector does not need to be stopped; columns tracked by field ID (safe rename/reorder).
 
 ---
 
 ## Issues
 
-### Q1 factual error: Iceberg default codec is Zstd, not Snappy (since 1.4.0)
+### Q1 technical misattribution: schema registry ≠ DDL detection mechanism
 
-The answer stated "Iceberg's default codec is Snappy." This is incorrect for Iceberg 1.5.2 (production version). Iceberg switched the default Parquet write codec to **Zstd** in version 1.4.0. The "switch to Zstd to get 20–30% better compression" recommendation in the answer is therefore moot for the production stack — engineers are already on Zstd by default unless they overrode it explicitly.
+The Q1 answer stated: "Debezium ... detects the DDL via a schema registry — either Confluent Schema Registry or Apicurio."
 
-**Fix applied**: `resources/11-lakehouse-storage-sizing.md` — added "Default Parquet compression codec" subsection after the compression-by-column-type table, stating Zstd as the 1.4.0+ default with verification and change SQL for both Spark and Trino.
+This is wrong. DDL detection happens through **WAL relation messages** — Postgres embeds the new table column layout in the next WAL record after an ALTER TABLE. The schema registry is for *serializing Kafka message payloads* (Avro/Protobuf), unrelated to DDL detection. An engineer who reads this answer will look for a schema registry config to enable DDL detection — it doesn't exist.
 
-### Q2 critical bug: SUM(CASE WHEN ... THEN 1) counts events not distinct users
+Additionally, the answer mentioned "`schema.evolution=basic` in Debezium 2.x" as if it's a source connector setting. It is actually a **Debezium Iceberg sink connector** setting; the Postgres source connector does not have this property. Engineers searching for it in the source connector docs won't find it.
 
-The `returns` CTE used:
-```sql
-SUM(CASE WHEN date_diff('day', f.first_event_at, e.occurred_at) BETWEEN 1 AND 7 THEN 1 ELSE 0 END) AS returned_7d
-```
-This counts event rows, not distinct users. A user who fires 5 events in the 7-day window contributes 5 to `returned_7d` and 1 to `total_users`, producing retention percentages above 100%.
+**Fix applied**: `resources/13-postgres-to-iceberg-ingestion.md`
+- Updated the CDC row in the schema evolution table to clarify `schema.evolution=basic` is a sink connector setting
+- Added "### For CDC jobs (Pattern C)" subsection explaining:
+  - WAL relation messages as the actual DDL detection mechanism (not schema registry)
+  - Schema registry = Kafka payload serialization only; unrelated to DDL detection
+  - `schema.evolution=basic` is on the Debezium Iceberg sink connector
+  - Two order-of-operations paths: manually-managed consumer vs Debezium sink connector
 
-The correct idiom is:
-```sql
-COUNT(DISTINCT CASE WHEN date_diff('day', f.first_event_at, e.occurred_at) BETWEEN 1 AND 7 THEN e.user_id END) AS returned_7d
-```
-`COUNT(DISTINCT ...)` ignores NULLs — when the CASE condition is false it returns NULL, which is excluded from the count.
+### Q2 minor: "single pass" framing slightly imprecise
 
-**Fix applied**: `resources/07-analytical-query-patterns.md` — added "Milestone-retention variant: % came back in 7 / 30 / 90 days" section in the cohort analysis block. Includes the full three-CTE query with `COUNT(DISTINCT CASE WHEN ... THEN user_id END)`, an explicit callout that `SUM(CASE WHEN ... THEN 1)` double-counts repeat events, the incomplete-cohort filter explanation, the overlapping-vs-non-overlapping bucket note, and the timestamp-vs-date precision caveat.
+"Window functions avoid scanning the table twice" is correct in spirit, but the CTE still aggregates once and the window function runs over the small per-week result. The real benefit is code simplicity, not physical I/O reduction. Minor — doesn't affect usability.
 
 ### Recurring beginner clarity gap
 
-"Dictionary encoding," "delta encoding," "erasure coding," "EC:4+2," "rewrite_data_files," "expire_snapshots" appear in Q1 without inline plain-English glosses. Q2 uses "cohort," "CTE," "BETWEEN," and "date_diff" without glosses for a beginner. This is a persistent multi-iteration gap that is tracked but not yet fully addressed in the resources.
+Q1: WAL, logical replication slot, schema registry, schema evolution — appear without inline glosses. Q2: "window function" used before being defined. Persistent multi-iteration gap.
 
 ---
 
-## Resource fixes applied in iter51
+## Resource fixes applied in iter52
 
-**HIGH priority — COMPLETED**: `resources/11-lakehouse-storage-sizing.md`
-- Added "Default Parquet compression codec" subsection: Zstd is the default for Iceberg 1.4.0+, not Snappy. Includes `SHOW CREATE TABLE` verification command, `ALTER TABLE SET TBLPROPERTIES` syntax for both Spark and Trino, and a note that existing files retain their original codec until `rewrite_data_files` runs.
-
-**HIGH priority — COMPLETED**: `resources/07-analytical-query-patterns.md`
-- Added "Milestone-retention variant: % came back in 7 / 30 / 90 days" section. Correct full three-CTE query using `COUNT(DISTINCT CASE WHEN ... THEN user_id END)`. Explicit warning against `SUM(CASE WHEN ... THEN 1)` with explanation of why it over-counts. Incomplete-cohort filter. Overlapping vs non-overlapping bucket note. Timestamp vs date precision caveat.
+**HIGH priority — COMPLETED**: `resources/13-postgres-to-iceberg-ingestion.md`
+- Fixed CDC row in schema evolution table: clarified `schema.evolution=basic` is on Debezium Iceberg sink connector (not source connector); updated "Fix" column to reflect correct order of operations
+- Added "### For CDC jobs (Pattern C)" subsection with:
+  - WAL relation messages as DDL detection mechanism
+  - Schema registry separation (serialization only)
+  - `schema.evolution=basic` attribution to sink connector
+  - Two complete order-of-operations paths (manual vs automated)
 
 ---
 
-## Weakest topics heading into iter52
+## Weakest topics heading into iter53
 
 | Topic | Avg | q |
 |---|---|---|
 | Multi-tenant analytics | 4.270 | 52 |
-| Postgres-to-Iceberg ingestion | 4.276 | 52 |
+| Postgres-to-Iceberg ingestion | 4.275 | 53 |
 | Storage sizing and growth estimation | 4.333 | 3 |
-| Analytical query patterns on Iceberg+Trino | 4.333 | 3 |
+| Analytical query patterns on Iceberg+Trino | 4.438 | 4 |
 | Iceberg partition design | 4.500 | 6 |
 
-Novel angles for iter52:
-- **Analytical query patterns**: First test of the milestone-retention pattern post-fix (should now score correctly with COUNT(DISTINCT CASE WHEN)); window functions — LAG/LEAD for week-over-week retention delta, RANK/NTILE for percentile distribution (only 3q so far)
-- **Storage sizing**: Test Zstd-default angle now that resource is fixed; cost-per-event formula (parquet_bytes_per_row × monthly_rows / 1B); when to switch from Snappy to Zstd on existing tables (rewrite_data_files cost)
-- **Multi-tenant**: JWT claim → resource group selector mapping; OPA integration pattern; GRANT ROLE chain verification (role → group → resource group selector)
-- **Postgres-to-Iceberg**: Schema evolution under CDC — adding a column to Postgres, how Debezium schema registry handles it, what happens in Iceberg (ALTER TABLE ADD COLUMN in Spark before consumer resumes)
+Novel angles for iter53:
+- **Multi-tenant**: JWT claim → resource group selector mapping (JWT `sub` claim = selector match key); or OPA integration pattern for row-level data filtering
+- **Postgres-to-Iceberg**: Post-fix validation — test CDC schema evolution again now that WAL-relation-message explanation is in the resource; or test a novel angle like handling a column TYPE CHANGE (INT → BIGINT) under CDC
+- **Storage sizing**: cost-per-event formula (parquet_bytes_per_row × monthly_rows / 1e9); when to run rewrite_data_files to switch all existing files from Snappy to Zstd
+- **Analytical patterns**: NTILE for percentile buckets (top quartile of tenants by WAU); RANK vs DENSE_RANK distinction

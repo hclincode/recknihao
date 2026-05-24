@@ -1,7 +1,7 @@
 {
-  "iteration": 52,
+  "iteration": 53,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. All 20 topics PASSED. Iter51 avg 4.25. Resource 11 Zstd-default fixed (Snappy → Zstd since Iceberg 1.4.0). Resource 07 milestone-retention variant added (COUNT(DISTINCT CASE WHEN) instead of SUM(CASE WHEN)). Weakest topics for iter52: Multi-tenant (4.270, 52q), Postgres-to-Iceberg (4.276, 52q). Novel angles: (1) Analytical patterns: milestone-retention post-fix, LAG/LEAD for WoW retention delta, NTILE for percentile buckets. (2) Storage sizing: cost-per-event, Zstd-default now in resource. (3) Multi-tenant: JWT claim → resource group selector. (4) Postgres-to-Iceberg: CDC schema evolution (adding Postgres column, Debezium schema registry, ALTER TABLE ADD COLUMN in Iceberg)."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. All 20 topics PASSED. Iter52 avg 4.50. Resource 13 CDC schema evolution fixed: WAL relation messages are DDL detection (not schema registry); schema.evolution=basic is a sink connector setting. Added 'For CDC jobs (Pattern C)' subsection. Weakest topics for iter53: Multi-tenant (4.270, 52q), Postgres-to-Iceberg (4.275, 53q). Novel angles: (1) Multi-tenant: JWT sub claim → resource group selector; OPA integration. (2) Postgres-to-Iceberg: post-fix validation of CDC schema evolution; column TYPE CHANGE under CDC. (3) Storage sizing: cost-per-event formula; rewrite_data_files to switch codec. (4) Analytical patterns: NTILE percentile buckets; RANK vs DENSE_RANK."
 }
