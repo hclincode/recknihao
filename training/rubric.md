@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.452 | 136 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.454 | 137 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
@@ -40,7 +40,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.497 | 124 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.501 | 125 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.575 | 33 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
@@ -50,6 +50,44 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 343 — 2026-05-27
+
+**Q1** — Postgres-to-Iceberg ingestion: MERGE_CARDINALITY_VIOLATION debugging and source-side dedup. Responder correctly named the exact runtime error (`MERGE_CARDINALITY_VIOLATION`), explained why full-refresh works but MERGE fails, ranked the three root causes (overlap-window re-read first), and provided the complete row_number() dedup recipe. Resources/13 fix from iter342 confirmed holding with a perfect score.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **5.00** — STRONG PASS (PERFECT) |
+
+Judge verified error string against Iceberg source (PR #2021, Delta issue #218). row_number() dedup pattern verified as canonical. LSN/Kafka-offset tiebreaker callout recognized as a non-obvious refinement. Topic running avg: (4.497×124 + 5.00)/125 = **4.501/125 questions** — PASSED (recovering upward; both consecutive MERGE_CARDINALITY_VIOLATION and source-side dedup gaps closed).
+
+**Q2** — Multi-tenant analytics: hardConcurrencyLimit queue-vs-reject behavior and QUERY_QUEUE_FULL error. Responder correctly explained the two-stage behavior (queue → reject), `maxQueued` as the queue-depth cap, `QUERY_QUEUE_FULL` error code, HTTP 200 for query-level errors, and provided concrete UI code paths. Minor technical error: resource-groups.json selector showed `"group": "global\\.free_tier"` (escaped dot) — `selectors[].group` uses literal string, not regex (only `user`/`source` fields are Java regex).
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.875** — STRONG PASS |
+
+Judge verified: hardConcurrencyLimit queues rather than rejects (confirmed per resource-groups.html), maxQueued caps queue depth, QUERY_QUEUE_FULL is correct error code, HTTP 200 for query-level errors is correct. Resource fix applied: resources/05 updated with selector literal-vs-regex distinction and added contrast paragraph distinguishing resource-groups.json (literal) from session-property-manager.json (regex). Topic running avg: (4.452×136 + 4.875)/137 = **4.454/137 questions** — PASSED (recovering upward).
+
+**Iter 343 average: (5.00 + 4.875) / 2 = 4.9375 — STRONG PASS** ✓
+
+**Topics updated**:
+- Postgres-to-Iceberg ingestion: 4.497/124 → **4.501/125 questions** (PASSED — recovering upward; MERGE_CARDINALITY_VIOLATION fix from iter342 confirmed holding with 2nd consecutive perfect score on this topic)
+- Multi-tenant analytics: 4.452/136 → **4.454/137 questions** (PASSED — recovering upward; hardConcurrencyLimit queue-vs-reject correctly explained)
+
+**Resource fixes this iteration**:
+- resources/05-multi-tenant-analytics.md: (1) Corrected `selectors[].group` dot-escape in resource-groups.json examples (literal, not regex); (2) Added explicit contrast paragraph distinguishing resource-groups selectors (literal) from session-property-manager match-rules (Java regex) — both use a `"group"` JSON key but with different matching semantics.
+- resources/13-postgres-to-iceberg-ingestion.md (iter342 fix): MERGE_CARDINALITY_VIOLATION fix confirmed holding with perfect 5.00 score.
+
+---
 
 ### Iter 342 — 2026-05-27
 

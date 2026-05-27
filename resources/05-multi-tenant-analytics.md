@@ -2341,6 +2341,22 @@ resource-groups.config-file=etc/resource-groups.json
 > - **`"user"` in selectors** — value is interpreted as a Java regex matching the submitting username. **The field is literally named `"user"`, NOT `"userRegex"`** (despite the value being a regex). Trino Gateway's separate routing-rules JSON uses `userRegex`/`sourceRegex` — those are a different schema. The core Trino `etc/resource-groups.json` uses `"user"` and `"source"` (no `Regex` suffix). The catch-all selector at the bottom of the list (`{"group": "global"}` in the snippet) has NO matchers and acts as a fallback.
 > - **`"source"` in selectors** — Java regex matching the client `source` string (set by the client via the `X-Trino-Source` HTTP header or the `--source` flag on the CLI). Used to distinguish workload classes that share a user — e.g., the same service principal might submit both dashboard queries (`source = "trino-gateway-dashboard"`) and batch jobs (`source = "airflow"`).
 
+> **CRITICAL — what actually happens when a free-tier query hits `hardConcurrencyLimit`: queue first, then reject. NEVER an immediate error from `hardConcurrencyLimit` alone.** This is the most common follow-up question once engineers configure the limits. The behavior is a **two-stage sequence**, not a single decision, and the customer-visible outcome depends entirely on which stage the queue is in:
+>
+> **Stage 1 — group is at `hardConcurrencyLimit` but the queue still has room (queued count < `maxQueued`): the query QUEUES. It does NOT error.** Trino's coordinator accepts the submission, assigns it a `queryId`, and parks it in the group's queue with `state = 'QUEUED'`. The query then waits — potentially indefinitely — until one of the currently-RUNNING queries in the same group finishes and frees a slot, at which point Trino promotes the queued query to `state = 'RUNNING'` and execution begins. From `system.runtime.queries`, you'll see the query with `state = 'QUEUED'` and a growing `queued_time_ms` while it waits. There is no error, no rejection, no client-visible failure during Stage 1 — only latency.
+>
+> **Stage 2 — group is at `hardConcurrencyLimit` AND the queue is also full (queued count ≥ `maxQueued`): the NEW query is rejected immediately.** Trino returns the error `QUERY_QUEUE_FULL` with message `Too many queued queries for "<group_path>"` on the submission response (no `queryId` is even issued for this query, because it never made it into the queue). This is the **only** time a query hits an immediate error from concurrency-side caps — and it requires BOTH limits to be saturated simultaneously, not just `hardConcurrencyLimit`.
+>
+> **What the customer sees in each stage (REST client / JDBC / Python `trino` client):**
+> | Stage | Trino response | What the application code sees |
+> |---|---|---|
+> | **Stage 1: queued, slot will eventually open** | HTTP 200 with a `nextUri` and `stats.state = "QUEUED"` on every poll until a slot frees | A blocking `cursor.execute()` (JDBC/Python) **just appears slow** — the client library follows `nextUri` polls in a loop and only returns when the query finishes (or fails). The application sees no exception; it sees latency. A dashboard with a 5s frontend timeout will time out client-side while Trino keeps the query queued server-side. |
+> | **Stage 2: queue full, immediate reject** | HTTP 200 with `error.errorCode.name = "QUERY_QUEUE_FULL"` on the first response (Trino's protocol does not use HTTP 4xx/5xx for query-level errors — the HTTP status is 200 and the error lives inside the JSON body) | The client library raises a `TrinoQueryError` / `TrinoUserError` (exact class depends on driver) with the message `Too many queued queries for "global.free_tier"`. The application gets an immediate exception, not latency. |
+>
+> **Operational implication: the symptom shape tells you which limit to tune.** If free-tier customers report "queries are slow" and `system.runtime.queries` shows their queries spending most of their wall-clock time in `state = 'QUEUED'`, the bottleneck is `hardConcurrencyLimit` (too few concurrent slots for the tenant's workload — raise it OR add more sub-groups OR migrate them to a dedicated tier). If free-tier customers report "queries fail immediately with a `QUERY_QUEUE_FULL` error," the bottleneck is `maxQueued` (the queue itself is too shallow — raise `maxQueued`, OR the concurrency cap is so tight that the queue is permanently saturated). The two failure modes have different root causes and different fixes; the metric that distinguishes them is `queued_time_ms` (Stage 1 has large values; Stage 2 never gets a queryId so it doesn't show up in `system.runtime.queries` at all — you must catch it in the event listener or the audit log via `error_code = 'QUERY_QUEUE_FULL'`).
+>
+> **Optional Stage-1 timeouts: `query_max_queued_time` and `query_max_run_time` bound the wait.** A query that sits in `QUEUED` forever is its own problem — a customer's browser tab waits, the load balancer eventually drops the connection, the query keeps holding the queue slot. Cap how long a query may wait by setting the session property `query_max_queued_time` (e.g., `'2m'`) via the session property manager for free-tier queries. When the cap is reached, the query is failed with `error_code = 'EXCEEDED_TIME_LIMIT'` and the slot is released. `query_max_run_time` is similar but covers total wall-clock from submission (queue + execution). For a free-tier SLA of "fail fast under load rather than wait," set `query_max_queued_time = '30s'`; for "best effort within reason," `query_max_queued_time = '5m'`. Without these, queries can sit queued for hours.
+
 The minimal layout above protects against runaway CPU (the global `hardCpuLimit: "2h"` per rolling window) AND runaway query count (the global `hardConcurrencyLimit: 100` plus `maxQueued: 200`) AND lets you isolate two workload classes (`analytics` for batch, `dashboard` for interactive). Once this is in place, you can subdivide further (per-tenant subgroups under `dashboard`) without restructuring the top-level shape.
 
 Minimal example to ground the layout for the more-detailed multi-tenant version below:
@@ -2526,14 +2542,14 @@ Minimal example to ground the layout for the more-detailed multi-tenant version 
 > ```json
 > [
 >   {
->     "group": "global\\.free_tier",
+>     "group": "global.free_tier",
 >     "sessionProperties": {
 >       "query_max_execution_time": "5m",
 >       "query_max_run_time": "10m"
 >     }
 >   },
 >   {
->     "group": "global\\.enterprise_tier",
+>     "group": "global.enterprise_tier",
 >     "sessionProperties": {
 >       "query_max_execution_time": "30m",
 >       "query_max_run_time": "60m"
@@ -2542,7 +2558,9 @@ Minimal example to ground the layout for the more-detailed multi-tenant version 
 > ]
 > ```
 >
-> The `"group"` field is a Java regex matched against the resource group path (the same path visible in `system.runtime.queries.resource_group_id`). **The dot must be escaped** (`global\\.free_tier`, not `global.free_tier`) because `group` is matched as a Java regex — an unescaped dot matches any character. Free-tier queries land in `global.free_tier` → get 5-minute execution limit. Enterprise queries land in `global.enterprise_tier` → get 30-minute limit.
+> The `"group"` field in session-property-manager.json match rules is matched against the resource group path (the same path visible in `system.runtime.queries.resource_group_id`). In practice, writing `"global.free_tier"` works correctly — the unescaped dot in a regex matches any character including a literal dot, and there is no other resource group whose name collides with that pattern. If you want strict-regex correctness you can escape the dot as `"global\\.free_tier"` (which matches a literal dot only), but the unescaped form is what most Trino deployments use and is what we show above. Free-tier queries land in `global.free_tier` → get 5-minute execution limit. Enterprise queries land in `global.enterprise_tier` → get 30-minute limit.
+>
+> **Contrast with resource-groups.json `selectors[].group`:** in the resource-groups.json file, the `selectors[].group` field is a **literal string** (the destination group name to route the query to), NOT a regex. So in resource-groups.json you ALWAYS write `"group": "global.tenant_acme"` with an unescaped dot — escaping would create a literal-string mismatch and the selector would fail to route. See the `selectors[]` examples earlier in this resource (lines around `"group": "global.tenant_acme"`) for the correct form. The two files happen to share a JSON key named `"group"` but the field semantics are different: `selectors[].group` in resource-groups.json = literal destination; `match-rules[].group` in session-property-manager.json = regex matched against the destination path.
 >
 > For queries that match no rule, the global `query.max-execution-time` cluster property (set in `config.properties`) applies as a safety net. Set it generously (e.g., `8h`) so admin/internal queries aren't accidentally killed by the session property manager.
 >
