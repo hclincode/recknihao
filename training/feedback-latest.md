@@ -1,91 +1,90 @@
-# Judge Feedback — Iter 314
+# Judge Feedback — Iter 315
 
 Date: 2026-05-27
 Phase: extended
-Topics: OLAP vs OLTP — do we actually need a separate analytics stack? (Q1) + OPA column masking silent failure — batchColumnMasks vs columnMask (Q2)
+Topics: Storage sizing and growth estimation for lakehouse workloads (Q1) + Real-time vs batch analytics trade-offs (Q2)
 
 ---
 
-## Q1 — OLAP vs OLTP — do we actually need a separate analytics stack?
+## Q1 — Storage sizing and growth estimation for lakehouse workloads
 
 ### Score
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5.0 | Row-vs-column storage characterization correct. Columnar 10–50x byte reduction realistic and supported. Tuning ladder (read replica, partial indexes, materialized views, partitioning, EXPLAIN ANALYZE) accurate and correctly ordered by risk/effort. Migration path (Spark JDBC → Parquet/MinIO → Iceberg/HMS → Trino) matches prod stack exactly. |
-| Beginner clarity | 5.0 | Opens with "one row vs millions of rows" before any jargon. Concrete 30-column/2-needed worked example makes columnar advantage tangible. No unexplained acronyms. "The Real Distinction" closing reframes without restating. |
-| Practical applicability | 5.0 | Direct decision tree: 5-step Postgres ladder first, then four concrete thresholds (50M rows, >2s after tuning, >3 users, multi-source joins), then 5-step migration recipe naming the engineer's actual stack components. Closing "next step" is unambiguous. |
-| Completeness | 5.0 | Covers all four sub-questions asked: (1) is the distinction real, (2) what is fundamentally different, (3) can Postgres be tuned further, (4) when does tuning stop working. Adds migration path. Nothing material missing. |
-| **Average** | **5.00** | **PASS** |
+| Technical accuracy | 4.0 | Math chain is sound and well-labeled as estimates. Postgres index/bloat heuristics (30-50%) and Parquet ratios (5-10x baseline) are within accepted ranges. `pg_total_relation_size` decomposition, `expire_snapshots` guidance, and `$files` query syntax confirmed correct. **MinIO EC:4 claim is wrong as a general statement**: "4 parity drives per 8-drive set, ~50% efficiency, plan 2× raw" only describes an 8-drive set; on 12/16-drive sets EC:4 = ~67-75% usable. Delta encoding for timestamps at "10-20x" is slightly optimistic. |
+| Beginner clarity | 5.0 | Explicitly debunks the naive "140 GB / compression" math. Explains indexes, bloat, fragmentation, dictionary/delta/RLE encoding in plain terms with concrete column-type examples. Step-by-step labeled multipliers. Zero assumed OLAP knowledge. |
+| Practical applicability | 4.5 | Runnable Postgres diagnostic SQL, Spark JDBC validation snippet, concrete sizing formula, `$files` monitoring SQL, four operational gotchas (snapshot expiry, compaction pairing, monitoring, tiered retention). MinIO over-provisioning advice (2× raw) is wasteful but not dangerous. Single-node MinIO suggestion glosses over HA. |
+| Completeness | 5.0 | Hits every part of the question: why Postgres baseline misleads, why Parquet compresses and by how much, growth projection, snapshot overhead, hardware sizing formula, validation procedure, ongoing monitoring, tiered retention bonus. |
+| **Average** | **4.625** | **PASS** |
 
 ### What Worked
-- "Row-at-a-time vs millions-at-once" nails the conceptual answer without storage-internals jargon
-- 30-column/2-needed worked example makes the columnar advantage tangible — far better than abstract "I/O reduction"
-- Tuning ladder ordered by risk/effort: read replica (zero risk) → partial index → matview → partitioning → EXPLAIN ANALYZE
-- Concrete numeric thresholds (50M rows, >2s, >3 users) prevent the "it depends" non-answer
-- Stack-aware migration path names MinIO, Iceberg, Hive Metastore, Trino, and Spark — not generic "use a data warehouse"
-- Closes with one specific next action, not a generic recap
-
-### What Missed (minor observations only)
-- Could briefly note that matviews cost write amplification at refresh time and don't fix ad-hoc queries (answer covers this in spirit)
-- "Spark writes Parquet to MinIO then register" slightly under-describes: in production, Spark with Iceberg writer commits Parquet + Iceberg metadata atomically in one step
-- 10–50x byte reduction is realistic but conservative — for very wide tables can exceed 100x
-
-### Technical Accuracy
-All claims verified: row-vs-columnar storage characterization; PostgreSQL streaming replication for OLAP/OLTP separation; REFRESH MATERIALIZED VIEW syntax; Trino Iceberg connector projection pushdown and partition pruning. Stack matches prod_info.md exactly.
-
-### Rubric Update
-- OLAP vs OLTP: prior avg 4.542 across 3 questions → (4.542 × 3 + 5.00) / 4 = **4.657 across 4 questions**. Status: PASSED (improving).
-- Also touched tangentially: "When to add OLAP" (tuning ladder + thresholds) and "OLTP-to-OLAP mindset" (design problem not config problem framing) — both benefit from this coverage.
-
----
-
-## Q2 — OPA column masking silent failure — batchColumnMasks vs columnMask
-
-### Score
-
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 5.0 | `batchColumnMasks` rule name confirmed correct. Response shape `{"index": i, "viewExpression": {"expression": "..."}}` matches docs exactly. `input.action.filterResources[i].column.columnName` nested path correct per official Trino OPA docs. Silent failure behavior accurate. Four-row truth table correctly captures all combinations. |
-| Beginner clarity | 4.5 | Opens with direct one-sentence diagnosis. "Two Different Places to Get Tripped Up" framing is highly accessible. Concrete email/hashing example tied to the user's scenario. Minor: doesn't explain what "Rego rule" means (acceptable — user is past that point). |
-| Practical applicability | 5.0 | Corrected Rego is copy-paste ready. Single-column comparison Rego shows exactly what changes. CI test gives concrete query plus expected length/format assertions (64 chars, no @). Engineer can fix and verify immediately. |
-| Completeness | 5.0 | Covers: rule name mismatch diagnosis, `batchColumnMasks` name, batch vs single-column endpoint comparison table, secondary response-shape trap (viewExpression vs expression), correct Rego example, single-column comparison, CI test, summary truth table. Nothing material missing. |
-| **Average** | **4.875** | **PASS** |
-
-### What Worked
-- Direct diagnosis in first sentence: what's happening, why no error is raised
-- Two-trap framing (wrong rule name + wrong response shape) preempts the follow-up failure the user would have hit next
-- Side-by-side Rego makes structural differences visible at a glance
-- Actionable CI test: length=64 and no-@ assertions are a real safety net
-- Truth table: four rows covering all endpoint × rule name combinations
-- **Confirmed that iter313's resource fix landed**: the responder correctly used `batchColumnMasks` this time (in iter313 Q1, the same responder made this exact bug)
+- Two-step decomposition (strip Postgres overhead first, then apply compression) corrects the most common engineering mistake
+- Labeled math with named multipliers so the engineer can substitute measured values
+- "Measure before you commit" sample-export procedure converts heuristics into verifiable numbers
+- `$files` monitoring query is correct Trino+Iceberg syntax and immediately useful
+- Snapshot accumulation gotcha (2-3× without expiry) is exactly the failure mode that bites teams in months 3-6
 
 ### What Missed
-- Could mention that OPA decision logs are the primary debugging tool to confirm whether the policy was evaluated and what it returned — a one-liner on enabling decision logging would help
-- Could note that `batch-column-masking-uri` overrides `column-masking-uri` if both are set (footgun in mixed configurations)
+- **MinIO EC:4 misstated** — "plan 2× raw" only applies to 8-drive sets; 12-drive → 1.5×, 16-drive → 1.3× (now fixed in resources/11)
+- Single-node MinIO skips HA/failure-domain considerations for on-prem production
+- Delta encoding "10-20x" for timestamps is on the high end of realistic
 
 ### Technical Accuracy
-All verified against trino.io/docs/current/security/opa-access-control.html:
-- `batchColumnMasks` rule name: confirmed
-- Response shape with `viewExpression`: confirmed
-- `input.action.filterResources[i].column.columnName` path: confirmed
-- Silent failure when rule not found: consistent with OPA+Trino integration
+Verified against: PostgreSQL wiki Disk Usage, Apache Parquet encodings docs, Trino 481 Iceberg connector docs (`$files` syntax confirmed), Iceberg spark-procedures docs, MinIO erasure coding docs and calculator.
 
 ### Rubric Update
-- Multi-tenant analytics: prior avg 4.469 across 113 questions → (4.469 × 113 + 4.875) / 114 = **4.473 across 114 questions**. Status: PASSED.
+- Storage sizing: prior avg 4.500 across 5 questions → (4.500 × 5 + 4.625) / 6 = **4.521 across 6 questions**. Status: PASSED.
 
 ---
 
-## Iter 314 Summary
+## Q2 — Real-time vs batch analytics trade-offs
 
-**Iter 314 average: 4.94 — PASS** ✓ (best iteration this session)
+### Score
+
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Technical accuracy | 4.75 | WAL/Debezium/Kafka/Spark Structured Streaming chain is correct. Two-timestamp pattern (occurred_at vs ingested_at) is industry standard. Late-arrival watermarking concept is real. **Minor: describes Kafka as requiring "ZooKeeper"** — ZooKeeper was removed in Kafka 4.0 (2025); KRaft has been default since Kafka 3.3. For a 2026 on-prem deployment this is a real inaccuracy (now fixed in resources/14). |
+| Beginner clarity | 4.75 | Tiered "freshness spectrum" framing is excellent for a non-OLAP engineer. Wi-Fi/mobile example for late-arriving events is concrete and memorable. Acronyms mostly defined in context. |
+| Practical applicability | 5.0 | Directly fits the production stack (on-prem Spark + Iceberg + Trino + k8s). Recommends K8s CronJob. Concrete "three next steps" tell the engineer exactly what to do Monday morning. "Ask the customer first" framing is mature SaaS advice. |
+| Completeness | 4.5 | Covers tiered freshness, CDC chain, late-arriving events, two-timestamp pattern, micro-batch-first recommendation. Light on: (a) Iceberg small-files problem from frequent commits — now fixed in resources/14; (b) Trino read-time effects during high-frequency commits; (c) HMS lock contention at sub-minute micro-batch commit frequency. |
+| **Average** | **4.75** | **PASS** |
+
+### What Worked
+- "Tiers, not binary choices" framing is exactly how a senior engineer thinks about freshness SLAs
+- "10× more complex per tier" heuristic gives a memorable cost model
+- "'We want real-time' is not a metric" — teaches better requirements gathering
+- partition-by-ingested_at / aggregate-by-occurred_at recommendation is the correct Iceberg pattern
+- Recommends hourly batch first — verified against sources that 80%+ of workloads are well-served by batch/micro-batch
+
+### What Missed
+- **Kafka/ZooKeeper reference outdated** — KRaft is default since Kafka 3.3, ZooKeeper fully removed in Kafka 4.0 (now fixed in resources/14)
+- **Small-files problem not named** — frequent Iceberg commits create small files that degrade Trino query performance; `rewrite_data_files` schedule not mentioned (now added to resources/14)
+- Hive Metastore lock contention under high commit frequency not mentioned
+- Postgres replication slot WAL retention as an operational gotcha for Debezium consumers not mentioned
+
+### Technical Accuracy
+Verified against: Debezium Postgres connector docs, Confluent CDC docs, Spark Structured Streaming docs, Databricks watermarking blog, Honeycomb ingest timestamps blog, Kafka 4.0 KRaft release notes.
+
+### Rubric Update
+- Real-time vs batch: prior avg 4.775 across 5 questions → (4.775 × 5 + 4.75) / 6 = **4.771 across 6 questions**. Status: PASSED.
+
+---
+
+## Iter 315 Summary
+
+**Iter 315 average: 4.6875 — PASS** ✓
 
 ### Notable
-- Q1 perfect 5.00: OLAP vs OLTP answered completely — row-vs-column storage, tuning ladder, migration path all correct and stack-aware
-- Q2 4.875: batchColumnMasks fix confirmed landed in resources — responder now gets it right after iter313 Q1 had the exact bug being diagnosed
+- Q1 4.625: Storage sizing answered with correct two-step decomposition; MinIO EC:4 error caught and fixed in resources
+- Q2 4.75: Real-time vs batch answered with correct tiered framing; Kafka/ZooKeeper anachronism and small-files gap caught and fixed in resources
 
-### Suggested focus for Iter 315
-- "Storage sizing and growth estimation for lakehouse workloads" (4.500/3 — only 3 questions, lowest question count among passing topics)
-- "Real-time vs batch analytics trade-offs" (4.775/5 — underrepresented, fresh angles possible)
-- "Schema design for analytics: denormalization, star schema basics" (4.60/5 — solid but ripe for an advanced angle)
-- Continue probing OPA column masking angles (OPA decision log debugging; mixed endpoint config footgun)
+### Resource fixes applied this iteration
+1. **resources/11-lakehouse-storage-sizing.md** — Added MinIO EC:4 erasure-set-size table (8/12/16 drives → 50%/67%/75% usable) replacing incorrect blanket "2× raw" claim; added Snapshot Management Commands section with full Iceberg 1.5.2 Spark procedure syntax
+2. **resources/14-real-time-vs-batch.md** — Updated Kafka reference from ZooKeeper to KRaft (Kafka 3.3+/4.0); added "small-files problem" operational subsection with `rewrite_data_files` schedule recommendation
+
+### Suggested focus for Iter 316
+- "Storage sizing and growth estimation" (4.521/6 — just asked, probe a different angle: retention math, partition-level sizing, or time-travel cost)
+- "Real-time vs batch" (4.771/6 — probe the Trino read-side effects of high-frequency streaming commits)
+- "Postgres-to-Iceberg ingestion" (4.486/107 — consistently lowest, high question count — try a CDC-specific angle: slot WAL bloat, schema evolution mid-migration)
+- "Multi-tenant analytics" (4.473/114 — probe OPA decision log debugging, the mixed endpoint config footgun from iter314 feedback)

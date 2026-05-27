@@ -265,14 +265,57 @@ Without expiry, a 100 GB table can balloon to 300+ GB in a year just from snapsh
 - A 1 TB MinIO node has 280 GB to spare — plenty.
 
 ### MinIO erasure coding
-- MinIO typically uses EC:4 (4 parity drives per 8-drive set) → ~50% storage efficiency.
-- Plan raw disk: usable × 2 for an 8-drive EC:4 setup.
-- 1 TB usable = ~2 TB raw across drives.
+
+MinIO's EC:4 means "4 parity drives per erasure set." The **usable percentage depends on the erasure set size** — it is NOT a fixed 50%. Sizing advice that says "plan 2× raw" only applies to 8-drive sets.
+
+| Erasure set size | EC:4 usable % | Rule of thumb |
+|---|---|---|
+| 8 drives | 50% | Plan 2× raw |
+| 12 drives | ~67% | Plan 1.5× raw |
+| 16 drives | ~75% | Plan 1.3× raw |
+
+Pick the row that matches your actual erasure set configuration. For example, 1 TB usable on a 12-drive EC:4 set = ~1.5 TB raw across drives, not 2 TB. Misapplying the 8-drive rule to a 16-drive deployment will over-provision storage by ~50%.
 
 ### What grows fastest
 - **Raw event tables** — direct function of user activity.
 - **Snapshots/orphan files** — if maintenance isn't scheduled.
 - **Failed Spark jobs leaving orphans** — periodic `remove_orphan_files` cleans these up.
+
+---
+
+## Snapshot Management Commands
+
+The full Spark procedure syntax for Iceberg 1.5.2 maintenance operations. Run these on a schedule (Airflow, cron, or a dedicated maintenance Spark job).
+
+```sql
+-- Expire old snapshots: drops snapshots older than the cutoff, but always retains at least N most recent.
+-- Required to reclaim storage from old data files no longer referenced by any retained snapshot.
+CALL catalog.system.expire_snapshots(
+  table       => 'analytics.events',
+  older_than  => TIMESTAMP '2024-01-01 00:00:00',
+  retain_last => 5
+);
+
+-- Compact small files: rewrites the table's data files to target file size (default 512 MB).
+-- Run after streaming ingest or any workload that produces many small files.
+CALL catalog.system.rewrite_data_files(
+  table => 'analytics.events'
+);
+
+-- Remove orphan files: deletes data/metadata files in the table's storage location that are
+-- not referenced by any snapshot. Catches files left behind by failed Spark jobs.
+CALL catalog.system.remove_orphan_files(
+  table      => 'analytics.events',
+  older_than => TIMESTAMP '2024-01-01 00:00:00'
+);
+```
+
+Replace `catalog` with your actual catalog name (e.g., `iceberg`, `prod`, etc.) and use named arguments (`table => '...'`) — they are required for Iceberg's Spark procedures.
+
+A typical schedule:
+- `rewrite_data_files` — daily (hourly for streaming sinks; see `14-real-time-vs-batch.md`).
+- `expire_snapshots` — daily, with `older_than = current_timestamp - INTERVAL 30 DAYS` and `retain_last = 10`.
+- `remove_orphan_files` — weekly, with `older_than = current_timestamp - INTERVAL 7 DAYS` to avoid racing with in-flight writes.
 
 ---
 

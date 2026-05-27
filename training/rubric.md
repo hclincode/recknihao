@@ -32,12 +32,12 @@ Each topic must reach the pass threshold before the system can enter final phase
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
 | Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.473 | 114 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
-| Real-time vs batch analytics trade-offs | PASSED | 4.775 | 5 |
+| Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
 | Query performance basics: partitioning, indexing strategy for analytics | PASSED | 4.675 | 5 |
 | Lakehouse schema design: fact tables, dimension tables, denormalization | PASSED | 4.650 | 5 |
 | Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.596 | 17 |
-| Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.500 | 5 |
+| Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.521 | 6 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.486 | 107 |
@@ -82,6 +82,44 @@ Resource fix from iter313 confirmed landed — responder correctly used `batchCo
 **Topics updated**:
 - OLAP vs OLTP: 4.542/3 → **4.657/4 questions** (PASSED — improving)
 - Multi-tenant analytics: 4.469/113 → **4.473/114 questions** (PASSED — stable)
+
+---
+
+### Iter 315 — 2026-05-27
+
+**Q1** — Storage sizing and growth estimation: Postgres index/bloat decomposition, Parquet compression ratios by encoding type (dictionary/delta/RLE), two-step sizing calculation (strip Postgres overhead → apply compression), 12-month growth projection, snapshot accumulation gotcha, MinIO EC:4 sizing, `$files` monitoring, tiered retention
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 4.5 |
+| Completeness | 5.0 |
+| **Average** | **4.625** — PASS |
+
+MinIO EC:4 claim was wrong (50% only for 8-drive sets; 12/16-drive sets give 67-75% usable) — fixed in resources/11. Topic running avg: (4.500×5 + 4.625)/6 = **4.521/6 questions** — PASSED.
+
+**Q2** — Real-time vs batch analytics trade-offs: tiered freshness spectrum (daily→hourly→15min→streaming), 10× complexity per tier rule, Debezium+Kafka+Spark Structured Streaming chain, late-arriving events, two-timestamp pattern (occurred_at vs ingested_at), partition-by-ingested_at, micro-batch-first recommendation
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 4.75 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** — PASS |
+
+Kafka/ZooKeeper reference outdated (ZK removed in Kafka 4.0; KRaft default since 3.3) — fixed in resources/14. Small-files problem from high-frequency Iceberg commits not named — added to resources/14. Topic running avg: (4.775×5 + 4.75)/6 = **4.771/6 questions** — PASSED.
+
+**Iter 315 average: 4.6875 — PASS** ✓
+
+**Topics updated**:
+- Storage sizing: 4.500/5 → **4.521/6 questions** (PASSED — stable)
+- Real-time vs batch: 4.775/5 → **4.771/6 questions** (PASSED — stable)
+
+**Resource fixes this iteration**:
+- resources/11: MinIO EC:4 erasure-set-size table; Snapshot Management Commands section with full Iceberg 1.5.2 Spark procedure syntax
+- resources/14: Kafka KRaft update (removed ZooKeeper reference); small-files/compaction operational subsection added
 
 ---
 

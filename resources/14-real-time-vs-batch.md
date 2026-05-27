@@ -108,12 +108,38 @@ The typical CDC streaming pipeline, one sentence per component:
 
 Iceberg 1.5.2 supports streaming writes natively via Spark Structured Streaming. You can `writeStream` directly to an Iceberg table — each micro-batch becomes an atomic Iceberg commit.
 
-**Watch out: streaming makes the small-files problem worse.** Each micro-batch creates new data files. A streaming job with a 30-second trigger creates 2,880 files per day per partition.
+### Operational considerations — the small-files problem from high-frequency commits
 
-Mitigations:
-- Run Iceberg's `rewrite_data_files` compaction procedure **hourly** (not nightly) for streaming tables.
-- Run `expire_snapshots` and `remove_orphan_files` daily — streaming creates many short-lived snapshots.
+**This is the single biggest operational cost of streaming or micro-batch writes into Iceberg.** It is the reason most teams should not adopt streaming until a business metric demands it.
+
+**Why it happens.** Every Iceberg commit produces at least one new data file per partition being written. A streaming job with a 30-second trigger creates **2,880 commits per day** — and each commit produces small Parquet files (typically a few MB each, far below the 128–512 MB target file size). After a week of streaming into a daily-partitioned table, a single partition can hold 20,000+ tiny files.
+
+**Why it hurts queries.** Trino must open every file in the scanned partition set. Each file open costs:
+- A metadata round-trip to MinIO (network latency).
+- A Parquet footer read (to learn schema, row groups, column stats).
+- A worker thread slot (parallelism is bounded by files, not bytes).
+
+A query that should scan 1 GB across 4 files takes seconds. The same 1 GB spread across 10,000 files takes minutes — file-open overhead dominates the actual data scan. Memory pressure on Trino workers also rises sharply because each open file holds its footer in memory.
+
+**The solution: schedule `rewrite_data_files` every 30–60 minutes for streaming sinks.** Don't wait for the nightly maintenance window — small files accumulate too fast.
+
+```sql
+-- Run this every 30-60 minutes for any table receiving streaming writes
+CALL iceberg.system.rewrite_data_files(
+  table   => 'analytics.events',
+  options => map(
+    'target-file-size-bytes', '268435456',   -- 256 MB
+    'min-input-files',        '5'             -- compact when ≥5 small files in a partition
+  )
+);
+```
+
+See `11-lakehouse-storage-sizing.md` for the full snapshot management command reference.
+
+**Additional mitigations:**
+- Run `expire_snapshots` and `remove_orphan_files` daily — streaming creates many short-lived snapshots that pile up fast.
 - Tune the trigger interval up (e.g., 2-minute micro-batches instead of 10-second) if your SLA allows. The Iceberg docs recommend a **minimum 60-second trigger** for streaming writes — anything sub-minute creates too many tiny files without proportional throughput benefit.
+- Restrict compaction to historical (non-hot) partitions to avoid commit conflicts with the active streaming writer; see the Copy-on-Write vs Merge-on-Read section below.
 
 ### Postgres prerequisites for Debezium CDC
 
@@ -272,7 +298,7 @@ query.awaitTermination()
 > - **The Debezium envelope must be parsed.** The Kafka `value` column contains JSON bytes with `op`, `before`, and `after` fields — raw Kafka bytes cannot be written to Iceberg directly. A bare `writeStream.format("iceberg")` on the readStream frame stores Kafka metadata columns (`key`, `value`, `topic`, `partition`, `offset`, `timestamp`) — none of your actual event fields.
 > - **UPDATEs and DELETEs require MERGE INTO, not append.** Postgres CDC includes UPDATEs and DELETEs. An append-only `writeStream` would create a duplicate row in Iceberg for every UPDATE (one row per change event) instead of updating the existing row in place — and DELETEs would never actually remove rows.
 > - **Use `foreachBatch` when you need MERGE INTO logic per micro-batch.** Spark's `.format("iceberg").writeStream` sink only supports append/complete output modes; arbitrary `MERGE INTO` requires the `foreachBatch` escape hatch, which gives you a regular DataFrame per micro-batch that you can run any Spark SQL against.
-> - **Kafka is a new on-prem infrastructure component.** This pipeline assumes a Kafka cluster running in your environment — separate from your Trino/Spark/MinIO stack. Plan for: 3+ Kafka brokers for HA, ZooKeeper or KRaft mode setup, broker storage sizing, retention policy configuration, consumer group lag monitoring, and an on-call rotation for the Kafka cluster itself. Debezium also runs as a Kafka Connect worker, which is another component to deploy and monitor. None of this exists in a pure batch-Spark pipeline reading directly from a Postgres read-replica.
+> - **Kafka is a new on-prem infrastructure component.** This pipeline assumes a Kafka cluster running in your environment — separate from your Trino/Spark/MinIO stack. Plan for: 3+ Kafka brokers for HA, KRaft mode setup (ZooKeeper-free since Kafka 3.3, fully removed in Kafka 4.0 — 2025), broker storage sizing, retention policy configuration, consumer group lag monitoring, and an on-call rotation for the Kafka cluster itself. Debezium also runs as a Kafka Connect worker, which is another component to deploy and monitor. None of this exists in a pure batch-Spark pipeline reading directly from a Postgres read-replica.
 > - **Trigger interval ≥ 60 seconds.** Iceberg's streaming-writes guidance recommends a minimum 1-minute trigger to bound small-file accumulation. Sub-minute triggers create too many tiny Parquet files without proportional throughput benefit — and they make `rewrite_data_files` compaction (which you now must run hourly) work much harder.
 > - **Checkpoint location is mandatory.** Spark Structured Streaming requires a `checkpointLocation` so it can recover Kafka offsets and processed batch IDs after a restart. Store it in MinIO (`s3a://...`), not in a worker pod's ephemeral disk — pod restarts would otherwise replay every Kafka event since the topic's retention horizon.
 
