@@ -1,80 +1,70 @@
-# Feedback — Iter 301 (Extended phase)
+# Feedback — Iter 302 (Extended phase)
 
 Date: 2026-05-27
-Topics: dbt incremental models on Iceberg (Q1) + JSONB from Postgres to Iceberg (Q2)
+Topics: Denormalize plan attributes vs federated join (Q1) + COUNT(DISTINCT) at scale / approx_distinct (Q2)
 
 ## Results summary
 
 | Question | Topic angle | Score | Pass/Fail |
 |---|---|---|---|
-| Q1 | dbt incremental models: watermarks, unique_key, strategies, CoW/MoR, on_schema_change | **4.375** | PASS |
-| Q2 | JSONB ingestion: VARCHAR vs flatten, get_json_object, file-skipping advantage, schema evolution | **5.00** | PASS |
+| Q1 | Denormalize plan_tier into events; star schema; SCD Type 2; as-of join; no backfill on plan upgrade | **5.00** | PASS |
+| Q2 | COUNT DISTINCT shuffle cost; approx_distinct (HyperLogLog 2.3% error); nightly rollup; UNION hybrid | **4.75** | PASS |
 
-**Iter 301 average: 4.69 — PASS** ✓
+**Iter 302 average: 4.875 — PASS** ✓
 
 **Topic updates**:
-- Postgres-to-Iceberg ingestion: 4.476/100 → **4.480/102 questions** (PASSED — stable)
+- Schema design for analytics: 4.50/4 → **4.60/5 questions** (PASSED — improved)
+- SQL query best practices for OLAP: 4.626/11 → **4.636/12 questions** (PASSED — stable)
 
 ---
 
-## Resource bugs to fix (PRIORITY — fix before iter302)
+## Resource fixes applied (teacher already corrected these)
 
-### Resource 13: postgres-to-iceberg-ingestion.md — dbt incremental model section
+None for Q1 — all claims correct.
 
-The Q1 answer contained 6 factual errors sourced from or absent from the resource. Fix the following in resource 13 (or a dbt-specific resource if one exists):
+### Resources 23 and 07: COUNT DISTINCT mechanism (fix before iter303)
 
-1. **`on_schema_change` default is `ignore`, not `fail`**
-   - Correct: The dbt default is `ignore` — new source columns are silently ignored unless you opt in.
-   - Fix: Update any example or prose that says `fail` is default.
+The Q2 answer's mechanism explanation was wrong: "all user_id values shuffle to a single coordinator node." This is inaccurate for Trino.
 
-2. **dbt-trino incremental strategies are `append`, `merge`, `delete+insert`**
-   - `insert_overwrite` is dbt-spark only and is explicitly rejected on dbt-trino with Iceberg.
-   - Correct strategy for partition-level overwrite on dbt-trino: `delete+insert`.
-   - Fix: Add a dbt-trino-specific strategy table distinguishing from dbt-spark.
+**Correct explanation:** Trino distributes distinct aggregation across workers via MarkDistinct strategies (MARK_DISTINCT, PRE_AGGREGATE, SINGLE_STEP, SPLIT_TO_SUBQUERIES). For `COUNT(DISTINCT user_id) GROUP BY event_date`, Trino partitions work by `event_date` across workers. The real bottleneck is:
+1. Multi-shuffle overhead (GROUP BY shuffle + distinct column shuffle layered on top)
+2. Per-group memory pressure when groups have high NDV
+3. Multiple re-shuffles when multiple distinct expressions appear in one query
 
-3. **dbt-trino default incremental strategy is `append`, not `merge`**
-   - Fix: State the correct per-adapter defaults clearly. Engineers must explicitly set `incremental_strategy='merge'` to get upsert behavior on dbt-trino.
-
-4. **MERGE INTO compiled SQL conditional predicate**
-   - dbt's default merge does NOT add `AND s.updated_at > t.updated_at` — it overwrites matched rows unconditionally.
-   - To add a target-side filter, you use `incremental_predicates` config.
-   - Fix: Show the actual default compiled SQL, and note `incremental_predicates` as the advanced option.
-
-5. **Jinja timedelta syntax**
-   - `macros.timedelta(days=4)` is invalid. Correct: `modules.datetime.timedelta(days=4)`.
-   - Fix: Update any late-arriving data example that uses the invalid form.
-
-6. **Trino rollback syntax**
-   - `CALL iceberg.system.rollback_to_snapshot(...)` is Spark SQL syntax.
-   - Trino uses: `ALTER TABLE iceberg.analytics.orders EXECUTE rollback_to_snapshot(snapshot_id => <id>)`.
-   - Fix: Wherever the rollback procedure is mentioned, show both forms or Trino-only form.
+**Fix in resources 23 and 07:**
+- Remove or correct any "all values to one node" / "coordinator collects all" phrasing
+- Add accurate MarkDistinct mechanism description (multi-shuffle, not centralization)
+- Add `approx_set(user_id)` + `merge()` + `cardinality()` HLL sketch reuse pattern (pre-aggregate sketches per day, then merge for rolling WAU/MAU windows without re-scanning raw data)
+- Add `distinct_aggregations_strategy` session property as a tuning knob before reaching for approx_distinct
+- Recommend `EXPLAIN ANALYZE` (not just `EXPLAIN`) to verify bytes-read reduction after optimization
 
 ---
 
 ## What worked
 
-### Q1 — dbt incremental models (4.375)
-1. "Not automatic magic — requires updated_at column" framing — correct and important
-2. Watermark filter with `is_incremental()` Jinja macro — right concept
-3. unique_key → MERGE INTO explained clearly
-4. CoW vs MoR trade-offs with when-to-use guidance — correct
-5. Iceberg-specific concerns (small files, snapshot rollback, partition pruning) — good coverage
-6. Final copy-paste config block — actionable structure
+### Q1 — Denormalization (5.00)
+1. "No backfill when plans change" — stated clearly and correctly with reasoning (historical value is the right value)
+2. Three-way comparison: federated join / denormalize at ingest / as-of join for current state — systematic
+3. PySpark `broadcast()` join pattern for enrichment at ingest — verified correct
+4. SCD Type 2 with valid_from/valid_to for as-of joins — correct pattern
+5. "Don't denormalize display_name" — practical gotcha preventing future backfill debt
+6. Iceberg ALTER TABLE ADD COLUMN is metadata-only — verified correct
+7. On-prem stack alignment — all code uses correct Spark + Iceberg + Trino 467 syntax
 
-### Q2 — JSONB ingestion (5.00)
-1. VARCHAR vs flatten decision table with two real use cases (event_payload vs metadata)
-2. `get_json_object` PySpark syntax — verified correct
-3. `json_extract_scalar` Trino syntax — verified correct
-4. File-skipping advantage quantified — correct (JSON-string predicate cannot skip files)
-5. Lexicographic comparison gotcha for `json_extract_scalar` → always VARCHAR
-6. `ALTER TABLE ADD COLUMN` metadata-only (no file rewrites) — verified correct
-7. Schema evolution: old rows return NULL, backfill optional — correct
+### Q2 — approx_distinct (4.75)
+1. Three-pronged structure: exact-vs-approx / rollup / partition pruning verification
+2. Validation SQL to measure real error on production data — excellent
+3. Decision matrix: internal ops / customer trend / billing / compliance — crisp and defensible
+4. Non-determinism caveat (page-load-to-page-load variance) correctly identified as the real customer concern
+5. Hybrid UNION pattern (rollup historical + approx_distinct for today) — production-grade
+6. approx_distinct accuracy parameter (0.01 for tighter bounds) — verified correct against Trino docs
+7. All numbers correct: 2.3% default standard error, [0.0040, 0.26] range
 
 ---
 
-## Suggested iter302 angles
+## Suggested iter303 angles
 
-1. **Iceberg time-travel** — `FOR TIMESTAMP AS OF` / `FOR VERSION AS OF`; debugging with snapshots; retention floor interaction; when time-travel breaks (snapshot expired)
-2. **Approximate functions in Trino** — `approx_distinct`, `approx_percentile`; why exact COUNT DISTINCT is slow on 500M rows; error bounds; when to use approximation
-3. **Schema design: fact vs dimension table distinction** — reinforcing the star-schema mental model with a concrete SaaS example (events fact + accounts/plans dimension)
-4. **dbt models corrected angle** — targeting the on_schema_change defaults and dbt-trino strategy list now that resource 13 is fixed
+1. **HLL sketch reuse** — `approx_set` + `merge` + `cardinality` for rolling WAU/MAU without re-scanning raw events (directly addresses gap flagged in Q2 judge feedback)
+2. **Iceberg time-travel** — `FOR TIMESTAMP AS OF` / `FOR VERSION AS OF`; debugging production data issues; snapshot retention floor
+3. **Approximate functions deeper** — `approx_percentile` for p95/p99 latency metrics; when percentile approximation is appropriate
+4. **dbt snapshot vs SCD Type 2 manually** — now that resource 13 covers dbt incremental, cover dbt snapshot strategy for dimension tables

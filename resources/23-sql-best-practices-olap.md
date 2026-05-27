@@ -56,15 +56,23 @@ Even for ad-hoc exploration, prefer `SELECT col1, col2, col3` over `SELECT *`. I
 
 ## 3. Use approximate functions when exactness isn't required
 
-**Why**: Exact distinct counts and percentiles require shuffling all unique values across the cluster. Approximations use sketch algorithms (HyperLogLog, T-Digest) that work in a single pass with tiny memory. Typical speedup is **10x to 50x**, with error around 2%.
+**Why `COUNT(DISTINCT)` is expensive — the real mechanism**
+
+A common misconception is that `COUNT(DISTINCT)` is slow because "all values are shipped to a single node." That is **not** how Trino implements it. Trino distributes distinct aggregation across workers. The real cost has three sources:
+
+1. **Multi-shuffle overhead.** For a query like `SELECT event_date, COUNT(DISTINCT user_id) FROM events GROUP BY event_date`, Trino first shuffles rows partitioned by the GROUP BY key (`event_date`) so different workers handle different days. Then, for each distinct column, it performs an **additional** shuffle partitioned by `(event_date, user_id)` so duplicate user_ids land on the same worker and can be deduplicated. This is the **MarkDistinct** strategy. The extra shuffle is the dominant network cost.
+2. **Per-group memory pressure.** Each worker must hold all distinct values within its assigned groups in memory at the same time to detect duplicates (a hash set per group). For a query like "12 months × user_id with high NDV (number of distinct values)," each worker's hash sets can blow past the per-query memory limit.
+3. **Multiple distinct expressions multiply the shuffles.** `SELECT COUNT(DISTINCT user_id), COUNT(DISTINCT session_id) FROM events GROUP BY event_date` triggers a separate shuffle pass for each distinct column. A query with three `COUNT(DISTINCT ...)` calls can perform three full re-shuffles of the input.
+
+Approximations (HyperLogLog for distinct counts, T-Digest for percentiles) sidestep all three: each worker builds a tiny fixed-size sketch in a single pass, then sketches are merged with one cheap shuffle. Typical speedup is **10x to 50x**, with error around 2% (see resource 07 for the precise error model).
 
 **Replace `COUNT(DISTINCT ...)` with `approx_distinct()`**:
 ```sql
--- Slow (exact): shuffles every distinct user_id
+-- Slow (exact): multi-shuffle + per-group hash sets in memory
 SELECT event_date, COUNT(DISTINCT user_id) AS dau
 FROM events GROUP BY event_date;
 
--- Fast (~2% error): HyperLogLog sketch
+-- Fast (~2% std error): per-worker HyperLogLog sketches, single cheap merge shuffle
 SELECT event_date, approx_distinct(user_id) AS dau
 FROM events GROUP BY event_date;
 ```
@@ -77,6 +85,58 @@ SELECT approx_percentile(latency_ms, ARRAY[0.5, 0.95, 0.99]) FROM api_logs;
 ```
 
 **When to use exact**: billing, compliance, audit reports. **When to use approximate**: dashboards, monitoring, exploration, dashboards refreshed every minute.
+
+### Before giving up exactness, try a different distinct-aggregation strategy
+
+Trino has multiple strategies for executing distinct aggregation. The default is `automatic`, but if your specific query shape performs poorly you can override it for a single session:
+
+```sql
+SET SESSION distinct_aggregations_strategy = 'pre_aggregate';
+-- other valid values: 'mark_distinct', 'single_step', 'split_to_subqueries', 'automatic'
+```
+
+- `mark_distinct` — classic MarkDistinct: extra shuffle per distinct column. Good for one distinct expression with many groups.
+- `pre_aggregate` — pre-aggregates partial counts on each worker before the final shuffle. Often a big win for multiple distinct expressions in the same query.
+- `single_step` — no pre-aggregation at all; relies on parallelism across the GROUP BY keys. Wins when group cardinality is high.
+- `split_to_subqueries` — rewrites each `COUNT(DISTINCT ...)` into its own subquery, then joins the results. Maximizes parallelism when you have several distinct expressions.
+
+Try each strategy with `EXPLAIN ANALYZE` and pick the one with the lowest CPU/wall time before reaching for approximation. Sometimes you can keep the exact answer just by switching strategy. See the Trino "Optimizer properties" docs for the full list of values.
+
+### Pre-aggregated HLL sketches: the production pattern for rolling windows
+
+When the SaaS product needs WAU (weekly active users) or MAU (monthly active users) computed daily across a 500M-row events table, re-scanning the raw events for every window is wasteful. The production pattern is to **build a tiny daily HLL sketch table once**, then merge sketches at query time.
+
+```sql
+-- Step 1: nightly job — one row per day, one HLL sketch column.
+-- approx_set(col) builds a HyperLogLog sketch (a fixed-size binary blob,
+-- typically a few KB) instead of an integer count. Stored as Trino's
+-- HyperLogLog type, which serializes to a varbinary column on disk.
+CREATE TABLE iceberg.analytics.daily_user_hll AS
+SELECT
+    event_date,
+    approx_set(user_id) AS user_id_hll
+FROM iceberg.analytics.events
+GROUP BY event_date;
+
+-- Step 2: rolling 7-day WAU without re-scanning raw events.
+-- merge(hll) unions sketches; cardinality(hll) extracts the count.
+SELECT
+    s1.event_date AS window_end,
+    cardinality(merge(s2.user_id_hll)) AS wau_7d
+FROM iceberg.analytics.daily_user_hll s1
+JOIN iceberg.analytics.daily_user_hll s2
+  ON s2.event_date BETWEEN s1.event_date - INTERVAL '6' DAY
+                       AND s1.event_date
+GROUP BY s1.event_date
+ORDER BY s1.event_date;
+```
+
+Why this works (and why it's the standard pattern):
+- `approx_set(column)` — builds a HyperLogLog sketch for a column. Returns a `HyperLogLog` type value, not a `BIGINT`.
+- `merge(hll_column)` — aggregate function that unions multiple HLL sketches into one. Merging sketches and then taking cardinality gives the same answer (within HLL error) as running `approx_distinct` on the union of all underlying rows.
+- `cardinality(hll)` — extracts the approximate distinct count from a sketch.
+
+You pay the sketch-building cost once per day (a single GROUP BY on the new partition). Every WAU/MAU/30D-active query after that reads at most 30 small rows from the sketch table and does a cheap merge — no scan of the 500M-row events table. This is the standard solution for rolling window cardinality in Trino, Snowflake, BigQuery, and DuckDB; they all expose the same three primitives.
 
 ---
 
@@ -108,6 +168,8 @@ GROUP BY user_id;
 - Missing `dynamicFilter` on a join — joins between fact and dim tables should show dynamic filters; if not, ensure both tables have stats (`ANALYZE TABLE`).
 
 **For deeper inspection** use `EXPLAIN (TYPE DISTRIBUTED)` or `EXPLAIN ANALYZE` (runs the query and reports actual rows/time per stage).
+
+**`EXPLAIN ANALYZE` is the right tool for verifying optimizations actually worked.** Plain `EXPLAIN` shows the planner's *estimated* costs; `EXPLAIN ANALYZE` runs the query and reports **actual bytes read, actual row counts per stage, and real wall time**. When you rewrite `COUNT(DISTINCT)` to `approx_distinct`, or swap a raw scan for a rollup/sketch table, run both versions with `EXPLAIN ANALYZE` and compare the "Input" bytes — that's the ground-truth proof that you reduced I/O. Estimates can be wrong; actuals from `EXPLAIN ANALYZE` cannot.
 
 ---
 

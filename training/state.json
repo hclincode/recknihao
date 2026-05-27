@@ -1,7 +1,7 @@
 {
-  "iteration": 302,
+  "iteration": 303,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter301 avg 4.69: Q1 (4.375) dbt incremental models — 6 dbt-trino errors: on_schema_change default ignore not fail, dbt-trino uses delete+insert not insert_overwrite, default strategy is append not merge, MERGE conditional predicate wrong, Jinja timedelta syntax wrong, CALL vs ALTER TABLE EXECUTE for rollback; Q2 (5.00) JSONB ingestion — clean. Resource 13 updated with dbt-trino corrections. Postgres-to-Iceberg: 4.480/102."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter302 avg 4.875: Q1 (5.00) Denormalize plan_tier into events — star schema, SCD Type 2, broadcast join, no backfill on plan upgrade; Q2 (4.75) COUNT DISTINCT shuffle cost — accurate approx_distinct, rollup pattern, but 'single coordinator node' mechanism wrong. Resources 23/07 need COUNT DISTINCT mechanism fix + HLL sketch reuse pattern. Schema design: 4.60/5. SQL best practices: 4.636/12."
 }

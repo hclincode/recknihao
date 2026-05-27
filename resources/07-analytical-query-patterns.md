@@ -159,7 +159,18 @@ activity AS (
 SELECT * FROM activity ORDER BY cohort_week, week_offset;
 ```
 
-**Why this stresses OLAP:** the GROUP BY has two dimensions and `COUNT(DISTINCT user_id)` is memory-hungry. For large cohorts use `approx_distinct(user_id)` in Trino — a built-in function that returns an *approximate* distinct count using the **HyperLogLog** algorithm (a probabilistic data structure that estimates cardinality from a tiny fixed-size sketch instead of storing every value seen): ~2% error, 100x less memory.
+**Why this stresses OLAP:** the GROUP BY has two dimensions and `COUNT(DISTINCT user_id)` is memory-hungry. The bottleneck is **not** "all values get sent to one coordinator node" — Trino distributes distinct aggregation across workers. The real costs are (1) an **extra shuffle pass** per distinct column on top of the GROUP BY shuffle (Trino's MarkDistinct strategy partitions by `(group_key, distinct_col)` so duplicates can be resolved per partition), and (2) **per-group memory pressure** — each worker holds a hash set of distinct values for every group it's responsible for. A 26-week × 1M-distinct-user cohort forces each worker to keep thousands of large hash sets in memory simultaneously.
+
+For large cohorts use `approx_distinct(user_id)` in Trino — a built-in function that returns an *approximate* distinct count using the **HyperLogLog** algorithm (a probabilistic data structure that estimates cardinality from a tiny fixed-size sketch instead of storing every value seen): ~2% error, 100x less memory, and only one cheap merge shuffle instead of MarkDistinct's per-column re-shuffle.
+
+**Before giving up exactness, try changing the distinct-aggregation strategy.** Trino exposes a session knob that controls how distinct aggregation is planned:
+
+```sql
+SET SESSION distinct_aggregations_strategy = 'pre_aggregate';
+-- other values: 'mark_distinct' (default), 'single_step', 'split_to_subqueries', 'automatic'
+```
+
+`pre_aggregate` adds a per-worker partial-deduplication step before the final shuffle and often outperforms `mark_distinct` for queries with multiple distinct columns. `split_to_subqueries` rewrites each `COUNT(DISTINCT ...)` into its own subquery joined back together — best when you have many distinct expressions in one query. Try each strategy with `EXPLAIN ANALYZE` and compare actual CPU/wall time before deciding to approximate.
 
 ### `approx_distinct` vs `COUNT(DISTINCT)` — when to use each
 
@@ -198,6 +209,43 @@ FROM sample;
 Run this on 5–10 different partitions covering your typical query shapes (per-tenant slices, per-day slices, per-cohort slices). If `pct_error` stays under ~1% across all of them, `approx_distinct` is safe for that workload. If you see any sample over 3%, do **not** use it for customer-facing numbers without further sampling — your data shape may have characteristics (heavy skew, very small cohorts, unusual cardinality patterns) that push HyperLogLog past its sweet spot.
 
 **One more nuance:** `approx_distinct` is non-deterministic in the sense that the same query *can* return a slightly different number on a different cluster version or after data reorganization (compaction, partition rewrites). For customer-facing numbers, determinism matters — customers notice if their "active users" jumps from 9,847 to 9,851 between two page loads. That alone is often enough reason to prefer exact `COUNT(DISTINCT)` for anything a customer sees.
+
+### Pre-aggregated HLL sketches: the rolling-window production pattern
+
+For DAU/WAU/MAU dashboards that need to refresh every minute against a 500M-row events table, even `approx_distinct` is wasteful if it re-scans raw events on every refresh. The production pattern is to **build a daily HyperLogLog sketch table once**, then merge sketches at query time for any window size you want.
+
+```sql
+-- Step 1: nightly job — one row per day, one sketch column.
+-- approx_set(col) builds an HLL sketch (a few KB binary blob) for a column,
+-- stored as Trino's HyperLogLog type. This table replaces re-scanning raw events.
+CREATE TABLE iceberg.analytics.daily_user_hll AS
+SELECT
+    event_date,
+    approx_set(user_id) AS user_id_hll
+FROM iceberg.analytics.events
+GROUP BY event_date;
+
+-- Step 2: compute rolling 7-day WAU without re-scanning raw events.
+-- merge(hll) unions sketches; cardinality(hll) extracts the count.
+SELECT
+    s1.event_date AS window_end,
+    cardinality(merge(s2.user_id_hll)) AS wau_7d
+FROM iceberg.analytics.daily_user_hll s1
+JOIN iceberg.analytics.daily_user_hll s2
+  ON s2.event_date BETWEEN s1.event_date - INTERVAL '6' DAY
+                       AND s1.event_date
+GROUP BY s1.event_date
+ORDER BY s1.event_date;
+```
+
+The three primitives:
+- `approx_set(column)` — builds a HyperLogLog sketch for a column. Returns the `HyperLogLog` type (not a `BIGINT`).
+- `merge(hll_column)` — aggregate function that unions multiple sketches into one. Merging sketches and then taking cardinality is mathematically equivalent to running `approx_distinct` over the union of all underlying rows — that is the *whole point* of HLL: sketches compose.
+- `cardinality(hll)` — extracts the approximate distinct count from a (merged) sketch.
+
+Pay the sketch-building cost once per day. Every subsequent rolling-window query reads at most a few dozen tiny rows from the sketch table — no scan of the raw 500M-row events table. This pattern also works for arbitrary windows ("last 30 days", "last 90 days", "this calendar month") without rebuilding anything: same sketch table, different join range. It is the standard solution for rolling cardinality in Trino, Snowflake, BigQuery, and DuckDB.
+
+**Verify your rewrite paid off with `EXPLAIN ANALYZE`.** When you replace `COUNT(DISTINCT)` with `approx_distinct`, or replace a raw-events scan with a sketch-table merge, prove it actually reduced I/O — don't take it on faith. Run both versions wrapped in `EXPLAIN ANALYZE` (which actually executes the query and reports real bytes scanned, actual rows per stage, and wall time per stage). Compare the "Input" bytes line — if the rewrite didn't reduce bytes scanned, the optimization didn't land (most often: the rollup/sketch table wasn't picked because of a planner mismatch, or the partition filter wasn't pushed down). Plain `EXPLAIN` only shows the *estimated* cost; `EXPLAIN ANALYZE` shows the *actual* cost.
 
 ### Milestone-retention variant: % came back in 7 / 30 / 90 days
 

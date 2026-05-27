@@ -28,7 +28,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | What a data lakehouse is and how it differs from a warehouse | PASSED | 4.625 | 2 |
 | Column-oriented storage — what it is and why it's faster for analytics | PASSED | 4.524 | 8 |
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
-| Schema design for analytics: denormalization, star schema basics | PASSED | 4.50 | 4 |
+| Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.480 | 9 |
 | Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.461 | 107 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
@@ -45,11 +45,45 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
-| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.626 | 11 |
+| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.636 | 12 |
 
 ---
 
 ## Score history
+
+### Iter 302 — 2026-05-27
+
+**Q1** — Denormalize plan_tier/company_size into events at ingest vs federated join; star schema, SCD Type 2, as-of join; PySpark broadcast join; backfill guidance
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **5.00** — PASS |
+
+All claims verified: Parquet dictionary encoding, SCD Type 2 valid_from/valid_to, PySpark broadcast(), ALTER TABLE ADD COLUMN metadata-only. Historical events keep the plan-at-time-of-event (correct design, no backfill needed).
+
+**Q2** — COUNT(DISTINCT) at scale: why it's slow, approx_distinct (HyperLogLog, 2.3% error, accuracy parameter), nightly rollup pattern, UNION hybrid for today's data
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **4.75** — PASS |
+
+Error: "all user_ids shuffle to a single coordinator node" is inaccurate — Trino distributes distinct aggregation across workers via MarkDistinct strategies; the real cost is multi-shuffle overhead and per-group memory, not centralization. Practical conclusion (use approx_distinct or rollup) remains correct. Resources 23/07 corrected.
+
+**Iter 302 average: 4.875 — PASS** ✓
+
+**Topics updated**:
+- Schema design for analytics: 4.50/4 → **4.60/5 questions** (PASSED — improved)
+- SQL query best practices for OLAP: 4.626/11 → **4.636/12 questions** (PASSED — stable)
+
+---
 
 ### Iter 301 — 2026-05-27
 
