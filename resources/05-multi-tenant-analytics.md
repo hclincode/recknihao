@@ -2552,6 +2552,21 @@ Minimal example to ground the layout for the more-detailed multi-tenant version 
 >
 > **Requires coordinator restart** (same as file-based resource groups): changes to `etc/session-property-manager.json` are only read at startup.
 
+> **MENTAL MODEL — resource groups are engine-enforced CEILINGS; session property manager values are DEFAULTS.** This distinction is the core reason `SET SESSION` can bypass time limits but cannot bypass memory/concurrency limits. Internalize it before you design tier enforcement:
+>
+> | Mechanism | What it sets | Can `SET SESSION` override it? | Server-side enforcement |
+> |---|---|---|---|
+> | **Resource groups** (`etc/resource-groups.json`) — `hardConcurrencyLimit`, `softMemoryLimit`, `hardCpuLimit`, `softCpuLimit` | A hard **ceiling** on aggregate cluster resources per group. The coordinator's admission controller rejects new queries (or queues them) when the group is at its cap. | **NO.** These caps are evaluated by the coordinator's admission controller at query-submission time. No `SET SESSION` property exists that raises `hardConcurrencyLimit` or `softMemoryLimit` — the tenant has no way to ask Trino for more. The cap is enforced server-side regardless of any client-side session state. |
+> | **Session Property Manager** (`etc/session-property-manager.json`) — sets `query_max_execution_time`, `query_max_run_time`, `task_concurrency`, etc. per matched group | A **default value** assigned to each session as it starts. The default applies if the client does not explicitly set the property. | **YES — by design.** Session properties are client-settable. Running `SET SESSION query_max_execution_time = '24h'` in the same session **replaces** the manager-assigned default for that session. Trino's session-property machinery treats the manager's value and a `SET SESSION` value identically: last-write-wins, and `SET SESSION` writes last. |
+> | **OPA `SetSystemSessionProperty` deny rule** | An access-control gate that rejects the `SET SESSION` action itself before it modifies the session. | **N/A — OPA is the gatekeeper.** When OPA denies the action, the `SET SESSION` statement fails with `Access Denied` and the session keeps the manager-assigned default. This is how you turn a default into a de-facto ceiling for non-admin tenants on this stack. |
+>
+> **What this means in practice for tier enforcement:**
+> - A free-tier tenant **cannot** raise their `hardConcurrencyLimit` from 5 to 50 — there is no `SET SESSION` that does it; resource groups are not a session-level construct.
+> - A free-tier tenant **can** raise their `query_max_execution_time` from 5m to 24h via `SET SESSION query_max_execution_time = '24h'` unless OPA blocks the `SetSystemSessionProperty` action. The session property manager set 5m as the *default*, not as a *cap*. There is no such thing as a Trino-enforced session-property ceiling; the only way to make a session property behave like a ceiling is to combine the manager's default with an OPA deny on the `SetSystemSessionProperty` action for non-admin principals.
+> - Whitelist admin / on-call / ops principals in the OPA deny rule before deploying — otherwise your own internal tooling cannot raise its own time limits for legitimate long-running work (compaction jobs, manual backfills, debugging sessions).
+>
+> **Common confusion to avoid:** engineers sometimes assume the session property manager is a "tier-limit enforcer" the way resource groups enforce memory and concurrency. It is not. It is a **default-setter**. The enforcement comes from OPA denying the override. Without the OPA rule, any tenant that knows the property name can call `SET SESSION ... = '<bigger value>'` and the manager's value is overwritten for the rest of the session.
+
 > **Immediate-relief tool during a live noisy-neighbor incident:** resource group config changes require a coordinator config push and (depending on the resource group manager) may take effect only for *new* queries. While the new limits are being deployed, kill the offending live query directly:
 >
 > ```sql

@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.445 | 133 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.447 | 134 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
@@ -41,7 +41,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.500 | 122 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.569 | 32 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.575 | 33 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
@@ -50,6 +50,42 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 340 — 2026-05-27
+
+**Q1** — Multi-tenant analytics: session-property-manager-as-default vs resource-groups-as-engine-enforced-ceiling. Responder correctly explained that session property manager sets defaults (overridable by SET SESSION), that resource groups enforce hard ceilings on concurrency/memory (not overridable), and that OPA + SetSystemSessionProperty is required to turn time limit defaults into enforced ceilings.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 4.5 |
+| Completeness | 4.5 |
+| **Average** | **4.75** — STRONG PASS |
+
+Judge verified all claims against trino.io official docs. The 3-row comparison table (resource groups vs session property manager alone vs session property manager + OPA) was called out as the standout strength. Missed: concrete config snippets (JSON + Rego), query_max_run_time vs query_max_execution_time distinction, cluster-level query.max-execution-time fallback, OPA decision log for troubleshooting. Topic running avg: (4.445×133 + 4.75)/134 = **4.447/134 questions** — PASSED (recovering upward).
+
+**Q2** — Iceberg table maintenance: Trino `remove_orphan_files` explicit error on retention_threshold shorter than 7-day floor. Responder correctly identified the error as expected behavior, showed the exact error message format, explained the race-condition rationale, gave two concrete remediation options (wait vs Spark with dry_run), and showed the correct Trino syntax (`ALTER TABLE ... EXECUTE remove_orphan_files(retention_threshold => '7d')`).
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** — STRONG PASS |
+
+Judge confirmed this answer closed both prior iter339 gaps: Trino syntax now shown, explicit error-vs-silent-skip rationale now explained. Missed: catalog property is admin-tunable (and danger of lowering it without pausing ingestion). Topic running avg: (4.569×32 + 4.75)/33 = **4.575/33 questions** — PASSED (recovering upward; both prior gaps closed).
+
+**Iter 340 average: (4.75 + 4.75) / 2 = 4.75 — STRONG PASS** ✓
+
+**Topics updated**:
+- Multi-tenant analytics: 4.445/133 → **4.447/134 questions** (PASSED — recovering upward; resource-groups vs session-property-manager distinction now clearly understood and expressed)
+- Iceberg table maintenance: 4.569/32 → **4.575/33 questions** (PASSED — recovering upward; Trino retention_threshold error behavior now correctly explained with exact syntax)
+
+**Resource fixes this iteration**: resources/05-multi-tenant-analytics.md (teacher pre-iter fix) — added comparison table of three enforcement mechanisms (resource groups, session property manager, OPA deny rule) with SET SESSION bypass behavior for each. No post-iteration fixes needed; iter340 answers demonstrated the fix held.
+
+---
 
 ### Iter 339 — 2026-05-27
 
