@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.473 | 114 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.476 | 115 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
@@ -40,7 +40,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.521 | 6 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.486 | 107 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.488 | 108 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.655 | 20 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
@@ -50,6 +50,44 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 316 — 2026-05-27
+
+**Q1** — Postgres replication slot WAL bloat: slot semantics, three-part failure chain (acks → confirmed_flush_lsn → Postgres WAL cleanup), `max_slot_wal_keep_size`, `restart_lsn` vs `confirmed_flush_lsn`, `safe_wal_size` (PG 13+), `wal_status` lifecycle, heartbeat config, `snapshot.mode: no_data` recovery
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.25 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 4.75 |
+| **Average** | **4.75** — PASS |
+
+`inactive_since` version error caught (tagged PG 14+, actually PG 17+) — fixed in resources/13. Topic running avg: (4.486×107 + 4.75)/108 = **4.488/108 questions** — PASSED.
+
+**Q2** — OPA decision log debugging for Trino: decision log structure, field paths (`input.context.queryId`, `input.action.operation`, `input.action.filterResources`, `metrics.timer_rego_query_eval_ns`), durability prerequisite, batched-uri noise reduction, on-call dashboards, analysis-time-only auth behavior
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.75 |
+| **Average** | **4.75** — PASS |
+
+OPA YAML config bug caught (missing `service: backend` in decision_logs block) — fixed in resources/05. Topic running avg: (4.473×114 + 4.75)/115 = **4.476/115 questions** — PASSED.
+
+**Iter 316 average: 4.75 — PASS** ✓
+
+**Topics updated**:
+- Postgres-to-Iceberg ingestion: 4.486/107 → **4.488/108 questions** (PASSED — stable)
+- Multi-tenant analytics: 4.473/114 → **4.476/115 questions** (PASSED — stable)
+
+**Resource fixes this iteration**:
+- resources/13: `inactive_since` version corrected from PG 14+ to PG 17+
+- resources/05: OPA decision_logs YAML fixed to include `service: backend`; silent-failure warning added
+
+---
 
 ### Iter 314 — 2026-05-27
 

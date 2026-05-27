@@ -1,90 +1,93 @@
-# Judge Feedback — Iter 315
+# Judge Feedback — Iter 316
 
 Date: 2026-05-27
 Phase: extended
-Topics: Storage sizing and growth estimation for lakehouse workloads (Q1) + Real-time vs batch analytics trade-offs (Q2)
+Topics: Postgres replication slot WAL bloat — Debezium CDC (Q1) + OPA decision log debugging for Trino access control (Q2)
 
 ---
 
-## Q1 — Storage sizing and growth estimation for lakehouse workloads
+## Q1 — Postgres replication slot WAL bloat
 
 ### Score
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 4.0 | Math chain is sound and well-labeled as estimates. Postgres index/bloat heuristics (30-50%) and Parquet ratios (5-10x baseline) are within accepted ranges. `pg_total_relation_size` decomposition, `expire_snapshots` guidance, and `$files` query syntax confirmed correct. **MinIO EC:4 claim is wrong as a general statement**: "4 parity drives per 8-drive set, ~50% efficiency, plan 2× raw" only describes an 8-drive set; on 12/16-drive sets EC:4 = ~67-75% usable. Delta encoding for timestamps at "10-20x" is slightly optimistic. |
-| Beginner clarity | 5.0 | Explicitly debunks the naive "140 GB / compression" math. Explains indexes, bloat, fragmentation, dictionary/delta/RLE encoding in plain terms with concrete column-type examples. Step-by-step labeled multipliers. Zero assumed OLAP knowledge. |
-| Practical applicability | 4.5 | Runnable Postgres diagnostic SQL, Spark JDBC validation snippet, concrete sizing formula, `$files` monitoring SQL, four operational gotchas (snapshot expiry, compaction pairing, monitoring, tiered retention). MinIO over-provisioning advice (2× raw) is wasteful but not dangerous. Single-node MinIO suggestion glosses over HA. |
-| Completeness | 5.0 | Hits every part of the question: why Postgres baseline misleads, why Parquet compresses and by how much, growth projection, snapshot overhead, hardware sizing formula, validation procedure, ongoing monitoring, tiered retention bonus. |
-| **Average** | **4.625** | **PASS** |
-
-### What Worked
-- Two-step decomposition (strip Postgres overhead first, then apply compression) corrects the most common engineering mistake
-- Labeled math with named multipliers so the engineer can substitute measured values
-- "Measure before you commit" sample-export procedure converts heuristics into verifiable numbers
-- `$files` monitoring query is correct Trino+Iceberg syntax and immediately useful
-- Snapshot accumulation gotcha (2-3× without expiry) is exactly the failure mode that bites teams in months 3-6
-
-### What Missed
-- **MinIO EC:4 misstated** — "plan 2× raw" only applies to 8-drive sets; 12-drive → 1.5×, 16-drive → 1.3× (now fixed in resources/11)
-- Single-node MinIO skips HA/failure-domain considerations for on-prem production
-- Delta encoding "10-20x" for timestamps is on the high end of realistic
-
-### Technical Accuracy
-Verified against: PostgreSQL wiki Disk Usage, Apache Parquet encodings docs, Trino 481 Iceberg connector docs (`$files` syntax confirmed), Iceberg spark-procedures docs, MinIO erasure coding docs and calculator.
-
-### Rubric Update
-- Storage sizing: prior avg 4.500 across 5 questions → (4.500 × 5 + 4.625) / 6 = **4.521 across 6 questions**. Status: PASSED.
-
----
-
-## Q2 — Real-time vs batch analytics trade-offs
-
-### Score
-
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 4.75 | WAL/Debezium/Kafka/Spark Structured Streaming chain is correct. Two-timestamp pattern (occurred_at vs ingested_at) is industry standard. Late-arrival watermarking concept is real. **Minor: describes Kafka as requiring "ZooKeeper"** — ZooKeeper was removed in Kafka 4.0 (2025); KRaft has been default since Kafka 3.3. For a 2026 on-prem deployment this is a real inaccuracy (now fixed in resources/14). |
-| Beginner clarity | 4.75 | Tiered "freshness spectrum" framing is excellent for a non-OLAP engineer. Wi-Fi/mobile example for late-arriving events is concrete and memorable. Acronyms mostly defined in context. |
-| Practical applicability | 5.0 | Directly fits the production stack (on-prem Spark + Iceberg + Trino + k8s). Recommends K8s CronJob. Concrete "three next steps" tell the engineer exactly what to do Monday morning. "Ask the customer first" framing is mature SaaS advice. |
-| Completeness | 4.5 | Covers tiered freshness, CDC chain, late-arriving events, two-timestamp pattern, micro-batch-first recommendation. Light on: (a) Iceberg small-files problem from frequent commits — now fixed in resources/14; (b) Trino read-time effects during high-frequency commits; (c) HMS lock contention at sub-minute micro-batch commit frequency. |
+| Technical accuracy | 4.25 | All core mechanics correct: slot semantics, `max_slot_wal_keep_size`, `wal_status` lifecycle, `restart_lsn` vs `confirmed_flush_lsn`, `safe_wal_size`, heartbeat, `snapshot.mode: no_data`. **One concrete version error**: `inactive_since` is PG 17+, not PG 14+ as stated. (PG 14 added `conflicting`, PG 16 added `invalidation_reason`, PG 17 added `inactive_since`.) |
+| Beginner clarity | 5.0 | Opens with "the #1 Debezium production incident" framing. Defines WAL and slot from first principles, uses concrete numbers (50 GB, 30 sec), explains root-cause chain in numbered steps, tells engineer exactly what each LSN column physically represents. Zero assumed OLAP knowledge. |
+| Practical applicability | 5.0 | Four-item action list, exact `postgresql.conf` line, executable monitoring SQL with alert thresholds, two-statement recovery SQL, exact Debezium config line, explicit staging runbook walkthrough guidance. Fits on-prem k8s + Postgres + Debezium stack. |
+| Completeness | 4.75 | Covers slot fundamentals, root-cause chain, three defenses (`max_slot_wal_keep_size`, monitoring, recovery runbook), heartbeats, recovery with `snapshot.mode: no_data`, gap-window backfill. Minor gaps: `invalidation_reason` (PG 16+) not mentioned for on-call triage; cross-database WAL accumulation case not covered; `heartbeat.action.query` for zero-traffic databases not mentioned. |
 | **Average** | **4.75** | **PASS** |
 
 ### What Worked
-- "Tiers, not binary choices" framing is exactly how a senior engineer thinks about freshness SLAs
-- "10× more complex per tier" heuristic gives a memorable cost model
-- "'We want real-time' is not a metric" — teaches better requirements gathering
-- partition-by-ingested_at / aggregate-by-occurred_at recommendation is the correct Iceberg pattern
-- Recommends hourly batch first — verified against sources that 80%+ of workloads are well-served by batch/micro-batch
+- Three-part failure chain (acks → confirmed_flush_lsn advances → Postgres cleans WAL; freeze any link and WAL accumulates) is the clearest explanation of slot bloat
+- "CDC dies, application stays up is almost always the right tradeoff" — exactly the framing needed to defend this design choice
+- Dual-LSN explanation (`restart_lsn` for disk impact, `confirmed_flush_lsn` for consumer lag) correctly mapped to Postgres docs
+- `safe_wal_size` as "most actionable single metric" is correct and verified against prometheus-community/postgres_exporter recommendations
+- Heartbeat `30000 ms` matches Confluent's recommended starting value
+- Recovery procedure: `snapshot.mode: no_data` + targeted backfill — correct and efficient (avoids multi-hour re-snapshot)
 
 ### What Missed
-- **Kafka/ZooKeeper reference outdated** — KRaft is default since Kafka 3.3, ZooKeeper fully removed in Kafka 4.0 (now fixed in resources/14)
-- **Small-files problem not named** — frequent Iceberg commits create small files that degrade Trino query performance; `rewrite_data_files` schedule not mentioned (now added to resources/14)
-- Hive Metastore lock contention under high commit frequency not mentioned
-- Postgres replication slot WAL retention as an operational gotcha for Debezium consumers not mentioned
+- **`inactive_since` version wrong** — tagged PG 14+, actually PG 17+ (fixed in resources/13)
+- `invalidation_reason` (PG 16+) not mentioned — when `wal_status = 'lost'`, this column tells you why (`wal_removed`, `rows_removed`, etc.); first thing on-call should check
+- Cross-database WAL accumulation: slot is per-database but WAL is per-cluster — a high-traffic sibling database generates WAL that accumulates against a slot on a quiet database even without Debezium failure
+- `heartbeat.action.query` not mentioned — for zero-traffic databases, `heartbeat.interval.ms` alone does not advance the slot LSN; a write to the monitored database is needed
 
-### Technical Accuracy
-Verified against: Debezium Postgres connector docs, Confluent CDC docs, Spark Structured Streaming docs, Databricks watermarking blog, Honeycomb ingest timestamps blog, Kafka 4.0 KRaft release notes.
+### Technical Accuracy (verified)
+All claims verified against PostgreSQL docs, Gunnar Morling's restart_lsn/confirmed_flush_lsn blog, EDB PG 13 slot blog, Debezium connector docs, DBAGlobe heartbeat benchmark. Version error: `inactive_since` is PG 17+ per `pg_replication_slots` docs.
 
 ### Rubric Update
-- Real-time vs batch: prior avg 4.775 across 5 questions → (4.775 × 5 + 4.75) / 6 = **4.771 across 6 questions**. Status: PASSED.
+- Postgres-to-Iceberg ingestion: prior avg 4.486 across 107 questions → (4.486 × 107 + 4.75) / 108 = **4.488 across 108 questions**. Status: PASSED.
 
 ---
 
-## Iter 315 Summary
+## Q2 — OPA decision log debugging for Trino access control
 
-**Iter 315 average: 4.6875 — PASS** ✓
+### Score
+
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Technical accuracy | 4.75 | All field paths verified correct against official Trino 481 OPA docs and OPA decision-log spec: `input.context.queryId`, `input.context.identity.user/groups`, `input.action.operation`, `input.action.filterResources`, `input.action.resource.table.catalogName/tableName`, `metrics.timer_rego_query_eval_ns` (exact key, correct — not `eval_ns`), `decision_id`. **Minor**: OPA YAML config example is functionally broken — `decision_logs` block missing `service: backend`, so remote service never receives logs (now fixed in resources/05). |
+| Beginner clarity | 4.5 | Durability caveat as lead is the right framing. Step-by-step debugging recipe is well-sequenced. OpenSearch DSL example is concrete. Minor: operation-name casing (upper-camel in JSON vs lowercase in docs narrative) not explained; `pg_stat_activity` forensic cross-reference is off-stack for this production environment. |
+| Practical applicability | 5.0 | Runnable DSL example, exact field paths, batched-uri noise reduction, two focused on-call dashboards with thresholds, three-way forensic cross-reference pattern. Engineer can start Monday morning. |
+| Completeness | 4.75 | Covers: durability prerequisite, log structure, debugging recipe (queryId → operation → filterResources → decision_id), log shipping setup, exact JSON paths, batched-uri, on-call dashboards, analysis-time-only behavior. Missing: operation-name casing note; queryId join-key format spelled out; governance-doc cross-reference for "why" interpretation. |
+| **Average** | **4.75** | **PASS** |
+
+### What Worked
+- All field paths (`input.context.queryId`, `input.action.filterResources`, `metrics.timer_rego_query_eval_ns`) verified correct
+- Durability caveat as prerequisite — the most common reason decision-log debugging is impossible
+- `opa.policy.batched-uri` → 1 log line for 50 tables is accurate and high-value
+- Step-by-step recipe (queryId + user → operation → filterResources → decision_id) is exactly what on-call needs
+- `metrics.timer_rego_query_eval_ns` specifically called out (not truncated `eval_ns`)
+
+### What Missed
+- **OPA YAML config broken** — missing `service: backend` in `decision_logs` block; as written ships console only (fixed in resources/05)
+- Operation-name casing: Trino emits upper-camel (`SelectFromColumns`, `FilterTables`) in JSON but docs narrative uses lowercase; one-line note prevents confusion
+- queryId join-key format not spelled out (`20250718_081710_03427_trino`) — explicit example helps when cross-referencing Trino event listener
+- `pg_stat_activity` forensic reference is off-stack (on-prem Trino + Iceberg + MinIO, not Postgres federation)
+- "OPA only at analysis time" blanket statement slightly imprecise: row-filter and column-mask Rego rules also evaluate at planning, and the universal "in-flight queries unaffected" claim holds for static auth but not for all dynamic auth configurations
+
+### Technical Accuracy (verified)
+All field paths verified against Trino 481 OPA docs and OPA decision-logs spec. Operation names verified. `metrics.timer_rego_query_eval_ns` confirmed exact key.
+
+### Rubric Update
+- Multi-tenant analytics: prior avg 4.473 across 114 questions → (4.473 × 114 + 4.75) / 115 = **4.476 across 115 questions**. Status: PASSED.
+
+---
+
+## Iter 316 Summary
+
+**Iter 316 average: 4.75 — PASS** ✓
 
 ### Notable
-- Q1 4.625: Storage sizing answered with correct two-step decomposition; MinIO EC:4 error caught and fixed in resources
-- Q2 4.75: Real-time vs batch answered with correct tiered framing; Kafka/ZooKeeper anachronism and small-files gap caught and fixed in resources
+- Q1 4.75: Replication slot WAL bloat answered with correct three-part failure chain and dual-LSN explanation; `inactive_since` version error (PG 14+ → PG 17+) caught and fixed in resources/13
+- Q2 4.75: OPA decision log debugging answered with all field paths verified correct; broken YAML config (missing `service: backend`) caught and fixed in resources/05
 
 ### Resource fixes applied this iteration
-1. **resources/11-lakehouse-storage-sizing.md** — Added MinIO EC:4 erasure-set-size table (8/12/16 drives → 50%/67%/75% usable) replacing incorrect blanket "2× raw" claim; added Snapshot Management Commands section with full Iceberg 1.5.2 Spark procedure syntax
-2. **resources/14-real-time-vs-batch.md** — Updated Kafka reference from ZooKeeper to KRaft (Kafka 3.3+/4.0); added "small-files problem" operational subsection with `rewrite_data_files` schedule recommendation
+1. **resources/13-postgres-to-iceberg-ingestion.md** — `inactive_since` version tag corrected from PG 14+ to PG 17+
+2. **resources/05-multi-tenant-analytics.md** — OPA decision_logs YAML config fixed to include `service: backend` in the decision_logs block
 
-### Suggested focus for Iter 316
-- "Storage sizing and growth estimation" (4.521/6 — just asked, probe a different angle: retention math, partition-level sizing, or time-travel cost)
-- "Real-time vs batch" (4.771/6 — probe the Trino read-side effects of high-frequency streaming commits)
-- "Postgres-to-Iceberg ingestion" (4.486/107 — consistently lowest, high question count — try a CDC-specific angle: slot WAL bloat, schema evolution mid-migration)
-- "Multi-tenant analytics" (4.473/114 — probe OPA decision log debugging, the mixed endpoint config footgun from iter314 feedback)
+### Suggested focus for Iter 317
+- "Postgres-to-Iceberg ingestion" (4.488/108 — probe `invalidation_reason` (PG 16+) for on-call triage, or `heartbeat.action.query` for zero-traffic databases)
+- "Multi-tenant analytics" (4.476/115 — probe the mixed endpoint config footgun: `batch-column-masking-uri` overrides `column-masking-uri` if both set)
+- "Storage sizing" (4.521/6 — probe a different angle: retention math or time-travel storage cost)
+- "Real-time vs batch" (4.771/6 — probe Trino read-side effects of high-frequency streaming commits / HMS lock contention)

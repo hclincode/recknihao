@@ -1078,12 +1078,20 @@ The OPA configuration is two parts: turn on logging, then make it durable.
 # In OPA's config.yaml (or Helm chart values):
 decision_logs:
   console: true          # writes one JSON record per evaluation to OPA's stdout
-  # AND/OR push to a remote sink for durability:
-  service: backend
+  # AND/OR push to a remote sink for durability — REQUIRES service: <name>
+  service: backend       # MUST match a key under `services:` below.
+                         # Without this line OPA only ships decisions to the
+                         # console — the `services.backend.url` is never called.
 services:
   backend:
     url: https://opa-decisions.observability.svc.cluster.local/ingest
+    credentials:
+      bearer:
+        token: "${OPA_LOG_TOKEN}"   # injected via env var / k8s secret;
+                                    # most collectors require auth before they accept POSTs.
 ```
+
+**The `service: backend` field inside the `decision_logs` block is load-bearing.** A surprisingly common misconfiguration is to define `services.backend.url` but forget to point `decision_logs.service` at it — in that case OPA happily starts, you see decisions on stdout, and you assume remote shipping is working. It is not. Verify remote shipping by tailing the collector's ingest log (or curling its `/healthz` for a request counter) after a few policy evaluations — never by inspecting OPA logs alone.
 
 Then deploy one of the following shippers to persist the stream:
 

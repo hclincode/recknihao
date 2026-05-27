@@ -1,7 +1,7 @@
 {
-  "iteration": 316,
+  "iteration": 317,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter315 avg 4.6875: Q1 (4.625) Storage sizing — two-step decomposition correct, MinIO EC:4 error caught (50% only for 8-drive sets; fixed in resources/11); Q2 (4.75) Real-time vs batch — tiered framing correct, Kafka/ZooKeeper anachronism caught and fixed in resources/14, small-files problem added. Storage sizing: 4.521/6. Real-time vs batch: 4.771/6."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter316 avg 4.75: Q1 (4.75) Postgres replication slot WAL bloat — inactive_since version error caught (PG 14+ → PG 17+), fixed resources/13; Q2 (4.75) OPA decision log debugging — broken YAML config fixed in resources/05. Postgres-to-Iceberg: 4.488/108. Multi-tenant: 4.476/115."
 }

@@ -1,16 +1,12 @@
-# Iter 314 Questions
+# Iter 316 Questions
 
 Date: 2026-05-27
-Topics: OLAP vs OLTP — do we actually need a separate analytics stack? (Q1) + OPA column masking configured but silently not working — batchColumnMasks vs columnMask Rego rule name (Q2)
+Topics: Postgres replication slot WAL bloat (Q1) + OPA decision log debugging for Trino access control (Q2)
 
-## Q1 — OLAP vs OLTP — do we actually need a separate analytics stack?
+## Q1 — Postgres replication slot WAL bloat
 
-We're a B2B SaaS with about 80 customers. We have an `events` table in PostgreSQL with roughly 500 million rows — it logs everything users do in our product. Customers are starting to ask for things like "show me our usage trends over the last 6 months" and "how does our team compare to other customers in our tier." Right now those queries just time out.
+We set up Debezium to stream changes from our Postgres database into our data pipeline about two months ago. It's been working fine, but last week our ops team started getting disk-full alerts on the Postgres server itself — not the analytics side, but the actual production database. We haven't changed our data volume much. After some digging, we found something called a "replication slot" that seems to be holding onto a huge amount of stuff. What is that, what's causing the disk to fill up, and how do we stop it from happening again without just turning off our sync pipeline?
 
-Someone on the team said we need to move to a "different kind of database" because Postgres is an OLTP database and analytics needs an OLAP database. I don't actually know what those terms mean. Is this a real distinction that matters, or is it just marketing? Like, what's fundamentally different between the two — can't I just tune Postgres better with more indexes and bigger machines, or is there a point where that stops working?
+## Q2 — OPA decision log debugging for Trino access control
 
-## Q2 — OPA column masking is configured but masking isn't happening
-
-We set up OPA column masking so that non-admin users can't see raw email addresses in our events table — they should get a hashed value instead. We followed what looked like the right setup: we pointed Trino at our OPA server using `batch-column-masking-uri`, and we wrote a Rego policy. When we run a query as a non-admin, we expect to see the hashed email, but we're actually getting the real email — no masking at all, and no errors either. Just... silently wrong.
-
-We're not sure where the bug is. Our Rego policy has a rule called `columnMask` that returns the hash expression. Could the rule name itself be the problem? What rule name does the batch column masking endpoint actually expect to find in the Rego policy, and how is that different from the single-column endpoint?
+We've been using OPA to control which rows each of our customers can see in Trino. Now we're getting requests to also debug why a specific user got access to — or was blocked from — certain data. OPA apparently has some kind of decision log, but when I look at it the entries are massive and hard to search through. What's actually in those logs, how do I read them to figure out why a particular query was allowed or denied, and is there a smarter way to set this up so debugging access decisions doesn't take an hour every time?

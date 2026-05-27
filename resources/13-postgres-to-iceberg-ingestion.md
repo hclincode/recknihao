@@ -2270,7 +2270,7 @@ SELECT
     safe_wal_size,                                                          -- PG 13+
     pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)        AS bytes_behind_restart,
     pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn) AS bytes_behind_consumer,
-    inactive_since,                                                          -- PG 14+
+    inactive_since,                                                          -- PG 17+ (NOT 14 — added in Postgres 17)
     invalidation_reason                                                       -- PG 16+
 FROM pg_replication_slots
 WHERE slot_name = 'debezium_slot';
@@ -2286,7 +2286,7 @@ WHERE slot_name = 'debezium_slot';
 
 - **`bytes_behind_consumer` — use this for consumer/Debezium lag.** This is the right metric for "is Debezium keeping up?" — the gap between the latest committed WAL and what the consumer has acknowledged. It is the correct lag metric for SLO/latency dashboards, but it is the **wrong** metric for slot-invalidation alerting.
 
-- **`inactive_since` (PG 14+) — when the slot became inactive.** Directly tells you the timestamp at which the slot transitioned from `active = true` to `active = false`. Far more useful than maintaining your own "first observed inactive" timestamp in the metrics layer — Postgres has already tracked it for you. Alert on `inactive_since < now() - interval '5 minutes'` for a slot-inactive page.
+- **`inactive_since` (PG 17+) — when the slot became inactive.** Directly tells you the timestamp at which the slot transitioned from `active = true` to `active = false`. Far more useful than maintaining your own "first observed inactive" timestamp in the metrics layer — Postgres has already tracked it for you. Alert on `inactive_since < now() - interval '5 minutes'` for a slot-inactive page. **Version note: this column was added in Postgres 17 (not 14 — a common mis-citation). On PG 13–16, you must compute "first observed inactive" yourself in your metrics pipeline by latching the timestamp the first time you see `active = false` for a given slot.** Postgres 14 added `conflicting`; Postgres 16 added `invalidation_reason`; Postgres 17 added `inactive_since`.
 
 - **`invalidation_reason` (PG 16+) — post-mortem for a lost slot.** When a slot is invalidated, this column tells you **why**, with values including:
   - `wal_removed` — slot fell behind `max_slot_wal_keep_size` (the common case — covered by the recovery procedure below).
@@ -2299,7 +2299,7 @@ WHERE slot_name = 'debezium_slot';
 - **Warning: `safe_wal_size < 50 GB`** (or `bytes_behind_restart > 50 GB` if `safe_wal_size` is NULL because `max_slot_wal_keep_size = -1`) — investigate within the hour.
 - **Critical: `safe_wal_size < 10 GB` or `safe_wal_size < 0`** — page on-call; slot invalidation is imminent.
 - **Critical: `wal_status IN ('unreserved', 'lost')`** — page on-call; the slot is already at risk or already invalidated.
-- **Critical: `inactive_since < now() - interval '5 minutes'`** — page on-call; Debezium is disconnected and WAL is piling up with no consumer.
+- **Critical: `inactive_since < now() - interval '5 minutes'`** — page on-call; Debezium is disconnected and WAL is piling up with no consumer. (Requires Postgres 17+; on older versions, alert on `active = false` persisting for 5 minutes via a latched timestamp in your metrics pipeline.)
 
 **Two Postgres safety nets to know about:**
 
