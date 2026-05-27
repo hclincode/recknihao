@@ -1,7 +1,7 @@
 {
-  "iteration": 300,
+  "iteration": 301,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter299 avg 5.00 (PERFECT): Q1 (5.00) Multi-tenant isolation — shared table + Trino views + OPA vs table-per-tenant for 80 customers; Q2 (5.00) Trino CBO — EXPLAIN ANALYZE, EXPLAIN TYPE DISTRIBUTED, ANALYZE syntax, NDV/Puffin, join ordering. No resource fixes needed. Multi-tenant analytics: 4.461/107. Trino CBO: 4.810/5."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter300 avg 5.00 (PERFECT): Q1 (5.00) When to move from Postgres to OLAP — thresholds, tuning checklist, decision tree; Q2 (5.00) SELECT * in Trino — columnar storage, projection pushdown, bytes-read math. No resource fixes. When to add OLAP: 4.480/9. Column-oriented storage: 4.524/8."
 }

@@ -26,10 +26,10 @@ Each topic must reach the pass threshold before the system can enter final phase
 | OLAP vs OLTP — difference and why it matters for SaaS | PASSED | 4.542 | 3 |
 | What a data warehouse is and when a SaaS product needs one | PASSED | 4.647 | 3 |
 | What a data lakehouse is and how it differs from a warehouse | PASSED | 4.625 | 2 |
-| Column-oriented storage — what it is and why it's faster for analytics | PASSED | 4.456 | 7 |
+| Column-oriented storage — what it is and why it's faster for analytics | PASSED | 4.524 | 8 |
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.50 | 4 |
-| When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.415 | 8 |
+| When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.480 | 9 |
 | Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.461 | 107 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.775 | 5 |
@@ -50,6 +50,40 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 300 — 2026-05-27
+
+**Q1** — When to move from Postgres to OLAP: concrete thresholds, Postgres tuning checklist first, decision tree, stack-aware migration steps
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **5.00** — PASS |
+
+Postgres replication lag claim verified correct. Tuning checklist, 5-threshold decision rule, and migration steps all accurate for the on-prem stack.
+
+**Q2** — SELECT * in Trino: columnar storage mechanics, projection pushdown, bytes-read math (80÷3 = 27x), impact table, actionable alternatives
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **5.00** — PASS |
+
+Parquet columnar layout, Trino projection pushdown, DESCRIBE/TABLESAMPLE/EXPLAIN syntax all verified correct. Minor nit: "column strips" is ORC terminology (Parquet uses "column chunks"), no score deduction.
+
+**Iter 300 average: 5.00 — PASS** ✓
+
+**Topics updated**:
+- When to add an OLAP layer: 4.415/8 → **4.480/9 questions** (PASSED — improved)
+- Column-oriented storage: 4.456/7 → **4.524/8 questions** (PASSED — improved)
+
+---
 
 ### Iter 299 — 2026-05-27
 

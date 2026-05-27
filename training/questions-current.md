@@ -1,9 +1,9 @@
-# Iter 298 Questions
+# Iter 300 Questions
 
-## Q1 — Iceberg table maintenance without Spark
+## Q1 — Do we actually need Iceberg and Trino, or can Postgres still handle this?
 
-We've been running Iceberg on top of Trino for about two months and our S3 costs keep climbing. I looked it up and it sounds like we need to do some kind of "snapshot expiration" or cleanup, but everything I find on the Iceberg docs talks about running maintenance through Spark — we don't have Spark in our stack at all, we only have Trino. Do we actually need to spin up a Spark cluster just to run cleanup jobs, or is there a way to do this directly from Trino? We're trying to avoid adding another system if we can help it.
+We are a B2B SaaS with around 15,000 customers. Most of them are small — their dashboards only query the last 90 days of data, maybe 5-10 million rows per customer at most. Right now our analytics queries run directly on Postgres and they are slow, but we are wondering if we are jumping to a complicated solution too fast. Someone on the team said we should just add read replicas and better indexes before we invest months in setting up Iceberg and Trino. Another person said once you are doing aggregations across many customers at once — like for our internal "platform health" reports — Postgres will always struggle no matter how many indexes you add. How do we actually decide whether our problem is solvable in Postgres, versus whether we genuinely need a separate analytics system? Are there specific signs or thresholds that tell you it is time to move?
 
-## Q2 — Filtering on a column with no index is fast in Iceberg but kills Postgres
+## Q2 — Why does everyone say to avoid SELECT * in a system like Trino? It works fine in Postgres.
 
-We have a Postgres table with about 80 million rows of customer event data. When we filter by `event_type = 'page_view'` it does a full sequential scan and the query takes 45 seconds, even though that column has low cardinality and it feels like it should be easy to skip rows. I added a B-tree index on `event_type` but for high-cardinality filters the planner sometimes ignores it anyway. I keep hearing that columnar formats like Parquet handle this kind of filtering much better — is that actually true, and if so how does it work? Is Parquet just doing what an index does, or is it something different?
+When I write queries against our Iceberg tables in Trino, I have been doing `SELECT *` during development because it is easier to explore the data. A coworker told me this is really bad for performance in a system like Trino and I should always list out only the columns I need. In Postgres I understand that `SELECT *` fetches more data, but it is not usually a big deal if the index is there. Why is `SELECT *` so much worse in Trino specifically? Is it something about how the files are stored on disk? And how significant is the difference in practice — are we talking 10% slower, or like 10x slower?
