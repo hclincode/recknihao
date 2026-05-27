@@ -1,7 +1,7 @@
 {
-  "iteration": 289,
+  "iteration": 290,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter288 avg 4.93: Q1 (4.94 PASS) Broadcast join: CBO from pg_stats, join_distribution_type=BROADCAST, Exchange[type=REPLICATE], 100MB limit, flush_metadata_cache(). Q2 (4.92 PASS) Federate vs ingest 5M-row: MERGE INTO with updated_at + 2-day lag buffer, compaction, snapshot expiry. TOPIC: Trino federation 4.507/249 → 4.511/251. NEW TOPIC ADDED: SQL query best practices for OLAP (user request)."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter289 avg 4.19: Q1 (3.50 PASS barely) DATE()/CAST() partition pruning — CRITICAL ERROR: Trino 467 UnwrapCastInComparison handles DATE()/CAST() so they DO prune; truly broken: date_trunc, year(), month(). Q2 (4.88 PASS) approx_distinct HyperLogLog, EXPLAIN types, Physical Input, CPU/Scheduled. NEW TOPIC: SQL query best practices for OLAP — PASSED 4.19/2. Resource 23 section 6 fixed."
 }

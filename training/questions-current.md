@@ -1,9 +1,17 @@
-# Iter 288 Questions
+# Iter 289 Questions
 
-## Q1 — Trino join with Postgres lookup table is painfully slow
+## Q1 — Query is slow even though I filtered by date — is something ignoring my WHERE clause?
 
-We have a query that joins a huge Iceberg table (like 200 million rows of usage events) against a Postgres table we use as a lookup — it has maybe 50,000 rows, just mapping customer IDs to their plan tier and region. The join works but it takes forever, like 4-5 minutes. I was reading somewhere that when one side of a join is really small, some query engines are smarter about it — they load the small table into memory and send a copy to every machine working on the big table instead of shuffling data around. Is that something Trino can do? And if it can, is it doing it automatically, or do I have to tell it somehow? Our Postgres table has up-to-date stats, I just don't know if Trino is aware of that.
+So I have an Iceberg table that's partitioned by day on an `event_time` column — at least that's how I think it was set up. I'm running a Trino query to pull usage events for the last 30 days, and I wrote the WHERE clause like this:
 
-## Q2 — Should I copy a 5-million-row Postgres table into Iceberg or just keep querying it live?
+```sql
+WHERE DATE(event_time) >= DATE('2026-04-27')
+```
 
-We have a Postgres table that our app writes to — it holds enrichment data for accounts, roughly 5 million rows. It gets updated every few hours via a background job. We run analytical queries against it through Trino dozens of times a day, always joining it with stuff in Iceberg. Right now we're just federating live (Trino queries Postgres directly), but it feels slow and I'm worried we're putting load on our production Postgres replica. Someone on the team suggested copying the table into Iceberg and just refreshing it periodically. But I don't know if 5 million rows is even big enough to bother, and if we do copy it, how do we keep it in sync without rewriting the whole thing every time? Is there a rule of thumb for when live federation stops being worth it?
+The query works and returns correct results, but it's scanning way more data than I'd expect — I can see it in the Trino UI, it's touching hundreds of files across every partition going back months. In Postgres I never had to think about stuff like this — if I filtered on a column, it used the index. Is wrapping the column in `DATE()` somehow preventing Trino from skipping old partitions? Should I be writing this filter differently? I'm not sure if there's a "right" way to filter on dates in Trino that keeps the scan fast.
+
+## Q2 — COUNT(DISTINCT user_id) takes forever — is there a faster version that's "close enough"?
+
+We have a query that counts unique active users per tenant per week, and it's running `COUNT(DISTINCT user_id)` over about 300 million rows in Iceberg. It's painfully slow — sometimes 90+ seconds. Someone on the team mentioned there might be an approximate version of this that runs much faster but gives you a number that's like 99% accurate. Is that a real thing in Trino? And if I switch to it, how do I know what tradeoff I'm actually making — is it off by a few rows, or could it be off by thousands?
+
+Also separately: I've heard I should run EXPLAIN on my queries before just firing them, but when I do it in Trino I get this big tree of output that doesn't look anything like what Postgres EXPLAIN gives me. Is there something specific I should be looking for in Trino's EXPLAIN to tell if a query is going to be expensive before I run it?

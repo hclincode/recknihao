@@ -45,7 +45,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.511 | 251 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.763 | 4 |
-| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | NOT STARTED | — | 0 |
+| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.19 | 2 |
 
 ---
 
@@ -9903,3 +9903,25 @@ Verified: trino.io/docs/current/connector/postgresql.html, trino.io/docs/current
 **Key findings**: 5M rows + dozens/day correctly identified as above federation threshold — correct rule-of-thumb; Spark `writeTo().using("iceberg").createOrReplace()` syntax — verified; MERGE INTO with updated_at watermark — valid Iceberg 1.5.2 syntax; 2-day lag buffer rationale (replica lag + timing drift) — correct; MERGE INTO idempotency explanation — correct; maintenance procedures (rewrite_data_files, expire_snapshots) — verified. No significant errors.
 
 Verified: trino.io/docs/current/connector/iceberg.html, iceberg.apache.org/docs/latest/spark-writes/.
+
+### Iter 289 Q1 — 2026-05-27 (EXTENDED PHASE) — SQL query best practices for OLAP (function-wrapped partition column: DATE(x)/CAST(x AS DATE) handled by UnwrapCastInComparison in Trino 467; truly broken functions: date_trunc, year(), month(); TIMESTAMP range is defensive best practice; EXPLAIN verification)
+
+**Score: 3.50/5.0 PASS (barely)**
+
+**Topics updated**: SQL query best practices for OLAP — new topic, first question. Running avg: 3.50 / 1 = **3.50 across 1 question**. Status: First angle tested.
+
+**CRITICAL ERROR**: Answer stated `DATE(event_time)` is "exactly why" Trino is doing a full table scan — this is incorrect for Trino 467. `DATE(x)` is an alias for `CAST(x AS DATE)`, and Trino 467's `UnwrapCastInComparison` optimizer rule (since 2022, PR #13567) handles this case and DOES enable partition pruning. The answer also contradicted itself by saying CAST "might work via special-case optimizer logic" while calling DATE() a guaranteed pruning breaker — they are literally the same function. Resource 23 section 6 has been corrected by teacher to clarify DATE()/CAST() nuance and distinguish truly non-invertible functions (date_trunc, year, month, day_of_week) from functions Trino can unwrap.
+
+**What was correct**: TIMESTAMP range rewrite (`>= TIMESTAMP '...' AND < TIMESTAMP '...'`) is correct and is the recommended defensive form. `constraint on [event_time]` in TableScan vs `ScanFilterProject` distinction — verified. Postgres vs Iceberg planning-time pruning contrast — conceptually correct. EXPLAIN verification recommendation — excellent.
+
+Verified: trino.io/blog/2023/04/11/date-predicates.html, trino.io/docs/current/connector/iceberg.html, github.com/trinodb/trino/issues/12925.
+
+### Iter 289 Q2 — 2026-05-27 (EXTENDED PHASE) — SQL query best practices for OLAP (approx_distinct() HyperLogLog, ~2.3% default error, 10-50x speedup; COUNT DISTINCT shuffle cost; EXPLAIN vs EXPLAIN ANALYZE; Physical Input bytes; ScanFilterProject vs constraint pushdown signals; CPU vs Scheduled timing)
+
+**Score: 4.88/5.0 PASS**
+
+**Topics updated**: SQL query best practices for OLAP — prior avg 3.50 across 1 question; new running avg (3.50 + 4.88) / 2 = 8.38 / 2 = **4.19 across 2 questions**. Status: **PASSED** (4.19 > 3.5 threshold, 2 different angles covered).
+
+**Key findings**: HyperLogLog backing of approx_distinct — verified; 2.3% standard error — verified; second-argument `e` in range [0.0040625, 0.26000] so 0.01 is valid — verified; EXPLAIN ANALYZE Physical Input and CPU/Scheduled/Blocked timing field names — verified; ScanFilterProject vs constraint-on-columns pushdown signals — correct. Minor gaps: no mention of `approx_set`/`merge`/`cardinality` for cross-day sketch reuse; no Trino Web UI pointer as alternative to text EXPLAIN.
+
+Verified: trino.io/docs/current/functions/hyperloglog.html, trino.io/docs/current/functions/aggregate.html, trino.io/docs/current/sql/explain-analyze.html.

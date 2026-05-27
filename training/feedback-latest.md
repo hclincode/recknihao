@@ -1,65 +1,69 @@
-# Feedback — Iter 288 (Extended phase)
+# Feedback — Iter 289 (Extended phase)
 
 Date: 2026-05-27
-Topic: Trino federation — broadcast join CBO override (Q1 PASS) + federate vs ingest 5M-row table (Q2 PASS)
+Topic: SQL query best practices for OLAP — first iteration of new topic (Q1 PASS barely, Q2 PASS strong)
 
 ## Results summary
 
 | Question | Topic angle | Score | Pass/Fail |
 |---|---|---|---|
-| Q1 | Broadcast join: CBO automatic from pg_stats; join_distribution_type=BROADCAST; EXPLAIN Exchange[type=REPLICATE]; join-max-broadcast-table-size=100MB; native ANALYZE on primary; flush_metadata_cache() | **4.94** | PASS |
-| Q2 | Federate vs ingest 5M-row accounts: above threshold at dozens/day; Spark JDBC initial load; MERGE INTO with updated_at + 2-day lag buffer; maintenance | **4.92** | PASS |
+| Q1 | Partition pruning: DATE()/CAST() handling in Trino 467, UnwrapCastInComparison, TIMESTAMP range as defensive best practice | **3.50** | PASS (barely) |
+| Q2 | approx_distinct() HyperLogLog, COUNT DISTINCT shuffle cost, EXPLAIN vs EXPLAIN ANALYZE, Physical Input, CPU/Scheduled timing | **4.88** | PASS |
 
-**Iter 288 average: 4.93 — PASS** ✓ Both passed with high scores!
+**Iter 289 average: 4.19 — PASS** ✓
 
-**Topic update**: Trino federation: 4.507/249 → **4.511/251** (PASSED — solidly above threshold)
+**Topic update**: SQL query best practices for OLAP: NEW TOPIC → 4.19/2 questions → **PASSED** (≥3.5 threshold with 2 angles)
 
 ---
 
 ## What worked
 
-### Q1 — Broadcast join (4.94)
-1. CBO reads Postgres stats from `pg_stats` — requires native `ANALYZE` on Postgres primary — correct
-2. `join_distribution_type='BROADCAST'` session property — verified correct
-3. `Exchange[type=REPLICATE]` in EXPLAIN = broadcast happening; `Exchange[type=REPARTITION]` = partitioned join — correct signals
-4. `join-max-broadcast-table-size=100MB` default limit — verified
-5. `CALL app_pg.system.flush_metadata_cache()` — parameterless for PostgreSQL, correct
-6. `SHOW STATS FOR app_pg.public.customers` to verify stats visible — correct diagnostic
+### Q1 — Partition pruning function wrapping (3.50)
+1. TIMESTAMP range rewrite (`>= TIMESTAMP '...' AND < TIMESTAMP '...'`) — correct and is the recommended form
+2. `constraint on [event_time]` in TableScan vs `ScanFilterProject` distinction — correct EXPLAIN signals
+3. Planning-time vs runtime framing for partition pruning — conceptually accurate
+4. EXPLAIN verification recommendation — correct and practical
 
-### Q2 — Federate vs ingest (4.92)
-1. 5M rows + dozens/day → above federation threshold (comfortable ≤1-2M at low frequency) — correct rule of thumb
-2. Spark JDBC → `writeTo().using("iceberg").createOrReplace()` syntax — correct
-3. MERGE INTO with `updated_at` watermark + 2-day lag buffer — correct pattern
-4. 2-day lookback rationale (replica lag + job timing drift + idempotency) — well-explained
-5. Nightly compaction (`rewrite_data_files`) + weekly snapshot expiry (`expire_snapshots`) — correct maintenance
-6. Before/after join query showing elimination of Postgres touch — good instructional finish
+### Q2 — approx_distinct and EXPLAIN (4.88)
+1. HyperLogLog backing, 2.3% default error, syntax `approx_distinct(col, 0.01)` — all verified
+2. COUNT DISTINCT shuffle cost explanation (RemoteExchange moving all distinct values) — correct
+3. Three EXPLAIN forms clearly delineated (bare EXPLAIN, TYPE DISTRIBUTED, EXPLAIN ANALYZE) — correct
+4. Physical Input field in EXPLAIN ANALYZE — verified
+5. CPU vs Scheduled vs Blocked timing interpretation — correct (I/O-bound vs compute-bound)
+6. Pre-run EXPLAIN checklist — directly actionable
 
 ---
 
-## Errors / gaps (minor — did not block pass)
+## Critical error (Q1)
 
-### Q1
-- Did not explain *why* stale JDBC stats cause CBO to miss broadcast: stats are cached in Trino's metadata cache; cache flush is the fix (mentioned) but root cause connection between ANALYZE-then-flush not fully articulated
+**DATE(x) is CAST(x AS DATE) in Trino — and Trino 467 CAN unwrap this.**
 
-### Q2
-- No mention of soft-delete handling: incremental MERGE INTO only handles INSERT/UPDATE; rows deleted from Postgres survive in Iceberg indefinitely unless full refresh or explicit WHEN MATCHED AND src.deleted=true THEN DELETE logic is added
+The answer stated `DATE(event_time)` is "exactly why" Trino was doing a full scan. This is wrong for Trino 467. `DATE(x)` is documented as an alias for `CAST(x AS DATE)`. Trino's `UnwrapCastInComparison` optimizer rule (PR #13567, shipped 2022, trino.io/blog/2023/04/11/date-predicates.html) handles this case and does enable partition pruning in most cases.
 
----
+**What actually breaks pruning** (truly non-invertible):
+- `date_trunc('day', col)` — non-invertible, many timestamps map to same truncated value
+- `year(col)`, `month(col)`, `day_of_week(col)`, `hour(col)` — non-monotonic for ranges
+- `LOWER(col)`, `SUBSTR(col, ...)` etc.
+- **Edge case**: `timestamp with time zone` — UnwrapCastInComparison has known limitations here; EXPLAIN verification extra important
 
-## Resource fixes
-
-None required. Resource 22 covers all these topics correctly. 
-
-**Optional future improvement**: Add soft-delete pattern to MERGE INTO section in resource 22 — flag that tables with physical deletes need either a `deleted_at` column or periodic full refresh to stay in sync.
+**The fix in resource 23** (section 6) has been applied: added UnwrapCastInComparison explanation, "Trino CAN unwrap" vs "definitely breaks pruning" distinction, kept TIMESTAMP range as defensive best practice, added timestamp with time zone caveat.
 
 ---
 
-## Suggested iter289 angles
+## Resource fixes applied
 
-1. **SQL query best practices for OLAP (new topic)**: partition column always in WHERE; avoid SELECT * on wide Iceberg tables; approximate functions (approx_distinct, approx_percentile); verify execution plan with EXPLAIN; type-safe predicates to avoid implicit casts breaking pushdown; avoid UDFs in WHERE
+- **Resource 23 section 6** — corrected DATE()/CAST() vs date_trunc distinction; added UnwrapCastInComparison explanation; added edge case for timestamp with time zone
 
-2. **Trino Postgres catalog: JDBC connection tuning** — `socketTimeout`, `connectTimeout`, `defaultRowFetchSize`; increasing fetch size for large scans; tradeoff with memory pressure
+---
 
-3. **Federation with SSL/TLS** — `sslmode=verify-full`, certificate paths in catalog properties; on-prem Kubernetes with internal TLS
+## Suggested iter290 angles
 
-4. **Re-test: federation predicate pushdown** — confirm ScanFilterProject vs constraint annotation understanding after all the DF fixes
+1. **SQL OLAP best practices — re-test partition pruning** (Q1 scored only 3.50 — need to solidify this angle with correct DATE()/CAST() nuance)
+
+2. **SQL OLAP best practices — JOIN ordering and CBO** — put smaller table as build side; when to trust CBO vs force join_distribution_type; how ANALYZE TABLE affects join planning
+
+3. **SQL OLAP best practices — CTEs vs subqueries vs multiple queries** — WITH clauses; Trino materializes some CTEs; when to push into one query vs split
+
+4. **SQL OLAP best practices — LIMIT behavior** — reinforce that LIMIT doesn't reduce scan cost; TABLESAMPLE BERNOULLI alternative
+
+5. **Trino federation re-test** — topic is PASSED but solidifying at 4.511/251; any new angle to keep it high
