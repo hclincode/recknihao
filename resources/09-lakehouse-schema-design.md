@@ -192,7 +192,50 @@ WHERE u.user_id = 'u_123'
 
 To find every user's **current** state, filter `WHERE is_current = TRUE`.
 
-**Practical note:** Spark can manage SCD Type 2 with Iceberg `MERGE INTO`. dbt has a built-in `snapshot` materialization that automates the whole pattern — use it.
+**Practical note:** You can maintain SCD Type 2 via Spark `MERGE INTO` (write the close-old / insert-new logic yourself) or via dbt snapshots (dbt automates it). Two patterns:
+
+**Option 1 — dbt snapshot (recommended for teams already using dbt):**
+
+```sql
+-- snapshots/users_snapshot.sql
+{% snapshot users_snapshot %}
+{{
+  config(
+    target_schema='analytics',
+    unique_key='id',
+    strategy='check',
+    check_cols=['plan_name', 'country', 'account_tier']
+  )
+}}
+SELECT id AS user_id, email, display_name, plan_name, country, account_tier
+FROM {{ source('postgres', 'users') }}
+{% endsnapshot %}
+```
+
+dbt adds these metadata columns automatically:
+- `dbt_valid_from` — when this version became true
+- `dbt_valid_to` — when it stopped (NULL = still active)
+- `dbt_is_deleted` — whether the source row was deleted (dbt 1.9+)
+- `dbt_scd_id` — unique ID per version row
+
+**There is no `dbt_is_current` column.** To query current records: `WHERE dbt_valid_to IS NULL`.
+
+**Option 2 — Spark MERGE INTO (for teams maintaining SCD2 inside their Spark ingestion job):**
+
+```sql
+-- Spark SQL — close stale rows
+MERGE INTO iceberg.analytics.users_dim AS target
+USING (
+  SELECT id AS user_id, plan_name, country, current_timestamp() AS now
+  FROM postgres_snapshot
+  WHERE plan_name != target_plan  -- changed rows
+) AS source
+ON target.user_id = source.user_id AND target.valid_to IS NULL
+WHEN MATCHED THEN UPDATE SET valid_to = source.now, is_current = false;
+
+-- Then INSERT new rows for changed users
+INSERT INTO iceberg.analytics.users_dim SELECT ..., now, NULL, true FROM changed_users;
+```
 
 ---
 

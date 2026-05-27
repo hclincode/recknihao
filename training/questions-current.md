@@ -1,9 +1,9 @@
-# Iter 294 Questions
+# Iter 295 Questions
 
-## Q1 — Should I normalize or denormalize my Iceberg tables? Coming from a relational database mindset.
+## Q1 — Our users table has a plan column, but users change plans over time — how do I answer "who was on Pro last quarter"?
 
-In Postgres we normalize everything — customers, orders, and line items are separate tables with foreign keys. We joined them at query time. Now we're moving some of this to Iceberg for analytics, and I'm not sure if I should keep the same normalized structure or flatten everything into one wide table. Someone mentioned "star schema" but I don't really know what that is. How should I think about data modeling for analytics vs OLTP?
+We have a users table in Iceberg that includes a `plan_name` column (Free, Pro, Enterprise). We sync it from Postgres nightly. The problem is when a user upgrades from Free to Pro mid-quarter and then back to Free, our nightly snapshot just overwrites the old value. So when a customer asks "how many users were on the Pro plan last quarter," we can't answer accurately because we only have today's plan. Someone mentioned we need to track "history" for this column but I have no idea what that looks like in practice. How do we store and query a column that changes over time?
 
-## Q2 — Our analytics tables have hundreds of columns and I'm not sure which ones to put in the fact table vs a separate dimension table.
+## Q2 — I'm setting up partitioning on our Iceberg events table and I don't know how to choose between the different partitioning options I keep seeing in examples.
 
-We have a usage events table that tracks every action a user takes — it has event metadata (timestamp, type, session_id), user attributes (plan, region, company_size), and product attributes (feature_name, module, version). Right now it's all one big table. Someone said we should split it into a fact table and dimension tables. What's the rule for deciding what goes where, and what would that look like for our events use case?
+We have an events table in Iceberg — about 2 billion rows — with columns like `occurred_at` (timestamp), `tenant_id` (we have ~800 tenants), and `user_id` (about 5 million distinct values). I've seen examples partition by the date, others by tenant, and one example partitioned by user_id. I don't know how to decide which column to partition on or whether I can use multiple. Also I keep seeing `bucket(user_id, 16)` in some docs and `day(occurred_at)` in others — what do those mean and which approach is right for a multi-tenant SaaS events table?

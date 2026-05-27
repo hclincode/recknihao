@@ -28,15 +28,15 @@ Each topic must reach the pass threshold before the system can enter final phase
 | What a data lakehouse is and how it differs from a warehouse | PASSED | 4.625 | 2 |
 | Column-oriented storage — what it is and why it's faster for analytics | PASSED | 4.365 | 6 |
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
-| Schema design for analytics: denormalization, star schema basics | PASSED | 4.50 | 3 |
+| Schema design for analytics: denormalization, star schema basics | PASSED | 4.50 | 4 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.415 | 8 |
 | Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.456 | 106 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.812 | 4 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.50 | 3 |
 | Query performance basics: partitioning, indexing strategy for analytics | PASSED | 4.594 | 4 |
-| Lakehouse schema design: fact tables, dimension tables, denormalization | PASSED | 4.688 | 4 |
-| Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.589 | 15 |
+| Lakehouse schema design: fact tables, dimension tables, denormalization | PASSED | 4.650 | 5 |
+| Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.583 | 16 |
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.500 | 5 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
@@ -50,6 +50,41 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 295 — 2026-05-27
+
+**Q1** — SCD Type 2: storing and querying plan history; nightly overwrite problem; dbt snapshots
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4 |
+| Beginner clarity | 5 |
+| Practical applicability | 4 |
+| Completeness | 5 |
+| **Average** | **4.50** — PASS |
+
+Defects: (1) Answer claimed `dbt_is_current` column — dbt actually emits `dbt_is_deleted`; current records identified via `dbt_valid_to IS NULL`. (2) Snapshot block was missing required `config()`. (3) No Spark MERGE INTO alternative shown. Resource 09 updated with correct dbt column list, complete snapshot template, and Spark MERGE INTO alternative.
+
+**Q2** — Partition design for a 2B-row multi-tenant events table: bucket vs identity vs day transforms
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4 |
+| Beginner clarity | 5 |
+| Practical applicability | 4 |
+| Completeness | 5 |
+| **Average** | **4.50** — PASS |
+
+Defect: Answer said compaction must be done via Spark, failing to mention Trino-native `ALTER TABLE ... EXECUTE optimize` path (already documented in resource 10 lines 540–541). No resource fix needed — resource was already correct.
+
+**Iter 295 average: 4.50 — PASS**
+
+**Topics updated**:
+- Schema design for analytics: 4.50/3 → **4.50/4 questions** (Q1 secondary)
+- Lakehouse schema design: 4.688/4 → **4.650/5 questions** (Q1 primary)
+- Iceberg partition design: 4.589/15 → **4.583/16 questions** (Q2 primary)
+
+---
 
 ### Iter 294 — 2026-05-27
 
