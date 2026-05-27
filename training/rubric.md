@@ -43,7 +43,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.474 | 99 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.623 | 16 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
-| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.481 | 217 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.483 | 219 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.763 | 4 |
 
 ---
@@ -9443,4 +9443,35 @@ Dimension scores: Technical accuracy 5/5, Beginner clarity 5/5, Practical applic
 **Key findings**: UUID→Trino UUID native — CORRECT; JSONB→Trino JSON native — CORRECT; custom enum→VARCHAR native — CORRECT; unsupported-type-handling=IGNORE default (silent drop) — CORRECT; CONVERT_TO_VARCHAR fix — CORRECT; array-mapping=DISABLED default — CORRECT; AS_ARRAY fix — CORRECT; system.query() for JSONB predicates — CORRECT. Minor gaps: AS_JSON value for array-mapping omitted (Trino docs list three values: DISABLED, AS_ARRAY, AS_JSON); INTEGER[] maps to ARRAY<INTEGER> not ARRAY<BIGINT> as stated.
 
 Verified: trino.io/docs/current/connector/postgresql.html.
+
+
+---
+
+## Iter 272 — 2026-05-27
+
+**Q1**: Metadata caching — stale schema after Postgres DDL change; flush_metadata_cache(); cache-ttl config
+**Answer**: `/Users/hclin/github/recknihao/training/answers/iter272-q1.md`
+**Score**: 4.75 / 5.0 — **PASS**
+
+Dimension scores: Technical accuracy 4.5/5, Beginner clarity 5/5, Practical applicability 5/5, Completeness 4.5/5.
+
+**Topics updated**: Trino federation — prior avg 4.481 across 217 questions; new running avg (4.481 × 217 + 4.75) / 218 = (972.377 + 4.75) / 218 = **4.482 across 218 questions**. Status: NEEDS WORK (4.482 < 4.5 raised threshold). Gap: 0.018 (improved from 0.019).
+
+**Key findings**: flush_metadata_cache() syntax correct; metadata.cache-ttl property correct; SELECT * frozen at view creation correct; TTL change requires restart — correct. Minor gaps: "cluster-wide" is imprecise (coordinator cache only); granular sub-TTL properties not mentioned.
+
+Verified: trino.io/docs/current/connector/postgresql.html and trino.io/docs/current/admin/properties-catalog.html.
+
+---
+
+**Q2**: Dynamic filtering — Iceberg+Postgres cross-catalog join; join type matrix; wait-timeout; EXPLAIN ANALYZE verification
+**Answer**: `/Users/hclin/github/recknihao/training/answers/iter272-q2.md`
+**Score**: 4.75 / 5.0 — **PASS**
+
+Dimension scores: Technical accuracy 4.5/5, Beginner clarity 5/5, Practical applicability 5/5, Completeness 4.5/5.
+
+**Topics updated**: Trino federation — prior avg 4.482 across 218 questions; new running avg (4.482 × 218 + 4.75) / 219 = (977.076 + 4.75) / 219 = **4.483 across 219 questions**. Status: NEEDS WORK (4.483 < 4.5 raised threshold). Gap: 0.017 (improved from 0.018).
+
+**Key findings**: DF mechanism (build→collect→push to probe) correct; join type matrix (INNER/RIGHT OUTER yes, LEFT/FULL OUTER no) correct; iceberg.dynamic-filtering.wait-timeout default 1s correct for Trino 467; EXPLAIN ANALYZE DynamicFilter signal correct. Minor gaps: session property syntax uses catalog placeholder; EXPLAIN snippet is stylized; missing nuance that 5K Postgres table IS supposed to be fully scanned (it's the build side).
+
+Verified: trino.io/docs/467/connector/iceberg.html and trino.io/docs/current/admin/dynamic-filtering.html.
 

@@ -1,15 +1,13 @@
-# Iter 271 Questions
+# Iter 272 Questions
 
-## Q1 — Is my WHERE clause actually filtering in Postgres or is Trino pulling everything first?
+## Q1 — Stale schema after altering a Postgres table
 
-We set up Trino with the PostgreSQL connector pointing at our app database, and separately we have an Iceberg catalog for our event data. The idea was to run queries that join Postgres user records to Iceberg events without having to copy everything to one place first.
+We added a column to one of our Postgres tables last week, and when I query it through Trino I still get an error saying the column doesn't exist. I double-checked: the column is definitely there in Postgres, I can query it directly in psql just fine. But Trino keeps acting like the old schema is the real one.
 
-The problem I'm running into is that some queries against the Postgres-backed tables feel suspiciously slow — like they're reading way more data than they should. For example, I'm filtering on `tenant_id = 'abc123'` and `created_at > now() - interval '30' day`, and that should use an existing Postgres index. But the query is still slow.
+Is Trino caching the table structure somewhere? If so, how do I get it to pick up the new column? I'm worried about this becoming a bigger problem — we do schema migrations regularly as we ship new features, and I don't want our analytics queries to break silently every time we alter a table.
 
-How do I actually tell whether Trino is pushing those WHERE conditions down into Postgres (so Postgres does the indexed lookup), versus Trino fetching a huge chunk of rows and then filtering them itself? Is there something in EXPLAIN I should look at?
+## Q2 — Cross-catalog join between Iceberg and Postgres is way slower than expected
 
-## Q2 — Postgres has a column with type `jsonb` — does Trino just break or quietly lose data?
+We have an Iceberg table with about 200 million event rows, partitioned by tenant and date. We also have a small Postgres lookup table with maybe 5,000 rows that maps user IDs to account metadata. I want to join them so the dashboard can show events enriched with account info.
 
-Our Postgres schema has a few columns that aren't simple types. We have a `metadata` column typed as `jsonb`, a `user_id` column typed as `uuid`, and an `account_status` column that's a custom enum we defined in Postgres. When I query these tables through Trino's PostgreSQL connector, I want to understand what actually happens.
-
-Does Trino refuse to read those columns and throw an error? Does it silently skip them and return the row without those columns? Or does it try to cast them to something else? I'm worried we might be getting wrong results without realizing it — like if `uuid` gets coerced to a string, maybe that's fine, but if `jsonb` gets dropped entirely, that would be a real problem for some of our queries.
+The Iceberg filter is really tight — after applying tenant and date filters, I'm pulling maybe 50,000 rows. But the join with the Postgres table still feels way slower than I'd expect. It's almost like Trino is reading the entire Postgres table regardless of what I'm filtering on the Iceberg side. Is that what's happening? Is there a way to make Trino push the filter down so it only fetches the relevant rows from Postgres?

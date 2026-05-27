@@ -1,7 +1,7 @@
 {
-  "iteration": 272,
+  "iteration": 273,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter271 avg 4.75: Q1 (4.75 PASS) predicate pushdown EXPLAIN debugging — ScanFilterProject above TableScan, constraint on [col] inside, EXPLAIN ANALYZE row counts, Postgres slow log. Q2 (4.75 PASS) Postgres type mapping — UUID, JSONB, enum, unsupported-type-handling, array-mapping. Minor gaps: AS_JSON array-mapping value omitted; INTEGER[] maps to ARRAY<INTEGER> not ARRAY<BIGINT>. TOPIC: Trino federation 4.481/217, gap 0.019 (improving). Need ~10 more at 4.875+ to cross 4.500."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter272 avg 4.75: Q1 (4.75 PASS) metadata caching — flush_metadata_cache(), cache-ttl, SELECT* view silent data loss. Q2 (4.75 PASS) dynamic filtering — join type matrix, wait-timeout 1s default, EXPLAIN ANALYZE DynamicFilter signal. Minor gaps: DF mental model (small table IS fully scanned; DF pushes its values to Iceberg). TOPIC: Trino federation 4.483/219, gap 0.017 (improving). Need ~9-10 more at 4.875+ to cross 4.500."
 }
