@@ -1,7 +1,7 @@
 {
-  "iteration": 311,
+  "iteration": 312,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter310 avg 4.75: Q1 (4.75) CTAS write-side exfiltration — four-layer defense (OPA write deny, metadata-table deny, MinIO IAM scoping, audit/alert), $files attack chain, Option A vs B for MinIO credentials; Q2 (4.75) replication slot WAL bloat — post-it analogy, three mitigations (monitor pg_wal_lsn_diff, max_slot_wal_keep_size, recovery runbook), heartbeat for idle tables. Multi-tenant analytics: 4.469/110. Postgres ingestion: 4.490/105."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter311 avg 4.095: Q1 (4.69) $path hidden column and metadata bypass vectors — system.runtime.queries, $path per-row file path, MinIO IAM bypass, DESCRIBE/SHOW introspection; Q2 (3.50) wal_status states — CRITICAL MISS: answered 'safe_wal_size doesn't exist' when it does (PG 13+, pg_replication_slots.safe_wal_size); also used confirmed_flush_lsn instead of restart_lsn. Resources 05/13 fixed. Multi-tenant: 4.471/111. Postgres ingestion: 4.481/106."
 }

@@ -2262,21 +2262,44 @@ WHERE slot_name = 'debezium_slot';
 ```
 
 ```sql
--- Measure how far behind Debezium is:
+-- The right monitoring query for slot-invalidation pressure (Postgres 13+):
 SELECT
     slot_name,
-    pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn) AS bytes_behind,
-    ROUND(
-        pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn) / 1024.0 / 1024.0
-    ) AS mb_behind
+    active,
+    wal_status,
+    safe_wal_size,                                                          -- PG 13+
+    pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)        AS bytes_behind_restart,
+    pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn) AS bytes_behind_consumer,
+    inactive_since,                                                          -- PG 14+
+    invalidation_reason                                                       -- PG 16+
 FROM pg_replication_slots
 WHERE slot_name = 'debezium_slot';
 ```
 
+**Read the columns in this order — each one tells you something different:**
+
+- **`safe_wal_size` (PG 13+) — the direct headroom metric.** This is Postgres telling you, in bytes, "how much more WAL can be written before this slot is at risk of being marked `lost`." It is the value to alert on — no manual subtraction needed. Two caveats:
+  - **`safe_wal_size IS NULL`** means either (a) the slot has already been invalidated (`wal_status = 'lost'` — check `invalidation_reason`), or (b) `max_slot_wal_keep_size = -1` (the default — no cap), in which case there is no enforced ceiling and the slot can grow unbounded until disk fills. If you have `max_slot_wal_keep_size = -1`, `safe_wal_size` will always be NULL and you must alert on `bytes_behind_restart` against your free-disk capacity directly.
+  - **`safe_wal_size` can go negative** when the slot has crossed the `max_slot_wal_keep_size` line but Postgres has not yet recycled the WAL — meaning invalidation is imminent on the next checkpoint. Treat any negative value as critical.
+
+- **`bytes_behind_restart` — use this for slot survival headroom (NOT `confirmed_flush_lsn`).** Slot invalidation is driven by the slot's `restart_lsn` — the oldest WAL position the slot still needs to be able to resume from — NOT by `confirmed_flush_lsn` (the consumer-acknowledged position). The two LSNs are normally close, but during **long-running transactions** they diverge: `confirmed_flush_lsn` keeps advancing for committed transactions, while `restart_lsn` is pinned to the oldest in-progress transaction's start LSN (because if Debezium restarts, it must re-read the WAL from there to reconstruct that uncommitted transaction). If you measure slot pressure with `confirmed_flush_lsn`, you will underestimate it — sometimes by tens of GB if a long-running transaction is open — and the slot can be invalidated even while your `bytes_behind_consumer` metric looks fine. **Always compute slot survival headroom from `restart_lsn`.**
+
+- **`bytes_behind_consumer` — use this for consumer/Debezium lag.** This is the right metric for "is Debezium keeping up?" — the gap between the latest committed WAL and what the consumer has acknowledged. It is the correct lag metric for SLO/latency dashboards, but it is the **wrong** metric for slot-invalidation alerting.
+
+- **`inactive_since` (PG 14+) — when the slot became inactive.** Directly tells you the timestamp at which the slot transitioned from `active = true` to `active = false`. Far more useful than maintaining your own "first observed inactive" timestamp in the metrics layer — Postgres has already tracked it for you. Alert on `inactive_since < now() - interval '5 minutes'` for a slot-inactive page.
+
+- **`invalidation_reason` (PG 16+) — post-mortem for a lost slot.** When a slot is invalidated, this column tells you **why**, with values including:
+  - `wal_removed` — slot fell behind `max_slot_wal_keep_size` (the common case — covered by the recovery procedure below).
+  - `rows_removed` — a logical slot fell behind `hot_standby_feedback`-related row visibility limits.
+  - `wal_level_insufficient` — `wal_level` was downgraded from `logical` (rare but devastating; recheck your `postgresql.conf` and any Patroni/RDS parameter group changes).
+
+  Capture this column in your incident response runbook — it changes the fix. `wal_removed` means "raise `max_slot_wal_keep_size` or fix the consumer"; `wal_level_insufficient` means "someone changed `wal_level` and you must fix that before recreating the slot or the new slot will also fail."
+
 **Alert thresholds** (adjust based on your WAL generation rate and free disk):
-- **Warning: `bytes_behind > 50 GB`** (50% of safe capacity) — investigate within the hour.
-- **Critical: `bytes_behind > 150 GB`** (80%) — page on-call; risk of Postgres disk fill is imminent.
-- **Critical: `active = false` for > 5 minutes** — page on-call; Debezium is disconnected and WAL is piling up with no consumer.
+- **Warning: `safe_wal_size < 50 GB`** (or `bytes_behind_restart > 50 GB` if `safe_wal_size` is NULL because `max_slot_wal_keep_size = -1`) — investigate within the hour.
+- **Critical: `safe_wal_size < 10 GB` or `safe_wal_size < 0`** — page on-call; slot invalidation is imminent.
+- **Critical: `wal_status IN ('unreserved', 'lost')`** — page on-call; the slot is already at risk or already invalidated.
+- **Critical: `inactive_since < now() - interval '5 minutes'`** — page on-call; Debezium is disconnected and WAL is piling up with no consumer.
 
 **Two Postgres safety nets to know about:**
 
@@ -2329,9 +2352,12 @@ When `pg_replication_slots.wal_status = 'lost'`, the slot row still exists in Po
 > **Preflight check before the next outage: `max_slot_wal_keep_size`.** The `wal_status = 'lost'` event was triggered by Postgres's `max_slot_wal_keep_size` setting — once the slot fell behind by more than this limit, Postgres invalidated it to protect the primary's disk. After completing the recovery procedure, audit your `max_slot_wal_keep_size` value (typical: `50GB`) against your worst-case acceptable downtime: at your WAL generation rate of `X MB/min`, a `50GB` budget tolerates approximately `50,000 / X` minutes of consumer downtime. If your worst-case CDC outage budget is greater than that, either raise `max_slot_wal_keep_size`, accept that long outages will require a backfill, or add monitoring that pages on-call before the slot crosses 80% of the limit.
 
   ```sql
-  -- Add wal_status to the lag query for a fuller picture (Postgres 13+):
-  SELECT slot_name, active, wal_status,
-         pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn) AS bytes_behind
+  -- Add wal_status + safe_wal_size to the lag query for a fuller picture (Postgres 13+):
+  -- Use restart_lsn (NOT confirmed_flush_lsn) for slot-survival headroom — see
+  -- "Monitoring replication slot lag" above for why these two LSNs diverge.
+  SELECT slot_name, active, wal_status, safe_wal_size,
+         pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)         AS bytes_behind_restart,
+         pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn) AS bytes_behind_consumer
   FROM pg_replication_slots
   WHERE slot_name = 'debezium_slot';
   ```

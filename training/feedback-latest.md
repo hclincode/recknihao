@@ -1,98 +1,97 @@
-# Judge Feedback — Iter 310
+# Judge Feedback — Iter 311
 
 Date: 2026-05-27
 Phase: extended
-Topics: CTAS / write-side exfiltration in multi-tenant Trino (Q1) + Postgres CDC replication slot WAL bloat (Q2)
+Topics: $path hidden column and metadata bypass vectors (Q1) + Postgres replication slot wal_status states and safe_wal_size (Q2)
 
 ---
 
-## Q1 — CTAS / write-side exfiltration in multi-tenant Trino
+## Q1 — $path hidden column and other metadata bypass vectors
 
 ### Score
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5.0 | CTAS write-side exfiltration is a real risk; `$files` does expose `file_path` (verified trino.io/docs/current/connector/iceberg.html). OPA can deny `CreateTable`/`CreateTableAsSelect` operations (verified trino.io OPA access control docs). MinIO IAM supports path-scoped policies. No false claims. |
-| Beginner clarity | 4.0 | Risk explained step-by-step with a concrete example; the four-layer structure is easy to follow. Terms like "OPA Rego," "principal," "IAM," and "metadata table" used without short glosses — a SaaS engineer with no OLAP background will follow it but may need to look up `$files` and "Rego." |
-| Practical applicability | 5.0 | Fits the prod stack (Trino + Iceberg + MinIO + OPA) precisely. Defers specific Rego rules to the external governance document (correct per prod_info.md). Provides a concrete CI test, P0 alert criterion, and explicit architectural choice (Option A vs B for MinIO credentials). |
-| Completeness | 5.0 | Covers all four mitigation surfaces: write-path SQL deny, metadata-table deny, MinIO IAM scoping, audit/alerting. Includes defense-in-depth reasoning (what happens if rule #1 misfires). Mentions `$partitions`, `$snapshots`, `$manifests`. Minor: `$path` hidden column not explicitly called out; no mention that `INSERT INTO` presents the same risk as CTAS. |
-| **Average** | **4.75** | **PASS** |
+| Technical accuracy | 4.75 | All five vectors are real and correctly described. `$path` hidden column verified against Trino Iceberg connector docs. `system.runtime.queries` exposure concern is real (non-admins see own queries by default, but explicit OPA deny is correct best practice). Direct MinIO bypass and DESCRIBE/SHOW vectors accurate. Minor: "OPA can inspect the column list in the query context" for `$path` denial is correct but doesn't name the `FilterColumns` operation explicitly. |
+| Beginner clarity | 4.5 | Strong opening framing ("necessary but insufficient"). Each vector has a concrete SQL example or scenario. Numbered structure is scannable. The `SELECT "$path"` example is exactly what the engineer needs to see. Recommended Full Fix with priority tiers (non-negotiable vs risk-appetite) is excellent. Minor: "OPA principal" used without a one-liner refresher. |
+| Practical applicability | 4.75 | Fits the production stack (OPA, Trino + Iceberg, MinIO). Names actual Trino access-control operations (`FilterCatalogs`) — verified accurate. Defers specific Rego rules to external governance doc (per prod_info.md). Five-item actionable checklist. |
+| Completeness | 4.75 | Covers main bypass surfaces. Missing: (a) `$partition` and `$file_modified_time` hidden columns alongside `$path` — equally exposed, same defense; (b) `information_schema` as a distinct enumeration surface from `system` catalog; (c) `system.metadata.table_properties` which can expose Iceberg `location` property (MinIO path). OPA `FilterColumns` operation name not given. |
+| **Average** | **4.69** | **PASS** |
 
 ### What Worked
-- Correctly framed CTAS-then-`$files` as the canonical write-side exfiltration path — the example query is exactly the attack a tenant would run
-- Four-layer defense-in-depth model (write deny, metadata deny, MinIO IAM scoping, audit) is the industry-standard answer and each layer is independently meaningful
-- Properly deferred specific OPA Rego rules to the external governance document — neither hand-waved nor over-prescribed
-- Differentiated Option A (no tenant MinIO credentials, signed-URL export endpoint) from Option B (path-scoped IAM) — gives the engineer an architectural choice
-- CI test and P0 alert criteria are concrete and runnable
-- Closing checklist is a useful artifact the engineer can copy into a ticket
+- "Necessary but insufficient" framing sets correct expectations immediately
+- Concrete `SELECT "$path"` SQL example — exactly the bypass the engineer needs to see
+- Five-vector enumeration (system catalog, $path, MinIO, DESCRIBE/SHOW, statistical inference) — all real and ordered by severity
+- Recommended Full Fix with priority tiers gives a credible ship plan
+- Stack-aware language (OPA, MinIO, JWT principal, CTAS export) matching prod_info.md without inventing specific Rego rules
+- Names actual Trino access-control operations (`FilterCatalogs`) rather than vague references
 
 ### What Missed
-- The `$path` hidden column (a per-row hidden column that also returns the underlying file path) is not explicitly called out. The "deny `$`-suffix table" rule does not cover `SELECT "$path", * FROM acme_scratch.exfil` because `$path` is a hidden column, not a metadata table.
-- `INSERT INTO ... SELECT` presents the same write-side exfiltration surface as CTAS — if the engineer's environment permits it for export, it needs the same OPA write-side denies
-- Brief glosses for "Rego," "principal," and "IAM" would help beginner clarity without lengthening the answer much
-- No explicit mention that CTAS-from-view (not from base table) is also a vector — if the tenant's view returns their rows, CTAS-from-view still materializes rows they can extract via MinIO
+- `$partition` and `$file_modified_time` are equally hidden columns on Iceberg tables — a blocked tenant could pivot to these; should be grouped as "the hidden column family"
+- `system.metadata.table_properties` returns the Iceberg `location` property (MinIO warehouse path) for any table the user can see — a specific high-leverage bypass that fits the question exactly
+- `information_schema` is a distinct enumeration surface from the `system` catalog
+- OPA `FilterColumns` operation not named — a senior engineer knows what to look for but a beginner won't
 
 ### Technical Accuracy
-All verified:
-- `$files` exposes `file_path`: confirmed in Trino Iceberg connector docs
-- OPA can deny `CreateTableAsSelect`: confirmed via `input.action.operation` in OPA access control plugin
-- MinIO IAM supports path-scoped policies: confirmed, MinIO PBAC follows AWS IAM syntax
-- Metadata tables (`$files`, `$partitions`, `$snapshots`, `$manifests`): all exist as documented
+Verified:
+- `$path`, `$partition`, `$file_modified_time` hidden columns: confirmed in Trino Iceberg connector docs
+- OPA can deny specific column references via `FilterColumns`: confirmed in Trino OPA docs and issue tracker
+- `FilterCatalogs` and metadata-listing events: confirmed in Trino access control docs
+- `system.runtime.queries` non-admin access: OPA explicit deny is correct best practice even if defaults limit visibility
 
 ### Rubric Update
-- Multi-tenant analytics: prior avg 4.467 across 109 questions → (4.467 × 109 + 4.75) / 110 = **4.469 across 110 questions**. Status: PASSED.
+- Multi-tenant analytics: prior avg 4.469 across 110 questions → (4.469 × 110 + 4.69) / 111 = **4.471 across 111 questions**. Status: PASSED.
 
 ---
 
-## Q2 — Postgres CDC Replication Slot WAL Bloat
+## Q2 — Postgres replication slot wal_status states and safe_wal_size
 
 ### Score
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 4.5 | All major claims verified against official docs. Minor oversimplification of `wal_status` (omits `extended` and `unreserved` intermediate states). Heartbeat root-cause framing slightly imprecise. MERGE INTO syntax in Step 4 is pseudo-SQL with trailing WHERE after MERGE clauses — illustrative but not copy-pasteable. |
-| Beginner clarity | 5.0 | The "post-it note" analogy for replication slots is excellent. Walks through what an LSN is, what happens when Debezium falls behind, and why the disk fills — all without assuming prior CDC knowledge. The "Monday morning" checklist closes the loop perfectly. |
-| Practical applicability | 4.75 | Specific thresholds (50 GB warn, 150 GB crit, 5 min disconnect), concrete SQL queries, exact config properties, named runbook steps. Fits Postgres + Debezium + Iceberg stack cleanly. Small gap: MERGE step would need translation into Spark+JDBC form for the on-prem stack. |
-| Completeness | 4.75 | Covers mechanism, monitoring queries, self-defense config, recovery runbook, and heartbeat safeguard — all four pillars. Could mention `safe_wal_size` column as the most direct "headroom" metric, and could acknowledge `unreserved` intermediate state for monitoring. |
-| **Average** | **4.75** | **PASS** |
+| Technical accuracy | 2.5 | Four `wal_status` states correctly named and ordered. But the answer makes a material factual error directly contradicting the user's question: claims "Postgres doesn't expose a direct 'bytes remaining before invalidation' column" — `safe_wal_size` is exactly that column (PG 13+), available in `pg_replication_slots`. Additionally, the headroom formula uses `confirmed_flush_lsn` where `restart_lsn` is the LSN that actually drives slot invalidation; with long-running transactions these diverge and the formula underestimates real slot pressure. |
+| Beginner clarity | 4.5 | Plain-language framing ("yellow-flag territory", "page immediately"), well-structured alert tier table, clear runbook references. A SaaS engineer without Postgres internals background can follow it. |
+| Practical applicability | 3.5 | Alert tiers and heartbeat config are concrete and actionable. But the missing `safe_wal_size` recommendation means the engineer builds a more brittle monitoring system (manual subtraction from a GUC instead of reading a server-computed column that auto-handles edge cases like NULL when slot is lost or when max_slot_wal_keep_size = -1). |
+| Completeness | 3.5 | Covers states, alert tiers, and heartbeat. Misses `safe_wal_size` (the exact column the user asked about), `inactive_since` (PG 14+, useful for detecting stuck Debezium), and `invalidation_reason` (PG 16+, critical for post-mortem). No end-to-end lag monitoring tie-in with Iceberg snapshot age. |
+| **Average** | **3.50** | **PASS (barely)** |
 
 ### What Worked
-- "Post-it note" analogy for replication slots is exemplary — gives a mental model and technical anchor simultaneously
-- Correctly frames that the CDC pipeline can take down the *application database*, not just analytics — elevates severity appropriately
-- Three non-negotiables structure (monitor, self-defend, runbook) is easy to remember
-- Recovery runbook is concrete and ordered: drop → recreate → restart with `snapshot.mode: never` → backfill via MERGE
-- "Walk through it once on staging" guidance is operational wisdom beyond textbook answers
-- Heartbeat section addresses a real second-order failure mode (idle monitored tables)
-- Monday morning summary is actionable — five concrete tasks an engineer can execute this week
+- Correctly identifies all four `wal_status` values in correct progression: reserved → extended → unreserved → lost
+- Correctly answers the headline question: "is `lost` too late?" → yes, alert on `unreserved`
+- Alert-tier table mixing byte thresholds, percentage thresholds, status flags, and `active = false` heuristic is what production monitoring needs
+- Heartbeat section with working Debezium config snippet for idle-table coverage is real-world wisdom
+- Correct nuance: don't rely solely on bytes thresholds because WAL generation rate spikes can skip past them
 
-### What Missed
-- `wal_status` enumeration is incomplete — official PG docs define four states: `reserved`, `extended`, `unreserved`, `lost`. The `unreserved` state is the "imminent danger, still recoverable" warning that gives the on-call window to act before invalidation.
-- `safe_wal_size` column not mentioned — the most direct "how much headroom do I have" metric from `pg_replication_slots` when `max_slot_wal_keep_size` is set
-- Heartbeat root-cause framing slightly off: the slot falls behind when *other* unrelated tables generate WAL while the monitored table is idle — Debezium has no events to acknowledge, so the flush LSN doesn't advance even though global WAL position moves
-- MERGE INTO Step 4 is pseudo-SQL — trailing WHERE after MATCH clauses is not valid Spark/Iceberg MERGE syntax; an engineer copy-pasting this will hit a parse error
-- No mention that `max_slot_wal_keep_size` requires Postgres 13+
+### What Missed (CRITICAL)
+- **`safe_wal_size` column directly answers the user's question.** The user asked "is there a column that tells us exactly how much headroom we have left?" — the answer is YES: `pg_replication_slots.safe_wal_size` (PG 13+) is exactly that column. The answer incorrectly says this column doesn't exist.
+- **`restart_lsn` vs `confirmed_flush_lsn`**: the bytes_behind formula should use `restart_lsn` (drives slot invalidation) not `confirmed_flush_lsn` (consumer acknowledgement). These diverge with long-running transactions.
+- `inactive_since` (PG 14+) — direct timestamp for when Debezium disconnected, more useful than tracking `active = false` duration in monitoring
+- `invalidation_reason` (PG 16+) — tells why slot was invalidated (wal_removed/rows_removed/wal_level_insufficient) for post-mortem
+- No end-to-end monitoring tie-in: healthy Postgres slot with stuck Iceberg writer still causes CDC lag the user cares about
 
 ### Technical Accuracy
-Verified against postgresql.org docs, Debezium connector docs:
-- `wal_status` states: `reserved`, `extended`, `unreserved`, `lost` — confirmed
-- `max_slot_wal_keep_size` auto-invalidation at Postgres 13+ — confirmed
-- `confirmed_flush_lsn` semantics — confirmed
-- `heartbeat.interval.ms` and `heartbeat.action.query` Debezium properties — confirmed
-- `snapshot.mode: never` — valid Debezium config to skip snapshot after slot recreation — confirmed
-- `pg_drop_replication_slot` / `pg_create_logical_replication_slot` functions — confirmed
+Verified from postgresql.org docs:
+- `safe_wal_size` column EXISTS in `pg_replication_slots` since PG 13: "The number of bytes that can be written to WAL such that this slot is not in danger of getting in state 'lost'." NULL for lost slots and when max_slot_wal_keep_size = -1. The answer's claim that this column doesn't exist is incorrect.
+- `restart_lsn` vs `confirmed_flush_lsn`: Gunnar Morling's authoritative post confirms `restart_lsn` determines WAL retention/invalidation, not `confirmed_flush_lsn`
+- Four `wal_status` states: confirmed correct per postgresql.org docs
+- Debezium heartbeat config: confirmed correct
+
+Sources: postgresql.org/docs/current/view-pg-replication-slots.html, EDB "PostgreSQL 13: Don't let slots kill your primary", morling.dev "Confirmed Flush LSN vs. Restart LSN"
 
 ### Rubric Update
-- Postgres-to-Iceberg ingestion: prior avg 4.487 across 104 questions → (4.487 × 104 + 4.75) / 105 = **4.490 across 105 questions**. Status: PASSED.
+- Postgres-to-Iceberg ingestion: prior avg 4.490 across 105 questions → (4.490 × 105 + 3.50) / 106 = **4.481 across 106 questions**. Status: PASSED.
+
+**Note**: This is a regression in score (3.50 vs. the prior 4.75 pattern) driven by a critical factual inaccuracy — directly denying a column that exists. Resources fixed (teacher pass): resources/13 now includes safe_wal_size, restart_lsn vs confirmed_flush_lsn, inactive_since, invalidation_reason. Resources/05 now includes the hidden column family ($path/$partition/$file_modified_time) and system.metadata.table_properties.
 
 ---
 
-## Iter 310 Summary
+## Iter 311 Summary
 
-**Iter 310 average: 4.75 — PASS** ✓
+**Iter 311 average: 4.095 — PASS** (Q1 4.69, Q2 3.50)
 
-### Suggested focus for Iter 311
-- `$path` hidden column as a metadata-table bypass not covered by `$`-suffix deny rules — multi-tenant security gap
-- `wal_status: unreserved` as the actionable early-warning state before `lost` — Debezium monitoring completeness
-- `safe_wal_size` column for direct replication slot headroom measurement
-- MERGE INTO valid Spark SQL syntax for the backfill pattern (vs pseudo-SQL shown)
-- OPA column masking / row-filter alternative at 500+ tenant scale (still untested after teacher added it to resources/05)
+### Suggested focus for Iter 312
+- `safe_wal_size` column directly — follow-up question on slot monitoring where responder must now demonstrate the corrected resource content
+- `restart_lsn` vs `confirmed_flush_lsn` distinction — a targeted question to verify the fix landed
+- Hidden column family ($path/$partition/$file_modified_time) probe — verify resources/05 fix
+- OPA row-filter alternative at 200+ tenant scale — still not tested from a question angle

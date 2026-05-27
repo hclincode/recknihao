@@ -1,12 +1,12 @@
-# Iter 310 Questions
+# Iter 311 Questions
 
 Date: 2026-05-27
-Topics: Multi-tenant CTAS exfiltration via scratch table + MinIO (Q1) + Postgres CDC replication slot WAL bloat (Q2)
+Topics: $path hidden column bypass in multi-tenant Trino (Q1) + Postgres replication slot early-warning states and safe_wal_size (Q2)
 
-## Q1 — Multi-tenant isolation edge case: can a customer exfiltrate data through their own queries?
+## Q1 — Multi-tenant data isolation / hidden column bypass
 
-We have the Trino view-per-tenant setup in place — each customer gets their own view that only shows their rows, and they can't access the base table directly. But I'm worried about a gap: when a customer runs an ad-hoc query (we let them run custom SQL through our dashboard), what stops them from doing something like `CREATE TABLE my_scratch AS SELECT * FROM events_customer_a` and then pulling the Parquet files out of MinIO directly? The view filters their tenant ID fine, but they'd own that scratch table and could do whatever with it. Is that a real risk, and how do you close it?
+We've been locking down our Trino setup so tenants can only query their own schema. Someone on the team said we should deny access to any table that starts with a dollar sign — like `$files` or `$snapshots` — to prevent tenants from peeking at underlying file paths. That sounds reasonable, but I'm not 100% sure it covers everything. Are there other ways a tenant could figure out what files are on disk without going through those metadata tables?
 
-## Q2 — Postgres CDC pipeline: something about disk filling up?
+## Q2 — Postgres replication slot monitoring / early warning states
 
-We're setting up change-data-capture from our Postgres events table into Iceberg using Debezium. Someone on our team mentioned there's a classic outage scenario involving "replication slots" and disk space, and said it's the most common way CDC pipelines blow up in production. I don't fully understand what a replication slot does or why it would cause disk to fill up. Can you explain what's actually happening there and what we should do to protect ourselves?
+We set up monitoring on our Postgres replication slot — we're watching `pg_replication_slots` and alerting if `wal_status` goes to `lost`, because that's when the slot gets invalidated and we lose our CDC position. But I'm wondering if `lost` is already too late — like, is there a warning state before that where we still have time to intervene? Also, we have `max_slot_wal_keep_size` configured — is there a column that tells us exactly how much headroom we have left before the slot gets dropped?

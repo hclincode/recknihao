@@ -1251,6 +1251,58 @@ SELECT COUNT(*) FROM iceberg.tenant_acme.events;  -- should succeed
 
 > **Note**: the `$partitions` metadata table is a separate exposure path from the `system.runtime.queries` system catalog leak. Both must be fixed independently — a catalog-level deny on `system` does not protect Iceberg metadata tables in the `iceberg` catalog.
 
+### Iceberg hidden columns — `$path`, `$partition`, `$file_modified_time`
+
+Distinct from the `$`-suffix metadata **tables** above, Trino's Iceberg connector also exposes a set of **hidden columns** on every Iceberg table. These columns do not appear in `DESCRIBE` output or `information_schema.columns` and are not part of the table schema — but they are queryable on any table the user has SELECT on, by referencing them with a `$`-prefixed quoted identifier:
+
+| Hidden column | What it exposes |
+|---|---|
+| `"$path"` | The full MinIO/S3 object path of the data file each row came from (e.g., `s3a://lakehouse/warehouse/analytics/events/data/...parquet`) — reveals MinIO bucket layout and lets an attacker bypass Trino by downloading the file directly with `mc cp` (same exfil shape as the `$files` metadata table). |
+| `"$partition"` | The partition values for each row as a struct — for a `partitioning = ARRAY['tenant_id', 'day(event_ts)']` table, this exposes the `tenant_id` of each row even when the SELECT-list does not include `tenant_id`. Lets an attacker enumerate which `tenant_id` values exist in any row they can read. |
+| `"$file_modified_time"` | The modification timestamp of the underlying file. Less sensitive than the other two, but reveals write cadence and may help an attacker correlate Iceberg compaction events with external activity. |
+
+All three can be referenced in any SELECT — for example:
+
+```sql
+SELECT "$path", "$partition", "$file_modified_time", event_id
+FROM iceberg.tenant_acme.events
+LIMIT 10;
+```
+
+**Why this is a separate vector from `$files` / `$partitions` tables.** The `$`-suffix tables (`events$files`, `events$partitions`) are **separate table references** — they appear in the FROM clause and are filtered by table-level OPA rules (`SELECT` on `iceberg.analytics."events$files"`). The hidden columns above appear inside an otherwise-normal SELECT on the **base view** (`SELECT "$path" FROM tenant_acme.events`). A table-level deny rule that blocks `events$files` does **NOT** block `"$path"` on the base view — those go through different OPA operations.
+
+**The fix: deny the three hidden columns in OPA via `FilterColumns`.** The OPA Trino plugin issues a `FilterColumns` request when a query references columns; the Rego policy can deny `"$path"`, `"$partition"`, and `"$file_modified_time"` for tenant principals by name. Group all three in a single deny rule — they are always denied together for tenant roles, since exposing any one of them undermines the row-level isolation boundary. The specific Rego code lives in the external governance document; what you must know as an engineer is: **a complete tenant-isolation OPA policy must deny these three hidden columns alongside the `$`-suffix metadata tables and the `system` catalog.**
+
+**Verification recipe — add to CI alongside the metadata-table tests:**
+
+```sql
+-- Connect as a tenant service account — all of these MUST fail with Access Denied:
+SELECT "$path" FROM iceberg.tenant_acme.events LIMIT 1;
+SELECT "$partition" FROM iceberg.tenant_acme.events LIMIT 1;
+SELECT "$file_modified_time" FROM iceberg.tenant_acme.events LIMIT 1;
+```
+
+### `system.metadata.table_properties` — Iceberg `location` leak via the system catalog
+
+The `system` catalog deny rule from the earlier "system catalog isolation" section covers `system.runtime.*` (the query/transaction/nodes tables) and is the right shape — but it is worth calling out specifically that `system.metadata.table_properties` also belongs on the deny list. For every Iceberg table the principal can see, this view returns the table's full property bag — including the Iceberg **`location`** property, which is the MinIO warehouse path of the table:
+
+```sql
+-- For a tenant principal with SELECT on tenant_acme.events:
+SELECT property_name, property_value
+FROM system.metadata.table_properties
+WHERE catalog_name = 'iceberg'
+  AND schema_name  = 'analytics'
+  AND table_name   = 'events';
+-- Returns rows including:
+--   ('location', 's3a://lakehouse/warehouse/analytics/events')
+--   ('format-version', '2')
+--   ...
+```
+
+Once a tenant has the `location` value, they have the MinIO path to attempt direct object download — the same exfil pathway as the hidden `"$path"` column and the `$files` metadata table, but reachable through a different surface. The same applies to `system.metadata.materialized_view_properties` (and any other `system.metadata.*` view) — anything that returns a `location`, file path, or storage URI is in scope.
+
+**The fix is the catalog-level `system` deny rule already documented above** — it covers `system.runtime.*` AND `system.metadata.*` in one shot. The reason to call this out explicitly: engineers reviewing a partial OPA policy sometimes see "the deny rule says `system.runtime.queries`" and assume `system.metadata.*` is a separate concern. It is not — both live in the same `system` catalog and are both blocked by a single `catalog = "system"` deny. **Confirm both surfaces are covered when you write or review the OPA rule**, and include `SELECT * FROM system.metadata.table_properties LIMIT 1` in the verification recipe (as already shown in the system catalog section above).
+
 ### CTAS / INSERT INTO ... SELECT — the write-side exfiltration surface
 
 The view-as-isolation-boundary pattern stops a tenant from `SELECT`-ing data they shouldn't see. It does **not**, by itself, stop a tenant from **writing** data they CAN see into a table they own — and then exporting the underlying files out of MinIO. This is the **write-side exfiltration surface** and it must be closed independently of the SELECT-side controls.

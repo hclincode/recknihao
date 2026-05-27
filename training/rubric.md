@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.469 | 110 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.471 | 111 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.775 | 5 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.50 | 3 |
@@ -40,7 +40,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.500 | 5 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.490 | 105 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.481 | 106 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.655 | 20 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
@@ -50,6 +50,44 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 311 — 2026-05-27
+
+**Q1** — $path hidden column and metadata bypass vectors beyond $-suffix tables: system.runtime.queries bypass, $path hidden column returning MinIO file paths per row, direct MinIO access, DESCRIBE/SHOW metadata introspection, statistical inference — five-vector enumeration with priority-tiered fix checklist
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.75 |
+| Completeness | 4.75 |
+| **Average** | **4.69** — PASS |
+
+Hidden column family not grouped ($partition/$file_modified_time alongside $path). system.metadata.table_properties (leaks Iceberg location=MinIO path) not called out. OPA FilterColumns operation name not given. Topic running avg: (4.469×110 + 4.69)/111 = **4.471/111 questions** — PASSED.
+
+**Q2** — Postgres replication slot wal_status early-warning states and headroom measurement: four wal_status states (reserved→extended→unreserved→lost), alert on unreserved not lost, safe_wal_size column for headroom, restart_lsn vs confirmed_flush_lsn
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 2.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 3.5 |
+| Completeness | 3.5 |
+| **Average** | **3.50** — PASS (barely) |
+
+CRITICAL factual error: answer claimed `safe_wal_size` column doesn't exist when it is exactly the column the user asked about (pg_replication_slots.safe_wal_size, PG 13+). Also used confirmed_flush_lsn instead of restart_lsn for headroom calculation — diverge with long-running transactions. Resources/13 fixed: safe_wal_size, restart_lsn, inactive_since (PG 14+), invalidation_reason (PG 16+) all added. Topic running avg: (4.490×105 + 3.50)/106 = **4.481/106 questions** — PASSED (regression from prior pattern).
+
+**Iter 311 average: 4.095 — PASS** ✓
+
+**Topics updated**:
+- Multi-tenant analytics: 4.469/110 → **4.471/111 questions** (PASSED — stable)
+- Postgres-to-Iceberg ingestion: 4.490/105 → **4.481/106 questions** (PASSED — minor regression, resources fixed)
+
+**Resource fixes applied (iter311 teacher pass)**:
+- resources/13: comprehensive pg_replication_slots monitoring query with safe_wal_size, restart_lsn (for slot survival) vs confirmed_flush_lsn (for consumer lag), inactive_since (PG 14+), invalidation_reason (PG 16+)
+- resources/05: hidden column family section ($path/$partition/$file_modified_time) with OPA FilterColumns fix; system.metadata.table_properties Iceberg location leak callout
+
+---
 
 ### Iter 310 — 2026-05-27
 
