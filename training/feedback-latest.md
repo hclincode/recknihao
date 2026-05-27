@@ -1,97 +1,86 @@
-# Judge Feedback — Iter 311
+# Judge Feedback — Iter 312
 
 Date: 2026-05-27
 Phase: extended
-Topics: $path hidden column and metadata bypass vectors (Q1) + Postgres replication slot wal_status states and safe_wal_size (Q2)
+Topics: OPA row-filter alternative to per-tenant views at 200+ tenant scale (Q1) + pg_replication_slots safe_wal_size and restart_lsn vs confirmed_flush_lsn (Q2)
 
 ---
 
-## Q1 — $path hidden column and other metadata bypass vectors
+## Q1 — OPA row-filter alternative to per-tenant views at 200+ tenant scale
 
 ### Score
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 4.75 | All five vectors are real and correctly described. `$path` hidden column verified against Trino Iceberg connector docs. `system.runtime.queries` exposure concern is real (non-admins see own queries by default, but explicit OPA deny is correct best practice). Direct MinIO bypass and DESCRIBE/SHOW vectors accurate. Minor: "OPA can inspect the column list in the query context" for `$path` denial is correct but doesn't name the `FilterColumns` operation explicitly. |
-| Beginner clarity | 4.5 | Strong opening framing ("necessary but insufficient"). Each vector has a concrete SQL example or scenario. Numbered structure is scannable. The `SELECT "$path"` example is exactly what the engineer needs to see. Recommended Full Fix with priority tiers (non-negotiable vs risk-appetite) is excellent. Minor: "OPA principal" used without a one-liner refresher. |
-| Practical applicability | 4.75 | Fits the production stack (OPA, Trino + Iceberg, MinIO). Names actual Trino access-control operations (`FilterCatalogs`) — verified accurate. Defers specific Rego rules to external governance doc (per prod_info.md). Five-item actionable checklist. |
-| Completeness | 4.75 | Covers main bypass surfaces. Missing: (a) `$partition` and `$file_modified_time` hidden columns alongside `$path` — equally exposed, same defense; (b) `information_schema` as a distinct enumeration surface from `system` catalog; (c) `system.metadata.table_properties` which can expose Iceberg `location` property (MinIO path). OPA `FilterColumns` operation name not given. |
-| **Average** | **4.69** | **PASS** |
+| Technical accuracy | 4.5 | OPA row-filter mode is real and correctly described. `opa.policy.row-filters-uri` is the exact property name. Rego rule name `rowFilters` is correct. Minor imprecision: answer says OPA "intercepts the query and rewrites it" — technically Trino's planner injects the returned WHERE expression; OPA returns it. The endpoint path `/v1/data/trino/rowFilters` is plausible but exact data path depends on the policy package name. |
+| Beginner clarity | 4.5 | Plain-language opening, "ONE table + ONE policy" contrast, concrete WHERE clause injection example, clean threshold table. No unexplained jargon — even "Rego" is given context. |
+| Practical applicability | 4.0 | Threshold table (1–50/50–200/200+/500+) is actionable. Migration steps concrete (5-step parallel cutover with CI verification). Correctly defers OPA Rego syntax to external governance doc per prod_info.md. Weakness: principal-to-tenant mapping mentioned twice (JWT username vs OPA data bundle) but no guidance on which is preferred in their JWT-based auth stack. |
+| Completeness | 4.5 | Covers: why view-per-tenant breaks at scale, OPA row-filter mechanism, config property, thresholds, security verification (CI test), migration path with parallel run. Missing: columnMask as sibling OPA capability for column-level hiding; no Trino version note (row-filter mode requires Trino 438+); mapping strategy not chosen. |
+| **Average** | **4.375** | **PASS** |
 
 ### What Worked
-- "Necessary but insufficient" framing sets correct expectations immediately
-- Concrete `SELECT "$path"` SQL example — exactly the bypass the engineer needs to see
-- Five-vector enumeration (system catalog, $path, MinIO, DESCRIBE/SHOW, statistical inference) — all real and ordered by severity
-- Recommended Full Fix with priority tiers gives a credible ship plan
-- Stack-aware language (OPA, MinIO, JWT principal, CTAS export) matching prod_info.md without inventing specific Rego rules
-- Names actual Trino access-control operations (`FilterCatalogs`) rather than vague references
+- Frames problem correctly: management overhead, not query performance — right reframing for a SaaS engineer
+- Concrete `opa.policy.row-filters-uri` property name matches official Trino docs
+- Threshold table with "stable schema vs schema-changing weekly" tiebreaker is practical, not arbitrary
+- Correctly defers specific Rego syntax to external governance document
+- Parallel-run migration with CI verification is a mature pattern avoiding hard cutover
+- Security CI test (`SELECT DISTINCT tenant_id FROM analytics.events`) is a one-liner the engineer can paste into a test
 
 ### What Missed
-- `$partition` and `$file_modified_time` are equally hidden columns on Iceberg tables — a blocked tenant could pivot to these; should be grouped as "the hidden column family"
-- `system.metadata.table_properties` returns the Iceberg `location` property (MinIO warehouse path) for any table the user can see — a specific high-leverage bypass that fits the question exactly
-- `information_schema` is a distinct enumeration surface from the `system` catalog
-- OPA `FilterColumns` operation not named — a senior engineer knows what to look for but a beginner won't
+- **OPA does not "rewrite" SQL** — OPA returns a WHERE expression and Trino's planner injects it. An engineer debugging the system will find these filters in Trino's query plan, not in OPA logs.
+- No mention of `columnMask` as the sibling OPA capability for column-level masking (e.g., hiding PII columns for certain tenant principals)
+- No Trino version note: OPA row-filter mode was added in Trino 438; at Trino 467 this works, but worth knowing for engineers on older clusters
+- Mapping strategy not chosen: given the prod stack has a custom JWT authenticator, the JWT-claim approach is more idiomatic than a separate OPA data bundle — should recommend one
+- No concrete Rego example fragment (even a stub showing `input.action.resource.table.tableName → tenant_id = input.context.identity.user`) to help visualize
 
 ### Technical Accuracy
-Verified:
-- `$path`, `$partition`, `$file_modified_time` hidden columns: confirmed in Trino Iceberg connector docs
-- OPA can deny specific column references via `FilterColumns`: confirmed in Trino OPA docs and issue tracker
-- `FilterCatalogs` and metadata-listing events: confirmed in Trino access control docs
-- `system.runtime.queries` non-admin access: OPA explicit deny is correct best practice even if defaults limit visibility
+Verified against trino.io OPA access control docs:
+- `opa.policy.row-filters-uri` exact property name: confirmed
+- OPA returns `{"expression": "clause"}` objects which Trino ANDs into the query plan: confirmed
+- Rego rule name `rowFilters`: confirmed in official Trino OPA example
 
 ### Rubric Update
-- Multi-tenant analytics: prior avg 4.469 across 110 questions → (4.469 × 110 + 4.69) / 111 = **4.471 across 111 questions**. Status: PASSED.
+- Multi-tenant analytics: prior avg 4.471 across 111 questions → (4.471 × 111 + 4.375) / 112 = **4.470 across 112 questions**. Status: PASSED.
 
 ---
 
-## Q2 — Postgres replication slot wal_status states and safe_wal_size
+## Q2 — pg_replication_slots: safe_wal_size and restart_lsn vs confirmed_flush_lsn
 
 ### Score
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 2.5 | Four `wal_status` states correctly named and ordered. But the answer makes a material factual error directly contradicting the user's question: claims "Postgres doesn't expose a direct 'bytes remaining before invalidation' column" — `safe_wal_size` is exactly that column (PG 13+), available in `pg_replication_slots`. Additionally, the headroom formula uses `confirmed_flush_lsn` where `restart_lsn` is the LSN that actually drives slot invalidation; with long-running transactions these diverge and the formula underestimates real slot pressure. |
-| Beginner clarity | 4.5 | Plain-language framing ("yellow-flag territory", "page immediately"), well-structured alert tier table, clear runbook references. A SaaS engineer without Postgres internals background can follow it. |
-| Practical applicability | 3.5 | Alert tiers and heartbeat config are concrete and actionable. But the missing `safe_wal_size` recommendation means the engineer builds a more brittle monitoring system (manual subtraction from a GUC instead of reading a server-computed column that auto-handles edge cases like NULL when slot is lost or when max_slot_wal_keep_size = -1). |
-| Completeness | 3.5 | Covers states, alert tiers, and heartbeat. Misses `safe_wal_size` (the exact column the user asked about), `inactive_since` (PG 14+, useful for detecting stuck Debezium), and `invalidation_reason` (PG 16+, critical for post-mortem). No end-to-end lag monitoring tie-in with Iceberg snapshot age. |
-| **Average** | **3.50** | **PASS (barely)** |
+| Technical accuracy | 5.0 | `safe_wal_size` correctly identified as PG 13+, defined as bytes until slot is at risk. `restart_lsn` correctly framed as slot-survival anchor pinned by long-running transactions; `confirmed_flush_lsn` correctly as consumer-acknowledged position. NULL semantics (lost slot OR max_slot_wal_keep_size = -1) verified. Negative-value semantics correct. `wal_status` values match docs. `invalidation_reason` values wal_removed/wal_level_insufficient/rows_removed all confirmed (PG 16). Heartbeat root cause framing correct. Minor: PG 16+ also added `idle_timeout` as a fourth invalidation_reason value — not a scoring deduction as the three named cover all common Debezium scenarios. |
+| Beginner clarity | 5.0 | "Debezium's bookmark in Postgres's WAL" analogy is excellent. Explicitly explains why the two LSNs diverge with concrete consequence ("can underestimate the real risk by tens of gigabytes"). Each column in the monitoring query read in priority order with bolded headings. No assumed OLAP knowledge. |
+| Practical applicability | 5.0 | Drop-in monitoring SQL parameterized by slot_name. Concrete alert thresholds (50 GB warning / 10 GB critical) with specific actions. Includes max_slot_wal_keep_size safety-net config, recovery runbook, and heartbeat config block. Engineer can ship this today. |
+| Completeness | 5.0 | Answers Q1 (yes, safe_wal_size is real, PG 13+, direct headroom). Answers Q2 (use restart_lsn for slot-survival alerts; confirmed_flush_lsn only for consumer-lag dashboards). Goes beyond with inactive_since, invalidation_reason, recovery procedure, and heartbeats. No significant gaps. |
+| **Average** | **5.00** | **PASS** |
 
 ### What Worked
-- Correctly identifies all four `wal_status` values in correct progression: reserved → extended → unreserved → lost
-- Correctly answers the headline question: "is `lost` too late?" → yes, alert on `unreserved`
-- Alert-tier table mixing byte thresholds, percentage thresholds, status flags, and `active = false` heuristic is what production monitoring needs
-- Heartbeat section with working Debezium config snippet for idle-table coverage is real-world wisdom
-- Correct nuance: don't rely solely on bytes thresholds because WAL generation rate spikes can skip past them
+- Directly corrected the iter311 critical miss: leads with "Yes, safe_wal_size is real" and gets the LSN choice unambiguously right
+- Long-running transaction explanation is the load-bearing insight that distinguishes the two LSNs — stated precisely with the failure mode named
+- Priority-ordered reading of monitoring query columns (1–6) gives operators a triage workflow, not just a column list
+- NULL and negative-value handling for safe_wal_size are both addressed — exactly the cases that bite in production
+- Heartbeat section ties slot behavior to the "quiet table" failure mode with a working JSON config
 
-### What Missed (CRITICAL)
-- **`safe_wal_size` column directly answers the user's question.** The user asked "is there a column that tells us exactly how much headroom we have left?" — the answer is YES: `pg_replication_slots.safe_wal_size` (PG 13+) is exactly that column. The answer incorrectly says this column doesn't exist.
-- **`restart_lsn` vs `confirmed_flush_lsn`**: the bytes_behind formula should use `restart_lsn` (drives slot invalidation) not `confirmed_flush_lsn` (consumer acknowledgement). These diverge with long-running transactions.
-- `inactive_since` (PG 14+) — direct timestamp for when Debezium disconnected, more useful than tracking `active = false` duration in monitoring
-- `invalidation_reason` (PG 16+) — tells why slot was invalidated (wal_removed/rows_removed/wal_level_insufficient) for post-mortem
-- No end-to-end monitoring tie-in: healthy Postgres slot with stuck Iceberg writer still causes CDC lag the user cares about
+### What Missed
+- PG 16+ added `idle_timeout` as a fourth `invalidation_reason` value (minor omission)
+- Recovery procedure doesn't note that the backfill gap must be scoped from `inactive_since`/last successful event time — readers might assume backfilling is automatic
 
 ### Technical Accuracy
-Verified from postgresql.org docs:
-- `safe_wal_size` column EXISTS in `pg_replication_slots` since PG 13: "The number of bytes that can be written to WAL such that this slot is not in danger of getting in state 'lost'." NULL for lost slots and when max_slot_wal_keep_size = -1. The answer's claim that this column doesn't exist is incorrect.
-- `restart_lsn` vs `confirmed_flush_lsn`: Gunnar Morling's authoritative post confirms `restart_lsn` determines WAL retention/invalidation, not `confirmed_flush_lsn`
-- Four `wal_status` states: confirmed correct per postgresql.org docs
-- Debezium heartbeat config: confirmed correct
-
-Sources: postgresql.org/docs/current/view-pg-replication-slots.html, EDB "PostgreSQL 13: Don't let slots kill your primary", morling.dev "Confirmed Flush LSN vs. Restart LSN"
+All claims verified: postgresql.org/docs/current/view-pg-replication-slots.html, morling.dev restart_lsn vs confirmed_flush_lsn, EDB PG 13 slot safety blog, Debezium connector docs.
 
 ### Rubric Update
-- Postgres-to-Iceberg ingestion: prior avg 4.490 across 105 questions → (4.490 × 105 + 3.50) / 106 = **4.481 across 106 questions**. Status: PASSED.
-
-**Note**: This is a regression in score (3.50 vs. the prior 4.75 pattern) driven by a critical factual inaccuracy — directly denying a column that exists. Resources fixed (teacher pass): resources/13 now includes safe_wal_size, restart_lsn vs confirmed_flush_lsn, inactive_since, invalidation_reason. Resources/05 now includes the hidden column family ($path/$partition/$file_modified_time) and system.metadata.table_properties.
+- Postgres-to-Iceberg ingestion: prior avg 4.481 across 106 questions → (4.481 × 106 + 5.00) / 107 = **4.486 across 107 questions**. Status: PASSED. This answer directly remediates the iter311 Q2 regression — resource fix demonstrated effective.
 
 ---
 
-## Iter 311 Summary
+## Iter 312 Summary
 
-**Iter 311 average: 4.095 — PASS** (Q1 4.69, Q2 3.50)
+**Iter 312 average: 4.69 — PASS** ✓
 
-### Suggested focus for Iter 312
-- `safe_wal_size` column directly — follow-up question on slot monitoring where responder must now demonstrate the corrected resource content
-- `restart_lsn` vs `confirmed_flush_lsn` distinction — a targeted question to verify the fix landed
-- Hidden column family ($path/$partition/$file_modified_time) probe — verify resources/05 fix
-- OPA row-filter alternative at 200+ tenant scale — still not tested from a question angle
+### Suggested focus for Iter 313
+- OPA clarification: "Trino injects the WHERE expression" (not OPA rewrites SQL) — Q1 accuracy nit that could confuse engineers debugging query plans
+- `columnMask` OPA rule for column-level masking — sibling to rowFilters, not yet tested
+- Replication slot gap-window scoping after recovery (from `inactive_since` to reconnection time) — completeness gap in Q2
+- Continue on any topic with score below 4.5 — try fresh angles on OLAP vs OLTP mindset, cost considerations, or Trino CBO topics

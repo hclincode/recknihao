@@ -1,12 +1,16 @@
-# Iter 311 Questions
+# Iter 312 Questions
 
 Date: 2026-05-27
-Topics: $path hidden column bypass in multi-tenant Trino (Q1) + Postgres replication slot early-warning states and safe_wal_size (Q2)
+Topics: OPA row-filter alternative to per-tenant views at 200+ tenant scale (Q1) + pg_replication_slots safe_wal_size and restart_lsn vs confirmed_flush_lsn (Q2)
 
-## Q1 — Multi-tenant data isolation / hidden column bypass
+## Q1 — Multi-tenant row isolation at 200+ tenant scale
 
-We've been locking down our Trino setup so tenants can only query their own schema. Someone on the team said we should deny access to any table that starts with a dollar sign — like `$files` or `$snapshots` — to prevent tenants from peeking at underlying file paths. That sounds reasonable, but I'm not 100% sure it covers everything. Are there other ways a tenant could figure out what files are on disk without going through those metadata tables?
+We're somewhere around 80 tenants right now and each one queries our Trino/Iceberg setup. Right now I have a separate view per tenant that filters down to their `tenant_id`, and OPA checks that you can only query your own view. Someone said that approach breaks down when we get to 200 or 500+ tenants. I sort of understand why — managing hundreds of view definitions sounds painful — but I'm not sure what the alternative looks like.
 
-## Q2 — Postgres replication slot monitoring / early warning states
+We have a single events table in Iceberg with a `tenant_id` column. At large tenant counts, is the view-per-tenant approach actually the problem, and if so what do people do instead? I've heard OPA can be configured to do something smarter but I don't understand what that means in practice.
 
-We set up monitoring on our Postgres replication slot — we're watching `pg_replication_slots` and alerting if `wal_status` goes to `lost`, because that's when the slot gets invalidated and we lose our CDC position. But I'm wondering if `lost` is already too late — like, is there a warning state before that where we still have time to intervene? Also, we have `max_slot_wal_keep_size` configured — is there a column that tells us exactly how much headroom we have left before the slot gets dropped?
+## Q2 — Postgres replication slot monitoring: which columns to actually watch
+
+We're running Debezium to stream our Postgres events table into Iceberg, and I'm trying to set up proper alerting on our replication slots so we never hit the situation where Postgres starts dropping WAL and the slot goes invalid.
+
+I know `pg_replication_slots` has a `wal_status` column that can flip to `lost` — we want to alert before that happens. I've read that there's also some column that tells you directly how many bytes of headroom you have left before the slot is in danger. Is that real? And separately, I've seen references to two different LSN columns — `restart_lsn` and `confirmed_flush_lsn` — but I can't figure out which one I should use in my monitoring queries to actually measure how much WAL Postgres is holding onto for this slot. Can you walk me through what each of those columns means and which one matters for "are we about to lose this slot" monitoring?
