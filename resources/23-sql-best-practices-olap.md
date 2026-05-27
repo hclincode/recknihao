@@ -192,7 +192,7 @@ These are either **non-monotonic** (the value jumps around as `ts` increases, so
 **Edge cases where even the unwrap rules can fail** — fall back to the explicit TIMESTAMP range form and verify with `EXPLAIN`:
 
 - **`timestamp with time zone` columns**: both unwrap rules have known limitations with TZ-normalized timestamp types. `CAST(tz_col AS DATE)` or `date_trunc('day', tz_col)` may not always unwrap cleanly when the column is `timestamp(6) with time zone`.
-- **`unwrap_casts` session property set to `false`**: this disables `UnwrapCastInComparison` (and the related rules) entirely. If a teammate's session config turns it off, your `CAST`/`date_trunc` predicates silently stop pruning.
+- **The unwrap rules are always-on in Trino 467**: the `unwrap_casts` session toggle was removed in Release 364 (PR #9550). There is no session property to disable these rules — they run unconditionally.
 - **Predicates that combine multiple columns or wrap the unwrappable expression in further arithmetic**: e.g. `date_trunc('day', event_ts) + INTERVAL '1' DAY = DATE '...'` is not recognized.
 
 Always test with `EXPLAIN` — if the predicate ends up inside a `ScanFilterProject` instead of as a `constraint` on the `TableScan`, the pushdown was lost.

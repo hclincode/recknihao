@@ -45,7 +45,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.511 | 251 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.763 | 4 |
-| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.095 | 4 |
+| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.355 | 6 |
 
 ---
 
@@ -9947,3 +9947,44 @@ Verified: trino.io/blog/2023/04/11/date-predicates.html, github.com/trinodb/trin
 **Key findings**: Broadcast = smaller table loaded into every worker as hash table — verified; partitioned join = shuffle both tables by key — verified; CBO needs NDV from ANALYZE TABLE — verified; `join_distribution_type` options (AUTOMATIC/BROADCAST/PARTITIONED) — verified; `Join[BROADCAST]` vs `Join[PARTITIONED]` in EXPLAIN — verified; `Estimates: {rows: ?}` = guessing — verified; ANALYZE TABLE populates NDV into Puffin files (Iceberg 1.1+) — verified. No significant errors.
 
 Verified: trino.io/docs/current/admin/properties-general.html, trino.io/docs/current/optimizer/cost-based-optimizations.html, trino.io/docs/current/sql/explain.html.
+
+### Iter 291 Q2 — 2026-05-27 (EXTENDED PHASE) — SQL query best practices for OLAP / Query performance basics (estimating Trino+Iceberg scan cost via $files metadata table, EXPLAIN, EXPLAIN ANALYZE Physical Input, partition pruning verification)
+
+**Score: 5.00/5.0 PASS**
+
+**Topics updated**: SQL query best practices for OLAP — prior avg 4.226 across 5 questions (sum 21.13); new running avg (21.13 + 5.00) / 6 = 26.13 / 6 = **4.355 across 6 questions**. Status: PASSED (4.355 > 3.5 threshold). Query performance basics — already PASSED at 4.594/4 (no stat update needed, tangentially relevant only).
+
+**Key findings verified**:
+- `$files` metadata table with `file_size_in_bytes`, `record_count`, `partition`, `file_path` — verified in Trino 481 Iceberg connector docs and the Iceberg internals deep-dive blog post.
+- `Physical Input: X GB` in EXPLAIN ANALYZE — verified; release 477 improved physical input accounting accuracy. Format is "Input: N rows (M MB)".
+- Bare `EXPLAIN` does NOT show Physical Input — correct, only cost estimates (rows, bytes) from CBO.
+- `date_trunc('day', occurred_at) = DATE '...'` enabling partition pruning via `UnwrapDateTruncInComparison` (PR #14011, in Trino 397+) — verified.
+- `DATE(occurred_at) = DATE '...'` via UnwrapCastInComparison — verified.
+- Truly broken: `year()`, `month()`, complex arithmetic on partition column — verified (non-monotonic, no unwrap rule).
+- `constraint on [occurred_at]` as a pruning signal — correct but slightly simplified (predicates pushed via `Constraint.predicate` rather than `Constraint.summary` don't always prune even when they appear in the TableScan); acceptable for an introductory decision flow, not a scoring deduction.
+
+**Notes**: Strong, complete answer. Four-approach ladder (mental math → metadata → EXPLAIN → EXPLAIN ANALYZE 1-day sample) is exactly the right teaching scaffold. Each approach has copy-paste SQL with concrete numbers (14 GB/day raw, 1.4–2.8 GB/day compressed, 42–84 GB for 30 days). Decision flow at the end is unambiguous. The "when your estimate jumps to full 5 TB" table is directly actionable. Calls out the EXPLAIN-vs-EXPLAIN-ANALYZE distinction the engineer specifically asked about. No factual errors detected — represents a clean recovery from iter290 Q1's date_trunc miss, with the corrected unwrap rules now flowing through to a related but distinct topic.
+
+Verified: trino.io/docs/current/connector/iceberg.html, trino.io/docs/current/sql/explain-analyze.html, trino.io/docs/current/release/release-477.html, trino.io/blog/2023/04/11/date-predicates.html, github.com/trinodb/trino/pull/14011.
+
+### Iter 291 Q1 — 2026-05-27 (EXTENDED PHASE) — SQL query best practices for OLAP (partition pruning: UnwrapCastInComparison DATE()/CAST() + UnwrapDateTruncInComparison date_trunc('day',ts) both SAFE; year()/month()/day_of_week()/hour() full scan; unwrap_casts removed in Trino 364 — always-on; TIMESTAMP range is defensive form)
+
+**Score: 4.75/5.0 PASS**
+
+**Topics updated**: SQL query best practices for OLAP — prior avg 4.095 across 4 questions (sum 16.38); new running avg (16.38 + 4.75) / 5 = 21.13 / 5 = **4.226 across 5 questions**. Status: PASSED (recovering — correct optimizer rules now accurately documented).
+
+**Strong recovery from iter290 Q1 (3.00 FAIL)**: answer correctly classifies DATE()/CAST() and date_trunc('day', ts) as SAFE via both optimizer rules; correctly identifies year()/month()/day_of_week()/hour() as always-broken non-monotonic functions; good EXPLAIN verification guidance.
+
+**One minor error**: answer claimed `unwrap_casts` session property = false disables the rules. This is incorrect — the property was removed in Trino 364 (PR #9550) and the rules are always-on in Trino 467. Resource 23 corrected to reflect this.
+
+Verified: trino.io/blog/2023/04/11/date-predicates.html, github.com/trinodb/trino/pull/14011, github.com/trinodb/trino/pull/9550.
+
+### Iter 291 Q2 — 2026-05-27 (EXTENDED PHASE) — SQL query best practices for OLAP (estimating Iceberg scan cost: mental math → $files metadata table → EXPLAIN ANALYZE 1-day sample; Physical Input field; constraint on vs ScanFilterProject; when estimate jumps to full table)
+
+**Score: 5.00/5.0 PASS**
+
+**Topics updated**: SQL query best practices for OLAP — prior avg 4.226 across 5 questions (sum 21.13); new running avg (21.13 + 5.00) / 6 = 26.13 / 6 = **4.355 across 6 questions**. Status: PASSED (solidifying — now tracking correctly above 4.0 avg).
+
+**Key findings**: `$files` metadata table with `file_size_in_bytes` — verified; `Physical Input: X GB` in EXPLAIN ANALYZE — verified (improved in Trino 477); mental math approach (table_size / total_days) — correct; EXPLAIN constraint vs ScanFilterProject distinction — correct; date_trunc unwrap rule in "safe" list — correct. Decision flow and numeric examples make the answer directly actionable.
+
+Verified: Iceberg connector docs, trino.io/docs/current/sql/explain-analyze.html, trino.io/docs/current/connector/iceberg.html.

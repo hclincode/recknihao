@@ -1,7 +1,7 @@
 {
-  "iteration": 291,
+  "iteration": 292,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter290 avg 4.00: Q1 (3.00 FAIL) date_trunc partition pruning — CRITICAL ERROR: Trino 467 has UnwrapDateTruncInComparison (PR #14011) so date_trunc('day',ts)=DATE'...' DOES prune; truly broken: year(), month(), day_of_week(). Q2 (5.00 PASS) JOIN ordering, broadcast join, CBO, ANALYZE NDV. SQL OLAP best practices topic: 4.095/4 (PASSED, trending down from Q1 failures). Resources 10 and 23 both re-corrected. RECURRING PATTERN: optimizer rule accuracy failures — need stable resource with all three unwrap rules documented."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter291 avg 4.875: Q1 (4.75 PASS) partition pruning functions — DATE()/CAST()/date_trunc safe; year()/month() broken; unwrap_casts removed in Trino 364. Q2 (5.0 PASS) scan cost estimation: $files metadata, EXPLAIN ANALYZE 1-day sample, Physical Input. SQL OLAP best practices: 4.095/4 → 4.355/6 (PASSED, recovering). Resource 23 fixed: unwrap_casts caveat corrected to always-on."
 }
