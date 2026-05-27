@@ -43,7 +43,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.474 | 99 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.623 | 16 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
-| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.493 | 237 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.496 | 239 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.763 | 4 |
 
 ---
@@ -9748,3 +9748,33 @@ Dimension scores: Technical accuracy 5/5, Beginner clarity 4.5/5, Completeness 5
 **Key findings**: Static schema limitation correctly explained — correct; UNION ALL generator with Python example — correct; system.query() with query=> named param and '' escaping — verified; Iceberg bucket(column, N) valid syntax — verified; identity partition metadata explosion risk vs bucket transform — verified. Tradeoffs table (effort/scalability/maintenance/freshness) — excellent structure. Minor gap: Python client library not named.
 
 Verified: trino.io/docs/current/connector/postgresql.html, trino.io/docs/current/connector/iceberg.html, iceberg.apache.org/spec.
+
+---
+
+## Iter 282 — 2026-05-27
+
+**Q1**: Trino federation to Postgres read replica — connection-url change, no replication lag awareness, external monitoring, replica vs primary use cases, schema caching
+**Answer**: `/Users/hclin/github/recknihao/training/answers/iter282-q1.md`
+**Score**: 4.85 / 5.0 — **PASS**
+
+Dimension scores: Technical accuracy 5/5, Beginner clarity 5/5, Completeness 5/5, Actionability 4/5.
+
+**Topics updated**: Trino federation — prior avg 4.493 across 237 questions; new running avg (4.493 × 237 + 4.85) / 238 = (1064.841 + 4.85) / 238 = **4.495 across 238 questions**. Status: NEEDS WORK (4.495 < 4.5 raised threshold). Gap: 0.005 (improved from 0.007).
+
+**Key findings**: connection-url change only — verified; Trino has no replication lag detection — correct; pg_stat_replication.replay_lag — verified; pg_last_wal_replay_lsn() — verified; replica vs primary use case guidance — correct; schema cache TTL=0s default — correct. Minor gap: no pg_is_in_recovery() check, no JDBC targetServerType alternative. Strong PASS.
+
+Verified: trino.io/docs/current/connector/postgresql.html, postgresql.org/docs/monitoring-stats, postgresql.org/docs/functions-admin.
+
+---
+
+**Q2**: UUID and JSONB type mapping — uuid→UUID native (use UUID literal), jsonb→JSON native (use json_extract_scalar/json_extract), no JSONB predicate pushdown, system.query() workaround, Iceberg for heavy analytics
+**Answer**: `/Users/hclin/github/recknihao/training/answers/iter282-q2.md`
+**Score**: 4.80 / 5.0 — **PASS**
+
+Dimension scores: Technical accuracy 5/5, Beginner clarity 4.5/5, Completeness 5/5, Actionability 4.5/5.
+
+**Topics updated**: Trino federation — prior avg 4.495 across 238 questions; new running avg (4.495 × 238 + 4.80) / 239 = (1069.81 + 4.80) / 239 = **4.496 across 239 questions**. Status: NEEDS WORK (4.496 < 4.5 raised threshold). Gap: 0.004 (improved from 0.005 — VERY CLOSE to threshold!).
+
+**Key findings**: uuid→UUID native — verified (PR #1011); jsonb→JSON native — verified (PR #81); json_extract_scalar / json_extract — verified; JSONB predicate no pushdown — verified; UUID literal `UUID '...'` syntax — verified; system.query() for server-side JSONB filtering — correct; Iceberg denormalization for heavy analytics — correct. Minor gap: json_value/json_query are modern alternatives to json_extract for strings; not mentioned but not an error.
+
+Verified: trino.io/docs/current/connector/postgresql.html, trino.io/docs/current/functions/json.html, trino.io/docs/current/optimizer/pushdown.html.
