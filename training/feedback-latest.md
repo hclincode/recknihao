@@ -1,102 +1,92 @@
-# Judge Feedback — Iter 330
+# Judge Feedback — Iter 331
 
 Date: 2026-05-27
 Phase: extended
-Topics: Iceberg table maintenance / $snapshots diagnostics (Q1) + Multi-tenant analytics / HMS startup-latency tuning (Q2)
+Topics: Iceberg table maintenance / history.expire.* Spark-only (Q1) + Multi-tenant analytics / Iceberg no metastore cache by design (Q2)
 
 ---
 
-## Q1 — Iceberg $snapshots diagnostics
+## Q1 — history.expire.* Properties: Spark Required, Not Trino
 
 ### Score
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 3.75 | Two Spark/Trino engine confusion errors: (1) `SET TBLPROPERTIES` is Spark SQL syntax, fails on Trino. (2) Trino's `SET PROPERTIES` does not accept `history.expire.*` properties — must use Spark. Core snapshot concepts, $snapshots query, maintenance order, and 7-day floor all verified correct. |
-| Beginner clarity | 4.75 | "Photograph" analogy and Day 1/2/3 immutability walkthrough are excellent. Column glossary plain-language. `"events$snapshots"` quoting note included. |
-| Practical applicability | 4.25 | Correct decision criteria, runnable diagnostic SQL, ordered runbook — but table-property SQL block fails on production Trino 467 as written. |
-| Completeness | 4.25 | Covers: snapshot definition, $snapshots columns, keep-vs-expire criteria, expire_snapshots order, maintenance runbook. Omits parent_id/manifest_list columns; no $refs/tags as pin mechanism; no retain_last Trino 479+ caveat. |
-| **Average** | **4.25** | **PASS** |
+| Technical accuracy | 5 | All four verification points pass: (1) Trino 467 SET PROPERTIES does not accept history.expire.* properties. (2) SET TBLPROPERTIES is correct Spark SQL syntax. (3) "events$properties" is the correct Trino metadata table for verification. (4) Floor semantics ("more conservative wins") are correct. |
+| Beginner clarity | 4 | Correctly explains why Trino rejects these and what to do instead. Minor gap: doesn't explain to a true beginner what "connector-level property" means in plain language. |
+| Practical applicability | 5 | Runnable Spark SQL block + Trino verification query. Fits on-prem Spark + Iceberg 1.5.2 stack. |
+| Completeness | 5 | Covers both parts of the question: which engine to use AND why Trino can't do it. Plus explains what the properties do. |
+| **Average** | **4.75** | **PASS** |
 
 ### What Worked
-- Snapshot "photograph" analogy and the Day 1/2/3 concrete example make immutability click for beginners.
-- `$snapshots` query is copy-pasteable and correct for Trino 467 including the `"events$snapshots"` double-quote requirement.
-- Columns `snapshot_id`, `committed_at`, `operation`, `summary` all accurate.
-- Keep-vs-expire decision rules are correct: time-travel queries in flight, audit-pinned snapshots, safety floor.
-- Maintenance order (compaction → expire_snapshots → remove_orphan_files → rewrite_manifests) is correct.
-- 7-day Trino 467 minimum-retention floor explicitly called out — the iter323 failure mode held this time.
+- Correctly routes to Spark SQL (`SET TBLPROPERTIES`) — the iter330 resource fix (ENGINE CALLOUT in resources/17) held perfectly.
+- Trino connector-level vs Iceberg-native table property distinction is explained correctly.
+- Verification via `"events$properties"` Trino metadata table — copy-pasteable and correct.
+- Floor semantics framing is clear: "table-level properties are sticky and durable, per-call arguments are one-off overrides."
+- No recurrence of iter330's Spark/Trino confusion.
 
 ### What Missed
-1. **`SET TBLPROPERTIES` is Spark syntax** — the example block says "-- Trino 467" but uses Spark SQL syntax. Fails with a parse error on Trino.
-2. **Trino's `SET PROPERTIES` doesn't accept `history.expire.*` properties** — even with the right keyword, these Iceberg-native table properties must be set from Spark. Double error in one block.
-3. `$snapshots` column list omits `parent_id` and `manifest_list` (both real columns per Trino docs).
-4. No mention of `$refs`/tags as the way to discover pinned snapshots before an aggressive expire run.
-5. No mention that `retain_last` argument requires Trino 479+ (this stack is 467 — must use Spark for that parameter).
+- "Connector-level Iceberg properties" is jargon a beginner won't know — a one-sentence plain-English explanation would close this ("Trino only recognizes its own catalog settings like how data is partitioned or what file format to use, not Iceberg's internal metadata management settings").
+- No mention of what happens if you accidentally set `history.expire.min-snapshots-to-keep` too conservatively and can't expire snapshots you need to — a brief "and here's how to unset it" would round out the answer.
 
 ### Technical Accuracy (verified)
-1. $snapshots columns (snapshot_id, committed_at, operation, summary) — CORRECT (also has parent_id, manifest_list — omitted, not wrong)
-2. Maintenance order compaction → expire → orphan → manifests — CORRECT
-3. 7-day Trino 467 minimum-retention floor — CORRECT
-4. `history.expire.min-snapshots-to-keep` / `history.expire.max-snapshot-age-ms` are real Iceberg properties — CORRECT, but must be set from Spark
-5. `FOR VERSION AS OF` time-travel syntax — CORRECT
-
-### Resource Fix Applied
-Fixed resources/17-iceberg-table-maintenance.md: added ENGINE CALLOUT block after the `SET TBLPROPERTIES` example clarifying it is Spark SQL only, that Trino's `SET PROPERTIES` does not accept `history.expire.*` properties, and how to verify via `"events$properties"` after setting from Spark.
+1. Trino 467 SET PROPERTIES rejects history.expire.* — CORRECT
+2. SET TBLPROPERTIES is correct Spark SQL syntax — CORRECT
+3. "events$properties" is correct Trino metadata table — CORRECT
+4. Properties act as a floor expire_snapshots cannot violate — CORRECT
 
 ### Rubric Update
-- Iceberg table maintenance: prior avg 4.574 across 25 questions → (4.574 × 25 + 4.25) / 26 = 118.60 / 26 = **4.561 across 26 questions**. Status: **PASSED** (mild downward drift; resource fix applied).
+- Iceberg table maintenance: prior avg 4.561 across 26 questions → (4.561 × 26 + 4.75) / 27 = 123.336 / 27 = **4.568 across 27 questions**. Status: **PASSED** (recovering from iter330 drop; fix held).
 
 ---
 
-## Q2 — HMS startup-latency tuning for multi-tenant Trino
+## Q2 — Iceberg Connector Has No Metastore Cache By Design
 
 ### Score
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 4.5 | All five load-bearing claims verified correct: per-query HMS contact (no Iceberg connector caching), port 9083, system.runtime.queries column names, HMS stateless architecture, 3-pod k8s HA pattern. No fabricated config properties. |
-| Beginner clarity | 4.5 | "Directory listing" mental model and 4-step query sequence are strong. SPOF acronym not expanded — minor gap for true beginners. |
-| Practical applicability | 4.5 | Priority-ordered fix list, kubectl commands, pg_stat_activity, and system.runtime.queries triage SQL all actionable. Fits on-prem k8s + MinIO + HMS stack. |
-| Completeness | 4.5 | Covers: what HMS is, why it's on the critical path, how to diagnose (kubectl + Trino system tables), Postgres backend tuning, HA pattern, REST catalog escape. Missing: `hive.metastore.uri` comma-separated failover form, concrete JVM heap number, Iceberg-vs-Hive caching contrast. |
-| **Average** | **4.5** | **PASS** |
+| Technical accuracy | 4.5 | All five major claims verified correct. Minor SQL drift: `execution_time_ms` is not a documented column of system.runtime.queries (use `queued_time_ms`, `analysis_time_ms`, `planning_time_ms`); `ORDER BY create_time DESC` should be `ORDER BY created DESC`. Both would fail at runtime. Resource/18 has correct column names — answer drifted slightly from it. |
+| Beginner clarity | 4.5 | "Directory listing" mental model and snapshot-consistency reason are clear. "SPOF" expanded in context. |
+| Practical applicability | 5.0 | Comma-separated hive.metastore.uri config, kubectl diagnosis, phase timing SQL, REST catalog migration path — all actionable. |
+| Completeness | 4.5 | Covers: is the caching difference real, why no Iceberg cache, what 5-10s actually means, diagnosis, HMS HA, REST catalog. Minor gap: no mention of JVM heap sizing or concrete Postgres connection pool tuning. |
+| **Average** | **4.625** | **PASS** |
 
 ### What Worked
-- "HMS is the directory; MinIO is the building" mental model maps cleanly to the rest.
-- Per-query HMS contact / no caching framing is technically correct (verified against trinodb/trino#13115).
-- Postgres-as-real-bottleneck callout is correct and highest-leverage.
-- HA recipe (3 stateless HMS pods + HA Postgres) matches resource 21 and verified patterns.
-- No fabricated config properties — clean run on a topic with prior fabrication history.
-- Diagnosis SQL (system.runtime.queries phase timings) gives engineer an immediate triage path.
+- Correct reframe: "the missing cache is NOT what's causing your pause; the HMS call is cheap when healthy — something upstream is wrong."
+- Snapshot consistency reason for no cache is explained correctly and clearly.
+- trinodb/trino#13115 citation for the intentional no-cache decision.
+- Comma-separated `hive.metastore.uri` failover config included (gap from iter330 Q2 filled).
+- REST catalog (Polaris, Lakekeeper, Nessie) as long-term escape — correct and fits on-prem k8s stack.
+- No fabricated config properties.
 
 ### What Missed
-- "SPOF" not expanded on first use — beginner may not know "single point of failure."
-- `hive.metastore.uri` comma-separated form not mentioned (Trino-side failover config knob).
-- No concrete JVM heap number suggested (just "often too small").
-- Iceberg-vs-Hive caching nuance implicit: Iceberg connector deliberately has no caching (to preserve snapshot correctness); Hive connector has `hive.metastore-cache-ttl`. Without this contrast, readers may try to apply Hive cache settings to an Iceberg catalog.
-- No mention of HMS table-count scaling: with 80 tenants × many tables, HMS's backing Postgres `TBLS`/`SDS` tables can grow large enough to slow lookups without proper indexes.
+1. **SQL column name drift**: `execution_time_ms` is not a valid column in `system.runtime.queries` (documented columns are `queued_time_ms`, `analysis_time_ms`, `planning_time_ms`, `execution_time`). `ORDER BY create_time DESC` should be `ORDER BY created DESC`. Both would fail at runtime. Resource/18 is correct; the answer drifted from it.
+2. No Iceberg-vs-Hive caching contrast statement ("Hive connector has `hive.metastore-cache-ttl`; Iceberg connector deliberately does not") as a direct explicit sentence — it's implied but not stated as plainly as it could be.
+3. No concrete JVM heap number for HMS pods serving 80 tenants.
 
 ### Technical Accuracy (verified)
-1. Per-query HMS contact, no Iceberg connector caching — CONFIRMED (trinodb/trino#13115)
-2. Port 9083 default Thrift port — CONFIRMED (Apache Hive docs, Starburst k8s docs)
-3. system.runtime.queries columns (queued_time_ms, analysis_time_ms, planning_time_ms, execution_time_ms) — CONFIRMED
-4. HMS is stateless; multiple instances = HA — CONFIRMED (Apache Hive admin guide)
-5. 3-pod HA pattern for on-prem k8s — CONFIRMED (Starburst HMS-on-k8s docs)
+1. Hive connector has hive.metastore-cache-ttl — CORRECT
+2. Iceberg connector intentionally has no metastore cache (trinodb/trino#13115) — CORRECT
+3. Snapshot consistency is the reason — CORRECT (metadata pointer changes on every write)
+4. Comma-separated hive.metastore.uri is valid Trino failover config — CORRECT (Trino release 346+)
+5. system.runtime.queries has queued_time_ms, analysis_time_ms, planning_time_ms — CORRECT (but execution_time_ms is wrong; it's execution_time or similar)
 
 ### Rubric Update
-- Multi-tenant analytics: prior avg 4.478 across 125 questions → (4.478 × 125 + 4.5) / 126 = 564.25 / 126 = **4.478 across 126 questions**. Status: **PASSED** (stable).
+- Multi-tenant analytics: prior avg 4.478 across 126 questions → (4.478 × 126 + 4.625) / 127 = 568.853 / 127 = **4.479 across 127 questions**. Status: **PASSED** (stable, slight upward drift).
 
 ---
 
-## Iter 330 Summary
+## Iter 331 Summary
 
-**Iter 330 average: (4.25 + 4.50) / 2 = 4.375 — PASS** ✓ (Q1 PASS / Q2 PASS)
+**Iter 331 average: (4.75 + 4.625) / 2 = 4.6875 — PASS** ✓ (Q1 PASS / Q2 PASS)
 
 ### Notable
-- Q1 4.25: $snapshots diagnostics — the recurring Spark/Trino engine confusion struck again (`SET TBLPROPERTIES` labeled as Trino). Resources/17 now has an ENGINE CALLOUT. The pattern: write-mode properties (iter317) → partition evolution (iter323) → now `history.expire.*` properties. All three are the same class of error.
-- Q2 4.50: HMS startup tuning — solid and correct, no fabricated config properties. The no-caching-for-Iceberg-connector point was correctly identified and is the key technical fact.
+- Q1 4.75: history.expire.* Spark-only fix — the iter330 ENGINE CALLOUT in resources/17 held perfectly. The recurring Spark/Trino confusion class of errors has been addressed in resources/17 three times; the latest probe was clean.
+- Q2 4.625: Iceberg no-HMS-cache by design — correct conceptually, but two SQL column names drifted from what resource/18 documents. Resource/18 is already correct; this is a responder drift error, not a resource bug.
 
 ### Resource fixes applied this iteration
-- **resources/17-iceberg-table-maintenance.md**: Added ENGINE CALLOUT clarifying that `SET TBLPROPERTIES` for `history.expire.*` properties must be run from Spark SQL, NOT Trino 467. Trino's `SET PROPERTIES` does not accept these Iceberg-native table properties.
+None needed. Resources/17 iter330 fix verified holding. Resources/18 already has correct column names — no fix needed.
 
-### Suggested focus for Iter 331
-- **Iceberg table maintenance** (4.561/26, drifting): probe the fix — ask directly about setting `history.expire.min-snapshots-to-keep` and verify the responder now correctly routes to Spark. Or probe the `$refs` metadata table for discovering pinned snapshots before an expire run.
-- **Multi-tenant analytics** (4.478/126): probe HMS-specific Iceberg connector caching — why the Iceberg connector has no metastore cache while the Hive connector does, and what this means for multi-tenant query planning latency.
-- **Postgres-to-Iceberg ingestion** (4.496/117): probe `offset.flush.interval.ms` at-least-once delivery gap and how to absorb it, or probe the snapshot-rows null LSN case in CDC dedup (identified as a gap in iter329).
+### Suggested focus for Iter 332
+- **Postgres-to-Iceberg ingestion** (4.496/117, not probed since iter329): probe `offset.flush.interval.ms` at-least-once delivery gap, or probe snapshot-row null LSN behavior in CDC dedup (identified as a gap in iter329 but never directly probed).
+- **Multi-tenant analytics** (4.479/127): probe `hive.metastore-cache-ttl` usage on the Hive connector — when it helps, what the tradeoffs are, and how to avoid serving stale data. Or probe connection pool sizing for HMS backing Postgres at 80-tenant scale.
+- **Iceberg table maintenance** (4.568/27, recovering): probe `$history` metadata table vs `$snapshots` — which to use for "which snapshot was live at time T" reconstruction (identified as a gap in iter330).

@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.478 | 126 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.479 | 127 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
@@ -41,7 +41,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.496 | 117 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.561 | 26 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.568 | 27 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
@@ -50,6 +50,42 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 331 — 2026-05-27
+
+**Q1** — Iceberg table maintenance: history.expire.* must be set from Spark (SET TBLPROPERTIES), not Trino; Trino SET PROPERTIES only accepts connector-level properties; verification via "events$properties"; floor semantics ("more conservative wins").
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.75** — PASS |
+
+Iter330 resource fix (ENGINE CALLOUT in resources/17) held perfectly — no Spark/Trino engine confusion recurred. All four verification points pass: Trino 467 SET PROPERTIES does not accept history.expire.* properties; SET TBLPROPERTIES is correct Spark syntax; "events$properties" is the correct Trino metadata table; floor semantics verified. Minor clarity gap: beginner engineers who already know Spark vs Trino don't need the explanation, but new engineers need more context on what "connector-level" means. Topic running avg: (4.561×26 + 4.75)/27 = **4.568/27 questions** — PASSED (recovering from iter330 drop).
+
+**Q2** — Multi-tenant analytics: Iceberg connector has no HMS metastore cache by design (snapshot consistency); Hive connector has hive.metastore-cache-ttl; HMS call is cheap (<10ms); 5-10s pause means HMS health issue not a caching problem; comma-separated hive.metastore.uri; REST catalog migration path.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.625** — PASS |
+
+All five major technical claims verified: Hive connector has hive.metastore-cache-ttl; Iceberg intentionally has no cache (trinodb/trino#13115); snapshot consistency is the correct reason; comma-separated hive.metastore.uri is valid failover config; system.runtime.queries has phase timing columns. Minor SQL drift: `execution_time_ms` is not a documented column of system.runtime.queries (should be omitted), and `ORDER BY create_time DESC` should be `ORDER BY created DESC` — both would fail at runtime. Resource/18 has correct column names; answer drifted slightly from it. Topic running avg: (4.478×126 + 4.625)/127 = **4.479/127 questions** — PASSED (stable, slight upward drift).
+
+**Iter 331 average: (4.75 + 4.625) / 2 = 4.6875 — PASS** ✓ (Q1 PASS / Q2 PASS)
+
+**Topics updated**:
+- Iceberg table maintenance: 4.561/26 → **4.568/27 questions** (PASSED — recovering; iter330 resource fix held)
+- Multi-tenant analytics: 4.478/126 → **4.479/127 questions** (PASSED — stable, slight upward drift)
+
+**Resource fixes this iteration**: None needed (resources/17 fix from iter330 verified holding). Note: system.runtime.queries column names in iter331-q2 drifted (`execution_time_ms`, `create_time`) — resource/18 is already correct; no fix needed.
+
+---
 
 ### Iter 330 — 2026-05-27
 
