@@ -40,8 +40,8 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.492 | 113 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.552 | 21 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.494 | 114 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.561 | 22 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
@@ -50,6 +50,42 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 324 — 2026-05-27
+
+**Q1** — Trino 467 vs Spark for Iceberg maintenance: `retention_threshold` only on Trino 467, `retain_last`/`clean_expired_metadata` Trino 479+, `rewrite_manifests` Trino 470+, Spark as the path for all 467 limitations, Trino/Spark dry_run asymmetry
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.75** — PASS |
+
+All five verification points confirmed: `retain_last`/`clean_expired_metadata` are Trino 479+; `rewrite_manifests` is Trino 470+; 7-day floor applies to both procedures; Spark `CALL iceberg.system.expire_snapshots(... retain_last => N)` is canonical; Trino `remove_orphan_files` has no `dry_run`. Resources/17 fix from iter323 held under direct probe. Topic running avg: (4.552×21 + 4.75)/22 = **4.561/22 questions** — PASSED (recovering from iter323 drop).
+
+**Q2** — JSONB column ingestion into Iceberg: store-as-VARCHAR vs flatten-hot-fields, `json_extract_scalar` vs `JSON_VALUE`, PySpark `get_json_object`, `ADD COLUMN` metadata-only for new fields, backfill pattern
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** — PASS |
+
+All key claims verified: `JSON_VALUE` and `json_extract_scalar` are real Trino functions; `get_json_object` is correct PySpark; Parquet stores JSON as opaque string with no per-field statistics (verified against Parquet spec); Iceberg `ADD COLUMN` is metadata-only with NULL for existing rows. Decision rule ("flatten what you filter/group on, keep rest in raw") is actionable and correct. Topic running avg: (4.492×113 + 4.75)/114 = **4.494/114 questions** — PASSED.
+
+**Iter 324 average: 4.75 — PASS** ✓ (clean recovery from two consecutive barely-PASS iterations)
+
+**Topics updated**:
+- Iceberg table maintenance: 4.552/21 → **4.561/22 questions** (PASSED — recovering from iter323 version-constraint failure)
+- Postgres-to-Iceberg ingestion: 4.492/113 → **4.494/114 questions** (PASSED — improving)
+
+**Resource fixes this iteration**: None (resources/17 fix from iter323 held; no new fabrications caught)
+
+---
 
 ### Iter 323 — 2026-05-27
 

@@ -1,7 +1,7 @@
 {
-  "iteration": 324,
+  "iteration": 325,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter323 avg 3.625 (barely PASS): Q1 (4.75) OPA revocation — resource fix held, no cache-ttl fabrication, correct no-cache model; Q2 (2.50 FAIL) Iceberg first-run expiry — retain_last and clean_expired_metadata are Trino 479+ only, not available on prod Trino 467. Fixed resources/17 with Trino version availability table. Multi-tenant: 4.465/121. Iceberg maintenance: 4.552/21."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter324 avg 4.75 — clean recovery: Q1 (4.75) Trino 467 vs Spark maintenance — resources/17 version-availability fix held; Q2 (4.75) JSONB column ingestion — all claims verified. Iceberg table maintenance: 4.561/22. Postgres-to-Iceberg: 4.494/114. Multi-tenant: 4.465/121."
 }
