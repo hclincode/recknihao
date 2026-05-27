@@ -674,6 +674,10 @@ The same applies to `ADD COLUMN` (the new column is invisible to Trino until the
 When the cache TTL is non-zero and you have just performed a Postgres schema change, you do **not** have to wait for the TTL to elapse or restart the cluster. OSS Trino 467 ships a system procedure (added in Trino 369, present in every release since) that invalidates the metadata cache on demand.
 
 > **CRITICAL — `flush_metadata_cache` on the PostgreSQL connector is PARAMETERLESS.** Named parameters like `schema_name => 'public'` and `table_name => 'accounts'` **do NOT exist** on the PostgreSQL (or MySQL, SQL Server, Oracle) connector — they only work on the **Hive** and **Delta Lake** connectors. Trying to call the parameterless procedure with named parameters fails with `Procedure should only be invoked with named arguments` or `line X:Y: Procedure not registered`. To flush a single table on PostgreSQL, you scope via `USE <catalog>.<schema>` first, then call the parameterless form. Source: [trino.io/docs/current/connector/postgresql.html](https://trino.io/docs/current/connector/postgresql.html) (section "PostgreSQL connector — Procedures").
+>
+> **At-a-glance distinction (memorize this):**
+> - **PostgreSQL connector (and MySQL / SQL Server / Oracle JDBC connectors):** `CALL app_pg.system.flush_metadata_cache();` — **parameterless**, flushes the **entire catalog's** metadata cache (all-or-nothing; you cannot scope to a single schema or table on the JDBC connectors).
+> - **Hive / Delta Lake connectors:** accept `schema_name =>` and `table_name =>` named parameters for **scoped flush** of a specific schema or table, e.g. `CALL hive.system.flush_metadata_cache(schema_name => 'sales', table_name => 'orders');`.
 
 ```sql
 -- CORRECT for PostgreSQL connector (parameterless) — flush the entire catalog cache:
@@ -736,8 +740,8 @@ iceberg.metadata-cache.enabled=true
 | Property | What it controls | Tuning guidance |
 |---|---|---|
 | `iceberg.metadata-cache.enabled` | Master switch for the cache. Default `true`. | Set to `false` only if you have very frequent external writes (Spark/Flink committing every few seconds) AND can tolerate the planning-time S3/HMS overhead per query. |
-| `fs.memory-cache.ttl` | How long cached metadata files live in memory before being re-fetched. **This is the staleness window.** | Lower it to reduce staleness; raise it to reduce S3 reads. Typical prod values: `60s`–`10m`. |
-| `fs.memory-cache.max-size` | Maximum total bytes the cache may hold. | `512MB`–`2GB` is typical for medium-traffic clusters. Size for the number of hot tables × average metadata.json + manifests size. |
+| `fs.memory-cache.ttl` | How long cached metadata files live in memory before being re-fetched. **This is the staleness window.** Default: **1 hour (`3600s`)**. | Lower it to reduce staleness; raise it to reduce S3 reads. Typical prod values: `30s`–`60s` for frequently-written tables, leave at the `1h` default for read-heavy tables. |
+| `fs.memory-cache.max-size` | Maximum total bytes the cache may hold. Default: **2% of the JVM `-Xmx` max heap** (NOT a fixed byte value — it scales with coordinator heap; e.g., 24GB heap → ~480MB cache). | Override with an explicit byte value (`512MB`, `1GB`, `2GB`) if you want a deterministic cap independent of heap sizing. Size for the number of hot tables × average metadata.json + manifests size. |
 | `fs.memory-cache.max-content-length` | Maximum size per single cached file. Files bigger than this bypass the cache. | Default is usually sufficient; raise if you have unusually large manifest files. |
 
 **3. Staleness after external writes (Spark, Flink, other Iceberg writers).**
@@ -748,7 +752,7 @@ This is the failure mode that lands tickets in your queue:
 3. Queries against the Iceberg table from Trino return the snapshot Spark just OVERWROTE, not the new one. New rows appear missing. Compaction commits look like they "didn't run."
 4. **The definitive tell**: if **restarting the Trino coordinator** makes the stale data go away, the in-memory metadata cache is the cause — a coordinator restart flushes the in-process cache. If a restart does NOT fix it, the issue is elsewhere (HMS pointer not updated, wrong catalog, Spark commit failed, etc.).
 
-**The staleness window equals `fs.memory-cache.ttl`** (default varies by Trino version; typical range is 10 minutes to 1 hour). Snapshot commits made within this window after a Trino query may be invisible until the TTL elapses.
+**The staleness window equals `fs.memory-cache.ttl`** (default in Trino 467: **1 hour / `3600s`**). Snapshot commits made within this window after a Trino query may be invisible until the TTL elapses — which is why the default is too long for tables with frequent external Spark/Flink writes; drop it to `30s`–`60s` per the remediation table below.
 
 **4. NO SQL `flush_metadata_cache()` for Iceberg.**
 This is the single most-confused point and it deserves its own line:
@@ -4422,8 +4426,28 @@ This raises the build-side row limit so larger builds still produce a DF (often 
 | `hive.dynamic_filtering_wait_timeout` / `delta.dynamic_filtering_wait_timeout` (Hive / Delta probe) | **`1s`** | Same as Iceberg — lakehouse connectors share the 1s "don't block" default. Raise for batch. |
 | `<pgcatalog>.domain_compaction_threshold` (e.g. `app_pg.domain_compaction_threshold`) | `256` | Build side has hundreds-to-thousands of distinct values and the IN-list-to-range degradation is killing probe pruning. Raise carefully. **Must use the catalog prefix in SET SESSION** — connector property, not system property. |
 | `enable_large_dynamic_filters` (system property — NO catalog prefix) | `false` | Build side is in the millions and no DF is being generated at all. Turn on, accept range-form DF. This is one of the few DF-related session properties that is system-level, so bare form is correct here. |
+| `join_distribution_type` (system property — NO catalog prefix) | `AUTOMATIC` (CBO-determined; usually `PARTITIONED` for large or unknown-size builds) | The CBO picked the **wrong build/probe assignment** because statistics are missing or stale — and DF therefore fires on the wrong (or no) side. Force `BROADCAST` to guarantee the smaller table becomes the build side: `SET SESSION join_distribution_type = 'BROADCAST';`. BROADCAST replicates the small build to every worker (so every worker has the full IN-list), which means **DF is guaranteed to fire and is at its most precise**. Use this when you KNOW one side is small (a filtered Postgres/MySQL dimension lookup) but haven't run `ANALYZE` yet — it's the fastest unstuck for a stats-broken cross-catalog join. |
 
-If you remember nothing else: **a missing DF is almost always either (a) build side too slow → bumped into `wait-timeout`, or (b) build side too large → exceeded the row cap (`enable_large_dynamic_filters` needed) or got compacted to a range (`domain_compaction_threshold`)**.
+> **`join_distribution_type` — the fastest CBO-bypass when DF isn't firing because the CBO guessed wrong.** Dynamic filtering depends on the CBO correctly identifying the smaller side as the build (DF flows build → probe; if the CBO inverts this, DF prunes nothing useful or doesn't generate at all). The CBO uses table statistics to size each side; when statistics are missing or stale (e.g., a freshly-created Iceberg table without `ANALYZE`, or a MySQL table where `information_schema.STATISTICS` lacks the histograms Trino needs), the CBO falls back to deterministic heuristics that frequently pick `PARTITIONED` (both sides shuffled by join key) and may invert the build/probe assignment. Symptom: `EXPLAIN ANALYZE` shows `dynamicFilterSplitsProcessed = 0` on the side you expected to be the probe, OR the build side in `EXPLAIN` is the large Iceberg fact instead of the small Postgres dimension.
+>
+> **Fix — force BROADCAST at session level:**
+>
+> ```sql
+> -- System session property — NO catalog prefix.
+> SET SESSION join_distribution_type = 'BROADCAST';
+> -- Now run your federated join — the smaller table is guaranteed to become the build (fully scanned and
+> -- replicated to every worker), DF will fire at maximum precision (full IN-list per worker, no per-partition
+> -- merging), and the large probe side is pruned by the resulting filter.
+> ```
+>
+> **What the three values mean:**
+> - **`AUTOMATIC` (default)**: CBO picks BROADCAST or PARTITIONED based on the estimated build-side size vs. `join_max_broadcast_table_size` (default `100MB`). Requires accurate stats to make the right call.
+> - **`BROADCAST`**: Force the smaller table to be replicated to every worker as the build side. Guarantees DF fires with the full IN-list. Safe when the small side is comfortably under per-worker memory (a few hundred MB at most).
+> - **`PARTITIONED`**: Force both sides to be hash-redistributed by join key. Use only for genuinely large × large joins where neither side fits in worker memory; DF still works but per-worker IN-lists must be merged (weaker DF precision).
+>
+> **When to reach for it.** Use `BROADCAST` as a tactical workaround **before** the proper fix (running `ANALYZE TABLE iceberg.analytics.events` on Iceberg, `ANALYZE accounts` on the Postgres primary, then flushing the Trino metadata cache). It gets the slow federated query unstuck in seconds while you queue the underlying stats fix. Reset (`RESET SESSION join_distribution_type;`) once `ANALYZE` has run and the CBO can compute costs accurately. See Section 5.5 for the full broadcast-vs-partitioned discussion, the `join_max_broadcast_table_size` threshold, and the safety bounds (don't BROADCAST a build side over ~1GB — it will OOM workers).
+
+If you remember nothing else: **a missing DF is almost always either (a) build side too slow → bumped into `wait-timeout`, or (b) build side too large → exceeded the row cap (`enable_large_dynamic_filters` needed) or got compacted to a range (`domain_compaction_threshold`), or (c) CBO picked the wrong build/probe assignment because stats are missing → force `SET SESSION join_distribution_type = 'BROADCAST';` to guarantee the smaller side becomes the build and DF fires correctly**.
 
 ### 5.5 Broadcast vs partitioned join — interaction with dynamic filtering
 

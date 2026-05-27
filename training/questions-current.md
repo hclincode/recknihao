@@ -1,9 +1,9 @@
-# Iter 279 Questions
+# Iter 280 Questions
 
-## Q1 — Stale dashboard data after Spark writes to Iceberg
+## Q1 — Strange Trino errors after adding a jsonb column to Postgres
 
-We have a Spark pipeline that runs every 10 minutes and writes new rows into an Iceberg table on S3. The problem is that when I query that table through Trino right after the pipeline finishes, I sometimes still see the old data for another 10-15 minutes. If I restart the Trino coordinator, the fresh data shows up immediately. Is there some kind of cache that Trino is holding onto? I do not want to restart the coordinator every time our pipeline runs -- that would take down all our queries. Is there a way to tell Trino to refresh or drop whatever it is caching, maybe through a SQL command or some config we can tune?
+We have a `users` table in Postgres with a `preferences` column that's of type `jsonb`. When I try to query that table through Trino, the query errors out or sometimes that column just silently doesn't show up in the results. I'm not even sure if Trino supports jsonb — it's not a standard SQL type. Is there a way to make this work, or do we need to change how we store that data? And if some column types just aren't supported, how would I even know which ones are being dropped versus which ones cause an outright error?
 
-## Q2 — Why does join order matter so much between Postgres and Iceberg tables
+## Q2 — Trino not seeing a new column we added to Postgres
 
-We noticed something weird with a query that joins a large Postgres events table (about 200M rows) against a small Iceberg lookup table (maybe 50k rows of customer segments). When we write the join with Iceberg on the right side, the query is fast -- maybe 8 seconds. But when we flip it so Postgres is on the right side and Iceberg is on the left, it gets really slow, like 2+ minutes. I figured joins were symmetric so this should not matter. Is Trino doing something special based on which table is on which side? Is there a way to control this behavior, or do we just have to remember to always write joins in a specific order?
+We added a column to one of our Postgres tables with `ALTER TABLE ... ADD COLUMN` and deployed it. Our app can read and write to it fine through the normal Postgres connection, but when we query the same table through Trino, the column doesn't exist — Trino just says it's not there or returns without it. We restarted nothing on the Trino side. Is Trino caching the table structure somewhere? If so, is there a way to force it to refresh without restarting the whole cluster?

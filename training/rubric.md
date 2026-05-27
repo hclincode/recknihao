@@ -43,7 +43,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.474 | 99 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.623 | 16 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
-| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.489 | 233 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.490 | 235 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.763 | 4 |
 
 ---
@@ -9688,3 +9688,33 @@ Dimension scores: Technical accuracy 5/5, Beginner clarity 5/5, Completeness 5/5
 **Key findings**: DF mechanism (build side collects keys, pushes IN-list to probe scan) — verified; INNER/RIGHT = DF enabled; LEFT/FULL OUTER = DF disabled — verified; optimizer decides build/probe (not SQL order) — verified; iceberg.dynamic-filtering.wait-timeout=1s default — verified; underscore vs hyphen in session vs catalog property — correct. Minor gap: no mention of join_distribution_type session property or domain-compaction-threshold for large IN-lists.
 
 Verified: trino.io/docs/current/admin/dynamic-filtering.html, trino.io/docs/current/connector/iceberg.html.
+
+---
+
+## Iter 280 — 2026-05-27
+
+**Q1**: Postgres type mapping — jsonb→JSON native, IGNORE silent drop, CONVERT_TO_VARCHAR fix, enum→VARCHAR native, array-mapping (DISABLED/AS_ARRAY/AS_JSON)
+**Answer**: `/Users/hclin/github/recknihao/training/answers/iter280-q1.md`
+**Score**: 4.95 / 5.0 — **PASS**
+
+Dimension scores: Technical accuracy 5/5, Beginner clarity 5/5, Completeness 5/5, Actionability 4.75/5.
+
+**Topics updated**: Trino federation — prior avg 4.489 across 233 questions; new running avg (4.489 × 233 + 4.95) / 234 = (1045.937 + 4.95) / 234 = **4.491 across 234 questions**. Status: NEEDS WORK (4.491 < 4.5 raised threshold). Gap: 0.009 (improved from 0.011).
+
+**Key findings**: jsonb→JSON natively — verified; IGNORE default → silent drop — verified; CONVERT_TO_VARCHAR fix — verified; array-mapping DISABLED/AS_ARRAY/AS_JSON — verified; enum→VARCHAR native — verified. Excellent diagnostic flow: Postgres \d vs Trino DESCRIBE + JDBC DEBUG logging. Correct naming convention (hyphens in catalog file, underscores in session property). Near-perfect answer.
+
+Verified: trino.io/docs/current/connector/postgresql.html.
+
+---
+
+**Q2**: Postgres schema cache — metadata.cache-ttl, flush_metadata_cache() for Postgres (no params on JDBC connector), coordinator-only, SELECT* view freeze, TTL tuning
+**Answer**: `/Users/hclin/github/recknihao/training/answers/iter280-q2.md`
+**Score**: 4.30 / 5.0 — **FAIL**
+
+Dimension scores: Technical accuracy 4/5, Beginner clarity 5/5, Completeness 5/5, Actionability 3/5.
+
+**Topics updated**: Trino federation — prior avg 4.491 across 234 questions; new running avg (4.491 × 234 + 4.30) / 235 = (1050.894 + 4.30) / 235 = **4.490 across 235 questions**. Status: NEEDS WORK (4.490 < 4.5 raised threshold). Gap: 0.010 (regressed slightly from 0.009).
+
+**Key findings**: flush_metadata_cache() existence for PostgreSQL connector — correct; metadata.cache-ttl default=0s — correct; SELECT* view freeze problem — correct; Iceberg contrast (no flush for Iceberg) — correct. Error: included `schema_name => ..., table_name => ...` named parameters in the PostgreSQL flush call — those parameters exist for Delta Lake/Hive connectors but NOT for the JDBC-based PostgreSQL connector. PostgreSQL flush is parameterless: `CALL app_pg.system.flush_metadata_cache();`. Engineer following the scoped example would hit an argument error.
+
+Verified: trino.io/docs/current/connector/postgresql.html, trino.io/docs/current/connector/delta-lake.html.

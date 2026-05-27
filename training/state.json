@@ -1,7 +1,7 @@
 {
-  "iteration": 280,
+  "iteration": 281,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter279 avg 4.80: Q1 (4.75 PASS) Iceberg metadata cache — iceberg.metadata-cache.enabled=true, no SQL flush, fs.memory-cache.ttl (default 1h documented, answer said ~10-60min — minor error), coordinator restart evidence. Q2 (4.85 PASS) dynamic filtering — build/probe, IN-list push, INNER/RIGHT enabled, LEFT/FULL OUTER disabled, wait-timeout 1s. TOPIC: Trino federation 4.489/233, gap 0.011. Need ~5-6 more at 4.875+ to cross 4.500. Resource fix nice-to-have: correct TTL default (1h) and max-size default (2% heap); add join_distribution_type."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter280 avg 4.625: Q1 (4.95 PASS) Postgres type mapping — near-perfect; jsonb→JSON, IGNORE/CONVERT_TO_VARCHAR, array-mapping. Q2 (4.30 FAIL) flush_metadata_cache() — wrong: included schema_name/table_name params (only for Hive/Delta, NOT for JDBC/PostgreSQL connector). PostgreSQL flush is parameterless. Resource fixed by teacher281. TOPIC: Trino federation 4.490/235, gap 0.010. Need ~5 more at 4.875+ to cross 4.500."
 }
