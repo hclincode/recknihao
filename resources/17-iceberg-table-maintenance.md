@@ -535,6 +535,33 @@ The `older_than` parameter (default 3 days) protects in-flight writes — a Spar
 
 **What it does:** Iceberg's manifest files list which data files belong to a snapshot and carry per-column min/max statistics. After hundreds of writes, you can have hundreds of small manifests. Trino must read all of them during query planning to decide which data files to skip — this becomes the bottleneck on tables with lots of writes.
 
+> **ENGINE NOTE — `rewrite_manifests` is Spark-only on this stack (Trino 467 does NOT have it).** Unlike the other three maintenance procedures (`rewrite_data_files` / `optimize`, `expire_snapshots`, `remove_orphan_files`), which all have a working `ALTER TABLE ... EXECUTE ...` form in Trino 467, **`rewrite_manifests` has NO Trino 467 equivalent.** Engine availability at a glance:
+>
+> | Engine | Status for `rewrite_manifests` |
+> |---|---|
+> | **Spark SQL (any recent version, including Iceberg 1.5.2)** | **Available.** Run via `CALL iceberg.system.rewrite_manifests(table => 'analytics.events')`. |
+> | **Trino 470+** (Feb 2025 and later) | Available as `ALTER TABLE iceberg.analytics.events EXECUTE optimize_manifests` — note the different procedure name (`optimize_manifests`, not `rewrite_manifests`). |
+> | **Trino 467 (the production version on this stack)** | **NOT available — must use Spark.** Both `CALL iceberg.system.rewrite_manifests(...)` and `ALTER TABLE ... EXECUTE optimize_manifests` fail on Trino 467 with `Procedure not registered` / syntax errors. |
+>
+> **What to actually run on this stack — the correct Spark call syntax:**
+>
+> ```sql
+> -- Spark SQL (the ONLY working form on this stack until Trino is upgraded to 470+).
+> -- Submit via spark-sql CLI, spark-submit, or spark.sql("...") in a Spark job.
+> CALL iceberg.system.rewrite_manifests(table => 'analytics.events');
+> ```
+>
+> **Contrast with the other three routine procedures — these DO work in Trino 467:**
+>
+> | Procedure | Trino 467 syntax (works) | Spark syntax (also works) |
+> |---|---|---|
+> | Compaction | `ALTER TABLE iceberg.analytics.events EXECUTE optimize` | `CALL iceberg.system.rewrite_data_files(table => 'analytics.events')` |
+> | Expire snapshots | `ALTER TABLE iceberg.analytics.events EXECUTE expire_snapshots(retention_threshold => '30d')` | `CALL iceberg.system.expire_snapshots(table => 'analytics.events', older_than => ...)` |
+> | Remove orphan files | `ALTER TABLE iceberg.analytics.events EXECUTE remove_orphan_files(retention_threshold => '7d')` | `CALL iceberg.system.remove_orphan_files(table => 'analytics.events', older_than => ...)` |
+> | **Rewrite manifests** | **NOT AVAILABLE on Trino 467 — use Spark** | `CALL iceberg.system.rewrite_manifests(table => 'analytics.events')` |
+>
+> **Operational implication:** if your weekly maintenance job runs entirely from Trino, the first three steps work natively but the manifest-rewrite step MUST be issued from a Spark session. Typical patterns: (a) run the entire weekly job from Spark (simplest — same engine for all four steps); or (b) run steps 1–3 from Trino and add a separate Spark job for step 4 (requires the scheduler to switch engines mid-window).
+
 ```sql
 -- Spark SQL syntax (run via spark-submit or spark-sql).
 -- Trino 467: NO equivalent — must run from Spark.

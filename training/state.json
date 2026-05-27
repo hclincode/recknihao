@@ -1,7 +1,7 @@
 {
-  "iteration": 346,
+  "iteration": 347,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter345 avg 5.00 PERFECT STRONG PASS (first-ever perfect iteration). Iceberg maintenance: 4.592/35. Multi-tenant: 4.458/138. Postgres-to-Iceberg: 4.505/126. Suggested focus for iter346: (1) Iceberg maintenance — rewrite_manifests Spark-only on Trino 467 (add engine-availability note to resources/17); (2) Multi-tenant — userGroup selector field; (3) Postgres-to-Iceberg — type change (VARCHAR→TEXT widening) or column drop."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter346 avg 5.00 PERFECT STRONG PASS (second consecutive perfect iteration). Iceberg maintenance: 4.603/36. Multi-tenant: 4.458/138. Postgres-to-Iceberg: 4.509/127. Suggested focus for iter347: (1) Multi-tenant analytics (weakest, 4.458/138) — userGroup selector, session property manager vs resource group memory limits, OPA enforcement of SET SESSION; (2) Postgres-to-Iceberg — column rename through Debezium CDC, or column drop behavior; (3) Iceberg maintenance (4.603/36) — ANALYZE TABLE + Puffin statistics, or concurrent maintenance safety."
 }

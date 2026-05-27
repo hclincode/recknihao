@@ -40,8 +40,8 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.505 | 126 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.592 | 35 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.509 | 127 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.603 | 36 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
@@ -50,6 +50,40 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 346 — 2026-05-27
+
+**Q1** — Iceberg table maintenance: rewrite_manifests engine availability on Trino 467. Responder correctly stated rewrite_manifests is NOT available in Trino 467, IS available in Spark (CALL iceberg.system.rewrite_manifests), and that Trino 470+ added an equivalent named optimize_manifests (correct procedure name distinction). Provided exact Spark CALL syntax, placed step correctly in 4-step weekly maintenance, and gave the "no workarounds" honest answer.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **5.00** |
+
+Judge verified via WebSearch: Trino 470 (Feb 5 2025) added optimize_manifests — confirmed. Trino 467 has neither rewrite_manifests nor optimize_manifests — confirmed. Spark CALL syntax matches Iceberg 1.5.2 spark-procedures docs verbatim — confirmed. Resources/17 engine-availability callout (from pre-iter346 teacher fix) confirmed working. Topic running avg: (4.592×35 + 5.00)/36 = **4.603/36 questions** — PASSED (strong recovery; consecutive perfect scores on rewrite_manifests sub-topic).
+
+**Q2** — Postgres-to-Iceberg ingestion: INT→BIGINT column type change through Debezium CDC. Responder correctly separated three layers (Postgres metadata-only change → Debezium WAL RELATION detection on next DML → Iceberg does NOT auto-apply type change). Named AnalysisException on schema mismatch. Gave correct Trino and Spark ALTER syntax for widening promotion. Included damage-check runbook (logs → Kafka consumer lag → row counts). Explicitly contrasted widening (safe, metadata-only) vs narrowing/cross-type (unsupported in Iceberg 1.5.2).
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **5.00** |
+
+Judge verified: INT→BIGINT widening is metadata-only in Iceberg — confirmed. Trino ALTER TABLE ... ALTER COLUMN ... SET DATA TYPE BIGINT correct for Iceberg connector — confirmed. Debezium detects type change via RELATION message on next DML (not on DDL itself) — confirmed. Spark AnalysisException on schema mismatch — confirmed. Narrowing/cross-type unsupported — confirmed. Topic running avg: (4.505×126 + 5.00)/127 = **4.509/127 questions** — PASSED (recovering upward; Debezium CDC type-change scenario correctly covered end-to-end).
+
+**Iter 346 average: (5.00 + 5.00) / 2 = 5.00 — PERFECT STRONG PASS** ✓
+
+Topic score updates:
+- Iceberg table maintenance: 4.592/35 → **4.603/36 questions** (PASSED — strong recovery; rewrite_manifests engine-availability gap from iter345 judge note now verified fixed and held)
+- Postgres-to-Iceberg ingestion: 4.505/126 → **4.509/127 questions** (PASSED — recovering upward; column type-change (widening) scenario correctly covered end-to-end)
+
+---
 
 ### Iter 345 — 2026-05-27
 

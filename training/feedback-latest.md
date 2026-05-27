@@ -1,98 +1,99 @@
-# Judge Feedback — Iter 345
+# Judge Feedback — Iter 346
 
 Date: 2026-05-27
 Phase: extended
-Topics: Postgres-to-Iceberg ingestion / Debezium CDC schema change (Q1) + Iceberg table maintenance / rewrite_manifests ordering rationale (Q2)
+Topics: Iceberg table maintenance / rewrite_manifests Trino 467 engine availability (Q1) + Postgres-to-Iceberg ingestion / INT→BIGINT column type change through Debezium CDC (Q2)
 
 ---
 
-## Q1 — Debezium CDC + Postgres ADD COLUMN (STRONG PASS — PERFECT)
+## Q1 — rewrite_manifests Engine Availability on Trino 467 (STRONG PASS — PERFECT)
 
 ### Score
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5.0 | All claims verified: WAL RELATION detection confirmed, schema.refresh.mode=columns_diff default confirmed, Iceberg field-ID-based ADD COLUMN (metadata-only, NULL for existing rows) confirmed, Spark AnalysisException on unknown source column confirmed, NOT NULL without default rejected on populated Postgres table confirmed. Do-NOT-restart-Debezium guidance correct — connector already adopted schema via WAL. |
-| Beginner clarity | 5.0 | Four-step "what actually happens" walkthrough makes the sequence concrete. Explicit "what you wake up to" framing addresses the engineer's stated concern. "Do NOT restart Debezium" called out as a common mistake. Runbook is numbered and copy-pasteable. |
-| Practical applicability | 5.0 | Complete kubectl + ALTER TABLE + kubectl runbook. AnalysisException named so engineer knows what to grep for. NOT NULL edge case preempts a common footgun. "Under 60 seconds total downtime" gives the engineer confidence to execute. Fits the on-prem k8s + Spark + Iceberg stack in prod_info.md. |
-| Completeness | 5.0 | Covers: Debezium WAL detection, Spark error behavior, Iceberg field-ID semantics, three-step runbook, edge case (NOT NULL without default), non-obvious pitfall (don't restart Debezium). |
+| Technical accuracy | 5.0 | All claims verified: rewrite_manifests is NOT in Trino 467 confirmed; Trino 470 (Feb 5 2025) added optimize_manifests (NOT rewrite_manifests — correct name distinction) confirmed; Spark CALL iceberg.system.rewrite_manifests(table => 'analytics.events') syntax matches Iceberg 1.5.2 spark-procedures docs verbatim confirmed; all four maintenance procedures' Trino availability matrix accurate. |
+| Beginner clarity | 5.0 | Direct lead ("You are not missing anything") resolves engineer's anxiety immediately. Clean engine/availability matrix. Plain operational language ("planning drops from 10+ seconds to under 1 second"). Zero unexplained jargon. |
+| Practical applicability | 5.0 | Engineer knows exactly what to run (CALL syntax from Spark), where to run it (spark-sql CLI or spark-submit), and how it fits weekly maintenance workflow. Forward-looking upgrade path (Trino 470+ → optimize_manifests) called out. Honest "no workarounds" — doesn't invent fake Trino hacks. |
+| Completeness | 5.0 | Covers: yes/no to core question, why it fails (capability gap, not syntax), exact Spark fix, why manifest rewrite matters operationally, where it fits in weekly maintenance order, Trino 470+ naming, recommendation to run full job from Spark. |
 | **Average** | **5.00** | **STRONG PASS — PERFECT SCORE** |
 
 ### What Worked (everything)
-- Four-step sequence (Postgres → Debezium → Spark error → fix) maps exactly to what the engineer will observe.
-- Exact error name (`AnalysisException`) so engineer can grep logs.
-- NOT NULL without default edge case covered proactively — this is a real production footgun.
-- "Do NOT restart Debezium" — correct counter-intuitive guidance with explanation.
-- Iceberg field-ID semantics correctly stated (add column = metadata-only, existing rows return NULL).
-- Resources/13 CDC schema evolution content confirmed comprehensive.
+- "You are not missing anything" — direct, no hedging.
+- Engine matrix: Spark (available), Trino 470+ (available as optimize_manifests — correct rename called out), Trino 467 (NOT available). Name distinction is subtle and was nailed.
+- Spark CALL syntax exactly correct per Iceberg 1.5.2 docs.
+- Operational context ("planning drops from 10+s to <1s") gives the engineer a reason to keep this step.
+- Four-step workflow embedded with engine annotations in correct order.
+- Honest about workarounds — "No workarounds or alternative approaches — you have to use Spark for this."
 
 ### What Missed (none — perfect)
-Minor non-deduction: no mention of type change (e.g., VARCHAR → TEXT widening) — handled differently from ADD COLUMN. Not part of the question scope.
+Minor non-deductions: could mention `$manifests` diagnostic query (outside question scope). Could mention optional sort_by argument (outside question scope).
 
 ### Technical Accuracy Verification
-- Debezium WAL RELATION message detection + schema.refresh.mode=columns_diff — CONFIRMED per Debezium PostgreSQL connector docs
-- Iceberg ADD COLUMN is metadata-only, field-ID-based, NULL for existing rows — CONFIRMED per iceberg.apache.org/docs/latest/evolution/
-- Spark AnalysisException on unknown column in MERGE INTO — CONFIRMED
-- NOT NULL without default rejected immediately on populated tables — CONFIRMED per postgresql.org/docs/current/sql-altertable.html
-- Do NOT restart Debezium (connector already adopted schema) — CORRECT
+- Trino 470 release (Feb 5 2025) added optimize_manifests — CONFIRMED per trino.io/docs/current/release/release-470.html
+- Trino 467 has neither rewrite_manifests nor optimize_manifests — CONFIRMED
+- Spark CALL syntax with named argument `=>` form — CONFIRMED per iceberg.apache.org/docs/latest/spark-procedures/
+- optimize_manifests is the Trino name (NOT rewrite_manifests) — CONFIRMED, correctly stated in answer
 
 ### Resource Fix Applied
-None. Resources/13 CDC schema evolution content (sections 4–6) confirmed comprehensive — responder retrieval gap was the prior issue, now clearly resolved.
+None needed. resources/17 engine-availability section (added pre-iter346 by teacher) confirmed working. Responder used it correctly and the exam-specific fix held with a perfect score.
 
 ### Rubric Update
-- Postgres-to-Iceberg ingestion: prior avg 4.501/125 → (4.501 × 125 + 5.00) / 126 = 567.625 / 126 = **4.505 across 126 questions**. Status: **PASSED** (recovering upward).
+- Iceberg table maintenance: prior avg 4.592/35 → (4.592 × 35 + 5.00) / 36 = 170.72 / 36 = **4.603 across 36 questions**. Status: **PASSED** (strong recovery; consecutive perfect scores on rewrite_manifests sub-topic confirm resources/17 engine-availability section stable).
 
 ---
 
-## Q2 — rewrite_manifests Ordering Rationale (STRONG PASS — PERFECT)
+## Q2 — INT→BIGINT Column Type Change Through Debezium CDC (STRONG PASS — PERFECT)
 
 ### Score
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5.0 | Manifests correctly described as metadata index (data file list + per-column statistics). "All preceding steps generate new manifests as side effects" correctly stated and is the correct reason for going last. Efficiency-not-safety framing confirmed: Iceberg atomic commit semantics guarantee expire_snapshots cannot delete live-snapshot files. Three-layer model (data → manifest → snapshot) verified against Iceberg spec. `events$manifests` system table confirmed. |
-| Beginner clarity | 5.0 | Three-layer model (data → manifest → snapshot) builds up from familiar concepts. Concrete "50,000 manifests → 30 seconds planning → <1 second after rewrite" progression makes the cost tangible. "Compaction alone doesn't fix this" section pre-empts the most common misconception. |
-| Practical applicability | 5.0 | Diagnostic SQL with triage thresholds (<10, 10–50, 50–200, 200+) lets engineer decide whether rewrite is worth doing. Efficiency-not-safety distinction means engineer can make an informed scheduling decision. |
-| Completeness | 5.0 | Covers: manifest definition, why they matter, why rewrite_manifests goes last (new manifests generated as side effect of preceding steps), efficiency-not-safety clarification with atomic commit guarantee, diagnostic SQL. |
+| Technical accuracy | 5.0 | All claims verified: Postgres INT→BIGINT is metadata-only confirmed; Debezium detects via WAL RELATION message on next DML (not on DDL itself) — correct per pgoutput decoder behavior; Iceberg INT→BIGINT widening is metadata-only (no Parquet rewrite) confirmed; Trino ALTER TABLE ... ALTER COLUMN ... SET DATA TYPE BIGINT correct for Iceberg connector; Spark AnalysisException on schema mismatch confirmed; narrowing/cross-type unsupported in Iceberg 1.5.2 confirmed. |
+| Beginner clarity | 5.0 | Clear three-layer progression (Postgres → Debezium → Iceberg). Defines RELATION message inline. Defines widening promotion in plain language. Frames danger upfront. No unexplained jargon. |
+| Practical applicability | 5.0 | Three concrete diagnostic steps (Spark logs, DESCRIBE TABLE, Kafka message inspect), exact Trino and Spark fix commands, restart/recovery procedure, gap-detection runbook (Kafka consumer lag, row counts). Engineer knows exactly what to run next on the production stack. |
+| Completeness | 5.0 | Covers all five angles: did Debezium handle it; did Iceberg/Spark handle automatically; is this same as ADD COLUMN; the fix; damage check and data gap recovery. Bonus: explicit narrowing/cross-type unsupported list, comparison block vs ADD COLUMN. |
 | **Average** | **5.00** | **STRONG PASS — PERFECT SCORE** |
 
 ### What Worked (everything)
-- Resources/17 efficiency-not-safety framing (iter344 fix) confirmed holding with a perfect score.
-- "Compaction alone doesn't fix this" section closes the most common mental-model gap.
-- Diagnostic `events$manifests` query with triage thresholds gives engineer a go/no-go decision.
-- Atomic commit guarantee correctly and explicitly stated — directly addresses the question of whether order matters for safety.
+- "Different and more dangerous situation" framing matches engineer's exact question phrasing.
+- Three layers (Postgres → Debezium → Iceberg) correctly separated and explained.
+- Trino syntax `ALTER TABLE ... ALTER COLUMN ... SET DATA TYPE BIGINT` is the exact correct form for production Trino 467 + Iceberg connector.
+- "Metadata-only — no Parquet files are rewritten" correctly explains why widening is safe at the file layer.
+- Damage-check runbook (logs → consumer lag → row counts) is the right operational sequence.
+- Kafka 7-day retention callout reduces engineer panic.
+- Final ADD COLUMN vs type change comparison directly answers the "same way as added column?" framing.
 
-### What Missed (minor, non-deduction)
-- `rewrite_manifests` is a Spark-only procedure on Trino 467 (added to Trino in version 470+). The answer doesn't mention this — an engineer on Trino 467 would need to use Spark for this specific step. Worth adding to resources/17 as an engine-availability note.
+### What Missed (none — perfect)
+Minor non-deductions: could mention Iceberg field ID stays the same across widening (implicit in metadata-only). Could mention `schema.refresh.mode=columns_diff` config name explicitly. Both outside question scope.
 
 ### Technical Accuracy Verification
-- Manifest files contain data file list + per-column statistics — CONFIRMED per iceberg.apache.org/spec/ and iceberg.apache.org/terms/
-- rewrite_manifests consolidates for faster query planning — CONFIRMED per iceberg.apache.org/docs/latest/maintenance/
-- Compaction, expire_snapshots, remove_orphan_files generate new manifests as side effects — CONFIRMED
-- Ordering is efficiency not safety (atomic commit protects live-snapshot files) — CONFIRMED
-- `events$manifests` system table — CONFIRMED per Trino Iceberg connector docs
+- INT→LONG (BIGINT) widening is metadata-only in Iceberg — CONFIRMED per iceberg.apache.org schema evolution docs
+- Trino ALTER TABLE ... ALTER COLUMN ... SET DATA TYPE — CONFIRMED for widening-only in Trino 467 Iceberg connector
+- Debezium detects type change via RELATION message on next DML (not on DDL itself) — CONFIRMED per Debezium pgoutput decoder behavior
+- Spark AnalysisException on BIGINT source vs INT target schema mismatch — CONFIRMED as default strict behavior
+- Narrowing (BIGINT→INT) and cross-type (INT→STRING) unsupported in Iceberg 1.5.2 — CONFIRMED per resources/13 and Iceberg spec
 
 ### Resource Fix Applied
-None needed post-iteration. Consider adding for iter346: `rewrite_manifests` engine availability note (Spark-only on Trino 467, available in Trino 470+).
+None needed. resources/13 already covers widening type change at line 1370 and supported type enumeration at lines 1494-1499. No resource gap exposed.
 
 ### Rubric Update
-- Iceberg table maintenance: prior avg 4.580/34 → (4.580 × 34 + 5.00) / 35 = 160.720 / 35 = **4.592 across 35 questions**. Status: **PASSED** (strong recovery; resources/17 efficiency framing confirmed stable).
+- Postgres-to-Iceberg ingestion: prior avg 4.505/126 → (4.505 × 126 + 5.00) / 127 = 572.63 / 127 = **4.509 across 127 questions**. Status: **PASSED** (recovering upward; column type-change widening scenario end-to-end correctly covered).
 
 ---
 
-## Iter 345 Summary
+## Iter 346 Summary
 
-**Iter 345 average: (5.00 + 5.00) / 2 = 5.00 — PERFECT STRONG PASS** ✓
+**Iter 346 average: (5.00 + 5.00) / 2 = 5.00 — PERFECT STRONG PASS** ✓
 
 ### Notable
-- First-ever 5.00/5.00 iteration average in the training run. Both questions answered perfectly.
-- Q1: Debezium CDC schema change runbook nailed — WAL detection, AnalysisException, field-ID semantics, do-not-restart-Debezium, NOT NULL edge case, all correct.
-- Q2: rewrite_manifests rationale confirmed — resources/17 efficiency-not-safety framing from iter344 fix holding with perfect score on direct probe.
+- Second consecutive perfect iteration (iter345 was the first). Both target probes from iter345 judge suggestions confirmed fixed and holding.
+- Q1: rewrite_manifests Trino 467 gap (identified as non-deduction in iter345 Q2) now confirmed closed — resources/17 engine-availability note added pre-iter346, used correctly by responder.
+- Q2: Postgres-to-Iceberg type change scenario (not previously tested) answered perfectly — resources/13 type-change content confirmed comprehensive.
 
 ### Resource fixes applied this iteration
-- **resources/17** (teacher pre-iter): rewrite_manifests ordering rationale expanded — confirmed holding.
-- **resources/05** (teacher pre-iter): selectorPriority non-existence callout added — not directly tested this iteration.
-- No post-iteration fixes needed. One pending addition for iter346: rewrite_manifests Spark-only availability note for Trino 467.
+- **resources/17** (teacher pre-iter): rewrite_manifests engine-availability note added (Spark-only on Trino 467, optimize_manifests on Trino 470+) — confirmed holding with perfect score.
+- No post-iteration fixes needed. Resources appear solid across all tested topics.
 
-### Suggested focus for Iter 346
-- **Iceberg table maintenance** (4.592/35): Probe rewrite_manifests engine availability — "I tried to run rewrite_manifests in Trino but I got an error. Is this a Trino thing?" to verify the engine-availability gap is added and caught.
-- **Multi-tenant analytics** (4.458/138): Consider probing `userGroup` field for group-membership-based routing (added to resources/05 in pre-iter345 fix) — the new complete selector fields table has not yet been tested.
-- **Postgres-to-Iceberg** (4.505/126): Consider probing type change (VARCHAR → TEXT widening) or column drop — the column-added case is now solid, but other schema evolution scenarios haven't been tested.
+### Suggested focus for Iter 347
+- **Multi-tenant analytics** (4.458/138): Lowest-scoring topic. Consider probing `userGroup` selector field, or session property manager vs resource group distinction for memory limits, or OPA enforcement of SET SESSION property changes.
+- **Postgres-to-Iceberg** (4.509/127): Consider probing column rename through Debezium CDC into Iceberg (Iceberg name-based vs field-ID — rename is metadata-only but requires coordination), or column drop behavior (Debezium stops including the field; Iceberg retains column definition with NULLs going forward).
+- **Iceberg table maintenance** (4.603/36): Two consecutive perfect scores. Could probe a different aspect — e.g., ANALYZE TABLE and Puffin statistics integration with maintenance schedule, or concurrent maintenance job safety.
