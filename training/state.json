@@ -1,7 +1,7 @@
 {
-  "iteration": 333,
+  "iteration": 334,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter332 avg 4.844 — PASS. Q1 (4.8125) offset.flush.interval.ms delivery gap — time-based window, LSN guard, pre-MERGE dedup. Q2 (4.875) $history vs $snapshots — perfect on 3/4 dimensions. Postgres-to-Iceberg: 4.499/118. Iceberg maintenance: 4.579/28. Multi-tenant: 4.479/127."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter333 avg 4.875 — PASS. Q1 (4.75) Trino resource groups — softMemoryLimit/hardConcurrencyLimit/maxQueued, selector routing. Q2 (5.00) CDC snapshot null LSN fix — PERFECT. Multi-tenant: 4.481/128. Postgres-to-Iceberg: 4.503/119. Iceberg maintenance: 4.579/28."
 }

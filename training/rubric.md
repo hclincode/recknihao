@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.479 | 127 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.481 | 128 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
@@ -40,7 +40,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.499 | 118 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.503 | 119 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.579 | 28 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
@@ -50,6 +50,42 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 333 — 2026-05-27
+
+**Q1** — Multi-tenant analytics: Trino resource groups for per-tenant limits — softMemoryLimit, hardConcurrencyLimit, maxQueued, two-file config, selector routing by username regex, system.runtime.queries resource_group_id column, coordinator restart requirement, DB-backed hot-reload alternative.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** — PASS |
+
+All five technical claims verified: softMemoryLimit/hardConcurrencyLimit/maxQueued are exact official property names; two-file setup correct; `resource-groups.configuration-manager=file` correct; system.runtime.queries has resource_group_id column; coordinator restart required for file-based config. Selector key `"user"` (not `"userRegex"`) correctly used. Minor gaps: time limits (query_max_run_time, query_max_execution_time) not mentioned despite question asking about "memory OR time"; no per-query node-level memory cap (query_max_memory_per_node); selector evaluation order not explained. Topic running avg: (4.479×127 + 4.75)/128 = **4.481/128 questions** — PASSED (mild upward drift).
+
+**Q2** — Postgres-to-Iceberg CDC: initial snapshot rows have null source_lsn by design (no WAL position before CDC started); SQL NULL comparison returns NULL not false; fix is `t.source_lsn IS NULL OR s.source_lsn > t.source_lsn`; test procedure to verify fix.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **5.00** — PERFECT PASS |
+
+All five verification points confirmed: Debezium snapshot rows have null source.lsn; `500 > NULL` evaluates to NULL in SQL three-valued logic; `t.source_lsn IS NULL OR s.source_lsn > t.source_lsn` is the correct null-safe idempotency guard; null LSN correctly means "pre-WAL snapshot row, never updated by CDC"; test procedure (insert before Debezium, update after) is valid. Step-by-step NULL evaluation trace is exemplary beginner pedagogy. No gaps. Topic running avg: (4.499×118 + 5.00)/119 = **4.503/119 questions** — PASSED (upward drift).
+
+**Iter 333 average: (4.75 + 5.00) / 2 = 4.875 — PASS** ✓ (Q1 PASS / Q2 PERFECT PASS)
+
+**Topics updated**:
+- Multi-tenant analytics: 4.479/127 → **4.481/128 questions** (PASSED — mild upward drift; resource groups correctly answered)
+- Postgres-to-Iceberg ingestion: 4.499/118 → **4.503/119 questions** (PASSED — upward drift; null LSN fix perfectly answered)
+
+**Resource fixes this iteration**: None needed.
+
+---
 
 ### Iter 332 — 2026-05-27
 
