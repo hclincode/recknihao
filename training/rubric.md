@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.459 | 130 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.461 | 131 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
@@ -40,7 +40,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.502 | 120 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.501 | 121 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.594 | 29 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
@@ -50,6 +50,42 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 336 — 2026-05-27
+
+**Q1** — Multi-tenant analytics: session property manager JSON format verification. Responder correctly identified the blog format as wrong (wrapper object), provided the correct flat top-level array schema, caught the regex escaping footgun (`global\\.free_tier`), explained both timing properties, and included the bootstrap `.properties` file.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** — STRONG PASS |
+
+Judge verified all claims against trino.io/docs: flat array schema correct; match fields (`group`, `user`, `source`, `queryType`, `clientTags`) correct; regex semantics correct; session property names correct; bootstrap file exact property names correct. The fix from iter335 (correcting resources/05 JSON schema) is now successfully surfaced. Topic running avg: (4.459×130 + 4.75)/131 = **4.461/131 questions** — PASSED (recovering upward).
+
+**Q2** — Postgres-to-Iceberg ingestion: hard deletes invisible in incremental pipeline. Covered the architectural limitation of watermark-based pipelines, three options (soft delete, reconciliation, CDC), decision guidance per deletion rate.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.5 |
+| Completeness | 4.0 |
+| **Average** | **4.375** — PASS |
+
+Accurate framing; all three industry-standard options covered; recommendation ordering (soft delete → reconciliation → CDC) correct. Minor gaps: reconciliation SQL shows only the detect half (EXCEPT) without the companion DELETE/MERGE; `wal_level = logical` prerequisite for Debezium not mentioned; no mention of Iceberg V2 delete file mechanics. Resources/13 already has the full DELETE pattern (line 997) — responder completeness gap, not resource gap. Topic running avg: (4.502×120 + 4.375)/121 = **4.501/121 questions** — PASSED (stable).
+
+**Iter 336 average: (4.75 + 4.375) / 2 = 4.563 — STRONG PASS** ✓
+
+**Topics updated**:
+- Multi-tenant analytics: 4.459/130 → **4.461/131 questions** (PASSED — recovering after two drops; corrected session property manager JSON schema now successfully surfaced)
+- Postgres-to-Iceberg ingestion: 4.502/120 → **4.501/121 questions** (PASSED — stable; hard-DELETE architectural limitation correctly framed)
+
+**Resource fixes this iteration**: None. Resources/13 already has the full reconciliation DELETE pattern; resources/05 schema fix from iter335 is holding.
+
+---
 
 ### Iter 335 — 2026-05-27
 
