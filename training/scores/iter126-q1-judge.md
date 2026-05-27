@@ -1,0 +1,38 @@
+# Iter126 Q1 — Judge Score
+
+**Score**: 3.5 / 5 (Tech 2, Clarity 5, Practical 4, Completeness 3)
+
+## Verdict
+Structurally excellent answer — incident-shaped, prioritized, with a clear 5-step recovery recipe and the right `$snapshots` query. However, it contains one HIGH-severity factual error that directly contradicts Trino 467's documented behavior: it tells the engineer that **Trino 467 does NOT expose a rollback procedure** and forces them to Spark. Trino 467 in fact ships `CALL <catalog>.system.rollback_to_snapshot(schema, table_name, snapshot_id)` as a documented Iceberg connector procedure. In a real incident this misdirection could send an on-call engineer hunting for a Spark session they may not have configured for ad-hoc rollback when their fastest path is the Trino CLI they already have open. That alone forces a low Technical Accuracy score even though the rest of the answer is well above the threshold.
+
+## What was verified correct (via WebSearch)
+- `$snapshots` metadata table columns `snapshot_id`, `committed_at`, `operation`, `summary` exist and are correctly named (verified against trino.io/docs/467/connector/iceberg.html — full column list: `committed_at`, `snapshot_id`, `parent_id`, `operation`, `manifest_list`, `summary`).
+- `iceberg.expire-snapshots.min-retention` catalog property defaults to **7d** and the procedure fails if `retention_threshold` is shorter (verified against trino.io/docs/467 — exact error: "Retention specified (Xd) is shorter than the minimum retention configured in the system (7.00d)"). The 7-day floor claim is correct.
+- `rollback_to_snapshot` does exist as a Spark `CALL system.rollback_to_snapshot` procedure in Iceberg 1.5.x (verified against iceberg.apache.org/docs/latest/spark-procedures/). Syntax `CALL <catalog>.system.rollback_to_snapshot(table => ..., snapshot_id => ...)` is correct.
+- Rollback is a metadata-only pointer swap (no data file rewrite), atomic, and reversible until `expire_snapshots` runs — correct per Iceberg spec.
+- The "if a correct write happened in between, rollback erases it" warning and `overwritePartitions()` as the surgical alternative are accurate.
+- The DROP TABLE caveat under "Where MinIO backups still matter" is directionally correct (catalog pointer + ability to recover data depends on whether PURGE was used and whether MinIO has versioning), though oversimplified — see below.
+
+## Errors or gaps
+- **HIGH**: "Must use Spark — Trino 467 does NOT expose a rollback procedure." This is factually wrong. Trino 467 ships `CALL <catalog>.system.rollback_to_snapshot('<schema>', '<table>', <snapshot_id>)` in the Iceberg connector (trino.io/docs/467/connector/iceberg.html). The correct framing for this prod stack is: **Trino 467 supports rollback via positional-argument Spark-style syntax; Spark supports the same via named-argument syntax.** The on-call engineer should be told they can run it from either engine, with the Trino form shown explicitly (no named arguments, schema and table as separate string args, NOT `iceberg.system.rollback_to_snapshot(table => 'analytics.events', ...)`).
+- **HIGH**: The Spark CALL example shows `CALL iceberg.system.rollback_to_snapshot(...)` — but the answer doesn't tell the reader that `iceberg` here is the catalog name and must match whatever Spark catalog they configured (in this prod stack the Spark catalog name may not be `iceberg`). Combined with the "Trino can't do this" misdirection, an engineer copy-pasting this in an incident may get `Cannot resolve catalog 'iceberg'`.
+- **MEDIUM**: "DROP TABLE removes Iceberg metadata — snapshots are gone." This is only true with `DROP TABLE PURGE` (or with Hive Metastore catalogs that default-purge). A bare `DROP TABLE` on most Iceberg catalogs removes only the catalog pointer — the metadata.json and data files remain in MinIO and can be re-registered with `register_table` if you still know the path. This nuance matters for MinIO-backup discussion in this exact prod environment.
+- **MEDIUM**: No fallback recipe for "snapshot already expired" beyond a one-line "re-ingest from Postgres." The expected fallback is: locate any surviving `metadata.json` in MinIO that still references the pre-bad-delete snapshot, then `register_table` to that metadata version, then copy the rows over. This is the actual MinIO-backup-marries-Iceberg path the engineer asked about.
+- **LOW**: `rollback_to_snapshot` in Trino requires that the target snapshot is an ancestor of the current snapshot in the lineage. The answer never mentions this constraint; if maintenance has happened in between, `set_current_snapshot` (Spark only) is the alternative — worth a callout.
+- **LOW**: Step-4 closing recommends "set a 30-day retention threshold on expire_snapshots" — fine, but doesn't mention that this requires bumping `iceberg.expire-snapshots.min-retention` in catalog config (a Trino server restart), not just the procedure call.
+- **LOW**: "Beginner clarity" still excellent, but terms `ACID`, `atomic`, `snapshot pointer`, `metadata-only` are used without inline glosses — a true newcomer from Postgres may not parse "moving the table's current-snapshot pointer backward" without a one-sentence picture.
+
+## Resource fix recommendations
+1. **Correct the engine-availability table for `rollback_to_snapshot`** in `resources/17-iceberg-table-maintenance.md` (or wherever rollback is taught): both Trino 467 and Spark support it. Show **both** syntaxes side-by-side:
+   - Trino 467: `CALL iceberg.system.rollback_to_snapshot('analytics', 'events', 4823511203987654321)` — positional args, schema and table as separate strings.
+   - Spark: `CALL <spark_catalog>.system.rollback_to_snapshot(table => 'analytics.events', snapshot_id => 4823511203987654321)` — named args, dotted table name.
+   Audit prior resources for the "Spark only" claim — multiple training notes (rubric lines 1105, 1226, 1243, 1330, 1466, 1517) celebrated labeling CALL procedures as Spark-only; that pattern is correct for `expire_snapshots`, `rewrite_data_files`, `rewrite_manifests`, `remove_orphan_files` (which Trino exposes via `ALTER TABLE EXECUTE`, not CALL), but **wrong for `rollback_to_snapshot`** which Trino exposes as a CALL procedure.
+2. **Add a "snapshot already expired" recovery recipe**: locate surviving `metadata.json` in MinIO, `register_table` to it, copy needed rows, drop the recovery table. This is the answer to "MinIO-level backups for Iceberg" that the engineer's last sentence is asking about.
+3. **Distinguish DROP TABLE vs DROP TABLE PURGE** in the rollback/recovery resource, and call out Hive-Metastore default-purge behavior since this stack uses HMS.
+4. **Add the ancestor-lineage constraint** to the rollback section, plus a one-line note that `set_current_snapshot` (Spark only) is the escape hatch when the target is not an ancestor.
+5. **Inline-gloss the jargon**: one-sentence picture of what a "snapshot pointer" is, and what "metadata-only" means for someone whose mental model is Postgres WAL.
+
+## Topic state
+**Topic**: Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup — currently **PASSED**, avg **4.640** across 12 questions.
+
+This answer's average **3.5** is at the pass threshold but well below the topic's running average. Adding this score: new running average ≈ (4.640 × 12 + 3.5) / 13 = **4.552** across 13 questions. **Topic remains PASSED**, but the HIGH-severity Trino-rollback misdirection is a regression that should be fixed in `resources/17-iceberg-table-maintenance.md` before the next rollback question, or the same error will likely repeat and erode the topic average further.

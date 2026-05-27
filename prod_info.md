@@ -27,10 +27,23 @@
 - **Ad-hoc result export**: Users sometimes run `INSERT INTO <temp_table> AS SELECT ...` and then download the result files directly from MinIO to speed up query performance.
 - **Spooling**: Experimental for query workloads; not officially supported or provided to users.
 
+### Authentication and authorization
+
+- **Authentication**: Custom authentication service using **JWT tokens**. Users obtain a JWT from the auth service; Trino validates it via a custom JWT authenticator configured in `etc/config.properties`. Standard username/password and LDAP are NOT used.
+- **Authorization (Trino)**: **Open Policy Agent (OPA)** with a customized policy set is the authorization backend for Trino. The OPA plugin evaluates every Trino query action against the centralized policy. File-based access control rules (the default examples in resources/) are provided only as conceptual illustrations — they do NOT reflect the production setup.
+- **SaaS user permission model**: User permissions within the SaaS product are governed by an **external governance document** that is not included in this repository. Resources in this repo should not attempt to document specific permission rules or role hierarchies — those are defined externally.
+
+### Implications for answering permission-related questions
+
+When a SaaS engineer asks about access control, role assignment, or user permission enforcement specific to this environment:
+- Answer with **general/conceptual Trino RBAC knowledge** (how roles work, how OPA integrates with Trino at a high level).
+- State clearly that **specific permission rules and user governance are defined in an external document** not yet available in this repo, and that detailed governance guidance will be provided in a future external document.
+- Do NOT attempt to write specific OPA policies, role hierarchies, or permission rules — defer those to the external governance document.
+
 ---
 
 ## Notes for agents
 
-- **Teacher**: All resources you write must give advice that works within the above constraints. Do not recommend tools or architectures that are incompatible with the production stack described here — this applies to both the SaaS product and the data team. When the stack is not yet filled in, note that assumption explicitly in your resources.
-- **Judge**: Evaluate answers not just for technical correctness but for fit with this production environment (SaaS product side and data team side). An answer that is correct in general but wrong for this stack is a failure.
-- **Weak-ai-responder**: When answering, always consider whether the advice applies to the production environment described here. If prod_info.md is incomplete, flag that your answer assumes a generic setup.
+- **Teacher**: All resources you write must give advice that works within the above constraints. Do not recommend tools or architectures that are incompatible with the production stack described here. For authentication/authorization: resources may explain general Trino RBAC and OPA concepts, but must not document specific policies or role hierarchies — those belong in the external governance document. When the stack is not yet filled in, note that assumption explicitly in your resources.
+- **Judge**: Evaluate answers not just for technical correctness but for fit with this production environment. For auth/authz questions: a correct answer gives general Trino/OPA concepts and defers specific permission rules to the external governance document. An answer that invents specific policy rules or tries to document the permission model is out of scope.
+- **Weak-ai-responder**: When answering, always consider whether the advice applies to the production environment described here. For authentication questions: mention JWT and OPA as the production mechanism at a conceptual level; tell the engineer that specific permission rules are in an external governance document not yet available in this repo. Do not attempt to write OPA policies or specific role assignments.

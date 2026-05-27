@@ -1,108 +1,81 @@
-# Feedback — Iteration 53 (Extended Phase)
+# Feedback — Iter 271 (Extended phase)
 
-**Date**: 2026-05-24
-**Phase**: Extended (continuing until 2026-05-30 12:00 CST)
-**Iteration average**: 4.00
-**Status**: All 20 topics PASSED.
+Date: 2026-05-27
+Topic: Trino federation — predicate pushdown EXPLAIN debugging (Q1 PASS) + Postgres type mapping (Q2 PASS)
 
----
+## Results summary
 
-## Iteration 53 score summary
+| Question | Topic angle | Score | Pass/Fail |
+|---|---|---|---|
+| Q1 | EXPLAIN output patterns for pushdown: ScanFilterProject vs constraint on [col], EXPLAIN ANALYZE row counts, Postgres slow log | **4.75** | PASS |
+| Q2 | Postgres type mapping: UUID→UUID, JSONB→JSON, custom enum→VARCHAR, unsupported-type-handling, array-mapping | **4.75** | PASS |
 
-| Question | Topic(s) | Score |
-|---|---|---|
-| Q1 — Resource group selectors: JWT `sub` claim and `"user"` field syntax | Multi-tenant analytics | 3.50 |
-| Q2 — Bytes-per-event measurement from `$files` for storage budget planning | Storage sizing and growth estimation | 4.50 |
-| **Iteration average** | | **4.00** |
+**Iter 271 average: 4.75 — PASS** ✓ Both passed!
 
----
-
-## Topic score updates after iteration 53
-
-| Topic | Prior avg | Prior q | New avg | New q | Change |
-|---|---|---|---|---|---|
-| Multi-tenant analytics | 4.270 | 52 | 4.255 | 53 | −0.015 (Q1 at 3.50) |
-| Storage sizing and growth estimation | 4.333 | 3 | 4.375 | 4 | +0.042 (Q2 at 4.50) |
-
-Both topics remain PASSED (above 3.5).
+**Topic update**: Trino federation: 4.478/215 → **4.481/217** (NEEDS WORK, gap 0.019 — improving)
 
 ---
 
-## What went well
+## What worked
 
-**Q2 scored 4.50 — cost-per-event model mostly complete.** The responder correctly covered:
-- `$files` metadata table with correct quoted Trino syntax (`"events$files"`)
-- `file_size_in_bytes` / `record_count` columns for bytes-per-row
-- Monthly growth formula with worked example (50M page views × 6.2 bytes = 310 MB/month)
-- Per-column compression breakdown (dictionary encoding, delta encoding, UUIDs)
-- 20–30% buffer with three sources (small files pre-compaction, metadata, new-customer variation)
-- MinIO EC:4+2 = 1.5x raw disk (not 2x or 3x)
-- Zstd default in Iceberg 1.4.0+ with correct `ALTER TABLE ... SET PROPERTIES` Trino syntax
+### Q1 — Predicate pushdown EXPLAIN (4.75)
+1. `ScanFilterProject` above `TableScan` = pushdown failure signal — correct
+2. `constraint on [col]` inside `TableScan` = pushdown success signal — correct
+3. VARCHAR equality and IN-list predicates push to Postgres — correct
+4. VARCHAR range (>, <) does NOT push by default — correct
+5. Implicit cast (`CAST(col AS VARCHAR)`) breaks pushdown — correct
+6. EXPLAIN ANALYZE `Input:` row count comparison to full table size — correct and practical
+7. Postgres slow log (`log_min_duration_statement=0`) as ground truth — concrete
+8. Three-step diagnostic workflow — clear and actionable
 
-**Q1 conceptual model correct.** The JWT `sub` → Trino username → resource group selector mapping was correctly explained. Silent failure mode (no-match → default pool) was correctly identified. Verification via `system.runtime.queries` was present. The `CALL system.runtime.kill_query(...)` syntax was correct.
-
----
-
-## Issues
-
-### Q1 critical bug: fabricated selector field name `"userRegex"` (correct name is `"user"`)
-
-The answer's JSON example used `"userRegex"` as the selector field name — but this field does not exist in Trino. The actual field is `"user"`. The value of `"user"` is interpreted as a Java regex, which makes `"userRegex"` an intuitive but wrong name.
-
-From the Trino resource groups docs: `"user"` is a selector field that matches the username as a Java regex. `"userRegex"` is not a valid field; it is silently ignored. An engineer copy-pasting the Q1 answer's JSON would reproduce exactly the silent-no-match bug they were trying to fix.
-
-The correct resource (05-multi-tenant-analytics.md) already used `"user"` correctly at lines 484–496. The responder hallucinated `"userRegex"` despite reading the correct example.
-
-**Fix applied**: `resources/05-multi-tenant-analytics.md` — added an explicit callout block in the "use correct property names" section naming `"userRegex"` as a fabricated field that does not exist, with a correct vs wrong side-by-side JSON example.
-
-### Q2 technical bug: `$files` per-event-type GROUP BY is invalid
-
-The answer included:
-```sql
-SELECT
-  event_type,
-  SUM(file_size_in_bytes) * 1.0 / SUM(record_count) AS bytes_per_row
-FROM iceberg.analytics."events$files"
-GROUP BY event_type
-```
-
-`$files` is file-level metadata — it has `file_path`, `file_size_in_bytes`, `record_count`, `partition`, etc., but NOT row-level columns like `event_type`. This query fails with "Column 'event_type' cannot be resolved".
-
-The correct approaches:
-- If table is partitioned by `event_type`: `GROUP BY partition.event_type` on `$files`
-- If not partitioned by `event_type`: sample from the base table via Spark
-
-**Fix applied**: `resources/11-lakehouse-storage-sizing.md` — added "Measuring bytes-per-row from existing Iceberg data ($files approach)" subsection with the correct overall query, an explicit warning that `$files` is file-level (no row-level columns), and both Option A (partition column) and Option B (base table sampling) approaches for per-event-type breakdown.
-
-### Recurring issues
-
-- Q1: Missing `clientTags` and `source` as alternative selector fields; `query.max-memory-per-node` as per-query hard cap not mentioned.
-- Q1 + Q2: Beginner clarity — WAL, replication slot, schema registry, $files metadata table — appear without inline glosses.
+### Q2 — Postgres type mapping (4.75)
+1. UUID → Trino `UUID` natively (not VARCHAR coercion) — correct
+2. JSONB → Trino `JSON` natively (not dropped) — correct
+3. Custom enum → Trino `VARCHAR` natively (not via `unsupported-type-handling`) — correct
+4. Default behavior: `postgresql.unsupported-type-handling=IGNORE` silently drops unsupported columns — critical risk, correctly explained
+5. `CONVERT_TO_VARCHAR` fix — correct
+6. Arrays: `postgresql.array-mapping=DISABLED` default, `AS_ARRAY` fix — correct
+7. `system.query()` for JSONB server-side predicates — correct practical workaround
+8. Diagnostic flow comparing `information_schema.columns` to Trino DESCRIBE — concrete
 
 ---
 
-## Resource fixes applied in iter53
+## Minor gaps (did not cause FAIL, fix for future iterations)
 
-**HIGH priority — COMPLETED**: `resources/05-multi-tenant-analytics.md`
-- Added selector field name callout: `"user"` is the correct Trino field (value is a regex); `"userRegex"` does not exist and is silently ignored. Correct vs wrong JSON side-by-side.
+### Q1
+- No mention of `EXPLAIN (TYPE IO)` as alternative EXPLAIN mode
+- `pg_stat_statements` on Postgres side not mentioned (useful for verifying what SQL Postgres actually executed)
+- EXPLAIN indentation may differ slightly from actual Trino 467 output (structure correct, presentation may vary)
 
-**HIGH priority — COMPLETED**: `resources/11-lakehouse-storage-sizing.md`
-- Added "Measuring bytes-per-row from existing Iceberg data ($files approach)" subsection: overall `$files` query, explicit warning that `$files` is file-level not row-level, Option A (partition column), Option B (base table Spark sampling), Option C (quick approximation).
+### Q2
+- `postgresql.array-mapping=AS_JSON` value omitted — Trino docs list three values (DISABLED, AS_ARRAY, AS_JSON); AS_JSON is the way to get multi-dim arrays as JSON strings
+- `INTEGER[]` → `ARRAY<INTEGER>` (not `ARRAY<BIGINT>` as stated — minor type name error)
 
 ---
 
-## Weakest topics heading into iter54
+## Resource fixes before iter272
 
-| Topic | Avg | q |
-|---|---|---|
-| Multi-tenant analytics | 4.255 | 53 |
-| Postgres-to-Iceberg ingestion | 4.275 | 53 |
-| Storage sizing and growth estimation | 4.375 | 4 |
-| Analytical query patterns on Iceberg+Trino | 4.438 | 4 |
-| Iceberg partition design | 4.500 | 6 |
+### Low priority (minor gaps, not errors)
 
-Novel angles for iter54:
-- **Multi-tenant**: Post-fix validation — test resource group `"user"` field now that resource is fixed; or test OPA integration angle (how OPA blocks system.runtime.queries for tenant principals)
-- **Postgres-to-Iceberg**: Post-fix validation — test CDC schema evolution with relation messages (now in resource); or test column TYPE CHANGE (INT → BIGINT widening) under CDC
-- **Storage sizing**: Post-fix validation — test `$files` per-event-type query (both partition column and base-table sampling approaches now in resource)
-- **Analytical patterns**: NTILE for percentile distribution; RANK vs DENSE_RANK for ranking tenants
+1. **array-mapping=AS_JSON** (resource 22, type mapping section):
+   - Add `AS_JSON` as a third value for `postgresql.array-mapping`
+   - Note when to use: multi-dimensional arrays (`INTEGER[][]`) that can't be represented as flat Trino ARRAY types
+   - Current resource likely only documents DISABLED and AS_ARRAY
+
+2. **INTEGER[] type mapping** (resource 22):
+   - Verify the mapping table says `INTEGER[]` → `ARRAY<INTEGER>` (not ARRAY<BIGINT>)
+   - Correct if needed
+
+---
+
+## Suggested iter272 angles (MUST target Trino federation, gap 0.019)
+
+Topic at 4.481/217. Need ~10 more questions at 4.875+ to cross 4.500 threshold.
+
+1. **Cross-schema queries in multi-tenant Postgres** — engineer has one Postgres instance with one schema per tenant; asks how to query across schemas; UNION ALL approach; why Trino can't pattern-match schema names dynamically; schema-as-catalog approach
+
+2. **Metadata caching and stale views** — engineer sees stale schema after Postgres DDL change; `metadata.cache-ttl`; `CALL catalog.system.flush_metadata_cache()`; views frozen at CREATE time need `CREATE OR REPLACE VIEW`
+
+3. **Dynamic filtering in cross-catalog joins** — engineer asks why their Iceberg+Postgres join is slow even with a small Iceberg filter; LEFT OUTER join disables DF; switching to INNER join enables DF; `iceberg.dynamic-filtering.wait-timeout`
+
+4. **system.query() edge cases** — schema inference from first row; empty results; ORDER BY non-preservation; cross-catalog joins with system.query() results

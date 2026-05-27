@@ -1,7 +1,5 @@
 # What a Data Warehouse Is and When Your SaaS Product Needs One
 
-> **Note:** The production environment in `prod_info.md` is not yet filled in. This resource gives advice for a generic SaaS setup. Once your stack is described, re-read this with your specific tools in mind.
-
 ---
 
 ## Concept in one sentence
@@ -17,6 +15,26 @@ A typical SaaS product scatters its data across several systems: the application
 When someone asks "what's our revenue from customers who signed up via the free trial and sent more than 10 messages in their first week?" — that answer lives across three different systems with no easy join.
 
 A data warehouse solves this by being the *one place* where all that data lands, cleaned, and ready to query together. It's the difference between having to phone four departments to get an answer versus just running a query.
+
+---
+
+## The two value propositions — both matter equally
+
+> **STOP — Which reason applies to your team?**
+>
+> Many SaaS teams focus only on query speed (Reason 1) when asking "do I need a warehouse?" But for many, Reason 2 — joining Stripe + Postgres + Mixpanel + Salesforce in one SQL query — is the real driver, even with only 5M rows. When answering a beginner question about why to build a warehouse, always surface *both* reasons and determine which one is primary for their situation. A team with 5M rows and three disconnected data sources needs the warehouse for Reason 2 right now.
+
+When someone asks *"what does a data warehouse do differently from my Postgres?"*, there are **two** answers, and you should always give both. Many SaaS teams build a warehouse for reason 2 long before reason 1 becomes painful.
+
+> **Callout — The two reasons a SaaS team builds a warehouse:**
+>
+> **1. Analytical query performance (the OLAP angle).** Columnar storage means a `SELECT AVG(duration) FROM events` reads only the `duration` column, not every column of every row. Append-mostly fact tables avoid the row-versioning overhead that hurts Postgres on wide aggregations. Distributed compute (Trino) scales horizontally. This is the answer most engineers reach for first because it's what "warehouse = faster analytics" sounds like.
+>
+> **2. Multi-source consolidation (the data-integration angle).** A warehouse lets you write *one SQL query* that joins data from Postgres (user accounts, app events), Stripe (subscriptions, invoices, refunds), Mixpanel or Amplitude (product behavior), Salesforce (CRM touches), and Zendesk (support tickets). On your Postgres replica you simply cannot answer "what was the churn rate among trial users who opened more than 3 support tickets and spent over $500?" because three of those tables live in three different vendors' systems. The warehouse is the only place they coexist.
+>
+> **For many SaaS companies, reason 2 is the primary driver, not reason 1.** You can have only 5M events and still need a warehouse — because the question that matters spans Stripe + Mixpanel + Postgres and nothing else can answer it.
+
+In the production stack (Iceberg on MinIO + Trino), both value propositions are delivered by the same system: Trino runs the columnar OLAP queries (reason 1), and Spark ingestion jobs land data from every source system into Iceberg tables so they can be joined in one SQL query (reason 2).
 
 ---
 

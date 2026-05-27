@@ -1,0 +1,44 @@
+# Iter 217 Q1 Judge Score
+
+## Score: 4.55
+
+## Topic: Trino federation cross-source connectors
+
+## What the answer got right
+- **Correct distinction between `EXPLAIN (TYPE DISTRIBUTED)` and `EXPLAIN ANALYZE`**: clearly explains plan-only vs runtime execution, and warns that EXPLAIN ANALYZE re-runs the full query. Matches official Trino docs at https://trino.io/docs/current/sql/explain-analyze.html.
+- **Fragment vocabulary correctly explained**: `[SOURCE]` (reads from a connector), `[SINGLE]` (final aggregation/output), with the "stages in a MapReduce job" analogy that lands well for a beginner.
+- **`Exchange[type=REPLICATE]` for broadcast and `Exchange[type=REPARTITION]` for partitioned hash join** are the correct Trino notations. Verified against resource 22 §5.5.2 and Trino EXPLAIN docs.
+- **`dynamicFilterSplitsProcessed` correctly placed on the PROBE side, not the build side** — this is the exact rule called out in resource 22 §5 "CRITICAL" callout, and matches the trinodb/trino#3217 PR that added the metric. Verified against https://trino.io/docs/current/admin/dynamic-filtering.html.
+- **The "good" vs "bad" `dynamicFilterSplitsProcessed` example pair** (185/200 split-skip vs 0/200 with a too-large IN-list) is concrete, actionable, and pedagogically excellent for a beginner.
+- **`Physical Input:` correctly identified as the bytes-read indicator on each TableScan** — matches Trino EXPLAIN ANALYZE official semantics.
+- **`constraint = ...` on TableScan correctly identified as the predicate-pushdown indicator** for JDBC connectors. The "missing constraint = your WHERE clause didn't push down" diagnosis is exactly right for Postgres/MySQL.
+- **`CPU` vs `Scheduled` vs `Blocked: Input` breakdown** is correct and actionable for distinguishing I/O-bound vs compute-bound bottlenecks. The rule of thumb ("Scheduled much larger than CPU = I/O-bound") is what an SRE would actually use.
+- **The concrete three-source diagnostic walk-through at the end** is genuinely useful: it shows what good output looks like for Postgres, mediocre output for Iceberg (partial DF benefit), and a clear bug for MySQL (no constraint → full scan). The recommended fix (add `WHERE b.invoice_date >= ...`) is the right next action.
+- **Production-environment fit**: the example uses on-prem-style catalog names (`app_pg`, `billing_mysql`, `iceberg.analytics.events`) consistent with the production stack (Trino 467 on K8s, on-prem MinIO + HMS). No cloud-managed services were recommended.
+
+## What the answer missed or got wrong
+- **Inline `constraint = ...` notation is simplified, not literal Trino 467 output.** Resource 22 §3.5 explicitly notes that in real Trino 467 EXPLAIN (TYPE DISTRIBUTED) output, the constraint appears on **separate indented lines underneath the TableScan node** prefixed with `constraint on [columns]`, not inline inside `TableScan[...]`. The answer presents the inline form throughout without flagging that it's a teaching simplification. A beginner who greps real EXPLAIN output for the literal string `constraint = (` will not find it and may conclude pushdown failed when it didn't. Minor pedagogical accuracy issue.
+- **`dynamicFilterSplitsProcessed: 185 / 200 splits skipped` format is invented.** The real metric is reported as a single integer count of splits processed after DF pruning (per trinodb/trino#3217), not as an "X / Y skipped" fraction. The conceptual intent is right, but a beginner pattern-matching on this exact string in their own EXPLAIN ANALYZE output will not find it. The Trino UI dynamic-filters panel is the better source for human-readable pruning stats — worth a one-line mention.
+- **No mention of `EXPLAIN ANALYZE VERBOSE` or `EXPLAIN ANALYZE (FORMAT TEXT, TYPE DISTRIBUTED)`** — both are called out in resource 22 §3.5 as the "deeper diagnostic" forms, and the latter is the form that actually shows per-operator CPU time breakdowns that the answer relies on. The answer just says "EXPLAIN ANALYZE" but the per-operator CPU/Scheduled/Blocked rendering shown in the examples is what you get from the distributed form.
+- **The Trino Web UI is not mentioned as a complementary diagnostic.** Resource 22 §5 explicitly recommends `/ui/query.html?<query_id>`'s "Dynamic filters" panel as the easiest way to see DF stats after a query has run. For a beginner staring at "pages and pages of text," pointing them at the UI as an alternative would have lowered their cognitive load.
+- **No mention of `dynamic-filtering.wait-timeout`** as the lever to pull when DF is wired up at plan time but did not fire because the build side was slow (resource 22 §5.4). For a three-source join where Postgres could be the build side and might be slow, this is a directly relevant tuning knob the answer omits.
+- **JDBC connectors and DF — small but important nuance missing.** DF works very well for Iceberg (file/split pruning), but for JDBC probes (Postgres, MySQL), DF can be pushed into the WHERE clause as an IN-list — different physical effect (server-side filter vs split skipping). The answer implicitly treats DF as Iceberg-only by showing `dynamicFilterSplitsProcessed` only on the Iceberg scan. For a three-source query where MySQL or Postgres could be the probe, the answer should at least note that JDBC probe-side DF takes a different form.
+- **No mention of MySQL connector parity with Postgres connector.** The question explicitly names MySQL as the third source. The answer treats MySQL roughly the same as Postgres (correct in this case), but a one-line note that the MySQL connector has the same predicate-pushdown story as Postgres (and the same lack of OSS connection pooling) would have been welcome.
+
+## WebSearch verification notes
+- Verified `EXPLAIN ANALYZE` semantics (CPU, Scheduled, Blocked, Physical Input) against https://trino.io/docs/current/sql/explain-analyze.html — answer is accurate.
+- Verified `dynamicFilterSplitsProcessed` is a probe-side metric tracking splits processed after DF pushdown, sourced from PR trinodb/trino#3217 and Trino dynamic-filtering docs at https://trino.io/docs/current/admin/dynamic-filtering.html — answer's "probe side, not build side" rule is correct.
+- Verified Fragment types `[SINGLE]`, `[SOURCE]`, `[HASH]`, `[ROUND_ROBIN]`, `[BROADCAST]` against Trino EXPLAIN docs — the answer's `[SOURCE]` / `[SINGLE]` usage is correct for the scenario.
+- Verified `Exchange[type=REPLICATE]` and `Exchange[type=REPARTITION]` notation against resource 22 §5.5.2 and Trino docs — these are the correct planner output labels for broadcast vs partitioned joins. (The lower-level `RemoteExchange[REPLICATE, BROADCAST, []]` form is what appears in some output renderings, but the answer's form is also valid.)
+- Verified `Physical Input` semantics — confirmed as actual bytes read from the connector before filtering, used to identify which source is doing the most I/O.
+- Verified `constraint = ...` representation — partly correct conceptually, but the literal Trino 467 output uses a multi-line `constraint on [columns]` block under the TableScan rather than inline. Resource 22 §3.5 itself flags this as a known teaching simplification. Minor pedagogical issue, not a correctness issue.
+
+## Recommendation for teacher
+The answer is strong overall (a clear pass at 4.55) and the topic average for Trino federation continues to climb. The remaining gaps are small but worth closing in resource 22:
+
+1. **(LOW)** Add a one-sentence callout in the EXPLAIN ANALYZE section that `dynamicFilterSplitsProcessed` is reported as a single processed-count metric (not as an "X / Y skipped" fraction), and point users at the Trino Web UI's "Dynamic filters" panel for the easier-to-read split-pruning breakdown.
+2. **(LOW)** Add a single line clarifying that the simplified inline `constraint = ...` notation used throughout the doc is a teaching device and the literal Trino 467 output uses a multi-line `constraint on [columns]` block under TableScan. (Resource 22 §3.5 has this callout for the predicate-pushdown section — promote a shorter version to the EXPLAIN ANALYZE general section so readers see it before they grep real output.)
+3. **(LOW)** Add one sentence on JDBC probe-side DF behavior: that for a Postgres/MySQL probe, the DF takes the form of an IN-list pushed into the WHERE clause sent to the JDBC server, rather than file/split pruning as in Iceberg. This is a small but real gap for three-source federation diagnostics where any of the three sources could be the probe.
+4. **(LOW)** Cross-reference `dynamic-filtering.wait-timeout` from the EXPLAIN-reading section so a reader who sees "DF wired up at plan time but `dynamicFilterSplitsProcessed = 0` at runtime" has an immediate tuning lever to try.
+
+None of these are blockers; the answer already meets the practical bar. The topic should remain "improving" with continued sustained passes.

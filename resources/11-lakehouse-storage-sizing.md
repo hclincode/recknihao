@@ -9,7 +9,7 @@
 - **Sizing formula:** `raw row bytes × row count ÷ compression ratio = on-disk Parquet size`.
 - Typical Parquet compression for SaaS event data is **5–10x** (sometimes 20x+ for low-cardinality columns).
 - A 100M-row event table with ~200 bytes/row raw → ~2–4 GB compressed. Easily fits on a single MinIO node.
-- Iceberg metadata adds **~1–3%** overhead — negligible. Snapshot retention is the real growth driver — set `expire_snapshots` to keep 30 days.
+- Iceberg metadata adds **~1–3%** overhead — negligible. Snapshot retention is the real growth driver — schedule `expire_snapshots` (Iceberg's `history.expire.max-snapshot-age-ms` default is 5 days, Trino's `iceberg.expire-snapshots.min-retention` floor is 7 days; many teams pick 30 days as an operator preference for a comfortable rollback window).
 - On-prem cost is hardware + power, not per-GB. Size disks for **peak + 20% headroom**, plan a refresh when you hit 70% capacity.
 
 ---
@@ -241,7 +241,7 @@ Even at 1 TB, a single MinIO node with a few disks is sufficient. Lakehouses sca
 ### Snapshot accumulation — the actual storage trap
 Time-travel snapshots reference data files. Without `expire_snapshots`, every compaction *adds* files (the new big ones) while keeping the old ones around (because snapshots still reference them).
 
-Without expiry, a 100 GB table can balloon to 300+ GB in a year just from snapshot accumulation. **Always schedule `expire_snapshots`** — retain 30 days of history, keep last 10 snapshots, delete the rest.
+Without expiry, a 100 GB table can balloon to 300+ GB in a year just from snapshot accumulation. **Always schedule `expire_snapshots`** — a common operator setting is "retain 30 days of history, keep last 10 snapshots, delete the rest." Iceberg's own default for `history.expire.max-snapshot-age-ms` is 5 days, and Trino enforces a 7-day minimum-retention floor (`iceberg.expire-snapshots.min-retention`); 30 days is a typical operator override for a comfortable rollback window, not a documented default of either system.
 
 ---
 

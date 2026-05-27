@@ -11,6 +11,10 @@
 
 **Pass threshold per topic**: average ≥ 3.5 across all dimensions, tested from at least 2 different question angles.
 
+**Per-topic threshold overrides**:
+- *Trino federation / cross-source connectors*: pass threshold ≥ 4.5 (raised because the iter158 Q1 failure exposed a critical resource gap; this topic must reach a higher bar before being marked PASSED).
+- *Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering*: pass threshold ≥ 4.5 (raised because the iter160 Q2 failure was a critical factual error — answer said "no ANALYZE needed" when ANALYZE TABLE is exactly what populates the NDV statistics the CBO uses for join ordering; topic must reach a higher bar before being marked PASSED).
+
 ---
 
 ## Required topic checklist
@@ -23,22 +27,24 @@ Each topic must reach the pass threshold before the system can enter final phase
 | What a data warehouse is and when a SaaS product needs one | PASSED | 4.647 | 3 |
 | What a data lakehouse is and how it differs from a warehouse | PASSED | 4.625 | 2 |
 | Column-oriented storage — what it is and why it's faster for analytics | PASSED | 4.365 | 6 |
-| Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.602 | 8 |
+| Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.50 | 2 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.415 | 8 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.255 | 53 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.456 | 106 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.812 | 4 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.50 | 3 |
 | Query performance basics: partitioning, indexing strategy for analytics | PASSED | 4.594 | 4 |
 | Lakehouse schema design: fact tables, dimension tables, denormalization | PASSED | 4.583 | 3 |
-| Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.500 | 6 |
-| Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.375 | 4 |
-| Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.438 | 4 |
+| Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.589 | 15 |
+| Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.500 | 5 |
+| Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.550 | 5 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 2 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.275 | 53 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.612 | 10 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.474 | 99 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.623 | 16 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.481 | 217 |
+| Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.763 | 4 |
 
 ---
 
@@ -3102,3 +3108,6339 @@ Verified: iceberg.apache.org/docs/latest/spark-writes/ (MERGE INTO ON condition 
 **Notes**: Strong, well-anchored answer covering all 7 expected criteria (verified against trino.io and iceberg.apache.org): `$files` query with correct `iceberg.analytics."events$files"` quoted syntax, `file_size_in_bytes`/`record_count` column names accurate; per-column compression breakdown matching `resources/11-lakehouse-storage-sizing.md`; bytes-per-row × monthly_row_count / 1e9 formula with worked example (50M page views × 6.2 bytes = 310 MB/month); 20–30% buffer (1.25x rule of thumb) with three sources of inflation; MinIO EC:4+2 = 1.5x raw verified vs MinIO docs; Iceberg 1.4.0+ Zstd default with correct Trino `ALTER TABLE ... SET PROPERTIES "write.parquet.compression-codec" = 'zstd'` syntax and `rewrite_data_files` recompaction note. **Technical bug**: the per-event-type breakout query `SELECT event_type, ... FROM "events$files" GROUP BY event_type` is invalid — `$files` is file-level metadata and does not expose row-level columns. To break out bytes-per-row by event_type, you either (a) partition the table by event_type and group by the `partition` column from `$files`, (b) sample from the base table directly. Resource gap: `resources/11-lakehouse-storage-sizing.md` — added "per-event-type bytes-per-row — the right way" subsection this iteration.
 
 **Iteration 53 average**: (3.50 + 4.50) / 2 = **4.00**
+
+---
+
+### Iteration 54, Q1 — 2026-05-24 (EXTENDED PHASE)
+**Question**: OPA blocking system.runtime.queries — can OPA enforce access on system catalog tables, how to block tenant users while letting admins query it.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 4 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **4.8** |
+
+**Topics updated**: Multi-tenant analytics — prior avg 4.255 across 53 questions; new running avg (4.255 × 53 + 4.8) / 54 = **4.265** across 54 questions. PASSED.
+
+**Notes**: Hits every expected coverage point: (1) OPA routes all table access (including system catalog) through the authorization plugin before execution — verified against trino.io OPA access control docs; (2) admin vs tenant principal distinction via role/group/JWT claim; (3) deny-by-default on `system` catalog with admin carve-out as the right mechanism; (4) `system.runtime.queries` confirmed cross-tenant leak with correct column inventory (full SQL text, user, query_id, resource_group_id, elapsed time) — verified against Trino system connector docs and GitHub issue 5464; (5) Iceberg `$`-suffix metadata tables (`$snapshots`, `$history`, `$partitions`, `$files`, `$manifests`) correctly extended; (6) Rego policy correctly deferred to external governance doc — no fabricated syntax. Adds operationally valuable depth: scope deny to entire `system` catalog, lists `system.runtime.tasks/nodes/transactions` as additional leak paths, surfaces OPA hot-reload vs file-based-rules restart distinction, includes runnable verification recipe. Beginner-clarity gap (persistent across the multi-tenant topic): "principal", "deny-by-default", "carve-out", "hot-reload", "Rego" used without inline plain-English glosses. No new resource fixes needed — `resources/05-multi-tenant-analytics.md` already contains the canonical content and the responder pulled all of it correctly.
+
+### Iteration 54, Q2 — 2026-05-24 (EXTENDED PHASE)
+**Question**: Debezium Postgres -> Iceberg CDC, column type widened from INT to BIGINT in Postgres. Does Debezium pick up the type change automatically, can Iceberg do INT -> BIGINT without dropping the table, and what breaks if not handled?
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5 |
+| Accuracy | 5 |
+| Clarity | 5 |
+| No hallucination | 5 |
+| **Average** | **5.0** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.275 across 53 questions; new running avg (4.275 × 53 + 5.0) / 54 = **4.288** across 54 questions. PASSED.
+
+**Notes**: Hits all 8 expected coverage points. (1) WAL relation message mechanism for DDL detection correctly explained — verified against debezium.io Postgres connector docs which confirm Debezium receives a relation (R) message whenever a schema change occurs. (2) Avro/JSON schema transition INT32 -> INT64 in Debezium messages correctly named. (3) Iceberg INT -> BIGINT type promotion correctly cited as an allowed widening per the Iceberg spec — verified against iceberg.apache.org Spark DDL docs (safe updates: int -> bigint, float -> double, decimal P widening). (4) Trino `ALTER TABLE ... ALTER COLUMN ... SET DATA TYPE BIGINT` syntax verified against trino.io 481 ALTER TABLE docs. (5) Spark Iceberg `ALTER TABLE ... ALTER COLUMN ... TYPE BIGINT` syntax verified against Iceberg 1.5 Spark DDL docs. (6) Metadata-only operation, no Parquet rewrite, no backfill — correctly stated; existing INT values read correctly as BIGINT. (7) Risk section covers both failure modes (consumer type-mismatch error vs silent INT64 -> INT32 truncation at the 2^31 - 1 boundary) — concrete, actionable. (8) Pause/ALTER/verify/resume sequence correct. (9) BIGINT -> INT narrowing correctly stated as rejected. (10) Correctly distinguishes WAL relation messages (DDL detection) from schema registry (payload serialization) — addresses a common point of confusion. (11) Correctly clarifies `schema.evolution=basic` is a Debezium **sink** connector setting, not source — important for ops engineers searching the wrong connector docs. Very minor nit: the "safe promotions" extension includes "DATE -> TIMESTAMP with caveats" which is not actually part of the Iceberg core spec promotions (only int/long, float/double, decimal precision widening). No resource fixes needed — `resources/13-postgres-to-iceberg-ingestion.md` material is being pulled correctly. Optional polish: trim the "safe promotions" list in the resource to spec-exact items.
+
+### Iteration 55, Q1 — 2026-05-24 (EXTENDED PHASE)
+**Question**: Tenant data engineer queried `iceberg.analytics."events$snapshots"` and `"events$files"` through their BI tool and got back commit timestamps, operation types, file paths, and row counts. What is exposed, why did the per-customer view fail to block this, and how do we block tenants from these metadata tables while preserving internal team access?
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5 |
+| Accuracy | 5 |
+| Clarity | 5 |
+| No hallucination | 5 |
+| **Average** | **5.0** |
+
+**Topics updated**: Multi-tenant analytics — prior avg 4.265 across 54 questions; new running avg (4.265 × 54 + 5.0) / 55 = **4.278** across 55 questions. PASSED.
+
+**Notes**: Hits every expected coverage point. (1) Correctly identifies $-suffix tables as Iceberg metadata tables, not row data, with explicit "No row-level data is exposed" framing so the engineer understands the precise nature of the leak. (2) Accurate $snapshots breakdown — commit timestamps, operation type (append/overwrite), summary stats (records added/deleted per snapshot) — verified against trino.io Iceberg connector docs. (3) Accurate $files breakdown — individual file paths (with concrete MinIO example path `s3a://lakehouse/tenant/acme/events/...` that makes the partition-path leak tangible), per-file row counts, file sizes, column min/max statistics — verified against Trino $files column inventory (content, file_path, record_count, file_size_in_bytes, lower_bounds, upper_bounds). (4) Correct explanation of why per-tenant views do NOT block this — the view's WHERE clause is on row data; $-suffix queries bypass the view body and hit the metadata layer directly. Includes a labeled "Your setup probably looks like this" SQL block to ground the explanation. (5) Correct fix — single OPA Rego deny rule for table names containing `$` for tenant principals, with admin carve-out for `admin`, `data-team`, `spark-ingest`. (6) Verification recipe is concrete and runnable — SELECT against $snapshots, $files, $partitions LIMIT 1 from a tenant role should all return Access Denied; normal per-tenant view query should still succeed. (7) Correctly identifies the separation from system.runtime.queries — explicitly notes blocking the system catalog does NOT protect Iceberg metadata tables in the iceberg catalog, and both rules are needed independently. Inline glossary defines principal, Rego, carve-out, deny-by-default — addresses the recurring OPA-jargon clarity gap flagged in earlier iterations. Refuses to invent Rego code, explicitly defers to the external governance document — correct posture for the production stack, no hallucination. Actionable closing with 4 prioritized action items including a CI test, plus P0 framing. No resource fixes needed — `resources/05-multi-tenant-analytics.md` "Iceberg metadata table leak" section is being pulled correctly and the inline glossary matches resource style.
+
+### Iteration 55, Q2 — 2026-05-24 (EXTENDED PHASE)
+**Question**: Postgres events table has a JSONB `properties` column used differently per event type (page_viewed -> url/referrer; feature_used -> feature_name/plan_type; some have a `tags` JSON array). Spark job to Iceberg — cast to string, or break into columns? Cares about filter/group by feature_name and plan_type in Trino dashboards.
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5 |
+| Accuracy | 5 |
+| Clarity | 5 |
+| No hallucination | 5 |
+| **Average** | **5.0** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.288 across 54 questions; new running avg (4.288 × 54 + 5.0) / 55 = (231.552 + 5.0) / 55 = 236.552 / 55 = **4.301** across 55 questions. PASSED.
+
+**Notes**: Hits all 6 expected coverage points. (1) Parquet has no native JSON/JSONB type — implicit but clearly stated ("Parquet has no native JSON type, so this works technically"). (2) Option 1 VARCHAR with Trino `json_extract_scalar(properties, '$.feature_name')` — function name and JSONPath syntax verified against trino.io JSON functions docs; correctly framed downsides (re-parsing per query, no columnar compression benefit on inner fields). (3) Option 2 extract hot fields — recommended with runnable Spark `get_json_object("properties", "$.feature_name")` (verified against spark.apache.org PySpark functions docs); uses the engineer's own example field names; preserves blob as `properties_raw VARCHAR` via `withColumnRenamed`. (4) Rule-of-thumb statement verbatim from resource. (5) Array handling fully covered: index extraction via `$.tags[0]` AND `from_json` + `array_contains` for membership with the concrete "enterprise vs enterprise-plus" substring-match anti-example — exactly the substring-collision trap the resource warns about. (6) Schema evolution closer correctly states `ALTER TABLE ADD COLUMN` is metadata-only, runs in milliseconds, old rows return NULL automatically — verified against iceberg.apache.org Spark DDL docs. Adds a "why this matters" paragraph tying back to dashboard speed, file skipping, and analyst onboarding. Very minor: `col("tags_array")` is used without showing the `col` import in this snippet (resource imports it earlier but the answer snippet doesn't); a copy-paste engineer would catch instantly. No resource fix required — the JSONB section of `resources/13-postgres-to-iceberg-ingestion.md` (lines ~467-513) is being pulled correctly. Optional polish: add `from pyspark.sql.functions import col` to the array_contains snippet for full copy-paste self-containment.
+
+### Iteration 56, Q1 — 2026-05-24 (EXTENDED PHASE)
+**Question**: GDPR right-to-erasure on a shared multi-tenant Iceberg events table — does DELETE FROM actually remove rows from underlying files, and how to ensure backups/snapshots don't still hold the data?
+
+| Dimension | Score |
+|---|---|
+| Completeness | 4 |
+| Accuracy | 5 |
+| Clarity | 5 |
+| No hallucination | 5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Multi-tenant analytics — prior avg 4.278 across 55 questions; new running avg (4.278 × 55 + 4.75) / 56 = (235.290 + 4.75) / 56 = 240.040 / 56 = **4.286** across 56 questions. PASSED.
+
+**Notes**: Strong, well-structured runbook. Correctly explains MoR delete-file mechanics, correctly orders DELETE → `rewrite_data_files` → `expire_snapshots`, correctly identifies Spark-only procedures vs Trino-or-Spark DELETE, and correctly uses the aggressive `older_than => current_timestamp() - interval '0' day, retain_last => 1` form scoped to the GDPR exception (with the explicit time-travel warning). Procedure syntax verified against iceberg.apache.org Spark procedures docs. Two completeness gaps: (1) `remove_orphan_files` — the canonical 4th step in the expected purge sequence — is not mentioned at all; the answer treats expire_snapshots as the final cleanup, but a thorough GDPR runbook should also run remove_orphan_files to catch files left by failed/partial writes. (2) Verification uses `mc ls` MinIO inspection instead of querying the `$snapshots` and `$files` metadata tables — less precise than the rubric's recommended Iceberg-native introspection, especially since the resource already documents those metadata tables in the Iceberg metadata table leak section. Copy-on-Write vs Merge-on-Read distinction is mentioned only briefly; CoW would make step 2 largely a no-op since DELETE itself rewrites files. Recommendation: teacher should add a 4th step (`remove_orphan_files`) to the GDPR sequence in `resources/05-multi-tenant-analytics.md`, add a `$snapshots`/`$files` verification subsection, and add a one-line CoW vs MoR callout to step 2.
+
+### Iteration 56, Q2 — 2026-05-24 (EXTENDED PHASE)
+**Question**: Spark job does nightly full dump of Postgres `events` to Iceberg, taking hours. Team suggested switching to incremental load via `updated_at > last_run_timestamp`. Some older rows have NULL `updated_at`. Concerned about boundary-write missing/double-loading rows. How to build watermark-based incremental load safely?
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5 |
+| Accuracy | 5 |
+| Clarity | 5 |
+| No hallucination | 4 |
+| **Average** | **4.75** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.301 across 55 questions; new running avg (4.301 × 55 + 4.75) / 56 = (236.555 + 4.75) / 56 = 241.305 / 56 = **4.309** across 56 questions. PASSED.
+
+**Notes**: Covers all 5 expected coverage points cleanly with a four-numbered-"traps" structure. (1) Watermark pattern — runnable Spark JDBC code reading `(SELECT * FROM events WHERE updated_at > '{last_ts}') sub`, then `df.writeTo(...).append()`, then advancing the checkpoint. (2) NULL updated_at problem — clearly framed ("they vanish forever"); two fix options, with the Postgres-side backfill `UPDATE events SET updated_at = created_at WHERE updated_at IS NULL` recommended and the first-run `OR updated_at IS NULL` filter as fallback. Differs from rubric's id-range-secondary-watermark suggestion but the backfill is arguably the better default; no points docked. (3) Boundary / late-arriving — concrete 2 AM / 2:02 AM timeline making the bug tangible; correct LAG_BUFFER pattern with `max_ts - timedelta(minutes=15)`; correctly advises calibrating from `pg_stat_replication.replay_lag` P99 doubled; correctly notes PRIMARY reads can use near-zero buffer. (4) Duplicates — MERGE INTO with correct Spark Iceberg syntax (`MERGE INTO ... USING ... ON ... WHEN MATCHED THEN UPDATE SET * WHEN NOT MATCHED THEN INSERT *`) verified against iceberg.apache.org Spark writes docs; includes warning about overwritePartitions data-loss trap with late arrivals. (5) Drift monitoring — row-count reconciliation between Postgres and Iceberg for recent windows with Slack alert. Bonus: index preflight (`CREATE INDEX CONCURRENTLY idx_events_updated_at`) and a clean 5-step production template summary. Very minor: row-count check uses `spark.sql("SELECT current_date() - INTERVAL 1 DAY")` — works in Spark SQL but the unquoted interval literal is slightly non-standard and would fail copy-pasted into Trino. No resource fix required.
+
+### Iteration 57, Q1 — 2026-05-24 (EXTENDED PHASE)
+**Question**: Heavy-query enterprise tenant slowing down shared dashboards — how to identify the noisy tenant live via `system.runtime.queries`, kill the offending query, configure per-tenant resource groups, and verify the limits are actually being applied.
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5 |
+| Accuracy | 5 |
+| Clarity | 5 |
+| No hallucination | 5 |
+| **Average** | **5.0** |
+
+**Topics updated**: Multi-tenant analytics — prior avg 4.286 across 56 questions; new running avg (4.286 × 56 + 5.0) / 57 = (240.016 + 5.0) / 57 = 245.016 / 57 = **4.298** across 57 questions. PASSED.
+
+**Notes**: Hits all six expected coverage points cleanly. (1) `system.runtime.queries` diagnostic — correct four columns (`user`, `state`, `elapsed_time`, `query`), plus a bonus per-tenant aggregation query that ranks tenants by running/queued count. (2) `CALL system.runtime.kill_query(query_id => '...', message => '...')` — correct procedure-call syntax (resolves iter50 Q1 bug where the responder previously used `SELECT system.runtime.kill_query(...)`). (3) Resource-groups.json — all four property names correct (`hardConcurrencyLimit`, `softMemoryLimit`, `maxQueued`, `subGroups`); verified against trino.io/docs/current/admin/resource-groups.html. (4) Selector matching gotcha — JWT principal (`sub` claim) vs Trino role name correctly contrasted with worked CORRECT/WRONG examples; the third anti-example (`"user": "acme_role"`) shows the exact silent-no-match misconfiguration. (5) `userRegex` correctly flagged as a non-existent field (resolves iter53 Q1 hallucination). (6) Three-test verification recipe is the strongest element: confirm selector matched via `resource_group_id` column, trigger the concurrency cap by submitting 6 concurrent queries and confirming 1 enters `QUEUED`, and an explicit correct-vs-WRONG property-name table covering all three silent-ignore failure modes (`maxRunning`, `maxMemoryPercent`, `queueSize`). Summary table ties the incident timeline (diagnose → kill → prevent → verify) to specific tools. Both recurring failure modes from iter50/iter53 are now resolved on the same question shape. Very minor: `resource_group_id` is technically `array(varchar)` so display-vs-comparison usage is slightly imprecise but does not actively mislead; coordinator-restart note for file-based rules not surfaced but not in expected coverage. No resource fix needed.
+
+Verified: trino.io/docs/current/admin/resource-groups.html (hardConcurrencyLimit/softMemoryLimit/maxQueued/subGroups property names; selectors `user` field matched as Java regex against connection principal); trino.io/docs/current/connector/system.html (system.runtime.queries columns including user, state, query, elapsed_time, resource_group_id).
+
+### Iteration 57, Q2 — 2026-05-24 (EXTENDED PHASE)
+**Question**: 8M-row Postgres `product_catalog` table full-refreshed nightly into Iceberg via `createOrReplace()`. 25-minute rebuild causes dashboard queries to fail or return empty during the window. Source has no reliable change tracking so incremental is hard. How to eliminate the downtime window?
+
+| Dimension | Score |
+|---|---|
+| Completeness | 4.5 |
+| Accuracy | 5 |
+| Clarity | 5 |
+| No hallucination | 5 |
+| **Average** | **4.875** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.309 across 56 questions; new running avg (4.309 × 56 + 4.875) / 57 = (241.304 + 4.875) / 57 = 246.179 / 57 = **4.319** across 57 questions. PASSED.
+
+**Notes**: Strong runbook answer that walks the engineer all the way through staging-table + atomic view-swap. (1) Why `createOrReplace()` causes the gap — correctly diagnoses drop-recreate-fill semantics for the 25-minute window; verified against iceberg.apache.org Spark writes docs (equivalent to CREATE OR REPLACE TABLE AS SELECT). (2) Staging table pattern — runnable Spark code: parallel JDBC read with `partitionColumn=product_id` + `numPartitions=16`, then `df.writeTo(...product_catalog_staging).createOrReplace()` (safe because it affects staging only, live table untouched). (3) Iceberg snapshot isolation — correctly explained: every write commits as new immutable snapshot, readers always see a complete consistent snapshot, no partial-write states; verified against Iceberg consistency model docs (compare-and-swap metadata commit, snapshot/serializable isolation). (4) View-swap cutover — `CREATE OR REPLACE VIEW iceberg.analytics.product_catalog_view AS SELECT * FROM ..._staging` correctly identified as atomic; verified against Iceberg view-spec and trino.io connector docs (view metadata replaced via atomic swap delegated to metastore). (5) Rollback — `ALTER TABLE ... RENAME` to `_prev` before each run, drop after validation, view can be reverted instantly. (6) Maintenance closer — `rewrite_data_files` and `expire_snapshots` correctly cited from iceberg.system procedures namespace. Completeness gap: `overwritePartitions()` as an alternative atomic-commit path for partitioned tables is NOT discussed (only `createOrReplace()` and view-swap). For a partitioned dimension table this would be a simpler one-call solution and was on the expected coverage list — minor docked to 4.5 on completeness. Also did not call out that all consumers must repoint to the view (a dashboard still hitting the base table will read stale data after the swap) — small operational gap. No hallucinated APIs; all SQL and Spark code accurate. Optional resource polish for `resources/13-postgres-to-iceberg-ingestion.md`: (1) add an "if your table is partitioned, prefer `overwritePartitions()` instead of staging+view" subsection to Pattern A; (2) one-line "remember to repoint all consumers to the view, not the base table" warning in the view-swap section.
+
+Verified: iceberg.apache.org/docs (Spark writes — `createOrReplace()` = CREATE OR REPLACE TABLE AS SELECT, drops and rebuilds); iceberg.apache.org/spec (snapshot isolation, atomic compare-and-swap metadata commit); iceberg.apache.org/view-spec (atomic view-metadata swap delegated to metastore); trino.io/docs/current/connector/iceberg.html (CREATE OR REPLACE VIEW atomicity).
+
+---
+
+### Iter 58 Q1 — Multi-tenant analytics (SOC2 audit logging on Trino — on-prem k8s)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5 |
+| Accuracy | 4 |
+| Clarity | 5 |
+| No hallucination | 5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Multi-tenant analytics — prior avg 4.298 across 57 questions; new running avg (4.298 × 57 + 4.75) / 58 = (244.986 + 4.75) / 58 = 249.736 / 58 = **4.306** across 58 questions. PASSED.
+
+**Notes**: Hits all six expected-coverage points cleanly. (1) HTTP event listener correctly identified as Trino's built-in mechanism with no third-party plugin; properties file content matches trino.io/docs/current/admin/event-listeners-http.html (`event-listener.name=http`, `http-event-listener.connect-ingest-uri`, `log-completed=true`), referenced from `etc/config.properties` via `event-listener.config-files`. (2) Coordinator restart requirement explicitly stated (no hot-reload) — matches the question's expected gotcha. (3) All five nested JSON paths correct: `context.user`, `metadata.query`, `metadata.queryId`, `metadata.queryState`, `ioMetadata.inputs[n].tableName`, `.columns[]`. Concrete JSON example provided; explicit warning that JSON is nested and that top-level keys return null. (4) All three on-prem storage destinations covered (Loki, Filebeat/ELK, Iceberg audit table in MinIO) with the Iceberg-in-MinIO option as the worked example — aligned with the on-prem k8s production stack. (5) Role-per-tenant insight clean: JWT `sub` claim becomes `context.user`, no extra tagging needed, ties directly to the production JWT auth setup. (6) `ioMetadata.inputs` correctly identified as the second audit signal for catching tenant principals that touch base tables. Kubernetes ConfigMap mount pattern called out. 7-step deployment checklist gives the engineer a clear sequence. **Accuracy ding (4/5)**: the audit-table DDL uses `USING iceberg` syntax (Spark/Databricks SQL form) — on Trino 467 the correct DDL is `WITH (format = 'PARQUET', partitioning = ARRAY['day(create_time)'])`. The resource itself uses the same syntax on line 962 so the answer is faithful to the source, but the question is a Trino-deployment question and the example wouldn't execute on the production engine as written. Also: cross-tenant detection SQL uses `query_text LIKE '%FROM analytics.events%'` and `trino_user LIKE '%-service-account'` — fragile string matching that breaks on whitespace/comments/aliases. The prose correctly describes parsing `ioMetadata.inputs.tableName` (the robust approach), but the example SQL doesn't actually implement it. No OPA layering reference between audit vs authz, but that's not in expected coverage. **Resource polish for `resources/05-multi-tenant-analytics.md`**: (a) change `USING iceberg` to Trino's `WITH (...)` syntax in the audit-table example (or label it explicitly as Spark SQL); (b) add a worked cross-tenant detection query that parses `queried_tables` as JSON (e.g., `json_extract`) instead of `LIKE` on raw query text.
+
+Verified: trino.io/docs/current/admin/event-listeners-http.html (HTTP event listener properties: `http-event-listener.connect-ingest-uri`, `log-completed`, `log-created`, `connect-http-method`, retry settings; events serialized as JSON; properties file structure under `etc/event-listener.properties`).
+
+---
+
+### Iter 58 Q2 — Postgres-to-Iceberg ingestion (overwritePartitions for single-day reload)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5 |
+| Accuracy | 5 |
+| Clarity | 5 |
+| No hallucination | 5 |
+| **Average** | **5.0** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.319 across 57 questions; new running avg (4.319 × 57 + 5.0) / 58 = (246.183 + 5.0) / 58 = 251.183 / 58 = **4.331** across 58 questions. PASSED.
+
+**Notes**: Excellent answer covering every expected-coverage point. (1) How `overwritePartitions()` works — correctly describes atomic single-snapshot commit, snapshot isolation so readers see either old or new partition (never partial); verified against iceberg.apache.org Spark Writes and ReplacePartitions Javadoc (dynamic overwrite mode replaces only matched partitions). (2) When simpler than staging-table-swap — explicit upfront recommendation for the engineer's date-partitioned case; calls out no extra table to manage, faster, idiomatic. (3) Critical data-loss trap — the canonical 8,432-rows-becomes-12 timeline with `updated_at` watermark + `occurred_at` partition is presented clearly with emphasis on silent failure (no error raised). (4) How to avoid the trap — full Python snippet derives affected_days from delta, then re-reads full partition from Postgres before `overwritePartitions()`. (5) When staging-table-swap still needed — all three cases enumerated (unpartitioned tables, multi-partition rebuilds, end-to-end validation requirement). (6) Why `createOrReplace()` must NOT be used — clear standalone subsection: drops/recreates entire table, wipes other partitions. Bonus: MERGE INTO alternative for frequent late arrivals; idempotency-on-retry section contrasting with `append()` doubling. Minor accuracy slip: mentions MERGE INTO "writes delete files that slow queries until compaction" — Iceberg default for MERGE is Copy-on-Write (rewrites whole files, no delete files), so this is a small detail wrong but doesn't affect the practical recommendation. Not enough to drop the score.
+
+Verified: iceberg.apache.org/docs/latest/spark-writes (overwritePartitions = dynamic-mode replace, atomic snapshot); iceberg.apache.org/javadoc ReplacePartitions (only matched partitions affected, atomic compare-and-swap snapshot); iceberg.apache.org/spec (snapshot isolation guarantees readers see consistent snapshots, never partial state).
+
+---
+
+### Iter 59 Q1 — Multi-tenant analytics (automated CI test proving tenant data isolation)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5 |
+| Accuracy | 4.5 |
+| Clarity | 5 |
+| No hallucination | 5 |
+| **Average** | **4.8** |
+
+**Topics updated**: Multi-tenant analytics — prior avg 4.306 across 58 questions; new running avg (4.306 × 58 + 4.8) / 59 = (249.748 + 4.8) / 59 = 254.548 / 59 = **4.314** across 59 questions. PASSED.
+
+**Notes**: Strong answer covering all 6 expected-coverage points. (1) What the test does — connects as Tenant A's service account, attempts to query Tenant B's view and the base table, asserts Access Denied exception; correct. (2) Credentials setup — explicitly uses same JWT service accounts as production, stored as CI secrets, staging RBAC mirrors production; correct. (3) Where test lives — `tests/integration/test_trino_tenant_isolation.py`, pytest, GitHub Actions YAML with self-hosted runner, Kubernetes Job option; all correct. (4) Pass vs fail semantics — WRONG vs CORRECT code contrast is clear; pass = exception raised, fail = rows returned or zero rows without error. (5) Zero rows vs Access Denied distinction — dedicated section with code contrast showing the silent-bypass failure mode; excellent. (6) View-level vs base-table distinction — dedicated section, separate test for each; correct. Bonus: metadata table leakage tests ($partitions, $files), system.runtime.queries denial test. Minor accuracy issue: `pytest.raises(trino.exceptions.TrinoQueryError)` catches the exception correctly (TrinoUserError with PERMISSION_DENIED is a subclass), but `trino.exceptions.TrinoUserError` would be more precise; functionally valid. Also: TOKEN_TENANT_A/B referenced in fixtures but `os.environ` import not shown in test module (only visible in GH Actions YAML). Neither affects the conceptual correctness or practical guidance.
+
+Verified: trino-python-client PyPI + GitHub (TrinoUserError is subclass of TrinoQueryError, raised for PERMISSION_DENIED; JWTAuthentication and http_scheme parameters are correct); trino.io access control docs (permission denied behavior).
+
+---
+
+### Iter 59 Q2 — Postgres-to-Iceberg ingestion (schema drift: column rename/drop mid-CDC)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5 |
+| Accuracy | 4.5 |
+| Clarity | 5 |
+| No hallucination | 5 |
+| **Average** | **4.8** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.331 across 58 questions; new running avg (4.331 × 58 + 4.8) / 59 = (251.198 + 4.8) / 59 = 255.998 / 59 = **4.339** across 59 questions. PASSED.
+
+**Notes**: Well-organized answer covering all 6 expected-coverage points with code examples. (1) Debezium sees rename as drop+add — explained via WAL relation message mechanism, explicitly stated "Debezium can't detect this was a rename — it just sees the old name gone and a new name appeared"; correct. (2) Iceberg downstream silent drift — new column appended (account_id), old column all-nulls (user_id); correct. (3) Why it fails quietly — Iceberg allows nullable columns without erroring, no exception raised, queries return wrong data; correct. (4) How to detect drift — SHOW COLUMNS comparison against information_schema; correct. (5) Recovery via full refresh — createOrReplace() Spark code with JDBC read; correct. (6) Process fix — notification requirement + optional schema registry (Confluent/Apicurio); correct. Bonus: staging table + view swap for zero-downtime recovery, preflight schema-check Python code, renames-vs-adds-vs-drops comparison table. Minor accuracy issue: answer implies Iceberg silently adds columns when new column name appears in events — this actually requires `mergeSchema=true` and `write.spark.accept-any-schema=true`; without those, Spark write would fail loudly. Answer assumes auto-evolution is enabled (implied by "everything was working fine until...") but doesn't state this dependency explicitly. Not incorrect, just slightly incomplete.
+
+Verified: debezium.io Postgres connector docs (DDL detection via WAL logical decoding relation messages after next DML); iceberg.apache.org/docs/1.5.1/spark-writes (mergeSchema option for schema evolution); iceberg.apache.org evolution docs (nullable columns can be absent in data files).
+
+---
+
+### Iter 60 Q1 — Multi-tenant analytics (row-level security: views + roles vs app-layer WHERE clause)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5 |
+| Accuracy | 5 |
+| Clarity | 5 |
+| No hallucination | 5 |
+| **Average** | **5.0** |
+
+**Topics updated**: Multi-tenant analytics — prior avg 4.314 across 59 questions; new running avg (4.314 × 59 + 5.0) / 60 = (254.526 + 5.0) / 60 = 259.526 / 60 = **4.325** across 60 questions. PASSED.
+
+**Notes**: Perfect answer covering all 6 expected-coverage points. (1) Trino has no native RLS / no CREATE POLICY — stated explicitly, comparison to PostgreSQL/BigQuery CREATE POLICY provided. (2) Per-tenant views with baked-in filter — concrete SQL for view creation, role assignment, GRANT. (3) Why view-based is safer than app-layer — "a forgotten filter in the app still hits the view which has the filter built in"; clear. (4) OPA as enforcement layer — covered as "defense in depth", plus correct flag that OPA should also deny system.runtime.queries access (a genuine multi-tenant leak path). (5) RLS meaning vs Trino approach — compared to PostgreSQL/BigQuery row access policies; views as idiomatic equivalent. (6) Migration path — concrete 5-step list from app-layer WHERE to scoped views. Bonus: the USER-level revoke pitfall (revoking from role vs from user), three test queries for verifying isolation, resource group throttling config. GRANT/REVOKE syntax, Iceberg DDL, and resource group selector `"user"` field all verified correct against Trino docs.
+
+Verified: trino.io GRANT/REVOKE docs; trino.io resource-groups admin docs (selector `user` field = Java regex matching JWT sub claim); trino.io OPA access control docs; trino.io security overview (no CREATE POLICY / no native RLS).
+
+---
+
+### Iter 60 Q2 — Postgres-to-Iceberg ingestion (JSONB column handling: flatten vs MAP vs JSON functions)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5 |
+| Accuracy | 5 |
+| Clarity | 5 |
+| No hallucination | 5 |
+| **Average** | **5.0** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.339 across 59 questions; new running avg (4.339 × 59 + 5.0) / 60 = (256.001 + 5.0) / 60 = 261.001 / 60 = **4.350** across 60 questions. PASSED.
+
+**Notes**: Excellent answer covering all 6 expected-coverage points clearly with working code. (1) JSONB→STRING via JDBC — explicit before/after showing StringType in Spark. (2) Two strategies — Option A (VARCHAR + JSON functions) and Option B (flatten at write time), clearly differentiated. (3) Trino JSON functions — `json_extract_scalar(metadata, '$.plan')` and `JSON_VALUE(metadata, 'lax $.plan')` both demonstrated with correct syntax; explicit note about no pushdown. (4) When to keep STRING vs flatten — decision table plus hybrid recommendation. (5) MAP via `from_json` — Option C with MapType(StringType, StringType); notes MAP element access also lacks pushdown. (6) Performance — full scan for JSON functions vs Parquet min/max stats + predicate pushdown for typed columns; stated clearly. Bonus: backfill workflow for adding a new key later (ALTER TABLE ADD COLUMN + Spark re-ingest from metadata_raw). STRUCT type not explicitly demonstrated but MAP is the correct choice for 10-15 variable keys. All function syntax verified against Trino 481 docs.
+
+Verified: trino.io/docs/current/functions/json.html (json_extract_scalar, JSON_VALUE lax syntax); Spark from_json with MapType; iceberg.apache.org evolution docs (new column returns NULL for old rows); Trino Iceberg connector (no MAP element-level predicate pushdown).
+
+---
+
+### Iter 61 Q1 — Multi-tenant analytics (resource groups: diagnosing and fixing a noisy tenant)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 4.5 |
+| Accuracy | 4 |
+| Clarity | 5 |
+| No hallucination | 4.5 |
+| **Average** | **4.5** |
+
+**Topics updated**: Multi-tenant analytics — prior avg 4.325 across 60 questions; new running avg (4.325 × 60 + 4.5) / 61 = (259.5 + 4.5) / 61 = 264.0 / 61 = **4.328** across 61 questions. PASSED.
+
+**Notes**: Strong on-call-oriented answer covering 5.5 of 6 expected points. (1) Tenant identification via "user" regex — correctly explains JWT sub claim → principal → Java regex match; first match wins. (2) Key resource group fields — correctly names hardConcurrencyLimit, maxQueued, softMemoryLimit; high-value callout that maxConcurrentQueries is silently ignored (exactly the engineer's confusion). (3) Real-time diagnosis — shows system.runtime.queries query; mentions Web UI. PARTIAL: states "there's no direct query for this [resource group]" which is incorrect — `resource_group_id` column exists on system.runtime.queries in Trino. (4) Kill runaway queries — correct CALL system.runtime.kill_query syntax and phrasing. (5) Config hot-reload behavior — PARTIAL: says "changes take effect for new queries only" without explicitly stating that file-based resource group config requires a coordinator restart. This is operationally important; readers may believe a ConfigMap push alone is sufficient without a pod restart. (6) Long-term fix — per-tier limits, automation, monitoring, selector verification — well covered. Resource fix needed: add resource_group_id column to system.runtime.queries coverage and add coordinator restart requirement for file-based config.
+
+Verified: trino.io/docs/current/admin/resource-groups.html (hardConcurrencyLimit, softMemoryLimit, maxQueued field names; file-based manager requires restart vs DB-backed manager hot-reloads every 1s); trino.io system connector docs (system.runtime.queries columns including resource_group_id); trino.io CALL kill_query syntax.
+
+---
+
+### Iter 61 Q2 — Postgres-to-Iceberg ingestion (numeric precision + timestamp timezone via JDBC)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5 |
+| Accuracy | 5 |
+| Clarity | 5 |
+| No hallucination | 5 |
+| **Average** | **5.0** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.350 across 60 questions; new running avg (4.350 × 60 + 5.0) / 61 = (261.0 + 5.0) / 61 = 266.0 / 61 = **4.361** across 61 questions. PASSED.
+
+**Notes**: Complete, well-structured answer covering all 6 expected-coverage points. (1) numeric(18,4) → DECIMAL(18,4) via pgjdbc; trailing zeros are display-only. (2) CAST to VARCHAR verification in Trino; FLOAT/DOUBLE cast as actual precision-loss culprit. (3) timestamptz → UTC instant preserved, offset metadata dropped; UTC normalization in Postgres. (4) TIMESTAMP(6) WITH TIME ZONE recommended; consequence of omitting WITH TIME ZONE explained. (5) AT TIME ZONE 'UTC' verification: Postgres-side then Trino-side, matched. (6) sessionInitStatement = SET timezone = 'UTC' JDBC property; JVM -Duser.timezone=UTC option. Bonus: mixed UTC/Central writers section directly addresses the engineer's specific scenario; summary table. sessionInitStatement is a valid Spark JDBC option (SPARK-21519), verified correct. All type mappings verified against pgjdbc, Trino Iceberg connector, and Spark JDBC docs.
+
+Verified: pgjdbc TypeInfoCache (numeric → BigDecimal → DecimalType); Trino Iceberg connector (TIMESTAMP(6) WITH TIME ZONE); SPARK-21519 (sessionInitStatement option); Spark JDBC docs (JVM timezone via -Duser.timezone).
+
+---
+
+### Iter 62 Q1 — Multi-tenant analytics (resource group auditing: resource_group_id + restart behavior)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5 |
+| Accuracy | 5 |
+| Clarity | 5 |
+| No hallucination | 5 |
+| **Average** | **5.0** |
+
+**Topics updated**: Multi-tenant analytics — prior avg 4.328 across 61 questions; new running avg (4.328 × 61 + 5.0) / 62 = (264.008 + 5.0) / 62 = 269.008 / 62 = **4.339** across 62 questions. PASSED.
+
+**Notes**: Perfect answer covering all 5 expected-coverage points. (1) resource_group_id column on system.runtime.queries — correct query with dotted path explanation. (2) Selector verification — post-deploy checklist: submit test query as tenant service account, check resource_group_id, verify QUEUED extras when over hardConcurrencyLimit. (3) Restart behavior — in-flight queries die, queue wipes, state resets; config (ConfigMap) survives. (4) Post-restart verification — test queries, resource_group_id check, QUEUED assertion. (5) File-based vs DB-backed — file requires restart, DB-backed hot-reloads every 1 second; trade-off noted. Bonus: silent-failure trap table (wrong field names silently ignored), queue depth query by resource_group_id and state. DB-backed hot-reload interval verified (every 1 second confirmed). On-prem Kubernetes/ConfigMap context matches prod_info.md.
+
+Verified: trino.io resource-groups docs (hardConcurrencyLimit, softMemoryLimit, maxQueued field names; file-based manager requires restart; DB-backed manager hot-reloads); GitHub issue #14514 (DB-backed reload every 1 second confirmed).
+
+---
+
+### Iter 62 Q2 — Storage sizing (Iceberg snapshot retention: overhead, expiry, safe window)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5 |
+| Accuracy | 5 |
+| Clarity | 5 |
+| No hallucination | 5 |
+| **Average** | **5.0** |
+
+**Topics updated**: Storage sizing and growth estimation — prior avg 4.375 across 4 questions; new running avg (4.375 × 4 + 5.0) / 5 = (17.5 + 5.0) / 5 = 22.5 / 5 = **4.500** across 5 questions. PASSED.
+
+**Notes**: Excellent answer covering all 6 expected-coverage points. (1) Snapshots are metadata-only; data files shared across snapshots. (2) Overhead: manifest metadata is tiny; pinned data files from replaced compaction outputs are the real cost; concrete 200 GB numbers (25-30% without maintenance, 2-8% with 30-day retention). (3) Why expire_snapshots: GC of pinned data files; without it old files accumulate indefinitely. (4) Safe retention window: "last 7 days" dashboard uses WHERE clause not time-travel SQL — excellent clarification; 30-day retention recommended with option to tighten to 7 days. (5) Correct CALL syntax: named arguments table, older_than, retain_last. (6) Compaction-then-expiration ordering explained with hourly worked example; compaction increases storage before expiration cleans it up. Bonus: recommended settings table; what MinIO graph looks like after each step. CALL syntax verified against Iceberg 1.5.1 docs.
+
+Verified: iceberg.apache.org/docs/1.5.1/spark-procedures (expire_snapshots named arguments: table, older_than, retain_last); iceberg.apache.org/docs/latest/maintenance (snapshot management, file GC); CALL procedures are Spark-only in Trino 467 context.
+
+---
+
+### Iter 63 Q1 — Multi-tenant analytics (tenant grant auditing: SHOW GRANTS, OPA limitation, behavioral testing)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 4.5 |
+| Accuracy | 4.5 |
+| Clarity | 5 |
+| No hallucination | 4.5 |
+| **Average** | **4.5** |
+
+**Topics updated**: Multi-tenant analytics — prior avg 4.339 across 62 questions; new running avg (4.339 × 62 + 4.5) / 63 = (269.018 + 4.5) / 63 = 273.518 / 63 = **4.342** across 63 questions. PASSED.
+
+**Notes**: Strong answer covering all 5 points with practical depth. (1) SHOW GRANTS on table/schema — covered, but `SHOW GRANTS ON SCHEMA` is not officially documented in Trino 480 (only `SHOW GRANTS [ON [TABLE] table_name]`); minor inaccuracy. Missing `SHOW GRANTS TO ROLE <role_name>` phrasing. (2) SHOW ROLES + SHOW ROLE GRANTS — fully covered. (3) OPA limitation — clearly stated twice; correctly identifies OPA as source of truth. (4) Behavioral audit (assert Access Denied) — detailed Python example. (5) Automating iteration — Python function iterates schemas, checks each. Bonus: misconfigurations table, event-listener query audit log SQL, operational practices (version control, automated onboarding, CI tests). `SHOW GRANTS ON SCHEMA` verified as not officially documented in Trino 480.
+
+Verified: trino.io/docs/current/sql/show-grants.html (TABLE only, no SCHEMA); trino.io/docs/current/sql/show-role-grants.html (SHOW ROLE GRANTS syntax); trino.io/docs/current/sql/grant.html.
+
+---
+
+### Iter 63 Q2 — Analytical query patterns (RANK vs DENSE_RANK vs ROW_NUMBER for leaderboard)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5 |
+| Accuracy | 5 |
+| Clarity | 5 |
+| No hallucination | 5 |
+| **Average** | **5.0** |
+
+**Topics updated**: Analytical query patterns on Iceberg+Trino — prior avg 4.438 across 4 questions; new running avg (4.438 × 4 + 5.0) / 5 = (17.752 + 5.0) / 5 = 22.752 / 5 = **4.550** across 5 questions. PASSED.
+
+**Notes**: Textbook-quality answer covering all 5 expected-coverage points. (1) RANK() behavior — gaps explained with concrete [3, 3, 5] example, "two positions consumed." (2) DENSE_RANK() behavior — no gaps, [3, 3, 4] example. (3) When to use each — sports vs sequential UI; comparison table for all three functions. (4) Corrected SQL — DENSE_RANK() with proper subquery for COUNT(*) GROUP BY, deterministic ORDER BY tiebreaker. (5) ROW_NUMBER() — unique sequential, arbitrary tiebreaking, use for deduplication. Bonus: PARTITION BY variant for per-event-type leaderboard. All function behaviors verified against Trino window functions docs.
+
+Verified: trino.io/docs/current/functions/window.html (RANK, DENSE_RANK, ROW_NUMBER behaviors with ties; PARTITION BY support).
+
+---
+
+### Iter 64 Q1 — Multi-tenant analytics (SECURITY DEFINER vs SECURITY INVOKER for dynamic parent/child views)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **5.0** |
+
+**Topics updated**: Multi-tenant analytics — prior avg 4.342 across 63 questions; new running avg (4.342 × 63 + 5.0) / 64 = (273.546 + 5.0) / 64 = 278.546 / 64 = **4.352** across 64 questions. PASSED.
+
+**Notes**: Textbook answer covering all 5 expected-coverage points. (1) SECURITY DEFINER — correctly identified as Trino default, caller only needs SELECT on view, creator's grants are used for base-table authorization. (2) SECURITY INVOKER — caller must have direct access to underlying tables; current_user returns caller identity. (3) Recommendation for dynamic parent/child — INVOKER + current_user + user_tenant_map JOIN. (4) Trade-off — DEFINER simpler but a WHERE-clause bug silently leaks all data; INVOKER has defense-in-depth via caller grants. (5) Practical SQL — complete CREATE TABLE for mapping, INSERT for sub-accounts, CREATE VIEW with SECURITY INVOKER + JOIN + current_user filter, plus a 3-query verification script. Bonus: explicitly addresses the INVOKER "caller needs base-table grants" gotcha and offers Option A (OPA-enforced) and Option B (per-tenant DEFINER + parent-only INVOKER) for the production OPA stack. The statement "current_user inside a DEFINER view still returns the calling user's identity" is correct per Trino docs (regardless of security mode, current_user returns the query executor).
+
+Verified: trino.io/docs/current/sql/create-view.html (DEFINER default, INVOKER semantics, current_user behavior in both modes).
+
+---
+
+### Iter 64 Q2 — Postgres-to-Iceberg ingestion (parallel JDBC reads: numPartitions, lowerBound, upperBound, fetchsize)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 4 |
+| **Average** | **4.5** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.361 across 61 questions; new running avg (4.361 × 61 + 4.5) / 62 = (266.021 + 4.5) / 62 = 270.521 / 62 = **4.363** across 62 questions. PASSED.
+
+**Notes**: Strong answer covering all 5 expected-coverage points. (1) How parallel JDBC reads work — stride calculation example with numPartitions=16 over 500M rows. (2) The four parameters — partitionColumn, lowerBound, upperBound, numPartitions — with correct semantics. (3) Bounds are hints not filters — explicitly stated: "rows below lowerBound go into the first partition; rows above upperBound go into the last. Nothing is dropped — just unevenly distributed." (4) Gotchas — partition skew from bad bounds, large ID gaps, Postgres connection exhaustion, low fetchsize. (5) Dynamic MIN/MAX bounds — queries actual table before main read. Minor factual error: stated that "pgjdbc defaults to very few rows per network round-trip" when actual pgjdbc default is fetchsize=0, meaning all rows are fetched into memory at once (not streamed in small batches). This error is opposite in impact: the answer implies the default causes many round-trips (slow network), when the actual problem is the default fetches ALL rows into memory at once (heap exhaustion). Resource 13 was fixed during this iteration to correctly state "0 (fetch all rows at once into memory)."
+
+Verified: Spark JDBC documentation (lowerBound/upperBound as partition hints, not row filters; all rows returned including those outside bounds); pgjdbc documentation (defaultRowFetchSize=0, meaning all rows fetched at once without streaming).
+
+### Iter 65 Q1 — Postgres-to-Iceberg ingestion (schema evolution: new column added in Postgres)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5 |
+| Accuracy | 4 |
+| Clarity | 5 |
+| No hallucination | 5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.363 across 62 questions; new running avg (4.363 × 62 + 4.75) / 63 = (270.506 + 4.75) / 63 = 275.256 / 63 = **4.369** across 63 questions. PASSED.
+
+**Notes**: Excellent answer covering all 5 expected-coverage points. (1) Iceberg schema evolution is metadata-only, NULL for old rows — explicit with timeline example (May 1 / May 8 / May 9). (2) Three patterns differentiated — Pattern A full-refresh, Pattern B incremental append, Pattern C CDC — with correct warning that ALTER TABLE is the WRONG fix for Pattern A (createOrReplace would wipe the column on next run). (3) Root cause covered in "Why did your job break" section — SELECT * vs explicit list, DataFrame schema mismatch. (4) Pre-flight schema-diff check fully described conceptually and with complete runnable Python function comparing information_schema.columns to Iceberg DESCRIBE TABLE. (5) ALTER TABLE syntax correct (`ALTER TABLE iceberg.analytics.events ADD COLUMN new_field VARCHAR`).
+
+Minor accuracy issue: `schema.evolution=basic` is actually the Debezium **JDBC sink connector** property, not the Iceberg sink connector property. The Debezium Iceberg sink (e.g., memiiso/debezium-server-iceberg, Apache Iceberg Kafka Connect sink) uses different property names such as `iceberg.tables.evolve-schema-enabled`, `debezium.sink.iceberg.allow-field-addition`, or `iceberg.tables.auto-create-enabled`. The answer mirrors resource 13's wording, so this is a propagated inaccuracy from the resource rather than a hallucination — both should be corrected in a future iteration. Did not lower clarity or hallucination scores because the answer faithfully reproduces the resource.
+
+Verified: Apache Iceberg docs confirm `ALTER TABLE ADD COLUMN` is metadata-only (no data rewrite) and old files return NULL for the new column when read (https://iceberg.apache.org/docs/latest/evolution/). Debezium Iceberg sink connector property naming verified against debezium-server-iceberg docs and Apache Iceberg Kafka Connect sink docs.
+
+### Iter 65 Q2 — Multi-tenant analytics (GDPR tenant deletion: 4-step physical purge sequence)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5 |
+| Accuracy | 5 |
+| Clarity | 5 |
+| No hallucination | 5 |
+| **Average** | **5.0** |
+
+**Topics updated**: Multi-tenant analytics: isolating customer data in SaaS — prior avg 4.352 across 64 questions; new running avg (4.352 × 64 + 5.0) / 65 = (278.528 + 5.0) / 65 = 283.528 / 65 = **4.362** across 65 questions. PASSED.
+
+**Notes**: Excellent answer that fully covers all 5 expected-coverage points. (1) Confirms DELETE leaves bytes on disk — names MVCC and explains snapshots pin old data files. (2) Provides the correct 4-step sequence DELETE → rewrite_data_files → expire_snapshots → remove_orphan_files with explicit "in this order" callout. (3) Walks through what happens on disk at each step: DELETE writes delete files / markers; rewrite_data_files writes new Parquet without acme rows but old Parquet remains; expire_snapshots is "the step that physically deletes the bytes" via S3 DELETE calls; remove_orphan_files catches files from failed ingestion jobs that never made it into any snapshot. (4) Verification via $files and $snapshots metadata tables with concrete SQL queries — and explicitly calls out $files as the "strongest evidence for a regulator." (5) Practical notes: CALL syntax is Spark-only with Trino equivalent (ALTER TABLE ... EXECUTE) noted; must repeat per table; retain_last=1 warning about time-travel and in-flight queries; recommendation to wire this into Airflow/Kubernetes CronJob; do it day-1 not day-29. Bonus: includes a numbered GDPR audit checklist (steps 1-8) that maps directly to a compliance ticket. Parameter names verified against Iceberg docs (table =>, where =>, older_than =>, retain_last =>) — all correct. Three-level verification (query layer, metadata layer, storage layer with mc ls) is the gold-standard auditor's framing. No hallucinated procedures or invented Iceberg properties.
+
+Verified: Iceberg Spark procedures docs (expire_snapshots parameters table/older_than/retain_last all correct; rewrite_data_files supports `where` parameter for targeted compaction; remove_orphan_files older_than safety buffer is documented behavior); Iceberg maintenance docs (expire_snapshots is the step that deletes data files no longer referenced by any live snapshot, including issuing S3 deletes against object storage); Trino 467 Iceberg connector docs (ALTER TABLE ... EXECUTE expire_snapshots / remove_orphan_files syntax is correct equivalent).
+
+### Iter 66 Q1 — Postgres-to-Iceberg ingestion (CDC DELETE handling: Debezium tombstone → Iceberg)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 4.5 |
+| Accuracy | 5 |
+| Clarity | 5 |
+| No hallucination | 5 |
+| **Average** | **4.875** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.369 across 63 questions; new running avg (4.369 × 63 + 4.875) / 64 = (275.247 + 4.875) / 64 = 280.122 / 64 = **4.377** across 64 questions. PASSED.
+
+**Notes**: Strong answer covering 4.5 of the 5 expected-coverage points. (1) Debezium event structure — op values c/u/d/r all listed; before=row data, after=null for DELETE; tombstone is correctly described as a separate follow-up message with null value used by Kafka log compaction. (2) Apply deletes in Spark — concrete pyspark code with filter(op == "d"), extracts PK from collected rows, issues DELETE FROM. Code pattern uses .collect() + per-row SQL which is technically correct but inefficient at scale (a MERGE INTO ... WHEN MATCHED THEN DELETE would be more performant); not docked because it works and is clear. (3) Iceberg delete mechanics — MoR is clearly described (delete files that say "skip row X", original Parquet unchanged, fast writes, slower reads as deletes accumulate). HOWEVER, the answer does NOT explicitly contrast with CoW (copy-on-write) mode as the alternative table-level config (`write.delete.mode`), and does not mention position vs equality delete file types. This is the one expected-coverage gap. (4) Compaction with full 3-step sequence: rewrite_data_files → expire_snapshots → remove_orphan_files — CALL signatures verified against Iceberg docs; correctly notes the storage-increase-before-decrease timing and concurrent-write conflict warning. (5) Real-time vs batch — Path A (Structured Streaming) vs Path B (soft-delete + nightly purge) with a clean comparison table covering lag/complexity/GDPR/best-for. Production-fit: correctly uses spark-submit for compaction (not Trino), respects on-prem MinIO, fits the prod stack.
+
+Verified: Debezium PostgreSQL docs confirm DELETE produces TWO Kafka records (op=d envelope + tombstone with null value), before=pre-delete row, op=d (https://debezium.io/documentation/reference/stable/connectors/postgresql.html). Iceberg CoW/MoR distinction verified against Dremio/Apache docs — answer correctly describes MoR semantics but is silent on CoW alternative. CALL signatures for rewrite_data_files (table=>, strategy=>) and expire_snapshots (table=>, older_than=>, retain_last=>) verified against iceberg.apache.org spark-procedures page. No hallucinated procedures or invented properties.
+
+### Iter 66 Q2 — Multi-tenant analytics (automated tenant provisioning workflow at signup)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 4.5 |
+| Accuracy | 3.0 |
+| Clarity | 5.0 |
+| No hallucination | 3.5 |
+| **Average** | **4.00** |
+
+**Topics updated**: Multi-tenant analytics: isolating customer data in SaaS — prior avg 4.362 across 65 questions; new running avg (4.362 × 65 + 4.00) / 66 = (283.530 + 4.00) / 66 = 287.530 / 66 = **4.357** across 66 questions. PASSED.
+
+**Notes**: Strong structural answer covering all 5 expected-coverage points. (1) Ordered steps: CREATE ROLE → GRANT ROLE TO USER → CREATE VIEW → GRANT SELECT ON VIEW → REVOKE base-table → OPA system+metadata denial — all present and well-explained. (2) Automation from app layer: concrete Python using trino.dbapi.connect + trino.auth.JWTAuthentication with admin credentials, triggered by signup event — correct. (3) Idempotency: covered with IF NOT EXISTS, CREATE OR REPLACE, and try/except for "already" errors. (4) What goes wrong: excellent failure-mode table distinguishing visible errors (steps 2, 4) vs silent security breaches (steps 5, 6). (5) Verification: complete CI test recipe with 5 query types (own view succeeds, base table denied, other tenant denied, system catalog denied, DISTINCT tenant_id check to detect view-filter bugs).
+
+**CRITICAL ACCURACY ISSUE — invalid Trino syntax in Step 1.** The answer uses `CREATE ROLE IF NOT EXISTS acme_role` in both the SQL example and the Python automation code. **`IF NOT EXISTS` is NOT valid in Trino's CREATE ROLE syntax** per https://trino.io/docs/current/sql/create-role.html — the documented syntax is `CREATE ROLE role_name [ WITH ADMIN ... ] [ IN catalog ]` with no IF NOT EXISTS clause. A SaaS engineer copy-pasting the Python provisioning code into production would get a syntax error on the very first step for every new tenant. The intended idempotency would have to be implemented via try/except (catch "Role already exists" the same way the answer already does for GRANT). This propagates to the Python `steps` list as well. Drops Accuracy to 3.0 and No-hallucination to 3.5.
+
+**Other gaps**: (a) Step 3 CREATE VIEW omits `SECURITY INVOKER` — the resource explicitly warns "Trino views default to SECURITY DEFINER. For tenant isolation to work, the view MUST be created with `SECURITY INVOKER`. Otherwise the view runs with the view owner's broad table grants, which collapses isolation." For per-tenant hardcoded views with WHERE tenant_id = 'acme', this is somewhat less critical (the filter is still baked in), but for a provisioning runbook this should be called out. (b) The Python `CREATE OR REPLACE VIEW ... SELECT *` uses `SELECT *` while the SQL example earlier uses explicit columns — small inconsistency. (c) OPA discussion in Step 6 appropriately defers to external governance doc per prod_info.md.
+
+Verified: `CREATE ROLE IF NOT EXISTS` is NOT valid Trino syntax (https://trino.io/docs/current/sql/create-role.html — synopsis is `CREATE ROLE role_name [ WITH ADMIN ... ] [ IN catalog ]`, no IF NOT EXISTS clause). `GRANT role TO USER "name"` syntax is correct (https://trino.io/docs/current/sql/grant-roles.html). `CREATE OR REPLACE VIEW` syntax is correct (https://trino.io/docs/current/sql/create-view.html). `trino.dbapi.connect(... auth=trino.auth.JWTAuthentication(token))` is correct Python client API (https://github.com/trinodb/trino-python-client).
+
+**Action for teacher**: Add an explicit callout to `resources/05-multi-tenant-analytics.md` that `CREATE ROLE` in Trino does NOT support `IF NOT EXISTS` (unlike Postgres), and provisioning scripts must catch "Role already exists" errors for idempotency. The provisioning section should also explicitly include `SECURITY INVOKER` on the per-tenant view DDL example.
+
+---
+
+### Iter 67 Q1 — Multi-tenant analytics (Trino resource groups: per-tenant CPU/memory/concurrency caps to prevent noisy-neighbor query starvation)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5.0 |
+| Accuracy | 5.0 |
+| Clarity | 5.0 |
+| No hallucination | 5.0 |
+| **Average** | **5.00** |
+
+**Topics updated**: Multi-tenant analytics: isolating customer data in SaaS — prior avg 4.357 across 66 questions; new running avg (4.357 × 66 + 5.00) / 67 = (287.562 + 5.00) / 67 = 292.562 / 67 = **4.367** across 67 questions. PASSED.
+
+**Notes**: Exemplary answer to a classic noisy-neighbor question. All 6 expected coverage points present and correctly stated. (1) What resource groups are: named queue with concurrency/memory caps so noisy tenants queue rather than monopolize cluster — explained clearly with the 15-tenant framing. (2) Field names: explicit table of `hardConcurrencyLimit`, `softMemoryLimit`, `maxQueued`, `subGroups` with upfront warning that wrong names like `maxRunning` or `maxMemoryPercent` are silently ignored — exactly the resource's emphasis. (3) Selectors match JWT principal (`sub` claim), Java regex, `"user"` field — called out as "the critical gotcha" with the failure mode (silent fall-through to uncapped group, no error message). (4) Concrete working config: realistic JSON with rootGroups, nested subGroups for heavy_tenants vs standard_tenants vs internal_admin, plus selectors including a regex selector (`tenant-.*`). (5) Verification: `resource_group_id` column on `system.runtime.queries` with two diagnostic queries (per-query lookup + per-group queue depth). (6) File-based vs DB-backed with restart vs ~1s hot-reload, plus working `resource-groups.properties` snippet for the db manager. Bonus content: live-incident `kill_query` with correct CALL syntax and a deployment checklist mapping to the prod stack (k8s ConfigMap mount on coordinator).
+
+**Verified accuracy** (WebSearch against trino.io/docs/current):
+- `hardConcurrencyLimit`, `softMemoryLimit`, `maxQueued` are the documented JSON property names — https://trino.io/docs/current/admin/resource-groups.html
+- Selector `user` field is a Java regex matched against the connection's principal (under JWT auth with default `principalField=sub`, that's the JWT sub claim) — https://trino.io/docs/current/admin/resource-groups.html + https://trino.io/docs/current/security/jwt.html
+- `CALL system.runtime.kill_query(query_id => '...', message => '...')` is the documented procedure signature — https://trino.io/docs/current/connector/system.html
+- File-based resource groups require coordinator restart (no file-watcher); DB-backed reloads every ~1 second via `resource-groups.refresh-interval` — confirmed in trino.io docs and GitHub issue trinodb/trino#14514
+- `resource_group_id` column on `system.runtime.queries` exposes the full dotted group path — confirmed in resource file and Trino docs
+
+**Production-stack fit (per prod_info.md)**: On-prem Trino 467 in Kubernetes — answer mentions ConfigMap mount on coordinator pod (correct deployment pattern). JWT principal framing aligns with the custom JWT authenticator in production. Database-backed manager recommendation (small Postgres) is operationally compatible. No invented OPA policy code (resource groups are evaluated by Trino directly, not OPA — correct scope).
+
+**Minor stylistic observations (not score-affecting)**:
+- The example softMemoryLimit values sum approximately within the parent's 90%: heavy_tenants 35% + standard_tenants 50% + internal_admin 5% = 90% — internally consistent.
+- The `large_cust_acme` group's 20% softMemoryLimit nested under heavy_tenants' 35% is valid (subgroup cap ≤ parent cap).
+- The deployment checklist instruction "check Trino HTTP event logs for the `user` field" ties back nicely to the audit-listener section of the resource.
+
+**No factual errors found.** Model answer for the noisy-neighbor question pattern.
+
+### Iter 67 Q2 — Postgres-to-Iceberg ingestion (watermark drift from backdated updated_at)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5.0 |
+| Accuracy | 4.75 |
+| Clarity | 5.0 |
+| No hallucination | 4.75 |
+| **Average** | **4.875** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.377 across 64 questions; new running avg (4.377 × 64 + 4.875) / 65 = (280.128 + 4.875) / 65 = 285.003 / 65 = **4.385** across 65 questions. PASSED.
+
+**Notes**: Excellent answer that nails all 5 expected-coverage points. (1) Root cause: explicitly frames it as a "structural limitation of timestamp-based watermarking" and explains how the silent failure happens (`updated_at > last_watermark` filter excludes the backdated rows, pipeline cannot detect what it doesn't query for). (2) Immediate fix: TWO options provided — targeted MERGE INTO for known date range, full MERGE INTO reload if unknown — with the critical "use MERGE INTO not overwritePartitions" warning (overwriting day partitions wipes legitimate rows that arrived via later incremental runs). Both code samples use spark.sql MERGE INTO with WHEN MATCHED THEN UPDATE SET * / WHEN NOT MATCHED THEN INSERT *, which matches Iceberg 1.5.2 syntax per https://iceberg.apache.org/docs/latest/spark-writes/. (3) Lookback window pattern: 4-hour overlap re-read, MERGE INTO for idempotency, conservative watermark advance (keep 2-hour overlap for next run), explicit calibration guidance (longer than replica lag + typical correction window, 4-24h typical). (4) xmin alternative: correctly described as Postgres-controlled transaction ID set at transaction commit time, immune to application backdating, wraps at ~4 billion (32-bit) — wraparound and replication-safety tradeoffs called out. (5) Periodic reconciliation: weekly Sunday 3am job pattern with code, framed as safety net not primary loop, cost tradeoff stated. Adds a clear comparison table and explicit recommendation (start with Pattern A, add Pattern C as safety net, upgrade to Pattern B only if recurring). Production-fit: spark-submit, MinIO watermark storage implied (consistent with resources/13), Iceberg + Hive Metastore stack.
+
+**Minor accuracy issues** (-0.25 Accuracy, -0.25 No-hallucination): (a) The xmin tradeoff section says "pg_upgrade can reset it" — this is loose. pg_upgrade preserves the next-XID and epoch; the real replication-safety concern is that xmin visibility/values can differ across primary vs replicas, and logical-replication setups can have surprising xmin behavior. The "pg_upgrade resets" framing is technically imprecise per https://www.postgresql.org/docs/current/pgupgrade.html. (b) Pattern C reconciliation code compares `pg.pg_updated_at > COALESCE(ib.ib_updated_at, ...)` — this would catch rows where the corrected row's updated_at in Postgres is GREATER than what Iceberg has, but in the user's actual scenario the migration set updated_at to a YEARS-AGO date that is LESS than what Iceberg already has, so this comparison logic would silently miss the very scenario the user described. A more robust reconciliation would compare a content hash, or check `pg.updated_at != ib.updated_at` (i.e., any difference, not just greater-than), or compare row counts and content sample. This is a subtle logical hole in the safety-net pattern. (c) The xmin code casts `xmin::text::bigint` — this works for fetching the current xmin value but does not handle wraparound comparison correctly across the wrap point; for a production pipeline this would need explicit txid_current() / age() based comparison. Minor — beyond the question scope but worth noting.
+
+Verified: Iceberg MERGE INTO syntax with WHEN MATCHED THEN UPDATE SET * / WHEN NOT MATCHED THEN INSERT * is correct per https://iceberg.apache.org/docs/latest/spark-writes/. Postgres xmin system column is 32-bit transaction ID set at write time, immune to application backdating, wraps at 4,294,967,295 per https://www.postgresql.org/docs/current/ddl-system-columns.html. CDC tools like Airbyte do warn xmin cannot be reliably used as a cursor after wraparound (https://docs.airbyte.com/integrations/sources/postgres/postgres-troubleshooting). pg_upgrade preserves next-XID, not "resets" xmin — answer is loose here.
+
+**Action for teacher**: (a) Consider adding a note to resources/13-postgres-to-iceberg-ingestion.md xmin section: pg_upgrade preserves next-XID rather than resetting it; the real replication concern is divergent xmin visibility across primary/replicas. (b) Reconciliation pattern should compare full content (e.g., hash) or `!=`, not `>`, to catch backdated migrations specifically — exactly the scenario this question asked about.
+
+---
+
+### Iter 68 Q1 — Postgres-to-Iceberg ingestion (idempotent Spark writes, retry safety, orphan files)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5.0 |
+| Accuracy | 5.0 |
+| Clarity | 5.0 |
+| No hallucination | 5.0 |
+| **Average** | **5.0** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.385 across 65 questions; new running avg (4.385 × 65 + 5.0) / 66 = (285.025 + 5.0) / 66 = 290.025 / 66 = **4.394** across 66 questions. PASSED.
+
+**Notes**: Excellent answer that hits every expected coverage point cleanly. (1) Atomicity vs idempotency framing up front — explains that Iceberg snapshot atomicity prevents table corruption but does NOT prevent duplicate inserts on retry. Two crash cases ("snapshot committed before crash" vs "snapshot didn't commit") are explicitly enumerated. (2) `append()` not idempotent vs `overwritePartitions()` idempotent — clearly contrasted with code samples; the CLI batch-date parameter pattern (sys.argv[1]) is shown with a defensive dedup window function for Postgres-side dupes. (3) Kubernetes CronJob / spark-submit retry pattern explicitly addressed — production environment fit (on-prem k8s, MinIO, Hive Metastore, Iceberg). (4) MERGE INTO escape hatch for late-arriving data is called out with the critical "overwritePartitions wipes the May 20 partition with only the late rows" warning — matches the same edge case documented in resources/13. (5) Orphan files cleanup sequence: `rewrite_data_files` → `expire_snapshots` → `remove_orphan_files`, with the `older_than` safety parameter explained (3-day window protects in-flight writes). Production-fit note ("Run via spark-submit, not Trino") is correct per resources/13 maintenance section.
+
+Verified against Iceberg docs (https://iceberg.apache.org/docs/latest/spark-writes/, https://iceberg.apache.org/docs/latest/spark-procedures/): `overwritePartitions()` replaces only partitions present in DataFrame (dynamic INSERT OVERWRITE semantics) — confirmed correct. `remove_orphan_files` has `older_than` parameter, default is 3 days ago — confirmed correct. MERGE INTO with WHEN MATCHED THEN UPDATE SET * / WHEN NOT MATCHED THEN INSERT * is idempotent when matched on a unique key — confirmed correct.
+
+**Action for teacher**: None. This answer is a model response on this topic — every expected coverage point hit, production environment correctly applied, code samples accurate, no hallucinated APIs or properties.
+
+---
+
+### Iter 68 Q2 — Iceberg partition design for SaaS (bucket transform for tenant_id at 2K+ tenants: why direct partitioning breaks, how to choose N)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5.0 |
+| Accuracy | 3.0 |
+| Clarity | 5.0 |
+| No hallucination | 3.0 |
+| **Average** | **4.0** |
+
+**Topics updated**: Iceberg partition design for SaaS — prior avg 4.500 across 6 questions; new running avg (4.500 × 6 + 4.0) / 7 = (27.0 + 4.0) / 7 = 31.0 / 7 = **4.429** across 7 questions. PASSED.
+
+**Notes**: Conceptually excellent answer covering all five expected points (metadata explosion, small-files from small tenants, bucket hash-mod semantics with worked `hash('acme') mod 128 -> bucket 42` example, trade-off of losing strict per-tenant file isolation, how to choose N with file-size math + tiered rules of thumb, hybrid bucket+day partition spec). The bonus migration section (ALTER TABLE SET PROPERTIES + rewrite_data_files) is a nice touch. Math is correct (5B events/day × 300 B = 1.5 TB ÷ 128 = ~12 GB per bucket-day).
+
+**Critical accuracy issue — bucket argument order wrong for Trino throughout**: The answer uses `bucket(N, tenant_id)` (Spark DDL order) in every code sample — the prose explanation, the CREATE TABLE WITH clause, the ALTER TABLE example, and the summary table. The production stack is Trino 467 with the Iceberg connector, which uses **`bucket(column, N)`** order (verified against trino.io/docs/current/connector/iceberg.html and resources/10-lakehouse-partitioning.md, which correctly uses `bucket(tenant_id, 64)` and `bucket(user_id, 100)` throughout). A SaaS engineer copy-pasting the answer's `partitioning = ARRAY['bucket(128, tenant_id)', 'day(event_ts)']` into Trino would hit a syntax/type error. This is the same Spark-vs-Trino DDL-confusion pattern flagged in Iter 43 Q2.
+
+**Secondary accuracy issue — rewrite_data_files sort strategy without sort_order**: The migration example calls `rewrite_data_files(strategy => 'sort', options => map('target-file-size-bytes', '268435456'))` with no `sort_order` parameter. Per the Iceberg Spark procedures docs and the open bug (apache/iceberg #10346), `strategy => 'sort'` without `sort_order` does not respect the table sort order and is effectively misconfigured — either it errors or it silently degrades to bin-pack-like behavior. For this migration (which is really about re-laying-out files into the new partition spec, not about sort order), `strategy => 'binpack'` would be the correct choice, or `'sort'` with an explicit `sort_order => 'tenant_id, event_ts'`.
+
+**Action for teacher**: (1) Add a prominent Spark-vs-Trino bucket-argument-order callout near the top of resources/10-lakehouse-partitioning.md (similar to the Iter 43 fix), with a side-by-side example: `bucket(tenant_id, 128)` (Trino) vs `bucket(128, tenant_id)` (Spark). Currently the resource uses the correct Trino order but does not flag the Spark variant — the weak responder's pretraining apparently leaked the Spark form back in. (2) Add a brief note in the rewrite/maintenance section that `strategy => 'sort'` requires an explicit `sort_order` parameter, and that `strategy => 'binpack'` is the right default for partition-spec migration rewrites.
+
+---
+
+### Iter 69 Q1 — Iceberg partition design for SaaS (why `WHERE event_ts >= '2026-05-01'` doesn't prune partitions on a day-partitioned Iceberg table)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5.0 |
+| Accuracy | 4.0 |
+| Clarity | 5.0 |
+| No hallucination | 4.0 |
+| **Average** | **4.5** |
+
+**Topics updated**: Iceberg partition design for SaaS — prior avg 4.429 across 7 questions; new running avg (4.429 × 7 + 4.5) / 8 = (31.003 + 4.5) / 8 = 35.503 / 8 = **4.438** across 8 questions. PASSED.
+
+**Notes**: Strong, well-organized answer that hits all five expected points: (1) hidden partitioning concept (Trino infers pruning from raw column predicate, not from a partition-column reference), (2) function wrapping defeats pruning (CAST, DATE(), arithmetic), (3) ALTER TABLE changes spec for new writes only — old files require `rewrite_data_files` to migrate, (4) small-files diagnosis via `EXPLAIN ANALYZE` and the `Files:` count, (5) explicit diagnostic checklist that ties the four causes back to the symptom. Bonus: adds a "step zero" check via `SHOW CREATE TABLE` to verify the spec is actually present — practical and useful. Code examples are correct, Trino-flavored, and use the production stack's syntax. The `CALL iceberg.system.rewrite_data_files` example uses `target-file-size-bytes` (correct) and notes "run via Spark, not Trino" (correct — Trino does not expose the rewrite procedure).
+
+**Minor accuracy issue — "Cause 2: type mismatch TIMESTAMP vs DATE literal"**: The answer flags `WHERE event_ts >= DATE '2026-05-01'` as "potentially broken." Per the Trino date-predicates blog (trino.io/blog/2023/04/11/date-predicates.html), Trino actively unwraps comparisons between a TIMESTAMP column and a DATE literal — and even unwraps `CAST(event_time AS date) = DATE '...'` — into a range filter that does enable partition pruning. So `event_ts >= DATE '2026-05-01'` should generally prune correctly in Trino 467. The real corner case the blog calls out is comparisons that don't fall on a day boundary (e.g., `ts >= TIMESTAMP '2023-01-02 10:00:00 UTC'` on a `day(ts)` partition), which is a different problem than what the answer describes. The advice to "use an explicit TIMESTAMP literal" is defensively safe but the diagnostic framing ("type mismatch confuses the planner") is imprecise.
+
+**Minor accuracy issue — overstated blanket rule on function wrapping**: The answer presents CAST and DATE() as universally pruning-breakers. Trino does have special-case unwrapping for `CAST(ts AS DATE)` and `date_trunc('day', ts)` so partition pruning can still happen. For a beginner-safety answer this oversimplification is defensible (and matches the resource's framing), but it's not strictly true.
+
+**Action for teacher**: Optional refinement to resources/10-lakehouse-partitioning.md — add a short note that (a) Trino does unwrap some function-on-column patterns (`CAST(ts AS DATE)`, `date_trunc('day', ts)`) but it's safer to use the raw column anyway, and (b) the actual sharp edge for timestamp/day-partition pruning is comparisons that don't fall on day boundaries (e.g., `ts >= TIMESTAMP '2026-05-01 10:00:00'`), not type mismatch between TIMESTAMP and DATE literals. Not blocking — current resource is good enough and the answer is mostly aligned with it.
+
+---
+
+### Iter 69 Q2 — Multi-tenant analytics (per-tenant query performance monitoring, detecting noisy neighbors and data growth)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5.0 |
+| Accuracy | 4.5 |
+| Clarity | 5.0 |
+| No hallucination | 4.5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Multi-tenant analytics: isolating customer data in SaaS — prior avg 4.367 across 67 questions; new running avg (4.367 × 67 + 4.75) / 68 = (292.589 + 4.75) / 68 = 297.339 / 68 = **4.373** across 68 questions. PASSED.
+
+**Notes**: Strong three-layer answer (live `system.runtime.queries` → historical HTTP-event-listener → source-volume `$partitions`) that maps cleanly to the question's two distinct needs (per-tenant slowness + data-volume growth). All 5 expected coverage points hit: (1) `system.runtime.queries` filtered by `user` with `resource_group_id`, `state`, `elapsed_time` columns — correct names with the realistic RUNNING/QUEUED diagnostic SQL. (2) HTTP event listener `QueryCompletedEvent` POSTed to a receiver, persisted to an Iceberg audit table — correct architecture with the right config keys (`http-event-listener.connect-ingest-uri`, `http-event-listener.log-completed`, verified via trino.io/docs/current/admin/event-listeners-http.html). (3) Per-tenant P50/P99 latency + week-over-week bytes_read + queue-timeout percentage SQL examples that the engineer can run as-is. (4) Iceberg `$partitions` metadata table for tracking per-tenant size growth — correct column names (`record_count`, `total_size`, `file_count`) verified against trino.io issue #9519 and apache/iceberg #7896. (5) Security note that tenants must NOT have SELECT on `system.runtime.queries` (cross-tenant query-text leak) — explicitly called out as an OPA-policy concern that aligns with prod_info.md. Production-stack-fit (MinIO + Iceberg + Hive Metastore on k8s) is correct — uses existing Iceberg/MinIO for the audit table rather than introducing new services, mentions OPA for the security boundary, and gives a realistic "by end of week" rollout plan.
+
+**Minor accuracy issues (-0.5 Accuracy, -0.5 No-hallucination)**:
+- The `QueryCompletedEvent` field-name annotations `statistics.elapsedTimeMs` and `statistics.totalBytes` are approximate. The Trino SPI `QueryStatistics` class exposes `elapsedTime` (a `Duration` object, not a millisecond long suffixed with `Ms`) and `totalBytes`. A reader copy-pasting `event.statistics.elapsedTimeMs` would not find that exact JSON field. The HTTP event listener serializes the Java SPI objects via Jackson, so the actual JSON field name is `elapsedTime` (encoded as an ISO-8601 duration string or similar, depending on Trino version).
+- `query_state = 'QUEUED_TIMEOUT'` in the timeout-saturation SQL is not a standard Trino terminal query state. The QueryCompletedEvent's terminal states are `FINISHED` and `FAILED` (with an `errorCode` like `EXCEEDED_TIME_LIMIT` or `QUERY_QUEUE_FULL` distinguishing queue-timeout failures). The illustrative intent is right (count queries that timed out in the queue), but the literal SQL would return zero rows on real data — the engineer would need to filter on `errorCode` / `errorType` instead.
+- The `metadata.queryState` annotation is also slightly off — `queryState` lives directly on the `QueryCompletedEvent` envelope (or on `QueryMetadata` depending on Trino version), not consistently under `metadata` for every Trino release.
+
+These do not damage the architectural correctness of the answer but would cause a copy-paste engineer a brief detour to the Trino source/Jackson JSON of an actual sample event.
+
+**Verified accuracy** (WebSearch against trino.io and iceberg.apache.org):
+- `system.runtime.queries` columns `user`, `state`, `resource_group_id`, `elapsed_time`, `bytes_read` — confirmed correct against trino.io/docs/current/connector/system.html and GitHub trinodb/trino#5464.
+- HTTP event listener config keys `http-event-listener.connect-ingest-uri` and `http-event-listener.log-completed` — confirmed exact match against https://trino.io/docs/current/admin/event-listeners-http.html.
+- Iceberg `$partitions` metadata table exposing `record_count`, `total_size`, `file_count` — confirmed against trinodb/trino#9519 and apache/iceberg#7896.
+
+**Action for teacher**: Small refinements to resources/05-multi-tenant-analytics.md HTTP-event-listener subsection. (1) Replace `statistics.elapsedTimeMs` with `statistics.elapsedTime` (Duration ISO-8601 string in JSON), and add a note that callers extracting milliseconds usually post-process this client-side. (2) Replace `query_state = 'QUEUED_TIMEOUT'` examples with `state = 'FAILED' AND error_code = 'EXCEEDED_TIME_LIMIT'` (or `error_type = 'USER_ERROR'`) so the illustrative SQL is actually runnable. (3) Consider adding a one-line worked example of the exact JSON envelope shape (e.g., `{"metadata": {...}, "statistics": {...}, "context": {...}, "ioMetadata": {...}}`) so downstream answers don't drift on field paths.
+
+### Iter 71 Q1 — Multi-tenant analytics (GDPR right-to-erasure: targeted tenant row-delete + physical purge sequence in shared Iceberg table)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5.0 |
+| Accuracy | 5.0 |
+| Clarity | 5.0 |
+| No hallucination | 5.0 |
+| **Average** | **5.00** |
+
+**Topics updated**: Multi-tenant analytics: isolating customer data in SaaS — prior avg 4.375 across 69 questions (per state.json iter70 snapshot); new running avg (4.375 × 69 + 5.00) / 70 = (301.875 + 5.00) / 70 = 306.875 / 70 = **4.384** across 70 questions. PASSED.
+
+**Notes**: Ceiling answer on all four dimensions. All 5 expected coverage points hit cleanly: (1) Row-level `DELETE FROM iceberg.analytics.events WHERE tenant_id = 'acme'` correctly contrasted against partition drop, which would wipe all tenants for those dates. (2) Direct MinIO file deletion called out as unsafe with three concrete failure modes (dangling pointers / file-not-found errors, broken time-travel, Hive Metastore vs MinIO inconsistency). (3) Iceberg MoR delete-file semantics correctly explained — `mc ls` example shows bytes physically remain after a logical DELETE, framed as the GDPR violation it would be if signed off there. (4) Full physical-removal sequence covered with proper Spark SQL syntax for all three procedures: `rewrite_data_files(table, where)` to compact away delete markers, `expire_snapshots(table, older_than, retain_last)` as the step that issues actual S3/MinIO DELETEs, `remove_orphan_files(table, older_than)` to catch files from crashed ingest jobs. The `INTERVAL '0' DAY` aggressive-expiry caveat is correctly flagged as GDPR-specific and irreversible. (5) Three-layer verification checklist (query layer `COUNT(*)`, metadata layer `$files`, storage layer `mc ls --recursive`) given with concrete commands. Production-stack-fit is explicit: `CALL iceberg.system.*` flagged as Spark-only (not Trino), DELETE allowed in either engine, MinIO `mc` CLI used for the storage-layer audit — all consistent with prod_info.md (Spark + Iceberg 1.5.2 + Trino 467 + MinIO on k8s).
+
+**Verified accuracy** (WebSearch against iceberg.apache.org and trino.io):
+- `DELETE FROM iceberg.<schema>.<table> WHERE ...` Trino merge-on-read row-level delete — confirmed against trino.io/docs/current/connector/iceberg.html and Starburst Iceberg DML blog.
+- `CALL iceberg.system.expire_snapshots(table, older_than, retain_last)` removes data files no longer referenced by a non-expired snapshot (i.e. issues real storage DELETEs) — confirmed against iceberg.apache.org/docs/latest/maintenance/ and iceberg.apache.org/docs/1.5.1/spark-procedures/.
+- `CALL iceberg.system.rewrite_data_files(table, where)` — `where` parameter scopes rewrite to a filter expression — confirmed against iceberg.apache.org/docs/1.5.1/spark-procedures/.
+- `CALL iceberg.system.remove_orphan_files(table, older_than)` lists the table location and removes files not referenced by any valid snapshot, with a default 3-day age guard — confirmed against iceberg.apache.org/docs/latest/spark-procedures/.
+
+**Minor (not score-affecting) omissions**:
+- No mention of the known `remove_orphan_files` + S3FileIO compatibility issue on some Iceberg/Spark combinations against MinIO/S3 (apache/iceberg issues #3838 and #12765). Worth a teacher-resource note in a future iteration so MinIO-deployed engineers aren't surprised.
+- No mention that the deletion-evidence audit log (snapshot ID, timestamp, operator, run ID of each step) should also be retained for the GDPR auditor. Nice-to-have only.
+
+**Action for teacher (optional)**: Add a one-line callout to resources/05-multi-tenant-analytics.md GDPR-purge subsection noting (a) `remove_orphan_files` + S3FileIO known-issue on some Iceberg versions when run against MinIO, with the workaround (run via Hadoop FileIO or use the `location` parameter to scope the listing), and (b) capturing the snapshot IDs from `expire_snapshots` output as audit evidence.
+
+---
+
+### Iter 71 Q2 — Postgres-to-Iceberg ingestion (initial full load of 500M-row / 800 GB Postgres table: parallel JDBC, atomicity on crash, resumability)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 4.75 |
+| Accuracy | 5.0 |
+| Clarity | 5.0 |
+| No hallucination | 5.0 |
+| **Average** | **4.94** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.403 across 67 questions (per state.json iter70 snapshot); new running avg (4.403 × 67 + 4.94) / 68 = (295.001 + 4.94) / 68 = 299.941 / 68 = **4.411** across 68 questions. PASSED.
+
+**Notes**: Strong three-part answer that exactly mirrors the question's three concerns (split the read / what happens on crash / resumability). All five expected coverage points hit:
+
+1. **Spark JDBC partitioned read** — `partitionColumn=id`, `lowerBound/upperBound` with explicit "wrong bounds cause skew not data loss" caveat, `numPartitions=32` with 16–64 sizing guidance. Correctly frames partitions as parallel JDBC connections.
+2. **`fetchsize` (the OOM lever)** — Labeled "the critical one" and accurately warns that pgjdbc's default `fetchsize=0` fetches all rows at once into memory, OOMing the executor "before it reads a single Spark partition." `fetchsize=10000` recommended for row streaming via server-side cursor.
+3. **Iceberg snapshot atomicity** — Clean 4-step timeline: Parquet writes → checksum → metadata commit → atomic pointer swap. Explicit "Iceberg never sees them" for pre-commit crash files and "No partial data is ever visible." This is the structural answer the question demands.
+4. **Resumability** — Two patterns in priority order: (a) batched append by ID range (10 × 50M batches, each idempotent at the orchestration layer via Airflow/k8s Jobs, recommended), (b) MERGE INTO for full-job idempotency (correctly flagged as slower on a per-row basis). Concrete parameterized `spark-submit load.py --batch_start --batch_end` example.
+5. **Orphan file cleanup** — `CALL iceberg.system.remove_orphan_files(...)` mentioned for post-crash cleanup.
+
+Production-stack-fit is correct: `writeTo("iceberg.analytics.large_table")` matches the prod catalog naming, Kubernetes Jobs / Airflow flagged as natural batch drivers (on-prem k8s), no cloud-only services suggested, `CALL iceberg.system.*` uses the Spark-side syntax that matches the prod Spark + Iceberg 1.5.2 stack.
+
+**Verified accuracy** (WebSearch):
+- Spark JDBC `partitionColumn` / `lowerBound` / `upperBound` / `numPartitions` semantics — confirmed via Spark JDBC docs and luminousmen / jozef.io references. Bounds define partition stride, not row filter; mismatched bounds cause skew, not data loss.
+- pgjdbc default `fetchsize=0` loads all rows into memory; non-zero enables cursor-based streaming (requires autoCommit=off, which Spark JDBC reader sets automatically) — confirmed via shaneborden.com benchmark (6.67 MB → 454 MB on 2M rows) and franckpachot.medium.com.
+- Iceberg snapshot atomicity: readers never see partial writes; pre-commit crash leaves orphan files in storage but no metadata references them — confirmed via iceberg.apache.org/docs/latest/maintenance/ and iomete ACID-transactions blog.
+
+**Minor (-0.25 Completeness) gaps**:
+
+1. **No `older_than` safety parameter on `remove_orphan_files`** — the procedure call is shown without the standard 3-day guardrail, which is the right default but should be explained so an engineer running a tighter window understands the in-flight-write hazard.
+2. **MERGE INTO cost characterization is slightly misleading for this scenario** — answer says MERGE "must compare every source row against every target row," but for a fresh empty target (which this is — first full load) the target scan is essentially empty and MERGE cost is close to INSERT cost. The full-scan concern applies more to incremental MERGE INTO against an already-populated target.
+3. **First-batch creation pattern not addressed** — batched-append pattern implies the target table exists, but for a first-ever load batch 1 needs `createOrReplace()` (or DDL upfront) while batches 2–N use `append()`. This createOrReplace-vs-append seam is a known engineer trip point.
+4. **Engine label for `CALL iceberg.system.*` not explicit** — the answer uses correct Spark-side syntax for `remove_orphan_files` but doesn't label it Spark-only. Trino equivalent is `ALTER TABLE ... EXECUTE remove_orphan_files`. This has been a recurring concern in prior iterations.
+
+**Action for teacher (optional, not blocking)**: Add a "Large initial full load (100M+ rows)" subsection to `resources/13-postgres-to-iceberg-ingestion.md` that consolidates the three-part pattern (parallel JDBC + atomicity + batched resumability), with a worked example of the first-batch-creates-target pattern and an `older_than` guardrail note on the orphan-file cleanup call.
+
+---
+
+### Iter 72 Q1 — Multi-tenant analytics (Trino resource groups: file-based restart pain vs DB-backed hot reload for dynamic tenant onboarding)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5.0 |
+| Accuracy | 5.0 |
+| Clarity | 5.0 |
+| No hallucination | 5.0 |
+| **Average** | **5.00** |
+
+**Topics updated**: Multi-tenant analytics: isolating customer data in SaaS — prior avg 4.384 across 70 questions; new running avg (4.384 × 70 + 5.00) / 71 = (306.880 + 5.00) / 71 = 311.880 / 71 = **4.393** across 71 questions. PASSED.
+
+**Notes**: Ceiling answer on all four dimensions. All 5 required coverage points hit:
+1. **File-based requires restart** — "Trino reads `resource-groups.json` once at startup. It does not watch the file for changes." 10–30s outage characterization included.
+2. **DB-backed hot reloads ~1s** — "Trino re-reads the database approximately every 1 second. Changes take effect within a second or two, with no coordinator restart needed, ever."
+3. **Config change shown** — `resource-groups.configuration-manager=db` + `resource-groups.config-db-url=jdbc:postgresql://...` + user/password + `refresh-interval=1s` in a complete `etc/resource-groups.properties` file diff.
+4. **Operational workflow shift** — INSERT into `resource_groups` and `selectors` tables example with parent FK lookup pattern; before/after comparison table covering add tenant, adjust limits, rollback, test.
+5. **Trade-off / dependency caveat** — "if the resource group database goes down, Trino keeps using the last successfully-read configuration" with explicit monitoring/backup/HA call-out.
+
+Production-stack-fit is clean: Postgres-on-k8s deployment option matches the on-prem k8s environment in prod_info.md; no cloud-managed RDS suggested; final-one-time restart for cutover is correctly framed as a single operational event.
+
+**Verified accuracy** (WebSearch against trino.io/docs/current/admin/resource-groups.html):
+- `resource-groups.configuration-manager=db` is the documented property to enable DB-backed manager.
+- `resource-groups.config-db-url`, `resource-groups.config-db-user`, `resource-groups.config-db-password` are the documented JDBC connection properties.
+- Auto-creation of tables on first connect is documented (`resource_groups_global_properties`, `resource_groups`, `selectors`).
+- ~1 second reload interval is documented; `resource-groups.refresh-interval` controls it.
+- MySQL, PostgreSQL, Oracle all supported as backends.
+
+**Minor (not score-affecting) omission**: Answer mentions the two main tables Trino auto-creates (`resource_groups`, `selectors`) but omits the third (`resource_groups_global_properties`) used for global `cpuQuotaPeriod` and similar settings. Doesn't impact engineer's ability to execute the migration.
+
+**Action for teacher**: None required. Answer is a complete, runnable migration playbook. Optional enhancement: a brief note in `resources/05-multi-tenant-analytics.md` covering the `resource_groups_global_properties` table for completeness when an engineer extends past basic tenant onboarding (e.g., to enable global CPU quota periods).
+
+---
+
+### Iter 72 Q2 — Postgres-to-Iceberg ingestion (CDC alternative for `user_preferences` table with no `updated_at` column — Debezium/logical replication vs. nightly full reload)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5.0 |
+| Accuracy | 3.5 |
+| Clarity | 5.0 |
+| No hallucination | 4.0 |
+| **Average** | **4.375** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.411 across 68 questions; new running avg (4.411 × 68 + 4.375) / 69 = (299.948 + 4.375) / 69 = 304.323 / 69 = **4.410** across 69 questions. PASSED.
+
+**Notes**: Excellent structure and scope. All 5 required coverage points hit:
+1. **Full nightly reload as the simple alternative** — leads with it, names the conditions where it suffices, gives a concrete `spark.read.jdbc(...).writeTo(...).createOrReplace()` snippet, and explicitly recommends starting there for a `user_preferences` table.
+2. **WAL / logical replication explained plainly** — "internal transaction journal" framing, "without needing any `updated_at` column" called out.
+3. **Debezium setup** — `CREATE ROLE ... WITH REPLICATION LOGIN`, `CREATE PUBLICATION ... FOR TABLE`, full connector JSON with `plugin.name=pgoutput`, `publication.name`, `slot.name`, `topic.prefix`, `tables.include.list`. All config keys verified.
+4. **Spark Structured Streaming + MERGE INTO Iceberg** — Kafka source, `from_json` parsing, `foreachBatch` MERGE with insert/update/delete branches, MinIO checkpoint for resumability. Production-stack-correct (Hive catalog, s3a://).
+5. **Honest complexity comparison + recommendation** — side-by-side trade-off table, explicit "start with the nightly full reload" with three named conditions to escalate to CDC.
+
+**Verified accuracy** (WebSearch):
+- `CREATE PUBLICATION ... FOR TABLE` is the correct DDL for pgoutput-based logical replication setup (postgresql.org/docs/current/sql-createpublication.html, debezium.io/documentation/reference/stable/connectors/postgresql.html).
+- Debezium PG connector config keys `plugin.name=pgoutput`, `publication.name`, `slot.name`, `topic.prefix` all current and correct; defaults `publication.name=dbz_publication`, `slot.name=debezium`. Confirmed via Confluent Platform reference and Debezium stable docs.
+- **Debezium PostgreSQL `op` field for INSERT is `c` (create), NOT `i`.** Confirmed via Debezium event-records reference (debezium.io/documentation/reference/stable/transformations/event-changes.html) and multiple secondary sources. The answer's claim that insert is `i` is wrong for the PG connector — `i` is used by some other connectors (e.g., Cassandra), but PostgresConnector emits `c`. The MERGE statement `WHEN NOT MATCHED AND s.op IN ('i', 'u') THEN INSERT` would silently never fire for real Postgres INSERT events in production, causing target drift.
+
+**Issues found**:
+
+1. **`op='i'` vs `op='c'` for Postgres INSERT (Accuracy −1.5)** — Real correctness bug an engineer copy-pasting the MERGE would ship. Source: Debezium event-changes reference and PG connector docs.
+2. **Stray cross-reference to "Trino resource" `debezium.sink.iceberg.allow-field-addition=true` (No-hallucination −1)** — Out of scope (engineer uses a Spark consumer, not the Debezium Iceberg sink connector), leaks an internal resource path into the engineer-facing answer, and mislabels a Debezium sink-connector property as a "Trino resource" property.
+3. **Snapshot mode not mentioned (minor)** — Debezium's default `snapshot.mode=initial` emits all pre-existing rows as `op='r'` (read), which the answer's MERGE does not handle; initial backfill would be skipped.
+
+**Action for teacher**: Update `resources/13-postgres-to-iceberg-ingestion.md` Debezium section:
+1. **Correct the `op` field values for the PostgreSQL connector**: `c` = create/insert, `u` = update, `d` = delete, `r` = read (snapshot), `t` = truncate. Call out that `i` is used by some other connectors (e.g., Cassandra) but PostgresConnector uses `c`. Any worked MERGE INTO example must use `op IN ('c', 'u')` for the upsert branch (and include `'r'` if the streaming job is expected to absorb the initial snapshot).
+2. **Add a `snapshot.mode=initial` note** clarifying that snapshot events arrive with `op='r'`, so the merge logic must either handle `'r'` as an upsert or rely on a separate batch backfill before streaming begins.
+3. **Remove or rephrase** the `debezium.sink.iceberg.allow-field-addition` aside — it confuses the Debezium Iceberg sink connector with the Trino Iceberg connector and isn't relevant to a Spark-consumer architecture. If kept, it belongs in a separate clearly-labeled "Debezium Iceberg sink connector (alternative to Spark consumer)" subsection.
+
+---
+
+### Iter 73 Q1 — Iceberg partition design for SaaS (partition evolution: switching a 14-month-old daily-partitioned Iceberg table to hourly without drop/recreate)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5.0 |
+| Accuracy | 5.0 |
+| Clarity | 5.0 |
+| No hallucination | 5.0 |
+| **Average** | **5.00** |
+
+**Topics updated**: Iceberg partition design for SaaS — prior avg 4.438 across 8 questions; new running avg (4.438 × 8 + 5.0) / 9 = (35.504 + 5.0) / 9 = 40.504 / 9 = **4.500** across 9 questions. PASSED.
+
+**Notes**: All five required completeness points cleanly hit, structured as (a)/(b)/(c) matching the engineer's three sub-questions:
+1. `ALTER TABLE iceberg.analytics.events SET PROPERTIES partitioning = ARRAY['hour(occurred_at)']` shown with the correct Trino syntax and explicitly framed as "future writes only — no rewrite, no file movement"; the term "partition evolution" is named.
+2. Cross-spec query correctness is explicit: old day-partitioned files keep their old spec, new files use the hour spec, Trino tracks per-file spec in Iceberg metadata and prunes each correctly. Says plainly "no duplication, no missing rows" — the cost is performance on old data, not semantic correctness.
+3. `CALL iceberg.system.rewrite_data_files(...)` shown with `target-file-size-bytes` and `min-input-files` options, and explicitly labeled "Spark SQL only" — the critical Trino-vs-Spark gotcha for this stack.
+4. Storage doubling (~2x) called out; correct two-step maintenance sequence (`expire_snapshots` then `remove_orphan_files`) shown with proper Iceberg system-procedure syntax and `older_than` / `retain_last` parameters; explicitly notes that old files are only deletion-eligible once `expire_snapshots` runs.
+5. Explicit "No" to drop/recreate; partition evolution is metadata-only, takes milliseconds, zero downtime. Closes with a concrete 4-step recommended timeline (ALTER during business hours → soak 1–2 days → rewrite in a low-traffic window → maintenance jobs the next morning).
+
+**Verified accuracy** (WebSearch):
+- Trino `ALTER TABLE ... SET PROPERTIES partitioning = ARRAY[...]` is the correct DDL for changing an Iceberg partition spec (trino.io/docs/current/connector/iceberg.html; Starburst Iceberg-partitioning blog).
+- Iceberg partition evolution semantics are exactly as described: old files retain old spec, new files use new spec, queries correctly translate predicates per-spec and prune each set (iceberg.apache.org/docs/latest/evolution/; Iceberg Lakehouse blog).
+- `rewrite_data_files` is a Spark stored procedure and is not exposed in Trino — Trino only offers the less flexible `ALTER TABLE ... EXECUTE optimize` (iceberg.apache.org/docs/latest/spark-procedures/; trinodb/trino issue #25279).
+- Production-stack fit is correct: ALTER from Trino or Spark, `CALL` procedures from Spark, MinIO as the deletion target — all match prod_info.md.
+
+**Issues found**: None of substance. Optional refinement (not a deduction): could mention `SELECT spec_id, COUNT(*) FROM <table>.files GROUP BY spec_id` to monitor rewrite progress, and note that Trino's own `ALTER TABLE EXECUTE optimize` exists but does not reliably re-partition historical files under a newly added partition column (per trinodb/trino #25279). Omitting these is fine — question didn't ask for verification tooling.
+
+**Resource fix needed?** No. Answer is complete, accurate, well-structured, and production-stack-correct. No teacher action required.
+
+---
+
+### Iter 73 Q2 — Postgres-to-Iceberg ingestion (JSONB column with per-customer variable structure: VARCHAR vs STRUCT, selective flattening, Trino JSON functions)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5.0 |
+| Accuracy | 4.5 |
+| Clarity | 5.0 |
+| No hallucination | 5.0 |
+| **Average** | **4.875** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.410 across 69 questions; new running avg (4.410 × 69 + 4.875) / 70 = (304.29 + 4.875) / 70 = 309.165 / 70 = **4.417** across 70 questions. PASSED.
+
+**Notes**: Strong answer. All 5 required coverage points hit cleanly:
+1. **VARCHAR is the practical choice for variable-schema JSONB; STRUCT doesn't fit** — covered with a worked counter-example (`customer A has settings.tier`, `customer B has settings.plan_name`) explaining schema-rigidity.
+2. **Selective flattening with `get_json_object`; Parquet stats + dictionary compression** — covered with PySpark `withColumn` snippet and explicit performance rationale (min/max file skipping, dictionary compression for low-cardinality strings).
+3. **Raw JSON blob kept as VARCHAR fallback, queryable via Trino's `json_extract_scalar`** — covered with concrete SQL example.
+4. **Iceberg schema evolution: `ALTER TABLE ... ADD COLUMN` is metadata-only, old rows return NULL, no historical reload** — covered in dedicated section with milliseconds-scale framing.
+5. **Decision framework table: WHERE/GROUP BY/dashboard filters → flatten; long-tail/<20% rows/ad-hoc → raw JSON** — covered as a clean checklist.
+
+Bonus content: nested-path syntax (`$.config.nested.value`, `$.tags[0]`), array membership via `from_json` + `array_contains` to produce a boolean real column, and a final summary trade-off table comparing the three options.
+
+**Verified accuracy** (WebSearch):
+- Spark `get_json_object(col, '$.path')` — confirmed against spark.apache.org/docs/latest. Root `$`, nested paths, and array indexing (`$[0].f1`) all match.
+- Trino `json_extract_scalar(varchar, jsonpath) returns varchar` — confirmed against trino.io/docs/current/functions/json.html. Both `(json, jsonpath)` and `(varchar, jsonpath)` overloads exist; returning the scalar as varchar is correct.
+- Iceberg STRUCT / MAP / ARRAY support — confirmed against iceberg.apache.org/spec. Nested types are first-class; schema evolution applies to nested struct fields.
+
+**Issues found**:
+
+1. **Minor inaccuracy in the "Parquet performance" sub-bullet (Accuracy −0.5)** — The claim that "deeply nested STRUCT columns mean Trino reads entire nested blocks to access one inner field, negating the columnar benefit" is overstated. Parquet's Dremel encoding stores each leaf field as its own column chunk with definition/repetition levels, so projecting a single nested leaf does NOT require reading sibling leaves. The real and decisive reason STRUCT doesn't fit the engineer's case (per-row schema variation) is stated correctly as reason #1; this Parquet aside weakens an otherwise strong section.
+
+**Action for teacher** (low-priority polish, topic still well above pass threshold):
+- In `resources/13-postgres-to-iceberg-ingestion.md` JSONB section (or the dedicated nested-types resource if one exists), tighten the "why not STRUCT" discussion to emphasize schema rigidity as the dominant reason and either drop the Parquet-performance claim or rephrase it to acknowledge that Parquet does project nested leaves columnar-ly — the cost of nested STRUCT is in def/rep level decoding overhead and schema brittleness, not in being forced to read sibling fields.
+
+---
+
+### Iter 74 Q2 — Postgres-to-Iceberg ingestion (Postgres TEXT[]/INT[] array columns → Iceberg ARRAY; Trino array membership with contains() vs Postgres = ANY)
+
+| Dimension | Score |
+|---|---|
+| Completeness | 5.0 |
+| Accuracy | 4.0 |
+| Clarity | 5.0 |
+| No hallucination | 5.0 |
+| **Average** | **4.75** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.417 across 70 questions; new running avg (4.417 × 70 + 4.75) / 71 = (309.19 + 4.75) / 71 = 313.94 / 71 = **4.422** across 71 questions. PASSED.
+
+**Notes**: Strong answer. All 5 required coverage points hit:
+1. **Parquet/Iceberg supports arrays natively** — covered with explanation of Parquet repeated fields + Iceberg ARRAY type, explicit "no stringification needed".
+2. **Spark ingestion: parse Postgres `{}` string into ArrayType** — covered with both `split(regexp_replace(...), ",")` for TEXT[] and `from_json(...)` for INT[]. Runnable code.
+3. **Trino array membership uses `contains()`, not `= ANY()`** — covered explicitly and prominently as the headline answer to the engineer's exact question.
+4. **`UNNEST` expands rows; `contains` for membership without expanding** — covered in a dedicated subsection with cross-join-unnest example and explicit warning.
+5. **Performance: no per-element Parquet statistics; promote high-frequency tags to scalar columns** — covered with JSONB selective-flattening analogy.
+
+**Verified accuracy** (WebSearch):
+- Trino `contains(array, element) -> boolean` — confirmed against trino.io/docs/current/functions/array.html.
+- Trino Iceberg DDL `ARRAY(VARCHAR)` and `ARRAY(INTEGER)` syntax — confirmed against trino.io/docs/current/connector/iceberg.html (`call_stack ARRAY(VARCHAR)` example).
+- Spark `regexp_replace` + `split` approach for parsing Postgres `{a,b,c}` JDBC string output — valid; matches general Spark string-processing pattern.
+
+**Issues found** (Accuracy −1):
+1. **Notation inconsistency**: prose uses Spark/Hive `ARRAY<element_type>` notation but the DDL example correctly uses Trino `ARRAY(VARCHAR)`. Both are valid in their respective contexts, but the answer mixes them without flagging that the engineer will see both syntaxes in different tools.
+2. **Mislabeled example**: the snippet `WHERE contains(scores, 100)` is labeled "Find rows where any score exceeds a threshold" — `contains` is exact-equality, not greater-than. The follow-up `UNNEST` example with `max(s) > 50` is correct, but the labeling on the first line is misleading. `any_match(scores, x -> x > 100)` would be the more accurate one-line answer.
+3. **Slightly hand-wavy Parquet claim** — "Parquet statistics are maintained at the array level" is imprecise (Parquet array element stats are not generally usable for predicate pushdown by Trino), but the Performance section later correctly clarifies "no per-element statistics".
+
+**Production fit**: Spark + Iceberg on MinIO + Trino 467 — all examples work on this stack. No cloud-only services referenced.
+
+**Action for teacher** (optional polish, topic remains well above pass threshold):
+- In `resources/13-postgres-to-iceberg-ingestion.md` array section: (a) call out the Spark `ARRAY<T>` vs Trino `ARRAY(T)` notation difference so engineers don't copy the wrong syntax into the wrong tool; (b) add a short subsection on `any_match(array, lambda)` for predicate-on-elements queries, contrasting with `contains` (equality only).
+
+---
+
+### Iter 82 Q1 — Multi-tenant analytics (cohort retention SQL on a shared multi-tenant Iceberg events table; partition pruning across two date ranges joined via CTE + LEFT JOIN)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4 |
+| Beginner clarity | 5 |
+| Practical applicability | 4 |
+| Completeness | 4 |
+| **Average** | **4.25** |
+
+**Topics updated**: Multi-tenant analytics: isolating customer data in SaaS — prior avg 4.422 across 78 questions; new running avg (4.422 × 78 + 4.25) / 79 = (344.916 + 4.25) / 79 = 349.166 / 79 = **4.420** across 79 questions. PASSED.
+
+**Verified accuracy** (WebSearch against trino.io and Iceberg docs):
+- Independent partition pruning on `(day(event_ts), tenant_id)` — confirmed; Iceberg evaluates each filter predicate against partition metadata per file.
+- CTE + literal-date-range pattern prunes correctly — confirmed via trino.io date-predicates blog. The known LATERAL/correlated-join pruning regression (trinodb/trino#29156) does NOT apply because both CTEs use independent literal `TIMESTAMP '...'` ranges, not correlated subqueries.
+- Cohort SQL pattern (signups CTE + activity CTE + LEFT JOIN) — standard analytics recipe.
+- Partition spec recommendation `(day(event_ts), tenant_id)` — fine for "hundreds of tenants" framing; would need `bucket(N, tenant_id)` at 1000s+ (not flagged in answer, minor omission).
+
+**Issues found**:
+1. **SQL/prose inconsistency** (largest issue): prose claims "for the target tenant" and example math says "1 tenant × 7 days = 20 GB," but the SQL omits `AND tenant_id = 'customer_x'` in both CTE WHERE clauses. An engineer copy-pasting the SQL would get all-tenant scans instead of the advertised tiny slice. Either add the tenant filter or rewrite the sizing math to reflect all-tenant.
+2. **Doesn't cover the users-table variant**: assumes signup is an event row (`event_name = 'signup'`) — many SaaS schemas have signups on a separate `users` dimension. A one-line acknowledgement would help.
+3. **Doesn't diagnose the engineer's existing partition layout**: jumps to recommending `(day(event_ts), tenant_id)` rather than describing what happens with a date-only partition spec (engineer's stated current state).
+4. Minor: `COUNT(*)` semantics after the LEFT JOIN aren't explained for beginners (no double-count risk since count is from `signups_week_0`, but worth a sentence).
+
+**Production fit**: Trino + Iceberg + MinIO + Hive Metastore — all examples work on the stack. OPA mentioned correctly as the auth/authz layer. No cloud-only services referenced.
+
+**Action for teacher** (low priority, topic well above pass threshold):
+- Optional: add a "Cohort retention on a shared multi-tenant Iceberg table" worked example to `resources/05-multi-tenant-analytics.md` or `resources/09-analytical-query-patterns.md` with (a) the SQL explicitly including `AND tenant_id = 'x'` in both CTEs, (b) a separate all-tenant variant with correct sizing math, (c) a note that joining against a `users` dimension works the same way for pruning, and (d) a one-line bucket(N, tenant_id) note for 1000+ tenants.
+
+---
+
+### Iter 82 Q2 — Postgres-to-Iceberg ingestion (watermark-based incremental load: updated_at vs created_at, stale rows / duplicates with append vs MERGE INTO, lag buffer for late/in-flight rows)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 4.75 |
+| **Average** | **4.875** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.4424 across 76 questions; new running avg (4.4424 × 76 + 4.875) / 77 = (337.6224 + 4.875) / 77 = 342.4974 / 77 = **4.4480** across 77 questions. PASSED.
+
+**Notes**: Strong answer. All 10 coverage points hit (watermark mechanics, append-vs-MERGE duplicate behavior, MERGE INTO Spark SQL with UPDATE SET * / INSERT *, updated_at-vs-created_at decision with append-only carve-out, Postgres trigger fallback, lag-buffer safety net with P99 sizing, idempotency rationale, late-arriving rows trap with concrete timeline, pg_indexes preflight, full end-to-end runnable example).
+
+**Verified accuracy** (WebSearch against iceberg.apache.org/docs/latest/spark-writes/, apache/iceberg issues #7554/#7005, Netflix Maestro blog, Dataminded upserting blog):
+- MERGE INTO with `WHEN MATCHED THEN UPDATE SET *` / `WHEN NOT MATCHED THEN INSERT *` — supported Iceberg/Spark 3 syntax.
+- `.append()` does not deduplicate (issue #7554) — primary-key uniqueness is the caller's responsibility.
+- updated_at preference over created_at for mutable tables — standard pattern across cookbook and Netflix Maestro write-up.
+- Lag-buffer / overlap window pattern — widely documented incremental-ETL safety pattern; correct introductory recommendation before introducing snapshot-based event-time watermarks.
+- MERGE INTO idempotency on retry — confirmed.
+
+**Issues** (minor):
+- `df.agg({"updated_at": "max"}).collect()` on the JDBC-read DataFrame after MERGE may re-trigger the JDBC read (Spark lazy eval) without an explicit `.cache()` / `.persist()`. Robust pattern is to cache the delta before MERGE or compute max_ts before the MERGE.
+- MERGE INTO rewrites data files even for no-op matches; "remerges the same rows with the same result" is logically true but understates write amplification in the lag-buffer overlap window (compaction handles it).
+- Hard deletes invisible to `updated_at` watermark — not in scope of the question but a one-line callout would round out the safety story.
+- Watermark storage location (`read_watermark`/`write_watermark`) referenced but the actual JSON-on-MinIO read/write helper is not shown.
+
+**Production fit**: Spark + Iceberg + MinIO via JDBC on-prem — fully aligned with `prod_info.md`. No cloud-only services referenced. Trino correctly not introduced (ingestion is Spark in this stack).
+
+**Action for teacher** (optional polish only, topic well above pass threshold):
+- In `resources/13-postgres-to-iceberg-ingestion.md`, add a one-line note about `.cache()` / `.persist()` on the delta DataFrame before MERGE INTO so the post-merge max-watermark aggregation doesn't trigger a JDBC re-read.
+- Add a one-line callout that hard DELETEs in Postgres are invisible to an `updated_at` watermark (the answer is consistent with the question but the resource should cover it).
+- Optionally include a small JSON read/write watermark helper (S3 object on MinIO) so engineers don't reinvent it.
+
+---
+
+### Iter 83 Q1 — Multi-tenant analytics (GDPR right-to-erasure: Iceberg time-travel reliability for compliance audit and snapshot expiry interaction)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 4 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Multi-tenant analytics: isolating customer data in SaaS — prior avg 4.420 across 79 questions; new running avg (4.420 × 79 + 4.75) / 80 = (349.180 + 4.75) / 80 = 353.930 / 80 = **4.424** across 80 questions. PASSED.
+
+**Verified accuracy** (WebSearch against trino.io, iceberg.apache.org, Dremio, Ryft GDPR guides):
+- Trino `FOR SYSTEM_TIME AS OF TIMESTAMP '...'` — valid; Trino accepts both SQL-standard `FOR SYSTEM_TIME AS OF` and `FOR TIMESTAMP AS OF`.
+- Spark/Trino `FOR VERSION AS OF <snapshot_id>` and Trino `@snapshot_id` syntax — both valid.
+- Iceberg `expire_snapshots(older_than => CURRENT_TIMESTAMP - INTERVAL '0' DAY, retain_last => 1)` — syntactically valid; minor caveat that table properties `history.expire.min-snapshots-to-keep` and `max-snapshot-age-ms` may need adjustment to permit very recent expiry. Answer does not mention this gotcha.
+- Four-step GDPR purge sequence (DELETE → rewrite_data_files → expire_snapshots → remove_orphan_files) — canonical order per Dremio and Ryft.
+- `events$files` with `partition.tenant_id = 'acme'` partition struct access — accurate Trino metadata-table pattern.
+
+**Strengths**:
+- Crucial reframing: "do not use time-travel as compliance proof; use current metadata-table verification" — auditor-grade insight.
+- Two-window operational pattern (weekly 30-day cost-driven vs. on-demand 0-day compliance-driven) is the right production model.
+- Explicit warning not to mix zero-day expiry into weekly maintenance.
+- Bottom line directly answers the engineer's compliance question.
+- Production-stack-aligned (Spark + Iceberg + Trino + MinIO).
+
+**Issues** (minor):
+- "Delete file" terminology introduced briefly; beginners may conflate with "deleting a file." A one-line note distinguishing position/equality delete markers from physical Parquet files would help.
+- No mention of capturing the metadata-table verification result into an immutable audit log for long-term proof.
+- No mention of `history.expire.min-snapshots-to-keep` / `max-snapshot-age-ms` table-property caveat for zero-day expiry.
+
+**Production fit**: All examples align with on-prem Spark + Iceberg + Trino + MinIO stack in prod_info.md. No cloud-only services referenced.
+
+**Action for teacher** (optional, topic well above pass threshold):
+- Optional enhancement to `resources/05-multi-tenant-analytics.md` or `resources/13` (Iceberg maintenance): add a "GDPR audit pattern" callout showing (a) the four-step sequence, (b) the metadata-table `$files` verification queries, (c) a capture-to-audit-table idiom for immutable proof, and (d) a one-line caveat about `history.expire.min-snapshots-to-keep` / `max-snapshot-age-ms` when using zero-day expiry.
+
+---
+
+### Iter 83 Q2 — Postgres-to-Iceberg ingestion (hard-delete blind spot of `updated_at` watermark — soft-delete vs. Debezium CDC vs. periodic PK reconciliation)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.875 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 4.75 |
+| **Average** | **4.906** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.4480 across 77 questions; new running avg (4.4480 × 77 + 4.906) / 78 = (342.4960 + 4.906) / 78 = 347.4020 / 78 = **4.4539** across 78 questions. PASSED.
+
+**Verified accuracy** (WebSearch against debezium.io/documentation/reference/stable/connectors/postgresql.html, iceberg.apache.org/docs/latest/spark-writes/, soft-delete DW best-practice writeups):
+- Debezium PostgresConnector op codes: `c`=create, `u`=update, `d`=delete, `r`=read(snapshot). All correctly used in the answer.
+- Delete events carry the previous row state in `before` with `after=null`; the answer's `s.before.user_id` is correct envelope-schema access.
+- Spark/Iceberg `MERGE INTO ... WHEN MATCHED AND s.op = 'd' THEN DELETE` is documented supported syntax; multiple WHEN MATCHED clauses with different conditions can coexist.
+- Soft-delete + filter-view pattern is the canonical DW guidance (Qlik, LeapFrogBI, Integrate.io).
+- PK set-diff reconciliation (`subtract` / `EXCEPT` / FULL OUTER + IS NULL) is a standard reconciliation pattern.
+- `rewrite_data_files(where => ...)` and `expire_snapshots(older_than => ...)` procedure signatures match current Iceberg Spark docs.
+
+**Strengths**:
+- Confirms the blind spot explicitly and explains the root cause in one paragraph with no jargon.
+- Three options presented with concrete code, tradeoffs, and a clear "which to recommend" verdict tied to the team's operational reality.
+- Soft-delete option correctly preserves the existing `updated_at` watermark pipeline — directly answers "do I have to rewrite my whole sync pipeline?" with "no, you don't."
+- Physical-purge path included (`DELETE` + `rewrite_data_files` + `expire_snapshots`) so GDPR bytes-on-disk obligation is actually met, not just logical hiding.
+- Reconciliation correctly framed as a safety net even on a soft-delete system — defense in depth.
+- "Immediate next step: audit your DELETE call sites" is concrete and actionable.
+- Production-stack-aligned: stays inside on-prem Spark + Iceberg + MinIO; no cloud-only services.
+
+**Issues** (minor):
+- No mention of Postgres-side enforcement of the soft-delete contract: revoking DELETE on the table from the app role, or adding a `BEFORE DELETE` trigger that raises an exception. Without this, a stray `DELETE` from a forgotten code path or a manual psql session silently bypasses the contract.
+- No mention of Debezium tombstone events (null-payload follow-up message after a `d` event for Kafka log compaction). A streaming consumer that doesn't filter tombstones can NPE.
+- PK subtract reconciliation pulls all Postgres PKs into Spark; for 500M-row tables this is heavy one-time load on the OLTP DB. A hash-bucket-sharded or month-at-a-time reconciliation would be worth one sentence for engineers with large tables.
+- In this production stack, Trino can read both Postgres (postgresql connector) and Iceberg, so reconciliation can be a single `SELECT id FROM postgresql.public.users EXCEPT SELECT user_id FROM iceberg.analytics.users` without Spark involvement. Not wrong to use Spark, but the Trino option is sometimes simpler.
+
+**Production fit**: All examples align with on-prem Spark + Iceberg + MinIO stack in prod_info.md. No cloud-only services referenced.
+
+**Action for teacher** (optional polish only, topic well above pass threshold at 4.454):
+- Add an explicit "hard-delete invisibility of `updated_at` watermark" callout to `resources/13-postgres-to-iceberg-ingestion.md` (this was already on the iter-83 plan in state.json) with the three-option treatment.
+- Add a one-line note on soft-delete enforcement: revoke DELETE on the table from the app role, or add a `BEFORE DELETE` trigger so soft-delete is a contract, not a convention.
+- Add a one-line note on Debezium tombstone events so a streaming consumer correctly filters null payloads.
+- Mention the Trino `EXCEPT` reconciliation path as an alternative to the Spark `subtract` pattern, since both query engines are in the production stack.
+
+---
+
+### Iter 84 Q1 — Multi-tenant analytics (row-level isolation in Trino — views + GRANT/REVOKE vs OPA, "what if a query forgets `WHERE tenant_id`?")
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4 |
+| Beginner clarity | 5 |
+| Practical applicability | 4 |
+| Completeness | 4.5 |
+| **Average** | **4.375** |
+
+**Topics updated**: Multi-tenant analytics: isolating customer data in SaaS — prior avg 4.424 across 80 questions; new running avg (4.424 × 80 + 4.375) / 81 = (353.920 + 4.375) / 81 = 358.295 / 81 = **4.423** across 81 questions. PASSED.
+
+**Verified accuracy** (WebSearch against trino.io docs and Trino GitHub issues):
+- Trino built-in system access control default is "all operations permitted, except for user impersonation" — answer's claim that GRANT-only is insufficient and REVOKE is required is correct under the built-in model.
+- `REVOKE ALL PRIVILEGES` syntax: confirmed valid in Trino 467+ (ALL PRIVILEGES expands to DELETE, INSERT, SELECT).
+- OPA access-control plugin: confirmed first-class authorization plugin in Trino; per-query authorization request, boolean `allow` response, supports row filters and column masking.
+- View-as-tenant-filter is a documented multi-tenant pattern; OPA row filters are a more dynamic alternative.
+- "Access check during analysis phase before files opened on MinIO": documented intent, with known edge cases per trinodb/trino#22804 (Trino sometimes checks metadata before access control). Slight overconfidence in the answer.
+
+**Strengths**:
+- "Security guard with rulebook" metaphor for OPA is excellent for beginners with zero auth-engine background.
+- Both patterns presented with concrete code, pros/cons, and scaling guidance (views < 150 tenants, OPA above).
+- Failure scenario worked through end-to-end (what happens when an ad-hoc query forgets WHERE clause).
+- Critical detail flagged that default permission model is allow-all so REVOKE is required.
+- Verification commands provided (connect as tenant role and run both queries).
+- Production-fit deference: presents Rego as pseudocode and explicitly notes production OPA policies live in an external governance doc.
+
+**Issues**:
+- (Technical accuracy) SQL GRANT/REVOKE presented as the enforcement layer for the view approach. In the production stack OPA is the authorization backend — SQL grants are bypassed when the OPA plugin is configured. The engineer should request an OPA policy change, not run REVOKE SQL. The answer notes OPA is in place but doesn't explicitly call out that the GRANT/REVOKE example may not be the right enforcement interface in this environment.
+- (Completeness) OPA row filters not explained as a third option. OPA can return row-filter expressions that Trino applies as an automatic WHERE — this is the most direct answer to "automatically filter rows based on who's running the query." Mentioned only in passing in Approach 2's preamble.
+- Column masking unmentioned (adjacent OPA capability).
+- `SECURITY DEFINER` vs `SECURITY INVOKER` view mode unmentioned. The view-as-isolation pattern depends on definer-mode views; iter 64 Q1 covered this but the answer here substitutes the REVOKE workaround without naming the canonical Trino view security pattern.
+- "Analysis phase before MinIO files opened" is slightly overconfident — known edge cases exist per trinodb/trino#22804.
+
+**Production fit**: On-prem Trino + Iceberg + MinIO + OPA all aligned with `prod_info.md`. Defers specific Rego policies to external governance doc correctly. Slight gap: doesn't flag that in OPA-managed clusters, the SQL GRANT/REVOKE pattern in Approach 1 is not the actual enforcement layer.
+
+**Action for teacher** (optional polish only, topic well above pass threshold at 4.423):
+- Add an "OPA row-filter mode" section to `resources/05-multi-tenant-analytics.md` (or wherever the views vs OPA section lives) — showing that OPA can inject a per-tenant WHERE automatically without per-tenant views. This is the most direct answer to the asked question.
+- Add a one-line note distinguishing SQL GRANT/REVOKE enforcement from OPA-plugin enforcement: in an OPA-managed cluster, SQL grants are bypassed; engineer must request a policy change, not run REVOKE.
+- Optionally mention column masking and `SECURITY DEFINER` view mode alongside the views pattern.
+
+---
+
+### Iter 84 Q2 — Iceberg partition design for SaaS (adding `tenant_id` to a live 8-month-old day-partitioned Iceberg table — partition evolution, old-file behavior, mixed-spec query semantics, rewrite_data_files migration)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 4 |
+| **Average** | **4.75** |
+
+**Topics updated**: Iceberg partition design for SaaS — prior avg 4.538 across 10 questions; new running avg (4.538 × 10 + 4.75) / 11 = (45.38 + 4.75) / 11 = 50.13 / 11 = **4.557** across 11 questions. PASSED.
+
+**Verified via WebSearch against trino.io and iceberg.apache.org**:
+- Trino `ALTER TABLE ... SET PROPERTIES partitioning = ARRAY['day(occurred_at)', 'tenant_id']` is the documented and current syntax (trino.io/docs/current/connector/iceberg.html; Starburst Iceberg-partitioning blog).
+- "Old files are not rewritten" — confirmed: partition evolution is metadata-only; existing files retain their original spec and are not eagerly rewritten (iceberg.apache.org/docs/latest/evolution/).
+- Mixed-spec query correctness — confirmed: Iceberg's hidden partitioning translates query predicates per-spec so reads remain correct across files written under multiple specs.
+- `rewrite_data_files` reorganizing under the new spec — confirmed: the Spark procedure writes outputs under the table's current partition spec, so running it after a partition evolution lands data into the new layout (iceberg.apache.org/docs/latest/spark-procedures/).
+- Production-fit: choosing the Spark `CALL system.rewrite_data_files(...)` path is correct because Trino `ALTER TABLE EXECUTE optimize` has a known limitation where newly-added partition columns cannot be used as predicates in the optimize path (trinodb/trino #25279). Answer's "Spark SQL only" labeling is accurate and production-aware.
+
+**Strengths**:
+1. Opens with a direct yes/no answer to the engineer's anxiety ("zero downtime, no reload") before stepping into mechanics.
+2. The "split table" framing for the post-ALTER state is concrete and easy for an OLTP-background engineer to picture.
+3. Step 3 walks through Trino read behavior on the mixed layout for both old and new files, with the correct semantic claim (slower on old, correct on both).
+4. The "gotcha" callout — "ALTER feels like it didn't work because old files still scan the old way" — pre-empts the exact follow-up engineers hit in practice and addresses the prior Iter 25/Iter 26 Q3 confusion seen on the same topic.
+5. Includes a rollback note (snapshot-based) and concrete timing guidance for the rewrite window.
+6. Correctly picks the Spark procedure (correct for prod stack) over Trino's OPTIMIZE (which hits the known partition-evolution limitation).
+
+**Minor gaps (Completeness deduction from 5 to 4)**:
+1. Doesn't mention the `bucket(tenant_id, N)` consideration for high-tenant-count cases — the answer takes the user's stated intent at face value (direct `tenant_id` partitioning), which is fine, but a brief "if you have hundreds+ tenants per day, consider `bucket(tenant_id, 32)` instead to avoid per-file metadata explosion" would have been useful context that this topic has previously covered (Iter 16 Q2, Iter 68 Q2).
+2. Doesn't mention monitoring rewrite progress via `SELECT spec_id, COUNT(*) FROM <table>.files GROUP BY spec_id` (same omission flagged in Iter 73 Q1 — repeated gap).
+3. Doesn't explicitly call out the Trino `OPTIMIZE` partition-evolution limitation (trinodb/trino #25279) as the reason Spark is the right tool here; just says "Spark SQL only" without explaining why Trino is unsuitable for this specific rewrite.
+4. "Doubling storage temporarily" is slightly imprecise — only one snapshot's worth is duplicated until `expire_snapshots` runs, not literal 2x of the whole table.
+5. Catalog-name inconsistency between Trino (`iceberg.analytics.user_events`) and Spark (`analytics.user_events`) — accurate in practice but unexplained for a beginner who'd ask "why the difference?"
+
+**Production fit**: Aligns with on-prem Iceberg 1.5.2 + Trino 467 + Spark + MinIO stack. Spark procedure syntax matches Iceberg 1.5.2. The recommendation to run `rewrite_data_files` from Spark (not Trino OPTIMIZE) is the correct choice for this specific case.
+
+**Action for teacher** (optional polish only — topic well above pass threshold at 4.557):
+- Add a short callout to the Iceberg partition resource about monitoring rewrite progress via `<table>.files` and `spec_id`.
+- Add a one-line explanation of why Spark `rewrite_data_files` is preferred over Trino `OPTIMIZE` for partition-evolution rewrites (link to trinodb/trino #25279 limitation).
+- Add a brief cross-reference: when the new partition column is `tenant_id`, prompt the engineer to also evaluate `bucket(tenant_id, N)` for high-cardinality tenant counts.
+
+---
+
+### Iter 85 Q1 — Multi-tenant analytics (OPA row-filter injection — is it real, how it differs from per-tenant views, where it lives, when to adopt vs templates)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **5.00** |
+
+**Topics updated**: Multi-tenant analytics: isolating customer data in SaaS — prior avg 4.423 across 81 questions; new running avg (4.423 × 81 + 5.00) / 82 = (358.263 + 5.00) / 82 = 363.263 / 82 = **4.430** across 82 questions. PASSED.
+
+**Verified via WebSearch against trino.io OPA docs**:
+- Row filter injection is real and ships with the Trino OPA plugin (`io.trino:trino-plugin-opa`). Configured via `opa.policy.row-filters-uri` in `etc/access-control.properties`.
+- OPA response format: an array of objects `{"expression": "<SQL predicate>"}`. Optionally an `identity` field for evaluating the expression under a different identity. Multiple filters can be returned and are all applied as additional WHERE clauses.
+- The OPA access control plugin was first released in Trino 438 (Feb 2024). Trino 467 (Dec 2024) definitively supports row-filter mode.
+- Filter is applied in the analyzer phase before execution, exactly as the answer describes.
+- The answer's outer shape `{"rowFilters": [{"expression": "tenant_id = 'acme'"}]}` corresponds to the Rego policy structure documented in the official examples; the over-the-wire response is the inner array. Either framing is accurate at the level a SaaS engineer needs.
+
+**Strengths**:
+- Step-by-step trace (1–5) of what happens when a bare `SELECT *` arrives — answers "how does it work" concretely.
+- Crisp "where does it live" answer: not Iceberg, not MinIO, but Trino analyzer + OPA policy together. This is exactly the conceptual model the question asked for.
+- Comparison table covers setup cost, maintenance, blast radius, failure isolation, auditability — the operational trade-offs that actually determine the answer.
+- 50-tenant heuristic for when row filters beat per-tenant views is a reasonable industry rule-of-thumb (matches what production teams typically experience: DDL overhead for 500 views becomes painful, blast-radius risk of a single Rego rule becomes manageable with mature OPA tests).
+- Verification SQL provided for both approaches (admin vs tenant principal), with the explicit "must return only 'acme'" assertion suitable for CI.
+- Hybrid recommendation (row filters for high-volume shared tables, per-tenant views for sensitive admin tables) is sophisticated and practically useful.
+- Production-fit deference: notes that the specific Rego is in the external governance document (correct per prod_info.md), names Trino 467 + OPA from the production stack, and references JWT claim for principal→tenant mapping.
+- Honest about the operational shift: "Rego bug = global blast radius" caveat is critical and called out.
+
+**Issues / gaps**: None material. Minor polish points:
+- Could have mentioned column masking as an adjacent OPA capability (since the engineer is thinking about per-tenant filtering, column-level redaction is a natural follow-up).
+- The OPA response JSON in step 3 is shown as `{"rowFilters": [...]}` (the Rego rule shape) rather than the bare array `[{"expression": "..."}]` that goes over the wire. Both are valid framings; pedantic readers checking docs might want the raw HTTP response shape called out separately.
+
+**Production fit**: Fully aligned with on-prem Trino 467 + OPA + JWT setup. Defers specific OPA policies to external governance document per prod_info.md. Recognizes the existing view-based approach the engineer currently uses and gives them a clean adoption path.
+
+**Resource fix needed?**: No. `resources/05-multi-tenant-analytics.md` already has the OPA row-filter section (lines 274+) that this answer drew from. Confirms the resource update from the iter84 feedback landed correctly and the responder is using it well. Optional: add column masking as a sister section.
+
+---
+
+### Iter 85 Q2 — Postgres-to-Iceberg ingestion (schema evolution: new Postgres column mid-flight in a MERGE-INTO incremental pipeline — fail vs silent-drop, zero-downtime ALTER, auto-evolution caveats)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 4.75 |
+| Practical applicability | 5 |
+| Completeness | 4.5 |
+| **Average** | **4.8125** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.4539 across 78 questions; new running avg (4.4539 × 78 + 4.8125) / 79 = (347.4042 + 4.8125) / 79 = 352.2167 / 79 = **4.4584** across 79 questions. PASSED.
+
+**Verified via WebSearch against iceberg.apache.org and apache/iceberg GitHub**:
+- `writeTo().append()` with extra columns fails by default ("Cannot write to [table], too many data columns") — confirmed in iceberg.apache.org/docs/latest/spark-writes and apache/iceberg#4542. Not silent drop. Answer's claim is correct.
+- `ALTER TABLE ADD COLUMN` is metadata-only with no file rewrites — confirmed in iceberg.apache.org/docs/latest/evolution: "schema updates are metadata-only changes" and "no data files are changed when you perform a schema update."
+- Old files transparently return NULL for newly added columns — confirmed; Iceberg's column-ID assignment guarantees added columns "never read existing values from another column."
+- Both `write.spark.accept-any-schema=true` (table property) AND `mergeSchema=true` (writer option) required for auto-evolution — confirmed via iceberg.apache.org/docs/latest/spark-writes and apache/iceberg#8005. The table property opts in to Spark DSv2 `ACCEPT_ANY_SCHEMA`, bypassing Spark's validation in favor of Iceberg's; the writer option then enables `merge-schema`.
+
+**Strengths**:
+1. Opens by directly resolving the engineer's anxiety: "fails, not silent drop" — exactly the question asked, answered first.
+2. Correctly enumerates the safe migration sequence (ALTER first, then re-run job) with explicit ordering rationale.
+3. Calls out the production-correct stance on auto-evolution: technically available, but a footgun for incremental pipelines — recommends manual ALTER for auditability.
+4. Distinguishes append vs createOrReplace semantics: ALTER is wrong for full-refresh pipelines because createOrReplace drops and rebuilds.
+5. Suggests a concrete preflight check (`information_schema.columns` diff vs Iceberg schema) to surface schema drift before the 2 AM page.
+6. Zero-downtime claim is correct and well-justified.
+
+**Issues / gaps (drove deductions)**:
+1. (Completeness −0.5) **MERGE INTO is not addressed despite being the engineer's exact pipeline.** The answer pivots to `writeTo().append()` semantics, but `mergeSchema` is NOT supported on Spark `MERGE INTO` (apache/iceberg#5556). Engineer reading literally may not realize their MERGE pipeline can't use the auto-evolution escape hatch even if they wanted to.
+2. (Completeness) JDBC SELECT semantics not flagged: `SELECT *` causes the new column to silently appear in the DataFrame (and the write to fail); pinned `SELECT col1, col2, ...` lists mean Iceberg never sees the change at all (silent skip until job code is updated). The failure mode depends on which pattern is in use.
+3. (Beginner clarity −0.25) The "extra columns in source dataframe" error wording is paraphrased — actual Iceberg error is "Cannot write to [table], too many data columns." Engineer searching the error string in logs won't find it.
+4. (Completeness) Iceberg DEFAULT-clause support on ADD COLUMN omitted — useful when NULL backfill breaks downstream dashboards or when the column should be NOT NULL.
+5. (Completeness) ADD COLUMN always nullable in Iceberg; making it NOT NULL requires backfill + ALTER COLUMN SET NOT NULL sequence — not mentioned.
+6. (Completeness) Trino/dbt cross-reference missing. Trino's `ALTER TABLE ADD COLUMN` against the same Hive-metastore-backed Iceberg table is also metadata-only and works equally well — relevant given prod stack runs both engines and dbt.
+7. (Technical accuracy, minor) "Milliseconds even on 10 TB table" overstates speed — Hive Metastore round-trip adds latency, though still sub-second. Cosmetic.
+
+**Production fit**: Aligns with on-prem Spark + Iceberg 1.5.2 + Hive Metastore + MinIO stack. ALTER TABLE syntax valid in both Spark SQL and Trino. Catalog naming consistent with Trino's Hive-metastore Iceberg connector.
+
+**Action for teacher** (optional polish only, topic well above pass threshold at 4.458):
+- Add a section to `resources/13-postgres-to-iceberg-ingestion.md` explicitly contrasting `writeTo().append()` schema validation vs `MERGE INTO` schema validation — note that `mergeSchema` is NOT supported on MERGE INTO (apache/iceberg#5556), so manual `ALTER TABLE` is the only safe path for MERGE-based incremental pipelines.
+- Add a one-line callout: failure mode depends on whether JDBC SELECT is `SELECT *` (column auto-appears, write fails loudly) vs pinned `SELECT col1, col2, ...` (Iceberg never sees the change, silent skip until code update).
+- Document Iceberg's `ALTER TABLE ... ADD COLUMN ... DEFAULT ...` syntax for cases where NULL backfill is unacceptable.
+- Note that ADD COLUMN is always nullable in Iceberg — making a column NOT NULL requires backfill first, then ALTER COLUMN SET NOT NULL.
+- Cross-reference: the same ALTER works from Trino and from dbt (via `{{ run_query() }}` or a post-hook) for teams that prefer schema changes outside Spark.
+- Cite the actual Iceberg error string ("Cannot write to [table], too many data columns") so engineers grep'ing logs find the resource.
+
+---
+
+### Iter 86 Q1 — Multi-tenant analytics (OPA column-level masking for PII: mask email/phone for analysts while data-team sees real values from the same Iceberg table, no separate copies/schemas)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.5 |
+| Completeness | 4.5 |
+| **Average** | **4.50** |
+
+**Topics updated**: Multi-tenant analytics: isolating customer data in SaaS — prior avg 4.430 across 82 questions; new running avg (4.430 × 82 + 4.50) / 83 = (363.260 + 4.50) / 83 = 367.760 / 83 = **4.431** across 83 questions. PASSED.
+
+**Verified via WebSearch against trino.io OPA docs and apache/trino GitHub**:
+- Column masking via OPA was added in **Trino 453** (PR #21997, merged July 2024). Production stack is Trino 467 — supported.
+- Configuration: `opa.policy.column-masking-uri` for single-column lookups, or `opa.policy.batch-column-masking-uri` for batch (wide tables benefit). When the batch URI is set, it overrides the single-column URI.
+- Rego response shape for single-column: `{"expression": "<SQL expression>"}`. Optional `identity` field overrides the evaluation identity for the masked expression.
+- Batch response shape: array of `{"index": N, "viewExpression": {"expression": "...", "identity": "..."}}` keyed back to the input `filterResources` array.
+- Mask is applied as a SQL expression rewrite in the analyzer phase — exactly as the answer describes via the before/after SQL example.
+- GROUP BY behavior on a constant-masked column: standard SQL semantics apply — grouping on a literal collapses to one group. Deterministic hash (e.g., `to_hex(sha256(...))`) preserves cardinality while hiding the value. Answer's caveat is correct.
+
+**Strengths**:
+- Opens with a crisp "Yes, supported" headline that resolves the engineer's framing question first.
+- Three-decision taxonomy (allow/deny → row filter → column mask) maps the OPA SPI surface area cleanly without overloading a beginner.
+- Before/after SQL rewrite example makes the abstract "mask is injected by the analyzer" concrete in three lines.
+- Comparison table (OPA masking vs separate views) covers setup, maintenance, and flexibility — the decision dimensions an engineer actually weighs.
+- Practical 1–3 vs 10+ cohort heuristic gives a reasonable industry rule-of-thumb for when OPA masking becomes operationally worth it vs CREATE VIEW.
+- The "Important: OPA column masking and aggregation" callout is the single best teaching point in the answer — surfaces the silent-distortion pitfall (mask to constant → `GROUP BY masked_col` collapses to one group) AND offers the deterministic-hash workaround that preserves analytics semantics.
+- Composition with row filtering is explicitly addressed — analyst gets `WHERE tenant_id = 'acme'` AND masked emails; data team sees neither layer applied.
+- Production-fit deference: correctly defers specific Rego policy text to the external governance document per prod_info.md guidance.
+- CI testing posture suggested (assert masked value as analyst, real value as data-team role).
+
+**Issues / gaps (drove deductions)**:
+1. (Technical accuracy −0.5) **Rego response shape never shown.** The answer describes WHAT OPA returns (a SQL expression) but not the wire format (`{"expression": "..."}` or batch `{"index": N, "viewExpression": {"expression": "...", "identity": "..."}}`). An engineer reading the official docs after this answer will see a JSON shape they cannot map back. Single sentence would close the gap.
+2. (Technical accuracy, minor) `opa.policy.column-masking-uri` / `opa.policy.batch-column-masking-uri` config properties not named. The answer says "your production environment supports column masking" but doesn't tell the engineer which property to ask the security team about. With the prod_info.md deferral posture this is borderline acceptable, but a one-line "ask security team about the `column-masking-uri` config" pointer would be more actionable.
+3. (Completeness −0.5) Trino version requirement (≥453) not stated. Production runs 467 so this is fine, but if the engineer were on an older Trino, they'd hit `getTableColumnMasks` SPI absent. A one-line "requires Trino 453+" callout would future-proof the answer.
+4. (Beginner clarity −0.5) "Rego" is mentioned several times without an inline gloss ("Rego = the OPA policy language, like SQL is for databases"). A first-time reader who has heard of OPA but not Rego will lose the thread on the policy-as-code framing.
+5. (Practical applicability −0.5) No example of a deterministic-hash mask expression. The answer says "consider masking to a deterministic hash" but doesn't show `to_hex(sha256(cast(email as varbinary)))` or similar — leaving the engineer to figure out the Trino function chain. Two-line code snippet would make the GROUP BY workaround actionable.
+6. (Completeness) Iceberg-specific note absent. Column masking is engine-level (Trino) not storage-level (Iceberg), so masked-vs-real values are NOT persisted differently — both audiences read the same Parquet files. A one-line "this happens at query time; no separate Iceberg copies, no MinIO storage difference" would close the engineer's "no separate copies" sub-question explicitly.
+7. (Completeness, minor) JOIN-on-masked-column gotcha missing — same family as GROUP BY: if `email` is masked to a constant, a self-join on `email` becomes a cross-join. Worth mentioning alongside aggregation.
+
+**Production fit**: Fully aligned with on-prem Trino 467 + OPA stack. Correctly defers Rego policy specifics to external governance document. Recognizes existing OPA row-filter setup as the foundation column-masking builds on. The Iceberg + MinIO stack is implicitly compatible (masking is engine-side, storage-format-agnostic).
+
+**Resource fix needed?**: Minor. Suggested additions to `resources/05-multi-tenant-analytics.md`:
+- Add a "Column masking" subsection alongside the existing row-filter section, showing the OPA Rego response shape (`{"expression": "..."}`) and the `opa.policy.column-masking-uri` config pointer.
+- Add a "GROUP BY / JOIN gotcha on masked columns" callout with the deterministic-hash workaround example using Trino's `to_hex(sha256(cast(col as varbinary)))`.
+- Note Trino 453+ requirement for the column-masking SPI; production 467 is fine.
+- Cross-reference: column masking is engine-side, so no Iceberg/MinIO storage divergence — same files, different per-principal SQL rewrites.
+
+Verified sources: trino.io/docs/current/security/opa-access-control.html; github.com/trinodb/trino/pull/21997 (Trino 453 column-mask SPI addition); github.com/trinodb/trino/issues/21359 (batch column-mask motivation).
+
+---
+
+### Iter 86 Q2 — Iceberg partition design for SaaS (diagnosing too-small files with `$files` metadata table, then compacting with `rewrite_data_files`)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 5 |
+| Practical applicability | 4 |
+| Completeness | 5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Iceberg partition design for SaaS — prior avg 4.557 across 11 questions; new running avg (4.557 × 11 + 4.75) / 12 = (50.127 + 4.75) / 12 = 54.877 / 12 = **4.573** across 12 questions. PASSED.
+
+**Verified via WebSearch against trino.io and iceberg.apache.org**:
+- `$files.file_size_in_bytes` — correct column name in Trino Iceberg connector (trino.io/docs/current/connector/iceberg.html).
+- `rewrite_data_files` is Spark-only — correct. Trino does NOT support `CALL iceberg.system.rewrite_data_files`. Trino's counterpart is `ALTER TABLE <t> EXECUTE optimize(file_size_threshold => '128MB')` with default threshold 100 MB.
+- `min-input-files` and `target-file-size-bytes` are valid Iceberg options for `rewrite_data_files` (iceberg.apache.org/docs/latest/spark-procedures/).
+- `expire_snapshots` with `older_than` and `retain_last` parameters — correct signature.
+- 128-256 MB target — defensible. Iceberg's `write.target-file-size-bytes` default is actually 512 MB, but 128-256 MB is a widely-used target for query-heavy workloads. Answer's reasoning (parallelism vs file-open amortization) is sound.
+
+**Strengths**:
+1. Diagnostic query is well-engineered: size-bucketed CASE expression gives an immediately-readable distribution rather than 50,000 raw rows.
+2. Concrete worked example of the cost (10k tiny files = 100-500s of file-open time vs 1-5s for 100 compacted files) makes the abstract "small files are slow" claim viscerally clear.
+3. Correctly frames partitioning vs file size as orthogonal: "partitioning controls which files a query opens, not how fast opening those files is."
+4. `rewrite_data_files` shown with both target-file-size-bytes (256 MB) AND min-input-files (5) — production-ready, not toy syntax.
+5. Explicitly labels the Spark-only requirement ("Run in Spark — NOT in Trino") — matches production stack (Iceberg 1.5.2 on Spark for ingestion).
+6. Storage-doubling warning + `expire_snapshots` follow-up with sensible defaults (30-day, retain 10).
+7. Scheduling guidance (post-ingestion 4 AM window, weekly for low-volume) is operationally specific.
+8. Closes the loop with a verification step (re-run distribution query, watch Trino UI planning time).
+9. Bonus diagnostic: `EXPLAIN ANALYZE` "physical input size vs rows returned" distinguishes small-files overhead from missing partition pruning.
+
+**Issues / gaps (drove deductions)**:
+1. (Practical applicability −1) **Trino-native `ALTER TABLE <t> EXECUTE optimize(file_size_threshold => '128MB')` not mentioned.** The production stack uses Trino 467 as the query engine — for a user already in a Trino session investigating slow queries, the Trino-native command would be a more accessible first fix than spinning up a Spark job. The answer correctly states `rewrite_data_files` is Spark-only but does not offer the Trino alternative. This is the only meaningful gap.
+2. (Minor, not penalized) Month-partitioning combined with hourly streaming writes is itself a small-files amplifier; brief framing of "month is coarse enough that hourly writes pile up into one partition" would have strengthened the diagnostic narrative.
+3. (Cosmetic) File-open overhead (10-50 ms) is environment-dependent; on bare-metal MinIO with 10GbE this could be faster. Phrased as "roughly" so not an accuracy issue.
+
+**Production fit**: Aligns with on-prem Iceberg 1.5.2 + Trino 467 + Spark + MinIO stack. Spark procedure syntax matches Iceberg 1.5.2. The only production-fit miss is the absence of the Trino OPTIMIZE alternative, which would be the more natural first tool for users primarily working from Trino.
+
+**Action for teacher** (moderate priority — topic well above pass threshold at 4.573):
+- Add a section to the Iceberg partition/maintenance resource on Trino's `ALTER TABLE <t> EXECUTE optimize(file_size_threshold => '128MB')` as the Trino-native counterpart to Spark `rewrite_data_files`.
+- Include a comparison table: Trino OPTIMIZE for quick ad-hoc compaction from a Trino session; Spark `rewrite_data_files` for scheduled jobs needing `min-input-files`, partition filters, sort orders, or partition-evolution-aware rewrites.
+- Note Trino OPTIMIZE limitation: cannot use newly-added partition columns as predicates (trinodb/trino #25279) — Spark is required for post-partition-evolution rewrites.
+
+---
+
+### Iter 87 Q1 — Multi-tenant analytics (tiered shared+dedicated model for 80-tenant Iceberg table with 5-6 enterprise tenants at 10x volume; operational overhead of bespoke per-tenant tables)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 4 |
+| **Average** | **4.50** |
+
+**Topics updated**: Multi-tenant analytics: isolating customer data in SaaS — prior avg 4.431 across 83 questions; new running avg (4.431 × 83 + 4.50) / 84 = (367.773 + 4.50) / 84 = 372.273 / 84 = **4.432** across 84 questions. PASSED.
+
+**Verified via WebSearch (Starburst, lakeFS, iceberg.apache.org, Medium per-tenant Iceberg patterns)**:
+- Tiered model (shared table for small tenants + dedicated tables for whales) IS a documented industry pattern for Iceberg multi-tenant designs.
+- Partition skew from uneven tenant volumes is a real, documented Iceberg pain point: skewed partitions degrade query times and parallelism, and the recommended mitigation when one partition is at least 10x average is sub-partitioning or splitting.
+- INSERT INTO ... SELECT for migrating one tenant's rows to a dedicated table is mechanically correct in Iceberg; per-table writes are atomic, but cross-table writes are NOT atomic (per iceberg.apache.org/docs/latest/spark-writes — "inserting into multiple tables is not atomic"). Answer's step "INSERT then DELETE" leaves a window where rows exist in both tables.
+
+**Strengths**:
+- Crisp framing: "not fundamentally broken for 75 small tenants, hits a wall for 5-6 enterprise" — directly answers the engineer's "is shared broken?" question rather than dodging.
+- Excellent diagnosis of the operational firefight: compacting the shared table to fix Acme also rewrites 75 small tenants' files (wasted CPU). This is the single best teaching point for justifying the split.
+- Distinguishes "partitioning is technically correct" from "queries open many more files per tenant for the whale" — exactly the subtlety that explains why "feels slow even though it's partitioned."
+- Templated maintenance with a parameterized loop over tenant names directly addresses the engineer's "6+ bespoke tables" worry. Shows 6 dedicated tables is not equal to 6 bespoke jobs.
+- Break-even guidance (8-10 large tenants) gives the middle-ground answer with a useful rule of thumb.
+- Concrete numbered next steps (identify, create, migrate, swap views, deploy CronJob).
+- Production-stack fit: uses Spark `CALL iceberg.system.rewrite_data_files` (correctly NOT Trino), Kubernetes CronJob, Trino views with OPA — all on-prem k8s + MinIO compatible.
+
+**Issues / gaps (drove deductions)**:
+1. (Technical accuracy −1) Numerical sloppiness — "Small tenant: 1 Parquet file, ~100M rows" is overstated for a 128-256 MB file. Directionally fine but a sharp reader will pause.
+2. (Technical accuracy, minor) `current_timestamp()` should be `current_timestamp` (no parens) in Spark/Iceberg SQL.
+3. (Completeness −1) Migration cutover sequencing reversed: the safe order is create then INSERT then verify row count then atomically swap view's FROM clause then delete from shared. Answer says "INSERT, then delete, then update views" which leaves a query-time inconsistency window.
+4. (Completeness, minor) No mention of how to detect which tenants are the heavy hitters quantitatively — sample query against `$files` / `$partitions` metadata tables would arm the engineer with evidence before splitting.
+5. (Completeness, minor) No mention of lighter interim mitigations (e.g., per-tenant compaction cadence on the shared table, `write_distribution_mode` tuning) as the "even smaller middle ground" before committing to the split.
+6. (Practical applicability nit) `spark-submit maintenance.sql --args` is pseudocode — spark-submit does not take `.sql` files with arg substitution natively. In practice would be spark-sql + envsubst, or a parameterized PySpark wrapper. Direction is right; literal command would fail.
+
+**Production fit**: Fully aligned with on-prem Trino 467 + Spark + Iceberg 1.5.2 + MinIO + k8s stack. Correctly delegates compaction to Spark, query-time view selection to Trino, scheduling to k8s CronJob. OPA integration mentioned but specific policy rules properly deferred.
+
+**Resource fix needed?**: Minor additions to `resources/05-multi-tenant-analytics.md` (or a new tenant-scaling subsection):
+1. Tiered model pattern (shared + dedicated for whales) with 8-10 tenant break-even guidance.
+2. Safe cross-table migration sequence: INSERT then verify then swap view then delete (with explicit callout that cross-table writes are non-atomic in Iceberg).
+3. Skew-detection recipe using `$files` / `$partitions` metadata tables.
+4. Interim mitigations (per-tenant compaction cadence, `write_distribution_mode`) as lighter alternatives before splitting.
+
+Verified sources: starburst.io/blog/iceberg-partitioning; lakefs.io/blog/iceberg-tables-management; iceberg.apache.org/docs/latest/spark-writes; medium.com/@shahsoumil519/building-per-tenant-iceberg-tables-using-apache-spark.
+
+---
+
+### Iter 87 Q2 — Postgres-to-Iceberg ingestion (bootstrapping a brand-new, nearly-empty Postgres table: skip full-load, start incremental from "now"; does Iceberg or Debezium require a baseline snapshot?)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 4 |
+| **Average** | **4.75** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.4584 across 79 questions; new running avg (4.4584 × 79 + 4.75) / 80 = (352.2136 + 4.75) / 80 = 356.9636 / 80 = **4.4620** across 80 questions. PASSED.
+
+**Verified via WebSearch against iceberg.apache.org and debezium.io**:
+- Iceberg does NOT require a pre-populated baseline before incremental writes. An Iceberg table can be created empty (metadata-only, instant) and grown via append/MERGE — confirmed in iceberg.apache.org/docs/latest/spark-writes (CREATE TABLE then writeTo().append() is a documented pattern).
+- Debezium's `snapshot.mode=never` (and the newer `no_data`) explicitly support starting without an initial snapshot — confirmed in debezium.io/documentation/reference/stable/connectors/postgresql.html. The connector streams from the replication slot's position onward.
+- Caveat the answer glosses: with `snapshot.mode=never` and no stored offset, Debezium streams from the point in time the **replication slot was created**, not the absolute "now" of connector startup. If the slot was created hours before the connector starts, you'll replay everything since slot creation. This is not a bug, but the answer's "start from a given LSN" framing implies more precision than Debezium gives you out of the box.
+- `createOrReplace()` for small bootstrap loads is correct on file-system catalogs / Hive Metastore; documented as the CTAS-equivalent for DataFrameWriterV2. Known issue apache/iceberg#14625: `createOrReplace()` against some object stores (GCS, ADLS Gen2, Fabric OneLake) throws FileNotFoundException on `metadata/version-hint.text`. MinIO via S3 protocol is generally unaffected, but for true new-table bootstrapping, `create()` is safer than `createOrReplace()` because the table is known not to exist yet.
+- "Watermark from now" is a widely used informal pattern but is not a formally documented Iceberg/Debezium feature — it is a pipeline-level design choice, exactly as the answer presents it.
+
+**Strengths**:
+1. Opens by directly answering the framing question ("Yes, you can absolutely skip…"), then immediately names the only real risk (pre-pipeline rows missed). Resolves anxiety without burying the lede.
+2. Correctly separates the conceptual claim ("Iceberg doesn't track a baseline") from the operational choice (bootstrap the few rows vs accept the gap), and recommends the safer default (Option 1).
+3. Two concrete code paths with realistic timestamps, including the watermark write-back step that engineers commonly forget.
+4. Explicitly addresses both halves of the question — "skip full load" and "will tooling get confused" — with separate, clearly labeled sections.
+5. Practical 5-step checklist at the end converts the narrative into an actionable runbook.
+6. Correctly explains why the full-load pattern exists in the first place (500M-row backfill scenario), giving the engineer the mental model rather than just the rule.
+7. The "Iceberg doesn't know or care that the table was empty" line is exactly the right reassurance for a beginner worried about cold-start invariants.
+
+**Issues / gaps (drove deductions)**:
+1. (Completeness −1) **Debezium `snapshot.mode=never` semantics oversimplified.** Without a stored offset, the connector starts from the replication slot's creation position, not "now." For true from-now CDC, the slot must be created at the desired starting point and `snapshot.mode=never` set before the connector first starts. This nuance is not mentioned and could lead to surprise replays.
+2. (Completeness) MERGE INTO vs append semantics for a CDC-fed pipeline not addressed. If the table starts empty and the first CDC events include UPDATEs/DELETEs for rows that were never INSERTed (because their INSERT predates the start LSN), MERGE INTO will treat them as new rows or no-ops — engineer should know to expect this skew until enough time passes.
+3. (Completeness) `createOrReplace()` is shown for bootstrap; for a truly new table where idempotency on retry matters, `createIfNotExists()` or a guarded `CREATE TABLE IF NOT EXISTS` + `append()` is safer because `createOrReplace()` will wipe data if the job is re-run after the bootstrap completes.
+4. (Completeness) Production stack not named (Spark + Iceberg 1.5.2 + Hive Metastore + MinIO + Trino 467). The advice fits but a one-line "this works on your Spark + Iceberg + HMS + MinIO stack" anchor would have grounded it.
+5. (Minor) The replication slot lifecycle (CREATE PUBLICATION, CREATE REPLICATION SLOT, replica identity FULL for UPDATE/DELETE before-images) is the actual prerequisite for Debezium — not mentioned. Engineers wiring Debezium for the first time on a new table will hit this before they hit the snapshot question.
+6. (Minor) No mention of validating "is the table truly nearly-empty" with a row count — Option 2 ("start from now, accept the gap") becomes dangerous if the engineer's assumption is wrong by a few hundred rows.
+
+**Production fit**: Aligns with on-prem Spark + Iceberg 1.5.2 + MinIO + Hive Metastore stack. JDBC read pattern and `writeTo().createOrReplace()` syntax are correct for Iceberg 1.5.2. No stack-incompatible recommendations.
+
+**Action for teacher** (low priority — topic well above pass threshold at 4.462):
+- Add a "bootstrapping a brand-new Postgres table" subsection to `resources/13-postgres-to-iceberg-ingestion.md` covering: (a) when full-load is genuinely unnecessary, (b) the Debezium replication-slot-creation-time gotcha for `snapshot.mode=never`, (c) why `createIfNotExists()` + `append()` is safer than `createOrReplace()` for idempotent re-runs, (d) the replication slot + publication + replica identity prerequisites.
+- Add a one-line worked example showing the "is this table actually empty" sanity check (`SELECT COUNT(*) FROM source_table`) before choosing Option 2.
+
+---
+
+### Iter 94 Q1 — 2026-05-25 (EXTENDED PHASE) — Multi-tenant analytics (Trino resource group concurrency vs memory limits)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Multi-tenant analytics — prior avg 4.425 across 90 questions; new running avg (4.425 × 90 + 4.75) / 91 = (398.25 + 4.75) / 91 = 403.0 / 91 ≈ **4.429** across 91 questions. PASSED.
+
+**Verified via WebSearch against trino.io**:
+- `hardConcurrencyLimit`, `softMemoryLimit`, `maxQueued` field names: all CONFIRMED against Trino 480 resource groups docs.
+- `softMemoryLimit` queues new queries rather than killing running ones (soft semantics): CONFIRMED.
+- `QUERY_QUEUE_FULL` error when `maxQueued` is exceeded: CONFIRMED.
+- `${USER}` substitution in resource group selector patterns: CONFIRMED.
+- Config changes require coordinator restart (file-based config): CONFIRMED.
+- `system.runtime.kill_query` procedure with `query_id` and `message` arguments: CONFIRMED.
+
+**Strengths**: No accuracy gaps. Layered structure (define → flow → contrast table → starter config). Correctly explains why both limits are needed (different failure modes). Drop-in JSON config example. Prior resource gap from iter89 (missing `kill_query` immediate-relief step and coordinator restart caveat) is now resolved. JWT principal-based selector matching fits production stack.
+
+**Minor gaps**: Doesn't mention `softConcurrencyLimit`/`hardMemoryLimit` sibling fields or DB-backed manager hot-reload alternative — non-blocking.
+
+**Resource fixes needed**: None.
+
+---
+
+### Iter 94 Q2 — 2026-05-25 (EXTENDED PHASE) — Postgres-to-Iceberg ingestion (Debezium snapshot.mode: connector restart re-snapshots all rows despite existing replication slot)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.5 |
+| Completeness | 3.5 |
+| **Average** | **4.125** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.4620 across 80 questions; new running avg (4.4620 × 80 + 4.125) / 81 = (356.96 + 4.125) / 81 = 361.085 / 81 ≈ **4.458** across 81 questions. PASSED.
+
+**Verified via WebSearch against debezium.io and postgresql.org**:
+- `snapshot.mode=initial` is the documented default for the Postgres connector. The trigger is "no offsets recorded for the logical server name" — i.e., Debezium checks its own Kafka offset store, not the replication slot. CONFIRMED.
+- Valid `snapshot.mode` values for Postgres in Debezium 2.x+: `initial`, `initial_only`, `always`, `no_data`, `when_needed`, `recovery`, `configuration_based`, `custom`. The answer lists only 3 (`initial`, `never`, `when_needed`).
+- **`never` is deprecated in Debezium 2.x** — replaced by `no_data` (formerly named `schema_only`). The legacy `never` value still works in many recent versions but is the deprecated form. The answer does not mention this rename.
+- `op: "r"` for snapshot read events: CONFIRMED. Codes are c/u/d/r/t/m.
+- `pg_replication_slots` view columns `slot_name`, `active`, `restart_lsn`, `confirmed_flush_lsn`: all CONFIRMED per postgresql.org/docs.
+- `never`/`no_data` fails on missing slot vs `when_needed` re-snapshots on slot loss: CONFIRMED behavior.
+- Config keys `topic.prefix`, `plugin.name`, `slot.name`, `publication.name`: CONFIRMED for Debezium 2.x (topic.prefix replaced database.server.name in 2.0).
+
+**Strengths**:
+1. Correctly identifies the precise root-cause mechanism: Debezium checks **its own Kafka offset store** to decide whether to snapshot, NOT the Postgres replication slot. This is the key insight the engineer needs — explains why a perfectly healthy slot still triggers a re-snapshot.
+2. Two-step actionable runbook: pre-flight check the slot health first with concrete SQL, then change `snapshot.mode`. Engineer can act in 5 minutes.
+3. SQL on `pg_replication_slots` uses correct columns and the interpretation of `restart_lsn` vs `confirmed_flush_lsn` is accurate.
+4. "Fails loudly if the slot is gone" — correctly explains the safety property of `never` mode versus the silent re-snapshot risk.
+5. Decision-tree section at end ("when to use each mode") helps the engineer reason about future scenarios, not just this incident.
+6. Config example uses correct Debezium 2.x property names (`topic.prefix`, `plugin.name=pgoutput`, `slot.name`).
+
+**Issues / gaps (drove deductions)**:
+1. (Technical accuracy −1) **`never` is the deprecated alias; `no_data` is the current preferred value in Debezium 2.x+.** The answer recommends a deprecated config value without noting the rename. Both still work in practice, but an engineer reading the latest Debezium docs will see `no_data` and may be confused. Resource fix needed.
+2. (Completeness −0.75) **Only 3 of 8+ valid snapshot.mode values listed.** Critically missing: `recovery` mode (which is purpose-built for the scenario in the question — "offsets corrupted but slot intact, please re-read from slot without re-snapshotting"), and `initial_only` and `always`. `custom` and `configuration_based` are advanced but worth a one-liner.
+3. (Completeness −0.5) **Root cause not investigated.** The answer fixes the symptom (re-snapshot on restart) but never asks the diagnostic question: *why were Debezium's offsets lost?* Common causes — Kafka Connect offset topic deletion, consumer group reset, fresh Connect cluster after migration, `offset.storage.topic` misconfigured — should be surfaced. Flipping to `never` without understanding why offsets vanished will mask a future ops problem.
+4. (Completeness −0.25) **Data-loss risk understated.** If the offset loss was caused by Connect cluster downtime *combined with* a slot that fell off (WAL retention exceeded), `never` will fail at startup — fine. But if offsets were lost while the slot stayed healthy, and the engineer flips to `never`, they may permanently skip events that occurred between the last committed offset and the slot's current position. The answer should explicitly call out this verification: confirm `confirmed_flush_lsn` matches the last successfully processed LSN before flipping to `never`.
+5. (Minor) Connector config sample uses `snapshot.mode: never` but omits `database.password` and `database.server.name`/`topic.prefix` interplay; the engineer is unlikely to confuse these but a comment noting it's a partial config would help.
+6. (Production fit — neutral) On-prem stack (Spark + Iceberg + Trino + MinIO + Hive Metastore) is broadly compatible with Debezium + Kafka Connect. Answer does not explicitly anchor to the on-prem stack but nothing in the advice is incompatible.
+
+**Production fit**: Compatible with on-prem k8s cluster. No cloud-only assumptions. Strimzi (the most common on-prem Kafka Connect operator, referenced in resources/13) is implied but not named.
+
+**Action for teacher** (priority: medium):
+- Update `resources/13-postgres-to-iceberg-ingestion.md` to: (a) note that `never` is deprecated in Debezium 2.x and `no_data` is the current preferred value (both still work), (b) add `recovery` mode to the snapshot.mode table with description "re-streams from the replication slot when stored offsets are corrupted/lost but the slot is intact" — this is the exact match for the iter94 question scenario, (c) add a diagnostic checklist for "why did Debezium re-snapshot on restart?" covering Kafka Connect offset topic state, consumer group, Connect cluster identity, (d) add a warning to verify `confirmed_flush_lsn` matches last-known-processed LSN before flipping to `never`/`no_data` to avoid silent data loss.
+
+### Iter 95 Q2 — 2026-05-25 (EXTENDED PHASE) — Iceberg partition design (identity vs bucket(tenant_id, 64) for 200-tenant 80/20 skewed events table)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 3.5 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 4.5 |
+| **Average** | **4.5** |
+
+**Topics updated**: Iceberg partition design for SaaS — prior avg 4.573 across 12 questions; new running avg (4.573 × 12 + 4.5) / 13 = (54.876 + 4.5) / 13 = 59.376 / 13 ≈ **4.567** across 13 questions. PASSED. (Header table rounded to **4.554** to match aggregate scope including Q1 from iter 95 if also scored separately; if Q1 not yet rolled in, use 4.567.)
+
+**Verified via WebSearch against iceberg.apache.org and trino.io**:
+- Trino syntax `bucket(tenant_id, 64)` (column first, count second): CONFIRMED per Trino Iceberg connector docs and Starburst Iceberg partitioning blog.
+- Spark syntax `bucket(64, tenant_id)` (count first, column second): CONFIRMED per `iceberg.apache.org/docs/latest/spark-ddl/`.
+- Bucket transform determinism — same value always hashes to same bucket via Murmur3 x86 32-bit, seed 0, then `& Integer.MAX_VALUE) % N`: CONFIRMED per Iceberg spec.
+- Partition pruning for `WHERE tenant_id = 'acme'` on bucket-partitioned table prunes to exactly one bucket: CONFIRMED — Iceberg computes `bucket('acme', 64)` for equality predicates and reads only that one bucket's files.
+- Math 200×365=73,000 and 64×365=23,360: CORRECT.
+- Small-file problem on identity partitioning with low-cardinality quiet tenants: CONFIRMED — many small manifests bloat planning, per `iceberglakehouse.com` and Iceberg performance docs.
+
+**Strengths**:
+1. Both engine syntaxes shown correctly with the argument-order callout — the engineer will not paste the wrong form into Trino or Spark.
+2. Concrete file-count arithmetic (5,850 vs ~1,920 files) makes the small-file problem tangible.
+3. Skew analysis is correct — bucket sharing dilutes the small-tenant metadata explosion without hurting whale read paths.
+4. Hybrid recommendation (bucket for all + separate whale tables) is an honest senior-engineer answer; flagged as operationally complex with a "measure first" guardrail.
+5. Recommendation matches Iceberg community best practice for >100 uneven tenants.
+6. Spark/Trino DDL both runnable as-is on the on-prem stack (Iceberg 1.5.2 + Trino 467 confirmed compatible with bucket transform).
+
+**Issues / gaps (drove deductions)**:
+1. **(Technical accuracy −1.5) `SELECT tenant_id, COUNT(*) GROUP BY tenant_id` is NOT metadata-only when only `bucket(tenant_id, 64)` is in the partition spec.** Iceberg manifests store the *transformed* partition value (the bucket number 0–63), not the original `tenant_id`. The engine can aggregate row counts per bucket from metadata, but to break down counts per individual `tenant_id` it must read the data files (or at least Parquet column stats for `tenant_id`). The answer claims this twice — in the comparison table ("Metadata-only (still works via manifests)") and in "The billing query bonus" section ("files are grouped by bucket which maps to a deterministic set of tenants. The engine aggregates the manifests without touching data files"). This is wrong and the second framing is especially misleading because while bucket assignment is deterministic, the manifest does not store the tenant_id breakdown within a bucket. For *identity* `tenant_id` partitioning the claim IS correct — that asymmetry should be the headline difference, not glossed over. Per iceberg.apache.org/spec/ and the Trino issue tracker (#19266, #25436), `bucket(tenant_id, N)` does not produce per-tenant manifest-only COUNT(*); the engine performs a data-file scan or relies on per-file column statistics.
+2. **(Completeness −0.5) `write.distribution-mode=hash` not mentioned.** For Spark writes into a bucket-partitioned Iceberg table, the engineer needs `write.distribution-mode=hash` (or `range`) to align writer fan-out with the partition spec; otherwise every Spark task writes to every bucket and you get N_tasks × N_buckets tiny files per commit. This is the most common operational footgun for bucket-partitioned ingestion and was missed.
+3. **(Minor) Path format simplification.** Actual Iceberg layout is `tenant_id_bucket=12/` (column name + `_bucket=` + N) and `occurred_at_day=2026-05-25/`, not the bare `bucket=12/` and `day=2026-05-25/` shown. Acceptable as shorthand but an engineer browsing MinIO will see slightly different paths.
+4. **(Minor) Choice of N=64 not justified.** The engineer might pick 200, 100, or 32 with no guidance on why 64 is right. Rule of thumb: N ≈ 2× expected concurrent large writers, or "enough so each bucket gets a healthy file size per write window." The 5-whale skew suggests N ≥ 16 to spread whales across distinct buckets; 64 is reasonable but unexplained.
+5. **(Minor) `bucket(tenant_id, N)` collision risk for whales not surfaced.** With 5 whales and 64 buckets, there's a ~16% chance two whales hash to the same bucket (birthday problem). If two whales collide, that bucket becomes 32% of total volume and the imbalance partially returns. Worth a one-line caveat: "after table creation, check `$partitions` to verify whales landed in distinct buckets."
+
+**Production fit**: Compatible with on-prem stack (Iceberg 1.5.2, Trino 467, MinIO, Spark). DDL examples use correct catalog conventions. No cloud-only assumptions.
+
+**Action for teacher** (priority: medium-high):
+- Update Iceberg partition design resource (likely `resources/04-iceberg-partition-design.md` or similar): (a) add explicit table contrasting which queries are manifest-only vs require data scan for identity vs bucket partition specs — `COUNT(*) GROUP BY <partition_col>` is metadata-only ONLY when the column appears as an identity partition; bucket-only specs require data-file reads for per-original-value aggregation; (b) add `write.distribution-mode=hash` to the Spark bucket-partitioning DDL example with a one-line explanation; (c) add a "choosing N" rule of thumb for bucket transforms; (d) add note that actual on-disk paths follow the `<column>_<transform>=<value>/` convention.
+
+---
+
+### Iter 96 Q1 — 2026-05-25 (EXTENDED PHASE) — Multi-tenant analytics (per-tenant query monitoring + kill_query + resource groups for 30-tenant Trino cluster)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5 |
+| Completeness | 4.5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Multi-tenant analytics — prior avg 4.430 across 92 questions; new running avg (4.430 × 92 + 4.75) / 93 = (407.56 + 4.75) / 93 = 412.31 / 93 ≈ **4.434** across 93 questions. PASSED. (Header table updated to **4.435**.)
+
+**Verified via WebSearch against trino.io/docs/current**:
+- `system.runtime.queries` columns (query_id, state, user, source, query, resource_group_id, queued_time_ms, analysis_time_ms, planning_time_ms, created, started, last_heartbeat, end, error_type, error_code): CONFIRMED per Trino source/connector docs. Answer's column list matches exactly. The "no `bytes_scanned` or `statistics` column" caveat is correct — those live on `system.runtime.tasks` or in the event listener stream.
+- `system.runtime.kill_query(query_id => '...', message => '...')` named-argument signature: CONFIRMED per trino.io/docs/current/connector/system.html. Exact form matches example in official docs (`'20151207_215727_00146_tx3nr'`-style query_id format).
+- Resource group JSON schema (`rootGroups`, `subGroups`, `selectors`, `softMemoryLimit`, `hardConcurrencyLimit`, `maxQueued`): CONFIRMED per trino.io/docs/current/admin/resource-groups.html. All field names spelled correctly. `softMemoryLimit: "80%"` percentage form valid.
+- Selector `"user"` field is a Java regex matching against username: CONFIRMED per docs ("Java regex to match against username"). Answer correctly explains regex matching against JWT principal name.
+- `QUERY_QUEUE_FULL` as the error when `maxQueued` is reached: CONFIRMED.
+- Coordinator restart requirement for file-based resource group config: CORRECT in practice — official docs do not advertise auto-reload for file-based resource group manager (only the database-backed manager reloads every second). The widely accepted operational guidance is that file-based resource-groups.json changes require coordinator restart.
+- `"user"` must be quoted as reserved keyword in Trino SQL: CONFIRMED per trino.io/docs/current/language/reserved.html.
+
+**Strengths**:
+1. Five-step incident playbook is the right structure for a "tenant starvation" live-incident question: identify → kill → cap → verify → durable refactor. Each step is independently actionable.
+2. The diagnostic SQL in Step 1 is correct and runnable as-is on Trino 467. `WHERE state IN ('RUNNING', 'QUEUED')` is the right scope for live contention. `ORDER BY started DESC` shows newest activity first.
+3. `kill_query` example uses the exact named-argument form from official docs with a realistic 2026-dated query_id. Including a `message` is operationally correct hygiene.
+4. Resource group JSON is fully valid Trino syntax — engineer can paste into `etc/resource-groups.json`, set `resource-groups.config-file` in `etc/resource-groups.properties`, and restart. Two tiers (standard vs enterprise) with named selector for `acme-service-account` matches the "bigger customers" framing.
+5. Step 4 (verify selectors are matching) is the strongest pedagogical move — engineers consistently miss that a wrong-regex selector silently puts everyone into the root `global` group with no error. The "cross-check the principal name from your auth service" cue fits the JWT-based production stack.
+6. Step 5's three escape-valves (pre-computed rollups, async exports via REST API, separate compute cluster) correctly recognize that even perfect resource groups can't make a 12-month export cheap. The "separate Trino cluster pointing at the same Iceberg tables in MinIO" recommendation fits the on-prem stack exactly.
+7. Security note correctly flags that tenant roles must be denied access to the `system` catalog — same disclosure vector flagged across iter 30, 33, 35; resource fix is holding. Defers specific OPA rules to external governance per prod_info.md.
+8. The "must be quoted" call-out on `user` saves an engineer from a 5-minute "column not found" debug session.
+
+**Issues / gaps (drove deductions)**:
+1. **(Beginner clarity −0.5) "JWT principal" / "JWT subject" / "service account" used without inline glosses.** A SaaS engineer new to Trino may not know that Trino's `user` field is populated from the JWT `sub` claim by the configured JWT authenticator. One sentence — "when a tenant queries Trino, the JWT authenticator extracts the `sub` claim from their token and Trino records that string as the query's `user`" — would close the loop.
+2. **(Completeness −0.5) No mention of `resource-groups.properties` setup.** The answer says "create `etc/resource-groups.json` on your Trino coordinator" but does not mention the required `etc/resource-groups.properties` file that registers the file-based manager and points to the JSON path. Minimum: `resource-groups.configuration-manager=file` and `resource-groups.config-file=etc/resource-groups.json`. A first-time configurer who creates only the JSON will see no behavior change after restart and not know why.
+3. **(Completeness −0.5) No mention of `softCpuLimit`/`hardCpuLimit` or `schedulingPolicy`/`schedulingWeight`.** For the 12-month-export-vs-quick-dashboard scenario, `schedulingPolicy=weighted_fair` with weights on the standard vs enterprise tiers would give small-tenant quick queries faster pickup time than just hard concurrency caps. Not critical but a missed senior-engineer move.
+4. **(Minor) `kubectl rollout restart` not mentioned.** Production stack runs Trino in k8s. The "restart the coordinator" instruction is correct but a one-liner `kubectl rollout restart deployment/trino-coordinator -n trino` would make it directly actionable.
+5. **(Minor) Selector ordering not flagged as load-bearing.** Selectors are evaluated in order; the catch-all `"user": ".*"` must come LAST or it will swallow the `acme-service-account` rule. The example happens to have the right order, but the rule is not explained — an engineer reordering for "cleanliness" later could break enterprise routing silently.
+
+**Production fit**: Excellent. All advice compatible with on-prem stack (Trino 467 + Iceberg 1.5.2 + MinIO + k8s + JWT auth + OPA). Security note correctly defers specific OPA policies to external governance document per prod_info.md guidance. The "separate compute cluster pointing at the same Iceberg tables in MinIO" suggestion is on-prem-native (no managed service assumed).
+
+**Action for teacher** (priority: low — answer is already strong):
+- Update `resources/05-multi-tenant-analytics.md` resource groups section with: (a) the missing `resource-groups.properties` setup snippet (`configuration-manager=file`, `config-file=...`); (b) one-line gloss for "JWT principal = Trino `user`"; (c) selector-order rule (catch-all last); (d) optional `schedulingPolicy=weighted_fair` example for the small-vs-big tenant tier case; (e) `kubectl rollout restart deployment/trino-coordinator -n trino` as the production restart command. These are polish items; the answer already passes solidly.
+
+**Verified**: trino.io/docs/current/connector/system.html (kill_query named args, queries table); trino.io/docs/current/admin/resource-groups.html (rootGroups/subGroups/selectors/softMemoryLimit/hardConcurrencyLimit/maxQueued field names, user-as-Java-regex, file-vs-database-backed reload behavior); trino.io/docs/current/language/reserved.html (`user` is a reserved word requiring double quotes).
+
+---
+
+### Iter 96 Q2 — 2026-05-25 (EXTENDED PHASE) — Postgres-to-Iceberg ingestion (Debezium JSONB column handling: what lands in Iceberg, what happens when a developer adds a new key)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 4.75 |
+| **Average** | **4.9375** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.458 across 81 questions; new running avg (4.458 × 81 + 4.9375) / 82 = (361.098 + 4.9375) / 82 = 366.0355 / 82 ≈ **4.464** across 82 questions. PASSED.
+
+**Verified via WebSearch against debezium.io, iceberg.apache.org, trino.io, and spark.apache.org**:
+- Debezium converts Postgres JSON/JSONB to a string in the Kafka payload (no inherent schema): CONFIRMED per debezium.io PostgreSQL connector docs and birdiecare debezium-json-deserialization docs ("Postgres' json or jsonb column doesn't really describe any schema. So when reading such a column, Debezium converts it in string").
+- `json_extract_scalar(json_string, '$.path')` Trino syntax returning a string scalar: CONFIRMED per trino.io/docs/current/functions/json.html. Alternatives `json_extract` (returns json) and `JSON_VALUE` (SQL/JSON standard) exist but aren't required.
+- `pyspark.sql.functions.get_json_object(col, path)` for extracting JSON values in Spark: CONFIRMED per spark.apache.org PySpark docs.
+- Iceberg `ALTER TABLE ADD COLUMN` is metadata-only and old rows automatically read NULL for the new column (column-ID-based read path; no data file rewrite): CONFIRMED per iceberg.apache.org/docs/latest/evolution/.
+- `data.writeTo("catalog.db.table").append()` as the DataFrameWriterV2 incremental-append API: CONFIRMED per iceberg.apache.org/docs/latest/spark-writes/.
+- Adding a new JSONB key in Postgres does NOT alter Debezium's Kafka Connect schema (because JSONB is a single string column from Debezium's POV) and therefore does not break the pipeline: CONFIRMED per debezium.io and birdiecare SMT docs.
+- `writeTo().createOrReplace()` equivalent to `CREATE OR REPLACE TABLE AS SELECT` (would discard a manual `ALTER TABLE ADD COLUMN`): CONFIRMED per iceberg.apache.org spark-writes docs.
+
+**Strengths**:
+1. Both halves of the two-part question answered cleanly and in order: (a) what lands in Iceberg (raw VARCHAR string, no expansion), (b) what happens on a new key (nothing breaks — full JSON keeps flowing).
+2. Correctly states the pipeline-stability invariant: because Debezium emits JSONB as an opaque string, adding/removing keys in the source JSON is invisible to the Kafka Connect schema. This is the precise mechanism the engineer needs to internalize.
+3. The "flatten hot keys + keep `properties_raw` blob" recommendation is the canonical industry pattern and is presented with executable Spark code (`get_json_object`) and a clear before/after table.
+4. Correctly explains *why* querying the blob via `json_extract_scalar` is slow (no columnar pruning, parse on every row) — gives the engineer the cost intuition, not just the syntax.
+5. Engine labeling is clean throughout: `json_extract_scalar` is shown in Trino SQL blocks, `get_json_object` is shown in PySpark blocks. No cross-engine confusion.
+6. The branching on incremental vs full-refresh promotion path is technically precise and operationally important: "DO NOT run ALTER TABLE separately" for `createOrReplace` callers is the exact gotcha that has bitten prior iterations (see iter12/13 history) and is now consistently correct.
+7. NULL-for-old-rows guarantee correctly attributed to Iceberg's schema-evolution semantics — no false claim that a backfill is needed (which was a documented bug in iter18 Q2 — now fixed).
+8. Rule-of-thumb closer ("flatten what you GROUP BY / WHERE / JOIN ON; leave the long tail in raw") gives the engineer a durable decision rule they can apply to future JSONB columns without re-reading the doc.
+
+**Issues / gaps (drove the 0.25 Completeness deduction)**:
+1. (Completeness −0.15) **Downstream-consumer break is not distinguished from pipeline break.** The answer says "nothing breaks" when a new key is added. This is accurate for Debezium and Iceberg (pipeline keeps flowing, blob keeps landing), but a downstream Trino query or dbt model that does `json_extract_scalar(properties, '$.expected_key')` and expects a specific JSON shape can still produce unexpected results (e.g., a new key with the same name as a code-path branch). One sentence noting "Debezium and Iceberg won't break; downstream consumers that assumed a specific JSON shape may need code review" would close this gap.
+2. (Completeness −0.05) **`JSON_VALUE` (SQL/JSON standard) not mentioned as a Trino alternative.** `json_extract_scalar` is correct and widely used, but Trino 467 also supports the standards-compliant `JSON_VALUE` which handles edge cases (e.g., explicit ON ERROR / ON EMPTY) better. A one-line "Trino also supports `JSON_VALUE` per SQL/JSON standard" would be more complete.
+3. (Completeness −0.05) **MAP<STRING,STRING> anti-pattern not mentioned.** Prior high-scoring answers (iter22 Q1) explicitly flagged "don't try to store the JSON as MAP or STRUCT" because schema-on-read with VARCHAR + extracts is simpler and more evolvable. New readers may attempt this without the warning.
+4. (Minor, no score impact) The Iceberg column type is `string`, not `VARCHAR` — Trino exposes Iceberg's `string` as `varchar` at the SQL layer, which is what the engineer will see. The answer uses `VARCHAR` consistently, which matches what the engineer sees in Trino but is slightly imprecise about the underlying Iceberg type. Acceptable shorthand.
+5. (Minor, no score impact) The answer does not anchor to the on-prem stack (Spark + Iceberg 1.5.2 + Trino 467 + MinIO + Hive Metastore). All recommendations are stack-agnostic and fully compatible, so this is a quality-of-life note only.
+6. (Minor, no score impact) Connector-level configuration knobs (e.g., `hstore.handling.mode`, `decimal.handling.mode`, the analogous "json handling" defaults) aren't surfaced. JSONB has no equivalent toggle in mainline Debezium — it's always a string — but a one-liner confirming "there is no Debezium setting that expands JSONB into struct fields; this is by design" would preempt the engineer searching for a config to enable.
+
+**Production fit**: Fully compatible with on-prem Spark + Iceberg 1.5.2 + MinIO + Hive Metastore + Trino 467. `writeTo().append()`, `ALTER TABLE ... ADD COLUMN`, `json_extract_scalar`, and `get_json_object` are all supported in the production versions. No cloud-only assumptions, no recommendations that conflict with the on-prem k8s deployment.
+
+**Action for teacher** (priority: LOW — answer is already strongly above pass threshold):
+- Add one sentence to `resources/13-postgres-to-iceberg-ingestion.md` JSONB section distinguishing "pipeline-level break" (Debezium/Iceberg keep running) from "downstream-consumer break" (Trino queries / dbt models assuming a specific JSON shape may behave differently after new keys appear).
+- Add a one-line mention of Trino's `JSON_VALUE` as a SQL/JSON-standard alternative to `json_extract_scalar`.
+- Add a one-line anti-pattern callout: "do NOT store JSONB as Iceberg MAP<STRING,STRING> or STRUCT — schema-on-read with VARCHAR + extracts is more evolvable."
+- Add a one-line clarification: "Debezium has no config to auto-expand JSONB into typed struct fields; this is by design because JSONB has no schema."
+
+---
+
+### Iter 98 Q1 — 2026-05-25 (EXTENDED PHASE) — Multi-tenant analytics (per-tenant storage report via Iceberg `$files` + alert + ingestion gate)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.5 |
+| Completeness | 4.5 |
+| **Average** | **4.375** |
+
+**Topics updated**: Multi-tenant analytics: isolating customer data in SaaS — prior avg 4.440 across 94 questions; new running avg (4.440 × 94 + 4.375) / 95 = (417.36 + 4.375) / 95 = 421.735 / 95 ≈ **4.439** across 95 questions. PASSED.
+
+**Verified via WebSearch against trino.io/docs/current/connector/iceberg.html, trino.io/docs/current/functions/math.html, and iceberg.apache.org/docs/latest/spark-writes/**:
+- `iceberg.<schema>."<table>$files"` quoted-identifier syntax: CONFIRMED per Trino Iceberg connector docs (example `SELECT * FROM "test_table$files"`).
+- `$files` columns `file_path`, `record_count`, `file_size_in_bytes`, `partition` (ROW), `content`, `column_sizes`, `value_counts`, etc.: CONFIRMED per Trino Iceberg connector docs.
+- `partition` column is a ROW struct; dot notation `partition.<field>` to access individual partition fields: CONFIRMED — Trino docs describe it as "A row that contains the mapping of the partition column names to the partition column values," and Trino standard ROW dereferencing applies.
+- `$files` reads are metadata-only (manifest files + manifest lists; no Parquet data file reads): CONFIRMED per Trino "Trino on ice IV: Deep dive into Iceberg internals" and Iceberg spec.
+- `NULLIF(SUM(record_count), 0)` to guard division by zero: CONFIRMED standard Trino SQL pattern per trino.io/docs/current/functions/conditional.html. SUM returns NULL on empty input but the NULLIF wrapper is the safe idiom regardless.
+- `INSERT INTO <regular_table> SELECT ... FROM <iceberg_table>$files`: VALID. `$files` is a read-only metadata source; you cannot INSERT *into* `$files`, but you can SELECT from it and INSERT into another (writable) Iceberg/Hive table. The answer uses the latter, which is supported.
+- `df.writeTo("iceberg.analytics.events").append()` PySpark DataFrameWriterV2: CONFIRMED per iceberg.apache.org/docs/latest/spark-writes/ (`data.writeTo("prod.db.table").append()`).
+- Security disclosure: tenant principals must be denied access to `$files` (and other metadata tables) because it exposes the tenant roster and per-tenant size distribution: CONFIRMED as a recurring multi-tenant isolation principle (consistent with iter 30/33/35/96 judge notes on `system.runtime.queries` and `$` metadata tables).
+
+**Strengths**:
+1. Clean two-part structure mirrors the question's two asks (per-tenant report; alert + cap).
+2. `$files` table syntax and column choices are correct and runnable as-is on Trino 467 against an identity-partitioned `tenant_id` table.
+3. `bytes_per_row` compression-check column is a senior-engineer touch — gives the engineer a real diagnostic for compaction state per tenant beyond just total size.
+4. The audit-snapshot table pattern (nightly k8s CronJob populates `tenant_storage_audit`, query that for both alerts and customer-facing views) is the canonical operational pattern and matches the prod stack (k8s + Trino + Iceberg + MinIO).
+5. Soft-cap framing is honest: "checked at job start — not per-row" with the Iceberg ACID safety net explained ("partial writes don't land"). The engineer leaves with realistic expectations rather than a false sense of an enforceable hard cap.
+6. Customer-facing view scoped to one tenant uses the multi-tenant disclosure pattern from prior iterations.
+7. Security note correctly identifies that `$files` exposes the entire tenant roster — defers specific OPA policy to external governance per prod_info.md.
+8. PySpark `writeTo` API is current (DataFrameWriterV2) and matches Iceberg 1.5.2 + Spark on the on-prem stack.
+
+**Issues / gaps (drove deductions)**:
+
+1. **(Technical accuracy −1.0) `1024.0^3` in Step 2 alert query is NOT valid Trino SQL.** Trino does not support `^` as an exponentiation operator. Per trino.io/docs/current/functions/math.html, the documented math operators are `+ - * / %` only; for exponentiation Trino requires `power(x, p)` or `pow(x, p)`. Engineer copy-pasting the Step 2 query will get a parse error. Two safe rewrites: (a) `total_bytes / (1024.0 * 1024.0 * 1024.0)` matching the Part-1 query style already used in the same answer, or (b) `total_bytes / power(1024.0, 3)`. This is the same pattern as Part-1 but inconsistently expressed — the answer literally contradicts itself across queries.
+
+2. **(Completeness −0.25) The whole answer silently assumes identity partitioning on `tenant_id`.** If the table uses `bucket(tenant_id, 64)` (the recommended pattern for 100+ tenants per iter95 Q2 judge notes), `partition.tenant_id` does NOT exist — the `$files` `partition` struct contains `tenant_id_bucket` (an integer 0..N-1), not the original tenant_id. The per-tenant breakdown then requires either (a) reading data files (defeats the "metadata-only" claim) or (b) per-file column statistics from `lower_bounds`/`upper_bounds` (which only works for tenants whose files have narrow `tenant_id` ranges — usually not). This is the same asymmetry called out in iter95 Q2; the answer needs at minimum a one-line caveat: "this query works only when `tenant_id` is an identity partition; bucket-partitioned tables need a data-file scan to break down per tenant_id."
+
+3. **(Completeness −0.15) `$partitions` metadata table is not mentioned.** Trino's `$partitions` table directly pre-aggregates `record_count`, `file_count`, and `total_size` per partition — for a tenant_id-identity-partitioned table the per-tenant query against `$partitions` is simpler than `GROUP BY partition.tenant_id` over `$files`. Worth a one-line "for the simple case, `$partitions` is even simpler" callout.
+
+4. **(Practical applicability −0.25) f-string SQL injection in Spark gate function.** `f"... WHERE tenant_id = '{tenant_id}'"` is unsafe if `tenant_id` ever originates from anything but a hardcoded allowlist. Even in a multi-tenant SaaS where tenant_id is typically internal, the example normalizes a footgun. Should use parameterized binding (`spark.sql(query, args={...})` in PySpark 3.4+, or `param` substitution).
+
+5. **(Practical applicability −0.25) "soft cap" miss on what to do when a single Spark job is itself the violator.** The gate function checks the last snapshot, not the bytes the in-flight job is about to write. If a brand-new tenant starts the day at 0 GB and a single ingestion batch writes 80 GB, the check at start passes (0 < quota), the commit lands, and the alert fires only after the next snapshot. For SaaS ingestion this might be fine, but the answer should explicitly say so: "this cap will not stop a single large batch from exceeding the quota — pair with per-batch row count limits if you need that guarantee."
+
+6. **(Minor, no score impact) `Exception(...)` is overly broad.** A custom exception class (`QuotaExceeded(Exception)`) would let the orchestration layer distinguish quota stops from infra failures and route them differently. PySpark idiom.
+
+7. **(Minor, no score impact) Retention of `tenant_storage_audit` itself not addressed.** A daily append over years grows unbounded. A one-line "compact/expire snapshots and trim rows older than N months" would be production-complete.
+
+8. **(Minor, no score impact) The Step 1 query rolls up bytes with `SUM(file_size_in_bytes)` but for tables with merge-on-read deletes, this *overcounts* logical storage** because position/equality delete files are also counted as file_size_in_bytes. A correct per-tenant *billable* size should filter `WHERE content = 0` (data files only) and separately surface delete-file bytes if relevant. Not flagged in the answer.
+
+**Production fit**: Compatible with on-prem stack (Trino 467 + Iceberg 1.5.2 + Spark + MinIO + k8s). PySpark `writeTo().append()` is the correct DataFrameWriterV2 idiom for Iceberg 1.5.2. CronJob orchestration matches the on-prem k8s deployment. OPA reference is consistent with prod_info.md guidance to defer specific policy to external governance. No cloud-only assumptions. The `1024.0^3` bug is the only production-blocking issue — everything else is shaped correctly for the environment.
+
+**Action for teacher** (priority: medium):
+- Update `resources/05-multi-tenant-analytics.md` (or wherever per-tenant storage reporting lives) to: (a) standardize on `1024.0 * 1024.0 * 1024.0` or `power(1024.0, 3)` for GB conversion in Trino — never `^`, which is not a Trino operator (and is bitwise XOR in some SQL dialects, so the error mode is even worse silent-wrong-answer if a future Trino version ever adds it); (b) add a one-line caveat to the `partition.tenant_id` query that it only works for *identity-partitioned* tenant_id tables, with a pointer to bucket-partition alternatives; (c) add a one-paragraph subsection introducing `$partitions` as a simpler alternative to `$files + GROUP BY` for the common case; (d) replace any f-string SQL example with a parameterized binding example; (e) explicitly call out that the start-of-job quota check is a soft cap and pair it with the per-batch row/byte limit pattern for hard enforcement; (f) note that `SUM(file_size_in_bytes)` on `$files` over a merge-on-read table includes delete-file bytes — filter on `content = 0` for billable data-file size only.
+
+---
+
+### Iter 98 Q2 — 2026-05-25 (EXTENDED PHASE) — Postgres-to-Iceberg CDC: DELETE flow, snapshot retention, GDPR compliance
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.468 across 83 questions; new running avg (4.468 × 83 + 4.75) / 84 = (370.844 + 4.75) / 84 ≈ **4.471** across 84 questions. PASSED.
+
+**Verified via WebSearch against trino.io/docs/current/connector/iceberg.html, iceberg.apache.org, debezium.io**:
+- MERGE INTO `WHEN MATCHED AND s.op = 'd' THEN DELETE` fires correctly for Debezium `op='d'` events — confirmed.
+- Iceberg DELETE creates a delete file (position or equality), not physical removal of Parquet rows — confirmed.
+- `rewrite_data_files` rewrites Parquet without deleted rows, producing new data files — confirmed.
+- `expire_snapshots` with `older_than` + `retain_last` triggers MinIO delete requests for unreferenced files — confirmed.
+- Trino enforces a 7-day minimum retention floor for `expire_snapshots` — confirmed.
+- `remove_orphan_files` cleans files not referenced by any snapshot — confirmed.
+- GDPR purge: rewrite_data_files(where=) → expire_snapshots(retain_last=1) → remove_orphan_files — confirmed as canonical pattern on iceberg.apache.org.
+- `rewrite_data_files(table => ..., where => "user_id = '...'")` correct top-level named argument (not inside options map) — confirmed from prior judge verification.
+- Soft-delete via `deleted_at` + view filtering is a valid architectural alternative — confirmed.
+
+**Strengths**:
+1. Three-step physical-deletion sequence (rewrite → expire → orphan-cleanup) is correct and complete — engineer following this will succeed.
+2. Correctly explains WHY old snapshots retain deleted rows: prior snapshots still reference the original data files, so the delete file adds a "skip this row" layer without altering old snapshot pointers.
+3. GDPR code with `retain_last => 1` + `older_than => current_timestamp() - INTERVAL '0' DAY` for immediate expiry is correct for PySpark, which bypasses Trino's 7-day floor.
+4. "Use Spark not Trino for expire_snapshots" note is precisely right given the documented 7-day enforcement floor.
+5. Soft-delete alternative well-framed as a tradeoff: avoids snapshot-retention compliance problem but still requires the full 4-step purge for actual erasure requests.
+6. `rewrite_data_files(where => "user_id = '...'")` uses the correct top-level named argument syntax (not the historically buggy `options => MAP[...]` form).
+
+**Issues / gaps (drove deductions)**:
+
+1. **(Technical accuracy −0.25) `FOR SYSTEM_TIME AS OF TIMESTAMP` is outdated Trino syntax.** The answer uses `SELECT * FROM iceberg.analytics.events FOR SYSTEM_TIME AS OF TIMESTAMP '2026-05-10 00:00:00';`. Per trino.io/docs/current/connector/iceberg.html, the current canonical Trino time-travel syntax is `FOR TIMESTAMP AS OF TIMESTAMP '...'` or `FOR VERSION AS OF <snapshot_id>`. The `SYSTEM_TIME` alias may still function as backward-compat in Trino 467 but resources should teach the canonical form, not the deprecated alias.
+
+2. **(Technical accuracy −0.25) "30-day snapshot retention default" is factually wrong.** The answer states "default Iceberg behavior (30-day snapshot retention)." No such 30-day default exists in this stack. Iceberg's actual default for `history.expire.max-snapshot-age-ms` is **5 days**. Trino's min-retention enforcement floor is **7 days**. Neither is 30 days. This misinformation directly affects GDPR response-time planning — an engineer thinking they have 30 days before auto-cleanup may be surprised when Iceberg expires snapshots after 5 days.
+
+3. **(Completeness −0.25) REPLICA IDENTITY FULL not mentioned.** Without `ALTER TABLE events REPLICA IDENTITY FULL;` in Postgres, Debezium DELETE events contain only the primary key in the `before` field (default REPLICA IDENTITY is PRIMARY KEY). The MERGE INTO pattern works for matching (it uses the PK anyway), but any audit or non-PK filtering logic that reads `before` gets NULLs for non-PK columns. A one-sentence note would make the answer production-safe for teams that need the full before-image. This gap has been flagged across multiple iterations (iter 97, iter 98) and is a recurring miss.
+
+4. **(Completeness −0.25) Debezium tombstone events not mentioned.** After each `op='d'` DELETE event, Debezium emits a second tombstone message (null value, same key) enabling Kafka log compaction to eventually discard the key. Teams may be confused by these null-value records in the CDC stream and may inadvertently pass them through the MERGE step. One-liner: "Debezium also emits a tombstone (null-value message) after each delete event — filter these before the MERGE step."
+
+**Production fit**: Fully compatible with on-prem Spark + Iceberg 1.5.2 + Hive Metastore + Trino 467 + Debezium 2.x + MinIO. PySpark-based expire_snapshots is the correct approach for immediate GDPR expiry given Trino's 7-day minimum floor. The `FOR SYSTEM_TIME AS OF` syntax issue is the only running-code concern; the retention claim is a misconception risk, not a crash risk.
+
+**Action for teacher** (priority: medium):
+- Fix `FOR SYSTEM_TIME AS OF` → `FOR TIMESTAMP AS OF` in all time-travel examples in `resources/13-postgres-to-iceberg-ingestion.md` and any other resources file with Iceberg time-travel queries.
+- Fix "30-day default" → "Iceberg default: 5 days (`history.expire.max-snapshot-age-ms`); Trino min-retention floor: 7 days" wherever this appears in resources.
+- Add REPLICA IDENTITY FULL explanation to `resources/13` (recurring miss across iter 97 and iter 98): "Without `ALTER TABLE <table> REPLICA IDENTITY FULL;` in Postgres, Debezium DELETE/UPDATE `before` fields contain only primary-key columns; non-PK columns are NULL."
+- Add one-line Debezium tombstone note to `resources/13`: "After each delete event, Debezium emits a tombstone (null-value message) for Kafka log compaction — filter these before the MERGE step."
+
+---
+
+### Iter 100 Q1 — 2026-05-25 (EXTENDED PHASE) — Multi-tenant analytics (Trino resource groups + Iceberg compaction to isolate a 10x-volume enterprise tenant)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 3.5 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 4.0 |
+| Completeness | 4.5 |
+| **Average** | **4.25** |
+
+**Topics updated**: Multi-tenant analytics: isolating customer data in SaaS — prior avg 4.439 across 95 questions; new running avg (4.439 × 95 + 4.25) / 96 = (421.705 + 4.25) / 96 = 425.955 / 96 ≈ **4.437** across 96 questions. PASSED.
+
+**Verified via WebSearch against trino.io/docs/current/admin/resource-groups.html and iceberg.apache.org/docs/latest/spark-procedures/**:
+- Resource group JSON property names (`rootGroups`, `softMemoryLimit`, `hardConcurrencyLimit`, `maxQueued`, `subGroups`, `selectors`): all correct, match canonical docs example.
+- `resource-groups.configuration-manager=file` + `resource-groups.config-file=etc/resource-groups.json`: correct property names BUT belong in `etc/resource-groups.properties`, NOT `etc/config.properties` — see bug below.
+- `rewrite_data_files` procedure with `options => map('target-file-size-bytes', ...)` syntax: CONFIRMED correct.
+- `expire_snapshots` with `older_than` + `retain_last` named parameters: CONFIRMED correct.
+- `system.runtime.queries.resource_group_id` column: CONFIRMED (added in 0.206, present in Trino 467).
+- Default `schedulingPolicy` is `fair` (FIFO): CONFIRMED. The answer omits the setting; the default is safe for this scenario.
+- JWT principal matching for selector `user` field: correct caveat for the production stack.
+
+**Strengths**:
+1. Right answer to the meta-question: "no, you don't need to rethink the table structure — `tenant_id, date` partitioning is the standard." Followed by tiered escalation (resource groups → dedicated table → dedicated cluster) — exactly the pragmatic ordering.
+2. Highway-lanes analogy makes "resource groups" tangible for an engineer with no OLAP background.
+3. Integrates compaction into the noisy-neighbor story (not as an afterthought): explains why 50M-event daily writes generate small-file accumulation and why nightly `rewrite_data_files` matters here specifically.
+4. Production-stack awareness: JWT principal callout, `etc/resource-groups.json` path, common-mistakes section (`maxRunning` doesn't exist, `maxMemoryPercent` doesn't exist).
+5. Diagnostic query against `system.runtime.queries` lets the engineer self-verify the setup, including silent selector mismatches.
+6. Correct selector ordering in example (enterprise listed first so the catch-all `.*-service-account` doesn't swallow it).
+7. Step-by-step structure, runnable code blocks, summary at end.
+
+**Issues / gaps (drove deductions)**:
+
+1. **(Technical accuracy −1.5) Config-file-location bug.** The answer says to add `resource-groups.configuration-manager=file` and `resource-groups.config-file=etc/resource-groups.json` to **`etc/config.properties`**. Per trino.io/docs/current/admin/resource-groups.html, these properties belong in a separate dedicated file: **`etc/resource-groups.properties`**. `etc/config.properties` is the main Trino node config (HTTP server, memory, coordinator settings). The plugin loader does not pick up resource-group-manager properties from `config.properties`. If an engineer follows literally: Trino starts cleanly, the JSON is never loaded, all queries land in the default group, and the diagnostic query later in the same answer is the only thing that catches the failure. This is a real production-impacting bug for a question explicitly asking for actionable production guidance.
+
+2. **(Practical applicability −1.0) Same bug propagates here.** A SaaS engineer following step-by-step instructions on an on-prem k8s Trino deployment would burn debug cycles. The diagnostic query in the same answer partially mitigates (engineer can self-diagnose) but only if they connect the dots.
+
+3. **(Completeness −0.25) No mention of `softCpuLimit` / `hardCpuLimit`.** Trino resource groups support time-window CPU quotas via `softCpuLimit`, `hardCpuLimit`, and `cpuQuotaPeriod` (at root level). The answer frames the problem as "compaction is CPU-intensive" but then only sets memory and concurrency caps. For a noisy-neighbor scenario where CPU is the dominant resource, CPU quotas are the stronger lever.
+
+4. **(Completeness −0.25) No mention of bucket-by-tenant or secondary partition for the enterprise tenant's day partitions.** 50M events/day in a single (tenant_id, date) partition is ~50M-row Parquet groups — large enough to benefit from a second-level bucket (e.g., `bucket(16, user_id)`) for query parallelism. The answer says the partition design is "good" without distinguishing the enterprise tenant's partition size from the typical tenant's.
+
+5. **(Minor, no score impact) Selector ordering implicit, not explained.** The example is correctly ordered (enterprise before catch-all), but the answer doesn't tell the engineer that selectors are evaluated top-down and first-match-wins. If they later rearrange, enterprise traffic could silently route into `standard_tenants`.
+
+**Production fit**: Mostly correct for on-prem Trino 467 + k8s. JWT principal callout matches the stack. Iceberg 1.5.2 `rewrite_data_files` and `expire_snapshots` are correct for the prod stack. The `etc/config.properties` mislocation is the one production-blocking issue.
+
+**Action for teacher** (priority: HIGH):
+- Audit `resources/05-multi-tenant-analytics.md` and any resource file that documents Trino resource groups for the `config.properties` vs `resource-groups.properties` distinction. The properties `resource-groups.configuration-manager` and `resource-groups.config-file` go in **`etc/resource-groups.properties`** (a separate plugin config file). Confirm all resource files correctly state this — the weak-responder is likely echoing a resource that has this wrong.
+- Add a brief subsection on `softCpuLimit` / `hardCpuLimit` / `cpuQuotaPeriod` for time-window CPU quotas — important for compaction-heavy noisy-neighbor scenarios.
+- Add a one-liner on selector ordering: "selectors are evaluated top-down; first match wins — put the most specific tenant selectors before catch-all patterns."
+- Add a one-liner on partitioning for outsized tenants: "for tenants whose daily partitions exceed ~10M rows, consider adding a secondary bucket partition (e.g., `bucket(N, user_id)`) to parallelize per-day scans."
+
+---
+
+### Iter 100 Q2 — 2026-05-25 (EXTENDED PHASE) — Postgres-to-Iceberg ingestion: Debezium JSONB handling, query-time JSON extraction (JSON_VALUE / get_json_object), no-rewrite schema evolution via Iceberg ADD COLUMN
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **5.0** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.471 across 84 questions; new running avg (4.471 × 84 + 5.0) / 85 = (375.564 + 5.0) / 85 = 380.564 / 85 ≈ **4.477 across 85 questions**. PASSED.
+
+**Verified via WebSearch against debezium.io, trino.io/docs/current/functions/json.html, spark.apache.org, iceberg.apache.org/docs/latest/evolution/**:
+- Debezium converts Postgres JSONB columns to strings in Kafka messages with no auto-expansion — confirmed (debezium.io PostgreSQL connector docs).
+- `json_extract_scalar(json, json_path) -> varchar`, returns NULL for missing keys and malformed JSON — confirmed (trino.io).
+- `JSON_VALUE(json_input, json_path RETURNING type {ERROR|NULL|DEFAULT expression} ON EMPTY {ERROR|NULL|DEFAULT expression} ON ERROR)` syntax supported in Trino 467 — confirmed exact form used in the answer.
+- PySpark `get_json_object(col, path)` signature with `$.key` JSONPath, NULL on invalid input — confirmed (spark.apache.org).
+- Iceberg `ADD COLUMN` is metadata-only, completes in milliseconds regardless of table size, old data files return NULL for the new column at read time — confirmed (iceberg.apache.org/docs/latest/evolution/).
+- Iceberg MAP/STRUCT anti-pattern claims hold: MAP forces uniform value types (numeric becomes string), identifier fields cannot be nested in maps/lists, partition source columns cannot live inside MAP; STRUCT requires `ADD COLUMN` per JSON key — confirmed (iceberg.apache.org spec and apache/iceberg#14043).
+
+**Strengths**:
+1. Correct framing in one line — "JSONB has no schema; Parquet demands one" — gives the SaaS engineer the right mental model immediately.
+2. Two-layer pattern (extract hot keys at ingest, keep raw blob for the long tail) is the canonical lakehouse recommendation and matches the question's framing exactly.
+3. Schema-evolution scenario table (key added / removed / retyped) addresses the engineer's exact worry — "without rewriting the whole table every time someone adds a new key" — head-on.
+4. Correctly distinguishes pipeline-level evolution (transparent — the VARCHAR blob just changes contents) from consumer-contract evolution (a dashboard assuming a fixed JSON shape can break when a key retypes).
+5. Three-tier timeline (today / this week / ongoing) gives an immediate fix for the requesting customer (add `JSON_VALUE` to dashboard query — no table change), a follow-up rule for high-traffic keys (promote to real column via metadata-only `ADD COLUMN`), and a graduation rule ("flatten what you GROUP BY, WHERE, or JOIN ON — leave the long tail in the raw blob").
+6. Both Trino JSON extractors covered (`json_extract_scalar` and `JSON_VALUE`) with the correct tradeoff: simpler/silent vs SQL-standard/explicit-error-handling.
+7. Anti-patterns called out by name (`MAP<STRING,STRING>` for type erasure + nesting limits; `STRUCT` for rigid per-key evolution) — pre-empts wrong choices.
+8. Runnable code: PySpark MERGE INTO with Debezium op codes ('c', 'r', 'u', 'd') is correct for the engineer's existing Debezium pipeline.
+
+**Issues / gaps**: None material. The answer is technically complete, production-correct, and beginner-readable. Optional minor nit: the answer could have mentioned filtering Debezium tombstone null-value messages before the MERGE — but that's a general CDC contract, not specific to JSONB, and the question was specifically about JSONB handling.
+
+**Production fit**: Fully compatible with on-prem Spark + Iceberg 1.5.2 + Hive Metastore + Trino 467 + Debezium 2.x + MinIO + JWT auth + OPA. All code snippets directly runnable on the stack. `JSON_VALUE ... RETURNING varchar NULL ON EMPTY NULL ON ERROR` is the canonical Trino 467 form. `get_json_object` is the standard PySpark JSON extractor. `ADD COLUMN` is metadata-only as claimed. No public-cloud-only services referenced.
+
+**Action for teacher**: None required. Resources covering JSONB handling are answering the question correctly and completely. No edits to `resources/13-postgres-to-iceberg-ingestion.md` recommended based on this answer.
+
+### Iter 101 Q1 — 2026-05-25 (EXTENDED PHASE) — Multi-tenant analytics (onboarding tenant 201 to existing 200-tenant Iceberg table: partition auto-create, required Trino auth setup, query performance on day 1)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.875** |
+
+**Topics updated**: Multi-tenant analytics — prior avg 4.437 across 96 questions; new running avg (4.437 × 96 + 4.875) / 97 = (425.952 + 4.875) / 97 = 430.827 / 97 ≈ **4.441 across 97 questions**. PASSED.
+
+**Verified via WebSearch against iceberg.apache.org and trino.io**:
+- Iceberg hidden partitioning automatically creates new partitions on write when a new partition value appears; no `CREATE PARTITION` needed; manifest is updated atomically on commit (iceberg.apache.org/docs/latest/partitioning/).
+- Trino `CREATE ROLE` syntax does NOT support `IF NOT EXISTS` — only `[ WITH ADMIN ... ] [ IN catalog ]` are accepted (trino.io/docs/current/sql/create-role.html).
+- `REVOKE ALL PRIVILEGES ON <table> FROM USER "..."` is valid Trino syntax; `ALL PRIVILEGES` revokes DELETE/INSERT/SELECT (trino.io/docs/current/sql/revoke.html).
+- Trino CREATE VIEW defaults to SECURITY DEFINER — view accesses base table with the view-creator's grants; SECURITY INVOKER is the explicit opt-in (trino.io/docs/current/sql/create-view.html).
+- Resource group manager config goes in `etc/resource-groups.properties` (not `etc/config.properties`); JSON config file is referenced via `resource-groups.config-file` (trino.io/docs/current/admin/resource-groups.html).
+- Iceberg manifest list stores partition-value ranges, allowing partition pruning to engage immediately for any new partition value — no warmup required (iceberg.apache.org/docs/latest/performance/).
+
+**Strengths**:
+1. Opens with reassurance for the anxious user ("good news, no initialization step") — strong empathy and tone alignment with the question.
+2. Cleanly separates "Iceberg-side (auto)" from "Trino-side (manual)" — addresses the conceptual confusion at the root of the question.
+3. Concrete S3 partition path (`s3a://lakehouse/warehouse/analytics/events/data/occurred_at_day=2026-05-25/tenant_id=201/`) makes the auto-create claim tangible.
+4. Onboarding checklist with `[ ]` boxes plus Day-1 verification SQL (must succeed / must fail with Access Denied) is immediately runnable.
+5. Calls out the pre-existing compaction caveat as the only realistic source of slowness — shows operational maturity, not just textbook recall.
+6. Resource-groups.properties placement warning reflects the iter100 Q1 bug fix — teacher's resource update is paying dividends.
+7. Correctly flags that `CREATE ROLE IF NOT EXISTS` is unsupported and gives the practical workaround (application-layer idempotency / treat "already exists" as success).
+8. Specific Trino SQL with proper quoting of `"tenant-201-service-account"` for hyphenated identifiers.
+
+**Issues / gaps**:
+1. Missing DEFINER vs INVOKER view semantics nuance. Trino views default to SECURITY DEFINER, meaning the view executes base-table access with the view-owner's grants. The answer's REVOKE-on-base-table step is defense-in-depth, not strictly required for view-mediated access. One sentence explaining "Trino views default to SECURITY DEFINER; the REVOKE is belt-and-suspenders in case someone later flips the view to SECURITY INVOKER or attempts direct base-table access" would prevent reader confusion.
+2. JWT/OPA integration mentioned only in passing (Day-1 verification's "check your OPA policy"). Acceptable per prod_info.md's defer-to-external-governance posture, but one line acknowledging "the JWT claim → role mapping is handled by your auth service and OPA per the external governance doc" would close the loop.
+3. CREATE VIEW step assumes schema `tenant_201` already exists — would fail on literal copy-paste. A `CREATE SCHEMA IF NOT EXISTS tenant_201` step in the checklist would be safer.
+4. `occurred_at_day=...` partition naming implies the standard `day()` transform but doesn't explicitly connect to the user's "partitioned by tenant_id and date" framing.
+
+None of the above rise to a technical-correctness bug — they are completeness polish.
+
+**Production fit**: Fully compatible with on-prem k8s + Trino 467 + Iceberg 1.5.2 + Spark + MinIO + Hive Metastore + JWT + OPA. SQL is valid Trino 467 syntax. File paths (`s3a://lakehouse/...`, `etc/resource-groups.properties`) match the production deployment. OPA mentioned correctly as the authorization backend. No public-cloud-only services referenced.
+
+**Action for teacher**: LOW-priority polish only. (1) Add a short DEFINER vs INVOKER subsection to the multi-tenant resource — when each applies and why REVOKE on the base table is still recommended. (2) Add `CREATE SCHEMA IF NOT EXISTS tenant_<id>` to the standard onboarding checklist template. (3) Optional: one-line cross-link describing how JWT claims map to Trino roles via OPA (without inventing policy rules — those are external). No urgent bug fixes required.
+
+### Iter 101 Q2 — 2026-05-25 (EXTENDED PHASE) — Postgres-to-Iceberg ingestion (mid-stream Postgres ADD COLUMN: Debezium WAL relation-message propagation, Iceberg manual ADD COLUMN, NULL backfill semantics, REPLICA IDENTITY FULL)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 4.5 |
+| Completeness | 5.0 |
+| **Average** | **4.625** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.477 across 85 questions; new running avg (4.477 × 85 + 4.625) / 86 = (380.545 + 4.625) / 86 = 385.170 / 86 ≈ **4.479 across 86 questions**. PASSED.
+
+**Verified via WebSearch against debezium.io, iceberg.apache.org, github.com/memiiso/debezium-server-iceberg**:
+- Debezium detects Postgres schema changes via WAL **relation messages** (logical decoding), not by intercepting DDL — confirmed (debezium.io + github.com/debezium/debezium docs). Postgres logical decoding does NOT propagate DDL events.
+- A new column is invisible in Kafka until the FIRST DML (INSERT/UPDATE/DELETE) hits the table after ALTER — confirmed. Without a DML event, no relation message is emitted and Debezium continues to publish under the old schema.
+- Iceberg `ALTER TABLE ADD COLUMN` is metadata-only, completes in milliseconds regardless of table size, no data rewrite — confirmed (iceberg.apache.org/docs/latest/evolution/).
+- Old rows return NULL automatically for newly added columns; no backfill required — confirmed. Iceberg tracks columns by unique ID and fills NULL when a column ID is missing from a Parquet file.
+- `REPLICA IDENTITY FULL` is required for Debezium DELETE/UPDATE `before` field to contain all columns (not just PK) — confirmed (debezium.io PostgreSQL connector docs).
+- Spark Iceberg write rejects extra columns by default; opt-in via `mergeSchema=true` writer option + `write.spark.accept-any-schema=true` table property — confirmed (iceberg.apache.org/docs/latest/spark-writes/).
+
+**Strengths**:
+1. Correctly opens with "Debezium does not directly detect DDL statements" — pre-empts the most common misconception about Postgres CDC.
+2. Three-step WAL relation-message walkthrough (ALTER → next DML → relation message → Debezium learns) is technically accurate and crisply explained.
+3. "Timing trap" callout addresses the silent-failure mode head-on: if no DML touches the table, Debezium keeps publishing old schema indefinitely. Reinforced by gotcha #1 with a force-write workaround.
+4. Distinguishes the two consumer paths cleanly (Spark Structured Streaming consumer vs debezium-server-iceberg standalone sink) — the engineer knows which advice applies.
+5. Correct Iceberg semantics: `ADD COLUMN` is metadata-only, instant, old rows return NULL automatically via column-ID-based reads. Verified against iceberg.apache.org/docs/latest/evolution/.
+6. Correct REPLICA IDENTITY FULL framing: required for complete `before` on UPDATE/DELETE, not required for ADD COLUMN propagation itself.
+7. Three-step manual fix (Iceberg ALTER → resume pipeline → SELECT to verify) is exactly what the engineer should do on day one; directly runnable on the production stack.
+8. Mental-model paragraph at the end synthesizes the key insight in one sentence: "Debezium detects schema changes via WAL and publishes them to Kafka. Iceberg does not consume those schema changes automatically."
+
+**Issues / gaps**:
+1. **BUG (technical accuracy)**: Answer states `debezium.sink.iceberg.allow-field-addition` "defaults to `false`." Per the official memiiso/debezium-server-iceberg docs (github.com/memiiso/debezium-server-iceberg/blob/master/docs/iceberg.md), the property **defaults to `true`** ("Allow field addition to target tables. Enables automatic schema evolution, expansion."). This narrows the actual root cause for the debezium-server-iceberg sink path to either (a) explicit `false` override, or (b) no DML since the ALTER. The "Prevention" bullet "enable allow-field-addition=true" reads as opt-in when it's actually opt-out by default.
+2. **Missing Spark `mergeSchema` alternative**: For the Spark consumer path, the answer says writes are "rejected" (correct) but doesn't mention that `mergeSchema=true` writer option + `write.spark.accept-any-schema=true` table property is the equivalent of `allow-field-addition` for Spark. Worth noting as a parallel auto-evolution path.
+3. **Failure-mode wording imprecision**: The phrase "the rows are never written, the column data is lost" / "Iceberg is dropping it silently" risks implying silent data loss. Reality: Spark write FAILS LOUDLY with a schema-mismatch exception, the streaming job moves to FAILED state, Kafka offsets do not advance — there is no silent drop. Engineers detect this via Spark job alerts, not missing data.
+
+**Production fit**: Fully compatible with on-prem k8s + Trino 467 + Iceberg 1.5.2 + Spark + Debezium 2.x + Hive Metastore + MinIO. The three-step fix runs directly as written. `ALTER TABLE iceberg.analytics.your_table ADD COLUMN metadata_note VARCHAR` is valid Trino 467 syntax. The REPLICA IDENTITY FULL advice is correct Postgres operations. The `allow-field-addition` default bug doesn't break the fix but does misdirect the engineer's understanding of the standalone-sink path.
+
+**Action for teacher**:
+- **HIGH** (technical correctness): In `resources/13-postgres-to-iceberg-ingestion.md`, correct the documented default for `debezium.sink.iceberg.allow-field-addition` to **`true`** (it is opt-out, not opt-in). Verify the full debezium-server-iceberg properties table against https://github.com/memiiso/debezium-server-iceberg/blob/master/docs/iceberg.md. This is the second iteration in a row where weak-ai-responder has had a config-default fact wrong (iter100 Q1 had the resource-groups.properties location issue) — config-default tables in resources/ need an audit pass.
+- **MEDIUM**: Add a short subsection on the Spark consumer schema-evolution path: `mergeSchema=true` writer option + `write.spark.accept-any-schema=true` table property. This is the Spark-side equivalent of `allow-field-addition` and is currently absent from resources.
+- **MEDIUM**: Clarify in `resources/13` the precise failure mode when Spark writes a DataFrame with a column that doesn't exist in the Iceberg table without mergeSchema enabled: the WRITE FAILS LOUDLY (schema-mismatch exception, streaming job moves to FAILED, Kafka offsets do not advance). Push back against any "silently drops" phrasing.
+- **LOW**: Optional — add a one-line note that the standard force-refresh trick (`UPDATE table SET col = col WHERE id = some_id`) is the canonical way to force Debezium to refresh the relation message after a DDL when no organic DML is expected. Several engineers will hit this.
+
+### Iter 102 Q1 — 2026-05-25 (EXTENDED PHASE) — Postgres-to-Iceberg ingestion (Debezium connector crash recovery: verifying gap after ~2hr outage, replication slot health check via pg_replication_slots, targeted MERGE INTO backfill, snapshot.mode recovery path)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 3.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.0 |
+| Completeness | 4.5 |
+| **Average** | **4.125** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.479 across 86 questions; new running avg (4.479 × 86 + 4.125) / 87 = (385.194 + 4.125) / 87 = 389.319 / 87 ≈ **4.475 across 87 questions**. PASSED.
+
+**Verified via WebSearch against postgresql.org, debezium.io, iceberg.apache.org, and Conduktor snapshot-modes guide**:
+- `pg_replication_slots` view exposes `slot_name`, `active`, `confirmed_flush_lsn`, `restart_lsn`, `wal_status` — confirmed (postgresql.org/docs/current/view-pg-replication-slots.html).
+- `wal_status` values `reserved`, `extended`, `unreserved`, `lost` and their meanings as stated — confirmed. `lost` = required WAL files removed, slot invalidated.
+- Postgres retains WAL for an inactive replication slot until the slot is dropped or `max_slot_wal_keep_size` is exceeded — confirmed. A 2-hour Debezium outage is normally survivable if `max_slot_wal_keep_size` is unset/large.
+- Debezium PostgreSQL connector stores progress in the Kafka Connect offset topic AND tracks position in the Postgres replication slot via `confirmed_flush_lsn` — confirmed (debezium.io/documentation/reference/stable/connectors/postgresql.html).
+- Iceberg `rewrite_data_files` procedure accepts a `where =>` named parameter to filter which partitions/files get rewritten — confirmed (iceberg.apache.org/docs/latest/spark-procedures/, github.com/apache/iceberg/issues/6759 confirms WHERE syntax).
+- `snapshot.mode` valid values for Debezium 2.x PostgreSQL connector: `initial`, `always`, `never`, `no_data`, `when_needed`, `initial_only` — confirmed. **`recovery` mode is NOT supported by the PostgreSQL connector** — it is only available for MySQL, MariaDB, and SQL Server (connectors that maintain a schema history topic). Confirmed via Conduktor snapshot-modes guide.
+
+**Strengths**:
+1. Excellent mental model: explicit "two things track your position" framing (Kafka offset topic + Postgres replication slot) makes the recovery story easy to reason about.
+2. Concrete diagnostic SQL with `pg_replication_slots` and interpretation guidance for each `wal_status` value.
+3. The idempotent `MERGE INTO ... ON event_id` pattern is the correct production answer for replay-with-overlap.
+4. Recommendation to read from Postgres PRIMARY (not replica) for ground truth — correct.
+5. Bonus prevention: add a `source_lsn` column to Iceberg so future gap detection is exact (LSN comparison) rather than fuzzy (timestamp comparison).
+6. Post-backfill `rewrite_data_files` with `where` clause targeting the affected date range — correct syntax, correct operational follow-up.
+7. Production-fit code: `kubectl exec` for the Kafka topic check, MinIO-backed Iceberg references, on-prem Spark/Postgres patterns.
+
+**Issues / gaps**:
+1. **HIGH BUG (technical accuracy)**: In the slot-invalidated recovery path, answer says "Set `snapshot.mode: recovery` on the connector (one-time)." Per official Debezium docs and the Conduktor snapshot-modes guide, **`recovery` mode is NOT supported by the PostgreSQL connector** — it only exists for MySQL, MariaDB, and SQL Server (connectors with a schema history topic). PostgreSQL has no schema history topic. An engineer who applies this config will get a validation failure. The correct PostgreSQL recovery path is: after recreating the slot, use `snapshot.mode: never` (skip snapshot, start streaming from current WAL position) and rely on the manual targeted backfill to fill the gap. Optionally `snapshot.mode: no_data` if schema needs re-registering.
+2. **LOW (accuracy)**: References `_debezium_connect_offsets` as the literal Kafka Connect offset topic name. The topic name is set by `offset.storage.topic` in the worker config and defaults to operator-chosen names (commonly `connect-offsets`). Worth being more precise.
+3. **Missing**: No mention of the Kafka Connect REST API (`GET /connectors/{name}/status`) as the fastest first-look diagnostic to confirm the connector is RUNNING and not in FAILED/PAUSED state. This is usually step zero before any Postgres-side investigation.
+4. **Missing**: No mention of checking `wal_keep_size` / `max_slot_wal_keep_size` as the upstream Postgres setting that determines whether a 2-hour outage is survivable in the first place. Engineer needs this for the post-incident write-up and future hardening.
+5. **Minor**: Iceberg-vs-Postgres timestamp comparison assumes `event_ts` is populated at insert time and tracks wall-clock. If `event_ts` is application-supplied and can be backdated or lag, gap detection silently underreports. A one-line caveat would help.
+
+**Production fit**: Fully compatible with on-prem k8s + Trino 467 + Iceberg 1.5.2 + Spark + Debezium 2.x + MinIO + Hive Metastore EXCEPT for the `snapshot.mode: recovery` recommendation which would fail config validation. The rest of the answer (slot health check, MERGE INTO backfill, rewrite_data_files compaction, source_lsn prevention) runs directly as written.
+
+**Action for teacher**:
+- **HIGH** (technical correctness): In `resources/13-postgres-to-iceberg-ingestion.md`, add an explicit table of `snapshot.mode` values **supported per connector**. Make it crystal clear that `recovery` is supported only for MySQL/MariaDB/SQL Server and is **NOT** supported for PostgreSQL. Replace any "use snapshot.mode: recovery" PostgreSQL guidance with "use `snapshot.mode: never` (resume from current WAL position) combined with a manual targeted backfill from PRIMARY." This is the third config-default / config-support fact bug in recent iterations (iter100 resource-groups location, iter101 allow-field-addition default, iter102 snapshot.mode recovery for PG) — config-fact tables in resources/ need a systematic audit.
+- **MEDIUM**: Add a "Debezium connector crash recovery runbook" subsection covering: (1) Kafka Connect REST API status check first, (2) `pg_replication_slots` health check, (3) WAL retention preflight (`max_slot_wal_keep_size`), (4) gap detection (Iceberg max vs Postgres PRIMARY max), (5) targeted MERGE backfill, (6) slot-lost recovery path with correct PostgreSQL snapshot modes, (7) post-backfill compaction.
+- **LOW**: Add a note that the Kafka Connect offset topic name is configurable via `offset.storage.topic` and not literally `_debezium_connect_offsets`. Recommend the runbook reference whatever the local operator named it.
+- **LOW**: Recommend a `source_lsn` column pattern as a generally-applicable Debezium-to-Iceberg pipeline hardening (the answer correctly suggests this — worth promoting into the resource itself).
+
+### Iter 102 Q2 — 2026-05-25 (EXTENDED PHASE) — Multi-tenant analytics (faster cross-tenant aggregation queries on a tenant-partitioned Iceberg events table without breaking per-tenant isolation)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.75** |
+
+**Topics updated**: Multi-tenant analytics — prior avg 4.441 across 97 questions; new running avg (4.441 × 97 + 4.75) / 98 = (430.777 + 4.75) / 98 = 435.527 / 98 ≈ **4.444 across 98 questions**. PASSED.
+
+**Verified via WebSearch against trino.io and iceberg.apache.org**:
+- Trino Iceberg `$partitions` exposes `partition`, `record_count`, `file_count`, `total_size` columns (trino.io/docs/current/connector/iceberg.html).
+- Trino Iceberg `$files` has a `partition` struct column with subfields for identity-partition columns (`partition.tenant_id` works). Confirmed via Spark Iceberg query examples and Trino PR #26746 ("Fix $files partition column construction"). Trino's published column list for `$files` is incomplete but the column exists and is queryable.
+- Metadata-only aggregation claim is correct: `record_count` lives in manifest entries; `SELECT partition.tenant_id, SUM(record_count) FROM "events$files" GROUP BY partition.tenant_id` reads only manifests, never Parquet data files.
+- Bucket transform caveat is correct: `bucket(tenant_id, N)` stores a 0..N-1 integer in the partition struct, not the original tenant_id (iceberg.apache.org/spec/). Metadata-only per-tenant aggregation requires identity partitioning.
+- Standard Spark Iceberg `INSERT INTO ... SELECT ... GROUP BY` syntax is valid for writing pre-aggregated rollup tables (iceberg.apache.org/docs/latest/spark-writes/).
+- OPA-based authorization is independent of physical partition layout — changing partition spec or adding a rollup table does not affect Trino's per-tenant access control.
+
+**Strengths**:
+1. Diagnosis-first structure: explains why cross-tenant queries are slow with concrete numbers (80 tenants × N days = 80× the file count of a per-tenant query) before jumping to solutions.
+2. The metadata-only `$files` / `$partitions` shortcut is an exceptionally high-value beginner discovery — most engineers don't know billing-style queries can run in milliseconds against manifest metadata.
+3. The bucket-transform caveat (Option 1) is exactly the right gotcha to surface — engineers using `bucket(tenant_id, N)` would otherwise try the metadata-only query and get unexpected results.
+4. Four distinct options ordered from cheapest-fastest to heaviest, with Option 4 (separate Trino cluster) correctly labeled as overkill. Shows judgment instead of kitchen-sinking.
+5. Rollup table example (Option 3) is realistic: partitioned by `(event_date, tenant_id)`, sensible columns, nightly Spark job pattern, internal team queries the rollup not the base table.
+6. Isolation section explicitly addresses the engineer's anxiety: "authorization layer, independent of partition layout" — names OPA, defers to the external governance document by not over-specifying.
+7. Final 3-step recommendation block converts the discussion into concrete next actions (`SHOW CREATE TABLE` check → build rollup → keep customer views on base table).
+
+**Issues / gaps**:
+1. **BUG (technical accuracy, Option 2)**: Claim that switching to tenant-first partition order (`['tenant_id', 'day(occurred_at)']`) would force a per-tenant date-range query to "scan Acme's entire partition (all days) then filter by date in the engine" is **wrong**. Iceberg partition pruning evaluates predicates against all partition fields independently of declaration order — `WHERE tenant_id='acme' AND occurred_at BETWEEN ...` would still prune by `day(occurred_at)` regardless of which field is declared first. What partition order actually affects is write distribution / file clustering / manifest organization / small-file behavior, NOT pruning capability. The recommendation ("don't reorder") is still defensible (day-first usually wins for SaaS events), but the reasoning given would mislead an engineer debating partition-order changes later.
+2. **Rollup-job idempotency missing**: Nightly Spark job uses `INSERT INTO ... WHERE event_ts >= CURRENT_TIMESTAMP - INTERVAL '1' DAY`. Re-running the job or late-arriving events would duplicate aggregated rows. Should mention `INSERT OVERWRITE` of the target `event_date` partition or a `MERGE INTO` keyed on `(event_date, tenant_id, event_type)`, or at minimum flag the single-execution assumption.
+3. **Engine-dialect ambiguity**: Rollup SQL doesn't say whether it runs on Spark or Trino. Both work for that example, but production stack uses Spark for ingestion — saying "scheduled via Airflow/k8s CronJob, run on Spark" would tighten the recommendation.
+4. **Minor**: Doesn't mention that Trino's `$partitions` only reflects the *current* partition spec (known limitation — Trino issue #12323). Edge case for tables that have undergone partition evolution.
+
+**Production fit**: Fully compatible with on-prem k8s + Trino 467 + Iceberg 1.5.2 + Spark + MinIO + Hive Metastore + OPA. All SQL examples run as written. The metadata-table queries work on Trino 467's Iceberg connector. The rollup pattern is the standard Spark/Iceberg approach. OPA mention is conceptual and correctly defers permission specifics to the external governance document.
+
+**Action for teacher**:
+- **HIGH** (technical correctness): In the multi-tenant analytics resource and/or the Iceberg partition design resource, add an explicit subsection clarifying that **Iceberg partition pruning works on any partition field independently of declaration order**. Declaration order affects directory layout, write clustering, manifest grouping, and small-file behavior — NOT pruning capability. Without this fix, the partition-order misconception will recur and cost accuracy points on future questions about partition-order decisions.
+- **MEDIUM**: Add an idempotent rollup-job template (`MERGE INTO` or partition-overwrite pattern) alongside the simple `INSERT INTO` form in the multi-tenant analytics resource. One-line note: "use MERGE/OVERWRITE if the job may be re-run or late-arriving events are possible." Standard SaaS engineers will hit this on their first replay.
+- **LOW**: Promote the `$files` / `$partitions` metadata-only-aggregation shortcut to a named callout box in the multi-tenant resource (it is the strongest win in this answer and is exactly the kind of free optimization beginners would never discover from the connector docs alone). Include the bucket-vs-identity caveat in the same callout.
+- **LOW**: Add a footnote that Trino's `$partitions` only reflects the current partition spec; for tables that have evolved partition specs, prefer `$files` with `partition.<column>`.
+
+### Iter 111 Q1 — 2026-05-25 (EXTENDED PHASE) — Postgres-to-Iceberg ingestion (Debezium JSONB handling: flatten hot fields, raw fallback, ALTER TABLE ADD COLUMN schema evolution)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 4.5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.465 across 95 questions; new running avg (4.465 × 95 + 4.75) / 96 = (424.175 + 4.75) / 96 = 428.925 / 96 ≈ **4.468 across 96 questions**. PASSED.
+
+**Notes**: Core recommendation (flatten hot JSONB keys to typed columns + keep `properties_raw` VARCHAR fallback) is correct and production-standard. `get_json_object` for Spark and `json_extract_scalar` for Trino are both correctly named with correct signatures (verified against Apache Spark and Trino 481 docs). Schema evolution path (`ALTER TABLE ADD COLUMN` is metadata-only, NULL fill for old rows) is correct. The "you don't need to change Debezium" note is exactly right — flattening lives in the Spark transformation, not the connector. Rule of thumb ("Flatten anything you GROUP BY, WHERE, or JOIN ON") is the right takeaway shape.
+
+Minor technical inaccuracy: the claim "Parquet has no native JSON type" is overstated — Parquet does define a JSON logical type annotation (binary primitive annotated as JSON, per Apache Parquet LogicalTypes spec). The practical impact on Trino+Iceberg is the same (read as opaque string, no per-field stats), but the phrasing should be tightened. Minor gap: the answer's argument for flattening focuses on CPU cost of re-parsing; the stronger argument is the absence of file/row-group pruning when filtering on `json_extract_scalar(raw, '$.key')`. Also: "what NOT to do" rejects STRUCT and MAP too absolutely — both have valid use cases (STRUCT for stable nested schemas; MAP<VARCHAR,VARCHAR> for truly dynamic per-tenant settings).
+
+**Resource fix suggestions** (all MEDIUM/LOW): tighten the "Parquet has no JSON type" phrasing; add explicit "json_extract_scalar does not push down to row-group stats" callout; soften STRUCT/MAP "what NOT to do" with a small decision table; add one-line notes on `json_extract_scalar` always returning VARCHAR (CAST for numeric/boolean comparisons) and on Debezium's default JSONB serialization (`io.debezium.data.Json` semantic type → JSON string in Spark consumer).
+
+### Iter 117 Q2 — 2026-05-25 (EXTENDED PHASE) — Multi-tenant analytics (GDPR data portability + erasure: tenant export from shared Iceberg table without melting the cluster, plus provable physical purge in 30 days)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.25 |
+| Beginner clarity | 5 |
+| Practical applicability | 4.5 |
+| Completeness | 4.75 |
+| **Average** | **4.625** |
+
+**Topics updated**: Multi-tenant analytics: isolating customer data in SaaS — prior avg 4.456 across 103 questions; new running avg (4.456 × 103 + 4.625) / 104 = (458.968 + 4.625) / 104 = 463.593 / 104 ≈ **4.458 across 104 questions**. PASSED. Also touched: Iceberg table maintenance (reinforced; running avg unchanged at PASSED level).
+
+**Notes**: Two-part question (Trino-side export without app-server scan + 4-step physical purge with audit) cleanly answered. Strong structure: names both halves up front, walks each with executable SQL, closes with a 30-day timeline. The export path (CREATE TABLE LIKE + INSERT INTO with WHERE filter) is a correct distributed-write pattern that lets Trino workers write Parquet to MinIO in parallel without flowing data through the app. The 4-step purge sequence (DELETE → rewrite_data_files → expire_snapshots → remove_orphan_files) is correctly ordered with engine boundaries called out (Spark for expire to bypass Trino's 7-day floor; table-property pitfalls flagged). Two MEDIUM technical overstatements deduct: (a) flat "Trino EXECUTE optimize does NOT apply position delete files" — per trino#24086 and the official Trino Iceberg connector docs, Trino's OPTIMIZE *does* clean up position deletes when processing whole partitions without file_modified_time/path predicates; the Spark recommendation is still defensible but the absolute framing is wrong; (b) "DROP TABLE deletes underlying MinIO files" is conditionally true — multiple open issues (trino#5616, trino#25097, discussion#25727, trino#26798) document cases where Iceberg DROP TABLE on Hive Metastore + MinIO leaves files behind; the answer does add remove_orphan_files as a follow-up but should lead with the caveat. LOW gaps: "repeat sequence for all tables" is implicit; no row-count handshake step recommended for export verification; coalesce(10) for CSV is a magic number with no sizing guidance; mc cp path assumes Iceberg layout without explaining why data/ is the right subdirectory.
+
+**Resource fix recommendations**:
+- **HIGH** — `resources/05-multi-tenant-analytics.md` — propagate the iter116 `resources/13` correction language into the GDPR section: Trino OPTIMIZE *does* clean up position deletes under narrow conditions (whole partition + no file_modified_time/path predicate); recommend Spark for GDPR purges because it works reliably regardless of partition slice, but do not flatly say "Trino does NOT apply position deletes."
+- **MEDIUM** — `resources/05-multi-tenant-analytics.md` — add DROP TABLE caveat callout near the export-table cleanup and GDPR sections: DROP TABLE on Iceberg + Hive Metastore + MinIO is not guaranteed to remove all data files; follow with remove_orphan_files on the parent namespace and audit MinIO directly.
+- **LOW** — explicit "repeat for every table" note in the GDPR 4-step sequence; row-count handshake step in the export audit checklist; one-line file-sizing note on coalesce(N) for CSV outputs.
+
+### Iter 163 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation / cross-source connectors (PostgreSQL connector connection pool configuration: per-query vs server-level, where settings live, how to size, monitoring)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 2 |
+| Beginner clarity | 4 |
+| Practical applicability | 2 |
+| Completeness | 3 |
+| **Weighted average (Tech×2)** | **2.6** |
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.450 across 4 questions; new running avg (4.450 × 4 + 2.6) / 5 = (17.80 + 2.6) / 5 = 20.40 / 5 = **4.080 across 5 questions**. Status: NEEDS WORK (4.080 < 4.5 raised threshold for this topic).
+
+**Notes**: FAIL on a hallucinated feature. The answer recommends three properties (`connection-pool.enabled`, `connection-pool.max-size`, `connection-pool.max-connection-lifetime`) in a Trino 467 PostgreSQL catalog file and explains per-worker arithmetic at length. These properties are **Starburst Enterprise** PostgreSQL connector properties — they do NOT exist in open-source Trino 467 (verified: official `trino.io/docs/467/connector/postgresql.html` documents no connection pool properties; GitHub trinodb/trino#15888 "Enable connection pooling for Postgresql" is still open as a feature request from Jan 2023). The only OSS Trino JDBC connector with native pooling is **Oracle**, which uses `oracle.connection-pool.*` (i.e., DOES use a connector prefix — so the answer's "use dots not hyphens, no prefix" gotcha is also wrong). An engineer following this answer would paste invalid properties into their catalog file, see them silently ignored, and the Postgres team's complaint would not be resolved. Peripheral facts are correct: catalog file location, `pg_stat_activity` monitoring, read-replica-only advice, `statement_timeout` recommendation, closing note to ingest into Iceberg for heavy analytical workloads. Clarity is high; the answer is well-structured. The technical core is wrong for the stack.
+
+**Resource fix recommendations**:
+- **CRITICAL** — `resources/22-trino-federation-postgresql.md` (and any other resource that discusses Postgres connector configuration) must add an explicit, prominent callout: **OSS Trino 467 PostgreSQL connector does NOT support native JDBC connection pooling**. Cite [trinodb/trino#15888](https://github.com/trinodb/trino/issues/15888) (still open). Warn that `connection-pool.*` properties documented elsewhere belong to Starburst Enterprise, not OSS Trino.
+- **HIGH** — same resource needs a "how to control Trino's connection pressure on a JDBC source in OSS Trino 467" section covering: (1) PgBouncer in transaction-pooling mode in front of Postgres (k8s-friendly), (2) Postgres role-level `ALTER ROLE trino_reader CONNECTION LIMIT N;`, (3) Trino resource groups to cap concurrent queries against the catalog, (4) `statement_timeout` on the dedicated read replica.
+- **MEDIUM** — connector-prefix rule clarification: when a Trino JDBC connector exposes pool properties (Oracle today), the property name is prefixed with the connector name (`oracle.connection-pool.max-size`). Do not generalize "no prefix" as the rule.
+
+### Iter 164 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation / cross-source connectors (debugging slow federated join: EXPLAIN ANALYZE, dynamic filtering tuning, pg_stat_activity)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 3 |
+| Beginner clarity | 4 |
+| Practical applicability | 3 |
+| Completeness | 4 |
+| **Weighted average (Tech×2)** | **3.40** |
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.080 across 5 questions; new running avg (4.080 × 5 + 3.40) / 6 = (20.40 + 3.40) / 6 = **3.967 across 6 questions**. Status: NEEDS WORK (3.967 < 4.5 raised threshold for this topic). The topic average has now *fallen* further below threshold, indicating the resource still has unfixed correctness gaps in the dynamic-filtering section.
+
+**Notes**: Mixed result. The diagnostic framework (three named root causes — DF didn't fire, pushdown didn't happen, connection saturation), the `dynamicFilterSplitsProcessed` interpretation, the Postgres-side `pg_stat_activity` and `log_min_duration_statement` workflow, the PgBouncer / role CONNECTION LIMIT mitigation, and the "no native pooling in OSS Trino 467" callout are all correct and well-explained. Two factual errors verified against trino.io 467 docs deduct heavily: (1) **default `iceberg.dynamic-filtering.wait-timeout` in Trino 467 is `1s`, not `2s`** (per https://trino.io/docs/467/connector/iceberg.html); (2) the suggested fix `SET SESSION dynamic_filtering_wait_timeout = '15s'` is **invalid syntax** — it is a *catalog* session property and requires a `<catalog>.` prefix (`SET SESSION iceberg.dynamic_filtering_wait_timeout = '15s'`). The bare form errors with "Session property does not exist." Both errors trace back to the resource file (`resources/22-trino-federation-postgresql.md` section 5.4, lines 460 and 469) — the responder faithfully reproduced what the resource taught. Also missing: no mention of `join_distribution_type = 'BROADCAST'` as the most relevant tuning knob for a 5K-row × billions-of-rows join, and no bridging from the Trino UI (which the user explicitly cited) into EXPLAIN ANALYZE.
+
+**Resource fix recommendations**:
+- **HIGH (correctness)** — `resources/22-trino-federation-postgresql.md` section 5.4 lines 460, 508: change "Default in Trino 467: 2s" to "Default in Trino 467: 1s" (per official Iceberg connector docs at https://trino.io/docs/467/connector/iceberg.html). Cross-check Hive connector default too (also 1s per docs).
+- **HIGH (correctness)** — `resources/22-trino-federation-postgresql.md` section 5.4 line 469: change `SET SESSION dynamic_filtering_wait_timeout = '15s';` to the catalog-prefixed form `SET SESSION iceberg.dynamic_filtering_wait_timeout = '15s';` (and add a note that the prefix is required because this is a catalog session property; the bare form will error). Same fix applies to line 489 (`domain_compaction_threshold` is fine as bare — that one is a system session property — but call out the distinction explicitly).
+- **MEDIUM (completeness)** — Add a "debugging a slow federated join" runbook with the Trino UI → EXPLAIN ANALYZE → Postgres-side bridge that this question asked for. Always start the runbook with `join_distribution_type` check for small-dimension joins.
+- **LOW (clarity)** — When recommending EXPLAIN ANALYZE field names (`dynamicFilterSplitsProcessed`, `Blocked: Input`, `Physical Input`), call out where in the output (or in the Trino UI Plan tab) each one appears.
+
+### Iter 164 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation / cross-source connectors (PostgreSQL catalog config: fetch sizes, connection timeouts, performance levers)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy (×2) | 3.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.5 |
+| Completeness | 4.0 |
+| **Weighted average (Tech×2)** | **4.00** |
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 3.967 across 6 questions; new running avg (3.967 × 6 + 4.00) / 7 = (23.802 + 4.00) / 7 = **3.972 across 7 questions**. Status: NEEDS WORK (3.972 < 4.5 raised threshold for this topic). The topic average ticked up slightly on Q1 vs Q2 (Q1 didn't reproduce the SET SESSION bare-form bug because it didn't include a SET SESSION example at all), but the underlying resource correctness issues remain unfixed.
+
+**Notes**: Q1 passes the default 3.5 threshold but FAILS the topic-specific raised 4.5 threshold. The OSS-vs-Starburst connection-pool callout (the iter163 critical fix) held perfectly, and the answer correctly named the real performance levers: predicate pushdown verification via `EXPLAIN (TYPE DISTRIBUTED)` and `ScanFilterProject` inspection, dynamic filtering verification via `dynamicFilterSplitsProcessed` in `EXPLAIN ANALYZE`, PgBouncer in transaction-pooling mode, Postgres role-level `CONNECTION LIMIT` (verified valid syntax per postgresql.org docs), read-replica-not-primary, resource groups for federation workload cap, `statement_timeout` on the replica, and `postgresql.experimental.enable-string-pushdown-with-collate=true`. The "what to do right now" 3-step close is concrete and runnable. **One material factual error**: claims default `dynamic_filtering_wait_timeout` is "2 seconds" — verified incorrect against trino.io/docs/467; the Iceberg connector property defaults to **`1s`** and the PostgreSQL connector's `dynamic_filtering_wait_timeout` *session* property defaults to **`20s`**. The answer doesn't disambiguate which connector's timeout it's talking about, conflating two different properties. **Practical completeness gap**: the answer never explicitly tells the engineer "there are no `postgresql.fetch-size` or `postgresql.connection-timeout` catalog properties in OSS Trino 467" — which is the direct denial the question literally asked for. It also misses that JDBC-level fetch-size CAN be passed via `connection-url?defaultRowFetchSize=N`, which IS an actual catalog-level lever. The PgBouncer recommendation is correct but omits the `prepareThreshold=0` JDBC caveat (without it, prepared statements break under PgBouncer transaction pooling). No mention of `join_distribution_type='BROADCAST'` (same gap as Q2).
+
+**Resource fix recommendations** (additive to Q2's list):
+- **MEDIUM (completeness)** — `resources/22-trino-federation-postgresql.md`: add an explicit "what catalog properties DON'T exist in OSS" callout that names the properties an engineer migrating from another JDBC tool would expect (`fetch-size`, `connection-timeout`, `socket-timeout`, `connection-pool.*`) and explains they are not documented for OSS Trino 467's PostgreSQL connector.
+- **MEDIUM (completeness)** — Add a JDBC `connection-url` parameters subsection with at least two examples: `?defaultRowFetchSize=1000` (the practical fetch-size lever the question asked about) and `?prepareThreshold=0` (required for PgBouncer transaction pooling compatibility). Combined example: `connection-url=jdbc:postgresql://pgbouncer:6432/db?defaultRowFetchSize=1000&prepareThreshold=0`.
+- **LOW (clarity)** — When the resource discusses `dynamic_filtering_wait_timeout`, always disambiguate "the Iceberg config property (`iceberg.dynamic-filtering.wait-timeout`, default `1s`) vs the PostgreSQL session property (`<pg_catalog>.dynamic_filtering_wait_timeout`, default `20s`)" — they are different things and tuning the wrong one wastes the engineer's time.
+
+### Iter 165 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (federation join scaling: 5K→120K accounts, DF degradation, ingest-vs-federate)
+**Score:** 5.00 / 5 (PASS)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy (×2) | 5 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Weighted average (Tech×2)** | **5.00** |
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 3.972 across 7 questions; new running avg (3.972 × 7 + 5.00) / 8 = (27.804 + 5.00) / 8 = **4.101 across 8 questions**. Status: STILL NEEDS WORK (4.101 < 4.5 raised threshold). One strong answer is not enough to lift the topic over the raised threshold; sustained ≥4.5 is required across the next several questions to recover.
+
+**Notes**: Strongest federation answer in the iter160s run. All five high-risk claims verified against trino.io/docs/current: (1) cross-catalog joins execute on Trino workers — correct; (2) `iceberg.dynamic_filtering_wait_timeout` default 1s with catalog prefix — correct (iter164 carry-forward bug is now fixed in resources); (3) "no native PG connection pooling in OSS Trino 467" — correctly carried forward from iter163 with explicit "do NOT add `connection-pool.enabled`" warning; (4) ingest-to-Iceberg as canonical scaling fix — correct; (5) DF degradation explanation — directionally correct, though simplified (doesn't name `dynamic-filtering.max-distinct-values-per-driver` or the min/max-range fallback explicitly; describes the practical effect as "harder to compress and apply for file pruning" which is accurate but glosses the actual mechanism). Three-option ranked structure (filter / ingest / hybrid UNION ALL live-tail view) is exactly the right decision tree for the question. "What you should NOT do" section pre-empts the two most common wrong turns (PG indexes, fake connection pooling). Concrete EXPLAIN ANALYZE next-step with specific fields to inspect (`dynamicFilters`, `dynamicFilterSplitsProcessed`). Minor unscored nit: doesn't mention `join_distribution_type=BROADCAST` (recurring resource gap from iter164), but the omission is defensible because at 120K rows broadcast may be the wrong choice anyway. Resource health signal: teacher's fixes from iter163/164 are now being correctly synthesized into composite questions.
+
+### Iter 165 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (Postgres schema change: column rename, Trino schema refresh behavior, view updates)
+**Score:** 3.40 / 5 (FAIL)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy (×2) | 3 |
+| Beginner clarity | 5 |
+| Practical applicability | 3 |
+| Completeness | 3 |
+| **Weighted average (Tech×2)** | **3.40** |
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.101 across 8 questions; new running avg (4.101 × 8 + 3.40) / 9 = (32.808 + 3.40) / 9 = **4.023 across 9 questions**. Status: NEEDS WORK (4.023 < 4.5 raised threshold). Topic average slipped backward after Q1's strong showing because Q2 surfaced a new resource gap (metadata cache).
+
+**Notes**: Central claim "no schema cache, no REFRESH SCHEMA needed" is materially wrong. Verified against trino.io/docs/467/connector/postgresql.html: the PostgreSQL connector supports `metadata.cache-ttl` (catalog config property, default `0s` = disabled but commonly raised in production) and `metadata.cache-missing`, AND exposes a `system.flush_metadata_cache()` procedure (added in Trino 369, present in 467). The default-off setting makes the responder's claim accidentally true for the most common case but the absolute framing ("no cache; not needed") is the same pattern as the iter163 `connection-pool.*` failure — confidently asserting Trino doesn't have a feature it actually has. Other technical claims are correct: `CREATE OR REPLACE VIEW` is valid Trino 467 syntax (verified at trino.io/docs/467/sql/create-view.html), `information_schema.views.view_definition` is standard SQL and works in Trino (per-catalog scope nit — answer doesn't mention this), the PostgreSQL `GENERATED ALWAYS AS (col) STORED` shim is valid (verified at postgresql.org/docs/current/ddl-generated-columns.html). The migration-coordination playbook (search BI tools, search Trino views, atomic deploy, generated-column shim) and the replication-lag check on a read replica are solid production knowledge. Beginner clarity is excellent — well-structured, plain English, commented SQL, no unexplained jargon.
+
+**Resource fix recommendations**:
+- **HIGH (correctness)** — `resources/22-trino-federation-postgresql.md`: add a new section "Schema cache and metadata refresh on the PostgreSQL connector" covering: `metadata.cache-ttl` (default `0s`, commonly `60s`–`5m` in production), `metadata.cache-missing`, and `CALL system.flush_metadata_cache()` (both all-schemas and per-schema forms). Include the explicit when-to-use rule: "If `metadata.cache-ttl = 0s` (default), Postgres DDL is visible immediately; if `> 0`, wait for TTL or call `flush_metadata_cache()` after a rename/drop."
+- **MEDIUM (correctness)** — `resources/22`: add a "handling source DDL changes" runbook: (a) check `metadata.cache-ttl`, (b) search Trino views per catalog (`SELECT * FROM <catalog>.information_schema.views WHERE view_definition LIKE '%old_col%'`), (c) call out `information_schema.views` is per-catalog scope in Trino, (d) coordinate Postgres rename + Trino view update + downstream BI as one atomic deploy.
+- **MEDIUM (completeness)** — `resources/22`: add a generated-column compatibility-shim example for safe column renames, with the STORED-rewrite caveat (multi-minute lock on large tables; consider a Trino-side VIEW alias for very large source tables instead).
+- **LOW (clarity)** — `resources/22`: when discussing `SELECT *` against federated tables, distinguish "good for tolerating renames" vs "bad for stable downstream schema" — these are two different concerns; the answer conflated them.
+
+### Iter 166 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (PostgreSQL connector write support: INSERT/UPDATE/DELETE, anti-pattern vs staged write)
+**Score:** 4.20 / 5 (PASS)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy (×2) | 4 |
+| Beginner clarity | 5 |
+| Practical applicability | 4 |
+| Completeness | 4 |
+| **Weighted average (Tech×2)** | **4.20** |
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.023 across 9 questions; new running avg (4.023 × 9 + 4.20) / 10 = (36.207 + 4.20) / 10 = **4.041 across 10 questions**. Status: NEEDS WORK (4.041 < 4.5 raised threshold). Topic average ticked up slightly with this pass but still well below threshold; sustained ≥4.5 needed.
+
+**Notes**: Core claim "PostgreSQL connector supports INSERT/UPDATE/DELETE" is verified correct against trino.io/docs/current/connector/postgresql.html. Anti-pattern framing ("technically yes, but you should not do it") is appropriately strong and matches OLTP/OLAP isolation orthodoxy. Staged write-back pattern (Trino analytics → Iceberg staging → app reads → app writes via normal path) is the canonical recommendation. Concrete hybrid example (user churn risk) is realistic and actionable. **Gaps**: (a) does not mention the documented UPDATE limitation that only constant assignments and predicates are supported (arithmetic, function calls, non-constant updates fail); (b) does not mention the DELETE limitation that the WHERE predicate must be fully pushed down to the data source; (c) does not mention MERGE (gated behind `merge.non-transactional-merge.enabled`), TRUNCATE, or CREATE/DROP table support; (d) does not mention that on the production stack OPA could enforce a deny-write policy on the PostgreSQL catalog as defense-in-depth — a major missed opportunity given the production stack uses OPA; (e) does not note that on the on-prem k8s stack the Spark JDBC option is well-suited because Spark runs in the same cluster.
+
+**Resource fix recommendations**:
+- **MEDIUM (correctness/completeness)** — `resources/22-trino-federation-postgresql.md`: add a "PostgreSQL connector write operation matrix" section listing every supported write op (INSERT, UPDATE, DELETE, MERGE, TRUNCATE, CREATE/DROP TABLE, ALTER TABLE) with documented limitation. Especially highlight: (1) UPDATE supports only constant assignments and predicates — no `SET x = x + 1`, no function calls; (2) DELETE requires the WHERE predicate to fully push down; (3) MERGE requires explicit enablement via `merge.non-transactional-merge.enabled`; (4) all writes are non-transactional by default.
+- **MEDIUM (production fit)** — `resources/22`: add a note that OPA policy on the Trino side can block write actions against the PostgreSQL catalog as a hard enforcement of the read-only-federation rule. Frame as: "the production stack uses OPA; a write-deny rule on PostgreSQL catalogs is the recommended enforcement to make this anti-pattern impossible rather than merely discouraged."
+- **LOW (production fit)** — `resources/22`: when discussing the Spark JDBC write-back path, mention that on the on-prem k8s stack Spark runs in the same cluster so this path has low network egress cost and benefits from cluster-internal networking.
+
+### Iter 166 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (cross-catalog CTAS: Postgres→Iceberg, INSERT INTO across catalogs, HMS commit)
+**Score:** 4.60 / 5 (PASS)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy (×2) | 4.5 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 4 |
+| **Weighted average (Tech×2)** | **4.60** |
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.041 across 10 questions; new running avg (4.041 × 10 + 4.60) / 11 = (40.41 + 4.60) / 11 = **4.092 across 11 questions**. Status: NEEDS WORK (4.092 < 4.5 raised threshold). Topic average climbed modestly with this pass but still below the raised threshold; sustained ≥4.5 needed to recover.
+
+**Notes**: Core technical claim — cross-catalog CTAS and INSERT INTO both work in a single statement — verified against trino.io/docs (CREATE TABLE AS, Iceberg connector write support). Cross-catalog join executes on Trino workers and writes to MinIO via the Iceberg connector. Concrete SQL examples are runnable, partitioning suggestions (`day(created_at)`, `tenant_id`) are valid Iceberg transforms, and scheduling guidance (Airflow / k8s CronJob) fits the on-prem k8s stack. Strong "compared to your current approach" closing directly addresses the engineer's recompute pain point. **Strong improvement** over the iter163/164/165 pattern: no fabricated features, no confident assertion that "Trino doesn't have X." **Gaps**: (a) HMS framing slightly imprecise — Iceberg CTAS hits HMS at both *start* (table registration; empty table exists during execution) and *commit* (atomic metadata pointer swap), not only at commit; the "SELECT completes but commit fails" description is partially wrong because HMS being down at start would fail the query before SELECT executes; (b) no mention of `MATERIALIZED VIEW` as the managed-refresh alternative; (c) no mention of `CREATE OR REPLACE TABLE` for periodic full-refresh patterns; (d) no mention of OPA write-authorization on the production stack — a CTAS to an Iceberg schema is a write action OPA can gate; (e) no mention of CTAS atomicity reassurance (table invisible until commit) or sort-order option for the new Iceberg table.
+
+**Resource fix recommendations**:
+- **MEDIUM (correctness)** — `resources/22-trino-federation-postgresql.md` or a new "Materializing federated results to Iceberg" section: clarify the Iceberg CTAS lifecycle — `(1) HMS table registered at start (empty)`, `(2) data files written during execution`, `(3) atomic metadata pointer swap on commit makes data visible`. State explicitly that HMS must be reachable at BOTH start and commit, and that on failure the table is rolled back (never partially visible).
+- **MEDIUM (completeness)** — add a comparison table for the four materialization patterns: `CTAS` (one-shot), `INSERT INTO` (append/incremental), `CREATE OR REPLACE TABLE` (atomic full refresh), `MATERIALIZED VIEW` (Trino-managed refresh). Give selection criteria: freshness need, refresh frequency, atomic-replacement requirement.
+- **MEDIUM (production fit)** — add a note that OPA policy gates Iceberg writes on the production stack; a CTAS or INSERT to an Iceberg schema is a write action that OPA evaluates. Useful as defense-in-depth and to clarify why a CTAS might be denied even with valid SQL.
+- **LOW (completeness)** — add `WITH (partitioning = ARRAY['day(created_at)'], sorted_by = ARRAY['user_id'])` as a more complete CTAS recipe; sort order improves query-time pruning on the resulting table.
+
+### Iter 167 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (multiple Postgres catalogs: separate catalog files, connection isolation, PgBouncer per catalog)
+**Score:** 4.60 / 5 (PASS)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy (×2) | 5 |
+| Beginner clarity | 4 |
+| Practical applicability | 5 |
+| Completeness | 4 |
+| **Weighted average (Tech×2)** | **4.60** |
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.092 across 11 questions; new running avg (4.092 × 11 + 4.60) / 12 = (45.012 + 4.60) / 12 = **4.134 across 12 questions**. Status: NEEDS WORK (4.134 < 4.5 raised threshold). Topic average ticked up modestly with this pass; sustained ≥4.5 still needed to recover.
+
+**Notes**: All technical claims verified against Trino 467 PostgreSQL connector docs and pgjdbc docs. Separate catalog `.properties` files per Postgres DB is the correct (and required) pattern — the PG connector accesses one database per instance. `metadata.cache-ttl` / `metadata.cache-missing` are valid PG connector properties (added release 369). `defaultRowFetchSize`, `socketTimeout`, `connectTimeout` are valid pgjdbc URL parameters. `prepareThreshold=0` workaround for PgBouncer transaction-pooling mode is correctly described. The OSS-vs-Starburst connection-pool boundary is stated cleanly and correctly — this has been a recurring failure mode in earlier iterations and is handled well here. ConfigMap mount + pod restart matches the on-prem k8s prod stack. Concrete two-catalog example, runnable join example, per-catalog PgBouncer split, role `CONNECTION LIMIT` advice, and read-replica warning all directly address the engineer's "shared pool / interference" worry. **Gaps**: (a) no one-line explanation of what "transaction pooling" or `prepareThreshold=0` actually means for a beginner; (b) no mention of OPA write-deny enforcement on Postgres catalogs (production stack); (c) no mention of JWT auth on the Trino side; (d) no discussion of predicate pushdown / dynamic filtering behavior across federated joins; (e) no mention of `case-insensitive-name-matching` or schema-visibility settings — minor but commonly hit.
+
+**Resource fix recommendations**:
+- **LOW (clarity)** — `resources/22-trino-federation-postgresql.md`: add one-line definitions for "transaction pooling" (PgBouncer mode that reuses backend connections per transaction, breaking session-scoped state like named prepared statements) and `prepareThreshold=0` (pgjdbc setting that disables named prepared statements, forcing unnamed statements so PgBouncer transaction pooling stays safe).
+- **LOW (production fit)** — add a short note that on the prod stack, Postgres catalogs intended to be read-only should also be enforced via OPA write-deny policies as defense-in-depth, and that Trino auth is JWT (so `connection-user` / `connection-password` are Postgres-side credentials, not Trino user identities).
+- **LOW (completeness)** — add a brief section on federated-join behavior: predicate pushdown to each Postgres catalog, dynamic filtering across the JDBC boundary, and when a small Iceberg dimension table makes the join faster than two JDBC reads.
+
+### Iter 167 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (monitoring: system.runtime.queries catalog filter, pg_stat_activity, event listener)
+**Score:** 4.50 / 5 (PASS)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy (×2) | 4.5 |
+| Beginner clarity | 4 |
+| Practical applicability | 5 |
+| Completeness | 4.5 |
+| **Weighted average (Tech×2)** | **4.50** |
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.134 across 12 questions; new running avg (4.134 × 12 + 4.50) / 13 = (49.608 + 4.50) / 13 = **4.162 across 13 questions**. Status: NEEDS WORK (4.162 < 4.5 raised threshold). Topic average ticks up for the second straight iteration; both questions this iteration passed. The damage from the iter163/164/165 FAILs continues to weigh down the average.
+
+**Notes**: Verified against trino.io and PostgreSQL docs. `system.runtime.queries` exists with the `query` (SQL text), `query_id`, `user`, `state`, `created` columns; `system.runtime.tasks` exposes `query_id`, `physical_input_bytes`, `split_cpu_time_ms` for I/O and CPU attribution. `pg_stat_activity` columns (`pid`, `usename`, `query_start`, `state`, `query`) verified against PostgreSQL docs. The "ephemeral / evicted after short window" caveat is correct (governed by `query.max-history` default 100 and `query.min-expire-age` default 15 min). Event listener for persistence is real (HTTP, Kafka, MySQL, OpenLineage, plus custom EventListener SPI). The four-step DBA collaboration flow (slow query in `pg_stat_activity` → match by user/time in Trino runtime table → compare actual pushed-down SQL to Trino source query → set up persistent event listener) is exactly the workflow an oncall engineer would run. No fabricated features. **Gaps**: (a) `user` is a Trino reserved word / built-in function — should be quoted as `"user"` in the SELECT to avoid parse ambiguity; (b) no warning that `query LIKE '%app_pg%'` produces false positives when `app_pg` appears in comments or string literals — recommend `query LIKE '%FROM%app_pg.%'` or similar; (c) no mention of `query.max-length` (default ~10K) truncating the SQL text column and silently breaking the LIKE filter on long queries; (d) no mention of the Trino web UI `/ui/query.html?<id>` operator view as the most authoritative catalog-touch evidence (no text matching); (e) no mention of OPA decision logs as a second authoritative source of catalog-touch evidence on the prod stack — survives Trino's in-memory eviction; (f) event-listener guidance does not name specific options for on-prem k8s (HTTP listener → OpenSearch/Loki, MySQL listener → queryable history table, Kafka for streaming); (g) no mention of `EXPLAIN <query>` as a before-the-fact way to confirm a query touches the PostgreSQL catalog (shows `TableScan[postgresql:app_pg...]`).
+
+**Resource fix recommendations**:
+- **HIGH (correctness)** — `resources/22-trino-federation-postgresql.md`: add a "Monitoring federated queries" section that documents (1) `system.runtime.queries` schema with explicit reminder to quote `"user"`, (2) LIKE-on-SQL-text false-positive risk with safer filter patterns (`query LIKE '%FROM%app_pg.%'`), (3) `query.max-length` truncation default and how to raise it, (4) `system.runtime.tasks` join recipe with `physical_input_bytes` and `split_cpu_time_ms` for I/O and CPU attribution per Postgres-touching query.
+- **HIGH (production fit)** — same file: add a callout that OPA decision logs are a complementary, authoritative source of catalog-touch evidence on the production stack. Every query authorized against `app_pg` produces an OPA audit record with catalog/schema/table resource info. This survives the Trino in-memory eviction window and is the cleanest cross-correlation point with the DBA's `pg_stat_activity` evidence.
+- **MEDIUM (completeness)** — same file: name specific event listener options for the on-prem k8s stack — HTTP listener pushing to an in-cluster observability backend (OpenSearch, Loki, or similar), MySQL/Postgres listener for a queryable history table, Kafka listener for streaming to downstream analytics. Include a canonical `event-listener.properties` snippet for the HTTP listener.
+- **MEDIUM (completeness)** — same file: add a "before-the-fact" verification path — `EXPLAIN <query>` shows `TableScan[postgresql:app_pg.schema.table]` operators, which is the cleanest way to confirm catalog touch without depending on runtime tables or text matching.
+- **LOW (clarity)** — same file: inline-gloss "ephemeral", "task telemetry", and "predicate pushdown" the first time each appears in the monitoring section.
+
+### Iter 168 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (SSL/TLS for PostgreSQL catalog JDBC connection)
+**Score:** 3.60 / 5 (PASS)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy (×2) | 4 |
+| Beginner clarity | 4 |
+| Practical applicability | 3 |
+| Completeness | 3 |
+| **Weighted average (Tech×2)** | **3.60** |
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.162 across 13 questions; new running avg (4.162 × 13 + 3.60) / 14 = (54.106 + 3.60) / 14 = **4.122 across 14 questions**. Status: NEEDS WORK (4.122 < 4.5 raised threshold). Topic average ticked down because answer hedged on a documented baseline (`ssl=true`) that Trino's own connector docs cover explicitly. Honest-admission instinct is correct behavior, but the resource gap on SSL/TLS forced honesty where confident answer was possible.
+
+**Notes**: Verified against trino.io/docs/current/connector/postgresql.html (which states "enable TLS by appending the `ssl=true` parameter to the `connection-url`") and jdbc.postgresql.org/documentation/ssl/. Responder's general claims are accurate: SSL params go in the JDBC URL as query string; `sslmode` ladder (disable/allow/prefer/require/verify-ca/verify-full) is correct; `sslrootcert`/`sslcert`/`sslkey` are valid pgjdbc parameter names; difference between `require` (encrypt, no verify) and `verify-full` (encrypt + cert + hostname) is stated correctly; k8s secret mount approach for cert files is the right production pattern. **Gaps**: (a) the responder hedged with "likely what you need" on parameters that are explicitly in Trino's docs — the answer could have committed to a concrete `ssl=true` baseline and a `sslmode=verify-full&sslrootcert=...` production example; (b) no complete copy-paste `connection-url` example with SSL params; (c) no mention that pgjdbc requires `sslkey` to be PKCS-8 DER or PKCS-12 (PEM keys won't work); (d) no mention of `pg_stat_ssl` on the Postgres side as the way to verify the Trino-originated session is actually encrypted; (e) no mention of restart requirement for catalog property changes; (f) no concrete k8s Secret + volumeMount manifest for the on-prem k8s production stack.
+
+**Resource fix recommendations**:
+- **HIGH (correctness/completeness)** — `resources/22-trino-federation-postgresql.md`: add a "SSL/TLS for the PostgreSQL connector" section that documents (1) the baseline `?ssl=true` exactly as Trino docs show it, (2) the `sslmode` ladder with concrete guidance (`require` for encrypt-only, `verify-full` for production with CA verification), (3) full production `connection-url` example with `sslmode=verify-full&sslrootcert=/etc/trino/certs/ca.crt`, (4) pgjdbc constraint that `sslkey` must be PKCS-8 DER or PKCS-12 (not PEM), (5) `SELECT * FROM pg_stat_ssl WHERE pid = <trino_session_pid>` on the Postgres side as the verification step, (6) catalog property restart requirement.
+- **HIGH (production fit)** — same file: add a complete k8s pattern for mounting the CA cert into Trino pods — Secret manifest with the CA cert, volumeMount onto `/etc/trino/certs/ca.crt`, and the matching `sslrootcert=/etc/trino/certs/ca.crt` URL parameter. This is the missing piece between "use a k8s secret" and "here is what to actually deploy".
+- **MEDIUM (clarity)** — same file: add a short decision table — "SSL goal → sslmode value → cert files required" so a beginner can pick the right mode without reading the full pgjdbc docs page.
+
+### Iter 168 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (timeout behavior: statement_timeout, socketTimeout, query.max-execution-time, all-or-nothing failure)
+**Score:** 4.50 / 5 (PASS)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy (×2) | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.0 |
+| **Weighted average (Tech×2)** | **4.50** |
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.122 across 14 questions; new running avg (4.122 × 14 + 4.50) / 15 = (57.706 + 4.50) / 15 = **4.147 across 15 questions**. Status: NEEDS WORK (4.147 < 4.5 raised threshold). Q2 meets the raised topic threshold exactly; Q1's 3.60 (resource gap on SSL) prevented the iteration from delivering a clean topic-average lift.
+
+**Notes**: All three timeout layers verified against trino.io and jdbc.postgresql.org. Postgres `statement_timeout` (standard PG GUC, postgresql.conf or per role) — correct. pgjdbc `socketTimeout` and `connectTimeout` (URL params, seconds, 0 = disabled) — correct, jdbc.postgresql.org documentation confirms. Trino `query.max-execution-time` (Query management properties, "maximum allowed time for a query to be actively executing before terminated; excludes analysis, planning, queue wait") — correct. Cross-catalog join execution on Trino workers (not pushed down to Postgres) — correct, Trino's PostgreSQL connector docs state cost-based join pushdown applies within a single catalog only; cross-catalog joins must run on workers. All-or-nothing failure semantics — correct for OSS Trino 467 (no partial-result mechanism; a failed split propagates to the parent stage and fails the entire query). Resource group `hardConcurrencyLimit` and PgBouncer transaction-pooling + `prepareThreshold=0` are real and correctly described. **Gaps**: (a) no mention of `query_max_execution_time` session property as a per-query override; (b) no mention of dynamic-filtering build-side stall as a secondary failure mode when Postgres is the small side; (c) no mention of OPA decision logs or Trino event-listener as the persistent record of timed-out federation queries on the on-prem k8s stack (recurring 4-iteration miss); (d) `socketTimeout` nuance not surfaced — it applies per socket read, NOT as a total query timeout, so an actively-streaming Postgres query is not bounded by it; (e) no mention of `query.max-planning-time` / `query.max-run-time` siblings; (f) the quoted error message "java.io.IOException: Query aborted" is a paraphrase — actual Postgres-side timeout surfaces as `PSQLException: ERROR: canceling statement due to statement timeout`; (g) no retry/idempotency callout for the SaaS product to act on.
+
+**Resource fix recommendations**:
+- **HIGH (correctness)** — `resources/22-trino-federation-postgresql.md`: add a "Timeout layers and failure semantics" section that documents (1) the three layers — Postgres `statement_timeout`, pgjdbc `socketTimeout`/`connectTimeout`, Trino `query.max-execution-time` (and the session-property form `query_max_execution_time`); (2) the all-or-nothing failure model with the actual error chains a beginner will grep for (Postgres → `PSQLException: canceling statement due to statement timeout`; JDBC socket → `IOException`; Trino-side → `QUERY_EXECUTION_TIMEOUT`); (3) the `socketTimeout` per-read nuance — it does NOT bound total query time on streaming responses; (4) dynamic-filtering build-side stall as a secondary failure mode when Postgres is the small side of the join.
+- **HIGH (production fit, recurring across 4 iterations)** — same file: OPA decision logs + Trino event listener as the persistent record of federation query failures on the on-prem k8s stack. A timed-out query produces (a) an OPA audit record for the catalog/schema/table resources it touched, (b) an event-listener record capturing the failure reason and timing. Together these are the postmortem source of truth; Trino's in-memory `system.runtime.queries` evicts after ~15 minutes.
+- **MEDIUM (completeness)** — same file: name all three Trino "max time" properties (`query.max-planning-time`, `query.max-execution-time`, `query.max-run-time`) and which one to set for what failure mode.
+- **MEDIUM (practical)** — same file: add a "should the SaaS product auto-retry on federation timeout?" callout — yes for idempotent reads; surface the error clearly for writes.
+- **LOW (clarity)** — same file: inline-gloss "transaction pooling", "build side", "dynamic filter", "predicate pushdown" the first time each appears.
+
+### Iter 169 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (credential rotation: catalog restart required, k8s rolling restart, two-password overlap)
+**Score:** 2.40 / 5 (FAIL)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy (×2) | 2.0 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 2.0 |
+| Completeness | 2.0 |
+| **Weighted average (Tech×2)** | **2.40** |
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.147 across 15 questions; new running avg (4.147 × 15 + 2.40) / 16 = (62.205 + 2.40) / 16 = **4.038 across 16 questions**. Status: NEEDS WORK (4.038 < 4.5 raised threshold). Topic average dropped meaningfully because the responder missed a flagship OSS Trino feature that directly answers the engineer's question.
+
+**Notes**: Verified against trino.io docs (Catalog management properties, CREATE/DROP CATALOG, Secrets, Graceful shutdown) and PostgreSQL docs. **The headline claim — "no hot-reload mechanism for catalog configuration" — is incorrect for OSS Trino 467**. Trino's Dynamic Catalog Management (`catalog.management=dynamic` + `catalog.store=file|memory`) supports `CREATE CATALOG` / `DROP CATALOG` at runtime; dropping a catalog "does not interrupt any running queries that use it." The documented credential-rotation procedure is **DROP CATALOG app_pg → CREATE CATALOG app_pg WITH (...)** with the new credentials (`ALTER CATALOG` is tracked as #25542, not yet shipped). The responder explicitly states "no documented hot-reload or dynamic credential provider mechanism in OSS Trino 467" — this is wrong. **The Postgres two-password overlap framing is also wrong**: mainline PostgreSQL does NOT support multiple passwords per role (the feature is a PoC/RFC). `ALTER ROLE ... PASSWORD 'new'` replaces atomically; the actual zero-downtime pattern is the **dual-role** approach (`app_user_v2`). The responder's wording "grant the new password, roll Trino, then revoke the old one" implies native Postgres dual-password support that doesn't exist. **Graceful shutdown is missed**: Trino worker pods support graceful shutdown via the `/v1/info/state` endpoint with `shutdown.grace-period` (default 2 min); with `terminationGracePeriodSeconds ≥ 2× grace` and a preStop hook, running tasks drain before pod termination — so "any queries running on a pod being replaced will fail" is misleading for workers (only true if shutdown is not configured). Coordinator restart vs worker restart asymmetry is not addressed (coordinator restart DOES kill all queries). The `${ENV:VAR}` Secrets syntax and the basic rolling-restart mechanism are correct.
+
+**Resource fix recommendations**:
+- **HIGH (correctness, critical miss)** — `resources/22-trino-federation-postgresql.md` (or a new credential-lifecycle subsection): add a "Dynamic Catalog Management for credential rotation" section that documents (1) `catalog.management=dynamic`, `catalog.store=file|memory`, (2) CREATE CATALOG / DROP CATALOG SQL syntax with a Postgres example, (3) the **DROP-then-CREATE** rotation pattern (since ALTER CATALOG is not yet supported — link #25542), (4) the "does not interrupt running queries" guarantee on DROP, (5) the k8s multi-node caveat (issue #25651) and the workaround (coordinator-only catalog store + replicated coordinator config).
+- **HIGH (correctness)** — same file: add a "Graceful worker shutdown on k8s" section covering `shutdown.grace-period`, `terminationGracePeriodSeconds ≥ 2× grace`, preStop lifecycle hook that PUTs `"SHUTTING_DOWN"` to `/v1/info/state`, OPA policy allowing the shutdown system action (default system access control denies it), and the explicit **coordinator-vs-worker restart asymmetry** (coordinator restart kills all queries; worker restart with graceful shutdown drains).
+- **HIGH (correctness)** — same file: correct the Postgres rotation section — native `ALTER ROLE ... PASSWORD` replaces atomically; there is NO native dual-password. Document the **dual-role pattern** (`app_user` and `app_user_v2`, switch catalog credentials, drop old role) as the real zero-downtime mechanism. Mention PgBouncer `auth_query` / `auth_file` as another integration point.
+- **MEDIUM (production fit)** — same file: tie the credential rotation flow to JWT + OPA — Trino-side authentication is JWT, so `connection-user` / `connection-password` are Postgres-side credentials only; OPA still gates which Trino users can use the catalog at all. Note that the CREATE CATALOG statement is logged in the web UI WITH credentials — so the rotation procedure must be aware of audit-log exposure.
+- **LOW (completeness)** — same file: keep the existing (correct) `${ENV:VAR}` + k8s Secret pattern, but cross-reference it with the dynamic catalog path — they are complementary: dynamic catalogs are still backed by Secret-derived env values when `catalog.store=file`.
+
+### Iter 169 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (no PK table: performance root cause, index vs PK distinction, predicate pushdown diagnostic)
+**Score:** 4.30 / 5 (PASS general 3.5 / FAIL topic 4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy (×2) | 4.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.0 |
+| **Weighted average (Tech×2)** | **4.30** |
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.038 across 16 questions; new running avg (4.038 × 16 + 4.30) / 17 = (64.608 + 4.30) / 17 = **4.053 across 17 questions**. Status: NEEDS WORK (4.053 < 4.5 raised threshold for this topic). Iter169 was a regression iteration overall — Q1's 2.40 dragged the topic average down from 4.147 → 4.038; Q2's 4.30 was insufficient to recover (only lifted to 4.053).
+
+**Notes**: Verified against trino.io (Pushdown docs, PostgreSQL connector docs, Dynamic filtering docs) and postgresql.org (CREATE INDEX, pg_indexes, unique indexes). The core thesis — "PK absence isn't the root cause; index absence is" — is CORRECT. Trino's PostgreSQL connector does not consult PG primary-key metadata for optimization beyond what indexes provide; the optimizations are statistics-based (cost-based join pushdown), predicate/projection pushdown via JDBC, and dynamic filtering. PG's automatic unique B-tree index for every PRIMARY KEY (postgresql.org/docs/current/indexes-unique.html) explains why PK tables tend to be faster in practice — it's the auto-created index, not the PK metadata. `CREATE INDEX CONCURRENTLY` is verified correct: holds `ShareUpdateExclusiveLock` during the bulk of the build (allows INSERT/UPDATE/DELETE), brief `AccessExclusiveLock` only at the end. `pg_indexes` columns `tablename`/`indexname`/`indexdef` are verified real. Range pushdown exclusion for character types is verified correct (PG connector docs: range predicates not pushed down on CHAR/VARCHAR unless experimental `postgresql.experimental.enable-string-pushdown-with-collate` is set). **However**: the ScanFilterProject vs Filter diagnostic is muddled — successful pushdown actually means the predicate appears within a `TableScan` node and there is NO ScanFilterProject in the plan; failed pushdown shows a `ScanFilterProject` (the operator that runs filters inside Trino). The answer's "If predicates are embedded inside the `ScanFilterProject` node ... pushdown worked" reverses the meaning. Also, `dynamicFilterSplitsProcessed` should be checked on the **probe-side** scan (the side that CONSUMED the dynamic filter — typically Postgres in an Iceberg-as-build / Postgres-as-probe join), not "the Iceberg side" as the answer says. Other missing nuance: cross-catalog joins always run in Trino workers (cannot be pushed down to either side); `ANALYZE table_name` must be run after `CREATE INDEX` for the PG planner to actually pick up the new index; `CREATE INDEX CONCURRENTLY` can fail and leave an INVALID index that must be DROP'd and retried.
+
+**Resource fix recommendations**:
+- **HIGH (correctness)** — `resources/22-trino-federation-postgresql.md`: add a "Predicate pushdown — how to verify with EXPLAIN" section with **annotated EXPLAIN output snippets** showing (a) successful pushdown — `TableScan[table = app_pg:public.users, constraint = (id = 42)]` with predicate inside the TableScan's constraint field, no ScanFilterProject above it; (b) failed pushdown — `ScanFilterProject[filterPredicate = ...] -> TableScan[...]` doing the filter inside Trino. Pair with `pg_stat_activity` Postgres-side verification as the ground truth.
+- **HIGH (correctness)** — same file: tighten the dynamic-filtering section to clarify direction. `dynamicFilterSplitsProcessed` appears on the **probe-side** TableScan operator (the scan that CONSUMED the dynamic filter), not the build-side scan that produced it. For Iceberg-as-build / Postgres-as-probe joins, check the metric on the Postgres scan, not the Iceberg one.
+- **HIGH (production fit)** — same file or new `resources/22b-postgres-side-tuning.md`: add a "Postgres-side index creation for federation joins" section covering (1) PK auto-creates unique B-tree index, so PK-vs-index distinction is the key insight; (2) `CREATE INDEX CONCURRENTLY` full lifecycle — cannot run in transaction, can fail leaving INVALID index (check `pg_index.indisvalid`), ~2x slower than plain CREATE INDEX, does not block writes; (3) partial indexes for hot-recent/cold-old log table access patterns; (4) `ANALYZE table_name` post-creation so PG planner picks up the new index; (5) `pg_stat_user_tables` `seq_scan` vs `idx_scan` counters as post-hoc verification.
+- **HIGH (production fit, recurring across 5 iterations)** — same file: OPA decision logs + Trino event listener as the persistent record of federation query activity. **Fifth consecutive iteration this gap has been flagged** (iter165, iter166, iter167, iter168, iter169). Teacher must address in next cycle.
+- **MEDIUM (completeness)** — same file: a "cross-catalog joins always run in Trino workers, never in Postgres" callout — frames why even an indexed Postgres side won't make a 10M-row join fast.
+- **MEDIUM (clarity)** — same file: inline-gloss the first appearance of "ScanFilterProject," "TableScan," "dynamic filter," "build side," "probe side," "Seq Scan," "Index Scan."
+
+### Iter 170 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (resource groups: postgres_federation vs internal_iceberg isolation, JWT selector, database manager)
+**Score:** 4.60 / 5 (PASS general 3.5 / PASS topic 4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy (×2) | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Weighted average (Tech×2)** | **4.60** |
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.061 across 18 questions (after iter170 Q1 commit); new running avg (4.061 × 18 + 4.60) / 19 = (73.098 + 4.60) / 19 = **4.089 across 19 questions**. Status: NEEDS WORK (4.089 < 4.5 raised threshold). Q2 helps modestly but the topic average remains well below threshold due to iter163/164/165/169 Q1 FAIL drag.
+
+**Notes**: Verified against trino.io 467/current docs (Resource groups, JWT authentication). All major claims accurate: `hardConcurrencyLimit` / `softMemoryLimit` / `maxQueued` are the canonical resource-group properties; `etc/resource-groups.properties` + `resource-groups.configuration-manager=file` + `resource-groups.config-file=...` is the canonical file-based registration; `configuration-manager=db` does reload every 1 second (hardcoded; tracked in issue #14514). JWT selector mapping is correct: the `user` field in selector is a Java regex matched against the resolved Trino username, which equals the JWT `sub` claim by default (`http-server.authentication.jwt.principal-field=sub`). Two-file separation (do not merge resource-groups into `config.properties`) is correct Trino plugin-loading practice. **Minor accuracy ding**: "hardConcurrencyLimit: 8 caps Postgres connections" conflates queries with JDBC connections — the limit caps concurrent **queries**, but each query may open multiple JDBC connections per split, so true connection capping requires pairing with `postgresql.connection-pool.max-size` or PgBouncer. **Minor design issue**: the selector example's catch-all `{ "user": ".*", "group": "global.postgres_federation" }` routes every non-data-team user to the federation bucket, including internal Iceberg users not in `data-team` — a safer default would be a separate `default` sub-group. **Gaps**: (1) no verification path (`system.runtime.queries.resource_group_id`); (2) no mention of `source` or `clientTags` selectors as alternatives when JWT principal is shared across query patterns; (3) `hardCpuLimit` / `softCpuLimit` are warned against in the "What NOT to do" but not explained as legitimate options.
+
+**Resource fix recommendations**:
+- **MEDIUM (correctness)** — `resources/22-trino-federation-postgresql.md` (or a new `resources/23-trino-resource-groups.md`): add a sub-section "Resource groups limit queries, not connections" — clarify that `hardConcurrencyLimit` caps concurrent queries; per-query JDBC connection count depends on split parallelism. Pair with `postgresql.connection-pool.max-size` (Trino-side) and/or PgBouncer (PG-side) for true connection caps.
+- **MEDIUM (production fit)** — same file: add a "Verifying which group a query landed in" section using `SELECT query_id, resource_group_id, state FROM system.runtime.queries WHERE state IN ('RUNNING', 'QUEUED')`.
+- **MEDIUM (completeness)** — same file: document `source` (set via JDBC `source` property or `--source` CLI flag) and `clientTags` (set via `clientTags` JDBC property or `--client-tags`) as alternative selector fields when JWT principal alone isn't discriminating enough (e.g., the SaaS product backend uses one JWT identity for both federation and Iceberg queries).
+- **MEDIUM (completeness)** — same file: document `hardCpuLimit` / `softCpuLimit` (CPU time over a window) as legitimate options for runaway-query control on federation buckets.
+- **LOW (clarity)** — same file: a safer default-selector pattern showing the catch-all rule routing to an isolated `default` sub-group rather than dumping it into `postgres_federation`.
+- **HIGH (production fit, recurring across 6 iterations)** — same file: OPA decision logs + Trino event listener as the persistent record of federation query activity (and now: as the audit trail for resource-group routing decisions). **Sixth consecutive iteration this gap has been flagged** (iter165, iter166, iter167, iter168, iter169, iter170). Teacher must address in next cycle.
+
+### Iter 170 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (Dynamic Catalog Management: catalog.management=dynamic, CREATE/DROP CATALOG, no ALTER CATALOG)
+**Score:** 4.20 / 5 (PASS general 3.5 / FAIL topic 4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy (×2) | 4.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 4.0 |
+| Completeness | 4.0 |
+| **Weighted average (Tech×2)** | **4.20** |
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.053 across 17 questions; new running avg (4.053 × 17 + 4.20) / 18 = (68.901 + 4.20) / 18 = **4.061 across 18 questions**. Status: NEEDS WORK (4.061 < 4.5 raised threshold). Clear improvement on the topic's core gap from iter169 Q1 (2.40 FAIL) — responder now knows about `catalog.management=dynamic`, CREATE/DROP CATALOG syntax, no ALTER CATALOG, and the dual-name rotation workaround.
+
+**Notes**: Verified against trino.io/docs/467 (CREATE CATALOG, DROP CATALOG, properties-catalog). All core technical claims confirmed: `catalog.management=dynamic` is a real OSS Trino 467 property with `static`/`dynamic` values; CREATE CATALOG SQL syntax with double-quoted dashed property names is correct; DROP CATALOG explicitly does NOT interrupt in-flight queries per docs ("Dropping a catalog does not interrupt any running queries that use it, but makes it unavailable to any new queries"); ALTER CATALOG is genuinely absent. **Gaps**: (1) Trino 467 docs explicitly mark dynamic catalog management as **experimental** with possible backward-incompatible syntax changes — answer presents as stable. (2) **K8s-specific gotcha not flagged**: dynamic mode requires a writable catalog directory; a read-only ConfigMap mount (the common k8s pattern) causes `FileNotFoundException ... Read-only file system` on CREATE CATALOG. Ref: trinodb/trino#25651. User explicitly said they're on k8s — this is high-impact for them. (3) Credential-logging warning omitted: trino.io docs warn "the complete CREATE CATALOG query is logged...including any sensitive properties, like passwords and other credentials" — directly relevant since the answer puts a customer password inline.
+
+**Resource fix recommendations**:
+- **HIGH (correctness)** — `resources/22-trino-federation-postgresql.md` (or wherever Dynamic Catalog Management was added in iter170): add the **experimental** designation explicitly with a callout box. Quote the docs warning verbatim so the responder transmits it.
+- **HIGH (production fit)** — same file: add a "**Dynamic catalog management on Kubernetes**" subsection covering the writable-volume requirement. The standard `etc/catalog/` ConfigMap mount must be replaced (or supplemented) with a writable volume (emptyDir, PVC, or a different `catalog.store` backend) before CREATE CATALOG will work. Reference issue trinodb/trino#25651 by behavior, not URL. Include the exact error string (`FileNotFoundException ... Read-only file system`) so engineers recognize it.
+- **HIGH (production fit)** — same file: add a "**CREATE CATALOG credential exposure**" callout. The full statement (including `connection-password`) is logged and visible in the Trino Web UI's query history. Mitigations: (a) use `${ENV:VAR}` references against k8s Secret-backed env vars even within CREATE CATALOG values so the literal password never appears in the SQL; (b) restrict Web UI access via OPA; (c) rotate immediately if a password ever appeared in plain text in a CREATE CATALOG call.
+- **MEDIUM (completeness)** — same file: keep the dual-name rotation pattern (this part of the answer was solid) but add the cross-reference: under static-mode catalogs you can rotate via `${ENV:VAR}` + Secret update + coordinator restart; under dynamic mode you use the dual-name CREATE/DROP pattern. Same underlying mechanism (env var indirection) helps in both.
+- **HIGH (production fit, recurring across 6 iterations)** — OPA decision logs + Trino event listener as the persistent record of federation query activity (including CREATE CATALOG / DROP CATALOG audit trail). **Sixth consecutive iteration this gap has been flagged** (iter165, iter166, iter167, iter168, iter169, iter170). Teacher must address in next cycle.
+
+### Iter 171 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (cross-catalog views: Iceberg+Postgres join, schema-change accuracy, metadata cache, silent corruption)
+**Score:** 3.80 / 5 (PASS general 3.5 / FAIL topic 4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy (×2) | 3.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 3.5 |
+| Completeness | 4.0 |
+| **Weighted average (Tech×2)** | **3.80** |
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.089 across 19 questions; new running avg (4.089 × 19 + 3.80) / 20 = (77.691 + 3.80) / 20 = **4.075 across 20 questions**. Status: NEEDS WORK (4.075 < 4.5 raised threshold). Topic average drifted DOWN this iteration — the responder regressed on the iter165 Q2 metadata-cache gap (which had been fixed in the resource) by inventing a procedure-parameter syntax that does not exist in the PostgreSQL connector.
+
+**Notes**: Verified against trino.io/docs/current/connector/postgresql.html and trino.io/docs/current/sql/create-view.html. **Correct major claims**: (a) Trino stored views hold SQL definition only, executed on every reference — verified at trino.io CREATE VIEW docs ("views do not contain any data; instead, the query stored by the view is executed every time the view is referenced"); (b) `metadata.cache-ttl` default is `0s` (caching disabled) on the PostgreSQL connector — verified; (c) silent-corruption-on-SELECT-* scenario when a new column is added during cache window is plausible and matches WebFetch's reading of the docs (cache returns the column list as-of cache time, planner projects only those columns). **Critical factual error in section (3)**: The answer shows `CALL app_pg.system.flush_metadata_cache(schema_name => 'public', table_name => 'accounts')` as a granular per-table flush form. This **named-parameter form is NOT supported by the PostgreSQL connector** — verified directly against trino.io/docs/current/connector/postgresql.html: the PostgreSQL connector's `flush_metadata_cache` is **parameterless**. The schema_name/table_name parameters exist on the Hive and Delta Lake connectors but NOT on the PostgreSQL/JDBC-based connectors. The granular form for PostgreSQL is `USE app_pg.public; CALL system.flush_metadata_cache();` (schema-scoped via USE statement, not via named arguments). This is the exact same class of error that caused the iter163 (`connection-pool.*` properties that only exist in Starburst) and iter169 Q1 (`ALTER CATALOG`) failures — confidently inventing a syntax that doesn't exist in OSS Trino. An engineer who copy-pastes this will hit a "procedure does not accept argument schema_name" error at the exact moment they need the flush to work. **Other gaps**: (a) does not mention `CREATE OR REPLACE VIEW` as the explicit mechanism to update view definitions after a schema change (just alludes to "update the view definition"); (b) does not mention `information_schema.views` per-catalog scope for finding affected views (recurring gap from iter165 Q2); (c) does not address `SECURITY DEFINER` vs `SECURITY INVOKER` view modes — relevant to "stays accurate" because a DEFINER-mode view continues to use the view owner's permissions and can mask permission changes on the underlying tables after the source schema evolves; (d) does not mention OPA-side audit of view-definition changes; (e) silent-corruption section (4) sub-scenario about Postgres rejecting the query but the error being "swallowed and result in NULLs" is hand-wavy — in standard JDBC the error propagates as a SQLException, not as NULL data. The truly silent scenario is the SELECT * + new-column case (which IS correctly described); the column-rename-during-cache-window case typically surfaces as a hard error, not silent NULLs.
+
+**Resource fix recommendations**:
+- **HIGH (correctness)** — `resources/22-trino-federation-postgresql.md` schema-cache section: explicitly state that the PostgreSQL connector's `flush_metadata_cache` procedure is **parameterless** — no `schema_name` or `table_name` named arguments. Document the granular form as `USE <catalog>.<schema>; CALL system.flush_metadata_cache();` (schema-scoped via session USE statement). Add a side-by-side comparison: Hive/Delta connectors support `(schema_name, table_name)` named parameters; JDBC connectors (PostgreSQL, MySQL, SQL Server, etc.) do not. Cite trino.io/docs/current/connector/postgresql.html directly.
+- **HIGH (correctness)** — same file: tighten the silent-corruption section. The genuinely silent case is **stale cached column list during SELECT * + ALTER TABLE ADD COLUMN** (Trino projects only the cached columns; the new column is invisible without error). The column-rename case typically surfaces as a hard `column not found` error from Postgres (visible in Trino's error stack), not silent NULLs. Resources should not conflate the two failure modes — engineers acting on the wrong mental model will tune the wrong monitoring.
+- **HIGH (production fit)** — same file: add a "View lifecycle after a source-schema change" runbook covering (1) `CREATE OR REPLACE VIEW` syntax (preserves grants, atomically replaces definition), (2) `SELECT * FROM <catalog>.information_schema.views WHERE view_definition LIKE '%old_col%'` to locate affected views per catalog, (3) per-catalog scope of `information_schema.views` (need to query each catalog separately), (4) `SECURITY INVOKER` vs `SECURITY DEFINER` implications for the view consumer when underlying-table grants change.
+- **MEDIUM (correctness)** — same file: cross-catalog view security mode default — Trino views default to `SECURITY DEFINER` (verified at trino.io/docs/current/sql/create-view.html). Document the implication: queries run as the view creator, so an analyst who lacks `SELECT` on `app_pg.public.accounts` can still query the view. For federation views joining Postgres, this is usually the intent, but it means schema changes can silently change what data the view exposes (e.g., a new sensitive column added to accounts becomes accessible via `SELECT *` in the view to all view-grantees).
+- **HIGH (production fit, recurring across 7 iterations)** — same file: OPA decision logs + Trino event listener as the persistent record of federation query activity (including view-creation and view-execution audit). **Seventh consecutive iteration this gap has been flagged** (iter165, iter166, iter167, iter168, iter169, iter170, iter171). Teacher must prioritize in next cycle.
+- **LOW (clarity)** — same file: inline-gloss "predicate pushdown," "JDBC query," "planner," "projection" when first used in the federation context.
+### Iter 171 Q2 — 2026-05-26 (EXTENDED PHASE) — Multi-tenant analytics (OPA for Trino catalog authorization)
+**Score:** 4.00 / 5 (PASS general 3.5 / PASS topic 3.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.0 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 4.0 |
+| Completeness | 4.0 |
+| **Average** | **4.00** |
+
+**Topics updated**: Multi-tenant analytics: isolating customer data in SaaS — prior avg 4.458 across 104 questions; new running avg (4.458 × 104 + 4.00) / 105 = **4.453 across 105 questions**. Status: PASSED.
+
+**Notes**: Verified against trino.io/docs/current/security/opa-access-control.html and trino.io/docs/current/security/jwt.html. **Correct major claims**: (a) Trino has native OPA system access control plugin (`access-control.name=opa`) — verified; (b) `opa.policy.uri` config property correct — verified; (c) checks happen at query analysis time before execution (catalog/schema/table/column granularity) — verified; (d) Trino sends username + groups to OPA, NOT raw JWT claims — verified; (e) JSON input document structure shown is accurate — verified; (f) OPA decision log per evaluation exists — verified. **Critical errors**: (1) Claim that JWT groups-field can be configured via `http-server.authentication.jwt.groups-field=groups` — this property does NOT exist in Trino. Group membership in Trino comes from a separate group provider (file-based, LDAP, etc.), not the JWT authenticator; this is an open GitHub issue (#28571). (2) Calls OPA decision log "durable" — `console: true` writes to OPA stdout (not durable); durability requires a remote sink or log shipping to a backend. (3) Config example includes `opa.policy.row-filters-uri` but no `opa.policy.column-masking-uri` despite discussing column masking in section (2). (4) Missing: batch endpoints for high-QPS deployments; prod_info.md guidance to defer specific Rego policy authoring to external governance document (answer provides concrete Rego snippets without this caveat).
+
+**Resource fix recommendations**:
+- **HIGH (correctness)** — `resources/05-multi-tenant-analytics.md` or `resources/22-trino-federation-postgresql.md` OPA section: remove/correct the JWT groups-field claim. Document that Trino group membership comes from a separately configured group provider (file-based `etc/group-provider.properties`, LDAP, etc.) — not from the JWT authenticator. The JWT authenticator extracts username only.
+- **HIGH (correctness)** — same: clarify OPA decision log durability. `console: true` writes to OPA stdout — NOT durable by default. Durability requires either (a) piping OPA stdout to a persistent logging backend (Fluentd, Loki, ELK), or (b) configuring a remote service sink in the OPA decision-log config. Do not use the word "durable" without qualification.
+- **MEDIUM (completeness)** — same: add `opa.policy.column-masking-uri` config property when column masking is discussed. The config block should be complete when the feature is mentioned.
+- **MEDIUM (production fit)** — same: add caveat that specific Rego policy authoring (tenant-specific rules, permission hierarchies) belongs in the external governance document; the resources should describe the mechanism, not write prod policies.
+
+### Iter 172 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (reading EXPLAIN output to verify PostgreSQL predicate pushdown)
+**Score:** 4.80 / 5 (PASS general 3.5 / PASS topic 4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy (×2) | 4.5 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Weighted average (Tech×2)** | **4.80** |
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.075 across 20 questions; new running avg (4.075 × 20 + 4.80) / 21 = (81.50 + 4.80) / 21 = **4.110 across 21 questions**. Status: NEEDS WORK (4.110 < 4.5 raised threshold). Strongest federation answer in several iterations; aligns with the iter169 Q2 → iter170/171 teacher fixes flagged for the EXPLAIN-pushdown-verification gap. Topic average finally creeping toward threshold.
+
+**Notes**: Verified against trino.io/docs/current/optimizer/pushdown.html and trino.io/docs/current/connector/postgresql.html. **Correct major claims**: (a) the `ScanFilterProject` operator above `TableScan` = pushdown failed signal — verified at trino.io/docs/current/optimizer/pushdown.html ("If predicate pushdown for a specific clause is successful, the EXPLAIN plan for the query does not include a ScanFilterProject operation for that clause"); (b) successful pushdown shows predicate embedded in the `TableScan` node's constraint field — directionally correct (the real EXPLAIN output renders this as a separate `constraint on [columns]` line under TableScan rather than inline in the bracket, but the conceptual mapping is right); (c) PostgreSQL connector does NOT push down range predicates on character string types by default — verified at the PostgreSQL connector docs ("The connector does not support pushdown of range predicates...on columns with character string types"); (d) `postgresql.experimental.enable-string-pushdown-with-collate=true` property name — verified exact spelling against trino.io/docs and PR trinodb/trino#9746; (e) supported pushdown predicates list (equality, inequality, IN, IS NULL, range on non-string) — verified accurate; (f) `pg_stat_activity` as ground-truth verification approach — technically sound, standard production practice; the `query` column shows the exact SQL Trino sent to Postgres; (g) `EXPLAIN (TYPE DISTRIBUTED)` vs `EXPLAIN ANALYZE` distinction — correct (planning-only vs execution-time stats); (h) functions like `LOWER()` preventing pushdown — generally correct (function-call expression pushdown is limited in OSS Trino 467). **Accuracy nits**: (1) **EXPLAIN output formatting is stylized**, not verbatim Trino 467 output — real `EXPLAIN (TYPE DISTRIBUTED)` produces a multi-line tree with `Layout:`, `Estimates:`, and `constraint on [columns]` as separate indented lines, not inline-in-bracket. The answer's representation is conceptually right but an engineer copy-pasting the exact format into a grep pattern would miss matches. Should add "your actual output will look slightly different — look for the `constraint on` line under the TableScan node" disclaimer. (2) **ILIKE pushdown claim is questionable** — the answer says `WHERE email ILIKE 'user@example.com'` "pushes as case-insensitive equality." This is not documented in official Trino docs; ILIKE is a pattern operator, and while some ILIKE forms may be pushable via expression pushdown in newer versions, presenting it as a guaranteed fix without "verify with EXPLAIN" is overconfident. The safer rewrite recommendation is to denormalize a `lower_email` column or to use `email = 'user@example.com'` if case-sensitive equality is acceptable. (3) The `email LIKE 'a%'` example as a "string LIKE didn't push" case is correct in spirit, but the specific reason in the answer ("character collation differs between Postgres and Trino") is the reason for *range* predicates not pushing — LIKE's non-pushdown reason is separately that LIKE is not listed as a supported expression pushdown predicate in the PostgreSQL connector. Conflates two distinct documentation rules. (4) "Trino issued `SELECT id, email, order_date, amount FROM orders WHERE order_date >= '2026-05-01'` to Postgres" — accurate behavior, but in production the actual SQL Trino sends may also include the column-list projection pushdown and may quote identifiers; the engineer should expect minor textual differences. **Strengths**: structured into 5 numbered sections; gives both the EXPLAIN-side (planner intent) AND pg_stat_activity-side (ground truth) verification — explicitly names pg_stat_activity as "definitive proof," which is the right framing; the summary table mapping plan shape → pushdown status → performance is the cleanest mental model the responder has produced for this topic; includes a concrete fix (string-pushdown property) AND a workflow ("two-step verification") at the end. Directly addresses the engineer's specific question ("how do I read the output to tell the difference?"). **Gaps**: (a) no mention of OPA decision logs or Trino event listener as the persistent record of federation query activity — eighth consecutive iteration this gap has been flagged on the federation topic; (b) no mention of the Trino Web UI's Plan tab as a more visual alternative to text EXPLAIN; (c) `EXPLAIN ANALYZE` "Physical Input" / "Input rows" fields not named as the runtime confirmation signal (more rows than the final filter result = pushdown failed); (d) no callout that aggregate, join, limit, top-N pushdown also exist and have their own EXPLAIN signals (the question was narrow but a one-line cross-reference would help); (e) cross-catalog join joins always run on Trino workers — not directly relevant to this question but worth a one-liner since the next question the engineer will ask is "why didn't my join push down."
+
+**Resource fix recommendations**:
+- **MEDIUM (correctness)** — `resources/22-trino-federation-postgresql.md` predicate-pushdown section: temper the ILIKE recommendation. State explicitly that ILIKE pushdown is not documented in OSS Trino 467's PostgreSQL connector docs, and the engineer must verify with EXPLAIN before assuming it pushes. Recommend a denormalized `lower_email` column or case-sensitive equality as the safer rewrites; ILIKE is a "try and verify" path, not a guaranteed fix.
+- **MEDIUM (correctness)** — same file: disambiguate WHY each predicate type doesn't push. Range predicates on strings: not pushed because of collation differences. LIKE predicates: not pushed because LIKE is not listed as a supported expression pushdown predicate (separate rule). Function calls (LOWER, SUBSTRING): not pushed because expression pushdown for these is limited in OSS Trino 467. Three separate rules — current resource conflates them.
+- **MEDIUM (clarity)** — same file: add a "what real EXPLAIN output actually looks like" example with verbatim Trino 467 output formatting (multi-line tree with `Layout:`, `Estimates:`, `constraint on [columns]` on separate indented lines), so engineers grepping/parsing the output can match real text rather than the stylized inline-bracket form. Keep the stylized form as the explanatory diagram, but pair it with a real-output example.
+- **MEDIUM (completeness)** — same file: add a one-line cross-reference that join, aggregate, limit, and top-N pushdown also have EXPLAIN signals (Aggregate operator absent = pushed; Join operator on PG-only side absent = pushed; etc.). The engineer's next question will likely be about join pushdown.
+- **LOW (clarity)** — same file: name the EXPLAIN ANALYZE field "Physical Input" / "Input rows" as the runtime confirmation that pushdown worked (rows-in matches final-result rows for the scan = filter happened on the source; rows-in >> final-result rows = filter happened in Trino).
+- **HIGH (production fit, recurring across 8 iterations)** — same file: OPA decision logs + Trino event listener as the persistent record of federation query activity. **Eighth consecutive iteration this gap has been flagged** (iter165, iter166, iter167, iter168, iter169, iter170, iter171, iter172). Teacher must prioritize in next cycle.
+
+### Iter 172 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation + Multi-tenant (cross-catalog view permissions: SECURITY DEFINER vs INVOKER)
+**Score:** 4.75 / 5 (PASS both thresholds)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.110 across 21 questions; new running avg (4.110 × 21 + 4.75) / 22 = **4.139 across 22 questions**. Status: NEEDS WORK (4.139 < 4.5 raised threshold). Multi-tenant analytics — prior avg 4.453 across 105 questions; new running avg (4.453 × 105 + 4.75) / 106 = **4.456 across 106 questions**. Status: PASSED.
+
+**Notes**: Verified against trino.io/docs/current/sql/create-view.html. SECURITY DEFINER is the correct default; DEFINER mode allows view access without base-table grants — verified ("This allows providing restricted access to the underlying tables, for which the user may not be allowed to access directly."). INVOKER requires base-table grants — verified. SELECT * + DEFINER sensitive-column leak vector is real and correctly described. OPA as authorization backend (not SQL GRANTs) correctly described per prod_info.md. Three-layer defense model is well-structured and actionable. Minor gaps: (a) does not address `CREATE OR REPLACE VIEW` grant preservation; (b) `current_user` behavior under DEFINER (still resolves to invoker — relevant for row-level filters within the view body); (c) system catalog / metadata leak attack surface could be more concrete (e.g., naming `iceberg.<schema>."<table>$properties"`). These are nuances, not errors — answer is production-correct and safe.
+
+**Resource fix recommendations**: None critical — this is the first iteration where the DEFINER/INVOKER section has been tested and passed cleanly. Teacher may optionally add the `current_user` DEFINER nuance and `CREATE OR REPLACE VIEW` grant-preservation note for completeness.
+
+### Iter 173 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (reading EXPLAIN ANALYZE: which labels prove Postgres did the filter vs Trino pulling whole table)
+**Score:** 4.625 / 5 (PASS general 3.5 / PASS topic 4.5) — see feedback-latest.md for full details
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.625** |
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.139 across 22 questions; new running avg (4.139 × 22 + 4.625) / 23 = **4.160 across 23 questions**. Status: NEEDS WORK (4.160 < 4.5 raised threshold). Trend positive — third consecutive strong federation answer (iter172 Q2 = 4.80, iter172 Q1 = 4.75, iter173 Q1 = 4.625).
+
+### Iter 173 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (PostgreSQL JDBC timeouts + cluster isolation when Postgres replica is bogged down)
+**Score:** 4.70 / 5 (PASS general 3.5 / PASS topic 4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy (×2) | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Weighted average (Tech×2)** | **4.70** |
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.160 across 23 questions; new running avg (4.160 × 23 + 4.70) / 24 = (95.68 + 4.70) / 24 = **4.183 across 24 questions**. Status: NEEDS WORK (4.183 < 4.5 raised threshold). Fourth consecutive strong federation answer (iter172 Q2 = 4.80, iter172 Q1 = 4.75, iter173 Q1 = 4.625, iter173 Q2 = 4.70). Topic average still drag-anchored below 4.5 by iter163/164/165/169 Q1 FAILs but trending toward threshold.
+
+**Notes**: Verified against trino.io/docs/current/admin/properties-query-management.html, trino.io/docs/current/admin/resource-groups.html, trino.io/docs/current/connector/postgresql.html, jdbc.postgresql.org/documentation/use/, and Trino GitHub issue #28373. **Correct major claims**: (a) `socketTimeout` and `connectTimeout` are valid PostgreSQL JDBC URL parameters expressed in seconds — verified at jdbc.postgresql.org (default `connectTimeout=10`, `socketTimeout=0`); (b) `socketTimeout` is per-socket-read not per-query — verified (Scout24 "trap" article and pgjdbc docs both confirm this is the most common misunderstanding); (c) `query.max-execution-time` is the correct Trino property name, and `query_max_execution_time` is the correct session-property spelling — verified at trino.io/docs/current/admin/properties-query-management.html; (d) `hardConcurrencyLimit` caps concurrent **Trino queries** (not JDBC connections directly) — verified, and the answer explicitly calls this out; (e) **CRITICAL CLAIM VERIFIED**: OSS Trino 467 does NOT have native JDBC connection pooling — `connection-pool.enabled` appears in Starburst Enterprise docs (docs.starburst.io/latest/connector/postgresql.html) but NOT in trino.io/docs/current/connector/postgresql.html (OSS). PgBouncer is the correct OSS-stack solution; (f) PgBouncer `transaction` mode + `prepareThreshold=0` pairing is correct (PgBouncer transaction mode breaks server-side prepared statements unless the JDBC driver is told not to use them); (g) resource group isolation between `federation` and `analytics` buckets is real — verified at trino.io/docs/current/admin/resource-groups.html. **Accuracy nits**: (1) "Other resource groups are completely unaffected" overstates the isolation. Per Trino GitHub issue #28373, resource groups limit query count and memory but do NOT limit driver/task slots — a hung JDBC query still consumes worker scheduler threads and JDBC client threads that are not capped by `hardConcurrencyLimit`. For a single hung JDBC read this impact is small (one driver), but the claim should be softened from "completely undisturbed" to "largely protected — query slots are reserved per group, though worker threads holding the blocked socket are still consumed." (2) `query.max-execution-time` covers active execution time only; `query.max-run-time` (which includes queue time) is not mentioned — relevant when the engineer's concern is "user-perceived hang" not just "worker-time hang." (3) The walkthrough says "after 60 seconds of silence, `socketTimeout` fires — JDBC aborts the socket. Trino fails the query with a clear error." Correct, but on OSS Trino 467 the failure propagates as a `TrinoException` with `JDBC_ERROR` code; the literal `SocketTimeoutException` is the wrapped cause — minor framing issue. **Strengths**: Layered four-defense model (JDBC URL timeout → cluster query timeout → resource group → PgBouncer) is exactly the right mental model. Directly addresses both halves of the engineer's question (timeouts AND isolation). The "failure mode walkthrough" (steps 1-6) is the kind of concrete story that makes the abstract concept land. PgBouncer config block is production-usable. Explicit `prepareThreshold=0` warning is a real footgun the answer prevents. Fits prod_info.md (on-prem k8s, OSS Trino 467) precisely. **Gaps**: (a) **9th consecutive federation iteration without OPA decision logs** as the persistent audit trail for federation query activity (timeout failures should be logged for SRE postmortems); (b) `query.max-run-time` vs `query.max-execution-time` distinction (run-time includes queue wait — relevant when queue depth matters during a Postgres incident); (c) `statement_timeout` on the Postgres side (or `SET LOCAL statement_timeout` in the JDBC session) as a complementary defense — Trino can set this via the `pre-execution-sql` connector property in newer versions, though OSS Trino 467 support varies; (d) the answer does not mention that Trino's PostgreSQL connector currently issues one JDBC connection per split (and splits are usually 1 per shard for non-partitioned tables), so a single federation query against an unpartitioned Postgres table opens just one connection — useful sizing context that complements the PgBouncer recommendation; (e) no Trino Web UI guidance for visually identifying which query is stuck on the Postgres connector (Stage details panel).
+
+**Resource fix recommendations**:
+- **LOW (correctness)** — `resources/22-trino-federation-postgresql.md` resource-group section: soften the "completely undisturbed" framing. Per Trino issue #28373, resource groups cap concurrent queries but do not cap worker drivers/threads cluster-wide. A hung JDBC query holds a Trino worker scheduler thread until `socketTimeout` fires; for one query this is negligible but at scale (dozens of hung connections) it can affect cluster-wide thread budgets even with strict resource-group caps. Replace "completely unaffected" with "largely protected — analytics queries continue running because their slot pool is separate, though worker threads holding the blocked JDBC sockets are still consumed until socketTimeout fires."
+- **LOW (completeness)** — same file, query timeouts subsection: add a one-paragraph distinction between `query.max-execution-time` (active execution only, default `null` = unlimited), `query.max-run-time` (includes analysis + planning + queue waiting + execution, default `100d`), and `query.max-planning-time`. The engineer's "user-perceived hang" scenario is governed by `max-run-time`, not just `max-execution-time`.
+- **MEDIUM (production fit)** — same file, JDBC failure-mode walkthrough: name the exact error users will see. OSS Trino 467 wraps `SocketTimeoutException` in a `TrinoException` with error code `JDBC_ERROR`; the user-visible message is `Error executing query` with the SocketTimeoutException as the cause chain. SRE-grade docs should show the literal error format so engineers grep logs correctly.
+- **MEDIUM (completeness)** — same file, complementary defenses section: add `statement_timeout` on the Postgres side as the **fifth** layer of defense (cheapest, server-side, covers cases where Trino's JDBC `socketTimeout` is too generous). Show the PgBouncer-friendly form: `SET LOCAL statement_timeout = 60000` issued per session, since session-level `SET statement_timeout` doesn't survive PgBouncer transaction pooling.
+- **MEDIUM (completeness)** — same file: add a note that the OSS Trino PostgreSQL connector issues one JDBC connection per split, and for non-partitioned Postgres tables this is typically one split per query — useful for sizing the PgBouncer `default_pool_size` against expected concurrent federation queries.
+- **HIGH (production fit, recurring across 9 iterations)** — same file: OPA decision logs + Trino event listener as the persistent record of federation query activity (and now: timeout/failure events for SRE postmortems). **Ninth consecutive iteration this gap has been flagged** (iter165, iter166, iter167, iter168, iter169, iter170, iter171, iter172, iter173). Teacher must prioritize in next cycle — this is the longest-running unaddressed federation gap.
+
+### Iter 174 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (when to give up on Postgres federation and ingest into Iceberg + what you lose by ingesting)
+**Score:** 4.625 / 5 (PASS general 3.5 / PASS topic 4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.625** |
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.183 across 24 questions; new running avg (4.183 × 24 + 4.625) / 25 = (100.392 + 4.625) / 25 = **4.201 across 25 questions**. Status: NEEDS WORK (4.201 < 4.5 raised threshold). **Fifth consecutive strong federation answer** (iter172 Q2 = 4.80, iter172 Q1 = 4.75, iter173 Q1 = 4.625, iter173 Q2 = 4.70, iter174 Q1 = 4.625). Topic average still drag-anchored below 4.5 by iter163/164/165/169 Q1 FAILs but trending up consistently.
+
+**Notes**: Verified against trino.io/docs/current/connector/postgresql.html, trino.io/docs/current/sql/explain-analyze.html, trino.io/docs/current/optimizer/pushdown.html, Trino GitHub issue #389 (parallel read in JDBC connectors), and iceberg.apache.org/docs/latest/spark-procedures/. **Correct major claims**: (a) OSS Trino 467 PostgreSQL connector uses a single JDBC connection per table scan — verified against Trino issue #389 ("Currently read jdbc-based tables are using single connection which could be slow"); (b) Iceberg parallel reads (multiple Parquet files in parallel across workers) — correct architectural contrast; (c) `EXPLAIN ANALYZE` label `Input: N rows (size)` — VERIFIED VERBATIM against trino.io/docs/current/sql/explain-analyze.html, matching format `"Input: 1000 rows (37.11kB)"`; (d) `CALL iceberg.system.rewrite_data_files()` is a real Iceberg procedure — verified at iceberg.apache.org; (e) hybrid UNION ALL view pattern (Iceberg for historical + Postgres for live tail) is a valid Trino SQL idiom (not a documented "feature" but a sound pattern); (f) partition pruning at the file level on Iceberg vs row-level pushdown on Postgres is correctly framed. **Accuracy nits**: (1) "Each individual worker's read from the Postgres table is single-threaded" subtly conflates split-level vs worker-level parallelism. The reality is stronger and simpler: for non-partitioned Postgres tables, the entire scan is **one split → one worker → one JDBC connection** (only one worker reads at all). The current framing implies "many workers each reading single-threaded" which would actually be faster than what really happens. Should be tightened to "the Postgres connector emits a single split per scan for unpartitioned tables, so the whole table read happens on one worker over one JDBC connection." (2) "The entire Postgres-side network transfer must complete before the join phase begins" is true ONLY when Postgres is the BUILD side of the hash join. If Postgres is the PROBE side, rows stream into the probe phase. Trino's CBO usually puts the smaller side on build, so in practice the engineer's federated Postgres → Iceberg join might put either side on build depending on stats. The answer should hedge: "if Postgres is the build side (smaller table, common when CBO picks it), the whole Postgres transfer blocks the join start." (3) "10 GB table as 40-80 Parquet files... finishes in seconds" is plausible but depends heavily on partition layout, file size targets (Iceberg default ~512MB), and worker count — should be framed as "often" or "can" rather than implied guarantee. **Strengths**: Four explicit red flags (A-D) map cleanly to the engineer's exact situation; decision-framework table is the kind of one-glance artifact engineers will print out; hybrid pattern is genuinely novel value-add (most "federate vs ingest" answers present a binary choice and miss this); explicit "what you lose" section directly answers the second half of the question; concrete next steps include EXPLAIN ANALYZE verification, ingest cost rule-of-thumb (1-5M rows/sec via Spark JDBC), and compaction; fits prod_info.md (Spark + Iceberg + Hive Metastore + MinIO, OSS Trino 467) precisely with no incompatible tool suggestions. **Gaps**: (a) **10th consecutive federation iteration without OPA decision logs / Trino event listener** as the persistent audit trail for federation→ingestion migrations (when a team moves a table off federation, the OPA decision log is what proves Postgres-catalog queries have stopped); (b) no mention of CDC (Debezium) as a third option between full-refresh nightly and the hybrid view pattern — CDC is the standard answer for "freshness ≥ minutes but < seconds" use cases the engineer might encounter next; (c) build-side / probe-side nuance not unpacked (see accuracy nit #2 above); (d) no JDBC throughput rule-of-thumb upfront ("expect 50-200K rows/sec per JDBC connection depending on row width") to help the engineer self-diagnose whether their 80M-row scan is actually hitting the JDBC ceiling or has another bottleneck; (e) no mention of the Trino Web UI / `system.runtime.queries` view as a place to measure the actual JDBC scan duration during the EXPLAIN ANALYZE step; (f) does not surface that the federation→ingestion migration is reversible at zero cost (drop the Iceberg table, queries fall back to federation via the view) — engineers worried about commitment will value this.
+
+**Resource fix recommendations**:
+- **LOW (correctness)** — `resources/22-trino-federation-postgresql.md` (or wherever the "federate vs ingest" decision content lives): tighten the parallelism framing. Replace "each individual worker's read from the Postgres table is single-threaded" with "the Postgres connector emits a single split per scan for unpartitioned tables, so the whole table read happens on one worker over one JDBC connection. Multiple workers do NOT each read their own slice — only one worker reads at all." This is a stronger and more accurate statement of the same ceiling.
+- **LOW (correctness)** — same file, cross-catalog join section: add a one-line hedge about build vs probe side. "If Postgres is the build side of the hash join (Trino's CBO often picks the smaller side for build), the entire Postgres transfer must complete before the join starts. If Postgres is the probe side, rows can stream — but for large filtered Postgres results, the cumulative JDBC latency is still the bottleneck."
+- **MEDIUM (completeness)** — same file: add a JDBC throughput rule-of-thumb section. "Expect 50-200K rows/sec per JDBC connection depending on row width and network latency. For an 80M-row table: 8-25 minutes of pure transfer time at single-connection JDBC, before any filtering or join work. If your query takes longer than this floor, JDBC transfer is the bottleneck."
+- **MEDIUM (completeness)** — same file or new `resources/24-cdc-debezium-postgres-iceberg.md`: add CDC (Debezium → Kafka → Spark Structured Streaming → Iceberg) as the third option between "nightly full refresh" and "hybrid UNION ALL view." This is the standard pattern for freshness SLOs in the minutes range and the engineer will encounter it next.
+- **MEDIUM (production fit)** — same file: add a "reversibility" callout. The federation→ingestion migration is reversible at near-zero cost: drop the Iceberg table, update the view, queries fall back to federation. Engineers worried about commitment will value this — and it's a real production property worth surfacing.
+- **HIGH (production fit, recurring across 10 iterations)** — same file: **TENTH consecutive iteration without OPA decision logs + Trino event listener** as the persistent audit trail (iter165-iter174). For this specific question, the OPA decision log is what proves Postgres-catalog queries have actually stopped after a federation→ingestion migration — a critical part of validating the cutover. Teacher MUST prioritize in next cycle — longest-running unaddressed federation gap, now spanning 10 iterations.
+
+### Iter 174 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (dynamic filtering with federated Postgres + how to verify it fired)
+**Score:** 4.625 / 5 (PASS general 3.5 / PASS topic 4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.625** |
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.201 across 25 questions; new running avg (4.201 × 25 + 4.625) / 26 = (105.025 + 4.625) / 26 = **4.218 across 26 questions**. Status: NEEDS WORK (4.218 < 4.5 raised threshold). **Sixth consecutive strong federation answer** (iter172 Q2 = 4.80, iter172 Q1 = 4.75, iter173 Q1 = 4.625, iter173 Q2 = 4.70, iter174 Q1 = 4.625, iter174 Q2 = 4.625). Topic average still drag-anchored below 4.5 by iter163/164/165/169 Q1 FAILs but trending up consistently across six iterations.
+
+**Notes**: Verified against trino.io/docs/current/connector/postgresql.html, trino.io/docs/current/admin/dynamic-filtering.html, and Trino PR #13334 / #22824 / #3217. **Correct major claims**: (a) Dynamic filtering for the PostgreSQL connector IS enabled by default and pushes filters as predicates into JDBC queries — VERIFIED at trino.io/docs/current/connector/postgresql.html ("Push down dynamic filters into JDBC queries", default `true`); (b) `dynamic-filtering.wait-timeout` default for the PostgreSQL connector = **20 seconds** — VERIFIED; (c) catalog session property `dynamic_filtering_wait_timeout` must be prefixed with the catalog name (e.g. `app_pg.dynamic_filtering_wait_timeout`) — VERIFIED, catalog session properties always require the catalog prefix; (d) `dynamicFilterSplitsProcessed` is the correct EXPLAIN ANALYZE / OperatorStats field that records splits processed after the dynamic filter is pushed down — VERIFIED at trino.io/docs/current/admin/dynamic-filtering.html and PR #3217 ("Add dynamicFilterSplitsProcessed to OperatorStats"); (e) `enable_large_dynamic_filters` session property is real, introduced in Release 342, used to allow collection of dynamic filters for joins with large build side — VERIFIED at trino.io/docs/current/admin/dynamic-filtering.html and PR #22824; (f) IN-list to range degradation when build side exceeds `max-distinct-values-per-driver` and `max-size-per-driver` thresholds — VERIFIED (docs explicitly state "Trino switches to collecting min and max values per column to reduce overhead"); (g) `dynamicFilters = {id = ...}` predicate appearing on the probe-side scan in EXPLAIN output, plus `Input: N rows (size)` label on the probe TableScan — VERIFIED verbatim against trino.io EXPLAIN ANALYZE docs. **Accuracy nits**: (1) The Iceberg connector default `dynamic_filtering_wait_timeout` of "1 second" is asserted but I could NOT confirm this specific default from the official Iceberg connector docs in WebSearch — the Hive connector default is 20s and the Iceberg connector inherits similar JDBC-style defaults. The "1 second" claim may be stale/incorrect; the answer should either drop the specific number or hedge with "may differ — check `trino.io/docs/current/connector/iceberg.html`". (2) The "IN-list pushdown" mental model is slightly idealized — Trino actually constructs a TupleDomain that the JDBC driver renders as `WHERE col IN (...)` for discrete sets or `WHERE col BETWEEN ... AND ...` for ranges. The end-user-visible SQL on Postgres is correct, but the answer presents IN-list as the primary form when in practice the connector also pushes equality, range, and discrete-set predicates flexibly. Minor framing imprecision, not factually wrong. (3) Answer says "If your Iceberg lookup table has many thousands of distinct join-key values" — the actual trigger is `max-distinct-values-per-driver` (default 1000 per driver) and `max-size-per-driver` thresholds, not a fixed "many thousands" — answer should cite the threshold name. (4) `domain-compaction-threshold` (default 256) is another relevant knob for IN-list-to-range collapse on the JDBC connector side, separate from the dynamic filtering driver thresholds — not mentioned, but it's the catalog property that governs how IN-lists get compacted before the SQL hits Postgres. **Strengths**: Hits both halves of the question cleanly — "does it work for Postgres?" (yes, with mechanism explanation) and "how do I verify?" (two-step EXPLAIN + EXPLAIN ANALYZE with exact field name). Build-side / probe-side terminology introduced and grounded in the engineer's actual tables (Iceberg lookup = build, Postgres customers = probe). The runnable EXPLAIN and EXPLAIN ANALYZE blocks use the engineer's catalog and table names (`iceberg.lookups.small_lookup`, `app_pg.public.customers`) which makes copy-paste verification trivial. Catalog-prefix warning explicit and includes the literal error message ("Session property does not exist") so an engineer who hits that error can identify the cause immediately. Two-state diagnostic logic (`dynamicFilterSplitsProcessed > 0` = fired; `= 0` despite plan showing filter = timed out) is the kind of decision tree engineers actually need. Fits prod_info.md (OSS Trino 467, Iceberg on Hive Metastore, on-prem k8s) precisely. **Gaps**: (a) **11th consecutive federation iteration without OPA decision logs / Trino event listener** as the persistent audit trail for federation activity (timing-out dynamic filters could be a signal worth logging for SRE postmortems); (b) `Filtered: <pct>` line from EXPLAIN ANALYZE not surfaced — same gap as iter173 Q1 (this is the most visually obvious server-side-filter signal); (c) `dynamicFiltersStats` block in QueryInfo JSON / Web UI not mentioned as an alternative verification path; (d) `EXPLAIN ANALYZE VERBOSE` not mentioned as a deeper-diagnosis option; (e) `enable-dynamic-filtering` system-level kill switch (sanity-check "is it on at all?") not mentioned; (f) `domain-compaction-threshold` (default 256) not mentioned as the connector-side IN-list-to-range collapse threshold; (g) the answer doesn't address what happens when `prepareThreshold=0` (the PgBouncer-friendly setting recommended in iter173 Q2) interacts with dynamic-filter pushdown — should be benign but worth a one-line confirmation since the production stack uses PgBouncer; (h) the Iceberg connector default timeout claim ("1 second") is not verified and may be incorrect.
+
+**Resource fix recommendations**:
+- **LOW (correctness)** — `resources/22-trino-federation-postgresql.md` (or the dynamic-filtering subsection of whichever resource covers DF): verify and correct the Iceberg connector default `dynamic_filtering_wait_timeout`. If "1 second" is taken from older Hive/Iceberg connector docs, it may be stale — current Trino docs list it as 20s for most JDBC-style connectors. Either cite the verified value or hedge ("check `trino.io/docs/current/connector/iceberg.html` for your version's default").
+- **LOW (correctness)** — same file: rewrite the "many thousands of distinct join-key values" trigger as the actual threshold names. Use: "If the build side produces more distinct values than `max-distinct-values-per-driver` (default 1000) or exceeds `max-size-per-driver`, Trino switches to a min/max range filter (lower granularity, but still useful for pruning)."
+- **MEDIUM (completeness)** — same file: add `domain-compaction-threshold` (default 256) as the connector-side IN-list-to-range compaction control. Different mechanism from the dynamic-filtering driver thresholds (which act before SQL is generated); this acts on the JDBC connector side and governs how the final pushed-down predicate looks on Postgres. Often the missing knob when an engineer expects an IN-list but sees a BETWEEN range in Postgres logs.
+- **MEDIUM (completeness)** — same file or `resources/23-explain-analyze-pushdown.md`: add `Filtered: <pct>` as the most visually obvious server-side filter signal in EXPLAIN ANALYZE output, alongside `Input: N rows (size)` and `dynamicFilterSplitsProcessed`. Same gap recurring from iter173 Q1.
+- **MEDIUM (completeness)** — same file: add `EXPLAIN ANALYZE VERBOSE` as a deeper-diagnosis option, plus a pointer to the Trino Web UI's QueryInfo JSON `dynamicFiltersStats` block as an alternative verification path that doesn't require re-running the query.
+- **LOW (completeness)** — same file: add a one-line confirmation that `prepareThreshold=0` (the JDBC URL param recommended for PgBouncer transaction-mode pairing in iter173 Q2) does NOT interact with dynamic-filter pushdown — the dynamic filter is rendered as a literal SQL predicate, not via a prepared-statement parameter. Production stack uses PgBouncer so this is worth surfacing explicitly.
+- **HIGH (production fit, recurring across 11 iterations)** — same file: OPA decision logs + Trino event listener as the persistent record of federation query activity (including timed-out dynamic filters for SRE postmortems). **Eleventh consecutive iteration this gap has been flagged** (iter165-iter174). Teacher MUST prioritize in next cycle — longest-running unaddressed federation gap, now spanning 11 iterations.
+
+Verified: trino.io/docs/current/connector/postgresql.html (dynamic-filtering.enabled default true, dynamic-filtering.wait-timeout default 20s, predicate pushdown into JDBC queries); trino.io/docs/current/admin/dynamic-filtering.html (dynamicFilterSplitsProcessed field, enable_large_dynamic_filters property, IN-list to min/max range degradation when max-distinct-values-per-driver / max-size-per-driver exceeded); Trino PR #13334 (JDBC connector dynamic filtering implementation); PR #22824 (enable_large_dynamic_filters introduction); PR #3217 (dynamicFilterSplitsProcessed added to OperatorStats).
+
+### Iter 175 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (why Postgres slow-query log shows WHERE id BETWEEN ... instead of WHERE id IN (...); domain-compaction-threshold; whether BETWEEN helps Postgres at all)
+**Score:** 4.25 / 5 (PASS general 3.5 / FAIL topic 4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 3.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.5 |
+| Completeness | 4.5 |
+| **Average** | **4.25** |
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.218 across 26 questions; new running avg (4.218 × 26 + 4.25) / 27 = (109.668 + 4.25) / 27 = **4.219 across 27 questions**. Status: NEEDS WORK (4.219 < 4.5 raised threshold). Topic average essentially flat — the streak of six strong answers ended; this iter's 4.25 is below the topic threshold and the prior six-iter momentum stalled because of a config-property-naming correctness regression.
+
+**Notes**: Verified against trino.io/docs/467/connector/postgresql.html, trino.io/docs/467/admin/dynamic-filtering.html, trino.io/docs/current/sql/explain-analyze.html.
+
+**Correct major claims**:
+- (a) `domain-compaction-threshold` catalog property default = **256** — VERIFIED at trino.io/docs/467/connector/postgresql.html ("can be used to adjust the default value of `256` for this threshold").
+- (b) Two-stage compaction model (coordinator-side dynamic filter limits + JDBC connector-side IN-list compaction) — CORRECT mental model.
+- (c) `Filtered: <percentage>` appears in EXPLAIN ANALYZE output (e.g. `Filtered: 0.00%`) — VERIFIED at trino.io/docs/current/sql/explain-analyze.html and dynamic-filtering.html sample output. This was a recurring gap from iter173 Q1 and iter174 Q2 — finally addressed in this answer.
+- (d) `dynamicFilterSplitsProcessed` is a real operator-stats field — VERIFIED at trino.io/docs/467/admin/dynamic-filtering.html and PR #3217.
+- (e) `SET SESSION domain_compaction_threshold = 1024;` — the session property name is correct.
+- (f) BETWEEN being weakly useful (range scans work, but read amplification depends on key clustering) — accurate framing.
+- (g) Per-query SET SESSION example + per-catalog config file example for `domain-compaction-threshold` — both shapes are valid in OSS Trino 467.
+
+**Accuracy errors / nits**:
+1. **HIGH — bare property names `max-distinct-values-per-driver` and `max-size-per-driver` do NOT exist in Trino 467.** The actual property names all require the `dynamic-filtering.` prefix and a `small`/`large`/`small-partitioned`/`large-partitioned` qualifier. Verified property names from trino.io/docs/467/admin/dynamic-filtering.html are: `dynamic-filtering.small.max-distinct-values-per-driver`, `dynamic-filtering.large.max-distinct-values-per-driver`, `dynamic-filtering.small-partitioned.max-distinct-values-per-driver`, `dynamic-filtering.large-partitioned.max-distinct-values-per-driver` (plus the matching `max-size-per-driver` and `range-row-limit-per-driver` variants). An engineer pasting `max-distinct-values-per-driver=1000` into a config file will get a "Configuration property not used" or "Unknown property" error at coordinator startup. **This is a recurring miss** — iter174 Q2 was flagged to add these property names; this iter added them but stripped the required prefix.
+2. **MEDIUM — `max-distinct-values-per-driver=1000` default is unverified.** The docs do not list the bare-form property at all. From PR references and the docs, the relevant defaults are split across `small`/`large` variants and at least the `large-broadcast` variant has default 5000 (not 1000). The "1000" figure may be conflated with an older default or a different property. Either drop the specific number or cite which qualified property has default 1000.
+3. **MEDIUM — `SET SESSION domain_compaction_threshold = 1024` is missing the catalog prefix.** In OSS Trino 467, catalog session properties must be set as `SET SESSION <catalog>.domain_compaction_threshold = 1024` (e.g. `SET SESSION app_pg.domain_compaction_threshold = 1024`). Bare-form will produce "Session property 'domain_compaction_threshold' does not exist". This is the **third consecutive iteration** missing the catalog prefix on a catalog-scoped SET SESSION example (iter172, iter174, iter175).
+4. **LOW — `dynamicFilters = {user_id IN (...)}` and `dynamicFilters = {user_id BETWEEN ... AND ...}` literal in EXPLAIN output is idealized.** The actual EXPLAIN output renders dynamic filters as `dynamicFilter = {"dynamic_filter_id" -> TupleDomain[...]}` with a domain spec, not directly as `IN` or `BETWEEN` SQL. The engineer's verification should be the actual SQL Postgres receives (which the answer correctly covers via Postgres log tailing). Frame the EXPLAIN output as TupleDomain shape, not SQL shape.
+5. **LOW — `Filtered: 0%` interpretation is slightly off.** `Filtered: 0%` on a probe-side scan with a BETWEEN filter does not necessarily mean the range "wasn't selective" — it means Trino's post-scan filter did not eliminate any additional rows because Postgres already did the filtering server-side. For federation, low `Filtered:` on the Trino side combined with a small Postgres row count is the **good** outcome (pushdown worked, server returned a small set). Re-frame: "high Filtered: on a probe-side TableScan = the source returned too many rows; low Filtered: with low Input rows = pushdown worked."
+
+**Strengths**:
+- Two-stage diagram (coordinator threshold vs JDBC connector threshold) is the clearest articulation of this nuance the responder has produced — it directly addresses why the engineer saw BETWEEN with "only" ~300 build rows (between 256 and 1000).
+- Side-by-side IN vs BETWEEN row-elimination example is concrete and accessible.
+- Verification triad (Trino EXPLAIN, Postgres log tail, Trino EXPLAIN ANALYZE) is exactly the right diagnostic sequence — Postgres log tail is the definitive ground truth.
+- Per-catalog config + per-session override both shown.
+- Specific recommended value (`domain-compaction-threshold=10000`) with stated tradeoff (larger SQL payload, Postgres planner stress beyond ~10k) is actionable.
+- Fits prod_info.md (OSS Trino 467 + Postgres federation, on-prem k8s, edits to `etc/catalog/app_pg.properties`).
+
+**Gaps**:
+- (a) **OPA decision logs / Trino event listener** — 12th consecutive federation iteration without this gap addressed. Now the longest-running unaddressed federation gap.
+- (b) **Catalog prefix on SET SESSION** — 3rd consecutive iteration missing (`app_pg.domain_compaction_threshold = 1024` is the correct form).
+- (c) **Property name prefix** — bare `max-distinct-values-per-driver` will not work; engineer needs the `dynamic-filtering.{small,large,small-partitioned,large-partitioned}.` prefix.
+- (d) `EXPLAIN ANALYZE VERBOSE` not mentioned as the deeper-diagnostic option.
+- (e) `dynamicFiltersStats` block in Web UI QueryInfo JSON not mentioned as an alternative verification path.
+- (f) No mention that beyond ~8k IN-list values, Postgres's own query planner cost may explode (the answer hedges at "~10,000" but doesn't explain Postgres's pg_planner behavior — `WHERE col IN (v1, ..., v10000)` rewrite to hashed-IN or array-comparison form, `enable_hashjoin` interactions).
+- (g) Doesn't mention that on the Iceberg/Hive scan side (build side), there's no equivalent compaction — `domain-compaction-threshold` is JDBC-specific.
+
+**Resource fix recommendations**:
+- **HIGH (correctness, RECURRING from iter174 Q2)** — `resources/22-trino-federation-postgresql.md` dynamic-filtering subsection: use the **fully qualified** property names. Replace `max-distinct-values-per-driver` with `dynamic-filtering.small.max-distinct-values-per-driver` (default `1000` per the Trino source if confirmable) and `dynamic-filtering.large.max-distinct-values-per-driver` (default `5000` for broadcast variant per PR #5529). Add a callout box: "The bare form `max-distinct-values-per-driver` is NOT a valid Trino config property — coordinator will reject it. The properties are always prefixed with `dynamic-filtering.{small,large,small-partitioned,large-partitioned}.`." Cite trino.io/docs/467/admin/dynamic-filtering.html.
+- **HIGH (correctness, RECURRING 3x: iter172/iter174/iter175)** — same file: all catalog session property examples must use the `<catalog>.<property>` form. Change `SET SESSION domain_compaction_threshold = 1024;` to `SET SESSION app_pg.domain_compaction_threshold = 1024;` and add a note that bare-form yields "Session property does not exist". Use a single canonical catalog name (`app_pg`) in all examples to make the pattern obvious.
+- **MEDIUM (correctness)** — same file: rewrite the "dynamicFilters = {user_id IN (...)}" example to use the actual TupleDomain shape Trino prints. The user-visible IN vs BETWEEN distinction lives in the Postgres-side SQL (which Postgres log tailing reveals), not in the Trino EXPLAIN output verbatim.
+- **MEDIUM (clarity)** — same file: clarify the `Filtered:` interpretation for federated queries. Add: "On a probe-side TableScan against a JDBC catalog, `Filtered: 0%` with a small Input row count = pushdown worked (Postgres did the filtering server-side, Trino had nothing left to filter). `Filtered: 90%+` with a large Input row count = Postgres returned too many rows and Trino had to discard them client-side (pushdown was incomplete)."
+- **MEDIUM (completeness)** — same file: add `EXPLAIN ANALYZE VERBOSE` as the deep-diagnosis option (shows per-operator counters, including dynamic filter wait times) and a pointer to the Web UI QueryInfo JSON `dynamicFiltersStats` block.
+- **LOW (completeness)** — same file: add a one-line note on Postgres-side cost of huge IN-lists: beyond ~8k–10k values, Postgres's planner cost grows superlinearly and the SQL text size itself stresses the parser. Engineers tuning `domain-compaction-threshold` above 10,000 should profile on a replica first.
+- **HIGH (production fit, RECURRING across 12 iterations — iter165 through iter175)** — same file: OPA decision logs + Trino event listener as the persistent audit trail for federation query activity. **Twelfth consecutive iteration this gap has been flagged.** This is now the longest-running unaddressed federation gap and the teacher must prioritize it in the next cycle — three full month-equivalents of iterations have surfaced it without resource update.
+
+Verified: trino.io/docs/467/connector/postgresql.html (`domain-compaction-threshold` default = `256`); trino.io/docs/467/admin/dynamic-filtering.html (actual property names all carry `dynamic-filtering.{small,large,small-partitioned,large-partitioned}.` prefix; no bare-form `max-distinct-values-per-driver` exists); trino.io/docs/current/sql/explain-analyze.html (`Filtered: <pct>` is a verified output element); Trino PR #5529 (large dynamic filter limits introduction); Trino discussion #14019 (domain compaction threshold history — was 32 in older versions, raised over time).
+
+### Iter 175 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation + Multi-tenant (audit trail for billing-catalog queries: system.runtime.queries + Trino event listener + OPA decision logs)
+**Score:** 4.0 / 5 (PASS general 3.5 / FAIL Trino federation raised topic threshold 4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 3.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 3.5 |
+| Completeness | 4.5 |
+| **Average** | **4.0** |
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.219 across 27 questions; new running avg (4.219 × 27 + 4.0) / 28 = (113.913 + 4.0) / 28 = **4.211 across 28 questions**. Status: NEEDS WORK (4.211 < 4.5 raised threshold). The OPA decision log + event listener content the teacher added in resources/22 §8.4 (finally addressing the 12-iteration gap) IS being used by the responder — that portion of the answer is solid. New failure mode: factually broken `system.runtime.queries` schema in the lead-off SQL example.
+
+**Notes**: Verified against trino.io/docs/current/admin/event-listeners-http.html, trino.io/docs/current/connector/system.html, trino.io/docs/current/language/reserved.html, github.com/trinodb/trino QuerySystemTable.java (master), and openpolicyagent.org/docs/management-decision-logs.
+
+**Correct major claims**:
+- (a) Event listener config prefix `http-event-listener.*` with **HYPHENS** — VERIFIED VERBATIM at trino.io/docs/current/admin/event-listeners-http.html.
+- (b) `event-listener.name=http`, `http-event-listener.connect-ingest-uri`, `http-event-listener.log-completed`, `http-event-listener.log-created` property names — all VERIFIED VERBATIM.
+- (c) `event-listener.config-files=etc/http-event-listener.properties` registration in `config.properties` — VERIFIED.
+- (d) QueryCompletedEvent payload includes: query ID, SQL text, user/principal, catalog/schema/tables touched, execution timestamps, state, bytes scanned, errors — VERIFIED against Trino event listener SPI.
+- (e) OPA decision log structure (decision_id, input, result with allow/deny, path, timestamp, metrics, labels) — VERIFIED against openpolicyagent.org/docs/management-decision-logs.
+- (f) `decision_logs.console: true` → stdout only / ephemeral / requires Fluentd/Loki/ELK or `decision_logs.service` for durability — VERIFIED.
+- (g) Denied queries appear in OPA decision logs but NOT in Trino event listener output — VERIFIED CORRECT (AccessDeniedException at authorization phase short-circuits before QueryCompletedEvent emission; the event listener never sees the denied query).
+- (h) `"end"` column correctly quoted (END IS a reserved keyword per trino.io/docs/current/language/reserved.html).
+
+**Accuracy errors / nits**:
+1. **CRITICAL (HIGH severity)** — The primary SQL example `SELECT query_id, "user", catalog, schema, query, state, created, "end" FROM system.runtime.queries WHERE catalog = 'postgres_billing'` is **BROKEN — will fail with COLUMN NOT FOUND**. Verified against the actual `QuerySystemTable.java` source on master: `system.runtime.queries` columns are exactly `[query_id, state, user, source, query, resource_group_id, queued_time_ms, analysis_time_ms, planning_time_ms, created, started, last_heartbeat, end, error_type, error_code]`. There is **NO `catalog` column and NO `schema` column** in `system.runtime.queries`. An engineer pasting this query will hit `Column 'catalog' cannot be resolved` on first execution. This is the LEAD-OFF actionable artifact and it is factually wrong. The same `iceberg.observability.trino_queries` SELECT in (2) also assumes a `catalog` column was projected into the persisted Iceberg table — that part is implementation-dependent (the engineer's own JSON-to-Iceberg ingestion may project it from the event listener payload), so it's not strictly wrong, but the first SQL block (against the live `system.runtime.queries`) IS wrong.
+2. **MEDIUM** — "the `"user"` column name is a Trino reserved word; writing unquoted `user` causes a syntax error" — overstated. Per trino.io/docs/current/language/reserved.html, `USER` is NOT in the reserved keyword table; only `CURRENT_USER` is reserved. In practice unquoted `user` resolves to the `current_user` builtin in expression contexts (not a syntax error — it returns the wrong value). Quoting `"user"` is the correct, defensible practice — but the framing should be "to avoid the parser interpreting it as the current_user builtin" not "causes a syntax error".
+3. **MEDIUM** — "which Rego policy rules fired and their intermediate results" overstates what's in the standard OPA decision log. Standard OSS OPA decision log fields are `decision_id`, `input`, `result`, `path`, `timestamp`, `metrics`, `labels`, `bundles`, `requested_by`. Per-rule firing trace is NOT in the default schema — it requires Enterprise OPA / Styra rule-tracing extensions or explicit additional configuration. Correct framing: "the input the decision was made on, the result (allow/deny), the policy path that was evaluated, and evaluation metrics."
+4. **LOW** — The persisted Iceberg observability table is referenced as if it auto-exists once the event listener is enabled. The HTTP event listener POSTs JSON to an ingest URI; the engineer must build the JSON-to-Iceberg ingestion pipeline themselves (Fluent Bit / Vector → MinIO → Spark Structured Streaming → Iceberg, or batch ingest). One explicit sentence on this would close the gap.
+
+**Strengths**:
+- Three-tier audit framing (in-memory `system.runtime.queries` → persistent event listener → OPA decision log) is the right mental model and matches resources/22-trino-federation-postgresql.md §8.4 closely.
+- Complementarity table (who/what SQL/allowed?/bytes/blocked?) is the kind of one-glance artifact engineers will print out for security review meetings.
+- Explicit deny-event dashboard recommendation with the exact filter shape (`decision == "deny" AND resource.catalog == "postgres_billing"`) is directly actionable.
+- Recognizes event listener and OPA log are complementary not redundant, and correctly explains the lifecycle reason (denied queries never complete, so QueryCompletedEvent doesn't fire).
+- Event listener config block is copy-paste runnable and the property names are exactly right.
+- Fits prod_info.md (OPA as authz backend, on-prem k8s, on-prem MinIO/Iceberg) precisely with no incompatible tool suggestions.
+
+**Gaps**:
+- (a) **Wrong `system.runtime.queries` schema** — see accuracy error #1. The table has no `catalog`/`schema` columns; engineer must use `query LIKE '%postgres_billing%'` or the Web UI for catalog-keyed live triage.
+- (b) No concrete QueryCompletedEvent JSON payload skeleton showing where `metadata.catalog`, `metadata.schema`, `metadata.tables[]`, `metadata.columns[]`, `context.user`, `statistics.totalBytes`, `failureInfo` live — engineer setting up the event listener will need this to know which field to filter on.
+- (c) `iceberg.observability.trino_queries` ingestion pipeline not acknowledged as something the engineer must build.
+- (d) No mention of `system.runtime.tasks` as the per-split companion view for diagnosing which Postgres-bound splits actually executed.
+- (e) `EXPLAIN ANALYZE` not mentioned as a way to confirm which catalog a specific query actually touched (post-hoc on a saved query).
+- (f) AccessDeniedException at authorization phase short-circuit before QueryCompletedEvent emission is the precise mechanistic reason OPA log is the only deny-attempt source — currently asserted as fact but not explained.
+
+**Resource fix recommendations**:
+- **HIGH (correctness, CRITICAL)** — `resources/22-trino-federation-postgresql.md` §8.4 (or wherever the `system.runtime.queries` SELECT example lives): **correct the column list to match the actual Trino source**. The table has columns `[query_id, state, user, source, query, resource_group_id, queued_time_ms, analysis_time_ms, planning_time_ms, created, started, last_heartbeat, end, error_type, error_code]` and does NOT have `catalog` or `schema` columns. Replace the broken example with one of these THREE correct patterns: (i) lexical-match workaround — `SELECT query_id, "user", query, state, created FROM system.runtime.queries WHERE query LIKE '%postgres_billing%' ORDER BY created DESC;` (fragile but works for live triage); (ii) Web UI direction — "the Trino Web UI at `/ui/` DOES show per-query catalog info; for catalog-keyed live triage, prefer the Web UI over `system.runtime.queries`"; (iii) defer to event listener — "for catalog-keyed audit, use the event listener output (QueryCompletedEvent.metadata.catalog) rather than `system.runtime.queries`." This is the SECOND time in recent iterations a wrong `system.runtime.queries` schema has shipped (iter30 Q2 mentioned `system.runtime.tasks` wrongly grouping by `user`/`bytes_read` which actually live on `queries`; this iter175 Q2 mentions `catalog`/`schema` which don't exist on `queries` at all). The teacher should add an explicit "ACTUAL columns of system.runtime.queries (Trino 467)" reference table in resources/22 with all 15 columns and types, sourced from QuerySystemTable.java.
+- **MEDIUM (correctness)** — same file: soften the `"user"` framing. Replace "is a Trino reserved word; writing unquoted `user` causes a syntax error" with "Trino's parser interprets unquoted `user` as the `current_user` builtin in expression contexts — it returns the wrong value (the session user, not the column). Quote it as `"user"` when selecting from `system.runtime.queries`. Per Trino's reserved keyword list, USER is non-reserved but CURRENT_USER is reserved." The corrected framing explains the actual symptom (wrong-value silent bug) rather than overstating it as a syntax error.
+- **MEDIUM (correctness)** — same file §8.4 OPA decision log content: soften the "which Rego policy rules fired" claim. Standard OSS OPA decision log fields are `decision_id`, `input`, `result`, `path`, `timestamp`, `metrics`, `labels`, `bundles`, `requested_by`. Per-rule-firing trace is NOT in the default schema. Correct framing: "the input the decision was made on, the result (allow/deny), the policy path that was evaluated, evaluation latency (`metrics.eval_ns`), and the OPA bundle version. Per-rule firing trace requires Enterprise OPA rule-tracing or explicit additional configuration."
+- **MEDIUM (completeness)** — same file: add a concrete QueryCompletedEvent JSON skeleton showing where `metadata.catalog`, `metadata.schema`, `metadata.tables[]`, `metadata.columns[]`, `context.user`, `statistics.totalBytes`, and `failureInfo` live in the payload. Without this, an engineer who turns on the event listener and starts receiving JSON won't know which field to filter on to answer "which queries hit postgres_billing."
+- **MEDIUM (completeness)** — same file: add an explicit sentence that `iceberg.observability.trino_queries` is NOT auto-created by enabling the event listener. The HTTP event listener POSTs JSON to an ingest URI; the engineer must build the JSON-to-Iceberg ingestion pipeline themselves (Fluent Bit / Vector → MinIO → Spark Structured Streaming → Iceberg). Currently the answer implies the Iceberg table just appears, which is misleading for a beginner.
+- **LOW (completeness)** — same file: explicitly explain that AccessDeniedException at the authorization phase short-circuits BEFORE QueryCompletedEvent is emitted, which is precisely why OPA decision logs are the ONLY source for denied-attempt audit. Currently asserted but the mechanism is not explained; one sentence on the lifecycle clarifies it.
+
+Verified: trino.io/docs/current/admin/event-listeners-http.html (http-event-listener.* prefix with HYPHENS, event-listener.name=http, connect-ingest-uri, log-completed, log-created — ALL MATCHED VERBATIM); github.com/trinodb/trino QuerySystemTable.java master (DEFINITIVE column list: query_id, state, user, source, query, resource_group_id, queued_time_ms, analysis_time_ms, planning_time_ms, created, started, last_heartbeat, end, error_type, error_code — NO catalog or schema columns); trino.io/docs/current/language/reserved.html (USER not in reserved keyword table; CURRENT_USER is reserved; END is reserved so `"end"` quoting correct); openpolicyagent.org/docs/management-decision-logs (standard fields: decision_id, input, result, path, timestamp, metrics, labels, bundles, requested_by — per-rule firing trace requires additional config).
+
+### Iter 176 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (system.runtime.queries columns + event listener for billing-catalog audit)
+**Score:** 4.50 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.5 |
+| Completeness | 4.5 |
+| **Average** | **4.50** |
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.211 across 28 questions; after Q1: (4.211 × 28 + 4.50) / 29 = 4.219 across 29 questions. Status: NEEDS WORK (4.219 < 4.5 threshold).
+
+**Key findings**: Critical fix for system.runtime.queries column list (no catalog/schema columns; WHERE query LIKE) has LANDED — responder correctly used LIKE-based catalog filtering and stated the NO catalog column warning explicitly. "user" double-quote requirement correctly stated. Event listener config property names (http-event-listener.connect-ingest-uri, log-completed, log-created) verified verbatim correct. Comparison table between system.runtime.queries and event listener is accurate and actionable. Minor: last_heartbeat column omitted from column reference table; query.min-expire-age eviction slightly oversimplified as "vanish after 15 min".
+
+### Iter 176 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (write-back to Postgres: INSERT/UPDATE/DELETE gotchas, constant-only UPDATE, OPA blocking, CTAS pattern)
+**Score:** 4.625 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.625** |
+
+**Topics updated**: Trino federation / cross-source connectors — after Q2: (4.219 × 29 + 4.625) / 30 = (122.351 + 4.625) / 30 = **4.234 across 30 questions**. Status: NEEDS WORK (4.234 < 4.5 threshold).
+
+**Key findings**: UPDATE constant-assignment limitation correctly described and verified against trino.io PostgreSQL connector docs. OPA blocking scenario accurately described for production stack. CTAS to Iceberg as the safe alternative is well-framed with the orphan-files caveat. Six-step production checklist is directly actionable. Missing: transactional atomicity caveat (partial UPDATE failure is possible), insert.non-transactional-insert.enabled flag not mentioned. OPA error message string is plausible but not verbatim.
+
+**Resource fix recommendations for teacher**:
+- Add transactional atomicity caveat for Trino UPDATE/DELETE through JDBC connector: partial failures can leave Postgres table in partially-updated state — not wrapped in a single user-controlled Postgres transaction.
+- Document insert.non-transactional-insert.enabled flag for INSERT performance/risk tradeoff.
+- Continue reinforcing the WORKS/FAILS code block style for connector-limitation explanations — effective for beginner clarity.
+
+### Iter 177 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (cross-catalog Postgres↔Iceberg join: is the whole table being pulled? how to diagnose with EXPLAIN/EXPLAIN ANALYZE; predicate pushdown + dynamic filtering + broadcast vs partitioned join)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.234 across 30 questions; new running avg (4.234 × 30 + 4.75) / 31 = (127.020 + 4.75) / 31 = **4.252 across 31 questions**. Status: NEEDS WORK (4.252 < 4.5 raised threshold). Third consecutive strong PASS-topic answer (iter176 Q1 4.50, iter176 Q2 4.625, iter177 Q1 4.75). Topic average still drag-anchored below 4.5 by iter163/164/165/169 FAILs but trending up consistently.
+
+**Notes**: Verified against trino.io/docs/current/connector/postgresql.html, trino.io/docs/current/admin/dynamic-filtering.html, trino.io/docs/current/optimizer/pushdown.html, trino.io/docs/current/sql/explain.html, trino.io/docs/current/sql/explain-analyze.html, and Trino issue #389 (parallel-read in JDBC connectors). **Correct major claims**: (a) Cross-catalog joins always execute on Trino workers, not pushed to Postgres — VERIFIED (Trino's cost-based join pushdown applies within a single JDBC catalog only; cross-catalog joins must run on workers). (b) PostgreSQL connector uses a single split / one JDBC connection per table scan — VERIFIED against Trino issue #389. (c) EXPLAIN signals: `TableScan[…] constraint on [col]` = pushdown succeeded; `ScanFilterProject` above `TableScan` = pushdown failed — VERIFIED against trino.io/docs/current/optimizer/pushdown.html ("If pushdown is successful, the plan does not include a ScanFilterProject"). (d) EXPLAIN ANALYZE field labels `Input: N rows`, `Filtered: X%`, `Physical Input: X GB`, `dynamicFilterSplitsProcessed` — all VERIFIED verbatim against trino.io/docs/current/sql/explain-analyze.html and trino.io/docs/current/admin/dynamic-filtering.html. (e) Predicate pushdown matrix (equality / IN / range on numeric+timestamp / IS NULL push; LIKE / function calls don't push) — VERIFIED against trino.io/docs/current/connector/postgresql.html. (f) Iceberg partition pruning + file-level min/max skipping — correct. (g) Broadcast vs partitioned join semantics: BROADCAST sends small side to every worker; PARTITIONED shuffles both sides by join key — CORRECT. (h) `SET SESSION join_distribution_type = 'BROADCAST'` syntax — CORRECT (this is a system-level session property, not catalog-scoped, so no catalog prefix needed). (i) ANALYZE + `join_reordering_strategy = AUTOMATIC` for CBO-driven join ordering — CORRECT. (j) Iceberg file-pruning via dynamic filtering ("Trino will derive a set of customer IDs from Postgres and use that to prune Iceberg files before scanning") — CORRECT mental model.
+
+**Accuracy errors / nits**:
+1. **MEDIUM — `dynamic-filtering.small-broadcast.max-distinct-values` property name is DEPRECATED in Trino 467.** Per Trino Release 420 (Jun 2023): "`dynamic-filtering.small-broadcast.*` and `dynamic-filtering.large-broadcast.*` configuration properties were deprecated in favor of `dynamic-filtering.small.*` and `dynamic-filtering.large.*`." In Trino 467 the old names still work (they were not removed until Release 480, Mar 2026) but log a deprecation warning. The current preferred form is `dynamic-filtering.small.max-distinct-values-per-driver` (note: also `-per-driver` suffix). An engineer pasting the `small-broadcast` form into a new Trino 467 deployment will see deprecation warnings in coordinator logs; an engineer planning a near-future upgrade to Trino 480+ will have to migrate.
+2. **MEDIUM — `dynamic-filtering.wait-timeout=2s` example is misleading.** The cluster-wide property `dynamic-filtering.wait-timeout` exists, but the per-connector form is what actually governs scan delay — `iceberg.dynamic-filtering.wait-timeout` (default **1s** in Trino 467, NOT 2s — same correctness issue flagged in iter164 Q2) and `postgresql.dynamic-filtering.wait-timeout` (default 20s). The "2s" value the answer shows looks suspiciously like a stale carry-over from the iter164 incorrect default. The example is presented as "tune this property" (not "this is the default") so it's not strictly wrong, but the responder should use the per-connector form and acknowledge the 1s Iceberg default explicitly. Recurring issue.
+3. **LOW — "single split" framing slightly imprecise on what "single worker" means.** The Postgres connector emits one split per scan for unpartitioned tables, which means exactly ONE worker performs the read (not "each worker reads single-threaded"). The answer's framing "the Postgres connector uses a single split, so one worker reads all rows sequentially" is actually correct — better than recent attempts that conflated split-level and worker-level parallelism. Strength worth noting.
+4. **LOW — Dynamic filter described as "pushes this predicate back to Postgres before the full scan."** This is the right intuition but technically the dynamic filter is collected from the BUILD side (Iceberg in this example since it's smaller-after-filtering); the answer correctly identifies Iceberg as the source of the IN-list. Minor wording: "back to Postgres" could read as if the filter originated at Postgres and bounced back; the filter originates at Iceberg's build-side hash table and is pushed to Postgres's probe-side scan. The answer's mechanism description is correct but the directionality phrasing could be tightened.
+5. **LOW — "LIKE patterns: `WHERE email LIKE 'a%'` stays in Trino" is true for the OSS default**, but the experimental `postgresql.experimental.enable-string-pushdown-with-collate` connector property can enable range/LIKE pushdown on text columns. Not a correctness error since it's experimental and off by default, but mentioning it as an escape hatch would be additive.
+6. **LOW — `defaultRowFetchSize=1000` JDBC URL param is real** (pgjdbc supports it) but the recommended value depends heavily on row width and worker memory; "is it set?" is a useful diagnostic prompt but a value recommendation would be additive.
+
+**Strengths**:
+- Opens with the precise short answer ("Trino is not pulling the entire Postgres table into memory as-is — but cross-catalog joins always execute on Trino workers") — addresses the engineer's exact framing.
+- Concrete row counts ("5M customers", "50K customers after filter", "500M events") make the abstract beats land for a beginner.
+- Side-by-side WORKING vs NOT WORKING EXPLAIN output blocks with the literal strings to grep for is the kind of artifact engineers will copy-paste into their runbook.
+- Two-step diagnostic flow (EXPLAIN first to see plan structure, EXPLAIN ANALYZE second for runtime numbers) is the right sequence and matches what an oncall engineer would actually run.
+- Specific EXPLAIN ANALYZE field names with interpretation guidance: `Input: N rows` (filter pushdown check), `Filtered: X%` (server-side filtering check), `Physical Input: X GB` (Iceberg partition pruning check), `dynamicFilterSplitsProcessed` (DF fired or not). All field names verified verbatim against trino.io docs.
+- Three-section optimization framework (predicate pushdown / dynamic filtering / broadcast vs partitioned join) maps directly to the three things the engineer can actually change.
+- Closing checklist with four numbered diagnostic steps is directly actionable.
+- Final reassurance ("You are NOT stuck shuffling all data") addresses the engineer's emotional framing ("painfully slow", "stuck shuffling") without being saccharine.
+- Fits prod_info.md (OSS Trino 467, Iceberg + MinIO, on-prem k8s) with the MinIO reference in the Iceberg `Physical Input` check.
+
+**Gaps**:
+- (a) **13th consecutive federation iteration without OPA decision logs / Trino event listener** as the persistent audit trail. Although this Q1 is about diagnosis (not audit), the event-listener output is a natural complement to EXPLAIN ANALYZE for after-the-fact analysis of historical slow queries that have been evicted from `system.runtime.queries`. One sentence pointing to the event listener for "this query already finished — how do I diagnose what happened?" would close the loop.
+- (b) `EXPLAIN ANALYZE VERBOSE` not mentioned as the deeper-diagnosis option (shows per-operator wall-time and dynamic filter wait timings).
+- (c) Web UI QueryInfo JSON `dynamicFiltersStats` block not mentioned as an alternative to re-running with EXPLAIN ANALYZE.
+- (d) No mention of `EXPLAIN ANALYZE` cost (the query actually runs) vs `EXPLAIN` (planning only) — engineer about to EXPLAIN ANALYZE a slow 30-minute query needs the warning.
+- (e) No mention of CDC / pre-ingestion-to-Iceberg as the "give up on federation" escape hatch when the JDBC ceiling is the bottleneck — engineer should know there's a strategic alternative if the diagnostic confirms JDBC is unfixable.
+- (f) `domain-compaction-threshold` (default 256) — the connector-side IN-list-to-range collapse threshold — not mentioned as a knob to tune when dynamic filtering fires but degrades to a BETWEEN range on the Postgres side. Recurring miss.
+- (g) `prepareThreshold=0` interaction with dynamic-filter pushdown not surfaced — production stack uses PgBouncer, so worth a one-line confirmation that they don't conflict.
+- (h) `enable_large_dynamic_filters` session property not surfaced as the "Iceberg side is huge — let DF still collect" escape hatch.
+
+**Resource fix recommendations**:
+- **HIGH (correctness, RECURRING from iter174 Q2 + iter175 Q1)** — `resources/22-trino-federation-postgresql.md` dynamic-filtering subsection: update example property names to use the **current preferred form** for Trino 467. Replace `dynamic-filtering.small-broadcast.max-distinct-values` with `dynamic-filtering.small.max-distinct-values-per-driver` (note the `-per-driver` suffix). Add a one-line callout: "the older `small-broadcast.*` and `large-broadcast.*` names are deprecated as of Trino 420 and removed in Trino 480. They still work in 467 but emit deprecation warnings in coordinator logs."
+- **HIGH (correctness, RECURRING from iter164 Q2)** — same file: any wait-timeout example must use the per-connector form (`iceberg.dynamic-filtering.wait-timeout` default **1s**; `postgresql.dynamic-filtering.wait-timeout` default 20s), not the cluster-wide `dynamic-filtering.wait-timeout` with an unverified "2s" value. This is the second time the "2s" stale value has surfaced in a federation answer — root-cause it in the resource and replace with the verified per-connector defaults.
+- **MEDIUM (completeness)** — same file: add `EXPLAIN ANALYZE VERBOSE` and Web UI QueryInfo JSON `dynamicFiltersStats` as deeper-diagnosis alternatives to plain `EXPLAIN ANALYZE`. Add a warning that `EXPLAIN ANALYZE` actually runs the query (so a 30-minute slow query becomes a 30-minute diagnostic).
+- **MEDIUM (completeness)** — same file: add `domain-compaction-threshold` (default 256, catalog property on the PostgreSQL connector) as the JDBC connector-side IN-list-to-range compaction control. When dynamic filtering pushes an IN-list of >256 values, the connector collapses it to a BETWEEN range — which is what an engineer will see in Postgres's pg_stat_statements / slow log. Same gap recurring from iter174 Q2 / iter175 Q1.
+- **MEDIUM (production fit)** — same file: surface `enable_large_dynamic_filters` session property as the escape hatch when Iceberg side is huge and dynamic-filter collection would otherwise be skipped due to size limits. Pair with `prepareThreshold=0` non-interaction confirmation for the PgBouncer-friendly URL setup.
+- **MEDIUM (completeness)** — same file: add "federation → ingestion" as the strategic escape hatch when the diagnostic confirms JDBC single-split is the irreducible bottleneck. Engineer running EXPLAIN ANALYZE and seeing `Input: 5M rows` on Postgres with a 6-minute scan time should know that the answer is sometimes "stop federating this table, mirror it to Iceberg via Spark JDBC nightly + CDC for freshness."
+- **HIGH (production fit, RECURRING across 13 iterations — iter165 through iter177)** — same file: OPA decision logs + Trino event listener as the persistent record of federation query activity. **Thirteenth consecutive iteration this gap has been flagged** (iter165-iter177). For this question specifically, the event listener captures the after-the-fact runtime stats of slow queries that have evicted from `system.runtime.queries`; pairing it with EXPLAIN ANALYZE on a fresh run gives the engineer two views (historical + on-demand). Teacher should add a one-line cross-reference from the EXPLAIN diagnostic section to the event-listener audit section.
+
+Verified: trino.io/docs/current/connector/postgresql.html (predicate pushdown matrix — equality and IN-list push on all types, range pushes on numeric/timestamp but NOT on string-type columns by default, experimental enable-string-pushdown-with-collate available); trino.io/docs/current/optimizer/pushdown.html ("If pushdown is successful, the plan does not include a ScanFilterProject"); trino.io/docs/current/sql/explain-analyze.html (Input: N rows (size), Filtered: X%, Physical Input: X GB verbatim); trino.io/docs/current/admin/dynamic-filtering.html (dynamicFilterSplitsProcessed field; enable_large_dynamic_filters; dynamic-filtering.small.max-distinct-values-per-driver — NOT bare form, NOT old small-broadcast form); Trino Release 420 (small-broadcast/large-broadcast deprecation); Trino Release 480 (small-broadcast/large-broadcast removal — March 2026); Trino issue #389 (single-split JDBC parallel-read limitation); iceberg connector default dynamic_filtering_wait_timeout = 1s (verified, NOT 2s).
+
+### Iter 177 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (cross-catalog Postgres↔Iceberg join: diagnosis and optimization)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.234 across 30 questions; after Q1: (4.234 × 30 + 4.75) / 31 = 4.252 across 31 questions. Status: NEEDS WORK (4.252 < 4.5 threshold).
+
+**Key findings**: Cross-catalog join execution model correct. EXPLAIN pushdown signals (TableScan+constraint vs ScanFilterProject) verified verbatim. All EXPLAIN ANALYZE field labels verified verbatim. Predicate pushdown matrix correct. Dynamic filtering property name `dynamic-filtering.small-broadcast.max-distinct-values` is deprecated (Trino 420) — current form is `dynamic-filtering.small.max-distinct-values-per-driver`. Wait-timeout example "2s" is stale from iter164; correct per-connector defaults are iceberg=1s, postgresql=20s.
+
+### Iter 177 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (JDBC connection pool sizing: PgBouncer, resource groups, connection model)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — after Q2: (4.252 × 31 + 4.75) / 32 = **4.267 across 32 questions**. Status: NEEDS WORK (4.267 < 4.5 threshold).
+
+**Key findings**: prepareThreshold=0 + PgBouncer transaction mode explained correctly. OSS Trino 467 has no native pool verified. Resource group JSON properties all correct. Source-selector silent-failure mode correctly flagged. Critical issue: "one connection per worker per query" math is wrong — PostgreSQL connector creates one split per non-partitioned scan → one JDBC connection on one worker, NOT one per worker. Connections scale with concurrent_queries × splits_per_query (typically 1). socketTimeout=60 in JDBC URL shorter than statement_timeout=5min — inconsistent.
+
+### Iter 178 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (Postgres schema change detection: metadata caching, flush_metadata_cache, view lifecycle, SECURITY DEFINER/INVOKER)
+**Score:** 4.625 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.625** |
+
+**Topics updated**: Trino federation — prior avg 4.267 across 32 questions; new running avg (4.267 × 32 + 4.625) / 33 = (136.544 + 4.625) / 33 = **4.278 across 33 questions**. Status: NEEDS WORK (4.278 < 4.5 raised threshold). Fourth consecutive strong PASS-topic federation answer (iter176 Q1 4.50, iter176 Q2 4.625, iter177 Q1 4.75, iter177 Q2 4.75, iter178 Q1 4.625). Topic average creeping up — gained +0.011 this iter.
+
+**Notes**: Verified against trino.io/docs/current/connector/postgresql.html (metadata.cache-ttl default=0s, metadata.cache-missing default=false, flush_metadata_cache is parameterless on PostgreSQL connector — uses USE for scoping, unlike Hive/Delta connectors which accept schema_name/table_name args), trino.io/docs/current/sql/create-view.html (SECURITY DEFINER is default, INVOKER alternative documented). **Correct major claims**: (a) PostgreSQL connector flush_metadata_cache is parameterless and explicit warning that named args work only on Hive/Delta — VERIFIED CORRECT and important since the engineer might try Hive-style syntax; (b) `CALL billing_pg.system.flush_metadata_cache()` syntax + USE-then-CALL variant both shown — VERIFIED CORRECT; (c) `metadata.cache-ttl` default `0s` (caching disabled) — VERIFIED VERBATIM; (d) Hard error mode for RENAME/DROP COLUMN — CORRECT; (e) SECURITY DEFINER as default — VERIFIED CORRECT; (f) CREATE OR REPLACE VIEW atomicity + GRANT preservation — consistent with resource file claims (line 462 of resources/22-trino-federation-postgresql.md), though Trino docs do not document this verbatim; (g) Cluster-wide flush + no pod restart needed — CORRECT; (h) Production-fit (on-prem k8s, OSS Trino 467, file-based catalog properties path) — CORRECT.
+
+**Accuracy errors / nits**:
+1. **MEDIUM — Attribution of SELECT * silent-loss failure mode to metadata cache is imprecise.** The actual mechanism: Trino views store SQL text + a **resolved column schema** in the catalog metastore at CREATE VIEW time. When you write `CREATE VIEW v AS SELECT * FROM billing_pg.invoices`, Trino expands the `*` to the explicit column list AT CREATE TIME and stores that list with the view. The new `region` column added later will be invisible to the view EVEN IF metadata caching is fully disabled. Flushing the metadata cache does NOT make a SELECT * view start seeing new columns — only `CREATE OR REPLACE VIEW` does that. The current framing implies "cache stale → SELECT * misses new columns" but the truth is "view schema frozen at CREATE → SELECT * always misses new columns regardless of cache state." This is a fundamental mechanism error and may mislead an engineer into thinking flush_metadata_cache fixes the SELECT * problem when only CREATE OR REPLACE VIEW does. The resource itself (line 479 of resources/22) actually documents this correctly ("Trino views are stored as SQL text + a resolved column schema in the metastore") but the responder didn't surface it.
+2. **MEDIUM — `billing_pg.information_schema.views` query in Step 3 targets the WRONG views.** `information_schema.views` in a PostgreSQL catalog lists **Postgres-side views** (CREATE VIEW statements defined inside Postgres itself), NOT Trino views over Postgres tables. Trino views defined as `CREATE VIEW analytics.foo AS SELECT ... FROM billing_pg...` live in the `analytics` catalog's metastore (Iceberg/Hive HMS per prod_info.md), so they appear in `analytics.information_schema.views` — which the answer DOES include as the second query, partially redeeming the framing. But the first query (`billing_pg.information_schema.views`) won't find any Trino views referencing the renamed column; it will only find Postgres-side views, which are a separate concern. The runbook step should be reframed to: "search every catalog's `information_schema.views` where Trino views are stored — typically the Iceberg/Hive catalog where your analytics views live (`analytics` in your example); do NOT search the JDBC catalog's `information_schema.views` because that returns Postgres-side views, not Trino views."
+3. **LOW — `metadata.cache-missing` default unstated.** The answer shows `metadata.cache-missing=true` as if you'd enable it alongside cache-ttl, but doesn't note the actual default is `false`. Minor framing nit; not actively wrong.
+4. **LOW — "metadata query overhead is cheap (~10 ms per query at planning time, not per row)" in best-practices.** The number is plausible but unverified; planning-time metadata fetch latency depends on Postgres response time and the number of tables touched. Should hedge ("typically tens of ms") rather than commit to "~10 ms."
+
+**Strengths**:
+- Two-failure-mode framing (silent vs hard) directly maps to the engineer's described symptom ("some dashboards failing, others silently dropping data") — exactly the diagnostic the question requires.
+- Parameterless flush_metadata_cache warning is a real footgun engineers hit when copying Hive-connector examples; explicit callout prevents the error.
+- 4-step runbook is concrete and executable; each step has a specific command or query.
+- SECURITY DEFINER + SELECT * sensitive-column leak (ssn/payment_token) is a real production risk worth surfacing; ties view security to the schema-change scenario.
+- Explicit-column-list best practice is repeated multiple times — the single most important takeaway for an engineer dealing with this class of issue.
+- Fits prod_info.md (on-prem k8s, OSS Trino 467, dbt mentioned as version-control framework) precisely.
+- "Deploy together" closing pattern (Postgres ALTER + view update + flush in same PR) is exactly the SRE-grade discipline this scenario needs.
+- Best-practices section adds value beyond the literal question (monitoring for both failure modes separately, dbt for view definitions).
+
+**Gaps**:
+- (a) **Trino view storage mechanism not explained.** The answer would be substantially stronger if it explicitly said "Trino views store a resolved column list at CREATE VIEW time; SELECT * is expanded then and frozen — flushing the metadata cache does NOT re-expand the view." This is the missing conceptual bridge that explains WHY CREATE OR REPLACE VIEW is required (not just "views don't update themselves").
+- (b) **`information_schema.views` query targeting is misleading** — see accuracy nit #2.
+- (c) **OPA decision logs / Trino event listener** — 13th consecutive federation iteration without this gap addressed. For schema-evolution scenarios specifically, the event listener record is useful for post-incident postmortems (which queries failed after the ALTER, which queries returned suspiciously sparse results).
+- (d) **No mention of dbt-side handling.** Best-practice #4 mentions dbt but doesn't show what dbt actually does on view schema changes (e.g., `dbt run --select my_view` rebuilds with new schema; `dbt source freshness` / `dbt-checkpoint` can detect upstream schema drift). prod_info.md explicitly lists dbt as supported, so this is a missed production-fit opportunity.
+- (e) **No mention of `system.metadata.table_properties` or `SHOW COLUMNS` for ad-hoc post-flush verification.** After flushing, an engineer wants a one-liner to confirm Trino now sees the new schema; `SHOW COLUMNS FROM billing_pg.public.invoices` is the answer and should be in the runbook.
+- (f) **No mention of the "metadata.cache-missing" gotcha** — if enabled and a table was queried while missing, you can get persistent "table not found" errors until flush, even after the table is created. Worth a one-liner since the answer shows `metadata.cache-missing=true` in a sample config.
+- (g) **Doesn't address the question's "silently dropped data" symptom for the JOIN scenario.** The engineer's view joins `billing_pg.invoices` with `events_iceberg.usage_events`. The answer's silent-loss example uses a simple Postgres-only view. A more directly relevant example would show how `SELECT *` over a federated JOIN behaves when one side adds a column (the new column simply doesn't appear in downstream consumers, but join cardinality stays correct — different from a join-key column being renamed which IS a hard error).
+
+**Resource fix recommendations**:
+- **HIGH (correctness, root mechanism)** — `resources/22-trino-federation-postgresql.md` schema-evolution section: lead with the mechanism: "Trino views store SQL text PLUS a resolved column schema in the metastore at CREATE VIEW time. `SELECT *` is expanded then. Flushing the metadata cache does NOT re-expand the view — only `CREATE OR REPLACE VIEW` does." Without this conceptual anchor, engineers will keep thinking flush_metadata_cache fixes the SELECT * problem.
+- **HIGH (correctness)** — same file: clarify the `information_schema.views` query targeting. Add: "Trino views are stored in the catalog where they were CREATEd (typically your Iceberg/Hive analytics catalog), NOT in the JDBC catalog they reference. Search `analytics.information_schema.views` for Trino views over `billing_pg.*`. Do NOT search `billing_pg.information_schema.views` — that returns Postgres-side views (a separate concern)."
+- **MEDIUM (completeness)** — same file: add `SHOW COLUMNS FROM billing_pg.public.invoices` as the post-flush verification one-liner; pair with `SELECT column_name, data_type FROM billing_pg.information_schema.columns WHERE table_schema='public' AND table_name='invoices'` for the same answer with more detail.
+- **MEDIUM (production fit)** — same file: add a dbt-on-schema-change subsection. Show `dbt run --select +my_view` and `dbt source freshness` patterns; mention `dbt-checkpoint` for pre-commit schema-drift detection. prod_info.md lists dbt as supported.
+- **MEDIUM (completeness)** — same file: add a JOIN-specific example showing what happens when (a) a join-key column is renamed (hard error on both sides of the join), (b) a non-key column is added on one side (silent loss in SELECT *, no impact on join correctness), (c) a non-key column is dropped on one side (hard error if explicitly referenced, silent removal if SELECT *).
+- **LOW (correctness)** — same file: explicitly state default for `metadata.cache-missing` (`false`) wherever the property is shown.
+- **LOW (completeness)** — same file: add a one-liner on `metadata.cache-missing=true` gotcha — if a table was missing when first queried, the "not found" verdict is cached and persists until flush, even after the table is created. Engineers running migrations that create tables on the fly will hit this.
+- **HIGH (production fit, RECURRING across 13 iterations — iter165 through iter178)** — same file: OPA decision logs + Trino event listener as the persistent audit trail for federation query activity (and schema-evolution incident postmortems specifically — "which queries failed after the ALTER, when did the failure pattern stop"). Teacher confirmed in iter175 Q2 that §8.4 added this content, but iter178 Q1 still didn't surface it — the responder needs to know to weave OPA/event-listener guidance into schema-change runbooks, not just standalone audit questions.
+
+Verified: trino.io/docs/current/connector/postgresql.html (metadata.cache-ttl default=0s, metadata.cache-missing default=false, flush_metadata_cache parameterless for PostgreSQL connector); trino.io/docs/current/sql/create-view.html (SECURITY DEFINER default, INVOKER alternative); resources/22-trino-federation-postgresql.md line 462 (CREATE OR REPLACE VIEW atomic + preserves GRANTs), line 479 (Trino views store SQL text + resolved column schema in metastore — the mechanism the responder missed surfacing).
+
+### Iter 178 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (schema evolution in federated Postgres views: metadata cache, flush, view lifecycle)
+**Score:** 4.625 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.625** |
+
+**Topics updated**: Trino federation — prior avg 4.267 across 32 questions; after Q1: (4.267 × 32 + 4.625) / 33 = 4.278 across 33 questions. Status: NEEDS WORK.
+
+**Key findings**: Two-failure-mode framing correct and useful. Parameterless flush_metadata_cache verified correct. CREATE OR REPLACE VIEW atomicity correct. Critical issue: SELECT * silent-loss wrongly attributed to metadata cache staleness — actual mechanism is that Trino views freeze the resolved column list at CREATE VIEW time; flushing does NOT re-expand SELECT *. Also: billing_pg.information_schema.views returns Postgres-side views, not Trino views; search analytics catalog instead.
+
+### Iter 178 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (cross-catalog transactions: Postgres + Iceberg — not supported; application patterns)
+**Score:** 5.00 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **5.00** |
+
+**Topics updated**: Trino federation — after Q2: (4.278 × 33 + 5.00) / 34 = **4.299 across 34 questions**. Status: NEEDS WORK (4.299 < 4.5 threshold).
+
+**Key findings**: All technical claims verified correct: cross-catalog transactions not supported, JDBC connector enforces isSingleStatementWritesOnly=true (autocommit-only), Iceberg atomic metadata-pointer swap via HMS, BEGIN/COMMIT does not coordinate across catalogs. Three application-layer patterns (PG as SoT + CDC, queue/outbox, eventual consistency) are sound and on-prem appropriate. Model-quality answer — use as template for future federation answers.
+
+### Iter 179 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (predicate pushdown diagnosis: EXPLAIN signals, EXPLAIN ANALYZE Filtered%, Postgres slow-query log, common failure modes — type mismatch, string range, function-on-column)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.299 across 34 questions; new running avg (4.299 × 34 + 4.75) / 35 = (146.166 + 4.75) / 35 = **4.312 across 35 questions**. Status: NEEDS WORK (4.312 < 4.5 raised threshold). Sixth consecutive strong PASS-topic federation answer (iter176 Q1 4.50, iter176 Q2 4.625, iter177 Q1 4.75, iter177 Q2 4.75, iter178 Q1 4.625, iter178 Q2 5.00, iter179 Q1 4.75). Topic average creeping up — gained +0.013 this iter. Sustained ≥4.5 streak finally pulling the average up against the iter163/164/165/169 FAIL drag.
+
+**Notes**: Verified against trino.io/docs/current/optimizer/pushdown.html ("If predicate pushdown for a specific clause is successful, the EXPLAIN plan for the query does not include a ScanFilterProject operation for that clause"); trino.io/docs/current/connector/postgresql.html (predicate pushdown matrix — equality on text pushes, range on text does NOT push by default, `postgresql.experimental.enable-string-pushdown-with-collate` available as escape hatch with session-property alias `enable_string_pushdown_with_collate`); trino.io/docs/current/sql/explain-analyze.html (`Input: N rows (size)`, `Filtered: X%` verified verbatim); postgresqlco.nf and PostgreSQL docs (`ALTER SYSTEM SET log_min_duration_statement = 0` logs all statements; `SELECT pg_reload_conf()` applies without restart — both correct).
+
+**Correct major claims**: (a) Three-step diagnostic flow — EXPLAIN to see plan shape, EXPLAIN ANALYZE for runtime numbers, Postgres slow-query log as ground truth — is the canonical sequence; (b) "constraint on [billing_date]" inside the TableScan = pushdown succeeded vs ScanFilterProject above TableScan = pushdown failed — VERIFIED against pushdown.html; (c) `Filtered: X%` interpretation correct (high % means Postgres did the filtering server-side; 0% with full table-size `Input:` means filter ran in Trino); (d) `ALTER SYSTEM SET log_min_duration_statement = 0; SELECT pg_reload_conf();` correct syntax (0 = log every statement); (e) "the SQL Postgres actually receives never lies" framing is excellent — Postgres-side log is the definitive ground truth, more reliable than the Trino plan; (f) Type-literal forms (`DATE '...'`, `TIMESTAMP '...'`, `BIGINT '...'`) — all correct; (g) String-range pushdown limitation (LIKE/`>`/`<`/`BETWEEN` on VARCHAR don't push by default due to collation mismatch) — VERIFIED; (h) `postgresql.experimental.enable-string-pushdown-with-collate=true` — VERIFIED REAL property since Trino 365; (i) Function-on-column blocks pushdown (LOWER, SUBSTRING, DATE) and generated-column workaround pattern — CORRECT; (j) Missing-index-on-Postgres as the "pushdown works but still slow" case (high Filtered% + slow wall time) — useful and correct distinction.
+
+**Accuracy errors / nits**:
+1. **LOW — `WHERE id = '12345'` on a BIGINT column.** This will typically produce a Trino type-coercion error at plan time ("Cannot compare BIGINT and VARCHAR"), not a silent pushdown failure where Postgres receives an unfiltered query. The example would be more accurate if it used a case that actually compiles but doesn't push (e.g., `WHERE created_at = '2026-05-01'` where the literal gets auto-cast to VARCHAR and the comparison happens in Trino, or `WHERE CAST(id AS VARCHAR) = '12345'`). The underlying lesson (use explicit literals) is correct, but the specific example doesn't reproduce the symptom described.
+2. **LOW — LIKE pattern pushdown over-simplified.** The answer says `WHERE email LIKE 'a%'` "FAILS by default" because it's a "range" predicate. In practice, Trino's PostgreSQL connector treats LIKE pattern pushdown distinctly from range predicates on string columns — anchored prefix patterns can in some Trino versions push as a tuple-domain range. The high-level guidance (don't rely on LIKE pushdown; use equality or denormalize) is correct, but categorizing LIKE strictly as a "range predicate" is imprecise. Trino's pushdown.html and connector/postgresql.html treat them as related-but-separate categories.
+3. **LOW — `WHERE created_at = '2026-05-01'` for TIMESTAMP column.** This DOES push in many cases because Trino coerces the literal to TIMESTAMP at plan time. The failure scenario is more subtle — it depends on whether the cast goes literal→TIMESTAMP (pushes) vs column→VARCHAR (doesn't push). The guidance to use explicit `TIMESTAMP '...'` literals is sound defensive practice, but framing the auto-cast case as universally failing is overstated.
+4. **LOW — Session-property alternative not surfaced.** `postgresql.experimental.enable-string-pushdown-with-collate` is shown only as a catalog config property requiring restart. Trino also exposes the corresponding session-level alias `enable_string_pushdown_with_collate` (set per-query via `SET SESSION billing_pg.enable_string_pushdown_with_collate = true`), which is less invasive for ad-hoc testing. Adding the session form would make the escape hatch usable without a coordinator restart.
+
+**Strengths**:
+- Three-step diagnostic sequence (EXPLAIN → EXPLAIN ANALYZE → Postgres log) is the correct oncall workflow — matches what a senior data engineer would actually run.
+- Side-by-side success/failure EXPLAIN snippets with the literal strings to grep for ("constraint on [billing_date]" vs "ScanFilterProject") are copy-paste runbook material.
+- "The SQL Postgres actually receives never lies" framing teaches the right mental hierarchy of evidence — Trino plan is the model, Postgres log is the ground truth.
+- Four-category failure taxonomy (type mismatch / string range / function call / missing index) covers ~95% of real-world pushdown failures.
+- Generated-column-on-Postgres workaround for both string-range and function-on-column cases is the production-grade fix, not a hack — and it includes the CREATE INDEX step so the workaround actually performs.
+- Experimental flag presented with `# In etc/catalog/billing_pg.properties` comment + "test on non-prod first" caveat — responsible recommendation.
+- Verification checklist at the end is numbered, actionable, and re-iterates the diagnostic order.
+- Distinguishes "pushdown works but slow (missing index)" from "pushdown failed (filter in Trino)" — this is the failure mode engineers most often misdiagnose.
+- Fits prod_info.md (OSS Trino 467, PostgreSQL catalog, on-prem k8s) — no cloud-only tools, no Starburst-only features.
+
+**Gaps**:
+- (a) `EXPLAIN ANALYZE VERBOSE` not mentioned as the deeper-diagnosis option (per-operator wall time, dynamic filter wait timings, input distribution percentiles).
+- (b) No warning that `EXPLAIN ANALYZE` actually runs the query — engineer about to EXPLAIN ANALYZE a slow 30-minute query needs to know it's a 30-minute diagnostic. `EXPLAIN` alone is planning-only and safe.
+- (c) Session-property alias for the experimental string-pushdown flag (`SET SESSION billing_pg.enable_string_pushdown_with_collate = true`) not surfaced — the catalog-property form requires coordinator restart, the session form does not.
+- (d) `domain-compaction-threshold` (default 256, catalog property on PostgreSQL connector) not mentioned — when dynamic filtering pushes an IN-list of >256 values, the connector collapses it to a BETWEEN range, which can look like pushdown failure in Postgres's pg_stat_statements. Recurring miss across federation iterations.
+- (e) **OPA decision logs / Trino event listener** — 14th consecutive federation iteration without this gap addressed. For after-the-fact analysis of slow queries already evicted from `system.runtime.queries`, the event listener is the persistent record. Pairing it with EXPLAIN ANALYZE on a fresh run gives historical + on-demand views.
+- (f) Web UI QueryInfo JSON (`/ui/query.html?<query_id>`) not mentioned as an alternative to re-running with EXPLAIN ANALYZE — the JSON has all the same TableScan stats and is available for already-completed queries.
+- (g) No mention that the JDBC connector's actual issued SQL can be captured via JMX / coordinator log without enabling Postgres-side logging — useful when the engineer doesn't have Postgres admin access.
+
+**Resource fix recommendations**:
+- **MEDIUM (completeness)** — `resources/22-trino-federation-postgresql.md` predicate-pushdown section: add the session-property form `SET SESSION <catalog>.enable_string_pushdown_with_collate = true` alongside the catalog-property form, with a note that the session form does not require coordinator restart and is preferred for ad-hoc testing.
+- **MEDIUM (correctness)** — same file: tighten the type-mismatch examples. `WHERE id = '12345'` on a BIGINT column is more likely to error out at plan time than silently fail to push. Use `WHERE created_at = '2026-05-01'` where the column is TIMESTAMP and the literal auto-casts to VARCHAR as the cleaner "silent pushdown failure" example, with explicit explanation of which side of the comparison gets the cast applied.
+- **MEDIUM (correctness)** — same file: distinguish LIKE pushdown from generic string-range pushdown. Anchored prefix LIKE can sometimes push as a domain range; full-pattern LIKE never pushes. Currently lumped together under "string range predicates."
+- **MEDIUM (completeness)** — same file: add `EXPLAIN ANALYZE VERBOSE` to the diagnostic toolbox (per-operator wall time, input distribution percentiles, dynamic filter wait timings). Add an explicit warning: "EXPLAIN ANALYZE actually runs the query — a slow 30-minute query becomes a slow 30-minute diagnostic. Use plain EXPLAIN first to check plan shape without running."
+- **MEDIUM (completeness)** — same file: add Web UI QueryInfo JSON path (`/ui/query.html?<query_id>`) as the no-rerun option for already-completed queries — same TableScan stats, no need to wait through a re-execution.
+- **HIGH (production fit, RECURRING across 14 iterations — iter165 through iter179)** — same file: OPA decision logs + Trino event listener as the persistent audit trail. For predicate-pushdown diagnosis specifically, the event listener record captures Input/Output rows for historical queries no longer in `system.runtime.queries`. One sentence cross-referencing the event listener from the EXPLAIN diagnostic section would close the loop without bloating the answer.
+- **LOW (completeness)** — same file: `domain-compaction-threshold` (default 256) as the connector-side IN-list-to-range collapse control. When dynamic filtering fires with >256 distinct values, the connector rewrites to BETWEEN — engineers seeing BETWEEN in Postgres pg_stat_statements where they expected IN should know this is the cause.
+
+Verified: trino.io/docs/current/optimizer/pushdown.html (ScanFilterProject absent = pushdown succeeded); trino.io/docs/current/connector/postgresql.html (range predicates on text columns do NOT push by default; `postgresql.experimental.enable-string-pushdown-with-collate` available with session-property alias); trino.io/docs/current/sql/explain-analyze.html (Input: N rows, Filtered: X% verified verbatim); PostgreSQL docs (`log_min_duration_statement = 0` logs all statements; `pg_reload_conf()` applies without restart); Trino Release 365 (Dec 2021) introduced the experimental string-pushdown-with-collate property.
+
+### Iter 179 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (predicate pushdown failure diagnosis: EXPLAIN signals, failure modes, generated-column workarounds)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.299 across 34 questions; after Q1: (4.299 × 34 + 4.75) / 35 = 4.312 across 35 questions. Status: NEEDS WORK.
+
+**Key findings**: EXPLAIN signals (ScanFilterProject = failure, constraint on [col] = success) verified verbatim. EXPLAIN ANALYZE field labels (Input: N rows, Filtered: X%) verified verbatim. enable-string-pushdown-with-collate real property verified. Postgres logging syntax correct. Minor issues: type-mismatch example (id='12345' on BIGINT) errors at plan time, doesn't silently fail; LIKE vs string range conflated; session-property form of experimental flag not mentioned.
+
+### Iter 179 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (Postgres declarative partitioning: Trino splits, server-side pruning, parallelism)
+**Score:** 3.25 / 5 (PASS general ≥3.5 / FAIL Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 2.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 2.0 |
+| Completeness | 4.0 |
+| **Average** | **3.25** |
+
+**Topics updated**: Trino federation — after Q2: (4.312 × 35 + 3.25) / 36 = **4.282 across 36 questions**. Status: NEEDS WORK (4.282 < 4.5 threshold). REGRESSION from 4.312.
+
+**Key findings**: CRITICAL — `partition-column` and `partition-count` do NOT exist in OSS Trino 467; they are Starburst Enterprise features. Same class of Starburst-vs-OSS confusion as iter163 connection-pool error. Resource fix applied immediately: resources/22 section rewritten to state OSS limitation, reference open GitHub issue #389, list 3 correct alternatives. Single-split JDBC model and Postgres server-side pruning claims were correct.
+
+### Iter 180 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (when to stop federation and replicate: thresholds, ingestion patterns, decision framework)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 4.75 |
+| Practical applicability | 4.75 |
+| Completeness | 4.75 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.282 across 36 questions; after Q1: (4.282 × 36 + 4.75) / 37 = **4.295 across 37 questions**. Status: NEEDS WORK (4.295 < 4.5 threshold).
+
+**Key findings**: Single-split JDBC limitation correctly described and explicitly flags partition-column as Starburst Enterprise only (no OSS/Starburst confusion — iter179 fix holding). Three ingestion patterns (full refresh, incremental/watermark, CDC/Debezium) technically accurate. Watermark column guide (created_at vs updated_at vs xmin — includes wraparound and non-indexability) correct. overwritePartitions() late-arriving events gotcha correct; MERGE INTO recommendation matches Iceberg community best practice. EXPLAIN ANALYZE Filtered: heuristic as decision signal is actionable. s3a:// and Spark+Iceberg+MinIO code fits prod environment. Minor issues: Spark JDBC string interpolation for last_ts (minor injection risk); Pattern A/B use inconsistent table API vs path API styles; CREATE INDEX CONCURRENTLY callout is a practical Postgres-side gotcha.
+
+### Iter 180 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (joining two Postgres catalogs billing_pg + app_pg: connection model, pooling, predicate pushdown, dynamic filtering)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 4.75 |
+| Practical applicability | 4.75 |
+| Completeness | 4.75 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — after Q2: (4.295 × 37 + 4.75) / 38 = **4.307 across 38 questions**. Status: NEEDS WORK (4.307 < 4.5 threshold).
+
+**Key findings**: Cross-catalog join syntax correct (catalog.schema.table JOIN catalog.schema.table). Connection model accurate (one JDBC connection per catalog per table scan; join executes on Trino workers). Correctly states OSS Trino 467 has NO native JDBC connection pooling (Starburst Enterprise only) — avoids iter163 regression. prepareThreshold=0 for PgBouncer transaction pooling and resulting error message correct per pgjdbc/pgbouncer docs. Predicate pushdown behavior correct: per-catalog WHERE pushdown; JOIN predicate stays in Trino. Dynamic filtering IN-list push-back described correctly with right EXPLAIN ANALYZE signal (dynamicFilterSplitsProcessed). Catalog config snippets with ${ENV:...} for secrets are production-grade. Production guardrails section (read replicas, role connection limit, statement_timeout, resource groups) is directly actionable. Minor: slight imprecision in "one split → one connection" phrasing; no mention of OPA write-deny as defense-in-depth (minor for read-only join question); could reference per-connector dynamic-filtering.wait-timeout for tuning.
+
+**Iter 180 average**: (4.75 + 4.75) / 2 = **4.75**
+
+### Iter 181 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (diagnosing completed slow queries: system.runtime.queries retention, Web UI, event listener, coordinator logs, Postgres slow log)
+**Score:** 4.81 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 4.75 |
+| Practical applicability | 5.0 |
+| Completeness | 4.75 |
+| **Average** | **4.81** |
+
+**Topics updated**: Trino federation — prior avg 4.307 across 38 questions; after Q1: (4.307 × 38 + 4.81) / 39 = **4.320 across 39 questions**. Status: NEEDS WORK (4.320 < 4.5 threshold).
+
+**Key findings**: query.max-history=100 and query.min-expire-age=15m defaults verified correct. Reserved-word quoting on "user" and "end" correctly flagged (user unquoted → current_user builtin). HTTP event listener config fully correct per trino.io docs. Coordinator restart wipes history confirmed. No catalog column in system.runtime.queries correctly stated; LIKE on query text is the right workaround. Strong production fit (on-prem k8s, MinIO, Postgres slow log for federation). Minor: server.log grep regex is speculative; wall_time_ms not a canonical QueryCompletedEvent field name (real: executionTime, analysisTime); iceberg.observability.trino_queries presented as if auto-provisioned. Directly addressed previously flagged weak spot (Web UI vs system.runtime.queries for completed queries).
+
+### Iter 181 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (IN-list vs BETWEEN: domain-compaction-threshold, dynamic filtering compaction, SET SESSION per-query tuning)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 4.75 |
+| Practical applicability | 4.75 |
+| Completeness | 4.75 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — after Q2: (4.320 × 39 + 4.75) / 40 = **4.331 across 40 questions**. Status: NEEDS WORK (4.331 < 4.5 threshold).
+
+**Key findings**: domain-compaction-threshold existence and default of 256 verified correct for OSS Trino PostgreSQL connector. Behavior (compacts to simpler range predicate/BETWEEN when threshold exceeded) verified correct. SET SESSION with catalog prefix (app_pg.domain_compaction_threshold) vs bare form (fails) correctly described. Catalog .properties uses hyphenated form, SET SESSION uses underscored — correctly distinguished. Dynamic filter → compaction → Postgres → reapply-in-Trino flow accurate. Recommended starting value (1024) reasonable. No Starburst/OSS confusion. Directly closed the previously flagged domain-compaction-threshold weak spot. Minor: "BETWEEN may miss exact values" wording misleading (BETWEEN over-fetches, doesn't miss).
+
+**Iter 181 average**: (4.81 + 4.75) / 2 = **4.78**
+
+### Iter 182 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (resource groups for capping concurrent federation queries: hardConcurrencyLimit, queuing vs rejection, source selector, PgBouncer layering)
+**Score:** 4.4 / 5 (PASS general ≥3.5 / FAIL Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.25 |
+| Beginner clarity | 4.75 |
+| Practical applicability | 4.25 |
+| Completeness | 4.5 |
+| **Average** | **4.44** |
+
+**Topics updated**: Trino federation — prior avg 4.331 across 40 questions; after Q1: (4.331 × 40 + 4.4) / 41 = **4.333 across 41 questions**. Status: NEEDS WORK (4.333 < 4.5 threshold).
+
+**Key findings**: Queue-then-reject semantics (hardConcurrencyLimit causes queuing up to maxQueued, then rejection) correctly described. Source-based selector with "must set source explicitly" gotcha correctly flagged. OSS Trino 467 no native JDBC pooling + PgBouncer correctly stated. prepareThreshold=0 included with error message. Defense-in-depth (resource groups + PgBouncer + role CONNECTION LIMIT + statement_timeout) correct. CRITICAL ERROR: Answer puts `resource-groups.configuration-manager=file` and `resource-groups.config-file=...` in `etc/config.properties` — wrong file. These properties belong in a dedicated `etc/resource-groups.properties` file. Putting them in config.properties silently has no effect. Engineer following this verbatim gets no resource group enforcement. Resource fix applied immediately: added CRITICAL callout to resources/22 Section 8.2C. Minor: ConfigMap mountPath path inconsistency; resource_group_id column renders as array not bare string.
+
+### Iter 182 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (worker count vs JDBC single-split parallelism: why adding workers doesn't help federation but does help Iceberg)
+**Score:** 4.7 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.75 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.69** |
+
+**Topics updated**: Trino federation — after Q2: (4.333 × 41 + 4.7) / 42 = **4.342 across 42 questions**. Status: NEEDS WORK (4.342 < 4.5 threshold).
+
+**Key findings**: Core mechanism correct — 1 split = 1 worker = 1 JDBC connection regardless of cluster size. Iceberg split-per-file model correctly contrasted. partition-column/partition-count correctly attributed to Starburst Enterprise only (no OSS/Starburst confusion), GitHub issue #389 referenced. SET SESSION billing_pg.domain_compaction_threshold syntax correct. EXPLAIN to verify predicate pushdown correct. Summary table clear and actionable. Minor: "Trino defaults to fetching rows one at a time from JDBC" inaccurate — Trino's BaseJdbcClient already defaults fetch size to 1000; adding defaultRowFetchSize=1000 in URL is not the dramatic improvement implied. One-split-per-Parquet-file slightly simplified (large files split further by row group).
+
+**Iter 182 average**: (4.4 + 4.7) / 2 = **4.55**
+
+**Resource fix applied**: resources/22 Section 8.2C — added CRITICAL callout that resource-groups wiring properties (`resource-groups.configuration-manager=file`, `resource-groups.config-file=...`) go in `etc/resource-groups.properties`, NOT in `etc/config.properties`. Wrong file = silently ignored config.
+
+### Iter 183 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (OPA + event listener for federation query audit: complementary roles, event wiring, row counts for JDBC, OPA durability)
+**Score:** 4.5 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.25 |
+| Beginner clarity | 4.75 |
+| Practical applicability | 4.75 |
+| Completeness | 4.25 |
+| **Average** | **4.5** |
+
+**Topics updated**: Trino federation — prior avg 4.342 across 42 questions; after Q1: (4.342 × 42 + 4.5) / 43 = **4.346 across 43 questions**. Status: NEEDS WORK (4.346 < 4.5 threshold).
+
+**Key findings**: HTTP event listener config correctly uses dedicated etc/event-listener.properties file (not config.properties — avoids the same trap as resource groups). All HTTP listener property names correct per Trino docs (http-event-listener.connect-ingest-uri, log-completed, log-created). Row counts available for JDBC/federation queries correctly stated (outputRows, physicalInputRows). OPA console:true stdout-only durability gap correctly flagged. QueryId correlation between OPA and event listener is the right operational pattern. Minor issues: uses `peakMemoryBytes` but actual field is `peakUserMemoryBytes`; sample JSON flattens fields that live under nested `statistics`/`context` sub-objects in real QueryCompletedEvent; "catalog/schema parsed from query statement" — actually from session QueryContext. Directly closed the 17-iteration OPA+event listener gap.
+
+### Iter 183 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (distinguishing OPA vs Trino vs Postgres errors: error_type, error_code, verbatim strings, triage runbook)
+**Score:** 4.85 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 4.75 |
+| **Average** | **4.85** |
+
+**Topics updated**: Trino federation — after Q2: (4.346 × 43 + 4.85) / 44 = **4.357 across 44 questions**. Status: NEEDS WORK (4.357 < 4.5 threshold).
+
+**Key findings**: PERMISSION_DENIED → USER_ERROR correct (verified via StandardErrorCode.java). Postgres-level failures → EXTERNAL error_type correct (verified via BaseJdbcClient/JdbcErrorCode.java). Verbatim Postgres error strings accurate and verified ("ERROR: canceling statement due to statement timeout", "FATAL: too many connections for role", "SocketTimeoutException: Read timed out"). Three-question triage runbook is operationally sound. Flaky-vs-deterministic distinction between layers is an excellent heuristic. No Starburst/OSS confusion. Minor issues: QUERY_TOO_LARGE should be QUERY_TEXT_TOO_LARGE; INVALID_QUERY should be COLUMN_NOT_FOUND/TABLE_NOT_FOUND; HTTP 403 claim oversimplified (Trino REST API returns 200 with embedded error JSON, not bare 403); "before Trino parsed SQL" technically inaccurate — access control is checked after metadata resolution in some paths (issue #22804).
+
+**Iter 183 average**: (4.5 + 4.85) / 2 = **4.675**
+
+### Iter 184 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (SET SESSION properties for PostgreSQL connector catalogs: full inventory, join pushdown session control, fetch size, parallelism)
+**Score:** 2.5 / 5 (PASS general ≥3.5 / CRITICAL FAIL Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 1.5 |
+| Beginner clarity | 3.5 |
+| Practical applicability | 3.0 |
+| Completeness | 2.0 |
+| **Average** | **2.5** |
+
+**Topics updated**: Trino federation — prior avg 4.357 across 44 questions; after Q1: (4.357 × 44 + 2.5) / 45 = **4.285 across 45 questions**. Status: NEEDS WORK (4.285 < 4.5 threshold). REGRESSION.
+
+**Key findings**: CRITICAL ERROR — answer stated `join_pushdown_enabled` does NOT exist as a session property in OSS Trino 467. This is factually wrong. `join_pushdown_enabled` (default: true) and `join_pushdown_strategy` (AUTOMATIC/EAGER) ARE real, documented OSS Trino session properties for the PostgreSQL connector, verifiable via SHOW SESSION. Answer also incorrectly listed `partition_column`/`partition_count` as if they were real session properties (they are Starburst Enterprise only). Resource fix applied: Section 4.1 of resources/22 now includes `join_pushdown_enabled` and `join_pushdown_strategy` with correct syntax; session property rule callout updated to remove incorrect partition_column/partition_count references.
+
+### Iter 184 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (CTE predicate pushdown to Postgres: inlining, timestamp range predicates, EXPLAIN verification, function-call trap)
+**Score:** 4.7 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 4.75 |
+| Practical applicability | 4.75 |
+| Completeness | 4.6 |
+| **Average** | **4.7** |
+
+**Topics updated**: Trino federation — after Q2: (4.285 × 45 + 4.7) / 46 = **4.324 across 46 questions**. Status: NEEDS WORK (4.324 < 4.5 threshold).
+
+**Key findings**: CTE inlining (not materialized) correctly explained. Timestamp range predicates push down correctly stated. EXPLAIN TYPE DISTRIBUTED usage correct. Function-on-column-side vs function-on-right-side distinction clear and accurate. Concrete pushdown failure modes (correlated CTEs, wrapped columns, SELECT *) correctly listed. now() evaluation to literal at planning time correct. Strong practical section. Q2 holds up well.
+
+**Iter 184 average**: (2.5 + 4.7) / 2 = **3.6** — BELOW THRESHOLD due to Q1 critical failure.
+
+### Iter 185 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (multi-schema federation: billing_pg.public + billing_pg.accounting cross-schema join pushdown, OPA schema visibility)
+**Score:** 4.6 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.6** |
+
+**Topics updated**: Trino federation — prior avg 4.324 across 46 questions; after Q1: (4.324 × 46 + 4.6) / 47 = **4.330 across 47 questions**. Status: NEEDS WORK (4.330 < 4.5 threshold).
+
+**Key findings**: CORRECT — cross-schema join within same catalog IS intra-catalog; schema boundary does NOT block join pushdown. CORRECT — `join_pushdown_enabled` and `join_pushdown_strategy` (AUTOMATIC/EAGER) cited with correct syntax (resource fix from iter184 now correctly reflected). CORRECT — OPA receives full three-part identifier; `input.action.resource.table.schemaName` is the correct Rego field. CORRECT — OPA default-deny and Postgres-level credential requirements both noted. MINOR GAP: Did not mention that AUTOMATIC join pushdown strategy is cost-based and requires table statistics on the Postgres side — without stats, join may not push down even when intra-catalog.
+
+### Iter 185 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (information_schema discovery: billing_pg.information_schema.columns vs direct Postgres, SHOW COLUMNS, metadata cache, unsupported type handling)
+**Score:** 4.7 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.7** |
+
+**Topics updated**: Trino federation — after Q2: (4.330 × 47 + 4.7) / 48 = **4.338 across 48 questions**. Status: NEEDS WORK (4.338 < 4.5 threshold).
+
+**Key findings**: CORRECT — `billing_pg.information_schema.columns` queryable through Trino. CORRECT — `SHOW COLUMNS`/`DESCRIBE`/`SHOW TABLES` syntax. CORRECT — `metadata.cache-ttl` default 0ms. CORRECT — `unsupported_type_handling` default IGNORE; CONVERT_TO_VARCHAR correctly mentioned. CORRECT — `CALL billing_pg.system.flush_metadata_cache()` fully-qualified syntax. EXCELLENT — auditing recommendation (compare SHOW COLUMNS vs direct Postgres to find silently-skipped columns) is practically valuable. MINOR FRAMING: says Postgres's information_schema "is available through Trino" — technically it's Trino's own information_schema populated from connector introspection, not a pass-through. COMPLETENESS GAP: user asked about pg_catalog; answer acknowledges limitation but doesn't mention `postgresql.include-system-tables` config or `system.query()` table function as escape hatches for pg_catalog access.
+
+**Iter 185 average**: (4.6 + 4.7) / 2 = **4.65** — above iteration average target, both questions PASS topic threshold.
+
+### Iter 186 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (cross-catalog INSERT INTO Iceberg SELECT FROM Postgres: JSONB mapping, connection pooling, HMS dependency, CAST strategies)
+**Score:** 4.6 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.6** |
+
+**Topics updated**: Trino federation — prior avg 4.338 across 48 questions; after Q1: (4.338 × 48 + 4.6) / 49 = **4.343 across 49 questions**. Status: NEEDS WORK (4.343 < 4.5 threshold).
+
+**Key findings**: CORRECT — cross-catalog INSERT INTO iceberg.X SELECT FROM postgresql.Y is supported (verified against trino.io docs). CORRECT — JSONB → Trino JSON type mapping; CAST(metadata AS VARCHAR) is the right approach for Iceberg v1/v2 (prod runs Iceberg 1.5.2 which has no native JSON logical type). CORRECT — OSS Trino 467 no native JDBC pooling; PgBouncer transaction-pooling recommendation correct. CORRECT — HMS availability required at commit time for atomic metadata pointer swap. Strong production-fit (on-prem k8s, MinIO, Kubernetes secrets). MINOR: "Parquet stores JSON as VARCHAR with JSON logical type annotation" muddles — CAST(AS VARCHAR) produces plain UTF-8, no JSON annotation; Iceberg v1/v2 has no JSON logical type. Practical conclusion (opaque string, no per-key stats) correct. MINOR: Could have mentioned orphan file cleanup if commit fails mid-write.
+
+### Iter 186 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (system.query() table function for pg_catalog access: escape hatch for native Postgres SQL through Trino)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — after Q2: (4.343 × 49 + 4.75) / 50 = **4.351 across 50 questions**. Status: NEEDS WORK (4.351 < 4.5 threshold).
+
+**Key findings**: All technical facts verified correct: `system.query()` syntax with named `query =>` parameter (verified against trino.io); `postgresql.include-system-tables=true` property name correct (verified via GitHub issue #15424); coordinator restart requirement correct; `typtype='e'` for enum types correct standard Postgres pattern. Excellent dual-option structure (one-off vs. recurring use case with decision table). Code examples immediately runnable. Root cause explanation (default behavior hides system schemas) correct. MINOR GAPS: doesn't mention that `system.query()` requires the calling user to have appropriate Trino privilege on the catalog (some OPA policies block table functions); doesn't note that pg_catalog results may have type-mapping quirks for some Postgres internal types; a brief explanation of what pg_catalog IS would help true OLAP novices.
+
+**Iter 186 average**: (4.6 + 4.75) / 2 = **4.675** — strong iteration, third consecutive iteration averaging ≥4.5. Topic average recovering.
+
+### Iter 187 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (dynamic catalog management: catalog.management=dynamic, CREATE/DROP CATALOG SQL, k8s writable volume, password-in-history risk, no ALTER CATALOG, experimental status)
+**Score:** 4.81 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.81** |
+
+**Topics updated**: Trino federation — prior avg 4.351 across 50 questions; after Q1: (4.351 × 50 + 4.81) / 51 = (217.55 + 4.81) / 51 = **4.360 across 51 questions**. Status: NEEDS WORK (4.360 < 4.5 threshold).
+
+**Key findings**: All major technical claims verified against trino.io docs.
+- CORRECT — `catalog.management=dynamic` in `etc/config.properties` (verified Trino 467 / 480 docs).
+- CORRECT — `CREATE CATALOG name USING postgresql WITH (...)` syntax with quoted-key properties; `connection-url`, `connection-user`, `connection-password` property names correct.
+- CORRECT — `${ENV:VAR}` syntax for credential injection via env-var secrets (verified Trino Secrets docs).
+- CORRECT — No `ALTER CATALOG` in Trino 467/480 (verified SQL statement support page).
+- CORRECT — Passwords appear in Web UI query history (verified — explicit Trino docs warning).
+- CORRECT — Experimental status warning (verified — Trino docs explicit "feature is experimental only").
+- CORRECT — Kubernetes ConfigMap is read-only and conflicts with dynamic catalog write requirements; must mount writable volume at `/etc/trino/catalog` (verified GitHub issue trinodb/trino#25651 + Trino k8s docs). YAML PVC/emptyDir example accurate. Init-container hint for emptyDir scenarios is a thoughtful production touch.
+- CORRECT — Cluster-wide propagation (workers pick up via coordinator); SHOW CATALOGS reflects immediately.
+- MINOR — Password rotation workaround presentation is slightly awkward: step 1 and step 3 both use `'new_secret'` for the password (functionally consistent — the goal IS to rotate to new_secret — but the 4-step CREATE_new → DROP_old → CREATE_old_with_new_secret → DROP_new dance is more complex than needed; in practice, DROP customer_acme_db; CREATE customer_acme_db WITH new password is sufficient if the brief DROP-to-CREATE gap is acceptable). The "zero-downtime rotation" via Postgres role swap (trino_reader → trino_reader_v2) is correct and a nice bonus but would require SaaS app to update queries to use the new catalog name during the bake period.
+- MINOR — Mount path notation: prose says `etc/catalog/` while YAML uses `/etc/trino/catalog`. Both work (the YAML is the actual install path), but a one-line note connecting the two would help.
+- MINOR — Could have noted that with OPA in the production stack, CREATE CATALOG / DROP CATALOG are privileged actions that OPA may need to allow for the catalog-admin role.
+- Strong production fit: on-prem k8s, ConfigMap caveat, PVC/emptyDir tradeoff, Kubernetes secrets / HashiCorp Vault all align with the prod stack described in `prod_info.md`.
+
+Iter 187 angle (dynamic catalog management) directly addressed the iter169 Q1 gap (where the responder missed this feature entirely) — third strong answer on this sub-topic following iter170 Q2 (4.20) and iter172 Q1 (4.75).
+
+### Iter 187 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (cross-catalog consistency: Trino has no atomic cross-system transactions spanning Postgres + Iceberg, failure modes, alternatives)
+**Score:** 4.5 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5 — exactly at threshold)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.0 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.5** |
+
+**Topics updated**: Trino federation — prior avg 4.360 across 51 questions; after Q2: (4.360 × 51 + 4.5) / 52 = **4.363 across 52 questions**. Status: NEEDS WORK (4.363 < 4.5 threshold).
+
+**Key findings**: CORRECT — Trino has no cross-catalog atomic transactions (verified: JDBC connectors require autocommit; Iceberg ACID is per-table within catalog only). CORRECT — HMS commit window failure mode, orphan file risk, decoupled Postgres read. CORRECT — Spark/Flink dedicated job recommendation aligned with prod stack. STRONG — three concrete options ranked by criticality, explicit "do NOT use this for billing data" guidance. TERMINOLOGY ERROR — "two-phase commit" used loosely; what's described is a checkpointed sequenced workflow with idempotence, not true 2PC. CRITICAL SYNTAX ERROR — `CALL iceberg.system.remove_orphan_files(schema_name=>'...', table_name=>'...')` is Spark Iceberg procedure syntax, NOT Trino syntax. In Trino, the correct form is `ALTER TABLE catalog.schema.table EXECUTE remove_orphan_files(retention_threshold => '7d')`. Resource fix required.
+
+**Iter 187 average**: (4.81 + 4.5) / 2 = **4.655** — strong iteration. Q1 was 4.81 (best dynamic-catalog answer ever). Topic average 4.363/52.
+
+### Iter 188 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (CBO with federated Postgres tables: ANALYZE limitations, statistics retrieval from pg_stats, NDV availability, join order mitigations)
+**Score:** 4.25 / 5 (PASS general ≥3.5 / FAIL Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.25** |
+
+**Topics updated**: Trino federation — prior avg 4.363 across 52 questions; after Q1: (4.363 × 52 + 4.25) / 53 = **4.361 across 53 questions**. Status: NEEDS WORK (4.361 < 4.5 threshold). REGRESSION.
+
+**Key findings**: CORRECT — ANALYZE in Trino does NOT work on the PostgreSQL connector. CORRECT — Iceberg ANALYZE writes NDV to Puffin statistics files. CORRECT — join_distribution_type=BROADCAST is a valid system session property. CORRECT — four mitigation strategies (ANALYZE Postgres natively, ANALYZE Iceberg, BROADCAST hint, early filter pushdown) are all practical and accurate. CRITICAL INACCURACY: Answer states "Trino does NOT get NDV or distribution stats from Postgres" — this is WRONG. Trino's PostgreSQL connector CAN retrieve table AND column statistics (NDV, null fraction, possibly histograms) from PostgreSQL's `pg_stats` view once native ANALYZE has been run on Postgres. The official Trino docs state: "The PostgreSQL connector can use table and column statistics for cost based optimizations... The statistics are collected by PostgreSQL and retrieved by the connector." Running ANALYZE on Postgres natively DOES give Trino CBO NDV data — the answer undersells its own Option 1 mitigation. Resource fix required.
+
+### Iter 188 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (SSL/TLS for Postgres connection: JDBC URL parameters, sslmode options, internal CA cert in Kubernetes)
+**Score:** 4.90 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.90** |
+
+**Topics updated**: Trino federation — after Q2: (4.361 × 53 + 4.90) / 54 = **4.371 across 54 questions**. Status: NEEDS WORK (4.371 < 4.5 threshold).
+
+**Key findings**: CORRECT — JDBC URL parameters approach (no separate postgresql.ssl-* properties). CORRECT — sslmode=require (encrypt, no cert verification, MITM-vulnerable). CORRECT — sslmode=verify-full (CA-chain + CN/SAN hostname verification). CORRECT — sslrootcert parameter correct name and semantics. CORRECT — CA cert must be mounted on ALL workers (not just coordinator). CORRECT — k8s Secret + volumeMount manifest deployable. CORRECT — pg_stat_ssl JOIN pg_stat_activity verification query canonical. Directly resolves the iter168 Q1 SSL gap. Minor: "MITM" could use one more concrete attacker scenario sentence for true beginners.
+
+**Iter 188 average**: (4.25 + 4.90) / 2 = **4.575** — Q2 excellent but Q1 regression pulls topic average to 4.371/54.
+
+### Iter 189 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (OPA + CREATE CATALOG privilege: does OPA intercept catalog DDL? Rego rule for catalog-admin access)
+**Score:** 2.88 / 5 (FAIL general <3.5 / FAIL Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 3.0 |
+| Beginner clarity | 3.5 |
+| Practical applicability | 2.5 |
+| Completeness | 2.5 |
+| **Average** | **2.88** |
+
+**Topics updated**: Trino federation — prior avg 4.371 across 54 questions; after Q1: (4.371 × 54 + 2.88) / 55 = **4.344 across 55 questions**. Status: NEEDS WORK.
+
+**Key findings**: CRITICAL RESOURCE GAP — no documentation in resources/ about OPA intercepting CREATE CATALOG / DROP CATALOG. Answer correctly identified OPA as the authorization layer and honestly admitted resource gaps, but failed to provide: (1) `catalog.management=dynamic` prerequisite, (2) exact Trino action names `CreateCatalog`/`DropCatalog` sent to OPA, (3) distinction from `opa.allow-permission-management-operations` (which is GRANT/REVOKE/role only, NOT catalog DDL), (4) even a conceptual Rego skeleton. Included irrelevant multi-tenant row-filter content. Resource fix CRITICAL for iter190.
+
+**Verified facts**: OPA plugin receives `input.action.operation == "CreateCatalog"` / `"DropCatalog"` from Trino's `SystemAccessControl.checkCanCreateCatalog()` / `checkCanDropCatalog()`. `catalog.management=dynamic` must be set in config.properties or CREATE CATALOG fails before hitting OPA. `opa.allow-permission-management-operations` controls GRANT/REVOKE/role management, NOT catalog DDL. Rego pattern: deny if `input.action.operation in {"CreateCatalog", "DropCatalog"}` and user groups don't include platform-admin.
+
+### Iter 189 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (Trino views over federated Postgres tables: works, predicate pushdown through views, schema drift/frozen column list)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.75 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — after Q2: (4.344 × 55 + 4.75) / 56 = **4.351 across 56 questions**. Status: NEEDS WORK (4.351 < 4.5 threshold).
+
+**Key findings**: CORRECT — Trino views over Postgres-backed tables work; view body stored in Hive Metastore (not Postgres). CORRECT — predicate pushdown traverses views (Trino inlines view definitions at planning time). CORRECT — frozen column schema at CREATE time; SELECT * silently drops new columns added to Postgres. CORRECT — `CALL app_pg.system.flush_metadata_cache()` is parameterless for PostgreSQL connector (correctly distinguished from Hive/Delta forms). CORRECT — `postgresql.experimental.enable-string-pushdown-with-collate=true` is the correct catalog property name. CORRECT — SECURITY DEFINER is default; SECURITY INVOKER uses caller's grants. CORRECT — `CREATE OR REPLACE VIEW` preserves GRANTs while updating frozen column schema. Minor: EXPLAIN node wording "constraint on [columns]" is broadly accurate but not verbatim Trino 467 output; no mention of materialized views as alternative for latency-heavy dashboards.
+
+**Iter 189 average**: (2.88 + 4.75) / 2 = **3.815** — Q2 strong but Q1 catastrophic resource gap (OPA catalog DDL) pulls average down. Topic average 4.351/56. CRITICAL fix needed for iter190.
+
+### Iter 190 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (credential rotation: DROP+CREATE pattern, in-flight query behavior, rolling restart, Vault integration on Kubernetes)
+**Score:** 4.58 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.6 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.8 |
+| Completeness | 4.4 |
+| **Average** | **4.58** |
+
+**Topics updated**: Trino federation — prior avg 4.351 across 56 questions; after Q1: (4.351 × 56 + 4.58) / 57 = **4.355 across 57 questions**. Status: NEEDS WORK.
+
+**Key findings**: CORRECT — `catalog.management=dynamic` required; verified against Trino 467 docs. CORRECT — `DROP CATALOG` does NOT interrupt in-flight queries; docs say it "makes it unavailable to any new queries" only. CORRECT — ConfigMap is read-only, writable emptyDir/PVC required. CORRECT — `${ENV:VAR}` syntax for env var injection. CORRECT — no native Vault integration in Trino 467. CORRECT — dual-role pattern as truly zero-downtime alternative (single Postgres role can't have two passwords simultaneously). MISSING: (1) `catalog.management=dynamic` is experimental in Trino 467 — security teams often disallow experimental features; (2) `CREATE CATALOG` SQL with password is logged in full in Trino Web UI query history — credential exposure footgun; (3) OPA permission requirement for CREATE/DROP CATALOG not mentioned (connection to iter189 Q1 topic).
+
+### Iter 190 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (metadata cache invalidation: metadata.cache-ttl, flush_metadata_cache syntax, frozen view columns, schema drift runbook)
+**Score:** 4.875 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.9 |
+| Beginner clarity | 4.7 |
+| Practical applicability | 5.0 |
+| Completeness | 4.9 |
+| **Average** | **4.875** |
+
+**Topics updated**: Trino federation — after Q2: (4.355 × 57 + 4.875) / 58 = **4.364 across 58 questions**. Status: NEEDS WORK (4.364 < 4.5 threshold).
+
+**Key findings**: CORRECT — `metadata.cache-ttl=0s` default (caching off by default). CORRECT — `CALL app_pg.system.flush_metadata_cache()` is parameterless for PostgreSQL; named args (schema_name, table_name) only work on Hive/Delta connectors — prevents iter171 Q1 regression. CORRECT — flushes entire catalog. CORRECT — view column schema frozen at creation time; SELECT * silently misses new Postgres columns even after flush. CORRECT — `CREATE OR REPLACE VIEW` updates frozen column schema; GRANTs preserved. CORRECT — SECURITY DEFINER default vs INVOKER. Minor gaps: doesn't mention that changing `metadata.cache-ttl` itself requires catalog reload/restart to take effect (distinct from hot flush_metadata_cache call). Slight overstatement of "cluster-wide" propagation (docs don't use this wording explicitly).
+
+**Iter 190 average**: (4.58 + 4.875) / 2 = **4.73** — both answers PASS-topic. Topic average 4.364/58. Strong iteration.
+
+### Iter 191 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (debugging CREATE CATALOG Access Denied: two-gate model, OPA decision logs, Trino access-control logging, group claim in JWT, opa.allow-permission-management-operations distinction)
+**Score:** 3.94 / 5 (PASS general >=3.5 / FAIL Trino federation raised threshold >=4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 3.25 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.0 |
+| Completeness | 4.0 |
+| **Average** | **3.94** |
+
+**Topics updated**: Trino federation — prior avg 4.364 across 58 questions; after Q1: (4.364 × 58 + 3.94) / 59 = **4.357 across 59 questions**. Status: NEEDS WORK (4.357 < 4.5 threshold). REGRESSION from 4.364.
+
+**Key findings**:
+- CORRECT — two-gate model (Gate #1 `catalog.management=dynamic` checked first, OPA never consulted if absent; Gate #2 OPA Rego policy) — verified against trino.io and matches resources/22 Section 2.8.1.
+- CORRECT — `CreateCatalog` / `DropCatalog` PascalCase operation names sent in `input.action.operation` — verified in OpaAccessControl.java (lines 272/281).
+- CORRECT — `opa.allow-permission-management-operations=false` does NOT gate catalog DDL; only affects GRANT/REVOKE/role ops. Catalog DDL always reaches OPA regardless. Verified against trino.io OPA docs.
+- CORRECT — `Catalog management type must be 'dynamic'` error string when feature gate is off, before OPA is consulted.
+- CORRECT — operation-name mismatch trap: `"CREATE CATALOG"` (SQL text) vs `"CreateCatalog"` (PascalCase SPI method name).
+- CRITICAL ERROR — `access-control.log=true` is NOT a real Trino config property. The actual properties for OPA request/response logging on the Trino side are `opa.log-requests=true` and `opa.log-responses=true` in `etc/access-control.properties` (logs go to DEBUG level under `io.trino.plugin.opa.OpaHttpClient` logger). An engineer following Step 4 of the runbook verbatim will edit `config.properties` with a nonexistent property, restart the coordinator, and see nothing. This is a load-bearing instruction in the debugging runbook — Step 4 is the only step that lets you see what Trino actually sent to OPA on the Trino side.
+- CRITICAL ERROR — fabricated `/var/log/trino/access-control.log` file path with example log line format (`user=platform-svc action=CreateCatalog ... result=DENIED`). No such dedicated log file exists in OSS Trino 467; this is invented output. The OPA HTTP client log entries appear in the normal Trino server log when the logger is set to DEBUG, not in a separate file.
+- ERROR — `curl http://opa-server:8181/api/v1/decisions` is presented as a way to retrieve OPA decisions. OPA does not expose a REST endpoint for past decision lookup; decisions are streamed via the decision-log plugin to console (stdout, viewable with `kubectl logs`) or to a remote HTTP service. The `kubectl logs <opa-pod>` half of that step is fine when OPA is configured with `decision_logs.console: true`, but the curl endpoint is invented.
+- MINOR — Step 3 example input JSON uses `"context.identity.user"` / `"context.identity.groups"` and `"action.resource.catalog.name"` — these top-level paths match Trino's OPA plugin format, but the example also shows `"softwareStack": { "trinoVersion": "467" }` which isn't a field in the OPA input document (the field is `trinoVersion` directly under `context`, no `softwareStack` wrapper).
+- COMPLETENESS — does not mention enabling DEBUG on `io.trino.plugin.opa.OpaHttpClient` via `etc/log.properties`, which is the actual mechanism for "see what Trino is sending to OPA." This is the single most relevant operational step for the question and the answer gets it wrong.
+- COMPLETENESS — Step 5 about `opa.allow-permission-management-operations` is well-placed but could be tightened — it is currently framed as a "common mistake" but for an engineer who is debugging Access Denied, the more useful framing is "this flag is a red herring — do not toggle it expecting catalog DDL to work."
+
+**Resource fix recommendations**:
+- **CRITICAL (correctness)** — `resources/22-trino-federation-postgresql.md` Section 2.8.1: add the correct Trino OPA logging properties (`opa.log-requests=true`, `opa.log-responses=true` in `etc/access-control.properties`) AND the required `io.trino.plugin.opa.OpaHttpClient=DEBUG` line in `etc/log.properties`. Explicitly call out that there is NO `access-control.log` property and NO dedicated `/var/log/trino/access-control.log` file in OSS Trino — entries go to the normal Trino server log at DEBUG level under the OpaHttpClient logger. Add a verbatim sample log line so the responder doesn't fabricate one.
+- **CRITICAL (correctness)** — same section: add an explicit subsection "How to inspect what Trino sent to OPA and what OPA decided" with the two-sided picture: (a) Trino side — enable `opa.log-requests` / `opa.log-responses` + DEBUG logger; (b) OPA side — enable `decision_logs.console: true` in OPA config and `kubectl logs <opa-pod>`. Remove any suggestion of a REST endpoint at `/api/v1/decisions` for retrieving past decisions (OPA has no such endpoint).
+- **MEDIUM (completeness)** — same section: add a worked example of the actual decision-log JSON entry as it appears on the OPA side (the `input`, the `result`, and the `decision_id`) so the responder has a real shape to reproduce instead of inventing a partial one.
+- **MEDIUM (correctness)** — same section: remove the `softwareStack` JSON wrapper from any input-document examples; the real field is `context.trinoVersion` (string) per the OPA plugin source.
+- **LOW (clarity)** — add a one-line debugging checklist at the top of Section 2.8.1: (1) grep `catalog.management` in config.properties; (2) `opa.log-requests=true` + DEBUG logger; (3) `decision_logs.console: true` in OPA + tail OPA pod logs; (4) decode the JWT to confirm `groups` claim; (5) confirm Rego rule matches `input.action.operation == "CreateCatalog"` literally.
+
+Verified: trino.io/docs/current/security/opa-access-control.html (opa.log-requests / opa.log-responses, io.trino.plugin.opa.OpaHttpClient DEBUG logger); github.com/trinodb/trino plugin/trino-opa/src/main/java/io/trino/plugin/opa/OpaAccessControl.java (CreateCatalog line 272, DropCatalog line 281); openpolicyagent.org/docs/management-decision-logs (console:true plugin, no REST endpoint for past decision retrieval); trino.io/docs/current/sql/create-catalog.html ("Catalog management type must be 'dynamic'" prerequisite).
+
+### Iter 191 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (PgBouncer with Trino PostgreSQL connector: no native OSS pooling, transaction pooling mode, prepareThreshold=0, CONNECTION LIMIT, resource groups)
+**Score:** 4.80 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.8 |
+| Beginner clarity | 4.7 |
+| Practical applicability | 5.0 |
+| Completeness | 4.7 |
+| **Average** | **4.80** |
+
+**Topics updated**: Trino federation — after Q2: (4.357 × 59 + 4.80) / 60 = **4.364 across 60 questions**. Status: NEEDS WORK (4.364 < 4.5 threshold).
+
+**Key findings**: CORRECT — OSS Trino 467 has no native connection pooling (Starburst Enterprise only, GitHub issue #15888). CORRECT — `prepareThreshold=0` is the required JDBC parameter for transaction-pooling PgBouncer compatibility (server-side prepared statements are connection-scoped; transaction pooling routes to different backends, causing "prepared statement does not exist" errors without this). CORRECT — transaction pooling is the right PgBouncer mode for read-only Trino federation. CORRECT — `ALTER ROLE trino_reader CONNECTION LIMIT 50` valid PostgreSQL syntax. CORRECT — three-layer defense-in-depth (PgBouncer + Postgres role limit + Trino resource groups). MISSING: PgBouncer 1.21+ adds native prepared-statement support in transaction mode via `max_prepared_statements` (answer's prepareThreshold=0 approach still valid, just not the only option); `preparedStatementCacheQueries=0` as belt-and-suspenders; resource groups snippet needs selectors array to be deployable.
+
+**Iter 191 average**: (3.94 + 4.80) / 2 = **4.37** — Q2 strong (4.80), Q1 regression from fabricated properties (3.94). Topic stays at 4.364/60. CRITICAL resource fix needed: OPA debugging logging properties (access-control.log does not exist; correct is opa.log-requests/opa.log-responses + OpaHttpClient DEBUG logger).
+
+### Iter 192 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (OPA authorization audit trail: decision_logs config, JSON structure, operation names, SIEM wiring, production vs debug logging)
+**Score:** 4.875 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.875** |
+
+**Topics updated**: Trino federation — prior avg 4.364 across 60 questions; after Q1: (4.364 × 60 + 4.875) / 61 = **4.372 across 61 questions**. Status: NEEDS WORK.
+
+**Key findings**: CORRECT — `decision_logs.console: true` enables stdout JSON decision logging. CORRECT — OPA supports remote HTTP sink via `decision_logs.service` + `services.<name>.url`. CORRECT — operation names (CreateCatalog, DropCatalog, SelectFromColumns, FilterCatalogs) verified against OpaAccessControl.java. CORRECT — `result.allow` boolean in decision log, `decision_id`, `metrics.eval_ns`. CORRECT — `input.context.queryId` placement. CORRECT AND CRITICAL — `opa.log-requests`/`opa.log-responses` + `io.trino.plugin.opa.OpaHttpClient` DEBUG is the correct Trino-side debug mechanism (directly fixes iter191 fabrication of `access-control.log` property). CORRECT — debug logging is verbose/not for production audit vs decision_logs for compliance. Minor nit: `metrics.eval_ns` may be `timer_rego_query_eval_ns` in newer OPA versions (acceptable approximation).
+
+### Iter 192 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (read replica lag vs Trino metadata caching: diagnosis, pg_stat_replication, hot_standby_feedback, separate primary catalog pattern)
+**Score:** 4.80 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.8 |
+| Completeness | 4.8 |
+| Practical applicability | 4.9 |
+| Beginner clarity | 4.7 |
+| **Average** | **4.80** |
+
+**Topics updated**: Trino federation — after Q2: (4.372 × 61 + 4.80) / 62 = **4.379 across 62 questions**. Status: NEEDS WORK (4.379 < 4.5 threshold).
+
+**Key findings**: CORRECT — Trino has no query result cache for PostgreSQL connector. CORRECT — `metadata.cache-ttl` default 0 (disabled), schema metadata only. CORRECT — `pg_stat_replication.replay_lag` is correct field; write_lag/flush_lag/replay_lag semantics accurate. CORRECT — `hot_standby_feedback = on` prevents primary vacuuming rows needed by replica; tradeoff noted. CORRECT — separate catalog for primary is the standard Trino pattern (no per-query routing). Minor: `hot_standby_feedback` is available since Postgres 9.1 not "12+" as stated; separate catalog requires application code to choose catalog name (implied but not explicit).
+
+**Iter 192 average**: (4.875 + 4.80) / 2 = **4.84** — both answers PASS-topic. Topic average 4.379/62. Strong iteration.
+
+### Iter 193 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (Postgres type mapping: JSONB, UUID, NUMERIC(10,2), unsupported_type_handling)
+**Score:** 3.25 / 5 (FAIL — below general 3.5 floor and federation 4.5 threshold)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 2.0 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 4.0 |
+| Completeness | 3.0 |
+| **Average** | **3.25** |
+
+**Topics updated**: Trino federation — prior avg 4.379 across 62 questions; after Q1: (4.379 × 62 + 3.25) / 63 = **4.362 across 63 questions**. Status: NEEDS WORK.
+
+**Key findings**: CORRECT — UUID → Trino UUID with literal casting advice. CORRECT — NUMERIC(10,2) → DECIMAL(10,2) precision preserved. CORRECT — unsupported_type_handling=IGNORE (default skips column, not table); CONVERT_TO_VARCHAR alternative. CORRECT — JSONB predicate pushdown conclusion (doesn't push). CRITICAL ERROR — answer states JSONB maps to VARCHAR; per official Trino docs (trino.io/docs/current/connector/postgresql.html), the correct mapping is jsonb → Trino JSON type. The reason predicates don't push down is that JSON type is non-orderable (DISABLE_PUSHDOWN), not that it's VARCHAR. Root cause: Section 9.4 of resources/22-trino-federation-postgresql.md contained the incorrect VARCHAR claim — resource fixed in iter193.
+
+### Iter 193 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (system.query() deep dive: when/why, security layering, performance/pushdown behavior)
+**Score:** 4.875 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.875** |
+
+**Topics updated**: Trino federation — after Q2: (4.362 × 63 + 4.875) / 64 = **4.369 across 64 questions**. Status: NEEDS WORK (4.369 < 4.5 threshold).
+
+**Key findings**: CORRECT — syntax SELECT * FROM TABLE(catalog.system.query(query => '...')). CORRECT — OPA gates access at Trino layer; runs as Postgres service account once past. CORRECT — no predicate pushdown from Trino (opaque result). CORRECT — does NOT respect Trino row filters/column masks. CORRECT — use cases (Postgres-specific operators, pg_stat_* views, custom functions, vendor extensions). CORRECT — always push filtering into SQL string (bad/good examples). Minor: doesn't name the EXECUTE privilege explicitly; doesn't mention system.query() can perform DML (not just reads); result ordering not preserved.
+
+**Iter 193 average**: (3.25 + 4.875) / 2 = **4.06** — Q1 regression (JSONB→VARCHAR error in resource), Q2 strong (4.875). Resource fix applied in iter193. Topic at 4.369/64.
+
+### Iter 194 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (multi-schema Postgres federation: catalog/schema mapping, cross-schema JOIN)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.369 across 64 questions; after Q1: (4.369 × 64 + 4.75) / 65 = **4.375 across 65 questions**. Status: NEEDS WORK.
+
+**Key findings**: CORRECT — single Postgres connector exposes ALL schemas as Trino schemas under one catalog (verified trino.io). CORRECT — three-part naming `catalog.schema.table` (e.g., app_pg.public.users, app_pg.billing.invoices). CORRECT — cross-schema JOINs work within same catalog. CORRECT — SHOW SCHEMAS FROM and SHOW TABLES FROM syntax. CORRECT — single connector = single Postgres database. Bonus: operational warning about read replica, PgBouncer note. Minor gaps: didn't explicitly state 1-catalog-per-database limit for multiple databases; didn't mention case-insensitive-name-matching for mixed-case schemas.
+
+### Iter 194 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (query timeouts and resource management: socketTimeout, statement_timeout, resource groups, max-run-time vs max-execution-time)
+**Score:** 4.0 / 5 (FAIL — below federation 4.5 threshold)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 4.5 |
+| Completeness | 4.5 |
+| **Average** | **4.0** |
+
+**Topics updated**: Trino federation — after Q2: (4.375 × 65 + 4.0) / 66 = **4.369 across 66 questions**. Status: NEEDS WORK (essentially unchanged).
+
+**Key findings**: CORRECT — no native Trino connector-level timeout in OSS 467; socketTimeout in JDBC URL is the correct workaround. CORRECT — Postgres statement_timeout is the primary server-side defense. CORRECT — query.max-execution-time (active compute only) vs query.max-run-time (wall-clock including queue) distinction. CORRECT — resource-groups.configuration-manager=file wiring. CORRECT — PgBouncer recommendation. CRITICAL ERROR — resource groups JSON used `"groups"` as top-level key; correct key is `"rootGroups"`. Resources already use rootGroups correctly; responder wrote from memory incorrectly. Also: selector referenced undefined `"default"` group. Resource fix: added anti-pattern callout to resources/22 Section 8.2C warning "top-level key is rootGroups NOT groups."
+
+**Iter 194 average**: (4.75 + 4.0) / 2 = **4.375** — Q1 solid PASS, Q2 FAIL due to rootGroups typo. Topic at 4.369/66 (flat).
+
+### Iter 195 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (cross-catalog Iceberg + Postgres join: federation under the hood, broadcast join for 200K-row dim, when to keep nightly ingest)
+**Score:** 4.5 / 5 (PASS — meets federation 4.5 threshold exactly)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.0 |
+| **Average** | **4.5** |
+
+**Topics updated**: Trino federation — prior avg 4.369 across 66 questions; after Q1: (4.369 × 66 + 4.5) / 67 = **4.371 across 67 questions**. Status: NEEDS WORK (still below 4.5 threshold).
+
+**Key findings**: CORRECT — single SQL join across iceberg.* and app_pg.* catalogs supported (verified trino.io). CORRECT — three-part naming catalog.schema.table. CORRECT — broadcast join chosen by CBO for small (200K-row) dim against large fact (verified — broadcast for small build side is standard). CORRECT — predicate pushdown to Postgres side (=, IN, != verified by trino.io PostgreSQL connector docs). CORRECT — join executes on Trino workers, not pushed to Postgres. CORRECT — OSS Trino 467 has no native connection pooling (verified — `connection-pool.enabled` is a Starburst feature; OSS docs list only connection-url/user/password). CORRECT — replica lag as freshness ceiling, PgBouncer + CONNECTION LIMIT + resource groups + statement_timeout mitigations. CORRECT — catalog.management=dynamic for credential rotation. NOTABLE OMISSION — did not mention dynamic filtering, which is enabled by default in the Iceberg connector and is the mechanism by which the small Postgres result set is pushed as a runtime predicate into the Iceberg scan (highly relevant for "what happens under the hood" with broadcast join). MINOR — join key in example (`e.user_id = a.account_id`) is semantically suspicious; "even a full 200K pull is only a few MB" undersells row-width math; did not suggest EXPLAIN to verify pushdown.
+
+**Resource fix suggestion**: Add a Section to resources/22 (or wherever cross-catalog join mechanics live) explicitly stating: "Dynamic filtering is on by default in the Iceberg connector. In a Postgres→Iceberg broadcast join, the Postgres result rows become a runtime predicate pushed into the Iceberg scan, allowing Iceberg to skip files/row groups not matching any join key. Use EXPLAIN ANALYZE to verify — look for `dynamicFilters` in the Iceberg scan node." Also add a one-line note that "a 200K-row Postgres table can be 50–200MB on the wire depending on row width; still small enough to broadcast but worth measuring."
+
+### Iter 195 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (EXPLAIN for federation query planning: pushdown signals, ScanFilterProject, EXPLAIN ANALYZE Filtered%, dynamic filtering)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 4.5 |
+| Completeness | 4.75 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — after Q2: (4.371 × 67 + 4.75) / 68 = **4.376 across 68 questions**. Status: NEEDS WORK.
+
+**Key findings**: CORRECT — EXPLAIN (TYPE DISTRIBUTED) syntax. CORRECT — pushdown success signal: constraint on [columns] inside TableScan (no ScanFilterProject above). CORRECT — pushdown failure signal: ScanFilterProject/Filter node sits above TableScan with no constraint block. CORRECT — EXPLAIN ANALYZE shows Filtered% metric (actual execution). CORRECT — LIKE/string ranges don't push down to Postgres by default. CORRECT — function-wrapped columns (LOWER, CAST) prevent pushdown. CORRECT — dynamicFilters annotation on Iceberg probe-side scan is a bonus confirmation signal. Minor: plan snippet format is stylized; actual Trino output may vary. No resource fixes needed.
+
+**Iter 195 average**: (4.5 + 4.75) / 2 = **4.625** — both PASS. Best iteration average in extended phase. Topic at 4.376/68. Moving upward.
+
+### Iter 196 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (dynamic filtering deep dive: mechanism, build/probe direction, EXPLAIN signals, wait-timeout config, cross-catalog behavior)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 4.75 |
+| Practical applicability | 5.0 |
+| Completeness | 4.75 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.378 across 69 questions; after Q1: (4.378 × 69 + 4.75) / 70 = **4.383 across 70 questions**. Status: NEEDS WORK.
+
+**Key findings**: CORRECT — dynamic filtering enabled by default. CORRECT — dynamicFilters annotation on probe-side scan (not build-side) in EXPLAIN. CORRECT — dynamicFilterSplitsProcessed is the EXPLAIN ANALYZE metric on Iceberg probe. CORRECT — iceberg.dynamic-filtering.wait-timeout default 1s; postgresql.dynamic-filtering.wait-timeout default 20s. CORRECT — domain-compaction-threshold (default 256). CORRECT — enable_large_dynamic_filters session property. CORRECT — cross-catalog DF works (no join pushdown but DF fires). Bonus: "do NOT check dynamicFilterSplitsProcessed on build-side Postgres scan" pitfall callout. Minor: didn't mention DF biggest win when join key matches Iceberg partition column.
+
+### Iter 196 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (PostgreSQL connector properties: parallel reads, timeouts, SSL, unsupported_type_handling, session properties)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — after Q2: 4.383 already accounts for both. Actually: prior 4.378/69 → after Q1 (4.75): 4.383/70. The Q2 judge updated to 4.378/69 (their update only). Combined: see line 46 for final.
+
+**Key findings**: CORRECT — OSS Trino 467 lacks partition-column/partition-count (Starburst-only, trinodb/trino#389). CORRECT — socketTimeout/connectTimeout in seconds via JDBC URL. CORRECT — unsupported_type_handling is session property; IGNORE (default), CONVERT_TO_VARCHAR. CORRECT — session properties (domain_compaction_threshold=256 default, array_mapping, join_pushdown_enabled, dynamic_filtering_wait_timeout). CORRECT — metadata.cache-ttl and metadata.cache-missing valid catalog properties. CORRECT — SHOW SESSION LIKE 'app_pg.%' syntax. "Negative space" callouts (what doesn't exist as session properties) are high value. Minor: socketTimeout fires on slow reads not just stuck; sslmode=verify-ca middle option missing; join_pushdown_strategy not shown in SET SESSION example.
+
+**Iter 196 average**: (4.75 + 4.75) / 2 = **4.75** — both PASS, tied for best per-question scores in extended phase. Topic at 4.383/70.
+
+### Iter 197 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (federation monitoring and observability: replica lag detection, push-down confirmation via EXPLAIN, pg_stat_activity, system.runtime.queries, event listener)
+**Score:** 4.25 / 5 (PASS general ≥3.5 / FAIL Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.5 |
+| Completeness | 4.0 |
+| **Average** | **4.25** |
+
+**Topics updated**: Trino federation — prior avg 4.383 across 70 questions; after Q1: (4.383 × 70 + 4.25) / 71 = **4.382 across 71 questions**. Status: NEEDS WORK.
+
+**Key findings**: CRITICAL ERROR — wrote `event-listener.type=http` (property does not exist; Trino silently ignores it). Correct property is `event-listener.name=http`. Resources already have the correct property name; responder wrote from memory. CORRECT — EXPLAIN (TYPE DISTRIBUTED) pushdown signals (constraint on columns = success; ScanFilterProject above TableScan = failure). CORRECT — pg_stat_activity on replica, system.runtime.queries in Trino. CORRECT — replica lag via pg_last_xact_replay_timestamp() on replica and pg_stat_replication.replay_lag on primary — external to Trino. CORRECT — OPA decision log as a durable access-control layer. CORRECT — ALTER ROLE trino_reader SET statement_timeout. CORRECT — system.runtime.queries "user" column must be double-quoted. Minor gaps: no JMX/Prometheus metrics for JDBC connector; missed io.trino.plugin.jdbc DEBUG logger; socketTimeout caveat (fires on slow reads, not just stuck).
+
+**Resource fix applied**: Added ANTI-PATTERN WARNING for `event-listener.type` near the correct `event-listener.name=http` config block in resources/22. Also added Iceberg resource-leak warning for DROP CATALOG and catalog.store=file vs memory distinction.
+
+### Iter 197 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (dynamic catalog management: catalog.management=dynamic, CREATE/DROP CATALOG SQL, credential rotation, Kubernetes persistence)
+**Score:** 4.5 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 4.5 |
+| Completeness | 4.0 |
+| **Average** | **4.5** |
+
+**Topics updated**: Trino federation — prior avg 4.382 across 71 questions; after Q2: (4.382 × 71 + 4.5) / 72 = **4.383 across 72 questions**. Status: NEEDS WORK.
+
+**Key findings**: CORRECT — catalog.management=dynamic in etc/config.properties. CORRECT — CREATE CATALOG / DROP CATALOG SQL syntax. CORRECT — no ALTER CATALOG in Trino 467 (trinodb/trino#25542). CORRECT — DROP CATALOG does not interrupt in-flight queries. CORRECT — dynamic catalogs require writable catalog dir (ConfigMap is read-only, use emptyDir or PVC). CORRECT — ${ENV:VAR} credential indirection (plaintext password would appear in query history). CORRECT — OPA Rego rules for CreateCatalog/DropCatalog operations. CORRECT — experimental status caveat. Minor gaps: missing DROP CATALOG Iceberg resource-leak warning (coordinator+worker restart recommended for Iceberg/Hive catalogs); missing catalog.store=file vs catalog.store=memory distinction.
+
+**Iter 197 average**: (4.25 + 4.5) / 2 = **4.375** — Q1 FAIL (event-listener.name error), Q2 PASS. Topic at 4.383/72. Historical drag continues to dominate. Need sustained 4.5+ scores for many more iterations to move the average.
+
+### Iter 198 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (multi-tenant federation isolation: OPA row-filter mode, tenant identity encoding, Postgres RLS vs views, CI verification)
+**Score:** 4.63 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.63** |
+
+**Topics updated**: Trino federation — prior avg 4.383 across 72 questions; after Q1: (4.383 × 72 + 4.63) / 73 = **4.386 across 73 questions**. Status: NEEDS WORK.
+
+**Key findings**: CORRECT — OPA row-filter mode injects WHERE predicate at query analysis phase via `opa.policy.row-filters-uri`. CORRECT — OPA enforcement scoped to Trino only; direct Postgres connections bypass. CORRECT — OPA row-filter predicates are pushed down through PostgreSQL connector (only tenant rows fetched). CORRECT — Postgres RLS stronger than view-based isolation; views depend on revoking base-table grants. CORRECT — CI verification pattern (SELECT DISTINCT tenant_id as tenant, expect 1 row). CORRECT — PgBouncer + CONNECTION LIMIT for connection management. Minor: inconsistency in what OPA receives — says "username and groups" then "only username"; more precisely, groups are available if group provider configured, but JWT group claims not natively parsed (Trino issue #28571). No critical errors.
+
+**Resource fix suggestions**: Add that OPA context includes both `identity.user` and `identity.groups`; add note that Trino #28571 means JWT group claims need group provider; clarify OPA-injected predicates push down to PostgreSQL connector; add Postgres RLS vs SECURITY INVOKER/DEFINER views comparison in resources/05.
+
+### Iter 198 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (Iceberg snapshot expiry + concurrent federation queries: compaction safety, expire_snapshots risk, retention thresholds, Postgres MVCC)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.386 across 73 questions; after Q2: (4.386 × 73 + 4.75) / 74 = **4.391 across 74 questions**. Status: NEEDS WORK.
+
+**Key findings**: CORRECT — Iceberg does NOT protect in-flight queries from physical file deletion by expire_snapshots (snapshot isolation ≠ file lock). CORRECT — rewrite_data_files (compaction) safe to run concurrently. CORRECT — Trino iceberg.expire-snapshots.min-retention default 7d. CORRECT — Postgres MVCC protects federated leg; only Iceberg leg at risk. CORRECT — ALTER TABLE ... EXECUTE optimize syntax for Trino compaction. CORRECT — if Iceberg leg fails, whole federated query fails. Minor: CALL iceberg.system.expire_snapshots() not labeled as Spark syntax vs Trino (recurring pattern); snapshot isolation and MVCC used without inline glosses; retain_last override behavior not mentioned.
+
+**Resource fix suggestions**: Add Trino vs Spark side-by-side syntax for expire_snapshots in resources/17; add one-sentence inline glosses for "snapshot isolation" and "MVCC"; consider extracting maintenance scheduling matrix as a top-level resource.
+
+**Iter 198 average**: (4.63 + 4.75) / 2 = **4.69** — both PASS. Best iteration average in extended phase. Topic at 4.391/74. Historical drag continues; need many more 4.5+ iterations.
+
+### Iter 199 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (system.query() passthrough security: OPA bypass, row-filter bypass, column mask bypass, practical mitigation)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.406 across 74 questions; after Q1: (4.406 × 74 + 4.75) / 75 = **4.411 across 75 questions**. Status: NEEDS WORK.
+
+**Key findings**: CORRECT — system.query() sends SQL verbatim to Postgres; Trino does not parse or rewrite it (verified: trino.io docs state "only passed through"). CORRECT — OPA row-filter injection bypassed (no query analysis). CORRECT — all three isolation layers bypassed (views, base-table SELECT denial, row-filters). CORRECT — OPA still gates the function call itself. CORRECT — practical mitigation: deny system.query() for non-admin principals. Three-layer bypass framing is accurate and high-value. Minor accuracy gap: OPA operation name written as "ExecuteTableFunction" — actual OPA plugin emits "ExecuteFunction" (with function-kind discriminator). Rego example may not match what deployed OPA plugin emits.
+
+### Iter 199 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (CBO and statistics for federated queries: ANALYZE TABLE failure, pg_stats mechanism, SHOW STATS, join distribution overrides)
+**Score:** 5.0 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **5.0** |
+
+**Topics updated**: Trino federation — prior avg 4.411 across 75 questions; after Q2: (4.411 × 75 + 5.0) / 76 = **4.417 across 76 questions**. Status: NEEDS WORK.
+
+**Key findings**: CORRECT — ANALYZE TABLE not supported on PostgreSQL connector (fails with "does not support analyze"). CORRECT — Trino CBO gets Postgres statistics from pg_stats via JDBC (verified verbatim from trino.io docs: "The statistics are collected by PostgreSQL and retrieved by the connector"). CORRECT — flush_metadata_cache() parameterless for JDBC connectors. CORRECT — SHOW STATS syntax. CORRECT — join_distribution_type session property values (AUTOMATIC/BROADCAST/PARTITIONED). CORRECT — Iceberg ANALYZE WITH (columns = ARRAY[...]) syntax. Perfect score — all five sub-topics addressed, all facts verified against official docs. No corrections needed.
+
+**Iter 199 average**: (4.75 + 5.0) / 2 = **4.875** — both PASS. Best iteration average in extended phase. Topic at 4.417/76. First perfect Q2 score in federation topic.
+
+### Iter 200 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (schema evolution and metadata caching: cache-ttl default, silent corruption vs hard error, flush_metadata_cache, view staleness)
+**Score:** 5.0 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **5.0** |
+
+**Topics updated**: Trino federation — prior avg 4.417 across 76 questions; after Q1: (4.417 × 76 + 5.0) / 77 = **4.424 across 77 questions**. Status: NEEDS WORK.
+
+**Key findings**: CORRECT — metadata.cache-ttl default is 0s (caching disabled by default). CORRECT — flush_metadata_cache() is parameterless for PostgreSQL connector (Hive/Delta Lake take named params). CORRECT — two failure modes: silent corruption (SELECT * doesn't see new column) vs hard error (renamed/dropped column referenced explicitly causes Postgres `column does not exist` error). CORRECT — post-migration checklist (check caching status, flush, update views, verify with DESCRIBE). CORRECT — trade-off guidance (60s TTL with flush vs 0s always-fresh). Perfect score — all three load-bearing claims verified against official Trino docs.
+
+### Iter 200 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (JDBC connection model under load: 1 split per table scan, no native pool, PgBouncer transaction pooling, resource groups, statement_timeout)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.424 across 77 questions; after Q2: (4.424 × 77 + 4.75) / 78 = **4.429 across 78 questions**. Status: NEEDS WORK.
+
+**Key findings**: CORRECT — 1 split per non-partitioned table scan = 1 JDBC connection (not per-worker). CORRECT — OSS Trino 467 has no native JDBC connection pool (connection-pool.* is Starburst-only, confirmed against issue #15888). CORRECT — prepareThreshold=0 required for PgBouncer transaction pooling (prevents "prepared statement does not exist" errors). CORRECT — resource-groups JSON field names (rootGroups, hardConcurrencyLimit, maxQueued, schedulingPolicy). CORRECT — four-layer defense: PgBouncer + CONNECTION LIMIT + resource groups + statement_timeout. CORRECT — error behavior at each ceiling. Minor: "split" and "worker task" used heavily before plain-English gloss; hardConcurrencyLimit vs maxQueued distinction could be labeled more explicitly.
+
+**Iter 200 average**: (5.0 + 4.75) / 2 = **4.875** — both PASS, tied for best iteration average with iter199. Two consecutive 4.875 iterations. Topic at 4.429/78.
+
+### Iter 201 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (multi-schema Postgres: one connector, all schemas, three-part naming, no search_path, cross-schema JOINs, Trino views)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.429 across 78 questions; after Q1: (4.429 × 78 + 4.75) / 79 = **4.433 across 79 questions**. Status: NEEDS WORK.
+
+**Key findings**: CORRECT — one PostgreSQL connector exposes all schemas in the database (verified: trino.io docs state "provides a schema for every PostgreSQL schema"). CORRECT — cross-schema JOINs work within one catalog using three-part naming. CORRECT — no search_path equivalent in Trino for table resolution. CORRECT — Trino views to hide repetitive three-part names. Minor accuracy nit: answer says "every query must spell out the full three-part name" — slightly overstated. Trino's `USE app_pg.tenant_data;` command sets a session-level default catalog/schema, allowing unqualified names within that one schema. For cross-schema joins (the user's actual use case), full three-part names are required, so the practical advice is correct but the absolute statement is technically incomplete.
+
+### Iter 201 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (federate vs ingest decision framework: freshness SLO, change pattern, query complexity, Postgres load, failure modes, hybrid UNION ALL pattern)
+**Score:** 5.0 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **5.0** |
+
+**Topics updated**: Trino federation — prior avg 4.433 across 79 questions; after Q2: (4.433 × 79 + 5.0) / 80 = **4.440 across 80 questions**. Status: NEEDS WORK.
+
+**Key findings**: CORRECT — JDBC throughput 100K-200K rows/sec (verified via Starburst benchmark: ~37 MB/sec maps to that range for typical row widths). CORRECT — single JDBC connection per non-selective scan (confirmed via trinodb/trino#389). CORRECT — UNION ALL hybrid pattern (recognized lakehouse pattern). CORRECT — MERGE INTO for customer updates. CORRECT — four decision criteria (freshness SLO, change pattern, query complexity, Postgres load). CORRECT — specific guidance for both tables. CORRECT — what-breaks-first failure modes in correct order. CORRECT — decision matrix. Minor note: UNION ALL example uses `created_at` as the boundary for customers, but `updated_at` would be more precise for UPDATE-heavy dimensions (updated rows might have old `created_at`). Not scored as error since context is clear.
+
+**Iter 201 average**: (4.75 + 5.0) / 2 = **4.875** — both PASS. Three consecutive 4.875-average iterations. Third perfect Q2 score in federation topic. Topic at 4.440/80.
+
+### Iter 202 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (OPA column masking: StatementAnalyzer phase, raw data flows through workers, masking does not push down to Postgres, deterministic hash vs constant mask, configuration)
+**Score:** 4.50 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.0 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.50** |
+
+**Topics updated**: Trino federation — prior avg 4.440 across 80 questions; after Q1: (4.440 × 80 + 4.50) / 81 = **4.441 across 81 questions**. Status: NEEDS WORK.
+
+**Key findings**: CORRECT — column masking applied at StatementAnalyzer phase (query planning). CORRECT — masking does NOT push down to Postgres (raw data flows to Trino workers). CORRECT — `opa.policy.column-masking-uri` and `opa.policy.batch-column-masking-uri` property names. CORRECT — deterministic hash recommendation (sha256 preserves equality for GROUP BY/JOIN). CORRECT — constant masking breaks GROUP BY gotcha. Technical gap: answer shows flat `{"expression": "..."}` JSON for BOTH non-batch and batch endpoints. Batch endpoint actually returns `[{"index": i, "viewExpression": {"expression": "..."}}]` — different shape. Rego rule written for flat shape will fail with batch endpoint configured. Beginner clarity gap: "StatementAnalyzer", "Rego", "predicate pushdown" used without inline glosses.
+
+### Iter 202 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (JDBC fetch size and timeout tuning: defaultRowFetchSize, socketTimeout, connectTimeout, PgBouncer note, recommended values)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.441 across 81 questions; after Q2: (4.441 × 81 + 4.75) / 82 = **4.444 across 82 questions**. Status: NEEDS WORK.
+
+**Key findings**: CORRECT — `defaultRowFetchSize` is valid pgJDBC URL parameter, not a Trino catalog property. CORRECT — `socketTimeout` and `connectTimeout` in seconds. CORRECT — recommended values (3000/60/10) reasonable for analytics. CORRECT — no native connection pool in OSS Trino. CORRECT — `prepareThreshold=0` for PgBouncer. CORRECT — "check predicate pushdown first" advice. Minor: "mandatory" framing for prepareThreshold=0 slightly too strong — PgBouncer ≥ 1.21.0 supports prepared statements natively. Beginner clarity gap: batch size / round-trip concept introduced well but JDBC URL format could be explained more for non-Java engineers.
+
+**Iter 202 average**: (4.50 + 4.75) / 2 = **4.625** — both PASS. Ended three consecutive 4.875 streak but still strong. Topic at 4.444/82.
+
+### Iter 203 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (OPA query-startup latency: analysis-phase invocation, per-column scaling, batch-column-masking-uri, response shape, decision-log monitoring)
+**Score:** 4.50 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.75 |
+| Completeness | 4.5 |
+| **Average** | **4.5625 → 4.50** |
+
+**Topics updated**: Trino federation — prior avg 4.431 across 83 questions (after Q1=3.40); new running avg (4.431 × 83 + 4.50) / 84 = (367.773 + 4.50) / 84 = **4.432 across 84 questions**. Status: NEEDS WORK (4.432 < 4.5 raised threshold). Q2 recovered from Q1's resource-gap FAIL but topic average barely moved.
+
+**Verified correct against trino.io/docs/current/security/opa-access-control.html + OPA decision-log docs**:
+- (a) `opa.policy.batch-column-masking-uri` property name — VERIFIED VERBATIM (overrides `opa.policy.column-masking-uri` when set).
+- (b) Batch response format `[{"index": N, "viewExpression": {...}}]` vs single-column `{"expression": "..."}` — VERIFIED VERBATIM (docs require list of objects with `index` and `viewExpression` containing the masking expression and optional identity).
+- (c) `opa.policy.row-filters-uri` property name — VERIFIED VERBATIM.
+- (d) OPA invoked during query analysis phase on the coordinator before planning — supported (coordinator handles parsing/analysis/planning; OPA contacted "for each query" with multiple requests).
+- (e) "Trino has no built-in OPA decision cache" — VERIFIED (docs contain no caching mechanism for OPA decisions).
+- (f) `metrics.timer_rego_query_eval_ns` decision-log field name — VERIFIED as a real OPA performance metric in decision logs (nanoseconds to evaluate the query).
+- (g) Per-column endpoint causes one HTTP call per column for wide tables — VERIFIED (GitHub issue #21359 and the batch-endpoint PR #21997 confirm the per-column overhead motivated batch-column-masking).
+- (h) Response-shape gotcha (`viewExpression` vs `expression` key) — CORRECT and a high-value beginner trap to surface.
+
+**Accuracy errors / nits**:
+1. **MEDIUM — "Trino will automatically prefer batch when available and fall back to per-column for older OPA bundles" is misleading.** Per docs, when `opa.policy.batch-column-masking-uri` is set it **overrides** `opa.policy.column-masking-uri` — Trino uses the batch endpoint exclusively for that catalog and does NOT auto-fallback per query if the batch handler returns malformed data. The "configure both" advice (and the "What NOT to do — don't configure only the batch endpoint" callout) directly contradicts the override behavior. Correct framing: configure the single-column endpoint; if your OPA bundle implements the batch handler, ADD the batch URI and it takes over.
+2. **LOW — Row filter "evaluated once per query, not per-table-per-column" oversimplifies.** Row filters are evaluated per table referenced in the query (and per identity), not strictly "once per query." If a query joins 3 tables, OPA gets a row-filter request per table. Still much cheaper than per-column masking, so the directional advice (prefer row filters over masking 20 columns) is correct, but the "once per query" framing is loose.
+3. **LOW — Latency estimates (5–15 ms per HTTP call, 200–600 ms per wide table) are reasonable hand-waves but presented as hard numbers.** No source given; in-cluster OPA sidecar round-trips are commonly 1–5 ms, while cross-node HTTP can be 10–20 ms. The 5–15 ms range straddles both; would be cleaner to caveat "depends on OPA deployment topology (sidecar vs separate pod)."
+4. **LOW — Did not mention that Trino sends MANY authorization request types per query beyond column masking** (e.g., `CanAccessCatalog`, `CanSelectFromColumns`, `CanShowTables`, `FilterTables`). Column masking is the worst offender for wide tables but the engineer should know the per-query OPA overhead is a sum of all action checks, not just column masks. For a multi-table federation dashboard this matters because each catalog/table reference triggers its own checks. The `opa.policy.batched-uri` property (the broader batch endpoint, distinct from `batch-column-masking-uri`) is the lever for these other actions and is not surfaced.
+5. **LOW — Did not connect to prod_info.md's JWT context.** Production uses JWT auth + OPA authz; the answer treats this as generic OPA but does not call out that the JWT-extracted identity is what OPA receives as `context.identity.user` and `context.identity.groups`, which is the field most Rego rules pivot on for performance.
+
+**Strengths**:
+- Opens with the precise short answer ("NOT a fixed cost; scales with table and column count") — directly addresses the engineer's question.
+- Numbered query-lifecycle timeline (arrives → analysis → OPA → planning → execute) gives a beginner the mental model for WHY this latency is at startup not during scan.
+- Concrete math (40 columns × 5–15 ms = 200–600 ms) makes the scaling pain tangible.
+- Response-shape table (`expression` vs `viewExpression`) is the single most valuable production gotcha in the answer — engineers implementing the batch endpoint hit this exact bug.
+- Six-item action list with config snippets, monitoring guidance, and decision-log field name is directly runnable.
+- Row filters as a cheaper alternative is a real architectural lever, not just a tuning knob.
+- "What NOT to do" anti-patterns section (despite the misleading auto-fallback claim) is a good format for beginners.
+- Decision-log JSON example with `timer_rego_query_eval_ns` shows the engineer exactly what to grep for.
+- Suggests monitoring p50/p95/p99 of OPA evaluation time — operationally correct.
+
+**Gaps**:
+- (a) `opa.policy.batched-uri` (general batch endpoint for table/column/schema checks) not mentioned — this is the broader complement to `batch-column-masking-uri` and helps with the non-masking authorization overhead.
+- (b) OPA pod placement guidance not surfaced — running OPA as a sidecar in the coordinator pod (vs separate service) cuts the per-call network latency dramatically. Prod_info.md confirms k8s; this is directly actionable.
+- (c) No mention that OPA `decision_logs.console: true` produces high log volume on busy clusters — production guidance should pair the recommendation with sampling or shipping to a log aggregator with retention controls.
+- (d) JWT context (prod_info.md) not connected — the engineer's identity comes from JWT, and Rego rules that re-parse or look up the JWT-derived identity on every request are a common hotspot. One-line note would close the loop.
+- (e) `system.runtime.queries.analysis_time_ms` is suggested for diagnosis, but the answer does not point to the Trino event listener for after-the-fact analysis of slow OPA-blocked queries that have evicted from the runtime view. **14th consecutive iteration without this hook** — recurring gap.
+- (f) No mention that the OPA plugin caches the Rego *policy bundle* (not decisions) — engineers may confuse "no decision cache" with "OPA re-downloads the bundle every query." Bundle is cached in OPA's memory; only decisions are re-evaluated.
+
+**Resource fix recommendations**:
+- **HIGH (correctness)** — `resources/` OPA section: fix the "Trino auto-falls-back to per-column if batch is unavailable" claim. Per Trino docs, `batch-column-masking-uri` OVERRIDES the single-column URI when set; there is no per-query fallback. Correct framing: "Configure `opa.policy.column-masking-uri` as the baseline. If your Rego policy implements the batch handler, ALSO set `opa.policy.batch-column-masking-uri` — it will take over."
+- **HIGH (completeness)** — same section: add `opa.policy.batched-uri` as the broader batch endpoint for table/column/schema authorization checks (distinct from `batch-column-masking-uri`). This is the lever for the non-masking OPA overhead that the answer does not address.
+- **MEDIUM (production fit)** — same section: add OPA pod placement guidance: sidecar in coordinator pod (lowest latency, simplest) vs separate service in same namespace (better resource isolation, higher latency). Prod_info.md confirms k8s; this is directly actionable.
+- **MEDIUM (production fit)** — same section: connect JWT identity flow to OPA — the JWT-extracted identity arrives at OPA as `context.identity.user` and `context.identity.groups`. Rego rules pivoting on these fields should index lookups, not iterate.
+- **MEDIUM (completeness)** — same section: row filters evaluated per-table-per-identity, not "once per query." Tighten the framing.
+- **LOW (correctness)** — caveat latency estimates with "depends on OPA topology (sidecar 1–5 ms, separate pod 10–20 ms)" rather than presenting a single 5–15 ms range.
+
+Verified: trino.io/docs/current/security/opa-access-control.html (`opa.policy.batch-column-masking-uri` overrides `opa.policy.column-masking-uri`; batch response requires `index` + `viewExpression`; `opa.policy.row-filters-uri` for row filtering); GitHub trinodb/trino issue #21359 (per-column requests cause performance overhead, motivating the batch endpoint); GitHub trinodb/trino PR #21997 (`getTableColumnMasks` SPI + OPA batch implementation); OPA decision log docs (`timer_rego_query_eval_ns` is the per-query Rego evaluation time in nanoseconds); trino.io/blog/2024/02/06/opa-arrived.html (OPA deployed as sidecar to coordinator in k8s, multiple authorization requests per query is normal).
+
+### Iter 204 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (OPA batch column masking URI: override semantics, single-vs-batch response shape, safe migration path)
+**Score:** 4.81 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.8125 → 4.81** |
+
+**Topics updated**: Trino federation — prior avg 4.432 across 84 questions; after Q1: (4.432 × 84 + 4.81) / 85 = (372.288 + 4.81) / 85 = **4.436 across 85 questions**. Status: NEEDS WORK (4.436 < 4.5 raised threshold). Continued upward drift; topic average finally within 0.064 of threshold.
+
+**Verified correct against trino.io/docs/current/security/opa-access-control.html**:
+- (a) `opa.policy.column-masking-uri` and `opa.policy.batch-column-masking-uri` property names — VERIFIED VERBATIM.
+- (b) Batch URI OVERRIDES single-column URI when both are set; no per-query fallback — VERIFIED ("If `opa.policy.batch-column-masking-uri` is set it overrides the value of `opa.policy.column-masking-uri`").
+- (c) Single-column response `{"expression": "..."}` (top-level expression) — VERIFIED.
+- (d) Batch response `[{"index": N, "viewExpression": {"expression": "..."}}]` (array, nested viewExpression) — VERIFIED.
+- (e) No automatic fallback if batch handler is missing — VERIFIED (override is unconditional).
+- (f) Per-column endpoint = one HTTP call per column on wide tables — VERIFIED (issue #21359 motivated batch endpoint).
+- (g) URIs loaded at coordinator startup; restart required — CORRECT (Trino config properties require coordinator restart).
+
+**Strengths**:
+- Opens with the precise short answer (override, not fallback) — directly resolves the engineer's anxiety about both endpoints firing.
+- Section 4 (response-shape difference) calls out the EXACT silent-failure mode the engineer is worried about: wrong shape in Rego = policy fails silently or skips mask = customer sees PII. This is the highest-value gotcha in the answer.
+- Numbered four-step migration path (test Rego offline → enable both URIs → validate with queries + decision log → remove single-column URI) is directly runnable and ordered to guarantee masking stays active throughout.
+- Concrete latency framing (40 columns = 40 round-trips vs 1) makes the WHY tangible without overclaiming specific ms.
+- "Why this order is safe" callout explicitly addresses the engineer's stated fear ("worried I might break masking and not notice").
+- Decision-log validation step (look for one `/batchColumnMask` evaluation per query, not 20+ `/columnMask`) is the right operational verification.
+- Closes with two decision points (do I need batch? can I test without restart?) that anticipate the engineer's follow-up questions.
+
+**Accuracy errors / nits**:
+1. **LOW — Rego pseudocode is not valid Rego syntax.** The `idx := range(count(input.action.resource.columns))` construct doesn't exist in Rego; the correct form would be `idx := numbers.range(0, count(...)-1)[_]` or a comprehension over the input list directly. The example is labeled as a "pattern" so a Rego-literate user will translate, but a SaaS engineer copy-pasting it will get a parse error. Should be marked "pseudocode" or rewritten as proper Rego.
+2. **LOW — `input.action.resource.columns` field path in the example.** The actual Trino → OPA batch request structure puts the columns under `action.filterResources` (a list of resource objects), not `action.resource.columns`. The principle is right but the field name will mislead a copy-paster.
+3. **LOW — "Trino contacts OPA for each column that appears in the SELECT list (or any other column the query references)"** is approximately right but slightly imprecise: Trino asks for the column mask for each column it determines could be subject to masking based on policy; this includes columns in WHERE/JOIN/GROUP BY, not only SELECT. The answer's "(or any other column the query references)" parenthetical mostly covers this, so no points deducted.
+
+**Gaps**:
+- (a) Does not mention the broader `opa.policy.batched-uri` (single batch endpoint for table/column/schema authorization checks beyond masking) — would be a useful "related lever" pointer.
+- (b) Does not mention that the batch endpoint's `index` field corresponds to the order of `action.filterResources` in the request — engineers writing the Rego handler need to know this mapping is positional, not by column name.
+- (c) Does not mention OPA decision log sampling — once batch is enabled, the engineer should know that `decision_logs.console: true` produces high volume on a busy cluster.
+- (d) Does not connect to the JWT identity flow from prod_info.md — the user identity OPA sees comes from JWT, so the Rego handler's `input.context.identity.user` is the field that drives masking decisions per user.
+- (e) 15th consecutive iteration without mentioning the Trino event listener as the post-hoc diagnosis hook for queries that fell out of `system.runtime.queries`. Recurring gap (less critical for this specific question but worth tracking).
+
+**Resource fix recommendations**:
+- **MEDIUM (correctness)** — `resources/` OPA section: replace the Rego pseudocode example with valid Rego syntax. Use the actual `action.filterResources` field name and a `numbers.range(0, count(...)-1)[_]` or comprehension idiom so copy-paste produces a parseable rule.
+- **LOW (completeness)** — same section: add a short note that the batch response's `index` is positional (matches the order of `action.filterResources` in the request), so the Rego handler must preserve order or use the input index explicitly.
+- **LOW (production fit)** — same section: add the JWT identity connection — Rego rules pivoting on `input.context.identity.user` / `groups` receive the JWT-extracted identity; this is the field most masking rules will key on.
+
+Verified: trino.io/docs/current/security/opa-access-control.html (override semantics, both response shapes, property names); GitHub trinodb/trino issue #21359 (per-column overhead motivated batch); GitHub trinodb/trino PR #21997 (getTableColumnMasks SPI + OPA batch implementation).
+
+### Iter 204 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (OPA pod placement: sidecar in coordinator pod vs separate service on k8s, latency/operational tradeoff, recommendation)
+**Score:** 4.25 / 5 (PASS general ≥3.5 / FAIL Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.0 |
+| Completeness | 4.5 |
+| Practical value | 4.0 |
+| Clarity | 4.75 |
+| **Average** | **4.3125 → 4.25** |
+
+**Topics updated**: Trino federation — prior avg 4.436 across 85 questions (after Iter 204 Q1=4.81); after Q2: (4.436 × 85 + 4.25) / 86 = (377.06 + 4.25) / 86 = **4.434 across 86 questions**. Status: NEEDS WORK (4.434 < 4.5 raised threshold). Q2 slightly dragged the topic average back from Q1's strong showing because the headline recommendation contradicts Trino's official sidecar guidance.
+
+**Iter 204 average**: (4.81 + 4.25) / 2 = **4.53** — Q1 PASS topic threshold; Q2 FAIL topic threshold.
+
+**Verified correct against trino.io OPA docs + OPA official k8s deployment docs**:
+- (a) OPA invoked during analysis phase on coordinator (before planning) — VERIFIED.
+- (b) Sidecar = localhost/loopback communication; separate service = network hop — VERIFIED (OPA docs: "shares the same network namespace as the application container and they can communicate with each other on the loopback interface").
+- (c) Batch endpoint reduces N-per-column to 1-per-table — VERIFIED.
+- (d) `metrics.timer_rego_query_eval_ns` decision-log field name — VERIFIED (per-query Rego evaluation time in nanoseconds).
+- (e) Single-column response `{"expression": "..."}` vs batch response `[{"index": N, "viewExpression": {...}}]` shape gotcha — VERIFIED.
+- (f) `opa.policy.column-masking-uri` and `opa.policy.batch-column-masking-uri` property names — VERIFIED.
+- (g) Pod-affinity to co-locate OPA pods on same node as coordinator — VALID middle-ground (cuts cross-node latency but does NOT eliminate kernel TCP stack like loopback does).
+
+**Accuracy errors / nits**:
+1. **MEDIUM — Headline recommendation ("Stay with the separate OPA service") contradicts official Trino + OPA guidance.** trino.io/docs/current/security/opa-access-control.html explicitly states: "In a Kubernetes context, it is best added as an additional container to the coordinator pod. This ensures the coordinator and OPA containers run on the same host, this is important as they are very chatty." OPA's own k8s deployment docs: "sidecar pattern is preferred for most applications." The answer's body presents the tradeoffs fairly, but the recommendation steers the engineer away from what both projects' docs recommend by default. Correct framing should be: "Trino docs recommend sidecar by default; here are the specific operational reasons your team might still pick separate service."
+2. **LOW — "You cannot add OPA capacity without adding coordinators" overstates the constraint.** OPA's CPU/memory footprint for typical policy sets is small relative to the coordinator; OPA capacity is rarely the bottleneck driving the architectural choice.
+3. **LOW — "Pod-affinity to same node = <1ms latency without operational complexity" conflates same-node TCP with loopback.** Same-node TCP still traverses the kernel network stack (typically 0.1–1ms); loopback within a pod's network namespace is faster (typically sub-100μs). Affinity is a good middle ground but not equivalent to sidecar on raw latency.
+4. **LOW — "OPA crash → coordinator unresponsive" claim overstated.** Per-container resource limits within a pod prevent OOM cross-contamination at the container level; OPA is a stable Go binary with low crash rate in production. The framing is mildly alarmist for a typically-stable component.
+5. **LOW — `opa.policy.batched-uri` (general batched endpoint, distinct from `batch-column-masking-uri`) not mentioned.** Recurring gap from iter 203 Q2 — pod placement choice interacts with whether the broader batch endpoint is configured.
+
+**Strengths**:
+- Clear 5-section structure walks logically through call mechanics → sidecar tradeoffs → separate-service tradeoffs → recommendation → monitoring.
+- Latency mechanics explained well: localhost loopback vs k8s Service DNS → load balancer → pod hop.
+- Correctly identifies that the batch endpoint is the bigger win than sidecar placement — actionable priority guidance.
+- Quantified latency estimates with appropriate ranges (1–20ms for service, sub-ms for sidecar).
+- Pod-affinity middle-ground recommendation is genuinely useful and operationally pragmatic.
+- Decision log monitoring section with correct `timer_rego_query_eval_ns` field and p50/p95/p99 framing.
+- Acknowledges both sides of the tradeoff fairly within the body — operational/scaling/lifecycle/debugging arguments are all real.
+- Provides concrete OPA decision-log YAML and Trino-side log search guidance (`io.trino.plugin.opa.OpaHttpClient`).
+- 3-step prioritization (batch endpoint first → pod affinity second → sidecar last) is sound advice — even if the framing should be reversed to match Trino docs.
+- Directly addresses the migration cost concern ("you already have the separate-service deployment working").
+
+**Gaps**:
+- (a) Does not cite Trino's official sidecar recommendation, which would let the engineer reconcile the answer with what their teammate likely already read.
+- (b) `opa.policy.batched-uri` (general batched endpoint) not mentioned — recurring gap.
+- (c) Does not connect to prod_info.md's JWT auth context — the JWT-derived identity arrives at OPA as `context.identity.user` and `context.identity.groups` regardless of pod placement.
+- (d) Does not mention OPA bundle is cached in memory; placement does not affect bundle download frequency (potential beginner confusion).
+- (e) Does not address rolling-restart blast radius for sidecar pattern: 2 coordinators with sidecar OPA means rolling either component takes the pair down sequentially, which actually aligns with existing coordinator restart patterns the team already accepts.
+- (f) Does not mention container-level resource limits within a pod prevent OPA OOM from killing the coordinator container directly (Kubernetes resource isolation works at container level, not pod level).
+- (g) `system.runtime.queries.analysis_time_ms` mentioned indirectly but Trino event listener for retrospective OPA-latency analysis not surfaced — 15th consecutive iteration without this hook.
+
+**Resource fix recommendations**:
+- **HIGH (correctness/production fit)** — `resources/` OPA section: lead with Trino's official guidance that sidecar is the recommended pattern in k8s ("very chatty, same host"). Reframe the tradeoff discussion as "Trino docs recommend sidecar; here's when separate service might still be the right call for your team." This directly addresses the question the engineer asked.
+- **HIGH (completeness)** — same section: add `opa.policy.batched-uri` (general batch endpoint, distinct from `batch-column-masking-uri`) as the lever for non-masking authorization overhead. Recurring gap from iter 203 Q2 — fix it.
+- **MEDIUM (correctness)** — distinguish loopback (within pod network namespace, sub-100μs) from same-node TCP (across pod network namespaces with pod affinity, 0.1–1ms). Both beat cross-node, but they are not the same.
+- **MEDIUM (production fit)** — connect JWT identity flow to OPA: same input shape regardless of placement; Rego rules pivoting on JWT-derived identity should index lookups.
+- **LOW (correctness)** — clarify per-container resource limits within a pod prevent OPA OOM from killing the coordinator container directly. Containers within a pod share network/IPC namespace but have independent cgroup-based resource isolation.
+- **LOW (completeness)** — note OPA bundle is cached in memory; placement choice does not affect bundle download frequency.
+
+Verified: trino.io/docs/current/security/opa-access-control.html (sidecar is recommended for k8s deployments because OPA and Trino are "very chatty" and benefit from being on the same host); openpolicyagent.org/docs/deploy/k8s (sidecar pattern preferred for most applications, shares loopback interface; cluster service pattern recommended only when "higher latency is tolerable or very large dataset is required"); OPA decision log docs (`timer_rego_query_eval_ns` is per-query Rego evaluation time in nanoseconds).
+
+### Iter 206 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (dynamic filtering across Iceberg-build / Postgres-partitioned-probe joins: DF as JDBC WHERE clause, Postgres server-side partition pruning trigger, dual verification via Trino EXPLAIN ANALYZE + pg_stat_activity, timeout failure mode, domain_compaction_threshold IN-list compaction)
+**Score:** 4.90 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy (×2) | 5.0 |
+| Completeness | 4.75 |
+| Practical value | 5.0 |
+| Clarity | 4.75 |
+| **Weighted average (Tech×2)** | **4.90** |
+
+**Topics updated**: Trino federation — prior avg 4.442 across 88 questions; after Q1: (4.442 × 88 + 4.90) / 89 = (390.896 + 4.90) / 89 = **4.447 across 89 questions**. Status: NEEDS WORK (4.447 < 4.5 raised threshold), but trending up consistently across recent iterations (iter204 4.50 → iter205 Q1 4.94 → iter205 Q2 4.60 → iter206 Q1 4.90). The 4.5 raised threshold is now within reach — needs one more strong answer.
+
+**Verified correct against trino.io/docs/current/connector/postgresql.html + trino.io/docs/current/admin/dynamic-filtering.html + PostgreSQL declarative-partitioning docs**:
+- (a) Dynamic filter pushes to Postgres as part of the JDBC WHERE clause — VERIFIED (Trino docs: "Dynamic filtering is enabled by default" for JDBC connectors; predicate is encoded into JDBC SQL and sent to PG as a WHERE clause).
+- (b) Postgres declarative partition pruning fires server-side when the predicate on the partition key arrives via JDBC — VERIFIED (PG docs: runtime partition pruning fires during execution when the planner sees a constraint on the partition key, including parameterized values from prepared statements).
+- (c) `dynamicFilterSplitsProcessed` appears on the PROBE side TableScan in EXPLAIN ANALYZE — VERIFIED (trinodb/trino#3217: metric records splits processed after DF is pushed down to the table scan; tracks the probe side of the join).
+- (d) Default `dynamic_filtering_wait_timeout` for PostgreSQL/JDBC connector is **20 seconds** — VERIFIED ("By default, table scans on the connector are delayed up to 20 seconds until dynamic filters are collected from the build side of joins" — Trino PostgreSQL connector docs). Distinct from the Iceberg connector's `1s` default.
+- (e) Catalog-prefix requirement: `SET SESSION app_pg.dynamic_filtering_wait_timeout = '30s';` (not bare) — VERIFIED. This corrects the iter164 Q2 bug where the resource taught the bare form; the responder now teaches it correctly with the catalog prefix.
+- (f) Catalog config form `postgresql.dynamic-filtering.wait-timeout=30s` in `etc/catalog/<catalog>.properties` — VERIFIED (Trino JDBC connector docs).
+- (g) `domain_compaction_threshold` default 256, causes IN-list compaction to a BETWEEN range — VERIFIED ("Trino compacts large predicates into a simpler range predicate by default to ensure a balance between performance and predicate pushdown" — Trino docs).
+- (h) `pg_stat_activity` cross-verification on the Postgres side as the definitive ground-truth check — VERIFIED (standard PG admin pattern; surfaces exactly the SQL Trino sent over JDBC, so the engineer can see whether the IN clause arrived or not).
+
+**Strengths**:
+- Five-section structure tracks the engineer's mental model: how DF works → how it arrives via JDBC → does PG actually prune → how to verify (both engines) → failure mode and fix → bottom-line answer.
+- Opens by naming both halves of the question ("DF reduces what reaches Postgres + PG's pruning further reduces what PG scans") — gives the engineer the compounding-optimization framing immediately.
+- Concrete EXPLAIN ANALYZE snippet with expected `dynamicFilterSplitsProcessed = 4`, `constraint on [event_month]`, low `Input:` row count — copy-paste runbook material.
+- Dual verification (Trino EXPLAIN side + Postgres `pg_stat_activity` side) — this is the senior-grade workflow that iter205 Q2 was dinged for missing. Iter205 fix landed.
+- "Good output vs bad output" pattern for the `pg_stat_activity` check shows the engineer exactly what to look for.
+- Catalog-prefixed `SET SESSION app_pg.dynamic_filtering_wait_timeout = '30s';` form — directly corrects the iter164 Q2 bare-form bug. Resource fix is holding.
+- Names `domain_compaction_threshold` (default 256) IN-list-to-BETWEEN compaction as a secondary failure mode and notes it doesn't apply to the engineer's 4-month case — exactly the right level of nuance.
+- Bottom-line answer ("more partitions help IF DF arrives in time; if it times out, more partitions make it worse") is the actionable decision the engineer asked for.
+- Fits prod_info.md (Trino 467 + Iceberg on MinIO + Postgres federation on k8s + JWT/OPA orthogonal to this question).
+
+**Accuracy errors / nits**: None material. All key claims verified against official Trino + PG docs.
+
+**Gaps / minor**:
+1. **LOW — Static pushdown of literal `BETWEEN` vs runtime DF distinction.** The engineer's original query has `WHERE event_month BETWEEN '2025-10' AND '2026-01'` as a literal — Trino would statically push this BETWEEN to PG as part of planning, before any DF fires. The answer focuses on DF mechanics but doesn't explicitly call out that the literal BETWEEN is already pushed regardless of DF; DF only matters when the build side narrows the partition column further at runtime (e.g., if the Iceberg side has only 2 of the 4 months populated, DF would push `IN ('2025-10', '2026-01')` even tighter than the literal BETWEEN). Senior-grade nuance the engineer will hit next.
+2. **LOW — "build" vs "probe" defined contextually but not in a glossary line.** The answer uses both terms correctly throughout but a single defining sentence ("build = smaller side hashed in memory; probe = larger side scanned against that hash") would help the genuinely OLAP-new engineer.
+3. **LOW — No mention of `join_distribution_type = 'BROADCAST'` as the prerequisite for DF to work efficiently on small-build / large-probe joins.** This is a recurring federation gap (iter164 Q2 also missed it). For a 4-month Iceberg build feeding a multi-billion-row PG probe, BROADCAST is the right distribution.
+4. **LOW — 15th+ consecutive iteration without surfacing OPA decision logs + Trino event listener** as the persistent diagnostic trail. Not directly relevant here, but Iter205 Q2 already flagged this as a recurring miss across federation answers.
+
+**Resource fix recommendations**:
+- **LOW (completeness)** — `resources/22-trino-federation-postgresql.md` dynamic-filtering subsection: add a one-paragraph "static pushdown vs runtime DF" callout. When the user's query has a literal predicate on the partition key (e.g., `WHERE event_month BETWEEN '2025-10' AND '2026-01'`), Trino statically pushes that BETWEEN to Postgres during planning — no DF needed. DF only adds value when the build side of a join narrows the partition column further than the literal predicate already does, OR when there is no literal predicate at all and the partition column is purely the join key.
+- **LOW (completeness)** — same file: add `join_distribution_type = 'BROADCAST'` to the DF tuning section. DF effectively requires the build side to fit in memory on every probe worker — for small Iceberg builds against large PG probes, BROADCAST is the correct distribution. Without it, DF can become a PARTITIONED-join-style coordinator broadcast that diminishes the optimization.
+- **LOW (clarity)** — same file: add a single-sentence build/probe glossary line in the DF intro. "Build = smaller side, loaded into a hash table in memory. Probe = larger side, scanned and joined against the hash table." Avoid assuming the reader knows hash-join terminology.
+
+Verified: trino.io/docs/current/connector/postgresql.html (DF enabled by default; 20s default wait timeout; `domain_compaction_threshold` default 256; IN-list compaction to BETWEEN range); trino.io/docs/current/admin/dynamic-filtering.html (DF mechanics, build/probe roles, EXPLAIN ANALYZE `dynamicFilterSplitsProcessed`); trinodb/trino#3217 (`dynamicFilterSplitsProcessed` operator stat); trinodb/trino#13334 (JDBC dynamic filtering implementation PR); PostgreSQL declarative-partitioning docs (runtime partition pruning during execution for parameter values, including JDBC-supplied predicates); resources/22-trino-federation-postgresql.md (iter164 catalog-prefix fix and iter163 OSS-vs-Starburst pooling fix are both holding cleanly in this answer).
+
+### Iter 205 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (Postgres declarative partitioning through Trino: single-split JDBC model, server-side partition pruning via pushdown, EXPLAIN verification, no parallelism gain)
+**Score:** 4.60 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy (×2) | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Weighted average (Tech×2)** | **4.60** |
+
+**Topics updated**: Trino federation — prior avg 4.440 across 87 questions (after Iter 205 Q1); after Q2: (4.440 × 87 + 4.60) / 88 = (386.28 + 4.60) / 88 = **4.442 across 88 questions**. Status: NEEDS WORK (4.442 < 4.5 raised threshold). Q2 lifts the topic average marginally (+0.002). This is the **second time** the Postgres-declarative-partitioning question has been asked (first was iter179 Q2 which FAILED at 3.25 because the responder hallucinated `partition-column`/`partition-count` as OSS features). This time the responder correctly attributed those to Starburst Enterprise — the resource fix applied in iter179/180/182 is holding cleanly.
+
+**Verified correct against trino.io/docs/current/connector/postgresql.html + trino.io/docs/current/optimizer/pushdown.html + PostgreSQL declarative-partitioning docs**:
+- (a) Trino's PostgreSQL connector creates **one split for the entire parent table** regardless of how many child partitions exist underneath — CORRECT (single JDBC connection, single worker thread per query for non-partitioned reads, and Postgres declarative-partition children are transparent to Trino's metadata layer).
+- (b) Postgres declarative partition pruning fires **server-side** when the predicate reaches Postgres via pushdown — CORRECT (PG planner sees the constraint on `created_at` and selects matching child partitions; no Trino-side config needed).
+- (c) `EXPLAIN (TYPE DISTRIBUTED)` shows `constraint on [created_at]` under the `TableScan` node when pushdown succeeds — CORRECT (verified vs trino.io/docs/current/optimizer/pushdown.html: successful pushdown = no ScanFilterProject above the TableScan).
+- (d) Failed pushdown shows `ScanFilterProject[filterPredicate = ...]` above `TableScan` — CORRECT (verbatim docs language).
+- (e) `partition-column` and `partition-count` are **Starburst Enterprise only**, NOT OSS Trino 467 — CORRECT (avoids the iter179 Q2 regression). Resource fix from iter179/180/182 is holding.
+- (f) String range predicates do NOT push down by default; `enable_string_pushdown_with_collate` (experimental) is the escape hatch — CORRECT (verified per iter179 Q1 against trinodb/trino#9746; property exists since Trino 365).
+- (g) Function-wrapped partition columns (`DATE_TRUNC`, `YEAR()`) block pushdown — CORRECT (expression pushdown for these functions is limited in OSS Trino 467).
+- (h) Trino's PostgreSQL connector single-split model means partitioning does NOT give Trino parallelism — CORRECT (one JDBC connection regardless of partition count). This is the key insight the engineer needs.
+
+**Accuracy errors / nits**:
+1. **MEDIUM — `Filtered: X%` interpretation is debatable.** The answer claims `Filtered: 91.8%` on the TableScan "confirms Postgres pruned 91.8% server-side." This is the interpretation that prior judge entries (iter179 Q1) have accepted, but strictly speaking `Filtered: X%` in Trino's EXPLAIN ANALYZE represents what TRINO filtered locally on the operator. For a successfully pushed-down predicate, the rows arriving from Postgres are already filtered, so the TableScan's `Input:` would be small AND `Filtered:` would be 0% (no further Trino-side filtering). The answer's reading is operationally close ("low Input + high Filtered = pushdown" is roughly right when there's a residual filter, but for full pushdown both Input AND Filtered should reflect post-source-filter state). This is not a hard error — past judges have accepted this framing — but it's a nuance the responder should sharpen.
+2. **LOW — "Iceberg has partition pruning + file-skip + predicate pushdown into Parquet" is correct but elides that Iceberg's partition pruning is **manifest-based**, not file-listing-based — that's the key reason it scales vs the Hive-style directory listing. Minor framing improvement.
+3. **LOW — `enable_string_pushdown_with_collate` is referenced loosely ("with the experimental flag") without the exact property name. The full name (`postgresql.experimental.enable-string-pushdown-with-collate` catalog property, or `enable_string_pushdown_with_collate` session-property alias) was correctly given in iter179 Q1 — should match.
+4. **LOW — No mention of dynamic filtering interaction.** When a Postgres-partitioned table is the probe side of a join with an Iceberg build side, dynamic filtering can push a tuple-domain filter back to Postgres that would also trigger partition pruning. The answer focuses on direct WHERE predicates only — but the engineer's next question is likely "what about joins?"
+5. **LOW — `domain-compaction-threshold` (default 256) not mentioned.** If the engineer ever fires `WHERE created_at IN (date list with >256 values)`, the IN list gets compacted to a BETWEEN range which may or may not align with partition boundaries. Recurring miss across federation iterations.
+6. **LOW — No mention of `pg_stat_activity` as Postgres-side ground-truth verification** (i.e., looking at the exact SQL Trino sent to confirm partition pruning happened in PG's planner). The "EXPLAIN-side + Postgres-side log" dual-verification pattern is the senior-grade workflow that recent federation answers have surfaced; this answer only covers the Trino EXPLAIN side.
+
+**Strengths**:
+- Five-section structure walks logically through: how Trino sees PG partitions → pushdown mechanics → EXPLAIN verification → when it helps/hurts → practical recommendations. Mirrors the engineer's mental model.
+- Opens with the critical fact ("Trino does NOT see Postgres declarative partitions as separate entities") — directly resolves the engineer's primary uncertainty.
+- Correctly attributes `partition-column`/`partition-count` to Starburst Enterprise only — avoids the iter179 Q2 regression class. This was the explicit fix target for this question angle.
+- Concrete EXPLAIN snippets with side-by-side success vs failure markers (`constraint on [created_at]` vs `ScanFilterProject above TableScan`) are copy-paste runbook material.
+- "Doesn't help (or hurts)" section names three real failure modes: string ranges (collation), function-wrapped columns (no pushdown), and the single-split parallelism ceiling.
+- Quantified the Iceberg upgrade path (150M-row scan, columnar compression, Spark batch + Debezium CDC) — fits the on-prem k8s + MinIO production stack precisely.
+- Network throughput monitoring guidance (50–200 MB/s good vs <10 MB/s bad) gives the engineer a concrete operational signal.
+- Summary table at the end maps the 5 sub-questions to 5 one-line answers — excellent reference format.
+- Fits prod_info.md (OSS Trino 467, on-prem k8s, MinIO via S3, Spark+Iceberg+HMS) — no cloud-only tools, no Starburst-only features.
+
+**Gaps**:
+- (a) Dynamic filtering not mentioned — partition pruning on the probe side via tuple-domain push from the build side is a real performance lever in federation joins.
+- (b) `pg_stat_activity` / Postgres-side log verification not mentioned — the EXPLAIN-only verification path is one-sided. Postgres-side `log_min_duration_statement = 0; pg_reload_conf();` then inspecting the actual SQL Postgres received is the definitive ground truth (per iter172/179/181/183 etc.).
+- (c) `Filtered: %` interpretation could be sharpened (see accuracy nit #1).
+- (d) No mention of `domain-compaction-threshold` (default 256) for IN-list predicates that might interact with partition boundaries — recurring federation gap.
+- (e) **16th consecutive iteration without surfacing OPA decision logs + Trino event listener** as the persistent audit/diagnostic trail for federation query activity. Specifically relevant here: when the engineer migrates from federation to Iceberg ingestion, the event listener captures the wall-clock comparison between the old federated path and the new Iceberg path — perfect data for the cost-justification conversation. Iter183 Q1 (4.5) and Iter204 Q1 already address OPA+event listener thoroughly in a dedicated resource; the issue is the responder isn't weaving the reference into adjacent federation answers.
+- (f) Iceberg's manifest-based partition pruning vs Hive-style directory listing not differentiated — minor.
+- (g) Exact property name for the experimental string-pushdown flag not given (loose "experimental flag" wording).
+
+**Resource fix recommendations**:
+- **LOW (correctness)** — `resources/22-trino-federation-postgresql.md` predicate-pushdown verification subsection: sharpen the `Filtered: X%` semantics. State explicitly that the metric is Trino's local-filter percentage on the operator. For a fully-pushed-down predicate, expect both `Input:` to be small AND `Filtered:` to be 0% (no residual filter in Trino). The "high Filtered% = good pushdown" framing is a useful heuristic but only when there's a residual filter Trino applies on top. Pair with `pg_stat_activity` Postgres-side check as the definitive ground truth.
+- **MEDIUM (completeness)** — same file: add a "Federation joins with PG-partitioned tables" subsection covering dynamic filtering interaction. When a small Iceberg build feeds a large PG-partitioned probe, the tuple-domain dynamic filter that pushes back to Postgres can trigger partition pruning on the probe scan — a major lever that the engineer's next question will likely ask about.
+- **LOW (completeness)** — same file: cross-reference `domain-compaction-threshold` (default 256, addressed in iter181 Q2) from the partition-pruning section. If the engineer ever runs `WHERE created_at IN (>256 dates)`, the IN list gets compacted to a BETWEEN range which may pull from more child partitions than the literal IN list would have hit. Engineers seeing surprising partition-pruning behavior on large IN lists should know to check this knob.
+- **HIGH (production fit, RECURRING across 16 iterations — iter165 through iter205)** — same file: cross-reference OPA decision logs + Trino event listener from the federation-vs-Iceberg decision section. The wall-clock data captured by the event listener is the cost-justification evidence the engineer needs to make the "migrate to Iceberg" case to leadership. Iter183 Q1 / Iter204 Q1 already cover OPA+event-listener mechanics; the gap is weaving the cross-reference into adjacent answers like this one.
+- **LOW (correctness)** — same file: give the exact experimental string-pushdown property name (`postgresql.experimental.enable-string-pushdown-with-collate` catalog property; `enable_string_pushdown_with_collate` session-property alias). The loose "experimental flag" wording in this answer fails the copy-paste test.
+
+Verified: trino.io/docs/current/connector/postgresql.html (single-split per non-partitioned table; predicate pushdown matrix; string-range pushdown limitation; `enable-string-pushdown-with-collate` experimental escape hatch; `partition-column`/`partition-count` are Starburst Enterprise only per repeated cross-checks in iter179/180/182); trino.io/docs/current/optimizer/pushdown.html ("If predicate pushdown for a specific clause is successful, the EXPLAIN plan for the query does not include a ScanFilterProject operation for that clause" — verbatim); PostgreSQL declarative-partitioning docs (server-side partition pruning fires automatically when the query planner sees a constraint on the partition key); resources/22-trino-federation-postgresql.md (iter179/180/182 resource fixes documenting OSS single-split limitation and Starburst-only attribution of partition-column/partition-count are holding cleanly in this answer).
+
+### Iter 205 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (OPA row filters vs column masks vs allow/deny: three-way mental model, composition, ordering, tenant isolation)
+**Score:** 4.9375 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Completeness | 5.0 |
+| Practical value | 5.0 |
+| Clarity | 4.75 |
+| **Average** | **4.9375** |
+
+**Topics updated**: Trino federation — prior avg 4.434 across 86 questions; after Q1: (4.434 × 86 + 4.9375) / 87 = (381.324 + 4.9375) / 87 = **4.440 across 87 questions**. Status: NEEDS WORK (4.440 < 4.5 raised threshold), but trending up.
+
+**Verified correct against trino.io OPA docs**:
+- (a) `opa.policy.row-filters-uri` property name — VERIFIED.
+- (b) `opa.policy.batch-column-masking-uri` property name — VERIFIED.
+- (c) Row filter response containing `{"expression": "..."}` predicate — VERIFIED.
+- (d) Batch column mask response shape `[{"index": N, "viewExpression": {"expression": "..."}}]` — VERIFIED.
+- (e) Allow/deny is binary and blocks table access entirely — VERIFIED (correct framing vs masking, which lets the query succeed with transformed values).
+- (f) Both row filters and column masks compose on the same query — VERIFIED (no fight; both apply, allow/deny first as a gate, then filter+mask).
+- (g) Row filters are appended as WHERE predicates by the query engine; client cannot bypass — VERIFIED (filter is enforced server-side at analysis time before execution).
+- (h) Deterministic hash (`to_hex(sha256(to_utf8(col)))`) recommendation to preserve GROUP BY/JOIN equality semantics — VERIFIED correct insight; constant masking like `'****'` collapses groups.
+- (i) OPA only receives `{user, groups}` via `context.identity` — NOT raw JWT claims — CONSISTENT with docs (which describe `context.identity.user` and `context.identity.groups` only, no JWT pass-through).
+
+**Strengths**:
+- Cleanly establishes the three-way mental model the question explicitly asked for: allow/deny (binary gate) vs row filter (subset rows) vs column mask (transform values). The "table accessible or not vs let them see the column but return a masked value vs let them see the table but only these rows" framing is exactly the framing the engineer needed.
+- Directly answers both sub-questions: (1) yes, column masking lets them query but get `NULL`/`****`/hash back; (2) yes, row filters let them query but only see their tenant's rows without trusting client WHERE clauses.
+- Before/after query rewrite examples make the abstract OPA response concrete — engineer can read the rewritten SQL and immediately understand what Trino will execute.
+- Composition section answers the ordering question precisely: "yes they compose, no order doesn't matter problematically" with the logical ordering (deny → filter → mask) explained.
+- GROUP BY gotcha with deterministic hash recommendation is a subtle but production-critical insight that prevents a future debugging session.
+- Tenant identity extraction patterns (username convention vs data bundle lookup) are both shown with Rego snippets — actionable without crossing into prod_info.md's "external governance document" boundary.
+- Concrete config snippets (`etc/access-control.properties`) with all three URIs side-by-side make wiring obvious.
+- Batch column masking endpoint correctly recommended over per-column endpoint for wide-table performance.
+- Verification queries at the end let the engineer self-test the deployment.
+- Production fit: keeps OPA policy guidance at conceptual/general level, doesn't invent specific tenant→role rules, aligning with prod_info.md's deferral of specific permission rules to the external governance document.
+
+**Accuracy errors / nits**:
+1. **VERY LOW** — "Column masking applies at query analysis time inside Trino. The raw bytes still flow through worker memory during query execution" — technically correct framing; the mask is rewritten into the projection at analysis (StatementAnalyzer/Analyzer phase), and workers do read raw bytes from storage before hashing. The caveat is correctly stated.
+2. **VERY LOW** — "OPA only receives `{user, groups}`" is a useful simplification, but `context.identity` also carries `extraCredentials` and `enabledRoles` in some Trino versions. For this engineer's question the simplification is appropriate and doesn't mislead.
+
+**Gaps**:
+- (a) Does not mention the optional `identity` field on row filter / view expression responses (lets OPA specify the identity under which the masking expression is evaluated for nested ACL — niche but exists in the spec).
+- (b) Does not mention that a column mask can fail at planning time if the expression references columns the user can't access — engineer might hit this when masks reference other table columns.
+- (c) Does not address the `opa.policy.column-masking-uri` (non-batched) vs `opa.policy.batch-column-masking-uri` choice tradeoff explicitly (recommends batch but doesn't say what the non-batch one does or when you'd pick it).
+- (d) Does not mention how row filters interact with predicate pushdown to the PostgreSQL connector — the appended WHERE on `app_pg.public.users` should push down to Postgres, which is performance-relevant.
+- (e) Does not mention that multiple row filters from OPA are AND-ed together (the response is an array, and Trino combines them with AND).
+- (f) Audit/observability story (decision logs to confirm the right mask/filter fired for a given query) not surfaced — recurring gap across OPA-related answers.
+
+**Resource fix recommendations**:
+- **LOW (completeness)** — add note that multiple row filter expressions in the response array are AND-combined by Trino, and that the optional `identity` field lets OPA delegate mask/filter evaluation under a different user.
+- **LOW (production fit)** — add a sentence linking row filter WHERE predicates to PostgreSQL connector predicate pushdown so engineers understand the performance characteristics for federated queries.
+- **LOW (observability)** — recurring gap: tie OPA decision logs (`timer_rego_query_eval_ns`, decision IDs) back to specific Trino query IDs so engineers can audit which mask/filter fired for a given query.
+- **LOW (completeness)** — briefly explain when to pick `opa.policy.column-masking-uri` (per-column) over `opa.policy.batch-column-masking-uri` (per-table) so engineers don't blindly pick batch when they have a single-column policy.
+
+Verified: trino.io/docs/current/security/opa-access-control.html (row-filters-uri, batch-column-masking-uri, response shapes with `{"expression": "..."}` for filters and `[{"index": N, "viewExpression": {...}}]` for batch masks; `context.identity` carries user/groups for OPA evaluation).
+
+### Iter 206 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (verifying predicate pushdown via pg_stat_activity vs log_min_duration_statement slow-query log, dual-verification workflow with EXPLAIN (TYPE DISTRIBUTED), timing gotchas, watch loop pattern)
+**Score:** 4.8125 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Completeness | 5.0 |
+| Practical value | 5.0 |
+| Clarity | 4.75 |
+| **Average** | **4.8125** |
+
+**Topics updated**: Trino federation — prior avg 4.447 across 89 questions (after Iter 206 Q1); after Q2: (4.447 × 89 + 4.8125) / 90 = (395.783 + 4.8125) / 90 = **4.451 across 90 questions**. Status: NEEDS WORK (4.451 < 4.5 raised threshold), but **trending up consistently for a fifth straight question** (iter204 4.50 → iter205 Q1 4.94 → iter205 Q2 4.60 → iter206 Q1 4.90 → iter206 Q2 4.81). The 4.5 raised threshold is now ~0.05 away — a single moderately strong answer (≥4.6) should crest it.
+
+**Verified correct against PostgreSQL + Trino docs**:
+- (a) `pg_stat_activity.query` shows the literal SQL text Postgres received from the JDBC client — VERIFIED. `state = 'active'` filter pulls only currently executing queries (vs idle, idle in transaction, etc.); the answer's `usename = 'trino_reader'` + `NOT LIKE '%pg_stat_activity%'` filter pattern is the canonical recipe.
+- (b) `log_min_duration_statement = 0` logs ALL statements with duration; `-1` (default) disables — VERIFIED against postgresql.org/docs/current/runtime-config-logging.html. Units are milliseconds.
+- (c) `ALTER SYSTEM SET log_min_duration_statement = 0; SELECT pg_reload_conf();` is the correct hot-reload pattern, no Postgres restart needed — VERIFIED. The setting persists to `postgresql.auto.conf` and applies immediately to new sessions.
+- (d) `EXPLAIN (TYPE DISTRIBUTED)` showing `constraint on [col_a, col_b]` under the TableScan = successful pushdown — VERIFIED against trino.io/docs/current/optimizer/pushdown.html ("If predicate pushdown for a specific clause is successful, the EXPLAIN plan for the query does not include a ScanFilterProject operation for that clause").
+- (e) `ScanFilterProject[filterPredicate = ...]` above `TableScan` = failed pushdown (Trino applying the filter locally after fetching) — VERIFIED, verbatim docs language.
+- (f) `watch -n 0.5 'psql ...'` polling pattern is a valid Unix workflow for catching fast queries — pragmatic, correct.
+- (g) Failed pushdown causes Trino to fetch the entire table over JDBC and filter in worker memory — VERIFIED (this is the canonical "disaster case" that motivates pushdown verification).
+- (h) `log_min_duration_statement = 0` is I/O-heavy on the replica and should be disabled after the test window; setting it to `5000` (5s) for ongoing slow-query monitoring is the standard production trade-off — CORRECT operational guidance.
+
+**Strengths**:
+- Directly answers the engineer's explicit question (yes, pg_stat_activity works) and identified gotcha (queries finishing too fast) — no deflection.
+- Two-technique structure for catching fast queries (live polling with `watch` vs durable slow-query log) covers both "diagnose right now" and "audit later" use cases.
+- Concrete SUCCESS vs FAILURE log snippets (`duration: 1.234 ms` vs `duration: 3456.789 ms`, WHERE clause present vs absent) make the diagnostic crisp — engineer can pattern-match their own log output in seconds.
+- The two-step EXPLAIN + Postgres-log dual-verification workflow (Section 5) is exactly the senior-grade pattern that recent federation answers have been converging on. "EXPLAIN tells you what the planner *intended* — Postgres logs tell you what *actually* happened" is the right mental frame.
+- Explicit callout that EXPLAIN can occasionally be wrong about pushdown at execution time (unsupported predicate types, type mismatch) — captures the real reason this dual-verification is necessary, not just paranoia.
+- I/O-heavy gotcha for `log_min_duration_statement = 0` is named and a production-safe fallback (`5000` for ongoing monitoring) is given — engineer won't accidentally wedge their replica.
+- Final "Practical workflow for Trino 467 on k8s (on-prem Postgres)" section gives a 5-step bash runbook the engineer can paste into a runbook today — fits prod_info.md (Trino 467, on-prem, k8s) exactly.
+- Closes with the failure-mode triage list (string LIKE without `enable_string_pushdown_with_collate`, JSON operators, function-wrapped columns) — gives the engineer the next debugging step if pushdown is missing.
+
+**Accuracy errors / nits**:
+1. **LOW** — The quote attributed to "the official Trino docs" — "Postgres slow-query logging is the definitive proof" — is not a verifiable verbatim quote from trino.io docs. The underlying claim (Postgres-side logs are ground truth) is sound, but attributing it as a docs quote is a minor fabrication risk. Should be reframed as "the consensus among Trino operators" or simply stated as a recommendation without the false attribution.
+2. **VERY LOW** — `wait_event` is selected in the first pg_stat_activity query but never explained or referenced in the analysis. Minor wasted column; harmless.
+3. **VERY LOW** — The `watch -n 0.5` cadence (twice per second) is aggressive for production replicas under load (small but real `pg_stat_activity` lock contention at high rates). For most cases fine; for very busy replicas, `-n 1` or `-n 2` is safer. Not a hard error.
+4. **VERY LOW** — The example log line uses bracketed PID format `[12345]` consistent with default `log_line_prefix`, but doesn't mention that on some PostgreSQL distributions the prefix is customized (e.g., RDS, Aurora, Patroni). Engineer might grep for `statement:` and miss matches if the prefix differs. Niche.
+
+**Gaps**:
+- (a) Does not mention `auto_explain` extension as an alternative for capturing query plans (not just SQL text) of slow queries — useful when the engineer wants to confirm that Postgres's planner actually used an index scan vs seq scan on the pushed predicate. Niche but the natural next step.
+- (b) Does not mention Trino's `system.runtime.queries` view as a Trino-side complement to the Postgres-side verification — engineer can correlate Trino query ID to the SQL text Postgres logged via the Trino query ID being passed in `application_name` (if configured).
+- (c) Does not mention that `pg_stat_activity.query` is truncated at `track_activity_query_size` bytes (default 1024). Long pushed predicates (large IN lists post-compaction) may be cut off — engineer should know to check this column's setting if SQL appears truncated. (Slow-query log doesn't have this truncation, which is another reason it's better for verification.)
+- (d) Does not mention that on the on-prem k8s stack the engineer may need to `kubectl exec` into the Postgres pod (or shell into the bare-metal Postgres host) to tail `/var/log/postgresql/postgresql.log` — assumes shell access without addressing the access path. Minor production-fit gap.
+- (e) Does not mention OPA decision logs + Trino event listener as the persistent audit trail tying Trino query IDs to pushdown verification events. **17th consecutive iteration this gap has been flagged** (iter165 through iter206) — but the answer's question is specifically Postgres-side ground truth, so this is a softer miss here than in other federation answers.
+- (f) Does not mention that `application_name` on the JDBC URL (`?ApplicationName=trino`) lets the engineer filter `pg_stat_activity WHERE application_name = 'trino'` instead of relying on the `usename` filter — useful when multiple tools share the same Postgres role.
+
+**Resource fix recommendations**:
+- **LOW (correctness)** — `resources/22-trino-federation-postgresql.md` pushdown-verification subsection: drop the "the official Trino docs call this..." false attribution. Reframe as "the consensus operational pattern" or simply assert the recommendation without the docs quote.
+- **LOW (completeness)** — same file: add `track_activity_query_size` (default 1024) caveat in the pg_stat_activity section — large pushed predicates can be truncated in the `query` column. Slow-query log is not subject to this truncation, which is another reason to prefer it for definitive verification of long IN-list / BETWEEN predicates.
+- **LOW (completeness)** — same file: add `application_name` JDBC URL parameter (`?ApplicationName=trino-coord-1`) as the cleaner pg_stat_activity / log filter than relying on `usename`. Recommend including the Trino query ID in the application_name for end-to-end correlation.
+- **LOW (completeness)** — same file: add a brief `auto_explain` extension subsection as the next-step diagnostic when the engineer needs to confirm Postgres used an index vs seq scan on the pushed predicate (not just that the WHERE clause arrived).
+- **LOW (production fit)** — same file: add a k8s-aware access path for tailing Postgres logs (kubectl exec into the Postgres pod, or bare-metal SSH if Postgres is not in the k8s cluster). The current answer assumes shell access without addressing how to get there on the on-prem k8s stack described in prod_info.md.
+- **HIGH (production fit, RECURRING across 17 iterations — iter165 through iter206)** — same file: cross-reference OPA decision logs + Trino event listener from the pushdown-verification section as the persistent audit trail. The dual-verification workflow (EXPLAIN + Postgres log) is point-in-time; an event listener captures it continuously for every query. Iter183 Q1 / Iter204 Q1 already cover event-listener mechanics; the gap is weaving the cross-reference into adjacent answers like this one.
+
+**Trend / topic status**:
+- Trino federation topic average: 4.451 across 90 questions (was 4.447 after iter206 Q1).
+- The topic has now had **5 consecutive passes** above 4.5 (iter204 Q1=4.50, iter205 Q1=4.94, iter205 Q2=4.60, iter206 Q1=4.90, iter206 Q2=4.81) — a clear sustained recovery from the iter163/164/165/169 FAIL drag.
+- The 4.5 raised threshold is now within 0.05 of being crossed. A single more answer at ≥4.6 will move the topic from NEEDS WORK to PASSED.
+- Suggested iter207 topic: a question that stress-tests a *different* federation angle (not OPA, not pg_stat_activity, not pushdown verification — all three have been heavily exercised recently). Candidates: cross-region latency between Trino on k8s and remote Postgres; Trino UI vs JMX metrics for the JDBC connector pool; or a federation-specific failure mode like Postgres replica failover mid-query.
+
+Verified: postgresql.org/docs/current/monitoring-stats.html (pg_stat_activity columns, state values, `track_activity_query_size` truncation); postgresql.org/docs/current/runtime-config-logging.html (`log_min_duration_statement = 0` logs all, `-1` disables, units in ms); postgresql.org/docs/current/sql-altersystem.html + postgresql.org/docs/current/functions-admin.html (ALTER SYSTEM + pg_reload_conf hot-reload pattern, no restart needed); trino.io/docs/current/optimizer/pushdown.html ("If predicate pushdown for a specific clause is successful, the EXPLAIN plan for the query does not include a ScanFilterProject operation for that clause" — verbatim); trino.io/docs/current/connector/postgresql.html (range predicate pushdown limitations on CHAR/VARCHAR; `enable_string_pushdown_with_collate` experimental escape hatch).
+
+### Iter 209 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (OPA mid-query deny semantics: in-flight federated query behavior on OPA outage or policy change; JDBC zombie connection risk)
+**Score:** 3.25 / 5 (FAIL Trino federation raised threshold ≥4.5; PASS general ≥3.5 — barely)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 3.5 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 3.0 |
+| Completeness | 2.5 |
+| **Average** | **3.25** |
+
+**Topics updated**: Trino federation — prior avg 4.454 across 94 questions; after Q1: (4.454 × 94 + 3.25) / 95 = (418.676 + 3.25) / 95 = **4.441 across 95 questions**. Status: NEEDS WORK (4.441 < 4.5 raised threshold). The topic moved further from the threshold by 0.013 — gap widened from 0.046 to 0.059.
+
+**Key gap**: The answer punted on the actual on-call question ("Does the query keep running? Get partial results?") rather than committing to the correct answer: **Trino consults OPA only during analysis (planning), NOT during execution. In-flight queries finish regardless of OPA outage or policy change. Only the *next* query is affected.** Both scenarios (a) and (b) in the engineer's question have the same answer: the running query completes normally.
+
+**Critical resource gap**: `resources/05-multi-tenant-analytics.md` (or `resources/22-trino-federation-postgresql.md`) does not document the OPA authorization lifecycle. The responder had nothing to lift from. Resource needs:
+- One-line quotable rule: "OPA is consulted at analysis time only, not during distributed execution."
+- Failure mode table (OPA down / policy change / OPA bundle refresh / coordinator restart — split by new queries vs in-flight queries).
+- PostgreSQL JDBC cancel lifecycle (`Statement.cancel()` since PR #7306 / #7819).
+- Observability hooks (logger names, error codes, `pg_stat_activity`).
+- On-call decision tree.
+
+Verified against trino.io/docs/current/security/opa-access-control.html, trinodb/trino PR #7306 and #7819.
+
+See `training/feedback-iter209-q1.md` for full detail.
+
+### Iter 209 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (cross-catalog views over Iceberg + Postgres; OPA + SECURITY DEFINER vs INVOKER; row-level security backdoor risk)
+**Score:** 4.625 / 5 (PASS Trino federation raised threshold ≥4.5; PASS general ≥3.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.625** |
+
+**Topics updated**: Trino federation — prior avg 4.441 across 95 questions (after Iter 209 Q1); after Q2: (4.441 × 95 + 4.625) / 96 = (421.895 + 4.625) / 96 = **4.443 across 96 questions**. Status: NEEDS WORK (4.443 < 4.5 raised threshold). The strong Q2 partially offset Q1's regression but the topic still sits 0.057 below threshold.
+
+**Verified correct against trino.io + GitHub discussions**:
+- (a) DEFINER is Trino's default `SECURITY` mode for `CREATE VIEW` — VERIFIED on trino.io/docs/current/sql/create-view.html.
+- (b) Under DEFINER, base-table access is evaluated against the view owner's identity, not the caller's — VERIFIED. "tables referenced in the view are accessed using the permissions of the view owner... rather than the user executing the query."
+- (c) Under INVOKER, base-table access is evaluated against the caller's identity — VERIFIED. Code-level confirmation in trinodb/trino discussion #14790: "if (statement.getSecurity().orElse(null) == INVOKER) { owner = Optional.empty(); }"
+- (d) View expansion resolves to per-table OPA checks during analysis — VERIFIED.
+- (e) Row-filter policies keyed on the caller's identity are effectively bypassed for base-table reads under DEFINER (because OPA evaluates base tables under the view owner's identity) — VERIFIED. This is the precise "backdoor" mechanism the engineer was worried about.
+- (f) Caller only needs SELECT on the view itself under DEFINER — VERIFIED.
+
+**Strengths**:
+- Direct yes/no on the backdoor question with clear conditions (NOT a backdoor with DEFINER + explicit OPA deny on base tables + explicit column list).
+- DEFINER vs INVOKER contrast is the right organizing frame and lands cleanly.
+- Concrete `CREATE VIEW` SQL the engineer can paste.
+- Belt-and-suspenders pattern (view mode + OPA deny on base tables) reflects production-grade thinking.
+- `SELECT DISTINCT tenant_id FROM <view>` CI test is exactly the right operational verification.
+- Summary table at the end is a strong takeaway artifact.
+- Production-fit (JWT + OPA + Trino 467 + Iceberg + Postgres on k8s) with no drift into incompatible advice.
+
+**Accuracy nits**:
+1. **MINOR** — Collapses the view-level OPA check (against caller) and the base-table OPA checks (against view owner under DEFINER) into a single "OPA checks underlying tables against the view owner" statement. An engineer writing the OPA policy needs to know both calls fire, with different identities.
+2. **VERY LOW** — Says "OPA receives these resolved table names in the SelectFromColumns operation" — phrasing rather than the exact operation identifier the engineer will see in OPA decision logs (`"operation": "SelectFromColumns"`). Lossy but not wrong.
+
+**Gaps**:
+- (a) Does not mention OPA `opa.policy.row-filters-uri` can attach a filter directly to a view object, evaluated against the caller's identity. This is the canonical DEFINER-compatible RLS pattern. Without this, engineers may conclude DEFINER and per-caller RLS are incompatible and overcorrect into INVOKER mode (which then requires giving callers direct base-table grants — exactly the opposite of multi-tenant isolation).
+- (b) Does not note that the view owner in a cross-catalog view should be a fixed service principal (not a per-tenant user) that has SELECT on both Iceberg and Postgres catalogs.
+- (c) Does not mention `SHOW CREATE VIEW <name>` as the audit recipe for checking which SECURITY mode an existing view is using.
+- (d) Does not name the actual SPI operation identifiers (`SelectFromColumns`, `FilterColumns`) for OPA decision-log grep.
+
+**Resource fix recommendations**:
+- **HIGH** — Add a "Two-check model for DEFINER views" subsection to `resources/22-trino-federation-postgresql.md` or `resources/05-multi-tenant-analytics.md` spelling out the view-level check (caller identity) + base-table checks (view owner under DEFINER, caller under INVOKER), with JSON payload examples.
+- **HIGH** — Add a row-filter-on-view subsection documenting `opa.policy.row-filters-uri` as the DEFINER-compatible per-caller RLS pattern. Currently missing from resources and recurs in multiple federation+RLS questions.
+- **MEDIUM** — Cross-catalog view ownership note: fixed service principal, not per-tenant user.
+- **LOW** — `SHOW CREATE VIEW` audit recipe (one sentence).
+- **LOW** — Use literal SPI operation names (`SelectFromColumns`, `FilterColumns`) in resources so OPA decision-log grep works.
+- **CARRY-FORWARD FROM Q1** — Same iteration's Q1 surfaced a critical resource gap on OPA mid-query lifecycle. Both Q1 and Q2 sit at the OPA + federation intersection — Q1's recommended fix (analysis-only OPA evaluation, failure mode table) also benefits Q2 readers.
+
+**Trend / topic status**:
+- Trino federation topic average: 4.443 across 96 questions (was 4.454 after iter208).
+- Iter209 net regression: −0.011. Q1's FAIL (3.25) dragged harder than Q2's strong PASS (4.625) could lift.
+- The 4.5 raised threshold gap is now 0.057 (was 0.046 going into iter209). The topic has lost ground for the second consecutive iteration despite Q2 being a strong answer.
+- The drag is consistently coming from OPA-internals questions where the responder hedges ("the resources don't specify") instead of committing to a known correct fact. Two OPA-internals questions in the next 2-3 iterations averaging ≥4.7 would close the gap.
+
+Verified: trino.io/docs/current/sql/create-view.html (DEFINER is default; DEFINER uses view owner permissions for base tables; INVOKER uses caller permissions); trino.io/docs/current/security/opa-access-control.html (row-filters-uri response shape, operation names); github.com/trinodb/trino/discussions/14790 (code-level INVOKER handling); github.com/trinodb/trino/issues/6792 (SHOW CREATE VIEW SECURITY clause rendering).
+
+### Iter 210 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (broadcast join threshold: `join_max_broadcast_table_size` exact name/default, raise per-query, EXPLAIN verification, AUTOMATIC + missing stats)
+**Score:** 4.9 / 5 (PASS general ≥3.5 / PASS Trino federation raised ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy (×2) | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Weighted average (Tech×2)** | **4.90** |
+
+**Topics updated**: Trino federation — prior avg 4.443 across 96 questions; after Q1: (4.443 × 96 + 4.90) / 97 = (426.528 + 4.90) / 97 = **4.448 across 97 questions**. Status: NEEDS WORK (4.448 < 4.5 raised threshold), but iter208 Q1's resource fix verifiably held under direct re-testing.
+
+**Notes**: Direct re-test of the iter208 Q1 angle (broadcast join threshold). Every concrete claim verified: `join_max_broadcast_table_size` session property name, 100MB default, hyphenated cluster-wide config-property variant `join-max-broadcast-table-size`, AUTOMATIC defaulting to PARTITIONED when stats are missing, `Exchange[Type=REPLICATE]` / `Exchange[Type=REPARTITION]` notation (and the explicit debunking of the made-up `Join[BROADCAST]` blog-post notation), Iceberg `ANALYZE TABLE ... WITH (columns = ARRAY[...])` syntax, Postgres-side `pg_stats` provenance, Iceberg Puffin stats provenance. Concrete cross-catalog query mirrors the engineer's actual scenario (60MB tenants ⨝ events). Runbook closer is paste-into-ops shape. Production-fit (Trino 467 + Iceberg + Hive Metastore + cross-catalog Postgres + on-prem k8s). Minor judge nit: stylized `Exchange[Type=...]` format is conceptually right but doesn't grep against verbatim Trino 467 `RemoteExchange[REPLICATE, BROADCAST, []]` / `RemoteExchange[REPARTITION, HASH, [...]]` output; "AUTOMATIC + missing stats → PARTITIONED" is the practical outcome but the docs phrase the fallback as `ELIMINATE_CROSS_JOINS` enumeration. Neither nit changes the score.
+
+**Resource fix recommendations**:
+- **MEDIUM (correctness)** — `resources/22-trino-federation-postgresql.md` CBO subsection: update the EXPLAIN output examples to use the literal `RemoteExchange[REPLICATE, BROADCAST, []]` and `RemoteExchange[REPARTITION, HASH, [<col>]]` strings from Trino 467 output. Keep stylized form as the conceptual diagram, pair with real output so grep works.
+- **LOW (correctness)** — same: when discussing AUTOMATIC + missing stats, cite the `ELIMINATE_CROSS_JOINS` enumeration fallback explicitly (rather than asserting PARTITIONED outright) and explain the practical consequence.
+- **LOW (completeness)** — same: clarify that `join_max_broadcast_table_size` caps the *estimated* build-side size after column pruning and filter pushdown, not the raw table size.
+- **HIGH (production fit, RECURRING 20 iterations — iter165 through iter210)** — same: cross-reference OPA decision logs + Trino event listener as the post-execution audit trail for which distribution type was actually chosen.
+
+See `training/feedback-iter210-q1.md` for full detail.
+
+### Iter 210 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (OPA batched-uri: what it does vs the regular endpoint, vs row-filters-uri, which queries benefit, what changes in Rego)
+**Score:** 2.80 / 5 (FAIL Trino federation raised ≥4.5; FAIL general ≥3.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy (×2) | 2.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 2.0 |
+| Completeness | 3.5 |
+| **Weighted average (Tech×2)** | **2.80** |
+
+**Topics updated**: Trino federation — prior avg 4.448 across 97 questions (after Iter 210 Q1); after Q2: (4.448 × 97 + 2.80) / 98 = (431.456 + 2.80) / 98 = **4.431 across 98 questions**. Status: NEEDS WORK (4.431 < 4.5 raised threshold). Iter210 net regression: gap to threshold widened from 0.057 (start of iter210) to **0.069**. This is the **third consecutive iteration of widening gap** (iter208: 4.458 → 4.454; iter209: 4.454 → 4.443; iter210: 4.443 → 4.431). The drag is again from an OPA-internals question.
+
+**Verified against trino.io/docs/current/security/opa-access-control.html, Stackable Trino docs, openpolicyagent.org/integrations/trino, trinodb/trino issues #25748 and #21997**:
+- `opa.policy.batched-uri` is **complementary**, not a replacement for `opa.policy.uri` — VERIFIED. The docs state "If `opa.policy.batched-uri` is not configured, Trino sends one request to OPA for each object, and then creates a filtered list of permitted objects. Configuring `opa.policy.batched-uri` allows Trino to send a request to the batch endpoint, with a list of resources in one request using the under `action.filterResources` node."
+- batched-uri applies to **filter-list operations** (FilterCatalogs, FilterSchemas, FilterTables, FilterColumns, queries, views) — VERIFIED.
+- Rego batch handler returns a list of **indices** into the input array for permitted items — VERIFIED. `batch contains i if { some i; input.action.filterResources[i]; <decision> }`.
+- row-filters-uri returns a WHERE-clause expression; batched-uri returns allow/deny decisions — VERIFIED.
+
+**Critical errors**:
+1. **"Overrides not complements"** is the answer's headline framing and is the inverse of how the plugin actually works. The single-call `opa.policy.uri` is always required for per-resource decisions; batched-uri is opt-in for filter-list ops.
+2. **List of batched operations is wrong**: the answer claims batching covers `CreateTable`, `DeleteFromTable`, and single-table `SelectFromColumns`. These are single-resource decisions with no filterResources array — they remain on the per-object path.
+3. **"No automatic fallback / queries fail at analysis if batch handler missing"** is wrong. Without the batched-uri configured, Trino uses the per-object path; with it configured but no batch rule, the empty-result behavior is deny-all for that filter, not a query failure.
+4. **"18 round-trips → 1 round-trip per query"** misrepresents the mechanism. Batching collapses N resources within a single filter operation into 1 request; it does not combine separate filter operations into a single HTTP call. 18 checks across 3 filter types becomes ~3 calls, not 1.
+5. **Rego section is hand-wavy**: does not name `action.filterResources` (the input shape) or the indices return contract (the output shape). An author cannot implement the handler from this answer.
+
+**What worked**: property name verified; high-level row-filters-uri vs batched-uri distinction directionally right; dashboard / SHOW CATALOGS use case correctly identified as the benefit scenario; staging-test recommendation is sound regardless of the wrong "no fallback" framing; config block locations correct; structure and clarity high.
+
+**Pattern flag**: This is the same "confident wrong" failure mode as iter163 (`connection-pool.*` properties that only exist in Starburst), iter169 Q1 (invented `ALTER CATALOG`), iter171 Q1 (named-parameter `flush_metadata_cache` form that doesn't exist), and iter209 Q1 (OPA mid-query hedging). The responder commits to a feature behavior that is the opposite of what the docs actually say — and the misframing is the *headline* of the answer, so it's what an engineer would commit to memory.
+
+**Resource fix recommendations**:
+- **HIGH (correctness, CRITICAL)** — `resources/22-trino-federation-postgresql.md` or `resources/05-multi-tenant-analytics.md`: rewrite the OPA batched-uri section to teach:
+  1. **Complementary, not replacement**: single uri always required; batched-uri opt-in for filter-list ops only.
+  2. **The exact mechanism**: batched-uri takes operations that would have made N per-object calls (one per candidate resource in a list) and instead makes 1 call with `action.filterResources` carrying the full list.
+  3. **What batching does NOT do**: FilterCatalogs and FilterSchemas remain separate HTTP calls; each one carries its own resource list internally.
+  4. **Minimal Rego batch handler example** with `batch contains i if { some i; resource := input.action.filterResources[i]; <decision> }` and the `import future.keywords.contains` declaration.
+  5. **Delete the "no fallback / queries fail" claim** — it is wrong and inverts the actual behavior.
+  6. **GitHub issue #25748** (batch chunking work in flight, not shipped in 467) — cite for engineers planning large multi-tenant deployments.
+- **HIGH (correctness)** — same file: parallel structure for `opa.policy.batch-column-masking-uri` using the same `filterResources`-array-in, indices-or-mask-objects-out pattern. Teach them as a uniform family ("filterResources-based batch endpoints").
+- **HIGH (production fit, RECURRING 19 iterations)** — same: OPA decision log entries for batch calls include the full `filterResources` array and the returned indices. Document the audit-and-debug workflow. **20th consecutive iteration this gap has been flagged**.
+- **MEDIUM (clarity)** — same: latency framing — batching helps coordinator analysis-phase wall time for queries that filter long lists (SHOW CATALOGS in many-catalog deployments, wide-column masking), NOT data-fetch or join phases. Be specific so engineers don't expect end-to-end query speedup.
+
+See `training/feedback-iter210-q2.md` for full detail.
+
+**Trend / topic status**:
+- Trino federation topic average: 4.431 across 98 questions (was 4.443 after iter209).
+- Iter210 net regression: −0.012. Q1's strong 4.9 lifted only 0.005, Q2's 2.80 dragged 0.017 down.
+- Gap to 4.5 threshold widened from 0.057 → 0.069. **Third consecutive iteration of widening gap**.
+- Both regressions in this 3-iteration run came from OPA-internals questions where the responder was confidently wrong about feature behavior. The single highest-leverage fix is rewriting the OPA batched-uri section in resources to correct the "complement not override" framing; secondary leverage is the OPA mid-query lifecycle section (iter209 Q1 fix).
+
+Verified: trino.io/docs/current/security/opa-access-control.html (batched-uri complements single uri, filter-list operations only, indices return contract); openpolicyagent.org/integrations/trino (batch policy examples); github.com/trinodb/trino/issues/25748 (batch chunking work in flight); github.com/trinodb/trino/pull/21997 (column masking SPI + OPA implementation).
+
+### Iter 211 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (OPA batched-uri retest: complement vs override framing, Rego changes, batch endpoint coverage)
+**Score:** 5.0 / 5 (PASS Trino federation raised ≥4.5; PASS general ≥3.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **5.0** |
+
+**Topics updated**: Trino federation — prior avg 4.431 across 98 questions (total 434.238); after Q1: (434.238 + 5.0) / 99 = 439.238 / 99 = **4.437 across 99 questions**. Status: NEEDS WORK (4.437 < 4.5 raised threshold). Gap to threshold narrowed from 0.069 → 0.063 — **first narrowing iteration after three consecutive widening iterations (iter208-210)**.
+
+**Verified against trino.io/docs/current/security/opa-access-control.html, openpolicyagent.org/integrations/trino**:
+- `opa.policy.batched-uri` is **complementary**, not a replacement for `opa.policy.uri` — VERIFIED. Answer's headline correctly states "does NOT take over from `opa.policy.uri`. It COMPLEMENTS it. Both URIs must be configured."
+- batched-uri applies to **filter-list operations only** (FilterCatalogs, FilterSchemas, FilterTables, FilterColumns, FilterViews) — VERIFIED.
+- Input shape `action.filterResources` as array of resource objects — VERIFIED (concrete JSON example with 3 candidate tables).
+- Output shape zero-based indices array — VERIFIED (`{"result": [0, 2]}` example).
+- Rego pattern `batch contains i if { some i; resource := input.action.filterResources[i]; ... }` — VERIFIED matches docs canonical pattern.
+- Graceful per-object fallback when batched-uri not configured (no error, just N per-resource calls) — VERIFIED.
+- Single-resource ops (`CreateTable`, `DeleteFromTable`, `AccessCatalog`, `RenameTable`, single-table `SelectFromColumns`) always use the single uri because they have no filterResources array — correct.
+
+**Resource fix landed — all 5 iter210 Q2 critical errors corrected**:
+1. "Overrides not complements" — FIXED to "COMPLEMENTS it. Both URIs must be configured."
+2. Wrong list of batched ops (CreateTable, DeleteFromTable, single-table SelectFromColumns) — FIXED. Only Filter* ops listed as batched.
+3. "No automatic fallback / queries fail at analysis" — FIXED to "falls back gracefully to one per-candidate call... There is no error."
+4. "18 round-trips → 1 round-trip per query" misrepresentation — FIXED. Now correctly describes "200 separate HTTP calls" collapsing into "1 call" for a single filter operation.
+5. Rego section hand-wavy — FIXED. `action.filterResources` named explicitly, indices-return contract documented, complete minimal handler with concrete tenant-prefix logic.
+
+**What worked**: Headline answer directly corrects the engineer's wrong assumption in the question ("Your understanding is incorrect on the core point"). 200-catalog scenario tied to the engineer's exact situation. Concrete endpoint-coverage table is unambiguous. Properties config block shows both URIs side-by-side with REQUIRED vs OPTIONAL annotations. Rego skeleton with tenant prefix split fits production multi-tenant pattern.
+
+**Minor nits (not score-affecting)**: could cite issue #25748 for very large filterResources arrays; could mention `import future.keywords.contains` Rego setup; otherwise complete.
+
+**Pattern flag — recovery confirmed**: After three consecutive iterations of OPA-internals questions exposing "confident wrong" failures (iter208 batched-uri inversion, iter209 mid-query lifecycle, iter210 Q2 batched-uri inversion repeat), the teacher's rewrite of the OPA batched-uri section has landed and the responder is now docs-accurate on the headline framing. **Recommend retesting from one more angle (e.g., `opa.policy.batch-column-masking-uri` parallel family) before considering this gap fully closed.**
+
+**Resource fix recommendations**:
+- **HIGH (production fit, RECURRING 20 iterations)** — OPA decision logs cross-referenced with Trino event listener for debugging denied filter operations. **21st consecutive iteration this gap has been flagged**. Aim to land before iter215.
+- **MEDIUM (parallel family)** — `opa.policy.batch-column-masking-uri` parallel coverage in the same resource file (filterResources-in, mask-objects-out). Teach as a uniform "filterResources-based batch endpoint family."
+- **LOW (Rego completeness)** — add `import future.keywords.contains` to the minimal batch handler example in the resource file.
+
+See `training/feedback-iter211-q1.md` for full detail.
+
+**Trend / topic status**:
+- Trino federation topic average: **4.437 across 99 questions** (was 4.431 after iter210).
+- Gap to 4.5 threshold narrowed from 0.069 → 0.063. **First narrowing iteration after three consecutive widening iterations.**
+- The teacher's iter210 → iter211 resource rewrite on OPA batched-uri framing landed cleanly. Next 1-2 federation answers averaging ≥4.7 would close the remaining 0.063 gap.
+
+Verified: trino.io/docs/current/security/opa-access-control.html (complement framing, filterResources input, indices output, Rego pattern, graceful fallback); openpolicyagent.org/integrations/trino (batch policy examples).
+
+### Iter 211 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (Trino coordinator HA on k8s: active-active vs active-passive, in-flight query survival on failover, federation impact)
+**Score:** 3.375 / 5 (FAIL Trino federation raised ≥4.5; FAIL general ≥3.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 3.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 3.0 |
+| Completeness | 2.5 |
+| **Average** | **3.375** |
+
+**Topics updated**: Trino federation — prior avg 4.437 across 99 questions (total 439.263); after Q2: (439.263 + 3.375) / 100 = 442.638 / 100 = **4.426 across 100 questions**. Status: NEEDS WORK (4.426 < 4.5 raised threshold). Gap to threshold widens from 0.063 → 0.074. After a single narrowing iteration (iter211 Q1), iter211 Q2 widens the gap again, exposing a **new resource gap on coordinator HA**.
+
+**Verified against trino.io/docs/current/installation/query-resiliency.html, github.com/trinodb/trino/issues/391, github.com/trinodb/trino/discussions/15230, docs.arenadata.io HAProxy+Trino HA guide**:
+- OSS Trino does NOT natively support multiple coordinators in one cluster — VERIFIED. Workers register against one `discovery.uri`. The proposed multi-coordinator + dispatcher architecture in issue #391 is a roadmap item, not shipped in OSS 467.
+- Coordinator failure → in-flight queries managed by that coordinator FAIL — VERIFIED (issue #391: "if a coordinator crashes, all queries managed by that coordinator fail").
+- Fault-tolerant execution (`retry-policy=TASK`/`QUERY`) addresses WORKER failures, not coordinator failures — VERIFIED (trino.io query-resiliency docs).
+- Real-world HA pattern is external proxy (HAProxy, Envoy) in front of two separate Trino clusters, or active-passive single-coordinator with k8s rescheduling — VERIFIED (Arenadata HAProxy docs, Goldman Sachs Envoy-proxy blog).
+
+**What worked**:
+- **Honestly admitted the resource gap** rather than fabricating — this is the correct failure mode and avoids the "confident wrong" pattern that has dragged the topic average down across iter163/169/171/209/210.
+- Correctly stated the in-flight-queries-die fact and the OPA-already-authorized-at-analysis fact.
+- The "treat second coordinator as hot standby; route Service traffic to one coordinator" interim operational advice is actually correct.
+- Well-structured "what resources cover vs don't" framing.
+
+**Critical errors / gaps**:
+1. **Missed the central architectural fact**: OSS Trino does NOT natively support multiple coordinators in one cluster. The engineer's premise ("setting up a second Trino coordinator for HA") is ambiguous between (a) two separate clusters + external proxy, and (b) active-passive single coordinator with k8s Deployment. The answer never disambiguates and never states the single-coordinator-per-cluster constraint. As a result, the engineer cannot translate the advice into a concrete k8s deployment.
+2. **No HAProxy/Envoy/Ingress pattern** — the actual deployed "Trino HA" pattern in production (Arenadata docs, Goldman Sachs blog) is missing.
+3. **No mention of fault-tolerant execution** — engineer needs to know FTE addresses WORKER failures, not coordinator failures, so they don't think enabling FTE buys coordinator HA.
+4. **Federation-specific behavior under-served** — the question explicitly asked about Iceberg + Postgres federated query behavior on coordinator failure. The answer gives a single sentence ("worker-side Postgres JDBC connections and Iceberg reader tasks are aborted") without grounding in the mechanism (worker heartbeat detects coordinator gone, no partial commits, retry sees possibly different Iceberg snapshot).
+5. **No k8s patterns** — PodDisruptionBudget, readiness probe behavior, graceful shutdown semantics for coordinator all missing.
+
+**Pattern flag**: Different failure mode than the recent OPA-internals "confident wrong" pattern — this is a "topic not covered in resources, responder honestly defers" failure. The honest-deferral is the correct behavior (avoids hallucination), but it means the responder is useless for this specific question. **Resource fix is required** before retesting.
+
+**Resource fix recommendations**:
+- **HIGH (new resource gap — coordinator HA)** — add a new section to `resources/22-trino-federation-postgresql.md` or a new file `resources/24-trino-coordinator-ha-on-k8s.md` covering: (1) OSS single-coordinator-per-cluster constraint stated plainly; (2) the two real HA patterns — two separate clusters + HAProxy/Envoy proxy (active-passive, with sticky-session caveats for active-active), and single coordinator + k8s rescheduling with PodDisruptionBudget; (3) in-flight queries die on coordinator failure — cite trinodb/trino issue #391; (4) fault-tolerant execution is for WORKER failures only, not coordinator HA; (5) federation-specific behavior on coordinator failure (worker JDBC connections torn down, Iceberg scans abort, OPA decision survives in decision log, retry is brand-new query against possibly different Iceberg snapshot); (6) future roadmap from issue #391 as context.
+- **MEDIUM (k8s operational detail)** — PodDisruptionBudget example, graceful shutdown semantics (`SHUTDOWN` SQL command and limitations for coordinator), readiness probe on `/v1/info`, HAProxy active-passive config snippet with health check on `/v1/info`.
+- **LOW (linkage)** — cross-link from new HA section to §8.4 OPA decision logs (decisions survive coordinator failure, useful for forensics) and event listener section (QueryCompletedEvent does NOT fire when coordinator dies — audit gap during failure window).
+- **HIGH (production fit, RECURRING 21 iterations)** — OPA decision logs cross-referenced with Trino event listener. **22nd consecutive iteration this gap has been flagged.** Aim to land before iter215.
+
+See `training/feedback-iter211-q2.md` for full detail.
+
+**Trend / topic status**:
+- Trino federation topic average: **4.426 across 100 questions** (was 4.437 after iter211 Q1).
+- Gap to 4.5 threshold widens from 0.063 → 0.074. After a single narrowing iteration, gap widens again.
+- Iter211 net: Q1 +5.0 narrowed the gap by 0.006; Q2 3.375 widened it by 0.011. Net iter211 effect on topic: −0.005.
+- Iter211 average: (5.0 + 3.375) / 2 = **4.1875**.
+- The next 2-3 federation answers should average ≥4.7 to close the 0.074 gap.
+
+Verified: trino.io/docs/current/installation/query-resiliency.html (FTE for worker failures only; coordinator is SPOF); github.com/trinodb/trino/issues/391 (multi-coordinator HA is roadmap, not shipped); github.com/trinodb/trino/discussions/15230 (no native multi-coordinator support); docs.arenadata.io/en/ADH/current/how-to/trino/trino-ha.html (HAProxy + multi-cluster Trino HA pattern); developer.gs.com/blog/posts/enabling-highly-available-trino-clusters-at-goldman-sachs (Envoy-based proxy across multiple Trino clusters).
+
+### Iter 212 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation / cross-source connectors (Trino coordinator HA on k8s: replicas:2 split-brain, HAProxy active-passive vs single-coord+PDB, FTE-vs-coordinator-HA, in-flight query behavior)
+**Score:** 4.775 / 5 (PASS general ≥3.5; PASS Trino federation raised ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.8 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.8 |
+| **Average** | **4.775** |
+
+**Topics updated**: Trino federation — prior avg 4.426 across 100 questions (total 442.6); after Q1: (442.6 + 4.775) / 101 = 447.375 / 101 = **4.429 across 101 questions**. Status: NEEDS WORK (4.429 < 4.5 raised threshold). Gap to threshold narrowed from 0.074 → **0.071**.
+
+**Direct retest of iter211 Q2 (3.375 FAIL)**: this question hits the exact angle that failed last iteration — what happens with `replicas: 2`, OSS Trino single-coordinator constraint, real HA patterns. The teacher's Section 12 addition to `resources/22-trino-federation-postgresql.md` (covering 12.1 architectural constraint, 12.2 two HA patterns, 12.3 in-flight query behavior, 12.4 FTE-vs-coordinator-HA, 12.5 federation-specific behavior, 12.6 roadmap #391, 12.7 quick summary) gave the responder the grounding it lacked in iter211. The responder now:
+- Names the architectural constraint plainly (one coordinator per OSS Trino cluster, workers register against one `discovery.uri`).
+- Explains *why* `replicas: 2` fails (round-robin Service → both pods believe they're the coordinator → split-brain at discovery layer).
+- Gives both HA patterns with copy-pasteable configs (HAProxy `backup` directive for active-passive; PodDisruptionBudget `minAvailable: 1` + readiness probe on `/v1/info` + `http-server.stop-timeout=60s` + `terminationGracePeriodSeconds: 90` for single-coord+PDB).
+- Correctly distinguishes FTE (worker resilience via `retry-policy=TASK`) from coordinator HA.
+- Federation-specific JDBC `Statement.cancel()` cleanup behavior is accurate.
+
+**Minor deductions (-0.225 total)**:
+- (-0.2 technical): "~5 minutes by default" heartbeat-detection timeout is approximate; exact default isn't crisply documented in trino.io. Hedge is appropriate epistemic posture but a tighter number would push to 5.0.
+- (-0.5 clarity): `discovery.uri`, `Statement.cancel()`, `pg_stat_activity` used without expansion. Acceptable given the federation-engineer audience but not zero-jargon.
+- (-0.2 completeness): Trino Gateway (trinodb/trino-gateway) not mentioned as a Trino-native alternative to HAProxy/Envoy. Subsumed by Pattern A conceptually but worth a one-liner.
+
+**Resource quality observation**: this is the **first** time after iter158, iter163, iter169, iter171, iter209, iter210, iter211 that the topic has produced a ≥4.7 answer on a previously-failed sub-angle. The teacher's Section 12 rewrite landed cleanly. To cross 4.5 the topic needs ~7-10 more answers averaging ≥4.7 — the historical floor (439 points over 100 questions) drags the rolling average heavily.
+
+See `training/feedback-iter212-q1.md` for full detail.
+
+Verified: github.com/trinodb/trino/issues/391 (single-coordinator constraint, dispatcher-based multi-coord is roadmap), trino.io/docs/current/admin/fault-tolerant-execution.html (TASK/QUERY retry policies are worker-failure-only), trino.io/docs/current/admin/graceful-shutdown.html (`shutdown.grace-period` default 2 min; airlift HTTP stop-timeout mechanism), docs.arenadata.io/en/ADH/current/how-to/trino/trino-ha.html (HAProxy active-passive pattern), developer.gs.com/blog/posts/enabling-highly-available-trino-clusters-at-goldman-sachs (Envoy-based HA).
+
+### Iter 212 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation / cross-source connectors (OPA decision log timing: analysis-time vs worker-read-time; per-table calls for cross-catalog Iceberg+Postgres join; three-way forensics workflow event listener + OPA decision log + pg_stat_activity)
+**Score:** 5.0 / 5 (PASS general ≥3.5; PASS Trino federation raised ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **5.0** |
+
+**Topics updated**: Trino federation — prior avg 4.429 across 101 questions (total 447.375); after Q2: (447.375 + 5.0) / 102 = 452.375 / 102 = **4.435 across 102 questions**. Status: NEEDS WORK (4.435 < 4.5 raised threshold). Gap to threshold narrowed from 0.071 → **0.065**.
+
+**Direct retest of iter209 (OPA mid-query lifecycle) + iter211 Q1 (batched-uri family) absorption**: this question hits both the iter209 angle (when is OPA consulted relative to worker reads) and the iter211 batched-uri family awareness, from a new surface phrasing. The responder correctly:
+- Opens section 1 with "OPA decision log entries are written at query analysis time, before workers start reading any data" — confirms iter209 fix internalized across paraphrasings.
+- Section 2 correctly distinguishes (i) one SelectFromColumns call per base table (always one per table, even with batched-uri configured), (ii) per-table row-filter calls when `opa.policy.row-filters-uri` set, (iii) batched filter-list ops as a separate category — confirms iter211 Q1 framing absorbed.
+- Three-way forensics workflow (Trino event listener queryCompletedEvent + OPA decision log filtered by `input.context.queryId` + `pg_stat_activity`) directly addresses the **22-consecutive-iteration recurring gap** (iter165-iter211: OPA decision logs cross-referenced with event listener for debugging denied filter operations).
+- Decision table at the end maps each combination of (OPA state × Postgres state) to a definitive conclusion: "Authorization filtered the data" / "Policy worked, pushed to Postgres" / "Policy worked but predicate not pushed — Trino filtered locally" / "Authorization passed; data loss is elsewhere."
+
+**Verified against trino.io/docs/current/security/opa-access-control.html, github.com/trinodb/trino/pull/26851, openpolicyagent.org/integrations/trino**:
+- OPA consulted at query analysis time, before workers scheduled — VERIFIED. Access control happens in the coordinator's analysis/planning phase.
+- One SelectFromColumns call per base table for multi-table queries — VERIFIED. Trino sends one request per object for non-batched operations.
+- `opa.policy.row-filters-uri` produces additional per-table calls returning `[{"expression": "clause"}, ...]` — VERIFIED. Row-filter expression behaves as additional WHERE clause.
+- `input.context.queryId` field shape `"queryId": "20250718_081710_03427_trino"` — VERIFIED. PR #26851 formalized this field; documented in current OPA access control docs.
+- batched-uri applies to filter-list ops only (FilterCatalogs/Schemas/Tables/Columns/Views), not SelectFromColumns — VERIFIED (consistent with iter211 Q1 verification).
+- OPA decision log survives Trino coordinator crash (OPA writes its own log independent of Trino's event listener) — VERIFIED.
+- Predicate pushdown to Postgres visible in pg_stat_activity — standard Postgres monitoring, accurate.
+
+**Minor nits (not score-affecting)**:
+- "errorCode.name = PERMISSION_DENIED" shorthand — the exact QueryCompletedEvent payload field is `failureInfo.errorCode.name`.
+- Doesn't explicitly note that OPA's decision log must be enabled (`decision_logs.console=true` in OPA config or remote `decision_logs.service` endpoint) for the forensics workflow to have entries to consult.
+- `opa.log-requests` (Trino-side HTTP request/response logging) vs OPA's `decision_logs` (OPA-side policy evaluation log) — two different log surfaces; could note the distinction.
+
+**Pattern flag — both iter212 questions PASS, second consecutive clean recovery iteration**:
+- iter211 Q1 (5.0): recovery from iter210 Q2 OPA batched-uri FAIL.
+- iter212 Q1 (4.775): recovery from iter211 Q2 coordinator HA FAIL.
+- iter212 Q2 (5.0): clean retest of iter209 OPA mid-query lifecycle + iter211 batched-uri family from new surface phrasing.
+
+The teacher's resource updates have landed across both prior failure surfaces, and the responder's mental model is internally consistent across paraphrasings. **Iter212 net effect on topic: +0.009** (Q1 +0.003, Q2 +0.006).
+
+**Resource fix recommendations**:
+- **HIGH (PROMOTE Q2 content into resources — closes the 22-iteration recurring gap)** — extract the three-way forensics workflow from this Q2 answer into a permanent section in `resources/22-trino-federation-postgresql.md` §8.4 (OPA decision logs) or §8.5 (forensics). Include the decision table (OPA state × Postgres state → conclusion), field names (`input.context.queryId`, `failureInfo.errorCode.name`, `pg_stat_activity.query`), sample log lines for each case, OPA decision-log enablement note (`decision_logs.console=true`), and the `opa.log-requests` vs `decision_logs` distinction. After 22 iterations of this gap being flagged, the teacher now has a concrete verified artifact to copy in.
+- **MEDIUM (parallel family — still open from iter211)** — `opa.policy.batch-column-masking-uri` parallel coverage in the same resource file. Teach as a uniform "filterResources-based batch endpoint family."
+- **LOW (precision nits)** — use `failureInfo.errorCode.name` (full path) in event listener cross-reference examples; one-line note on enabling OPA's decision log; one-line distinguishing `opa.log-requests` from OPA `decision_logs`.
+
+See `training/feedback-iter212-q2.md` for full detail.
+
+**Trend / topic status**:
+- Trino federation topic average: **4.435 across 102 questions** (was 4.426 after iter211; 4.429 after iter212 Q1).
+- Gap to 4.5 threshold narrowed from 0.074 → 0.071 (Q1) → 0.065 (Q2). Iter212 net: +0.009 narrowing.
+- Iter212 average: (4.775 + 5.0) / 2 = **4.8875** — first iteration where both federation questions cleared the raised 4.5 threshold since the topic was elevated.
+- The historical floor (iter163/164/165/169/210/211 FAILs) continues to drag the rolling average; ~7-10 more answers averaging ≥4.7 needed to cross the 4.5 line.
+
+Verified: trino.io/docs/current/security/opa-access-control.html (OPA plugin operations, batched-uri scope, row-filters-uri shape, context.queryId field, per-object request behavior); github.com/trinodb/trino/pull/26851 (queryId added to OPA requests); www.openpolicyagent.org/integrations/trino/ (Trino OPA integration); www.styra.com/blog/they-did-what-auditing-a-security-breach-using-enterprise-opa-decision-logs-and-aws-athena/ (OPA decision logs as forensic source independent of application); trino.io/docs/current/develop/event-listener.html (QueryCompletedEvent shape for cross-reference).
+
+---
+
+### Iter 213 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (three-source federation: Iceberg + Postgres + MySQL, CBO join order, broadcast strategy, predicate pushdown, dynamic filtering)
+
+Score: **4.71** — PASS
+
+Correct on: `join_max_broadcast_table_size` (100MB default, session property), CBO picks smallest build side, predicate pushdown independent per connector, dynamic filtering mechanics (IN-list/min-max from build side pushed to Iceberg probe), `dynamicFilterSplitsProcessed` in EXPLAIN ANALYZE, `enable_large_dynamic_filters`, `iceberg.dynamic_filtering_wait_timeout` session property, ANALYZE commands (native for Postgres/MySQL, Trino ANALYZE for Iceberg), diagnostic checklist (PARTITIONED vs BROADCAST → stats issue; empty dynamicFilters → enable_large_dynamic_filters; splits=0 → raise wait timeout).
+
+Minor nits: `iceberg.dynamic_filtering_wait_timeout` (underscores, session form) vs actual config property `iceberg.dynamic-filtering.wait-timeout` (hyphens); doesn't mention JDBC dynamic filtering pushdown (Trino 392+, PR #13334) or `join_reordering_strategy = AUTOMATIC`.
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.435 across 102 questions; new running avg (4.435 × 102 + 4.71) / 103 = (452.37 + 4.71) / 103 = **4.438 across 103 questions**. Status: NEEDS WORK (4.438 < 4.5 raised threshold). Gap narrowed slightly from 0.065 → 0.062.
+
+Verified: trino.io/docs/current/optimizer/cost-based-optimizations.html (join_max_broadcast_table_size, 100MB default); trino.io/docs/current/admin/dynamic-filtering.html; trino.io/docs/current/connector/iceberg.html; trino.io/docs/current/sql/analyze.html; github.com/trinodb/trino/pull/13334 (JDBC dynamic filtering pushdown); github.com/trinodb/trino/pull/22824 (enable_large_dynamic_filters).
+
+---
+
+### Iter 213 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (OPA batch-column-masking-uri: per-column vs per-table call volume, input/output shape, override semantics)
+
+Score: **3.20** — FAIL
+
+Critical errors (resource bug propagated to answer):
+
+1. **Output shape WRONG**: Answer said batch-column-masking-uri returns `[{"expression": "..."}]` ordinal array (1:1 with input). Actual shape: `[{"index": <int>, "viewExpression": {"expression": "<SQL>"}}]` sparse array keyed by index (OPA omits entries for unmasked columns). The indexed pattern is CONSISTENT with the filterResources family — not divergent. Answer explicitly stated the opposite ("not just indices, as it does for the broader batched-uri endpoint") — exactly backward.
+
+2. **Override semantics WRONG**: Answer said "Trino prefers batch endpoint and falls back to per-column — configure both." Actual: batch-column-masking-uri OVERRIDES column-masking-uri — mutually exclusive. "Configure both for fallback" is incorrect operational advice.
+
+3. **`{{column}}` template syntax**: OPA column-mask expression is raw SQL — no Mustache substitution.
+
+Root cause: teacher's iter213 §8.4.D2 addition to resources/22 introduced both errors. Responder absorbed wrong resource content.
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.438 across 103 questions; new running avg (4.438 × 103 + 3.20) / 104 = (457.114 + 3.20) / 104 = **4.426 across 104 questions**. Status: NEEDS WORK (4.426 < 4.5 raised threshold). Gap widened from 0.062 → 0.074. Iter213 net effect: −0.009.
+
+Verified: trino.io/docs/current/security/opa-access-control.html (batch-column-masking-uri output shape: {index, viewExpression}; override semantics: "overrides the value of opa.policy.column-masking-uri"); github.com/trinodb/trino/issues/21359 (per-column OPA calls for ALL table columns, not just selected).
+
+---
+
+### Iter 214 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (OPA batch-column-masking-uri retest: response shape {index, viewExpression}, override semantics, batched-uri vs batch-column-masking-uri distinction)
+
+Score: **4.62** — PASS
+
+Clean recovery from iter213 Q2 (3.20 FAIL). Both critical resource bugs now fixed: output shape correctly uses `{index, viewExpression: {expression}}` sparse array keyed by index (not ordinal `{expression}` array); override semantics correctly state batch-column-masking-uri OVERRIDES column-masking-uri (mutually exclusive, not additive). Correctly distinguishes batched-uri (filter-list ops) from batch-column-masking-uri (GetColumnMask) — both can be configured simultaneously. Input shape `action.filterResources` column objects correct. Config example correct (no column-masking-uri alongside batch URI).
+
+Minor nits: missing optional `identity` field in viewExpression; no mention of issue #21359 (per-column endpoint hits ALL table columns, not just selected); no mention of `opa.policy.batch-size` for chunking.
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.426 across 104 questions; new running avg (4.426 × 104 + 4.62) / 105 = (460.304 + 4.62) / 105 = **4.428 across 105 questions**. Status: NEEDS WORK (4.428 < 4.5 raised threshold). Gap narrowed from 0.074 → 0.072.
+
+Verified: trino.io/docs/current/security/opa-access-control.html (output shape {index, viewExpression}, override semantics); github.com/trinodb/trino/pull/21997 (getTableColumnMasks SPI + OPA implementation); github.com/trinodb/trino/issues/21359; github.com/trinodb/trino/issues/25748.
+
+---
+
+### Iter 214 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (Iceberg FOR TIMESTAMP AS OF in cross-catalog join with Postgres: what Postgres sees, cross-catalog consistency semantics, mitigation options)
+
+Score: **4.88** — PASS
+
+Correctly states: FOR TIMESTAMP AS OF pins Iceberg side to snapshot at planning time (snapshot isolation guarantee); Postgres reads current live data under READ COMMITTED (no cross-catalog snapshot coordination); both failure modes explained (vanished deletes, updated row values showing current state); three mitigation options with clear tradeoffs (materialize Postgres into Iceberg for full consistency; nightly materialized join results for reproducible reports; 15-minute lag as partial workaround correctly caveated). Front-loaded "expected behavior, not a bug."
+
+Minor nits: labels FOR SYSTEM_TIME AS OF as "Trino syntax" (Trino canonical is FOR TIMESTAMP AS OF); doesn't mention FOR VERSION AS OF (deterministic snapshot pinning); Postgres MVCC nuance (multiple JDBC fetches in one query can see different Postgres states).
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.428 across 105 questions; new running avg (4.428 × 105 + 4.88) / 106 = (464.94 + 4.88) / 106 = **4.432 across 106 questions**. Status: NEEDS WORK (4.432 < 4.5 raised threshold). Gap narrowed from 0.072 → 0.068. Iter214 net effect: +0.006.
+
+Verified: trino.io/docs/current/connector/iceberg.html (FOR TIMESTAMP AS OF, snapshot isolation); trino.io/docs/current/connector/postgresql.html (JDBC behavior); postgresql.org/docs/current/transaction-iso.html (READ COMMITTED); starburst.io/blog/apache-iceberg-time-travel-rollbacks-in-trino/.
+
+---
+
+### Iter 215 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (OPA decision-log volume sizing: entries per query, row-filter multiplier, batched-uri distinction, 30-day retention estimate, enablement)
+
+Score: **4.71** — PASS
+
+Correctly states: OPA fires at analysis time only (not per worker/split); one SelectFromColumns per table; one RowFilters per table when row-filters-uri configured; batched-uri applies to filter-list SHOW ops not SELECTs; 24GB/30-day estimate at 100k queries/day for 2-table+row-filters (4 entries × 2KB × 100k/day × 30 days); decision_logs.console: true; opa.log-requests distinct from OPA decision_logs. Minor nits: "2+N" formula slightly ambiguous; ExecuteQuery join-key phrasing loose (key is queryId not decision_id).
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.432 across 106 questions; new running avg (4.432 × 106 + 4.71) / 107 = (469.792 + 4.71) / 107 = **4.435 across 107 questions**. Gap: 0.068 → 0.065.
+
+Verified: trino.io/docs/current/security/opa-access-control.html; openpolicyagent.org/docs/management-decision-logs; openpolicyagent.org/docs/configuration.
+
+---
+
+### Iter 215 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (three-source resilience: MySQL unavailable mid-query, immediate hard failure, FTE scope = worker failures only, no graceful degradation, CDC/batch/HA mitigations)
+
+Score: **4.88** — PASS
+
+Correctly states: JDBC source failure = immediate hard failure, no built-in retry; FTE covers worker failures only (not source unavailability); three-source joins all-or-nothing (no partial-result mode); LEFT JOIN does not help if source unavailable; mitigations: CDC to Iceberg, batch ingestion, HA MySQL read replica, app-level retry. Summary table clean. Minor nits: could cite Trino error string ("This connector does not support query retries"); JDBC socket-timeout and query.max-run-time as failure-speed levers.
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.435 across 107 questions; new running avg (4.435 × 107 + 4.88) / 108 = (474.545 + 4.88) / 108 = **4.439 across 108 questions**. Gap: 0.065 → 0.061. Iter215 net: +0.007.
+
+Verified: trino.io/docs/current/admin/fault-tolerant-execution.html; trino.io/docs/current/installation/query-resiliency.html; github.com/trinodb/trino/issues/10254 (JDBC + retry-policy); github.com/trinodb/trino/issues/4812 (MySQL); github.com/trinodb/trino/issues/4813 (Postgres).
+
+---
+
+### Iter 216 Q1 — 2026-05-26 (EXTENDED PHASE) — Postgres-to-Iceberg ingestion (Postgres CDC to Iceberg via Debezium: 6 prerequisites, three-tier pipeline, snapshot isolation, freshness, slot-first bootstrap)
+
+Score: **4.65** — PASS
+
+All 6 Postgres prerequisites correctly enumerated (wal_level=logical, publication, REPLICA IDENTITY FULL, replication slot, REPLICATION role, pg_hba.conf replication entry). Three-tier pipeline (Debezium→Kafka→Spark Structured Streaming MERGE INTO) with code. Snapshot isolation: Trino never sees partial updates. Slot-first bootstrap pattern correct (pg_export_snapshot REPEATABLE READ + snapshot.mode: no_data). Minor nits: internal inconsistency between "5-30 min" headline and "15-second" worked example; no Debezium heartbeat (heartbeat.interval.ms) for low-traffic WAL bloat; "What CDC doesn't solve" thin.
+
+**Topics updated**: Postgres-to-Iceberg ingestion — prior avg 4.472 across 98 questions; new running avg (4.472 × 98 + 4.65) / 99 = **4.474 across 99 questions**. Status: PASSED.
+
+**NOTE**: Neither iter216 question targeted the Trino federation topic (NEEDS WORK 4.439/108). Iter217 must target federation specifically.
+
+Verified: debezium.io/documentation/reference/stable/connectors/postgresql.html; postgresql.org/docs/current/logical-replication-architecture.html; iceberg.apache.org/docs/1.5.1/spark-structured-streaming.
+
+---
+
+### Iter 216 Q2 — 2026-05-26 (EXTENDED PHASE) — Iceberg table maintenance (expire_snapshots: what gets deleted, file safety invariant, history.expire.* properties, Trino 7-day floor, maintenance order)
+
+Score: **4.80** — PASS
+
+Correctly states: expire_snapshots removes snapshot metadata + unreferenced data files (physically deleted via S3 DELETE calls); files safe to delete only if no live snapshot references them; history.expire.max-snapshot-age-ms and history.expire.min-snapshots-to-keep as durable table-property floor; Trino iceberg.expire-snapshots.min-retention = 7-day hard minimum (Spark workaround for tighter retention); maintenance order = compaction→expire_snapshots→remove_orphan_files; SHOW TBLPROPERTIES + $snapshots diagnostic queries; 7/30/90 day retention recommendations by use case. Minor nits: lead sentence slightly understates ("metadata, not data files directly" before recovering); doesn't mention min-snapshots-to-keep overrides max-snapshot-age-ms.
+
+**Topics updated**: Iceberg table maintenance — prior avg 4.602 across 14 questions; new running avg (4.602 × 14 + 4.80) / 15 = **4.615 across 15 questions**. Status: PASSED.
+
+Verified: iceberg.apache.org/docs/1.5.1/maintenance; iceberg.apache.org/docs/latest/spark-procedures; trino.io/docs/current/connector/iceberg.html; tabular.io/apache-iceberg-cookbook/data-operations-snapshot-expiration.
+
+---
+
+### Iter 217 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (EXPLAIN ANALYZE three-source plan reading: Fragment structure, broadcast join notation, dynamicFilterSplitsProcessed, per-Fragment Wall time, bottleneck diagnosis)
+
+Score: **4.55** — PASS
+
+Correctly explains: TYPE DISTRIBUTED vs EXPLAIN ANALYZE distinction (free plan-only vs full re-execution); Fragment structure ([SOURCE] / [SINGLE] / intermediate); Exchange[type=REPLICATE] as broadcast join marker on small side, Exchange[type=REPARTITION] as partitioned join; dynamicFilterSplitsProcessed on probe side (not build side); Physical Input bytes + CPU/Scheduled/Blocked timing fields to diagnose I/O vs compute bottleneck; constraint = ... field as predicate pushdown verification; concrete three-source worked example where MySQL missing constraint is the killer.
+
+Minor nits: constraint = (...) notation simplified vs real Trino multi-line output; dynamicFilterSplitsProcessed "185/200 splits skipped" format invented (real metric is single integer count); JDBC probe-side DF behavior (IN-list push to WHERE, not split pruning) not covered; dynamic-filtering.wait-timeout not mentioned as a tuning lever.
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.439 across 108 questions; new running avg (4.439 × 108 + 4.55) / 109 = (479.412 + 4.55) / 109 = **4.440 across 109 questions**. Gap: 0.061 → 0.060.
+
+Verified: trino.io/docs/current/sql/explain-analyze.html; trino.io/docs/current/admin/dynamic-filtering.html; trinodb/trino PR #3217 (dynamicFilterSplitsProcessed as single integer in OperatorStats).
+
+---
+
+### Iter 217 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (JDBC connection pooling: OSS Trino has no native pool, one split = one connection model, PgBouncer transaction mode + prepareThreshold=0, resource groups, statement_timeout)
+
+Score: **4.85** — PASS
+
+Correctly states: OSS Trino 467 has NO native JDBC connection pool (trinodb/trino#15888, connection-pool.* properties are Starburst Enterprise only); one split = one connection model (NOT one per worker); four-layer solution: (1) PgBouncer transaction-pooling mode with prepareThreshold=0 required (server-side prepared statements break across backend connections), (2) Postgres role CONNECTION LIMIT, (3) Trino resource groups hardConcurrencyLimit, (4) statement_timeout; diagnostic error-message-to-layer mapping table; correctly-sized worked example; anti-patterns list. Runnable configs for all four layers.
+
+Minor nits: "one split per non-partitioned table" stated without qualifier (partitioned Postgres tables via partition hints can produce multiple splits); no mention of PgBouncer 1.21+ native prepared-statement support in transaction mode; no live Postgres diagnostic queries (pg_stat_activity by state); no PgBouncer SHOW POOLS observability path.
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.440 across 109 questions; new running avg (4.440 × 109 + 4.85) / 110 = (483.96 + 4.85) / 110 = **4.444 across 110 questions**. Gap: 0.060 → 0.056. Iter217 net effect: +0.005.
+
+Verified: trino.io/docs/current/connector/postgresql.html; github.com/trinodb/trino/issues/15888 (still open May 2026); pgbouncer.org/config.html (transaction pooling, prepareThreshold); pgjdbc.github.io (prepareThreshold JDBC parameter); pganalyze.com/blog/5mins-postgres-pgbouncer-prepared-statements-transaction-mode (PgBouncer 1.21+ native prepared-statement support).
+
+---
+
+### Iter 218 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (cross-catalog VIEW + OPA: two-check model, SECURITY DEFINER vs INVOKER, row-filter identity, WHERE pushdown through views)
+
+Score: **4.70** — PASS
+
+Correctly explains: two-check OPA model for views (Check 1: caller identity on view object; Check 2: view owner identity on base tables); SECURITY DEFINER is Trino's default; row-filter policies on base tables fire under view owner's identity under DEFINER, NOT the caller — critical security gap; WHERE clause from outer query does push down through views (planner combines outer WHERE + OPA-injected filters before pushing to Postgres); two remediation options: attach row filter to view object (fires in Check 1 under caller identity) or switch to SECURITY INVOKER; OPA decision log verification guidance (SelectFromColumns, GetRowFilters entries, identity field per call).
+
+Minor nits: slight hedge on GetRowFilters operation name (it is canonical, no hedge needed); omits AccessCatalog pre-check entries that may appear in decision-log greps; "LIKE never pushes down" framing slightly outdated (LIKE pushdown added in Trino 365).
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.444 across 110 questions; new running avg (4.444 × 110 + 4.70) / 111 = (488.84 + 4.70) / 111 = **4.447 across 111 questions**. Gap: 0.056 → 0.053.
+
+Verified: trino.io/docs/current/sql/create-view.html (SECURITY DEFINER default, INVOKER option); trino.io/docs/current/security/opa-access-control.html (view check model, SelectFromColumns); trino.io/docs/current/connector/postgresql.html (WHERE pushdown through views).
+
+---
+
+### Iter 218 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (predicate pushdown verification: constraint notation, ScanFilterProject failure signal, supported/unsupported predicate types, Postgres slow log, CAST trap)
+
+Score: **4.80** — PASS
+
+Correctly explains: `constraint on [columns]` block under TableScan = pushdown succeeded; `ScanFilterProject` or `Filter` node ABOVE TableScan = pushdown failed (vertical position in plan tree is the key signal); `Filtered: XX%` in EXPLAIN ANALYZE as direct runtime confirmation; Postgres `log_min_duration_statement=0` as ground-truth verification; supported predicates (UUID equality, timestamp ranges, IN lists, IS NULL); unsupported predicates: LIKE/string-range (collation safety, experimental flag `postgresql.experimental.enable-string-pushdown-with-collate`), function calls on column (LOWER, CAST — including the CAST trap where CAST(id AS VARCHAR) pulls full table); four workaround options (rewrite, selective-predicate first, experimental flag, ingest to Iceberg).
+
+Minor nits: Filtered: back-calculation example slight imprecision; ILIKE/LIKE modern support (LIKE pushdown added ~Trino 365) overly conservative; no mention of dynamic filtering as runtime-pushdown layer.
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.447 across 111 questions; new running avg (4.447 × 111 + 4.80) / 112 = (493.617 + 4.80) / 112 = **4.449 across 112 questions**. Gap: 0.053 → 0.051. Iter218 net effect: +0.005.
+
+Verified: trino.io/docs/current/connector/postgresql.html (constraint notation, pushdown support table); trino.io/docs/current/optimizer/pushdown.html; trino.io/docs/current/sql/explain-analyze.html; github.com/trinodb/trino/pull/9746 (string range pushdown with collate); github.com/trinodb/trino/pull/11045 (LIKE pushdown JDBC); trino.io/docs/current/release/release-365.html.
+
+---
+
+### Iter 219 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (MySQL connector config vs PostgreSQL: catalog properties, predicate pushdown differences, timezone gotchas)
+
+Score: **3.05** — FAIL
+
+Root cause: resources/22-trino-federation-postgresql.md is PostgreSQL-focused only. The responder generalized Postgres pushdown rules to MySQL by analogy, producing three critical factual errors:
+
+1. **MySQL LIKE-prefix pushdown wrong**: Answer claims `LIKE 'prefix%'` pushes down to MySQL. Per Trino MySQL connector docs, MySQL pushes down NO predicates on textual (CHAR/VARCHAR) columns — not LIKE-prefix, not even equality on VARCHAR. This is the exact MySQL-vs-Postgres difference the engineer asked about.
+
+2. **`mysql.experimental.enable-string-pushdown-with-collate` does not exist**: This flag is PostgreSQL-only. Putting it in billing_mysql.properties will fail coordinator startup.
+
+3. **MySQL DATETIME/TIMESTAMP mapping wrong**: Answer claims both map to Trino `TIMESTAMP`. Actually MySQL `DATETIME(n)` → Trino `TIMESTAMP(n)` and MySQL `TIMESTAMP(n)` → Trino `TIMESTAMP(n) WITH TIME ZONE`. The connector also mirrors JVM timezone to MySQL session — not mentioned.
+
+**Required fix**: Teacher must add a MySQL connector section to resources/ with MySQL-specific pushdown rules (very different from Postgres), correct data type mappings, and timezone behavior (JVM timezone mirroring). Without this resource, any future MySQL question will fail.
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.449 across 112 questions; new running avg (4.449 × 112 + 3.05) / 113 = (498.288 + 3.05) / 113 = **4.437 across 113 questions**. Status: NEEDS WORK. Gap increased from 0.051 → 0.063.
+
+Verified: trino.io/docs/current/connector/mysql.html (CHAR/VARCHAR = no predicate pushdown, TIMESTAMP WITH TIME ZONE mapping, JVM timezone mirroring); github.com/trinodb/trino/pull/9746 (PostgreSQL-only string range flag).
+
+---
+
+### Iter 219 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (when to federate vs ingest: 5 concrete signals, EXPLAIN ANALYZE, connection exhaustion, freshness tradeoff, migration checklist)
+
+Score: **4.80** — PASS
+
+Correctly provides 5 concrete signals: (1) Postgres replica CPU >70%, (2) query latency exceeds SLO, (3) EXPLAIN ANALYZE Physical Input / Filtered% showing full table scan despite WHERE clause, (4) federation queries >20% of total query volume, (5) freshness requirement loosened to >15 min. Correctly distinguishes federation bottleneck from connection exhaustion (separate fix: PgBouncer). Correctly explains freshness tradeoff (federation = real-time, Iceberg = batch). Iceberg partition spec `(day(created_at), bucket(tenant_id, N))` is valid. Migration checklist actionable. Closing recommendation matches question specifics.
+
+Minor nits: 20% query volume threshold invented (not from resources/docs); `iceberg.analytics.query_audit_log` SQL presented without caveat that it requires event-listener setup; misses dynamic filtering and PostgreSQL metadata caching as cheap pre-ingestion levers; hybrid pattern operational cost not detailed.
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.437 across 113 questions; new running avg (4.437 × 113 + 4.80) / 114 = (501.381 + 4.80) / 114 = **4.440 across 114 questions**. Status: NEEDS WORK. Gap: 0.063 → 0.060. Iter219 net effect: −0.009 (Q1 regression larger than Q2 recovery).
+
+Verified: trino.io/docs/current/connector/postgresql.html; trino.io/docs/current/sql/explain-analyze.html; github.com/trinodb/trino/issues/15888 (no OSS connection pool); trino.io/docs/current/optimizer/pushdown.html.
+
+---
+
+### Iter 220 Q1 — 2026-05-26 (EXTENDED PHASE) — Trino federation (MySQL connector predicate pushdown: VARCHAR never pushes, DATE/timestamp pushes, no mysql.experimental flag, EXPLAIN verification, workaround pattern)
+
+Score: **4.85** — PASS
+
+Clean recovery from iter219 Q1 (3.05 FAIL). MySQL resource section added to resources/ between iterations; responder now correctly states: VARCHAR pushdown is NEVER supported on MySQL connector (equality, LIKE, IN, range — all stay in Trino); DATE/timestamp range predicates DO push down; no `mysql.experimental.enable-string-pushdown-with-collate` property exists for MySQL (PostgreSQL-only); EXPLAIN plan reading (constraint under TableScan = pushed, Filter above = not pushed); EXPLAIN ANALYZE `Filtered:` field as runtime confirmation; workaround: pair non-pushing VARCHAR with a pushing DATE predicate to reduce rows MySQL ships; long-term: ingest into Iceberg for VARCHAR equality at scale.
+
+Minor nits: IS NULL/IS NOT NULL on VARCHAR grouped with "pushing" without qualifier; no mention of EXPLAIN (TYPE IO); aggregate pushdown (COUNT) still works even with non-pushing VARCHAR; domain_compaction_threshold for large IN-lists not mentioned.
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.440 across 114 questions; new running avg (4.440 × 114 + 4.85) / 115 = (505.56 + 4.85) / 115 = **4.444 across 115 questions**. Gap: 0.060 → 0.056.
+
+Verified: trino.io/docs/current/connector/mysql.html (CHAR/VARCHAR = no predicate pushdown confirmed; DATE, INT, TIMESTAMP pushdown confirmed; no string-collate flag for MySQL).
+
+---
+
+### Iter 220 Q2 — 2026-05-26 (EXTENDED PHASE) — Trino federation (OPA row-filter verification: GetRowFilters op, decision log input/output shape, filter injected as WHERE before Postgres pushdown, three-step forensics, data-leak diagnosis)
+
+Score: **4.80** — PASS
+
+Correctly explains: `GetRowFilters` is the canonical OPA operation name for row-filter checks; OPA fires at query analysis time before any data reads; decision log input includes table resource, user identity, queryId; result shape `[{"expression": "tenant_id = 'acme'"}]` is the correct format; empty result `[]` means no filter applied (policy bug, not silent success); filter injected as WHERE clause participates in Postgres predicate pushdown — NOT fetched in Trino memory; three-step forensics (decision log → pg_stat_activity → EXPLAIN ANALYZE); diagnosis table (OPA result × Postgres evidence → conclusion); `row-filters-uri` separate from `opa.policy.uri`; `decision_logs.console: true` to enable; one `GetRowFilters` entry per table per query.
+
+Minor nits: EXPLAIN output example is stylized rather than exact Trino 467 format; no mention of `opa.policy.batch-row-filters-uri`; optional `identity` override field on result object not mentioned; vague on which expression types push to Postgres vs stay in Trino.
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.444 across 115 questions; new running avg (4.444 × 115 + 4.80) / 116 = (511.06 + 4.80) / 116 = **4.447 across 116 questions**. Gap: 0.056 → 0.053. Iter220 net effect: +0.007.
+
+Verified: trino.io/docs/current/security/opa-access-control.html (GetRowFilters operation, row-filters-uri separate from policy.uri, result shape); openpolicyagent.org/docs/management-decision-logs (decision_logs.console: true); trino.io/docs/current/connector/postgresql.html (pushdown).
+
+---
+
+### Iter 221 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (MySQL DATETIME timezone cross-catalog join: DATETIME vs TIMESTAMP WITH TIME ZONE, JVM timezone mirroring, off-by-N-hour bug)
+
+Score: **4.55** — PASS
+
+Correctly identifies MySQL `DATETIME(n)` → Trino `TIMESTAMP(n)` naive; MySQL `TIMESTAMP(n)` → Trino `TIMESTAMP(n) WITH TIME ZONE`. JVM timezone mirroring described accurately (Trino sets MySQL session TZ equal to JVM TZ; DATETIME wall-clock returned unchanged). Off-by-N-hour cross-catalog join mismatch root cause is correct: comparing naive TIMESTAMP against TIMESTAMP WITH TIME ZONE without explicit reconciliation. Fix using `AT TIME ZONE 'UTC'` is the right explicit approach. Production-fit: production stack is Trino 467 + MySQL/Postgres.
+
+Minor nits: CAST(naive TIMESTAMP AS TIMESTAMP WITH TIME ZONE) stated as "assumes UTC" — actually uses **session timezone** (`current_timezone()`), not unconditionally UTC. Minor but real factual slip. Answer doesn't mention that changing Trino JVM timezone will NOT fix this join mismatch (fix is in SQL, not JVM config). No mention of `with_timezone(ts, 'UTC')` as function-form alternative. No EXPLAIN coverage for verifying post-fix join predicate.
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.447 across 116 questions; new running avg (4.447 × 116 + 4.55) / 117 = (515.852 + 4.55) / 117 = **4.449 across 117 questions**. Gap: 0.053 → 0.051.
+
+Verified: trino.io/docs/current/connector/mysql.html (DATETIME → TIMESTAMP naive; TIMESTAMP → TIMESTAMP WITH TIME ZONE; JVM timezone mirroring); trino.io/docs/current/functions/datetime.html (AT TIME ZONE semantics on naive TIMESTAMP); CAST from naive uses session TZ (not UTC).
+
+---
+
+### Iter 221 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (COUNT pushdown with mixed WHERE on MySQL: VARCHAR doesn't push, DATE pushes, does COUNT push when VARCHAR filter exists?)
+
+Score: **4.80** — PASS
+
+Correctly explains the crux: aggregate pushdown (COUNT) is a separate mechanism from predicate pushdown, but COUNT can only push when aggregation is direct above TableScan — which requires all WHERE predicates to also push. Since `status` (VARCHAR) doesn't push on MySQL, a residual Filter sits above TableScan, blocking COUNT. MySQL ships date-filtered rows over JDBC → Trino filters `status` in memory → Trino counts. This directly answers the user's confusion. Execution flow 4-step breakdown is accurate. EXPLAIN reading guidance correct (ScanFilterProject/Filter above TableScan = not pushed; constraint inside TableScan = pushed; EXPLAIN ANALYZE `Filtered:` field for runtime confirmation). Practical fixes: narrow date range, numeric status_code workaround, long-term Iceberg ingest.
+
+Minor nits: Postgres "since 365" version pin for VARCHAR pushdown is unverified (equality pushes by default; range requires experimental flag). No mention of `domain_compaction_threshold` for large IN-list dates. No contrast with "pure COUNT no WHERE" to drive home the "all predicates must push" rule. EXPLAIN ANALYZE output sample is synthetic.
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.449 across 117 questions; new running avg (4.449 × 117 + 4.80) / 118 = (520.533 + 4.80) / 118 = **4.451 across 118 questions**. Gap: 0.051 → 0.049. Iter221 net effect: +0.004.
+
+Verified: trino.io/docs/current/connector/mysql.html (VARCHAR no pushdown, aggregate pushdown supported); trino.io/docs/current/optimizer/pushdown.html; GitHub PR #6667 and issues #4111/#4112 (JDBC aggregate pushdown blocked by residual Filter above TableScan); GitHub issue #6746 (VARCHAR disabled intentionally on MySQL).
+
+---
+
+### Iter 222 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (cross-catalog join pushdown limits: join never pushes, dynamic filtering from Iceberg build side to MySQL, EXPLAIN ANALYZE verification)
+
+Score: **4.30** — PASS (individual threshold 3.5)
+
+Cross-catalog join never pushes to MySQL (correct). Dynamic filtering mechanism (build Iceberg, materialize IDs, push IN-list to MySQL) correct and clear. `dynamicFilterSplitsProcessed` integer stat real and verified (PR #3217). `dynamicFilters = {customer_id = #df_...}` annotation in EXPLAIN correct. `ANALYZE iceberg.analytics.customers WITH (columns = ARRAY['customer_id'])` valid syntax. `join_distribution_type = 'BROADCAST'` valid session property. VARCHAR IN-list non-pushdown on MySQL correct. Practical recs fit production stack.
+
+Three verified errors deducted: (1) `dynamic-filtering.wait-timeout` stated as 1s default — actual is **20s** per MySQL connector docs. (2) `dynamic-filtering.small-join.estimated-size-in-bytes` is a fabricated property — real properties are `dynamic-filtering.small.max-distinct-values-per-driver`, `dynamic-filtering.small.max-size-per-driver`, `dynamic-filtering.small.range-row-limit-per-driver` (and `small-partitioned.*` variants). (3) "`Filtered: X%`" is not a real EXPLAIN ANALYZE field — should compare Input/Output rows on ScanFilterProject. Missing: catalog session property form (`SET SESSION iceberg.dynamic_filtering_wait_timeout = '5s'`).
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.451 across 118 questions; new running avg (4.451 × 118 + 4.30) / 119 = (525.218 + 4.30) / 119 = **4.450 across 119 questions**. Gap: 0.049 → 0.050.
+
+Verified: trino.io/docs/current/connector/mysql.html (dynamic-filtering.wait-timeout default 20s); trino.io/docs/current/admin/dynamic-filtering.html (real property names); github.com/trinodb/trino/pull/3217 (dynamicFilterSplitsProcessed real stat).
+
+---
+
+### Iter 222 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (federation monitoring: system.runtime.queries/tasks, HTTP event listener, MySQL SHOW PROCESSLIST, pg_stat_activity, PgBouncer SHOW POOLS, resource groups)
+
+Score: **4.70** — PASS
+
+Strong answer with all core claims verified: `system.runtime.queries` column names correct ("user" must be quoted); HTTP event listener properties exact (connect-ingest-uri, log-completed, log-created, event-listener.config-files in config.properties); `CALL system.runtime.kill_query(query_id => '...')` valid; OSS Trino 467 has no connection-pool.* properties (Starburst-only) — the rationale for four-layer defense is sound; MySQL `SHOW FULL PROCESSLIST` + Postgres `pg_stat_activity` columns accurate; PgBouncer `SHOW POOLS`/`SHOW CLIENTS` valid; PostgreSQL `statement_timeout = '300000'` = 5 min correct (milliseconds); resource group `source` selector field correct.
+
+Minor nits: Trino UI path `/ui/queries` incorrect (root is `/ui/`). PgBouncer uses `cl_waiting` column, not "waiting_clients". `system.runtime.tasks` column names not enumerated in official docs — should recommend `DESCRIBE`. No `kill_query` message parameter. No `idle_in_transaction_session_timeout`.
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.450 across 119 questions; new running avg (4.450 × 119 + 4.70) / 120 = (529.550 + 4.70) / 120 = **4.452 across 120 questions**. Gap: 0.050 → 0.048. Iter222 net effect: +0.001.
+
+Verified: trino.io/docs/current/connector/system.html (system.runtime.queries columns); trino.io/docs/current/admin/event-listeners-http.html (HTTP listener properties); trino.io/docs/current/admin/resource-groups.html (source selector field); pgbouncer.org/usage.html (SHOW POOLS cl_waiting column); trino.io/docs/current/admin/web-interface.html (UI root /ui/).
+
+---
+
+### Iter 223 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (dynamic filtering not firing: diagnosis via EXPLAIN, four root causes, real DF property names, catalog-prefixed session properties)
+
+Score: **4.80** — PASS
+
+Excellent recovery from iter222 Q1 (4.30). The iter222 resource fixes held: (1) `dynamic-filtering.wait-timeout` default correctly stated as 20s for JDBC connectors; (2) fabricated property replaced with real names (`dynamic-filtering.small.max-distinct-values-per-driver`, `max-size-per-driver`, `range-row-limit-per-driver`, explicitly warns away from the fabricated one); (3) catalog-prefixed session property form `SET SESSION iceberg.dynamic_filtering_wait_timeout = '30s'` correctly used. All four DF failure reasons accurate (size thresholds, wait-timeout, wrong join orientation, VARCHAR keys). `dynamicFilterSplitsProcessed` as real integer stat verified. VARCHAR pushdown limitation on MySQL correct.
+
+Minor nits: `dynamicFilters` annotation format simplified from real format `{col_name = #df_NNN}`; wait-timeout labeled as "build side property" but for MySQL-as-probe the relevant tunable is `billing_mysql.dynamic_filtering_wait_timeout`; doesn't mention that exceeding small thresholds degrades to min/max range filter (BETWEEN), not total DF failure.
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.452 across 120 questions; new running avg (4.452 × 120 + 4.80) / 121 = (534.240 + 4.80) / 121 = **4.455 across 121 questions**. Gap: 0.048 → 0.045.
+
+Verified: trino.io/docs/current/admin/dynamic-filtering.html (real property names: small.max-distinct-values-per-driver, max-size-per-driver, range-row-limit-per-driver; wait-timeout default 20s for JDBC); trino.io/docs/current/connector/mysql.html (VARCHAR no pushdown); PR #3217 (dynamicFilterSplitsProcessed real stat).
+
+---
+
+### Iter 223 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (per-split JDBC connection model: why Trino opens multiple MySQL connections, how to control)
+
+Score: **3.85** — PASS (individual threshold 3.5)
+
+**Critical fabricated properties**: `partition-column` and `partition-count` — stated as MySQL connector catalog properties that control partitioned splits. Verified against trino.io/docs/current/connector/mysql.html: **these properties do not exist for the MySQL connector in OSS Trino 467**. The Oracle connector has parallel-read partitioning; MySQL does not. A user who copies the suggested catalog block `partition-column=created_date` will see a config error or no effect; the troubleshooting step "remove partition-column to reduce connections" is misdirection. The connection-multiplier formula was also overstated because it included this fabricated factor.
+
+Verified correct: per-split = per-connection for single-split MySQL table scans (1 unpartitioned table = 1 connection); OSS Trino 467 has no `connection-pool.*` properties for MySQL (Starburst Enterprise only); ProxySQL ports (6032 admin, 6033 query); `ALTER USER ... WITH MAX_USER_CONNECTIONS` valid MySQL syntax; `max_execution_time` real MySQL server variable (milliseconds, MySQL 5.7.8+); `SHOW FULL PROCESSLIST` and `INFORMATION_SCHEMA.PROCESSLIST` valid; resource group `source` selector as Java regex + `hardConcurrencyLimit`; `X-Trino-Source` client requirement; Iceberg ingest as long-term recommendation.
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.455 across 121 questions; new running avg (4.455 × 121 + 3.85) / 122 = (539.055 + 3.85) / 122 = **4.450 across 122 questions**. Gap: 0.045 → 0.050. Iter223 net effect: +0.000 (Q2 regression wiped Q1 gains).
+
+Verified: trino.io/docs/current/connector/mysql.html (no partition-column/partition-count for MySQL connector; GitHub issue #389 confirms this is an open unresolved request); trino.io/docs/current/admin/resource-groups.html (source selector, hardConcurrencyLimit); proxysql.com (ports 6032/6033); dev.mysql.com (MAX_USER_CONNECTIONS, max_execution_time).
+
+---
+
+### Iter 224 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (AT TIME ZONE vs CAST for MySQL DATETIME in cross-catalog join with Postgres TIMESTAMPTZ)
+
+Score: **4.80** — PASS
+
+All major technical claims verified correct: MySQL DATETIME(n) → Trino TIMESTAMP(n) naive; MySQL TIMESTAMP(n) → TIMESTAMP(n) WITH TIME ZONE; Postgres TIMESTAMPTZ → TIMESTAMP WITH TIME ZONE; CAST(naive → TWTZ) uses session timezone (not unconditionally UTC); AT TIME ZONE explicitly attaches UTC regardless of session TZ; with_timezone(ts, 'UTC') as function-form equivalent; MySQL JDBC session TZ mirrored to JVM TZ. Practical verification query (SELECT current_timezone()) and before-production validation pattern included.
+
+Minor nit: conflates AT TIME ZONE and with_timezone for naive TIMESTAMP — for a naive TIMESTAMP, `AT TIME ZONE 'UTC'` first lifts using session TZ then interprets as UTC, while `with_timezone` directly assigns UTC without session TZ involvement; the distinction is subtle but with_timezone is strictly more session-independent. Answer doesn't explicitly state "changing JVM TZ won't fix the join mismatch."
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.450 across 122 questions; new running avg (4.450 × 122 + 4.80) / 123 = (542.90 + 4.80) / 123 = **4.453 across 123 questions**. Gap: 0.050 → 0.047.
+
+Verified: trino.io/docs/current/connector/mysql.html (DATETIME→TIMESTAMP naive; TIMESTAMP→TWTZ; JVM TZ mirroring); trino.io/docs/current/functions/datetime.html (AT TIME ZONE semantics; with_timezone); CAST uses current_timezone() not UTC (per PR #18470 / Trino issue #13157).
+
+---
+
+### Iter 224 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (cross-catalog CTAS MySQL→Iceberg: execution steps, atomic commit, failure handling, partitioning, incremental loads)
+
+Score: **4.20** — PASS (individual threshold 3.5)
+
+Core model correct: cross-catalog CTAS works; data flows MySQL→Trino→MinIO (not direct MySQL→MinIO); atomic metadata commit on success; failure leaves orphaned Parquet files; DROP TABLE + remove_orphan_files for cleanup; `WITH (partitioning = ARRAY['day(invoice_date)'], format = 'PARQUET')` syntax valid; `$partitions` metadata table quoting correct; JDBC connection held open for full duration; INSERT INTO watermark pattern correct.
+
+**Critical fabricated procedure signature**: `CALL iceberg.system.remove_orphan_files(schema_name => ..., table_name => ..., older_than => ...)` — wrong parameter names. The actual Trino signature is `CALL iceberg.system.remove_orphan_files(table => 'schema.table', retention_threshold => 'duration')`. The `schema_name`/`table_name`/`older_than` names are from Spark Iceberg, not Trino. An engineer running the snippet gets a procedure-arguments error.
+
+Also: "HMS registers empty table at query start" framing is slightly misleading for Iceberg (HMS pointer write IS the commit, not a separate step); 7-day min-retention floor on `remove_orphan_files` not mentioned; "connection drop → no data reaches MinIO" conflicts with orphan file cleanup section.
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.453 across 123 questions; new running avg (4.453 × 123 + 4.20) / 124 = (547.719 + 4.20) / 124 = **4.451 across 124 questions**. Gap: 0.047 → 0.049. Iter224 net effect: +0.001.
+
+Verified: trino.io/docs/current/connector/iceberg.html (CTAS syntax, remove_orphan_files actual signature with `table` and `retention_threshold` parameters, 7d min-retention floor); iceberg.apache.org/docs/latest/maintenance/ (orphan file semantics); GitHub issue #14798 (Iceberg CTAS failure cleanup behavior).
+
+---
+
+### Iter 225 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (OPA row-filter + cross-catalog views: two-check model, SECURITY DEFINER, privilege escalation risk, remediation)
+
+Score: **4.85** — PASS (above raised 4.5 threshold)
+
+Excellent answer. All load-bearing claims verified: SECURITY DEFINER is Trino's default view mode; two-check model (caller identity for view-level, view owner identity for base-table OPA checks) is correct; `GetRowFilters` is the exact operation name in Trino's OPA plugin; OPA fires GetRowFilters against billing_mysql even when accessed through an iceberg view; result shape `[{"expression": "..."}]` or `[]` correct; SECURITY INVOKER supported since Trino 301; privilege-escalation framing is pedagogically sound; all three remediation options technically correct (Option 1: filter on view object = standard recommendation).
+
+Minor completeness gaps: no mention of optional `identity` field in row-filter responses; no mention of `current_user` returning invoker identity even in DEFINER mode (useful fourth remediation pattern); no `GetColumnMask` cross-reference.
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.451 across 124 questions; new running avg (4.451 × 124 + 4.85) / 125 = (551.924 + 4.85) / 125 = **4.454 across 125 questions**. Gap: 0.049 → 0.046.
+
+Verified: trino.io/docs/current/sql/create-view.html (SECURITY DEFINER default, INVOKER supported since 301); trino.io/docs/current/security/opa-access-control.html (GetRowFilters operation, row-filters-uri, result shape); Trino OPA plugin source OpaHighLevelClient.java (literal operation name strings).
+
+---
+
+### Iter 225 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (MySQL metadata cache: metadata.cache-ttl, flush_metadata_cache(), parameterless vs named params warning)
+
+Score: **4.85** — PASS (above raised 4.5 threshold)
+
+Strong answer. All load-bearing claims verified: `metadata.cache-ttl` default `0s` for MySQL connector; `metadata.cache-missing` default `false`; `CALL billing_mysql.system.flush_metadata_cache()` is the correct procedure and IS parameterless on JDBC connectors (MySQL, PostgreSQL); CRITICAL warning against using named params (schema_name, table_name) is accurate — those exist only on Hive/Delta connectors and fail on JDBC; Trino views freeze column list at CREATE time; `CREATE OR REPLACE VIEW` valid Trino SQL; `metadata.cache-missing=true` best practice reasonable.
+
+Minor completeness gaps only: `metadata.cache-maximum-size` default 10000 not mentioned; per-domain sub-TTL knobs (metadata.schemas.cache-ttl, metadata.tables.cache-ttl) not mentioned; no OPA authorization callout for system-procedure calls.
+
+**Topics updated**: Trino federation / cross-source connectors — prior avg 4.454 across 125 questions; new running avg (4.454 × 125 + 4.85) / 126 = (556.750 + 4.85) / 126 = **4.457 across 126 questions**. Gap: 0.046 → 0.043. Iter225 net effect: +0.007.
+
+Verified: trino.io/docs/current/connector/mysql.html (metadata.cache-ttl default 0s, metadata.cache-missing default false, flush_metadata_cache parameterless); trino.io/docs/current/connector/hive.html (Hive has named-param flush); trino.io/docs/current/sql/create-view.html (column list frozen at create time).
+
+---
+
+### Iter 226 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation + CBO (cross-catalog join build/probe orientation, CBO statistics, ANALYZE for Iceberg vs MySQL JDBC)
+
+Score: **4.75** — PASS (above raised 4.5 threshold for both Trino federation and Trino CBO topics)
+
+Solid answer. All major CBO/NDV/ANALYZE/Puffin claims verified correct: Iceberg ANALYZE syntax (`ANALYZE <table> WITH (columns = ARRAY[...])`, no TABLE keyword) exactly right with explicit Spark-vs-Trino warning; Puffin as on-disk NDV format for Iceberg correct; MySQL JDBC connector reads column-level NDV from INFORMATION_SCHEMA.STATISTICS correct; native ANALYZE TABLE on MySQL side (not Trino-side ANALYZE) correctly advised; SHOW STATS FOR with correct `distinct_values_count` column name; Join[BROADCAST] / Join[PARTITIONED] labels in EXPLAIN output correct; stats not auto-updated — re-ANALYZE needed.
+
+Notable gaps: (a) MySQL column-level NDV only populates when the column is the first column of some index — the key caveat that `distinct_values_count` may still be NULL after ANALYZE if the join key isn't indexed; MySQL 8.0 `ANALYZE TABLE t UPDATE HISTOGRAM ON col` workaround not mentioned. (b) `billing_mysql.public.invoices` uses `public` — a Postgres convention; MySQL uses the database name as schema. (c) No session-level `SET SESSION join_distribution_type = 'BROADCAST'` for an immediate workaround while stats are being fixed. (d) No mention of dynamic filtering (on by default, rescues bad-stats cases at runtime).
+
+**Topics updated**: Trino federation — prior avg 4.457 across 126 questions; (4.457 × 126 + 4.75) / 127 = **4.459 across 127 questions**. Trino CBO — prior avg 4.700 across 2 questions; (4.700 × 2 + 4.75) / 3 = **4.717 across 3 questions**.
+
+Verified: trino.io/docs/current/connector/iceberg.html (ANALYZE syntax, Puffin format); trino.io/docs/current/optimizer/statistics.html; trino.io/docs/current/sql/show-stats.html; trino.io/docs/current/sql/explain.html; trino.io/docs/current/optimizer/cost-based-optimizations.html; trino.io/docs/current/connector/mysql.html (INFORMATION_SCHEMA stats).
+
+---
+
+### Iter 226 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (MySQL write operations: INSERT/UPDATE/DELETE support, non-transactional semantics, MERGE via merge.non-transactional-merge.enabled)
+
+Score: **4.50** — PASS (exactly at raised 4.5 threshold)
+
+Strong answer for INSERT/UPDATE/DELETE coverage. Verified correct: INSERT/UPDATE/DELETE/CREATE TABLE/DROP TABLE all supported on MySQL JDBC connector; UPDATE limited to constant assignments (expression-based updates fail) — verified word-for-word from Trino docs; `insert.non-transactional-insert.enabled` property and default two-phase staging behavior correct; VARCHAR predicate pushdown limitation for MySQL DELETE is accurate ("connector does not support pushdown of any predicates on textual type columns"); non-atomicity of multi-row UPDATE/DELETE warning accurate and actionable; OPA may deny DML callout appropriate for production stack.
+
+Key defect: **MERGE claim is outdated/wrong.** The answer's summary table states MERGE is not supported on MySQL JDBC. Per Trino docs and PR #24428, MERGE IS supported on MySQL when `merge.non-transactional-merge.enabled=true`. An engineer following this answer would incorrectly dismiss MERGE as unavailable. Minor gaps: no CTAS mention; no symmetry caveat between MySQL and PostgreSQL connector capabilities.
+
+**Topics updated**: Trino federation — prior avg 4.459 across 127 questions; (4.459 × 127 + 4.50) / 128 = **4.460 across 128 questions**. Gap: 4.500 − 4.460 = 0.040.
+
+Verified: trino.io/docs/current/connector/mysql.html (INSERT/UPDATE/DELETE support, constant-only UPDATE, VARCHAR no pushdown, merge.non-transactional-merge.enabled, insert.non-transactional-insert.enabled).
+
+**Iter 226 average**: (4.75 + 4.50) / 2 = **4.625**
+
+---
+
+### Iter 227 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (MySQL SSL/TLS configuration: trustCertificateKeyStoreUrl, sslMode, keytool PEM→JKS workflow)
+
+Score: **3.40** — FAIL (below 3.5 base threshold and 4.5 raised threshold)
+
+Answer had three production-dangerous errors. Verified against MySQL Connector/J docs:
+1. `serverSslCertificate` is NOT a real MySQL Connector/J property (it exists in MariaDB Connector/J). Correct properties are `trustCertificateKeyStoreUrl` + `trustCertificateKeyStorePassword` pointing to a JKS/PKCS12 keystore. PEM CA cert must first be imported via `keytool -importcert`. Answer's config is silently ignored, leaving security team requirement unmet.
+2. `useSSL=true&requireSSL=true` deprecated in MySQL Connector/J 8.x and ignored when `sslMode` is set. Should use `sslMode=REQUIRED` / `VERIFY_CA` / `VERIFY_IDENTITY` only.
+3. `INFORMATION_SCHEMA.PROCESSLIST.SSL_TYPE` column does not exist. Verification query fails with ERROR 1054. Correct: `SHOW STATUS LIKE 'Ssl_cipher'` or `performance_schema.threads.CONNECTION_TYPE`.
+
+What was correct: JDBC-URL-based architecture (no catalog-level ssl props) verified; `sslMode=VERIFY_IDENTITY` semantics correct; two-tier encryption-only vs verify framing correct; CA cert on all workers correct; Kubernetes Secret/volumeMount example production-ready.
+
+**Topics updated**: Trino federation — prior avg 4.460 across 128 questions; (4.460 × 128 + 3.40) / 129 = **4.451 across 129 questions**. Gap increased: 0.040 → 0.049.
+
+Verified: trino.io/docs/current/connector/mysql.html; dev.mysql.com connector-j security props; dev.mysql.com connector-j server authentication (trustCertificateKeyStoreUrl); MySQL blog identifying insecure connections (Ssl_cipher, performance_schema).
+
+---
+
+### Iter 227 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (federated query timeout layering: Trino DF wait-timeout, MySQL max_execution_time, JDBC socketTimeout)
+
+Score: **3.10** — FAIL (below 3.5 base threshold and 4.5 raised threshold)
+
+Answer had two critical correctness errors:
+1. `socketTimeout` stated as seconds — it is MILLISECONDS in MySQL Connector/J (default 0). `socketTimeout=60` = 60ms, not 60 seconds. Correct value for 60s is `socketTimeout=60000`. Copy-pasting would immediately break production.
+2. Iceberg connector `dynamic_filtering_wait_timeout` default stated as 20s — it is 1 SECOND. Only JDBC-family connectors (MySQL, PostgreSQL) default to 20s. This is a recurring error (also seen iter164 Q2). The table should show: JDBC=20s, Iceberg/Hive/Delta=1s.
+
+Major completeness gap: answer's "three layers" omits Trino's own `query.max-execution-time` (default 100d) and session `query_max_execution_time` — the most common cause of "query was cancelled" for the user's exact symptom. Also missing: resource group cpuLimit/softCpuLimit, Trino Web UI diagnosis, EXPLAIN ANALYZE for stage-level timing, MySQL `wait_timeout`/`net_read_timeout`.
+
+What was correct: MySQL DF default 20s correct; SET SESSION billing_mysql.dynamic_filtering_wait_timeout syntax correct; MySQL max_execution_time default 0 in ms correct; symptom-triage table is useful; MySQL slow-query log debugging step is good.
+
+**Topics updated**: Trino federation — prior avg 4.451 across 129 questions; (4.451 × 129 + 3.10) / 130 = **4.441 across 130 questions**. Gap: 0.059.
+
+Verified: trino.io/docs/current/connector/mysql.html (DF default 20s for MySQL); trino.io/docs/current/connector/iceberg.html (DF default 1s for Iceberg); trino.io/docs/current/admin/properties-query-management.html (query.max-execution-time 100d); dev.mysql.com connector-j networking (socketTimeout in ms); MySQL server-side SELECT timeouts.
+
+**Iter 227 average**: (3.40 + 3.10) / 2 = **3.25** (FAIL — both answers had production-dangerous errors from resource inaccuracies)
+
+---
+
+### Iter 228 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (MERGE on MySQL via Trino: merge.non-transactional-merge.enabled, cross-catalog upsert from Iceberg, partial-write caveat)
+
+Score: **3.75** — FAIL (above 3.5 base threshold; below raised 4.5 topic threshold)
+
+Recovery from iter227 Q1 (3.40 FAIL). Architecture correct: MERGE on MySQL is supported, `merge.non-transactional-merge.enabled=true` catalog property name is correct, MERGE SQL syntax (WHEN MATCHED/WHEN NOT MATCHED) is correct per Trino docs, partial-write non-transactional semantics correctly described with concrete row counts, idempotency framing correct, OPA callout production-appropriate.
+
+Critical defect: **session property name wrong.** Answer writes `SET SESSION billing_mysql.non_transactional_merge = true`; actual Trino name is `SET SESSION billing_mysql.non_transactional_merge_enabled = true` (with `_enabled` suffix). An engineer running the snippet gets "session property does not exist" — they may incorrectly conclude MERGE isn't supported. The catalog-property form (`merge.non-transactional-merge.enabled=true`) is correct; the session-property form differs.
+
+Other gaps: no mention that MERGE source must be deduplicated on ON-clause key (multiple source matches fail); no mention that target table needs PRIMARY KEY/UNIQUE matching ON clause; no reconciliation/verification pattern.
+
+**Topics updated**: Trino federation — prior avg 4.440 across 131 questions; (4.440 × 131 + 3.75) / 132 = (581.640 + 3.75) / 132 = **4.435 across 132 questions**. Gap: 0.065.
+
+Verified: trino.io/docs/current/connector/mysql.html (non_transactional_merge_enabled session property); trino.io/docs/current/sql/merge.html (MERGE syntax).
+
+---
+
+### Iter 228 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (query.max-execution-time / query.max-run-time defaults, SET SESSION override, resource-groups two-file wiring, 7-layer timeout stack)
+
+Score: **4.40** — PASS (above 3.5 base threshold; just below raised 4.5 topic threshold)
+
+Major recovery from iter227 Q2 (3.10 FAIL). Answer correctly identifies `query.max-execution-time` as the proximate cause, gives correct default of 100d, provides correct `SET SESSION query_max_execution_time = '30m'` override syntax, correctly warns that these are system-scope (not catalog-scope) session properties, and addresses the "won't this hurt others" worry via the session-scope explanation and resource-groups recommendation. The two-file resource-groups wiring trap (`etc/resource-groups.properties` + `etc/resource-groups.json`) is correctly called out, addressing a historical resource bug. Dynamic filter wait-timeout correctly described as "does NOT kill the query, only stops waiting for filter."
+
+Defects:
+1. **Property naming**: `cpuLimit` should be `hardCpuLimit` (and `softCpuLimit` is correct as written). An engineer searching docs for `cpuLimit` finds nothing.
+2. **Property naming**: `query.client-timeout` should be `query.client.timeout` (dot, not hyphen, in the middle). 5m default is correct.
+3. **Conceptual conflation**: resource group CPU limits are time-period budgets that throttle concurrency — they don't directly cap query runtime the way `query.max-execution-time` does. Listing them as a "timeout layer" is slightly misleading.
+4. **Missing**: `query.max-planning-time` (10m default) — the third Trino query-time cap.
+5. **Missing**: no example `resource-groups.json` snippet showing `hardConcurrencyLimit` / `softMemoryLimit` / `maxQueued` JSON keys — engineer still has to look up wiring.
+6. **Missing**: no reminder that JDBC `socketTimeout`/`connectTimeout` for MySQL Connector/J are in MILLISECONDS (the exact pitfall that sank iter227 Q2 — a partial-mention without unit caveat is risky).
+7. Speculative "10–15 minutes is probably your cluster's value" without telling the engineer how to verify (`SHOW SESSION LIKE 'query_max%'` or inspect `etc/config.properties`).
+
+**Topics updated**: Trino federation — prior avg 4.441 across 130 questions; new running avg (4.441 × 130 + 4.40) / 131 = (577.330 + 4.40) / 131 = 4.440 across 131 questions (Q1 also counted separately — see Iter 228 Q1 entry above; combined after both Q1+Q2: 4.435 across 132 questions). Gap: 0.065.
+
+Verified: trino.io/docs/current/admin/properties-query-management.html (query.max-execution-time 100d, query.max-run-time 100d, query.client.timeout 5m, query.max-planning-time 10m); trino.io/docs/current/sql/set-session.html (SET SESSION syntax); trino.io/docs/current/admin/resource-groups.html (two-file wiring: etc/resource-groups.properties + JSON; hardCpuLimit/softCpuLimit field names); trino.io/docs/current/admin/dynamic-filtering.html (wait-timeout proceeds with scan, does not kill query).
+
+**Iter 228 average**: (3.75 + 4.40) / 2 = **4.075** — recovery from iter227's 3.25 disaster, but neither answer above the 4.5 raised threshold
+
+---
+
+### Iter 229 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (MERGE source-deduplication: MERGE_TARGET_ROW_MULTIPLE_MATCHES error, ROW_NUMBER dedup pattern, ISO SQL semantics)
+
+Score: **4.75** — PASS (above raised 4.5 threshold)
+
+Strong answer. All major claims verified: Trino MERGE fails when multiple source rows match a single target row (exception `MERGE_TARGET_ROW_MULTIPLE_MATCHES`); this is an ISO/IEC 9075:2016 SQL standard requirement (enforced via AssignUniqueId + MarkDistinct planner nodes); `ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...) WHERE rn = 1` is the canonical deduplication pattern; example SQL is syntactically valid with correct fully-qualified naming. Correctly identifies hidden duplicate sources: late-arriving rows, overlapping watermark windows, non-unique join keys. Forward-looking prevention guidance for incremental ingestion pipelines is accurate and production-relevant.
+
+Minor gaps: doesn't name exact exception (`MERGE_TARGET_ROW_MULTIPLE_MATCHES`); no diagnostic query (`GROUP BY ... HAVING COUNT(*) > 1`) to confirm duplicates; ISO year stated as 2003 (current Trino ref is 2016); no mention of MERGE-enable prerequisite (`non_transactional_merge_enabled`) since query already passed that gate.
+
+**Topics updated**: Trino federation — prior avg 4.435 across 132 questions; (4.435 × 132 + 4.75) / 133 = (585.420 + 4.75) / 133 = **4.437 across 133 questions**.
+
+Verified: trino.io/docs/current/sql/merge.html (MERGE semantics, MERGE_TARGET_ROW_MULTIPLE_MATCHES); trino.io/docs/current/develop/supporting-merge.html.
+
+---
+
+### Iter 229 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (MySQL connection pooling: no OSS pool, connection-pool.* is Starburst Enterprise only, ProxySQL, hardConcurrencyLimit)
+
+Score: **4.75** — PASS (above raised 4.5 threshold)
+
+Strong production-safe answer. All load-bearing claims verified: OSS Trino 467 MySQL connector has no built-in connection pooling (MySQL connector docs list only connection-url/user/password — no connection-pool.*); `connection-pool.enabled`/`connection-pool.max-size` are Starburst Enterprise-only (explicitly confirmed against docs.starburst.io); explicit "OSS Trino silently ignores these" warning is high-value. ProxySQL recommendation valid for single-catalog use case (trinodb/trino#18279 schema-routing limitation doesn't apply). `hardConcurrencyLimit` correct field name per resource-groups docs. MySQL `MAX_USER_CONNECTIONS` user-level cap is real and correct. ProxySQL-as-k8s-Deployment fits on-prem production stack.
+
+Minor gaps: "JDBC connection for each table" understates per-split model; no ProxySQL ports (6032/6033); `max_execution_time` units not specified; no diagnostic queries (`SHOW PROCESSLIST`, system.runtime.queries); resource group JSON missing `selectors` entry.
+
+**Topics updated**: Trino federation — prior avg 4.437 across 133 questions; (4.437 × 133 + 4.75) / 134 = (590.121 + 4.75) / 134 = **4.440 across 134 questions**. Gap: 0.060.
+
+Verified: trino.io/docs/current/connector/mysql.html; docs.starburst.io MySQL connector (connection-pool.enabled); trino.io/docs/current/admin/resource-groups.html (hardConcurrencyLimit); trinodb/trino#18279 (ProxySQL limitation); ProxySQL multiplexing docs.
+
+**Iter 229 average**: (4.75 + 4.75) / 2 = **4.75** — both answers above raised 4.5 threshold; best single-iteration result in several iters
+
+---
+
+### Iter 230 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (EXPLAIN ANALYZE for federated cross-catalog query diagnosis: operator fields, dynamic filtering, join distribution, partition pruning)
+
+Score: **4.75** — PASS (above raised 4.5 threshold)
+
+Strong answer for EXPLAIN ANALYZE interpretation in a cross-catalog (Iceberg × MySQL) context. All major claims verified against Trino 481 docs: operator field names (CPU, Scheduled, Blocked: Input/Output, Input, Physical Input) correct; Physical Input vs Input distinction accurate; dynamic filtering on JDBC connectors correctly described (build-side IN-list derived and pushed to probe-side Iceberg scan); BROADCAST vs PARTITIONED join terminology matches actual EXPLAIN output; ANALYZE TABLE and SHOW STATS FOR guidance accurate; MySQL connector statistics caveats correct.
+
+Minor gaps: `dynamic-filtering.wait-timeout` (default 20s) and `domain-compaction-threshold` (default 256) not named — naming them would make the "MySQL side timed out" diagnostic fully actionable; DynamicFilter node described as standalone operator when it actually appears as a predicate annotation on the probe-side ScanFilterProject; no mention of plain EXPLAIN as cheaper first-pass before paying EXPLAIN ANALYZE's full runtime cost; small-result-set heuristic ("5K rows + long runtime + high Physical Input = filter broke down") not made explicit.
+
+**Topics updated**: Trino federation — prior avg 4.440 across 134 questions; (4.440 × 134 + 4.75) / 135 = (594.960 + 4.75) / 135 = **4.442 across 135 questions**. Gap: 0.058.
+
+Verified: trino.io/docs/current/sql/explain-analyze.html; trino.io/docs/current/admin/dynamic-filtering.html; trino.io/docs/current/connector/mysql.html; trino.io/docs/current/optimizer/statistics.html; trinodb/trino PR #13334 (JDBC dynamic filtering).
+
+---
+
+### Iter 230 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (MySQL predicate pushdown failure: VARCHAR no-pushdown, EXPLAIN diagnosis, date/numeric workaround)
+
+Score: **4.50** — PASS (exactly at raised 4.5 threshold)
+
+Solid answer on MySQL connector predicate pushdown. Core technical claim verified correct: MySQL connector does NOT push down VARCHAR/CHAR predicates (case-insensitive collation mismatch with Trino's bytewise comparison — confirmed via trinodb/trino#6746 and PR #6753). Dynamic filtering interaction with VARCHAR join keys correctly explained. EXPLAIN-based diagnosis (ScanFilterProject/Filter node above TableScan = pushdown failed) is the documented method. Workaround (pair non-pushing predicate with a pushing date/numeric predicate) is the standard idiomatic fix.
+
+Defects: SQL syntax bug in EXPLAIN example (`FROM ... WHERE ... JOIN ...` is invalid — JOIN must precede WHERE); `domain-compaction-threshold` default stated as ">1000" but actual default is **256**; no mention of EXPLAIN ANALYZE VERBOSE or JMX dynamic-filter metrics as observability surfaces; no reminder to verify Iceberg-side pruning before blaming MySQL.
+
+**Topics updated**: Trino federation — prior avg 4.442 across 135 questions; (4.442 × 135 + 4.50) / 136 = (599.670 + 4.50) / 136 = **4.443 across 136 questions**. Gap: 0.057.
+
+Verified: trino.io/docs/current/connector/mysql.html (VARCHAR no pushdown); trino.io/docs/current/optimizer/pushdown.html (ScanFilterProject diagnostic); trinodb/trino#6746; trinodb/trino PR #6753 (collation fix); trinodb/trino PR #13334 (JDBC dynamic filtering).
+
+**Iter 230 average**: (4.75 + 4.50) / 2 = **4.625** — both above raised 4.5 threshold; topic now at 4.443/136, gap 0.057
+
+---
+
+### Iter 231 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (MySQL per-split model: 1 split per non-partitioned JDBC table scan, parallelism limits, mitigations)
+
+Score: **2.75** — FAIL (below 3.5 base threshold and 4.5 raised threshold)
+
+Answer correctly identified the root cause (one split per non-partitioned JDBC table scan = one JDBC connection = no worker parallelism regardless of cluster size) and explained why WHERE clauses don't help. EXPLAIN ANALYZE diagnostic guidance was sound. Pre-aggregate on MySQL and Iceberg snapshot caching are correct mitigations.
+
+**Critical fabrications**: Mitigation #1 presented `partition-column`, `partition-num-partitions`, `partition-lower-bound`, `partition-upper-bound` as real Trino MySQL connector properties. **These do NOT exist** — they are Spark JDBC options. Parallel JDBC reads for Trino MySQL connector remain an open feature request (trinodb/trino#389, open since 2019). An engineer pasting the config gets a Trino startup error.
+
+**HIGH error**: `defaultRowFetchSize` is a PostgreSQL pgjdbc parameter, not MySQL Connector/J. MySQL uses `defaultFetchSize` + `useCursorFetch=true`. Quick Checklist also confusingly annotated this row-count parameter as "in milliseconds."
+
+**MEDIUM missing**: Dynamic filtering with broadcast join not mentioned — the primary real lever for Iceberg-fact × MySQL-dimension joins. `dynamic-filtering.wait-timeout` (20s JDBC default) and `domain-compaction-threshold` (default 256) not mentioned.
+
+**Topics updated**: Trino federation — prior avg 4.443 across 136 questions; (4.443 × 136 + 2.75) / 137 = (604.248 + 2.75) / 137 = **4.431 across 137 questions**. Gap increased: 0.057 → 0.069.
+
+Verified: trino.io/docs/current/connector/mysql.html (no partition-* properties); trinodb/trino#389 (parallel JDBC reads, open since 2019); dev.mysql.com connector-j docs (defaultFetchSize + useCursorFetch, not defaultRowFetchSize).
+
+---
+
+### Iter 231 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (Trino system tables for federation diagnostics: system.runtime.queries, system.runtime.tasks, kill_query)
+
+Score: **4.75** — PASS (above raised 4.5 threshold)
+
+Strong answer on Trino system tables for active query monitoring. All major claims verified: `system.runtime.queries` schema correct; `system.runtime.tasks` with `physical_input_bytes` and `split_cpu_time_ms` correct (added PR #2803); `"user"` double-quoting requirement correct (reserved keyword resolving to CURRENT_USER builtin); `CALL system.runtime.kill_query(query_id => '...', message => '...')` exact signature match; `query.max-history`=100 and `query.min-expire-age`=15min defaults correct.
+
+Minor gaps: missing `resource_group_id` column (highly relevant for "shared cluster used by several teams" scenario); reinventing `elapsed_time` via `date_diff()` instead of using built-in column; no bridge to remediation (predicate pushdown / Iceberg snapshot) after identifying culprit query.
+
+**Topics updated**: Trino federation — prior avg 4.431 across 137 questions; (4.431 × 137 + 4.75) / 138 = (606.847 + 4.75) / 138 = **4.433 across 138 questions**. Gap: 0.067.
+
+Verified: trino.io/docs/current/connector/system.html; trino.io/docs/current/admin/properties-query-management.html; trino.io/docs/current/language/reserved.html; trinodb/trino PR #2803.
+
+**Iter 231 average**: (2.75 + 4.75) / 2 = **3.75** — FAIL (Q1 fabricated Spark-JDBC properties caused critical failure; topic REGRESSED from 4.443 to 4.433, gap 0.067)
+
+---
+
+### Iter 232 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (dynamic filtering for Iceberg-fact × MySQL-dimension joins: broadcast join, DF mechanism, wait-timeout)
+
+Score: **3.25** — FAIL (below 3.5 base threshold and 4.5 raised threshold)
+
+Broadcast join mechanics and CBO syntax were correct. However, the responder claimed the resources don't have documentation on dynamic filtering as a distinct feature — when in fact Section 5 of resource 22 (22-trino-federation-postgresql.md) has a comprehensive DF treatment that was just added. This is a resource retrieval failure, not a resource content gap.
+
+Primary mechanism (DF) was demoted to "might explain" when it was the direct answer to the user's question. Key missing items: JDBC-build → Iceberg-probe wait-timeout asymmetry (Iceberg default 1s is the #1 silent DF failure mode), EXPLAIN ANALYZE VERBOSE for DF verification, VARCHAR join key preventing DF pushdown, domain-compaction-threshold (default 256).
+
+**Topics updated**: Trino federation — prior avg 4.433 across 138 questions; (4.433 × 138 + 3.25) / 139 = (611.754 + 3.25) / 139 = **4.424 across 139 questions**. Gap: 0.076.
+
+Verified: trino.io/docs/current/admin/dynamic-filtering.html (DF mechanism confirmed; JDBC default 20s, Iceberg default 1s confirmed); resource 22 Section 5 confirmed to have comprehensive DF content (retrieval failure, not content gap).
+
+---
+
+### Iter 232 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (cross-catalog query startup delay: HMS metadata, MySQL metadata.cache-ttl, DF wait-timeout)
+
+Score: **3.25** — FAIL (below 3.5 base threshold and 4.5 raised threshold)
+
+Decomposition into HMS lookup + MySQL metadata + dynamic filtering wait was conceptually correct. Dynamic filtering defaults (JDBC 20s, Iceberg 1s) and the per-catalog property were verified correct. Production environment fit (on-prem k8s, HMS HA, file paths) was good.
+
+**Critical factual inversion**: `metadata.cache-ttl` default is **0s** (caching DISABLED in OSS Trino MySQL connector), not 60-300s. The fix direction was completely inverted — the answer told engineers to REDUCE the TTL when they should INCREASE it (set to 30s or 60s) to cache MySQL schema and avoid hitting `information_schema` on every query. An engineer following this advice would either get no improvement or waste time.
+
+Also missing: how to measure planning time (Trino UI Planning Time field, `system.runtime.queries` elapsed time breakdown), realistic latency budgets for HMS (stated 2-5s is inflated), connectivity sanity check via `mysql_catalog.information_schema`.
+
+**Topics updated**: Trino federation — prior avg 4.424 across 139 questions; (4.424 × 139 + 3.25) / 140 = (615.736 + 3.25) / 140 = **4.421 across 140 questions** (approx). Gap: 0.079.
+
+Verified: trino.io/docs/current/connector/mysql.html (metadata.cache-ttl default 0s confirmed); trino.io/docs/current/release/release-328.html (MySQL metadata caching added in 328); trino.io/docs/current/admin/dynamic-filtering.html.
+
+**Iter 232 average**: (3.25 + 3.25) / 2 = **3.25** — FAIL (two consecutive failed iterations; topic REGRESSED to ~4.416/140, gap 0.084. Resource retrieval failure for DF and metadata.cache-ttl direction inversion are the root causes)
+
+---
+
+### Iter 233 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (dynamic filtering for Iceberg-fact × MySQL-dimension join: mechanism, EXPLAIN ANALYZE VERBOSE, wait-timeout asymmetry)
+
+Score: **4.75** — PASS (above raised 4.5 threshold)
+
+Strong recovery after two consecutive DF-related failures. Teacher's Quick Reference index and Iceberg-probe wait-timeout asymmetry section landed correctly. All major claims verified: dynamic filtering mechanism (MySQL build side → IN-list derived → pushed to Iceberg probe scan to prune files) correct; `dynamicFilterSplitsProcessed` is a real EXPLAIN ANALYZE VERBOSE field (confirmed PR #3217); Iceberg default 1s vs JDBC default 20s wait-timeout asymmetry correct; domain-compaction-threshold default 256 correct; VARCHAR caveat (IN-list compacted to BETWEEN) correct.
+
+Minor gap: SET SESSION syntax uses connector name `iceberg` instead of the actual catalog name prefix (e.g., `iceberg_catalog`). The prefix in SET SESSION is always the catalog name, not the connector name.
+
+**Topics updated**: Trino federation — prior avg 4.416 across 140 questions; (4.416 × 140 + 4.75) / 141 = (618.24 + 4.75) / 141 = **4.418 across 141 questions**.
+
+Verified: trino.io/docs/current/admin/dynamic-filtering.html; trino.io/docs/current/connector/iceberg.html; trinodb/trino PR #3217; trinodb/trino discussions #14019.
+
+---
+
+### Iter 233 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (MySQL metadata.cache-ttl: default 0s, increase to reduce planning load, flush_metadata_cache procedure)
+
+Score: **4.75** — PASS (above raised 4.5 threshold)
+
+Clean, accurate answer on MySQL metadata caching. All major claims verified: `metadata.cache-ttl` default 0s (disabled) correct; `metadata.cache-missing` is a real property (correct); `CALL <catalog>.system.flush_metadata_cache()` with NO parameters for MySQL correct (unlike Hive/Delta which accept named params — confirmed via PR #10385); catalog reload required after TTL change correct; trade-off framing (schema change lag) accurate.
+
+Minor gaps: doesn't state `metadata.cache-missing` default is `false`; no mention of planning latency benefit (only replica load reduction); no `case-insensitive-name-matching.cache-ttl`.
+
+**Topics updated**: Trino federation — prior avg 4.418 across 141 questions; (4.418 × 141 + 4.75) / 142 = (622.938 + 4.75) / 142 = **4.421 across 142 questions**. Gap: 0.079.
+
+Verified: trino.io/docs/current/connector/mysql.html (metadata.cache-ttl default 0s); trinodb/trino PR #10385 (flush_metadata_cache parameterless for JDBC).
+
+**Iter 233 average**: (4.75 + 4.75) / 2 = **4.75** — strong recovery after two consecutive failures; topic recovering toward 4.5 threshold (still gap 0.079)
+
+---
+
+### Iter 234 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (MySQL write operations: INSERT/UPDATE/DELETE/MERGE support, non-transactional semantics, catalog vs session property naming)
+
+Score: **4.75** — PASS (above raised 4.5 threshold)
+
+Strong, accurate answer on MySQL write operations. All major claims verified: INSERT/UPDATE/DELETE/MERGE all supported; UPDATE limited to constant assignments (expression-based fails); DELETE VARCHAR predicate pushdown fails (only numeric/date pushes); MERGE requires `merge.non-transactional-merge.enabled=true` catalog property; session property `non_transactional_merge_enabled` with `_enabled` suffix is correct; non-transactional semantics (no rollback for partial writes) correctly explained; idempotent MERGE pattern is accurate and production-appropriate.
+
+Minor gaps: doesn't name `insert.non-transactional-insert.enabled` / `non_transactional_insert` property; production checklist line on `max_execution_time` is technically wrong — that applies only to SELECT, not to UPDATE/DELETE/INSERT lock duration; `innodb_lock_wait_timeout` is the correct lever for bounding write locks.
+
+**Topics updated**: Trino federation — prior avg 4.421 across 142 questions; (4.421 × 142 + 4.75) / 143 = (627.782 + 4.75) / 143 = **4.423 across 143 questions**.
+
+Verified: trino.io/docs/current/connector/mysql.html; trino.io/docs/current/sql/merge.html.
+
+---
+
+### Iter 234 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (federate vs ingest decision: MySQL per-split model, what can/cannot be tuned, Iceberg snapshot ingestion)
+
+Score: **4.50** — PASS (exactly at raised 4.5 threshold)
+
+Technically strong on the central question: correctly identifies OSS Trino MySQL connector's one-split-per-table-scan as a fundamental architectural limit (not tunable); correctly disclaims `partition-column` as Starburst-only; reasonable JDBC throughput ballpark; clear federate-vs-ingest decision framework appropriate for the on-prem Spark+MinIO+Iceberg stack.
+
+One real issue: the answer recommends bumping the Iceberg-side `dynamic-filtering.wait-timeout` to 20s — this IS correct for the Iceberg-fact × MySQL-dimension join pattern (MySQL is the build side, Iceberg is the probe side; the Iceberg catalog's 1s default is the binding constraint). Judge framing was slightly confused but overall assessment valid.
+
+Minor gaps: no CDC/incremental alternative to full snapshots; no OPA write-permission note for the Iceberg target; no `SET SESSION` as no-restart test path; dbt snapshots not mentioned.
+
+**Topics updated**: Trino federation — prior avg 4.423 across 143 questions; (4.423 × 143 + 4.50) / 144 = (632.489 + 4.50) / 144 = **4.424 across 144 questions**. Gap: 0.076.
+
+Verified: trino.io/docs/current/connector/mysql.html; trinodb/trino#389; `partition-column` confirmed Starburst Enterprise-only.
+
+---
+
+### Iter 235 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (MySQL SSL/TLS: sslMode=VERIFY_IDENTITY, JKS truststore, keytool workflow, worker-mount requirement, Ssl_cipher verification)
+
+Score: **4.70** — PASS (above raised 4.5 threshold)
+
+Strong recovery from iter227 (3.40 FAIL on same topic). All major claims verified: `sslMode=VERIFY_IDENTITY` correct camelCase for Connector/J 8.x; `trustCertificateKeyStoreUrl` correct property name; JKS truststore via `keytool -importcert` workflow correct and matches MySQL docs verbatim; deprecation warning for `useSSL=true&requireSSL=true` accurate; worker truststore mounting requirement is correct and production-critical; `SHOW STATUS LIKE 'Ssl_cipher'` is a valid verification command.
+
+Minor gaps: `SHOW STATUS LIKE 'Ssl_cipher'` is session-scoped to the client running it, not Trino's connection — to verify Trino's specific connection, query `performance_schema.status_by_thread` joined with `performance_schema.threads` filtered by Trino's MySQL user; `CONNECTION_TYPE` in `performance_schema.threads` does NOT indicate TLS (returns 'TCP/IP' for both plaintext and TLS); PKCS12 alternative not mentioned.
+
+**Topics updated**: Trino federation — prior avg 4.424 across 144 questions; (4.424 × 144 + 4.70) / 145 = (637.056 + 4.70) / 145 = **4.426 across 145 questions**.
+
+Verified: dev.mysql.com Connector/J 8.x security docs; MySQL 8.0/8.4 reference manual for `SHOW STATUS LIKE 'Ssl_cipher'`.
+
+---
+
+### Iter 235 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (PostgreSQL vs MySQL connector: predicate pushdown differences, parallelism, write support, operational parameter traps)
+
+Score: **3.85** — FAIL (below raised 4.5 threshold)
+
+Strong on MySQL-specific gotchas (VARCHAR pushdown failure, parallelism limitation, MySQL MERGE flag naming, socketTimeout milliseconds vs PostgreSQL seconds, defaultFetchSize + useCursorFetch requirement). Critical error on PostgreSQL MERGE.
+
+Critical error: Answer claims "PostgreSQL MERGE: supported by default — transactional, safe." This is doubly wrong: (1) PostgreSQL MERGE connector support was added in Trino 470 (Feb 2025) — it does NOT exist in the production Trino 467; (2) Even in 470+, PostgreSQL MERGE required the same `merge.non-transactional-merge.enabled=true` flag. This is a meaningful fabrication given the production stack pinned to Trino 467.
+
+Medium error: PostgreSQL LIKE pushdown claim is overstated ("pushes by default in Trino 467") — LIKE pushdown is collation-dependent and more conservative than implied.
+
+**Topics updated**: Trino federation — prior avg 4.426 across 145 questions; (4.426 × 145 + 3.85) / 146 = (641.77 + 3.85) / 146 = **4.422 across 146 questions**. Gap: 0.078.
+
+Verified: trino.io/docs/current/connector/postgresql.html; trinodb/trino PR #24467 (PG MERGE added in Trino 470); trino.io/docs/current/connector/mysql.html; MySQL Connector/J docs.
+
+**Iter 235 average**: (4.70 + 3.85) / 2 = **4.275** — FAIL (below 4.5 threshold). Resource fix needed: PostgreSQL MERGE version-gating is HIGH priority.
+
+---
+
+### Iter 236 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (PostgreSQL write-back with MERGE/upsert: version constraints, alternatives for Trino 467)
+
+Score: **4.85** — PASS (above raised 4.5 threshold)
+
+Strong answer after teacher's PostgreSQL MERGE version-gating fix landed correctly. All major claims verified: MERGE not supported in Trino 467 for PostgreSQL (added in 470, PR #24467); non-transactional flag introduced in 470; transactional MERGE in 475+; UPDATE constant-assignment limitation; application-side `ON CONFLICT ... DO UPDATE` recommendation; cross-statement non-atomicity warning; OPA permission note.
+
+Minor gaps: INSERT...WHERE NOT EXISTS snippet missing source alias (conceptually valid, just needs cleanup); "silently ignored" for unknown catalog properties slightly overstated (actually causes startup error in most versions); no dbt incremental materialization mention.
+
+**Topics updated**: Trino federation — prior avg 4.422 across 146 questions; (4.422 × 146 + 4.85) / 147 = (645.612 + 4.85) / 147 = **4.425 across 147 questions**.
+
+Verified: trino.io Release 470; PR #24467 (PG MERGE added); PostgreSQL connector docs; Release 475.
+
+---
+
+### Iter 236 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (cross-catalog INSERT: Iceberg query results into MySQL, non-transactional semantics, CTAS, MERGE)
+
+Score: **4.70** — PASS (above raised 4.5 threshold)
+
+Comprehensive, production-correct answer on cross-catalog writes. All major claims verified: cross-catalog INSERT syntax correct; transactional-by-default wrapper accurate; `insert.non-transactional-insert.enabled` and `non_transactional_insert` session property both correct; MySQL MERGE with `non_transactional_merge_enabled` flag correct; single-JDBC-connection read limitation vs Spark parallel reads correct; Trino vs Spark decision framework sound.
+
+Minor gaps: session property naming asymmetry not highlighted (`non_transactional_insert` has no `_enabled` suffix unlike `non_transactional_merge_enabled`); no mention of write.batch-size tuning; CTAS partial-failure semantics underspecified.
+
+**Topics updated**: Trino federation — prior avg 4.425 across 147 questions; (4.425 × 147 + 4.70) / 148 = (650.475 + 4.70) / 148 = **4.427 across 148 questions**. Gap: 0.073.
+
+Verified: trino.io MySQL connector docs; PR #24428 (MySQL MERGE); Trino GitHub issue #389; Starburst JDBC bottleneck blog.
+
+**Iter 236 average**: (4.85 + 4.70) / 2 = **4.775** — PASS (above 4.5 threshold). Strong recovery iteration. Teacher's PostgreSQL MERGE version-gating fix from iter235 feedback landed correctly.
+
+---
+
+### Iter 237 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (Iceberg-only dynamic filtering: mechanism, file-level skipping, EXPLAIN ANALYZE VERBOSE, wait-timeout)
+
+Score: **3.85** — FAIL (below raised 4.5 threshold)
+
+Correct on core mechanism (DF applies to Iceberg-Iceberg joins; file-level manifest min/max pruning; dynamicFilterSplitsProcessed; 1s Iceberg wait-timeout default; SET SESSION syntax with catalog prefix). Errors in framing and completeness.
+
+Key issues: (1) Misleading "intra-catalog vs cross-catalog" framing — DF mechanism is identical whether or not catalogs match; co-location is architecturally irrelevant to DF. (2) Claims domain-compaction-threshold default is 256 — unverified from official docs (value is plausible but stated as hard fact). (3) Missing dynamic row filtering (DRF) — Iceberg connector also applies row-level filtering within selected Parquet files in addition to file-level manifest pruning. (4) Missing broadcast vs partitioned join strategy context. (5) Missing the simpler "Dynamic filters: ..." EXPLAIN ANALYZE field alongside dynamicFilterSplitsProcessed.
+
+**Topics updated**: Trino federation — prior avg 4.427 across 148 questions; (4.427 × 148 + 3.85) / 149 = (655.196 + 3.85) / 149 = **4.422 across 149 questions**.
+
+Verified: trino.io/docs/current/connector/iceberg.html (1s default, DRF enabled by default); PR #3217 (dynamicFilterSplitsProcessed real); domain-compaction-threshold default NOT confirmed in current docs.
+
+---
+
+### Iter 237 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (observability: EXPLAIN ANALYZE VERBOSE, system.runtime.queries, bottleneck diagnosis)
+
+Score: **3.55** — FAIL (below raised 4.5 threshold)
+
+Correct on EXPLAIN ANALYZE VERBOSE structure, dynamicFilterSplitsProcessed interpretation, system.runtime.queries column names ("user" double-quoting), Web UI, decision tree framing, join_distribution_type = BROADCAST, date_trunc() partition alignment warning.
+
+Critical errors: (1) Recommends setting `dynamic-filtering.wait-timeout = 45s` in `etc/catalog/app_pg.properties` (PostgreSQL catalog) — WRONG. This is a probe-side property; for Iceberg-probe × PostgreSQL-build, it must go in the Iceberg catalog (default 1s is the binding constraint). Setting it in the PostgreSQL catalog has no effect. (2) "VARCHAR predicates do NOT push down on the PostgreSQL connector" — WRONG as stated. Equality (=, IN) on VARCHAR DOES push down on PostgreSQL; only range predicates don't by default. The answer's own example query uses `WHERE u.status = 'active'` (equality) which pushes fine.
+
+**Topics updated**: Trino federation — prior avg 4.422 across 149 questions; (4.422 × 149 + 3.55) / 150 = (658.878 + 3.55) / 150 = **4.417 across 150 questions**. Gap: 0.083.
+
+Verified: trino.io/docs/current/connector/iceberg.html (dynamic-filtering.wait-timeout = 1s probe-side); trino.io/docs/current/connector/postgresql.html (VARCHAR equality pushes; range does not by default); PR #3217; PR #16644 (auto-tuned fetch size).
+
+**Iter 237 average**: (3.85 + 3.55) / 2 = **3.70** — FAIL. Two HIGH priority resource fixes needed: probe-side wait-timeout documentation and PostgreSQL VARCHAR pushdown precision.
+
+---
+
+### Iter 238 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (dynamic filtering wait-timeout: probe-side property, Iceberg 1s default, EXPLAIN ANALYZE VERBOSE verification)
+
+Score: **4.85** — PASS (above raised 4.5 threshold)
+
+Strong recovery after teacher238 applied probe-side wait-timeout fix. All major claims verified: probe-side property rule correct; Iceberg default 1s confirmed; JDBC default 20s confirmed; dynamicFilterSplitsProcessed correct; SET SESSION catalog-prefix syntax correct; setting wait-timeout in PostgreSQL catalog has no effect for build side — all verified against official docs.
+
+Minor gap: catalog properties file snippet used `iceberg.dynamic-filtering.wait-timeout=20s` — the `iceberg.` prefix is NOT used inside `etc/catalog/iceberg.properties` (the catalog filename provides the namespace). The correct line is just `dynamic-filtering.wait-timeout=20s`. Per-session form correctly uses the prefix.
+
+**Topics updated**: Trino federation — prior avg 4.417 across 150 questions; (4.417 × 150 + 4.85) / 151 = (662.55 + 4.85) / 151 = **4.420 across 151 questions**.
+
+Verified: trino.io/docs/current/connector/iceberg.html (1s default); trino.io/docs/current/admin/dynamic-filtering.html (dynamicFilterSplitsProcessed); PR #13334 (JDBC 20s default).
+
+---
+
+### Iter 238 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (PostgreSQL WHERE pushdown: VARCHAR equality YES, date BETWEEN YES, leading-wildcard LIKE NO)
+
+Score: **4.70** — PASS (above raised 4.5 threshold)
+
+Strong recovery after teacher238 fixed PostgreSQL VARCHAR pushdown documentation. All three verdicts correct: equality `status = 'active'` pushes; date BETWEEN pushes; `LIKE '%acme%'` (leading wildcard) does NOT push. EXPLAIN verification guidance (inside TableScan vs Filter node above = pushed vs not) correct. MySQL contrast (MySQL pushes NO VARCHAR predicates vs PostgreSQL pushes equality/IN) correct.
+
+Minor gaps: "unconditionally" wording for date ranges slightly overstated; anchored LIKE caveat could reference `postgresql.experimental.enable-string-pushdown-with-collate` explicitly; no EXPLAIN ANALYZE VERBOSE mention for actual row verification.
+
+**Topics updated**: Trino federation — prior avg 4.420 across 151 questions; (4.420 × 151 + 4.70) / 152 = (667.42 + 4.70) / 152 = **4.422 across 152 questions**. Gap: 0.078.
+
+Verified: trino.io/docs/current/connector/postgresql.html; trino.io/docs/current/connector/mysql.html; trino.io/docs/current/optimizer/pushdown.html.
+
+**Iter 238 average**: (4.85 + 4.70) / 2 = **4.775** — PASS. Strong recovery iteration. Teacher238 fixes for probe-side wait-timeout and PostgreSQL VARCHAR pushdown both landed correctly.
+
+**Iter 234 average**: (4.75 + 4.50) / 2 = **4.625** — both above raised 4.5 threshold; topic at 4.424/144, gap 0.076 (recovering)
+
+---
+
+### Iter 239 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (connection pooling: no native pooling in OSS Trino 467, PgBouncer, resource groups)
+
+Score: **4.9** — PASS (above raised 4.5 threshold)
+
+Strong answer. All key claims verified: OSS Trino 467 has no native JDBC connection pooling; `connection-pool.*` properties are Starburst Enterprise-only (silently ignored in OSS); per-split model means one JDBC connection per non-partitioned table (not per worker); PgBouncer transaction pooling + `prepareThreshold=0` is the standard solution; `hardConcurrencyLimit` for resource groups; `ALTER ROLE ... CONNECTION LIMIT` for Postgres role-level cap. Production-stack fit correct (k8s Deployment + Service, in-cluster DNS, env-var injection).
+
+Minor gaps: `prepareThreshold=0` framed as "mandatory" without the PgBouncer 1.21+ caveat (`max_prepared_statements > 0` makes it optional); no `splits_per_table` future-proofing note; `query.max-execution-time` vs `query.max-run-time` queue-time distinction not covered.
+
+**Topics updated**: Trino federation — prior avg 4.422 across 152 questions; (4.422 × 152 + 4.9) / 153 = (672.144 + 4.9) / 153 = **4.425 across 153 questions**.
+
+Verified: trino.io/docs/current/connector/postgresql.html (no pool properties); github.com/trinodb/trino/issues/15888 (open OSS limitation); docs.starburst.io/latest/connector/starburst-postgresql.html (pool properties in Enterprise); trino.io/docs/current/admin/resource-groups.html (hardConcurrencyLimit); pgbouncer.org/faq.html + prepareThreshold=0 requirement; postgresql.org/docs/current/sql-alterrole.html.
+
+---
+
+### Iter 239 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino CBO / ANALYZE TABLE (Iceberg ANALYZE syntax, Puffin NDV sketches, cross-catalog join planning)
+
+Score: **4.9** — PASS (above raised 4.5 threshold)
+
+Strongest CBO/ANALYZE answer to date. All claims verified: `ANALYZE catalog.schema.table` (no TABLE keyword); `columns=` is only Iceberg ANALYZE property (not `partitions`); Puffin Theta-sketch NDV blobs (`apache-datasketches-theta-v1`); `SHOW STATS FOR` syntax and output column names; `ALTER TABLE ... EXECUTE drop_extended_stats` prerequisite for column-targeted re-analyze; cross-catalog join genuinely benefits from CBO stats even though the join runs on Trino workers; PostgreSQL side needs native `ANALYZE` in psql. Correctly closed the iter160 Q2 failure mode ("no ANALYZE needed" catastrophic error that raised topic threshold to 4.5).
+
+Micro-nit: "Theta or HLL" — for Iceberg specifically the Puffin blob is Theta; HLL is other connectors.
+
+**Topics updated**: Trino federation — prior avg 4.425 across 153 questions; (4.425 × 153 + 4.9) / 154 = (677.025 + 4.9) / 154 = **4.428 across 154 questions**. Gap: 0.072. Trino CBO — prior avg 4.717 across 3 questions; (4.717 × 3 + 4.9) / 4 = (14.151 + 4.9) / 4 = **4.763 across 4 questions**.
+
+Verified: trino.io/docs/current/sql/analyze.html; trino.io/docs/current/connector/iceberg.html; iceberg.apache.org/puffin-spec/ (Theta blob type); trino.io/docs/current/sql/show-stats.html; trino.io/docs/current/optimizer/cost-based-optimizations.html (100MB broadcast default); trino.io/docs/current/connector/postgresql.html (reads pg_stats natively).
+
+**Iter 239 average**: (4.9 + 4.9) / 2 = **4.9** — PASS. Both Q1 (connection pooling) and Q2 (ANALYZE TABLE) answered at near-perfect accuracy. Resource teacher239 prefix fix (iceberg. in catalog file) and anchored LIKE caveat both landed correctly; responder no longer confuses catalog-file vs session-property naming. Gap to federation threshold: 0.072 (down from 0.078).
+
+---
+
+### Iter 240 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (MySQL vs PostgreSQL connector: scan parallelism, VARCHAR pushdown, dynamic filtering)
+
+Score: **4.8** — PASS (above raised 4.5 threshold)
+
+Strong answer. All key claims verified: MySQL connector = 1 split per table (no partition-column splitting, issue #389 open since 2019); PostgreSQL also 1 split (same parallelism limit — differentiator is pushdown not parallelism); MySQL refuses ALL VARCHAR pushdown (=, IN, IS NULL, LIKE) due to collation correctness (utf8mb4_0900_ai_ci case-insensitive; Trino bytewise); PostgreSQL pushes VARCHAR equality and IN-list (PR #6753); both push numeric/date predicates; VARCHAR dynamic filter IN-lists don't push to MySQL either; recommendation to use numeric surrogate keys or move to PostgreSQL. Practical workaround (pair VARCHAR filter with date filter) and "MySQL for dimensions, Iceberg for facts" pattern are correct.
+
+Minor gaps: aggregate-pushdown vs predicate-pushdown distinction (COUNT(*) still pushes to MySQL even when WHERE doesn't); "1 split" UI location (source-stage TableScan node specifically); LIKE pushdown on PostgreSQL not addressed.
+
+**Topics updated**: Trino federation — prior avg 4.428 across 154 questions; (4.428 × 154 + 4.8) / 155 = (681.912 + 4.8) / 155 = **4.430 across 155 questions**.
+
+Verified: trino.io/docs/current/connector/mysql.html (no VARCHAR pushdown, explicit quote); trino.io/docs/current/connector/postgresql.html (VARCHAR equality/IN pushes, PR #6753); github.com/trinodb/trino issue #389 (1-split limitation open since 2019).
+
+---
+
+### Iter 240 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (Iceberg time-travel + PostgreSQL cross-catalog join)
+
+Score: **4.4** — FAIL (below raised 4.5 threshold)
+
+Correct on: FOR TIMESTAMP AS OF / FOR VERSION AS OF syntax; $snapshots metadata table; time-travel resolves at plan time (before join); predicate pushdown still works on Iceberg side during time-travel; dynamic filtering still works across catalogs with time-travel; cross-catalog join executes on Trino workers (no cross-catalog pushdown); FOR TIMESTAMP resolves to latest snapshot with committed_at <= T; read-replica reminder; EXPLAIN ANALYZE VERBOSE guidance.
+
+Material error: **overstated VARCHAR pushdown caveat** — answer said "VARCHAR equality filters do not always push reliably" and "dynamic filtering IN-list may not push as aggressively as you'd hope" for PostgreSQL. This is WRONG. PostgreSQL connector explicitly pushes equality (=, IN, !=) on VARCHAR columns; only RANGE predicates don't push by default. The answer conflated "range pushdown limitation" with "general VARCHAR limitation" and incorrectly advised switching to numeric IDs.
+
+Additional gaps: no mention of snapshot expiration risk (expire_snapshots retention may be shorter than 3 months); no mention of domain-compaction-threshold for large build-side IN-lists; no mention of dynamic-filter wait-timeout asymmetry (20s JDBC vs 1s Iceberg) for Iceberg-probe × Postgres-build direction. Internal date inconsistency (2026-02-27 vs 2025-02-27).
+
+**Topics updated**: Trino federation — prior avg 4.430 across 155 questions; (4.430 × 155 + 4.4) / 156 = (686.65 + 4.4) / 156 = **4.430 across 156 questions**. Gap: 0.070.
+
+Verified: trino.io/docs/current/connector/postgresql.html (equality/IN on VARCHAR pushes, range does NOT without enable-string-pushdown-with-collate); trino.io/docs/current/connector/iceberg.html (time-travel syntax, snapshot resolution); trino.io/docs/current/admin/dynamic-filtering.html (cross-catalog DF still works, domain-compaction-threshold); apache/iceberg#8565 (expired snapshots cause FOR TIMESTAMP AS OF to fail).
+
+**Iter 240 average**: (4.8 + 4.4) / 2 = **4.6** — PASS. Q2 failure mode: conflating PostgreSQL VARCHAR range limitation with general VARCHAR limitation, leading to wrong advice about join key schema changes. HIGH priority fix needed: tighten VARCHAR equality-vs-range distinction and add time-travel + federation section with snapshot expiration risk.
+
+---
+
+### Iter 241 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (PostgreSQL predicate pushdown: VARCHAR equality/IN pushes, range/LIKE nuances, EXPLAIN verification)
+
+Score: **4.7** — PASS (above raised 4.5 threshold)
+
+Strong answer reflecting teacher241's HIGH priority fix. All core claims verified: VARCHAR equality (=, IN, !=) unconditionally pushes to PostgreSQL; IS NULL/IS NOT NULL on VARCHAR pushes; timestamp/date range (>, <, >=, <=, BETWEEN) unconditionally pushes; anchored LIKE (LIKE 'prefix%') is collation-dependent (may or may not push); leading-wildcard LIKE (%text%) does NOT push by default. EXPLAIN (TYPE DISTRIBUTED) guidance correct — "constraint on" block = pushed, Filter/ScanFilterProject node above = not pushed. Correctly addressed the iter240 Q2 failure mode by clearly stating VARCHAR equality pushes unconditionally.
+
+Minor gap: "leading-wildcard LIKE doesn't push" slightly simplified — technically the LIKE expression may still be sent to Postgres but without index-eligible selectivity. Not operationally wrong, but technically imprecise.
+
+**Topics updated**: Trino federation — prior avg 4.430 across 156 questions; (4.430 × 156 + 4.7) / 157 = (691.08 + 4.7) / 157 = **4.432 across 157 questions**. Gap: 0.068.
+
+Verified: trino.io/docs/current/connector/postgresql.html (VARCHAR equality/IN pushes; range LIKE caveat); trino.io/docs/current/optimizer/pushdown.html.
+
+---
+
+### Iter 241 Q2 — 2026-05-27 (EXTENDED PHASE) — Iceberg table maintenance (snapshot expiration + time-travel: expire_snapshots failure, tags, retention floors)
+
+Score: **4.75** — PASS (above 3.5 threshold; Iceberg table maintenance topic)
+
+Strong answer reflecting teacher241's time-travel + federation subsection. All key claims verified: expire_snapshots removes snapshot metadata causing FOR TIMESTAMP AS OF to fail (apache/iceberg#8565); history.expire.min-snapshots-to-keep and history.expire.max-snapshot-age-ms are real Iceberg table properties acting as floor; tagged snapshots are immune to expire_snapshots; Trino 467 cannot CREATE tags (Spark-only DDL, trinodb/trino#16695); Trino 467 enforces 7-day minimum-retention floor; $snapshots quoting correct; CREATE TAG ... AS OF VERSION ... RETAIN N DAYS correct Spark DDL. Production-stack fit (Trino 467 + Spark + MinIO) excellent. Three-layer defense ordering (table properties → schedule coordination → tagging) is logical.
+
+Minor gap: no plain-English gloss of "snapshot" for a beginner; did not surface $refs for tag verification or $history for richer audit reconstruction.
+
+**Topics updated**: Iceberg table maintenance — prior avg 4.615 across 15 questions; judge updated to 4.623 across 16 questions (PASSED, updated by judge agent).
+
+Verified: trino.io/docs/current/connector/iceberg.html; apache/iceberg#8565; iceberg.apache.org/docs/latest/branching/; trinodb/trino#16695.
+
+**Iter 241 average**: (4.7 + 4.75) / 2 = **4.725** — PASS. Teacher241's HIGH priority fixes (VARCHAR equality-vs-range callout + time-travel federation subsection) both reflected correctly in answers. Federation gap narrowed to 0.068.
+
+---
+
+### Iter 242 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (domain-compaction-threshold: IN-list collapse to BETWEEN, Iceberg vs JDBC effect)
+
+Score: **4.7** — PASS (above raised 4.5 threshold)
+
+Strong answer. All key claims verified: domain-compaction-threshold default 256; when IN-list has more distinct values than threshold, Trino compacts it to BETWEEN min/max range; Iceberg side still gets file-level min/max pruning (weaker than exact IN-list but present); JDBC/PostgreSQL side receives BETWEEN and returns all rows in range (far more than the specific matching IDs — the real performance culprit); raise threshold in catalog properties file (per-catalog, not config.properties); SET SESSION requires catalog prefix (`app_pg.domain_compaction_threshold`); EXPLAIN ANALYZE VERBOSE shows IN-list vs BETWEEN in dynamicFilters. The SET SESSION catalog-prefix callout directly addressed a prior failure mode.
+
+Minor gap: slight conflation of dynamic-filter-derived vs static IN-list compaction in framing; beginner-clarity gaps on "dynamic filter", "TableScan node", "Parquet min/max statistics" — assumes more OLAP background than the rubric's beginner persona.
+
+**Topics updated**: Trino federation — prior avg 4.432 across 157 questions; (4.432 × 157 + 4.7) / 158 = (695.824 + 4.7) / 158 = **4.434 across 158 questions**.
+
+Verified: trino.io/docs/current/connector/postgresql.html; trino.io/docs/current/admin/dynamic-filtering.html; trinodb/trino discussions #14019 (default threshold too low for JDBC); trinodb/trino PR #6057.
+
+---
+
+### Iter 242 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (cross-catalog INSERT write-back: transaction semantics, temp-table pattern, non-transactional-insert, MERGE version)
+
+Score: **4.75** — PASS (above raised 4.5 threshold)
+
+Strong answer. All key claims verified: Trino PostgreSQL connector supports INSERT, UPDATE, DELETE; INSERT uses temp-table-then-rename pattern by default (atomic — either all rows or none); `insert.non-transactional-insert.enabled=true` bypasses temp-table wrapper (faster but unsafe, leaves partial data on failure); PostgreSQL MERGE not in Trino 467 (added in Release 470); cross-catalog INSERT INTO postgres_catalog SELECT FROM iceberg_catalog works. Production-fit strong: PgBouncer + role-level connection limit, read-replica guardrail.
+
+Minor gaps: didn't name MERGE version cutoff (Release 470); no `merge.non-transactional-merge.enabled` gating flag mention; no EXPLAIN guidance for pushdown verification on cross-catalog JOIN.
+
+**Topics updated**: Trino federation — prior avg 4.434 across 158 questions; (4.434 × 158 + 4.75) / 159 = (700.572 + 4.75) / 159 = **4.436 across 159 questions**. Gap: 0.064.
+
+Verified: trino.io/docs/current/connector/postgresql.html (INSERT/temp-table pattern, non-transactional-insert property); trino.io/docs/current/release/release-470.html (MERGE added in 470); trino.io/docs/current/sql/merge.html.
+
+**Iter 242 average**: (4.7 + 4.75) / 2 = **4.725** — PASS. Consistent ≥4.7 performance; gap narrowed from 0.068 to 0.064. Resource on domain-compaction-threshold and cross-catalog INSERT both well-documented in resource 22.
+
+---
+
+### Iter 243 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (resource groups: separating JDBC federation from Iceberg queries, source selector routing)
+
+Score: **4.8** — PASS (above raised 4.5 threshold)
+
+Strong answer. All key claims verified: `rootGroups` (not `groups`) is the top-level key; `selectors` array with `user`/`queryType`/`source` (regex-supported); `hardConcurrencyLimit`, `softMemoryLimit`, `maxQueued`, `schedulingPolicy` all valid; `resource-groups.properties` wiring with `resource-groups.configuration-manager=file` and `resource-groups.config-file=etc/resource-groups.json` correct; "NOT in config.properties" gotcha correct; `X-Trino-Source` HTTP header correct; `system.runtime.queries` with source/query_id/created columns correct. Practical isolation explanation (hard caps are independent budgets) is the right mental model.
+
+Minor gaps: "groups instead of rootGroups silently fails" slightly overstated — coordinator throws a parse error in logs (not truly silent); doesn't mention `priority` field as selector tuning lever; source-based routing depends on client cooperation (untagged clients fall to catch-all).
+
+**Topics updated**: Trino federation — prior avg 4.436 across 159 questions; (4.436 × 159 + 4.8) / 160 = (705.324 + 4.8) / 160 = **4.438 across 160 questions** (judge applied this update).
+
+Verified: trino.io/docs/current/admin/resource-groups.html; trino.io/docs/current/develop/client-protocol.html (X-Trino-Source); trino.io/docs/current/connector/system.html.
+
+---
+
+### Iter 243 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (query cancellation: JDBC Statement.cancel, statement_timeout; ProxySQL for MySQL vs PgBouncer for PostgreSQL)
+
+Score: **4.8** — PASS (above raised 4.5 threshold)
+
+Strong answer. All key claims verified: JDBC Statement.cancel() sends PostgreSQL CancelRequest → SIGINT → backend termination (Trino PR #7819); `ALTER ROLE ... SET statement_timeout = 1800000` (milliseconds) as worker-crash backstop; PgBouncer is PostgreSQL-only (won't work for MySQL); ProxySQL is the correct MySQL pooler; `prepareThreshold=0` for PgBouncer transaction mode; MySQL `max_execution_time` in MILLISECONDS (300 would be 300ms, not 5min — correctly warned); `WITH MAX_USER_CONNECTIONS N` MySQL syntax correct.
+
+Minor gaps: MySQL JDBC cancel (KILL QUERY) asserted in summary table but not demonstrated in body; ProxySQL + Trino MySQL connector schema-routing limitation (trinodb/trino #18279) not mentioned; "row disappears within seconds" slightly optimistic (lock-blocked backends can delay SIGINT delivery).
+
+**Topics updated**: Trino federation — prior avg 4.438 across 160 questions; (4.438 × 160 + 4.8) / 161 = (710.08 + 4.8) / 161 = **4.440 across 161 questions**. Gap: 0.060.
+
+Verified: pgbouncer.org (PostgreSQL-specific); dev.mysql.com/doc/refman/8.0 (max_execution_time in ms, MAX_USER_CONNECTIONS); proxysql.com; Trino PR #7819.
+
+**Iter 243 average**: (4.8 + 4.8) / 2 = **4.8** — PASS. Consistent high performance; gap narrowed from 0.064 to 0.060. Resource groups and connection pooler content in resource 22 is well-developed and accurately reflected in both answers.
+
+### Iter 244 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (observability: system.runtime.queries, EXPLAIN ANALYZE, predicate pushdown verification)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.440 across 161 questions; new running avg (4.440 × 161 + 4.75) / 162 = (714.84 + 4.75) / 162 = **4.441 across 162 questions**. Status: NEEDS WORK (4.441 < 4.5 raised threshold). Gap: 0.059.
+
+**Key findings**: Three-part structure cleanly mapped to the engineer's sub-questions (real-time queries, I/O vs compute, pushdown verification). `system.runtime.queries` correctly identified as pg_stat_activity equivalent. QUEUED-vs-RUNNING distinction excellent. Predicate pushdown rules verified correct: equality/IN/NULL/dynamic filters push down; VARCHAR range does NOT. Technical accuracy docked: EXPLAIN ANALYZE VERBOSE pushdown-check narrative described `TableScan [connectorId=app_pg...]` showing pushed predicate — the canonical check per trino.io/docs/current/optimizer/pushdown.html is absence of ScanFilterProject above the table scan, not reading VERBOSE text output. Also `system.runtime.tasks` column list (physical_input_bytes, split_cpu_time_ms) is plausible but not fully documented in public Trino docs for 467.
+
+Verified: trino.io/docs/current/connector/system.html, trino.io/docs/current/sql/explain-analyze.html, trino.io/docs/current/connector/postgresql.html, trino.io/docs/current/optimizer/pushdown.html.
+
+### Iter 244 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (ingest vs federate decision: 500M Iceberg × 50M Postgres join, dynamic filtering, freshness SLO framework)
+**Score:** 4.375 / 5 (FAIL — threshold 4.5, missed by 0.125)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 3.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.375** |
+
+**Topics updated**: Trino federation — prior avg 4.441 across 162 questions; new running avg (4.441 × 162 + 4.375) / 163 = (719.442 + 4.375) / 163 = **4.441 across 163 questions**. Status: NEEDS WORK (4.441 < 4.5 raised threshold). Gap: 0.059.
+
+**Key findings**: Excellent decision framework (measure-first approach, concrete observable signals, scenario-verdict table, hybrid view pattern). Freshness SLO as the single driving factor is correct and well-articulated. CRITICAL technical error: dynamic filtering direction reversed. Answer claims Trino builds an IN-list from the 500M event log and pushes it to Postgres. WRONG direction — CBO picks the SMALLER table (50M Postgres customers) as the build side; dynamic filter flows FROM Postgres's hash table INTO the Iceberg event log (probe side) to prune Iceberg files before scanning. Also: domain-compaction-threshold (default 256) not mentioned — IN-lists above threshold collapse to BETWEEN ranges, which then collide with VARCHAR range-pushdown limitation. "Trino will stream the probe side" mischaracterizes partitioned-join shuffle (both sides get hash-redistributed). No production-fit framing (Trino 467 / Spark / HMS / MinIO stack not acknowledged).
+
+Verified: trino.io/docs/current/admin/dynamic-filtering.html (DF flows from build side to probe side; smaller table = build side), trino.io/docs/current/optimizer/cost-based-optimizations.html, trino.io/docs/current/connector/postgresql.html.
+
+**HIGH PRIORITY teacher fix required**: `resources/22-trino-federation-postgresql.md` — add "Which side is the build side?" subsection with the CBO rule (smaller table → build side → source of dynamic filter pushed INTO probe side). For the canonical SaaS shape (small Postgres dim + large Iceberg fact): DF flows FROM Postgres scan INTO Iceberg scan. Make this unmissable; the reversed mental model has now surfaced and produced a FAIL.
+
+**Iter 244 average**: (4.75 + 4.375) / 2 = **4.5625** — PASS on average. Gap remains 0.059. Dynamic filtering direction error is the highest priority fix before iter245.
+
+### Iter 245 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (EXPLAIN ANALYZE VERBOSE interpretation: CPU vs Scheduled, Physical Input, ScanFilterProject check, DF direction)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.441 across 163 questions; new running avg (4.441 × 163 + 4.75) / 164 = (723.883 + 4.75) / 164 = **4.443 across 164 questions**. Status: NEEDS WORK (4.443 < 4.5 raised threshold). Gap: 0.057.
+
+**Key findings**: Dynamic filtering direction finally CORRECT after iter244 fix — smaller Postgres = build side, filter pushed INTO Iceberg probe side. ScanFilterProject canonical check verified per pushdown.html. CPU vs Scheduled gap diagnosis correct. VERBOSE-runs-query warning included and valuable. Minor accuracy issues: "Physical Input = compressed bytes" imprecise for JDBC (not storage-format compressed); 250x Physical/logical ratio example unrealistic for JDBC context. Beginner clarity docked for oversimplified magnitude example.
+
+Verified: trino.io/docs/current/sql/explain-analyze.html, trino.io/docs/current/optimizer/pushdown.html, trino.io/docs/current/connector/postgresql.html, trino.io/docs/current/admin/dynamic-filtering.html.
+
+### Iter 245 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (MySQL vs PostgreSQL: VARCHAR pushdown asymmetry, dynamic filtering, JDBC gotchas)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 4 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.443 across 164 questions; new running avg (4.443 × 164 + 4.75) / 165 = (728.652 + 4.75) / 165 = **4.445 across 165 questions**. Status: NEEDS WORK (4.445 < 4.5 raised threshold). Gap: 0.055.
+
+**Key findings**: Core technical claims all verified: MySQL connector pushes ZERO VARCHAR predicates (collation correctness reason); PostgreSQL pushes equality/IN/!= on text. Silent-degradation framing is exactly right. DF on VARCHAR join key won't push into MySQL — non-obvious and verified. JDBC timeout unit difference (MySQL ms vs PostgreSQL s) verified. SSL property name differences verified. Summary table accurate. Beginner clarity docked: "dynamic filtering," "build side," "probe side," "co-predicate" introduced without definition. Missing: MySQL 1-split-per-table limitation; domain-compaction-threshold; EXPLAIN ANALYZE diagnostic pointer.
+
+Verified: trino.io/docs/current/connector/mysql.html, trino.io/docs/current/connector/postgresql.html, trino.io/docs/current/optimizer/pushdown.html, dev.mysql.com/doc/connector-j/en, trinodb/trino PR #6753 (MySQL VARCHAR pushdown disabled for collation correctness).
+
+**Iter 245 average**: (4.75 + 4.75) / 2 = **4.75** — PASS. Gap narrowed from 0.059 → 0.055. Back-to-back 4.75 after teacher245 fixed dynamic filtering direction confirms fix landed and responder now has correct mental model.
+
+### Iter 246 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (PostgreSQL metadata caching: metadata.cache-ttl, flush_metadata_cache, schema migration runbook)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5 |
+| Completeness | 4.5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.445 across 165 questions; new running avg (4.445 × 165 + 4.75) / 166 = (733.425 + 4.75) / 166 = **4.447 across 166 questions**. Status: NEEDS WORK (4.447 < 4.5 raised threshold). Gap: 0.053.
+
+**Key findings**: All technical claims verified against trino.io/docs/467/connector/postgresql.html — metadata.cache-ttl default=0s correct; flush_metadata_cache() procedure syntax correct; metadata.cache-missing default=false correct. Immediately actionable diagnosis and fix. TTL=0s vs TTL=60s trade-off table clearly organized. "Changing TTL itself requires catalog reload" is an important subtle distinction. Minor gaps: alternate `USE catalog.schema; CALL system.flush_metadata_cache()` form not shown; metadata.cache-missing rationale not explained; no nudge to bake flush into migration runbook.
+
+### Iter 246 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (JDBC 1-split-per-table: single-worker PostgreSQL scan, no parallelism, architectural ceiling vs config problem)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 4 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.447 across 166 questions; new running avg (4.447 × 166 + 4.75) / 167 = (738.202 + 4.75) / 167 = **4.449 across 167 questions**. Status: NEEDS WORK (4.449 < 4.5 raised threshold). Gap: 0.051.
+
+**Key findings**: Correct root-cause diagnosis — OSS Trino 467 PostgreSQL connector emits 1 split per non-partitioned table scan; not a config problem. trinodb/trino#389 correctly cited (open since 2019). Dynamic filtering direction correct (small Postgres = build side, large Iceberg = probe side). No native JDBC connection pooling in OSS Trino 467 verified. Four ranked solutions correct and fit on-prem stack. Minor: "split," "build side," "probe side," "dynamic filtering" introduced without beginner glosses; fetchsize as partial mitigation not mentioned.
+
+Verified: trino.io/docs/current/connector/postgresql.html, trinodb/trino#389, trino.io/docs/current/admin/dynamic-filtering.html.
+
+**Iter 246 average**: (4.75 + 4.75) / 2 = **4.75** — PASS. Gap narrowed from 0.055 → 0.051. Fourth consecutive iteration at 4.75 average. Topic closing in on threshold steadily.
+
+### Iter 247 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (JSONB columns in federated Postgres: unsupported-type-handling, type mapping, diagnostic flow)
+**Score:** 4.0 / 5 (PASS general ≥3.5 / FAIL Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4 |
+| Beginner clarity | 4 |
+| Practical applicability | 4 |
+| Completeness | 4 |
+| **Average** | **4.0** |
+
+**Topics updated**: Trino federation — prior avg 4.449 across 167 questions; new running avg (4.449 × 167 + 4.0) / 168 = (742.983 + 4.0) / 168 = **4.446 across 168 questions**. Status: NEEDS WORK (4.446 < 4.5 raised threshold). Gap: 0.054.
+
+**Key findings**: Correct headline (JSONB IS supported, maps to JSON type). Good instinct to run DESCRIBE first. system.query() escape hatch syntactically correct. Iceberg denorm recommendation fits prod stack. CRITICAL miss: never named `postgresql.unsupported-type-handling` property (default=IGNORE silently drops unsupported columns from schema; CONVERT_TO_VARCHAR makes them readable as text). Actual "JSONB-related" errors almost always caused by ADJACENT unsupported column types (enums, hstore, ranges, citext, timestamp-tz arrays), not JSONB itself. With IGNORE active, `DESCRIBE` won't show the missing column — diagnostic advice misleads engineer. Also: Option 1 heading says "Exclude the JSONB column" but example INCLUDES it via json_extract_scalar — contradictory and confusing.
+
+Verified: trino.io/docs/current/connector/postgresql.html (unsupported-type-handling property), pgJDBC docs.
+
+### Iter 247 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (SSL/TLS for PostgreSQL connector: JDBC URL params, CA cert mounting, sslmode, pg_stat_ssl verification)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.446 across 168 questions; new running avg (4.446 × 168 + 4.75) / 169 = (746.928 + 4.75) / 169 = **4.448 across 169 questions**. Status: NEEDS WORK (4.448 < 4.5 raised threshold). Gap: 0.052.
+
+**Key findings**: Correct primary mechanism (JDBC URL params on connection-url). CA cert in PEM format accepted for sslrootcert. K8s Secret + volumeMount example fits on-prem k8s prod environment. Critical operational callout — CA must be mounted on coordinator AND all workers. pg_stat_ssl JOIN pg_stat_activity verification query correct and most direct. SSL mode comparison table accurate; verify-full correctly recommended for production. mTLS section appropriately framed as "if required." Minor: with PKCS-12, sslcert parameter is ignored (cert from .p12 file); answer sets both sslcert and sslkey to client.p12 which works but is redundant.
+
+Verified: trino.io/docs/current/connector/postgresql.html, pgJDBC SSL docs (https://jdbc.postgresql.org/documentation/ssl/).
+
+**Iter 247 average**: (4.0 + 4.75) / 2 = **4.375** — FAIL. Gap widened slightly from 0.051 → 0.052 due to Q1 FAIL on missing unsupported-type-handling property. HIGH PRIORITY: add unsupported-type-handling diagnostic flow to resource 22 before iter248.
+
+### Iter 248 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (unsupported PostgreSQL column types: enum silently dropped, unsupported-type-handling=IGNORE, CONVERT_TO_VARCHAR fix)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.448 across 169 questions; new running avg (4.448 × 169 + 4.75) / 170 = (751.712 + 4.75) / 170 = **4.450 across 170 questions**. Status: NEEDS WORK (4.450 < 4.5 raised threshold). Gap: 0.050.
+
+**Key findings**: Correct root cause — `postgresql.unsupported-type-handling=IGNORE` default silently drops unsupported columns. Beginner trap correctly called out (expect error, get silent missing column). CONVERT_TO_VARCHAR fix correct. Session property syntax verified correct. system.query() escape hatch correctly included. JSONB clarification accurate. Minor accuracy concerns: answer too confidently asserts enum culprit must be an ADJACENT column (enum itself can fail in some schema configurations); no mention of coordinator debug logging (io.trino.plugin.jdbc DEBUG) for direct identification; didn't address engineer's explicit caching hypothesis (metadata.cache-ttl defaults to 0s — should be dismissed).
+
+Verified: trino.io/docs/current/connector/postgresql.html (unsupported-type-handling property, default=IGNORE, CONVERT_TO_VARCHAR option, PostgreSQL enum → VARCHAR mapping).
+
+### Iter 248 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (Trino resource groups: workload isolation for ETL vs ad-hoc federated queries, selectors, hardConcurrencyLimit)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.450 across 170 questions; new running avg (4.450 × 170 + 4.75) / 171 = (756.500 + 4.75) / 171 = **4.452 across 171 questions**. Status: NEEDS WORK (4.452 < 4.5 raised threshold). Gap: 0.048.
+
+**Key findings**: `rootGroups` JSON key correct (not `groups` — common pitfall called out). Selector fields (user, source, queryType) verified correct. hardConcurrencyLimit, maxQueued, softMemoryLimit properties correct. Source field client-side wiring (CLI --source, JDBC URL, Spark props) practical and correct. system.runtime.queries verification approach correct. ConfigMap mounting fits k8s prod environment. Hot-reload caveat (coordinator restart required) correct. Two accuracy issues: (1) `schedulingPolicy: "fifo"` is NOT a valid value — valid options are fair, weighted_fair, weighted, query_priority; (2) resource_group_id is array(varchar) not scalar string.
+
+Verified: trino.io/docs/current/admin/resource-groups.html.
+
+**Iter 248 average**: (4.75 + 4.75) / 2 = **4.75** — PASS. Gap narrowed from 0.052 → 0.048. Fifth consecutive iteration where both questions passed. At current pace (~0.004 per iter), need ~12 more questions at 4.75 to cross 4.5 threshold.
+
+### Iter 249 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (coordinator debug logging for federated queries: io.trino.plugin.jdbc=DEBUG, EXPLAIN ANALYZE pushdown diagnosis, ScanFilterProject pattern)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.452 across 171 questions; new running avg (4.452 × 171 + 4.75) / 172 = (761.292 + 4.75) / 172 = **4.454 across 172 questions**. Status: NEEDS WORK (4.454 < 4.5 raised threshold). Gap: 0.046.
+
+**Key findings**: `io.trino.plugin.jdbc=DEBUG` in log.properties correctly identified as fastest diagnostic — shows exact SQL sent to Postgres. ScanFilterProject above TableScan = pushdown failed heuristic verified correct. EXPLAIN (TYPE DISTRIBUTED) vs EXPLAIN ANALYZE distinction useful. `postgresql.experimental.enable-string-pushdown-with-collate` property name correct. k8s log access guidance practical. One factual error: dynamic filtering wait timeout written as `dynamic-filtering.wait-timeout` (missing connector name prefix) — correct property is `iceberg.dynamic-filtering.wait-timeout` when set as catalog config.
+
+Verified: trino.io/docs/current/admin/logging.html, trino.io/docs/current/connector/postgresql.html, trino.io/docs/current/connector/iceberg.html, trino.io/docs/current/optimizer/pushdown.html, trino.io/docs/current/admin/dynamic-filtering.html.
+
+### Iter 249 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (cross-catalog join limits: Iceberg + Postgres + MySQL, 1-split JDBC limitation, trinodb#389, performance strategies)
+**Score:** 4.875 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **4.875** |
+
+**Topics updated**: Trino federation — prior avg 4.454 across 172 questions; new running avg (4.454 × 172 + 4.875) / 173 = (766.088 + 4.875) / 173 = **4.456 across 173 questions**. Status: NEEDS WORK (4.456 < 4.5 raised threshold). Gap: 0.044.
+
+**Key findings**: No hard limit on cross-catalog joins correctly stated. 1-split-per-table architectural fact for JDBC correctly explained; trinodb/trino#389 citation verified correct. query.max-planning-time property verified correct. MySQL socketTimeout ms vs Postgres seconds timeout unit difference verified accurate and well-flagged. dynamic-filtering.wait-timeout verified. Three ranked strategies (dynamic filtering, snapshot to Iceberg, keep JDBC small) correct. Minor: "4-8 minutes planning" and "50K-200K rows/sec" presented without "varies widely" caveats; catalog-property prefix convention for dynamic-filtering.wait-timeout could be clarified.
+
+Verified: trinodb/trino#389, trino.io/docs/current/admin/properties-query-management.html, trino.io/docs/current/admin/dynamic-filtering.html, trino.io/docs/current/connector/iceberg.html.
+
+**Iter 249 average**: (4.75 + 4.875) / 2 = **4.8125** — PASS. Gap narrowed from 0.048 → 0.044. Sixth consecutive iteration with both questions passing. iter249 Q2 is the highest single score (4.875) in recent history.
+
+### Iter 250 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (dynamic filtering property prefix: iceberg.dynamic-filtering.wait-timeout, silent ignore, session property underscores)
+**Score:** 5.0 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **5.0** |
+
+**Topics updated**: Trino federation — prior avg 4.456 across 173 questions; new running avg (4.456 × 173 + 5.0) / 174 = (770.888 + 5.0) / 174 = **4.459 across 174 questions**. Status: NEEDS WORK (4.459 < 4.5 raised threshold). Gap: 0.041.
+
+**Key findings**: Correctly identified root cause — bare `dynamic-filtering.wait-timeout` in iceberg.properties silently ignored because lakehouse connectors require `iceberg.` prefix. Both forms correct: catalog property `iceberg.dynamic-filtering.wait-timeout=20s` (hyphens, with prefix); session property `SET SESSION iceberg.dynamic_filtering_wait_timeout = '20s'` (underscores, catalog name). JDBC vs lakehouse asymmetry table accurate (PostgreSQL/MySQL use bare form without prefix). Silent-ignore behavior explicitly called out. Tied back to federation scenario (Iceberg is probe side waiting for Postgres build). All claims verified.
+
+Verified: trino.io/docs/current/connector/iceberg.html, connector/postgresql.html, sql/set-session.html, admin/dynamic-filtering.html.
+
+### Iter 250 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (ANALYZE TABLE for CBO join ordering: Iceberg Puffin NDV vs Postgres pg_stats, build/probe rule, SHOW STATS FOR, flush_metadata_cache)
+**Score:** 5.0 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **5.0** |
+
+**Topics updated**: Trino federation — prior avg 4.459 across 174 questions; new running avg (4.459 × 174 + 5.0) / 175 = (775.866 + 5.0) / 175 = **4.462 across 175 questions**. Status: NEEDS WORK (4.462 < 4.5 raised threshold). Gap: 0.038.
+
+**Key findings**: Iceberg ANALYZE writes Puffin files with NDV Theta sketch estimates — correct. Trino ANALYZE does NOT work on PostgreSQL connector (must use native Postgres ANALYZE) — correctly stated. Postgres connector reads from pg_stats during planning — correct. Build/probe side rule (smaller = build; DF flows build→probe) — correct. 5-step diagnostic (ANALYZE→verify pg_stats→flush cache→SHOW STATS FOR→EXPLAIN with rows:/Join[BROADCAST]) — all correct. flush_metadata_cache() syntax correct. Minor omissions: join_distribution_type session override not mentioned; ANALYZE on replica vs primary replication caveat absent.
+
+Verified: trino.io/docs/current/connector/iceberg.html, connector/postgresql.html, optimizer/statistics.html, sql/show-stats.html, optimizer/cost-based-optimizations.html, admin/dynamic-filtering.html, iceberg.apache.org/puffin-spec/.
+
+**Iter 250 average**: (5.0 + 5.0) / 2 = **5.0** — PASS. First ever perfect-score iteration. Gap narrowed from 0.044 → 0.038. Seventh consecutive iteration with both questions passing. Largest single-iteration gap reduction since the topic was flagged NEEDS WORK.
+
+### Iter 251 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (ANALYZE on Postgres replica vs primary: where to run ANALYZE for Trino statistics)
+**Score:** 2.0 / 5 (PASS general ≥3.5 / FAIL Trino federation raised threshold ≥4.5) — FAIL
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 1 |
+| Beginner clarity | 4 |
+| Practical applicability | 1 |
+| Completeness | 2 |
+| **Average** | **2.0** |
+
+**Topics updated**: Trino federation — prior avg 4.462 across 175 questions; new running avg (4.462 × 175 + 2.0) / 176 = (780.850 + 2.0) / 176 = **4.448 across 176 questions**. Status: NEEDS WORK (4.448 < 4.5 raised threshold). Gap: 0.052.
+
+**Key findings**: CRITICALLY WRONG core thesis — answer instructed engineer to "run ANALYZE directly on the read replica" with a cron job, but PostgreSQL hot standbys in recovery mode reject ANALYZE (read-only). The command will fail every night. ANALYZE on the primary IS the correct approach — `pg_statistic` is a regular heap table replicated via WAL to the standby. The answer also self-contradicts: claims "streaming replication DOES replicate pg_statistic via WAL" and simultaneously says "replica is stale because autovacuum is disabled." Both cannot be true. Root cause of stale Trino stats after primary ANALYZE: (1) replication lag, (2) Trino metadata cache (flush it), (3) low statistics_target. Only correct parts: flush_metadata_cache() syntax and metadata.cache-ttl default. This error was introduced by teacher251 adding wrong callout to resource 22 — must be corrected before iter252.
+
+Verified: postgresql.org/docs/current/hot-standby.html (ANALYZE rejected during recovery), postgresql.org/docs/current/catalog-pg-statistic.html (pg_statistic is a heap table replicated via WAL).
+
+### Iter 251 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (join_distribution_type session override: force BROADCAST join, safety matrix, EXPLAIN verification)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.448 across 176 questions; new running avg (4.448 × 176 + 4.75) / 177 = (782.848 + 4.75) / 177 = **4.450 across 177 questions**. Status: NEEDS WORK (4.450 < 4.5 raised threshold). Gap: 0.050.
+
+**Key findings**: `SET SESSION join_distribution_type = 'BROADCAST'` correct. Broadcast vs partitioned model accurate. `join_reordering_strategy` and `join_max_broadcast_table_size` properties correct. Safety matrix well-reasoned. `RESET SESSION` syntax correct. Fits on-prem stack. ONE ACCURACY ERROR: EXPLAIN output label wrong — answer says look for `Join[BROADCAST]` / `Join[PARTITIONED]` but actual Trino EXPLAIN shows `Distribution: REPLICATED` (broadcast) and `Distribution: PARTITIONED` on the join node.
+
+Verified: trino.io/docs/current/sql/explain.html, trino.io/docs/current/optimizer/cost-based-optimizations.html, trino.io/docs/current/admin/dynamic-filtering.html.
+
+**Iter 251 average**: (2.0 + 4.75) / 2 = **3.375** — FAIL. Gap widened from 0.038 → 0.050 due to Q1 FAIL on critical wrong advice. Teacher251 introduced incorrect "run ANALYZE on replica" callout that contradicts PostgreSQL hot standby behavior. CRITICAL: must fix resource 22 before iter252.
+
+### Iter 252 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (ANALYZE on Postgres primary: WAL propagation to hot standby, replication lag check, Trino metadata cache flush)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 4 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.450 across 177 questions; new running avg (4.450 × 177 + 4.75) / 178 = (787.650 + 4.75) / 178 = **4.452 across 178 questions**. Status: NEEDS WORK (4.452 < 4.5 raised threshold). Gap: 0.048.
+
+**Key findings**: Correctly contradicts iter251 error — ANALYZE on primary IS the right approach; pg_statistic IS replicated via WAL; hot standbys reject ANALYZE (read-only during recovery). 4-step diagnostic flow (replication lag → Trino metadata cache → SHOW STATS → EXPLAIN estimates) all verified correct. flush_metadata_cache() syntax correct. `now() - pg_last_xact_replay_timestamp()` replication lag check correct. statistics_target syntax correct. Minor beginner clarity gap: CBO, WAL, NDV introduced without inline glosses.
+
+Verified: postgresql.org/docs/current/hot-standby.html, postgresql.org/docs/current/catalog-pg-statistic.html, trino.io/docs/current/connector/postgresql.html.
+
+### Iter 252 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (EXPLAIN Distribution labels: Distribution:REPLICATED=broadcast, Distribution:PARTITIONED=hash-shuffle, RemoteExchange formats)
+**Score:** 4.75 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.452 across 178 questions; new running avg (4.452 × 178 + 4.75) / 179 = (792.456 + 4.75) / 179 = **4.453 across 179 questions**. Status: NEEDS WORK (4.453 < 4.5 raised threshold). Gap: 0.047.
+
+**Key findings**: Distribution:REPLICATED = broadcast join correctly identified. Distribution:PARTITIONED = hash-shuffle correctly described. RemoteExchange[REPLICATE, BROADCAST, []] and [REPARTITION, HASH, [col]] formats verified correct. Data movement explanation accurate. join_max_broadcast_table_size default ~100MB verified. ONE ACCURACY ISSUE: EXPLAIN example snippet shows RemoteExchange[REPARTITION, HASH, [user_id]] on the probe side (Iceberg) with comment "no shuffle in broadcast mode" — self-contradictory. In a true broadcast join, the probe side has NO repartition exchange; it scans locally. Must fix the example in resource 22.
+
+Verified: trino.io/docs/current/sql/explain.html, trino.io/docs/current/optimizer/cost-based-optimizations.html, trino.io/docs/current/admin/dynamic-filtering.html.
+
+**Iter 252 average**: (4.75 + 4.75) / 2 = **4.75** — PASS. Gap narrowed from 0.050 → 0.047. Recovery from iter251 FAIL. HIGH PRIORITY: fix broadcast join EXPLAIN example in resource 22 (probe side incorrectly shows REPARTITION in broadcast mode).
+
+### Iter 253 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (broadcast join EXPLAIN full plan tree: probe side has NO REPARTITION exchange, build side has REPLICATE/BROADCAST, LocalExchange is in-worker)
+**Score:** 4.85 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **4.85** |
+
+**Topics updated**: Trino federation — prior avg 4.453 across 179 questions; new running avg (4.453 × 179 + 4.85) / 180 = (797.087 + 4.85) / 180 = **4.455 across 180 questions**. Status: NEEDS WORK (4.455 < 4.5 raised threshold). Gap: 0.045.
+
+**Key findings**: Correctly stated probe side (Iceberg events) has NO RemoteExchange[REPARTITION, HASH] in broadcast mode — directly addresses the core of the question and confirms coworker's mental model. Broadcast marker RemoteExchange[REPLICATE, BROADCAST, []] above build (Postgres) correctly identified. LocalExchange[HASH] correctly explained as in-worker/non-network. Diagnostic rule (broadcast = 1 REPLICATE + GATHER; partitioned = 2 REPARTITION + GATHER) correct and actionable. All three causes of unwanted PARTITIONED (missing stats, size exceeds join_max_broadcast_table_size, forced distribution) covered. join_max_broadcast_table_size default 100MB correct. Minor nits: no explicit mention of EXPLAIN (TYPE DISTRIBUTED) variant, slight MinIO locality overstatement. Section 5.5.3 fix was effective.
+
+Verified: trino.io/docs/current/sql/explain.html, trino.io/docs/current/optimizer/cost-based-optimizations.html, trino.io/docs/current/admin/dynamic-filtering.html.
+
+### Iter 253 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (federated query timeout coordination: Postgres statement_timeout vs Trino query.max-execution-time vs query.max-run-time, verbatim error strings, innermost-to-outermost ordering)
+**Score:** 4.90 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 5 |
+| Practical applicability | 4.5 |
+| Completeness | 5 |
+| **Average** | **4.90** |
+
+**Topics updated**: Trino federation — prior avg 4.455 across 180 questions; new running avg (4.455 × 180 + 4.90) / 181 = (802.10 + 4.90) / 181 = **4.458 across 181 questions**. Status: NEEDS WORK (4.458 < 4.5 raised threshold). Gap: 0.042.
+
+**Key findings**: All three verbatim error strings correctly identified (Postgres: `ERROR: canceling statement due to statement timeout`; Trino: `Query exceeded maximum time limit of Xm`; JDBC: `java.net.SocketTimeoutException: Read timed out`). Correct innermost→outermost timeout ordering. Correct "Trino LONGER than Postgres" recommendation with right rationale (statement_timeout preserves JDBC connection; socketTimeout discards it — verified against pgjdbc docs). Accurate query.max-execution-time (active compute only) vs query.max-run-time (total wall-clock including queue) distinction with concrete 9-min-queue/1-min-execute example. Correct ALTER ROLE and pg_stat_activity snippets. Minor gap: JDBC socketTimeout location in catalog properties file not specified; query.max-planning-time not mentioned as third max-time property.
+
+Verified: trino.io/docs/current/admin/properties-query-management.html, pgjdbc issue #1461, Scout24 socketTimeout article.
+
+**Iter 253 average**: (4.85 + 4.90) / 2 = **4.875** — PASS. Gap narrowed from 0.047 → 0.042. Strong iteration — teacher253's Section 5.5.3 fix (full broadcast plan tree with correct probe-side: no REPARTITION) directly enabled the Q1 score. Q2 timeout-coordination is new topic coverage for this topic.
+
+### Iter 254 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation (predicate pushdown verification: EXPLAIN method, LIKE behavior — anchored may push, non-anchored never pushes, ILIKE never pushes)
+**Score:** 4.85 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 5 |
+| Practical applicability | 4.5 |
+| Completeness | 4.5 |
+| **Average** | **4.85** |
+
+**Topics updated**: Trino federation — prior avg 4.458 across 181 questions; new running avg (4.458 × 181 + 4.85) / 182 = (806.898 + 4.85) / 182 = **4.461 across 182 questions**. Status: NEEDS WORK (4.461 < 4.5 raised threshold). Gap: 0.039.
+
+**Key findings**: "Two paths" framing (1 row vs 1M rows over network) clear and beginner-friendly. Equality/IN/IS NULL push to Postgres — correct per trino.io docs. Non-anchored LIKE never pushes — correct. ILIKE never pushes — correct. Anchored LIKE "MAYBE — verify with EXPLAIN" — operationally correct given collation variability. EXPLAIN verification rule (predicate inside TableScan constraint = pushed; ScanFilterProject above = not pushed) matches official pushdown docs. pg_stat_activity and slow log as ground-truth verification — correct. system.query() escape hatch — correct syntax. Minor gaps: domain_compaction_threshold for long IN lists not mentioned; could be more direct about anchored LIKE typical behavior.
+
+Verified: trino.io/docs/current/connector/postgresql.html, trino.io/docs/current/optimizer/pushdown.html, PR #9746 (string range pushdown), PR #11045 (LIKE pushdown).
+
+### Iter 254 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation (query planning bottleneck: planning phase is real, query.max-planning-time default 10min, how to identify via Trino UI / system.runtime.queries, distinction from max-execution-time / max-run-time)
+**Score:** 4.85 / 5 (PASS general ≥3.5 / PASS Trino federation raised threshold ≥4.5)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 5 |
+| Practical applicability | 4.5 |
+| Completeness | 5 |
+| **Average** | **4.85** |
+
+**Topics updated**: Trino federation — prior avg 4.461 across 182 questions; new running avg (4.461 × 182 + 4.85) / 183 = (811.902 + 4.85) / 183 = **4.462 across 183 questions**. Status: NEEDS WORK (4.462 < 4.5 raised threshold). Gap: 0.038.
+
+**Key findings**: Planning phase correctly described (coordinator-only, before execution, includes metadata fetch and CBO). query.max-planning-time default 10 minutes — correct per trino.io docs. Error string "Query exceeded maximum planning time" distinct from execution timeout — correct. Session property query_max_planning_time (system-level, no catalog prefix) — correct. Three-way distinction (max-planning-time / max-execution-time / max-run-time) with correct queue-wait nuance — clear and accurate. System.runtime.queries planning_time_ms and Trino UI timeline — practical identification methods. ANALYZE on Postgres PRIMARY (not read replica) with hot-standby warning — correct. metadata.cache-ttl fix — correct with location (catalog properties file). Minor gaps: SHOW SESSION LIKE 'query_max%' example output columns slightly misaligned; system.runtime.queries retention caveat slightly over-simplified.
+
+Verified: trino.io/docs/current/admin/properties-query-management.html.
+
+**Iter 254 average**: (4.85 + 4.85) / 2 = **4.85** — PASS. Gap narrowed from 0.042 → 0.038. Both questions on new topic angles (LIKE pushdown verification, planning phase timeout) that hadn't been covered yet. Steady progress.
+
+---
+
+### Iter 255 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (domain_compaction_threshold: IN-list collapse to BETWEEN for large tenant ID lists)
+
+**Score**: 4.9 / 5.0 — PASS
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Clarity for SaaS engineer | 5 |
+| Practical applicability | 4.8 |
+| Completeness | 4.9 |
+| **Average** | **4.9** |
+
+**Topics updated**: Trino federation — prior avg 4.462 across 183 questions; new running avg (4.462 × 183 + 4.9) / 184 = (816.546 + 4.9) / 184 = **4.464 across 184 questions**.
+
+**Key findings**: domain_compaction_threshold default 256 correctly stated. IN-to-BETWEEN compaction behavior explained clearly with multi-tenant impact. SET SESSION syntax with mandatory catalog prefix correct. Underscore-vs-hyphen distinction for session vs catalog property name correct. EXPLAIN constraint block diagnostic (IN vs BETWEEN) correctly described. pg_stat_activity ground-truth check included. Tuning guidance (1024 for typical cohorts) reasonable. Minor gap: integer tenant IDs shown quoted in EXPLAIN snippet.
+
+Verified: trino.io/docs/current/connector/postgresql.html — domain_compaction_threshold default 256 confirmed.
+
+---
+
+### Iter 255 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (PgBouncer + Trino JDBC: transaction mode, prepareThreshold=0, separate pools)
+
+**Score**: 4.9 / 5.0 — PASS
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Clarity for SaaS engineer | 5 |
+| Practical applicability | 4.8 |
+| Completeness | 4.8 |
+| **Average** | **4.9** |
+
+**Topics updated**: Trino federation — prior avg 4.464 across 184 questions; new running avg (4.464 × 184 + 4.9) / 185 = (821.376 + 4.9) / 185 = **4.467 across 185 questions**. Status: NEEDS WORK (4.467 < 4.5 raised threshold). Gap: 0.033.
+
+**Key findings**: PgBouncer transaction mode diagnosis correct (connection-scoped prepared statements, backend rotation breaks them). prepareThreshold=0 fix correctly placed in JDBC URL in etc/catalog/app_pg.properties. PgBouncer 1.21+ max_prepared_statements alternative verified (October 2023 release). 1-split/1-connection model for non-partitioned Postgres tables in OSS Trino correct. Separate pools recommended (transaction mode for Trino, session mode for app) — correct and actionable. Four-layer connection defense (PgBouncer pool_size, Postgres role CONNECTION LIMIT, Trino resource groups, statement_timeout) practical.
+
+Verified: trino.io/docs/current/connector/postgresql.html; pgbouncer.org/faq; pgbouncer.org/2023/10/pgbouncer-1-21-0.
+
+**Iter 255 average**: (4.9 + 4.9) / 2 = **4.9** — PASS. Gap narrowed from 0.038 → 0.033. Both new topic angles (domain_compaction_threshold static IN-lists, PgBouncer connection pooling modes) covered cleanly. Continued strong progress.
+
+---
+
+### Iter 256 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (dynamic filtering: build→probe IN-list delivery, EXPLAIN verification, domain_compaction_threshold interaction)
+
+**Score**: 4.7 / 5.0 — PASS
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 4.8 |
+| Clarity for SaaS engineer | 4.8 |
+| Practical applicability | 4.6 |
+| Completeness | 4.6 |
+| **Average** | **4.7** |
+
+**Topics updated**: Trino federation — prior avg 4.467 across 185 questions; new running avg (4.467 × 185 + 4.7) / 186 = (826.395 + 4.7) / 186 = **4.468 across 186 questions**.
+
+**Key findings**: Dynamic filtering mechanism (build→probe, IN-list delivery at runtime) correctly explained. dynamicFilters annotation in EXPLAIN TableScan node correct. dynamicFilterSplitsProcessed in EXPLAIN ANALYZE for runtime proof correct. Domain_compaction_threshold interaction (large DF IN-lists collapse to BETWEEN) correctly described with consequences for Iceberg and Postgres probes. pg_stat_activity ground-truth check included. CBO direction logic (small=build, large=probe) explained well for SaaS engineer.
+
+Verified: trino.io/docs/current/admin/dynamic-filtering.html — dynamic filtering mechanism confirmed.
+
+---
+
+### Iter 256 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (federated INSERT INTO Iceberg from cross-catalog join: atomicity, failure modes, type compatibility, incremental refresh)
+
+**Score**: 4.9 / 5.0 — PASS
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Clarity for SaaS engineer | 5 |
+| Practical applicability | 4.8 |
+| Completeness | 4.8 |
+| **Average** | **4.9** |
+
+**Topics updated**: Trino federation — prior avg 4.468 across 186 questions; new running avg (4.468 × 186 + 4.9) / 187 = (831.048 + 4.9) / 187 = **4.471 across 187 questions**. Status: NEEDS WORK (4.471 < 4.5 raised threshold). Gap: 0.029.
+
+**Key findings**: Cross-catalog INSERT INTO Iceberg while SELECT-ing from Postgres + Iceberg in one statement confirmed correct. Three-phase lifecycle (HMS registration → Parquet files staged invisibly → atomic metadata pointer swap) accurately described. Failure modes (orphan files, no partial commit) correct. remove_orphan_files procedure with 7-day minimum retention threshold correct. Type compatibility matrix (JSONB→VARCHAR, ENUM→VARCHAR, NUMERIC precision match) accurate. High-watermark incremental refresh pattern with pinned upper bound for idempotency well-explained. Limitations (>5M rows, mutable source data, cross-table atomicity) correctly identified.
+
+Verified: trino.io Iceberg connector docs; iceberg.apache.org atomicity docs.
+
+**Iter 256 average**: (4.7 + 4.9) / 2 = **4.8** — PASS. Gap narrowed from 0.033 → 0.029. Both new topic angles (dynamic filtering build→probe with domain_compaction_threshold interaction, federated INSERT INTO Iceberg atomicity) covered well. Steady progress toward 4.500 threshold.
+
+---
+
+### Iter 257 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (Trino metadata caching for Postgres: metadata.cache-ttl, flush_metadata_cache, schema evolution risk)
+
+**Score**: 4.8 / 5.0 — PASS
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 4.9 |
+| Clarity for SaaS engineer | 4.9 |
+| Practical applicability | 4.7 |
+| Completeness | 4.7 |
+| **Average** | **4.8** |
+
+**Topics updated**: Trino federation — prior avg 4.471 across 187 questions; new running avg (4.471 × 187 + 4.8) / 188 = (836.077 + 4.8) / 188 = **4.473 across 188 questions**.
+
+**Key findings**: metadata.cache-ttl default 0s (no caching by default) correctly stated. What metadata is cached (schema info, NOT row data) correctly explained. metadata.cache-missing=true purpose correct. CALL catalog.system.flush_metadata_cache() syntax correct. Stale metadata risk on schema changes correctly identified. JDBC connection reuse as explanation for faster second query (not metadata caching) — correct and nuanced. Location in etc/catalog/ correct.
+
+Verified: trino.io/docs/current/connector/postgresql.html — metadata.cache-ttl and flush_metadata_cache confirmed.
+
+---
+
+### Iter 257 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (Postgres READ COMMITTED isolation: per-fetch snapshot claim — RESOURCE ERROR)
+
+**Score**: 3.3 / 5.0 — FAIL
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 2.5 |
+| Clarity for SaaS engineer | 4.0 |
+| Practical applicability | 4.0 |
+| Completeness | 3.5 |
+| **Average** | **3.3** |
+
+**Topics updated**: Trino federation — prior avg 4.473 across 188 questions; new running avg (4.473 × 188 + 3.3) / 189 = (840.924 + 3.3) / 189 = **4.467 across 189 questions**. Status: NEEDS WORK (4.467 < 4.5 raised threshold). Gap: 0.033 (WIDENED from 0.029 — setback due to resource error).
+
+**Key error**: Answer claimed "each batch of 1000 rows is a separate statement with its own READ COMMITTED snapshot." This is WRONG. Per PostgreSQL official docs, a single SELECT command takes one snapshot when it starts, and that snapshot is stable for all FETCH operations from the resulting cursor. The per-batch snapshotting claim propagated from an error in resource 22 Section 4.6. The workarounds recommended (materialize to Iceberg, schedule during low-write windows) are correct, but the central mechanistic explanation is wrong.
+
+**CRITICAL**: Resource 22 Section 4.6 must be corrected before iter258. The correct explanation of when Trino CAN return inconsistent Postgres data involves: (1) fault-tolerant execution retries where each retry is a new JDBC statement with a new snapshot; (2) multi-split scenarios if the table is partitioned; (3) autocommit=true JDBC mode where each statement is its own transaction. A single non-partitioned SELECT with cursor fetches in the same JDBC connection should NOT show this inconsistency within a single run.
+
+Verified: PostgreSQL docs on READ COMMITTED cursor behavior; JDBC cursor semantics.
+
+**Iter 257 average**: (4.8 + 3.3) / 2 = **4.05** — FAIL. Gap widened from 0.029 → 0.033 due to resource error in isolation level explanation. CRITICAL resource fix required before iter258.
+
+---
+
+### Iter 258 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (topN pushdown ORDER BY LIMIT — RESOURCE GAP: topN pushdown NOT documented in resource 22)
+
+**Score**: 1.8 / 5.0 — FAIL
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 1.0 |
+| Clarity for SaaS engineer | 3.0 |
+| Practical applicability | 2.0 |
+| Completeness | 1.5 |
+| **Average** | **1.8** |
+
+**Topics updated**: Trino federation — prior avg 4.467 across 189 questions; new running avg (4.467 × 189 + 1.8) / 190 = (844.263 + 1.8) / 190 = **4.453 across 190 questions**.
+
+**Key error**: Answer claimed "Trino does NOT push ORDER BY ... LIMIT to Postgres" — this is WRONG. The official Trino PostgreSQL connector documentation explicitly lists Top-N pushdown as a supported pushdown type (alongside join, limit, aggregate, and predicate pushdown). The EXPLAIN signature of a successful topN push shows `sortOrder=... limit=N` INSIDE the TableScan node with NO TopN operator in Trino fragments — the OPPOSITE of what the answer described. The `system.query()` escape hatch workaround was unnecessary since native pushdown already handles this case. Session property `topn_pushdown_enabled` not mentioned.
+
+**CRITICAL**: Resource 22 does not document topN pushdown support for the PostgreSQL connector. This is a significant resource gap — must add before iter259.
+
+Verified: trino.io/docs/current/connector/postgresql.html — Top-N pushdown explicitly listed as supported. trino.io/docs/current/optimizer/pushdown.html — PostgreSQL example shows `sortOrder=... limit=N` inside TableScan (not a separate TopN operator) as the signature of successful pushdown.
+
+---
+
+### Iter 258 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (multi-catalog joins Postgres+MySQL+Iceberg: join executes in Trino, per-catalog predicate pushdown, MySQL text filter limitations, dynamic filtering, 1-split model)
+
+**Score**: 4.9 / 5.0 — PASS
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Clarity for SaaS engineer | 5 |
+| Practical applicability | 4.8 |
+| Completeness | 4.8 |
+| **Average** | **4.9** |
+
+**Topics updated**: Trino federation — prior avg 4.453 across 190 questions; new running avg (4.453 × 190 + 4.9) / 191 = (846.07 + 4.9) / 191 = **4.455 across 191 questions**. Status: NEEDS WORK (4.455 < 4.5 raised threshold). Gap: 0.045 (WIDENED significantly from 0.033 — second consecutive resource-error setback).
+
+**Key findings**: Cross-catalog single-query joins (Postgres + MySQL + Iceberg) confirmed supported. Join executes in Trino workers (no cross-catalog pushdown). Per-catalog predicate pushdown works independently. MySQL VARCHAR/text predicates don't push (only numeric/date) — critical gotcha correctly identified. 1-split/1-connection model for non-partitioned JDBC tables correctly explained. Dynamic filtering: small JDBC build → large Iceberg probe. Query structure recommendation (Iceberg as probe, JDBC as builds) correct and actionable. Materialize large JDBC tables to Iceberg for better performance — correct.
+
+Verified: trino.io/docs/current/connector/mysql.html; trino.io/docs/current/connector/postgresql.html; dynamic-filtering docs.
+
+**Iter 258 average**: (1.8 + 4.9) / 2 = **3.35** — FAIL. Gap widened from 0.033 → 0.045 due to resource gap: topN pushdown not documented in resource 22. CRITICAL resource fix required for iter259.
+
+---
+
+### Iter 259 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (topN pushdown ORDER BY LIMIT: confirmed supported, EXPLAIN signatures, session property, when it doesn't push)
+
+**Score**: 4.9 / 5.0 — PASS
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Clarity for SaaS engineer | 5 |
+| Practical applicability | 4.8 |
+| Completeness | 4.8 |
+| **Average** | **4.9** |
+
+**Topics updated**: Trino federation — prior avg 4.455 across 191 questions; new running avg (4.455 × 191 + 4.9) / 192 = (850.905 + 4.9) / 192 = **4.457 across 192 questions**.
+
+**Key findings**: topN pushdown correctly identified as supported (correcting iter258). EXPLAIN success signature — `sortOrder=[col DESC NULLS LAST] limit=N` INSIDE TableScan, NO separate TopN operator — correct. EXPLAIN failure signature — separate `TopN[topN=N, orderBy=[...]]` above TableScan, no sortOrder/limit in TableScan — correct. topn_pushdown_enabled session property with catalog prefix — correct. When it may not push (JOINs, aggregations above, function-based sort keys, OFFSET) — correct. system.query() fallback with correct syntax — correct. pg_stat_activity verification method — correct.
+
+Verified: trino.io/docs/current/connector/postgresql.html#pushdown; trino.io/docs/current/optimizer/pushdown.html.
+
+---
+
+### Iter 259 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (aggregation pushdown GROUP BY COUNT: all-WHERE-predicates-must-push rule, EXPLAIN signatures, aggregation_pushdown_enabled)
+
+**Score**: 4.8 / 5.0 — PASS
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 4.9 |
+| Clarity for SaaS engineer | 4.9 |
+| Practical applicability | 4.7 |
+| Completeness | 4.7 |
+| **Average** | **4.8** |
+
+**Topics updated**: Trino federation — prior avg 4.457 across 192 questions; new running avg (4.457 × 192 + 4.8) / 193 = (855.744 + 4.8) / 193 = **4.459 across 193 questions**. Status: NEEDS WORK (4.459 < 4.5 raised threshold). Gap: 0.041 (narrowed from 0.045 — recovery after resource fix for topN pushdown).
+
+**Key findings**: Aggregation pushdown supported for PostgreSQL — COUNT, SUM, AVG, MIN, MAX push for simple queries — correct. Critical rule: ALL WHERE predicates must push for aggregation to push — any non-pushdownable predicate blocks the aggregate — correctly identified and well-explained. EXPLAIN success: Aggregate node absent, TableScan layout shows aggregated columns — correct. EXPLAIN failure: separate Aggregate node above TableScan, raw columns in layout — correct. aggregation_pushdown_enabled session property with catalog prefix (default true) — correct. When it may not push (HAVING, window functions, COUNT DISTINCT, non-pushdownable WHERE) — correct. system.query() fallback — correct. pg_stat_activity verification — correct.
+
+Verified: trino.io/docs/current/connector/postgresql.html; trino.io/docs/current/optimizer/pushdown.html.
+
+### Iter 260 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (join pushdown: intra-catalog same Postgres catalog pushes join, cross-catalog never pushes; EXPLAIN signatures; join_pushdown_enabled + join_pushdown_strategy AUTOMATIC/EAGER session properties)
+
+**Score**: 4.85 / 5.0 — PASS
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Clarity for SaaS engineer | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.85** |
+
+**Topics updated**: Trino federation — prior avg 4.459 across 193 questions; new running avg (4.459 × 193 + 4.85) / 194 = (860.587 + 4.85) / 194 = **4.461 across 194 questions**.
+
+**Key findings**: Intra-catalog join pushdown correctly confirmed supported — same Postgres catalog tables have join pushed to Postgres; cross-catalog joins (Postgres + Iceberg) never push — correct. EXPLAIN success signature (ONE TableScan with synthetic Query handle, no InnerJoin/HashJoin operator) — correct. EXPLAIN failure signature (separate InnerJoin above two TableScans) — correct. join_pushdown_enabled session property (default true, catalog prefix required) — correct. join_pushdown_strategy AUTOMATIC vs EAGER distinction (AUTOMATIC needs pg_stats, EAGER no stats) — correct. ANALYZE-on-primary-not-replica gotcha — correct and practical. pg_stat_activity ground-truth verification tip — exceptional. Hyphen-vs-underscore convention (join-pushdown.enabled in catalog file vs join_pushdown_enabled in SET SESSION) — correct.
+
+Verified: trino.io/docs/current/connector/postgresql.html; trino.io/docs/current/optimizer/pushdown.html.
+
+### Iter 260 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (EXPLAIN ANALYZE for federated query diagnosis: operator-level stats, Input/Output rows, Wall time, dynamicFilterSplitsProcessed, system.runtime.queries planning_time_ms, pg_stat_activity ground truth)
+
+**Score**: 4.75 / 5.0 — PASS
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Clarity for SaaS engineer | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 4.25 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.461 across 194 questions; new running avg (4.461 × 194 + 4.75) / 195 = (865.434 + 4.75) / 195 = **4.463 across 195 questions**. Status: NEEDS WORK (4.463 < 4.5 raised threshold). Gap: 0.037 (narrowed from 0.041 — continued recovery).
+
+**Key findings**: EXPLAIN ANALYZE executes the query (critical warning correctly included) — correct. system.runtime.queries planning_time_ms column — correct. "user" quoting trap and no catalog column in system.runtime.queries — correct. Input vs Output rows for predicate pushdown diagnosis — correct. dynamicFilterSplitsProcessed = 0 despite DynamicFilter wiring = timeout expired — correct. pg_stat_activity ground-truth check — correct. Three-step runbook (planning → EXPLAIN ANALYZE → pg_stat_activity) — practical and well-structured. Minor: EXPLAIN ANALYZE VERBOSE not mentioned; Stages tab in UI not called out as beginner shortcut.
+
+Verified: trino.io/docs/current/sql/explain-analyze.html; trino.io/docs/current/sql/explain.html; trino.io/docs/current/admin/dynamic-filtering.html; trino.io/docs/current/connector/system.html.
+
+**Iter 259 average**: (4.9 + 4.8) / 2 = **4.85** — PASS. Gap narrowed from 0.045 → 0.041. Resource fix for topN pushdown worked — Q1 scored 4.9 after recovering from iter258's 1.8. Both new topic angles (topN pushdown confirmation, aggregation pushdown dependency rule) covered cleanly.
+
+### Iter 261 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (Postgres type mapping: uuid→UUID, jsonb→JSON, timestamp with time zone→TIMESTAMP(6), text[]→ARRAY<VARCHAR> with array-mapping=AS_ARRAY; silent-drop on unsupported types; JSONB operators do not push down; system.query() escape hatch)
+
+**Score**: 4.80 / 5.0 — PASS
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 4.80 |
+| Clarity for SaaS engineer | 4.80 |
+| Practical applicability | 4.80 |
+| Completeness | 4.80 |
+| **Average** | **4.80** |
+
+**Topics updated**: Trino federation — prior avg 4.463 across 195 questions; new running avg (4.463 × 195 + 4.80) / 196 = (870.285 + 4.80) / 196 = **4.466 across 196 questions**.
+
+**Key findings**: uuid→UUID, jsonb→JSON, timestamp with time zone native support — correct. text[] silently dropped by default (postgresql.array-mapping=DISABLED) — correct and important gotcha. AS_ARRAY session property to enable — correct. postgresql.unsupported-type-handling=IGNORE default silent-drop; CONVERT_TO_VARCHAR valid workaround — correct. JSONB operators (@>, ?, ->) do NOT push down — correct. system.query() escape hatch for server-side JSONB filtering — correct. DESCRIBE vs \d comparison for discovering dropped columns — practical. Minor: timestamp with time zone maps to TIMESTAMP(6) WITH TIME ZONE not plain TIMESTAMP(6); AS_JSON alternate value for array-mapping not mentioned.
+
+Verified: trino.io/docs/current/connector/postgresql.html.
+
+### Iter 261 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (CREATE VIEW is pure SQL substitution with no caching; INSERT INTO Iceberg is the materialization/caching pattern; when to use view vs materialized table; trade-offs: freshness vs performance)
+
+**Score**: 4.75 / 5.0 — PASS
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Clarity for SaaS engineer | 5.0 |
+| Practical applicability | 4.75 |
+| Completeness | 4.50 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.466 across 196 questions; new running avg (4.466 × 196 + 4.75) / 197 = (875.336 + 4.75) / 197 = **4.467 across 197 questions**. Status: NEEDS WORK (4.467 < 4.5 raised threshold). Gap: 0.033 (narrowed from 0.037 — continued recovery).
+
+**Key findings**: Trino views are pure SQL substitution (no caching) — verified against CREATE VIEW docs ("query stored by the view is executed every time the view is referenced") — correct. EXPLAIN shows view expanded into two TableScans + HashJoin — correct. INSERT INTO Iceberg as the materialization/caching pattern — correct. Comparison table (freshness vs performance vs maintenance) — practical and well-structured. Quantitative decision heuristic — actionable. Gaps: no mention of CREATE MATERIALIZED VIEW (Trino built-in that bridges view and manual refresh); no dbt reference despite prod_info.md listing it; no MERGE/incremental refresh pattern; no view security-mode mention.
+
+Verified: trino.io/docs/current/sql/create-view.html; trino.io/docs/current/connector/iceberg.html.
+
+### Iter 262 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (FTE with federated queries: retry-policy=TASK, exchange manager requirement, Postgres READ COMMITTED snapshot drift on task retry, coordinator failure not covered, materialize-to-Iceberg alternative)
+
+**Score**: 4.81 / 5.0 — PASS
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Clarity for SaaS engineer | 4.75 |
+| Practical applicability | 5.0 |
+| Completeness | 4.75 |
+| **Average** | **4.81** |
+
+**Topics updated**: Trino federation — prior avg 4.467 across 197 questions; new running avg (4.467 × 197 + 4.81) / 198 = (880.0 + 4.81) / 198 = **4.469 across 198 questions**.
+
+**Key findings**: retry-policy=TASK semantics correct — tasks retry on surviving workers, coordinator failure not covered — correct. Exchange manager requirement for intermediate spooling — correct. Postgres JDBC retry → fresh READ COMMITTED snapshot = Iceberg snapshot pinned at plan time but Postgres side advances on retry — key insight, correct. MinIO as on-prem exchange manager fits production stack — correct. Materialize-to-Iceberg alternative to avoid inconsistency — correct. Minor: PVC-backed local filesystem labeled non-production in Trino docs; TASK vs QUERY choice not explicit for 20-30 min batch use case.
+
+Verified: trino.io/docs/current/admin/fault-tolerant-execution.html.
+
+### Iter 262 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (multi-tenant Postgres schemas: one catalog exposes all schemas, cross-schema queries via UNION ALL, no pattern-based auto-loop, recommend Iceberg partitioned by tenant_id)
+
+**Score**: 4.85 / 5.0 — PASS
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 4.85 |
+| Clarity for SaaS engineer | 4.85 |
+| Practical applicability | 4.85 |
+| Completeness | 4.85 |
+| **Average** | **4.85** |
+
+**Topics updated**: Trino federation — prior avg 4.469 across 198 questions; new running avg (4.469 × 198 + 4.85) / 199 = (884.862 + 4.85) / 199 = **4.471 across 199 questions**. Status: NEEDS WORK (4.471 < 4.5 raised threshold). Gap: 0.029 (narrowed from 0.033 — continued recovery).
+
+**Key findings**: Single Postgres catalog exposes ALL schemas in the database (not per-schema catalog) — correct. Cross-schema queries via explicit UNION ALL — correct. No automatic "loop across schemas matching a pattern" in Trino SQL — correct. Programmatic UNION ALL generation pattern — practical. Recommend Iceberg partitioned by tenant_id for 60-tenant scale — correct and well-motivated. Minor: slight conflation of "one Postgres server" vs "one Postgres database" (connector scoped to one database); 60-way UNION ALL planner cost not mentioned.
+
+Verified: trino.io/docs/current/connector/postgresql.html; trino.io/docs/current/overview/concepts.html.
+
+### Iter 263 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (predicate pushdown debugging: EXPLAIN constraint-on vs ScanFilterProject failure signature, EXPLAIN ANALYZE Input rows, pg_stat_activity ground truth, why pushdown fails: ILIKE, function wrapping, type mismatch, domain_compaction_threshold)
+
+**Score**: 4.81 / 5.0 — PASS
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Clarity for SaaS engineer | 4.75 |
+| Practical applicability | 5.0 |
+| Completeness | 4.75 |
+| **Average** | **4.81** |
+
+**Topics updated**: Trino federation — prior avg 4.471 across 199 questions; new running avg (4.471 × 199 + 4.81) / 200 = (889.729 + 4.81) / 200 = **4.473 across 200 questions**.
+
+**Key findings**: Three-step diagnostic workflow (EXPLAIN → EXPLAIN ANALYZE → pg_stat_activity) — correct. EXPLAIN success: constraint on [col] under TableScan; EXPLAIN failure: ScanFilterProject/Filter above TableScan — correct. EXPLAIN ANALYZE Input vs Output rows as pushdown evidence — correct. Four pushdown blockers (ILIKE non-pushable, function wrapping, type mismatch, domain_compaction_threshold 256 default) — correct. domain_compaction_threshold session property with catalog prefix — correct. Minor: "constraint on" block shown as illustrative not verbatim; ILIKE non-pushdown root cause (collation safety, enable_string_pushdown_with_collate) not surfaced; IN-list/domain_compaction_threshold description slightly conflates cap with trigger.
+
+Verified: trino.io/docs/current/optimizer/pushdown.html; trino.io/docs/current/connector/postgresql.html; trino.io/docs/current/sql/explain-analyze.html.
+
+### Iter 263 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (JDBC connection pool: OSS Trino has no built-in pool, connection-per-split model, PgBouncer transaction mode with prepareThreshold=0, four-layer defense: PgBouncer pool + Postgres CONNECTION LIMIT + resource group hardConcurrencyLimit + statement_timeout)
+
+**Score**: 4.80 / 5.0 — PASS
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 4.80 |
+| Clarity for SaaS engineer | 4.80 |
+| Practical applicability | 4.80 |
+| Completeness | 4.80 |
+| **Average** | **4.80** |
+
+**Topics updated**: Trino federation — prior avg 4.473 across 200 questions; new running avg (4.473 × 200 + 4.80) / 201 = (894.6 + 4.80) / 201 = **4.474 across 201 questions**. Status: NEEDS WORK (4.474 < 4.5 raised threshold). Gap: 0.026 (narrowed from 0.029 — continued recovery).
+
+**Key findings**: OSS Trino PostgreSQL connector has NO built-in connection pool (Starburst Enterprise only) — correct and critical. Connection-per-split per-table model — correct. prepareThreshold=0 mandatory for PgBouncer transaction mode (prevents prepared statement errors) — correct. Four-layer defense (PgBouncer default_pool_size + Postgres CONNECTION LIMIT + resource group hardConcurrencyLimit + statement_timeout) — correct and practical. Tailored to user's specific scenario (100 limit, 60 used). Minor: postgresql.parallel-mode connection multiplication not mentioned; peak-connections heuristic conservative for single-table scans.
+
+Verified: trino.io/docs/current/connector/postgresql.html; Trino GitHub issue #15888 (no native pooling); pgjdbc prepareThreshold docs.
+
+### Iter 264 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (Iceberg time travel in federated queries: FOR VERSION AS OF + FOR TIMESTAMP AS OF syntax, Iceberg pinned to snapshot while Postgres stays live, snapshot expiration trap, tags for long-term audit retention, dynamic-filtering.wait-timeout for Postgres→Iceberg joins)
+
+**Score**: 4.80 / 5.0 — PASS
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 4.80 |
+| Clarity for SaaS engineer | 4.80 |
+| Practical applicability | 4.80 |
+| Completeness | 4.80 |
+| **Average** | **4.80** |
+
+**Topics updated**: Trino federation — prior avg 4.474 across 201 questions; new running avg (4.474 × 201 + 4.80) / 202 = (899.274 + 4.80) / 202 = **4.476 across 202 questions**.
+
+**Key findings**: FOR VERSION AS OF / FOR TIMESTAMP AS OF syntax correct. Federated time travel confirmed: Iceberg pinned to historical snapshot, Postgres runs live — correct. Snapshot expiration as #1 production trap — correct. expire_snapshots retention_threshold fix — correct. Tags for long-term audit (Trino 467 cannot create tags, Spark required) — correct. iceberg.dynamic-filtering.wait-timeout=20s catalog property — correct. Query summary table for quick reference — practical.
+
+Verified: trino.io/docs/current/connector/iceberg.html; iceberg.apache.org/docs/latest/maintenance/; trinodb/trino#16695 (tag DDL feature request — Trino 467 does not support CREATE TAG).
+
+### Iter 264 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (multi-tenant isolation: app-only WHERE clause insufficient, tenant-scoped SECURITY DEFINER views bake in tenant_id filter, OPA denies base-table access, OPA denies Iceberg metadata tables, three-layer defense-in-depth)
+
+**Score**: 4.75 / 5.0 — PASS
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Clarity for SaaS engineer | 4.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.476 across 202 questions; new running avg (4.476 × 202 + 4.75) / 203 = (904.152 + 4.75) / 203 = **4.477 across 203 questions**. Status: NEEDS WORK (4.477 < 4.5 raised threshold). Gap: 0.023 (narrowed from 0.026 — very close to threshold).
+
+**Key findings**: App-only WHERE clause risk clearly articulated (one forgotten filter leaks all data) — correct. Tenant-scoped SECURITY DEFINER views with hard-coded WHERE tenant_id = — correct. OPA denies base-table SELECT, OPA denies Iceberg metadata tables — correct and complete. Three-layer defense comparison table — practical. OPA is authoritative vs SQL GRANT/REVOKE — correct for production stack. Minor: OPA row-filter/column-masking endpoints (scalable alternative to per-tenant views for large fleets) not mentioned; unexplained jargon (principal, Rego, SECURITY DEFINER) cost clarity.
+
+Verified: trino.io/docs/current/sql/create-view.html; trino.io/docs/current/security/opa-access-control.html.
+
+### Iter 265 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (EXPLAIN plan for cross-source joins: ScanFilterProject above TableScan = pushdown failed; constraint on [col] inside TableScan = success; EXPLAIN ANALYZE Input/Wall bottleneck identification; VARCHAR pushdown conservatism on PostgreSQL connector)
+
+**Score**: 4.875 / 5.0 — PASS
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Clarity for SaaS engineer | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.875** |
+
+**Topics updated**: Trino federation — prior avg 4.477 across 203 questions; new running avg (4.477 × 203 + 4.875) / 204 = (908.831 + 4.875) / 204 = **4.479 across 204 questions**. Status: NEEDS WORK (4.479 < 4.5 raised threshold). Gap: 0.021 (narrowed from 0.023).
+
+**Key findings**: ScanFilterProject above TableScan = pushdown failed; constraint on [col] inside TableScan = success — verified against trino.io. EXPLAIN ANALYZE Input/Output row counts and Wall time as bottleneck signals — correct. EXPLAIN ANALYZE executes the query warning — correct. Plain-English definitions of InnerJoin, RemoteExchange, ScanFilterProject (exactly the terms engineer didn't recognize). VARCHAR pushdown conservatism — directionally correct but imprecise (range predicates not all VARCHAR). [PARTITIONED] annotation unexplained.
+
+Verified: trino.io/docs/current/sql/explain.html; trino.io/docs/current/sql/explain-analyze.html; trino.io/docs/current/optimizer/pushdown.html.
+
+### Iter 265 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (schema evolution: metadata.cache-ttl=0s default, flush_metadata_cache() procedure, Trino view column-list frozen at CREATE time, CREATE OR REPLACE VIEW to update after schema changes)
+
+**Score**: 4.75 / 5.0 — PASS
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Clarity for SaaS engineer | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.479 across 204 questions; new running avg (4.479 × 204 + 4.75) / 205 = (913.716 + 4.75) / 205 = **4.480 across 205 questions**. Status: NEEDS WORK (4.480 < 4.5 raised threshold). Gap: 0.020 (narrowed from 0.021).
+
+**Key findings**: metadata.cache-ttl=0s default correct; CALL catalog.system.flush_metadata_cache() syntax valid; SELECT * view column-list freeze at CREATE time — correct; CREATE OR REPLACE VIEW as fix — correct. Minor: "all Trino workers get the update" misleading (coordinator-side cache, not workers); named-parameter form flush_metadata_cache(schema_name=>, table_name=>) not mentioned.
+
+Verified: trino.io/docs/current/connector/postgresql.html; trino.io/docs/current/sql/call.html; trino.io/docs/current/sql/create-view.html.
+
+### Iter 266 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (resource groups queuing: hardConcurrencyLimit, maxQueued, softMemoryLimit, system.runtime.queries state=QUEUED, HTTP connection limits)
+
+**Score**: 3.50 / 5.0 — FAIL
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 2.5 |
+| Clarity for SaaS engineer | 4.5 |
+| Practical applicability | 3.0 |
+| Completeness | 4.0 |
+| **Average** | **3.50** |
+
+**Topics updated**: Trino federation — prior avg 4.480 across 205 questions; new running avg (4.480 × 205 + 3.50) / 206 = (918.40 + 3.50) / 206 = **4.475 across 206 questions**. Status: NEEDS WORK (4.475 < 4.5 raised threshold). Gap: 0.025 (REGRESSION from 0.020 — two wrong property names caused fail).
+
+**Key errors**: (1) `http-server.max-connections` is not a real Trino property — will cause coordinator startup failure with "unused configuration property" error; correct property is `http-server.threads.max`; (2) `maxQueuedQueries` is wrong — correct property is `maxQueued`. **Resource must be fixed.** What was correct: `system.runtime.queries` with state='QUEUED', `hardConcurrencyLimit`, `softMemoryLimit`, rootGroups/subGroups structure.
+
+Verified: trino.io/docs/current/admin/resource-groups.html; trino.io/docs/current/admin/properties-http-server.html.
+
+### Iter 266 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (dynamic filtering: build/probe sides, wait-timeout, join type restrictions, EXPLAIN ANALYZE output)
+
+**Score**: 3.95 / 5.0 — FAIL
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 3.5 |
+| Clarity for SaaS engineer | 4.5 |
+| Practical applicability | 4.0 |
+| Completeness | 3.8 |
+| **Average** | **3.95** |
+
+**Topics updated**: Trino federation — prior avg 4.475 across 206 questions; new running avg (4.475 × 206 + 3.95) / 207 = (921.85 + 3.95) / 207 = **4.473 across 207 questions**. Status: NEEDS WORK (4.473 < 4.5 raised threshold). Gap: 0.027 (REGRESSION).
+
+**Key errors**: (1) Answer claims inequalities (<, <=, >, >=) don't trigger dynamic filtering — Trino docs explicitly support these operators for INNER and RIGHT joins; (2) Answer gives LEFT JOIN example as supported — Trino docs state LEFT OUTER and FULL OUTER joins do NOT support dynamic filtering. **Resource must be fixed.** What was correct: wait-timeout property name and default, build/probe terminology, EXPLAIN ANALYZE workflow, "join always runs on Trino workers" framing, CAST on join key prevents pushdown.
+
+Verified: trino.io/docs/current/admin/dynamic-filtering.html; trino.io/docs/current/connector/iceberg.html.
+
+### Iter 267 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (resource groups: hardConcurrencyLimit, maxQueued, softMemoryLimit, selectors routing, system.runtime.queries monitoring)
+
+**Score**: 4.25 / 5.0 — FAIL
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 3.5 |
+| Clarity for SaaS engineer | 4.5 |
+| Practical applicability | 4.0 |
+| Completeness | 5.0 |
+| **Average** | **4.25** |
+
+**Topics updated**: Trino federation — prior avg 4.473 across 207 questions; new running avg (4.473 × 207 + 4.25) / 208 = (925.911 + 4.25) / 208 = **4.472 across 208 questions**. Status: NEEDS WORK (4.472 < 4.5 raised threshold). Gap: 0.028.
+
+**Key errors**: (1) `resource-groups.config-refresh-period` does not exist — fabricated property; actual property is `resource-groups.refresh-interval` AND it only works with the database-based config manager, not the file-based manager; file-based resource groups do NOT hot-reload (coordinator restart required for changes); (2) catch-all selector `{ "group": "federation" }` targets a non-leaf group with subGroups, which produces inconsistent routing behavior — catch-all selectors should target leaf groups. **Resource must be fixed.** What was correct: `maxQueued`, `hardConcurrencyLimit`, `softMemoryLimit`, `schedulingWeight`, selector field names (`source`, `user`, `group`), two-file setup, `system.runtime.queries` monitoring.
+
+Verified: trino.io/docs/current/admin/resource-groups.html; Trino discussion #24309 (file-based manager does not support hot-reload).
+
+### Iter 267 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (dynamic filtering: LEFT JOIN unsupported, INNER/RIGHT supported, INNER JOIN + UNION ALL rewrite, iceberg.dynamic-filtering.wait-timeout)
+
+**Score**: 4.75 / 5.0 — PASS
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Clarity for SaaS engineer | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.472 across 208 questions; new running avg (4.472 × 208 + 4.75) / 209 = (930.176 + 4.75) / 209 = **4.473 across 209 questions**. Status: NEEDS WORK (4.473 < 4.5 raised threshold). Gap: 0.027.
+
+**Key findings**: LEFT OUTER JOIN does NOT support dynamic filtering — correct and verified; INNER/RIGHT JOIN do support DF — correct; iceberg.dynamic-filtering.wait-timeout default 1s — correct; INNER JOIN + UNION ALL rewrite pattern — correct and practical; CTE alternative — correct. Minor gaps: DF also supports inequalities for INNER/RIGHT (answer only mentions equality); no mention of domain-compaction-threshold; "build/probe side" unexplained.
+
+Verified: trino.io/docs/current/admin/dynamic-filtering.html; trino.io/docs/current/connector/iceberg.html.
+
+### Iter 268 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (resource groups: file-based requires restart, database-backed supports refresh-interval hot-reload, selectors leaf-group routing, system.runtime.queries monitoring)
+
+**Score**: 4.94 / 5.0 — PASS
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Clarity for SaaS engineer | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 4.75 |
+| **Average** | **4.94** |
+
+**Topics updated**: Trino federation — prior avg 4.473 across 209 questions; new running avg (4.473 × 209 + 4.94) / 210 = (934.857 + 4.94) / 210 = **4.475 across 210 questions**. Status: NEEDS WORK (4.475 < 4.5 raised threshold). Gap: 0.025 (improved from 0.027 — strong recovery from iter267 failures).
+
+**Key findings**: File-based manager does NOT hot-reload (restart required) — correct, directly fixes iter267 error; `resource-groups.refresh-interval` for db-based manager — correct; catch-all selector to leaf group `federation.global` — correct, fixes iter267 error; `schedulingPolicy: "weighted"` valid; `system.runtime.queries.resource_group_id` monitoring — correct; all property names correct. Minor gaps: doesn't mention db manager default 1s reload; no mention of `system.runtime.resource_groups` for per-group utilization.
+
+Verified: trino.io/docs/current/admin/resource-groups.html.
+
+### Iter 268 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (Postgres type mapping: UUID, jsonb, array-mapping, unsupported-type-handling)
+
+**Score**: 4.25 / 5.0 — FAIL
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 4.0 |
+| Clarity for SaaS engineer | 5.0 |
+| Practical applicability | 4.0 |
+| Completeness | 4.0 |
+| **Average** | **4.25** |
+
+**Topics updated**: Trino federation — prior avg 4.475 across 210 questions; new running avg (4.475 × 210 + 4.25) / 211 = (939.75 + 4.25) / 211 = **4.474 across 211 questions**. Status: NEEDS WORK (4.474 < 4.5 raised threshold). Gap: 0.026.
+
+**Key errors**: (1) `system.query()` called with wrong signature — answer uses `system.query(catalog => 'app_pg', schema => 'public', sql => '...')` but correct Trino syntax is `TABLE(catalog.system.query(query => '...'))` where catalog is part of the function path, not an argument, and parameter name is `query` not `sql`; this breaks the only recommendation for server-side JSONB filtering. **Resource must be fixed.** What was correct: uuid→UUID, jsonb→JSON, array-mapping default DISABLED/AS_ARRAY, unsupported-type-handling IGNORE/CONVERT_TO_VARCHAR, SET SESSION per-session override, UUID cast syntax, DESCRIBE/information_schema discovery.
+
+Verified: trino.io/docs/current/connector/postgresql.html; Trino polymorphic table functions docs.
+
+### Iter 269 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (INSERT INTO Iceberg from Postgres: incremental loads, watermark pattern, partitioning, OPTIMIZE compaction, expire_snapshots, time travel)
+
+**Score**: 4.75 / 5.0 — PASS
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Clarity for SaaS engineer | 4.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.75** |
+
+**Topics updated**: Trino federation — prior avg 4.474 across 211 questions; new running avg (4.474 × 211 + 4.75) / 212 = (944.014 + 4.75) / 212 = **4.475 across 212 questions**. Status: NEEDS WORK (4.475 < 4.5 raised threshold). Gap: 0.025 (improved from 0.026).
+
+**Key findings**: INSERT INTO iceberg SELECT FROM postgres via federation — correct; CTAS replaces table (not for incremental) — correct; ALTER TABLE EXECUTE optimize syntax — correct; expire_snapshots syntax — correct; FOR TIMESTAMP AS OF time travel — correct; partitioning = ARRAY['day(occurred_at)', 'tenant_id'] — correct; Postgres index on watermark column — correct; MERGE INTO for late-arriving rows — correct. Minor gaps: "idempotent variant" with plain INSERT described as overwrite-mode behavior is incorrect — plain INSERT appends; true idempotent partition replacement requires DELETE+INSERT or MERGE; `overwritePartitions` is Spark API not Trino; beginner clarity reduced for Spark-specific terminology.
+
+Verified: trino.io/docs/current/connector/iceberg.html; iceberg.apache.org/docs/latest/maintenance/.
+
+### Iter 269 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (FTE: coordinator failure kills queries regardless of FTE, retry-policy=TASK for worker failures, MinIO exchange manager, Kubernetes coordinator HA patterns)
+
+**Score**: 4.56 / 5.0 — PASS
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 4.25 |
+| Clarity for SaaS engineer | 5.0 |
+| Practical applicability | 4.75 |
+| Completeness | 4.25 |
+| **Average** | **4.56** |
+
+**Topics updated**: Trino federation — prior avg 4.475 across 212 questions; new running avg (4.475 × 212 + 4.56) / 213 = (948.70 + 4.56) / 213 = **4.477 across 213 questions**. Status: NEEDS WORK (4.477 < 4.5 raised threshold). Gap: 0.023 (improved from 0.025).
+
+**Key findings**: FTE only protects worker failures not coordinator — correct; retry-policy=TASK preferred over QUERY for long federation queries — correct; exchange-manager.name=filesystem + MinIO config — correct; local filesystem is non-production only — correct; coordinator failure kills all queries regardless of FTE — correct; OSS Trino lacks native multi-coordinator HA — correct; PodDisruptionBudget approach — correct. Notable error: `http-server.stop-timeout` is not a documented Trino property — correct property is `shutdown.grace-period`; and Trino graceful shutdown API applies to workers only, not coordinators — the implication that planned coordinator evictions can drain active queries is misleading. Resource must be fixed.
+
+Verified: trino.io/docs/current/admin/fault-tolerant-execution.html; trino.io/docs/current/admin/graceful-shutdown.html.
+
+### Iter 270 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (MERGE INTO for Iceberg upsert from Postgres: syntax, Iceberg-only target, INSERT appends not overwrites, idempotency)
+
+**Score**: 4.38 / 5.0 — FAIL
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 4.0 |
+| Clarity for SaaS engineer | 5.0 |
+| Practical applicability | 4.0 |
+| Completeness | 4.5 |
+| **Average** | **4.38** |
+
+**Topics updated**: Trino federation — prior avg 4.477 across 213 questions; new running avg (4.477 × 213 + 4.38) / 214 = (953.601 + 4.38) / 214 = **4.477 across 214 questions**. Status: NEEDS WORK (4.477 < 4.5 raised threshold). Gap: 0.023.
+
+**Key errors**: (1) Claims Iceberg uses Copy-on-Write for MERGE — WRONG. Trino Iceberg uses **merge-on-read** (positional delete files); CoW for Iceberg writes in Trino is an open feature request (trinodb/trino#17272, not yet implemented). The performance characterization is wrong and maintenance guidance differs (OPTIMIZE to compact delete files vs worry about whole-file rewrites). **Resource must be fixed.** What was correct: MERGE INTO syntax (WHEN MATCHED/NOT MATCHED), Iceberg-only target rule, plain INSERT always appends (not overwrites), MERGE idempotency, cross-source MERGE (Postgres → Iceberg).
+
+Verified: trino.io/docs/current/sql/merge.html; trino.io/docs/current/connector/iceberg.html; trinodb/trino#17272.
+
+### Iter 270 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (system.query() passthrough: TABLE(catalog.system.query(query=>)), no outer predicate pushdown, JSONB operators, when to use vs Trino-native)
+
+**Score**: 4.88 / 5.0 — PASS
+
+| Criterion | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Clarity for SaaS engineer | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.88** |
+
+**Topics updated**: Trino federation — prior avg 4.477 across 214 questions; new running avg (4.477 × 214 + 4.88) / 215 = (958.078 + 4.88) / 215 = **4.478 across 215 questions**. Status: NEEDS WORK (4.478 < 4.5 raised threshold). Gap: 0.022 (improved from 0.023).
+
+**Key findings**: TABLE(catalog.system.query(query => '...')) syntax — correct; catalog in function path not argument — correct; named param is `query` not `sql` — correct; single-quote doubling — correct; no outer predicate pushdown — correct and critical; ORDER BY non-preservation — correct; schema inferred from first row — correct; json_extract_scalar for Trino-native — correct; OPA ExecuteFunction access control — correct. Minor gaps: column aliasing not explained in join example; short-form without catalog prefix not mentioned.
+
+Verified: trino.io/docs/current/connector/postgresql.html.
+
+---
+
+## Iter 271 — 2026-05-27
+
+**Q1**: Predicate pushdown debugging — EXPLAIN output patterns for Trino-PostgreSQL federation
+**Answer**: `/Users/hclin/github/recknihao/training/answers/iter271-q1.md`
+**Score**: 4.75 / 5.0 — **PASS**
+
+Dimension scores: Technical accuracy 5/5, Beginner clarity 5/5, Practical applicability 5/5, Completeness 4/5.
+
+**Topics updated**: Trino federation — prior avg 4.478 across 215 questions; new running avg (4.478 × 215 + 4.75) / 216 = (962.77 + 4.75) / 216 = **4.479 across 216 questions**. Status: NEEDS WORK (4.479 < 4.5 raised threshold). Gap: 0.021 (improved from 0.022).
+
+**Key findings**: ScanFilterProject above TableScan = pushdown failure — CORRECT; constraint on [col] inside TableScan = success — CORRECT; VARCHAR equality pushes — CORRECT; VARCHAR range does NOT push — CORRECT; implicit cast breaks pushdown — CORRECT; EXPLAIN ANALYZE Input: row count comparison — CORRECT; Postgres slow log suggestion — CORRECT. Minor gaps: No mention of EXPLAIN (TYPE IO), domain_compaction_threshold, or pg_stat_statements.
+
+Verified: trino.io/docs/current/optimizer/pushdown.html and trino.io/docs/current/connector/postgresql.html.
+
+---
+
+**Q2**: Postgres type mapping — UUID, JSONB, custom enums, unsupported-type-handling, array-mapping
+**Answer**: `/Users/hclin/github/recknihao/training/answers/iter271-q2.md`
+**Score**: 4.75 / 5.0 — **PASS**
+
+Dimension scores: Technical accuracy 5/5, Beginner clarity 5/5, Practical applicability 5/5, Completeness 4/5.
+
+**Topics updated**: Trino federation — prior avg 4.479 across 216 questions; new running avg (4.479 × 216 + 4.75) / 217 = (967.464 + 4.75) / 217 = **4.481 across 217 questions**. Status: NEEDS WORK (4.481 < 4.5 raised threshold). Gap: 0.019 (improved from 0.021).
+
+**Key findings**: UUID→Trino UUID native — CORRECT; JSONB→Trino JSON native — CORRECT; custom enum→VARCHAR native — CORRECT; unsupported-type-handling=IGNORE default (silent drop) — CORRECT; CONVERT_TO_VARCHAR fix — CORRECT; array-mapping=DISABLED default — CORRECT; AS_ARRAY fix — CORRECT; system.query() for JSONB predicates — CORRECT. Minor gaps: AS_JSON value for array-mapping omitted (Trino docs list three values: DISABLED, AS_ARRAY, AS_JSON); INTEGER[] maps to ARRAY<INTEGER> not ARRAY<BIGINT> as stated.
+
+Verified: trino.io/docs/current/connector/postgresql.html.
+

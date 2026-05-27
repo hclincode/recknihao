@@ -63,6 +63,33 @@ On your production Postgres, that second query competes for disk I/O with every 
 
 ---
 
+## Before you switch: Postgres tuning checklist
+
+Most "we need a warehouse" complaints turn out to be untuned Postgres. Work through this list before standing anything up:
+
+- **Read replica.** Stream a replica and point all analytics (BI, ad-hoc, dbt-on-Postgres) at it. The primary stops competing with analytical scans. Single highest-impact fix.
+- **Partial indexes.** `CREATE INDEX ... WHERE deleted_at IS NULL` for soft-deleted SaaS data, or `WHERE plan_type = 'enterprise'` for skewed segments. Smaller indexes, faster scans.
+- **Materialized views.** Pre-compute the slow dashboard query (`signups_by_plan_daily`) and refresh on a schedule. The dashboard does a point-lookup instead of an aggregate scan.
+- **`EXPLAIN ANALYZE` every slow query.** Look for `Seq Scan`, sorts spilling to disk, or nested loops over big tables. Often the fix is one missing index.
+- **`pg_partman` for table partitioning.** Split a 200M-row `events` table into one partition per month. Queries with `WHERE created_at >= ...` only scan the partitions they need.
+- **`pg_stat_statements` and connection pooling.** Find your real top-10 slowest queries; put PgBouncer in front so analytics tools can't exhaust connections.
+
+If after all of this your dashboards are still slow, *that's* when OLAP earns its complexity. See `06-when-to-add-olap.md` for the migration path.
+
+---
+
+## Why read replicas help but don't fully solve it
+
+A Postgres read replica is the right first move — it stops analytics from competing for the primary's CPU and I/O. But once your analytical workload gets serious, three failure modes show up on the replica that no amount of tuning will eliminate. They are structural, not configurational.
+
+1. **The replica is still row-oriented.** A query like `SELECT AVG(duration_ms) FROM events WHERE created_at >= '2024-01-01'` only needs two columns, but Postgres stores rows together on disk. The replica must read every column of every matching row off disk into memory, then throw away the columns it doesn't need. The I/O and CPU cost is identical to running the same query on the primary — you've just moved *where* it hurts, not reduced *how much* it hurts. A columnar engine (Trino over Iceberg) reads only the two columns from object storage, which is often a 10–50x reduction in bytes scanned.
+
+2. **Long analytical scans grow replication lag.** A multi-minute analytical scan holds open a transaction and a WAL position on the replica. While that scan runs, the replica cannot apply newer WAL records that would conflict (or, if `hot_standby_feedback` is on, the primary delays vacuum). The result: replication lag grows during your heaviest analytics windows, which is exactly when application reads on the replica (read-after-write for users routed there, dashboards expecting fresh data) start returning stale rows. You discover this the day finance runs end-of-month reports and the product dashboard starts showing yesterday's data.
+
+3. **The structural fix is moving analytics off Postgres entirely.** In the production stack (Spark + Iceberg on MinIO, Trino for queries), analytics queries (a) read only the columns they aggregate — columnar Parquet on object storage, (b) run on distributed compute that scales horizontally with no impact on Postgres, and (c) share zero resources (CPU, memory, WAL, connections) with the OLTP path. The read replica is a useful bridge — Iceberg + Trino is the destination.
+
+---
+
 ## Key terms defined
 
 | Term | Plain meaning |

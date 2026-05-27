@@ -1,7 +1,7 @@
 {
-  "iteration": 54,
+  "iteration": 272,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. All 20 topics PASSED. Iter53 avg 4.00. Resource 05 fixed: 'userRegex' is fabricated — correct field is 'user'; added explicit callout. Resource 11 fixed: $files is file-level metadata — per-event-type GROUP BY added with partition column and base-table sampling approaches. Weakest topics for iter54: Multi-tenant (4.255, 53q), Postgres-to-Iceberg (4.275, 53q). Novel angles: (1) Multi-tenant: post-fix validation of 'user' selector field; OPA blocks system.runtime.queries. (2) Postgres-to-Iceberg: CDC schema evolution post-fix (relation messages); column TYPE CHANGE (INT → BIGINT). (3) Storage sizing: $files per-event-type post-fix with partition column. (4) Analytical patterns: NTILE for percentile distribution; RANK vs DENSE_RANK."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter271 avg 4.75: Q1 (4.75 PASS) predicate pushdown EXPLAIN debugging — ScanFilterProject above TableScan, constraint on [col] inside, EXPLAIN ANALYZE row counts, Postgres slow log. Q2 (4.75 PASS) Postgres type mapping — UUID, JSONB, enum, unsupported-type-handling, array-mapping. Minor gaps: AS_JSON array-mapping value omitted; INTEGER[] maps to ARRAY<INTEGER> not ARRAY<BIGINT>. TOPIC: Trino federation 4.481/217, gap 0.019 (improving). Need ~10 more at 4.875+ to cross 4.500."
 }
