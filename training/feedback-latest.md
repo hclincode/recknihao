@@ -1,96 +1,97 @@
-# Judge Feedback — Iter 343
+# Judge Feedback — Iter 344
 
 Date: 2026-05-27
 Phase: extended
-Topics: Postgres-to-Iceberg ingestion / MERGE_CARDINALITY_VIOLATION debugging (Q1) + Multi-tenant analytics / hardConcurrencyLimit queue-vs-reject behavior (Q2)
+Topics: Iceberg table maintenance / weekly maintenance ordering WHY (Q1) + Multi-tenant analytics / resource group selector first-match-wins (Q2)
 
 ---
 
-## Q1 — MERGE_CARDINALITY_VIOLATION Debugging (STRONG PASS — PERFECT)
+## Q1 — Iceberg Maintenance Ordering Rationale (STRONG PASS)
 
 ### Score
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5.0 | Exact error string `MERGE_CARDINALITY_VIOLATION: Cannot perform Merge as multiple source rows matched a single target row` verified against Apache Iceberg source. row_number() OVER (PARTITION BY pk ORDER BY updated_at DESC) dedup recipe is canonical and verified. Root cause ranking (overlap-window re-reads first) correctly matches the engineer's scenario (just switched to incremental MERGE). LSN/Kafka-offset tiebreaker callout is correct and a non-obvious refinement. |
-| Beginner clarity | 5.0 | "The error string to grep for" vs "NOT parse error" framing resolves confusion directly. "Why full refresh works but MERGE doesn't" paragraph directly addresses the engineer's stated question. Diagnostic table (same event_id, different updated_at → overlap window; same updated_at, different values → CDC duplicate) is actionable without OLAP background. |
-| Practical applicability | 5.0 | Complete runnable code snippet with correct imports, window spec, row_number filter, createOrReplaceTempView, and MERGE SQL. Three-cause ranking with specific diagnostic guidance. Covers all common production scenarios for incremental sync. |
-| Completeness | 5.0 | Covers: error definition, why full-refresh avoids it, three root causes ranked by likelihood, source-side dedup recipe with multiple tiebreaker options, diagnostic instructions. Resources/13 fix from iter342 confirmed holding. |
+| Technical accuracy | 4.5 | Both expire-before-orphan reasons correctly explained (exposing previously-protected files + in-flight write race window). One overstatement: "Why compaction must come BEFORE expire_snapshots" framed as a safety concern (files may not be protected, broken pointers). This is incorrect — Iceberg's atomic commit semantics guarantee expire_snapshots cannot delete files referenced by any live snapshot. The real reason to compact before expire is operational efficiency: you get max cleanup in one maintenance window vs. needing an extra cycle. No data-loss risk in reversing the order. |
+| Beginner clarity | 5.0 | "Leases on files" analogy for snapshot protection is excellent. "Quick mnemonic" section gives one-sentence rationales for each ordering decision. Swap-by-swap table directly answers the engineer's specific "what breaks?" question. Runbook-close is practical. |
+| Practical applicability | 5.0 | Engineer can explain all three ordering decisions to their team lead with concrete rationales. No action needed (their current setup is right) and they understand why. |
+| Completeness | 4.5 | Covers: all four steps in order, WHY for each major step pair, what breaks when flipped, practical recommendation. Minor gap: rewrite_manifests ordering rationale not explained (it's last because you rebuild the index after the data layer is clean). |
+| **Average** | **4.75** | **STRONG PASS** |
+
+### What Worked
+- Both reasons for expire-before-orphan correctly surfaced (the pre-iter resources/17 fix held).
+- "Leases on files" analogy is one of the clearest in the training run.
+- Swap-by-swap table directly addresses the engineer's "what actually breaks?" question.
+- In-flight write race window correctly explained and linked to the 7-day retention floor.
+- Resources/17 expanded WHY section from pre-iter fix confirmed holding.
+
+### What Missed
+1. **Compact-before-expire overstated as a safety issue** — Iceberg's atomic commit semantics protect all live-snapshot files. The actual concern is operational efficiency: compact first to get the old-small-file snapshots eligible for the same-window expire run. Reversing the order has no data-loss risk, only a one-week efficiency penalty.
+2. **rewrite_manifests ordering rationale not explained** — it goes last because you rebuild the metadata index after the data layer has been cleaned by orphan removal.
+
+### Technical Accuracy Verification (verified by judge via WebSearch)
+- expire_snapshots drops old snapshots and physically deletes unreferenced data files — CONFIRMED per iceberg.apache.org/docs/latest/maintenance/
+- remove_orphan_files scans for files not in any snapshot — CONFIRMED; expired snapshots expose more orphans
+- In-flight write race condition (files uploaded before commit look like orphans) — CONFIRMED per Iceberg maintenance docs
+- Iceberg atomic commit semantics protect files referenced by live snapshots from expire_snapshots — CONFIRMED; compact-before-expire is efficiency, not safety
+
+### Resource Fix Applied
+resources/17-iceberg-table-maintenance.md: Corrected compact-before-expire framing from "safety/data-loss" to "operational efficiency — same final state, just one extra week of storage cost." Added explicit statement that Iceberg atomic commit semantics guarantee expire_snapshots cannot delete files referenced by any live snapshot.
+
+### Rubric Update
+- Iceberg table maintenance: prior avg 4.575/33 → (4.575 × 33 + 4.75) / 34 = 155.725 / 34 = **4.580 across 34 questions**. Status: **PASSED** (recovering upward; ordering WHY correctly explained with both expire-before-orphan reasons).
+
+---
+
+## Q2 — Resource Group Selector First-Match-Wins (STRONG PASS — PERFECT)
+
+### Score
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Technical accuracy | 5.0 | All five claims verified against trino.io: first-match-wins top-to-bottom (confirmed), user/source are Java regex (confirmed), group in selectors is literal string not regex (confirmed), multiple fields AND-combined (confirmed), system.runtime.queries user/resource_group_id columns exist (confirmed since release 0.206). |
+| Beginner clarity | 5.0 | if-elif-else analogy perfectly maps the concept to familiar programming constructs. Wrong-order vs right-order side-by-side snippet is immediately scannable. "Occasionally fails" symptom correctly traced to AND-combined conditions (source field) as the prime suspect. |
+| Practical applicability | 5.0 | Three-step debugging recipe (check JSON order, query system.runtime.queries, match regex to actual JWT value) gives the engineer a complete runbook for their specific symptom. JWT principal callout fits the production on-prem auth stack. |
+| Completeness | 5.0 | Covers: first-match-wins rule, catch-all ordering trap, AND-combination, user/source as regex, group as literal, system.runtime.queries debugging, five operational rules. The pre-iter resources/05 selector hierarchy section confirmed holding with a perfect score. |
 | **Average** | **5.00** | **STRONG PASS — PERFECT SCORE** |
 
 ### What Worked (everything)
-- Exact runtime error name given correctly — "MERGE_CARDINALITY_VIOLATION," not "parse error."
-- "Grep for MERGE_CARDINALITY_VIOLATION or 'multiple source rows matched', NOT for 'parse error'" guidance directly prevents the debugging dead-end flagged in iter342.
-- Root cause 1 (overlap-window re-reads) is the correct most-likely cause for an engineer who "just switched from full refresh to incremental MERGE."
-- Complete, runnable dedup recipe with imports.
-- Diagnostic table maps observed data patterns to specific causes — engineers can debug without knowing theory.
-- Resources/13 MERGE_CARDINALITY_VIOLATION fix from iter342 confirmed holding — second consecutive perfect score on this topic.
+- if-elif-else analogy makes the first-match-wins rule immediately intuitive.
+- Correctly identifies the catch-all-above-specific-rule as the most common cause of the engineer's symptom.
+- AND-combined conditions correctly surfaced as the intermittent failure cause (source field varying by submission path).
+- user/source as Java regex vs group as literal correctly stated — direct application of the iter343 selector syntax fix.
+- system.runtime.queries debugging recipe is copy-pasteable and directly actionable.
+- Resources/05 pre-iter selector hierarchy section confirmed holding.
 
 ### What Missed (none — perfect score)
-Minor non-deductions: no mention that dedup also applies when using MERGE for CDC streams (Debezium) where one row may have multiple events in a micro-batch. Not a gap for this specific question.
+Minor non-deductions: no mention of `selectorPriority` field (an alternative to position-based ordering); no mention of `userGroup` field for group-membership-based routing.
 
 ### Technical Accuracy Verification (verified by judge via WebSearch)
-- MERGE_CARDINALITY_VIOLATION is the correct Iceberg runtime error — CONFIRMED per Apache Iceberg GitHub PR #2021 and Delta Lake issue #218
-- row_number() OVER (PARTITION BY pk ORDER BY updated_at DESC) dedup recipe — CONFIRMED as canonical production pattern
-- Full-refresh avoids the error because it doesn't use MERGE (no cardinality check) — CONFIRMED
-- LSN/Kafka offset as tiebreaker for CDC sources — CONFIRMED as more reliable than updated_at for deterministic dedup
+- First-match-wins top-to-bottom in JSON array — CONFIRMED per trino.io/docs/current/admin/resource-groups.html
+- user and source are Java regex — CONFIRMED
+- group in selectors is literal string — CONFIRMED (distinct from session-property-manager match-rules where group IS regex)
+- Multiple conditions AND-combined — CONFIRMED
+- system.runtime.queries resource_group_id (array(varchar)) — CONFIRMED since Trino release 0.206
 
 ### Resource Fix Applied
-None. Resources/13 fix (MERGE_CARDINALITY_VIOLATION error name, two cardinality directions, source-side dedup recipe) confirmed holding with second consecutive perfect score.
+None needed. Resources/05 pre-iter selector hierarchy section confirmed holding with perfect score.
 
 ### Rubric Update
-- Postgres-to-Iceberg ingestion: prior avg 4.497/124 → (4.497 × 124 + 5.00) / 125 = 562.628 / 125 = **4.501 across 125 questions**. Status: **PASSED** (recovering upward; two consecutive clean scores after MERGE_CARDINALITY_VIOLATION fix).
+- Multi-tenant analytics: prior avg 4.454/137 → (4.454 × 137 + 5.00) / 138 = 615.198 / 138 = **4.458 across 138 questions**. Status: **PASSED** (recovering upward; 3rd consecutive strong score on selector-related subtopics).
 
 ---
 
-## Q2 — hardConcurrencyLimit Queue-vs-Reject Behavior (STRONG PASS)
+## Iter 344 Summary
 
-### Score
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 4.5 | Two-stage behavior (queue → QUERY_QUEUE_FULL reject) correct. maxQueued as queue depth cap correct. QUERY_QUEUE_FULL as error code correct. HTTP 200 for query-level errors correct. Minor error: resource-groups.json selector showed `"group": "global\\.free_tier"` (escaped dot) — `selectors[].group` uses literal string, not Java regex. Only `user` and `source` fields are regex. This could lead an engineer to write a selector that never matches. |
-| Beginner clarity | 5.0 | The two-stage framing with explicit "Stage 1: Queued" vs "Stage 2: Queue full" labels directly answers the engineer's UI-copy question. The table showing HTTP status + error code + client behavior for each stage is exactly what someone writing UI error messages needs. "Your query is waiting" vs "your query failed" decision codified into concrete code branches. |
-| Practical applicability | 5.0 | Complete resource-groups.json config with correct field values. Two-path client code (QUEUED vs QUERY_QUEUE_FULL). queued_time_ms monitoring tip for tuning maxQueued. HTTP 200 warning prevents a real production bug (engineer expecting 4xx for errors). |
-| Completeness | 5.0 | Covers: two-stage behavior, both config fields, both error cases, concrete UI implementation, monitoring guidance. Nothing substantively missing for this question. |
-| **Average** | **4.875** | **STRONG PASS** |
-
-### What Worked
-- Two-stage framing (Stage 1: queue, Stage 2: QUERY_QUEUE_FULL reject) directly answers the engineer's specific question: "do I say 'your query failed' or 'your query is waiting'?"
-- HTTP 200 for query-level errors callout prevents a real production bug.
-- Exact client-side code branches (`stats.state == "QUEUED"` vs `error.errorCode.name == "QUERY_QUEUE_FULL"`) are ready to paste into production.
-- queued_time_ms monitoring guidance closes the loop on how to tune maxQueued.
-- Pre-iter resources/05 hardConcurrencyLimit queue-vs-reject callout confirmed holding immediately.
-
-### What Missed
-1. **`selectors[].group` escaped dot** — `"group": "global\\.free_tier"` in the resource-groups.json example is wrong for selectors. `selectors[].group` is a literal string; only `user` and `source` fields are Java regex. A selector with escaped dot in the group field may fail to match queries, meaning the resource group never applies.
-
-### Technical Accuracy Verification (verified by judge via WebSearch)
-- hardConcurrencyLimit queues rather than rejects immediately — CONFIRMED per trino.io/docs/current/admin/resource-groups.html
-- maxQueued caps the queue depth; exceeded → QUERY_QUEUE_FULL — CONFIRMED
-- QUERY_QUEUE_FULL is correct error code — CONFIRMED
-- HTTP 200 for query-level errors — CONFIRMED per Trino client REST API docs
-
-### Resource Fix Applied
-resources/05-multi-tenant-analytics.md: (1) Corrected `selectors[].group` dot-escape in resource-groups examples (literal string, not regex); (2) Added explicit contrast paragraph distinguishing resource-groups.json selectors (literal) from session-property-manager.json match-rules (Java regex) — both JSON keys are named `"group"` but with different matching semantics. This is a common confusion point.
-
-### Rubric Update
-- Multi-tenant analytics: prior avg 4.452/136 → (4.452 × 136 + 4.875) / 137 = 610.347 / 137 = **4.454 across 137 questions**. Status: **PASSED** (recovering upward; hardConcurrencyLimit queue-vs-reject correctly explained on first probe after resources/05 fix).
-
----
-
-## Iter 343 Summary
-
-**Iter 343 average: (5.00 + 4.875) / 2 = 4.9375 — STRONG PASS** ✓
+**Iter 344 average: (4.75 + 5.00) / 2 = 4.875 — STRONG PASS** ✓
 
 ### Notable
-- Q1 5.00 PERFECT: MERGE_CARDINALITY_VIOLATION debugging nailed — second consecutive perfect score on Postgres-to-Iceberg after the iter342 resource fix. Error name, root causes, dedup recipe, and diagnostic guidance all correct.
-- Q2 4.875 STRONG PASS: hardConcurrencyLimit two-stage behavior correctly explained on first probe after resources/05 fix. Minor selector JSON syntax error (`\\.` in group field) found and corrected in resources/05.
-- Resources/05 now has a key architectural distinction documented: resource-groups.json selectors use literal string for `group`; session-property-manager.json match-rules use Java regex for `group`. This prevents future confusion between two JSON structures that look similar but have different semantics.
+- Q1 4.75 STRONG PASS: Both expire-before-orphan reasons correctly surfaced (pre-iter resources/17 fix held). One technical overstatement corrected post-iteration: compact-before-expire is an efficiency decision, not a safety decision (Iceberg atomic commits prevent expire from deleting live-snapshot files).
+- Q2 5.00 PERFECT: First-match-wins selector hierarchy perfectly explained — 2nd consecutive perfect score on a multi-tenant subtopic. Pre-iter resources/05 selector section confirmed holding.
 
 ### Resource fixes applied this iteration
-- **resources/05-multi-tenant-analytics.md**: selector group field literal-vs-regex distinction; contrast paragraph added.
-- **resources/13-postgres-to-iceberg-ingestion.md** (iter342 fix): Confirmed holding with second consecutive perfect score.
+- **resources/17-iceberg-table-maintenance.md**: Corrected compact-before-expire rationale from safety to efficiency; added Iceberg atomic commit guarantee statement.
+- **resources/05-multi-tenant-analytics.md** (teacher pre-iter fix): Selector first-match-wins hierarchy section — confirmed holding with perfect score.
 
-### Suggested focus for Iter 344
-- **Iceberg table maintenance** (4.575/33): Probe the complete weekly maintenance schedule ordering — compaction → expire_snapshots → remove_orphan_files → rewrite_manifests — and whether the responder can explain WHY that ordering matters (compaction before expire so new files get referenced before orphan scan; expire before orphan so expired snapshots don't protect orphaned files from deletion).
-- **Multi-tenant analytics** (4.454/137): Probe the selector matching hierarchy — what happens when a query matches multiple resource group selectors? Does the first match win? Or most-specific?
-- **Postgres-to-Iceberg** (4.501/125): Consider probing CDC with Debezium — specifically how to handle schema changes in the source Postgres table and what Iceberg schema evolution looks like.
+### Suggested focus for Iter 345
+- **Iceberg table maintenance** (4.580/34): Probe the compact-before-expire atomic commit detail specifically — can the responder now correctly explain it as efficiency (not safety)? Also probe rewrite_manifests ordering rationale.
+- **Postgres-to-Iceberg** (4.501/125): Consider probing CDC with Debezium — schema changes in source table + Iceberg schema evolution.
+- **Multi-tenant analytics** (4.458/138): Consider probing the `selectorPriority` field as an alternative to position-based ordering — not yet tested.

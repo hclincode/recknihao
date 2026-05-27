@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.454 | 137 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.458 | 138 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
@@ -41,7 +41,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.501 | 125 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.575 | 33 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.580 | 34 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
@@ -50,6 +50,44 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 344 — 2026-05-27
+
+**Q1** — Iceberg table maintenance: weekly maintenance ordering rationale (WHY compaction before expire, WHY expire before orphan). Responder correctly explained both reasons for expire-before-orphan (exposing previously-protected files to orphan scan + protecting in-flight writes). Minor technical overstatement on compact-before-expire: framed it as a safety concern (data loss risk) when it's actually an operational efficiency concern (Iceberg atomic commits guarantee expire_snapshots cannot delete files referenced by any live snapshot; reversing order costs an extra cleanup cycle, not data integrity).
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** — STRONG PASS |
+
+Judge verified expire-before-orphan rationale against iceberg.apache.org maintenance docs. Flagged compact-before-expire as efficiency (not safety) per Iceberg atomic commit semantics. Resources/17 corrected: "should run before (efficiency, not safety)" with explicit atomic commit guarantee statement. Topic running avg: (4.575×33 + 4.75)/34 = **4.580/34 questions** — PASSED (recovering upward).
+
+**Q2** — Multi-tenant analytics: resource group selector first-match-wins hierarchy. Responder correctly explained first-match-wins, catch-all ordering trap, AND-combined multi-field selectors, user/source as Java regex, group as literal string, and provided system.runtime.queries debugging recipe. All five technical claims verified against trino.io. Perfect score across all dimensions.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **5.00** — STRONG PASS (PERFECT) |
+
+Judge verified: first-match-wins confirmed, user/source as Java regex confirmed, group as literal confirmed, AND-combined conditions confirmed, system.runtime.queries user/resource_group_id columns confirmed. The pre-iter resources/05 selector hierarchy section held perfectly. Topic running avg: (4.454×137 + 5.00)/138 = **4.458/138 questions** — PASSED (recovering upward; 3rd consecutive strong score on selector-matching).
+
+**Iter 344 average: (4.75 + 5.00) / 2 = 4.875 — STRONG PASS** ✓
+
+**Topics updated**:
+- Iceberg table maintenance: 4.575/33 → **4.580/34 questions** (PASSED — recovering upward; both expire-before-orphan reasons surfaced; compact-before-expire overstatement corrected in resources/17)
+- Multi-tenant analytics: 4.454/137 → **4.458/138 questions** (PASSED — recovering upward; selector first-match-wins perfectly explained with all five operational rules)
+
+**Resource fixes this iteration**:
+- resources/17-iceberg-table-maintenance.md: Corrected compact-before-expire framing from "safety/data-loss" to "operational efficiency"; added explicit statement that Iceberg atomic commit semantics guarantee expire_snapshots cannot delete files referenced by any live snapshot.
+- resources/05-multi-tenant-analytics.md (teacher pre-iter fix): Selector hierarchy first-match-wins section confirmed holding with perfect score.
+
+---
 
 ### Iter 343 — 2026-05-27
 

@@ -2265,6 +2265,70 @@ The selector field that matches the JWT principal is named **`"user"`** in Trino
 { "userRegex": "acme-service-account", "group": "global.tenant_acme" }
 ```
 
+### Selector matching hierarchy — WHICH selector wins when multiple match?
+
+> **THE RULE: top-down, first-match-wins. NOT "most specific wins," NOT priority-ordered, NOT longest-prefix.** Trino evaluates selectors in **array order** (the order they appear in the `"selectors": [ ... ]` JSON array) and assigns the query to the **first** selector whose conditions all match. As soon as a match is found, evaluation stops — every later selector is ignored, even if a later selector is "more specific" or "obviously a better fit." This is `selectors[0]`, then `selectors[1]`, then `selectors[2]`, in order.
+
+**Concrete example.** Suppose `acme-service-account` submits a query with `source = "trino-gateway-dashboard"`, and your `resource-groups.json` has these selectors in this order:
+
+```json
+"selectors": [
+  // (0) catch-all FIRST — this is the bug
+  { "group": "global" },
+
+  // (1) more-specific: acme dashboard queries
+  { "user": "acme-service-account", "source": "trino-gateway-dashboard",
+    "group": "global.tenant_acme.dashboards" },
+
+  // (2) acme catch-all
+  { "user": "acme-service-account",
+    "group": "global.tenant_acme" }
+]
+```
+
+The query lands in `global` — not `global.tenant_acme.dashboards`, not `global.tenant_acme`. Selector (0) matches first (no conditions to fail), evaluation stops, and Acme's per-tenant caps are NEVER applied. Reorder so the most-specific selectors are FIRST and the catch-all is LAST:
+
+```json
+"selectors": [
+  // (0) most specific: acme dashboard queries
+  { "user": "acme-service-account", "source": "trino-gateway-dashboard",
+    "group": "global.tenant_acme.dashboards" },
+
+  // (1) acme catch-all (any source that didn't match above)
+  { "user": "acme-service-account",
+    "group": "global.tenant_acme" },
+
+  // (2) catch-all LAST — unconditional fallback for everything else
+  { "group": "global" }
+]
+```
+
+Now the same query correctly lands in `global.tenant_acme.dashboards`.
+
+**Operational rules to internalize:**
+
+1. **More-specific selectors go ABOVE broader selectors.** "Specific" means more matcher fields (e.g., `user` + `source` + `clientTags`) and tighter regex patterns (e.g., `"acme-service-account"` is more specific than `"acme-.*"`, which is more specific than `".*"`). The most-restrictive match comes first.
+2. **The unconditional catch-all `{"group": "global"}` (or whichever fallback group you want) goes LAST.** Without a catch-all, queries that don't match any selector are rejected with `QUERY_REJECTED: No matching resource group found` — keep an unconditional fallback as the last entry.
+3. **Multiple matcher fields within a single selector are AND-combined.** A selector with `{"user": "acme-service-account", "source": "airflow"}` matches only queries from `acme-service-account` whose `source` is `airflow`. If the source is `trino-gateway-dashboard`, that selector does NOT match — Trino moves to the next selector in the array.
+4. **The `user` and `source` values are Java regexes.** `"acme-.*"` matches `acme-prod`, `acme-staging`, `acme-batch`. `"acme-service-account"` is a regex too — it just happens to be a regex with no metacharacters, so it matches only the literal string `acme-service-account`.
+5. **The `group` field is a LITERAL string, NOT a regex.** This is the most confusing asymmetry: `user`/`source` are regex, `group` is literal. Writing `"group": "global\\.tenant_acme"` (escaped dot) creates a literal-string mismatch — no resource group named `global\.tenant_acme` exists, and the selector fails to route. Always write `"group": "global.tenant_acme"` with an unescaped dot in resource-groups.json.
+
+**How to verify which selector matched in production.** During an incident, query `system.runtime.queries` to see which group each query landed in:
+
+```sql
+SELECT query_id, user, source, resource_group_id, state
+FROM system.runtime.queries
+WHERE state = 'RUNNING' OR state = 'QUEUED'
+ORDER BY created DESC
+LIMIT 50;
+```
+
+The `resource_group_id` column shows the resolved group path (e.g., `ARRAY['global', 'tenant_acme', 'dashboards']`). If you expected a query to land in `global.tenant_acme.dashboards` but it shows `global`, a higher selector matched first — the catch-all is above the specific selector, or one of the matcher fields in the specific selector isn't actually matching the query's user/source (regex typo, wrong field name like `userRegex`, etc.).
+
+**The mental model that gets engineers into trouble.** Coming from rule engines like AWS IAM (deny-overrides-allow) or Kubernetes admission controllers (all matching webhooks run), engineers assume "Trino must combine all matching selectors" or "the most-specific rule wins automatically." **Trino does neither.** It evaluates the selector array top-down, stops at the first match, and applies that single selector's destination group. Order is everything. Treat the `selectors` array as an ordered if-elif-else ladder, not a set of rules.
+
+> **CONTRAST WITH SESSION-PROPERTY-MANAGER (different file, different semantics):** `etc/session-property-manager.json` uses a `match-rules` array where each rule's `"group"` field is a **Java regex** matched against the resource group path the query was already routed to. Match-rules also evaluate top-down, but they apply **cumulatively** — Trino walks the entire rules list and merges every matching rule's `sessionProperties` block into the query's effective session (later matches override earlier values for the same property key). This is the opposite behavior from resource-groups.json `selectors`: `selectors` is first-match-wins routing; `match-rules` is layered cumulative property merging. Do NOT carry the first-match-wins assumption across files — see the "Session Property Manager" section later in this resource for the full rule.
+
 **The complete two-file layout — both files are required, side-by-side, in the Trino coordinator's `etc/` directory.** A common copy-paste mistake is to put the JSON content directly inside `etc/resource-groups.properties` (because the JSON looks like the "real" config and the properties file looks like a stub). That fails silently — `etc/resource-groups.properties` is a Java properties file that must contain ONLY key=value lines, not JSON. Below are both files shown in full as you would lay them on disk:
 
 **File 1: `etc/resource-groups.properties`** (Java properties — exactly two lines; this is the pointer that registers the JSON file with Trino):

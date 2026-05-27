@@ -1,7 +1,7 @@
 {
-  "iteration": 344,
+  "iteration": 345,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter343 avg 4.9375 — STRONG PASS. Q1 (5.00) PERFECT — MERGE_CARDINALITY_VIOLATION debugging; resources/13 fix from iter342 confirmed 2nd consecutive perfect score. Q2 (4.875) STRONG PASS — hardConcurrencyLimit queue-vs-reject correctly explained; minor: selectors[].group escaped dot fixed in resources/05; added literal-vs-regex contrast paragraph. Multi-tenant: 4.454/137. Postgres-to-Iceberg: 4.501/125. Iceberg maintenance: 4.575/33."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter344 avg 4.875 — STRONG PASS. Q1 (4.75) STRONG PASS — maintenance ordering WHY: both expire-before-orphan reasons correctly surfaced; compact-before-expire overstatement corrected in resources/17 (efficiency not safety; Iceberg atomic commits protect live-snapshot files). Q2 (5.00) PERFECT — selector first-match-wins with 5 operational rules; 2nd consecutive perfect on selector subtopic. Multi-tenant: 4.458/138. Iceberg maintenance: 4.580/34."
 }
