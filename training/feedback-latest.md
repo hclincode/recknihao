@@ -1,91 +1,98 @@
-# Judge Feedback — Iter 341
+# Judge Feedback — Iter 342
 
 Date: 2026-05-27
 Phase: extended
-Topics: Postgres-to-Iceberg ingestion / lag-buffer calibration (Q1) + Multi-tenant analytics / query_max_memory vs softMemoryLimit (Q2)
+Topics: Multi-tenant analytics / softMemoryLimit admission control vs mid-flight kill (Q1) + Postgres-to-Iceberg ingestion / MERGE INTO ON clause primary key requirement (Q2)
 
 ---
 
-## Q1 — Lag-Buffer Calibration for Incremental Postgres Sync (STRONG PASS)
+## Q1 — softMemoryLimit Admission Control vs kill_query Mid-Flight Kill (STRONG PASS — PERFECT)
 
 ### Score
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5.0 | All core claims verified. `pg_stat_replication.replay_lag` is the correct column. MERGE INTO dedup pattern is correct. 15-30 min default is reasonable for healthy Postgres replicas. P99 × 2 as sizing methodology is industry-standard. Reference table (< 5 min → 15 min, 5-15 min → 30 min, etc.) matches resources/13 calibration table exactly. |
-| Beginner clarity | 4.0 | The "disappearing row" scenario and "re-read overlap" rationale are well explained. The code snippet is helpful. Gaps: "primary", "read replica", and "replication lag" are used without inline definitions — a true beginner might not know these Postgres concepts. |
-| Practical applicability | 5.0 | Engineer has everything needed: the P99 × 2 sizing formula, the pg_stat_replication query to run, the reference table to look up their number, the code pattern. Actionable end-to-end. |
-| Completeness | 4.0 | Covers: why rows go missing, why duplicates happen, how to size the buffer, how to apply it in code. Minor gaps: `writeTo(...).merge()` omits ON clause / primary key join condition (code may not run as-is); no mention of reading from primary vs replica as an alternative failure mode; no escape-hatch alternatives (hot_standby_feedback, LSN-based watermarks for sub-5-min tolerance). |
-| **Average** | **4.50** | **STRONG PASS** |
+| Technical accuracy | 5.0 | All claims verified against trino.io: softMemoryLimit is admission control only (confirmed per resource-groups.html — once admitted, running queries are not killed or suspended by softMemoryLimit changes). CALL system.runtime.kill_query(query_id => '...') syntax confirmed in system connector docs. query.max-memory in config.properties IS the per-query hard ceiling that kills queries mid-flight when distributed memory exceeds the limit (confirmed per properties-resource-management.html). |
+| Beginner clarity | 5.0 | "Bouncer at the door, not a power cord" analogy is immediately comprehensible. Direct "No." in sentence one. "Right now" vs "After the incident" action plan perfectly calibrated to an engineer in incident mode. |
+| Practical applicability | 5.0 | Engineer has everything needed for immediate action: find query ID in Trino UI, run CALL system.runtime.kill_query with exact syntax, follow up with two-layer config fix. Three-layer defense (softMemoryLimit + query.max-memory + query.max-memory-per-node) provides a complete architectural recommendation. |
+| Completeness | 5.0 | Covers: the direct "no" to the engineer's question, WHY softMemoryLimit doesn't kill running queries, the correct immediate-relief tool (kill_query), the two-layer defense architecture, sequenced next steps. All four dimensions of the question addressed. |
+| **Average** | **5.00** | **STRONG PASS — PERFECT SCORE** |
 
-### What Worked
-- Correctly explains BOTH symptoms (missing rows AND duplicates) and traces them to different root causes.
-- P99 × 2 sizing recipe is correct and actionable.
-- `pg_stat_replication.replay_lag` is the right column to query.
-- Reference table matches the canonical calibration table in resources/13.
-- MERGE INTO requirement correctly called out as the fix for duplicates.
-- Resources/13 lag-buffer content (lines 245-268) correctly surfaced after multiple iterations of miss.
+### What Worked (everything)
+- "Bouncer at the door, not a power cord" — one of the clearest mechanical analogies in the training run.
+- Direct "No." in sentence one, followed by the corrective action in the same sentence. No hedging.
+- Comparison table with explicit "Kills in-flight query? NO / YES" column resolves the confusion that has persisted across iterations.
+- "Right now" → "After the incident" action sequencing perfectly matches incident-response mental mode.
+- Pre-iter resources/05 admission-control callout confirmed holding with a perfect score — best validation of a resource fix this training run.
 
-### What Missed
-1. **`writeTo(...).merge()` missing ON clause** — Spark Iceberg MERGE INTO requires a join condition specifying which column(s) to match on. The code snippet as written is incomplete and may not run correctly.
-2. **Primary vs replica failure modes not distinguished** — reading from replica (the common case) has the lag issue; reading from primary avoids it but adds load. Useful to note.
-3. **No mention of `xmin`/LSN-based watermarks** — for sub-5-min lag tolerance use cases, LSN-based approaches avoid the replica lag problem entirely.
-4. **Beginner-hostile terminology** — "primary," "read replica," and "replication lag" used without definition.
+### What Missed (minor non-deductions)
+- kill_query `message =>` optional parameter not shown (useful for logging why a query was killed)
+- Coordinator restart required for query.max-memory changes not mentioned
+- OPA grant required for killing another user's query not mentioned
+
+### Technical Accuracy Verification (verified by judge via WebSearch)
+- softMemoryLimit is admission control only (does not kill in-flight) — CONFIRMED per trino.io/docs/current/admin/resource-groups.html
+- CALL system.runtime.kill_query(query_id => '...') signature — CONFIRMED per trino.io/docs/current/connector/system.html
+- query.max-memory is the per-query hard ceiling that kills mid-flight — CONFIRMED per trino.io/docs/current/admin/properties-resource-management.html
 
 ### Resource Fix Applied
-None needed. Resources/13 already has comprehensive lag-buffer calibration content. This was a responder retrieval gap (confirmed by teacher pre-iter check), now closed.
+Teacher pre-iter applied resources/05 admission-control vs mid-flight kill CRITICAL callout. Confirmed holding with perfect 5.00 score.
 
 ### Rubric Update
-- Postgres-to-Iceberg ingestion: prior avg 4.500/122 → (4.500 × 122 + 4.50) / 123 = 553.50 / 123 = **4.500 across 123 questions**. Status: **PASSED** (stable; lag-buffer calibration gap finally closed).
+- Multi-tenant analytics: prior avg 4.448/135 → (4.448 × 135 + 5.00) / 136 = 605.48 / 136 = **4.452 across 136 questions**. Status: **PASSED** (recovering strongly upward; admission-control distinction now perfectly explained).
 
 ---
 
-## Q2 — query_max_memory vs softMemoryLimit Enforcement (STRONG PASS)
+## Q2 — MERGE INTO ON Clause Primary Key Requirement (PASS)
 
 ### Score
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 4.5 | All Trino field names verified against trino.io docs. query_max_memory IS a session property overridable by SET SESSION. softMemoryLimit in resource groups IS admission-control enforcement. query.max-memory IS the cluster-wide per-query ceiling. SetSystemSessionProperty IS the correct OPA action name. Minor inaccuracy: answer implies softMemoryLimit "kills" queries — it is actually admission control (queues/rejects new queries), not a mid-flight killer. |
-| Beginner clarity | 4.5 | 3-row comparison table (query_max_memory / softMemoryLimit / query.max-memory) resolves the confusion directly. "Suggested default, not an enforced ceiling" framing is clear. Code snippet for resource-groups.json is concrete. Minor gap: "admission control" concept not explained — engineer may not know what queuing means for their runaway query. |
-| Practical applicability | 5.0 | Engineer can immediately act: switch to softMemoryLimit in resource groups with the provided JSON snippet. Whitelist caveat for OPA option included. The "which problem are you solving?" framing (per-tier aggregate vs per-query enforcement) is practically useful. |
-| Completeness | 4.5 | Covers: bypass mechanism, all three memory knobs, correct recommendation (softMemoryLimit), OPA option for session property enforcement. Key gap: doesn't clarify that softMemoryLimit is admission control — it queues new queries from the group but does NOT kill the in-flight runaway query. For the engineer's specific situation (query already ran and used too much memory), the answer that would have stopped it is query.max-memory (per-query hard ceiling), not softMemoryLimit (aggregate group limit). This framing distinction is missing. |
-| **Average** | **4.625** | **STRONG PASS** |
+| Technical accuracy | 3.5 | Core thesis correct (ON clause must uniquely identify target rows). But two factual errors: (1) "parse error" is wrong — Iceberg's cardinality check fires at runtime; the error is `MERGE_CARDINALITY_VIOLATION` / "Cannot perform Merge as multiple source rows matched a single target row." (2) "cross-join blowup" is not how Iceberg behaves — it detects the multi-match condition and fails with a runtime error, not a cartesian explosion. Also, two cardinality directions conflated: many-source-to-one-target → runtime error; one-source-to-many-target → silent corruption (no error). |
+| Beginner clarity | 4.5 | The failure table mapping each wrong column to why it fails is excellent — directly answers the engineer's "what if I use updated_at or tenant_id" question. The one-rule closing is memorable and sharp. Minor deduction for "cross-join blowup" which is technically incorrect and could confuse. |
+| Practical applicability | 4.5 | Composite PK syntax shown, idempotency tie-back is useful, the rule for choosing ON clause columns is actionable. Missing: source-side dedup recipe for the common case where overlap-window reads produce duplicate PKs in the source delta (triggering MERGE_CARDINALITY_VIOLATION even with a correct ON clause). |
+| Completeness | 4.0 | Covers: uniqueness requirement, three failure modes (two with accuracy issues), composite PK syntax, idempotency. Missing: source-side dedup recipe; MERGE_CARDINALITY_VIOLATION error string (so engineers can grep for it); the two cardinality directions (direction 1 = runtime error, direction 2 = silent corruption with no error). |
+| **Average** | **4.125** | **PASS** |
 
 ### What Worked
-- Correctly identifies query_max_memory as a default not a ceiling — direct answer to the engineer's confusion.
-- 3-row comparison table (query_max_memory / softMemoryLimit / query.max-memory) is clear and complete.
-- Steers to the right solution: softMemoryLimit in resource groups.
-- SetSystemSessionProperty named correctly for the 4th consecutive question.
-- Resources/05 query_max_memory fix from teacher pre-iter confirmed working immediately.
+- Core thesis stated clearly: ON clause must uniquely identify rows.
+- Failure table with `updated_at` / `tenant_id` / `created_at` / `id` rows directly addresses the engineer's specific question.
+- Composite PK syntax shown: `ON t.tenant_id = s.tenant_id AND t.event_id = s.event_id`.
+- Idempotency property correctly tied back to incremental sync re-read safety.
+- "The one rule" closing is memorable.
 
 ### What Missed
-1. **softMemoryLimit is admission control, not a mid-flight killer** — the engineer's runaway query was already running. softMemoryLimit queues NEW queries when the group is over budget; it doesn't kill in-flight queries. The knob that would have killed the runaway mid-flight is `query.max-memory`. This distinction matters for the engineer's "why didn't it get killed" question.
-2. **Per-query vs per-group enforcement not explicitly named** — `softMemoryLimit` is aggregate (all free-tier queries together); `query.max-memory` is per-query. Naming this would help the engineer pick the right lever.
-3. **No mention of `query.max-memory-per-node`** — for per-worker defense-in-depth, this property exists but isn't in the answer.
+1. **"Parse error" is wrong** — cardinality violation fires at runtime, not parse time. Engineers grepping logs for "parse error" won't find the actual `MERGE_CARDINALITY_VIOLATION` message.
+2. **"Cross-join blowup" is not what happens** — Iceberg detects the multi-match and fails at runtime; it doesn't produce a cartesian product.
+3. **Two cardinality directions not distinguished**: (a) many source rows matching one target row → runtime `MERGE_CARDINALITY_VIOLATION`; (b) one source row matching many target rows → silent update of ALL matching target rows, no error — the dangerous one because it silently corrupts data.
+4. **Source-side dedup recipe missing** — overlap-window incremental reads (which the lag-buffer intentionally creates) commonly produce duplicate source PKs. Even with a correct ON clause, duplicate source PKs trigger `MERGE_CARDINALITY_VIOLATION`. The fix is `row_number() OVER (PARTITION BY pk ORDER BY updated_at DESC)` to keep only the latest version of each source PK before the MERGE.
+
+### Technical Accuracy Verification (verified by judge via WebSearch)
+- MERGE_CARDINALITY_VIOLATION is the correct runtime error for multi-match — CONFIRMED per Iceberg docs and community sources
+- Iceberg detects multi-match and fails; does not produce a cartesian product — CONFIRMED
+- One-source-to-many-target silently updates all matched rows — CONFIRMED
+- row_number() dedup pattern on source delta is the standard fix for duplicate source PKs — CONFIRMED
 
 ### Resource Fix Applied
-Consider adding to resources/05: explicit note that `softMemoryLimit` is admission control (queues/rejects new queries, does not kill in-flight) vs `query.max-memory` (per-query ceiling, kills queries mid-flight). This distinction was the main gap in iter341 Q2.
+resources/13-postgres-to-iceberg-ingestion.md: (1) Replaced "parse error" with MERGE_CARDINALITY_VIOLATION runtime error name; (2) Distinguished two cardinality directions with explicit failure modes; (3) Added source-side dedup recipe using row_number() OVER (PARTITION BY pk ORDER BY updated_at DESC) for overlap-window duplicate PKs.
 
 ### Rubric Update
-- Multi-tenant analytics: prior avg 4.447/134 → (4.447 × 134 + 4.625) / 135 = 600.523 / 135 = **4.448 across 135 questions**. Status: **PASSED** (recovering upward; query_max_memory vs softMemoryLimit distinction correctly explained on first attempt after resources/05 fix).
+- Postgres-to-Iceberg ingestion: prior avg 4.500/123 → (4.500 × 123 + 4.125) / 124 = 557.625 / 124 = **4.497 across 124 questions**. Status: **PASSED** (minor drop; resource fix applied; MERGE_CARDINALITY_VIOLATION error name and two cardinality directions now documented).
 
 ---
 
-## Iter 341 Summary
+## Iter 342 Summary
 
-**Iter 341 average: (4.50 + 4.625) / 2 = 4.5625 — STRONG PASS** ✓
+**Iter 342 average: (5.00 + 4.125) / 2 = 4.5625 — STRONG PASS** ✓
 
 ### Notable
-- Q1 4.50 STRONG PASS: Lag-buffer calibration gap finally closed after multiple iterations of miss. Resources/13 content surfaced correctly: P99 × 2 recipe, `pg_stat_replication.replay_lag`, reference table, MERGE INTO requirement.
-- Q2 4.625 STRONG PASS: query_max_memory vs softMemoryLimit distinction correctly explained on first attempt after resources/05 pre-iter fix. SetSystemSessionProperty correctly named for 4th consecutive question. Key remaining gap: softMemoryLimit is admission control (queues, not kills), not a mid-flight query killer.
+- Q1 5.00 PERFECT: softMemoryLimit as admission control vs query.max-memory as mid-flight killer perfectly explained. The pre-iter resources/05 CRITICAL callout confirmed holding with a perfect score — best resource-fix validation in the training run.
+- Q2 4.125 PASS: MERGE INTO ON clause core correctly explained but "parse error" label wrong (it's MERGE_CARDINALITY_VIOLATION at runtime) and the two cardinality directions conflated. Resource fix applied to resources/13.
 
 ### Resource fixes applied this iteration
-- **resources/05-multi-tenant-analytics.md** (teacher pre-iter fix): added query_max_memory vs softMemoryLimit vs query.max-memory 3-row comparison table. Fix confirmed holding immediately.
-- No post-iteration fixes needed; remaining gaps are completeness/framing, not missing resource content.
+- **resources/13-postgres-to-iceberg-ingestion.md**: MERGE_CARDINALITY_VIOLATION error name, two cardinality directions, source-side dedup recipe with row_number().
+- **resources/05-multi-tenant-analytics.md** (teacher pre-iter fix): admission-control vs mid-flight kill CRITICAL callout — confirmed holding with perfect 5.00.
 
-### Suggested resource fix for iter342
-- **resources/05**: Add note that softMemoryLimit is admission control (queues/rejects new queries when group budget is exceeded), not a mid-flight query killer. Distinguish from query.max-memory (per-query hard ceiling that can kill mid-flight). This distinction was the main completeness gap in iter341 Q2.
-
-### Suggested focus for Iter 342
-- **Multi-tenant analytics** (4.448/135): Probe the admission-control vs mid-flight-kill distinction — specifically "I want to kill a runaway query from a free-tier customer that's already running and consuming too much memory, which Trino lever does that?"
-- **Postgres-to-Iceberg** (4.500/123): Probe the MERGE INTO ON clause / primary key join condition — the missing detail from iter341 Q1.
-- **Iceberg table maintenance** (4.575/33): Consider probing the interaction between expire_snapshots min-retention floor and the same 7-day floor on remove_orphan_files — are both understood together?
+### Suggested focus for Iter 343
+- **Postgres-to-Iceberg ingestion** (4.497/124): Probe the MERGE_CARDINALITY_VIOLATION error specifically — "I got this error, what does it mean and how do I fix it?" — to verify the resource fix held and responder can now explain source-side dedup.
+- **Multi-tenant analytics** (4.452/136): Probe something not yet tested — e.g., resource group `hardConcurrencyLimit` queuing behavior under high load (what happens when a free-tier customer hits the concurrency ceiling — does their query error or wait?).
+- **Iceberg table maintenance** (4.575/33): Consider probing the complete weekly maintenance schedule (what runs in what order and why) to verify the canonical ordering is now stable.

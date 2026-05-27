@@ -1,7 +1,7 @@
 {
-  "iteration": 342,
+  "iteration": 343,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter341 avg 4.5625 — STRONG PASS. Q1 (4.50) STRONG PASS — lag-buffer P99 sizing recipe surfaced correctly after multiple iterations of miss; pg_stat_replication.replay_lag correct; MERGE INTO requirement noted. Q2 (4.625) STRONG PASS — query_max_memory vs softMemoryLimit distinction correctly explained; softMemoryLimit as admission control vs query.max-memory as per-query killer gap remains. Pre-iter resources/05 query_max_memory fix held. Multi-tenant: 4.448/135. Postgres-to-Iceberg: 4.500/123. Iceberg maintenance: 4.575/33."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter342 avg 4.5625 — STRONG PASS. Q1 (5.00) PERFECT SCORE — softMemoryLimit admission control vs kill_query/query.max-memory mid-flight kill distinction perfectly explained; pre-iter resources/05 callout confirmed working. Q2 (4.125) PASS — MERGE INTO ON clause core correct; 'parse error' wrong (MERGE_CARDINALITY_VIOLATION), two cardinality directions conflated; resource fix applied to resources/13. Multi-tenant: 4.452/136. Postgres-to-Iceberg: 4.497/124. Iceberg maintenance: 4.575/33."
 }

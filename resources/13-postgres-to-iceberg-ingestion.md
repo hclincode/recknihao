@@ -4281,6 +4281,60 @@ For dimension tables that are too large for a full refresh, use SQL MERGE INTO: 
 
 > **Critical note for Spark 3 + Iceberg 1.5.2 (the production stack)**: use `spark.sql("MERGE INTO ...")`, NOT the DataFrame chained API (`df.writeTo().whenMatched().updateAll().whenNotMatched().insertAll().merge()`). The DataFrame merge builder requires PySpark 4.0+. Calling it on Spark 3 raises `AttributeError`. On the production stack, `spark.sql()` is the only working approach.
 
+> **MANDATORY — every MERGE INTO requires an explicit `ON <join condition>` clause naming the primary key (or unique business key) of the target table.** This is the single most common mistake in MERGE INTO code snippets, and it's a SQL-level requirement, not a "best practice" — Spark/Iceberg will reject a MERGE statement that omits the `ON` clause with a parse error. The `ON` clause is what tells the merge planner "match rows from the source against rows in the target using THIS column" — without it, the planner has no way to decide which target row a given source row should update. Pseudocode snippets like `df.writeTo("iceberg.analytics.events").merge()` or `MERGE INTO target USING source WHEN MATCHED THEN ...` (with no ON clause) are **invalid SQL** and will not run. The correct shape is always:
+>
+> ```python
+> spark.sql("""
+>     MERGE INTO iceberg.analytics.events AS t
+>     USING events_delta AS s
+>     ON t.event_id = s.event_id                  -- <-- PRIMARY KEY JOIN, MANDATORY
+>     WHEN MATCHED THEN UPDATE SET *
+>     WHEN NOT MATCHED THEN INSERT *
+> """)
+> ```
+>
+> **Picking the right ON-clause column.** It must be the column (or composite tuple of columns) that uniquely identifies a row in the target Iceberg table. For event fact tables this is usually `event_id` (a UUID or monotonically-increasing identifier from the source); for dimension tables it's the source table's primary key (`user_id`, `tenant_id`, `subscription_id`); for CDC-replicated tables it's typically the same primary key Postgres uses. **The join must be on a column whose values are stable across runs** — if you join on `updated_at` (which changes every write), the same source row will match a different target row on every run and produce garbage. **Composite keys are fine**: `ON t.tenant_id = s.tenant_id AND t.event_id = s.event_id` is the correct form when the table's logical PK is `(tenant_id, event_id)`. The ON-clause column should also be **partition-aligned where possible** — if the target is partitioned by `day(occurred_at)` and the join key is `event_id`, Iceberg's merge planner can prune partitions only when the source DataFrame also carries `occurred_at`; including `AND t.occurred_at = s.occurred_at` in the ON clause (when the source has it) materially speeds up large-table MERGEs by reducing the data files Iceberg has to scan.
+>
+> **What goes wrong without the ON clause — and the two distinct cardinality-violation directions you must understand.** Omitting the ON clause altogether is caught at SQL parse time (`mismatched input 'WHEN' expecting 'ON'`) — that one is loud and obvious. The dangerous failures are **runtime** cardinality violations that fire only when the data actually flows through the merge planner. There are **two directions**, and they fail very differently. Engineers conflate them all the time, then grep for the wrong error string in their logs.
+>
+> **Direction 1: Many source rows match ONE target row (e.g., the source delta contains duplicate PKs).** Iceberg's merge planner enforces this at **runtime** — not parse time — and throws `MERGE_CARDINALITY_VIOLATION` with a message like `Cannot perform Merge as multiple source rows matched a single target row for the operation`. **Grep your logs for `MERGE_CARDINALITY_VIOLATION` or `multiple source rows matched`, NOT for "parse error".** The batch fails, the streaming offset does not commit, and the next retry re-attempts the same window with the same error until you dedupe the source. The common trigger is *not* a literally broken ON clause — it's an overlap-window incremental read (`updated_at > checkpoint - LAG_BUFFER`) reading the same source row twice across the boundary, or a CDC stream that emits multiple `op='u'` events for the same PK within one micro-batch. See the **Source-side dedup recipe** below for the fix.
+>
+> **Direction 2: One source row matches MANY target rows (e.g., the ON clause uses a non-unique column like `tenant_id`).** This is the genuinely dangerous case because **Iceberg does NOT throw an error.** `WHEN MATCHED THEN UPDATE SET *` silently updates **all** target rows that matched — for a join on `tenant_id`, that could be thousands or millions of rows overwritten with values from a single source row. There is no runtime exception, no failed batch, no log signal at all — just silent data corruption at scale. The only defense is to make the ON clause unique-on-the-target by construction: it must be the target's primary key (or a composite tuple unique within the target). **If you can't name what makes a target row unique, you cannot write a correct MERGE.**
+>
+> A third, much rarer failure: if a chained-API form somehow reaches the planner without any join condition, it would degrade to a full cross-join between source and target, producing N×M matched rows and consuming enormous resources before OOM. The SQL form prevents this at parse time, which is one more reason to use `spark.sql("MERGE INTO ...")` over any chained builder API.
+>
+> **Source-side dedup recipe (fixes Direction-1 violations in overlap-window incremental reads).** The most common production trigger for `MERGE_CARDINALITY_VIOLATION` is *not* a malformed ON clause — it's a perfectly correct `ON t.event_id = s.event_id` running over a source delta that happens to contain the same `event_id` twice (because the overlap window re-read it, or because Postgres emitted two `updated_at` bumps for the same row within the window). Dedupe the source DataFrame to keep only the latest version of each PK *before* the MERGE:
+>
+> ```python
+> from pyspark.sql import functions as F
+> from pyspark.sql.window import Window
+>
+> # source_delta has potential duplicates on event_id from the overlap window.
+> # Keep only the latest row per event_id (by updated_at), discard the rest.
+> latest_per_pk = Window.partitionBy("event_id").orderBy(F.col("updated_at").desc())
+> deduped = (
+>     source_delta
+>     .withColumn("_rn", F.row_number().over(latest_per_pk))
+>     .filter(F.col("_rn") == 1)
+>     .drop("_rn")
+> )
+> deduped.createOrReplaceTempView("events_delta")
+>
+> spark.sql("""
+>     MERGE INTO iceberg.analytics.events AS t
+>     USING events_delta AS s
+>     ON t.event_id = s.event_id
+>     WHEN MATCHED THEN UPDATE SET *
+>     WHEN NOT MATCHED THEN INSERT *
+> """)
+> ```
+>
+> Two notes on the dedup:
+> - **`ORDER BY updated_at DESC` keeps the most recent version.** If two source rows for the same PK have the same `updated_at` (rare but possible), add a tiebreaker column to the ORDER BY — for CDC this is usually the source LSN / Kafka offset; for JDBC reads it's `xmin` or a per-row hash.
+> - **Dedup happens on the SOURCE side only.** It does not look at what's already in the target. The MERGE's `WHEN MATCHED` clause is what reconciles the deduped source row against the existing target row — that part is unchanged. The dedup just ensures the source side carries at most one row per PK so the cardinality check passes.
+>
+> The rule is sharp: **the ON clause must use the target table's primary key (or a column tuple that is unique within the target), AND the source DataFrame must contain at most one row per ON-clause key.** Both halves are required — a correct ON clause does not protect you from a duplicated source delta.
+
 ```python
 # Step 1: load the latest snapshot of the users table from Postgres
 users_df = spark.read \
@@ -4328,7 +4382,12 @@ If you ran MERGE INTO and found duplicate rows in Iceberg afterwards, work throu
 
 #### Question 1: Is your ON clause on a unique column?
 
-The wrong `ON` clause is by far the most common cause of MERGE INTO duplicates. The `ON` clause is the join condition that decides "is this source row already in the target?" — if multiple source rows match the same target row (or multiple target rows match one source row), Iceberg either errors or inserts extras depending on the version and write mode. Either way, you end up with bad data.
+The wrong `ON` clause is by far the most common cause of MERGE INTO data problems. The `ON` clause is the join condition that decides "is this source row already in the target?" — and what happens when it goes wrong depends on **which direction** the cardinality breaks:
+
+- **Many source rows match one target row** (e.g., the source delta has duplicate PKs from an overlap-window re-read) → Iceberg fails the batch at **runtime** with `MERGE_CARDINALITY_VIOLATION` / `Cannot perform Merge as multiple source rows matched a single target row`. Loud, visible, the offset does not commit. Fix with source-side dedup — see the recipe in the MANDATORY callout above.
+- **One source row matches many target rows** (e.g., `ON t.tenant_id = s.tenant_id` on a column that is not unique in the target) → Iceberg **silently** updates ALL matched target rows with values from the single source row. No error, no log signal, just silent data corruption that you find only via downstream reconciliation against Postgres.
+
+Either way, you end up with bad data — but the symptom you'll see is different, and grepping the logs for the right error string saves hours.
 
 ```python
 # WRONG — event_date is shared by thousands of events per day. Many source rows

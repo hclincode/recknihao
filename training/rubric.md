@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.448 | 135 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.452 | 136 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
@@ -40,7 +40,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.500 | 123 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.497 | 124 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.575 | 33 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
@@ -50,6 +50,44 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 342 — 2026-05-27
+
+**Q1** — Multi-tenant analytics: softMemoryLimit admission control vs query.max-memory mid-flight kill. Responder correctly explained that softMemoryLimit only affects new queries (admission control), that kill_query is the live-incident tool, and that query.max-memory is the per-query circuit breaker that terminates runaway queries mid-flight. Perfect score across all four dimensions.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **5.00** — STRONG PASS |
+
+Judge verified all claims against trino.io: softMemoryLimit is admission-control only (confirmed), CALL system.runtime.kill_query syntax confirmed, query.max-memory IS the per-query hard ceiling that kills mid-flight (confirmed). "Bouncer at the door, not a power cord" analogy called out as excellent. Pre-iter resources/05 admission-control callout confirmed holding. Topic running avg: (4.448×135 + 5.00)/136 = **4.452/136 questions** — PASSED (recovering strongly upward).
+
+**Q2** — Postgres-to-Iceberg ingestion: MERGE INTO ON clause primary key uniqueness requirement. Responder correctly identified that the ON clause must uniquely identify target rows (primary key), named three failure modes, explained idempotency, and gave composite PK syntax. Technical accuracy gap: "parse error" is wrong label for the runtime MERGE_CARDINALITY_VIOLATION, and "cross-join blowup" does not match Iceberg's actual behavior (it detects multi-match and fails, doesn't explode). Two cardinality directions conflated.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 3.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.5 |
+| Completeness | 4.0 |
+| **Average** | **4.125** — PASS |
+
+Judge verified MERGE_CARDINALITY_VIOLATION as correct runtime error name (not parse error). Clarified two cardinality directions: many-source-to-one-target → runtime MERGE_CARDINALITY_VIOLATION; one-source-to-many-target → silent update of all matched target rows (no error). Resource fix applied: resources/13 updated with correct error name, two-direction cardinality explanation, and source-side dedup recipe using row_number() for overlap-window duplicate PKs. Topic running avg: (4.500×123 + 4.125)/124 = **4.497/124 questions** — PASSED (minor drop; resource fix applied).
+
+**Iter 342 average: (5.00 + 4.125) / 2 = 4.5625 — STRONG PASS** ✓
+
+**Topics updated**:
+- Multi-tenant analytics: 4.448/135 → **4.452/136 questions** (PASSED — recovering strongly; softMemoryLimit as admission-control vs query.max-memory as mid-flight killer perfectly explained; perfect 5.00 score)
+- Postgres-to-Iceberg ingestion: 4.500/123 → **4.497/124 questions** (PASSED — minor drop; MERGE_CARDINALITY_VIOLATION error name gap; resource fix applied to resources/13)
+
+**Resource fixes this iteration**:
+- resources/13-postgres-to-iceberg-ingestion.md: (1) Replaced "parse error" with MERGE_CARDINALITY_VIOLATION runtime error; (2) Distinguished two cardinality directions (many-source-to-one-target → runtime error; one-source-to-many-target → silent corruption); (3) Added source-side dedup recipe using row_number() OVER (PARTITION BY pk ORDER BY updated_at DESC) for overlap-window duplicate PKs.
+- resources/05-multi-tenant-analytics.md (teacher pre-iter fix): Added admission-control vs mid-flight kill CRITICAL callout — confirmed holding perfectly with 5.00 Q1 score.
+
+---
 
 ### Iter 341 — 2026-05-27
 
