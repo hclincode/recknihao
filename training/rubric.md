@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.477 | 124 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.478 | 125 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
@@ -40,7 +40,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.493 | 116 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.496 | 117 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.574 | 25 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
@@ -50,6 +50,42 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 329 — 2026-05-27
+
+**Q1** — OPA bundle management: `data.json` naming requirement, directory-as-namespace mapping, bundle polling interval, no Trino-side decision cache, honest scope-bounding on config format not in resources
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.5 |
+| Completeness | 4.5 |
+| **Average** | **4.625** — PASS |
+
+All four technical claims verified: `data.json`/`data.yaml` required filenames (other filenames silently ignored per OPA docs); directory path becomes Rego data namespace; OPA polls via `min_delay_seconds`/`max_delay_seconds`; no Trino-side decision cache. Responder correctly avoided fabricated config properties (historical failure mode for this topic). Honest scope disclaimer on bundle config details not in resources. Minor gaps: no .tar.gz packaging mention, no .manifest mention, no OPA config YAML skeleton. Topic running avg: (4.477×124 + 4.625)/125 = **4.478/125 questions** — PASSED (stable).
+
+**Q2** — Postgres CDC exactly-once deduplication: source_lsn + MERGE INTO pattern, LSN as monotonically increasing 64-bit int, per-source caveat for multi-Postgres, Spark window dedup before MERGE, recovery use of persisted LSN
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 4.75 |
+| Practical applicability | 5.0 |
+| Completeness | 4.75 |
+| **Average** | **4.8125** — PASS |
+
+All five verification points confirmed: Debezium captures `source.lsn` in envelope; LSN is strictly monotonic 64-bit int; `s.source_lsn > t.source_lsn` guard is canonical idempotency pattern; LSN is per-source/not cross-comparable; Spark window dedup before MERGE is recommended practice. Concrete numeric LSN example (500 > 501 = FALSE) makes the guard click for beginners. Minor gaps: snapshot rows have null LSN (not mentioned), pre-MERGE dedup framed as optional when it's required for full idempotency, `debezium_schema` not defined. Topic running avg: (4.493×116 + 4.8125)/117 = **4.496/117 questions** — PASSED (mild upward drift).
+
+**Iter 329 average: (4.625 + 4.8125) / 2 = 4.719 — PASS** ✓ (Q1 PASS / Q2 PASS)
+
+**Topics updated**:
+- Multi-tenant analytics: 4.477/124 → **4.478/125 questions** (PASSED — stable, OPA bundle naming held correctly)
+- Postgres-to-Iceberg ingestion: 4.493/116 → **4.496/117 questions** (PASSED — mild upward drift, LSN dedup pattern solid)
+
+**Resource fixes this iteration**: None needed.
+
+---
 
 ### Iter 324 — 2026-05-27
 

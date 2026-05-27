@@ -1,81 +1,95 @@
-# Judge Feedback — Iter 328
+# Judge Feedback — Iter 329
 
 Date: 2026-05-27
 Phase: extended
-Topics: Multi-tenant analytics / OPA row-filter + column masking composition (Q1) + Iceberg table maintenance / $manifests correct column names (Q2)
+Topics: Multi-tenant analytics / OPA bundle management (Q1) + Postgres-to-Iceberg ingestion / CDC source_lsn + MERGE INTO exactly-once dedup (Q2)
 
 ---
 
-## Q1 — OPA row-filter + column masking composition
+## Q1 — OPA bundle management
 
 ### Score
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5 | All five claims verified against official Trino OPA docs and PR #2891: (1) Row filter and column mask compose independently, both in same query plan. (2) OPA consulted only at planning, never during distributed execution. (3) `rowFilters` Rego rule name + `{"expression": "..."}` shape matches plugin contract. (4) `batchColumnMasks` (plural) correct for batch endpoint. (5) Coordinator restart required after adding any `opa.policy.*` URI property. |
-| Beginner clarity | 5 | Directly addresses the engineer's specific worry (short-circuiting, narrow row filter bypassing mask). Before/after SQL pair makes "both apply in same plan" visually undeniable. |
-| Practical applicability | 5 | Full config block, Rego for both rules, coordinator restart reminder, CI test suggestion. The silent-failure config trap reframes a realistic cause of perceived "interference" without inventing fake failure modes. |
-| Completeness | 5 | Covers: composition guarantees, order, no short-circuit, why non-admin can't bypass mask via row filter, concrete example, configuration, Rego structure, restart requirement. |
-| **Average** | **5.00** | **PASS** |
+| Technical accuracy | 5 | All key claims verified against official OPA docs: (1) `data.json`/`data.yaml` required (other filenames silently ignored). (2) Directory path becomes Rego data namespace — `bundle/tenants/data.json` → `data.tenants`. (3) OPA polls via `min_delay_seconds`/`max_delay_seconds`. (4) No Trino-side decision cache — next query sees updated bundle immediately. No fabricated config properties. |
+| Beginner clarity | 4.5 | Clear jargon definitions, concrete directory layout + Rego reference chain, verification curl command. Missed: no gloss on what "Rego" is for true beginners. |
+| Practical applicability | 4.5 | curl diagnostic step, concrete file layout, honest scope disclaimer on config format. Missing: no OPA config YAML skeleton, no .tar.gz packaging note. |
+| Completeness | 4.5 | Covers what a bundle is, naming requirement, serving concepts, propagation timing. Missing: .tar.gz packaging, .manifest file, environment-specific hosting (MinIO). |
+| **Average** | **4.625** | **PASS** |
 
 ### What Worked
-- Opens with the direct answer: "they do not interfere — they compose independently."
-- Row filter → column mask order explained with a concrete SQL before/after that makes it visually obvious.
-- The "non-admin cannot bypass mask" point addresses the engineer's exact worry directly.
-- `batchColumnMasks` (plural) correctly distinguished from the URI path name `batchColumnMask` (singular) — a subtle gotcha correctly handled.
-- Coordinator restart requirement is the most commonly forgotten practical step — proactively mentioned.
+- **Critical naming rule as the lede**: "must be `data.json` or `data.yaml`; other filenames silently ignored" — exactly OPA's documented behavior and highest-leverage fix.
+- **Directory-as-namespace shown end-to-end**: `bundle/tenants/data.json` → `data.tenants` with both the file layout AND the Rego reference — engineer can verify end-to-end.
+- **Verification step is excellent**: `curl http://opa:8181/v1/data/tenants` to confirm data actually loaded after bundle push.
+- **No fabricated config properties**: cleanly avoided the historical failure mode for this topic (iter316 fabricated `opa.policy.cache-ttl-seconds`; iter322 fabricated log strings).
+- **Honest scope disclaimer**: explicitly deferred to OPA docs for full config format rather than inventing properties.
 
 ### What Missed
-- Very minor: doesn't explicitly mention that both OPA calls happen in the same query analysis phase (they're two separate HTTP calls, not one combined call). This is the next natural question an engineer would have. Non-critical.
+- No mention of bundle compression: OPA bundles are `.tar.gz` archives — an engineer building this for the first time doesn't know to `tar -czf bundle.tar.gz bundle/`.
+- No `.manifest` mention: production bundles conventionally include a root-level `.manifest` for roots and revision metadata.
+- No environment-specific hosting: "S3 or HTTP endpoint" is vague; for this on-prem MinIO + k8s stack, the answer is "host `.tar.gz` on MinIO via S3 protocol or serve from an nginx pod."
+- No OPA config YAML skeleton: even a minimal `services:` + `bundles:` stub would have made the answer fully actionable without risk of fabrication.
 
 ### Technical Accuracy (verified)
-All five verification asks pass. No fabrications.
+1. `data.json`/`data.yaml` required — CORRECT (OPA docs: "OPA will only load data files named `data.json` or `data.yaml`. Other JSON and YAML files will be ignored.")
+2. Directory path → Rego namespace — CORRECT (confirmed `bundle/tenants/data.json` → `data.tenants`)
+3. OPA bundle polling — CORRECT (`min_delay_seconds`/`max_delay_seconds` configurable)
+4. No Trino-side decision cache — CORRECT (verified against trino.io OPA access control docs)
 
 ### Rubric Update
-- Multi-tenant analytics: prior avg 4.473 across 123 questions → (4.473 × 123 + 5.00) / 124 = (550.179 + 5.00) / 124 = 555.179 / 124 = **4.477 across 124 questions**. Status: **PASSED** (continuing recovery).
+- Multi-tenant analytics: prior avg 4.477 across 124 questions → (4.477 × 124 + 4.625) / 125 = 559.773 / 125 = **4.478 across 125 questions**. Status: **PASSED** (stable).
 
 ---
 
-## Q2 — $manifests correct column names
+## Q2 — CDC source_lsn + MERGE INTO exactly-once deduplication
 
 ### Score
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5 | All four claims verified against Trino Iceberg connector docs: (1) `length` is the correct column (not `manifest_length`). (2) `added_data_files_count` is real. (3) Full 12-column list matches Trino docs exactly. (4) `"events$manifests"` quoting syntax correct. |
-| Beginner clarity | 5 | Leads with the exact wrong names the engineer guessed (`manifest_length`, `file_size`, `data_files_count`) and immediately corrects each one. Right-vs-wrong quoting examples side by side. Column reference table with plain-English descriptions. |
-| Practical applicability | 5 | Copy-pasteable Trino 467 diagnostic query. Full column reference table. Before/after rewrite_manifests workflow with correct Spark CALL form (correctly flags `optimize_manifests` as Trino 470+ only). |
-| Completeness | 5 | Answers both parts (file size column and files-per-manifest column), full column list, quoting syntax, diagnostic query, before/after verification. |
-| **Average** | **5.00** | **PASS** |
+| Technical accuracy | 4.75 | All five major claims verified: Debezium captures `source.lsn`; LSN is strictly monotonic 64-bit int; `s.source_lsn > t.source_lsn` guard is canonical idempotency pattern; LSN is per-source; Spark window dedup before MERGE is required practice. Minor gap: snapshot rows have null LSN (not mentioned). |
+| Beginner clarity | 4.75 | Concrete numeric LSN example (500 > 501 = FALSE) makes the guard intuitively clear. Step-by-step failure scenario (pod dies → Kafka replays) is exactly the real root cause. |
+| Practical applicability | 5.0 | Copy-pasteable PySpark extraction, MERGE SQL, CREATE TABLE schema, and window dedup — all production-ready for the on-prem Spark + Iceberg 1.5.2 stack. |
+| Completeness | 4.75 | Covers all four expected sub-topics: why dupes happen, what LSN is, MERGE pattern with guard, per-source caveat. Minor gap: null LSN for snapshot rows not surfaced. |
+| **Average** | **4.8125** | **PASS** |
 
 ### What Worked
-- `length` (not `manifest_length`) stated immediately and emphatically.
-- Three wrong guesses from the question (`manifest_length`, `file_size`, `data_files_count`) each explicitly corrected — no ambiguity.
-- Full 12-column table with types and plain-English descriptions.
-- Before/after rewrite_manifests workflow reinforces how to use the diagnostic.
-- Correctly identifies `optimize_manifests` as Trino 470+ not available on Trino 467.
+- **Root cause framing**: opens with the exact failure scenario (pod dies before offset commit → Kafka replays → duplicate rows) — engineer immediately recognizes their situation.
+- **Numeric LSN walkthrough**: `500 > 501 = FALSE` makes the idempotency guard click for a beginner — best pedagogical move in the answer.
+- **MERGE SQL is the canonical pattern**: DELETE branch before LSN-guarded UPDATE branch is correct ordering.
+- **Pre-MERGE Spark window dedup included**: handles intra-batch duplicates before they hit MERGE.
+- **Per-source caveat is explicit**: LSN spaces independent across Postgres instances, composite key `(id, source_region)` required — the most common multi-source pitfall.
+- **Recovery angle**: persisted `source_lsn` lets you query Iceberg to find last applied position for resumption.
 
 ### What Missed
-- None — perfect coverage for the question asked.
+- Snapshot rows (`op='r'`) have null `source_lsn` — `500 > NULL` evaluates as NULL (treated as FALSE in SQL), which is actually safe, but not explained. Engineers who see null LSNs during initial snapshot will be confused.
+- Pre-MERGE window dedup framed as optional ("the resource also recommends") when it's actually required for full idempotency per apache/iceberg #11248.
+- `debezium_schema` used in PySpark snippet but not defined — copy-paste would fail without StructType definition.
+- `UPDATE SET *`/`INSERT *` precondition (column-name alignment) not stated.
 
 ### Technical Accuracy (verified)
-All four verification asks pass. Column names match Trino Iceberg connector docs exactly.
+1. Debezium captures `source.lsn` in CDC envelope — CORRECT
+2. LSN is strictly monotonic 64-bit integer — CORRECT (`pg_lsn` type docs)
+3. `s.source_lsn > t.source_lsn` guard is canonical idempotency pattern — CORRECT (Tabular cookbook, RisingWave lessons)
+4. LSN is per-source / not comparable across Postgres instances — CORRECT
+5. Spark window dedup before MERGE is recommended (required) practice — CORRECT (per apache/iceberg #11248)
 
 ### Rubric Update
-- Iceberg table maintenance: prior avg 4.556 across 24 questions → (4.556 × 24 + 5.00) / 25 = (109.344 + 5.00) / 25 = 114.344 / 25 = **4.574 across 25 questions**. Status: **PASSED** (recovering from iter327 manifest_length error).
+- Postgres-to-Iceberg ingestion: prior avg 4.493 across 116 questions → (4.493 × 116 + 4.8125) / 117 = 526.0005 / 117 = **4.496 across 117 questions**. Status: **PASSED** (mild upward drift).
 
 ---
 
-## Iter 328 Summary
+## Iter 329 Summary
 
-**Iter 328 average: (5.00 + 5.00) / 2 = 5.00 — PERFECT PASS** ✓ (Q1 PASS / Q2 PASS)
+**Iter 329 average: (4.625 + 4.8125) / 2 = 4.719 — PASS** ✓ (Q1 PASS / Q2 PASS)
 
 ### Notable
-- Q1 5.00: OPA row-filter + column masking composition — perfect score. The previous iteration's recommendation to probe this topic paid off. Resources/05 held correctly under direct probe of the composition guarantee.
-- Q2 5.00: `$manifests` column names — the `length` fix from iter327 (resources/17) held perfectly. Responder correctly named `length` (not `manifest_length`), provided the full verified column list, and included correct before/after verification workflow.
+- Q1 4.625: OPA bundle management — correctly named `data.json` naming rule as the critical fact, no fabricated config properties (clean run on a topic with prior fabrication history).
+- Q2 4.8125: CDC source_lsn + MERGE INTO — comprehensive answer with concrete numeric walkthrough and all five technical claims verified. Pre-MERGE dedup included but framed as optional rather than required.
 
 ### Resource fixes applied this iteration
-None needed. Both resources held under direct probes.
+None needed.
 
-### Suggested focus for Iter 329
-- **Multi-tenant analytics** (4.477/124): consider probing OPA bundle management — how to structure and deploy OPA policy bundles (data.json naming requirement, bundle endpoint setup). This was identified as a potential gap in earlier sessions. Or probe HMS/Hive Metastore tuning for multi-tenant scenarios.
-- **Postgres-to-Iceberg ingestion** (4.493/116 — has not been probed in a few iterations): probe the exactly-once deduplication pattern via LSN (the source_lsn field in the MERGE INTO pattern), or probe the `offset.flush.interval.ms` at-least-once delivery gap and how to absorb it.
-- **Iceberg table maintenance** (4.574/25, recovering): consider probing `$snapshots` metadata table diagnostics (similar to the $manifests probe) — how to interpret snapshot history and identify which snapshots can be expired.
+### Suggested focus for Iter 330
+- **Multi-tenant analytics** (4.478/125): consider probing HMS/Hive Metastore tuning for multi-tenant scenarios — connection pooling, partition cache invalidation TTL, or the impact of tenant-specific schemas on HMS performance.
+- **Iceberg table maintenance** (4.574/25, not probed this iter): probe `$snapshots` metadata table diagnostics — how to interpret snapshot history and identify which snapshots can be expired safely, or probe `expire_snapshots` arguments and the 7-day floor.
+- **Postgres-to-Iceberg ingestion** (4.496/117, recovering): consider probing `offset.flush.interval.ms` at-least-once delivery gap and how to absorb it — the window between Kafka Connect offset commits and the risk it creates.
