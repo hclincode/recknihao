@@ -3734,12 +3734,63 @@ Coordinate with downstream consumers before dropping — any Trino view, dbt mod
 
 | Scenario | Why auto-evolution doesn't handle it | What you must do manually |
 |---|---|---|
-| **Column rename in Postgres** (`ALTER TABLE events RENAME COLUMN ab_variant TO experiment_variant`) | Iceberg sees the rename as a **DROP of the old column + ADD of a new column**. The historical data tied to `ab_variant` becomes orphaned (still on MinIO but unreachable by name), and `experiment_variant` has NULL for all old rows. Column **identity is lost** — Iceberg cannot infer that the rename was semantically the same column. | Run `ALTER TABLE iceberg.analytics.events RENAME COLUMN ab_variant TO experiment_variant` in Iceberg **first** (before the Spark job picks up the new Postgres column name). Iceberg preserves column ID across the rename, so historical data follows the new name. |
+| **Column rename in Postgres** (`ALTER TABLE events RENAME COLUMN ab_variant TO experiment_variant`) | Postgres pgoutput emits NO standalone DDL rename event. Debezium learns about the rename only when the **WAL RELATION message** arrives on the **next DML** against the table — and at that point Debezium DOES emit events containing the new column name (`experiment_variant`). The pipeline doesn't break at the Debezium layer. The silence is **downstream**: either (a) the Iceberg table doesn't have an `experiment_variant` column yet, or (b) the Spark MERGE/INSERT job's column list still references `ab_variant`, or both. From Iceberg's perspective, if you do nothing and let auto-evolution add the new column, the historical data tied to `ab_variant` is **orphaned under the old column ID** (still on MinIO but unreachable under the new name), and `experiment_variant` is NULL for all old rows. Column identity is lost — Iceberg cannot infer that the rename was semantically the same column. | **Preferred repair (clean schema match):** Run `ALTER TABLE iceberg.analytics.events RENAME COLUMN ab_variant TO experiment_variant` in Iceberg **first** (before the Spark job picks up the new Postgres column name). This is **metadata-only** — Iceberg tracks columns by unique field IDs, so a rename updates only the human-readable name; the column ID is preserved and ALL historical Parquet data is immediately accessible under the new name with zero file rewrites. Then update the Spark job's column list to use `experiment_variant`. **Alternative (dual-column transition):** if downstream consumers need backward compatibility, use the ADD + backfill + DROP path — `ADD COLUMN experiment_variant`, dual-write to both columns for a release cycle, switch readers, then `DROP COLUMN ab_variant`. Slower but lets you migrate consumers one-by-one. |
 | **Type widening beyond Iceberg's allowed rules** (e.g., Postgres `INTEGER` → `VARCHAR`) | Iceberg permits a documented set of **type promotions** (int → long, float → double, decimal precision increase). Everything else — including int → string, timestamp → string, decimal scale changes — fails the write. `mergeSchema` does NOT relax these rules; it only adds columns. | Run a one-off Spark job that reads the table, casts the affected column to the new type, and writes to a new Iceberg table; then swap. There is no in-place ALTER for unsupported type changes. |
 | **Column drop in Postgres** (`ALTER TABLE events DROP COLUMN legacy_score`) | Already covered in section 6 above, but worth repeating here: auto-evolution does NOT propagate drops. The Iceberg column persists and silently fills with NULL for new rows. Downstream queries that filter on `legacy_score IS NOT NULL` start returning fewer rows over time with no error. | Explicitly run `ALTER TABLE iceberg.analytics.events DROP COLUMN legacy_score`. Audit and update every Trino view, dbt model, and dashboard that references the column first. |
 | **NOT NULL column added without a default in Postgres** (`ALTER TABLE events ADD COLUMN required_field VARCHAR NOT NULL`) | Even with `mergeSchema` enabled, Iceberg can ADD the column to the schema, but **it cannot supply a value for old rows** — old Parquet files have no value for the new column, so reads return NULL. If the column is declared NOT NULL on the Iceberg side and a reader strictly enforces nullability, queries against historical data fail. More commonly: any downstream consumer expecting non-NULL values (Trino views with `WHERE required_field = ...`, dbt models assuming non-NULL) silently breaks. | Add the column as **nullable** in Iceberg (this is the default for `ADD COLUMNS`) regardless of how it's declared in Postgres. Run a one-off backfill Spark job that computes a default value for historical rows. Only after the backfill is verified, optionally migrate the Iceberg column to NOT NULL via a column-spec change (this is a costly rewrite, usually skipped). |
 
 **Quick rule of thumb:** `mergeSchema` is a one-trick tool — it adds nullable columns. Renames, type changes, drops, and NOT-NULL semantics all need either a manual Iceberg `ALTER TABLE` (preferred — metadata-only) or a Spark rewrite job (expensive). Treat any schema change other than "add a new nullable column" as a **deliberate, scheduled migration**, not something a nightly pipeline should figure out on its own.
+
+#### Deeper dive — what actually happens to a Debezium CDC pipeline when Postgres column is renamed
+
+This is the failure mode most engineers misdiagnose. The misframe to AVOID is "Debezium drops the new column" or "the new column name never appears in events." That is incorrect. Here is what really happens, step by step:
+
+1. **Postgres `ALTER TABLE events RENAME COLUMN ab_variant TO experiment_variant` runs.** This is catalog-only on Postgres (no data rewrite, brief `ACCESS EXCLUSIVE` lock — usually milliseconds). It does NOT generate a WAL DDL event — Postgres logical decoding via pgoutput **does not emit DDL events for column renames** (or for any DDL).
+2. **Debezium notices nothing immediately.** The connector is happily streaming row-level changes from the WAL; the rename produced no row-level change, so there's nothing new for Debezium to read. The in-memory schema cached in the Debezium connector still has the old `ab_variant` column.
+3. **The next INSERT/UPDATE/DELETE on `events` runs in Postgres.** That DML produces a WAL record. Inline with that record, Postgres emits a **WAL RELATION message** describing the table's current column layout — which now lists `experiment_variant`, not `ab_variant`.
+4. **Debezium picks up the RELATION message** via `schema.refresh.mode=columns_diff` (the default), notices the layout differs from its cache, updates its in-memory schema, and **starts emitting events that include `experiment_variant`**. The events DO appear in Kafka with the new column name. **This is the key point the misframe gets wrong: Debezium itself is NOT silently dropping the new column. It emits it correctly once the relation message arrives.**
+
+So where does the pipeline break? **Downstream of Debezium**, not at Debezium:
+
+- **Failure mode A — Iceberg table doesn't have `experiment_variant`.** When the Spark consumer reads the Kafka event and tries to MERGE/INSERT into Iceberg, it discovers the target table has no `experiment_variant` column. Behavior depends on the writer config: with `mergeSchema=true` + `write.spark.accept-any-schema=true` the column is auto-added (but as a brand-new column ID, not linked to the old `ab_variant` ID — historical data is now orphaned under the old ID); without those flags, the write fails.
+- **Failure mode B — Spark MERGE job's column list still says `ab_variant`.** A hand-written MERGE/INSERT job that explicitly enumerates columns in its SQL (e.g., `MERGE INTO target USING source ON ... WHEN MATCHED THEN UPDATE SET target.ab_variant = source.ab_variant`) will fail because `source.ab_variant` no longer exists in the event payload (it's `source.experiment_variant` now). The job throws a `Column 'ab_variant' cannot be resolved` error and stops.
+- **Failure mode C — both.** Most common in practice. The user sees the consumer crash AND the Iceberg schema is stale.
+
+**The cleanest repair on the production stack (Trino 467 + Spark + Iceberg 1.5.2):**
+
+1. **Run Iceberg's native rename FIRST** — this is metadata-only and preserves the column ID, so all historical Parquet data is immediately readable under the new name with zero file rewrites:
+
+   ```sql
+   -- From Spark or Trino — same syntax in both engines:
+   ALTER TABLE iceberg.analytics.events RENAME COLUMN ab_variant TO experiment_variant;
+   ```
+
+   This is dramatically cleaner than the ADD-new-column + backfill + DROP-old-column path. The ADD/backfill/DROP sequence creates a NEW column ID, requires a full backfill job to copy old `ab_variant` values into the new column, and leaves the old column's data physically present in old Parquet files until `rewrite_data_files` runs. **Use the ADD+backfill+DROP path only when you specifically need a dual-column transition window** (e.g., downstream consumers can't all switch in lockstep).
+
+2. **Update the Spark consumer's column list** to use `experiment_variant`. Restart the consumer.
+
+3. **Reconcile any rows that landed during the broken window.** If auto-evolution was enabled and Debezium tried to write events with `experiment_variant` while Iceberg didn't have that column yet, those events may have landed in a freshly-added column with a NEW column ID (different from the original `ab_variant` ID). Audit by checking `DESCRIBE TABLE` for duplicate-looking columns. If found, copy values from the orphaned column into the renamed-and-preserved column, then DROP the orphan.
+
+4. **(Optional) If the connector seems stuck on the old schema** — for example, a long-idle table where the relation message never arrived — force a no-op DML to push a new RELATION message through:
+
+   ```sql
+   -- In Postgres, against the renamed table:
+   UPDATE events SET id = id WHERE id = (SELECT id FROM events LIMIT 1);
+   ```
+
+   This produces a WAL record with the updated RELATION message inline; Debezium picks it up within seconds.
+
+**Prevention pattern (expand/contract migration):** to avoid this entirely on future renames:
+
+1. ADD the new column in Postgres (`experiment_variant`) — auto-evolution handles the Iceberg side.
+2. Backfill the new column from the old one in Postgres (`UPDATE events SET experiment_variant = ab_variant WHERE experiment_variant IS NULL`).
+3. Update application code to dual-write to both columns.
+4. Wait one release cycle, switch all readers (Spark jobs, Trino views, dbt models) to the new column.
+5. DROP the old column in Postgres. By this point, no consumer depends on it.
+
+This is sometimes called "expand/contract" — expand the schema with the new column first, then contract by dropping the old one only after consumers have migrated. It avoids the entire rename-detection problem because no rename ever happens; you've decomposed it into safe ADD and DROP operations.
+
+**Detection rule** (add to your preflight schema-diff check): alert when a Postgres table shows a `DROP COLUMN` + `ADD COLUMN` pair within a short window — that pattern is almost always a rename, and the operator should be asked "did you mean to rename?" before the pipeline tries to auto-evolve.
 
 > **Footnote on MERGE INTO + mergeSchema history.** The `mergeSchema` interaction with `MERGE INTO` has been fragile across Iceberg versions — see [apache/iceberg#5556](https://github.com/apache/iceberg/issues/5556) for the discussion thread. In **Iceberg 1.5.2 (the production stack version)**, schema evolution via `MERGE INTO` works for the common "ADD nullable column" case when the table has `write.spark.accept-any-schema=true`, but several edge cases (renaming a column referenced in the MERGE ON clause, type promotion combined with a schema add in the same commit) have known issues. **The safe production posture is unchanged: do not rely on `MERGE INTO` to evolve schema. Always run `ALTER TABLE ... ADD COLUMNS` manually before the `MERGE INTO` job picks up the new column.** The `mergeSchema` writer option is documented to apply to `writeTo(...).append()` only; reading the Iceberg source in 1.5.2 confirms `MERGE INTO` does not honor the option in the same way (the merge planner builds the target schema from the catalog metadata, not from the source DataFrame). Treat `MERGE INTO` as schema-fixed: if the schema needs to change, run the Iceberg DDL first, then the MERGE.
 

@@ -37,10 +37,10 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Query performance basics: partitioning, indexing strategy for analytics | PASSED | 4.675 | 5 |
 | Lakehouse schema design: fact tables, dimension tables, denormalization | PASSED | 4.650 | 5 |
 | Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.596 | 17 |
-| Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.521 | 6 |
+| Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.447 | 7 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.491 | 112 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.492 | 113 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.655 | 20 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
@@ -50,6 +50,44 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 321 — 2026-05-27
+
+**Q1** — Column rename detection in CDC pipeline: Debezium sees rename as DROP+ADD (no DDL rename event; WAL RELATION message on next DML), expand/contract migration pattern, repair recipe, preflight schema-diff rename detection
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.75 |
+| Completeness | 4.5 |
+| **Average** | **4.56** — PASS |
+
+Mechanism correct: pgoutput emits no DDL rename event; Debezium learns new layout via WAL RELATION message on next DML; rename appears as drop-old + add-new. Lead-in overstated "the new column name never appears in events" — once RELATION message arrives, Debezium DOES emit events with new column name; silence is downstream (Iceberg table missing column or Spark MERGE referencing old name). Missing: Iceberg native `ALTER TABLE ... RENAME COLUMN` (metadata-only, preserves column ID) as cleaner alternative to ADD+backfill+DROP. Topic running avg: (4.491×112 + 4.56)/113 = **4.492/113 questions** — PASSED.
+
+**Q2** — Time-travel snapshot storage cost: what Iceberg keeps alive, expire_snapshots + remove_orphan_files sequence, retention tradeoff, Spark/Trino syntax, operational safety nets
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 3.5 |
+| Completeness | 4.0 |
+| **Average** | **4.00** — PASS |
+
+Correct mechanism (snapshots hold data files hostage; compaction without expiry stacks files), correct canonical sequence (expire_snapshots → remove_orphan_files), correct Spark CALL and Trino ALTER TABLE EXECUTE syntax (verified). Material errors: fabricated cost formula `base × (1 + retention_days/100)` vastly understates overhead for heavily-updated CoW tables (10% daily UPDATE rate at 30-day retention → ~300% overhead, not 30%); Trino `remove_orphan_files` has NO `dry_run` parameter (only Spark does); missing `rollback_to_snapshot` safety net; no first-run cost warning for multi-month backlog. Topic running avg: (4.521×6 + 4.00)/7 = **4.447/7 questions** — PASSED.
+
+**Iter 321 average: 4.28 — PASS** ✓
+
+**Topics updated**:
+- Postgres-to-Iceberg ingestion: 4.491/112 → **4.492/113 questions** (PASSED — stable)
+- Storage sizing: 4.521/6 → **4.447/7 questions** (PASSED — mild downward drift from formula fabrication)
+
+**Resource fixes this iteration**:
+- resources/11: Replaced fabricated calendar-day-percentage formula with commit-rate-based estimator (`daily_rewritten_volume × retention_days`); worked example for 500 GB table at 10% daily UPDATE rate → 300% overhead at 30 days; Trino `remove_orphan_files` no `dry_run` callout; `rollback_to_snapshot` safety net; first-run cost warning; 7-day floor applies to BOTH procedures
+- resources/13: Corrected "new column name never appears" framing (Debezium DOES emit new-named events once WAL RELATION arrives; silence is downstream); added Iceberg native `ALTER TABLE ... RENAME COLUMN` as preferred metadata-only repair path
+
+---
 
 ### Iter 320 — 2026-05-27
 

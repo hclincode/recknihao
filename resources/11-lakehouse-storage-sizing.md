@@ -10,6 +10,7 @@
 - Typical Parquet compression for SaaS event data is **5–10x** (sometimes 20x+ for low-cardinality columns).
 - A 100M-row event table with ~200 bytes/row raw → ~2–4 GB compressed. Easily fits on a single MinIO node.
 - Iceberg metadata adds **~1–3%** overhead — negligible. Snapshot retention is the real growth driver — schedule `expire_snapshots` (Iceberg's `history.expire.max-snapshot-age-ms` default is 5 days, Trino's `iceberg.expire-snapshots.min-retention` floor is 7 days; many teams pick 30 days as an operator preference for a comfortable rollback window).
+- **Snapshot overhead is NOT a fixed calendar-day percentage** — it scales with `daily_rewritten_volume × retention_days`. A heavily-updated CoW table can see 100–300% overhead at 30-day retention; an append-only event stream may see under 20% at the same retention. See the snapshot-accumulation section for the formula and worked example.
 - On-prem cost is hardware + power, not per-GB. Size disks for **peak + 20% headroom**, plan a refresh when you hit 70% capacity.
 
 ---
@@ -239,9 +240,89 @@ Even at 1 TB, a single MinIO node with a few disks is sufficient. Lakehouses sca
 - Total metadata: typically **1–3% of data size**. Negligible unless you have millions of tiny files (in which case fix the small-files problem first — see `10-lakehouse-partitioning.md`).
 
 ### Snapshot accumulation — the actual storage trap
-Time-travel snapshots reference data files. Without `expire_snapshots`, every compaction *adds* files (the new big ones) while keeping the old ones around (because snapshots still reference them).
+Time-travel snapshots reference data files. Without `expire_snapshots`, every compaction *adds* files (the new big ones) while keeping the old ones around (because snapshots still reference them). Every UPDATE, DELETE, or MERGE on a copy-on-write (CoW) table rewrites the affected data files — the old files stay alive as long as any snapshot still points at them.
 
 Without expiry, a 100 GB table can balloon to 300+ GB in a year just from snapshot accumulation. **Always schedule `expire_snapshots`** — a common operator setting is "retain 30 days of history, keep last 10 snapshots, delete the rest." Iceberg's own default for `history.expire.max-snapshot-age-ms` is 5 days, and Trino enforces a 7-day minimum-retention floor (`iceberg.expire-snapshots.min-retention`); 30 days is a typical operator override for a comfortable rollback window, not a documented default of either system.
+
+#### How to actually estimate snapshot storage overhead
+
+**Wrong mental model:** "Overhead is some calendar-day percentage — 7 days adds 2%, 30 days adds 30%." There is no such formula in Iceberg, and using one will dramatically understate cost for heavily-updated tables.
+
+**Right mental model:** Snapshot overhead is driven by **commit-rate × file-rewrite-volume-per-commit × retention-window** — not by the calendar. A read-heavy table with one append per day has tiny snapshot overhead even at 90-day retention. A heavily-updated CoW table with thousands of MERGE/UPDATE commits per day can accumulate 2–3x its live size in snapshot-held files at just 30-day retention.
+
+The estimator:
+
+```
+snapshot_overhead ≈ daily_rewritten_volume × retention_days
+total_storage    ≈ live_data_size + snapshot_overhead
+```
+
+`daily_rewritten_volume` is the sum of bytes written by all commits in a day — every UPDATE/DELETE/MERGE rewrites whole data files in CoW mode, so this is usually much larger than the byte-size of the changed rows themselves.
+
+**Worked example — heavily-updated CoW table:**
+
+- Live data size: **500 GB**
+- 10% of rows get UPDATEd every day (a common shape for a customer-state table or any table being kept in sync with a Postgres source via daily MERGE)
+- Files containing those rows get rewritten → **~50 GB of new files written per day**, with the old 50 GB held alive by any snapshot from before today
+- 30-day snapshot retention:
+  - `snapshot_overhead ≈ 50 GB × 30 = 1,500 GB = 1.5 TB`
+  - `total_storage    ≈ 500 GB + 1,500 GB = 2.0 TB`
+- That's **300% overhead** at 30-day retention, not 30%. The live table is 500 GB; snapshots pin another 1.5 TB.
+
+The same table at 7-day retention:
+
+- `snapshot_overhead ≈ 50 GB × 7 = 350 GB` → **70% overhead** (already very different from "2%")
+- `total_storage    ≈ 500 GB + 350 GB = 850 GB`
+
+**Rule of thumb:** A "heavily updated every day" table can see **100–300% storage overhead** at 30-day retention. Tables that are append-mostly (event streams, log tables) see much less — usually under 20% even at 30 days — because new appends don't rewrite old files.
+
+**How to measure your own commit rate** (do this before picking a retention window):
+
+```sql
+-- Trino: list the last 30 days of snapshots and the bytes added per commit
+SELECT
+  date(committed_at)                            AS commit_day,
+  count(*)                                      AS commits,
+  sum(CAST(summary['added-files-size'] AS BIGINT))   AS bytes_written_today
+FROM iceberg.analytics."events$snapshots"
+WHERE committed_at >= current_date - INTERVAL '30' DAY
+GROUP BY date(committed_at)
+ORDER BY commit_day DESC;
+```
+
+Multiply the daily average of `bytes_written_today` by your candidate retention window — that's your snapshot overhead estimate. Compare it to the live table size from `$files` (see the "Measuring bytes-per-row from existing Iceberg data" section above) to get a percentage.
+
+#### Safety nets before aggressive expiry
+
+Once a snapshot is expired and `remove_orphan_files` runs, the time-travel window is gone — you cannot `SELECT ... FOR VERSION AS OF <old_snapshot>` afterwards. Two safety nets to consider before shortening retention or running the first big expiry:
+
+1. **Snapshot a known-good version first via `rollback_to_snapshot` awareness.** If you expire to 7 days and then discover a data corruption bug from day 10, you've lost the recovery path. Before aggressive expiry, identify a snapshot ID you trust and record it externally (in a runbook, ticket, or wiki) so an operator can intentionally roll back to it. The Spark procedure to actually roll back if needed:
+
+   ```sql
+   CALL iceberg.system.rollback_to_snapshot(
+     table       => 'analytics.events',
+     snapshot_id => 1234567890123456789
+   );
+   ```
+
+   This is your "undo" button. If you do this BEFORE running `expire_snapshots`, the rollback target is still alive in metadata; if you do it AFTER expiry has run past that snapshot's age, the rollback target's data files may already be deleted from MinIO.
+
+2. **Test expiry on a staging/copy table before running it on production.** Especially the FIRST expiry on a table that's accumulated many months of snapshots — the initial `remove_orphan_files` sweep can be slow and IO-heavy on MinIO (it lists every file in the table's storage location and cross-references against all live snapshots). On a backlog of 100k+ files this is not instant.
+
+#### Trino's `remove_orphan_files` has NO `dry_run` parameter
+
+A critical Trino-vs-Spark difference that catches engineers off-guard:
+
+- **Spark** supports preview mode: `CALL iceberg.system.remove_orphan_files(table => 'analytics.events', older_than => TIMESTAMP '2025-01-01 00:00:00', dry_run => true)` — this lists the files that WOULD be deleted without actually deleting anything. Run this first, eyeball the output, then re-run without `dry_run` to commit.
+- **Trino 467** does NOT support `dry_run` on `ALTER TABLE ... EXECUTE remove_orphan_files`. There is no preview mode. Running the command from Trino IS the deletion — there is no "what would this do?" step.
+
+Practical guidance for the production stack (Trino 467 + Spark + MinIO):
+
+- If you only have Trino, test `remove_orphan_files` on a small/staging table first, or take a MinIO snapshot before running it on production. Verify the retention threshold (it must be ≥ the 7-day floor or it errors out).
+- If you have both engines available, prefer Spark for the FIRST expiry pass on any table — the `dry_run => true` preview is genuinely useful for catching surprises (e.g., when a stale snapshot ref is keeping more files alive than expected).
+- For routine weekly maintenance, either engine is fine once you've validated the procedure on the table.
+
+Also note: the 7-day minimum-retention floor (`iceberg.expire-snapshots.min-retention` in Trino's iceberg connector config) applies to **both** `expire_snapshots` AND `remove_orphan_files` — there's a parallel `iceberg.remove-orphan-files.min-retention` with the same 7-day default. You cannot expire or orphan-clean anything younger than 7 days from Trino without raising those config values.
 
 ---
 

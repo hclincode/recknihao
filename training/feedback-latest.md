@@ -1,112 +1,118 @@
-# Judge Feedback — Iter 320
+# Judge Feedback — Iter 321
 
 Date: 2026-05-27
 Phase: extended
-Topics: NOT NULL constraint addition in CDC pipeline (Q1) + Multi-tenant analytics — View-per-tenant vs OPA row-level filtering at scale (Q2)
+Topics: Column rename detection in CDC pipeline (Q1) + Time-travel snapshot storage cost (Q2)
 
 ---
 
-## Q1 — NOT NULL constraint addition in CDC pipeline
+## Q1 — Column rename detection in CDC pipeline
 
 ### Score
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 4 | Core claims are correct: Debezium PostgreSQL connector does NOT propagate DDL/constraint-only events (logical decoding limitation); `ALTER COLUMN SET NOT NULL` on a column containing NULLs fails at the DDL level and never reaches WAL; the `ADD CONSTRAINT … NOT VALID` + `VALIDATE CONSTRAINT` pattern is correct for PG 12+; `max_slot_wal_keep_size` exists (the answer correctly attributes it to `postgresql.conf` but does not note it is PG 13+). The diagnostic narrative for "your pipeline actually failed" is partly hedged speculation ("application code tried to *reference* the new constraint" is not a typical failure mode — the more likely real causes are (a) the engineer running `ALTER COLUMN SET NOT NULL` on a column that DID have NULLs causing application-side rather than CDC-side errors, or (b) a coincident schema-cache/downstream issue unrelated to the constraint). The diagnostic could have been sharper. |
-| Beginner clarity | 4 | Jargon is explained (WAL, RELATION, ctid, MERGE INTO). The SQL examples are concrete and copy-pastable. The "Key Takeaway" closer is good. One mild source of confusion: the user said "constraint added to an *existing* column, no new column" yet the safe-pattern section pivots to a scenario where you're adding a new column — that pivot is not explicitly justified to the reader, who could wonder whether the answer matched their situation. |
-| Practical applicability | 4 | Engineer has actionable next steps: check `is_nullable` and `column_default` in information_schema, use the NOT VALID + VALIDATE pattern, do not restart Debezium, restart the Spark consumer instead, configure `max_slot_wal_keep_size`. The kubectl scale snippet is on-prem-k8s appropriate. Misses: a concrete diagnostic ladder for the specific failure (look at Debezium task status / last successful LSN / Spark consumer error log) before jumping to "don't restart the connector." Also doesn't suggest checking whether the Postgres ALTER actually committed (`pg_attribute.attnotnull`). |
-| Completeness | 4 | Answers all four sub-questions (what broke, why, how to fix, how to prevent), but "what broke" is hedged because the answer concedes uncertainty about the actual failure mechanism. The prevention section is strong. The `max_slot_wal_keep_size` advice is solid but slightly tangential to the asked question. Missing: explicit treatment of the user's specific scenario where the engineer added NOT NULL to an *existing* column (not a new one) — this is the literal question, and the answer's three-step pattern is for the new-column case. A short paragraph stating "if you added SET NOT NULL to an existing column with no NULLs, here is the metadata-only path and Debezium is unaffected" would have closed the gap. |
+| Technical accuracy | 4.5 | Core mechanism correct: Postgres pgoutput emits no DDL rename event; Debezium learns the new column layout via the WAL relation message piggybacked on the next DML; rename is effectively seen as "old column gone, new column appears." Iceberg `ADD COLUMN` / `DROP COLUMN` mechanics correct. One imprecision: the "Default: Silent column drop. The old column name disappears from events. The new column name never appears" framing is slightly off — per Debezium PG connector behavior, once the relation message arrives the connector emits events that include the **new** column name; what is "silently broken" is the downstream consumer (Spark MERGE) whose column list still references the old name, and/or an Iceberg table that has never had `ADD COLUMN` for the new name. The answer partially course-corrects in step 4 ("With auto-evolution enabled... your Spark job's hardcoded column list probably still references the old name"), but the lead-in implies Debezium itself drops the new column, which overstates it. Also missing: that Iceberg has a native `ALTER TABLE ... RENAME COLUMN` (metadata-only, preserves column ID) which would be the cleanest alternative repair if the schema-match path were chosen; the answer instead always recommends ADD + backfill + DROP. Postgres RENAME being catalog-only (no rewrite, brief AccessExclusiveLock) not mentioned — minor since the question is CDC-side. |
+| Beginner clarity | 4.5 | Walks through what Debezium "sees" step by step, names the WAL relation message concept, contrasts with MySQL/SQL Server schema-history topic. Phrases like "data silently vanishes" and "Don't Rename in Postgres. Migrate Instead." make the takeaway memorable. No unexplained jargon — "WAL relation message" and "logical replication protocol" are both introduced with their function. Could have briefly defined "expand/contract" by name since that is the canonical industry term for the 5-step migration, but the steps themselves are clear. |
+| Practical applicability | 4.75 | Two complete runnable paths: (a) prevention via expand/contract migration in 5 numbered steps, (b) repair pattern for the user's already-broken state in 4 steps with SQL/PySpark snippets. The MERGE INTO sample uses explicit column lists, which directly answers the prevention sub-question. Preflight schema-diff and "alert on DROP+ADD pair on same table" is a concrete detection rule the engineer can put into their CI/cron today. Spark MERGE example fits the prod stack (Spark + Iceberg). Missing: a note that step 3's `UPDATE iceberg... SET new_name = old_name` only recovers values written **before** the Postgres rename — anything Debezium attempted to write to the new column name during the broken window (if Iceberg auto-evolved) may live in a different column or be missing entirely; the engineer should reconcile against Postgres after the fix. Also missing: any mention of the Trino-side equivalent of these ALTERs (the prod stack uses Trino 467 as the query engine), though Spark-side ALTER works fine. |
+| Completeness | 4.5 | All three sub-questions answered: (1) how Debezium handles the rename — yes, with the relation-message mechanism; (2) what happened on the user's pipeline — yes, framed as old-gone/new-appears with the consumer-side break; (3) safe process going forward — yes, the expand/contract pattern plus a repair recipe and a detection/prevention rule. Nuance gaps: doesn't mention that Iceberg's native `RENAME COLUMN` preserves column ID and is metadata-only (would let engineer keep one column instead of ADD+DROP if they choose to align Iceberg to the new Postgres name); doesn't mention that the WAL relation message arrives only on the **next DML**, so a read-heavy/write-light table can defer the propagation for hours and that's not a separate failure (this is in resources/13 already and would have improved the diagnostic framing); doesn't mention checking connector schema-cache or restarting the Debezium task if a stale cached schema is suspected. |
+| **Average** | **4.56** | **PASS** |
+
+### What Worked
+- Correctly framed the root cause as Postgres pgoutput emitting no DDL rename event, with Debezium learning new column layout via the WAL relation message tied to the next DML.
+- Correctly contrasted Postgres (no schema-history topic) vs MySQL/SQL Server (separate schema-history Kafka topic) — useful mental model.
+- Expand/contract migration pattern (add new column → dual-write → switch readers → drop old) is the textbook-correct prevention and is laid out as 5 actionable steps.
+- Concrete repair recipe with runnable SQL and a Spark MERGE skeleton that uses explicit column lists.
+- Preflight schema-diff with "DROP+ADD pair on the same table = likely rename" is a real, deployable detection rule.
+- Explicit MERGE column list recommendation directly attacks the silent-failure mode.
+
+### What Missed
+- Lead-in overstates "the new column name never appears" as if Debezium itself drops new-column events. More accurate: once the WAL relation message arrives, Debezium **does** emit events with the new column name; the silence is downstream — either the Iceberg table has no such column, or the Spark MERGE column list still references the old name, or both. The answer self-corrects in step 4 but the misframe sits at the top of the technical explanation.
+- Does not mention Iceberg's native `ALTER TABLE ... RENAME COLUMN` (metadata-only, preserves column ID) as an alternative to ADD-then-DROP when the engineer wants the Iceberg schema to match the new Postgres name and is willing to update consumers in lockstep.
+- Postgres `RENAME COLUMN` being catalog-only with a brief `ACCESS EXCLUSIVE` lock not mentioned — would have reassured the engineer that the Postgres side wasn't the bottleneck.
+- The repair's `UPDATE iceberg... SET new_name = old_name` only recovers values written **before** the rename; anything Debezium tried to land during the silent window (if auto-evolution was on) needs a separate reconciliation against the Postgres source-of-truth. Should be called out.
+- No mention of restarting the Debezium task or refreshing connector schema cache if the relation message is suspected stale.
+- Prod-stack-fit: example uses Spark SQL only; a one-liner showing the Trino 467 equivalent (`ALTER TABLE iceberg.analytics.your_table RENAME COLUMN ...` from Trino against the Hive Metastore catalog) would have closed the loop for the user's actual query engine.
+
+### Technical Accuracy (verified)
+- **Debezium PG connector treats RENAME COLUMN as drop-old + add-new (no rename event)**: Confirmed via Debezium PG connector docs / Red Hat Integration docs — Debezium for Postgres does **not** maintain a schema-history topic and learns table shape from WAL relation messages; the connector "appends a column with the new name" rather than recognizing a rename. Answer correct on the mechanism; slightly imprecise on whether new-column events ever flow (they do).
+- **Postgres pgoutput sends no standalone DDL rename event, only WAL relation message on next DML**: Confirmed — pgoutput attaches relation messages inline with the next change event for the table; this matches resources/13 line 4073 and the Debezium PG connector documentation. Answer correct.
+- **`ALTER TABLE ... RENAME COLUMN` is metadata-only in Postgres**: Confirmed via Crunchy Data and PostgreSQL docs — rename is a catalog-only change (system catalog entry update), no data file rewrite, brief `ACCESS EXCLUSIVE` lock. Answer doesn't state this explicitly but doesn't contradict it.
+- **Iceberg supports `ALTER TABLE ... RENAME COLUMN` as metadata-only via column ID**: Confirmed via Apache Iceberg docs — Iceberg tracks columns by unique IDs; rename updates only the name in metadata, no file rewrite. Answer doesn't mention this native rename path (gap noted above) but the ADD+DROP path the answer recommends is also valid.
+
+### Rubric Update
+- Postgres-to-Iceberg ingestion: prior avg 4.491 across 112 questions → (4.491 × 112 + 4.56) / 113 = **4.492 across 113 questions**. Status: **PASSED**.
+
+---
+
+## Q2 — Time-travel snapshot storage cost
+
+### Score
+
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Technical accuracy | 4.0 | Core mechanics correct and verified: snapshots hold data files alive even after they're "replaced"; compaction without expiry doubles disk because old + new files coexist; canonical 2-step sequence expire_snapshots → remove_orphan_files reclaims space; Trino's 7-day min-retention floor named correctly (`iceberg.expire-snapshots.min-retention`); Spark `CALL iceberg.system.expire_snapshots(table=>..., older_than=>..., retain_last=>...)` syntax VERIFIED correct; Trino `ALTER TABLE ... EXECUTE expire_snapshots(retention_threshold=>'30d')` syntax VERIFIED correct; `$snapshots` and `$files` metadata tables are real and the diagnostic queries are valid. Material weaknesses: (1) the "rough formula" `base_data_size × (1 + retention_days/100)` is a fabricated heuristic with no grounding — actual snapshot overhead is driven by UPDATE/DELETE/MERGE *frequency* and compaction activity, not by calendar days; for a "heavily updated table" the user described, 7 days could easily be 100%+ overhead, not 2%. The percentage table (7d: +2%, 30d: +30%, 90d: +90%) reads as quantitative guidance but is unsupported. (2) "Iceberg's default behavior is to keep every snapshot forever" — operationally true (no auto-expiry runs), but the Iceberg library default `history.expire.max-snapshot-age-ms` is 5 days as the eligibility threshold; phrasing is imprecise. (3) "Trino's 7-day minimum retention floor means you can't delete anything younger than 7 days, but there's no upper bound by default" conflates the floor with an "upper bound" concept that doesn't apply to this API. |
+| Beginner clarity | 4.5 | Strong narrative: opens with the right anchor ("snapshots hold data files hostage"), explains compaction interaction in 4 numbered steps that map cleanly to MinIO usage growing → finally dropping. Tables digestible. Jargon (snapshot, manifest, orphan file) introduced with minimal assumption. The "Why Storage Grows After Compaction" subsection is the pedagogical highlight — a clear beginner-friendly causal chain. |
+| Practical applicability | 3.5 | Diagnostic queries copy-pasteable; Spark + Trino syntax both shown; weekly schedule concrete. Gaps for the production stack (Trino 467 + Spark + MinIO): (1) does NOT mention that Trino 467's `ALTER TABLE ... EXECUTE remove_orphan_files` has NO `dry_run` parameter — only Spark supports `dry_run => true`; an engineer who copies the Trino command expecting a preview will not get one. Resources/17 explicitly calls this out. (2) does NOT mention that the 7-day floor applies to `remove_orphan_files` from Trino too, not just `expire_snapshots`. (3) "Recommended Schedule" uses Spark CALL syntax without specifying which engine the cron should run from — engineer must infer engine choice. (4) No mention of `iceberg.system.rollback_to_snapshot` as the safety net before running aggressive expiry. (5) No warning about the FIRST-run cost when a multi-month snapshot backlog gets expired — that initial `remove_orphan_files` sweep can be slow and IO-heavy on MinIO. |
+| Completeness | 4.0 | All three sub-questions addressed: what's stored (snapshots + held-alive data files), how to estimate (diagnostic queries + formula), tradeoff of shortening retention (table). Missing nuance: (1) cost estimation should teach reasoning from *operation rate* (commits/day × avg file size × retention days), not calendar-day percentages; (2) snapshot-level metadata growth (manifest list files, manifest files) is conflated with data-file growth — manifest growth is small but for heavily-updated tables compounds; (3) no mention of `clean_expired_metadata => true` option (cleans unreferenced schemas/partition-specs alongside snapshots); (4) doesn't explain WHY heavy updates inflate storage faster (UPDATE in CoW mode rewrites files → old files held alive by snapshots → effective storage = files-per-day × retention-days). |
 | **Average** | **4.00** | **PASS** |
 
 ### What Worked
 
-- Correctly leads with "Debezium does NOT capture constraint-only changes" — the right anchor for the question.
-- Accurately states that `ALTER COLUMN SET NOT NULL` on a column containing NULLs fails before reaching WAL.
-- The NOT VALID + VALIDATE CONSTRAINT two-step pattern is reproduced correctly with proper Postgres 12+ syntax.
-- Tells the engineer NOT to restart the Debezium connector reflexively — and explains why (snapshot re-pulls, offset duplication).
-- Production-stack-appropriate `kubectl scale` example for restarting the Spark consumer on on-prem k8s.
-- Surfaces `max_slot_wal_keep_size` as a database-self-defense measure, with the correct framing ("CDC dies, app stays up").
-- Concrete `information_schema.columns` query and `COUNT(*) WHERE col IS NULL` pre-check both included.
-- Engine labeling clean — Spark vs Trino vs Postgres roles never confused.
+- Anchors on the correct mechanism: "snapshots hold data files hostage" — accurate mental model
+- Compaction causal chain laid out in the right order: compaction writes new files → snapshots still point to old files → expire_snapshots makes old files eligible → remove_orphan_files actually deletes them → MinIO drops. This is the clearest section.
+- Both Spark CALL and Trino ALTER TABLE EXECUTE syntaxes shown; both verified correct against current docs
+- Diagnostic queries against `$snapshots` and `$files` metadata tables are real and copy-pasteable
+- "Verify Expiry Is Running" closing diagnostic (count snapshots; thousands → expiry isn't running) is concrete and actionable
+- Correctly names the Trino config key `iceberg.expire-snapshots.min-retention` and the 7-day floor
+- Production-fit framing: "On bare-metal MinIO: there's no per-GB cost beyond hardware, so the question is disk capacity" — matches `prod_info.md`
+- Order of operations (compaction → expire → remove orphans) stated and reinforced
 
 ### What Missed
 
-- **Scenario mismatch with the question.** The user explicitly said "added a `NOT NULL` constraint to an existing column … no new column." The safe-pattern section then walks through adding a *new* column. The answer should have first addressed the literal scenario: "If the existing column had no NULLs, the `ALTER COLUMN SET NOT NULL` is metadata-only — fast catalog update, no table rewrite, and Debezium sees nothing. If it had NULLs, the ALTER fails immediately in Postgres and never reaches the WAL — Debezium is not the culprit." Then pivot to the three-step pattern as the recommended approach for future changes.
-- **Diagnostic ladder is too thin.** Before guessing about why the pipeline broke, the answer should have suggested checking: (1) Debezium connector task status (RUNNING vs FAILED) and the connector's exception trace via Kafka Connect REST; (2) the Spark consumer's error log; (3) whether the Postgres ALTER actually committed (`SELECT attnotnull FROM pg_attribute WHERE attrelid = 'events'::regclass AND attname = 'some_column'`); (4) the replication slot's `confirmed_flush_lsn` vs `pg_current_wal_lsn()` to see if Debezium was even keeping up.
-- **Speculation framed as cause.** "Application code tried to reference the new constraint and failed because the column definition changed slightly" is not a meaningful Debezium failure mode. Better to say "the failure was almost certainly coincidental or in a downstream consumer — Debezium does not emit events for constraint additions, period."
-- **`max_slot_wal_keep_size` version not specified.** This is PG 13+. A team running PG 12 will hit a config error trying to set it. Minor but worth a line.
-- **Restart guidance is one-sided.** "Do NOT manually restart the Debezium connector" is good default advice, but the user *did* restart and the pipeline recovered — the answer should briefly acknowledge that a restart can be appropriate for certain failure modes (e.g., connector stuck on a transient Kafka issue) and that the user's restart probably worked because the underlying issue was unrelated to the constraint change.
+- **Fabricated cost formula.** `base_data_size × (1 + retention_days/100)` is not grounded in Iceberg mechanics. Real overhead scales with commit rate × avg file size × retention window. The percentage table (7d: +2%, 30d: +30%, 90d: +90%) reads as authoritative quantitative guidance but is unsupported. For a CoW table where 10% of rows update daily, every day's snapshot pins ~10% of the table; 30 days of retention easily exceeds 200% overhead, not 30%. The user explicitly said "heavily updated every day" — this is exactly the scenario where the formula understates the problem.
+- **Trino `remove_orphan_files` has NO `dry_run` on Trino 467.** Only the Spark form supports dry_run. The "Always run `dry_run => true` first" advice is correct for the Spark example but an engineer who copies the Trino-equivalent will not get preview behavior. Resources/17 explicitly calls this out (line 79–80, 95–101); the answer should have surfaced it for the prod stack.
+- **Trino 7-day floor applies to `remove_orphan_files` too**, not just `expire_snapshots`. The answer only mentions the floor for expire_snapshots.
+- **"No upper bound by default" is misleading.** Iceberg's library `history.expire.max-snapshot-age-ms` defaults to 5 days as the *eligibility* threshold for expire_snapshots when it runs — the operational issue is that nothing auto-runs the procedure, not that there's no default age.
+- **First-run cost not warned.** A team that's accumulated months of snapshots and runs `expire_snapshots` for the first time will trigger a large orphan-file sweep that can be slow and IO-heavy on MinIO. Worth a one-line operational warning.
+- **No mention of `rollback_to_snapshot` as safety net** before aggressive expiry. If you expire to 7 days and discover a bug from day 10, you've lost the ability to recover via Iceberg time-travel.
+- **Engine choice for scheduled job not specified.** The "WEEKLY maintenance job" code block uses Spark CALL syntax — should be explicit that on this stack the weekly job typically runs from Spark via Airflow / k8s CronJob, with Trino as the ad-hoc alternative.
+- **Manifest-file vs data-file overhead not separated.** All overhead is attributed to data files; manifest list / manifest growth (small but non-trivial for heavily-updated tables) is invisible in the formula.
 
 ### Technical Accuracy (verified)
 
-WebSearch verification against Debezium documentation and PostgreSQL documentation:
+WebSearch verification against trino.io connector docs and Iceberg maintenance docs:
 
-1. **Does Debezium capture DDL constraint-only changes (NOT NULL)?** Confirmed NO for the PostgreSQL connector. Debezium's Postgres connector relies on Postgres's logical decoding (`pgoutput`), which does not surface DDL change events to consumers. The MySQL/SQL Server connectors maintain a schema history topic for DDL; the Postgres connector does not. Source: Debezium GitHub documentation and Red Hat Debezium User Guide for PostgreSQL.
-2. **What WAL messages does Debezium emit for schema changes vs data changes?** Confirmed: Postgres logical decoding sends RELATION messages before the first change event for a table, whenever a schema change occurs, or when replication resumes. Debezium consumes RELATION messages internally to update its in-memory schema, but does NOT emit a separate schema-change event to Kafka for the Postgres connector. Data DML produces INSERT/UPDATE/DELETE events; pure DDL (constraint-only) produces neither row events nor schema-change events on the Postgres connector. The answer's claim is accurate.
-3. **Is the `ADD CONSTRAINT ... NOT VALID` + `VALIDATE CONSTRAINT` pattern correct for Postgres 12+?** Confirmed via the PostgreSQL official ALTER TABLE documentation. The pattern adds the constraint with a brief AccessExclusiveLock for the catalog update (no table scan), then VALIDATE acquires only ShareUpdateExclusiveLock for the row check — readers and writers continue normally. This is the canonical online-DDL pattern. The answer reproduces it correctly.
-4. **Does adding `SET NOT NULL` to a column with existing NULLs fail at the DDL level in Postgres?** Confirmed: Postgres scans the column and errors with "column contains null values" before the constraint is applied. The DDL never commits, never reaches WAL, and Debezium sees nothing. The answer's claim is accurate.
+1. **Iceberg keeps all data files referenced by any live snapshot, even "replaced" files**: VERIFIED. Per Iceberg maintenance docs and Tabular cookbook, data files are reachable through any live snapshot; expire_snapshots removes metadata pointers and only then are orphaned data files eligible for cleanup.
+2. **`expire_snapshots` + `remove_orphan_files` as canonical two-step**: VERIFIED. Standard pattern in Iceberg maintenance documentation. The answer's ordering (expire first, then remove orphans) is correct.
+3. **Trino `iceberg.expire-snapshots.min-retention` default 7d**: VERIFIED against Trino 481 connector docs and Starburst Galaxy forum. The retention_threshold must be ≥ min-retention or the procedure fails with "Retention specified (X) is shorter than the minimum retention configured in the system (7.00d)". The answer's claim is accurate.
+4. **Spark `CALL iceberg.system.expire_snapshots(table => '...', older_than => ..., retain_last => ...)`**: VERIFIED. Named-argument form with `table`, `older_than`, `retain_last` matches the Iceberg Spark procedures spec.
+5. **Trino `ALTER TABLE ... EXECUTE expire_snapshots(retention_threshold => '30d')`**: VERIFIED against trino.io/docs/current/connector/iceberg.html. The extended form `expire_snapshots(retention_threshold => '30d', retain_last => 10, clean_expired_metadata => true)` is also supported.
 
-One small precision issue: the answer says `max_slot_wal_keep_size` should be in `postgresql.conf`, which is correct, but does not note that this parameter was introduced in Postgres 13. A team on PG 12 will get a config error.
+Unverified / partially incorrect:
+- The percentage overhead table (7d: +2%, 30d: +30%, 90d: +90%) — not from any documentation; heuristics that vastly underestimate overhead for heavily-updated tables (exactly the user's scenario).
+- "Iceberg's default behavior is to keep every snapshot forever" — operationally correct (no auto-expiry); technically there is a 5-day default `max-snapshot-age-ms` eligibility threshold when expire_snapshots is invoked.
 
 ### Rubric Update
 
-- Postgres-to-Iceberg ingestion: prior avg 4.495 across 111 questions → (4.495 × 111 + 4.00) / 112 = 503.045 / 112 = **4.491 across 112 questions**. Status: **PASSED** (stable, slight downward drift of 0.004).
+- Storage sizing: prior avg 4.521 across 6 questions → (4.521 × 6 + 4.00) / 7 = (27.126 + 4.00) / 7 = 31.126 / 7 = **4.447 across 7 questions**. Status: **PASSED** (mild downward drift of 0.074 — formula fabrication and Trino-467 prod-fit gaps pulled the score down).
 
 ---
 
-## Q2 — View-per-tenant vs OPA row-level filtering at scale
+## Iter 321 Summary
 
-### Score
-
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 4.0 | Core mechanics verified: OPA row-filter response format `{"rowFilters": [{"expression": "..."}]}` matches the Trino OPA plugin docs; row filters are injected at query analysis (planning) time, not per-row; HMS listing degradation with many schemas/views is real. **One material error**: the answer suggests `opa.policy.batched-uri` can be used to "collapse multiple filter checks into a single HTTP round-trip" for the OPA row-filter latency concern. Per Trino docs (and resources/05 line 925+ explicitly), `opa.policy.batched-uri` handles only **filter-list operations** (e.g., `FilterTables`, `FilterSchemas`), NOT row-filter expression checks. Row filters are not batched via batched-uri. Also: the threshold table claim that 1000+ tenants becomes "a planner bottleneck on every schema change" overstates the planner role — the dominant cost at that scale is HMS catalog listing and view-DDL deploy time, not query planning per se. |
-| Beginner clarity | 4.5 | Strong narrative arc. Opens with the actual answer (query perf is similar, ops is what scales). Three breaking-point modes (catalog listing, schema migration, onboarding) are concrete. Each section has a takeaway sentence. No assumed OPA jargon — explains what Rego rules look like at conceptual level. |
-| Practical applicability | 4.5 | Engineer can act immediately: the 200/250/300 staging plan is shippable; CI assertion `SELECT DISTINCT tenant_id FROM analytics.events` per tenant principal is the right verification recipe; production stack fit (Trino + OPA + Iceberg + HMS) matches `prod_info.md`. Missing: concrete OPA config snippet (`opa.policy.row-filters-uri=...`), and a worked Rego skeleton for the row-filter rule. The batched-uri suggestion would actively mislead an engineer who tries to configure it for row-filter latency. |
-| Completeness | 4.25 | All three sub-questions answered: performance difference (negligible at runtime), breaking point (200–300 ops-driven, 1000+ structural), faster vs easier (easier-not-faster bottom line is correct). Missing nuance: (1) `opa.policy.cache-ttl-seconds` interaction with row-filter latency — cache amortizes the per-query OPA call, which is more relevant than the (incorrect) batched-uri suggestion; (2) view migration mechanics (what happens to existing tenant clients during cutover — do they need DSN changes?); (3) the "200 threshold" should mention HMS-specific tuning knobs (`hive.metastore-cache-ttl`) that can extend the view pattern's runway. |
-| **Average** | **4.31** | **PASS** |
-
-### What Worked
-- Bottom-line framing ("not faster — easier to manage at scale") is the correct mental model and directly answers the engineer's "actually faster or just easier" sub-question
-- The three operational breaking points (catalog listing, schema migration, onboarding) map cleanly to on-call experience and CI/CD reality
-- 200/250/300 staged migration plan is actionable and risk-aware (parallel cutover, CI assertion)
-- OPA row-filter mechanism walkthrough (5 steps) correctly identifies analysis-phase enforcement, not per-row
-- Honest hedging on the "200-tenant threshold is a rule of thumb, not a hard rule" with two modifiers (churn rate, growth pace) prevents over-precise advice
-- Correctly notes that from the application's perspective, OPA enforcement is transparent — engineers don't add `WHERE tenant_id = ?` in SQL
-
-### What Missed
-- **`opa.policy.batched-uri` misapplied to row-filter latency** — batched-uri only batches filter-list operations (FilterTables, FilterSchemas), not row-filter expression checks. An engineer configuring batched-uri expecting row-filter latency reduction will see no improvement. The correct latency optimization for row filters is `opa.policy.cache-ttl-seconds` (caches the OPA decision for repeated queries from the same principal).
-- **No concrete OPA config snippet** — the answer describes the mechanism but doesn't show `opa.policy.row-filters-uri=http://opa:8181/v1/data/trino/rowFilters` or a Rego skeleton. resources/05 has both ready to cite.
-- **HMS tuning knobs not mentioned as runway extender** — `hive.metastore-cache-ttl` and `hive.metastore-cache-maximum-size` can mitigate the catalog listing slowdown for moderate tenant counts before forcing migration.
-- **Migration mechanics gap** — what happens to existing tenant DSNs/JDBC URLs during the view→shared-table cutover? If tenants connect to `tenant_acme.events_view`, they need a SQL change to `analytics.events`. Worth flagging.
-- **Planner bottleneck overclaim at 1000+** — the dominant cost is HMS listings and view DDL deploy time, not query planning. Minor framing issue.
-
-### Technical Accuracy (verified)
-- **Row-filter response format `{"rowFilters": [{"expression": "..."}]}`**: VERIFIED against [Trino OPA access control docs](https://trino.io/docs/current/security/opa-access-control.html) — "array of objects, each of them in the format {expression:clause}".
-- **Row filters injected at query analysis (planning) time, not per-row**: VERIFIED. Trino's planner reads the returned expression and injects it as a filter predicate above the table scan (visible in EXPLAIN).
-- **200-tenant threshold as a documented guideline**: NOT a Trino/OPA documented number — it's a rule-of-thumb from resources/05. Answer correctly labels it as such.
-- **HMS listing degradation with many schemas/views**: VERIFIED. Multiple Trino GitHub issues (e.g., trinodb/trino#13115, #21671, #5567) confirm getMetastoreClient + Thrift API latency stacks on SHOW TABLES / information_schema.tables at scale.
-- **`opa.policy.batched-uri` as correct config key**: Key name is correct, but the **scope is wrong** in the answer. Per Trino docs and resources/05 (lines 925–1036), batched-uri handles only filter-list operations (FilterTables, FilterColumns), NOT row-filter expression evaluation. The answer's suggestion to use it for row-filter latency reduction is incorrect.
-
-### Rubric Update
-- Multi-tenant analytics: prior avg 4.481 across 118 questions → (4.481 × 118 + 4.31) / 119 = **4.480 across 119 questions**. Status: PASSED (stable).
-
----
-
-## Iter 320 Summary
-
-**Iter 320 average: 4.155 — PASS** ✓
+**Iter 321 average: (4.56 + 4.00) / 2 = 4.28 — PASS** ✓
 
 ### Notable
-- Q1 4.00: NOT NULL constraint in CDC — correctly stated Debezium doesn't capture DDL constraint changes; answer's three-step pattern was for new-column addition, not existing-column SET NOT NULL (scenario mismatch); diagnostic ladder too speculative
-- Q2 4.31: View-per-tenant vs OPA row filters — bottom-line "easier not faster" correct; `opa.policy.batched-uri` misapplied to row-filter latency (it only batches filter-list ops FilterTables/FilterSchemas, not row-filter checks; correct optimization is `opa.policy.cache-ttl-seconds`)
+- Q1 4.56: Column rename detection in CDC — correctly framed pgoutput sending no DDL rename event and Debezium learning via WAL relation message; expand/contract pattern + repair recipe both runnable; minor lead-in overstates "new column name never appears" and misses Iceberg native `RENAME COLUMN` alternative
+- Q2 4.00: Time-travel snapshot storage cost — correct anchor (snapshots hold data files hostage), correct Spark+Trino syntax, correct expire→remove-orphans ordering; cost estimation formula is a fabricated calendar-day-percentage heuristic that understates overhead for the user's heavily-updated scenario; Trino 467 prod-fit gaps (no `dry_run` in Trino's `remove_orphan_files`, floor applies to BOTH procedures, engine choice for scheduled job unstated); missing `rollback_to_snapshot` safety-net mention and first-run cost warning
 
 ### Resource fixes applied this iteration
-1. **resources/05-multi-tenant-analytics.md** — clarify `opa.policy.batched-uri` scope (filter-list ops only, NOT row-filter checks); add `opa.policy.cache-ttl-seconds` as the correct row-filter latency optimization; add HMS tuning knobs runway extender
-2. **resources/13-postgres-to-iceberg-ingestion.md** — add explicit guidance for adding NOT NULL to an existing column (if no NULLs: metadata-only, Debezium unaffected; if NULLs exist: fails at DDL level before WAL; diagnostic ladder for pipeline failures post-DDL)
+1. **resources/11-lakehouse-storage-sizing.md** — Replaced fabricated calendar-day-percentage formula with commit-rate-based estimator (`snapshot_overhead ≈ daily_rewritten_volume × retention_days`); worked example: 500 GB CoW table with 10% daily UPDATE rate → 50 GB/day rewritten → 1.5 TB overhead at 30-day retention (300%, not 30%); Trino `remove_orphan_files` has NO `dry_run` parameter (Spark-only); `rollback_to_snapshot` safety net before aggressive expiry; first-run cost warning for multi-month backlogs; 7-day floor applies to BOTH `expire_snapshots` AND `remove_orphan_files`
+2. **resources/13-postgres-to-iceberg-ingestion.md** — Corrected "new column name never appears" framing: Debezium DOES emit events with new column name once WAL RELATION message arrives on next DML; silence is downstream (Iceberg table missing column or Spark consumer referencing old name); added Iceberg native `ALTER TABLE ... RENAME COLUMN` as metadata-only preferred repair (preserves column ID, works in Spark and Trino); added three downstream failure mode diagnostic ladder
 
-### Suggested focus for Iter 321
-- "Postgres-to-Iceberg ingestion" (4.491/112 — probe column rename detection in CDC, or type widening vs narrowing in Iceberg schema evolution)
-- "Multi-tenant analytics" (4.480/119 — probe `opa.policy.cache-ttl-seconds` behavior: cache hit rate, staleness, when to lower TTL for revocation latency)
-- "Storage sizing" (4.521/6 — probe time-travel storage cost: snapshot retention vs MinIO costs)
-- "Real-time vs batch" (4.771/6 — probe Trino HMS lock contention under high-frequency streaming commits)
+### Suggested focus for Iter 322
+- **Storage sizing** (4.447/7 after Q2 — slight downward drift): probe the *quantitative* cost-estimation angle — commit-rate × file-size × retention-window framing instead of calendar-day percentages. Resources/11 should add a worked example showing how a heavily-updated CoW table accumulates per-day snapshot overhead from UPDATE/MERGE activity, and explicitly call out that "heavily updated" can mean 100–300% overhead at 30-day retention, not 30%.
+- **Iceberg table maintenance** (4.655/20): probe Trino 467-specific gaps surfaced by Q2 — no `dry_run` in Trino's `remove_orphan_files`, 7-day floor enforcement on BOTH procedures, `clean_expired_metadata` parameter, first-run cost on a multi-month backlog, `rollback_to_snapshot` as pre-expiry safety net. Resources/17 covers these but the responder didn't surface them from /11.
+- **Postgres-to-Iceberg ingestion** (4.492/113): continue probing CDC edge cases — column rename was Q1; next angle could be JSONB column type evolution, composite primary key handling in Debezium, or `replica identity` impact on UPDATE/DELETE event completeness.
+- **Multi-tenant analytics** (4.480/119): probe `opa.policy.cache-ttl-seconds` revocation latency tradeoff (cache hit rate vs how long a revoked tenant retains access).

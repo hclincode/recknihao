@@ -1,7 +1,7 @@
 {
-  "iteration": 321,
+  "iteration": 322,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter320 avg 4.155: Q1 (4.00) NOT NULL constraint in CDC — Debezium doesn't capture DDL, scenario mismatch (answer gave new-column pattern for existing-column question); Q2 (4.31) View-per-tenant vs OPA row filters — batched-uri scope error (filter-list only, not row-filter). Fixed: resources/05 batched-uri scope + cache-ttl + HMS tuning; resources/13 NOT NULL existing-column guidance + diagnostic ladder. Multi-tenant: 4.480/119. Postgres-to-Iceberg: 4.491/112."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter321 avg 4.28: Q1 (4.56) Column rename detection in CDC — passed but lead-in overstated 'new column name never appears' and missed Iceberg native RENAME COLUMN as alternative; Q2 (4.00) Time-travel snapshot storage cost — passed but fabricated calendar-day cost formula understated overhead for heavy CoW updates, missed Trino-no-dry_run + rollback safety net. Fixed: resources/11 commit-rate-based snapshot overhead formula with 500GB/30d worked example (300% overhead), Trino remove_orphan_files no-dry_run warning, rollback_to_snapshot safety net, 7-day floor applies to BOTH procedures; resources/13 corrected column-rename framing (Debezium DOES emit new-named events post-RELATION-message; failures are downstream), added Iceberg native RENAME COLUMN as preferred metadata-only repair with ADD+backfill+DROP as alternative for dual-column transitions. Storage sizing: 4.447/7. Postgres-to-Iceberg: 4.492/113. Multi-tenant: 4.480/119."
 }
