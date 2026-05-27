@@ -1,61 +1,57 @@
-# Feedback — Iter 291 (Extended phase)
+# Feedback — Iter 292 (Extended phase)
 
 Date: 2026-05-27
-Topic: SQL query best practices for OLAP — third iteration (Q1 PASS, Q2 PASS perfect)
+Topic: SQL query best practices for OLAP — fourth iteration (Q1 PASS perfect, Q2 PASS perfect)
 
 ## Results summary
 
 | Question | Topic angle | Score | Pass/Fail |
 |---|---|---|---|
-| Q1 | Partition pruning: which date functions are safe (DATE()/CAST(), date_trunc) vs which break pruning (year(), month(), day_of_week()) | **4.75** | PASS |
-| Q2 | Estimating scan cost before running: $files metadata, EXPLAIN ANALYZE 1-day sample, Physical Input field | **5.00** | PASS |
+| Q1 | CTEs in Trino: inlined not materialized; N references = N executions; CASE WHEN fix; CTAS for cross-query | **5.00** | PASS |
+| Q2 | HAVING vs WHERE: correct for aggregates, bad for raw columns; engineer's query is already right | **5.00** | PASS |
 
-**Iter 291 average: 4.875 — PASS** ✓
+**Iter 292 average: 5.00 — PASS** ✓
 
-**Topic update**: SQL query best practices for OLAP: 4.095/4 → **4.355/6 questions** (PASSED — recovering strongly after iter290 Q1 failures)
+**Topic update**: SQL query best practices for OLAP: 4.355/6 → **4.516/8 questions** (PASSED — strongly above 4.0, recovering well from early oscillation)
 
 ---
 
 ## What worked
 
-### Q1 — Partition pruning function breakdown (4.75)
-1. Both optimizer rules correctly stated: UnwrapCastInComparison (DATE()/CAST()) and UnwrapDateTruncInComparison (date_trunc) — correct after 2 iterations of oscillation
-2. Non-monotonic functions correctly identified as the truly broken class: year(), month(), day_of_week(), hour() — no unwrap rule
-3. TIMESTAMP range as guaranteed production form — correct
-4. EXPLAIN verification guidance — correct
-5. Fixes for non-monotonic functions (explicit ranges or precomputed columns) — practical
+### Q1 — CTE inlining (5.0)
+1. CTEs inlined (not materialized) in Trino — correctly stated
+2. N references = N executions — correct
+3. No CTE materialization hint in Trino 467 — correct, no invented property
+4. CASE WHEN inside aggregates as single-pass fix — canonical and correct
+5. CTAS as cross-query materialization workaround — correct for Trino 467 + Iceberg stack
+6. Predicate pushdown through single-use inlined CTEs — correct
+7. EXPLAIN self-diagnosis recipe — practical
 
-### Q2 — Scan cost estimation (5.0)
-1. Four-approach ladder (mental math → $files → EXPLAIN → EXPLAIN ANALYZE sample) — excellent teaching structure
-2. `$files` metadata table with `file_size_in_bytes` — verified correct
-3. `Physical Input: X GB` in EXPLAIN ANALYZE — correct field
-4. 1-day sample + extrapolation technique — directly actionable
-5. "When your estimate jumps to full 5 TB" table — immediately useful
-6. Numeric examples (14 GB/day raw, 1.4-2.8 GB compressed, 42-84 GB for 30 days) — concrete
-
----
-
-## Minor error (Q1) — already fixed
-
-**Claim**: `unwrap_casts` session property = false disables the unwrap rules.
-**Reality**: This property was removed in Trino 364 (PR #9550). The rules are always-on in Trino 467 — there's no session property to disable them.
-
-**Resource 23 fix applied**: Corrected the edge cases section to state "unwrap rules are always-on in Trino 467; the `unwrap_casts` toggle was removed in Release 364."
+### Q2 — HAVING vs WHERE (5.0)
+1. WHERE runs before aggregation, HAVING after — correct
+2. Engineer's specific query already correct — directly answered the question
+3. BAD: HAVING on raw column (tenant_id IN ...) — correct illustration of the actual trap
+4. HAVING on COUNT/SUM = mandatory, no alternative — correct
+5. EXPLAIN ANALYZE + Physical Input redirect for slow query diagnosis — excellent
 
 ---
 
-## Resource fixes applied
+## No errors — no teacher action required
 
-- **Resource 23 edge cases section** — replaced incorrect `unwrap_casts` session property caveat with accurate "always-on in Trino 467" note
+Both answers passed with perfect scores. Resources are accurate and the responder is performing well on SQL OLAP best practices.
 
 ---
 
-## Suggested iter292 angles
+## Topic state
 
-1. **SQL OLAP best practices — CTEs and subquery reuse** (running same subquery twice is an OLTP habit that's expensive in OLAP; Trino materializes some CTEs)
+SQL query best practices for OLAP is now at **4.516/8 questions** — well above the 3.5 threshold and tracking above 4.5 over the last 4 iterations. The topic has recovered from the early oscillation on partition pruning optimizer rules.
 
-2. **SQL OLAP best practices — WHERE before HAVING** (filter before aggregation; HAVING applies after — more data processed)
+---
 
-3. **SQL OLAP best practices — SELECT * column overhead** (reinforce the columnar storage lesson with a concrete bytes example)
+## Suggested iter293 angles
 
-4. **Alternative topic**: if SQL OLAP is at 4.355/6 and trending well, introduce another topic from other resources
+1. **Continue SQL OLAP best practices** — remaining areas: SELECT * columnar overhead (concrete bytes example), or window functions vs GROUP BY for running totals
+
+2. **Cross-topic** — test a different resource area to ensure coverage breadth; consider testing "Multi-tenant analytics" or "Real-time vs batch analytics" which haven't been tested recently
+
+3. **New angle from the weaker topics** — schema design for analytics hasn't been tested in many iterations; could be worth a re-check

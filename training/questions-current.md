@@ -1,9 +1,19 @@
-# Iter 291 Questions
+# Iter 292 Questions
 
-## Q1 — Which date/time functions on a timestamp partition column are safe in Trino, and which ones kill performance?
+## Q1 — Does using a CTE in Trino make it faster, or is it just for readability?
 
-I've read a bunch of conflicting stuff about filtering on timestamp columns in Trino when the table is partitioned by day. Like, some places say `DATE(event_at) = DATE '2026-05-01'` is fine, others say it does a full table scan. Same with `date_trunc('day', event_at)`. And then there are functions like `year(event_at) = 2026` that I think are definitely a problem. Can you just give me a clear breakdown of which patterns are safe versus which ones will scan the whole table? Our table has an `event_at TIMESTAMP(6)` column partitioned by `day(event_at)` in Iceberg, and we're running Trino 467. I want to know what's actually happening under the hood, not just "avoid functions" — because clearly some functions are fine and some aren't.
+In Postgres, when I write a complex query, I sometimes break it into CTEs (the WITH ... AS ... part) to make it easier to read. I assumed Trino does the same thing — materialize the CTE result once and reuse it. But someone told me that in Trino, CTEs are NOT materialized by default and get inlined, which means if I reference the same CTE twice in a query, it actually runs that subquery twice. Is that true? And if so, should I be avoiding CTEs in Trino? We're running Trino 467 on Iceberg tables and I have some queries that reference the same CTE 2-3 times for different aggregations.
 
-## Q2 — Is there a way to see how much of my Iceberg table a query will actually read before I run it?
+## Q2 — My query filters with HAVING but it still feels slow — is HAVING the same as WHERE in Trino?
 
-I have a few queries I want to run against a large Iceberg fact table in Trino (maybe 5 TB total, partitioned by day). Before I just fire them off and wait forever, is there a way to estimate how much data they'll actually scan? Like, I want to know if a query is going to read 50 GB or the whole 5 TB before I commit to running it. I know about EXPLAIN, but I'm not sure how to interpret the output for this specific question.
+I'm writing a query to find tenants who have more than 1000 events this week. I wrote it like this:
+
+```sql
+SELECT tenant_id, COUNT(*) AS event_count
+FROM events
+WHERE event_date >= DATE '2026-05-20'
+GROUP BY tenant_id
+HAVING COUNT(*) > 1000;
+```
+
+Someone told me HAVING is slower than WHERE for this kind of filter. But I don't see how — aren't HAVING and WHERE equivalent here? The COUNT has to happen before HAVING can evaluate, so how could I possibly avoid it?

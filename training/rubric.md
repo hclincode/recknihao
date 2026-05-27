@@ -45,7 +45,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.511 | 251 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.763 | 4 |
-| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.355 | 6 |
+| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.517 | 8 |
 
 ---
 
@@ -9988,3 +9988,23 @@ Verified: trino.io/blog/2023/04/11/date-predicates.html, github.com/trinodb/trin
 **Key findings**: `$files` metadata table with `file_size_in_bytes` — verified; `Physical Input: X GB` in EXPLAIN ANALYZE — verified (improved in Trino 477); mental math approach (table_size / total_days) — correct; EXPLAIN constraint vs ScanFilterProject distinction — correct; date_trunc unwrap rule in "safe" list — correct. Decision flow and numeric examples make the answer directly actionable.
 
 Verified: Iceberg connector docs, trino.io/docs/current/sql/explain-analyze.html, trino.io/docs/current/connector/iceberg.html.
+
+### Iter 292 Q1 — 2026-05-27 (EXTENDED PHASE) — SQL query best practices for OLAP (CTEs inlined not materialized in Trino; N references = N executions; fix: CASE WHEN single-pass aggregation; CTAS materialize for cross-query reuse; predicate pushdown through single-use CTEs)
+
+**Score: 5.00/5.0 PASS**
+
+**Topics updated**: SQL query best practices for OLAP — prior avg 4.355 across 6 questions (sum 26.13); new running avg (26.13 + 5.00) / 7 = 31.13 / 7 = **4.447 across 7 questions**. Status: PASSED (trending up strongly — 3rd consecutive high score).
+
+**Key findings**: CTEs inlined by default in Trino (not materialized) — verified; N CTE references = N subquery executions — verified; no CTE materialization hint/session property in Trino 467 — verified (answer correctly avoided inventing one); `CASE WHEN` inside aggregates as single-pass fix — verified; CTAS as cross-query materialization workaround — correct; predicate pushdown through inlined single-use CTEs — correct. EXPLAIN self-diagnosis recipe excellent. No corrections needed.
+
+Verified: trino.io/docs/current/sql/select.html, trino.io/docs/current/optimizer/pushdown.html, trino.io/docs/current/connector/iceberg.html.
+
+### Iter 292 Q2 — 2026-05-27 (EXTENDED PHASE) — SQL query best practices for OLAP (HAVING on aggregate = correct; HAVING on raw column = move to WHERE; engineer's specific query correct; EXPLAIN ANALYZE + Physical Input to diagnose true bottleneck)
+
+**Score: 5.00/5.0 PASS**
+
+**Topics updated**: SQL query best practices for OLAP — prior avg 4.447 across 7 questions (sum 31.13); new running avg (31.13 + 5.00) / 8 = 36.13 / 8 = **4.516 across 8 questions**. Status: PASSED (solidly above threshold — topic performing well).
+
+**Key findings**: WHERE runs before aggregation, HAVING runs after — verified; engineer's specific query (`WHERE event_date >= ... HAVING COUNT(*) > 1000`) is correct pattern — verified; HAVING on raw columns (like `HAVING tenant_id IN (...)`) is slower and should be in WHERE — verified; EXPLAIN ANALYZE + Physical Input redirect for further performance diagnosis — excellent practical guidance. No errors.
+
+Verified: trino.io/docs/current/sql/select.html, trino.io/docs/current/optimizer/pushdown.html.
