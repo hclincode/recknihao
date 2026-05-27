@@ -1,95 +1,89 @@
-# Judge Feedback — Iter 325
+# Judge Feedback — Iter 326
 
 Date: 2026-05-27
 Phase: extended
-Topics: Iceberg manifest cleanup / optimize_manifests on Trino 467 (Q1) + STRUCT vs flat columns for stable-schema JSONB (Q2)
+Topics: STRUCT schema evolution — adding a field with dotted-path ADD COLUMN (Q1) + OPA batched-uri scope vs row-filter latency (Q2)
 
 ---
 
-## Q1 — Iceberg manifest cleanup and slow query planning on Trino 467
+## Q1 — Adding a new field to an existing STRUCT column in Iceberg
 
 ### Score
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5 | Every load-bearing claim verified. `optimize_manifests` confirmed added in Trino 470 (Feb 5, 2025) via PR #14821. Spark `CALL iceberg.system.rewrite_manifests(table => '...')` named-arg syntax matches official Iceberg Spark procedures docs. 7-day min-retention floor for both `expire_snapshots` and `remove_orphan_files` confirmed. Maintenance sequence (optimize → expire → orphan → manifests) matches resources/17 and canonical runbook order. No fabrications. |
-| Beginner clarity | 5 | Opens with concrete plain-English definition of manifest files. "Trino must deserialize and scan all 50,000 before it can tell your query which data to read" makes the metadata-vs-data distinction clear without jargon. 50k manifests → 30s → <1s contrast is immediately intuitive. |
-| Practical applicability | 5 | Engineer knows exactly what to run: immediate one-statement Spark fix, both CLI invocation methods, weekly schedule guidance paired with snapshot expiry, complete 4-step runbook with engine labels. Summary table maps each procedure to which engine on Trino 467. |
-| Completeness | 5 | Covers: what manifest files are, why they slow planning not execution, what to actually run on Trino 467, whether it's a different Trino command or Spark. Bonus: 7-day floor proactively, Trino 470 upgrade path, ordering rationale for the full sequence. |
+| Technical accuracy | 5 | All four critical claims verified: (1) `ALTER TABLE ... ADD COLUMN metadata.sso_enabled BOOLEAN` (dotted-path) correct per Iceberg Spark DDL docs. (2) Metadata-only with NULL for old rows — correct per Iceberg field-ID resolution spec. (3) `col("metadata").withField("sso_enabled", value)` — valid PySpark 3.1.0+. (4) `ALTER COLUMN metadata ADD sso_enabled` correctly flagged as invalid. Trino 467 supports the dotted-path form (added in Trino 422). |
+| Beginner clarity | 4.5 | Strong scaffolding: opens with the exact correct DDL immediately, explains why the wrong syntax fails, field-ID mechanism explained in plain English ("Iceberg matches by numeric field ID, not column name"). Comparison table between top-level and STRUCT syntax is scannable. Minor: field-ID mechanism explanation could be slightly more beginner-accessible. |
+| Practical applicability | 5 | Engineer has everything needed: immediate DDL to run, Spark ingestion code updated to include the new field, backfill option with `withField` + `coalesce`, backfill gotcha called out (silent NULL exclusion from dashboards), and a four-step rollout timeline. Production-stack fit strong (Trino 467, Spark, MinIO, Iceberg 1.5.2). |
+| Completeness | 5 | Covers all asked questions: correct syntax, why wrong syntax fails, NULL behavior for old rows, ingestion job changes, drop/rename parity. Also anticipates the follow-on question about schema stability contract vs MAP/VARCHAR alternatives. |
+| **Average** | **4.875** | **PASS** |
+
+### What Worked
+- Opens with correct DDL immediately — no preamble.
+- Why `ALTER COLUMN ... ADD` fails is explained without jargon ("Iceberg does not support an `ALTER COLUMN ... ADD` form").
+- Field-ID mechanism in plain English makes the NULL-for-old-rows behavior intuitive rather than magic.
+- Backfill `withField` + `coalesce` pattern with the "silent NULL exclusion" gotcha is a real production trap — calling it out proactively is the right move.
+- Four-step rollout timeline gives the engineer a concrete action sequence.
+- Drop/rename parity (same dotted-path syntax) extends the mental model without extra explanation.
+
+### What Missed
+- Minor: the comparison table between top-level and STRUCT syntax is clean but could add DROP and RENAME rows for completeness (drop/rename are mentioned in prose but not in the table).
+- Minor: no mention of what happens when you DROP and re-ADD a STRUCT field — re-ADD gets a NEW field ID, so old data for the original field is not accessible via the new column. This is an advanced gotcha but relevant for teams that rename fields by drop-then-add rather than RENAME COLUMN.
+
+### Technical Accuracy (verified)
+1. Dotted-path `ADD COLUMN metadata.sso_enabled BOOLEAN` — CORRECT per Iceberg Spark DDL docs
+2. Metadata-only with NULL for old rows — CORRECT per Iceberg field-ID resolution spec
+3. `withField` PySpark syntax — VALID (Spark 3.1.0+)
+4. `ALTER COLUMN metadata ADD` invalid — CORRECT; dotted-path ADD COLUMN is the only form
+
+### Rubric Update
+- Postgres-to-Iceberg ingestion: prior avg 4.490 across 115 questions → (4.490 × 115 + 4.875) / 116 = (516.35 + 4.875) / 116 = 521.225 / 116 = **4.493 across 116 questions**. Status: **PASSED** (recovering from MODIFY COLUMN error in iter325).
+
+---
+
+## Q2 — OPA batched-uri scope vs row-filter latency
+
+### Score
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Technical accuracy | 5 | All five claims verified against official Trino OPA docs: (1) `batched-uri` applies only to FilterTables/Schemas/Columns/Catalogs/Views — confirmed. (2) No `cache-ttl-seconds` / no decision cache — confirmed. (3) Row-filter evaluation uses separate `opa.policy.row-filters-uri` endpoint — confirmed. (4) Sidecar deployment for low-latency OPA calls — industry-standard, accurate. (5) Endpoint mapping table matches official 10-property config list. Critically avoids the fabricated `opa.policy.cache-ttl-seconds` property that caused iter322 failure. |
+| Beginner clarity | 5 | Schema visibility vs row visibility distinction explained in plain English ("which resources can you see?" vs "which rows can you see?"). Batching analogy (50 tables → 50 calls vs 1 call) makes the performance difference concrete. Debug logging guidance is actionable. |
+| Practical applicability | 5 | Four concrete levers for reducing row-filter latency with config snippets and expected impact (10-20ms savings from sidecar). Diagnostic logging procedure to confirm what's actually slow. Complete recommended config block at the end is copy-pasteable. |
+| Completeness | 5 | Covers all parts of the question: why batched-uri didn't help, what it does batch, what row-filter evaluation actually is, and what does actually reduce overhead. Endpoint mapping table consolidates the full picture. |
 | **Average** | **5.00** | **PASS** |
 
 ### What Worked
-- Version-gate precision: Trino 470 (Feb 2025) as the version introducing `optimize_manifests` — exact match against release notes.
-- Engine routing unambiguous: every code block labeled, summary table makes "Spark not Trino" visible at a glance.
-- Concrete numbers (50k manifests → 30s → <1s) give a testable expectation.
-- Full 4-step maintenance sequence with correct ordering and ordering rationale.
-- 7-day floor mentioned proactively with GDPR escape hatch (Spark bypasses floor).
+- Opens directly with the answer: "batched-uri does NOT apply to row-filter expression evaluation."
+- Schema-visibility-vs-row-visibility framing is the core mental model engineers need — stated clearly early.
+- Batching example (50 tables → 50 calls vs 1 call) makes the benefit of batched-uri concrete, so the engineer understands what it IS good for.
+- "Cannot be batched — each query is independent" explains WHY row filters can't be batched, not just that they can't.
+- Correctly avoids the fabricated `opa.policy.cache-ttl-seconds` property.
+- Sidecar deployment as the highest-impact latency lever (10-20ms savings) is the right recommendation.
+- Debug logging guidance lets engineer confirm the diagnosis before making infrastructure changes.
+- Endpoint mapping table is a clean reference for the full OPA plugin config surface.
 
 ### What Missed
-- Minor: `optimize` shown without `WHERE` partition-scoped variant.
-- Minor: no diagnostic query (`SELECT COUNT(*) FROM "events$manifests"`) to confirm manifest count before/after.
-- Minor: `dry_run` is Spark-only for `remove_orphan_files` — step 3 treats it as a clean Trino call without this caveat.
+- Very minor: the answer doesn't explicitly call out the `opa.policy.column-masking-uri` vs `opa.policy.batch-column-masking-uri` distinction in the body text (only in the table) — but both appear in the table and the question is about row-filter latency, so this is acceptable.
 
 ### Technical Accuracy (verified)
-All four verification asks pass. No fabrications. No version mismatches.
+All five verification asks pass. No fabrications.
 
 ### Rubric Update
-- Iceberg table maintenance: prior avg 4.561 across 22 questions → (4.561 × 22 + 5.00) / 23 = **4.580 across 23 questions**. Status: **PASSED**.
+- Multi-tenant analytics: prior avg 4.465 across 121 questions → (4.465 × 121 + 5.00) / 122 = (540.265 + 5.00) / 122 = 545.265 / 122 = **4.469 across 122 questions**. Status: **PASSED** (continuing recovery from iter322 fabrication drop).
 
 ---
 
-## Q2 — STRUCT vs flat columns for stable-schema JSONB
+## Iter 326 Summary
 
-### Score
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 3.5 | Most claims correct (STRUCT physical layout, per-field stats, `from_json`, `withField`, JSON-string drawbacks, dereference-pushdown caveats). One serious error: `ALTER TABLE ... MODIFY COLUMN metadata STRUCT<...>` is NOT valid Iceberg syntax. Correct form is `ALTER TABLE ... ADD COLUMN metadata.sso_enabled BOOLEAN` (dotted-path ADD COLUMN). Iceberg docs explicitly state "ALTER COLUMN is not used to update struct types; instead, use ADD COLUMN and DROP COLUMN." Engineer pasting the MODIFY COLUMN form would get a parser error. |
-| Beginner clarity | 4.5 | Clear definitions, accessible language. Trade-off table excellent. Dot-notation, bracket-notation, and CAST AS JSON variants all shown. Minor: "dereference pushdown" feature name never used explicitly. |
-| Practical applicability | 3.5 | Strong on the decision framework, hybrid pattern, recommendation, Spark code. Loses points because the schema-evolution DDL (most likely thing to copy-paste) contains invalid syntax — engineer would hit a syntax error on day one of evolving the schema. |
-| Completeness | 4.5 | All three approaches covered, trade-off table, query performance scenarios with concrete numbers, both ingestion patterns, schema-evolution scenario, backfill, hybrid promotion, explicit verdict. Minor: no EXPLAIN snippet to verify pushdown fires. |
-| **Average** | **4.00** | **PASS** |
-
-### What Worked
-- Clear three-way framing (flat / STRUCT / JSON string) with crisp pros/cons.
-- Trade-off comparison table accurate at the cell level.
-- Two correct PySpark ingestion patterns (`from_json` with explicit schema, `struct(col, col, ...)`) with "never auto-derive in prod" guardrail.
-- Per-field min/max statistics claim for STRUCT verified against Iceberg spec.
-- Honest treatment of Trino dereference pushdown ("more conservative on nested predicates") — matches PR #8129 and known Parquet caveats.
-- Hybrid promotion pattern (one hot field flat + full STRUCT) is a real production recipe.
-- Numerical query-performance scenarios (7/2000 vs 50/2000 vs 2000/2000 files) make the trade-off tangible.
-
-### What Missed
-- **DDL error**: `ALTER TABLE ... MODIFY COLUMN metadata STRUCT<...>` is not Iceberg syntax. Correct: `ALTER TABLE iceberg.analytics.events ADD COLUMN metadata.sso_enabled BOOLEAN`. This is the single most consequential error — a copy-paste trap on day one of schema evolution.
-- No Trino syntax example for the dotted-path ADD COLUMN (engineer's main query engine is Trino 467).
-- "Dereference pushdown" — the actual Trino feature name — never used; would help engineer search for follow-ups.
-- No EXPLAIN snippet to verify nested predicate pushdown actually fires.
-
-### Technical Accuracy (verified)
-1. STRUCT stored as separate Parquet columns with per-field min/max — VERIFIED
-2. `from_json(col, schema)` — VERIFIED
-3. Trino 467 dereference pushdown with caveats — PARTIALLY VERIFIED (PR #8129, hedging is fair)
-4. `withField` PySpark syntax — VERIFIED (Spark 3.1.1+)
-5. `ALTER TABLE ... MODIFY COLUMN metadata STRUCT<...>` — **FALSE** — parser error on Iceberg
-
-### Resource Fix Applied
-resources/13 updated: added explicit STRUCT schema evolution callout with correct dotted-path `ADD COLUMN metadata.new_field TYPE` syntax and explicit note that `MODIFY COLUMN` is invalid for STRUCT field addition. See lines added after the decision table.
-
-### Rubric Update
-- Postgres-to-Iceberg ingestion: prior avg 4.494 across 114 questions → (4.494 × 114 + 4.00) / 115 = **4.490 across 115 questions**. Status: **PASSED** (slight downward drift from MODIFY COLUMN error; resource fix applied to prevent recurrence).
-
----
-
-## Iter 325 Summary
-
-**Iter 325 average: (5.00 + 4.00) / 2 = 4.50 — PASS** ✓ (Q1 PASS / Q2 PASS)
+**Iter 326 average: (4.875 + 5.00) / 2 = 4.9375 — PASS** ✓ (Q1 PASS / Q2 PASS)
 
 ### Notable
-- Q1 5.00: Perfect score on manifest cleanup / optimize_manifests version gate. Strong recovery theme continues — the version-gate pattern (Trino 470 for optimize_manifests) was applied correctly, all maintenance sequence claims verified, and the Spark fallback was given with exact syntax.
-- Q2 4.00: STRUCT vs flat columns had strong framing and accurate trade-off analysis, but the schema-evolution DDL was wrong (`MODIFY COLUMN` instead of dotted-path `ADD COLUMN`). Resource/13 patched immediately.
+- Q1 4.875: STRUCT schema evolution DDL — the resource/13 fix from iter325 held perfectly. Responder correctly gave `ADD COLUMN metadata.sso_enabled BOOLEAN` (dotted-path) as the fix, explained why `ALTER COLUMN ... ADD` fails, and correctly described NULL behavior for old rows. Field-ID mechanism explained in plain English.
+- Q2 5.00: Perfect score on batched-uri scope / row-filter mechanics. Responder correctly explained schema visibility (batchable) vs row visibility (per-query HTTP call, not batchable), avoided the fabricated cache-ttl property, and gave four concrete latency-reduction levers.
 
 ### Resource fixes applied this iteration
-- resources/13: Added explicit STRUCT schema evolution DDL callout — `ALTER TABLE ... ADD COLUMN metadata.new_field TYPE` (dotted path) is the correct form; `MODIFY COLUMN` is invalid for STRUCT.
+None needed. Both resources held under direct probes.
 
-### Suggested focus for Iter 326
-- **Iceberg table maintenance** (4.580/23): probe manifest diagnostics angle — the judge noted the answer didn't surface `events$manifests` metadata table as a diagnostic. A question framed as "how do I know if I have a manifest problem before running the fix?" would test this.
-- **Postgres-to-Iceberg ingestion** (4.490/115): probe STRUCT schema evolution directly — force the responder to give `ALTER TABLE ... ADD COLUMN parent.child TYPE` syntax. A question like "I need to add a new field to my existing STRUCT column — what DDL do I run?" would test whether the resource/13 fix held.
-- **Multi-tenant analytics** (4.465/121 — weakest): still the lowest-scoring topic. Consider a different OPA angle — perhaps row-filter expression mechanics or the batched-uri scope limitation.
+### Suggested focus for Iter 327
+- **Multi-tenant analytics** (4.469/122): continue probing OPA angle — per the rubric, this topic is the lowest scored at 4.469. Consider probing column masking (`opa.policy.column-masking-uri` vs `opa.policy.batch-column-masking-uri`) or the OPA bundle management / data structure requirements. Both are documented in resources/05 and haven't been probed recently.
+- **Iceberg table maintenance** (4.580/23): probe a different angle — the manifest diagnostics angle the Q1 judge suggested (how do I know if I have a manifest problem before running the fix? Using `events$manifests` metadata table). Or probe `rollback_to_snapshot` as a safety net.
+- **Postgres-to-Iceberg ingestion** (4.493/116): recovering. Consider a question about the LAG_BUFFER / replica lag watermark pattern, or the exactly-once semantics deduplication via LSN, to probe a different part of the resource.
