@@ -537,6 +537,60 @@ This rewrites the small manifests into fewer larger manifests, sorted by partiti
 
 **Schedule:** weekly is plenty. Most teams pair this with the `expire_snapshots` job since both are metadata-only operations.
 
+#### Diagnosing manifest bloat before running the fix
+
+Use the `$manifests` metadata table to measure how many manifest files the table has before deciding to run `rewrite_manifests`:
+
+```sql
+-- Trino 467: count manifest files (use quoted "table$manifests" syntax)
+SELECT COUNT(*) AS manifest_count
+FROM iceberg.analytics."events$manifests";
+
+-- Richer diagnostic — also shows total metadata size and write pattern:
+SELECT
+  COUNT(*) AS manifest_count,
+  SUM(length) / 1024 / 1024 AS total_manifest_mb,
+  ROUND(AVG(added_data_files_count)) AS avg_files_per_manifest,
+  MAX(added_data_files_count) AS max_files_per_manifest
+FROM iceberg.analytics."events$manifests";
+```
+
+**Verified column names for the `$manifests` metadata table (Trino 467):**
+
+| Column | Type | Description |
+|---|---|---|
+| `content` | INTEGER | 0 = data files, 1 = delete files |
+| `path` | VARCHAR | MinIO/S3 path to the manifest file |
+| `length` | BIGINT | Size of manifest file in bytes (NOT `manifest_length`) |
+| `partition_spec_id` | INTEGER | Which partition spec version this manifest was written under |
+| `added_snapshot_id` | BIGINT | The snapshot that added this manifest |
+| `added_data_files_count` | INTEGER | Data files added in this manifest |
+| `added_rows_count` | BIGINT | Rows added |
+| `existing_data_files_count` | INTEGER | Data files inherited from prior snapshots |
+| `existing_rows_count` | BIGINT | Existing rows |
+| `deleted_data_files_count` | INTEGER | Data files deleted (compaction, expiry) |
+| `deleted_rows_count` | BIGINT | Deleted rows |
+| `partition_summaries` | ARRAY(ROW) | Per-partition min/max summary |
+
+> **CRITICAL — the column is `length`, NOT `manifest_length`.** Using `manifest_length` returns a "Column not found" error. This is the most common mistake when querying `$manifests`.
+
+**Thresholds (rule of thumb):**
+- < 10 manifests → healthy, no action needed
+- 10–50 → monitor; fine for most tables
+- 50–200 → if planning latency is 5+ seconds, worth running `rewrite_manifests`
+- 200+ → almost certainly causing slow query planning; run `rewrite_manifests`
+
+**Before/after verification:**
+```sql
+-- Before: save this number
+SELECT COUNT(*) AS manifest_count FROM iceberg.analytics."events$manifests";
+
+-- Run rewrite_manifests from Spark (see above)
+
+-- After: should be 80–95% lower
+SELECT COUNT(*) AS manifest_count FROM iceberg.analytics."events$manifests";
+```
+
 ---
 
 ## Safe scheduling order — get this right or risk data loss

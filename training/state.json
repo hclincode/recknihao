@@ -1,7 +1,7 @@
 {
-  "iteration": 327,
+  "iteration": 328,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter326 avg 4.94 — Q1 (4.875) STRUCT ADD COLUMN dotted-path syntax verified and held; Q2 (5.00) batched-uri scope/row-filter mechanics: perfect score. Postgres-to-Iceberg: 4.493/116. Multi-tenant: 4.469/122. Iceberg maintenance: 4.580/23."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter327 avg 4.50 — Q1 (5.00) OPA column masking perfect score; Q2 (4.00) $manifests diagnostics: manifest_length column name wrong (real: length). resources/17 patched with verified column list. Multi-tenant: 4.473/123. Iceberg maintenance: 4.556/24. Postgres-to-Iceberg: 4.493/116."
 }

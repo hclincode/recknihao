@@ -1,89 +1,90 @@
-# Judge Feedback — Iter 326
+# Judge Feedback — Iter 327
 
 Date: 2026-05-27
 Phase: extended
-Topics: STRUCT schema evolution — adding a field with dotted-path ADD COLUMN (Q1) + OPA batched-uri scope vs row-filter latency (Q2)
+Topics: Multi-tenant analytics / OPA column masking (Q1) + Iceberg table maintenance / manifest diagnostics with $manifests metadata table (Q2)
 
 ---
 
-## Q1 — Adding a new field to an existing STRUCT column in Iceberg
+## Q1 — OPA column masking in Trino
 
 ### Score
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5 | All four critical claims verified: (1) `ALTER TABLE ... ADD COLUMN metadata.sso_enabled BOOLEAN` (dotted-path) correct per Iceberg Spark DDL docs. (2) Metadata-only with NULL for old rows — correct per Iceberg field-ID resolution spec. (3) `col("metadata").withField("sso_enabled", value)` — valid PySpark 3.1.0+. (4) `ALTER COLUMN metadata ADD sso_enabled` correctly flagged as invalid. Trino 467 supports the dotted-path form (added in Trino 422). |
-| Beginner clarity | 4.5 | Strong scaffolding: opens with the exact correct DDL immediately, explains why the wrong syntax fails, field-ID mechanism explained in plain English ("Iceberg matches by numeric field ID, not column name"). Comparison table between top-level and STRUCT syntax is scannable. Minor: field-ID mechanism explanation could be slightly more beginner-accessible. |
-| Practical applicability | 5 | Engineer has everything needed: immediate DDL to run, Spark ingestion code updated to include the new field, backfill option with `withField` + `coalesce`, backfill gotcha called out (silent NULL exclusion from dashboards), and a four-step rollout timeline. Production-stack fit strong (Trino 467, Spark, MinIO, Iceberg 1.5.2). |
-| Completeness | 5 | Covers all asked questions: correct syntax, why wrong syntax fails, NULL behavior for old rows, ingestion job changes, drop/rename parity. Also anticipates the follow-on question about schema stability contract vs MAP/VARCHAR alternatives. |
-| **Average** | **4.875** | **PASS** |
-
-### What Worked
-- Opens with correct DDL immediately — no preamble.
-- Why `ALTER COLUMN ... ADD` fails is explained without jargon ("Iceberg does not support an `ALTER COLUMN ... ADD` form").
-- Field-ID mechanism in plain English makes the NULL-for-old-rows behavior intuitive rather than magic.
-- Backfill `withField` + `coalesce` pattern with the "silent NULL exclusion" gotcha is a real production trap — calling it out proactively is the right move.
-- Four-step rollout timeline gives the engineer a concrete action sequence.
-- Drop/rename parity (same dotted-path syntax) extends the mental model without extra explanation.
-
-### What Missed
-- Minor: the comparison table between top-level and STRUCT syntax is clean but could add DROP and RENAME rows for completeness (drop/rename are mentioned in prose but not in the table).
-- Minor: no mention of what happens when you DROP and re-ADD a STRUCT field — re-ADD gets a NEW field ID, so old data for the original field is not accessible via the new column. This is an advanced gotcha but relevant for teams that rename fields by drop-then-add rather than RENAME COLUMN.
-
-### Technical Accuracy (verified)
-1. Dotted-path `ADD COLUMN metadata.sso_enabled BOOLEAN` — CORRECT per Iceberg Spark DDL docs
-2. Metadata-only with NULL for old rows — CORRECT per Iceberg field-ID resolution spec
-3. `withField` PySpark syntax — VALID (Spark 3.1.0+)
-4. `ALTER COLUMN metadata ADD` invalid — CORRECT; dotted-path ADD COLUMN is the only form
-
-### Rubric Update
-- Postgres-to-Iceberg ingestion: prior avg 4.490 across 115 questions → (4.490 × 115 + 4.875) / 116 = (516.35 + 4.875) / 116 = 521.225 / 116 = **4.493 across 116 questions**. Status: **PASSED** (recovering from MODIFY COLUMN error in iter325).
-
----
-
-## Q2 — OPA batched-uri scope vs row-filter latency
-
-### Score
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 5 | All five claims verified against official Trino OPA docs: (1) `batched-uri` applies only to FilterTables/Schemas/Columns/Catalogs/Views — confirmed. (2) No `cache-ttl-seconds` / no decision cache — confirmed. (3) Row-filter evaluation uses separate `opa.policy.row-filters-uri` endpoint — confirmed. (4) Sidecar deployment for low-latency OPA calls — industry-standard, accurate. (5) Endpoint mapping table matches official 10-property config list. Critically avoids the fabricated `opa.policy.cache-ttl-seconds` property that caused iter322 failure. |
-| Beginner clarity | 5 | Schema visibility vs row visibility distinction explained in plain English ("which resources can you see?" vs "which rows can you see?"). Batching analogy (50 tables → 50 calls vs 1 call) makes the performance difference concrete. Debug logging guidance is actionable. |
-| Practical applicability | 5 | Four concrete levers for reducing row-filter latency with config snippets and expected impact (10-20ms savings from sidecar). Diagnostic logging procedure to confirm what's actually slow. Complete recommended config block at the end is copy-pasteable. |
-| Completeness | 5 | Covers all parts of the question: why batched-uri didn't help, what it does batch, what row-filter evaluation actually is, and what does actually reduce overhead. Endpoint mapping table consolidates the full picture. |
+| Technical accuracy | 5 | All five claims verified: (1) `column-masking-uri` vs `batch-column-masking-uri` config keys correct verbatim. (2) Rule names `columnMask` (singular) and `batchColumnMasks` (plural) confirmed against official Trino OPA docs. (3) Batch response shape with nested `viewExpression` wrapper confirmed exactly. (4) One-call-per-column vs one-call-per-table semantics confirmed (GitHub issue #21359 is the motivation for the batch endpoint). (5) All SQL masking expressions use valid Trino built-ins. |
+| Beginner clarity | 5 | Opens with direct answer ("yes, Trino and OPA support column-level masking"). "OPA doesn't mask data in the database — it tells Trino to rewrite the column" is the clearest possible framing for a beginner. Two-pattern structure (single vs batch) is well-labeled with when to use each. |
+| Practical applicability | 5 | Engineer has everything: config properties, Rego rule structure for both patterns, real SQL masking expressions for their specific use cases (credit card first-4-digits, email hash), the silent-failure trap with a CI test pattern, and explicit tie-back to their existing Trino 467 + OPA row-filter setup. |
+| Completeness | 5 | Covers both halves of the question: yes it's possible, and Trino does the rewrite while OPA returns the expression. Silent-failure trap is proactively covered. Performance implications (per-column vs per-table call count) explained. |
 | **Average** | **5.00** | **PASS** |
 
 ### What Worked
-- Opens directly with the answer: "batched-uri does NOT apply to row-filter expression evaluation."
-- Schema-visibility-vs-row-visibility framing is the core mental model engineers need — stated clearly early.
-- Batching example (50 tables → 50 calls vs 1 call) makes the benefit of batched-uri concrete, so the engineer understands what it IS good for.
-- "Cannot be batched — each query is independent" explains WHY row filters can't be batched, not just that they can't.
-- Correctly avoids the fabricated `opa.policy.cache-ttl-seconds` property.
-- Sidecar deployment as the highest-impact latency lever (10-20ms savings) is the right recommendation.
-- Debug logging guidance lets engineer confirm the diagnosis before making infrastructure changes.
-- Endpoint mapping table is a clean reference for the full OPA plugin config surface.
+- Config key names exactly match the official Trino OPA docs.
+- Rego rule names `columnMask` (singular) and `batchColumnMasks` (plural) — the singular/plural distinction is a non-obvious gotcha that the answer catches correctly.
+- Nested `viewExpression` → `expression` structure for batch response is the most common implementation trap; calling it out with the "what happens if you get it wrong" note is excellent.
+- Silent-failure trap with a concrete CI test pattern is responsible engineering guidance.
+- SQL masking expressions (CONCAT/SUBSTR for credit cards, sha256 for email) are exactly what the engineer asked for.
 
 ### What Missed
-- Very minor: the answer doesn't explicitly call out the `opa.policy.column-masking-uri` vs `opa.policy.batch-column-masking-uri` distinction in the body text (only in the table) — but both appear in the table and the question is about row-filter latency, so this is acceptable.
+- Very minor: doesn't mention that column masking and row filtering compose — if a user has BOTH a row filter AND a column mask applied, both fire independently (row filter reduces rows, column mask rewrites the value). Engineers sometimes wonder if they interfere. Non-critical omission since the question didn't ask.
 
 ### Technical Accuracy (verified)
 All five verification asks pass. No fabrications.
 
 ### Rubric Update
-- Multi-tenant analytics: prior avg 4.465 across 121 questions → (4.465 × 121 + 5.00) / 122 = (540.265 + 5.00) / 122 = 545.265 / 122 = **4.469 across 122 questions**. Status: **PASSED** (continuing recovery from iter322 fabrication drop).
+- Multi-tenant analytics: prior avg 4.469 across 122 questions → (4.469 × 122 + 5.00) / 123 = (545.218 + 5.00) / 123 = 550.218 / 123 = **4.473 across 123 questions**. Status: **PASSED** (continuing recovery).
 
 ---
 
-## Iter 326 Summary
+## Q2 — Iceberg manifest diagnostics with `$manifests` metadata table
 
-**Iter 326 average: (4.875 + 5.00) / 2 = 4.9375 — PASS** ✓ (Q1 PASS / Q2 PASS)
+### Score
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Technical accuracy | 3 | Most claims correct — `$manifests` metadata table exists, Trino syntax is correct, column names mostly right, threshold guidance reasonable, `rewrite_manifests` Spark-only on Trino 467 correct. One consequential error: `manifest_length` is NOT a real column. The actual column is `length`. Three separate code blocks use `SUM(manifest_length)` — all fail at runtime with "Column not found." |
+| Beginner clarity | 5 | Excellent framing — explains what manifest bloat is and why it causes planning latency before diving into diagnostics. Threshold table (< 10 healthy, 200+ too many) is immediately usable. Before/after verification pattern is clean. |
+| Practical applicability | 3 | Strong on the diagnostic approach and sequence, but the richer diagnostic SQL fails at runtime due to the `manifest_length` column name error. The baseline `SELECT COUNT(*) FROM "events$manifests"` works, but the more useful multi-column query would return a "Column not found" error on production. |
+| Completeness | 5 | Covers: what manifest bloat is, how to query `$manifests`, threshold guidance, column meanings, relationship to small file count, when to run vs skip, before/after verification, complete diagnostic runbook. |
+| **Average** | **4.00** | **PASS** |
+
+### What Worked
+- `$manifests` metadata table as the diagnostic tool — this is exactly what was missing from prior answers.
+- Trino quoted-name syntax `"events$manifests"` is correct.
+- Baseline `SELECT COUNT(*) FROM "events$manifests"` works and is the right starting query.
+- Threshold guidance (< 10, 10-50, 50-200, 200+) is practical and aligned with community benchmarks.
+- `rewrite_manifests` correctly identified as Spark-only on Trino 467.
+- Before/after count comparison is the right verification pattern.
+
+### What Missed
+- **Column name error**: `manifest_length` does NOT exist. The real column is `length`. All three `SUM(manifest_length)` queries fail at runtime. This is the single most consequential error.
+- Column list accuracy: some column names are correct (`partition_spec_id`, `added_data_files_count`, `existing_data_files_count`, `deleted_data_files_count`) but `manifest_length` is fabricated.
+
+### Resource Fix Applied
+resources/17 updated: added `$manifests` diagnostics section after the `rewrite_manifests` procedure block with:
+- Verified column names (especially `length`, NOT `manifest_length`)
+- Complete column reference table with descriptions
+- Explicit CRITICAL callout: "the column is `length`, NOT `manifest_length`"
+- Before/after query templates using the correct column names
+
+### Technical Accuracy (verified)
+The Trino Iceberg connector docs list `$manifests` columns: `content`, `path`, `length`, `partition_spec_id`, `added_snapshot_id`, `added_data_files_count`, `added_rows_count`, `existing_data_files_count`, `existing_rows_count`, `deleted_data_files_count`, `deleted_rows_count`, `partition_summaries`. The column is `length`, not `manifest_length`.
+
+### Rubric Update
+- Iceberg table maintenance: prior avg 4.580 across 23 questions → (4.580 × 23 + 4.00) / 24 = (105.34 + 4.00) / 24 = 109.34 / 24 = **4.556 across 24 questions**. Status: **PASSED**.
+
+---
+
+## Iter 327 Summary
+
+**Iter 327 average: (5.00 + 4.00) / 2 = 4.50 — PASS** ✓ (Q1 PASS / Q2 PASS)
 
 ### Notable
-- Q1 4.875: STRUCT schema evolution DDL — the resource/13 fix from iter325 held perfectly. Responder correctly gave `ADD COLUMN metadata.sso_enabled BOOLEAN` (dotted-path) as the fix, explained why `ALTER COLUMN ... ADD` fails, and correctly described NULL behavior for old rows. Field-ID mechanism explained in plain English.
-- Q2 5.00: Perfect score on batched-uri scope / row-filter mechanics. Responder correctly explained schema visibility (batchable) vs row visibility (per-query HTTP call, not batchable), avoided the fabricated cache-ttl property, and gave four concrete latency-reduction levers.
+- Q1 5.00: OPA column masking — perfect score. All config keys, Rego rule names, response shapes, and SQL expressions verified exactly. The singular/plural `columnMask`/`batchColumnMasks` distinction correctly handled.
+- Q2 4.00: `$manifests` diagnostic approach was correct (right table, right Trino syntax, right threshold guidance, right Spark fix) but one fabricated column name (`manifest_length` → should be `length`) causes all richer diagnostic queries to fail at runtime. Resource/17 patched immediately.
 
 ### Resource fixes applied this iteration
-None needed. Both resources held under direct probes.
+- resources/17: Added `$manifests` diagnostics section with verified column list. Critical callout: column is `length`, NOT `manifest_length`. Includes threshold guidance, before/after templates, and complete column reference table.
 
-### Suggested focus for Iter 327
-- **Multi-tenant analytics** (4.469/122): continue probing OPA angle — per the rubric, this topic is the lowest scored at 4.469. Consider probing column masking (`opa.policy.column-masking-uri` vs `opa.policy.batch-column-masking-uri`) or the OPA bundle management / data structure requirements. Both are documented in resources/05 and haven't been probed recently.
-- **Iceberg table maintenance** (4.580/23): probe a different angle — the manifest diagnostics angle the Q1 judge suggested (how do I know if I have a manifest problem before running the fix? Using `events$manifests` metadata table). Or probe `rollback_to_snapshot` as a safety net.
-- **Postgres-to-Iceberg ingestion** (4.493/116): recovering. Consider a question about the LAG_BUFFER / replica lag watermark pattern, or the exactly-once semantics deduplication via LSN, to probe a different part of the resource.
+### Suggested focus for Iter 328
+- **Iceberg table maintenance** (4.556/24): probe `$manifests` diagnostics again to verify the `length` column fix held — ask a question specifically about which columns to use in `$manifests` to measure manifest health.
+- **Multi-tenant analytics** (4.473/123): probe the composition of row filters + column masking — the Q1 judge noted the answer didn't cover this. A question like "I have both row-level security and column masking set up — do they interact or conflict?" would test this.
+- **Postgres-to-Iceberg ingestion** (4.493/116): consider probing a different angle — LAG_BUFFER replica lag watermark or exactly-once deduplication via LSN, to probe a different part of resource 13.
