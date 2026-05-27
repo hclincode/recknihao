@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.460 | 139 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.449 | 140 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
@@ -40,7 +40,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.513 | 128 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.517 | 129 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.603 | 36 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
@@ -50,6 +50,40 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 348 — 2026-05-28
+
+**Q1** — Multi-tenant analytics: Trino selector regex match semantics. Critical resource error exposed: resources/05 claimed Trino uses `Matcher.find()` (substring match) for `user`/`userGroup`/`source` selectors — this is WRONG. Trino 467 StaticSelector.java uses `Matcher.matches()` (full-string match). The responder faithfully reproduced the wrong claim from resources/05, confidently explaining that `"user": "data"` matches `data_science_alice` via substring — which is impossible under correct Trino behavior. The `^...$` anchor fix is harmless but unnecessary (matches() already requires full-string). Resources/05 corrected by teacher post-iteration.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 1.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 2.5 |
+| Completeness | 3.0 |
+| **Average** | **2.875** |
+
+Judge verified against Trino 467 StaticSelector.java source: `userMatcher.matches()`, `userGroupRegex.get().matcher(group).matches()`, `sourceRegex.get().matcher(source).matches()` — all full-string. `.find()` only appears in `addVariableValues()` for named-capture-group variable expansion after match gate, not for match/reject decisions. Resources/05 corrected: find()/substring claim removed, replaced with accurate matches()/full-string explanation plus real-footgun note (forgetting `.*` wildcards). Topic running avg: (4.460×139 + 2.875)/140 = **4.449/140 questions** — PASSED (still above threshold due to large denominator; critical resource error now fixed).
+
+**Q2** — Postgres-to-Iceberg ingestion: column DROP through Debezium CDC. Responder correctly explained: Debezium detects DROP via WAL RELATION message on next DML (no DDL event), Iceberg does NOT auto-drop the column, AnalysisException on schema mismatch if consumer not updated, pause-ALTER DROP COLUMN-resume runbook (metadata-only, milliseconds), historical data stays in Parquet files and is queryable via time-travel until snapshot expiry.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **5.00** |
+
+Judge verified: Postgres pgoutput no DDL event for DROP COLUMN — confirmed; Debezium WAL RELATION on next DML — confirmed; Iceberg DROP COLUMN metadata-only, Parquet bytes preserved — confirmed; time-travel still exposes dropped columns via stable field IDs — confirmed; AnalysisException on schema mismatch — confirmed. No resource fix needed. Topic running avg: (4.513×128 + 5.00)/129 = **4.517/129 questions** — PASSED (5th consecutive perfect score on Debezium CDC schema-evolution scenarios).
+
+**Iter 348 average: (2.875 + 5.00) / 2 = 3.9375 — FAIL** ✗
+
+Topic score updates:
+- Multi-tenant analytics: 4.460/139 → **4.449/140 questions** (PASSED threshold but FAIL this iteration — critical find()/matches() error in resources/05; corrected by teacher)
+- Postgres-to-Iceberg ingestion: 4.513/128 → **4.517/129 questions** (PASSED — ADD/RENAME/TYPE/DROP DDL quadrant now all confirmed correct in resources/13)
+
+---
 
 ### Iter 347 — 2026-05-27
 
