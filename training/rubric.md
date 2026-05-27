@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.467 | 109 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.469 | 110 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.775 | 5 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.50 | 3 |
@@ -40,7 +40,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.500 | 5 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.487 | 104 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.490 | 105 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.655 | 20 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
@@ -50,6 +50,44 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 310 — 2026-05-27
+
+**Q1** — CTAS / write-side exfiltration in multi-tenant Trino: CTAS-then-$files attack chain, four-layer defense (write-path OPA deny, metadata-table OPA deny, MinIO IAM path-scoped credentials, audit/alert), defense-in-depth reasoning if any single layer misfires, CI test and P0 alert criteria
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.75** — PASS |
+
+Four-layer defense model correctly covers the full attack surface. OPA write-side deny and metadata-table deny verified. Minor gaps: `$path` hidden column not called out as separate bypass vector; `INSERT INTO ... SELECT` has same exfiltration risk as CTAS but not mentioned; no glosses for "Rego"/"IAM" for beginner audience. Topic running avg: (4.467×109 + 4.75)/110 = **4.469/110 questions** — PASSED.
+
+**Q2** — Postgres CDC replication slot WAL bloat: post-it-note analogy for slot bookmark mechanism, catastrophic disk-fill scenario, three mitigations (monitor `pg_wal_lsn_diff` with thresholds, `max_slot_wal_keep_size` self-defense, recovery runbook drop→recreate→`snapshot.mode:never`→backfill MERGE), heartbeat for idle-table coverage
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 4.75 |
+| Completeness | 4.75 |
+| **Average** | **4.75** — PASS |
+
+Mechanism explanation and Monday-morning checklist exemplary. Minor accuracy gaps: `wal_status` omits `extended`/`unreserved` intermediate states; MERGE INTO syntax is pseudo-SQL; `safe_wal_size` column not mentioned; heartbeat root cause framing slightly off. Topic running avg: (4.487×104 + 4.75)/105 = **4.490/105 questions** — PASSED.
+
+**Iter 310 average: 4.75 — PASS** ✓
+
+**Topics updated**:
+- Multi-tenant analytics: 4.467/109 → **4.469/110 questions** (PASSED — stable)
+- Postgres-to-Iceberg ingestion: 4.487/104 → **4.490/105 questions** (PASSED — improving)
+
+**Resource improvements (iter309 prep pass)**:
+- resources/05: explicit `SECURITY DEFINER` keyword in CREATE VIEW, CTAS write-side exfiltration section with MinIO bypass and OPA write-side denies, 200+ tenant threshold table for OPA row-filter migration
+- resources/13: `schema_of_json`/`from_json` full-struct promotion, COALESCE fallback for partial-backfill window, replication slot WAL bloat top-of-CDC-section callout with three non-negotiable mitigations
+
+---
 
 ### Iter 308 — 2026-05-27
 

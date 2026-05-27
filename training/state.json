@@ -1,7 +1,7 @@
 {
-  "iteration": 309,
+  "iteration": 311,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter308 avg 4.75: Q1 (4.75) multi-tenant isolation — SECURITY DEFINER semantics, per-tenant views, OPA back door, metadata leak vectors, CI verification; Q2 (4.75) JSONB promotion — get_json_object PySpark, two-tier pattern (promote hot keys + properties_raw fallback), silent NULL trap for historical rows, MERGE INTO backfill, Spark vs dbt. Multi-tenant analytics: 4.467/109. Postgres ingestion: 4.487/104."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter310 avg 4.75: Q1 (4.75) CTAS write-side exfiltration — four-layer defense (OPA write deny, metadata-table deny, MinIO IAM scoping, audit/alert), $files attack chain, Option A vs B for MinIO credentials; Q2 (4.75) replication slot WAL bloat — post-it analogy, three mitigations (monitor pg_wal_lsn_diff, max_slot_wal_keep_size, recovery runbook), heartbeat for idle tables. Multi-tenant analytics: 4.469/110. Postgres ingestion: 4.490/105."
 }

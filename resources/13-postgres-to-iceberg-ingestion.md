@@ -1122,6 +1122,26 @@ Debezium reads the Postgres write-ahead log (WAL), publishes row-change events t
 - **Complexity:** ~3x more moving parts (Debezium, Kafka, streaming job, exactly-once semantics). Don't start here.
 - **On-prem reality:** Debezium and Kafka both run on Kubernetes; the prod stack supports it, but you own the ops burden.
 
+> **CALLOUT — REPLICATION SLOT WAL BLOAT IS THE #1 DEBEZIUM PRODUCTION INCIDENT. READ THIS BEFORE YOU START.**
+>
+> The single most common way a CDC pipeline takes the Postgres primary offline is the **replication-slot-fills-the-disk** failure mode. Every Debezium production deployment will eventually hit some version of it; teams that have not pre-built monitoring and the recovery runbook will hit it as a P0 page that takes the application database down. The mechanism in three sentences:
+>
+> 1. Debezium uses a Postgres logical replication slot as a bookmark — Postgres retains every WAL segment from the slot's `confirmed_flush_lsn` forward until Debezium reads and acknowledges it.
+> 2. If Debezium falls behind (consumer crash, network split, Iceberg sink hung, Kafka unavailable, Spark job dead), the slot's confirmed position stops advancing, and Postgres holds WAL **forever, or until the disk fills up**.
+> 3. When the Postgres data disk fills, **Postgres goes read-only or crashes**. Your application database is now down — caused by your analytics CDC pipeline, not by anything the application did wrong.
+>
+> **Why this happens more often than it should:** Debezium's failure modes are subtle (the connector can be "running" in Kafka Connect status while silently stuck on a poison message), nobody notices the slot is growing until disk hits 80%, and the recovery path (drop slot, recreate, re-bootstrap from a backfill) is not in most teams' runbooks the first time they need it.
+>
+> **The three non-negotiable mitigations — wire ALL THREE before turning on Debezium in production:**
+>
+> 1. **Monitor `pg_replication_slots.confirmed_flush_lsn` lag** (`pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)` — bytes_behind). Page on warn at 50 GB behind, page critical at 150 GB or 80% of safe capacity, whichever is smaller. Also page on `active = false` for >5 minutes. See "Monitoring replication slot lag" further down for the exact queries.
+> 2. **Set `max_slot_wal_keep_size` in `postgresql.conf`** (Postgres 13+). This is the database's self-defense: if any slot falls more than this amount behind, Postgres **auto-invalidates the slot** to free WAL, rather than letting the disk fill. Typical setting: `50GB`. The CDC pipeline dies (recoverable via the `wal_status = 'lost'` recovery procedure), but the application database stays up. ALWAYS prefer "CDC dies, app stays up" over "app dies, CDC was fine until it wasn't."
+> 3. **Have the slot-invalidation recovery runbook ready BEFORE you need it** — the four-step procedure (drop the invalid slot → recreate at current LSN → restart Debezium with `snapshot.mode: never` → backfill the gap via MERGE INTO from Postgres PRIMARY). Walk through it once on a staging environment so the on-call engineer has muscle memory; don't read it for the first time at 3 AM. See "Recovering from `wal_status = 'lost'`" further down for the full runbook.
+>
+> **Also wire `heartbeat.interval.ms` on the Debezium connector** to keep the slot advancing on quiet tables — without it, a slot that monitors only low-traffic tables can lag indefinitely and trigger `max_slot_wal_keep_size` even when nothing is wrong. See "Debezium heartbeat events" further down.
+>
+> If you remember nothing else from this CDC section, remember: **`max_slot_wal_keep_size` is the difference between "CDC outage" and "application database outage."** Configure it on day one.
+
 #### Before you start: Postgres prerequisites for Debezium
 
 Engineers routinely hit six Postgres-side prerequisites before they can write a single line of CDC consumer code. Debezium will not start (or will start and silently emit zero events) until all of them are in place. The six are: (1) `postgresql.conf` settings, (2) a publication, (3) `REPLICA IDENTITY FULL` on tables you need full before-images for, (4) a logical replication slot, (5) a role with the `REPLICATION` attribute, and (6) a `pg_hba.conf` entry permitting replication connections. Run all of these on the **Postgres primary** — logical replication does not work from a read replica.
@@ -2948,6 +2968,76 @@ df = df.withColumn("device_type", get_json_object("properties", "$.device_type")
 - **Con:** if you add a new hot field, you must alter the Iceberg schema (cheap: metadata-only via `ALTER TABLE ADD COLUMN`). Old rows return **NULL** for the new column automatically — no backfill is required unless you specifically need non-NULL values in historical records (in which case, one Spark job reads all old rows and rewrites them with the extracted value).
 
 **Rule of thumb:** flatten anything you `GROUP BY`, `WHERE`, or `JOIN ON`. Leave the rest in `properties_raw`.
+
+> **Shortcut for stable-schema JSONB: `schema_of_json` + `from_json` for full struct promotion in one pass.** When the JSON schema is **known and stable** (you control the producer, the key set rarely changes, every row has the same shape), you do NOT have to extract keys one-by-one with `get_json_object`. Spark's `from_json` parses the entire JSON blob into a typed `STRUCT` in a single call, and `schema_of_json` derives the schema automatically from a sample row. The result is a typed struct column you can address with normal dot notation (`properties.device_type`, `properties.plan_at_event`) — and Iceberg stores it as a nested struct with full columnar storage and per-sub-field statistics.
+>
+> ```python
+> from pyspark.sql.functions import schema_of_json, from_json, lit
+>
+> # Step 1: derive the schema from a representative sample of the JSON.
+> # In practice, pick a known-good row from production or hand-write a sample
+> # that covers every expected key. schema_of_json infers types from the values.
+> sample_json = '{"device_type": "ios", "plan_at_event": "pro", "feature_name": "search", "tags": ["beta", "v2"], "metadata": {"region": "us-east"}}'
+> json_schema = spark.sql(f"SELECT schema_of_json('{sample_json}')").collect()[0][0]
+> # json_schema is now a DDL-style schema string like:
+> # 'STRUCT<device_type:STRING, plan_at_event:STRING, feature_name:STRING,
+> #         tags:ARRAY<STRING>, metadata:STRUCT<region:STRING>>'
+>
+> # Step 2: parse the entire JSON blob into a typed struct column in one call.
+> df = df.withColumn("properties_struct", from_json("properties", json_schema)) \
+>        .withColumnRenamed("properties", "properties_raw")
+>
+> # Step 3 (optional): hoist sub-fields to top level if you want flat columns.
+> df = df.withColumn("device_type",   df["properties_struct.device_type"]) \
+>        .withColumn("plan_at_event", df["properties_struct.plan_at_event"])
+> ```
+>
+> **When this is the right tool:**
+> - You control the JSON producer (your own app emitting events you control) — so the schema doesn't drift behind your back.
+> - The key set is fully enumerated and stable across releases.
+> - You want all the fields promoted, not just a curated hot subset.
+>
+> **When to stick with per-key `get_json_object`:**
+> - The JSON shape is unstable (different rows have different keys, or producers add keys without coordination).
+> - You only want to promote 5–10 hot keys out of dozens — keeping the long tail in `properties_raw` is cheaper than nesting it into a struct that mostly stays unused.
+> - Producers occasionally emit malformed JSON — `from_json` returns NULL for the entire row's struct on a parse error (you lose every promoted key for that row), while `get_json_object` fails only the specific key and the rest still extract. Per-key extraction degrades more gracefully under partial corruption.
+>
+> **Important caveat: `schema_of_json` only sees the sample you give it.** Keys not present in the sample are NOT in the inferred schema, and any row that contains those extra keys has them silently dropped when `from_json` parses against the schema. Always either (a) generate the sample from a query like `SELECT properties FROM events ORDER BY id DESC LIMIT 1000` and union the field sets, or (b) hand-write a schema string that explicitly covers every key you expect — do not rely on a single random row producing a complete schema. For production, pin the schema in code (don't re-derive every job run) so a producer-side change that adds a key fails CI rather than silently dropping data.
+
+> **COALESCE fallback pattern — querying during a partial backfill.** When you promote a JSONB key into a typed column (`device_type VARCHAR`), historical rows have `NULL` in the new column until the MERGE INTO backfill runs. The backfill takes hours to days on a multi-billion-row table; during that window, queries against the new column return NULL for old rows and the real value for new rows — half-right answers that are worse than either extreme. **The transitional query pattern is COALESCE**: read the typed column first, fall back to extracting from `properties_raw` for any row where the typed column is still NULL.
+>
+> ```sql
+> -- Transitional query: uses the promoted column when available, falls back
+> -- to JSON extraction for rows that haven't been backfilled yet.
+> SELECT
+>   COALESCE(device_type, JSON_EXTRACT_SCALAR(properties_raw, '$.device_type')) AS device_type,
+>   COUNT(*) AS event_count
+> FROM iceberg.analytics.events
+> WHERE event_ts >= DATE '2026-05-01'
+> GROUP BY 1;
+> ```
+>
+> Three things to know about this pattern:
+>
+> 1. **It is strictly a TRANSITIONAL query** — keep it in your dashboard / dbt model only until the backfill is complete and verified. Once `still_null` (the verification query from the backfill recipe) returns zero, switch back to reading `device_type` directly. The fallback path is slower (no file skipping on the JSON extract — see the "FILE SKIPPING" callout above), so leaving it in production permanently is a forever-on tax on every query.
+> 2. **It loses the file-skipping benefit on rows that fall through to the COALESCE second arm.** Trino can still prune row-groups based on `device_type`'s min/max for the promoted-side fast path, but rows where the typed column is NULL fall through to the JSON extract, which forces a row-by-row evaluation. During the backfill window, query latency is somewhere between "fully promoted" and "fully raw JSON" — closer to the promoted side as the backfill catches up.
+> 3. **It is also useful for "new column, no backfill" scenarios.** Sometimes the right call is to add a column going forward and **not** backfill the history (storage cost, compute cost, or the historical data simply doesn't matter for the downstream use case). In that case, COALESCE is the permanent query shape — but be explicit about the decision in your ADR / dbt model docs so the next engineer doesn't strip the fallback thinking "oh, this should be cleaned up."
+>
+> The same COALESCE pattern works in dbt-trino models (using `JSON_EXTRACT_SCALAR`, not `get_json_object` — see the dbt section later in this file) and in any consumer that needs to be correct across the partial-backfill window. Wrap it in a CTE if multiple columns need the fallback:
+>
+> ```sql
+> WITH promoted AS (
+>   SELECT
+>     event_id,
+>     event_ts,
+>     COALESCE(device_type,   JSON_EXTRACT_SCALAR(properties_raw, '$.device_type'))   AS device_type,
+>     COALESCE(plan_at_event, JSON_EXTRACT_SCALAR(properties_raw, '$.plan_at_event')) AS plan_at_event,
+>     COALESCE(feature_name,  JSON_EXTRACT_SCALAR(properties_raw, '$.feature_name'))  AS feature_name
+>   FROM iceberg.analytics.events
+>   WHERE event_ts >= DATE '2026-05-01'
+> )
+> SELECT device_type, plan_at_event, COUNT(*) FROM promoted GROUP BY 1, 2;
+> ```
 
 > **The dominant reason to flatten hot keys is FILE SKIPPING, not CPU savings.** A predicate like `WHERE json_extract_scalar(properties_raw, '$.plan_tier') = 'enterprise'` does **NOT push down** to Parquet row-group statistics — Trino cannot see inside the opaque JSON string at planning time, so it reads **every file** in the table (or every file in the matched partitions) and evaluates the `json_extract_scalar(...)` function row-by-row after reading. The CPU cost of re-parsing the JSON is real but secondary; the dominant cost is the I/O of reading files that don't contain a single matching row.
 >

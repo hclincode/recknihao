@@ -331,10 +331,26 @@ CREATE SCHEMA IF NOT EXISTS tenant_acme;
 -- WHERE clause even if they try. OPA enforces this by denying tenant principals
 -- direct base-table SELECT. See the DEFINER vs INVOKER section below for the
 -- full discussion of why DEFINER (not INVOKER) is correct here.
-CREATE VIEW tenant_acme.events AS
+--
+-- STYLE TIP — even though SECURITY DEFINER is Trino's default and the
+-- `SECURITY DEFINER` keyword can be omitted, writing it explicitly is
+-- recommended for security-relevant views. The keyword turns the view's
+-- security mode from "implicit, depends on Trino default" into "explicit,
+-- visible to anyone reading the DDL or doing a security review." Reviewers
+-- should not have to know Trino's default to confirm the view runs with the
+-- owner's grants; the keyword tells them directly. Both forms below are
+-- equivalent at runtime — pick the explicit form for production DDL.
+CREATE VIEW tenant_acme.events SECURITY DEFINER AS
   SELECT event_id, user_id, event_type, event_ts, payload
   FROM analytics.events
   WHERE tenant_id = 'acme';
+
+-- Equivalent (relies on Trino's SECURITY DEFINER default) — accepted, but
+-- the explicit form above is preferred for documentation clarity.
+-- CREATE VIEW tenant_acme.events AS
+--   SELECT event_id, user_id, event_type, event_ts, payload
+--   FROM analytics.events
+--   WHERE tenant_id = 'acme';
 
 -- Step 1: create the role (a named bundle of permissions, like a Postgres role or Linux group).
 --
@@ -729,6 +745,17 @@ The two modes **compose**, and you usually want both in the same policy:
 - Row filters then constrain what rows the tenant sees from the tables they ARE allowed to touch.
 
 **Why this is sometimes preferable to the per-tenant view pattern.** The view pattern (CREATE VIEW tenant_acme.events AS SELECT ... WHERE tenant_id = 'acme') requires you to provision one view and one role per tenant; onboarding tenant #81 means another `CREATE VIEW` + `GRANT`. With OPA row filters, you have ONE table (`analytics.events`) and ONE OPA rule that injects the right predicate based on the caller — adding tenant #81 is a row in your principal-to-tenant mapping, not a SQL DDL change. At hundreds of tenants this is materially less work. The cost is that the security boundary now lives entirely in OPA policy (which must be tested as carefully as any view, with CI assertions that each tenant principal can only see their own rows). See the per-tenant view tradeoff discussion above — row filters are essentially the "dynamic `current_user` view" pattern reimplemented at the policy layer, with the same blast-radius caveat: a bug in the OPA principal-to-tenant mapping breaks isolation for everyone simultaneously.
+
+> **Concrete threshold — at what tenant count should you migrate from per-tenant views to OPA row filters?**
+>
+> | Tenant count | Recommended pattern | Why |
+> |---|---|---|
+> | **1–50** | Per-tenant views | Trivial to provision and audit; one-at-a-time blast radius. The view DDL fits in a Terraform module or a 50-line provisioning script. |
+> | **50–200** | Per-tenant views, still works | Onboarding still tractable (one `CREATE VIEW` + `GRANT ROLE` per tenant). Hive Metastore catalog listings start to feel slow but are still acceptable. Most production SaaS deployments live in this band — including the 80-tenant prod stack this guide targets. |
+> | **200+** | **Migrate to OPA row filters** | The per-tenant view layout becomes operationally painful: every base-table schema change triggers a `SHOW CREATE VIEW` audit across 200+ views, the catalog listing in `SHOW TABLES` returns hundreds of tenant schemas (slowing every catalog-aware client), and onboarding scripts become a meaningful percentage of total deploy time. OPA row filters collapse all of this into one table + one Rego rule + one entry per tenant in the principal-to-tenant mapping. |
+> | **1000+** | OPA row filters, almost certainly | Per-tenant views become a planner bottleneck on every schema change. OPA row filter is the standard pattern at this scale. |
+>
+> The 200-tenant threshold is a rule of thumb, not a hard line — if your tenant churn is high (50+ tenant adds/removals per week), you may want OPA row filters earlier; if your tenant count is stable and growing slowly, per-tenant views can stretch further. The migration is non-trivial (you must rewrite the policy, get CI passing for every tenant under the new model, and run both patterns in parallel during cutover) — plan for it before you cross the threshold, don't react after.
 
 **Verification recipe.** As a tenant principal, run `SELECT DISTINCT tenant_id FROM analytics.events` — it must return exactly one row (their own tenant). As an admin principal (whose OPA policy carves out the row-filter rule), the same query must return all tenant IDs. Add both as CI tests. If a tenant principal ever sees more than one `tenant_id`, the row-filter Rego is misconfigured — treat as a P0 cross-tenant data leak.
 
@@ -1223,6 +1250,57 @@ SELECT COUNT(*) FROM iceberg.tenant_acme.events;  -- should succeed
 ```
 
 > **Note**: the `$partitions` metadata table is a separate exposure path from the `system.runtime.queries` system catalog leak. Both must be fixed independently — a catalog-level deny on `system` does not protect Iceberg metadata tables in the `iceberg` catalog.
+
+### CTAS / INSERT INTO ... SELECT — the write-side exfiltration surface
+
+The view-as-isolation-boundary pattern stops a tenant from `SELECT`-ing data they shouldn't see. It does **not**, by itself, stop a tenant from **writing** data they CAN see into a table they own — and then exporting the underlying files out of MinIO. This is the **write-side exfiltration surface** and it must be closed independently of the SELECT-side controls.
+
+**The attack shape.** Suppose tenant `acme` has SELECT on `tenant_acme.events` (their filtered view) — exactly as the per-tenant view pattern intends. Acme also has CREATE TABLE privilege somewhere (perhaps in a scratch schema like `iceberg.acme_scratch.*` they were given for their own intermediate tables). Acme runs:
+
+```sql
+-- Step 1: create a table they own, in a schema they have CREATE on.
+CREATE TABLE iceberg.acme_scratch.exfil AS
+SELECT * FROM tenant_acme.events;        -- only their own rows, fine so far
+```
+
+So far, nothing is breached — the view returned only Acme's rows. The problem starts when the attacker walks the next step:
+
+```sql
+-- Step 2: peek at the file paths via the metadata table.
+SELECT file_path FROM iceberg.acme_scratch."exfil$files";
+-- Returns something like: s3a://lakehouse/warehouse/acme_scratch/exfil/data/...parquet
+```
+
+Now the attacker has a list of MinIO object paths they own. If their MinIO credentials grant them read access to the path prefix where their own scratch table is stored (a common setup when the platform team gives tenants direct MinIO read access for "BYO BI tool" or "export your data as Parquet" workflows — see the ad-hoc export pattern in `prod_info.md`), they can download the Parquet files directly using `mc cp`, `aws s3 cp`, or any S3-compatible client — completely outside Trino. The data leaves the engine and lands on the attacker's laptop. The Trino audit log shows a CTAS and a metadata-table SELECT, both of which look benign in isolation.
+
+**Where the boundary leaks** (and why CTAS specifically is the dangerous verb):
+
+- `CREATE TABLE ... AS SELECT` (CTAS) reads from the view (allowed), writes to a tenant-owned table (allowed if they have CREATE), and produces Parquet files in MinIO that the tenant can download directly. No row-level boundary is crossed inside Trino — the boundary leaks at the storage layer.
+- `INSERT INTO ... SELECT` is the same story for an existing tenant-owned table — append rows to a table they own, then export the resulting files.
+- `UNLOAD` / `EXPORT` SQL is **not** a Trino feature, but the CTAS-then-download path achieves the same effect via the file system.
+- The same path also enables **cross-tenant exfil if the SELECT side ever leaks**: any view bug, any OPA misconfiguration, any row-filter regression that lets Acme see Beta's rows for even a few seconds, is now permanently extractable — Acme CTASes the leaked rows into a table they own, takes their time exporting the files, and the leak is no longer ephemeral.
+
+**The required OPA policy additions.** Closing this surface requires OPA to deny **writes** beyond just denying SELECTs on cross-tenant tables:
+
+1. **Deny `CreateTable`, `InsertIntoTable`, `CreateTableAsSelect` on every schema OUTSIDE the tenant's own scratch schema.** Tenant principals must not be able to CTAS into `iceberg.analytics.*`, `iceberg.public.*`, or any schema that is not explicitly their scratch space. Specifically deny `CreateTableAsSelect` (the operation name in the OPA input payload — distinct from `CreateTable` for empty tables) for any target schema not matching `iceberg.<tenant_id>_scratch.*`.
+2. **Deny SELECT against `$files`, `$partitions`, and `$manifests` metadata tables on tenant scratch tables** — not just on the analytics base table. Even if Acme owns the scratch table, exposing the file paths is what makes the MinIO bypass usable. The `$`-suffix metadata-table deny rule from the previous subsection should cover the **entire iceberg catalog**, not just `iceberg.analytics.*`.
+3. **Restrict the tenant's MinIO IAM policy** so they cannot read raw Parquet from any path — including their own scratch tables' paths. If tenants need bulk export, run it through a controlled export endpoint (see "Large tenant data export" later in this file) that produces a tenant-isolated CSV / Parquet under a signed URL, rather than giving them direct MinIO read on the warehouse bucket. The principle: Trino is the only path to the data; MinIO is treated as engine-internal storage.
+4. **Audit-log every CTAS by tenant principals.** Add an alert: any `CreateTableAsSelect` event in the HTTP event listener whose principal is a tenant role should page if the target schema is not the tenant's own scratch space. Even with OPA denying these, a successful CTAS (the deny rule misfires, or a new tenant is provisioned without OPA coverage) is a P0 finding.
+
+**Verification recipe — add to CI.** Connect as a tenant principal and run:
+
+```sql
+-- All of these MUST fail with Access Denied:
+CREATE TABLE iceberg.analytics.exfil_attempt AS SELECT * FROM tenant_acme.events;
+CREATE TABLE iceberg.public.exfil_attempt    AS SELECT * FROM tenant_acme.events;
+INSERT INTO iceberg.analytics.events SELECT * FROM tenant_acme.events;
+SELECT file_path FROM iceberg.tenant_acme."events$files";
+SELECT file_path FROM iceberg.acme_scratch."exfil$files";  -- even own scratch table
+```
+
+If any of these succeed, the write-side surface is open. Combine with the SELECT-side CI tests from earlier sections — both sides must pass before a tenant principal is allowed in production.
+
+> **The simplest hardening: do not give tenant principals CREATE TABLE at all.** If your product does not expose an "let customers materialize their own tables" feature, the cleanest answer is to deny `CreateTable` and `CreateTableAsSelect` globally for tenant principals — no scratch schema, no exceptions. Force every workload through views and the controlled export endpoint. Most SaaS multi-tenant deployments do not need per-tenant CTAS; eliminating it removes this entire class of bug without limiting the customer experience. Reach for the schema-scoped allow-list only if a product feature genuinely requires tenants to land their own derived tables.
 
 ### The foot-gun: trusting application-layer WHERE clauses
 
