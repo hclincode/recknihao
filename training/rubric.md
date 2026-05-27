@@ -43,7 +43,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.474 | 99 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.623 | 16 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
-| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.483 | 219 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.485 | 221 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.763 | 4 |
 
 ---
@@ -9474,4 +9474,35 @@ Dimension scores: Technical accuracy 4.5/5, Beginner clarity 5/5, Practical appl
 **Key findings**: DF mechanism (build→collect→push to probe) correct; join type matrix (INNER/RIGHT OUTER yes, LEFT/FULL OUTER no) correct; iceberg.dynamic-filtering.wait-timeout default 1s correct for Trino 467; EXPLAIN ANALYZE DynamicFilter signal correct. Minor gaps: session property syntax uses catalog placeholder; EXPLAIN snippet is stylized; missing nuance that 5K Postgres table IS supposed to be fully scanned (it's the build side).
 
 Verified: trino.io/docs/467/connector/iceberg.html and trino.io/docs/current/admin/dynamic-filtering.html.
+
+
+---
+
+## Iter 273 — 2026-05-27
+
+**Q1**: Multi-tenant cross-schema queries — UNION ALL approach, system.query() passthrough, Iceberg migration
+**Answer**: `/Users/hclin/github/recknihao/training/answers/iter273-q1.md`
+**Score**: 4.75 / 5.0 — **PASS**
+
+Dimension scores: Technical accuracy 4.5/5, Beginner clarity 5/5, Practical applicability 5/5, Completeness 4.5/5.
+
+**Topics updated**: Trino federation — prior avg 4.483 across 219 questions; new running avg (4.483 × 219 + 4.75) / 220 = (981.777 + 4.75) / 220 = **4.484 across 220 questions**. Status: NEEDS WORK (4.484 < 4.5 raised threshold). Gap: 0.016 (improved from 0.017).
+
+**Key findings**: Static schema binding in Trino correctly explained; UNION ALL correct approach; Python generator script concrete; system.query() verbatim passthrough, no outer pushdown — correct; Iceberg migration advice sound. Gaps: system.query() SQL example has a correctness bug (subquery doesn't scope per-tenant schema from CTE); Iceberg partitioning recommendation should prefer bucket(N, tenant_id) over identity transform for high-cardinality tenant IDs.
+
+Verified: trino.io/docs/467/connector/postgresql.html.
+
+---
+
+**Q2**: Federate vs ingest decision framework — size thresholds, frequency multiplier, freshness, three architecture patterns
+**Answer**: `/Users/hclin/github/recknihao/training/answers/iter273-q2.md`
+**Score**: 4.75 / 5.0 — **PASS**
+
+Dimension scores: Technical accuracy 4.5/5, Beginner clarity 5/5, Practical applicability 5/5, Completeness 4.5/5.
+
+**Topics updated**: Trino federation — prior avg 4.484 across 220 questions; new running avg (4.484 × 220 + 4.75) / 221 = (986.48 + 4.75) / 221 = **4.485 across 221 questions**. Status: NEEDS WORK (4.485 < 4.5 raised threshold). Gap: 0.015 (improved from 0.016).
+
+**Key findings**: Decision table (size × frequency × freshness) — clear and actionable; MERGE INTO syntax correct; dynamic filtering (INNER required, LEFT disabled) — correct; EXPLAIN ANALYZE Input: diagnostic — correct; three architecture patterns (direct, nightly ingest, hybrid) — sound. Minor gaps: size thresholds presented with more authority than deserved (should be heuristics); MERGE example assumes updated_at exists without noting prerequisite.
+
+Verified: trino.io/docs/current/sql/merge.html, trino.io/docs/current/admin/dynamic-filtering.html.
 

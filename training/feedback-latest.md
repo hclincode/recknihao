@@ -1,76 +1,74 @@
-# Feedback — Iter 272 (Extended phase)
+# Feedback — Iter 273 (Extended phase)
 
 Date: 2026-05-27
-Topic: Trino federation — metadata caching stale schema (Q1 PASS) + dynamic filtering in Iceberg+Postgres joins (Q2 PASS)
+Topic: Trino federation — multi-tenant cross-schema queries (Q1 PASS) + federate vs ingest decision (Q2 PASS)
 
 ## Results summary
 
 | Question | Topic angle | Score | Pass/Fail |
 |---|---|---|---|
-| Q1 | Metadata caching: stale schema after Postgres DDL, flush_metadata_cache(), cache-ttl config, SELECT * view silent data loss | **4.75** | PASS |
-| Q2 | Dynamic filtering: Iceberg+Postgres join, join type matrix (INNER/RIGHT vs LEFT/FULL), wait-timeout, EXPLAIN ANALYZE verification | **4.75** | PASS |
+| Q1 | Cross-schema queries: static binding, UNION ALL + generator script, system.query(), Iceberg migration | **4.75** | PASS |
+| Q2 | Federate vs ingest: size thresholds, frequency multiplier, freshness, three patterns | **4.75** | PASS |
 
-**Iter 272 average: 4.75 — PASS** ✓ Both passed!
+**Iter 273 average: 4.75 — PASS** ✓ Both passed!
 
-**Topic update**: Trino federation: 4.481/217 → **4.483/219** (NEEDS WORK, gap 0.017 — improving steadily)
+**Topic update**: Trino federation: 4.483/219 → **4.485/221** (NEEDS WORK, gap 0.015 — improving steadily)
 
 ---
 
 ## What worked
 
-### Q1 — Metadata caching (4.75)
-1. `CALL app_pg.system.flush_metadata_cache()` syntax — correct
-2. `metadata.cache-ttl` property name — correct (defaults to 0s)
-3. Two failure modes: hard error (column not found) vs silent data loss (SELECT * frozen) — excellent teaching
-4. `CREATE OR REPLACE VIEW` to refresh frozen view — correct; preserves grants
-5. TTL change requires coordinator restart — correct
-6. Add flush to migration script as automation — practical
-7. Schema drift detection query — actionable
+### Q1 — Cross-schema queries (4.75)
+1. Trino cannot use dynamic schema names (static planning) — correctly explained
+2. UNION ALL as the primary solution — correct
+3. Python generator script to auto-generate UNION ALL — concrete and practical
+4. system.query() correctly described: verbatim passthrough, no outer predicate pushdown
+5. Iceberg migration with tenant_id partition as the long-term fix — correct
+6. Decision guide (time/effort/scalability trade-offs) — clear
 
-### Q2 — Dynamic filtering (4.75)
-1. DF mechanism: build side → collect values → push runtime predicate to probe side — correct
-2. Join type matrix: INNER/RIGHT OUTER enable DF; LEFT/FULL OUTER disable DF — correct
-3. `iceberg.dynamic-filtering.wait-timeout` default 1s (verified for Trino 467) — correct
-4. `SET SESSION iceberg.dynamic_filtering_wait_timeout = '10s'` — correct fix
-5. `EXPLAIN ANALYZE VERBOSE` + `DynamicFilter` signal — correct diagnostic
-6. Three-step diagnostic (join type → wait-timeout → EXPLAIN ANALYZE) — actionable
+### Q2 — Federate vs ingest (4.75)
+1. Decision table (size × frequency × freshness) — clear and actionable
+2. MERGE INTO for incremental sync — correct syntax
+3. Dynamic filtering note (INNER JOIN required for DF; LEFT disables it) — correct
+4. EXPLAIN ANALYZE `Input: X rows` diagnostic — correct
+5. Three architecture patterns (direct federation, nightly ingest, hybrid) — practical
+6. Dimension vs fact framing — resonates with engineers
 
 ---
 
-## Minor gaps (did not cause FAIL)
+## Gaps to address before iter274
 
 ### Q1
-- "Cluster-wide" flush is imprecise — cache is coordinator-only (workers don't cache metadata in this model)
-- Granular sub-properties not mentioned: `metadata.schemas.cache-ttl`, `metadata.tables.cache-ttl`, `metadata.cache-missing` 
-- Dynamic catalog management not mentioned as restart alternative
+- **system.query() SQL example has a correctness bug**: The CTE-based example's subquery `(SELECT COUNT(*) FROM events WHERE ...)` doesn't scope to the per-tenant schema from the outer CTE — every row returns the same count. The surrounding prose about pushdown limitations is correct, but the SQL itself is wrong. Fix: either simplify the system.query() example or correct the SQL scoping.
+- **Iceberg partitioning**: `'tenant_id'` (identity transform) works for ~200 tenants but best practice for high-cardinality tenant IDs is `bucket(N, tenant_id)`. Worth a trade-off note.
 
 ### Q2
-- Session property syntax example uses catalog-specific prefix (`iceberg.`) without noting this is a placeholder for the actual catalog name
-- EXPLAIN ANALYZE snippet is stylized — real output uses `dynamicFilters = {"col" = #df_N}` syntax, not prose description
-- Didn't correct user's mental model: the 5,000-row Postgres table IS fully scanned (it's the build side) — DF pushes Postgres values INTO Iceberg, not the other way around
-- Missing: broadcast vs partitioned join nuance and DF effectiveness when join column isn't correlated with Iceberg file clustering
+- Size thresholds (< 10M, > 100M) should be presented as heuristics, not hard cutoffs — they vary by column width, Postgres hardware, and JDBC pool size
+- MERGE example assumes `updated_at` watermark column exists without flagging that prerequisite
 
 ---
 
-## Resource fixes before iter273
+## Resource fixes before iter274
 
-### Low priority (minor gaps, not errors)
+### Low priority
 
-1. **DF mental model** (resource 22, dynamic filtering section):
-   - Add explicit note: the small table (Postgres lookup) IS fully scanned — it's the build side; DF collects its values and pushes them INTO the large table (Iceberg), not the reverse
-   - This corrects a common misconception that "DF means Trino skips reading Postgres"
+1. **system.query() example correctness** (resource 22):
+   - If the resource has a cross-schema system.query() example using a CTE + subquery, verify the SQL correctly scopes per-tenant schema names
+   - Simplest fix: use a plain aggregation example without dynamic schema discovery in system.query() (just demonstrate the passthrough syntax, don't try to do per-schema dynamic discovery in it)
 
-2. **flush_metadata_cache scope** (resource 22, metadata caching section):
-   - Clarify: the metadata cache lives on the coordinator only; "cluster-wide" is imprecise
+2. **Iceberg partitioning for high-cardinality tenant IDs** (resource 22 or Iceberg partitioning resource):
+   - Add note: for tenant_id with high cardinality (hundreds to thousands), `bucket(N, tenant_id)` distributes data more evenly than the identity transform; identity creates one partition directory per unique value which can create small-file problems at scale
 
 ---
 
-## Suggested iter273 angles (MUST target Trino federation, gap 0.017)
+## Suggested iter274 angles (MUST target Trino federation, gap 0.015)
 
-Topic at 4.483/219. Need ~9-10 more questions at 4.875+ to cross 4.500 threshold.
+Topic at 4.485/221. Need ~7-8 more questions at 4.875+ to cross 4.500 threshold.
 
-1. **Cross-schema queries in multi-tenant Postgres** — engineer has one Postgres instance with one schema per tenant; asks how to query across schemas; UNION ALL approach; why Trino can't pattern-match schema names dynamically
+1. **Trino EXPLAIN output deep dive** — engineer asks what the different node types mean; TableScan, ScanFilterProject, Exchange, Aggregate; what "Input: X rows" vs "Output: Y rows" tells you about where filtering happens
 
-2. **system.query() edge cases** — empty results causing schema inference errors; ORDER BY not preserved; column aliasing in join with system.query() result; when to use system.query() vs Trino-native
+2. **Connection pool configuration for Postgres federation** — engineer asks how many concurrent JDBC connections Trino uses to Postgres; how to tune the pool; what happens when queries pile up waiting for connections; PgBouncer's role
 
-3. **MERGE INTO Iceberg — MoR write mode** — follow-up on iter270 Q1 error: confirm MoR with positional delete files; OPTIMIZE after MERGE compacts delete files; CoW is open FR
+3. **Cross-catalog join planning** — engineer asks why Trino sometimes picks a different join order than expected; which table is build vs probe; broadcast join vs partitioned join; stats on Iceberg vs no stats on Postgres
+
+4. **system.query() security and access control** — engineer asks about the security model; OPA ExecuteFunction permission; SQL injection risks; credentials used (catalog-configured, not per-user)

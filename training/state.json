@@ -1,7 +1,7 @@
 {
-  "iteration": 273,
+  "iteration": 274,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter272 avg 4.75: Q1 (4.75 PASS) metadata caching — flush_metadata_cache(), cache-ttl, SELECT* view silent data loss. Q2 (4.75 PASS) dynamic filtering — join type matrix, wait-timeout 1s default, EXPLAIN ANALYZE DynamicFilter signal. Minor gaps: DF mental model (small table IS fully scanned; DF pushes its values to Iceberg). TOPIC: Trino federation 4.483/219, gap 0.017 (improving). Need ~9-10 more at 4.875+ to cross 4.500."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter273 avg 4.75: Q1 (4.75 PASS) multi-tenant cross-schema queries — UNION ALL generator, system.query() passthrough, Iceberg migration. Q2 (4.75 PASS) federate-vs-ingest decision framework — size thresholds, frequency multiplier, three patterns. Gaps: system.query() SQL example has correctness bug (CTE subquery doesn't scope per-tenant schema); Iceberg identity partition vs bucket for high-cardinality. TOPIC: Trino federation 4.485/221, gap 0.015. Need ~7-8 more at 4.875+ to cross 4.500."
 }

@@ -666,7 +666,15 @@ CALL system.flush_metadata_cache();
 --   or "Procedure not registered". Do NOT copy this form from Hive/Delta examples.
 ```
 
-This is the documented, supported way to react to an upstream schema change. **No pod restart is needed.** Run the procedure once on any coordinator; the cache invalidation is cluster-wide for that catalog.
+This is the documented, supported way to react to an upstream schema change. **No pod restart is needed.** Run the procedure once on any coordinator; the cache invalidation is sufficient for that catalog.
+
+> **CORRECT SCOPE — say "coordinator cache," not "cluster-wide" (this is a precision fix to a common mis-statement):**
+>
+> - The PostgreSQL connector's metadata cache (table list, column lists, schema lookups, table statistics) lives on the **coordinator only**. **Workers do NOT cache table metadata** for Trino's PostgreSQL connector — they receive splits with already-resolved metadata from the coordinator at query-execution time.
+> - `flush_metadata_cache()` clears the **coordinator's in-memory metadata cache**. It does not touch any worker, because there is no worker-side metadata cache to touch.
+> - Calling this operation "cluster-wide" is misleading and imprecise. The more accurate phrasing is **"coordinator cache"** or **"Trino's metadata cache"** — both describe what is actually flushed.
+> - **Since every metadata lookup is resolved on the coordinator at planning time (before splits are dispatched to workers), flushing the coordinator's cache is sufficient.** You do NOT need to restart workers, redeploy worker pods, or run a separate flush operation on workers. The single coordinator flush is enough for the entire cluster to see fresh Postgres metadata on the next query.
+> - The only caveat (already covered in Section 2.6 step 5 of the runbook) is **multi-coordinator HA deployments** — if you operate two independent coordinators behind a load balancer, each has its own metadata cache, so the flush on coordinator A does NOT invalidate the cache on coordinator B. In single-coordinator deployments (the typical case for this stack), one flush is enough.
 
 > **The `system` schema here is the catalog's connector-provided system schema** (`app_pg.system.*`), not the cluster-wide `system` catalog. Every JDBC connector exposes its own `flush_metadata_cache` under its catalog's `system` schema. Use the catalog name you actually configured (`app_pg` here, whatever yours is named).
 
@@ -861,7 +869,7 @@ CALL system.flush_metadata_cache();
 -- Do NOT use named parameters here — see Section 2.6 connector compatibility matrix.
 ```
 
-After the flush, the next query against `app_pg.public.accounts` (or any other table in that catalog) reads fresh metadata from Postgres. The flush is cluster-wide — run it once on any Trino client connected to any coordinator.
+After the flush, the next query against `app_pg.public.accounts` (or any other table in that catalog) reads fresh metadata from Postgres. The flush clears the **coordinator's** in-memory metadata cache (workers do not hold a separate JDBC metadata cache — see the "CORRECT SCOPE" callout in Section 2.6) — run it once on any Trino client connected to the coordinator. In single-coordinator deployments (the typical case for this stack) one call suffices; in multi-coordinator HA deployments, each coordinator has its own cache and must be flushed separately.
 
 **Post-flush verification — confirm Trino sees the new Postgres schema:**
 
@@ -3701,6 +3709,18 @@ What happens:
 5. Iceberg scans ~5 million rows instead of 500 million — a 100× reduction in I/O.
 
 **Direction of DF flow: Postgres (small, build) → Iceberg (large, probe).** The IN-list filter ORIGINATES from Postgres and FLOWS TO Iceberg. Iceberg is the one receiving the help.
+
+> **CORRECT MENTAL MODEL — what DF actually does, step by step (the most-misread mechanism in Trino):**
+>
+> 1. The **small table** (the 5,000-row Postgres `customers` lookup) is the **build side** — it is **ALWAYS FULLY SCANNED FIRST**. DF does NOT skip or filter rows on the build side; the build is read in its entirety (subject only to your literal WHERE-clause predicate pushdown, which is a separate planning-time mechanism — see Section 3 and the predicate-pushdown vs DF callout at the end of Section 5.1.2).
+> 2. Trino collects the **join-key values** from the build side after it finishes (the 5,000 `customer_id` values seen in `customers.id`).
+> 3. Trino derives a runtime IN-list (or BETWEEN range if compacted past `domain-compaction-threshold`) from those values, and **pushes it INTO the Iceberg scan (the probe side)** — not into the Postgres scan.
+> 4. The **Iceberg connector** uses the per-file min/max statistics in Parquet/manifest metadata to **skip files whose `customer_id` min/max range does NOT overlap** the IN-list values. For files that do overlap, only the matching row-groups are read.
+> 5. **Result: Iceberg scans fewer files / fewer row-groups.** The **Postgres scan is NOT filtered by DF** — Postgres was already fully scanned in step 1 (the build side). It is **the Iceberg scan that is filtered** based on the Postgres join-key values.
+>
+> **THE COMMON MISCONCEPTION (do NOT believe this):** "DF pushes the Iceberg filter into Postgres, so Postgres reads fewer rows" — or — "DF lets Trino skip reading rows from Postgres." **Both are WRONG.** DF does NOT filter which Postgres rows are read. It **filters which Iceberg files are read** based on the Postgres join-key values. The Postgres table is read fully (i.e., fully under whatever WHERE-clause predicate pushdown narrowed it at planning time). The Iceberg scan is what gets the new runtime IN-list pruning.
+>
+> If you find yourself saying "DF helps Postgres scan less data," you have the direction backwards. The build is always fully scanned; DF helps the **probe** (the other side, the large table). In the canonical SaaS shape, the probe is Iceberg, so DF helps Iceberg, not Postgres.
 
 ##### Worked example B — the reverse case (small Iceberg dimension × large Postgres fact, rarer)
 

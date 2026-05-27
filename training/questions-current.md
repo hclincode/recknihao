@@ -1,13 +1,17 @@
-# Iter 272 Questions
+# Iter 273 Questions
 
-## Q1 — Stale schema after altering a Postgres table
+## Q1 — Querying across all tenant schemas in Postgres via Trino
 
-We added a column to one of our Postgres tables last week, and when I query it through Trino I still get an error saying the column doesn't exist. I double-checked: the column is definitely there in Postgres, I can query it directly in psql just fine. But Trino keeps acting like the old schema is the real one.
+We run a multi-tenant Postgres setup where each customer gets their own schema — so we have `tenant_abc.events`, `tenant_xyz.events`, and so on, maybe 200 schemas total. We connected Postgres to Trino as a catalog.
 
-Is Trino caching the table structure somewhere? If so, how do I get it to pick up the new column? I'm worried about this becoming a bigger problem — we do schema migrations regularly as we ship new features, and I don't want our analytics queries to break silently every time we alter a table.
+Now I want to run an aggregate across all tenants — like a platform-level report showing total events per tenant this week. In plain Postgres I'd probably write a loop or use `information_schema` to discover schemas dynamically. But when I try to do something like that in Trino it falls apart — I can't seem to pass a schema name as a variable.
 
-## Q2 — Cross-catalog join between Iceberg and Postgres is way slower than expected
+Is there an actual way to query across all those tenant schemas from Trino, or do I need to go back to Postgres for that? If Trino can do it, what does that SQL actually look like?
 
-We have an Iceberg table with about 200 million event rows, partitioned by tenant and date. We also have a small Postgres lookup table with maybe 5,000 rows that maps user IDs to account metadata. I want to join them so the dashboard can show events enriched with account info.
+## Q2 — Should I keep querying Postgres through Trino or copy the data into Iceberg?
 
-The Iceberg filter is really tight — after applying tenant and date filters, I'm pulling maybe 50,000 rows. But the join with the Postgres table still feels way slower than I'd expect. It's almost like Trino is reading the entire Postgres table regardless of what I'm filtering on the Iceberg side. Is that what's happening? Is there a way to make Trino push the filter down so it only fetches the relevant rows from Postgres?
+Right now our Trino setup has two catalogs: one pointing at our Postgres database (where all the live app data lives), and one pointing at our Iceberg tables on S3 (where we've been loading some historical event data). Most of our analytics queries join between the two — like joining a Postgres `accounts` table with Iceberg `events`.
+
+The queries work, but some of them are slow, and I'm not sure if it's because of the cross-catalog join or because Postgres just can't handle the scan volume. A coworker suggested we just copy the Postgres data into Iceberg so everything is in one place. But that feels like a big lift, and it means the Iceberg copy is always slightly behind the live data.
+
+How do I figure out whether to keep federating from Postgres or move the data into Iceberg? What's the actual deciding factor?
