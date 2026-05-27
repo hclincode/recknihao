@@ -1,90 +1,90 @@
-# Judge Feedback — Iter 318
+# Judge Feedback — Iter 319
 
 Date: 2026-05-27
 Phase: extended
-Topics: Schema evolution mid-CDC — ADD COLUMN in Postgres (Q1) + OPA row-filter performance under high concurrency (Q2)
+Topics: OPA bundle management — policy distribution without restarts (Q1) + Schema drift monitoring — detecting Postgres/Iceberg column mismatch (Q2)
 
 ---
 
-## Q1 — Schema evolution mid-CDC: ADD COLUMN in Postgres
+## Q1 — OPA bundle management: policy distribution without restarts
 
 ### Score
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 4.25 | Core mechanics correct: Debezium picks up new columns via RELATION messages on next DML; Iceberg ADD COLUMN is metadata-only; historical rows return NULL. Two inaccuracies: (1) `UPDATE SET *` / `INSERT *` wildcards do NOT trigger schema evolution in MERGE — they expand to the target table's current columns at plan time. MERGE INTO does not support auto schema evolution in Iceberg 1.5.2. (2) Backfill snippet uses `mergeSchema=true` without the required `write.spark.accept-any-schema=true` table property. |
-| Beginner clarity | 4.5 | Clear structure: "what Debezium did right" → "why Iceberg is behind" → "fix sequence" → "root cause". Two-outcome framing (silent drop vs AnalysisException) helps self-diagnosis. WAL/checkpoint terms used but explained in context. |
-| Practical applicability | 4.75 | Engineer knows what to do: pause Spark, ALTER Iceberg, resume. Explicit 30-60s downtime estimate. Concrete SQL. Backfill recipe. "Don't restart Debezium" warning prevents a likely wrong reaction. Fits on-prem Spark+Iceberg+HMS stack. |
-| Completeness | 4.5 | Covers detection, root cause, fix, prevention, historical backfill. Missing: `write.spark.accept-any-schema` table property; MERGE INTO auto schema evolution not supported in Iceberg 1.5.2; DROP COLUMN / TYPE CHANGE asymmetry; schema-drift monitoring. |
+| Technical accuracy | 4.5 | All core mechanics verified: bundle = gzipped tarball of Rego + data files; `opa build`; `services.<name>.polling.*` config; OPA falls back to old bundle on fetch failure; authorization at analysis time only. Three minor errors: (1) `data/tenants.json` naming is wrong — OPA only loads `data.json`/`data.yaml`; directory name becomes data path; (2) `/health` endpoint only checks initial activation, not ongoing freshness; (3) `ERRC: bundle download failed` is not a real OPA error code. |
+| Beginner clarity | 4.75 | Strong narrative arc. Two-part bundle breakdown (policy vs data) is clear. Config YAML is paste-ready. Workflow table at end is wiki-ready. Jargon unpacked. |
+| Practical applicability | 4.75 | Engineer can act immediately. MinIO matches prod env. `opa build` cited. `KILL QUERY` as immediate revocation escape hatch. Workflow table is pinnable reference. |
+| Completeness | 4.5 | Answers all three sub-questions. Missing: Trino `opa.policy.cache-ttl-seconds` stacking with bundle poll interval (total propagation = both); bundle signing for on-prem MinIO integrity. |
+| **Average** | **4.625** | **PASS** |
+
+### What Worked
+- Excellent production environment fit (MinIO, on-prem k8s)
+- Security trade-off framing: reframes "is eventual consistency a problem" → "compared to what?" with three alternatives
+- `KILL QUERY` mention is the right escape hatch for immediate revocation
+- Workflow table (Update Rego → CI/CD builds bundle → OPA polls → next query sees policy) is wiki-ready
+
+### What Missed
+- **Bundle data file naming wrong** — `data/tenants.json` won't load; must be `tenants/data.json` (directory = data path, file must be named `data.json`) (fixed in resources/05)
+- **`/health` conflated with bundle freshness** — `/health` checks initial activation only; ongoing monitoring needs Status API or Prometheus `bundle_loaded_counter` / `bundle_request_errors_total` (fixed in resources/05)
+- **`ERRC: bundle download failed` is fabricated** — OPA status JSON uses `code: "bundle_error"` style
+- **`opa.policy.cache-ttl-seconds` stacking** not mentioned — total propagation = bundle poll + Trino cache TTL (added to resources/05)
+
+### Technical Accuracy (verified)
+All mechanics verified against OPA management-bundles docs, OPA monitoring docs, OPA CLI reference, Trino OPA docs. Bundle data file naming error confirmed: OPA ignores arbitrary filenames, only loads `data.json`/`data.yaml`.
+
+### Rubric Update
+- Multi-tenant analytics: prior avg 4.480 across 117 questions → (4.480 × 117 + 4.625) / 118 = **4.481 across 118 questions**. Status: PASSED.
+
+---
+
+## Q2 — Schema drift monitoring: detecting Postgres/Iceberg column mismatch
+
+### Score
+
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Technical accuracy | 4.25 | Core preflight schema-diff, `information_schema.columns`, `DESCRIBE TABLE` filter, ADD COLUMN metadata-only, three silent-failure modes all correct. **Notable inaccuracy**: DROP COLUMN described as making historical data "inaccessible through Trino" — incorrect. Iceberg's field-ID design means historical data IS recoverable via `FOR VERSION AS OF <snapshot_id>` time travel until snapshots expire. Auto-`ADD COLUMN ... STRING` blindly assigns string type ignoring the `data_type` already fetched — silently coerces integers/timestamps. |
+| Beginner clarity | 4.5 | Strong framing ("the silence is the problem"). Concrete table mapping Postgres operations to Iceberg responses. Code is readable with inline comments. |
+| Practical applicability | 4.75 | Preflight check is shippable. Decision matrix (add → auto-fix, drop → alert) maps to on-call response. Weekly Trino cross-catalog reconciliation uses correct Trino PostgreSQL connector syntax. Minor: no guard for NOT NULL columns auto-added as nullable. |
+| Completeness | 4.5 | Hits core asks (detection, monitoring, alerting, ADD vs DROP asymmetry, reconciliation). Missing: column rename ambiguity (name-only diff can't distinguish RENAME from DROP+ADD); type-change detection beyond passing mention; CDC-specific monitoring (Debezium schema history topic); NOT NULL/default drift. |
 | **Average** | **4.50** | **PASS** |
 
 ### What Worked
-- Correctly identifies the failure is on the Iceberg consumer side, not Debezium
-- Pause-ALTER-resume is the right operational pattern for on-prem Iceberg
-- Two-outcome framing (silent NULL drop vs AnalysisException) is practically useful
-- Backfill caveat ("historical rows will be NULL") correctly surfaced
-- "Don't restart Debezium" prevents a common wrong reflex
+- Three-mode silent-failure framing (SELECT *, explicit list, CDC) is the right mental model
+- `spark.read.jdbc` + `DESCRIBE TABLE` with `#`-prefix filtering is correct Spark + Iceberg pattern
+- Decision asymmetry: auto-fix additions vs fail-loud removals matches real on-call ergonomics
+- Trino cross-catalog reconciliation uses correct `postgresql.public.events` syntax
 
 ### What Missed
-- **MERGE wildcards don't trigger schema evolution** — `UPDATE SET *` / `INSERT *` expand to target's current columns at plan time. The ALTER step is mandatory; wildcards just make post-ALTER behavior less brittle (now added to resources/13)
-- **`write.spark.accept-any-schema=true` required** for `mergeSchema=true` in backfill to add missing columns — backfill snippet was incomplete (now added to resources/13)
-- ADD vs DROP vs TYPE CHANGE asymmetry not mentioned (DROP is destructive in Iceberg; TYPE CHANGE only allows widening promotions)
-- Schema-drift monitoring not mentioned
+- **DROP COLUMN "inaccessibility" overstated** — historical data is recoverable via time travel until snapshot expiry (fixed in resources/13)
+- **Auto-`ADD COLUMN ... STRING` ignores `data_type`** — should map Postgres types to Iceberg types; `data_type` is already fetched from `information_schema.columns` (type mapping table added to resources/13)
+- Column rename ambiguity: name-only diff can't distinguish RENAME from DROP+ADD
+- Type-change detection not operationalized despite `data_type` being available in the query
+- CDC schema-drift monitoring not addressed
 
 ### Technical Accuracy (verified)
-Debezium ADD COLUMN behavior confirmed. Iceberg MERGE INTO schema evolution limitation confirmed (apache/iceberg#5548). `write.spark.accept-any-schema` requirement confirmed per iceberg.apache.org/docs/latest/spark-writes/.
+Iceberg ADD COLUMN metadata-only confirmed. DROP COLUMN time-travel recoverability confirmed (field-ID design). Trino `postgresql.schema.table` syntax confirmed. `information_schema.columns` query verified.
 
 ### Rubric Update
-- Postgres-to-Iceberg ingestion: prior avg 4.490 across 109 questions → (4.490 × 109 + 4.50) / 110 = **4.494 across 110 questions**. Status: PASSED.
+- Postgres-to-Iceberg ingestion: prior avg 4.494 across 110 questions → (4.494 × 110 + 4.50) / 111 = **4.495 across 111 questions**. Status: PASSED.
 
 ---
 
-## Q2 — OPA row-filter performance under high concurrency
+## Iter 319 Summary
 
-### Score
-
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 4.75 | All verifiable claims match Trino 467+ OPA plugin docs. OPA called once per query at analysis time (not per row) — correct. `batched-uri` endpoint for FilterTables/FilterSchemas bundling — correct. `batch-column-masking-uri` overrides `column-masking-uri` — exact docs quote. `io.trino.plugin.opa.OpaHttpClient` debug logger — exact. `metrics.timer_rego_query_eval_ns` field — exact. "1 OPA pod per ~20 concurrent users" rule of thumb not in official docs but labeled as rule of thumb. Minor: example OPA URL path is a convention, not a Trino constant. |
-| Beginner clarity | 4.5 | Explains once-per-query vs per-row distinction up front. Concrete numbers (200 tables = 200 calls without batching, 50 users × 30 columns = 1,500 calls). Doesn't define "Rego" or "OPA bundle" but question implies engineer already runs OPA. |
-| Practical applicability | 5.0 | Diagnose-first ordering (enable debug log → count calls → tune). Concrete config snippets. Tuning levers ordered by impact. K8s replica example matches prod environment. Coordinator restart reminder. Engineer can act immediately. |
-| Completeness | 4.75 | Covers: call frequency, where extra calls come from, diagnosis path, batched-uri, batch column masking + precedence, horizontal OPA scaling, Rego optimization. Missing: `opa.http-client.*` connection pool tuning (max-connections, request-timeout); OPA bundle polling impact; information_schema query amplification (Trino Issue #22323). |
-| **Average** | **4.75** | **PASS** |
-
-### What Worked
-- Direct answer to both parts of the user's question (call frequency + what to tune)
-- Correctly framed row filter as 1 call per query and identified real cost driver as SHOW TABLES / column masking fan-out
-- Diagnose-before-tune ordering with exact logger name
-- Coordinator restart reminder (reinforcing iter317 fix)
-- Honest framing of rule of thumb
-
-### What Missed
-- `opa.http-client.*` connection pool properties not mentioned — when scaling OPA replicas, Trino's HTTP client also needs tuning (now added to resources/05)
-- Diagnostic decision tree (call count vs per-call latency) not made explicit — user asked "is it OPA or Trino config?" (decision tree added to resources/05)
-- Information_schema query amplification (Issue #22323) not mentioned
-
-### Technical Accuracy (verified)
-All verifiable claims confirmed against Trino 481 OPA docs and OPA decision-logs docs. `batch-column-masking-uri` precedence quote exact. `io.trino.plugin.opa.OpaHttpClient` logger name exact.
-
-### Rubric Update
-- Multi-tenant analytics: prior avg 4.478 across 116 questions → (4.478 × 116 + 4.75) / 117 = **4.480 across 117 questions**. Status: PASSED.
-
----
-
-## Iter 318 Summary
-
-**Iter 318 average: 4.625 — PASS** ✓
+**Iter 319 average: 4.5625 — PASS** ✓
 
 ### Notable
-- Q1 4.50: Schema evolution answer correct on core mechanics; MERGE wildcard/schema-evolution misconception and missing `write.spark.accept-any-schema` caught; fixed in resources/13
-- Q2 4.75: OPA performance answer comprehensive; HTTP client tuning and diagnostic decision tree gaps fixed in resources/05
+- Q1 4.625: OPA bundle mechanics correct; data file naming error caught (`data/tenants.json` → `tenants/data.json`), `/health` vs Status API distinction clarified, Trino cache TTL stacking added to resources/05
+- Q2 4.50: Schema drift monitoring solid; DROP COLUMN time-travel recoverability corrected, Postgres→Iceberg type mapping table added to resources/13
 
 ### Resource fixes applied this iteration
-1. **resources/13-postgres-to-iceberg-ingestion.md** — "MERGE INTO and schema evolution: wildcards are not enough" section; `write.spark.accept-any-schema=true` + `mergeSchema=true` requirement; ADD vs DROP vs TYPE CHANGE asymmetry note
-2. **resources/05-multi-tenant-analytics.md** — OPA HTTP client tuning properties (`opa.http-client.*`); diagnostic decision tree (call count vs per-call latency)
+1. **resources/05-multi-tenant-analytics.md** — OPA bundle directory structure with `data.json` naming rule; `/health` vs Status API/Prometheus clarification; `opa.policy.cache-ttl-seconds` + bundle poll propagation note
+2. **resources/13-postgres-to-iceberg-ingestion.md** — Iceberg DROP COLUMN time-travel recoverability corrected; Postgres→Iceberg type mapping table added
 
-### Suggested focus for Iter 319
-- "Postgres-to-Iceberg ingestion" (4.494/110 — probe DROP COLUMN behavior or TYPE CHANGE widening; or schema-drift monitoring pattern)
-- "Multi-tenant analytics" (4.480/117 — probe OPA bundle management: how Rego policies are distributed, bundle polling, bundle signing)
-- "Storage sizing" (4.521/6 — probe time-travel cost: how many snapshots to keep, what expire_snapshots does to storage)
-- "OLAP vs OLTP" (4.657/4 — probe a harder angle: hybrid HTAP, when Trino federation over Postgres is sufficient vs full migration)
+### Suggested focus for Iter 320
+- "Postgres-to-Iceberg ingestion" (4.495/111 — probe column rename handling in CDC, or NOT NULL constraint additions)
+- "Multi-tenant analytics" (4.481/118 — probe OPA performance at 500+ tenants: when to move from view-per-tenant to OPA row filters)
+- "Storage sizing" (4.521/6 — probe time-travel storage cost: snapshot retention vs MinIO costs)
+- "Real-time vs batch" (4.771/6 — probe Trino HMS lock contention under high-frequency streaming commits)

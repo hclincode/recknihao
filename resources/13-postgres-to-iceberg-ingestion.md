@@ -1447,7 +1447,27 @@ The exact behavior matters because the wrong mental model leads to incorrect rem
 > **ADD vs DROP vs TYPE CHANGE — Iceberg DDL is NOT symmetric.** When planning a schema change, know that the three classes of column alteration have very different cost and safety properties:
 >
 > - **ADD COLUMN** — **safe, metadata-only**. Completes in milliseconds on a 10 TB table. Always nullable (see section 7 below). Historical Parquet files NULL-fill at read time. No data rewrite, no backfill required.
-> - **DROP COLUMN** — **destructive going forward**. Metadata-only at the DDL level (Iceberg just retires the field ID from the schema), but **the column is gone from any data files written after the DROP** — new MERGE / INSERT / append writes will not include the column. Re-ADDing a column with the same name does NOT restore the old data; the new ADD gets a fresh field ID, and the old column's bytes (still sitting in pre-DROP Parquet files on MinIO) become unreachable. Treat DROP as a one-way migration that needs to be coordinated with every downstream view, dbt model, and dashboard before you run it.
+> - **DROP COLUMN** — **destructive going forward, but not immediately destructive of historical data**. Metadata-only at the DDL level (Iceberg just retires the field ID from the schema). New MERGE / INSERT / append writes will not include the column. Re-ADDing a column with the same name does NOT restore the old data into the *current* schema; the new ADD gets a fresh field ID. **However — the historical column data is NOT permanently inaccessible.** Iceberg tracks columns by **stable field IDs** baked into the Parquet files; the bytes for the dropped column are still in pre-DROP Parquet files on MinIO, and they are **still recoverable via time travel queries** against the snapshots that existed before the DROP:
+>
+>   ```sql
+>   -- Time-travel SELECT against a pre-DROP snapshot still shows the column
+>   SELECT id, dropped_col, event_ts
+>   FROM iceberg.analytics.events FOR VERSION AS OF <pre_drop_snapshot_id>;
+>
+>   -- Same idea with timestamp-based time travel
+>   SELECT id, dropped_col, event_ts
+>   FROM iceberg.analytics.events FOR TIMESTAMP AS OF TIMESTAMP '2026-05-20 12:00:00';
+>   ```
+>
+>   This works because the pre-DROP snapshot's schema metadata still includes the column's field ID, and the Parquet files referenced by that snapshot still contain the column's bytes — Iceberg simply projects them through the historical schema for the time-travel query.
+>
+>   **The data does become permanently inaccessible only after `CALL iceberg.system.expire_snapshots(...)` removes the pre-DROP snapshots** (typically 7 days on this stack, per resource 17's maintenance schedule). After expiry: time travel to the pre-DROP snapshot fails (snapshot no longer exists), the orphaned Parquet files become candidates for `remove_orphan_files`, and the column data is gone for good. So the correct framing is:
+>
+>   - **Current-snapshot queries** (the default — `SELECT ... FROM events`): the dropped column is gone, the way the SQL standard expects.
+>   - **Time-travel queries** (`FOR VERSION AS OF <pre_drop_snapshot_id>` or `FOR TIMESTAMP AS OF '...'`): the column is still accessible **until `expire_snapshots` removes those snapshots**.
+>   - **After snapshot expiry**: the column data is permanently unrecoverable (orphan files may even be physically deleted).
+>
+>   **Practical implication**: a DROP COLUMN that turns out to be a mistake is **recoverable within your snapshot retention window** via `CALL iceberg.system.rollback_to_snapshot(...)` to a pre-DROP snapshot (which restores the entire table state including the column) or via a one-off Spark job that time-travels to the pre-DROP snapshot, extracts the column, and writes it back into a new column on the current table. Treat DROP as a **one-way migration for the current schema** that needs to be coordinated with every downstream view, dbt model, and dashboard before you run it — but the underlying data has a `history.expire.max-snapshot-age-ms` worth of grace period (default 5 days, typically configured to 7 days on this stack) before it is truly gone.
 > - **TYPE CHANGE** — **only widening promotions are supported in Iceberg 1.5.2**. The allowed set is narrow:
 >   - `int` → `long` (32-bit to 64-bit integer)
 >   - `float` → `double` (32-bit to 64-bit float)
@@ -3792,6 +3812,102 @@ def preflight_schema_check(spark, pg_table, iceberg_table):
 ```
 
 Iceberg's **metadata table** convention exposes table internals as queryable pseudo-tables you can SELECT from for ops automation. The widely supported ones in Trino are `$snapshots`, `$files`, `$partitions`, `$history`, `$manifests`, and `$properties`. For introspecting **columns**, use `DESCRIBE TABLE iceberg.analytics.events` or `SHOW COLUMNS FROM iceberg.analytics.events` in Trino, or `DESCRIBE TABLE iceberg.analytics.events` in Spark SQL — `$schema` is **not** a standard Iceberg metadata table in Trino.
+
+#### CRITICAL — when auto-ADDing columns, map Postgres types to Iceberg types correctly. Do NOT default to STRING.
+
+The pre-flight schema-diff above shows pulling `data_type` from `information_schema.columns` alongside `column_name` — **that `data_type` column is there for a reason.** A common mistake in auto-`ALTER TABLE ... ADD COLUMN` code paths is to default every new column to `STRING` / `VARCHAR` "because string accepts anything." This is **silently wrong** for numeric and temporal columns:
+
+- An integer column landing as `VARCHAR` causes `SUM(new_col)` and `AVG(new_col)` to fail with a type error — and even when implicit casts kick in, lexicographic sort order means `"10" < "2"` in a `WHERE new_col > '5'` predicate, returning the wrong rows with no error.
+- A `timestamptz` column landing as `VARCHAR` breaks every `WHERE event_ts BETWEEN '...' AND '...'` filter in Trino — strings compare lexicographically, so `'2026-05-01T09:00:00Z'` correctly sorts before `'2026-05-01T10:00:00Z'`, but anything with a different ISO format (UTC offset, missing milliseconds, `Z` vs `+00:00`) silently breaks the comparison.
+- A `numeric(18, 4)` column landing as `VARCHAR` means every aggregation in downstream dbt models has to cast through `CAST(new_col AS DECIMAL(18, 4))`, and any non-numeric value that sneaks in (`NULL` as the string `'NULL'`, an empty string `''`, a typo from a buggy producer) becomes a hard cast error in production rather than a clean NULL.
+
+**Use the Postgres → Iceberg type mapping table below to choose the correct Iceberg type for each ADDed column.** The mapping is the same whether you're emitting the DDL from a Python pre-flight script, from a custom Spark job, or from an ops runbook:
+
+| Postgres type | Iceberg type | Notes |
+|---|---|---|
+| `int4`, `integer` | `INT` | 32-bit signed integer |
+| `int8`, `bigint` | `BIGINT` | 64-bit signed integer (default for surrogate keys) |
+| `int2`, `smallint` | `INT` | Iceberg has no 16-bit int; widen to 32-bit |
+| `float4`, `real` | `FLOAT` | 32-bit IEEE-754 |
+| `float8`, `double precision` | `DOUBLE` | 64-bit IEEE-754 |
+| `numeric(p,s)`, `decimal(p,s)` | `DECIMAL(p,s)` | Preserve exact `p` and `s`; do NOT widen to DOUBLE (loses precision) |
+| `timestamptz`, `timestamp with time zone` | `TIMESTAMP(6) WITH TIME ZONE` | Microsecond precision; preserves UTC offset |
+| `timestamp`, `timestamp without time zone` | `TIMESTAMP(6)` | Microsecond precision, no timezone |
+| `date` | `DATE` | Day-precision, no time component |
+| `time` | `TIME(6)` | Microsecond precision |
+| `text`, `varchar`, `varchar(n)`, `char(n)` | `VARCHAR` | Iceberg's underlying type is unbounded `string` — `varchar(n)` length is informational only |
+| `boolean`, `bool` | `BOOLEAN` | Direct mapping |
+| `bytea` | `VARBINARY` | Iceberg's `binary` type |
+| `uuid` | `VARCHAR` | Iceberg has no native UUID type; store as 36-char string (or `BINARY(16)` for storage efficiency, but VARCHAR is simpler and more queryable) |
+| `jsonb`, `json` | `VARCHAR` | Store as raw JSON string for schemaless flexibility (see resource 13 "JSON columns" section). Parse on read via `json_extract_scalar(...)` in Trino. |
+| `inet`, `cidr`, `macaddr` | `VARCHAR` | No native Iceberg type; store as string representation |
+| `interval` | `VARCHAR` | No direct mapping; either store as ISO 8601 string or convert to seconds as `BIGINT` |
+| Array types (`int[]`, `text[]`) | `ARRAY(<element-iceberg-type>)` | Iceberg natively supports arrays; recursively map the element type |
+| `enum` (Postgres ENUM type) | `VARCHAR` | Store the label as a string; enforce allowed-values via a downstream check, not at the storage layer |
+
+**The auto-ALTER pattern**, corrected to use the mapping:
+
+```python
+PG_TO_ICEBERG = {
+    "integer": "INT", "int4": "INT",
+    "bigint": "BIGINT", "int8": "BIGINT",
+    "smallint": "INT", "int2": "INT",
+    "real": "FLOAT", "float4": "FLOAT",
+    "double precision": "DOUBLE", "float8": "DOUBLE",
+    "boolean": "BOOLEAN",
+    "date": "DATE",
+    "timestamp with time zone": "TIMESTAMP(6) WITH TIME ZONE",
+    "timestamp without time zone": "TIMESTAMP(6)",
+    "text": "VARCHAR", "varchar": "VARCHAR", "character varying": "VARCHAR",
+    "uuid": "VARCHAR",
+    "jsonb": "VARCHAR", "json": "VARCHAR",
+    "bytea": "VARBINARY",
+}
+
+def map_pg_type(pg_data_type: str, numeric_precision=None, numeric_scale=None) -> str:
+    # numeric(p, s) and decimal(p, s) — Postgres reports data_type='numeric' and
+    # carries precision/scale in separate information_schema columns; pass them in.
+    if pg_data_type in ("numeric", "decimal"):
+        if numeric_precision is None or numeric_scale is None:
+            raise ValueError("numeric/decimal columns require precision and scale")
+        return f"DECIMAL({numeric_precision}, {numeric_scale})"
+    iceberg_type = PG_TO_ICEBERG.get(pg_data_type.lower())
+    if iceberg_type is None:
+        # Unknown type — log loudly and fail rather than silently defaulting to STRING.
+        # Adding a new mapping is a one-line PR; silently coercing to VARCHAR creates
+        # a permanent type-correctness bug.
+        raise ValueError(f"No Iceberg mapping for Postgres type: {pg_data_type!r}")
+    return iceberg_type
+
+# Updated preflight: when issuing the auto-ALTER, use the mapping.
+for new_col_name in new_in_postgres:
+    pg_row = next(r for r in pg_cols if r.column_name == new_col_name)
+    iceberg_type = map_pg_type(
+        pg_row.data_type,
+        numeric_precision=getattr(pg_row, "numeric_precision", None),
+        numeric_scale=getattr(pg_row, "numeric_scale", None),
+    )
+    spark.sql(
+        f"ALTER TABLE iceberg.analytics.{iceberg_table} "
+        f"ADD COLUMN {new_col_name} {iceberg_type}"
+    )
+```
+
+**Update the pre-flight `information_schema.columns` query** to pull the type metadata you need for the mapping:
+
+```sql
+SELECT
+    column_name,
+    data_type,                  -- 'integer', 'numeric', 'timestamp with time zone', etc.
+    numeric_precision,          -- for numeric(p, s)
+    numeric_scale,              -- for numeric(p, s)
+    datetime_precision,         -- for timestamp/time
+    is_nullable
+FROM information_schema.columns
+WHERE table_schema = 'public' AND table_name = '<your_table>';
+```
+
+**Operational rule**: when the auto-ALTER encounters a Postgres type the mapping doesn't cover, **fail loudly and alert** rather than defaulting to `VARCHAR`. A missing mapping is a one-line code change; a silent VARCHAR-default is a class of bug that produces wrong analytical results for weeks before anyone notices. The earlier `preflight_schema_check` should be paired with this mapping function — together they catch the schema drift AND apply the correct type.
 
 ### Other schema changes (quick reference)
 

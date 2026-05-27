@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.480 | 117 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.481 | 118 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
@@ -40,7 +40,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.521 | 6 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.494 | 110 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.495 | 111 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.655 | 20 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
@@ -50,6 +50,54 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 319 — 2026-05-27
+
+**Q1** — OPA bundle management for policy distribution: what a bundle is, mechanical fetch flow, propagation delay as a security trade-off, monitoring for stalled bundles
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.75 |
+| Practical applicability | 4.75 |
+| Completeness | 4.5 |
+| **Average** | **4.625** — PASS |
+
+All core mechanical claims verified against official OPA docs: bundles are gzipped tarballs of `.rego` + `data.json` files; `opa build -b ./policy -o bundle.tar.gz` is the canonical build command; `services.<name>.polling.min_delay_seconds` / `max_delay_seconds` controls poll cadence; OPA falls back to previously activated bundle on fetch failure (and persists to disk for startup resilience); bundle status is exposed via Status API plus `/health` and `/metrics` (Prometheus). The "OPA authorizes only at query analysis time, never during execution" claim is verified for Trino's OPA plugin — Trino sends authorization requests during query processing, after which the execution phase runs without re-checking. Practical fit with prod (on-prem MinIO bundle server, k8s) is excellent.
+
+Minor accuracy / scope notes:
+- The `/health` endpoint check for bundle activation only covers **initial** activation by default — subsequent download failures do NOT flip `/health` to unhealthy unless `?bundles=true` is passed AND the bundle was already activated. The Status API (or Prometheus `bundle_loaded_counter` / `bundle_request_duration_ns`) is the correct surface for ongoing freshness monitoring. Answer's `/health` recommendation is partially correct but doesn't note the activation-vs-freshness distinction.
+- The "1-minute propagation window" framing is accurate, but the answer slightly understates the case where a malicious actor knows about the window: revocation of an actively-abused tenant should be paired with `KILL QUERY` (answer mentions this) AND ideally cache invalidation if Trino is configured with `opa.policy.cache-ttl-seconds`. Cache-TTL on Trino's side is not mentioned and can add additional propagation delay beyond just OPA bundle polling.
+- `data/tenants.json` example: technically the file must be named exactly `data.json` (or `data.yaml`) inside the directory hierarchy — OPA does not load files with arbitrary names. The hierarchical directory path becomes the data document path. Answer's "data/tenants.json" framing is wrong by file-naming convention; should be `tenants/data.json` to land at `data.tenants`. This is a real minor error that would bite a beginner trying to follow the example literally.
+- "ERRC: bundle download failed" — this exact log string is fabricated. OPA's decision logs and status messages use different formats (e.g., `code: "bundle_error"` in status JSON). Minor cosmetic error.
+
+Practical strengths: the workflow table at the bottom is excellent and directly actionable; the alternatives comparison (manual restart vs file-based vs bundles) gives the engineer a clear "why this matters"; the `KILL QUERY` mention for immediate revocation is the right escape hatch.
+
+Topic running avg: (4.480×117 + 4.625)/118 = **4.481/118 questions** — PASSED.
+
+**Q2** — Schema drift monitoring: detecting Postgres/Iceberg column mismatch, preflight schema-diff at job startup, ADD vs DROP asymmetry, type mapping, time-travel recoverability
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.25 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.75 |
+| Completeness | 4.5 |
+| **Average** | **4.50** — PASS |
+
+Three-mode silent-failure framing correct; `spark.read.jdbc` + `DESCRIBE TABLE` with `#`-prefix filtering correct; decision asymmetry (auto-fix additions, fail-loud removals) matches real on-call ergonomics; Trino cross-catalog reconciliation correct. Notable inaccuracy: DROP COLUMN described as making historical data "inaccessible through Trino" — incorrect. Iceberg's field-ID design means historical data is recoverable via `FOR VERSION AS OF <snapshot_id>` time travel until snapshots expire. Auto-`ADD COLUMN ... STRING` blindly assigns STRING type ignoring the `data_type` already fetched from `information_schema.columns` — silently coerces integers/timestamps. Topic running avg: (4.494×110 + 4.50)/111 = **4.495/111 questions** — PASSED.
+
+**Iter 319 average: 4.5625 — PASS** ✓
+
+**Topics updated**:
+- Multi-tenant analytics: 4.480/117 → **4.481/118 questions** (PASSED — stable)
+- Postgres-to-Iceberg ingestion: 4.494/110 → **4.495/111 questions** (PASSED — stable)
+
+**Resource fixes this iteration**:
+- resources/05: OPA bundle data-file naming rule (`tenants/data.json` → `tenants/data.json`; directory = data path, file must be `data.json`); `/health` vs Status API/Prometheus distinction; `opa.policy.cache-ttl-seconds` stacking with bundle poll interval
+- resources/13: Iceberg DROP COLUMN time-travel recoverability corrected; Postgres→Iceberg type mapping table with `map_pg_type()` function
+
+---
 
 ### Iter 318 — 2026-05-27
 

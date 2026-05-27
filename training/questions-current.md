@@ -1,12 +1,12 @@
-# Iter 318 Questions
+# Iter 319 Questions
 
 Date: 2026-05-27
-Topics: Schema evolution mid-CDC-pipeline — ADD COLUMN in Postgres (Q1) + OPA row-filter performance under high concurrency (Q2)
+Topics: OPA bundle management — policy distribution without restarts (Q1) + Schema drift monitoring — detecting Postgres/Iceberg column mismatch (Q2)
 
-## Q1 — Schema evolution mid-CDC-pipeline: ADD COLUMN in Postgres
+## Q1 — OPA bundle management: distributing policy updates without restarting OPA
 
-We're using Debezium to stream changes from our Postgres database into our data pipeline, and everything has been working fine. Last week, one of our teams added two new columns to one of the Postgres tables we're streaming from — just a regular `ALTER TABLE ... ADD COLUMN`. Nobody touched the Debezium connector config. Now some downstream consumers are saying they see the new columns in the Kafka messages, but when we check the Iceberg table on the other end, the new columns aren't there. The rows that came in after the ALTER still seem to be landing, but without those columns. What actually happens to a CDC pipeline when you change the Postgres table schema mid-stream — does Debezium automatically pick up new columns, and if not, what do we need to do manually to get the Iceberg table updated and the data flowing correctly?
+We use OPA to control which rows each tenant can see in our analytics queries. Right now if I need to change a policy — say a customer gets a new data access agreement and I need to restrict what they see — I have to SSH into the OPA process and restart it to load the new rules. That's obviously terrible in production. I've heard there's a way OPA can pull down policy updates automatically, something called a "bundle," but I have no idea what that actually is or how it works mechanically. Like, where do the policy files live? How does OPA know to go fetch them? And what happens if the OPA instance gets behind — say it's still running old rules for a few minutes after I've pushed a change — is that a real security problem for us?
 
-## Q2 — OPA row-filter performance under high concurrency
+## Q2 — Schema drift monitoring: detecting Postgres/Iceberg column mismatch
 
-We have around 200 tenants on our platform and we're using OPA to control which rows each tenant can see when they query through Trino. It mostly works, but under load — say 50-80 concurrent users across tenants hitting the dashboard at the same time — query latency jumps noticeably, sometimes 2-3x slower than when traffic is light. We're trying to figure out if OPA is the bottleneck. Specifically: when a Trino query runs, is OPA being called once per query to decide what that tenant can see, or is it somehow getting called per row, or per something else? And if OPA is the bottleneck, what do we actually tune — is it the OPA server itself, or is there something in how Trino is configured to call it?
+We sync data from Postgres into our analytics pipeline on a schedule. It's been working fine, but I'm worried about a scenario I haven't figured out how to catch: what if a developer on the app team quietly drops a column from a Postgres table, or renames one, and our pipeline just keeps running and silently ignores that data or starts writing garbage? By the time a customer notices their dashboard is wrong, it's been broken for days. Is there a standard way to detect that the Postgres table structure has drifted away from what your pipeline expects, before it causes that kind of silent data loss? What should we actually be monitoring?

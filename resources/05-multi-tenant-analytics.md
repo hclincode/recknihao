@@ -720,7 +720,31 @@ The injection happens transparently at query planning time inside Trino — the 
 > tenant := data.tenant_map[input.context.identity.user]
 > ```
 >
-> Onboarding a new tenant means adding one line to `data/tenants.json` and pushing the bundle — no Rego changes, no Trino restart. Pattern 2 is the better choice when username conventions can't be enforced (e.g., human-user principals don't follow the service-account naming scheme), when the same username must map to different tenants in different environments (the bundle differs per env), or when tenant identity needs to be revocable (delete the row from the bundle, and the next OPA evaluation denies that username).
+> Onboarding a new tenant means adding one line to the bundle data file and pushing the bundle — no Rego changes, no Trino restart. Pattern 2 is the better choice when username conventions can't be enforced (e.g., human-user principals don't follow the service-account naming scheme), when the same username must map to different tenants in different environments (the bundle differs per env), or when tenant identity needs to be revocable (delete the row from the bundle, and the next OPA evaluation denies that username).
+>
+> **CRITICAL — OPA bundle data file naming rule: the file MUST be named `data.json` or `data.yaml`, NOT `tenants.json`.** The references above to `data/tenants.json` are conceptual shorthand for "the tenant_map data inside the OPA bundle." In the actual bundle filesystem layout, **OPA only loads files named exactly `data.json` or `data.yaml`** — any other filename is silently ignored. The **directory hierarchy** becomes the data document path inside OPA's `data` namespace. Concretely, the correct bundle directory structure is:
+>
+> ```
+> bundle/
+>   trino_policy/
+>     row_filter.rego
+>     column_mask.rego
+>   tenants/
+>     data.json        # NOT tenants.json — OPA ignores arbitrary filenames
+> ```
+>
+> The file at `bundle/tenants/data.json` becomes accessible in Rego as **`data.tenants`** (the directory name `tenants/` is the path segment, and the contents of `data.json` are merged into that namespace). So if `bundle/tenants/data.json` contains:
+>
+> ```json
+> {
+>   "tenant_map": {
+>     "acme-svc": "acme",
+>     "beta-svc": "beta"
+>   }
+> }
+> ```
+>
+> Then in Rego you reference it as `data.tenants.tenant_map[input.context.identity.user]` — NOT `data.tenant_map` (no `tenants.` prefix would only be correct if the file were at `bundle/data.json` at the root, which collides with everything else and is not recommended). **If you name the file `tenants.json` instead of `data.json`, OPA loads the bundle successfully but the `tenant_map` is simply not present in OPA's data document** — every lookup returns undefined, every tenant gets denied (or in some Rego patterns, every tenant falls through to a default branch that may grant the wrong access). This is one of the most confusing OPA bundle bugs because OPA's logs do not warn about the ignored file. Verify by running `curl http://opa:8181/v1/data/tenants` after pushing the bundle — if it returns `{}` instead of your tenant_map, the filename is wrong.
 >
 > **Operational caveat — OPA data bundle polling cadence creates a propagation window.** Changes to `data/tenants.json` (and the rest of the OPA data bundle) propagate to OPA on the **next bundle poll cycle**. OPA pulls its bundle from the configured bundle server (S3, an HTTP endpoint, etc.) at a fixed interval set in OPA's configuration — **typically 30 seconds to 5 minutes depending on `services.<name>.polling.min_delay_seconds` / `max_delay_seconds`**. During the window between (a) pushing a new `tenants.json` to the bundle server and (b) OPA picking it up on the next poll, **the previous tenant_map is still in effect** — a user who has been moved from tenant `acme` to tenant `beta` will still see `acme`'s data on any query that runs during that window. For routine adds/removes the staleness window is harmless, but for **tenant changes that affect a specific human user** (e.g., user `alice@beta.com` is reassigned from tenant `acme` to tenant `beta`), the correct sequence is:
 >
@@ -729,6 +753,23 @@ The injection happens transparently at query planning time inside Trino — the 
 > 3. `alice` re-authenticates against the IdP and receives a new JWT; by the time she makes her next request, OPA has polled the new bundle and her identity now maps to the correct tenant.
 >
 > If you skip step 1 and update the bundle first, `alice` retains a valid JWT mapped to the **old** tenant for up to one poll cycle, and any request she makes during that window is authorized against the wrong tenant. This is the kind of race condition that only shows up in audit logs after the fact — design the sequence correctly from day one. For tenants/users that are deleted entirely (not reassigned), the same ordering applies: revoke the JWT at the issuer first, then drop the bundle entry.
+>
+> **CRITICAL — `/health` does NOT confirm ongoing bundle freshness. Use the Status API or Prometheus metrics for that.** A common monitoring mistake: engineers wire an OPA liveness probe to `GET /health` (or `GET /health?bundles=true`) and assume that as long as the probe is green, the bundle is up-to-date. **This is wrong** — both `/health` variants check only narrow conditions, and neither alerts on subsequent bundle download failures:
+>
+> - **`GET /health`** (no params) — only checks that the OPA process is alive and accepting HTTP requests. Returns 200 the instant OPA starts, regardless of whether any bundle has loaded. Does NOT indicate bundle freshness or even that a bundle exists.
+> - **`GET /health?bundles=true`** — checks only the **initial** bundle activation at startup. Once OPA has activated a bundle for the first time, the endpoint returns 200 forever (as long as OPA is alive), **even if every subsequent bundle download fails** for hours or days. The endpoint does NOT distinguish "bundle loaded 30 seconds ago" from "bundle last loaded 12 hours ago and every poll since has 5xx'd."
+>
+> **For ongoing bundle-freshness monitoring, use one of these instead:**
+>
+> - **Status API: `GET /v1/status`** — returns a JSON document with the latest activation timestamp, the last successful download timestamp, and the last error (if any) for every configured bundle. Alert when `last_successful_request` falls behind `now() - 3 * poll_max_delay` (i.e., three consecutive polls have failed).
+> - **Prometheus metrics** (OPA's `/metrics` endpoint when `prometheus` plugin is enabled) — specifically:
+>   - `bundle_loaded_counter` — increments every successful bundle activation. Alert when this counter is flat for > 3 poll intervals.
+>   - `bundle_request_duration_ns` — histogram of bundle download latency. Alert when p99 spikes (signals bundle server pressure).
+>   - `bundle_request_errors_total` — counts failed downloads. Alert when the rate is non-zero for sustained periods.
+>
+> Wire both: liveness probe → `/health` (process-alive only); freshness alert → Status API or `bundle_loaded_counter` staleness. Never conflate the two.
+>
+> **Total policy-propagation delay = bundle poll interval + Trino OPA decision cache TTL.** The bundle poll interval (30s–5min above) is only **one** of the two delays. If your Trino access-control config sets `opa.policy.cache-ttl-seconds` (a per-coordinator cache that memoizes OPA decisions to reduce per-query OPA traffic), the **total** propagation delay for a policy or data change is **bundle poll interval + cache TTL**. Concretely: bundle poll cadence = 60s, `opa.policy.cache-ttl-seconds` = 120s → worst-case 180s between pushing a bundle change and the change being enforced for every active principal. **Engineers must account for both when reasoning about policy revocation timing.** If a security-incident SLA requires you to revoke a tenant within 60 seconds, you must set bundle poll cadence + `opa.policy.cache-ttl-seconds` to sum to < 60s — or set `opa.policy.cache-ttl-seconds=0` (disable Trino-side caching) and accept the higher OPA QPS in exchange for instant cache invalidation on the next poll. A common production posture: 30s bundle poll + 30s cache TTL = 60s worst-case revocation, balanced against the OPA call rate the cache absorbs. Document this number explicitly in your incident-response runbook so on-call engineers know how long to wait after pushing a revocation before considering it effective.
 >
 > **Third option — custom JWT authenticator via Trino's SPI (heavy lift, mention for completeness).** Patterns 1 and 2 above are config-only solutions: they require no Java, no plugin build, no Trino restart for tenant adds. The **third** option is to **build a custom Trino plugin that implements `Authenticator` (or `HeaderAuthenticator`) from the Trino SPI**, parses the raw JWT yourself, extracts whichever custom claim you want (`tenant_id`, `department`, `clearance_level`), and **encodes it into the `Identity` object's principal name or its associated metadata** that gets passed to the access-control plugin. This is the only OSS Trino 467 path that lets you propagate a custom JWT claim straight into the identity context OPA sees.
 >
