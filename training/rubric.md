@@ -30,14 +30,14 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.480 | 119 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.463 | 120 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
 | Query performance basics: partitioning, indexing strategy for analytics | PASSED | 4.675 | 5 |
 | Lakehouse schema design: fact tables, dimension tables, denormalization | PASSED | 4.650 | 5 |
 | Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.596 | 17 |
-| Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.447 | 7 |
+| Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.492 | 113 |
@@ -50,6 +50,43 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 322 — 2026-05-27
+
+**Q1** — Storage growth estimation with daily updates: `snapshot_overhead = daily_rewritten_volume × retention_days`, spreadsheet formula with two diagnostic queries against `$files` and `$snapshots` metadata tables, 30-day vs 7-day retention comparison
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **5.00** — PASS |
+
+Perfect score. Formula grounded in verified Iceberg CoW behavior; `$files` and `$snapshots` queries confirmed valid against Trino 481 docs; spreadsheet table manager-ready. Minor nits only: 350 MB derivation not algebraically closed, `'replace'` operation excluded from `$snapshots` filter (compaction commits), 7-day Trino floor not mentioned. Topic running avg: (4.447×7 + 5.00)/8 = **4.516/8 questions** — PASSED (recovering from iter321 drift).
+
+**Q2** — OPA cache-ttl-seconds revocation latency: FAIL — `opa.policy.cache-ttl-seconds` is a fabricated Trino OPA config property that does not exist; fabrication propagated from resources/05
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 1.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 1.0 |
+| Completeness | 2.5 |
+| **Average** | **2.38** — FAIL |
+
+CRITICAL: `opa.policy.cache-ttl-seconds` does NOT exist in the Trino OPA plugin (verified against trino.io docs and OpaConfig.java source). The plugin has only 10 config properties, none involving decision caching. Every authorization check is a fresh live HTTP call to OPA. The fabricated property was in resources/05 (lines 632, 639, 780) — immediately fixed. Correct revocation model: IdP JWT expiry + OPA bundle propagation (30s–60s) + KILL QUERY for in-flight queries. `kill_query` syntax, bundle polling, and JWT framing all correct. Topic running avg: (4.480×119 + 2.38)/120 = **4.463/120 questions** — PASSED (above 3.5 threshold, but single-question −2.1 drop demands re-probe after resource fix).
+
+**Iter 322 average: 3.69 — PASS** ✓ (barely — Q1 perfect score absorbs Q2 FAIL)
+
+**Topics updated**:
+- Storage sizing: 4.447/7 → **4.516/8 questions** (PASSED — recovering)
+- Multi-tenant analytics: 4.480/119 → **4.463/120 questions** (PASSED — sharp drop from fabricated config; resource fixed)
+
+**Resource fixes this iteration**:
+- resources/05: CRITICAL — removed all `opa.policy.cache-ttl-seconds` references (fabricated property); corrected revocation model (IdP JWT + bundle propagation only, no Trino-side cache); fixed SCOPE WARNING to list valid row-filter latency levers (scale OPA, reduce Rego complexity, tune http-client pool); added authoritative list of 10 real Trino OPA plugin config properties with explicit "What is NOT in this list" callout
+
+---
 
 ### Iter 321 — 2026-05-27
 

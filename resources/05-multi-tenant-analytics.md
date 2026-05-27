@@ -628,15 +628,20 @@ OPA service is SLOW (high latency, intermittent timeouts):
   -> If most of the call volume is FILTER-LIST ops (FilterTables / FilterSchemas /
      FilterColumns) — enable `opa.policy.batched-uri`. This batches N candidate
      resources within a single filter operation into one HTTP call.
-  -> If most of the latency is ROW-FILTER expression evaluation — enable
-     `opa.policy.cache-ttl-seconds` instead. `batched-uri` does NOT apply to
-     row-filter checks (see scope callout below). Caching the OPA decision per
-     (principal, table) for the TTL window collapses repeated queries from the
-     same user onto a single OPA call.
+  -> If most of the latency is ROW-FILTER expression evaluation — the Trino OPA
+     plugin has NO decision cache. `batched-uri` also does NOT apply to row-filter
+     checks (see scope callout below). The only available levers are:
+       (1) scale OPA horizontally (add replicas) to spread load,
+       (2) reduce Rego policy complexity (large data-bundle lookups, deep object
+           traversal, and unindexed `some i; input.x[i] == ...` scans are the
+           usual culprits — profile via `opa eval --profile`),
+       (3) tune Trino's HTTP client pool via `opa.http-client.max-connections`
+           and `opa.http-client.request-timeout` so a busy coordinator doesn't
+           wait on a free connection.
   -> Check `io.trino.plugin.opa.OpaHttpClient` DEBUG log for per-call latency
 ```
 
-> **SCOPE WARNING — `opa.policy.batched-uri` does NOT batch row-filter checks.** This is the single most common misconfiguration when engineers try to reduce row-filter latency. `opa.policy.batched-uri` ONLY batches **filter-list operations** (`FilterTables`, `FilterSchemas`, `FilterColumns`, `FilterCatalogs`, `FilterViews` — the operations where Trino has N candidate resources and asks OPA "which of these may the user see?"). It does **NOT** apply to **row-filter expression evaluation** — those calls go through `opa.policy.row-filters-uri` and are not collapsed by `batched-uri`. **For row-filter latency reduction, use `opa.policy.cache-ttl-seconds`** — this is a per-coordinator cache that memoizes the OPA decision for repeated queries from the same principal against the same table. A user running 20 dashboard refreshes against `analytics.events` over a 60-second window with `cache-ttl-seconds=60` makes ONE OPA row-filter call (the first); the other 19 reuse the cached decision. The tradeoff is **revocation latency**: a policy change won't take effect until the cache TTL expires (see the bundle-poll-interval + cache-TTL composition note earlier in this file for the full revocation-window math).
+> **SCOPE WARNING — `opa.policy.batched-uri` does NOT batch row-filter checks.** This is the single most common misconfiguration when engineers try to reduce row-filter latency. `opa.policy.batched-uri` ONLY batches **filter-list operations** (`FilterTables`, `FilterSchemas`, `FilterColumns`, `FilterCatalogs`, `FilterViews` — the operations where Trino has N candidate resources and asks OPA "which of these may the user see?"). It does **NOT** apply to **row-filter expression evaluation** — those calls go through `opa.policy.row-filters-uri` and are not collapsed by `batched-uri`. **For row-filter latency reduction, the Trino OPA plugin has no decision cache — every row-filter call is a fresh HTTP call to OPA.** There is no `opa.policy.cache-ttl-seconds` or equivalent property in the plugin (verified against the upstream `OpaConfig.java` and the official `trino.io/docs/current/security/opa-access-control.html` reference). The available options to reduce row-filter latency are: **(1) scale OPA horizontally** (add replicas — only helps if OPA CPU is the bottleneck, verify with `opa_request_duration_seconds` and pod CPU first); **(2) reduce Rego policy complexity** (shrink the data bundle the row-filter rule reads, replace deep object traversal with indexed lookups, remove unindexed iteration); **(3) tune `opa.http-client.max-connections` and `opa.http-client.request-timeout`** so a busy coordinator does not stall on a saturated connection pool while waiting on an otherwise-healthy OPA. Do NOT add a "cache-ttl-seconds" line to your access-control properties — the property does not exist, and Trino will fail to start with "Configuration property 'opa.policy.cache-ttl-seconds' was not used" in the error log.
 
 The single most common on-call mistake is **conflating "OPA is down" with "running queries are unsafe."** They are not. OPA's outage affects the front door (new query admission), not the queries already inside. Internalize this and you can answer 80% of OPA-related pages correctly without escalating.
 
@@ -777,7 +782,15 @@ The injection happens transparently at query planning time inside Trino — the 
 >
 > Wire both: liveness probe → `/health` (process-alive only); freshness alert → Status API or `bundle_loaded_counter` staleness. Never conflate the two.
 >
-> **Total policy-propagation delay = bundle poll interval + Trino OPA decision cache TTL.** The bundle poll interval (30s–5min above) is only **one** of the two delays. If your Trino access-control config sets `opa.policy.cache-ttl-seconds` (a per-coordinator cache that memoizes OPA decisions to reduce per-query OPA traffic), the **total** propagation delay for a policy or data change is **bundle poll interval + cache TTL**. Concretely: bundle poll cadence = 60s, `opa.policy.cache-ttl-seconds` = 120s → worst-case 180s between pushing a bundle change and the change being enforced for every active principal. **Engineers must account for both when reasoning about policy revocation timing.** If a security-incident SLA requires you to revoke a tenant within 60 seconds, you must set bundle poll cadence + `opa.policy.cache-ttl-seconds` to sum to < 60s — or set `opa.policy.cache-ttl-seconds=0` (disable Trino-side caching) and accept the higher OPA QPS in exchange for instant cache invalidation on the next poll. A common production posture: 30s bundle poll + 30s cache TTL = 60s worst-case revocation, balanced against the OPA call rate the cache absorbs. Document this number explicitly in your incident-response runbook so on-call engineers know how long to wait after pushing a revocation before considering it effective.
+> **Total revocation delay = IdP JWT expiry + OPA bundle propagation + in-flight queries (handled separately).** Engineers commonly assume there is a Trino-side decision cache that adds another TTL to the revocation window. **There is not.** The Trino OPA plugin has **no decision cache** — once a new bundle is loaded by OPA, the **VERY NEXT** authorization call from any principal sees the new policy. The full revocation chain has exactly three components, in evaluation order:
+>
+> **(a) IdP JWT expiry / revocation.** A user holding a still-valid JWT can re-authenticate to Trino with the OLD identity until the JWT expires (or is explicitly revoked at the issuer). Short JWT TTLs (5–15 min) keep this window small; longer TTLs (hours) make it the dominant term. Revoke aggressively at the IdP for security incidents.
+>
+> **(b) OPA bundle propagation delay.** From the moment you push an updated bundle to the bundle server until OPA loads it: bundle-push latency (usually < 1s for S3 / HTTP) **plus** OPA's poll interval (`services.<name>.polling.min_delay_seconds` / `max_delay_seconds`, typically **30s–60s** in production). Once OPA has activated the new bundle, every subsequent Trino->OPA call sees the new policy immediately — there is no Trino-side TTL to wait on.
+>
+> **(c) In-flight queries that already passed authorization.** Queries currently executing have already passed their `SelectFromColumns` / row-filter checks and will run to completion under the **old** policy (Trino does not re-authorize mid-execution). For immediate termination, use `CALL system.runtime.kill_query(query_id => '<id>', message => 'access revoked');` — this kills the query stage on workers within seconds. Find the `query_id` to kill via `SELECT query_id, user, query FROM system.runtime.queries WHERE user = '<revoked_user>' AND state = 'RUNNING';`.
+>
+> **Concrete worst-case revocation example:** JWT TTL = 15 min, OPA bundle poll = 30s, in-flight query = 5 min runtime. Without active steps, a revoked tenant could see data for up to 15 min (until JWT expires) PLUS 30s (bundle propagation) PLUS 5 min (in-flight query). To collapse this to seconds: (1) revoke the JWT at the IdP immediately, (2) push the OPA bundle update immediately (wait one poll cycle = 30s), (3) `KILL QUERY` any in-flight queries by the revoked principal immediately. Document this exact sequence in your incident-response runbook so on-call engineers do not wait on a non-existent Trino-side cache TTL before declaring the revocation effective.
 >
 > **Third option — custom JWT authenticator via Trino's SPI (heavy lift, mention for completeness).** Patterns 1 and 2 above are config-only solutions: they require no Java, no plugin build, no Trino restart for tenant adds. The **third** option is to **build a custom Trino plugin that implements `Authenticator` (or `HeaderAuthenticator`) from the Trino SPI**, parses the raw JWT yourself, extracts whichever custom claim you want (`tenant_id`, `department`, `clearance_level`), and **encodes it into the `Identity` object's principal name or its associated metadata** that gets passed to the access-control plugin. This is the only OSS Trino 467 path that lets you propagate a custom JWT claim straight into the identity context OPA sees.
 >
@@ -1158,6 +1171,31 @@ opa.http-client.request-timeout=10s
 - **When you observe high `OpaHttpClient` DEBUG-log wait times that do NOT correlate with OPA-side latency.** If OPA's own `opa_request_duration_seconds` p99 is 5 ms but the Trino-side per-call elapsed time is 200 ms, the time is being spent **waiting for a free connection in Trino's pool** — bump `max-connections`.
 
 **Operational rule: any change to `opa.http-client.*` properties requires a Trino coordinator restart** — same as `opa.policy.*` properties. These are read at startup, not hot-reloaded. After a change, validate via the `OpaHttpClient` DEBUG log that per-call wait times have dropped.
+
+#### Authoritative reference — the complete list of Trino OPA plugin config properties
+
+> **This is the FULL set of supported config properties for the Trino OPA access control plugin (verified against `trino.io/docs/current/security/opa-access-control.html` and `OpaConfig.java` in `trinodb/trino`).** If a property is not on this list, **it does not exist** — Trino will fail to start with "Configuration property '<name>' was not used" if you add an unsupported property to `etc/access-control.properties`. There are exactly **10 supported properties**, and **none of them implement a decision cache**:
+>
+> | Property | Purpose |
+> |---|---|
+> | `opa.policy.uri` | REQUIRED. URI for the default allow/deny decision endpoint. Receives every single-resource operation (CreateTable, DropTable, ExecuteQuery, etc.). |
+> | `opa.policy.row-filters-uri` | URI for row-filter expression decisions. OPA returns `{"rowFilters": [{"expression": "..."}]}`; Trino injects the expression as a filter predicate. |
+> | `opa.policy.column-masking-uri` | URI for per-column masking decisions. Called once per column on the table. |
+> | `opa.policy.batch-column-masking-uri` | URI for batched per-table column masking. **Overrides `opa.policy.column-masking-uri` when both are set** (upstream-documented precedence rule). |
+> | `opa.policy.batched-uri` | URI for batched filter-list operations (`FilterTables`, `FilterSchemas`, `FilterColumns`, `FilterCatalogs`, `FilterViews`). **Does NOT batch row-filter or single-resource checks.** |
+> | `opa.log-requests` | Boolean. Logs every OPA request payload at INFO level. Off by default. |
+> | `opa.log-responses` | Boolean. Logs every OPA response payload at INFO level. Off by default. |
+> | `opa.allow-permission-management-operations` | Boolean. Whether Trino should ask OPA about permission-management operations (GRANT, REVOKE, ROLE management). Default `false`. |
+> | `opa.http-client.*` | Sub-namespace for the HTTP client pool to OPA. Includes `opa.http-client.max-connections` (default ~32) and `opa.http-client.request-timeout` (default 30s) — see the section above. |
+> | `opa.context-file` | Path to a JSON file whose contents are merged into every `input.context` Trino sends to OPA. Useful for environment tags (cluster name, region) the policy needs. |
+>
+> **What is NOT in this list (and therefore does not exist in the Trino OPA plugin):**
+>
+> - **No `opa.policy.cache-ttl-seconds`.** There is no decision cache in the Trino OPA plugin. Every authorization check (allow/deny, row filter, column mask) is a fresh live HTTP call to OPA. Anyone telling you to set a cache TTL for the OPA decision is wrong — the property does not exist, and adding it to `etc/access-control.properties` will prevent the coordinator from starting.
+> - **No `opa.policy.cache-size`** or any other Trino-side memoization knob.
+> - **No async / fire-and-forget decision mode.** Every check is synchronous and blocks query analysis until OPA replies (or the HTTP timeout fires).
+>
+> **Performance levers (given there is no cache):** The only available levers to reduce OPA-related query latency are (1) `opa.policy.batched-uri` and `opa.policy.batch-column-masking-uri` to collapse N calls into 1 for filter-list and column-masking operations, (2) `opa.http-client.max-connections` / `opa.http-client.request-timeout` to tune the Trino-side connection pool, (3) scaling OPA horizontally (more replicas), and (4) simplifying the Rego policy so each evaluation is faster. **All four can be combined**; none of them is a cache.
 
 ### OPA decision log — the auditable record of every authz decision (NOT durable by default)
 
