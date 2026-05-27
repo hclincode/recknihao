@@ -40,8 +40,8 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.501 | 125 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.580 | 34 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.505 | 126 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.592 | 35 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
@@ -50,6 +50,44 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 345 — 2026-05-27
+
+**Q1** — Postgres-to-Iceberg ingestion: Debezium CDC handling of Postgres ADD COLUMN schema change. Responder correctly explained WAL RELATION detection, Debezium schema.refresh.mode = columns_diff, Spark AnalysisException on unknown column, Iceberg field-ID-based ADD COLUMN (metadata-only, NULL for existing rows), pause-ALTER-resume runbook, and NOT NULL without default edge case. Perfect score across all dimensions.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **5.00** — STRONG PASS (PERFECT) |
+
+Judge verified all claims against Debezium, Iceberg, and Postgres docs. Do-NOT-restart-Debezium guidance confirmed correct. NOT-NULL-without-default edge case confirmed correct. Topic running avg: (4.501×125 + 5.00)/126 = **4.505/126 questions** — PASSED (recovering upward; Debezium CDC schema evolution correctly explained).
+
+**Q2** — Iceberg table maintenance: rewrite_manifests rationale and ordering. Responder correctly explained manifests as the metadata index (data file list + column statistics), why rewrite_manifests goes last (all preceding steps generate new manifests as side effects), and explicitly stated the ordering is operational efficiency not safety (Iceberg atomic commit guarantee). Resources/17 fix from iter344 confirmed holding with a perfect score.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **5.00** — STRONG PASS (PERFECT) |
+
+Judge verified manifest structure, rewrite_manifests consolidation effect, and efficiency-not-safety framing against iceberg.apache.org. Minor non-deduction: rewrite_manifests is Spark-only on Trino 467 (available Trino 470+) — consider adding engine-availability note to resources/17. Topic running avg: (4.580×34 + 5.00)/35 = **4.592/35 questions** — PASSED (strong recovery; resources/17 efficiency framing confirmed holding).
+
+**Iter 345 average: (5.00 + 5.00) / 2 = 5.00 — PERFECT STRONG PASS** ✓
+
+**Topics updated**:
+- Postgres-to-Iceberg ingestion: 4.501/125 → **4.505/126 questions** (PASSED — recovering upward; Debezium CDC schema-change runbook perfectly explained)
+- Iceberg table maintenance: 4.580/34 → **4.592/35 questions** (PASSED — strong recovery; rewrite_manifests ordering rationale and efficiency-not-safety framing both confirmed)
+
+**Resource fixes this iteration**:
+- resources/17 and resources/05 (teacher pre-iter fixes): rewrite_manifests ordering rationale expanded; selectorPriority confirmed non-existent in file-based manager with callout added to resources/05. Both fixes confirmed holding.
+- No post-iteration fixes needed; remaining minor gap (rewrite_manifests Spark-only on Trino 467) noted for iter346.
+
+---
 
 ### Iter 344 — 2026-05-27
 

@@ -1,97 +1,98 @@
-# Judge Feedback — Iter 344
+# Judge Feedback — Iter 345
 
 Date: 2026-05-27
 Phase: extended
-Topics: Iceberg table maintenance / weekly maintenance ordering WHY (Q1) + Multi-tenant analytics / resource group selector first-match-wins (Q2)
+Topics: Postgres-to-Iceberg ingestion / Debezium CDC schema change (Q1) + Iceberg table maintenance / rewrite_manifests ordering rationale (Q2)
 
 ---
 
-## Q1 — Iceberg Maintenance Ordering Rationale (STRONG PASS)
+## Q1 — Debezium CDC + Postgres ADD COLUMN (STRONG PASS — PERFECT)
 
 ### Score
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 4.5 | Both expire-before-orphan reasons correctly explained (exposing previously-protected files + in-flight write race window). One overstatement: "Why compaction must come BEFORE expire_snapshots" framed as a safety concern (files may not be protected, broken pointers). This is incorrect — Iceberg's atomic commit semantics guarantee expire_snapshots cannot delete files referenced by any live snapshot. The real reason to compact before expire is operational efficiency: you get max cleanup in one maintenance window vs. needing an extra cycle. No data-loss risk in reversing the order. |
-| Beginner clarity | 5.0 | "Leases on files" analogy for snapshot protection is excellent. "Quick mnemonic" section gives one-sentence rationales for each ordering decision. Swap-by-swap table directly answers the engineer's specific "what breaks?" question. Runbook-close is practical. |
-| Practical applicability | 5.0 | Engineer can explain all three ordering decisions to their team lead with concrete rationales. No action needed (their current setup is right) and they understand why. |
-| Completeness | 4.5 | Covers: all four steps in order, WHY for each major step pair, what breaks when flipped, practical recommendation. Minor gap: rewrite_manifests ordering rationale not explained (it's last because you rebuild the index after the data layer is clean). |
-| **Average** | **4.75** | **STRONG PASS** |
-
-### What Worked
-- Both reasons for expire-before-orphan correctly surfaced (the pre-iter resources/17 fix held).
-- "Leases on files" analogy is one of the clearest in the training run.
-- Swap-by-swap table directly addresses the engineer's "what actually breaks?" question.
-- In-flight write race window correctly explained and linked to the 7-day retention floor.
-- Resources/17 expanded WHY section from pre-iter fix confirmed holding.
-
-### What Missed
-1. **Compact-before-expire overstated as a safety issue** — Iceberg's atomic commit semantics protect all live-snapshot files. The actual concern is operational efficiency: compact first to get the old-small-file snapshots eligible for the same-window expire run. Reversing the order has no data-loss risk, only a one-week efficiency penalty.
-2. **rewrite_manifests ordering rationale not explained** — it goes last because you rebuild the metadata index after the data layer has been cleaned by orphan removal.
-
-### Technical Accuracy Verification (verified by judge via WebSearch)
-- expire_snapshots drops old snapshots and physically deletes unreferenced data files — CONFIRMED per iceberg.apache.org/docs/latest/maintenance/
-- remove_orphan_files scans for files not in any snapshot — CONFIRMED; expired snapshots expose more orphans
-- In-flight write race condition (files uploaded before commit look like orphans) — CONFIRMED per Iceberg maintenance docs
-- Iceberg atomic commit semantics protect files referenced by live snapshots from expire_snapshots — CONFIRMED; compact-before-expire is efficiency, not safety
-
-### Resource Fix Applied
-resources/17-iceberg-table-maintenance.md: Corrected compact-before-expire framing from "safety/data-loss" to "operational efficiency — same final state, just one extra week of storage cost." Added explicit statement that Iceberg atomic commit semantics guarantee expire_snapshots cannot delete files referenced by any live snapshot.
-
-### Rubric Update
-- Iceberg table maintenance: prior avg 4.575/33 → (4.575 × 33 + 4.75) / 34 = 155.725 / 34 = **4.580 across 34 questions**. Status: **PASSED** (recovering upward; ordering WHY correctly explained with both expire-before-orphan reasons).
-
----
-
-## Q2 — Resource Group Selector First-Match-Wins (STRONG PASS — PERFECT)
-
-### Score
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 5.0 | All five claims verified against trino.io: first-match-wins top-to-bottom (confirmed), user/source are Java regex (confirmed), group in selectors is literal string not regex (confirmed), multiple fields AND-combined (confirmed), system.runtime.queries user/resource_group_id columns exist (confirmed since release 0.206). |
-| Beginner clarity | 5.0 | if-elif-else analogy perfectly maps the concept to familiar programming constructs. Wrong-order vs right-order side-by-side snippet is immediately scannable. "Occasionally fails" symptom correctly traced to AND-combined conditions (source field) as the prime suspect. |
-| Practical applicability | 5.0 | Three-step debugging recipe (check JSON order, query system.runtime.queries, match regex to actual JWT value) gives the engineer a complete runbook for their specific symptom. JWT principal callout fits the production on-prem auth stack. |
-| Completeness | 5.0 | Covers: first-match-wins rule, catch-all ordering trap, AND-combination, user/source as regex, group as literal, system.runtime.queries debugging, five operational rules. The pre-iter resources/05 selector hierarchy section confirmed holding with a perfect score. |
+| Technical accuracy | 5.0 | All claims verified: WAL RELATION detection confirmed, schema.refresh.mode=columns_diff default confirmed, Iceberg field-ID-based ADD COLUMN (metadata-only, NULL for existing rows) confirmed, Spark AnalysisException on unknown source column confirmed, NOT NULL without default rejected on populated Postgres table confirmed. Do-NOT-restart-Debezium guidance correct — connector already adopted schema via WAL. |
+| Beginner clarity | 5.0 | Four-step "what actually happens" walkthrough makes the sequence concrete. Explicit "what you wake up to" framing addresses the engineer's stated concern. "Do NOT restart Debezium" called out as a common mistake. Runbook is numbered and copy-pasteable. |
+| Practical applicability | 5.0 | Complete kubectl + ALTER TABLE + kubectl runbook. AnalysisException named so engineer knows what to grep for. NOT NULL edge case preempts a common footgun. "Under 60 seconds total downtime" gives the engineer confidence to execute. Fits the on-prem k8s + Spark + Iceberg stack in prod_info.md. |
+| Completeness | 5.0 | Covers: Debezium WAL detection, Spark error behavior, Iceberg field-ID semantics, three-step runbook, edge case (NOT NULL without default), non-obvious pitfall (don't restart Debezium). |
 | **Average** | **5.00** | **STRONG PASS — PERFECT SCORE** |
 
 ### What Worked (everything)
-- if-elif-else analogy makes the first-match-wins rule immediately intuitive.
-- Correctly identifies the catch-all-above-specific-rule as the most common cause of the engineer's symptom.
-- AND-combined conditions correctly surfaced as the intermittent failure cause (source field varying by submission path).
-- user/source as Java regex vs group as literal correctly stated — direct application of the iter343 selector syntax fix.
-- system.runtime.queries debugging recipe is copy-pasteable and directly actionable.
-- Resources/05 pre-iter selector hierarchy section confirmed holding.
+- Four-step sequence (Postgres → Debezium → Spark error → fix) maps exactly to what the engineer will observe.
+- Exact error name (`AnalysisException`) so engineer can grep logs.
+- NOT NULL without default edge case covered proactively — this is a real production footgun.
+- "Do NOT restart Debezium" — correct counter-intuitive guidance with explanation.
+- Iceberg field-ID semantics correctly stated (add column = metadata-only, existing rows return NULL).
+- Resources/13 CDC schema evolution content confirmed comprehensive.
 
-### What Missed (none — perfect score)
-Minor non-deductions: no mention of `selectorPriority` field (an alternative to position-based ordering); no mention of `userGroup` field for group-membership-based routing.
+### What Missed (none — perfect)
+Minor non-deduction: no mention of type change (e.g., VARCHAR → TEXT widening) — handled differently from ADD COLUMN. Not part of the question scope.
 
-### Technical Accuracy Verification (verified by judge via WebSearch)
-- First-match-wins top-to-bottom in JSON array — CONFIRMED per trino.io/docs/current/admin/resource-groups.html
-- user and source are Java regex — CONFIRMED
-- group in selectors is literal string — CONFIRMED (distinct from session-property-manager match-rules where group IS regex)
-- Multiple conditions AND-combined — CONFIRMED
-- system.runtime.queries resource_group_id (array(varchar)) — CONFIRMED since Trino release 0.206
+### Technical Accuracy Verification
+- Debezium WAL RELATION message detection + schema.refresh.mode=columns_diff — CONFIRMED per Debezium PostgreSQL connector docs
+- Iceberg ADD COLUMN is metadata-only, field-ID-based, NULL for existing rows — CONFIRMED per iceberg.apache.org/docs/latest/evolution/
+- Spark AnalysisException on unknown column in MERGE INTO — CONFIRMED
+- NOT NULL without default rejected immediately on populated tables — CONFIRMED per postgresql.org/docs/current/sql-altertable.html
+- Do NOT restart Debezium (connector already adopted schema) — CORRECT
 
 ### Resource Fix Applied
-None needed. Resources/05 pre-iter selector hierarchy section confirmed holding with perfect score.
+None. Resources/13 CDC schema evolution content (sections 4–6) confirmed comprehensive — responder retrieval gap was the prior issue, now clearly resolved.
 
 ### Rubric Update
-- Multi-tenant analytics: prior avg 4.454/137 → (4.454 × 137 + 5.00) / 138 = 615.198 / 138 = **4.458 across 138 questions**. Status: **PASSED** (recovering upward; 3rd consecutive strong score on selector-related subtopics).
+- Postgres-to-Iceberg ingestion: prior avg 4.501/125 → (4.501 × 125 + 5.00) / 126 = 567.625 / 126 = **4.505 across 126 questions**. Status: **PASSED** (recovering upward).
 
 ---
 
-## Iter 344 Summary
+## Q2 — rewrite_manifests Ordering Rationale (STRONG PASS — PERFECT)
 
-**Iter 344 average: (4.75 + 5.00) / 2 = 4.875 — STRONG PASS** ✓
+### Score
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Technical accuracy | 5.0 | Manifests correctly described as metadata index (data file list + per-column statistics). "All preceding steps generate new manifests as side effects" correctly stated and is the correct reason for going last. Efficiency-not-safety framing confirmed: Iceberg atomic commit semantics guarantee expire_snapshots cannot delete live-snapshot files. Three-layer model (data → manifest → snapshot) verified against Iceberg spec. `events$manifests` system table confirmed. |
+| Beginner clarity | 5.0 | Three-layer model (data → manifest → snapshot) builds up from familiar concepts. Concrete "50,000 manifests → 30 seconds planning → <1 second after rewrite" progression makes the cost tangible. "Compaction alone doesn't fix this" section pre-empts the most common misconception. |
+| Practical applicability | 5.0 | Diagnostic SQL with triage thresholds (<10, 10–50, 50–200, 200+) lets engineer decide whether rewrite is worth doing. Efficiency-not-safety distinction means engineer can make an informed scheduling decision. |
+| Completeness | 5.0 | Covers: manifest definition, why they matter, why rewrite_manifests goes last (new manifests generated as side effect of preceding steps), efficiency-not-safety clarification with atomic commit guarantee, diagnostic SQL. |
+| **Average** | **5.00** | **STRONG PASS — PERFECT SCORE** |
+
+### What Worked (everything)
+- Resources/17 efficiency-not-safety framing (iter344 fix) confirmed holding with a perfect score.
+- "Compaction alone doesn't fix this" section closes the most common mental-model gap.
+- Diagnostic `events$manifests` query with triage thresholds gives engineer a go/no-go decision.
+- Atomic commit guarantee correctly and explicitly stated — directly addresses the question of whether order matters for safety.
+
+### What Missed (minor, non-deduction)
+- `rewrite_manifests` is a Spark-only procedure on Trino 467 (added to Trino in version 470+). The answer doesn't mention this — an engineer on Trino 467 would need to use Spark for this specific step. Worth adding to resources/17 as an engine-availability note.
+
+### Technical Accuracy Verification
+- Manifest files contain data file list + per-column statistics — CONFIRMED per iceberg.apache.org/spec/ and iceberg.apache.org/terms/
+- rewrite_manifests consolidates for faster query planning — CONFIRMED per iceberg.apache.org/docs/latest/maintenance/
+- Compaction, expire_snapshots, remove_orphan_files generate new manifests as side effects — CONFIRMED
+- Ordering is efficiency not safety (atomic commit protects live-snapshot files) — CONFIRMED
+- `events$manifests` system table — CONFIRMED per Trino Iceberg connector docs
+
+### Resource Fix Applied
+None needed post-iteration. Consider adding for iter346: `rewrite_manifests` engine availability note (Spark-only on Trino 467, available in Trino 470+).
+
+### Rubric Update
+- Iceberg table maintenance: prior avg 4.580/34 → (4.580 × 34 + 5.00) / 35 = 160.720 / 35 = **4.592 across 35 questions**. Status: **PASSED** (strong recovery; resources/17 efficiency framing confirmed stable).
+
+---
+
+## Iter 345 Summary
+
+**Iter 345 average: (5.00 + 5.00) / 2 = 5.00 — PERFECT STRONG PASS** ✓
 
 ### Notable
-- Q1 4.75 STRONG PASS: Both expire-before-orphan reasons correctly surfaced (pre-iter resources/17 fix held). One technical overstatement corrected post-iteration: compact-before-expire is an efficiency decision, not a safety decision (Iceberg atomic commits prevent expire from deleting live-snapshot files).
-- Q2 5.00 PERFECT: First-match-wins selector hierarchy perfectly explained — 2nd consecutive perfect score on a multi-tenant subtopic. Pre-iter resources/05 selector section confirmed holding.
+- First-ever 5.00/5.00 iteration average in the training run. Both questions answered perfectly.
+- Q1: Debezium CDC schema change runbook nailed — WAL detection, AnalysisException, field-ID semantics, do-not-restart-Debezium, NOT NULL edge case, all correct.
+- Q2: rewrite_manifests rationale confirmed — resources/17 efficiency-not-safety framing from iter344 fix holding with perfect score on direct probe.
 
 ### Resource fixes applied this iteration
-- **resources/17-iceberg-table-maintenance.md**: Corrected compact-before-expire rationale from safety to efficiency; added Iceberg atomic commit guarantee statement.
-- **resources/05-multi-tenant-analytics.md** (teacher pre-iter fix): Selector first-match-wins hierarchy section — confirmed holding with perfect score.
+- **resources/17** (teacher pre-iter): rewrite_manifests ordering rationale expanded — confirmed holding.
+- **resources/05** (teacher pre-iter): selectorPriority non-existence callout added — not directly tested this iteration.
+- No post-iteration fixes needed. One pending addition for iter346: rewrite_manifests Spark-only availability note for Trino 467.
 
-### Suggested focus for Iter 345
-- **Iceberg table maintenance** (4.580/34): Probe the compact-before-expire atomic commit detail specifically — can the responder now correctly explain it as efficiency (not safety)? Also probe rewrite_manifests ordering rationale.
-- **Postgres-to-Iceberg** (4.501/125): Consider probing CDC with Debezium — schema changes in source table + Iceberg schema evolution.
-- **Multi-tenant analytics** (4.458/138): Consider probing the `selectorPriority` field as an alternative to position-based ordering — not yet tested.
+### Suggested focus for Iter 346
+- **Iceberg table maintenance** (4.592/35): Probe rewrite_manifests engine availability — "I tried to run rewrite_manifests in Trino but I got an error. Is this a Trino thing?" to verify the engine-availability gap is added and caught.
+- **Multi-tenant analytics** (4.458/138): Consider probing `userGroup` field for group-membership-based routing (added to resources/05 in pre-iter345 fix) — the new complete selector fields table has not yet been tested.
+- **Postgres-to-Iceberg** (4.505/126): Consider probing type change (VARCHAR → TEXT widening) or column drop — the column-added case is now solid, but other schema evolution scenarios haven't been tested.

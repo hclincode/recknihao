@@ -2313,6 +2313,40 @@ Now the same query correctly lands in `global.tenant_acme.dashboards`.
 4. **The `user` and `source` values are Java regexes.** `"acme-.*"` matches `acme-prod`, `acme-staging`, `acme-batch`. `"acme-service-account"` is a regex too — it just happens to be a regex with no metacharacters, so it matches only the literal string `acme-service-account`.
 5. **The `group` field is a LITERAL string, NOT a regex.** This is the most confusing asymmetry: `user`/`source` are regex, `group` is literal. Writing `"group": "global\\.tenant_acme"` (escaped dot) creates a literal-string mismatch — no resource group named `global\.tenant_acme` exists, and the selector fails to route. Always write `"group": "global.tenant_acme"` with an unescaped dot in resource-groups.json.
 
+#### Selector precedence — array position is the ONLY mechanism (no `selectorPriority` field exists)
+
+> **`selectorPriority` IS A FABRICATION — DO NOT WRITE IT IN `resource-groups.json`.** Engineers (and AI-generated answers) frequently invent a `"selectorPriority": <int>` field as a way to "reorder selectors without moving them in the array" or "override array position with a numeric priority." **This field does not exist in Trino's file-based resource group manager.** Trino does not parse it, does not error on it, and silently ignores it — leaving the selector evaluation to fall back to array order, exactly as if you had not added the field at all. The selector then either matches in array-order position (so the priority field had zero effect) or it doesn't match where you expected (because you trusted a non-existent priority and didn't reorder the array). **The ONLY way to change selector precedence in the file-based manager is to move the selector to a different position in the `"selectors": [ ... ]` array.** Position is the mechanism. There is no field-based override.
+>
+> **What the official docs DO support, and why it is easy to confuse with a fictional `selectorPriority`:** Trino offers a *separate* resource group manager called the **database resource group manager** (`resource-groups.configuration-manager=db`, backed by a JDBC connection to MySQL/Postgres instead of a JSON file). In that backend, the `selectors` SQL table has a column literally named `priority` (NOT `selectorPriority`) of type INT, and selectors are evaluated in **descending order of priority value** — the highest `priority` row matches first. This is the entire mechanism that lets the database backend reorder selectors without moving rows. **It applies ONLY to the database manager** — not to the file-based manager, which is what the production stack uses (`resource-groups.configuration-manager=file` pointed at `etc/resource-groups.json`). If your production manager is `file`, ignore everything about `priority`; just reorder the JSON array. If you ever migrate to the `db` manager, the field is `priority` (a numeric column on the `selectors` table), evaluated DESCENDING — and even then, the field name is **not** `selectorPriority`.
+>
+> Quick decision rule: open `etc/resource-groups.properties` and check the `resource-groups.configuration-manager=` value. If it says `file`, position-only — no priority field anywhere. If it says `db`, the schema column is `priority` (descending). Either way, `selectorPriority` is wrong.
+
+#### Complete list of valid selector fields (Trino file-based manager)
+
+> **Use this as the canonical "is this a real selector field?" reference.** Trino silently ignores unknown JSON keys in selector objects — there is no schema validation. Every field name not in the list below has zero effect; the selector falls back to whatever its real fields specify, or matches everything if it has none. The most common fabrications (`userRegex`, `sourceRegex`, `cpuLimit`, `maxRunning`, `selectorPriority`, `selector_priority`, `tenantId`) are NOT in this list and never do anything. Every field below is verified against [trino.io/docs/current/admin/resource-groups.html](https://trino.io/docs/current/admin/resource-groups.html).
+
+| Selector field | Type | Meaning |
+|---|---|---|
+| `user` | Java regex | Match against the connection's effective username (after any `X-Trino-User` impersonation). On this stack, this is the JWT principal name. |
+| `originalUser` | Java regex | Match against the **original** username before any session-user changes (impersonation source). |
+| `authenticatedUser` | Java regex | Match against the **authenticated** username — always the user that authenticated with Trino. |
+| `userGroup` | Java regex | Match against **every group** the user belongs to (group membership). Useful when you want to route by team / role rather than by individual principal — e.g., `"userGroup": "data_engineering"` routes all members of that group into one resource group without listing each principal. Group membership is supplied by the authenticator (group-extracting authenticator or LDAP-mapping plugin); on the JWT auth stack, groups must be encoded in a JWT claim that the custom authenticator extracts and exposes to Trino. |
+| `source` | Java regex | Match against the connection's `source` string (set by client via `X-Trino-Source` header or JDBC `source` property). Common values: `airflow`, `dbeaver`, `trino-cli`, `tableau`, `metabase`. |
+| `queryText` | regex | Match against the SQL query text itself. Lets you route, e.g., all queries matching `INSERT INTO tmp_export.*` to a low-priority bulk-export queue. Use sparingly — regex-matching every query's text adds coordinator overhead. |
+| `queryType` | string (exact match) | Match against query category. Valid values: `SELECT`, `EXPLAIN`, `DESCRIBE`, `INSERT`, `UPDATE`, `MERGE`, `DELETE`, `ANALYZE`, `DATA_DEFINITION`, `ALTER_TABLE_EXECUTE`. Useful for routing DDL and heavy writes to a separate queue from interactive SELECTs. |
+| `clientTags` | array of strings | Match if **every** listed tag is in the query's client-tag set (set via `X-Trino-Client-Tags` header). AND-semantics: `["dashboard", "p1"]` matches only queries tagged with BOTH `dashboard` AND `p1`. |
+| `group` | literal string (required) | The destination resource group path (e.g., `"global.tenant_acme.dashboards"`). Required on every selector. Literal, NOT regex — see rule 5 above. |
+
+**All matcher fields within a single selector are AND-combined** (per rule 3 above). Multiple selectors are then evaluated top-down with first-match-wins (per rule 1 above). The only fields not in this table that you can legitimately add are nested `subGroups[].*` configuration on the group definition side — those are NOT selector fields and live under `rootGroups`/`subGroups`, not under `selectors`.
+
+**Quick triage when a selector "isn't applying":**
+
+1. Run the diagnostic query in the next subsection to find the actual `resource_group_id` the query landed in. If it's not what you expected, one of the following is true.
+2. **Wrong field name**: you wrote `userRegex`, `sourceRegex`, `selectorPriority`, `tenantId`, or any other invented key. Trino silently ignored it. Replace with a real key from the table above.
+3. **Wrong position**: a more-permissive selector higher in the array matched first. Move the specific selector ABOVE the catch-all.
+4. **Regex doesn't match the actual principal**: the JWT's `sub` claim is `acme-svc` but the selector's `user` regex is `acme-service-account`. Inspect `system.runtime.queries.user` to see the exact value Trino received.
+5. **`group` field has escaped dots or regex metacharacters**: `"group"` is literal, so `"global\\.tenant_acme"` resolves to no-such-group.
+
 **How to verify which selector matched in production.** During an incident, query `system.runtime.queries` to see which group each query landed in:
 
 ```sql

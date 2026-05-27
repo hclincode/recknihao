@@ -1,7 +1,7 @@
 {
-  "iteration": 345,
+  "iteration": 346,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter344 avg 4.875 — STRONG PASS. Q1 (4.75) STRONG PASS — maintenance ordering WHY: both expire-before-orphan reasons correctly surfaced; compact-before-expire overstatement corrected in resources/17 (efficiency not safety; Iceberg atomic commits protect live-snapshot files). Q2 (5.00) PERFECT — selector first-match-wins with 5 operational rules; 2nd consecutive perfect on selector subtopic. Multi-tenant: 4.458/138. Iceberg maintenance: 4.580/34."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter345 avg 5.00 PERFECT STRONG PASS (first-ever perfect iteration). Iceberg maintenance: 4.592/35. Multi-tenant: 4.458/138. Postgres-to-Iceberg: 4.505/126. Suggested focus for iter346: (1) Iceberg maintenance — rewrite_manifests Spark-only on Trino 467 (add engine-availability note to resources/17); (2) Multi-tenant — userGroup selector field; (3) Postgres-to-Iceberg — type change (VARCHAR→TEXT widening) or column drop."
 }
