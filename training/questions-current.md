@@ -1,9 +1,9 @@
-# Iter 297 Questions
+# Iter 298 Questions
 
-## Q1 — Storage keeps growing and old query results seem wrong
+## Q1 — Iceberg table maintenance without Spark
 
-We've been writing event data into our data lake for about eight months now. I noticed our storage costs jumped 40% last quarter even though our data volume only grew 15%. Also, a junior engineer ran a report against "historical" data from two months ago and got a different number than the same report we ran at the time. I think something is accumulating in our storage that shouldn't be. Is there a cleanup process we're supposed to be running periodically? And is there a safe order to do it — like, do you delete the data first or do some kind of metadata step first — because I'm nervous about accidentally wiping data that's still in use?
+We've been running Iceberg on top of Trino for about two months and our S3 costs keep climbing. I looked it up and it sounds like we need to do some kind of "snapshot expiration" or cleanup, but everything I find on the Iceberg docs talks about running maintenance through Spark — we don't have Spark in our stack at all, we only have Trino. Do we actually need to spin up a Spark cluster just to run cleanup jobs, or is there a way to do this directly from Trino? We're trying to avoid adding another system if we can help it.
 
-## Q2 — Joining our live Postgres customer table against our analytics data
+## Q2 — Filtering on a column with no index is fast in Iceberg but kills Postgres
 
-Right now our analytics data lives in a separate system (we moved our event data off Postgres a few months ago), but almost every dashboard query needs to join against our main Postgres `customers` table to filter by plan tier, signup date, or account region. The way we handle it today is we export a nightly CSV dump of `customers` into the analytics system. That means our joins are always 24 hours stale, and when a customer upgrades their plan mid-day the dashboard shows the wrong tier until tomorrow. Someone mentioned we might be able to query Postgres directly from our analytics engine in the same SQL statement. Is that actually possible, and is it fast enough to be practical, or does it just make everything slow?
+We have a Postgres table with about 80 million rows of customer event data. When we filter by `event_type = 'page_view'` it does a full sequential scan and the query takes 45 seconds, even though that column has low cardinality and it feels like it should be easy to skip rows. I added a B-tree index on `event_type` but for high-cardinality filters the planner sometimes ignores it anyway. I keep hearing that columnar formats like Parquet handle this kind of filtering much better — is that actually true, and if so how does it work? Is Parquet just doing what an index does, or is it something different?

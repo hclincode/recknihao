@@ -1,7 +1,7 @@
 {
-  "iteration": 298,
+  "iteration": 299,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter297 avg 4.69: Q1 (4.50 PASS) Iceberg maintenance runbook — responder incorrectly said Spark-only, resource 17 already has Trino-native cheat sheet; Q2 (4.875 PASS) Trino federation with Postgres — dynamic filtering, read replica, no-connection-pooling confirmed. No resource fixes needed. Iceberg table maintenance: 4.616/17. Trino federation: 4.513/252."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter298 avg 5.00 (PERFECT): Q1 (5.00) Trino-native maintenance — corrected iter297 regression, verified ALTER TABLE EXECUTE syntax; Q2 (5.00) Parquet vs Postgres B-tree index — three-layer skipping, columnar I/O, sort-based clustering. No resource fixes needed. Iceberg maintenance: 4.637/18. Column-oriented storage: 4.456/7. Query performance basics: 4.675/5."
 }

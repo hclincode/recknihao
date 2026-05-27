@@ -26,7 +26,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | OLAP vs OLTP — difference and why it matters for SaaS | PASSED | 4.542 | 3 |
 | What a data warehouse is and when a SaaS product needs one | PASSED | 4.647 | 3 |
 | What a data lakehouse is and how it differs from a warehouse | PASSED | 4.625 | 2 |
-| Column-oriented storage — what it is and why it's faster for analytics | PASSED | 4.365 | 6 |
+| Column-oriented storage — what it is and why it's faster for analytics | PASSED | 4.456 | 7 |
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.50 | 4 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.415 | 8 |
@@ -34,14 +34,14 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.775 | 5 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.50 | 3 |
-| Query performance basics: partitioning, indexing strategy for analytics | PASSED | 4.594 | 4 |
+| Query performance basics: partitioning, indexing strategy for analytics | PASSED | 4.675 | 5 |
 | Lakehouse schema design: fact tables, dimension tables, denormalization | PASSED | 4.650 | 5 |
 | Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.583 | 16 |
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.500 | 5 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.476 | 100 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.616 | 17 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.637 | 18 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.763 | 4 |
@@ -50,6 +50,41 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 298 — 2026-05-27
+
+**Q1** — Iceberg maintenance from Trino only (no Spark): native ALTER TABLE EXECUTE syntax, 7-day floor, rewrite_manifests gap
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **5.00** — PASS |
+
+This answer directly corrected the iter297 Q1 regression. All Trino 467 native syntax verified correct.
+
+**Q2** — Parquet/Iceberg vs Postgres B-tree index for bulk low-cardinality filter (event_type): three-layer skipping, dictionary encoding, sort-based clustering
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **5.00** — PASS |
+
+Three-layer skipping (manifest → row-group → column-only), concrete bytes walkthrough, OLAP-vs-OLTP decision rule — all verified correct.
+
+**Iter 298 average: 5.00 — PASS** ✓
+
+**Topics updated**:
+- Iceberg table maintenance: 4.616/17 → **4.637/18 questions** (PASSED — improved)
+- Column-oriented storage: 4.365/6 → **4.456/7 questions** (PASSED — improved)
+- Query performance basics: 4.594/4 → **4.675/5 questions** (PASSED — improved)
+
+---
 
 ### Iter 297 — 2026-05-27
 

@@ -1,55 +1,56 @@
-# Feedback — Iter 297 (Extended phase)
+# Feedback — Iter 298 (Extended phase)
 
 Date: 2026-05-27
-Topics: Iceberg table maintenance (storage cleanup) + Trino federation with Postgres
+Topics: Trino-native Iceberg maintenance + Parquet/Iceberg vs Postgres B-tree index
 
 ## Results summary
 
 | Question | Topic angle | Score | Pass/Fail |
 |---|---|---|---|
-| Q1 | Iceberg maintenance: storage spike, cleanup order, historical data mismatch | **4.50** | PASS |
-| Q2 | Trino PostgreSQL connector: live cross-catalog joins, read replica, dynamic filtering | **4.875** | PASS |
+| Q1 | Iceberg maintenance from Trino only — ALTER TABLE EXECUTE syntax, 7-day floor, dry-run caveat | **5.00** | PASS |
+| Q2 | Parquet/Iceberg vs Postgres B-tree index for bulk filter — three-layer skipping, columnar I/O | **5.00** | PASS |
 
-**Iter 297 average: 4.69 — PASS** ✓
+**Iter 298 average: 5.00 — PASS** ✓
 
 **Topic updates**:
-- Iceberg table maintenance: 4.623/16 → **4.616/17 questions** (PASSED — stable)
-- Trino federation: 4.511/251 → **4.513/252 questions** (PASSED — stable)
+- Iceberg table maintenance: 4.616/17 → **4.637/18 questions** (PASSED — improved)
+- Column-oriented storage: 4.365/6 → **4.456/7 questions** (PASSED — improved)
+- Query performance basics: 4.594/4 → **4.675/5 questions** (PASSED — improved)
 
 ---
 
 ## What worked
 
-### Q1 — Iceberg maintenance (4.50)
-1. Storage jump → snapshot accumulation diagnosis — correctly identifies the root cause
-2. Race condition explanation for wrong cleanup order — makes the ordering intuitive, not just prescribed
-3. Complete 4-step runbook with correct order (compact → expire → orphan → manifests) — copy-paste ready
-4. Dry-run preview before orphan cleanup — critical safety step, correctly included
+### Q1 — Trino-native maintenance (5.00)
+1. Direct "you do NOT need Spark" answer up front — resolves the engineer's actual concern immediately
+2. Three Trino-native commands with exact syntax — copy-paste ready, verified correct for Trino 467
+3. `optimize_manifests` correctly gated to Trino 470, not 467 — accurate and prevents frustration
+4. 7-day retention floor explained with the reason (protects in-flight writes) — not just a rule, but why
 5. "Storage goes UP after step 1 before dropping after steps 2-3" — explains the counterintuitive behavior
-6. Historical mismatch investigation: `$snapshots` metadata table + `FOR VERSION AS OF` — bonus coverage that pre-empts the natural follow-up
-7. Permanent schedule recommendation (nightly compact, weekly full maintenance) — moves from fix to operational habit
+6. Dry-run caveat: Trino has no dry_run, use Spark form once for preview — correct and appropriately minimal
+7. K8s CronJob scheduling hint with `trino --execute "..."` — fits the on-prem stack exactly
 
-### Q2 — Trino federation (4.875)
-1. Yes/no answer with three critical rules up front — correct framing for a SaaS engineer
-2. Predicate pushdown for `plan_tier = 'enterprise'` → pushed to Postgres as WHERE clause — correctly explained
-3. Dynamic filtering (Iceberg events → customer ID list → pushed back to Postgres) — correctly described, on by default
-4. "No JDBC connection pooling in OSS Trino 467" — correct and confirmed against GitHub issue #15888
-5. Read replica requirement with concrete failure scenario (20 connections on primary) — makes the risk visceral
-6. Hybrid pattern (live federation by default, hourly materialization for high-frequency dashboards) — practical and matches production stack
+This directly corrected the iter297 Q1 regression where the responder routed everything to Spark.
 
----
-
-## Resource status
-
-**Q1 error**: Answer routed to Spark exclusively ("not Trino — Spark's Iceberg procedures accept flexible retention windows; Trino's ALTER TABLE EXECUTE optimize is for bin-pack compaction only"). In fact, Trino 467 supports `ALTER TABLE ... EXECUTE expire_snapshots` and `... EXECUTE remove_orphan_files` natively. Resource 17 lines 75-101 already document the Trino-native cheat sheet correctly. **No resource fix needed** — the responder missed the resource.
-
-**Q2**: No errors. All claims verified correct.
+### Q2 — Parquet vs B-tree index (5.00)
+1. "Not like an index — something different" framing — corrects the engineer's mental model before explaining
+2. Postgres B-tree failure explanation (bulk fetch from heap, not index traversal) — explains why the index is correctly ignored
+3. Three-layer skipping (manifest → row-group → column-only) — precise and verified correct
+4. Unsorted vs sorted data contrast — makes clear the speedup requires sorting
+5. Concrete byte math (80 GB → 1.5 GB → 75 MB) with "real world 10x–100x" caveat — honest
+6. OLAP-vs-OLTP decision rule (bulk analytics = Parquet wins, single-row lookup = Postgres wins) — practical ending
 
 ---
 
-## Suggested iter298 angles
+## No resource fixes needed
 
-1. **Iceberg maintenance follow-up** — reinforce Trino-native maintenance path (the responder missed it, but the resource is correct — a second angle gives the responder another chance to surface it)
-2. **Multi-tenant analytics** — row-level security with Apache Ranger; or the "one table vs many tables" data isolation model decision for B2B SaaS
-3. **Column-oriented storage** — a new angle not covered recently: why a predicate on a non-indexed column is still faster in columnar Iceberg than Postgres (row-skipping via Parquet min/max stats)
-4. **SQL OLAP best practices** — EXPLAIN ANALYZE workflow for diagnosing a slow query step by step (covered piecemeal; systematic end-to-end hasn't been a standalone question)
+Both answers were factually clean and verified against official docs. All claims correct.
+
+---
+
+## Suggested iter299 angles
+
+1. **Multi-tenant analytics** — the "one table vs many tables" data isolation decision for B2B SaaS; or row-level security with Apache Ranger; or cross-tenant SLA metrics (p99 per tenant)
+2. **Iceberg partition evolution** — what happens when you need to change a partition spec on an existing table with terabytes of data; ALTER TABLE SET PROPERTIES vs rewriting
+3. **Trino CBO / ANALYZE TABLE** — a new angle: what happens when stats are stale or missing, and how to diagnose join order problems
+4. **SQL OLAP best practices** — EXPLAIN ANALYZE end-to-end workflow for diagnosing a slow query (covered piecemeal but not as a systematic walkthrough)
