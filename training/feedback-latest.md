@@ -1,90 +1,81 @@
-# Judge Feedback — Iter 327
+# Judge Feedback — Iter 328
 
 Date: 2026-05-27
 Phase: extended
-Topics: Multi-tenant analytics / OPA column masking (Q1) + Iceberg table maintenance / manifest diagnostics with $manifests metadata table (Q2)
+Topics: Multi-tenant analytics / OPA row-filter + column masking composition (Q1) + Iceberg table maintenance / $manifests correct column names (Q2)
 
 ---
 
-## Q1 — OPA column masking in Trino
+## Q1 — OPA row-filter + column masking composition
 
 ### Score
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5 | All five claims verified: (1) `column-masking-uri` vs `batch-column-masking-uri` config keys correct verbatim. (2) Rule names `columnMask` (singular) and `batchColumnMasks` (plural) confirmed against official Trino OPA docs. (3) Batch response shape with nested `viewExpression` wrapper confirmed exactly. (4) One-call-per-column vs one-call-per-table semantics confirmed (GitHub issue #21359 is the motivation for the batch endpoint). (5) All SQL masking expressions use valid Trino built-ins. |
-| Beginner clarity | 5 | Opens with direct answer ("yes, Trino and OPA support column-level masking"). "OPA doesn't mask data in the database — it tells Trino to rewrite the column" is the clearest possible framing for a beginner. Two-pattern structure (single vs batch) is well-labeled with when to use each. |
-| Practical applicability | 5 | Engineer has everything: config properties, Rego rule structure for both patterns, real SQL masking expressions for their specific use cases (credit card first-4-digits, email hash), the silent-failure trap with a CI test pattern, and explicit tie-back to their existing Trino 467 + OPA row-filter setup. |
-| Completeness | 5 | Covers both halves of the question: yes it's possible, and Trino does the rewrite while OPA returns the expression. Silent-failure trap is proactively covered. Performance implications (per-column vs per-table call count) explained. |
+| Technical accuracy | 5 | All five claims verified against official Trino OPA docs and PR #2891: (1) Row filter and column mask compose independently, both in same query plan. (2) OPA consulted only at planning, never during distributed execution. (3) `rowFilters` Rego rule name + `{"expression": "..."}` shape matches plugin contract. (4) `batchColumnMasks` (plural) correct for batch endpoint. (5) Coordinator restart required after adding any `opa.policy.*` URI property. |
+| Beginner clarity | 5 | Directly addresses the engineer's specific worry (short-circuiting, narrow row filter bypassing mask). Before/after SQL pair makes "both apply in same plan" visually undeniable. |
+| Practical applicability | 5 | Full config block, Rego for both rules, coordinator restart reminder, CI test suggestion. The silent-failure config trap reframes a realistic cause of perceived "interference" without inventing fake failure modes. |
+| Completeness | 5 | Covers: composition guarantees, order, no short-circuit, why non-admin can't bypass mask via row filter, concrete example, configuration, Rego structure, restart requirement. |
 | **Average** | **5.00** | **PASS** |
 
 ### What Worked
-- Config key names exactly match the official Trino OPA docs.
-- Rego rule names `columnMask` (singular) and `batchColumnMasks` (plural) — the singular/plural distinction is a non-obvious gotcha that the answer catches correctly.
-- Nested `viewExpression` → `expression` structure for batch response is the most common implementation trap; calling it out with the "what happens if you get it wrong" note is excellent.
-- Silent-failure trap with a concrete CI test pattern is responsible engineering guidance.
-- SQL masking expressions (CONCAT/SUBSTR for credit cards, sha256 for email) are exactly what the engineer asked for.
+- Opens with the direct answer: "they do not interfere — they compose independently."
+- Row filter → column mask order explained with a concrete SQL before/after that makes it visually obvious.
+- The "non-admin cannot bypass mask" point addresses the engineer's exact worry directly.
+- `batchColumnMasks` (plural) correctly distinguished from the URI path name `batchColumnMask` (singular) — a subtle gotcha correctly handled.
+- Coordinator restart requirement is the most commonly forgotten practical step — proactively mentioned.
 
 ### What Missed
-- Very minor: doesn't mention that column masking and row filtering compose — if a user has BOTH a row filter AND a column mask applied, both fire independently (row filter reduces rows, column mask rewrites the value). Engineers sometimes wonder if they interfere. Non-critical omission since the question didn't ask.
+- Very minor: doesn't explicitly mention that both OPA calls happen in the same query analysis phase (they're two separate HTTP calls, not one combined call). This is the next natural question an engineer would have. Non-critical.
 
 ### Technical Accuracy (verified)
 All five verification asks pass. No fabrications.
 
 ### Rubric Update
-- Multi-tenant analytics: prior avg 4.469 across 122 questions → (4.469 × 122 + 5.00) / 123 = (545.218 + 5.00) / 123 = 550.218 / 123 = **4.473 across 123 questions**. Status: **PASSED** (continuing recovery).
+- Multi-tenant analytics: prior avg 4.473 across 123 questions → (4.473 × 123 + 5.00) / 124 = (550.179 + 5.00) / 124 = 555.179 / 124 = **4.477 across 124 questions**. Status: **PASSED** (continuing recovery).
 
 ---
 
-## Q2 — Iceberg manifest diagnostics with `$manifests` metadata table
+## Q2 — $manifests correct column names
 
 ### Score
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 3 | Most claims correct — `$manifests` metadata table exists, Trino syntax is correct, column names mostly right, threshold guidance reasonable, `rewrite_manifests` Spark-only on Trino 467 correct. One consequential error: `manifest_length` is NOT a real column. The actual column is `length`. Three separate code blocks use `SUM(manifest_length)` — all fail at runtime with "Column not found." |
-| Beginner clarity | 5 | Excellent framing — explains what manifest bloat is and why it causes planning latency before diving into diagnostics. Threshold table (< 10 healthy, 200+ too many) is immediately usable. Before/after verification pattern is clean. |
-| Practical applicability | 3 | Strong on the diagnostic approach and sequence, but the richer diagnostic SQL fails at runtime due to the `manifest_length` column name error. The baseline `SELECT COUNT(*) FROM "events$manifests"` works, but the more useful multi-column query would return a "Column not found" error on production. |
-| Completeness | 5 | Covers: what manifest bloat is, how to query `$manifests`, threshold guidance, column meanings, relationship to small file count, when to run vs skip, before/after verification, complete diagnostic runbook. |
-| **Average** | **4.00** | **PASS** |
+| Technical accuracy | 5 | All four claims verified against Trino Iceberg connector docs: (1) `length` is the correct column (not `manifest_length`). (2) `added_data_files_count` is real. (3) Full 12-column list matches Trino docs exactly. (4) `"events$manifests"` quoting syntax correct. |
+| Beginner clarity | 5 | Leads with the exact wrong names the engineer guessed (`manifest_length`, `file_size`, `data_files_count`) and immediately corrects each one. Right-vs-wrong quoting examples side by side. Column reference table with plain-English descriptions. |
+| Practical applicability | 5 | Copy-pasteable Trino 467 diagnostic query. Full column reference table. Before/after rewrite_manifests workflow with correct Spark CALL form (correctly flags `optimize_manifests` as Trino 470+ only). |
+| Completeness | 5 | Answers both parts (file size column and files-per-manifest column), full column list, quoting syntax, diagnostic query, before/after verification. |
+| **Average** | **5.00** | **PASS** |
 
 ### What Worked
-- `$manifests` metadata table as the diagnostic tool — this is exactly what was missing from prior answers.
-- Trino quoted-name syntax `"events$manifests"` is correct.
-- Baseline `SELECT COUNT(*) FROM "events$manifests"` works and is the right starting query.
-- Threshold guidance (< 10, 10-50, 50-200, 200+) is practical and aligned with community benchmarks.
-- `rewrite_manifests` correctly identified as Spark-only on Trino 467.
-- Before/after count comparison is the right verification pattern.
+- `length` (not `manifest_length`) stated immediately and emphatically.
+- Three wrong guesses from the question (`manifest_length`, `file_size`, `data_files_count`) each explicitly corrected — no ambiguity.
+- Full 12-column table with types and plain-English descriptions.
+- Before/after rewrite_manifests workflow reinforces how to use the diagnostic.
+- Correctly identifies `optimize_manifests` as Trino 470+ not available on Trino 467.
 
 ### What Missed
-- **Column name error**: `manifest_length` does NOT exist. The real column is `length`. All three `SUM(manifest_length)` queries fail at runtime. This is the single most consequential error.
-- Column list accuracy: some column names are correct (`partition_spec_id`, `added_data_files_count`, `existing_data_files_count`, `deleted_data_files_count`) but `manifest_length` is fabricated.
-
-### Resource Fix Applied
-resources/17 updated: added `$manifests` diagnostics section after the `rewrite_manifests` procedure block with:
-- Verified column names (especially `length`, NOT `manifest_length`)
-- Complete column reference table with descriptions
-- Explicit CRITICAL callout: "the column is `length`, NOT `manifest_length`"
-- Before/after query templates using the correct column names
+- None — perfect coverage for the question asked.
 
 ### Technical Accuracy (verified)
-The Trino Iceberg connector docs list `$manifests` columns: `content`, `path`, `length`, `partition_spec_id`, `added_snapshot_id`, `added_data_files_count`, `added_rows_count`, `existing_data_files_count`, `existing_rows_count`, `deleted_data_files_count`, `deleted_rows_count`, `partition_summaries`. The column is `length`, not `manifest_length`.
+All four verification asks pass. Column names match Trino Iceberg connector docs exactly.
 
 ### Rubric Update
-- Iceberg table maintenance: prior avg 4.580 across 23 questions → (4.580 × 23 + 4.00) / 24 = (105.34 + 4.00) / 24 = 109.34 / 24 = **4.556 across 24 questions**. Status: **PASSED**.
+- Iceberg table maintenance: prior avg 4.556 across 24 questions → (4.556 × 24 + 5.00) / 25 = (109.344 + 5.00) / 25 = 114.344 / 25 = **4.574 across 25 questions**. Status: **PASSED** (recovering from iter327 manifest_length error).
 
 ---
 
-## Iter 327 Summary
+## Iter 328 Summary
 
-**Iter 327 average: (5.00 + 4.00) / 2 = 4.50 — PASS** ✓ (Q1 PASS / Q2 PASS)
+**Iter 328 average: (5.00 + 5.00) / 2 = 5.00 — PERFECT PASS** ✓ (Q1 PASS / Q2 PASS)
 
 ### Notable
-- Q1 5.00: OPA column masking — perfect score. All config keys, Rego rule names, response shapes, and SQL expressions verified exactly. The singular/plural `columnMask`/`batchColumnMasks` distinction correctly handled.
-- Q2 4.00: `$manifests` diagnostic approach was correct (right table, right Trino syntax, right threshold guidance, right Spark fix) but one fabricated column name (`manifest_length` → should be `length`) causes all richer diagnostic queries to fail at runtime. Resource/17 patched immediately.
+- Q1 5.00: OPA row-filter + column masking composition — perfect score. The previous iteration's recommendation to probe this topic paid off. Resources/05 held correctly under direct probe of the composition guarantee.
+- Q2 5.00: `$manifests` column names — the `length` fix from iter327 (resources/17) held perfectly. Responder correctly named `length` (not `manifest_length`), provided the full verified column list, and included correct before/after verification workflow.
 
 ### Resource fixes applied this iteration
-- resources/17: Added `$manifests` diagnostics section with verified column list. Critical callout: column is `length`, NOT `manifest_length`. Includes threshold guidance, before/after templates, and complete column reference table.
+None needed. Both resources held under direct probes.
 
-### Suggested focus for Iter 328
-- **Iceberg table maintenance** (4.556/24): probe `$manifests` diagnostics again to verify the `length` column fix held — ask a question specifically about which columns to use in `$manifests` to measure manifest health.
-- **Multi-tenant analytics** (4.473/123): probe the composition of row filters + column masking — the Q1 judge noted the answer didn't cover this. A question like "I have both row-level security and column masking set up — do they interact or conflict?" would test this.
-- **Postgres-to-Iceberg ingestion** (4.493/116): consider probing a different angle — LAG_BUFFER replica lag watermark or exactly-once deduplication via LSN, to probe a different part of resource 13.
+### Suggested focus for Iter 329
+- **Multi-tenant analytics** (4.477/124): consider probing OPA bundle management — how to structure and deploy OPA policy bundles (data.json naming requirement, bundle endpoint setup). This was identified as a potential gap in earlier sessions. Or probe HMS/Hive Metastore tuning for multi-tenant scenarios.
+- **Postgres-to-Iceberg ingestion** (4.493/116 — has not been probed in a few iterations): probe the exactly-once deduplication pattern via LSN (the source_lsn field in the MERGE INTO pattern), or probe the `offset.flush.interval.ms` at-least-once delivery gap and how to absorb it.
+- **Iceberg table maintenance** (4.574/25, recovering): consider probing `$snapshots` metadata table diagnostics (similar to the $manifests probe) — how to interpret snapshot history and identify which snapshots can be expired.

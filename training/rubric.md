@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.473 | 123 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.477 | 124 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
@@ -41,7 +41,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.493 | 116 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.556 | 24 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.574 | 25 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
