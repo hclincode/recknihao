@@ -43,7 +43,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.474 | 99 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.623 | 16 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
-| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.486 | 231 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.489 | 233 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.763 | 4 |
 
 ---
@@ -9658,3 +9658,33 @@ Dimension scores: Technical accuracy 5/5, Beginner clarity 5/5, Completeness 5/5
 **Key findings**: No native connection pool in OSS Trino (issue #15888 still open) — verified; hardConcurrencyLimit/maxQueued property names — verified; source selector silent failure (X-Trino-Source must be set by clients) — verified; file-based resource groups require coordinator restart — verified; multi-connection-per-query nuance (each Postgres TableScan = 1 connection) — correct; PgBouncer as Postgres-side complement — correct. Perfect answer.
 
 Verified: trino.io/docs/current/admin/resource-groups.html, trino.io/docs/current/connector/postgresql.html, GitHub issue #15888.
+
+---
+
+## Iter 279 — 2026-05-27
+
+**Q1**: Iceberg metadata cache re-test — iceberg.metadata-cache.enabled=true, no SQL flush for Iceberg, fs.memory-cache.ttl, disable option, tradeoffs
+**Answer**: `/Users/hclin/github/recknihao/training/answers/iter279-q1.md`
+**Score**: 4.75 / 5.0 — **PASS**
+
+Dimension scores: Technical accuracy 4.5/5, Beginner clarity 5/5, Completeness 5/5, Actionability 5/5.
+
+**Topics updated**: Trino federation — prior avg 4.486 across 231 questions; new running avg (4.486 × 231 + 4.75) / 232 = (1036.266 + 4.75) / 232 = **4.487 across 232 questions**. Status: NEEDS WORK (4.487 < 4.5 raised threshold). Gap: 0.013 (improved from 0.014).
+
+**Key findings**: iceberg.metadata-cache.enabled=true correctly identified — verified; no flush_metadata_cache() for Iceberg connector — verified; fs.memory-cache.ttl correct property name — verified; coordinator restart clears cache — correct. Minor inaccuracies: default TTL stated as "10-60 min" but actual default is 1 hour; max-size stated as 128MB but actual default is 2% of max heap. Non-blocking — remediation advice (lower TTL) is correct. Resource 22 improvements by teacher279 enabled this correct answer after iter278 catastrophic failure (2.05 → 4.75).
+
+Verified: trino.io/docs/current/connector/iceberg.html, file-system-cache.html.
+
+---
+
+**Q2**: Dynamic filtering in Postgres+Iceberg joins — build/probe sides, DF mechanism, join types (INNER/RIGHT=enabled; LEFT/FULL OUTER=disabled), optimizer decides not SQL order, wait-timeout
+**Answer**: `/Users/hclin/github/recknihao/training/answers/iter279-q2.md`
+**Score**: 4.85 / 5.0 — **PASS**
+
+Dimension scores: Technical accuracy 5/5, Beginner clarity 5/5, Completeness 5/5, Actionability 4/5.
+
+**Topics updated**: Trino federation — prior avg 4.487 across 232 questions; new running avg (4.487 × 232 + 4.85) / 233 = (1040.984 + 4.85) / 233 = **4.489 across 233 questions**. Status: NEEDS WORK (4.489 < 4.5 raised threshold). Gap: 0.011 (improved from 0.013).
+
+**Key findings**: DF mechanism (build side collects keys, pushes IN-list to probe scan) — verified; INNER/RIGHT = DF enabled; LEFT/FULL OUTER = DF disabled — verified; optimizer decides build/probe (not SQL order) — verified; iceberg.dynamic-filtering.wait-timeout=1s default — verified; underscore vs hyphen in session vs catalog property — correct. Minor gap: no mention of join_distribution_type session property or domain-compaction-threshold for large IN-lists.
+
+Verified: trino.io/docs/current/admin/dynamic-filtering.html, trino.io/docs/current/connector/iceberg.html.

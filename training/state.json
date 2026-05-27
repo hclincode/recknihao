@@ -1,7 +1,7 @@
 {
-  "iteration": 279,
+  "iteration": 280,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter278 avg 3.525: Q1 (2.05 FAIL) stale Iceberg data — resource gap: iceberg.metadata-cache.enabled not covered; responder incorrectly said no Iceberg metadata cache exists; coordinator restart is textbook sign of in-memory cache hit. Q2 (5.00 PASS) resource groups — perfect answer; hardConcurrencyLimit/maxQueued, source selector caveat, PgBouncer. TOPIC: Trino federation 4.486/231, gap 0.014 (regression from 0.006). URGENT: teacher must add iceberg.metadata-cache.enabled coverage before iter279 questions."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter279 avg 4.80: Q1 (4.75 PASS) Iceberg metadata cache — iceberg.metadata-cache.enabled=true, no SQL flush, fs.memory-cache.ttl (default 1h documented, answer said ~10-60min — minor error), coordinator restart evidence. Q2 (4.85 PASS) dynamic filtering — build/probe, IN-list push, INNER/RIGHT enabled, LEFT/FULL OUTER disabled, wait-timeout 1s. TOPIC: Trino federation 4.489/233, gap 0.011. Need ~5-6 more at 4.875+ to cross 4.500. Resource fix nice-to-have: correct TTL default (1h) and max-size default (2% heap); add join_distribution_type."
 }

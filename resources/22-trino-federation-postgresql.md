@@ -713,9 +713,93 @@ This is the table to bookmark. The procedure name is the same across connectors,
 | **Hive** | `(schema_name, table_name, partition_columns, partition_values)` — **named params** | `CALL hive.system.flush_metadata_cache(schema_name => 'sales', table_name => 'orders');` |
 | **Delta Lake** | `(schema_name, table_name)` — **named params** | `CALL delta.system.flush_metadata_cache(schema_name => 'sales', table_name => 'orders');` |
 | **PostgreSQL / MySQL / SQL Server / Oracle** (JDBC connectors) | **parameterless** — scope via `USE <catalog>.<schema>` if you want session-level narrowing | `CALL app_pg.system.flush_metadata_cache();` |
-| **Iceberg** | Iceberg does NOT expose `flush_metadata_cache` — the Iceberg connector uses a metadata-file pointer (no in-engine cache to flush). Schema changes are picked up automatically on the next commit. | (N/A) |
+| **Iceberg** | Iceberg does NOT expose a SQL `flush_metadata_cache` procedure. **However, Trino DOES cache Iceberg metadata FILES in-memory on the coordinator** (`iceberg.metadata-cache.enabled=true` by default — the manifest lists, manifest files, and `metadata.json` content). Stale-snapshot symptoms after external Spark/Flink writes are real; there is just no SQL-level command to flush. Remediation = lower `fs.memory-cache.ttl`, disable the cache, restart the coordinator, or use JMX. **See the dedicated callout immediately below.** | (no SQL form — see callout below) |
 
 **Rule of thumb:** if you are on a JDBC connector (PostgreSQL, MySQL, SQL Server, Oracle), the procedure takes **no parameters**. If you are on Hive or Delta Lake, you use named parameters. Confusing these is the most common "invented syntax" failure mode — it is the third such regression in this guide's history (after fake `connection-pool.*` properties and fake `ALTER CATALOG` syntax), and the resource has been corrected accordingly.
+
+##### ICEBERG METADATA CACHE — properties, behavior, and stale-data remediation (Trino 467)
+
+> **CRITICAL — read this BEFORE concluding "Iceberg doesn't cache metadata."** It does. The Iceberg connector has a separate, file-level, in-memory cache on the Trino coordinator that holds the actual Iceberg metadata FILES read from S3/MinIO. There is no SQL-level flush procedure for it (unlike Hive/Delta/JDBC), which is what trips up engineers who go looking for `CALL iceberg.system.flush_metadata_cache()` and find nothing. The cache is real, the staleness is real, and the remediation lives in the catalog properties file and the JVM — not in SQL.
+
+**1. What it actually caches.**
+The Iceberg connector caches Iceberg metadata FILES in-memory on the coordinator: the table's current `metadata.json` content, manifest lists (`snap-*.avro`), and manifest files (`*-m0.avro`). This is a coordinator-level in-memory cache backed by the Trino MemoryFileSystem cache layer (`io.trino.filesystem.memory.MemoryFileSystemCache`). Purpose: query planning for an Iceberg table requires reading these metadata files from S3/MinIO, and the same files are read repeatedly across queries — caching them avoids repeated object-store round-trips during planning.
+
+The cache is enabled by default in Trino 467:
+
+```properties
+# Default — Iceberg metadata file caching is ON
+iceberg.metadata-cache.enabled=true
+```
+
+**2. TTL and sizing properties (set in `etc/catalog/iceberg.properties`).**
+
+| Property | What it controls | Tuning guidance |
+|---|---|---|
+| `iceberg.metadata-cache.enabled` | Master switch for the cache. Default `true`. | Set to `false` only if you have very frequent external writes (Spark/Flink committing every few seconds) AND can tolerate the planning-time S3/HMS overhead per query. |
+| `fs.memory-cache.ttl` | How long cached metadata files live in memory before being re-fetched. **This is the staleness window.** | Lower it to reduce staleness; raise it to reduce S3 reads. Typical prod values: `60s`–`10m`. |
+| `fs.memory-cache.max-size` | Maximum total bytes the cache may hold. | `512MB`–`2GB` is typical for medium-traffic clusters. Size for the number of hot tables × average metadata.json + manifests size. |
+| `fs.memory-cache.max-content-length` | Maximum size per single cached file. Files bigger than this bypass the cache. | Default is usually sufficient; raise if you have unusually large manifest files. |
+
+**3. Staleness after external writes (Spark, Flink, other Iceberg writers).**
+This is the failure mode that lands tickets in your queue:
+
+1. Spark commits a new Iceberg snapshot — Spark writes a new `metadata.json` (e.g., `v42.metadata.json`), writes the new manifest list, and updates the HMS `metadata_location` pointer from `v41.metadata.json` to `v42.metadata.json`.
+2. Trino's coordinator still has `v41.metadata.json` (and its manifest list / manifests) cached in memory. The HMS pointer change does NOT invalidate the cache — Trino keeps serving the old metadata content until the entry expires by TTL.
+3. Queries against the Iceberg table from Trino return the snapshot Spark just OVERWROTE, not the new one. New rows appear missing. Compaction commits look like they "didn't run."
+4. **The definitive tell**: if **restarting the Trino coordinator** makes the stale data go away, the in-memory metadata cache is the cause — a coordinator restart flushes the in-process cache. If a restart does NOT fix it, the issue is elsewhere (HMS pointer not updated, wrong catalog, Spark commit failed, etc.).
+
+**The staleness window equals `fs.memory-cache.ttl`** (default varies by Trino version; typical range is 10 minutes to 1 hour). Snapshot commits made within this window after a Trino query may be invisible until the TTL elapses.
+
+**4. NO SQL `flush_metadata_cache()` for Iceberg.**
+This is the single most-confused point and it deserves its own line:
+
+> **`CALL iceberg.system.flush_metadata_cache()` does NOT exist.** The procedure exists for Hive, Delta Lake, and JDBC (PostgreSQL/MySQL/SQL Server/Oracle) connectors only. The Iceberg connector does NOT register this procedure. Calling it returns `Procedure not registered: iceberg.system.flush_metadata_cache`.
+
+There is no SQL-level cache invalidation command in Trino for the Iceberg metadata file cache. Your remediation tools are configuration changes, JVM-level invalidation (JMX), or a coordinator restart — not SQL.
+
+**5. Remediation options — pick based on write pattern.**
+
+| Option | What to do | When it fits | Cost |
+|---|---|---|---|
+| **A — Lower the TTL** | `fs.memory-cache.ttl=30s` (or `60s`) in `etc/catalog/iceberg.properties`. | High-write Iceberg tables (frequent Spark/Flink commits) where you can tolerate a sub-minute staleness window. | Increases S3 + HMS read load during planning — every TTL window, the planner re-fetches metadata files. Usually still cheap on MinIO. |
+| **B — Disable the cache entirely** | `iceberg.metadata-cache.enabled=false`. Every query re-reads metadata from S3/HMS. | Tables under near-constant external write where ANY staleness is unacceptable (e.g., near-real-time pipelines). | Highest planning overhead — every query pays the full S3 metadata-read cost. Use only on tables that truly need it, not as a global setting. |
+| **C — Accept the default TTL** | Leave `iceberg.metadata-cache.enabled=true` and `fs.memory-cache.ttl` at its default. | Read-heavy Iceberg tables written infrequently (daily batch, weekly load) from outside Trino. **This is the right default for the typical SaaS analytics workload on this stack.** | Up to `fs.memory-cache.ttl` of staleness after an external commit. |
+| **D — Coordinator restart** | `kubectl rollout restart deployment/trino-coordinator` (or equivalent). | Emergency unblock — you need fresh metadata RIGHT NOW and cannot wait for the TTL. | Cancels all in-flight queries on the coordinator. Use surgically. |
+| **E — JMX invalidation (advanced)** | Trino exposes `io.trino.filesystem.memory:name=MemoryFileSystemCache` over JMX. Use `jconsole`, JMX REST, or `SELECT * FROM jmx.current."io.trino.filesystem.memory:name=memoryfilesystemcache"` to invoke cache-management operations. | When you need to invalidate without a full coordinator restart AND you have JMX tooling configured. | Operationally heavyweight — most teams just use options A–D. |
+
+**6. Configuration example — sane defaults for a moderate-write Iceberg deployment.**
+
+Add to `etc/catalog/iceberg.properties` on the coordinator:
+
+```properties
+# Iceberg metadata file cache (Trino 467)
+iceberg.metadata-cache.enabled=true
+fs.memory-cache.ttl=60s
+fs.memory-cache.max-size=512MB
+# fs.memory-cache.max-content-length=8MB   # raise only if you have very large manifest files
+```
+
+This gives a 60-second staleness window after external Spark/Flink commits, caps the in-memory footprint at 512MB on the coordinator, and keeps the cache enabled so query planning stays fast for read-heavy workloads. Reload the catalog (coordinator restart in static catalog mode, or `DROP CATALOG` + `CREATE CATALOG` in dynamic mode) for the property changes to take effect — these are not hot-loadable.
+
+**7. Diagnostic flow — "Iceberg table looks stale after a Spark commit."**
+
+1. **Confirm the staleness symptom**: from Trino, run `SELECT * FROM "iceberg_catalog"."schema"."table$snapshots" ORDER BY committed_at DESC LIMIT 5;` — if the most recent snapshot ID does NOT match what Spark just committed, Trino is serving cached metadata. If it DOES match, the issue is not the cache.
+2. **Confirm by direct check**: from a Spark or pyiceberg session, list the table's snapshots and compare. If Spark sees `snapshot_id=12345` as current and Trino sees `snapshot_id=12340`, that gap is the cache.
+3. **Apply remediation**: for an immediate unblock, restart the coordinator (Option D). For a permanent fix, lower `fs.memory-cache.ttl` (Option A) or disable the cache for that catalog (Option B).
+4. **Do NOT reach for `CALL iceberg.system.flush_metadata_cache()`** — the procedure does not exist on the Iceberg connector. Confirm with `SHOW FUNCTIONS FROM iceberg.system;` (it will not be in the list). Inventing this call wastes time and confuses runbooks.
+5. **Do NOT reach for `metadata.cache-ttl`** either — that is the **JDBC** connector property covered in Section 2.6 (PostgreSQL/MySQL). It has nothing to do with the Iceberg metadata file cache, which uses the `fs.memory-cache.*` properties documented above. Confusing the two is a common debugging mistake.
+
+**8. Distinguishing this cache from other Trino caches.**
+
+| Cache | Where it lives | What it caches | How to invalidate |
+|---|---|---|---|
+| **Iceberg metadata file cache** (this section) | Coordinator in-memory (MemoryFileSystem) | Iceberg `metadata.json`, manifest lists, manifests — read from S3/MinIO | Lower TTL, disable, restart coordinator, JMX. **No SQL procedure.** |
+| **JDBC metadata cache** (PostgreSQL/MySQL — Section 2.6) | Coordinator in-memory (JDBC connector) | Postgres/MySQL `information_schema` results (column lists, table existence) | `CALL <catalog>.system.flush_metadata_cache();` (parameterless) |
+| **Hive metadata cache** | Coordinator in-memory (Hive connector) | HMS responses (table list, partition list) | `CALL hive.system.flush_metadata_cache(schema_name => '...', table_name => '...');` (named params) |
+| **Delta Lake metadata cache** | Coordinator in-memory (Delta connector) | Delta log entries (JSON / checkpoint files) | `CALL delta.system.flush_metadata_cache(schema_name => '...', table_name => '...');` (named params) |
+| **Query result cache** | Coordinator (if enabled — off by default in OSS) | Final query results | `query.cache.*` properties; not commonly used on this stack |
+
+The Iceberg row is the odd one out — it has a real cache but no SQL flush command. Everything else has either a SQL flush procedure or no cache at all. Internalize this asymmetry before debugging Iceberg staleness.
 
 #### Checklist — Postgres schema change that affects Trino queries
 

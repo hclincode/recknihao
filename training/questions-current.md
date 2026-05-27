@@ -1,9 +1,9 @@
-# Iter 278 Questions
+# Iter 279 Questions
 
-## Q1 — Trino showing stale data after our Spark pipeline runs
+## Q1 — Stale dashboard data after Spark writes to Iceberg
 
-We have a Spark job that runs every hour and writes new data files to our Iceberg table on S3. The problem is that when we query through Trino right after the job finishes, we're still seeing the old data — sometimes for 10 or 15 minutes. We have to either wait it out or restart the Trino coordinator to get fresh results, which is obviously not sustainable. Is there a setting or command we can run from within Trino itself to force it to pick up the new files without restarting the whole service? And if there's a config knob for how long it caches that file metadata, what's a reasonable value to set — does lowering it have a meaningful performance cost?
+We have a Spark pipeline that runs every 10 minutes and writes new rows into an Iceberg table on S3. The problem is that when I query that table through Trino right after the pipeline finishes, I sometimes still see the old data for another 10-15 minutes. If I restart the Trino coordinator, the fresh data shows up immediately. Is there some kind of cache that Trino is holding onto? I do not want to restart the coordinator every time our pipeline runs -- that would take down all our queries. Is there a way to tell Trino to refresh or drop whatever it is caching, maybe through a SQL command or some config we can tune?
 
-## Q2 — Limiting how many simultaneous queries Trino sends to Postgres
+## Q2 — Why does join order matter so much between Postgres and Iceberg tables
 
-We connected Trino to our production Postgres database so analysts can join our operational data with the Iceberg stuff on S3. The problem is that sometimes five or six analysts run reports at the same time, and each one is firing a separate query straight through to Postgres. Our Postgres connection count spikes and we start seeing slowdowns on the application side. Is there a way to tell Trino "only send at most two or three queries to the Postgres catalog at any given time, and queue the rest"? I'd rather cap it in Trino than add more connection pool infrastructure if I can avoid it.
+We noticed something weird with a query that joins a large Postgres events table (about 200M rows) against a small Iceberg lookup table (maybe 50k rows of customer segments). When we write the join with Iceberg on the right side, the query is fast -- maybe 8 seconds. But when we flip it so Postgres is on the right side and Iceberg is on the left, it gets really slow, like 2+ minutes. I figured joins were symmetric so this should not matter. Is Trino doing something special based on which table is on which side? Is there a way to control this behavior, or do we just have to remember to always write joins in a specific order?
