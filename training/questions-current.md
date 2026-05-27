@@ -1,9 +1,9 @@
-# Iter 275 Questions
+# Iter 276 Questions
 
-## Q1 — Cross-catalog writes and what happens when one side fails
+## Q1 — Search filter not getting pushed to Postgres
 
-We have Trino set up to query both our Postgres database and an Iceberg table on S3. A feature I'm building needs to write to both at the same time — update a row in Postgres and also append a record to Iceberg to keep an audit log in sync. I want to do this in one shot rather than making two separate calls from my application. Can Trino handle that? And if Trino writes to Postgres successfully but then the Iceberg write fails, what actually happens — does Postgres roll back, or am I left with half-committed data?
+We added a search bar in our dashboard where customers can type partial strings to filter their data — something like finding all accounts whose name contains "corp" case-insensitively. In our old direct-Postgres setup we used `ILIKE` for this and it was fast. Now that the same query goes through Trino (which federates to Postgres), it feels noticeably slower, and when I look at the row counts in the query plan it seems like a lot more rows are flowing through than I'd expect. My question is: does Trino actually push `ILIKE` down to Postgres, or does it pull all the rows into Trino and do the filtering there? Is there a way to check, and is there anything we can configure to make it push down?
 
-## Q2 — Spotting slow Postgres scans in the Trino Web UI
+## Q2 — Running a Postgres-specific function through Trino
 
-We've noticed some of our federated queries — ones that join Postgres tables against Iceberg — are slower than expected. Someone told me Trino has a Web UI where I can inspect what's going on. What does that UI actually show me for a query like this? I'm specifically trying to figure out whether the slowness is coming from Trino pulling too much data out of Postgres before filtering it. Is there a way to see in the UI how many rows came back from the Postgres side, without having to run an EXPLAIN statement?
+We rely on a Postgres function called `similarity()` from the pg_trgm extension to do fuzzy matching on customer names — it's been working great in our app queries. Now we're trying to use that same matching logic in a Trino query that joins our Postgres customer table to an Iceberg events table, and Trino just errors out saying it doesn't know the function. Is there a way to tell Trino "for this part of the query, just run it directly in Postgres and give me the results"? I don't need Trino to understand the function, I just need the output so I can join it to my Iceberg data. What's the right way to handle something like this?

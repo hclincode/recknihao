@@ -43,7 +43,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.474 | 99 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.623 | 16 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
-| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.490 | 225 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.491 | 227 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.763 | 4 |
 
 ---
@@ -9568,3 +9568,33 @@ Dimension scores: Technical accuracy 5/5, Beginner clarity 4.75/5, Practical app
 
 Verified: trino.io/docs/current/admin/web-interface.html, trino.io/docs/current/optimizer/pushdown.html.
 
+
+---
+
+## Iter 276 — 2026-05-27
+
+**Q1**: ILIKE pushdown to Postgres — conditional (not categorical), session property, EXPLAIN verification, plan shapes, practical fallbacks
+**Answer**: `/Users/hclin/github/recknihao/training/answers/iter276-q1.md`
+**Score**: 4.39 / 5.0 — **FAIL**
+
+Dimension scores: Technical accuracy 4/5, Beginner clarity 5/5, Completeness 5/5, Actionability 4/5.
+
+**Topics updated**: Trino federation — prior avg 4.490 across 225 questions; new running avg (4.490 × 225 + 4.39) / 226 = (1010.25 + 4.39) / 226 = **4.489 across 226 questions**. Status: NEEDS WORK (4.489 < 4.5 raised threshold). Gap: 0.011 (slightly regressed from 0.010).
+
+**Key findings**: Correctly frames ILIKE pushdown as conditional — correct; correct session/catalog property names — verified; correct that ScanFilterProject disappears on pushdown success — verified. Errors: PR #11045 attribution wrong — that PR adds general LIKE pushdown machinery (released in 373, not 467); the ILIKE flag (`enable_string_pushdown_with_collate`) traces to different work; `constraint=(name ILIKE '...')` plan shape presented as authoritative but the exact textual format is not documented and may not appear verbatim in Trino 467 — should be hedged.
+
+Verified: trino.io/docs/current/connector/postgresql.html, trino.io/docs/current/optimizer/pushdown.html, github.com/trinodb/trino/pull/11045.
+
+---
+
+**Q2**: system.query() passthrough for native Postgres functions — syntax, escaping, join to Iceberg, limitations
+**Answer**: `/Users/hclin/github/recknihao/training/answers/iter276-q2.md`
+**Score**: 4.86 / 5.0 — **PASS**
+
+Dimension scores: Technical accuracy 5/5, Beginner clarity 5/5, Completeness 5/5, Actionability 4/5.
+
+**Topics updated**: Trino federation — prior avg 4.489 across 226 questions; new running avg (4.489 × 226 + 4.86) / 227 = (1014.514 + 4.86) / 227 = **4.491 across 227 questions**. Status: NEEDS WORK (4.491 < 4.5 raised threshold). Gap: 0.009 (improved from 0.011).
+
+**Key findings**: Correct TABLE(<catalog>.system.query(query => '...')) syntax — verified; correct named parameter `query =>` — verified; correct single-quote doubling escape rule — verified; correct no-outer-predicate-pushdown limitation — verified; correct derived-table join pattern to Iceberg — correct; column statistics absence + LIMIT recommendation — practical. Minor gap: Does not mention that result ORDER is not preserved even with ORDER BY inside the inner query — doc-verified limitation.
+
+Verified: trino.io/docs/current/connector/postgresql.html, trino.io/docs/current/develop/table-functions.html.
