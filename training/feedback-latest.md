@@ -1,74 +1,81 @@
-# Feedback — Iter 274 (Extended phase)
+# Feedback — Iter 275 (Extended phase)
 
 Date: 2026-05-27
-Topic: Trino federation — EXPLAIN plan interpretation (Q1 PASS) + JDBC connection pooling under load (Q2 PASS)
+Topic: Trino federation — cross-catalog atomicity (Q1 PASS) + Trino Web UI federation debugging (Q2 PASS)
 
 ## Results summary
 
 | Question | Topic angle | Score | Pass/Fail |
 |---|---|---|---|
-| Q1 | EXPLAIN plan: ScanFilterProject vs constraint on [col], Input/Output row counts, pushdown rules, diagnostic checklist | **4.75** | PASS |
-| Q2 | JDBC connection pooling: no native pool, PgBouncer + prepareThreshold=0, resource groups, queuing behavior | **4.81** | PASS |
+| Q1 | Cross-catalog writes: no atomic cross-catalog transactions, partial failure patterns, three remediation patterns | **4.75** | PASS |
+| Q2 | Trino Web UI for federation debugging: Stages tab Input/Output rows, EXPLAIN as authoritative tool, combined diagnostic workflow | **4.88** | PASS |
 
-**Iter 274 average: 4.78 — PASS** ✓ Both passed!
+**Iter 275 average: 4.815 — PASS** ✓ Both passed!
 
-**Topic update**: Trino federation: 4.485/221 → **4.487/223** (NEEDS WORK, gap 0.013 — improving steadily)
+**Topic update**: Trino federation: 4.487/223 → **4.490/225** (NEEDS WORK, gap 0.010 — improving steadily)
 
 ---
 
 ## What worked
 
-### Q1 — EXPLAIN plan interpretation (4.75)
-1. `ScanFilterProject` above `TableScan` = pushdown failure — correct
-2. `constraint on [col]` inside `TableScan` = pushdown success — correct
-3. Input/Output row count interpretation (large Input at TableScan = not pushed) — correct
-4. Pushdown rules table (equality/ranges/IN-list push; ILIKE/function calls don't) — correct direction
-5. Four-step diagnostic checklist — actionable
-6. EXPLAIN ANALYZE runtime confirmation — correct
-7. Postgres slow-query log as ground truth — practical
+### Q1 — Cross-catalog atomicity (4.75)
+1. Correctly stated Trino has no cross-catalog transactions — correct
+2. Each catalog commits independently — correct
+3. Partial failure scenario (Postgres succeeds, Iceberg fails) explained clearly — correct
+4. Three remediation patterns: app-level coordination, CDC (Debezium+Kafka), batch MERGE INTO — correct and complete
+5. Python idempotent retry example with `enqueue_retry` — practical
+6. CDC pattern: Kafka buffers retries if Iceberg unavailable — correct key insight
+7. `MERGE INTO` batch sync as simplest fallback — correct
 
-### Q2 — JDBC connection pool (4.81)
-1. OSS Trino 467 has no native `connection-pool.*` properties — correct (verified)
-2. PgBouncer + `prepareThreshold=0` — correct and complete explanation of why
-3. Resource group `hardConcurrencyLimit` / `maxQueued` property names — correct
-4. Queries queue at Trino, not Postgres — correct key insight
-5. Four-layer defense (PgBouncer → Postgres role cap → resource groups → statement timeout) — excellent framing
-6. Source-selector caveat (clients must set X-Trino-Source or selector silently fails) — high-value operational detail
-7. `pg_stat_activity` + PgBouncer `SHOW POOLS` monitoring — concrete
+### Q2 — Trino Web UI debugging (4.88)
+1. Web UI Stages tab shows Input/Output rows per stage — correct
+2. JDBC source stage vs Iceberg source stage distinction — correct
+3. "Input: 5M rows, Output: 312 rows" pattern as red flag for pushdown failure — concrete and accurate
+4. Critical limitation: Web UI shows how many rows returned, NOT whether WHERE clause ran server-side — correct nuance
+5. EXPLAIN (TYPE DISTRIBUTED) as free diagnostic (no re-execution) — correct
+6. EXPLAIN ANALYZE for runtime row counts — correct
+7. Combined workflow table (Web UI → plain EXPLAIN → EXPLAIN ANALYZE → Postgres slow-query log) — excellent structure
+8. Fix note: remove implicit casts that block pushdown — actionable
 
 ---
 
-## Errors / gaps to fix before iter275
+## Errors / gaps to fix before iter276
 
-### Q1 (important correction)
-- **ILIKE "never pushes" is too absolute**: Answer stated "customer_email ILIKE 'a%'... never pushes in OSS Trino 467." Per PR #11045 (merged into Trino), LIKE/ILIKE pushdown was added to the PostgreSQL connector. Actual behavior depends on session config and column collation. The correct statement: "ILIKE may not push — always verify with EXPLAIN rather than assuming." Resource should reflect this nuance.
+### Q1 (important addition)
+- **START TRANSACTION caveat missing**: Answer should note that `START TRANSACTION` in Trino does NOT give cross-catalog atomicity — it only controls autocommit behavior within a single connector. Engineers sometimes try `START TRANSACTION; INSERT INTO iceberg...; UPDATE postgres...; COMMIT;` expecting atomicity but Trino does not coordinate across catalogs within a transaction block. Should be called out explicitly.
+- **JDBC stages are single-task**: Minor — when explaining Trino internals, should note that JDBC source stages run as a single task (no parallelism) because JDBC connectors don't support splits by default; this is a factor in why Postgres scans appear as one serialized operation.
 
 ### Q2 (minor)
-- "1 query = 1 connection" simplification needs a caveat: each Postgres **TableScan** = 1 connection; a query joining two Postgres tables opens 2 connections
-- No mention of PgBouncer 1.21+ native prepared-statement tracking as an alternative to `prepareThreshold=0`
-- `softMemoryLimit: "60%"` in resource group example given without explanation
+- No significant errors. High-quality answer.
 
 ---
 
-## Resource fixes before iter275
+## Resource fixes before iter276
 
 ### Important
 
-1. **ILIKE/LIKE pushdown nuance** (resource 22, predicate pushdown section):
-   - Change "ILIKE never pushes" to "ILIKE may or may not push depending on session config and column collation — always verify with EXPLAIN"
-   - Add: the PostgreSQL connector has LIKE/ILIKE pushdown support (added via Trino PR #11045); behavior depends on `enable_string_pushdown_with_collate` session property and the column's collation
-   - Keep the practical advice: verify with EXPLAIN rather than assuming
+1. **START TRANSACTION and cross-catalog atomicity** (resource 22, cross-catalog section):
+   - Add explicit callout: `START TRANSACTION` in Trino does NOT give cross-catalog atomicity
+   - Clarify that START TRANSACTION / COMMIT controls autocommit within a single connector only
+   - Note: `BEGIN; INSERT INTO iceberg...; UPDATE postgres...; COMMIT;` is NOT atomic — each DML commits to its own catalog independently regardless of the transaction block
+
+2. **JDBC parallelism / single-task note** (resource 22, JDBC connector section):
+   - Add note: JDBC source stages run as a single task by default (JDBC connectors do not support splits)
+   - Contrast with Iceberg which supports parallel file splits
+   - This explains why large Postgres scans serialize in Trino and appear as a bottleneck
 
 ---
 
-## Suggested iter275 angles (MUST target Trino federation, gap 0.013)
+## Suggested iter276 angles (MUST target Trino federation, gap 0.010)
 
-Topic at 4.487/223. Need ~6-7 more questions at 4.875+ to cross 4.500 threshold.
+Topic at 4.490/225. Need ~4-5 more questions at 4.875+ to cross 4.500 threshold.
 
-1. **Cross-catalog transaction limits** — engineer asks whether they can do a transaction that writes to both Postgres and Iceberg atomically; answer: no cross-catalog transactions in Trino; each catalog is independently committed; patterns for handling failure
+1. **Re-test: ILIKE pushdown nuanced behavior** — engineer asks if Trino can push LIKE/ILIKE through to Postgres; correct answer: conditional on `enable_string_pushdown_with_collate` and column collation; always verify with EXPLAIN; not a categorical "never"
 
-2. **Trino Web UI for federation debugging** — engineer asks what the Trino UI shows when a federated query runs; stages, tasks, JDBC operator, where to find Input/Output row counts in the UI (vs EXPLAIN)
+2. **Trino resource groups under federation load** — engineer asks how to limit how many concurrent Postgres queries Trino runs; resource groups + PgBouncer pattern; `hardConcurrencyLimit`, `maxQueued`; source selector caveat
 
-3. **Re-test: predicate pushdown with ILIKE** — now that we've corrected the resource, test whether the responder gives the nuanced answer (may push, verify with EXPLAIN) rather than the wrong categorical answer
+3. **Federate vs ingest decision at scale** — engineer has 50M-row Postgres table that joins to Iceberg frequently; answer: above 10M threshold → prefer ingestion; nightly MERGE INTO pattern; when to hybrid materialize
 
-4. **Re-test: resource group configuration** — earlier iters had errors here; verify the current resource correctly describes `hardConcurrencyLimit`, `maxQueued`, file-based vs db-based manager
+4. **metadata.cache-ttl and stale reads** — engineer sees Trino return old Iceberg data after a Spark job adds files; answer: cache-ttl, flush_metadata_cache (coordinator-only), CREATE OR REPLACE VIEW workaround
+
+5. **system.query() passthrough** — engineer wants to run a native Postgres function not supported by Trino connector; TABLE(catalog.system.query(query => '...')) syntax; no outer pushdown; single-quote doubling

@@ -43,7 +43,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.474 | 99 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.623 | 16 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
-| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.487 | 223 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.490 | 225 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.763 | 4 |
 
 ---
@@ -9536,4 +9536,35 @@ Dimension scores: Technical accuracy 4.75/5, Beginner clarity 5/5, Practical app
 **Key findings**: No native connection pool in OSS Trino — correct; PgBouncer + prepareThreshold=0 — verified correct; resource group hardConcurrencyLimit/maxQueued syntax — correct; queries queue at Trino not Postgres — correct; four-layer defense framing — excellent; source-selector caveat — high-value gotcha. Minor gaps: "1 query = 1 connection" simplification (each Postgres TableScan = 1 connection; multi-table joins open multiple); no PgBouncer 1.21+ prepared-statement support alternative; softMemoryLimit value unexplained.
 
 Verified: trino.io/docs/current/connector/postgresql.html, trino.io/docs/current/admin/resource-groups.html, pgbouncer.org/faq.html.
+
+
+---
+
+## Iter 275 — 2026-05-27
+
+**Q1**: Cross-catalog atomicity — Trino cannot do cross-catalog transactions; each catalog commits independently; partial failure patterns; three remediation options
+**Answer**: `/Users/hclin/github/recknihao/training/answers/iter275-q1.md`
+**Score**: 4.75 / 5.0 — **PASS**
+
+Dimension scores: Technical accuracy 4.5/5, Beginner clarity 5/5, Practical applicability 5/5, Completeness 4.5/5.
+
+**Topics updated**: Trino federation — prior avg 4.487 across 223 questions; new running avg (4.487 × 223 + 4.75) / 224 = (1000.601 + 4.75) / 224 = **4.488 across 224 questions**. Status: NEEDS WORK (4.488 < 4.5 raised threshold). Gap: 0.012 (improved from 0.013).
+
+**Key findings**: No cross-catalog transactions — correct; each catalog autocommits independently — correct; partial failure leaves half-committed data — correct; three patterns (app coordination, CDC, batch sync) — well-chosen; MERGE INTO syntax correct. Gaps: Doesn't address START TRANSACTION (engineers may assume it gives cross-catalog atomicity — it doesn't); doesn't mention postgresql.insert.non-transactional-insert.enabled which removes per-catalog rollback; CDC pattern assumes Debezium/Kafka infrastructure not in prod_info.md stack.
+
+Verified: trino.io/docs/current/sql/merge.html, trino.io/docs/current/connector/postgresql.html, trino.io/docs/current/sql/start-transaction.html.
+
+---
+
+**Q2**: Trino Web UI for federation debugging — Stages tab Input/Output rows, EXPLAIN as the authoritative diagnostic, combined workflow
+**Answer**: `/Users/hclin/github/recknihao/training/answers/iter275-q2.md`
+**Score**: 4.88 / 5.0 — **PASS**
+
+Dimension scores: Technical accuracy 5/5, Beginner clarity 4.75/5, Practical applicability 5/5, Completeness 4.75/5.
+
+**Topics updated**: Trino federation — prior avg 4.488 across 224 questions; new running avg (4.488 × 224 + 4.88) / 225 = (1005.312 + 4.88) / 225 = **4.490 across 225 questions**. Status: NEEDS WORK (4.490 < 4.5 raised threshold). Gap: 0.010 (improved from 0.012).
+
+**Key findings**: Web UI Stages tab shows Input/Output rows — correct; ScanFilterProject above TableScan = pushdown failed — correct; UI shows count but not whether WHERE was applied server-side (correct limitation) — correctly explained; ILIKE pushdown hedged correctly (may/may not push, verify with EXPLAIN) — good correction from iter274. Minor gaps: No mention that JDBC stages are typically single-task (explains wall-time dominance); EXPLAIN output is illustrative not literal.
+
+Verified: trino.io/docs/current/admin/web-interface.html, trino.io/docs/current/optimizer/pushdown.html.
 
