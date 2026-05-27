@@ -1,7 +1,7 @@
 {
-  "iteration": 299,
+  "iteration": 300,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter298 avg 5.00 (PERFECT): Q1 (5.00) Trino-native maintenance — corrected iter297 regression, verified ALTER TABLE EXECUTE syntax; Q2 (5.00) Parquet vs Postgres B-tree index — three-layer skipping, columnar I/O, sort-based clustering. No resource fixes needed. Iceberg maintenance: 4.637/18. Column-oriented storage: 4.456/7. Query performance basics: 4.675/5."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter299 avg 5.00 (PERFECT): Q1 (5.00) Multi-tenant isolation — shared table + Trino views + OPA vs table-per-tenant for 80 customers; Q2 (5.00) Trino CBO — EXPLAIN ANALYZE, EXPLAIN TYPE DISTRIBUTED, ANALYZE syntax, NDV/Puffin, join ordering. No resource fixes needed. Multi-tenant analytics: 4.461/107. Trino CBO: 4.810/5."
 }

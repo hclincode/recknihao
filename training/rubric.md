@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.50 | 4 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.415 | 8 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.456 | 106 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.461 | 107 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.775 | 5 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.50 | 3 |
@@ -44,12 +44,46 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.637 | 18 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
-| Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.763 | 4 |
+| Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
 | SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.626 | 11 |
 
 ---
 
 ## Score history
+
+### Iter 299 — 2026-05-27
+
+**Q1** — Multi-tenant isolation: one shared table vs table-per-tenant for 80 enterprise customers; Iceberg partition by tenant_id; Trino views + OPA enforcement
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **5.00** — PASS |
+
+Clear recommendation up front, three isolation models compared, correct DDL syntax verified, whale-tenant promotion pattern, Postgres RLS → Trino view/OPA bridge.
+
+**Q2** — Trino CBO: EXPLAIN ANALYZE behavior, EXPLAIN (TYPE DISTRIBUTED) safe alternative, ANALYZE syntax, NDV/Puffin stats, join_reordering_strategy, three-layer optimization stack
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **5.00** — PASS |
+
+All technical claims verified against official Trino docs: EXPLAIN ANALYZE runs query, TYPE DISTRIBUTED is plan-only, ANALYZE syntax (no TABLE keyword), partitions property Hive-only. 7-step diagnostic checklist practical and correct.
+
+**Iter 299 average: 5.00 — PASS** ✓
+
+**Topics updated**:
+- Multi-tenant analytics: 4.456/106 → **4.461/107 questions** (PASSED — improved)
+- Trino CBO / ANALYZE TABLE / Puffin statistics: 4.763/4 → **4.810/5 questions** (PASSED — improved)
+
+---
 
 ### Iter 298 — 2026-05-27
 
