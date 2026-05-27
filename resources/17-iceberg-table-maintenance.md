@@ -268,7 +268,7 @@ What the options mean:
 >
 > - Compaction writes **new** Parquet files (the merged big ones) and creates a new snapshot pointing at them.
 > - The **old** small Parquet files are **still on MinIO** because the **prior snapshots still reference them** (Iceberg never deletes files that any live snapshot still points to).
-> - Only after `expire_snapshots` removes those prior snapshots do the old small files become unreferenced. They are then eligible for cleanup by `remove_orphan_files` (or by Iceberg's automatic file cleanup that runs during `expire_snapshots` itself for files that fall out of all live snapshots).
+> - Only after `expire_snapshots` removes those prior snapshots do the old small files become exclusively unreferenced by any live snapshot — at which point `expire_snapshots` **physically deletes them** from MinIO (issues S3 DELETE calls). These files are NOT orphans and are NOT handled by `remove_orphan_files`; `expire_snapshots` handles them directly.
 >
 > **Storage only drops visibly on MinIO after BOTH `rewrite_data_files` AND `expire_snapshots` have run.** If you ran compaction last night and the storage graph still shows growth, that is expected — schedule `expire_snapshots` to follow and the drop will appear after that runs.
 >
@@ -372,7 +372,14 @@ CALL iceberg.system.rewrite_data_files(
 
 > **What is a snapshot?** An Iceberg snapshot is a point-in-time record of the complete state of a table — which data files exist and what their min/max statistics are. Every INSERT, UPDATE, DELETE, or MERGE creates a new snapshot. Snapshots are how time-travel queries (`FOR VERSION AS OF`) know exactly which data files to read.
 
-**What it does:** removes old snapshot **metadata** from the table's snapshot list. After a snapshot is expired, no one can time-travel to it. The data files that *only that snapshot* referenced become eligible for deletion. (Files referenced by any still-living snapshot are kept.)
+**What it does:** removes old snapshot **metadata** from the table's snapshot list AND **physically deletes** the data files that are no longer referenced by any surviving live snapshot. After a snapshot is expired: (1) no one can time-travel to it, and (2) any data file exclusively referenced by that snapshot (and no other live snapshot) is deleted from MinIO via S3 DELETE — not just marked eligible, actually removed. Files referenced by any still-living snapshot are kept.
+
+> **CRITICAL DISTINCTION — what `expire_snapshots` handles vs. what `remove_orphan_files` handles:**
+>
+> - **`expire_snapshots`** handles **Class 1 garbage**: data files that *were* properly committed into snapshots, but those snapshots have now aged out. When a snapshot expires, `expire_snapshots` deletes the files it exclusively owned.
+> - **`remove_orphan_files`** handles **Class 2 garbage**: data files that *were never committed into any snapshot at all* — e.g., a Spark write job uploaded a Parquet file to MinIO, then crashed before writing the Iceberg manifest commit. The file sits on MinIO unreferenced. `expire_snapshots` cannot find Class 2 files because it only looks at snapshot manifest references; `remove_orphan_files` does a full directory scan of MinIO to catch them.
+>
+> Both procedures are needed because they handle different kinds of garbage. `expire_snapshots` alone does NOT catch failed-write orphans. `remove_orphan_files` alone does NOT clean up the data files freed by snapshot expiry (they aren't orphans — they were in a snapshot; they just need the snapshot expired first before `expire_snapshots` can delete them).
 
 **Why it matters:** without this, every snapshot you've ever created is still tracked, and the data files those snapshots point to (including all the small files that compaction rewrote) cannot be removed from MinIO. Your storage grows forever.
 

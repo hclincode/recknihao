@@ -1,7 +1,7 @@
 {
-  "iteration": 337,
+  "iteration": 338,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter336 avg 4.563 — STRONG PASS. Q1 (4.75) STRONG PASS — session property manager JSON schema correctly surfaced as flat array after iter335 fix. Q2 (4.375) PASS — hard-DELETE architectural limitation; missed the DELETE half of reconciliation and wal_level prerequisite. Multi-tenant: 4.461/131. Postgres-to-Iceberg: 4.501/121. Iceberg maintenance: 4.594/29."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter337 avg 4.25 — PASS. Q1 (4.125) PASS — expire_snapshots framing wrong (metadata-only claim); resources/17 fixed with CRITICAL DISTINCTION callout. Q2 (4.375) PASS — correct DELETE lifecycle, missed remove_orphan_files as 4th step and batching guidance. Iceberg maintenance: 4.578/30. Postgres-to-Iceberg: 4.500/122. Multi-tenant: 4.461/131."
 }

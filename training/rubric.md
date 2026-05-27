@@ -40,8 +40,8 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.501 | 121 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.594 | 29 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.500 | 122 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.578 | 30 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
@@ -50,6 +50,42 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 337 — 2026-05-27
+
+**Q1** — Iceberg table maintenance: `remove_orphan_files` vs `expire_snapshots` distinction, scheduling order. Responder correctly stated the order (expire first, orphan files second) and correctly described what orphan files are (failed writes, abandoned compaction temp files). But the central framing was wrong: claimed `expire_snapshots` is "metadata-only" and that `remove_orphan_files` "sweeps the files expire_snapshots freed up." Per official docs, `expire_snapshots` actively deletes data files no longer referenced by any live snapshot. `remove_orphan_files` handles a DIFFERENT class — files never in any snapshot.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 3.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.5 |
+| Completeness | 4.0 |
+| **Average** | **4.125** — PASS |
+
+Judge verified against trino.io and iceberg.apache.org: `expire_snapshots` per Trino docs "removes all snapshots and all related metadata and data files" — it issues S3 DELETE calls for data files no longer referenced by any live snapshot. `remove_orphan_files` handles only files that were never in any snapshot metadata. Resources/17 had two misleading passages ("become eligible for deletion" in line 375 and line 271 saying files become "eligible for cleanup by remove_orphan_files"). Both fixed with CRITICAL DISTINCTION callout. Topic running avg: (4.594×29 + 4.125)/30 = **4.578/30 questions** — PASSED (minor drop from resource framing error; fix applied).
+
+**Q2** — Postgres-to-Iceberg ingestion: deleting orphaned rows from Iceberg after EXCEPT detection. Correct three-step sequence (DELETE → compact → expire_snapshots). Cross-catalog EXCEPT wired directly into DELETE. Trino 7-day floor correctly called out. Both Spark and Trino paths shown. Missing: `remove_orphan_files` as canonical 4th step; batching guidance for large ID lists; cross-catalog subquery perf warning; partition-scoped optimize note.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.5 |
+| Completeness | 4.0 |
+| **Average** | **4.375** — PASS |
+
+Judge verified all major syntax claims correct per trino.io and iceberg.apache.org. The three-step sequence is correct; 7-day floor accurate; MoR transient slowdown accurate. Resources/13 already covers remove_orphan_files; responder completeness gap. Topic running avg: (4.501×121 + 4.375)/122 = **4.500/122 questions** — PASSED (stable).
+
+**Iter 337 average: (4.125 + 4.375) / 2 = 4.25 — PASS** ✓
+
+**Topics updated**:
+- Iceberg table maintenance: 4.594/29 → **4.578/30 questions** (PASSED — minor drop; resources/17 expire_snapshots/remove_orphan_files distinction fixed)
+- Postgres-to-Iceberg ingestion: 4.501/121 → **4.500/122 questions** (PASSED — stable; three-step DELETE lifecycle correctly answered)
+
+**Resource fixes this iteration**: resources/17-iceberg-table-maintenance.md — (1) replaced misleading "become eligible for deletion" with explicit statement that `expire_snapshots` physically deletes unreferenced data files; (2) added CRITICAL DISTINCTION callout explaining Class 1 garbage (expire_snapshots) vs Class 2 garbage (remove_orphan_files — files never in any snapshot); (3) fixed line 271 which incorrectly said old files become "eligible for cleanup by remove_orphan_files" — corrected to say expire_snapshots physically deletes them itself.
+
+---
 
 ### Iter 336 — 2026-05-27
 

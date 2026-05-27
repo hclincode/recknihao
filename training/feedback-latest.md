@@ -1,89 +1,100 @@
-# Judge Feedback — Iter 336
+# Judge Feedback — Iter 337
 
 Date: 2026-05-27
 Phase: extended
-Topics: Multi-tenant analytics / session property manager JSON schema verification (Q1) + Postgres-to-Iceberg / hard deletes invisible in incremental pipeline (Q2)
+Topics: Iceberg table maintenance / expire_snapshots vs remove_orphan_files distinction and scheduling order (Q1) + Postgres-to-Iceberg / deleting orphaned rows from Iceberg after EXCEPT detection (Q2)
 
 ---
 
-## Q1 — Session Property Manager JSON Schema (STRONG PASS)
+## Q1 — expire_snapshots vs remove_orphan_files (PASS)
 
 ### Score
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5.0 | All claims verified against trino.io/docs. Top-level array correct; match fields (group, user, source, queryType, clientTags) correct; regex semantics correct; session property names correct. |
-| Beginner clarity | 4.5 | Clearly identifies the bug, contrasts wrong vs. right format, explains regex escaping with the dot example, lists both required config files with exact contents. Minor: no explicit definition of "session property" for a true beginner. |
-| Practical applicability | 5.0 | Engineer can copy the array + properties file verbatim and have a working setup. Calls out coordinator restart requirement and regex escaping gotcha that would otherwise silently misfire. |
-| Completeness | 4.5 | Covers schema, both timing properties, match fields, the two config files, restart requirement, parse-error debugging tips. Slight miss: no mention of rule ordering (later rules override earlier ones) or the queryType match field's allowed values. |
-| **Average** | **4.75** | **STRONG PASS** |
+| Technical accuracy | 3.5 | Order, orphan-file definition, 7d Trino floor, and example syntax are correct. BUT the central framing that `expire_snapshots` is "metadata-only" and that files "become eligible for deletion" (without being deleted) is wrong. Per Trino and Iceberg docs, `expire_snapshots` removes both expired snapshot metadata AND physically deletes data files exclusively referenced by those expired snapshots. `remove_orphan_files` handles a different class: files that were never in any snapshot at all. Also internally inconsistent: states "3 days" as the default (Iceberg Spark default) then says Trino enforces 7d floor without clarifying that Trino's default IS 7d, not 3d. |
+| Beginner clarity | 4.5 | Clear structure, plain-language analogies (snapshot A vs B), concrete failure scenarios for orphan files, explicit ordering guidance with code. |
+| Practical applicability | 4.5 | Engineer gets exact Trino syntax, scheduling cadence, ordering guidance, and maintenance-window suggestion. Trino 467 7d floor correctly called out. |
+| Completeness | 4.0 | Covers what each procedure does, why both are needed, order, scheduling, prod constraints. Missing: (a) safety reason orphan removal needs generous threshold (concurrent in-flight writes); (b) `remove_orphan_files` is expensive (full directory listing of MinIO) so weekly cadence is appropriate; (c) the `dry_run` Spark-only preview option. |
+| **Average** | **4.125** | **PASS** |
 
 ### What Worked
-- Correctly diagnosed the wrapper-object format as wrong and gave the proper top-level array.
-- Showed the corrected JSON with two realistic rules (free_tier + enterprise_tier) instead of just abstract syntax.
-- Caught the regex escaping issue (`global\\.free_tier`) — common silent-failure footgun.
-- Explained `query_max_execution_time` vs `query_max_run_time` correctly per the docs.
-- Included the `session-property-config.properties` bootstrap file.
-- Mentioned coordinator restart requirement.
-- Offered concrete parse-error debugging hints.
+- Correct ordering (expire_snapshots → remove_orphan_files) matches official guidance.
+- Correct identification of orphan file sources (mid-write crashes, failed commits, abandoned compaction temp files).
+- Correctly flagged Trino 467's 7-day floor for both procedures.
+- Trino `ALTER TABLE ... EXECUTE` syntax is correct.
+- Sunday 3 AM maintenance window suggestion is sensible.
+- Clear pedagogical structure.
 
 ### What Missed
-- Rule evaluation order (later rules override earlier property assignments) — useful when stacking tier rules.
-- `queryType` allowed values not enumerated (SELECT, INSERT, DELETE, DESCRIBE, EXPLAIN, DATA_DEFINITION).
-- No note that all match fields are optional.
+1. **`expire_snapshots` is NOT metadata-only** — Per Trino docs: "The expire_snapshots command removes all snapshots and all related metadata AND data files." It physically deletes data files no longer referenced by any live snapshot. The answer said "files stay put until you explicitly tell Iceberg to delete them" — wrong. expire_snapshots tells Iceberg to delete them.
+2. **The two classes of garbage were conflated** — The correct distinction:
+   - Class 1 (expire_snapshots): files that WERE in snapshots, now expired → expire_snapshots deletes them
+   - Class 2 (remove_orphan_files): files NEVER in any snapshot (failed writes) → expire_snapshots can't find them; remove_orphan_files does full directory scan
+3. **3-day Spark default vs 7-day Trino default not cleanly separated** — On the production stack (Trino), the default is 7d, not 3d.
+
+### Resource Fix Applied
+- resources/17-iceberg-table-maintenance.md:
+  1. Replaced "become eligible for deletion" at line 375 with explicit statement that `expire_snapshots` physically deletes unreferenced data files (S3 DELETE calls)
+  2. Added CRITICAL DISTINCTION callout explaining Class 1 (expire_snapshots) vs Class 2 (remove_orphan_files) garbage
+  3. Fixed line 271 which incorrectly said old files become "eligible for cleanup by remove_orphan_files" — corrected to say expire_snapshots physically deletes them itself
 
 ### Technical Accuracy (verified)
-All claims verified against https://trino.io/docs/current/admin/session-property-managers.html and https://trino.io/docs/current/admin/properties-query-management.html. No errors.
+- expire_snapshots physically deletes data files no longer referenced — CORRECT per trino.io: "removes all snapshots and all related metadata and data files"
+- remove_orphan_files handles files never in any snapshot — CORRECT per iceberg.apache.org maintenance docs
+- Order: expire_snapshots → remove_orphan_files — CORRECT per official guidance
+- Trino 467 7d floor for both procedures — CORRECT
 
 ### Rubric Update
-- Multi-tenant analytics: prior avg 4.459/130 → (4.459 × 130 + 4.75) / 131 = 584.420 / 131 = **4.461 across 131 questions**. Status: **PASSED** (recovering after two consecutive drops; corrected JSON schema now correctly surfaced).
+- Iceberg table maintenance: prior avg 4.594/29 → (4.594 × 29 + 4.125) / 30 = 137.351 / 30 = **4.578 across 30 questions**. Status: **PASSED** (minor drop; resource framing error corrected).
 
 ---
 
-## Q2 — Hard Deletes Invisible in Incremental Pipeline (PASS)
+## Q2 — Deleting Orphaned Rows from Iceberg After EXCEPT Detection (PASS)
 
 ### Score
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 4.5 | Core claims correct: updated_at/created_at/xmin cannot catch hard deletes; soft-delete pattern valid; reconciliation via EXCEPT valid; Debezium WAL claim correct. Minor: xmin framing slightly imprecise (deletes leave xmax trace, not xmin), but practical takeaway is right. CDC tradeoff framing accurate. |
-| Beginner clarity | 4.5 | Plain language throughout; clear table; concrete SQL examples; ramps from simple (soft delete) to complex (CDC). Minimal jargon. |
-| Practical applicability | 4.5 | Three clear options with explicit "when to use" guidance. Actionable next steps (audit, switch with trigger, weekly reconcile). Fits production stack (Spark + Iceberg + Trino on-prem). |
-| Completeness | 4.0 | Covers three main industry-standard approaches. Missing: (a) the companion DELETE/MERGE after the EXCEPT detection — answer shows only the detect half; (b) wal_level=logical prerequisite for Debezium + replication-slot xmin-horizon trap; (c) Iceberg V2 delete file mechanics; (d) scale note for EXCEPT pattern (expensive for 500M+ row tables). |
+| Technical accuracy | 4.5 | DELETE → compact → expire_snapshots three-step chain verified correct. 7-day Trino floor accurate. Engine labels clean (Spark vs Trino). Cross-catalog EXCEPT in DELETE subquery is supported. Minor: expire_snapshots is not the sole physical-cleanup step — `remove_orphan_files` is the documented complement for files outside the snapshot graph. |
+| Beginner clarity | 4.5 | Three numbered steps with "what happens / what doesn't happen" framing. Postgres analogy acknowledged. "Why all three required" with skip-step consequences is a strong teaching device. Transient slow-query window explained. |
+| Practical applicability | 4.5 | Runnable Spark and Trino paths both shown. Cross-catalog DELETE FROM ... WHERE id IN (SELECT ... EXCEPT SELECT ...) directly answers the stuck-point. Missing: batching guidance for large ID lists and cross-catalog subquery perf warning. |
+| Completeness | 4.0 | Covers DELETE → compact → expire lifecycle. Missing: (a) `remove_orphan_files` as 4th step; (b) batching for large ID lists (>10K); (c) cross-catalog subquery perf caveat (materialized ID list is safer); (d) partition-scoped optimize guidance; (e) EXCEPT-generated ID list is a moving target if new rows ingested between EXCEPT and DELETE. |
 | **Average** | **4.375** | **PASS** |
 
 ### What Worked
-- Clear framing that the limitation is architectural, not a bug.
-- Table comparing watermarks is digestible at a glance.
-- Three-option structure mirrors how senior data engineers think about this.
-- "Audit which tables actually do hard deletes" is exactly the right pragmatic first step.
-- Recommendation ordering (soft delete → reconciliation → CDC) matches the operational-complexity gradient.
-- No cloud-only tools recommended.
+- Correctly identified that DELETE alone does not free storage — multi-step sequence required.
+- Clean Spark-vs-Trino separation with engine labels.
+- 7-day retention floor for Trino's expire_snapshots correctly called out.
+- "Skip step X consequences" framing turns procedure into causal reasoning.
+- Acknowledges transient query slowdown between DELETE and compaction.
+- DELETE SQL shows cross-catalog EXCEPT inline, directly answering the stuck-point.
 
 ### What Missed
-1. **Reconciliation DELETE half omitted** — the EXCEPT query only shows the detection step. The companion DELETE (or MERGE INTO ... WHEN NOT MATCHED BY SOURCE THEN DELETE) that actually removes orphaned rows from Iceberg is missing. Resources/13 has this at line 997; responder didn't surface it.
-2. **`wal_level = logical` prerequisite for Debezium** — without this, Debezium cannot connect to the WAL. Missing from the CDC option description.
-3. **Replication slot xmin-horizon trap** — an inactive Debezium replication slot can cause the Postgres primary to retain dead tuples indefinitely, growing disk usage. A production operational concern.
-4. **Scale note** — the EXCEPT pattern reads the full PK set from both sides; fine for 1M rows but expensive for 500M.
+1. `remove_orphan_files` not mentioned — documented maintenance order is expire → orphan → manifests; expire_snapshots doesn't catch all garbage.
+2. No batching guidance for large reconciliation deletes (1M IDs → huge position-delete files).
+3. No warning about cross-catalog DELETE subquery perf (re-evaluates postgres side at delete-plan time; safer to materialize ID list first).
+4. `ALTER TABLE ... EXECUTE optimize` without WHERE clause rewrites entire table — partition-scoped optimize is much cheaper.
+5. EXCEPT ID list is a moving target if rows were ingested between the EXCEPT and DELETE.
 
 ### Resource Fix Applied
-None required. Resources/13 already has the full reconciliation pattern including the DELETE step (line 997) and the hard-delete section (lines 989–999). Gaps are responder completeness, not resource gaps.
+None required. Resources/13 and resources/17 already cover the full pattern. Gaps are responder completeness.
 
 ### Rubric Update
-- Postgres-to-Iceberg ingestion: prior avg 4.502/120 → (4.502 × 120 + 4.375) / 121 = 544.615 / 121 = **4.501 across 121 questions**. Status: **PASSED** (stable).
+- Postgres-to-Iceberg ingestion: prior avg 4.501/121 → (4.501 × 121 + 4.375) / 122 = 548.996 / 122 = **4.500 across 122 questions**. Status: **PASSED** (stable).
 
 ---
 
-## Iter 336 Summary
+## Iter 337 Summary
 
-**Iter 336 average: (4.75 + 4.375) / 2 = 4.563 — STRONG PASS** ✓
+**Iter 337 average: (4.125 + 4.375) / 2 = 4.25 — PASS** ✓
 
 ### Notable
-- Q1 4.75 STRONG PASS: The resources/05 JSON schema fix from iter335 held perfectly. Responder correctly identified the flat-array format, called out the regex escaping footgun, and gave a copy-pasteable config.
-- Q2 4.375 PASS: Hard-DELETE architectural limitation clearly framed; three-option taxonomy correct. Missed showing the full reconciliation pattern (detect + delete); resources/13 already has it.
+- Q1 4.125: expire_snapshots framing error — resources/17 had misleading "become eligible for deletion" language that the responder amplified into a full "metadata-only" claim. Fixed immediately with CRITICAL DISTINCTION callout.
+- Q2 4.375: DELETE orphaned rows lifecycle — correct three-step sequence with both Spark/Trino paths. Missed remove_orphan_files as 4th step and batching guidance.
 
 ### Resource fixes applied this iteration
-- None. Resources/05 and resources/13 are both correct; responder completeness gaps, not resource gaps.
+- **resources/17-iceberg-table-maintenance.md**: Corrected expire_snapshots description (physically deletes unreferenced data files, not just metadata); added CRITICAL DISTINCTION callout for Class 1 vs Class 2 garbage; fixed line 271 confusing phrasing.
 
-### Suggested focus for Iter 337
-- **Iceberg table maintenance** (4.594/29, stable but not recently probed): Probe orphan file removal — what `remove_orphan_files` catches that `expire_snapshots` doesn't, retention window, safe scheduling order. Also consider probing the full reconciliation DELETE pattern (MERGE INTO with WHEN NOT MATCHED BY SOURCE THEN DELETE) to reinforce resources/13 surfacing.
-- **Multi-tenant analytics** (4.461/131, recovering): Consider probing OPA session property override blocking — `SetSystemSessionProperty` action name, how to deny for non-admin principals.
-- **Postgres-to-Iceberg ingestion** (4.501/121): Probe the full reconciliation pattern including the DELETE half, or lag-buffer calibration.
+### Suggested focus for Iter 338
+- **Iceberg table maintenance** (4.578/30, just dropped): Probe the corrected expire_snapshots distinction — ask specifically whether expire_snapshots or remove_orphan_files handles files from crashed write jobs. Verify the fix held.
+- **Multi-tenant analytics** (4.461/131): Consider probing OPA session property override blocking with `SetSystemSessionProperty` action name explicitly.
+- **Postgres-to-Iceberg ingestion** (4.500/122): Probe partition-scoped optimize or the batching guidance for large reconciliation deletes.
