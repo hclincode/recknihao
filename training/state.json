@@ -1,7 +1,7 @@
 {
-  "iteration": 320,
+  "iteration": 321,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter319 avg 4.5625: Q1 (4.625) OPA bundle management — data.json naming rule, /health vs Status API, cache-ttl stacking added to resources/05; Q2 (4.50) Schema drift monitoring — DROP COLUMN time-travel recoverability fixed, Postgres→Iceberg type mapping table added to resources/13. Multi-tenant: 4.481/118. Postgres-to-Iceberg: 4.495/111."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter320 avg 4.155: Q1 (4.00) NOT NULL constraint in CDC — Debezium doesn't capture DDL, scenario mismatch (answer gave new-column pattern for existing-column question); Q2 (4.31) View-per-tenant vs OPA row filters — batched-uri scope error (filter-list only, not row-filter). Fixed: resources/05 batched-uri scope + cache-ttl + HMS tuning; resources/13 NOT NULL existing-column guidance + diagnostic ladder. Multi-tenant: 4.480/119. Postgres-to-Iceberg: 4.491/112."
 }

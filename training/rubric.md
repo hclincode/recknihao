@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.481 | 118 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.480 | 119 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
@@ -40,7 +40,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.521 | 6 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.495 | 111 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.491 | 112 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.655 | 20 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
@@ -50,6 +50,44 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 320 — 2026-05-27
+
+**Q1** — NOT NULL constraint addition in CDC pipeline: Debezium doesn't capture DDL constraint changes (logical decoding limitation), failure root-cause diagnosis, safe pattern for NOT NULL on existing vs new columns, replication slot health
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.0 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 4.0 |
+| Completeness | 4.0 |
+| **Average** | **4.00** — PASS |
+
+Correctly anchored that Debezium doesn't capture constraint-only DDL changes; `ALTER COLUMN SET NOT NULL` on NULLed column fails before WAL; NOT VALID + VALIDATE CONSTRAINT pattern correct for PG 12+. Weaknesses: answer's three-step safe pattern was for adding a *new* column, not the user's scenario of adding NOT NULL to an existing column — scenario mismatch. Diagnostic section speculative rather than concrete (should have checked connector task status, `pg_attribute.attnotnull`, slot lag). `max_slot_wal_keep_size` version (PG 13+) not mentioned. Topic running avg: (4.495×111 + 4.00)/112 = **4.491/112 questions** — PASSED.
+
+**Q2** — View-per-tenant vs OPA row-level filtering at scale (200 → 500+ tenants): query-performance parity, three operational breaking points, 200-tenant threshold as rule of thumb, migration staging plan, OPA row-filter mechanism
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.5 |
+| Completeness | 4.25 |
+| **Average** | **4.31** — PASS |
+
+Strong narrative arc; bottom-line "easier not faster" is correct; three operational breaking points (catalog listing, schema migration, onboarding) concrete; CI assertion recipe correct. One material error: `opa.policy.batched-uri` suggested for row-filter latency — incorrect, batched-uri only handles filter-list operations (FilterTables/FilterSchemas), not row-filter expression checks; correct latency optimization is `opa.policy.cache-ttl-seconds`. No OPA config snippet or Rego skeleton. HMS tuning knobs (`hive.metastore-cache-ttl`) not mentioned as runway extender. Topic running avg: (4.481×118 + 4.31)/119 = **4.480/119 questions** — PASSED.
+
+**Iter 320 average: 4.155 — PASS** ✓
+
+**Topics updated**:
+- Postgres-to-Iceberg ingestion: 4.495/111 → **4.491/112 questions** (PASSED — slight downward drift, resources being fixed)
+- Multi-tenant analytics: 4.481/118 → **4.480/119 questions** (PASSED — stable)
+
+**Resource fixes this iteration**:
+- resources/05: `opa.policy.batched-uri` scope clarification (filter-list ops only); `opa.policy.cache-ttl-seconds` as correct row-filter latency optimization; HMS tuning knobs runway extender
+- resources/13: explicit NOT NULL existing-column guidance; diagnostic ladder for CDC pipeline failures post-DDL
+
+---
 
 ### Iter 319 — 2026-05-27
 

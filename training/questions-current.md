@@ -1,12 +1,12 @@
-# Iter 319 Questions
+# Iter 320 Questions
 
 Date: 2026-05-27
-Topics: OPA bundle management — policy distribution without restarts (Q1) + Schema drift monitoring — detecting Postgres/Iceberg column mismatch (Q2)
+Topics: NOT NULL constraint addition in CDC pipeline (Q1) + View-per-tenant vs OPA row-level filtering at scale (Q2)
 
-## Q1 — OPA bundle management: distributing policy updates without restarting OPA
+## Q1 — Postgres-to-Iceberg ingestion: NOT NULL constraint addition in CDC pipeline
 
-We use OPA to control which rows each tenant can see in our analytics queries. Right now if I need to change a policy — say a customer gets a new data access agreement and I need to restrict what they see — I have to SSH into the OPA process and restart it to load the new rules. That's obviously terrible in production. I've heard there's a way OPA can pull down policy updates automatically, something called a "bundle," but I have no idea what that actually is or how it works mechanically. Like, where do the policy files live? How does OPA know to go fetch them? And what happens if the OPA instance gets behind — say it's still running old rules for a few minutes after I've pushed a change — is that a real security problem for us?
+We've been using Debezium to stream changes from Postgres into our Iceberg tables. Everything was fine until one of our backend engineers added a `NOT NULL` constraint to an existing column in Postgres — just added it, no data change, no new column. After that, our CDC pipeline started throwing errors and we had to manually restart the Debezium connector. I don't understand why a constraint change on the Postgres side would blow up the ingestion side. Does Debezium actually capture constraint changes as events, and if so, how should we be handling this so it doesn't take down the pipeline?
 
-## Q2 — Schema drift monitoring: detecting Postgres/Iceberg column mismatch
+## Q2 — Multi-tenant analytics: View-per-tenant vs OPA row-level filtering at scale
 
-We sync data from Postgres into our analytics pipeline on a schedule. It's been working fine, but I'm worried about a scenario I haven't figured out how to catch: what if a developer on the app team quietly drops a column from a Postgres table, or renames one, and our pipeline just keeps running and silently ignores that data or starts writing garbage? By the time a customer notices their dashboard is wrong, it's been broken for days. Is there a standard way to detect that the Postgres table structure has drifted away from what your pipeline expects, before it causes that kind of silent data loss? What should we actually be monitoring?
+Right now we have about 200 tenants and we're using a separate view per tenant in Trino to control data access — each tenant's users only query through their view. It works but our ops team is complaining that every time we onboard a new tenant, someone has to manually create the view, and we're worried about what happens when we hit 500 or 1,000 tenants. Someone on the team mentioned we could use OPA (which we already have in our stack) to do row-level filtering instead of separate views. What's the actual performance difference between the view-per-tenant approach and row-level filtering through OPA at that scale? I'm trying to figure out at what point the view approach breaks down and whether switching to OPA filters is actually faster or just easier to manage.

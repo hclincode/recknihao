@@ -625,10 +625,18 @@ OPA service is DOWN (pod CrashLoopBackOff, HTTP 5xx, network partition):
 
 OPA service is SLOW (high latency, intermittent timeouts):
   -> NEW queries may time out at analysis (Trino has a per-call OPA HTTP timeout)
-  -> Consider enabling the OPA batch endpoint (opa.policy.batched-uri) to reduce
-     the number of HTTP calls per query — see the batched-uri section in this file
+  -> If most of the call volume is FILTER-LIST ops (FilterTables / FilterSchemas /
+     FilterColumns) — enable `opa.policy.batched-uri`. This batches N candidate
+     resources within a single filter operation into one HTTP call.
+  -> If most of the latency is ROW-FILTER expression evaluation — enable
+     `opa.policy.cache-ttl-seconds` instead. `batched-uri` does NOT apply to
+     row-filter checks (see scope callout below). Caching the OPA decision per
+     (principal, table) for the TTL window collapses repeated queries from the
+     same user onto a single OPA call.
   -> Check `io.trino.plugin.opa.OpaHttpClient` DEBUG log for per-call latency
 ```
+
+> **SCOPE WARNING — `opa.policy.batched-uri` does NOT batch row-filter checks.** This is the single most common misconfiguration when engineers try to reduce row-filter latency. `opa.policy.batched-uri` ONLY batches **filter-list operations** (`FilterTables`, `FilterSchemas`, `FilterColumns`, `FilterCatalogs`, `FilterViews` — the operations where Trino has N candidate resources and asks OPA "which of these may the user see?"). It does **NOT** apply to **row-filter expression evaluation** — those calls go through `opa.policy.row-filters-uri` and are not collapsed by `batched-uri`. **For row-filter latency reduction, use `opa.policy.cache-ttl-seconds`** — this is a per-coordinator cache that memoizes the OPA decision for repeated queries from the same principal against the same table. A user running 20 dashboard refreshes against `analytics.events` over a 60-second window with `cache-ttl-seconds=60` makes ONE OPA row-filter call (the first); the other 19 reuse the cached decision. The tradeoff is **revocation latency**: a policy change won't take effect until the cache TTL expires (see the bundle-poll-interval + cache-TTL composition note earlier in this file for the full revocation-window math).
 
 The single most common on-call mistake is **conflating "OPA is down" with "running queries are unsafe."** They are not. OPA's outage affects the front door (new query admission), not the queries already inside. Internalize this and you can answer 80% of OPA-related pages correctly without escalating.
 
@@ -800,6 +808,19 @@ The two modes **compose**, and you usually want both in the same policy:
 > | **1000+** | OPA row filters, almost certainly | Per-tenant views become a planner bottleneck on every schema change. OPA row filter is the standard pattern at this scale. |
 >
 > The 200-tenant threshold is a rule of thumb, not a hard line — if your tenant churn is high (50+ tenant adds/removals per week), you may want OPA row filters earlier; if your tenant count is stable and growing slowly, per-tenant views can stretch further. The migration is non-trivial (you must rewrite the policy, get CI passing for every tenant under the new model, and run both patterns in parallel during cutover) — plan for it before you cross the threshold, don't react after.
+
+> **HMS tuning knobs — extending the view-per-tenant runway before migrating to OPA row filters.** The primary symptom that pushes you toward OPA row filters is **Hive Metastore catalog listing slowdown**: `SHOW TABLES`, `information_schema.tables`, and any client that calls `getTables` against the Iceberg catalog (BI tools, JDBC introspection, dbt schema discovery) gets slower as the number of schemas × views grows. Before you commit to the OPA migration, two Trino-side caching knobs in `etc/catalog/iceberg.properties` can buy you meaningful runway by amortizing the HMS round-trip cost across queries:
+>
+> ```properties
+> # etc/catalog/iceberg.properties on the Trino coordinator
+> # Cache HMS responses (table lists, table metadata, partition lists) on the
+> # coordinator side. The first query after TTL expiry pays the full HMS round
+> # trip; subsequent queries within the TTL window hit the local cache.
+> hive.metastore-cache-ttl=10m            # default is 0s (no cache); 5m–15m is typical for SaaS analytics
+> hive.metastore-cache-maximum-size=10000 # bound the cache size; raise for very wide catalogs
+> ```
+>
+> **What this buys you.** At 200–400 tenants on the per-tenant view pattern, the dominant pain is `SHOW TABLES` taking 3–10 seconds because every call walks 200+ schemas through HMS. With `hive.metastore-cache-ttl=10m`, the first `SHOW TABLES` of the cache window pays that cost; the next 1000 queries hit a sub-millisecond local cache. For workloads where the catalog shape rarely changes (you don't add a new view every minute), this can extend the view pattern's usable runway from 200 tenants up to **400–600 tenants** without migrating to OPA row filters. **Tradeoff: cache staleness on schema changes** — a new tenant's view won't be visible to other coordinator instances until the cache TTL expires (typically irrelevant for tenant analytics, but worth knowing). **When the cache no longer helps:** if you cross 600+ tenants AND your onboarding cadence is high enough that the cache TTL doesn't amortize (cache evictions happen faster than cache hits), then the structural fix (OPA row filters) becomes unavoidable. Use the cache to delay the migration, not to avoid it forever.
 
 **Verification recipe.** As a tenant principal, run `SELECT DISTINCT tenant_id FROM analytics.events` — it must return exactly one row (their own tenant). As an admin principal (whose OPA policy carves out the row-filter rule), the same query must return all tenant IDs. Add both as CI tests. If a tenant principal ever sees more than one `tenant_id`, the row-filter Rego is misconfigured — treat as a P0 cross-tenant data leak.
 
