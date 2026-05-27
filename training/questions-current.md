@@ -1,12 +1,12 @@
-# Iter 305 Questions
+# Iter 306 Questions
 
 Date: 2026-05-27
-Topics: Trino resource groups (Q1) + Partition strategy for multi-tenant SaaS events table (Q2)
+Topics: When Postgres is enough vs OLAP (Q1) + CDC ingestion Debezium→Kafka→Iceberg (Q2)
 
-## Q1 — Trino resource groups: stopping ingestion from starving dashboards
+## Q1 — How do I know if this is a "fix Postgres" problem or "you've outgrown Postgres for analytics"?
 
-We have one Trino cluster that both our customer dashboards and our nightly data loading jobs hit at the same time. Lately when the ingestion jobs are running, our dashboard queries start timing out or just crawl. Someone said we should configure something called "resource groups" in Trino. What does that actually do? Is it just a queue, or does it actually give different jobs different amounts of memory or CPU? And how do we set it up so dashboards always get served even when ingestion is hammering the cluster?
+Our dashboard runs about 15 analytics queries per page load. Last quarter they were averaging 800ms, now they're hitting 4-6 seconds and we're getting customer complaints. Someone on the team is saying we need to move everything to Snowflake. But I don't want to build a whole new data pipeline if we just need to tune some indexes. How do I actually figure out whether this is a "fix Postgres" problem or a "you've outgrown Postgres for analytics" problem? What should I be looking at?
 
-## Q2 — How to partition a new multi-tenant SaaS events table
+## Q2 — How does change data capture actually work, and what happens to updates and deletes on the analytics side?
 
-We're setting up a new table to store customer activity events — columns like `tenant_id`, `event_type`, `occurred_at` (timestamp), and `user_id`. We expect each tenant to have wildly different event volumes. Before we load data, we need to decide how to partition this table, and we have no idea how to think about it. Should we partition by tenant? By date? Both? Does it even matter if we're using something like Iceberg? What's the actual decision process here?
+Right now we do a full dump of our Postgres tables every night at 2am and reload them into our analytics system. It's causing noticeable load on our production DB and we're also just getting stale data — customers are complaining their dashboards are 18 hours behind. Someone mentioned something called "change data capture" as a way to stream just the changes over instead of doing full copies. I have no idea how that works. Can you explain what's actually happening under the hood, and specifically, how do deletes and updates get handled on the analytics side — because I assume the analytics copy isn't just a live replica?

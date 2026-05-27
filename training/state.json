@@ -1,7 +1,7 @@
 {
-  "iteration": 306,
+  "iteration": 307,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter305 avg 4.8: Q1 (4.8) Trino resource groups — hardConcurrencyLimit/softMemoryLimit/maxQueued, two-file setup, weighted_fair, selector routing by source; Q2 (4.8) Iceberg partition strategy — (day(occurred_at), tenant_id) as SaaS default, metadata-only billing query, skew/bucketing threshold, compaction, partition evolution. Multi-tenant: 4.464/108. Iceberg partition design: 4.596/17."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter306 avg 4.888: Q1 (4.9) When to add OLAP — profiling-first (EXPLAIN ANALYZE, log_min_duration_statement), Postgres tuning ladder (read replica/partial indexes/materialized views), decision tree with 50M-row/1.5s thresholds; Q2 (4.875) CDC ingestion — WAL+Debezium, op/before/after events, MERGE INTO for UPDATE/DELETE, wal_level=logical+REPLICA IDENTITY FULL+replication slot, CoW vs MoR. When-to-add-OLAP: 4.522/10. Postgres ingestion: 4.484/103."
 }

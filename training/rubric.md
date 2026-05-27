@@ -29,7 +29,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Column-oriented storage — what it is and why it's faster for analytics | PASSED | 4.524 | 8 |
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
-| When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.480 | 9 |
+| When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
 | Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.464 | 108 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.775 | 5 |
@@ -40,7 +40,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.500 | 5 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.480 | 102 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.484 | 103 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.655 | 20 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
@@ -50,6 +50,42 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 306 — 2026-05-27
+
+**Q1** — When Postgres is enough vs OLAP: EXPLAIN ANALYZE profiling first, Postgres tuning ladder (read replica → partial indexes → materialized views → PgBouncer), concrete thresholds (50M rows, >1.5s after tuning, 2+ sources), decision tree + checklist, migration to Iceberg+Trino shown concretely
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.9** — PASS |
+
+Profiling-first approach with correct Postgres syntax verified. Tuning ladder ordered by impact-vs-effort. Correctly redirects from "Snowflake" to the actual production stack (Iceberg+Trino). Decision tree, checklist, and red flags give engineer a clear flowchart. Shows concrete PySpark migration snippet. Minor: `REFRESH MATERIALIZED VIEW CONCURRENTLY` requires a UNIQUE index on the view (not mentioned); `pg_stat_statements` not mentioned; `work_mem`/`shared_buffers` tuning omitted.
+
+**Q2** — CDC from Postgres to Iceberg: WAL + logical replication, Debezium op/before/after structure, MERGE INTO for UPDATE and DELETE on Iceberg, wal_level=logical + REPLICA IDENTITY FULL + replication slot prerequisites, CoW vs MoR for high-churn tables, "start with hourly batch first" honest tradeoff
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.875** — PASS |
+
+All seven judge checklist items hit: WAL via logical replication, Debezium event structure (op/before/after), UPDATE MERGE by PK, DELETE MERGE with op="d", three Postgres prerequisites (wal_level=logical, REPLICA IDENTITY FULL, replication slot via pg_create_logical_replication_slot with pgoutput), CoW vs MoR decision rule (>1,000 UPDATEs per micro-batch), and honest "start with hourly batch first" advice. All technical claims verified against debezium.io and postgresql.org. Fits on-prem stack (Spark Structured Streaming + Iceberg + MinIO). Minor completeness gaps: no mention of Debezium "r" (snapshot read) op code, no mention of replication slot WAL bloat / heartbeat risk (a real prod gotcha), no mention of tombstone events / Kafka log-compaction interaction.
+
+All seven judge checklist items hit. Technical claims verified against debezium.io and postgresql.org. Fits on-prem stack (Spark Structured Streaming + Iceberg + MinIO). Minor completeness gaps: no mention of Debezium "r" (snapshot read) op code, no mention of replication slot WAL bloat / heartbeat risk (#1 prod gotcha), no tombstone events / Kafka log-compaction interaction.
+
+**Iter 306 average: 4.888 — PASS** ✓
+
+**Topics updated**:
+- When to add an OLAP layer: 4.480/9 → **4.522/10 questions** (PASSED — improving)
+- Postgres-to-Iceberg ingestion: 4.480/102 → **4.484/103 questions** (PASSED — stable)
+
+---
 
 ### Iter 305 — 2026-05-27
 
