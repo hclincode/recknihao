@@ -1,7 +1,7 @@
 {
-  "iteration": 325,
+  "iteration": 326,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter324 avg 4.75 — clean recovery: Q1 (4.75) Trino 467 vs Spark maintenance — resources/17 version-availability fix held; Q2 (4.75) JSONB column ingestion — all claims verified. Iceberg table maintenance: 4.561/22. Postgres-to-Iceberg: 4.494/114. Multi-tenant: 4.465/121."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter325 avg 4.50 — Q1 (5.00) optimize_manifests version gate / Trino 467 manifest cleanup: perfect score, all claims verified. Q2 (4.00) STRUCT vs flat columns for stable JSONB: strong framing, one DDL error (MODIFY COLUMN invalid; correct is ADD COLUMN metadata.field TYPE). resources/13 patched with correct dotted-path ADD COLUMN example. Iceberg table maintenance: 4.580/23. Postgres-to-Iceberg: 4.490/115. Multi-tenant: 4.465/121."
 }

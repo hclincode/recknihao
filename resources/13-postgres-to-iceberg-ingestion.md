@@ -3256,6 +3256,20 @@ A common, reasonable question: "If the app starts writing a new key like `proper
 > - **`MAP<VARCHAR,VARCHAR>`** absorbs any string-valued key but loses type information (a numeric `$.score` becomes the string `"42"`), cannot represent nested arrays or sub-objects without further encoding, and turns every per-key extraction into an `element_at(properties_map, 'device_type')` call — same query cost as `json_extract_scalar` against a VARCHAR. Per-key min/max statistics do not exist for MAP entries, so file skipping on a MAP lookup is limited.
 > - **Flatten + raw VARCHAR** is the only pattern where the hot keys get per-column min/max statistics and dictionary filtering (the file-skipping property described in the callout above). For SaaS event tables with a clear hot-key set and an unbounded long tail, this is usually the right answer.
 
+> **STRUCT schema evolution — correct DDL syntax.** Adding a new field to a STRUCT column uses the **dotted-path form** of `ALTER TABLE ADD COLUMN`, NOT `MODIFY COLUMN`. `MODIFY COLUMN` is not valid Iceberg DDL for STRUCT field addition; Spark SQL will reject it with a parser error. The correct pattern:
+>
+> ```sql
+> -- Add a new field 'sso_enabled' to an existing 'metadata' STRUCT column (Spark SQL or Trino 467)
+> ALTER TABLE iceberg.analytics.events ADD COLUMN metadata.sso_enabled BOOLEAN;
+>
+> -- Add a nested field inside a sub-struct (e.g., metadata.billing.auto_renew)
+> ALTER TABLE iceberg.analytics.events ADD COLUMN metadata.billing.auto_renew BOOLEAN;
+> ```
+>
+> This is **metadata-only** (no data rewrite). Existing rows return NULL for `metadata.sso_enabled` at read time; the new field appears in new writes immediately. To drop a STRUCT field: `ALTER TABLE ... DROP COLUMN metadata.sso_enabled` — same dotted-path syntax, same metadata-only cost. Renaming a STRUCT field: `ALTER TABLE ... RENAME COLUMN metadata.sso_enabled TO metadata.sso_active`.
+>
+> The syntax is identical in Spark SQL and Trino — both delegate to Iceberg's schema-evolution catalog operation using the dotted parent.child column path to address the nested field.
+
 **No Debezium connector setting auto-expands JSONB into typed struct fields.** Engineers sometimes look for a `debezium.jsonb.expand-to-struct=true` or equivalent option — it does not exist. There is no Debezium PostgresConnector configuration that takes a JSONB column on the source side and emits one column-per-JSON-key on the Kafka message side. **This is by design**: JSONB has no schema, so typed expansion is not possible without user-defined transformation logic (which keys to extract, what types they should be, what to do when a key is missing or has the wrong type). Debezium emits the full JSONB value as a single `STRING` field in the change event payload; turning it into typed columns is the consumer's job — exactly the `get_json_object(...)` flattening pass shown in Option 2 above. The same applies on the Iceberg sink side: neither `debezium-server-iceberg` nor a custom Spark Structured Streaming consumer auto-expands the JSON blob; both write it as VARCHAR and leave key extraction to downstream queries or transformation jobs.
 
 > **Debezium JSONB serialization details.** Debezium serializes Postgres `JSONB` columns via the **`io.debezium.data.Json`** semantic type — the change-event payload carries the JSON value as a UTF-8 string with a Kafka Connect schema marker `{ "type": "string", "name": "io.debezium.data.Json" }`. The consumer (a Spark Structured Streaming job reading from Kafka, or the `debezium-server-iceberg` sink) sees a plain JSON **string** in the `after`/`before` payload — no converter SMT (single message transform) is required to handle JSONB in the standard Spark consumer pattern. Just read the field as a `STRING` from the Kafka value and pass it to `get_json_object(...)` or write it through to Iceberg as VARCHAR.

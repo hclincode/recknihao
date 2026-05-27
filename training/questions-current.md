@@ -1,12 +1,12 @@
-# Iter 324 Questions
+# Iter 325 Questions
 
 Date: 2026-05-27
-Topics: Trino 467 Iceberg maintenance — what runs where (Q1) + JSONB column ingestion into Iceberg (Q2)
+Topics: Iceberg manifest cleanup / optimize_manifests version gate on Trino 467 (Q1) + STRUCT vs flat columns for stable-schema JSONB (Q2)
 
-## Q1 — Iceberg table maintenance: Trino 467 vs Spark
+## Q1 — Iceberg maintenance: manifest cleanup and slow query planning on Trino 467
 
-We're running Trino 467 and I'm trying to clean up our Iceberg tables — we have a bunch of old snapshots piling up and the storage costs are climbing. I looked at some docs online and found syntax like `ALTER TABLE ... EXECUTE expire_snapshots(retain_last => 10, clean_expired_metadata => true)`, but when I ran it against our Trino cluster I got an error saying those parameters don't exist. What can I actually run from Trino 467 to expire snapshots, and is there anything I just flat-out cannot do from Trino and would need a separate Spark job for?
+Our Trino queries on one of our larger Iceberg event tables are getting slow at the planning phase — before any data is actually read, there's a multi-second delay that gets worse the longer we go without maintenance. I went looking for a fix and found several references suggesting we should run something called `optimize_manifests` or `rewrite_manifests` to clean up "manifest files." I tried running `ALTER TABLE iceberg.analytics.events EXECUTE optimize_manifests` against our Trino cluster (we're on version 467) and got an error saying the procedure doesn't exist. Can you explain what manifest files actually are and why they slow down query planning rather than data reading, and tell me what I should actually run on Trino 467 to fix this — whether that's a different Trino command or something I need to run from Spark instead?
 
-## Q2 — Postgres-to-Iceberg ingestion: JSONB column handling
+## Q2 — Postgres-to-Iceberg ingestion: is a "struct" type better than individual columns when you control the JSONB schema?
 
-We're pulling change events from Postgres into Iceberg via Debezium and Kafka, and it's mostly working. But one of our Postgres tables has a `details` column that's stored as JSONB — it has nested fields like `plan_tier`, `feature_flags`, and `region` that our customers actually want to filter on in their dashboards. Right now those nested fields are just landing as a raw JSON string in Iceberg, which means our Trino queries can't filter on them efficiently. What's the right way to handle this — do we extract the fields during ingestion and store them as real columns, or is there a way to query into the JSON string from Trino that performs well enough?
+We have a `metadata` JSONB column in one of our core Postgres tables that we own completely — it is not user-generated, we wrote the schema, and it always has exactly the same eight fields: `account_tier`, `region`, `feature_flags`, `contract_start`, `contract_end`, `seat_count`, `billing_cycle`, and `support_tier`. None of these fields are ever missing or added at runtime. Previously I was told the right move for JSONB in Iceberg is to flatten the hot fields into individual columns and store the raw JSON as a fallback string. But a colleague mentioned that Iceberg has a "struct" or "nested record" type that can hold all eight fields in a typed format without creating eight separate top-level columns — and that this might be cleaner when you know the schema upfront. Is that a real thing? If we go with individual flat columns versus a struct type versus just leaving it as a plain JSON string column, what are the actual trade-offs in terms of query performance, schema evolution, and operational overhead on our Trino 467 + Iceberg setup?
