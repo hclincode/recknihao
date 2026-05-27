@@ -43,7 +43,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.474 | 99 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.623 | 16 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
-| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.504 | 247 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.507 | 249 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.763 | 4 |
 
 ---
@@ -9862,3 +9862,23 @@ Verified: trino.io/docs/current/connector/iceberg.html, trino.io/docs/current/ad
 **Key findings**: ILIKE no pushdown by default — verified (trino.io connector docs); `enable_string_pushdown_with_collate` correct session property name — verified (PR #9746); COLLATE "C" mechanism and collation correctness caveat — verified; lowercase generated column pattern — correct and production-safe. Minor gap: no mention of catalog-level config as alternative to session property; no explicit OPA SET SESSION permission note.
 
 Verified: trino.io/docs/current/connector/postgresql.html, github.com/trinodb/trino/pull/9746.
+
+### Iter 287 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (Postgres unsupported type handling: IGNORE default silently drops; ENUMs map natively to VARCHAR; CONVERT_TO_VARCHAR fix; session property; JDBC debug logging diagnostic)
+
+**Score: 4.96/5.0 PASS**
+
+**Topics updated**: Trino federation — prior avg 4.504 across 247 questions; new running avg (1112.451 + 4.96) / 248 = 1117.411 / 248 = **4.506 across 248 questions**. Status: PASSED (solidifying above threshold).
+
+**Key findings**: postgresql.unsupported-type-handling=IGNORE default — verified; custom ENUMs map natively to VARCHAR (not via unsupported-type-handling path) — verified; CONVERT_TO_VARCHAR correct alternative — verified; session property syntax correct; JDBC DEBUG logger name verified; DESCRIBE-vs-\d diagnostic correct. No significant errors.
+
+Verified: trino.io/docs/current/connector/postgresql.html.
+
+### Iter 287 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (Postgres array column mapping: DISABLED default silently drops; AS_ARRAY → ARRAY<T>; AS_JSON for multi-dim; CONTAINS/ANY_MATCH; no pushdown; system.query() @> for GIN index)
+
+**Score: 4.93/5.0 PASS**
+
+**Topics updated**: Trino federation — prior avg 4.506 across 248 questions; new running avg (1117.411 + 4.93) / 249 = 1122.341 / 249 = **4.507 across 249 questions**. Status: PASSED (solidifying above threshold).
+
+**Key findings**: postgresql.array-mapping=DISABLED default — verified; AS_ARRAY → ARRAY<VARCHAR> for TEXT[] — verified; AS_JSON for multi-dimensional arrays — verified; array predicates (CONTAINS/ANY_MATCH) do NOT push down — verified; system.query() with @> for GIN index — correct. Session property syntax (underscore, catalog prefix) — correct.
+
+Verified: trino.io/docs/current/connector/postgresql.html, trino.io/docs/current/optimizer/pushdown.html.

@@ -1,7 +1,7 @@
 {
-  "iteration": 287,
+  "iteration": 288,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter286 avg 4.875: Q1 (4.90 PASS) Iceberg DF wait timeout catalog-config-only — teacher285 fix validated; correct SET SESSION failure; Hive vs Iceberg contrast; three workarounds without restart. Q2 (4.85 PASS) ILIKE pushdown: no default; enable_string_pushdown_with_collate session prop; COLLATE C risk; lowercase generated column. TOPIC: Trino federation 4.501/245 → 4.504/247. SOLIDLY PASSED."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter287 avg 4.945: Q1 (4.96 PASS) Postgres unsupported-type-handling: IGNORE default silently drops; ENUMs map natively to VARCHAR; CONVERT_TO_VARCHAR fix; JDBC debug logging. Q2 (4.93 PASS) Postgres array mapping: DISABLED default; AS_ARRAY/AS_JSON; CONTAINS/ANY_MATCH; no pushdown; system.query() @> for GIN. TOPIC: Trino federation 4.504/247 → 4.507/249. SOLIDLY PASSED."
 }

@@ -1,13 +1,15 @@
-# Iter 286 Questions
+# Iter 287 Questions
 
-## Q1 — Iceberg scan seems to ignore our Postgres join filter, is there a timeout somewhere?
+## Q1 — Postgres column completely missing when I query through Trino
 
-We have a federated query where we join a big Iceberg event table (left side, around 200 million rows) against a Postgres customers table (right side, maybe 50k rows). The whole point is that Trino reads Postgres first, figures out which customer IDs are relevant, and then only scans the matching Iceberg files instead of everything. That part seems to work sometimes, but on days when Postgres is under load and responds slowly, the query just blows up and scans the full Iceberg table like it didn't even try to filter.
+We have a Postgres table with a column that stores some custom status values — it's defined as a custom type (an enum we created in Postgres years ago, something like `CREATE TYPE order_status AS ENUM ('pending', 'fulfilled', 'cancelled')`). The column is definitely there, I can SELECT it directly in Postgres no problem.
 
-My theory is that Trino gives up waiting for the Postgres side to finish and just starts scanning Iceberg anyway. Is that actually what's happening — like there's some timeout where Trino says "filter didn't arrive in time, I'll just scan everything"? If so, can I bump that timeout somewhere, either in a query hint or a session setting I can set per query? I'd rather not restart the coordinator just to test a config change.
+But when I query that same table through Trino — either with `DESCRIBE` or just `SELECT *` — the column is completely gone. It's not null, it's not throwing an error, it literally does not appear in the result at all. No warning either. I double-checked the catalog config and the table name is definitely correct, it's reading other columns from the same table fine.
 
-## Q2 — Does Trino push ILIKE down to Postgres or does it pull everything into memory?
+Is this a known thing where Trino quietly drops columns it doesn't understand? How do I get that column to show up, even if it comes back as a plain string?
 
-We're building a search feature where users can search customer names case-insensitively — basically a LIKE but it shouldn't care whether the name is stored as "Acme Corp" or "acme corp." In Postgres directly I'd just use ILIKE and it works fine and uses the index.
+## Q2 — Postgres array column not showing up in Trino, or maybe it does but I can't query it right
 
-Now we're routing that query through Trino because the rest of the query joins against Iceberg data. My concern is that Trino might not know how to push ILIKE down to Postgres — so instead of Postgres doing the filtering with its index, Trino pulls the entire customers table into memory and does the case-insensitive match itself. Is that what happens? Is there a way to tell Trino it's okay to push ILIKE down, or are we stuck doing a full table transfer every time someone searches?
+We store a list of tags per customer in Postgres as a `TEXT[]` column — just a plain Postgres array. When I try to access it through Trino it either doesn't show up at all, or when it does show up I'm not sure how to actually filter on it (like "give me all customers where tags contains 'enterprise'").
+
+Can Trino even work with Postgres array columns? Is there a setting I need to flip to make the column visible, and if so does it come back as something I can actually search inside, or just a raw string I'd have to parse myself?
