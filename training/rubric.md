@@ -30,13 +30,13 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.480 | 9 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.461 | 107 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.464 | 108 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.775 | 5 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.50 | 3 |
 | Query performance basics: partitioning, indexing strategy for analytics | PASSED | 4.675 | 5 |
 | Lakehouse schema design: fact tables, dimension tables, denormalization | PASSED | 4.650 | 5 |
-| Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.583 | 16 |
+| Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.596 | 17 |
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.500 | 5 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
@@ -50,6 +50,40 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 305 — 2026-05-27
+
+**Q1** — Trino resource groups: hardConcurrencyLimit / softMemoryLimit / maxQueued, selectors, two-file setup, weighted_fair scheduling, client source string routing
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.8** — PASS |
+
+All property names verified against official Trino docs. Two-file setup correct. schedulingPolicy: weighted_fair placement correct. Client X-Trino-Source routing covered. Minor: doesn't explicitly answer the CPU question ("Trino resource groups do not have a CPU quota knob — concurrency limits + scheduling weights govern CPU indirectly"). softCpuLimit/hardCpuLimit not mentioned.
+
+**Q2** — Iceberg partition strategy: `(day(occurred_at), tenant_id)` recommendation, pruning mechanics, metadata-only billing query, skew / bucketing threshold, DDL for Trino + Spark, compaction, partition evolution
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.8** — PASS |
+
+Standard SaaS default recommendation correct and verified. Metadata-only COUNT(*) GROUP BY tenant_id advantage of identity vs bucket correctly explained. All DDL verified. Compaction and snapshot expiry paired correctly. Partition evolution syntax verified against Trino docs. Minor: column-order-doesn't-affect-pruning slightly oversimplified (affects directory layout under Hive-compatible paths).
+
+**Iter 305 average: 4.8 — PASS** ✓
+
+**Topics updated**:
+- Multi-tenant analytics: 4.461/107 → **4.464/108 questions** (PASSED — improving)
+- Iceberg partition design for SaaS: 4.583/16 → **4.596/17 questions** (PASSED — improving)
+
+---
 
 ### Iter 304 — 2026-05-27
 

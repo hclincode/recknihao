@@ -1,12 +1,12 @@
-# Iter 304 Questions
+# Iter 305 Questions
 
 Date: 2026-05-27
-Topics: HLL varbinary cast retest (Q1) + Iceberg schema evolution (Q2)
+Topics: Trino resource groups (Q1) + Partition strategy for multi-tenant SaaS events table (Q2)
 
-## Q1 — HLL type error storing sketches in Iceberg
+## Q1 — Trino resource groups: stopping ingestion from starving dashboards
 
-We're trying to store a daily pre-aggregated count of unique users in an Iceberg table so we can roll it up into 7-day and 30-day windows quickly, but our CREATE TABLE query is failing with something about the HyperLogLog type not being supported. What are we doing wrong, and what's the right way to store these sketches so we can actually merge them later when a customer queries their rolling 30-day active users?
+We have one Trino cluster that both our customer dashboards and our nightly data loading jobs hit at the same time. Lately when the ingestion jobs are running, our dashboard queries start timing out or just crawl. Someone said we should configure something called "resource groups" in Trino. What does that actually do? Is it just a queue, or does it actually give different jobs different amounts of memory or CPU? And how do we set it up so dashboards always get served even when ingestion is hammering the cluster?
 
-## Q2 — Adding a column to a live Iceberg table with hundreds of millions of rows
+## Q2 — How to partition a new multi-tenant SaaS events table
 
-When we need to add a new column to a live Iceberg table that already has hundreds of millions of rows, what actually happens to the old Parquet files? Does Iceberg have to rewrite all of them, or is there some way it handles this without touching existing data?
+We're setting up a new table to store customer activity events — columns like `tenant_id`, `event_type`, `occurred_at` (timestamp), and `user_id`. We expect each tenant to have wildly different event volumes. Before we load data, we need to decide how to partition this table, and we have no idea how to think about it. Should we partition by tenant? By date? Both? Does it even matter if we're using something like Iceberg? What's the actual decision process here?

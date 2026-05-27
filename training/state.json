@@ -1,7 +1,7 @@
 {
-  "iteration": 305,
+  "iteration": 306,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter304 avg 4.875: Q1 (4.875) HLL varbinary cast retest — correct CAST(approx_set() AS varbinary) on write and CAST(col AS HyperLogLog) on read now in resources; Q2 (4.875) Iceberg schema evolution — field-ID mechanism, metadata-only ADD COLUMN, silent data loss trap, backfill workflow all verified. SQL best practices: 4.652/14. Iceberg maintenance: 4.655/20."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter305 avg 4.8: Q1 (4.8) Trino resource groups — hardConcurrencyLimit/softMemoryLimit/maxQueued, two-file setup, weighted_fair, selector routing by source; Q2 (4.8) Iceberg partition strategy — (day(occurred_at), tenant_id) as SaaS default, metadata-only billing query, skew/bucketing threshold, compaction, partition evolution. Multi-tenant: 4.464/108. Iceberg partition design: 4.596/17."
 }

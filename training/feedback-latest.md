@@ -1,71 +1,73 @@
-# Feedback — Iter 304 (Extended phase)
+# Feedback — Iter 305 (Extended phase)
 
 Date: 2026-05-27
-Topics: HLL varbinary cast retest (Q1) + Iceberg schema evolution (Q2)
+Topics: Trino resource groups (Q1) + Iceberg partition strategy for multi-tenant SaaS events table (Q2)
 
 ## Results summary
 
 | Question | Topic angle | Score | Pass/Fail |
 |---|---|---|---|
-| Q1 | HLL varbinary cast: CAST(approx_set() AS varbinary) + CAST(col AS HyperLogLog) for rolling WAU/MAU | **4.875** | PASS |
-| Q2 | Iceberg schema evolution: field-ID mechanism, metadata-only ADD COLUMN, silent data loss trap, backfill | **4.875** | PASS |
+| Q1 | Trino resource groups: hardConcurrencyLimit/softMemoryLimit/maxQueued, selectors, weighted_fair | **4.8** | PASS |
+| Q2 | Partition strategy: `(day(occurred_at), tenant_id)`, pruning, metadata-only query, compaction, evolution | **4.8** | PASS |
 
-**Iter 304 average: 4.875 — PASS** ✓
+**Iter 305 average: 4.8 — PASS** ✓
 
 **Topic updates**:
-- SQL query best practices for OLAP: 4.635/13 → **4.652/14 questions** (PASSED — improved)
-- Iceberg table maintenance: 4.643/19 → **4.655/20 questions** (PASSED — improved)
+- Multi-tenant analytics: 4.461/107 → **4.464/108 questions** (PASSED — improving)
+- Iceberg partition design for SaaS: 4.583/16 → **4.596/17 questions** (PASSED — improving)
 
 ---
 
 ## No resource fixes needed
 
-Both answers were technically accurate. No resource corrections required before iter305.
+Both answers were technically accurate and verified against official docs. No resource corrections required before iter306.
 
 ---
 
 ## What worked
 
-### Q1 — HLL varbinary cast retest (4.875)
-1. Root cause identified correctly: `HyperLogLog` is an in-engine Trino type with no Parquet encoding; Iceberg cannot persist it directly
-2. `CAST(approx_set(user_id) AS varbinary)` on write — the critical fix from iter303 gap — present and correct
-3. `CAST(user_id_hll AS HyperLogLog)` on read before `merge()` — present with the exact error message when skipped
-4. All three primitives (approx_set / merge / cardinality) explained with types and roles
-5. Complete double-cast gotcha table showing the two wrong patterns and the correct pattern side by side
-6. Dashboard query using `CASE WHEN` inside `merge()` for WAU + MAU in one scan — the cleanest approach
-7. ~2.3% standard error correctly framed with validation query
-8. Nightly incremental refresh pattern (`INSERT INTO ... WHERE event_date = CURRENT_DATE - INTERVAL '1' DAY`)
-9. Performance table: GB raw scan vs ~30KB sketch merge
+### Q1 — Trino resource groups (4.8)
+1. Correctly distinguishes resource groups from "just a queue" — controls concurrency, memory, and admission together
+2. All three primary properties named and explained: `hardConcurrencyLimit`, `softMemoryLimit`, `maxQueued`
+3. Two-file setup (`resource-groups.properties` + `resource-groups.json`) correct with exact required properties
+4. Working JSON config: dashboard and ingestion subgroups under root, correct structure
+5. `schedulingPolicy: weighted_fair` correctly placed at parent level; `schedulingWeight` correctly on children
+6. Selectors: source/user/queryType routing, first-match-wins ordering rule
+7. Client-side `X-Trino-Source` header / JDBC `?source=` parameter correctly identified as routing key
+8. Common-mistakes section: forgetting .properties file and wrong property names called out explicitly
+9. Verification via `system.runtime.queries` — concrete and runnable
+10. Correctly distinguishes group-level `softMemoryLimit` from per-query `query.max-memory-per-node`
 
-### Q2 — Iceberg schema evolution (4.875)
-1. Field-ID mechanism explained correctly and verified against Iceberg spec
-2. ADD COLUMN metadata-only with zero file rewrites — confirmed instant at any table size
-3. Old files return NULL for new column via field-ID matching — correctly explained
-4. Clean taxonomy: metadata-only (ADD/DROP/RENAME/REORDER/safe type promotion) vs requires rewrite (backfill, unsafe type change, NOT NULL)
-5. Silent data loss trap — concrete dangerous SQL example with explanation of why it fails silently
-6. 5-step safe production workflow: add → verify NULL → MERGE INTO backfill → verify → wire dashboards
-7. How Trino handles mixed-schema files: per-file field-ID mapping, NULL column projection on old files
-8. Drop column orphaned bytes + `rewrite_data_files` for storage reclamation
-9. Why Iceberg field-ID tracking is safer than plain Parquet name-based column matching
+### Q2 — Partition strategy (4.8)
+1. `(day(occurred_at), tenant_id)` recommended as standard SaaS default with clear reasoning
+2. Both-axis pruning explained: time range AND per-tenant, and cross-tenant scenario
+3. Metadata-only billing query advantage of identity `tenant_id` vs bucket — explicitly notes bucketing loses this
+4. Correct skew threshold (200+ tenants) before switching to bucket transform
+5. Production DDL for both Trino and Spark — syntax verified
+6. Compaction procedure correctly scoped to Spark with correct options map syntax
+7. Snapshot expiry paired with compaction; Trino 467 7-day floor noted
+8. Partition evolution: `ALTER TABLE SET PROPERTIES partitioning = ARRAY[...]` syntax verified
+9. EXPLAIN ANALYZE verification step gives engineer a concrete next action
+10. "What NOT to do" addresses hour/minute, tenant-only, and event_type anti-patterns
 
 ---
 
 ## Minor gaps (not errors, not resource fixes needed)
 
 ### Q1
-- Self-join rolling window (Step 2) is more expensive than the `CASE WHEN` + single scan approach shown later. Should lead with the cleaner dashboard query pattern.
-- `P4HyperLogLog` (denser, fixed-format alternative) not mentioned — minor omission
-- Single-day DAU via `cardinality(CAST(col AS HyperLogLog))` without `merge()` not shown
+- Doesn't explicitly answer the CPU question ("Trino resource groups do not have a CPU quota knob — concurrency limits + scheduling weights govern CPU indirectly"). The user asked about CPU; the answer implies it but doesn't state it directly.
+- `softCpuLimit` / `hardCpuLimit` optional fields (CPU-time-based admission over a window) not mentioned — rarely used but worth one line.
+- JWT auth: `user` selector matches JWT principal name, not a Trino role name — not strictly needed for this question but a recurring gap.
 
 ### Q2
-- Iceberg v3 `initial-default` / `write-default` capability (lets old rows read a non-NULL default instead of NULL) not mentioned — useful for teams wanting to avoid backfill entirely
-- MERGE INTO backfill example assumes a `properties` JSON column the user never mentioned; framed as an example, not a problem
+- "Column order doesn't affect pruning" is slightly oversimplified — column order can affect directory layout under Hive-compatible paths and write distribution, though pruning itself is indeed column-order-independent.
+- Hidden partitioning (no need to add a derived `event_date` column) not mentioned explicitly.
 
 ---
 
-## Suggested iter305 angles
+## Suggested iter306 angles
 
-1. **Trino resource groups** — configuring concurrency limits so dashboard queries don't starve ingestion jobs; memory caps per group; queue behavior
-2. **Partition strategy for a new SaaS table** — given a specific schema, walk through the decision: which column to partition by, what granularity (day/month), tenant_id vs time
-3. **Iceberg compaction triggers** — when to run `rewrite_data_files`, small-files problem symptoms, recommended file size targets, how to schedule
-4. **Approximate aggregation beyond COUNT DISTINCT** — `approx_percentile` for p99 latency dashboards, when to use vs exact
+1. **Approx_percentile for p99 latency dashboards** — when `approx_percentile` is appropriate vs exact, accuracy guarantees, multi-percentile syntax `approx_percentile(col, ARRAY[0.5, 0.95, 0.99])`
+2. **CDC ingestion: Debezium → Kafka → Iceberg** — how change-data-capture works end to end, merge semantics for upserts, handling deletes in Iceberg MoR mode
+3. **When Postgres is enough vs when to move to an OLAP layer** — concrete decision triggers (row counts, query latency, concurrent users, query complexity), how to profile Postgres first
+4. **Trino CBO follow-up: join ordering with NDV** — what happens when ANALYZE is stale, how to tell if the optimizer made a bad join order decision
