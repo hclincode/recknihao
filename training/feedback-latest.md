@@ -1,71 +1,80 @@
-# Feedback — Iter 306 (Extended phase)
+# Feedback — Iter 307 (Extended phase)
 
 Date: 2026-05-27
-Topics: When Postgres is enough vs OLAP (Q1) + CDC: Debezium→Kafka→Iceberg for updates and deletes (Q2)
+Topics: approx_percentile for p99 latency dashboards (Q1) + Parquet column storage and JSON predicate pushdown (Q2)
 
 ## Results summary
 
 | Question | Topic angle | Score | Pass/Fail |
 |---|---|---|---|
-| Q1 | When to add OLAP: profiling Postgres first, tuning ladder, decision thresholds, migration to Iceberg+Trino | **4.9** | PASS |
-| Q2 | CDC ingestion: WAL+Debezium, op/before/after events, MERGE INTO for UPDATE/DELETE, CoW vs MoR, hourly batch first | **4.875** | PASS |
+| Q1 | approx_percentile: T-Digest sketch, ARRAY multi-percentile, exact-vs-approx decision rule, PERCENTILE_CONT non-support in Trino | **4.75** | PASS |
+| Q2 | Parquet min/max stats, three-level file skipping, JSON-as-string defeats skipping, two-tier schema promote solution | **4.85** | PASS |
 
-**Iter 306 average: 4.888 — PASS** ✓
+**Iter 307 average: 4.80 — PASS** ✓
 
 **Topic updates**:
-- When to add an OLAP layer: 4.480/9 → **4.522/10 questions** (PASSED — improving)
-- Postgres-to-Iceberg ingestion: 4.480/102 → **4.484/103 questions** (PASSED — stable)
+- SQL query best practices for OLAP: 4.652/14 → **4.645/15 questions** (PASSED — stable)
+- Column-oriented storage: 4.524/8 → **4.560/9 questions** (PASSED — improving)
 
 ---
 
-## No resource fixes needed
+## Resource fixes applied (PRIORITY — fixed before iter308)
 
-Both answers technically accurate and verified against official docs. No resource corrections required before iter307.
+### Resources 07 and 23: approx error figure corrected to 2.3%
+
+The Q1 answer wrote "~2% relative standard deviation" when Trino's official aggregate-functions docs state **2.3% standard error**. This was also in the resources.
+
+**Fixed in both resources 07 and 23:**
+- "~2% error" → "2.3% standard error" for `approx_distinct` (HyperLogLog)
+- "~2% std error" → "2.3% standard error" with correct ±2.3%/±4.6%/±6.9% breakdown
+- Added `approx_percentile` accuracy note with 2.3% standard error and PERCENTILE_CONT non-support caveat
+- Also added multi-percentile ARRAY syntax to resource 23
 
 ---
 
 ## What worked
 
-### Q1 — When to add OLAP (4.9)
-1. Profiling-first approach: `log_min_duration_statement` + `EXPLAIN ANALYZE` before any warehouse recommendation
-2. EXPLAIN ANALYZE plan-node interpretation table (Seq Scan / Bitmap Index Scan / Sort / Nested Loop) accurate and beginner-friendly
-3. Tuning ladder ordered by impact-vs-effort: read replica → partial indexes → materialized views → composite indexes → PgBouncer
-4. Correctly redirects from "Snowflake" to the actual production stack (MinIO + Iceberg + Trino + Spark)
-5. Concrete decision thresholds: >10M rows for Seq Scan red flag, >50M rows for size problem, >1.5s after tuning, 2+ source systems
-6. Three-node decision tree + full checklist + red flags = clear flowchart for an oncall engineer
-7. Shows concrete PySpark migration snippet with `df.write.format("iceberg")` — answers "what does moving mean" practically
-8. `$0 fix first` mentality closing summary
+### Q1 — approx_percentile (4.75)
+1. Both ARRAY and per-column forms of approx_percentile shown with clear guidance on when to use each
+2. Explicitly flags that Trino does NOT support `PERCENTILE_CONT WITHIN GROUP (ORDER BY ...)` — saves engineer a syntax error
+3. Decision framework anchored on business consequence ("would 2% off harm the business?") — correct framing
+4. Validate-against-existing-monitoring rollout pattern is the right production migration approach
+5. Production dashboard query: valid Trino 467 syntax, uses partition pruning (`WHERE event_date = CURRENT_DATE`), groups by hour and endpoint, single pass
+6. Edge case: small per-tenant samples (<1,000 rows) widen relative error — shows multi-tenant SaaS awareness
 
-### Q2 — CDC ingestion (4.875)
-1. Correctly explains Debezium reads the Postgres WAL via logical replication, never tables directly
-2. Concrete JSON event sample showing op/before/after — all op codes (c/u/d) verified accurate
-3. UPDATE handling: MERGE INTO by primary key with WHEN MATCHED UPDATE + WHEN NOT MATCHED INSERT — correct SQL
-4. DELETE handling: MERGE INTO with WHEN MATCHED THEN DELETE using op="d" and before image — correct
-5. All three Postgres prerequisites named and explained: `wal_level = logical`, `REPLICA IDENTITY FULL` (with correct rationale — default only logs PK columns), `pg_create_logical_replication_slot` with pgoutput
-6. CoW vs MoR section: file-rewrite mechanics, delete-file mechanics, 5–30% read penalty, >1,000 UPDATEs/micro-batch decision rule, correct `write.delete.mode`/`write.update.mode`/`write.merge.mode` property names, hourly compaction
-7. Honest "start with hourly batch first" recommendation — directly addresses 18-hour-stale pain with a 10x simpler fix before introducing Kafka+Debezium
-8. 2–4 week stabilization timeline estimate sets realistic expectations
+### Q2 — Parquet storage and JSON predicate pushdown (4.85)
+1. Opens with a crisp one-line answer that directly addresses the question
+2. Correctly explains per-row-group min/max statistics with a concrete row-group skipping example
+3. Accurately covers dictionary encoding for low-cardinality columns with a clear example
+4. Precisely diagnoses why JSON-as-string defeats file skipping: min/max captures byte range of whole JSON text, not contents
+5. Cleanly enumerates three-level skipping cascade: manifest pruning → row-group pruning → column projection
+6. Two-tier schema solution with concrete before/after DDL and Iceberg-native partitioning syntax
+7. Correct Trino syntax: `json_extract_scalar(properties, '$.plan')` — verified
+8. Correct PySpark syntax: `get_json_object("properties", "$.plan")` — verified
+9. Decision rule for promote-vs-keep with cardinality guidance (10–10,000 sweet spot for dictionary encoding)
+10. Production-stack-aware: MinIO I/O as bottleneck, Iceberg metadata-only `ADD COLUMN`, need to backfill old rows
+11. Combined filter pattern: promoted columns prune files first, then `json_extract_scalar` runs on the reduced slice
 
 ---
 
-## Minor gaps (not errors, not resource fixes needed)
+## Minor gaps (not errors, not additional resource fixes needed)
 
 ### Q1
-- `REFRESH MATERIALIZED VIEW CONCURRENTLY` requires a UNIQUE index on the view — not mentioned; engineer copy-pasting will get an error
-- `pg_stat_statements` extension not mentioned — standard tool for finding which 5 queries account for 80% of dashboard time
-- `work_mem` / `shared_buffers` tuning not mentioned — often explains "Sort: 512MB+" memory pressure visible in EXPLAIN output
+- "~2% error" stated (now fixed in resources) — should be 2.3% standard error per Trino docs
+- "T-Digest algorithm" overcommits to a specific implementation name that Trino docs don't use for approx_percentile (safer: "quantile-sketch algorithm")
+- Weighted variant `approx_percentile(x, w, percentages)` not mentioned
+- Performance comparison table numbers not caveatted as "cluster-dependent, YMMV"
 
 ### Q2
-- No mention of Debezium `r` op code (snapshot read events emitted during initial snapshot) — engineer will see these on day one
-- No mention of replication slot WAL bloat risk — if Debezium goes down, the slot pins WAL and Postgres disk fills up (#1 production incident; should mention heartbeat config and slot monitoring)
-- No mention of tombstone events (null-value Kafka messages after delete) and Kafka log-compaction interaction
-- Schema drift mentioned as a tradeoff but no concrete pointer to Iceberg's `ALTER TABLE ADD COLUMN` as the analytics-side primitive
+- LIKE '%value%' (leading wildcard) defeating pruning even on typed string columns — not mentioned
+- Parquet Page Index (sub-row-group skipping) not mentioned
+- Sorting/clustering data by filter column to tighten min/max bounds not mentioned
 
 ---
 
-## Suggested iter307 angles
+## Suggested iter308 angles
 
-1. **approx_percentile for p99 latency dashboards** — when `approx_percentile` is appropriate vs exact percentile, multi-percentile syntax `approx_percentile(col, ARRAY[0.5, 0.95, 0.99])`, accuracy trade-offs
-2. **Replication slot WAL bloat** — the #1 Debezium production incident; how to monitor, heartbeat config, `max_slot_wal_keep_size`, slot drop-and-replay procedure
-3. **JSONB ingestion patterns** — promoting vs keeping as VARCHAR blob, `json_extract_scalar` in Trino vs `get_json_object` in PySpark, file-skipping limitation on JSON predicates
-4. **Column-oriented storage deep dive** — how Parquet encodes data physically (row groups, column chunks, dictionary encoding), why predicate pushdown works at the file level
+1. **Postgres-to-Iceberg ingestion: JSONB column promotion at ingest time** — retest Q2's topic in a more practical angle: the engineer wants to know HOW to set up the ingest pipeline to promote JSON fields (dbt, Spark job, or dbt macro)
+2. **Multi-tenant analytics: per-tenant query isolation with Trino views** — how to set up Trino views that bake in `WHERE tenant_id = ...` so tenants can never query each other's data
+3. **Real-time vs batch trade-offs** — when is the freshness cost of batch acceptable, what are the operational triggers to move to streaming
+4. **approx_percentile accuracy refinement** — retest the topic now that resources have 2.3% standard error corrected

@@ -1,12 +1,12 @@
-# Iter 306 Questions
+# Iter 307 Questions
 
 Date: 2026-05-27
-Topics: When Postgres is enough vs OLAP (Q1) + CDC ingestion Debezium→Kafka→Iceberg (Q2)
+Topics: approx_percentile for p99 latency dashboards (Q1) + Parquet column storage and JSONB predicate pushdown (Q2)
 
-## Q1 — How do I know if this is a "fix Postgres" problem or "you've outgrown Postgres for analytics"?
+## Q1 — approx_percentile vs exact percentile for p99 API latency
 
-Our dashboard runs about 15 analytics queries per page load. Last quarter they were averaging 800ms, now they're hitting 4-6 seconds and we're getting customer complaints. Someone on the team is saying we need to move everything to Snowflake. But I don't want to build a whole new data pipeline if we just need to tune some indexes. How do I actually figure out whether this is a "fix Postgres" problem or a "you've outgrown Postgres for analytics" problem? What should I be looking at?
+We're trying to show p99 API response time on our analytics dashboard. Someone on the team said we should use `approx_percentile` instead of the regular percentile function because it's way faster on large datasets. How do I know when that's actually okay to use versus when I need the exact number? And can I calculate p50, p95, and p99 in a single query, or do I have to run three separate ones?
 
-## Q2 — How does change data capture actually work, and what happens to updates and deletes on the analytics side?
+## Q2 — Why does filtering by customer_id scan almost nothing, but filtering on a JSON column scans everything?
 
-Right now we do a full dump of our Postgres tables every night at 2am and reload them into our analytics system. It's causing noticeable load on our production DB and we're also just getting stale data — customers are complaining their dashboards are 18 hours behind. Someone mentioned something called "change data capture" as a way to stream just the changes over instead of doing full copies. I have no idea how that works. Can you explain what's actually happening under the hood, and specifically, how do deletes and updates get handled on the analytics side — because I assume the analytics copy isn't just a live replica?
+I noticed that when I filter my Iceberg table by something like `customer_id = 'abc123'`, the query is super fast and barely touches any data. But when I filter on a value that's inside a JSON column — like `WHERE json_col LIKE '%some_value%'` or even using a JSON extract function on it — it seems to read the whole table. Why does one work and the other doesn't? Does it have to do with how Parquet stores the data physically, or is something else going on?

@@ -26,7 +26,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | OLAP vs OLTP — difference and why it matters for SaaS | PASSED | 4.542 | 3 |
 | What a data warehouse is and when a SaaS product needs one | PASSED | 4.647 | 3 |
 | What a data lakehouse is and how it differs from a warehouse | PASSED | 4.625 | 2 |
-| Column-oriented storage — what it is and why it's faster for analytics | PASSED | 4.524 | 8 |
+| Column-oriented storage — what it is and why it's faster for analytics | PASSED | 4.560 | 9 |
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
@@ -45,11 +45,49 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
-| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.652 | 14 |
+| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.645 | 15 |
 
 ---
 
 ## Score history
+
+### Iter 307 — 2026-05-27
+
+**Q1** — `approx_percentile` for p99 latency dashboards: T-Digest probabilistic sketch, ARRAY multi-percentile syntax both forms, NOT-supported `PERCENTILE_CONT WITHIN GROUP`, decision rule based on consequence (SLA/billing/audit vs internal dashboards), validate-against-monitoring rollout pattern, hourly per-endpoint p50/p95/p99 production query on Iceberg+Trino
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** — PASS |
+
+Both ARRAY and per-column forms shown with guidance on which to use. Correctly flags absence of `PERCENTILE_CONT WITHIN GROUP (ORDER BY)` in Trino (verified vs trino.io aggregate functions docs). Decision rule anchored on business consequence ("2% off — harm or not?") is the right framing. Production dashboard query is valid Trino 467 syntax with partition pruning. Minor accuracy nits: stated "~2% error" should be the documented 2.3% standard error; the 68/95/99.7 ranges in the table inherit the same understatement; attribution of T-Digest as the backing algorithm for `approx_percentile` is plausible but not unambiguously documented (Trino docs name only the 2.3% standard error; `tdigest`/`qdigest` are separate data-type pages). Weighted variant `approx_percentile(x, w, percentages)` not mentioned. Topic running avg: (4.652×14 + 4.75)/15 = **4.645/15 questions** — PASSED.
+
+Verified: trino.io/docs/current/functions/aggregate.html, trino.io/docs/current/functions/tdigest.html, trino.io/docs/current/functions/qdigest.html.
+
+**Q2** — Parquet column storage and JSON predicate pushdown: min/max stats per row group, dictionary encoding for low-cardinality columns, three-level skipping cascade (manifest → row-group → column projection), why JSON-as-string defeats all file-skipping, two-tier schema solution (promote hot fields to typed columns), `json_extract_scalar` (Trino) + `get_json_object` (PySpark), decision rule for promote-vs-keep
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.85** — PASS |
+
+All technical claims verified: Parquet per-column-chunk min/max statistics, Iceberg manifest-level file skipping, row-group pruning, `json_extract_scalar` Trino syntax, `get_json_object` PySpark syntax, two-tier schema promote pattern. Minor: LIKE '%value%' with leading wildcard defeating pruning even on typed columns not mentioned; page-level statistics (Parquet Page Index) not mentioned; column sorting/clustering for tighter min/max bounds not mentioned.
+
+**Iter 307 average: 4.80 — PASS** ✓
+
+**Topics updated**:
+- SQL query best practices for OLAP: 4.652/14 → **4.645/15 questions** (PASSED — stable)
+- Column-oriented storage: 4.524/8 → **4.560/9 questions** (PASSED — improving)
+
+**Resource fixes applied**: Resources 07 and 23 updated — "~2% error" corrected to "2.3% standard error" per Trino docs for both `approx_distinct` (HyperLogLog) and `approx_percentile`. Decision tables updated throughout.
+
+---
 
 ### Iter 306 — 2026-05-27
 

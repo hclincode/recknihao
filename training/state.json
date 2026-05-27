@@ -1,7 +1,7 @@
 {
-  "iteration": 307,
+  "iteration": 308,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter306 avg 4.888: Q1 (4.9) When to add OLAP — profiling-first (EXPLAIN ANALYZE, log_min_duration_statement), Postgres tuning ladder (read replica/partial indexes/materialized views), decision tree with 50M-row/1.5s thresholds; Q2 (4.875) CDC ingestion — WAL+Debezium, op/before/after events, MERGE INTO for UPDATE/DELETE, wal_level=logical+REPLICA IDENTITY FULL+replication slot, CoW vs MoR. When-to-add-OLAP: 4.522/10. Postgres ingestion: 4.484/103."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter307 avg 4.80: Q1 (4.75) approx_percentile — ARRAY multi-percentile syntax, PERCENTILE_CONT non-support in Trino, decision rule by consequence; Q2 (4.85) Parquet/JSON — min/max stats, three-level skipping cascade, JSON-as-string defeats file-skipping, two-tier schema promote solution. Resources 07/23 fixed: '~2% error' → '2.3% standard error' per Trino docs. SQL best practices: 4.645/15. Column-oriented storage: 4.560/9."
 }

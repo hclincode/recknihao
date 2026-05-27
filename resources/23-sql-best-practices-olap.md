@@ -64,7 +64,7 @@ A common misconception is that `COUNT(DISTINCT)` is slow because "all values are
 2. **Per-group memory pressure.** Each worker must hold all distinct values within its assigned groups in memory at the same time to detect duplicates (a hash set per group). For a query like "12 months × user_id with high NDV (number of distinct values)," each worker's hash sets can blow past the per-query memory limit.
 3. **Multiple distinct expressions multiply the shuffles.** `SELECT COUNT(DISTINCT user_id), COUNT(DISTINCT session_id) FROM events GROUP BY event_date` triggers a separate shuffle pass for each distinct column. A query with three `COUNT(DISTINCT ...)` calls can perform three full re-shuffles of the input.
 
-Approximations (HyperLogLog for distinct counts, T-Digest for percentiles) sidestep all three: each worker builds a tiny fixed-size sketch in a single pass, then sketches are merged with one cheap shuffle. Typical speedup is **10x to 50x**, with error around 2% (see resource 07 for the precise error model).
+Approximations (HyperLogLog for distinct counts, quantile sketches for percentiles) sidestep all three: each worker builds a tiny fixed-size sketch in a single pass, then sketches are merged with one cheap shuffle. Typical speedup is **10x to 50x** (see resource 07 for the precise error model).
 
 **Replace `COUNT(DISTINCT ...)` with `approx_distinct()`**:
 ```sql
@@ -72,19 +72,23 @@ Approximations (HyperLogLog for distinct counts, T-Digest for percentiles) sides
 SELECT event_date, COUNT(DISTINCT user_id) AS dau
 FROM events GROUP BY event_date;
 
--- Fast (~2% std error): per-worker HyperLogLog sketches, single cheap merge shuffle
+-- Fast (2.3% standard error): per-worker HyperLogLog sketches, single cheap merge shuffle
 SELECT event_date, approx_distinct(user_id) AS dau
 FROM events GROUP BY event_date;
 ```
 
+The **2.3%** is a relative *standard deviation*, not a hard ceiling: ~68% of estimates fall within ±2.3% of the true count, ~95% within ±4.6%. For internal dashboards this is invisible; for billing or customer-facing counts use `COUNT(DISTINCT)`.
+
 **Replace exact percentiles with `approx_percentile()`**:
 ```sql
--- Slow: full sort
-SELECT approx_percentile(latency_ms, 0.95) FROM api_logs;   -- p95
-SELECT approx_percentile(latency_ms, ARRAY[0.5, 0.95, 0.99]) FROM api_logs;
+-- Multi-percentile in one pass — no separate queries needed:
+SELECT approx_percentile(latency_ms, 0.99) AS p99 FROM api_logs;
+SELECT approx_percentile(latency_ms, ARRAY[0.5, 0.95, 0.99]) AS percentiles FROM api_logs;
 ```
 
-**When to use exact**: billing, compliance, audit reports. **When to use approximate**: dashboards, monitoring, exploration, dashboards refreshed every minute.
+`approx_percentile` uses a quantile-sketch algorithm with **2.3% standard error** (per Trino docs). Trino does NOT support `PERCENTILE_CONT WITHIN GROUP (ORDER BY ...)` — that is Postgres/Snowflake syntax. Always use `approx_percentile(col, fraction)` in Trino.
+
+**When to use exact**: billing, compliance, contractual SLA values, audit reports. **When to use approximate**: internal dashboards, monitoring, trend charts, queries refreshed every minute.
 
 ### Before giving up exactness, try a different distinct-aggregation strategy
 
