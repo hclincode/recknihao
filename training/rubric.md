@@ -28,18 +28,18 @@ Each topic must reach the pass threshold before the system can enter final phase
 | What a data lakehouse is and how it differs from a warehouse | PASSED | 4.625 | 2 |
 | Column-oriented storage — what it is and why it's faster for analytics | PASSED | 4.365 | 6 |
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
-| Schema design for analytics: denormalization, star schema basics | PASSED | 4.50 | 2 |
+| Schema design for analytics: denormalization, star schema basics | PASSED | 4.50 | 3 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.415 | 8 |
 | Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.456 | 106 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.812 | 4 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.50 | 3 |
 | Query performance basics: partitioning, indexing strategy for analytics | PASSED | 4.594 | 4 |
-| Lakehouse schema design: fact tables, dimension tables, denormalization | PASSED | 4.583 | 3 |
+| Lakehouse schema design: fact tables, dimension tables, denormalization | PASSED | 4.688 | 4 |
 | Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.589 | 15 |
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.500 | 5 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
-| OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 2 |
+| OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.474 | 99 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.623 | 16 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
@@ -50,6 +50,39 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 294 — 2026-05-27
+
+**Q1** — Normalize vs denormalize Iceberg tables; star schema; OLTP vs OLAP data modeling
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4 |
+| Beginner clarity | 5 |
+| Practical applicability | 4 |
+| Completeness | 5 |
+| **Average** | **4.50** — PASS |
+
+Defect: Final schema example used `PARTITIONED BY (day(occurred_at), user_id)` — identity partition on user_id is an anti-pattern creating millions of tiny partitions. Should be `bucket(user_id, 16)` or omitted. Resource 08 updated to document this anti-pattern.
+
+**Q2** — Fact vs dimension table rules for a wide events table (300+ columns)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **5.00** — PASS |
+
+**Iter 294 average: 4.75 — PASS**
+
+**Topics updated**:
+- Schema design for analytics: denormalization, star schema basics — prior avg 4.50 across 2 questions; new running avg still **4.50** across 3 questions. Status: PASSED.
+- Lakehouse schema design: fact tables, dimension tables, denormalization — prior avg 4.583 across 3 questions; new running avg (4.583×3 + 5.00) / 4 = **4.688** across 4 questions. Status: PASSED.
+- OLTP-to-OLAP mindset — prior avg 4.50 across 2 questions; new running avg still **4.50** across 3 questions (Q1 tertiary mapping). Status: PASSED.
+
+---
 
 ### Q1 — 2026-05-23
 **Question**: Why does a GROUP BY / COUNT query slow down so much worse than a point-lookup as rows grow?

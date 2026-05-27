@@ -130,6 +130,7 @@ Plus small dimension tables for things that genuinely change over time independe
 
 - **Schema evolution.** Adding a new column to a fact table (`ALTER TABLE user_events ADD COLUMN device_type VARCHAR`) is metadata-only — Iceberg does *not* rewrite existing files. New rows have the column; old rows return NULL. This makes denormalization additions painless.
 - **Hidden partitioning.** Partition by `days(event_time)` and Iceberg handles the directory layout. Queries with `WHERE event_time >= ...` automatically skip files. You never have to write `WHERE event_date = '...' AND event_time >= '...'` like in old Hive setups.
+- **Partition anti-pattern: never identity-partition on a high-cardinality column.** `PARTITIONED BY (day(occurred_at), user_id)` with 1M users creates 1M partitions — metadata balloons and queries slow down from metadata overhead alone. For a secondary partition on user_id, use `bucket(user_id, 16)` (Trino syntax) or just omit the secondary partition and rely on Bloom filters or sorting for user-level lookups. `PARTITIONED BY (day(occurred_at), tenant_id)` is safe because tenant cardinality in a B2B SaaS is typically low (hundreds, not millions).
 - **Column types.** Use `MAP<VARCHAR, VARCHAR>` for flexible event properties — keeps the schema clean while still letting you index frequently-used keys by promoting them to top-level columns later.
 
 ---
@@ -143,7 +144,7 @@ Plus small dimension tables for things that genuinely change over time independe
 - Engineers writing the same JOIN logic over and over
 - Eventual realization that they need to rebuild as a star schema, but now with terabytes of data already in the wrong shape
 
-**Instead:** when migrating, treat it as a redesign. The fact tables on the lakehouse should look *nothing* like the OLTP tables they came from. Use a Spark ingestion job to flatten and denormalize on the way in.
+**Instead:** when migrating, treat it as a redesign. The fact tables on the lakehouse should look *nothing* like the OLTP tables they came from. Use a Spark ingestion job to flatten and denormalize on the way in, and maintain the denormalized fact tables with dbt models — dbt is the right tool for keeping the schema consistent across your transformation layer.
 
 ---
 

@@ -1,9 +1,9 @@
-# Iter 293 Questions
+# Iter 294 Questions
 
-## Q1 — Window functions vs GROUP BY: when should I use one over the other?
+## Q1 — Should I normalize or denormalize my Iceberg tables? Coming from a relational database mindset.
 
-I'm trying to add a "running total" feature to our analytics — showing cumulative revenue per tenant over time. In Postgres I'd use a window function (`SUM(amount) OVER (PARTITION BY tenant_id ORDER BY event_date)`). But I've also seen people do this with self-joins or GROUP BY + subquery. I'm not sure which approach Trino handles better on Iceberg tables. Does Trino support window functions? And is there a meaningful performance difference between a window function and a GROUP BY approach for this use case?
+In Postgres we normalize everything — customers, orders, and line items are separate tables with foreign keys. We joined them at query time. Now we're moving some of this to Iceberg for analytics, and I'm not sure if I should keep the same normalized structure or flatten everything into one wide table. Someone mentioned "star schema" but I don't really know what that is. How should I think about data modeling for analytics vs OLTP?
 
-## Q2 — What does SELECT * actually cost me in Trino vs Postgres?
+## Q2 — Our analytics tables have hundreds of columns and I'm not sure which ones to put in the fact table vs a separate dimension table.
 
-I know "don't use SELECT *" is standard advice, but I want to understand what the actual cost is. In Postgres, SELECT * vs SELECT col1, col2 doesn't matter much because the page is fetched anyway and you're just getting more columns from it. In Trino querying Iceberg, I've heard it's different because of columnar storage. Can you explain what actually happens in the file format when I do SELECT * versus naming specific columns — like, at what layer does Trino stop reading data it doesn't need?
+We have a usage events table that tracks every action a user takes — it has event metadata (timestamp, type, session_id), user attributes (plan, region, company_size), and product attributes (feature_name, module, version). Right now it's all one big table. Someone said we should split it into a fact table and dimension tables. What's the rule for deciding what goes where, and what would that look like for our events use case?

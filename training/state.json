@@ -1,7 +1,7 @@
 {
-  "iteration": 294,
+  "iteration": 295,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter293 avg 5.00: Q1 (5.0 PASS) window functions SUM OVER PARTITION BY ORDER BY, spill-enabled, ANALYZE TABLE, dbt rollup. Q2 (5.0 PASS) SELECT * columnar cost, Parquet column chunks, three pruning layers, Physical Input. SQL OLAP best practices: 4.613/10. Analytical query patterns: 4.625/6. No resource fixes needed."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter294 avg 4.75: Q1 (4.50 PASS) normalize/denormalize, star schema, OLTP-vs-OLAP mindset; Q2 (5.00 PASS) fact vs dimension table rules, 300-column events table, denormalization promotion heuristic. Resource fix: 08-schema-design-for-analytics.md updated with identity-partition anti-pattern warning (user_id → bucket) and dbt mention. Schema design for analytics: 4.50/3. Lakehouse schema design: 4.688/4. OLTP-to-OLAP mindset: 4.50/3."
 }
