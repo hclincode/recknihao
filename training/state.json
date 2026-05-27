@@ -1,7 +1,7 @@
 {
-  "iteration": 296,
+  "iteration": 297,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter295 avg 4.50: Q1 (4.50 PASS) SCD Type 2 / plan history / dbt snapshots; Q2 (4.50 PASS) partition design for 2B-row multi-tenant events. Resource fix: 09-lakehouse-schema-design.md updated with correct dbt column list (dbt_valid_to IS NULL = current, not dbt_is_current), complete snapshot config block, and Spark MERGE INTO alternative. Schema design for analytics: 4.50/4. Lakehouse schema design: 4.650/5. Iceberg partition design: 4.583/16."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter296 avg 4.69: Q1 (4.75 PASS) TABLESAMPLE BERNOULLI + approx functions + rollup tables; Q2 (4.625 PASS) CDC architecture + batch vs CDC decision + stepwise recommendation. Resource fix: 23-sql-best-practices-olap.md — BERNOULLI vs SYSTEM scan-cost nuance (BERNOULLI reduces post-scan work not I/O; SYSTEM skips whole splits). SQL OLAP best practices: 4.626/11. Postgres-to-Iceberg: 4.476/100. Real-time vs batch: 4.775/5."
 }

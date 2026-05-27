@@ -1,59 +1,56 @@
-# Feedback — Iter 295 (Extended phase)
+# Feedback — Iter 296 (Extended phase)
 
 Date: 2026-05-27
-Topics: SCD Type 2 (plan history) + Iceberg partition design (day/bucket/identity)
+Topics: TABLESAMPLE BERNOULLI for exploration + CDC vs nightly batch
 
 ## Results summary
 
 | Question | Topic angle | Score | Pass/Fail |
 |---|---|---|---|
-| Q1 | SCD Type 2: storing/querying slowly-changing plan column; dbt snapshots | **4.50** | PASS |
-| Q2 | Partition design for 2B-row multi-tenant events: day vs bucket vs identity | **4.50** | PASS |
+| Q1 | TABLESAMPLE BERNOULLI for prototyping; approx functions; partition filter + sample workflow | **4.75** | PASS |
+| Q2 | CDC architecture; batch vs CDC decision criteria; stepwise recommendation | **4.625** | PASS |
 
-**Iter 295 average: 4.50 — PASS** ✓
+**Iter 296 average: 4.69 — PASS** ✓
 
 **Topic updates**:
-- Schema design for analytics: 4.50/3 → **4.50/4 questions** (PASSED — stable)
-- Lakehouse schema design: 4.688/4 → **4.650/5 questions** (PASSED — stable)
-- Iceberg partition design: 4.589/15 → **4.583/16 questions** (PASSED — stable)
+- SQL query best practices for OLAP: 4.613/10 → **4.626/11 questions** (PASSED — improved)
+- Postgres-to-Iceberg ingestion: 4.474/99 → **4.476/100 questions** (PASSED — stable)
+- Real-time vs batch: 4.812/4 → **4.775/5 questions** (PASSED — stable)
 
 ---
 
 ## What worked
 
-### Q1 — SCD Type 2 (4.50)
-1. Short-answer + before/after row example — immediately shows what changes
-2. OLTP-vs-OLAP framing for why nightly overwrite breaks history — connects to engineer's mental model
-3. Three runnable SQL queries: point-in-time lookup, last-quarter overlap, current-only — all correct
-4. Half-open interval for last-quarter overlap (`valid_from < end AND valid_to >= start`) — technically correct
-5. Type 1 vs Type 2 decision table — immediately actionable
+### Q1 — TABLESAMPLE BERNOULLI (4.75)
+1. "LIMIT doesn't help you" opening — corrects the engineer's likely first instinct
+2. Partition filter + TABLESAMPLE combo — exactly the right pattern, shown with before/after SQL
+3. Approx functions (approx_distinct HyperLogLog, approx_percentile T-Digest) — named the algorithms, practical error bound (~2%)
+4. Three-phase iteration workflow (design → validate → production rollup) — concrete and immediately actionable
+5. Rollup table as the production solution — addresses the underlying problem, not just the prototyping question
 
-### Q2 — Partition design (4.50)
-1. "Partition = file skipping" explained in one sentence — right abstraction for a beginner
-2. Concrete math: 800 tenants × 365 days = 292K partitions, in Iceberg's comfort zone — shows the engineer can reason about limits
-3. Metadata-only COUNT optimization for identity `tenant_id` partitioning — excellent practical detail, shows the trade-off of bucketing
-4. Decision rule for when to switch to `bucket(tenant_id, 64)` — concrete threshold (1,000+ tenants or 80%+ skew)
-5. Hidden partitioning explanation — clarifies that you write normal SQL and Iceberg does the pruning
-
----
-
-## Resource fixes applied (iter 295)
-
-**Bug 1 (Q1)**: Answer claimed `dbt_is_current` column — this column does not exist. dbt snapshot materialization emits: `dbt_valid_from`, `dbt_valid_to`, `dbt_is_deleted` (dbt 1.9+). Current records are identified by `dbt_valid_to IS NULL`. Also the snapshot block lacked the required `config()` block with `target_schema`, `unique_key`, `strategy`, and `check_cols`.
-
-**Fix applied** to `resources/09-lakehouse-schema-design.md`:
-- Replaced the one-liner dbt mention with a complete `{% snapshot %}` block including `config()`
-- Listed actual dbt metadata columns (`dbt_valid_from`, `dbt_valid_to`, `dbt_is_deleted`)
-- Added explicit note: "There is no `dbt_is_current` column" + correct query pattern (`WHERE dbt_valid_to IS NULL`)
-- Added Spark `MERGE INTO` alternative for teams not using dbt
-
-**Bug 2 (Q2)**: Answer said compaction must be done via Spark, failing to mention Trino-native compaction (`ALTER TABLE ... EXECUTE optimize`). Resource 10 lines 540–541 already correctly documented this. No resource change needed — the responder missed it in the resource.
+### Q2 — CDC vs batch (4.625)
+1. Freshness-tier table ("each jump is ~10x harder") — excellent mental model for a PM conversation
+2. Concrete CDC architecture walk-through (WAL → Debezium → Kafka → Spark Streaming → Iceberg) — right level for a SaaS engineer
+3. Hard DELETE capture as a key CDC differentiator — engineers often miss this
+4. Ops burden enumerated honestly (Postgres WAL setup, Kafka maintenance, on-call) — prevents surprises
+5. Stepwise recommendation (hourly batch → tiered dashboards → CDC on one small table) — pragmatic path
 
 ---
 
-## Suggested iter296 angles
+## Resource fix applied (iter 296)
 
-1. **SQL OLAP best practices** — `TABLESAMPLE BERNOULLI` for cheap dashboard prototyping without a full scan; cost-effective exploration pattern
-2. **Multi-tenant analytics** — harder angles: row-level security via Ranger policies, or cross-tenant SLA metrics (how do you report on p99 latency per tenant?)
-3. **Postgres-to-Iceberg ingestion** — CDC deep dive (Debezium + Kafka → Spark → Iceberg) vs full-refresh tradeoffs; when to move from nightly snapshot to real-time CDC
-4. **Real-time vs batch** — already PASSED at 4.812; reinforce with a concrete SaaS scenario (live dashboards for enterprise customers, latency SLAs)
+**Bug (Q1)**: Answer framed `TABLESAMPLE BERNOULLI` as scanning 400M→1M rows, implying I/O reduction. In fact, BERNOULLI reads all physical Parquet blocks from matched partitions, then randomly drops rows post-read. The actual I/O savings come from the partition filter, not BERNOULLI. `TABLESAMPLE SYSTEM` (split-level skipping) is what actually reduces I/O.
+
+**Fix applied** to `resources/23-sql-best-practices-olap.md` section 7:
+- Added complete TABLESAMPLE BERNOULLI example with percentage clarification
+- Added BERNOULLI vs SYSTEM scan-cost nuance: BERNOULLI reduces post-scan work but not I/O; SYSTEM skips whole splits
+- Added guidance: pair BERNOULLI with a tight partition filter for representative samples; use SYSTEM for genuine I/O reduction
+
+---
+
+## Suggested iter297 angles
+
+1. **Multi-tenant analytics** — harder angles: row-level security (Apache Ranger policies), or cross-tenant SLA metrics (p99 query latency per tenant over time)
+2. **Iceberg maintenance** — snapshot expiry + orphan file cleanup workflow; or compaction tuning (when to use sort vs bin-pack strategy)
+3. **Trino federation** — cross-catalog joins (Iceberg + Postgres connector in one query), predicate pushdown to JDBC, when federation beats ingestion
+4. **SQL OLAP best practices** — EXPLAIN ANALYZE workflow for diagnosing a slow query step-by-step (TABLESAMPLE and approx functions covered; EXPLAIN workflow has been touched but could use a systematic angle)

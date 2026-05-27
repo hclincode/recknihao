@@ -216,7 +216,21 @@ WHERE event_date = DATE '2026-05-26'
 LIMIT 10;
 ```
 
-For "give me a sample" exploration, use `TABLESAMPLE BERNOULLI (1)` after a partition filter, not bare `LIMIT`.
+For exploration, use `TABLESAMPLE BERNOULLI (N)` after a partition filter, not bare `LIMIT`:
+
+```sql
+-- N is a percentage: BERNOULLI (5) keeps ~5% of rows randomly
+SELECT feature_name, COUNT(*) AS events
+FROM events TABLESAMPLE BERNOULLI (5)
+WHERE occurred_at >= CURRENT_DATE - INTERVAL '7' DAY
+GROUP BY feature_name;
+```
+
+**Important nuance — BERNOULLI vs SYSTEM scan cost:**
+- `TABLESAMPLE BERNOULLI (N)`: Trino reads all the physical Parquet blocks from the matched partitions, then randomly drops rows during filtering. **It does NOT reduce I/O.** The speedup comes from the partition filter reducing files scanned, plus reduced post-scan aggregation work over fewer rows.
+- `TABLESAMPLE SYSTEM (N)`: Trino skips whole splits (file segments) at the storage level, reducing I/O. Results are less evenly random (whole chunks of rows are included or excluded together).
+
+**Rule**: pair `BERNOULLI` with a tight partition filter (so the I/O is already small) for representative random samples during prototyping. Use `SYSTEM` only when you truly want to reduce file I/O at the cost of cluster-level sampling bias.
 
 ---
 
