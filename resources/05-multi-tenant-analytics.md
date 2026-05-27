@@ -2501,6 +2501,59 @@ Minimal example to ground the layout for the more-detailed multi-tenant version 
 > # resource-groups.refresh-interval=1s
 > ```
 
+> **Per-tier query time limits — use the Session Property Manager, not resource groups.** Resource groups control memory, concurrency, and aggregate CPU — they have NO property to kill a single query that has been running too long. For per-tier per-query execution time limits (e.g., free-tier queries die after 5 minutes, enterprise queries after 30 minutes), Trino provides a separate mechanism: the **session property manager** (`etc/session-property-config.properties` + a JSON match-rules file). The session property manager automatically sets session properties (like `query_max_execution_time`) for each query before it starts, based on the resource group the query landed in. This is the documented Trino pattern for different time limits per tenant tier — NOT an undocumented feature.
+>
+> **Two properties for time limits:**
+> - `query_max_execution_time` — wall-clock time from when the query *starts executing*. Queries that exceed this are killed with `EXCEEDED_TIME_LIMIT`.
+> - `query_max_run_time` — wall-clock time from when the query is *submitted* (includes time spent queued). Usually set to a longer value than `query_max_execution_time` as a backstop for queries stuck in the queue.
+>
+> **Setup — two files on the Trino coordinator:**
+>
+> **File 1: `etc/session-property-config.properties`**
+> ```properties
+> session-property-config.configuration-manager=file
+> session-property-manager.config-file=etc/session-property-manager.json
+> ```
+>
+> **File 2: `etc/session-property-manager.json`**
+> ```json
+> {
+>   "defaultSessionProperties": {
+>     "query_max_execution_time": "8h"
+>   },
+>   "sessionPropertySpecs": [
+>     {
+>       "name": "free-tier-limits",
+>       "match": {
+>         "group": "global.free_tier"
+>       },
+>       "sessionProperties": {
+>         "query_max_execution_time": "5m",
+>         "query_max_run_time": "10m"
+>       }
+>     },
+>     {
+>       "name": "enterprise-limits",
+>       "match": {
+>         "group": "global.enterprise_tier"
+>       },
+>       "sessionProperties": {
+>         "query_max_execution_time": "30m",
+>         "query_max_run_time": "60m"
+>       }
+>     }
+>   ]
+> }
+> ```
+>
+> The `"group"` field is a Java regex matched against the resource group path (the same path visible in `system.runtime.queries.resource_group_id`). Free-tier queries land in `global.free_tier` → get 5-minute execution limit. Enterprise queries land in `global.enterprise_tier` → get 30-minute limit. The `defaultSessionProperties` applies to queries that match no rule — set it generously (e.g., `8h`) so admin/internal queries aren't accidentally killed.
+>
+> **When a query exceeds the time limit:** it is killed with a `FAILED` state and `errorCode.name = 'EXCEEDED_TIME_LIMIT'`. This surfaces to the client as a query failure with that error code — the query does NOT silently disappear.
+>
+> **OPA note:** tenants can attempt to override time limits with `SET SESSION query_max_execution_time = '24h'` before their query. If you use the Trino OPA plugin, add an OPA rule that denies `SetSessionProperty` actions on `query_max_execution_time` for non-admin principals — otherwise a savvy tenant can bypass the per-tier limit entirely. The session property manager sets the *default*; a `SET SESSION` by the client overrides it unless OPA blocks the override.
+>
+> **Requires coordinator restart** (same as file-based resource groups): changes to `etc/session-property-manager.json` are only read at startup.
+
 > **Immediate-relief tool during a live noisy-neighbor incident:** resource group config changes require a coordinator config push and (depending on the resource group manager) may take effect only for *new* queries. While the new limits are being deployed, kill the offending live query directly:
 >
 > ```sql

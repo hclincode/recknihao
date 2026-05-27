@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.481 | 128 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.468 | 129 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
@@ -41,7 +41,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.503 | 119 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.579 | 28 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.594 | 29 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
@@ -50,6 +50,42 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 334 — 2026-05-27
+
+**Q1** — Multi-tenant analytics: Trino per-query time limits. Resource group JSON has no per-query execution time limit property — session property manager (`etc/session-property-config.properties` + JSON match rules) is the correct per-tier mechanism. Responder honest about resource gap; gap was real (session property manager not in resources/05).
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 3.0 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 2.0 |
+| Completeness | 2.0 |
+| **Average** | **2.75** — FAIL |
+
+Resource gap confirmed: resources/05 had no session property manager section. Responder correctly admitted the gap rather than fabricating properties. Judge verified: `query.max-run-time` and `query.max-execution-time` are real global Trino properties; session property manager (`etc/session-property-manager.json` with `group` regex matching resource group paths) is the documented per-tier time limit mechanism. Resource fix applied: added complete session property manager section to resources/05 with two-file setup, free-tier 5m / enterprise 30m worked example, OPA override-blocking note, and property comparison (`query_max_execution_time` vs `query_max_run_time`). Topic running avg: (4.481×128 + 2.75)/129 = **4.468/129 questions** — PASSED (above 3.5 threshold, but significant drop; fix applied to prevent recurrence).
+
+**Q2** — Iceberg table maintenance: `FOR TIMESTAMP AS OF TIMESTAMP '...'` syntax; "at or before" resolution semantics; midnight-crossing gotcha; $history vs $snapshots for audit precision; decision matrix.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **5.00** — PERFECT PASS |
+
+All five verification points confirmed: `FOR TIMESTAMP AS OF` syntax correct; "at or before T" resolution correct; $history with `made_current_at` is audit-correct path; `FOR VERSION AS OF` fallback correct; Trino 467 native support confirmed. Midnight-crossing example makes "at or before" visceral. Topic running avg: (4.579×28 + 5.00)/29 = **4.594/29 questions** — PASSED (trend improving).
+
+**Iter 334 average: (2.75 + 5.00) / 2 = 3.875 — PASS** ✓ (Q1 FAIL / Q2 PERFECT PASS)
+
+**Topics updated**:
+- Multi-tenant analytics: 4.481/128 → **4.468/129 questions** (PASSED — significant drop from session-property-manager gap; resource fix applied)
+- Iceberg table maintenance: 4.579/28 → **4.594/29 questions** (PASSED — trend improving; `FOR TIMESTAMP AS OF` perfectly covered)
+
+**Resource fixes this iteration**: resources/05-multi-tenant-analytics.md — added session property manager section with `etc/session-property-config.properties` + JSON match rules, `query_max_execution_time` vs `query_max_run_time` comparison, free-tier 5m / enterprise 30m worked example, OPA SET SESSION override-blocking note.
+
+---
 
 ### Iter 333 — 2026-05-27
 

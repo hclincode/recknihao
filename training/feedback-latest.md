@@ -1,89 +1,89 @@
-# Judge Feedback — Iter 333
+# Judge Feedback — Iter 334
 
 Date: 2026-05-27
 Phase: extended
-Topics: Multi-tenant analytics / Trino resource groups per-tenant limits (Q1) + Postgres-to-Iceberg / CDC snapshot-row null LSN fix (Q2)
+Topics: Multi-tenant analytics / Trino per-query time limits via session property manager (Q1) + Iceberg table maintenance / FOR TIMESTAMP AS OF syntax (Q2)
 
 ---
 
-## Q1 — Trino Resource Groups for Per-Tenant Query Limits
+## Q1 — Trino Per-Query Time Limits: Session Property Manager (FAIL)
 
 ### Score
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5 | All five claims verified: softMemoryLimit/hardConcurrencyLimit/maxQueued are exact official property names; two-file config correct; `resource-groups.configuration-manager=file` correct; system.runtime.queries has resource_group_id; coordinator restart required for file-based config. Selector key `"user"` correctly used (not `"userRegex"` — a known trap). |
-| Beginner clarity | 4.5 | "Lanes on a highway" analogy maps cleanly. JWT-username → selector → group chain explained. Minor gap: selector top-to-bottom evaluation order not explained — a beginner might not know first-match-wins. |
-| Practical applicability | 5 | JSON config is runnable as-is. Live incident playbook (kill_query first, then config push + restart) is operational nuance separating useful answer from textbook. DB-backed hot-reload alternative mentioned. |
-| Completeness | 4.5 | Covers: how resource groups work, three limit types, config files, selector routing, production notes. Missing: time limits (`query_max_run_time`, `query_max_execution_time`) despite question asking "memory OR time"; no per-query node-level memory cap (`query_max_memory_per_node`); no selector ordering caveat. |
-| **Average** | **4.75** | **PASS** |
+| Technical accuracy | 3.0 | Correctly stated resource group JSON has no `maxExecutionTime`/`executionTimeLimit` field; correctly described softCpuLimit/hardCpuLimit as aggregate-not-per-query. But never mentioned the actual documented mechanism (session property manager). Hedged on `query.max-run-time` as "would need to check docs" when it's a real documented property since Trino 0.116. |
+| Beginner clarity | 4.0 | Clear explanation of the resource group limitation. "Lanes on a highway" analogy from iter333 maintained. But leaving the engineer without an actual solution reduces beginner utility. |
+| Practical applicability | 2.0 | No runnable solution for the engineer's actual problem. CPU limits are not per-query time limits. The answer tells them what doesn't work but not what does. |
+| Completeness | 2.0 | Missing: session property manager (the documented per-tier time limit mechanism), query_max_execution_time vs query_max_run_time comparison, OPA SET SESSION override-blocking, both required config files. |
+| **Average** | **2.75** | **FAIL** |
 
 ### What Worked
-- Zero fabrications — JSON config uses exact Trino property names and is copy-pasteable.
-- Correct selector key `"user"` (not `"userRegex"`) — a common trap in resource groups config.
-- Live-incident playbook: kill runaway query first, then deploy config. This is the operationally correct sequence.
-- DB-backed configuration manager mentioned as hot-reload alternative without fabricating properties.
-- `system.runtime.queries.resource_group_id` diagnostic query — correct and actionable.
+- Correct claim: resource group JSON has no per-query execution time limit property.
+- Correct description of softCpuLimit/hardCpuLimit as aggregate-per-group-per-rolling-window.
+- Honest about the resource gap rather than fabricating a `maxQueryRunTime` field.
+- The resource gap was genuine — resources/05 had no session property manager section.
 
 ### What Missed
-- **Time limits not mentioned**: engineer explicitly asked "memory OR time" — `query_max_run_time` (per-query max) and `query_max_execution_time` at the resource group level are the answer. These were in the question but not in the answer.
-- **`query_max_memory_per_node`**: group-level `softMemoryLimit` caps total group memory but a single query can still hog a single node; the per-query per-node cap is defense-in-depth.
-- **Selector evaluation order**: selectors are evaluated top-to-bottom, first match wins — a beginner with 10 selectors might put a catch-all selector first and wonder why specific rules don't fire.
+1. **Session property manager not mentioned** — the documented Trino mechanism for per-tier query time limits is `etc/session-property-config.properties` + `etc/session-property-manager.json` with `group` regex matching resource group paths. This is literally the Trino docs example for free-tier / enterprise tier time limits.
+2. **`query_max_execution_time` and `query_max_run_time`** are real documented Trino session properties (since 0.116 and 0.186 respectively) — responder hedged as "you'd need to check the docs."
+3. **Resource gap confirmed**: resources/05 had only two passing mentions of `query.max-execution-time` (in a SET SESSION export example and an error code table) but no section explaining the session property manager pattern.
+
+### Resource Fix Applied
+Added complete session property manager section to resources/05-multi-tenant-analytics.md:
+- `etc/session-property-config.properties` activation
+- `etc/session-property-manager.json` with free-tier 5m / enterprise 30m worked example using `group` regex matching
+- `query_max_execution_time` vs `query_max_run_time` comparison
+- OPA note: tenants can bypass via `SET SESSION` unless OPA blocks `SetSessionProperty`
+- Coordinator restart required (same as file-based resource groups)
 
 ### Technical Accuracy (verified)
-1. softMemoryLimit, hardConcurrencyLimit, maxQueued — CORRECT (exact official property names)
-2. Two-file setup (resource-groups.properties + resource-groups.json) — CORRECT
-3. `resource-groups.configuration-manager=file` — CORRECT
-4. system.runtime.queries has resource_group_id column — CORRECT (added Trino 0.206)
-5. File-based config requires coordinator restart — CORRECT
+1. Resource group JSON has no per-query execution time limit property — CORRECT
+2. `query.max-run-time` exists as a global Trino config property — CORRECT (since 0.116)
+3. Session property manager (`etc/session-property-manager.json`) with `group` regex is the per-tier time limit mechanism — CORRECT (Trino session property managers docs)
+4. `softCpuLimit`/`hardCpuLimit` are aggregate-per-group-per-rolling-window — CORRECT
 
 ### Rubric Update
-- Multi-tenant analytics: prior avg 4.479 across 127 questions → (4.479 × 127 + 4.75) / 128 = 573.583 / 128 = **4.481 across 128 questions**. Status: **PASSED** (mild upward drift).
+- Multi-tenant analytics: prior avg 4.481 across 128 questions → (4.481 × 128 + 2.75) / 129 = 576.318 / 129 = **4.468 across 129 questions**. Status: **PASSED** (above 3.5 threshold, significant drop; resource fix applied).
 
 ---
 
-## Q2 — CDC Initial Snapshot Rows Have Null source_lsn — and the MERGE Fix
+## Q2 — FOR TIMESTAMP AS OF Time Travel Syntax (PERFECT PASS)
 
 ### Score
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5 | All five verification points confirmed: Debezium snapshot rows have null source.lsn (no WAL position); `500 > NULL` evaluates to NULL in SQL three-valued logic; `t.source_lsn IS NULL OR s.source_lsn > t.source_lsn` is the correct null-safe idempotency guard; null LSN means "pre-WAL snapshot row"; test procedure is valid. |
-| Beginner clarity | 5 | Step-by-step NULL evaluation trace (1→2→3→4→5, evaluates to NULL, NULL is falsy, UPDATE doesn't fire, silent drop) is exemplary beginner pedagogy. Concrete `500 > NULL = NULL` makes three-valued logic click without jargon. |
-| Practical applicability | 5 | Corrected MERGE SQL with `t.source_lsn IS NULL OR s.source_lsn > t.source_lsn` is copy-pasteable. Bootstrap pattern `lit(None).cast("long")` is production-correct. Test procedure (insert before Debezium, update after) is a falsification test. |
-| Completeness | 5 | Covers all four expected areas: is null LSN expected, why it breaks MERGE, the fix, how to test. No gaps. |
+| Technical accuracy | 5 | All five claims verified: `FOR TIMESTAMP AS OF TIMESTAMP '...'` is correct syntax; "at or before T" resolution correct; $history with `made_current_at` is audit-correct; `FOR VERSION AS OF` fallback correct; Trino 467 native support confirmed. |
+| Beginner clarity | 5 | Midnight-crossing example (nightly report starts 23:58, commits 00:03, querying 00:00 returns pre-report data) makes "at or before" visceral. No jargon issues. |
+| Practical applicability | 5 | Direct SQL syntax for the simple case, plus two-step $history → FOR VERSION AS OF path for precision. Decision matrix for use case routing. |
+| Completeness | 5 | Covers: syntax, "at or before" gotcha, when each approach is appropriate, concrete scenarios (billing audits, compliance). |
 | **Average** | **5.00** | **PERFECT PASS** |
 
 ### What Worked
-- Everything. Tight scope, all claims verified, perfect pedagogy, runnable code.
-- "Null LSN means never been updated by CDC" — the semantic label for null makes future debugging easier.
-- Test procedure is particularly valuable: tells the engineer exactly how to catch this class of bug in CI.
+- Everything. Tight scope, correct semantics, midnight example is standout pedagogy, $history vs $snapshots distinction correctly drawn.
 
 ### What Missed
-- None. Tightly scoped to exactly what the engineer asked.
+- None material. Optional: `FOR TIMESTAMP AS OF DATE '...'` short form; session-timezone resolution (correctly avoided by always using UTC).
 
 ### Technical Accuracy (verified)
-1. Debezium snapshot rows have null source.lsn — CORRECT (Debezium PostgreSQL connector docs)
-2. `500 > NULL` evaluates to NULL in SQL — CORRECT (three-valued logic)
-3. `t.source_lsn IS NULL OR s.source_lsn > t.source_lsn` is correct null-safe guard — CORRECT
-4. Null LSN means "pre-WAL snapshot row, never updated by CDC" — CORRECT
-5. Test procedure (insert pre-snapshot, update post-streaming, verify in Iceberg) — VALID
+All five points verified against official Trino/Iceberg docs. No errors.
 
 ### Rubric Update
-- Postgres-to-Iceberg ingestion: prior avg 4.499 across 118 questions → (4.499 × 118 + 5.00) / 119 = 535.882 / 119 = **4.503 across 119 questions**. Status: **PASSED** (upward drift).
+- Iceberg table maintenance: prior avg 4.579 across 28 questions → (4.579 × 28 + 5.00) / 29 = 133.212 / 29 = **4.594 across 29 questions**. Status: **PASSED** (trend improving).
 
 ---
 
-## Iter 333 Summary
+## Iter 334 Summary
 
-**Iter 333 average: (4.75 + 5.00) / 2 = 4.875 — PASS** ✓ (Q1 PASS / Q2 PERFECT PASS)
+**Iter 334 average: (2.75 + 5.00) / 2 = 3.875 — PASS** ✓ (Q1 FAIL / Q2 PERFECT PASS)
 
 ### Notable
-- Q1 4.75: Resource groups — technically clean, operationally complete. Minor gap on time limits (engineer asked "memory OR time"). Selector eval order not mentioned.
-- Q2 5.00: Snapshot null LSN — perfect score. The null LSN gap from iter329/iter332 has now been addressed directly and answered perfectly.
+- Q1 2.75: Session property manager gap — worst multi-tenant score in many iterations. Resource gap was genuine; responder correctly avoided fabrication. Fix applied immediately.
+- Q2 5.00: FOR TIMESTAMP AS OF — perfect across all four dimensions. Midnight-crossing example makes the "at or before" semantic memorable.
 
 ### Resource fixes applied this iteration
-None needed.
+- **resources/05-multi-tenant-analytics.md**: Added session property manager section — `etc/session-property-config.properties` + `etc/session-property-manager.json` with free-tier 5m / enterprise 30m worked example, property comparison, OPA override-blocking note.
 
-### Suggested focus for Iter 334
-- **Multi-tenant analytics** (4.481/128): probe time-based query limits — `query_max_run_time` and `query_max_execution_time` at the resource group level (gap from iter333 Q1). Or probe `query_max_memory_per_node` as per-query node-level defense.
-- **Iceberg table maintenance** (4.579/28): probe `FOR TIMESTAMP AS OF` as a one-step alternative to the two-step $history query (gap from iter332 Q2).
-- **Postgres-to-Iceberg ingestion** (4.503/119, recovering): consider probing full-refresh pattern vs incremental vs CDC decision tree — when to use each approach.
+### Suggested focus for Iter 335
+- **Multi-tenant analytics** (4.468/129, just dropped): Probe the fix — ask directly about setting per-tier query time limits to verify the session property manager section is now correctly surfaced. Ask as: "I have resource groups set up but queries run for hours — how do I kill them after 5 minutes for free-tier and 30 minutes for enterprise?"
+- **Postgres-to-Iceberg ingestion** (4.503/119): probe full-refresh vs incremental vs CDC decision tree — when to use each approach.
+- **Iceberg table maintenance** (4.594/29, recovering): consider probing orphan file removal — what `remove_orphan_files` catches that `expire_snapshots` doesn't, retention window, safe scheduling order.

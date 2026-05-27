@@ -1,7 +1,7 @@
 {
-  "iteration": 334,
+  "iteration": 335,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter333 avg 4.875 — PASS. Q1 (4.75) Trino resource groups — softMemoryLimit/hardConcurrencyLimit/maxQueued, selector routing. Q2 (5.00) CDC snapshot null LSN fix — PERFECT. Multi-tenant: 4.481/128. Postgres-to-Iceberg: 4.503/119. Iceberg maintenance: 4.579/28."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter334 avg 3.875 — PASS. Q1 (2.75) FAIL — session property manager gap in resources/05; fix applied. Q2 (5.00) PERFECT — FOR TIMESTAMP AS OF covered perfectly. Multi-tenant: 4.468/129. Iceberg maintenance: 4.594/29. Postgres-to-Iceberg: 4.503/119."
 }
