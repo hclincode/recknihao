@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.463 | 120 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.465 | 121 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
@@ -41,7 +41,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.492 | 113 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.655 | 20 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.552 | 21 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
@@ -50,6 +50,43 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 323 — 2026-05-27
+
+**Q1** — OPA policy revocation latency: no decision cache in Trino OPA plugin, authorization-at-planning-only semantics, bundle propagation as sole delay, KILL QUERY for in-flight queries, four-step incident playbook
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 4.75 |
+| Practical applicability | 4.75 |
+| Completeness | 4.75 |
+| **Average** | **4.75** — PASS |
+
+Resource fix from iter322 held: responder no longer mentions fabricated `opa.policy.cache-ttl-seconds`. Correctly states Trino OPA plugin has no decision cache and every authz is a fresh live HTTP call. Two-stage model (authorization at query planning, no re-auth during execution) correct. Bundle propagation (~30–60s) as sole delay verified. `kill_query` syntax correct. Minor gaps: no mention of Rego/bundle/principal glosses for beginner, no JWT-claim→user column mapping. Topic running avg: (4.463×120 + 4.75)/121 = **4.465/121 questions** — PASSED (recovering from iter322 fabrication drop).
+
+**Q2** — First-run snapshot expiry after 6 months + clean_expired_metadata: FAIL — `retain_last` and `clean_expired_metadata` parameters don't exist in Trino 467, only added in Trino 479 (Dec 2025)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 1.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 1.0 |
+| Completeness | 3.0 |
+| **Average** | **2.50** — FAIL |
+
+CRITICAL: Answer recommended `ALTER TABLE ... EXECUTE expire_snapshots(retain_last => 10, clean_expired_metadata => true)` for Trino 467. Both parameters were added in Trino 479 (Dec 14, 2025 release notes, PR #27362). Trino 467 (Dec 2024) only supports `retention_threshold`. Engineer would get an error pasting this into prod. Spark form `CALL iceberg.system.expire_snapshots(... retain_last => N)` correctly supports `retain_last` — this is the right alternative for Trino 467 users. 7-day floor, `remove_orphan_files` Trino/Spark `dry_run` asymmetry, and "won't blow up" reassurance all correct. Fixed resources/17 with explicit Trino version availability table. Topic running avg: (4.655×20 + 2.50)/21 = **4.552/21 questions** — PASSED (sharp −2.15 drop).
+
+**Iter 323 average: 3.625 — PASS** ✓ (barely — Q1 recovery absorbed Q2 version-constraint FAIL)
+
+**Topics updated**:
+- Multi-tenant analytics: 4.463/120 → **4.465/121 questions** (PASSED — recovering from iter322 fabrication)
+- Iceberg table maintenance: 4.655/20 → **4.552/21 questions** (PASSED — sharp drop, resources fixed)
+
+**Resource fixes this iteration**:
+- resources/17: Added Trino version availability callout for `expire_snapshots` parameters (`retain_last` and `clean_expired_metadata` are Trino 479+, not available on prod Trino 467); updated syntax reference table and cheat sheet with version constraints; Spark `CALL` form as the alternative for `retain_last` on Trino 467
+
+---
 
 ### Iter 322 — 2026-05-27
 

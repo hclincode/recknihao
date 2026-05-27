@@ -87,6 +87,11 @@ ALTER TABLE iceberg.analytics.events EXECUTE optimize(file_size_threshold => '12
 -- Snapshot expiry (Trino-native)
 -- NOTE: retention_threshold must be >= iceberg.expire-snapshots.min-retention
 -- (default 7d). Trino REJECTS values below the floor with a clear error.
+-- NOTE: Trino 467 supports ONLY `retention_threshold`. The `retain_last` and
+-- `clean_expired_metadata` arguments were added in Trino 479 (Dec 2025) and
+-- DO NOT exist on Trino 467. For retain_last behavior on this stack, use the
+-- Spark form: CALL iceberg.system.expire_snapshots(table => '...',
+-- older_than => ..., retain_last => N).
 ALTER TABLE iceberg.analytics.events EXECUTE expire_snapshots(retention_threshold => '30d');
 
 -- Orphan-file cleanup (Trino-native)
@@ -146,7 +151,7 @@ WHERE tenant_id = 'acme';
 | Operation | Spark SQL (named args via `=>`) | Trino 467 (positional / `ALTER TABLE ... EXECUTE`) |
 |---|---|---|
 | Compact data files | `CALL iceberg.system.rewrite_data_files(table => 'analytics.events', options => map('target-file-size-bytes', '268435456'))` | `ALTER TABLE iceberg.analytics.events EXECUTE optimize(file_size_threshold => '128MB')` |
-| Expire snapshots | `CALL iceberg.system.expire_snapshots(table => 'analytics.events', older_than => current_timestamp - interval '30' day, retain_last => 10)` | `ALTER TABLE iceberg.analytics.events EXECUTE expire_snapshots(retention_threshold => '30d')` |
+| Expire snapshots | `CALL iceberg.system.expire_snapshots(table => 'analytics.events', older_than => current_timestamp - interval '30' day, retain_last => 10)` | `ALTER TABLE iceberg.analytics.events EXECUTE expire_snapshots(retention_threshold => '30d')` — **Trino 467 supports ONLY `retention_threshold`.** `retain_last` and `clean_expired_metadata` were added in Trino 479 (Dec 2025) and do NOT exist on Trino 467. For retain_last on this stack, use the Spark form. |
 | Remove orphan files | `CALL iceberg.system.remove_orphan_files(table => 'analytics.events', older_than => current_timestamp - interval '3' day, dry_run => true)` (run with `dry_run => true` first to preview; re-run without it to delete) | `ALTER TABLE iceberg.analytics.events EXECUTE remove_orphan_files(retention_threshold => '7d')` — **NO `dry_run` parameter in Trino**; preview from Spark. Trino enforces a 7-day minimum-retention floor; values shorter than `'7d'` are rejected. |
 | Rewrite manifests | `CALL iceberg.system.rewrite_manifests(table => 'analytics.events')` | Not available on Trino 467 — use Spark `CALL iceberg.system.rewrite_manifests(table => 'analytics.events')`. Available as `ALTER TABLE iceberg.analytics.events EXECUTE optimize_manifests` on Trino 470+ (Feb 2025). |
 | Rollback to snapshot | `CALL iceberg.system.rollback_to_snapshot(table => 'analytics.events', snapshot_id => 4823511203987654321)` (named args) | `CALL iceberg.system.rollback_to_snapshot('analytics', 'events', 4823511203987654321)` (positional args — the only Trino 467 form). The `ALTER TABLE ... EXECUTE rollback_to_snapshot(snapshot_id => ...)` syntax requires Trino 469+ and does NOT work on Trino 467. |
@@ -159,7 +164,7 @@ WHERE tenant_id = 'acme';
 > **Use this as the canonical "does this procedure exist in Trino?" reference.** Confusing Spark-only procedures for Trino-supported ones is the most common cause of "procedure not found" errors on this stack. The Iceberg library exposes many procedures; **Trino implements only a subset**. Everything else is Spark-only.
 
 **Valid in Trino 467 via `ALTER TABLE ... EXECUTE`:**
-- `expire_snapshots` — snapshot metadata expiry (subject to 7-day min-retention floor).
+- `expire_snapshots` — snapshot metadata expiry (subject to 7-day min-retention floor). **Trino 467 accepts ONLY `retention_threshold` as an argument.** The `retain_last` and `clean_expired_metadata` arguments were added in **Trino 479** (Dec 2025) and are NOT available on Trino 467. For retain_last behavior, use the Spark form.
 - `remove_orphan_files` — sweep unreferenced files from object storage (subject to 7-day min-retention floor).
 - `optimize` — file compaction (Trino's equivalent of Spark's `rewrite_data_files`; exposes only `file_size_threshold`).
 - `optimize_manifests` — **NOT available on Trino 467**. This EXECUTE form was added in **Trino 470** (Feb 2025). On Trino 467 you must use Spark's `CALL iceberg.system.rewrite_manifests(table => '...')` for manifest rewrites.
@@ -371,10 +376,36 @@ CALL iceberg.system.rewrite_data_files(
 
 **Why it matters:** without this, every snapshot you've ever created is still tracked, and the data files those snapshots point to (including all the small files that compaction rewrote) cannot be removed from MinIO. Your storage grows forever.
 
+> **Trino version availability for `expire_snapshots` parameters (READ BEFORE COPYING):**
+> - `retention_threshold` — available since the original Trino Iceberg connector implementation. **Works on Trino 467 (production).**
+> - `retain_last` — added in **Trino 479** (released Dec 14, 2025; PR #27362, issue #27357). **NOT available on Trino 467.** Attempting it on 467 fails with "Procedure expire_snapshots does not accept argument 'retain_last'" or a similar argument-not-recognized error.
+> - `clean_expired_metadata` — also added in **Trino 479** (Dec 2025). **NOT available on Trino 467.**
+>
+> **For Trino 467 (the current production version):** the ONLY accepted argument is `retention_threshold`. If you need `retain_last` behavior on this stack (keep the last N snapshots regardless of age), run the Spark form instead: `CALL iceberg.system.expire_snapshots(table => 'analytics.events', older_than => current_timestamp - interval '30' day, retain_last => 10)` — `retain_last` has always been an Iceberg Spark-procedure parameter and works independently of the Trino version.
+>
+> Trino 467-compatible form (the only one you can use on production today):
+> ```sql
+> ALTER TABLE iceberg.analytics.events EXECUTE expire_snapshots(retention_threshold => '30d');
+> ```
+>
+> Trino 479+ enhanced form (available ONLY after the cluster is upgraded to 479 or later — do NOT use on Trino 467):
+> ```sql
+> -- TRINO 479+ ONLY. Fails on Trino 467.
+> ALTER TABLE iceberg.analytics.events EXECUTE expire_snapshots(
+>   retention_threshold     => '30d',
+>   retain_last             => 10,
+>   clean_expired_metadata  => true
+> );
+> ```
+
 ```sql
 -- Spark SQL syntax (run via spark-submit or spark-sql).
 -- Trino 467 equivalent (same operation, different syntax):
 --   ALTER TABLE iceberg.analytics.events EXECUTE expire_snapshots(retention_threshold => '30d');
+-- Trino 467 supports ONLY `retention_threshold`. `retain_last` and
+-- `clean_expired_metadata` were added in Trino 479 (Dec 2025) and are NOT
+-- available on Trino 467 — see the callout above. For retain_last behavior
+-- on this stack, run from Spark (as below).
 -- Trino requires retention_threshold >= iceberg.expire-snapshots.min-retention (default 7d);
 -- 30d is comfortably above the floor so this Trino form runs without complaint.
 -- Spark's 30-day older_than below is operationally equivalent.
