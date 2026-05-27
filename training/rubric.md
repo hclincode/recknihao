@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.447 | 134 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.448 | 135 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
@@ -40,7 +40,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.500 | 122 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.500 | 123 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.575 | 33 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
@@ -50,6 +50,42 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 341 — 2026-05-27
+
+**Q1** — Postgres-to-Iceberg ingestion: lag-buffer calibration for incremental sync (missing/duplicate rows). Responder correctly explained the P99 sizing recipe (`pg_stat_replication.replay_lag` P99 × 2), provided the reference table (< 5 min → 15 min buffer, 5-15 min → 30 min buffer), and explained why MERGE INTO is required to avoid duplicates from the overlap window.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 5.0 |
+| Completeness | 4.0 |
+| **Average** | **4.50** — STRONG PASS |
+
+Judge verified `pg_stat_replication.replay_lag` semantics, MERGE INTO dedup pattern, and P99 × 2 sizing as industry standard. Minor gaps: `writeTo(...).merge()` snippet omits ON clause / primary key join condition; no mention of reading from primary vs replica failure modes; no escape-hatch alternatives (hot_standby_feedback, LSN-based watermarks). Topic running avg: (4.500×122 + 4.50)/123 = **4.500/123 questions** — PASSED (stable; lag-buffer calibration gap finally closed).
+
+**Q2** — Multi-tenant analytics: query_max_memory (session property, SET SESSION bypassable) vs softMemoryLimit (resource group, engine-enforced ceiling). Responder correctly explained that query_max_memory is a default not a ceiling, named SetSystemSessionProperty correctly (4th consecutive iter), steered to softMemoryLimit as the real enforcement mechanism, and provided a valid resource group JSON snippet.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.625** — STRONG PASS |
+
+Judge verified all Trino field names and config properties against trino.io docs. Key gap: answer explains the bypass but doesn't clarify that softMemoryLimit is admission control (queues new queries, does not kill in-flight runaway); query.max-memory is what would have killed the runaway mid-flight. The resources/05 query_max_memory fix from teacher pre-iter fix confirmed working immediately. Topic running avg: (4.447×134 + 4.625)/135 = **4.448/135 questions** — PASSED (recovering upward).
+
+**Iter 341 average: (4.50 + 4.625) / 2 = 4.5625 — STRONG PASS** ✓
+
+**Topics updated**:
+- Postgres-to-Iceberg ingestion: 4.500/122 → **4.500/123 questions** (PASSED — stable; lag-buffer P99 sizing recipe and reference table correctly surfaced after multiple iterations of miss)
+- Multi-tenant analytics: 4.447/134 → **4.448/135 questions** (PASSED — recovering upward; query_max_memory vs softMemoryLimit distinction correctly explained on first attempt after resources/05 fix)
+
+**Resource fixes this iteration**: resources/05-multi-tenant-analytics.md (teacher pre-iter fix) — added query_max_memory vs softMemoryLimit vs query.max-memory 3-row comparison table with SET SESSION bypass behavior. Fix confirmed holding immediately.
+
+---
 
 ### Iter 340 — 2026-05-27
 

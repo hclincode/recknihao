@@ -1,7 +1,7 @@
 {
-  "iteration": 341,
+  "iteration": 342,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter340 avg 4.75 — STRONG PASS. Q1 (4.75) STRONG PASS — session property manager vs resource groups enforcement distinction: 3-row comparison table nailed it; SetSystemSessionProperty named correctly (3rd consecutive). Q2 (4.75) STRONG PASS — remove_orphan_files retention_threshold error behavior: both prior gaps closed (Trino syntax, error-vs-skip rationale). Pre-iter teacher fix to resources/05 (enforcement comparison table) held. Multi-tenant: 4.447/134. Iceberg maintenance: 4.575/33."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter341 avg 4.5625 — STRONG PASS. Q1 (4.50) STRONG PASS — lag-buffer P99 sizing recipe surfaced correctly after multiple iterations of miss; pg_stat_replication.replay_lag correct; MERGE INTO requirement noted. Q2 (4.625) STRONG PASS — query_max_memory vs softMemoryLimit distinction correctly explained; softMemoryLimit as admission control vs query.max-memory as per-query killer gap remains. Pre-iter resources/05 query_max_memory fix held. Multi-tenant: 4.448/135. Postgres-to-Iceberg: 4.500/123. Iceberg maintenance: 4.575/33."
 }

@@ -1,102 +1,91 @@
-# Judge Feedback — Iter 340
+# Judge Feedback — Iter 341
 
 Date: 2026-05-27
 Phase: extended
-Topics: Multi-tenant analytics / session-property-manager vs resource-groups enforcement (Q1) + Iceberg table maintenance / remove_orphan_files retention_threshold error behavior (Q2)
+Topics: Postgres-to-Iceberg ingestion / lag-buffer calibration (Q1) + Multi-tenant analytics / query_max_memory vs softMemoryLimit (Q2)
 
 ---
 
-## Q1 — Session Property Manager vs Resource Groups Enforcement (STRONG PASS)
+## Q1 — Lag-Buffer Calibration for Incremental Postgres Sync (STRONG PASS)
 
 ### Score
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5.0 | All claims verified against official Trino docs. Session property manager values ARE defaults overridable by SET SESSION. Resource group hardConcurrencyLimit/softMemoryLimit/hardCpuLimit ARE engine-enforced ceilings not overridable by any session property. query_max_execution_time IS a system session property. SetSystemSessionProperty IS the correct OPA action name for blocking SET SESSION on system properties. SetCatalogSessionProperty correctly identified as the sibling for catalog-scoped properties. No factual errors. |
-| Beginner clarity | 5.0 | The 3-row comparison table (resource groups / session property manager alone / session property manager + OPA) directly resolves the engineer's exact confusion. "Pre-filled form field" analogy is accessible. Step-by-step walkthrough of what happens when OPA denies SetSystemSessionProperty makes the enforcement chain concrete. No unexplained jargon. |
-| Practical applicability | 4.5 | Engineer can immediately act: knows session property manager needs OPA to have teeth, knows to whitelist admin identities, knows the exact OPA action name. Missing: no concrete JSON config snippet, no concrete Rego/OPA policy snippet, query_max_run_time vs query_max_execution_time distinction not addressed despite engineer asking about "timeouts" generically. |
-| Completeness | 4.5 | Covers: bypass mechanism, resource groups as hard ceilings, OPA action name, admin whitelist reminder, step-by-step lockdown guide. Missing: cluster-level `query.max-execution-time` coordinator property (which IS a true ceiling outside session properties), OPA decision log for monitoring denied attempts, `query_max_memory` session property (memory limits can also be session-settable), the engineer explicitly asked about memory limits and only gets resource-group-level treatment. |
-| **Average** | **4.75** | **STRONG PASS** |
+| Technical accuracy | 5.0 | All core claims verified. `pg_stat_replication.replay_lag` is the correct column. MERGE INTO dedup pattern is correct. 15-30 min default is reasonable for healthy Postgres replicas. P99 × 2 as sizing methodology is industry-standard. Reference table (< 5 min → 15 min, 5-15 min → 30 min, etc.) matches resources/13 calibration table exactly. |
+| Beginner clarity | 4.0 | The "disappearing row" scenario and "re-read overlap" rationale are well explained. The code snippet is helpful. Gaps: "primary", "read replica", and "replication lag" are used without inline definitions — a true beginner might not know these Postgres concepts. |
+| Practical applicability | 5.0 | Engineer has everything needed: the P99 × 2 sizing formula, the pg_stat_replication query to run, the reference table to look up their number, the code pattern. Actionable end-to-end. |
+| Completeness | 4.0 | Covers: why rows go missing, why duplicates happen, how to size the buffer, how to apply it in code. Minor gaps: `writeTo(...).merge()` omits ON clause / primary key join condition (code may not run as-is); no mention of reading from primary vs replica as an alternative failure mode; no escape-hatch alternatives (hot_standby_feedback, LSN-based watermarks for sub-5-min tolerance). |
+| **Average** | **4.50** | **STRONG PASS** |
 
 ### What Worked
-- The 3-row comparison table is the standout strength — resolves the engineer's core confusion in one glance.
-- Correctly and completely distinguishes the three enforcement mechanisms with the correct "can SET SESSION bypass it?" column.
-- Gives the exact OPA action names verbatim (SetSystemSessionProperty, SetCatalogSessionProperty) — third consecutive question correctly naming both.
-- Admin whitelist reminder included — important production safety detail.
-- Step-by-step walkthrough of the OPA enforcement chain is pedagogically valuable.
+- Correctly explains BOTH symptoms (missing rows AND duplicates) and traces them to different root causes.
+- P99 × 2 sizing recipe is correct and actionable.
+- `pg_stat_replication.replay_lag` is the right column to query.
+- Reference table matches the canonical calibration table in resources/13.
+- MERGE INTO requirement correctly called out as the fix for duplicates.
+- Resources/13 lag-buffer content (lines 245-268) correctly surfaced after multiple iterations of miss.
 
 ### What Missed
-1. **No concrete config snippets** — engineer gets the shape of the solution but no JSON for session-property-manager.json or Rego pseudocode for the OPA deny rule.
-2. **query_max_run_time not addressed** — engineer asked about "timeouts" generically; query_max_run_time is a distinct session property with different semantics.
-3. **Cluster-level `query.max-execution-time`** — this coordinator property IS a true ceiling (not a session property), and mentioning it would complete the enforcement picture.
-4. **Memory limits gap** — engineer asked about memory limits, but the answer only covers time limits + resource group concurrency/memory. The session property `query_max_memory` can also be set by clients; locking that down also requires OPA.
-5. **OPA decision log** — denied SetSystemSessionProperty attempts are logged and useful for detecting probing behavior.
-
-### Technical Accuracy Verification (verified by judge via WebSearch)
-- Session property manager values are defaults overridable by SET SESSION — CORRECT per trino.io/docs/current/admin/session-property-managers.html
-- resource group hardConcurrencyLimit, softMemoryLimit enforce engine-side ceilings not bypassable via SET SESSION — CORRECT per trino.io/docs/current/admin/resource-groups.html
-- query_max_execution_time is a system session property — CORRECT per trino.io/docs/current/admin/properties-query-management.html
-- SetSystemSessionProperty is the OPA action for system-level session properties — CORRECT per Trino OPA plugin source and trino.io/docs/current/security/opa-access-control.html
-- SetCatalogSessionProperty is the OPA action for connector-scoped properties — CORRECT per same source
+1. **`writeTo(...).merge()` missing ON clause** — Spark Iceberg MERGE INTO requires a join condition specifying which column(s) to match on. The code snippet as written is incomplete and may not run correctly.
+2. **Primary vs replica failure modes not distinguished** — reading from replica (the common case) has the lag issue; reading from primary avoids it but adds load. Useful to note.
+3. **No mention of `xmin`/LSN-based watermarks** — for sub-5-min lag tolerance use cases, LSN-based approaches avoid the replica lag problem entirely.
+4. **Beginner-hostile terminology** — "primary," "read replica," and "replication lag" used without definition.
 
 ### Resource Fix Applied
-Teacher applied pre-iteration fix to resources/05: added a comparison table of three enforcement mechanisms (resource groups, session property manager, OPA deny rule) with SET SESSION bypass behavior. Fix confirmed holding in this answer.
+None needed. Resources/13 already has comprehensive lag-buffer calibration content. This was a responder retrieval gap (confirmed by teacher pre-iter check), now closed.
 
 ### Rubric Update
-- Multi-tenant analytics: prior avg 4.445/133 → (4.445 × 133 + 4.75) / 134 = 595.935 / 134 = **4.447 across 134 questions**. Status: **PASSED** (recovering upward; third consecutive question correctly naming OPA action names and getting security posture right).
+- Postgres-to-Iceberg ingestion: prior avg 4.500/122 → (4.500 × 122 + 4.50) / 123 = 553.50 / 123 = **4.500 across 123 questions**. Status: **PASSED** (stable; lag-buffer calibration gap finally closed).
 
 ---
 
-## Q2 — remove_orphan_files Retention_threshold Error Behavior (STRONG PASS)
+## Q2 — query_max_memory vs softMemoryLimit Enforcement (STRONG PASS)
 
 ### Score
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5.0 | All load-bearing claims verified against trino.io and iceberg.apache.org. iceberg.remove-orphan-files.min-retention default is 7d (confirmed for Trino 389-481 including 467). Error message format confirmed verbatim. Trino ALTER TABLE ... EXECUTE syntax confirmed. Spark has no engine-enforced floor (warns, doesn't refuse) confirmed. dry_run parameter in Spark confirmed. |
-| Beginner clarity | 4.5 | "Safety floor, not a bug" framing is immediately reassuring. Numbered race-condition story motivates the floor. Two clearly labeled options. Exact error message shown so engineer knows what they saw. Minor: opening hedge "6h or 6d if you meant 6 days" is unnecessary clutter; engineer was unambiguous. "Snapshot" used without inline definition (minor). |
-| Practical applicability | 5.0 | Both the prior gaps are now closed: Trino syntax shown (`ALTER TABLE ... EXECUTE remove_orphan_files(retention_threshold => '7d')`), engineer can see what they should have typed differently. Error-vs-silent-skip rationale explained. Two ranked options (wait vs Spark with dry_run). Pause-ingestion requirement explicitly called out for the Spark path. Copy-pasteable Spark SQL with dry_run first. |
-| Completeness | 4.5 | Covers: error is expected, exact error format, retention floor mechanics, race-condition rationale, two remediation options, correct Trino syntax for safe weekly maintenance. Missing: catalog property is admin-tunable (lowering min-retention is possible but dangerous without pause-ingestion discipline); Trino procedure output metrics ("what does success look like" — how many files deleted/scanned); same floor applies to expire_snapshots (cross-reference). |
-| **Average** | **4.75** | **STRONG PASS** |
+| Technical accuracy | 4.5 | All Trino field names verified against trino.io docs. query_max_memory IS a session property overridable by SET SESSION. softMemoryLimit in resource groups IS admission-control enforcement. query.max-memory IS the cluster-wide per-query ceiling. SetSystemSessionProperty IS the correct OPA action name. Minor inaccuracy: answer implies softMemoryLimit "kills" queries — it is actually admission control (queues/rejects new queries), not a mid-flight killer. |
+| Beginner clarity | 4.5 | 3-row comparison table (query_max_memory / softMemoryLimit / query.max-memory) resolves the confusion directly. "Suggested default, not an enforced ceiling" framing is clear. Code snippet for resource-groups.json is concrete. Minor gap: "admission control" concept not explained — engineer may not know what queuing means for their runaway query. |
+| Practical applicability | 5.0 | Engineer can immediately act: switch to softMemoryLimit in resource groups with the provided JSON snippet. Whitelist caveat for OPA option included. The "which problem are you solving?" framing (per-tier aggregate vs per-query enforcement) is practically useful. |
+| Completeness | 4.5 | Covers: bypass mechanism, all three memory knobs, correct recommendation (softMemoryLimit), OPA option for session property enforcement. Key gap: doesn't clarify that softMemoryLimit is admission control — it queues new queries from the group but does NOT kill the in-flight runaway query. For the engineer's specific situation (query already ran and used too much memory), the answer that would have stopped it is query.max-memory (per-query hard ceiling), not softMemoryLimit (aggregate group limit). This framing distinction is missing. |
+| **Average** | **4.625** | **STRONG PASS** |
 
 ### What Worked
-- Exactly addresses the engineer's confusion: error is expected, not a bug.
-- Shows the exact Trino error message — engineer can now match what they saw to what's explained.
-- Explains WHY Trino errors (makes safety violation visible) vs silently skipping — this directly answers the "why would Trino error instead of just being conservative" part of the question.
-- Shows the correct Trino syntax the engineer should have used (`retention_threshold => '7d'`).
-- Pause-ingestion requirement explicitly called out for the Spark option.
-- Both prior gaps (Trino syntax, error-vs-skip rationale) now closed.
+- Correctly identifies query_max_memory as a default not a ceiling — direct answer to the engineer's confusion.
+- 3-row comparison table (query_max_memory / softMemoryLimit / query.max-memory) is clear and complete.
+- Steers to the right solution: softMemoryLimit in resource groups.
+- SetSystemSessionProperty named correctly for the 4th consecutive question.
+- Resources/05 query_max_memory fix from teacher pre-iter confirmed working immediately.
 
 ### What Missed
-1. **No mention that min-retention is admin-tunable** — the catalog property `iceberg.remove-orphan-files.min-retention` can be lowered in the Trino config (with coordinator restart), but this is risky without enforcing pause-ingestion discipline. This would complete the options picture.
-2. **No description of successful procedure output** — what does the engineer see when it works? Trino 467 outputs file-count metrics; "0 files deleted" vs "N files deleted" is a useful debugging signal.
-3. **Same floor applies to expire_snapshots** — cross-referencing this would reinforce the pattern and prevent future surprise.
-
-### Technical Accuracy Verification (verified by judge via WebSearch)
-- iceberg.remove-orphan-files.min-retention default is 7d in Trino — CORRECT per trino.io/docs/current/connector/iceberg.html
-- Passing retention_threshold shorter than min-retention throws explicit error — CORRECT; error message format "Retention specified (X) is shorter than the minimum retention configured in the system (7.00d)" verified
-- ALTER TABLE ... EXECUTE remove_orphan_files(retention_threshold => '7d') is correct Trino syntax — CORRECT
-- Spark system.remove_orphan_files has older_than and dry_run parameters, no engine-enforced floor — CORRECT per iceberg.apache.org/docs/latest/spark-procedures/
+1. **softMemoryLimit is admission control, not a mid-flight killer** — the engineer's runaway query was already running. softMemoryLimit queues NEW queries when the group is over budget; it doesn't kill in-flight queries. The knob that would have killed the runaway mid-flight is `query.max-memory`. This distinction matters for the engineer's "why didn't it get killed" question.
+2. **Per-query vs per-group enforcement not explicitly named** — `softMemoryLimit` is aggregate (all free-tier queries together); `query.max-memory` is per-query. Naming this would help the engineer pick the right lever.
+3. **No mention of `query.max-memory-per-node`** — for per-worker defense-in-depth, this property exists but isn't in the answer.
 
 ### Resource Fix Applied
-None needed. resources/17 already documented both the Trino syntax and the error behavior; this was a responder completeness gap in prior iterations that is now closed.
+Consider adding to resources/05: explicit note that `softMemoryLimit` is admission control (queues/rejects new queries, does not kill in-flight) vs `query.max-memory` (per-query ceiling, kills queries mid-flight). This distinction was the main gap in iter341 Q2.
 
 ### Rubric Update
-- Iceberg table maintenance: prior avg 4.569/32 → (4.569 × 32 + 4.75) / 33 = 150.958 / 33 = **4.575 across 33 questions**. Status: **PASSED** (recovering upward; both prior gaps closed in a single iteration).
+- Multi-tenant analytics: prior avg 4.447/134 → (4.447 × 134 + 4.625) / 135 = 600.523 / 135 = **4.448 across 135 questions**. Status: **PASSED** (recovering upward; query_max_memory vs softMemoryLimit distinction correctly explained on first attempt after resources/05 fix).
 
 ---
 
-## Iter 340 Summary
+## Iter 341 Summary
 
-**Iter 340 average: (4.75 + 4.75) / 2 = 4.75 — STRONG PASS** ✓
+**Iter 341 average: (4.50 + 4.625) / 2 = 4.5625 — STRONG PASS** ✓
 
 ### Notable
-- Q1 4.75 STRONG PASS: The resources/05 comparison table fix (teacher pre-iter) held immediately — responder produced a 3-row comparison table showing exactly which Trino mechanism enforces what and whether SET SESSION can bypass it. Third consecutive question correctly naming SetSystemSessionProperty and SetCatalogSessionProperty.
-- Q2 4.75 STRONG PASS: Both prior gaps (Trino ALTER TABLE EXECUTE syntax, error-vs-silent-skip rationale) closed in a single iteration. The answer now shows the engineer exactly what they should have typed and why they got an error instead of silent skipping.
+- Q1 4.50 STRONG PASS: Lag-buffer calibration gap finally closed after multiple iterations of miss. Resources/13 content surfaced correctly: P99 × 2 recipe, `pg_stat_replication.replay_lag`, reference table, MERGE INTO requirement.
+- Q2 4.625 STRONG PASS: query_max_memory vs softMemoryLimit distinction correctly explained on first attempt after resources/05 pre-iter fix. SetSystemSessionProperty correctly named for 4th consecutive question. Key remaining gap: softMemoryLimit is admission control (queues, not kills), not a mid-flight query killer.
 
 ### Resource fixes applied this iteration
-- **resources/05-multi-tenant-analytics.md** (teacher pre-iter fix): added comparison table of three enforcement mechanisms with SET SESSION bypass behavior. Fix confirmed holding.
-- No post-iteration fixes needed.
+- **resources/05-multi-tenant-analytics.md** (teacher pre-iter fix): added query_max_memory vs softMemoryLimit vs query.max-memory 3-row comparison table. Fix confirmed holding immediately.
+- No post-iteration fixes needed; remaining gaps are completeness/framing, not missing resource content.
 
-### Suggested focus for Iter 341
-- **Postgres-to-Iceberg ingestion** (4.500/122): Probe lag-buffer calibration — 15-30 min P99 window for incremental ingestion lag thresholds has been missed across multiple iterations.
-- **Multi-tenant analytics** (4.447/134): Consider probing the memory limits gap — specifically whether `query_max_memory` (session property, SET SESSION overridable) vs resource group `softMemoryLimit` (engine-enforced) distinction is understood.
-- **Iceberg table maintenance** (4.575/33): Consider probing `expire_snapshots` — specifically the same min-retention floor that apply to both procedures, or the interaction between expire_snapshots and remove_orphan_files in the complete weekly maintenance schedule.
+### Suggested resource fix for iter342
+- **resources/05**: Add note that softMemoryLimit is admission control (queues/rejects new queries when group budget is exceeded), not a mid-flight query killer. Distinguish from query.max-memory (per-query hard ceiling that can kill mid-flight). This distinction was the main completeness gap in iter341 Q2.
+
+### Suggested focus for Iter 342
+- **Multi-tenant analytics** (4.448/135): Probe the admission-control vs mid-flight-kill distinction — specifically "I want to kill a runaway query from a free-tier customer that's already running and consuming too much memory, which Trino lever does that?"
+- **Postgres-to-Iceberg** (4.500/123): Probe the MERGE INTO ON clause / primary key join condition — the missing detail from iter341 Q1.
+- **Iceberg table maintenance** (4.575/33): Consider probing the interaction between expire_snapshots min-retention floor and the same 7-day floor on remove_orphan_files — are both understood together?
