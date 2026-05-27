@@ -1,7 +1,7 @@
 {
-  "iteration": 332,
+  "iteration": 333,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter331 avg 4.6875 — PASS. Q1 (4.75) history.expire.* Spark-only fix held perfectly. Q2 (4.625) Iceberg no-HMS-cache by design — correct, minor SQL column drift. Iceberg maintenance: 4.568/27. Multi-tenant: 4.479/127. Postgres-to-Iceberg: 4.496/117."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter332 avg 4.844 — PASS. Q1 (4.8125) offset.flush.interval.ms delivery gap — time-based window, LSN guard, pre-MERGE dedup. Q2 (4.875) $history vs $snapshots — perfect on 3/4 dimensions. Postgres-to-Iceberg: 4.499/118. Iceberg maintenance: 4.579/28. Multi-tenant: 4.479/127."
 }

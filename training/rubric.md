@@ -40,8 +40,8 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.496 | 117 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.568 | 27 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.499 | 118 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.579 | 28 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
@@ -50,6 +50,42 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 332 — 2026-05-27
+
+**Q1** — Postgres-to-Iceberg: offset.flush.interval.ms at-least-once delivery window (time-based, not event-count), LSN guard in MERGE, pre-MERGE ROW_NUMBER() dedup required, reducing flush interval tradeoffs.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.75 |
+| **Average** | **4.8125** — PASS |
+
+All five technical claims verified: offset.flush.interval.ms default 60s correct; duplicate window is time-based not event-count-based; LSN guard `s.source_lsn > t.source_lsn` is canonical idempotency pattern; pre-MERGE ROW_NUMBER() dedup required for correct MERGE behavior. No fabrications. Minor gaps: LSN/WAL jargon not glossed for true beginners. Topic running avg: (4.496×117 + 4.8125)/118 = **4.499/118 questions** — PASSED (mild upward drift).
+
+**Q2** — Iceberg table maintenance: $history vs $snapshots — $history tracks which snapshot was current at each point (made_current_at column); $snapshots shows all snapshots ever created. Rollback example, two-step query to find snapshot and time-travel to it, decision matrix.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.875** — PASS |
+
+All five verification points confirmed: $history has `made_current_at`; $snapshots has `committed_at`, `operation`, `parent_id`; `FOR VERSION AS OF <snapshot_id>` is correct Trino syntax; $history tracks current-snapshot lineage; both tables are valid Trino Iceberg metadata tables. Rollback timeline example makes the distinction concrete. Minor gap: no mention of `is_current_ancestor` column or `FOR TIMESTAMP AS OF` as one-shot alternative. Topic running avg: (4.568×27 + 4.875)/28 = **4.579/28 questions** — PASSED (recovering from iter330 drop).
+
+**Iter 332 average: (4.8125 + 4.875) / 2 = 4.844 — PASS** ✓ (Q1 PASS / Q2 PASS)
+
+**Topics updated**:
+- Postgres-to-Iceberg ingestion: 4.496/117 → **4.499/118 questions** (PASSED — mild upward drift; CDC dedup pattern solid)
+- Iceberg table maintenance: 4.568/27 → **4.579/28 questions** (PASSED — recovering; $history vs $snapshots clean)
+
+**Resource fixes this iteration**: None needed.
+
+---
 
 ### Iter 331 — 2026-05-27
 
