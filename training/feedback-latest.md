@@ -1,69 +1,65 @@
-# Feedback — Iter 287 (Extended phase)
+# Feedback — Iter 288 (Extended phase)
 
 Date: 2026-05-27
-Topic: Trino federation — Postgres unsupported type handling (Q1 PASS) + Postgres array column mapping (Q2 PASS)
+Topic: Trino federation — broadcast join CBO override (Q1 PASS) + federate vs ingest 5M-row table (Q2 PASS)
 
 ## Results summary
 
 | Question | Topic angle | Score | Pass/Fail |
 |---|---|---|---|
-| Q1 | Postgres unsupported type handling: IGNORE default silently drops; ENUMs map natively to VARCHAR; CONVERT_TO_VARCHAR fix; JDBC debug logging diagnostic | **4.96** | PASS |
-| Q2 | Postgres array mapping: DISABLED default silently drops; AS_ARRAY → ARRAY<T>; AS_JSON for multi-dim; CONTAINS/ANY_MATCH; no pushdown; system.query() @> for GIN index | **4.93** | PASS |
+| Q1 | Broadcast join: CBO automatic from pg_stats; join_distribution_type=BROADCAST; EXPLAIN Exchange[type=REPLICATE]; join-max-broadcast-table-size=100MB; native ANALYZE on primary; flush_metadata_cache() | **4.94** | PASS |
+| Q2 | Federate vs ingest 5M-row accounts: above threshold at dozens/day; Spark JDBC initial load; MERGE INTO with updated_at + 2-day lag buffer; maintenance | **4.92** | PASS |
 
-**Iter 287 average: 4.945 — PASS** ✓ Both passed with high scores!
+**Iter 288 average: 4.93 — PASS** ✓ Both passed with high scores!
 
-**Topic update**: Trino federation: 4.504/247 → **4.507/249** (PASSED — solidly above threshold)
+**Topic update**: Trino federation: 4.507/249 → **4.511/251** (PASSED — solidly above threshold)
 
 ---
 
 ## What worked
 
-### Q1 — Unsupported type handling (4.96)
-1. `postgresql.unsupported-type-handling=IGNORE` is the default — verified correct
-2. Critical nuance: custom ENUMs map natively to VARCHAR (not via unsupported-type-handling) — correct and important
-3. The culprit is likely a DIFFERENT column with hstore/range/composite type — correct reframing
-4. `CONVERT_TO_VARCHAR` fix — verified correct value
-5. Session property syntax: `app_pg.unsupported_type_handling` (underscore, catalog prefix) — verified correct
-6. JDBC debug logging diagnostic (`io.trino.plugin.jdbc=DEBUG`) — verified correct logger name
-7. DESCRIBE vs `\d` comparison for finding missing columns — sound diagnostic
+### Q1 — Broadcast join (4.94)
+1. CBO reads Postgres stats from `pg_stats` — requires native `ANALYZE` on Postgres primary — correct
+2. `join_distribution_type='BROADCAST'` session property — verified correct
+3. `Exchange[type=REPLICATE]` in EXPLAIN = broadcast happening; `Exchange[type=REPARTITION]` = partitioned join — correct signals
+4. `join-max-broadcast-table-size=100MB` default limit — verified
+5. `CALL app_pg.system.flush_metadata_cache()` — parameterless for PostgreSQL, correct
+6. `SHOW STATS FOR app_pg.public.customers` to verify stats visible — correct diagnostic
 
-### Q2 — Array column mapping (4.93)
-1. `postgresql.array-mapping=DISABLED` default — verified correct
-2. `AS_ARRAY` → `ARRAY<VARCHAR>` for `TEXT[]` — verified correct
-3. `AS_JSON` for multi-dimensional arrays — correct (Trino ARRAY is flat; Postgres arrays aren't)
-4. `CONTAINS()` and `ANY_MATCH()` Trino array functions with examples — correct
-5. Array predicates do NOT push down to Postgres — verified correct
-6. `system.query()` with native `@>` operator for GIN index — correct
-7. Session property `app_pg.array_mapping = 'AS_ARRAY'` (underscore, catalog prefix) — correct
-8. Iceberg denormalization as long-term pattern for heavy analytics — correct
+### Q2 — Federate vs ingest (4.92)
+1. 5M rows + dozens/day → above federation threshold (comfortable ≤1-2M at low frequency) — correct rule of thumb
+2. Spark JDBC → `writeTo().using("iceberg").createOrReplace()` syntax — correct
+3. MERGE INTO with `updated_at` watermark + 2-day lag buffer — correct pattern
+4. 2-day lookback rationale (replica lag + job timing drift + idempotency) — well-explained
+5. Nightly compaction (`rewrite_data_files`) + weekly snapshot expiry (`expire_snapshots`) — correct maintenance
+6. Before/after join query showing elimination of Postgres touch — good instructional finish
 
 ---
 
 ## Errors / gaps (minor — did not block pass)
 
 ### Q1
-- No mention that `CONVERT_TO_VARCHAR` only works per-column (doesn't solve multi-column unsupported type issues at query level)
-- No mention that some types (e.g., `hstore`) need Postgres extensions to be installed
+- Did not explain *why* stale JDBC stats cause CBO to miss broadcast: stats are cached in Trino's metadata cache; cache flush is the fix (mentioned) but root cause connection between ANALYZE-then-flush not fully articulated
 
 ### Q2
-- No mention that multi-dimensional arrays (`TEXT[][]`) with `AS_ARRAY` may fail — only safe for 1D arrays; use `AS_JSON` for 2D+
+- No mention of soft-delete handling: incremental MERGE INTO only handles INSERT/UPDATE; rows deleted from Postgres survive in Iceberg indefinitely unless full refresh or explicit WHEN MATCHED AND src.deleted=true THEN DELETE logic is added
 
 ---
 
 ## Resource fixes
 
-None needed. Resource 22 covers all these topics correctly.
+None required. Resource 22 covers all these topics correctly. 
+
+**Optional future improvement**: Add soft-delete pattern to MERGE INTO section in resource 22 — flag that tables with physical deletes need either a `deleted_at` column or periodic full refresh to stay in sync.
 
 ---
 
-## Suggested iter288 angles (topic PASSED at 4.507/249 — continue solidifying)
+## Suggested iter289 angles
 
-1. **Broadcast join hint for CBO override** — when Trino's CBO guesses wrong build/probe side for an Iceberg × Postgres join; `join_distribution_type='BROADCAST'` forces broadcast of the smaller side; when to override vs trust CBO
+1. **SQL query best practices for OLAP (new topic)**: partition column always in WHERE; avoid SELECT * on wide Iceberg tables; approximate functions (approx_distinct, approx_percentile); verify execution plan with EXPLAIN; type-safe predicates to avoid implicit casts breaking pushdown; avoid UDFs in WHERE
 
-2. **JDBC connection URL parameters for Postgres federation** — `socketTimeout`, `connectTimeout`, `defaultRowFetchSize`; importance for on-prem federation where network latency exists; how to configure in catalog properties
+2. **Trino Postgres catalog: JDBC connection tuning** — `socketTimeout`, `connectTimeout`, `defaultRowFetchSize`; increasing fetch size for large scans; tradeoff with memory pressure
 
-3. **Trino Postgres catalog: SSL/TLS configuration** — `sslmode=verify-full`, `sslrootcert`, `ssl=true` in JDBC URL; important for on-prem Kubernetes where internal TLS is common
+3. **Federation with SSL/TLS** — `sslmode=verify-full`, certificate paths in catalog properties; on-prem Kubernetes with internal TLS
 
-4. **Federation performance: JDBC fetch size impact** — `defaultRowFetchSize=1000` default; increasing for large table scans; tradeoff with memory pressure on Trino workers
-
-5. **Re-test: federate vs ingest with a 5M-row table** — between the "clearly federate" (<10M) and "clearly ingest" (>50M) zones; decision factors (query frequency, staleness tolerance, Postgres replica load)
+4. **Re-test: federation predicate pushdown** — confirm ScanFilterProject vs constraint annotation understanding after all the DF fixes

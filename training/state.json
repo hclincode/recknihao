@@ -1,7 +1,7 @@
 {
-  "iteration": 288,
+  "iteration": 289,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter287 avg 4.945: Q1 (4.96 PASS) Postgres unsupported-type-handling: IGNORE default silently drops; ENUMs map natively to VARCHAR; CONVERT_TO_VARCHAR fix; JDBC debug logging. Q2 (4.93 PASS) Postgres array mapping: DISABLED default; AS_ARRAY/AS_JSON; CONTAINS/ANY_MATCH; no pushdown; system.query() @> for GIN. TOPIC: Trino federation 4.504/247 → 4.507/249. SOLIDLY PASSED."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter288 avg 4.93: Q1 (4.94 PASS) Broadcast join: CBO from pg_stats, join_distribution_type=BROADCAST, Exchange[type=REPLICATE], 100MB limit, flush_metadata_cache(). Q2 (4.92 PASS) Federate vs ingest 5M-row: MERGE INTO with updated_at + 2-day lag buffer, compaction, snapshot expiry. TOPIC: Trino federation 4.507/249 → 4.511/251. NEW TOPIC ADDED: SQL query best practices for OLAP (user request)."
 }

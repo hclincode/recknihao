@@ -43,8 +43,9 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.474 | 99 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.623 | 16 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
-| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.507 | 249 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.511 | 251 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.763 | 4 |
+| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | NOT STARTED | — | 0 |
 
 ---
 
@@ -9882,3 +9883,23 @@ Verified: trino.io/docs/current/connector/postgresql.html.
 **Key findings**: postgresql.array-mapping=DISABLED default — verified; AS_ARRAY → ARRAY<VARCHAR> for TEXT[] — verified; AS_JSON for multi-dimensional arrays — verified; array predicates (CONTAINS/ANY_MATCH) do NOT push down — verified; system.query() with @> for GIN index — correct. Session property syntax (underscore, catalog prefix) — correct.
 
 Verified: trino.io/docs/current/connector/postgresql.html, trino.io/docs/current/optimizer/pushdown.html.
+
+### Iter 288 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (broadcast join: CBO automatic from pg_stats; EXPLAIN Exchange[type=REPLICATE]; join_distribution_type=BROADCAST session property; join-max-broadcast-table-size=100MB limit; native ANALYZE on primary; flush_metadata_cache())
+
+**Score: 4.94/5.0 PASS**
+
+**Topics updated**: Trino federation — prior avg 4.507 across 249 questions; new running avg (1122.341 + 4.94) / 250 = 1127.281 / 250 = **4.509 across 250 questions**. Status: PASSED (solidly above threshold).
+
+**Key findings**: CBO reads Postgres stats from pg_stats via native ANALYZE on primary — verified; `Exchange[type=REPLICATE]` in EXPLAIN is the correct broadcast signal — verified; `join_distribution_type=BROADCAST` is the correct session property — verified; `join-max-broadcast-table-size=100MB` default — verified; `CALL app_pg.system.flush_metadata_cache()` correct parameterless form for PostgreSQL — verified. No significant errors.
+
+Verified: trino.io/docs/current/connector/postgresql.html, trino.io/docs/current/admin/join-distribution-type.html.
+
+### Iter 288 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (federate vs ingest: 5M rows + dozens/day above threshold; Spark JDBC writeTo().createOrReplace() initial load; MERGE INTO with updated_at watermark + 2-day lag buffer; nightly compaction; snapshot expiry)
+
+**Score: 4.92/5.0 PASS**
+
+**Topics updated**: Trino federation — prior avg 4.509 across 250 questions; new running avg (1127.281 + 4.92) / 251 = 1132.201 / 251 = **4.511 across 251 questions**. Status: PASSED (solidifying above threshold).
+
+**Key findings**: 5M rows + dozens/day correctly identified as above federation threshold — correct rule-of-thumb; Spark `writeTo().using("iceberg").createOrReplace()` syntax — verified; MERGE INTO with updated_at watermark — valid Iceberg 1.5.2 syntax; 2-day lag buffer rationale (replica lag + timing drift) — correct; MERGE INTO idempotency explanation — correct; maintenance procedures (rewrite_data_files, expire_snapshots) — verified. No significant errors.
+
+Verified: trino.io/docs/current/connector/iceberg.html, iceberg.apache.org/docs/latest/spark-writes/.
