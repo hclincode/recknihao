@@ -1,9 +1,13 @@
-# Iter 282 Questions
+# Iter 283 Questions
 
-## Q1 — Connecting Trino to a read replica instead of primary Postgres
+## Q1 — Writes to Postgres and Iceberg at the same time — are they safe together?
 
-We recently set up a Postgres read replica for our primary app database. The idea was to offload our analytics queries so they don't hammer the primary. Now we want to point Trino at the replica instead of the primary — that way our OLTP writes never compete with whatever Trino is doing. My question is: is this actually straightforward? Is it just a matter of changing the connection URL in the Trino catalog config to point at the replica host, or is there more to it? And I'm a little worried about stale data — if replication is lagging by a few seconds or even a minute, does Trino have any way to know that, or does it just silently return stale rows without warning?
+We have a workflow where, when a customer's billing event comes in, we need to write a record to our main Postgres database (so the app can see it immediately) and also write the same event into our Iceberg tables (so it shows up in their usage dashboard). Right now we're doing these as two separate writes in our backend code, which feels fragile — if one succeeds and the other fails we end up with inconsistent data.
 
-## Q2 — Postgres UUID and JSON columns coming through Trino weirdly
+I saw that Trino supports some kind of transaction syntax. My question is: if I wrap both writes in a `START TRANSACTION` in Trino, does that actually guarantee both the Postgres write and the Iceberg write either both succeed or both roll back together? Or is that wishful thinking and they're still separate underneath? I want to understand how much I can trust Trino to keep these two systems in sync.
 
-We store a lot of data in Postgres with UUID primary keys and some JSONB columns for flexible metadata. When I query those tables through Trino, the UUIDs seem fine, but the JSONB fields look like they're coming back as plain strings — I can't do anything useful with them, like pull out a nested key. For example, I have a column called `settings` that in Postgres is JSONB with keys like `{"plan": "pro", "seats": 10}`, but when I try to do something like extract the `plan` value in a Trino query, I'm not sure what the right syntax is. Is Trino doing some kind of conversion on these types, and if so, what's the correct way to work with UUID and JSON data that originated in Postgres?
+## Q2 — Should we copy a big Postgres table into Iceberg or just keep joining across them?
+
+We have a table in Postgres called `accounts` — it's about 20 million rows and it changes slowly (maybe a few hundred updates a day, things like plan changes or account renames). Almost every analytics query we run in Trino ends up joining against this table to attach account-level context to the event data sitting in Iceberg.
+
+Right now we just let Trino reach across and query Postgres directly when it needs that data. It works, but some of our heavier queries feel sluggish and I'm wondering if we're paying a cost every time Trino has to go fetch from Postgres mid-query. Would we be better off copying that `accounts` table into Iceberg and keeping it in sync ourselves? Or is the live federation approach fine and we're just not tuning something right?

@@ -1,75 +1,76 @@
-# Feedback — Iter 282 (Extended phase)
+# Feedback — Iter 283 (Extended phase)
 
 Date: 2026-05-27
-Topic: Trino federation — Postgres read replica federation (Q1 PASS) + UUID/JSONB type mapping (Q2 PASS)
+Topic: Trino federation — Cross-catalog atomicity (Q1 PASS) + Federate vs ingest 20M-row table (Q2 PASS)
 
 ## Results summary
 
 | Question | Topic angle | Score | Pass/Fail |
 |---|---|---|---|
-| Q1 | Read replica federation: connection-url change only, no replication lag awareness, pg_stat_replication monitoring, replica vs primary use cases | **4.85** | PASS |
-| Q2 | UUID→UUID native (UUID literal syntax), jsonb→JSON native (json_extract_scalar/json_extract), no JSONB predicate pushdown, system.query() for server-side | **4.80** | PASS |
+| Q1 | Cross-catalog atomicity: START TRANSACTION does not coordinate across Postgres+Iceberg; no XA/2PC; three remediation patterns (outbox, CDC, batch MERGE) | **4.70** | PASS |
+| Q2 | Federate vs ingest 20M-row accounts table: JDBC bottlenecks, DF tuning first, CTAS+MERGE INTO sync, hybrid UNION ALL view | **4.70** | PASS |
 
-**Iter 282 average: 4.825 — PASS** ✓ Both passed!
+**Iter 283 average: 4.70 — PASS** ✓ Both passed!
 
-**Topic update**: Trino federation: 4.493/237 → **4.496/239** (NEEDS WORK, gap 0.004 — very close to threshold)
+**Topic update**: Trino federation: 4.496/239 → **4.498/241** (NEEDS WORK, gap 0.002 — EXTREMELY CLOSE to 4.500 threshold!)
 
 ---
 
 ## What worked
 
-### Q1 — Read replica federation (4.85)
-1. Config change is only `connection-url` — no "read replica mode" or flag — correct
-2. Trino has zero replication lag awareness — silently returns stale rows — correct and well-emphasized
-3. External monitoring via `pg_stat_replication.replay_lag` and `pg_last_wal_replay_lsn()` — verified
-4. Practical guidance: use replica for analytics/aggregations, use primary for sub-second freshness — correct
-5. Schema caching interaction with `metadata.cache-ttl` — complete and accurate
-6. Summary table (config change / lag detection / when to use replica / schema caching) — excellent structure
+### Q1 — Cross-catalog atomicity (4.70)
+1. Correct and immediate "no" — START TRANSACTION does NOT coordinate across catalogs
+2. Trino has no XA/2PC coordinator — verified against Trino docs
+3. Each connector commits independently at DML completion — correct
+4. Three remediation patterns with code: outbox+idempotent retry (Python), CDC (Debezium+Kafka concept), batch MERGE INTO with watermark overlap
+5. Explicit warning: Iceberg rows committed before Postgres failure = no auto-rollback
+6. Watermark upper bound in MERGE INTO pattern (2-hour overlap) — correct
 
-### Q2 — UUID/JSONB type mapping (4.80)
-1. `uuid`→UUID native, `jsonb`/`json`→JSON native — correct Trino type mapping
-2. UUID literal syntax `UUID '...'` and explicit CAST — correct; predicate pushdown works for UUID equality
-3. `json_extract_scalar(col, '$.key')` returns VARCHAR — correct
-4. `json_extract(col, '$.key')` returns native JSON type — correct
-5. JSONB predicates do NOT push down to Postgres — fetches entire table, filter in Trino — correct and critical
-6. `system.query()` workaround for server-side JSONB filtering with GIN index — correct
-7. Iceberg ingestion recommendation for heavy JSONB analytics — correct long-term pattern
-8. Type mapping summary table — clear and accurate
+### Q2 — Federate vs ingest (4.70)
+1. Three structural JDBC costs correctly identified: row-by-row, single-split/connection, no pre-computation
+2. Tuning-first approach: DF wait timeout to 15s, selective WHERE predicate, EXPLAIN ANALYZE
+3. `dynamicFilterSplitsProcessed > 0` as the correct DF verification metric — verified
+4. Domain compaction threshold 256 — verified correct
+5. CTAS initial load + MERGE INTO incremental sync with 2-hour overlap watermark — sound
+6. Hybrid UNION ALL view (Iceberg historical + Postgres live tail) — correct freshness pattern
+7. Broadcast join benefit at 150-300MB Parquet — realistic sizing
+8. Decision summary table with measurable threshold (>2s after tuning)
 
 ---
 
 ## Errors / gaps (did not block pass)
 
 ### Q1 (minor)
-- No mention of `pg_is_in_recovery()` as a quick health check to confirm you're connected to the replica and not the primary
-- No mention of `hot_standby_feedback` replication parameter (affects visibility of old row versions; niche but relevant for long-running analytics queries on replica)
+- Slight overstatement: "Iceberg commits are immutable — no rollback once written" understates `CALL iceberg.system.rollback_to_snapshot()`. Should clarify that manual snapshot rollback is possible but is NOT triggered automatically on transaction failure. The practical conclusion (no auto-rollback) is correct.
 
 ### Q2 (minor)
-- `json_value()` and `json_query()` (ISO SQL standard JSON functions added in Trino ~390+) not mentioned as modern alternatives to `json_extract_scalar`/`json_extract`
-- `postgresql.unsupported-type-handling=CONVERT_TO_VARCHAR` not mentioned — relevant if the JSONB column is unexpectedly missing from Trino's schema view
+- "Single-task" should more precisely be "single split / single JDBC connection" — the constraint is at the split/connection layer, not the task layer
+- Session property `iceberg.dynamic_filtering_wait_timeout` should note the prefix is the catalog name — could cause confusion if catalog is named differently
+- Hard-delete handling not mentioned: MERGE INTO with watermark catches inserts/updates but not deletes; periodic full reconciliation needed for true SCD with deletes
+- `domain_compaction_threshold` is configurable as a session property — not mentioned
 
 ---
 
-## Resource fixes before iter283
+## Resource fixes before iter284
 
-None urgent. Resource is in good shape. The JSONB pushdown limitation and system.query() workaround are already documented.
+None urgent. Resource 22 is in good shape.
 
 ### Nice-to-have
-1. **Add `pg_is_in_recovery()` tip** (resource 22, read replica section):
-   - Quick sanity check: `SELECT * FROM TABLE(app_pg.system.query(query => 'SELECT pg_is_in_recovery()'))` → returns `true` on replica, `false` on primary
+1. **Clarify "single-split / single JDBC connection" phrasing** in JDBC parallelism section — current "single task" language is slightly imprecise
+2. **Add `domain_compaction_threshold` configurability note**: `SET SESSION domain_compaction_threshold = 512` for cases where IN-list precision matters
 
 ---
 
-## Suggested iter283 angles (MUST target Trino federation, gap 0.004)
+## Suggested iter284 angles (MUST target Trino federation, gap 0.002)
 
-Topic at 4.496/239. Need ~2 more questions at 4.875+ to cross 4.500 threshold.
+Topic at 4.498/241. Need ~1 more question at 4.875+ to cross 4.500 threshold!
 
-1. **Dynamic filtering with large IN-lists and domain compaction** — engineer sees join performance degrade with high-cardinality keys; correct: `join_reordering_strategy`, `domain_compaction_threshold` compacts oversized IN-lists to a range, reducing DF effectiveness for high-cardinality joins
+1. **EXPLAIN ANALYZE on federated queries — reading the plan** — how to interpret ScanFilterProject vs TableScan; constraint annotation for predicate pushdown; dynamicFilters in plan output
 
-2. **Re-test: cross-catalog atomicity / two-phase commit** — engineer asks if Trino can use XA/2PC across Postgres and Iceberg catalogs; correct: no; START TRANSACTION does not coordinate across catalogs; three remediation patterns
+2. **Trino resource groups for federated workloads** — hardConcurrencyLimit, maxQueued, source selectors with X-Trino-Source header; file-based config requires coordinator restart
 
-3. **Trino resource groups for federated workloads** — hardConcurrencyLimit, maxQueued, source selectors with X-Trino-Source header, file-based vs REST-based config, coordinator restart required
+3. **Dynamic filtering with high-cardinality keys — domain compaction** — DF IN-list ≥256 values compacted to a range; session property `domain_compaction_threshold` to raise the limit; when DF stops being effective
 
-4. **Federate vs ingest decision for 20M-row slowly-changing Postgres table** — above single-use federate threshold; MERGE INTO nightly with watermark upper bound; remove JDBC load from Postgres primary
+4. **Re-test: JSONB system.query() passthrough** — sending native Postgres SQL verbatim; no outer predicate pushdown on the result; single-quote doubling; ORDER BY not preserved
 
-5. **EXPLAIN ANALYZE on federated queries** — how to read the plan for cross-catalog joins; ScanFilterProject vs TableScan; predicate pushdown verification for JDBC connector
+5. **ILIKE pushdown conditions** — conditional on `enable_string_pushdown_with_collate=true` and compatible column collation; COLLATE "C" warning for ICU columns

@@ -43,7 +43,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.474 | 99 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.623 | 16 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
-| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.496 | 239 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.498 | 241 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.763 | 4 |
 
 ---
@@ -9778,3 +9778,23 @@ Dimension scores: Technical accuracy 5/5, Beginner clarity 4.5/5, Completeness 5
 **Key findings**: uuid→UUID native — verified (PR #1011); jsonb→JSON native — verified (PR #81); json_extract_scalar / json_extract — verified; JSONB predicate no pushdown — verified; UUID literal `UUID '...'` syntax — verified; system.query() for server-side JSONB filtering — correct; Iceberg denormalization for heavy analytics — correct. Minor gap: json_value/json_query are modern alternatives to json_extract for strings; not mentioned but not an error.
 
 Verified: trino.io/docs/current/connector/postgresql.html, trino.io/docs/current/functions/json.html, trino.io/docs/current/optimizer/pushdown.html.
+
+### Iter 283 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (cross-catalog atomicity: START TRANSACTION does not coordinate across Postgres and Iceberg catalogs; no XA/2PC; three remediation patterns)
+
+**Score: 4.70/5.0 PASS**
+
+**Topics updated**: Trino federation — prior avg 4.496 across 239 questions; new running avg (4.496 × 239 + 4.70) / 240 = (1074.544 + 4.70) / 240 = **4.4968 across 240 questions**. Status: NEEDS WORK (4.497 < 4.5 raised threshold). Gap: 0.003.
+
+**Key findings**: START TRANSACTION does not provide cross-catalog atomicity — verified (Trino docs confirm no XA/2PC coordinator); Iceberg commits immutable at snapshot creation (manual rollback_to_snapshot exists but is not automatic) — verified; outbox/idempotent-retry pattern correct; CDC (Debezium+Kafka) pattern correct; MERGE INTO with overlap watermark pattern correct. Minor gap: slight overstatement that Iceberg snapshots cannot be rolled back (rollback_to_snapshot exists as manual operation).
+
+Verified: trino.io/docs/current/sql/start-transaction.html, trino.io/docs/current/connector/iceberg.html.
+
+### Iter 283 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (federate vs ingest: 20M-row slowly-changing Postgres accounts table; JDBC single-split/single-connection bottleneck; dynamic filtering tuning; domain compaction threshold; CTAS + MERGE INTO incremental sync; hybrid UNION ALL view)
+
+**Score: 4.70/5.0 PASS**
+
+**Topics updated**: Trino federation — prior avg 4.4968 across 240 questions; new running avg (4.4968 × 240 + 4.70) / 241 = (1079.232 + 4.70) / 241 = **4.498 across 241 questions**. Status: NEEDS WORK (4.498 < 4.5 raised threshold). Gap: 0.002 (EXTREMELY CLOSE!).
+
+**Key findings**: Three structural JDBC federation costs correct; dynamicFilterSplitsProcessed metric verified (PR #3217); domain compaction threshold 256 verified (official docs); CTAS + MERGE INTO incremental sync with overlap watermark — verified; hybrid UNION ALL view pattern — correct. Gaps: "single task" should be "single split / single JDBC connection" (more precise wording); catalog prefix in session property needs clarification; hard-delete handling not mentioned; domain_compaction_threshold configurability not mentioned.
+
+Verified: trino.io/docs/current/connector/postgresql.html, trino.io/docs/current/admin/dynamic-filtering.html.

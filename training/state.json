@@ -1,7 +1,7 @@
 {
-  "iteration": 283,
+  "iteration": 284,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter282 avg 4.825: Q1 (4.85 PASS) read replica federation — connection-url only, no lag awareness, pg_stat_replication monitoring, replica vs primary guidance. Q2 (4.80 PASS) UUID/JSONB type mapping — UUID literal syntax, json_extract_scalar/json_extract, no JSONB pushdown, system.query() workaround, Iceberg for heavy analytics. TOPIC: Trino federation 4.493/237 → 4.496/239, gap 0.004. Need ~2 more at 4.875+ to cross 4.500."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter283 avg 4.70: Q1 (4.70 PASS) cross-catalog atomicity — START TRANSACTION not cross-catalog, no XA/2PC, outbox+CDC+MERGE INTO patterns. Q2 (4.70 PASS) federate vs ingest 20M-row accounts — JDBC single-split bottleneck, DF tuning, CTAS+MERGE INTO, hybrid UNION ALL view. TOPIC: Trino federation 4.496/239 → 4.498/241, gap 0.002. Need ~1 more at 4.875+ to cross 4.500 threshold!"
 }
