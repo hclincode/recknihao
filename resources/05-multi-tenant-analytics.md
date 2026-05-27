@@ -2516,41 +2516,35 @@ Minimal example to ground the layout for the more-detailed multi-tenant version 
 > ```
 >
 > **File 2: `etc/session-property-manager.json`**
+>
+> > **SCHEMA**: The file is a top-level JSON **array** of match-rule objects. Each rule has match fields (`user`, `source`, `queryType`, `clientTags`, `group`) directly alongside a `sessionProperties` map. There is no `defaultSessionProperties` wrapper, no `sessionPropertySpecs` key, and no nested `match` object — those do not exist in the real Trino schema and will cause a parse error on coordinator startup.
+>
 > ```json
-> {
->   "defaultSessionProperties": {
->     "query_max_execution_time": "8h"
->   },
->   "sessionPropertySpecs": [
->     {
->       "name": "free-tier-limits",
->       "match": {
->         "group": "global.free_tier"
->       },
->       "sessionProperties": {
->         "query_max_execution_time": "5m",
->         "query_max_run_time": "10m"
->       }
->     },
->     {
->       "name": "enterprise-limits",
->       "match": {
->         "group": "global.enterprise_tier"
->       },
->       "sessionProperties": {
->         "query_max_execution_time": "30m",
->         "query_max_run_time": "60m"
->       }
+> [
+>   {
+>     "group": "global\\.free_tier",
+>     "sessionProperties": {
+>       "query_max_execution_time": "5m",
+>       "query_max_run_time": "10m"
 >     }
->   ]
-> }
+>   },
+>   {
+>     "group": "global\\.enterprise_tier",
+>     "sessionProperties": {
+>       "query_max_execution_time": "30m",
+>       "query_max_run_time": "60m"
+>     }
+>   }
+> ]
 > ```
 >
-> The `"group"` field is a Java regex matched against the resource group path (the same path visible in `system.runtime.queries.resource_group_id`). Free-tier queries land in `global.free_tier` → get 5-minute execution limit. Enterprise queries land in `global.enterprise_tier` → get 30-minute limit. The `defaultSessionProperties` applies to queries that match no rule — set it generously (e.g., `8h`) so admin/internal queries aren't accidentally killed.
+> The `"group"` field is a Java regex matched against the resource group path (the same path visible in `system.runtime.queries.resource_group_id`). **The dot must be escaped** (`global\\.free_tier`, not `global.free_tier`) because `group` is matched as a Java regex — an unescaped dot matches any character. Free-tier queries land in `global.free_tier` → get 5-minute execution limit. Enterprise queries land in `global.enterprise_tier` → get 30-minute limit.
+>
+> For queries that match no rule, the global `query.max-execution-time` cluster property (set in `config.properties`) applies as a safety net. Set it generously (e.g., `8h`) so admin/internal queries aren't accidentally killed by the session property manager.
 >
 > **When a query exceeds the time limit:** it is killed with a `FAILED` state and `errorCode.name = 'EXCEEDED_TIME_LIMIT'`. This surfaces to the client as a query failure with that error code — the query does NOT silently disappear.
 >
-> **OPA note:** tenants can attempt to override time limits with `SET SESSION query_max_execution_time = '24h'` before their query. If you use the Trino OPA plugin, add an OPA rule that denies `SetSessionProperty` actions on `query_max_execution_time` for non-admin principals — otherwise a savvy tenant can bypass the per-tier limit entirely. The session property manager sets the *default*; a `SET SESSION` by the client overrides it unless OPA blocks the override.
+> **OPA note:** tenants can attempt to override time limits with `SET SESSION query_max_execution_time = '24h'` before their query. If you use the Trino OPA plugin, add an OPA rule that denies `SetSystemSessionProperty` actions on `query_max_execution_time` for non-admin principals (`query_max_execution_time` is a system-level session property, so the Trino OPA plugin distinguishes it as `SetSystemSessionProperty`, not `SetCatalogSessionProperty`) — otherwise a savvy tenant can bypass the per-tier limit entirely. The session property manager sets the *default*; a `SET SESSION` by the client overrides it unless OPA blocks the override.
 >
 > **Requires coordinator restart** (same as file-based resource groups): changes to `etc/session-property-manager.json` are only read at startup.
 

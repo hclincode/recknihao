@@ -1,89 +1,98 @@
-# Judge Feedback — Iter 334
+# Judge Feedback — Iter 335
 
 Date: 2026-05-27
 Phase: extended
-Topics: Multi-tenant analytics / Trino per-query time limits via session property manager (Q1) + Iceberg table maintenance / FOR TIMESTAMP AS OF syntax (Q2)
+Topics: Multi-tenant analytics / Trino session property manager JSON schema (Q1) + Postgres-to-Iceberg ingestion / full-refresh vs incremental vs CDC decision tree (Q2)
 
 ---
 
-## Q1 — Trino Per-Query Time Limits: Session Property Manager (FAIL)
+## Q1 — Trino Session Property Manager JSON Schema (FAIL)
 
 ### Score
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 3.0 | Correctly stated resource group JSON has no `maxExecutionTime`/`executionTimeLimit` field; correctly described softCpuLimit/hardCpuLimit as aggregate-not-per-query. But never mentioned the actual documented mechanism (session property manager). Hedged on `query.max-run-time` as "would need to check docs" when it's a real documented property since Trino 0.116. |
-| Beginner clarity | 4.0 | Clear explanation of the resource group limitation. "Lanes on a highway" analogy from iter333 maintained. But leaving the engineer without an actual solution reduces beginner utility. |
-| Practical applicability | 2.0 | No runnable solution for the engineer's actual problem. CPU limits are not per-query time limits. The answer tells them what doesn't work but not what does. |
-| Completeness | 2.0 | Missing: session property manager (the documented per-tier time limit mechanism), query_max_execution_time vs query_max_run_time comparison, OPA SET SESSION override-blocking, both required config files. |
-| **Average** | **2.75** | **FAIL** |
+| Technical accuracy | 2.5 | Correctly identifies that resource groups lack a per-query time-kill property and that session property manager is the right mechanism. BUT the JSON structure is materially wrong: official docs specify a flat top-level list of match rules, not a `{"defaultSessionProperties": {...}, "sessionPropertySpecs": [...]}` wrapper. The `"match"` nested object and `"name"` field do not exist in the real schema. An engineer who copy-pastes this JSON will get parser errors on coordinator startup. |
+| Beginner clarity | 4.0 | Clear explanation of the conceptual gap (resource groups vs. session properties), readable file/property breakdown, plain-English caveats, and a quick verification query. A new engineer can follow the logic, even if the config they paste won't work. |
+| Practical applicability | 2.5 | The shape of the solution is right (file-based session property manager keyed on resource group name) but the JSON example is non-functional as written — the file would fail to parse. The kubectl rollout restart, OPA override caveat, and kill_query are genuinely useful, but the broken config is the centerpiece. |
+| Completeness | 4.0 | Covers: resource-group limitation, session-property-manager mechanism, free/enterprise differential, restart requirement, OPA SET SESSION bypass risk, kill_query, verification SQL. Missing: cluster-wide `query.max-execution-time` as fallback default, actual OPA action name (`SetSystemSessionProperty`), regex escape requirement. |
+| **Average** | **3.25** | **FAIL** |
 
 ### What Worked
-- Correct claim: resource group JSON has no per-query execution time limit property.
-- Correct description of softCpuLimit/hardCpuLimit as aggregate-per-group-per-rolling-window.
-- Honest about the resource gap rather than fabricating a `maxQueryRunTime` field.
-- The resource gap was genuine — resources/05 had no session property manager section.
+- Correctly diagnosed the real problem: resource group JSON has no per-query execution-time-kill property.
+- Identified file-based session property manager as the documented solution, keyed off `group` regex against resource group path.
+- Explained `query_max_execution_time` vs `query_max_run_time` in a beginner-friendly way.
+- Operationally rich: included k8s rollout restart, OPA bypass warning, runtime `kill_query` for incident response, verification query.
 
 ### What Missed
-1. **Session property manager not mentioned** — the documented Trino mechanism for per-tier query time limits is `etc/session-property-config.properties` + `etc/session-property-manager.json` with `group` regex matching resource group paths. This is literally the Trino docs example for free-tier / enterprise tier time limits.
-2. **`query_max_execution_time` and `query_max_run_time`** are real documented Trino session properties (since 0.116 and 0.186 respectively) — responder hedged as "you'd need to check the docs."
-3. **Resource gap confirmed**: resources/05 had only two passing mentions of `query.max-execution-time` (in a SET SESSION export example and an error code table) but no section explaining the session property manager pattern.
+1. **JSON schema is wrong** — Per https://trino.io/docs/current/admin/session-property-managers.html, the file contains a top-level JSON **array** of match-rule objects. Each rule directly contains optional `user`, `source`, `queryType`, `clientTags`, `group` fields plus a `sessionProperties` map. There is no `defaultSessionProperties` key, no `sessionPropertySpecs` wrapper, no `"name"` field, and no nested `"match"` object. The example as written will not parse.
+2. **Regex dot must be escaped** — `group` is matched as a Java regex, so `global.free_tier` should be `global\\.free_tier`. An unescaped dot matches any character.
+3. **OPA action is `SetSystemSessionProperty`** — Trino OPA plugin distinguishes `SetSystemSessionProperty` and `SetCatalogSessionProperty`; for `query_max_execution_time` (a system property) the correct action to deny is `SetSystemSessionProperty`.
+4. **No mention of cluster-wide `query.max-execution-time`** — for queries that match no session property manager rule, the global `query.max-execution-time` cluster property applies as a safety net.
 
 ### Resource Fix Applied
-Added complete session property manager section to resources/05-multi-tenant-analytics.md:
-- `etc/session-property-config.properties` activation
-- `etc/session-property-manager.json` with free-tier 5m / enterprise 30m worked example using `group` regex matching
-- `query_max_execution_time` vs `query_max_run_time` comparison
-- OPA note: tenants can bypass via `SET SESSION` unless OPA blocks `SetSessionProperty`
-- Coordinator restart required (same as file-based resource groups)
+- resources/05-multi-tenant-analytics.md: corrected session-property-manager.json to flat top-level array schema (not wrapper object); added SCHEMA callout explaining the correct format vs what does NOT exist; fixed regex escaping (`global\\.free_tier`); updated OPA action name from `SetSessionProperty` to `SetSystemSessionProperty`; added note about `query.max-execution-time` as fallback for unmatched queries.
 
 ### Technical Accuracy (verified)
-1. Resource group JSON has no per-query execution time limit property — CORRECT
-2. `query.max-run-time` exists as a global Trino config property — CORRECT (since 0.116)
-3. Session property manager (`etc/session-property-manager.json`) with `group` regex is the per-tier time limit mechanism — CORRECT (Trino session property managers docs)
-4. `softCpuLimit`/`hardCpuLimit` are aggregate-per-group-per-rolling-window — CORRECT
+1. Resource groups have no per-query execution time kill property — CORRECT
+2. Session property manager with `group` regex is the per-tier time limit mechanism — CORRECT (trino.io/docs/current/admin/session-property-managers.html)
+3. JSON format is flat top-level array, not wrapper object — CORRECT (verified against official docs)
+4. `query_max_execution_time` = wall-clock from execution start; `query_max_run_time` = from submission including queue — CORRECT
+5. OPA action for system session properties is `SetSystemSessionProperty` — CORRECT
 
 ### Rubric Update
-- Multi-tenant analytics: prior avg 4.481 across 128 questions → (4.481 × 128 + 2.75) / 129 = 576.318 / 129 = **4.468 across 129 questions**. Status: **PASSED** (above 3.5 threshold, significant drop; resource fix applied).
+- Multi-tenant analytics: prior avg 4.468/129 → (4.468 × 129 + 3.25) / 130 = 579.622 / 130 = **4.459 across 130 questions**. Status: **PASSED** (second consecutive drop; resource fix applied).
 
 ---
 
-## Q2 — FOR TIMESTAMP AS OF Time Travel Syntax (PERFECT PASS)
+## Q2 — Postgres-to-Iceberg Ingestion Strategy (PASS)
 
 ### Score
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5 | All five claims verified: `FOR TIMESTAMP AS OF TIMESTAMP '...'` is correct syntax; "at or before T" resolution correct; $history with `made_current_at` is audit-correct; `FOR VERSION AS OF` fallback correct; Trino 467 native support confirmed. |
-| Beginner clarity | 5 | Midnight-crossing example (nightly report starts 23:58, commits 00:03, querying 00:00 returns pre-report data) makes "at or before" visceral. No jargon issues. |
-| Practical applicability | 5 | Direct SQL syntax for the simple case, plus two-step $history → FOR VERSION AS OF path for precision. Decision matrix for use case routing. |
-| Completeness | 5 | Covers: syntax, "at or before" gotcha, when each approach is appropriate, concrete scenarios (billing audits, compliance). |
-| **Average** | **5.00** | **PERFECT PASS** |
+| Technical accuracy | 4.5 | Three-pattern taxonomy (Full Refresh / Incremental / CDC) correct. `overwritePartitions()` idempotency, `append()` non-idempotency, `updated_at` vs `created_at` watermark, late-arriving rows trap with MERGE INTO fix, hot_standby_feedback, and 10M threshold all verified accurate. Minor issues: CDC "~3x more infrastructure" is imprecise (it's an entirely new infrastructure footprint: Kafka, Connect, Debezium, streaming consumer, schema registry, replication slot management). |
+| Beginner clarity | 4.5 | Three patterns presented clearly with When/Pros/Cons. Concrete trigger SQL, index check SQL. Acronyms expanded. "What NOT to do" framing effective. "Start here" summary at end gives a clear decision flowchart. |
+| Practical applicability | 4.5 | Engineer knows exactly what to do for each table type. Decision rule (10M threshold), index preflight SQL, trigger snippet, and hot_standby_feedback tip all concrete and actionable. No off-stack tools recommended. |
+| Completeness | 4.0 | Covers three patterns, decision criteria per table type, watermark column choice, late-arrivals trap (MERGE INTO fix), index preflight, read replica strategy. Missing: (a) hard-DELETE invisibility to incremental loads and soft-delete pattern (`deleted_at`); (b) lag-buffer calibration (15-30 min P99 calibration from resources/13); (c) no JDBC throttling guidance despite "can't slow down the live database" concern; (d) maintenance follow-up (compaction/snapshot expiration). |
+| **Average** | **4.375** | **PASS** |
 
 ### What Worked
-- Everything. Tight scope, correct semantics, midnight example is standout pedagogy, $history vs $snapshots distinction correctly drawn.
+- Three-pattern taxonomy mapped cleanly to user's two-table scenario.
+- Pushed back on CDC as default; gave concrete bar for when to escalate.
+- Late-arriving rows trap with MERGE INTO is the most important gotcha and was called out correctly.
+- `hot_standby_feedback = on` is sophisticated and accurate.
+- `updated_at` vs `created_at` trap correctly described as most common new-pipeline failure.
+- Index preflight SQL and trigger SQL are immediately runnable.
+- Fits on-prem Spark + Iceberg + MinIO production stack.
 
 ### What Missed
-- None material. Optional: `FOR TIMESTAMP AS OF DATE '...'` short form; session-timezone resolution (correctly avoided by always using UTC).
+1. **Hard DELETEs invisible to incremental loads** — "a few tables get heavy writes all day" likely includes deletes. Soft-delete (`deleted_at` column) pattern from resources/13 should have been mentioned.
+2. **Lag buffer / replica freshness calibration** — resources/13 has 15-min default with P99 calibration; answer omitted.
+3. **Throttling against live database** — user's stated concern was "can't afford to slow it down." Answer mentions read replicas for bootstrap but not JDBC `fetchsize`, partitioned parallel reads, or off-peak scheduling for ongoing pulls.
+4. **Maintenance follow-up** — Iceberg compaction and snapshot expiration necessary after these patterns; not mentioned.
+
+### Resource Fix Applied
+None required. Gaps are completeness, not factual errors. Resources/13 already covers lag buffer and soft-delete; responder simply didn't surface them.
 
 ### Technical Accuracy (verified)
-All five points verified against official Trino/Iceberg docs. No errors.
+All major claims verified: overwritePartitions idempotency, append non-idempotency, MERGE INTO for late arrivals, hot_standby_feedback correctness, updated_at/created_at trap, staging+view swap, CDC threshold (sub-minute or hard deletes). Sources: Iceberg Spark writes docs, PostgreSQL hot standby docs.
 
 ### Rubric Update
-- Iceberg table maintenance: prior avg 4.579 across 28 questions → (4.579 × 28 + 5.00) / 29 = 133.212 / 29 = **4.594 across 29 questions**. Status: **PASSED** (trend improving).
+- Postgres-to-Iceberg ingestion: prior avg 4.503/119 → (4.503 × 119 + 4.375) / 120 = 540.232 / 120 = **4.502 across 120 questions**. Status: **PASSED** (stable).
 
 ---
 
-## Iter 334 Summary
+## Iter 335 Summary
 
-**Iter 334 average: (2.75 + 5.00) / 2 = 3.875 — PASS** ✓ (Q1 FAIL / Q2 PERFECT PASS)
+**Iter 335 average: (3.25 + 4.375) / 2 = 3.813 — PASS** ✓ (Q1 FAIL / Q2 PASS)
 
 ### Notable
-- Q1 2.75: Session property manager gap — worst multi-tenant score in many iterations. Resource gap was genuine; responder correctly avoided fabrication. Fix applied immediately.
-- Q2 5.00: FOR TIMESTAMP AS OF — perfect across all four dimensions. Midnight-crossing example makes the "at or before" semantic memorable.
+- Q1 3.25: Session property manager JSON schema error — worst accuracy failure since resources were added. The responder correctly identified the mechanism but had the wrong JSON format (wrapper object vs flat array). The resources/05 fix itself had the wrong format, which caused the resources to propagate incorrect config to the responder. Resources corrected immediately.
+- Q2 4.375: Postgres-to-Iceberg decision tree — solid three-pattern answer. Missed hard-DELETE invisibility and lag buffer from resources/13; otherwise comprehensive.
 
 ### Resource fixes applied this iteration
-- **resources/05-multi-tenant-analytics.md**: Added session property manager section — `etc/session-property-config.properties` + `etc/session-property-manager.json` with free-tier 5m / enterprise 30m worked example, property comparison, OPA override-blocking note.
+- **resources/05-multi-tenant-analytics.md**: corrected session-property-manager.json to flat top-level array; added SCHEMA callout; fixed regex escaping; updated OPA action to `SetSystemSessionProperty`; added `query.max-execution-time` cluster property as fallback for unmatched queries.
 
-### Suggested focus for Iter 335
-- **Multi-tenant analytics** (4.468/129, just dropped): Probe the fix — ask directly about setting per-tier query time limits to verify the session property manager section is now correctly surfaced. Ask as: "I have resource groups set up but queries run for hours — how do I kill them after 5 minutes for free-tier and 30 minutes for enterprise?"
-- **Postgres-to-Iceberg ingestion** (4.503/119): probe full-refresh vs incremental vs CDC decision tree — when to use each approach.
-- **Iceberg table maintenance** (4.594/29, recovering): consider probing orphan file removal — what `remove_orphan_files` catches that `expire_snapshots` doesn't, retention window, safe scheduling order.
+### Suggested focus for Iter 336
+- **Multi-tenant analytics** (4.459/130, second consecutive drop): Probe the corrected JSON schema directly — ask an engineer who has the wrong wrapper format how to verify their session property manager config is valid. Confirm the responder now surfaces the flat array format.
+- **Postgres-to-Iceberg ingestion** (4.502/120, stable): Probe hard DELETEs — ask what happens to deleted rows in an incremental pipeline and how to handle them. Also probe lag buffer calibration.
+- **Iceberg table maintenance** (4.594/29): Consider probing orphan file removal — what `remove_orphan_files` catches that `expire_snapshots` doesn't.

@@ -1,7 +1,7 @@
 {
-  "iteration": 335,
+  "iteration": 336,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter334 avg 3.875 — PASS. Q1 (2.75) FAIL — session property manager gap in resources/05; fix applied. Q2 (5.00) PERFECT — FOR TIMESTAMP AS OF covered perfectly. Multi-tenant: 4.468/129. Iceberg maintenance: 4.594/29. Postgres-to-Iceberg: 4.503/119."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter335 avg 3.813 — PASS. Q1 (3.25) FAIL — session property manager JSON schema wrong (wrapper object vs flat array); resources/05 corrected. Q2 (4.375) PASS — strong Postgres-to-Iceberg decision tree; minor gaps in hard-DELETE handling and lag buffer. Multi-tenant: 4.459/130. Postgres-to-Iceberg: 4.502/120. Iceberg maintenance: 4.594/29."
 }

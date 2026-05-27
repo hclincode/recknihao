@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.468 | 129 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.459 | 130 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
@@ -40,7 +40,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.503 | 119 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.502 | 120 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.594 | 29 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
@@ -50,6 +50,42 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 335 — 2026-05-27
+
+**Q1** — Multi-tenant analytics: per-tier query time limits via session property manager. Resource groups lack a per-query execution time kill; session property manager is the documented mechanism. Responder correctly identified the mechanism and explained query_max_execution_time vs query_max_run_time. But the JSON config used a fabricated `defaultSessionProperties`+`sessionPropertySpecs` wrapper that does not exist in the real Trino schema — actual format is a flat top-level array of match-rule objects.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 2.5 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 2.5 |
+| Completeness | 4.0 |
+| **Average** | **3.25** — FAIL |
+
+Judge verified: flat JSON array (not wrapper object) is correct per https://trino.io/docs/current/admin/session-property-managers.html; `group` field must use escaped Java regex (`global\\.free_tier`); OPA action is `SetSystemSessionProperty` not `SetSessionProperty`. Resource fix applied: corrected JSON schema in resources/05, added schema warning callout, fixed regex escaping, updated OPA action name. Topic running avg: (4.468×129 + 3.25)/130 = **4.459/130 questions** — PASSED (second consecutive drop; correct schema now in resources).
+
+**Q2** — Postgres-to-Iceberg ingestion: full-refresh vs incremental vs CDC decision tree. Three-pattern taxonomy (Full Refresh / Incremental / CDC), decision criteria by table size and freshness, updated_at vs created_at watermark, late-arriving rows trap with MERGE INTO fix, hot_standby_feedback for replica reads, overwritePartitions idempotency.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.5 |
+| Completeness | 4.0 |
+| **Average** | **4.375** — PASS |
+
+Strong answer. Judge-verified accurate: overwritePartitions idempotency, append non-idempotency, MERGE INTO for late arrivals, hot_standby_feedback, updated_at trap, 10M threshold. Gaps: hard-DELETE invisibility / soft-delete pattern (`deleted_at`) not mentioned; lag-buffer calibration (15-30min P99) omitted; no JDBC throttling guidance despite user's "can't slow the live database" concern; CDC "~3x more infrastructure" framing imprecise. No resource fix needed; gaps are completeness not accuracy errors. Topic running avg: (4.503×119 + 4.375)/120 = **4.502/120 questions** — PASSED (stable).
+
+**Iter 335 average: (3.25 + 4.375) / 2 = 3.813 — PASS** ✓ (Q1 FAIL / Q2 PASS)
+
+**Topics updated**:
+- Multi-tenant analytics: 4.468/129 → **4.459/130 questions** (PASSED — second drop from session property manager JSON schema error; schema fix applied)
+- Postgres-to-Iceberg ingestion: 4.503/119 → **4.502/120 questions** (PASSED — stable; strong three-pattern answer with minor completeness gaps)
+
+**Resource fixes this iteration**: resources/05-multi-tenant-analytics.md — corrected session-property-manager.json to flat top-level array schema (not `defaultSessionProperties`+`sessionPropertySpecs` wrapper); fixed regex escaping (`global\\.free_tier`); updated OPA action name from `SetSessionProperty` to `SetSystemSessionProperty`; added note that unmatched queries fall through to `query.max-execution-time` cluster property.
+
+---
 
 ### Iter 334 — 2026-05-27
 
