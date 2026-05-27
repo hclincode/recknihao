@@ -248,6 +248,25 @@ SELECT * FROM TABLE(
 - Use it for **escape-hatch** queries: introspection, vendor-specific operators, custom Postgres functions. Don't use it as your normal data-read path for tables that Trino's connector can already see — you lose pushdown, statistics, and dynamic filtering.
 - **Connector availability**: `system.query()` is documented for the PostgreSQL, MySQL, SQL Server, and Oracle connectors in OSS Trino 467. Same pattern, same `query => 'string'` argument, per connector catalog.
 
+> **ORDERING WARNING — `system.query()` does NOT preserve result ordering, even when the inner SQL contains `ORDER BY`.** The official Trino docs are explicit on this: the table function returns rows in an unspecified order regardless of any `ORDER BY` clause inside the passthrough SQL string. If you need ordered results, you MUST add `ORDER BY` in the **outer** Trino query (outside the derived table that wraps `system.query()`).
+>
+> - `LIMIT` inside the inner query **IS** respected — it bounds the number of rows Postgres returns over the wire, which is what you usually want for Top-N fallback queries. Only `ORDER BY` is not preserved.
+> - For a Top-N pattern you typically need BOTH: an inner `ORDER BY ... LIMIT N` (so Postgres uses its index and ships only N rows), AND an outer `ORDER BY ...` (so Trino re-sorts those N rows before returning them to the client).
+>
+> Example pattern (note `ORDER BY score DESC` is applied in Trino, not inside `system.query()`):
+> ```sql
+> SELECT * FROM (
+>   SELECT * FROM TABLE(app_pg.system.query(
+>     query => 'SELECT id, name, similarity(name, ''Acme'') AS score
+>               FROM customers
+>               WHERE similarity(name, ''Acme'') > 0.3
+>               ORDER BY score DESC LIMIT 50'
+>   ))
+> ) AS pg_result
+> ORDER BY score DESC;  -- ordering applied in Trino, not inside system.query()
+> ```
+> Without the outer `ORDER BY`, the 50 rows Postgres ranked by `score DESC` will arrive at the client in arbitrary order — a subtle correctness bug that often passes manual testing on small datasets and silently breaks under parallel split execution in production.
+
 > **SECURITY WARNING — OPA does NOT inject row filters or column masks into `system.query()`.** Because Trino passes the SQL string verbatim to Postgres without analysis, OPA's row-filter and column-mask policies are **never invoked** for the underlying tables. OPA is consulted once — to check whether the user may call the table function — but no `WHERE tenant_id = ...` predicate is injected, and no column is masked. **In a multi-tenant setup, this means a single `system.query()` call can bypass all OPA tenant isolation.** Restrict access to the function for non-admin users.
 >
 > **OPA operation name for `system.query()` access control**: the Trino OPA plugin emits `"ExecuteFunction"` (not `"ExecuteTableFunction"`) when a user calls `system.query()`. Use this exact string in your Rego deny rule:

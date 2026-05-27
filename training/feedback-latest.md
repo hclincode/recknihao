@@ -1,73 +1,77 @@
-# Feedback — Iter 276 (Extended phase)
+# Feedback — Iter 277 (Extended phase)
 
 Date: 2026-05-27
-Topic: Trino federation — ILIKE pushdown behavior (Q1 FAIL) + system.query() passthrough (Q2 PASS)
+Topic: Trino federation — LIKE/ILIKE pushdown re-test (Q1 PASS) + federate vs ingest at scale (Q2 PASS)
 
 ## Results summary
 
 | Question | Topic angle | Score | Pass/Fail |
 |---|---|---|---|
-| Q1 | ILIKE pushdown: conditional not categorical, session property, EXPLAIN verification, plan shapes | **4.39** | FAIL |
-| Q2 | system.query() passthrough: syntax, single-quote escaping, join to Iceberg, limitations | **4.86** | PASS |
+| Q1 | LIKE/ILIKE pushdown: conditional (re-test after resource fix), session property, ScanFilterProject-disappears signal, COLLATE "C" warning | **4.90** | PASS |
+| Q2 | Federate vs ingest: decision threshold, CTAS full load, MERGE INTO incremental, compaction, what changes after ingestion | **4.875** | PASS |
 
-**Iter 276 average: 4.625 — mixed** (Q1 FAIL dragged by PR attribution error)
+**Iter 277 average: 4.8875 — PASS** ✓ Both passed!
 
-**Topic update**: Trino federation: 4.490/225 → **4.491/227** (NEEDS WORK, gap 0.009 — very slow progress; Q1 FAIL cost ~0.001)
+**Topic update**: Trino federation: 4.491/227 → **4.494/229** (NEEDS WORK, gap 0.006 — closing fast!)
 
 ---
 
 ## What worked
 
-### Q1 — ILIKE pushdown (4.39)
-1. Correctly framed ILIKE pushdown as conditional, not categorical — correct
-2. Correct session property name: `enable_string_pushdown_with_collate` — verified
-3. Correct catalog property: `postgresql.experimental.enable-string-pushdown-with-collate` — verified
-4. Correct that ScanFilterProject disappears on pushdown success — verified
-5. Excellent fallbacks: generated lower(name) column + index, system.query() passthrough — production-realistic
-6. Strong beginner clarity: two-condition rule framed accessibly
+### Q1 — ILIKE pushdown re-test (4.90)
+1. Conditional pushdown framing — no PR attribution, no categorical statement — correct (fix from teacher277 and teacher276 validated)
+2. Session property `enable_string_pushdown_with_collate` — verified exact
+3. Catalog property `postgresql.experimental.enable-string-pushdown-with-collate` — verified exact
+4. Success signal: "ScanFilterProject disappears" (not constraint= textual format) — exactly the canonical phrasing from Trino docs
+5. COLLATE "C" vs ICU correctness warning — correct and specific
+6. Unanchored patterns (`%text%`) still scan all rows even with flag — correctly explained
+7. Four practical options (generated lower column, date predicate pairing, flag test, ingest to Iceberg) — production-realistic
+8. Postgres slow-query log as ground truth — actionable
 
-### Q2 — system.query() passthrough (4.86)
-1. Correct full syntax: `SELECT * FROM TABLE(app_pg.system.query(query => '...'))` — verified
-2. Correct named parameter: `query =>` — verified
-3. Correct single-quote escaping: `''` (doubled) — verified and explained with before/after
-4. Correctly explained no-outer-predicate-pushdown limitation — verified
-5. Correct derived-table join pattern to Iceberg with partition-pruning timestamp predicate — correct
-6. Mentioned absence of column statistics + LIMIT recommendation — practical
-7. EXPLAIN shows TableFunctionProcessor; debug inner SQL on Postgres replica — actionable
-8. Complete end-to-end copy-pasteable example matching the scenario — excellent
-
----
-
-## Errors / gaps to fix before iter277
-
-### Q1 (important — caused FAIL)
-- **PR #11045 attribution wrong**: Answer stated "ILIKE pushdown to the PostgreSQL connector was added via Trino PR #11045 and is available in Trino 467." Judge verified: PR #11045 is about general JDBC function predicate pushdown machinery with LIKE as initial example, merged in release 373 — not specifically ILIKE, not in 467. The `enable_string_pushdown_with_collate` flag traces to different work. (**FIXED in resource 22 by teacher277 — removed all 7 PR #11045 mentions**)
-- **`constraint=(...)` plan shape not authoritative**: Answer presented `constraint=(name ILIKE '%corp%')` inside TableScan as the canonical success signal. Official Trino docs only say "ScanFilterProject disappears" — the exact textual format is not documented and varies by version/connector. Should be hedged. (**FIXED in resource 22 by teacher277 — added hedge language**)
-- Minor: The flag may not cover ILIKE specifically in all builds — the docs describe it in terms of range predicates; "verify with EXPLAIN before relying on it" caveat exists in the answer but framing was too confident.
-
-### Q2 (minor)
-- Missing caveat: `system.query()` does NOT preserve result order even with inner `ORDER BY` — Trino docs explicitly state this. Not a correctness error (LIMIT still bounds rows), but the user might be surprised if they expect ordering.
-- Does not warn about `||` multi-line string concatenation escaping hazard in the complete example.
+### Q2 — Federate vs ingest (4.875)
+1. Decision threshold table (CPU, latency, query frequency, freshness tolerance) — concrete
+2. JDBC single-task bottleneck explanation (no parallelism, 50M rows over one connection) — correct and verified
+3. CTAS for initial full load — verified
+4. MERGE INTO for incremental sync — verified; WHEN MATCHED/WHEN NOT MATCHED correct syntax
+5. Explicit upper-bound watermark pattern (not NOW() inside query) — production-safe guidance
+6. ALTER TABLE EXECUTE optimize for compaction after MERGE — verified
+7. Before/after query comparison (federated vs local) — concrete and illustrative
+8. When to still federate edge cases — appropriate nuance
+9. Action plan numbered list — actionable
 
 ---
 
-## Resource fixes completed (teacher277)
+## Errors / gaps to fix before iter278
 
-1. **PR #11045 attribution removed** (resource 22, ~10 locations): replaced all "PR #11045" mentions with canonical statement about LIKE/ILIKE pushdown being conditional on `enable_string_pushdown_with_collate` and column collation
-2. **`constraint=(...)` hedge added** (resource 22, ILIKE pushdown section): clarified that plan shape for successful pushdown is "ScanFilterProject disappears" — exact textual format of constraint block varies and is not documented
+### Q1 (minor — did not block pass)
+- No mention of `pg_trgm` GIN index as the canonical Postgres-side fix for unanchored LIKE searches. The answer recommends `LIKE '%global%'` on a generated lower column, but a GIN trigram index is the standard approach for fast substring search in Postgres. Worth adding to resource.
+
+### Q2 (minor — did not block pass)
+- Jargon: "positional delete files," "predicate-prune and project-push," "watermark" used without inline explanation. Fine for the score but could confuse a SaaS engineer reading carefully.
+- No mention of monitoring HMS (Hive Metastore) health during CTAS — if HMS is unavailable at commit time, the CTAS fails even if data was written.
 
 ---
 
-## Suggested iter277 angles (MUST target Trino federation, gap 0.009)
+## Resource fixes before iter278
 
-Topic at 4.491/227. Need ~3-4 more questions at 4.875+ to cross 4.500 threshold.
+### Nice-to-have
 
-1. **system.query() ORDER BY caveat + LIMIT** — engineer asks about getting fuzzy-matched results ordered by similarity score; answer must include the ORDER BY not-preserved caveat and that ordering must be applied in Trino AFTER the passthrough
+1. **pg_trgm GIN index for unanchored LIKE** (resource 22, ILIKE/string search section):
+   - Add: for unanchored substring search (`LIKE '%text%'`), the production-grade Postgres fix is a GIN trigram index via `pg_trgm` extension
+   - `CREATE EXTENSION IF NOT EXISTS pg_trgm;` + `CREATE INDEX ... USING GIN (name gin_trgm_ops);`
+   - Once indexed, Postgres can use the GIN index for LIKE '%text%' queries efficiently, even when Trino can't push the filter
+   - Note: the Trino flag only controls whether the filter arrives at Postgres; the index controls whether Postgres executes it efficiently
 
-2. **Federate vs ingest at scale** — engineer has 50M-row Postgres table that joins Iceberg frequently; answer: above 10M threshold → prefer ingestion; nightly MERGE INTO pattern; when to hybrid materialize
+---
 
-3. **Re-test: ILIKE pushdown nuance (after resource fix)** — verify the responder now gives the corrected answer: conditional on flag + collation, no PR number cited, ScanFilterProject-disappears as the success signal
+## Suggested iter278 angles (MUST target Trino federation, gap 0.006)
 
-4. **Metadata caching and stale Iceberg reads** — engineer sees Trino return old Iceberg data after Spark adds files; answer: metadata.cache-ttl, flush_metadata_cache (coordinator-only), CREATE OR REPLACE VIEW workaround
+Topic at 4.494/229. Need ~2-3 more questions at 4.875+ to cross 4.500 threshold.
 
-5. **Resource groups to limit Postgres load** — engineer wants to cap concurrent Postgres queries; hardConcurrencyLimit + maxQueued; source selector caveat; PgBouncer integration
+1. **Metadata caching and stale Iceberg reads** — engineer sees Trino return old Iceberg data after a Spark job adds new files; answer: metadata.cache-ttl, flush_metadata_cache (coordinator-only), CREATE OR REPLACE VIEW workaround; well-covered in resource
+
+2. **Resource groups to limit Postgres load** — engineer wants to cap concurrent federated queries hitting Postgres; hardConcurrencyLimit + maxQueued; source selector caveat (clients must set X-Trino-Source or selector silently fails); PgBouncer integration
+
+3. **Dynamic filtering in federated Postgres+Iceberg joins** — engineer asks why adding a join condition on a small Iceberg lookup table speeds up the Postgres scan; answer: DF collects join keys from the small table and pushes an IN-list into the Postgres TableScan; LEFT/FULL OUTER disables DF; wait-timeout config
+
+4. **Re-test: federate vs ingest at scale** — high scores suggest this is a strong coverage angle; another variation would reinforce the pattern

@@ -1,7 +1,7 @@
 {
-  "iteration": 277,
+  "iteration": 278,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter276 avg 4.625: Q1 (4.39 FAIL) ILIKE pushdown — conditional not categorical, but PR #11045 attribution wrong (removed by teacher277), plan shape constraint=() not authoritative (hedged by teacher277). Q2 (4.86 PASS) system.query() passthrough — syntax, escaping, join to Iceberg, limitations. TOPIC: Trino federation 4.491/227, gap 0.009. Need ~3-4 more at 4.875+ to cross 4.500."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter277 avg 4.8875: Q1 (4.90 PASS) ILIKE pushdown re-test — conditional behavior validated, no PR attribution, ScanFilterProject-disappears success signal correct, COLLATE C vs ICU warning. Q2 (4.875 PASS) federate vs ingest at 50M-row scale — decision threshold, CTAS full load, MERGE INTO incremental, compaction. TOPIC: Trino federation 4.494/229, gap 0.006. Need ~2-3 more at 4.875+ to cross 4.500. Teacher fix nice-to-have: pg_trgm GIN index for unanchored LIKE."
 }

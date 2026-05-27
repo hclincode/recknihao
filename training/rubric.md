@@ -43,7 +43,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.474 | 99 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.623 | 16 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
-| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.491 | 227 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.494 | 229 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.763 | 4 |
 
 ---
@@ -9598,3 +9598,33 @@ Dimension scores: Technical accuracy 5/5, Beginner clarity 5/5, Completeness 5/5
 **Key findings**: Correct TABLE(<catalog>.system.query(query => '...')) syntax — verified; correct named parameter `query =>` — verified; correct single-quote doubling escape rule — verified; correct no-outer-predicate-pushdown limitation — verified; correct derived-table join pattern to Iceberg — correct; column statistics absence + LIMIT recommendation — practical. Minor gap: Does not mention that result ORDER is not preserved even with ORDER BY inside the inner query — doc-verified limitation.
 
 Verified: trino.io/docs/current/connector/postgresql.html, trino.io/docs/current/develop/table-functions.html.
+
+---
+
+## Iter 277 — 2026-05-27
+
+**Q1**: LIKE/ILIKE pushdown re-test — conditional behavior (not categorical), session property, ScanFilterProject-disappears success signal, COLLATE "C" correctness warning, practical search-bar options
+**Answer**: `/Users/hclin/github/recknihao/training/answers/iter277-q1.md`
+**Score**: 4.90 / 5.0 — **PASS**
+
+Dimension scores: Technical accuracy 5/5, Beginner clarity 4.5/5, Completeness 5/5, Actionability 5/5.
+
+**Topics updated**: Trino federation — prior avg 4.491 across 227 questions; new running avg (4.491 × 227 + 4.90) / 228 = (1019.457 + 4.90) / 228 = **4.493 across 228 questions**. Status: NEEDS WORK (4.493 < 4.5 raised threshold). Gap: 0.007 (improved from 0.009).
+
+**Key findings**: Conditional pushdown framing correct — no PR attribution, no categorical statement. Session and catalog property names verified exact. Success signal "ScanFilterProject disappears" correctly stated (not specific constraint= format) — per official Trino docs. COLLATE "C" vs ICU correctness warning correct and genuine — improves on iter276 Q1 which had this wrong. Minor gap: no mention of pg_trgm GIN index as the canonical Postgres-side fix for unanchored LIKE.
+
+Verified: trino.io/docs/current/connector/postgresql.html, trino.io/docs/current/optimizer/pushdown.html, PR #9746.
+
+---
+
+**Q2**: Federate vs ingest at 50M-row scale — decision threshold, CTAS full load, MERGE INTO incremental sync, compaction, what changes after ingestion
+**Answer**: `/Users/hclin/github/recknihao/training/answers/iter277-q2.md`
+**Score**: 4.875 / 5.0 — **PASS**
+
+Dimension scores: Technical accuracy 5/5, Beginner clarity 4.5/5, Completeness 5/5, Actionability 5/5.
+
+**Topics updated**: Trino federation — prior avg 4.493 across 228 questions; new running avg (4.493 × 228 + 4.875) / 229 = (1024.404 + 4.875) / 229 = **4.494 across 229 questions**. Status: NEEDS WORK (4.494 < 4.5 raised threshold). Gap: 0.006 (improved from 0.007).
+
+**Key findings**: CTAS for initial load — verified; MERGE INTO for incremental sync — verified; ALTER TABLE EXECUTE optimize for compaction — verified; JDBC single-task explanation (no parallelism) — verified against GitHub issue. Explicit upper-bound watermark pattern — production-correct. Minor gaps: "positional delete files", "predicate-prune" jargon unexplained; no glossary for SaaS engineer. Production fit: aligns with on-prem Trino 467 + MinIO + dbt stack.
+
+Verified: trino.io/docs/current/sql/merge.html, trino.io/docs/current/connector/iceberg.html, trino.io/docs/current/connector/postgresql.html.
