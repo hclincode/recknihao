@@ -6620,6 +6620,22 @@ WHERE plan IN ('enterprise', 'pro');
 
 This reads from Postgres (with predicate pushdown for the `WHERE plan IN (...)`) and writes the result as a new Iceberg table backed by Parquet files on MinIO, with metadata registered in **Hive Metastore (HMS)**.
 
+> **Choosing `tenant_id` (identity) vs `bucket(tenant_id, N)` (bucket transform) — depends on tenant cardinality.** The example above uses the **bucket transform** because it's well-suited to multi-tenant SaaS at scale. The identity transform (`partitioning = ARRAY['tenant_id', 'day(created_at)']`) creates **one partition directory per unique tenant value**, which is fine at small/moderate cardinality (~200 tenants) but causes **small-file problems** at thousands of tenants — each daily ingest produces one tiny Parquet file per tenant per day, and Iceberg's metadata layer grows linearly with the partition count. The bucket transform groups tenants into a fixed number of buckets (e.g., 16, 64, 128 depending on table size), keeping the partition count bounded regardless of tenant growth:
+>
+> ```sql
+> -- For high cardinality (thousands of tenants): use bucket transform.
+> -- Partition count is bounded at N * <number of days>, NOT tenant_count * days.
+> WITH (partitioning = ARRAY['bucket(tenant_id, 64)', 'day(created_at)']);
+>
+> -- For moderate cardinality (~200 tenants): identity transform is fine.
+> -- Easier mental model (one directory per tenant) and partition pruning is exact.
+> WITH (partitioning = ARRAY['tenant_id', 'day(created_at)']);
+> ```
+>
+> **Per-tenant queries still need `WHERE tenant_id = 'acme'` in either case.** With the identity transform, that predicate prunes directly to the one matching partition directory. With the bucket transform, Trino hashes `'acme'` to identify the one matching bucket (1 of N), so the predicate still prunes — just to `1/N` of the data rather than to one tenant's slice exactly. Within that bucket, Iceberg uses **min/max column statistics** (and optionally **bloom filters**, enabled via the `parquet_bloom_filter_columns` table property) on `tenant_id` to skip Parquet files and row groups belonging to other tenants in the same bucket. The trade-off: bucket transforms read a bit more data per single-tenant query than identity, but they avoid the small-file / metadata-bloat tax that kills identity-partitioned tables at high tenant counts.
+>
+> **Rule of thumb for choosing N (bucket count):** target individual partitions of roughly **128 MB – 1 GB** of Parquet data per day. If a single day's data for the table is ~10 GB total, `bucket(tenant_id, 16)` gives ~625 MB per bucket per day — a good fit. For ~100 GB per day, jump to `bucket(tenant_id, 64)` or `bucket(tenant_id, 128)`. N should be a power of 2 (matches Iceberg's hash-mod distribution best) and is **fixed at table creation** — changing it later requires a full table rewrite. Pick generously the first time. See `resources/05-multi-tenant-analytics.md` for the deeper multi-tenant partitioning decision tree.
+
 **HMS is involved at BOTH key moments of the CTAS lifecycle — not just at commit time:**
 
 1. **At query start (before the SELECT runs).** HMS is called to register the new Iceberg table (or to check that the table name does not already exist). If HMS is down at this point, **CTAS fails immediately** before Trino reads even one row from Postgres. No data files are written to MinIO; no orphans are created. The query just errors out.

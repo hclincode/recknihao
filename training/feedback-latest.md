@@ -1,74 +1,74 @@
-# Feedback — Iter 273 (Extended phase)
+# Feedback — Iter 274 (Extended phase)
 
 Date: 2026-05-27
-Topic: Trino federation — multi-tenant cross-schema queries (Q1 PASS) + federate vs ingest decision (Q2 PASS)
+Topic: Trino federation — EXPLAIN plan interpretation (Q1 PASS) + JDBC connection pooling under load (Q2 PASS)
 
 ## Results summary
 
 | Question | Topic angle | Score | Pass/Fail |
 |---|---|---|---|
-| Q1 | Cross-schema queries: static binding, UNION ALL + generator script, system.query(), Iceberg migration | **4.75** | PASS |
-| Q2 | Federate vs ingest: size thresholds, frequency multiplier, freshness, three patterns | **4.75** | PASS |
+| Q1 | EXPLAIN plan: ScanFilterProject vs constraint on [col], Input/Output row counts, pushdown rules, diagnostic checklist | **4.75** | PASS |
+| Q2 | JDBC connection pooling: no native pool, PgBouncer + prepareThreshold=0, resource groups, queuing behavior | **4.81** | PASS |
 
-**Iter 273 average: 4.75 — PASS** ✓ Both passed!
+**Iter 274 average: 4.78 — PASS** ✓ Both passed!
 
-**Topic update**: Trino federation: 4.483/219 → **4.485/221** (NEEDS WORK, gap 0.015 — improving steadily)
+**Topic update**: Trino federation: 4.485/221 → **4.487/223** (NEEDS WORK, gap 0.013 — improving steadily)
 
 ---
 
 ## What worked
 
-### Q1 — Cross-schema queries (4.75)
-1. Trino cannot use dynamic schema names (static planning) — correctly explained
-2. UNION ALL as the primary solution — correct
-3. Python generator script to auto-generate UNION ALL — concrete and practical
-4. system.query() correctly described: verbatim passthrough, no outer predicate pushdown
-5. Iceberg migration with tenant_id partition as the long-term fix — correct
-6. Decision guide (time/effort/scalability trade-offs) — clear
+### Q1 — EXPLAIN plan interpretation (4.75)
+1. `ScanFilterProject` above `TableScan` = pushdown failure — correct
+2. `constraint on [col]` inside `TableScan` = pushdown success — correct
+3. Input/Output row count interpretation (large Input at TableScan = not pushed) — correct
+4. Pushdown rules table (equality/ranges/IN-list push; ILIKE/function calls don't) — correct direction
+5. Four-step diagnostic checklist — actionable
+6. EXPLAIN ANALYZE runtime confirmation — correct
+7. Postgres slow-query log as ground truth — practical
 
-### Q2 — Federate vs ingest (4.75)
-1. Decision table (size × frequency × freshness) — clear and actionable
-2. MERGE INTO for incremental sync — correct syntax
-3. Dynamic filtering note (INNER JOIN required for DF; LEFT disables it) — correct
-4. EXPLAIN ANALYZE `Input: X rows` diagnostic — correct
-5. Three architecture patterns (direct federation, nightly ingest, hybrid) — practical
-6. Dimension vs fact framing — resonates with engineers
-
----
-
-## Gaps to address before iter274
-
-### Q1
-- **system.query() SQL example has a correctness bug**: The CTE-based example's subquery `(SELECT COUNT(*) FROM events WHERE ...)` doesn't scope to the per-tenant schema from the outer CTE — every row returns the same count. The surrounding prose about pushdown limitations is correct, but the SQL itself is wrong. Fix: either simplify the system.query() example or correct the SQL scoping.
-- **Iceberg partitioning**: `'tenant_id'` (identity transform) works for ~200 tenants but best practice for high-cardinality tenant IDs is `bucket(N, tenant_id)`. Worth a trade-off note.
-
-### Q2
-- Size thresholds (< 10M, > 100M) should be presented as heuristics, not hard cutoffs — they vary by column width, Postgres hardware, and JDBC pool size
-- MERGE example assumes `updated_at` watermark column exists without flagging that prerequisite
+### Q2 — JDBC connection pool (4.81)
+1. OSS Trino 467 has no native `connection-pool.*` properties — correct (verified)
+2. PgBouncer + `prepareThreshold=0` — correct and complete explanation of why
+3. Resource group `hardConcurrencyLimit` / `maxQueued` property names — correct
+4. Queries queue at Trino, not Postgres — correct key insight
+5. Four-layer defense (PgBouncer → Postgres role cap → resource groups → statement timeout) — excellent framing
+6. Source-selector caveat (clients must set X-Trino-Source or selector silently fails) — high-value operational detail
+7. `pg_stat_activity` + PgBouncer `SHOW POOLS` monitoring — concrete
 
 ---
 
-## Resource fixes before iter274
+## Errors / gaps to fix before iter275
 
-### Low priority
+### Q1 (important correction)
+- **ILIKE "never pushes" is too absolute**: Answer stated "customer_email ILIKE 'a%'... never pushes in OSS Trino 467." Per PR #11045 (merged into Trino), LIKE/ILIKE pushdown was added to the PostgreSQL connector. Actual behavior depends on session config and column collation. The correct statement: "ILIKE may not push — always verify with EXPLAIN rather than assuming." Resource should reflect this nuance.
 
-1. **system.query() example correctness** (resource 22):
-   - If the resource has a cross-schema system.query() example using a CTE + subquery, verify the SQL correctly scopes per-tenant schema names
-   - Simplest fix: use a plain aggregation example without dynamic schema discovery in system.query() (just demonstrate the passthrough syntax, don't try to do per-schema dynamic discovery in it)
-
-2. **Iceberg partitioning for high-cardinality tenant IDs** (resource 22 or Iceberg partitioning resource):
-   - Add note: for tenant_id with high cardinality (hundreds to thousands), `bucket(N, tenant_id)` distributes data more evenly than the identity transform; identity creates one partition directory per unique value which can create small-file problems at scale
+### Q2 (minor)
+- "1 query = 1 connection" simplification needs a caveat: each Postgres **TableScan** = 1 connection; a query joining two Postgres tables opens 2 connections
+- No mention of PgBouncer 1.21+ native prepared-statement tracking as an alternative to `prepareThreshold=0`
+- `softMemoryLimit: "60%"` in resource group example given without explanation
 
 ---
 
-## Suggested iter274 angles (MUST target Trino federation, gap 0.015)
+## Resource fixes before iter275
 
-Topic at 4.485/221. Need ~7-8 more questions at 4.875+ to cross 4.500 threshold.
+### Important
 
-1. **Trino EXPLAIN output deep dive** — engineer asks what the different node types mean; TableScan, ScanFilterProject, Exchange, Aggregate; what "Input: X rows" vs "Output: Y rows" tells you about where filtering happens
+1. **ILIKE/LIKE pushdown nuance** (resource 22, predicate pushdown section):
+   - Change "ILIKE never pushes" to "ILIKE may or may not push depending on session config and column collation — always verify with EXPLAIN"
+   - Add: the PostgreSQL connector has LIKE/ILIKE pushdown support (added via Trino PR #11045); behavior depends on `enable_string_pushdown_with_collate` session property and the column's collation
+   - Keep the practical advice: verify with EXPLAIN rather than assuming
 
-2. **Connection pool configuration for Postgres federation** — engineer asks how many concurrent JDBC connections Trino uses to Postgres; how to tune the pool; what happens when queries pile up waiting for connections; PgBouncer's role
+---
 
-3. **Cross-catalog join planning** — engineer asks why Trino sometimes picks a different join order than expected; which table is build vs probe; broadcast join vs partitioned join; stats on Iceberg vs no stats on Postgres
+## Suggested iter275 angles (MUST target Trino federation, gap 0.013)
 
-4. **system.query() security and access control** — engineer asks about the security model; OPA ExecuteFunction permission; SQL injection risks; credentials used (catalog-configured, not per-user)
+Topic at 4.487/223. Need ~6-7 more questions at 4.875+ to cross 4.500 threshold.
+
+1. **Cross-catalog transaction limits** — engineer asks whether they can do a transaction that writes to both Postgres and Iceberg atomically; answer: no cross-catalog transactions in Trino; each catalog is independently committed; patterns for handling failure
+
+2. **Trino Web UI for federation debugging** — engineer asks what the Trino UI shows when a federated query runs; stages, tasks, JDBC operator, where to find Input/Output row counts in the UI (vs EXPLAIN)
+
+3. **Re-test: predicate pushdown with ILIKE** — now that we've corrected the resource, test whether the responder gives the nuanced answer (may push, verify with EXPLAIN) rather than the wrong categorical answer
+
+4. **Re-test: resource group configuration** — earlier iters had errors here; verify the current resource correctly describes `hardConcurrencyLimit`, `maxQueued`, file-based vs db-based manager

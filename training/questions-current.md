@@ -1,17 +1,13 @@
-# Iter 273 Questions
+# Iter 274 Questions
 
-## Q1 — Querying across all tenant schemas in Postgres via Trino
+## Q1 — EXPLAIN plan confusion: where does filtering actually happen?
 
-We run a multi-tenant Postgres setup where each customer gets their own schema — so we have `tenant_abc.events`, `tenant_xyz.events`, and so on, maybe 200 schemas total. We connected Postgres to Trino as a catalog.
+We set up Trino to query both Postgres (via the PostgreSQL connector) and our Iceberg tables on S3. I started running EXPLAIN on some of our slower cross-source queries and I'm getting back this wall of text with nodes like "TableScan," "ScanFilterProject," "Exchange," and "Aggregate." I can see numbers like "Input: 4200000 rows, Output: 312 rows" on some nodes.
 
-Now I want to run an aggregate across all tenants — like a platform-level report showing total events per tenant this week. In plain Postgres I'd probably write a loop or use `information_schema` to discover schemas dynamically. But when I try to do something like that in Trino it falls apart — I can't seem to pass a schema name as a variable.
+What does it mean when a filter appears inside a "ScanFilterProject" node right next to the TableScan, versus when I see a separate Filter node higher up in the plan tree? I'm trying to figure out whether Trino is pushing my WHERE clause down into Postgres or pulling all 4 million rows over the network and then filtering them itself. How do I read the plan to know which one is happening?
 
-Is there an actual way to query across all those tenant schemas from Trino, or do I need to go back to Postgres for that? If Trino can do it, what does that SQL actually look like?
+## Q2 — Postgres connection exhaustion when dashboards run in parallel
 
-## Q2 — Should I keep querying Postgres through Trino or copy the data into Iceberg?
+We have maybe 15-20 customers all loading their dashboards at the same time during business hours. Some of these dashboards run Trino queries that join our Iceberg tables against a live Postgres table (for real-time account metadata). When load spikes, queries start backing up and some timeout.
 
-Right now our Trino setup has two catalogs: one pointing at our Postgres database (where all the live app data lives), and one pointing at our Iceberg tables on S3 (where we've been loading some historical event data). Most of our analytics queries join between the two — like joining a Postgres `accounts` table with Iceberg `events`.
-
-The queries work, but some of them are slow, and I'm not sure if it's because of the cross-catalog join or because Postgres just can't handle the scan volume. A coworker suggested we just copy the Postgres data into Iceberg so everything is in one place. But that feels like a big lift, and it means the Iceberg copy is always slightly behind the live data.
-
-How do I figure out whether to keep federating from Postgres or move the data into Iceberg? What's the actual deciding factor?
+I'm guessing Trino is opening JDBC connections to Postgres under the hood. How many connections does it open? Is there a connection pool I can configure, or does every Trino worker thread just open its own connection? And when things get backed up, does Trino queue the Postgres requests, or do they just fail immediately? I want to know what knobs to turn before I tell customers their dashboards are slow.

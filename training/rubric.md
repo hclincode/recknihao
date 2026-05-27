@@ -43,7 +43,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.474 | 99 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.623 | 16 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
-| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.485 | 221 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.487 | 223 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.763 | 4 |
 
 ---
@@ -9505,4 +9505,35 @@ Dimension scores: Technical accuracy 4.5/5, Beginner clarity 5/5, Practical appl
 **Key findings**: Decision table (size × frequency × freshness) — clear and actionable; MERGE INTO syntax correct; dynamic filtering (INNER required, LEFT disabled) — correct; EXPLAIN ANALYZE Input: diagnostic — correct; three architecture patterns (direct, nightly ingest, hybrid) — sound. Minor gaps: size thresholds presented with more authority than deserved (should be heuristics); MERGE example assumes updated_at exists without noting prerequisite.
 
 Verified: trino.io/docs/current/sql/merge.html, trino.io/docs/current/admin/dynamic-filtering.html.
+
+
+---
+
+## Iter 274 — 2026-05-27
+
+**Q1**: EXPLAIN plan interpretation — ScanFilterProject vs constraint on [col], Input/Output row counts, pushdown rules
+**Answer**: `/Users/hclin/github/recknihao/training/answers/iter274-q1.md`
+**Score**: 4.75 / 5.0 — **PASS**
+
+Dimension scores: Technical accuracy 4.5/5, Beginner clarity 5/5, Practical applicability 5/5, Completeness 4.5/5.
+
+**Topics updated**: Trino federation — prior avg 4.485 across 221 questions; new running avg (4.485 × 221 + 4.75) / 222 = (991.185 + 4.75) / 222 = **4.486 across 222 questions**. Status: NEEDS WORK (4.486 < 4.5 raised threshold). Gap: 0.014 (improved from 0.015).
+
+**Key findings**: ScanFilterProject above TableScan = pushdown failure — correct; constraint on [col] inside TableScan = pushdown success — correct; Input/Output row count interpretation — correct; pushdown rules for equality, ranges, IN-lists correct. Gap: Answer claims ILIKE "never pushes in OSS Trino 467" — this is too absolute. Per PR #11045 (merged), LIKE/ILIKE pushdown was added to the PostgreSQL connector; behavior depends on session config and column collation. Should say "may not push — verify with EXPLAIN" rather than "never."
+
+Verified: trino.io/docs/current/optimizer/pushdown.html, trino.io/docs/current/connector/postgresql.html, github.com/trinodb/trino/pull/11045.
+
+---
+
+**Q2**: JDBC connection pooling — no native pool in OSS Trino, PgBouncer + prepareThreshold=0, resource groups, queuing behavior
+**Answer**: `/Users/hclin/github/recknihao/training/answers/iter274-q2.md`
+**Score**: 4.81 / 5.0 — **PASS**
+
+Dimension scores: Technical accuracy 4.75/5, Beginner clarity 5/5, Practical applicability 5/5, Completeness 4.5/5.
+
+**Topics updated**: Trino federation — prior avg 4.486 across 222 questions; new running avg (4.486 × 222 + 4.81) / 223 = (995.892 + 4.81) / 223 = **4.487 across 223 questions**. Status: NEEDS WORK (4.487 < 4.5 raised threshold). Gap: 0.013 (improved from 0.014).
+
+**Key findings**: No native connection pool in OSS Trino — correct; PgBouncer + prepareThreshold=0 — verified correct; resource group hardConcurrencyLimit/maxQueued syntax — correct; queries queue at Trino not Postgres — correct; four-layer defense framing — excellent; source-selector caveat — high-value gotcha. Minor gaps: "1 query = 1 connection" simplification (each Postgres TableScan = 1 connection; multi-table joins open multiple); no PgBouncer 1.21+ prepared-statement support alternative; softMemoryLimit value unexplained.
+
+Verified: trino.io/docs/current/connector/postgresql.html, trino.io/docs/current/admin/resource-groups.html, pgbouncer.org/faq.html.
 
