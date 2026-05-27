@@ -1,7 +1,7 @@
 {
-  "iteration": 304,
+  "iteration": 305,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter303 avg 4.69: Q1 (4.625) HLL sketch WAU/MAU — approx_set/merge/cardinality pattern correct, but missing CAST(approx_set() AS varbinary) for Iceberg persistence; Q2 (4.75) Iceberg time-travel — all syntax verified, Trino 467 vs 469 rollback distinction correct. Resources 07/23 updated with varbinary cast. SQL best practices: 4.635/13. Iceberg maintenance: 4.643/19."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter304 avg 4.875: Q1 (4.875) HLL varbinary cast retest — correct CAST(approx_set() AS varbinary) on write and CAST(col AS HyperLogLog) on read now in resources; Q2 (4.875) Iceberg schema evolution — field-ID mechanism, metadata-only ADD COLUMN, silent data loss trap, backfill workflow all verified. SQL best practices: 4.652/14. Iceberg maintenance: 4.655/20."
 }

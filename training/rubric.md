@@ -41,15 +41,49 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.480 | 102 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.643 | 19 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.655 | 20 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
-| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.635 | 13 |
+| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.652 | 14 |
 
 ---
 
 ## Score history
+
+### Iter 304 — 2026-05-27
+
+**Q1** — HLL varbinary cast retest: CAST(approx_set() AS varbinary) on write, CAST(col AS HyperLogLog) on read, complete rolling WAU/MAU with double-cast pattern
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.875** — PASS |
+
+Root cause explanation correct (HyperLogLog not a Parquet type), varbinary cast on write correct, HyperLogLog cast on read before merge() correct, complete double-cast gotcha table. Minor: self-join rolling window is more expensive than CASE WHEN pattern (shown in dashboard query but should lead with it).
+
+**Q2** — Iceberg schema evolution: ADD COLUMN metadata-only, field-ID mechanism, NULL for old rows, silent data loss trap, safe backfill workflow
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.875** — PASS |
+
+Field-ID mechanism correctly explained and verified against spec. Metadata-only ops taxonomy correct. Silent data loss trap with concrete dangerous SQL example. Full 5-step production workflow. Mixed-schema query behavior and drop column orphaned bytes both covered. Minor: Iceberg v3 `initial-default` / `write-default` for non-NULL defaults on old rows not mentioned.
+
+**Iter 304 average: 4.875 — PASS** ✓
+
+**Topics updated**:
+- SQL query best practices for OLAP: 4.635/13 → **4.652/14 questions** (PASSED — improved)
+- Iceberg table maintenance: 4.643/19 → **4.655/20 questions** (PASSED — improved)
+
+---
 
 ### Iter 303 — 2026-05-27
 
