@@ -1,56 +1,55 @@
-# Feedback — Iter 296 (Extended phase)
+# Feedback — Iter 297 (Extended phase)
 
 Date: 2026-05-27
-Topics: TABLESAMPLE BERNOULLI for exploration + CDC vs nightly batch
+Topics: Iceberg table maintenance (storage cleanup) + Trino federation with Postgres
 
 ## Results summary
 
 | Question | Topic angle | Score | Pass/Fail |
 |---|---|---|---|
-| Q1 | TABLESAMPLE BERNOULLI for prototyping; approx functions; partition filter + sample workflow | **4.75** | PASS |
-| Q2 | CDC architecture; batch vs CDC decision criteria; stepwise recommendation | **4.625** | PASS |
+| Q1 | Iceberg maintenance: storage spike, cleanup order, historical data mismatch | **4.50** | PASS |
+| Q2 | Trino PostgreSQL connector: live cross-catalog joins, read replica, dynamic filtering | **4.875** | PASS |
 
-**Iter 296 average: 4.69 — PASS** ✓
+**Iter 297 average: 4.69 — PASS** ✓
 
 **Topic updates**:
-- SQL query best practices for OLAP: 4.613/10 → **4.626/11 questions** (PASSED — improved)
-- Postgres-to-Iceberg ingestion: 4.474/99 → **4.476/100 questions** (PASSED — stable)
-- Real-time vs batch: 4.812/4 → **4.775/5 questions** (PASSED — stable)
+- Iceberg table maintenance: 4.623/16 → **4.616/17 questions** (PASSED — stable)
+- Trino federation: 4.511/251 → **4.513/252 questions** (PASSED — stable)
 
 ---
 
 ## What worked
 
-### Q1 — TABLESAMPLE BERNOULLI (4.75)
-1. "LIMIT doesn't help you" opening — corrects the engineer's likely first instinct
-2. Partition filter + TABLESAMPLE combo — exactly the right pattern, shown with before/after SQL
-3. Approx functions (approx_distinct HyperLogLog, approx_percentile T-Digest) — named the algorithms, practical error bound (~2%)
-4. Three-phase iteration workflow (design → validate → production rollup) — concrete and immediately actionable
-5. Rollup table as the production solution — addresses the underlying problem, not just the prototyping question
+### Q1 — Iceberg maintenance (4.50)
+1. Storage jump → snapshot accumulation diagnosis — correctly identifies the root cause
+2. Race condition explanation for wrong cleanup order — makes the ordering intuitive, not just prescribed
+3. Complete 4-step runbook with correct order (compact → expire → orphan → manifests) — copy-paste ready
+4. Dry-run preview before orphan cleanup — critical safety step, correctly included
+5. "Storage goes UP after step 1 before dropping after steps 2-3" — explains the counterintuitive behavior
+6. Historical mismatch investigation: `$snapshots` metadata table + `FOR VERSION AS OF` — bonus coverage that pre-empts the natural follow-up
+7. Permanent schedule recommendation (nightly compact, weekly full maintenance) — moves from fix to operational habit
 
-### Q2 — CDC vs batch (4.625)
-1. Freshness-tier table ("each jump is ~10x harder") — excellent mental model for a PM conversation
-2. Concrete CDC architecture walk-through (WAL → Debezium → Kafka → Spark Streaming → Iceberg) — right level for a SaaS engineer
-3. Hard DELETE capture as a key CDC differentiator — engineers often miss this
-4. Ops burden enumerated honestly (Postgres WAL setup, Kafka maintenance, on-call) — prevents surprises
-5. Stepwise recommendation (hourly batch → tiered dashboards → CDC on one small table) — pragmatic path
-
----
-
-## Resource fix applied (iter 296)
-
-**Bug (Q1)**: Answer framed `TABLESAMPLE BERNOULLI` as scanning 400M→1M rows, implying I/O reduction. In fact, BERNOULLI reads all physical Parquet blocks from matched partitions, then randomly drops rows post-read. The actual I/O savings come from the partition filter, not BERNOULLI. `TABLESAMPLE SYSTEM` (split-level skipping) is what actually reduces I/O.
-
-**Fix applied** to `resources/23-sql-best-practices-olap.md` section 7:
-- Added complete TABLESAMPLE BERNOULLI example with percentage clarification
-- Added BERNOULLI vs SYSTEM scan-cost nuance: BERNOULLI reduces post-scan work but not I/O; SYSTEM skips whole splits
-- Added guidance: pair BERNOULLI with a tight partition filter for representative samples; use SYSTEM for genuine I/O reduction
+### Q2 — Trino federation (4.875)
+1. Yes/no answer with three critical rules up front — correct framing for a SaaS engineer
+2. Predicate pushdown for `plan_tier = 'enterprise'` → pushed to Postgres as WHERE clause — correctly explained
+3. Dynamic filtering (Iceberg events → customer ID list → pushed back to Postgres) — correctly described, on by default
+4. "No JDBC connection pooling in OSS Trino 467" — correct and confirmed against GitHub issue #15888
+5. Read replica requirement with concrete failure scenario (20 connections on primary) — makes the risk visceral
+6. Hybrid pattern (live federation by default, hourly materialization for high-frequency dashboards) — practical and matches production stack
 
 ---
 
-## Suggested iter297 angles
+## Resource status
 
-1. **Multi-tenant analytics** — harder angles: row-level security (Apache Ranger policies), or cross-tenant SLA metrics (p99 query latency per tenant over time)
-2. **Iceberg maintenance** — snapshot expiry + orphan file cleanup workflow; or compaction tuning (when to use sort vs bin-pack strategy)
-3. **Trino federation** — cross-catalog joins (Iceberg + Postgres connector in one query), predicate pushdown to JDBC, when federation beats ingestion
-4. **SQL OLAP best practices** — EXPLAIN ANALYZE workflow for diagnosing a slow query step-by-step (TABLESAMPLE and approx functions covered; EXPLAIN workflow has been touched but could use a systematic angle)
+**Q1 error**: Answer routed to Spark exclusively ("not Trino — Spark's Iceberg procedures accept flexible retention windows; Trino's ALTER TABLE EXECUTE optimize is for bin-pack compaction only"). In fact, Trino 467 supports `ALTER TABLE ... EXECUTE expire_snapshots` and `... EXECUTE remove_orphan_files` natively. Resource 17 lines 75-101 already document the Trino-native cheat sheet correctly. **No resource fix needed** — the responder missed the resource.
+
+**Q2**: No errors. All claims verified correct.
+
+---
+
+## Suggested iter298 angles
+
+1. **Iceberg maintenance follow-up** — reinforce Trino-native maintenance path (the responder missed it, but the resource is correct — a second angle gives the responder another chance to surface it)
+2. **Multi-tenant analytics** — row-level security with Apache Ranger; or the "one table vs many tables" data isolation model decision for B2B SaaS
+3. **Column-oriented storage** — a new angle not covered recently: why a predicate on a non-indexed column is still faster in columnar Iceberg than Postgres (row-skipping via Parquet min/max stats)
+4. **SQL OLAP best practices** — EXPLAIN ANALYZE workflow for diagnosing a slow query step by step (covered piecemeal; systematic end-to-end hasn't been a standalone question)

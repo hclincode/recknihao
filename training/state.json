@@ -1,7 +1,7 @@
 {
-  "iteration": 297,
+  "iteration": 298,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter296 avg 4.69: Q1 (4.75 PASS) TABLESAMPLE BERNOULLI + approx functions + rollup tables; Q2 (4.625 PASS) CDC architecture + batch vs CDC decision + stepwise recommendation. Resource fix: 23-sql-best-practices-olap.md — BERNOULLI vs SYSTEM scan-cost nuance (BERNOULLI reduces post-scan work not I/O; SYSTEM skips whole splits). SQL OLAP best practices: 4.626/11. Postgres-to-Iceberg: 4.476/100. Real-time vs batch: 4.775/5."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter297 avg 4.69: Q1 (4.50 PASS) Iceberg maintenance runbook — responder incorrectly said Spark-only, resource 17 already has Trino-native cheat sheet; Q2 (4.875 PASS) Trino federation with Postgres — dynamic filtering, read replica, no-connection-pooling confirmed. No resource fixes needed. Iceberg table maintenance: 4.616/17. Trino federation: 4.513/252."
 }

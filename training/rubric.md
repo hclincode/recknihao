@@ -41,15 +41,49 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.476 | 100 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.623 | 16 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.616 | 17 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
-| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.511 | 251 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.763 | 4 |
 | SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.626 | 11 |
 
 ---
 
 ## Score history
+
+### Iter 297 — 2026-05-27
+
+**Q1** — Iceberg table maintenance: storage cost spike; cleanup order; historical data mismatch investigation
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4 |
+| Beginner clarity | 5 |
+| Practical applicability | 4 |
+| Completeness | 5 |
+| **Average** | **4.50** — PASS |
+
+Error: answer routed exclusively to Spark, stating Trino is for bin-pack compaction only. In fact Trino 467 supports `ALTER TABLE ... EXECUTE expire_snapshots` and `... EXECUTE remove_orphan_files` natively. Resource 17 already documents this correctly in the "Trino-native maintenance cheat sheet" — the responder missed it. No resource fix needed.
+
+**Q2** — Trino federation with Postgres: live cross-catalog joins; read replica requirement; dynamic filtering; caching strategy
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **4.875** — PASS |
+
+Strong answer. No-connection-pooling claim correctly applies to OSS Trino 467 (Starburst Enterprise feature). All three critical rules (read replica, filter-one-side-small, dynamic filtering) correct and well-explained.
+
+**Iter 297 average: 4.69 — PASS**
+
+**Topics updated**:
+- Iceberg table maintenance: 4.623/16 → **4.616/17 questions** (PASSED — stable)
+- Trino federation: 4.511/251 → **4.513/252 questions** (PASSED — stable)
+
+---
 
 ### Iter 296 — 2026-05-27
 
