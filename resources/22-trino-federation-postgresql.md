@@ -2525,6 +2525,26 @@ For predictable, collation-independent case-insensitive matching that ALWAYS pus
 
 3. **If you MUST use ILIKE on a small table without enabling the experimental flag**: accept that with `enable_string_pushdown_with_collate=false` (the default) the predicate will not push down — Trino will pull the rows and filter in-memory. This is only acceptable when the table is small enough (a few thousand rows) AND when a co-located predicate (an indexed equality, e.g., `WHERE tenant_id = '...'`) narrows the JDBC scan first. Verify with `EXPLAIN (TYPE DISTRIBUTED)`: you will see a `ScanFilterProject` or `Filter` node above the PostgreSQL `TableScan` carrying the `ILIKE` predicate — that is the in-memory filter. For any large table, either enable the session-level flag (preference #2 above) or rewrite the query to use the denormalized `lower_email` approach in step 1.
 
+4. **`pg_trgm` GIN index — Postgres-native fix for fast unanchored LIKE / ILIKE on substrings.** If the query shape you actually need is `WHERE name LIKE '%text%'` (or `ILIKE '%text%'`) — i.e., **unanchored** substring search where neither end is anchored to a prefix — neither the `lower_email` generated-column trick nor the `enable_string_pushdown_with_collate` flag will help on its own. A B-tree index cannot satisfy a leading-wildcard LIKE. The standard Postgres fix is the **`pg_trgm` (trigram) extension + a GIN index**, which Postgres CAN use to satisfy `LIKE '%text%'`:
+
+   ```sql
+   -- On the Postgres side (one-time setup):
+   CREATE EXTENSION IF NOT EXISTS pg_trgm;
+   CREATE INDEX idx_companies_name_trgm ON companies USING GIN (name gin_trgm_ops);
+
+   -- Once indexed, Postgres uses the GIN index for LIKE '%text%' — even unanchored.
+   -- Trino can push the filter to Postgres (via the enable_string_pushdown_with_collate flag)
+   -- and Postgres executes it efficiently via the trigram index.
+   -- Note: without the Trino pushdown flag, Trino still pulls all rows and filters locally
+   -- even with the GIN index in place — the flag and the index work together.
+   ```
+
+   **The two pieces are independent and BOTH are required for fast unanchored LIKE through Trino**:
+   - The **`pg_trgm` GIN index** controls whether **Postgres** can execute the filter efficiently (without it, Postgres falls back to a full sequential scan even if the predicate arrives).
+   - The **`enable_string_pushdown_with_collate` flag** (catalog property or session property — see the LIKE-vs-ILIKE subsection above for the correctness caveat) controls whether the filter **arrives at Postgres at all** (without it, Trino strips the LIKE before issuing the JDBC query and applies it on Trino workers after pulling all rows — the trigram index is never consulted).
+   - Verify both ends after setup: (a) Postgres-side `EXPLAIN ANALYZE` on the raw `SELECT ... FROM companies WHERE name LIKE '%foo%'` should show a `Bitmap Index Scan on idx_companies_name_trgm` instead of `Seq Scan on companies`; (b) Trino-side `EXPLAIN (TYPE DISTRIBUTED)` on the federated query should show no `ScanFilterProject`/`Filter` node above the PostgreSQL `TableScan` (the LIKE predicate should be absorbed into the scan's constraint).
+   - For very high-cardinality `LIKE '%word%'` workloads (full document search, log search), prefer `tsvector` + GIN full-text search over `pg_trgm` — it scales better and supports phrase/stemming queries. `pg_trgm` is the right answer for **mid-cardinality substring search on short-to-medium VARCHAR columns** (company names, usernames, product titles, etc.).
+
 #### String range pushdown — the experimental flag and its caveats
 
 There is an experimental flag to enable string-range pushdown:

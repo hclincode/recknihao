@@ -1,7 +1,7 @@
 {
-  "iteration": 278,
+  "iteration": 279,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter277 avg 4.8875: Q1 (4.90 PASS) ILIKE pushdown re-test — conditional behavior validated, no PR attribution, ScanFilterProject-disappears success signal correct, COLLATE C vs ICU warning. Q2 (4.875 PASS) federate vs ingest at 50M-row scale — decision threshold, CTAS full load, MERGE INTO incremental, compaction. TOPIC: Trino federation 4.494/229, gap 0.006. Need ~2-3 more at 4.875+ to cross 4.500. Teacher fix nice-to-have: pg_trgm GIN index for unanchored LIKE."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter278 avg 3.525: Q1 (2.05 FAIL) stale Iceberg data — resource gap: iceberg.metadata-cache.enabled not covered; responder incorrectly said no Iceberg metadata cache exists; coordinator restart is textbook sign of in-memory cache hit. Q2 (5.00 PASS) resource groups — perfect answer; hardConcurrencyLimit/maxQueued, source selector caveat, PgBouncer. TOPIC: Trino federation 4.486/231, gap 0.014 (regression from 0.006). URGENT: teacher must add iceberg.metadata-cache.enabled coverage before iter279 questions."
 }

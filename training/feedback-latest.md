@@ -1,77 +1,80 @@
-# Feedback — Iter 277 (Extended phase)
+# Feedback — Iter 278 (Extended phase)
 
 Date: 2026-05-27
-Topic: Trino federation — LIKE/ILIKE pushdown re-test (Q1 PASS) + federate vs ingest at scale (Q2 PASS)
+Topic: Trino federation — stale Iceberg data after Spark writes (Q1 FAIL) + resource groups for Postgres load (Q2 PASS)
 
 ## Results summary
 
 | Question | Topic angle | Score | Pass/Fail |
 |---|---|---|---|
-| Q1 | LIKE/ILIKE pushdown: conditional (re-test after resource fix), session property, ScanFilterProject-disappears signal, COLLATE "C" warning | **4.90** | PASS |
-| Q2 | Federate vs ingest: decision threshold, CTAS full load, MERGE INTO incremental, compaction, what changes after ingestion | **4.875** | PASS |
+| Q1 | Stale Iceberg data: metadata cache, flush command, TTL, root cause | **2.05** | FAIL |
+| Q2 | Resource groups: no native pool, hardConcurrencyLimit, source selector, PgBouncer | **5.00** | PASS |
 
-**Iter 277 average: 4.8875 — PASS** ✓ Both passed!
+**Iter 278 average: 3.525 — FAIL** (Q1 catastrophic failure from critical resource gap)
 
-**Topic update**: Trino federation: 4.491/227 → **4.494/229** (NEEDS WORK, gap 0.006 — closing fast!)
+**Topic update**: Trino federation: 4.494/229 → **4.486/231** (NEEDS WORK, gap 0.014 — significant regression from 0.006 due to Q1 FAIL)
 
 ---
 
 ## What worked
 
-### Q1 — ILIKE pushdown re-test (4.90)
-1. Conditional pushdown framing — no PR attribution, no categorical statement — correct (fix from teacher277 and teacher276 validated)
-2. Session property `enable_string_pushdown_with_collate` — verified exact
-3. Catalog property `postgresql.experimental.enable-string-pushdown-with-collate` — verified exact
-4. Success signal: "ScanFilterProject disappears" (not constraint= textual format) — exactly the canonical phrasing from Trino docs
-5. COLLATE "C" vs ICU correctness warning — correct and specific
-6. Unanchored patterns (`%text%`) still scan all rows even with flag — correctly explained
-7. Four practical options (generated lower column, date predicate pairing, flag test, ingest to Iceberg) — production-realistic
-8. Postgres slow-query log as ground truth — actionable
-
-### Q2 — Federate vs ingest (4.875)
-1. Decision threshold table (CPU, latency, query frequency, freshness tolerance) — concrete
-2. JDBC single-task bottleneck explanation (no parallelism, 50M rows over one connection) — correct and verified
-3. CTAS for initial full load — verified
-4. MERGE INTO for incremental sync — verified; WHEN MATCHED/WHEN NOT MATCHED correct syntax
-5. Explicit upper-bound watermark pattern (not NOW() inside query) — production-safe guidance
-6. ALTER TABLE EXECUTE optimize for compaction after MERGE — verified
-7. Before/after query comparison (federated vs local) — concrete and illustrative
-8. When to still federate edge cases — appropriate nuance
-9. Action plan numbered list — actionable
+### Q2 — Resource groups (5.00 — PERFECT)
+1. No native per-catalog connection pool in OSS Trino 467 — verified (issue #15888 open)
+2. hardConcurrencyLimit + maxQueued property names — verified
+3. Queuing happens at Trino, before queries reach Postgres — correct
+4. Source selector silent failure (clients must set X-Trino-Source) — correct and critical
+5. File-based resource groups require coordinator restart — verified
+6. Multi-connection-per-query nuance (each Postgres TableScan = 1 connection; joining 3 tables → 3 connections) — correct
+7. PgBouncer as Postgres-side complement — correct framing
+8. Complete runnable example JSON config — excellent
 
 ---
 
-## Errors / gaps to fix before iter278
+## Errors / gaps (Q1 — CRITICAL)
 
-### Q1 (minor — did not block pass)
-- No mention of `pg_trgm` GIN index as the canonical Postgres-side fix for unanchored LIKE searches. The answer recommends `LIKE '%global%'` on a generated lower column, but a GIN trigram index is the standard approach for fast substring search in Postgres. Worth adding to resource.
+### Q1 — CRITICAL resource gap causing FAIL
 
-### Q2 (minor — did not block pass)
-- Jargon: "positional delete files," "predicate-prune and project-push," "watermark" used without inline explanation. Fine for the score but could confuse a SaaS engineer reading carefully.
-- No mention of monitoring HMS (Hive Metastore) health during CTAS — if HMS is unavailable at commit time, the CTAS fails even if data was written.
+The responder falsely claimed: "Trino's Iceberg connector does NOT maintain a metadata pointer cache" and "there is no Trino-side cache to flush for Iceberg and no TTL to tune."
+
+**What the official Trino docs actually say** (trino.io/docs/current/connector/iceberg.html):
+- `iceberg.metadata-cache.enabled` — enables in-memory caching of Iceberg metadata files on the coordinator (default: `true`)
+- `fs.memory-cache.ttl` — TTL for the in-memory metadata file cache
+- `fs.memory-cache.max-size` — max total cached bytes
+- `fs.memory-cache.max-content-length` — max size per individual cached file
+- Trino DOES cache Iceberg metadata in-memory on the coordinator
+
+**The definitive tell the responder missed:** the engineer said "restarting the Trino coordinator fixes it." A coordinator restart invalidates the in-memory coordinator cache — this is textbook evidence that `iceberg.metadata-cache.enabled=true` is the root cause of the 10-15 minute staleness window.
+
+**What the responder got right (partial credit):**
+- `flush_metadata_cache()` SQL procedure does NOT exist for Iceberg (only Hive/Delta/JDBC connectors) — this is correct
+
+**Root cause of the failure:** Resource 22 (trino-federation-postgresql.md) covers Postgres connector behavior, not Iceberg connector internals. There is NO coverage of `iceberg.metadata-cache.enabled` or the Iceberg metadata cache in any resource the responder could read.
 
 ---
 
-## Resource fixes before iter278
+## Resource fixes before iter279 — URGENT
 
-### Nice-to-have
+### Critical (must add before next iter)
 
-1. **pg_trgm GIN index for unanchored LIKE** (resource 22, ILIKE/string search section):
-   - Add: for unanchored substring search (`LIKE '%text%'`), the production-grade Postgres fix is a GIN trigram index via `pg_trgm` extension
-   - `CREATE EXTENSION IF NOT EXISTS pg_trgm;` + `CREATE INDEX ... USING GIN (name gin_trgm_ops);`
-   - Once indexed, Postgres can use the GIN index for LIKE '%text%' queries efficiently, even when Trino can't push the filter
-   - Note: the Trino flag only controls whether the filter arrives at Postgres; the index controls whether Postgres executes it efficiently
+1. **Add Iceberg metadata cache coverage to resource** (resource 22 or a dedicated Iceberg resource):
+   - `iceberg.metadata-cache.enabled` — default true; controls in-memory caching of Iceberg metadata files on coordinator
+   - `fs.memory-cache.ttl` — TTL (default varies by build; lowering it increases HMS/S3 calls but reduces staleness window)
+   - `fs.memory-cache.max-size` and `fs.memory-cache.max-content-length` — sizing controls
+   - **No SQL flush_metadata_cache() for Iceberg** — that procedure only exists for Hive/Delta/JDBC connectors
+   - **JMX workaround** for immediate invalidation without restart: `io.trino.filesystem.memory:name=MemoryFileSystemCache` (Trino exposes cache stats/invalidation via JMX)
+   - **"Coordinator restart fixes staleness"** is the textbook signal that the in-memory cache is the cause
+   - **Remediation options**: (1) lower `fs.memory-cache.ttl` (tradeoff: more S3/HMS calls during query planning), (2) disable `iceberg.metadata-cache.enabled=false` (no caching, fresh every time — only for high-write scenarios), (3) accept the TTL-based staleness window as a design choice for read-heavy workloads
 
 ---
 
-## Suggested iter278 angles (MUST target Trino federation, gap 0.006)
+## Suggested iter279 angles (MUST target Trino federation, gap 0.014)
 
-Topic at 4.494/229. Need ~2-3 more questions at 4.875+ to cross 4.500 threshold.
+Topic at 4.486/231. Need ~6-7 more questions at 4.875+ to cross 4.500 threshold (gap widened from 0.006 to 0.014).
 
-1. **Metadata caching and stale Iceberg reads** — engineer sees Trino return old Iceberg data after a Spark job adds new files; answer: metadata.cache-ttl, flush_metadata_cache (coordinator-only), CREATE OR REPLACE VIEW workaround; well-covered in resource
+1. **Re-test: Iceberg metadata cache (after resource fix)** — same question about stale data after Spark writes; resource must now cover iceberg.metadata-cache.enabled, fs.memory-cache.ttl, no SQL flush for Iceberg, JMX workaround
 
-2. **Resource groups to limit Postgres load** — engineer wants to cap concurrent federated queries hitting Postgres; hardConcurrencyLimit + maxQueued; source selector caveat (clients must set X-Trino-Source or selector silently fails); PgBouncer integration
+2. **Dynamic filtering in federated Postgres+Iceberg joins** — engineer asks why joining to a small Iceberg lookup table speeds up the Postgres scan; answer: DF collects join keys and pushes IN-list into the Postgres TableScan; LEFT/FULL OUTER disables DF; wait-timeout config
 
-3. **Dynamic filtering in federated Postgres+Iceberg joins** — engineer asks why adding a join condition on a small Iceberg lookup table speeds up the Postgres scan; answer: DF collects join keys from the small table and pushes an IN-list into the Postgres TableScan; LEFT/FULL OUTER disables DF; wait-timeout config
+3. **Postgres type mapping edge cases** — jsonb → JSON, uuid → UUID, custom enums → VARCHAR (may need CONVERT_TO_VARCHAR), array types (AS_ARRAY vs AS_JSON vs DISABLED default)
 
-4. **Re-test: federate vs ingest at scale** — high scores suggest this is a strong coverage angle; another variation would reinforce the pattern
+4. **Resource groups re-test** — verify the perfect Q2 answer pattern is repeatable on a slightly different angle (e.g., per-user or per-source group config)

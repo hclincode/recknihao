@@ -43,7 +43,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.474 | 99 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.623 | 16 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
-| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.494 | 229 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.486 | 231 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.763 | 4 |
 
 ---
@@ -9628,3 +9628,33 @@ Dimension scores: Technical accuracy 5/5, Beginner clarity 4.5/5, Completeness 5
 **Key findings**: CTAS for initial load — verified; MERGE INTO for incremental sync — verified; ALTER TABLE EXECUTE optimize for compaction — verified; JDBC single-task explanation (no parallelism) — verified against GitHub issue. Explicit upper-bound watermark pattern — production-correct. Minor gaps: "positional delete files", "predicate-prune" jargon unexplained; no glossary for SaaS engineer. Production fit: aligns with on-prem Trino 467 + MinIO + dbt stack.
 
 Verified: trino.io/docs/current/sql/merge.html, trino.io/docs/current/connector/iceberg.html, trino.io/docs/current/connector/postgresql.html.
+
+---
+
+## Iter 278 — 2026-05-27
+
+**Q1**: Stale Iceberg data after Spark writes — metadata cache, flush command, TTL config, root cause diagnosis
+**Answer**: `/Users/hclin/github/recknihao/training/answers/iter278-q1.md`
+**Score**: 2.05 / 5.0 — **FAIL**
+
+Dimension scores: Technical accuracy 1/5, Beginner clarity 4/5, Completeness 2/5, Actionability 2/5.
+
+**Topics updated**: Trino federation — prior avg 4.494 across 229 questions; new running avg (4.494 × 229 + 2.05) / 230 = (1029.126 + 2.05) / 230 = **4.483 across 230 questions**. Status: NEEDS WORK (4.483 < 4.5 raised threshold). Gap: 0.017 (significant regression from 0.006 — critical resource gap exposed).
+
+**Key findings**: CRITICAL resource gap: answer falsely claimed Trino's Iceberg connector has NO metadata cache and nothing to flush. Official Trino docs document `iceberg.metadata-cache.enabled` (default true), `fs.memory-cache.ttl`, and related sizing properties. Trino DOES cache Iceberg metadata in-memory on the coordinator. The engineer's observation that "coordinator restart fixes it" is textbook evidence of an in-memory coordinator cache. Answer redirected toward HMS latency and Spark commit timing — these are not invalidated by a coordinator restart and are wrong diagnoses here. flush_metadata_cache() SQL procedure correctly identified as NOT available for Iceberg (only for Hive/Delta/JDBC connectors). Resource 22 does not cover Iceberg metadata caching — this is a critical coverage gap.
+
+Verified: trino.io/docs/current/connector/iceberg.html (iceberg.metadata-cache.enabled, fs.memory-cache.ttl confirmed).
+
+---
+
+**Q2**: Resource groups to limit concurrent Postgres queries — no native pool in OSS Trino, hardConcurrencyLimit + maxQueued, source selector caveat, PgBouncer complement
+**Answer**: `/Users/hclin/github/recknihao/training/answers/iter278-q2.md`
+**Score**: 5.00 / 5.0 — **PASS**
+
+Dimension scores: Technical accuracy 5/5, Beginner clarity 5/5, Completeness 5/5, Actionability 5/5.
+
+**Topics updated**: Trino federation — prior avg 4.483 across 230 questions; new running avg (4.483 × 230 + 5.00) / 231 = (1031.090 + 5.00) / 231 = **4.486 across 231 questions**. Status: NEEDS WORK (4.486 < 4.5 raised threshold). Gap: 0.014 (improved slightly from 0.017 but still significant regression from 0.006 due to Q1 FAIL).
+
+**Key findings**: No native connection pool in OSS Trino (issue #15888 still open) — verified; hardConcurrencyLimit/maxQueued property names — verified; source selector silent failure (X-Trino-Source must be set by clients) — verified; file-based resource groups require coordinator restart — verified; multi-connection-per-query nuance (each Postgres TableScan = 1 connection) — correct; PgBouncer as Postgres-side complement — correct. Perfect answer.
+
+Verified: trino.io/docs/current/admin/resource-groups.html, trino.io/docs/current/connector/postgresql.html, GitHub issue #15888.
