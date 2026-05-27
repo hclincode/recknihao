@@ -1404,9 +1404,56 @@ The consumer resumes from its last committed Kafka offset (stored in the Spark s
 The exact behavior matters because the wrong mental model leads to incorrect remediation:
 
 - **Default (no special config):** If the source CDC stream has a column not present in the target Iceberg table, Spark's MERGE INTO throws `AnalysisException: Unable to find the column of the target table from the INSERT columns` (paraphrased — exact message varies slightly by Spark version). The error is **visible**, not silent — the streaming batch fails, the offset does not commit, and the next batch re-attempts the same window of events with the same error until the schema is fixed.
-- **With `write.spark.accept-any-schema=true` table property AND `.option("mergeSchema", "true")` writer option:** MERGE INTO auto-evolves the target schema to include the new column. New columns from the source are added to the Iceberg table automatically as part of the same commit.
-- **Both options are REQUIRED for auto-evolution.** Either alone is insufficient (the writer option without the table property gets rejected at Spark's pre-validation step; the table property without the writer option produces an accepting-but-not-evolving writer).
-- **For production CDC pipelines, prefer explicit `ALTER TABLE ADD COLUMN`** (controlled, auditable, leaves a trail in your DDL history) **over auto-evolution** (can mask mistakes, ties schema changes to whatever the most recent Spark batch happened to send).
+- **For production CDC pipelines, the manual `ALTER TABLE ADD COLUMN` step is MANDATORY before MERGE INTO can see the new column.** See the next callout for the precise reason — wildcards and `mergeSchema` do NOT auto-evolve a MERGE INTO target in Iceberg 1.5.2.
+
+> **CRITICAL — MERGE INTO and schema evolution: the manual ALTER step is mandatory in Iceberg 1.5.2.** A common (wrong) belief, often repeated in AI-generated answers, is that `WHEN MATCHED THEN UPDATE SET *` and `WHEN NOT MATCHED THEN INSERT *` wildcards in Spark MERGE INTO "automatically pick up new Iceberg columns without any code change." **This is false in two important ways. Read carefully:**
+>
+> 1. **Wildcards resolve at PLAN TIME against the TARGET table's CURRENT columns.** `UPDATE SET *` and `INSERT *` are not late-bound — Spark's analyzer expands them into the explicit column list of the **target Iceberg table as it exists at the moment the MERGE statement is planned**. They do **not** look at the source DataFrame to discover "new" columns, and they do **not** trigger any schema-evolution code path. After you run `ALTER TABLE ... ADD COLUMN`, the next MERGE INTO plan-time resolution sees the new column on the target and the wildcards expand to include it. **Before** the ALTER, the wildcards expand to the old column set and any extra source-side column is rejected with `AnalysisException`. The wildcard form just makes the MERGE less brittle **going forward** (you don't have to maintain a hand-written column list); it does not eliminate the manual ALTER step.
+>
+> 2. **MERGE INTO does NOT support automatic schema evolution in Iceberg 1.5.2 — even with `write.spark.accept-any-schema=true` AND `mergeSchema=true` set.** This is an open upstream bug — [apache/iceberg#5548](https://github.com/apache/iceberg/issues/5548). The combination that auto-evolves a `writeTo().append()` write does **NOT** auto-evolve a `MERGE INTO` write — the merge planner builds the target schema from the catalog metadata, not from the source DataFrame, and the writer-option / table-property pair has no effect on that path. The closest you can get is the `writeTo().append()` path (see point 3 below), which is a different write API.
+>
+> 3. **For `writeTo().append()` writes you need BOTH knobs to auto-evolve.** If your CDC consumer or backfill uses `df.writeTo("iceberg.analytics.events").append()` (not MERGE INTO), auto-evolution requires **both** of the following — either alone is insufficient:
+>    - **Table property** (set ONCE per table, ideally at CREATE TABLE time):
+>      ```sql
+>      ALTER TABLE iceberg.analytics.events
+>      SET TBLPROPERTIES ('write.spark.accept-any-schema'='true');
+>      ```
+>    - **Writer option** (set on EVERY write that should auto-evolve):
+>      ```python
+>      df.writeTo("iceberg.analytics.events") \
+>          .option("mergeSchema", "true") \
+>          .append()
+>      ```
+>    Without the table property, Spark's V2 writer rejects the DataFrame schema mismatch BEFORE Iceberg gets a chance to extend the schema. Without the writer option, Iceberg accepts the write but does not extend the schema (the new column's values are silently dropped). **Both must be set together, every time.** And again: this only applies to `writeTo().append()`, NOT to MERGE INTO.
+>
+> 4. **The mandatory production sequence for adding a column to a MERGE-INTO-fed Iceberg table is always:**
+>    ```sql
+>    -- Step 1: ADD the column to the Iceberg target FIRST. Metadata-only, milliseconds.
+>    ALTER TABLE iceberg.analytics.events ADD COLUMN ab_variant VARCHAR;
+>    ```
+>    Then re-run (or resume) the MERGE INTO consumer. Wildcards (`UPDATE SET *` / `INSERT *`) will re-plan against the now-evolved target and start including the new column automatically — that is the only thing they buy you, and it's still strictly post-ALTER.
+>
+> **Summary table — what each write API supports for schema evolution in Iceberg 1.5.2:**
+>
+> | Write API | Manual `ALTER TABLE ADD COLUMN` required? | Auto-evolution available? | Required config for auto-evolution |
+> |---|---|---|---|
+> | `df.writeTo(...).append()` | No (if auto-evolution configured) — Yes (if not) | YES | BOTH `write.spark.accept-any-schema=true` on table AND `.option("mergeSchema", "true")` on writer |
+> | `df.writeTo(...).overwritePartitions()` | Same as above | YES | Same as above |
+> | Spark `MERGE INTO` (any form, including wildcards) | **YES — always mandatory** | **NO** (open issue apache/iceberg#5548) | None — the manual ALTER is the only path |
+> | Trino `MERGE INTO` | YES — always mandatory | NO | None |
+>
+> Treat MERGE INTO as **schema-fixed**: the manual `ALTER TABLE ADD COLUMN` is always step 1; only the post-ALTER MERGE benefits from wildcard column resolution.
+
+> **ADD vs DROP vs TYPE CHANGE — Iceberg DDL is NOT symmetric.** When planning a schema change, know that the three classes of column alteration have very different cost and safety properties:
+>
+> - **ADD COLUMN** — **safe, metadata-only**. Completes in milliseconds on a 10 TB table. Always nullable (see section 7 below). Historical Parquet files NULL-fill at read time. No data rewrite, no backfill required.
+> - **DROP COLUMN** — **destructive going forward**. Metadata-only at the DDL level (Iceberg just retires the field ID from the schema), but **the column is gone from any data files written after the DROP** — new MERGE / INSERT / append writes will not include the column. Re-ADDing a column with the same name does NOT restore the old data; the new ADD gets a fresh field ID, and the old column's bytes (still sitting in pre-DROP Parquet files on MinIO) become unreachable. Treat DROP as a one-way migration that needs to be coordinated with every downstream view, dbt model, and dashboard before you run it.
+> - **TYPE CHANGE** — **only widening promotions are supported in Iceberg 1.5.2**. The allowed set is narrow:
+>   - `int` → `long` (32-bit to 64-bit integer)
+>   - `float` → `double` (32-bit to 64-bit float)
+>   - `decimal(P, S)` → `decimal(P', S)` where `P' > P` (increase precision, scale unchanged)
+>
+>   Everything else — `int` → `string`, `timestamp` → `string`, `long` → `int` (narrowing), `decimal` scale changes, any rename of the underlying primitive — is **NOT** supported as an in-place ALTER. The workaround is a one-off Spark job that reads the table, casts the affected column to the new type, and writes to a new Iceberg table; then swap. There is no in-place ALTER for unsupported type changes.
 
 ##### 7. Iceberg `ADD COLUMN` nullability note
 

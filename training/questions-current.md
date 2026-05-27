@@ -1,12 +1,12 @@
-# Iter 317 Questions
+# Iter 318 Questions
 
 Date: 2026-05-27
-Topics: Mixed column-masking-uri + batch-column-masking-uri footgun (Q1) + Debezium heartbeat.action.query for low-traffic databases (Q2)
+Topics: Schema evolution mid-CDC-pipeline — ADD COLUMN in Postgres (Q1) + OPA row-filter performance under high concurrency (Q2)
 
-## Q1 — Column masking stopped working after adding batch masking endpoint
+## Q1 — Schema evolution mid-CDC-pipeline: ADD COLUMN in Postgres
 
-We set up Trino with a security policy to mask certain columns in our analytics tables — things like email addresses and API keys — so that different customers only see their own data and sensitive fields are hidden. That's been working fine. But last week we added a new "batch" version of the same masking endpoint because our team heard it was more efficient. Now we're getting reports that some users who were previously seeing masked data are suddenly seeing plain text values instead. We didn't change any policy logic, just added the new endpoint. What could be causing column masking to stop working after adding a second masking endpoint?
+We're using Debezium to stream changes from our Postgres database into our data pipeline, and everything has been working fine. Last week, one of our teams added two new columns to one of the Postgres tables we're streaming from — just a regular `ALTER TABLE ... ADD COLUMN`. Nobody touched the Debezium connector config. Now some downstream consumers are saying they see the new columns in the Kafka messages, but when we check the Iceberg table on the other end, the new columns aren't there. The rows that came in after the ALTER still seem to be landing, but without those columns. What actually happens to a CDC pipeline when you change the Postgres table schema mid-stream — does Debezium automatically pick up new columns, and if not, what do we need to do manually to get the Iceberg table updated and the data flowing correctly?
 
-## Q2 — Debezium heartbeat not reducing replication slot lag on low-traffic database
+## Q2 — OPA row-filter performance under high concurrency
 
-We're using Debezium to stream changes from our Postgres database into our data lake. On our high-traffic production database, everything works — we can see events flowing through. But on our analytics staging database, which barely gets any writes (maybe a handful per hour), Debezium seems to fall behind and the lag just keeps growing even though the connector is running and showing as healthy. We added a heartbeat interval config thinking that would help keep things moving, but the lag on the Postgres side doesn't seem to be going down. What's actually happening and what are we missing?
+We have around 200 tenants on our platform and we're using OPA to control which rows each tenant can see when they query through Trino. It mostly works, but under load — say 50-80 concurrent users across tenants hitting the dashboard at the same time — query latency jumps noticeably, sometimes 2-3x slower than when traffic is light. We're trying to figure out if OPA is the bottleneck. Specifically: when a Trino query runs, is OPA being called once per query to decide what that tenant can see, or is it somehow getting called per row, or per something else? And if OPA is the bottleneck, what do we actually tune — is it the OPA server itself, or is there something in how Trino is configured to call it?

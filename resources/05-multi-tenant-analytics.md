@@ -1026,6 +1026,77 @@ If you have read older drafts of this guide or other blog posts that claim `opa.
 > | Not yet using batch endpoint | Enable batch endpoint FIRST; then revisit pod placement |
 > | Regulated environment, OPA must be separately audited | Separate service (compliance requirement overrides latency) |
 
+#### Diagnostic decision tree — "OPA is slow," is it call count or per-call latency?
+
+When a user pages you with "queries got slower after we turned on OPA" or "analysis-phase latency doubled overnight," the very first diagnostic question is **NOT** "is OPA's CPU high?" or "did the Rego get more complex?" — it is **"how many OPA HTTP calls per query, and how long does each call take?"** These two numbers point at completely different fixes. Confusing the two is the most common reason for an OPA performance investigation to consume an afternoon and end with no improvement.
+
+**The two numbers come from the same source: the `io.trino.plugin.opa.OpaHttpClient` DEBUG log on the coordinator** (enable via `etc/log.properties`: `io.trino.plugin.opa.OpaHttpClient=DEBUG`). Each line records one HTTP call to OPA with the request URI, the response status, and the elapsed time. Count the lines per `queryId` to get **N (call count)**; read the elapsed-time field to get **per-call latency**.
+
+```text
+Triage rule (apply in order):
+
+If N > 5 OPA calls per query
+  -> Problem is TRINO CONFIG (the coordinator is making too many calls)
+  -> Fix: enable batching — `opa.policy.batched-uri` for filter-list ops AND
+     `opa.policy.batch-column-masking-uri` for per-table column masking.
+     See the "broader batch endpoint" section earlier in this file.
+  -> Expected effect: N drops to 1–3 per query for most query shapes.
+  -> Coordinator restart REQUIRED after adding either property (see the
+     `opa.policy.*` hot-reload warning earlier in this file).
+
+If N <= 2 but per-call latency > 20 ms
+  -> Problem is OPA SERVER (each call is too slow)
+  -> Fix candidates, in order of likely impact:
+     1. Scale OPA replicas (add pods) — only helps if OPA CPU is saturated;
+        check `opa_request_duration_seconds` and pod CPU first.
+     2. Optimize the Rego policy — large `data` bundle lookups, deep object
+        traversal, unindexed `some i; input.x[i] == ...` scans are the usual
+        culprits. Use `opa eval --profile` against a captured input to find
+        the slow rules.
+     3. Reduce OPA<->Trino network latency — co-locate via sidecar or pod
+        affinity (see the "OPA pod placement" section above).
+  -> Expected effect: per-call latency drops below 5 ms for normal Rego.
+
+If BOTH (N > 5 AND per-call latency > 20 ms)
+  -> Fix call count FIRST (batching is the bigger lever — collapsing 40 slow
+     calls into 1 slow call is a much larger absolute win than making 40 calls
+     each 5 ms faster).
+  -> After batching, re-measure. If per-call latency on the BATCHED endpoint
+     is still > 20 ms, then address the OPA-server-side fix above.
+  -> Never try to scale OPA replicas first when N is high — adding replicas
+     does not reduce the number of calls Trino makes; it just spreads them
+     across more pods. The bottleneck is still the per-query call count.
+```
+
+**Why "fix call count first" is almost always correct.** Suppose a query has N=40 column-masking calls at 20 ms each — total analysis-phase OPA tax is 800 ms. Scaling OPA replicas from 1 to 4 reduces per-call latency from 20 ms to perhaps 15 ms (roughly, by spreading load) → new total is 600 ms. Enabling `batch-column-masking-uri` cuts N from 40 to 1 → new total is one batched call at 30 ms (slightly slower per-call because the batched call evaluates more data, but only one round-trip) → ~30 ms total. The batching fix is **20x larger** than the replica fix. Always exhaust batching before scaling OPA pods.
+
+#### `opa.http-client.*` — Trino's HTTP connection pool to OPA
+
+When you scale OPA replicas (or after a traffic spike, or when you migrate to the separate-service pattern), Trino's HTTP **client pool** to OPA can become the bottleneck even though OPA itself has headroom. Trino's OPA plugin uses a JVM HTTP client with a bounded connection pool — if the pool's max-connections is too low or the per-request timeout is too tight, you will see symptoms like "OPA calls hang for seconds and then time out, even though OPA's own metrics show sub-10 ms evaluation latency."
+
+**Configure these in `etc/config.properties` on the coordinator** (the OPA HTTP client is configured at the coordinator level, NOT in `etc/access-control.properties`):
+
+```properties
+# Maximum concurrent HTTP connections from Trino coordinator to OPA.
+# Default is conservative (around 32); on a busy coordinator running many
+# concurrent queries — each making multiple OPA calls — bump this to match
+# expected peak concurrency.
+opa.http-client.max-connections=100
+
+# Per-request timeout for any single OPA HTTP call. Trade-off: too high and a
+# slow OPA pod stalls query analysis; too low and a healthy-but-momentarily-slow
+# OPA call fails the query at the front door. 10s is a reasonable production
+# starting value for clusters that have already enabled batching.
+opa.http-client.request-timeout=10s
+```
+
+**When you must tune these:**
+- **After adding OPA replicas.** Adding replicas raises the *aggregate* OPA capacity, but Trino's client pool is the choke point on the **Trino side**. If `max-connections=32` (the default), no amount of OPA scaling will let Trino send more than 32 concurrent calls. Match `opa.http-client.max-connections` to roughly `(peak concurrent queries) × (average OPA calls in-flight per query)`.
+- **After the cluster grows past ~50 concurrent queries.** A single query in its analysis phase can hold several OPA connections briefly; with 50+ concurrent queries, the default pool will saturate even with batching enabled.
+- **When you observe high `OpaHttpClient` DEBUG-log wait times that do NOT correlate with OPA-side latency.** If OPA's own `opa_request_duration_seconds` p99 is 5 ms but the Trino-side per-call elapsed time is 200 ms, the time is being spent **waiting for a free connection in Trino's pool** — bump `max-connections`.
+
+**Operational rule: any change to `opa.http-client.*` properties requires a Trino coordinator restart** — same as `opa.policy.*` properties. These are read at startup, not hot-reloaded. After a change, validate via the `OpaHttpClient` DEBUG log that per-call wait times have dropped.
+
 ### OPA decision log — the auditable record of every authz decision (NOT durable by default)
 
 > **Every authorization decision OPA makes is loggable — but the log is NOT durable on its own.** Engineers commonly assume "OPA writes a durable decision log" the way a SIEM writes durable events. **It does not.** OPA writes decisions to stdout (when configured) and from there you MUST ship the stream to an external store. Without that shipping, the decision log lives only in the OPA pod's stdout buffer and is lost on pod restart or k8s log rotation.

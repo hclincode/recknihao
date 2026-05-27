@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.478 | 116 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.480 | 117 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
@@ -40,7 +40,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.521 | 6 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.490 | 109 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.494 | 110 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.655 | 20 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
@@ -50,6 +50,44 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 318 — 2026-05-27
+
+**Q1** — Schema evolution mid-CDC: ADD COLUMN in Postgres, columns visible in Kafka but missing from Iceberg
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.25 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.75 |
+| Completeness | 4.5 |
+| **Average** | **4.50** — PASS |
+
+Correctly identifies the failure mode (explicit-column MERGE silently drops new columns), recommends the right pause-ALTER-resume sequence, and correctly notes Iceberg ADD COLUMN is metadata-only with NULL for historical rows. Minor inaccuracies: (1) WAL RELATION message arrives on next DML, not "immediately" — answer's "On the next INSERT or UPDATE after the DDL" is correct but the description glosses over that there is no event without DML; (2) for `UPDATE SET *` / `INSERT *` to auto-evolve schema during MERGE, the target table must set `write.spark.accept-any-schema=true` AND the writer must enable `mergeSchema=true` — wildcards alone do NOT trigger schema evolution. Answer implies wildcards alone are sufficient, which is incorrect. (3) `mergeSchema` is shown on the backfill writer but not paired with `write.spark.accept-any-schema` table property. Topic running avg: (4.490×109 + 4.50)/110 = **4.494/110 questions** — PASSED.
+
+**Q2** — OPA row-filter performance under high concurrency: once-per-query at analysis time (not per row), multiple calls per query from FilterTables/column masking fan-out, diagnosis via `io.trino.plugin.opa.OpaHttpClient` DEBUG, batched-uri + batch-column-masking-uri, horizontal OPA scaling, `metrics.timer_rego_query_eval_ns`
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.75 |
+| **Average** | **4.75** — PASS |
+
+All field paths and config names verified. `opa.http-client.*` connection pool tuning and diagnostic decision tree added to resources/05. Topic running avg: (4.478×116 + 4.75)/117 = **4.480/117 questions** — PASSED.
+
+**Iter 318 average: 4.625 — PASS** ✓
+
+**Topics updated**:
+- Postgres-to-Iceberg ingestion: 4.490/109 → **4.494/110 questions** (PASSED — stable)
+- Multi-tenant analytics: 4.478/116 → **4.480/117 questions** (PASSED — stable)
+
+**Resource fixes this iteration**:
+- resources/13: MERGE INTO schema evolution callout (`write.spark.accept-any-schema=true` + `mergeSchema=true`); ADD vs DROP vs TYPE CHANGE asymmetry
+- resources/05: OPA HTTP client tuning properties; diagnostic decision tree (call count vs per-call latency)
+
+---
 
 ### Iter 317 — 2026-05-27
 

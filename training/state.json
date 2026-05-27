@@ -1,7 +1,7 @@
 {
-  "iteration": 318,
+  "iteration": 319,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter317 avg 4.75: Q1 (4.75) Mixed endpoint footgun — batch overrides single, exact Trino docs quote confirmed, coordinator restart note added to resources/05; Q2 (4.75) heartbeat.action.query — publication.autocreate.mode and cross-database WAL sharing added to resources/13. Multi-tenant: 4.478/116. Postgres-to-Iceberg: 4.490/109."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter318 avg 4.625: Q1 (4.50) Schema evolution mid-CDC — MERGE wildcard/schema-evolution misconception caught, write.spark.accept-any-schema=true requirement added to resources/13; Q2 (4.75) OPA performance — HTTP client tuning and diagnostic decision tree added to resources/05. Postgres-to-Iceberg: 4.494/110. Multi-tenant: 4.480/117."
 }
