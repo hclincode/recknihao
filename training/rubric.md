@@ -43,7 +43,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.474 | 99 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.623 | 16 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
-| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.501 | 245 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.504 | 247 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.763 | 4 |
 
 ---
@@ -9842,3 +9842,23 @@ Verified: trino.io/docs/current/connector/iceberg.html, trino.io/docs/current/ad
 **Key findings**: No `catalog` selector in Trino resource groups — verified; valid selectors (user, source, clientTags, queryType, sessionPropertyFilters) — verified; `hardConcurrencyLimit`/`maxQueued` correct property names — verified; file-based resource groups require coordinator restart — verified; `prepareThreshold=0` for PgBouncer transaction-pooling — verified. Minor gaps: no mention of DB-backed resource group config as hot-reload alternative.
 
 Verified: trino.io/docs/current/admin/resource-groups.html, pgbouncer.org.
+
+### Iter 286 Q1 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (Iceberg DF wait-timeout: catalog config ONLY, no session property; contrast with Hive; workarounds without restart: selective WHERE, second Iceberg catalog, ingest to Iceberg)
+
+**Score: 4.90/5.0 PASS**
+
+**Topics updated**: Trino federation — prior avg 4.501 across 245 questions; new running avg (1102.701 + 4.90) / 246 = 1107.601 / 246 = **4.502 across 246 questions**. Status: PASSED (solidifying above 4.5 threshold).
+
+**Teacher285 fix validated**: Answer correctly states Iceberg has NO session property for wait-timeout; correctly states `iceberg.dynamic-filtering.wait-timeout` is catalog-config-only; correctly contrasts with Hive connector which HAS session property; SET SESSION example correctly labeled as failing. Resource fix is working.
+
+Verified: trino.io/docs/current/connector/iceberg.html, trino.io/docs/current/admin/dynamic-filtering.html, trino.io/docs/current/connector/hive.html.
+
+### Iter 286 Q2 — 2026-05-27 (EXTENDED PHASE) — Trino federation / cross-source connectors (ILIKE pushdown: default no pushdown; enable_string_pushdown_with_collate session property; COLLATE "C" correctness risk for ICU/custom collations; lowercase generated column as production-safe alternative)
+
+**Score: 4.85/5.0 PASS**
+
+**Topics updated**: Trino federation — prior avg 4.502 across 246 questions; new running avg (1107.601 + 4.85) / 247 = 1112.451 / 247 = **4.504 across 247 questions**. Status: PASSED (solidly above threshold).
+
+**Key findings**: ILIKE no pushdown by default — verified (trino.io connector docs); `enable_string_pushdown_with_collate` correct session property name — verified (PR #9746); COLLATE "C" mechanism and collation correctness caveat — verified; lowercase generated column pattern — correct and production-safe. Minor gap: no mention of catalog-level config as alternative to session property; no explicit OPA SET SESSION permission note.
+
+Verified: trino.io/docs/current/connector/postgresql.html, github.com/trinodb/trino/pull/9746.

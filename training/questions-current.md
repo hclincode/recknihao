@@ -1,13 +1,13 @@
-# Iter 285 Questions
+# Iter 286 Questions
 
-## Q1 — Join between Iceberg and Postgres is slow even though I thought Trino was doing some optimization
+## Q1 — Iceberg scan seems to ignore our Postgres join filter, is there a timeout somewhere?
 
-We have a query that joins a large Iceberg table to a Postgres lookup table. The Iceberg side has about 80 million rows and we're joining on a customer ID column that has maybe 2 million distinct values. I was told Trino does something called "dynamic filtering" where it reads the Postgres side first, builds a list of matching IDs, and then uses that list to skip a ton of Iceberg files it doesn't need to scan. That sounded great, but in practice the query still takes way longer than expected and seems to be scanning most of the Iceberg data anyway.
+We have a federated query where we join a big Iceberg event table (left side, around 200 million rows) against a Postgres customers table (right side, maybe 50k rows). The whole point is that Trino reads Postgres first, figures out which customer IDs are relevant, and then only scans the matching Iceberg files instead of everything. That part seems to work sometimes, but on days when Postgres is under load and responds slowly, the query just blows up and scans the full Iceberg table like it didn't even try to filter.
 
-Is there a point where the number of distinct join keys is so large that this optimization just stops working? Like, does Trino give up on building that filter list if it gets too big? And if so, is there anything I can tune to change that behavior, or do I need to rethink how the query is structured?
+My theory is that Trino gives up waiting for the Postgres side to finish and just starts scanning Iceberg anyway. Is that actually what's happening — like there's some timeout where Trino says "filter didn't arrive in time, I'll just scan everything"? If so, can I bump that timeout somewhere, either in a query hint or a session setting I can set per query? I'd rather not restart the coordinator just to test a config change.
 
-## Q2 — We want to cap how many Trino queries can hit our Postgres replica at the same time
+## Q2 — Does Trino push ILIKE down to Postgres or does it pull everything into memory?
 
-Our Postgres replica is getting hammered when multiple analysts run federated queries at the same time — each one opens connections to Postgres and the replica falls over. We basically need a way to say "no more than, say, 5 of these Trino-to-Postgres queries can run concurrently, and anything extra should just queue up instead of failing."
+We're building a search feature where users can search customer names case-insensitively — basically a LIKE but it shouldn't care whether the name is stored as "Acme Corp" or "acme corp." In Postgres directly I'd just use ILIKE and it works fine and uses the index.
 
-I've seen references to "resource groups" in the Trino docs but I don't understand how to tie a resource group specifically to queries that go to Postgres versus queries that are purely against Iceberg. Is there a way to tag a query or route it into a specific group based on what data source it's hitting? And once I set this up, does Trino pick it up automatically or do I have to restart something?
+Now we're routing that query through Trino because the rest of the query joins against Iceberg data. My concern is that Trino might not know how to push ILIKE down to Postgres — so instead of Postgres doing the filtering with its index, Trino pulls the entire customers table into memory and does the case-insensitive match itself. Is that what happens? Is there a way to tell Trino it's okay to push ILIKE down, or are we stuck doing a full table transfer every time someone searches?
