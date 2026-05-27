@@ -109,20 +109,25 @@ When the SaaS product needs WAU (weekly active users) or MAU (monthly active use
 ```sql
 -- Step 1: nightly job — one row per day, one HLL sketch column.
 -- approx_set(col) builds a HyperLogLog sketch (a fixed-size binary blob,
--- typically a few KB) instead of an integer count. Stored as Trino's
--- HyperLogLog type, which serializes to a varbinary column on disk.
-CREATE TABLE iceberg.analytics.daily_user_hll AS
-SELECT
+-- typically a few KB) instead of an integer count.
+-- IMPORTANT: cast to varbinary before storing in Iceberg. The Iceberg
+-- connector (Parquet under the hood) does not know about Trino's native
+-- HyperLogLog type, so you must serialize the sketch to binary first.
+-- The on-disk column type is varbinary.
+CREATE TABLE iceberg.analytics.daily_user_hll
+WITH (partitioning = ARRAY['event_date'])
+AS SELECT
     event_date,
-    approx_set(user_id) AS user_id_hll
+    CAST(approx_set(user_id) AS varbinary) AS user_id_hll
 FROM iceberg.analytics.events
 GROUP BY event_date;
 
 -- Step 2: rolling 7-day WAU without re-scanning raw events.
--- merge(hll) unions sketches; cardinality(hll) extracts the count.
+-- IMPORTANT: cast varbinary back to HyperLogLog before merge() —
+-- merge() and cardinality() do not accept varbinary directly.
 SELECT
     s1.event_date AS window_end,
-    cardinality(merge(s2.user_id_hll)) AS wau_7d
+    cardinality(merge(CAST(s2.user_id_hll AS HyperLogLog))) AS wau_7d
 FROM iceberg.analytics.daily_user_hll s1
 JOIN iceberg.analytics.daily_user_hll s2
   ON s2.event_date BETWEEN s1.event_date - INTERVAL '6' DAY
@@ -131,9 +136,11 @@ GROUP BY s1.event_date
 ORDER BY s1.event_date;
 ```
 
+**Why the casts are mandatory.** `HyperLogLog` is a Trino in-engine type — it has no native encoding in Parquet/ORC, and the Iceberg connector does not know how to persist it. The [official Trino docs](https://trino.io/docs/current/functions/hyperloglog.html) prescribe this exact round-trip pattern: serialize to `varbinary` on write (`CAST(approx_set(...) AS varbinary)`), deserialize on read (`CAST(... AS HyperLogLog)`) before passing to `merge()` or `cardinality()`. Forget the write-side cast and the CTAS errors with `Unsupported type: HyperLogLog`. Forget the read-side cast and the query errors with `Unexpected parameters (varbinary) for function merge`.
+
 Why this works (and why it's the standard pattern):
-- `approx_set(column)` — builds a HyperLogLog sketch for a column. Returns a `HyperLogLog` type value, not a `BIGINT`.
-- `merge(hll_column)` — aggregate function that unions multiple HLL sketches into one. Merging sketches and then taking cardinality gives the same answer (within HLL error) as running `approx_distinct` on the union of all underlying rows.
+- `approx_set(column)` — builds a HyperLogLog sketch for a column. Returns a `HyperLogLog` type value, not a `BIGINT`. Cast to `varbinary` to persist.
+- `merge(hll_column)` — aggregate function that unions multiple HLL sketches into one. Input must be `HyperLogLog`; if reading from a stored sketch table, cast `varbinary` -> `HyperLogLog` first. Merging sketches and then taking cardinality gives the same answer (within HLL error) as running `approx_distinct` on the union of all underlying rows.
 - `cardinality(hll)` — extracts the approximate distinct count from a sketch.
 
 You pay the sketch-building cost once per day (a single GROUP BY on the new partition). Every WAU/MAU/30D-active query after that reads at most 30 small rows from the sketch table and does a cheap merge — no scan of the 500M-row events table. This is the standard solution for rolling window cardinality in Trino, Snowflake, BigQuery, and DuckDB; they all expose the same three primitives.

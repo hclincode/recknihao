@@ -1,7 +1,7 @@
 {
-  "iteration": 303,
+  "iteration": 304,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter302 avg 4.875: Q1 (5.00) Denormalize plan_tier into events — star schema, SCD Type 2, broadcast join, no backfill on plan upgrade; Q2 (4.75) COUNT DISTINCT shuffle cost — accurate approx_distinct, rollup pattern, but 'single coordinator node' mechanism wrong. Resources 23/07 need COUNT DISTINCT mechanism fix + HLL sketch reuse pattern. Schema design: 4.60/5. SQL best practices: 4.636/12."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter303 avg 4.69: Q1 (4.625) HLL sketch WAU/MAU — approx_set/merge/cardinality pattern correct, but missing CAST(approx_set() AS varbinary) for Iceberg persistence; Q2 (4.75) Iceberg time-travel — all syntax verified, Trino 467 vs 469 rollback distinction correct. Resources 07/23 updated with varbinary cast. SQL best practices: 4.635/13. Iceberg maintenance: 4.643/19."
 }
