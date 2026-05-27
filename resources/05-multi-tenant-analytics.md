@@ -1230,7 +1230,7 @@ When you build dashboards or alerts on top of the OPA decision log (in OpenSearc
 
 ##### OPA operation names — audit-relevant subset
 
-The Trino OPA plugin sends a fixed set of operation strings in `input.action.operation`. The full set in Trino 467 is around 60 operation names (the complete list is in `OpaAccessControl.java` in the Trino source); the table below is the **audit-relevant subset** — the operations you actually filter on in security dashboards. For "did anyone change a catalog?" or "who SELECTed from this table?" alerts, these eight are the ones to know:
+The Trino OPA plugin sends a fixed set of operation strings in `input.action.operation`. The full set in Trino 467 is around 60 operation names (the complete list is in `OpaAccessControl.java` in the Trino source); the table below is the **audit-relevant subset** — the operations you actually filter on in security dashboards. For "did anyone change a catalog?" or "who SELECTed from this table?" alerts, these are the ones to know:
 
 | `input.action.operation` | What the user did in Trino |
 |---|---|
@@ -1242,8 +1242,12 @@ The Trino OPA plugin sends a fixed set of operation strings in `input.action.ope
 | `InsertIntoTable` | User ran `INSERT INTO` on a connector table |
 | `ExecuteQuery` | Query execution started (one entry per query — useful as a join key against the event listener) |
 | `ImpersonateUser` | User tried to impersonate another identity (e.g., via `SET SESSION AUTHORIZATION`) — high-signal for audit |
+| `SetSystemSessionProperty` | User ran `SET SESSION <property> = '...'` for a **system-level** session property (e.g., `query_max_execution_time`, `query_max_run_time`, `task_concurrency`). **This is the action to deny for non-admin principals to prevent bypassing per-tier time limits set by the session property manager.** System session properties are connector-independent and apply globally to the query. |
+| `SetCatalogSessionProperty` | User ran `SET SESSION <catalog>.<property> = '...'` for a **catalog-level** session property (e.g., `iceberg.split_size`, `hive.max_partitions_per_scan`). Catalog session properties are scoped to a specific connector/catalog. Use a separate OPA deny rule if you need to block these. |
 
-Operations NOT in this subset (e.g., `ShowSchemas`, `ShowTables`, `CreateView`, `DropView`, etc.) still produce decision-log entries — you can filter on them when you need to — but the eight above are the ones that matter most for routine security dashboards.
+> **Key distinction for tier enforcement:** `query_max_execution_time` is a **system-level** session property, so the OPA action is `SetSystemSessionProperty` — **not** a generic `SetSessionProperty` (which does not exist as an OPA operation). When a tenant runs `SET SESSION query_max_execution_time = '24h'`, Trino checks `SetSystemSessionProperty` in OPA. Deny this action for non-admin principals to prevent bypassing the per-tier time limits. See the Session Property Manager section below for the full enforcement pattern.
+
+Operations NOT in this subset (e.g., `ShowSchemas`, `ShowTables`, `CreateView`, `DropView`, etc.) still produce decision-log entries — you can filter on them when you need to — but the operations above are the ones that matter most for routine security dashboards and tier enforcement.
 
 #### Wiring it up — enable AND ship
 

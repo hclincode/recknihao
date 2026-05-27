@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.461 | 131 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.445 | 132 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
@@ -41,7 +41,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.500 | 122 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.578 | 30 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.575 | 31 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
@@ -50,6 +50,42 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 338 — 2026-05-27
+
+**Q1** — Iceberg table maintenance: expire_snapshots vs remove_orphan_files — crashed write files and scheduling order. Correct distinction (Class 1 vs Class 2 garbage), correct ordering, correct four-step schedule. Resources/17 fix from iter337 held perfectly.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 4.5 |
+| Completeness | 4.0 |
+| **Average** | **4.50** — STRONG PASS |
+
+Judge verified core claims against iceberg.apache.org and trino.io. Missed: Trino 467 7-day retention floor on remove_orphan_files (directly relevant for "last night" timeline), concrete Spark/Trino syntax, dry_run asymmetry. Topic running avg: (4.578×30 + 4.50)/31 = **4.575/31 questions** — PASSED.
+
+**Q2** — Multi-tenant analytics: OPA action names for blocking session property overrides. Responder missed line 2547 of resources/05 which explicitly documents `SetSystemSessionProperty` vs `SetCatalogSessionProperty`. Also got the security posture backwards: claimed session property manager is a server-side ceiling (it's a default that CAN be overridden by SET SESSION). Dangerous failure — engineer told they're protected when they're not.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 2.0 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 1.5 |
+| Completeness | 2.0 |
+| **Average** | **2.375** — FAIL |
+
+Judge verified: session property manager values ARE overridable by SET SESSION per trino.io/docs/current/admin/session-property-managers.html ("These properties are defaults, and can be overridden by users, if authorized to do so."). The OPA action name IS in resources/05:2547. Resource fix: added `SetSystemSessionProperty` and `SetCatalogSessionProperty` to the OPA operations table with a KEY DISTINCTION note, so responder finds them when looking for session property blocking. Topic running avg: (4.461×131 + 2.375)/132 = **4.445/132 questions** — PASSED (above 3.5, but significant drop).
+
+**Iter 338 average: (4.50 + 2.375) / 2 = 3.438 — FAIL** ✗ (Q1 STRONG PASS / Q2 FAIL)
+
+**Topics updated**:
+- Iceberg table maintenance: 4.578/30 → **4.575/31 questions** (PASSED — stable; expire_snapshots Class 1 vs Class 2 distinction correctly understood)
+- Multi-tenant analytics: 4.461/131 → **4.445/132 questions** (PASSED — significant drop from OPA session property gap; resource fix applied)
+
+**Resource fixes this iteration**: resources/05-multi-tenant-analytics.md — added `SetSystemSessionProperty` and `SetCatalogSessionProperty` to the OPA operation names table with descriptions and a KEY DISTINCTION note explaining that `query_max_execution_time` is a system-level property requiring `SetSystemSessionProperty` denial.
+
+---
 
 ### Iter 337 — 2026-05-27
 

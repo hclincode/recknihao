@@ -1,7 +1,7 @@
 {
-  "iteration": 338,
+  "iteration": 339,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter337 avg 4.25 — PASS. Q1 (4.125) PASS — expire_snapshots framing wrong (metadata-only claim); resources/17 fixed with CRITICAL DISTINCTION callout. Q2 (4.375) PASS — correct DELETE lifecycle, missed remove_orphan_files as 4th step and batching guidance. Iceberg maintenance: 4.578/30. Postgres-to-Iceberg: 4.500/122. Multi-tenant: 4.461/131."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter338 avg 3.438 — FAIL. Q1 (4.50) STRONG PASS — expire_snapshots vs remove_orphan_files correctly distinguished. Q2 (2.375) FAIL — responder missed SetSystemSessionProperty in resources/05:2547; also got security posture backwards (session property manager is a default, not a ceiling). Resource fix: added SetSystemSessionProperty/SetCatalogSessionProperty to OPA operations table. Multi-tenant: 4.445/132. Iceberg maintenance: 4.575/31."
 }
