@@ -1,16 +1,16 @@
-# Iter 312 Questions
+# Iter 313 Questions
 
 Date: 2026-05-27
-Topics: OPA row-filter alternative to per-tenant views at 200+ tenant scale (Q1) + pg_replication_slots safe_wal_size and restart_lsn vs confirmed_flush_lsn (Q2)
+Topics: OPA columnMask for per-column PII redaction (Q1) + Cost model for analytical workloads at SaaS scale (Q2)
 
-## Q1 — Multi-tenant row isolation at 200+ tenant scale
+## Q1 — Column-level redaction with OPA in Trino
 
-We're somewhere around 80 tenants right now and each one queries our Trino/Iceberg setup. Right now I have a separate view per tenant that filters down to their `tenant_id`, and OPA checks that you can only query your own view. Someone said that approach breaks down when we get to 200 or 500+ tenants. I sort of understand why — managing hundreds of view definitions sounds painful — but I'm not sure what the alternative looks like.
+We already have OPA set up for row-level filtering — each tenant only sees their own rows in our events table, and that's working well. Now I have a new problem: that events table has some columns that contain PII, things like the end user's email address or their name. We want to give our customers access to their analytics data, but we can not show them their users' raw email addresses on the dashboard.
 
-We have a single events table in Iceberg with a `tenant_id` column. At large tenant counts, is the view-per-tenant approach actually the problem, and if so what do people do instead? I've heard OPA can be configured to do something smarter but I don't understand what that means in practice.
+Right now I'm thinking about splitting the table — like having a "safe" version without the PII columns that we use for the public dashboard, and keeping the full table behind stricter access. But that means we're duplicating a lot of data and maintaining two copies. Is there a way to keep one table and just mask or blank out specific columns depending on who's querying — kind of like how OPA already controls which rows you see, but applied to specific columns instead?
 
-## Q2 — Postgres replication slot monitoring: which columns to actually watch
+## Q2 — Cost surprises as analytics scales
 
-We're running Debezium to stream our Postgres events table into Iceberg, and I'm trying to set up proper alerting on our replication slots so we never hit the situation where Postgres starts dropping WAL and the slot goes invalid.
+We're running our analytics queries against Postgres right now, and we're about to move to something like a data warehouse or lakehouse setup. I'm trying to build a rough cost model before we commit to anything, but I genuinely don't know what the billing surprises look like at our scale.
 
-I know `pg_replication_slots` has a `wal_status` column that can flip to `lost` — we want to alert before that happens. I've read that there's also some column that tells you directly how many bytes of headroom you have left before the slot is in danger. Is that real? And separately, I've seen references to two different LSN columns — `restart_lsn` and `confirmed_flush_lsn` — but I can't figure out which one I should use in my monitoring queries to actually measure how much WAL Postgres is holding onto for this slot. Can you walk me through what each of those columns means and which one matters for "are we about to lose this slot" monitoring?
+We have about 80 customers, roughly 500 million rows of event data, and queries run constantly throughout the day as customers load their dashboards. I've looked at Snowflake and BigQuery pricing pages and seen "per TB scanned" and "compute credits" — but I have no feel for what that actually translates to in dollars per month for a product like ours. Are there architectural decisions we could make early on that would dramatically reduce how much we get billed, or does the cost mainly just track with how much data and how many customers we have?

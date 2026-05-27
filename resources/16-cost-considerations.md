@@ -54,7 +54,7 @@ A rough industry number: 0.2 to 0.5 full-time-equivalent engineering year per 10
 - **Compaction:** merging many small Parquet files into fewer large (~128 MB) files. Adds compute cost but saves much more on query side.
 - **Snapshot expiry:** the Iceberg maintenance call (`expire_snapshots`) that physically deletes old data file versions that no live snapshot references.
 - **Rollup table:** a pre-aggregated, much smaller table (e.g., daily metrics) maintained by dbt or Spark so dashboards don't re-scan raw events on every load.
-- **Per-TB-scanned pricing:** the BigQuery model — you pay per terabyte of compressed data read by each query.
+- **Per-TB-scanned pricing:** the BigQuery on-demand model — you pay per terabyte of (uncompressed-equivalent) data read by each query. As of 2026 the on-demand rate is **~$6.25/TB scanned** (first 1 TB/month is free). BigQuery also offers **capacity-based pricing** (reserved "slots") as an alternative for high-volume workloads where flat-rate compute is cheaper than per-query.
 - **Warehouse credit:** Snowflake's billing unit. A "medium" warehouse burns ~2 credits per hour while running.
 
 ---
@@ -65,7 +65,7 @@ Scenario: **500 GB analytical data, 10 analysts, 50,000 queries/month, average 1
 
 | Option | Monthly cost (rough) | What you trade |
 |---|---|---|
-| **BigQuery** (per-TB-scanned) | ~$625/month query + ~$10/month storage. Math: 50% cache hit → 25,000 queries × 10 GB = 250 TB scanned × $2.50/TB = $625. | Zero ops. Pay per query — wild swings if someone runs `SELECT *`. Cloud-only (incompatible with your on-prem rule). |
+| **BigQuery** (per-TB-scanned, on-demand) | ~$1,560/month query + ~$10/month storage. Math: 50% cache hit → 25,000 queries × 10 GB = 250 TB scanned; first 1 TB/month is free, so 249 TB × ~$6.25/TB ≈ $1,556. | Zero ops. Pay per query — wild swings if someone runs `SELECT *`. **Capacity-based pricing (slots)** is an alternative for high-volume workloads: you reserve compute capacity for a flat monthly rate, which can be cheaper than on-demand once sustained scan volume gets large. Cloud-only (incompatible with your on-prem rule). |
 | **Snowflake** (warehouse credits) | ~$400/month. Math: medium warehouse at $2/credit, ~200 credits/month for this load. | Zero ops, but always-on warehouse can balloon if not auto-suspended. Cloud-only. |
 | **ClickHouse Cloud** | ~$50–$150/month for this volume. | Very cheap at small scale. Different query semantics from Trino. Cloud-only. |
 | **Self-hosted Iceberg + Trino (your stack)** | **Marginal query cost ≈ $0/month** (hardware paid). **Engineering cost: 0.2–0.5 FTE/year** = ~$3k–$8k/month fully loaded. | Full ops responsibility, but no per-query surprises and meets the on-prem requirement in `prod_info.md`. |

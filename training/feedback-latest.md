@@ -1,86 +1,92 @@
-# Judge Feedback — Iter 312
+# Judge Feedback — Iter 313
 
 Date: 2026-05-27
 Phase: extended
-Topics: OPA row-filter alternative to per-tenant views at 200+ tenant scale (Q1) + pg_replication_slots safe_wal_size and restart_lsn vs confirmed_flush_lsn (Q2)
+Topics: OPA columnMask for per-column PII redaction (Q1) + Cost model for analytical workloads at SaaS scale (Q2)
 
 ---
 
-## Q1 — OPA row-filter alternative to per-tenant views at 200+ tenant scale
+## Q1 — OPA columnMask for per-column PII redaction
 
 ### Score
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 4.5 | OPA row-filter mode is real and correctly described. `opa.policy.row-filters-uri` is the exact property name. Rego rule name `rowFilters` is correct. Minor imprecision: answer says OPA "intercepts the query and rewrites it" — technically Trino's planner injects the returned WHERE expression; OPA returns it. The endpoint path `/v1/data/trino/rowFilters` is plausible but exact data path depends on the policy package name. |
-| Beginner clarity | 4.5 | Plain-language opening, "ONE table + ONE policy" contrast, concrete WHERE clause injection example, clean threshold table. No unexplained jargon — even "Rego" is given context. |
-| Practical applicability | 4.0 | Threshold table (1–50/50–200/200+/500+) is actionable. Migration steps concrete (5-step parallel cutover with CI verification). Correctly defers OPA Rego syntax to external governance doc per prod_info.md. Weakness: principal-to-tenant mapping mentioned twice (JWT username vs OPA data bundle) but no guidance on which is preferred in their JWT-based auth stack. |
-| Completeness | 4.5 | Covers: why view-per-tenant breaks at scale, OPA row-filter mechanism, config property, thresholds, security verification (CI test), migration path with parallel run. Missing: columnMask as sibling OPA capability for column-level hiding; no Trino version note (row-filter mode requires Trino 438+); mapping strategy not chosen. |
+| Technical accuracy | 4.0 | Config property `batch-column-masking-uri` is the correct name. Batch response format (`viewExpression` vs `expression`) is correctly identified. Hashing syntax `to_hex(sha256(to_utf8(email)))` is valid Trino. Material error: answer configures `batch-column-masking-uri` but writes Rego using `columnMask contains` — the batch endpoint expects rule named `batchColumnMasks`, not `columnMask`. This is a silent-failure trap (no masking applied, no error raised). |
+| Beginner clarity | 4.5 | Clear framing ("you don't need to do it"), concrete before/after example of what user sees, no unexplained jargon, good "table stays singular" mental model. |
+| Practical applicability | 4.5 | Drop-in `etc/access-control.properties` snippet matches on-prem Trino+OPA stack. Test plan with EXPLAIN guidance is actionable. Defers user-specific role rules to external governance doc (correct scope discipline per prod_info.md). |
+| Completeness | 4.5 | Covers capability, config, Rego patterns, batch vs single endpoint, response-shape gotcha, testing, and table-duplication comparison. Composes with rowFilters correctly noted. Missing: Trino version note for column masking SPI; view-based fallback as alternative. |
 | **Average** | **4.375** | **PASS** |
 
 ### What Worked
-- Frames problem correctly: management overhead, not query performance — right reframing for a SaaS engineer
-- Concrete `opa.policy.row-filters-uri` property name matches official Trino docs
-- Threshold table with "stable schema vs schema-changing weekly" tiebreaker is practical, not arbitrary
-- Correctly defers specific Rego syntax to external governance document
-- Parallel-run migration with CI verification is a mature pattern avoiding hard cutover
-- Security CI test (`SELECT DISTINCT tenant_id FROM analytics.events`) is a one-liner the engineer can paste into a test
+- "You don't need to do it" opens immediately with the right answer
+- `batch-column-masking-uri` property name correct and reasoning (20 calls → 1) quantified
+- Response-shape warning (`viewExpression` vs `expression`) is the exact footgun a beginner would hit
+- `to_hex(sha256(to_utf8(email)))` verified as canonical Trino hashing chain
+- EXPLAIN debugging tip points to the right place
+- Composition with rowFilters explicitly noted — rows first, then column masks within surviving rows
 
 ### What Missed
-- **OPA does not "rewrite" SQL** — OPA returns a WHERE expression and Trino's planner injects it. An engineer debugging the system will find these filters in Trino's query plan, not in OPA logs.
-- No mention of `columnMask` as the sibling OPA capability for column-level masking (e.g., hiding PII columns for certain tenant principals)
-- No Trino version note: OPA row-filter mode was added in Trino 438; at Trino 467 this works, but worth knowing for engineers on older clusters
-- Mapping strategy not chosen: given the prod stack has a custom JWT authenticator, the JWT-claim approach is more idiomatic than a separate OPA data bundle — should recommend one
-- No concrete Rego example fragment (even a stub showing `input.action.resource.table.tableName → tenant_id = input.context.identity.user`) to help visualize
+- **CRITICAL: Rego rule name mismatch.** Answer configures batch endpoint but writes `columnMask contains {...}` Rego rule. Batch endpoint expects `batchColumnMasks` rule that iterates `input.action.filterResources` and emits `{"index": i, "viewExpression": {...}}`. Copying this Rego with the batch endpoint = silent failure, no masking.
+- No `input.action.filterResources` iteration shown — required for batch Rego
+- No Trino version note (column masking SPI added via PR #21997; batch column masking is even newer)
+- No view-based alternative as fallback for cases where OPA column masking is unsupported or overkill
 
 ### Technical Accuracy
-Verified against trino.io OPA access control docs:
-- `opa.policy.row-filters-uri` exact property name: confirmed
-- OPA returns `{"expression": "clause"}` objects which Trino ANDs into the query plan: confirmed
-- Rego rule name `rowFilters`: confirmed in official Trino OPA example
+Verified: `batch-column-masking-uri` property name confirmed; batch response format `[{"index": i, "viewExpression": {...}}]` confirmed; `batchColumnMasks` is the correct Rego rule name for the batch endpoint (NOT `columnMask`); `to_hex(sha256(to_utf8(email)))` valid Trino binary function chain. Sources: trino.io/docs/current/security/opa-access-control.html, Trino PR #21997.
 
 ### Rubric Update
-- Multi-tenant analytics: prior avg 4.471 across 111 questions → (4.471 × 111 + 4.375) / 112 = **4.470 across 112 questions**. Status: PASSED.
+- Multi-tenant analytics: prior avg 4.470 across 112 questions → (4.470 × 112 + 4.375) / 113 = **4.469 across 113 questions**. Status: PASSED.
 
 ---
 
-## Q2 — pg_replication_slots: safe_wal_size and restart_lsn vs confirmed_flush_lsn
+## Q2 — Cost model for analytical workloads at SaaS scale
 
 ### Score
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5.0 | `safe_wal_size` correctly identified as PG 13+, defined as bytes until slot is at risk. `restart_lsn` correctly framed as slot-survival anchor pinned by long-running transactions; `confirmed_flush_lsn` correctly as consumer-acknowledged position. NULL semantics (lost slot OR max_slot_wal_keep_size = -1) verified. Negative-value semantics correct. `wal_status` values match docs. `invalidation_reason` values wal_removed/wal_level_insufficient/rows_removed all confirmed (PG 16). Heartbeat root cause framing correct. Minor: PG 16+ also added `idle_timeout` as a fourth invalidation_reason value — not a scoring deduction as the three named cover all common Debezium scenarios. |
-| Beginner clarity | 5.0 | "Debezium's bookmark in Postgres's WAL" analogy is excellent. Explicitly explains why the two LSNs diverge with concrete consequence ("can underestimate the real risk by tens of gigabytes"). Each column in the monitoring query read in priority order with bolded headings. No assumed OLAP knowledge. |
-| Practical applicability | 5.0 | Drop-in monitoring SQL parameterized by slot_name. Concrete alert thresholds (50 GB warning / 10 GB critical) with specific actions. Includes max_slot_wal_keep_size safety-net config, recovery runbook, and heartbeat config block. Engineer can ship this today. |
-| Completeness | 5.0 | Answers Q1 (yes, safe_wal_size is real, PG 13+, direct headroom). Answers Q2 (use restart_lsn for slot-survival alerts; confirmed_flush_lsn only for consumer-lag dashboards). Goes beyond with inactive_since, invalidation_reason, recovery procedure, and heartbeats. No significant gaps. |
-| **Average** | **5.00** | **PASS** |
+| Technical accuracy | 3.5 | BigQuery pricing cited as "~$2.50/TB (after cache hits)" — actual 2026 on-demand rate is $6.25/TB, making the $625-$1,250/month estimate roughly half of what it should be. Parquet 5-10x compression defensible for categorical event data at the upper end. Snowflake medium warehouse $300-$600/month plausible for intermittent (auto-suspended) workloads. Partition spec and FTE estimates are sound. |
+| Beginner clarity | 5.0 | Zero assumed OLAP knowledge. Explains `expire_snapshots`, compaction, "per TB scanned" and "compute credits" in plain language. Three architectural decisions frame and rough cost table are excellent pedagogical structures. |
+| Practical applicability | 5.0 | Perfectly tailored to on-prem Trino+Iceberg+MinIO+k8s stack from prod_info.md. Mentions Hive Metastore HA, MinIO storage amortization, k8s vCPU chargeback math, Spark ingestion executors. Engineer knows exactly which knobs to turn. |
+| Completeness | 5.0 | Covers all four cost layers (storage, compute, engineering FTE), three architectural levers, rough cost table, and direct answer to "do architectural decisions reduce cost?" Missing: BigQuery free tier note; `bucket()` transform for future tenant growth; caveat that Snowflake $300-600/mo assumes auto-suspend. |
+| **Average** | **4.625** | **PASS** |
 
 ### What Worked
-- Directly corrected the iter311 critical miss: leads with "Yes, safe_wal_size is real" and gets the LSN choice unambiguously right
-- Long-running transaction explanation is the load-bearing insight that distinguishes the two LSNs — stated precisely with the failure mode named
-- Priority-ordered reading of monitoring query columns (1–6) gives operators a triage workflow, not just a column list
-- NULL and negative-value handling for safe_wal_size are both addressed — exactly the cases that bite in production
-- Heartbeat section ties slot behavior to the "quiet table" failure mode with a working JSON config
+- "Per-query marginal cost is zero, but costs hide elsewhere" is exactly the mental model OLTP-trained engineers need
+- Engineering FTE positioned as dominant cost line — the single most important insight for managed vs self-hosted comparison, often missed
+- Specific Iceberg maintenance operations named (`expire_snapshots`, `rewrite_data_files`) with weekly cadence
+- "Streaming is the #1 way to create millions of tiny files" — concrete, memorable warning mapping to a real Iceberg failure mode
+- Closing reframe: "architectural decisions don't make it cheap, they prevent it from becoming catastrophically expensive"
+- `day(occurred_at), tenant_id` partition spec correct for 80 tenants
 
 ### What Missed
-- PG 16+ added `idle_timeout` as a fourth `invalidation_reason` value (minor omission)
-- Recovery procedure doesn't note that the backfill gap must be scoped from `inactive_since`/last successful event time — readers might assume backfilling is automatic
+- **BigQuery pricing incorrect: $2.50/TB stated, actual $6.25/TB on-demand.** Makes the downstream $625-$1,250/month estimate roughly half of reality. Resources/16 fixed.
+- Snowflake $300-$600/month is plausible only for auto-suspended workloads — caveat not stated
+- No mention of BigQuery's free 1 TB/month tier or slots-based capacity pricing alternative
+- `bucket()` transform for tenant_id not mentioned as a future-proofing note for growth beyond 80 tenants
 
 ### Technical Accuracy
-All claims verified: postgresql.org/docs/current/view-pg-replication-slots.html, morling.dev restart_lsn vs confirmed_flush_lsn, EDB PG 13 slot safety blog, Debezium connector docs.
+- BigQuery: actual 2026 on-demand rate is ~$6.25/TB (not $2.50/TB). Source: cloud.google.com/bigquery/pricing
+- Snowflake: 4 credits/hour × $2-4/credit; $300-600/mo plausible only if auto-suspended. Source: docs.snowflake.com
+- Parquet Zstd compression: 5-10x defensible for event data with categorical columns + dictionary encoding. Source: community benchmarks
+- Partition spec: `day(occurred_at), tenant_id` sound for 80 tenants. Source: Starburst Iceberg partitioning best practices
 
 ### Rubric Update
-- Postgres-to-Iceberg ingestion: prior avg 4.481 across 106 questions → (4.481 × 106 + 5.00) / 107 = **4.486 across 107 questions**. Status: PASSED. This answer directly remediates the iter311 Q2 regression — resource fix demonstrated effective.
+- Cost considerations: prior avg 4.500 across 3 questions → (4.500 × 3 + 4.625) / 4 = **4.531 across 4 questions**. Status: PASSED.
 
 ---
 
-## Iter 312 Summary
+## Iter 313 Summary
 
-**Iter 312 average: 4.69 — PASS** ✓
+**Iter 313 average: 4.50 — PASS** ✓
 
-### Suggested focus for Iter 313
-- OPA clarification: "Trino injects the WHERE expression" (not OPA rewrites SQL) — Q1 accuracy nit that could confuse engineers debugging query plans
-- `columnMask` OPA rule for column-level masking — sibling to rowFilters, not yet tested
-- Replication slot gap-window scoping after recovery (from `inactive_since` to reconnection time) — completeness gap in Q2
-- Continue on any topic with score below 4.5 — try fresh angles on OLAP vs OLTP mindset, cost considerations, or Trino CBO topics
+### Resource fixes applied (iter313 teacher pass)
+- resources/05: explicit batchColumnMasks vs columnMask Rego rule name distinction; both endpoint patterns side-by-side with which Rego rule each requires; silent-failure trap warning
+- resources/16: BigQuery pricing corrected from ~$2.50/TB to ~$6.25/TB on-demand; downstream cost calculations updated
+
+### Suggested focus for Iter 314
+- batchColumnMasks Rego rule correctly — follow-up to verify resource fix landed (answer must now show correct iteration over `input.action.filterResources`)
+- Snowflake capacity (slots-based) pricing alternative vs on-demand — underrepresented angle on cost topic
+- Iceberg bucket() transform for high-cardinality tenant partition (complement to day/tenant_id)
+- Fresh angles on topics with the most room: OLAP vs OLTP mindset (4.542/3), storage sizing (4.500/3)

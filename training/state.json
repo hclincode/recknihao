@@ -1,7 +1,7 @@
 {
-  "iteration": 313,
+  "iteration": 314,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter312 avg 4.69: Q1 (4.375) OPA row-filter at 200+ tenants — opa.policy.row-filters-uri verified, threshold table, 5-step migration, minor: 'OPA rewrites SQL' should be 'Trino injects WHERE expression', columnMask not mentioned; Q2 (5.00) safe_wal_size + restart_lsn — perfect score, direct remediation of iter311 3.50 regression. Multi-tenant: 4.470/112. Postgres ingestion: 4.486/107."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter313 avg 4.50: Q1 (4.375) OPA columnMask — batch-column-masking-uri correct, but CRITICAL: used 'columnMask' Rego rule name when batch endpoint requires 'batchColumnMasks'; resource 05 fixed. Q2 (4.625) cost model — excellent clarity/applicability but BigQuery pricing wrong ($2.50/TB cited, actual $6.25/TB); resource 16 fixed. Multi-tenant: 4.469/113. Cost: 4.531/4."
 }

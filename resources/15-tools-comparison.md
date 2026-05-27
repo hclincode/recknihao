@@ -68,7 +68,7 @@ A common scenario: 1 TB of analytical data, 100 internal analysts, 10,000 querie
 
 | Tool | Rough monthly cost | Cost shape |
 |---|---|---|
-| BigQuery | ~$250 query + $23 storage | Per TB scanned; spiky |
+| BigQuery | ~$620 query + $23 storage (on-demand) | Per TB scanned at ~$6.25/TB; first 1 TB/month free; spiky. Capacity-based **slot** pricing is an alternative for high sustained scan volumes. |
 | Snowflake | ~$1,000 | Per second of warehouse uptime |
 | ClickHouse Cloud | $50–$200 | Per node-hour |
 | Self-hosted Iceberg + Trino | ~$0 marginal | You already paid for the hardware |

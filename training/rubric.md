@@ -30,10 +30,10 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.470 | 112 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.469 | 113 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.775 | 5 |
-| Cost considerations for analytical workloads at SaaS scale | PASSED | 4.50 | 3 |
+| Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
 | Query performance basics: partitioning, indexing strategy for analytics | PASSED | 4.675 | 5 |
 | Lakehouse schema design: fact tables, dimension tables, denormalization | PASSED | 4.650 | 5 |
 | Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.596 | 17 |
@@ -50,6 +50,44 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 313 — 2026-05-27
+
+**Q1** — OPA columnMask for per-column PII redaction: batch-column-masking-uri config, batchColumnMasks vs columnMask Rego rule names, batch response format (viewExpression), to_hex(sha256(to_utf8(email))) hashing, compose with rowFilters
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.5 |
+| Completeness | 4.5 |
+| **Average** | **4.375** — PASS |
+
+batch-column-masking-uri property name and response format (viewExpression) verified correct. Material error: answer used `columnMask` Rego rule name but batch endpoint expects `batchColumnMasks` rule that iterates input.action.filterResources — silent-failure trap. Resource 05 fixed with both patterns side-by-side. Topic running avg: (4.470×112 + 4.375)/113 = **4.469/113 questions** — PASSED.
+
+**Q2** — Cost model for analytical workloads at SaaS scale: storage (Parquet compression), compute (fixed cluster vs per-query cloud), engineering FTE as dominant cost, three architectural levers (partition spec, rollup tables, batch ingestion), rough cost table
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 3.5 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.625** — PASS |
+
+Pedagogically excellent but BigQuery pricing incorrect: stated $2.50/TB, actual $6.25/TB on-demand. Makes downstream $625-$1,250/month estimate roughly half of reality. Resource 16 fixed. FTE as dominant cost line, three architectural levers, and comparison table all excellent. Topic running avg: (4.500×3 + 4.625)/4 = **4.531/4 questions** — PASSED.
+
+**Iter 313 average: 4.50 — PASS** ✓
+
+**Topics updated**:
+- Multi-tenant analytics: 4.470/112 → **4.469/113 questions** (PASSED — stable)
+- Cost considerations: 4.500/3 → **4.531/4 questions** (PASSED — improving)
+
+**Resource fixes applied (iter313 teacher pass)**:
+- resources/05: batchColumnMasks vs columnMask Rego rule name distinction; both endpoint patterns side-by-side; silent-failure trap warning
+- resources/16: BigQuery pricing corrected from ~$2.50/TB to ~$6.25/TB on-demand; downstream cost calculations updated
+
+---
 
 ### Iter 312 — 2026-05-27
 

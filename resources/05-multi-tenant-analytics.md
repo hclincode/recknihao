@@ -634,19 +634,22 @@ The single most common on-call mistake is **conflating "OPA is down" with "runni
 
 ### OPA row-filter mode — automatic per-caller WHERE clause injection
 
-Most engineers' first mental model of OPA is "allow/deny": Trino asks OPA "can user X read table Y?" and OPA answers yes or no. That's correct but incomplete — OPA can do **more than allow/deny**. The Trino OPA plugin also supports **row-level filter injection**: a mode where OPA returns not just a boolean decision but a **WHERE clause fragment** that Trino automatically appends to the user's query. This is the direct answer to "automatically filter rows based on who's running the query, without requiring every query to include `WHERE tenant_id = ...`."
+Most engineers' first mental model of OPA is "allow/deny": Trino asks OPA "can user X read table Y?" and OPA answers yes or no. That's correct but incomplete — OPA can do **more than allow/deny**. The Trino OPA plugin also supports **row-level filter injection**: a mode where OPA returns a **policy decision containing a WHERE expression** (a JSON object with an `expression` field), and **Trino's planner** then injects that expression into the query plan as an additional filter predicate. This is the direct answer to "automatically filter rows based on who's running the query, without requiring every query to include `WHERE tenant_id = ...`."
 
-**How it works.** For tables configured under the row-filter policy, Trino sends OPA a context payload that includes the calling principal and the target table. OPA evaluates the Rego rule and returns a SQL expression like `tenant_id = 'acme'`. Trino's analyzer then rewrites the query as if the user had typed:
+**How it works — and which component does which step.** For tables configured under the row-filter policy, Trino sends OPA a context payload that includes the calling principal and the target table. OPA evaluates the `rowFilters` Rego rule and **returns a JSON policy decision** of the form `{"rowFilters": [{"expression": "tenant_id = 'acme'"}]}` — that is, OPA's only output is the policy decision; **OPA itself does not see, parse, or rewrite the user's SQL**. Trino's planner is the component that takes that returned expression string and **injects it into the query plan as a filter predicate** above the table scan, equivalent to the user having written:
 
 ```sql
 -- User typed this:
 SELECT * FROM analytics.events;
 
--- Trino actually executes this (OPA-injected predicate in bold):
+-- The query plan Trino builds and executes has an injected filter predicate
+-- (logically equivalent to, though NOT a SQL-text rewrite of):
 SELECT * FROM analytics.events WHERE tenant_id = 'acme';
 ```
 
-The injection happens transparently at query analysis time — the application sends a bare `SELECT *`, OPA injects the predicate, and only the caller's tenant rows ever leave the engine. No WHERE clause in the SQL the app submits. No per-tenant view to maintain. No risk of a forgotten filter leaking everything.
+The injection happens transparently at query planning time inside Trino — the application sends a bare `SELECT *`, OPA returns the WHERE expression as a policy decision, Trino's planner adds it as a filter node in the plan, and only the caller's tenant rows ever leave the engine. No WHERE clause in the SQL the app submits. No per-tenant view to maintain. No risk of a forgotten filter leaking everything.
+
+> **Debugging note — where to look for an injected filter.** Because OPA only returns a policy decision and Trino is the one that applies it to the plan, an OPA-injected row filter is visible in **Trino's `EXPLAIN` / `EXPLAIN ANALYZE` output as a `Filter` node above the table scan** (you will see the predicate text like `tenant_id = 'acme'` in the plan), and also in Trino's `system.runtime.queries` history. It is **NOT** visible as a SQL rewrite in any log of the original query text — the original `SELECT *` is what gets logged on the client and event-listener side; the injected predicate lives in the plan, not in the SQL string. OPA's decision logs, separately, show the JSON response (`{"rowFilters": [{"expression": "..."}]}`) — but they don't show "Trino rewrote the query," because Trino didn't rewrite the SQL; it built a plan with an extra filter node. When debugging "why is this tenant seeing wrong rows?", **run `EXPLAIN <query>` as that tenant principal first** to confirm the filter node is present and the predicate is correct; only fall back to OPA decision logs if the filter is missing or the expression is wrong.
 
 **Conceptual Rego shape (pseudocode — DO NOT copy as actual policy).** The Rego rule shape, in plain English: "for table `analytics.events`, derive `tenant` from `input.context.identity.user` (via username encoding or an OPA data bundle lookup — see Patterns 1 and 2 in the callout below) and return the filter expression `tenant_id = '<tenant>'`." Note that the derivation reads only `input.context.identity.user` and possibly `data.tenant_map` — **never `input.context.identity.claims`, because that field does not exist on Trino 467's OPA integration**. The real Rego (including the exact `rowFilters` response shape the Trino OPA plugin expects, the principal-to-tenant mapping, and how to handle admin principals who should NOT have a filter applied) lives in your external governance document — per `prod_info.md`, do not hand-craft Rego in this guide.
 
@@ -738,7 +741,7 @@ The injection happens transparently at query analysis time — the application s
 | Mode | What OPA returns | What Trino does | When to use |
 |---|---|---|---|
 | **Allow/deny** | `{"allow": true}` or `{"allow": false}` | Lets the query proceed unchanged, or rejects with `Access Denied` | Block tenants from `system` catalog, deny base-table access entirely, gate admin-only tables |
-| **Row filter** | `{"rowFilters": [{"expression": "tenant_id = 'acme'"}]}` | Appends the expression as a `WHERE` predicate before execution | Multi-tenant fact tables where every tenant queries the same physical table and you want OPA to enforce the per-tenant filter automatically |
+| **Row filter** | `{"rowFilters": [{"expression": "tenant_id = 'acme'"}]}` | Trino's planner reads the returned `expression` and injects it into the query plan as a filter predicate above the table scan (visible in `EXPLAIN`). OPA does not rewrite SQL; it returns the policy decision and Trino applies it. | Multi-tenant fact tables where every tenant queries the same physical table and you want OPA to enforce the per-tenant filter automatically |
 
 The two modes **compose**, and you usually want both in the same policy:
 - Allow/deny first guards what tables a tenant can mention at all (denies `system`, denies `$`-suffix metadata tables, denies cross-tenant admin views).
@@ -758,6 +761,8 @@ The two modes **compose**, and you usually want both in the same policy:
 > The 200-tenant threshold is a rule of thumb, not a hard line — if your tenant churn is high (50+ tenant adds/removals per week), you may want OPA row filters earlier; if your tenant count is stable and growing slowly, per-tenant views can stretch further. The migration is non-trivial (you must rewrite the policy, get CI passing for every tenant under the new model, and run both patterns in parallel during cutover) — plan for it before you cross the threshold, don't react after.
 
 **Verification recipe.** As a tenant principal, run `SELECT DISTINCT tenant_id FROM analytics.events` — it must return exactly one row (their own tenant). As an admin principal (whose OPA policy carves out the row-filter rule), the same query must return all tenant IDs. Add both as CI tests. If a tenant principal ever sees more than one `tenant_id`, the row-filter Rego is misconfigured — treat as a P0 cross-tenant data leak.
+
+> **Sibling capability — `columnMask` is to columns what `rowFilters` is to rows.** The Trino OPA plugin exposes a second policy-decision rule alongside `rowFilters`, named **`columnMask`** (analogous in shape and lifecycle). Where `rowFilters` controls **which rows** a tenant sees, `columnMask` controls **which column values** a tenant sees within rows they're already allowed to see. The Rego rule returns a **SQL expression that Trino's planner substitutes for the original column reference** in the plan — for example, returning the literal `'***@***.***'` replaces the `user_email` column with that masked string in the query output, or returning `REGEXP_REPLACE(user_email, '@.*', '@redacted.com')` keeps the local part but masks the domain. **Use case: partial column exposure** — the caller is allowed to see the row (it survived the `rowFilters` predicate) but should NOT see every field at full fidelity. Common patterns: an internal analytics user gets the email domain (for cohort analysis) but not the local part; a tenant's own users see usage rows that include their own emails but masked emails for other users in the same tenant; a support agent sees the row's existence and event type but a `[REDACTED]` literal in place of free-text content. The two capabilities compose — `rowFilters` first decides which rows survive, then `columnMask` rewrites individual column values in those surviving rows. The deeper mechanics (single-column vs. batch endpoint, wiring, anti-patterns) are in the next section.
 
 ### OPA column-masking mode — per-caller column rewriting
 
@@ -782,23 +787,80 @@ opa.policy.batch-column-masking-uri=http://opa:8181/v1/data/trino/batchColumnMas
 >
 > **How the two URIs interact — `batch-column-masking-uri` COMPLEMENTS (does NOT replace) `column-masking-uri`.** Like the broader `opa.policy.batched-uri` / `opa.policy.uri` pairing, the column-masking pair is **additive**: `column-masking-uri` remains the always-available baseline, and `batch-column-masking-uri` is the **opt-in performance optimization** for tables with many columns. When `batch-column-masking-uri` is configured, Trino prefers it for per-table column-masking calls; when it is not configured, Trino falls back to one call per column to `column-masking-uri`. Both URIs should be configured in production. **Correct deployment pattern**: implement the batch handler in your Rego policy AND keep the single-column handler available; configure both URIs. The batch handler in Rego is a small wrapper around the per-column rule (it iterates the input column list using `some i ... input.action.filterResources[i]` — the same `filterResources` family pattern as the broader batched-uri — and emits an array of `{index, viewExpression}` entries), so the migration is mechanical.
 
-**Rego response shape — DIFFERENT for single-column vs. batch endpoints.**
+**Rego rule name AND response shape — BOTH differ between the two endpoints.**
 
-> **ANTI-PATTERN WARNING — the single-column and batch endpoints return DIFFERENT JSON shapes.** Using the single-column shape in a batch Rego rule (or vice versa) produces a policy-eval error or silently returns no mask.
+> **ANTI-PATTERN WARNING — the single-column and batch endpoints require DIFFERENT Rego rule names AND return DIFFERENT JSON shapes.** Mixing the endpoint with the wrong Rego rule name is a **silent-failure trap — no masking is applied and no error is raised.** Trino simply doesn't find a decision document at the URI path it called, treats that as "no mask," and returns the **raw column value** to the analyst. This is the worst possible failure mode for a PII-masking feature: it fails open, and you only discover it during a security audit. The exact same trap applies to the response shape (`expression` vs. `viewExpression`) — using the wrong key produces a policy-eval miss that Trino interprets as "no mask configured."
 
-- **Single-column endpoint** (`column-masking-uri`): OPA returns one object per HTTP call:
+**Side-by-side — the two patterns and what each requires:**
+
+**Pattern A — Single-column endpoint (one OPA HTTP call per column):**
+
+```properties
+opa.policy.column-masking-uri=http://opa:8181/v1/data/trino/columnMask
+```
+
+- **Rego rule name: `columnMask`** (the path component after `/v1/data/trino/` must match this exactly)
+- **Response shape:** OPA returns a single object per HTTP call:
   ```json
   {"expression": "to_hex(sha256(to_utf8(email)))"}
   ```
+- **Rego sketch:**
+  ```rego
+  package trino
 
-- **Batch endpoint** (`batch-column-masking-uri`): OPA receives all columns in one request and must return an array, one entry per input column, in this shape:
+  columnMask := {"expression": "to_hex(sha256(to_utf8(email)))"} if {
+      input.action.resource.column.columnName == "email"
+      not "pii-cleared" in input.context.identity.groups
+  }
+  ```
+- **Cost:** one HTTP round-trip per column referenced in the query. A 40-column SELECT triggers ~40 sequential OPA calls before planning starts.
+
+**Pattern B — Batch endpoint (one OPA HTTP call per table, all columns at once):**
+
+```properties
+opa.policy.batch-column-masking-uri=http://opa:8181/v1/data/trino/batchColumnMask
+```
+
+- **Rego rule name: `batchColumnMasks`** (note the plural `Masks` — the URI path `batchColumnMask` and the Rego rule `batchColumnMasks` are intentionally different strings; this trips people up constantly)
+- **Response shape:** OPA receives all columns for a table in one request via `input.action.filterResources` and **must iterate that array** to return one entry per column, in this shape:
   ```json
   [
     {"index": 0, "viewExpression": {"expression": "to_hex(sha256(to_utf8(email)))"}},
     {"index": 1, "viewExpression": {"expression": "'****'"}}
   ]
   ```
-  Note: the outer key is `viewExpression`, NOT `expression`. A Rego rule that returns `{"expression": "..."}` at the batch endpoint fails.
+  Note: the outer key inside each array entry is `viewExpression`, NOT `expression`. The `viewExpression` value itself is an object containing `expression`. A Rego rule that returns `{"expression": "..."}` directly at the batch endpoint fails (silent miss → raw column returned).
+- **Rego sketch — MUST iterate `input.action.filterResources`:**
+  ```rego
+  package trino
+
+  import future.keywords.contains
+  import future.keywords.if
+
+  # One entry per masked column; iterate the candidates Trino sent.
+  batchColumnMasks contains {"index": i, "viewExpression": {"expression": expr}} if {
+      some i
+      resource := input.action.filterResources[i]
+      resource.column.columnName == "email"
+      not "pii-cleared" in input.context.identity.groups
+      expr := "to_hex(sha256(to_utf8(email)))"
+  }
+  ```
+  Columns whose index does not appear in the returned array are left unmasked (raw value passes through) — only emit entries for columns you actively want to mask.
+- **Cost:** one HTTP round-trip per table referenced in the query, regardless of column count. A 40-column SELECT triggers 1 OPA call instead of 40.
+
+**Recommendation: configure the batch endpoint for any table with more than a handful of columns.** On a busy cluster, switching a 40-column users table from Pattern A to Pattern B cuts 40 sequential OPA round-trips down to 1 per query — easily a 20x+ reduction in OPA-side latency for column-masking work. Both URIs should still be configured (Pattern A remains the always-available fallback for tables where the batch handler isn't implemented), but for any wide table, write the `batchColumnMasks` rule and let Trino use the batch path.
+
+**The silent-failure trap, stated explicitly:**
+
+| Endpoint configured | Rego rule you wrote | Outcome |
+|---|---|---|
+| `column-masking-uri` (Pattern A) | `columnMask` | Correct — single-column masking works |
+| `column-masking-uri` (Pattern A) | `batchColumnMasks` | **Silent failure — raw column returned, no error** |
+| `batch-column-masking-uri` (Pattern B) | `batchColumnMasks` | Correct — batch masking works |
+| `batch-column-masking-uri` (Pattern B) | `columnMask` | **Silent failure — raw column returned, no error** |
+
+To detect this in CI before it ships: write an integration test that runs `SELECT email FROM analytics.users` as a non-cleared principal and asserts the returned value is the masked form. If it's the raw email, the wrong rule name is wired up.
 
 When the analyst runs `SELECT email FROM analytics.users`, Trino rewrites it to (for the hash-mask case) `SELECT to_hex(sha256(to_utf8(email))) AS email FROM analytics.users`.
 
