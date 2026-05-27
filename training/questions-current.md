@@ -1,9 +1,9 @@
-# Iter 280 Questions
+# Iter 281 Questions
 
-## Q1 — Strange Trino errors after adding a jsonb column to Postgres
+## Q1 — Postgres schema cache flush after adding a column
 
-We have a `users` table in Postgres with a `preferences` column that's of type `jsonb`. When I try to query that table through Trino, the query errors out or sometimes that column just silently doesn't show up in the results. I'm not even sure if Trino supports jsonb — it's not a standard SQL type. Is there a way to make this work, or do we need to change how we store that data? And if some column types just aren't supported, how would I even know which ones are being dropped versus which ones cause an outright error?
+We added a new column to one of our PostgreSQL tables this morning, and now Trino can't see it — the column just doesn't show up when I run `DESCRIBE` against that table through Trino. A teammate told me Trino caches metadata and I need to flush it. I found a reference to a procedure called `flush_metadata_cache` but I'm not sure of the exact syntax to call it, especially whether I need to pass in the schema name or table name so it only clears the cache for that one table and doesn't blow away everything. Can you show me the exact SQL call to use for our PostgreSQL connector catalog (let's call it `app_pg`)? And is there a way to set the cache TTL so this expires automatically next time without manual intervention?
 
-## Q2 — Trino not seeing a new column we added to Postgres
+## Q2 — Querying across per-tenant Postgres schemas in one shot
 
-We added a column to one of our Postgres tables with `ALTER TABLE ... ADD COLUMN` and deployed it. Our app can read and write to it fine through the normal Postgres connection, but when we query the same table through Trino, the column doesn't exist — Trino just says it's not there or returns without it. We restarted nothing on the Trino side. Is Trino caching the table structure somewhere? If so, is there a way to force it to refresh without restarting the whole cluster?
+We built our app with one PostgreSQL schema per customer — so we have `tenant_1.orders`, `tenant_2.orders`, `tenant_3.orders`, and so on, and we're adding new tenants regularly. Now we want to build a cross-tenant analytics view in Trino so our ops team can see aggregate metrics across all customers without running a separate query per tenant. My first instinct was to write a Trino query that somehow loops over all schemas dynamically, but I'm not sure if that's even possible. Is there a pattern for federating across dozens of schemas that share the same table structure, and how do we handle new tenants being added without rewriting the query every time?

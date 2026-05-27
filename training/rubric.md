@@ -43,7 +43,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.474 | 99 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.623 | 16 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
-| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.490 | 235 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.493 | 237 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.763 | 4 |
 
 ---
@@ -9718,3 +9718,33 @@ Dimension scores: Technical accuracy 4/5, Beginner clarity 5/5, Completeness 5/5
 **Key findings**: flush_metadata_cache() existence for PostgreSQL connector — correct; metadata.cache-ttl default=0s — correct; SELECT* view freeze problem — correct; Iceberg contrast (no flush for Iceberg) — correct. Error: included `schema_name => ..., table_name => ...` named parameters in the PostgreSQL flush call — those parameters exist for Delta Lake/Hive connectors but NOT for the JDBC-based PostgreSQL connector. PostgreSQL flush is parameterless: `CALL app_pg.system.flush_metadata_cache();`. Engineer following the scoped example would hit an argument error.
 
 Verified: trino.io/docs/current/connector/postgresql.html, trino.io/docs/current/connector/delta-lake.html.
+
+---
+
+## Iter 281 — 2026-05-27
+
+**Q1**: Postgres schema cache flush re-test — flush_metadata_cache() parameterless for PostgreSQL connector, WRONG example contrast (Delta/Hive), metadata.cache-ttl default 0s, coordinator scope, SELECT* freeze
+**Answer**: `/Users/hclin/github/recknihao/training/answers/iter281-q1.md`
+**Score**: 4.83 / 5.0 — **PASS**
+
+Dimension scores: Technical accuracy 5/5, Beginner clarity 4.5/5, Completeness 5/5, Actionability 4.75/5.
+
+**Topics updated**: Trino federation — prior avg 4.490 across 235 questions; new running avg (4.490 × 235 + 4.83) / 236 = (1055.15 + 4.83) / 236 = **4.491 across 236 questions**. Status: NEEDS WORK (4.491 < 4.5 raised threshold). Gap: 0.009 (improved from 0.010).
+
+**Key findings**: flush_metadata_cache() parameterless for PostgreSQL — verified; WRONG vs CORRECT contrast labeled correctly; schema_name/table_name only for Hive/Delta — verified; metadata.cache-ttl default 0s — verified; restart required for TTL change — verified; coordinator-only scope with HA caveat — correct. Bonus: finer-grained metadata.tables.cache-ttl and metadata.statistics.cache-ttl properties; SELECT* freeze problem. Strong improvement from iter280 Q2 (4.30 FAIL) to here (4.83 PASS) after resource fix.
+
+Verified: trino.io/docs/current/connector/postgresql.html, trino.io/docs/current/admin/properties-catalog.html.
+
+---
+
+**Q2**: Multi-tenant cross-schema Postgres federation — static schema limitation, UNION ALL generator, system.query() discovery, Iceberg bucket(tenant_id, N) for scale, tradeoffs
+**Answer**: `/Users/hclin/github/recknihao/training/answers/iter281-q2.md`
+**Score**: 4.79 / 5.0 — **PASS**
+
+Dimension scores: Technical accuracy 5/5, Beginner clarity 4.5/5, Completeness 5/5, Actionability 4.5/5.
+
+**Topics updated**: Trino federation — prior avg 4.491 across 236 questions; new running avg (4.491 × 236 + 4.79) / 237 = (1059.876 + 4.79) / 237 = **4.493 across 237 questions**. Status: NEEDS WORK (4.493 < 4.5 raised threshold). Gap: 0.007 (improved from 0.009).
+
+**Key findings**: Static schema limitation correctly explained — correct; UNION ALL generator with Python example — correct; system.query() with query=> named param and '' escaping — verified; Iceberg bucket(column, N) valid syntax — verified; identity partition metadata explosion risk vs bucket transform — verified. Tradeoffs table (effort/scalability/maintenance/freshness) — excellent structure. Minor gap: Python client library not named.
+
+Verified: trino.io/docs/current/connector/postgresql.html, trino.io/docs/current/connector/iceberg.html, iceberg.apache.org/spec.

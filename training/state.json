@@ -1,7 +1,7 @@
 {
-  "iteration": 281,
+  "iteration": 282,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter280 avg 4.625: Q1 (4.95 PASS) Postgres type mapping — near-perfect; jsonb→JSON, IGNORE/CONVERT_TO_VARCHAR, array-mapping. Q2 (4.30 FAIL) flush_metadata_cache() — wrong: included schema_name/table_name params (only for Hive/Delta, NOT for JDBC/PostgreSQL connector). PostgreSQL flush is parameterless. Resource fixed by teacher281. TOPIC: Trino federation 4.490/235, gap 0.010. Need ~5 more at 4.875+ to cross 4.500."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter281 avg 4.81: Q1 (4.83 PASS) flush_metadata_cache() parameterless for PostgreSQL — resource fix validated; correct WRONG/CORRECT contrast; metadata.cache-ttl=0s default. Q2 (4.79 PASS) multi-tenant cross-schema — UNION ALL generator, system.query() discovery, Iceberg bucket(tenant_id, N). TOPIC: Trino federation 4.493/237, gap 0.007. Need ~4 more at 4.875+ to cross 4.500."
 }
