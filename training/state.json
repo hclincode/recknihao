@@ -1,7 +1,7 @@
 {
-  "iteration": 314,
+  "iteration": 315,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter313 avg 4.50: Q1 (4.375) OPA columnMask — batch-column-masking-uri correct, but CRITICAL: used 'columnMask' Rego rule name when batch endpoint requires 'batchColumnMasks'; resource 05 fixed. Q2 (4.625) cost model — excellent clarity/applicability but BigQuery pricing wrong ($2.50/TB cited, actual $6.25/TB); resource 16 fixed. Multi-tenant: 4.469/113. Cost: 4.531/4."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter314 avg 4.94 (best this session): Q1 (5.00) OLAP vs OLTP — perfect score, row-vs-column storage, tuning ladder, stack-aware migration path; Q2 (4.875) batchColumnMasks vs columnMask — iter313 resource fix confirmed landed, silent failure explained, four-way truth table. OLAP vs OLTP: 4.657/4. Multi-tenant: 4.473/114."
 }

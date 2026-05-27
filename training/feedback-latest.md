@@ -1,92 +1,91 @@
-# Judge Feedback — Iter 313
+# Judge Feedback — Iter 314
 
 Date: 2026-05-27
 Phase: extended
-Topics: OPA columnMask for per-column PII redaction (Q1) + Cost model for analytical workloads at SaaS scale (Q2)
+Topics: OLAP vs OLTP — do we actually need a separate analytics stack? (Q1) + OPA column masking silent failure — batchColumnMasks vs columnMask (Q2)
 
 ---
 
-## Q1 — OPA columnMask for per-column PII redaction
+## Q1 — OLAP vs OLTP — do we actually need a separate analytics stack?
 
 ### Score
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 4.0 | Config property `batch-column-masking-uri` is the correct name. Batch response format (`viewExpression` vs `expression`) is correctly identified. Hashing syntax `to_hex(sha256(to_utf8(email)))` is valid Trino. Material error: answer configures `batch-column-masking-uri` but writes Rego using `columnMask contains` — the batch endpoint expects rule named `batchColumnMasks`, not `columnMask`. This is a silent-failure trap (no masking applied, no error raised). |
-| Beginner clarity | 4.5 | Clear framing ("you don't need to do it"), concrete before/after example of what user sees, no unexplained jargon, good "table stays singular" mental model. |
-| Practical applicability | 4.5 | Drop-in `etc/access-control.properties` snippet matches on-prem Trino+OPA stack. Test plan with EXPLAIN guidance is actionable. Defers user-specific role rules to external governance doc (correct scope discipline per prod_info.md). |
-| Completeness | 4.5 | Covers capability, config, Rego patterns, batch vs single endpoint, response-shape gotcha, testing, and table-duplication comparison. Composes with rowFilters correctly noted. Missing: Trino version note for column masking SPI; view-based fallback as alternative. |
-| **Average** | **4.375** | **PASS** |
+| Technical accuracy | 5.0 | Row-vs-column storage characterization correct. Columnar 10–50x byte reduction realistic and supported. Tuning ladder (read replica, partial indexes, materialized views, partitioning, EXPLAIN ANALYZE) accurate and correctly ordered by risk/effort. Migration path (Spark JDBC → Parquet/MinIO → Iceberg/HMS → Trino) matches prod stack exactly. |
+| Beginner clarity | 5.0 | Opens with "one row vs millions of rows" before any jargon. Concrete 30-column/2-needed worked example makes columnar advantage tangible. No unexplained acronyms. "The Real Distinction" closing reframes without restating. |
+| Practical applicability | 5.0 | Direct decision tree: 5-step Postgres ladder first, then four concrete thresholds (50M rows, >2s after tuning, >3 users, multi-source joins), then 5-step migration recipe naming the engineer's actual stack components. Closing "next step" is unambiguous. |
+| Completeness | 5.0 | Covers all four sub-questions asked: (1) is the distinction real, (2) what is fundamentally different, (3) can Postgres be tuned further, (4) when does tuning stop working. Adds migration path. Nothing material missing. |
+| **Average** | **5.00** | **PASS** |
 
 ### What Worked
-- "You don't need to do it" opens immediately with the right answer
-- `batch-column-masking-uri` property name correct and reasoning (20 calls → 1) quantified
-- Response-shape warning (`viewExpression` vs `expression`) is the exact footgun a beginner would hit
-- `to_hex(sha256(to_utf8(email)))` verified as canonical Trino hashing chain
-- EXPLAIN debugging tip points to the right place
-- Composition with rowFilters explicitly noted — rows first, then column masks within surviving rows
+- "Row-at-a-time vs millions-at-once" nails the conceptual answer without storage-internals jargon
+- 30-column/2-needed worked example makes the columnar advantage tangible — far better than abstract "I/O reduction"
+- Tuning ladder ordered by risk/effort: read replica (zero risk) → partial index → matview → partitioning → EXPLAIN ANALYZE
+- Concrete numeric thresholds (50M rows, >2s, >3 users) prevent the "it depends" non-answer
+- Stack-aware migration path names MinIO, Iceberg, Hive Metastore, Trino, and Spark — not generic "use a data warehouse"
+- Closes with one specific next action, not a generic recap
 
-### What Missed
-- **CRITICAL: Rego rule name mismatch.** Answer configures batch endpoint but writes `columnMask contains {...}` Rego rule. Batch endpoint expects `batchColumnMasks` rule that iterates `input.action.filterResources` and emits `{"index": i, "viewExpression": {...}}`. Copying this Rego with the batch endpoint = silent failure, no masking.
-- No `input.action.filterResources` iteration shown — required for batch Rego
-- No Trino version note (column masking SPI added via PR #21997; batch column masking is even newer)
-- No view-based alternative as fallback for cases where OPA column masking is unsupported or overkill
+### What Missed (minor observations only)
+- Could briefly note that matviews cost write amplification at refresh time and don't fix ad-hoc queries (answer covers this in spirit)
+- "Spark writes Parquet to MinIO then register" slightly under-describes: in production, Spark with Iceberg writer commits Parquet + Iceberg metadata atomically in one step
+- 10–50x byte reduction is realistic but conservative — for very wide tables can exceed 100x
 
 ### Technical Accuracy
-Verified: `batch-column-masking-uri` property name confirmed; batch response format `[{"index": i, "viewExpression": {...}}]` confirmed; `batchColumnMasks` is the correct Rego rule name for the batch endpoint (NOT `columnMask`); `to_hex(sha256(to_utf8(email)))` valid Trino binary function chain. Sources: trino.io/docs/current/security/opa-access-control.html, Trino PR #21997.
+All claims verified: row-vs-columnar storage characterization; PostgreSQL streaming replication for OLAP/OLTP separation; REFRESH MATERIALIZED VIEW syntax; Trino Iceberg connector projection pushdown and partition pruning. Stack matches prod_info.md exactly.
 
 ### Rubric Update
-- Multi-tenant analytics: prior avg 4.470 across 112 questions → (4.470 × 112 + 4.375) / 113 = **4.469 across 113 questions**. Status: PASSED.
+- OLAP vs OLTP: prior avg 4.542 across 3 questions → (4.542 × 3 + 5.00) / 4 = **4.657 across 4 questions**. Status: PASSED (improving).
+- Also touched tangentially: "When to add OLAP" (tuning ladder + thresholds) and "OLTP-to-OLAP mindset" (design problem not config problem framing) — both benefit from this coverage.
 
 ---
 
-## Q2 — Cost model for analytical workloads at SaaS scale
+## Q2 — OPA column masking silent failure — batchColumnMasks vs columnMask
 
 ### Score
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 3.5 | BigQuery pricing cited as "~$2.50/TB (after cache hits)" — actual 2026 on-demand rate is $6.25/TB, making the $625-$1,250/month estimate roughly half of what it should be. Parquet 5-10x compression defensible for categorical event data at the upper end. Snowflake medium warehouse $300-$600/month plausible for intermittent (auto-suspended) workloads. Partition spec and FTE estimates are sound. |
-| Beginner clarity | 5.0 | Zero assumed OLAP knowledge. Explains `expire_snapshots`, compaction, "per TB scanned" and "compute credits" in plain language. Three architectural decisions frame and rough cost table are excellent pedagogical structures. |
-| Practical applicability | 5.0 | Perfectly tailored to on-prem Trino+Iceberg+MinIO+k8s stack from prod_info.md. Mentions Hive Metastore HA, MinIO storage amortization, k8s vCPU chargeback math, Spark ingestion executors. Engineer knows exactly which knobs to turn. |
-| Completeness | 5.0 | Covers all four cost layers (storage, compute, engineering FTE), three architectural levers, rough cost table, and direct answer to "do architectural decisions reduce cost?" Missing: BigQuery free tier note; `bucket()` transform for future tenant growth; caveat that Snowflake $300-600/mo assumes auto-suspend. |
-| **Average** | **4.625** | **PASS** |
+| Technical accuracy | 5.0 | `batchColumnMasks` rule name confirmed correct. Response shape `{"index": i, "viewExpression": {"expression": "..."}}` matches docs exactly. `input.action.filterResources[i].column.columnName` nested path correct per official Trino OPA docs. Silent failure behavior accurate. Four-row truth table correctly captures all combinations. |
+| Beginner clarity | 4.5 | Opens with direct one-sentence diagnosis. "Two Different Places to Get Tripped Up" framing is highly accessible. Concrete email/hashing example tied to the user's scenario. Minor: doesn't explain what "Rego rule" means (acceptable — user is past that point). |
+| Practical applicability | 5.0 | Corrected Rego is copy-paste ready. Single-column comparison Rego shows exactly what changes. CI test gives concrete query plus expected length/format assertions (64 chars, no @). Engineer can fix and verify immediately. |
+| Completeness | 5.0 | Covers: rule name mismatch diagnosis, `batchColumnMasks` name, batch vs single-column endpoint comparison table, secondary response-shape trap (viewExpression vs expression), correct Rego example, single-column comparison, CI test, summary truth table. Nothing material missing. |
+| **Average** | **4.875** | **PASS** |
 
 ### What Worked
-- "Per-query marginal cost is zero, but costs hide elsewhere" is exactly the mental model OLTP-trained engineers need
-- Engineering FTE positioned as dominant cost line — the single most important insight for managed vs self-hosted comparison, often missed
-- Specific Iceberg maintenance operations named (`expire_snapshots`, `rewrite_data_files`) with weekly cadence
-- "Streaming is the #1 way to create millions of tiny files" — concrete, memorable warning mapping to a real Iceberg failure mode
-- Closing reframe: "architectural decisions don't make it cheap, they prevent it from becoming catastrophically expensive"
-- `day(occurred_at), tenant_id` partition spec correct for 80 tenants
+- Direct diagnosis in first sentence: what's happening, why no error is raised
+- Two-trap framing (wrong rule name + wrong response shape) preempts the follow-up failure the user would have hit next
+- Side-by-side Rego makes structural differences visible at a glance
+- Actionable CI test: length=64 and no-@ assertions are a real safety net
+- Truth table: four rows covering all endpoint × rule name combinations
+- **Confirmed that iter313's resource fix landed**: the responder correctly used `batchColumnMasks` this time (in iter313 Q1, the same responder made this exact bug)
 
 ### What Missed
-- **BigQuery pricing incorrect: $2.50/TB stated, actual $6.25/TB on-demand.** Makes the downstream $625-$1,250/month estimate roughly half of reality. Resources/16 fixed.
-- Snowflake $300-$600/month is plausible only for auto-suspended workloads — caveat not stated
-- No mention of BigQuery's free 1 TB/month tier or slots-based capacity pricing alternative
-- `bucket()` transform for tenant_id not mentioned as a future-proofing note for growth beyond 80 tenants
+- Could mention that OPA decision logs are the primary debugging tool to confirm whether the policy was evaluated and what it returned — a one-liner on enabling decision logging would help
+- Could note that `batch-column-masking-uri` overrides `column-masking-uri` if both are set (footgun in mixed configurations)
 
 ### Technical Accuracy
-- BigQuery: actual 2026 on-demand rate is ~$6.25/TB (not $2.50/TB). Source: cloud.google.com/bigquery/pricing
-- Snowflake: 4 credits/hour × $2-4/credit; $300-600/mo plausible only if auto-suspended. Source: docs.snowflake.com
-- Parquet Zstd compression: 5-10x defensible for event data with categorical columns + dictionary encoding. Source: community benchmarks
-- Partition spec: `day(occurred_at), tenant_id` sound for 80 tenants. Source: Starburst Iceberg partitioning best practices
+All verified against trino.io/docs/current/security/opa-access-control.html:
+- `batchColumnMasks` rule name: confirmed
+- Response shape with `viewExpression`: confirmed
+- `input.action.filterResources[i].column.columnName` path: confirmed
+- Silent failure when rule not found: consistent with OPA+Trino integration
 
 ### Rubric Update
-- Cost considerations: prior avg 4.500 across 3 questions → (4.500 × 3 + 4.625) / 4 = **4.531 across 4 questions**. Status: PASSED.
+- Multi-tenant analytics: prior avg 4.469 across 113 questions → (4.469 × 113 + 4.875) / 114 = **4.473 across 114 questions**. Status: PASSED.
 
 ---
 
-## Iter 313 Summary
+## Iter 314 Summary
 
-**Iter 313 average: 4.50 — PASS** ✓
+**Iter 314 average: 4.94 — PASS** ✓ (best iteration this session)
 
-### Resource fixes applied (iter313 teacher pass)
-- resources/05: explicit batchColumnMasks vs columnMask Rego rule name distinction; both endpoint patterns side-by-side with which Rego rule each requires; silent-failure trap warning
-- resources/16: BigQuery pricing corrected from ~$2.50/TB to ~$6.25/TB on-demand; downstream cost calculations updated
+### Notable
+- Q1 perfect 5.00: OLAP vs OLTP answered completely — row-vs-column storage, tuning ladder, migration path all correct and stack-aware
+- Q2 4.875: batchColumnMasks fix confirmed landed in resources — responder now gets it right after iter313 Q1 had the exact bug being diagnosed
 
-### Suggested focus for Iter 314
-- batchColumnMasks Rego rule correctly — follow-up to verify resource fix landed (answer must now show correct iteration over `input.action.filterResources`)
-- Snowflake capacity (slots-based) pricing alternative vs on-demand — underrepresented angle on cost topic
-- Iceberg bucket() transform for high-cardinality tenant partition (complement to day/tenant_id)
-- Fresh angles on topics with the most room: OLAP vs OLTP mindset (4.542/3), storage sizing (4.500/3)
+### Suggested focus for Iter 315
+- "Storage sizing and growth estimation for lakehouse workloads" (4.500/3 — only 3 questions, lowest question count among passing topics)
+- "Real-time vs batch analytics trade-offs" (4.775/5 — underrepresented, fresh angles possible)
+- "Schema design for analytics: denormalization, star schema basics" (4.60/5 — solid but ripe for an advanced angle)
+- Continue probing OPA column masking angles (OPA decision log debugging; mixed endpoint config footgun)

@@ -23,14 +23,14 @@ Each topic must reach the pass threshold before the system can enter final phase
 
 | Topic | Status | Avg Score | Questions Asked |
 |---|---|---|---|
-| OLAP vs OLTP — difference and why it matters for SaaS | PASSED | 4.542 | 3 |
+| OLAP vs OLTP — difference and why it matters for SaaS | PASSED | 4.657 | 4 |
 | What a data warehouse is and when a SaaS product needs one | PASSED | 4.647 | 3 |
 | What a data lakehouse is and how it differs from a warehouse | PASSED | 4.625 | 2 |
 | Column-oriented storage — what it is and why it's faster for analytics | PASSED | 4.560 | 9 |
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.469 | 113 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.473 | 114 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.775 | 5 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
@@ -50,6 +50,40 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 314 — 2026-05-27
+
+**Q1** — OLAP vs OLTP: row-at-a-time vs millions-at-once, row-store vs columnar storage, Postgres tuning ladder (read replica → partial indexes → matviews → partitioning → EXPLAIN ANALYZE), concrete thresholds for moving to OLAP (>50M rows, >2s after tuning, >3 users, multi-source), migration path on actual stack (Spark JDBC → Parquet/MinIO → Iceberg/HMS → Trino)
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **5.00** — PASS |
+
+Perfect score. Stack-aware migration path, concrete thresholds, tuning ladder ordered by risk/effort. Topic running avg: (4.542×3 + 5.00)/4 = **4.657/4 questions** — PASSED (improving).
+
+**Q2** — OPA column masking silent failure — batchColumnMasks vs columnMask: batch endpoint requires `batchColumnMasks` rule (not `columnMask`), response shape differences (`viewExpression` + `index` array vs single `expression`), four-row truth table of endpoint × rule combinations, correct Rego example iterating `input.action.filterResources`, CI test
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.875** — PASS |
+
+Resource fix from iter313 confirmed landed — responder correctly used `batchColumnMasks` this time. All claims verified against trino.io OPA docs. Topic running avg: (4.469×113 + 4.875)/114 = **4.473/114 questions** — PASSED.
+
+**Iter 314 average: 4.94 — PASS** ✓ (best iteration this session)
+
+**Topics updated**:
+- OLAP vs OLTP: 4.542/3 → **4.657/4 questions** (PASSED — improving)
+- Multi-tenant analytics: 4.469/113 → **4.473/114 questions** (PASSED — stable)
+
+---
 
 ### Iter 313 — 2026-05-27
 
