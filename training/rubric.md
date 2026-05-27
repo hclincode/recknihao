@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.464 | 108 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.467 | 109 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.775 | 5 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.50 | 3 |
@@ -40,7 +40,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.500 | 5 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.484 | 103 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.487 | 104 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.655 | 20 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
@@ -50,6 +50,40 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 308 — 2026-05-27
+
+**Q1** — Multi-tenant isolation with Trino views + OPA: SECURITY DEFINER semantics (view runs with owner's privileges), per-tenant view DDL with WHERE tenant_id baked in, grant SELECT on view only (not base table), OPA closes back door for direct base-table access, metadata leak vectors ($files, $partitions, system.runtime.queries), CI verification queries
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** — PASS |
+
+SECURITY DEFINER default verified. DDL end-to-end and runnable on Iceberg+MinIO prod stack. Correctly separates two enforcement layers (view+grant front door, OPA back door). Bypass attempts with expected Access Denied outcomes. Metadata leak vectors called out. Minor gaps: no column masking alternative, no explicit SECURITY DEFINER keyword in CREATE VIEW, CTAS/INSERT exfiltration vector not addressed, "view owner" not defined before first use. Topic running avg: (4.464×108 + 4.75)/109 = **4.467/109 questions** — PASSED.
+
+**Q2** — JSONB column promotion during Postgres→Iceberg ingestion: get_json_object PySpark extraction, two-tier pattern (hot promoted columns + properties_raw fallback), ADD COLUMN metadata-only but historical rows return NULL (silent data-loss trap), MERGE INTO backfill required before wiring dashboards, Spark vs dbt recommendation
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** — PASS |
+
+get_json_object syntax correct. Two-tier pattern well-explained. Silent NULL trap for historical rows called out. MERGE INTO backfill shown with verify query. Spark vs dbt distinction and transition path correct. Minor gaps: no mention of schema_of_json/from_json for full struct promotion when schema is known; coalesce fallback pattern for when promoted column is NULL not shown in decision table; no note on Iceberg snapshot isolation during MERGE backfill. Topic running avg: (4.484×103 + 4.75)/104 = **4.487/104 questions** — PASSED.
+
+**Iter 308 average: 4.75 — PASS** ✓
+
+**Topics updated**:
+- Multi-tenant analytics: 4.464/108 → **4.467/109 questions** (PASSED — stable)
+- Postgres-to-Iceberg ingestion: 4.484/103 → **4.487/104 questions** (PASSED — stable)
+
+---
 
 ### Iter 307 — 2026-05-27
 

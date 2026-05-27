@@ -1,7 +1,7 @@
 {
-  "iteration": 308,
+  "iteration": 309,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter307 avg 4.80: Q1 (4.75) approx_percentile — ARRAY multi-percentile syntax, PERCENTILE_CONT non-support in Trino, decision rule by consequence; Q2 (4.85) Parquet/JSON — min/max stats, three-level skipping cascade, JSON-as-string defeats file-skipping, two-tier schema promote solution. Resources 07/23 fixed: '~2% error' → '2.3% standard error' per Trino docs. SQL best practices: 4.645/15. Column-oriented storage: 4.560/9."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter308 avg 4.75: Q1 (4.75) multi-tenant isolation — SECURITY DEFINER semantics, per-tenant views, OPA back door, metadata leak vectors, CI verification; Q2 (4.75) JSONB promotion — get_json_object PySpark, two-tier pattern (promote hot keys + properties_raw fallback), silent NULL trap for historical rows, MERGE INTO backfill, Spark vs dbt. Multi-tenant analytics: 4.467/109. Postgres ingestion: 4.487/104."
 }

@@ -1,12 +1,12 @@
-# Iter 307 Questions
+# Iter 308 Questions
 
 Date: 2026-05-27
-Topics: approx_percentile for p99 latency dashboards (Q1) + Parquet column storage and JSONB predicate pushdown (Q2)
+Topics: Multi-tenant isolation with Trino views (Q1) + JSONB column promotion during Postgres→Iceberg ingestion (Q2)
 
-## Q1 — approx_percentile vs exact percentile for p99 API latency
+## Q1 — How do I make sure customers can never see each other's data even if they write their own SQL?
 
-We're trying to show p99 API response time on our analytics dashboard. Someone on the team said we should use `approx_percentile` instead of the regular percentile function because it's way faster on large datasets. How do I know when that's actually okay to use versus when I need the exact number? And can I calculate p50, p95, and p99 in a single query, or do I have to run three separate ones?
+We store all our customers' event data in one big table with a `tenant_id` column. Right now our app server always appends `WHERE tenant_id = ?` to every query, and we just trust that the code never forgets. We're moving to a setup where Trino sits in front of our data, and some customers will eventually be able to run their own queries or connect their own BI tools directly. How do I make sure a customer can physically never see another customer's rows — even if they write their own SQL? I heard something about "views" being able to help here, but I don't understand how a view stops someone from just querying the underlying table directly.
 
-## Q2 — Why does filtering by customer_id scan almost nothing, but filtering on a JSON column scans everything?
+## Q2 — How do I actually promote JSONB fields into real columns during Postgres→Iceberg ingestion?
 
-I noticed that when I filter my Iceberg table by something like `customer_id = 'abc123'`, the query is super fast and barely touches any data. But when I filter on a value that's inside a JSON column — like `WHERE json_col LIKE '%some_value%'` or even using a JSON extract function on it — it seems to read the whole table. Why does one work and the other doesn't? Does it have to do with how Parquet stores the data physically, or is something else going on?
+We have a `properties` JSONB column in Postgres that holds maybe 15–20 different keys depending on the event type — things like `plan_name`, `feature_flag`, `device_type`. We want to move this data into Iceberg for analytics. Someone on my team said we should "promote" those JSON fields into real columns during ingestion, not keep them as a JSON blob. That sounds right, but I don't actually know how to do that in practice — do we write a Spark job, use dbt, something else? And do we have to go back and reprocess all the old data, or can we only fix new rows going forward?
