@@ -2339,6 +2339,60 @@ Now the same query correctly lands in `global.tenant_acme.dashboards`.
 
 **All matcher fields within a single selector are AND-combined** (per rule 3 above). Multiple selectors are then evaluated top-down with first-match-wins (per rule 1 above). The only fields not in this table that you can legitimately add are nested `subGroups[].*` configuration on the group definition side — those are NOT selector fields and live under `rootGroups`/`subGroups`, not under `selectors`.
 
+> **`userGroup` selector — semantics, dependencies, and how it differs from `user` / `originalUser` / `authenticatedUser`.** The four user-related selector fields look similar but match against different sources, and `userGroup` has a unique evaluation rule that engineers routinely get wrong:
+>
+> | Selector | Matches against | Cardinality | Match rule |
+> |---|---|---|---|
+> | `user` | The effective Trino username for the query (one string, after any `X-Trino-User` impersonation). | 1 value | Regex matches the single username string. |
+> | `originalUser` | The pre-impersonation username (one string). | 1 value | Regex matches the single original-user string. |
+> | `authenticatedUser` | The username produced by the authenticator (one string, before any session-user change). | 1 value | Regex matches the single authenticated-user string. |
+> | `userGroup` | **Every group in the user's groups list** (a list of zero-or-more group names from the group provider). | N values | Selector matches if the regex matches **ANY ONE** group in the list. This is "match any," not "match all." Combined with other matcher fields in the same selector via AND (as usual). |
+>
+> **Concrete behavior.** A user whose groups are `["data_engineering", "on_call", "all_employees"]` matches a selector with `"userGroup": "data_engineering"` (one of their groups matches the regex). They ALSO match `"userGroup": "data_.*"` (the `data_engineering` group matches the regex). They do NOT match `"userGroup": "finance"` (no group in their list matches). The selector is satisfied as long as **at least one** group in the user's groups list satisfies the regex — Trino does not require every group to match.
+>
+> **Where the groups come from on this stack.** `userGroup` reads from `input.context.identity.groups` (the same list OPA sees). On the production JWT auth stack, **`groups` is NOT populated from a JWT claim** — OSS Trino 467's JWT authenticator extracts only the username from the token. The groups list is filled by a **separately configured group provider** in `etc/group-provider.properties`:
+>
+> ```properties
+> # File-based group provider (small static rosters):
+> group-provider.name=file
+> file.group-file=etc/groups.txt
+> ```
+>
+> Where `etc/groups.txt` is the mapping file (one line per group: `group_name:user1,user2,user3`). For LDAP-backed rosters, use `group-provider.name=ldap` with the LDAP connection properties. **If NO group provider is configured, `input.context.identity.groups` is the empty list for every user, and EVERY `userGroup` selector silently never matches** — the routing falls through to the next selector or the catch-all. This is the single most common "my `userGroup` selector isn't firing" bug.
+>
+> **When to use `userGroup` instead of `user`.** Use `userGroup` when the routing decision is by **role / team / tier** rather than by individual principal — and you want the resource-groups.json file to stay short as principals are added or removed.
+>
+> - `user: "alice|bob|charlie|dave|eve|frank|grace|hank"` — fragile. Every new team member requires a Trino config push and coordinator restart. Eight names today, eighty next quarter.
+> - `userGroup: "data_engineering"` — stable. Adding a new team member is a one-line change to `etc/groups.txt` (or an LDAP membership update); no Trino restart, no `resource-groups.json` touch. The selector keeps working.
+>
+> **Worked example — routing all data-engineering team queries into a dedicated subgroup:**
+>
+> ```json
+> {
+>   "selectors": [
+>     {
+>       "group": "global.internal.data_engineering",
+>       "userGroup": "data_engineering"
+>     },
+>     {
+>       "group": "global.tenant_acme",
+>       "user": "acme-service-account"
+>     },
+>     { "group": "global" }
+>   ]
+> }
+> ```
+>
+> With the group provider populated so that `alice`, `bob`, `charlie` all have group `data_engineering`, any query from any of those three principals lands in `global.internal.data_engineering`. A query from `acme-service-account` (a tenant service principal NOT in the `data_engineering` group) falls through to the second selector. Anything else hits the catch-all `global`.
+>
+> **`userGroup` + other matchers (AND-combined).** You can mix `userGroup` with `source`, `clientTags`, `queryType`, etc. — they still AND inside the selector. For example, `{"userGroup": "data_engineering", "source": "airflow", "group": "global.batch.engineering"}` routes only queries that are BOTH from a data-engineering team member AND submitted via Airflow. Other queries from the same engineers (e.g., interactive `dbeaver` sessions) fall through to a later selector.
+>
+> **Diagnosing a non-matching `userGroup` selector.** When the routing falls through unexpectedly:
+> 1. Confirm a group provider is configured: `cat etc/group-provider.properties` on the coordinator. If the file is missing, every `userGroup` selector matches zero queries.
+> 2. Confirm the user actually has the group: for file-based, `grep "<username>" etc/groups.txt`; for LDAP, query the directory or check the OPA decision log entry for that user (the `input.context.identity.groups` array shows exactly what Trino sees).
+> 3. Confirm the regex: `userGroup: "data_engineering"` matches the literal `data_engineering` group, but `userGroup: "data"` ALSO matches because the value is a Java regex and `data` is a substring of `data_engineering` (Java regex uses `find`, not `match` — anchor with `^...$` if you want exact-only matching: `"userGroup": "^data_engineering$"`).
+> 4. Verify in production: run `SELECT user, resource_group_id FROM system.runtime.queries WHERE user = '<username>' ORDER BY created DESC LIMIT 5` and see which group the user's queries actually landed in. If they're in `ARRAY['global']` instead of the engineering subgroup, one of steps 1–3 is the cause.
+
 **Quick triage when a selector "isn't applying":**
 
 1. Run the diagnostic query in the next subsection to find the actual `resource_group_id` the query landed in. If it's not what you expected, one of the following is true.

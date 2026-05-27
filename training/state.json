@@ -1,7 +1,7 @@
 {
-  "iteration": 347,
+  "iteration": 348,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter346 avg 5.00 PERFECT STRONG PASS (second consecutive perfect iteration). Iceberg maintenance: 4.603/36. Multi-tenant: 4.458/138. Postgres-to-Iceberg: 4.509/127. Suggested focus for iter347: (1) Multi-tenant analytics (weakest, 4.458/138) — userGroup selector, session property manager vs resource group memory limits, OPA enforcement of SET SESSION; (2) Postgres-to-Iceberg — column rename through Debezium CDC, or column drop behavior; (3) Iceberg maintenance (4.603/36) — ANALYZE TABLE + Puffin statistics, or concurrent maintenance safety."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter347 (teacher pre-iter): added userGroup selector deep-dive callout to resources/05 (lines ~2342) — semantics table vs user/originalUser/authenticatedUser, group-provider dependency (NOT JWT claim on OSS Trino 467), worked example, diagnosis steps. Session property manager vs resource group memory ceiling distinction + OPA SetSystemSessionProperty enforcement already comprehensive in lines 2671-2698. No changes to those sections. Iter346 avg 5.00 PERFECT STRONG PASS. Iceberg maintenance: 4.603/36. Multi-tenant: 4.458/138. Postgres-to-Iceberg: 4.509/127."
 }

@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.458 | 138 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.460 | 139 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
@@ -40,7 +40,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.509 | 127 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.513 | 128 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.603 | 36 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
@@ -50,6 +50,40 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 347 — 2026-05-27
+
+**Q1** — Multi-tenant analytics: `userGroup` selector semantics and group-provider dependency. Responder correctly explained that userGroup is NOT defined in Trino itself and NOT passed from the app at connection time; groups come from a separately configured group provider (`etc/group-provider.properties`); a user can belong to multiple groups and the selector matches if ANY one group matches the regex; missing group provider causes silent fail-through. Minor gaps: didn't mention JWT auth on production stack doesn't populate groups from JWT claims (group provider still required), Java regex substring-match footgun, or diagnostic query.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** |
+
+Judge verified: group-provider.properties file name and syntax confirmed per trino.io. File format (group:user1,user2) confirmed. Any-one-group-matches semantics confirmed. Silent fall-through on missing provider confirmed. No resource fix needed — resources/05 lines 2342–2394 already comprehensive; this was a responder selection gap. Topic running avg: (4.458×138 + 4.75)/139 = **4.460/139 questions** — PASSED (recovering upward; userGroup semantics correctly explained on first probe of new content).
+
+**Q2** — Postgres-to-Iceberg ingestion: column rename through Debezium CDC into Iceberg. Responder correctly explained Iceberg's field-ID tracking (rename ≠ drop+add), Debezium detecting rename via WAL RELATION message on next DML (Postgres emits no DDL event for renames), exact Trino RENAME COLUMN syntax (metadata-only), historical data remaining accessible under new name, and the auto-evolution (mergeSchema=true) orphan-column trap producing two columns with different field IDs.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **5.00** |
+
+Judge verified: Iceberg field-ID tracking for RENAME confirmed per iceberg.apache.org. Postgres pgoutput no DDL event for ALTER TABLE RENAME COLUMN confirmed — Debezium detects via RELATION message on next DML. Trino ALTER TABLE RENAME COLUMN syntax confirmed. Auto-evolution orphan-column trap confirmed. No resource fix needed — resources/13 already covers this scenario. Topic running avg: (4.509×127 + 5.00)/128 = **4.513/128 questions** — PASSED (4th consecutive perfect score on Debezium CDC schema-change scenarios).
+
+**Iter 347 average: (4.75 + 5.00) / 2 = 4.875 — STRONG PASS** ✓
+
+Topic score updates:
+- Multi-tenant analytics: 4.458/138 → **4.460/139 questions** (PASSED — recovering upward; userGroup semantics, group-provider dependency, any-match semantics, silent-fail gotcha all surfaced correctly)
+- Postgres-to-Iceberg ingestion: 4.509/127 → **4.513/128 questions** (PASSED — strong recovery; column rename end-to-end correctly explained)
+
+---
 
 ### Iter 346 — 2026-05-27
 
