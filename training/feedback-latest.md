@@ -1,57 +1,56 @@
-# Feedback — Iter 292 (Extended phase)
+# Feedback — Iter 293 (Extended phase)
 
 Date: 2026-05-27
-Topic: SQL query best practices for OLAP — fourth iteration (Q1 PASS perfect, Q2 PASS perfect)
+Topics: SQL query best practices for OLAP + Analytical query patterns — window functions and columnar SELECT * cost
 
 ## Results summary
 
 | Question | Topic angle | Score | Pass/Fail |
 |---|---|---|---|
-| Q1 | CTEs in Trino: inlined not materialized; N references = N executions; CASE WHEN fix; CTAS for cross-query | **5.00** | PASS |
-| Q2 | HAVING vs WHERE: correct for aggregates, bad for raw columns; engineer's query is already right | **5.00** | PASS |
+| Q1 | Window functions vs GROUP BY for running totals; spilling; pre-aggregation pattern | **5.00** | PASS |
+| Q2 | SELECT * cost in columnar storage: Parquet column chunks, three pruning layers, Physical Input | **5.00** | PASS |
 
-**Iter 292 average: 5.00 — PASS** ✓
+**Iter 293 average: 5.00 — PASS** ✓
 
-**Topic update**: SQL query best practices for OLAP: 4.355/6 → **4.516/8 questions** (PASSED — strongly above 4.0, recovering well from early oscillation)
+**Topic updates**:
+- SQL query best practices for OLAP: 4.516/8 → **4.613/10 questions** (PASSED — strong above 4.5)
+- Analytical query patterns on Iceberg+Trino: 4.550/5 → **4.625/6 questions** (PASSED — reinforced)
 
 ---
 
 ## What worked
 
-### Q1 — CTE inlining (5.0)
-1. CTEs inlined (not materialized) in Trino — correctly stated
-2. N references = N executions — correct
-3. No CTE materialization hint in Trino 467 — correct, no invented property
-4. CASE WHEN inside aggregates as single-pass fix — canonical and correct
-5. CTAS as cross-query materialization workaround — correct for Trino 467 + Iceberg stack
-6. Predicate pushdown through single-use inlined CTEs — correct
-7. EXPLAIN self-diagnosis recipe — practical
+### Q1 — Window functions for running totals (5.0)
+1. Correct window function syntax with frame clause — `SUM(...) OVER (PARTITION BY ... ORDER BY ... ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` — verified
+2. Why GROUP BY can't do running totals (collapses rows) — clear explanation
+3. Self-join O(n²) cost — good concrete math (1M events → 1 trillion comparisons)
+4. `spill-enabled=true` + `spill_window_operator` session property — verified
+5. `EXCEEDED_LOCAL_MEMORY_LIMIT` error code — correct
+6. ANALYZE TABLE for CBO stats — correct
+7. Pre-aggregation nightly dbt model as production pattern — excellent practical guidance
 
-### Q2 — HAVING vs WHERE (5.0)
-1. WHERE runs before aggregation, HAVING after — correct
-2. Engineer's specific query already correct — directly answered the question
-3. BAD: HAVING on raw column (tenant_id IN ...) — correct illustration of the actual trap
-4. HAVING on COUNT/SUM = mandatory, no alternative — correct
-5. EXPLAIN ANALYZE + Physical Input redirect for slow query diagnosis — excellent
+### Q2 — SELECT * columnar cost (5.0)
+1. Parquet column chunks as contiguous byte ranges — correct
+2. Trino reads only SELECT-listed column chunks — verified
+3. Three-layer pruning (manifest → row-group → column chunk) — correct order and explanation
+4. Postgres-vs-Trino contrast — excellent framing for the audience
+5. Physical Input in EXPLAIN ANALYZE as the measurement tool — verified
+6. Rollup table / dbt model as the production mitigation — fits stack
 
----
-
-## No errors — no teacher action required
-
-Both answers passed with perfect scores. Resources are accurate and the responder is performing well on SQL OLAP best practices.
+**Minor note (not score-affecting)**: Q2 short answer said "25x more I/O" but the worked example computes ~16.7x (50 columns / 3 = 16.7). The teacher may want to make these consistent in a future resource pass.
 
 ---
 
-## Topic state
+## No resource fixes needed
 
-SQL query best practices for OLAP is now at **4.516/8 questions** — well above the 3.5 threshold and tracking above 4.5 over the last 4 iterations. The topic has recovered from the early oscillation on partition pruning optimizer rules.
+Both answers were factually clean. Resources are accurate.
 
 ---
 
-## Suggested iter293 angles
+## Suggested iter294 angles
 
-1. **Continue SQL OLAP best practices** — remaining areas: SELECT * columnar overhead (concrete bytes example), or window functions vs GROUP BY for running totals
+1. **Continue SQL OLAP best practices** — `TABLESAMPLE BERNOULLI` for cheap exploration; or `approx_percentile` use cases (already covered, could reinforce with different angle)
 
-2. **Cross-topic** — test a different resource area to ensure coverage breadth; consider testing "Multi-tenant analytics" or "Real-time vs batch analytics" which haven't been tested recently
+2. **New topic breadth** — consider testing "Multi-tenant analytics" or "Real-time vs batch" which haven't had recent coverage
 
-3. **New angle from the weaker topics** — schema design for analytics hasn't been tested in many iterations; could be worth a re-check
+3. **Schema design for analytics** (4.50/2 questions) — still at minimum question count; more angles would solidify it

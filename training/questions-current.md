@@ -1,19 +1,9 @@
-# Iter 292 Questions
+# Iter 293 Questions
 
-## Q1 — Does using a CTE in Trino make it faster, or is it just for readability?
+## Q1 — Window functions vs GROUP BY: when should I use one over the other?
 
-In Postgres, when I write a complex query, I sometimes break it into CTEs (the WITH ... AS ... part) to make it easier to read. I assumed Trino does the same thing — materialize the CTE result once and reuse it. But someone told me that in Trino, CTEs are NOT materialized by default and get inlined, which means if I reference the same CTE twice in a query, it actually runs that subquery twice. Is that true? And if so, should I be avoiding CTEs in Trino? We're running Trino 467 on Iceberg tables and I have some queries that reference the same CTE 2-3 times for different aggregations.
+I'm trying to add a "running total" feature to our analytics — showing cumulative revenue per tenant over time. In Postgres I'd use a window function (`SUM(amount) OVER (PARTITION BY tenant_id ORDER BY event_date)`). But I've also seen people do this with self-joins or GROUP BY + subquery. I'm not sure which approach Trino handles better on Iceberg tables. Does Trino support window functions? And is there a meaningful performance difference between a window function and a GROUP BY approach for this use case?
 
-## Q2 — My query filters with HAVING but it still feels slow — is HAVING the same as WHERE in Trino?
+## Q2 — What does SELECT * actually cost me in Trino vs Postgres?
 
-I'm writing a query to find tenants who have more than 1000 events this week. I wrote it like this:
-
-```sql
-SELECT tenant_id, COUNT(*) AS event_count
-FROM events
-WHERE event_date >= DATE '2026-05-20'
-GROUP BY tenant_id
-HAVING COUNT(*) > 1000;
-```
-
-Someone told me HAVING is slower than WHERE for this kind of filter. But I don't see how — aren't HAVING and WHERE equivalent here? The COUNT has to happen before HAVING can evaluate, so how could I possibly avoid it?
+I know "don't use SELECT *" is standard advice, but I want to understand what the actual cost is. In Postgres, SELECT * vs SELECT col1, col2 doesn't matter much because the page is fetched anyway and you're just getting more columns from it. In Trino querying Iceberg, I've heard it's different because of columnar storage. Can you explain what actually happens in the file format when I do SELECT * versus naming specific columns — like, at what layer does Trino stop reading data it doesn't need?

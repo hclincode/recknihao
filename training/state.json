@@ -1,7 +1,7 @@
 {
-  "iteration": 293,
+  "iteration": 294,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter292 avg 5.00: Q1 (5.0 PASS) CTEs inlined in Trino, N references = N executions, CASE WHEN fix, CTAS for cross-query. Q2 (5.0 PASS) HAVING on aggregate = correct, HAVING on raw column = move to WHERE, engineer's query already right. SQL OLAP best practices: 4.355/6 → 4.516/8 (PASSED, solidifying above 4.5). No resource fixes needed."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter293 avg 5.00: Q1 (5.0 PASS) window functions SUM OVER PARTITION BY ORDER BY, spill-enabled, ANALYZE TABLE, dbt rollup. Q2 (5.0 PASS) SELECT * columnar cost, Parquet column chunks, three pruning layers, Physical Input. SQL OLAP best practices: 4.613/10. Analytical query patterns: 4.625/6. No resource fixes needed."
 }

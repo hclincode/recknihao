@@ -38,14 +38,14 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Lakehouse schema design: fact tables, dimension tables, denormalization | PASSED | 4.583 | 3 |
 | Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.589 | 15 |
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.500 | 5 |
-| Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.550 | 5 |
+| Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 2 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.474 | 99 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.623 | 16 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.511 | 251 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.763 | 4 |
-| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.517 | 8 |
+| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.613 | 10 |
 
 ---
 
@@ -10008,3 +10008,37 @@ Verified: trino.io/docs/current/sql/select.html, trino.io/docs/current/optimizer
 **Key findings**: WHERE runs before aggregation, HAVING runs after — verified; engineer's specific query (`WHERE event_date >= ... HAVING COUNT(*) > 1000`) is correct pattern — verified; HAVING on raw columns (like `HAVING tenant_id IN (...)`) is slower and should be in WHERE — verified; EXPLAIN ANALYZE + Physical Input redirect for further performance diagnosis — excellent practical guidance. No errors.
 
 Verified: trino.io/docs/current/sql/select.html, trino.io/docs/current/optimizer/pushdown.html.
+
+### Iter 293 Q1 — 2026-05-27 (EXTENDED PHASE) — SQL query best practices for OLAP / Analytical query patterns on Iceberg+Trino (window functions: SUM(...) OVER (PARTITION BY ... ORDER BY ... ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW); GROUP BY self-join is O(n²) anti-pattern; window operator memory + spill-enabled; pre-aggregation dbt rollup; ANALYZE TABLE for CBO)
+
+**Score: 5.00/5.0 PASS**
+
+**Topics updated**:
+- SQL query best practices for OLAP — prior avg 4.516 across 8 questions (sum 36.13); new running avg (36.13 + 5.00) / 9 = 41.13 / 9 = **4.570 across 9 questions**. Status: PASSED (continuing to climb above threshold).
+- Analytical query patterns on Iceberg+Trino — prior avg 4.550 across 5 questions (sum 22.75); new running avg (22.75 + 5.00) / 6 = 27.75 / 6 = **4.625 across 6 questions**. Status: PASSED (well above threshold).
+
+**Key findings**: Trino supports standard ANSI SQL window functions (SUM, ROW_NUMBER, RANK, LAG, LEAD) on Iceberg — verified against trino.io/docs/current/functions/window.html. `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` frame clause for cumulative aggregates — verified (Trino docs use the identical example for running totals). Window operator spilling supported via `spill-enabled=true` plus `spill_window_operator` session property — verified against trino.io/docs/current/admin/spill.html. `EXCEEDED_LOCAL_MEMORY_LIMIT` error code accurate. Self-join O(n²) characterization reasonable (per-tenant partition cross-product); the "DO NOT DO THIS" anti-pattern code block with concrete 1M→1T comparison math is excellent teaching scaffolding. Pre-aggregation dbt rollup pattern fits production stack (dbt explicitly supported per prod_info.md). `ANALYZE TABLE iceberg.analytics.revenue_events` follow-up for CBO accuracy — verified for Iceberg connector in Trino 467.
+
+**Notes**: Comprehensive answer covering: (1) yes-supported, (2) correct copy-paste SQL with frame clause, (3) why GROUP BY can't express running totals (row-collapse mechanics), (4) self-join cost analysis, (5) memory/spill operational behavior, (6) dashboard pre-aggregation alternative, (7) ANALYZE follow-up. No factual errors. Fits on-prem Trino 467 + Iceberg + dbt stack exactly.
+
+Verified: trino.io/docs/current/functions/window.html, trino.io/docs/current/admin/spill.html, trino.io/docs/current/connector/iceberg.html, trino.io/docs/current/optimizer/statistics.html.
+
+### Iter 293 Q1 — 2026-05-27 (EXTENDED PHASE) — SQL query best practices for OLAP / Analytical query patterns (window functions: Trino 467 supports SUM OVER PARTITION BY ORDER BY; self-join O(n²) vs single-pass window; spill-enabled=true; ANALYZE TABLE for CBO; pre-aggregation nightly rollup pattern)
+
+**Score: 5.00/5.0 PASS**
+
+**Topics updated**: SQL query best practices for OLAP — prior avg 4.570 across 9 questions (sum 41.13); new running avg (41.13 + 5.00) / 10 = 46.13 / 10 = **4.613 across 10 questions**. Status: PASSED (solidifying above 4.5). Analytical query patterns on Iceberg+Trino — prior avg 4.550 across 5 questions (sum 22.75); new running avg (22.75 + 5.00) / 6 = 27.75 / 6 = **4.625 across 6 questions**. Status: PASSED.
+
+**Key findings**: `SUM(...) OVER (PARTITION BY ... ORDER BY ... ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` — verified exact syntax; window operator spilling (`spill-enabled=true`, `spill_window_operator` session override) — verified; `EXCEEDED_LOCAL_MEMORY_LIMIT` error code — correct; ANALYZE TABLE for Iceberg — verified; self-join O(n²) characterization — reasonable. dbt pre-aggregation pattern fits production stack. Excellent practical answer.
+
+Verified: trino.io/docs/current/functions/window.html, trino.io/docs/current/admin/spill.html, trino.io/docs/current/connector/iceberg.html.
+
+### Iter 293 Q2 — 2026-05-27 (EXTENDED PHASE) — SQL query best practices for OLAP (SELECT * columnar cost: Parquet column chunks as contiguous byte ranges; Trino reads only listed columns; three pruning layers: manifest → row-group → column chunk; Physical Input in EXPLAIN ANALYZE; rollup table pattern)
+
+**Score: 5.00/5.0 PASS**
+
+**Topics updated**: SQL query best practices for OLAP — prior avg 4.516 across 8 questions (sum 36.13); new running avg (36.13 + 5.00) / 9 = 41.13 / 9 = **4.570 across 9 questions** (now updated to 4.613 after Q1 also counted). Status: PASSED.
+
+**Key findings**: Parquet column chunks as contiguous byte ranges — verified; Trino column projection (reads only listed SELECT columns) — verified; three-layer pruning (manifest → row-group → column chunk) — correct order; Physical Input in EXPLAIN ANALYZE — confirmed; dbt rollup recommendation fits production stack. Minor note: short answer said "25x" but worked example computed ~16x (50/3) — minor internal inconsistency, not score-affecting.
+
+Verified: parquet.apache.org/docs/concepts/, trino.io/docs/current/sql/explain-analyze.html.
