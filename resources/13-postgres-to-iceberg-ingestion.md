@@ -2370,6 +2370,8 @@ Wire the two queries above into your monitoring system (Prometheus + `postgres_e
 
 The same scenario can also, in the worst case, cause real harm: if `bytes_behind` crosses `max_slot_wal_keep_size` because of pure idleness, Postgres will **auto-invalidate the slot** (see the prior subsection) and Debezium loses its position — even though nothing was actually wrong with the consumer.
 
+> **Why this is much worse than it looks in a multi-database Postgres cluster — WAL is cluster-wide, not per-database.** In a Postgres cluster that hosts multiple databases (e.g., a single RDS/Aurora/Cloud SQL instance running `app_prod`, `app_staging`, `analytics_warehouse`, and `internal_tools` databases side by side), **the WAL is a single shared stream at the cluster level — not per-database.** Every commit on every database in the cluster writes to the same `pg_wal/` directory and advances the cluster's `pg_current_wal_lsn()`. A replication slot, even one bound to a single low-traffic database via the slot's `database` field, **pins WAL retention at the cluster level**: it holds back every WAL segment from its `confirmed_flush_lsn` forward, regardless of which database in the cluster produced the entries in those segments. The practical consequence: when a high-traffic database (your production app generating thousands of TPS) produces many WAL segments per minute, those segments **accumulate against the replication slot on the low-traffic database** (a staging or analytics DB with no writes of its own) — because the slot's `confirmed_flush_lsn` on the quiet database never advances, but the cluster-wide `pg_current_wal_lsn()` is racing forward driven by the noisy neighbor. The `bytes_behind` reported for the quiet slot is **mostly WAL from the noisy database**, not from the database the slot actually monitors. This is why **heartbeats are mandatory, not optional, on every replication slot in a multi-database cluster** — without a heartbeat, the quiet slot's `confirmed_flush_lsn` will fall behind cluster-wide WAL production within hours and trip `max_slot_wal_keep_size` even though the monitored database itself is doing nothing. A useful mental model: the slot does NOT care which database wrote the WAL — it only cares about its own `confirmed_flush_lsn` position relative to the **cluster's** current WAL position. Heartbeating the slot forces that position forward.
+
 **The solution: heartbeat events.** Debezium can write a "heartbeat" row to a dedicated table in Postgres at a configurable interval. The heartbeat is just an `INSERT` (or `INSERT ... ON CONFLICT DO NOTHING`) into a small table you create for this purpose. That INSERT generates a tiny change event in the WAL — which gives Debezium something to read, decode, and confirm, which **advances `confirmed_flush_lsn` even when every monitored table is quiet.** Postgres can then release the older WAL segments. Slot lag stays near zero; alerts stop firing falsely; `max_slot_wal_keep_size` is never approached by accident.
 
 **Configuration in the Debezium connector.** Add these two properties to your connector config (the `KafkaConnector` CRD under Strimzi, or the JSON POSTed to the Connect REST API under the raw deployment):
@@ -2411,6 +2413,61 @@ ALTER PUBLICATION debezium_pub ADD TABLE public.debezium_heartbeat;
 ```
 
 If you skip the publication step, the heartbeat INSERT will commit successfully in Postgres but won't be visible to the logical decoder — so it won't actually advance the slot. The slot lag will keep growing as if heartbeats were disabled.
+
+> **CRITICAL — `publication.autocreate.mode=filtered` will silently EXCLUDE the heartbeat table from the auto-created publication.** This is one of the highest-frequency "I configured heartbeats but the slot is still lagging" bugs. The `publication.autocreate.mode` Debezium connector property controls how Debezium creates the Postgres publication on its first startup. The valid values per the Debezium Postgres connector docs are:
+>
+> - **`all_tables`** — Debezium runs `CREATE PUBLICATION debezium_pub FOR ALL TABLES`. The publication covers every table in the database, including the heartbeat table — so heartbeats work without any extra config.
+> - **`filtered`** — Debezium runs `CREATE PUBLICATION debezium_pub FOR TABLE <list>`, where `<list>` is **derived from `table.include.list`** (intersected with `schema.include.list` if set, and minus anything in `table.exclude.list` / `schema.exclude.list`). **Tables not in `table.include.list` are NOT in the auto-created publication** — the heartbeat table is silently excluded.
+> - **`disabled`** — Debezium does not create or modify any publication; you must `CREATE PUBLICATION` yourself before starting the connector.
+>
+> **Which mode is the default depends on the Debezium version and how you configure the connector.** Newer Debezium versions (Debezium 2.x and later) default to `all_tables`, but **production deployments commonly override this to `filtered`** because operators want least-privilege publications that only carry the tables actually being ingested. If your team has standardized on `filtered` (a very reasonable security choice), the heartbeat table will be missing from the publication unless you explicitly handle it. The failure mode is silent: the heartbeat INSERT commits, Postgres logs the change in the WAL, but `pgoutput` filters the event out (it is not in the publication), so the WAL position the Debezium consumer "sees" never advances past the heartbeat. The slot lag continues to grow exactly as it did before you enabled heartbeats. Engineers commonly add a heartbeat, watch the lag keep climbing, and conclude "heartbeats don't work in our environment" — when the real issue is the publication's table list.
+>
+> **Two correct solutions — pick one:**
+>
+> **1. Add the heartbeat table to `table.include.list` in the connector config.** This is the simplest fix and works automatically with `publication.autocreate.mode=filtered`. The heartbeat table becomes part of the publication via the standard auto-create path.
+>
+> ```yaml
+> # Debezium connector config (Strimzi KafkaConnector or Connect REST JSON):
+> table.include.list: "public.events,public.users,public.orders,public.debezium_heartbeat"
+> publication.autocreate.mode: "filtered"
+> heartbeat.interval.ms: "30000"
+> heartbeat.action.query: "INSERT INTO public.debezium_heartbeat (id, heartbeat_at) VALUES (1, now()) ON CONFLICT (id) DO UPDATE SET heartbeat_at = now()"
+> ```
+>
+> You'll then want to filter the resulting `app-db.public.debezium_heartbeat` Kafka topic out of your Spark consumer (see "Add a heartbeat topic filter in your Kafka consumer" below).
+>
+> **2. Use `publication.autocreate.mode=disabled` and manage the publication manually.** This is the right answer when your security team requires that database publications be reviewed and approved by a DBA (i.e., the connector should NOT have `CREATE PUBLICATION` privilege). You then create and maintain the publication yourself:
+>
+> ```sql
+> -- Run as a DBA on the Postgres primary, once at setup:
+> CREATE PUBLICATION debezium_pub FOR TABLE
+>   public.events,
+>   public.users,
+>   public.orders,
+>   public.debezium_heartbeat;
+>
+> -- Adding a new table later (e.g., onboarding a new domain table to CDC):
+> ALTER PUBLICATION debezium_pub ADD TABLE public.new_domain_table;
+> ```
+>
+> ```yaml
+> # Debezium connector config:
+> publication.name: "debezium_pub"
+> publication.autocreate.mode: "disabled"
+> ```
+>
+> The heartbeat table is in the publication because **you** put it there; the connector never touches publication membership.
+>
+> **Verification query — run this after any publication change to confirm the heartbeat table is included:**
+>
+> ```sql
+> SELECT pubname, schemaname, tablename
+> FROM pg_publication_tables
+> WHERE pubname = 'debezium_pub'
+>   AND tablename = 'debezium_heartbeat';
+> ```
+>
+> If this query returns zero rows, the heartbeat table is NOT in the publication and slot lag will continue growing despite `heartbeat.interval.ms` being set. Re-run the `ALTER PUBLICATION ... ADD TABLE` (or add the heartbeat table to `table.include.list` and restart the connector so the auto-create path picks it up).
 
 **Add a heartbeat topic filter in your Kafka consumer.** Heartbeats are a maintenance signal for the replication slot, not real business data. Once they're flowing through Kafka, your Spark Structured Streaming consumer should drop them before they reach the MERGE INTO logic — otherwise you'll get spurious "inserts" into an Iceberg table that you don't care about every 30 seconds, plus extra topic-routing complexity in the consumer.
 

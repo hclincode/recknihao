@@ -1,93 +1,89 @@
-# Judge Feedback — Iter 316
+# Judge Feedback — Iter 317
 
 Date: 2026-05-27
 Phase: extended
-Topics: Postgres replication slot WAL bloat — Debezium CDC (Q1) + OPA decision log debugging for Trino access control (Q2)
+Topics: Mixed column-masking-uri + batch-column-masking-uri footgun (Q1) + Debezium heartbeat.action.query for low-traffic databases (Q2)
 
 ---
 
-## Q1 — Postgres replication slot WAL bloat
+## Q1 — Column masking stopped working after adding batch masking endpoint
 
 ### Score
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 4.25 | All core mechanics correct: slot semantics, `max_slot_wal_keep_size`, `wal_status` lifecycle, `restart_lsn` vs `confirmed_flush_lsn`, `safe_wal_size`, heartbeat, `snapshot.mode: no_data`. **One concrete version error**: `inactive_since` is PG 17+, not PG 14+ as stated. (PG 14 added `conflicting`, PG 16 added `invalidation_reason`, PG 17 added `inactive_since`.) |
-| Beginner clarity | 5.0 | Opens with "the #1 Debezium production incident" framing. Defines WAL and slot from first principles, uses concrete numbers (50 GB, 30 sec), explains root-cause chain in numbered steps, tells engineer exactly what each LSN column physically represents. Zero assumed OLAP knowledge. |
-| Practical applicability | 5.0 | Four-item action list, exact `postgresql.conf` line, executable monitoring SQL with alert thresholds, two-statement recovery SQL, exact Debezium config line, explicit staging runbook walkthrough guidance. Fits on-prem k8s + Postgres + Debezium stack. |
-| Completeness | 4.75 | Covers slot fundamentals, root-cause chain, three defenses (`max_slot_wal_keep_size`, monitoring, recovery runbook), heartbeats, recovery with `snapshot.mode: no_data`, gap-window backfill. Minor gaps: `invalidation_reason` (PG 16+) not mentioned for on-call triage; cross-database WAL accumulation case not covered; `heartbeat.action.query` for zero-traffic databases not mentioned. |
+| Technical accuracy | 4.75 | Core claims verified: `batch-column-masking-uri` overrides `column-masking-uri` when both set (exact docs quote confirmed); `batchColumnMasks` Rego rule name (plural) correct; response shape array with `viewExpression` + `index` verified; `input.action.filterResources[i]` path correct. Minor: silent fail-open behavior asserted confidently but not explicitly documented in Trino OPA docs — it's the observed behavior (undefined Rego rule = empty OPA result = no mask). Answer should soften to "in practice" or recommend checking OPA decision logs to confirm. |
+| Beginner clarity | 4.5 | Diagnosis-first framing, side-by-side comparison table, Rego snippet with annotations, CI detection SQL. Minor: "Rego rule" / "OPA policy code" not defined in plain terms for beginners who configured OPA via copy-paste. |
+| Practical applicability | 5.0 | Two clear fix paths (migrate to batch or revert to single), copy-pasteable Rego with correct response shape, CI SQL test to catch regressions. Fits production stack (Trino 467 + OPA per prod_info.md). |
+| Completeness | 4.75 | Covers: root cause, silent failure, precedence interaction, both response-shape differences, two fix options, CI detection, full truth table. Missing: no mention of checking OPA/Trino decision logs to confirm which endpoint is being called; no coordinator restart reminder for `opa.policy.*` config changes. |
 | **Average** | **4.75** | **PASS** |
 
 ### What Worked
-- Three-part failure chain (acks → confirmed_flush_lsn advances → Postgres cleans WAL; freeze any link and WAL accumulates) is the clearest explanation of slot bloat
-- "CDC dies, application stays up is almost always the right tradeoff" — exactly the framing needed to defend this design choice
-- Dual-LSN explanation (`restart_lsn` for disk impact, `confirmed_flush_lsn` for consumer lag) correctly mapped to Postgres docs
-- `safe_wal_size` as "most actionable single metric" is correct and verified against prometheus-community/postgres_exporter recommendations
-- Heartbeat `30000 ms` matches Confluent's recommended starting value
-- Recovery procedure: `snapshot.mode: no_data` + targeted backfill — correct and efficient (avoids multi-hour re-snapshot)
+- Precedence diagnosis ("batch overrides single when both set") is the exact root cause and was verified against official Trino docs quote
+- Side-by-side table (endpoint / rule name / response shape / cost) is the right mental model
+- `batchColumnMasks contains mask if { ... }` Rego is syntactically correct and matches official Trino example structure
+- CI detection query turns a one-time fix into a regression guard
+- Five-row truth table enumerates all configuration states
 
 ### What Missed
-- **`inactive_since` version wrong** — tagged PG 14+, actually PG 17+ (fixed in resources/13)
-- `invalidation_reason` (PG 16+) not mentioned — when `wal_status = 'lost'`, this column tells you why (`wal_removed`, `rows_removed`, etc.); first thing on-call should check
-- Cross-database WAL accumulation: slot is per-database but WAL is per-cluster — a high-traffic sibling database generates WAL that accumulates against a slot on a quiet database even without Debezium failure
-- `heartbeat.action.query` not mentioned — for zero-traffic databases, `heartbeat.interval.ms` alone does not advance the slot LSN; a write to the monitored database is needed
+- Silent-failure claim asserted as documented behavior, not confirmed. Should recommend enabling `opa.log-requests=true` / `opa.log-responses=true` for diagnostic confirmation
+- No coordinator restart reminder — `opa.policy.*` config changes require Trino coordinator restart
+- No version note: batch column masking landed ~Trino 448 (PR #21997); prod is 467 so available, but one sentence confirms it
 
 ### Technical Accuracy (verified)
-All claims verified against PostgreSQL docs, Gunnar Morling's restart_lsn/confirmed_flush_lsn blog, EDB PG 13 slot blog, Debezium connector docs, DBAGlobe heartbeat benchmark. Version error: `inactive_since` is PG 17+ per `pg_replication_slots` docs.
+All claims verified against Trino 481 OPA docs. `batch-column-masking-uri` precedence: exact quote confirmed — "If `opa.policy.batch-column-masking-uri` is set it overrides the value of `opa.policy.column-masking-uri`."
 
 ### Rubric Update
-- Postgres-to-Iceberg ingestion: prior avg 4.486 across 107 questions → (4.486 × 107 + 4.75) / 108 = **4.488 across 108 questions**. Status: PASSED.
+- Multi-tenant analytics: prior avg 4.476 across 115 questions → (4.476 × 115 + 4.75) / 116 = **4.478 across 116 questions**. Status: PASSED.
 
 ---
 
-## Q2 — OPA decision log debugging for Trino access control
+## Q2 — Debezium heartbeat not reducing replication slot lag on low-traffic database
 
 ### Score
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 4.75 | All field paths verified correct against official Trino 481 OPA docs and OPA decision-log spec: `input.context.queryId`, `input.context.identity.user/groups`, `input.action.operation`, `input.action.filterResources`, `input.action.resource.table.catalogName/tableName`, `metrics.timer_rego_query_eval_ns` (exact key, correct — not `eval_ns`), `decision_id`. **Minor**: OPA YAML config example is functionally broken — `decision_logs` block missing `service: backend`, so remote service never receives logs (now fixed in resources/05). |
-| Beginner clarity | 4.5 | Durability caveat as lead is the right framing. Step-by-step debugging recipe is well-sequenced. OpenSearch DSL example is concrete. Minor: operation-name casing (upper-camel in JSON vs lowercase in docs narrative) not explained; `pg_stat_activity` forensic cross-reference is off-stack for this production environment. |
-| Practical applicability | 5.0 | Runnable DSL example, exact field paths, batched-uri noise reduction, two focused on-call dashboards with thresholds, three-way forensic cross-reference pattern. Engineer can start Monday morning. |
-| Completeness | 4.75 | Covers: durability prerequisite, log structure, debugging recipe (queryId → operation → filterResources → decision_id), log shipping setup, exact JSON paths, batched-uri, on-call dashboards, analysis-time-only behavior. Missing: operation-name casing note; queryId join-key format spelled out; governance-doc cross-reference for "why" interpretation. |
+| Technical accuracy | 5.0 | All core claims verified. `heartbeat.interval.ms` emits Kafka heartbeat events (does NOT advance Postgres slot LSN alone). `heartbeat.action.query` generates a WAL write on the monitored DB that flows through logical decoding, advancing `confirmed_flush_lsn`. Publication-inclusion requirement for filtered publications confirmed. `ON CONFLICT DO UPDATE` single-row upsert pattern confirmed. `confirmed_flush_lsn` as the key column confirmed. |
+| Beginner clarity | 4.5 | One-sentence diagnosis, three-part decomposition, runnable SQL per diagnostic step. Minor: "publication" concept introduced functionally but `CREATE PUBLICATION` not linked back to; beginners may not know what a publication is. |
+| Practical applicability | 5.0 | Exact `CREATE TABLE`, `GRANT`, `ALTER PUBLICATION`, JSON connector snippet, four sequential diagnostic SQL checks. "Most likely cause" section reads like an on-call pointer. Stack-compatible (on-prem k8s + Postgres + Debezium). |
+| Completeness | 4.5 | Covers: heartbeat.interval.ms vs heartbeat.action.query distinction, publication requirement, single-row constraint, connector config, four diagnostic steps. Missing: `publication.autocreate.mode=filtered` interaction; cross-database WAL sharing explanation (why low-traffic DBs in multi-DB clusters are specifically affected); `REPLICA IDENTITY` requirement for UPDATE events. |
 | **Average** | **4.75** | **PASS** |
 
 ### What Worked
-- All field paths (`input.context.queryId`, `input.action.filterResources`, `metrics.timer_rego_query_eval_ns`) verified correct
-- Durability caveat as prerequisite — the most common reason decision-log debugging is impossible
-- `opa.policy.batched-uri` → 1 log line for 50 tables is accurate and high-value
-- Step-by-step recipe (queryId + user → operation → filterResources → decision_id) is exactly what on-call needs
-- `metrics.timer_rego_query_eval_ns` specifically called out (not truncated `eval_ns`)
+- Precise distinction: `heartbeat.interval.ms` advances Kafka offsets only; `heartbeat.action.query` generates WAL write that advances `confirmed_flush_lsn`
+- Three-part decomposition (table → publication → connector config) maps 1:1 to the three things engineers forget
+- `CHECK (id = 1)` single-row constraint with 2,880 rows/day growth calculation — real production detail
+- Diagnostic SQL sequenced to falsify each hypothesis
+- "Most likely cause" section provides a direct on-call pointer
 
 ### What Missed
-- **OPA YAML config broken** — missing `service: backend` in `decision_logs` block; as written ships console only (fixed in resources/05)
-- Operation-name casing: Trino emits upper-camel (`SelectFromColumns`, `FilterTables`) in JSON but docs narrative uses lowercase; one-line note prevents confusion
-- queryId join-key format not spelled out (`20250718_081710_03427_trino`) — explicit example helps when cross-referencing Trino event listener
-- `pg_stat_activity` forensic reference is off-stack (on-prem Trino + Iceberg + MinIO, not Postgres federation)
-- "OPA only at analysis time" blanket statement slightly imprecise: row-filter and column-mask Rego rules also evaluate at planning, and the universal "in-flight queries unaffected" claim holds for static auth but not for all dynamic auth configurations
+- `publication.autocreate.mode=filtered` interaction not mentioned — when Debezium auto-creates a filtered publication, heartbeat table must be in `table.include.list` or manually added (now added to resources/13)
+- Cross-database WAL sharing not explained — this is why low-traffic DBs in a multi-DB cluster accumulate WAL even without Debezium failure (now added to resources/13)
+- `REPLICA IDENTITY` requirement for UPDATE events (PK = DEFAULT works; otherwise need FULL)
 
 ### Technical Accuracy (verified)
-All field paths verified against Trino 481 OPA docs and OPA decision-logs spec. Operation names verified. `metrics.timer_rego_query_eval_ns` confirmed exact key.
+All claims verified against Debezium stable docs, Confluent CDC docs, Gunnar Morling's LSN blog, DBAGlobe heartbeat benchmark. No factual errors detected.
 
 ### Rubric Update
-- Multi-tenant analytics: prior avg 4.473 across 114 questions → (4.473 × 114 + 4.75) / 115 = **4.476 across 115 questions**. Status: PASSED.
+- Postgres-to-Iceberg ingestion: prior avg 4.488 across 108 questions → (4.488 × 108 + 4.75) / 109 = **4.490 across 109 questions**. Status: PASSED.
 
 ---
 
-## Iter 316 Summary
+## Iter 317 Summary
 
-**Iter 316 average: 4.75 — PASS** ✓
+**Iter 317 average: 4.75 — PASS** ✓
 
 ### Notable
-- Q1 4.75: Replication slot WAL bloat answered with correct three-part failure chain and dual-LSN explanation; `inactive_since` version error (PG 14+ → PG 17+) caught and fixed in resources/13
-- Q2 4.75: OPA decision log debugging answered with all field paths verified correct; broken YAML config (missing `service: backend`) caught and fixed in resources/05
+- Q1 4.75: Mixed endpoint footgun correctly diagnosed with exact precedence rule from Trino docs; coordinator restart note missing
+- Q2 4.75: heartbeat.action.query distinction from heartbeat.interval.ms correct and verified; publication.autocreate.mode footgun and cross-database WAL sharing gaps
 
 ### Resource fixes applied this iteration
-1. **resources/13-postgres-to-iceberg-ingestion.md** — `inactive_since` version tag corrected from PG 14+ to PG 17+
-2. **resources/05-multi-tenant-analytics.md** — OPA decision_logs YAML config fixed to include `service: backend` in the decision_logs block
+1. **resources/05-multi-tenant-analytics.md** — Added exact Trino docs precedence quote for `batch-column-masking-uri` overriding `column-masking-uri`; added coordinator restart note for `opa.policy.*` changes
+2. **resources/13-postgres-to-iceberg-ingestion.md** — Added `publication.autocreate.mode=filtered` interaction callout; added cross-database WAL sharing explanation
 
-### Suggested focus for Iter 317
-- "Postgres-to-Iceberg ingestion" (4.488/108 — probe `invalidation_reason` (PG 16+) for on-call triage, or `heartbeat.action.query` for zero-traffic databases)
-- "Multi-tenant analytics" (4.476/115 — probe the mixed endpoint config footgun: `batch-column-masking-uri` overrides `column-masking-uri` if both set)
-- "Storage sizing" (4.521/6 — probe a different angle: retention math or time-travel storage cost)
+### Suggested focus for Iter 318
+- "Multi-tenant analytics" (4.478/116 — probe OPA row-filter performance at scale: Rego evaluation latency under high-concurrency, policy caching, bundle loading)
+- "Postgres-to-Iceberg ingestion" (4.490/109 — probe schema evolution mid-CDC-pipeline: ADD COLUMN in Postgres, how Debezium handles schema registry updates, Iceberg schema evolution via ADD COLUMN)
+- "Storage sizing" (4.521/6 — probe time-travel storage costs or partition-level sizing)
 - "Real-time vs batch" (4.771/6 — probe Trino read-side effects of high-frequency streaming commits / HMS lock contention)

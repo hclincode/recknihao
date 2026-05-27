@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.476 | 115 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.478 | 116 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
@@ -40,7 +40,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.521 | 6 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.488 | 108 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.490 | 109 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.655 | 20 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
@@ -50,6 +50,44 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 317 — 2026-05-27
+
+**Q1** — Mixed `batch-column-masking-uri` + `column-masking-uri` footgun: batch overrides single when both configured (verified exact Trino docs quote), `batchColumnMasks` Rego rule name, response shape array with `viewExpression`+`index`, silent fail-open, two fix paths, CI detection SQL, five-row truth table
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.75 |
+| **Average** | **4.75** — PASS |
+
+`batch-column-masking-uri` precedence rule added with exact docs quote; coordinator restart note added. Topic running avg: (4.476×115 + 4.75)/116 = **4.478/116 questions** — PASSED.
+
+**Q2** — Debezium `heartbeat.action.query` for low-traffic databases: `heartbeat.interval.ms` vs `heartbeat.action.query` distinction, publication-inclusion requirement, single-row upsert pattern, four diagnostic steps
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** — PASS |
+
+`publication.autocreate.mode=filtered` interaction and cross-database WAL sharing explanation added to resources/13. Topic running avg: (4.488×108 + 4.75)/109 = **4.490/109 questions** — PASSED.
+
+**Iter 317 average: 4.75 — PASS** ✓
+
+**Topics updated**:
+- Multi-tenant analytics: 4.476/115 → **4.478/116 questions** (PASSED — stable)
+- Postgres-to-Iceberg ingestion: 4.488/108 → **4.490/109 questions** (PASSED — stable)
+
+**Resource fixes this iteration**:
+- resources/05: batch-column-masking-uri precedence docs quote added; coordinator restart note added
+- resources/13: publication.autocreate.mode=filtered callout; cross-database WAL sharing explanation
+
+---
 
 ### Iter 316 — 2026-05-27
 

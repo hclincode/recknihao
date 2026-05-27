@@ -1,12 +1,12 @@
-# Iter 316 Questions
+# Iter 317 Questions
 
 Date: 2026-05-27
-Topics: Postgres replication slot WAL bloat (Q1) + OPA decision log debugging for Trino access control (Q2)
+Topics: Mixed column-masking-uri + batch-column-masking-uri footgun (Q1) + Debezium heartbeat.action.query for low-traffic databases (Q2)
 
-## Q1 — Postgres replication slot WAL bloat
+## Q1 — Column masking stopped working after adding batch masking endpoint
 
-We set up Debezium to stream changes from our Postgres database into our data pipeline about two months ago. It's been working fine, but last week our ops team started getting disk-full alerts on the Postgres server itself — not the analytics side, but the actual production database. We haven't changed our data volume much. After some digging, we found something called a "replication slot" that seems to be holding onto a huge amount of stuff. What is that, what's causing the disk to fill up, and how do we stop it from happening again without just turning off our sync pipeline?
+We set up Trino with a security policy to mask certain columns in our analytics tables — things like email addresses and API keys — so that different customers only see their own data and sensitive fields are hidden. That's been working fine. But last week we added a new "batch" version of the same masking endpoint because our team heard it was more efficient. Now we're getting reports that some users who were previously seeing masked data are suddenly seeing plain text values instead. We didn't change any policy logic, just added the new endpoint. What could be causing column masking to stop working after adding a second masking endpoint?
 
-## Q2 — OPA decision log debugging for Trino access control
+## Q2 — Debezium heartbeat not reducing replication slot lag on low-traffic database
 
-We've been using OPA to control which rows each of our customers can see in Trino. Now we're getting requests to also debug why a specific user got access to — or was blocked from — certain data. OPA apparently has some kind of decision log, but when I look at it the entries are massive and hard to search through. What's actually in those logs, how do I read them to figure out why a particular query was allowed or denied, and is there a smarter way to set this up so debugging access decisions doesn't take an hour every time?
+We're using Debezium to stream changes from our Postgres database into our data lake. On our high-traffic production database, everything works — we can see events flowing through. But on our analytics staging database, which barely gets any writes (maybe a handful per hour), Debezium seems to fall behind and the lag just keeps growing even though the connector is running and showing as healthy. We added a heartbeat interval config thinking that would help keep things moving, but the lag on the Postgres side doesn't seem to be going down. What's actually happening and what are we missing?
