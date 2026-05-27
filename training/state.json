@@ -1,7 +1,7 @@
 {
-  "iteration": 285,
+  "iteration": 286,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter284 avg 4.79: Q1 (4.80 PASS) EXPLAIN ANALYZE predicate pushdown — ScanFilterProject vs TableScan, constraint annotation, dynamicFilterSplitsProcessed, Postgres slow query log. Q2 (4.78 PASS) system.query() JSONB passthrough — verbatim SQL, no outer pushdown, ORDER BY not preserved, Iceberg JOIN with DF, OPA bypass concern. TOPIC: Trino federation 4.498/241 → 4.500/243. BORDERLINE PASSED (true value 4.4998, gap <0.0002). Continuing to solidify."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter285: Q1 (4.40 FAIL) DF domain compaction — CRITICAL ERROR: SET SESSION iceberg.dynamic_filtering_wait_timeout does not exist for Iceberg connector (catalog config only); teacher285 fixed resource 22. Q2 (4.83 PASS) resource groups no catalog routing; PgBouncer + CONNECTION LIMIT + resource groups via X-Trino-Source. TOPIC: Trino federation 4.500/243 → 4.501/245. DEFINITIVELY PASSED (4.501 > 4.5 threshold)!"
 }

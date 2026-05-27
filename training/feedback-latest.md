@@ -1,78 +1,92 @@
-# Feedback — Iter 284 (Extended phase)
+# Feedback — Iter 285 (Extended phase)
 
 Date: 2026-05-27
-Topic: Trino federation — EXPLAIN ANALYZE predicate pushdown verification (Q1 PASS) + system.query() JSONB passthrough (Q2 PASS)
+Topic: Trino federation — DF domain compaction (Q1 FAIL) + resource groups no catalog routing (Q2 PASS)
 
 ## Results summary
 
 | Question | Topic angle | Score | Pass/Fail |
 |---|---|---|---|
-| Q1 | EXPLAIN ANALYZE for pushdown verification: ScanFilterProject vs TableScan, constraint annotation, dynamicFilterSplitsProcessed, Postgres slow query log | **4.80** | PASS |
-| Q2 | system.query() for JSONB GIN index filtering: verbatim SQL, no outer pushdown, ORDER BY not preserved, Iceberg JOIN works, OPA bypass concern | **4.78** | PASS |
+| Q1 | Dynamic filtering breakdown at 2M distinct join keys: domain compaction to BETWEEN range, Iceberg 1s wait timeout, enable_large_dynamic_filters, ingest as structural fix | **4.40** | **FAIL** |
+| Q2 | Resource groups cannot route by catalog; three-layer Postgres protection: CONNECTION LIMIT, PgBouncer, resource groups via X-Trino-Source; coordinator restart required | **4.83** | PASS |
 
-**Iter 284 average: 4.79 — PASS** ✓ Both passed!
+**Iter 285 average: 4.615 — mixed** (Q1 FAIL, Q2 PASS)
 
-**Topic update**: Trino federation: 4.498/241 → **4.500/243** (PASSED — at threshold! True value 4.4998, gap < 0.0002)
+**Topic update**: Trino federation: 4.500/243 → **4.501/245** (**DEFINITIVELY PASSED** — 4.501 > 4.5 threshold!)
+
+---
+
+## Critical error that caused Q1 FAIL
+
+### Iceberg connector has NO session-property form for dynamic filtering wait timeout
+
+The answer included:
+```sql
+SET SESSION iceberg.dynamic_filtering_wait_timeout = '20s';
+```
+
+**This is WRONG.** The Iceberg connector does NOT expose `dynamic_filtering_wait_timeout` as a session property. It is catalog-config only:
+
+```properties
+# etc/catalog/iceberg.properties — requires coordinator restart
+iceberg.dynamic-filtering.wait-timeout=15s
+```
+
+Hive connector: HAS `<hive-catalog>.dynamic_filtering_wait_timeout` as a session property.
+Delta Lake connector: HAS session property form.
+Iceberg connector: **NO session property — catalog config only.**
+
+**Teacher285 has fixed resource 22** with explicit callout, connector comparison table, and "DOES NOT WORK" comments removing all phantom Iceberg session property examples.
 
 ---
 
 ## What worked
 
-### Q1 — EXPLAIN ANALYZE predicate pushdown (4.80)
-1. ScanFilterProject above TableScan = pushdown FAILED — canonical signal, verified
-2. constraint annotation under TableScan = pushdown SUCCEEDED — verified
-3. `EXPLAIN (TYPE DISTRIBUTED)` first (no cost), then EXPLAIN ANALYZE for runtime row counts — correct approach
-4. `Input: N rows` on Postgres TableScan as runtime proof — correct and concrete
-5. `dynamicFilterSplitsProcessed > 0` as DF confirmation metric — verified (PR #3217)
-6. Postgres slow query log (`log_min_duration_statement=0`) as ground-truth fallback — excellent practical tip
-7. Common pushdown blockers: function wrapping, type mismatch, OR across tables, ILIKE without collate — all correct
+### Q1 — DF domain compaction (4.40 — FAIL despite mostly correct content)
+1. Domain compaction threshold 256 → BETWEEN range — verified correct
+2. Iceberg 1s default wait timeout as key binding constraint — correct
+3. `enable_large_dynamic_filters` session property — real in Trino 467 — verified
+4. EXPLAIN diagnostic path (dynamicFilters annotation → dynamicFilterSplitsProcessed) — correct
+5. Ingest Postgres lookup into Iceberg as structural fix — correct
+6. MERGE INTO incremental sync with overlap watermark — correct
+7. Selective WHERE predicate to shrink build side — correct
 
-### Q2 — system.query() JSONB passthrough (4.78)
-1. JSONB json_extract_scalar/json_extract run on Trino workers (GIN index ignored) — correct
-2. `<catalog>.system.query(query => '...')` syntax — verified against official docs
-3. Single-quote doubling (`''`) inside query string — correct
-4. No outer predicate pushdown — WHERE outside the function runs in Trino memory — critical and correct
-5. ORDER BY inside query string not preserved in Trino output — verified
-6. JOIN with Iceberg works, dynamic filtering applies on Iceberg side — correct
-7. OPA row filters / column masks do NOT apply to system.query() results — verified, correct security callout
-8. Try EXPLAIN first before reaching for system.query() (simple equality may push down) — good advice
-
----
-
-## Errors / gaps (did not block pass)
-
-### Q1 (minor)
-- `EXPLAIN (TYPE IO)` not mentioned (shows object storage I/O predictions in addition to plan)
-- No mention of partial vs full pushdown (some predicates push, others stay in Trino)
-
-### Q2 (minor)
-- Single-split execution model not mentioned: system.query() result comes via a single JDBC connection — no parallelism
-- JSONB → VARCHAR type coercion edge case not mentioned: if system.query() returns a JSONB column, Trino may display it as VARCHAR
-- system.query() is read-only — cannot INSERT/UPDATE/DELETE via passthrough — not mentioned
+### Q2 — Resource groups (4.83 PASS)
+1. No `catalog` selector in Trino resource groups — verified (routing before parsing)
+2. Valid selectors: user, source, clientTags, queryType, sessionPropertyFilters — verified
+3. Postgres CONNECTION LIMIT on the Trino role — correct and immediate
+4. PgBouncer transaction-pooling with `prepareThreshold=0` — verified correct
+5. `hardConcurrencyLimit`/`maxQueued` correct property names — verified
+6. Coordinator restart required for file-based resource group config — verified
+7. X-Trino-Source header for source selector routing — correct
 
 ---
 
-## Resource fixes before iter285
+## Errors / gaps
 
-None urgent. Resource 22 covers all material correctly.
+### Q1 (CRITICAL — caused FAIL)
+- `SET SESSION iceberg.dynamic_filtering_wait_timeout = '20s'` is a phantom session property — does not exist for Iceberg connector. **Teacher285 has fixed resource 22.**
 
-### Nice-to-have
-1. **Add system.query() read-only note** (resource 22, system.query() section): clarify that system.query() only supports SELECT — no DML passthrough
+### Q2 (minor — did not block pass)
+- No mention of DB-backed resource group configuration manager as a hot-reload alternative (file-based requires restart; DB-backed polls for changes)
+- No mention that `enable_large_dynamic_filters` was removed in Trino 480 (relevant for future Trino upgrades)
 
 ---
 
-## Next steps
+## Resource fixes status
 
-Topic is at 4.500/243, essentially at the ≥ 4.5 threshold. The true computed value is 4.4998 (gap < 0.0002). Continue one or two more iterations with high-quality coverage to solidify the PASSED status beyond any rounding ambiguity.
+**Teacher285 fix applied**: Resource 22 corrected to remove all phantom Iceberg session property examples for `dynamic_filtering_wait_timeout`. Now correctly states: Iceberg = catalog config only (coordinator restart required); Hive/Delta/JDBC = session property available.
 
-## Suggested iter285 angles
+---
 
-1. **Re-test: dynamic filtering with high-cardinality keys + domain compaction** — DF IN-list ≥256 values compacted to range; `SET SESSION domain_compaction_threshold = 512`; when DF stops being effective for high-cardinality joins
+## Suggested iter286 angles (topic PASSED at 4.501/245 — continue to solidify)
 
-2. **Trino resource groups for federated workloads** — `hardConcurrencyLimit`, `maxQueued`, source selectors with `X-Trino-Source` header; file-based config requires coordinator restart; queue depth monitoring
+1. **Re-test: Iceberg DF wait timeout (verify fix applied)** — engineer asks how to tune dynamic filtering wait timeout for an Iceberg-Postgres cross-catalog join; correct answer must NOT say SET SESSION iceberg.*; must say catalog config only with coordinator restart
 
-3. **ILIKE case-insensitive search via Trino → Postgres** — conditional on `enable_string_pushdown_with_collate=true` session property AND compatible column collation; COLLATE "C" warning for ICU columns; pg_trgm GIN index for unanchored LIKE
+2. **Trino ILIKE pushdown conditions** — case-insensitive LIKE on Postgres text column; `enable_string_pushdown_with_collate=true` session property + compatible column collation (COLLATE "C" risk for ICU columns); what happens without the flag
 
-4. **federation + OPA: how Trino applies authorization to JDBC scans** — OPA evaluates at the Trino layer, not Postgres layer; `system.query()` bypasses column masking; file-based rules vs OPA integration
+3. **Postgres unsupported type handling** — engineer confused why a column exists in Postgres but is missing from Trino schema view; `postgresql.unsupported-type-handling=IGNORE` (default silently drops); `CONVERT_TO_VARCHAR` to expose; array mapping; custom ENUMs → VARCHAR
 
-5. **Incremental MERGE INTO from Postgres with watermark — edge cases** — upper bound watermark prevents race condition; hard-delete handling; schema evolution (new columns)
+4. **Dynamic filtering with broadcast join hint** — when CBO guesses wrong build/probe assignment; `join_distribution_type='BROADCAST'` forces correct side; when to override
+
+5. **Federated query result ordering** — engineer expects ORDER BY on Postgres federation query to be preserved in Trino result; it's not guaranteed (no ORDER BY preservation across JDBC); ORDER BY must be at the Trino level
