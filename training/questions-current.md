@@ -1,17 +1,9 @@
-# Iter 289 Questions
+# Iter 290 Questions
 
-## Q1 — Query is slow even though I filtered by date — is something ignoring my WHERE clause?
+## Q1 — Does DATE() or CAST() on a timestamp column break Iceberg partition pruning in Trino?
 
-So I have an Iceberg table that's partitioned by day on an `event_time` column — at least that's how I think it was set up. I'm running a Trino query to pull usage events for the last 30 days, and I wrote the WHERE clause like this:
+I've been reading that you should always filter on your partition column directly and avoid wrapping it in functions, because Trino can't push down the filter into the partition scan. But I'm confused about where the line is. Like, my timestamp column `event_at` is what the Iceberg table is partitioned on by day. If I write `WHERE DATE(event_at) = DATE '2026-05-01'` or `WHERE CAST(event_at AS DATE) = DATE '2026-05-01'` — does that actually break partition pruning? I've also seen people use `date_trunc('day', event_at) = ...` and I'm not sure if that's the same thing or worse. We're running Trino against Iceberg tables in MinIO and I really can't tell which of these forms is safe versus which ones are silently doing a full scan.
 
-```sql
-WHERE DATE(event_time) >= DATE('2026-04-27')
-```
+## Q2 — Why does JOIN order matter in Trino and how do I make sure it picks the right side?
 
-The query works and returns correct results, but it's scanning way more data than I'd expect — I can see it in the Trino UI, it's touching hundreds of files across every partition going back months. In Postgres I never had to think about stuff like this — if I filtered on a column, it used the index. Is wrapping the column in `DATE()` somehow preventing Trino from skipping old partitions? Should I be writing this filter differently? I'm not sure if there's a "right" way to filter on dates in Trino that keeps the scan fast.
-
-## Q2 — COUNT(DISTINCT user_id) takes forever — is there a faster version that's "close enough"?
-
-We have a query that counts unique active users per tenant per week, and it's running `COUNT(DISTINCT user_id)` over about 300 million rows in Iceberg. It's painfully slow — sometimes 90+ seconds. Someone on the team mentioned there might be an approximate version of this that runs much faster but gives you a number that's like 99% accurate. Is that a real thing in Trino? And if I switch to it, how do I know what tradeoff I'm actually making — is it off by a few rows, or could it be off by thousands?
-
-Also separately: I've heard I should run EXPLAIN on my queries before just firing them, but when I do it in Trino I get this big tree of output that doesn't look anything like what Postgres EXPLAIN gives me. Is there something specific I should be looking for in Trino's EXPLAIN to tell if a query is going to be expensive before I run it?
+In Postgres I never really thought about JOIN order because the planner figures it out. But I'm running a query in Trino that joins our big `events` Iceberg table (like 400M rows) against a smaller `accounts` table (maybe 50k rows), and someone on the team said "make sure the small table is on the right side of the JOIN." I don't really understand why that matters or what Trino is doing differently from Postgres here. Is Trino loading one of these tables entirely into memory? If so, how does it decide which one? And is there a way for me to see what it's actually doing, or force it to do the right thing if it's choosing wrong?

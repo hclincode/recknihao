@@ -881,16 +881,18 @@ WHERE year(occurred_at) = 2026 AND month(occurred_at) = 5  -- separate scalar fn
 
 ```sql
 -- Trino has special-case unwrapping for simple CAST(ts AS DATE) comparisons against
--- DATE literals on a day(ts)-partitioned table. The optimizer recognizes the equivalence
--- and rewrites it to an equivalent timestamp range predicate before partition pruning.
+-- DATE literals on a day(ts)-partitioned table. The UnwrapCastInComparison optimizer
+-- rule (PR #13567) rewrites this to an equivalent timestamp range predicate before
+-- partition pruning, so this form does prune partitions on Trino 467.
 WHERE CAST(occurred_at AS DATE) >= DATE '2026-05-01'
 
--- date_trunc('day', ts) against day-aligned timestamps is also recognized in current Trino
--- versions and rewrites to a partition-aware predicate.
+-- date_trunc('day', ts) = DATE '...' is also handled by Trino 467 — specifically
+-- by the UnwrapDateTruncInComparison rule (PR #14011). Like CAST/DATE(), it is
+-- rewritten to a timestamp range predicate and partition pruning works.
 WHERE date_trunc('day', occurred_at) = DATE '2026-05-01'
 ```
 
-These may work fine in practice — if you've been writing `CAST(occurred_at AS DATE)` predicates and seeing reasonable scan sizes in the query stats, you are not necessarily losing pruning. Check the `EXPLAIN` plan or the `system.runtime.queries` row's `physical_input_bytes` to confirm. **However, this behavior depends on the Trino version's optimizer rules** and the exact shape of the predicate; minor changes to either can silently disable the unwrap.
+These may work fine in practice — if you've been writing `CAST(occurred_at AS DATE)` or `date_trunc('day', occurred_at)` predicates and seeing reasonable scan sizes in the query stats, you are not necessarily losing pruning. Check the `EXPLAIN` plan or the `system.runtime.queries` row's `physical_input_bytes` to confirm. **However, this behavior depends on the Trino version's optimizer rules**, on the `unwrap_casts` session property staying enabled, and on the exact shape of the predicate (e.g., `timestamp with time zone` columns have known unwrap limitations); minor changes to any of these can silently disable the unwrap.
 
 **The safest pattern is always filtering on the raw column with a TIMESTAMP literal** — this is guaranteed to allow pruning regardless of Trino version, regardless of optimizer rule changes, and regardless of partition spec evolution:
 

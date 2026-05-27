@@ -1,69 +1,80 @@
-# Feedback — Iter 289 (Extended phase)
+# Feedback — Iter 290 (Extended phase)
 
 Date: 2026-05-27
-Topic: SQL query best practices for OLAP — first iteration of new topic (Q1 PASS barely, Q2 PASS strong)
+Topic: SQL query best practices for OLAP — second iteration (Q1 FAIL, Q2 PASS perfect)
 
 ## Results summary
 
 | Question | Topic angle | Score | Pass/Fail |
 |---|---|---|---|
-| Q1 | Partition pruning: DATE()/CAST() handling in Trino 467, UnwrapCastInComparison, TIMESTAMP range as defensive best practice | **3.50** | PASS (barely) |
-| Q2 | approx_distinct() HyperLogLog, COUNT DISTINCT shuffle cost, EXPLAIN vs EXPLAIN ANALYZE, Physical Input, CPU/Scheduled timing | **4.88** | PASS |
+| Q1 | date_trunc vs DATE()/CAST() partition pruning — which forms break pruning in Trino 467? | **3.00** | FAIL |
+| Q2 | JOIN ordering: broadcast vs partitioned join; CBO + ANALYZE; join_distribution_type; EXPLAIN signals | **5.00** | PASS |
 
-**Iter 289 average: 4.19 — PASS** ✓
+**Iter 290 average: 4.00**
 
-**Topic update**: SQL query best practices for OLAP: NEW TOPIC → 4.19/2 questions → **PASSED** (≥3.5 threshold with 2 angles)
+**Topic update**: SQL query best practices for OLAP: 4.19/2 → **4.095/4 questions** (PASSED — still above 3.5 threshold but Q1 failures are pulling down the avg)
+
+---
+
+## Critical error (Q1) — recurring optimizer rule pattern
+
+**The mistake**: The corrected resource 23 section 6 over-rotated after the iter289 DATE()/CAST() fix. It marked `date_trunc('day', ts)` as "truly non-invertible" and put it in the "Functions that definitely break pruning" table. This is wrong.
+
+**The truth**: Trino 467 has TWO optimizer unwrap rules for timestamp predicates:
+- `UnwrapCastInComparison` (PR #13567, 2022): handles `CAST(ts AS DATE)` and `DATE(ts)` comparisons
+- `UnwrapDateTruncInComparison` (PR #14011, 2022): handles `date_trunc('day', ts) = DATE '...'` comparisons
+
+Both rewrite the predicate to an equivalent TIMESTAMP range before partition pruning. The Trino blog post "Just the right time date predicates with Iceberg" (trino.io/blog/2023/04/11/date-predicates.html) explicitly confirms this for BOTH forms.
+
+**What actually breaks pruning** (no unwrap rule exists):
+- `year(ts) = 2026` — non-monotonic, can't be expressed as a single range
+- `month(ts) = 5` — non-monotonic
+- `day_of_week(ts) = 3` — non-monotonic
+- `hour(ts) = 14` — non-monotonic
+- `LOWER(col)`, `SUBSTR(col, ...)` — not invertible
+
+**Edge cases where even DATE()/CAST()/date_trunc may fail**:
+- `timestamp with time zone` columns — unwrap has known TZ normalization limitations
+- `unwrap_casts` session property = false
+- Complex nested expressions
+
+**Resources fixed**: Both resource 10 and resource 23 section 6 have been corrected to accurately document both optimizer rules. The resource correction pattern: iter289 fixed DATE(), resource over-corrected to break date_trunc; iter290 now fixed date_trunc back to correct.
 
 ---
 
 ## What worked
 
-### Q1 — Partition pruning function wrapping (3.50)
-1. TIMESTAMP range rewrite (`>= TIMESTAMP '...' AND < TIMESTAMP '...'`) — correct and is the recommended form
-2. `constraint on [event_time]` in TableScan vs `ScanFilterProject` distinction — correct EXPLAIN signals
-3. Planning-time vs runtime framing for partition pruning — conceptually accurate
-4. EXPLAIN verification recommendation — correct and practical
+### Q1
+1. DATE(x) = CAST(x AS DATE) aliasing and UnwrapCastInComparison — correct
+2. TIMESTAMP range as the safe defensive production form — correct
+3. `constraint on [event_at]` in TableScan as pruning signal — correct
+4. `timestamp with time zone` edge case — correctly flagged
 
-### Q2 — approx_distinct and EXPLAIN (4.88)
-1. HyperLogLog backing, 2.3% default error, syntax `approx_distinct(col, 0.01)` — all verified
-2. COUNT DISTINCT shuffle cost explanation (RemoteExchange moving all distinct values) — correct
-3. Three EXPLAIN forms clearly delineated (bare EXPLAIN, TYPE DISTRIBUTED, EXPLAIN ANALYZE) — correct
-4. Physical Input field in EXPLAIN ANALYZE — verified
-5. CPU vs Scheduled vs Blocked timing interpretation — correct (I/O-bound vs compute-bound)
-6. Pre-run EXPLAIN checklist — directly actionable
-
----
-
-## Critical error (Q1)
-
-**DATE(x) is CAST(x AS DATE) in Trino — and Trino 467 CAN unwrap this.**
-
-The answer stated `DATE(event_time)` is "exactly why" Trino was doing a full scan. This is wrong for Trino 467. `DATE(x)` is documented as an alias for `CAST(x AS DATE)`. Trino's `UnwrapCastInComparison` optimizer rule (PR #13567, shipped 2022, trino.io/blog/2023/04/11/date-predicates.html) handles this case and does enable partition pruning in most cases.
-
-**What actually breaks pruning** (truly non-invertible):
-- `date_trunc('day', col)` — non-invertible, many timestamps map to same truncated value
-- `year(col)`, `month(col)`, `day_of_week(col)`, `hour(col)` — non-monotonic for ranges
-- `LOWER(col)`, `SUBSTR(col, ...)` etc.
-- **Edge case**: `timestamp with time zone` — UnwrapCastInComparison has known limitations here; EXPLAIN verification extra important
-
-**The fix in resource 23** (section 6) has been applied: added UnwrapCastInComparison explanation, "Trino CAN unwrap" vs "definitely breaks pruning" distinction, kept TIMESTAMP range as defensive best practice, added timestamp with time zone caveat.
+### Q2 (perfect score)
+1. Broadcast = smaller table as hash table in every worker's memory — correct
+2. Partitioned join = shuffle both tables by key — correct
+3. CBO needs NDV from ANALYZE (not just row count) — correct
+4. `join_distribution_type` values (AUTOMATIC/BROADCAST/PARTITIONED) — correct
+5. `Join[BROADCAST]` in EXPLAIN = broadcast active — correct
+6. `Estimates: {rows: ?}` = CBO guessing — correct
+7. ANALYZE TABLE → Puffin files → NDV — correct
+8. Postgres-vs-Trino mental model (B-tree vs file-based) — excellent framing
 
 ---
 
 ## Resource fixes applied
 
-- **Resource 23 section 6** — corrected DATE()/CAST() vs date_trunc distinction; added UnwrapCastInComparison explanation; added edge case for timestamp with time zone
+- **Resource 23 section 6** — removed date_trunc from "definitely breaks pruning"; added UnwrapDateTruncInComparison explanation; updated "functions Trino CAN unwrap" list; kept TIMESTAMP range as defensive production form
+- **Resource 10 lines ~888-894** — corrected back to accurate state: date_trunc('day', ts) IS handled by UnwrapDateTruncInComparison
 
 ---
 
-## Suggested iter290 angles
+## Suggested iter291 angles
 
-1. **SQL OLAP best practices — re-test partition pruning** (Q1 scored only 3.50 — need to solidify this angle with correct DATE()/CAST() nuance)
+1. **SQL OLAP best practices — final re-test on partition pruning** (Q1 scored 3.00; the correct answer should distinguish: DATE()/CAST()/date_trunc('day', ts) all work; year()/month()/day_of_week() do NOT; TIMESTAMP range is the explicit production form)
 
-2. **SQL OLAP best practices — JOIN ordering and CBO** — put smaller table as build side; when to trust CBO vs force join_distribution_type; how ANALYZE TABLE affects join planning
+2. **SQL OLAP best practices — LIMIT behavior** (doesn't reduce scan cost; TABLESAMPLE BERNOULLI alternative)
 
-3. **SQL OLAP best practices — CTEs vs subqueries vs multiple queries** — WITH clauses; Trino materializes some CTEs; when to push into one query vs split
+3. **SQL OLAP best practices — CTEs and subquery reuse** (Trino materializes some CTEs; running same subquery twice in OLTP habit is expensive in OLAP)
 
-4. **SQL OLAP best practices — LIMIT behavior** — reinforce that LIMIT doesn't reduce scan cost; TABLESAMPLE BERNOULLI alternative
-
-5. **Trino federation re-test** — topic is PASSED but solidifying at 4.511/251; any new angle to keep it high
+4. **New topic exploration** — if SQL OLAP is stable, start testing other weak areas from rubric

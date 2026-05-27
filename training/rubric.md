@@ -45,7 +45,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.511 | 251 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.763 | 4 |
-| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.19 | 2 |
+| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.095 | 4 |
 
 ---
 
@@ -9925,3 +9925,25 @@ Verified: trino.io/blog/2023/04/11/date-predicates.html, trino.io/docs/current/c
 **Key findings**: HyperLogLog backing of approx_distinct — verified; 2.3% standard error — verified; second-argument `e` in range [0.0040625, 0.26000] so 0.01 is valid — verified; EXPLAIN ANALYZE Physical Input and CPU/Scheduled/Blocked timing field names — verified; ScanFilterProject vs constraint-on-columns pushdown signals — correct. Minor gaps: no mention of `approx_set`/`merge`/`cardinality` for cross-day sketch reuse; no Trino Web UI pointer as alternative to text EXPLAIN.
 
 Verified: trino.io/docs/current/functions/hyperloglog.html, trino.io/docs/current/functions/aggregate.html, trino.io/docs/current/sql/explain-analyze.html.
+
+### Iter 290 Q1 — 2026-05-27 (EXTENDED PHASE) — SQL query best practices for OLAP (DATE()/CAST() vs date_trunc partition pruning: BOTH handled by Trino 467 optimizer — UnwrapCastInComparison and UnwrapDateTruncInComparison; truly broken: year(), month(), day_of_week(); TIMESTAMP range is defensive production form)
+
+**Score: 3.00/5.0 FAIL**
+
+**Topics updated**: SQL query best practices for OLAP — prior avg 4.19 across 2 questions (sum 8.38); new running avg (8.38 + 3.00) / 3 = 11.38 / 3 = **3.793 across 3 questions**. Status: PASSED (3.793 > 3.5 threshold, but declining — recurring optimizer accuracy failures).
+
+**CRITICAL ERROR**: Answer listed `date_trunc('day', event_at)` in "Functions that definitely break pruning" table — this is WRONG for Trino 467. Trino has `UnwrapDateTruncInComparison` (PR #14011, 2022) that handles `date_trunc('day', ts) = DATE '...'` comparisons and rewrites them to TIMESTAMP ranges, enabling partition pruning. Trino's own blog post "Just the right time date predicates with Iceberg" (trino.io/blog/2023/04/11/date-predicates.html) explicitly confirms this. The resources over-corrected after the iter289 Q1 DATE()/CAST() error and mis-labeled date_trunc as a pruning-breaker. Resources 10 and 23 have been re-corrected: both `CAST(ts AS DATE)` (UnwrapCastInComparison) AND `date_trunc('day', ts)` (UnwrapDateTruncInComparison) are handled; truly broken functions are non-monotonic ones: year(), month(), day_of_week(), hour().
+
+**Pattern**: iter289 Q1 incorrectly said DATE() breaks pruning; resource was over-corrected to say date_trunc breaks pruning; iter290 Q1 then inherited that error. Now both resources corrected.
+
+Verified: trino.io/blog/2023/04/11/date-predicates.html, github.com/trinodb/trino/pull/14011, github.com/trinodb/trino/issues/12925.
+
+### Iter 290 Q2 — 2026-05-27 (EXTENDED PHASE) — SQL query best practices for OLAP / Trino CBO (broadcast vs partitioned join; CBO needs NDV from ANALYZE; join_distribution_type BROADCAST/PARTITIONED; EXPLAIN Join[BROADCAST] vs Join[PARTITIONED]; Estimates: {rows: ?} means guessing)
+
+**Score: 5.00/5.0 PASS**
+
+**Topics updated**: SQL query best practices for OLAP — prior avg 3.793 across 3 questions (sum 11.38); new running avg (11.38 + 5.00) / 4 = 16.38 / 4 = **4.095 across 4 questions**. Status: PASSED (4.095 > 3.5 threshold). Trino CBO — already PASSED at 4.763/4 (no stat update needed, well above 4.5 threshold).
+
+**Key findings**: Broadcast = smaller table loaded into every worker as hash table — verified; partitioned join = shuffle both tables by key — verified; CBO needs NDV from ANALYZE TABLE — verified; `join_distribution_type` options (AUTOMATIC/BROADCAST/PARTITIONED) — verified; `Join[BROADCAST]` vs `Join[PARTITIONED]` in EXPLAIN — verified; `Estimates: {rows: ?}` = guessing — verified; ANALYZE TABLE populates NDV into Puffin files (Iceberg 1.1+) — verified. No significant errors.
+
+Verified: trino.io/docs/current/admin/properties-general.html, trino.io/docs/current/optimizer/cost-based-optimizations.html, trino.io/docs/current/sql/explain.html.

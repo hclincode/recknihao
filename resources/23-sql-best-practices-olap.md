@@ -143,34 +143,42 @@ WHERE event_date = DATE '2026-05-26'
 
 **Why**: Most functions applied to a column in WHERE block Iceberg from using that column for partition pruning or Parquet min/max statistics — the predicate cannot be **pushed down**. There are important exceptions in Trino 467, but the safe habit is to filter the raw column directly.
 
-**Important nuance for Trino 467**: Trino has an optimizer rule called `UnwrapCastInComparison` (shipped in 2022) that rewrites simple casts on the column side back into typed literals on the value side. So `WHERE CAST(event_ts AS DATE) = DATE '2026-05-26'` (and its alias `WHERE DATE(event_ts) = DATE '2026-05-26'`) is typically rewritten to a range predicate on `event_ts` and **does** prune partitions correctly. See Trino's blog post "Just the right time date predicates with Iceberg" (trino.io/blog/2023/04/11/date-predicates.html).
+**Important nuance for Trino 467**: Trino ships **two** optimizer rules that unwrap common timestamp/date predicates so partition pruning still works:
 
-Even so, the explicit TIMESTAMP range form below is the recommended defensive pattern: it always works, it's obvious to readers, and it doesn't depend on optimizer rules that can have edge cases.
+- **`UnwrapCastInComparison`** (Trino PR #13567, 2022): rewrites simple casts on the column side back to typed literals on the value side. So `WHERE CAST(event_ts AS DATE) = DATE '2026-05-26'` (and its alias `WHERE DATE(event_ts) = DATE '2026-05-26'`) is rewritten to a timestamp range predicate on `event_ts` and **does** prune partitions correctly.
+- **`UnwrapDateTruncInComparison`** (Trino PR #14011, 2022): handles `date_trunc('day', ts) = DATE '...'` (and the analogous `<`, `<=`, `>`, `>=` shapes) by rewriting it to the same kind of timestamp range predicate. So `WHERE date_trunc('day', event_ts) = DATE '2026-05-26'` also prunes partitions correctly on Trino 467.
 
-**Bad** — `date_trunc` is truly non-invertible (many timestamps map to the same day), so the optimizer cannot unwrap it and pruning is lost:
+See the Trino team's blog post "Just the right time date predicates with Iceberg" (trino.io/blog/2023/04/11/date-predicates.html), which walks through both rewrites.
+
+Even so, the explicit TIMESTAMP range form below is the recommended defensive pattern: it always works, it's obvious to readers, and it doesn't depend on optimizer rules that can have edge cases (see below).
+
+**OK on Trino 467** — both of these unwrap to a timestamp range and prune correctly:
 ```sql
-SELECT * FROM events
-WHERE date_trunc('day', event_ts) = DATE '2026-05-26';
+SELECT * FROM events WHERE CAST(event_ts AS DATE) = DATE '2026-05-26';
+SELECT * FROM events WHERE DATE(event_ts)        = DATE '2026-05-26';
+SELECT * FROM events WHERE date_trunc('day', event_ts) = DATE '2026-05-26';
 ```
 
-**Good** — express the same condition as a range against the raw column:
+**Recommended** — express the same condition as a range against the raw column. Guaranteed prunable on any Trino version, no optimizer dependency:
 ```sql
 SELECT * FROM events
 WHERE event_ts >= TIMESTAMP '2026-05-26 00:00:00'
   AND event_ts <  TIMESTAMP '2026-05-27 00:00:00';
 ```
 
-**Functions Trino 467 CAN unwrap (pruning usually works)**:
+**Functions Trino 467 CAN unwrap (pruning works)**:
 
-- `CAST(col AS DATE)` and its alias `DATE(col)` against a `DATE` literal
+- `CAST(col AS DATE)` and its alias `DATE(col)` against a `DATE` literal — via `UnwrapCastInComparison`
+- `date_trunc('day', col) = DATE '...'` (and `<`, `<=`, `>`, `>=`) — via `UnwrapDateTruncInComparison`
 - `CAST(col AS some_type)` for simple, monotonic, invertible casts on the column side
 - Comparisons like `=`, `<`, `<=`, `>`, `>=` against a typed literal
 
-**Functions that definitely break pruning (no unwrap possible)**:
+**Functions that truly break pruning (no unwrap rule exists)**:
+
+These are either **non-monotonic** (the value jumps around as `ts` increases, so the predicate cannot be expressed as a single contiguous timestamp range) or **non-invertible on strings**:
 
 | Bad | Good |
 |---|---|
-| `WHERE date_trunc('day', event_ts) = DATE '2026-05-26'` | `WHERE event_ts >= TIMESTAMP '2026-05-26 00:00:00' AND event_ts < TIMESTAMP '2026-05-27 00:00:00'` |
 | `WHERE year(event_ts) = 2026` | `WHERE event_ts >= TIMESTAMP '2026-01-01 00:00:00' AND event_ts < TIMESTAMP '2027-01-01 00:00:00'` |
 | `WHERE month(event_ts) = 5` | Range predicate on `event_ts` for the desired month(s) |
 | `WHERE day_of_week(event_ts) = 1` | Pre-compute a `dow` column at ingest if you need this filter often |
@@ -179,9 +187,13 @@ WHERE event_ts >= TIMESTAMP '2026-05-26 00:00:00'
 | `WHERE SUBSTR(country, 1, 2) = 'US'` | `WHERE country LIKE 'US%'` (LIKE with a leading literal can use pushdown) |
 | `WHERE CAST(user_id AS VARCHAR) = '42'` | `WHERE user_id = 42` (use correct type — section 5) |
 
-These functions are either **non-invertible** (multiple inputs map to the same output, e.g. `date_trunc`, `LOWER`) or **non-monotonic over ranges** (e.g. `year`, `month`, `day_of_week`) — there is no general way for the optimizer to translate them back into a range on the raw column.
+`year`, `month`, `day_of_week`, and `hour` are all **non-monotonic over time** — `month(ts) = 5` matches May of every year, which is not a single timestamp range, so there's no general rewrite. `LOWER` and `SUBSTR` are non-invertible (many inputs collapse to the same output), so the optimizer cannot recover the original column predicate.
 
-**Edge case — `timestamp with time zone` columns**: `UnwrapCastInComparison` has known limitations with TZ-normalized timestamp types. A `CAST(tz_col AS DATE)` predicate may not always unwrap cleanly. If your column is `timestamp(6) with time zone` and pruning is critical, use the explicit TIMESTAMP range form — and verify with `EXPLAIN`.
+**Edge cases where even the unwrap rules can fail** — fall back to the explicit TIMESTAMP range form and verify with `EXPLAIN`:
+
+- **`timestamp with time zone` columns**: both unwrap rules have known limitations with TZ-normalized timestamp types. `CAST(tz_col AS DATE)` or `date_trunc('day', tz_col)` may not always unwrap cleanly when the column is `timestamp(6) with time zone`.
+- **`unwrap_casts` session property set to `false`**: this disables `UnwrapCastInComparison` (and the related rules) entirely. If a teammate's session config turns it off, your `CAST`/`date_trunc` predicates silently stop pruning.
+- **Predicates that combine multiple columns or wrap the unwrappable expression in further arithmetic**: e.g. `date_trunc('day', event_ts) + INTERVAL '1' DAY = DATE '...'` is not recognized.
 
 Always test with `EXPLAIN` — if the predicate ends up inside a `ScanFilterProject` instead of as a `constraint` on the `TableScan`, the pushdown was lost.
 
