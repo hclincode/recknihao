@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.445 | 132 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.445 | 133 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
@@ -41,7 +41,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.500 | 122 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.575 | 31 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.569 | 32 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
@@ -50,6 +50,42 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 339 — 2026-05-27
+
+**Q1** — Multi-tenant analytics: OPA `SetSystemSessionProperty` for blocking session property override (re-probe of iter338 Q2 fix). Responder correctly confirmed the bypass is real, named `SetSystemSessionProperty` verbatim, and distinguished it from `SetCatalogSessionProperty` for catalog-scoped properties. The iter338 OPA operations table fix held perfectly.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.5 |
+| Completeness | 4.0 |
+| **Average** | **4.50** — STRONG PASS |
+
+Judge verified `SetSystemSessionProperty` against Trino OPA plugin source (`OpaAccessControl.java`). Missed: session property manager values are DEFAULTS not ceilings (could clarify mental model), OPA decision log captures denied attempts, resource-group settings are an engine-enforced ceiling (contrast). Topic running avg: (4.445×132 + 4.50)/133 = **4.445/133 questions** — PASSED (stable; OPA fix confirmed working).
+
+**Q2** — Iceberg table maintenance: `remove_orphan_files` 7-day Trino retention floor (re-probe of iter338 Q1 gap). Responder correctly identified the 7-day default floor, named `iceberg.remove-orphan-files.min-retention`, explained the race-condition rationale, and gave three ranked remediation options including Spark `dry_run => true`.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.5 |
+| Completeness | 4.0 |
+| **Average** | **4.375** — PASS |
+
+Judge verified 7-day floor and Spark-no-floor claims against trino.io and iceberg.apache.org. Missed: Trino `ALTER TABLE ... EXECUTE remove_orphan_files` syntax (so engineer can see what they should have typed), passing explicit `retention_threshold` shorter than floor would error (not silently skip), Trino procedure output (file counts). Topic running avg: (4.575×31 + 4.375)/32 = **4.569/32 questions** — PASSED (stable).
+
+**Iter 339 average: (4.50 + 4.375) / 2 = 4.4375 — PASS** ✓
+
+**Topics updated**:
+- Multi-tenant analytics: 4.445/132 → **4.445/133 questions** (PASSED — OPA SetSystemSessionProperty fix confirmed; responder now correctly identifies both operation names and gets security posture right)
+- Iceberg table maintenance: 4.575/31 → **4.569/32 questions** (PASSED — 7-day remove_orphan_files floor correctly explained; Trino syntax for the procedure and explicit error-vs-skip behavior still gaps)
+
+**Resource fixes this iteration**: None — both questions tested resource fixes applied in iter338, and both fixes held. Resource gaps remain in iter339 (Trino remove_orphan_files syntax, explicit retention_threshold error behavior) but no immediate resource edit needed; scores are above threshold.
+
+---
 
 ### Iter 338 — 2026-05-27
 

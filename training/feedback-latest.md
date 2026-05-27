@@ -1,90 +1,89 @@
-# Judge Feedback — Iter 338
+# Judge Feedback — Iter 339
 
 Date: 2026-05-27
 Phase: extended
-Topics: Iceberg table maintenance / expire_snapshots vs remove_orphan_files for crashed writes (Q1) + Multi-tenant analytics / OPA action names for blocking session property overrides (Q2)
+Topics: Multi-tenant analytics / OPA SetSystemSessionProperty re-probe (Q1) + Iceberg table maintenance / remove_orphan_files 7-day Trino retention floor (Q2)
 
 ---
 
-## Q1 — expire_snapshots vs remove_orphan_files — Crashed Write Files (STRONG PASS)
+## Q1 — OPA SetSystemSessionProperty for Blocking Session Property Overrides (STRONG PASS)
 
 ### Score
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 4.5 | Core distinction correct: expire_snapshots deletes files that WERE in expired snapshots; remove_orphan_files handles files NEVER in any snapshot (crashed writes). Ordering correct. Minor: answer says remove_orphan_files "does a full directory scan" — correct for Spark but Trino 467 also enforces 7-day retention floor. |
-| Beginner clarity | 5.0 | Excellent. Clear verdict in first sentence, concrete crash narrative, two-column comparison table, zero unexplained jargon. |
-| Practical applicability | 4.5 | Engineer knows exactly what to do: add remove_orphan_files as separate step, run after expire_snapshots. Four-step schedule provided. Missing: Trino 467 7-day floor (directly relevant for "last night" timeline — last night's crash files won't be cleaned by default). |
-| Completeness | 4.0 | Core question fully answered. Missing: concrete Spark CALL / Trino ALTER TABLE EXECUTE syntax; 7-day floor warning; dry_run Spark-only asymmetry. |
+| Technical accuracy | 5.0 | Confirmed bypass is real (SET SESSION overrides session-property-manager defaults). Named exact OPA operation `SetSystemSessionProperty`. Correctly distinguished `SetCatalogSessionProperty` for `<catalog>.<property>` forms. All example properties (query_max_execution_time, query_max_run_time, task_concurrency) are genuine system session properties. No factual errors. |
+| Beginner clarity | 4.5 | Direct yes/no opener, bolded operation name, concrete property examples. Pseudo-Rego snippet labeled as pseudocode. Could improve by stating session property manager values are defaults (not ceilings), which is why the override is possible. |
+| Practical applicability | 4.5 | Exact operation string ready to drop into OPA policy. Fits the on-prem OPA-backed Trino stack in prod_info.md. Missing: no mention to whitelist admin identities in the deny rule before first deploy. |
+| Completeness | 4.0 | Hits: bypass real, SetSystemSessionProperty, SetCatalogSessionProperty distinction. Missing: OPA decision log records denied attempts (useful for audit/detection); resource groups enforce engine-side ceilings (different from session-property defaults); deny snippet should elaborate on admin whitelist for power-user tuning. |
 | **Average** | **4.50** | **STRONG PASS** |
 
 ### What Worked
-- Correct mental model: expire_snapshots handles Class 1 garbage; remove_orphan_files handles Class 2.
-- Concrete narrative: "uploaded a Parquet file, then crashed before writing the Iceberg commit."
-- Two-column comparison table makes the distinction memorable.
-- Canonical maintenance ordering (compaction → expire → orphan → manifests).
-- Resources/17 fix from iter337 held perfectly.
+- Correct answer to "is this possible" — unambiguously yes.
+- Exact operation name given verbatim, verified against Trino OPA plugin source.
+- Correctly distinguishes system-level vs catalog-level properties with concrete examples.
+- Recommends OPA (right layer) over file-based ACLs — fits production stack.
+- iter338 OPA operations table fix confirmed holding.
 
 ### What Missed
-1. **Trino 467 7-day `retention_threshold` floor** — if the crash was last night, default `remove_orphan_files` will silently skip those fresh files. This directly affects the engineer's "last night" question.
-2. **No concrete syntax** — neither Spark `CALL system.remove_orphan_files(...)` nor Trino `ALTER TABLE ... EXECUTE remove_orphan_files(retention_threshold => '7d')` shown.
-3. **`dry_run` asymmetry** — Spark supports it, Trino does not. Important safety guidance.
+1. **Does not state session property manager values are defaults, not ceilings** — this is the core "why" the bypass is possible. An engineer who doesn't understand this may be confused next time they see the session property manager silently ignored.
+2. **No mention of OPA decision log** — capturing denied `SetSystemSessionProperty` attempts is valuable for detecting probing behavior in a multi-tenant environment.
+3. **No whitelist caveat** — deny rule on `user.tier == "free"` without explicitly reminding the engineer to allow admin/ops identities would break their own tooling on first deploy.
+4. **Resource groups as engine-enforced ceiling** — `softMemoryLimit`/`hardConcurrencyLimit` in resource-groups.json ARE enforced server-side; contrasting these with session-property defaults would solidify the mental model.
 
 ### Resource Fix Applied
-None. Resources/17 already has all the correct information. Responder completeness gap.
+None. The iter338 OPA operations table fix held perfectly. No resource edit needed.
 
 ### Rubric Update
-- Iceberg table maintenance: prior avg 4.578/30 → (4.578 × 30 + 4.50) / 31 = 141.840 / 31 = **4.575 across 31 questions**. Status: **PASSED** (stable).
+- Multi-tenant analytics: prior avg 4.445/132 → (4.445 × 132 + 4.50) / 133 = 591.24 / 133 = **4.445 across 133 questions**. Status: **PASSED** (stable; OPA fix confirmed working).
 
 ---
 
-## Q2 — OPA Action Names for Blocking Session Property Overrides (FAIL)
+## Q2 — remove_orphan_files 7-day Trino Retention Floor (PASS)
 
 ### Score
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 2.0 | Two critical errors: (1) Claims session property manager is a server-side ceiling that caps SET SESSION overrides — FALSE. Per official docs and resources/05:2547: "The session property manager sets the *default*; a `SET SESSION` by the client overrides it unless OPA blocks the override." (2) Claims resources do NOT document the OPA action name — FALSE. Resources/05:2547 explicitly states `SetSystemSessionProperty` and distinguishes it from `SetCatalogSessionProperty`. |
-| Beginner clarity | 4.0 | Writing clear and organized with headers. Explains the concept of enforcement timing (wrong framing). |
-| Practical applicability | 1.5 | Actively misleads the engineer. Core concern: "can a tenant bypass tier limits with SET SESSION?" Correct answer: YES, and OPA blocking `SetSystemSessionProperty` is the fix. Answer says "server-side ceiling protects you" — engineer concludes no OPA rules needed, remains vulnerable. |
-| Completeness | 2.0 | Misses the documented OPA action name (`SetSystemSessionProperty`), misses the system vs catalog distinction (`SetCatalogSessionProperty`), arrives at wrong conclusion on the override-vs-ceiling question. |
-| **Average** | **2.375** | **FAIL** |
+| Technical accuracy | 4.5 | Core claim (7-day default min-retention floor) correct. Spark having no floor correct. `dry_run` parameter exists in Spark Iceberg procedures. Minor imprecision: says Trino "skipped" files — correct outcome, but doesn't mention passing `retention_threshold` shorter than `min-retention` would ERROR. Race-condition framing (Spark "retrying") slightly misleading — actual risk is any uncommitted write in flight, not specifically retry logic. |
+| Beginner clarity | 4.5 | Strong narrative. Opens with diagnosis ("safety floor, not a bug"). Numbered race-condition story motivates the floor. Three clearly labeled options ranked by safety. No unexplained jargon. Closing "key takeaway" reframes failure as correct protective behavior. |
+| Practical applicability | 4.5 | Three concrete options with copy-pasteable Spark SQL. `dry_run => true` recommended first. Names exact catalog config property so engineer can self-serve. Missing: Trino syntax (`ALTER TABLE ... EXECUTE remove_orphan_files(retention_threshold => '12h')`) — engineer ran Trino, can't see what they should have typed differently. |
+| Completeness | 4.0 | Covers: the why (floor), the mechanism (catalog property + default), three remediation paths, race-condition rationale. Missing: Trino syntax for the procedure; passing shorter `retention_threshold` in Trino would error (not silently skip); Trino procedure output (file counts as debugging signal); orphan files are storage cost only, not correctness risk. |
+| **Average** | **4.375** | **PASS** |
 
 ### What Worked
-- Correctly identified that production environment uses OPA as Trino's authorization backend.
-- Cites the relevant resource file.
-- Mentions `EXCEEDED_TIME_LIMIT` error code (correct for when the limit is enforced).
+- Correct root cause identification (7-day floor, not a bug).
+- Three options ranked by safety (wait > Spark > lower floor) — actionable and risk-calibrated.
+- `dry_run => true` recommended before destructive action.
+- Exact catalog property name lets engineer self-serve.
+- Closing sentence reframes "nothing happened" as protective behavior — good for a panicked engineer.
 
 ### What Missed
-1. **Missed line 2547 of resources/05** — the cited resource explicitly says `SetSystemSessionProperty` and `SetCatalogSessionProperty`. Responder claimed these weren't there.
-2. **Got override semantics backwards** — session property manager is a DEFAULT, not a ceiling. `SET SESSION` CAN override it unless OPA blocks the `SetSystemSessionProperty` action.
-3. **Dangerous security misinformation** — told the engineer they're protected when they're not.
-4. **Wrong remediation** — sent engineer to dig through source code when the answer was in the cited resource.
+1. **No Trino syntax** — the engineer ran a Trino procedure but the answer pivots entirely to Spark. Showing `ALTER TABLE analytics.events EXECUTE remove_orphan_files(retention_threshold => '7d')` and noting that passing a shorter value would error (not silently skip) would close the loop on what they originally ran.
+2. **`retention_threshold` shorter than floor errors in Trino** — this is a usable debugging signal: if the engineer had tried passing `retention_threshold => '12h'`, they'd have gotten an explicit error telling them the minimum is 7d.
+3. **Trino procedure output** — newer Trino versions output metrics (files deleted/skipped); engineer would have seen "0 files deleted" which is itself a signal.
+4. **Orphan files are storage cost only** — noting this would help calibrate urgency; engineer may panic-delete with Spark option 2 when waiting is the right call.
 
 ### Resource Fix Applied
-- resources/05-multi-tenant-analytics.md: added `SetSystemSessionProperty` and `SetCatalogSessionProperty` to the OPA operation names table (lines ~1235-1244) with descriptions and a KEY DISTINCTION note explaining that `query_max_execution_time` is a system-level property requiring `SetSystemSessionProperty` denial (not a generic non-existent `SetSessionProperty`). Now findable from the OPA operations section, not just buried in the session property manager section.
+None. Resources/17 already covers the 7-day floor adequately. Remaining gaps are responder completeness (Trino syntax, error behavior) rather than missing resource content.
 
-### Technical Accuracy (verified)
-- Session property manager values are overridable by SET SESSION — CORRECT per trino.io/docs/current/admin/session-property-managers.html: "These properties are defaults, and can be overridden by users, if authorized to do so."
-- OPA action for system session properties is `SetSystemSessionProperty` — CORRECT per Trino source `OpaAccessControl.java`
-- OPA action for catalog session properties is `SetCatalogSessionProperty` — CORRECT per same source
-- `query_max_execution_time` is a system-level session property → correct action is `SetSystemSessionProperty` — CORRECT
+Consider adding to resources/17: Trino `ALTER TABLE ... EXECUTE remove_orphan_files` syntax with a note that `retention_threshold` shorter than `min-retention` throws an explicit error message.
 
 ### Rubric Update
-- Multi-tenant analytics: prior avg 4.461/131 → (4.461 × 131 + 2.375) / 132 = 586.766 / 132 = **4.445 across 132 questions**. Status: **PASSED** (above 3.5, but significant drop; resource fix applied).
+- Iceberg table maintenance: prior avg 4.575/31 → (4.575 × 31 + 4.375) / 32 = 146.200 / 32 = **4.569 across 32 questions**. Status: **PASSED** (stable; minor drop; no resource fix needed).
 
 ---
 
-## Iter 338 Summary
+## Iter 339 Summary
 
-**Iter 338 average: (4.50 + 2.375) / 2 = 3.438 — FAIL** ✗ (Q1 STRONG PASS / Q2 FAIL)
+**Iter 339 average: (4.50 + 4.375) / 2 = 4.4375 — PASS** ✓ (both questions PASS/STRONG PASS)
 
 ### Notable
-- Q1 4.50 STRONG PASS: The resources/17 expire_snapshots fix held perfectly — responder correctly articulated Class 1 vs Class 2 garbage distinction. Missed the 7-day Trino retention floor for the "last night" scenario.
-- Q2 2.375 FAIL: Responder missed line 2547 of resources/05 AND got the security posture backwards (claiming server-side cap when it's actually a default overridable by SET SESSION). This is the most dangerous failure mode: confident, well-formatted answer that reverses the actual security posture.
+- Q1 4.50 STRONG PASS: The iter338 OPA operations table fix for `SetSystemSessionProperty` confirmed working — responder now correctly identifies both system and catalog session property operation names, and gets the security posture right (bypass IS possible without OPA deny rule).
+- Q2 4.375 PASS: Correctly explained Trino's 7-day retention floor for `remove_orphan_files`, which was the gap flagged in iter338 Q1 feedback. Trino-specific syntax gap remains (no `ALTER TABLE ... EXECUTE` example shown), but answer is actionable.
 
 ### Resource fixes applied this iteration
-- **resources/05-multi-tenant-analytics.md**: Added `SetSystemSessionProperty` and `SetCatalogSessionProperty` to the OPA operation names table with a KEY DISTINCTION note explaining these are needed to block per-tier time limit bypasses.
+None — both resource fixes applied in iter338 confirmed holding.
 
-### Suggested focus for Iter 339
-- **Multi-tenant analytics** (4.445/132, significant drop): Probe the OPA fix — ask the same question again to verify `SetSystemSessionProperty` is now correctly surfaced. Confirm the responder no longer claims session property manager is a server-side ceiling.
-- **Iceberg table maintenance** (4.575/31): Probe the Trino 7-day `retention_threshold` floor for `remove_orphan_files` — why an engineer's "last night" crash files might not be cleaned by default.
-- **Postgres-to-Iceberg** (4.500/122): Consider probing lag-buffer calibration (15-30 min P99) which has been missed in several iterations.
+### Suggested focus for Iter 340
+- **Iceberg table maintenance** (4.569/32): Probe the Trino `ALTER TABLE ... EXECUTE remove_orphan_files` syntax gap — can the responder provide the exact Trino form? Also probe whether responder knows that passing `retention_threshold` shorter than `min-retention` in Trino throws an error (vs Spark which just warns).
+- **Multi-tenant analytics** (4.445/133): Probe the session-property-manager-as-default vs resource-groups-as-ceiling distinction — this mental model gap appeared in both Q1 feedback items. Ask about which Trino mechanism is a "hard ceiling" vs a "default that SET SESSION can override."
+- **Postgres-to-Iceberg** (4.500/122): Probe lag-buffer calibration (15-30 min P99 window) which has been missed across multiple iterations.

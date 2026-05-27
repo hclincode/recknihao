@@ -1,7 +1,7 @@
 {
-  "iteration": 339,
+  "iteration": 340,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter338 avg 3.438 — FAIL. Q1 (4.50) STRONG PASS — expire_snapshots vs remove_orphan_files correctly distinguished. Q2 (2.375) FAIL — responder missed SetSystemSessionProperty in resources/05:2547; also got security posture backwards (session property manager is a default, not a ceiling). Resource fix: added SetSystemSessionProperty/SetCatalogSessionProperty to OPA operations table. Multi-tenant: 4.445/132. Iceberg maintenance: 4.575/31."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter339 avg 4.4375 — PASS. Q1 (4.50) STRONG PASS — OPA SetSystemSessionProperty re-probe: iter338 OPA operations table fix confirmed working; responder correctly named both operation names and got security posture right. Q2 (4.375) PASS — remove_orphan_files 7-day Trino floor correctly explained; Trino ALTER TABLE EXECUTE syntax and retention_threshold error behavior still gaps. Multi-tenant: 4.445/133. Iceberg maintenance: 4.569/32."
 }
