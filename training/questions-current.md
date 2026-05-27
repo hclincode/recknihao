@@ -1,13 +1,13 @@
-# Iter 283 Questions
+# Iter 284 Questions
 
-## Q1 — Writes to Postgres and Iceberg at the same time — are they safe together?
+## Q1 — How do I tell if Trino is actually sending my WHERE clause to Postgres or doing the filtering itself?
 
-We have a workflow where, when a customer's billing event comes in, we need to write a record to our main Postgres database (so the app can see it immediately) and also write the same event into our Iceberg tables (so it shows up in their usage dashboard). Right now we're doing these as two separate writes in our backend code, which feels fragile — if one succeeds and the other fails we end up with inconsistent data.
+We have a federated query that joins our Iceberg event data with a Postgres table, and I'm filtering on a Postgres column in the WHERE clause. The query is slower than I expected and I'm trying to figure out if Trino is actually passing that filter down to Postgres (so Postgres can use its indexes), or if Trino is pulling all the rows from Postgres into memory and then doing the filtering itself.
 
-I saw that Trino supports some kind of transaction syntax. My question is: if I wrap both writes in a `START TRANSACTION` in Trino, does that actually guarantee both the Postgres write and the Iceberg write either both succeed or both roll back together? Or is that wishful thinking and they're still separate underneath? I want to understand how much I can trust Trino to keep these two systems in sync.
+Someone mentioned I should look at the query plan with EXPLAIN ANALYZE but I've never done that for a query that touches two different systems. What am I looking for in that output to confirm the filter is actually being applied on the Postgres side? Is there a specific line or section that tells me "yes, Postgres is handling this" versus "Trino is doing this work in memory after fetching everything"?
 
-## Q2 — Should we copy a big Postgres table into Iceberg or just keep joining across them?
+## Q2 — We're doing JSONB filtering on a Postgres column through Trino and it's ignoring our index
 
-We have a table in Postgres called `accounts` — it's about 20 million rows and it changes slowly (maybe a few hundred updates a day, things like plan changes or account renames). Almost every analytics query we run in Trino ends up joining against this table to attach account-level context to the event data sitting in Iceberg.
+We store some per-customer configuration in a Postgres column as JSONB, and we have a GIN index on it so that filtering on specific JSON keys is fast when querying Postgres directly. The problem is we're now querying this through Trino (because the rest of our analytics stack is there), and the same filter that's instant in Postgres is dog-slow through Trino.
 
-Right now we just let Trino reach across and query Postgres directly when it needs that data. It works, but some of our heavier queries feel sluggish and I'm wondering if we're paying a cost every time Trino has to go fetch from Postgres mid-query. Would we be better off copying that `accounts` table into Iceberg and keeping it in sync ourselves? Or is the live federation approach fine and we're just not tuning something right?
+My guess is Trino doesn't know how to push a JSONB condition down to Postgres, so it's fetching everything and filtering in Trino. Someone on my team mentioned there's a way to send a raw SQL string directly to Postgres from within Trino using something like `system.query()` so the GIN index gets used. Is that a real thing? How does it work, and are there gotchas I should know about — like can I still JOIN the result of that against my Iceberg tables, or does it have to be a standalone query?
