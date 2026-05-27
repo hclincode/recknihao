@@ -1,7 +1,7 @@
 {
-  "iteration": 301,
+  "iteration": 302,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter300 avg 5.00 (PERFECT): Q1 (5.00) When to move from Postgres to OLAP — thresholds, tuning checklist, decision tree; Q2 (5.00) SELECT * in Trino — columnar storage, projection pushdown, bytes-read math. No resource fixes. When to add OLAP: 4.480/9. Column-oriented storage: 4.524/8."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter301 avg 4.69: Q1 (4.375) dbt incremental models — 6 dbt-trino errors: on_schema_change default ignore not fail, dbt-trino uses delete+insert not insert_overwrite, default strategy is append not merge, MERGE conditional predicate wrong, Jinja timedelta syntax wrong, CALL vs ALTER TABLE EXECUTE for rollback; Q2 (5.00) JSONB ingestion — clean. Resource 13 updated with dbt-trino corrections. Postgres-to-Iceberg: 4.480/102."
 }

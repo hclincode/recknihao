@@ -1,61 +1,80 @@
-# Feedback — Iter 300 (Extended phase)
+# Feedback — Iter 301 (Extended phase)
 
 Date: 2026-05-27
-Topics: When to move from Postgres to OLAP (decision criteria + thresholds) + SELECT * in Trino vs Postgres (columnar storage / projection pushdown)
+Topics: dbt incremental models on Iceberg (Q1) + JSONB from Postgres to Iceberg (Q2)
 
 ## Results summary
 
 | Question | Topic angle | Score | Pass/Fail |
 |---|---|---|---|
-| Q1 | When to add OLAP: concrete thresholds, Postgres tuning checklist, decision tree, stack-aware migration steps | **5.00** | PASS |
-| Q2 | SELECT * harm in Trino: columnar storage mechanics, projection pushdown, bytes-read math, impact table | **5.00** | PASS |
+| Q1 | dbt incremental models: watermarks, unique_key, strategies, CoW/MoR, on_schema_change | **4.375** | PASS |
+| Q2 | JSONB ingestion: VARCHAR vs flatten, get_json_object, file-skipping advantage, schema evolution | **5.00** | PASS |
 
-**Iter 300 average: 5.00 — PASS** ✓
+**Iter 301 average: 4.69 — PASS** ✓
 
 **Topic updates**:
-- When to add an OLAP layer: 4.415/8 → **4.480/9 questions** (PASSED — improved)
-- Column-oriented storage: 4.456/7 → **4.524/8 questions** (PASSED — improved)
+- Postgres-to-Iceberg ingestion: 4.476/100 → **4.480/102 questions** (PASSED — stable)
+
+---
+
+## Resource bugs to fix (PRIORITY — fix before iter302)
+
+### Resource 13: postgres-to-iceberg-ingestion.md — dbt incremental model section
+
+The Q1 answer contained 6 factual errors sourced from or absent from the resource. Fix the following in resource 13 (or a dbt-specific resource if one exists):
+
+1. **`on_schema_change` default is `ignore`, not `fail`**
+   - Correct: The dbt default is `ignore` — new source columns are silently ignored unless you opt in.
+   - Fix: Update any example or prose that says `fail` is default.
+
+2. **dbt-trino incremental strategies are `append`, `merge`, `delete+insert`**
+   - `insert_overwrite` is dbt-spark only and is explicitly rejected on dbt-trino with Iceberg.
+   - Correct strategy for partition-level overwrite on dbt-trino: `delete+insert`.
+   - Fix: Add a dbt-trino-specific strategy table distinguishing from dbt-spark.
+
+3. **dbt-trino default incremental strategy is `append`, not `merge`**
+   - Fix: State the correct per-adapter defaults clearly. Engineers must explicitly set `incremental_strategy='merge'` to get upsert behavior on dbt-trino.
+
+4. **MERGE INTO compiled SQL conditional predicate**
+   - dbt's default merge does NOT add `AND s.updated_at > t.updated_at` — it overwrites matched rows unconditionally.
+   - To add a target-side filter, you use `incremental_predicates` config.
+   - Fix: Show the actual default compiled SQL, and note `incremental_predicates` as the advanced option.
+
+5. **Jinja timedelta syntax**
+   - `macros.timedelta(days=4)` is invalid. Correct: `modules.datetime.timedelta(days=4)`.
+   - Fix: Update any late-arriving data example that uses the invalid form.
+
+6. **Trino rollback syntax**
+   - `CALL iceberg.system.rollback_to_snapshot(...)` is Spark SQL syntax.
+   - Trino uses: `ALTER TABLE iceberg.analytics.orders EXECUTE rollback_to_snapshot(snapshot_id => <id>)`.
+   - Fix: Wherever the rollback procedure is mentioned, show both forms or Trino-only form.
 
 ---
 
 ## What worked
 
-### Q1 — When to move from Postgres to OLAP (5.00)
-1. Direct engagement with both teammates' positions — validated the "optimize first" view while correctly framing its limits
-2. Concrete 5-item Postgres tuning checklist (read replica, materialized views, partial indexes, pg_partman, PgBouncer) — actionable and ordered by impact
-3. Quantitative thresholds table: >50M rows + >10% growth, >2s latency, >3 queryers, >1 source system, >20% CPU — "two or more = move"
-4. Decision tree with STOP nodes — clear exit conditions prevent premature migration
-5. Replication lag claim on replicas verified correct (MVCC + WAL replay conflict)
-6. Stack-aware migration steps (Spark → MinIO → Iceberg → Trino) match prod_info.md exactly
-7. Runnable table-size SQL — immediately actionable
+### Q1 — dbt incremental models (4.375)
+1. "Not automatic magic — requires updated_at column" framing — correct and important
+2. Watermark filter with `is_incremental()` Jinja macro — right concept
+3. unique_key → MERGE INTO explained clearly
+4. CoW vs MoR trade-offs with when-to-use guidance — correct
+5. Iceberg-specific concerns (small files, snapshot rollback, partition pruning) — good coverage
+6. Final copy-paste config block — actionable structure
 
-### Q2 — SELECT * / columnar storage (5.00)
-1. Direct Postgres-vs-Trino framing — met the engineer where they are
-2. 80÷3 = 27x bytes-read math — concrete and verifiable
-3. Impact table with four tiers (10%, 2–3x, 10–20x, 100x) — directly answered the "10% vs 10x?" question
-4. `DESCRIBE table_name`, `TABLESAMPLE BERNOULLI`, `EXPLAIN (TYPE DISTRIBUTED)` — all verified valid Trino syntax
-5. Partition column in WHERE called out as the biggest independent win
-
----
-
-## Minor nits (not score-affecting)
-
-- Q2: Used "column strips" (ORC vocabulary) — Parquet uses "column chunks within row groups." Not wrong, just imprecise terminology.
-- Q2: TABLESAMPLE BERNOULLI still scans all physical blocks (no I/O reduction). The answer uses it correctly for sampling (not claiming I/O reduction), but could note SYSTEM is more I/O efficient if skipping blocks matters.
-
-Neither nit requires a resource fix.
+### Q2 — JSONB ingestion (5.00)
+1. VARCHAR vs flatten decision table with two real use cases (event_payload vs metadata)
+2. `get_json_object` PySpark syntax — verified correct
+3. `json_extract_scalar` Trino syntax — verified correct
+4. File-skipping advantage quantified — correct (JSON-string predicate cannot skip files)
+5. Lexicographic comparison gotcha for `json_extract_scalar` → always VARCHAR
+6. `ALTER TABLE ADD COLUMN` metadata-only (no file rewrites) — verified correct
+7. Schema evolution: old rows return NULL, backfill optional — correct
 
 ---
 
-## No resource fixes needed
+## Suggested iter302 angles
 
-Both answers were factually clean and verified against official docs.
-
----
-
-## Suggested iter301 angles
-
-1. **dbt incremental models on Iceberg** — how `is_incremental()`, `unique_key`, and `on_schema_change` interact with Iceberg's snapshot model; when to use `merge` vs `append` strategy
-2. **JSONB from Postgres ingested to Iceberg** — flattening vs keeping as string; filtering on nested keys; Spark `from_json` / `get_json_object`
-3. **Iceberg time-travel** — `FOR TIMESTAMP AS OF` / `FOR VERSION AS OF` for debugging or compliance; retention floor interaction with time-travel
-4. **Approximate functions in Trino** — `approx_distinct`, `approx_percentile` — why they're useful for analytics and when exact counts aren't needed
+1. **Iceberg time-travel** — `FOR TIMESTAMP AS OF` / `FOR VERSION AS OF`; debugging with snapshots; retention floor interaction; when time-travel breaks (snapshot expired)
+2. **Approximate functions in Trino** — `approx_distinct`, `approx_percentile`; why exact COUNT DISTINCT is slow on 500M rows; error bounds; when to use approximation
+3. **Schema design: fact vs dimension table distinction** — reinforcing the star-schema mental model with a concrete SaaS example (events fact + accounts/plans dimension)
+4. **dbt models corrected angle** — targeting the on_schema_change defaults and dbt-trino strategy list now that resource 13 is fixed

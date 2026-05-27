@@ -4199,6 +4199,202 @@ To permanently clean up: run a Spark MERGE INTO (Pattern 2 above) from the curre
 
 ---
 
+## dbt incremental models on Iceberg (dbt-trino adapter)
+
+> **Adapter context for this whole section.** The production stack runs `dbt-trino` against Trino 467 with the Iceberg connector. **Every default and behavior below is dbt-trino-specific.** `dbt-spark` and `dbt-bigquery` have different defaults, different strategies, and different compiled SQL. Do NOT cross-reference dbt-spark blog posts when configuring dbt-trino models — the defaults are not the same.
+
+### The watermark pattern with `is_incremental()`
+
+dbt incremental models use a **watermark filter** on a timestamp column (typically `updated_at`) to detect which rows are new or changed since the last run. The pattern uses the `is_incremental()` Jinja macro:
+
+```sql
+{{ config(
+    materialized='incremental',
+    unique_key='order_id',
+    incremental_strategy='merge',
+    on_schema_change='append_new_columns'
+) }}
+
+SELECT order_id, customer_id, amount, status, updated_at
+FROM {{ source('app', 'orders') }}
+{% if is_incremental() %}
+  WHERE updated_at > (SELECT COALESCE(MAX(updated_at), TIMESTAMP '1970-01-01') FROM {{ this }})
+{% endif %}
+```
+
+On the **first run**, `is_incremental()` returns `false` and dbt runs the full SELECT to build the target table from scratch. On **subsequent runs**, it returns `true` and the watermark filter limits the scan to rows changed since the prior run's max timestamp.
+
+**This is NOT automatic magic.** It requires the source table to have a timestamp column that the application maintains on every INSERT and UPDATE. If `updated_at` can be backdated by migrations or backfills, the incremental model will silently miss those rows — see the "Backdated `updated_at` and the watermark-monotonicity hole" section earlier in this document for the failure mode and the `xmin`-based fix.
+
+### `incremental_strategy` on dbt-trino — the THREE valid strategies
+
+> **CRITICAL — dbt-trino supports exactly three incremental strategies: `append`, `merge`, `delete+insert`.** A very common AI-generated mistake is to list `insert_overwrite` as a fourth option. **`insert_overwrite` is dbt-spark-only.** Setting `incremental_strategy='insert_overwrite'` on dbt-trino against an Iceberg target produces a compilation error — the adapter explicitly rejects it. If you want partition-level overwrite semantics on dbt-trino, use `delete+insert`, not `insert_overwrite`.
+
+| Strategy | What dbt-trino compiles it to | When to use |
+|---|---|---|
+| **`append`** (default on dbt-trino) | `INSERT INTO target SELECT ... FROM source` — appends new rows; no dedup, no upsert | Immutable event/log tables where rows never change. **Wrong choice for any table with UPDATEs** — produces duplicates. |
+| **`merge`** | `MERGE INTO target USING source ON unique_key WHEN MATCHED THEN UPDATE SET * WHEN NOT MATCHED THEN INSERT *` | Mutable dimension and fact tables (orders, subscriptions, user profiles). **Requires `unique_key`.** |
+| **`delete+insert`** | Two-step: `DELETE FROM target WHERE <filter>` then `INSERT INTO target SELECT ...` | Full-partition reloads (e.g., "rebuild today's partition"); when you want explicit two-statement control instead of a single MERGE; also a fallback when MERGE performance is poor on a specific table. |
+
+> **dbt-trino's default strategy is `append`, NOT `merge`.** This is the single most common dbt-trino misconfiguration. Engineers coming from dbt-snowflake or dbt-bigquery (where `merge` is the default on most warehouses) assume the same here. **It is not.** If you omit `incremental_strategy` from your dbt-trino model config, you get `append` semantics — every run inserts the new rows without checking `unique_key`, and any row that gets a second update will appear twice in the target. **Always set `incremental_strategy='merge'` explicitly** on any model where the source rows can change after first insert.
+
+#### The compiled MERGE SQL — what dbt-trino actually generates
+
+When you set `incremental_strategy='merge'` with `unique_key='order_id'`, dbt-trino compiles a MERGE statement that looks like this (simplified):
+
+```sql
+MERGE INTO iceberg.analytics.orders AS DBT_INTERNAL_DEST
+USING (
+    SELECT order_id, customer_id, amount, status, updated_at
+    FROM iceberg.analytics.orders__dbt_tmp
+) AS DBT_INTERNAL_SOURCE
+ON (DBT_INTERNAL_SOURCE.order_id = DBT_INTERNAL_DEST.order_id)
+WHEN MATCHED THEN UPDATE SET
+    customer_id = DBT_INTERNAL_SOURCE.customer_id,
+    amount      = DBT_INTERNAL_SOURCE.amount,
+    status      = DBT_INTERNAL_SOURCE.status,
+    updated_at  = DBT_INTERNAL_SOURCE.updated_at
+WHEN NOT MATCHED THEN INSERT (order_id, customer_id, amount, status, updated_at)
+VALUES (DBT_INTERNAL_SOURCE.order_id, DBT_INTERNAL_SOURCE.customer_id, ...);
+```
+
+> **CRITICAL — dbt's default MERGE has NO conditional predicate on the matched branch.** A very common AI-generated mistake is to claim dbt compiles `WHEN MATCHED AND s.updated_at > t.updated_at THEN UPDATE SET *`. **It does not.** The default is `WHEN MATCHED THEN UPDATE SET *` with **no condition** — every matched row is overwritten unconditionally, regardless of whether the source's `updated_at` is newer or older than the target's. If a stale row arrives from an out-of-order source, dbt will happily overwrite a fresher target row with the older values.
+>
+> **To add a target-side predicate, use the `incremental_predicates` config**, not a hand-written WHEN MATCHED filter:
+>
+> ```sql
+> {{ config(
+>     materialized='incremental',
+>     unique_key='order_id',
+>     incremental_strategy='merge',
+>     incremental_predicates=[
+>         "DBT_INTERNAL_DEST.updated_at < DBT_INTERNAL_SOURCE.updated_at"
+>     ]
+> ) }}
+> ```
+>
+> `incremental_predicates` adds the listed conditions to the MERGE's `ON` clause (or as additional `AND ...` predicates depending on adapter version), so only target rows that satisfy the predicate participate in the UPDATE. This is the correct way to add "only update if source is newer" semantics, file-pruning hints (e.g., `DBT_INTERNAL_DEST.partition_date >= ...`), or any other target-side filter to a dbt-managed MERGE.
+
+### `on_schema_change` — the FOUR options and the correct default
+
+> **CRITICAL — the dbt default for `on_schema_change` is `ignore`, NOT `fail`.** Another very common AI-generated mistake is to claim `fail` is the default. **It is not.** If you do not set `on_schema_change` explicitly, dbt uses `ignore` semantics: any new column added to the source SELECT is **silently dropped** from the INSERT/UPDATE, never propagates to the target Iceberg table, and never appears in downstream queries. This is silent data loss for newly-added source columns.
+
+| Value | Behavior on a new source column | Behavior on a removed source column |
+|---|---|---|
+| **`ignore`** (default) | New column is silently dropped from the insert/update. Target schema unchanged. No error. | Column persists in target with NULL for new rows. No error. |
+| **`fail`** | dbt run errors out immediately, halting the pipeline. | dbt run errors out immediately. |
+| **`append_new_columns`** | dbt issues `ALTER TABLE ... ADD COLUMN` against the Iceberg target, then runs the model. New column propagates and is populated. | Column persists in target with NULL for new rows (does not drop). |
+| **`sync_all_columns`** | dbt adds new columns via `ALTER TABLE ... ADD COLUMN`. | dbt removes columns no longer in the model via `ALTER TABLE ... DROP COLUMN`. **Destructive — use with care.** |
+
+**Recommended default for SaaS pipelines on dbt-trino + Iceberg: `on_schema_change='append_new_columns'`.** It auto-propagates new source columns to the target so dashboards see the new field on the next run, and it never drops columns (so a transient schema diff during a migration does not lose data). `sync_all_columns` is too aggressive for most pipelines because an accidental SELECT typo can drop a real column from the Iceberg target. `fail` is correct for contract-enforced models where any schema drift should halt the pipeline. `ignore` (the default) is rarely what you want — explicitly set the config.
+
+### Late-arriving data in dbt incremental models — the correct Jinja syntax
+
+A common pattern is to widen the incremental window so that rows arriving 3-5 days late are still picked up. The correct Jinja syntax uses `modules.datetime.timedelta`, not `macros.timedelta`:
+
+```sql
+{% if is_incremental() %}
+  -- Widen the lookback window by 4 days to catch late-arriving events.
+  WHERE updated_at > (
+    SELECT COALESCE(MAX(updated_at), TIMESTAMP '1970-01-01') FROM {{ this }}
+  )
+  AND occurred_at >= TIMESTAMP '{{ (run_started_at - modules.datetime.timedelta(days=4)).isoformat() }}'
+{% endif %}
+```
+
+> **CRITICAL — the correct Jinja module path is `modules.datetime.timedelta`, NOT `macros.timedelta`.** `macros` is a dbt namespace for user-defined and package macros — it has no `timedelta` attribute. Writing `{{ run_started_at - macros.timedelta(days=4) }}` fails at compile time with an `'undefined' has no attribute 'timedelta'` error. The correct path is `modules.datetime.timedelta(days=4)` — `modules.datetime` is dbt's pointer to Python's `datetime` module, which exposes `timedelta` directly. See the [dbt modules variable docs](https://docs.getdbt.com/reference/dbt-jinja-functions/modules) for the full list of Python modules dbt makes available in Jinja.
+
+Combine the lookback with `incremental_strategy='merge'` so late-arriving rows that already exist in the target (because an earlier batch already inserted them with a stale value) get updated in place, not double-inserted.
+
+### Rollback semantics — Trino vs Spark syntax
+
+If a dbt run produces bad data and the prior Iceberg snapshot is still live, you can roll the table back. **The Trino syntax differs from Spark.** On the production stack (Trino 467 client + Spark batch jobs both touching the same Iceberg tables), use the right syntax for the engine your session is connected to.
+
+**From Trino 467 (the supported form for dbt-trino post-hooks or operational rollback):**
+
+```sql
+-- Trino 467 supports this CALL form with positional arguments:
+CALL iceberg.system.rollback_to_snapshot('analytics', 'orders', 4823511203987654321);
+
+-- NOTE: the `ALTER TABLE iceberg.<schema>.<table> EXECUTE rollback_to_snapshot(snapshot_id => ...)`
+-- table-procedure form was added in Trino 469 (Jan 2025) and does NOT exist on Trino 467.
+-- See resource 17 for the full Trino-vs-Spark rollback syntax reference.
+```
+
+**From Spark (e.g., a spark-submit-driven rollback script):**
+
+```sql
+-- Spark uses named arguments:
+CALL iceberg.system.rollback_to_snapshot(
+    table => 'analytics.orders',
+    snapshot_id => 4823511203987654321
+);
+```
+
+> **Do not mix the two syntaxes.** Trino 467's `CALL` requires positional VARCHAR, VARCHAR, BIGINT arguments. Spark's `CALL` requires named arguments. Passing Spark-style named args to Trino's `CALL` (or vice versa) fails with a parse / argument-count error. See resource 17 ("Iceberg table maintenance") for the canonical Trino-vs-Spark rollback syntax cheat sheet.
+
+### Copy-on-Write vs Merge-on-Read for dbt-managed Iceberg tables
+
+When dbt-trino runs `MERGE INTO` on Iceberg, the physical write behavior depends on the table's write mode:
+
+- **Copy-on-Write (CoW) — Iceberg 1.5.2 default.** Every matched row's containing Parquet file is rewritten; old files are orphaned (cleaned up by `remove_orphan_files`). Higher write cost, lower read cost (no delete files to merge at query time). **Best for daily / hourly dbt incremental batches** where the write window is bounded and readers are latency-sensitive.
+- **Merge-on-Read (MoR) — must be enabled explicitly.** Updated rows are marked with small position-delete files; the original data files stay intact. Lower write cost, higher read cost (every scan merges data + delete files). **Best for high-frequency micro-batches** (many runs per hour) where the write cost dominates.
+
+For daily / hourly dbt incremental models on this stack, **stick with the CoW default**. Switch to MoR only when the dbt run cadence drops below ~15 minutes and the table's write cost is the documented bottleneck.
+
+### Iceberg-specific concerns for dbt incremental models
+
+**Partition pruning on the incremental filter.** If the Iceberg target is partitioned by `day(updated_at)` and the watermark filter is on `updated_at`, Iceberg automatically prunes partitions — only the affected partition files are read. The dbt model does not need any extra config; pruning happens at the Iceberg layer.
+
+**Small-file accumulation.** Frequent incremental runs (especially with `merge` and CoW) create many small Parquet files as Iceberg rewrites the files containing matched rows. **Schedule nightly compaction** via Trino's `ALTER TABLE ... EXECUTE optimize` or Spark's `CALL iceberg.system.rewrite_data_files`, or query performance degrades over weeks. See resource 17 for the full maintenance schedule.
+
+**Snapshot accumulation.** Every dbt run creates at least one new Iceberg snapshot (the MERGE commit). Without `expire_snapshots` running weekly, the metadata layer balloons and read planning slows down. See resource 17.
+
+### Reference: canonical dbt-trino incremental model on Iceberg
+
+Copy-paste starting point for a mutable orders table:
+
+```sql
+{{ config(
+    materialized='incremental',
+    unique_key='order_id',
+    incremental_strategy='merge',          -- REQUIRED — default is 'append' on dbt-trino
+    on_schema_change='append_new_columns', -- REQUIRED — default is 'ignore' (silent data loss)
+    file_format='iceberg',
+    table_type='iceberg',
+    partitioned_by=['day(updated_at)']
+) }}
+
+SELECT
+    order_id,
+    customer_id,
+    amount,
+    status,
+    updated_at,
+    occurred_at
+FROM {{ source('app', 'orders') }}
+{% if is_incremental() %}
+  -- Watermark filter: only pull rows changed since the prior run.
+  WHERE updated_at > (
+    SELECT COALESCE(MAX(updated_at), TIMESTAMP '1970-01-01') FROM {{ this }}
+  )
+  -- Optional: widen lookback by 4 days for late-arriving events.
+  -- Note `modules.datetime.timedelta`, NOT `macros.timedelta`.
+  AND occurred_at >= TIMESTAMP '{{ (run_started_at - modules.datetime.timedelta(days=4)).isoformat() }}'
+{% endif %}
+```
+
+**Configuration checklist before deploying any dbt-trino incremental model:**
+
+1. **`incremental_strategy='merge'` (or `'delete+insert'`) is set explicitly** — never rely on the default, which is `append` and produces duplicates on mutable tables.
+2. **`unique_key` is set** when using `merge` — without it, the MERGE join key is undefined and the model errors out.
+3. **`on_schema_change='append_new_columns'`** (or `'sync_all_columns'` if you accept destructive column drops) — never rely on the default `ignore`, which silently drops new source columns.
+4. **The watermark column (`updated_at`) is indexed in Postgres** if your source SELECT pushes the filter down — see "Postgres `updated_at` index preflight" earlier in this document.
+5. **Compaction (`rewrite_data_files`) is scheduled** for the target Iceberg table — see resource 17.
+6. **`expire_snapshots` is scheduled weekly** — see resource 17.
+
+---
+
 ## Scheduling the job
 
 Two reasonable choices on the prod stack:

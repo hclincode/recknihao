@@ -40,7 +40,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.500 | 5 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.476 | 100 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.480 | 102 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.637 | 18 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
@@ -50,6 +50,39 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 301 — 2026-05-27
+
+**Q1** — dbt incremental models on Iceberg: watermarks, unique_key, append/merge/insert_overwrite strategies, CoW vs MoR, on_schema_change
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 3.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.5 |
+| Completeness | 5.0 |
+| **Average** | **4.375** — PASS |
+
+Errors caught: (1) `on_schema_change` default is `ignore`, not `fail`; (2) dbt-trino strategies are `append/merge/delete+insert` — `insert_overwrite` is dbt-spark only; (3) dbt-trino default strategy is `append`, not `merge`; (4) MERGE INTO conditional predicate not in dbt default; (5) `macros.timedelta` → `modules.datetime.timedelta`; (6) `CALL iceberg.system.rollback_to_snapshot` is Spark — Trino uses `ALTER TABLE ... EXECUTE rollback_to_snapshot`. Resource 13 updated.
+
+**Q2** — JSONB from Postgres to Iceberg: VARCHAR vs flatten, get_json_object, json_extract_scalar, file-skipping advantage, ALTER TABLE ADD COLUMN schema evolution
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+| **Average** | **5.00** — PASS |
+
+All technical claims verified. Flatten vs raw decision, file-skipping advantage, lexicographic comparison gotcha, and production stack code all correct.
+
+**Iter 301 average: 4.69 — PASS** ✓
+
+**Topics updated**:
+- Postgres-to-Iceberg ingestion: 4.476/100 → **4.480/102 questions** (PASSED — stable)
+
+---
 
 ### Iter 300 — 2026-05-27
 
