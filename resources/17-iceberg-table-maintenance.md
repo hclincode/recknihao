@@ -434,15 +434,23 @@ Three properties matter:
 - `history.expire.max-ref-age-ms` — expire named references (tags / branches) older than N milliseconds.
 
 ```sql
--- Trino 467: set retention floor directly on the table.
+-- SPARK SQL ONLY — SET TBLPROPERTIES is Spark syntax.
+-- Trino 467's ALTER TABLE SET PROPERTIES does NOT accept history.expire.* properties.
+-- Run this from a Spark SQL session (spark-sql CLI or spark.sql(...) in a job).
 ALTER TABLE iceberg.analytics.events
 SET TBLPROPERTIES (
     'history.expire.min-snapshots-to-keep' = '5',
     'history.expire.max-snapshot-age-ms'   = '2592000000'  -- 30 days in ms
 );
+
+-- Verify from Trino after setting:
+SELECT * FROM iceberg.analytics."events$properties"
+WHERE key IN ('history.expire.min-snapshots-to-keep', 'history.expire.max-snapshot-age-ms');
 ```
 
-After this, if someone accidentally schedules `expire_snapshots(retention_threshold => '7d')`, the table-level `max-snapshot-age-ms = 30 days` still protects the last 30 days of snapshots — the per-call argument cannot relax the table floor. Treat these properties as the durable policy and per-call arguments as one-off overrides.
+> **ENGINE CALLOUT — `history.expire.*` properties must be set from Spark, NOT Trino 467.** Trino's `ALTER TABLE ... SET PROPERTIES` only accepts connector-level Iceberg properties (`partitioning`, `format`, `sorted_by`, `format_version`). It does NOT pass through Iceberg table-level properties like `history.expire.min-snapshots-to-keep` or `history.expire.max-snapshot-age-ms`. To set these retention guardrails, run `ALTER TABLE ... SET TBLPROPERTIES (...)` from a Spark SQL session. You can verify the properties took effect from Trino by querying `iceberg.analytics."events$properties"`.
+
+After setting these, if someone accidentally schedules `expire_snapshots(retention_threshold => '7d')`, the table-level `max-snapshot-age-ms = 30 days` still protects the last 30 days of snapshots — the per-call argument cannot relax the table floor. Treat these properties as the durable policy and per-call arguments as one-off overrides.
 
 **Schedule:** weekly. 30 days is a common operator-chosen retention setting (not an Iceberg or Trino default — see the defaults reminder above); you can keep 7 days if storage is tight, 90 days if compliance demands it. The actual built-in defaults are Iceberg's 5-day `history.expire.max-snapshot-age-ms` and Trino's 7-day `iceberg.expire-snapshots.min-retention` floor.
 

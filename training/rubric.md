@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.478 | 125 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.478 | 126 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
@@ -41,7 +41,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.496 | 117 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.574 | 25 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.561 | 26 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
@@ -50,6 +50,42 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 330 — 2026-05-27
+
+**Q1** — Iceberg $snapshots diagnostics: snapshot definition (photo analogy), $snapshots column set, keep-vs-expire criteria, maintenance order (compaction→expire→orphan→manifests), 7-day Trino 467 floor. Bug: SET TBLPROPERTIES is Spark syntax — answered as if Trino. Resource fix applied to resources/17.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 3.75 |
+| Beginner clarity | 4.75 |
+| Practical applicability | 4.25 |
+| Completeness | 4.25 |
+| **Average** | **4.25** — PASS |
+
+Two Spark/Trino engine confusion errors: (1) `SET TBLPROPERTIES` is Spark syntax; (2) Trino's `SET PROPERTIES` doesn't accept `history.expire.*` properties — must use Spark. Core snapshot concepts, `$snapshots` query, maintenance order, and 7-day floor all correct. Resource fix applied: added ENGINE CALLOUT to resources/17 clarifying that `history.expire.*` properties must be set from Spark. Topic running avg: (4.574×25 + 4.25)/26 = **4.561/26 questions** — PASSED (mild downward drift; fix applied to prevent recurrence).
+
+**Q2** — HMS startup-latency tuning for 80-tenant Trino: what HMS is, per-query critical path, Postgres-as-real-bottleneck, HA pattern (3 pods), system.runtime.queries phase timing for diagnosis, REST catalog as long-term escape.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.5 |
+| Completeness | 4.5 |
+| **Average** | **4.5** — PASS |
+
+All five technical claims verified: per-query HMS contact (no Iceberg connector caching per trinodb/trino#13115); port 9083 correct; system.runtime.queries columns accurate; HMS is stateless; 3-pod HA is the correct on-prem k8s pattern. No fabricated config properties. Minor gaps: SPOF not expanded, `hive.metastore.uri` comma-separated failover not mentioned, no concrete JVM heap size. Topic running avg: (4.478×125 + 4.5)/126 = **4.478/126 questions** — PASSED (stable).
+
+**Iter 330 average: (4.25 + 4.50) / 2 = 4.375 — PASS** ✓ (Q1 PASS / Q2 PASS)
+
+**Topics updated**:
+- Iceberg table maintenance: 4.574/25 → **4.561/26 questions** (PASSED — mild drop; SET TBLPROPERTIES Spark/Trino confusion; resource fixed)
+- Multi-tenant analytics: 4.478/125 → **4.478/126 questions** (PASSED — stable)
+
+**Resource fixes this iteration**: resources/17 — added ENGINE CALLOUT: `history.expire.min-snapshots-to-keep` and `history.expire.max-snapshot-age-ms` must be set from Spark SQL (`SET TBLPROPERTIES`), NOT Trino. Trino's `SET PROPERTIES` does not accept these Iceberg-native table properties.
+
+---
 
 ### Iter 329 — 2026-05-27
 

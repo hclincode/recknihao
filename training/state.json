@@ -1,7 +1,7 @@
 {
-  "iteration": 330,
+  "iteration": 331,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter329 avg 4.719 — PASS. Q1 (4.625) OPA bundle management: data.json naming, directory-as-namespace, no fabricated config props. Q2 (4.8125) CDC source_lsn + MERGE INTO exactly-once dedup pattern held perfectly. Multi-tenant: 4.478/125. Postgres-to-Iceberg: 4.496/117. Iceberg maintenance: 4.574/25."
+  "notes": "Extended phase — continuing until 2026-05-30 12:00 CST. Iter330 avg 4.375 — PASS. Q1 (4.25) $snapshots diagnostics: SET TBLPROPERTIES Spark/Trino confusion caught; resource fixed in resources/17. Q2 (4.50) HMS startup tuning — correct and actionable. Multi-tenant: 4.478/126. Iceberg maintenance: 4.561/26. Postgres-to-Iceberg: 4.496/117."
 }
