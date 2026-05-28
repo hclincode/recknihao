@@ -1,132 +1,161 @@
-# Judge Feedback — Iter 357 Q1
+# Iter 358 Q1 Feedback — Trino federation stop-gap session properties
 
-## Question recap
+**Question**: "We know we need to eventually ingest our 50M-row Postgres accounts table into Iceberg instead of federating it live, but the engineering work will take 2 weeks. Our dashboards are currently failing because the federated joins are OOMing. Are there session properties or config we can set RIGHT NOW to keep things running while we build the ingestion pipeline?"
 
-SaaS engineer asks: should we keep federating a 50M-row Postgres `customers` table live (via the Trino postgresql connector) for joins with our Iceberg `events` table, or copy/materialize it into Iceberg? What are the tradeoffs?
+**Verdict**: **FAIL — 2.75 / 5.0 average**
 
-This is the RE-PROBE that iter356 explicitly requested (judge probe target #3): test whether iter357 teacher actions #3/#5 (federate-vs-ingest decision matrix) landed in resources.
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 2.0 |
+| Beginner clarity | 3.0 |
+| Practical applicability | 2.0 |
+| Completeness | 4.0 |
 
-## Score
+This was a critical correctness probe (iter357 judge probe target #4) and the answer failed by giving the inverse of the correct recommendation on the central question.
 
-| Dimension | Score | Notes |
-|---|---|---|
-| Technical accuracy | 4.0 | Core mechanics correct; specific numbers unsourced; key levers (dynamic filtering, `join_distribution_type=PARTITIONED`) absent |
-| Beginner clarity | 4.0 | Plain-language framing; multiple unexplained terms |
-| Practical applicability | 4.5 | Concrete, pasteable; stack fit incomplete (dbt, CDC, k8s specifics) |
-| Completeness | 3.5 | Binary >5M cutoff loses the gradient; CDC tier missing; stop-gap tier missing |
-| **Average** | **4.00** | **PASS** (soft — right at the per-question 4.0 bar) |
+---
 
-**Topic running avg**: 4.511 -> **4.509** across 254 questions. PASSED (still above 4.5 threshold but downward smoothing).
+## What went well
 
-## What landed (teacher action follow-through)
+1. **Step 0 (dynamic filtering verification via EXPLAIN ANALYZE VERBOSE)** — correct and matches iter358 teacher action #1. `dynamicFilterSplitsProcessed > 0` is a real field in the ScanFilterAndProjectOperator JSON stats per Trino docs. This is the first iteration in 4 attempts where DF verification was surfaced as Step 0.
+2. **Step 1 (ANALYZE on Postgres + SHOW STATS verification)** — correct and matches iter358 teacher action #3. Checking `distinct_values_count` populated is the right NULL-stats sanity check.
+3. **Step 3 (spill_enabled)** — `SET SESSION spill_enabled = true` syntax is correct per Trino spilling properties docs.
+4. **Step 4 (resource group concurrency cap)** — the idea of capping concurrent federated queries is correct and a legitimate stability lever. The selector regex is wrong but the concept is right.
+5. **Five distinct levers covered** — DF check, stats, distribution, spill, concurrency throttling. Good breadth.
 
-The iter357 teacher action #3 was: "add an explicit 'when to federate live vs ingest into Iceberg' decision matrix." Responder DID surface federate-vs-ingest as the architectural alternative — this was the iter356 critical gap. Big improvement vs iter356 Q1 which never mentioned ingestion at all.
+---
 
-The iter357 teacher action #5 (decision matrix) PARTIALLY landed — the matrix was reduced to a binary `>5M=ingest` rule instead of the documented three-tier gradient.
+## Critical errors
 
-## What did not land
+### 1. PRIMARY RECOMMENDATION IS INVERTED — BROADCAST is the OOM cause, not the fix
 
-1. **Gradient was flattened.** Iter357 teacher action documented:
-   - `<10M` -> federate live with `join_distribution_type=PARTITIONED`
-   - `10M-100M` -> ingest nightly via `INSERT INTO ... SELECT * FROM postgres_catalog.<schema>.<table>`
-   - `>100M` -> CDC pipeline (Debezium -> Iceberg)
+The answer's Step 2 is `SET SESSION join_distribution_type = 'BROADCAST'` for a federated join to a 50M-row Postgres table that is currently OOMing.
 
-   Responder collapsed this to `>5M -> ingest`. The CDC tier is missing — important because the engineer said "every dashboard query," which implies the data freshness floor matters and CDC with 1–5 min lag is often the right answer for high-traffic dashboards.
+This is the opposite of correct. Per [Trino cost-based optimization docs](https://trino.io/docs/current/optimizer/cost-based-optimizations.html):
 
-2. **Dynamic filtering still absent** (recurring gap flagged iter164/165/356/357 — slipped AGAIN). For Iceberg-fact x JDBC-dimension joins, dynamic filtering is the single biggest lever Trino has. The answer says "queries run in <500ms" after cutover without naming the mechanism. This is the THIRD consecutive iteration where the federation answer omits dynamic filtering — needs to be a checklist item in `resources/22`.
+> "Broadcast joins require that the tables on the right side of the join after filtering fit in memory on each node, whereas distributed joins only need to fit in distributed memory across all nodes."
 
-3. **`join_distribution_type=PARTITIONED` stop-gap absent.** Engineer is currently in pain. Ingestion takes time to build. The stop-gap order (dynamic filtering check -> `ANALYZE` on Postgres source -> `SET SESSION join_distribution_type='PARTITIONED'` -> consider `spill_enabled=true`) buys runway while the ingestion pipeline is built. Not surfaced.
+BROADCAST replicates the right-side table to every worker. The default `join_max_broadcast_table_size` is 100MB precisely as a guard against OOM. A 50M-row Postgres table is approximately 10-20GB uncompressed (per iter356 framing) — far above the broadcast threshold. The result of following Step 2 will be one of:
+- Trino refuses to broadcast (exceeds `join_max_broadcast_table_size`) and the plan stays as it was, no change
+- If the engineer also raises `join_max_broadcast_table_size`, the OOM gets WORSE because every worker now tries to hold 10-20GB
 
-4. **Production stack specifics absent.** prod_info.md says dbt is permitted, Spark runs on k8s, MinIO is the Iceberg storage layer. None of these are named. The answer says "Spark job runs once per night" with no mention of how it runs on this stack (SparkApplication CR on k8s). dbt would be the natural tool for the 15-min micro-batch path with `incremental` materialization.
+PARTITIONED is the documented OOM-avoidance lever for large joins. PARTITIONED hash-redistributes both sides across workers, so the build-side hash table is split across the cluster instead of replicated. This is exactly what iter356 (4.125 PASS) and iter357 (4.00 soft PASS) got right and what iter358 teacher action #3 instructed.
 
-5. **Specific unsourced numbers.** "5M rows," "<500ms," ">70% CPU" are presented as factual without basis. The 100MB `join_max_broadcast_table_size` default is sourced. Specific perf numbers should either cite a source or be removed.
+### 2. "What NOT to do" actively warns against the correct answer
 
-6. **Beginner clarity terms unexplained.** "build side", "JDBC", "dynamic filtering", "min/max statistics", "partition pruning", "columnar" all appear without inline definitions. This is the same recurring gap iter356 flagged.
+> "Do NOT set join_distribution_type = 'PARTITIONED' as a long-term fix. ... It's a temporary fix only."
 
-## Pattern across federation answers (iter356 -> iter357)
+This buries the correct stop-gap inside a warning. The framing is the inverse of safe. PARTITIONED IS the temporary stop-gap that the engineer asked for. They explicitly said they will rebuild as an Iceberg ingestion pipeline in 2 weeks; a "temporary fix only" is exactly what they want.
 
-- Iter356 Q1 (4.125): missed federate-vs-ingest entirely — never surfaced ingestion as the architectural alternative.
-- Iter357 Q1 (4.00): surfaced ingestion correctly — BIG win — but flattened the gradient, omitted dynamic filtering AGAIN, omitted stop-gap tuning, omitted prod-stack fit.
+### 3. Resource group selector regex is wrong
 
-Trajectory is positive on the architectural framing but the federation runbook is still incomplete on its core levers (dynamic filtering, partitioned distribution) and on prod-environment fit (dbt, CDC, k8s, MinIO).
+```json
+"selectors": [{"user": ".*", "source": ".*postgresql.*"}]
+```
 
-## ITER358 TEACHER ACTIONS
+Per [Trino resource group docs](https://trino.io/docs/current/admin/resource-groups.html), the `source` field matches the client-supplied ApplicationName (set via `--source` CLI flag or `ApplicationName` JDBC connection property), NOT the catalog name. A JDBC client querying the postgresql catalog will NOT automatically have "postgresql" in its source. This selector will silently fail to match in production unless every client app happens to set source to include "postgresql".
 
-**MEDIUM (Q1 passed soft, topic stable but slipping):**
+### 4. "If it's the smaller side" hedge is dangerous
 
-1. **Restore the three-tier gradient in `resources/22-trino-federation-postgresql.md`.** Make the decision tree unambiguous: <10M federate live with PARTITIONED + dynamic filtering / 10M-100M ingest nightly Spark+dbt / >100M or <5min freshness SLO -> Debezium CDC -> Iceberg MoR. Show example syntax for each tier.
+Step 2 says: "The 50M-row accounts table fits in broadcast if it's the smaller side of the join and workers have sufficient RAM."
 
-2. **Add a "stop-gap before you commit to ingestion" tier** — engineer in pain TODAY who needs to ship the cutover in 2 weeks. Order: (a) verify `join-dynamic-filtering-enabled=true`; (b) `SHOW STATS FOR postgres_catalog.<schema>.<table>` -> `ANALYZE <table>` on Postgres source if row_count NULL; (c) `SET SESSION join_distribution_type='PARTITIONED'`; (d) consider `spill_enabled=true` for stability. This is the bridge the answer is missing.
+The question is explicit: the dashboards are OOMing on a federated join to this 50M-row table. The "if it's the smaller side" hedge is buried in a sentence and not turned into an actionable check. An engineer in pain TODAY will skim and run Step 2. If accounts is the larger side, Step 2 makes the OOM worse. If accounts is the smaller side but >100MB, Step 2 trips the broadcast threshold guard. There's no scenario where BROADCAST is the right first try for an OOM on a 50M-row JDBC join.
 
-3. **Add inline definitions for federation jargon** — "build side", "JDBC", "dynamic filtering", "columnar storage", "min/max statistics", "partition pruning". These keep being used without explanation across multiple iterations. Add a one-line glossary at the top of `resources/22`.
+---
 
-4. **Add a cutover playbook** — full refresh vs incremental MERGE with primary key, snapshot atomicity, dual-write window vs cut-and-replace, row-count and aggregate verification against the Postgres source.
+## Specific teacher actions for iter359 (HIGH priority)
 
-5. **Tie examples to the production stack** — Spark job runs as `SparkApplication` CR on k8s; dbt model uses `incremental` with `unique_key='customer_id'`; MinIO is the S3 backend; Iceberg catalog is Hive Metastore. This makes the advice actionable on the engineer's actual environment.
+`resources/22-trino-federation-postgresql.md` needs the following fixes before iter359:
 
-## ITER358 JUDGE PROBE TARGETS
+1. **Add a "Stop-gap for federated-join OOM" checklist** with this exact order:
+   - (a) Verify `join-dynamic-filtering-enabled=true` (default true in Trino 467; confirm via EXPLAIN ANALYZE VERBOSE looking for `dynamicFilterSplitsProcessed > 0`)
+   - (b) `SHOW STATS FOR postgresql.<schema>.<table>` — if `row_count` or `distinct_values_count` is NULL, run `ANALYZE <table>` on the Postgres source replica
+   - (c) `SET SESSION join_distribution_type = 'PARTITIONED'` — this is the primary OOM remedy, NOT BROADCAST
+   - (d) `SET SESSION spill_enabled = true` as a stability backstop
 
-Still-open / under-tested topics:
+2. **Add an explicit anti-pattern callout**: "If your federated join is OOMing, BROADCAST is almost never the fix and is likely already the cause. The default `join_max_broadcast_table_size=100MB` is a guard against exactly this. If you find yourself raising `join_max_broadcast_table_size`, you probably want `PARTITIONED` instead."
 
-1. **CDC-vs-batch ingestion** — re-probe at "we need fresher data than nightly batch — what's the architecture for syncing Postgres customers into Iceberg every 5 minutes?" Tests if teacher action #1 (CDC tier) lands.
-2. **Stop-gap federation tuning** — re-probe at "we can't ingest yet (cutover takes 2 weeks) — what session properties do we set to keep dashboards alive in the meantime?" Tests if teacher action #2 (stop-gap tier) lands.
-3. **Query plan optimization (EXPLAIN ANALYZE reading)** — never probed; recurring rubric note since iter356.
-4. **Cost considerations cloud vs on-prem** (S3+Athena+Glue lift-and-shift vs on-prem Trino+Iceberg+MinIO) — never probed.
+3. **Fix the resource group example**: `source` matches client ApplicationName, not catalog name. Either show a `queryType` selector, show `clientTags`, or explicitly state that the source string must be set by the client app.
+
+4. **Inline glossary at top of resources/22** (flagged for 4 consecutive iterations): "build side", "probe side", "broadcast join", "partitioned join", "hash redistribute", "spill". Currently load-bearing terms used without definitions.
+
+5. **"How to identify the build side" callout** — Trino's CBO picks the smaller side as build when stats are populated; without stats it falls back to syntactic right-side. Verify via `EXPLAIN (TYPE DISTRIBUTED)` looking for the `HashBuilder` step.
+
+---
+
+## Topic state
+
+- **Trino federation / cross-source connectors**: 4.509/254 -> **4.499/255 questions** — SLIPPED BELOW 4.5 RAISED THRESHOLD for the first time since iter356 recovery. Topic flipped from PASSED back to NEEDS WORK on a critical correctness probe.
+- Three consecutive iterations of decline (iter356 4.125, iter357 4.00, iter358 2.75). The trajectory is concerning even though the running avg only slipped marginally below threshold.
+
+## Judge probe targets for iter359
+
+1. **CRITICAL RE-PROBE** — Re-test stop-gap federation tuning at fresh phrasing (e.g., "our federated join is hitting `Query exceeded per-node memory limit` — which session property do we change?"). Iter358 failed this question; iter359 must re-probe to verify the BROADCAST→PARTITIONED correction lands.
+2. Query plan optimization (EXPLAIN ANALYZE reading for slow Iceberg queries) — recurring open probe target since iter356.
+3. Cost considerations cloud vs on-prem (lift-and-shift S3+Athena+Glue vs on-prem Trino+Iceberg+MinIO) — still not probed.
+4. CDC tier — iter358 teacher action #2 (>100M or <5min freshness → Debezium → Iceberg MoR) untested.
 
 ## Sources verified via WebSearch
 
-- [PostgreSQL connector — Trino 481 Documentation](https://trino.io/docs/current/connector/postgresql.html)
-- [Cost-based optimizations — Trino 481 Documentation](https://trino.io/docs/current/optimizer/cost-based-optimizations.html) — `join_max_broadcast_table_size`, broadcast right-side memory requirement
-- [Dynamic filtering — Trino 481 Documentation](https://trino.io/docs/current/admin/dynamic-filtering.html)
-- [General properties — Trino 481 Documentation](https://trino.io/docs/current/admin/properties-general.html) — `join_distribution_type`
-- [Benchmarking the JDBC Bottleneck in Trino — Starburst](https://www.starburst.io/blog/benchmarking-the-jdbc-bottleneck-in-trino/) — JDBC serialization bottleneck
+- [General properties — Trino 481 Documentation](https://trino.io/docs/current/admin/properties-general.html) — `join_distribution_type` BROADCAST/PARTITIONED/AUTOMATIC semantics
+- [Cost-based optimizations — Trino 481 Documentation](https://trino.io/docs/current/optimizer/cost-based-optimizations.html) — `join_max_broadcast_table_size` default 100MB, broadcast requires right side fits in worker memory
+- [Spilling properties — Trino 479 Documentation](https://trino.io/docs/current/admin/properties-spilling.html) — `spill_enabled` session property confirmed
+- [EXPLAIN ANALYZE — Trino 481 Documentation](https://trino.io/docs/current/sql/explain-analyze.html) — `dynamicFilterSplitsProcessed` field in ScanFilterAndProjectOperator JSON
+- [Resource groups — Trino 480 Documentation](https://trino.io/docs/current/admin/resource-groups.html) — `source` selector matches client ApplicationName, not catalog name
+- [Dynamic filtering — Trino 481 Documentation](https://trino.io/docs/current/admin/dynamic-filtering.html) — verification via EXPLAIN ANALYZE
 
-## Iter 357 End-of-Iteration Summary
+---
 
-### Per-question scores
+## Iter 358 End-of-Iteration Summary
 
-| Question | Topic | Score | Verdict |
+**Verdict**: **FAIL — 3.5625 / 5.0 iteration average**
+
+| Question | Topic | Score | Result |
 |---|---|---|---|
-| Q1 | Trino federation: federate-vs-ingest 50M-row Postgres customers x Iceberg events | 4.00 | soft PASS |
-| Q2 | When to add OLAP: 5M-row Postgres at 45s p95, prod already runs Trino+Iceberg+MinIO — proxy test + decision | 4.00 | soft PASS |
-| **Iter 357 average** | | **4.00** | **MARGINAL PASS** |
+| Q1 | Trino federation stop-gap OOM (session properties) | 2.75 | FAIL |
+| Q2 | 5M-rows in RAM, columnar advantage / Postgres-vs-OLAP | 4.375 | PASS |
+| **Iter avg** | | **3.5625** | **FAIL** |
 
-### Root causes — what improved, what slipped
+### Headline finding
 
-**What landed (teacher actions from iter356 -> iter357):**
-- Q1: federate-vs-ingest now surfaced as the architectural alternative (iter356 critical miss is closed). Big win on architectural framing.
-- Q2: Postgres CSV extraction syntax fix landed — no more `INTO OUTFILE` mistakes; `\COPY ... TO ...` / `COPY ... TO ...` is now correct. Critical iter356 FAIL on Q2 is closed.
-- Q2: "use the OLAP engine you already have" callout partially landed — Trino+Iceberg+MinIO is now mentioned as the proxy path instead of defaulting to a DuckDB install.
+Iter358 fails on the iter357 critical re-probe target #2 (stop-gap federation tuning). The answer recommended the inverse of correct: `SET SESSION join_distribution_type = 'BROADCAST'` as the primary OOM remedy on a 50M-row federated Postgres join, and explicitly warned the engineer NOT to use `PARTITIONED` (which is the documented fix). This is a critical correctness inversion on a topic that has now slipped from PASSED back to NEEDS WORK after three consecutive declining iterations (iter356 4.125, iter357 4.00, iter358 2.75).
 
-**What did not land (regressions / recurring gaps):**
-1. **Dynamic filtering omitted on federation answer for the 3rd consecutive iteration** (iter164/165, iter356, iter357). This is now a chronic gap — the answer claims "<500ms after cutover" without naming the single biggest Trino lever for fact x dim joins. Must become a CHECKLIST ITEM in resources/22, not just prose.
-2. **Three-tier federate-vs-ingest gradient flattened to a binary `>5M=ingest`.** The CDC tier (>100M or <5min freshness SLO -> Debezium -> Iceberg MoR) was documented in iter357 teacher actions but did not survive into the answer. CDC is the right answer for "every dashboard query" freshness — losing this tier loses the high-traffic dashboard case entirely.
-3. **Stop-gap tuning tier missing on Q1.** Engineer is in pain TODAY and ingestion takes weeks to build. The bridge order (dynamic filtering check -> `ANALYZE` Postgres source -> `SET SESSION join_distribution_type='PARTITIONED'` -> `spill_enabled=true`) was not surfaced.
-4. **Tuning-first framing on Postgres-vs-OLAP subtopic still weak.** Q2 at 4.00 means the third probe of this subtopic (iter355 4.9375 / iter356 3.875 / iter357 4.00) shows MIXED durability — the subtopic is NOT yet stable. The answer routes to Trino+Iceberg proxy correctly but is still light on `EXPLAIN (ANALYZE, BUFFERS)`, index audit (`pg_stat_user_indexes`), `work_mem`, partial indexes, BRIN, MVs, `max_parallel_workers_per_gather` BEFORE the OLAP push recommendation.
-5. **Production-stack fit still partial.** dbt is rarely named where it's the natural tool (incremental materialization for nightly/15-min batch). SparkApplication CR on k8s for the ingestion job is missing. MinIO / Hive Metastore catalog plumbing rarely surfaces concretely.
-6. **Beginner clarity terms repeatedly unexplained.** "build side", "JDBC", "dynamic filtering", "min/max statistics", "partition pruning", "columnar", "REPLICATE", "REPARTITION", "hash-redistributes" keep appearing without inline definitions across multiple iterations. Needs a one-line glossary at the top of resources/22.
+### Per-question pattern
 
-### Iter 358 teacher actions
+- **Q1 (2.75 FAIL)** — Critical inversion on the primary lever. The good news: Step 0 (dynamic filtering verification via EXPLAIN ANALYZE VERBOSE) finally landed for the first time in 4 attempts, matching iter358 teacher action #1. ANALYZE/SHOW STATS sanity check (Step 1) landed too (teacher action #3). But Steps 2-5 inverted the primary distribution recommendation and embedded the correct answer inside a "do NOT do this" warning. The breadth was right (5 levers), the central correctness was wrong.
+- **Q2 (4.375 PASS)** — Postgres-vs-OLAP 4th probe lands cleanly. Vectorization/SIMD reasoning solid, tuning-first framing preserved (EXPLAIN BUFFERS / work_mem / partial indexes / BRIN BEFORE OLAP-proxy step), upward trajectory across iter355/356/357/358 (4.9375 / 3.875 / 4.00 / 4.375). Subtopic now stable enough to declare durable.
 
-**HIGH (chronic gaps blocking strong pass):**
-1. **Promote dynamic filtering to a TOP-of-section checklist item in resources/22-trino-federation-postgresql.md.** Not buried in prose. Show: `SET SESSION join-dynamic-filtering-enabled = true` (verify cluster default), `EXPLAIN (ANALYZE, VERBOSE)` reading the `Dynamic filters` line, expected rows-filtered ratio for Iceberg-fact x JDBC-dim joins. This has slipped 3 iterations in a row.
-2. **Restore the three-tier federate-vs-ingest gradient with the CDC tier intact.** Decision tree must be unambiguous: `<10M federate live` (PARTITIONED + dynamic filtering) / `10M-100M ingest nightly` (Spark+dbt incremental) / `>100M or <5min freshness SLO -> Debezium CDC -> Iceberg MoR`. Show working syntax per tier. Do not let the answer collapse this to a binary cutoff.
-3. **Add the "stop-gap before you commit to ingestion" tier.** Order: (a) verify `join-dynamic-filtering-enabled=true`; (b) `SHOW STATS FOR postgres_catalog.<schema>.<table>` -> `ANALYZE <table>` on Postgres source if `row_count` NULL; (c) `SET SESSION join_distribution_type='PARTITIONED'`; (d) `SET SESSION spill_enabled=true` for stability. This is the runway-buying bridge.
+### Topic state changes
 
-**MEDIUM (subtopic durability):**
-4. **Reinforce tuning-first framing for sub-10M-row Postgres slowness** BEFORE the OLAP-proxy step. Concrete pre-OLAP checklist: `EXPLAIN (ANALYZE, BUFFERS)`, `pg_stat_user_indexes` audit, `work_mem` sizing, partial indexes on hot filter predicates, BRIN for time-series, materialized views, `max_parallel_workers_per_gather`. The OLAP proxy is the SECOND step, not the first.
-5. **Tie examples to the production stack concretely.** Spark ingest = `SparkApplication` CR on k8s. dbt = `incremental` materialization with `unique_key='customer_id'`. MinIO = S3 backend for the Iceberg warehouse. Hive Metastore = Iceberg catalog. Name these by name in code samples.
-6. **Add inline definitions / one-line glossary** for "build side", "JDBC", "dynamic filtering", "columnar storage", "min/max statistics", "partition pruning", "REPLICATE", "REPARTITION", "hash-redistributes" at the top of resources/22.
+- **Trino federation / cross-source connectors**: 4.509 -> **4.499 (255 questions)** — slipped below raised 4.5 threshold for the first time since iter356 recovery. Status flipped PASSED -> NEEDS WORK.
+- **When to add an OLAP layer / Postgres-vs-OLAP decision**: 4th probe at fresh phrasing (5M rows, fits in RAM) lands at 4.375, durability now demonstrated across 4 angles. Topic remains PASSED with reinforced confidence.
+- **Column-oriented storage**: Q2 also touched columnar/vectorization reasoning — landed cleanly, no regression.
 
-**LOW (cutover playbook):**
-7. **Add a federation -> Iceberg cutover playbook** — full refresh vs incremental MERGE with primary key, snapshot atomicity, dual-write window vs cut-and-replace, row-count and aggregate verification against the Postgres source.
+### Recurring gaps (now CHRONIC)
 
-### Iter 358 judge probe targets
+1. **Federation OOM-stop-gap correctness** — iter356/357/358 all show this topic is fragile under stop-gap framing. The answer keeps either omitting `PARTITIONED` (iter356/357) or now actively recommending its opposite (iter358). Stop-gap tier in resources/22 is either missing, mis-ordered, or being read wrong by the responder. Highest-priority repair target.
+2. **Inline glossary at top of resources/22** — flagged for 4 consecutive iterations (iter355/356/357/358). "Build side", "broadcast", "partitioned", "hash redistribute", "spill" still load-bearing without definitions in resources/22.
+3. **Resource group selector example wrong** — `source` matches client ApplicationName, not catalog name. This has been incorrect in two iterations now.
 
-Still-open / under-tested topics:
-1. **CDC tier re-probe** — "we need fresher data than nightly batch — what's the architecture for syncing Postgres customers into Iceberg every 5 minutes?" Tests if action #2 (CDC tier) survives into the answer.
-2. **Stop-gap federation tuning re-probe** — "we can't ingest yet (cutover takes 2 weeks) — what session properties do we set to keep dashboards alive in the meantime?" Tests if action #3 (stop-gap tier) lands.
-3. **Postgres-vs-OLAP decision — 4th probe** — three probes (4.9375 / 3.875 / 4.00) show mixed durability; needs a 4th probe at a different phrasing (e.g., "5M rows, 12s p95, fits in RAM — do we even need OLAP?") before declaring stable.
-4. **Query plan optimization (EXPLAIN ANALYZE reading)** — never probed, recurring rubric note since iter356.
-5. **Cost considerations cloud vs on-prem** (AWS S3+Athena+Glue lift-and-shift vs on-prem Trino+Iceberg+MinIO) — never probed.
+### What is working
+
+- Dynamic filtering verification finally surfaced as Step 0 on the federation answer (iter358 teacher action #1 landed)
+- ANALYZE / SHOW STATS Postgres-stats sanity check landed (teacher action #3 landed)
+- Tuning-first framing on Postgres-vs-OLAP subtopic now durable across 4 probes
+- Vectorization/SIMD/columnar reasoning on Q2 was correct and concrete
+
+### Iter359 teacher actions (HIGH priority — extending iter358 actions)
+
+1. **CRITICAL — rewrite stop-gap checklist in resources/22 with `PARTITIONED` as the primary OOM lever** and an explicit anti-pattern callout that BROADCAST is almost never the fix for an OOMing federated join (and is likely already the cause if `join_max_broadcast_table_size` was raised). See iter358 Q1 feedback section "Specific teacher actions" for exact ordering.
+2. **CRITICAL — add anti-pattern callout** "BROADCAST is the OOM cause, not the fix" with the `join_max_broadcast_table_size=100MB` default explained as a guard.
+3. **HIGH — fix resource group selector example** in resources/22: use `queryType` or `clientTags` or explicitly note that `source` matches client ApplicationName.
+4. **HIGH — inline glossary at top of resources/22** (4th iteration flagged): build side, probe side, broadcast join, partitioned join, hash redistribute, spill. Currently load-bearing without definitions.
+5. **MEDIUM — "how to identify the build side" callout**: Trino CBO picks smaller side as build when stats are populated; falls back to syntactic right-side without stats. Verify via `EXPLAIN (TYPE DISTRIBUTED)` looking for `HashBuilder`.
+
+### Iter359 judge probe targets
+
+1. **CRITICAL RE-PROBE** — Re-test stop-gap federation tuning at fresh phrasing (e.g., "our federated join is hitting `Query exceeded per-node memory limit` — which session property do we change?"). Iter358 failed; iter359 must verify the BROADCAST->PARTITIONED correction lands.
+2. CDC tier — iter358 teacher action #2 (>100M or <5min freshness -> Debezium -> Iceberg MoR) still untested.
+3. Query plan optimization (EXPLAIN ANALYZE reading for slow Iceberg queries) — recurring open probe target since iter356.
+4. Cost considerations cloud vs on-prem (lift-and-shift S3+Athena+Glue vs on-prem Trino+Iceberg+MinIO) — still not probed.
 

@@ -26,10 +26,10 @@ Each topic must reach the pass threshold before the system can enter final phase
 | OLAP vs OLTP — difference and why it matters for SaaS | PASSED | 4.657 | 4 |
 | What a data warehouse is and when a SaaS product needs one | PASSED | 4.647 | 3 |
 | What a data lakehouse is and how it differs from a warehouse | PASSED | 4.625 | 2 |
-| Column-oriented storage — what it is and why it's faster for analytics | PASSED | 4.598 | 10 |
+| Column-oriented storage — what it is and why it's faster for analytics | PASSED | 4.578 | 11 |
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
-| When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.464 | 13 |
+| When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.458 | 14 |
 | Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.447 | 143 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
@@ -43,13 +43,71 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.524 | 131 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.523 | 42 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
-| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.509 | 254 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.499 | 255 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
 | SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.652 | 16 |
 
 ---
 
 ## Score history
+
+### Iter 358 Q1 — 2026-05-29 (EXTENDED PHASE) — Trino federation stop-gap session properties (per iter357 judge probe target #4)
+
+**Q1** — Re-probe at "we can't ingest yet (engineering work takes 2 weeks), dashboards are OOMing on federated joins to 50M-row Postgres accounts — what session properties keep things alive RIGHT NOW?" Tests iter358 teacher action #3 (stop-gap tier ordering).
+
+Responder produced: (a) Step 0 verify DF working via `EXPLAIN ANALYZE VERBOSE` looking for `dynamicFilterSplitsProcessed > 0`; (b) Step 1 `ANALYZE accounts` on Postgres + `SHOW STATS FOR postgresql.public.accounts` and confirm `distinct_values_count` populated; (c) Step 2 **`SET SESSION join_distribution_type = 'BROADCAST'`** with rationale "50M-row accounts table fits in broadcast if it's the smaller side"; (d) Step 3 `SET SESSION spill_enabled = true`; (e) Step 4 resource group concurrency cap with `selectors: [{"user": ".*", "source": ".*postgresql.*"}]`; (f) "What NOT to do" section that warns AGAINST `join_distribution_type = 'PARTITIONED'` as a long-term fix.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 2.0 |
+| Beginner clarity | 3.0 |
+| Practical applicability | 2.0 |
+| Completeness | 4.0 |
+| **Average** | **2.75** |
+
+Judge verified via WebSearch:
+1. **BROADCAST vs PARTITIONED for OOM on 50M-row table — CRITICAL INVERSION.** Per [General properties — Trino docs](https://trino.io/docs/current/admin/properties-general.html) and [Cost-based optimizations](https://trino.io/docs/current/optimizer/cost-based-optimizations.html): "Broadcast joins require that the tables on the right side of the join after filtering fit in memory on each node, whereas distributed joins only need to fit in distributed memory across all nodes." BROADCAST is the OOM-CAUSING distribution for a large build side, not the fix. The default `join_max_broadcast_table_size` is 100MB — a 50M-row Postgres table almost certainly exceeds this (per iter356 framing: 50M rows ≈ 10-20GB uncompressed). PARTITIONED is the documented stop-gap for OOM avoidance with large joins. The answer recommends BROADCAST as Step 2 and **explicitly warns against PARTITIONED in "What NOT to do"** — this is the exact OPPOSITE of what iter358 teacher action #3 and Trino docs prescribe.
+2. **`spill_enabled` session property exists** — CONFIRMED per [Spilling properties — Trino docs](https://trino.io/docs/current/admin/properties-spilling.html). Step 3 syntax is correct.
+3. **`dynamicFilterSplitsProcessed` in EXPLAIN ANALYZE VERBOSE** — CONFIRMED per [EXPLAIN ANALYZE — Trino docs](https://trino.io/docs/current/sql/explain-analyze.html) and trinodb/trino#3217. Appears in ScanFilterAndProjectOperator JSON stats. Step 0 verification approach is correct.
+4. **Resource group `source` selector** — per [Resource groups — Trino docs](https://trino.io/docs/current/admin/resource-groups.html), `source` matches the client-supplied ApplicationName / `--source` CLI option, NOT the catalog name. The regex `.*postgresql.*` will not automatically match a JDBC client querying the postgresql catalog unless the client explicitly sets its source string to include "postgresql". This is a misleading example.
+5. **ANALYZE on Postgres source + SHOW STATS** — CORRECT per [Table statistics — Trino docs](https://trino.io/docs/current/optimizer/statistics.html) and PostgreSQL connector docs.
+
+Topic running avg: (4.509 × 254 + 2.75) / 255 = (1145.286 + 2.75) / 255 = 1148.036 / 255 = **4.499 across 255 questions** — slipped BELOW raised 4.5 threshold for the first time since iter356 recovery, NEEDS WORK again.
+
+**Iter 358 Q1: 2.75 — FAIL** (well below per-question 4.0 bar)
+
+GAPS (deductions from 5):
+- **Technical accuracy (−3.0)**: (a) PRIMARY recommendation (Step 2 BROADCAST) is INVERTED — for a 50M-row table causing OOM, BROADCAST replicates the large table to every worker and either trips `join_max_broadcast_table_size` (default 100MB) or makes the OOM strictly worse. PARTITIONED is the documented OOM-avoidance lever per Trino docs. (b) "What NOT to do" section AGGRESSIVELY warns against PARTITIONED ("Do NOT set join_distribution_type = 'PARTITIONED' as a long-term fix"), which is the OPPOSITE of correct guidance — PARTITIONED is precisely what the stop-gap calls for. (c) The hedge "if it's the smaller side of the join" is buried and the engineer is in pain TODAY; recommending BROADCAST first without verifying which side is smaller is unsafe guidance. (d) Resource group `source` selector regex `.*postgresql.*` will not match catalog name — it matches client ApplicationName.
+- **Beginner clarity (−2.0)**: "build side", "broadcast", "PARTITIONED", "shuffle", "hash", "spill", "dynamic filter", "resource group" all used without inline definitions. A SaaS engineer with no OLAP background cannot tell from this answer whether their 50M-row accounts table IS the smaller/build side or not — that judgment is left implicit but is the determining factor in whether Step 2 helps or hurts.
+- **Practical applicability (−3.0)**: An engineer in pain TODAY who copy-pastes Step 2 (`SET SESSION join_distribution_type = 'BROADCAST'`) on a 50M-row build side will likely (a) hit `join_max_broadcast_table_size` cap and the query fails immediately, OR (b) make the OOM worse if the cap is raised. Net effect of following this guidance is WORSE than doing nothing. The resource group example may not even match their JDBC traffic.
+- **Completeness (−1.0)**: Covers DF verification, stats, distribution, spill, and concurrency — five distinct levers, good breadth. Misses: `join-dynamic-filtering-enabled` explicit toggle check, `join_max_broadcast_table_size` discussion (which would have caught the BROADCAST error), worker memory headroom (`query.max-memory-per-node`), and the JDBC predicate pushdown angle. The "What NOT to do" section is actively counterproductive.
+
+ITER359 TEACHER ACTION (HIGH priority — CRITICAL inversion of stop-gap recommendation, topic slipped from 4.509 to 4.499 below threshold):
+1. **HIGH (correctness)** — `resources/22-trino-federation-postgresql.md` must contain an unambiguous "Stop-gap for federated-join OOM" checklist with `join_distribution_type='PARTITIONED'` as the PRIMARY remedy, not BROADCAST. The mental model must be explicit: BROADCAST replicates the right-side table to EVERY worker, so it works only when the right side is genuinely small (<100MB default, or under raised `join_max_broadcast_table_size`); PARTITIONED hash-redistributes both sides on the join key, so it can handle joins where neither side fits on a single worker. For a 50M-row Postgres table (≈10-20GB uncompressed), PARTITIONED is the stability remedy, not BROADCAST.
+2. **HIGH (correctness)** — Add an explicit warning: "If your federated join is OOMing, BROADCAST is almost never the fix and is likely the cause. The default `join_max_broadcast_table_size=100MB` is a guard against exactly this — if you find yourself raising it, you probably want PARTITIONED instead."
+3. **HIGH (correctness)** — Fix the resource group example: `source` is the client ApplicationName / `--source` CLI option, NOT the catalog name. Either show a `queryType` selector, or explain that clients must set their source string explicitly for this to work, or use a different selector (user, clientTags).
+4. **HIGH** — The stop-gap order per iter358 teacher action #3 (a) verify `join-dynamic-filtering-enabled=true` (b) `SHOW STATS` + `ANALYZE` Postgres source (c) `SET SESSION join_distribution_type='PARTITIONED'` (d) `SET SESSION spill_enabled=true` — must be the ONLY recommended order. The iter358 answer's BROADCAST-first order is the inverse of safe and contradicts iter356/iter357 teacher actions that already correctly identified PARTITIONED as the stop-gap.
+5. **MEDIUM** — Inline glossary at top of resources/22 for "build side", "probe side", "broadcast join", "partitioned join", "hash redistribute", "spill" — these are the load-bearing terms for this entire topic and still being used without definitions across iterations.
+6. **MEDIUM** — Add a brief "how to tell which side is the build side" callout — Trino's CBO picks the smaller side as build when stats are populated; without stats it falls back to syntactic right-side as build. Engineers can verify with `EXPLAIN (TYPE DISTRIBUTED)` looking for which input has the `HashBuilder` step.
+
+ITER359 JUDGE PROBE TARGETS — under-tested topics still open + critical correctness re-probe:
+1. **CRITICAL RE-PROBE** — stop-gap federation tuning at NEW phrasing (e.g., "our federated join is hitting `Query exceeded per-node memory limit` — which session property do we change?") to verify the BROADCAST→PARTITIONED correction lands.
+2. Query plan optimization (EXPLAIN ANALYZE reading for slow Iceberg queries) — still not probed, recurring rubric note since iter356.
+3. Cost considerations cloud vs on-prem (S3+Athena+Glue lift-and-shift vs on-prem Trino+Iceberg+MinIO) — still not probed.
+4. CDC tier (>100M or <5min freshness SLO → Debezium → Iceberg MoR) — iter358 teacher action #2 still untested.
+
+Sources verified via WebSearch:
+- [General properties — Trino 481 Documentation](https://trino.io/docs/current/admin/properties-general.html) — `join_distribution_type` BROADCAST/PARTITIONED/AUTOMATIC semantics
+- [Cost-based optimizations — Trino 481 Documentation](https://trino.io/docs/current/optimizer/cost-based-optimizations.html) — `join_max_broadcast_table_size` default 100MB, broadcast requires right side fits in worker memory
+- [Spilling properties — Trino 479 Documentation](https://trino.io/docs/current/admin/properties-spilling.html) — `spill_enabled` session property confirmed
+- [EXPLAIN ANALYZE — Trino 481 Documentation](https://trino.io/docs/current/sql/explain-analyze.html) — `dynamicFilterSplitsProcessed` field in ScanFilterAndProjectOperator
+- [Resource groups — Trino 480 Documentation](https://trino.io/docs/current/admin/resource-groups.html) — `source` selector matches client ApplicationName, not catalog name
+- [Dynamic filtering — Trino 481 Documentation](https://trino.io/docs/current/admin/dynamic-filtering.html) — verification via EXPLAIN ANALYZE
+
+**Topics updated**:
+- Trino federation: 4.509/254 → **4.499/255 questions** (NEEDS WORK — slipped below 4.5 raised threshold, critical inversion on a directly-asked correctness question)
+
+---
 
 ### Iter 357 — 2026-05-29 (EXTENDED PHASE)
 
