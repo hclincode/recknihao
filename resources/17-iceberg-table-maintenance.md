@@ -463,9 +463,39 @@ In the `$files` metadata table, equality delete files show up with `content = 2`
 
 2. **Iceberg 1.5.2 has a known dangling-equality-delete bug** ([apache/iceberg#12838](https://github.com/apache/iceberg/issues/12838), still open as of mid-2026). `rewrite_data_files` can leave equality delete files **orphaned across partition boundaries** when `dataSequenceNumber` comparisons span partitions. The result: even after `rewrite_data_files` reports success, your `$files` `content=2` count keeps growing.
 
-3. **The fix landed in Iceberg 1.8+, NOT 1.5.2.** A new `remove-dangling-deletes` option was added to `rewrite_data_files` (also a related [apache/iceberg#8933](https://github.com/apache/iceberg/issues/8933) discussion). **The production stack is on Iceberg 1.5.2 and does NOT have this option.** Trying `options => map('remove-dangling-deletes', 'true')` on 1.5.2 either silently no-ops or errors depending on the codepath — do not rely on it.
+3. **The fix landed in Iceberg 1.8+ (released 2026-02-13), NOT 1.5.2.** A new `remove-dangling-deletes` option was added to `rewrite_data_files`: `CALL system.rewrite_data_files(table => 'analytics.cdc_users', options => map('remove-dangling-deletes', 'true'))`. **The production stack is on Iceberg 1.5.2 and does NOT have this option.** Trying `options => map('remove-dangling-deletes', 'true')` on 1.5.2 either silently no-ops or errors depending on the codepath — do not rely on it.
 
-> **Workaround for Iceberg 1.5.2:** run `remove_orphan_files` **after** `rewrite_data_files` in the same maintenance pass. Once `rewrite_data_files` has applied an equality delete (merged surviving rows into a new data file), the equality delete file is no longer referenced by any live snapshot — so it becomes a Class 2 orphan and `remove_orphan_files` will sweep it up. This is not as clean as the 1.8+ `remove-dangling-deletes` option (which removes them inside the same commit), but it does close the storage and read-amplification gap on 1.5.2.
+> ### THERE IS NO SILVER-BULLET WORKAROUND ON ICEBERG 1.5.2
+>
+> **Be unambiguous about this with your team.** On Iceberg 1.5.2, the dangling-equality-delete bug ([apache/iceberg#12838](https://github.com/apache/iceberg/issues/12838)) has **no effective workaround**. If you are running a Debezium CDC pipeline into a MoR Iceberg 1.5.2 table, equality delete files (`$files content=2`) **will accumulate** over time, your read amplification will grow, and the only complete fix is to **upgrade to Iceberg 1.8+** and use the `remove-dangling-deletes` option in `rewrite_data_files`.
+>
+> **Why `remove_orphan_files` does NOT help here (common false workaround — do not use):**
+> - `remove_orphan_files` only deletes files that are **NOT referenced by any live snapshot's manifest** (Class 2 orphans — files written but never committed).
+> - Dangling equality deletes from the 1.5.2 bug **ARE still referenced** by the live snapshot's delete-file manifest. That is precisely *why* they survive `rewrite_data_files` — Iceberg still thinks they are live.
+> - If you add `remove_orphan_files` to your maintenance pass expecting it to clean up dangling equality deletes, you will watch `$files content=2` keep growing with no change, and you'll have wasted a maintenance window scanning your entire MinIO bucket for nothing.
+> - This was a previously-recommended workaround in older guides (including an earlier version of this document). It is **factually incorrect** — verified against the upstream Iceberg `RemoveOrphanFilesAction` source and the issue tracker discussion on #12838.
+
+**Partial mitigation only (does NOT fix the bug, but reduces accumulation rate):**
+
+Force `rewrite_data_files` to visit **every partition** at least weekly, by lowering `min-input-files` to `1` and running a full-table rewrite. Equality deletes are only applied (and dropped) for partitions that `rewrite_data_files` actually touches; by forcing it to touch every partition, you ensure equality deletes are at least eagerly consumed for non-dangling cases:
+
+```sql
+-- Spark on Iceberg 1.5.2 — partial mitigation: force full-table rewrite weekly.
+-- This does NOT fix dangling deletes that cross partition boundaries (issue #12838),
+-- but it does ensure all "normal" equality deletes get applied each week.
+CALL iceberg.system.rewrite_data_files(
+  table   => 'analytics.cdc_users',
+  options => map(
+    'min-input-files',        '1',          -- visit every partition, even healthy ones
+    'rewrite-all',            'true',       -- force full-table rewrite
+    'target-file-size-bytes', '134217728'   -- 128 MB
+  )
+);
+```
+
+**Costs of this mitigation:** rewriting every partition every week is expensive — both in compute (Spark scans and rewrites all data) and in MinIO storage (each rewrite produces a new snapshot that must be expired). Budget accordingly. On large tables (> 100 GB) the cost may exceed the value; in that case, accept the equality delete accumulation as a known issue, monitor it, and prioritize the Iceberg 1.8+ upgrade.
+
+**The right answer is the upgrade.** If you have a Debezium CDC pipeline on Iceberg 1.5.2, your engineering team should treat upgrading to Iceberg 1.8+ as a priority. The `remove-dangling-deletes` option in `rewrite_data_files` is the only mechanism that atomically removes dangling equality delete files inside the rewrite commit.
 
 #### Diagnostic: monitor equality delete file growth
 
@@ -498,27 +528,30 @@ If you cross any critical threshold, the maintenance workflow described next is 
 
 ```
 weekly maintenance window (Debezium-fed CDC table on Iceberg 1.5.2):
-   1. rewrite_data_files          (Spark CALL or Trino EXECUTE optimize)
-   2. remove_orphan_files         (Spark CALL or Trino EXECUTE)   <-- THIS sweeps the dangling equality deletes
-   3. expire_snapshots            (Spark CALL or Trino EXECUTE)
-   4. rewrite_manifests           (SPARK ONLY on Trino 467)
+   1. rewrite_data_files          (Spark CALL — use min-input-files=1, rewrite-all=true
+                                   as a partial mitigation; equality deletes will
+                                   still accumulate due to the unfixed 1.5.2 bug)
+   2. expire_snapshots            (Spark CALL or Trino EXECUTE)
+   3. remove_orphan_files         (Spark CALL or Trino EXECUTE — for Class 2 garbage only;
+                                   does NOT clean dangling equality deletes — see warning above)
+   4. rewrite_manifests           (SPARK ONLY on Trino 467; Trino 470+ has optimize_manifests)
 ```
 
-The ordering matters: `remove_orphan_files` MUST run **after** `rewrite_data_files` (which is when the equality delete files lose their last live reference) and **before** the next CDC ingest cycle adds new equality delete files that you actually want to keep. Set the `retention_threshold` on `remove_orphan_files` carefully — the default 7-day floor is correct for routine maintenance; do not lower it to chase the dangling deletes faster, or you risk deleting equality delete files from in-flight CDC commits.
+**Important:** `remove_orphan_files` is still in the standard maintenance pass — it's needed for failed-write orphans (Class 2 garbage from crashed Spark jobs). It is **NOT** in the pass to clean up dangling equality deletes; it cannot do that. See the warning box above.
 
 #### Cadence guidance for CDC pipelines
 
-The right maintenance frequency depends on the source UPDATE/DELETE rate:
+The right maintenance frequency depends on the source UPDATE/DELETE rate. **None of these schedules fixes the 1.5.2 dangling-equality-delete bug** — they only control how fast equality deletes accumulate before becoming critical:
 
 | Source Postgres UPDATE/DELETE rate | Recommended `rewrite_data_files` cadence |
 |---|---|
-| < 10 ops/sec (low write) | Nightly is fine |
-| 10–100 ops/sec (moderate) | Daily, with a weekly full pass that also runs `remove_orphan_files` |
-| > 100 ops/sec (high write) | Hourly compaction; full pass with `remove_orphan_files` daily |
+| < 10 ops/sec (low write) | Nightly compaction; weekly full-table pass (`min-input-files=1`, `rewrite-all=true`) |
+| 10–100 ops/sec (moderate) | Daily compaction; daily full-table pass |
+| > 100 ops/sec (high write) | Hourly compaction; full-table pass every 6–12 hours |
 
-The driver is read amplification: every Trino query against a Debezium-fed table must consult every equality delete file that overlaps the scanned data files. At 1000+ accumulated equality delete files, query latencies typically degrade from seconds to minutes. The diagnostic query above is the early-warning signal.
+The driver is read amplification: every Trino query against a Debezium-fed table must consult every equality delete file that overlaps the scanned data files. At 1000+ accumulated equality delete files, query latencies typically degrade from seconds to minutes. The diagnostic query above is the early-warning signal — alert at **50+ files or 100+ MB of `content=2`**.
 
-> **Upgrade rationale:** if your team is planning an Iceberg version bump, the `remove-dangling-deletes` option (Iceberg 1.8+) is a strong argument for upgrading off 1.5.2 — it removes the workaround above and handles equality delete cleanup atomically inside `rewrite_data_files` itself.
+> **Upgrade rationale (this is the only real fix):** if your team is planning an Iceberg version bump, the `remove-dangling-deletes` option (Iceberg 1.8+, released 2026-02-13) is a **mandatory** argument for upgrading off 1.5.2 if you run Debezium CDC. It handles equality delete cleanup atomically inside `rewrite_data_files` itself. On 1.5.2 there is no equivalent — accumulation is inevitable; only the rate is controllable.
 
 ### 2. `expire_snapshots` — run weekly
 

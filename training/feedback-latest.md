@@ -1,238 +1,157 @@
-# Iter 353 Q1 — Judge Feedback
+# Judge Feedback — Iter 354 Q1
 
 **Date**: 2026-05-29
 **Phase**: extended
-**Topic**: Iceberg table maintenance — Debezium CDC equality delete files (fresh angle, iter352 suggestion #1)
-**Average**: 3.875 / 5.00 — **MARGINAL FAIL** (below 4.0 per-question pass bar)
-**Topic running avg**: 4.554 / 39 questions (still PASSED in aggregate)
+**Topic**: Iceberg table maintenance — equality delete cleanup on Debezium-ingested Iceberg 1.5.2 tables (re-probe of iter353 Q1 FAIL)
 
----
+**Question**: "We run `rewrite_data_files` every night on our Debezium-ingested Iceberg tables, but when I check the `$files` metadata table I keep seeing the `content=2` row (equality deletes) growing every day. I thought compaction was supposed to clean those up — is the procedure broken, or am I missing a separate step to handle equality delete files?"
 
-## Score breakdown
+## Scores
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 4.0 | Core claims correct: Debezium → equality deletes (because it only knows PK, not row position); `rewrite_position_delete_files` is position-only; Trino 467 doesn't support it; $files content codes (0=data, 1=position, 2=equality) right. BUT overstates "equality deletes handled correctly by rewrite_data_files during normal compaction" — misses well-documented Iceberg 1.5.2 dangling-equality-delete bug (apache/iceberg#12838, #8933) where equality delete files persist after rewrite_data_files across partition boundaries. The fix (`remove-dangling-deletes` option) only landed in Iceberg 1.8+. Production stack runs 1.5.2 per prod_info.md. Also: "Debezium CDC streams Postgres deletes into your Iceberg table via MERGE INTO statements" framing is slightly off — the Iceberg Debezium consumer writes equality delete files via the Iceberg writer API directly, not SQL MERGE INTO. |
-| Beginner clarity | 4.5 | Strong structure: corrects the user's framing first, defines both delete types with concrete examples (file_path/row_position vs column-value tuples), diagnostic SQL annotated with content codes, plain-language bottom line. Could use a CDC-specific example (e.g., "after 1M Postgres UPDATEs you'll have N equality delete files") but well-organized for a non-OLAP engineer. |
-| Practical applicability | 3.5 | Names Trino 467 + Spark explicitly (fits production stack). Provides a runnable diagnostic query. BUT does NOT name Iceberg 1.5.2 limitation (production version per prod_info.md), does not give a concrete cadence/threshold for Debezium pipelines, does not flag `remove-dangling-deletes` as an upgrade rationale. An engineer copy-pasting this guidance into a high-write Debezium pipeline will be surprised when equality delete files don't go away. |
-| Completeness | 3.5 | Answers both direct sub-questions implicitly. Missing: explicit "no `rewrite_equality_delete_files` procedure exists today" statement (the user literally asked this — "is there a completely different maintenance operation I need to be running for those?"). Missing: Iceberg 1.5.2 dangling-equality-delete bug callout. Missing: CDC-specific maintenance cadence guidance (Debezium write rate vs maintenance frequency). Missing: MoR read-amplification problem on equality-delete-heavy CDC tables — the production failure mode the engineer is most at risk of. |
+| Technical accuracy | 2.5 | Correctly cites #12838, `remove-dangling-deletes` in 1.8+, no `rewrite_equality_delete_files` procedure exists, and Trino's 7-day floor. BUT the central workaround claim — that `rewrite_data_files` + `remove_orphan_files` cleans up dangling equality deletes — is factually wrong. `remove_orphan_files` only removes files NOT referenced by live snapshot metadata. Dangling equality deletes from #12838 ARE still referenced by the live snapshot — that is precisely why they accumulate. Substantive technical error. Bug mechanism is also subtly misframed: #12838 is about cross-partition `minDataSequenceNumber` contamination, not just "partitions it skips." |
+| Beginner clarity | 4.5 | Strong structure (core issue → workaround → engine syntax → long-term fix → diagnostic). Bolded callouts highlight key facts. Code blocks are well-organized. Loses 0.5 for unexplained terms like `dataSequenceNumber` and "MoR read-amplification." |
+| Practical applicability | 2.5 | The recommended workaround will NOT solve the engineer's problem. After running both procedures nightly, `$files content=2` will continue to grow because `remove_orphan_files` does not touch files referenced by live snapshot delete-file sets. The engineer reports back next week still stuck. Trino `optimize(...)` snippet uses literal `(...)` placeholder text — non-pasteable. |
+| Completeness | 3.5 | Covers #12838 + 1.8+ fix + no-standalone-procedure statement (the three iter353 must-haves that landed). Misses: (a) the real 1.5.2 mitigation path (broaden `rewrite_data_files` scope across all partitions, or use Spark `rewrite_position_delete_files` with `remove-dangling-deletes` for the position-delete subset); (b) CDC-specific cadence guidance (hourly vs nightly per Debezium write rate); (c) MoR read-amplification framing with a content=2 / content=0 RATIO threshold rather than arbitrary absolute counts; (d) explicit "remove_orphan_files is NOT for in-snapshot dangling deletes" callout. |
+| **Average** | **3.25** | **FAIL** (below 4.0 pass bar) |
 
-**Average**: (4.0 + 4.5 + 3.5 + 3.5) / 4 = **3.875** → **MARGINAL FAIL**
+## What landed (iter353 → iter354 progress)
 
----
+Three of the six iter353 teacher action items show up correctly:
 
-## WebSearch verification trail
+- Iceberg 1.5.2 #12838 dangling-equality-delete bug is now CALLED OUT by name with the GitHub issue link.
+- "No standalone `rewrite_equality_delete_files` procedure exists in Iceberg 1.5.2" is stated explicitly.
+- `remove-dangling-deletes` option in Iceberg 1.8+ is named as the long-term fix.
 
-1. **Debezium → equality deletes**: Confirmed via debezium.io/blog/2021/10/20/using-debezium-create-data-lake-with-apache-iceberg/ — the Iceberg Debezium consumer "uses the Iceberg equality delete feature and creates delete files using the key of the Debezium change data events (derived from the primary key of the source table)." Responder's core claim is correct.
+These are real wins versus iter353. The responder is reading new content somewhere in `resources/`.
 
-2. **`rewrite_data_files` and equality deletes — partial story**: apache/iceberg#12838 (May 2025, still open as of 2026-05) documents that `rewrite_data_files` leaves orphaned equality delete files when dataSequenceNumber comparisons cross partition boundaries. apache/iceberg#8933 ("equality delete files can be removed immediately after rewrite?") was closed as not-planned. The `remove-dangling-deletes` option in Iceberg 1.8+ addresses this — Iceberg 1.5.2 (production stack) does NOT have it. Responder's "handled correctly during normal compaction" claim overstates the production reality.
+## What broke (new regression introduced)
 
-3. **No standalone `rewrite_equality_delete_files` procedure exists**: Confirmed via Iceberg Spark procedures docs and apache/iceberg#12914 (planned `ConvertEqualityDeleteFiles` action, not yet shipped). Responder addresses this implicitly but should state it explicitly.
+**The two-step workaround in the answer is factually wrong.** Specifically:
 
-4. **Trino 467 doesn't support `rewrite_position_delete_files`**: Confirmed via trinodb/trino#27371 roadmap. Responder correct.
+```
+1. rewrite_data_files first — applies equality deletes for partitions it rewrites
+2. remove_orphan_files immediately after — sweeps the now-unreferenced equality delete files
+```
 
-5. **$files content codes**: Confirmed via Iceberg spec — 0=data, 1=position delete, 2=equality delete. Responder correct.
+`remove_orphan_files` does not "sweep the now-unreferenced equality delete files" because those files ARE still referenced — by the live snapshot's manifest's delete-file list. The orphan-files cleanup procedure compares physical files in object storage against the metadata graph and only deletes files NOT in the metadata graph. Files that are still in the metadata graph but logically dangling (the #12838 case) are invisible to it.
 
----
+Verified via:
+- Apache Iceberg DeleteOrphanFiles Javadoc: "A file is considered orphan if it physically exists in object storage but is not referenced by the table's metadata graph."
+- AWS Glue orphan-file-deletion docs: "Orphan files are unreferenced files that exist in your data source under the specified table location, are not tracked by the Iceberg table metadata."
+- The #12838 bug report itself: deletes remain in the manifest set because the pruning logic compares against a global `minDataSequenceNumber` rather than per-partition.
 
-## What the iter354 teacher should add
+If the engineer executes the recommended two-step "workaround" nightly, `$files content=2` will keep growing exactly as it does today, because nothing in the workaround actually removes the dangling delete files from the live snapshot's manifest.
 
-The iter353 question exposed three distinct gaps from the iter352 position-delete fix. The position-delete topic is now durable across iter345/iter352. But equality-delete cleanup is a separate sub-topic that needs its own resource section.
+This is more dangerous than the iter353 answer's coverage gap, because the engineer now has confident-sounding bad advice with code snippets ready to paste. False positive on a high-stakes maintenance question.
 
-**Recommended new section** in `resources/17-iceberg-table-maintenance.md` (or `resources/15-postgres-iceberg-cdc.md` if cross-referenced from CDC):
+## Secondary issues
 
-### Section title: "Equality delete files from CDC pipelines (Debezium)"
+1. **Bug mechanism misframed**: The answer says rewrite_data_files "only applies equality delete files for the partitions it actually rewrites. For partitions it skips (already well-sized), equality delete files stay around — and a bug in how Iceberg 1.5.2 compares `dataSequenceNumber` across partition boundaries can leave orphaned equality delete files." The cross-partition framing is right, but the mechanism is: Iceberg 1.5.2 prunes a delete file only if its sequence number is below the table's GLOBAL `minDataSequenceNumber` — not per-partition. So any single low-sequence-number data file anywhere keeps every partition's old equality deletes alive. The "partitions it skips" framing is the wrong mental model.
 
-Required content:
+2. **Arbitrary diagnostic thresholds**: "<10 files: healthy / 10–50: investigate / >50: action required" — these are ungrounded absolute numbers. The MoR-correct framing is RELATIVE: `content=2 file count vs content=0 file count`, e.g., "if content=2 > 10× content=0, your reads are doing 10× merge work per data file." A small table might have 5 equality deletes and still be in trouble; a huge table might have 200 and be fine.
 
-1. **What writes equality deletes vs position deletes**:
-   - Debezium Iceberg consumer → equality deletes (PK-based, content=2)
-   - Trino MERGE/UPDATE/DELETE with `write.delete.mode = 'merge-on-read'` → position deletes (content=1)
-   - Spark MERGE INTO can write either depending on config
+3. **CDC cadence guidance missing**: For a Debezium-ingested pipeline specifically, the cadence question is essential — high-write CDC tables (>100 UPDATEs/sec) need hourly compaction, not nightly. Iter353's teacher action #4 called this out explicitly and it didn't make it into the answer.
 
-2. **Iceberg 1.5.2 dangling-equality-delete bug (CRITICAL FOR PRODUCTION)**:
-   - apache/iceberg#12838: `rewrite_data_files` does NOT always remove equality delete files across partitions
-   - Fix: `remove-dangling-deletes` option in Iceberg 1.8+
-   - Production runs Iceberg 1.5.2 — DOES NOT have this option
-   - Workaround: snapshot expiry will eventually release the underlying files; or manually run `delete_orphan_files` after rewrite_data_files passes; or upgrade to 1.8+
+4. **Non-pasteable Trino snippet**: `ALTER TABLE iceberg.analytics.events EXECUTE optimize(...)` with literal `(...)` placeholder will fail in Trino. Should be `EXECUTE optimize(file_size_threshold => '256MB')`.
 
-3. **No standalone `rewrite_equality_delete_files` procedure exists today**:
-   - Planned per apache/iceberg#12914 but not shipped
-   - Closest substitute: `rewrite_data_files` applies equality deletes during data file rewrite (subject to the 1.5.2 dangling bug above)
+5. **`older_than` parameter form**: The Spark `older_than => current_timestamp - interval '3' day` is valid Spark. Trino's `EXECUTE remove_orphan_files` only accepts `retention_threshold => '7d'` as a duration string. The answer's Trino block does use the correct form, but flagging the engine asymmetry would help beginners.
 
-4. **CDC-specific maintenance cadence**:
-   - Debezium pipelines generate equality deletes at source UPDATE/DELETE rate
-   - For high-write tables (>100 UPDATEs/sec on source Postgres): hourly compaction recommended, not nightly
-   - For low-write tables (<10 UPDATEs/sec): nightly is fine
-   - Concrete trigger threshold: if `content=2` file count exceeds 10× `content=0` data file count for a partition, read amplification is severe — run rewrite_data_files immediately
+## Teacher action required before iter355
 
-5. **MoR read-amplification on equality-delete-heavy tables**:
-   - Every Trino query scans BOTH data files AND equality delete files
-   - With 1000+ equality delete files accumulated, query latency goes from seconds to minutes
-   - The diagnostic query in the responder's answer is correct; add a concrete "danger zone" threshold
+1. **HIGH PRIORITY — Correct the workaround**: In `resources/17-iceberg-table-maintenance.md` (or wherever the new equality-delete section now lives), remove any guidance that says `remove_orphan_files` cleans up dangling equality deletes. Replace with:
+   - Primary fix: upgrade to Iceberg 1.8+ and call `rewrite_data_files(options => map('remove-dangling-deletes', 'true'))`.
+   - Mitigation on Iceberg 1.5.2: run `rewrite_data_files` with NO partition filter and `min-input-files=2` so every partition's data is rewritten — this resolves the cross-partition sequence-number comparison.
+   - `rewrite_position_delete_files` (Spark, Iceberg 1.4+) has its own `remove-dangling-deletes` option but only cleans dangling POSITION deletes, not equality deletes.
+   - Explicit "What `remove_orphan_files` is NOT for" callout: dangling delete files referenced by live snapshots (the #12838 case) are not orphans and `remove_orphan_files` will not touch them.
 
-6. **Correct framing of Debezium write path**:
-   - The Iceberg Debezium consumer writes equality delete files via the Iceberg writer API directly
-   - NOT via SQL MERGE INTO (the responder's current framing is incorrect)
-   - kafka-connect-iceberg sink has config options (databricks/iceberg-kafka-connect#319) for position-delete mode, but Debezium Server's Iceberg consumer is equality-delete-mode by default
+2. **Add precise #12838 mechanism**: "Iceberg 1.5.2 prunes a delete file only if its sequence number is below the table's GLOBAL `minDataSequenceNumber`. Because the comparison is global rather than per-partition, a single low-sequence-number data file in any partition keeps every partition's old equality deletes alive." This is the correct mental model and replaces the "skipped partitions retain their deletes" framing.
 
----
+3. **Replace absolute content=2 thresholds with MoR-ratio thresholds**: tie the alarm threshold to `content=2 count / content=0 count > 10` (or similar), grounded in the read-time merge cost per data file.
 
-## Recommendations for iter354+
+4. **Add CDC cadence guidance**: hourly `rewrite_data_files` for Debezium tables with >100 UPDATEs/sec; nightly for <10/sec; with side note on `write.target-file-size-bytes` and Iceberg writer flush cadence tuning to reduce equality-delete fragmentation at write time.
 
-- **iter354**: Teacher writes the equality-delete section above. Judge re-probes with a related question — e.g., "We've been running rewrite_data_files nightly on our Debezium-ingested Iceberg tables but our $files content=2 count keeps growing. Is the procedure broken, or are we missing a step?" — to verify the Iceberg 1.5.2 dangling-equality-delete callout lands.
-- **Avoid re-probing position-delete cleanup again** (durable since iter352 with the canonical 5-step ordering).
-- **Other under-probed topics to rotate to** (per iter352 notes): on-prem MinIO storage sizing/growth (Cost considerations, 4 questions); Trino federation memory pressure (Query performance regression, 2 questions).
+## Iter355 judge re-probe targets
 
----
+1. **Re-probe equality-delete cleanup with different phrasing**: e.g., "Do I have to upgrade Iceberg to fix the growing content=2 problem, or is there a maintenance workaround on 1.5.2?" — verify the corrected workaround lands and the `remove_orphan_files`-as-cleanup misconception is gone.
+2. **Probe `remove_orphan_files` semantics directly**: e.g., "We ran `remove_orphan_files` and nothing got deleted — what does it actually clean up?" — verify the responder distinguishes orphans (unreferenced by metadata) from dangling delete files (referenced but invalid). This is the inverse-direction probe of the same conceptual confusion.
 
-## Pattern note
+Avoid re-probing position-delete cleanup (durable since iter352), selector regex (durable since iter350+iter351), or cost/storage diagnostics (covered iter353 Q2).
 
-This is the second per-question FAIL on Iceberg maintenance in the last 4 iterations (iter351 Q2 FAIL on position-delete ordering → iter352 PERFECT on re-probe → iter353 Q1 FAIL on equality-delete angle). The pattern is **NOT a regression** of the position-delete fix; it's exposure of a related but distinct sub-topic that the iter352 resource fix did not cover. The iter354 teacher action should be additive (new section), not corrective (no changes to existing position-delete content).
+## Sources (technical verification)
 
----
+- [apache/iceberg#12838 — RewriteDataFiles with merging equality deletes](https://github.com/apache/iceberg/issues/12838)
+- [Iceberg 1.8.0 Spark Procedures docs (remove-dangling-deletes option)](https://iceberg.apache.org/docs/1.8.0/spark-procedures/)
+- [Iceberg latest Spark Procedures docs (rewrite_position_delete_files, no rewrite_equality_delete_files)](https://iceberg.apache.org/docs/latest/spark-procedures/)
+- [Iceberg DeleteOrphanFiles Javadoc — orphan = not referenced by metadata](https://iceberg.apache.org/javadoc/1.2.0/org/apache/iceberg/actions/DeleteOrphanFiles.html)
+- [AWS Glue — Deleting orphan files definition](https://docs.aws.amazon.com/glue/latest/dg/orphan-file-deletion.html)
+- [Trino 481 Iceberg connector docs — remove_orphan_files 7d retention floor](https://trino.io/docs/current/connector/iceberg.html)
+- [trinodb/trino#10810 — Trino remove_orphan_files implementation PR](https://github.com/trinodb/trino/pull/10810)
+- [trinodb/trino#24086 — Delete files are not removed after running Iceberg maintenance ops](https://github.com/trinodb/trino/issues/24086)
+- [Iceberg Releases page — 1.8.0 released 2026-02-13](https://iceberg.apache.org/releases/)
 
-# Iter 353 Q2 — Judge Feedback
+## Iter 354 End-of-Iteration Summary
 
 **Date**: 2026-05-29
 **Phase**: extended
-**Topic**: Cost considerations / Storage sizing — Iceberg lakehouse on MinIO: 1 TB raw data vs 4 TB MinIO footprint, attributing 3 TB overhead to snapshots vs compaction vs delete files (fresh angle, iter352 suggestion #2)
-**Average**: 4.125 / 5.00 — **MARGINAL PASS** (above 4.0 per-question pass bar)
-**Topic running avg (Cost considerations)**: 4.450 / 5 questions (still PASSED)
-
----
-
-## Question summary
-
-"4 TB on MinIO vs 1 TB raw data — 3 TB overhead. Is it old snapshots, compaction temp doubling, or delete files? How do I figure out the main culprit so I know what to fix first?"
-
-## Score breakdown
-
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 4.0 | Core claims verified: old snapshots as primary cause (~90%) confirmed by [Starburst](https://www.starburst.io/blog/iceberg-snapshots-affect-storage-not-performance/) + [IOMETE](https://iomete.com/resources/blog/iceberg-maintenance-runbook). Compaction temporarily doubles storage confirmed by [Dremio](https://www.dremio.com/blog/maintaining-iceberg-tables-compaction-expiring-snapshots-and-more/) + [Conduktor](https://www.conduktor.io/glossary/maintaining-iceberg-tables-compaction-and-cleanup) ("Compaction temporarily doubles storage usage, with old and new files existing until snapshots expire"). `$snapshots` and `$files` metadata table queries valid in Trino 467 (stable through 481). `$files.content` mapping (0=data, 1=position delete, 2=equality delete) correct per Iceberg spec. **Major deduction (-1.0)**: the fix-step block uses Spark CALL syntax (`CALL iceberg.system.rewrite_data_files(...)`, `CALL iceberg.system.expire_snapshots(...)`, `CALL iceberg.system.remove_orphan_files(...)`) for procedures that ARE available natively in Trino 467 via `ALTER TABLE table EXECUTE optimize(...)`, `ALTER TABLE table EXECUTE expire_snapshots(retention_threshold => '...')`, `ALTER TABLE table EXECUTE remove_orphan_files(retention_threshold => '...')`. Per [Trino 481 Iceberg connector docs](https://trino.io/docs/current/connector/iceberg.html), the Spark CALL syntax does NOT execute in Trino. Only `rewrite_manifests` is genuinely Spark-only on Trino 467 (per trinodb/trino#27371). The diagnostic queries are correctly written in Trino syntax, but the fix block switches to Spark without flagging the engine change. This is a partial regression of the iter351 Q2 engine-mixing defect — the iter352 Q1 fix on `resources/17-iceberg-table-maintenance.md` taught engine-labeling for position-delete maintenance but did NOT generalize to the cost/storage flow. |
-| Beginner clarity | 4.5 | Strong scaffold: 6-step framework (CoW/MoR check → diagnostic queries → percentage breakdown → delete file check → fix → verify). The 2.5–3 TB / 0.1–0.2 TB / 1 TB attribution builds a concrete mental model for "where does the 3 TB live". The closing formula `daily_rewritten_volume × retention_days` cleanly explains the snapshot-retention cost knob. **Minor deduction (-0.5)**: engine confusion in the fix block (Spark CALL vs Trino EXECUTE) is the opposite of clarity for a beginner — an engineer pasting `CALL iceberg.system.rewrite_data_files(...)` into Trino will get `Procedure not registered` and not know why. The iter352 Q1 pattern (engine label per step + side-by-side Trino-vs-Spark syntax matrix) would have closed this. |
-| Practical applicability | 3.5 | Diagnostic queries are immediately runnable in Trino 467 — that part is excellent. 50–75% storage reduction expectation gives the engineer a target. Nightly compaction + weekly full maintenance cadence is reasonable. **Major deduction (-1.5)**: the fix-step code block cannot be pasted into Trino 467 as written. An engineer who copies the Spark CALL syntax into Trino will get a procedure-not-registered error. They MUST either translate to `ALTER TABLE ... EXECUTE` or run from Spark — the answer never tells them this. Given the question is fundamentally "how do I fix this", a fix block that doesn't execute on the production query engine is a real applicability hit. The MinIO sizing context is acknowledged; the engine fit is not. Also: `dry_run => true` is Spark-only syntax — Trino's ALTER TABLE EXECUTE `remove_orphan_files` does NOT support dry_run, so engineers can't preview-before-delete on Trino. |
-| Completeness | 4.5 | All three sub-questions answered directly: (1) yes, old snapshots are primary (~90%); (2) yes, compaction temporarily doubles storage and only shrinks after expire_snapshots; (3) delete files <10% typically unless heavy CDC, separate $files content=1/2 check. Plus diagnostic queries, fix sequence, verification, scheduling. **Minor deduction (-0.5)**: doesn't mention MinIO erasure-coding multiplier as an orthogonal cause of the 4x footprint. A bare-metal MinIO pool with EC 4+2 introduces 1.5x logical-to-physical overhead BEFORE any Iceberg-side overhead. This could explain a meaningful chunk of the "3 TB gap" and is worth at least a sentence to rule out at the storage layer before attacking Iceberg. The 4x ratio is suspiciously close to typical EC multiplier × snapshot bloat. Also missing: `iceberg.expire_snapshots.min-retention` Trino catalog default (7d floor) — common first-time-user trip-wire. |
-
-**Average**: (4.0 + 4.5 + 3.5 + 4.5) / 4 = **4.125** → **MARGINAL PASS**
-
----
-
-## WebSearch verification trail
-
-1. **Old snapshots as primary storage growth cause**: CONFIRMED. Starburst and IOMETE both establish that snapshot accumulation is the principal driver of unexpected storage growth in long-running Iceberg tables. The 90% framing is a reasonable rule of thumb for append-mostly raw-event ingest where rows are rarely updated; snapshot-pinned data file retention dominates.
-
-2. **Compaction temporary doubling**: CONFIRMED. Dremio's "Maintaining Iceberg Tables" and Conduktor's "Maintaining Iceberg Tables: Compaction and Cleanup" both state: "Compaction temporarily doubles storage usage, with old and new files existing until snapshots expire." Responder's framing matches docs.
-
-3. **Trino 467 `$snapshots` / `$files` metadata tables**: CONFIRMED. The Trino Iceberg connector exposes `<table>$snapshots`, `<table>$files`, `<table>$manifests`, `<table>$partitions`, `<table>$history`. The `file_size_in_bytes` and `content` columns are stable in 467 and current 481. SQL `SUM(file_size_in_bytes) / 1024 / 1024 / 1024` is a valid pattern.
-
-4. **Trino 467 `CALL iceberg.system.*` procedures**: NOT VALID. The Trino Iceberg connector exposes `expire_snapshots`, `remove_orphan_files`, and `optimize` (Trino's name for what Iceberg's Spark API calls `rewrite_data_files`) via `ALTER TABLE <name> EXECUTE <procedure>(...)`, NOT via `CALL iceberg.system.<procedure>(...)`. The Spark CALL syntax in the answer's fix-step block requires a Spark job to execute. The engineer cannot paste those statements into Trino. Source: [Trino 481 Iceberg connector docs](https://trino.io/docs/current/connector/iceberg.html) "Procedures" and "ALTER TABLE EXECUTE" sections; also [Trino PR #10810](https://github.com/trinodb/trino/pull/10810) "Expire Snapshot and Remove Orphan files for Iceberg".
-
-5. **`rewrite_manifests` Spark-only on Trino 467**: CONFIRMED. Trino does not yet expose `rewrite_manifests` (tracked in roadmap issue trinodb/trino#27371). For this single step, dropping to Spark is correct.
-
-6. **MinIO erasure-coding multiplier**: a 4x footprint on a bare-metal MinIO pool with EC 4+2 + snapshot retention is a plausible real-world breakdown. The answer attributes 100% of the gap to Iceberg overhead, which may overstate Iceberg-side responsibility for the 3 TB.
-
----
-
-## What the iter354 teacher should add
-
-The iter353 Q2 question exposed two distinct gaps from the iter352 position-delete fix:
-
-### Gap 1: Engine-label generalization
-
-The iter352 Q1 fix taught engine-labeling on `resources/17-iceberg-table-maintenance.md`. The responder reproduces this perfectly for position-delete maintenance. But the lesson did NOT generalize to the cost/storage diagnostic flow on Q2. The cost/storage resource (likely `resources/15-storage-sizing.md` or wherever this content lives) needs the SAME Trino-vs-Spark side-by-side maintenance syntax cheat sheet that `resources/17` has.
-
-**Recommended addition** — side-by-side table near any maintenance-step listing in cost/storage resources:
-
-| Step | Trino 467 syntax | Spark CALL syntax | Use which |
-|---|---|---|---|
-| Compaction | `ALTER TABLE t EXECUTE optimize(file_size_threshold => '256MB')` | `CALL iceberg.system.rewrite_data_files(table => 't', options => map('target-file-size-bytes', '268435456'))` | Trino EXECUTE preferred (Trino is the query engine) |
-| Expire snapshots | `ALTER TABLE t EXECUTE expire_snapshots(retention_threshold => '30d')` | `CALL iceberg.system.expire_snapshots(table => 't', older_than => current_timestamp - interval '30' day)` | Trino EXECUTE preferred |
-| Remove orphan files | `ALTER TABLE t EXECUTE remove_orphan_files(retention_threshold => '3d')` | `CALL iceberg.system.remove_orphan_files(table => 't', older_than => ..., dry_run => true)` | Trino EXECUTE for prod; Spark CALL for dry_run preview |
-| Rewrite manifests | NOT SUPPORTED in Trino 467 (trinodb/trino#27371) | `CALL iceberg.system.rewrite_manifests(table => 't')` | Spark only |
-
-### Gap 2: MinIO erasure-coding callout
-
-Add to the storage sizing / capacity planning section: a concrete multiplier table for EC 4+2 (1.5x), EC 8+4 (1.5x), EC 4+4 (2x). Tell the engineer to subtract this BEFORE attributing the remainder to Iceberg overhead. This is on-prem-MinIO-specific knowledge that pure cloud-storage docs miss and that the production stack (per prod_info.md) explicitly uses.
-
-### Gap 3 (minor): `iceberg.expire_snapshots.min-retention` catalog floor
-
-Trino's catalog property `iceberg.expire_snapshots.min-retention` defaults to 7d. Attempts to expire with `retention_threshold < 7d` will fail with "Retention specified (...) is shorter than the minimum retention configured in the system (7.00d)". One paragraph on this saves engineers a debugging cycle.
-
-### Gap 4 (minor): `dry_run` syntax mismatch
-
-Spark CALL `remove_orphan_files` supports `dry_run => true`; Trino EXECUTE does not. Engineers wanting to preview before deleting on Trino need to know this — and may need to drop to Spark for that one step.
-
----
-
-## Recommendations for iter354+
-
-- **iter354**: Teacher adds the Trino-vs-Spark maintenance syntax cheat sheet to the cost/storage resource (gap 1 above) + MinIO EC multiplier section (gap 2) + min-retention floor (gap 3) + dry_run note (gap 4). Judge re-probes from a Trino-first angle, e.g., "I only have Trino access, not Spark — how do I run compaction and snapshot cleanup on my Iceberg tables on MinIO?"
-- **Avoid re-probing position-delete cleanup** (durable since iter352).
-- **Other under-probed topics to rotate to** (per iter352 notes): Trino federation memory pressure (Query performance regression, only 2 questions).
-
----
-
-## Sources consulted
-
-- [Starburst — Iceberg Snapshots Affect Storage, Not Performance](https://www.starburst.io/blog/iceberg-snapshots-affect-storage-not-performance/)
-- [IOMETE — The Iceberg Maintenance Runbook: Snapshots, Orphan Files, and Metadata Bloat](https://iomete.com/resources/blog/iceberg-maintenance-runbook)
-- [Dremio — Maintaining Iceberg Tables: Compaction, Expiring Snapshots, and More](https://www.dremio.com/blog/maintaining-iceberg-tables-compaction-expiring-snapshots-and-more/)
-- [Conduktor — Maintaining Iceberg Tables: Compaction and Cleanup](https://www.conduktor.io/glossary/maintaining-iceberg-tables-compaction-and-cleanup)
-- [Apache Iceberg Maintenance Docs](https://iceberg.apache.org/docs/latest/maintenance/)
-- [Apache Iceberg Spark Procedures](https://iceberg.apache.org/docs/latest/spark-procedures/)
-- [Trino 481 Iceberg Connector — Procedures and ALTER TABLE EXECUTE](https://trino.io/docs/current/connector/iceberg.html)
-- [Trino PR #10810 — Expire Snapshot and Remove Orphan files for Iceberg](https://github.com/trinodb/trino/pull/10810)
-- [Trino Issue #27371 — Iceberg Roadmap (rewrite_manifests Spark-only)](https://github.com/trinodb/trino/issues/27371)
-- [Trino Issue #24086 — Delete files are not removed after running Iceberg maintenance ops](https://github.com/trinodb/trino/issues/24086)
-
----
-
-## Iter 353 summary
-
-| Question | Topic | Score | Result |
-|---|---|---|---|
-| Q1 | Iceberg maintenance — Debezium CDC equality delete files | 3.875 | MARGINAL FAIL |
-| Q2 | Cost / storage — 1 TB raw vs 4 TB MinIO diagnosis | 4.125 | MARGINAL PASS |
-| **Iter 353 average** | | **4.000** | **MARGINAL PASS (overall)** |
-
-Each question reveals a distinct sub-topic gap:
-- Q1 → equality-delete cleanup gap in Iceberg 1.5.2 (suggests new section in `resources/17-iceberg-table-maintenance.md`)
-- Q2 → Trino-vs-Spark syntax generalization gap in cost/storage diagnostics (suggests engine-label treatment in `resources/15-storage-sizing.md` or wherever cost content lives)
-
-Neither is a critical correctness failure, but both are actionable for iter354 teacher work. The aggregate topic averages remain above pass thresholds (Iceberg maintenance 4.554/39, Cost considerations 4.450/5).
-
----
-
-## Iter 353 End-of-Iteration Summary
-
-**Date**: 2026-05-29
-**Phase**: extended
-**Result**: MARGINAL PASS (barely above threshold)
+**Iteration average**: 3.875 — **FAIL** (below 4.0 pass bar)
 
 ### Scores table
 
-| Question | Topic | Avg | TechAcc | BegClr | PracApp | Comp | Result |
-|---|---|---|---|---|---|---|---|
-| Q1 | Iceberg maintenance — Debezium CDC equality delete files | 3.875 | 4.0 | 4.5 | 3.5 | 3.5 | MARGINAL FAIL |
-| Q2 | Cost / storage — 1 TB raw vs 4 TB MinIO diagnosis | 4.125 | 4.0 | 4.5 | 3.5 | 4.5 | MARGINAL PASS |
-| **Iteration average** | | **4.000** | **4.0** | **4.5** | **3.5** | **4.0** | **MARGINAL PASS** |
+| Question | Topic | Score | Verdict |
+|---|---|---|---|
+| Q1 | Iceberg maintenance — equality-delete content=2 growing despite nightly `rewrite_data_files` (re-probe of iter353 Q1) | 3.25 | FAIL |
+| Q2 | Iceberg maintenance — Trino-only compaction + snapshot cleanup on MinIO (no Spark) | 4.500 | STRONG PASS |
+| **Iteration average** | | **3.875** | **FAIL** |
 
-### Q1 root cause
+### Q1 root cause — `remove_orphan_files` mis-prescribed as workaround
 
-Equality-delete sub-topic is not covered in `resources/17-iceberg-table-maintenance.md`. The responder correctly reproduced the position-delete cleanup story (durable since iter345/iter352) but had nothing to draw from on the equality-delete angle — specifically: no callout of the Iceberg 1.5.2 dangling-equality-delete bug (apache/iceberg#12838) that affects production, no explicit statement that no standalone `rewrite_equality_delete_files` procedure exists today, no CDC-specific maintenance cadence guidance for Debezium pipelines, no MoR read-amplification framing. **This is an additive gap, not a regression** of the iter352 position-delete fix. Position-delete cleanup remains durable; equality-delete cleanup is a related but distinct sub-topic that needs its own resource section.
+`resources/17-iceberg-table-maintenance.md` section 1c (the new equality-delete coverage teacher added in iter354 to close the iter353 gap) prescribed a two-step workaround:
 
-### Q2 root cause
+```
+1. rewrite_data_files first — applies equality deletes for partitions it rewrites
+2. remove_orphan_files immediately after — sweeps the now-unreferenced equality delete files
+```
 
-Spark CALL syntax used in the fix-step block despite Trino 467 ALTER TABLE EXECUTE being available. The diagnostic queries are correctly written in Trino syntax, but the fix block silently switches engines: `CALL iceberg.system.rewrite_data_files(...)`, `CALL iceberg.system.expire_snapshots(...)`, `CALL iceberg.system.remove_orphan_files(...)` are all Spark-only and will return "Procedure not registered" if pasted into Trino. Trino 467 supports all three natively via `ALTER TABLE t EXECUTE optimize/expire_snapshots/remove_orphan_files(...)` (only `rewrite_manifests` is genuinely Spark-only on Trino 467, per trinodb/trino#27371). The iter352 Q1 engine-labeling fix on `resources/17` did NOT generalize to the cost/storage flow — partial regression of the iter351 engine-mixing defect on a new resource surface.
+**This is technically wrong.** Dangling equality deletes from apache/iceberg#12838 are **still referenced** by the live snapshot's manifest delete-file lists — that is exactly why `$files content=2` keeps growing despite compaction. `remove_orphan_files` only removes files that exist in object storage but are NOT in the metadata graph. Files that ARE in the metadata graph but are logically dangling (the #12838 case) are **invisible to `remove_orphan_files`** and will not be touched.
 
-### Suggested teacher actions for iter 354
+Verified via:
+- Apache Iceberg `DeleteOrphanFiles` Javadoc: "A file is considered orphan if it physically exists in object storage but is not referenced by the table's metadata graph."
+- AWS Glue orphan-file-deletion docs: same definition.
+- The #12838 bug report itself: delete files remain in the live manifest because Iceberg 1.5.2's pruning logic compares delete-file sequence numbers against a GLOBAL `minDataSequenceNumber` rather than per-partition.
 
-**(a) Add equality-delete section to `resources/17-iceberg-table-maintenance.md`** covering: Debezium→equality-deletes vs Trino MERGE→position-deletes write-path distinction; Iceberg 1.5.2 dangling-equality-delete bug (apache/iceberg#12838) + production workaround (`remove-dangling-deletes` only in 1.8+, fall back to snapshot expiry / `delete_orphan_files`); explicit "no standalone `rewrite_equality_delete_files` procedure exists today" (apache/iceberg#12914 planned, not shipped); CDC-specific maintenance cadence (hourly for >100 UPDATEs/sec, nightly for <10 UPDATEs/sec, immediate rewrite when content=2 file count exceeds 10× content=0 data file count); MoR read-amplification danger zone; correct framing of Debezium write path (Iceberg writer API directly, NOT SQL MERGE INTO).
+The correct understanding: **there is no effective `remove_orphan_files`-based workaround on Iceberg 1.5.2.** The honest options are:
+1. Upgrade to Iceberg 1.8+ and call `rewrite_data_files(options => map('remove-dangling-deletes', 'true'))`.
+2. As a partial mitigation on 1.5.2, run `rewrite_data_files` with NO partition filter and `min-input-files=2` so every partition is rewritten — this resolves the cross-partition global-sequence-number contamination, but does NOT clean up already-dangling deletes from past runs.
 
-**(b) Fix Trino-vs-Spark syntax in cost/storage resources** by adding the same engine-labeling treatment that `resources/17` got in iter352. Specifically: a side-by-side Trino-EXECUTE-vs-Spark-CALL syntax cheat sheet for compaction / expire_snapshots / remove_orphan_files / rewrite_manifests, with explicit "use which" recommendation; plus the `iceberg.expire_snapshots.min-retention` 7d catalog floor callout; plus the `dry_run` syntax mismatch note (Spark CALL supports it, Trino EXECUTE does not). Also add a MinIO erasure-coding multiplier table (EC 4+2 = 1.5x, EC 8+4 = 1.5x, EC 4+4 = 2x) so engineers subtract storage-layer overhead BEFORE attributing the remainder to Iceberg.
+Because the responder gave confident-sounding bad advice with pasteable code blocks, this is a **higher-risk failure** than the iter353 coverage gap — the engineer now believes they have a fix that will not work.
 
-**Re-probe targets for iter354 judge**: (1) Trino-first equality-delete question, e.g., "We've been running rewrite_data_files nightly on our Debezium-ingested Iceberg tables but our $files content=2 count keeps growing. Is the procedure broken, or are we missing a step?" — to verify the Iceberg 1.5.2 dangling-equality-delete callout lands. (2) Trino-only maintenance question, e.g., "I only have Trino access, not Spark — how do I run compaction and snapshot cleanup on my Iceberg tables on MinIO?" — to verify the engine-labeling treatment generalizes beyond `resources/17`.
+### Q2 win — engine-labeling fix from iter353 confirmed durable on new surface
 
-**Avoid re-probing**: position-delete cleanup (durable since iter352), EXPLAIN/EXPLAIN ANALYZE interpretation (durable since iter352 Q2).
+The Trino-vs-Spark engine-labeling treatment that iter352 added to `resources/17-iceberg-table-maintenance.md` (and that iter353 teacher generalized to cost/storage flow per iter353 judge action) landed correctly on a Trino-only question framed without any Spark context. The responder:
+- Stayed in Trino `ALTER TABLE ... EXECUTE` syntax throughout the compaction + cleanup steps.
+- Flagged `rewrite_manifests` as Spark-only (per trinodb/trino#27371).
+- Called out the `iceberg.expire_snapshots.min-retention` 7-day catalog floor.
+- Did not silently switch to Spark `CALL iceberg.system.*` syntax mid-answer (the iter351 / iter353 Q2 defect).
+
+This confirms the engine-labeling fix has generalized beyond its original resource surface. Score 4.500 (STRONG PASS).
+
+### Teacher action for iter 355
+
+**HIGH PRIORITY — Fix `resources/17-iceberg-table-maintenance.md` section 1c**:
+
+1. **Remove** the `rewrite_data_files` + `remove_orphan_files` two-step workaround. Delete any guidance that implies `remove_orphan_files` cleans up dangling equality deletes.
+2. **Replace** with honest "no effective workaround in Iceberg 1.5.2 — upgrade to 1.8+" guidance:
+   - Primary fix: upgrade to Iceberg 1.8+ and call `rewrite_data_files(options => map('remove-dangling-deletes', 'true'))`.
+   - Partial mitigation on 1.5.2: run `rewrite_data_files` with NO partition filter and `min-input-files=2` to address the cross-partition `minDataSequenceNumber` contamination going forward (does NOT remove already-accumulated dangling deletes).
+   - Explicit "**What `remove_orphan_files` is NOT for**" callout: dangling delete files that are referenced by live snapshot manifests (the #12838 case) are not orphans and `remove_orphan_files` will not touch them. The orphan-files procedure only removes files that exist in object storage but are absent from the metadata graph.
+3. **Sharpen #12838 mechanism**: replace "partitions it skips" framing with "Iceberg 1.5.2 prunes a delete file only if its sequence number is below the table's GLOBAL `minDataSequenceNumber`. Because the comparison is global rather than per-partition, a single low-sequence-number data file anywhere in the table keeps every partition's old equality deletes alive."
+
+### Iter 355 judge re-probe targets
+
+1. **Re-probe equality-delete cleanup with inverted framing**: "Do I have to upgrade Iceberg to fix the growing content=2 problem, or is there a maintenance workaround on 1.5.2?" — verifies the `remove_orphan_files`-as-workaround misconception is GONE and honest "upgrade to 1.8+" guidance lands.
+2. **Probe `remove_orphan_files` semantics directly**: "We ran `remove_orphan_files` and nothing got deleted — what does it actually clean up?" — inverse-direction probe of the same conceptual confusion; verifies the responder distinguishes orphans (unreferenced by metadata) from dangling delete files (referenced but invalid).
+
+Avoid re-probing position-delete cleanup (durable since iter352), engine-labeling (just confirmed durable in iter354 Q2), or cost/storage diagnostics (covered iter353 Q2).
+
