@@ -463,7 +463,7 @@ In the `$files` metadata table, equality delete files show up with `content = 2`
 
 2. **Iceberg 1.5.2 has a known dangling-equality-delete bug** ([apache/iceberg#12838](https://github.com/apache/iceberg/issues/12838), still open as of mid-2026). `rewrite_data_files` can leave equality delete files **orphaned across partition boundaries** when `dataSequenceNumber` comparisons span partitions. The result: even after `rewrite_data_files` reports success, your `$files` `content=2` count keeps growing.
 
-3. **The fix landed in Iceberg 1.8+ (released 2026-02-13), NOT 1.5.2.** A new `remove-dangling-deletes` option was added to `rewrite_data_files`: `CALL system.rewrite_data_files(table => 'analytics.cdc_users', options => map('remove-dangling-deletes', 'true'))`. **The production stack is on Iceberg 1.5.2 and does NOT have this option.** Trying `options => map('remove-dangling-deletes', 'true')` on 1.5.2 either silently no-ops or errors depending on the codepath — do not rely on it.
+3. **The fix landed in Iceberg 1.8+ (released 2025-02-13), NOT 1.5.2.** A new `remove-dangling-deletes` option was added to `rewrite_data_files`: `CALL system.rewrite_data_files(table => 'analytics.cdc_users', options => map('remove-dangling-deletes', 'true'))`. **The production stack is on Iceberg 1.5.2 and does NOT have this option.** Trying `options => map('remove-dangling-deletes', 'true')` on 1.5.2 either silently no-ops or errors depending on the codepath — do not rely on it.
 
 > ### THERE IS NO SILVER-BULLET WORKAROUND ON ICEBERG 1.5.2
 >
@@ -551,7 +551,7 @@ The right maintenance frequency depends on the source UPDATE/DELETE rate. **None
 
 The driver is read amplification: every Trino query against a Debezium-fed table must consult every equality delete file that overlaps the scanned data files. At 1000+ accumulated equality delete files, query latencies typically degrade from seconds to minutes. The diagnostic query above is the early-warning signal — alert at **50+ files or 100+ MB of `content=2`**.
 
-> **Upgrade rationale (this is the only real fix):** if your team is planning an Iceberg version bump, the `remove-dangling-deletes` option (Iceberg 1.8+, released 2026-02-13) is a **mandatory** argument for upgrading off 1.5.2 if you run Debezium CDC. It handles equality delete cleanup atomically inside `rewrite_data_files` itself. On 1.5.2 there is no equivalent — accumulation is inevitable; only the rate is controllable.
+> **Upgrade rationale (this is the only real fix):** if your team is planning an Iceberg version bump, the `remove-dangling-deletes` option (Iceberg 1.8+, released 2025-02-13) is a **mandatory** argument for upgrading off 1.5.2 if you run Debezium CDC. It handles equality delete cleanup atomically inside `rewrite_data_files` itself. On 1.5.2 there is no equivalent — accumulation is inevitable; only the rate is controllable.
 
 ### 2. `expire_snapshots` — run weekly
 
