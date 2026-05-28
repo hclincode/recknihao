@@ -29,6 +29,92 @@ If after all of this your dashboards are still slow, *then* keep reading.
 
 ---
 
+## Step 1A: The OLAP proxy test — before you commit to building any pipeline
+
+Before standing up a real ingestion pipeline, run a **proxy test**: copy a representative slice of the slow Postgres table into an OLAP engine and re-run the slow dashboard query there. If the query goes from 45s to <2s, OLAP will help. If it only goes from 45s to 20s, the problem is the query shape and OLAP won't save you — go back to Step 1 (tuning).
+
+### Step 1A.0: Use the OLAP engine you ALREADY HAVE
+
+> **Read this first.** If your org already runs Trino + Iceberg + MinIO + Spark (this production stack does), **do NOT install DuckDB on your laptop** for the proxy test. Use the engine you already have. Installing a new tool to evaluate whether you need an OLAP engine — when you already operate one — is wasted effort and produces results that don't generalize to your production query path.
+>
+> | Org already runs... | Proxy-test path | Time to "yes/no" answer |
+> |---|---|---|
+> | **Trino + Iceberg + MinIO (this stack)** | `CREATE TABLE iceberg.scratch.events_proxy AS SELECT * FROM postgres_catalog.public.events` then re-run the slow query against `iceberg.scratch.events_proxy` | Hours — table creation + one query |
+> | Snowflake / BigQuery / Redshift | `CREATE TABLE scratch.events_proxy AS SELECT * FROM <Postgres external table or COPY from S3>` then re-run | Hours |
+> | ClickHouse | `INSERT INTO scratch.events_proxy SELECT * FROM postgresql('host', 'db', 'events', 'user', 'pass')` | Hours |
+> | **No OLAP engine at all** | DuckDB on a laptop or a Spark sandbox — cheapest option to prove the pattern before buying anything | Day-ish |
+>
+> **The fundamental point:** the proxy test answers "would columnar OLAP make this query fast?" — the answer is the same regardless of *which* OLAP engine you test in. Pick the cheapest path to running the query in a columnar engine. If you already operate Trino+Iceberg, that IS the cheapest path.
+>
+> **"Migration" cost on an existing stack:** if your org already has on-prem Trino + Iceberg + MinIO + Spark running, "migrating a table" is **days-to-weeks** of work — adding one Iceberg table definition, scheduling one Spark ingest job, pointing one dashboard at it. It is **NOT** months of building OLAP infrastructure from scratch. The expensive part (the cluster, the metastore, the object store, the operating practice) is already paid. Don't let "migration cost" be a strawman that keeps you on Postgres past the breaking point.
+
+### Step 1A.1: The Trino + Iceberg proxy test (preferred — this is YOUR stack)
+
+```sql
+-- One-shot copy of the slow Postgres table into Iceberg via Trino federation.
+-- Substitute your actual catalog/schema/table names.
+CREATE TABLE iceberg.scratch.events_proxy
+WITH (
+  format = 'PARQUET',
+  partitioning = ARRAY['day(created_at)']   -- match the dominant filter column
+)
+AS
+SELECT *
+FROM postgres_catalog.public.events
+WHERE created_at >= DATE '2024-01-01';      -- limit to a representative slice if 5M rows is too much
+
+-- Then re-run your slow dashboard query against the Iceberg copy:
+SELECT user_id, COUNT(*) AS n
+FROM iceberg.scratch.events_proxy
+WHERE created_at >= DATE '2025-05-01'
+GROUP BY user_id
+ORDER BY n DESC
+LIMIT 100;
+```
+
+If this query returns in <2s while the Postgres equivalent takes 45s, columnar OLAP is your answer — and you already have it running.
+
+### Step 1A.2: The DuckDB proxy test (ONLY if you have no OLAP engine yet)
+
+If your org has zero OLAP engine in production, DuckDB on a developer laptop is the cheapest possible "would OLAP help?" test. DuckDB can read Postgres directly via its `postgres_scan` extension.
+
+```sql
+-- In DuckDB (install: pip install duckdb, or download the CLI):
+INSTALL postgres_scanner;
+LOAD postgres_scanner;
+
+-- Pull a sample of the slow table directly from Postgres into a Parquet file.
+-- This is the CORRECT DuckDB syntax — note `COPY (...) TO ... (FORMAT PARQUET)`.
+-- Do NOT use `SELECT ... INTO OUTFILE` — that is MySQL syntax and DuckDB rejects it.
+COPY (
+  SELECT *
+  FROM postgres_scan('host=pg-replica port=5432 dbname=app user=readonly password=...',
+                     'public',
+                     'events')
+  WHERE created_at >= DATE '2024-01-01'
+) TO '/tmp/events_sample.parquet' (FORMAT PARQUET);
+
+-- Now query the Parquet file directly — no ingest step needed:
+SELECT user_id, COUNT(*) AS n
+FROM '/tmp/events_sample.parquet'
+WHERE created_at >= DATE '2025-05-01'
+GROUP BY user_id
+ORDER BY n DESC
+LIMIT 100;
+```
+
+> **Run the diagnostic query TWICE and use the second-run timing.** The first run pays for cold-cache I/O (reading Parquet/Iceberg files from disk or MinIO for the first time, populating OS page cache, JIT-compiling DuckDB / warming Trino splits). The second run reflects steady-state warm-cache performance, which is what your production dashboard users actually see most of the time. Reporting only the first-run number distorts the comparison — a 5s cold run that drops to 0.3s warm is a strong "yes, OLAP helps" signal that gets hidden if you only look at run 1.
+
+### What the proxy test does NOT do
+
+- **It does not size your production cluster.** A 5M-row sample on a laptop won't tell you how 500M rows perform on Trino under concurrency.
+- **It does not validate your partition spec.** The proxy is a "is the IDEA right?" test, not a tuning exercise.
+- **It does not include join cost.** If your real dashboard joins 3 tables, copy all 3 (or at least re-run the full multi-table query against the Iceberg copies).
+
+The proxy test answers exactly one question: **"if my data were in a columnar OLAP engine, would the slow query be fast?"** — yes or no, in a few hours of effort, with the engine you already have.
+
+---
+
 ## Step 2: Concrete thresholds for moving to OLAP
 
 Don't move based on a feeling. Use numbers:
@@ -61,7 +147,7 @@ Is your largest analytical table > 50M rows?
 
 ## Step 4: The migration path on YOUR stack
 
-You already have MinIO + Iceberg + Trino + Spark. Here is what "move a table" actually looks like, in plain English:
+You already have MinIO + Iceberg + Trino + Spark. **"Migrating a table" is days-to-weeks of work on this stack — not months of building OLAP from scratch.** The cluster, metastore, object store, and operating practice are already paid for. Here is what "move a table" actually looks like, in plain English:
 
 1. **Spark job reads Postgres.** Use Spark's JDBC source to `SELECT * FROM events WHERE created_at >= ...`. For a first cut, do a nightly full snapshot. CDC (change data capture) comes later.
 2. **Spark writes Parquet to MinIO.** Spark partitions the output by date and writes Parquet files into an S3-compatible bucket on MinIO.

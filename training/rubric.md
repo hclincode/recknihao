@@ -29,7 +29,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Column-oriented storage — what it is and why it's faster for analytics | PASSED | 4.598 | 10 |
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
-| When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.560 | 11 |
+| When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.503 | 12 |
 | Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.447 | 143 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
@@ -43,13 +43,61 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.524 | 131 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.523 | 42 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
-| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.511 | 253 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
 | SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.652 | 16 |
 
 ---
 
 ## Score history
+
+### Iter 356 — 2026-05-29
+
+**Q1** — Trino federation memory pressure (federated join 200M-row Iceberg events × 50M-row Postgres accounts, worker OOM, what to tune / what is fundamentally wrong). Responder produced: (a) correct identification of broadcast-join build-side mechanics with `join_max_broadcast_table_size` default 100MB framing; (b) three-step fix: filter events with WHERE first, force PARTITIONED via `SET SESSION join_distribution_type = 'PARTITIONED'`, optionally raise `join_max_broadcast_table_size`; (c) EXPLAIN (TYPE DISTRIBUTED) → look for `Exchange[Type=REPLICATE]` (broadcast) vs `Exchange[Type=REPARTITION]` (partitioned); (d) SHOW STATS FOR postgres_catalog.public.accounts → if row_count NULL, run `ANALYZE public.accounts` on the Postgres primary; (e) on-prem k8s "force PARTITIONED for stability" recommendation; (f) honest caveat that 50M rows likely 10-20GB uncompressed so 500MB broadcast threshold raise unlikely to help.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 4.5 |
+| Completeness | 3.5 |
+| **Average** | **4.125** |
+
+Judge verified via WebSearch: (1) `join_distribution_type` session property with BROADCAST/PARTITIONED/AUTOMATIC values CONFIRMED per trino.io/docs/current/admin/properties-general.html — BROADCAST broadcasts right table; PARTITIONED hash-redistributes both tables; AUTOMATIC uses CBO. (2) `join_max_broadcast_table_size` default of 100MB CONFIRMED per trino.io/docs/current/optimizer/cost-based-optimizations.html — "the replicated table size is capped to 100MB". (3) EXPLAIN (TYPE DISTRIBUTED) showing REPARTITION vs REPLICATE exchanges CONFIRMED per trino.io/docs/current/sql/explain.html and the unskewdata.com Trino join algorithms write-up — broadcast = REPLICATE, partitioned = REPARTITION on hash of join key. (4) Postgres connector SHOW STATS uses statistics collected by PostgreSQL and retrieved by the connector CONFIRMED per trino.io/docs/current/optimizer/statistics.html — ANALYZE on Postgres source is the correct action. (5) Trino syntax `SET SESSION join_distribution_type = 'PARTITIONED'` (string with quotes) — CORRECT form. (6) The build-side framing "Trino's CBO chooses the smaller table as the build side" is a slight simplification — in AUTOMATIC mode CBO can reorder L/R based on cost; the smaller table is usually but not always the build side. (7) The mechanism claim "filter events aggressively first to … make Trino more likely to pick events as build side or switch to partitioned join" is imprecise — reducing events row count doesn't directly shrink accounts; the actual mechanism is dynamic filtering pushing the events-side predicate down to the join probe + improving cost estimates. Topic running avg: (4.513 × 252 + 4.125) / 253 = (1137.276 + 4.125) / 253 = 1141.401 / 253 = **4.511 across 253 questions** — PASSED (stable above 4.5 threshold).
+
+**Iter 356 Q1: 4.125 — PASS** ✓
+
+GAPS (deductions from 5):
+- **Beginner clarity (−1.0)**: "build side", "REPLICATE/REPARTITION", "hash-redistributes", "join distribution type", "broadcast threshold" are used without inline definitions. A SaaS engineer with no OLAP background would need to look these up. The progressive 3-step structure compensates partly, but the answer assumes Trino vocabulary.
+- **Completeness (−1.5)**: misses several known-needed elements for the federation topic:
+  - The engineer asked "is there something fundamental about this kind of federated join that we're doing wrong?" — the answer never directly addresses the architectural alternative of **ingesting accounts into Iceberg as a dimension table** rather than doing live federated joins. For a 50M-row Postgres dimension, materializing nightly into Iceberg with `INSERT INTO ... AS SELECT` is often the better SaaS answer on this on-prem k8s stack. The federate-vs-ingest tradeoff is a named element of the federation topic ("when to federate vs ingest") and should have been surfaced.
+  - **Dynamic filtering** not mentioned — Trino's standard tool for exactly this Iceberg-fact × JDBC-dimension scenario (`join-dynamic-filtering-enabled`, `dynamic_filtering_wait_timeout`) and the Iceberg connector's `dynamic-filtering.wait-timeout` (1s default per Trino 467 docs). Iter164/165 already flagged this as a recurring gap.
+  - **Worker memory headroom settings** not mentioned: `query.max-memory-per-node`, `query.max-memory`, `memory.heap-headroom-per-node` — the question is literally "workers running out of memory."
+  - **Spilling** not mentioned (`spill_enabled` session property, `spill-enabled` config) — a legitimate stability lever for OOM on partitioned joins.
+  - **JDBC predicate/projection pushdown** framing not surfaced — selective WHERE on the accounts side could reduce rows pulled from Postgres.
+- **Technical accuracy (−0.5)**: minor — "filter events first to make Trino pick events as build side" mechanism is imprecise (the actual lever is dynamic filtering + improved cost estimates, not just relative size); "smaller table is build side" is a usually-true simplification not a CBO rule.
+
+ITER357 TEACHER ACTION (LOW-MEDIUM priority — Q1 passed at 4.125, topic at 4.511 stable):
+1. Add a "federated join OOM runbook" section to `resources/22-trino-federation-postgresql.md` covering, in order: (a) check `EXPLAIN (TYPE DISTRIBUTED)` for `Exchange[Type=REPLICATE]` (broadcast) vs `[Type=REPARTITION]` (partitioned); (b) verify statistics via `SHOW STATS FOR postgres_catalog.<schema>.<table>` and run `ANALYZE` on the Postgres source if row_count is NULL; (c) **dynamic filtering** as the first lever — confirm `join-dynamic-filtering-enabled=true` (Trino 467 default true) and `dynamic_filtering_wait_timeout` (default 1s for Iceberg+Hive connectors per trinodb/trino#13688); (d) `SET SESSION join_distribution_type='PARTITIONED'` to force partitioned join when build side too big; (e) raise `join_max_broadcast_table_size` only if workers have headroom; (f) consider `spill_enabled=true` as a stability lever; (g) **architectural alternative**: ingest the Postgres dimension into Iceberg nightly (or via Debezium CDC) and join Iceberg-to-Iceberg — this is the on-prem k8s preferred pattern for 10M+ row dimensions.
+2. Add a "build side vs probe side" callout with a one-line definition: "Build side is the smaller input that Trino reads fully into a hash table; probe side is the larger input that streams through and looks up matches. Broadcast join replicates the build side to every worker; partitioned join hash-redistributes both sides on the join key."
+3. Add explicit "when to federate live vs ingest into Iceberg" decision matrix already named in the topic checklist: <10M-row dimension + low write rate → federate live with `join_distribution_type=PARTITIONED`; 10M-100M-row dimension → ingest nightly with `INSERT INTO ... AS SELECT * FROM postgres_catalog.<schema>.<table>`; >100M-row dimension → CDC pipeline (Debezium → Iceberg).
+
+ITER357 JUDGE PROBE TARGETS — under-tested topics still open:
+1. Query plan optimization (EXPLAIN ANALYZE reading) — not yet probed.
+2. Cost considerations cloud vs on-prem (S3+Athena+Glue lift-and-shift) — not yet probed.
+3. Federate-vs-ingest architectural choice — could re-probe with phrasing like "we're joining a 50M-row Postgres customers table to Iceberg events every 5 minutes — should we keep doing this live or materialize customers into Iceberg?" to test if iter357 teacher action #3 lands.
+
+Sources verified via WebSearch:
+- [General properties — Trino 481 Documentation](https://trino.io/docs/current/admin/properties-general.html) — `join_distribution_type` session property
+- [Cost-based optimizations — Trino 481 Documentation](https://trino.io/docs/current/optimizer/cost-based-optimizations.html) — `join_max_broadcast_table_size` default 100MB
+- [EXPLAIN — Trino 480 Documentation](https://trino.io/docs/current/sql/explain.html) — TYPE DISTRIBUTED, exchange types
+- [Table statistics — Trino 480 Documentation](https://trino.io/docs/current/optimizer/statistics.html) — SHOW STATS for federated connectors
+- [PostgreSQL connector — Trino 481 Documentation](https://trino.io/docs/current/connector/postgresql.html) — Postgres statistics retrieval
+
+**Topics updated**:
+- Trino federation: 4.513/252 → **4.511/253 questions** (PASSED — stable, slight smoothing from 4.125 single-question pull-down)
+
+---
 
 ### Iter 354 — 2026-05-29
 
