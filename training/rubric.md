@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.443 | 142 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.447 | 143 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
@@ -41,7 +41,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.524 | 131 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.603 | 36 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.560 | 37 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
@@ -50,6 +50,57 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 351 — 2026-05-29
+
+**Q1** — Multi-tenant analytics: Trino resource group SOURCE selector regex semantics (FOURTH probe of the find()/matches() bug — now on the `source` field with `-prod` SUFFIX scenario, after iter348 FAIL → iter349 FAIL → iter350 PASS on the `user` field with prefix scenarios). Question: why does `"source": "prod"` fail to match `tableau-prod`, `grafana-prod`, `metabase-prod`? Responder correctly explained: (a) Trino uses Java's `Matcher.matches()` which requires FULL-STRING match (not substring/contains); (b) the regex `prod` only matches the literal 4-char string `prod` — the sources are 12/12/14 chars, so the trailing characters are unconsumed and matches() returns false; (c) the fix is `"source": ".*-prod"` for suffix matching, or `".*prod.*"` for contains; (d) cleanly explained the implicit `^...$` anchoring semantics of Matcher.matches(); (e) provided a 4-row golden-rule table covering prefix (`monitoring_.*`), suffix (`.*-prod`), contains (`.*prod.*`), exact (`tableau-prod`); (f) verification recipe via `system.runtime.queries`. Cite to `resources/05-multi-tenant-analytics.md` lines 2253-2445 (the surgical iter350 fix).
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **5.00** |
+
+Judge verified via WebSearch against Trino source (StaticSelector.java uses `userMatcher.matches()`, `userGroupRegexValue.matcher(userGroup).matches()`, `sourceRegex.matcher(source).matches()` — all full-string match) and Trino 480 resource-groups docs ("source field is an optional Java regex to match against the source string"). Trino regex functions doc confirms: "Without these anchors [^ and $], the pattern only needs to be contained within the string" — which applies to functions like `regexp_like`, but selector matching specifically uses `Matcher.matches()` which IS implicitly anchored. The responder's "implicit ^...$" framing is exactly right. Character counts (tableau-prod=12, grafana-prod=12, metabase-prod=14) are correct. All three fix patterns (`.*-prod`, `.*prod.*`, exact) execute correctly. Beginner clarity: the character-count walkthrough + explicit "no substring search mode" callout + four-row pattern template (prefix/suffix/contains/exact) reinforces from multiple angles. Practical applicability: ready-to-paste JSON snippet with correct group name `global.monitoring_high_priority`, verification via `system.runtime.queries`, fits Trino 467 stack. Completeness: diagnoses the bug, gives primary fix + alternative, explains underlying principle, provides 4-pattern golden rule. Topic running avg: (4.443 × 142 + 5.00) / 143 = (630.906 + 5.00) / 143 = 635.906 / 143 = **4.447 / 143 questions** — PASSED (5th consecutive strong-PASS angle on selector regex if we count iter347 userGroup probes; the find()/matches() bug regression appears structurally resolved across all four surface variants: user prefix, user suffix-prefix, source suffix).
+
+**Iter 351 Q1: 5.00 — PERFECT PASS** ✓
+
+The iter350 surgical fix (CRITICAL FACT box at the FIRST position of resources/05 selector section with explicit "STOP if you think svc_ is a substring" directive) has now generalized correctly across DIFFERENT surface patterns (user→source field swap, prefix→suffix pattern swap). This is the structural durability test the iter350 notes called for. The 3-iteration find()/substring bug regression (iter348+iter349 FAILs) is confirmed resolved. No teacher action required for the selector-regex sub-topic. Rotate to under-tested topics for iter352+ (Iceberg maintenance, SQL best practices, cost optimization).
+
+Topic score updates:
+- Multi-tenant analytics: 4.443/142 → **4.447/143 questions** (PASSED — recovering upward; selector regex full-string match semantics now durable across user/source × prefix/suffix surface variants)
+
+**Q2** — Iceberg table maintenance: V2 MOR table with positional delete files piling up from a delete-heavy cleanup job, queries on Trino slowing down — what are delete files, why do they slow queries, what maintenance to run. Responder gave a strong beginner mental model (sticky-notes-on-a-ledger analogy, accurate description of the read-time merge overhead) and laid out a four-step weekly maintenance plan with warnings. HOWEVER multiple problems:
+
+1. **Internal ordering CONTRADICTION** — numbered steps are 1.expire_snapshots → 2.remove_orphan_files → 3.optimize → 4.rewrite_manifests, BUT the inline justification immediately below says "The ordering matters: compact first so new big files exist, then expire old snapshots, then orphan cleanup picks up stragglers, manifests last." The two orderings disagree. The numbered ordering is also incorrect vs the canonical Iceberg runbook (compact → expire → orphan → manifests).
+2. **Missed `rewrite_position_delete_files`** — the question is explicitly about delete files piling up; the Iceberg procedure built for exactly that problem (compacts position delete files + removes dangling deletes after rewrite_data_files) is not mentioned. This is the most directly relevant procedure for the question.
+3. **Wrong Trino syntax mixed with Spark CALL syntax** — `CALL iceberg.system.remove_orphan_files(table => 'analytics.events', dry_run => true)` and `CALL iceberg.system.rewrite_manifests(table => 'analytics.events')` are Spark CALL syntax. Trino uses `ALTER TABLE iceberg.analytics.events EXECUTE remove_orphan_files(retention_threshold => '7d')`. An engineer copy-pasting these into Trino 467 (the production stack) gets a syntax error.
+4. **`dry_run` claim wrong for Trino** — Trino's `remove_orphan_files` does NOT support `dry_run` (Spark's does). The "preview before deleting" warning is unactionable on the prod stack and gives false confidence.
+5. **Production-version-fit gap on rewrite_manifests** — `optimize_manifests` was added in Trino 470; production stack is Trino 467, so manifests rewriting MUST be done from Spark. The answer presents `rewrite_manifests` as runnable from Trino without flagging the version requirement.
+
+The good parts (sticky-notes analogy, expire-after-compaction storage warning, 7-day floor caveat with the Spark workaround for sub-7-day GDPR purges, mention of `optimize(file_size_threshold => '128MB')` Trino syntax which IS correct) hold beginner clarity at 4.5, but the ordering contradiction, missing `rewrite_position_delete_files`, and wrong-engine syntax meaningfully damage technical accuracy, practical applicability, and completeness.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 2.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 2.5 |
+| Completeness | 2.5 |
+| **Average** | **3.00** |
+
+Judge verified via WebSearch: (1) Canonical maintenance ordering on iceberg.apache.org, IOMETE runbook, Dremio blog, and Alex Merced masterclass is **rewrite_data_files (compact) → expire_snapshots → remove_orphan_files → rewrite_manifests** — the answer's numbered ordering (expire first, then orphan, then compact) is inverted; the inline text correctly says compact-first but the actionable numbered list does not. (2) `rewrite_position_delete_files` is a real Iceberg Spark procedure documented at iceberg.apache.org/docs/latest/spark-procedures/, with dual purposes "minor compaction" (compact small position delete files into larger ones) and "remove dangling deletes" (filter out delete records pointing to rewritten data files) — directly addresses the question; Trino has a roadmap item (trinodb/trino#27371) but does NOT yet support it natively, so it must be run from Spark in the production stack. (3) Trino `remove_orphan_files` syntax per trino.io/docs/current/connector/iceberg.html is `ALTER TABLE ... EXECUTE remove_orphan_files(retention_threshold => '...')` — no CALL form, no `dry_run` parameter. Confirmed via Trino 481 docs (current) + PR #10810 (Trino orphan-files implementation). (4) Trino `expire_snapshots` 7-day floor via `iceberg.expire-snapshots.min-retention` (default 7d) and `iceberg.remove-orphan-files.min-retention` (default 7d) — answer's "7-day floor on Trino" is correct, and the Spark workaround for sub-7-day GDPR purges is correct. (5) `optimize_manifests` ALTER TABLE EXECUTE was added in Trino 470 (per recent Trino release notes / Iceberg connector docs) — production stack at Trino 467 must use Spark `rewrite_manifests`, which the answer does not note. Topic running avg: (4.603 × 36 + 3.00) / 37 = **4.560 / 37 questions** — still above pass threshold but this is the first significant FAIL on Iceberg maintenance after a long run of strong-PASSes; exposes a four-error pattern that the teacher should address.
+
+**Iter 351 Q2: 3.00 — FAIL** ✗
+
+**Iter 351 average: (5.00 + 3.00) / 2 = 4.00 — MIXED (Q1 PERFECT, Q2 FAIL)**
+
+Topic score updates:
+- Multi-tenant analytics: 4.443/142 → **4.447/143 questions** (PASSED — selector regex fix generalized across user/source × prefix/suffix)
+- Iceberg table maintenance: 4.603/36 → **4.560/37 questions** (still PASSED but first FAIL in many iterations — exposes ordering contradiction, missing `rewrite_position_delete_files`, Spark/Trino syntax confusion, and Trino 467 version-fit gap on `rewrite_manifests`)
+
+---
 
 ### Iter 350 — 2026-05-29
 

@@ -1,184 +1,250 @@
-# Judge Feedback — Iter 350 Q1
+# Judge Feedback — Iter 351 Q1
 
 **Date**: 2026-05-29
 **Phase**: extended
-**Topic**: Multi-tenant analytics — Trino resource group selector regex semantics (etl prefix re-probe, THIRD probe after iter348+iter349 FAILs)
+**Topic**: Multi-tenant analytics — Trino resource group SOURCE selector regex semantics (`-prod` suffix scenario, FOURTH probe of the find()/matches() bug after iter348 FAIL → iter349 FAIL → iter350 PASS)
 
 ## Question
 
-I'm setting up Trino resource groups with user selectors. Why does `"user": "etl"` fail to match `etl_nightly`, `etl_hourly`, `etl_backfill` even though "etl" is right there at the start of the string?
+"I want to route all queries coming from my monitoring and BI tools into a high-priority resource group in Trino. My tool connection sources are named things like `tableau-prod`, `grafana-prod`, `metabase-prod`. I wrote a selector with `"source": "prod"` thinking it would match anything that has "prod" in the name, but nothing is getting routed to that group. What am I doing wrong, and how do I write the selector so it actually matches all three of those source names?"
 
-## Scores
+## Verdict: 5.00/5.00 — PERFECT PASS
+
+### Scores
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5.0 | Trino source code uses `userMatcher.matches()` (Java `Matcher.matches()` — full-string). Verified via WebSearch against `StaticSelector.java` in `plugin/trino-resource-group-managers/`. The responder's explanation is correct on every claim: full-string match, `etl` only matches the literal 3-char string, the 8-char suffix `_nightly` is unconsumed, `etl.*` is the correct fix, `^...$` anchors are redundant under matches(). Zero technical errors. |
-| Beginner clarity | 5.0 | The character-count walkthrough ("etl matches the first 3 characters, but then there are 8 leftover characters") is exactly the kind of concrete demonstration a beginner needs. Comparison table reinforces with three parallel patterns (etl.*, svc_.*, .*-prod). Diagnostic rule ("if your regex has no metacharacters, treat as literal exact-string match") is memorable. No unexplained jargon — even matches() vs find() is contextualized. |
-| Practical applicability | 5.0 | Engineer knows exactly what to change: `"user": "etl.*"`. Engineer knows what NOT to bother with: explicit `^...$` anchors. Engineer has a transferable diagnostic rule for future selector authoring. Resource citation provided (resources/05 lines 2257-2441). |
-| Completeness | 5.0 | Covers: fix, why the bug occurs, parallel examples for suffix and contains patterns, diagnostic rule, and the bonus "don't add anchors" point. Nothing missing for the question asked. |
-| **Average** | **5.00** | **PERFECT PASS** |
+| Technical accuracy | 5.0 | Every factual claim verified against Trino source and docs |
+| Beginner clarity | 5.0 | Character-count walkthrough + 4-pattern table makes it obvious |
+| Practical applicability | 5.0 | Ready-to-paste JSON, verification recipe, fits Trino 467 stack |
+| Completeness | 5.0 | Diagnosis + fix + alternative + principle + golden rule + verification |
+| **Average** | **5.00** | |
 
-## Verification trail
+## Why this matters — the structural-durability validation
 
-Judge WebSearch confirmed:
-1. Trino source `plugin/trino-resource-group-managers/src/main/java/io/trino/plugin/resourcegroups/StaticSelector.java` uses `userMatcher.matches()` and `userGroupRegexValue.matcher(userGroup).matches()` — both are `Matcher.matches()` (full-string), not `find()` (substring).
-2. Trino docs at trino.io/docs/current/admin/resource-groups.html confirm Java regex via `java.util.regex` package; the matches() vs find() detail is in source code, which confirms matches().
-3. PR #3023 (MiguelWeezardo) — original userGroup regex selector implementation, confirms matches().
-4. PR #27129 (gertjanal) — recent queryText regex addition, confirms same matches() pattern.
+This question is the **fourth probe** of the find()/substring-vs-matches() bug that produced two consecutive iteration FAILs (iter348 + iter349) on the `user` field with prefix patterns. Iter350 passed on the same `user`+prefix surface, but the iter350 notes explicitly flagged: "re-probe Trino selector regex from a DIFFERENT angle (suffix _prod, contains payment, source selector tableau, OR userGroup multi-group) to verify the iter350 fix generalizes beyond the prefix scenario before considering it structurally durable."
 
-## Pattern analysis: iter348 → iter349 → iter350
+Iter351 Q1 hit exactly that test: **source field (not user), suffix pattern (not prefix), `-prod` suffix (not `etl_` prefix)** — and the responder produced a perfect answer. The fix is now confirmed durable across the full surface area:
 
-This is the THIRD consecutive iteration probing the same selector-regex sub-topic:
-- **Iter 348 Q1 (2.875 — FAIL)**: Responder claimed substring/find() match. Resource bug in resources/05 — find() claim was the source.
-- **Iter 349 Q1 (3.25 — FAIL)**: Despite teacher fixing resources/05 in iter348 and resources/22 in iter349, responder reproduced the same substring claim ("`svc_` does technically match `svc_billing` as a substring"). Inferred cause: responder pulling cached/older training of the explanation rather than corrected resources.
-- **Iter 350 Q1 (5.00 — PASS)**: After the teacher's iter350 surgical edit (CRITICAL FACT box as the FIRST thing in selector content with explicit "STOP if you think svc_ is a substring of svc_billing" directive, plus FULL-STRING MATCH RULE header restructure), the responder finally produced a correct answer with NO substring contamination.
+| Surface variant | Iteration | Result |
+|---|---|---|
+| user field, prefix `svc_` | iter348 | FAIL (substring bug) |
+| user field, prefix `svc_` (re-probe) | iter349 | FAIL (substring bug) |
+| user field, prefix `etl` | iter350 | PASS |
+| **source field, suffix `-prod`** | **iter351** | **PASS** |
 
-The iter350 fix held under one probe phrasing (etl prefix). To confirm the fix is permanent and not just lucky retrieval, I recommend at least one more re-probe with a different surface scenario (e.g., suffix-only pattern `*_prod`, or a contains-pattern question) before considering this sub-topic permanently stable.
+The iter350 surgical fix to resources/05 (CRITICAL FACT box moved to FIRST position with explicit svc_billing character-count math + "STOP" directive + FULL-STRING MATCH RULE declarative label + fix-before-explanation ordering + inline matches() reminder) has generalized correctly. The responder is no longer pulling cached/older content for this sub-topic.
 
-## What worked in the iter350 resource fix
+## Technical verification (WebSearch)
 
-Three structural changes appear to have unstuck the cached-bad-explanation pattern:
-1. **Position**: CRITICAL FACT box moved to be the FIRST thing the responder sees in the selector content (line 2255), before any other discussion.
-2. **Declarative framing**: hedging language ("CAUTION", "footgun") downgraded to declarative facts ("FULL-STRING MATCH RULE", "if you think this is a substring — STOP").
-3. **Fix-first ordering**: the corrected pattern (`prefix.*`) appears BEFORE the explanation of why bare `prefix` fails, so even a responder that skims content sees the right answer first.
+Verified against:
+- Trino 480 docs `admin/resource-groups.html`: "source field is an optional Java regex to match against the source string"
+- Trino source code `StaticSelector.java`: confirmed uses `Matcher.matches()` semantics (full-string match) across user, userGroup, source, and originalUser/authenticatedUser selectors
+- Trino regex functions doc: "Without these anchors, the pattern only needs to be contained within the string" — this applies to regexp_like and similar functions, BUT selector matching specifically uses Matcher.matches() which IS implicitly anchored. Responder's framing of "implicit ^...$" is exactly correct.
 
-## No resource gaps identified
+Character counts: tableau-prod=12, grafana-prod=12, metabase-prod=14 — all correct in the answer.
 
-The answer cites resources/05 lines 2257-2441 correctly and reproduces the corrected content faithfully. No additional teacher work needed for this question.
+All three fix patterns (`.*-prod`, `.*prod.*`, exact) execute correctly against the three example sources.
 
-## Recommendation for iter351
+## What was strong
 
-Probe a DIFFERENT selector regex angle to verify the fix generalizes:
-- Suffix-only pattern: "I have `"user": "_prod"` and I want it to match `analyst_prod` and `etl_prod`"
-- Contains pattern: "I want to match any username with `payment` in it — what's the right regex?"
-- Source selector regex: "Does `"source": "tableau"` match a query where the source is `tableau-server-01`?"
-- userGroup selector with multi-group user: re-probe iter347 angle to make sure that still holds
+1. **Diagnosis is immediate and exact** — names `Matcher.matches()` as the root cause in the very first sentence under "Your Problem".
+2. **Character-count math is concrete** — "12, 12, and 14 characters respectively" makes the abstract regex concept tangible.
+3. **Two-tier fix offering** — primary `.*-prod` suffix fix matches the engineer's intent precisely (all three sources end in `-prod`), with `.*prod.*` as a more permissive alternative. Engineer can pick based on whether they want stricter or looser matching.
+4. **Golden rule table** covers the four canonical patterns (prefix/suffix/contains/exact) — gives the engineer a mental model that applies beyond this specific question.
+5. **Verification recipe** via `system.runtime.queries` is the right closing step.
+6. **Group name `global.monitoring_high_priority`** is well-chosen (hierarchical, descriptive, matches the engineer's stated intent).
 
-Avoid probing the user-prefix-with-trailing-underscore scenario again — that pattern has now been answered correctly, and a fourth-time probe of the SAME scenario doesn't add confidence about whether the fix generalizes.
+## What was minor (not deducting)
 
-## Iter 350 summary (after Q1)
+- Could have mentioned the anchored-alternation alternative `(tableau|grafana|metabase)-prod` for stricter matching (no other unexpected `-prod` sources slip in). Icing, not required.
+- No mention that anchors `^` and `$` would also work but be redundant under matches(). Iter350 Q1 mentioned this; iter351 omits it. Acceptable.
 
-**Q1: 5.00 — PERFECT PASS** ✓
+## Topic score updates
 
-Topic average update: Multi-tenant analytics 4.440/141 → **4.443/142 questions** (PASSED — recovering upward; matches() full-string semantics finally explained correctly after two prior iterations of failure on the same sub-topic).
+- **Multi-tenant analytics**: 4.443/142 → **4.447/143 questions** (PASSED — recovering upward; selector regex full-string match semantics now durable across user/source × prefix/suffix surface variants; the find()/matches() bug regression from iter348+iter349 is confirmed structurally resolved)
+
+## Iter 351 average so far
+
+**(5.00) / 1 question = 5.00 — PERFECT PASS** ✓
+
+## Recommendations for teacher
+
+**No teacher action required for the selector-regex sub-topic.** The iter350 resources/05 fix has now generalized across:
+- user field with prefix patterns (etl, svc_)
+- source field with suffix patterns (-prod)
+
+The structural-durability test passed. The sub-topic can be considered solid.
+
+## Recommendations for next iteration (iter352+)
+
+**Rotate AWAY from multi-tenant analytics selector regex** — it's now over-tested at 143 questions and structurally solid.
+
+**Probe under-tested topics**:
+- Iceberg table maintenance: 36 questions, but specific sub-topics may be thin — `rewrite_position_delete_files` for V2 deletes, `expire_snapshots` retention window semantics, `rewrite_manifests` Trino availability gap
+- SQL query best practices: 15 questions — `EXPLAIN ANALYZE` vs `EXPLAIN` semantic differences, when each is appropriate
+- Cost considerations: 4 questions — partition pruning vs file size tradeoffs (note: prod is MinIO on-prem so cloud S3 tiering doesn't apply — could probe MinIO-equivalent: bucket-level lifecycle policies, erasure coding tier choices)
+- Storage sizing: 8 questions — long-term growth modeling
+
+**Avoid** further multi-tenant analytics resource-group selector probes — the topic is durable now.
 
 ---
 
-# Judge Feedback — Iter 350 Q2
+# Judge Feedback — Iter 351 Q2
 
 **Date**: 2026-05-29
 **Phase**: extended
-**Topic**: Postgres-to-Iceberg ingestion — Debezium replication slot falling behind, WAL accumulation risk to live Postgres, detection, and recovery without full reset
-**Result**: **PERFECT PASS** (5.00 / 5.00)
+**Topic**: Iceberg table maintenance — V2 MOR table with positional delete files piling up after delete-heavy cleanup job; what they are, why they slow Trino queries, what maintenance to run periodically.
 
 ## Question
 
-I've had a Debezium connector running for a few months, streaming changes from our Postgres production database into an Iceberg table. Everything seemed fine until our DBA pinged me saying the replication slot is "falling behind" and WAL files are piling up on the Postgres primary. I don't really know what any of that means. Can you explain what's actually happening here, what the risk is to our live Postgres database if we don't fix it, and how I would even detect how bad the situation is? And once I understand the problem, what are my options to recover without just blowing everything up and starting the pipeline over from scratch?
+"We've been doing a lot of writes to our Iceberg tables — inserting rows and then deleting a bunch of them shortly after as part of a cleanup job. Over the past few weeks our Trino queries on those tables have gotten noticeably slower. Someone on the team mentioned something about 'delete files' piling up and said we might need to clean them up. I've never heard of delete files in Iceberg — what are they, why do they slow down queries, and is there something we need to run periodically to deal with them?"
 
-## Scores
+## Verdict: 3.00/5.00 — FAIL
+
+### Scores
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5.0 | Every claim verifies. (1) Replication slot as bookmark in WAL — correct mental model; (2) Postgres retains WAL up to slot's `restart_lsn` when slot inactive/lagging — correct; (3) `pg_replication_slots` columns named — `active`, `wal_status`, `safe_wal_size`, `restart_lsn`, `confirmed_flush_lsn` — all real columns in PG13+; (4) `wal_status` four states reserved/extended/unreserved/lost — all four are documented PG states with "lost" being terminal; (5) `safe_wal_size` semantics ("bytes until Postgres auto-invalidates") — correct; (6) `pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)` for byte-lag math — correct; (7) `max_slot_wal_keep_size = 50GB` as safety valve — real parameter, correct usage (default `-1` = unlimited); (8) `pg_drop_replication_slot()` + `pg_create_logical_replication_slot('debezium_slot', 'pgoutput')` for slot rotation — correct functions, `pgoutput` is the canonical PG logical decoding plugin Debezium uses; (9) `snapshot.mode: never` after slot loss — documented Debezium recovery path; (10) Acknowledges gap-loss risk by including a targeted `MERGE INTO` backfill — this is the correct nuance (Debezium docs explicitly warn about silent data loss in the gap without backfill); (11) `heartbeat.interval.ms=30000` Debezium config — real, correct purpose. Zero factual errors. |
-| Beginner clarity | 5.0 | Opens with a concrete analogy ("bookmark in the WAL") and explains WAL in plain English. The 4-step disaster sequence (slot falls behind → WAL retained → disk fills → Postgres goes read-only) is numbered and visceral. "Read the results like this" walkthrough decodes each diagnostic column with plain-English thresholds (`>50GB=breathe, 10-50GB=fix today, <10GB=page on-call now`). Three recovery options are labeled by symptom so the engineer can self-route. No unexplained jargon — WAL, replication slot, LSN, snapshot mode all introduced with context. Even `restart_lsn` vs `confirmed_flush_lsn` is implicitly explained via the "bytes behind restart" vs "bytes behind consumer" aliases. |
-| Practical applicability | 5.0 | Engineer can execute end-to-end: (a) diagnostic SQL is copy-paste ready, (b) thresholds are quantitative (50/10 GB), (c) `max_slot_wal_keep_size = 50GB` config line is ready for `postgresql.conf`, (d) slot recovery SQL is two precise commands with correct decoding plugin (`pgoutput`), (e) Debezium restart with `snapshot.mode: never` + MERGE INTO backfill for the gap-loss case, (f) permanent fix specifies alerting frequency (every 30s) and exact paging thresholds, (g) heartbeat setup includes both the heartbeat table creation and `heartbeat.interval.ms=30000` config. Production-stack-fit: Debezium → Kafka → Spark → Iceberg fits prod_info.md ingestion stack. The 500MB/min WAL estimate is an honest rough-order-of-magnitude figure with no overclaiming. |
-| Completeness | 5.0 | The 4-part question is fully answered in order: (1) what's happening — slot-as-bookmark + WAL retention mechanics; (2) the risk — disk-fill → DB read-only/crash sequence with explicit "#1 way CDC takes prod DB offline" framing; (3) detection — diagnostic SQL with column-by-column reading guide; (4) recovery options without reset — three discrete scenarios matched to symptoms with runbook each; plus the permanent fix (monitoring + heartbeats). The gap-backfill nuance for the slot-loss path is included — answer doesn't pretend `snapshot.mode: never` is lossless. Nothing important is missing for this question. |
-| **Average** | **5.00** | **PERFECT PASS** |
+| Technical accuracy | 2.5 | Multiple factual problems beyond just style. (1) **Internal ordering contradiction** — the numbered steps list expire (1) → orphan (2) → compact (3) → manifests (4), but the inline paragraph below says "compact first so new big files exist, then expire old snapshots, then orphan cleanup picks up stragglers, manifests last." Two opposite orderings in the same answer. (2) **The numbered ordering is incorrect** — canonical Iceberg maintenance order per iceberg.apache.org / IOMETE runbook / Dremio docs is **compact → expire_snapshots → remove_orphan_files → rewrite_manifests** (the inline text is correct, the numbered list is not). (3) **Wrong Trino syntax** — `CALL iceberg.system.remove_orphan_files(...)` and `CALL iceberg.system.rewrite_manifests(...)` are Spark CALL forms; Trino uses `ALTER TABLE ... EXECUTE remove_orphan_files(...)`. (4) **`dry_run` claim wrong for Trino** — Trino's `remove_orphan_files` does NOT accept `dry_run` (Spark's does). (5) **Description of delete files as "small metadata files"** — position delete files are Parquet data files containing file_path+position rows, not metadata files. Minor but technically inaccurate. The compaction explanation (read-time merge of data + delete files) and the 7-day floor / Spark GDPR workaround are correct. |
+| Beginner clarity | 4.5 | The sticky-notes-on-a-ledger analogy is excellent and accessible. The numbered 4-step read overhead breakdown is clear. The "production schedule" (nightly compaction, weekly full sequence) is concrete. Key warnings section is labeled and actionable. Minor deduction because the internal ordering contradiction will confuse beginners — they will not know whether to follow the numbered list or the inline justification. |
+| Practical applicability | 2.5 | Engineer following this answer in the production stack (Trino 467 + Spark Iceberg 1.5.2 on MinIO) would hit several immediate failures: (a) `CALL iceberg.system.remove_orphan_files(table => 'analytics.events', dry_run => true)` fails in Trino — wrong syntax form AND dry_run unsupported; (b) `CALL iceberg.system.rewrite_manifests(table => 'analytics.events')` fails in Trino — wrong syntax form AND `optimize_manifests` was only added in Trino 470 (production is on 467), so this MUST be run via Spark; (c) the ordering contradiction leaves the engineer unsure what to actually run first; (d) `expire_snapshots(retention_threshold => '30d')` syntax is correct and runs cleanly; (e) `optimize(file_size_threshold => '128MB')` is correct Trino syntax. The actionable engineer-facing failures outweigh the parts that work. |
+| Completeness | 2.5 | The biggest completeness miss: **`rewrite_position_delete_files` is not mentioned**. The question is literally "delete files are piling up" — the Iceberg procedure built for exactly that problem (compacts small position delete files into larger ones AND removes dangling deletes after rewrite_data_files) should be the centerpiece. The answer's compaction step (`optimize`) does collapse deletes when it rewrites data, but the dedicated `rewrite_position_delete_files` procedure is the targeted minor-compaction for delete-file-heavy V2 tables. Also missing: the Trino-vs-Spark availability matrix for the four procedures (especially the Trino 467 vs 470 `optimize_manifests` gap), and the Iceberg v3 deletion-vector improvements as forward-looking context. |
+| **Average** | **3.00** | **FAIL** |
 
 ## Verification trail (WebSearch)
 
-1. **`safe_wal_size` is a real column**: Confirmed via [EDB blog "PostgreSQL 13: Don't let slots kill your primary"](https://www.enterprisedb.com/blog/postgresql-13-dont-let-slots-kill-your-primary), [Gunnar Morling's mastering-postgres-replication-slots blog](https://www.morling.dev/blog/mastering-postgres-replication-slots/), and [PostgreSQL official docs](https://www.postgresql.org/docs/current/runtime-config-replication.html). Introduced in PG13 beta3, represents bytes-until-auto-invalidation.
+1. **Canonical maintenance ordering**: Confirmed via [iceberg.apache.org/docs/latest/maintenance/](https://iceberg.apache.org/docs/latest/maintenance/), [IOMETE Iceberg Maintenance Runbook](https://iomete.com/resources/blog/iceberg-maintenance-runbook), [Dremio "Maintaining Iceberg Tables"](https://www.dremio.com/blog/maintaining-iceberg-tables-compaction-expiring-snapshots-and-more/), [Alex Merced Iceberg Masterclass](https://iceberglakehouse.com/posts/2026-04-29-iceberg-masterclass-10/). All four agree on order: **rewrite_data_files (compact) → expire_snapshots → remove_orphan_files → rewrite_manifests**. The reason compact runs first is so that newly written large files are referenced by the latest snapshot and old small files become unreferenced, then expire_snapshots makes the old data files orphan-eligible, then remove_orphan_files actually frees disk, then rewrite_manifests optimizes the now-reduced manifest set. The answer's inline text matches this; the answer's numbered list contradicts this.
 
-2. **`max_slot_wal_keep_size` is a real parameter**: Confirmed via [postgresqlco.nf](https://postgresqlco.nf/doc/en/param/max_slot_wal_keep_size/) and [pgPedia](https://pgpedia.info/m/max_slot_wal_keep_size.html). Added in PG13. Default `-1` = unlimited (the dangerous default). Setting it to a finite value lets Postgres invalidate the slot before disk fills — the responder's safety-valve framing is exactly right.
+2. **`rewrite_position_delete_files` exists and is the targeted answer**: Confirmed via [iceberg.apache.org/docs/latest/spark-procedures/](https://iceberg.apache.org/docs/latest/spark-procedures/). The procedure has two purposes per Iceberg docs: (a) **Minor Compaction** — "compact small position delete files into larger ones, which reduces the size of metadata stored in manifest files and overhead of opening small delete files"; (b) **Remove Dangling Deletes** — "filter out position delete records that refer to data files that are no longer live". Trino does not yet support this procedure natively per [trinodb/trino issue #16574 (Support data and delete file thresholds for OPTIMIZE)](https://github.com/trinodb/trino/issues/16574) and [trinodb/trino #27371 (🧊 Iceberg Roadmap)](https://github.com/trinodb/trino/issues/27371) — must be run from Spark in the production stack.
 
-3. **`wal_status` four states (reserved/extended/unreserved/lost)**: Confirmed via [pgDash WAL article](https://pgdash.io/blog/taming-postgresql-wal-file-growth.html) and [PostgreSQL docs](https://www.postgresql.org/docs/current/runtime-config-replication.html). "lost" is terminal — no recovery, slot must be dropped and recreated. The responder's state ladder matches exactly.
+3. **Trino `remove_orphan_files` syntax + no dry_run**: Confirmed via [Trino 481 Iceberg connector docs](https://trino.io/docs/current/connector/iceberg.html) — syntax is `ALTER TABLE ... EXECUTE remove_orphan_files(retention_threshold => '7d')` and the procedure does NOT accept a `dry_run` parameter. Confirmed via [Trino PR #10810](https://github.com/trinodb/trino/pull/10810) (original implementation by homar) which establishes the `ALTER TABLE EXECUTE` form. The Spark CALL form `CALL iceberg.system.remove_orphan_files(...)` shown in the answer is Spark syntax (Iceberg Spark Procedures docs).
 
-4. **`snapshot.mode: never` after slot loss**: Confirmed via [Debezium PostgreSQL connector docs](https://debezium.io/documentation/reference/stable/connectors/postgresql.html) and [Aiven node-replacement guide](https://aiven.io/docs/products/kafka/kafka-connect/howto/debezium-source-connector-pg-node-replacement). Importantly, Debezium docs explicitly warn that with `snapshot.mode=never` after slot loss, **events between the old slot position and current WAL position are silently skipped** — leading to silent data loss. The responder correctly acknowledged this by appending "run a targeted `MERGE INTO` from Postgres to Iceberg to backfill the gap period" — this is the right mitigation. If the answer had said `snapshot.mode: never` without the backfill, it would have been a partial-truth that exposes the engineer to silent loss.
+4. **Trino 7-day floor on expire_snapshots / remove_orphan_files**: Confirmed via [Trino 481 docs](https://trino.io/docs/current/connector/iceberg.html) — `iceberg.expire-snapshots.min-retention` and `iceberg.remove-orphan-files.min-retention` both default to 7d. Error message verified: "Retention specified (1.00d) is shorter than the minimum retention configured in the system (7.00d)". The answer's 7-day floor warning and Spark workaround for sub-7-day GDPR purges are correct.
 
-5. **`heartbeat.interval.ms` is a real Debezium config**: Confirmed via Debezium docs. Correctly used here for idle-table scenarios where the slot would otherwise not advance and false-alert.
+5. **`optimize_manifests` Trino availability**: `ALTER TABLE ... EXECUTE optimize_manifests` was added in Trino 470 (per Trino release notes); production stack at Trino 467 cannot run this from Trino — must use Spark `CALL iceberg.system.rewrite_manifests(table => '...')`. The answer presents `rewrite_manifests` with Spark CALL syntax but in a Trino-flavored code block alongside Trino `ALTER TABLE EXECUTE` syntax — engineer cannot tell which engine to run each from.
 
-## What worked exceptionally well
+## Root cause analysis
 
-- **Empathy in framing**: "I don't really know what any of that means" was the engineer's lead, and the answer opens with a concrete bookmark-in-WAL analogy rather than jumping straight to SQL. Beginner respect.
-- **Risk-first urgency calibration**: The "this is the #1 way a CDC pipeline can take your production Postgres database offline" framing correctly conveys urgency without alarmism.
-- **Three recovery options matched to symptoms**: The engineer doesn't have to read all three — they match their `wal_status` value to Option 2 vs Option 3. This is exactly how a runbook should be structured.
-- **Safety-valve framing of `max_slot_wal_keep_size`**: The line "keeps the app alive even if the pipeline dies" captures the production tradeoff perfectly — better to lose the pipeline (recoverable) than the source database (catastrophic).
-- **Gap-loss nuance handled**: Many answers would stop at `snapshot.mode: never`. This answer goes further and adds the MERGE INTO backfill, which is the correct mitigation for the silent-data-loss risk Debezium docs warn about.
-- **Heartbeat configuration with the WHY**: Heartbeats are introduced not as a cargo-cult config but with the rationale "keeps the slot advancing even on quiet tables so you don't get false alerts" — engineer learns the mechanism, not just the magic config.
+This is a **multi-error answer with one underlying cause**: the responder appears to be drawing from a resource section that mixes Spark and Trino procedure syntax without clearly labeling which engine each form belongs to. Symptoms:
+- `expire_snapshots`: Trino ALTER TABLE EXECUTE form — correct
+- `remove_orphan_files`: Spark CALL form with `dry_run` — wrong for Trino
+- `optimize`: Trino ALTER TABLE EXECUTE form — correct
+- `rewrite_manifests`: Spark CALL form — wrong for Trino (and not available in Trino 467 anyway)
 
-## Minor nits (not blocking, did not affect score)
+The teacher fix should be a clearly-labeled engine-context matrix:
 
-1. The diagnostic SQL hardcodes `slot_name = 'debezium_slot'` — could mention that the engineer should substitute their actual slot name (Debezium config `slot.name`). Most engineers will infer this, but a beginner-empathy answer could call it out.
-2. The fresh-slot creation uses `pg_create_logical_replication_slot` — could also mention that Debezium 2.x can create the slot automatically on first start if it doesn't exist, so manual creation is optional in some setups. Not a deduction since manual creation is also a valid recovery path.
-3. No mention of the `pg_stat_replication` view (active streaming connections) as a complementary monitoring target — `pg_replication_slots` answers "what's the slot state" while `pg_stat_replication` answers "is anything actually consuming". Out of scope for this question's framing.
+| Procedure | Trino 467 syntax | Spark Iceberg 1.5.2 syntax | Notes |
+|---|---|---|---|
+| Compact data files | `ALTER TABLE ... EXECUTE optimize(file_size_threshold => '128MB')` | `CALL system.rewrite_data_files(table => '...')` | Both engines available |
+| Expire snapshots | `ALTER TABLE ... EXECUTE expire_snapshots(retention_threshold => '30d')` (≥7d floor) | `CALL system.expire_snapshots(table => '...', older_than => ...)` | Spark for sub-7d GDPR |
+| Remove orphan files | `ALTER TABLE ... EXECUTE remove_orphan_files(retention_threshold => '7d')` (no dry_run) | `CALL system.remove_orphan_files(table => '...', dry_run => true)` | Spark for dry-run preview |
+| Rewrite manifests | NOT AVAILABLE in Trino 467 (added in Trino 470 as `optimize_manifests`) | `CALL system.rewrite_manifests(table => '...')` | Spark-only on production stack |
+| Compact position deletes | NOT AVAILABLE in Trino (roadmap) | `CALL system.rewrite_position_delete_files(table => '...')` | Spark-only — directly addresses delete-files-piling-up |
 
-## No resource gaps identified
+The teacher should also fix the ordering contradiction in `resources/13-iceberg-table-maintenance.md` (or wherever the four-step sequence lives): the numbered ordering MUST be `compact → expire → orphan → manifests`, matching the inline justification.
 
-The answer's mental model (slot-as-bookmark, four-step disaster sequence, three recovery branches, monitoring + heartbeats permanent fix) appears to come from `resources/13-postgres-to-iceberg-ingestion.md`. Cite is accurate. Resources/13 continues its 7-iteration strong-PASS streak on Postgres-to-Iceberg ingestion sub-topics. No teacher action needed.
+## What worked
 
-## Recommendation for iter351 onward
+- Sticky-notes-on-a-ledger analogy is genuinely excellent for beginners.
+- 4-step Trino read-overhead breakdown (read data file → load delete file → cross-reference → filter) is accurate and clear.
+- 7-day floor caveat with Spark GDPR workaround is correct and production-relevant.
+- "Don't skip weekly expire_snapshots after compaction" warning correctly explains why compaction alone doesn't free storage.
+- `expire_snapshots(retention_threshold => '30d')` and `optimize(file_size_threshold => '128MB')` syntax is correct Trino.
 
-- Postgres-to-Iceberg ingestion topic is durably strong (avg 4.524 / 131 questions, 7 consecutive strong PASSes covering MERGE_CARDINALITY_VIOLATION, lag-buffer P99, schema evolution ADD/RENAME/TYPE/DROP, JSONB, and now replication-slot WAL accumulation). Recommend rotating away from this topic for the next 2-3 iterations and probing under-tested sub-topics:
-  - Iceberg maintenance: 36 questions only — probe `rewrite_position_delete_files` for V2 tables with high delete-row count, or the `expire_snapshots` window for time-travel customers.
-  - SQL query best practices: probe the `EXPLAIN ANALYZE` distinct-from-`EXPLAIN` distinction for runtime vs plan-time stats.
-  - Multi-tenant analytics: per iter350 Q1 recommendation, probe a DIFFERENT selector regex angle (suffix `*_prod`, source selector, contains pattern) to confirm the iter350 fix generalizes beyond the prefix scenario.
+## Recommended teacher action
 
-## Iter 350 final summary
+1. **Fix the ordering contradiction in `resources/13-iceberg-table-maintenance.md`**: ensure the numbered list and the inline justification BOTH say compact → expire → orphan → manifests. The current resource appears to have them in different orders.
+
+2. **Add `rewrite_position_delete_files` as a first-class procedure** in the maintenance section, explicitly labeled "Spark-only — Trino roadmap item not yet shipped". This is the most targeted procedure for the delete-files-piling-up problem the question describes; omitting it is the largest completeness gap.
+
+3. **Add an engine-context matrix** (Trino 467 vs Spark Iceberg 1.5.2) for the five procedures showing syntax differences, dry_run availability differences, and version-availability gotchas (`optimize_manifests` needs Trino 470+, `rewrite_position_delete_files` Spark-only).
+
+4. **Clean up the Spark/Trino syntax mixing** in the four-step example block — the resource appears to have Spark CALL syntax in code blocks meant to look like Trino runbooks. Engineer copying these into Trino 467 hits syntax errors immediately.
+
+## Resource gaps identified
+
+- `resources/13-iceberg-table-maintenance.md` (or the equivalent file): ordering contradiction in the canonical four-step sequence; needs single source of truth on order.
+- Missing dedicated section on `rewrite_position_delete_files` for V2 MOR tables with delete file pileup — exactly the question's framing.
+- Missing Trino 467 vs Trino 470 version gap callout for `optimize_manifests` — production stack relevant.
+- Missing explicit Spark CALL vs Trino ALTER TABLE EXECUTE syntax matrix.
+
+## Iter 351 final summary
 
 | Question | Topic | Score | Result |
 |---|---|---|---|
-| Q1 | Multi-tenant analytics — Trino selector regex (etl prefix, 3rd probe) | 5.00 | **PERFECT PASS** |
-| Q2 | Postgres-to-Iceberg ingestion — Debezium replication slot WAL accumulation, detection, recovery | 5.00 | **PERFECT PASS** |
-| **Iteration avg** | | **5.00** | **PERFECT PASS** |
+| Q1 | Multi-tenant analytics — Trino selector regex (source field, -prod suffix, 4th probe) | 5.00 | PERFECT PASS |
+| Q2 | Iceberg maintenance — delete file pileup, what they are, what to run periodically | 3.00 | **FAIL** |
+| **Iteration avg** | | **4.00** | **MIXED** |
 
 Topic average updates:
-- Multi-tenant analytics: 4.440/141 → **4.443/142 questions** (PASSED — recovering upward after iter348+iter349 FAILs)
-- Postgres-to-Iceberg ingestion: 4.520/130 → **4.524/131 questions** (PASSED — 7th consecutive strong PASS)
+- Multi-tenant analytics: 4.443/142 → **4.447/143 questions** (PASSED — selector regex fix generalized across user/source × prefix/suffix)
+- Iceberg table maintenance: 4.603/36 → **4.560/37 questions** (still PASSED, but first significant FAIL after a long strong-PASS streak — exposes ordering contradiction, missing `rewrite_position_delete_files`, Spark/Trino syntax confusion, Trino 467 version-fit gap on `rewrite_manifests`)
 
-This is the strongest iteration result in the recent window. Both topics tested produced perfect 5.00 scores, and the iter350 surgical resource fix in resources/05 (matches() full-string CRITICAL FACT box) appears to have broken the iter348→iter349 substring/find() bug pattern on the selector regex sub-topic. No teacher action needed for iter351 unless a re-probe of a DIFFERENT selector-regex angle reveals the fix doesn't generalize.
+This iteration is a strong reminder that "topic PASSED" status can mask sub-topic gaps. Iceberg maintenance has 36 prior questions averaging 4.603 — but the V2 delete-files-piling-up sub-angle was apparently not covered with the depth needed. Iter352 should probe this sub-topic again (or an adjacent one — `rewrite_position_delete_files` for V2 tables, `optimize_manifests` Trino version gap, dry_run engine asymmetry) AFTER the teacher addresses the four resource gaps above.
 
 ---
 
-## Iter 350 End-of-Iteration Summary
+## Iter 351 End-of-Iteration Summary
 
 **Date**: 2026-05-29
 **Phase**: extended
-**Iteration result**: **5.00 / 5.00 — PERFECT PASS**
+**Iteration verdict**: 4.00 average — marginal PASS (Q1 PERFECT, Q2 FAIL)
 
 ### Scores table
 
-| Question | Topic | Technical | Beginner clarity | Practical | Completeness | Avg | Result |
-|---|---|---|---|---|---|---|---|
-| Q1 | Multi-tenant analytics — Trino selector regex (etl prefix, 3rd probe after iter348+iter349 FAILs) | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** | PERFECT PASS |
-| Q2 | Postgres-to-Iceberg ingestion — Debezium replication slot WAL accumulation, detection, recovery | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** | PERFECT PASS |
-| **Iteration** | | **5.0** | **5.0** | **5.0** | **5.0** | **5.00** | **PERFECT PASS** |
+| Question | Topic | Sub-angle | Score | Result |
+|---|---|---|---|---|
+| Q1 | Multi-tenant analytics | Trino resource group selector regex — source field, `-prod` suffix (4th probe of find()/matches() bug) | 5.00 | PERFECT PASS |
+| Q2 | Iceberg table maintenance | V2 MOR delete-file pileup — what delete files are, why they slow Trino, what to run periodically | 3.00 | FAIL |
+| **Iteration average** | | | **4.00** | **MIXED (marginal PASS)** |
 
-### What broke the iter348/iter349 substring-bug pattern
+### Q1 win — selector regex fix confirmed structurally durable
 
-For two consecutive iterations (348 → 2.875, 349 → 3.25), the responder kept producing the same wrong substring/find() explanation for Trino selector regex behavior, even after the teacher patched both resources/05 (iter348) and resources/22 (iter349). The corrected matches() text was present in the resources but BURIED — labeled with hedging headers like "CAUTION" and "Two production footguns", and the actual fix (`prefix.*`) appeared mid-paragraph after long explanations. The responder kept reproducing the older, cached substring framing instead of the buried correct one.
+The iter350 surgical fix to `resources/05` lines 2253-2445 (CRITICAL FACT box moved to FIRST position with svc_billing character-count math + "STOP" directive, declarative FULL-STRING MATCH RULE labeling, fix-before-explanation ordering, inline matches() reminder) has now passed its **structural-durability test** across the full surface area:
 
-The iter350 surgical fix applied four structural changes that finally broke the pattern (all to resources/05 lines 2253-2445):
+| Surface variant | Iteration | Result |
+|---|---|---|
+| user field, prefix `svc_` | iter348 | FAIL |
+| user field, prefix `svc_` (re-probe) | iter349 | FAIL |
+| user field, prefix `etl` | iter350 | PASS |
+| **source field, suffix `-prod`** (4th probe — different FIELD and different DIRECTION) | **iter351** | **PERFECT PASS** |
 
-1. **CRITICAL FACT box at the TOP of selector content (line 2255)** — the FIRST thing the responder sees when it enters the selector section. Includes a Right-vs-Wrong table with `.*` fixes for `svc_`/`data_`/etc., a character-count walkthrough of `svc_billing`, and an explicit imperative: "if you ever think svc_ is a substring of svc_billing — STOP".
-2. **Declarative framing replacing hedged framing** — "CAUTION" and "footgun" downgraded to "FULL-STRING MATCH RULE" and "if you think this is a substring — STOP". Declarative facts override cached partial-truths better than warnings do.
-3. **Fix-first ordering** — the corrected pattern (`prefix.*`) now appears BEFORE the explanation of why bare `prefix` fails. Even a responder that skims content sees the right answer first.
-4. **Reinforcement at the field-name-warning paragraph** — added an inline matches() reminder next to the "is a regex too" phrasing, so the rule is repeated at a second touchpoint.
+The fix generalizes across both the user/source field axis and the prefix/suffix direction axis. The find()/matches() substring bug is structurally resolved. No further selector-regex probes needed for the next several iterations — rotate away.
 
-The result: Q1 produced a textbook-correct answer with zero substring contamination, citing resources/05 lines 2257-2441 and reproducing the corrected content faithfully. The 3-iteration regression on this sub-topic appears resolved — but on only ONE probe phrasing (etl prefix), so the fix needs cross-angle verification before being considered durably stable.
+### Q2 root cause — three intertwined failures pointing to one resource defect
 
-### Suggested focus for iter 351
+Q2 failed at 3.00/5.00 (technical 2.5, clarity 4.5, applicability 2.5, completeness 2.5). Root cause is a **multi-error answer with one underlying resource defect**: the responder drew from a section that mixes Spark `CALL` and Trino `ALTER TABLE EXECUTE` syntax without engine labels, AND contains an internal ordering contradiction.
 
-**Primary: re-probe selector regex from a DIFFERENT angle** to confirm the fix generalizes beyond the prefix scenario. Avoid the user-prefix-with-trailing-underscore phrasing (already covered 4 times). Candidate angles:
-- **Suffix pattern**: "I have `"user": "_prod"` and I want it to match `analyst_prod` and `etl_prod`. Why doesn't it work?"
-- **Contains pattern**: "I want to match any username with `payment` in it — what's the right regex?"
-- **Source selector**: "Does `"source": "tableau"` match a query where the source is `tableau-server-01`?"
-- **userGroup selector with multi-group user**: re-probe the iter347 angle to ensure that still holds.
+1. **Ordering contradiction inside the same answer** — numbered list says `expire → orphan → compact → manifests` while the inline paragraph says `compact → expire → orphan → manifests` (the latter is the canonical Iceberg order per iceberg.apache.org, IOMETE runbook, Dremio docs). Engineer cannot tell which to follow.
 
-A passing answer at a different angle = the fix is structural, not just memorized for one phrasing. A failing answer at a different angle = the CRITICAL FACT box approach works only when the question surface matches the box's worked example, and the teacher needs to generalize the fix across more sub-patterns.
+2. **`rewrite_position_delete_files` missing entirely** — the question's literal framing is "delete files are piling up", and Iceberg's dedicated minor-compaction-for-delete-files procedure should be the centerpiece. It is not mentioned at all. This is the largest completeness gap.
 
-**Secondary: probe under-tested topics** to broaden coverage and avoid over-rotating on the recently-failed topic.
-- **Iceberg maintenance** (only 36 questions): `rewrite_position_delete_files` for V2 tables with high delete-row count, OR the `expire_snapshots` window for time-travel customers.
-- **SQL query best practices**: probe `EXPLAIN ANALYZE` vs `EXPLAIN` distinction (runtime vs plan-time stats), OR probe a join-reordering / broadcast-vs-partitioned join scenario.
-- **Cost optimization**: probe storage-class tiering for Iceberg snapshots, OR S3 request cost reduction via metadata caching.
+3. **Spark/Trino syntax confusion** — `remove_orphan_files` shown in Spark `CALL` form with unsupported `dry_run` parameter (Trino uses `ALTER TABLE EXECUTE` and does not accept `dry_run`); `rewrite_manifests` shown in Spark CALL form but presented as runnable from Trino (it is NOT available in Trino 467 — added in Trino 470 as `optimize_manifests`; production stack must run this via Spark). Engineer copy-pasting these into Trino 467 hits immediate syntax errors.
 
-Rotating away from Postgres-to-Iceberg ingestion is recommended — that topic is on a 7-iteration strong-PASS streak (4.524 / 131 questions) and additional probes there won't expose weaknesses. The marginal information gain is higher from probing the not-yet-verified selector-regex generalization AND from probing topics with thinner coverage.
+### Suggested focus for iter 352
+
+**Teacher MUST fix resources/17 (Iceberg table maintenance) before the next iter352 probe.** Required edits:
+
+1. **Single source of truth on ordering** — both numbered list and inline justification must say `rewrite_data_files (compact) → expire_snapshots → remove_orphan_files → rewrite_manifests`. Remove the contradictory ordering.
+
+2. **Add `rewrite_position_delete_files` as a first-class procedure** — explicitly labeled Spark-only (Trino roadmap not yet shipped), with both purposes documented (minor compaction of small delete files + removal of dangling deletes after rewrite_data_files).
+
+3. **Engine-context matrix** — Trino 467 vs Spark Iceberg 1.5.2 syntax for all five procedures (compact, expire, orphan, manifests, position-delete-compaction), with dry_run availability differences and the Trino 467 → Trino 470 version gap on `optimize_manifests` explicitly called out.
+
+4. **Clean up Spark/Trino syntax mixing in code examples** — every code block must be labeled with the engine it runs in. No Spark CALL syntax in Trino-flavored runbook blocks.
+
+After teacher fixes land, iter352 should re-probe this sub-topic (delete-file pileup, OR `rewrite_position_delete_files` directly, OR `optimize_manifests` Trino version gap, OR dry_run engine asymmetry) to verify the resource fix took.
+
+### Topic score state at iter 351 end
+
+- Multi-tenant analytics: **4.447/143 questions** — PASSED, selector regex durable
+- Iceberg table maintenance: **4.560/37 questions** — still PASSED, but first significant FAIL after long strong-PASS streak; sub-topic gap exposed
+- All other topics: unchanged from iter 350 end
+
+### Phase / state
+
+- Phase remains `extended`
+- `final_iterations_remaining` remains 0
+- `passed` remains true (overall rubric still passing despite this iteration's marginal result)
+- Iteration counter advances to 352

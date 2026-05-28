@@ -10,8 +10,15 @@
 
 1. Iceberg never modifies files in place — every write creates new files, every delete creates marker files, every operation creates a new snapshot.
 2. Without maintenance, your table accumulates thousands of tiny files plus old snapshots holding onto data files forever — query speed drops 5–10x and storage grows ~30% per year.
-3. Run **four** procedures: `rewrite_data_files` (nightly), `expire_snapshots` (weekly), `remove_orphan_files` (weekly), `rewrite_manifests` (weekly).
-4. **Run them in this order:** compaction → expire snapshots → remove orphan files → rewrite manifests. **Why (this is an OPERATIONAL EFFICIENCY ordering, NOT a safety ordering — Iceberg's atomic commit semantics guarantee `expire_snapshots` will NEVER delete files referenced by any live snapshot, regardless of which order you run things):** (a) compaction creates a NEW snapshot that points at merged big files and leaves the OLD small files referenced only by older snapshots — running compaction first means the same maintenance window's `expire_snapshots` can immediately clean up those now-superseded older snapshots and reclaim the small-file storage in ONE cycle. If you expire first then compact, you'd have to wait for *next* week's expiry to clean up the small files compaction just orphaned, costing you an extra week of storage; (b) `expire_snapshots` before `remove_orphan_files` for the same efficiency reason — expiry frees more files for orphan cleanup in the same window; (c) `rewrite_manifests` last, so it compacts the manifest set that already reflects the cleaned table. There is no data-loss risk in reversing any of these orderings — only an extra-cycle cost for full cleanup.
+3. Run **four core** procedures: `rewrite_data_files` (nightly), `expire_snapshots` (weekly), `remove_orphan_files` (weekly), `rewrite_manifests` (weekly). On MoR tables with accumulating position deletes, add a **fifth** procedure: `rewrite_position_delete_files` (Spark only — Trino 467 does NOT support it; see [trinodb/trino #27371](https://github.com/trinodb/trino/issues/27371)).
+4. **Run them in this CANONICAL ORDER (the order matches iceberg.apache.org/docs/latest/spark-procedures/):**
+   - **Step 1: `rewrite_data_files` (compact FIRST)** — merges small files, applies pending deletes, produces the new "clean" data layer that every subsequent step operates against.
+   - **Step 1b (MoR only): `rewrite_position_delete_files`** — if the table has accumulating position delete files (`content = 1` in `$files`), compact them as part of the same window. Spark only.
+   - **Step 2: `expire_snapshots`** — drops the now-superseded older snapshots that compaction left behind, and physically deletes the small data files those snapshots exclusively referenced.
+   - **Step 3: `remove_orphan_files`** — sweeps any unreferenced files left by failed writes (a different class of garbage from Step 2).
+   - **Step 4: `rewrite_manifests`** — consolidates the manifest metadata that now reflects the cleaned data layer.
+
+   **Why this order (operational efficiency, NOT data safety — Iceberg's atomic commit semantics guarantee `expire_snapshots` will NEVER delete files referenced by any live snapshot, regardless of which order you run things):** (a) compaction creates a NEW snapshot that points at merged big files and leaves the OLD small files referenced only by older snapshots — running compaction FIRST means the same maintenance window's `expire_snapshots` can immediately clean up those now-superseded older snapshots and reclaim the small-file storage in ONE cycle. If you expire first then compact, you'd have to wait for *next* week's expiry to clean up the small files compaction just orphaned, costing you an extra week of storage; (b) `expire_snapshots` before `remove_orphan_files` for the same efficiency reason — expiry frees more files for orphan cleanup in the same window; (c) `rewrite_manifests` last, so it compacts the manifest set that already reflects the cleaned table. There is no data-loss risk in reversing any of these orderings — only an extra-cycle cost for full cleanup.
 5. If a bad ingestion job ever runs, `CALL iceberg.system.rollback_to_snapshot` instantly reverts the table without touching data files — the safest cleanup tool you have.
 
 ---
@@ -151,6 +158,7 @@ WHERE tenant_id = 'acme';
 | Operation | Spark SQL (named args via `=>`) | Trino 467 (positional / `ALTER TABLE ... EXECUTE`) |
 |---|---|---|
 | Compact data files | `CALL iceberg.system.rewrite_data_files(table => 'analytics.events', options => map('target-file-size-bytes', '268435456'))` | `ALTER TABLE iceberg.analytics.events EXECUTE optimize(file_size_threshold => '128MB')` |
+| Compact position delete files (MoR only) | `CALL iceberg.system.rewrite_position_delete_files(table => 'analytics.events', options => map('target-file-size-bytes', '67108864'))` | **NOT supported in Trino 467** ([trinodb/trino #27371](https://github.com/trinodb/trino/issues/27371)). Run from Spark. |
 | Expire snapshots | `CALL iceberg.system.expire_snapshots(table => 'analytics.events', older_than => current_timestamp - interval '30' day, retain_last => 10)` | `ALTER TABLE iceberg.analytics.events EXECUTE expire_snapshots(retention_threshold => '30d')` — **Trino 467 supports ONLY `retention_threshold`.** `retain_last` and `clean_expired_metadata` were added in Trino 479 (Dec 2025) and do NOT exist on Trino 467. For retain_last on this stack, use the Spark form. |
 | Remove orphan files | `CALL iceberg.system.remove_orphan_files(table => 'analytics.events', older_than => current_timestamp - interval '3' day, dry_run => true)` (run with `dry_run => true` first to preview; re-run without it to delete) | `ALTER TABLE iceberg.analytics.events EXECUTE remove_orphan_files(retention_threshold => '7d')` — **NO `dry_run` parameter in Trino**; preview from Spark. Trino enforces a 7-day minimum-retention floor; values shorter than `'7d'` are rejected. |
 | Rewrite manifests | `CALL iceberg.system.rewrite_manifests(table => 'analytics.events')` | Not available on Trino 467 — use Spark `CALL iceberg.system.rewrite_manifests(table => 'analytics.events')`. Available as `ALTER TABLE iceberg.analytics.events EXECUTE optimize_manifests` on Trino 470+ (Feb 2025). |
@@ -181,15 +189,24 @@ WHERE tenant_id = 'acme';
 - `drop_tag` — Spark only, via DDL: `ALTER TABLE ... DROP TAG \`tag_name\``.
 - `drop_branch` — Spark only, via DDL: `ALTER TABLE ... DROP BRANCH \`branch_name\``.
 - `fast_forward` — Spark only (branch fast-forward operation).
-- `publish_changes`, `cherrypick_snapshot`, `set_current_snapshot` (procedure form), `rewrite_position_delete_files`, `migrate`, `snapshot` (the table-snapshot form for migration) — all Spark-only.
+- `rewrite_position_delete_files` — **Spark only**. This is the Iceberg procedure for compacting position delete files on MoR tables ([Iceberg Spark procedures docs](https://iceberg.apache.org/docs/latest/spark-procedures/#rewrite_position_delete_files)). Trino 467 does NOT support it ([trinodb/trino #27371](https://github.com/trinodb/trino/issues/27371)). On MoR tables, this is THE procedure for cleaning up position delete file accumulation — `rewrite_data_files` applies position deletes only for the partitions it rewrites, so position delete files in untouched partitions linger until you run `rewrite_position_delete_files` from Spark. There is no `ALTER TABLE ... EXECUTE` form in any Trino version.
+- `publish_changes`, `cherrypick_snapshot`, `set_current_snapshot` (procedure form), `migrate`, `snapshot` (the table-snapshot form for migration) — all Spark-only.
 
 **Why this matters in practice:** if a Trino client returns `Procedure not registered: iceberg.system.<name>` or `function 'iceberg.system.<name>' not found`, the procedure is one of the Spark-only ones above. Switch to Spark (`spark-sql` or `spark-submit`) — do not try to "fix" the call by adjusting argument syntax. The procedure simply does not exist in Trino's catalog.
 
 ---
 
-## The four maintenance operations
+## The four maintenance operations (plus one for MoR tables)
 
-Run them in **this order of importance**. If you only have time to set up one, start with `rewrite_data_files`.
+**These are presented in the CANONICAL EXECUTION ORDER per [iceberg.apache.org/docs/latest/spark-procedures/](https://iceberg.apache.org/docs/latest/spark-procedures/):**
+
+1. `rewrite_data_files` (compact) — **runs FIRST**: merges small files, applies pending deletes.
+2. `rewrite_position_delete_files` (MoR tables only — runs after compact when position deletes are accumulating). **Spark only — Trino 467 does NOT support this procedure** ([trinodb/trino #27371](https://github.com/trinodb/trino/issues/27371)).
+3. `expire_snapshots` — drops superseded snapshots and the data files they exclusively referenced.
+4. `remove_orphan_files` — sweeps files left by failed writes (different garbage class from step 3).
+5. `rewrite_manifests` — consolidates manifest metadata last.
+
+If you only have time to set up one, start with `rewrite_data_files` (it has the biggest single impact on query speed).
 
 > **Engine matters — read this before copying any command:**
 > - **The procedures themselves are NOT Spark-only.** `rewrite_data_files`, `expire_snapshots`, `remove_orphan_files`, and `rewrite_manifests` are Iceberg-level operations supported by both engines. Only the SQL surface differs.
@@ -367,6 +384,68 @@ CALL iceberg.system.rewrite_data_files(
 | Scheduled nightly per-tenant fairness compaction (loop over tenant IDs, compact each one independently with size/min-files tuning) | **Spark `rewrite_data_files` with `where`**. Full option control, fits the Airflow / k8s CronJob model. |
 | Per-tenant compaction immediately after partition evolution that added `tenant_id` as a new partition column | **Spark `rewrite_data_files` with `where`** (Trino can't use the newly-added partition column as a predicate — see limitation above). |
 | Mixed batch — compact every tenant, but with different file-size targets per tenant tier (Enterprise tenants → 512 MB files, free-tier → 128 MB) | **Spark `rewrite_data_files` with `where`** — loop over tenants in a scheduler, vary `target-file-size-bytes` per tenant. |
+
+### 1b. `rewrite_position_delete_files` — MoR tables only, Spark only, runs AFTER compact and BEFORE expire_snapshots
+
+> **When does this apply?** Only if your table is using **Merge-on-Read (MoR)** for DELETE / UPDATE / MERGE — i.e., someone explicitly set `write.delete.mode = 'merge-on-read'` (and/or `write.update.mode`, `write.merge.mode`). The Iceberg 1.5.2 default is CoW, which does NOT produce position delete files. If you don't know which mode your table uses, run `SHOW TBLPROPERTIES iceberg.analytics.events` from Spark — absence of `write.delete.mode` means CoW and you can skip this step entirely.
+
+**What it does:** Iceberg MoR tables produce **position delete files** (small Iceberg metadata files listing "in data file X, ignore rows at positions [3, 7, 42, ...]"). Over time, a busy MoR table accumulates hundreds or thousands of these tiny position delete files. Every read query must consult them to filter rows out — and like data files, lots of small position delete files cause planning slowdown. The `rewrite_position_delete_files` procedure compacts many small position delete files into fewer larger ones, mirroring what `rewrite_data_files` does for data files.
+
+**Why it's a separate step from `rewrite_data_files`:** `rewrite_data_files` will, as part of compacting data, *apply* position deletes (merge the surviving rows into new files and discard the position delete files for that partition) — but only for the data files it actually rewrites. Position delete files for partitions that aren't being recompacted are left alone. On tables where the data layer is stable but the delete layer keeps growing (e.g., a slowly-changing dim table that gets occasional row deletes via CDC), `rewrite_position_delete_files` is the procedure that actually targets the delete-file layer directly.
+
+> **ENGINE CALLOUT — `rewrite_position_delete_files` is Spark-only.** Trino 467 does **NOT** support this procedure. There is no `ALTER TABLE ... EXECUTE rewrite_position_delete_files` form, and no `CALL iceberg.system.rewrite_position_delete_files(...)` form either — attempting either returns `Procedure not registered`. The procedure has been requested for Trino but is not implemented as of this writing ([trinodb/trino #27371](https://github.com/trinodb/trino/issues/27371)). **On the production stack (Trino 467 + Spark + Iceberg 1.5.2), you MUST run this procedure from Spark.** Submit via `spark-sql`, `spark-submit`, or `spark.sql("...")` in a Spark job.
+
+```sql
+-- Spark SQL ONLY — no Trino 467 equivalent exists.
+-- Run after rewrite_data_files in the same maintenance window.
+CALL iceberg.system.rewrite_position_delete_files(
+  table   => 'analytics.events',
+  options => map(
+    'target-file-size-bytes', '67108864',   -- 64 MB target for delete files (smaller than data files)
+    'min-input-files',        '5',          -- only compact partitions with 5+ small delete files
+    'rewrite-all',            'false'       -- set true to force a full rewrite regardless of file size
+  )
+);
+```
+
+**Options:**
+- `target-file-size-bytes` — target size for compacted position delete files. 64 MB is a common default; position delete files are typically much smaller than data files because each row delete is only ~16 bytes of metadata.
+- `min-input-files` — minimum number of small delete files in a partition before compaction kicks in. Same protection-against-wasted-work pattern as `rewrite_data_files`.
+- `rewrite-all` — force every delete file in scope to be rewritten regardless of size. Useful when migrating between delete-file format versions or as part of an MoR-to-CoW conversion.
+
+**Diagnostic: count position delete files before deciding to run.** Query the `$files` metadata table from either Trino or Spark:
+
+```sql
+-- Trino 467 OR Spark — count position delete files (content = 1) vs data files (content = 0).
+-- equality delete files (content = 2) are also delete files, but typical Iceberg
+-- writers produce position deletes; equality deletes are rarer.
+SELECT
+  content,                                  -- 0 = data, 1 = position delete, 2 = equality delete
+  COUNT(*)            AS file_count,
+  SUM(file_size_in_bytes) / 1024 / 1024 AS total_mb,
+  AVG(file_size_in_bytes) / 1024       AS avg_kb
+FROM iceberg.analytics."events$files"
+GROUP BY content
+ORDER BY content;
+```
+
+**Thresholds (rule of thumb):**
+- < 50 position delete files total → healthy; no action needed.
+- 50–500 → monitor; consider running monthly if query latency is degrading.
+- 500+ → run `rewrite_position_delete_files` weekly alongside `rewrite_data_files`.
+
+**Scheduling:** when applicable, run **immediately after `rewrite_data_files`** in the same Spark job, BEFORE `expire_snapshots`. The canonical sequence on an MoR table becomes:
+
+```
+weekly maintenance window (MoR table):
+   1. rewrite_data_files        (Spark CALL or Trino EXECUTE optimize)
+   2. rewrite_position_delete_files  (SPARK ONLY)
+   3. expire_snapshots          (Spark CALL or Trino EXECUTE)
+   4. remove_orphan_files       (Spark CALL or Trino EXECUTE)
+   5. rewrite_manifests         (SPARK ONLY on Trino 467; Trino 470+ has EXECUTE optimize_manifests)
+```
+
+For CoW tables (the Iceberg 1.5.2 default), skip step 2 — there are no position delete files to compact.
 
 ### 2. `expire_snapshots` — run weekly
 
@@ -637,19 +716,31 @@ SELECT COUNT(*) AS manifest_count FROM iceberg.analytics."events$manifests";
 
 ## Safe scheduling order — get this right or risk data loss
 
-The four operations have **mandatory ordering** for the weekly job. Running them out of order can delete files that are still in use.
+The maintenance operations have a **canonical execution order** matching the order documented at [iceberg.apache.org/docs/latest/spark-procedures/](https://iceberg.apache.org/docs/latest/spark-procedures/). Running them out of order doesn't cause data loss (Iceberg's atomic commits guarantee that), but it wastes maintenance cycles and can leave storage temporarily inflated.
 
-**Correct order:**
+**Canonical execution order — apply ALL steps in a SINGLE weekly window:**
 
 ```
-compaction (nightly)
-    │
-    ▼
-weekly maintenance window:
-    1. expire_snapshots
-    2. remove_orphan_files
-    3. rewrite_manifests
+Step 1: rewrite_data_files          (compact FIRST — merges small files, applies pending deletes)
+   │
+   ▼
+Step 1b: rewrite_position_delete_files   (MoR tables only — Spark ONLY; Trino 467 does NOT support)
+   │
+   ▼
+Step 2: expire_snapshots            (drops old snapshots + deletes their exclusively-referenced data files)
+   │
+   ▼
+Step 3: remove_orphan_files         (sweeps unreferenced files from failed writes)
+   │
+   ▼
+Step 4: rewrite_manifests           (consolidates manifest metadata LAST; Spark ONLY on Trino 467)
 ```
+
+**Common scheduling pattern:**
+- Step 1 (`rewrite_data_files`) runs **nightly** at ~4 AM after the 2 AM ingestion window.
+- Steps 1b–4 run **weekly** on Sunday 3 AM when ingestion is paused. (Step 1 is also re-run as part of the weekly job, since the canonical sequence starts with compact.)
+
+**Important:** for CoW tables (the Iceberg 1.5.2 default), Step 1b is N/A — skip it entirely. Only MoR tables (where someone explicitly set `write.delete.mode = 'merge-on-read'`) produce the position delete files that Step 1b targets.
 
 ### Why this order matters
 
@@ -728,17 +819,51 @@ CALL iceberg.system.rewrite_data_files(
 
 -- ============================================================
 -- WEEKLY (runs Sunday 3 AM, when ingestion is paused)
--- IMPORTANT: run in this exact order.
+-- IMPORTANT: run in this CANONICAL ORDER (matches iceberg.apache.org/docs/latest/spark-procedures/):
+--   Step 1: rewrite_data_files (compact FIRST — applies pending deletes, merges small files)
+--   Step 1b (MoR ONLY): rewrite_position_delete_files (Spark only; Trino 467 does NOT support)
+--   Step 2: expire_snapshots (drops superseded snapshots, deletes their data files)
+--   Step 3: remove_orphan_files (sweeps unreferenced files from failed writes)
+--   Step 4: rewrite_manifests (consolidates manifest metadata LAST)
 -- ============================================================
 
--- 1. Expire old snapshots first (frees data files from old snapshot refs)
+-- Step 1: COMPACT FIRST — even though the nightly job already ran compact,
+-- re-running it at the start of the weekly window ensures the data layer is
+-- clean before expire_snapshots / remove_orphan_files run. This is the
+-- canonical ordering per the Iceberg docs.
+CALL iceberg.system.rewrite_data_files(
+  table   => 'analytics.events',
+  options => map(
+    'target-file-size-bytes', '268435456',  -- 256 MB
+    'min-input-files',        '5'
+  )
+);
+
+-- Step 1b: MoR TABLES ONLY — compact accumulating position delete files.
+-- SKIP THIS STEP entirely if the table uses CoW (the Iceberg 1.5.2 default).
+-- This procedure is Spark ONLY — Trino 467 does NOT support it (trinodb/trino #27371).
+-- Check with: SELECT content, COUNT(*) FROM iceberg.analytics."events$files" GROUP BY content;
+-- If content=1 (position deletes) row count is 50+, enable this step.
+CALL iceberg.system.rewrite_position_delete_files(
+  table   => 'analytics.events',
+  options => map(
+    'target-file-size-bytes', '67108864',   -- 64 MB target
+    'min-input-files',        '5'
+  )
+);
+
+-- Step 2: Expire old snapshots (frees data files from old snapshot refs and
+-- physically deletes the data files those snapshots exclusively referenced).
 CALL iceberg.system.expire_snapshots(
   table       => 'analytics.events',
   older_than  => current_timestamp - interval '30' day,
   retain_last => 10
 );
+-- Trino 467 equivalent:
+--   ALTER TABLE iceberg.analytics.events EXECUTE expire_snapshots(retention_threshold => '30d');
 
--- 2. Remove orphan files (now-unreferenced files can be safely deleted).
+-- Step 3: Remove orphan files (sweeps files from failed writes — a different
+-- class of garbage from Step 2).
 -- For scheduled jobs, prefer running a Spark dry_run first (in the same
 -- spark-submit; capture output to logs) so a human review of the affected
 -- files is possible before the actual delete commits — orphan deletion is
@@ -755,11 +880,13 @@ CALL iceberg.system.remove_orphan_files(
   older_than => current_timestamp - interval '3' day
 );
 
--- Trino 467 equivalent (no dry_run support in Trino):
+-- Trino 467 equivalent (NO dry_run support in Trino — dry_run is Spark-only):
 --   ALTER TABLE iceberg.analytics.events
 --   EXECUTE remove_orphan_files(retention_threshold => '7d');
 
--- 3. Compact manifest files (speeds up query planning)
+-- Step 4: Compact manifest files LAST (speeds up query planning by
+-- consolidating the manifest set that now reflects the cleaned data layer).
+-- SPARK ONLY on Trino 467 — Trino's `EXECUTE optimize_manifests` requires 470+.
 CALL iceberg.system.rewrite_manifests(
   table => 'analytics.events'
 );
@@ -1306,4 +1433,23 @@ If you only have budget for one improvement, **make the RDBMS HA first** — tha
 
 ## Summary
 
-The unmaintained Iceberg table is the most common operational failure mode on this stack. Set up the four procedures, get the order right (compaction nightly; weekly: expire → orphan → manifests), and the table stays healthy indefinitely. If anything goes wrong with a write, reach for `rollback_to_snapshot` before you touch any data. Build these into your scheduler on day one — retrofitting later is harder than doing it correctly upfront.
+The unmaintained Iceberg table is the most common operational failure mode on this stack. Set up the procedures, get the canonical order right (per iceberg.apache.org/docs/latest/spark-procedures/):
+
+1. **`rewrite_data_files`** (compact FIRST — applies pending deletes, merges small files)
+2. **`rewrite_position_delete_files`** (MoR tables only — Spark ONLY, Trino 467 does NOT support)
+3. **`expire_snapshots`** (drops superseded snapshots and physically deletes their data files)
+4. **`remove_orphan_files`** (sweeps unreferenced files from failed writes)
+5. **`rewrite_manifests`** (consolidates manifest metadata LAST — Spark ONLY on Trino 467)
+
+Common schedule: `rewrite_data_files` nightly; the rest in a single weekly maintenance window. If anything goes wrong with a write, reach for `rollback_to_snapshot` before you touch any data. Build these into your scheduler on day one — retrofitting later is harder than doing it correctly upfront.
+
+**Trino-vs-Spark syntax quick reference (Trino 467):**
+
+| Procedure | Trino 467 | Spark |
+|---|---|---|
+| `rewrite_data_files` | `ALTER TABLE ... EXECUTE optimize` | `CALL iceberg.system.rewrite_data_files(...)` |
+| `rewrite_position_delete_files` | **NOT supported** ([#27371](https://github.com/trinodb/trino/issues/27371)) | `CALL iceberg.system.rewrite_position_delete_files(...)` |
+| `expire_snapshots` | `ALTER TABLE ... EXECUTE expire_snapshots(retention_threshold => '30d')` (no `retain_last` on 467; that's 479+) | `CALL iceberg.system.expire_snapshots(...)` |
+| `remove_orphan_files` | `ALTER TABLE ... EXECUTE remove_orphan_files(retention_threshold => '7d')` (NO `dry_run`; 7d min-retention floor) | `CALL iceberg.system.remove_orphan_files(... dry_run => true)` (Spark supports `dry_run`) |
+| `rewrite_manifests` | **NOT supported** on 467; `EXECUTE optimize_manifests` is 470+ | `CALL iceberg.system.rewrite_manifests(...)` |
+| `rollback_to_snapshot` | `CALL iceberg.system.rollback_to_snapshot('schema','table',id)` (positional) | `CALL iceberg.system.rollback_to_snapshot(table => ..., snapshot_id => ...)` (named) |
