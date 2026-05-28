@@ -1,201 +1,184 @@
-# Judge Feedback — Iter 349 Q1
+# Judge Feedback — Iter 350 Q1
 
-**Date**: 2026-05-28
+**Date**: 2026-05-29
 **Phase**: extended
-**Topic**: Multi-tenant analytics — Trino resource group selector regex semantics (svc_ prefix re-probe of iter348 failure)
-**Result**: **FAIL** (3.25 / 5.00)
+**Topic**: Multi-tenant analytics — Trino resource group selector regex semantics (etl prefix re-probe, THIRD probe after iter348+iter349 FAILs)
 
----
+## Question
+
+I'm setting up Trino resource groups with user selectors. Why does `"user": "etl"` fail to match `etl_nightly`, `etl_hourly`, `etl_backfill` even though "etl" is right there at the start of the string?
 
 ## Scores
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 2.0 | Central explanation of regex matching is factually wrong. Answer says "your pattern `svc_` does technically match `svc_billing` as a substring" — this is false. Trino uses `Matcher.matches()` (full-string), verified against Trino source (StaticSelector) and official docs. `svc_` (no metacharacters) matches ONLY the literal 4-character string `svc_`. The fix (`svc_.*`) is correct, but the diagnosis sends the user down the wrong path. |
-| Beginner clarity | 4.0 | Structure is clean: problem statement, fix, breakdown of `.*`, ordering rule. Easy to read, well-formatted. Loses 1.0 only because the false "substring match" claim plants a wrong mental model that the engineer will carry forward to other selectors. |
-| Practical applicability | 3.5 | The recommended JSON snippet (`"user": "svc_.*"`) will work, so the engineer can ship a fix. But the answer's two "actual issue" theories — (a) "you're hitting a different selector first" and (b) "you have a typo" — actively misdirect debugging. The engineer might reorder selectors thinking THAT was the problem, when in reality the missing `.*` was the issue. Also missed: production stack uses JWT auth, so the `user` field equals the JWT subject claim — worth noting. |
-| Completeness | 3.5 | Covers fix and ordering. Misses (a) the actual mechanism (matches() vs find() / full-string vs substring), (b) verification recipe (`SELECT user, resource_group_id FROM system.runtime.queries`), (c) JWT-to-username mapping on this production stack. |
-| **Average** | **3.25** | **FAIL** (< 4.0) |
+| Technical accuracy | 5.0 | Trino source code uses `userMatcher.matches()` (Java `Matcher.matches()` — full-string). Verified via WebSearch against `StaticSelector.java` in `plugin/trino-resource-group-managers/`. The responder's explanation is correct on every claim: full-string match, `etl` only matches the literal 3-char string, the 8-char suffix `_nightly` is unconsumed, `etl.*` is the correct fix, `^...$` anchors are redundant under matches(). Zero technical errors. |
+| Beginner clarity | 5.0 | The character-count walkthrough ("etl matches the first 3 characters, but then there are 8 leftover characters") is exactly the kind of concrete demonstration a beginner needs. Comparison table reinforces with three parallel patterns (etl.*, svc_.*, .*-prod). Diagnostic rule ("if your regex has no metacharacters, treat as literal exact-string match") is memorable. No unexplained jargon — even matches() vs find() is contextualized. |
+| Practical applicability | 5.0 | Engineer knows exactly what to change: `"user": "etl.*"`. Engineer knows what NOT to bother with: explicit `^...$` anchors. Engineer has a transferable diagnostic rule for future selector authoring. Resource citation provided (resources/05 lines 2257-2441). |
+| Completeness | 5.0 | Covers: fix, why the bug occurs, parallel examples for suffix and contains patterns, diagnostic rule, and the bonus "don't add anchors" point. Nothing missing for the question asked. |
+| **Average** | **5.00** | **PERFECT PASS** |
+
+## Verification trail
+
+Judge WebSearch confirmed:
+1. Trino source `plugin/trino-resource-group-managers/src/main/java/io/trino/plugin/resourcegroups/StaticSelector.java` uses `userMatcher.matches()` and `userGroupRegexValue.matcher(userGroup).matches()` — both are `Matcher.matches()` (full-string), not `find()` (substring).
+2. Trino docs at trino.io/docs/current/admin/resource-groups.html confirm Java regex via `java.util.regex` package; the matches() vs find() detail is in source code, which confirms matches().
+3. PR #3023 (MiguelWeezardo) — original userGroup regex selector implementation, confirms matches().
+4. PR #27129 (gertjanal) — recent queryText regex addition, confirms same matches() pattern.
+
+## Pattern analysis: iter348 → iter349 → iter350
+
+This is the THIRD consecutive iteration probing the same selector-regex sub-topic:
+- **Iter 348 Q1 (2.875 — FAIL)**: Responder claimed substring/find() match. Resource bug in resources/05 — find() claim was the source.
+- **Iter 349 Q1 (3.25 — FAIL)**: Despite teacher fixing resources/05 in iter348 and resources/22 in iter349, responder reproduced the same substring claim ("`svc_` does technically match `svc_billing` as a substring"). Inferred cause: responder pulling cached/older training of the explanation rather than corrected resources.
+- **Iter 350 Q1 (5.00 — PASS)**: After the teacher's iter350 surgical edit (CRITICAL FACT box as the FIRST thing in selector content with explicit "STOP if you think svc_ is a substring of svc_billing" directive, plus FULL-STRING MATCH RULE header restructure), the responder finally produced a correct answer with NO substring contamination.
+
+The iter350 fix held under one probe phrasing (etl prefix). To confirm the fix is permanent and not just lucky retrieval, I recommend at least one more re-probe with a different surface scenario (e.g., suffix-only pattern `*_prod`, or a contains-pattern question) before considering this sub-topic permanently stable.
+
+## What worked in the iter350 resource fix
+
+Three structural changes appear to have unstuck the cached-bad-explanation pattern:
+1. **Position**: CRITICAL FACT box moved to be the FIRST thing the responder sees in the selector content (line 2255), before any other discussion.
+2. **Declarative framing**: hedging language ("CAUTION", "footgun") downgraded to declarative facts ("FULL-STRING MATCH RULE", "if you think this is a substring — STOP").
+3. **Fix-first ordering**: the corrected pattern (`prefix.*`) appears BEFORE the explanation of why bare `prefix` fails, so even a responder that skims content sees the right answer first.
+
+## No resource gaps identified
+
+The answer cites resources/05 lines 2257-2441 correctly and reproduces the corrected content faithfully. No additional teacher work needed for this question.
+
+## Recommendation for iter351
+
+Probe a DIFFERENT selector regex angle to verify the fix generalizes:
+- Suffix-only pattern: "I have `"user": "_prod"` and I want it to match `analyst_prod` and `etl_prod`"
+- Contains pattern: "I want to match any username with `payment` in it — what's the right regex?"
+- Source selector regex: "Does `"source": "tableau"` match a query where the source is `tableau-server-01`?"
+- userGroup selector with multi-group user: re-probe iter347 angle to make sure that still holds
+
+Avoid probing the user-prefix-with-trailing-underscore scenario again — that pattern has now been answered correctly, and a fourth-time probe of the SAME scenario doesn't add confidence about whether the fix generalizes.
+
+## Iter 350 summary (after Q1)
+
+**Q1: 5.00 — PERFECT PASS** ✓
+
+Topic average update: Multi-tenant analytics 4.440/141 → **4.443/142 questions** (PASSED — recovering upward; matches() full-string semantics finally explained correctly after two prior iterations of failure on the same sub-topic).
 
 ---
 
-## Critical issue: this is the iter348 bug, repeated
+# Judge Feedback — Iter 350 Q2
 
-The iter348 Q1 failure was: responder said Trino selectors use `Matcher.find()` (substring match) when they actually use `Matcher.matches()` (full-string). Teacher fixed resources/05 in iter348 and resources/22 in iter349. Yet **this answer says the same wrong thing**:
-
-> "The default regex matching in Java (like most languages) looks for a substring match"
-> "your pattern `svc_` does technically match `svc_billing` as a substring"
-
-This is the bug. Trino's StaticSelector calls `userMatcher.matches()`, which requires the WHOLE input string to match. So:
-- `"user": "svc_"` only matches the literal username `svc_` (4 chars exactly). It will NOT match `svc_billing`.
-- `"user": "svc_.*"` matches `svc_` followed by any suffix — `svc_billing`, `svc_etl`, etc. all match.
-
-The correct diagnosis for the engineer's question:
-> Your selector `"user": "svc_"` doesn't fire on `svc_billing` because Trino does FULL-STRING regex matching (Java's `Matcher.matches()`, not `Matcher.find()`). The regex `svc_` only matches the exact 4-character string `svc_`. To match anything STARTING with `svc_`, you need `"user": "svc_.*"` — the `.*` is required, not optional polish.
-
-The responder's answer gives the right fix (`svc_.*`) but the wrong reason. An engineer reading this will conclude:
-1. "Java regex always does substring matching" — wrong general lesson
-2. "My problem was probably selector ordering" — wrong specific diagnosis
-3. "Adding `.*` is one way to be more explicit" — wrong urgency level (it's the only way)
-
----
-
-## What the teacher should investigate
-
-The fact that the responder produced this answer when resources/05 and resources/22 BOTH now correctly explain matches() / full-string suggests one of:
-
-1. **Resource retrieval gap**: The responder isn't pulling from the corrected sections. The answer cites `resources/05-multi-tenant-analytics.md` lines 2255–2314 — verify those lines actually contain the matches() / full-string explanation. The quoted snippet in the answer says "interpreted as a Java regex" but does NOT mention matches() or full-string — that section may need stronger inline anchoring of the matches() semantic right at the cite point.
-
-2. **Conflicting signals in resources**: If ANY part of resources/ still says "substring" or "find()" or "Java regex matches anywhere in the string", the responder may be reading from that section. Re-scan all of resources/ for any phrasing like:
-   - "substring"
-   - "matches anywhere"
-   - "matches the substring"
-   - "doesn't need to match the entire"
-   - "find()"
-   - "looks for a substring"
-
-3. **Buried correction**: The corrected explanation may be in resources/05 and resources/22 but not in the section the responder retrieves for "selector regex" / "user prefix" queries. The matches() / full-string explanation should be in a top-of-section CRITICAL CALLOUT or a dedicated "common mistake" callout immediately adjacent to ANY selector JSON example.
-
-### Recommended teacher action for iter350
-
-Add to `resources/05-multi-tenant-analytics.md` a **prominent CRITICAL section** at the very TOP of the resource-groups selector discussion, before any JSON example:
-
-> ### CRITICAL: Trino uses FULL-STRING regex match (matches()), not substring (find())
->
-> Most engineers expect `"user": "svc_"` to match `svc_billing` because in Java's `Pattern.matcher().find()`, `svc_` would match anywhere in the string. Trino does NOT use find(). Trino's StaticSelector calls `Matcher.matches()`, which requires the **entire** username to match the pattern.
->
-> - `"user": "svc_"` matches ONLY the literal username `svc_`. It does NOT match `svc_billing`, `svc_etl`, etc.
-> - `"user": "svc_.*"` matches `svc_billing`, `svc_etl`, `svc_reporting`, and also bare `svc_`.
-> - `"user": "svc_.+"` matches `svc_billing` etc. but NOT bare `svc_` (requires at least one suffix char).
->
-> The `.*` (or `.+`) at the end is **mandatory** for prefix matching — it is not optional polish.
-
-Place this callout at the TOP of any subsection that includes a JSON selector example with a `"user"` field. The substring confusion is the single most common Trino selector mistake; responders need to encounter the matches() truth before they encounter any example.
-
----
-
-## Sources used for verification
-
-- [Trino Resource Groups docs (480)](https://trino.io/docs/current/admin/resource-groups.html) — confirms `"user"` is a Java regex.
-- [PR #3023 — Adding regexp to match each user group](https://github.com/trinodb/trino/pull/3023) — references `userGroupRegexValue.matcher(userGroup).matches()`.
-- [PR #27129 — queryText regex pattern](https://github.com/trinodb/trino/pull/27129) — confirms `matches()` is the match method used by selectors.
-- WebSearch results explicitly stated: "the user field uses `userMatcher.matches()` which is the Java Matcher.matches() method for full-string matching."
-
----
-
-# Judge Feedback — Iter 349 Q2
-
-**Date**: 2026-05-28
+**Date**: 2026-05-29
 **Phase**: extended
-**Topic**: Postgres-to-Iceberg ingestion — Debezium handling of Postgres JSONB column, what type it lands as in Iceberg, and how to query it from Trino
-**Result**: **PASS** (4.875 / 5.00)
+**Topic**: Postgres-to-Iceberg ingestion — Debezium replication slot falling behind, WAL accumulation risk to live Postgres, detection, and recovery without full reset
+**Result**: **PERFECT PASS** (5.00 / 5.00)
 
----
+## Question
+
+I've had a Debezium connector running for a few months, streaming changes from our Postgres production database into an Iceberg table. Everything seemed fine until our DBA pinged me saying the replication slot is "falling behind" and WAL files are piling up on the Postgres primary. I don't really know what any of that means. Can you explain what's actually happening here, what the risk is to our live Postgres database if we don't fix it, and how I would even detect how bad the situation is? And once I understand the problem, what are my options to recover without just blowing everything up and starting the pipeline over from scratch?
 
 ## Scores
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5.0 | Every claim verifies. (1) Debezium emits Postgres JSONB as a JSON STRING via the `io.debezium.data.Json` semantic type — confirmed via Debezium docs + birdiecare/connect-smts deserialization docs (`"Debezium converts it in string"`, `"natively represented in the Kafka event structure as a string value"`). (2) Trino reads it as VARCHAR in Iceberg — confirmed; Parquet JSON logical type is UTF-8 byte_array per parquet.apache.org. (3) `settings->>'theme'` is Postgres-specific and not in Trino's grammar — Trino only has `json_extract`, `json_extract_scalar`, `JSON_VALUE`, `JSON_QUERY`. (4) `JSON_VALUE(... RETURNING varchar NULL ON EMPTY NULL ON ERROR)` is exact SQL/JSON standard syntax supported in Trino 467. (5) File-pruning limitation (no per-key Parquet stats on opaque JSON) is accurate — Trino's planner cannot see inside the string. (6) Spark `get_json_object` is the canonical PySpark API for the flatten pattern. No errors detected. |
-| Beginner clarity | 4.5 | Structure is clean: sectioned by question part ("What Debezium sends" / "The Iceberg type" / "Querying syntax — NO" / "The real limitation" / "The production-grade fix"). Code blocks are annotated with intent comments. Explains "VARCHAR (a string)" inline. Loses 0.5 because the answer is long and an absolute beginner reading top-to-bottom hits the file-pruning analysis before the simple "use json_extract_scalar instead of `->>'`" takeaway is fully cemented. A 2-line TL;DR at top ("Lands as VARCHAR. `->>'` doesn't work — use `json_extract_scalar(settings, '$.theme')`") would have been ideal. |
-| Practical applicability | 5.0 | Engineer knows exactly what to do: (a) the immediate Trino query syntax, (b) why their first instinct (`->>'`) will fail with a parse error, (c) when to upgrade from "store as VARCHAR" to "flatten hot keys", (d) a copy-pasteable PySpark recipe for the flatten pattern, (e) the dual-column model (`theme` + `settings_raw`) with both query paths shown. Mentions Iceberg 1.5.2 and Trino 467 explicitly — fits the production stack from prod_info.md. The 100x speedup figure is realistic for promoted low-cardinality fields. |
-| Completeness | 5.0 | Three-part question fully answered: (1) what type it lands as — VARCHAR/JSON string, (2) Postgres operator support — explicit "NO" with the parse-error reason, (3) how to query it — `json_extract_scalar` + `JSON_VALUE`. Adds high-value bonus content the engineer will hit next: file-pruning limitation and the flatten + raw fallback pattern. No important nuance is missing for the question as asked. |
-| **Average** | **4.875** | **PASS** (> 4.0) |
+| Technical accuracy | 5.0 | Every claim verifies. (1) Replication slot as bookmark in WAL — correct mental model; (2) Postgres retains WAL up to slot's `restart_lsn` when slot inactive/lagging — correct; (3) `pg_replication_slots` columns named — `active`, `wal_status`, `safe_wal_size`, `restart_lsn`, `confirmed_flush_lsn` — all real columns in PG13+; (4) `wal_status` four states reserved/extended/unreserved/lost — all four are documented PG states with "lost" being terminal; (5) `safe_wal_size` semantics ("bytes until Postgres auto-invalidates") — correct; (6) `pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)` for byte-lag math — correct; (7) `max_slot_wal_keep_size = 50GB` as safety valve — real parameter, correct usage (default `-1` = unlimited); (8) `pg_drop_replication_slot()` + `pg_create_logical_replication_slot('debezium_slot', 'pgoutput')` for slot rotation — correct functions, `pgoutput` is the canonical PG logical decoding plugin Debezium uses; (9) `snapshot.mode: never` after slot loss — documented Debezium recovery path; (10) Acknowledges gap-loss risk by including a targeted `MERGE INTO` backfill — this is the correct nuance (Debezium docs explicitly warn about silent data loss in the gap without backfill); (11) `heartbeat.interval.ms=30000` Debezium config — real, correct purpose. Zero factual errors. |
+| Beginner clarity | 5.0 | Opens with a concrete analogy ("bookmark in the WAL") and explains WAL in plain English. The 4-step disaster sequence (slot falls behind → WAL retained → disk fills → Postgres goes read-only) is numbered and visceral. "Read the results like this" walkthrough decodes each diagnostic column with plain-English thresholds (`>50GB=breathe, 10-50GB=fix today, <10GB=page on-call now`). Three recovery options are labeled by symptom so the engineer can self-route. No unexplained jargon — WAL, replication slot, LSN, snapshot mode all introduced with context. Even `restart_lsn` vs `confirmed_flush_lsn` is implicitly explained via the "bytes behind restart" vs "bytes behind consumer" aliases. |
+| Practical applicability | 5.0 | Engineer can execute end-to-end: (a) diagnostic SQL is copy-paste ready, (b) thresholds are quantitative (50/10 GB), (c) `max_slot_wal_keep_size = 50GB` config line is ready for `postgresql.conf`, (d) slot recovery SQL is two precise commands with correct decoding plugin (`pgoutput`), (e) Debezium restart with `snapshot.mode: never` + MERGE INTO backfill for the gap-loss case, (f) permanent fix specifies alerting frequency (every 30s) and exact paging thresholds, (g) heartbeat setup includes both the heartbeat table creation and `heartbeat.interval.ms=30000` config. Production-stack-fit: Debezium → Kafka → Spark → Iceberg fits prod_info.md ingestion stack. The 500MB/min WAL estimate is an honest rough-order-of-magnitude figure with no overclaiming. |
+| Completeness | 5.0 | The 4-part question is fully answered in order: (1) what's happening — slot-as-bookmark + WAL retention mechanics; (2) the risk — disk-fill → DB read-only/crash sequence with explicit "#1 way CDC takes prod DB offline" framing; (3) detection — diagnostic SQL with column-by-column reading guide; (4) recovery options without reset — three discrete scenarios matched to symptoms with runbook each; plus the permanent fix (monitoring + heartbeats). The gap-backfill nuance for the slot-loss path is included — answer doesn't pretend `snapshot.mode: never` is lossless. Nothing important is missing for this question. |
+| **Average** | **5.00** | **PERFECT PASS** |
 
----
+## Verification trail (WebSearch)
 
-## What worked
+1. **`safe_wal_size` is a real column**: Confirmed via [EDB blog "PostgreSQL 13: Don't let slots kill your primary"](https://www.enterprisedb.com/blog/postgresql-13-dont-let-slots-kill-your-primary), [Gunnar Morling's mastering-postgres-replication-slots blog](https://www.morling.dev/blog/mastering-postgres-replication-slots/), and [PostgreSQL official docs](https://www.postgresql.org/docs/current/runtime-config-replication.html). Introduced in PG13 beta3, represents bytes-until-auto-invalidation.
 
-- Direct answer to the operator syntax question — "NO, that won't work" with the actual workaround on the same line.
-- The file-pruning callout is the key insight beyond the literal question and addresses the engineer's likely next problem.
-- Production-grade fix is a runbook, not a sketch: typed promoted columns + raw VARCHAR fallback, with both query paths shown.
-- Cite to `resources/13-postgres-to-iceberg-ingestion.md` ~line 3092 is accurate — the cited section actually contains the JSONB problem discussion plus the `io.debezium.data.Json` semantic-type callout.
-- The answer correctly distinguishes `json_extract_scalar` (silent NULL on missing/malformed) from `JSON_VALUE` with `RETURNING ... ON EMPTY ... ON ERROR` (explicit handling) — this is the right nuance for a SaaS engineer who needs to decide between fast-and-forgiving vs. strict-with-error-control.
+2. **`max_slot_wal_keep_size` is a real parameter**: Confirmed via [postgresqlco.nf](https://postgresqlco.nf/doc/en/param/max_slot_wal_keep_size/) and [pgPedia](https://pgpedia.info/m/max_slot_wal_keep_size.html). Added in PG13. Default `-1` = unlimited (the dangerous default). Setting it to a finite value lets Postgres invalidate the slot before disk fills — the responder's safety-valve framing is exactly right.
 
----
+3. **`wal_status` four states (reserved/extended/unreserved/lost)**: Confirmed via [pgDash WAL article](https://pgdash.io/blog/taming-postgresql-wal-file-growth.html) and [PostgreSQL docs](https://www.postgresql.org/docs/current/runtime-config-replication.html). "lost" is terminal — no recovery, slot must be dropped and recreated. The responder's state ladder matches exactly.
 
-## Minor improvement suggestions (not blocking)
+4. **`snapshot.mode: never` after slot loss**: Confirmed via [Debezium PostgreSQL connector docs](https://debezium.io/documentation/reference/stable/connectors/postgresql.html) and [Aiven node-replacement guide](https://aiven.io/docs/products/kafka/kafka-connect/howto/debezium-source-connector-pg-node-replacement). Importantly, Debezium docs explicitly warn that with `snapshot.mode=never` after slot loss, **events between the old slot position and current WAL position are silently skipped** — leading to silent data loss. The responder correctly acknowledged this by appending "run a targeted `MERGE INTO` from Postgres to Iceberg to backfill the gap period" — this is the right mitigation. If the answer had said `snapshot.mode: never` without the backfill, it would have been a partial-truth that exposes the engineer to silent loss.
 
-1. **Lead with a 2-line summary.** Even for an answer this strong, an absolute-beginner reader benefits from "Lands as VARCHAR. Use `json_extract_scalar(settings, '$.theme')` instead of `settings->>'theme'`. Read on for the file-pruning gotcha." at the very top. Then the structured sections.
+5. **`heartbeat.interval.ms` is a real Debezium config**: Confirmed via Debezium docs. Correctly used here for idle-table scenarios where the slot would otherwise not advance and false-alert.
 
-2. **Could mention the `MAP<VARCHAR,VARCHAR>` alternative** for the specific "arbitrary key-value pairs that vary per customer" phrasing in the question — resources/13 line 3245–3257 has a decision table that explicitly covers "truly dynamic per-tenant settings" as a MAP candidate vs. flatten-hot-keys. The answer chose flatten + raw VARCHAR (which is the right default), but the question's framing ("vary per customer") hints at the MAP scenario. Not a deduction since the chosen recommendation is correct; just a completeness note.
+## What worked exceptionally well
 
-3. **No mention of the new-key-arrival behavior** (i.e., what happens when a new `settings` key appears post-ingest). Resources/13 line 3234–3243 covers this thoroughly — engineer might ask this next.
+- **Empathy in framing**: "I don't really know what any of that means" was the engineer's lead, and the answer opens with a concrete bookmark-in-WAL analogy rather than jumping straight to SQL. Beginner respect.
+- **Risk-first urgency calibration**: The "this is the #1 way a CDC pipeline can take your production Postgres database offline" framing correctly conveys urgency without alarmism.
+- **Three recovery options matched to symptoms**: The engineer doesn't have to read all three — they match their `wal_status` value to Option 2 vs Option 3. This is exactly how a runbook should be structured.
+- **Safety-valve framing of `max_slot_wal_keep_size`**: The line "keeps the app alive even if the pipeline dies" captures the production tradeoff perfectly — better to lose the pipeline (recoverable) than the source database (catastrophic).
+- **Gap-loss nuance handled**: Many answers would stop at `snapshot.mode: never`. This answer goes further and adds the MERGE INTO backfill, which is the correct mitigation for the silent-data-loss risk Debezium docs warn about.
+- **Heartbeat configuration with the WHY**: Heartbeats are introduced not as a cargo-cult config but with the rationale "keeps the slot advancing even on quiet tables so you don't get false alerts" — engineer learns the mechanism, not just the magic config.
 
----
+## Minor nits (not blocking, did not affect score)
 
-## Sources used for verification
+1. The diagnostic SQL hardcodes `slot_name = 'debezium_slot'` — could mention that the engineer should substitute their actual slot name (Debezium config `slot.name`). Most engineers will infer this, but a beginner-empathy answer could call it out.
+2. The fresh-slot creation uses `pg_create_logical_replication_slot` — could also mention that Debezium 2.x can create the slot automatically on first start if it doesn't exist, so manual creation is optional in some setups. Not a deduction since manual creation is also a valid recovery path.
+3. No mention of the `pg_stat_replication` view (active streaming connections) as a complementary monitoring target — `pg_replication_slots` answers "what's the slot state" while `pg_stat_replication` answers "is anything actually consuming". Out of scope for this question's framing.
 
-- [Debezium Event Deserialization docs](https://debezium.io/documentation/reference/stable/integrations/serdes.html) — confirms `io.debezium.data.Json` semantic type
-- [birdiecare/connect-smts Debezium JSON deserialization](https://github.com/birdiecare/connect-smts/blob/master/doc/debezium-json-deserialization.md) — explicit "Debezium converts it in string"
-- [Trino JSON functions (official docs)](https://trino.io/docs/current/functions/json.html) — confirms `json_extract_scalar`, `JSON_VALUE` syntax; no `->>'` operator
-- [Parquet logical types](https://parquet.apache.org/docs/file-format/types/logicaltypes/) — JSON annotation is UTF-8 BYTE_ARRAY (opaque string)
-- [Iceberg spec](https://iceberg.apache.org/spec/) — VARIANT type only in v3, not 1.5; JSON stored as string in 1.5.2
+## No resource gaps identified
 
----
+The answer's mental model (slot-as-bookmark, four-step disaster sequence, three recovery branches, monitoring + heartbeats permanent fix) appears to come from `resources/13-postgres-to-iceberg-ingestion.md`. Cite is accurate. Resources/13 continues its 7-iteration strong-PASS streak on Postgres-to-Iceberg ingestion sub-topics. No teacher action needed.
 
-## Iter 349 End-of-Iteration Summary
+## Recommendation for iter351 onward
 
-**Iteration result**: **4.0625 / 5.00 — marginal PASS** (barely above the 4.0 floor; Q1 FAIL dragged what would have been a strong iteration down to the threshold)
+- Postgres-to-Iceberg ingestion topic is durably strong (avg 4.524 / 131 questions, 7 consecutive strong PASSes covering MERGE_CARDINALITY_VIOLATION, lag-buffer P99, schema evolution ADD/RENAME/TYPE/DROP, JSONB, and now replication-slot WAL accumulation). Recommend rotating away from this topic for the next 2-3 iterations and probing under-tested sub-topics:
+  - Iceberg maintenance: 36 questions only — probe `rewrite_position_delete_files` for V2 tables with high delete-row count, or the `expire_snapshots` window for time-travel customers.
+  - SQL query best practices: probe the `EXPLAIN ANALYZE` distinct-from-`EXPLAIN` distinction for runtime vs plan-time stats.
+  - Multi-tenant analytics: per iter350 Q1 recommendation, probe a DIFFERENT selector regex angle (suffix `*_prod`, source selector, contains pattern) to confirm the iter350 fix generalizes beyond the prefix scenario.
 
-### Iteration scores
+## Iter 350 final summary
 
 | Question | Topic | Score | Result |
 |---|---|---|---|
-| Q1 | Multi-tenant analytics — Trino selector regex (svc_ prefix re-probe of iter348) | 3.25 | **FAIL** |
-| Q2 | Postgres-to-Iceberg ingestion — Debezium JSONB → Iceberg VARCHAR, Trino querying | 4.875 | **PASS** |
-| **Iteration avg** | | **4.0625** | **PASS** |
+| Q1 | Multi-tenant analytics — Trino selector regex (etl prefix, 3rd probe) | 5.00 | **PERFECT PASS** |
+| Q2 | Postgres-to-Iceberg ingestion — Debezium replication slot WAL accumulation, detection, recovery | 5.00 | **PERFECT PASS** |
+| **Iteration avg** | | **5.00** | **PERFECT PASS** |
 
-### Root cause analysis — Q1 failure (the bug persists across iter348 + iter349 fixes)
+Topic average updates:
+- Multi-tenant analytics: 4.440/141 → **4.443/142 questions** (PASSED — recovering upward after iter348+iter349 FAILs)
+- Postgres-to-Iceberg ingestion: 4.520/130 → **4.524/131 questions** (PASSED — 7th consecutive strong PASS)
 
-**The bug**: Responder again claimed Trino selectors do substring matching ("`svc_` does technically match `svc_billing` as a substring"). Trino actually uses `Matcher.matches()` (full-string), so `"user": "svc_"` matches ONLY the literal username `svc_` and nothing else.
+This is the strongest iteration result in the recent window. Both topics tested produced perfect 5.00 scores, and the iter350 surgical resource fix in resources/05 (matches() full-string CRITICAL FACT box) appears to have broken the iter348→iter349 substring/find() bug pattern on the selector regex sub-topic. No teacher action needed for iter351 unless a re-probe of a DIFFERENT selector-regex angle reveals the fix doesn't generalize.
 
-**Why teacher's iter348 + iter349 fixes did not penetrate**:
+---
 
-1. **Resource fixes exist but are not at retrieval anchor points.** Teacher fixed resources/05 (iter348) and resources/22 (iter349 — line 5567 "anchored loosely (substring match)" → corrected to matches()/full-string). Both fixes are correct in isolation. But the responder still produced the substring claim, which means the retrieval path for "selector regex" / "user prefix" / "why doesn't my selector fire" pulled context that does NOT contain the matches() correction, OR pulled it alongside another section that still suggests substring semantics.
+## Iter 350 End-of-Iteration Summary
 
-2. **The corrected text is descriptive, not prescriptive.** The responder cited resources/05 lines 2255-2314 — the quoted snippet says "interpreted as a Java regex" but does NOT explicitly contrast matches() vs find(). The corrected matches() callout is elsewhere in resources/05 (lines 2346, 2397, 2402 per state.json notes), not at the section the responder retrieved. The fix is in the file but not on the retrieval path.
+**Date**: 2026-05-29
+**Phase**: extended
+**Iteration result**: **5.00 / 5.00 — PERFECT PASS**
 
-3. **Default Java regex mental model leaks through.** When the responder's own internal model says "Java regex usually means substring (find())", and the resource section retrieved doesn't actively contradict that at the cite point, the responder fills in the gap from its prior. The fix needs to be at EVERY cite anchor where a `"user"` selector example appears — not just in dedicated callout sections.
+### Scores table
 
-4. **The wrong-answer template is more readable than the right-answer template.** The responder's wrong answer is well-structured: problem → "actual issue" theory A → theory B → fix → ordering. That structure is appealing precisely because it gives the engineer multiple paths to investigate. The corrected resource needs to make the matches() truth equally structured and equally near the top of the retrieval target — otherwise the responder will keep generating the readable-but-wrong template.
+| Question | Topic | Technical | Beginner clarity | Practical | Completeness | Avg | Result |
+|---|---|---|---|---|---|---|---|
+| Q1 | Multi-tenant analytics — Trino selector regex (etl prefix, 3rd probe after iter348+iter349 FAILs) | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** | PERFECT PASS |
+| Q2 | Postgres-to-Iceberg ingestion — Debezium replication slot WAL accumulation, detection, recovery | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** | PERFECT PASS |
+| **Iteration** | | **5.0** | **5.0** | **5.0** | **5.0** | **5.00** | **PERFECT PASS** |
 
-**Pattern**: This is the 2nd consecutive FAIL on the same selector regex semantics question across iter348 → iter349. Topic average held at 4.440 only because of the 141-question denominator; the recent-windows score on this sub-topic is markedly worse.
+### What broke the iter348/iter349 substring-bug pattern
 
-### What Q2 did well
+For two consecutive iterations (348 → 2.875, 349 → 3.25), the responder kept producing the same wrong substring/find() explanation for Trino selector regex behavior, even after the teacher patched both resources/05 (iter348) and resources/22 (iter349). The corrected matches() text was present in the resources but BURIED — labeled with hedging headers like "CAUTION" and "Two production footguns", and the actual fix (`prefix.*`) appeared mid-paragraph after long explanations. The responder kept reproducing the older, cached substring framing instead of the buried correct one.
 
-- **Three-part question fully answered in order**: (a) what type JSONB lands as (VARCHAR), (b) Postgres operator support (explicit "NO" with parse-error reason), (c) Trino querying syntax (`json_extract_scalar` + `JSON_VALUE` with `RETURNING ... ON EMPTY NULL ON ERROR`).
-- **Chain-of-custody accuracy**: every link verified (Debezium `io.debezium.data.Json` → Kafka string → Iceberg VARCHAR → Parquet JSON logical type = UTF-8 byte_array → Trino reads as VARCHAR). No factual errors.
-- **Beyond-the-question value-add**: file-pruning limitation explained (no per-key Parquet stats inside opaque JSON string) — this is exactly the next problem the engineer will hit.
-- **Production-grade runbook, not a sketch**: typed promoted columns via Spark `get_json_object` + `settings_raw VARCHAR` fallback, both query paths shown, realistic 100x speedup figure for low-cardinality promoted fields.
-- **Stack-specific**: explicit Iceberg 1.5.2 + Trino 467 versions, matching prod_info.md.
-- **Correct nuance choice**: distinguishes silent-NULL `json_extract_scalar` from strict `JSON_VALUE ... RETURNING ... ON EMPTY ... ON ERROR` — right tradeoff framing for a SaaS engineer.
-- **Accurate cite**: resources/13 line 3092 actually contains the JSONB / Debezium serialization material referenced.
+The iter350 surgical fix applied four structural changes that finally broke the pattern (all to resources/05 lines 2253-2445):
 
-### Suggested focus for iter 350 — teacher needs a different strategy
+1. **CRITICAL FACT box at the TOP of selector content (line 2255)** — the FIRST thing the responder sees when it enters the selector section. Includes a Right-vs-Wrong table with `.*` fixes for `svc_`/`data_`/etc., a character-count walkthrough of `svc_billing`, and an explicit imperative: "if you ever think svc_ is a substring of svc_billing — STOP".
+2. **Declarative framing replacing hedged framing** — "CAUTION" and "footgun" downgraded to "FULL-STRING MATCH RULE" and "if you think this is a substring — STOP". Declarative facts override cached partial-truths better than warnings do.
+3. **Fix-first ordering** — the corrected pattern (`prefix.*`) now appears BEFORE the explanation of why bare `prefix` fails. Even a responder that skims content sees the right answer first.
+4. **Reinforcement at the field-name-warning paragraph** — added an inline matches() reminder next to the "is a regex too" phrasing, so the rule is repeated at a second touchpoint.
 
-The current strategy (fix the section, add callouts) has NOT penetrated to the responder. Two consecutive FAILs on the same sub-topic mean a structural change is needed:
+The result: Q1 produced a textbook-correct answer with zero substring contamination, citing resources/05 lines 2257-2441 and reproducing the corrected content faithfully. The 3-iteration regression on this sub-topic appears resolved — but on only ONE probe phrasing (etl prefix), so the fix needs cross-angle verification before being considered durably stable.
 
-1. **Inline the matches() correction at EVERY `"user"` selector JSON example in resources/05 + resources/22.** Not in a dedicated callout 50 lines away — directly above or below every JSON snippet that contains a `"user": "..."` field. The responder retrieves the JSON example; the matches() truth must travel with it.
+### Suggested focus for iter 351
 
-2. **Add an anti-pattern section that explicitly enumerates the wrong claims.** Format like:
-   > **WRONG** (do NOT write this): "`svc_` matches `svc_billing` as a substring because Java regex does substring matching."
-   > **RIGHT**: Trino uses `Matcher.matches()` which requires the WHOLE username to match. `svc_` (no metachars) matches ONLY the literal 4-char string `svc_`. Use `svc_.*` to match any string starting with `svc_`.
+**Primary: re-probe selector regex from a DIFFERENT angle** to confirm the fix generalizes beyond the prefix scenario. Avoid the user-prefix-with-trailing-underscore phrasing (already covered 4 times). Candidate angles:
+- **Suffix pattern**: "I have `"user": "_prod"` and I want it to match `analyst_prod` and `etl_prod`. Why doesn't it work?"
+- **Contains pattern**: "I want to match any username with `payment` in it — what's the right regex?"
+- **Source selector**: "Does `"source": "tableau"` match a query where the source is `tableau-server-01`?"
+- **userGroup selector with multi-group user**: re-probe the iter347 angle to ensure that still holds.
 
-   Naming the wrong template explicitly may keep the responder from generating it.
+A passing answer at a different angle = the fix is structural, not just memorized for one phrasing. A failing answer at a different angle = the CRITICAL FACT box approach works only when the question surface matches the box's worked example, and the teacher needs to generalize the fix across more sub-patterns.
 
-3. **Audit ALL resources/ files for any phrasing the responder could draw on for substring intuition**: "matches anywhere", "looks for", "contains", "substring", "find()", "partial match", "starts with" (without `.*`). Even in unrelated contexts (e.g., grep examples, Postgres LIKE, JavaScript `.match()`), nearby language about regex matching could leak the wrong mental model.
+**Secondary: probe under-tested topics** to broaden coverage and avoid over-rotating on the recently-failed topic.
+- **Iceberg maintenance** (only 36 questions): `rewrite_position_delete_files` for V2 tables with high delete-row count, OR the `expire_snapshots` window for time-travel customers.
+- **SQL query best practices**: probe `EXPLAIN ANALYZE` vs `EXPLAIN` distinction (runtime vs plan-time stats), OR probe a join-reordering / broadcast-vs-partitioned join scenario.
+- **Cost optimization**: probe storage-class tiering for Iceberg snapshots, OR S3 request cost reduction via metadata caching.
 
-4. **Consider a re-probe-and-pin test on iter 350 Q1**: directly ask the selector regex question again. If the responder STILL produces substring, the issue is not solvable by resource edits alone and we need to escalate to a different mitigation (e.g., a top-of-resources/05 "READ FIRST" header that the responder cannot avoid).
-
-5. **Q2 (JSONB) is stable — no action needed.** Resources/13 lines 3092-3275 are holding up across 6 consecutive strong PASSes. Continue probing other ingestion sub-topics (CDC schema evolution, type widening through CDC, Debezium connector failures, snapshot vs incremental tradeoffs) rather than re-probing JSONB.
-
-### Topic running averages after iter 349
-
-- Multi-tenant analytics: 4.440 / 141 questions (PASSED, but recent windows softening on selector regex)
-- Postgres-to-Iceberg ingestion: 4.520 / 130 questions (PASSED, JSONB sub-topic strong)
-- Iceberg maintenance: 4.603 / 36 questions (PASSED, no iter349 probe)
-- Trino federation: 4.513 / 252 questions (PASSED, no iter349 probe)
-
-All required topics remain above pass threshold. Continue extended phase per training deadline (2026-05-30 12:00 CST).
-
+Rotating away from Postgres-to-Iceberg ingestion is recommended — that topic is on a 7-iteration strong-PASS streak (4.524 / 131 questions) and additional probes there won't expose weaknesses. The marginal information gain is higher from probing the not-yet-verified selector-regex generalization AND from probing topics with thinner coverage.

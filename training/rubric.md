@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.440 | 141 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.443 | 142 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
@@ -40,7 +40,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.520 | 130 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.524 | 131 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.603 | 36 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
@@ -50,6 +50,46 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 350 — 2026-05-29
+
+**Q1** — Multi-tenant analytics: Trino resource group user selector regex semantics (third probe of the same find/matches bug after iter348 + iter349 FAILs). Question: why does `"user": "etl"` fail to match `etl_nightly`, `etl_hourly`, `etl_backfill`? Responder correctly explained: (a) Trino uses Java's `Matcher.matches()` which requires FULL-STRING match (not substring, not `find()`); (b) the regex `etl` only matches the literal 3-char string `etl` — for `etl_nightly` the 8 trailing chars `_nightly` are unconsumed, so matches() returns false; (c) the fix is `"user": "etl.*"` with explicit `.*` to consume the suffix; (d) provided a clear comparison table (etl.*, svc_.*, .*-prod with the wrong-side counterexamples); (e) diagnostic rule "if regex has no metacharacters, treat as literal exact-string match"; (f) bonus correct point that `^...$` anchors are redundant under matches() (`"etl.*"` ≡ `"^etl.*$"`). Cite to `resources/05-multi-tenant-analytics.md` lines 2257-2441. Answer is the OPPOSITE of the iter348+iter349 bug — the teacher's surgical iter350 CRITICAL FACT box + matches() reinforcement landed.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **5.00** |
+
+Judge verified via WebSearch against Trino source: `plugin/trino-resource-group-managers/src/main/java/io/trino/plugin/resourcegroups/StaticSelector.java` uses `userMatcher.matches()` and `userGroupRegexValue.matcher(userGroup).matches()` — confirmed full-string match semantics for user and userGroup selectors (and source by analogy). Trino docs (trino.io/docs/current/admin/resource-groups.html) confirm "selector rules for pattern matching use Java's regular expression capabilities through the java.util.regex package" — leaving the matches() vs find() detail to source code, which confirms matches(). The responder's explanation matches Trino's actual behavior in every detail. Beginner clarity: the character-count walkthrough (`etl` matches 3 chars, `_nightly` has 8 leftover, full-string requires consuming all) is exactly the kind of concrete demonstration a beginner needs; the comparison table reinforces with parallel patterns (svc_, -prod). Practical applicability: engineer knows exactly what to change (`"user": "etl.*"`) and what NOT to bother with (`^...$` anchors). Completeness: covers fix + why + redundant-anchor note + diagnostic rule. Topic running avg: (4.440 × 141 + 5.00) / 142 = (626.040 + 5.00) / 142 = 631.040 / 142 = **4.443 / 142 questions** — PASSED (recovering upward; the third-time-bad selector regex sub-topic FINALLY held under the surgical iter350 resource fix).
+
+**Iter 350 Q1: 5.00 — PERFECT PASS** ✓
+
+This is the validation result the teacher needed: after iter348 and iter349 both produced the same find()/substring bug despite resource fixes, the iter350 CRITICAL FACT box (the FIRST thing the responder sees in the selector content, with explicit "STOP if you think svc_ is a substring of svc_billing" directive) finally produced a correct answer. The pattern of failure (responder pulling cached/older explanation despite corrected resources) appears broken — at least for this question phrasing. One more re-probe with different surface-level wording (different prefix, different scenario) would be ideal before declaring the fix permanent.
+
+**Q2** — Postgres-to-Iceberg ingestion: Debezium PG replication slot falling behind, WAL accumulation risk, detection, and recovery without full reset. Responder correctly explained: (a) replication slot as a bookmark in WAL, why Postgres retains WAL when slot is stuck, (b) full disaster sequence — slot stuck → WAL piles up → disk fills → Postgres goes read-only / crashes (this is the #1 way CDC kills the source DB), (c) diagnostic SQL on `pg_replication_slots` with all the right columns: `active`, `wal_status` (reserved/extended/unreserved/lost), `safe_wal_size`, `restart_lsn`, `confirmed_flush_lsn` plus the `pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)` byte-lag math, (d) three labeled recovery options matched to symptoms — running-but-slow / disconnected / lost-slot — with `pg_drop_replication_slot` + `pg_create_logical_replication_slot('debezium_slot', 'pgoutput')` and `snapshot.mode: never` + MERGE INTO backfill for the gap-loss case, (e) permanent fix: `max_slot_wal_keep_size = 50GB` safety valve + alerting thresholds (50GB/10GB/lost) + Debezium heartbeats with `heartbeat.interval.ms=30000` for idle tables. Cite to resources/13.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **5.00** |
+
+Judge verified via WebSearch: (1) `safe_wal_size` is real — introduced in PG13 beta3 as part of `pg_replication_slots`, represents bytes-until-auto-invalidation — confirmed via EDB blog + Gunnar Morling blog + postgresql.org docs; (2) `max_slot_wal_keep_size` is real — added in PG13, `-1` default = unlimited retention — confirmed via postgresqlco.nf + pgpedia; (3) `wal_status` four states reserved/extended/unreserved/lost all correct, with "lost" being terminal (no coming back) — confirmed via postgresql.org docs + pgdash; (4) `snapshot.mode: never` after slot loss is the documented recovery path BUT carries silent-data-loss risk in the gap period — confirmed via debezium.io PostgreSQL connector docs + Aiven node-replacement guide; responder correctly acknowledged the gap by including a targeted MERGE INTO backfill step; (5) `heartbeat.interval.ms` is a real Debezium config and correctly used to advance slot on idle tables — confirmed via Debezium docs. Every code snippet (SQL + config) executes as written. Topic running avg: (4.520 × 130 + 5.00) / 131 = **4.524/131 questions** — PASSED (7th consecutive strong-PASS on Postgres-to-Iceberg topic).
+
+**Iter 350 Q2: 5.00 — PERFECT PASS** ✓
+
+**Iter 350 average: (5.00 + 5.00) / 2 = 5.00 — PERFECT PASS** ✓
+
+Topic score updates:
+- Multi-tenant analytics: 4.440/141 → **4.443/142 questions** (PASSED — recovering upward; matches() full-string semantics finally explained correctly after two prior iterations of failure)
+- Postgres-to-Iceberg ingestion: 4.520/130 → **4.524/131 questions** (PASSED — 7th consecutive strong PASS; replication slot WAL accumulation runbook complete and accurate)
+
+---
 
 ### Iter 349 — 2026-05-28
 
