@@ -29,6 +29,32 @@ If after all of this your dashboards are still slow, *then* keep reading.
 
 ---
 
+## STOP — for tables under 10M rows still taking >10 seconds, this is almost always a tuning problem, not an OLAP problem
+
+> **Read this before you go anywhere near the proxy test.** If your slow Postgres query is hitting a table with fewer than 10M rows and it still takes more than 10 seconds, **the overwhelming probability is that the query, the indexes, or the Postgres configuration is wrong — not that you need a columnar OLAP engine.** Columnar OLAP is designed for the 100M-row–and-up regime; throwing it at a 5M-row tuning problem masks the root cause and saddles you with a second system that you now have to operate. **Exhaust the tuning checklist below FIRST.** Only if every item has been tried and the dashboard is still slow should you advance to the proxy test in Step 1A.
+>
+> The pattern this guards against: an engineer sees `45s` on a 5M-row table, jumps to "we need OLAP," spends six months building a lakehouse, and discovers post-migration that the original query was missing one partial index and would have run in 200ms on Postgres. This is the #1 cause of premature-OLAP regret in SaaS teams. **Sub-10M rows + 10+ seconds = tuning problem until proven otherwise.**
+
+### The mandatory tuning-first checklist (run all of these BEFORE the proxy test)
+
+For any Postgres query taking >10s on a table under 10M rows, work through this list **before** assuming OLAP will help:
+
+- **`EXPLAIN (ANALYZE, BUFFERS) <your query>;`** — this is non-negotiable. Read the output for:
+  - **Seq Scan on a large table** → you are missing an index. Add it.
+  - **`Buffers: shared read=N`** with N huge → cold cache; the query is I/O-bound, not CPU-bound. Often fixed by warming the cache (just running the query a second time) or raising `shared_buffers`.
+  - **`Sort Method: external merge Disk: N kB`** → `work_mem` is too small for the sort; the sort spilled to disk. Raise `work_mem` (session-level: `SET work_mem = '256MB';`).
+  - **`Rows Removed by Filter: N`** with N large → the index is too coarse; Postgres is fetching many rows then filtering. Add a more selective index or a partial index.
+- **`work_mem` sizing.** The default 4MB is far too small for analytical sorts/hashes. For a session running a slow dashboard query, `SET work_mem = '128MB';` or `'256MB';` often turns a 45s query into a 2s query without any other change. Do NOT raise `work_mem` globally (it is per-operator, per-connection — a 256MB global setting with 200 connections is 50GB of potential RAM use); raise it in the session that runs the slow query, or per role.
+- **Partial indexes on hot filter predicates.** If 99% of your dashboard queries filter to `WHERE deleted_at IS NULL AND status = 'active'`, build the index with that predicate baked in: `CREATE INDEX ON events (user_id, created_at) WHERE deleted_at IS NULL AND status = 'active';`. The index is dramatically smaller and faster; Postgres reads only the surviving rows.
+- **BRIN indexes for append-only time-series tables.** A `created_at`-style timestamp column on an append-only table is a perfect BRIN target: `CREATE INDEX ON events USING BRIN (created_at);`. BRIN stores one summary entry per 8MB block — for a 5M-row table, the BRIN index is kilobytes instead of hundreds of megabytes, and `WHERE created_at >= '2025-01-01'` scans roughly the right block range. BRIN is one of the most under-used Postgres features in SaaS analytics.
+- **Materialized views for repeated GROUP BY shapes.** If the dashboard runs the same `SELECT user_id, COUNT(*) ... GROUP BY user_id` every page load, pre-compute it: `CREATE MATERIALIZED VIEW mv_signups_by_user AS <query>;` and `REFRESH MATERIALIZED VIEW CONCURRENTLY mv_signups_by_user;` on a schedule (hourly is usually plenty). Dashboard queries become point-lookups against the MV instead of full re-aggregations.
+- **`pg_stat_user_indexes` audit.** Run `SELECT relname, indexrelname, idx_scan FROM pg_stat_user_indexes WHERE schemaname='public' ORDER BY idx_scan;`. If your slow query's table has indexes that show `idx_scan = 0`, those indexes are unused dead weight (slow INSERTs, wasted space). More importantly, if the join column or filter column has NO index at all, that is your problem.
+- **`max_parallel_workers_per_gather`.** Default is 2. Raising to 4 or 8 on a beefy replica often halves wall time for sequential-scan-heavy analytical queries. Session-level: `SET max_parallel_workers_per_gather = 4;`.
+
+**If you have not run `EXPLAIN (ANALYZE, BUFFERS)` and worked through this list, do NOT skip ahead to the proxy test.** The proxy test only answers "would columnar help?" — it does not tell you whether tuning would have helped first. Most "we need OLAP" tickets resolve on this checklist alone.
+
+---
+
 ## Step 1A: The OLAP proxy test — before you commit to building any pipeline
 
 Before standing up a real ingestion pipeline, run a **proxy test**: copy a representative slice of the slow Postgres table into an OLAP engine and re-run the slow dashboard query there. If the query goes from 45s to <2s, OLAP will help. If it only goes from 45s to 20s, the problem is the query shape and OLAP won't save you — go back to Step 1 (tuning).

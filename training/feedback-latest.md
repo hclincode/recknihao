@@ -1,138 +1,132 @@
-# Iter 356 Q1 Judge Feedback — 2026-05-29
+# Judge Feedback — Iter 357 Q1
 
-## Question
+## Question recap
 
-"Our Trino workers keep running out of memory when we join a 200-million-row events table in Iceberg to a 50-million-row accounts table in Postgres via the postgresql connector. The workers crash with an out-of-memory error. Are there specific settings we should tune, or is there something fundamental about this kind of federated join that we're doing wrong?"
+SaaS engineer asks: should we keep federating a 50M-row Postgres `customers` table live (via the Trino postgresql connector) for joins with our Iceberg `events` table, or copy/materialize it into Iceberg? What are the tradeoffs?
+
+This is the RE-PROBE that iter356 explicitly requested (judge probe target #3): test whether iter357 teacher actions #3/#5 (federate-vs-ingest decision matrix) landed in resources.
 
 ## Score
 
-| Dimension | Score |
-|---|---|
-| Technical accuracy | 4.5 |
-| Beginner clarity | 4.0 |
-| Practical applicability | 4.5 |
-| Completeness | 3.5 |
-| **Average** | **4.125** |
+| Dimension | Score | Notes |
+|---|---|---|
+| Technical accuracy | 4.0 | Core mechanics correct; specific numbers unsourced; key levers (dynamic filtering, `join_distribution_type=PARTITIONED`) absent |
+| Beginner clarity | 4.0 | Plain-language framing; multiple unexplained terms |
+| Practical applicability | 4.5 | Concrete, pasteable; stack fit incomplete (dbt, CDC, k8s specifics) |
+| Completeness | 3.5 | Binary >5M cutoff loses the gradient; CDC tier missing; stop-gap tier missing |
+| **Average** | **4.00** | **PASS** (soft — right at the per-question 4.0 bar) |
 
-**Verdict: PASS** (above the 4.0 per-question bar; Trino federation topic running average remains stable above 4.5 threshold)
+**Topic running avg**: 4.511 -> **4.509** across 254 questions. PASSED (still above 4.5 threshold but downward smoothing).
 
-Topic running average: Trino federation 4.513/252 → **4.511/253 questions** — PASSED, stable.
+## What landed (teacher action follow-through)
 
-## What landed
+The iter357 teacher action #3 was: "add an explicit 'when to federate live vs ingest into Iceberg' decision matrix." Responder DID surface federate-vs-ingest as the architectural alternative — this was the iter356 critical gap. Big improvement vs iter356 Q1 which never mentioned ingestion at all.
 
-- `join_distribution_type` session property with `BROADCAST`/`PARTITIONED` values — VERIFIED correct per trino.io/docs/current/admin/properties-general.html.
-- `join_max_broadcast_table_size` default of 100MB — VERIFIED correct per trino.io/docs/current/optimizer/cost-based-optimizations.html.
-- `EXPLAIN (TYPE DISTRIBUTED)` showing `Exchange[Type=REPLICATE]` (broadcast) vs `Exchange[Type=REPARTITION]` (partitioned) — VERIFIED correct per trino.io/docs/current/sql/explain.html.
-- `SHOW STATS FOR postgres_catalog.public.accounts` + `ANALYZE public.accounts` on the Postgres primary if row_count is NULL — VERIFIED correct per trino.io/docs/current/optimizer/statistics.html (the Postgres connector relies on native PG statistics).
-- Step-by-step diagnostic recipe is copy-pasteable on Trino 467.
-- On-prem k8s recommendation to "force PARTITIONED for stability" is the right operational call.
-- Honest caveat that 50M rows at 10-20GB uncompressed won't fit a 500MB broadcast threshold raise.
+The iter357 teacher action #5 (decision matrix) PARTIALLY landed — the matrix was reduced to a binary `>5M=ingest` rule instead of the documented three-tier gradient.
 
-## What slipped — gaps to close in resources/22
+## What did not land
 
-### HIGH priority — the engineer literally asked "is there something fundamental we're doing wrong"
+1. **Gradient was flattened.** Iter357 teacher action documented:
+   - `<10M` -> federate live with `join_distribution_type=PARTITIONED`
+   - `10M-100M` -> ingest nightly via `INSERT INTO ... SELECT * FROM postgres_catalog.<schema>.<table>`
+   - `>100M` -> CDC pipeline (Debezium -> Iceberg)
 
-The answer treats this as purely a tuning question and never surfaces the architectural alternative: **ingest the Postgres accounts table into Iceberg as a dimension table** instead of joining live across catalogs. For a 50M-row Postgres dimension on this on-prem k8s + MinIO stack, materializing nightly with `INSERT INTO iceberg.analytics.accounts AS SELECT * FROM postgres_catalog.public.accounts` (or via Debezium CDC for fresher data) is often the right SaaS answer. The federate-vs-ingest tradeoff is literally a named bullet on the topic checklist ("when to federate vs ingest") and should have been the closing recommendation.
+   Responder collapsed this to `>5M -> ingest`. The CDC tier is missing — important because the engineer said "every dashboard query," which implies the data freshness floor matters and CDC with 1–5 min lag is often the right answer for high-traffic dashboards.
 
-### MEDIUM priority — dynamic filtering not mentioned
+2. **Dynamic filtering still absent** (recurring gap flagged iter164/165/356/357 — slipped AGAIN). For Iceberg-fact x JDBC-dimension joins, dynamic filtering is the single biggest lever Trino has. The answer says "queries run in <500ms" after cutover without naming the mechanism. This is the THIRD consecutive iteration where the federation answer omits dynamic filtering — needs to be a checklist item in `resources/22`.
 
-Trino's dynamic filtering is the standard tool for exactly this Iceberg-fact x JDBC-dimension scenario. The Iceberg connector default `dynamic-filtering.wait-timeout=1s` (Trino 467) should have appeared. Iter164/165 already flagged dynamic filtering as a recurring gap on this topic — it slipped again.
+3. **`join_distribution_type=PARTITIONED` stop-gap absent.** Engineer is currently in pain. Ingestion takes time to build. The stop-gap order (dynamic filtering check -> `ANALYZE` on Postgres source -> `SET SESSION join_distribution_type='PARTITIONED'` -> consider `spill_enabled=true`) buys runway while the ingestion pipeline is built. Not surfaced.
 
-### MEDIUM priority — worker memory and spilling
+4. **Production stack specifics absent.** prod_info.md says dbt is permitted, Spark runs on k8s, MinIO is the Iceberg storage layer. None of these are named. The answer says "Spark job runs once per night" with no mention of how it runs on this stack (SparkApplication CR on k8s). dbt would be the natural tool for the 15-min micro-batch path with `incremental` materialization.
 
-The engineer's question is about workers running out of memory. The answer doesn't mention any actual memory settings:
-- `query.max-memory-per-node` and `query.max-memory` (cluster-wide limits)
-- `memory.heap-headroom-per-node`
-- `spill_enabled` session property (and `spill-enabled` config) for partitioned-join stability under memory pressure
+5. **Specific unsourced numbers.** "5M rows," "<500ms," ">70% CPU" are presented as factual without basis. The 100MB `join_max_broadcast_table_size` default is sourced. Specific perf numbers should either cite a source or be removed.
 
-These are the direct levers for the literal symptom described.
+6. **Beginner clarity terms unexplained.** "build side", "JDBC", "dynamic filtering", "min/max statistics", "partition pruning", "columnar" all appear without inline definitions. This is the same recurring gap iter356 flagged.
 
-### LOW priority — minor technical imprecisions
+## Pattern across federation answers (iter356 -> iter357)
 
-- "Trino's CBO chooses the smaller table as the build side" — usually true but not a CBO rule; in AUTOMATIC mode the CBO can reorder based on cost.
-- "Filter events aggressively first to ... make Trino more likely to pick events as build side or switch to partitioned join" — the actual mechanism is dynamic filtering + improved cost estimates, not just relative table size. Shrinking events doesn't directly shrink accounts.
+- Iter356 Q1 (4.125): missed federate-vs-ingest entirely — never surfaced ingestion as the architectural alternative.
+- Iter357 Q1 (4.00): surfaced ingestion correctly — BIG win — but flattened the gradient, omitted dynamic filtering AGAIN, omitted stop-gap tuning, omitted prod-stack fit.
 
-### LOW priority — Beginner clarity
+Trajectory is positive on the architectural framing but the federation runbook is still incomplete on its core levers (dynamic filtering, partitioned distribution) and on prod-environment fit (dbt, CDC, k8s, MinIO).
 
-The 3-step structure is good, but key terms are used without inline definitions:
-- "build side"
-- "REPLICATE" / "REPARTITION"
-- "hash-redistributes"
-- "join distribution type"
-- "broadcast threshold"
+## ITER358 TEACHER ACTIONS
 
-A one-line callout like *"Build side = smaller input read fully into a hash table; probe side = larger input streamed through. Broadcast replicates build to every worker; partitioned hash-redistributes both inputs on the join key."* would close most of this gap.
+**MEDIUM (Q1 passed soft, topic stable but slipping):**
 
-## Teacher action for iter357 (LOW-MEDIUM priority — Q1 passed)
+1. **Restore the three-tier gradient in `resources/22-trino-federation-postgresql.md`.** Make the decision tree unambiguous: <10M federate live with PARTITIONED + dynamic filtering / 10M-100M ingest nightly Spark+dbt / >100M or <5min freshness SLO -> Debezium CDC -> Iceberg MoR. Show example syntax for each tier.
 
-1. Add a **"federated join OOM runbook"** to `resources/22-trino-federation-postgresql.md` ordered: (a) `EXPLAIN (TYPE DISTRIBUTED)` distribution check; (b) `SHOW STATS` + `ANALYZE` on Postgres source; (c) **dynamic filtering** as the first lever; (d) `join_distribution_type='PARTITIONED'` to force partitioned; (e) raise `join_max_broadcast_table_size` only if heap headroom allows; (f) `spill_enabled=true` for stability under pressure; (g) **architectural alternative**: ingest 10M+ row Postgres dimensions into Iceberg.
-2. Add a **"build side vs probe side"** one-line definition callout.
-3. Add the **"when to federate live vs ingest into Iceberg"** decision matrix: <10M rows → federate live; 10M-100M rows → ingest nightly; >100M rows → CDC pipeline. The topic checklist already names this as an in-scope element.
+2. **Add a "stop-gap before you commit to ingestion" tier** — engineer in pain TODAY who needs to ship the cutover in 2 weeks. Order: (a) verify `join-dynamic-filtering-enabled=true`; (b) `SHOW STATS FOR postgres_catalog.<schema>.<table>` -> `ANALYZE <table>` on Postgres source if row_count NULL; (c) `SET SESSION join_distribution_type='PARTITIONED'`; (d) consider `spill_enabled=true` for stability. This is the bridge the answer is missing.
 
-## Judge probe targets for iter357
+3. **Add inline definitions for federation jargon** — "build side", "JDBC", "dynamic filtering", "columnar storage", "min/max statistics", "partition pruning". These keep being used without explanation across multiple iterations. Add a one-line glossary at the top of `resources/22`.
 
-Under-tested topics still open per iter355→356 notes:
-1. **Query plan optimization** — reading `EXPLAIN ANALYZE` output to find bottlenecks (TableScan/Filter/Aggregate cost, scan stats, dynamic filter rows, hash collision count). Not yet probed.
-2. **Cost considerations cloud vs on-prem** — Trino+Iceberg+MinIO on-prem vs AWS S3+Athena+Glue lift-and-shift. Not yet probed.
-3. **Federate-vs-ingest architectural choice** — re-probe with phrasing like "we're joining a 50M-row Postgres customers table to Iceberg events every 5 minutes — keep federating live, or materialize customers into Iceberg?" to test if iter357 teacher action #3 lands.
-4. **Postgres-vs-OLAP decision framing** — iter355 Q2 gave 4.9375 on first probe; needs at least one additional re-probe at different phrasing before this subtopic is declared durable.
+4. **Add a cutover playbook** — full refresh vs incremental MERGE with primary key, snapshot atomicity, dual-write window vs cut-and-replace, row-count and aggregate verification against the Postgres source.
+
+5. **Tie examples to the production stack** — Spark job runs as `SparkApplication` CR on k8s; dbt model uses `incremental` with `unique_key='customer_id'`; MinIO is the S3 backend; Iceberg catalog is Hive Metastore. This makes the advice actionable on the engineer's actual environment.
+
+## ITER358 JUDGE PROBE TARGETS
+
+Still-open / under-tested topics:
+
+1. **CDC-vs-batch ingestion** — re-probe at "we need fresher data than nightly batch — what's the architecture for syncing Postgres customers into Iceberg every 5 minutes?" Tests if teacher action #1 (CDC tier) lands.
+2. **Stop-gap federation tuning** — re-probe at "we can't ingest yet (cutover takes 2 weeks) — what session properties do we set to keep dashboards alive in the meantime?" Tests if teacher action #2 (stop-gap tier) lands.
+3. **Query plan optimization (EXPLAIN ANALYZE reading)** — never probed; recurring rubric note since iter356.
+4. **Cost considerations cloud vs on-prem** (S3+Athena+Glue lift-and-shift vs on-prem Trino+Iceberg+MinIO) — never probed.
 
 ## Sources verified via WebSearch
 
-- [General properties — Trino 481 Documentation](https://trino.io/docs/current/admin/properties-general.html)
-- [Cost-based optimizations — Trino 481 Documentation](https://trino.io/docs/current/optimizer/cost-based-optimizations.html)
-- [EXPLAIN — Trino 480 Documentation](https://trino.io/docs/current/sql/explain.html)
-- [Table statistics — Trino 480 Documentation](https://trino.io/docs/current/optimizer/statistics.html)
 - [PostgreSQL connector — Trino 481 Documentation](https://trino.io/docs/current/connector/postgresql.html)
+- [Cost-based optimizations — Trino 481 Documentation](https://trino.io/docs/current/optimizer/cost-based-optimizations.html) — `join_max_broadcast_table_size`, broadcast right-side memory requirement
+- [Dynamic filtering — Trino 481 Documentation](https://trino.io/docs/current/admin/dynamic-filtering.html)
+- [General properties — Trino 481 Documentation](https://trino.io/docs/current/admin/properties-general.html) — `join_distribution_type`
+- [Benchmarking the JDBC Bottleneck in Trino — Starburst](https://www.starburst.io/blog/benchmarking-the-jdbc-bottleneck-in-trino/) — JDBC serialization bottleneck
 
----
+## Iter 357 End-of-Iteration Summary
 
-## Iter 356 End-of-Iteration Summary — 2026-05-29
-
-### Scores table
+### Per-question scores
 
 | Question | Topic | Score | Verdict |
 |---|---|---|---|
-| Q1 | Trino federation OOM on Iceberg-fact x Postgres-dimension join | 4.125 | PASS (per-question bar 4.0) |
-| Q2 | When to add OLAP / DuckDB proxy test for a slow 5M-row 45s Postgres query | 3.875 | FAIL (below 4.0 per-question bar) |
-| **Iteration average** | | **4.000** | **MARGINAL PASS** |
+| Q1 | Trino federation: federate-vs-ingest 50M-row Postgres customers x Iceberg events | 4.00 | soft PASS |
+| Q2 | When to add OLAP: 5M-row Postgres at 45s p95, prod already runs Trino+Iceberg+MinIO — proxy test + decision | 4.00 | soft PASS |
+| **Iter 357 average** | | **4.00** | **MARGINAL PASS** |
 
-### Root cause analysis
+### Root causes — what improved, what slipped
 
-**Q1 (4.125 PASS, but soft pass)** — answer treated the prompt as purely a tuning question. The engineer literally asked "is there something fundamental we're doing wrong" and the answer never surfaced the federate-vs-ingest architectural alternative, never mentioned dynamic filtering (the standard tool for exactly this Iceberg-fact x JDBC-dimension scenario, and a recurring gap flagged back at iter164/165), and never named the direct memory levers (`query.max-memory-per-node`, `spill_enabled`). All cited Trino syntax/properties verified correct against trino.io/docs/current. The 3.5 on completeness is what dragged the average down — the answer covered the join-distribution-type and broadcast-threshold dimension well but missed three named subtopics from the checklist.
+**What landed (teacher actions from iter356 -> iter357):**
+- Q1: federate-vs-ingest now surfaced as the architectural alternative (iter356 critical miss is closed). Big win on architectural framing.
+- Q2: Postgres CSV extraction syntax fix landed — no more `INTO OUTFILE` mistakes; `\COPY ... TO ...` / `COPY ... TO ...` is now correct. Critical iter356 FAIL on Q2 is closed.
+- Q2: "use the OLAP engine you already have" callout partially landed — Trino+Iceberg+MinIO is now mentioned as the proxy path instead of defaulting to a DuckDB install.
 
-**Q2 (3.875 FAIL)** — two distinct failure modes compounded:
+**What did not land (regressions / recurring gaps):**
+1. **Dynamic filtering omitted on federation answer for the 3rd consecutive iteration** (iter164/165, iter356, iter357). This is now a chronic gap — the answer claims "<500ms after cutover" without naming the single biggest Trino lever for fact x dim joins. Must become a CHECKLIST ITEM in resources/22, not just prose.
+2. **Three-tier federate-vs-ingest gradient flattened to a binary `>5M=ingest`.** The CDC tier (>100M or <5min freshness SLO -> Debezium -> Iceberg MoR) was documented in iter357 teacher actions but did not survive into the answer. CDC is the right answer for "every dashboard query" freshness — losing this tier loses the high-traffic dashboard case entirely.
+3. **Stop-gap tuning tier missing on Q1.** Engineer is in pain TODAY and ingestion takes weeks to build. The bridge order (dynamic filtering check -> `ANALYZE` Postgres source -> `SET SESSION join_distribution_type='PARTITIONED'` -> `spill_enabled=true`) was not surfaced.
+4. **Tuning-first framing on Postgres-vs-OLAP subtopic still weak.** Q2 at 4.00 means the third probe of this subtopic (iter355 4.9375 / iter356 3.875 / iter357 4.00) shows MIXED durability — the subtopic is NOT yet stable. The answer routes to Trino+Iceberg proxy correctly but is still light on `EXPLAIN (ANALYZE, BUFFERS)`, index audit (`pg_stat_user_indexes`), `work_mem`, partial indexes, BRIN, MVs, `max_parallel_workers_per_gather` BEFORE the OLAP push recommendation.
+5. **Production-stack fit still partial.** dbt is rarely named where it's the natural tool (incremental materialization for nightly/15-min batch). SparkApplication CR on k8s for the ingestion job is missing. MinIO / Hive Metastore catalog plumbing rarely surfaces concretely.
+6. **Beginner clarity terms repeatedly unexplained.** "build side", "JDBC", "dynamic filtering", "min/max statistics", "partition pruning", "columnar", "REPLICATE", "REPARTITION", "hash-redistributes" keep appearing without inline definitions across multiple iterations. Needs a one-line glossary at the top of resources/22.
 
-1. **Technical accuracy error**: recommended `SELECT ... INTO OUTFILE '/tmp/events.csv' FROM postgres ...` to extract the table for a DuckDB proxy test. `INTO OUTFILE` is **MySQL syntax**, not Postgres. Postgres requires `\COPY events TO '/tmp/events.csv' CSV HEADER` (psql client-side) or `COPY events TO '/tmp/events.csv' CSV HEADER` (server-side, requires superuser + server-writable path). DuckDB-side ingest is `COPY events FROM '/tmp/events.csv' (HEADER)` or `CREATE TABLE events AS SELECT * FROM read_csv_auto('/tmp/events.csv')`. A copy-paste-broken command on an OLAP-proxy-test recommendation directly defeats the purpose of the answer.
-2. **Prod-environment-fit miss**: the org already runs Trino+Iceberg+MinIO on-prem (per prod_info.md). The natural proxy test is `CREATE TABLE iceberg.scratch.events AS SELECT * FROM postgres_catalog.public.events` followed by an aggregate query against the Iceberg copy — not a fresh DuckDB install on a laptop with manual CSV export. The answer recommended a tool the engineer would have to introduce vs. using infrastructure they already operate.
-3. **Diagnostic depth too shallow**: 5M rows at 45s p95 is a tuning-first signal, not an OLAP-adoption signal. The answer should have led with `EXPLAIN (ANALYZE, BUFFERS)` reading (sequential scan vs index scan, sort spill to disk, hash join build size), missing/stale indexes, `work_mem` sizing, partial indexes on hot filter predicates, and BRIN for time-series — exactly the tuning-first framing that landed at 4.9375 on iter355 Q2. The answer jumped to "test OLAP via DuckDB" before establishing whether Postgres tuning closes the gap, which is the same premature-OLAP-push failure mode iter355 explicitly avoided.
+### Iter 358 teacher actions
 
-### Pattern across Q1 and Q2
+**HIGH (chronic gaps blocking strong pass):**
+1. **Promote dynamic filtering to a TOP-of-section checklist item in resources/22-trino-federation-postgresql.md.** Not buried in prose. Show: `SET SESSION join-dynamic-filtering-enabled = true` (verify cluster default), `EXPLAIN (ANALYZE, VERBOSE)` reading the `Dynamic filters` line, expected rows-filtered ratio for Iceberg-fact x JDBC-dim joins. This has slipped 3 iterations in a row.
+2. **Restore the three-tier federate-vs-ingest gradient with the CDC tier intact.** Decision tree must be unambiguous: `<10M federate live` (PARTITIONED + dynamic filtering) / `10M-100M ingest nightly` (Spark+dbt incremental) / `>100M or <5min freshness SLO -> Debezium CDC -> Iceberg MoR`. Show working syntax per tier. Do not let the answer collapse this to a binary cutoff.
+3. **Add the "stop-gap before you commit to ingestion" tier.** Order: (a) verify `join-dynamic-filtering-enabled=true`; (b) `SHOW STATS FOR postgres_catalog.<schema>.<table>` -> `ANALYZE <table>` on Postgres source if `row_count` NULL; (c) `SET SESSION join_distribution_type='PARTITIONED'`; (d) `SET SESSION spill_enabled=true` for stability. This is the runway-buying bridge.
 
-Both answers share a **practical-applicability ceiling**: technically defensible content that doesn't account for the production stack the engineer is sitting on. Q1 missed "ingest into the Iceberg you already have" as the architectural fix; Q2 missed "use the Trino+Iceberg you already have as the OLAP proxy" and recommended a tool outside the stack. Whatever resource is being read for "when to introduce OLAP" framing needs an explicit **prod-environment-aware decision step**: "before recommending a new engine, check if the engineer already runs one — if so, use it for the proxy test."
+**MEDIUM (subtopic durability):**
+4. **Reinforce tuning-first framing for sub-10M-row Postgres slowness** BEFORE the OLAP-proxy step. Concrete pre-OLAP checklist: `EXPLAIN (ANALYZE, BUFFERS)`, `pg_stat_user_indexes` audit, `work_mem` sizing, partial indexes on hot filter predicates, BRIN for time-series, materialized views, `max_parallel_workers_per_gather`. The OLAP proxy is the SECOND step, not the first.
+5. **Tie examples to the production stack concretely.** Spark ingest = `SparkApplication` CR on k8s. dbt = `incremental` materialization with `unique_key='customer_id'`. MinIO = S3 backend for the Iceberg warehouse. Hive Metastore = Iceberg catalog. Name these by name in code samples.
+6. **Add inline definitions / one-line glossary** for "build side", "JDBC", "dynamic filtering", "columnar storage", "min/max statistics", "partition pruning", "REPLICATE", "REPARTITION", "hash-redistributes" at the top of resources/22.
 
-### Iter 357 teacher action suggestions
+**LOW (cutover playbook):**
+7. **Add a federation -> Iceberg cutover playbook** — full refresh vs incremental MERGE with primary key, snapshot atomicity, dual-write window vs cut-and-replace, row-count and aggregate verification against the Postgres source.
 
-**HIGH priority — Q2 was the FAIL**:
+### Iter 358 judge probe targets
 
-1. **Fix Postgres CSV extraction syntax** wherever it appears in `resources/` (likely `resources/03-postgres-vs-olap.md` or the "when to add OLAP" doc). Replace any `INTO OUTFILE` reference with Postgres `\COPY` / `COPY ... TO` syntax. Verify against postgresql.org/docs/current/sql-copy.html.
-2. **Add a "use the OLAP engine you already have" callout** to the OLAP-adoption resource. Decision tree: "(a) is the org already running Trino/Iceberg/Snowflake/BigQuery? If yes, copy a sample into that engine for the proxy test — do not install DuckDB. (b) only if no OLAP engine exists, then DuckDB is the cheapest proxy."
-3. **Reinforce tuning-first framing for sub-10M-row Postgres p95 slowness**. Concrete checklist: `EXPLAIN (ANALYZE, BUFFERS)`, index audit (`pg_stat_user_indexes`), `work_mem` sizing, partial indexes, BRIN for time-series, materialized views, parallel query (`max_parallel_workers_per_gather`) — **before** any OLAP recommendation. This is the exact framing that earned 4.9375 on iter355 Q2 and slipped on iter356 Q2.
+Still-open / under-tested topics:
+1. **CDC tier re-probe** — "we need fresher data than nightly batch — what's the architecture for syncing Postgres customers into Iceberg every 5 minutes?" Tests if action #2 (CDC tier) survives into the answer.
+2. **Stop-gap federation tuning re-probe** — "we can't ingest yet (cutover takes 2 weeks) — what session properties do we set to keep dashboards alive in the meantime?" Tests if action #3 (stop-gap tier) lands.
+3. **Postgres-vs-OLAP decision — 4th probe** — three probes (4.9375 / 3.875 / 4.00) show mixed durability; needs a 4th probe at a different phrasing (e.g., "5M rows, 12s p95, fits in RAM — do we even need OLAP?") before declaring stable.
+4. **Query plan optimization (EXPLAIN ANALYZE reading)** — never probed, recurring rubric note since iter356.
+5. **Cost considerations cloud vs on-prem** (AWS S3+Athena+Glue lift-and-shift vs on-prem Trino+Iceberg+MinIO) — never probed.
 
-**MEDIUM priority — Q1 PASSED but soft**:
-
-4. Add **"federated join OOM runbook"** to `resources/22-trino-federation-postgresql.md` in this order: (a) `EXPLAIN (TYPE DISTRIBUTED)` distribution check; (b) `SHOW STATS` + `ANALYZE` on Postgres source; (c) **dynamic filtering** as the first lever; (d) `join_distribution_type='PARTITIONED'`; (e) `join_max_broadcast_table_size` raise only if heap headroom allows; (f) `spill_enabled=true`; (g) **architectural alternative**: ingest 10M+ row Postgres dimensions into Iceberg.
-5. Add **federate-vs-ingest decision matrix**: <10M rows → federate live; 10M-100M rows → ingest nightly; >100M rows → CDC pipeline. This is a named checklist subtopic that has slipped twice now.
-6. Add inline definitions for "build side", "REPLICATE", "REPARTITION", "hash-redistributes" — beginner-clarity gap on Q1.
-
-**LOW priority polish (carried from iter355 notes)**:
-
-7. Fix `resources/17-iceberg-table-maintenance.md` Iceberg 1.8.0 release date `2026-02-13` → `2025-02-13`.
-
-### Judge probe targets for iter 357
-
-1. **Re-probe federate-vs-ingest at different phrasing** — e.g., "we're joining a 50M-row Postgres customers table to Iceberg events every 5 minutes — keep federating live, or materialize customers into Iceberg?" Tests if iter357 action #4-#5 lands.
-2. **Re-probe OLAP-adoption with prod-environment-aware framing** — e.g., "Postgres query on a 5M-row table runs 30s, org already runs Trino+Iceberg+MinIO — what's the proxy test and what's the decision?" Tests if iter357 action #1-#2 lands and if the answer routes to existing Trino vs recommending DuckDB.
-3. **Re-probe Postgres-vs-OLAP decision framing one more time** — iter355 4.9375 + iter356 3.875 = mixed signal, subtopic NOT durable yet, needs a third probe at a third phrasing before declaring stable.
-4. **Query plan optimization** — `EXPLAIN ANALYZE` reading for slow Iceberg queries (TableScan/Filter/Aggregate cost, scan stats, dynamic filter rows). Still not probed.
-5. **Cost considerations cloud vs on-prem** — Trino+Iceberg+MinIO on-prem vs AWS S3+Athena+Glue lift-and-shift cost model. Still not probed.

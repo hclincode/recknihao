@@ -4866,18 +4866,44 @@ The general "federation vs ingest" tradeoff is in 6.1 / 6.2, but in practice the
 
 **Common mistake to avoid:** Do NOT migrate purely on "feels slow." Without the event listener evidence, you may discover the slow query was actually fast on Postgres but slow because of cross-catalog network egress or a missing dynamic filter — both fixable without an ingestion pipeline. Always measure first; the migration is real engineering work and should be justified by data.
 
-### 6.2B Ingest-vs-federate sizing rule — the >5M-rows-OR-frequently-joined cutoff
+### 6.2B Ingest-vs-federate sizing rule — the three-tier row-count gradient
 
 > **The fundamental tradeoff in one line.** Federated queries are **live but costly**: every query against `postgres_catalog.public.<table>` is a fresh full-or-partial JDBC read of the Postgres table from Trino workers. There is no Iceberg-style file pruning, no min/max statistics, no Parquet column projection at storage — the network and Postgres CPU pay the full price every time, and big-enough tables OOM Trino workers when the JDBC result set is materialized for a hash join. **Ingested dimensions are fast but require a pipeline**: the Spark/dbt ingest job pays the cost once at write time; every subsequent analytical query reads the columnar Iceberg copy with all the partition-pruning and dynamic-filtering benefits.
 
-**Decision rule for any specific Postgres table:**
+#### The three-tier decision gradient — pick the tier by row count first, then refine
+
+**Do NOT collapse this to a single >5M cutoff.** The right architecture depends on row count AND freshness SLO. Use the three tiers below:
+
+| Tier | Row count | Architecture | Why this tier |
+|---|---|---|---|
+| **Tier 1 — Federate live** | **< 10M rows** | `postgres_catalog.public.<table>` queried directly via the Trino PostgreSQL connector. Force `join_distribution_type='BROADCAST'` for the small-Postgres-dim × big-Iceberg-fact shape. Confirm dynamic filtering is firing (see runbook below). | Build side fits comfortably in worker memory; full JDBC read finishes in seconds; no pipeline to operate. Best fit for **rarely-joined reference tables** — dim_country, dim_currency, plan_tier metadata, feature flags. |
+| **Tier 2 — Ingest nightly batch (Spark JDBC snapshot)** | **10M – 100M rows** | Spark job (running as a `SparkApplication` CR on the on-prem k8s cluster) does `INSERT INTO iceberg.analytics.<table> SELECT * FROM postgres_catalog.public.<table>` once per night, or runs as a dbt `incremental` model with `unique_key=<pk>` on a 1–6 hour cadence. The Iceberg copy backs all analytical queries. | A single JDBC scan of 10M–100M rows is feasible nightly (minutes) but unacceptable per-query (Postgres replica CPU, network egress, worker memory pressure). One pipeline build pays for thousands of subsequent fast Iceberg queries. **Acceptable freshness floor: hours.** |
+| **Tier 3 — CDC pipeline (Debezium → Kafka → Iceberg)** | **> 100M rows OR < 5 min freshness SLO** | Debezium reads the Postgres WAL, publishes change events to Kafka, a Spark Structured Streaming job (or Kafka Connect Iceberg sink) MERGEs them into the Iceberg table. End-to-end latency: seconds to a few minutes. See Section 7.4 for the full data path. | Above 100M rows, nightly full-refresh stops fitting in the maintenance window — re-reading 200M rows over JDBC takes hours and you still get nightly-stale data. Below 100M rows, CDC is overkill unless you need sub-minute freshness. **Acceptable freshness floor: minutes.** |
+
+**Worked example — 50M-row customers table joined to Iceberg events nightly for dashboards:**
+
+> Row count is 50M → squarely in Tier 2. **Architecture: ingest nightly batch (Spark JDBC snapshot).** A nightly `SparkApplication` runs `INSERT INTO iceberg.analytics.customers SELECT * FROM postgres_catalog.public.customers` against the Postgres read replica, partitioned by `bucket(customer_id, 16)` for join performance. Dashboard queries now join two Iceberg tables (`iceberg.analytics.events JOIN iceberg.analytics.customers`) — no JDBC in the hot path, dynamic filtering works between two Iceberg tables, Postgres replica load drops to one snapshot read per night instead of N reads per dashboard refresh. If the team later needs intra-day customer churn visibility (e.g., new-signup attribution within 15 minutes of signup), move customers to Tier 3 (Debezium CDC); until then, Tier 2 is the cheapest architecture that meets the dashboard SLO.
+
+#### Exception — even Tier 1 (<10M rows) should be ingested if the table is joined on EVERY query
+
+> **Lower the threshold to roughly 5M rows when the table is in the join graph of every production dashboard.** Tier 1 (federate live) assumes the table is **rarely** queried — reference tables, ad-hoc lookups. If a 7M-row `customers` table is joined to `events` in 12 different production dashboards refreshing every 5 minutes, you are issuing dozens of full 7M-row JDBC scans per hour against the Postgres replica. The cumulative replica CPU, network egress, and per-query latency dominate even though each individual scan is "manageable."
+
+**Concrete refinement of Tier 1:**
+- **<10M rows AND queried <5 times per day (ad-hoc / reference data)** → federate live. This is the canonical Tier 1 case.
+- **5M–10M rows AND in the join graph of any production dashboard** → ingest into Iceberg via nightly batch (Tier 2 architecture, just at a smaller scale). The pipeline cost is the same; the per-query payoff multiplies with refresh frequency.
+- **<5M rows AND in the join graph of any production dashboard** → federate live is still fine if dynamic filtering is firing and the build side is < 100MB after filtering (the default `join_max_broadcast_table_size` threshold). Confirm with `EXPLAIN ANALYZE` — see the OOM runbook below.
+
+**The principle:** "federate vs ingest" is not "row count alone" — it is **row count × query frequency × Postgres replica headroom**. Tier 1's 10M ceiling assumes low query frequency. Raise that frequency and the ceiling drops.
+
+#### Decision rule for any specific Postgres table (refined view)
 
 | Condition on the Postgres table | Action |
 |---|---|
-| **> 5M rows** *(any access pattern)* | **Ingest into Iceberg as a dimension table** — too large to federate efficiently, and a single full JDBC read of >5M rows will routinely pressure worker memory on a hash join. |
-| **Joined frequently** *(appears in >5 distinct analytical queries per day, or in any production dashboard)* | **Ingest into Iceberg** — even if small, the cumulative Postgres replica load and per-query latency add up. Pay the ingest cost once at write time, then federate-free for every read. |
-| Small (<5M rows) AND rarely joined (one-off / ad-hoc only) | **Federate live** — the right tool. Reference data, lookup tables, dim_country / dim_currency, plan tier metadata. Cross-catalog joins + dynamic filtering handle this case well. |
-| Mid-size (1M–5M rows) AND joined a few times per day | **Federate live, but watch the signals in Section 6.2A.** Migrate to Iceberg the moment Postgres replica CPU, query latency, or schema-churn frequency crosses the thresholds. |
+| **> 100M rows, OR < 5 min freshness SLO** | **Tier 3 — CDC pipeline** (Debezium → Kafka → Iceberg with MERGE INTO). See Section 7.4. |
+| **10M – 100M rows** | **Tier 2 — Ingest nightly batch** (Spark JDBC snapshot, or dbt incremental model). |
+| **5M – 10M rows AND joined in production dashboards** | **Tier 2 — Ingest nightly batch** — even though the row count alone permits Tier 1, the cumulative query load makes ingestion cheaper. |
+| **< 10M rows AND rarely joined (one-off / ad-hoc only)** | **Tier 1 — Federate live.** The right tool. Reference data, lookup tables, dim_country / dim_currency, plan tier metadata. Cross-catalog joins + dynamic filtering handle this case well. |
+| **1M – 5M rows AND joined a few times per day** | **Tier 1 — Federate live, but watch the signals in Section 6.2A.** Migrate to Tier 2 the moment Postgres replica CPU, query latency, or schema-churn frequency crosses the thresholds. |
 
 #### The 50M-row accounts scenario — worked example
 
@@ -4896,6 +4922,77 @@ After ingest, the join becomes `iceberg.analytics.events JOIN iceberg.analytics.
 - Do not raise `join_max_broadcast_table_size` to 10GB to "let the broadcast finish" — you are putting 10GB of Postgres-derived JDBC rows onto every worker. Memory pressure migrates from "build side overflow" to "broadcast side worker-replicated bloat."
 - Do not switch to `join_distribution_type='PARTITIONED'` and call it solved — partitioned joins help with memory shape but the federation still re-reads 50M rows over JDBC on every query. The Postgres replica CPU goes through the roof and the network egress dominates query latency. PARTITIONED is the right *temporary* operational fix while you build the ingest pipeline; it is not the durable architecture.
 - Do not "just add more worker memory" — at 50M rows of Postgres-side dimension data, you are now operating Trino as a JDBC scan-and-join service, which is exactly what it is bad at. Spend the same engineering effort on the ingest pipeline instead.
+
+#### Federation OOM runbook — the ordered steps to take RIGHT NOW (before the ingestion pipeline is built)
+
+> **Engineer is in pain today. The ingestion pipeline is the durable fix, but it takes 1–2 weeks to build and validate. This runbook is the bridge — it keeps dashboards alive while the Spark/dbt pipeline is being built. Run the steps IN ORDER; do not skip Step 0.**
+
+##### Step 0 (CHECK FIRST) — Verify dynamic filtering is enabled AND firing
+
+> **This is the single highest-leverage check, and it is the most commonly missed step. Run this before touching any other knob.** Dynamic filtering is the mechanism that lets Trino push filter values from the Iceberg fact side back to the Postgres JDBC scan, **dramatically reducing the rows Postgres ships over the wire before the join**. When DF is firing, a federated join that would scan 50M Postgres rows often ends up scanning < 1M rows (just the rows that match the join key values from the filtered Iceberg side). When DF is NOT firing — and this is what causes most "federation OOM" surprises — Trino reads every row Postgres has, materializes them on workers, and only then applies the join. Same query plan, 50× the memory pressure.
+
+**1. Confirm DF is configured on.** Run in your Trino session:
+
+```sql
+-- Confirm DF config is enabled at the session level
+SHOW SESSION LIKE '%dynamic_filtering%';
+-- Expected: enable_dynamic_filtering = true
+```
+
+If `enable_dynamic_filtering = false` (someone disabled it, or it was never set), enable it for the current session:
+
+```sql
+SET SESSION enable_dynamic_filtering = true;
+```
+
+**2. Verify DF actually fired in `EXPLAIN ANALYZE` output.** Running `EXPLAIN ANALYZE <your query>;` produces operator-level stats. On the **probe-side TableScan** (the Iceberg fact scan in the canonical small-Postgres-dim × big-Iceberg-fact shape), look for:
+
+```
+dynamicFilterSplitsProcessed = N
+```
+
+- **N > 0** → DF fired. Splits were pruned at the file level using the values pushed from the build side. This is what you want.
+- **N = 0** (or the field absent entirely) → DF did NOT fire. The probe scanned every split. You are paying full I/O cost for no DF benefit.
+
+Common reasons DF does not fire even when enabled:
+- The DF **wait timeout expired** before the build finished. Iceberg connector default is `dynamic-filtering.wait-timeout = 1s`. If the Postgres build side takes longer than that to deliver its values, the probe gives up waiting and scans unfiltered. Raise with `SET SESSION dynamic_filtering_wait_timeout = '30s';` (system-level) or fix the build's slowness.
+- The build **exceeded the per-driver row cap** and got compacted to a range. For wider IN-lists, set `SET SESSION enable_large_dynamic_filters = true;`. See Section 5.4.
+- The join is `LEFT JOIN` or `FULL OUTER JOIN` — DF is unsafe and disabled for these. See Section 5.1.1A.
+- The CBO put the WRONG side on build. Run `SHOW STATS FOR postgres_catalog.public.<dim_table>;` — if `row_count` is NULL, the CBO is blind and likely picked the wrong build side. Run `ANALYZE public.<dim_table>;` on the Postgres replica (NOT a hot standby — on the PRIMARY, the stats replicate via WAL) to fix.
+
+**If DF is firing (dynamicFilterSplitsProcessed > 0) but workers still OOM**, proceed to Step 1. **If DF is NOT firing**, the next steps (PARTITIONED join, raising broadcast threshold) will not save you — fix DF first, or jump to the architectural alternative (ingest into Iceberg). DF is the cheapest single win available; do not bypass it.
+
+##### Step 1 — Refresh statistics on the Postgres source
+
+Run `SHOW STATS FOR postgres_catalog.public.<dim_table>;` — if `row_count` is NULL or `distinct_values_count` is NULL on the join keys, the CBO cannot size the build side and falls back to PARTITIONED (the wrong choice for a small-dim × big-fact shape). Fix by running `ANALYZE <table>;` on the **Postgres PRIMARY** (a read replica will reject `ANALYZE` with `cannot execute ANALYZE in a read-only transaction`); the stats replicate to the read replica via WAL and Trino picks them up through the JDBC connector's `pg_stats` lookup. After ANALYZE, flush the Trino metadata cache: `CALL postgres_catalog.system.flush_metadata_cache();` and re-run.
+
+##### Step 2 — Force `join_distribution_type = 'PARTITIONED'` (last-resort memory-shape fix)
+
+> **Only reach for this AFTER Step 0 (DF) and Step 1 (stats) are confirmed correct.** If DF is firing, stats are good, and workers STILL OOM, the build side is genuinely too large to broadcast and you need to switch to a hash-partitioned (REPARTITIONED) join:
+
+```sql
+SET SESSION join_distribution_type = 'PARTITIONED';
+-- ... run your join ...
+RESET SESSION join_distribution_type;
+```
+
+PARTITIONED hashes both sides across workers, so no single worker holds the full 50M-row build — each worker only sees its `1/N` slice. This trades memory pressure for network shuffle cost. It is the right *temporary* operational fix while the ingestion pipeline is built; it is NOT the durable architecture (the JDBC scan still re-reads 50M Postgres rows on every query — see "What NOT to do" above).
+
+##### Step 3 — Consider `spill_enabled = true` for stability under unpredictable load
+
+```sql
+SET SESSION spill_enabled = true;
+```
+
+Spill writes the build-side hash table to local disk when worker memory fills, trading latency for stability. Enable only if you cannot afford the query to fail outright (e.g., an executive dashboard refresh that must complete even if slow). Spill paths require local SSD per worker pod — verify your k8s `Deployment` mounts a fast `emptyDir` or `local-pv` for `spiller-spill-path`.
+
+##### Step 4 — Cap concurrency on the federated catalog
+
+Add a Trino resource group entry capping `hardConcurrencyLimit = 2` (or 3) for the federated catalog. While the ingestion pipeline is being built, this prevents a stampede where 8 simultaneous dashboard refreshes each issue a 50M-row JDBC scan and combine to OOM the cluster. See Section 8.2C for resource group syntax.
+
+##### Step 5 — Build the ingestion pipeline (Tier 2 or Tier 3) — the actual fix
+
+Steps 0–4 buy you 1–2 weeks of stability. The durable fix is to ingest the table into Iceberg per the three-tier gradient above. Do NOT live on Steps 0–4 indefinitely — they are a bridge, not a destination. See Section 6.2B's three-tier table for the right ingestion architecture by row count.
 
 #### Dynamic filtering — verify it is enabled and check the join-reordering strategy
 

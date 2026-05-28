@@ -29,7 +29,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Column-oriented storage — what it is and why it's faster for analytics | PASSED | 4.598 | 10 |
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
-| When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.503 | 12 |
+| When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.464 | 13 |
 | Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.447 | 143 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
@@ -43,13 +43,60 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.524 | 131 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.523 | 42 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
-| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.511 | 253 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.509 | 254 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
 | SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.652 | 16 |
 
 ---
 
 ## Score history
+
+### Iter 357 — 2026-05-29 (EXTENDED PHASE)
+
+**Q1** — Trino federation: federate-vs-ingest decision for 50M-row Postgres `customers` joined to Iceberg `events` on every dashboard query (RE-PROBE per iter356 judge probe target #3: "we're joining a 50M-row Postgres customers table to Iceberg events every 5 minutes — should we keep federating live, or materialize customers into Iceberg?"). Responder produced: (a) clear "stop federating, ingest into Iceberg" recommendation; (b) decision rule table (`>5M rows`/`frequently joined` → ingest); (c) why federation breaks: worker memory pressure on 50M-row JDBC result, Postgres replica CPU >70%, Iceberg-side optimizations (min/max stats, partition pruning, dynamic filtering) lost when joined to JDBC source; (d) federation-vs-ingestion tradeoff table (freshness, read perf, Postgres load, scalability); (e) two ingestion options (nightly Spark batch with `INSERT INTO iceberg.analytics.customers SELECT * FROM postgres_catalog.public.customers`; 15-min micro-batch recommended for SaaS dashboards); (f) post-cutover Iceberg-to-Iceberg join example.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.0 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 4.5 |
+| Completeness | 3.5 |
+| **Average** | **4.00** |
+
+Judge verified via WebSearch: (1) Federating large Postgres tables via JDBC is a known bottleneck — per Starburst's "Benchmarking the JDBC Bottleneck in Trino" the JDBC layer is a serialization bottleneck that limits Postgres-side throughput on cross-source joins; parallelization via multiple JDBC connections is the documented mitigation but does not eliminate the problem at 50M rows. (2) Broadcast joins require the right side after filtering to fit in memory on each node, so raising `join_max_broadcast_table_size` for a 50M-row dimension does replicate the dimension to every worker per trino.io/docs/current/optimizer/cost-based-optimizations.html — responder's "10GB on every worker" framing is qualitatively correct. (3) Partitioned joins require redistributing both tables using a hash of the join key — slower but allow much larger joins per general-properties docs — responder did NOT mention this as a stop-gap, which is a gap for the federation topic that the iter357 teacher action #4 listed in order. (4) Iceberg's min/max statistics, partition pruning, and dynamic filtering all become available when both sides are Iceberg per trino.io/docs/current/admin/dynamic-filtering.html — responder's claim that "Iceberg side loses all advantages when joined with JDBC" is essentially correct (dynamic filtering can still push to Iceberg side from JDBC predicates, but the build-side stats and partition pruning that Iceberg-to-Iceberg unlocks are lost on the JDBC side). (5) The specific "5M row" threshold in the decision rule is NOT documented in official Trino sources; the iter357 teacher action #3/#5 documented a granular matrix (<10M federate live with PARTITIONED, 10M-100M ingest nightly, >100M CDC pipeline). Responder collapsed this gradient to a binary >5M=ingest rule, which is conservative but loses nuance — the CDC option for >100M is absent. (6) `INSERT INTO iceberg.analytics.customers SELECT * FROM postgres_catalog.public.customers` is correct Trino cross-catalog CTAS-style syntax. (7) The "<500ms columnar" and ">70% CPU" specific numbers are illustrative but not sourced. (8) dbt is permitted in prod_info.md and is a natural fit for the micro-batch ingestion path — not mentioned. Topic running avg: (4.511 × 253 + 4.00) / 254 = (1141.283 + 4.00) / 254 = **4.509 across 254 questions** — PASSED (stable above 4.5 threshold, slight downward smoothing from 4.00 single-question pull-down).
+
+**Iter 357 Q1: 4.00 — PASS** ✓ (soft pass — right at the per-question 4.0 bar; on the topic's raised 4.5 threshold this drags the running average slightly)
+
+GAPS (deductions from 5):
+- **Technical accuracy (−1.0)**: (a) "5M row" cutoff is presented as a hard rule but is not from official Trino docs and contradicts the iter357 teacher action's documented matrix of <10M federate / 10–100M ingest nightly / >100M CDC; (b) "<500ms" and ">70% CPU" are unsourced specific numbers; (c) dynamic filtering not mentioned as a recurring gap (flagged iter164/165/356 — slipped AGAIN); (d) `join_distribution_type=PARTITIONED` not surfaced as the stop-gap that the engineer could try before committing to ingestion.
+- **Beginner clarity (−1.0)**: "build side" appears without inline definition; "JDBC", "dynamic filtering", "min/max statistics", "partition pruning", "columnar" all unexplained for a SaaS engineer with no OLAP background.
+- **Practical applicability (−0.5)**: (a) dbt not mentioned despite being permitted in prod_info.md and being the natural tool for the 15-min micro-batch pattern on this on-prem k8s stack; (b) CDC option (Debezium → Iceberg) absent — for a customers table joined "every dashboard query," CDC with 1-5 min lag may be the right answer over 15-min micro-batch.
+- **Completeness (−1.5)**: (a) intermediate "if you must federate, do this first" tier missing — engineer could lose data freshness or face cutover risk and might want the stop-gap order: dynamic filtering check → `SET SESSION join_distribution_type='PARTITIONED'` → `SHOW STATS`/`ANALYZE` on Postgres → THEN ingest; (b) CDC vs batch tradeoff for the >100M tier absent; (c) cutover/refresh strategy nuance (full refresh vs incremental MERGE with primary key, snapshot semantics) absent; (d) the granular decision matrix (<10M / 10-100M / >100M) collapsed to binary; (e) prod-environment specifics absent — no mention of dbt, no mention of where the Spark job runs (k8s SparkApplication), no mention of MinIO as the Iceberg storage layer.
+
+ITER358 TEACHER ACTION (MEDIUM priority — Q1 passed at 4.00 soft pass, topic at 4.509 stable but slipping):
+1. Add an explicit "federate-vs-ingest decision tree" to `resources/22-trino-federation-postgresql.md` that is unambiguous about the gradient: <10M-row dimension + low write rate → federate live with `join_distribution_type=PARTITIONED` and dynamic filtering; 10M-100M-row dimension → ingest nightly with Spark + dbt + `INSERT INTO iceberg.analytics.<table> SELECT * FROM postgres_catalog.<schema>.<table>`; >100M-row dimension OR <5min freshness SLO → Debezium CDC → Iceberg MoR pipeline.
+2. Add a "stop-gap before you commit to ingestion" tier — if you must federate for now, the order is: check `join-dynamic-filtering-enabled=true`, run `SHOW STATS FOR postgres_catalog.<schema>.<table>` and `ANALYZE <table>` on the Postgres source if NULL, then `SET SESSION join_distribution_type='PARTITIONED'`, then consider `spill_enabled=true`. This buys time while the ingestion pipeline is built.
+3. Add inline definitions for "build side", "JDBC", "dynamic filtering", "columnar storage", "min/max statistics", "partition pruning" — these are still being used without explanation across federation/CBO answers despite multiple iterations flagging the gap.
+4. Add a "cutover playbook" — full refresh vs incremental MERGE, snapshot semantics (atomicity), dual-write window vs cut-and-replace, how to compare row counts and aggregates against the Postgres source as a verification step.
+5. Tie ingestion examples explicitly to the production stack: Spark job runs as a `SparkApplication` CR on the k8s cluster; dbt model materializes as `incremental` with `unique_key='customer_id'`; MinIO is the Iceberg storage layer via S3 protocol.
+
+ITER358 JUDGE PROBE TARGETS — under-tested topics still open:
+1. Query plan optimization (EXPLAIN ANALYZE reading for slow Iceberg queries) — still not probed, recurring rubric note since iter356.
+2. Cost considerations cloud vs on-prem (S3+Athena+Glue lift-and-shift vs on-prem Trino+Iceberg+MinIO) — still not probed.
+3. CDC-vs-batch for federate-vs-ingest decision — re-probe at "we need fresher data than nightly batch — what's the architecture for syncing Postgres customers into Iceberg every 5 minutes?" to test if iter358 teacher action #1 (CDC tier) lands.
+4. Stop-gap federation tuning — re-probe at "we can't ingest yet (cutover takes 2 weeks) — what session properties do we set to keep dashboards alive in the meantime?" to test if iter358 teacher action #2 lands.
+
+Sources verified via WebSearch:
+- [PostgreSQL connector — Trino 481 Documentation](https://trino.io/docs/current/connector/postgresql.html) — Postgres connector and statistics retrieval
+- [Cost-based optimizations — Trino 481 Documentation](https://trino.io/docs/current/optimizer/cost-based-optimizations.html) — `join_max_broadcast_table_size` default 100MB, broadcast requires right side fits in worker memory
+- [Dynamic filtering — Trino 481 Documentation](https://trino.io/docs/current/admin/dynamic-filtering.html) — dynamic filtering for star-schema joins
+- [General properties — Trino 481 Documentation](https://trino.io/docs/current/admin/properties-general.html) — `join_distribution_type` BROADCAST/PARTITIONED/AUTOMATIC
+- [Benchmarking the JDBC Bottleneck in Trino — Starburst](https://www.starburst.io/blog/benchmarking-the-jdbc-bottleneck-in-trino/) — JDBC serialization bottleneck at scale
+
+**Topics updated**:
+- Trino federation: 4.511/253 → **4.509/254 questions** (PASSED — stable above 4.5, slight downward smoothing from 4.00 single-question pull-down)
+
+---
 
 ### Iter 356 — 2026-05-29
 
