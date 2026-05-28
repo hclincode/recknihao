@@ -1,232 +1,238 @@
-# Judge Feedback — Iter 352 Q1
+# Iter 353 Q1 — Judge Feedback
 
 **Date**: 2026-05-29
 **Phase**: extended
-**Topic**: Iceberg table maintenance (position delete file cleanup, MoR vs CoW, maintenance ordering)
-
-**Question summary**: SaaS engineer notices storage keeps growing on Iceberg tables with heavy row deletes despite nightly `EXECUTE optimize` in Trino. Teammate said position delete files don't get cleaned up the same way. Is that true? Is there a separate step? Can Trino run it?
-
-## Score
-
-| Dimension | Score | Notes |
-|---|---|---|
-| Technical accuracy | 5.0 | Every claim verified against iceberg.apache.org docs, trinodb/trino#27371, #23801, #12617, #24086. CoW-as-default for `write.delete.mode` correct. Spark CALL syntax correct. Trino EXECUTE optimize partition-scope behavior correct. Canonical 5-step order matches Iceberg maintenance runbook exactly. |
-| Beginner clarity | 5.0 | CoW vs MoR crisply explained with concrete byte-level analogy ("metadata files listing 'ignore rows at positions 3, 7, 42 in data file X'"). Numbered steps with engine labels. Diagnostic query with content=0/1/2 mapping spelled out inline. Storage-growth closing reinforces the mental model from a different angle. |
-| Practical applicability | 5.0 | Production stack (Trino 467 + Iceberg 1.5.2 + Spark + MinIO + on-prem k8s) fully respected. Engineer knows: (a) which procedure to run, (b) which engine to run it from (Spark), (c) when in the schedule to run it (between rewrite_data_files and expire_snapshots), (d) how to verify the problem exists ($files content=1 threshold of 50), (e) why storage spikes between optimize and expire. Ready-to-paste SQL. |
-| Completeness | 5.0 | Answers all three sub-questions directly: (1) yes, position deletes are different; (2) yes, separate procedure rewrite_position_delete_files; (3) Spark only, not Trino 467. Plus bonus: full maintenance ordering with engine matrix, diagnostic query, storage-growth explanation. |
-| **Average** | **5.00** | **PASS** |
-
-## Verification (WebSearch)
-
-1. **`rewrite_position_delete_files` real procedure** — confirmed at iceberg.apache.org/docs/latest/spark-procedures/ with documented dual purpose (minor compaction of small position delete files + remove dangling deletes after rewrite_data_files). Spark-only.
-2. **Trino support** — NOT supported natively per trinodb/trino#27371 roadmap. Responder's "Trino 467 does NOT support this procedure" is correct.
-3. **Canonical maintenance order** — rewrite_data_files → rewrite_position_delete_files → expire_snapshots → remove_orphan_files → rewrite_manifests is the documented sequence per iceberg.apache.org/docs/latest/maintenance/, IOMETE runbook, Dremio blog. Responder's 5-step order is exactly right.
-4. **CoW as default** — confirmed default for `write.delete.mode` per iceberg.apache.org configuration docs.
-5. **Trino OPTIMIZE partition-scope cleanup** — per PR #23801 (raunaqmorarka: "Clean up position deletes when optimizing a subset of partitions") and open issues #12617/#24086, Trino's OPTIMIZE applies position deletes ONLY for partitions being rewritten. Responder's framing "applies position deletes during rewrite but only for partitions it actually rewrites" is exactly correct.
-6. **`$files` metadata content column** — 0=data, 1=position delete, 2=equality delete — confirmed by Iceberg spec.
-
-## What worked
-
-Clean recovery from iter351 Q2's FAIL. The iter352 teacher fix on `resources/17-iceberg-table-maintenance.md` landed precisely:
-
-- TL;DR rewritten with explicit numbered canonical sequence → responder reproduced the correct 5-step order.
-- NEW SECTION 1b `rewrite_position_delete_files` between sections 1 and 2 → responder now mentions the procedure prominently with full Spark CALL syntax + Trino #27371 callout.
-- Safe scheduling order diagram updated → responder's "correct maintenance order for MoR tables" section is structured identically.
-- Side-by-side Trino-vs-Spark syntax matrix → responder labels every step with its engine.
-- Weekly schedule re-numbered starting with rewrite_data_files → ordering contradiction from iter351 is gone.
-
-All four iter351 defects are addressed in this single answer:
-1. Internal ordering contradiction — GONE (numbered 1→5 matches inline justification).
-2. Missing `rewrite_position_delete_files` — PRESENT with full Spark syntax and explicit "Trino 467 does NOT support" callout.
-3. Wrong Trino syntax mixed with Spark CALL — CORRECTLY SEPARATED (Spark CALL for rewrite_position_delete_files + rewrite_manifests; Trino EXECUTE optimize for compaction).
-4. Trino 467 version-fit gap on rewrite_manifests — "Spark only on Trino 467" label PRESENT.
-
-## What to watch for next
-
-No teacher action required for this sub-topic. The Iceberg maintenance topic recovers to 4.572/38. Recommended next probes for durability checks at different angles:
-
-- **Equality delete files** (`content = 2`) — when do these accumulate, what procedure handles them, Trino vs Spark availability. Most responders/resources focus on position deletes; equality deletes from CDC pipelines are the next-most-likely real-world question.
-- **`dangling_delete_threshold` parameter** for `rewrite_position_delete_files` — controls when minor compaction triggers; useful for tuning.
-- **What happens if you NEVER run rewrite_position_delete_files** — long-term query performance degradation timeline; how many delete files before scan planning slows materially.
-- **Combined-job ordering with concurrent writes** — what happens if rewrite_position_delete_files runs while a Debezium CDC stream is writing new deletes? Conflict resolution behavior.
-
-## Rubric update
-
-- Iceberg table maintenance: 4.560 / 37 → **4.572 / 38** (PASSED — recovery from iter351 Q2 FAIL)
-
-## Sources consulted
-
-- [Apache Iceberg Spark Procedures](https://iceberg.apache.org/docs/latest/spark-procedures/)
-- [Apache Iceberg Maintenance](https://iceberg.apache.org/docs/latest/maintenance/)
-- [Apache Iceberg Configuration](https://iceberg.apache.org/docs/latest/configuration/)
-- [Trino Iceberg Connector Docs](https://trino.io/docs/current/connector/iceberg.html)
-- [Trino Iceberg Roadmap (rewrite_position_delete_files proposal) — trinodb/trino#27371](https://github.com/trinodb/trino/issues/27371)
-- [Trino PR #23801 — Clean up position deletes when optimizing a subset of partitions](https://github.com/trinodb/trino/pull/23801)
-- [Trino issue #12617 — Remove unused position and equality deletes when running optimize](https://github.com/trinodb/trino/issues/12617)
-- [Trino issue #24086 — Delete files are not removed after running Iceberg maintenance ops](https://github.com/trinodb/trino/issues/24086)
-- [Dremio — CoW vs MoR in Apache Iceberg](https://www.dremio.com/blog/row-level-changes-on-the-lakehouse-copy-on-write-vs-merge-on-read-in-apache-iceberg/)
-- [IOMETE Iceberg Maintenance Runbook](https://iomete.com/resources/blog/iceberg-maintenance-runbook)
+**Topic**: Iceberg table maintenance — Debezium CDC equality delete files (fresh angle, iter352 suggestion #1)
+**Average**: 3.875 / 5.00 — **MARGINAL FAIL** (below 4.0 per-question pass bar)
+**Topic running avg**: 4.554 / 39 questions (still PASSED in aggregate)
 
 ---
 
-# Judge Feedback — Iter 352 Q2
-
-**Date**: 2026-05-29
-**Phase**: extended
-**Topic**: SQL query best practices for OLAP — interpreting Trino `EXPLAIN` output (operator names like `ScanFilterProject`, `LocalExchange`), `EXPLAIN` vs `EXPLAIN ANALYZE` semantic difference, how to use metrics to localize slowdowns.
-
-## Question
-
-"My Trino queries on our biggest tables are getting slow and I want to actually understand what's happening before I start randomly adding things. Someone told me to run `EXPLAIN` on my query to see the execution plan. I did that and got back this wall of text with words like 'ScanFilterProject' and 'LocalExchange' and numbers I don't know how to interpret. What is this output actually telling me, and how do I use it to figure out where the slowdown is? Is there also an `EXPLAIN ANALYZE` — is that different?"
-
-## Verdict: 4.75/5.00 — STRONG PASS
-
-### Scores
+## Score breakdown
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5.0 | All factual claims verified against Trino official docs. EXPLAIN ANALYZE does execute the query (confirmed via [Trino 481 EXPLAIN ANALYZE docs](https://trino.io/docs/current/sql/explain-analyze.html)). Field names `CPU`, `Scheduled`, `Blocked`, `Physical Input` are accurate. Operator descriptions (`ScanFilterProject` = read+filter+project, `LocalExchange` = within-worker shuffle) are correct. The compute-vs-I/O classification rule ("Scheduled ≈ CPU = compute-bound; Scheduled >> CPU = I/O-bound") is a legitimate diagnostic heuristic matching the docs' note that "scheduled time and physical input read time represents the amount of time spent doing I/O, which often dominates query time". The "EXPLAIN ANALYZE costs the same as running the query normally" warning is accurate and production-relevant. |
-| Beginner clarity | 5.0 | Excellent. Each operator name is defined in plain English on first appearance ("ScanFilterProject = read the table, apply WHERE conditions, pick columns to return"). The EXPLAIN vs EXPLAIN ANALYZE distinction is established with a clear free-vs-costs framing and side-by-side code blocks. The fields table (Field / Meaning / Red flag) is the right pedagogical structure for someone facing wall-of-text output. The closing concrete example with "Translation: 200 GB from disk for a 'last week' query = partition pruning failure" demonstrates exactly how to read the output, not just what it means. |
-| Practical applicability | 4.5 | Fits the production stack — MinIO is explicitly mentioned twice ("waiting on MinIO", "Compressed bytes read from MinIO"). The 5-step "how to find the problem" runbook is concrete and actionable. The follow-up diagnostic `SELECT COUNT(*) FROM iceberg.analytics."events$files"` for small-files diagnosis is correct Trino 467 syntax. The cost warning on EXPLAIN ANALYZE is engineer-appropriate ("Use sparingly, only when actively debugging"). **Gap**: the verification prompt explicitly asked about `EXPLAIN (TYPE DISTRIBUTED)` — the answer doesn't mention it. This is a meaningful applicability miss because the engineer's stated intent is "understand before randomly adding things" and TYPE DISTRIBUTED is the safer plan-only middle ground between plain `EXPLAIN` (default already shows distributed plan) and `EXPLAIN ANALYZE` (which costs full query execution). An engineer with a 30-minute slow query who wants distributed fragments without paying the runtime cost benefits from knowing this command exists. |
-| Completeness | 4.5 | Covers EXPLAIN vs EXPLAIN ANALYZE difference, output anatomy, operator names, metric interpretation, compute-vs-I/O classification, problem-finding runbook, concrete example. **Missing**: (a) `EXPLAIN (TYPE DISTRIBUTED)` as the explicit plan-only fragments option — the question specifically asks "is there also an EXPLAIN ANALYZE — is that different?" which is a natural lead-in to listing the three forms (LOGICAL/DISTRIBUTED/ANALYZE); (b) `EXPLAIN ANALYZE VERBOSE` for deeper diagnosis (Filtered %, dynamicFilterSplitsProcessed, per-operator breakdown); (c) Trino Web UI Query Plan tab as an alternative to reading raw text output (common engineer workflow — same info visualized). The core answer is strong but these three additions would close the loop. |
-| **Average** | **4.75** | **STRONG PASS** |
+| Technical accuracy | 4.0 | Core claims correct: Debezium → equality deletes (because it only knows PK, not row position); `rewrite_position_delete_files` is position-only; Trino 467 doesn't support it; $files content codes (0=data, 1=position, 2=equality) right. BUT overstates "equality deletes handled correctly by rewrite_data_files during normal compaction" — misses well-documented Iceberg 1.5.2 dangling-equality-delete bug (apache/iceberg#12838, #8933) where equality delete files persist after rewrite_data_files across partition boundaries. The fix (`remove-dangling-deletes` option) only landed in Iceberg 1.8+. Production stack runs 1.5.2 per prod_info.md. Also: "Debezium CDC streams Postgres deletes into your Iceberg table via MERGE INTO statements" framing is slightly off — the Iceberg Debezium consumer writes equality delete files via the Iceberg writer API directly, not SQL MERGE INTO. |
+| Beginner clarity | 4.5 | Strong structure: corrects the user's framing first, defines both delete types with concrete examples (file_path/row_position vs column-value tuples), diagnostic SQL annotated with content codes, plain-language bottom line. Could use a CDC-specific example (e.g., "after 1M Postgres UPDATEs you'll have N equality delete files") but well-organized for a non-OLAP engineer. |
+| Practical applicability | 3.5 | Names Trino 467 + Spark explicitly (fits production stack). Provides a runnable diagnostic query. BUT does NOT name Iceberg 1.5.2 limitation (production version per prod_info.md), does not give a concrete cadence/threshold for Debezium pipelines, does not flag `remove-dangling-deletes` as an upgrade rationale. An engineer copy-pasting this guidance into a high-write Debezium pipeline will be surprised when equality delete files don't go away. |
+| Completeness | 3.5 | Answers both direct sub-questions implicitly. Missing: explicit "no `rewrite_equality_delete_files` procedure exists today" statement (the user literally asked this — "is there a completely different maintenance operation I need to be running for those?"). Missing: Iceberg 1.5.2 dangling-equality-delete bug callout. Missing: CDC-specific maintenance cadence guidance (Debezium write rate vs maintenance frequency). Missing: MoR read-amplification problem on equality-delete-heavy CDC tables — the production failure mode the engineer is most at risk of. |
 
-## Technical verification (WebSearch)
-
-1. **EXPLAIN ANALYZE executes the query** — Confirmed via [Trino 481 EXPLAIN ANALYZE docs](https://trino.io/docs/current/sql/explain-analyze.html): "EXPLAIN ANALYZE executes the statement and shows the distributed execution plan of the statement along with the cost of each operation." Cost warning is faithful to docs.
-
-2. **Metric names** — `CPU`, `Scheduled`, `Blocked`, `Physical Input` all verified in [Trino EXPLAIN ANALYZE docs](https://trino.io/docs/current/sql/explain-analyze.html) and [Simon Thelin's Trino query performance write-up](https://medium.com/@simon.thelin90/query-plans-analyse-sql-performance-in-trino-97ac1e8f8044). Trino docs explicitly note: "scheduled time and physical input read time represents the amount of time spent doing I/O, which often dominates query time" — matches the answer's I/O-bound classification rule.
-
-3. **Operator names** — `ScanFilterProject` and `LocalExchange` are real Trino operator names confirmed in [Trino EXPLAIN docs examples](https://trino.io/docs/current/sql/explain.html). `ScanFilterProject[table = ..., filterPredicate = ...]` appears verbatim in docs; `LocalExchange[HASH][$hashvalue]` is shown in distributed plan examples.
-
-4. **EXPLAIN (TYPE DISTRIBUTED)** — Confirmed real syntax via [Trino 480 EXPLAIN docs](https://trino.io/docs/current/sql/explain.html): `EXPLAIN [ ( option [, ...] ) ] statement` with `TYPE { LOGICAL | DISTRIBUTED | VALIDATE | IO }`. Distributed plan is the default. Not mentioned in the answer — this is the completeness gap noted.
-
-## What worked
-
-1. **Concrete operator translations** — "ScanFilterProject = read the table, apply WHERE conditions, pick columns to return" is exactly the kind of plain-language explanation a beginner needs after staring at unfamiliar operator names.
-
-2. **Field interpretation table** — the Field / Meaning / Red flag structure is excellent pedagogy. The engineer can use it as a lookup reference when reading future EXPLAIN output.
-
-3. **Compute-vs-I/O heuristic** — the `Scheduled ≈ CPU` vs `Scheduled >> CPU` rule is the right mental model and matches official docs.
-
-4. **5-step problem-finding runbook** — concrete steps (check Physical Input first, classify CPU vs I/O bound, check small-files via `events$files`, look at join order if compute-bound). Engineer knows exactly what to do next.
-
-5. **MinIO explicitly mentioned** — production stack fit. "Waiting on MinIO" and "Compressed bytes read from MinIO" map the abstract concept of "I/O" to the engineer's actual storage layer.
-
-6. **Closing concrete example with translation** — "200 GB from disk for a 'last week' query = partition pruning failure. CPU ≈ Scheduled = not compute-heavy. Fix: verify your WHERE clause matches the partition column." This demonstrates the diagnostic in action, not just in theory.
-
-7. **EXPLAIN ANALYZE cost warning** — "costs the same as running the query normally" + "Use sparingly, only when actively debugging" is critical safety guidance for a stack where the slow query might be running on a big table.
-
-## What was minor (small deductions)
-
-1. **No `EXPLAIN (TYPE DISTRIBUTED)` mention** — the verification prompt specifically flagged this. The answer covers EXPLAIN (free, plan-only — actually default already shows distributed) and EXPLAIN ANALYZE (executes), but doesn't explicitly enumerate the `TYPE` options. Engineer with a long-running slow query who wants fragments-without-execution may not realize they can use `EXPLAIN (TYPE DISTRIBUTED)` to be explicit, or that the default already gives them this.
-
-2. **No `EXPLAIN ANALYZE VERBOSE`** — for deeper diagnosis (per-operator stats, Filtered %, dynamic filter stats). This is the next layer of "I see the plan but still don't know which operator is slow" investigation.
-
-3. **No mention of Trino Web UI Query Plan tab** — the same info is available visually in the UI without needing to parse the wall of text. Common engineer workflow.
-
-4. **Minor metric imprecision** — "Scheduled: Wall-clock time across workers" is close but not exact. Scheduled time is the sum of scheduled time across worker threads — a wall-clock proxy summed across workers, not averaged. Not deducting because the diagnostic intent (compare to CPU) is preserved.
-
-## Topic score updates
-
-- **SQL query best practices for OLAP**: 4.645/15 → **4.652/16 questions** (PASSED — stable, slight uptick; EXPLAIN/EXPLAIN ANALYZE interpretation sub-angle is well-covered, though `EXPLAIN (TYPE DISTRIBUTED)`, `EXPLAIN ANALYZE VERBOSE`, and Trino Web UI sub-angles remain under-probed)
-
-## Iter 352 summary so far
-
-| Question | Topic | Score | Result |
-|---|---|---|---|
-| Q1 | Iceberg table maintenance — position delete file cleanup, MoR vs CoW, maintenance ordering | 5.00 | PERFECT PASS |
-| Q2 | SQL query best practices — interpreting Trino EXPLAIN output, EXPLAIN vs EXPLAIN ANALYZE | 4.75 | STRONG PASS |
-| **Iter 352 average** | | **4.875** | **STRONG PASS** |
-
-Clean recovery iteration: iter351 marginal-pass (4.00) → iter352 strong-pass (4.875). Both Q1 (Iceberg maintenance, the topic that FAILed last iteration) and Q2 (a fresh probe on EXPLAIN interpretation) land at high quality.
-
-## Recommendations for teacher
-
-**No urgent action required** — this answer is solid and the topic remains passing. For incremental polish on the EXPLAIN/EXPLAIN ANALYZE sub-topic:
-
-1. **Add a 3-form EXPLAIN comparison table** to whichever resource covers `EXPLAIN`:
-
-| Form | Runs query? | Use when |
-|---|---|---|
-| `EXPLAIN <query>` | No (default shows DISTRIBUTED) | Quick plan preview, see fragments + operators |
-| `EXPLAIN (TYPE LOGICAL) <query>` | No | Single-node logical plan before distributed planning |
-| `EXPLAIN (TYPE DISTRIBUTED) <query>` | No | Explicit distributed plan (same as default) |
-| `EXPLAIN ANALYZE <query>` | YES (full execution cost) | Real metrics: CPU, Scheduled, Blocked, Physical Input |
-| `EXPLAIN ANALYZE VERBOSE <query>` | YES (full execution cost) | Above + per-operator deep stats, Filtered %, dynamic filter stats |
-
-2. **Add Trino Web UI as alternative** — one-line callout that the Query Plan tab in the Trino UI shows the same plan info visually, often easier than parsing text output.
-
-3. **Add `EXPLAIN ANALYZE VERBOSE` to the diagnostic ladder** — useful for the next layer of "I see the plan but still don't know which operator is slow" investigation.
-
-## Recommendations for next iteration (iter353+)
-
-**Topics under-tested or with sub-angle gaps**:
-- SQL query best practices: probe `EXPLAIN (TYPE DISTRIBUTED)` directly, or `EXPLAIN ANALYZE VERBOSE`, or partition pruning verification via EXPLAIN
-- Iceberg table maintenance: equality delete files (content=2) from CDC pipelines, `dangling_delete_threshold` tuning, long-term degradation if rewrite_position_delete_files never runs
-- Cost considerations: MinIO erasure coding tier choices, on-prem capacity planning (only 4 questions)
-- Query performance regression: oncall workflow integration with EXPLAIN ANALYZE diagnostics (only 2 questions)
-
-## Sources consulted
-
-- [Trino 481 EXPLAIN ANALYZE](https://trino.io/docs/current/sql/explain-analyze.html)
-- [Trino 480 EXPLAIN](https://trino.io/docs/current/sql/explain.html)
-- [Trino 480 Cost in EXPLAIN](https://trino.io/docs/current/optimizer/cost-in-explain.html)
-- [Simon Thelin — Query Plans: Analyse SQL Performance In Trino](https://medium.com/@simon.thelin90/query-plans-analyse-sql-performance-in-trino-97ac1e8f8044)
-- [CelerData — Trino Query Optimization Best Practices](https://celerdata.com/glossary/trino-query-optimization)
+**Average**: (4.0 + 4.5 + 3.5 + 3.5) / 4 = **3.875** → **MARGINAL FAIL**
 
 ---
 
-## Iter 352 End-of-Iteration Summary
+## WebSearch verification trail
+
+1. **Debezium → equality deletes**: Confirmed via debezium.io/blog/2021/10/20/using-debezium-create-data-lake-with-apache-iceberg/ — the Iceberg Debezium consumer "uses the Iceberg equality delete feature and creates delete files using the key of the Debezium change data events (derived from the primary key of the source table)." Responder's core claim is correct.
+
+2. **`rewrite_data_files` and equality deletes — partial story**: apache/iceberg#12838 (May 2025, still open as of 2026-05) documents that `rewrite_data_files` leaves orphaned equality delete files when dataSequenceNumber comparisons cross partition boundaries. apache/iceberg#8933 ("equality delete files can be removed immediately after rewrite?") was closed as not-planned. The `remove-dangling-deletes` option in Iceberg 1.8+ addresses this — Iceberg 1.5.2 (production stack) does NOT have it. Responder's "handled correctly during normal compaction" claim overstates the production reality.
+
+3. **No standalone `rewrite_equality_delete_files` procedure exists**: Confirmed via Iceberg Spark procedures docs and apache/iceberg#12914 (planned `ConvertEqualityDeleteFiles` action, not yet shipped). Responder addresses this implicitly but should state it explicitly.
+
+4. **Trino 467 doesn't support `rewrite_position_delete_files`**: Confirmed via trinodb/trino#27371 roadmap. Responder correct.
+
+5. **$files content codes**: Confirmed via Iceberg spec — 0=data, 1=position delete, 2=equality delete. Responder correct.
+
+---
+
+## What the iter354 teacher should add
+
+The iter353 question exposed three distinct gaps from the iter352 position-delete fix. The position-delete topic is now durable across iter345/iter352. But equality-delete cleanup is a separate sub-topic that needs its own resource section.
+
+**Recommended new section** in `resources/17-iceberg-table-maintenance.md` (or `resources/15-postgres-iceberg-cdc.md` if cross-referenced from CDC):
+
+### Section title: "Equality delete files from CDC pipelines (Debezium)"
+
+Required content:
+
+1. **What writes equality deletes vs position deletes**:
+   - Debezium Iceberg consumer → equality deletes (PK-based, content=2)
+   - Trino MERGE/UPDATE/DELETE with `write.delete.mode = 'merge-on-read'` → position deletes (content=1)
+   - Spark MERGE INTO can write either depending on config
+
+2. **Iceberg 1.5.2 dangling-equality-delete bug (CRITICAL FOR PRODUCTION)**:
+   - apache/iceberg#12838: `rewrite_data_files` does NOT always remove equality delete files across partitions
+   - Fix: `remove-dangling-deletes` option in Iceberg 1.8+
+   - Production runs Iceberg 1.5.2 — DOES NOT have this option
+   - Workaround: snapshot expiry will eventually release the underlying files; or manually run `delete_orphan_files` after rewrite_data_files passes; or upgrade to 1.8+
+
+3. **No standalone `rewrite_equality_delete_files` procedure exists today**:
+   - Planned per apache/iceberg#12914 but not shipped
+   - Closest substitute: `rewrite_data_files` applies equality deletes during data file rewrite (subject to the 1.5.2 dangling bug above)
+
+4. **CDC-specific maintenance cadence**:
+   - Debezium pipelines generate equality deletes at source UPDATE/DELETE rate
+   - For high-write tables (>100 UPDATEs/sec on source Postgres): hourly compaction recommended, not nightly
+   - For low-write tables (<10 UPDATEs/sec): nightly is fine
+   - Concrete trigger threshold: if `content=2` file count exceeds 10× `content=0` data file count for a partition, read amplification is severe — run rewrite_data_files immediately
+
+5. **MoR read-amplification on equality-delete-heavy tables**:
+   - Every Trino query scans BOTH data files AND equality delete files
+   - With 1000+ equality delete files accumulated, query latency goes from seconds to minutes
+   - The diagnostic query in the responder's answer is correct; add a concrete "danger zone" threshold
+
+6. **Correct framing of Debezium write path**:
+   - The Iceberg Debezium consumer writes equality delete files via the Iceberg writer API directly
+   - NOT via SQL MERGE INTO (the responder's current framing is incorrect)
+   - kafka-connect-iceberg sink has config options (databricks/iceberg-kafka-connect#319) for position-delete mode, but Debezium Server's Iceberg consumer is equality-delete-mode by default
+
+---
+
+## Recommendations for iter354+
+
+- **iter354**: Teacher writes the equality-delete section above. Judge re-probes with a related question — e.g., "We've been running rewrite_data_files nightly on our Debezium-ingested Iceberg tables but our $files content=2 count keeps growing. Is the procedure broken, or are we missing a step?" — to verify the Iceberg 1.5.2 dangling-equality-delete callout lands.
+- **Avoid re-probing position-delete cleanup again** (durable since iter352 with the canonical 5-step ordering).
+- **Other under-probed topics to rotate to** (per iter352 notes): on-prem MinIO storage sizing/growth (Cost considerations, 4 questions); Trino federation memory pressure (Query performance regression, 2 questions).
+
+---
+
+## Pattern note
+
+This is the second per-question FAIL on Iceberg maintenance in the last 4 iterations (iter351 Q2 FAIL on position-delete ordering → iter352 PERFECT on re-probe → iter353 Q1 FAIL on equality-delete angle). The pattern is **NOT a regression** of the position-delete fix; it's exposure of a related but distinct sub-topic that the iter352 resource fix did not cover. The iter354 teacher action should be additive (new section), not corrective (no changes to existing position-delete content).
+
+---
+
+# Iter 353 Q2 — Judge Feedback
 
 **Date**: 2026-05-29
 **Phase**: extended
-**Result**: STRONG PASS — iteration average 4.875/5.00
+**Topic**: Cost considerations / Storage sizing — Iceberg lakehouse on MinIO: 1 TB raw data vs 4 TB MinIO footprint, attributing 3 TB overhead to snapshots vs compaction vs delete files (fresh angle, iter352 suggestion #2)
+**Average**: 4.125 / 5.00 — **MARGINAL PASS** (above 4.0 per-question pass bar)
+**Topic running avg (Cost considerations)**: 4.450 / 5 questions (still PASSED)
 
-### Scores
+---
+
+## Question summary
+
+"4 TB on MinIO vs 1 TB raw data — 3 TB overhead. Is it old snapshots, compaction temp doubling, or delete files? How do I figure out the main culprit so I know what to fix first?"
+
+## Score breakdown
+
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Technical accuracy | 4.0 | Core claims verified: old snapshots as primary cause (~90%) confirmed by [Starburst](https://www.starburst.io/blog/iceberg-snapshots-affect-storage-not-performance/) + [IOMETE](https://iomete.com/resources/blog/iceberg-maintenance-runbook). Compaction temporarily doubles storage confirmed by [Dremio](https://www.dremio.com/blog/maintaining-iceberg-tables-compaction-expiring-snapshots-and-more/) + [Conduktor](https://www.conduktor.io/glossary/maintaining-iceberg-tables-compaction-and-cleanup) ("Compaction temporarily doubles storage usage, with old and new files existing until snapshots expire"). `$snapshots` and `$files` metadata table queries valid in Trino 467 (stable through 481). `$files.content` mapping (0=data, 1=position delete, 2=equality delete) correct per Iceberg spec. **Major deduction (-1.0)**: the fix-step block uses Spark CALL syntax (`CALL iceberg.system.rewrite_data_files(...)`, `CALL iceberg.system.expire_snapshots(...)`, `CALL iceberg.system.remove_orphan_files(...)`) for procedures that ARE available natively in Trino 467 via `ALTER TABLE table EXECUTE optimize(...)`, `ALTER TABLE table EXECUTE expire_snapshots(retention_threshold => '...')`, `ALTER TABLE table EXECUTE remove_orphan_files(retention_threshold => '...')`. Per [Trino 481 Iceberg connector docs](https://trino.io/docs/current/connector/iceberg.html), the Spark CALL syntax does NOT execute in Trino. Only `rewrite_manifests` is genuinely Spark-only on Trino 467 (per trinodb/trino#27371). The diagnostic queries are correctly written in Trino syntax, but the fix block switches to Spark without flagging the engine change. This is a partial regression of the iter351 Q2 engine-mixing defect — the iter352 Q1 fix on `resources/17-iceberg-table-maintenance.md` taught engine-labeling for position-delete maintenance but did NOT generalize to the cost/storage flow. |
+| Beginner clarity | 4.5 | Strong scaffold: 6-step framework (CoW/MoR check → diagnostic queries → percentage breakdown → delete file check → fix → verify). The 2.5–3 TB / 0.1–0.2 TB / 1 TB attribution builds a concrete mental model for "where does the 3 TB live". The closing formula `daily_rewritten_volume × retention_days` cleanly explains the snapshot-retention cost knob. **Minor deduction (-0.5)**: engine confusion in the fix block (Spark CALL vs Trino EXECUTE) is the opposite of clarity for a beginner — an engineer pasting `CALL iceberg.system.rewrite_data_files(...)` into Trino will get `Procedure not registered` and not know why. The iter352 Q1 pattern (engine label per step + side-by-side Trino-vs-Spark syntax matrix) would have closed this. |
+| Practical applicability | 3.5 | Diagnostic queries are immediately runnable in Trino 467 — that part is excellent. 50–75% storage reduction expectation gives the engineer a target. Nightly compaction + weekly full maintenance cadence is reasonable. **Major deduction (-1.5)**: the fix-step code block cannot be pasted into Trino 467 as written. An engineer who copies the Spark CALL syntax into Trino will get a procedure-not-registered error. They MUST either translate to `ALTER TABLE ... EXECUTE` or run from Spark — the answer never tells them this. Given the question is fundamentally "how do I fix this", a fix block that doesn't execute on the production query engine is a real applicability hit. The MinIO sizing context is acknowledged; the engine fit is not. Also: `dry_run => true` is Spark-only syntax — Trino's ALTER TABLE EXECUTE `remove_orphan_files` does NOT support dry_run, so engineers can't preview-before-delete on Trino. |
+| Completeness | 4.5 | All three sub-questions answered directly: (1) yes, old snapshots are primary (~90%); (2) yes, compaction temporarily doubles storage and only shrinks after expire_snapshots; (3) delete files <10% typically unless heavy CDC, separate $files content=1/2 check. Plus diagnostic queries, fix sequence, verification, scheduling. **Minor deduction (-0.5)**: doesn't mention MinIO erasure-coding multiplier as an orthogonal cause of the 4x footprint. A bare-metal MinIO pool with EC 4+2 introduces 1.5x logical-to-physical overhead BEFORE any Iceberg-side overhead. This could explain a meaningful chunk of the "3 TB gap" and is worth at least a sentence to rule out at the storage layer before attacking Iceberg. The 4x ratio is suspiciously close to typical EC multiplier × snapshot bloat. Also missing: `iceberg.expire_snapshots.min-retention` Trino catalog default (7d floor) — common first-time-user trip-wire. |
+
+**Average**: (4.0 + 4.5 + 3.5 + 4.5) / 4 = **4.125** → **MARGINAL PASS**
+
+---
+
+## WebSearch verification trail
+
+1. **Old snapshots as primary storage growth cause**: CONFIRMED. Starburst and IOMETE both establish that snapshot accumulation is the principal driver of unexpected storage growth in long-running Iceberg tables. The 90% framing is a reasonable rule of thumb for append-mostly raw-event ingest where rows are rarely updated; snapshot-pinned data file retention dominates.
+
+2. **Compaction temporary doubling**: CONFIRMED. Dremio's "Maintaining Iceberg Tables" and Conduktor's "Maintaining Iceberg Tables: Compaction and Cleanup" both state: "Compaction temporarily doubles storage usage, with old and new files existing until snapshots expire." Responder's framing matches docs.
+
+3. **Trino 467 `$snapshots` / `$files` metadata tables**: CONFIRMED. The Trino Iceberg connector exposes `<table>$snapshots`, `<table>$files`, `<table>$manifests`, `<table>$partitions`, `<table>$history`. The `file_size_in_bytes` and `content` columns are stable in 467 and current 481. SQL `SUM(file_size_in_bytes) / 1024 / 1024 / 1024` is a valid pattern.
+
+4. **Trino 467 `CALL iceberg.system.*` procedures**: NOT VALID. The Trino Iceberg connector exposes `expire_snapshots`, `remove_orphan_files`, and `optimize` (Trino's name for what Iceberg's Spark API calls `rewrite_data_files`) via `ALTER TABLE <name> EXECUTE <procedure>(...)`, NOT via `CALL iceberg.system.<procedure>(...)`. The Spark CALL syntax in the answer's fix-step block requires a Spark job to execute. The engineer cannot paste those statements into Trino. Source: [Trino 481 Iceberg connector docs](https://trino.io/docs/current/connector/iceberg.html) "Procedures" and "ALTER TABLE EXECUTE" sections; also [Trino PR #10810](https://github.com/trinodb/trino/pull/10810) "Expire Snapshot and Remove Orphan files for Iceberg".
+
+5. **`rewrite_manifests` Spark-only on Trino 467**: CONFIRMED. Trino does not yet expose `rewrite_manifests` (tracked in roadmap issue trinodb/trino#27371). For this single step, dropping to Spark is correct.
+
+6. **MinIO erasure-coding multiplier**: a 4x footprint on a bare-metal MinIO pool with EC 4+2 + snapshot retention is a plausible real-world breakdown. The answer attributes 100% of the gap to Iceberg overhead, which may overstate Iceberg-side responsibility for the 3 TB.
+
+---
+
+## What the iter354 teacher should add
+
+The iter353 Q2 question exposed two distinct gaps from the iter352 position-delete fix:
+
+### Gap 1: Engine-label generalization
+
+The iter352 Q1 fix taught engine-labeling on `resources/17-iceberg-table-maintenance.md`. The responder reproduces this perfectly for position-delete maintenance. But the lesson did NOT generalize to the cost/storage diagnostic flow on Q2. The cost/storage resource (likely `resources/15-storage-sizing.md` or wherever this content lives) needs the SAME Trino-vs-Spark side-by-side maintenance syntax cheat sheet that `resources/17` has.
+
+**Recommended addition** — side-by-side table near any maintenance-step listing in cost/storage resources:
+
+| Step | Trino 467 syntax | Spark CALL syntax | Use which |
+|---|---|---|---|
+| Compaction | `ALTER TABLE t EXECUTE optimize(file_size_threshold => '256MB')` | `CALL iceberg.system.rewrite_data_files(table => 't', options => map('target-file-size-bytes', '268435456'))` | Trino EXECUTE preferred (Trino is the query engine) |
+| Expire snapshots | `ALTER TABLE t EXECUTE expire_snapshots(retention_threshold => '30d')` | `CALL iceberg.system.expire_snapshots(table => 't', older_than => current_timestamp - interval '30' day)` | Trino EXECUTE preferred |
+| Remove orphan files | `ALTER TABLE t EXECUTE remove_orphan_files(retention_threshold => '3d')` | `CALL iceberg.system.remove_orphan_files(table => 't', older_than => ..., dry_run => true)` | Trino EXECUTE for prod; Spark CALL for dry_run preview |
+| Rewrite manifests | NOT SUPPORTED in Trino 467 (trinodb/trino#27371) | `CALL iceberg.system.rewrite_manifests(table => 't')` | Spark only |
+
+### Gap 2: MinIO erasure-coding callout
+
+Add to the storage sizing / capacity planning section: a concrete multiplier table for EC 4+2 (1.5x), EC 8+4 (1.5x), EC 4+4 (2x). Tell the engineer to subtract this BEFORE attributing the remainder to Iceberg overhead. This is on-prem-MinIO-specific knowledge that pure cloud-storage docs miss and that the production stack (per prod_info.md) explicitly uses.
+
+### Gap 3 (minor): `iceberg.expire_snapshots.min-retention` catalog floor
+
+Trino's catalog property `iceberg.expire_snapshots.min-retention` defaults to 7d. Attempts to expire with `retention_threshold < 7d` will fail with "Retention specified (...) is shorter than the minimum retention configured in the system (7.00d)". One paragraph on this saves engineers a debugging cycle.
+
+### Gap 4 (minor): `dry_run` syntax mismatch
+
+Spark CALL `remove_orphan_files` supports `dry_run => true`; Trino EXECUTE does not. Engineers wanting to preview before deleting on Trino need to know this — and may need to drop to Spark for that one step.
+
+---
+
+## Recommendations for iter354+
+
+- **iter354**: Teacher adds the Trino-vs-Spark maintenance syntax cheat sheet to the cost/storage resource (gap 1 above) + MinIO EC multiplier section (gap 2) + min-retention floor (gap 3) + dry_run note (gap 4). Judge re-probes from a Trino-first angle, e.g., "I only have Trino access, not Spark — how do I run compaction and snapshot cleanup on my Iceberg tables on MinIO?"
+- **Avoid re-probing position-delete cleanup** (durable since iter352).
+- **Other under-probed topics to rotate to** (per iter352 notes): Trino federation memory pressure (Query performance regression, only 2 questions).
+
+---
+
+## Sources consulted
+
+- [Starburst — Iceberg Snapshots Affect Storage, Not Performance](https://www.starburst.io/blog/iceberg-snapshots-affect-storage-not-performance/)
+- [IOMETE — The Iceberg Maintenance Runbook: Snapshots, Orphan Files, and Metadata Bloat](https://iomete.com/resources/blog/iceberg-maintenance-runbook)
+- [Dremio — Maintaining Iceberg Tables: Compaction, Expiring Snapshots, and More](https://www.dremio.com/blog/maintaining-iceberg-tables-compaction-expiring-snapshots-and-more/)
+- [Conduktor — Maintaining Iceberg Tables: Compaction and Cleanup](https://www.conduktor.io/glossary/maintaining-iceberg-tables-compaction-and-cleanup)
+- [Apache Iceberg Maintenance Docs](https://iceberg.apache.org/docs/latest/maintenance/)
+- [Apache Iceberg Spark Procedures](https://iceberg.apache.org/docs/latest/spark-procedures/)
+- [Trino 481 Iceberg Connector — Procedures and ALTER TABLE EXECUTE](https://trino.io/docs/current/connector/iceberg.html)
+- [Trino PR #10810 — Expire Snapshot and Remove Orphan files for Iceberg](https://github.com/trinodb/trino/pull/10810)
+- [Trino Issue #27371 — Iceberg Roadmap (rewrite_manifests Spark-only)](https://github.com/trinodb/trino/issues/27371)
+- [Trino Issue #24086 — Delete files are not removed after running Iceberg maintenance ops](https://github.com/trinodb/trino/issues/24086)
+
+---
+
+## Iter 353 summary
 
 | Question | Topic | Score | Result |
 |---|---|---|---|
-| Q1 | Iceberg table maintenance — position delete file cleanup (MoR vs CoW), canonical maintenance ordering, `rewrite_position_delete_files` Spark-only availability | 5.00 | PERFECT PASS |
-| Q2 | SQL query best practices — Trino `EXPLAIN` output interpretation, operator names (`ScanFilterProject`, `LocalExchange`), `EXPLAIN` vs `EXPLAIN ANALYZE` semantic difference, compute-vs-I/O classification heuristic | 4.75 | STRONG PASS |
-| **Iter 352 average** | | **4.875** | **STRONG PASS** |
+| Q1 | Iceberg maintenance — Debezium CDC equality delete files | 3.875 | MARGINAL FAIL |
+| Q2 | Cost / storage — 1 TB raw vs 4 TB MinIO diagnosis | 4.125 | MARGINAL PASS |
+| **Iter 353 average** | | **4.000** | **MARGINAL PASS (overall)** |
 
-### Q1 win — resources/17 fix confirmed durable for MoR/position-delete scenario
+Each question reveals a distinct sub-topic gap:
+- Q1 → equality-delete cleanup gap in Iceberg 1.5.2 (suggests new section in `resources/17-iceberg-table-maintenance.md`)
+- Q2 → Trino-vs-Spark syntax generalization gap in cost/storage diagnostics (suggests engine-label treatment in `resources/15-storage-sizing.md` or wherever cost content lives)
 
-The iter352 teacher fix on `resources/17-iceberg-table-maintenance.md` landed perfectly and the responder reproduced every key element:
+Neither is a critical correctness failure, but both are actionable for iter354 teacher work. The aggregate topic averages remain above pass thresholds (Iceberg maintenance 4.554/39, Cost considerations 4.450/5).
 
-- Canonical 5-step ordering (rewrite_data_files → rewrite_position_delete_files → expire_snapshots → remove_orphan_files → rewrite_manifests) is reproduced exactly with engine labels per step.
-- `rewrite_position_delete_files` is prominently named with correct Spark CALL syntax and explicit "Trino 467 does NOT support" callout (trinodb/trino#27371).
-- CoW-as-default for `write.delete.mode` is correctly stated.
-- Trino `OPTIMIZE` partition-scope behavior (applies position deletes only for partitions actually rewritten) is correctly framed per PR #23801 and issues #12617/#24086.
-- `$files` content column mapping (0=data, 1=position delete, 2=equality delete) is spelled out inline with diagnostic query.
-- All four iter351 Q2 defects (ordering contradiction, missing procedure, wrong syntax, missing version-fit) are addressed in this single answer.
+---
 
-Topic score: Iceberg table maintenance 4.560/37 → 4.572/38 (recovery confirmed from iter351 Q2 FAIL).
+## Iter 353 End-of-Iteration Summary
 
-### Q2 win — first probe of EXPLAIN/EXPLAIN ANALYZE topic, strong answer
+**Date**: 2026-05-29
+**Phase**: extended
+**Result**: MARGINAL PASS (barely above threshold)
 
-First time the EXPLAIN output interpretation sub-angle has been tested directly. Strong showing:
+### Scores table
 
-- EXPLAIN vs EXPLAIN ANALYZE semantic difference (plan-only vs full execution cost) clearly established with cost warning.
-- Operator names (`ScanFilterProject`, `LocalExchange`) translated to plain English on first appearance.
-- Field interpretation table (Field / Meaning / Red flag) gives engineer a usable lookup reference.
-- Compute-vs-I/O heuristic (`Scheduled ≈ CPU` vs `Scheduled >> CPU`) matches official Trino docs.
-- MinIO explicitly named twice, anchoring abstract I/O to the production stack.
-- Concrete 200 GB partition-pruning-failure example demonstrates diagnostic in action.
+| Question | Topic | Avg | TechAcc | BegClr | PracApp | Comp | Result |
+|---|---|---|---|---|---|---|---|
+| Q1 | Iceberg maintenance — Debezium CDC equality delete files | 3.875 | 4.0 | 4.5 | 3.5 | 3.5 | MARGINAL FAIL |
+| Q2 | Cost / storage — 1 TB raw vs 4 TB MinIO diagnosis | 4.125 | 4.0 | 4.5 | 3.5 | 4.5 | MARGINAL PASS |
+| **Iteration average** | | **4.000** | **4.0** | **4.5** | **3.5** | **4.0** | **MARGINAL PASS** |
 
-Minor deductions (-0.25 on each of applicability and completeness): no `EXPLAIN (TYPE DISTRIBUTED)` enumeration, no `EXPLAIN ANALYZE VERBOSE`, no Trino Web UI Query Plan tab mention. These are polish gaps, not correctness issues.
+### Q1 root cause
 
-Topic score: SQL query best practices for OLAP 4.645/15 → 4.652/16.
+Equality-delete sub-topic is not covered in `resources/17-iceberg-table-maintenance.md`. The responder correctly reproduced the position-delete cleanup story (durable since iter345/iter352) but had nothing to draw from on the equality-delete angle — specifically: no callout of the Iceberg 1.5.2 dangling-equality-delete bug (apache/iceberg#12838) that affects production, no explicit statement that no standalone `rewrite_equality_delete_files` procedure exists today, no CDC-specific maintenance cadence guidance for Debezium pipelines, no MoR read-amplification framing. **This is an additive gap, not a regression** of the iter352 position-delete fix. Position-delete cleanup remains durable; equality-delete cleanup is a related but distinct sub-topic that needs its own resource section.
 
-### Suggested focus for iter 353 — probe different angles
+### Q2 root cause
 
-Avoid re-testing position-delete cleanup (already perfect twice — iter345/352). Recommended fresh probes:
+Spark CALL syntax used in the fix-step block despite Trino 467 ALTER TABLE EXECUTE being available. The diagnostic queries are correctly written in Trino syntax, but the fix block silently switches engines: `CALL iceberg.system.rewrite_data_files(...)`, `CALL iceberg.system.expire_snapshots(...)`, `CALL iceberg.system.remove_orphan_files(...)` are all Spark-only and will return "Procedure not registered" if pasted into Trino. Trino 467 supports all three natively via `ALTER TABLE t EXECUTE optimize/expire_snapshots/remove_orphan_files(...)` (only `rewrite_manifests` is genuinely Spark-only on Trino 467, per trinodb/trino#27371). The iter352 Q1 engine-labeling fix on `resources/17` did NOT generalize to the cost/storage flow — partial regression of the iter351 engine-mixing defect on a new resource surface.
 
-1. **Equality delete cleanup (`content = 2`)** — when Debezium CDC writes equality deletes (vs position deletes from straight DELETEs), what procedure handles cleanup, Trino vs Spark availability matrix, how `rewrite_position_delete_files` does or does not address equality deletes. Most resources focus on position deletes; equality deletes from CDC are the next-most-likely real-world question.
+### Suggested teacher actions for iter 354
 
-2. **Storage sizing / growth on-prem** — capacity planning for MinIO on Iceberg lakehouse: snapshot retention policy impact on raw bytes stored, position+equality delete file overhead on MoR tables, manifest file growth on high-write tables, ratio of metadata to data, MinIO erasure coding tier choices and their effective storage multiplier. Cost considerations topic has only 4 questions and is under-probed.
+**(a) Add equality-delete section to `resources/17-iceberg-table-maintenance.md`** covering: Debezium→equality-deletes vs Trino MERGE→position-deletes write-path distinction; Iceberg 1.5.2 dangling-equality-delete bug (apache/iceberg#12838) + production workaround (`remove-dangling-deletes` only in 1.8+, fall back to snapshot expiry / `delete_orphan_files`); explicit "no standalone `rewrite_equality_delete_files` procedure exists today" (apache/iceberg#12914 planned, not shipped); CDC-specific maintenance cadence (hourly for >100 UPDATEs/sec, nightly for <10 UPDATEs/sec, immediate rewrite when content=2 file count exceeds 10× content=0 data file count); MoR read-amplification danger zone; correct framing of Debezium write path (Iceberg writer API directly, NOT SQL MERGE INTO).
 
-3. **Trino federation memory pressure** — when federating Iceberg + PostgreSQL CDC source + something else, where do memory bottlenecks land: coordinator vs worker, query_max_memory_per_node vs query_max_memory, spill-to-disk on MinIO-backed temp storage, the realistic limits on JOIN size between a Trino-federated PostgreSQL table and a large Iceberg table. Query performance regression topic (only 2 questions) and Trino federation sub-angles are under-probed.
+**(b) Fix Trino-vs-Spark syntax in cost/storage resources** by adding the same engine-labeling treatment that `resources/17` got in iter352. Specifically: a side-by-side Trino-EXECUTE-vs-Spark-CALL syntax cheat sheet for compaction / expire_snapshots / remove_orphan_files / rewrite_manifests, with explicit "use which" recommendation; plus the `iceberg.expire_snapshots.min-retention` 7d catalog floor callout; plus the `dry_run` syntax mismatch note (Spark CALL supports it, Trino EXECUTE does not). Also add a MinIO erasure-coding multiplier table (EC 4+2 = 1.5x, EC 8+4 = 1.5x, EC 4+4 = 2x) so engineers subtract storage-layer overhead BEFORE attributing the remainder to Iceberg.
 
-Any of these three angles would test fresh ground and validate durability of recent gains on different topics.
+**Re-probe targets for iter354 judge**: (1) Trino-first equality-delete question, e.g., "We've been running rewrite_data_files nightly on our Debezium-ingested Iceberg tables but our $files content=2 count keeps growing. Is the procedure broken, or are we missing a step?" — to verify the Iceberg 1.5.2 dangling-equality-delete callout lands. (2) Trino-only maintenance question, e.g., "I only have Trino access, not Spark — how do I run compaction and snapshot cleanup on my Iceberg tables on MinIO?" — to verify the engine-labeling treatment generalizes beyond `resources/17`.
+
+**Avoid re-probing**: position-delete cleanup (durable since iter352), EXPLAIN/EXPLAIN ANALYZE interpretation (durable since iter352 Q2).

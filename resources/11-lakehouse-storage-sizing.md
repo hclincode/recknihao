@@ -349,13 +349,17 @@ Also note: the 7-day minimum-retention floor (`iceberg.expire-snapshots.min-rete
 
 MinIO's EC:4 means "4 parity drives per erasure set." The **usable percentage depends on the erasure set size** — it is NOT a fixed 50%. Sizing advice that says "plan 2× raw" only applies to 8-drive sets.
 
-| Erasure set size | EC:4 usable % | Rule of thumb |
-|---|---|---|
-| 8 drives | 50% | Plan 2× raw |
-| 12 drives | ~67% | Plan 1.5× raw |
-| 16 drives | ~75% | Plan 1.3× raw |
+| Erasure set size | EC:4 usable % | Storage multiplier (Iceberg bytes → MinIO disk bytes) | Rule of thumb |
+|---|---|---|---|
+| 8 drives (EC 4+4) | 50% | **2.0×** | Plan 2× raw |
+| 12 drives (EC 8+4) | ~67% | **~1.5×** | Plan 1.5× raw |
+| 16 drives (EC 12+4) | ~75% | **~1.3×** | Plan 1.3× raw |
 
 Pick the row that matches your actual erasure set configuration. For example, 1 TB usable on a 12-drive EC:4 set = ~1.5 TB raw across drives, not 2 TB. Misapplying the 8-drive rule to a 16-drive deployment will over-provision storage by ~50%.
+
+> **Diagnosing storage gaps — subtract EC overhead BEFORE attributing the rest to Iceberg.** If you see "1 TB of Iceberg data is occupying 4 TB on MinIO", the very first thing to check is the EC multiplier. On an EC 4+2 / 8+4 pool, 1 TB of Iceberg-reported `file_size_in_bytes` becomes **~1.5 TB on disk** just from parity overhead — that's the storage layer doing its job, not snapshot accumulation. On an EC 4+4 pool, it's 2 TB. Subtract that BEFORE attacking Iceberg-side overhead. A 4× footprint typically breaks down as: EC multiplier (~1.5×) × snapshot accumulation (~2.5–3×) = ~4×. Mistaking EC overhead for snapshot bloat will send you chasing the wrong fix.
+
+To check your MinIO EC configuration, run `mc admin info <alias>` from the MinIO client — the output shows the erasure set size and parity drive count, from which you can compute the exact multiplier (`data_drives / total_drives = usable_fraction`; `1 / usable_fraction = multiplier`).
 
 ### What grows fastest
 - **Raw event tables** — direct function of user activity.
@@ -366,12 +370,32 @@ Pick the row that matches your actual erasure set configuration. For example, 1 
 
 ## Snapshot Management Commands
 
-The full Spark procedure syntax for Iceberg 1.5.2 maintenance operations. Run these on a schedule (Airflow, cron, or a dedicated maintenance Spark job).
+Maintenance operations for Iceberg 1.5.2 in the production stack (Trino 467 + Spark + MinIO). Run on a schedule via Airflow, cron, or a dedicated maintenance job.
+
+### Trino-vs-Spark syntax cheat sheet (read this first)
+
+**The big trap:** Spark uses `CALL iceberg.system.<procedure>(...)` syntax; Trino uses `ALTER TABLE <name> EXECUTE <procedure>(...)` syntax. **They are NOT interchangeable** — pasting `CALL iceberg.system.rewrite_data_files(...)` into a Trino session returns `Procedure not registered`. Pasting `ALTER TABLE ... EXECUTE optimize(...)` into Spark returns a syntax error.
+
+| Operation | Trino 467 syntax | Spark CALL syntax | Use which |
+|---|---|---|---|
+| **Compaction** | `ALTER TABLE iceberg.analytics.events EXECUTE optimize(file_size_threshold => '256MB')` | `CALL iceberg.system.rewrite_data_files(table => 'analytics.events', options => map('target-file-size-bytes', '268435456'))` | Trino EXECUTE preferred for ad-hoc; Spark for scheduled batch with fine-grained options |
+| **Expire snapshots** | `ALTER TABLE iceberg.analytics.events EXECUTE expire_snapshots(retention_threshold => '30d')` | `CALL iceberg.system.expire_snapshots(table => 'analytics.events', older_than => current_timestamp - interval '30' day, retain_last => 10)` | Trino EXECUTE for simple cases; Spark when you need `retain_last` (Trino 467 only accepts `retention_threshold`) |
+| **Remove orphan files** | `ALTER TABLE iceberg.analytics.events EXECUTE remove_orphan_files(retention_threshold => '7d')` | `CALL iceberg.system.remove_orphan_files(table => 'analytics.events', older_than => current_timestamp - interval '7' day, dry_run => true)` | Trino EXECUTE for production runs; **Spark required for `dry_run` preview** (see note below) |
+| **Rewrite manifests** | NOT SUPPORTED in Trino 467 — tracked in [trinodb/trino#27371](https://github.com/trinodb/trino/issues/27371). Trino 470+ exposes `ALTER TABLE ... EXECUTE optimize_manifests`, but production is on 467. | `CALL iceberg.system.rewrite_manifests(table => 'analytics.events')` | **Spark only** on Trino 467 |
+
+**Critical Trino 467 caveats:**
+
+1. **`dry_run` is Spark-only.** Trino's `remove_orphan_files` does NOT support `dry_run => true`. Running the Trino form IS the deletion — there is no preview mode. For first-time runs on a large table, drop to Spark for the preview.
+2. **`retention_threshold` has a 7-day floor.** Trino's catalog property `iceberg.expire_snapshots.min-retention` defaults to **7d**, and there's a parallel `iceberg.remove_orphan_files.min-retention` (also 7d). Setting `retention_threshold => '1d'` will fail with `Retention specified (1.00d) is shorter than the minimum retention configured in the system (7.00d)`. To use sub-7-day retention, either raise the catalog config (requires Trino restart) or run from Spark.
+3. **`retain_last` is Spark-only on Trino 467.** Added to Trino's `expire_snapshots` in Trino 479 (Dec 2025); production is on 467. If you need "keep last N snapshots regardless of age", use the Spark form.
+4. **`rewrite_manifests` is Spark-only on Trino 467.** No workaround other than upgrading or running Spark.
+
+### Spark CALL examples (full options)
 
 ```sql
 -- Expire old snapshots: drops snapshots older than the cutoff, but always retains at least N most recent.
 -- Required to reclaim storage from old data files no longer referenced by any retained snapshot.
-CALL catalog.system.expire_snapshots(
+CALL iceberg.system.expire_snapshots(
   table       => 'analytics.events',
   older_than  => TIMESTAMP '2024-01-01 00:00:00',
   retain_last => 5
@@ -379,19 +403,33 @@ CALL catalog.system.expire_snapshots(
 
 -- Compact small files: rewrites the table's data files to target file size (default 512 MB).
 -- Run after streaming ingest or any workload that produces many small files.
-CALL catalog.system.rewrite_data_files(
+CALL iceberg.system.rewrite_data_files(
   table => 'analytics.events'
 );
 
--- Remove orphan files: deletes data/metadata files in the table's storage location that are
--- not referenced by any snapshot. Catches files left behind by failed Spark jobs.
-CALL catalog.system.remove_orphan_files(
+-- Remove orphan files (with dry_run preview): lists what WOULD be deleted without deleting.
+-- Drop the dry_run argument to actually delete. Trino has no equivalent preview mode.
+CALL iceberg.system.remove_orphan_files(
   table      => 'analytics.events',
-  older_than => TIMESTAMP '2024-01-01 00:00:00'
+  older_than => TIMESTAMP '2024-01-01 00:00:00',
+  dry_run    => true
 );
 ```
 
-Replace `catalog` with your actual catalog name (e.g., `iceberg`, `prod`, etc.) and use named arguments (`table => '...'`) — they are required for Iceberg's Spark procedures.
+Replace `iceberg` (the catalog name) with your actual catalog if different (e.g., `prod`), and use named arguments (`table => '...'`) — they are required for Iceberg's Spark procedures.
+
+### Trino EXECUTE examples (production query engine)
+
+```sql
+-- Compaction from a Trino session. Single statement, no Spark cluster startup.
+ALTER TABLE iceberg.analytics.events EXECUTE optimize(file_size_threshold => '256MB');
+
+-- Expire snapshots — Trino 467 only accepts retention_threshold.
+ALTER TABLE iceberg.analytics.events EXECUTE expire_snapshots(retention_threshold => '30d');
+
+-- Remove orphan files — NO dry_run support in Trino 467. This DELETES on execution.
+ALTER TABLE iceberg.analytics.events EXECUTE remove_orphan_files(retention_threshold => '7d');
+```
 
 A typical schedule:
 - `rewrite_data_files` — daily (hourly for streaming sinks; see `14-real-time-vs-batch.md`).
