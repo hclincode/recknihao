@@ -41,15 +41,43 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.524 | 131 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.560 | 37 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.572 | 38 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
-| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.645 | 15 |
+| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.652 | 16 |
 
 ---
 
 ## Score history
+
+### Iter 352 — 2026-05-29
+
+**Q1** — Iceberg table maintenance: re-probe of iter351 Q2 FAIL on position delete file cleanup. Question: storage keeps growing on a MoR table despite nightly `EXECUTE optimize` in Trino; teammate said "position delete files don't get cleaned up the same way"; is there a separate step, and can Trino run it? Responder correctly answered: (a) CoW vs MoR distinction with `write.delete.mode = 'merge-on-read'` table property and CoW as Iceberg default, (b) `EXECUTE optimize` applies position deletes during rewrite BUT only for partitions actually being rewritten — leftover position deletes in non-rewritten partitions remain, which is why `rewrite_position_delete_files` exists, (c) Spark-only `CALL iceberg.system.rewrite_position_delete_files(table => 'analytics.events', options => map('target-file-size-bytes', '67108864', 'min-input-files', '5'))` syntax, (d) Trino 467 does NOT support the procedure — explicit version+stack callout, (e) canonical 5-step maintenance order: rewrite_data_files (Trino EXECUTE optimize) → rewrite_position_delete_files (Spark) → expire_snapshots (Trino or Spark) → remove_orphan_files (Trino or Spark) → rewrite_manifests (Spark on Trino 467), with engine labels per step, (f) diagnostic query on `iceberg.analytics."events$files"` group by content (0=data, 1=position delete, 2=equality delete) with explicit "if content=1 row > 50 files, you have accumulation" threshold, (g) closing storage-growth explanation: optimize writes new files (MinIO grows), expire_snapshots releases old refs (MinIO shrinks), so storage only drops after BOTH steps run.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 5.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **5.00** |
+
+Judge verified via WebSearch: (1) `rewrite_position_delete_files` is documented at iceberg.apache.org/docs/latest/spark-procedures/ with dual purpose (minor compaction of small position delete files + remove dangling deletes); Trino does NOT support it natively per trinodb/trino#27371 roadmap (responder's "Trino 467 does NOT support this procedure" is correct). (2) Canonical maintenance ordering per iceberg.apache.org/docs/latest/maintenance/, IOMETE runbook, Dremio blog: rewrite_data_files → rewrite_position_delete_files → expire_snapshots → remove_orphan_files → rewrite_manifests — responder's 5-step ordering exactly matches. (3) CoW is the documented default for `write.delete.mode` per iceberg.apache.org/docs/latest/configuration/ and confirmed by Dremio + Guptaakashdeep blogs — responder's "default in Iceberg 1.5.2" claim is correct. (4) Trino `OPTIMIZE` applies position deletes ONLY for partitions being rewritten per trinodb/trino#23801 (raunaqmorarka PR: "Clean up position deletes when optimizing a subset of partitions") and #12617/#24086 (open issues about delete files not removed by maintenance ops) — responder's "applies position deletes during rewrite but only for partitions it actually rewrites" framing is exactly right. (5) `$files` metadata table content column: 0=data, 1=position delete, 2=equality delete — confirmed by Iceberg spec and Trino docs. (6) Spark CALL syntax with `options => map('target-file-size-bytes', '67108864', 'min-input-files', '5')` is valid per the Iceberg Spark procedures docs. Every recommendation fits the production stack (Trino 467 + Iceberg 1.5.2 + Spark + MinIO + on-prem k8s). Topic running avg: (4.560 × 37 + 5.00) / 38 = **4.572 / 38 questions** — PASSED (recovery from iter351 Q2 FAIL; the four-error pattern from iter351 — internal ordering contradiction, missing rewrite_position_delete_files, Spark/Trino syntax confusion, Trino 467 version-fit gap on rewrite_manifests — is all addressed in this single answer).
+
+**Iter 352 Q1: 5.00 — PERFECT PASS** ✓
+
+The iter352 teacher fix on `resources/17-iceberg-table-maintenance.md` (TL;DR rewritten with explicit numbered canonical sequence, NEW SECTION 1b rewrite_position_delete_files between sections 1 and 2 with Spark-only labeling + Trino #27371 link, safe scheduling order diagram updated, weekly schedule re-numbered starting with rewrite_data_files Step 1, side-by-side Trino-vs-Spark syntax matrix at top, summary section rewritten with 5-step canonical order + Trino-vs-Spark quick-reference table) landed perfectly. The responder now produces:
+- Correct canonical 5-step ordering
+- Correct identification of rewrite_position_delete_files as the relevant procedure
+- Correct Spark-only labeling with explicit Trino 467 stack callout
+- Correct Spark CALL syntax + Trino EXECUTE syntax distinction
+- Correct CoW-as-default framing
+
+Topic score updates:
+- Iceberg table maintenance: 4.560/37 → **4.572/38 questions** (PASSED — recovery; iter351 Q2 FAIL pattern fully resolved by iter352 resource fix; the four-error cluster is now correctly handled on re-probe)
+
+---
 
 ### Iter 351 — 2026-05-29
 
