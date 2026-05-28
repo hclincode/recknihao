@@ -5564,11 +5564,13 @@ The `source` field in the selector matches the **source name set at query submis
 
 **If the source is not set, the selector will not match** and queries will fall through to the next selector in the file (typically a catch-all `"user": ".*"` rule that puts queries in a default group with no `hardConcurrencyLimit`). The federation queries then bypass your `hardConcurrencyLimit=10` cap entirely and Postgres connection pressure returns.
 
-The source name does **not** have to match the regex exactly — it just needs to **satisfy the pattern**. `federation-queries`, `federation-bi-dashboard`, `analytics-federation-job` all match `.*federation.*` because the regex is anchored loosely (substring match). You can be more or less specific depending on how you want to group:
+The source name does **not** have to be a literal exact-string match — it just needs to satisfy the regex as a **full-string** match. **Trino's selector regex evaluation uses Java `Matcher.matches()` (full-string), NOT `Matcher.find()` (substring).** That means `federation-queries`, `federation-bi-dashboard`, `analytics-federation-job` all match `.*federation.*` only because of the **explicit `.*` wildcards on both sides** that consume the surrounding characters — NOT because the regex engine is doing a substring scan. Strip the wildcards and the matching breaks immediately. You can be more or less specific depending on how you want to group:
 
-- `^federation-.*` — only matches sources that START with `federation-` (more restrictive)
-- `.*federation.*` — matches any source containing `federation` anywhere (loose, what's shown above)
-- `^federation-queries$` — matches exactly `federation-queries` (most restrictive)
+- `federation-.*` — matches sources that START with `federation-`. The trailing `.*` is **required**; without it, `"federation-"` matches ONLY the literal string `federation-` and nothing else. `^federation-.*` behaves identically (the `^` is redundant under `matches()`).
+- `.*federation.*` — matches any source CONTAINING `federation` anywhere. **Both** `.*` are required; without the leading `.*`, sources like `analytics-federation-job` will NOT match (the `analytics-` prefix has nothing to consume it).
+- `federation-queries` — matches EXACTLY `federation-queries` and nothing else. The `^...$` anchors in `^federation-queries$` are redundant under `matches()`; both forms behave identically.
+
+**Most common mistake**: writing `"source": "federation"` and expecting it to match `federation-queries`, `federation-bi-dashboard`, etc. It will not — `matches()` requires the entire input string to be consumed by the pattern, and `federation` (with no wildcards) consumes only the 10-character string `federation`. The fix is to add wildcards: `.*federation.*` for contains, `federation-.*` for prefix, `.*-federation` for suffix.
 
 **Operational checklist after wiring up a `source`-based selector:**
 1. Confirm clients ARE setting the source (run a federation query, then check `SELECT "source" FROM system.runtime.queries WHERE query LIKE '%app_pg%' ORDER BY created DESC LIMIT 5` — `"source"` should be quoted; `source` may also be reserved depending on Trino version).

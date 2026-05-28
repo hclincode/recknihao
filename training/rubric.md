@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.522 | 10 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.449 | 140 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.440 | 141 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.531 | 4 |
@@ -40,7 +40,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.50 | 3 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.517 | 129 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.520 | 130 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.603 | 36 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | PASSED | 4.513 | 252 |
@@ -50,6 +50,44 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 349 — 2026-05-28
+
+**Q1** — Multi-tenant analytics: Trino selector regex match semantics (svc_ prefix scenario, re-probe of iter348 failure). Responder reproduced the SAME critical error from iter348: claimed Trino performs substring match ("`svc_` does technically match `svc_billing` as a substring"). Trino actually uses `Matcher.matches()` (full-string). The diagnosis "you must be hitting a different selector first OR have a typo" actively misleads — the real reason `"user": "svc_"` doesn't fire on `svc_billing` is that `matches()` only succeeds when the WHOLE input equals the regex, and the regex `svc_` (no metachars) only matches the literal 4-char string `svc_`. The provided fix (`svc_.*`) is correct, and ordering guidance is correct, but the explanation contradicts the corrected resources/05 + resources/22 (teacher iter349 fix). Same bug pattern as iter348 — the responder is not consistently retrieving the fixed content; sometimes it is, sometimes (this time) it isn't.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 2.0 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 3.5 |
+| Completeness | 3.5 |
+| **Average** | **3.25** |
+
+Judge verified via WebSearch against Trino source: StaticSelector uses `userMatcher.matches()` (full-string), confirmed by trino.io documentation and PR #3023 / #27129 source references. The substring-match claim in the responder's answer is exactly the bug pattern teacher fixed in iter348 (resources/05) and iter349 (resources/22) — responder appears to have pulled from cached/older training of the explanation rather than the corrected resources. Topic running avg: (4.449×140 + 3.25)/141 = **4.440/141 questions** — PASSED (still above threshold due to large denominator; this is the 2nd consecutive FAIL on the same selector regex semantics question).
+
+**Iter 349 Q1: 3.25 — FAIL** ✗
+
+**Q2** — Postgres-to-Iceberg ingestion: Debezium handling of Postgres JSONB column into Iceberg and Trino querying syntax. Responder correctly explained: (a) Debezium serializes JSONB as a JSON STRING (`io.debezium.data.Json` semantic type) in Kafka events, (b) lands in Iceberg as VARCHAR (Trino reads JSON-annotated Parquet columns as strings), (c) Postgres `->>'` operator is NOT supported by Trino — must use `json_extract_scalar` or SQL/JSON standard `JSON_VALUE` with `RETURNING ... NULL ON EMPTY NULL ON ERROR` clause, (d) file-pruning limitation (no per-key min/max stats on opaque JSON string, full scan inside partition), (e) production-grade fix: flatten hot keys via Spark `get_json_object` to first-class columns + keep `settings_raw VARCHAR` for long-tail fields, (f) correct end-to-end Spark + Trino code, (g) cite to resources/13 line 3092.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.875** |
+
+Judge verified via WebSearch: (1) Debezium `io.debezium.data.Json` semantic type serializes Postgres JSONB as UTF-8 string in Kafka event — confirmed via Debezium docs + birdiecare/connect-smts deserialization docs; (2) Trino `json_extract_scalar` works on VARCHAR JSON content in Iceberg tables — confirmed via trino.io functions/json.html and stackoverflow Iceberg examples; (3) Postgres `->>'` JSON operator is Postgres-specific and not in Trino's grammar — Trino docs show only `json_extract`, `json_extract_scalar`, `JSON_VALUE`, `JSON_QUERY` for JSON access; (4) Parquet JSON logical type annotation stores opaque UTF-8 string — confirmed via parquet.apache.org/docs/file-format/types/logicaltypes/. Beginner clarity loses 0.5 only for a minor density issue — the answer is long and an absolute beginner might prefer the answer to lead with a 2-line "what type / what query syntax" summary before diving into the file-pruning analysis. No technical errors. Topic running avg: (4.517 × 129 + 4.875) / 130 = **4.520/130 questions** — PASSED (6th consecutive strong-PASS on the Postgres-to-Iceberg / JSONB sub-topic; resources/13 JSONB section continues to hold up under varied probes).
+
+**Iter 349 Q2: 4.875 — PASS** ✓
+
+**Iter 349 average: (3.25 + 4.875) / 2 = 4.0625 — PASS** ✓ (barely above 4.0 threshold; Q1 FAIL dragged down what would otherwise have been a strong iteration)
+
+Topic score updates:
+- Multi-tenant analytics: 4.449/140 → **4.440/141 questions** (PASSED threshold but FAIL this iteration — repeated find()/substring error despite iter348 + iter349 resource fixes)
+- Postgres-to-Iceberg ingestion: 4.517/129 → **4.520/130 questions** (PASSED — JSONB ingest end-to-end correctly explained, Debezium → Iceberg → Trino full chain, file-pruning insight, flatten + raw fallback recipe; cite to resources/13 line 3092 accurate)
+
+---
 
 ### Iter 348 — 2026-05-28
 

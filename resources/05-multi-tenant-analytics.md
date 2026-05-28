@@ -2252,9 +2252,31 @@ This is the single most common config bug for resource groups: engineers invent 
 
 > **COMMON MISTAKE — `cpuLimit` is not a valid Trino field.** Engineers frequently write `"cpuLimit": "1h"` in `resource-groups.json`, expecting it to cap aggregate CPU. **That field does not exist in Trino.** The hard cap is `hardCpuLimit` (refuses new query admission once exceeded), and the soft cap is `softCpuLimit` (throttles by reducing effective concurrency rather than rejecting). Trino silently ignores unknown JSON keys, so the typo loads without error and provides ZERO protection — the cluster sees no cap. Always use `hardCpuLimit` / `softCpuLimit`, paired with a root-level `cpuQuotaPeriod` that defines the rolling window length.
 
+> ## CRITICAL FACT — READ THIS FIRST BEFORE ANY SELECTOR REGEX REASONING
+>
+> **Trino selector regexes are evaluated with Java `Matcher.matches()` — FULL-STRING match ONLY. NOT `Matcher.find()`. NOT substring. NOT "looks for the pattern anywhere in the string."**
+>
+> **THE FIX (apply this FIRST, then read the rest):** if you want a prefix/suffix/contains match, you MUST add explicit `.*` wildcards.
+>
+> | You want to match | Write this | NOT this |
+> |---|---|---|
+> | Users starting with `svc_` | `"user": "svc_.*"` | `"user": "svc_"` (matches ONLY the 4-char string `svc_`, nothing else) |
+> | Users starting with `data_` | `"user": "data_.*"` | `"user": "data_"` (matches ONLY the 5-char string `data_`) |
+> | Users ending with `-prod` | `"user": ".*-prod"` | `"user": "-prod"` (matches ONLY the literal 5-char string `-prod`) |
+> | Users containing `acme` anywhere | `"user": ".*acme.*"` | `"user": "acme"` (matches ONLY the literal username `acme`) |
+> | Exactly the user `acme-svc` | `"user": "acme-svc"` | (already exact — fine as-is) |
+>
+> **WORKED EXAMPLE — the `svc_billing` bug.** A selector with `"user": "svc_"` does **NOT** match the principal `svc_billing`. It does **NOT** do substring matching. It does **NOT** "match because `svc_` is a prefix of `svc_billing`." The regex `svc_` is evaluated against the full string `svc_billing` by `Matcher.matches()`, which requires the regex to consume **every single character** of the input from start to finish. The regex `svc_` consumes 4 characters (`s`, `v`, `c`, `_`). The input `svc_billing` has 11 characters. After the regex finishes, 7 characters (`billing`) remain unconsumed — so `matches()` returns **false** and the selector does **NOT** apply. To match `svc_billing`, you MUST write `"user": "svc_.*"` (the `.*` consumes the remaining `billing`). To match only the literal 4-character user named `svc_`, write `"user": "svc_"`. There is no in-between behavior.
+>
+> **Anchors are redundant.** `"user": "^svc_.*$"` and `"user": "svc_.*"` behave identically because `matches()` already requires full-string match — the implicit `^...$` is baked into the call.
+>
+> **The ONLY exception** is internal: Trino calls `Matcher.find()` for `${VAR}` variable substitution in the `group` path AFTER a match has already succeeded. That `find()` does NOT govern the match/reject decision. The match/reject decision is **always** `matches()`, full-string. Do not let the existence of one internal `find()` call confuse the routing semantics.
+>
+> **If you ever find yourself thinking "well, `svc_` is a substring of `svc_billing`, so it probably matches" — STOP. That reasoning is wrong. Trino does not do that. Add `.*`.**
+
 **Selector field name warning — `"user"` is a regex, but the field is NOT called `"userRegex"`:**
 
-The selector field that matches the JWT principal is named **`"user"`** in Trino's resource-groups.json — not `"userRegex"`. The value is *interpreted as a Java regex*, which makes the name confusing, but the key itself is always `"user"`. `"userRegex"` does not exist in Trino and will be silently ignored:
+The selector field that matches the JWT principal is named **`"user"`** in Trino's resource-groups.json — not `"userRegex"`. The value is *interpreted as a Java regex*, which makes the name confusing, but the key itself is always `"user"`. `"userRegex"` does not exist in Trino and will be silently ignored. **Reminder per the CRITICAL FACT above: the regex value uses full-string `Matcher.matches()` — `"svc_"` matches ONLY the literal user `svc_`, NOT `svc_billing`. Add `.*` for prefix matching.**
 
 ```json
 // CORRECT — field name is "user", value is a Java regex
@@ -2310,7 +2332,7 @@ Now the same query correctly lands in `global.tenant_acme.dashboards`.
 1. **More-specific selectors go ABOVE broader selectors.** "Specific" means more matcher fields (e.g., `user` + `source` + `clientTags`) and tighter regex patterns (e.g., `"acme-service-account"` is more specific than `"acme-.*"`, which is more specific than `".*"`). The most-restrictive match comes first.
 2. **The unconditional catch-all `{"group": "global"}` (or whichever fallback group you want) goes LAST.** Without a catch-all, queries that don't match any selector are rejected with `QUERY_REJECTED: No matching resource group found` — keep an unconditional fallback as the last entry.
 3. **Multiple matcher fields within a single selector are AND-combined.** A selector with `{"user": "acme-service-account", "source": "airflow"}` matches only queries from `acme-service-account` whose `source` is `airflow`. If the source is `trino-gateway-dashboard`, that selector does NOT match — Trino moves to the next selector in the array.
-4. **The `user` and `source` values are Java regexes.** `"acme-.*"` matches `acme-prod`, `acme-staging`, `acme-batch`. `"acme-service-account"` is a regex too — it just happens to be a regex with no metacharacters, so it matches only the literal string `acme-service-account`.
+4. **The `user` and `source` values are Java regexes, evaluated with `Matcher.matches()` — FULL-STRING match, NOT substring, NOT `find()`.** `"acme-.*"` matches `acme-prod`, `acme-staging`, `acme-batch` (the `.*` consumes the trailing characters). `"acme-service-account"` is a regex too — it just happens to be a regex with no metacharacters, so it matches ONLY the literal full string `acme-service-account` (NOT `acme-service-account-prod`, NOT `dev-acme-service-account`). **Critical implication:** a value with no `.*` is a literal exact-string match. `"svc_"` matches ONLY the literal 4-char user `svc_` — it does NOT match `svc_billing` because Trino does NOT do substring matching. To match every user starting with `svc_`, you MUST write `"svc_.*"`. See the CRITICAL FACT box above for the full rule.
 5. **The `group` field is a LITERAL string, NOT a regex.** This is the most confusing asymmetry: `user`/`source` are regex, `group` is literal. Writing `"group": "global\\.tenant_acme"` (escaped dot) creates a literal-string mismatch — no resource group named `global\.tenant_acme` exists, and the selector fails to route. Always write `"group": "global.tenant_acme"` with an unescaped dot in resource-groups.json.
 
 #### Selector precedence — array position is the ONLY mechanism (no `selectorPriority` field exists)
@@ -2343,7 +2365,7 @@ Now the same query correctly lands in `global.tenant_acme.dashboards`.
 >
 > **Two production footguns engineers hit FIRST — read these before anything else:**
 > 1. **JWT auth does NOT populate the `groups` list on this stack.** OSS Trino 467's JWT authenticator extracts only the username (`sub`) and ignores any `groups`/`roles` claim. You MUST configure a separate group provider in `etc/group-provider.properties`, or every `userGroup` selector silently matches zero queries. Details below.
-> 2. **Selector regexes use Java `Matcher.matches()` — FULL-STRING matching, NOT substring.** `userGroup: "data"` matches ONLY a group whose name is exactly `data` — it does NOT match `data_engineering`, `data_science`, or `metadata`. `user: "admin"` matches ONLY the user `admin` — it does NOT match `sysadmin` or `admin_readonly`. **`^...$` anchors are REDUNDANT** (the regex already requires full-string match). The REAL footgun is the opposite: when you WANT a prefix/suffix/contains match, you must add explicit wildcards. To match every user whose name starts with `data_`, write `"user": "data_.*"` — forgetting the trailing `.*` means only the literal string `data_` matches and every actual `data_engineering` / `data_science_alice` query falls through to the next selector. Applies to `user`, `originalUser`, `authenticatedUser`, `userGroup`, and `source`. Details below.
+> 2. **Selector regexes use `Matcher.matches()` — FULL-STRING match. `"svc_"` matches ONLY the 4-char user named `svc_`. It does NOT match `svc_billing`, `svc_analytics`, or any other principal. THE FIX: add `.*` — write `"user": "svc_.*"` to match every user starting with `svc_`.** This is `Matcher.matches()`, not `Matcher.find()`. There is NO substring behavior. There is NO "the pattern appears inside the string so it matches" behavior. `userGroup: "data"` matches ONLY a group whose name is exactly `data` — it does NOT match `data_engineering`, `data_science`, or `metadata`. `user: "admin"` matches ONLY the user `admin` — it does NOT match `sysadmin` or `admin_readonly`. `^...$` anchors are REDUNDANT (already implicit). The fix for ANY prefix/suffix/contains case is **always to add `.*`**: prefix → `"prefix.*"`, suffix → `".*suffix"`, contains → `".*middle.*"`. Applies to `user`, `originalUser`, `authenticatedUser`, `userGroup`, and `source`. Details below.
 >
 > | Selector | Matches against | Cardinality | Match rule |
 > |---|---|---|---|
@@ -2394,12 +2416,29 @@ Now the same query correctly lands in `global.tenant_acme.dashboards`.
 > **Diagnosing a non-matching `userGroup` selector.** When the routing falls through unexpectedly:
 > 1. Confirm a group provider is configured: `cat etc/group-provider.properties` on the coordinator. If the file is missing, every `userGroup` selector matches zero queries.
 > 2. Confirm the user actually has the group: for file-based, `grep "<username>" etc/groups.txt`; for LDAP, query the directory or check the OPA decision log entry for that user (the `input.context.identity.groups` array shows exactly what Trino sees).
-> 3. **CAUTION — Java regex FULL-STRING match footgun (applies to `user`, `originalUser`, `authenticatedUser`, `userGroup`, `source`).** All of these selector fields are Java regexes evaluated with `Matcher.matches()` — **NOT** `Matcher.find()`. `matches()` requires the regex to consume the **entire** input string from start to finish, exactly like an implicit `^...$` were wrapped around the pattern. So `userGroup: "data"` matches ONLY a group whose name is exactly `data` — it does NOT match `data_engineering`, `data_science`, or `metadata_team`. `user: "admin"` matches ONLY the user `admin` — it does NOT match `sysadmin`, `badmin`, or `admin_readonly`. **This means `^...$` anchors are redundant** — `"user": "^admin$"` and `"user": "admin"` behave identically. The real footgun is the OPPOSITE of substring matching: when you actually WANT a prefix / suffix / contains match, you must add explicit wildcards. Forgetting them is the most common cause of "my selector isn't firing":
-> - To match every user whose name **starts with** `data_`, write `"user": "data_.*"` — without the trailing `.*`, only the literal string `data_` matches and every `data_engineering` / `data_science_alice` query falls through to the next selector.
-> - To match every user whose name **ends with** `-service-account`, write `"user": ".*-service-account"` — without the leading `.*`, no real principal name matches at all.
-> - To match a user whose name **contains** `acme` anywhere, write `"user": ".*acme.*"` — bare `"acme"` matches only the literal username `acme`.
+> 3. **FULL-STRING MATCH RULE — `Matcher.matches()`, NOT `Matcher.find()`, NOT substring (applies to `user`, `originalUser`, `authenticatedUser`, `userGroup`, `source`).**
 >
-> (Note: Trino does internally call `Matcher.find()` in one narrow place — when expanding `${VAR}` placeholders in the `group` path using named capture groups from the selector regex. That `find()` is for **variable substitution after a match has already succeeded**; it does NOT govern the match/reject decision. The match/reject decision is always `matches()`, full-string.)
+> **THE FIX FIRST — add `.*` to make any prefix/suffix/contains match work:**
+> - **Prefix match** (user starts with `svc_`): write `"user": "svc_.*"`. NOT `"user": "svc_"` — that matches only the 4-char user `svc_`.
+> - **Prefix match** (user starts with `data_`): write `"user": "data_.*"`. NOT `"user": "data_"` — that matches only the 5-char user `data_`.
+> - **Suffix match** (user ends with `-service-account`): write `"user": ".*-service-account"`. NOT `"user": "-service-account"` — that matches nothing real.
+> - **Contains match** (user contains `acme` anywhere): write `"user": ".*acme.*"`. NOT `"user": "acme"` — that matches only the literal username `acme`.
+>
+> **WHY (the underlying rule):** every selector regex value is fed to Java's `Pattern.compile(...).matcher(input).matches()`. The `matches()` method requires the regex to **consume the entire input string** from index 0 to the final character — equivalent to an implicit `^...$` wrapping the pattern. There is no substring behavior. There is no "find the pattern somewhere in the input" behavior. If the regex `svc_` is matched against the input `svc_billing`, `matches()` returns **false** because after the regex consumes `svc_` (4 chars), 7 characters of input (`billing`) remain unconsumed.
+>
+> **Worked counterexamples (memorize these):**
+> - `"user": "svc_"` vs input `svc_billing` → **NO MATCH** (regex consumes 4 chars; 7 chars left over)
+> - `"user": "svc_.*"` vs input `svc_billing` → **MATCH** (`.* ` consumes `billing`)
+> - `"userGroup": "data"` vs group `data_engineering` → **NO MATCH** (regex consumes 4 chars; 12 chars left over)
+> - `"userGroup": "data.*"` vs group `data_engineering` → **MATCH**
+> - `"user": "admin"` vs user `sysadmin` → **NO MATCH** (regex starts matching at position 0; input starts with `s`, regex starts with `a`, fails immediately)
+> - `"user": ".*admin"` vs user `sysadmin` → **MATCH**
+>
+> `^...$` anchors are REDUNDANT — `"user": "^svc_.*$"` and `"user": "svc_.*"` behave identically because `matches()` already requires full-string match.
+>
+> **Sanity-check rule of thumb:** if your regex value has no `.` or `*` and no other metacharacters, treat it as a LITERAL exact-string match. `"user": "svc_"` is functionally identical to `user == "svc_"`. Period. No prefix interpretation. No substring interpretation. None.
+>
+> **The internal `Matcher.find()` call is unrelated.** Trino does call `Matcher.find()` in ONE narrow place — when expanding `${VAR}` placeholders in the `group` destination path using named capture groups from the selector regex. That `find()` runs AFTER the match/reject decision has already succeeded, purely for variable substitution. The match/reject decision is **ALWAYS** `Matcher.matches()`, full-string. Do not let this one internal `find()` confuse the routing semantics.
 > 4. Verify in production: run `SELECT user, resource_group_id FROM system.runtime.queries WHERE user = '<username>' ORDER BY created DESC LIMIT 5` and see which group the user's queries actually landed in. If they're in `ARRAY['global']` instead of the engineering subgroup, one of steps 1–3 is the cause.
 
 **Quick triage when a selector "isn't applying":**
