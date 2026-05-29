@@ -1150,6 +1150,105 @@ This pattern gives you audit-grade reproducibility without paying storage costs 
 
 ---
 
+## Iceberg Tags — immutable snapshot labels
+
+A **tag** is a permanent, immutable label that points to a specific snapshot ID. Unlike a branch, a tag pointer can never advance — it always resolves to the same snapshot forever (until you explicitly drop the tag). Use tags for versioned dataset releases, month-end or quarter-end report cutoffs, and regulatory retention obligations.
+
+**Tags vs Branches — the one-sentence difference:**
+- **Tag**: immutable pointer — cannot receive new commits; always refers to the same snapshot.
+- **Branch**: mutable pointer — can advance as new commits are added to it (e.g., via WAP or `fast_forward`).
+
+### Creating a tag (Spark only)
+
+Tag DDL must run from Spark. Trino 467 cannot create or drop tags — attempting any tag or branch DDL from Trino fails with a procedure-not-found or syntax error.
+
+```sql
+-- Spark SQL — create an immutable tag pointing to a specific snapshot.
+-- Get the snapshot_id from a $snapshots query first.
+ALTER TABLE iceberg.analytics.events
+  CREATE TAG `end-of-may-2026`
+  AS OF VERSION 4823511203987654321;
+
+-- Optional: add an automatic expiry so a forgotten tag self-cleans.
+-- Without RETAIN, the tag lives until explicitly dropped.
+ALTER TABLE iceberg.analytics.events
+  CREATE TAG `end-of-may-2026`
+  AS OF VERSION 4823511203987654321
+  RETAIN 3650 DAYS;
+
+-- Drop a tag when it is no longer needed (Spark only):
+ALTER TABLE iceberg.analytics.events DROP TAG `end-of-may-2026`;
+```
+
+### Querying a tagged snapshot (Trino CAN read tags)
+
+Trino 467 cannot create or drop tags, but it CAN query a tagged snapshot using `FOR VERSION AS OF '<tag-name>'`. This is the correct Trino read form:
+
+```sql
+-- Trino 467 — query the snapshot the tag points at.
+SELECT COUNT(*), SUM(api_calls)
+FROM iceberg.analytics.events
+FOR VERSION AS OF 'end-of-may-2026';
+
+-- The numeric snapshot_id form also works and is preferable for audit reproducibility
+-- (tag names can be dropped; snapshot IDs are stable in the metadata until expired):
+SELECT COUNT(*), SUM(api_calls)
+FROM iceberg.analytics.events
+FOR VERSION AS OF 4823511203987654321;
+```
+
+### View all tags and branches
+
+Both Trino and Spark can read the `$refs` metadata table — it shows every named ref (tags and branches) with their snapshot IDs and retention settings:
+
+```sql
+-- Works in both Trino 467 and Spark.
+SELECT name, type, snapshot_id, max_reference_age_in_ms
+FROM iceberg.analytics."events$refs";
+
+-- Filter to tags only:
+SELECT name, type, snapshot_id, max_reference_age_in_ms
+FROM iceberg.analytics."events$refs"
+WHERE type = 'TAG';
+
+-- Filter to branches only:
+SELECT name, type, snapshot_id, max_reference_age_in_ms
+FROM iceberg.analytics."events$refs"
+WHERE type = 'BRANCH';
+```
+
+**What the columns mean:**
+- `name` — the tag or branch name you created (e.g., `end-of-may-2026`).
+- `type` — `TAG` or `BRANCH`.
+- `snapshot_id` — the snapshot this ref currently points at. For a tag this never changes; for a branch it advances with each new commit.
+- `max_reference_age_in_ms` — the `RETAIN` expiry you set (null means "keep forever until explicitly dropped").
+
+### Engine support summary for tags
+
+| Operation | Trino 467 | Spark |
+|---|---|---|
+| `CREATE TAG` | **NOT supported** — fails with syntax/procedure error | `ALTER TABLE ... CREATE TAG \`name\` AS OF VERSION <snapshot_id>` |
+| `DROP TAG` | **NOT supported** | `ALTER TABLE ... DROP TAG \`name\`` |
+| Read using `FOR VERSION AS OF '<tag-name>'` | **Supported** | Supported via `VERSION AS OF '<tag-name>'` |
+| Read `$refs` metadata table | **Supported** (read-only) | Supported |
+
+**Important:** `CALL iceberg.system.create_tag(...)` does NOT exist in either Trino or Spark — tag creation is always DDL (`ALTER TABLE ... CREATE TAG`), never a CALL procedure. If you see this pattern in a guide, it is fabricated.
+
+### When to use tags vs branches
+
+| Use case | Use |
+|---|---|
+| Billing cutoff, regulatory filing, end-of-quarter report snapshot | **Tag** — it is immutable; auditors can query the same data months later |
+| Staging data for validation before publishing to readers | **Branch** — it can receive new commits; you fast-forward to main on success |
+| Marking a "v2.0 dataset release" that downstream consumers reference | **Tag** — version label that never changes |
+| Ongoing development with iterative writes | **Branch** — designed to advance |
+
+### Snapshot protection — tagged snapshots survive `expire_snapshots`
+
+A snapshot referenced by any named tag or branch is **protected** from `expire_snapshots` regardless of its age. Iceberg will not physically delete a snapshot (or its exclusively-owned data files) while a live ref points at it. This is both the feature (your billing cutoff is safe for years) and the operational gotcha (a forgotten tag holding an old snapshot keeps that snapshot's data files on MinIO indefinitely — monitor `$refs` and drop tags when they are no longer needed).
+
+---
+
 ## Write-Audit-Publish (WAP) with Iceberg branches
 
 The WAP pattern lets you write data, **audit it**, and only then make it visible to readers — instead of having every ingestion job commit directly to `main` where bad data is immediately seen by every dashboard. On this stack (Iceberg 1.5.2 + Spark + Trino 467), WAP is implemented via **Iceberg branches**. This section covers what branches are, the four-step WAP workflow, and the critical engine-support caveat: **branch DDL is Spark-only on Trino 467**.

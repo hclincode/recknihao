@@ -33,7 +33,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.4515 | 145 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
-| Cost considerations for analytical workloads at SaaS scale | PASSED | 4.106 | 13 |
+| Cost considerations for analytical workloads at SaaS scale | PASSED | 4.063 | 14 |
 | Query performance basics: partitioning, indexing strategy for analytics | PASSED | 4.4445 | 10 |
 | Lakehouse schema design: fact tables, dimension tables, denormalization | PASSED | 4.650 | 5 |
 | Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.527 | 22 |
@@ -41,7 +41,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.422 | 8 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.609 | 4 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.5193 | 138 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.5408 | 49 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.5050 | 50 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 4.751 | 5 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4910 | 263 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.7392 | 7 |
@@ -50,6 +50,46 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 388 — 2026-05-30 (EXTENDED PHASE) — Q1 Iceberg table tagging/organization; Q2 Trino file system cache
+
+**Q1** — Iceberg table tagging and organization: native SnapshotRef tags (Spark create + Trino read via `FOR VERSION AS OF` + `$refs` table), TBLPROPERTIES custom metadata, schema separation as workaround.
+
+Responder gave: "no native tagging system"; separate schemas (prod/staging/dev); TBLPROPERTIES for custom metadata (Spark sets, Trino reads via `$properties`); REST catalog future path; practical: use schemas now.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 2.0 |
+| Beginner clarity | 3.5 |
+| Practical applicability | 3.0 |
+| Completeness | 2.5 |
+| **Average** | **2.75** |
+
+**Iter 388 Q1: 2.75 — FAIL**
+
+CRITICAL TA error: "no native tagging system" is wrong. Iceberg has SnapshotRef tags (immutable labels on snapshot-id) as first-class spec objects. Spark supports `ALTER TABLE t CREATE TAG 'v1.0' AS OF VERSION <id>`. Trino 467 supports time-travel TO tags via `FOR VERSION AS OF 'v1.0'` and exposes branches+tags through `$refs` metadata table. Trino's gap is the write DDL (cannot CREATE TAG), not the existence of tags. Responder collapsed partial-tooling-gap into false absolute claim. TBLPROPERTIES + $properties + schema-separation advice is correct but sidesteps the main feature. PA collapse because engineer doesn't learn the canonical Iceberg-tag pattern that fits the production Spark-ingestion + Trino-query stack.
+
+**Q2** — Trino file system cache: honest "not enough info in resources" punt; identified `iceberg.metadata-cache.enabled` for metadata; recommended official docs for data file cache.
+
+Responder gave: honest "not enough info"; found metadata caching (`iceberg.metadata-cache.enabled`); no data file cache content in resources; recommends checking official Trino docs.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 3.5 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 3.5 |
+| Completeness | 3.0 |
+| **Average** | **3.5** |
+
+**Iter 388 Q2: 3.5 — BORDERLINE FAIL**
+
+`iceberg.metadata-cache.enabled` correctly identified (verified valid, default true). "Not enough info" is honest refusal-to-hallucinate behavior, scored partially positive on TA and BC. But the actual file system data cache DOES exist publicly: `fs.cache.enabled=true` + `fs.cache.directories=/cache/trino` is Trino's documented Alluxio-backed local-disk cache at `/object-storage/file-system-cache.html`. Resource gap should be filled. Comp slip because the feature name + mutual exclusivity (fs.cache.enabled=true deactivates iceberg.metadata-cache.enabled) + k8s PV mount detail all missing. Honest-punt deserves BC credit but the 4.0 bar isn't met.
+
+**Iter 388 overall: (2.75 + 3.5) / 2 = 3.125 — FAIL**
+
+PATTERN NOTE: Major regression from iter387 4.25 PASS to iter388 3.125 FAIL. Q1 TA collapse (4.5→2.0) from categorical denial-of-feature error — worst failure mode (actively misleads engineer). Q2 honest-punt but missed publicly-documented feature. BC unchanged at 3.5-4.0 (11+ iter cap). Teacher must fill TWO resource gaps before next iter: (1) Iceberg native tagging (SnapshotRef + Spark CREATE TAG + Trino FOR VERSION AS OF + $refs metadata table + Trino-write-DDL gap qualifier); (2) fs.cache.enabled (file system data cache + directories + mutual exclusivity with iceberg.metadata-cache.enabled + k8s PV mount). JUDGE PROBE TARGETS NEXT (iter 389): (1) Iceberg tagging 2nd angle "freeze snapshot for 90-day audit"; (2) Trino fs.cache 2nd angle "repeated MinIO reads, how to cache parquet on workers"; (3) carry-forward iter387 targets (catalog migration HMS→Nessie, SPILL_FAILED 60GB diagnosis). Topic score updates: Iceberg table maintenance 4.5408/49 → 4.5050/50 (mild drop, still PASS); Cost considerations 4.106/13 → 4.063/14 (mild drop, still PASS).
+
+---
 
 ### Iter 387 — 2026-05-30 (EXTENDED PHASE) — Q1 Iceberg catalog HMS vs Nessie vs Polaris; Q2 Trino spill disk sizing
 

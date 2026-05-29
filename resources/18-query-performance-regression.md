@@ -780,6 +780,92 @@ On a stack where workers cannot scale horizontally on demand (the production set
 
 ---
 
+## Step 10: Trino native file system cache (local disk caching of Parquet data blocks)
+
+If repeated dashboard queries keep scanning the same hot partitions — the same last-7-days of events, the same tenant's data, the same dimension tables — you can reduce MinIO round-trips by enabling Trino's built-in file system data cache. This caches actual Parquet data blocks on each worker's local disk so the second and subsequent reads of the same file go to local SSD instead of MinIO.
+
+**This is Trino's native implementation.** It does NOT require Alluxio as a separate service. The feature was added in approximately Trino 400+ and is available on Trino 467.
+
+### What it does and when it helps
+
+The file system cache intercepts Parquet file reads at the worker. The first time a worker reads a set of Parquet blocks from MinIO, it stores them on local disk. Subsequent queries that touch the same blocks read from the local cache — much faster than a network call to MinIO. The cache is content-addressed and evicts old data when the configured max size is reached.
+
+**Best for:**
+- Repeated dashboard queries reading the same hot partitions (e.g., last 7 days of events, a small "current state" rollup table, a frequently-joined dimension table).
+- Clusters where MinIO bandwidth is the bottleneck (high-frequency refreshing dashboards saturating the network to MinIO).
+
+**Less useful for:**
+- Large ad-hoc analytical queries that scan the whole table — each query touches different partitions and the cache hit rate stays low.
+- Append-only tables where each run reads new partitions that haven't been cached yet.
+
+### Enable in the Iceberg catalog properties
+
+Configure on the Iceberg catalog properties file on every coordinator and worker. A pod restart is required for the change to take effect:
+
+```properties
+# etc/catalog/iceberg.properties
+# Enable the native file system data cache.
+fs.cache.enabled=true
+fs.cache.directories=/var/trino/cache
+fs.cache.max-sizes=100GB
+```
+
+**IMPORTANT: `fs.cache.enabled=true` disables `iceberg.metadata-cache.enabled`.** The two cache systems are mutually exclusive — the file system cache supersedes the metadata-only cache. If you previously had `iceberg.metadata-cache.enabled=true`, removing that line (or leaving it — it will be ignored) is correct when enabling `fs.cache.enabled`. You cannot run both simultaneously; the `fs.cache` covers the broader set of I/O and makes the metadata cache redundant.
+
+### Worker pod requirements
+
+The file system cache writes to local disk on each Trino worker pod. For this to be fast:
+
+- **Mount a local fast SSD** at `/var/trino/cache` on each worker pod. In Kubernetes, use an `emptyDir` volume (ephemeral, wiped on pod restart — acceptable since the cache is a read-through layer, not durable storage) or a `local` PersistentVolume backed by the node's NVMe SSD.
+- **Do NOT use network-mounted storage** (NFS, MinIO-FUSE, or a PVC backed by a network storage class) for the cache path. The cache's value comes from fast local I/O; network storage makes caching slower than not caching.
+- **Size `fs.cache.max-sizes` to fit on the local disk** with headroom for Trino's spill directory and OS. A typical setup: 100 GB cache on a worker with 500 GB local NVMe (leaving headroom for spill and OS).
+
+Example Kubernetes worker pod volume spec (emptyDir):
+
+```yaml
+# Kubernetes worker pod spec — add to your Trino Helm chart values or manifest.
+volumeMounts:
+  - name: trino-cache
+    mountPath: /var/trino/cache
+volumes:
+  - name: trino-cache
+    emptyDir:
+      sizeLimit: 120Gi   # slightly larger than fs.cache.max-sizes to give Trino headroom
+```
+
+Or a local PV for persistent SSD-backed cache (survives pod restarts, useful if the worker pod restarts frequently):
+
+```yaml
+volumeMounts:
+  - name: trino-cache
+    mountPath: /var/trino/cache
+volumes:
+  - name: trino-cache
+    persistentVolumeClaim:
+      claimName: trino-worker-cache-pvc   # backed by a local-storage StorageClass on the node's NVMe
+```
+
+### Mutual exclusivity with metadata cache
+
+| Setting | When to use |
+|---|---|
+| `iceberg.metadata-cache.enabled=true` (metadata-only cache) | When you only want to cache Iceberg metadata (snapshot lists, manifest files) and NOT cache actual Parquet data blocks. Lower disk requirement (metadata is small). |
+| `fs.cache.enabled=true` (full data cache) | When you want to cache both metadata AND Parquet data blocks for hot partitions. Requires local SSD. Disables the metadata-only cache automatically. |
+| Neither | Default. Every read hits MinIO. Fine for large ad-hoc analytical workloads with low cache hit rates. |
+
+Setting both `fs.cache.enabled=true` and `iceberg.metadata-cache.enabled=true` results in the metadata cache being silently ignored — `fs.cache` takes over. Only set `fs.cache.enabled=true` and leave out `iceberg.metadata-cache.enabled`.
+
+### Verify the cache is working
+
+After enabling and restarting workers, run a dashboard query twice. The second run should be noticeably faster. Trino's JMX MBeans expose cache hit and miss counters under `trino.filesystem.cache:*` — scrape these with Prometheus to confirm cache hit rate is increasing for your hot-partition queries.
+
+If the second run is NOT faster, check:
+1. The cache directory exists and is writable by the Trino process on the worker pod (`ls -la /var/trino/cache` from inside the pod).
+2. The worker pods actually have local SSD mounted (not a network PVC — watch for slow first reads that indicate the "cache" is itself going over the network).
+3. The queries are actually re-reading the same Parquet files (check `Physical Input:` in `EXPLAIN ANALYZE` before and after — if it drops to near-zero on the second run, caching is working).
+
+---
+
 ## Oncall runbook summary
 
 | Symptom | First check | Likely fix |
