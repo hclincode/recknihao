@@ -40,9 +40,9 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.422 | 8 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.609 | 4 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.4951 | 141 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.4938 | 142 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.4779 | 56 |
-| Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 4.751 | 5 |
+| Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 4.6885 | 6 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4925 | 265 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.6948 | 8 |
 | SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.6373 | 20 |
@@ -50,6 +50,46 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 397 — 2026-05-30 (EXTENDED PHASE) — Q1 Iceberg column rename user_name→display_name (metadata-only + field IDs); Q2 GROUP BY 5B rows CPU≈Scheduled (compute-bound + whale skew salt+two-level)
+
+**Q1** — Iceberg RENAME COLUMN user_name→display_name: metadata-only operation (millisecond commit, no data rewrite); Iceberg matches columns by field ID (not name) — that's why rename is backward-compatible without rewriting old Parquet files; old files continue to be read seamlessly because the field ID inside the Parquet footer is mapped to the new column name via the table schema's field ID lookup; ADD new column + backfill + DROP old column path is wrong (it would actually rewrite data, break time-travel reads of old snapshots, and risks deletion-vector inconsistency).
+
+Responder gave: core mechanism correct per Iceberg spec — RENAME COLUMN is a metadata-only schema evolution operation; field ID matching is the exact reason name changes don't break readers (verified per Iceberg schema evolution docs); old Parquet files genuinely do work because Iceberg's Parquet writer embeds field IDs in column metadata and the reader resolves columns by ID; ADD+backfill+DROP correctly identified as anti-pattern. Minor gaps: didn't specify the exact ALTER TABLE syntax for Trino (`ALTER TABLE t RENAME COLUMN user_name TO display_name`) vs Spark; could mention downstream view/dashboard/dbt-model update implications since the rename is engine-side instant but consumer SQL still references the old name; didn't explicitly mention field ID being stored in the Parquet schema metadata (the "why" beneath the "why").
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 4.5 |
+| Completeness | 4.0 |
+| **Average** | **4.3125** |
+
+**Iter 397 Q1: 4.3125 — PASS**
+
+**Q2** — GROUP BY 5B rows with CPU 6m / Scheduled 7m (17% gap): CPU≈Scheduled means worker threads are pegged on actual compute work (not waiting on I/O or network) — this is compute-bound, not I/O-bound; three fixes — (1) check for whale skew: one or a few group keys with disproportionate row counts dominate one driver — fix via salt (append random 0..N suffix to group key) + two-level GROUP BY (aggregate by salted key first, then re-aggregate by original key); (2) pre-aggregate rollup — materialize daily/hourly partial aggregates upstream so the query runs over millions not billions of rows; (3) increase parallelism (task.concurrency / task.writer-count); diagnostic step: `EXPLAIN ANALYZE VERBOSE` to read per-driver inputRows distribution — if one driver has 10x the rows of others, that confirms skew.
+
+Responder gave: diagnosis precisely correct per Trino performance analysis docs — CPU time ≈ scheduled time (within ~20%) is the textbook signal for CPU-bound workload (vs scheduled >> CPU which indicates I/O wait or scheduling contention); salt + two-level GROUP BY is the canonical Trino fix for high-cardinality skew (used to be called "salting" pattern in distributed SQL literature); pre-aggregation rollup is the standard precomputation play; task.concurrency / parallelism tuning valid; EXPLAIN ANALYZE VERBOSE with per-driver inputRows is the exact Trino diagnostic for skew confirmation (verified per Trino 467 EXPLAIN docs). Engineer-actionable: 3 concrete fixes + diagnostic verification path. Minor: "whale skew" jargon not unpacked for beginner (could say "one customer/group key has 100x more rows than others"); salt+two-level pattern would benefit from a 3-line SQL example showing the CONCAT(key, '_', cast(rand_int as varchar)) → first GROUP BY → second GROUP BY structure.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 3.75 |
+| Practical applicability | 4.5 |
+| Completeness | 4.5 |
+| **Average** | **4.375** |
+
+**Iter 397 Q2: 4.375 — PASS**
+
+**Iter 397 overall: (4.3125 + 4.375) / 2 = 4.34375 — PASS**
+
+Topic score updates:
+- Query performance regression diagnosis: 4.751/5 -> 4.6885/6 (Q2 4.375 nudges average down slightly but topic remains comfortably PASSED)
+- Postgres-to-Iceberg ingestion (schema evolution / column rename in scope): 4.4951/141 -> 4.4938/142 (Q1 4.3125 nudges average slightly but topic remains PASSED)
+
+Strengths observed iter397: (1) Q1 field-ID-vs-name mechanism is the exact "why" that earns this answer technical accuracy — many responders state the rule but skip the underlying field ID lookup, this one didn't; (2) Q2 compute-bound diagnosis from CPU≈Scheduled ratio is a sharp, defensible Trino-specific signal call-out (not generic "high CPU"); (3) salt + two-level GROUP BY is the right canonical recommendation, not a generic "add parallelism" cop-out; (4) EXPLAIN ANALYZE VERBOSE per-driver inputRows as diagnostic verification is engineer-actionable next-step.
+
+Minor gaps: (1) Q1 missed Trino `ALTER TABLE ... RENAME COLUMN` exact syntax + dbt-model/dashboard downstream impact callout; (2) Q2 whale skew jargon and salt pattern would benefit from 3-line SQL example.
 
 ### Iter 396 — 2026-05-30 (EXTENDED PHASE) — Q1 Trino UNNEST array columns (CROSS JOIN UNNEST + ARRAY vs JSON honesty); Q2 column-targeted ANALYZE 500GB table (~80% speedup + drop_extended_stats footgun)
 
