@@ -40,8 +40,8 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.422 | 8 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.609 | 4 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.5193 | 138 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.4698 | 54 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.5208 | 139 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.4753 | 55 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 4.751 | 5 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4925 | 265 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.7392 | 7 |
@@ -50,6 +50,46 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 393 — 2026-05-30 (EXTENDED PHASE) — Q1 Trino system.table_changes (Trino CDC pattern); Q2 Position vs equality deletes
+
+**Q1** — Trino `system.table_changes` (Trino-side CDC pattern): Trino has NO `system.table_changes` equivalent; `start-snapshot-id`/`end-snapshot-id` are Spark-only DataFrameReader options; Trino alternative = timestamp watermark on `updated_at` column with SQL filter; limits = backdated timestamps + timestamp skew.
+
+Responder gave: correct inversion of common misconception that Trino has the Spark-Iceberg CDC TVF; Trino-side alternative is `WHERE updated_at > :last_watermark AND updated_at <= :now` watermark pattern; two limits — backdated timestamps (late arrivals miss the window) and timestamp skew (clock drift across writers).
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** |
+
+**Iter 393 Q1: 4.75 — STRONG PASS**
+
+Trino-side counterpart to iter392's Q1 (Spark-side `start-snapshot-id`). Together iter392+393 close the incremental-reads gap that dragged across iter389-391.
+
+**Q2** — Position vs equality deletes: Position deletes (MoR, content=1, row-position pointer, `rewrite_position_delete_files` when >50); equality deletes (CDC/Debezium, content=2, column-value matching, no built-in compact in 1.5.2, dangling-delete bug #12838, upgrade to 1.8+); CoW default = neither type.
+
+Responder gave: content=1/content=2 manifest distinction; `rewrite_position_delete_files` exact procedure name with ~50 threshold; equality-delete production source = CDC/Debezium upserts; Iceberg 1.5.2 lacks equality-delete compaction; bug #12838 reference; 1.8+ upgrade as real fix; CoW default rewrites whole files producing neither delete type.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.75** |
+
+**Iter 393 Q2: 4.75 — STRONG PASS**
+
+Textbook-grade delete-file detail. Bug #12838 + 1.8+ version-pin signal credibility beyond generic-LLM. CoW=neither caveat closes a common misconception. Maps directly to prod_info.md Iceberg 1.5.2.
+
+**Iter 393 overall: (4.75 + 4.75) / 2 = 4.75 — STRONG PASS**
+
+Topic score updates:
+- Iceberg table maintenance: 4.4698/54 -> 4.4753/55 (rise from Q2 strong pass on delete file compaction)
+- Postgres-to-Iceberg ingestion: 4.5193/138 -> 4.5208/139 (rise from Q1 strong pass on Trino CDC-watermark pattern)
 
 ### Iter 392 — 2026-05-30 (EXTENDED PHASE) — Q1 Iceberg snapshot incremental reads (Spark hourly job); Q2 Multi-tenant row-level security via Trino views
 
