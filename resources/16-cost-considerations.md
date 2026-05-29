@@ -122,22 +122,27 @@ Representative SaaS scale: 80 TB stored in Parquet, 50 TB scanned per month afte
 
 **Reading this table honestly:** the AWS infra bill ($28k) is *less than* the on-prem FTE cost ($40k – $100k). So why does on-prem still win for this scale? Because the FTE cost doesn't disappear in the AWS world — you still need someone owning ingestion logic, schema design, dbt models, and dashboard reliability. The "0.1 FTE on AWS vs 0.3 FTE on-prem" delta is real but smaller than the headline numbers suggest. Also: the on-prem hardware here is sunk cost. The moment you have to *buy new hardware specifically for analytics*, the math shifts toward AWS.
 
-### Crossover heuristic — when each side wins
+### Crossover heuristic — when each side wins (indexed on TB/month SCANNED)
 
-**One-sentence summary:** Below ~20 TB stored or <10 TB/month scanned with spiky demand, AWS is usually cheaper; above ~50 TB stored with steady query load and existing hardware, on-prem usually wins on total cost. The break-even for most SaaS companies is 20-40 TB stored.
+**Critical axis correction:** Athena's per-query cost scales with **TB scanned per month**, *not* TB stored. A 100 TB lakehouse where analysts only scan 2 TB/month (well-partitioned, rollups in place) costs Athena $10/month in queries. A 5 TB lakehouse where analysts run `SELECT *` and scan 50 TB/month costs $250/month. The right question is "at what *scan* volume does on-prem become cheaper?", not "at what *storage* volume?"
 
 Use this as a back-of-the-envelope filter, not a final answer:
 
-| Workload shape | Winner | Why |
+| Monthly scan volume | Winner | Why |
 |---|---|---|
-| **< 10 TB stored AND < 10 TB/month scanned AND spiky query load** | **Cloud (AWS Athena)** | At this scale Athena bill is < $100/month, Glue catalog is free tier, no FTE for cluster ops. On-prem you still pay for idle Trino workers. |
-| **10 – 50 TB stored, moderate steady load** | **Roughly break-even** | Decision driven by org factors (existing hardware? FTE budget? compliance constraints?) more than dollars. |
-| **> 50 TB stored OR > 30 TB/month scanned AND steady predictable load AND hardware already paid for** | **On-prem (your stack)** | S3 storage alone exceeds $1,000/month at this point; Athena scans add another $150+. On-prem hardware amortization is $0 if already bought. |
+| **< 5 TB/month scanned** | **Athena on-demand** | $25/month in query costs. Cloud infra is likely cheaper total if you don't have existing hardware. No idle-cluster tax. |
+| **5 – 30 TB/month scanned** | **Gray zone** | Depends on whether hardware is already provisioned and how high your FTE cost is. Athena costs $25–$150/month in queries; on-prem hardware is $0 if sunk. The decision is dominated by FTE budget and ops appetite, not the query bill. |
+| **> 30 TB/month scanned** | **On-prem Trino + Iceberg** (if hardware is provisioned) | Athena would cost $150+/month just in query fees; steady queries at this volume mean predictable load that on-prem handles cheaply on sunk hardware. The Trino-always-on tax is amortized across enough query volume to win. |
+| **> 175 TB/month scanned** | **Re-evaluate Athena Provisioned Capacity** | At $0.30/DPU-hour, Athena Provisioned Capacity may become competitive again against on-prem at scale. On-demand at this scan rate would be $875+/month; provisioned capacity caps it. Evaluate both. |
 | **Any workload requiring on-prem (compliance, data sovereignty, your `prod_info.md`)** | **On-prem (mandatory)** | Not a cost decision. |
 
-**Break-even rule of thumb:** somewhere around **20 – 40 TB stored with moderate query volume**. Below that, AWS is cheaper (you don't pay the Trino-cluster-always-on tax). Above that, on-prem pays for its hardware within **~18 months** because cloud storage costs scale linearly with data volume while on-prem hardware is one-time.
+**Note: Athena's minimum charge per query is 10 MB** — if you have many small queries scanning <10 MB, each costs the 10 MB minimum. At 5 TB/month with small queries, effective cost per query may be much higher than $5/TB implies. A workload of 1 million dashboard queries each scanning ~1 MB still bills as 10 TB scanned (= $50), not 1 TB. Aggregate small queries into rollup tables or batch them where possible.
+
+**Break-even rule of thumb (scan axis):** somewhere around **5 – 30 TB/month scanned with moderate query volume**. Below that, AWS Athena on-demand is cheaper (you don't pay the Trino-cluster-always-on tax). Above 30 TB/month, on-prem pays for itself quickly because Athena's per-TB-scanned bill scales linearly while on-prem hardware is one-time.
 
 **Don't forget:** the crossover analysis assumes the FTE work gets done either way. If you're underbudgeting engineering on the on-prem side and the system rots (stale dashboards, missed compaction, runaway snapshots), the real on-prem cost is much higher than the table shows. AWS forces a baseline level of reliability via managed services; on-prem forces you to staff for it.
+
+**Storage-volume guidance (separate axis):** stored TB still matters for the S3-vs-MinIO storage cost line — see the worked TCO example above where 80 TB stored costs ~$1,853/month in S3 alone. Use stored TB for storage-cost tradeoffs; use scanned TB for the query-cost crossover decision. Conflating the two axes is the most common mistake in cloud-vs-on-prem analyses.
 
 ---
 
