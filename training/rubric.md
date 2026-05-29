@@ -43,13 +43,68 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.523 | 134 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.528 | 43 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
-| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4951 | 260 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4949 | 261 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
 | SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.652 | 16 |
 
 ---
 
 ## Score history
+
+### Iter 369 Q1 — 2026-05-30 (EXTENDED PHASE) — Trino federation 14th-iter angle: dynamic filtering mechanism + verification on 500M-row Iceberg ⨝ 200K-row Postgres (per iter368 judge probe target #6)
+
+**Q1** — "We're joining our 500M-row Iceberg events table to a 200K-row Postgres tenants table. The query is slower than expected. How does dynamic filtering work in this type of join, and how do I verify whether it's firing?"
+
+Responder produced: (a) correct DF flow direction (build = Postgres tenants smaller, probe = Iceberg events larger); (b) correct mental model "Trino scans Postgres → extracts tenant_id IN-list → pushes to Iceberg scan → skips files with no overlap"; (c) plan-time signal `dynamicFilters = {tenant_id = #df_0}` on Iceberg TableScan in EXPLAIN output; (d) runtime signal `dynamicFilterSplitsProcessed > 0` in EXPLAIN ANALYZE; (e) most common failure mode: 1s default Iceberg wait-timeout, fix via `iceberg.dynamic-filtering.wait-timeout=20s` in `etc/catalog/iceberg.properties` + coordinator restart; (f) `EXPLAIN ANALYZE VERBOSE` for wait-time field; (g) VARCHAR join-key edge case: >256 distinct values compacted to BETWEEN range, fix via `enable_large_dynamic_filters` session property.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 3.75 |
+| Practical applicability | 4.75 |
+| Completeness | 4.5 |
+| **Average** | **4.4375** |
+
+Judge verified via WebSearch:
+1. **Default `iceberg.dynamic-filtering.wait-timeout = 1s`** — CONFIRMED per [Iceberg connector — Trino 481 Documentation](https://trino.io/docs/current/connector/iceberg.html): "Maximum duration to wait for completion of dynamic filters during split generation" default 1s. Responder's claim CORRECT.
+2. **`dynamicFilterSplitsProcessed` operator stat** — CONFIRMED per [Dynamic filtering — Trino 481 Documentation](https://trino.io/docs/current/admin/dynamic-filtering.html): "records the number of splits processed after a dynamic filter is pushed down to the table scan". Responder's claim CORRECT.
+3. **Plan-time `dynamicFilters = {col = #df_N}` in `ScanFilterProject`** — CONFIRMED per Trino docs example `"dynamicFilters = {\"ss_sold_date_sk\" = #df_370}"`. Responder's claim CORRECT.
+4. **`enable_large_dynamic_filters` session property** — CONFIRMED per Trino docs as real session property for large-build-side DF.
+5. **Domain compaction threshold default 256** — CONFIRMED per [PostgreSQL connector — Trino 481 Documentation](https://trino.io/docs/current/connector/postgresql.html): `domain_compaction_threshold` default 256. Responder's claim CORRECT.
+
+**Iter 369 Q1: 4.4375 — PASS** (above per-question 4.0 bar; 0.0625 below the 4.5 STRONG-PASS bar for federation topic; lifts topic running avg from 4.4951/260 toward but not over 4.5 threshold.)
+
+GAPS (deductions from 5):
+- **Technical accuracy (−0.25)**: VERBOSE attribution over-specific — collection-duration shows in regular `EXPLAIN ANALYZE` for `ScanFilterProject` as well; VERBOSE not strictly required.
+- **Beginner clarity (−1.25)**: "build side", "probe side", "#df_0 dynamic filter ID", "domain compaction", "BETWEEN range" used without inline definitions. 13th-iter-flagged glossary gap in `resources/22` continues to drag clarity. Build/probe directionality needs a one-sentence "smaller side is build, larger side is probe" inline gloss.
+- **Practical applicability (−0.25)**: (a) no explicit note that on the production on-prem k8s coordinator, "restart coordinator" means rolling a k8s Deployment/StatefulSet; (b) no Trino 467 / Iceberg 1.5.2 version pin on the 1s default.
+- **Completeness (−0.5)**: (a) missing `enable_dynamic_filtering` master kill switch (cluster and session level) as the FIRST thing to check before tuning timeout; (b) missing CBO/ANALYZE prerequisite — DF requires planner to pick Postgres as build side which needs stats (`ANALYZE postgresql.public.tenants`); (c) missing the "collection-duration vs wait-timeout" reading — even if `dynamicFilterSplitsProcessed > 0`, if collection-duration > wait-timeout the filter arrived too late and didn't prune splits.
+
+ITER370 TEACHER ACTIONS (PRIORITY-ORDERED):
+1. **HIGH (clarity, 13th-iter-flagged)** — Inline glossary at top of `resources/22-trino-federation-postgresql.md`: build side / probe side / `#df_0` / domain compaction / BETWEEN range. Continues to be the single largest BC deduction across iter360 (3.5), iter367 (3.5), iter368 (3.75), iter369 (3.75).
+2. **HIGH (completeness)** — Add `enable_dynamic_filtering` master kill switch (cluster property + session property) to `resources/22` as FIRST thing to check before DF tuning.
+3. **MEDIUM (completeness)** — Add "collection-duration vs wait-timeout" reading to `resources/22`: if `dynamicFilterSplitsProcessed > 0` but query slow, check whether collection-duration > wait-timeout (filter arrived too late) and raise wait-timeout accordingly.
+4. **MEDIUM (correctness)** — Add CBO/ANALYZE prerequisite to `resources/22` DF section: DF requires planner to pick smaller table as build side; if Postgres stats are missing, run `ANALYZE postgresql.public.tenants` and verify with `SHOW STATS FOR postgresql.public.tenants` in Trino.
+5. **LOW (practical applicability)** — Add k8s coordinator restart note: catalog property changes in `etc/catalog/iceberg.properties` require rolling the Trino coordinator Deployment/StatefulSet on the production on-prem k8s Trino 467 cluster.
+6. **LOW (topic running average push)** — One more 4.6+ STRONG-PASS landing pushes federation topic over the 4.5 threshold (currently 4.4949/261).
+
+ITER370 JUDGE PROBE TARGETS:
+1. Federation 15th-iter angle re-probe: "We set `iceberg.dynamic-filtering.wait-timeout=20s` and `dynamicFilterSplitsProcessed` shows N > 0, but the Iceberg scan still reads more files than it should. What's the next thing to check?" — tests iter370 teacher action #3 (collection-duration vs wait-timeout reading).
+2. Federation cluster-config kill switch: "We tried `SET SESSION enable_dynamic_filtering = true` but DF still doesn't fire. What gives?" — tests iter370 teacher action #2.
+3. Carry-forward CDC tier 5th angle (snapshot isolation under concurrent CDC writes) still pending iter365–369.
+4. Carry-forward cost-considerations 8th/9th angle re-probes (bus-factor/MTTR, 90-day-plan) still pending iter368/369.
+5. Carry-forward query plan optimization 6th angle (scan-skew vs aggregation-skew durability) still pending.
+
+Sources verified via WebSearch:
+- [Iceberg connector — Trino 481 Documentation](https://trino.io/docs/current/connector/iceberg.html) — `iceberg.dynamic-filtering.wait-timeout = 1s` default confirmed
+- [Dynamic filtering — Trino 481 Documentation](https://trino.io/docs/current/admin/dynamic-filtering.html) — `dynamicFilterSplitsProcessed` operator stat + plan-time `dynamicFilters` ScanFilterProject syntax confirmed; `enable_large_dynamic_filters` confirmed
+- [PostgreSQL connector — Trino 481 Documentation](https://trino.io/docs/current/connector/postgresql.html) — `domain_compaction_threshold` default 256 confirmed
+- [Add dynamicFilterSplitsProcessed to OperatorStats — PR #3217](https://github.com/trinodb/trino/pull/3217) — metric origin confirmed
+
+**Topics updated**:
+- Trino federation: 4.4951/260 → **4.4949/261 questions** (still NEEDS WORK — 0.0051 below 4.5 raised threshold; iter369 Q1 lands at 4.4375 which is just below the 4.5 STRONG-PASS bar but slightly drags the running average down by 0.0002. Topic remains at the same ~4.495 plateau approaching the 4.5 ceiling; one 4.6+ probe will land it.)
+
+---
 
 ### Iter 360 Q1 — 2026-05-29 (EXTENDED PHASE) — Trino federation 3rd-phrasing stop-gap re-probe: "PARTITIONED still OOMs — what's the next lever?" (per iter359 judge probe target #4)
 

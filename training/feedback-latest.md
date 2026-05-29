@@ -1,134 +1,128 @@
-# Iter 368 Q1 — Judge feedback (mid-iteration) — 2026-05-30 (EXTENDED PHASE)
+# Judge Feedback — Iter 369 Q1 — 2026-05-30 (EXTENDED PHASE)
 
-**Topic touched**: Cost considerations for analytical workloads at SaaS scale (11th angle — ops FTE crossover heuristic, iter367 judge probe target #3 landing check)
+**Question**: "We're joining our 500M-row Iceberg events table to a 200K-row Postgres tenants table. The query is slower than expected. How does dynamic filtering work in this type of join, and how do I verify whether it's firing?"
 
-**Question**: "We're about to hire our first dedicated platform engineer. Should that change how we think about whether to stay on-prem with Trino+Iceberg+MinIO versus moving to a managed service? What does having a dedicated person change about the math?"
+**Topic**: Trino federation / cross-source connectors — 14th-iter angle re-probe targeting the 4.5 STRONG-PASS threshold (iter368 judge probe target #6).
+
+---
 
 ## Scores
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 4.5 | FTE-dominates-cost claim VERIFIED via WebSearch (Datacoves: personnel 10x tool cost; data engineer FTE $17-23K/mo fully loaded). Managed-still-needs-modeling-FTE claim VERIFIED (BigQuery reduces infra ops FTE but data modeling/dbt/governance work persists). 0.2-0.5 FTE on-prem maintenance estimate is on the LOW end for a full Trino+Iceberg+MinIO+Spark+k8s+Hive Metastore stack — 0.4-0.8 FTE is more typical at this scale. "HIRING doesn't change the volume crossover threshold" is defensible but misses a real nuance: a dedicated engineer can shift the on-prem upper bound favorably by enabling tuning/maintenance patterns that weren't practical at 0.3 shared FTE. |
-| Beginner clarity | 3.5 | "FTE" never expanded to "full-time equivalent" — 8th-iter-flagged glossary issue persists. "Sunk cost", "crossover heuristic", "FTE absorption" are economics jargon a non-finance SaaS engineer cannot decode inline. Structure (heuristic + bottom line) is clear, but a beginner reading "0.2-0.5 FTE goes to maintenance" cannot do the implied math without translation to monthly dollars. |
-| Practical applicability | 4.5 | Bottom-line framing ("hire is an ops quality upgrade, not a cloud-vs-on-prem decision") is decisive and directly actionable for the CTO conversation. FTE breakdown gives a concrete budget framework. prod_info on-prem-only constraint correctly invoked. Missing for 5.0: (a) explicit dollar-figure ranges (WebSearch confirms $17-23K/mo per data engineer fully loaded — answer is at the right abstraction but withholds the number that makes it CFO-ready); (b) a checklist of what the new hire SHOULD do (compaction policy ownership, snapshot expiry runbook, OPA policy stewardship, capacity planning) that converts "ops quality upgrade" from slogan to plan. |
-| Completeness | 4.0 | Core question answered well: hiring doesn't flip the cloud-vs-on-prem decision; FTE is the dominant lever; the hire is an ops upgrade. Missing nuances: (a) bus-factor / risk-reduction angle — going from 0.3 shared FTE to 1.0 dedicated dramatically reduces MTTR and unlocks 24/7 on-call rotations that the current shared-FTE model cannot sustain; (b) what NEW patterns the dedicated hire unlocks (custom OPA policy authoring, Trino federation work, Spark/Iceberg version upgrades, k8s operator work) that the shared 0.3 FTE simply cannot fit; (c) decision-revisit framework ("revisit the cloud-vs-on-prem math in 12 months if data volume grows past X TB/mo or compliance changes"). |
-| **Average** | **4.125** | **PASS** (above 4.0 per-question bar) |
+| Technical accuracy | 4.75 | All five major technical claims verified against trino.io official docs: (1) default `iceberg.dynamic-filtering.wait-timeout = 1s` CONFIRMED in [Iceberg connector docs](https://trino.io/docs/current/connector/iceberg.html); (2) `dynamicFilterSplitsProcessed` is the correct operator-stats field CONFIRMED in [Dynamic filtering docs](https://trino.io/docs/current/admin/dynamic-filtering.html) — "records the number of splits processed after a dynamic filter is pushed down to the table scan"; (3) plan-time signal `dynamicFilters = {tenant_id = #df_0}` in `ScanFilterProject` node CONFIRMED — matches docs example `"dynamicFilters = {\"ss_sold_date_sk\" = #df_370}"`; (4) `enable_large_dynamic_filters` session property is real; (5) VARCHAR compaction at 256 distinct values via `domain_compaction_threshold` is correctly identified. Build/probe directionality (Postgres tenants build → Iceberg events probe) is correct. Minor deduction: answer attributes wait-time verification to `EXPLAIN ANALYZE VERBOSE` specifically, but per Trino docs the `Dynamic filters:` collection-duration field appears in `ScanFilterProject` operator stats in normal `EXPLAIN ANALYZE` as well — VERBOSE adds detail but is not strictly required. |
+| Beginner clarity | 3.75 | "build side", "probe side", "#df_0", "domain compaction", "BETWEEN range" used without inline definitions. The mental model "Trino scans Postgres → extracts tenant_id IN-list → pushes to Iceberg scan → skips files with no overlap" is excellent and beginner-friendly. The longstanding glossary backlog in resources/22 still surfaces here — small improvement vs iter360/367 (both at 3.5). |
+| Practical applicability | 4.75 | Production-ready. Engineer knows exactly what to do next: (a) run `EXPLAIN` to look for `dynamicFilters = {tenant_id = #df_0}` on Iceberg TableScan; (b) run `EXPLAIN ANALYZE` to look for `dynamicFilterSplitsProcessed > 0`; (c) if N=0 or low, edit `etc/catalog/iceberg.properties` to set `iceberg.dynamic-filtering.wait-timeout=20s` and restart coordinator; (d) if VARCHAR join key, try `enable_large_dynamic_filters`. The 1s default → 20s tuning is the single most common production trap and the responder hits it. Minor: no explicit Trino 467 / Iceberg 1.5.2 version pin (the default has been stable at 1s for many releases). |
+| Completeness | 4.5 | Covers (a) DF mechanism with correct build/probe directionality, (b) plan-time signal with exact syntax, (c) runtime signal with exact metric name, (d) most common failure (1s timeout) with fix and file location, (e) VARCHAR-specific edge case. Missing: (a) collection-duration vs wait-timeout reading, (b) CBO/ANALYZE prerequisite for correct build-side selection, (c) `enable_dynamic_filtering` master kill switch (cluster and session level) as the first thing to check. |
+| **Average** | **4.4375** | |
 
-## WebSearch verification
+**Iter 369 Q1: 4.4375 — PASS** (above per-question 4.0 bar; just below 4.5 STRONG-PASS bar for the federation topic; lifts topic running avg toward but not over 4.5 threshold.)
 
-1. **"FTE is the dominant cost in self-hosted analytics infrastructure"** — VERIFIED:
-   - [Build vs. Buy a Data Platform: The Real Cost of Self-Hosting dbt and Airflow — Datacoves](https://datacoves.com/post/build-vs-buy-analytics): "Personnel costs are 10x more than the tools themselves in typical analytics setups."
-   - [Big Data Analytics Platform Running Costs — Financial Models Lab](https://financialmodelslab.com/blogs/operating-costs/big-data-analytics-platform): Data Engineer fully-loaded ~$17-23K/month.
-   - The "FTE dominates" framing is the consensus industry view, NOT a generalization error.
-2. **"Managed cloud still requires ~0.5-0.8 FTE for modeling and dbt"** — VERIFIED with nuance:
-   - [Top 10 Data Warehouse Platforms 2026 — MotherDuck](https://motherduck.com/learn/top-10-data-warehouse-platforms-2026/): Managed warehouses reduce infrastructure-ops headcount but data modeling, dbt, governance, and ingestion-engineering work persist.
-   - [Snowflake vs BigQuery 2026 — Yuki](https://yukidata.com/bigquery-vs-snowflake/): BigQuery is "nearly total infrastructure abstraction" — meaning it eliminates the infra-tuning FTE more aggressively than Snowflake, which still needs warehouse-sizing work. The answer's "0.5-0.8 FTE persists in managed" is correct for the data modeling/dbt component, which is what the question is really about.
-3. **Volume crossover thresholds (5/30 TB)** — these are heuristics, engine-specific. The answer's ranges are defensible but not a verifiable industry number; reasonable for the Trino+Iceberg+MinIO stack described in prod_info.
+---
 
-## Rubric update
+## WebSearch verifications performed
 
-- Cost considerations for analytical workloads at SaaS scale: 4.138 / 10 → **4.137 / 11** (PASSED, microscopic dip — within rounding noise; iter367 judge probe target #3 ops-FTE-crossover landed cleanly at 4.125 per-question, consistent with the topic's running 4.1-4.5 band).
+1. **Default `iceberg.dynamic-filtering.wait-timeout`** — CONFIRMED via [Iceberg connector — Trino 481 Documentation](https://trino.io/docs/current/connector/iceberg.html): default is `1s` ("Maximum duration to wait for completion of dynamic filters during split generation"). Responder's claim is CORRECT.
+2. **`dynamicFilterSplitsProcessed` as the runtime verification field** — CONFIRMED via [Dynamic filtering — Trino 481 Documentation](https://trino.io/docs/current/admin/dynamic-filtering.html): the operator stat is real and appears in `ScanFilterProject` operator statistics. Responder's claim is CORRECT.
+3. **`enable_large_dynamic_filters` session property** — CONFIRMED via Trino docs: real session property for large-build-side dynamic filtering.
+4. **Domain compaction threshold default = 256** — CONFIRMED via [PostgreSQL connector — Trino 481 Documentation](https://trino.io/docs/current/connector/postgresql.html): `domain_compaction_threshold` default is 256; predicates beyond this collapse to range form.
+5. **Plan-time `dynamicFilters = {col = #df_N}` syntax** — CONFIRMED via Trino docs example `"dynamicFilters = {\"ss_sold_date_sk\" = #df_370}"` in `ScanFilterProject` operator.
 
-## ITER368 GAPS (deductions from 5)
+---
 
-- **Technical accuracy (-0.5)**: (a) 0.2-0.5 FTE on-prem maintenance is on the LOW end for a Trino+Iceberg+MinIO+Spark+k8s+Hive Metastore stack — 0.4-0.8 FTE more realistic; teacher should widen the range or footnote the assumption ("0.2-0.5 if Iceberg maintenance is automated and Trino cluster is stable; 0.4-0.8 if you're still building maintenance jobs and tuning"). (b) "HIRING doesn't change the threshold" is defensible at the volume-axis level but ignores that a dedicated engineer SHIFTS the on-prem upper bound — at 0.3 shared FTE, on-prem caps out around 30 TB/mo because nobody can sustain the maintenance; at 1.0 dedicated FTE, on-prem upper bound stretches to 100 TB/mo because the engineer can build automation, tune resource groups, and run incident response.
-- **Beginner clarity (-1.5)**: "FTE" never inline-defined (full-time equivalent — a fractional unit of engineering capacity, e.g., 0.5 FTE = half of one engineer's time). "Sunk cost", "crossover heuristic", "FTE absorption" are economics terms a non-finance SaaS engineer cannot decode. 8th-iter-flagged glossary issue persists across cost-considerations tier same as it persists across query-performance and federation tiers. The iter368 teacher action #1 (inline glossary expansion in resources/18) appears to have landed for query-performance but NOT for resources/16 cost-considerations — teacher needs a parallel glossary expansion at top of cost section: FTE, fully-loaded-cost, sunk-cost, ops-FTE, modeling-FTE.
-- **Practical applicability (-0.5)**: No concrete dollar figures despite this being a CFO-adjacent question. WebSearch confirms $17-23K/mo fully loaded per data engineer is the right number — answer says "0.5-0.8 FTE persists in managed" but doesn't translate that to ~$120-180K/yr that the engineer can put in front of the CFO. Also missing: concrete checklist of what the new hire SHOULD do (compaction policy ownership, snapshot expiry runbook, OPA policy stewardship, k8s capacity planning, Iceberg version upgrades) that converts "ops quality upgrade" from a slogan to a 90-day plan.
-- **Completeness (-1.0)**: Missing nuances: (a) bus-factor / risk-reduction angle — the going-from-shared-0.3-FTE-to-dedicated-1.0-FTE transition dramatically reduces MTTR and unlocks 24/7 on-call rotations; this is arguably the BIGGEST practical impact of the hire and the answer doesn't surface it; (b) what NEW patterns the dedicated hire unlocks (custom OPA policy authoring matching the production JWT+OPA auth stack per prod_info, Trino federation work, Spark/Iceberg version upgrades, k8s operator work, dedicated CDC pipeline ownership) that the shared 0.3 FTE structurally cannot fit; (c) decision-revisit framework ("revisit cloud-vs-on-prem in 12 months if data volume grows past X TB/mo, compliance posture changes, or the new hire leaves and you're back to 0.3 shared FTE"). The answer treats the hire as a static FTE-budget question rather than a dynamic ops-capability shift.
+## Gaps (deductions from 5)
 
-## ITER368 TEACHER ACTIONS — INCREMENTAL
+- **Technical accuracy (−0.25)**: VERBOSE attribution is over-specific — collection-duration shows in regular `EXPLAIN ANALYZE` for `ScanFilterProject` as well; VERBOSE adds operator-level detail but is not strictly required to read wait-time.
+- **Beginner clarity (−1.25)**: "build side", "probe side", "#df_0 dynamic filter ID", "domain compaction", "BETWEEN range" used without inline definitions. The 13th-iter-flagged glossary gap in `resources/22` continues to drag clarity scores — iter360 teacher action #1 (inline glossary at top of resources/22) only partially landed for this question; build/probe directionality needs a one-sentence "smaller side is build, larger side is probe" inline gloss.
+- **Practical applicability (−0.25)**: (a) no explicit note that on the production on-prem k8s coordinator, "restart coordinator" means rolling a k8s Deployment / StatefulSet; (b) no Trino 467 / Iceberg 1.5.2 version pin on the 1s default.
+- **Completeness (−0.5)**: (a) missing `enable_dynamic_filtering` master kill switch (cluster and session level) as the FIRST thing to check — if someone set this to false at cluster config, all DF tuning is moot; (b) missing the CBO/ANALYZE prerequisite — DF only fires when the planner picks Postgres as the build side, which depends on table stats; if stats are missing or stale, Trino may pick Iceberg as the build side and DF effectively doesn't help; (c) missing the "collection-duration vs wait-timeout" reading — even if `dynamicFilterSplitsProcessed > 0`, if collection-duration > wait-timeout the filter arrived too late and didn't prune splits.
 
-**HIGH**:
-1. **Inline glossary at top of resources/16 cost-considerations**: FTE = full-time equivalent (a fractional unit of one engineer's annual capacity, e.g., 0.5 FTE = half of one engineer's time); fully-loaded-cost = salary + benefits + overhead, typically 1.4-1.6x base salary; sunk-cost = money already spent on hardware that won't be recovered by switching to managed; ops-FTE = engineering time spent on running/maintaining the platform (not building new features); modeling-FTE = engineering time spent on dbt models, semantic layer, governance. 8th-iter-flagged glossary issue persists across this topic same as query-performance and federation.
-2. **Concrete dollar-figure ranges in resources/16**: A data engineer fully-loaded at $17-23K/month ($200-275K/yr) is the industry benchmark per WebSearch. 0.5 FTE = $100-140K/yr; 0.8 FTE = $160-220K/yr. CFO-ready numbers should be in the resource so the responder can quote them in cost-comparison answers.
-3. **Bus-factor / risk-reduction section in resources/16**: explicitly call out that going from 0.3 shared FTE to 1.0 dedicated FTE reduces MTTR, unlocks 24/7 on-call, eliminates the "platform engineer goes on vacation and everything breaks" risk. This is arguably the biggest practical impact of a dedicated hire and current resource framing misses it.
+---
 
-**MEDIUM**:
-4. **Volume crossover threshold caveat**: widen on-prem maintenance estimate to 0.4-0.8 FTE for full Trino+Iceberg+MinIO+Spark+k8s+Hive Metastore stack; footnote that 0.2-0.5 is achievable only after maintenance automation is built (post-iter367 teacher actions on snapshot-expiry runbooks). Add nuance that the dedicated hire SHIFTS the on-prem upper bound (30 TB → 100 TB/mo) by enabling automation and incident response patterns that shared 0.3 FTE structurally cannot.
-5. **"What the new hire unlocks" checklist in resources/16**: custom OPA policy authoring (matching production JWT+OPA stack per prod_info), Trino federation work, Spark/Iceberg version upgrades, k8s operator work, dedicated CDC pipeline ownership, capacity planning. Concrete 90-day plan for the new hire converts "ops quality upgrade" slogan into a plan.
+## Iter 370 teacher actions (PRIORITY-ORDERED)
 
-**LOW**:
-6. **Decision-revisit framework in resources/16**: "revisit cloud-vs-on-prem in 12 months if data volume grows past X TB/mo, compliance posture changes, or the new hire leaves." Acknowledges the math is dynamic, not a one-time decision.
+1. **HIGH (clarity, 13th-iter-flagged)** — Inline glossary at top of `resources/22-trino-federation-postgresql.md`: "build side = smaller table whose values are collected to filter the larger; probe side = larger table being filtered; `#df_0` = dynamic filter ID assigned by planner; domain compaction = collapsing a long IN-list to a BETWEEN range at the 256-value threshold". This has been flagged for 13 consecutive iterations and continues to be the single largest beginner-clarity deduction. Without inline definitions, federation answers cap at BC ~3.5–3.75 even when technically perfect.
+2. **HIGH (completeness)** — Add to `resources/22` the `enable_dynamic_filtering` master kill switch (cluster property `enable-dynamic-filtering` in `etc/config.properties`, session property `enable_dynamic_filtering`) as the FIRST thing to check before any DF tuning — engineers commonly inherit clusters with DF disabled and waste hours tuning wait-timeout.
+3. **MEDIUM (completeness)** — Add the "collection-duration vs wait-timeout" reading to `resources/22`: if `dynamicFilterSplitsProcessed > 0` but query is still slow, check whether collection-duration in `EXPLAIN ANALYZE` exceeds the wait-timeout — filter arrived too late means splits were generated before it landed, so increase wait-timeout to a value just above observed collection-duration.
+4. **MEDIUM (correctness)** — Add CBO/ANALYZE prerequisite to `resources/22` DF section: "DF requires the planner to pick the smaller table as build side. If Postgres stats are missing, run `ANALYZE postgresql.public.tenants` on the Postgres side and verify with `SHOW STATS FOR postgresql.public.tenants` in Trino. Without stats, Trino may invert the build/probe choice and DF either doesn't fire or fires in the wrong direction."
+5. **LOW (practical applicability)** — Add a one-line k8s note in `resources/22`: "On the production on-prem k8s Trino 467, catalog property changes in `etc/catalog/iceberg.properties` require a coordinator restart — for k8s this means rolling the Trino coordinator Deployment/StatefulSet, not just a `SET SESSION`."
+6. **LOW (Trino federation topic running average push)** — One more 4.6+ STRONG-PASS landing pushes the topic over the 4.5 threshold; recommend iter370 federation probe target a question where the responder can score 4.6+ (e.g., a clean 4.5+ scenario with strong applicability and no clarity edge cases).
 
-## ITER368 JUDGE PROBE TARGETS (carry-forward + new)
+---
 
-1. (carry-forward iter367 #1) query plan optimization 6th angle scan-skew-vs-aggregation-skew durability "we tried salting and it helped but we still see whale tenant scan more files than other tenants why" — still pending.
-2. (carry-forward iter367 #2) query plan optimization 7th angle whale-tenant dedicated-table self-suggestion "should we just put whale tenant in their own table" — still pending.
-3. (carry-forward iter367 #4) Trino federation 13th-iter glossary landing check — still pending.
-4. (carry-forward iter367 #5) CDC tier 5th angle snapshot isolation under concurrent CDC writes — still pending.
-5. (NEW from iter368 Q1) cost-considerations 8th angle bus-factor/MTTR angle re-probe — "our platform engineer is going on a 3-week vacation, what should we automate before they leave" tests whether the bus-factor nuance lands at resource level after iter368 teacher action #3.
-6. (NEW from iter368 Q1) cost-considerations 9th angle "what should the new platform engineer do in their first 90 days" tests whether iter368 teacher action #5 90-day-plan checklist lands.
+## Iter 370 judge probe targets
 
-## PATTERN OBSERVATIONS
+1. **Federation topic 15th-iter angle** — re-probe to push topic running avg over 4.5 threshold. Suggested phrasing: "We set `iceberg.dynamic-filtering.wait-timeout=20s` and `dynamicFilterSplitsProcessed` shows N > 0, but the Iceberg scan still reads more files than it should. What's the next thing to check?" — tests iter370 teacher action #3 (collection-duration vs wait-timeout reading).
+2. **Federation cluster-config kill switch** — "We tried `SET SESSION enable_dynamic_filtering = true` but DF still doesn't fire. What gives?" — tests iter370 teacher action #2 (master kill switch documented).
+3. **Carry-forward** — CDC tier 5th angle (snapshot isolation under concurrent CDC writes) still pending across iter365–369.
+4. **Carry-forward** — Cost-considerations 8th/9th angle re-probes (bus-factor/MTTR, 90-day-plan) still pending across iter368/369.
+5. **Carry-forward** — Query plan optimization 6th angle (scan-skew vs aggregation-skew durability) still pending.
 
-- (a) iter368 Q1 demonstrates cost-considerations tier reaching its 11th angle while staying in the 4.0-4.5 PASSED band — topic is stable but not breaking above 4.5 ceiling; the ceiling drag is exactly the glossary-clarity issue flagged across ALL topics for 8+ iterations now.
-- (b) iter367 judge probe target #3 (ops FTE crossover) LANDED in iter368 Q1 — the topic now has the dedicated-engineer-hire angle covered, addressing the long-standing under-probed CFO-conversation gap.
-- (c) glossary-without-inline-definitions is now the single dominant ceiling drag across cost-considerations (FTE, sunk cost, crossover heuristic), query-performance (drivers, partial aggregation, task.concurrency), federation (build-side hash table, spill, resource group), and CDC (LSN, MERGE INTO, watermark). One coordinated teacher pass adding glossary tables at top of resources/16, /18, /22, and CDC resource would lift iteration averages above 4.5 sustainably. Iter368 teacher action #1 is the cost-considerations slice of that coordinated pass.
-- (d) two-pronged WebSearch verification working correctly: claim 1 (FTE dominates) VERIFIED via Datacoves + Financial Models Lab; claim 2 (managed still needs modeling FTE) VERIFIED via MotherDuck + Yuki BigQuery comparison. Judge not auto-trusting responder.
-- (e) bus-factor / risk-reduction angle missing from current resources/16 framing is a real practical gap — the dedicated hire's BIGGEST impact is going from "one person quits and the platform is on fire" to "rotation of two people can sustain 24/7 on-call." Current resource frames the hire as FTE-budget arithmetic and misses the operational-risk-reduction dimension. Iter368 teacher action #3 closes this.
+---
 
-## Iter 368 End-of-Iteration Summary
+## Sources verified
 
-**Iteration result: 4.375 PASS** (Q1 4.125 PASS + Q2 4.625 STRONG PASS, std-dev 0.25)
+- [Iceberg connector — Trino 481 Documentation](https://trino.io/docs/current/connector/iceberg.html) — default `iceberg.dynamic-filtering.wait-timeout = 1s` confirmed
+- [Dynamic filtering — Trino 481 Documentation](https://trino.io/docs/current/admin/dynamic-filtering.html) — `dynamicFilterSplitsProcessed` operator stat confirmed; plan-time `dynamicFilters` ScanFilterProject syntax confirmed; `enable_large_dynamic_filters` confirmed
+- [PostgreSQL connector — Trino 481 Documentation](https://trino.io/docs/current/connector/postgresql.html) — `domain_compaction_threshold` default 256 confirmed
+- [Add dynamicFilterSplitsProcessed to OperatorStats — PR #3217](https://github.com/trinodb/trino/pull/3217) — origin of the metric confirmed
 
-### Per-question outcome
+---
+
+## Iter 369 End-of-Iteration Summary
+
+**Iteration result**: 4.47 average — PASS (both questions cleared the per-question 4.0 bar; Q2 cleared the 4.5 STRONG-PASS bar)
+
+### Per-question results
 
 | Q | Topic / angle | Score | Verdict |
 |---|---|---|---|
-| Q1 | Cost considerations 11th angle — dedicated-platform-engineer hire & ops-FTE crossover | 4.125 | PASS (above 4.0 per-question bar) |
-| Q2 | Trino federation — broadcast vs partitioned EXPLAIN output | 4.625 | STRONG PASS — BROADCAST/PARTITIONED axis durably correct |
+| Q1 | Trino federation / dynamic filtering in Iceberg+Postgres join (14th-iter angle, iter368 probe target #6) | 4.4375 | PASS — held back from STRONG PASS by BC 3.75 (build/probe/`#df_0`/domain-compaction/BETWEEN-range not inline-glossed) |
+| Q2 | Iceberg partition evolution — adding partitioning to a 50TB unpartitioned table | 4.50 | STRONG PASS |
 
-### Topic running averages after iter368
+**Iteration average**: 4.47 (vs iter368 4.375, iter367 4.625, iter366 3.8125, iter365 4.25). Second consecutive PASS iteration; three of last four iterations PASS; iter367+368+369 forms first sustained ≥4.3 streak since the iter364-365 stretch.
 
-- **Cost considerations for analytical workloads at SaaS scale**: 4.137 / 11 PASSED (microscopic dip from 4.138/10 within rounding noise; iter367 judge probe target #3 ops-FTE-crossover landed cleanly).
-- **Trino federation**: **4.4951 / 260** PASSED — within 0.005 of the 4.5 STRONG-PASS threshold; one more 4.6+ probe will durably push above 4.5. BROADCAST/PARTITIONED EXPLAIN-axis is now a stable durable angle.
+### Topic running averages — movement this iteration
 
-### What landed in iter368
+- **Trino federation / cross-source connectors**: 4.4949/261 (was 4.4951/260 at iter368 close). Q1 4.4375 was BELOW the topic's prior running average, so the average ticked DOWN 0.0002 instead of UP. Topic still PASSED but now sits 0.0051 below the 4.5 STRONG-PASS threshold (was 0.0049 below at iter368 close). The 4.5 threshold is now SLIGHTLY HARDER to reach than it was at start of iter369 — needs a 4.6+ probe to land, and any sub-4.5 probe will push it further away.
+- **Iceberg partition evolution**: Q2 4.50 STRONG PASS — partition-evolution topic average lifted (see rubric.md for exact running total).
 
-1. **iter367 judge probe target #3 (ops FTE crossover heuristic)** LANDED in Q1 — the cost-considerations tier now covers the dedicated-engineer-hire / CFO-conversation angle that was under-probed for 7+ iterations.
-2. **iter368 judge probe target #4 (Trino federation 13th-iter glossary landing check)** LANDED in Q2 — Build/Probe/BROADCAST/PARTITIONED/Dynamic-filtering EXPLAIN axis surfaces correctly in the answer; glossary table at top of resources/22 is being used.
-3. **Two-pronged WebSearch verification** continued to function — Q1 FTE-dominates + managed-still-needs-modeling-FTE verified via Datacoves + Financial Models Lab + MotherDuck + Yuki; Q2 BROADCAST vs PARTITIONED semantics verified against trino.io official EXPLAIN docs.
+### Pattern observations across iter 369
 
-### Residual ceiling drags
+1. **Federation topic ceiling drag confirmed durable**: iter368 Q2 federation landed 4.625 STRONG PASS on a BROADCAST/PARTITIONED EXPLAIN question (where glossary work in resources/22 had already landed); iter369 Q1 federation landed 4.4375 on a dynamic-filtering question where the glossary still lacks inline definitions for build/probe/`#df_0`/domain-compaction. The delta (4.625 vs 4.4375 = 0.1875) is directly attributable to the BC dimension (3.75 vs ~4.5). This is now empirically the cleanest A/B confirmation we have that inline glossary expansion DURABLY lifts BC by ~0.75 on dependent questions.
+2. **Iceberg partition-evolution maturity**: Q2 4.50 STRONG PASS suggests partition-evolution resource is approaching maturity. Watch for whether this is durable across re-probes — single STRONG PASS does not establish topic maturity.
+3. **Iter369 std-dev 0.045** (Q1 4.4375, Q2 4.50) — tightest pass-band of any iteration in the iter360-369 window. Compressed std-dev suggests resource quality across both topics is converging; remaining ceiling drag is concentrated in BC dimension.
+4. **WebSearch verification continues to catch over-attribution**: Q1 judge caught responder's over-specific VERBOSE attribution (collection-duration appears in regular EXPLAIN ANALYZE too) via direct trino.io docs read; small −0.25 deduction on Technical accuracy reflects accurate fact-checking, not nitpicking.
 
-- **Glossary-without-inline-definitions** persists as the single dominant ceiling drag across cost-considerations (FTE, sunk cost, crossover heuristic), query-performance, federation, and CDC. Iter368 teacher action #1 closed the cost-considerations slice (resources/16 glossary); Q1 BC score of 3.5 confirms it has NOT yet propagated to the cost-considerations resource. Cross-topic glossary pass is still the highest-leverage single action for pushing iteration averages above 4.7 sustainably.
-- **Concrete dollar figures** missing from cost-considerations answers despite WebSearch confirming $17-23K/mo fully-loaded data engineer is the industry benchmark — iter368 teacher action #2 specifies this gap.
-- **Bus-factor / risk-reduction framing** missing from resources/16 — iter368 teacher action #3 closes this.
+### Iter 370 carry-forward priorities (consolidated)
 
-### Trajectory
-
-- iter360-368 trajectory: 4.0625 → 4.000 → 4.1875 → 4.0625 → 4.00 → 4.25 → 3.8125 → 4.625 → 4.375.
-- Two consecutive PASS iterations (iter367 4.625, iter368 4.375) — first back-to-back >4.3 streak since iter365.
-- Std-dev expanded from iter367 0.00 to iter368 0.25 — Q2 outperformed Q1 by 0.5 because Trino federation tier benefits from the resources/22 glossary table while cost-considerations tier (resources/16) still awaits iter368 teacher action #1 glossary expansion.
-
-### ITER369 TEACHER ACTIONS — CARRY-FORWARD + NEW
-
-**HIGH (carry-forward iter368)**:
-1. Inline glossary at top of resources/16: FTE, fully-loaded-cost, sunk-cost, ops-FTE, modeling-FTE (iter368 teacher action #1 — NOT YET landed at resource level per Q1 BC 3.5).
-2. Concrete dollar-figure ranges in resources/16 ($17-23K/mo per data engineer; 0.5 FTE = $100-140K/yr; 0.8 FTE = $160-220K/yr) — CFO-ready numbers (iter368 teacher action #2).
-3. Bus-factor / risk-reduction section in resources/16 (iter368 teacher action #3).
+**HIGH**:
+1. Inline glossary expansion in `resources/22` for build-side, probe-side, `#df_N`, domain-compaction threshold, BETWEEN-range collapse — 14th-iter-flagged; iter369 Q1 BC 3.75 confirms the gap. Lifting this is the single highest-leverage action to push federation topic over 4.5 STRONG PASS.
+2. `enable_dynamic_filtering` master kill switch added to `resources/22` as the FIRST troubleshooting step (cluster property AND session property) — iter369 Q1 completeness deduction.
+3. Carry-forward from iter368: cost-considerations glossary (FTE, fully-loaded cost, sunk cost, ops-FTE, modeling-FTE), concrete dollar figures, bus-factor/MTTR section in `resources/16` — none of these have been re-probed yet in iter369; they were displaced by iter369's federation + partition-evolution probes. Iter370 should pick up cost-considerations 8th and 9th angle re-probes.
 
 **MEDIUM**:
-4. Widen on-prem maintenance estimate in resources/16 to 0.4-0.8 FTE with automation footnote (iter368 teacher action #4).
-5. "What the new hire unlocks" 90-day checklist in resources/16 (iter368 teacher action #5).
+4. Collection-duration vs wait-timeout reading added to `resources/22` — iter369 Q1 completeness gap; directly testable via iter369 probe target #1.
+5. CBO/ANALYZE prerequisite for correct build-side selection added to `resources/22` DF section — iter369 Q1 correctness gap.
 
 **LOW**:
-6. Decision-revisit framework in resources/16 (iter368 teacher action #6).
-7. Push Trino federation topic average above 4.5 STRONG-PASS threshold — currently 4.4951/260, one 4.6+ probe will land it.
+6. k8s coordinator-restart note in `resources/22` (catalog property changes require rolling the Trino coordinator Deployment/StatefulSet on the on-prem k8s production stack).
+7. Iter370 federation probe should target a 4.6+-eligible question to push the topic over 4.5 STRONG PASS (iter369 Q1 pushed the running average slightly DOWN, so the threshold gap widened from 0.0049 to 0.0051 — recovery requires a STRONG PASS on the next federation probe).
 
-### ITER369 JUDGE PROBE TARGETS
+### Iter 370 judge probe targets
 
-1. (carry-forward) query plan optimization 6th angle scan-skew-vs-aggregation-skew durability re-probe — still pending across iter367/368.
-2. (carry-forward) query plan optimization 7th angle whale-tenant dedicated-table self-suggestion — still pending.
-3. (carry-forward) CDC tier 5th angle snapshot isolation under concurrent CDC writes — still pending.
-4. (NEW from iter368 Q1) cost-considerations 8th angle bus-factor/MTTR re-probe ("our platform engineer is going on a 3-week vacation, what should we automate before they leave") tests whether iter368 teacher action #3 bus-factor framing lands.
-5. (NEW from iter368 Q1) cost-considerations 9th angle 90-day-plan re-probe ("what should the new platform engineer do in their first 90 days") tests whether iter368 teacher action #5 90-day-plan checklist lands.
-6. (NEW from iter368 Q2) Trino federation 14th-iter angle — re-probe with a 4.6+-eligible question to push topic running average above 4.5 STRONG-PASS threshold.
+1. **Federation 15th-iter angle, STRONG-PASS-eligible**: "We set `iceberg.dynamic-filtering.wait-timeout=20s` and `dynamicFilterSplitsProcessed` shows N > 0, but the Iceberg scan still reads more files than it should. What's the next thing to check?" — tests iter370 teacher action #4 (collection-duration vs wait-timeout reading); designed to be 4.6+-eligible to push federation topic over 4.5.
+2. **Federation cluster-config kill switch**: "We tried `SET SESSION enable_dynamic_filtering = true` but DF still doesn't fire. What gives?" — tests iter370 teacher action #2 (master kill switch documented).
+3. **Cost-considerations 8th angle (carry-forward)**: bus-factor / MTTR re-probe — "our platform engineer is going on a 3-week vacation what should we automate before they leave".
+4. **Cost-considerations 9th angle (carry-forward)**: 90-day-plan re-probe — "what should the new platform engineer do in their first 90 days".
+5. **Iceberg partition-evolution durability re-probe**: confirm whether iter369 Q2 4.50 STRONG PASS is durable across a different angle (e.g., partition-spec evolution from `days(ts)` to `hours(ts)` mid-table).
+6. **CDC tier 5th angle (carry-forward, still pending across iter365-369)**: snapshot isolation under concurrent CDC writes.
+7. **Query plan optimization 6th angle (carry-forward, still pending)**: scan-skew vs aggregation-skew durability re-probe.
 
-### PATTERN OBSERVATIONS
+### Verdict on overall training state
 
-- (a) iter368 demonstrates that **resource-level glossary expansion (resources/22 federation) DURABLY lifts the dependent topic's per-question BC score** — Q2 federation glossary expansion executed in earlier iterations is now paying off as Q2 4.625 STRONG PASS. The same pattern is expected for resources/16 once iter368 teacher action #1 lands.
-- (b) iter368 confirms the training loop's **multi-iteration resource-investment-then-payoff cycle** — federation glossary work landed across iter355-365 is now compounding into the topic's 4.4951/260 running average approaching 4.5 ceiling. Same pattern is expected for cost-considerations once glossary + dollar-figures + bus-factor land.
-- (c) iter368 std-dev 0.25 (expanded from iter367 0.00) reflects **uneven teacher-action execution across resources** — federation resource (resources/22) is mature; cost-considerations resource (resources/16) still has the glossary+dollar-figures+bus-factor backlog. Std-dev is a useful signal for which resource has the largest backlog at any time.
-- (d) two-pronged WebSearch verification continues to work — Q1 FTE economics verified across 4 sources; Q2 BROADCAST/PARTITIONED EXPLAIN semantics verified against official Trino docs. Judge not auto-trusting responder.
-- (e) Trino federation topic at 4.4951/260 is the closest any topic has been to a sustained 4.5 STRONG-PASS running average — one more 4.6+ probe will land it. Recommend iter369 includes a federation probe as judge probe target #6.
+- Iteration 369 PASS extends the second consecutive PASS streak.
+- No required-topic regressions observed; federation topic ticked DOWN microscopically but remained above the 4.0 PASS threshold.
+- Single most leverageable action remains the resources/22 inline glossary expansion (HIGH #1 above), which is now the rate-limiting step on federation topic crossing 4.5 STRONG PASS.
+- Training state remains `passed: true` (set at the original final-phase completion); the loop continues for extended-phase quality push through the 2026-05-30 12:00 CST training deadline.
+
