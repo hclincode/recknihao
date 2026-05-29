@@ -392,7 +392,7 @@ This is exactly why your SaaS product keeps a transactional database (Postgres/M
 
 Sometimes you legitimately need a single-row or small-range lookup against your Iceberg table — debugging a customer issue ("show me event_id `abc123`"), powering a "view raw event" feature in your admin UI, or a low-frequency operational query. You can't make columnar as fast as Postgres for this, but you can avoid the worst case (full table scan). Two Iceberg-native features dramatically reduce the I/O for these queries:
 
-**1. Bloom filter index on the lookup column.** A Bloom filter is a tiny probabilistic data structure (a few KB per row group) that answers "is this value possibly in this row group?" in microseconds without reading the column data. If the filter says no, Trino skips the entire row group. Configure per-column as an Iceberg table property:
+**1. Bloom filter index on the lookup column.** A Bloom filter is a tiny probabilistic data structure (a few KB per row group) that answers "is this value possibly in this row group?" in microseconds without reading the column data. If the filter says no, Trino skips the entire row group. **Bloom filters pay off on HIGH-cardinality columns** (UUIDs, `event_id`, `user_id`, `session_id`, `trace_id`) where min/max stats are useless because every file's range covers the lookup value. **Do NOT add bloom filters on low-cardinality columns** (`status`, `country_code`, `plan_type`) — dictionary encoding + min/max already prune those efficiently and the bloom filter is pure write overhead. Configure per-column as an Iceberg table property:
 
 ```sql
 -- Spark SQL (Trino does not expose write-side bloom-filter properties through SET PROPERTIES)

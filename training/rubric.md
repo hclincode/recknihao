@@ -36,9 +36,9 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.106 | 13 |
 | Query performance basics: partitioning, indexing strategy for analytics | PASSED | 4.431 | 9 |
 | Lakehouse schema design: fact tables, dimension tables, denormalization | PASSED | 4.650 | 5 |
-| Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.573 | 19 |
+| Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.526 | 20 |
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
-| Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
+| Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.375 | 7 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.609 | 4 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.525 | 135 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.535 | 47 |
@@ -50,6 +50,107 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 377 Q1 — 2026-05-30 (EXTENDED PHASE) — Window functions running totals in Trino (SUM() OVER() pattern)
+
+**Q1** — "How do I compute a running total per tenant per day in Trino using window functions?"
+
+Responder admitted resources do not contain enough window-function content; confirmed Trino supports window functions (per one resource); recommended testing with EXPLAIN ANALYZE; suggested pre-aggregated rollup tables as alternative for large datasets. **DID NOT provide a working `SUM(...) OVER (PARTITION BY ... ORDER BY ... ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` example** — the actual deliverable the engineer needed.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.0 |
+| Beginner clarity | 3.5 |
+| Practical applicability | 2.0 |
+| Completeness | 2.0 |
+| **Average** | **2.875** |
+
+**Iter 377 Q1: 2.875 — FAIL** (below per-question 4.0 bar; drags "Analytical query patterns on Iceberg+Trino" topic running avg from 4.625/6 → 4.375/7.)
+
+GAPS (deductions from 5):
+- **TA (−1.0)**: What was stated is accurate (Trino supports window functions, EXPLAIN ANALYZE useful, pre-aggregated rollup is a valid alternative for very large datasets) — but the *absence* of the canonical SQL example is a content-coverage failure, not a factual error. No misleading claims.
+- **BC (−1.5)**: No jargon issues, but a beginner asking "how do I compute a running total" needs to SEE the SQL. Telling them "we support it, go test with EXPLAIN ANALYZE" is unhelpful — they have nothing to test. Honest admission of resource gap is appropriate but does not substitute for the answer.
+- **PA (−3.0)**: Engineer cannot act on this. The CORE deliverable (working `SUM() OVER()` syntax with `PARTITION BY tenant_id ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`) is missing. EXPLAIN ANALYZE advice is moot without a query. Pre-aggregated rollup is a valid alternative but only after the engineer has a baseline working query.
+- **Comp (−3.0)**: Did not answer the question. Window function SQL for running totals is a standard Trino pattern documented at https://trino.io/docs/current/functions/window.html — the syntax pattern (`SUM(amount) OVER (PARTITION BY tenant_id ORDER BY day ROWS UNBOUNDED PRECEDING)`) is mandatory. Also missed: frame specification basics (`ROWS` vs `RANGE`), per-tenant partitioning for multi-tenant SaaS use case, NULL handling, performance caveat (window function executes after FROM/WHERE so partition pruning still works on the base scan).
+
+Judge verified via WebSearch / Trino docs:
+- Trino supports SQL standard window functions including SUM(...) OVER (PARTITION BY ... ORDER BY ... [frame_clause]) per [Window functions — Trino 481 Documentation](https://trino.io/docs/current/functions/window.html).
+- Canonical running-total pattern: `SUM(amount) OVER (PARTITION BY tenant_id ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total` — confirmed standard SQL pattern.
+
+---
+
+### Iter 377 Q2 — 2026-05-30 (EXTENDED PHASE) — Iceberg table properties on CREATE TABLE (partitioning + format + distribution-mode + sorted_by + bloom filters + history retention)
+
+**Q2** — "What Iceberg table properties should I set when creating a table?"
+
+Responder claimed: `partitioning=ARRAY['day(occurred_at)', 'tenant_id']` as sensible default; `format='PARQUET'` explicit; `write.distribution-mode='hash'` CRITICAL when using bucket partitioning (prevents file explosion); `sorted_by` for non-partition column pruning; **bloom filters for LOW-CARDINALITY equality predicates**; `history.expire.min-snapshots-to-keep` as safety net; `write.target-file-size-bytes` "belongs in compaction not creation"; provided a detailed checklist table.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 3.0 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 3.5 |
+| Completeness | 4.0 |
+| **Average** | **3.625** |
+
+**Iter 377 Q2: 3.625 — FAIL** (below per-question 4.0 bar; drags "Iceberg partition design for SaaS" topic running avg from 4.573/19 → 4.526/20.)
+
+Judge verified via WebSearch:
+1. **partitioning=ARRAY['day(occurred_at)', 'tenant_id']** — VALID per [Iceberg connector — Trino 481 Documentation](https://trino.io/docs/current/connector/iceberg.html). `day()` is a supported partition transform; identity transforms (bare column name like `tenant_id`) are also supported.
+2. **format='PARQUET'** — VALID per same docs; PARQUET, ORC, AVRO are supported formats.
+3. **write.distribution-mode='hash' "critical, prevents file explosion" claim** — PARTIALLY CORRECT / OVERSTATED per [Iceberg partitioned writes with transform columns have poor distribution — Trino issue #12966](https://github.com/trinodb/trino/issues/12966) and [Spark Writes — Apache Iceberg](https://iceberg.apache.org/docs/latest/spark-writes/): `write.distribution-mode='hash'` is a Spark-side write hint that shuffles by partition hash before writing. Trino's writer respects some Iceberg distribution semantics but the property is primarily honored by Spark writers. Calling it "critical" for bucket partitioning is overstated — Trino issue #12966 documents that hash distribution on bucket transforms can produce SKEW and concentrate writes, not always fix the small-files problem.
+4. **sorted_by for non-partition pruning** — VALID per Trino 481 docs; `sorted_by = ARRAY['ts ASC NULLS FIRST']` is a recognized CREATE TABLE property.
+5. **Bloom filters for LOW-CARDINALITY equality** — INCORRECT / BACKWARDS per [Iceberg Bloom Filters with Spark — Cazpian](https://cazpian.ai/blog/iceberg-bloom-filters-with-spark-configuration-validation-and-performance-guide) and [Bloom Filter — Apache Parquet](https://parquet.apache.org/docs/file-format/bloomfilter/). Bloom filters are most valuable for HIGH-CARDINALITY columns (UUIDs, user IDs, session IDs, trace IDs) where min/max statistics are useless because the range covers nearly every file. For low-cardinality columns, min/max + dictionary encoding already prune well and bloom filters add overhead with little benefit. **This is a factual error** that would steer the engineer to add bloom filter overhead on the wrong columns.
+6. **history.expire.min-snapshots-to-keep as safety net** — VALID per Iceberg docs; it caps the minimum retained snapshots regardless of time-based expiry.
+7. **write.target-file-size-bytes "belongs in compaction not creation"** — MISLEADING per [Configuration — Apache Iceberg](https://iceberg.apache.org/docs/latest/configuration/) and [Trino issue #28250](https://github.com/trinodb/trino/issues/28250). It IS a creation-time Iceberg table property (standard property with 1GB default), but Trino's Iceberg connector currently does NOT respect the table-level property — it only honors session-level `target_max_file_size`. So the responder's framing is half-right: in the Trino-only stack the property is effectively ignored at write time today (Trino issue #28250 is open). Should be framed as "Trino does not currently honor table-level write.target-file-size-bytes; use session property `target_max_file_size` instead" — not "belongs in compaction."
+
+GAPS (deductions from 5):
+- **TA (−2.0)**: Two factual errors: (a) bloom filter low-cardinality recommendation is BACKWARDS (should be high-cardinality); (b) write.distribution-mode='hash' "critical, prevents file explosion" is overstated and partially incorrect for Trino writes. Minor framing issue on write.target-file-size-bytes (it IS creation-time, just unhonored by Trino).
+- **BC (−1.0)**: Checklist table format is helpful; no major jargon issues. "Bucket partitioning", "distribution-mode", "non-partition column pruning" used without inline glosses — minor.
+- **PA (−1.5)**: Detailed checklist gives a starting CREATE TABLE template, but the bloom-filter advice would steer the engineer to add overhead on wrong columns (low-cardinality where min/max already prunes), and write.distribution-mode might be set unnecessarily on a Trino-write workload where the property is not fully honored. Engineer needs production-stack-specific guidance (Iceberg 1.5.2 + Trino 467 + HMS): Trino-side session property `target_max_file_size`, not table-level write.target-file-size-bytes.
+- **Comp (−1.0)**: Covers many properties comprehensively but missed: (a) production caveat that Trino 467 does not honor all Iceberg standard write.* table properties — engineer ingesting via Spark will see different behavior than querying via Trino; (b) `parquet_bloom_filter_columns` as the Trino-Iceberg-specific property name (vs Spark's `write.parquet.bloom-filter-enabled.column.<col>`); (c) `format_version = 2` recommendation (needed for row-level delete files / position deletes); (d) `location` property for explicit MinIO path control on the on-prem stack.
+
+---
+
+ITER378 TEACHER ACTIONS (PRIORITY-ORDERED):
+1. **CRITICAL (TA, factual error in Q2)** — Bloom filter cardinality guidance: must clearly state bloom filters are for HIGH-CARDINALITY columns (UUIDs, user IDs, session IDs, trace IDs) where min/max statistics are useless because every file's [min, max] range covers the lookup value. For LOW-CARDINALITY columns, min/max + dictionary encoding already prune well and bloom filters add overhead without benefit. Add a one-paragraph "when to use / when NOT to use bloom filters" section to `resources/` Iceberg table properties content. Verify all existing resources are not propagating the inverted advice.
+2. **CRITICAL (PA gap in Q1)** — Window functions content: `resources/` is missing canonical running-total / cumulative-sum / per-tenant cohort SQL examples. Add a worked example: `SELECT day, tenant_id, amount, SUM(amount) OVER (PARTITION BY tenant_id ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total FROM fact_events WHERE day >= DATE '2026-01-01' AND tenant_id = ?` with explanations of (a) PARTITION BY for per-tenant isolation, (b) ORDER BY for the cumulative ordering, (c) frame clause `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`, (d) why window function does NOT break partition pruning (executes after FROM/WHERE filter on the scan).
+3. **HIGH (TA in Q2)** — `write.distribution-mode` guidance: clarify it is primarily a Spark write hint; Trino writers handle distribution per their own writer rules; on bucket transforms hash distribution can introduce skew per Trino issue #12966. Do not frame as "critical, prevents file explosion" — frame as "Spark-side hint, helps reduce small files in some patterns, can cause skew in others."
+4. **HIGH (TA in Q2)** — `write.target-file-size-bytes` guidance: state plainly that Trino 467 / Trino 481 do NOT honor the table-level property at write time (Trino issue #28250 open); engineer must use session property `target_max_file_size` instead. Spark ingestion will honor the table-level property. Surface this Spark-vs-Trino split.
+5. **MEDIUM (Comp in Q2)** — Add to `resources/` Iceberg table properties: `format_version = 2` recommendation (needed for row-level deletes / position deletes), `location` property for MinIO path control, `parquet_bloom_filter_columns` as the Trino property name (vs Spark's `write.parquet.bloom-filter-enabled.column.<col>`).
+6. **LOW CARRY-FORWARD (BC, iter376 systemic)** — Inline glossary for Trino UI vocab (Queued, Scheduled, Physical Input, Blocked, Spilled, EXPLAIN ANALYZE, TYPE DISTRIBUTED) AND lakehouse tx vocab (atomic, idempotent, destructive, partial commit) AND federation vocab (CBO, BROADCAST, PARTITIONED, build/probe side, left-deep join tree). HyperLogLog gloss open since iter372. MinIO TCO open since iter374.
+
+ITER378 JUDGE PROBE TARGETS:
+1. **Window function durability re-probe**: "How do I compute a 7-day rolling average of events per tenant in Trino?" — tests action #2 (window function content) from a different angle (RANGE / sliding frame vs cumulative UNBOUNDED PRECEDING).
+2. **Bloom filter cardinality re-probe**: "I have a `country_code` column with 200 distinct values used in WHERE clauses — should I add a bloom filter on it?" — tests action #1 (correct low-cardinality guidance: NO, min/max + dictionary already prunes; bloom filter would add overhead).
+3. **Iceberg table property production-stack-fit**: "I set `write.target-file-size-bytes = 512MB` on my Iceberg table via Spark DDL but Trino is still writing 200MB files. Why?" — tests action #4 (Trino does not honor table-level write.target-file-size-bytes; session property `target_max_file_size` needed).
+4. **Distribution mode probe**: "Should I set `write.distribution-mode='hash'` on my bucket-partitioned Iceberg table?" — tests action #3 (Spark vs Trino split + skew caveat).
+5. **Carry-forward iter377 EXPLAIN ANALYZE warning probe** from iter376 action #4.
+6. **Carry-forward iter370+ federation glossary** open since iter360.
+
+PATTERN OBSERVATIONS:
+- (a) **Iter 377 ends 3.25 — FAIL**, breaking the iter370-376 stabilizing band (4.0-4.75). Two distinct failure modes: Q1 = content-coverage gap (window function SQL absent from resources/); Q2 = two factual errors (bloom filter cardinality backwards, distribution-mode overstated).
+- (b) Q1 is the more concerning failure: the responder honestly admitted the resource gap, which is the correct behavior when content is missing — but it still produces an unusable answer for the engineer. Teacher must close the window-function content gap.
+- (c) Q2 is the harder failure to detect because the answer LOOKS authoritative (detailed checklist table) but contains a backwards recommendation (bloom filters on low-cardinality) that would harm the engineer's table. Resources should not propagate inverted bloom-filter cardinality advice — judge must verify this is corrected.
+- (d) Production-stack-fit is mixed: Q2 used `format='PARQUET'` and `day()` transforms appropriate for the Iceberg 1.5.2 + Trino 467 + HMS stack, but missed Trino-vs-Spark write property split (table-level write.target-file-size-bytes unhonored by Trino).
+- (e) Both questions had no inline glossary issues that were primary drivers (TA dominates this iteration's drag), suggesting the BC gloss-cascade has secondary importance vs the content-coverage and factual-error issues this iteration.
+- (f) Topic running averages updated: "Analytical query patterns on Iceberg+Trino" 4.625/6 → 4.375/7 (still PASSED but the single 2.875 drop is the largest negative on the topic since iter300+ — durability concern if next probe on similar SQL pattern questions also fails); "Iceberg partition design for SaaS" 4.573/19 → 4.526/20 (still PASSED, small drag).
+
+Sources verified via WebSearch:
+- [Window functions — Trino 481 Documentation](https://trino.io/docs/current/functions/window.html) — SUM() OVER (PARTITION BY ... ORDER BY ... frame) syntax confirmed
+- [Iceberg connector — Trino 481 Documentation](https://trino.io/docs/current/connector/iceberg.html) — partitioning, format, sorted_by, location confirmed as CREATE TABLE properties
+- [Iceberg partitioned writes with transform columns have poor distribution — Trino issue #12966](https://github.com/trinodb/trino/issues/12966) — hash distribution on bucket transforms can cause skew
+- [Spark Writes — Apache Iceberg](https://iceberg.apache.org/docs/latest/spark-writes/) — write.distribution-mode primarily Spark write hint
+- [Iceberg Bloom Filters with Spark — Cazpian](https://cazpian.ai/blog/iceberg-bloom-filters-with-spark-configuration-validation-and-performance-guide) — bloom filters for HIGH-cardinality (NOT low-cardinality)
+- [Bloom Filter — Apache Parquet](https://parquet.apache.org/docs/file-format/bloomfilter/) — bloom filter use case for high-cardinality point lookups
+- [Trino issue #28250 — Support Iceberg table properties for write configuration](https://github.com/trinodb/trino/issues/28250) — Trino does not honor table-level write.target-file-size-bytes; session property target_max_file_size used instead
+- [Configuration — Apache Iceberg](https://iceberg.apache.org/docs/latest/configuration/) — write.target-file-size-bytes is a standard table property with 1GB default
+
+**Topics updated**:
+- Analytical query patterns on Iceberg+Trino: 4.625/6 → **4.375/7** (PASSED, but single-iteration drag from Q1 2.875 fail; topic needs re-probe to confirm durability)
+- Iceberg partition design for SaaS: 4.573/19 → **4.526/20** (PASSED, small drag)
+
+---
 
 ### Iter 376 Q1 — 2026-05-30 (EXTENDED PHASE) — Trino web UI slow query diagnosis (queue + CPU vs Scheduled + Physical Input + Blocked + Spilled + EXPLAIN ANALYZE / EXPLAIN TYPE DISTRIBUTED)
 

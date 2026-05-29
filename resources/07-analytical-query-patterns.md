@@ -391,6 +391,141 @@ ORDER BY c.day;
 
 ---
 
+## 5. Window functions (running totals, ranks, lag/lead)
+
+**The SaaS question family:** "Running total of revenue per tenant by day." "Each customer's day-over-day change in MRR." "Top 10 highest-value orders per tenant."
+
+Window functions compute an aggregate or rank **per row** while still returning every input row — unlike `GROUP BY`, which collapses rows. Trino supports the full ANSI SQL window function syntax (documented at https://trino.io/docs/current/functions/window.html).
+
+The general shape:
+
+```sql
+<window_function>(<args>) OVER (
+  PARTITION BY <columns>     -- buckets the window (per-tenant is typical for SaaS)
+  ORDER BY <columns>         -- ordering within each bucket
+  [<frame_clause>]           -- which rows in the bucket count for THIS row's result
+)
+```
+
+### Pattern A: Running total (cumulative sum)
+
+"Cumulative revenue per tenant over time."
+
+```sql
+SELECT
+  day,
+  tenant_id,
+  amount,
+  SUM(amount) OVER (
+    PARTITION BY tenant_id
+    ORDER BY day
+    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+  ) AS cumulative_revenue
+FROM iceberg.analytics.daily_revenue
+WHERE day >= DATE '2026-01-01'
+  AND tenant_id = 'acme'
+ORDER BY day;
+```
+
+Why each piece matters:
+- `PARTITION BY tenant_id` — every tenant gets its own running total. Without this, the cumulative sum would mix all tenants together. **Always partition by `tenant_id` for multi-tenant SaaS** so a tenant's window can't see another tenant's data.
+- `ORDER BY day` — defines the order in which "previous rows" accumulate.
+- `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` — the frame clause. "Sum every row from the start of the partition through this row." This is the canonical running-total frame.
+- The `WHERE` clause executes BEFORE the window function, so partition pruning on `day` and `tenant_id` still works on the base scan. Window functions are not a barrier to file skipping — only to the final aggregation phase.
+
+### Pattern B: Lag / Lead (compare to previous or next row)
+
+"Day-over-day change in revenue per tenant."
+
+```sql
+SELECT
+  day,
+  tenant_id,
+  revenue,
+  LAG(revenue, 1) OVER (PARTITION BY tenant_id ORDER BY day) AS prev_day_revenue,
+  revenue - LAG(revenue, 1) OVER (PARTITION BY tenant_id ORDER BY day) AS day_over_day_change
+FROM iceberg.analytics.daily_revenue
+WHERE day >= DATE '2026-01-01';
+```
+
+- `LAG(col, n)` returns the value of `col` from `n` rows back within the partition (default 1). Returns NULL when there is no prior row.
+- `LEAD(col, n)` is the mirror — `n` rows forward.
+- No frame clause needed — `LAG`/`LEAD` operate on a specific row offset, not a frame.
+
+### Pattern C: Rank (top-N per group)
+
+"Top 10 highest-value orders per tenant."
+
+```sql
+SELECT *
+FROM (
+  SELECT
+    tenant_id,
+    order_id,
+    amount,
+    RANK() OVER (PARTITION BY tenant_id ORDER BY amount DESC) AS revenue_rank
+  FROM iceberg.analytics.orders
+  WHERE order_date >= DATE '2026-01-01'
+)
+WHERE revenue_rank <= 10;
+```
+
+Rank function variants:
+- `ROW_NUMBER()` — assigns a strictly increasing integer (1, 2, 3, 4) within the partition. Ties break arbitrarily.
+- `RANK()` — ties get the same rank, then the next rank skips (1, 2, 2, 4).
+- `DENSE_RANK()` — ties get the same rank, no gap (1, 2, 2, 3).
+
+Pick `ROW_NUMBER()` if you literally need "exactly 10 rows per tenant"; pick `RANK()`/`DENSE_RANK()` if you want to include all ties at rank 10.
+
+### Pattern D: Sliding window (last 7 days rolling)
+
+"7-day rolling average of daily active users per tenant."
+
+```sql
+SELECT
+  day,
+  tenant_id,
+  dau,
+  AVG(dau) OVER (
+    PARTITION BY tenant_id
+    ORDER BY day
+    RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW
+  ) AS rolling_7d_avg_dau
+FROM iceberg.analytics.daily_dau;
+```
+
+- `RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW` — a value-based frame: include all rows whose `day` is within 6 days before this row. Works correctly even when some days are missing (gaps).
+- `ROWS BETWEEN 6 PRECEDING AND CURRENT ROW` is the row-count alternative — strict last 7 rows. Use this only when you know there are no day gaps.
+
+### Performance: when window functions get expensive
+
+Window functions force Trino to **sort the probe data** by `(PARTITION BY columns, ORDER BY columns)` before computing the window. This sort happens after `WHERE` filtering but before producing output. For large input sets the sort can spill to disk or OOM the worker.
+
+Symptoms of a window-function memory problem:
+- Trino UI shows the `Window` operator as the blocked stage with high memory usage.
+- `EXPLAIN ANALYZE` shows large `Spilled` bytes on the Window operator (Trino uses ORC spill for window operators when enabled).
+- The query passes a small test but times out on a year of data.
+
+Mitigations, in order of preference:
+1. **Tighten `WHERE`** to reduce the probe set before the window. A window over 30 days is fine; over 2 years probably is not. Always partition-prune on `day` / `occurred_at` first.
+2. **Push to a pre-aggregated rollup table.** Rather than running a window over the raw fact table on every dashboard load, materialize a daily `agg_daily_revenue_by_tenant` table (one row per tenant per day) and run the window over the rollup. For a SaaS with 10k tenants × 365 days = 3.6M rows in the rollup vs 500M raw events, this is the difference between a 30-second query and a 0.5-second query.
+3. **Narrow `PARTITION BY`.** Each unique partition key requires its own sort-and-window pass. `PARTITION BY tenant_id, user_id` on a high-cardinality table is far more expensive than `PARTITION BY tenant_id` alone.
+4. **Enable Trino spill-to-disk** (`spill_enabled = true`, `query_max_total_memory_per_node` tuned) if you must run the window over the raw data. Spill trades latency for not OOMing.
+
+### When to use a window function vs `GROUP BY`
+
+| Need | Use |
+|---|---|
+| One row per group with an aggregate (total revenue per tenant) | `GROUP BY` |
+| Every row PLUS an aggregate context (each order's amount AND tenant running total) | Window function |
+| Top-N per group | Window function (`ROW_NUMBER`/`RANK`) + outer `WHERE` |
+| Compare each row to the previous row in a group | `LAG` / `LEAD` |
+| Aggregate over a moving window (last 7 days, last N rows) | Window function with frame clause |
+
+If you can answer the question with `GROUP BY`, prefer it — `GROUP BY` collapses rows early and runs cheaper than a window function on the same data.
+
+---
+
 ## Why each pattern stresses OLAP differently
 
 | Pattern | Bottleneck | What helps |
@@ -399,5 +534,6 @@ ORDER BY c.day;
 | Funnel | Multi-pass over same table | Caching, MATCH_RECOGNIZE, pre-aggregated funnel tables |
 | Cohort | High-cardinality DISTINCT | `approx_distinct`, pre-built cohort tables |
 | Time-series | Gap-filling logic | Calendar tables, dashboard-side fill |
+| Window functions | Sort + memory on PARTITION BY / ORDER BY data | Tight `WHERE`, pre-aggregated rollup tables, narrower PARTITION BY |
 
 Knowing which bottleneck you're hitting tells you where to optimize.

@@ -3511,6 +3511,16 @@ TBLPROPERTIES (
 
 After creation, Trino and Spark both see the same table because both point at the same HMS. **Do not create tables in two places** — pick Spark or Trino, stay consistent.
 
+> **Spark-vs-Trino split on `write.target-file-size-bytes`.** This is a valid Iceberg standard table property and **Spark honors it at write time** (Spark Structured Streaming, batch Spark SQL, `MERGE INTO`). However, **Trino 467 does NOT honor `write.target-file-size-bytes` at write time** (tracked at [trinodb/trino #28250](https://github.com/trinodb/trino/issues/28250)) — Trino writers ignore the table-level property and follow Trino's own session-level config. When writing from Trino, use the Trino session property instead:
+>
+> ```sql
+> -- Trino session: must SET before the INSERT/CTAS that you want to honor it
+> SET SESSION iceberg.target_max_file_size = '256MB';
+> INSERT INTO iceberg.analytics.events SELECT * FROM staging.events_today;
+> ```
+>
+> Practical consequence for this stack: setting `'write.target-file-size-bytes' = '134217728'` in `TBLPROPERTIES` controls Spark-side ingestion file size, but Trino-side `INSERT`/`CTAS` writes will keep writing files at Trino's default (~1 GB unless tuned via session). If your ingestion is Spark-only (the standard pattern in this stack), the table property is enough. If you also write to the table from Trino (ad-hoc CTAS for derived tables, etc.), add the `SET SESSION` line at the start of those query scripts.
+
 ---
 
 ## Schema evolution: handling new columns added to Postgres

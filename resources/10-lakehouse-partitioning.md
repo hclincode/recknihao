@@ -138,24 +138,39 @@ CALL iceberg.system.rewrite_data_files(
 );
 ```
 
-### Fix 2 (optional): Parquet bloom filters for low-cardinality equality predicates
+### Fix 2 (optional): Parquet bloom filters for HIGH-cardinality equality predicates
 
-For low-cardinality equality filters (`WHERE plan_type = 'enterprise'`, `WHERE country_code = 'JP'`), Parquet **bloom filters** let the Parquet reader answer "is this value possibly in this row group?" in microseconds without reading any column data. If the bloom filter says no, the entire row group is skipped — even within a file the sort hasn't fully clustered.
+**Use bloom filters on HIGH-cardinality columns** (UUIDs, `user_id`, `order_id`, `session_id`, `trace_id`, `event_id`) where equality predicates are common. **Do NOT use bloom filters on low-cardinality columns** (`status`, `country_code`, `plan_type`, `currency`) — dictionary encoding already handles those efficiently and Parquet's per-row-group min/max statistics already prune them well. Adding a bloom filter on a low-cardinality column just adds write overhead and file-size bloat with little to no skipping benefit.
+
+**Why high cardinality benefits most.** For a UUID like `event_id = 'abc123...'`, every row group's min/max range covers basically the full ID space — min/max pruning skips nothing. The bloom filter is the only structure that can answer "is this specific ID in this row group?" without reading the column data. For a low-cardinality column like `country_code = 'JP'`, almost every row group contains some `'JP'` rows (or none of them, in which case min/max already tells you that), so the bloom filter does not add prune power beyond min/max + dictionary encoding.
+
+For HIGH-cardinality equality filters (`WHERE event_id = ?`, `WHERE user_id = ?`, `WHERE session_id = ?`), Parquet **bloom filters** let the Parquet reader answer "is this value possibly in this row group?" in microseconds without reading any column data. If the bloom filter says no, the entire row group is skipped.
 
 Bloom filters are configured at write time as Iceberg table properties. Set per-column:
 
 ```sql
--- Spark SQL only
+-- Spark SQL (Trino's Iceberg connector uses a different property name — see below)
 ALTER TABLE iceberg.analytics.user_events SET TBLPROPERTIES (
-  'write.parquet.bloom-filter-enabled.column.plan_type'      = 'true',
-  'write.parquet.bloom-filter-fpp.column.plan_type'          = '0.05',
-  'write.parquet.bloom-filter-max-bytes'                     = '1048576'
+  'write.parquet.bloom-filter-enabled.column.event_id'      = 'true',
+  'write.parquet.bloom-filter-fpp.column.event_id'          = '0.01',
+  'write.parquet.bloom-filter-max-bytes'                    = '1048576'
 );
 ```
 
-Once set, future writes embed a bloom filter for `plan_type` in each Parquet row group. Trino's Parquet reader consults the filter before reading column data. Bloom filters add ~1–5% to file size; they pay off only for selective equality predicates.
+```sql
+-- Trino's Iceberg connector exposes a separate table property
+ALTER TABLE iceberg.analytics.user_events
+  SET PROPERTIES parquet_bloom_filter_columns = ARRAY['event_id', 'user_id'];
+```
+
+Once set, future writes embed a bloom filter for the configured columns in each Parquet row group. Trino's Parquet reader consults the filter before reading column data. Bloom filters add ~1–5% to file size; they pay off only for selective equality predicates on **high-cardinality** columns.
 
 **Bloom filters do NOT apply to historical files.** Re-run `rewrite_data_files` after enabling them to rebuild existing files with bloom filters embedded.
+
+**When NOT to use bloom filters:**
+- Low-cardinality columns (`<1000` distinct values): use dictionary encoding + min/max — they already prune well.
+- Range predicates (`WHERE amount > 100`): bloom filters only help equality.
+- Columns rarely used as a filter: pure write-side overhead with no read-side payoff.
 
 ### Fix 3 (anti-pattern): adding `plan_type` to the partition spec
 
@@ -180,9 +195,9 @@ Problems this creates:
 
 | Situation | Fix |
 |---|---|
-| Low-cardinality column, occasional equality filter | Sort (`rewrite_data_files` with `strategy='sort'`) |
-| Low-cardinality column, frequent equality filter, latency-critical | Sort + Parquet bloom filter |
-| High-cardinality column with point lookups (`user_id = ?`, `session_id = ?`) | Bloom filter + sort (or zorder if multi-column) |
+| Low-cardinality column, occasional equality filter | Sort (`rewrite_data_files` with `strategy='sort'`) — rely on dictionary encoding + min/max, do NOT add bloom filter |
+| Low-cardinality column, frequent equality filter, latency-critical | Sort by that column — min/max + dictionary encoding handle it; bloom filter is wasteful |
+| High-cardinality column with point lookups (`user_id = ?`, `session_id = ?`, `event_id = ?`) | **Parquet bloom filter** + sort (or zorder if multi-column) |
 | Time-range scan with secondary high-cardinality filter | Day partition + sort on the secondary column within the day |
 | Predicate is on a column that genuinely partitions evenly (e.g., `region` with 4 ~equal regions) | OK to add to partition spec |
 
@@ -947,4 +962,4 @@ WHERE occurred_at >= TIMESTAMP '2026-05-01 00:00:00'
 | **`lower_bounds` / `upper_bounds`** | Per-file min/max value maps stored in each Iceberg manifest entry, keyed by field ID **for every column** — not just partition columns. The basis for file-level pruning on any column. |
 | **File-level pruning** | Skipping a whole data file because its `lower_bounds`/`upper_bounds` for the filtered column prove the predicate value cannot be present. Works for any column — but only when the file's min/max range is narrow (data is clustered/sorted on that column). |
 | **Sort-based clustering** | Running `rewrite_data_files` with `strategy='sort'` to physically reorder rows within files by one or more columns. Narrows per-file min/max ranges on the sort key, unlocking file-level pruning for non-partition columns. |
-| **Parquet bloom filter** | Optional per-column probabilistic data structure embedded in Parquet row groups that lets the reader skip row groups for equality predicates without reading column data. Configurable via `write.parquet.bloom-filter-enabled.column.<col>` Iceberg table properties. |
+| **Parquet bloom filter** | Optional per-column probabilistic data structure embedded in Parquet row groups that lets the reader skip row groups for equality predicates without reading column data. Use on **HIGH-cardinality** columns (UUIDs, `user_id`, `session_id`, `event_id`); **do NOT use on low-cardinality columns** (`status`, `country_code`, `plan_type`) where dictionary encoding + min/max already prune efficiently. Configurable via Spark's `write.parquet.bloom-filter-enabled.column.<col>` Iceberg table property, or Trino's `parquet_bloom_filter_columns` array property. |

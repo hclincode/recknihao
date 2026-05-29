@@ -277,6 +277,14 @@ What the options mean:
 - `target-file-size-bytes` — the size each rewritten Parquet file aims for. 256 MB is the standard sweet spot: big enough that file-open overhead is negligible, small enough that one Trino worker per file gives good parallelism.
 - `min-input-files` — a partition is only compacted if it has at least this many candidate small files. Prevents wasted work on partitions that don't need it.
 
+> **`write.target-file-size-bytes` Spark-vs-Trino split (separate from the compaction option above).** The table-level Iceberg property `write.target-file-size-bytes` set in `TBLPROPERTIES` controls **write-time** file sizing for **regular** `INSERT`/`MERGE` writes — not compaction. Spark **honors** this table property at write time; **Trino 467 does NOT** honor `write.target-file-size-bytes` (tracked at [trinodb/trino #28250](https://github.com/trinodb/trino/issues/28250)). For Trino writes, use the Trino session property instead:
+>
+> ```sql
+> SET SESSION iceberg.target_max_file_size = '256MB';
+> ```
+>
+> The `target-file-size-bytes` shown in the `rewrite_data_files` `options` map above is a different concept — it's a per-call **option to the compaction procedure**, not a table property. Both Spark's `rewrite_data_files` and Trino's `optimize` honor their own compaction-time size parameter (Trino's is `file_size_threshold`). The compaction-time option is always honored; only the table-level write-time property has the Trino gap.
+
 **Schedule:** nightly, after the ingestion window closes. For a SaaS that runs nightly ETL at 2 AM, schedule compaction at 4 AM.
 
 > **COMMON MISCONCEPTION — `rewrite_data_files` does NOT reduce MinIO storage by itself.**

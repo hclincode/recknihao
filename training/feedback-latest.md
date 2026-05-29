@@ -1,98 +1,133 @@
-# Judge Feedback — Iter 376 (EXTENDED PHASE)
+# Judge Feedback — Iter 377 (EXTENDED PHASE)
 
-**Iteration average: 4.5625 — STRONG PASS**
+**Iteration average: 3.25 — FAIL**
 
 | Question | Topic | TA | BC | PA | Comp | Avg | Result |
 |---|---|---|---|---|---|---|---|
-| Q1 | Trino web UI slow query diagnosis | 4.75 | 4.0 | 4.75 | 4.5 | **4.50** | STRONG PASS |
-| Q2 | Iceberg cross-table atomic transactions | 5.0 | 4.25 | 4.75 | 4.5 | **4.625** | STRONG PASS |
+| Q1 | Window functions running totals in Trino | 4.0 | 3.5 | 2.0 | 2.0 | **2.875** | FAIL |
+| Q2 | Iceberg table properties at CREATE TABLE | 3.0 | 4.0 | 3.5 | 4.0 | **3.625** | FAIL |
 
 ---
 
-## Q1 — Trino web UI slow query diagnosis
+## Q1 — Window functions running totals in Trino
 
-**What worked:** All technical claims verified against Trino 480/481 docs:
-- CPU vs Scheduled time framing accurate (Scheduled = CPU + per-thread blocked time)
-- Physical Input Data Size as partition-pruning indicator confirmed per EXPLAIN ANALYZE docs
-- BLOCKED query state and Blocked Time metric confirmed
-- Spilled Data Size in web UI confirmed (Trino PR #161)
-- Queued state as concurrency/resource-group saturation indicator correct
-- EXPLAIN ANALYZE vs EXPLAIN (TYPE DISTRIBUTED) distinction correct (latter is plan-only, does not execute)
+**What was given:** Responder admitted resources do not contain enough window-function content; confirmed Trino supports window functions; recommended testing with EXPLAIN ANALYZE; suggested pre-aggregated rollup tables as alternative for large datasets. **Did NOT provide a working `SUM(...) OVER()` example** — the deliverable the engineer asked for.
+
+**What worked:**
+- Honest acknowledgement of the resource gap (correct behavior when content is missing)
+- All affirmative claims are accurate (Trino supports window functions, EXPLAIN ANALYZE is useful, pre-aggregated rollup is a valid alternative pattern)
+- No misleading or incorrect technical claims
 
 **Gaps:**
-- BC -1.0: Trino UI vocabulary cascade (Queued, Scheduled time, Physical Input, Blocked:Input, Spilled Data, EXPLAIN ANALYZE, TYPE DISTRIBUTED) used without inline plain-English glosses at first mention. Same systemic gloss-gap as iter375.
-- TA -0.25: "CPU≈Scheduled" framing is a useful heuristic but technically Scheduled = CPU + per-thread-blocked-time summed across threads, so on highly parallel CPU-bound queries you can see Scheduled > CPU just from parallelism. Minor framing imprecision.
-- PA -0.25: Did not surface the specific web UI click-path (Stages tab, Live Plan view) — engineer told WHAT to look at but not WHERE to click.
-- Comp -0.5: Missing the "EXPLAIN ANALYZE actually executes the query so do not run it casually on already-slow queries" warning; missing Live Plan inspection for in-flight queries; missing `system.runtime.queries` / `system.runtime.tasks` SQL-queryable alternative.
+- **TA (−1.0)**: No factual errors in what was stated, but absence of canonical SQL example is a content-coverage failure.
+- **BC (−1.5)**: A beginner asking "how do I compute a running total" needs to SEE the SQL syntax. Telling them "we support it, go test with EXPLAIN ANALYZE" gives them nothing to test.
+- **PA (−3.0)**: Engineer cannot act on this. The CORE deliverable (`SUM(amount) OVER (PARTITION BY tenant_id ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`) is missing.
+- **Comp (−3.0)**: Did not answer the question. Missing canonical Trino window function syntax (documented at https://trino.io/docs/current/functions/window.html), frame specification (ROWS vs RANGE), per-tenant PARTITION BY for multi-tenant SaaS, performance note that window functions execute after FROM/WHERE so partition pruning still works.
+
+Judge verified via WebSearch:
+- [Window functions — Trino 481 Documentation](https://trino.io/docs/current/functions/window.html) confirms SUM() OVER (PARTITION BY ... ORDER BY ... [frame_clause]) is the standard syntax pattern.
 
 ---
 
-## Q2 — Iceberg cross-table atomic transactions
+## Q2 — Iceberg table properties at CREATE TABLE
 
-**What worked:** Core claim is correct and well-verified:
-- Iceberg native API supports atomic transactions on a single table only (per apache/iceberg Java API docs)
-- Open issue #10617 confirms multi-table transaction API is a feature request, not native
-- HMS-backed Iceberg in Trino (production stack per prod_info.md) inherits per-table-only semantics; HMS struggles even with concurrent single-table writes per Trino issue #27942
-- Workaround pattern (additive write first, verify, then destructive operation) is the standard data-engineering idempotent-write convention for warehouses lacking cross-table tx
-- Explicit "no BEGIN...COMMIT spanning multiple tables" is accurate and important for an engineer with OLTP mental model
+**What was given:** Detailed checklist table with: `partitioning=ARRAY['day(occurred_at)', 'tenant_id']`, `format='PARQUET'`, `write.distribution-mode='hash'` (claimed CRITICAL for bucket partitioning, prevents file explosion), `sorted_by` for non-partition pruning, **bloom filters for LOW-cardinality equality predicates**, `history.expire.min-snapshots-to-keep` as safety net, `write.target-file-size-bytes` "belongs in compaction not creation."
 
-**Gaps:**
-- BC -0.75: "Atomic", "idempotent", "destructive operation", "reconciliation" used without inline glosses. A SaaS engineer with OLTP background may know "atomic" but newcomers to lakehouse semantics need "atomic = all-or-nothing, either every row commits or none do" plain-English gloss at first mention.
-- PA -0.25: Workaround pattern is described but no concrete Trino SQL example showing the two-statement sequence (INSERT INTO additive_table SELECT ... then DELETE FROM source WHERE ...) on the production Iceberg 1.5.2 + Trino 467 + HMS stack.
-- Comp -0.5: Did not mention catalog-level alternatives (Nessie branch-merge, Databricks Unity Catalog multi-statement tx) even with the explicit "not part of your on-prem HMS production stack" caveat — engineer would benefit from knowing WHY their HMS setup has this limit and what does solve it. Did not surface the three operational failure shapes (write-then-crash partial commit / write-then-rollback / concurrent-writer-conflict). Did not mention dbt-test reconciliation as the concrete monitoring implementation hook (prod_info.md confirms dbt is supported).
+**What worked:**
+- Checklist table format is helpful for an engineer scanning a CREATE TABLE template
+- partitioning=ARRAY['day(occurred_at)', 'tenant_id'] is VALID per Trino 481 Iceberg connector docs
+- format='PARQUET' is VALID
+- sorted_by for non-partition column pruning is VALID
+- history.expire.min-snapshots-to-keep as safety net is VALID
 
----
+**Gaps (two factual errors — see verification below):**
+- **TA (−2.0)**: TWO factual issues:
+  1. **Bloom filter LOW-CARDINALITY recommendation is BACKWARDS.** Per [Iceberg Bloom Filters with Spark — Cazpian](https://cazpian.ai/blog/iceberg-bloom-filters-with-spark-configuration-validation-and-performance-guide) and [Bloom Filter — Apache Parquet](https://parquet.apache.org/docs/file-format/bloomfilter/), bloom filters are valuable for HIGH-cardinality columns (UUIDs, user IDs, session IDs, trace IDs) where min/max stats are useless because every file's range covers the lookup value. For LOW-cardinality columns, min/max + dictionary encoding already prune well — bloom filter adds overhead with little benefit. This would steer the engineer to add bloom-filter overhead on wrong columns.
+  2. **`write.distribution-mode='hash'` "critical, prevents file explosion" is overstated.** Per [Trino issue #12966](https://github.com/trinodb/trino/issues/12966) and [Spark Writes — Apache Iceberg](https://iceberg.apache.org/docs/latest/spark-writes/): it is primarily a Spark write hint; on bucket transforms hash distribution can produce SKEW, not always fix small-files. Should be framed as "Spark-side hint, helps in some patterns, can cause skew in others."
+  3. **`write.target-file-size-bytes` "belongs in compaction not creation"** is MISLEADING — per [Configuration — Apache Iceberg](https://iceberg.apache.org/docs/latest/configuration/) it IS a creation-time table property (1GB default), but per [Trino issue #28250](https://github.com/trinodb/trino/issues/28250) Trino does NOT currently honor the table-level property at write time; only session-level `target_max_file_size` is honored. Correct framing is "Trino does not honor table-level; use session property `target_max_file_size`."
+- **BC (−1.0)**: Checklist helpful; "bucket partitioning", "distribution-mode", "non-partition column pruning" used without inline glosses but minor.
+- **PA (−1.5)**: Detailed checklist gives a starting CREATE TABLE template, but bloom-filter advice would steer engineer wrong, and distribution-mode might be set unnecessarily on Trino-write workloads. Engineer needs production-stack-specific guidance (Iceberg 1.5.2 + Trino 467 + HMS): Trino session property `target_max_file_size`, not table-level write.target-file-size-bytes.
+- **Comp (−1.0)**: Missed: (a) production caveat that Trino 467 does not honor all Iceberg standard write.* table properties — Spark-vs-Trino split; (b) `parquet_bloom_filter_columns` as the Trino-Iceberg property name (vs Spark's `write.parquet.bloom-filter-enabled.column.<col>`); (c) `format_version = 2` recommendation (needed for row-level delete files / position deletes); (d) `location` property for explicit MinIO path control.
 
-## ITER377 TEACHER ACTIONS (PRIORITY-ORDERED)
-
-1. **HIGH (clarity, systemic 16th-iter-flagged gloss-at-first-mention gap)** — Inline glossary in `resources/` for:
-   - Trino UI terms: Queued, Scheduled time vs CPU time, Physical Input Data Size, Blocked Time, Spilled Data Size, EXPLAIN ANALYZE, TYPE DISTRIBUTED
-   - Lakehouse transaction terms: atomic, idempotent, destructive operation, partial commit
-   - One-line plain-English gloss per term, placed before the diagnostic / workaround recommendation, not after.
-
-2. **HIGH (completeness)** — Add Trino web UI click-path section: which tab to open (Stages, Live Plan), how to find a specific query by ID, how to read the operator-level metrics table. Engineer is told WHAT to look at but not WHERE to click.
-
-3. **MEDIUM (completeness)** — Add catalog-level alternatives section for Iceberg cross-table transactions: Nessie branch-merge, Unity Catalog multi-statement tx — with explicit on-prem HMS production caveat that neither is part of the production stack but knowing WHY HMS lacks it helps engineer reason about limitations.
-
-4. **MEDIUM (completeness)** — Add EXPLAIN ANALYZE warning: it actually executes the query, so on an already-slow query do not run it casually; use EXPLAIN (TYPE DISTRIBUTED) for plan-only. Surface the "free vs paid" distinction explicitly.
-
-5. **MEDIUM (practical)** — Add concrete Trino SQL two-statement workaround sequence (INSERT INTO additive_table SELECT ... → verify counts → DELETE FROM source_table WHERE ...) on Iceberg 1.5.2 + Trino 467 + HMS, plus dbt-test reconciliation example.
-
-6. **LOW (carry-forward iter375)** — `memory.heap-headroom-per-node` constraint and 25%-vs-30% heap framing; federation glossary (CBO/BROADCAST/PARTITIONED) open since iter360; HyperLogLog gloss open since iter372; MinIO TCO decomposition open since iter374.
+Judge verified via WebSearch:
+- [Iceberg connector — Trino 481 Documentation](https://trino.io/docs/current/connector/iceberg.html) — partitioning, format, sorted_by, location confirmed
+- [Trino issue #12966 — partitioned writes with transform columns have poor distribution](https://github.com/trinodb/trino/issues/12966) — hash distribution on bucket transforms can cause skew
+- [Spark Writes — Apache Iceberg](https://iceberg.apache.org/docs/latest/spark-writes/) — write.distribution-mode primarily Spark write hint
+- [Iceberg Bloom Filters with Spark — Cazpian](https://cazpian.ai/blog/iceberg-bloom-filters-with-spark-configuration-validation-and-performance-guide) — bloom filters for HIGH-cardinality (NOT low-cardinality)
+- [Bloom Filter — Apache Parquet](https://parquet.apache.org/docs/file-format/bloomfilter/) — bloom filter use case for high-cardinality point lookups
+- [Trino issue #28250 — Support Iceberg table properties for write configuration](https://github.com/trinodb/trino/issues/28250) — Trino does not honor table-level write.target-file-size-bytes
+- [Configuration — Apache Iceberg](https://iceberg.apache.org/docs/latest/configuration/) — write.target-file-size-bytes is a standard creation-time table property
 
 ---
 
-## ITER377 JUDGE PROBE TARGETS
+## ITER378 TEACHER ACTIONS (PRIORITY-ORDERED)
 
-1. **Trino UI live-plan reading**: "I see my query stuck in RUNNING for 8 minutes — where in the web UI do I look to see WHICH operator is slow right now, while it's still running?" — tests action #2 (Live Plan click path).
-2. **EXPLAIN ANALYZE warning**: "EXPLAIN ANALYZE timed out on my slow query too. What do I run instead to see the plan?" — tests action #4 (EXPLAIN TYPE DISTRIBUTED as plan-only).
-3. **Iceberg cross-table tx workaround SQL**: "Show me the actual SQL to safely move 1M rows from staging_events to events without leaving the table in a half-committed state." — tests action #5.
-4. **Catalog-level alternative**: "Is there any catalog setup that would give me real cross-table atomic transactions on Iceberg?" — tests action #3 (Nessie / Unity awareness with on-prem HMS caveat).
-5. Carry-forward iter375 federation glossary (CBO/BROADCAST/PARTITIONED) open since iter360.
-6. Carry-forward iter375 Trino S3 filesystem config / MinIO TCO open since iter374.
+1. **CRITICAL (TA, factual error in Q2)** — **Fix bloom filter cardinality guidance.** Audit all `resources/` files mentioning bloom filters. Must clearly state bloom filters are for HIGH-CARDINALITY columns (UUIDs, user IDs, session IDs, trace IDs) where min/max stats are useless. For LOW-CARDINALITY columns, min/max + dictionary encoding already prune well and bloom filters add overhead without benefit. Add explicit "when to use / when NOT to use bloom filters" section. **This is critical — the answer would actively harm an engineer following it.**
+
+2. **CRITICAL (PA gap in Q1)** — **Add window function content to `resources/`.** Worked SQL example for running total:
+   ```sql
+   SELECT
+     day,
+     tenant_id,
+     amount,
+     SUM(amount) OVER (
+       PARTITION BY tenant_id
+       ORDER BY day
+       ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+     ) AS running_total
+   FROM fact_events
+   WHERE day >= DATE '2026-01-01'
+     AND tenant_id = ?
+   ```
+   Explain: (a) PARTITION BY for per-tenant isolation in multi-tenant SaaS, (b) ORDER BY for cumulative ordering, (c) frame clause `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` for running total semantics, (d) note that window function executes AFTER FROM/WHERE so partition pruning on the base scan still works, (e) when to switch to pre-aggregated rollup table (very large fact tables, per-tenant windowing memory pressure).
+
+3. **HIGH (TA in Q2)** — **Reframe `write.distribution-mode` guidance.** State plainly: primarily Spark write hint; Trino writers follow their own distribution rules; on bucket transforms hash distribution can cause skew per Trino issue #12966. Do NOT call it "critical, prevents file explosion."
+
+4. **HIGH (TA in Q2)** — **Surface Spark-vs-Trino write property split for `write.target-file-size-bytes`.** Trino 467/481 does NOT honor the table-level property (Trino issue #28250 open). Engineers must use Trino session property `target_max_file_size`. Spark ingestion DOES honor the table-level property. This is exactly the kind of cross-engine inconsistency the on-prem Iceberg 1.5.2 + Spark + Trino 467 + HMS production stack will encounter.
+
+5. **MEDIUM (Comp in Q2)** — Add to `resources/` Iceberg table properties section: `format_version = 2` recommendation (needed for row-level deletes / position deletes), `location` property for explicit MinIO path control, `parquet_bloom_filter_columns` as the Trino-Iceberg-specific property name (vs Spark's `write.parquet.bloom-filter-enabled.column.<col>`).
+
+6. **LOW CARRY-FORWARD (BC, iter376 systemic)** — Inline glossary at first mention for: Trino UI vocab (Queued, Scheduled, Physical Input, Blocked, Spilled, EXPLAIN ANALYZE, TYPE DISTRIBUTED), lakehouse tx vocab (atomic, idempotent, destructive operation, partial commit), federation vocab (CBO, BROADCAST, PARTITIONED, build/probe side, left-deep join tree). HyperLogLog gloss open since iter372. MinIO TCO open since iter374.
+
+---
+
+## ITER378 JUDGE PROBE TARGETS
+
+1. **Window function durability re-probe**: "How do I compute a 7-day rolling average of events per tenant in Trino?" — tests action #2 from a different angle (sliding frame `RANGE BETWEEN INTERVAL '7' DAY PRECEDING AND CURRENT ROW` vs cumulative UNBOUNDED PRECEDING).
+
+2. **Bloom filter cardinality re-probe**: "I have a `country_code` column with 200 distinct values used in WHERE clauses — should I add a bloom filter on it?" — tests action #1 (correct answer: NO, low cardinality means min/max + dictionary already prunes; bloom filter would add overhead).
+
+3. **Iceberg table property production-stack-fit**: "I set `write.target-file-size-bytes = 512MB` on my Iceberg table via Spark DDL but Trino is still writing 200MB files. Why?" — tests action #4 (Trino does not honor table-level write.target-file-size-bytes; session property `target_max_file_size` needed).
+
+4. **Distribution mode probe**: "Should I set `write.distribution-mode='hash'` on my bucket-partitioned Iceberg table?" — tests action #3 (Spark vs Trino split + skew caveat).
+
+5. **Carry-forward iter376 EXPLAIN ANALYZE warning probe** (it actually executes — do not run casually on already-slow queries; use EXPLAIN TYPE DISTRIBUTED instead).
+
+6. **Carry-forward iter370+ federation glossary** open since iter360.
 
 ---
 
 ## PATTERN OBSERVATIONS
 
-- (a) Iter376 4.5625 STRONG PASS continues iter370-376 stabilizing 4.2-4.6 band; both answers technically accurate, no factual errors.
-- (b) **Shared systemic pattern**: property/term-name density without inline gloss-at-first-mention is the dominant BC drag (Q1 BC=4.0, Q2 BC=4.25). Same pattern across iter375 (BC=4.0 on both Qs) and federation BC ceiling since iter360. This is the most durable improvement target across the loop.
-- (c) Production-fit landed cleanly: Q2 implicitly assumes HMS production stack (no Nessie/Unity push); Q1 web UI is the on-prem deployment view.
-- (d) "Query performance regression diagnosis" topic now at 4.771/4 questions — durability proof builds, no longer a 1-question PASS.
-- (e) Both Q1 and Q2 missed an "alternatives you do NOT have but should know exist" callout — would lift completeness without bloating the answer (Q1: system.runtime SQL view; Q2: Nessie/Unity catalog-level cross-table tx).
-- (f) Q1 framing of CPU vs Scheduled as compute-bound vs I/O-bound is technically defensible but oversimplifies — Scheduled > CPU can also reflect scheduling overhead on highly parallel queries, not just I/O wait.
+- **Iter 377 ends 3.25 — FAIL**, breaking the iter370-376 stabilizing band (4.0-4.75). First sub-4.0 iteration since iter370 (3.98 FAIL).
+- Two distinct failure modes this iteration:
+  - **Q1 = content-coverage gap**: window function SQL absent from `resources/`. Responder honestly admitted the gap (correct behavior) but cannot answer the question. Teacher must close this content gap before next iteration.
+  - **Q2 = factual errors**: bloom filter cardinality is BACKWARDS (low vs high), distribution-mode framing overstated, write.target-file-size-bytes framing misleading. The answer LOOKS authoritative (detailed checklist) which makes the errors harder to catch — exactly the kind of failure that hurts engineers in production.
+- Q2 production-stack-fit was mixed: used appropriate `format='PARQUET'` and `day()` transforms for Iceberg 1.5.2 + Trino 467 + HMS, but missed the Trino-vs-Spark write property split — a known issue for this on-prem stack.
+- BC was not the primary drag this iteration (TA and PA dominate). The systemic gloss-cascade gap from iter360+ remains open but is secondary to the content/factual errors this iteration.
+- "Analytical query patterns on Iceberg+Trino" topic running avg 4.625/6 → 4.375/7 — still PASSED but the 2.875 single-question drop is the largest negative since iter300+. Topic durability concern if next probe on similar SQL pattern questions also fails.
+- "Iceberg partition design for SaaS" topic 4.573/19 → 4.526/20 — small drag but still PASSED.
+- Training loop remains in extended phase with `passed: true` overall, but iter377 shows the bar is fragile: content gaps and embedded factual errors in `resources/` surface as soon as the question hits an unprobed angle.
 
 ---
 
-## SOURCES VERIFIED (WebSearch)
+## SOURCES VERIFIED
 
-- [Web UI — Trino 480 Documentation](https://trino.io/docs/current/admin/web-interface.html)
-- [EXPLAIN ANALYZE — Trino 481 Documentation](https://trino.io/docs/current/sql/explain-analyze.html)
-- [Faster Query Processing: CPU Time — Starburst](https://www.starburst.io/blog/faster-query-processing-cpu-time/)
-- [Add spilled data to query stats, CLI, and Web UI — Trino PR #161](https://github.com/trinodb/trino/pull/161)
-- [Java API — Apache Iceberg](https://iceberg.apache.org/docs/nightly/api/?h=transaction)
-- [Add Multi-Table Transaction API · Issue #10617 · apache/iceberg](https://github.com/apache/iceberg/issues/10617)
-- [Nessie — Apache Iceberg](https://iceberg.apache.org/docs/nightly/nessie/?h=transaction)
+- [Window functions — Trino 481 Documentation](https://trino.io/docs/current/functions/window.html)
 - [Iceberg connector — Trino 481 Documentation](https://trino.io/docs/current/connector/iceberg.html)
-- [Iceberg Connector using the Hive Metastore doesn't handle concurrent writes — Trino Issue #27942](https://github.com/trinodb/trino/issues/27942)
-- [Multi-Format, Multi-Table, Multi-Statement Transactions on Unity Catalog — Databricks DAIS 2025](https://www.databricks.com/dataaisummit/session/multi-format-multi-table-multi-statement-transactions-unity-catalog)
+- [Trino issue #12966 — Iceberg partitioned writes with transform columns have poor distribution](https://github.com/trinodb/trino/issues/12966)
+- [Spark Writes — Apache Iceberg](https://iceberg.apache.org/docs/latest/spark-writes/)
+- [Iceberg Bloom Filters with Spark — Cazpian](https://cazpian.ai/blog/iceberg-bloom-filters-with-spark-configuration-validation-and-performance-guide)
+- [Bloom Filter — Apache Parquet](https://parquet.apache.org/docs/file-format/bloomfilter/)
+- [Trino issue #28250 — Support Iceberg table properties for write configuration](https://github.com/trinodb/trino/issues/28250)
+- [Configuration — Apache Iceberg](https://iceberg.apache.org/docs/latest/configuration/)
