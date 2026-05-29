@@ -44,12 +44,52 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.4779 | 56 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 4.751 | 5 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4925 | 265 |
-| Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.7392 | 7 |
-| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.6480 | 19 |
+| Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.6948 | 8 |
+| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.6373 | 20 |
 
 ---
 
 ## Score history
+
+### Iter 396 — 2026-05-30 (EXTENDED PHASE) — Q1 Trino UNNEST array columns (CROSS JOIN UNNEST + ARRAY vs JSON honesty); Q2 column-targeted ANALYZE 500GB table (~80% speedup + drop_extended_stats footgun)
+
+**Q1** — Trino UNNEST for array columns: `CROSS JOIN UNNEST(tags) AS t(tag)` syntax explodes array element into per-row tuples; COUNT(DISTINCT order_id) example over exploded rows; note ARRAY<VARCHAR> vs JSON column distinction (JSON requires CAST or json_parse first); honest acknowledgment that resources don't explicitly document this pattern.
+
+Responder gave: syntax correct per Trino 467/479 docs; COUNT(DISTINCT order_id) idiom is the textbook "tag co-occurrence / per-order tag count" pattern; ARRAY<VARCHAR> vs JSON distinction is precisely right (JSON column requires conversion to array type before UNNEST works); honesty about resource gap demonstrates calibration. Minor: could mention WITH ORDINALITY for positional tracking and LEFT JOIN UNNEST for NULL/empty arrays.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.5 |
+| Completeness | 4.0 |
+| **Average** | **4.375** |
+
+**Iter 396 Q1: 4.375 — PASS**
+
+**Q2** — Column-targeted ANALYZE for 500GB table: `ANALYZE table_name WITH (columns = ARRAY['col1','col2'])` syntax; ~80% speedup vs full table; drop_extended_stats footgun if previous full ANALYZE ran (column subset interaction with Puffin sketches); target join keys + high-selectivity filter columns only; safe because file-skipping uses manifest min/max not Puffin NDV.
+
+Responder gave: syntax correct per Trino Iceberg connector ANALYZE docs; ~80% speedup is plausible heuristic (depends on column count ratio and Puffin sketch generation overhead); drop_extended_stats footgun is a real and underdocumented gotcha — running ANALYZE with columns subset retains older sketches for unspecified columns unless drop_extended_stats is invoked; target selection (join keys + high-selectivity filters) matches CBO best practice for sketch budget allocation; "safe — doesn't affect file skipping" is technically correct because partition/file-level skipping uses Iceberg manifest min/max statistics, which are produced by writes not by ANALYZE. Engineer-actionable: pick the 3-5 columns that actually drive join decisions, run targeted ANALYZE, then verify via EXPLAIN cost output.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 4.5 |
+| Completeness | 4.5 |
+| **Average** | **4.375** |
+
+**Iter 396 Q2: 4.375 — PASS**
+
+**Iter 396 overall: (4.375 + 4.375) / 2 = 4.375 — PASS**
+
+Topic score updates:
+- Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering: 4.7392/7 -> 4.6948/8 (Q2 4.375 nudges average down slightly but topic remains PASSED with raised 4.5 threshold; 4.6948 still above threshold)
+- SQL query best practices for OLAP (UNNEST/array handling in scope): 4.6480/19 -> 4.6373/20 (Q1 4.375 nudges average slightly but topic remains comfortably PASSED)
+
+Strengths observed iter396: (1) responder's calibrated honesty about resource gap on UNNEST is exactly the behavior we want — flags lack of explicit doc while still giving correct answer; (2) drop_extended_stats footgun call-out on Q2 is precisely the kind of "expensive gotcha" SaaS engineers need; (3) both answers production-stack-fit (Trino 467 Iceberg connector exact match per prod_info.md).
+
+Minor gaps: (1) Q1 could mention WITH ORDINALITY and LEFT JOIN UNNEST for NULL handling; (2) Q2 could specify re-ANALYZE cadence (post-compaction trigger) and EXPLAIN-cost verification step.
 
 ### Iter 395 — 2026-05-30 (EXTENDED PHASE) — Q1 Hive Parquet → Iceberg 500GB migrate() RE-PROBE (iter394 Q2 inversion fix verification); Q2 847 equality delete files read amplification + Iceberg 1.5.2 bug #12838
 

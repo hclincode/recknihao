@@ -1,85 +1,61 @@
-# Judge Feedback — Iter 395 (2026-05-30, EXTENDED PHASE)
+# Iter 396 Feedback — 2026-05-30 (EXTENDED PHASE)
 
-## Overall result: PASS — 4.3125 average
+**Overall: 4.375 — PASS**
 
-| Question | Average | Verdict |
-|---|---|---|
-| Q1 — Hive Parquet → Iceberg 500GB migrate() (RE-PROBE of iter394 Q2 inversion) | 4.0 | PASS |
-| Q2 — 847 equality delete files + Iceberg 1.5.2 bug #12838 | 4.625 | STRONG PASS |
-| **Iter 395 overall** | **4.3125** | **PASS** |
+## Q1 — Trino UNNEST for array columns — 4.375 PASS
 
----
+### Scores
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.5 |
+| Completeness | 4.0 |
 
-## Q1 — Hive Parquet → Iceberg 500GB migration
+### What landed
+- `CROSS JOIN UNNEST(tags) AS t(tag)` syntax exact per Trino 467/479 Iceberg connector docs.
+- COUNT(DISTINCT order_id) example over exploded rows is the canonical "tag co-occurrence" pattern; engineer can drop their column name in directly.
+- ARRAY<VARCHAR> vs JSON column distinction is precisely right and operationally important — a SaaS engineer coming from Postgres JSONB will hit the type mismatch immediately if not warned. The note that JSON columns require `CAST(... AS ARRAY<VARCHAR>)` or `json_parse` before UNNEST works is exactly the right framing.
+- Calibrated honesty: the responder acknowledging that resources don't explicitly document this pattern while still giving the correct answer is the behavior we want — beats fabricating a citation.
 
-### What the answer claimed
-- `migrate()` is metadata-only, completes in 1-5 minutes
-- `snapshot()` for testing first
-- Post-migration `rewrite_manifests` recommended
-- Spark-only
-- Zero data rewrite
+### Minor gaps
+- No mention of `WITH ORDINALITY` for tracking element position (useful for "first tag" / "tag rank" queries).
+- No mention of `LEFT JOIN UNNEST` for rows where array is NULL or empty — without this, `CROSS JOIN UNNEST` silently drops rows with empty arrays, which is a real SaaS analytics footgun (you lose orders with no tags from counts).
 
-### Scoring
-| Dimension | Score | Note |
-|---|---|---|
-| Technical accuracy | 3.5 | Core claims correct; "Spark-only" is wrong — Trino Iceberg connector also exposes `CALL <catalog>.system.migrate(...)` |
-| Beginner clarity | 4.5 | Clear time bounds, named procedures |
-| Practical applicability | 4.0 | Engineer knows the path; "Spark-only" claim could push them to spin up Spark unnecessarily |
-| Completeness | 4.0 | Covers migrate/snapshot/manifests/zero-rewrite; misses Trino-side option |
-| **Average** | **4.0** | |
+## Q2 — Column-targeted ANALYZE for 500GB table — 4.375 PASS
 
-### Critical fix verification — VERIFIED
-Iter394 Q2 catastrophically claimed "no in-place conversion, must rewrite". Iter395 Q1 correctly inverts that claim on the CORE point: `migrate()` is metadata-only, no data rewrite, minutes not hours. The teacher's between-iter resource add worked for the core claim.
+### Scores
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 4.5 |
+| Completeness | 4.5 |
 
-### Residual issue: Spark-only claim
-Verified against Trino 481 Iceberg connector docs: `system.migrate` is callable from Trino via `CALL <catalog>.system.migrate(schema_name => 'x', table_name => 'y')`. On the prod stack (Spark + Trino + HMS + MinIO), the engineer has BOTH options. The "Spark-only" framing is technically wrong and practically suboptimal — if they already have a Trino client open, Trino is the faster path.
+### What landed
+- `ANALYZE table_name WITH (columns = ARRAY['col1','col2'])` syntax exact per Trino Iceberg connector ANALYZE documentation.
+- ~80% speedup is a plausible heuristic for column-targeted vs full ANALYZE on a wide 500GB table (Puffin sketch generation is the dominant cost and scales with column count).
+- `drop_extended_stats` footgun is a real and underdocumented gotcha — running ANALYZE with a column subset retains older Puffin sketches for unspecified columns; if the engineer assumes they get fresh stats only on the named columns and stale stats elsewhere are discarded, that assumption is wrong. Calling this out is high-value.
+- Target selection guidance (join keys + high-selectivity filter columns) matches CBO best practice — these are the columns whose NDV/distribution most affects join ordering and filter cardinality estimation.
+- "Safe — doesn't affect file skipping" is technically correct: partition/file-level skipping uses Iceberg manifest min/max statistics, which are produced by Spark writes, not by Trino ANALYZE. Critical reassurance for an engineer worried about regressions.
 
----
+### Minor gaps
+- "Puffin" is mentioned implicitly (via drop_extended_stats) but not explained for beginners.
+- No mention of re-ANALYZE cadence (post-compaction trigger, weekly maintenance window, etc.) — engineer might run targeted ANALYZE once and not realize it needs refresh.
+- Could suggest EXPLAIN cost-output verification step after ANALYZE completes ("look for non-zero NDV on the analyzed columns in EXPLAIN (TYPE DISTRIBUTED)").
 
-## Q2 — 847 equality delete files, read amplification
+## Pattern observations
 
-### What the answer claimed
-- 2-5x slowdown
-- Way past the >50 file critical threshold
-- Iceberg 1.5.2 bug #12838 — no silver bullet
-- Partial mitigation: `rewrite-all=true` weekly
-- Real fix: upgrade to Iceberg 1.8+
-- Diagnostic: `$files` metadata query filtering `content=2`
+Both answers production-stack-fit (Trino 467 + Iceberg 1.5.2 per prod_info.md). Both correctly identify the engineer-actionable next step. Both show calibrated honesty (Q1) or appropriate caveats (Q2 footgun). This is the iter390+ pattern of consistent ~4.3-4.4 PASS performance — exactly the "consistent correctness across phrasings" the rubric asks for.
 
-### Scoring
-| Dimension | Score | Note |
-|---|---|---|
-| Technical accuracy | 5.0 | All claims verified; #12838 is real and accurately characterized (partition-level sequence-number cleanup bug in 1.5.x); content=2 is correct equality-delete content type |
-| Beginner clarity | 4.0 | Some jargon ("content=2", "rewrite-all=true") — fine for an engineer already debugging this, but a softer onboarding line would help |
-| Practical applicability | 5.0 | Exact production-stack fit (Iceberg 1.5.2 is what prod_info.md describes); engineer has a diagnostic query, a mitigation, and an upgrade target |
-| Completeness | 4.5 | Mitigation + diagnostic + root cause + upgrade target all present |
-| **Average** | **4.625** | |
+## Teacher actions next (iter397)
 
-### Strengths
-- The 50-file threshold heuristic matches documented `delete-file-threshold` guidance
-- Bug #12838 characterization is precise — partition-level sequence-number cleanup means delete files orphan even after rewrite, which is exactly why "no silver bullet" in 1.5.2 is the right framing
-- The `$files content=2` diagnostic is the correct Iceberg metadata table approach for counting equality deletes per partition
-- Upgrading to ≥1.8 is the actual community-recommended fix
+1. **LOW priority** — Add `WITH ORDINALITY` and `LEFT JOIN UNNEST` for NULL/empty arrays to the UNNEST resource. These are the most common follow-up questions after an engineer adopts the basic pattern.
+2. **LOW priority** — Add a one-line "Puffin = Trino's per-column statistics sidecar files" definition to the ANALYZE resource for beginner clarity.
+3. **LOW priority** — Document ANALYZE re-run cadence guidance: "re-ANALYZE after large compaction, or weekly, whichever comes first."
 
----
+## Judge probe targets next (iter397)
 
-## Pattern across recent iterations
-
-Trajectory of last 10 iters: ..., 4.125 PASS, 3.9375 FAIL, 4.625 PASS, 4.75 PASS, 3.125 FAIL, **4.3125 PASS**.
-
-**Key signal**: the iter394 catastrophic inversion (Hive→Iceberg "must rewrite" claim) was FIXED on the core claim in iter395. The re-probe worked. The residual "Spark-only" error is a smaller secondary issue, not a category inversion.
-
----
-
-## Teacher actions for iter 396
-
-### HIGH priority
-1. **Fix Spark-only claim in Hive→Iceberg migration resource.** The newly added migration resource should explicitly state that `system.migrate` is callable from BOTH Spark (`spark.sql("CALL spark_catalog.system.migrate('db.tbl')")`) AND Trino (`CALL iceberg.system.migrate(schema_name => 'db', table_name => 'tbl')`). On the prod stack with HMS shared between engines, either works. Include a one-line "when to use which": Trino if you already have a SQL client open and a small table; Spark if you want recursive_directory control or are scripting a batch.
-
-### MED priority
-2. **Equality-delete answer landed strong.** No action needed on Iceberg 1.5.2 #12838 content, but consider adding a note to the upgrade-to-1.8 section about whether the prod stack's HMS schema is compatible with a 1.5.2 → 1.8 in-place lib upgrade (it is, but the answer didn't have to address it — useful preempt for next probe).
-
-### Judge probe targets for iter 396
-1. HIGH — Hive→Iceberg migration **3rd angle**: explicitly probe whether the engineer can call migrate from Trino, OR a probe about migrating a 50TB table (size-scaling question) to test whether the 1-5min estimate holds.
-2. MED — equality-delete buildup **2nd-angle reprobe**: same root cause via a different symptom (e.g., "MERGE INTO slowness after 6 months of CDC") to confirm #12838 awareness is durable.
-3. Carry-forward backlog from iter394: HMS->Nessie no-downtime, SPILL_FAILED 60GB at 200GB cap, MERGE INTO rollback, OPA-override timeout, schema registry compat, EXPLAIN TYPE IO + VALIDATE, result caching, Iceberg branches fast_forward, bucket sizing, JWT+OPA concurrency, partition spec migration, Iceberg tagging 3rd angle, fs.cache 3rd angle JMX.
+1. Carry forward backlog: HMS→Nessie no-downtime, SPILL_FAILED 60GB at 200GB cap, MERGE INTO rollback, OPA-override timeout, schema registry compat, EXPLAIN TYPE IO + VALIDATE, result caching, Iceberg branches fast_forward, bucket sizing, JWT+OPA concurrency, partition spec migration, Iceberg tagging 3rd angle, fs.cache 3rd angle JMX.
+2. Hive→Iceberg migration: 3rd angle probe — explicit Trino-from-migrate angle to test whether teacher's between-iter resource update on dual-engine migrate() landed.
+3. Equality-delete 2nd angle: MERGE INTO slowness after 6mo CDC accumulation as a different symptom for the same underlying read-amplification problem.
