@@ -356,7 +356,74 @@ If a join hangs or OOMs, check `EXPLAIN` to see which side is being broadcast. F
 
 ---
 
-## 10. Use CTEs or subqueries — don't re-run the same expensive query twice
+## 10. IN subqueries vs JOINs — let Trino's optimizer decide
+
+**The short answer**: you do NOT need to manually rewrite `IN (SELECT ...)` to a JOIN. Trino converts IN subqueries to efficient semi-joins automatically. Manual rewriting can produce wrong results.
+
+**How it works**
+
+When you write:
+```sql
+SELECT user_id, SUM(amount)
+FROM events
+WHERE user_id IN (SELECT user_id FROM premium_users)
+  AND event_date = DATE '2026-05-26'
+GROUP BY user_id;
+```
+
+Trino's optimizer applies the **"Semi-Join (IN) Decorrelation"** rule and converts this to a `SemiJoinNode` internally. You get `SemiJoin[...]` in the EXPLAIN output. This is the efficient path — Trino also applies precomputed hash optimization (`optimize-hash-generation`, default on) to SemiJoin nodes, making IN subqueries typically faster than manually-written JOINs.
+
+**Why rewriting to an INNER JOIN can be wrong**
+
+```sql
+-- Looks "faster" but changes the semantics:
+SELECT e.user_id, SUM(e.amount)
+FROM events e
+JOIN premium_users p ON e.user_id = p.user_id
+WHERE e.event_date = DATE '2026-05-26'
+GROUP BY e.user_id;
+```
+
+If `premium_users` has duplicate `user_id` rows (a common data quality issue), this JOIN multiplies the matching event rows. The IN subquery deduplicated correctly; the JOIN does not. The symptom is silently inflated SUM or COUNT values — no error, just wrong numbers.
+
+**What to look for in EXPLAIN**
+
+```sql
+EXPLAIN
+SELECT user_id, SUM(amount)
+FROM events
+WHERE user_id IN (SELECT user_id FROM premium_users)
+  AND event_date = DATE '2026-05-26'
+GROUP BY user_id;
+```
+
+| Node in EXPLAIN output | Meaning |
+|---|---|
+| `SemiJoin[...]` | Trino correctly handled IN as a semi-join. Good — leave it alone. |
+| `InnerJoin[...]` | You wrote an explicit JOIN (may produce duplicates if the right side has dupes). |
+| `CorrelatedJoin[...]` | Correlated subquery that couldn't be decorrelated — needs attention (see below). |
+
+**When you actually need to act: correlated subqueries**
+
+A correlated subquery references a column from the outer query inside the subquery:
+```sql
+-- Correlated: references e.event_date from the outer query
+WHERE amount > (SELECT AVG(amount) FROM events WHERE event_date = e.event_date)
+```
+
+If Trino cannot decorrelate this (it will show `CorrelatedJoin[...]` in EXPLAIN), the subquery re-executes for every row. Before rewriting, check if the table has stats:
+
+```sql
+SHOW STATS FOR premium_users;
+```
+
+If `row_count` is NULL, run `ANALYZE iceberg.analytics.premium_users` first — the CBO needs row count estimates to decorrelate safely. After ANALYZE, re-EXPLAIN to see if `CorrelatedJoin` converts to `SemiJoin`. If it still shows `CorrelatedJoin`, then rewrite to an explicit JOIN or a pre-filtered CTE.
+
+**Rule of thumb**: if EXPLAIN shows `SemiJoin`, your IN subquery is already optimal — do not touch it.
+
+---
+
+## 11. Use CTEs or subqueries — don't re-run the same expensive query twice
 
 **Why**: A common Postgres habit is to run a heavy query once, store the result in the app, and reuse it. In Trino you don't have a session-scoped temp result, but you can let the planner share a subquery within a single statement using a CTE (`WITH`). Avoid pasting the same expensive subquery in two places — Trino will execute it twice.
 
@@ -403,9 +470,10 @@ GROUP BY user_id;
 7. If you used `LIMIT`, did you also add a partition filter?
 8. Are filters in `WHERE`, not `HAVING`?
 9. Is the **smaller table on the left** of the JOIN, and was `ANALYZE` run?
-10. Are duplicate subqueries collapsed into a CTE or `FILTER (WHERE ...)`?
+10. Does EXPLAIN show `SemiJoin` for any IN subqueries? (If yes, leave them — do not rewrite to a JOIN.)
+11. Are duplicate subqueries collapsed into a CTE or `FILTER (WHERE ...)`?
 
-If you can answer "yes" to all ten, you avoid the most common 10x-cost mistakes that OLTP engineers make on their first day in Trino.
+If you can answer "yes" to all eleven, you avoid the most common 10x-cost mistakes that OLTP engineers make on their first day in Trino.
 
 ---
 
@@ -417,3 +485,5 @@ If you can answer "yes" to all ten, you avoid the most common 10x-cost mistakes 
 - **CBO (Cost-Based Optimizer)**: Trino's optimizer that reorders joins and chooses strategies using table statistics from `ANALYZE`.
 - **HyperLogLog / T-Digest**: probabilistic sketch algorithms behind `approx_distinct` and `approx_percentile`.
 - **ScanFilterProject vs TableScan with constraint**: in EXPLAIN, the former means filtering happens in Trino memory; the latter means Iceberg already filtered the files.
+- **SemiJoin**: the join type Trino uses internally for `IN (SELECT ...)` subqueries. Unlike an INNER JOIN, a SemiJoin returns at most one output row per probe row (no duplication), which is the correct semantic for IN predicates. Trino's `optimize-hash-generation` property applies precomputed hashes to SemiJoin nodes by default.
+- **CorrelatedJoin**: a subquery that references columns from the outer query. Trino tries to decorrelate these automatically; if it can't (shown as `CorrelatedJoin` in EXPLAIN), the subquery re-runs once per outer row — expensive. Fix by running ANALYZE on the subquery table first, then rewriting if needed.

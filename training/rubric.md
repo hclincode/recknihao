@@ -41,15 +41,62 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.4101 | 9 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.609 | 4 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.4891 | 144 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.4662 | 58 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.4689 | 59 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 4.6885 | 6 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4925 | 266 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.6948 | 8 |
-| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.6070 | 22 |
+| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.5426 | 23 |
 
 ---
 
 ## Score history
+
+### Iter 402 — 2026-05-30 (EXTENDED PHASE) — Q1 Iceberg DROP COLUMN (metadata-only + Parquet bytes retained + rewrite_data_files to reclaim + audit consumers); Q2 Trino IN subquery vs JOIN (honest punt — MISSED documented Trino auto-decorrelation to SemiJoin)
+
+**Q1** — Iceberg DROP COLUMN behavior: metadata-only (instant); existing Parquet files keep the column bytes until rewrite_data_files; new writes exclude the column; storage not reclaimed until explicit compaction; audit consumers before dropping. Technically correct end-to-end: Iceberg's field-ID based schema evolution makes DROP metadata-only on commit (no Parquet rewrite), the immutable Parquet files retain the column bytes until rewrite_data_files (or eventual expire_snapshots after rewrite), new writes correctly exclude the dropped column from new Parquet files, and the consumer-audit reminder is the missing operational step in most beginner answers (downstream consumers reading by column name will break; column-name reuse can collide with a different field ID later). Practical applicability is strong: engineer knows next steps are (1) audit consumers, (2) ALTER TABLE DROP COLUMN, (3) rewrite_data_files + expire_snapshots to reclaim storage. Minor gap: no explicit mention that on Trino 467 the syntax is `ALTER TABLE ... DROP COLUMN col_name` and that on this stack `ALTER TABLE ... EXECUTE optimize` + `ALTER TABLE ... EXECUTE expire_snapshots(retention_threshold => '7d')` is the Trino-side reclaim path (vs Spark's `CALL system.rewrite_data_files`). No mention of partition-column DROP edge case (cannot drop a partition column without rewriting the spec). No mention of v2 deletes interaction (equality delete files referencing the dropped column).
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.5 |
+| Completeness | 4.5 |
+| **Average** | **4.625** |
+
+**Q2** — Trino IN subquery vs JOIN: responder gave honest punt ("resources don't cover correlated subquery optimization"); offered practical EXPLAIN-based comparison advice and recommended running ANALYZE for CBO stats. CRITICAL TECHNICAL GAP: Trino's optimizer DOES automatically convert uncorrelated IN subqueries to SemiJoin operators (verified against Trino docs — "Semi-Join (IN) Decorrelation" rule + SemiJoin operator with precomputed hash optimization in optimize-hash-generation, enabled by default). For correlated subqueries, Trino runs a Decorrelate Subqueries optimization rule. The "honest punt" framing implies the engineer needs to manually pick between IN-subquery and JOIN, but in practice the planner usually rewrites them to the same SemiJoin shape. A correct answer would be: (1) Trino auto-converts uncorrelated IN→SemiJoin (verify with EXPLAIN — look for SemiJoinNode in the plan); (2) for correlated subqueries, Trino decorrelates when possible; (3) manual IN→JOIN rewrite usually doesn't help and can hurt (JOIN doesn't dedupe like SemiJoin does); (4) if EXPLAIN shows a CorrelatedJoin that didn't decorrelate, THAT is when manual rewrite helps. EXPLAIN/ANALYZE advice is correct and practical, but is a generic fallback that misses the documented auto-optimization behavior. Punt cost: a beginner reading this thinks they must manually choose; the truth is Trino usually picks for them.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 2.5 |
+| Beginner clarity | 4 |
+| Practical applicability | 3.5 |
+| Completeness | 2.5 |
+| **Average** | **3.125** |
+
+**Iteration average**: (4.625 + 3.125) / 2 = **3.875** — FAIL (below 4.0 PASS threshold).
+
+Verdict: Q1 strong PASS (4.625) — DROP COLUMN explained correctly with the operational consumer-audit step that beginner answers usually miss. Q2 FAIL (3.125) — honest-punt framing missed the documented Trino auto-decorrelation behavior (Trino converts uncorrelated IN to SemiJoin via the optimizer, not the engineer; correlated subqueries are decorrelated when possible). The punt was the wrong instinct here because Trino docs explicitly cover this; this is a "resources don't cover X" answer where X actually IS covered by the upstream tool's documented behavior and the resources should be teaching it.
+
+Topic score updates:
+- Iceberg table maintenance (Q1 — DROP COLUMN reclaim path via rewrite_data_files + expire_snapshots fits this topic since reclaiming storage is the maintenance concern): 4.4662/58 -> (4.4662*58 + 4.625)/59 = **4.4689/59** (PASS, nudged up slightly)
+- SQL query best practices for OLAP (Q2 — IN subquery vs JOIN is a SQL pattern question): 4.6070/22 -> (4.6070*22 + 3.125)/23 = **4.5426/23** (PASS but pulled down meaningfully — was 4.6070, now 4.5426; Q2's 3.125 is the lowest score this topic has seen in many iterations)
+
+PATTERN iter392-402 (4.75/4.125/3.9375F/4.625/4.75/3.125F/4.3125/4.375/4.34375/4.09375/4.0625/3.8125F/4.59375P/**3.875F**): iter401 PASS broke after one cycle; iter402 returns to FAIL pattern. The post-fail recovery from iter400→iter401 did NOT durably stabilize the responder. iter402 FAIL is driven entirely by Q2's "honest punt" pattern — the responder defaulted to "resources don't cover this" instead of using available knowledge about Trino's optimizer.
+
+TEACHER ACTIONS NEXT (iter403):
+(1) **HIGH** — Add a Trino subquery optimization resource covering: (a) Trino auto-converts uncorrelated IN→SemiJoin (cite optimize-hash-generation default-enabled); (b) Trino decorrelates correlated subqueries via the "Decorrelate Subqueries" rule; (c) EXPLAIN signature — look for SemiJoinNode for uncorrelated, CorrelatedJoin (failed decorrelation) means manual rewrite IS warranted; (d) manual IN→JOIN rewrite usually doesn't help and can introduce duplicates (JOIN doesn't dedupe; SemiJoin does); (e) NOT IN with NULL gotcha (NOT IN returns NULL when subquery contains NULL — usually wrong; rewrite to NOT EXISTS).
+(2) **HIGH** — Add an Iceberg DROP COLUMN resource covering: (a) metadata-only on commit; (b) Parquet bytes retained until rewrite_data_files; (c) Trino 467 syntax: `ALTER TABLE ... DROP COLUMN` + `ALTER TABLE ... EXECUTE optimize` + `ALTER TABLE ... EXECUTE expire_snapshots`; (d) Spark equivalent `CALL system.rewrite_data_files`; (e) partition column DROP edge case; (f) v2 equality delete files referencing dropped column; (g) consumer-audit checklist (downstream `SELECT col` will fail).
+(3) **LOW** — Carry forward iter401 actions: post_hook literal snippet in dbt-trino resource; EXPLAIN output text snippets for predicate pushdown TableScan/ScanFilterProject; pushdownFilters connector config + unpushable predicate warnings.
+
+JUDGE PROBE TARGETS NEXT (iter403):
+(1) 2nd-angle Trino subquery: "my EXPLAIN shows CorrelatedJoin not SemiJoin — what does that mean and how do I fix it" — probes failed-decorrelation diagnosis.
+(2) 2nd-angle Iceberg DROP COLUMN: "I dropped a column 3 weeks ago but my MinIO usage didn't drop — what's wrong" — probes rewrite_data_files + expire_snapshots reclaim path.
+(3) NOT IN NULL gotcha: "my NOT IN query returns zero rows but I know there's matching data" — probes NULL semantics in NOT IN.
+(4) Carry-forward backlog: dbt-trino merge duplicates angle, predicate-pushdown JDBC layer rewrite angle, CoW vs MoR write.merge.mode angle, write.isolation-level 2nd-angle, SHOW SESSION/catalog-prefix 2nd-angle, HMS->Nessie no-downtime, SPILL_FAILED at 60GB cap, MERGE INTO rollback, OPA-override timeout, schema registry compat, EXPLAIN TYPE IO + VALIDATE, result caching 2nd-angle, Iceberg branches fast_forward 2nd-angle, JWT+OPA concurrency, partition spec migration + rewrite_data_files, Iceberg tagging 3rd-angle, fs.cache 3rd-angle JMX, bucket(tenant_id) high-cardinality 2nd-angle, PERCENT_RANK/NTILE 3rd-angle, RANGE INTERVAL gap-day semantics.
+
+Trajectory iter370-402: 4.625->4.375->4.47->3.98F->4.5625->4.75->4.1875->4.4375->4.40625->4.5625->3.25F->4.71875->4.8125->4.78125->4.375->4.094->4.4375->4.4375->4.4375->4.25->3.125F->4.75P->4.125P->3.9375F->4.625P->4.75P->3.125F->4.3125P->4.375P->4.34375P->4.09375P->4.0625P->3.8125F->4.59375P->**3.875F**.
+
+---
 
 ### Iter 401 — 2026-05-30 (EXTENDED PHASE) — Q1 Complete dbt-trino Iceberg incremental model config (canonical YAML + compiled MERGE + watermark + late-arrival lookback + maintenance); Q2 Predicate pushdown verification via EXPLAIN (TYPE DISTRIBUTED + EXPLAIN ANALYZE + Postgres slow query log three-layer)
 
