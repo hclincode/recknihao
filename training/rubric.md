@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.645 | 10 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.458 | 14 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.4515 | 145 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.4527 | 146 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.1088 | 15 |
@@ -41,7 +41,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.422 | 8 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.609 | 4 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.5193 | 138 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.4669 | 53 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.4698 | 54 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 4.751 | 5 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4925 | 265 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.7392 | 7 |
@@ -50,6 +50,59 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 392 — 2026-05-30 (EXTENDED PHASE) — Q1 Iceberg snapshot incremental reads (Spark hourly job); Q2 Multi-tenant row-level security via Trino views
+
+**Q1** — Iceberg snapshot incremental reads (Spark hourly job): RETRIEVAL FIX LANDED. Responder finally surfaced `start-snapshot-id`/`end-snapshot-id` DataFrameReader options, `$snapshots` metadata table for current_snapshot_id, watermark-and-compare pattern, four limits (append-only, Spark-only, validate snapshot exists, not streaming), and referenced QUICK REFERENCE section.
+
+Responder gave: Spark DataFrameReader `start-snapshot-id`/`end-snapshot-id` for snapshot-range reads; query `$snapshots` metadata table for `current_snapshot_id`; compare to stored watermark to determine range; four limits — (1) only captures append snapshots not overwrites/deletes, (2) Spark-only feature (Trino has `system.table_changes` TVF instead), (3) must validate snapshot still exists (not expired), (4) not for streaming use `readStream` instead; references QUICK REFERENCE section in resources.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.625** |
+
+**Iter 392 Q1: 4.625 — STRONG PASS**
+
+The iter390 teacher patch (added `start-snapshot-id` content to resources/13) FINALLY surfaced after two consecutive honest-punts in iter390 and iter391. Either the teacher restructured headings between iter391 and iter392 OR the responder's retrieval matched on different keywords this iteration. Either way, the topic is now discoverable. The four-limits framing is a high-signal quality marker — shows the responder is not just regurgitating one API but understands the constraints. The cross-reference to Trino's `system.table_changes` (mentioned as the equivalent for Trino) shows topical depth. This finally closes the iter389-391 incremental-reads gap that has dragged on for three iterations.
+
+**Q2** — Multi-tenant row-level security via Trino views: views-alone-fails-because-base-table-bypass + correct three-layer defense (view WHERE clause + OPA deny base table + SECURITY DEFINER); scale-based recommendation (per-tenant views for 1-200 tenants, OPA row filters for 1000+); test-by-distinct-tenant_ids verification step.
+
+Responder gave: Views alone fail because users can directly query the base table bypassing the view's WHERE clause; correct pattern combines three defense layers — (1) view WHERE tenant_id = current_user_tenant, (2) OPA deny rule on base table forcing access through view only, (3) SECURITY DEFINER / view definer-mode so view runs as creator not invoker; scale guidance — per-tenant views work for 1-200 tenants (manageable view count), OPA row filters scale better for 1000+ tenants (single policy vs N views); verification test — query distinct tenant_ids visible to test user, should return only their tenant.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.625** |
+
+**Iter 392 Q2: 4.625 — STRONG PASS**
+
+Hits the canonical security antipattern (views-without-base-table-deny are bypassable) and pairs it with the production-stack-correct fix (OPA deny on base table, since prod_info.md says OPA is the Trino authz backend). SECURITY DEFINER / definer-mode is the right Trino concept for view privilege elevation. Scale guidance is actionable and grounded — per-tenant views become unmanageable at 1000+ tenants, OPA row filters use a single parameterized policy. The verification step (query distinct tenant_ids) is the kind of practical-engineer detail that proves the answer is more than theory. Maps cleanly to prod_info.md JWT+OPA stack — JWT carries tenant claim, OPA reads it, policy enforces row filter.
+
+**Iter 392 overall: (4.625 + 4.625) / 2 = 4.625 — STRONG PASS**
+
+**Pattern observation iter370-392**: 4.625 -> 4.375 -> 4.47 -> 3.98 FAIL -> 4.5625 -> 4.75 -> 4.1875 -> 4.4375 -> 4.40625 -> 4.5625 -> 3.25 FAIL -> 4.71875 -> 4.8125 -> 4.78125 -> 4.375 -> 4.094 -> 4.4375 -> 4.4375 -> 4.4375 -> 4.25 -> 3.125 FAIL -> 4.75 PASS -> 4.125 PASS -> 3.9375 FAIL -> 4.625 PASS. Two consecutive PASSES after the iter391 retrieval-gap FAIL; iter392 closes the three-iteration incremental-reads gap (iter389+390+391 all punted on this topic).
+
+Topic score updates:
+- Iceberg table maintenance: 4.4669/53 -> 4.4698/54 (RISE from Q1 strong pass, PASS holds)
+- Multi-tenant analytics: 4.4515/145 -> 4.4527/146 (mild rise from Q2 strong pass, PASS holds)
+
+TEACHER ACTIONS NEXT (iter393):
+- (1) LOW — incremental-reads finally retrievable; monitor next probe to confirm not a one-off
+- (2) LOW — Q2 was a textbook strong response, no immediate teacher action needed on multi-tenant
+
+JUDGE PROBE TARGETS NEXT (iter393):
+- (1) Iceberg incremental reads FOURTH angle: "weekly CDC export to downstream Postgres" — force `system.table_changes` Trino TVF to confirm coverage (Q1 today was Spark side; need Trino side)
+- (2) Multi-tenant row-level security SECOND angle: JWT tenant claim extraction in OPA policy (carry context-var pattern + how tenant_id flows from JWT through Trino to OPA)
+- (3) Carry-forward standard backlog (HMS->Nessie no-downtime, SPILL_FAILED 60GB at 200GB cap, MERGE INTO rollback, OPA-override timeout, schema registry compat, EXPLAIN TYPE IO + VALIDATE, result caching, Iceberg branches fast_forward, bucket sizing, JWT+OPA concurrency, partition spec migration, Iceberg tagging 3rd angle, fs.cache 3rd angle JMX)
+
+---
 
 ### Iter 391 — 2026-05-30 (EXTENDED PHASE) — Q1 Iceberg snapshot incremental reads (re-probe after iter390 fix); Q2 Trino 100 concurrent Python connections
 

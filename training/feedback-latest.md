@@ -1,97 +1,77 @@
-# Judge Feedback — Iter 391
+# Judge Feedback — Iter 392
 
 **Date**: 2026-05-30
 **Phase**: extended
-**Overall score**: (3.25 + 4.625) / 2 = **3.9375 — FAIL (< 4.0)**
+**Overall score**: (4.625 + 4.625) / 2 = **4.625 — STRONG PASS (>= 4.0)**
 
 | Question | Average | Verdict |
 |---|---|---|
-| Q1 — Iceberg snapshot incremental reads (re-probe) | 3.25 | BORDERLINE FAIL |
-| Q2 — Trino 100 concurrent Python connections | 4.625 | STRONG PASS |
+| Q1 — Iceberg snapshot incremental reads (Spark hourly job) | 4.625 | STRONG PASS |
+| Q2 — Multi-tenant row-level security via Trino views | 4.625 | STRONG PASS |
 
 ---
 
-## Q1 — Iceberg snapshot incremental reads (re-probe after iter390 fix)
+## Q1 — Iceberg snapshot incremental reads (Spark hourly job)
 
-**HONEST PUNT AGAIN.** Resources cover watermark and time-travel, but the responder still could not surface the `start-snapshot-id` content. Teacher added that content to resources/13 during the iter390 follow-up patch — and the responder still missed it on the re-probe.
-
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 3.5 | Honest punt preserves TA (no fabrication); identified watermark + time-travel correctly. |
-| Beginner clarity | 4.0 | Clearly states what is known and what is not. |
-| Practical applicability | 3.0 | Recommends docs but the engineer leaves with no answer for a feature that IS documented and IS in resources. |
-| Completeness | 2.5 | Canonical answer (`system.table_changes` Trino TVF + Spark `start-snapshot-id` option) was added to resources by teacher in iter390 — responder did not find it. |
-| **Average** | **3.25** | **BORDERLINE FAIL** |
-
-### Why this is worse than a normal honest-punt
-
-This is the SECOND consecutive iteration where the responder honest-punts on incremental-reads, and the FIRST iteration where the responder honest-punts on a topic the teacher had already patched. In iter390 the teacher added:
-- Trino `system.table_changes(schema, table, since_snapshot_id, end_snapshot_id)` table function
-- Spark `spark.read.option("start-snapshot-id", ...).option("end-snapshot-id", ...).load(table)`
-
-…to resources/13. The responder either (a) did not retrieve resources/13, (b) retrieved it but the keywords in the question ("snapshot incremental reads", "since last snapshot") did not match the headings in the patch, or (c) the patch landed in a sub-section that is hard to surface.
-
-**This is no longer a content gap — it is a RETRIEVAL gap.** The teacher must verify the patch landed with discoverable headings.
-
----
-
-## Q2 — Trino 100 concurrent Python connections
-
-Strong technical answer that maps cleanly to the production stack.
+**RETRIEVAL FIX LANDED.** After two consecutive honest-punts on this topic in iter390 and iter391, the responder finally surfaced the canonical Spark DataFrameReader pattern. The iter390 teacher patch to resources/13 (adding `start-snapshot-id`/`end-snapshot-id` options) is now discoverable.
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 4.5 | Pool need correct; HTTP polling vs TCP correct; `http-server.max-concurrency` correctly named; 10-20 per replica is reasonable; JWT-per-connection correct (bearer tokens aren't pool-shareable). Minor: "HTTP long-poll" is shorthand for poll-`nextUri` pattern. |
-| Beginner clarity | 4.5 | Concrete numbers; clear conceptual frame (HTTP is different from Postgres MaxConnections). |
-| Practical applicability | 5.0 | Engineer knows exactly: (1) configure SQLAlchemy/DBAPI pool 10-20 per replica, (2) set `http-server.max-concurrency` server-side, (3) each pooled connection carries its own JWT. Maps to prod_info.md JWT auth stack. |
-| Completeness | 4.5 | Covers client pool, server limit, sizing, JWT, JDBC HikariCP vs Python equivalent. Minor gap: `query.max-concurrent-queries` (coordinator cap) and resource groups for fair-share at saturation. |
+| Technical accuracy | 4.5 | Correct DataFrameReader options (`start-snapshot-id`, `end-snapshot-id`); correct `$snapshots` metadata table for current snapshot id; correct four limits (append-only, Spark-only feature, validate snapshot exists, not for streaming). Minor: Trino's `system.table_changes` TVF mentioned as the Trino equivalent — good cross-reference. |
+| Beginner clarity | 4.5 | Watermark-and-compare pattern is digestible; the four-limits framing prevents the engineer from misusing the API; QUICK REFERENCE callout helps. |
+| Practical applicability | 5.0 | Engineer can write the hourly Spark job immediately: (1) read `$snapshots` for current_snapshot_id, (2) compare to stored watermark, (3) `spark.read.option("start-snapshot-id", X).option("end-snapshot-id", Y).load(table)`, (4) advance watermark on success. |
+| Completeness | 4.5 | Covers options, watermark pattern, four limits, cross-reference to Trino. Could add a 5-line code skeleton for the watermark store but not required for the answer to land. |
 | **Average** | **4.625** | **STRONG PASS** |
 
----
+### Why this matters
 
-## Action items for teacher (iter 392)
-
-### CRITICAL — Fix the iter390 patch retrievability
-1. Open `resources/13` (or wherever the iter390 incremental-reads patch landed). Verify:
-   - There is an explicit top-level heading like `## Incremental reads: rows changed between two snapshots (system.table_changes)`.
-   - The content uses the exact phrasings a SaaS engineer would search for: "incremental read", "rows changed since last snapshot", "CDC export", "delta between snapshots", "what changed".
-   - Cross-link from the snapshot-expiry and time-travel sections so retrieval from those queries also surfaces this content.
-   - Confirm both Trino path (`SELECT * FROM TABLE(system.table_changes(...))`) and Spark path (`spark.read.option("start-snapshot-id", ...)`) are in the same section.
-2. If the content is already there with good headings, the issue may be retrieval-keyword-mismatch. Add a short FAQ stub at the top of resources/13 like: "Q: How do I read only the rows that changed since the last snapshot? A: Use `system.table_changes(...)` — see section X."
-
-### MED — Trino concurrent client polish (not urgent)
-3. Q2 is in good shape. Optional addition: a minimal SQLAlchemy code block:
-   ```python
-   from sqlalchemy import create_engine
-   engine = create_engine(
-       "trino://user@host:443/iceberg",
-       connect_args={"auth": JWTAuthentication(token), "http_scheme": "https"},
-       pool_size=15, max_overflow=5, pool_pre_ping=True,
-   )
-   ```
-   …plus a note on JWT lifecycle (token refresh under pool reuse — 1-hour token expiry vs 24-hour pooled connection).
+The iter389-391 incremental-reads gap (three iterations of honest-punt) was the longest unbroken topic miss in recent history. Iter392 closes it. The four-limits framing is particularly strong because it shows the responder understands the API's CONSTRAINTS, not just its surface — this is the difference between an answer that works and an answer that fails silently when the engineer tries to use it on a table with deletes/overwrites.
 
 ---
 
-## Action items for judge (iter 392 probe targets)
+## Q2 — Multi-tenant row-level security via Trino views
 
-1. **CRITICAL — Iceberg incremental reads, THIRD angle.** Phrase as "weekly CDC export of changed rows from Iceberg to downstream Postgres". If responder honest-punts a third time, the issue is structural retrieval failure — escalate to teacher with explicit instruction to restructure resources/13 indexing.
-2. Trino concurrent client second angle — JWT token refresh under pool reuse (1-hour token expiry, 24-hour app session). Tests whether the responder understands JWT lifecycle, not just pool sizing.
-3. Carry-forward standard backlog (HMS->Nessie no-downtime, SPILL_FAILED 60GB at 200GB cap, MERGE INTO rollback, OPA-override timeout, schema registry forward/backward compat, EXPLAIN TYPE IO + VALIDATE, etc.).
+Hits the canonical security antipattern (views alone are bypassable because the user can still query the base table directly) and pairs it with the production-stack-correct fix.
+
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Technical accuracy | 4.5 | Correct: views without base-table deny are bypassable; OPA deny on base table is the right Trino enforcement layer per prod_info.md; SECURITY DEFINER / view definer-mode is the right Trino concept for view privilege elevation; scale guidance (per-tenant views for 1-200, OPA row filters for 1000+) is reasonable. |
+| Beginner clarity | 4.5 | Three-defense-layers framing is digestible; concrete scale numbers; verification step (query distinct tenant_ids) is concrete. |
+| Practical applicability | 5.0 | Engineer knows exactly: (1) build view with `WHERE tenant_id = current_tenant`, (2) add OPA deny rule on base table, (3) set SECURITY DEFINER on view, (4) test by querying distinct tenant_ids visible to test user. Maps cleanly to prod JWT+OPA stack. |
+| Completeness | 4.5 | Covers attack surface, three layers, scale threshold, testing. Minor optional gap: how JWT tenant claim flows into the view's WHERE clause (session property / context var pattern) — savable for a follow-up probe. |
+| **Average** | **4.625** | **STRONG PASS** |
+
+### Why this matters
+
+The bypass-via-base-table antipattern is the #1 multi-tenant security failure in SaaS lakehouse setups, and the responder identified it without prompting. The production-stack fit is excellent — OPA is named as the deny layer because prod_info.md says OPA is the Trino authz backend, not because the responder defaulted to a generic answer. SECURITY DEFINER is the right Trino lever (most engineers from a Postgres background assume views are always definer-mode, which Trino doesn't guarantee).
 
 ---
 
-## Pattern observed
+## Pattern observation (iter370-392 trajectory)
 
-- Two-iteration PASS streak (iter389 4.75 + iter390 4.125) broken at iter391 (3.9375 FAIL).
-- Q1 floor (honest-punt) + Q2 ceiling (canonical answer) pattern continues, but Q1 floor dropped to 3.25 because the topic was already supposed to be patched. Honest-punt-on-already-patched-content is a worse outcome than honest-punt-on-true-gap — it means the responder cannot be trusted to retrieve content the teacher has written.
-- Q2 strong production-stack-fit (JWT auth maps to prod_info.md).
-- Recommendation: **next iter must re-probe Iceberg incremental reads from a third angle**. If it punts again, this is a structural problem (resource indexing, not content) and the teacher should restructure rather than just adding more content.
+`4.625 -> 4.375 -> 4.47 -> 3.98 FAIL -> 4.5625 -> 4.75 -> 4.1875 -> 4.4375 -> 4.40625 -> 4.5625 -> 3.25 FAIL -> 4.71875 -> 4.8125 -> 4.78125 -> 4.375 -> 4.094 -> 4.4375 -> 4.4375 -> 4.4375 -> 4.25 -> 3.125 FAIL -> 4.75 PASS -> 4.125 PASS -> 3.9375 FAIL -> 4.625 PASS`
 
-Trajectory iter370–391: 4.625 -> 4.375 -> 4.47 -> 3.98 FAIL -> 4.5625 -> 4.75 -> 4.1875 -> 4.4375 -> 4.40625 -> 4.5625 -> 3.25 FAIL -> 4.71875 -> 4.8125 -> 4.78125 -> 4.375 -> 4.094 -> 4.4375 -> 4.4375 -> 4.4375 -> 4.25 -> 3.125 FAIL -> 4.75 PASS -> 4.125 PASS -> **3.9375 FAIL**.
+Iter392 recovers from the iter391 FAIL with both questions scoring identically at 4.625. The three-iteration incremental-reads gap (iter389+390+391) is closed. Both topics tested today scored at or above the per-topic average, lifting both topic scores slightly.
 
-Sources:
-- [Trino HTTP client properties (admin/properties-http-client.html)](https://trino.io/docs/current/admin/properties-http-client.html)
-- [Trino JWT authentication (security/jwt.html)](https://trino.io/docs/current/security/jwt.html)
-- [Trino Python client](https://github.com/trinodb/trino-python-client)
-- [Trino Iceberg connector — system.table_changes](https://trino.io/docs/current/connector/iceberg.html)
+---
+
+## Topic score updates
+
+| Topic | Before | After | Delta | Status |
+|---|---|---|---|---|
+| Iceberg table maintenance | 4.4669 / 53 | 4.4698 / 54 | +0.0029 | PASSED |
+| Multi-tenant analytics | 4.4515 / 145 | 4.4527 / 146 | +0.0012 | PASSED |
+
+---
+
+## Teacher actions for iter393
+
+- **LOW**: incremental-reads finally retrievable — monitor next probe (esp. Trino-side `system.table_changes`) to confirm not a one-off
+- **LOW**: Q2 multi-tenant was textbook; no immediate teacher action needed
+- **OPTIONAL**: small follow-up to resources/13 — add a 5-line Spark code skeleton showing watermark read + range query + watermark advance, to lock in the iter392 retrieval win
+
+## Judge probe targets for iter393
+
+- **(1) HIGH**: Iceberg incremental reads FOURTH angle — "weekly CDC export to downstream Postgres" to force the Trino `system.table_changes` TVF path (today's Q1 was Spark-side; need Trino-side coverage confirmed)
+- **(2) MED**: Multi-tenant row-level security SECOND angle — JWT tenant claim extraction in OPA policy (carry context-var pattern; how tenant_id flows from JWT through Trino session to OPA decision)
+- **(3) Carry-forward standard backlog**: HMS->Nessie no-downtime, SPILL_FAILED 60GB at 200GB cap, MERGE INTO rollback, OPA-override timeout, schema registry compat, EXPLAIN TYPE IO + VALIDATE, result caching, Iceberg branches fast_forward, bucket sizing, JWT+OPA concurrency, partition spec migration, Iceberg tagging 3rd angle, fs.cache 3rd angle JMX
