@@ -34,14 +34,14 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.106 | 13 |
-| Query performance basics: partitioning, indexing strategy for analytics | PASSED | 4.431 | 9 |
+| Query performance basics: partitioning, indexing strategy for analytics | PASSED | 4.4445 | 10 |
 | Lakehouse schema design: fact tables, dimension tables, denormalization | PASSED | 4.650 | 5 |
 | Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.534 | 21 |
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.422 | 8 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.609 | 4 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.525 | 135 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.535 | 47 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.541 | 48 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 4.771 | 4 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4910 | 263 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.8104 | 6 |
@@ -50,6 +50,66 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 381 Q1 — 2026-05-30 (EXTENDED PHASE) — Trino result caching for 30s dashboard refresh (no built-in result cache, three patterns: Redis app cache + pre-aggregated rollup table + materialized view)
+
+**Q1** — "Trino result caching for 30s dashboard refresh"
+
+Responder gave: Trino doesn't cache results by default; three options (Redis app cache 60-300s TTL, pre-aggregated rollup table query thousands of rows not billions, materialized view with REFRESH scheduling); comparison table for when to pick each.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** |
+
+**Iter 381 Q1: 4.75 — STRONG PASS**
+
+Judge verified via WebSearch:
+1. **Trino has no built-in query result cache** — CONFIRMED per [Support query result caching · Issue #20854 · trinodb/trino](https://github.com/trinodb/trino/issues/20854): query result caching is an open feature request, not a built-in capability. Trino does have file system cache, metadata cache, and hive connector storage caching — but NOT query-result-level cache. The responder correctly distinguished the missing layer.
+2. **Redis app cache 60-300s TTL is the canonical SaaS pattern** — REASONABLE, aligns with standard cache-aside pattern for dashboard freshness vs latency tradeoff.
+3. **Pre-aggregated rollup table** — CORRECT: paying the aggregation cost once at write time, then dashboard queries scan thousands of rows instead of billions, is the standard OLAP rollup pattern.
+4. **Materialized view with REFRESH** — Trino does support `CREATE MATERIALIZED VIEW` and `REFRESH MATERIALIZED VIEW` for Iceberg connector since Trino 401+. Production-fit for Trino 467 stack.
+
+GAPS:
+- **TA (0)**: Fully accurate. The "no built-in result cache" framing is the exact correct starting point for this question.
+- **BC (−0.5)**: "TTL", "pre-aggregated rollup", "materialized view" used without inline gloss; the comparison table provides good structural clarity but a beginner would benefit from one-line definitions.
+- **PA (0)**: Engineer has three concrete patterns with a comparison table for trade-off selection. Production-fit for 30s dashboard refresh interval.
+- **Comp (−0.5)**: Missed: (a) Trino's metadata cache (different from result cache — still helps planning), (b) dashboard concurrency considerations (Redis stampede protection), (c) materialized view REFRESH being a full rebuild not incremental in Trino as of 467, (d) staleness window analysis for each pattern relative to the 30s refresh window.
+
+---
+
+### Iter 381 Q2 — 2026-05-30 (EXTENDED PHASE) — Iceberg branches WAP (write-audit-publish) pattern (Spark-only writes, Trino audit reads, fast_forward atomic publish)
+
+**Q2** — "Iceberg branches WAP pattern"
+
+Responder gave: CREATE BRANCH in Spark; writes to branch via spark.wap.branch config; production main unaffected; audit from Trino via FOR VERSION AS OF; CALL fast_forward for atomic metadata-only publish; DROP BRANCH to clean up; branch creation/write/publish are Spark-only, audit reads are Trino-compatible.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.75 |
+| **Average** | **4.8125** |
+
+**Iter 381 Q2: 4.8125 — STRONG PASS**
+
+Judge verified via WebSearch:
+1. **CREATE BRANCH + spark.wap.branch + fast_forward is the canonical Iceberg WAP flow** — CONFIRMED per [Spark Procedures — Apache Iceberg 1.5.1](https://iceberg.apache.org/docs/1.5.1/spark-procedures/) (production-stack-fit for Iceberg 1.5.2) and [Streamlining Data Quality in Apache Iceberg with WAP & branching (Dremio)](https://www.dremio.com/blog/streamlining-data-quality-in-apache-iceberg-with-write-audit-publish-branching/): the documented WAP pattern uses Spark to create the audit branch, sets `spark.wap.branch` so writes land on that branch instead of main, audits the branch, then uses `CALL catalog.system.fast_forward('table', 'main', 'audit_branch')` to atomically advance main.
+2. **fast_forward is metadata-only and atomic** — CONFIRMED per [Try Iceberg FastForward Procedure (tomtan.dev)](https://tomtan.dev/blog/2024-01-30-try-iceberg-fastforward/) and [Build WAP pattern with Apache Iceberg branching (AWS Glue Data Quality)](https://aws.amazon.com/blogs/big-data/build-write-audit-publish-pattern-with-apache-iceberg-branching-and-aws-glue-data-quality/): fast_forward updates the main branch ref to the audit branch's snapshot — no data movement, all-or-nothing semantics.
+3. **Trino read with FOR VERSION AS OF** — CORRECT for snapshot reads; Trino's Iceberg connector supports `SELECT ... FROM table FOR VERSION AS OF <snapshot_id>`. Note: Trino 467 does NOT support direct branch-name reads in `FOR VERSION AS OF` syntax (must use snapshot ID); the responder's framing of "audit reads are Trino-compatible" is correct, though the cleanest path is to resolve the branch's snapshot ID first via Spark / metadata table.
+4. **Spark-only for create/write/publish, Trino-compatible for audit read** — CORRECT per the Iceberg + Trino capability split: Trino does not implement branch-write or branch-create procedures; both are Spark Procedures.
+
+GAPS:
+- **TA (0)**: All claims verified, exact syntax correct, capability split between Spark and Trino correct.
+- **BC (−0.5)**: "WAP", "branch", "snapshot", "fast_forward", "FOR VERSION AS OF" all used; "atomic metadata-only publish" could use one-line gloss ("only the pointer to the latest snapshot changes; no Parquet files are rewritten").
+- **PA (0)**: End-to-end blueprint engineer can execute: create branch, configure Spark to write to it, audit from Trino, fast_forward publish, drop branch. Production-fit for Spark + Iceberg 1.5.2 + Trino 467 + HMS stack.
+- **Comp (−0.25)**: Strong core but missed: (a) Trino 467 `FOR VERSION AS OF` works on snapshot ID not branch name (small but production-relevant), (b) branch retention policy via `CALL set_current_snapshot` or branch reference deletion, (c) what happens if main advances during audit (conflict — fast_forward fails, you need to rebase or use cherrypick), (d) interaction with snapshot expiry maintenance (don't expire snapshots referenced by branches).
+
+---
 
 ### Iter 379 Q1 — 2026-05-30 (EXTENDED PHASE) — ANALYZE TABLE on Iceberg for Trino CBO (Puffin NDV + 3-layer pruning model + drop_extended_stats footgun + cadence)
 
