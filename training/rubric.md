@@ -40,16 +40,72 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.609 | 4 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.524 | 131 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.523 | 132 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.523 | 42 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
-| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.499 | 255 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.498 | 256 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
 | SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.652 | 16 |
 
 ---
 
 ## Score history
+
+### Iter 359 Q1 — 2026-05-29 (EXTENDED PHASE) — Trino federation OOM session-property re-probe (per iter358 judge probe target #1, CRITICAL RE-PROBE of BROADCAST→PARTITIONED correction)
+
+**Q1** — Re-probe at fresh phrasing: "Trino workers throwing `Query exceeded per-node memory limit of 8GB` on a JOIN between Iceberg events and a Postgres dimension via the postgresql connector — which session property do we change? Heard there's a broadcast vs partitioned setting — which one should we use when the Postgres table is large?" Tests iter358 teacher action #1+#2 (PARTITIONED as primary OOM remedy, BROADCAST as anti-pattern).
+
+Responder produced: (a) clear diagnosis that BROADCAST replicating the entire build side to every worker is the OOM cause for a large Postgres table; (b) `SET SESSION join_distribution_type = 'PARTITIONED'` as the primary remedy with `RESET` cleanup; (c) BROADCAST vs PARTITIONED mental-model contrast (replicate-to-every-worker vs hash-redistribute both sides); (d) explicit "CRITICAL Anti-Pattern" callout warning NOT to set BROADCAST and noting BROADCAST is right only when dimension is small (~5K rows, ~50MB); (e) Step 0 dynamic filtering verification via `EXPLAIN ANALYZE` looking for `dynamicFilterSplitsProcessed = N`; (f) ANALYZE on Postgres source + `SHOW STATS FOR postgresql.public.accounts` if N=0 to let CBO decide automatically.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 3.5 |
+| Practical applicability | 4.5 |
+| Completeness | 4.0 |
+| **Average** | **4.125** |
+
+Judge verified via WebSearch:
+1. **`SET SESSION join_distribution_type='PARTITIONED'` as the documented OOM remedy** — CONFIRMED per [General properties — Trino docs](https://trino.io/docs/current/admin/properties-general.html) and [Cost-based optimizations — Trino docs](https://trino.io/docs/current/optimizer/cost-based-optimizations.html): "Broadcast joins require that the tables on the right side of the join after filtering fit in memory on each node, whereas distributed joins only need to fit in distributed memory across all nodes." The answer's mental model is correct.
+2. **`join_max_broadcast_table_size` default 100MB** — CONFIRMED per Trino CBO docs: "By default, the replicated table size is capped to 100MB." The answer's ~100MB threshold for safe BROADCAST matches the documented guard, though the answer does not name the property explicitly.
+3. **BROADCAST replicates to every worker** — CONFIRMED per [General properties — Trino docs](https://trino.io/docs/current/admin/properties-general.html): "BROADCAST, it broadcasts the right table to all nodes in the cluster that have data from the left table." Answer mechanism is correct.
+4. **`dynamicFilterSplitsProcessed` field** — appears in `EXPLAIN ANALYZE VERBOSE` output per Trino docs; the answer uses plain `EXPLAIN ANALYZE` which surfaces summary stats but the field is most reliably observed under `VERBOSE`. Minor accuracy deduction.
+5. **ANALYZE on Postgres source + SHOW STATS** — CORRECT per [Table statistics — Trino docs](https://trino.io/docs/current/optimizer/statistics.html).
+
+Topic running avg: (4.499 × 255 + 4.125) / 256 = (1147.245 + 4.125) / 256 = 1151.370 / 256 = **4.498 across 256 questions** — still NEEDS WORK (below raised 4.5 threshold), but the per-question score is a 1.375-point recovery from iter358's 2.75 critical inversion. The BROADCAST→PARTITIONED correction lands.
+
+**Iter 359 Q1: 4.125 — PASS** (above per-question 4.0 bar; topic average still below 4.5 raised threshold so topic remains NEEDS WORK, but the critical-inversion regression from iter358 is fixed.)
+
+GAPS (deductions from 5):
+- **Technical accuracy (−0.5)**: (a) Step 0 references `EXPLAIN ANALYZE` for `dynamicFilterSplitsProcessed` but that field is most reliably surfaced under `EXPLAIN ANALYZE VERBOSE` per Trino docs — engineer may not find the field at all without VERBOSE. (b) The ~100MB safe-BROADCAST threshold is correct but the answer doesn't name `join_max_broadcast_table_size` explicitly so engineers can't connect the threshold to a configurable property. (c) "5K rows, ~50MB" is a reasonable rule of thumb but slightly hand-wavy on row count (a 5K-row table with 200 columns of TEXT can easily exceed 50MB; the real guard is byte size not row count).
+- **Beginner clarity (−1.5)**: "build side", "probe side", "hash-redistribute", "dynamic filtering", "build side replication", "1/N slice" all used without inline definitions — these have been flagged as load-bearing for 5 iterations now (iter355/356/357/358/359). The BROADCAST/PARTITIONED contrast is clear at the prose level but the underlying terminology gap remains.
+- **Practical applicability (−0.5)**: The anti-pattern callout is exactly what an engineer in pain TODAY needs to avoid the iter358 failure mode. Step 0 dynamic filtering check and Step 1 stats sanity check are actionable. Minor deduction: no `spill_enabled=true` backstop mentioned, no `query.max-memory-per-node` worker headroom check, no production environment fit note (Trino 467 on-prem per `prod_info.md`).
+- **Completeness (−1.0)**: Covers diagnosis, primary remedy, anti-pattern, dynamic-filtering Step 0, stats Step 1 — five of the iter358 teacher-action levers landed. Missing: (a) `spill_enabled=true` as a backstop when PARTITIONED still spills under memory pressure (iter358 teacher action step (d)); (b) explicit mention of `join_max_broadcast_table_size` as the named guardrail property; (c) "how to identify the build side" callout (iter358 teacher action #6) — Trino CBO picks smaller side as build with stats, falls back to syntactic right-side without stats, verify via `EXPLAIN (TYPE DISTRIBUTED)` HashBuilder; (d) production environment fit (Trino 467 on-prem MinIO/Iceberg per `prod_info.md`).
+
+ITER360 TEACHER ACTION (MEDIUM priority — topic running avg 4.498 still 0.002 below raised 4.5 threshold; critical-inversion regression FIXED but gradual recovery needed):
+1. **MEDIUM (clarity)** — Inline glossary at top of `resources/22-trino-federation-postgresql.md` for "build side", "probe side", "broadcast join", "partitioned join", "hash-redistribute", "spill", "dynamic filtering" — 5th iteration flagged. This is the single largest remaining gap on the topic.
+2. **MEDIUM (correctness)** — Add explicit note that `dynamicFilterSplitsProcessed` field is surfaced under `EXPLAIN ANALYZE VERBOSE` (not bare `EXPLAIN ANALYZE`).
+3. **MEDIUM (completeness)** — Name `join_max_broadcast_table_size` explicitly when discussing the ~100MB safe-BROADCAST threshold so engineers can connect the rule of thumb to a configurable property.
+4. **MEDIUM (completeness)** — Add `spill_enabled=true` as a Step 3 backstop after PARTITIONED — the stop-gap order should be (Step 0) DF check (Step 1) stats sanity (Step 2) `join_distribution_type=PARTITIONED` (Step 3) `spill_enabled=true` (Step 4) escalate to ingestion pipeline.
+5. **MEDIUM (clarity)** — Add a "how to identify the build side" callout — Trino CBO picks smaller side as build when stats are populated; without stats it falls back to syntactic right-side; verify via `EXPLAIN (TYPE DISTRIBUTED)` looking for `HashBuilder`. (Iter358 teacher action #6, still not landed.)
+6. **LOW (environment fit)** — Resource should note production environment fit: Trino 467 on-prem with MinIO/Iceberg per `prod_info.md` — session properties are the same but the resource-group selector example must reflect the production OPA + JWT authentication stack rather than file-based access control.
+
+ITER360 JUDGE PROBE TARGETS — under-tested topics still open:
+1. CDC tier (>100M or <5min freshness SLO → Debezium → Iceberg MoR) — iter358 teacher action #2 still untested across iter357/358/359.
+2. Query plan optimization (EXPLAIN ANALYZE / EXPLAIN ANALYZE VERBOSE reading for slow Iceberg queries: TableScan/Filter/Aggregate cost, scan stats, dynamic-filter rows-filtered) — still not probed since iter356 rubric flag.
+3. Cost considerations cloud vs on-prem (AWS S3+Athena+Glue lift-and-shift vs on-prem Trino+Iceberg+MinIO) — still not probed.
+4. Stop-gap federation re-probe at a 3rd phrasing (e.g., "if we set PARTITIONED and it STILL OOMs, what's the next lever?") — to test if `spill_enabled` backstop lands.
+
+Sources verified via WebSearch:
+- [General properties — Trino 481 Documentation](https://trino.io/docs/current/admin/properties-general.html) — `join_distribution_type` BROADCAST/PARTITIONED/AUTOMATIC semantics, BROADCAST replicates right table to all nodes with left-table data
+- [Cost-based optimizations — Trino 481 Documentation](https://trino.io/docs/current/optimizer/cost-based-optimizations.html) — `join_max_broadcast_table_size` default 100MB, broadcast requires right side fits in worker memory after filtering, distributed joins only need to fit in distributed memory across all nodes
+- [Spill to disk — Trino 481 Documentation](https://trino.io/docs/current/admin/spill.html) — `spill_enabled` session property
+- [EXPLAIN ANALYZE — Trino 481 Documentation](https://trino.io/docs/current/sql/explain-analyze.html) — VERBOSE flag exposes dynamic-filter operator-level stats
+
+**Topics updated**:
+- Trino federation: 4.499/255 → **4.498/256 questions** (still NEEDS WORK below 4.5 raised threshold, but the per-question score recovered 1.375 points from iter358 — the BROADCAST→PARTITIONED critical-inversion regression is FIXED; topic needs ~5-6 more 4.5+ questions to recross the threshold)
+
+---
 
 ### Iter 358 Q1 — 2026-05-29 (EXTENDED PHASE) — Trino federation stop-gap session properties (per iter357 judge probe target #4)
 
