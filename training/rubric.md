@@ -41,15 +41,55 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.422 | 8 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.609 | 4 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.5193 | 138 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.5098 | 51 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.4904 | 52 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 4.751 | 5 |
-| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4910 | 263 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4920 | 264 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.7392 | 7 |
 | SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.6423 | 18 |
 
 ---
 
 ## Score history
+
+### Iter 390 — 2026-05-30 (EXTENDED PHASE) — Q1 Iceberg incremental reads since last snapshot; Q2 Trino Postgres connector multi-schema access
+
+**Q1** — Iceberg incremental reads (rows added between two snapshots): honest "not enough info in resources" punt; found time-travel + $snapshots metadata table; cannot answer change-data query from resources; recommends iceberg.apache.org.
+
+Responder gave: honest "not enough info in resources"; identified time-travel (`FOR VERSION AS OF`) and `$snapshots` metadata table; correctly stated cannot derive row-level changes between two snapshots from current resources; recommended official Iceberg docs.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 3.5 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 3.5 |
+| Completeness | 3.0 |
+| **Average** | **3.5** |
+
+**Iter 390 Q1: 3.5 — BORDERLINE PASS**
+
+Honest-punt is responsible refusal-to-hallucinate behavior (preserves TA over fabrication). Time-travel + $snapshots correctly identified. BUT the canonical incremental-read answer DOES exist publicly: Trino exposes `system.table_changes(schema_name, table_name, since_snapshot_id, end_snapshot_id)` table function that returns row-level changes (`_change_type`, `_change_version_id`, `_change_timestamp`) between two snapshots — exactly what the question asks. Spark side has `spark.read.option("start-snapshot-id", ...).option("end-snapshot-id", ...)` for the same pattern. Resource gap: no content on `system.table_changes` or Iceberg incremental read options. Honest-punt deserves BC + TA partial credit but misses the documented canonical pattern. Comp slip because engineer learns "not in resources" but not the actual feature name to search for.
+
+**Q2** — Trino PostgreSQL connector access to all schemas in a database: one connector covers ALL schemas; JDBC `connection-url` scoped to the database; all schemas auto-visible as `catalog.schema.table`; no multiple connectors needed for schemas in same DB.
+
+Responder gave: single PostgreSQL connector per database; `connection-url` targets database level; every PG schema auto-exposed as a Trino schema under that catalog; no need for multiple `.properties` files for schemas within the same database; separate connectors only needed for separate databases or servers.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** |
+
+**Iter 390 Q2: 4.75 — STRONG PASS**
+
+Matches trino.io/docs/current/connector/postgresql.html exactly: "The PostgreSQL connector can only access a single database within a PostgreSQL server... if you have multiple PostgreSQL databases, or want to connect to multiple PostgreSQL servers, you must configure multiple instances of the PostgreSQL connector." But within ONE database, all schemas are auto-exposed. Engineer knows precisely: one `.properties` file with `connection-url=jdbc:postgresql://host:5432/dbname`, then `catalog.schema.table` works for every schema. Minor Comp gap: could mention `case-insensitive-name-matching=true` for schemas with mixed case, or `schema-pattern` filter property, but core answer is complete and unambiguous.
+
+**Iter 390 overall: (3.5 + 4.75) / 2 = 4.125 — PASS (>= 4.0)**
+
+PATTERN NOTE: Two-iteration PASS streak (iter389 4.75 + iter390 4.125), though iter390 regressed 0.625 from iter389. Q1 honest-punt behavior preserved (no fabrication), but resource gap for Iceberg incremental reads (`system.table_changes` Trino table function + `start-snapshot-id`/`end-snapshot-id` Spark options) revealed for the SECOND time — iter388 Q2 was also an honest-punt that missed publicly-documented Trino feature (fs.cache.enabled), which teacher patched for iter389. Same pattern here: honest-punt is the correct fallback but reveals teacher must add `system.table_changes` content. Q2 demonstrates strong production-stack-fit. Topic score updates: Iceberg table maintenance 4.5098/51 -> 4.4904/52 (mild drop from Q1 borderline, still PASS); Trino federation 4.4910/263 -> 4.4920/264 (mild rise from Q2 strong pass, still NEEDS WORK toward 4.5 override threshold). TEACHER ACTIONS NEXT (iter391): (1) HIGH gap — Iceberg incremental reads via `system.table_changes(schema_name, table_name, since_snapshot_id, end_snapshot_id)` Trino table function (verified at trino.io/docs/current/connector/iceberg.html); include `_change_type` (insert/delete/update_before/update_after), `_change_version_id`, `_change_timestamp` output columns; (2) HIGH gap — Spark `spark.read.format("iceberg").option("start-snapshot-id", ...).option("end-snapshot-id", ...).load(table)` for batch incremental ETL; (3) MED — production-stack-fit anchor for Trino Postgres connector covering `case-insensitive-name-matching` + `schema-pattern` + `case-insensitive-name-matching-cache-ttl`. JUDGE PROBE TARGETS NEXT (iter391): (1) Iceberg incremental reads 2nd angle "weekly CDC export to downstream warehouse" tests `system.table_changes` + Spark snapshot-range options; (2) Trino Postgres connector 2nd angle "case-sensitivity quirks when Postgres has MixedCase.schema_name" tests `case-insensitive-name-matching`; (3) carry-forward iter387-389 targets (catalog migration HMS->Nessie no-downtime, SPILL_FAILED 60GB at 200GB cap, Z-order 2nd angle, audit log 2nd angle, MERGE INTO rollback, Trino timeout OPA-override, schema registry forward/backward compat, EXPLAIN TYPE IO + VALIDATE, result caching, Iceberg branches concurrent fast_forward, bucket sizing 32/128/256, JWT+OPA concurrency, partition spec migration without downtime, Iceberg tagging 3rd angle drop expired tag + $refs, fs.cache 3rd angle JMX cache-hit-rate metric + tuning max-sizes). Trajectory iter370-390: 4.625 -> 4.375 -> 4.47 -> 3.98 FAIL -> 4.5625 -> 4.75 -> 4.1875 -> 4.4375 -> 4.40625 -> 4.5625 -> 3.25 FAIL -> 4.71875 -> 4.8125 -> 4.78125 -> 4.375 -> 4.094 -> 4.4375 -> 4.4375 -> 4.4375 -> 4.25 -> 3.125 FAIL -> 4.75 PASS -> 4.125 PASS. Pattern: honest-punt floor + canonical-answer ceiling producing reliable PASS averages.
+
+---
 
 ### Iter 389 — 2026-05-30 (EXTENDED PHASE) — Q1 Iceberg tags month-end bookmarks; Q2 Trino native fs.cache
 

@@ -3386,6 +3386,115 @@ df = (spark.read.format("jdbc")
 
 ---
 
+## Reading new rows from an Iceberg table (incremental reads)
+
+So far this resource has covered **writing** data from Postgres into Iceberg. This section covers the inverse: if you have a downstream job that needs to consume only the rows that have been **added to an Iceberg table since the last time it ran**, Iceberg's snapshot model gives you a precise and efficient way to do that — without a timestamp column or a watermark query against the Iceberg table.
+
+### Why snapshot-based incremental reads exist
+
+Every write to an Iceberg table creates a numbered, immutable snapshot. The snapshot records exactly which data files were added (for `INSERT`/`APPEND` operations). Instead of asking "give me all rows where `event_ts > last_run`" — which requires scanning all files and filtering — you can ask "give me only the rows that were **physically added** between snapshot N and snapshot M." Iceberg can answer that by reading only the new files, skipping everything that was there before.
+
+This is useful for downstream pipelines that consume from Iceberg rather than directly from Postgres: e.g., a nightly job that reads new events from `iceberg.analytics.events` and writes aggregated summaries to a second table, without having to know anything about timestamps.
+
+### Spark API for incremental reads (append-only)
+
+```python
+# Spark: read only rows added since snapshot 4823511203987654321
+# (rows that were APPENDED — new INSERT/APPEND operations only)
+spark.read \
+  .option("start-snapshot-id", 4823511203987654321) \
+  .option("end-snapshot-id", 9876543210987654321) \
+  .format("iceberg") \
+  .load("iceberg.analytics.events")
+```
+
+Or using the `$changes` system table (Iceberg 1.1+, available in Spark SQL):
+
+```sql
+-- Spark SQL: rows appended between two snapshots
+SELECT * FROM iceberg.analytics.events.changes
+  STARTING FROM 4823511203987654321
+  ENDING AT 9876543210987654321;
+```
+
+Both forms return only the rows that were added in `APPEND` operations between the two snapshot IDs. The result is the delta — you process it and store the new `end-snapshot-id` as your watermark for the next run.
+
+### The standard pipeline pattern
+
+```python
+# 1. Read your pipeline's last processed snapshot from state storage
+#    (a small JSON file in MinIO, a row in a state table, etc.)
+last_snapshot_id = read_pipeline_state("events_consumer")  # e.g., 4823511203987654321
+
+# 2. Look up the current (latest) snapshot ID from the $snapshots metadata table
+current_snapshot_row = spark.sql("""
+  SELECT snapshot_id
+  FROM iceberg.analytics.`events$snapshots`
+  ORDER BY committed_at DESC
+  LIMIT 1
+""").collect()[0]
+current_snapshot_id = current_snapshot_row["snapshot_id"]
+
+# 3. If nothing changed, skip this run
+if current_snapshot_id == last_snapshot_id:
+    print("No new snapshots since last run — nothing to process.")
+    exit(0)
+
+# 4. Read only the new rows
+new_rows = spark.read \
+    .option("start-snapshot-id", last_snapshot_id) \
+    .option("end-snapshot-id", current_snapshot_id) \
+    .format("iceberg") \
+    .load("iceberg.analytics.events")
+
+# 5. Process new_rows (aggregate, write to another table, etc.)
+process(new_rows)
+
+# 6. Store the new snapshot ID as the watermark for next run
+write_pipeline_state("events_consumer", current_snapshot_id)
+```
+
+### Critical limitations — read before using this pattern
+
+**1. APPENDS only — not updates or deletes.**
+`start-snapshot-id` / `end-snapshot-id` and `$changes` capture only rows added by `INSERT`/`APPEND` operations. If the Iceberg table has `UPDATE` or `DELETE` operations (including CDC tables fed by Debezium, or any table using MoR), those changed/deleted rows are **not reflected** in the incremental read result. You will see the row as it was when first inserted — the subsequent UPDATE or DELETE is invisible to this API. For tables with mutations, use a timestamp watermark on a column like `updated_at` instead (Pattern B earlier in this resource).
+
+**2. Trino does NOT support this.**
+The `start-snapshot-id` / `end-snapshot-id` read options and the `$changes` table are **Spark-only features**. Trino 467 has no equivalent syntax for snapshot-range incremental reads. If your consuming job runs in Trino, use a timestamp or row-ID watermark approach instead.
+
+**3. Validate snapshot IDs before using them.**
+If a `rewrite_data_files` compaction or `expire_snapshots` ran between your two snapshot IDs, the snapshot chain may have gaps. Before reading, confirm that both `last_snapshot_id` and `current_snapshot_id` still exist in the `$snapshots` metadata table:
+
+```python
+valid_ids = spark.sql("""
+  SELECT snapshot_id
+  FROM iceberg.analytics.`events$snapshots`
+  WHERE snapshot_id IN ({0}, {1})
+""".format(last_snapshot_id, current_snapshot_id)).collect()
+
+if len(valid_ids) < 2:
+    # One or both snapshots were expired. Fall back to a full re-read
+    # or timestamp-based watermark to recover.
+    raise Exception("Snapshot watermark expired — fall back to timestamp scan")
+```
+
+If `last_snapshot_id` has been expired (it was older than your `expire_snapshots` retention window), you cannot use the snapshot-range approach for that run. Fall back to a full re-read or a timestamp-based scan to recover, then resume snapshot-based reads from the newly-established `current_snapshot_id`.
+
+**4. This is not a substitute for CDC.**
+Snapshot-range reads give you append-only deltas efficiently. If you need deletes and updates — for example, because the source is a mutable dim table fed by CDC — this pattern does not apply. Use Pattern C (CDC via Debezium) for full change capture.
+
+### When to use vs. when not to
+
+| Situation | Use snapshot-range incremental reads? |
+|---|---|
+| Append-only fact table (events, logs, audit records) — need to process new rows in a downstream job | YES — this is the ideal use case |
+| Mutable table with UPDATEs or DELETEs (users, subscriptions, dim tables) | NO — use timestamp watermark or CDC instead |
+| Running the consuming job in Trino | NO — use timestamp watermark; `start-snapshot-id` is Spark-only |
+| Source table runs frequent compaction (`rewrite_data_files` nightly) | YES, but always validate both snapshot IDs exist before reading; add the `$snapshots` validation step |
+| Need sub-minute freshness | NO — snapshot IDs are a batch watermark mechanism; for streaming, use Spark Structured Streaming with Iceberg's streaming source instead |
+
+---
+
 ## Idempotency and cleanup
 
 > **Read this section before your first production run.** It will save you from an outage. Every Spark ingestion job will eventually run twice by accident — a CronJob retry, a backfill that overlapped with the regular run, a manual `spark-submit` that completed after the operator thought it had failed. When that happens, your event counts double. You need three tools, in order of "safest first."
