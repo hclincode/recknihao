@@ -27,7 +27,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | What a data warehouse is and when a SaaS product needs one | PASSED | 4.647 | 3 |
 | What a data lakehouse is and how it differs from a warehouse | PASSED | 4.625 | 2 |
 | Column-oriented storage — what it is and why it's faster for analytics | PASSED | 4.578 | 11 |
-| Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.633 | 9 |
+| Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.645 | 10 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.458 | 14 |
 | Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.449 | 144 |
@@ -36,9 +36,9 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.106 | 13 |
 | Query performance basics: partitioning, indexing strategy for analytics | PASSED | 4.431 | 9 |
 | Lakehouse schema design: fact tables, dimension tables, denormalization | PASSED | 4.650 | 5 |
-| Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.526 | 20 |
+| Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.534 | 21 |
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
-| Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.375 | 7 |
+| Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.422 | 8 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.609 | 4 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.525 | 135 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.535 | 47 |
@@ -50,6 +50,103 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 378 Q1 — 2026-05-30 (EXTENDED PHASE) — Cumulative sum window function in Trino (re-probe of iter377 Q1 window function durability gap)
+
+**Q1** — "How do I compute a cumulative sum per customer over time in Trino using window functions?"
+
+Responder provided the canonical SQL `SUM(revenue) OVER (PARTITION BY customer_id ORDER BY event_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_revenue` with explanation of PARTITION BY (per-customer isolation), ORDER BY (cumulative ordering), frame clause (`ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`), and an example output table walking through cumulative values row by row.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** |
+
+**Iter 378 Q1: 4.75 — STRONG PASS** (well above per-question 4.0 bar; lifts "Analytical query patterns on Iceberg+Trino" running avg from 4.375/7 → 4.422/8, closing the iter377 Q1 content-coverage gap. Topic durability rebuilt with 8th angle.)
+
+Judge verified via WebSearch:
+1. **`ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` is the canonical Trino frame for cumulative sum** — CONFIRMED per [Window functions — Trino 480 Documentation](https://trino.io/docs/current/functions/window.html) and [Trino blog — Introducing new window features](https://trino.io/blog/2021/03/10/introducing-new-window-features.html): `sum(totalprice) OVER (PARTITION BY clerk ORDER BY orderdate ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` is the documented running-total pattern.
+2. **PARTITION BY semantics** — CONFIRMED: rows are isolated per partition key (customer_id), so cumulative sum resets per customer.
+3. **ROWS vs RANGE frame distinction** — `ROWS` specifies physical row offsets (1 row before the current row), while `RANGE` specifies value-based offsets on the ORDER BY column. For deterministic running totals with unique ordering, `ROWS` is the right choice.
+
+GAPS (deductions from 5):
+- **TA (0)**: Fully accurate; matches canonical Trino window function syntax verbatim.
+- **BC (−0.5)**: Example output table is a strong beginner aid that walks through cumulative values row by row. Minor: "frame clause" used without inline gloss for newcomer who has never seen window-function frame syntax — a one-line "the frame clause says which rows in the partition contribute to the SUM for the current row" would close the gap.
+- **PA (0)**: Engineer has copy-paste-ready SQL with named columns; can run it against Trino 467 immediately.
+- **Comp (−0.5)**: Strong core coverage but missed (a) `ROWS` vs `RANGE` distinction (when to use each), (b) NULL handling note (`SUM` skips NULLs but the running total still progresses), (c) note that window function executes after FROM/WHERE so partition pruning on `event_date` / `customer_id` filter on the scan still works (critical for multi-tenant SaaS scale).
+
+---
+
+### Iter 378 Q2 — 2026-05-30 (EXTENDED PHASE) — Bloom filters on high-cardinality UUID/user_id columns (re-probe of iter377 Q2 bloom filter cardinality factual error)
+
+**Q2** — "Should I add a bloom filter on a high-cardinality user_id UUID column in Iceberg?"
+
+Responder stated clearly: YES, bloom filters help on high-cardinality UUID/user_id equality predicates because min/max statistics are useless on these columns (range spans nearly every file). NO for low-cardinality columns like status / country / plan_type — those already prune via dictionary encoding and min/max. Provided the Trino-Iceberg-specific syntax `ALTER TABLE ... SET PROPERTIES parquet_bloom_filter_columns = ARRAY['user_id']` for enabling. Noted that existing data does NOT gain bloom filters automatically — Trino can't write bloom filters, so a Spark rewrite is required. Cited 10-100x speedup for point lookups.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.75 |
+| Completeness | 4.5 |
+| **Average** | **4.6875** |
+
+**Iter 378 Q2: 4.6875 — STRONG PASS** (well above per-question 4.0 bar; lifts "Iceberg partition design for SaaS" running avg from 4.526/20 → 4.534/21, INVERTING and correcting the iter377 backwards bloom filter cardinality recommendation. Teacher action #1 closed.)
+
+Judge verified via WebSearch:
+1. **Bloom filters for HIGH-cardinality columns (UUIDs, user IDs, session IDs, trace IDs)** — CONFIRMED per [Iceberg Bloom Filters with Spark — Cazpian](https://cazpian.ai/blog/iceberg-bloom-filters-with-spark-configuration-validation-and-performance-guide), [Bloom Filter — Apache Parquet](https://parquet.apache.org/docs/file-format/bloomfilter/), and [Iceberg Query Performance Tuning — Cazpian](https://www.cazpian.ai/blog/iceberg-query-performance-tuning-partition-pruning-bloom-filters-and-spark-configs): "For high-cardinality columns like UUIDs, user IDs, session IDs, or trace IDs, min/max statistics are nearly useless. A bloom filter is a compact probabilistic data structure embedded in each Parquet file that can definitively say 'this value is NOT in this file' — allowing the engine to skip the file entirely." Reduces I/O by 80-90% for point lookups.
+2. **Low-cardinality columns (status, country, plan_type) do NOT benefit** — CONFIRMED: min/max + dictionary encoding already prunes well; bloom filter adds storage overhead with little benefit.
+3. **`parquet_bloom_filter_columns` is the Trino-Iceberg property name** — CONFIRMED per [Iceberg connector — Trino 481 Documentation](https://trino.io/docs/current/connector/iceberg.html) (vs Spark's `write.parquet.bloom-filter-enabled.column.<col>` form).
+4. **Existing data needs rewrite to gain bloom filters** — CONFIRMED: bloom filters are written at file creation time; existing Parquet files do not gain them via property change. Trino's Iceberg writer does not currently write bloom filters (as of Trino 467/481); Spark with `OPTIMIZE` / `rewriteDataFiles` is the path.
+5. **10-100x speedup for point lookups** — REASONABLE; aligns with the 80-90% I/O reduction cited in Cazpian + InfluxData bloom filter benchmarks.
+
+GAPS (deductions from 5):
+- **TA (0)**: Fully accurate; reverses the iter377 backwards advice correctly and matches Apache Parquet + Iceberg documentation.
+- **BC (−0.5)**: Concrete examples (UUID, user_id as YES; status, country, plan_type as NO) anchor the cardinality concept well. Could gloss "cardinality" (= number of distinct values) and "dictionary encoding" (= Parquet stores repeated values once and references via integer ID) inline for a SaaS engineer with OLTP background who has not seen Parquet internals.
+- **PA (−0.25)**: ALTER TABLE syntax + Spark-rewrite caveat is actionable; engineer can run the DDL immediately. Minor: did not call out the `parquet_bloom_filter_fpp` tunable (false-positive rate) for very-high-cardinality columns where the default 1MB size may produce too many false positives.
+- **Comp (−0.5)**: Strong core coverage but missed (a) bloom filter is probabilistic — "no" is definitive but "yes" is "maybe" (false-positive case, engine still has to read the file), (b) the 1MB default size per column per row group, (c) note that bloom filters only help equality predicates (`=`, `IN`) not range predicates (`>`, `<`, `BETWEEN`) — a beginner might think they accelerate all WHERE clauses.
+
+---
+
+ITER379 TEACHER ACTIONS (PRIORITY-ORDERED):
+1. **MEDIUM (Comp in Q1)** — Window functions: add to the running-total example a clarification on (a) `ROWS` vs `RANGE` distinction (physical row offset vs value-based offset on ORDER BY column), (b) NULL handling (`SUM` skips NULLs, running total progresses), (c) explicit "window functions execute after FROM/WHERE — partition pruning on the scan is preserved" callout for multi-tenant SaaS scale.
+2. **MEDIUM (Comp in Q2)** — Bloom filters: add (a) probabilistic nature — bloom filter says "NOT in file" definitively but "yes" means "maybe in file" (engine still reads), (b) 1MB default size per column per row group, (c) explicit note that bloom filters only help equality predicates (`=`, `IN`) not range predicates (`>`, `<`, `BETWEEN`), (d) `parquet_bloom_filter_fpp` tunable.
+3. **LOW (BC in both Q1+Q2)** — Inline glossary cascade still open: "frame clause" (window function), "cardinality" (= distinct value count), "dictionary encoding" (= Parquet stores repeated values once). Plus iter376 carry-forward: Trino UI vocab (Queued, Scheduled, Physical Input, Blocked, Spilled, EXPLAIN ANALYZE, TYPE DISTRIBUTED), lakehouse tx vocab (atomic, idempotent, destructive, partial commit), federation vocab (CBO, BROADCAST, PARTITIONED, build/probe side, left-deep). HyperLogLog gloss open since iter372. MinIO TCO open since iter374.
+4. **LOW (Comp carry-forward)** — `format_version = 2` for row-level deletes, `location` property for MinIO path control, Spark-vs-Trino write property split (table-level `write.target-file-size-bytes` unhonored by Trino — session property `target_max_file_size` needed) — all open from iter377 teacher actions, did not surface this iteration because questions did not probe them.
+
+ITER379 JUDGE PROBE TARGETS:
+1. **Window function 3rd angle**: "How do I compute a 7-day rolling average per tenant in Trino?" — tests sliding RANGE frame (`RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW`) vs the cumulative `UNBOUNDED PRECEDING` pattern. Builds topic durability from 8 → 9 angles.
+2. **Bloom filter 3rd angle**: "I have a `country_code` column with 200 distinct values used in WHERE clauses — should I add a bloom filter on it?" — explicit low-cardinality probe (CORRECT answer: NO, dictionary encoding + min/max already prunes). Tests whether the Q2 win is durable on the low-cardinality side.
+3. **Iceberg table property production-stack-fit (carry-forward iter378 #3)**: "I set `write.target-file-size-bytes = 512MB` on my Iceberg table via Spark DDL but Trino is still writing 200MB files. Why?" — tests Trino-vs-Spark write property split per Trino issue #28250.
+4. **Distribution mode probe (carry-forward iter378 #4)**: "Should I set `write.distribution-mode='hash'` on my bucket-partitioned Iceberg table?" — tests Spark vs Trino split + skew caveat per Trino issue #12966.
+5. **EXPLAIN ANALYZE warning** (carry-forward iter376 action #4): probe whether responder warns that EXPLAIN ANALYZE actually executes the query on an already-slow query.
+6. **Federation glossary** (carry-forward iter370+): re-probe CBO / BROADCAST / PARTITIONED / build-vs-probe vocab inline glosses.
+
+PATTERN OBSERVATIONS:
+- (a) **Iter 378 ends 4.71875 — STRONG PASS**, RECOVERING from iter377 3.25 FAIL. Both teacher critical actions from iter377 closed: window function canonical SQL provided (action #2), bloom filter cardinality inverted from backwards to correct (action #1).
+- (b) Recovery profile is clean: Q1 closes the content-coverage gap (canonical SUM() OVER() syntax with frame clause now in answer), Q2 inverts the factual error (HIGH-cardinality bloom filter advice correct, low-cardinality dictionary encoding called out). Both answers are production-ready for a SaaS engineer to act on immediately.
+- (c) Remaining drag is BC inline gloss cascade (cardinality, dictionary encoding, frame clause) and Comp depth (ROWS vs RANGE, false-positive nature of bloom filter) — both secondary to the iter377 TA + PA failures. Drag is small (each dimension <0.5 below 5.0 across both questions).
+- (d) Production-stack-fit was good: `parquet_bloom_filter_columns` is Trino-specific (not Spark's `write.parquet.bloom-filter-enabled.column.<col>`), Spark-rewrite caveat correctly surfaces Trino-can't-write-bloom-filters constraint for the Iceberg 1.5.2 + Trino 467 + HMS stack.
+- (e) Topic running averages improve: "Analytical query patterns on Iceberg+Trino" 4.375/7 → 4.422/8 (durability rebuilt with 8th angle, recovery from iter377 2.875 single-iteration drop); "Iceberg partition design for SaaS" 4.526/20 → 4.534/21 (small positive); "Common analytical query patterns" 4.633/9 → 4.645/10 (small positive on adjacent topic since Q1 is dual-tagged as cumulative-sum analytical pattern).
+- (f) Iter370-378 trajectory restored (with iter377 as outlier): 4.625 → 4.375 → 4.47 → 3.98 FAIL → 4.5625 PASS → 4.75 STRONG PASS → 4.1875 PASS → 4.4375 PASS → 4.40625 PASS → 4.5625 STRONG PASS → 3.25 FAIL → **4.71875 STRONG PASS**. Pass band restored above 4.0; iter377 was a single-iteration anomaly driven by a content gap + factual error pair, both now corrected.
+
+Sources verified via WebSearch:
+- [Window functions — Trino 480 Documentation](https://trino.io/docs/current/functions/window.html) — `SUM() OVER (PARTITION BY ... ORDER BY ... ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` is canonical running-total syntax
+- [Trino blog — Introducing new window features](https://trino.io/blog/2021/03/10/introducing-new-window-features.html) — `sum(totalprice) OVER (PARTITION BY clerk ORDER BY orderdate ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` documented pattern
+- [Iceberg Bloom Filters with Spark — Cazpian](https://cazpian.ai/blog/iceberg-bloom-filters-with-spark-configuration-validation-and-performance-guide) — high-cardinality (UUIDs, user IDs, session IDs, trace IDs) is the correct use case
+- [Bloom Filter — Apache Parquet](https://parquet.apache.org/docs/file-format/bloomfilter/) — bloom filter for high-cardinality point lookups
+- [Iceberg Query Performance Tuning — Cazpian](https://www.cazpian.ai/blog/iceberg-query-performance-tuning-partition-pruning-bloom-filters-and-spark-configs) — 80-90% I/O reduction confirmed for point lookups on high-cardinality columns
+- [Iceberg connector — Trino 481 Documentation](https://trino.io/docs/current/connector/iceberg.html) — `parquet_bloom_filter_columns` is the Trino-Iceberg property name
+
+**Topics updated**:
+- Analytical query patterns on Iceberg+Trino: 4.375/7 → **4.422/8** (PASSED, durability rebuilt with 8th angle, recovery from iter377 single-iteration 2.875 drop)
+- Iceberg partition design for SaaS: 4.526/20 → **4.534/21** (PASSED, small positive)
+- Common analytical query patterns: 4.633/9 → **4.645/10** (PASSED, small positive from Q1 cumulative-sum cross-tag)
+
+---
 
 ### Iter 377 Q1 — 2026-05-30 (EXTENDED PHASE) — Window functions running totals in Trino (SUM() OVER() pattern)
 
