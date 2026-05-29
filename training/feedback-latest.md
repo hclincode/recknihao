@@ -1,62 +1,75 @@
-# Judge Feedback — Iter 384 (EXTENDED PHASE)
+# Iter 385 Feedback — 2026-05-30 (EXTENDED PHASE)
 
-## Iteration outcome: 4.4375 PASS (both Q1 + Q2 pass cleanly)
+**Overall: 4.4375 — PASS**
 
-Strong recovery from iter383 3.875 Q1 FAIL. Schema registry framing now leads with evolution-safety, not size optimization. Apicurio named for on-prem fit.
+## Q1: Iceberg MERGE INTO internals + CDC upserts (4.4375 PASS)
 
----
+Responder coverage:
+- CoW = rewrites affected data files (no separate delete markers)
+- MoR = position deletes + new data files
+- MERGE INTO CDC pattern: op='u' → UPDATE, op='d' → DELETE, WHEN NOT MATCHED → INSERT
+- Equality delete bug #12838 in Iceberg 1.5.2 (production-stack fit)
+- Post-MERGE maintenance loop (compaction + snapshot expiry)
 
-## Q1 — Schema registry for Debezium re-probe (evolution-safety framing)
+| Dimension | Score | Notes |
+|---|---|---|
+| Technical accuracy | 4.75 | CoW/MoR + three-branch MERGE pattern + #12838 all correct; minor — #12838 is more precisely RewriteDataFiles + equality-delete interaction across partitions, slightly understated |
+| Beginner clarity | 3.75 | "Position delete", "equality delete", "MoR/CoW", "op='u'/'d'" all thrown without inline gloss — same BC cascade as iter384 |
+| Practical applicability | 4.75 | Concrete MERGE INTO pattern + 1.5.2-specific bug callout + maintenance follow-up = engineer knows exact next steps |
+| Completeness | 4.5 | Misses: write.merge.mode / write.delete.mode table-property toggle that controls CoW vs MoR per-operation |
 
-**Score: 4.50 STRONG PASS** (TA 4.75, BC 4.0, PA 4.75, Comp 4.5)
+## Q2: Trino per-query timeout (4.4375 PASS)
 
-Responder said: schema-evolution safety is PRIMARY value (silent data corruption otherwise), WAL detection is separate, Apicurio on-prem Apache 2.0, add when >10K msg/sec OR multiple consumers, skip OK for stable schema + single sink, debezium-server-iceberg auto-ALTERs.
+Responder coverage:
+- query_max_run_time = total elapsed (queue + planning + execution)
+- query_max_execution_time = active computation only
+- query.max-run-time=10m in config.properties (cluster default)
+- Session Property Manager for per-tier limits
+- OPA enforces non-override of session property bounds
+- CALL system.runtime.kill_query for immediate kill
 
-### What worked
-- **TA recovery (+0.75 from iter383)**: Evolution-safety lead is exactly the right framing. Registry-as-compatibility-gate is the production-value pattern, not registry-as-size-optimization.
-- **PA production-fit (+0.75 from iter383)**: Apicurio specifically named — Apache 2.0 license, no Confluent license required, runs on on-prem k8s. Closes the iter383 gap where Confluent SR was implied without on-prem cost call-out.
-- **Comp threshold rule**: ">10K msg/sec OR multiple consumers" is concrete and acts as the add-registry trigger. "Skip for stable schema + single sink" is the symmetric skip rule — engineer can decide both directions.
-- **debezium-server-iceberg auto-ALTER**: correctly framed as default behavior — clarifies that for the simple single-sink case the consumer handles schema evolution downstream without a registry intermediary.
+| Dimension | Score | Notes |
+|---|---|---|
+| Technical accuracy | 4.75 | run-time vs execution-time distinction correct per Trino 481 docs; OPA-as-enforcer fits Trino 467 stack; kill_query correct |
+| Beginner clarity | 3.75 | "Session Property Manager", "OPA", "config.properties" all thrown without inline gloss — same BC cascade |
+| Practical applicability | 4.75 | Concrete config value (10m) + specific file (config.properties) + per-tier mechanism + immediate-kill procedure |
+| Completeness | 4.5 | Misses: query.max-queued-time peer property + EXCEEDED_TIME_LIMIT error code users observe |
 
-### Remaining gaps
-- **BC (−1.0)**: WAL, Apicurio, ALTER TABLE, sink, msg/sec not inline-glossed. One-liner each (WAL = Postgres write-ahead log Debezium tails for CDC; Apicurio = Red Hat's open-source schema registry drop-in for Confluent SR; sink = downstream consumer like the Iceberg writer).
-- **Comp (−0.5)**: Could explicitly couple registry schemaId increment → Iceberg ALTER TABLE ADD COLUMN flow. The mechanism by which auto-ALTER works (Debezium envelope carries schema → consumer parses → applies Iceberg DDL) would close the loop on "how does the safety actually manifest in production."
+## Pattern observations
 
----
+Two consecutive iterations (384, 385) landed at exactly **4.4375**. This is no coincidence:
+- TA 4.75 both Qs both iters (ceiling-strong)
+- PA 4.75 both Qs both iters (ceiling-strong)
+- Comp 4.5 stable (minor missing peer-property gaps)
+- **BC 3.75 both Qs both iters — the consistent score cap**
 
-## Q2 — EXPLAIN TYPE LOGICAL vs DISTRIBUTED
+BC drag is now ~8 iterations of unresolved jargon cascade. Until inline-gloss work lands, STRONG PASS (≥4.6) is structurally blocked even with perfect TA + PA.
 
-**Score: 4.375 PASS** (TA 4.75, BC 3.75, PA 4.5, Comp 4.5)
+## Teacher actions next (iter 386)
 
-Responder said: LOGICAL = abstract CBO plan with rows:? signal for missing stats, debug join order / build-probe; DISTRIBUTED = physical plan with RemoteExchange types (REPARTITION/REPLICATE), predicate pushdown position, fragment topology; LOGICAL cheaper + CBO focus, DISTRIBUTED for execution topology; neither executes the query (ANALYZE does).
+1. **HIGH — MERGE INTO BC inline-gloss cascade**
+   - "position delete = pointer (file_path, position) to a row in an existing file marked for skip at read time"
+   - "equality delete = predicate-based delete e.g. WHERE id=5 stored as a delete file"
+   - "CoW (copy-on-write) = rewrites the entire affected data file with the change applied"
+   - "MoR (merge-on-read) = keeps delete file separate, applied at scan time, reconciled later by compaction"
+   - "op='u'/'d'/'c'/'r' = Debezium operation code in change event envelope: update / delete / create / read-snapshot"
 
-### What worked
-- **TA**: All technical claims accurate — LOGICAL/DISTRIBUTED distinction, rows:? as missing-stats signal, RemoteExchange REPARTITION vs REPLICATE, neither-executes vs EXPLAIN ANALYZE.
-- **PA**: Use-case split is the actionable takeaway — LOGICAL for join order debugging (cheaper, CBO focus), DISTRIBUTED for execution topology (shuffle cost, pushdown verification). Engineer knows which to run for which symptom.
-- **Comp**: Hits both modes plus the critical ANALYZE distinction (executes vs plans-only).
+2. **HIGH — Trino timeout BC inline-gloss cascade**
+   - "Session Property Manager = Trino coordinator config (session-property-config.properties) mapping user/group/source patterns to per-session property defaults"
+   - "config.properties = cluster-wide Trino coordinator/worker config file in etc/"
+   - "elapsed time = wall-clock from query submit including queue wait"
+   - "execution time = active CPU/IO time excluding queue and planning phases"
 
-### Remaining gaps
-- **BC (−1.25)**: CBO, build-probe, RemoteExchange, predicate pushdown, fragment topology used without inline gloss. For a beginner: CBO = picks plan from row count estimates; build-probe = inner side built into hash table, outer side probes it; RemoteExchange = data shuffle between worker nodes; predicate pushdown = filter pushed to storage layer; fragment = unit of work assigned to a stage.
-- **Comp (−0.5)**: Could mention sibling modes TYPE IO (data locations to be read — useful for pushdown verification) and TYPE VALIDATE (parse-only check). Not critical but rounds out the EXPLAIN-family picture.
+3. **MED — Q1 Comp**: write.merge.mode / write.delete.mode / write.update.mode table properties that toggle CoW vs MoR per-operation (default CoW in 1.5.2)
 
----
+4. **MED — Q2 Comp**: query.max-queued-time peer property + EXCEEDED_TIME_LIMIT error code surface (what user sees in error message)
 
-## Pattern observations across iter 384
+## Judge probe targets next
 
-1. **iter383 recovery confirmed**: Q1 4.50 vs iter383 3.875 — evolution-safety framing now lead, Apicurio production-fit named. Teacher's iter383 actions on schema registry topic landed.
-2. **BC drag persists across both Qs**: Q1 4.0, Q2 3.75 — jargon cascade unmitigated. The −0.5 to −1.25 BC penalty has been the consistent dimension-floor for 6+ iterations. Inline-gloss one-liners for stack-specific vocab (WAL, Apicurio, CBO, RemoteExchange, build-probe, fragment) would lift BC by ~0.5 across the board.
-3. **PA strong both Qs**: 4.75 + 4.5 — pragmatic guidance present (specific tool names, concrete thresholds, use-case split). Pattern continues from iter378-383.
-4. **TA both Qs ≥4.75**: factual precision strong — no critical factual errors.
-5. **Comp both Qs 4.5**: covers core, misses minor adjacent topics (Iceberg ALTER coupling for Q1, TYPE IO/VALIDATE for Q2).
+1. **MERGE INTO 2nd angle** — "MERGE failed mid-batch on equality delete file; how to roll back?" tests snapshot rollback + MoR equality-delete corruption recovery + interaction with iter385 #12838 fix.
+2. **Trino timeout 2nd angle** — "User complains query killed at 8m but they set session property to 30m; why didn't override take effect?" tests OPA-policy enforcement of session-property bounds + Session Property Manager precedence ordering.
+3. **Carry-forward** — schema registry 4th angle (forward/backward compat after enum add), EXPLAIN TYPE IO + VALIDATE, Trino result caching, Iceberg branches concurrent fast_forward, bucket sizing 32/128/256, JWT+OPA concurrency, partition spec migration without downtime.
 
-## Teacher action priorities for iter 385
+## Trajectory
 
-1. **HIGH BC** — inline-gloss one-liners for high-frequency stack vocab. Persistent BC drag is the single biggest score lever now.
-2. **LOW Comp Q1 schema registry** — schemaId → Iceberg ALTER TABLE ADD COLUMN flow diagram.
-3. **LOW Comp Q2 EXPLAIN family** — TYPE IO (locations read, pushdown verification), TYPE VALIDATE (parse-only).
-
-## Judge probe targets for iter 385
-
-1. Schema registry 4th angle — "consumer broke after producer added enum value, registry would have prevented?" (tests forward/backward compatibility specifics).
-2. EXPLAIN 2nd angle — "EXPLAIN ANALYZE shows 50× row estimate vs actual on inner side, which TYPE would have told me sooner?" (tests stale-stats detection via LOGICAL rows:? signal).
-3. Carry-forward: Trino result caching (iter381), Iceberg branches concurrent fast_forward (iter381), bucket sizing 32/128/256 (iter382), partition spec migration without downtime (iter382), JWT+OPA concurrency (iter382).
+iter370 → 385: 4.625 / 4.375 / 4.47 / 3.98 FAIL / 4.5625 / 4.75 / 4.1875 / 4.4375 / 4.40625 / 4.5625 / 3.25 FAIL / 4.71875 STRONG / 4.8125 STRONG / 4.78125 STRONG / 4.375 PASS / 4.094 PASS / 4.4375 PASS / **4.4375 PASS** — 8 consecutive iterations above 4.0 pass bar. Resource base stable; BC inline-gloss work is the only remaining lever between PASS and STRONG PASS.

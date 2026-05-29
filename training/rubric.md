@@ -40,8 +40,8 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.422 | 8 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.609 | 4 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.5200 | 137 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.541 | 48 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.5193 | 138 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.5408 | 49 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 4.751 | 5 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4910 | 263 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.7392 | 7 |
@@ -50,6 +50,46 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 385 — 2026-05-30 (EXTENDED PHASE) — Q1 MERGE INTO CoW/MoR + CDC upserts + 1.5.2 equality delete bug; Q2 Trino per-query timeout (max_run_time vs max_execution_time)
+
+**Q1** — Iceberg MERGE INTO internals + CDC upserts (CoW vs MoR, op='u'/'d' pattern, equality delete bug #12838, maintenance)
+
+Responder gave: CoW = rewrites affected files (no delete markers); MoR = position deletes + new files; MERGE INTO CDC pattern with op='u' UPDATE + op='d' DELETE + WHEN NOT MATCHED INSERT; equality delete bug #12838 in 1.5.2 (RewriteDataFiles + equality deletes — production-stack 1.5.2 fit); maintenance cleanup after MERGE.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 3.75 |
+| Practical applicability | 4.75 |
+| Completeness | 4.5 |
+| **Average** | **4.4375** |
+
+**Iter 385 Q1: 4.4375 — PASS**
+
+CoW vs MoR distinction correct (rewrites vs position-deletes + new files); MERGE INTO CDC three-branch pattern (UPDATE op='u' / DELETE op='d' / INSERT WHEN NOT MATCHED) correctly maps Debezium op codes to MERGE clauses; #12838 correctly identified as a 1.5.x equality-delete + RewriteDataFiles interaction bug (production-stack Iceberg 1.5.2 fit); post-MERGE maintenance loop closes the operational gap. BC drag (−1.25): "position deletes", "equality delete", "MoR/CoW", "op='u'/'d'" not inline-glossed — persistent BC cascade across 7+ iterations. Minor Comp gap: no mention of write.merge.mode / write.delete.mode table properties controlling CoW vs MoR per-operation.
+
+**Q2** — Trino per-query timeout (query.max-run-time vs query.max-execution-time, Session Property Manager, OPA, kill_query)
+
+Responder gave: query_max_run_time = total elapsed time (queue + planning + execution) vs query_max_execution_time = active computation only; query.max-run-time=10m in config.properties (cluster default); Session Property Manager for per-tier different limits; OPA to prevent user override of timeouts; CALL system.runtime.kill_query for immediate kill.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 3.75 |
+| Practical applicability | 4.75 |
+| Completeness | 4.5 |
+| **Average** | **4.4375** |
+
+**Iter 385 Q2: 4.4375 — PASS**
+
+run-time vs execution-time distinction correct per Trino 481 docs (run-time = total lifecycle including queue + planning; execution-time = active execution only); config.properties + 10m cluster default concrete and actionable; Session Property Manager correctly identified as per-tier override mechanism; OPA-as-enforcer correctly fits production stack (Trino 467 + OPA); kill_query procedure correct. BC drag (−1.25): "Session Property Manager", "OPA", "config.properties", "elapsed vs computation" not inline-glossed — same persistent BC cascade. Minor Comp gap: no mention of query.max-queued-time or what users observe when killed (error code QUERY_HAS_TOO_MANY_STAGES vs EXCEEDED_TIME_LIMIT).
+
+**Iter 385 overall: (4.4375 + 4.4375) / 2 = 4.4375 — PASS**
+
+PATTERN NOTE: Two consecutive iterations (384, 385) at exactly 4.4375 — BC drag (3.75 both Qs both iters) is the consistent score cap. TA 4.75 + PA 4.75 are both ceiling-strong; Comp 4.5 stable. BC inline-gloss work remains the single biggest score lever for STRONG PASS (≥4.6) recovery. TEACHER ACTIONS NEXT (iter386): (1) HIGH BC one-liner cascade for MERGE INTO vocab: "position delete = pointer to row in existing file marked for skip", "equality delete = predicate-based delete e.g. WHERE id=5", "CoW = copy-on-write rewrites entire file", "MoR = merge-on-read keeps delete file separate, applied at scan time", "op='u'/'d' = Debezium operation code for update/delete"; (2) HIGH BC one-liner cascade for Trino timeout vocab: "Session Property Manager = config file mapping user/group/source to per-session property defaults", "config.properties = Trino coordinator/worker cluster-wide config file", "elapsed time = wall-clock since query submitted including queue", "execution time = active CPU/IO time excluding queue and planning"; (3) MED Comp Q1 — write.merge.mode / write.delete.mode table-property toggle CoW↔MoR per-operation; (4) MED Comp Q2 — query.max-queued-time + EXCEEDED_TIME_LIMIT error code surface. JUDGE PROBE TARGETS NEXT: (1) MERGE INTO 2nd angle — "MERGE failed mid-batch on equality delete file, how to roll back" tests snapshot rollback + MoR equality-delete corruption recovery; (2) Trino timeout 2nd angle — "user complains query killed at 8m but they had set session property to 30m, why didn't override take effect" tests OPA-policy enforcement of session-property bounds; (3) carry-forward: schema registry 4th angle (forward/backward compat after enum add), EXPLAIN TYPE IO + VALIDATE, result caching, Iceberg branches concurrent fast_forward, bucket sizing 32/128/256, JWT+OPA concurrency.
+
+---
 
 ### Iter 384 — 2026-05-30 (EXTENDED PHASE) — Q1 schema registry for Debezium re-probe (evolution-safety framing); Q2 EXPLAIN TYPE LOGICAL vs DISTRIBUTED
 
