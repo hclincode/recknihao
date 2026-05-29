@@ -41,15 +41,62 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.609 | 4 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.523 | 134 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.529 | 44 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.531 | 45 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
-| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4910 | 262 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4910 | 263 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
 | SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.652 | 16 |
 
 ---
 
 ## Score history
+
+### Iter 371 Q1 — 2026-05-30 (EXTENDED PHASE) — Trino federation CRITICAL re-probe: ANALYZE direction (Postgres vs Trino) for 50K dim that CBO is partitioning
+
+**Q1** — "We're using a Postgres table as a dimension in Trino joins but the CBO chooses partitioned join when the table is only 50K rows. Someone said we need to run ANALYZE so Trino knows the table is small. How do I actually do that — do I run it in Trino or on Postgres itself?"
+
+Responder gave the correct direction: `ANALYZE public.dimension_table_name;` on the source Postgres database directly (psql), explicitly told the user that `ANALYZE app_pg.public.dimension_table_name` from Trino will FAIL (JDBC PostgreSQL connector does not support ANALYZE), explained Trino's PostgreSQL connector reads from pg_stats on next query planning, provided `SHOW STATS FOR app_pg.public.dimension_table_name` as the Trino-side verification (row_count ~50K, distinct_values_count populated), included `CALL app_pg.system.flush_metadata_cache();` as a fallback if stats don't appear immediately, named root cause (empty pg_stats → CBO defaults to PARTITIONED as safe fallback), and called out autovacuum-disabled as the durable stale-stats issue.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 5.0 |
+| Completeness | 4.0 |
+| **Average** | **4.50** |
+
+Judge verified via WebSearch:
+1. **ANALYZE direction is correct** — per [PostgreSQL connector — Trino 481 Documentation](https://trino.io/docs/current/connector/postgresql.html): "To collect statistics for a table, execute the following statement in PostgreSQL: `ANALYZE table_schema.table_name;`". The Trino PostgreSQL connector retrieves pre-collected Postgres stats; no ANALYZE statement is registered for the JDBC connector. Responder's direction (Postgres direct, NOT Trino) is correct.
+2. **pg_stats source is correct** — per same docs: "The statistics are collected by PostgreSQL and retrieved by the connector." Responder's pg_stats / pg_statistic explanation is correct.
+3. **SHOW STATS FOR verification** — per [Table statistics — Trino 480 Documentation](https://trino.io/docs/current/optimizer/statistics.html): SHOW STATS FOR <table> is the canonical Trino-side verification command.
+4. **CBO PARTITIONED fallback on missing stats** — per [Cost-based optimizations — Trino 481 Documentation](https://trino.io/docs/current/optimizer/cost-based-optimizations.html): CBO uses table statistics for join distribution choices; missing stats lead to conservative defaults. Responder's narrative is consistent.
+
+**Iter 371 Q1: 4.50 — STRONG PASS** (above per-question 4.0 bar; meets federation topic 4.5 STRONG-PASS bar; topic running avg 4.4910/262 → 4.4910/263 neutral on average but DURABLE PROOF that the iter370 CRITICAL ANALYZE-direction regression is closed.)
+
+GAPS (deductions from 5):
+- **Beginner clarity (−1.0)**: "CBO" and "PARTITIONED" used without inline gloss — 15th-iter-flagged glossary drag in `resources/22` continues to cap BC at 4.0 on federation probes. Iter370 action #1 + iter371 action #3 glossary expansion has not yet fully landed in time for the responder to surface it.
+- **Completeness (−1.0)**: (a) No mention of `SET SESSION join_distribution_type = 'BROADCAST'` or `SET SESSION join_reordering_strategy = 'AUTOMATIC'` as backup knobs if stats land but plan still does not flip; (b) `join_max_broadcast_table_size` (~100MB default) threshold not surfaced — a 50K-row dim should broadcast unless rows are unusually wide; (c) No WAL/replica caveat (if Postgres connection points at read replica, ANALYZE must run on primary and propagate via WAL — resources/22 Section 7 lines 3366-3372 covers this but responder did not surface it).
+
+ITER372 TEACHER ACTIONS (PRIORITY-ORDERED):
+1. **HIGH (clarity, 15th-iter-flagged, carry-forward iter370+iter371)** — Inline glossary in `resources/22` for "CBO", "BROADCAST", "PARTITIONED", "build side", "probe side", "left-deep join tree", "join_distribution_type", "join_reordering_strategy", "dynamic filtering". Single drag preventing federation BC ceiling of 5.0.
+2. **MEDIUM (completeness)** — Add "what to try if stats land but the plan still does not flip" sub-section to `resources/22`: manual `join_distribution_type = 'BROADCAST'` override, `join_reordering_strategy = 'AUTOMATIC'` to let CBO re-pick join order, `join_max_broadcast_table_size` threshold check.
+3. **MEDIUM (durability)** — Surface the read-replica caveat ("run ANALYZE on the PRIMARY, let WAL propagate `pg_statistic`") up-front in the ANALYZE direction section, not just in Section 7.
+4. **LOW (carry-forward iter370)** — `enable_dynamic_filtering` master kill switch + left-deep join tree multi-way execution model still pending probe.
+
+ITER372 JUDGE PROBE TARGETS:
+1. **Federation glossary**: "Trino EXPLAIN shows `join (INNER, PARTITIONED)` — what does PARTITIONED mean and how is it different from BROADCAST?" — tests iter372 action #1.
+2. **Federation backup knobs**: "I ran ANALYZE on Postgres and SHOW STATS in Trino shows the right row_count, but EXPLAIN still says `join (INNER, PARTITIONED)`. What now?" — tests iter372 action #2.
+3. **Federation replica caveat**: "Our Trino Postgres connection points at our streaming read replica. Should I run ANALYZE on the replica or the primary?" — tests iter372 action #3.
+4. Carry-forward iter370 probe target: `enable_dynamic_filtering` master kill switch.
+5. Carry-forward iter370 probe target: multi-way left-deep join tree execution model.
+6. Carry-forward CDC tier 5th angle: snapshot isolation under concurrent CDC writes.
+
+Sources verified via WebSearch:
+- [PostgreSQL connector — Trino 481 Documentation](https://trino.io/docs/current/connector/postgresql.html) — ANALYZE must run on source Postgres directly; connector reads pre-collected stats; no Trino-side ANALYZE for JDBC PostgreSQL.
+- [Cost-based optimizations — Trino 481 Documentation](https://trino.io/docs/current/optimizer/cost-based-optimizations.html) — CBO uses stats for join distribution; missing stats lead to conservative defaults.
+- [Table statistics — Trino 480 Documentation](https://trino.io/docs/current/optimizer/statistics.html) — SHOW STATS FOR is the canonical Trino-side verification.
+
+---
 
 ### Iter 370 Q1 — 2026-05-30 (EXTENDED PHASE) — Trino federation 15th-iter angle: three-table join OOM diagnosis (1B-row Iceberg ⨝ 500K Postgres customers ⨝ 50K Postgres products)
 
