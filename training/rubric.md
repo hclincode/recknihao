@@ -51,6 +51,46 @@ Each topic must reach the pass threshold before the system can enter final phase
 
 ## Score history
 
+### Iter 386 — 2026-05-30 (EXTENDED PHASE) — Q1 Iceberg Z-order/sort for multi-column filtering; Q2 Trino query history + auditing (event listener)
+
+**Q1** — Iceberg Z-order/sort multi-column filtering (file skipping via min/max stats, rewrite_data_files strategy=sort, zorder, sorted_by, sort vs partition tradeoffs)
+
+Responder gave: per-file min/max statistics power file skipping; without sort = scattered data = useless statistics; rewrite_data_files with strategy='sort' and sort_order='tenant_id ASC, event_type ASC'; Z-order for high-cardinality columns via zorder(tenant_id, user_id); sorted_by declared at CREATE TABLE; sort vs partitioning tradeoffs explained.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 3.75 |
+| Practical applicability | 4.75 |
+| Completeness | 4.5 |
+| **Average** | **4.4375** |
+
+**Iter 386 Q1: 4.4375 — PASS**
+
+Min/max-stats-driven file skipping correctly framed as the why behind sort; rewrite_data_files with strategy='sort' + concrete sort_order column list (tenant_id ASC, event_type ASC) production-stack actionable; Z-order for high-cardinality correctly distinguished from single-column sort; sorted_by table property anchors new writes; sort vs partition tradeoff closes the loop. BC drag (−1.25): "min/max statistics", "Z-order", "high-cardinality", "sorted_by", "rewrite_data_files strategy=sort" not inline-glossed — persistent BC cascade across 9+ iterations. Minor Comp gap: no mention of rewrite_manifests after sort or write.distribution-mode=range to pre-shuffle writes.
+
+**Q2** — Trino query history + auditing (system.runtime.queries non-persistence, HTTP event listener, payload schema, collector patterns, OPA protection)
+
+Responder gave: system.runtime.queries is in-memory only, not persistent, not suitable for audit log; HTTP event listener configured in etc/http-event-listener.properties posts JSON payload to collector; event payload has context.user, metadata.query, ioMetadata.inputs; three collector patterns (Loki, ELK, Iceberg audit table); OPA protects system.runtime.queries from tenants.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 3.75 |
+| Practical applicability | 4.75 |
+| Completeness | 4.5 |
+| **Average** | **4.4375** |
+
+**Iter 386 Q2: 4.4375 — PASS**
+
+system.runtime.queries non-persistence correctly identified as the why audit log can't live there (in-memory, evicted on coordinator restart); etc/http-event-listener.properties file path correct for Trino 467; event payload field names (context.user, metadata.query, ioMetadata.inputs) match QueryCompletedEvent schema; three collector patterns appropriate for on-prem stack (Iceberg-audit-table especially production-fit since lakehouse is already deployed); OPA-as-tenant-isolation for system.runtime.queries fits production stack. BC drag (−1.25): "event listener", "JSON payload", "collector pattern", "OPA" not inline-glossed — same persistent BC cascade. Minor Comp gap: no mention of kafka-event-listener alternative, buffering/retry semantics, or QueryCreatedEvent vs QueryCompletedEvent split.
+
+**Iter 386 overall: (4.4375 + 4.4375) / 2 = 4.4375 — PASS**
+
+PATTERN NOTE: THREE consecutive iterations (384, 385, 386) at exactly 4.4375 — BC drag (3.75 all three iters both Qs) is the consistent score cap. TA 4.75 + PA 4.75 are ceiling-strong; Comp 4.5 stable. BC inline-gloss work is the single biggest score lever for STRONG PASS (≥4.6) recovery. TEACHER ACTIONS NEXT (iter387): (1) HIGH BC one-liner cascade for Iceberg sort vocab: "min/max statistics = per-file metadata recording smallest+largest value of each column used to skip files not matching WHERE", "Z-order = interleaved bit ordering across N columns so adjacent values cluster for any subset of those columns", "high-cardinality = >1M distinct values where Z-order beats partition", "sorted_by = CREATE TABLE WITH(sorted_by=ARRAY['col']) declares default sort for new writes", "rewrite_data_files strategy=sort = procedure that physically re-clusters existing files on sort columns"; (2) HIGH BC one-liner cascade for Trino event listener vocab: "event listener = Trino plugin invoked at query lifecycle events posting structured records to external sink", "http-event-listener.properties = etc/ file declaring event-listener.name=http + ingest-uri target", "event payload = JSON record with context.user/metadata.query/ioMetadata fields", "collector pattern = downstream service Loki/ELK/Kafka/Iceberg-audit-table that receives and persists event records"; (3) MED Comp Q1 — rewrite_manifests + write.distribution-mode=range pre-shuffles writes; (4) MED Comp Q2 — kafka-event-listener alternative + buffering/retry semantics + QueryCreatedEvent vs QueryCompletedEvent. JUDGE PROBE TARGETS NEXT: (1) Z-order 2nd angle — "query still slow after sort, EXPLAIN shows all files scanned" tests sort-column vs WHERE-predicate column mismatch + manifest stats freshness; (2) audit log 2nd angle — "event listener dropping events under load, how to size + monitor" tests buffering + queue depth + DLQ; (3) carry-forward: MERGE INTO rollback, Trino timeout OPA-override, schema registry 4th angle, EXPLAIN TYPE IO + VALIDATE, result caching, Iceberg branches, bucket sizing, JWT+OPA concurrency.
+
+---
+
 ### Iter 385 — 2026-05-30 (EXTENDED PHASE) — Q1 MERGE INTO CoW/MoR + CDC upserts + 1.5.2 equality delete bug; Q2 Trino per-query timeout (max_run_time vs max_execution_time)
 
 **Q1** — Iceberg MERGE INTO internals + CDC upserts (CoW vs MoR, op='u'/'d' pattern, equality delete bug #12838, maintenance)
