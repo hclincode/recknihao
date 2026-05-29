@@ -1,69 +1,150 @@
-# Iter 374 Judge Feedback
+# Iter 375 Judge Feedback — 2026-05-30 (EXTENDED PHASE)
 
-## Q1 — "What's the actual cost breakdown when our on-prem Trino workers pull data from S3, and how does that compare to local MinIO?"
+## Iteration Summary
 
-This is the CRITICAL re-probe of the iter373 Q1 failure (Trino-on-prem reading S3 cost+performance vs local MinIO). Per iter373 judge probe target #1, this iteration tests whether iter374 teacher actions land: (a) cost stack decomposition per architecture with Athena clearly LABELED as alternative architecture not part of Trino-reading-S3 stack, (b) order-of-magnitude latency anchors, (c) metadata caching knobs.
+| Question | Topic | Average | Verdict |
+|---|---|---|---|
+| Q1 | Trino memory config / OOM on aggregations (query perf regression diagnosis) | 4.375 | PASS |
+| Q2 | Iceberg small files / 5-min batch writes (Iceberg maintenance) | 4.4375 | PASS |
+| **Iter avg** | | **4.40625** | **PASS** |
 
-### Scores
-
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 4.5 | (a) S3 egress $0.09/GB for first 10TB CONFIRMED via [AWS S3 Pricing](https://aws.amazon.com/s3/pricing/) tiered after that ($0.085/GB next 40TB, $0.07/GB next 100TB, $0.05/GB above 150TB) — responder's $0.09/GB is correct at small scale but 50TB/month at flat $0.09/GB overstates by ~3% versus tiered actual ($4,365 vs $4,500 reported); minor rounding within tolerance; (b) S3 storage $23.55/TB-month = $0.023/GB CONFIRMED accurate Standard tier; (c) GET requests $0.0004/1K CONFIRMED accurate; (d) Athena vs Trino-reading-S3 distinction CORRECTLY drawn per [Vantage on S3+Athena+Trino](https://www.vantage.sh/blog/s3-bill-increase-athena-trino-hive-fix-iceberg-caching) — Athena = $5/TB scanned managed query, Trino-reading-S3 = just S3 costs no per-query charge — this is the EXACT iter373 failure mode FIXED here, major correctness recovery; (e) Direct Connect $0.02/GB + $220/month baseline CONFIRMED at 1Gbps small-port pricing; (f) Latency numbers 50s vs 500s for 10K-file metadata fetch directionally correct (10x amplification from rack-local-MinIO to remote-S3 due to per-object GET round-trip), though the absolute 50s for local MinIO is on the high end — rack-local with metadata cache cold should be 5-15s for 10K files at 1-2ms/GET, not 50s; warm cache should be <1s. Minor latency-magnitude overshoot. Overall correctness recovery from iter373 3.5. |
-| Beginner clarity | 4.0 | Egress, storage, GET, metadata cache, Direct Connect all explained inline. "Cold/archival data" framing is clear. Minor drag: "metadata cache as critical optimization" mentioned but not named with specific Trino property names (`iceberg.metadata-cache-enabled`, `iceberg.metadata-cache-max-size`, `hive.metastore-cache-ttl`) per iter374 teacher action #3 — engineer can't search for these by name. Otherwise reads cleanly for a SaaS engineer with no AWS background. |
-| Practical applicability | 4.5 | Engineer can compute their own bill: 50TB/month → $4,500 egress is a concrete anchor. Direct Connect break-even math is implied ($0.02/GB savings × volume must exceed $220/month baseline + setup). "Use S3 only for cold/archival data" is actionable architectural guidance that fits on-prem-MinIO-is-production prod_info.md anchor. The Athena clarification prevents engineer from accidentally specing Athena as a Trino-on-S3 alternative. Drag: no specific config snippet for the metadata cache knobs that would close the on-prem-S3 latency gap for repeat queries. |
-| Completeness | 4.0 | Covers cost stack decomposition (egress + storage + GET), Athena-vs-Trino distinction, MinIO $0 egress contrast, latency anchors, Direct Connect option, metadata cache mention, cold/archival framing. Missing: (a) MinIO TCO decomposition ($2-4/TB raw + ops FTE amortization) per iter374 teacher action #1; (b) Trino S3 filesystem config deltas (`fs.native-s3.enabled`, `s3.endpoint`, `s3.path-style-access`) per iter374 teacher action #4; (c) named metadata cache property names. The core question (cost + how it compares) is answered, but the actionable Trino-side configuration half is thin. |
-
-**Q1 average: (4.5 + 4.0 + 4.5 + 4.0) / 4 = 4.25 PASS**
-
-Major iter373→iter374 recovery: the Athena conflation failure mode is FIXED, latency anchors are present (iter373 was punted), Direct Connect path is concrete. Remaining gaps are config-name specificity (caching knobs + S3 filesystem deltas) and MinIO TCO decomposition. Iter374 teacher action #1 (cost stack decomposition + Athena labeling) LANDED; action #3 (metadata caching knobs by name) PARTIAL — concept mentioned, property names not surfaced; action #4 (S3 filesystem config deltas) NOT LANDED in this probe but not required by this question phrasing.
+Iter convergence: std-dev 0.03125 — tightest convergence of recent iterations, suggests stable resource quality across both general-Trino and Iceberg-maintenance tracks.
 
 ---
 
-## Q2 — "What is Iceberg 'hidden partitioning' and how is it different from regular Hive-style partitioning?"
+## Q1 — Trino memory config, OOM on aggregations
 
-Foundational Iceberg concept probe. Iceberg partition design topic is at 4.570 avg over 18 questions, mature. This question tests the canonical "hidden partitioning" terminology and the Hive contrast.
+### Scoring
 
-### Scores
-
-| Dimension | Score | Reasoning |
+| Dimension | Score | Notes |
 |---|---|---|
-| Technical accuracy | 5.0 | (a) "Hidden = partition machinery invisible to query author" CONFIRMED canonical per [Apache Iceberg Partitioning](https://iceberg.apache.org/docs/latest/partitioning/) — "Iceberg avoids reading unnecessary partitions automatically, and consumers don't need to know how the table is partitioned and add extra filters to their queries"; (b) Hive requires manual `WHERE year=2024 AND month=3` partition predicates CONFIRMED — Hive partition columns are explicit table columns; (c) Iceberg filter on business column `WHERE occurred_at >= '...'` with Iceberg translating via partition transform CONFIRMED per Iceberg docs; (d) `day(occurred_at)` partition transform CONFIRMED real syntax in `PARTITIONED BY (day(occurred_at))`; (e) "No special syntax needed" CONFIRMED; (f) Partition evolution transparent with old files keeping old spec CONFIRMED — this is the per-snapshot partition-spec-id mechanism in Iceberg. All claims verified against official Iceberg docs. |
-| Beginner clarity | 4.5 | "Partition machinery invisible to query author" is a clean one-line framing. Hive-side example (`WHERE year=2024 AND month=3`) and Iceberg-side example (`WHERE occurred_at >= ...`) make the contrast concrete with side-by-side SQL. "Faster queries by default for new team members" surfaces the team-onboarding value clearly. Minor drag: "partition transform" used without inline gloss on first mention — engineer needs to infer that `day(occurred_at)` is a built-in function that buckets timestamps to daily partitions. |
-| Practical applicability | 4.5 | Engineer knows: (a) they can `PARTITIONED BY (day(occurred_at))` in their Iceberg table DDL, (b) their dbt models and ad-hoc SQL filter on `occurred_at` directly (no `partition_date` redundant column), (c) onboarding cost for new engineers is lower (they don't need to know the physical layout), (d) partition evolution is safe (old data files retain their old spec). Fits prod_info.md Iceberg 1.5.2 + Trino 467 stack — both support `day()`, `month()`, `year()`, `hour()`, `bucket(N, col)`, `truncate(N, col)` transforms. Drag: no mention of which Iceberg version introduced each transform, no callout that legacy Hive tables migrated to Iceberg may still have the legacy partition-column-as-data-column shape. |
-| Completeness | 4.5 | Covers definition (hidden = machinery invisible), Hive contrast (manual predicates), Iceberg behavior (auto-translation from business column), example transform (`day(occurred_at)`), zero-special-syntax benefit, partition evolution transparency. Missing: (a) full transform catalog (`year`, `month`, `day`, `hour`, `bucket(N, col)`, `truncate(N, col)`, `identity`) — engineer doesn't know what other transforms exist; (b) the metadata-driven mechanism (partition spec stored per snapshot in manifest list, planner uses transform to filter manifest entries by partition value range); (c) Trino-specific syntax notes for the Iceberg connector. Core question fully addressed, edge details light. |
+| Technical accuracy | 4.5 | All three memory property names CONFIRMED real; spill prereqs CONFIRMED; 25% per-node sizing is conservative vs. community consensus 30% but defensible as safe starting point |
+| Beginner clarity | 4.0 | Property names cascade without inline gloss; "rolling restart", "JVM heap", "spill" used assuming background |
+| Practical applicability | 4.5 | Priority order (restructure → join_distribution_type → spill) is actionable; concrete config values; Trino UI verification step; kubectl rolling restart fits on-prem k8s prod environment |
+| Completeness | 4.5 | Three knobs + spill prereqs + verify + priority order is comprehensive; missing `memory.heap-headroom-per-node` constraint that sum of per-node + headroom must be < JVM heap |
+| **Average** | **4.375** | **PASS** |
 
-**Q2 average: (5.0 + 4.5 + 4.5 + 4.5) / 4 = 4.625 STRONG PASS**
+### Judge WebSearch verification
 
-Foundational concept, mature topic, clean exposition. Hive-vs-Iceberg contrast is sharp and the `day(occurred_at)` example anchors the abstract concept concretely. Engineer leaves with actionable DDL pattern + onboarding-cost argument for Iceberg adoption.
+1. **`query.max-memory-per-node` is real** — CONFIRMED per [Resource management properties — Trino 480 Documentation](https://trino.io/docs/current/admin/properties-resource-management.html): "limits the amount of memory a query may use on any one node." Constraint: sum of `query.max-memory-per-node` + `memory.heap-headroom-per-node` must be less than max JVM heap size on the node.
+2. **`query.max-memory` (cluster) is real** — CONFIRMED at same docs page.
+3. **`query_max_memory` (session) is real** — CONFIRMED at [Memory management properties — Trino 370+ docs](https://trino.io/docs/current/admin/properties-memory-management.html). Session form maps to the config-level cluster limit.
+4. **25% of JVM heap sizing** — DEFENSIBLE BUT CONSERVATIVE. Per [Right-Sizing Trino: A Data-Driven Guide to Cluster Memory Tuning (Vivek Jain, Medium)](https://medium.com/@vjain143/right-sizing-trino-a-data-driven-guide-to-cluster-memory-tuning-a31b6a80c2f6) and [Trino Memory Config Calculator](https://vjain143.github.io/Trino_Memory_Sizing_Guidelines.html), the more common recommendation is ~30% of JVM heap for `query.max-memory-per-node` (e.g., 14GB on a 48GB heap). 25% is within safe bounds and avoids under-allocating headroom, but slightly under-utilizes resources. Responder's 25% is correct as a STARTING POINT but should be flagged as such, with 30% as the upper-conservative ceiling. NOT a factual error.
+5. **Spill properties** — All CONFIRMED per [Spilling properties — Trino 479 docs](https://trino.io/docs/current/admin/properties-spilling.html) and [Spill to disk — Trino 481 docs](https://trino.io/docs/current/admin/spill.html):
+   - `spill-enabled` (cluster) / `spill_enabled` (session) — both exist
+   - `spiller-spill-path` — exists, supports comma-separated paths for JBOD
+   - `max-spill-per-node` — exists, total node spill budget
+   - `query-max-spill-per-node` — exists, per-query node spill budget
+   - LZ4 compression (`spill-compression-codec`) — supported codec
+   - Local SSD recommendation matches docs warning against system drives and NFS
+
+### Gaps (deductions from 5)
+
+- **Beginner clarity (-1.0)**: Properties cascade by name without inline one-line glosses. A SaaS engineer with no OLAP background hits 6+ unfamiliar Trino property names and may not know which lever to pull first. Glosses needed for: "JVM heap" = the Java memory pool the Trino worker JVM allocates at startup, "rolling restart" = restart workers one at a time so the cluster stays serving, "spill" = streaming intermediate hash-join/aggregation state to local disk when worker memory pressure exceeds budget.
+- **Technical accuracy (-0.5)**: 25% sizing should be paired with the upper bound 30% (or stated as "start at 25%, can raise to 30% if heap-headroom calculation allows"). Sole 25% recommendation slightly under-utilizes available worker memory.
+- **Practical applicability (-0.5)**: No `memory.heap-headroom-per-node` callout — this is the constraint that bites engineers ("I set per-node to 40% of heap and now the worker crashes on startup" because per-node + heap-headroom must be < JVM heap). Engineer needs this constraint to make sizing decisions safely.
+- **Completeness (-0.5)**: Missing (a) `memory.heap-headroom-per-node` constraint and recommended sizing (default 30% of heap, never below 2GB); (b) EXPLAIN ANALYZE VERBOSE diagnostic to confirm the OOM source is HashAggregation operator (not output buffer); (c) which aggregation pattern is the typical OOM driver (high-cardinality GROUP BY > many-window-function chains > distinct-count without HyperLogLog).
 
 ---
 
-## Iter374 summary
+## Q2 — Iceberg small files problem, 5-min batch writes
 
-- **Iter374 average: (4.25 + 4.625) / 2 = 4.4375 PASS**
-- Q1 4.25 PASS — critical iter373 re-probe RECOVERS; Athena conflation FIXED; latency anchors PRESENT; remaining gap is config-name specificity (metadata cache knobs, S3 filesystem config deltas)
-- Q2 4.625 STRONG PASS — foundational Iceberg hidden partitioning, mature topic, clean delivery
-- Iter374 std-dev: 0.1875 — convergent iteration, both answers in the same band, contrast with iter373 0.5625 polarization
-- Topic running averages: cost considerations for analytical workloads at SaaS scale: (4.094 × 12 + 4.25) / 13 = (49.128 + 4.25) / 13 = 53.378 / 13 = **4.106 across 13 questions** — recovers +0.012 from iter373's slip, cloud-vs-on-prem sub-angle now demonstrated as durable on re-probe; Iceberg partition design for SaaS: (4.570 × 18 + 4.625) / 19 = (82.260 + 4.625) / 19 = 86.885 / 19 = **4.573 across 19 questions** — holds at top-tier band
+### Scoring
 
-### Iter374 teacher action landing
-- **Action #1 (cost stack decomposition + Athena labeling) LANDED** — Q1 correctly separates Athena ($5/TB managed) from Trino-reading-S3 (just S3 costs); this was the iter373 failure mode and it is FIXED
-- **Action #2 (inline glosses) PARTIAL** — egress + Direct Connect explained inline, metadata cache mentioned but property names not surfaced
-- **Action #3 (metadata caching knobs by name) PARTIAL** — concept present, property names (`iceberg.metadata-cache-enabled`, `hive.metastore-cache-ttl`) NOT surfaced
-- **Action #4 (S3 filesystem config deltas) NOT TESTED** — question phrasing did not require it; carry forward to next probe of this sub-angle
-- **Action #6 (federation glossary CBO/BROADCAST/PARTITIONED) NOT TESTED** — federation not probed this iter, carry forward
-- **Action #7 (HyperLogLog gloss) NOT TESTED** — HLL not probed this iter, carry forward
+| Dimension | Score | Notes |
+|---|---|---|
+| Technical accuracy | 4.5 | File count math correct (2,016 ~ 2,000); 10-50ms per-file metadata reasonable; 256MB target valid (default is 512MB but 256MB is sensible for 5-min cadence); rewrite_data_files signature correct; 4-step maintenance ordering matches official guidance after compact step |
+| Beginner clarity | 4.0 | Concrete numbers help; "manifest explosion", "binpack", "snapshot" used without inline gloss; "metadata overhead" not unpacked |
+| Practical applicability | 4.75 | Concrete numbers (2,000 files, 20-100s overhead, 30s+ query planning); exact Spark procedure call with parameters; Trino alternative (`ALTER TABLE EXECUTE optimize`); 4-step maintenance sequence — engineer knows exactly what command to run next |
+| Completeness | 4.5 | Covers symptoms, math, fix, ordering, alternative; could add (a) write-side prevention via `write.target-file-size-bytes` table property; (b) explicit cadence guidance (hourly vs. daily compaction); (c) Trino `file_size_threshold` parameter |
+| **Average** | **4.4375** | **PASS** |
 
-### Iter375 judge probe targets
-1. **Trino S3 filesystem config deltas** — fresh phrasing: "How do I point Trino at our MinIO vs AWS S3 — what properties change in the catalog file?" — tests iter374 action #4 which did not land in iter374 Q1
-2. **Trino metadata caching knobs by name** — fresh phrasing: "Our Iceberg queries do tons of small reads against MinIO — what's the specific Trino config property to enable metadata caching?" — tests iter374 action #3 surfacing property names
-3. **Carry-forward federation glossary** (CBO/BROADCAST/PARTITIONED) — open since iter360, not probed iter371-iter374
-4. **Carry-forward HyperLogLog gloss** — open since iter372, not probed iter373-iter374
-5. **Iceberg partition evolution mechanics** — follow-up to iter374 Q2: "We started with `day(occurred_at)` and want to switch to `month(occurred_at)` — what happens to existing data files and old queries?" — tests partition-spec-per-snapshot mechanism understanding
+### Judge WebSearch verification
 
-### Sources verified
-- [AWS S3 Pricing](https://aws.amazon.com/s3/pricing/) — egress $0.09/GB first 10TB, tiered after
-- [Vantage: S3 bill + Athena + Trino + Iceberg](https://www.vantage.sh/blog/s3-bill-increase-athena-trino-hive-fix-iceberg-caching) — Athena $5/TB scanned vs self-hosted Trino just S3 charges
-- [Amazon Athena Pricing](https://aws.amazon.com/athena/pricing/) — $5/TB scanned confirmed
-- [Apache Iceberg Partitioning](https://iceberg.apache.org/docs/latest/partitioning/) — hidden partitioning canonical term + transforms + partition evolution
-- [Tabular: Using Hidden Partitioning](https://www.tabular.io/apache-iceberg-cookbook/data-engineering-hidden-partitioning/) — hidden partitioning practical cookbook
+1. **Small files problem accurately described** — CONFIRMED per [Compaction in Apache Iceberg (Dremio blog)](https://www.dremio.com/blog/compaction-in-apache-iceberg-fine-tuning-your-iceberg-tables-data-files/) and [Spark Iceberg and problem of Tiny files (Medium)](https://medium.com/@deepa.account/spark-iceberg-and-problem-of-tiny-files-9d5d369b77cb): small files inflate metadata overhead and runtime file open cost. Responder's 10-50ms per-file metadata estimate is in the documented range for object-store metadata latency. 2,016 file count for 5-min × 7-day cadence is arithmetically correct.
+2. **`rewrite_data_files` parameters CONFIRMED** — per [Spark Procedures — Apache Iceberg latest docs](https://iceberg.apache.org/docs/latest/spark-procedures/):
+   - `target-file-size-bytes` — exists, default 536870912 (512MB). Responder's 268435456 (256MB) is a valid override; sensible for 5-min cadence where 512MB targets are too aggressive.
+   - `min-input-files` — exists, controls minimum file group size for rewrite.
+   - Default strategy `binpack` correctly described.
+3. **4-step maintenance sequence** — CONFIRMED per [The Iceberg Maintenance Runbook (IOMETE)](https://iomete.com/resources/blog/iceberg-maintenance-runbook) and [Maintenance — Apache Iceberg latest docs](https://iceberg.apache.org/docs/latest/maintenance/) and [GH issue #11804](https://github.com/apache/iceberg/issues/11804). The canonical safe order is: **expire_snapshots → remove_orphan_files → rewrite_manifests**. Compaction (`rewrite_data_files`) is a separate operation that typically goes FIRST because it creates new snapshots that the subsequent expire step then cleans up. Responder's compact → expire → orphan → manifests order is the correct full sequence. Running tasks out of this order risks data loss, broken time travel, or lingering orphan files.
+4. **Trino `ALTER TABLE EXECUTE optimize` CONFIRMED** — per [Iceberg connector — Trino 481 Documentation](https://trino.io/docs/current/connector/iceberg.html): `ALTER TABLE test_table EXECUTE optimize(file_size_threshold => '128MB')`. Default threshold is 100MB. Files smaller than threshold are merged. This is the correct Trino ad-hoc alternative for users without direct Spark access.
+
+### Gaps (deductions from 5)
+
+- **Beginner clarity (-1.0)**: "manifest", "manifest explosion", "snapshot", "binpack" used without inline gloss. A SaaS engineer reading this for the first time needs: "manifest = Iceberg's per-snapshot index file listing which data files belong to the snapshot", "snapshot = an immutable commit of the table at a point in time", "manifest explosion = too many manifest files cause query planning to read megabytes of metadata before any data file is touched".
+- **Technical accuracy (-0.5)**: `target-file-size-bytes` default is 512MB, not the answer's 256MB — should explicitly say "I'm overriding the default 512MB to 256MB because 5-min cadence does not produce enough per-batch data to fill 512MB economically". Without the framing, the engineer might think 256MB is the default.
+- **Practical applicability (-0.25)**: No cadence guidance — should the engineer run this hourly, nightly, or weekly? For 5-min writes producing ~12 files/hour, hourly compaction is the typical recommendation. Missing this leaves the engineer unsure how often to schedule the job.
+- **Completeness (-0.5)**: Missing (a) write-side prevention: `ALTER TABLE ... SET TBLPROPERTIES ('write.target-file-size-bytes'='268435456')` so new writes produce closer-to-target files, reducing how much compaction has to do; (b) Trino `file_size_threshold` parameter mention (`ALTER TABLE EXECUTE optimize(file_size_threshold => '256MB')`); (c) `write.distribution-mode = 'hash'` callout for partitioned tables to consolidate writes by partition key.
+
+---
+
+## Patterns across Q1 + Q2
+
+1. **Property-name density without glosses** — Both answers list correct, verified property names but stack 4-7 of them without inline one-line definitions. This is the dominant beginner-clarity drag in both questions (BC = 4.0 on both). For an engineer with zero OLAP background, the property cascade is the single largest comprehension barrier even when each individual property is correctly named and used. This is the same pattern that has driven federation BC ceilings at 4.0 since iter360.
+2. **Defaults vs. overrides not framed** — Q1's 25% sizing and Q2's 256MB target-file-size are both valid overrides of the documented defaults (30% / 512MB respectively) but the answers present them as the recommendation without framing them as overrides. This invites the engineer to think the answer's number IS the default, which it isn't.
+3. **Both answers technically correct on substance** — All property names verified, all sequences verified, all syntax verified. The 4.4 iter average reflects clarity/framing gaps, not factual errors. This is a stable iteration in a mature topic band.
+4. **Trino-on-k8s production fit landed cleanly on Q1** — `kubectl rolling restart`, Trino UI verification, all match the on-prem k8s production environment described in `prod_info.md`. No cloud-managed-service assumptions snuck in. This is durable evidence that the on-prem/k8s production-fit teacher actions from iter374 and earlier have stabilized.
+
+---
+
+## ITER376 TEACHER ACTIONS (PRIORITY-ORDERED)
+
+### HIGH
+
+1. **Inline-gloss the Trino memory property cascade in resources** — At first mention of each property name, add a one-line gloss: `query.max-memory` = total memory budget summed across all worker nodes for a single query; `query.max-memory-per-node` = max user memory a single query can use on ONE worker; `query_max_memory` = session-level override of the cluster `query.max-memory`. Also gloss "JVM heap" = the Java memory pool allocated to each Trino worker JVM at process startup; "rolling restart" = restart workers one at a time so the cluster stays serving queries; "spill" = streaming hash-table or sort state to local SSD when worker memory pressure exceeds the per-node budget. Tests directly against Q1 BC = 4.0 deduction.
+
+2. **Inline-gloss the Iceberg metadata vocabulary in resources/maintenance section** — At first mention: "snapshot" = immutable commit of the table at a point in time; "manifest" = per-snapshot index file listing which data files belong to the snapshot, plus column-level min/max stats; "manifest list" = top-level pointer to the manifests of a single snapshot; "binpack" = the default rewrite strategy that combines small files into target-sized files without sort/zorder. Tests directly against Q2 BC = 4.0 deduction.
+
+### MEDIUM
+
+3. **Frame defaults vs. overrides explicitly** — In Trino memory section: "The default per-node sizing of 30% of JVM heap is the community consensus; 25% is a safer conservative starting point if you have a mix of analytics and embedded reporting workloads sharing the cluster." In Iceberg compaction section: "`target-file-size-bytes` defaults to 512MB (536870912). For 5-min batch cadences, override to 256MB (268435456) since per-batch volume rarely fills 512MB economically." Tests against Q1 TA -0.5 and Q2 TA -0.5.
+
+4. **Add `memory.heap-headroom-per-node` constraint section** — Explicit callout: "The sum of `query.max-memory-per-node` + `memory.heap-headroom-per-node` MUST be less than max JVM heap. `memory.heap-headroom-per-node` defaults to 30% of heap, never below 2GB. If you raise per-node sizing without checking heap-headroom, the worker crashes on startup." Tests against Q1 PA -0.5.
+
+5. **Add Iceberg compaction cadence guidance** — Concrete table: "5-min batch writes (12 files/hour): hourly compaction; hourly batch writes: 6-hourly compaction; daily batch writes: weekly compaction. Tune `min-input-files` higher (e.g., 10) for low-cadence to avoid rewriting near-target-size files." Tests against Q2 PA -0.25.
+
+### LOW
+
+6. **Carry-forward federation glossary expansion in resources/22** — CBO/BROADCAST/PARTITIONED/build-side/probe-side/left-deep-join-tree/`join_distribution_type`/`join_reordering_strategy`/dynamic-filtering — open since iter360. Not re-probed in iter375 but will re-emerge on next federation probe.
+
+7. **Carry-forward HyperLogLog inline gloss** — `approx_distinct()` / `cardinality(approx_set())` open since iter372. Relevant to Q1 OOM-on-aggregation context: high-cardinality COUNT(DISTINCT) is a classic OOM driver and HyperLogLog approximation is the standard fix. Could be tied into the Q1 memory-OOM teaching path.
+
+8. **Carry-forward iter374 actions** — (a) Trino S3 filesystem config deltas section (AWS-vs-MinIO side-by-side: `fs.native-s3.enabled` / `s3.endpoint` / `s3.path-style-access`); (b) Metadata caching property names (`iceberg.metadata-cache-enabled` / `iceberg.metadata-cache-max-size` / `iceberg.metadata-cache-ttl` / `hive.metastore-cache-ttl`); (c) MinIO TCO decomposition.
+
+---
+
+## ITER376 JUDGE PROBE TARGETS
+
+1. **Trino memory glossary follow-up at fresh phrasing** — "What's the difference between `query.max-memory` and `query.max-memory-per-node` — and which one do I tune when a single query OOMs vs. when multiple concurrent queries OOM?" — tests iter376 action #1 inline glossaries and the cluster-vs-per-node distinction.
+
+2. **Iceberg compaction cadence follow-up** — "How often should I run `rewrite_data_files` on a table that gets 5-min batch writes? Hourly? Nightly? Weekly?" — tests iter376 action #5.
+
+3. **Write-side compaction prevention** — "Can I tune Spark/Iceberg so it writes larger files in the first place, instead of always playing catch-up with compaction?" — tests whether write-side table properties (`write.target-file-size-bytes`, `write.distribution-mode`) land as resources, not just compaction-side fixes.
+
+4. **Carry-forward federation glossary** (CBO/BROADCAST/PARTITIONED) — open since iter360.
+
+5. **Carry-forward iter374 action #3 metadata caching property names by name** — "Our Iceberg queries do tons of small reads against MinIO — what's the specific Trino config property to enable metadata caching?" — still not probed since iter374.
+
+6. **Carry-forward iter374 action #4 Trino S3 filesystem config deltas** — "How do I point Trino at our MinIO vs AWS S3 — what properties change in the catalog file?" — still not probed since iter374.
+
+---
+
+## Topic running averages after iter375
+
+- **Iceberg table maintenance** (Q2): (4.531 x 45 + 4.4375) / 46 = 208.332 / 46 = **4.533 across 46 questions** — PASSED top band hold.
+- **Query performance regression diagnosis** (Q1): (5.0 x 2 + 4.375) / 3 = 14.375 / 3 = **4.792 across 3 questions** — PASSED but only 3 questions; iter376 should probe a 4th angle to durabilize.
+
+## Sources verified via WebSearch
+
+- [Resource management properties — Trino 480 Documentation](https://trino.io/docs/current/admin/properties-resource-management.html) — `query.max-memory-per-node` and `query.max-memory` confirmed; per-node + heap-headroom constraint confirmed.
+- [Memory management properties — Trino 370 Documentation](https://trino.io/docs/current/admin/properties-memory-management.html) — session-form `query_max_memory` confirmed.
+- [Right-Sizing Trino: A Data-Driven Guide to Cluster Memory Tuning (Vivek Jain, Medium)](https://medium.com/@vjain143/right-sizing-trino-a-data-driven-guide-to-cluster-memory-tuning-a31b6a80c2f6) — community 30%-of-heap recommendation for per-node sizing.
+- [Trino Memory Config Calculator (Vivek Jain)](https://vjain143.github.io/Trino_Memory_Sizing_Guidelines.html) — heap headroom = 30% of heap, never below 2GB.
+- [Spilling properties — Trino 479 Documentation](https://trino.io/docs/current/admin/properties-spilling.html) — `spill-enabled`, `spill_enabled`, `max-spill-per-node`, `query-max-spill-per-node` all confirmed.
+- [Spill to disk — Trino 481 Documentation](https://trino.io/docs/current/admin/spill.html) — `spiller-spill-path` confirmed; do-not-spill-to-system-drives guidance.
+- [Spark Procedures — Apache Iceberg latest docs](https://iceberg.apache.org/docs/latest/spark-procedures/) — `rewrite_data_files`, `target-file-size-bytes` default 536870912 (512MB), `min-input-files`, binpack strategy all confirmed.
+- [The Iceberg Maintenance Runbook (IOMETE)](https://iomete.com/resources/blog/iceberg-maintenance-runbook) — maintenance ordering: expire_snapshots → remove_orphan_files → rewrite_manifests confirmed.
+- [Maintenance — Apache Iceberg latest docs](https://iceberg.apache.org/docs/latest/maintenance/) — official maintenance operations and ordering guidance.
+- [GH apache/iceberg #11804 — correct sequence for running maintenance steps](https://github.com/apache/iceberg/issues/11804) — community consensus on safe ordering.
+- [Iceberg connector — Trino 481 Documentation](https://trino.io/docs/current/connector/iceberg.html) — `ALTER TABLE EXECUTE optimize(file_size_threshold => '128MB')` confirmed; default 100MB.
+- [Compaction in Apache Iceberg (Dremio blog)](https://www.dremio.com/blog/compaction-in-apache-iceberg-fine-tuning-your-iceberg-tables-data-files/) — small files problem and metadata overhead confirmed.
