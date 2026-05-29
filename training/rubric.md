@@ -40,8 +40,8 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.422 | 8 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.609 | 4 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.4992 | 140 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.4753 | 55 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.4951 | 141 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.4779 | 56 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 4.751 | 5 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4925 | 265 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.7392 | 7 |
@@ -50,6 +50,46 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 395 — 2026-05-30 (EXTENDED PHASE) — Q1 Hive Parquet → Iceberg 500GB migrate() RE-PROBE (iter394 Q2 inversion fix verification); Q2 847 equality delete files read amplification + Iceberg 1.5.2 bug #12838
+
+**Q1** — Hive Parquet → Iceberg 500GB migration: `system.migrate()` is metadata-only and completes in 1-5 minutes; `system.snapshot()` for testing first (creates non-destructive copy); post-migration `rewrite_manifests` recommended; zero data rewrite.
+
+Responder gave: core inversion CORRECT (iter394 Q2 catastrophic "must rewrite" claim is now fixed — responder correctly identifies metadata-only path). Time estimate plausible. snapshot()-for-testing call-out correct. Post-migration rewrite_manifests recommendation correct.
+
+ERROR: "Spark-only" is INCORRECT — the Trino Iceberg connector also exposes `CALL <catalog>.system.migrate(schema_name => 'x', table_name => 'y')` (verified against Trino 481 Iceberg connector docs). On this stack (Spark + Trino + HMS), the engineer could run migrate from either engine. This matters: the engineer might already have a Trino client on hand and not need to spin up a Spark job.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 3.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 4.0 |
+| Completeness | 4.0 |
+| **Average** | **4.0** |
+
+**Iter 395 Q1: 4.0 — PASS (iter394 critical inversion VERIFIED FIXED on core claim; minor Spark-only error)**
+
+**Q2** — 847 equality delete files read amplification: 2-5x slowdown; way past the documented >50 file critical threshold; Iceberg 1.5.2 has bug #12838 (RewriteDataFiles with merging equality deletes — partition-level sequence-number cleanup bug leaves orphaned delete files); partial mitigation via `rewrite-all=true` weekly; real fix = upgrade Iceberg ≥ 1.8; diagnostic = query `$files` metadata table filtering `content=2` (equality delete content type).
+
+Responder gave: numbers align with published guidance (50-file threshold heuristic); #12838 reference accurate per Apache Iceberg GitHub issue (partition-aware cleanup logic missing in 1.5.x including 1.5.2); rewrite-all weekly is a reasonable partial mitigation given the bug; upgrade-to-1.8 framing matches community direction; content=2 diagnostic correct for Iceberg metadata schema. Production-stack-fit: Iceberg 1.5.2 is exactly what prod_info.md describes, so the upgrade caveat lands precisely.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.625** |
+
+**Iter 395 Q2: 4.625 — STRONG PASS**
+
+**Iter 395 overall: (4.0 + 4.625) / 2 = 4.3125 — PASS**
+
+Topic score updates:
+- Postgres-to-Iceberg ingestion (Hive→Iceberg migration in scope): 4.4992/140 -> 4.4951/141 (Q1 4.0 nudges average down slightly but topic remains PASSED; critical inversion from iter394 is verified fixed on core claim)
+- Iceberg table maintenance (compaction + delete file management): 4.4753/55 -> 4.4779/56 (Q2 4.625 lifts average)
+
+Critical inversion follow-up: iter394 Q2 catastrophic "must rewrite, no metadata-only path" was FIXED in iter395 Q1 on the core claim. Teacher added Hive→Iceberg migration resource between iters per state.json plan. Residual gap: resource should explicitly note `system.migrate` is callable from BOTH Spark AND Trino (Trino Iceberg connector exposes it as `CALL <catalog>.system.migrate(...)`), not Spark-only.
 
 ### Iter 394 — 2026-05-30 (EXTENDED PHASE) — Q1 Trino prepared statements (placeholders/injection/no plan caching/perf-minimal/client-lib); Q2 Hive Parquet → Iceberg without rewrite (CRITICAL INVERSION)
 
