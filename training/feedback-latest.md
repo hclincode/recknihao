@@ -1,72 +1,43 @@
-# Judge Feedback — Iter 398 (EXTENDED PHASE)
+# Iter 399 Feedback (EXTENDED PHASE — end-of-iteration only)
 
-**Overall: 4.09375 — PASS**
+## Result: 4.0625 — PASS
 
-| Question | Avg | Verdict |
-|---|---|---|
-| Q1 — Iceberg day vs week vs month partition granularity | 3.875 | PASS |
-| Q2 — LAG + day-over-day + 7-day rolling avg in one Trino query | 4.3125 | PASS |
+- Q1 (concurrent INSERT + MERGE Iceberg): 4.0 PASS
+- Q2 (SET SESSION vs catalog .properties): 4.125 PASS
 
 ---
 
-## Q1 — Iceberg partition granularity (day vs week vs month) — 3.875 PASS
+## Pattern across both answers
 
-**Answer summary**: Stay with day(); coarser partitions don't help 90-day queries (pruning evaluates same files); coarser HURTS by reducing per-tenant granularity; real culprit = small-files problem from streaming writes; fix = nightly compaction + tenant_id to partition spec.
+The responder continues the consistent ~4.0–4.4 PASS band: correct core mechanism, production-stack-fit advice (on-prem Spark+Iceberg 1.5.2+HMS for Q1, Trino 467+OPA for Q2), one concrete actionable knob in each answer (`commit.retry.num-retries=4→8-12` for Q1, hyphen-vs-underscore gotcha for Q2). Both answers correctly identified the most important "what to do next" lever for an application engineer.
 
-| Dimension | Score | Rationale |
-|---|---|---|
-| Technical accuracy | 4.0 | Stay-with-day conclusion correct; small-files-from-streaming diagnosis is the right root-cause framing. BUT "pruning evaluates same files" is loose reasoning — coarser partitions DO reduce partition directory count (3 months vs 90 days), the real problem is larger per-partition files with broader min/max stats weakening file-level pruning. |
-| Beginner clarity | 3.5 | "Per-tenant granularity," "small-files problem," "partition spec" — jargon present, structure digestible but not unpacked. |
-| Practical applicability | 4.5 | Clear actions: nightly compaction (`rewrite_data_files`) + add tenant_id to partition spec. Production-fit for on-prem Trino 467 + Iceberg 1.5.2 + Spark streaming. |
-| Completeness | 3.5 | Missing: partition spec evolution caveat (existing partitions stay on old spec until `rewrite_data_files` migrates them — `ALTER TABLE ... SET PARTITION SPEC` only affects new writes); `bucket(tenant_id, N)` consideration for very-high-tenant-count; `write.target-file-size-bytes` property for streaming write file-size control; no Trino/Spark `ALTER TABLE ADD PARTITION FIELD` syntax shown. |
+The recurring soft spot is **completeness on adjacent operational knobs** — Q1 named `commit.retry.num-retries` but didn't surface its three sibling backoff properties (`min-wait-ms`, `max-wait-ms`, `total-timeout-ms`) or the deeper `write.isolation-level` lever which is the real tuning knob for MERGE-vs-INSERT conflicts. Q2 named the hyphen/underscore gotcha but didn't surface the `catalog.property` prefix requirement that engineers will hit first when typing `SET SESSION` against a catalog property. Both gaps cost ~0.5 on Completeness without affecting Accuracy or Practical Applicability.
 
----
+Beginner clarity dipped to 3.5 on Q1 because "optimistic concurrency," "atomically," and "CommitFailedException" were used without definition. A one-line plain-English gloss ("two writers race; whoever commits last sees the other already won and retries") would have lifted clarity to 4.5.
 
-## Q2 — LAG + day-over-day + 7-day rolling avg in one Trino query — 4.3125 PASS
+## Teacher actions next (iter 400)
 
-**Answer summary**: `LAG(revenue, 1) OVER (ORDER BY day)`; `revenue - LAG(...)` for change; `AVG(revenue) OVER (ORDER BY day RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW)` for 7-day rolling; add `PARTITION BY tenant_id`; RANGE vs ROWS distinction explained.
+1. **MEDIUM — Iceberg concurrent write resource expansion**: add the full retry-backoff property family (`commit.retry.min-wait-ms=100`, `commit.retry.max-wait-ms=60000`, `commit.retry.total-timeout-ms=1800000`) with an example timeline showing how 4 retries × exponential backoff fits inside the 30-minute total timeout. Add `write.isolation-level=serializable` vs `snapshot` explanation — this is the right knob for MERGE-vs-INSERT conflict severity in Iceberg 1.5.2, and the responder missed it.
 
-| Dimension | Score | Rationale |
-|---|---|---|
-| Technical accuracy | 4.75 | LAG syntax canonical; AVG OVER RANGE INTERVAL '6' DAY PRECEDING is valid Trino 467 (RANGE frames with INTERVAL offsets work when ORDER BY column is date/timestamp); PARTITION BY tenant_id correct for multi-tenant. All claims verifiable per Trino window functions doc. |
-| Beginner clarity | 4.0 | RANGE vs ROWS distinction explicitly explained — strong clarity move addressing a frequent beginner footgun. Still uses "OVER," "PARTITION BY," "frame" without inline gloss. |
-| Practical applicability | 4.5 | Engineer can immediately write the query; concrete syntax provided. |
-| Completeness | 4.0 | Missing: full combined SELECT example showing all three computations in ONE query (user explicitly asked for "one query"); gap-day callout — RANGE INTERVAL = true calendar window even with missing days vs ROWS BETWEEN 6 PRECEDING = 7 consecutive rows ignoring calendar gaps (critical for SaaS dashboards with sparse-day tenants); LAG default NULL handling note (`LAG(revenue, 1, 0)` to coalesce first-row NULL); no note that window functions execute after scan/filter so partition pruning on `day` still applies. |
+2. **MEDIUM — MERGE conflict shape callout**: add a CoW-MERGE-vs-INSERT conflict-detection note: CoW MERGE rewrites files that an overlapping INSERT may also touch, producing a file-level snapshot conflict (not just a metadata-pointer race). This nuance matters for engineers asking specifically about INSERT + MERGE rather than INSERT + INSERT.
 
----
+3. **LOW — Trino session property catalog-prefix callout**: add explicit one-liner that catalog session properties require `SET SESSION <catalog>.<property_name>=<value>` prefix syntax (e.g. `SET SESSION iceberg.target_split_size='128MB'`), not bare `SET SESSION target_split_size=...`. Add `SHOW SESSION` mention for discovering available session-tunable properties.
 
-## Teacher actions for iter 399
+4. **LOW — Beginner-clarity layer for concurrency jargon**: add a one-line plain-English gloss for "optimistic concurrency control" (e.g. "no lock taken upfront; whoever commits first wins, others retry"). The responder uses the term frequently and a definition layer would lift beginner-clarity from 3.5 to 4.5 without extra length.
 
-1. **MEDIUM** — Iceberg partition granularity resource: tighten the "coarser doesn't help" reasoning. Replace "pruning evaluates same files" with the precise mechanism: "coarser partitions = fewer partition directories but larger per-partition file sets with broader min/max stats — file-level pruning becomes less selective for narrower-window queries." Add partition spec evolution caveat: `ALTER TABLE ... SET PARTITION SPEC` only affects new writes; existing data needs `rewrite_data_files` to repartition; old snapshots still readable via Iceberg's per-snapshot spec tracking.
+## Judge probe targets next (iter 400)
 
-2. **LOW** — Window function resource: add a full combined SELECT example showing LAG day-over-day + AVG OVER RANGE 7-day stacked in one query:
-   ```sql
-   SELECT day, tenant_id, revenue,
-          revenue - LAG(revenue, 1, 0) OVER (PARTITION BY tenant_id ORDER BY day) AS dod_change,
-          AVG(revenue) OVER (PARTITION BY tenant_id ORDER BY day
-                             RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW) AS rolling_7d
-   FROM daily_revenue
-   WHERE day >= DATE '2026-03-01'
-   ```
+1. **`write.isolation-level` 2nd angle** — ask "MERGE keeps failing under concurrent INSERTs after raising retries to 12; what's the next knob?" to test whether responder reaches for isolation-level vs just more retries.
+2. **`SHOW SESSION` / catalog-prefix syntax 2nd angle** — ask "how do I find which Iceberg properties are session-tunable" to probe `SHOW SESSION` knowledge and the catalog-prefix rule.
+3. **Carry-forward backlog** (unchanged from iter 398): HMS→Nessie no-downtime, SPILL_FAILED 60GB at 200GB cap, MERGE INTO rollback, OPA-override timeout, schema registry compat, EXPLAIN TYPE IO + VALIDATE, result caching, Iceberg branches fast_forward, JWT+OPA concurrency, partition spec migration, Iceberg tagging 3rd angle, fs.cache 3rd angle JMX, `bucket(tenant_id)` very-high-cardinality 2nd angle, PERCENT_RANK/NTILE 3rd angle, RANGE INTERVAL gap-day semantics, partition spec evolution + `rewrite_data_files` migration.
 
-3. **LOW** — RANGE vs ROWS gap-day callout: explicitly document that `RANGE BETWEEN INTERVAL '6' DAY PRECEDING` gives a 7-calendar-day window (correct semantics even if intermediate days are missing) while `ROWS BETWEEN 6 PRECEDING` gives 7 consecutive rows regardless of calendar gaps — the former is what SaaS dashboards usually want.
+## Topic score updates
 
-4. **LOW** — `bucket(tenant_id, N)` 2nd-angle resource: when tenant count > 10K, prefer bucket() over identity partition on tenant_id to avoid partition explosion.
+- Iceberg table maintenance: 4.4779/56 → 4.4744/57 (Q1 4.0, PASSED)
+- SQL query best practices for OLAP: 4.6373/20 → 4.6121/21 (Q2 4.125, PASSED)
 
-## Judge probe targets for iter 399
+## Verification notes
 
-1. `bucket(tenant_id, N)` partition design 2nd angle for very high cardinality (>10K tenants) — tests partition spec migration + write.distribution-mode=hash.
-2. PERCENT_RANK / NTILE window function 3rd angle — tests ranking window function durability.
-3. Carry-forward backlog: HMS→Nessie no-downtime migration, SPILL_FAILED 60GB at 200GB cap, MERGE INTO rollback, OPA-override timeout, schema registry compat, EXPLAIN TYPE IO + VALIDATE, result caching patterns, Iceberg branches fast_forward, JWT+OPA concurrency under load, partition spec migration, Iceberg tagging 3rd angle, fs.cache 3rd angle JMX.
-
-## Trajectory iter 370-398
-
-4.625 → 4.375 → 4.47 → 3.98 FAIL → 4.5625 → 4.75 → 4.1875 → 4.4375 → 4.40625 → 4.5625 → 3.25 FAIL → 4.71875 → 4.8125 → 4.78125 → 4.375 → 4.094 → 4.4375 → 4.4375 → 4.4375 → 4.25 → 3.125 FAIL → 4.75 PASS → 4.125 PASS → 3.9375 FAIL → 4.625 PASS → 4.75 PASS → 3.125 FAIL → 4.3125 PASS → 4.375 PASS → 4.34375 PASS → **4.09375 PASS**
-
-Consistent ~4.0–4.4 PASS band continues. Q1 dipped to 3.875 due to loose pruning reasoning but still passes; Q2 strong on Trino window function correctness. No critical factual errors; both answers production-stack-fit for on-prem Trino 467 + Iceberg 1.5.2.
-
-## WebSearch verification
-
-- RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW — CONFIRMED valid Trino syntax per [Trino window functions documentation](https://trino.io/docs/current/functions/window.html): RANGE frames with INTERVAL offsets are supported when the ORDER BY column is date/timestamp.
-- Iceberg partition transforms (day/week/month/bucket) — CONFIRMED per [Iceberg partition spec](https://iceberg.apache.org/spec/#partitioning).
-- Iceberg streaming write small-files problem — CONFIRMED real production issue per [Iceberg structured streaming guide](https://iceberg.apache.org/docs/latest/spark-structured-streaming/) — compaction via `rewrite_data_files` is the canonical fix.
+- `commit.retry.num-retries=4` default CONFIRMED via WebSearch (Cloudera + Iceberg KB).
+- Trino SET SESSION hyphen→underscore CONFIRMED via WebSearch (Trino official docs + Iceberg connector docs).
+- Both answers fit on-prem Trino 467 + Iceberg 1.5.2 + HMS + OPA stack per `prod_info.md`.

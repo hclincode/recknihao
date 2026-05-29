@@ -41,15 +41,60 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.4101 | 9 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.609 | 4 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.4938 | 142 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.4779 | 56 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.4744 | 57 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 4.6885 | 6 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4925 | 265 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.6948 | 8 |
-| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.6373 | 20 |
+| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.6121 | 21 |
 
 ---
 
 ## Score history
+
+### Iter 399 — 2026-05-30 (EXTENDED PHASE) — Q1 Concurrent INSERT + MERGE to Iceberg (optimistic concurrency + commit.retry.num-retries); Q2 SET SESSION vs catalog .properties (hyphens-vs-underscores gotcha + OPA tenant-override guard)
+
+**Q1** — Concurrent INSERT + MERGE to Iceberg with overlapping data: no corruption — Iceberg optimistic concurrency control; both writers produce Parquet files independently, both attempt atomic metadata commit, one wins, loser receives `CommitFailedException` and auto-retries; `commit.retry.num-retries` default=4; practical advice: stagger jobs (ingestion 2AM, compaction 4AM); raise retries to 8-12 for frequent collisions.
+
+Responder gave: Optimistic concurrency mechanism correct per [Iceberg knowledge base](https://iceberglakehouse.com/iceberg/iceberg-concurrent-writes/) — writers write data files then attempt atomic metadata-pointer swap, conflict detected at commit; `commit.retry.num-retries=4` default verified per Iceberg table properties doc; stagger-jobs (2AM/4AM) is canonical production-fit guidance and matches the on-prem Spark+Iceberg+HMS stack; retry-bump to 8-12 aligns with Cloudera best-practices recommendation of 10 for high-concurrency tables. Gaps: didn't address MERGE-specific conflict shape (CoW MERGE rewrites files INSERT may also touch → file-level snapshot conflict, not just metadata-pointer race); missed companion properties (`commit.retry.min-wait-ms=100`, `commit.retry.max-wait-ms=60000`, `commit.retry.total-timeout-ms=1800000` exponential backoff window); missed isolation mode discussion (`write.isolation-level=serializable` vs `snapshot`) which is the right knob for MERGE-vs-INSERT conflict tuning; no `write.delete.mode` for MoR vs CoW MERGE in Iceberg 1.5.2; no Trino-side concurrent-MERGE consideration (Trino 467 Iceberg connector + MERGE has known limitations with concurrent writers). Jargon used without defining: "optimistic concurrency," "atomically," "CommitFailedException."
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 3.5 |
+| Practical applicability | 4.5 |
+| Completeness | 3.5 |
+| **Average** | **4.0** |
+
+**Iter 399 Q1: 4.0 — PASS**
+
+**Q2** — Trino SET SESSION vs catalog .properties file: .properties = cluster-wide defaults, requires Trino restart, hyphen-syntax (e.g. `iceberg.target-split-size`); SET SESSION = current session only, immediate, underscore-syntax (e.g. `SET SESSION iceberg.target_split_size=...`); Iceberg connector has NO session form for some config-only properties (catalog URI, catalog type); OPA in production stack used to prevent tenant override of dangerous session properties; critical hyphens-vs-underscores gotcha.
+
+Responder gave: Cluster-wide vs per-session distinction correct per [Trino SET SESSION docs](https://trino.io/docs/current/sql/set-session.html); restart-required for catalog properties accurate (catalog config files reload requires coordinator restart on Trino 467); hyphen-vs-underscore conversion explicitly called out as "critical" — this is the engineer-relevant gotcha verified per Trino docs ("`iceberg.incremental-refresh-enabled` config maps to `incremental_refresh_enabled` session"); "Iceberg has NO session form for some properties" accurate but vague — should clarify that metastore URI / catalog type are config-only by design, while runtime tuning props (split size, compression, extended stats) all expose session forms; OPA-prevents-tenant-override is the right production-stack callout (matches prod_info.md: OPA enforces Trino auth/authz). Gaps: missed `catalog.property_name=value` prefix requirement for catalog session properties (`SET SESSION iceberg.target_split_size=...` not bare `SET SESSION target_split_size=...`); no `SHOW SESSION` mention for discovering available session-tunable properties; no system vs catalog session property distinction (system props have no catalog prefix); no side-by-side example showing both forms (`iceberg.properties: iceberg.target-split-size=128MB` vs `SET SESSION iceberg.target_split_size='128MB'`); no scope guidance on which properties are safe for tenant self-service vs which must stay coordinator-only.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 4.5 |
+| Completeness | 3.5 |
+| **Average** | **4.125** |
+
+**Iter 399 Q2: 4.125 — PASS**
+
+**Iter 399 overall: (4.0 + 4.125) / 2 = 4.0625 — PASS**
+
+**Topic score updates:**
+- Iceberg table maintenance (Q1, concurrent write conflict + commit retries fits maintenance/operations tier): 4.4779/56 → 4.4744/57 (Q1 4.0 nudges down minimally, comfortably PASSED)
+- SQL query best practices for OLAP (Q2, SET SESSION property tuning fits OLAP query-tuning tier): 4.6373/20 → 4.6121/21 (Q2 4.125 nudges down minimally, comfortably PASSED)
+
+**WebSearch verification:**
+- `commit.retry.num-retries` default=4 — CONFIRMED per [Cloudera Iceberg table properties](https://docs-archive.cloudera.com/cdw-runtime/1.5.1/iceberg-how-to/topics/iceberg-table-properties.html) and [Iceberg concurrent write handling](https://iceberglakehouse.com/iceberg/iceberg-concurrent-writes/); recommended bump to 10 for high-concurrency confirmed by Cloudera.
+- Iceberg optimistic concurrency mechanism — CONFIRMED per [Iceberg concurrent writes KB](https://iceberglakehouse.com/iceberg/iceberg-concurrent-writes/): writers commit via atomic metadata-pointer swap, conflict raises `CommitFailedException`, retry with backoff.
+- Trino SET SESSION hyphen→underscore conversion — CONFIRMED per [Trino SET SESSION docs](https://trino.io/docs/current/sql/set-session.html) and [Trino Iceberg connector](https://trino.io/docs/current/connector/iceberg.html): config `iceberg.incremental-refresh-enabled` ↔ session `incremental_refresh_enabled`; catalog session properties require `catalog.property_name` prefix.
+
+**Trajectory iter370-399**: 4.625 → 4.375 → 4.47 → 3.98 FAIL → 4.5625 → 4.75 → 4.1875 → 4.4375 → 4.40625 → 4.5625 → 3.25 FAIL → 4.71875 → 4.8125 → 4.78125 → 4.375 → 4.094 → 4.4375 → 4.4375 → 4.4375 → 4.25 → 3.125 FAIL → 4.75 PASS → 4.125 PASS → 3.9375 FAIL → 4.625 PASS → 4.75 PASS → 3.125 FAIL → 4.3125 PASS → 4.375 PASS → 4.34375 PASS → 4.09375 PASS → 4.0625 PASS. Consistent ~4.0–4.4 PASS band continues.
+
+---
 
 ### Iter 398 — 2026-05-30 (EXTENDED PHASE) — Q1 Iceberg day vs week vs month partition granularity (small-files real culprit + compaction + tenant_id); Q2 LAG + day-over-day + 7-day rolling avg one Trino query (RANGE vs ROWS distinction)
 
