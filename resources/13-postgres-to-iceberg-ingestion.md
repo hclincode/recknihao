@@ -16,6 +16,79 @@
 
 ---
 
+## QUICK REFERENCE: Iceberg Incremental Reads — new rows since last run (start-snapshot-id)
+
+> **Finding this section:** If you searched for "incremental read", "start-snapshot-id", "snapshot-based read", "new rows since last run", or "only process rows added since last job" — this is the section you want.
+
+**The short answer:** Iceberg assigns every write a permanent snapshot ID. To get only the rows added since the last time your job ran, pass the previous snapshot ID as `start-snapshot-id` and the current one as `end-snapshot-id`. This is called a **snapshot-based incremental read** and is more precise than a timestamp watermark — no scanning required, Iceberg reads only the new files.
+
+### Minimal working example
+
+```python
+# Read ONLY the rows added to iceberg.analytics.events between two snapshots.
+# This is the correct DataFrameReader syntax (Iceberg 1.5.2 + Spark).
+new_rows = (
+    spark.read
+    .option("start-snapshot-id", last_snapshot_id)   # exclusive: rows AFTER this snapshot
+    .option("end-snapshot-id",   current_snapshot_id) # inclusive: rows UP TO AND INCLUDING this
+    .format("iceberg")
+    .load("iceberg.analytics.events")
+)
+```
+
+- `start-snapshot-id` is **exclusive** (rows added by that snapshot are NOT included).
+- `end-snapshot-id` is **inclusive** (rows added by that snapshot ARE included). It is optional; omitting it defaults to the current snapshot.
+- This only returns rows from `APPEND`/`INSERT` operations. Updates and deletes are invisible to this API.
+
+### How to get the current snapshot ID
+
+```python
+row = spark.sql("""
+    SELECT snapshot_id
+    FROM iceberg.analytics.`events$snapshots`
+    ORDER BY committed_at DESC
+    LIMIT 1
+""").collect()[0]
+current_snapshot_id = row["snapshot_id"]
+```
+
+### Full pipeline pattern (store snapshot ID as watermark)
+
+```python
+last_snapshot_id    = read_pipeline_state("events_consumer")   # from MinIO JSON or state table
+current_snapshot_id = get_current_snapshot("iceberg.analytics.events")  # query $snapshots above
+
+if current_snapshot_id == last_snapshot_id:
+    exit(0)  # nothing new since last run
+
+new_rows = (
+    spark.read
+    .option("start-snapshot-id", last_snapshot_id)
+    .option("end-snapshot-id",   current_snapshot_id)
+    .format("iceberg")
+    .load("iceberg.analytics.events")
+)
+process(new_rows)
+write_pipeline_state("events_consumer", current_snapshot_id)
+```
+
+### Critical limitations (read before using)
+
+| Situation | What to use instead |
+|---|---|
+| Table has UPDATEs or DELETEs (CDC, mutable dim tables) | Timestamp watermark on `updated_at` (Pattern B) |
+| Consuming job runs in Trino | Timestamp watermark — Trino has NO `start-snapshot-id` equivalent |
+| `last_snapshot_id` was expired by `expire_snapshots` | Fall back to timestamp scan for that run, then resume snapshot-based |
+| Need sub-minute freshness | Spark Structured Streaming with Iceberg streaming source |
+
+> **Trino note:** `start-snapshot-id` is a Spark-only feature. There is no equivalent in Trino 467. If your reader is Trino, use a timestamp watermark column instead.
+
+> **No SQL syntax:** There is no Spark SQL `SELECT ... STARTING FROM ... ENDING AT ...` syntax. The DataFrame API (`.option("start-snapshot-id", ...)`) is the only supported method for snapshot-range incremental reads.
+
+For the complete section with validation code, edge cases, and the snapshot-expiry fallback pattern, see [Reading new rows from an Iceberg table (incremental reads)](#reading-new-rows-from-an-iceberg-table-incremental-reads) later in this document.
+
+---
+
 ## The three ingestion patterns
 
 ### Pattern A — Full refresh (start here)
@@ -127,6 +200,8 @@ Contrast with `createOrReplace()`: that replaces the **entire table** — every 
 - **Requires:** an `updated_at` (or `created_at`) timestamp on every source row. Add the column to your Postgres tables if missing — it is the foundation of the whole pipeline.
 - **Handling deletes:** hard `DELETE`s in Postgres are *invisible* to incremental loads — the row just stops appearing. Adopt soft deletes: a `deleted_at` column, never `DELETE FROM`.
 - **Watermark storage:** a tiny JSON file in MinIO (`s3a://watermarks/events.json`) is fine. Don't over-engineer.
+
+> **Alternative to timestamp watermarks — snapshot-based incremental reads:** If you have a **downstream Spark job** that reads from an Iceberg table (rather than reading from Postgres), and the Iceberg table is append-only, you can skip the `updated_at` watermark entirely and use Iceberg's `start-snapshot-id` / `end-snapshot-id` DataFrameReader options to read only the new files. This is more precise and avoids full-table scans. See the [QUICK REFERENCE: Iceberg Incremental Reads](#quick-reference-iceberg-incremental-reads--new-rows-since-last-run-start-snapshot-id) section at the top of this document, or the full explanation in [Reading new rows from an Iceberg table (incremental reads)](#reading-new-rows-from-an-iceberg-table-incremental-reads) later.
 
 ### Choosing the watermark column: `updated_at` vs `created_at` vs `xmin`
 
@@ -3408,16 +3483,11 @@ spark.read \
   .load("iceberg.analytics.events")
 ```
 
-Or using the `$changes` system table (Iceberg 1.1+, available in Spark SQL):
+There is no Spark SQL syntax for snapshot-range incremental reads. The DataFrame API (`.option("start-snapshot-id", ...)`) is the only supported method. Iceberg does have a `create_changelog_view` stored procedure for changelog use cases, but it is not a direct SELECT syntax — use the DataFrame API shown above for incremental append reads.
 
-```sql
--- Spark SQL: rows appended between two snapshots
-SELECT * FROM iceberg.analytics.events.changes
-  STARTING FROM 4823511203987654321
-  ENDING AT 9876543210987654321;
-```
+> **SQL syntax note:** Queries like `SELECT * FROM table.changes STARTING FROM ... ENDING AT ...` are **not valid Iceberg SQL**. Incremental reads must go through the DataFrame API. Trino has no equivalent at all — see limitations below.
 
-Both forms return only the rows that were added in `APPEND` operations between the two snapshot IDs. The result is the delta — you process it and store the new `end-snapshot-id` as your watermark for the next run.
+Both DataFrameReader reads return only the rows that were added in `APPEND` operations between the two snapshot IDs. The result is the delta — you process it and store the new `end-snapshot-id` as your watermark for the next run.
 
 ### The standard pipeline pattern
 

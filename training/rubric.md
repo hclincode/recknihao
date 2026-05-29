@@ -41,15 +41,55 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.422 | 8 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.609 | 4 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.5193 | 138 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.4904 | 52 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.4669 | 53 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 4.751 | 5 |
-| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4920 | 264 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4925 | 265 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.7392 | 7 |
 | SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.6423 | 18 |
 
 ---
 
 ## Score history
+
+### Iter 391 — 2026-05-30 (EXTENDED PHASE) — Q1 Iceberg snapshot incremental reads (re-probe after iter390 fix); Q2 Trino 100 concurrent Python connections
+
+**Q1** — Iceberg snapshot incremental reads (re-probe): HONEST PUNT AGAIN. Teacher added `system.table_changes` + Spark `start-snapshot-id`/`end-snapshot-id` content to resources/13 during iter390 fix, but responder STILL did not surface it in this iteration. Resource exists, retrieval failed.
+
+Responder gave: honest "not enough info"; covered watermark + time-travel; could not find `start-snapshot-id` content; recommended official docs.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 3.5 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 3.0 |
+| Completeness | 2.5 |
+| **Average** | **3.25** |
+
+**Iter 391 Q1: 3.25 — BORDERLINE FAIL**
+
+This is the THIRD honest-punt on Iceberg incremental reads, and the SECOND time on a topic the teacher had ALREADY patched. Teacher added the canonical `system.table_changes(schema, table, since_snapshot_id, end_snapshot_id)` + Spark `start-snapshot-id`/`end-snapshot-id` content to resources/13 during the iter390 follow-up. The responder failed to find/surface that content. This is no longer a content gap — it is a RETRIEVAL/INDEXING gap. The new content may be buried, may have non-discoverable headings, or may not match search keywords the responder uses (watermark, incremental, "since last snapshot"). Honest-punt preserves TA floor (no fabrication = 3.5 not 1.0), but Comp tanks to 2.5 because the answer literally exists in the resources directory and was missed. PA hurts because the engineer is told "not in resources" when in fact it IS in resources — a worse outcome than a true gap (engineer can't even trust the responder's coverage claim).
+
+**Q2** — Trino 100 concurrent Python connections: connection pool on Python side; Trino uses HTTP long-poll not TCP; `http-server.max-concurrency` as primary server-side limit; pool sizing 10-20 per app replica; JWT per connection (not per pool); HikariCP for JDBC + Python framework equivalent (SQLAlchemy/DBAPI pool).
+
+Responder gave: Yes need client-side connection pool; Trino is HTTP-based with polling (`/v1/statement`) not persistent TCP; server-side `http-server.max-concurrency` is primary admission limit; rule-of-thumb 10-20 pooled connections per Python app replica; JWT issued per connection (cannot be shared across pool entries — token validation happens at Trino auth filter); HikariCP for Java/JDBC path, equivalent in Python is SQLAlchemy pool (`pool_size`, `max_overflow`) or DBAPI-level pool around `trino.dbapi.connect`.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.625** |
+
+**Iter 391 Q2: 4.625 — STRONG PASS**
+
+Production-stack-fit (JWT matches prod_info.md auth). Concrete sizing (10-20 per replica). Correctly distinguishes HTTP polling from persistent TCP — important conceptual frame because engineers from Postgres/MySQL world incorrectly assume `MaxConnections` ceiling matters. `http-server.max-concurrency` correctly identified as server-side primary limit. JWT-per-connection caveat correctly named (tokens are bearer credentials, not shareable). HikariCP→SQLAlchemy pool mapping is the exact actionable handoff the engineer needs. Minor TA shave: "HTTP long-poll" is a slight simplification — Trino client polls `nextUri` rather than true long-poll, but close enough for the abstraction. Minor Comp shave: could mention `query.max-concurrent-queries` (coordinator-level cap) alongside `http-server.max-concurrency`, and `query.queue-config-file`/resource groups for fair-share when 100 concurrent saturates pool — but core answer is solid.
+
+**Iter 391 overall: (3.25 + 4.625) / 2 = 3.9375 — FAIL (< 4.0)**
+
+PATTERN NOTE: Two-iter PASS streak broken (iter389 4.75 + iter390 4.125 + iter391 3.9375 FAIL). Q2 strong on a NEW topic (Trino concurrent Python clients) but Q1 reveals serious RETRIEVAL gap — teacher already added the canonical answer during iter390 fix, responder did not find it. This is no longer a content-coverage problem. Possible root causes: (a) iter390 patch headings don't match query keywords ("snapshot incremental reads" vs whatever heading was added), (b) content was added to wrong resource file index, (c) responder's retrieval is keyword-limited and doesn't semantic-match "since last snapshot" -> `system.table_changes`. Topic score updates: Iceberg table maintenance 4.4904/52 -> 4.4669/53 (drop from Q1 borderline-fail, still PASS but trending down); Trino federation 4.4920/264 -> 4.4925/265 (mild rise from Q2 strong pass, still NEEDS WORK toward 4.5 override). TEACHER ACTIONS NEXT (iter392): (1) CRITICAL — verify the iter390-added incremental-reads content is actually in resources/13 (or wherever it was added); check that it uses keywords matching the question phrasing ("incremental read", "since last snapshot", "rows added", "changes between snapshots", "CDC export"); add explicit heading like `## Incremental reads: rows changed between snapshots (system.table_changes)`; cross-link from snapshot-expiry and time-travel sections. (2) MED — Trino concurrent client guide is in good shape; could add a small example block with SQLAlchemy `pool_size=15, max_overflow=5` + JWT auth Python snippet for the production stack. JUDGE PROBE TARGETS NEXT (iter392): (1) CRITICAL THIRD ANGLE — Iceberg incremental reads, phrased as "weekly CDC export of changed rows to downstream Postgres" to force the responder toward `system.table_changes`; if it punts a third time, escalate to teacher with explicit "the content is not retrievable, restructure resources/13"; (2) Trino concurrent client second angle — JWT token refresh under pool reuse (1-hour token expiry, 24-hour app session) — tests JWT lifecycle under pooled connections; (3) carry-forward standard iter387-389 backlog (HMS->Nessie no-downtime, SPILL_FAILED 60GB at 200GB cap, MERGE INTO rollback, OPA-override timeout, etc.). Trajectory iter370-391: 4.625 -> 4.375 -> 4.47 -> 3.98 FAIL -> 4.5625 -> 4.75 -> 4.1875 -> 4.4375 -> 4.40625 -> 4.5625 -> 3.25 FAIL -> 4.71875 -> 4.8125 -> 4.78125 -> 4.375 -> 4.094 -> 4.4375 -> 4.4375 -> 4.4375 -> 4.25 -> 3.125 FAIL -> 4.75 PASS -> 4.125 PASS -> 3.9375 FAIL.
+
+---
 
 ### Iter 390 — 2026-05-30 (EXTENDED PHASE) — Q1 Iceberg incremental reads since last snapshot; Q2 Trino Postgres connector multi-schema access
 
