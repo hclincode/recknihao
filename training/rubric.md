@@ -51,6 +51,46 @@ Each topic must reach the pass threshold before the system can enter final phase
 
 ## Score history
 
+### Iter 387 — 2026-05-30 (EXTENDED PHASE) — Q1 Iceberg catalog HMS vs Nessie vs Polaris; Q2 Trino spill disk sizing
+
+**Q1** — Iceberg catalog: HMS vs Nessie vs Polaris (HMS pointer + SPOF framing, Nessie Git-style branching, Polaris simpler REST, switch trigger, migration via URI + re-registration)
+
+Responder gave: HMS = pointer lookup + SPOF on writes; switch when HMS outages expensive or new deployment; Nessie = REST catalog + Git-style branching; Polaris = REST catalog, simpler; honest "stay on HMS if stable"; migration = URI change + table re-registration.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 3.75 |
+| Practical applicability | 4.5 |
+| Completeness | 4.25 |
+| **Average** | **4.25** |
+
+**Iter 387 Q1: 4.25 — PASS**
+
+HMS pointer/SPOF correctly framed; Nessie Git-style branching + Polaris simpler-REST distinguished; "stay if stable" pragmatic; migration via URI + re-registration concrete. TA slip (−0.5): "SPOF on writes" oversimplifies — HMS itself can be HA via replicas; real SPOF is backing RDBMS + HMS lock table contention. BC drag (−1.25): "pointer lookup", "SPOF", "REST catalog", "Git-style branching", "re-registration" no inline gloss. Comp gap (−0.75): no production-stack-fit anchor (prod is HMS today), no Iceberg REST Catalog spec significance, no HMS lock table commit serialization detail, no `register_table` procedure name.
+
+**Q2** — Trino spill disk sizing (max-spill-per-node aggregate + query-max-spill-per-node per-query, SSD sizing, LZ4, last-resort framing)
+
+Responder gave: max-spill-per-node=200GB aggregate cap; query-max-spill-per-node=50GB per-query cap; ~350–400GB SSD per worker; disk-full → query OOMs anyway; LZ4 compression; spill is last resort after query restructuring.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 3.75 |
+| Practical applicability | 4.5 |
+| Completeness | 4.25 |
+| **Average** | **4.25** |
+
+**Iter 387 Q2: 4.25 — PASS**
+
+Property names + cap relationship + sizing + LZ4 + last-resort framing all correct. TA slip (−0.5): "query OOMs anyway on disk full" loose — actual error is SPILL_FAILED, and spill-enabled=true flag is required but not stated. BC drag (−1.25): "spill", "aggregate cap", "per-query cap", "OOM", "LZ4" no inline gloss. Comp gap (−0.75): no spill-enabled flag, no `spiller-spill-path` k8s PV mount detail, no k8s warning against network-attached spill (MinIO/NFS), no monitoring path (`spilled_data_size` metric + alert threshold).
+
+**Iter 387 overall: (4.25 + 4.25) / 2 = 4.25 — PASS**
+
+PATTERN NOTE: Score regressed from iter384-386 plateau of 4.4375 down to 4.25. Both Qs lost 0.25 on TA (minor framing-precision gaps) and 0.25 on Comp (missing production-stack-fit anchors). BC unchanged at 3.75 — 10+ consecutive iterations of unresolved jargon cascade. PA holds at 4.5 both Qs. TEACHER ACTIONS NEXT (iter388): (1) HIGH TA Q1 — tighten HMS SPOF framing (real SPOF = backing RDBMS + HMS lock table contention, not HMS itself; HMS can be HA); (2) HIGH TA Q2 — tighten spill failure framing (SPILL_FAILED not OOM, spill-enabled=true required); (3) HIGH BC Q1 — Iceberg catalog inline-gloss cascade: pointer lookup / SPOF / REST catalog / Git-style branching / URI change / table re-registration one-liners; (4) HIGH BC Q2 — Trino spill inline-gloss cascade: spill / aggregate cap / per-query cap / LZ4 / OOM one-liners; (5) MED Comp Q1 — add production-stack-fit "stay on HMS unless multi-branch CDC or cross-engine standardization" + REST Catalog spec + HMS lock table + `register_table`; (6) MED Comp Q2 — add k8s PV mount detail + spill-enabled flag + monitoring path. JUDGE PROBE TARGETS NEXT: (1) Catalog 2nd angle — "migrate 5K tables HMS→Nessie no-downtime" tests register_table + dual-catalog cutover; (2) Spill 2nd angle — "SPILL_FAILED at 60GB even though max-spill-per-node=200GB" tests per-query vs aggregate cap interaction; (3) carry-forward: BC inline-gloss probe, Z-order 2nd angle, audit log 2nd angle, MERGE INTO rollback, Trino timeout OPA-override.
+
+---
+
 ### Iter 386 — 2026-05-30 (EXTENDED PHASE) — Q1 Iceberg Z-order/sort for multi-column filtering; Q2 Trino query history + auditing (event listener)
 
 **Q1** — Iceberg Z-order/sort multi-column filtering (file skipping via min/max stats, rewrite_data_files strategy=sort, zorder, sorted_by, sort vs partition tradeoffs)
