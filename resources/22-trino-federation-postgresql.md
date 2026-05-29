@@ -13,7 +13,7 @@ Search this document by keyword. Major topics and where they live:
 - **Predicate pushdown**: Section 2A.2 (MySQL/PostgreSQL — what pushes, what doesn't, VARCHAR no-pushdown)
 - **PostgreSQL VARCHAR pushdown — equality vs range** (the most-confused fact): Section 3.2 canonical callout — equality/IN/IS NULL/dynamic-filter IN-lists ALL push; only RANGE (`<`,`>`,`BETWEEN`) does not push by default
 - **Top-N pushdown (`ORDER BY <col> LIMIT N`) on PostgreSQL**: Section 3.3A — **YES, it pushes** by default (session `app_pg.topn_pushdown_enabled = true`); EXPLAIN signature for SUCCESS = `sortOrder=[...] limit=N` annotations INSIDE the TableScan with NO separate TopN operator above; signature for FAILURE = a separate `TopN [topN=N, orderBy=[...]]` operator sitting ABOVE a bare TableScan. Doesn't push above Joins, Unions, Aggregations, or when sort key is a function. Fallback when it refuses: `system.query()` passthrough.
-- **Iceberg time travel + live PostgreSQL federation** (FOR VERSION AS OF, FOR TIMESTAMP AS OF, snapshot expiry, tags for audits, domain_compaction_threshold, DF wait-timeout asymmetry): Section 4.7
+- **Iceberg time travel + live PostgreSQL federation** (FOR VERSION AS OF, FOR TIMESTAMP AS OF, snapshot expiry, tags for audits, DF wait-timeout asymmetry, **why `domain-compaction-threshold` is JDBC-only and does NOT work on Iceberg**): Section 4.7
 - **Dynamic filtering (runtime join pruning)**: Section 5 — how build-side IN-lists prune probe-side Iceberg scans; wait-timeout defaults (JDBC 20s, Iceberg 1s); VARCHAR key caveat; EXPLAIN ANALYZE VERBOSE verification
 - **DF build/probe direction rule (CRITICAL mental model)**: Section 5.1.1 — DF flows from SMALLER (build) table TO LARGER (probe) table, not the reverse; worked examples for both directions
 - **DF supported join types + predicates (CRITICAL — commonly misstated)**: Section 5.1.1A — **INNER and RIGHT joins ONLY** (LEFT OUTER and FULL OUTER are NOT supported); **equality AND inequality (`<`, `<=`, `>`, `>=`, `IS NOT DISTINCT FROM`) predicates BOTH trigger DF** for INNER/RIGHT joins. `enable_dynamic_filtering` system session property for per-query debugging.
@@ -2540,7 +2540,7 @@ As of Trino 467, the PostgreSQL connector pushes these predicate types down to P
 > - Raise to `4096`+ only after measuring that the larger IN-list doesn't (a) blow up the JDBC query text past Postgres's `max_stack_depth` parse limit, or (b) defeat Postgres index usage (a 5000-element IN-list can plan slower than a BETWEEN scan if the values are dense — measure with `EXPLAIN ANALYZE` on the Postgres side after enabling slow-log capture).
 > - **Do NOT set it globally to a very large value** — large IN-lists increase query planning cost on both Trino and Postgres. Prefer per-session (`SET SESSION app_pg.domain_compaction_threshold = ...`) for the specific cohort/backfill query that needs it.
 >
-> **Cross-reference**: this same knob also governs dynamic-filter IN-lists in cross-catalog joins (Section 5.1.2 and 5.4). The 256-threshold behavior is identical for both static IN-lists and DF-derived IN-lists — both get compacted to BETWEEN ranges past the threshold, and the same `SET SESSION app_pg.domain_compaction_threshold = ...` raises both. The catalog prefix must match the catalog that owns the TableScan receiving the IN-list (so for a join with the IN-list landing on the Postgres scan, use the Postgres catalog prefix; for a join with the IN-list landing on the Iceberg scan, use `iceberg.domain_compaction_threshold`).
+> **Cross-reference**: this same knob also governs dynamic-filter IN-lists in cross-catalog joins (Section 5.1.2 and 5.4), **but ONLY when the probe (the side receiving the DF) is a JDBC connector** (Postgres/MySQL/SQL Server). The 256-threshold behavior is identical for both static IN-lists and DF-derived IN-lists on the JDBC side — both get compacted to BETWEEN ranges past the threshold, and the same `SET SESSION app_pg.domain_compaction_threshold = ...` raises both. The catalog prefix must match the JDBC catalog that owns the TableScan receiving the IN-list. **Important: there is NO `iceberg.domain_compaction_threshold` — that property does not exist for the Iceberg connector** (see Section 4.7d). For IN-list compaction issues when **Iceberg is the probe**, the lever is build-side cardinality reduction or `enable_large_dynamic_filters`, not `domain_compaction_threshold`.
 
 ### 3.3 What does NOT push down by default — three distinct rules, do not conflate them
 
@@ -3800,30 +3800,43 @@ For SaaS apps with regulated retention windows (HIPAA, SOX, GDPR), the operation
 2. Configure `expire_snapshots` with its normal retention (e.g., 7 days) — tagged snapshots are exempt and survive.
 3. Audit queries always reference the named tag (e.g., `FOR VERSION AS OF 'q1_2026_audit'`), never a raw timestamp or snapshot ID.
 
-#### d) `domain_compaction_threshold` and large build-side IN-lists
+#### d) Large build-side IN-lists — `domain-compaction-threshold` (JDBC-only) vs the Iceberg case
 
-When the build side (e.g., Postgres `accounts` filtered for a tenant) produces many matching rows, the dynamic-filter IN-list pushed to the Iceberg probe scan can have **tens of thousands of values**. Trino has a session knob — `domain_compaction_threshold`, default **256** — that controls how big an IN-list can grow before Trino **compacts it down to a `BETWEEN min/max` range** for transmission to the probe side.
+When the build side (e.g., Postgres `accounts` filtered for a tenant) produces many matching rows, the dynamic-filter IN-list pushed to the probe scan can have **tens of thousands of values**. Past a certain size, the IN-list gets compacted to a `BETWEEN min/max` range. **But the knob that controls this differs sharply between JDBC and Iceberg probes** — and this is the part most engineers get wrong.
 
-Why this matters for federation + time travel:
+> **CRITICAL: `domain-compaction-threshold` is a JDBC connector property — it has NO effect on the Iceberg connector.** It lives in the `BaseJdbcConfig` class shared by PostgreSQL, MySQL, SQL Server, and other JDBC connectors. Setting `domain-compaction-threshold=1000` (or `domain_compaction_threshold` as a session property) inside `etc/catalog/iceberg.properties` is **silently ignored** — the Iceberg connector simply does not register that property name. Likewise `SET SESSION iceberg.domain_compaction_threshold = 1000` will fail with `Session property 'iceberg.domain_compaction_threshold' does not exist` against an OSS Trino 481 cluster. This was the #1 federation-tuning misdirection in older blog posts and is corrected here.
 
-- For the **Iceberg probe direction**: a compacted BETWEEN range still enables **file-level min/max pruning** against the Iceberg manifest stats. So compaction is "still useful" — it just degrades from "skip files matching no IN-list value" to "skip files whose min/max range doesn't overlap [global_min, global_max]." This is a real loss of selectivity on join keys with wide value spread (e.g., random UUIDs).
-- For the **PostgreSQL probe direction** (less common — usually Postgres is the build side): a compacted BETWEEN on a surrogate integer key still works well if Postgres has a btree index. On a VARCHAR key, BETWEEN may not prune effectively (and string-range pushdown is off by default — see Section 3.3).
+Why this matters for federation + time travel — split by probe direction:
 
-**Diagnostic — if `EXPLAIN ANALYZE` shows the Iceberg side scanning many more files than you expected even with DF active**, raise `domain_compaction_threshold` to keep the full IN-list intact. The session property is **connector-scoped — it must carry the catalog prefix of whichever catalog owns the SCAN you want to keep the IN-list for** (the side receiving the DF):
+- **PostgreSQL is the probe (Iceberg fact → Postgres dim build is rare; the common shape is Postgres dim → Iceberg fact, but in the opposite-direction case)**: this is the **only** case where `domain-compaction-threshold` is the right lever. Raise it on the **PostgreSQL catalog** (`etc/catalog/app_pg.properties`) to keep the full IN-list intact before the JDBC connector compacts it for the SQL it sends to Postgres. A compacted BETWEEN on a surrogate integer key still works well if Postgres has a btree index. On a VARCHAR key, BETWEEN may not prune effectively (and string-range pushdown is off by default — see Section 3.3).
+
+- **Iceberg is the probe (the common shape — Postgres dim build → Iceberg fact probe)**: there is **no Iceberg-specific `domain-compaction-threshold` equivalent** in OSS Trino 481. The IN-list-to-BETWEEN compaction on the Iceberg side is governed by the coordinator-level dynamic-filtering caps — `dynamic-filtering.large.max-distinct-values-per-driver` and friends (see Section 5.4 Stage 1). When DF on an Iceberg probe still scans too many files, **do NOT reach for `domain_compaction_threshold` on the Iceberg catalog — it will not help.** Instead:
+  - **Reduce build-side cardinality**: add a more selective `WHERE` to the Postgres build side so it produces fewer distinct join-key values (under the ~1000-per-driver coordinator cap). This is the most reliable fix.
+  - **Bucket or pre-filter the join key**: if the build side has high cardinality (e.g., a UUID column), introduce a more selective filter upstream (tenant_id, time window, status) before joining. Bucketed join keys with lower cardinality dramatically improve DF effectiveness.
+  - **Opt into large DF**: `SET SESSION enable_large_dynamic_filters = true;` raises the per-driver cap and lets DF carry more values through, at the cost of additional coordinator memory. See Section 5.4 Stage 1 for the trade-off.
+  - **Tune the wait timeout** if the issue is "DF didn't arrive in time" rather than "DF arrived but was compacted": `iceberg.dynamic-filtering.wait-timeout=20s` in the Iceberg catalog file (see Section 4.7e directly below).
+
+**Diagnostic — if `EXPLAIN ANALYZE` shows the Iceberg probe scanning many more files than you expected even with DF active**:
+
+1. First confirm whether DF actually fired and what shape it took. Run `EXPLAIN ANALYZE VERBOSE` and look at the `dynamicFilters` field on the Iceberg `TableScan` (Section 5.4). If you see `dynamicFilters = {join_key BETWEEN min AND max}` instead of `dynamicFilters = {join_key IN (...)}`, the IN-list was compacted on the coordinator side because the build exceeded the per-driver distinct-value cap.
+2. The **correct fix for the Iceberg case is to reduce build-side cardinality** (more selective WHERE on the Postgres dim, or a bucketed/lower-cardinality join key), or to raise the coordinator cap via `SET SESSION enable_large_dynamic_filters = true;`. **Do not paste `SET SESSION iceberg.domain_compaction_threshold = ...` — that property does not exist for Iceberg and the statement will error.**
+3. For the JDBC-probe case (less common in this section, more common in Section 5.4), the correct fix is the JDBC-side `domain-compaction-threshold`:
 
 ```sql
--- Iceberg is the probe (receiving the DF) — raise the threshold on the Iceberg catalog:
-SET SESSION iceberg.domain_compaction_threshold = 1000;
-
--- If Postgres is the probe instead, set it on the Postgres catalog:
+-- ONLY for the JDBC-probe direction (Postgres is the probe receiving the DF).
+-- Raises the JDBC connector's compaction threshold so a larger IN-list is preserved
+-- in the SQL Trino sends to Postgres.
 SET SESSION app_pg.domain_compaction_threshold = 1000;
 
--- NOTE: a bare `SET SESSION domain_compaction_threshold = ...` (no catalog prefix) FAILS
--- with "Session property 'domain_compaction_threshold' does not exist" — connector
--- properties always require the `<catalog>.` prefix. See Section 5.4.
+-- WRONG — this fails. `domain_compaction_threshold` is NOT registered for the Iceberg connector.
+-- SET SESSION iceberg.domain_compaction_threshold = 1000;
+-- (Error: Session property 'iceberg.domain_compaction_threshold' does not exist)
+
+-- WRONG — bare form (no catalog prefix) also fails for JDBC connectors.
+-- SET SESSION domain_compaction_threshold = 1000;
 ```
 
-The trade-off: a larger IN-list takes more memory and is slower to serialize across worker boundaries. For most federation cases with build sides under a few thousand rows, `1000` is a sweet spot.
+The trade-off for the JDBC case: a larger IN-list takes more memory, is slower to serialize across worker boundaries, and produces a longer SQL string that Postgres's parser has to handle. For most JDBC-probe federation cases with build sides under a few thousand rows, `1000` is a sweet spot. For Iceberg-probe cases, again — there is no equivalent `domain-compaction-threshold` knob; reduce build-side cardinality or enable large DF instead.
 
 #### e) Dynamic-filter wait-timeout asymmetry — the Iceberg-probe-side 1s default trap
 
@@ -3949,7 +3962,7 @@ Dynamic filtering does **not** work for every join shape. Two factual claims her
 | `CROSS JOIN` / cartesian | **NO** | No join key to derive a filter from. |
 | Semi-join (`WHERE x IN (SELECT ...)`) | **YES** | Same shape as INNER for DF purposes. |
 
-> **WRONG — do NOT recommend rewriting INNER JOIN to LEFT JOIN as a way to "enable" dynamic filtering.** Rewriting in that direction **disables** DF entirely (LEFT and FULL OUTER joins do not support it). If the engineer's INNER JOIN already has DF wired up, switching to LEFT JOIN to "expand" results will silently lose the runtime pruning and the probe scan will read everything. If DF is not firing on an INNER JOIN, the cause is one of: (a) wait-timeout fired before build delivered (Section 5.3 / 5.4), (b) build side exceeded the per-driver row cap and DF generation gave up (raise `enable_large_dynamic_filters`), (c) IN-list got compacted to BETWEEN by `domain_compaction_threshold` (Section 5.1.2), (d) join key is VARCHAR and the probe is MySQL (Section 2A.2). The fix is to address whichever of (a)–(d) is firing, NOT to rewrite the join type.
+> **WRONG — do NOT recommend rewriting INNER JOIN to LEFT JOIN as a way to "enable" dynamic filtering.** Rewriting in that direction **disables** DF entirely (LEFT and FULL OUTER joins do not support it). If the engineer's INNER JOIN already has DF wired up, switching to LEFT JOIN to "expand" results will silently lose the runtime pruning and the probe scan will read everything. If DF is not firing on an INNER JOIN, the cause is one of: (a) wait-timeout fired before build delivered (Section 5.3 / 5.4), (b) build side exceeded the per-driver row cap and DF generation gave up (raise `enable_large_dynamic_filters`), (c) **JDBC probe only** — IN-list got compacted to BETWEEN by the JDBC connector's `domain_compaction_threshold` (Section 5.1.2; this knob does NOT exist for Iceberg — see Section 4.7d), (d) join key is VARCHAR and the probe is MySQL (Section 2A.2). The fix is to address whichever of (a)–(d) is firing, NOT to rewrite the join type.
 
 **Supported join predicates** (the `ON` clause shape). This is the second commonly-misstated claim — **dynamic filtering is NOT restricted to equality predicates:**
 
@@ -5012,7 +5025,14 @@ SET SESSION spill_enabled = true;
 
 > **PREREQUISITE — `SET SESSION spill_enabled=true` only works if the cluster has `spill-enabled=true` in `etc/config.properties`.**
 >
-> Verify with: `SHOW SESSION LIKE 'spill%';` — if `spill_enabled` is not listed or shows as `false`, the cluster admin must enable it at the cluster level first. **`SET SESSION` only overrides cluster defaults — it cannot enable a feature the cluster has disabled.** Engineers hit this trap repeatedly: they paste `SET SESSION spill_enabled = true;` into their query, see no error, then watch the query OOM exactly the same way and conclude "spill doesn't help." It wasn't spill that didn't help — spill never turned on in the first place. The session property silently no-ops against a cluster where `spill-enabled` is the (Trino-default) `false`. Always run the `SHOW SESSION` check first; if the property is missing or `false`, file a ticket with the cluster admin to set `spill-enabled=true` plus `spiller-spill-path=/var/trino/spill` (or equivalent local SSD path) in `etc/config.properties` and restart the coordinator + workers. Only then will the session-level override actually engage.
+> Verify with: `SHOW SESSION LIKE 'spill%';` — this surfaces **only `spill_enabled`** (the session-overrideable flag). It does **NOT** show `spiller_spill_path`, because `spiller-spill-path` is a **config-only property** (read from `etc/config.properties` at coordinator/worker startup), not a session property. There is **no Trino SQL command** to verify config-only properties from a query session — `SHOW SESSION LIKE 'spill%'` will never reveal whether the spill path is actually configured or mounted. If `spill_enabled` is not listed or shows as `false`, the cluster admin must enable it at the cluster level first. **`SET SESSION` only overrides cluster defaults — it cannot enable a feature the cluster has disabled.** Engineers hit this trap repeatedly: they paste `SET SESSION spill_enabled = true;` into their query, see no error, then watch the query OOM exactly the same way and conclude "spill doesn't help." It wasn't spill that didn't help — spill never turned on in the first place. The session property silently no-ops against a cluster where `spill-enabled` is the (Trino-default) `false`. Always run the `SHOW SESSION` check first; if the property is missing or `false`, file a ticket with the cluster admin to confirm `etc/config.properties` contains **both** `spill-enabled=true` **and** `spiller-spill-path=/var/trino/spill` (or equivalent local SSD path), and restart the coordinator + workers. Only then will the session-level override actually engage.
+>
+> **Verifying the spill path is actually configured and mounted** (since `SHOW SESSION` cannot tell you):
+>
+> 1. **Ask the cluster admin** to confirm `etc/config.properties` contains both `spill-enabled=true` and `spiller-spill-path=/var/trino/spill` (or whichever local path is in use). This is the authoritative check — there is no SQL equivalent.
+> 2. **On Kubernetes**, verify the worker pod has the spill directory mounted and writable, e.g. `kubectl exec <worker-pod> -- ls -ld /var/trino/spill` (or whichever path matches `spiller-spill-path`). Confirm the path exists and is on a fast local SSD volume (`emptyDir` with `medium: ""` for node-local disk, or a `local-pv` claim) — NOT on the pod's overlay filesystem and NOT on a network volume like EFS/EBS-gp2 (spill needs local SSD bandwidth).
+> 3. Optionally check worker logs at startup — workers log the configured spill path on boot, e.g. `Spill path: /var/trino/spill`. Grep the worker pod logs for `Spill` or `spiller`.
+> 4. Once spill is actually running on a query, the worker's JMX / `/v1/spill` HTTP endpoint exposes spill bytes written — but that requires admin access to the worker HTTP API, not a SQL query.
 
 Spill writes the build-side hash table to local disk when worker memory fills, trading latency for stability. Enable only if you cannot afford the query to fail outright (e.g., an executive dashboard refresh that must complete even if slow). Spill paths require local SSD per worker pod — verify your k8s `Deployment` mounts a fast `emptyDir` or `local-pv` for `spiller-spill-path`.
 
