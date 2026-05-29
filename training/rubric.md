@@ -33,7 +33,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.4515 | 145 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
-| Cost considerations for analytical workloads at SaaS scale | PASSED | 4.063 | 14 |
+| Cost considerations for analytical workloads at SaaS scale | PASSED | 4.1088 | 15 |
 | Query performance basics: partitioning, indexing strategy for analytics | PASSED | 4.4445 | 10 |
 | Lakehouse schema design: fact tables, dimension tables, denormalization | PASSED | 4.650 | 5 |
 | Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.527 | 22 |
@@ -41,7 +41,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.422 | 8 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.609 | 4 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.5193 | 138 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.5050 | 50 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.5098 | 51 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 4.751 | 5 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4910 | 263 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.7392 | 7 |
@@ -50,6 +50,46 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 389 — 2026-05-30 (EXTENDED PHASE) — Q1 Iceberg tags month-end bookmarks; Q2 Trino native fs.cache
+
+**Q1** — Iceberg native tagging for month-end audit bookmarks (2nd-angle test of iter388 gap):
+
+Responder gave: query `$snapshots` for snapshot_id; Spark `ALTER TABLE CREATE TAG name AS OF VERSION id RETAIN 3650 DAYS`; Trino read via `FOR VERSION AS OF 'tag-name'`; tags protect snapshots from `expire_snapshots`; create/drop Spark-only + read both engines; concrete billing-audit workflow.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.75** |
+
+**Iter 389 Q1: 4.75 — STRONG PASS**
+
+Direct fill of iter388 Q1 gap. CREATE TAG syntax correct (Spark only), `RETAIN 3650 DAYS` per-tag retention correct, `FOR VERSION AS OF 'tag-name'` Trino read path correct, expire_snapshots protection correct (tagged snapshots pinned via SnapshotRef), Spark-write/Trino-read split correct. $snapshots metadata table lookup gives engineer the canonical workflow. BC trimmed because $snapshots assumes some metadata-table familiarity — could inline-gloss "$snapshots = Iceberg metadata table listing all snapshot IDs with timestamps". Otherwise concrete and actionable for the billing-audit use case.
+
+**Q2** — Trino native file system cache (2nd-angle test of iter388 gap):
+
+Responder gave: `fs.cache.enabled=true` + `fs.cache.directories` + `fs.cache.max-sizes` in iceberg.properties; mutual exclusivity with `iceberg.metadata-cache.enabled`; k8s emptyDir or local PVC; JMX verification; when cache helps (hot partitions, repeated reads) vs less helpful (ad-hoc wide scans).
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 5.0 |
+| Completeness | 5.0 |
+| **Average** | **4.75** |
+
+**Iter 389 Q2: 4.75 — STRONG PASS**
+
+Direct fill of iter388 Q2 gap. Property names verified against trino.io/docs/current/object-storage/file-system-cache.html — `fs.cache.enabled`, `fs.cache.directories`, `fs.cache.max-sizes` are correct documented names. Mutual exclusivity with `iceberg.metadata-cache.enabled` correct. Production-fit excellent: k8s emptyDir vs local PVC choice matches on-prem MinIO + k8s stack. JMX verification path gives engineer a feedback loop. Applicability boundaries (hot partitions help; ad-hoc wide scans less helpful) prevent misuse. BC trimmed for JMX without inline gloss — could add "JMX = Trino's built-in metrics endpoint, query `jmx.current` schema from Trino itself".
+
+**Iter 389 overall: (4.75 + 4.75) / 2 = 4.75 — STRONG PASS**
+
+PATTERN NOTE: Excellent recovery from iter388 3.125 FAIL — both critical gaps (Iceberg native tagging + fs.cache.enabled) now filled with high-quality, production-fit answers. Q1 TA recovery 2.0→5.0 (categorical-denial error fully reversed; canonical SnapshotRef tag pattern now taught). Q2 TA recovery 3.5→5.0 (file system cache properties now sourced from trino.io official docs). Both answers carry engine-split qualifiers (Spark-only CREATE TAG; mutual exclusivity with metadata-cache) that prevent downstream misuse. Topic score updates: Iceberg table maintenance 4.5050/50 → 4.5098/51 (mild rise, still PASS); Cost considerations 4.063/14 → 4.1088/15 (mild rise, still PASS). JUDGE PROBE TARGETS NEXT (iter 390): (1) Iceberg tagging 3rd angle "drop expired tag + audit ref retention via `$refs` table"; (2) fs.cache 3rd angle "JMX cache hit rate metric name + tuning max-sizes when working set > cache"; (3) carry-forward iter387/388 targets (catalog migration HMS→Nessie no-downtime, SPILL_FAILED 60GB at 200GB cap, Z-order 2nd angle, audit log 2nd angle, MERGE INTO rollback, Trino timeout OPA-override, schema registry forward/backward compat, EXPLAIN TYPE IO + VALIDATE, result caching, Iceberg branches concurrent fast_forward, bucket sizing 32/128/256, JWT+OPA concurrency, partition spec migration without downtime). Trajectory iter370-389: 4.625 → 4.375 → 4.47 → 3.98 FAIL → 4.5625 → 4.75 → 4.1875 → 4.4375 → 4.40625 → 4.5625 → 3.25 FAIL → 4.71875 → 4.8125 → 4.78125 → 4.375 → 4.094 → 4.4375 → 4.4375 → 4.4375 → 4.25 → 3.125 FAIL → 4.75 PASS. Recovery shows teacher successfully patched both targeted resource gaps in single iteration.
+
+---
 
 ### Iter 388 — 2026-05-30 (EXTENDED PHASE) — Q1 Iceberg table tagging/organization; Q2 Trino file system cache
 
