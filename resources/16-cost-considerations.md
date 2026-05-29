@@ -182,6 +182,87 @@ Use this as a back-of-the-envelope filter, not a final answer:
 
 ---
 
+## Trino on-prem reading AWS S3 vs local MinIO — cost and performance
+
+A subtly different question from "should we lift-and-shift to AWS Athena?" is: **what if we keep our on-prem Trino cluster but point it at AWS S3 instead of local MinIO for some tables?** Common motivation: archival/cold data that's too big for the MinIO cluster, or data that's already living in S3 from another system. This is a real architectural choice — and the cost model is **completely different** from Athena. Get the distinction right before you pitch it.
+
+**Critical clarification — this is NOT Athena:**
+
+- **Athena** is a managed query service. You pay **$5/TB scanned** because AWS runs the query engine for you.
+- **Trino on-prem reading S3** is *your* query engine reading from S3 as an object store. AWS only sees `GET` requests against S3 — there is no per-TB-scanned query fee. The pricing model is **S3 object-store pricing**, not Athena pricing. Conflating these is a common and expensive mistake in build-vs-buy memos.
+
+### Cost breakdown for Trino on-prem reading S3 (NOT Athena)
+
+| Cost line | 2026 price | Reality for a typical query workload |
+|---|---|---|
+| **S3 storage** | $0.023/GB = **$23.55/TB-month** | Same as the S3 line in the Athena section above. Tiered pricing applies above 50 TB / 500 TB. |
+| **S3 GET requests** | $0.0004 per 1,000 GET requests | **Negligible.** Each Parquet file opened = 1 GET. 10,000 files per query = $0.004. Even at 1 million GETs/day, this is ~$12/month. |
+| **S3 egress to your on-prem Trino workers** | **$0.09/GB out of AWS region** | **THE MAIN COST.** A query scanning 100 GB from S3 to your data center costs **$9 in egress alone**. At a sustained 50 TB/month scanned, that's **$4,500/month JUST in egress fees** — completely dominating the storage line. |
+| **AWS Direct Connect** (optional) | ~$0.02/GB egress + **$0.30/port-hour minimum** | Reduces egress per-GB by ~4.5x, but the port-hour fee adds ~$220/month baseline regardless of traffic. Worth it above ~5 TB/month sustained egress. |
+
+**The egress fee is what kills this architecture.** S3 storage is cheap; pulling that data across the public internet to your on-prem Trino cluster is not. Every byte Trino reads from S3 leaves the AWS region and hits the egress meter. Partition pruning matters even more here than locally because skipped data = skipped egress = real dollars saved per query.
+
+**This is completely separate from Athena.** Athena's $5/TB-scanned fee is the *query service*. If you used Athena to scan that same 100 GB you'd pay ~$0.50 in query fees plus zero egress (Athena results return as a small CSV). The Trino-on-prem + remote-S3 architecture is **not** competing with Athena on the same axis; they're different products with different bills. Don't write "Athena $5/TB" when the actual cost is "S3 egress $0.09/GB."
+
+### Latency comparison (order of magnitude)
+
+Network round-trip dominates small-file workloads. Trino opens one network connection per Parquet file for metadata (footer + row group offsets), then again for data. At 10,000 files per query, latency stacks fast.
+
+| Backend | Per-file metadata latency | Throughput | Practical for 10K-file query |
+|---|---|---|---|
+| **Local MinIO, same rack** | ~1–5 ms | 100–500 MB/s | ~10–50 sec metadata + fast reads |
+| **Local MinIO, same k8s cluster (same DC)** | ~5–20 ms | 100–500 MB/s | ~50–200 sec metadata |
+| **AWS S3 from on-prem over public internet** | ~50–200 ms | 100–300 MB/s (limited by your internet pipe) | **~500–2,000 sec just in metadata round-trips** before any data is read |
+| **AWS S3 with Direct Connect** | ~10–50 ms | 500 MB/s+ | ~100–500 sec metadata |
+
+**Practical impact:** for a query that opens 10,000 Parquet files, local MinIO adds roughly **~50 seconds** of metadata fetch overhead; remote S3 over the public internet adds **~500 seconds** (8+ minutes). This is overhead the user sees *before* any actual data scanning starts. The metadata-fetch latency is the single biggest reason remote-S3 queries feel slow.
+
+**Mitigation — Trino metadata cache is CRITICAL for remote S3:**
+
+```properties
+# etc/catalog/iceberg.properties
+iceberg.metadata-cache-enabled=true
+iceberg.metadata-cache.ttl=10m
+iceberg.metadata-cache.max-size=1000
+```
+
+With the cache hot, repeat queries against the same table skip most metadata GETs and only pay egress on the actual data reads. Without it, every query pays the full metadata round-trip cost. This config is optional for MinIO; it's effectively mandatory for remote S3.
+
+### Key config properties for S3 backend in Trino 467
+
+For `etc/catalog/iceberg.properties` — these are the native S3 filesystem properties (the legacy `hive.s3.*` properties are deprecated in Trino 467):
+
+```properties
+# AWS S3 backend
+fs.native-s3.enabled=true
+s3.endpoint=https://s3.amazonaws.com
+s3.region=us-east-1
+s3.path-style-access=false
+# Credentials via instance profile, IAM role, or static keys
+# s3.aws-access-key=...
+# s3.aws-secret-key=...
+
+# MinIO backend (for comparison)
+# fs.native-s3.enabled=true
+# s3.endpoint=http://minio.internal:9000
+# s3.region=us-east-1            # MinIO ignores region but Trino requires the property
+# s3.path-style-access=true      # MinIO requires path-style; AWS uses virtual-host-style
+```
+
+The `s3.path-style-access` flag is the most common gotcha when switching between MinIO and AWS — MinIO requires `true`, AWS S3 requires `false`.
+
+### Bottom-line rule of thumb
+
+**Remote S3 + on-prem Trino is expensive and slower unless you have Direct Connect.** Use it only for:
+
+- **Cold or archival data** where you can tolerate slow queries (minutes instead of seconds).
+- **Datasets you cannot fit in your MinIO cluster** and where the egress savings vs the storage cost savings actually break even — do the math on monthly scan volume.
+- **Data already living in S3** from another system (e.g., a SaaS vendor that drops Parquet into your S3 bucket) where copying to MinIO would duplicate cost without operational benefit.
+
+For your normal hot-tier analytical workload — daily dashboards, recent fact tables, frequently-scanned event data — **keep it on local MinIO**. The egress fees and metadata round-trip latency make remote S3 a poor fit for active query patterns.
+
+---
+
 ## The hidden costs of self-hosted
 
 These don't show up in any cost dashboard. They show up as a slow dashboard, a stale report, or a 3 a.m. page.
