@@ -36,13 +36,13 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.106 | 13 |
 | Query performance basics: partitioning, indexing strategy for analytics | PASSED | 4.4445 | 10 |
 | Lakehouse schema design: fact tables, dimension tables, denormalization | PASSED | 4.650 | 5 |
-| Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.534 | 21 |
+| Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.527 | 22 |
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.422 | 8 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.609 | 4 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.525 | 135 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.541 | 48 |
-| Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 4.771 | 4 |
+| Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 4.751 | 5 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4910 | 263 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.8104 | 6 |
 | SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.658 | 17 |
@@ -50,6 +50,54 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 382 — 2026-05-30 (EXTENDED PHASE) — Q1 Trino 50 concurrent queries (HTTP admission + resource groups); Q2 7.3M partition explosion (day×tenant_id → bucket(tenant_id))
+
+**Q1** — 50 concurrent Trino queries at peak
+
+Responder gave: Two concurrency layers (HTTP admission `http-server.max-concurrency`=1000 default raised to 1500-2000 for 50 replicas × 20 conn pool; resource groups `hardConcurrencyLimit` runs, `maxQueued` queues, excess rejected); symptom table (503=Jetty, QUEUED=resource group, CPU-bound=slow queries); peak sizing guidance.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 4.75 |
+| Completeness | 4.25 |
+| **Average** | **4.375** |
+
+**Iter 382 Q1: 4.375 — PASS**
+
+GAPS:
+- TA (−0.5): Two-layer model correct; `http-server.max-concurrency` exists but the cited 1000 default is not clearly documented in current Trino docs — borderline claim. `hardConcurrencyLimit`/`maxQueued`/Jetty 503/QUEUED state all accurate.
+- BC (−1.0): "Jetty", "resource groups", "conn pool", "503" thrown without inline gloss — beginner needs one-liners.
+- PA (−0.25): Sizing math (50 × 20 → 1500-2000) is concrete; symptom-to-cause table is actionable.
+- Comp (−0.75): Missed coordinator-level `query.max-concurrent-queries`, JWT auth overhead at 50 concurrent, OPA policy-eval latency added per query in this production stack.
+
+---
+
+### Iter 382 Q2 — 2026-05-30 (EXTENDED PHASE) — 7.3M partitions day×tenant_id partition explosion → bucket(tenant_id, 128)
+
+**Q2** — 7.3 million partitions day×tenant_id
+
+Responder gave: Will cause problems; GB-scale manifests → query planning bottleneck; small-files unfixable; solution bucket(tenant_id, 128) → 93,440 partitions; threshold table (<100 tenants identity, 100-1000 bucket 32, 1000+ bucket 128); tradeoff loses per-tenant storage metadata query.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.25 |
+| Beginner clarity | 4.25 |
+| Practical applicability | 4.75 |
+| Completeness | 4.25 |
+| **Average** | **4.375** |
+
+**Iter 382 Q2: 4.375 — PASS**
+
+GAPS:
+- TA (−0.75): 7.3M = ~20K tenants × 365d math accurate; bucket(tenant_id,128) recommendation correct; 93,440 partitions figure = 730 days × 128 = 2-year retention — math works only with implicit 2-year retention assumption that was not stated, should be 46,720 for 1 year. Threshold table reasonable.
+- BC (−0.75): "bucket transform", "manifests", "small-files problem" mentioned with brief context; threshold table aids clarity but jargon density is high.
+- PA (−0.25): Specific bucket-count per tenant tier + named tradeoff. Engineer can decide partition strategy.
+- Comp (−0.75): Missed: migration path from existing 7.3M partitions (partition spec evolution + REWRITE_DATA_FILES partitioned by new spec), how bucket changes interact with existing snapshots, compaction implications post-rebucket.
+
+---
 
 ### Iter 381 Q1 — 2026-05-30 (EXTENDED PHASE) — Trino result caching for 30s dashboard refresh (no built-in result cache, three patterns: Redis app cache + pre-aggregated rollup table + materialized view)
 
