@@ -36,20 +36,75 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.450 | 5 |
 | Query performance basics: partitioning, indexing strategy for analytics | PASSED | 4.675 | 5 |
 | Lakehouse schema design: fact tables, dimension tables, denormalization | PASSED | 4.650 | 5 |
-| Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.596 | 17 |
+| Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.570 | 18 |
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.609 | 4 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.523 | 132 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.523 | 42 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
-| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.498 | 256 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.497 | 257 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
 | SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.652 | 16 |
 
 ---
 
 ## Score history
+
+### Iter 360 Q1 — 2026-05-29 (EXTENDED PHASE) — Trino federation 3rd-phrasing stop-gap re-probe: "PARTITIONED still OOMs — what's the next lever?" (per iter359 judge probe target #4)
+
+**Q1** — "We set `join_distribution_type = 'PARTITIONED'` like you suggested, but workers are still running out of memory — failing with same `Query exceeded per-node memory limit` error. We can tolerate slower queries, we just need them to complete. What's the next thing to try after PARTITIONED?" Tests whether iter360 teacher action #4 (Step 3 `spill_enabled=true` backstop) lands.
+
+Responder produced: (a) `SET SESSION spill_enabled = true` as the immediate next lever with "trades latency for stability" framing — exactly matching the iter360 teacher action #4 backstop sequence; (b) critical prerequisite that worker pods need local fast storage mounted (`emptyDir` / `local-pv`) for `spiller-spill-path` in k8s Deployment specs — correctly acknowledges on-prem k8s production environment; (c) Step 4 concurrency cap via resource group with `hardConcurrencyLimit = 2` or `3` to queue concurrent dashboard refreshes; (d) explicit "1-2 weeks of stability, not a permanent solution, durable fix is ingest into Iceberg" framing; (e) anti-pattern callout against raising `query.max-memory-per-node` ("only works if you have free heap" — correct).
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 3.5 |
+| Practical applicability | 4.5 |
+| Completeness | 4.0 |
+| **Average** | **4.125** |
+
+Judge verified via WebSearch:
+1. **`spill_enabled` session property exists** — CONFIRMED per [Spilling properties — Trino docs](https://trino.io/docs/current/admin/properties-spilling.html): "`spill-enabled` has a **Session property:** `spill_enabled`." The `SET SESSION spill_enabled = true` syntax is correct.
+2. **`spiller-spill-path` config property exists** — CONFIRMED per [Spill to disk — Trino docs](https://trino.io/docs/current/admin/spill.html): the property specifies the directory where spilled content is written, supports comma-separated list for multiple drives (JBOD). The k8s `emptyDir`/`local-pv` recommendation matches the documented "do not spill to system drives, do not spill to JVM log drive" guidance.
+3. **Resource groups `hardConcurrencyLimit` and source selector** — CONFIRMED per [Resource groups — Trino docs](https://trino.io/docs/current/admin/resource-groups.html): `hardConcurrencyLimit` is the maximum concurrent queries; source selector matches the `--source` CLI option or JDBC `source` property. The example structure is correct, though it's a fragment rather than complete `etc/resource-groups.json`.
+
+Topic running avg: (4.498 × 256 + 4.125) / 257 = (1151.488 + 4.125) / 257 = 1155.613 / 257 = **4.497 across 257 questions** — still NEEDS WORK (0.003 below raised 4.5 threshold), but the iter360 teacher action #4 (spill_enabled Step 3 backstop) landed cleanly. The 3rd-phrasing stop-gap probe confirms the federation stop-gap tier is durable across reformulations.
+
+**Iter 360 Q1: 4.125 — PASS** (above per-question 4.0 bar; topic average still 0.003 below 4.5 raised threshold so topic remains NEEDS WORK by per-topic override, but the stop-gap session-property sequence is now demonstrably stable across three different phrasings of the same scenario.)
+
+GAPS (deductions from 5):
+- **Technical accuracy (−0.5)**: (a) Answer does not mention that `spill-enabled=true` must also be set at the **cluster config level** in `etc/config.properties` — if the cluster has `spill-enabled=false` (the default for many on-prem installs), the session property is a no-op. Engineer copy-pasting `SET SESSION spill_enabled=true` on a cluster without cluster-level spill enabled gets no effect and the OOM continues. This is a real production trap. (b) Resource group JSON snippet is a fragment — the actual file requires `rootGroups`, `selectors`, and full `etc/resource-groups.json` schema with the resource group manager configured in `etc/resource-groups.properties`. Engineer cannot copy-paste this directly. (c) `max-spill-per-node` and `query-max-spill-per-node` not mentioned — these size the spill disk budget and are a common stumbling block when spill silently fails because budget is exhausted.
+- **Beginner clarity (−1.5)**: "build-side hash table", "spill", "resource group", "concurrency limit", "JDBC scan" all used without inline definitions. The 5th-iteration-flagged glossary issue from iter355/356/357/358/359 persists — the teacher's iter360 action #1 (inline glossary at top of `resources/22`) appears not to have landed for this answer's beginner-clarity payoff. A SaaS engineer with no OLAP background cannot tell from this answer what "build-side hash table" is or why writing it to disk specifically would help.
+- **Practical applicability (−0.5)**: Strong on the immediate next lever (`spill_enabled=true`) with the critical k8s storage-mount prerequisite, concurrency cap as a complementary lever, and explicit "1-2 weeks, not permanent" framing. Minor deductions: (a) no `EXPLAIN ANALYZE VERBOSE` step to confirm WHERE the OOM is happening (join build, aggregation, or sort) before spill is the right answer — spill helps for joins/aggregations/sorts but not for, e.g., output buffer pressure; (b) the resource-group JSON fragment is not directly copy-pasteable into `etc/resource-groups.json`; (c) no production environment fit note that the resource-group example must reflect the production OPA + JWT authentication stack rather than file-based examples (per `prod_info.md`).
+- **Completeness (−1.0)**: Covers (a) spill as Step 3 next lever, (b) k8s storage mount prerequisite, (c) Step 4 concurrency cap via resource group, (d) "not permanent, ingest to Iceberg is the durable fix" framing — four of the iter360 teacher-action levers landed in sequence. Missing: (a) cluster-config-level `spill-enabled=true` check at `etc/config.properties`, (b) `max-spill-per-node` / `query-max-spill-per-node` spill disk budget sizing, (c) `EXPLAIN ANALYZE VERBOSE` confirmation step to verify the OOM is in the join build before spill is recommended, (d) production environment fit (resource-group selector must reflect OPA + JWT prod auth stack, not file-based examples).
+
+ITER361 TEACHER ACTION (MEDIUM priority — topic running avg 4.497 still 0.003 below raised 4.5 threshold; stop-gap tier now durable across 3 phrasings, gradual recovery still needed):
+1. **MEDIUM (correctness)** — Add explicit callout in stop-gap Step 3: "Verify cluster-level `spill-enabled=true` in `etc/config.properties` first — the session property `SET SESSION spill_enabled=true` is a no-op if the cluster has spill disabled at the config level." This is a real production trap and the iter360 answer missed it.
+2. **MEDIUM (completeness)** — Add `max-spill-per-node` and `query-max-spill-per-node` to the stop-gap tier as the spill disk budget sizing knobs — engineers commonly hit silent spill-budget exhaustion and need to know these exist.
+3. **MEDIUM (clarity, 6th iteration flagged)** — Inline glossary at top of `resources/22-trino-federation-postgresql.md` for "build side", "probe side", "broadcast join", "partitioned join", "hash-redistribute", "spill", "build-side hash table", "dynamic filtering", "resource group", "concurrency limit". This is the longest-standing open gap on the topic and continues to be the single largest beginner-clarity deduction (−1.5 in iter359 and iter360).
+4. **MEDIUM (practical applicability)** — Add an `EXPLAIN ANALYZE VERBOSE` confirmation step before recommending spill — "look for `HashBuilder` operator memory usage; if HashBuilder is the OOM source, spill helps; if it's output buffer pressure, spill does not help." This is the missing diagnostic step from iter360.
+5. **LOW (completeness)** — Add a complete `etc/resource-groups.json` template (not a fragment) and explicit pointer to `etc/resource-groups.properties` manager configuration, so engineers can copy-paste a working resource group rather than reconstruct the full file schema themselves.
+6. **LOW (environment fit)** — Resource group selector example must note that in the production OPA + JWT stack (per `prod_info.md`), the source field comes from the JWT-authenticated client and resource-group selectors run independently of OPA authorization — the two systems are orthogonal.
+
+ITER361 JUDGE PROBE TARGETS — under-tested topics still open:
+1. CDC tier (>100M or <5min freshness SLO → Debezium → Iceberg MoR) — iter358 teacher action #2 still untested across iter357/358/359/360 (single iter359 Q2 baseline at 4.375 but needs second angle).
+2. Query plan optimization (EXPLAIN ANALYZE / EXPLAIN ANALYZE VERBOSE reading for slow Iceberg queries: TableScan/Filter/Aggregate cost, scan stats, dynamic-filter rows-filtered) — still not probed since iter356 rubric flag.
+3. Cost considerations cloud vs on-prem (AWS S3+Athena+Glue lift-and-shift vs on-prem Trino+Iceberg+MinIO) — still not probed.
+4. Trino federation 4th-phrasing re-probe at the *cluster-config* level (e.g., "we set SET SESSION spill_enabled=true and nothing happened — what's wrong?") to test if the cluster-config gap from iter360 lands.
+5. Trino federation re-probe testing whether the inline glossary at top of `resources/22` (iter360 teacher action #1) actually landed in subsequent rewrites — clarity has been flagged for 6 consecutive iterations.
+
+Sources verified via WebSearch:
+- [Spilling properties — Trino 479 Documentation](https://trino.io/docs/current/admin/properties-spilling.html) — `spill_enabled` confirmed as session property mapping to `spill-enabled` config property
+- [Spill to disk — Trino 481 Documentation](https://trino.io/docs/current/admin/spill.html) — `spiller-spill-path` confirmed, JBOD model, do-not-spill-to-JVM-log-drive guidance matches the answer's k8s `emptyDir`/`local-pv` recommendation
+- [Resource groups — Trino 480 Documentation](https://trino.io/docs/current/admin/resource-groups.html) — `hardConcurrencyLimit` and source selector semantics confirmed
+- [General properties — Trino 481 Documentation](https://trino.io/docs/current/admin/properties-general.html) — `query.max-memory-per-node` anti-pattern correctly noted in answer
+
+**Topics updated**:
+- Trino federation: 4.498/256 → **4.497/257 questions** (still NEEDS WORK — 0.003 below 4.5 raised threshold; iter360 Q1 lands at 4.125, the stop-gap session-property sequence is now demonstrably stable across three phrasings of the OOM scenario, but topic needs ~5-6 more 4.5+ landings to recross the threshold)
+
+---
 
 ### Iter 359 Q1 — 2026-05-29 (EXTENDED PHASE) — Trino federation OOM session-property re-probe (per iter358 judge probe target #1, CRITICAL RE-PROBE of BROADCAST→PARTITIONED correction)
 

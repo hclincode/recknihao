@@ -3149,6 +3149,21 @@ The official Trino documentation on this is the blog post "Just the right time d
 
 ## 4. Cross-catalog joins — the limitation you must understand
 
+> ### Quick Reference: Key Terms (Federation Troubleshooting Glossary)
+>
+> Read these definitions before scanning sections 4–5. Most federation OOMs and "why is this slow" tickets are misdiagnosed because engineers confuse these six terms.
+>
+> | Term | Plain-English definition |
+> |---|---|
+> | **Build side** | The table Trino loads **into memory first** to create an in-memory hash table keyed on the join column. Usually the **smaller** (or more-filtered) side. The build side determines worker memory usage. |
+> | **Probe side** | The table Trino **streams through**, looking up (probing) each row's join key against the build-side hash table. Usually the **larger** side. The probe side is read-only / streaming — it doesn't sit in memory. |
+> | **BROADCAST join** | The entire build side is **replicated to every worker**. Every worker holds a full copy of the build-side hash table. Fast for small builds (under ~100 MB, the `join_max_broadcast_table_size` default); **causes OOM for large builds** because each worker tries to hold the whole thing. |
+> | **PARTITIONED (distributed) join** | Both sides are **hash-redistributed across workers** by the join key. Each worker holds only `1/N` of each side. **Prevents OOM** on large builds. Trade-off: an extra network shuffle adds latency. |
+> | **Spill** | Writing the build-side hash table to **local worker disk** (SSD) when worker memory fills. Trades latency for stability — query stays alive instead of OOM-ing. Requires `spill-enabled=true` at the cluster level (a session-level `SET` cannot enable it if the cluster has it off). |
+> | **Dynamic filtering (DF)** | Trino derives a **runtime predicate** (IN-list or min/max range) from the join keys on the **build side** after the build finishes, then pushes that predicate **back into the probe side's scan** to reduce rows read before the join. The single most important optimization for "small Postgres dimension × huge Iceberg fact" joins. |
+>
+> **One-sentence mental model**: in a JOIN, Trino picks one side to **build** a hash table in memory; **BROADCAST** copies that build to every worker (fast, small only); **PARTITIONED** splits both sides across workers (safe for large); **spill** is the safety net when the build-side hash table won't fit; **dynamic filtering** is what makes the **probe** side small in the first place.
+
 ### 4.1 The rule
 
 **Join pushdown is intra-catalog only.** The PostgreSQL connector's join pushdown only fires when both tables being joined live in the **same PostgreSQL catalog** (e.g., `app_pg.public.users` JOIN `app_pg.public.orders`). In that case Trino can rewrite the join into a single SQL statement and send it to Postgres, which executes the join server-side using its own indexes and join algorithms.
@@ -4994,6 +5009,10 @@ PARTITIONED hashes both sides across workers, so no single worker holds the full
 ```sql
 SET SESSION spill_enabled = true;
 ```
+
+> **PREREQUISITE — `SET SESSION spill_enabled=true` only works if the cluster has `spill-enabled=true` in `etc/config.properties`.**
+>
+> Verify with: `SHOW SESSION LIKE 'spill%';` — if `spill_enabled` is not listed or shows as `false`, the cluster admin must enable it at the cluster level first. **`SET SESSION` only overrides cluster defaults — it cannot enable a feature the cluster has disabled.** Engineers hit this trap repeatedly: they paste `SET SESSION spill_enabled = true;` into their query, see no error, then watch the query OOM exactly the same way and conclude "spill doesn't help." It wasn't spill that didn't help — spill never turned on in the first place. The session property silently no-ops against a cluster where `spill-enabled` is the (Trino-default) `false`. Always run the `SHOW SESSION` check first; if the property is missing or `false`, file a ticket with the cluster admin to set `spill-enabled=true` plus `spiller-spill-path=/var/trino/spill` (or equivalent local SSD path) in `etc/config.properties` and restart the coordinator + workers. Only then will the session-level override actually engage.
 
 Spill writes the build-side hash table to local disk when worker memory fills, trading latency for stability. Enable only if you cannot afford the query to fail outright (e.g., an executive dashboard refresh that must complete even if slow). Spill paths require local SSD per worker pod — verify your k8s `Deployment` mounts a fast `emptyDir` or `local-pv` for `spiller-spill-path`.
 
