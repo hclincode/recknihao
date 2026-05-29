@@ -74,6 +74,71 @@ Scenario: **500 GB analytical data, 10 analysts, 50,000 queries/month, average 1
 
 ---
 
+## AWS Athena + Glue + S3 vs on-prem Trino + Iceberg + MinIO — concrete 2026 anchors
+
+When the CTO asks "should we lift-and-shift the lakehouse to AWS instead?", the answer hinges on actual dollar figures, not vibes. This section gives the 2026 AWS pricing anchors you need to do the math, a worked TCO example at SaaS scale, and a crossover heuristic.
+
+**Hard constraint reminder:** `prod_info.md` mandates on-prem only — no public cloud. AWS is out of scope as a real migration target for your stack. Use this section as a sanity-check on whether you're wildly overspending, and as ammo for the next strategy review. Do **not** propose AWS as an action item without an explicit policy change from leadership.
+
+### 2026 AWS pricing anchors (verified against official AWS pricing pages)
+
+| Service | 2026 price | Notes |
+|---|---|---|
+| **Athena (on-demand)** | **$5/TB scanned** | The classic per-query model. Min charge 10 MB per query. Compressed columnar data scans much less than raw size — Parquet typically reduces scanned bytes 5–10x vs CSV. |
+| **Athena Provisioned Capacity** | **$0.30/DPU-hour** | Reserved compute, available since Feb 2026. Cheaper than on-demand once sustained scan rate gets large (rough crossover: > ~50 TB/month scanned). |
+| **Glue ETL (standard)** | **$0.44/DPU-hour** | A DPU = 4 vCPU + 16 GB RAM. Glue is Spark-as-a-service; substitutes for your on-prem Spark ingestion jobs. |
+| **Glue ETL (Flex)** | **$0.29/DPU-hour** | ~34% cheaper, but jobs may start with cold-start delay (minutes). Good for nightly compaction; bad for time-sensitive ingestion. |
+| **Glue Data Catalog** | **First 1M objects free**, then **$1 per 100K accesses** | Replaces your Hive Metastore. Note: Athena *requires* Glue Catalog — you cannot point Athena at an arbitrary external Hive Metastore. This is a lift-and-shift constraint, not a preference. |
+| **S3 Standard** | **$0.023/GB-month** = **$23.55/TB-month** | Replaces MinIO. Add request costs (~$0.005 per 1K PUT, ~$0.0004 per 1K GET) — usually a rounding error at lakehouse scale. |
+
+**Critical lift-and-shift constraint:** Athena requires the Glue Data Catalog. You cannot run Athena against your existing Hive Metastore over a VPN or any other path. A migration means dual-writing or fully cutting over the metadata layer, which is a non-trivial engineering project on top of the data move.
+
+### Worked TCO example — 100 TB lakehouse, 50 TB/month scanned, 200 queries/day
+
+Representative SaaS scale: 100 TB stored in Parquet, 50 TB scanned per month after partition pruning, ~6,000 queries/month (~200/day), nightly compaction job using ~20 DPU-hours/day.
+
+**AWS monthly cost:**
+
+| Line item | Math | Monthly |
+|---|---|---|
+| S3 Standard storage | 100 TB × $23.55/TB-month | **$2,355** |
+| Athena on-demand queries | 50 TB scanned × $5/TB | **$250** |
+| Glue ETL (compaction + ingestion) | 20 DPU-hr/day × 30 days × $0.44/DPU-hr | **$264** |
+| Glue Data Catalog accesses | typically free tier | **~$0** |
+| **AWS subtotal** | | **~$2,869/month** |
+| **AWS annual** | × 12 | **~$34,400/year** |
+| Engineering FTE (managed = less ops, but still need data owner) | 0.1 FTE × $200k | **~$20,000/year** |
+| **AWS total annual** | | **~$54,400/year** |
+
+**On-prem (your existing stack) annual cost:**
+
+| Line item | Annual | Notes |
+|---|---|---|
+| Hardware amortization (already provisioned) | **$0** | Sunk cost on existing k8s cluster |
+| MinIO storage (already provisioned) | **$0** | 100 TB fits in existing capacity |
+| k8s compute (Trino + Spark capacity) | **$0 cash** | Reserved cluster capacity, no marginal $ |
+| Engineering FTE | **$40k – $100k** | 0.2 – 0.5 FTE × $200k fully loaded |
+| **On-prem total annual** | **$40k – $100k** | Dominated entirely by FTE |
+
+**Reading this table honestly:** the AWS infra bill ($34k) is *less than* the on-prem FTE cost ($40k – $100k). So why does on-prem still win for this scale? Because the FTE cost doesn't disappear in the AWS world — you still need someone owning ingestion logic, schema design, dbt models, and dashboard reliability. The "0.1 FTE on AWS vs 0.3 FTE on-prem" delta is real but smaller than the headline numbers suggest. Also: the on-prem hardware here is sunk cost. The moment you have to *buy new hardware specifically for analytics*, the math shifts toward AWS.
+
+### Crossover heuristic — when each side wins
+
+Use this as a back-of-the-envelope filter, not a final answer:
+
+| Workload shape | Winner | Why |
+|---|---|---|
+| **< 10 TB stored AND < 10 TB/month scanned AND spiky query load** | **Cloud (AWS Athena)** | At this scale Athena bill is < $100/month, Glue catalog is free tier, no FTE for cluster ops. On-prem you still pay for idle Trino workers. |
+| **10 – 50 TB stored, moderate steady load** | **Roughly break-even** | Decision driven by org factors (existing hardware? FTE budget? compliance constraints?) more than dollars. |
+| **> 50 TB stored OR > 30 TB/month scanned AND steady predictable load AND hardware already paid for** | **On-prem (your stack)** | S3 storage alone exceeds $1,000/month at this point; Athena scans add another $150+. On-prem hardware amortization is $0 if already bought. |
+| **Any workload requiring on-prem (compliance, data sovereignty, your `prod_info.md`)** | **On-prem (mandatory)** | Not a cost decision. |
+
+**Break-even rule of thumb:** somewhere around **20 – 40 TB stored with moderate query volume**. Below that, AWS is cheaper (you don't pay the Trino-cluster-always-on tax). Above that, on-prem pays for its hardware within **~18 months** because cloud storage costs scale linearly with data volume while on-prem hardware is one-time.
+
+**Don't forget:** the crossover analysis assumes the FTE work gets done either way. If you're underbudgeting engineering on the on-prem side and the system rots (stale dashboards, missed compaction, runaway snapshots), the real on-prem cost is much higher than the table shows. AWS forces a baseline level of reliability via managed services; on-prem forces you to staff for it.
+
+---
+
 ## The hidden costs of self-hosted
 
 These don't show up in any cost dashboard. They show up as a slow dashboard, a stale report, or a 3 a.m. page.
