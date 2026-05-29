@@ -33,8 +33,8 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.447 | 143 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
-| Cost considerations for analytical workloads at SaaS scale | PASSED | 4.153 | 9 |
-| Query performance basics: partitioning, indexing strategy for analytics | PASSED | 4.518 | 7 |
+| Cost considerations for analytical workloads at SaaS scale | PASSED | 4.138 | 10 |
+| Query performance basics: partitioning, indexing strategy for analytics | PASSED | 4.407 | 8 |
 | Lakehouse schema design: fact tables, dimension tables, denormalization | PASSED | 4.650 | 5 |
 | Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.570 | 18 |
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |

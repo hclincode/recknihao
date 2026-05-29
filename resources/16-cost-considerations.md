@@ -4,6 +4,20 @@
 
 ---
 
+## Quick Reference: Key Terms
+
+| Term | One-line meaning |
+|---|---|
+| **DPU (Data Processing Unit)** | 4 vCPU + 16 GB RAM — the billing unit used by AWS Glue and Athena Provisioned Capacity. |
+| **DPU-hour** | 1 DPU running for 1 hour; Glue ETL charges $0.44/DPU-hour standard ($0.29 Flex). |
+| **FTE (Full-Time Equivalent)** | 1.0 FTE = one full-time engineer for a year; 0.2 FTE ≈ 8 hours/week of attention. |
+| **TCO (Total Cost of Ownership)** | All costs combined — hardware, software, cloud bills, AND people-time — not just the line items on an invoice. |
+| **Lift-and-shift** | Moving a workload from on-prem to cloud (or vice versa) without re-architecting it — same shape, new home. |
+| **On-demand pricing** | Pay per query scanned (e.g., Athena $5/TB); no reservation, no minimum commitment. Bill scales with usage. |
+| **Provisioned Capacity** | Pre-purchase compute at a lower per-unit rate (e.g., Athena $0.30/DPU-hour with 4 DPU minimum) for predictable workloads. |
+
+---
+
 ## Quick answer (TL;DR)
 
 - **Storage is almost free** on your stack: MinIO on bare-metal + Parquet compression typically lands at ~$0 incremental per TB; the hardware is already paid for.
@@ -91,7 +105,16 @@ When the CTO asks "should we lift-and-shift the lakehouse to AWS instead?", the 
 | **Glue Data Catalog** | **First 1M objects free**, then **$1 per 100K accesses** | Replaces your Hive Metastore. Note: Athena *requires* Glue Catalog — you cannot point Athena at an arbitrary external Hive Metastore. This is a lift-and-shift constraint, not a preference. |
 | **S3 Standard (tiered)** | **First 50 TB: $0.023/GB = $23.55/TB-month**<br>**Next 450 TB: $0.022/GB = $22.53/TB-month**<br>**Over 500 TB: $0.021/GB = $21.50/TB-month** | Replaces MinIO. Tiered pricing applies per account per region per month. Add request costs (~$0.005 per 1K PUT, ~$0.0004 per 1K GET) — usually a rounding error at lakehouse scale. **For quick estimates at <100 TB, $23/TB-month is within 4% of actual and acceptable for VP-level memos.** |
 
-**Critical lift-and-shift constraint:** Athena requires AWS Glue Data Catalog — it cannot connect to an arbitrary Hive Metastore. If you're self-hosting Hive Metastore (as the production stack does), migration to Athena requires either (a) migrating to Glue Catalog or (b) running a Glue-compatible metastore. This is a hidden migration cost not reflected in the simple dollar comparison. You cannot point Athena at your existing Hive Metastore over a VPN or any other path. A migration means dual-writing or fully cutting over the metadata layer, which is a non-trivial engineering project on top of the data move.
+**Critical lift-and-shift constraint — Athena requires AWS Glue Data Catalog:** Athena requires AWS Glue Data Catalog — **it cannot connect to a self-hosted Hive Metastore**. Migration to Athena means one of:
+
+- **(a) Migrate all table metadata to Glue Catalog** — requires re-registering every table, every partition, and every schema. For an Iceberg lakehouse, every Iceberg table's metadata-pointer entry must be re-created in Glue. This is a metadata project on top of the data move.
+- **(b) Run AWS Lake Formation as the catalog layer** — fronts Glue Catalog with row/column-level governance and tag-based access. Adds setup complexity but supports fine-grained access policies.
+
+**There is no path (c)** — you cannot point Athena at your existing self-hosted Hive Metastore over a VPN, VPC peering, or PrivateLink. The Athena → Glue binding is hard-wired in the service.
+
+**Glue Catalog pricing reality**: first 1M objects free, then $1 per 100,000 API accesses beyond that. Each table, partition, and column counts as objects; each table/partition lookup from a query counts as accesses. For a **100-table lakehouse with moderate dashboard traffic, Glue Catalog typically adds $50–200/month** in API access fees — small relative to the Athena query bill but a real recurring line item to budget for, and easy to forget in lift-and-shift estimates. Heavy partition scanners (e.g., dashboards that hit thousands of partitions per query) can push this materially higher.
+
+For the production on-prem stack (`prod_info.md`), this constraint matters as ammunition for "no, we cannot lift-and-shift to Athena without rebuilding the catalog layer" — not as a planning input for any actual migration.
 
 ### Worked TCO example — 80 TB lakehouse, 50 TB/month scanned, 200 queries/day
 
@@ -121,6 +144,19 @@ Representative SaaS scale: 80 TB stored in Parquet, 50 TB scanned per month afte
 | **On-prem total annual** | **$40k – $100k** | Dominated entirely by FTE |
 
 **Reading this table honestly:** the AWS infra bill ($28k) is *less than* the on-prem FTE cost ($40k – $100k). So why does on-prem still win for this scale? Because the FTE cost doesn't disappear in the AWS world — you still need someone owning ingestion logic, schema design, dbt models, and dashboard reliability. The "0.1 FTE on AWS vs 0.3 FTE on-prem" delta is real but smaller than the headline numbers suggest. Also: the on-prem hardware here is sunk cost. The moment you have to *buy new hardware specifically for analytics*, the math shifts toward AWS.
+
+#### MinIO is NOT free — the real all-in $/TB-month estimate
+
+The "$0 marginal storage cost" line for on-prem is a sunk-cost framing — true once the hardware is bought, but misleading if you're sizing new capacity or comparing TCO honestly against S3. **MinIO on-prem storage is NOT free.** The all-in cost is **$15–25/TB-month** when you include:
+
+- **Disk hardware**: NVMe/SSD at $0.05–0.10/GB amortized over 5 years (HDD is cheaper but rarely used for lakehouse hot data).
+- **Rack, power, cooling**: applies a roughly 1.5–2x multiplier on the raw hardware spend. Data center floor space and electricity are real recurring costs.
+- **Erasure coding overhead**: MinIO's default EC 4+2 = **1.5x raw storage for 1 TB usable** (4 data shards + 2 parity shards). EC 8+4 is also 1.5x; EC 8+2 is 1.25x but with lower durability. You always pay for parity.
+- **Ops and refresh allowance**: disk failures, node retirements, 5-year hardware refresh cycle.
+
+**For a quick budget estimate, use $20/TB-month all-in for MinIO.** That compares against **S3 Standard at $23.55/TB-month** — roughly equivalent at small scale. **On-prem gets relatively cheaper at >50 TB** because (a) better EC ratios become viable at higher disk counts, (b) hardware amortization spreads across more usable TB, and (c) S3 tiered pricing only drops to $21.50/TB-month above 500 TB whereas on-prem fixed costs (rack, power) stop scaling linearly.
+
+**What this means for the "$0 marginal cost" framing above:** when comparing against S3, you should add ~$20/TB-month to the on-prem column for any new capacity that isn't truly sunk. The 80 TB example above adds ~$19k/year in honest MinIO TCO. That brings on-prem total annual to **$59k–$119k/year** vs AWS **$48k/year** — still close, with the decision dominated by FTE cost, ops appetite, and on-prem mandate (per `prod_info.md`).
 
 ### Crossover heuristic — when each side wins (indexed on TB/month SCANNED)
 

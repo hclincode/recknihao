@@ -33,6 +33,21 @@ Search this document by keyword. Major topics and where they live:
 
 ---
 
+## Quick Reference: Key Terms (federated join vocabulary)
+
+When you read EXPLAIN ANALYZE on a federated query, or tune a Trino JOIN, these terms are the load-bearing vocabulary:
+
+| Term | One-line meaning |
+|---|---|
+| **Build side** | The table loaded into memory first as a hash table; usually the **smaller** table. Trino's CBO picks the build side automatically using stats. |
+| **Probe side** | The table streamed through the hash table; usually the **larger** table. Each probe row is looked up against the hash table to find matches. |
+| **BROADCAST join** | Replicates the build side to every worker (via `RemoteExchange[REPLICATE]`) — fast for small builds, **OOM risk for large builds**. Default for builds under `join-max-broadcast-table-size` (100 MB). |
+| **PARTITIONED join** | Hash-redistributes BOTH sides by the join key (via `RemoteExchange[REPARTITION]`) — safer for large tables, but adds network shuffle on both sides. |
+| **Dynamic filtering** | Pushes join-key values from the build side to the probe side's scan at runtime to prune the probe scan (often by 10–100×). See Section 5. |
+| **Spill** | Writes hash table overflow to local disk when memory is full; requires `spill-enabled=true` and `spiller-spill-path` configured on workers. Slows the join but prevents OOM. |
+
+---
+
 ## 0. CRITICAL — OSS Trino 467 has NO native PostgreSQL connection pooling
 
 > **Read this before you touch any catalog properties file.**

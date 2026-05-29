@@ -4,6 +4,22 @@ A guide for SaaS engineers and oncall members investigating why analytics querie
 
 ---
 
+## Quick Reference: Key Terms (EXPLAIN ANALYZE vocabulary)
+
+When you read Trino's EXPLAIN ANALYZE output, you'll hit these terms. Definitions you can use as a runtime crib sheet:
+
+| Term | One-line meaning |
+|---|---|
+| **Fragment** | A unit of parallelism in Trino; a query compiles into fragments that run in parallel (e.g., `Fragment 0` = coordinator output, `Fragment 1` = source scan, `Fragment 2` = aggregation). |
+| **Exchange** | Operator that moves data between fragments/workers. `RemoteExchange` crosses the network between workers; `LocalExchange` stays inside one worker (cheap). |
+| **REPARTITION** | Exchange type that **hash-distributes rows by a key** (used for GROUP BY and distributed/hash joins) — every row goes to exactly one downstream worker chosen by hash(key). |
+| **REPLICATE** | Exchange type that **copies all rows to every worker** (used for broadcast joins) — fast when the replicated side is small, OOM risk when it's not. |
+| **CPU time** | Compute-only time (excludes waits). When CPU ≈ Scheduled, the operator is **compute-bound** (more cores would help). |
+| **Scheduled time** | Wall-clock time for the operator including waits. When Scheduled >> CPU, the operator is **I/O-bound or network-bound** (waiting on data or downstream consumers). |
+| **Blocked Input / Blocked Output** | Time waiting on upstream/downstream operators. Blocked Input = waiting for data from upstream; Blocked Output = downstream consumer is slow. |
+
+---
+
 ## Triage priority order
 
 When someone reports "queries are slow," work through these in order — each step takes 1–5 minutes and the answer in step 1 often makes the later steps irrelevant:
@@ -405,15 +421,91 @@ LIMIT 20;
 
 If one tenant_id has 200M rows and the others have 50K, that's 4,000x skew. All 200M rows land on one Trino worker; the others sit idle while that worker grinds.
 
+### Detecting GROUP BY skew with EXPLAIN ANALYZE VERBOSE (per-driver distribution)
+
+Default `EXPLAIN ANALYZE` aggregates stats across all drivers per operator, which **hides skew**: one driver doing 100x the work of others looks the same as evenly-distributed work because the totals are summed. To see per-driver distribution, you need `EXPLAIN ANALYZE VERBOSE`.
+
+```sql
+EXPLAIN ANALYZE VERBOSE
+SELECT tenant_id, COUNT(*) AS event_count
+FROM iceberg.analytics.feature_usage
+WHERE event_date = CURRENT_DATE - INTERVAL '1' DAY
+GROUP BY tenant_id;
+```
+
+In the VERBOSE output, look at the **Aggregation** operator's per-driver stats — VERBOSE prints `inputRows`, `inputBytes`, `cpuTime`, and `wallTime` distributions across drivers (min / p50 / max). The telltale signs of GROUP BY skew:
+
+| What you see | What it means |
+|---|---|
+| `inputRows` max ≈ 100x p50 across drivers on the Aggregation operator | One driver is processing the whale tenant; the rest finish quickly and idle. Classic whale-tenant skew. |
+| `cpuTime` max >> p50 on Aggregation | Same — the skewed driver burns all the CPU; query wall time = the slowest driver's wall time. |
+| `maxDriversPerTask` is low (e.g., 4) and you have skew | Even fewer drivers to spread work across. Bumping driver parallelism alone won't fix whale skew, but very low driver counts amplify the symptom. |
+| Final aggregation has 1 driver but partial aggregation has N drivers | Expected — final aggregation merges partials at the coordinator. Skew problems live in the PARTIAL aggregation stage, not the FINAL. |
+
+If the Aggregation operator's per-driver `inputRows` is roughly even (min ≈ p50 ≈ max), you do NOT have skew — go look elsewhere (compaction, partition pruning, concurrency). If max is 10-100x p50, you have skew and the fixes below apply.
+
 ### Fixes for skew
 
-**If one tenant is enormous:**
-- Create a dedicated table for that tenant: `feature_usage_acme`.
-- Build a nightly rollup: one row per tenant/day/feature rather than one row per event.
+#### Fix 1 (primary fix for whale-tenant GROUP BY skew): two-level GROUP BY with a salt column
 
-**If dates are skewed (one day has 10x data):**
-- Add a sub-partition (bucket by user_id hash): `partitioning = ARRAY['day(event_date)', 'bucket(user_id, 100)']`.
-- This splits each day's data into 100 equal buckets, enabling parallel reads.
+The canonical fix when one tenant dominates a GROUP BY is to **break that tenant's rows across N workers by adding a random salt**, aggregate first by `(tenant_id, salt)`, then merge the N partial results by `tenant_id`. The first aggregation distributes the whale's rows across N workers (no single worker holds them all); the second aggregation merges N partial counts per tenant, which is cheap because it's only N rows per tenant regardless of the tenant's row count.
+
+```sql
+-- Two-level GROUP BY: breaks whale-tenant skew at READ time.
+-- Step 1: First-level aggregation with salt — distributes the whale across N workers.
+WITH salted AS (
+  SELECT
+    tenant_id,
+    CAST(FLOOR(RANDOM() * 8) AS BIGINT) AS salt,   -- 8 = number of worker buckets to spread across
+    event_count
+  FROM iceberg.analytics.feature_usage
+  WHERE event_date = CURRENT_DATE - INTERVAL '1' DAY
+),
+partial AS (
+  SELECT tenant_id, salt, COUNT(*) AS partial_count
+  FROM salted
+  GROUP BY tenant_id, salt                          -- N partial rows per tenant, distributed across workers
+)
+-- Step 2: Final aggregation merges the N partial counts per tenant. Cheap — only N rows per tenant.
+SELECT tenant_id, SUM(partial_count) AS total_count
+FROM partial
+GROUP BY tenant_id;
+```
+
+**How to pick N (the salt cardinality):** N should roughly equal the number of Trino worker drivers available for the Aggregation stage. Too small (N=2) and you don't spread the whale enough; too large (N=1000) and the partial aggregation produces 1000 rows per tenant, which adds memory and shuffle overhead with no further skew benefit. Start with N = (number of workers × `task.concurrency`); typical values land at 8-32. Verify with `EXPLAIN ANALYZE VERBOSE` after — per-driver `inputRows` on the partial Aggregation operator should be roughly even.
+
+**Works for SUM/COUNT/MIN/MAX (all algebraic aggregates).** For non-algebraic aggregates like `COUNT(DISTINCT col)` or `APPROX_DISTINCT`, the salt trick needs care — `SUM(partial_count)` over distinct-counts double-counts values that appear in multiple salt buckets. For exact distinct counts on whale tenants, use `approx_distinct(col)` (HyperLogLog-based, mergeable) at the partial level and merge with `approx_distinct` again at the final level, or fall back to fix 3 below (pre-aggregated rollup tables).
+
+#### Fix 2: dedicated table for the whale tenant
+
+For a single tenant that's persistently 100-1000x larger than others (an enterprise account, a noisy bot, etc.), the cleanest fix is to write that tenant to its own Iceberg table — `feature_usage_acme` — and route queries that filter on `tenant_id = 'acme'` to the dedicated table. The application or a thin SQL view picks the right table at query time. This trades schema complexity for fully-parallel scans on both the whale and the rest of the population. Best when there are only a handful of whales (≤5) and they're stable.
+
+#### Fix 3: nightly pre-aggregated rollup
+
+Build a daily rollup (one row per `tenant_id` × `event_date` × `feature_name`) via a nightly Spark job. Dashboards that ask "total events per tenant per day" then read 10K rows from the rollup instead of scanning 200M rows from the raw fact table. The whale stops being a hot path because the per-tenant rollup row is the same size regardless of how many events the tenant generated. Best for high-frequency dashboard queries where 5-15 minute staleness is acceptable. See `08-schema-design-for-analytics.md` for the rollup table pattern.
+
+#### What about `bucket(tenant_id, N)` — does that fix GROUP BY skew? NO.
+
+> **Critical clarification — bucket partitioning does NOT fix read-time GROUP BY skew.** A common (wrong) instinct is "we have one giant tenant, let's bucket the partition spec by `tenant_id` to spread it across files: `partitioning = ARRAY['day(event_date)', 'bucket(tenant_id, 64)']`." This does NOT solve whale-tenant GROUP BY skew, because Iceberg's `bucket()` transform **hashes each distinct value to exactly one bucket**. All rows for `tenant_id='acme'` still hash to the same bucket and still land on the same worker at GROUP BY time. The hash partitions the *set of tenants* across 64 buckets — not the rows of a single tenant.
+>
+> What `bucket(tenant_id, N)` actually achieves:
+> - **WRITE side**: distributes write load across N buckets — useful when many tenants write concurrently and you want to spread ingestion across files (reduces small-files on writes, balances Spark task output).
+> - **READ side, multi-tenant aggregation**: distributes the *scan* across workers when many tenants are queried together — e.g., a cross-tenant `GROUP BY plan_type` benefits because the 64 buckets read in parallel.
+> - **READ side, whale tenant**: does NOTHING. One tenant's rows still hash to one bucket, so one worker still processes them at GROUP BY time.
+>
+> For the whale-tenant case, reach for **fix 1 (salt + two-level GROUP BY)**, **fix 2 (dedicated table)**, or **fix 3 (rollup)** — not bucketing.
+
+#### Fix 4: bucket sub-partitioning when DATES are skewed (not tenants)
+
+If the skew is on the time axis — one day has 10x the rows because of a product launch or campaign — adding a bucket sub-partition spreads each day's data across N parallel files. Here bucketing helps because the skew is in the cardinality of users-within-a-day (many users, not one whale), so `bucket(user_id, 100)` distributes them evenly:
+
+```sql
+-- Trino DDL: column-first bucket syntax.
+ALTER TABLE iceberg.analytics.feature_usage
+  SET PROPERTIES partitioning = ARRAY['day(event_date)', 'bucket(user_id, 100)'];
+```
+
+This splits each day's data into 100 equal buckets, enabling parallel reads when scanning a single day. Use this only when you have many users-per-day and the skew is at the day level, not when one tenant dominates.
 
 > **ENGINE NOTE — `bucket()` argument order differs between Trino and Spark SQL.** The snippet above is **Trino syntax**, where the column comes first: `bucket(column, N)`. If you run the equivalent DDL in Spark SQL, the argument order is **reversed**: `bucket(N, column)` — e.g., `PARTITIONED BY (days(event_date), bucket(100, user_id))`. Same Iceberg transform on disk; different SQL spelling. Pasting Trino's column-first form into Spark (or vice versa) gives you a parse error.
 
@@ -696,7 +788,7 @@ On a stack where workers cannot scale horizontally on demand (the production set
 | One query slow, others fine | EXPLAIN ANALYZE `Physical Input:` (and `$files` / `EXPLAIN ANALYZE VERBOSE` for file count) | Add partition filter, run compaction |
 | One query stuck RUNNING for hours, blocking the queue | `system.runtime.queries` JOIN `system.runtime.tasks` filtered to `state='RUNNING'` and long `running_min` | `CALL system.runtime.kill_query(query_id => '...')` — see Immediate remediation section above |
 | Slow after midnight | Compaction CronJob logs | Fix the CronJob, run compaction manually |
-| Slow for one tenant | Row count by tenant | Dedicated table or nightly rollup |
+| Slow for one tenant (whale) | Row count by tenant; confirm with `EXPLAIN ANALYZE VERBOSE` per-driver `inputRows` on Aggregation operator | **Salt + two-level GROUP BY** (Step 5 fix 1) for ad-hoc queries; dedicated table or nightly rollup for sustained workloads. Do NOT use `bucket(tenant_id, N)` — it does not fix read-time GROUP BY skew. |
 | OOM errors (`EXCEEDED_LOCAL_MEMORY_LIMIT`) | `query.max-memory-per-node` hit on one worker | Narrow query scope, pre-aggregate, add partition filters. For fact-to-dim joins: `SET SESSION join_distribution_type = 'BROADCAST'`. Safety net: enable spill-to-disk (`spill-enabled=true`). See Step 9. |
 | OOM errors (`EXCEEDED_DISTRIBUTED_MEMORY_LIMIT`) | `query.max-memory` cluster-wide limit hit | Same as above; or increase `query.max-memory` if query is legitimately large. See Step 9 for BROADCAST joins and spill config. |
 | Slow after data model change | EXPLAIN ANALYZE `Input:` rows and `Physical Input:` bytes | Compare filter coverage before/after |
@@ -712,7 +804,9 @@ On a stack where workers cannot scale horizontally on demand (the production set
 
 **Partition pruning**: Trino's ability to skip data files where the partition column value can't match the WHERE clause. Only works if you filter on a partition column.
 
-**Partition skew**: One partition having dramatically more rows than others. Causes one worker to do most of the work while others idle.
+**Partition skew**: One partition having dramatically more rows than others. Causes one worker to do most of the work while others idle. **Read-time GROUP BY skew** (one key dominates) is fixed with a salt column + two-level GROUP BY, dedicated table, or rollup — NOT with `bucket(key, N)` partitioning, because Iceberg bucketing hashes each distinct value to one bucket. See Step 5.
+
+**Salt / two-level GROUP BY**: A SQL pattern for breaking whale-key GROUP BY skew. Add a random integer salt column (1..N), aggregate by `(key, salt)` first to distribute the whale across N workers, then SUM the partial results by `key` to get the final answer. See Step 5 fix 1.
 
 **Small files problem**: Many tiny Parquet files (< 32 MB) accumulated from frequent small writes. Metadata overhead per file turns into minutes of I/O overhead at query time.
 
