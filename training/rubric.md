@@ -40,8 +40,8 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.4101 | 9 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.609 | 4 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.4938 | 142 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.4744 | 57 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.4877 | 143 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.4662 | 58 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 4.6885 | 6 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4925 | 265 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.6948 | 8 |
@@ -50,6 +50,34 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 400 — 2026-05-30 (EXTENDED PHASE) — Q1 Iceberg format v1 vs v2 (append-only vs delete-files; v1→v2 metadata-only upgrade); Q2 dbt + Trino for Iceberg (dbt-trino adapter; four critical gotchas: append-default, on_schema_change=ignore, no MATCH conditional, insert_overwrite spark-only)
+
+**Q1** — Iceberg format v1 vs v2: v1 append-only (no delete files); v2 adds delete files enabling DELETE/UPDATE/MERGE; v1→v2 upgrade metadata-only (instant); default to v2 for any mutating table; v1 fine for pure append; query overhead ~2-3%.
+
+Responder gave: All core technical points correct — v1 lacks position/equality delete file support so DML is impossible without rewriting whole partitions; v2 introduces position deletes + equality deletes that enable row-level DELETE/UPDATE/MERGE; v1→v2 upgrade is genuinely metadata-only via `ALTER TABLE ... SET TBLPROPERTIES('format-version'='2')` (no data file rewrite); "default to v2" is industry consensus and matches Iceberg 1.5.2 + Trino 467 + Spark in the prod stack (both engines write v2 by default since Iceberg 1.4+); "~2-3% query overhead" is in the right ballpark for v2 reads against tables with few delete files but is a hand-wavy number without source — actual overhead scales linearly with equality delete file count (the 847-delete-file bug #12838 from iter395 is the failure mode). Gaps: didn't mention CoW vs MoR row-level operation modes (`write.delete.mode`, `write.update.mode`, `write.merge.mode`) which is the actual v2 tuning knob; didn't reference Iceberg 1.5.2 + Trino 467 explicit compatibility in prod stack; didn't mention v3 deletion vectors (now in 1.5+) that fix the equality-delete-amplification cost; no ALTER TABLE syntax shown. Jargon used without unpacking: "delete files" (positional vs equality not glossed), "metadata-only" (not explained = no data file rewrite).
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 3.5 |
+| Practical applicability | 4.0 |
+| Completeness | 4.0 |
+| **Average** | **4.0 PASS** |
+
+**Q2** — dbt + Trino for Iceberg: dbt-trino adapter profiles.yml; four critical gotchas: default is 'append' not 'merge' (causes duplicates), on_schema_change='ignore' default (silent data loss), no conditional update on MATCH (stale overwrites fresh), insert_overwrite is spark-only; canonical config template; maintenance schedule after dbt runs.
+
+Responder gave: dbt-trino adapter is the correct package — correct (`dbt-trino` PyPI package, profiles.yml entry with `method: jwt` fits the on-prem JWT auth in prod_info.md). Four gotchas all technically correct: (a) `incremental_strategy` default IS `append` not `merge` — verified against dbt-trino docs, this DOES cause duplicates if `unique_key` re-arrives; (b) `on_schema_change` default IS `ignore` — silent column drop = data loss confirmed; (c) `merge` strategy with no `merge_update_columns` filter has no conditional update predicate so a stale source row will overwrite a fresh target row — real footgun; (d) `insert_overwrite` strategy IS Spark-only — `dbt-trino` does not support it (would need `delete+insert` instead). However, answer references "canonical config template" + "maintenance schedule" without actually showing the YAML or the maintenance command list — engineer has to infer or look up. Gaps: missed `unique_key` requirement for `merge` strategy (without it, merge silently degrades to append); missed `incremental_predicates` for partition pruning on large Iceberg fact tables (the production scale lever); missed dbt-trino version pinning vs Trino 467 + Iceberg 1.5.2 compat note; missed `cluster_by` / partition spec being declared in dbt model config (`partition_by=['day(event_ts)']`); missed `post-hook` pattern for running `ALTER TABLE ... EXECUTE optimize` and `expire_snapshots` from inside the dbt model. Jargon used without unpacking: "MATCH", "insert_overwrite", "merge strategy" — beginner reading this would not know the JOIN-on-key semantics dbt's merge implies.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 3.0 |
+| Practical applicability | 3.5 |
+| Completeness | 3.5 |
+| **Average** | **3.625 FAIL** |
+
+**Iter 400 average: 3.8125 FAIL** (Q1 4.0 PASS, Q2 3.625 FAIL — Q2 clarity/completeness gaps pulled below 4.0)
 
 ### Iter 399 — 2026-05-30 (EXTENDED PHASE) — Q1 Concurrent INSERT + MERGE to Iceberg (optimistic concurrency + commit.retry.num-retries); Q2 SET SESSION vs catalog .properties (hyphens-vs-underscores gotcha + OPA tenant-override guard)
 

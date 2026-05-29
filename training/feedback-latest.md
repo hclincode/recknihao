@@ -1,43 +1,52 @@
-# Iter 399 Feedback (EXTENDED PHASE — end-of-iteration only)
+# Judge Feedback — Iter 400
 
-## Result: 4.0625 — PASS
+**Average: 3.8125 FAIL** (Q1 4.0 PASS, Q2 3.625 FAIL)
 
-- Q1 (concurrent INSERT + MERGE Iceberg): 4.0 PASS
-- Q2 (SET SESSION vs catalog .properties): 4.125 PASS
+Pattern this iteration: the responder nailed the *what* (factual claims correct on both questions) but consistently lost points on *how* (no shown YAML / ALTER syntax) and *what-it-means-for-a-beginner* (jargon used without unpacking). This is the same gap that has appeared 4+ times in the last 10 iterations: correct mechanism + missing concrete syntax + unglossed jargon.
 
 ---
 
-## Pattern across both answers
+## Q1 — Iceberg format v1 vs v2 → 4.0 PASS
 
-The responder continues the consistent ~4.0–4.4 PASS band: correct core mechanism, production-stack-fit advice (on-prem Spark+Iceberg 1.5.2+HMS for Q1, Trino 467+OPA for Q2), one concrete actionable knob in each answer (`commit.retry.num-retries=4→8-12` for Q1, hyphen-vs-underscore gotcha for Q2). Both answers correctly identified the most important "what to do next" lever for an application engineer.
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Technical accuracy | 4.5 | v1 append-only, v2 delete-files-for-DML, v1→v2 metadata-only — all correct against Iceberg 1.5.2 spec. "~2-3% overhead" is hand-wavy but in-bounds for sparse delete tables. |
+| Beginner clarity | 3.5 | "delete files," "metadata-only," "MERGE" used without glossing. No example. |
+| Practical applicability | 4.0 | Clear decision rule (v2 unless pure append; upgrade is free). Missing `ALTER TABLE ... SET TBLPROPERTIES('format-version'='2')` exact syntax. |
+| Completeness | 4.0 | Covers when, upgrade path, overhead. Missing CoW vs MoR (`write.delete.mode` / `write.update.mode` / `write.merge.mode` — the real v2 tuning knob), v3 deletion vectors, prod-stack compat note (Iceberg 1.5.2 + Trino 467 both write v2 by default). |
 
-The recurring soft spot is **completeness on adjacent operational knobs** — Q1 named `commit.retry.num-retries` but didn't surface its three sibling backoff properties (`min-wait-ms`, `max-wait-ms`, `total-timeout-ms`) or the deeper `write.isolation-level` lever which is the real tuning knob for MERGE-vs-INSERT conflicts. Q2 named the hyphen/underscore gotcha but didn't surface the `catalog.property` prefix requirement that engineers will hit first when typing `SET SESSION` against a catalog property. Both gaps cost ~0.5 on Completeness without affecting Accuracy or Practical Applicability.
+## Q2 — dbt + Trino for Iceberg → 3.625 FAIL
 
-Beginner clarity dipped to 3.5 on Q1 because "optimistic concurrency," "atomically," and "CommitFailedException" were used without definition. A one-line plain-English gloss ("two writers race; whoever commits last sees the other already won and retries") would have lifted clarity to 4.5.
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Technical accuracy | 4.5 | All four gotchas correct: `incremental_strategy` default `append`, `on_schema_change` default `ignore`, no MATCH conditional on merge, `insert_overwrite` Spark-only. dbt-trino is the right adapter. |
+| Beginner clarity | 3.0 | Dense gotcha list with no unpacking. "MATCH," "merge strategy," "insert_overwrite" assumed familiar. No YAML shown. |
+| Practical applicability | 3.5 | References "canonical config template" + "maintenance schedule" but doesn't show them. Engineer needs to look it up. Production-fit (dbt is permitted per prod_info.md). |
+| Completeness | 3.5 | Missing: `unique_key` requirement (merge silently degrades to append without it), `incremental_predicates` for partition pruning, `partition_by` model config, `post-hook` pattern for `optimize` + `expire_snapshots`, dbt-trino version pinning. |
 
-## Teacher actions next (iter 400)
+---
 
-1. **MEDIUM — Iceberg concurrent write resource expansion**: add the full retry-backoff property family (`commit.retry.min-wait-ms=100`, `commit.retry.max-wait-ms=60000`, `commit.retry.total-timeout-ms=1800000`) with an example timeline showing how 4 retries × exponential backoff fits inside the 30-minute total timeout. Add `write.isolation-level=serializable` vs `snapshot` explanation — this is the right knob for MERGE-vs-INSERT conflict severity in Iceberg 1.5.2, and the responder missed it.
+## Teacher actions next (iter 401)
 
-2. **MEDIUM — MERGE conflict shape callout**: add a CoW-MERGE-vs-INSERT conflict-detection note: CoW MERGE rewrites files that an overlapping INSERT may also touch, producing a file-level snapshot conflict (not just a metadata-pointer race). This nuance matters for engineers asking specifically about INSERT + MERGE rather than INSERT + INSERT.
+1. **HIGH (Q2 root cause)** — Expand `resources/` dbt-trino guide with **actual YAML examples** for each of the four gotchas:
+   - `incremental_strategy: 'merge'` + `unique_key: 'id'` + `merge_update_columns: [...]` (fix the conditional-update gap)
+   - `on_schema_change: 'append_new_columns'` or `'sync_all_columns'` (fix silent data loss)
+   - `incremental_predicates: ["DBT_INTERNAL_DEST.day >= current_date - 7"]` (partition pruning at production scale)
+   - Explicit "do NOT use `insert_overwrite`" callout with the `delete+insert` substitute
+2. **HIGH (Q2 maintenance gap)** — Add canonical `post-hook` snippet showing `ALTER TABLE {{ this }} EXECUTE optimize` and `ALTER TABLE {{ this }} EXECUTE expire_snapshots(retention_threshold => '7d')` so the "maintenance schedule" claim is concrete.
+3. **MEDIUM (Q1 row-level mode gap)** — In Iceberg format-version resource, add the CoW vs MoR decision table tied to `write.delete.mode`, `write.update.mode`, `write.merge.mode` — this is the actual v2 tuning knob the responder missed.
+4. **MEDIUM (Q1 prod-stack tie)** — Add explicit Iceberg 1.5.2 + Trino 467 default behavior note: both write v2 by default, so the question "should I use v2" is moot for *new* tables in this stack — the live question is "do I need to upgrade legacy v1 tables and which mode (CoW/MoR) should I pick for my write rate."
+5. **LOW (beginner clarity recurring)** — Standing teacher prompt: gloss any of these on first use — "delete files (positional vs equality)," "metadata-only (no data file rewrite)," "MATCH (the WHEN MATCHED THEN UPDATE branch of a SQL MERGE)," "merge strategy (dbt's incremental mode that does an upsert via SQL MERGE INTO under the hood)."
 
-3. **LOW — Trino session property catalog-prefix callout**: add explicit one-liner that catalog session properties require `SET SESSION <catalog>.<property_name>=<value>` prefix syntax (e.g. `SET SESSION iceberg.target_split_size='128MB'`), not bare `SET SESSION target_split_size=...`. Add `SHOW SESSION` mention for discovering available session-tunable properties.
+## Judge probe targets next (iter 401)
 
-4. **LOW — Beginner-clarity layer for concurrency jargon**: add a one-line plain-English gloss for "optimistic concurrency control" (e.g. "no lock taken upfront; whoever commits first wins, others retry"). The responder uses the term frequently and a definition layer would lift beginner-clarity from 3.5 to 4.5 without extra length.
+1. **2nd-angle v1 vs v2** — "I have a legacy v1 table receiving DELETE statements from a dbt model — what happens?" (probes whether responder knows DML fails on v1 or whether engine silently rewrites whole partitions, and whether they recommend the v1→v2 upgrade as the fix).
+2. **2nd-angle dbt-trino merge** — "My dbt incremental merge model is producing duplicates — what should I check?" (probes whether responder knows `unique_key` is required and `incremental_strategy` defaults to `append`).
+3. **CoW vs MoR 3rd-angle** — "MERGE INTO is rewriting 80GB per run on a 200GB table — how do I switch to row-level deletes?" (probes `write.merge.mode=merge-on-read` + delete file format).
+4. **Carry-forward backlog** — write.isolation-level 2nd-angle, SHOW SESSION/catalog-prefix 2nd-angle, HMS→Nessie no-downtime, SPILL_FAILED 60GB at 200GB cap, MERGE INTO rollback, OPA-override timeout, schema registry compat, EXPLAIN TYPE IO + VALIDATE, result caching 2nd-angle, Iceberg branches fast_forward 2nd-angle, JWT+OPA concurrency, partition spec migration + rewrite_data_files, Iceberg tagging 3rd-angle, fs.cache 3rd-angle JMX, bucket(tenant_id) high-cardinality 2nd-angle, PERCENT_RANK/NTILE 3rd-angle, RANGE INTERVAL gap-day semantics.
 
-## Judge probe targets next (iter 400)
+## Trajectory iter 391–400
 
-1. **`write.isolation-level` 2nd angle** — ask "MERGE keeps failing under concurrent INSERTs after raising retries to 12; what's the next knob?" to test whether responder reaches for isolation-level vs just more retries.
-2. **`SHOW SESSION` / catalog-prefix syntax 2nd angle** — ask "how do I find which Iceberg properties are session-tunable" to probe `SHOW SESSION` knowledge and the catalog-prefix rule.
-3. **Carry-forward backlog** (unchanged from iter 398): HMS→Nessie no-downtime, SPILL_FAILED 60GB at 200GB cap, MERGE INTO rollback, OPA-override timeout, schema registry compat, EXPLAIN TYPE IO + VALIDATE, result caching, Iceberg branches fast_forward, JWT+OPA concurrency, partition spec migration, Iceberg tagging 3rd angle, fs.cache 3rd angle JMX, `bucket(tenant_id)` very-high-cardinality 2nd angle, PERCENT_RANK/NTILE 3rd angle, RANGE INTERVAL gap-day semantics, partition spec evolution + `rewrite_data_files` migration.
+4.75 → 4.125 → 3.9375 FAIL → 4.625 → 4.75 → 3.125 FAIL → 4.3125 → 4.375 → 4.0625 → **3.8125 FAIL**
 
-## Topic score updates
-
-- Iceberg table maintenance: 4.4779/56 → 4.4744/57 (Q1 4.0, PASSED)
-- SQL query best practices for OLAP: 4.6373/20 → 4.6121/21 (Q2 4.125, PASSED)
-
-## Verification notes
-
-- `commit.retry.num-retries=4` default CONFIRMED via WebSearch (Cloudera + Iceberg KB).
-- Trino SET SESSION hyphen→underscore CONFIRMED via WebSearch (Trino official docs + Iceberg connector docs).
-- Both answers fit on-prem Trino 467 + Iceberg 1.5.2 + HMS + OPA stack per `prod_info.md`.
+Three FAILs in the last 10 iterations all share the same shape: correct mechanism, missing concrete syntax/YAML, unglossed beginner-jargon. The Q2 dbt-trino failure is the most actionable — a one-page "dbt-trino Iceberg canonical config" resource with the YAML inline would likely have flipped this to PASS.
