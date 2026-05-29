@@ -36,9 +36,9 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.1088 | 15 |
 | Query performance basics: partitioning, indexing strategy for analytics | PASSED | 4.4445 | 10 |
 | Lakehouse schema design: fact tables, dimension tables, denormalization | PASSED | 4.650 | 5 |
-| Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.527 | 22 |
+| Iceberg partition design for SaaS: strategies, small-files, compaction | PASSED | 4.498 | 23 |
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
-| Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.422 | 8 |
+| Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.4101 | 9 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.609 | 4 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.4938 | 142 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.4779 | 56 |
@@ -50,6 +50,47 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 398 — 2026-05-30 (EXTENDED PHASE) — Q1 Iceberg day vs week vs month partition granularity (small-files real culprit + compaction + tenant_id); Q2 LAG + day-over-day + 7-day rolling avg one Trino query (RANGE vs ROWS distinction)
+
+**Q1** — Iceberg day() vs week() vs month() partition granularity for 90-day-window dashboard query: stay with day(); coarser partitions don't help 90-day queries because pruning evaluates the same files; coarser actually HURTS by reducing per-tenant granularity; real culprit is small-files problem from streaming writes; fix = nightly compaction (rewrite_data_files) + add tenant_id to partition spec.
+
+Responder gave: stay-with-day() conclusion correct for the multi-tenant SaaS shape; small-files diagnosis is the right root-cause framing for streaming-write-driven slowness (verified per Iceberg streaming guide — Spark Structured Streaming + Iceberg with frequent commits produces many small Parquet files that hurt scan performance until compacted); compaction + tenant_id partition recommendation is canonical production-fit advice; on-prem Trino 467 + Iceberg 1.5.2 stack supports both `rewrite_data_files` (Spark) and the answer fits. Reasoning gap: "coarser doesn't help because pruning evaluates same files" is loose — coarser partitions DO reduce partition directory count (e.g., 3 months vs 90 days) but the dominant problem is that they produce larger files with broader min/max ranges, weakening file-level statistic pruning for narrower-window queries; the engineer-correct framing is "coarser = bigger per-partition file sets with weaker per-file stats pruning, plus loss of per-tenant-day shape." Missing: partition spec evolution caveat (existing partitions stay on old spec — `ALTER TABLE ... SET PARTITION SPEC` only affects new writes, requires `rewrite_data_files` to migrate old data); `bucket(tenant_id, N)` for very-high-tenant-count cases (per Iceberg partition transforms doc); `write.target-file-size-bytes` property for streaming-write file-size control; no Trino/Spark `ALTER TABLE` syntax shown for adding tenant_id to spec.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.0 |
+| Beginner clarity | 3.5 |
+| Practical applicability | 4.5 |
+| Completeness | 3.5 |
+| **Average** | **3.875** |
+
+**Iter 398 Q1: 3.875 — PASS**
+
+**Q2** — LAG + day-over-day change + 7-day rolling average in one Trino query: `LAG(revenue, 1) OVER (ORDER BY day)` for prior-day; `revenue - LAG(...)` for day-over-day change; `AVG(revenue) OVER (ORDER BY day RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW)` for 7-day rolling; add `PARTITION BY tenant_id` for multi-tenant; explicit RANGE vs ROWS distinction.
+
+Responder gave: LAG syntax canonical and correct per Trino window functions doc; `AVG(...) OVER (ORDER BY day RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW)` is valid Trino 467 syntax — RANGE frames with INTERVAL offsets are supported when the ORDER BY column is date/timestamp (verified per [Trino window functions](https://trino.io/docs/current/functions/window.html)); PARTITION BY tenant_id correctly addresses multi-tenant SaaS use case (per iter392/iter378 multi-tenant patterns); RANGE vs ROWS distinction explicitly explained — this is a strong clarity point and addresses a frequent beginner footgun. Missing: no full combined `SELECT day, revenue, revenue - LAG(...) AS dod_change, AVG(...) OVER (...) AS rolling_7d FROM ...` example showing all three computations stacked in a single query (the user asked for "one query"); gap-day callout — RANGE INTERVAL = true calendar window (6 days back from current date even if intermediate days are missing) vs ROWS BETWEEN 6 PRECEDING = 7 consecutive rows regardless of calendar gaps — critical for SaaS dashboards with sparse-day tenants; no LAG default-NULL handling note (`LAG(revenue, 1, 0)` to coalesce first-row NULL); no callout that both LAG and AVG window functions execute AFTER scan/filter so partition pruning on day still applies.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 4.5 |
+| Completeness | 4.0 |
+| **Average** | **4.3125** |
+
+**Iter 398 Q2: 4.3125 — PASS**
+
+**Iter 398 overall: (3.875 + 4.3125) / 2 = 4.09375 — PASS**
+
+**Topic score updates:**
+- Iceberg partition design for SaaS (Q1): 4.527/22 → 4.498/23 (Q1 3.875 nudges down, comfortably PASSED)
+- Analytical query patterns on Iceberg+Trino (Q2): 4.422/8 → 4.4101/9 (Q2 4.3125 nudges down minimally, PASSED)
+
+**WebSearch verification:**
+- RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW — CONFIRMED valid Trino syntax per [Trino window functions documentation](https://trino.io/docs/current/functions/window.html): "RANGE frames can use INTERVAL offsets when the ORDER BY column is a date/timestamp type."
+- Iceberg partition transforms (day/week/month/bucket) — CONFIRMED per [Iceberg partition spec](https://iceberg.apache.org/spec/#partitioning).
+- Iceberg streaming write small-files problem — CONFIRMED real issue per [Iceberg structured streaming guide](https://iceberg.apache.org/docs/latest/spark-structured-streaming/) — compaction via `rewrite_data_files` is the canonical fix.
 
 ### Iter 397 — 2026-05-30 (EXTENDED PHASE) — Q1 Iceberg column rename user_name→display_name (metadata-only + field IDs); Q2 GROUP BY 5B rows CPU≈Scheduled (compute-bound + whale skew salt+two-level)
 
