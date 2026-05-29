@@ -4066,9 +4066,19 @@ Postgres does not emit explicit `ALTER TABLE` events in the logical replication 
 
 Key consequence: Debezium does NOT re-emit historical rows with the new column. It only starts including the new field in events that occur *after* the `ALTER TABLE`. Pre-alter rows in Kafka will have the field absent (not `null` — just absent from the message).
 
-**The schema registry: Kafka payload serialization (unrelated to DDL detection)**
+**The schema registry: schema-evolution safety gate (and efficient serialization)**
 
-The schema registry (Confluent Schema Registry, Apicurio) stores Avro or Protobuf schemas for the Kafka message payloads. It is used by the Debezium connector to serialize and deserialize messages — not to detect DDL changes on the source database. You can run Debezium without a schema registry (using JSON serialization) and DDL detection still works.
+The schema registry (Apicurio, Confluent Schema Registry) serves two roles — but the most important one is often overlooked.
+
+**Primary value — schema-evolution safety gate.** When a Postgres column type changes or a new column is added, the registry enforces that consumers can still deserialize the message before it is written anywhere. Without a registry, a Postgres schema change can silently corrupt downstream Iceberg writes: old consumer code reads a message containing new fields, fails to deserialize it correctly, and may write nulls, garbage, or nothing — with no clear error. With a registry, the schema is versioned and validated at publish time; a consumer that cannot handle the new schema version gets a hard deserialization error rather than silent data corruption.
+
+**Secondary value — efficient binary serialization.** Avro and Protobuf are 10–50x smaller than JSON for wide tables. This matters at high message volumes but is a performance optimization, not a correctness requirement.
+
+**On-prem recommendation — Apicurio Registry.** For production on-prem Kubernetes stacks, use [Apicurio Registry](https://www.apicur.io/registry/) (Apache 2.0 licensed, runs as a single Deployment, compatible with the Confluent Schema Registry API). Confluent Schema Registry requires a commercial license or Confluent Cloud.
+
+**When NOT to add a registry.** For simple pipelines with stable schemas and low message volumes, plain JSON serialization is fine. A registry adds operational overhead (another service to deploy, monitor, and back up). Add a registry when: (a) Postgres schema changes are frequent and downstream consumers are numerous, or (b) message volume is high (>10K messages/sec) where binary encoding meaningfully reduces Kafka storage and network cost.
+
+The schema registry is NOT involved in DDL detection — Debezium detects Postgres schema changes via WAL relation messages regardless of whether a registry is present.
 
 **Schema evolution config: where it lives depends on the sink**
 

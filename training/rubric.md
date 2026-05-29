@@ -40,16 +40,64 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.422 | 8 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.609 | 4 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.525 | 135 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.5202 | 136 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.541 | 48 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 4.751 | 5 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4910 | 263 |
-| Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.8104 | 6 |
+| Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.7392 | 7 |
 | SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.658 | 17 |
 
 ---
 
 ## Score history
+
+### Iter 383 — 2026-05-30 (EXTENDED PHASE) — Q1 schema registry for Debezium + Iceberg; Q2 Trino CBO statistics freshness after ANALYZE
+
+**Q1** — Schema registry necessity for Debezium + Iceberg pipeline
+
+Responder gave: Schema registry stores schemas for Kafka messages (Avro/Protobuf efficient vs JSON), NOT required for Debezium/Iceberg, can use plain JSON serialization, DDL detection happens via WAL not registry, adding registry later is fine if message size becomes a bottleneck.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.0 |
+| Beginner clarity | 3.75 |
+| Practical applicability | 4.0 |
+| Completeness | 3.75 |
+| **Average** | **3.875** |
+
+**Iter 383 Q1: 3.875 — FAIL**
+
+GAPS:
+- TA (−1.0): Schema registry is technically optional for Debezium → Iceberg, but stating it as "NOT required" understates the schema-evolution-safety value. In production CDC pipelines registry enforces backward/forward compatibility checks before producer publishes incompatible schema — preventing silent consumer breakage. WAL-based DDL detection is correct but Debezium still encodes column-level schema in each message envelope; without registry, downstream Iceberg writer parses schema from envelope each message (works but no central compatibility gate).
+- BC (−1.25): "WAL", "DDL", "Avro", "Protobuf", "JSON serialization" thrown without inline gloss. Beginner with no Kafka background needs one-liners (WAL = Postgres write-ahead log Debezium tails; Avro = compact binary format with schema).
+- PA (−1.0): "Can use JSON now, add registry later" is concrete and pragmatic — good. But missed: when exactly to add (rule of thumb: when message rate > X/sec OR when first schema-incompatible change breaks consumer), what registry options work on-prem k8s (Apicurio runs on-prem without Confluent license — production-stack fit), how registry integrates with Iceberg writer (Iceberg connector reads schema from registry, applies schema evolution).
+- Comp (−1.25): Missed: (a) schema evolution safety — registry's main value, not message size; (b) Iceberg schema evolution coupling — registry version → Iceberg ALTER TABLE flow; (c) on-prem registry options (Apicurio vs Confluent Schema Registry licensing); (d) cost-of-not-using-registry — a single bad schema change in production breaks the Iceberg writer mid-stream, requires manual snapshot rollback.
+
+---
+
+### Iter 383 Q2 — 2026-05-30 (EXTENDED PHASE) — Trino CBO statistics freshness after ANALYZE / 10% overnight growth
+
+**Q2** — Trino CBO statistics freshness — when ANALYZE-collected stats go stale
+
+Responder gave: Stats don't auto-update; 10% overnight growth = immediately stale but not catastrophically bad; three failure modes (wrong join order, wrong broadcast vs partitioned, wrong memory reservation); worst case with highly-skewed tenant growth; weekly column-targeted ANALYZE recommended.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.5 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 4.5 |
+| Completeness | 4.25 |
+| **Average** | **4.3125** |
+
+**Iter 383 Q2: 4.3125 — PASS**
+
+GAPS:
+- TA (−0.5): Stats-don't-auto-refresh correct. 10% drift = "stale but not catastrophic" is accurate (CBO planner uses NDV and row counts ratios — small drifts don't flip plan shape). Three failure modes accurate. Borderline: "memory reservation" wording — Trino uses `query.max-memory-per-node` etc.; wrong-stats path is via DistributedExecutionPlanner sizing the build side. Acceptable simplification.
+- BC (−1.0): "CBO", "broadcast vs partitioned join", "memory reservation", "highly-skewed" not inline-glossed. Question presumes some CBO familiarity but beginner-clarity rubric demands one-liners (CBO = picks plan based on row count estimates; broadcast = small side copied to every worker; partitioned = both sides shuffled by join key).
+- PA (−0.5): "Weekly column-targeted ANALYZE" is concrete and right-sized. Could be more specific: ANALYZE WITH (columns = ARRAY['tenant_id','event_date']) targets only join/filter columns, much cheaper than full table.
+- Comp (−0.75): Missed: (a) Puffin NDV sketches specifically (Trino 467 reads NDV from Iceberg Puffin files — relevant production stack); (b) how to detect stale stats (EXPLAIN shows estimated row count — if vastly off from actual, stats are stale); (c) staged refresh strategy (hot partitions daily, cold weekly) for the highly-skewed tenant case.
+
+---
 
 ### Iter 382 — 2026-05-30 (EXTENDED PHASE) — Q1 Trino 50 concurrent queries (HTTP admission + resource groups); Q2 7.3M partition explosion (day×tenant_id → bucket(tenant_id))
 
