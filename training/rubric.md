@@ -40,16 +40,54 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.422 | 8 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.609 | 4 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.5208 | 139 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.4992 | 140 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.4753 | 55 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 4.751 | 5 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4925 | 265 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.7392 | 7 |
-| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.6423 | 18 |
+| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.6480 | 19 |
 
 ---
 
 ## Score history
+
+### Iter 394 — 2026-05-30 (EXTENDED PHASE) — Q1 Trino prepared statements (placeholders/injection/no plan caching/perf-minimal/client-lib); Q2 Hive Parquet → Iceberg without rewrite (CRITICAL INVERSION)
+
+**Q1** — Trino prepared statements: `?` placeholders supported via PREPARE/EXECUTE; prevents SQL injection; NO persistent plan caching in Trino (session-scoped only, unlike Postgres); performance benefit is minimal; Python client library support check needed.
+
+Responder gave: all four core claims correct per Trino 479 docs and known issues (#1141 plan caching limitation, #20854 query result caching feature request, Superset #16494 client breakage).
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.75** |
+
+**Iter 394 Q1: 4.75 — STRONG PASS**
+
+**Q2** — Hive Parquet → Iceberg conversion without rewrite: Answer claims "no in-place conversion, must rewrite" — FACTUAL INVERSION. Iceberg has three Spark procedures for metadata-only conversion: `system.migrate()` (replaces Hive table in-place, keeps data files), `system.snapshot()` (testing copy), `system.add_files()` (adds files to existing Iceberg table). Verified against iceberg.apache.org official docs.
+
+Responder gave: claim that no in-place conversion exists. Completely wrong.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 1.0 |
+| Beginner clarity | 3.0 |
+| Practical applicability | 1.0 |
+| Completeness | 1.0 |
+| **Average** | **1.5** |
+
+**Iter 394 Q2: 1.5 — CRITICAL FAIL**
+
+**Iter 394 overall: (4.75 + 1.5) / 2 = 3.125 — FAIL**
+
+Topic score updates:
+- Postgres-to-Iceberg ingestion: 4.5208/139 -> 4.4992/140 (drop from Q2 critical fail; Hive→Iceberg migration is in this topic's scope)
+- SQL query best practices: 4.6423/18 -> 4.6480/19 (rise from Q1 strong pass on Trino prepared statements)
+
+Teacher action HIGH PRIORITY: add Hive→Iceberg migration section to resources covering `system.migrate` / `system.snapshot` / `system.add_files` Spark procedures, 1.5.2 availability, and stack-fit (Spark on k8s + HMS + MinIO).
 
 ### Iter 393 — 2026-05-30 (EXTENDED PHASE) — Q1 Trino system.table_changes (Trino CDC pattern); Q2 Position vs equality deletes
 

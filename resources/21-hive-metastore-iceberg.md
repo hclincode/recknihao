@@ -50,6 +50,83 @@ Schema, partitions, file lists, per-file min/max stats, row counts — everythin
 
 ---
 
+## Migrating existing Hive Parquet tables to Iceberg (in-place, no data rewrite)
+
+> **Common misconception**: "Migrating from Hive to Iceberg means rewriting all your data files." **This is wrong.** Iceberg provides a metadata-only migration path. A 100 GB Hive Parquet table converts to Iceberg in minutes, not hours — because no data files are touched.
+
+### The two migration commands
+
+Both run from **Spark SQL** (not Trino — Trino does not implement the migration stored procedures).
+
+#### Option 1: `CALL catalog.system.migrate()` — in-place, permanent
+
+Replaces the Hive table definition with Iceberg metadata **without rewriting any data files**. After the call, the table is an Iceberg table. The original Hive table definition is gone.
+
+```sql
+-- Spark SQL — convert a Hive Parquet table to Iceberg in-place
+CALL iceberg.system.migrate('analytics.events');
+```
+
+What actually happens:
+1. Spark reads the existing Parquet file list from HMS (or the file system).
+2. It builds Iceberg snapshot + manifest metadata on top of those existing files.
+3. HMS's table definition is updated to point at the new Iceberg `metadata.json`.
+4. **No Parquet files are moved, renamed, or rewritten.** The data bytes on MinIO are untouched.
+
+Completion time is proportional to the number of files, not the data size. A 100 GB table with 500 Parquet files typically takes 1–5 minutes.
+
+#### Option 2: `CALL catalog.system.snapshot()` — shadow copy, non-destructive
+
+Creates a **new Iceberg table** that references the same Parquet files as the original Hive table. The original Hive table continues to exist unchanged. Use this to validate Iceberg behavior before committing to a full migration.
+
+```sql
+-- Spark SQL — create an Iceberg shadow table without touching the Hive table
+CALL iceberg.system.snapshot('analytics.events', 'analytics.events_iceberg');
+```
+
+Both `analytics.events` (Hive) and `analytics.events_iceberg` (Iceberg) will point at the same underlying Parquet files. You can query the Iceberg copy through Trino, verify the results, and then run `migrate()` on the original when you're confident.
+
+**Important**: do not delete or modify the original Hive table's files after creating a snapshot — both tables are reading the same physical files.
+
+### Post-migration steps
+
+After `migrate()` (or after you're done validating `snapshot()` and have migrated), run two follow-up procedures:
+
+**1. Rebuild manifests for proper Iceberg structure:**
+
+```sql
+-- Spark SQL — rebuild manifests after migration
+CALL iceberg.system.rewrite_manifests('analytics.events');
+```
+
+The freshly-migrated table has one manifest entry per pre-existing Parquet file — potentially thousands of small manifest entries if the Hive table had many partitions. `rewrite_manifests` consolidates these into fewer, well-structured Iceberg manifests. This significantly speeds up query planning in Trino for large migrated tables.
+
+**2. (Optional) Upgrade to format version 2 if you need row-level deletes:**
+
+```sql
+-- Spark SQL — upgrade from Iceberg v1 to v2 format
+ALTER TABLE iceberg.analytics.events
+SET TBLPROPERTIES ('format-version' = '2');
+```
+
+Migrated tables default to Iceberg format version 1, which does not support delete files (used by `MERGE INTO` and row-level `DELETE` statements). If you plan to use those operations, upgrade to v2. Read-only tables and append-only tables do not need v2.
+
+### Summary of limitations
+
+| Concern | Detail |
+|---|---|
+| `migrate()` is permanent | The original Hive table definition is replaced. Run `snapshot()` first if you want a safety net. |
+| `snapshot()` shares files | Do not delete the Hive table's data directory after creating a snapshot — the Iceberg copy reads those files too. |
+| Runs from Spark, not Trino | Trino does not implement `CALL system.migrate()`. Use a Spark session or a Spark-based notebook. |
+| Migrated table starts at format v1 | No delete files until you `ALTER TABLE ... SET TBLPROPERTIES ('format-version' = '2')`. |
+| Run `rewrite_manifests` after migration | Skipping this leaves the table with a poorly-structured manifest that slows Trino query planning. |
+
+### The bottom line
+
+If you have existing Hive Parquet tables and want to move them to Iceberg: run `CALL iceberg.system.migrate('your_schema.your_table')` from Spark. It completes in minutes regardless of data size. No ETL pipeline needed, no data copy, no downtime window proportional to table size.
+
+---
+
 ## Per-query access pattern: HMS is on the critical path for every new query
 
 When Trino runs a query against an Iceberg table, the first thing the Iceberg connector does is **ask HMS for the current `metadata.json` pointer for each table in the query**. This happens **every single time** a new query starts.
