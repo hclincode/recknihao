@@ -1,273 +1,165 @@
-# Judge Feedback — Iter 362 Q1 (EXTENDED phase, mid-iteration)
+# Judge Feedback — Iter 363 Q1
 
 **Date**: 2026-05-29
-**Phase**: EXTENDED
-**Topic probed**: Postgres-to-Iceberg ingestion — CDC + maintenance interaction (Debezium concurrent writes vs `rewrite_data_files` compaction). Tests iter361 judge probe target #1 (CDC tier 2nd-angle re-probe after iter359 Q2 baseline).
-
-## Question
-"We have Debezium streaming changes from Postgres into our Iceberg tables continuously. I know we need to run compaction on Iceberg tables, but I'm worried about the compaction conflicting with the live Debezium writes. How often should we compact tables that have active CDC writes, and is there any risk of data corruption or lost changes if compaction runs while Debezium is still writing?"
-
-## Score: 4.50 — PASS (well above per-question 4.0 bar)
-
-| Dimension | Score |
-|---|---|
-| Technical accuracy | 5.0 |
-| Beginner clarity | 4.0 |
-| Practical applicability | 4.5 |
-| Completeness | 4.5 |
-| **Average** | **4.50** |
-
-## WebSearch verification (judge due-diligence)
-
-1. **Iceberg ACID + concurrent compaction safety** — CONFIRMED per [Reliability — Apache Iceberg](https://iceberg.apache.org/docs/1.6.0/reliability/) and [Manage concurrent write conflicts in Apache Iceberg on AWS Glue — AWS Blog](https://aws.amazon.com/blogs/big-data/manage-concurrent-write-conflicts-in-apache-iceberg-on-the-aws-glue-data-catalog/): Iceberg uses optimistic concurrency with atomic metadata-file swap. Compaction writes new files and never modifies old files. Readers see a consistent snapshot. The answer's "zero data loss / zero corruption" framing is correct.
-2. **CommitFailedException + retry behavior** — CONFIRMED per [Handling Commit Conflicts in Apache Iceberg — Ryft](https://www.ryft.io/blog/handling-commit-conflicts-in-apache-iceberg-patterns-and-fixes) and [Iceberg Concurrent Write Handling](https://iceberglakehouse.com/iceberg/iceberg-concurrent-writes/): `commit.retry.num-retries` defaults to 4 with exponential backoff 100ms→60s. The answer's "4–12 retries" recommendation is a valid tunable range for higher-concurrency CDC tables. The retry only repeats the metadata commit, not the entire transaction — answer correctly describes this.
-3. **Iceberg 1.8.0 release date** — CONFIRMED 2025-02-13 per [Releases — Apache Iceberg](https://iceberg.apache.org/releases/). `remove-dangling-deletes` available in 1.8+.
-4. **Issue #12838** — CONFIRMED per [RewriteDataFiles with merging equality deletes · Issue #12838](https://github.com/apache/iceberg/issues/12838). Equality deletes can persist across partitions due to sequence-number logic; affects 1.5.x. The `rewrite-all=true` workaround is correctly named.
-
-## What landed (wins)
-
-- **Top-line ACID-safety answer matches what the engineer needs to hear first.** "No data corruption, no lost changes" framing with immutable Parquet + atomic snapshot commit + snapshot isolation chain — this is exactly the right reassurance for a CDC engineer worried about concurrent compaction. Diagnosis-first ordering is correct.
-- **CommitFailedException with retry semantics correctly described.** Iter362 answer correctly explains that Iceberg retries the metadata commit (not the transaction) and that `commit.retry.num-retries` is the tunable knob. The 4-12 range recommendation is reasonable for high-CDC tables.
-- **Frequency table by write rate is concretely actionable.** <10 ops/sec → nightly, 10-100 → daily, >100 → hourly — engineer can map their Debezium throughput to a cadence immediately. This directly addresses iter361 rubric gap #1 (CDC tier 2nd-angle still pending).
-- **Small-files math (288 files/day per partition from 5-min micro-batches)** — makes the "why compaction" question tangible. Beginner-friendly framing.
-- **Equality-delete bug callout (issue #12838 + rewrite-all=true workaround)** — correctly pinned to production Iceberg 1.5.2 per `prod_info.md`. This is high-value production knowledge that an engineer running CDC on 1.5.2 needs to know now, not after they hit the bug.
-- **1.8 forward-looking `remove-dangling-deletes` reference with correct release date** — gives engineer a concrete upgrade target for when 1.8 lands.
-- **Full Spark CALL syntax maintenance runbook** — copy-pasteable, ties nightly + weekly cadence together.
-
-## Critical gaps (deductions from 5)
-
-### Technical accuracy (0 deduction — fully correct)
-All major claims verified against Apache Iceberg docs and the AWS Glue concurrent-write conflicts guide. No factual errors detected this answer.
-
-### Beginner clarity (−1.0)
-- **"snapshot isolation", "equality-delete", "MoR" used without inline definitions.** A SaaS engineer with no OLAP background reading the answer cold cannot tell what "snapshot isolation" means without external lookup. Inline glossary at top of `resources/19-postgres-iceberg-ingestion.md` (or wherever this question's answer is sourced) for: "snapshot isolation", "atomic commit", "optimistic concurrency", "equality delete", "position delete", "MoR / Merge-on-Read", "dangling delete".
-- **"CommitFailedException" introduced without explaining what would happen to the engineer's pipeline if it fires** — does Debezium retry? Does it fail the connector? Does the engineer need to add a try/catch? The answer says "retry" but doesn't make clear whether the retry is automatic at the Iceberg level (it is) or requires connector-side handling (it doesn't for the Iceberg sink).
-
-### Practical applicability (−0.5)
-- **On-prem k8s Spark deployment specifics not surfaced.** The Spark CALL syntax is correct, but the answer doesn't tie it to `SparkApplication` CR / Spark Operator on the k8s cluster per `prod_info.md`. Engineer needs to know how to wrap the CALL in a `SparkApplication` resource or a CronJob on the on-prem cluster.
-- **No callout on whether compaction conflicts with Debezium can exhaust the retry budget under high-write CDC.** Per AWS Glue blog: "for conflicts between streaming ingestion and compaction operations, snapshot isolation does not provide any additional benefits to the default serializable isolation." Under sustained high-write CDC + concurrent compaction, retry budget exhaustion IS possible and the answer should warn that >100 ops/sec tables may need either (a) partition-filter compaction (`where = 'partition_date > current_date - 7'`) to scope the compaction to cold partitions Debezium isn't actively writing to, or (b) higher `commit.retry.num-retries` + larger `commit.retry.max-wait-ms`.
-- **Hive Metastore + MinIO production stack** not explicitly tied to the Iceberg catalog used for compaction (`CALL system.rewrite_data_files('hive.<schema>.<table>')`). The example should match the production catalog name.
-
-### Completeness (−0.5)
-- **Partition-scoped compaction (`where` clause on `rewrite_data_files`)** not surfaced. This is the standard technique for avoiding compaction-vs-CDC conflicts on partitioned tables — compact yesterday's partition while Debezium writes today's. Should be Step 1 in the runbook for CDC tables.
-- **`write.distribution-mode = 'hash'` table property** not mentioned as a CDC-specific tuning knob. For Debezium tables with a primary key, `hash` distribution on the key reduces equality-delete fan-out at write time, which in turn reduces the work `rewrite_data_files` has to do.
-- **`write.target-file-size-bytes` tuning** for CDC tables not mentioned. Default 512MB may be too large for high-rotation CDC tables where compaction needs to scan smaller windows; 128MB-256MB is often a better starting point.
-- **`rewrite_position_delete_files` procedure** not in the runbook. After `rewrite_data_files` on a CDC table, position deletes accumulate against the new data files; `rewrite_position_delete_files` is the dedicated procedure for compacting those (introduced for exactly this CDC workload). Should be in the nightly maintenance sequence alongside `rewrite_data_files` and before `expire_snapshots`.
-
-## Topic running average
-
-Postgres-to-Iceberg ingestion: prior avg 4.523 across 132 questions → new avg = (4.523 × 132 + 4.50) / 133 = (597.036 + 4.50) / 133 = 601.536 / 133 = **4.522 across 133 questions**. Status: **PASSED** (well above 3.5 baseline threshold; CDC sub-tier now has 2 angles tested — iter359 Q2 baseline 4.375 + iter362 Q1 4.50 — confirming durability under reformulation).
-
-## Iter362 teacher actions (priority-ordered)
-
-### HIGH
-1. **Inline glossary at top of `resources/19-postgres-iceberg-ingestion.md`** (or the CDC-section sub-resource) for: "snapshot isolation", "atomic commit", "optimistic concurrency", "CommitFailedException", "equality delete", "position delete", "MoR / Merge-on-Read", "dangling delete", "compaction". Mirrors the long-standing `resources/22` glossary gap — beginner clarity is the single −1.0 deduction this answer.
-2. **Add partition-scoped compaction (`where` clause)** as Step 1 of the CDC maintenance runbook: `CALL system.rewrite_data_files(table => 'hive.cdc.orders', where => 'event_date < current_date - 1', options => map('rewrite-all', 'true'))`. This is the standard technique for avoiding compaction-vs-Debezium retry exhaustion under high-write CDC and was missing from the answer.
-3. **Add retry-budget-exhaustion callout for high-write CDC.** At >100 ops/sec, compaction-vs-CDC commit conflicts can exhaust the default retry budget even though no data is lost. Document: (a) raise `commit.retry.num-retries` to 10-20, (b) raise `commit.retry.max-wait-ms` to 120000ms, (c) use partition-scoped compaction to physically separate compaction from active CDC partitions. Cite [AWS Glue concurrent-write conflicts blog](https://aws.amazon.com/blogs/big-data/manage-concurrent-write-conflicts-in-apache-iceberg-on-the-aws-glue-data-catalog/) as authoritative source.
-
-### MEDIUM
-4. **Add `rewrite_position_delete_files` to the nightly maintenance sequence** for CDC tables. After `rewrite_data_files`, position deletes accumulate against new data files and need their own compaction procedure. Sequence should be: `rewrite_data_files` → `rewrite_position_delete_files` → `expire_snapshots` → `remove_orphan_files` (weekly).
-5. **Add CDC-specific table properties section**: `write.distribution-mode = 'hash'` on the primary key column (reduces equality-delete fan-out), `write.target-file-size-bytes = 134217728` (128MB) for high-rotation CDC tables (smaller than the 512MB default makes compaction scan windows tractable).
-6. **Tie Spark CALL examples to the production catalog**: use `hive.<schema>.<table>` (matching the Hive Metastore-backed Iceberg catalog per `prod_info.md`) consistently in the runbook. Wrap the CALL in a `SparkApplication` CR template for the on-prem k8s Spark Operator deployment so engineer can deploy the maintenance job directly.
-
-### LOW
-7. **Add a Debezium-Iceberg-sink-specific note** clarifying that the Iceberg sink connector's retry behavior is governed by Iceberg's `commit.retry.*` properties at the table level — the connector itself does not need additional retry configuration for compaction conflicts. This answers the implicit "do I need to do anything in the connector config?" follow-up.
-
-## Iter362 judge probe targets (under-tested topics still open)
-
-1. **Trino federation 5th-phrasing escalation** — "cluster spill enabled AND SET SESSION spill_enabled=true AND OOM still happens — what next?" to test escalation path past spill (larger workers, resource group concurrency cap, Postgres-to-Iceberg ingest rewrite).
-2. **Trino federation glossary landing check** — 8TH iteration probe re-probe with question requiring inline terminology definitions e.g. "what is build-side hash table and why does spill help with it?". Glossary at top of `resources/22` has been flagged for 7 consecutive iterations.
-3. **Query plan optimization 3rd angle** — TableScan cost reading OR Exchange operator interpretation to keep two-angle durability extending past iter360-iter361.
-4. **Cost considerations cloud vs on-prem** — AWS S3+Athena+Glue lift-and-shift vs on-prem Trino+Iceberg+MinIO TCO. Still not probed since rubric flag.
-5. **Connector-fit correctness re-probe** — ask a query plan tuning question against an explicitly Iceberg-only stack to test whether JDBC-only property mistake (iter361 Q2) recurs.
-6. **CDC partition-scoped compaction probe** — if iter362 teacher action #2 lands, probe at iter363+ with "we tried hourly `rewrite_data_files` on our CDC table but it conflicts with Debezium writes — how do we scope compaction to cold partitions only?" to test partition-where-clause landing.
-
-## Sources verified via WebSearch
-
-- [Reliability — Apache Iceberg](https://iceberg.apache.org/docs/1.6.0/reliability/) — ACID via atomic metadata-file swap, optimistic concurrency confirmed
-- [Manage concurrent write conflicts in Apache Iceberg on the AWS Glue Data Catalog — AWS Blog](https://aws.amazon.com/blogs/big-data/manage-concurrent-write-conflicts-in-apache-iceberg-on-the-aws-glue-data-catalog/) — streaming-vs-compaction conflict patterns, retry behavior, snapshot isolation nuance for streaming
-- [Handling Commit Conflicts in Apache Iceberg: Patterns and Fixes — Ryft](https://www.ryft.io/blog/handling-commit-conflicts-in-apache-iceberg-patterns-and-fixes) — `commit.retry.num-retries` default 4, retry only repeats metadata commit
-- [Iceberg Concurrent Write Handling — Iceberg Lakehouse KB](https://iceberglakehouse.com/iceberg/iceberg-concurrent-writes/) — default 4 attempts, exponential backoff 100ms→60s, defaults stop being enough at higher concurrency
-- [Releases — Apache Iceberg](https://iceberg.apache.org/releases/) — Iceberg 1.8.0 release date 2025-02-13 confirmed
-- [Release apache-iceberg-1.8.0 — GitHub](https://github.com/apache/iceberg/releases/tag/apache-iceberg-1.8.0) — 1.8.0 release artifact
-- [RewriteDataFiles with merging equality deletes · Issue #12838 — GitHub](https://github.com/apache/iceberg/issues/12838) — dangling equality-delete bug across partitions in 1.5.x, 1.8 remove-dangling-deletes as fix path
+**Phase**: extended
+**Topic**: Cost considerations cloud vs on-prem (2nd angle — re-probe of iter362 Q2 with concrete dollar scenario per iter363 judge probe target #1)
+**Question**: "We have ~80 TB stored in MinIO and scan ~40 TB of it per month for analytics. I need to give our VP a concrete comparison of what we'd pay on AWS (Athena + Glue + S3) versus what we're paying to run Trino + Iceberg + MinIO ourselves. Can you give me an approximate monthly cost breakdown for both options at our scale?"
 
 ---
 
-# Judge Feedback — Iter 362 Q2 (EXTENDED phase, mid-iteration)
+## Scores
 
-**Date**: 2026-05-29
-**Phase**: EXTENDED
-**Topic probed**: Cost considerations cloud vs on-prem — AWS Athena+Glue+S3 lift-and-shift vs on-prem Trino+Iceberg+MinIO TCO. Tests iter361 judge probe target #3 (still not probed across iter357-iter361 — first probe of this angle).
+| Dimension | Score | Notes |
+|---|---|---|
+| Technical accuracy | 4.0 | Athena $5/TB, Glue $0.44/DPU-h, Athena Provisioned $0.30/DPU-h all CORRECT; S3 inaccurate ($23.55/TB-month flat vs actual tiered $23/TB first 50 TB + $22/TB next 30 TB — minor 4% error, gave $1,884 instead of $1,810); Glue Data Catalog API costs omitted; S3 GET/egress not addressed; Glue 10 DPU-h/day assumption arbitrary and not anchored to question scope |
+| Beginner clarity | 3.0 | DPU, FTE, Provisioned Capacity, "lift-and-shift" used without inline definitions. Glossary tier (per iter362) flagged 8+ consecutive iterations across topic resources — has NOT landed for cost-considerations resource. A VP-facing breakdown should expand "DPU = Data Processing Unit (4 vCPU + 16 GB RAM)" so the VP can understand what the line items mean |
+| Practical applicability | 4.0 | Strong VP-facing format with line-item totals (AWS $2,216/mo, ~$26.6k/yr; on-prem FTE-wrapped $40k-$100k/yr), explicit hardware-sunk-cost caveat, prod_info.md on-prem-only constraint invoked correctly, Provisioned Capacity alternative offered. Gaps: no S3 egress/GET callout, no Glue Catalog API costs, no MinIO all-in $/TB-mo for honest on-prem comparison, no Athena-requires-Glue-Catalog lift-and-shift constraint surfaced |
+| Completeness | 4.0 | Covers S3, Athena, Glue ETL line items + provisioned alternative + on-prem FTE + on-prem-only caveat. Missing: Glue Catalog API ($1/100K objects after 1M free), S3 GET/LIST/egress, MinIO all-in storage (disks/EC/rack/power/cooling/refresh), crossover heuristic in TB/month sustained scan, lift-and-shift Glue Catalog constraint |
+| **Average** | **3.75** | **MARGINAL FAIL** (below per-question 4.0 bar) |
 
-## Question
-"We're currently running Trino + Iceberg + MinIO all on-prem on Kubernetes. Our VP of Engineering is asking us to evaluate moving to AWS — specifically using Athena + Glue + S3 instead of managing everything ourselves. What would the cost model look like for AWS vs our on-prem setup? Are there situations where one is clearly cheaper than the other?"
+---
 
-## Score: 3.875 — FAIL (below per-question 4.0 bar)
+## Pricing verification (via WebSearch on 2026-05-29)
 
-| Dimension | Score |
-|---|---|
-| Technical accuracy | 4.0 |
-| Beginner clarity | 4.0 |
-| Practical applicability | 4.0 |
-| Completeness | 3.5 |
-| **Average** | **3.875** |
+| Claim | Verdict | Source |
+|---|---|---|
+| Athena $5/TB on-demand | CORRECT | [Amazon Athena Pricing](https://aws.amazon.com/athena/pricing/) confirms $5.00/TB engine v3, 10MB minimum/query |
+| Athena Provisioned Capacity $0.30/DPU-h, 4 DPU min, since Feb 10 2026 | CORRECT | aws.amazon.com/athena/pricing |
+| Glue ETL $0.44/DPU-hour | CORRECT | [AWS Glue Pricing](https://aws.amazon.com/glue/pricing/) confirms $0.44/DPU-h standard, $0.29/DPU-h Flex, 1 DPU = 4 vCPU + 16 GB RAM, 1-min minimum |
+| S3 Standard $23.55/TB-month flat | INACCURATE | Actual 2026 tiered: $0.023/GB first 50 TB → $23/TB; $0.022/GB next 450 TB → $22/TB. For 80 TB: 50 × $23 + 30 × $22 = **$1,810/month**, not $1,884. Answer's flat $23.55/TB rate appears to be a $0.023/GB × 1024 GB rounding artifact — does not use tiered structure |
 
-## WebSearch verification (judge due-diligence)
-
-1. **Athena pricing per-TB-scanned** — CONFIRMED **$5.00 per TB on-demand** per [Amazon Athena Pricing — AWS](https://aws.amazon.com/athena/pricing/). 10 MB minimum per query, rounded up to nearest MB. DDL queries free. Failed queries still charged for data scanned up to point of failure. Provisioned Capacity (as of Feb 10, 2026): **$0.30/DPU-hour with 1-minute billing and 4 DPU minimum** — AWS claims up to 95% savings for short-duration workloads. Answer's "per-TB-scanned" framing is directionally correct but is missing the $5/TB anchor and the new Provisioned-Capacity option.
-2. **Glue DPU-hour pricing** — CONFIRMED **$0.44 per DPU-hour** (Flex execution $0.29) with 1-second billing, 1-minute minimum per [AWS Glue Pricing — AWS](https://aws.amazon.com/glue/pricing/). Glue Data Catalog: first 1M objects/accesses free, then **$1 per 100K** objects/accesses. Answer's "per DPU-hour" framing is directionally correct but is missing the $0.44 anchor and the Data Catalog object/access charges, which matter for high-table-count lakehouses.
-3. **General on-prem vs cloud cost framing** — CONFIRMED across the 2026 Athena/Glue cost-breakdown references — pay-per-query (cloud) wins at low/spiky workloads; sustained moderate-to-high throughput tilts toward owned capacity once amortization is included. Answer's qualitative crossover direction is correct. The "FTE doesn't go to zero with managed services" point is well-known and correct.
-
-## What landed (wins)
-
-- **Qualitative cost model framing is accurate** — on-prem is capital-heavy with sunk compute capacity and engineering FTE dominating; cloud is per-TB scanned (Athena), per DPU-hour (Glue), per TB/month (S3). All three pricing axes are correctly named.
-- **Crossover heuristic direction is right** — very low volume → cloud cheaper; sustained moderate-to-high → self-hosted wins. Matches the textbook lakehouse-TCO conclusion that other cost-considerations questions in iter6/iter7 also landed.
-- **FTE honesty** — the answer explicitly notes you cannot reduce engineering headcount to zero by moving to managed services if you still own the data model. This is a common executive-conversation trap, and the answer surfaces it correctly.
-- **prod_info.md hard constraint correctly invoked** — on-prem-only deployment is a hard requirement per `prod_info.md`. The answer correctly flags that even if the VP wants to evaluate AWS, the production environment does not permit cloud deployment. Right environment-fit framing.
-- **Honest about resource limitation** — the answer explicitly states that resources/ do not contain Athena/Glue pricing specifics and redirects to "model AWS costs externally" rather than fabricating pricing. Correct behavior under uncertainty, and aligned with the iter354+ pattern of preferring honest "I don't have that data" over confident-wrong.
-
-## Critical gaps (deductions from 5)
-
-### Technical accuracy (−1.0)
-- **No specific 2026 dollar anchors**, even though the question explicitly asks "what would the cost model look like":
-  - Athena on-demand $5/TB scanned — not stated.
-  - Athena Provisioned Capacity (Feb 10, 2026): $0.30/DPU-hour, 4 DPU min, 1-minute billing — not stated; this materially changes the crossover math for sustained workloads.
-  - Glue ETL DPU-hour $0.44 (Flex $0.29) — not stated.
-  - Glue Data Catalog: 1M objects/accesses free tier, then $1 per 100K — not stated; matters for lakehouses with many tables and partitions.
-- **"Storage nearly free" on-prem is misleading** — MinIO needs disks (3x replication or erasure coding), hardware refresh cycle (~5 yr), rack/power/cooling, and 24/7 ops. All-in $/TB-month for on-prem MinIO is non-trivial, not ~zero. The answer's framing understates on-prem storage TCO.
-
-### Beginner clarity (−1.0)
-- **"DPU", "FTE", "crossover", "lift-and-shift" used without inline definitions**. A SaaS engineer with no AWS background needs to know:
-  - DPU = Data Processing Unit (4 vCPU + 16 GB RAM in the Glue/Athena context); DPU-hour is the Glue/Athena Provisioned-Capacity billing unit.
-  - FTE = Full-Time Equivalent engineer (the staffing-cost unit).
-  - Crossover = the workload size at which one cost model overtakes the other.
-  - Lift-and-shift = migrating a workload to a cloud equivalent service without re-architecting.
-
-### Practical applicability (−1.0)
-- **The "framework to actually answer VP's question" is correct in spirit but leaves the engineer with the entire modeling job**: "measure current workload, model AWS costs externally, calculate on-prem FTE honestly." A higher-applicability answer would give:
-  - Concrete current rates ($5/TB Athena, $0.44/DPU-h Glue, $0.023/GB-mo S3 Standard US East),
-  - A worked sample for a representative workload (e.g., "100 TB stored, 50 TB scanned/month, 200 queries/day → ~$X/mo Athena + $Y/mo Glue + $Z/mo S3 vs ~$N/mo on-prem all-in"),
-  - A clear crossover number ("above ~X TB scanned/month sustained, self-hosted wins").
-- No mention of the Athena Provisioned-Capacity option that just launched Feb 10, 2026 — this is the most recent material pricing change and is exactly what the VP's evaluation needs to factor in.
-
-### Completeness (−1.5)
-- **Missing cost categories that materially affect the comparison**:
-  - S3 request costs (GET/LIST/PUT) — high-fanout small-file Iceberg scans hit these hard. Real gotcha.
-  - Data egress: $0.09/GB to internet, $0.02/GB cross-region — relevant if BI tools or the SaaS product live outside AWS.
-  - Glue Catalog API calls beyond 1M free tier — Iceberg metadata operations hit the catalog frequently at $1/100K accesses.
-  - Athena workgroup limits / concurrency — affects whether Athena can replace Trino at the engineer's throughput target at all.
-- **Lift-and-shift constraints not surfaced** — Athena requires Glue Catalog (or Lake Formation); arbitrary Hive Metastore is not supported as an Athena catalog. The migration is not a pure storage move — the production Iceberg + Hive Metastore stack would need migration to Glue Catalog to be usable by Athena.
-- **No concrete crossover heuristic with dollars or scale tier** — the VP wants a number. "Cloud cheaper at low volume, on-prem cheaper at high volume" is not actionable enough to support an evaluation memo.
+---
 
 ## Topic running average
 
-Cost considerations for analytical workloads at SaaS scale: prior avg 4.450 across 5 questions → new avg = (4.450 × 5 + 3.875) / 6 = (22.250 + 3.875) / 6 = 26.125 / 6 = **4.354 across 6 questions**. Status: **PASSED** (well above the 3.5 baseline threshold; topic average dropped 0.096 from 4.450 because the iter362 first probe on the cloud-vs-on-prem angle landed below per-question 4.0 bar). Topic gained a 6th angle (cloud-vs-on-prem TCO) but lost ground on the running avg by 0.096.
+(4.354 × 6 + 3.75) / 7 = (26.124 + 3.75) / 7 = 29.874 / 7 = **4.268 across 7 questions** — still PASSED above 3.5 threshold, but trajectory is downward: 4.50 → 4.450 (iter353) → 4.125 (iter362 Q2) → 3.75 (iter363 Q1) over recent angles. Cost-considerations topic is degrading as fresh angles expose 2026 pricing-anchor and resource-content gaps.
 
-## Iter362 teacher actions for cost-considerations topic (NEW)
+---
 
-### HIGH
-1. **Add 2026 AWS pricing anchors to a cost-considerations resource**: Athena $5/TB on-demand; Athena Provisioned Capacity $0.30/DPU-hour (4 DPU min, 1-min billing, available since Feb 10, 2026); Glue ETL $0.44/DPU-hour (Flex $0.29); Glue Data Catalog 1M free then $1/100K objects/accesses; S3 Standard ~$0.023/GB-month US East; S3 GET ~$0.0004/1K requests; S3 egress $0.09/GB to internet. Cite [AWS Athena Pricing](https://aws.amazon.com/athena/pricing/) and [AWS Glue Pricing](https://aws.amazon.com/glue/pricing/) as authoritative.
-2. **Add a worked TCO example for a representative SaaS scale** (e.g., 100 TB stored, 50 TB scanned/month, 200 queries/day) comparing AWS Athena+Glue+S3 vs on-prem Trino+Iceberg+MinIO with explicit dollar figures including: storage ($/TB-mo), compute (per query or sustained), Glue Catalog API, S3 GET/LIST, FTE allocation, hardware amortization 5-yr, rack/power/cooling.
-3. **Add concrete crossover heuristic with a dollar threshold**: "above ~X TB scanned/month sustained, self-hosted Trino+MinIO typically wins; below ~Y TB scanned/month or spiky/bursty, cloud Athena+Glue typically wins."
+## Pattern observations
 
-### MEDIUM
-4. **Correct "storage nearly free on-prem" framing** — MinIO storage all-in (disks + replication/EC + hardware refresh + rack/power/cooling + ops) is non-trivial. Provide a $/TB-mo all-in on-prem storage estimate.
-5. **Surface lift-and-shift constraints** — Athena requires Glue Catalog (or Lake Formation), not arbitrary Hive Metastore. The on-prem Iceberg + Hive Metastore stack requires metastore migration before Athena can query it.
-6. **Inline glossary** for DPU (Data Processing Unit, 4 vCPU + 16 GB RAM in Glue context), DPU-hour, FTE (Full-Time Equivalent engineer), TCO, lift-and-shift, crossover point. Mirrors the long-standing `resources/22` glossary gap.
+1. **iter363 judge probe target #1 PARTIALLY LANDED** — the probe was designed to test whether iter363 teacher action #1 (2026 AWS pricing anchors) made it into the cost-considerations resource. Three of four anchors landed correctly (Athena $5/TB, Glue $0.44/DPU-h, Athena Provisioned $0.30/DPU-h) — this is meaningful progress over iter362 Q2 where zero specific anchors landed. The S3 anchor regressed to a flat rate that misses the tiered discount. So teacher action #1 partially landed but with a tier-structure miss on S3.
 
-### LOW
-7. **Reinforce prod_info.md on-prem-only hard constraint** — even when answering cost-comparison questions, frame the answer as "evaluation framework for the VP's question; deployment remains on-prem per current production policy." The iter362 answer did this correctly; resource should institutionalize the pattern.
+2. **Glossary tier remains the longest-standing open issue (9th consecutive iteration flagged)** — DPU, FTE, Provisioned Capacity, lift-and-shift all used without inline definitions. The teacher's repeated iter354+ glossary action has not landed for cost-considerations resource. Beginner clarity took a −2.0 deduction here. The VP-facing audience makes this gap especially expensive: the engineer is going to translate this into a memo, and they need plain-English expansions of DPU, FTE, provisioned vs on-demand.
 
-## Iter363 judge probe targets (carried forward + new)
+3. **MinIO all-in $/TB-mo framing still missing** — iter362 teacher action #9 ("correct storage-nearly-free on-prem framing give all-in $/TB-mo MinIO estimate") did not land. The answer correctly flags hardware as sunk cost but the VP comparison is incomplete without an estimated all-in $/TB-mo for MinIO (disks + EC overhead + rack + power + cooling + 5-yr refresh + ops). Without this, the on-prem side is artificially cheap in the comparison.
 
-1. **Cost considerations cloud vs on-prem 2nd angle (NEW iter362)** — re-probe with a more concrete scenario (e.g., "we have 80 TB in MinIO and scan ~40 TB/month — give me a dollar comparison") to test whether iter363 teacher actions land specific pricing anchors and a worked dollar example.
-2. **CDC tier 3rd angle** — iter362 Q1 4.50 landed cleanly with 2nd angle (post iter359 Q2 baseline 4.375); iter363+ could probe partition-scoped compaction per iter362 Q1 teacher action #2 if it lands.
-3. **Trino federation glossary landing check** — 8th iteration probe pending.
-4. **Trino federation 5th-phrasing escalation** — "cluster spill enabled AND `SET SESSION spill_enabled=true` AND OOM still happens — what next?"
+4. **Lift-and-shift constraint still not surfaced** — iter362 teacher action #10 ("Athena requires Glue Catalog or Lake Formation not arbitrary Hive Metastore") did not land. This is a critical lift-and-shift gotcha: if the engineer takes this answer at face value, they could pitch the VP on "$2,200/month AWS" and then discover during migration that all Iceberg tables registered in their on-prem Hive Metastore must be re-cataloged in Glue Catalog before Athena can query them — adding both engineering time and ongoing Glue Catalog API costs.
+
+5. **No crossover heuristic** — iter362 teacher action #3 ("concrete crossover heuristic with dollar threshold above ~X TB scanned/month sustained self-hosted wins below ~Y TB scanned/month or spiky cloud wins") did not land. A VP-facing comparison should give the rule-of-thumb crossover so the VP understands "at our scan volume, on-prem is cheaper; below ~10 TB/mo scan, AWS would be cheaper because the FTE absorbs into fewer queries."
+
+6. **Glue ETL line item is arbitrary** — "10 DPU-h/day" is plucked from nowhere. The question said scan ~40 TB/month; Glue is for ETL, not for query. If the engineer doesn't have Spark/Glue ETL jobs today, this $132/month line item shouldn't exist at all. If they do, it should be anchored to ingestion volume (e.g., "for ~1 TB/day Postgres-to-Iceberg incremental ingestion, ~6 DPU × 0.5 hours/day = 90 DPU-h/month × $0.44 = $40/month"). The answer's 10 DPU-h/day is unanchored and inflates the AWS number by ~6%.
+
+---
+
+## ITER364 TEACHER ACTIONS
+
+**HIGH priority** (these blocked iter363 Q1 from reaching 4.0):
+
+1. **HIGH (correctness)** — Fix the S3 pricing example to use **tiered structure** explicitly: "S3 Standard us-east-1: first 50 TB/mo at $0.023/GB (= $23/TB), next 450 TB/mo at $0.022/GB (= $22/TB), over 500 TB/mo at $0.021/GB (= $21/TB). For 80 TB: 50 × $23 + 30 × $22 = $1,810/month." Show the tier math so engineers know to recalculate for their own scale. Cite [S3 Pricing](https://aws.amazon.com/s3/pricing/).
+
+2. **HIGH (clarity, 9TH CONSECUTIVE ITERATION FLAGGED)** — Land the inline glossary block at the top of the cost-considerations resource: DPU (Data Processing Unit = 4 vCPU + 16 GB RAM, the billing unit for Glue ETL and Athena Provisioned Capacity), FTE (Full-Time Equivalent = 1 person-year of engineering work, used to amortize ops cost), TCO (Total Cost of Ownership = all-in cost including hidden line items like ops/refresh/cooling), lift-and-shift (migrating an existing stack to a new platform with minimal architectural changes), crossover (the data-volume threshold at which one option becomes cheaper than another), on-demand vs provisioned (Athena on-demand = $5/TB scanned, no commit; provisioned = $0.30/DPU-h with 4-DPU minimum reservation), Glue Catalog (managed Hive-compatible metastore on AWS — required for Athena to discover tables, separate billing).
+
+3. **HIGH (completeness)** — Add MinIO all-in $/TB-mo estimate to on-prem side of the comparison: "MinIO on-prem all-in: disks ($5-10/TB-mo amortized over 5 yr including replacement) + EC overhead (1.5x for EC 4+2) + rack/power/cooling (~$3-5/TB-mo) + ops time (already counted in FTE). Conservative all-in: $15-25/TB-mo raw, so 80 TB × $20 = $1,600/month on-prem storage. This is comparable to AWS S3 at this scale, not free." This corrects the misleading "hardware sunk = $0" framing.
+
+4. **HIGH (practical applicability)** — Add lift-and-shift Glue Catalog constraint to the AWS side: "Athena cannot query Iceberg tables in arbitrary Hive Metastore — it requires either Glue Data Catalog or AWS Lake Formation. Lift-and-shift means re-registering all Iceberg tables in Glue Catalog. Glue Catalog billing: first 1M objects/accesses/month free, then $1 per 100K. For 80 TB across ~5,000 tables with daily access: well within free tier. But the catalog migration is a one-time engineering task that should be in the VP estimate." Cite [AWS Glue Pricing](https://aws.amazon.com/glue/pricing/).
+
+**MEDIUM priority:**
+
+5. **MEDIUM (completeness)** — Add a concrete crossover heuristic with dollar threshold at the bottom of the cost-considerations resource: "Rule of thumb (2026 pricing): if you sustain >30 TB scanned/month AND have an existing data team that can absorb the ops, on-prem wins (Athena on-demand at 30 TB/mo = $150/mo, FTE absorbs at $50k+/yr; on-prem all-in for the same workload is ~$25k/yr fully loaded). Below ~5 TB scanned/month, AWS Athena on-demand wins because the FTE cost dominates everything else. Spiky workloads (large variance month-to-month) favor cloud because you don't pay for idle capacity."
+
+6. **MEDIUM (correctness)** — Anchor Glue ETL DPU-hour estimates to ingestion volume, not arbitrary "10 DPU-h/day". Add example: "For Postgres-to-Iceberg incremental ingestion at ~1 TB/day, expect ~4-6 DPU × 30 min/day × 30 days = ~75-90 DPU-h/month = $33-$40/month. If you don't have ETL jobs (e.g., pure ad-hoc query workload), Glue ETL is $0." This prevents the arbitrary inflation pattern.
+
+7. **MEDIUM (completeness)** — Add S3 GET/egress to AWS side: "S3 GET requests $0.0004/1,000 (negligible at typical scan rates); S3 egress to internet $0.09/GB (significant if results leave AWS — e.g., 1 TB of query results downloaded daily = $90 × 30 = $2,700/month). Athena egresses results to your client by default, so for dashboard refreshes pulling ~100 GB/day, expect ~$270/month egress on top of $200/month scan."
+
+**LOW priority:**
+
+8. **LOW (environment fit)** — Reinforce prod_info.md on-prem-only hard constraint by framing the question as "for VP evaluation memo" rather than a migration plan: "Note that prod_info.md mandates on-prem-only deployment, so this comparison is purely for evaluation purposes. The numbers below help the VP understand opportunity cost, not a migration plan."
+
+9. **LOW (completeness)** — Add a Flex execution callout for Glue ETL: "If ingestion is non-urgent (can tolerate ~10 min start delay), Glue Flex is $0.29/DPU-h instead of $0.44/DPU-h (34% savings). For nightly incremental loads, Flex is appropriate."
+
+---
+
+## ITER364 JUDGE PROBE TARGETS
+
+1. **Cost considerations cloud vs on-prem 3rd angle** — re-probe with crossover-question framing: "At what scan volume per month does on-prem become cheaper than Athena on-demand?" to test whether iter364 teacher action #5 (crossover heuristic) lands. This is the 3rd-angle question that should solidify or break the cost-considerations topic; if it lands cleanly, the topic moves to "durable 3-angle" status.
+2. **Cost considerations 4th angle** — MinIO all-in $/TB-mo probe: "What does MinIO actually cost us per TB-month when we count disks, EC, rack, power, and cooling?" to test whether teacher action #3 lands.
+3. **CDC tier 3rd angle** (carried from iter363) — partition-scoped compaction per iter362 Q1 teacher action #5 if it lands: "We tried hourly rewrite_data_files on our CDC table but it conflicts with Debezium writes — how do we scope compaction to cold partitions only?"
+4. **Trino federation glossary landing check** — 9th iteration probe still pending.
 5. **Query plan optimization 3rd angle** — TableScan cost reading OR Exchange operator interpretation.
-6. **Connector-fit correctness re-probe** — query plan tuning against explicitly Iceberg-only stack.
-
-## Sources verified via WebSearch
-
-- [Amazon Athena Pricing — AWS](https://aws.amazon.com/athena/pricing/)
-- [AWS Glue Pricing — AWS](https://aws.amazon.com/glue/pricing/)
-- [Amazon Athena Pricing in 2026: Complete Cost Breakdown + Hidden Costs — Cloud Burn](https://cloudburn.io/blog/amazon-athena-pricing)
-- [AWS Glue Pricing: How Much Does AWS Glue Really Cost in 2026 — Integrate.io](https://www.integrate.io/blog/aws-glue-pricing/)
-- [AWS Athena Costs 2026: Best Cost Optimization Tips — Cloudvisor](https://cloudvisor.co/aws-athena-costs-2/)
 
 ---
 
-## Iter 362 End-of-Iteration Summary
+## Sources verified via WebSearch (2026-05-29)
 
-**Date**: 2026-05-29
-**Phase**: EXTENDED
-**Iteration average**: **4.1875 — PASS** (above 4.0 iteration bar; Q1 4.50 PASS + Q2 3.875 FAIL averaged across 2 questions)
+- [Amazon S3 Pricing](https://aws.amazon.com/s3/pricing/) — S3 Standard tiered: $0.023/GB first 50 TB, $0.022/GB next 450 TB, $0.021/GB over 500 TB (us-east-1)
+- [Amazon Athena Pricing](https://aws.amazon.com/athena/pricing/) — Confirmed $5.00/TB on-demand engine v3, $0.30/DPU-h Provisioned Capacity, 4-DPU minimum, 1-min billing intervals since Feb 10 2026
+- [AWS Glue Pricing](https://aws.amazon.com/glue/pricing/) — Confirmed $0.44/DPU-h standard ETL, $0.29/DPU-h Flex (34% savings), 1 DPU = 4 vCPU + 16 GB RAM, 1-min minimum billing
+- [AWS S3 Pricing 2026: Storage Classes, Per-GB Rates & Cost Guide](https://costimizer.ai/blogs/aws-s3-storage) — tiered S3 pricing example confirms tier math
+
+---
+
+**Iter 363 Q1: 3.75 — MARGINAL FAIL** (below per-question 4.0 bar; topic running average 4.268 still PASSED, but downward trajectory across 7 cost-considerations questions exposes the pricing-anchor + glossary + on-prem all-in framing gaps that have been flagged for 9 consecutive iterations on the clarity tier and 2 iterations on the cost-anchor tier.)
+
+---
+
+## Iter 363 End-of-Iteration Summary
+
+**Iteration average**: (3.75 + 4.375) / 2 = **4.0625 — MARGINAL PASS** (above per-iteration 3.5 bar, but Q1 below per-question 4.0 bar)
 
 ### Per-question results
 
-| Question | Topic | Score | Result | Notes |
-|---|---|---|---|---|
-| Q1 | CDC compaction cadence & ACID safety (Debezium-vs-`rewrite_data_files` concurrent writes) | 4.50 | STRONG PASS | iter361 judge probe target #1 cleared; CDC tier now durable 2-angle (iter359 Q2 4.375 baseline + iter362 Q1 4.50 re-probe) |
-| Q2 | Cloud vs on-prem cost model (Athena+Glue+S3 lift-and-shift vs on-prem Trino+Iceberg+MinIO TCO) | 3.875 | FAIL | iter361 judge probe target #3 first probe; correct qualitative framing but missing 2026 AWS pricing anchors and concrete TCO example |
+| Q | Topic / angle | Score | Verdict |
+|---|---|---|---|
+| Q1 | Cost considerations cloud vs on-prem (2nd angle: 80 TB stored / 40 TB scanned concrete dollar scenario per iter363 judge probe target #1) | 3.75 | MARGINAL FAIL |
+| Q2 | Trino federation escalation (after exhausting spill_enabled + dynamic-filtering.wait-timeout, what's next?) | 4.375 | PASS |
 
-### Wins (cross-question)
+### Pattern observations across iter 363
 
-1. **CDC tier officially durable** — Q1 4.50 paired with iter359 Q2 baseline 4.375 establishes 2-angle pass for the CDC sub-tier of the Postgres-to-Iceberg ingestion topic. Iter361 judge probe target #1 (CDC tier 2nd-angle re-probe) cleared. Topic running avg 4.522 across 133 questions, well above the 3.5 baseline.
-2. **Honesty under resource uncertainty preserved** — Q2 correctly flagged that resources/ do not contain Athena/Glue pricing specifics and avoided fabricating dollar figures. Aligns with the iter354+ pattern of preferring honest "I don't have that data" over confident-wrong. The framing is qualitatively correct even where it lacks anchors.
-3. **prod_info.md hard constraint correctly invoked in Q2** — on-prem-only deployment requirement surfaced even when answering a cost-comparison question, reinforcing the right environment-fit framing.
-4. **No connector-fit factual error this iteration** — iter361's pattern of "diagnostically correct + one wrong operational property" did not recur. Q1 correctly named Iceberg-stack properties (`commit.retry.num-retries`, `write.distribution-mode`); Q2 correctly named AWS-stack categories (Athena per-TB, Glue per-DPU-h, S3 per-GB-mo) without confusing connector lanes.
+1. **Iter363 judge probe target #1 partially landed (cost-considerations 2nd angle)** — Athena $5/TB, Glue $0.44/DPU-h, Athena Provisioned $0.30/DPU-h pricing anchors landed correctly (3 of 4 from iter362 teacher action #1). The S3 anchor regressed to a flat $23.55/TB rate that misses the 2026 tiered structure ($23/TB first 50 TB → $22/TB next 450 TB → $21/TB over 500 TB). Net: teacher action #1 mostly landed but with one tier-structure miss.
 
-### Critical gaps (cross-question)
+2. **Iter363 Q2 verification clean (Trino federation escalation)** — JDBC single-split per-connector-split claim verified against trino.io docs, and dynamic-filtering.wait-timeout correctly placed at Iceberg catalog properties (not PostgreSQL catalog). This was the iter363 judge probe target #4 (Trino federation 5th-phrasing escalation when all options exhausted). The answer correctly escalated to materialization/ingestion-vs-federation tradeoff and surfaced concrete next steps (Lambda architecture, per-tenant Iceberg snapshot, etc.).
 
-1. **HIGH NEW iter362** — **Q2 missing 2026 AWS pricing anchors**: $5/TB Athena on-demand, $0.30/DPU-h Athena Provisioned Capacity (4 DPU min, 1-min billing, available since Feb 10, 2026), $0.44/DPU-h Glue ETL (Flex $0.29), $0.023/GB-mo S3 Standard, Glue Catalog 1M free then $1/100K, S3 GET ~$0.0004/1K, S3 egress $0.09/GB to internet. Without these the VP cannot build an evaluation memo. This is the single highest-priority teacher action for iter363.
-2. **HIGH NEW iter362** — **Q2 no concrete worked TCO example** at a representative SaaS scale (e.g., 100 TB stored / 50 TB scanned-month / 200 queries-day). "Cloud cheaper at low volume, on-prem cheaper at high volume" is correct directionally but not actionable enough to support an evaluation. Need explicit dollar lines per axis and a clear crossover threshold ("above ~X TB scanned/month sustained, self-hosted wins").
-3. **HIGH 8TH CONSECUTIVE ITERATION FLAGGED** — **inline glossary still not landed**: "snapshot isolation", "atomic commit", "optimistic concurrency", "equality delete", "position delete", "MoR/Merge-on-Read", "dangling delete", "CommitFailedException" missing from `resources/19-postgres-iceberg-ingestion.md` (Q1); "DPU", "DPU-hour", "FTE", "TCO", "crossover", "lift-and-shift" missing from cost-considerations resource (Q2). Beginner-clarity −1.0 deductions on BOTH answers trace back to this single gap. Longest-standing open issue; mirrors `resources/22` glossary gap that was flagged for 7 consecutive iterations on the Trino federation tier.
-4. **MEDIUM** — **Q1 missing partition-scoped compaction (`where` clause on `rewrite_data_files`)** as the standard CDC-vs-compaction conflict mitigation pattern. Engineer at >100 ops/sec needs to scope compaction to cold partitions Debezium isn't actively writing to.
-5. **MEDIUM** — **Q1 missing `rewrite_position_delete_files` procedure** in the nightly maintenance sequence. After `rewrite_data_files` on a CDC table, position deletes accumulate against the new data files and need their own compaction procedure. Sequence should be: `rewrite_data_files` → `rewrite_position_delete_files` → `expire_snapshots` → `remove_orphan_files`.
-6. **MEDIUM** — **Q2 "storage nearly free on-prem" framing is misleading** — MinIO all-in $/TB-month (disks + replication/EC + hardware refresh + rack/power/cooling + ops) is non-trivial. Resource should provide an all-in on-prem storage estimate.
-7. **MEDIUM** — **Q2 lift-and-shift constraints not surfaced** — Athena requires Glue Catalog (or Lake Formation), not arbitrary Hive Metastore. The on-prem Iceberg + Hive Metastore stack requires metastore migration before Athena can query it. Material constraint for the VP's evaluation.
+3. **Glossary tier remains the longest-standing open issue — 9TH consecutive iteration flagged** — Q1 took -2.0 beginner-clarity hit (DPU, FTE, Provisioned Capacity, lift-and-shift all undefined inline). Q2 had decent inline definitions but the Trino federation resource glossary tier remains open from iter354+ (now 9 iterations carried). This is the single highest-priority unresolved gap across the loop.
 
-### Topic running averages
+4. **MinIO all-in $/TB-mo framing still missing** — iter362 teacher action #9 did not land in iter363 cost-considerations resource. Q1 correctly flags hardware as sunk cost but the on-prem side of the VP comparison is artificially cheap without an estimated all-in ~$15-25/TB-mo for MinIO (disks + EC + rack + power + cooling + 5-yr refresh).
 
-- **Postgres-to-Iceberg ingestion**: 4.522 across 133 questions — PASSED, CDC sub-tier now durable 2-angle.
-- **Cost considerations for analytical workloads at SaaS scale**: 4.354 across 6 questions — PASSED but topic average dropped 0.096 from 4.450 because iter362 Q2 landed below per-question 4.0 bar. Gained a 6th angle (cloud-vs-on-prem TCO) but lost ground on running avg.
+5. **Lift-and-shift Glue Catalog constraint still not surfaced** — iter362 teacher action #10 did not land in iter363. Critical lift-and-shift gotcha: Athena requires Glue Catalog or Lake Formation, not arbitrary Hive Metastore. Without this, the VP estimate misses both the one-time engineering cost and the ongoing Glue Catalog API costs.
 
-### Iter363 teacher actions (priority-ordered)
+6. **Crossover heuristic still missing** — iter362 teacher action #3 did not land. A VP-facing comparison should give the rule-of-thumb "at >~30 TB scanned/month sustained, on-prem wins; at <~5 TB/month or spiky, AWS wins." Without this, the answer requires the engineer to compute the crossover themselves.
 
-**HIGH**
-1. **Add 2026 AWS pricing anchors to cost-considerations resource**: Athena $5/TB on-demand; Athena Provisioned Capacity $0.30/DPU-h (4 DPU min, 1-min billing, since Feb 10, 2026); Glue ETL $0.44/DPU-h (Flex $0.29); Glue Data Catalog 1M free then $1/100K objects/accesses; S3 Standard ~$0.023/GB-mo US East; S3 GET ~$0.0004/1K requests; S3 egress $0.09/GB to internet. Cite [AWS Athena Pricing](https://aws.amazon.com/athena/pricing/) and [AWS Glue Pricing](https://aws.amazon.com/glue/pricing/) as authoritative.
-2. **Add worked TCO example at representative SaaS scale** (e.g., 100 TB stored, 50 TB scanned/month, 200 queries/day) comparing AWS Athena+Glue+S3 vs on-prem Trino+Iceberg+MinIO with explicit dollar figures including: storage ($/TB-mo), compute (per query or sustained), Glue Catalog API, S3 GET/LIST, FTE allocation, hardware amortization 5-yr, rack/power/cooling.
-3. **Add concrete crossover heuristic with dollar threshold**: "above ~X TB scanned/month sustained, self-hosted Trino+MinIO typically wins; below ~Y TB scanned/month or spiky/bursty, cloud Athena+Glue typically wins."
-4. **Inline glossary at top of `resources/19-postgres-iceberg-ingestion.md`** for: "snapshot isolation", "atomic commit", "optimistic concurrency", "CommitFailedException", "equality delete", "position delete", "MoR / Merge-on-Read", "dangling delete", "compaction". 8TH CONSECUTIVE ITERATION FLAGGED across the glossary tier as a whole.
-5. **Add partition-scoped compaction (`where` clause)** as Step 1 of CDC maintenance runbook: `CALL system.rewrite_data_files(table => 'hive.cdc.orders', where => 'event_date < current_date - 1', options => map('rewrite-all', 'true'))`.
+7. **Glue ETL DPU-h estimate is arbitrary** — Q1's "10 DPU-h/day" is plucked from nowhere and inflates AWS by ~$132/month (~6%). Should be anchored to ingestion volume or set to $0 if there's no ETL workload.
 
-**MEDIUM**
-6. **Add `rewrite_position_delete_files`** to nightly maintenance sequence for CDC tables: `rewrite_data_files` → `rewrite_position_delete_files` → `expire_snapshots` → `remove_orphan_files`.
-7. **Add CDC-specific table properties section**: `write.distribution-mode = 'hash'` on primary key column, `write.target-file-size-bytes = 134217728` (128MB) for high-rotation CDC tables.
-8. **Add retry-budget-exhaustion callout for high-write CDC** at >100 ops/sec: raise `commit.retry.num-retries` to 10-20, raise `commit.retry.max-wait-ms` to 120000ms, use partition-scoped compaction.
-9. **Correct "storage nearly free on-prem" framing** in cost-considerations resource — give all-in $/TB-mo MinIO estimate covering disks + EC + hardware refresh + rack/power/cooling + ops.
-10. **Surface lift-and-shift constraints**: Athena requires Glue Catalog or Lake Formation, not arbitrary Hive Metastore.
-11. **Inline glossary for cost-considerations resource**: DPU (Data Processing Unit, 4 vCPU + 16 GB RAM in Glue context), DPU-hour, FTE (Full-Time Equivalent engineer), TCO, lift-and-shift, crossover point.
+8. **Trino federation topic running average updated** — (4.4943 × 258 + 4.375) / 259 = 4.4946 across 259 questions. Marginal increase from 4.4943 → 4.4946 over single question (negligible at this sample size). Topic remains below 4.5 per-topic threshold by 0.005 — still NEEDS WORK status. After 9 iterations of glossary flag without landing, this is the dominant blocker for topic graduation.
 
-**LOW**
-12. **Add Debezium-Iceberg-sink-specific note** clarifying that Iceberg sink connector retry behavior is governed by Iceberg's `commit.retry.*` table-level properties; connector itself does not need additional retry configuration for compaction conflicts.
-13. **Tie Spark CALL examples to production catalog** (`hive.<schema>.<table>` per Hive Metastore-backed Iceberg catalog in `prod_info.md`) and wrap in `SparkApplication` CR template for on-prem k8s Spark Operator.
-14. **Reinforce prod_info.md on-prem-only hard constraint** institutionalization in cost-considerations resource — frame cost-comparison answers as "evaluation framework for VP's question; deployment remains on-prem per current production policy."
+### Iter 364 carry-forward teacher actions (prioritized)
 
-### Iter363 judge probe targets
+**HIGH priority (blocked iter363 Q1 from 4.0 bar):**
 
-1. **Cost considerations cloud vs on-prem 2nd angle (NEW iter362)** — re-probe with a more concrete scenario (e.g., "we have 80 TB in MinIO and scan ~40 TB/month — give me a dollar comparison") to test whether iter363 teacher actions land specific pricing anchors and worked dollar example. This is the highest-priority re-probe for iter363.
-2. **CDC tier 3rd angle** — iter362 Q1 4.50 landed cleanly with 2nd angle (post iter359 Q2 baseline 4.375); iter363+ could probe partition-scoped compaction per iter362 Q1 teacher action #5 if it lands ("we tried hourly `rewrite_data_files` on our CDC table but it conflicts with Debezium writes — how do we scope compaction to cold partitions only?").
-3. **Trino federation glossary landing check** — 8th iteration probe pending.
-4. **Trino federation 5th-phrasing escalation** — "cluster spill enabled AND `SET SESSION spill_enabled=true` AND OOM still happens — what next?"
+1. **Fix S3 pricing to tiered structure** — Show explicit math: 50 × $23 + 30 × $22 = $1,810 (not $1,884 flat rate). Cite aws.amazon.com/s3/pricing.
+2. **Land glossary block at top of cost-considerations resource** — DPU, DPU-hour, FTE, TCO, lift-and-shift, crossover, on-demand vs provisioned, Glue Catalog. 9th consecutive iteration flagged across glossary tier.
+3. **Add MinIO all-in $/TB-mo estimate to on-prem side** — Concrete $15-25/TB-mo with disks/EC/rack/power/cooling/refresh breakdown. Corrects "storage is free on-prem" misframing.
+4. **Add Athena-requires-Glue-Catalog lift-and-shift constraint** — Plus Glue Catalog API pricing ($1/100K objects after 1M free).
+
+**MEDIUM priority:**
+
+5. **Add concrete crossover heuristic with dollar threshold** — ">30 TB/mo scanned: on-prem wins; <5 TB/mo: AWS wins; spiky: AWS wins."
+6. **Anchor Glue ETL DPU-h to ingestion volume** — Not arbitrary 10 DPU-h/day. Add ~75-90 DPU-h/month for 1 TB/day Postgres CDC as concrete example.
+7. **Add S3 GET/egress to AWS side** — Especially $0.09/GB egress for dashboard result downloads.
+
+**LOW priority:**
+
+8. **Reinforce prod_info.md on-prem-only hard constraint** in cost-considerations resource framing.
+9. **Add Glue Flex callout** ($0.29/DPU-h, 34% savings, for non-urgent ingestion).
+
+### Iter 364 judge probe targets
+
+1. **Cost considerations 3rd angle (highest priority)** — Crossover-question framing: "At what scan volume per month does on-prem become cheaper than Athena on-demand?" Tests whether iter364 teacher action #5 lands. 3rd-angle question; if clean, cost-considerations moves to durable-3-angle.
+2. **Cost considerations 4th angle** — MinIO all-in $/TB-mo probe: "What does MinIO actually cost per TB-month when we count everything?" Tests iter364 teacher action #3.
+3. **CDC tier 3rd angle (carried)** — Partition-scoped compaction per iter362 Q1 teacher action #5.
+4. **Trino federation glossary landing check** — 9th iteration probe still pending; teacher must land glossary before iter364 closes.
 5. **Query plan optimization 3rd angle** — TableScan cost reading OR Exchange operator interpretation.
-6. **Connector-fit correctness re-probe** — query plan tuning against explicitly Iceberg-only stack.
 
-### Pattern observations
+### Trajectory note
 
-- **Iter362 broke the iter361 connector-fit factual-error pattern** — no "one wrong operational property per answer" defect this iteration. Q1 Iceberg-stack properties were correctly named; Q2 AWS-stack categories correctly named. Iter361 teacher action #2 (audit query-plan-optimization resource for connector-specific properties) appears to have landed for at least the iter362 prompts.
-- **New first-probe pattern**: when judging a topic that has never been probed before in the loop (cost considerations cloud-vs-on-prem here), the weak responder reliably produces correct qualitative framing but lacks the specific 2026 dollar anchors needed for practical applicability. This is the same pattern observed when CDC tier was first probed in iter359 — first-probe answers tend to land at the 3.75-4.0 boundary on completeness and applicability until the resource is enriched with concrete numbers.
-- **Glossary tier remains the single longest-standing open gap** — 8th consecutive iteration flagged. Across this iteration, BOTH answers took a −1.0 beginner-clarity deduction tracing back to missing inline definitions. The teacher should prioritize landing glossary blocks at the top of `resources/19` AND the cost-considerations resource before iter363 closes; the Trino-federation `resources/22` glossary tier has been flagged for 7 consecutive iterations on top of this.
-- **Iteration-level consistency improving but ceiling pressure absent** — iter362 avg 4.1875 is above the 4.0 iteration bar but still has one answer at 3.875. The pattern across iter360-iter362 is 4.0625 → 4.000 → 4.1875 — slow upward drift in the 4.0-4.2 band, no breakouts to 4.5+ iteration avg. Topic-running-average gains will require either landing 4.5+ on both questions in the same iteration or shrinking the standard deviation across the 2 prompts.
-
+Iter360-363 iteration-average trajectory: 4.0625 → 4.000 → 4.1875 → 4.0625. Loop is stuck in 4.00-4.20 ceiling band. Ceiling break requires either (a) landing 4.5+ on both questions in same iteration, or (b) shrinking std-dev across the 2 prompts. Iter363 std-dev was 0.44 (3.75 vs 4.375) — typical of recent iterations. Single longest-standing blocker (glossary tier, 9 iterations) remains the highest-leverage teacher action for ceiling break.

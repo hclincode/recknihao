@@ -89,40 +89,42 @@ When the CTO asks "should we lift-and-shift the lakehouse to AWS instead?", the 
 | **Glue ETL (standard)** | **$0.44/DPU-hour** | A DPU = 4 vCPU + 16 GB RAM. Glue is Spark-as-a-service; substitutes for your on-prem Spark ingestion jobs. |
 | **Glue ETL (Flex)** | **$0.29/DPU-hour** | ~34% cheaper, but jobs may start with cold-start delay (minutes). Good for nightly compaction; bad for time-sensitive ingestion. |
 | **Glue Data Catalog** | **First 1M objects free**, then **$1 per 100K accesses** | Replaces your Hive Metastore. Note: Athena *requires* Glue Catalog — you cannot point Athena at an arbitrary external Hive Metastore. This is a lift-and-shift constraint, not a preference. |
-| **S3 Standard** | **$0.023/GB-month** = **$23.55/TB-month** | Replaces MinIO. Add request costs (~$0.005 per 1K PUT, ~$0.0004 per 1K GET) — usually a rounding error at lakehouse scale. |
+| **S3 Standard (tiered)** | **First 50 TB: $0.023/GB = $23.55/TB-month**<br>**Next 450 TB: $0.022/GB = $22.53/TB-month**<br>**Over 500 TB: $0.021/GB = $21.50/TB-month** | Replaces MinIO. Tiered pricing applies per account per region per month. Add request costs (~$0.005 per 1K PUT, ~$0.0004 per 1K GET) — usually a rounding error at lakehouse scale. **For quick estimates at <100 TB, $23/TB-month is within 4% of actual and acceptable for VP-level memos.** |
 
-**Critical lift-and-shift constraint:** Athena requires the Glue Data Catalog. You cannot run Athena against your existing Hive Metastore over a VPN or any other path. A migration means dual-writing or fully cutting over the metadata layer, which is a non-trivial engineering project on top of the data move.
+**Critical lift-and-shift constraint:** Athena requires AWS Glue Data Catalog — it cannot connect to an arbitrary Hive Metastore. If you're self-hosting Hive Metastore (as the production stack does), migration to Athena requires either (a) migrating to Glue Catalog or (b) running a Glue-compatible metastore. This is a hidden migration cost not reflected in the simple dollar comparison. You cannot point Athena at your existing Hive Metastore over a VPN or any other path. A migration means dual-writing or fully cutting over the metadata layer, which is a non-trivial engineering project on top of the data move.
 
-### Worked TCO example — 100 TB lakehouse, 50 TB/month scanned, 200 queries/day
+### Worked TCO example — 80 TB lakehouse, 50 TB/month scanned, 200 queries/day
 
-Representative SaaS scale: 100 TB stored in Parquet, 50 TB scanned per month after partition pruning, ~6,000 queries/month (~200/day), nightly compaction job using ~20 DPU-hours/day.
+Representative SaaS scale: 80 TB stored in Parquet, 50 TB scanned per month after partition pruning, ~6,000 queries/month (~200/day), nightly compaction job using ~20 DPU-hours/day.
 
 **AWS monthly cost:**
 
 | Line item | Math | Monthly |
 |---|---|---|
-| S3 Standard storage | 100 TB × $23.55/TB-month | **$2,355** |
+| S3 Standard storage (tiered) | First 50 TB × $23.55/TB = $1,177.50; next 30 TB × $22.53/TB = $675.90 | **$1,853** |
 | Athena on-demand queries | 50 TB scanned × $5/TB | **$250** |
 | Glue ETL (compaction + ingestion) | 20 DPU-hr/day × 30 days × $0.44/DPU-hr | **$264** |
 | Glue Data Catalog accesses | typically free tier | **~$0** |
-| **AWS subtotal** | | **~$2,869/month** |
-| **AWS annual** | × 12 | **~$34,400/year** |
+| **AWS subtotal** | | **~$2,367/month** |
+| **AWS annual** | × 12 | **~$28,400/year** |
 | Engineering FTE (managed = less ops, but still need data owner) | 0.1 FTE × $200k | **~$20,000/year** |
-| **AWS total annual** | | **~$54,400/year** |
+| **AWS total annual** | | **~$48,400/year** |
 
 **On-prem (your existing stack) annual cost:**
 
 | Line item | Annual | Notes |
 |---|---|---|
 | Hardware amortization (already provisioned) | **$0** | Sunk cost on existing k8s cluster |
-| MinIO storage (already provisioned) | **$0** | 100 TB fits in existing capacity |
+| MinIO storage (already provisioned) | **$0** | 80 TB fits in existing capacity |
 | k8s compute (Trino + Spark capacity) | **$0 cash** | Reserved cluster capacity, no marginal $ |
 | Engineering FTE | **$40k – $100k** | 0.2 – 0.5 FTE × $200k fully loaded |
 | **On-prem total annual** | **$40k – $100k** | Dominated entirely by FTE |
 
-**Reading this table honestly:** the AWS infra bill ($34k) is *less than* the on-prem FTE cost ($40k – $100k). So why does on-prem still win for this scale? Because the FTE cost doesn't disappear in the AWS world — you still need someone owning ingestion logic, schema design, dbt models, and dashboard reliability. The "0.1 FTE on AWS vs 0.3 FTE on-prem" delta is real but smaller than the headline numbers suggest. Also: the on-prem hardware here is sunk cost. The moment you have to *buy new hardware specifically for analytics*, the math shifts toward AWS.
+**Reading this table honestly:** the AWS infra bill ($28k) is *less than* the on-prem FTE cost ($40k – $100k). So why does on-prem still win for this scale? Because the FTE cost doesn't disappear in the AWS world — you still need someone owning ingestion logic, schema design, dbt models, and dashboard reliability. The "0.1 FTE on AWS vs 0.3 FTE on-prem" delta is real but smaller than the headline numbers suggest. Also: the on-prem hardware here is sunk cost. The moment you have to *buy new hardware specifically for analytics*, the math shifts toward AWS.
 
 ### Crossover heuristic — when each side wins
+
+**One-sentence summary:** Below ~20 TB stored or <10 TB/month scanned with spiky demand, AWS is usually cheaper; above ~50 TB stored with steady query load and existing hardware, on-prem usually wins on total cost. The break-even for most SaaS companies is 20-40 TB stored.
 
 Use this as a back-of-the-envelope filter, not a final answer:
 
