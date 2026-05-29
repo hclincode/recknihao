@@ -41,8 +41,8 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.609 | 4 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.525 | 135 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.533 | 46 |
-| Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 4.792 | 3 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.535 | 47 |
+| Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 4.771 | 4 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4910 | 263 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
 | SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.658 | 17 |
@@ -50,6 +50,106 @@ Each topic must reach the pass threshold before the system can enter final phase
 ---
 
 ## Score history
+
+### Iter 376 Q1 — 2026-05-30 (EXTENDED PHASE) — Trino web UI slow query diagnosis (queue + CPU vs Scheduled + Physical Input + Blocked + Spilled + EXPLAIN ANALYZE / EXPLAIN TYPE DISTRIBUTED)
+
+**Q1** — "Slow Trino query — what do I look at in the web UI to diagnose it?"
+
+Responder gave a diagnostic ladder: (1) check queue status first (queued = saturation/concurrency cap, not slow query); (2) CPU vs Scheduled time framing — CPU≈Scheduled means compute-bound, Scheduled>>CPU means I/O-bound / blocked-on-wait; (3) Physical Input Data Size — if too high vs filter output, partition pruning broken; (4) Blocked:Input ratio — storage slow / S3 latency on MinIO; (5) Spilled Data Size — query spilled to disk under memory pressure; (6) EXPLAIN ANALYZE for per-operator precision (cost numbers); (7) EXPLAIN (TYPE DISTRIBUTED) as a free plan-only option that does not execute the query.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 4.75 |
+| Completeness | 4.5 |
+| **Average** | **4.50** |
+
+Judge verified via WebSearch:
+1. **CPU time vs Scheduled time** — CONFIRMED per [Web UI — Trino 480 Documentation](https://trino.io/docs/current/admin/web-interface.html) and [Faster Query Processing: CPU Time — Starburst](https://www.starburst.io/blog/faster-query-processing-cpu-time/): CPU Time is actual computational work; Scheduled Time is elapsed time tasks are scheduled (includes both active CPU and waiting). The responder's framing "CPU≈Scheduled=compute-bound, Scheduled>>CPU=I/O-bound/blocked" is a reasonable heuristic — technically Scheduled = CPU + per-thread-blocked-time so the gap directly indicates I/O wait or scheduling inefficiency.
+2. **Physical Input data size and partition pruning** — CONFIRMED per [EXPLAIN ANALYZE — Trino 481 Documentation](https://trino.io/docs/current/sql/explain-analyze.html): `physicalInputDataSize` and `physicalInputPositions` are reported per ScanFilterProject node. Diagnosis pattern (high physical input vs low filter output = pruning broken / filter applied AFTER scan = paid I/O cost) is per [Practice: Analyzing Query Plans — apxml](https://apxml.com/courses/intro-data-lake-architectures/chapter-5-querying-and-performance/practice-query-analysis).
+3. **Blocked state and Blocked Time metric** — CONFIRMED per [Web UI — Trino 480 Documentation](https://trino.io/docs/current/admin/web-interface.html): BLOCKED is a documented query state (waiting for buffer space, memory, splits, or I/O); Blocked Time is sum across parallel threads. Persistent BLOCKED with high I/O on probe side = storage slow — matches responder claim.
+4. **Spilled Data Size in web UI** — CONFIRMED per [Add spilled data to query stats, CLI, and Web UI — Trino PR #161](https://github.com/trinodb/trino/pull/161): spilled data size is rolled up as an operator stat to query level and surfaced in the Web UI.
+5. **Queue status** — CONFIRMED per [Web UI docs](https://trino.io/docs/current/admin/web-interface.html): QUEUED is a documented query state meaning the query is awaiting execution (resource group / concurrency cap saturation), distinct from RUNNING-but-slow.
+6. **EXPLAIN ANALYZE vs EXPLAIN (TYPE DISTRIBUTED)** — CONFIRMED per [EXPLAIN ANALYZE — Trino 481 Documentation](https://trino.io/docs/current/sql/explain-analyze.html) and [EXPLAIN — Trino 481 Documentation](https://trino.io/docs/current/sql/explain.html): EXPLAIN ANALYZE executes the query and returns per-operator runtime stats; EXPLAIN (TYPE DISTRIBUTED) returns the distributed plan without execution.
+
+**Iter 376 Q1: 4.50 — STRONG PASS** (above per-question 4.0 bar; lifts "Query performance regression diagnosis" topic running avg from 4.792/3 → 4.771/4, durability builds with 4th angle.)
+
+GAPS (deductions from 5):
+- **Technical accuracy (−0.25)**: "CPU≈Scheduled" framing is a useful heuristic but the actual relationship is Scheduled = CPU + per-thread-blocked-time (summed across parallel threads), so on a highly parallel CPU-bound query you can still see Scheduled > CPU just from parallelism overhead, not I/O. Minor framing imprecision, not a factual error.
+- **Beginner clarity (−1.0)**: Trino UI vocabulary cascade (Queued state, Scheduled time, Physical Input Data Size, Blocked Time, Blocked:Input ratio, Spilled Data Size, EXPLAIN ANALYZE, TYPE DISTRIBUTED) used without inline glosses — newcomer needs "Scheduled time = wall-clock time tasks spent assigned to a worker, including any wait inside the worker" plain-English one-liner per term. Same gloss-at-first-mention gap as iter375 carry-forward.
+- **Practical applicability (−0.25)**: Did not call out the web UI's "Stages" tab specifically nor the "Live Plan" view as the click path; engineer is told what numbers to look at but not exactly where in the UI to click.
+- **Completeness (−0.5)**: (a) Missing call-out that EXPLAIN ANALYZE actually executes the query — so for an already-slow query the user should NOT run it casually (loops back on the same slowness); EXPLAIN (TYPE DISTRIBUTED) is mentioned as "free" but the reason WHY (does not execute) is not surfaced. (b) Missing "Live Plan" / running-query inspection path for queries still in flight. (c) No mention of `system.runtime.queries` / `system.runtime.tasks` as the SQL-queryable alternative to the web UI for programmatic on-call automation.
+
+---
+
+### Iter 376 Q2 — 2026-05-30 (EXTENDED PHASE) — Iceberg cross-table atomic transactions (multi-table commit support, workaround pattern, idempotent + monitoring alternative)
+
+**Q2** — "Can I do an atomic transaction across multiple Iceberg tables (BEGIN...COMMIT spanning two tables)?"
+
+Responder stated clearly: Iceberg does NOT support cross-table atomic transactions — per-table only; if the second write fails after the first succeeds, the first persists and you have an inconsistent state. Workaround pattern: insert into the second (additive) table FIRST, verify row counts match expectations, THEN do the destructive operation on the first table — narrows the inconsistency window. Alternative: design for idempotent writes + add monitoring/reconciliation jobs. Explicitly said there is no BEGIN...COMMIT block that spans multiple Iceberg tables.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.25 |
+| Practical applicability | 4.75 |
+| Completeness | 4.5 |
+| **Average** | **4.625** |
+
+Judge verified via WebSearch:
+1. **Iceberg has no native cross-table atomic transactions** — CONFIRMED per [Java API — Apache Iceberg](https://iceberg.apache.org/docs/nightly/api/?h=transaction): "Transactions are used for performing multiple updates to a single table atomically." Per-table only, not cross-table.
+2. **Open issue for multi-table transaction API** — CONFIRMED per [Add Multi-Table Transaction API · Issue #10617 · apache/iceberg](https://github.com/apache/iceberg/issues/10617): user demand for all-or-nothing operations across multiple tables is acknowledged as a feature request, not native support.
+3. **Hive Metastore catalog (production stack per prod_info.md) does not add cross-table tx** — CONFIRMED per [Iceberg connector — Trino 481 Documentation](https://trino.io/docs/current/connector/iceberg.html) and [Issue #27942 — Iceberg Connector using the Hive Metastore doesn't handle concurrent writes conflicts](https://github.com/trinodb/trino/issues/27942): HMS-backed Iceberg in Trino has documented per-table commit semantics; HMS struggles even with concurrent single-table writes, let alone cross-table atomicity.
+4. **Catalog-level alternatives exist (Nessie, Databricks Unity)** — per [Nessie — Apache Iceberg](https://iceberg.apache.org/docs/nightly/nessie/?h=transaction) Nessie supports branch-based cross-table atomic commits via merge; per [Databricks Multi-Statement Multi-Table Transactions — DAIS 2025](https://www.databricks.com/dataaisummit/session/multi-format-multi-table-multi-statement-transactions-unity-catalog) Unity Catalog adds multi-statement multi-table transactions across Delta and Iceberg. Neither is part of the on-prem HMS production stack, so responder's omission is defensible — fits prod_info.md.
+5. **Workaround pattern (insert second first, verify, then destructive on first)** — standard data-engineering idempotent-write pattern; aligns with the "writes are forward-only / additive-first" convention for warehouses that lack cross-table tx.
+
+**Iter 376 Q2: 4.625 — STRONG PASS** (above per-question 4.0 bar; lifts "Iceberg table maintenance" running avg from 4.533/46 → 4.535/47.)
+
+GAPS (deductions from 5):
+- **Beginner clarity (−0.75)**: "Atomic", "idempotent", "destructive operation", "reconciliation" used without inline glosses — a SaaS engineer with OLTP background recognizes "atomic" but newcomers to lakehouse semantics need "atomic = all-or-nothing, either every row commits or none do" plain-English gloss. Same gloss-at-first-mention systemic gap as Q1 and iter375 carry-forward.
+- **Practical applicability (−0.25)**: Workaround pattern is concrete but no Trino SQL example of the two-statement sequence with the explicit `INSERT INTO ... SELECT` then `DELETE FROM ... WHERE ...` ordering on Iceberg 1.5.2 + Trino 467; engineer has to write the SQL themselves.
+- **Completeness (−0.5)**: (a) Did not mention catalog-level alternatives (Nessie branch-merge, Unity Catalog) even with the caveat "not applicable to your on-prem HMS production stack" — engineer would benefit from knowing WHY their HMS setup has this limitation and what catalogs DO solve it. (b) Did not surface the failure-mode taxonomy: write-then-crash (partial commit) vs write-then-rollback (none committed) vs concurrent-writer-conflict (commit retry / fail) — these three are the actual operational failure shapes engineer will hit. (c) Did not mention that monitoring/reconciliation can be implemented as a daily dbt-test or SQL-job (fits prod_info.md "dbt is supported and permitted") — missed dbt-test concrete-implementation hook.
+
+---
+
+ITER377 TEACHER ACTIONS (PRIORITY-ORDERED):
+1. **HIGH (clarity, systemic gloss-at-first-mention gap, 16th-iter-flagged)** — Inline glossary at first mention in `resources/` for: Trino UI terms (Queued, Scheduled time vs CPU time, Physical Input Data Size, Blocked Time, Spilled Data Size, EXPLAIN ANALYZE, TYPE DISTRIBUTED) AND lakehouse transaction terms (atomic, idempotent, destructive operation, partial commit). One-line plain-English gloss per term, before the diagnostic / workaround recommendation.
+2. **HIGH (completeness)** — Add Trino web UI click-path section: which tab to open (Stages, Live Plan), how to find a specific query by ID, how to read the operator-level metrics table. Engineer is told WHAT to look at but not WHERE to click.
+3. **MEDIUM (completeness)** — Add catalog-level alternatives section for Iceberg cross-table transactions: Nessie branch-merge, Unity Catalog multi-statement tx — with the explicit on-prem HMS production caveat that neither is part of the production stack but knowing WHY their HMS lacks it helps engineer reason about limitations.
+4. **MEDIUM (completeness)** — Add EXPLAIN ANALYZE warning: it actually executes the query, so on an already-slow query do not run EXPLAIN ANALYZE casually; use EXPLAIN (TYPE DISTRIBUTED) for plan-only. Surface the "free vs paid" distinction explicitly.
+5. **MEDIUM (practical)** — Add concrete Trino SQL two-statement workaround sequence for cross-table inconsistency-window narrowing (INSERT INTO additive_table SELECT ... → verify counts → DELETE FROM source_table WHERE ...) on Iceberg 1.5.2 + Trino 467 + HMS, plus dbt-test reconciliation example.
+6. **LOW (carry-forward iter375)** — `memory.heap-headroom-per-node` constraint and 25%-vs-30% heap framing, federation glossary (CBO/BROADCAST/PARTITIONED) open since iter360, HyperLogLog gloss open since iter372, MinIO TCO decomposition open since iter374.
+
+ITER377 JUDGE PROBE TARGETS:
+1. **Trino UI live-plan reading**: "I see my query stuck in RUNNING for 8 minutes — where in the web UI do I look to see WHICH operator is slow right now, while it's still running?" — tests action #2 (Live Plan click path).
+2. **EXPLAIN ANALYZE warning**: "EXPLAIN ANALYZE timed out on my slow query too. What do I run instead to see the plan?" — tests action #4 (EXPLAIN TYPE DISTRIBUTED as plan-only).
+3. **Iceberg cross-table tx workaround SQL**: "Show me the actual SQL to safely move 1M rows from staging_events to events without leaving the table in a half-committed state." — tests action #5.
+4. **Catalog-level alternative**: "Is there any catalog setup that would give me real cross-table atomic transactions on Iceberg?" — tests action #3 (Nessie / Unity catalog awareness with on-prem HMS caveat).
+5. **Carry-forward iter375 federation glossary** open since iter360.
+6. **Carry-forward iter375 Trino S3 filesystem config / MinIO TCO** open since iter374.
+
+PATTERN OBSERVATIONS:
+- (a) Iter376 4.5625 STRONG PASS continues iter370-376 stabilizing band 4.2-4.6, std-dev tightening; both answers technically accurate.
+- (b) Shared systemic pattern across Q1+Q2 (and iter375 Q1+Q2): property/term-name density without inline gloss-at-first-mention is the dominant clarity drag — both BC=4.0/4.25 same pattern. This is the most durable improvement target.
+- (c) Production-fit landed cleanly on both Q2 (HMS production stack referenced implicitly, no Nessie/Unity push) and Q1 (web UI on-prem deployment assumed).
+- (d) "Query performance regression diagnosis" topic now has 4 questions at 4.771 avg — durability proof builds, no longer a 1-question PASS.
+
+Sources verified via WebSearch:
+- [Web UI — Trino 480 Documentation](https://trino.io/docs/current/admin/web-interface.html) — Queued/Running/Blocked states confirmed; CPU vs Scheduled time confirmed
+- [EXPLAIN ANALYZE — Trino 481 Documentation](https://trino.io/docs/current/sql/explain-analyze.html) — physicalInputDataSize per-operator stat confirmed
+- [Faster Query Processing: CPU Time — Starburst](https://www.starburst.io/blog/faster-query-processing-cpu-time/) — CPU vs Scheduled distinction confirmed
+- [Trino PR #161 — Add spilled data to query stats, CLI, and Web UI](https://github.com/trinodb/trino/pull/161) — Spilled Data Size in web UI confirmed
+- [Java API — Apache Iceberg](https://iceberg.apache.org/docs/nightly/api/?h=transaction) — single-table-only transaction confirmed
+- [Add Multi-Table Transaction API · Issue #10617 · apache/iceberg](https://github.com/apache/iceberg/issues/10617) — multi-table tx is feature request, not native
+- [Nessie — Apache Iceberg](https://iceberg.apache.org/docs/nightly/nessie/?h=transaction) — Nessie branch-merge catalog-level alternative
+- [Iceberg Connector — Trino 481 Documentation](https://trino.io/docs/current/connector/iceberg.html) — Trino Iceberg connector confirmed per-table commit semantics
+
+**Topics updated**:
+- Query performance regression diagnosis: 4.792/3 → **4.771/4** (PASSED, durability builds — now tested from 4 angles)
+- Iceberg table maintenance: 4.533/46 → **4.535/47** (PASSED, top band hold)
+
+---
 
 ### Iter 371 Q1 — 2026-05-30 (EXTENDED PHASE) — Trino federation CRITICAL re-probe: ANALYZE direction (Postgres vs Trino) for 50K dim that CBO is partitioning
 

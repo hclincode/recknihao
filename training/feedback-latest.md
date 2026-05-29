@@ -1,150 +1,98 @@
-# Iter 375 Judge Feedback — 2026-05-30 (EXTENDED PHASE)
+# Judge Feedback — Iter 376 (EXTENDED PHASE)
 
-## Iteration Summary
+**Iteration average: 4.5625 — STRONG PASS**
 
-| Question | Topic | Average | Verdict |
-|---|---|---|---|
-| Q1 | Trino memory config / OOM on aggregations (query perf regression diagnosis) | 4.375 | PASS |
-| Q2 | Iceberg small files / 5-min batch writes (Iceberg maintenance) | 4.4375 | PASS |
-| **Iter avg** | | **4.40625** | **PASS** |
-
-Iter convergence: std-dev 0.03125 — tightest convergence of recent iterations, suggests stable resource quality across both general-Trino and Iceberg-maintenance tracks.
+| Question | Topic | TA | BC | PA | Comp | Avg | Result |
+|---|---|---|---|---|---|---|---|
+| Q1 | Trino web UI slow query diagnosis | 4.75 | 4.0 | 4.75 | 4.5 | **4.50** | STRONG PASS |
+| Q2 | Iceberg cross-table atomic transactions | 5.0 | 4.25 | 4.75 | 4.5 | **4.625** | STRONG PASS |
 
 ---
 
-## Q1 — Trino memory config, OOM on aggregations
+## Q1 — Trino web UI slow query diagnosis
 
-### Scoring
+**What worked:** All technical claims verified against Trino 480/481 docs:
+- CPU vs Scheduled time framing accurate (Scheduled = CPU + per-thread blocked time)
+- Physical Input Data Size as partition-pruning indicator confirmed per EXPLAIN ANALYZE docs
+- BLOCKED query state and Blocked Time metric confirmed
+- Spilled Data Size in web UI confirmed (Trino PR #161)
+- Queued state as concurrency/resource-group saturation indicator correct
+- EXPLAIN ANALYZE vs EXPLAIN (TYPE DISTRIBUTED) distinction correct (latter is plan-only, does not execute)
 
-| Dimension | Score | Notes |
-|---|---|---|
-| Technical accuracy | 4.5 | All three memory property names CONFIRMED real; spill prereqs CONFIRMED; 25% per-node sizing is conservative vs. community consensus 30% but defensible as safe starting point |
-| Beginner clarity | 4.0 | Property names cascade without inline gloss; "rolling restart", "JVM heap", "spill" used assuming background |
-| Practical applicability | 4.5 | Priority order (restructure → join_distribution_type → spill) is actionable; concrete config values; Trino UI verification step; kubectl rolling restart fits on-prem k8s prod environment |
-| Completeness | 4.5 | Three knobs + spill prereqs + verify + priority order is comprehensive; missing `memory.heap-headroom-per-node` constraint that sum of per-node + headroom must be < JVM heap |
-| **Average** | **4.375** | **PASS** |
-
-### Judge WebSearch verification
-
-1. **`query.max-memory-per-node` is real** — CONFIRMED per [Resource management properties — Trino 480 Documentation](https://trino.io/docs/current/admin/properties-resource-management.html): "limits the amount of memory a query may use on any one node." Constraint: sum of `query.max-memory-per-node` + `memory.heap-headroom-per-node` must be less than max JVM heap size on the node.
-2. **`query.max-memory` (cluster) is real** — CONFIRMED at same docs page.
-3. **`query_max_memory` (session) is real** — CONFIRMED at [Memory management properties — Trino 370+ docs](https://trino.io/docs/current/admin/properties-memory-management.html). Session form maps to the config-level cluster limit.
-4. **25% of JVM heap sizing** — DEFENSIBLE BUT CONSERVATIVE. Per [Right-Sizing Trino: A Data-Driven Guide to Cluster Memory Tuning (Vivek Jain, Medium)](https://medium.com/@vjain143/right-sizing-trino-a-data-driven-guide-to-cluster-memory-tuning-a31b6a80c2f6) and [Trino Memory Config Calculator](https://vjain143.github.io/Trino_Memory_Sizing_Guidelines.html), the more common recommendation is ~30% of JVM heap for `query.max-memory-per-node` (e.g., 14GB on a 48GB heap). 25% is within safe bounds and avoids under-allocating headroom, but slightly under-utilizes resources. Responder's 25% is correct as a STARTING POINT but should be flagged as such, with 30% as the upper-conservative ceiling. NOT a factual error.
-5. **Spill properties** — All CONFIRMED per [Spilling properties — Trino 479 docs](https://trino.io/docs/current/admin/properties-spilling.html) and [Spill to disk — Trino 481 docs](https://trino.io/docs/current/admin/spill.html):
-   - `spill-enabled` (cluster) / `spill_enabled` (session) — both exist
-   - `spiller-spill-path` — exists, supports comma-separated paths for JBOD
-   - `max-spill-per-node` — exists, total node spill budget
-   - `query-max-spill-per-node` — exists, per-query node spill budget
-   - LZ4 compression (`spill-compression-codec`) — supported codec
-   - Local SSD recommendation matches docs warning against system drives and NFS
-
-### Gaps (deductions from 5)
-
-- **Beginner clarity (-1.0)**: Properties cascade by name without inline one-line glosses. A SaaS engineer with no OLAP background hits 6+ unfamiliar Trino property names and may not know which lever to pull first. Glosses needed for: "JVM heap" = the Java memory pool the Trino worker JVM allocates at startup, "rolling restart" = restart workers one at a time so the cluster stays serving, "spill" = streaming intermediate hash-join/aggregation state to local disk when worker memory pressure exceeds budget.
-- **Technical accuracy (-0.5)**: 25% sizing should be paired with the upper bound 30% (or stated as "start at 25%, can raise to 30% if heap-headroom calculation allows"). Sole 25% recommendation slightly under-utilizes available worker memory.
-- **Practical applicability (-0.5)**: No `memory.heap-headroom-per-node` callout — this is the constraint that bites engineers ("I set per-node to 40% of heap and now the worker crashes on startup" because per-node + heap-headroom must be < JVM heap). Engineer needs this constraint to make sizing decisions safely.
-- **Completeness (-0.5)**: Missing (a) `memory.heap-headroom-per-node` constraint and recommended sizing (default 30% of heap, never below 2GB); (b) EXPLAIN ANALYZE VERBOSE diagnostic to confirm the OOM source is HashAggregation operator (not output buffer); (c) which aggregation pattern is the typical OOM driver (high-cardinality GROUP BY > many-window-function chains > distinct-count without HyperLogLog).
+**Gaps:**
+- BC -1.0: Trino UI vocabulary cascade (Queued, Scheduled time, Physical Input, Blocked:Input, Spilled Data, EXPLAIN ANALYZE, TYPE DISTRIBUTED) used without inline plain-English glosses at first mention. Same systemic gloss-gap as iter375.
+- TA -0.25: "CPU≈Scheduled" framing is a useful heuristic but technically Scheduled = CPU + per-thread-blocked-time summed across threads, so on highly parallel CPU-bound queries you can see Scheduled > CPU just from parallelism. Minor framing imprecision.
+- PA -0.25: Did not surface the specific web UI click-path (Stages tab, Live Plan view) — engineer told WHAT to look at but not WHERE to click.
+- Comp -0.5: Missing the "EXPLAIN ANALYZE actually executes the query so do not run it casually on already-slow queries" warning; missing Live Plan inspection for in-flight queries; missing `system.runtime.queries` / `system.runtime.tasks` SQL-queryable alternative.
 
 ---
 
-## Q2 — Iceberg small files problem, 5-min batch writes
+## Q2 — Iceberg cross-table atomic transactions
 
-### Scoring
+**What worked:** Core claim is correct and well-verified:
+- Iceberg native API supports atomic transactions on a single table only (per apache/iceberg Java API docs)
+- Open issue #10617 confirms multi-table transaction API is a feature request, not native
+- HMS-backed Iceberg in Trino (production stack per prod_info.md) inherits per-table-only semantics; HMS struggles even with concurrent single-table writes per Trino issue #27942
+- Workaround pattern (additive write first, verify, then destructive operation) is the standard data-engineering idempotent-write convention for warehouses lacking cross-table tx
+- Explicit "no BEGIN...COMMIT spanning multiple tables" is accurate and important for an engineer with OLTP mental model
 
-| Dimension | Score | Notes |
-|---|---|---|
-| Technical accuracy | 4.5 | File count math correct (2,016 ~ 2,000); 10-50ms per-file metadata reasonable; 256MB target valid (default is 512MB but 256MB is sensible for 5-min cadence); rewrite_data_files signature correct; 4-step maintenance ordering matches official guidance after compact step |
-| Beginner clarity | 4.0 | Concrete numbers help; "manifest explosion", "binpack", "snapshot" used without inline gloss; "metadata overhead" not unpacked |
-| Practical applicability | 4.75 | Concrete numbers (2,000 files, 20-100s overhead, 30s+ query planning); exact Spark procedure call with parameters; Trino alternative (`ALTER TABLE EXECUTE optimize`); 4-step maintenance sequence — engineer knows exactly what command to run next |
-| Completeness | 4.5 | Covers symptoms, math, fix, ordering, alternative; could add (a) write-side prevention via `write.target-file-size-bytes` table property; (b) explicit cadence guidance (hourly vs. daily compaction); (c) Trino `file_size_threshold` parameter |
-| **Average** | **4.4375** | **PASS** |
-
-### Judge WebSearch verification
-
-1. **Small files problem accurately described** — CONFIRMED per [Compaction in Apache Iceberg (Dremio blog)](https://www.dremio.com/blog/compaction-in-apache-iceberg-fine-tuning-your-iceberg-tables-data-files/) and [Spark Iceberg and problem of Tiny files (Medium)](https://medium.com/@deepa.account/spark-iceberg-and-problem-of-tiny-files-9d5d369b77cb): small files inflate metadata overhead and runtime file open cost. Responder's 10-50ms per-file metadata estimate is in the documented range for object-store metadata latency. 2,016 file count for 5-min × 7-day cadence is arithmetically correct.
-2. **`rewrite_data_files` parameters CONFIRMED** — per [Spark Procedures — Apache Iceberg latest docs](https://iceberg.apache.org/docs/latest/spark-procedures/):
-   - `target-file-size-bytes` — exists, default 536870912 (512MB). Responder's 268435456 (256MB) is a valid override; sensible for 5-min cadence where 512MB targets are too aggressive.
-   - `min-input-files` — exists, controls minimum file group size for rewrite.
-   - Default strategy `binpack` correctly described.
-3. **4-step maintenance sequence** — CONFIRMED per [The Iceberg Maintenance Runbook (IOMETE)](https://iomete.com/resources/blog/iceberg-maintenance-runbook) and [Maintenance — Apache Iceberg latest docs](https://iceberg.apache.org/docs/latest/maintenance/) and [GH issue #11804](https://github.com/apache/iceberg/issues/11804). The canonical safe order is: **expire_snapshots → remove_orphan_files → rewrite_manifests**. Compaction (`rewrite_data_files`) is a separate operation that typically goes FIRST because it creates new snapshots that the subsequent expire step then cleans up. Responder's compact → expire → orphan → manifests order is the correct full sequence. Running tasks out of this order risks data loss, broken time travel, or lingering orphan files.
-4. **Trino `ALTER TABLE EXECUTE optimize` CONFIRMED** — per [Iceberg connector — Trino 481 Documentation](https://trino.io/docs/current/connector/iceberg.html): `ALTER TABLE test_table EXECUTE optimize(file_size_threshold => '128MB')`. Default threshold is 100MB. Files smaller than threshold are merged. This is the correct Trino ad-hoc alternative for users without direct Spark access.
-
-### Gaps (deductions from 5)
-
-- **Beginner clarity (-1.0)**: "manifest", "manifest explosion", "snapshot", "binpack" used without inline gloss. A SaaS engineer reading this for the first time needs: "manifest = Iceberg's per-snapshot index file listing which data files belong to the snapshot", "snapshot = an immutable commit of the table at a point in time", "manifest explosion = too many manifest files cause query planning to read megabytes of metadata before any data file is touched".
-- **Technical accuracy (-0.5)**: `target-file-size-bytes` default is 512MB, not the answer's 256MB — should explicitly say "I'm overriding the default 512MB to 256MB because 5-min cadence does not produce enough per-batch data to fill 512MB economically". Without the framing, the engineer might think 256MB is the default.
-- **Practical applicability (-0.25)**: No cadence guidance — should the engineer run this hourly, nightly, or weekly? For 5-min writes producing ~12 files/hour, hourly compaction is the typical recommendation. Missing this leaves the engineer unsure how often to schedule the job.
-- **Completeness (-0.5)**: Missing (a) write-side prevention: `ALTER TABLE ... SET TBLPROPERTIES ('write.target-file-size-bytes'='268435456')` so new writes produce closer-to-target files, reducing how much compaction has to do; (b) Trino `file_size_threshold` parameter mention (`ALTER TABLE EXECUTE optimize(file_size_threshold => '256MB')`); (c) `write.distribution-mode = 'hash'` callout for partitioned tables to consolidate writes by partition key.
+**Gaps:**
+- BC -0.75: "Atomic", "idempotent", "destructive operation", "reconciliation" used without inline glosses. A SaaS engineer with OLTP background may know "atomic" but newcomers to lakehouse semantics need "atomic = all-or-nothing, either every row commits or none do" plain-English gloss at first mention.
+- PA -0.25: Workaround pattern is described but no concrete Trino SQL example showing the two-statement sequence (INSERT INTO additive_table SELECT ... then DELETE FROM source WHERE ...) on the production Iceberg 1.5.2 + Trino 467 + HMS stack.
+- Comp -0.5: Did not mention catalog-level alternatives (Nessie branch-merge, Databricks Unity Catalog multi-statement tx) even with the explicit "not part of your on-prem HMS production stack" caveat — engineer would benefit from knowing WHY their HMS setup has this limit and what does solve it. Did not surface the three operational failure shapes (write-then-crash partial commit / write-then-rollback / concurrent-writer-conflict). Did not mention dbt-test reconciliation as the concrete monitoring implementation hook (prod_info.md confirms dbt is supported).
 
 ---
 
-## Patterns across Q1 + Q2
+## ITER377 TEACHER ACTIONS (PRIORITY-ORDERED)
 
-1. **Property-name density without glosses** — Both answers list correct, verified property names but stack 4-7 of them without inline one-line definitions. This is the dominant beginner-clarity drag in both questions (BC = 4.0 on both). For an engineer with zero OLAP background, the property cascade is the single largest comprehension barrier even when each individual property is correctly named and used. This is the same pattern that has driven federation BC ceilings at 4.0 since iter360.
-2. **Defaults vs. overrides not framed** — Q1's 25% sizing and Q2's 256MB target-file-size are both valid overrides of the documented defaults (30% / 512MB respectively) but the answers present them as the recommendation without framing them as overrides. This invites the engineer to think the answer's number IS the default, which it isn't.
-3. **Both answers technically correct on substance** — All property names verified, all sequences verified, all syntax verified. The 4.4 iter average reflects clarity/framing gaps, not factual errors. This is a stable iteration in a mature topic band.
-4. **Trino-on-k8s production fit landed cleanly on Q1** — `kubectl rolling restart`, Trino UI verification, all match the on-prem k8s production environment described in `prod_info.md`. No cloud-managed-service assumptions snuck in. This is durable evidence that the on-prem/k8s production-fit teacher actions from iter374 and earlier have stabilized.
+1. **HIGH (clarity, systemic 16th-iter-flagged gloss-at-first-mention gap)** — Inline glossary in `resources/` for:
+   - Trino UI terms: Queued, Scheduled time vs CPU time, Physical Input Data Size, Blocked Time, Spilled Data Size, EXPLAIN ANALYZE, TYPE DISTRIBUTED
+   - Lakehouse transaction terms: atomic, idempotent, destructive operation, partial commit
+   - One-line plain-English gloss per term, placed before the diagnostic / workaround recommendation, not after.
 
----
+2. **HIGH (completeness)** — Add Trino web UI click-path section: which tab to open (Stages, Live Plan), how to find a specific query by ID, how to read the operator-level metrics table. Engineer is told WHAT to look at but not WHERE to click.
 
-## ITER376 TEACHER ACTIONS (PRIORITY-ORDERED)
+3. **MEDIUM (completeness)** — Add catalog-level alternatives section for Iceberg cross-table transactions: Nessie branch-merge, Unity Catalog multi-statement tx — with explicit on-prem HMS production caveat that neither is part of the production stack but knowing WHY HMS lacks it helps engineer reason about limitations.
 
-### HIGH
+4. **MEDIUM (completeness)** — Add EXPLAIN ANALYZE warning: it actually executes the query, so on an already-slow query do not run it casually; use EXPLAIN (TYPE DISTRIBUTED) for plan-only. Surface the "free vs paid" distinction explicitly.
 
-1. **Inline-gloss the Trino memory property cascade in resources** — At first mention of each property name, add a one-line gloss: `query.max-memory` = total memory budget summed across all worker nodes for a single query; `query.max-memory-per-node` = max user memory a single query can use on ONE worker; `query_max_memory` = session-level override of the cluster `query.max-memory`. Also gloss "JVM heap" = the Java memory pool allocated to each Trino worker JVM at process startup; "rolling restart" = restart workers one at a time so the cluster stays serving queries; "spill" = streaming hash-table or sort state to local SSD when worker memory pressure exceeds the per-node budget. Tests directly against Q1 BC = 4.0 deduction.
+5. **MEDIUM (practical)** — Add concrete Trino SQL two-statement workaround sequence (INSERT INTO additive_table SELECT ... → verify counts → DELETE FROM source_table WHERE ...) on Iceberg 1.5.2 + Trino 467 + HMS, plus dbt-test reconciliation example.
 
-2. **Inline-gloss the Iceberg metadata vocabulary in resources/maintenance section** — At first mention: "snapshot" = immutable commit of the table at a point in time; "manifest" = per-snapshot index file listing which data files belong to the snapshot, plus column-level min/max stats; "manifest list" = top-level pointer to the manifests of a single snapshot; "binpack" = the default rewrite strategy that combines small files into target-sized files without sort/zorder. Tests directly against Q2 BC = 4.0 deduction.
-
-### MEDIUM
-
-3. **Frame defaults vs. overrides explicitly** — In Trino memory section: "The default per-node sizing of 30% of JVM heap is the community consensus; 25% is a safer conservative starting point if you have a mix of analytics and embedded reporting workloads sharing the cluster." In Iceberg compaction section: "`target-file-size-bytes` defaults to 512MB (536870912). For 5-min batch cadences, override to 256MB (268435456) since per-batch volume rarely fills 512MB economically." Tests against Q1 TA -0.5 and Q2 TA -0.5.
-
-4. **Add `memory.heap-headroom-per-node` constraint section** — Explicit callout: "The sum of `query.max-memory-per-node` + `memory.heap-headroom-per-node` MUST be less than max JVM heap. `memory.heap-headroom-per-node` defaults to 30% of heap, never below 2GB. If you raise per-node sizing without checking heap-headroom, the worker crashes on startup." Tests against Q1 PA -0.5.
-
-5. **Add Iceberg compaction cadence guidance** — Concrete table: "5-min batch writes (12 files/hour): hourly compaction; hourly batch writes: 6-hourly compaction; daily batch writes: weekly compaction. Tune `min-input-files` higher (e.g., 10) for low-cadence to avoid rewriting near-target-size files." Tests against Q2 PA -0.25.
-
-### LOW
-
-6. **Carry-forward federation glossary expansion in resources/22** — CBO/BROADCAST/PARTITIONED/build-side/probe-side/left-deep-join-tree/`join_distribution_type`/`join_reordering_strategy`/dynamic-filtering — open since iter360. Not re-probed in iter375 but will re-emerge on next federation probe.
-
-7. **Carry-forward HyperLogLog inline gloss** — `approx_distinct()` / `cardinality(approx_set())` open since iter372. Relevant to Q1 OOM-on-aggregation context: high-cardinality COUNT(DISTINCT) is a classic OOM driver and HyperLogLog approximation is the standard fix. Could be tied into the Q1 memory-OOM teaching path.
-
-8. **Carry-forward iter374 actions** — (a) Trino S3 filesystem config deltas section (AWS-vs-MinIO side-by-side: `fs.native-s3.enabled` / `s3.endpoint` / `s3.path-style-access`); (b) Metadata caching property names (`iceberg.metadata-cache-enabled` / `iceberg.metadata-cache-max-size` / `iceberg.metadata-cache-ttl` / `hive.metastore-cache-ttl`); (c) MinIO TCO decomposition.
+6. **LOW (carry-forward iter375)** — `memory.heap-headroom-per-node` constraint and 25%-vs-30% heap framing; federation glossary (CBO/BROADCAST/PARTITIONED) open since iter360; HyperLogLog gloss open since iter372; MinIO TCO decomposition open since iter374.
 
 ---
 
-## ITER376 JUDGE PROBE TARGETS
+## ITER377 JUDGE PROBE TARGETS
 
-1. **Trino memory glossary follow-up at fresh phrasing** — "What's the difference between `query.max-memory` and `query.max-memory-per-node` — and which one do I tune when a single query OOMs vs. when multiple concurrent queries OOM?" — tests iter376 action #1 inline glossaries and the cluster-vs-per-node distinction.
-
-2. **Iceberg compaction cadence follow-up** — "How often should I run `rewrite_data_files` on a table that gets 5-min batch writes? Hourly? Nightly? Weekly?" — tests iter376 action #5.
-
-3. **Write-side compaction prevention** — "Can I tune Spark/Iceberg so it writes larger files in the first place, instead of always playing catch-up with compaction?" — tests whether write-side table properties (`write.target-file-size-bytes`, `write.distribution-mode`) land as resources, not just compaction-side fixes.
-
-4. **Carry-forward federation glossary** (CBO/BROADCAST/PARTITIONED) — open since iter360.
-
-5. **Carry-forward iter374 action #3 metadata caching property names by name** — "Our Iceberg queries do tons of small reads against MinIO — what's the specific Trino config property to enable metadata caching?" — still not probed since iter374.
-
-6. **Carry-forward iter374 action #4 Trino S3 filesystem config deltas** — "How do I point Trino at our MinIO vs AWS S3 — what properties change in the catalog file?" — still not probed since iter374.
+1. **Trino UI live-plan reading**: "I see my query stuck in RUNNING for 8 minutes — where in the web UI do I look to see WHICH operator is slow right now, while it's still running?" — tests action #2 (Live Plan click path).
+2. **EXPLAIN ANALYZE warning**: "EXPLAIN ANALYZE timed out on my slow query too. What do I run instead to see the plan?" — tests action #4 (EXPLAIN TYPE DISTRIBUTED as plan-only).
+3. **Iceberg cross-table tx workaround SQL**: "Show me the actual SQL to safely move 1M rows from staging_events to events without leaving the table in a half-committed state." — tests action #5.
+4. **Catalog-level alternative**: "Is there any catalog setup that would give me real cross-table atomic transactions on Iceberg?" — tests action #3 (Nessie / Unity awareness with on-prem HMS caveat).
+5. Carry-forward iter375 federation glossary (CBO/BROADCAST/PARTITIONED) open since iter360.
+6. Carry-forward iter375 Trino S3 filesystem config / MinIO TCO open since iter374.
 
 ---
 
-## Topic running averages after iter375
+## PATTERN OBSERVATIONS
 
-- **Iceberg table maintenance** (Q2): (4.531 x 45 + 4.4375) / 46 = 208.332 / 46 = **4.533 across 46 questions** — PASSED top band hold.
-- **Query performance regression diagnosis** (Q1): (5.0 x 2 + 4.375) / 3 = 14.375 / 3 = **4.792 across 3 questions** — PASSED but only 3 questions; iter376 should probe a 4th angle to durabilize.
+- (a) Iter376 4.5625 STRONG PASS continues iter370-376 stabilizing 4.2-4.6 band; both answers technically accurate, no factual errors.
+- (b) **Shared systemic pattern**: property/term-name density without inline gloss-at-first-mention is the dominant BC drag (Q1 BC=4.0, Q2 BC=4.25). Same pattern across iter375 (BC=4.0 on both Qs) and federation BC ceiling since iter360. This is the most durable improvement target across the loop.
+- (c) Production-fit landed cleanly: Q2 implicitly assumes HMS production stack (no Nessie/Unity push); Q1 web UI is the on-prem deployment view.
+- (d) "Query performance regression diagnosis" topic now at 4.771/4 questions — durability proof builds, no longer a 1-question PASS.
+- (e) Both Q1 and Q2 missed an "alternatives you do NOT have but should know exist" callout — would lift completeness without bloating the answer (Q1: system.runtime SQL view; Q2: Nessie/Unity catalog-level cross-table tx).
+- (f) Q1 framing of CPU vs Scheduled as compute-bound vs I/O-bound is technically defensible but oversimplifies — Scheduled > CPU can also reflect scheduling overhead on highly parallel queries, not just I/O wait.
 
-## Sources verified via WebSearch
+---
 
-- [Resource management properties — Trino 480 Documentation](https://trino.io/docs/current/admin/properties-resource-management.html) — `query.max-memory-per-node` and `query.max-memory` confirmed; per-node + heap-headroom constraint confirmed.
-- [Memory management properties — Trino 370 Documentation](https://trino.io/docs/current/admin/properties-memory-management.html) — session-form `query_max_memory` confirmed.
-- [Right-Sizing Trino: A Data-Driven Guide to Cluster Memory Tuning (Vivek Jain, Medium)](https://medium.com/@vjain143/right-sizing-trino-a-data-driven-guide-to-cluster-memory-tuning-a31b6a80c2f6) — community 30%-of-heap recommendation for per-node sizing.
-- [Trino Memory Config Calculator (Vivek Jain)](https://vjain143.github.io/Trino_Memory_Sizing_Guidelines.html) — heap headroom = 30% of heap, never below 2GB.
-- [Spilling properties — Trino 479 Documentation](https://trino.io/docs/current/admin/properties-spilling.html) — `spill-enabled`, `spill_enabled`, `max-spill-per-node`, `query-max-spill-per-node` all confirmed.
-- [Spill to disk — Trino 481 Documentation](https://trino.io/docs/current/admin/spill.html) — `spiller-spill-path` confirmed; do-not-spill-to-system-drives guidance.
-- [Spark Procedures — Apache Iceberg latest docs](https://iceberg.apache.org/docs/latest/spark-procedures/) — `rewrite_data_files`, `target-file-size-bytes` default 536870912 (512MB), `min-input-files`, binpack strategy all confirmed.
-- [The Iceberg Maintenance Runbook (IOMETE)](https://iomete.com/resources/blog/iceberg-maintenance-runbook) — maintenance ordering: expire_snapshots → remove_orphan_files → rewrite_manifests confirmed.
-- [Maintenance — Apache Iceberg latest docs](https://iceberg.apache.org/docs/latest/maintenance/) — official maintenance operations and ordering guidance.
-- [GH apache/iceberg #11804 — correct sequence for running maintenance steps](https://github.com/apache/iceberg/issues/11804) — community consensus on safe ordering.
-- [Iceberg connector — Trino 481 Documentation](https://trino.io/docs/current/connector/iceberg.html) — `ALTER TABLE EXECUTE optimize(file_size_threshold => '128MB')` confirmed; default 100MB.
-- [Compaction in Apache Iceberg (Dremio blog)](https://www.dremio.com/blog/compaction-in-apache-iceberg-fine-tuning-your-iceberg-tables-data-files/) — small files problem and metadata overhead confirmed.
+## SOURCES VERIFIED (WebSearch)
+
+- [Web UI — Trino 480 Documentation](https://trino.io/docs/current/admin/web-interface.html)
+- [EXPLAIN ANALYZE — Trino 481 Documentation](https://trino.io/docs/current/sql/explain-analyze.html)
+- [Faster Query Processing: CPU Time — Starburst](https://www.starburst.io/blog/faster-query-processing-cpu-time/)
+- [Add spilled data to query stats, CLI, and Web UI — Trino PR #161](https://github.com/trinodb/trino/pull/161)
+- [Java API — Apache Iceberg](https://iceberg.apache.org/docs/nightly/api/?h=transaction)
+- [Add Multi-Table Transaction API · Issue #10617 · apache/iceberg](https://github.com/apache/iceberg/issues/10617)
+- [Nessie — Apache Iceberg](https://iceberg.apache.org/docs/nightly/nessie/?h=transaction)
+- [Iceberg connector — Trino 481 Documentation](https://trino.io/docs/current/connector/iceberg.html)
+- [Iceberg Connector using the Hive Metastore doesn't handle concurrent writes — Trino Issue #27942](https://github.com/trinodb/trino/issues/27942)
+- [Multi-Format, Multi-Table, Multi-Statement Transactions on Unity Catalog — Databricks DAIS 2025](https://www.databricks.com/dataaisummit/session/multi-format-multi-table-multi-statement-transactions-unity-catalog)
