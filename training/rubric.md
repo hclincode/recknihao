@@ -40,16 +40,54 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.422 | 8 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.609 | 4 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.5202 | 136 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.5200 | 137 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.541 | 48 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 4.751 | 5 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4910 | 263 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.7392 | 7 |
-| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.658 | 17 |
+| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.6423 | 18 |
 
 ---
 
 ## Score history
+
+### Iter 384 — 2026-05-30 (EXTENDED PHASE) — Q1 schema registry for Debezium re-probe (evolution-safety framing); Q2 EXPLAIN TYPE LOGICAL vs DISTRIBUTED
+
+**Q1** — Schema registry for Debezium re-probe (evolution-safety framing, Apicurio on-prem, debezium-server-iceberg auto-ALTER)
+
+Responder gave: Primary value = schema-evolution safety (silent data corruption without registry when schema changes), NOT just size; WAL detection is separate from registry; Apicurio Registry for on-prem Apache 2.0; add when (a) multiple consumers or (b) >10K msg/sec; can skip for stable schema + single sink; debezium-server-iceberg auto-ALTERs Iceberg by default.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 4.75 |
+| Completeness | 4.5 |
+| **Average** | **4.50** |
+
+**Iter 384 Q1: 4.50 — STRONG PASS**
+
+Strong recovery from iter383 Q1 3.875 FAIL. Evolution-safety framing now PRIMARY (not size optimization); Apicurio named for on-prem Apache 2.0 fit (production-stack); concrete threshold (>10K msg/sec OR multiple consumers); explicit skip case (stable schema + single sink); debezium-server-iceberg auto-ALTER behavior correctly named. Minor BC drag from WAL/Apicurio/ALTER without inline gloss; minor Comp drag from missing registry-version → Iceberg ALTER TABLE coupling detail.
+
+**Q2** — EXPLAIN TYPE LOGICAL vs DISTRIBUTED (CBO estimates, RemoteExchange, neither executes)
+
+Responder gave: LOGICAL = abstract plan, CBO estimates with rows:? signal for missing stats, use to debug join order / build-probe assignment; DISTRIBUTED = physical execution plan with RemoteExchange types (REPARTITION/REPLICATE), predicate pushdown position, fragment topology; TYPE LOGICAL cheaper + CBO focus, TYPE DISTRIBUTED for execution topology; neither executes the query (EXPLAIN ANALYZE does).
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 3.75 |
+| Practical applicability | 4.5 |
+| Completeness | 4.5 |
+| **Average** | **4.375** |
+
+**Iter 384 Q2: 4.375 — PASS**
+
+Correct LOGICAL vs DISTRIBUTED distinction; rows:? as missing-stats signal accurate; RemoteExchange REPARTITION/REPLICATE correctly named; neither-executes vs EXPLAIN ANALYZE distinction correct. BC drag: CBO, build-probe, RemoteExchange, predicate pushdown, fragment topology not inline-glossed. PA: clear use cases (LOGICAL for join order, DISTRIBUTED for execution topology) — engineer knows which mode to run. Comp: covers both modes + ANALYZE distinction but misses TYPE IO and TYPE VALIDATE peers.
+
+**Iter 384 overall: (4.50 + 4.375) / 2 = 4.4375 — PASS**
+
+---
 
 ### Iter 383 — 2026-05-30 (EXTENDED PHASE) — Q1 schema registry for Debezium + Iceberg; Q2 Trino CBO statistics freshness after ANALYZE
 
