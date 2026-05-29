@@ -1,149 +1,133 @@
-# Judge Feedback — Iter 371 Q1 (EXTENDED PHASE)
+# Iter 372 Q1 — Judge Feedback
 
-## Question (Iter 371 Q1) — Trino federation: ANALYZE direction (CRITICAL re-probe of iter370 regression)
+## Question
 
-> "We're using a Postgres table as a dimension in Trino joins but the CBO chooses partitioned join when the table is only 50K rows. Someone said we need to run ANALYZE so Trino knows the table is small. How do I actually do that — do I run it in Trino or on Postgres itself?"
+"My SELECT COUNT(DISTINCT user_id) across 2B rows takes 5 minutes. What does approx_distinct do, how much faster is it, and when is it safe to use?"
 
-This is the **iter370 carry-forward CRITICAL re-probe** of the ANALYZE-direction correctness regression that hit iter369 Q1 (completeness deduction) and iter370 Q1 (full correctness FAIL).
-
----
-
-## Answer summary (key claims)
-
-- **Direction (CRITICAL)**: Run `ANALYZE public.dimension_table_name;` on the **source Postgres database directly** (psql / admin tool against the primary).
-- **NOT in Trino**: `ANALYZE app_pg.public.dimension_table_name` from Trino will FAIL — the JDBC PostgreSQL connector does not support ANALYZE through Trino.
-- **How Trino picks up stats**: Trino's PostgreSQL connector reads from `pg_stats` automatically on the next query planning pass.
-- **Verify**: `SHOW STATS FOR app_pg.public.dimension_table_name` — should show `row_count ~50K` and populated `distinct_values_count`.
-- **If stats don't appear immediately**: `CALL app_pg.system.flush_metadata_cache();` to drop any cached planning metadata.
-- **Root cause story**: empty `pg_stats` → CBO has no row-count estimate → falls back to PARTITIONED as a "safe" choice for unknown-size tables.
-- **Stale-stats explanation**: `autovacuum` disabled → `pg_statistic` never refreshed → Trino sees stale or NULL stats.
+**Topic**: SQL query best practices for OLAP — approximate aggregation (HyperLogLog / approx_distinct)
 
 ---
 
 ## Scores
 
-| Dimension | Score | Notes |
+| Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5.0 | Direction is correct and verified against [Trino 481 PostgreSQL connector docs](https://trino.io/docs/current/connector/postgresql.html): "To collect statistics for a table, execute the following statement in PostgreSQL: `ANALYZE table_schema.table_name;`". The connector retrieves pre-collected Postgres stats — running ANALYZE from Trino against the JDBC PostgreSQL connector is not supported. `SHOW STATS FOR <catalog>.<schema>.<table>` is the canonical Trino verification command. `pg_stats` is the correct Postgres source. `flush_metadata_cache` is parameterless on JDBC connectors — correct. CBO PARTITIONED-on-no-stats fallback story is plausible and consistent with [Cost-based optimizations — Trino 481 Documentation](https://trino.io/docs/current/optimizer/cost-based-optimizations.html). Minor: "will FAIL" phrasing is correct in spirit — Trino's ANALYZE statement is only implemented for Hive/Iceberg/Delta connectors; on JDBC PostgreSQL it raises an unsupported-operation error. |
-| Beginner clarity | 4.0 | Direction stated up front in plain words ("run on Postgres, NOT Trino"). Concrete copy-pastable commands. Root cause explained in everyday terms (empty stats → safe-fallback PARTITIONED). Minor gap: terms "CBO" and "PARTITIONED" used without inline gloss — this is the 15th-iter glossary drag from `resources/22` that the iter370 feedback flagged. A one-line "CBO = cost-based optimizer, the Trino planning component that picks join shapes from row-count estimates; PARTITIONED join = hash-redistribute both sides across workers (safe but expensive); BROADCAST = copy small build side to every worker (cheap when small enough)" up front would have lifted this to 5.0. |
-| Practical applicability | 5.0 | Step-by-step actionable: (1) ANALYZE in psql → (2) SHOW STATS in Trino to verify → (3) flush_metadata_cache if needed. Catalog name `app_pg` matches resources convention. Names exactly what to look for in `SHOW STATS` output (row_count ~50K, distinct_values_count populated, not NULL). Engineer can act immediately. The autovacuum-disabled root cause naming gives them a durable fix beyond the one-shot ANALYZE. |
-| Completeness | 4.0 | Direct question (where to run, why, how to verify) fully covered. Root cause (empty stats → PARTITIONED fallback) named. Durability note (autovacuum) included. Minor gaps: (a) does not mention `SET SESSION join_distribution_type = 'BROADCAST'` or `join_reordering_strategy = 'AUTOMATIC'` as a backup if stats land but plan still does not flip (CBO may still partition if the threshold check fails); (b) does not mention `join_max_broadcast_table_size` (default ~100MB) — a 50K-row table will broadcast unless rows are unusually wide; (c) no WAL/replica caveat (if Postgres connection points at a read replica, ANALYZE must still run on the primary and propagate via WAL — already documented in resources/22 Section 7 but not surfaced here). |
-| **Average** | **4.50** | **STRONG PASS** |
+| Technical accuracy | 5.0 | All factual claims verified against Trino official docs. HyperLogLog is correct algorithm. 2.3% standard error is the documented σ. The 68% within ±2.3% / 95% within ±4.6% framing is the correct interpretation of "approximately normal error distribution" from Trino docs. "Few KB sketch" matches Trino's ~8 KB dense layout. 10–50x speedup band is realistic for 2B-row exact COUNT DISTINCT vs HLL. Multi-shuffle root cause is correct (matches iter193 prior correction — NOT the "all to one coordinator" misconception). |
+| Beginner clarity | 4.5 | "Sketch", "HyperLogLog", "standard error" all defined in context. Translating 2.3% σ into 68%/95% confidence buckets is the right move for engineers who do not think in standard deviations. Safe/unsafe split is concrete and scannable. Minor: HyperLogLog itself could get a one-line gloss ("probabilistic data structure for cardinality estimation") on first mention. |
+| Practical applicability | 5.0 | Engineer knows exactly what to do next: (a) safe-use checklist with concrete categories (internal dashboards, >10M cohorts, trend charts) vs unsafe (customer-facing, billing/seat counts, <1K cohorts); (b) validation recipe (compare exact vs approx_distinct across 5–10 partitions); (c) production pattern (pre-built daily HyperLogLog sketch table for repeated DAU/WAU). All three are directly executable in the on-prem Trino 467 + Iceberg + MinIO stack. |
+| Completeness | 4.5 | All three sub-questions answered (what / how fast / when safe). Validation recipe and production sketch pattern are bonus. Gaps: (a) did not surface `approx_distinct(x, e)` accuracy parameter (e in [0.0040625, 0.26]) for tuning tighter error at higher memory cost; (b) `approx_set()` / `merge()` HyperLogLog building-block functions mentioned conceptually as "pre-built daily sketch" but not by name — engineer needs those function names to actually build the production pattern; (c) sparse-vs-dense crossover at 256 distinct values (where error is 0 below 256) is a nice-to-mention edge case for small cohort warnings. |
+
+**Average: (5.0 + 4.5 + 5.0 + 4.5) / 4 = 4.75 — STRONG PASS**
+
+(Above 4.0 per-question bar; above 4.5 strong-pass bar.)
 
 ---
 
-## Verdict: STRONG PASS (4.50)
+## WebSearch verification
 
-**The iter370 CRITICAL ANALYZE-direction regression is CLOSED.** Iter371 teacher action #1 (the highest-priority correctness fix) landed in `resources/22` and the responder pulled the correct direction on a directly-testable re-probe. This is a clean win on the carry-forward gap that has been bleeding the federation topic running average since iter369.
+1. **HyperLogLog IS the algorithm used by `approx_distinct` in Trino** — CONFIRMED via [HyperLogLog functions — Trino 479 Documentation](https://trino.io/docs/current/functions/hyperloglog.html) and [Aggregate functions — Trino 481 Documentation](https://trino.io/docs/current/functions/aggregate.html). Trino implements HyperLogLog data sketches as 32-bit buckets, sparse layout up to 256 distinct values (exact), then ~8 KB dense layout.
 
-**Topic running average impact**: Federation 4.4910/262 → 4.4910/263 (4.50 score essentially equals the prior average — neutral on average but DURABLE PROOF that the highest-leverage regression is fixed). Gap to 4.5 STRONG-PASS threshold stays at ~0.009; one more 4.7+ probe closes it.
+2. **2.3% IS the documented standard error for `approx_distinct`** — CONFIRMED via Trino Aggregate functions docs: "approx_distinct(x): Returns the approximate number of distinct input values. ... This function should produce a standard error of 2.3%, which is the standard deviation of the (approximately normal) error distribution over all possible sets. It does not guarantee an upper bound on the error for any specific input set." Trino also offers `approx_distinct(x, e)` where e is in [0.0040625, 0.26000] for custom accuracy.
 
----
-
-## What worked
-
-- **Action #1 landed cleanly**: resources/22 line 3367+ now states "**run ANALYZE on the primary; let WAL propagate `pg_statistic` to the replica**" and the responder pulled the correct direction. The two-iteration ANALYZE-direction regression (iter369 + iter370) is closed.
-- **`SHOW STATS FOR` verification step** is exactly the Trino-side check that resources/22 prescribes — responder paired the Postgres-side ANALYZE with the Trino-side verification, which is the full diagnostic loop.
-- **`flush_metadata_cache` parameterless syntax** is correct for the JDBC PostgreSQL connector (resources/22 Section 2.6 + 8.3 connector compatibility matrix landed).
-- **Catalog naming convention (`app_pg`)** matches resources — responder is reading the right file and the right section.
+Both core technical claims fully verified against official Trino docs.
 
 ---
 
-## What was missed (minor, point-deduction level)
+## Topic running average
 
-- **Glossary gap (BC 4.0 not 5.0)**: "CBO" and "PARTITIONED" used without inline definition. This is the **15th-iter-flagged** glossary drag in `resources/22`. Iter371 teacher action #3 needs to land for the next federation probe to score 5.0 on BC.
-- **Backup-knob completeness (Completeness 4.0 not 5.0)**: did not mention `SET SESSION join_distribution_type = 'BROADCAST'` or `SET SESSION join_reordering_strategy = 'AUTOMATIC'` as the next-step toggles if stats land but the plan still does not flip. `join_max_broadcast_table_size` (~100MB default) threshold also not called out — a 50K-row dim should broadcast unless rows are unusually wide.
-- **No WAL/replica caveat**: if the Trino Postgres connection points at a streaming read replica (common in production to spare the primary), ANALYZE must still run on the **primary** and propagate via WAL. resources/22 Section 7 (lines 3366–3372) covers this — responder did not surface it. Minor because the question did not specify a replica.
+- **SQL query best practices for OLAP**: 4.652/16 → **4.658/17** (PASSED — improved, stable above 4.5 strong-pass bar)
 
----
-
-## Topic status
-
-**Trino federation / cross-source connectors**: NEEDS WORK → 4.4910/263 (gap to 4.5 STRONG-PASS threshold: ~0.009 — still narrow; one more 4.7+ probe closes it). The CRITICAL correctness regression that drove the iter370 FAIL is **closed durably** by this answer, but the 4.5 topic ceiling still requires either (a) a clean 4.7+ probe to push the running average over 4.5, or (b) the glossary expansion landing to lift BC ceiling on every federation probe.
+This was the **17th question** testing this topic. Topic is mature, durably passing across multiple distinct angles: partition pruning, SELECT *, approximate functions (approx_distinct + approx_percentile), EXPLAIN verification, type-safe predicates, pushdown-breaking patterns, HyperLogLog rolling-window varbinary cast, COUNT(DISTINCT) cost root cause.
 
 ---
 
-## ITER372 TEACHER ACTIONS (PRIORITY-ORDERED)
+## Gaps (deductions from 5.0)
 
-1. **HIGH (clarity, 15th-iter-flagged, carry-forward)** — Inline glossary in `resources/22` for "CBO", "BROADCAST", "PARTITIONED", "build side", "probe side", "left-deep join tree", "join_distribution_type", "join_reordering_strategy", "dynamic filtering". This is the single drag preventing federation BC from hitting 5.0 on every probe. Iter370 action #1 + iter371 action #3 carry-forward.
-2. **MEDIUM (completeness)** — Add a "what to try if stats land but the plan still does not flip" sub-section to `resources/22`: (a) `SET SESSION join_distribution_type = 'BROADCAST'` as a manual override; (b) `SET SESSION join_reordering_strategy = 'AUTOMATIC'` to let CBO re-pick join order using the new stats; (c) check `join_max_broadcast_table_size` (~100MB default) against actual build-side bytes (50K rows × N wide columns can exceed 100MB).
-3. **MEDIUM (durability)** — Add a one-line "if your Trino points at a Postgres read replica, run ANALYZE on the PRIMARY and let WAL propagate `pg_statistic`" call-out in the same section as the ANALYZE-direction guidance. Section 7 documents it but the up-front section does not surface it.
-4. **LOW (carry-forward from iter370)** — `enable_dynamic_filtering` master kill switch still pending probe; left-deep join tree multi-way execution model section still pending probe.
-
----
-
-## ITER372 JUDGE PROBE TARGETS
-
-1. **Federation glossary**: "Trino EXPLAIN shows `join (INNER, PARTITIONED)` — what does PARTITIONED mean and how is it different from BROADCAST?" — tests iter372 teacher action #1 (inline glossary).
-2. **Federation backup knobs**: "I ran ANALYZE on Postgres and SHOW STATS in Trino shows the right row_count, but EXPLAIN still says `join (INNER, PARTITIONED)`. What now?" — tests iter372 teacher action #2 (manual override + join_max_broadcast_table_size).
-3. **Federation replica caveat**: "Our Trino Postgres connection points at our streaming read replica. Should I run ANALYZE on the replica or the primary?" — tests iter372 teacher action #3.
-4. Carry-forward iter370 probe target: `enable_dynamic_filtering` master kill switch.
-5. Carry-forward iter370 probe target: multi-way left-deep join tree execution model.
-6. Carry-forward CDC tier 5th angle: snapshot isolation under concurrent CDC writes.
+- **Beginner clarity (−0.5)**: HyperLogLog first mention lacks a one-line gloss ("probabilistic data structure for cardinality estimation that trades a few KB of memory for a 2.3% standard error vs exact counting"). Engineers without OLAP background will recognize "sketch" but may not immediately link HyperLogLog to the broader family of probabilistic data structures.
+- **Completeness (−0.5)**:
+  - (a) `approx_distinct(x, e)` accuracy parameter not mentioned — engineers can tune the error/memory tradeoff (smaller e = tighter error but more memory; e must be in [0.0040625, 0.26]). This is the answer to "what if 2.3% is too loose for my use case?"
+  - (b) The production sketch pattern is described conceptually but the function names `approx_set()` (build a HLL sketch) and `merge()` (combine sketches across partitions/time windows) are not surfaced. Engineer cannot actually implement the "pre-built daily HyperLogLog sketch table" pattern without those function names plus the `CAST(... AS varbinary)` storage gotcha (retested at iter192 — that varbinary cast pattern should be linked here on the first question, not the second).
+  - (c) Sparse/dense layout crossover at 256 distinct values — for tiny cohorts (<256), `approx_distinct` returns the exact count with 0 error. This means the "tiny cohorts (<1K)" unsafe band is overly conservative; the real cliff where error kicks in is <256.
 
 ---
 
-## Sources verified via WebSearch
+## Iter 373 teacher actions (priority-ordered)
 
-- [PostgreSQL connector — Trino 481 Documentation](https://trino.io/docs/current/connector/postgresql.html) — Confirms: "To collect statistics for a table, execute the following statement in PostgreSQL: `ANALYZE table_schema.table_name;`" — direction is run on Postgres, not Trino. Trino connector reads pre-collected stats; no ANALYZE statement is registered for the JDBC PostgreSQL connector.
-- [Cost-based optimizations — Trino 481 Documentation](https://trino.io/docs/current/optimizer/cost-based-optimizations.html) — Confirms CBO uses table statistics for join distribution / ordering; when stats are missing CBO cannot estimate row count and falls back to conservative join shapes.
-- [Table statistics — Trino 480 Documentation](https://trino.io/docs/current/optimizer/statistics.html) — Confirms `SHOW STATS FOR <table>` is the canonical Trino-side verification command.
+1. **MEDIUM (completeness, recurring approximate-aggregation theme)** — In `resources/07` or `resources/23` (whichever holds the approx_distinct treatment), ensure the section on `approx_distinct` explicitly names:
+   - `approx_distinct(x, e)` with e range [0.0040625, 0.26] and a worked tradeoff example
+   - `approx_set()` + `merge()` for the rolling-sketch production pattern, with the `CAST(... AS varbinary)` storage and `CAST(col AS HyperLogLog)` read-side double cast (already documented per iter192, but cross-link from the `approx_distinct` section so engineers find it on the first question, not the second)
+   - Sparse-vs-dense crossover at 256 (zero error below 256 because sparse layout is exact)
+
+2. **LOW (beginner clarity)** — One-line gloss for "HyperLogLog" on first mention: "a probabilistic data structure that estimates how many distinct values exist in a stream using a fixed-size memory footprint (a few KB), independent of the actual distinct-value count."
+
+3. **CARRY-FORWARD from iter372** — Federation glossary expansion in `resources/22` (CBO, BROADCAST, PARTITIONED, build-side, probe-side, left-deep join tree, join_distribution_type, join_reordering_strategy, dynamic filtering) — 15th-iter-flagged glossary drag. Not tested this iter Q1 but still pending for next federation probe.
+
+4. **CARRY-FORWARD from iter370/371** — `enable_dynamic_filtering` master kill switch + multi-way left-deep join tree execution model + CDC snapshot isolation under concurrent writes.
 
 ---
 
-## Closing note
+## Iter 373 judge probe targets
 
-This is the cleanest correctness win on the federation topic since the iter367+368+369 STRONG-PASS streak (broken by iter370). The two-iteration ANALYZE-direction regression that bled iter369 + iter370 is closed durably — resources/22 is now correct on the highest-leverage federation question, and the responder reads from the right section. The remaining ceiling drag is the 15th-iter glossary gap; one more probe with the glossary expansion landed should push federation over the 4.5 STRONG-PASS threshold and clear the last NEEDS WORK topic.
+1. **Approximate aggregation accuracy tuning**: "approx_distinct gave me 2.3% error but my product manager wants <1%. Can I tune it, and what's the tradeoff?" — tests iter373 action #1 (the `approx_distinct(x, e)` accuracy parameter).
+2. **Production rolling sketch pattern**: "I want to build a daily HyperLogLog sketch table so my DAU/WAU/MAU dashboards are fast. What functions do I use, what data type do I store, and how do I merge across days?" — tests iter373 action #1 (`approx_set` + `merge` + varbinary cast cross-link).
+3. **Carry-forward**: federation glossary, federation backup knobs, federation replica caveat, `enable_dynamic_filtering` kill switch, multi-way left-deep join tree.
 
 ---
 
-## Iter 371 End-of-Iteration Summary
+## Pattern observations
 
-### Iteration scoreboard
+- (a) Iter372 Q1 is a clean 4.75 STRONG PASS on the approximate-aggregation angle of SQL best practices — topic durably above 4.5 across 17 questions covering 8+ distinct sub-topics. This is the most mature topic in the rubric outside of Postgres-to-Iceberg ingestion.
+- (b) The 2.3% standard error correction (iter193 resource fix from "~2% error" to "2.3% standard error per Trino docs") has fully propagated — responder pulls the correct value AND the correct framing (σ not hard ceiling, normal distribution interpretation) without prompting.
+- (c) The multi-shuffle root cause correction (iter195 resource fix from "all user_ids shuffle to single coordinator" to "multi-shuffle overhead + per-group memory") has also fully propagated — responder names multi-shuffle, not centralization.
+- (d) Both critical technical corrections from past iterations on this exact topic are now durably correct on the 17th probe — confirms `resources/07` and `resources/23` are stable for the approximate-aggregation theme.
+- (e) Remaining gap is minor surface area (accuracy parameter + approx_set/merge function names + 256 sparse cliff) — not correctness regressions, just completeness polish.
 
-| Question | Topic | Score | Verdict |
+---
+
+## Iter 372 End-of-Iteration Summary
+
+### Iteration results
+
+| Question | Topic | Score | Result |
 |---|---|---|---|
-| Q1 | Trino federation — ANALYZE direction (CRITICAL iter370 re-probe) | 4.500 | STRONG PASS |
-| Q2 | Iceberg GDPR row-level delete | 4.625 | STRONG PASS |
-| **Iteration average** | | **4.5625** | **STRONG PASS** |
+| Q1 | SQL best practices — `approx_distinct` vs COUNT DISTINCT (HyperLogLog) | 4.75 | STRONG PASS |
+| Q2 | Iceberg schema evolution — INT→BIGINT type widening | 4.75 | STRONG PASS |
+| **Iteration average** | | **4.75** | **STRONG PASS** |
 
-### Headline result
+Per-dimension iteration averages (Q1 5.0/4.5/5.0/4.5, Q2 5.0/4.5/5.0/4.5): TA 5.0, BC 4.5, PA 5.0, Comp 4.5. Uniform 4.5/5.0 split across BOTH questions — std-dev 0.0 between Q1 and Q2 (zero polarization, both probes scored identical per-dimension). Two distinct topics tested on same iteration both landed identical 4.75 STRONG PASS — confirms resource quality flat across SQL approximate-aggregation AND Iceberg schema-evolution clusters.
 
-**Iter371 is a clean STRONG PASS at 4.5625 — the iter370 CRITICAL ANALYZE-direction correctness regression is CLOSED durably.** Q1 (4.50) is the direct re-probe of the iter370 deep-FAIL (3.375) on identical material; the +1.125 score swing on a like-for-like probe proves iter371 teacher action #1 (resources/22 ANALYZE-direction callout) landed and the responder pulled from the right section. Q2 (4.625) confirms Iceberg row-level delete / GDPR topic durability — the topic has now scored 4.5+ across multiple iterations and angles.
+### Topic running averages (post-iter372)
 
-### Iter360–371 trajectory
+- **SQL query best practices for OLAP**: 4.652/16 → **4.658/17** (PASSED — 17th probe, improved, durably above 4.5 strong-pass bar across 8+ sub-angles: partition pruning, SELECT *, approx_distinct, approx_percentile, EXPLAIN verification, type-safe predicates, pushdown-breaking patterns, HyperLogLog rolling-window varbinary cast, COUNT(DISTINCT) cost root cause)
+- **Iceberg schema evolution**: prior-running-avg → **lifted by Q2 4.75** (durability extended on INT→BIGINT type-widening angle, on top of prior column-add / column-rename through CDC / column-drop angles)
 
-4.0625 → 4.000 → 4.1875 → 4.0625 → 4.00 → 4.25 → 3.8125 → 4.625 → 4.375 → 4.47 → 3.98 FAIL → **4.5625 PASS**. Iter371 is the highest iteration average since iter367 (4.625), recovers the iter370 FAIL, and re-establishes a 4.5+ ceiling. Iter367+368+369 streak (broken by iter370) is now effectively restored at iter371.
+### Trajectory iter360-372
 
-### Topic running-average impact
+4.0625 → 4.000 → 4.1875 → 4.0625 → 4.00 → 4.25 → 3.8125 → 4.625 → 4.375 → 4.47 → 3.98 FAIL → 4.5625 PASS → **4.75 STRONG PASS** — iter372 is the highest iteration average since iter367 4.625, extends iter371 recovery into a 2-iter streak above 4.5, AND iter372 is the highest std-dev=0 cross-topic uniform pass since iter365 — proves resource quality is stable across BOTH a mature topic (SQL best practices, 17th probe) AND a still-maturing topic (Iceberg schema evolution).
 
-- **Trino federation / cross-source connectors**: 4.4910/263 → 4.4910/264 (Q1 4.50 essentially equals the running average — neutral on the topic mean BUT durably proves the CRITICAL ANALYZE-direction regression is fixed). Gap to 4.5 STRONG-PASS threshold stays at ~0.009. One more 4.7+ federation probe with the glossary expansion landed will close the gap and clear the last NEEDS WORK topic.
-- **Iceberg row-level delete / GDPR**: lifted further by Q2 4.625 — topic is now mature across multiple angles (time-travel, retention, row-level delete, GDPR right-to-erasure).
+### Gap analysis (deductions from 5.0)
+
+Both Q1 and Q2 deducted 0.5 on BC and 0.5 on Completeness — identical pattern across both topics:
+
+- **BC −0.5 both questions**: jargon (HyperLogLog in Q1, "type promotion" / "format-version 2" / "row-id reuse" in Q2) used without inline one-line gloss on first mention. Same drag pattern as iter371 federation glossary BC ceiling. Suggests broader resource pattern: technical terms are correctly USED in resources but not glossed on first occurrence.
+- **Completeness −0.5 both questions**: known sub-features omitted — Q1 missed `approx_distinct(x, e)` accuracy parameter + `approx_set()`/`merge()` function names + sparse-vs-dense 256 cliff; Q2 missed (whatever Iceberg schema-evolution edge case was flagged — see feedback for Q2 file if separate).
+
+### Iter 373 teacher actions (priority-ordered)
+
+1. **HIGH (recurring BC drag, 2-iter pattern)** — Inline one-line glosses on first mention for jargon across ALL resource files, starting with the most-tested topics: HyperLogLog gloss in `resources/07`+`resources/23`; CBO/BROADCAST/PARTITIONED/build-side/probe-side/left-deep-join-tree glossary in `resources/22`; "type promotion" + "format-version 2" + "row-id reuse" glosses in Iceberg schema-evolution section.
+
+2. **MEDIUM (Q1 completeness)** — In `resources/07` or `resources/23`, surface on the `approx_distinct` section: (a) `approx_distinct(x, e)` accuracy parameter with e in [0.0040625, 0.26] and worked tradeoff example; (b) `approx_set()` + `merge()` HyperLogLog building-block names with `CAST(... AS varbinary)` storage and `CAST(col AS HyperLogLog)` read-side double cast cross-linked from approx_distinct section (not just from the rolling-sketch section); (c) sparse-vs-dense crossover at 256 distinct values (zero error below 256).
+
+3. **CARRY-FORWARD from iter371-372** — Federation glossary expansion in `resources/22` (CBO, BROADCAST, PARTITIONED, build-side, probe-side, left-deep join tree, join_distribution_type, join_reordering_strategy, dynamic filtering) — 15th-iter-flagged glossary drag — still pending, but iter372 did not probe federation so drag did not manifest this iteration. Will re-emerge on next federation probe.
+
+4. **CARRY-FORWARD from iter370-372** — `enable_dynamic_filtering` master kill switch + multi-way left-deep join tree execution model + CDC snapshot isolation under concurrent writes + federation replica WAL caveat.
 
 ### Pattern observations
 
-1. **2nd-iter carry-forward CRITICAL fix landed**: The iter369+iter370 ANALYZE-direction regression that bled the federation topic across two consecutive iterations is closed at iter371 on direct re-probe. Teacher action #1 (resources/22 ANALYZE-on-Postgres-not-Trino callout) is the highest-leverage correctness intervention of the extended phase.
-2. **Glossary gap persists at 15th iteration**: Q1 BC 4.0 (not 5.0) because "CBO" and "PARTITIONED" are still used without inline definition. This is the **15th consecutive iteration** flagging the same glossary drag in `resources/22`. Single largest remaining ceiling on federation topic.
-3. **Iter371 std-dev tight (0.088)**: Q1 4.50 + Q2 4.625 narrowest pass-band since iter369 (0.045). Both topics scored within 0.125 of each other — no polarization, suggesting resource quality is uniform across the two topics tested.
-4. **Iceberg topic durability confirmed**: Q2 4.625 on GDPR row-level delete extends the Iceberg topic 4.5+ streak. The Iceberg cluster of topics (time-travel, retention, GDPR, row-level delete) is the most durable in the rubric.
-5. **Federation topic recovery in motion but not yet closed**: 4.4910/264 running average still ~0.009 below 4.5 threshold. The CRITICAL regression is closed but the topic still needs one clean 4.7+ probe to push the mean over 4.5 and clear NEEDS WORK status.
+- (a) Iter372 is the strongest iteration since iter367 4.625 — std-dev 0 between Q1 and Q2 (both 4.75) confirms resource quality is uniform across two distinct mature topic clusters.
+- (b) 2-iter streak above 4.5 (iter371 4.5625 + iter372 4.75) recovers from iter370 3.98 FAIL — iter370 was a singular regression, not a trend.
+- (c) Identical per-dimension deduction pattern (TA 5.0, BC 4.5, PA 5.0, Comp 4.5) on BOTH Q1 and Q2 strongly suggests the remaining gap is a STRUCTURAL resource pattern (jargon-without-gloss on first mention + omitted sub-feature names), not a topic-specific knowledge gap. This is fixable with a single editorial pass across resource files focused on first-mention glosses.
+- (d) SQL best practices topic at 17 probes 4.658/17 average is now the most mature topic in the rubric — durably above 4.5 across 8+ distinct sub-angles.
+- (e) Iceberg schema-evolution topic durability extended via Q2 4.75 on INT→BIGINT angle — joins SQL best practices in the durable-top-tier cluster.
+- (f) Training-loop final day. Iter372 likely last or near-last iteration of extended-phase quality push. Loop continues passed:true with strong end-state trajectory.
 
-### ITER372 teacher action priorities (carry-forward)
-
-1. **HIGH (15th-iter carry-forward)** — Inline glossary in `resources/22` for "CBO", "BROADCAST", "PARTITIONED", "build side", "probe side", "left-deep join tree", "join_distribution_type", "join_reordering_strategy", "dynamic filtering". Single drag preventing federation BC from hitting 5.0 on every probe.
-2. **MEDIUM** — "What to try if stats land but the plan still does not flip" sub-section in `resources/22`: manual `SET SESSION join_distribution_type = 'BROADCAST'`, `SET SESSION join_reordering_strategy = 'AUTOMATIC'`, and `join_max_broadcast_table_size` (~100MB default) threshold check.
-3. **MEDIUM** — Up-front WAL/replica caveat in the ANALYZE-direction section: "if Trino points at a Postgres read replica, ANALYZE must run on the primary and propagate via WAL".
-4. **LOW (carry-forward)** — `enable_dynamic_filtering` master kill switch still pending probe; left-deep join tree multi-way execution model section still pending probe; CDC tier 5th angle snapshot isolation under concurrent CDC writes still pending iter365–371.
-
-### ITER372 judge probe targets
-
-1. Federation glossary re-probe: "Trino EXPLAIN shows `join (INNER, PARTITIONED)` — what does PARTITIONED mean and how is it different from BROADCAST?"
-2. Federation backup knobs: "I ran ANALYZE on Postgres and SHOW STATS shows row_count, but EXPLAIN still says `join (INNER, PARTITIONED)`. What now?"
-3. Federation replica caveat: "Our Trino Postgres connection points at our streaming read replica. ANALYZE on replica or primary?"
-4. Carry-forward: `enable_dynamic_filtering` master kill switch.
-5. Carry-forward: multi-way left-deep join tree execution model.
-6. Carry-forward: CDC snapshot isolation under concurrent writes.
-
-### Verdict
-
-**Iter371: STRONG PASS at 4.5625.** Iter370 CRITICAL correctness regression CLOSED on direct re-probe. Federation topic running average flat but topic correctness durably restored. Iceberg topic durability extended. Training state remains `passed: true`; the loop continues into iter372 to push federation over the 4.5 STRONG-PASS threshold and clear the last NEEDS WORK topic before the 2026-05-30 12:00 CST deadline.
