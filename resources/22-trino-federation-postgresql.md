@@ -3294,6 +3294,33 @@ So when someone asks "if my federated join is slow, will ingesting the Postgres 
 
 > **CRITICAL — common misconception**: "Trino's CBO can't get NDV or distribution statistics from Postgres, so it always guesses for federation joins." **This is wrong.** The Trino PostgreSQL connector **CAN and DOES retrieve table and column statistics from PostgreSQL**, including NDV (distinct value counts) and null fractions — the connector reads them from `pg_stats` via JDBC metadata queries. The catch is that you must run **native PostgreSQL `ANALYZE`** on the Postgres database first to populate `pg_stats`, and Trino's `ANALYZE TABLE` command does NOT work on PostgreSQL connector tables. This section explains exactly what works, what doesn't, and how to verify.
 
+> **WHERE to run `ANALYZE` for Postgres tables — the one rule that gets misremembered.** Trino's JDBC connector **reads pre-collected Postgres statistics** from `pg_stats` over JDBC during query planning. To populate those stats:
+>
+> 1. Run `ANALYZE table_name` directly on the **Postgres PRIMARY** (psql, pgAdmin, pg_cron, or autovacuum). **Not the replica** (a streaming hot standby is read-only and rejects `ANALYZE` with `cannot execute ANALYZE in a read-only transaction`). **Not through Trino** (the PostgreSQL connector does not implement Trino's `ANALYZE` statement — see the three-situations table below).
+> 2. Trino picks up the new stats **automatically on the next query** that plans against the table — **no additional command needed on the Trino side** (subject to `metadata.cache-ttl`; if set > 0, run `CALL <catalog>.system.flush_metadata_cache();` to force an immediate refresh, see Section 2.6).
+>
+> **Worked example — WRONG vs RIGHT:**
+>
+> ```sql
+> -- WRONG — do NOT do this in Trino. The PostgreSQL connector does
+> --        not implement ANALYZE; this errors with something like
+> --        "Catalog 'app_pg' does not support analyze".
+> ANALYZE app_pg.public.customers;     -- fails — connector does not support it
+> ANALYZE app_pg.public.products;      -- fails — connector does not support it
+> ```
+>
+> ```sql
+> -- CORRECT — run these on the Postgres PRIMARY (psql, pgAdmin,
+> --          pg_cron, or autovacuum). The new pg_statistic rows
+> --          flow through WAL to the hot-standby replica Trino reads
+> --          from. Trino's NEXT query plan picks them up — no Trino-
+> --          side command is required.
+> ANALYZE public.customers;
+> ANALYZE public.products;
+> ```
+>
+> The rest of this section explains the mechanics in depth — but the one-line summary is: **Postgres collects, Trino reads. ANALYZE goes on the Postgres primary, period.**
+
 #### The official behavior
 
 Per the Trino documentation ([trino.io/docs/current/connector/postgresql.html](https://trino.io/docs/current/connector/postgresql.html), "Table statistics" section): **"The PostgreSQL connector can use table and column statistics for cost based optimizations to improve query processing performance. The statistics are collected by PostgreSQL and retrieved by the connector."**
@@ -4653,7 +4680,59 @@ If none of those help, PARTITIONED is correct. Accept it. The join will run; the
 
 #### 5.5.2 Reading join distribution out of EXPLAIN — `Distribution: REPLICATED` vs `Distribution: PARTITIONED`
 
-**The join distribution shows up on the Exchange operator above the join in EXPLAIN output**, NOT as a `Join[BROADCAST]` / `Join[PARTITIONED]` annotation on the join node itself. Use the `Distribution:` line or the `Exchange[Type=...]` block to read it.
+**The join distribution shows up in TWO places in `EXPLAIN (TYPE DISTRIBUTED)` output:**
+1. **On the `InnerJoin` node itself**, as a `distribution` / `Distribution` qualifier — the correct tokens are `InnerJoin[<predicate>][distribution = REPLICATED]` for broadcast joins and `InnerJoin[<predicate>][distribution = PARTITIONED]` for partitioned joins. Some Trino versions render this on the same line as the join predicate.
+2. **On the `RemoteExchange` operator feeding the build side** — `RemoteExchange[REPLICATE, BROADCAST, []]` for broadcast, `RemoteExchange[REPARTITION, HASH, [<join_key>]]` for partitioned. This is the most reliable token to grep for.
+
+**There is NO `Join[BROADCAST]` token in Trino EXPLAIN output** — that string is a common fabrication in blog posts and AI-generated answers. The correct equivalents are:
+- Broadcast join: `InnerJoin[..., distribution = REPLICATED]` on the join node AND `RemoteExchange[REPLICATE, BROADCAST, []]` above the build side.
+- Partitioned join: `InnerJoin[..., distribution = PARTITIONED]` on the join node AND `RemoteExchange[REPARTITION, HASH, [<key>]]` above BOTH sides.
+
+**Canonical `EXPLAIN (TYPE DISTRIBUTED)` example — broadcast join (what to grep for):**
+
+```
+EXPLAIN (TYPE DISTRIBUTED)
+SELECT t.name, COUNT(*)
+FROM iceberg.analytics.events e
+JOIN app_pg.public.tenants t ON e.tenant_id = t.id
+WHERE t.plan_tier = 'enterprise'
+GROUP BY t.name;
+
+-- Trino 467 output (key tokens shown):
+Fragment 0 [SINGLE]
+    ...
+    InnerJoin[("e.tenant_id" = "t.id")][distribution = REPLICATED]   <-- distribution token on join node
+        TableScan[iceberg:analytics.events]                          <-- probe: NO RemoteExchange above
+            dynamicFilters = {tenant_id = #df0}
+        LocalExchange[HASH][$hashvalue]
+            RemoteExchange[REPLICATE, BROADCAST, []]                 <-- build: REPLICATE marker
+                TableScan[app_pg:public.tenants,
+                          constraint = (plan_tier = 'enterprise')]
+```
+
+**Canonical `EXPLAIN (TYPE DISTRIBUTED)` example — partitioned join:**
+
+```
+Fragment 0 [SINGLE]
+    ...
+    InnerJoin[("e.tenant_id" = "t.id")][distribution = PARTITIONED]  <-- distribution token on join node
+        RemoteExchange[REPARTITION, HASH, [tenant_id]]               <-- probe shuffled by join key
+            TableScan[iceberg:analytics.events]
+        LocalExchange[HASH][$hashvalue]
+            RemoteExchange[REPARTITION, HASH, [id]]                  <-- build ALSO shuffled by join key
+                TableScan[app_pg:public.tenants, ...]
+```
+
+**Grep recipe — fastest way to read distribution out of a captured plan:**
+
+```bash
+# Was it broadcast or partitioned?
+grep -E 'distribution = (REPLICATED|PARTITIONED)' plan.txt
+# Equivalent (more reliable across Trino versions): look at the build-side RemoteExchange:
+grep -E 'RemoteExchange\[(REPLICATE|REPARTITION)' plan.txt
+```
+
+The rest of this subsection covers the legacy stylized notation (`Distribution: REPLICATED`, `Exchange[Type=REPLICATE]`) you may see in older docs — both forms carry the same `REPLICATE` / `REPARTITION` tokens, so the grep recipe above works on either.
 
 Two views of the same information — the **stylized conceptual form** (good for documentation and teaching) and the **literal Trino 467 output format** (what you actually grep against `EXPLAIN (TYPE DISTRIBUTED)` output):
 
@@ -4694,7 +4773,7 @@ Walk down to the `InnerJoin` (or `LeftJoin`/etc.) node and look at the Exchange 
 
 If you see `REPLICATE` on the build-side Exchange, the CBO concluded the build was below `join_max_broadcast_table_size` (or `join_distribution_type` was forced to `BROADCAST`). If you see `REPARTITION`, either the build estimate exceeded the threshold, the type was forced to `PARTITIONED`, or stats are missing/wrong (run `ANALYZE` to fix).
 
-There is **no `Join[BROADCAST]` or `Join[PARTITIONED]` token** in real Trino EXPLAIN output — if you see that in an answer or blog post, it's a fabrication. Read the **Exchange / Distribution** line instead.
+There is **no `Join[BROADCAST]` or `Join[PARTITIONED]` token** in real Trino EXPLAIN output — if you see that in an answer or blog post, it's a fabrication. The correct tokens are `InnerJoin[..., distribution = REPLICATED]` (broadcast) and `InnerJoin[..., distribution = PARTITIONED]` (partitioned) on the join node, plus the `RemoteExchange[REPLICATE, BROADCAST, []]` / `RemoteExchange[REPARTITION, HASH, [<key>]]` markers above the build side. Read the **Exchange / Distribution** line, not a phantom `Join[...]` annotation.
 
 #### 5.5.3 Full broadcast-join EXPLAIN plan tree — what the probe side does (and does NOT) show
 
@@ -4758,6 +4837,88 @@ Fragment 0 [SINGLE]
 - **Partitioned** = **TWO** `RemoteExchange[REPARTITION, HASH, [<key>]]` nodes (one per side), plus a top-level `RemoteExchange[GATHER]`. Both sides shuffle.
 
 **Why this matters in practice.** If you mis-read a partitioned plan as broadcast (or vice versa), you'll chase the wrong tuning lever. Seeing `REPARTITION, HASH` over the Iceberg probe means the join is partitioned and you should investigate why (stats missing? build estimate exceeded `join_max_broadcast_table_size`? `join_distribution_type` forced to PARTITIONED?). Seeing only `REPLICATE, BROADCAST` over the build and a bare probe means broadcast is working — and any remaining slowness is in DF wait-timeout, probe-side file pruning, or coordinator gather, not in the join distribution choice.
+
+#### 5.5.4 Multi-table joins — how Trino executes `A JOIN B JOIN C` (left-deep tree)
+
+**Trino does not execute a 3-table join "all at once."** A query like `SELECT ... FROM A JOIN B ON ... JOIN C ON ...` is converted by the CBO into a sequence of **two-way joins** arranged in a **left-deep join tree**:
+
+```
+                InnerJoin (second join)
+               /                       \
+   InnerJoin (first join)               C
+   /        \
+  A          B
+```
+
+Read this as: **first** join A with B, **then** join the intermediate result with C. Each pairwise join is a separate operator in the plan with its own build side, probe side, and distribution choice.
+
+**What the CBO decides for a 3-table join:**
+
+1. **Join order** — which two tables to join first. Driven by `join_reordering_strategy = AUTOMATIC` (default) and the per-table statistics (`SHOW STATS FOR ...`). The CBO will typically start with the smallest pair to keep the intermediate result tiny. **Stats matter enormously here**: without `ANALYZE` on the Postgres primary AND `ANALYZE TABLE` on the Iceberg side, the CBO falls back to deterministic heuristics (often `ELIMINATE_CROSS_JOINS`) and picks an arbitrary order — frequently the wrong one. See Section 4.1A.
+2. **Distribution per pairwise join** — each two-way join INDEPENDENTLY chooses BROADCAST or PARTITIONED. The first join might be broadcast (small × small), the second join might be partitioned (intermediate result × large fact). They are independent decisions.
+3. **Build/probe assignment per pairwise join** — for each two-way join, the CBO picks which side is the build (smaller, hashed in memory) and which is the probe (larger, streamed). Bad stats here invert this assignment and DF flows the wrong way.
+
+**Concrete example — 3-table federated join (Postgres × Postgres × Iceberg):**
+
+```sql
+SELECT u.name, o.amount, e.event_type
+FROM app_pg.public.users u            -- 5K rows (small Postgres dim)
+JOIN app_pg.public.orders o           -- 200K rows (mid Postgres dim)
+  ON o.user_id = u.id
+JOIN iceberg.analytics.events e       -- 500M rows (large Iceberg fact)
+  ON e.order_id = o.id
+WHERE u.plan_tier = 'enterprise'
+  AND e.occurred_at >= DATE '2026-05-01';
+```
+
+**Plan shape the CBO usually picks (with good stats on all three tables):**
+
+```
+Fragment 0 [SINGLE]
+    Output[...]
+        InnerJoin[e.order_id = o.id][distribution = REPLICATED]      <-- second join: (users JOIN orders) <-> events
+            TableScan[iceberg:analytics.events,                       <-- probe (largest, 500M rows)
+                      constraint = (occurred_at >= DATE '2026-05-01')]
+                dynamicFilters = {order_id = #df1}                    <-- DF from the (users JOIN orders) result
+            LocalExchange[HASH]
+                RemoteExchange[REPLICATE, BROADCAST, []]              <-- build: broadcast (users JOIN orders) intermediate
+                    InnerJoin[o.user_id = u.id][distribution = REPLICATED]  <-- first join: users (small) JOIN orders (mid)
+                        TableScan[app_pg:public.orders]               <-- probe of first join
+                        LocalExchange[HASH]
+                            RemoteExchange[REPLICATE, BROADCAST, []]
+                                TableScan[app_pg:public.users,
+                                          constraint = (plan_tier = 'enterprise')]  <-- build of first join
+```
+
+Two pairwise joins, each with its own distribution choice. The intermediate result `(users JOIN orders WHERE plan_tier = 'enterprise')` is small enough (a few hundred MB at most) to broadcast against the giant Iceberg fact, so the second join is also `REPLICATED`.
+
+**Where multi-table federated joins go wrong — the OOM trap.**
+
+The most common 3-table federated-join failure on this stack is **both JDBC tables being broadcast simultaneously**. If the CBO underestimates the size of `users` AND the size of `orders` (because `ANALYZE` was never run on the Postgres primary — see Section 4.1A), it may try to broadcast both Postgres tables independently before joining to Iceberg:
+
+- Every worker pulls a full copy of `users` from Postgres (small — fine).
+- Every worker ALSO pulls a full copy of `orders` from Postgres (200K rows could be 100MB — feasible per worker).
+- The intermediate `(users JOIN orders)` then gets broadcast to every worker AGAIN before joining to Iceberg.
+
+The result: each worker holds the build side of **two** broadcast joins simultaneously, consuming **2× the expected memory**. On a stats-deprived cluster this is a frequent OOM root cause for 3+ table joins. Symptom: `EXCEEDED_LOCAL_MEMORY_LIMIT` or `Query exceeded per-node memory limit` errors when the same join with two tables works fine.
+
+**Three diagnostic steps when a 3-table federated join OOMs:**
+
+1. **Run `SHOW STATS FOR <each_table>` on all three tables.** Any NULL `row_count` or `distinct_values_count` on a join key means the CBO is operating blind. Run `ANALYZE` on the Postgres PRIMARY for the JDBC tables (see Section 4.1A) and `ANALYZE TABLE iceberg.<schema>.<table>` for the Iceberg tables. Flush the metadata cache (`CALL <catalog>.system.flush_metadata_cache();`).
+2. **Inspect `EXPLAIN (TYPE DISTRIBUTED)` and count `RemoteExchange[REPLICATE, BROADCAST, []]` nodes.** If both Postgres tables show one, you have the simultaneous-broadcast pattern described above.
+3. **Force `join_distribution_type = 'PARTITIONED'`** as a temporary unstick. Partitioned distribution shuffles both sides by key and uses `1/N` of the build per worker — strictly safer for memory:
+
+   ```sql
+   SET SESSION join_distribution_type = 'PARTITIONED';
+   -- run the query — it will be slower (more shuffle) but will not OOM
+   ```
+
+   Then run the proper `ANALYZE` fix above and reset (`RESET SESSION join_distribution_type;`).
+
+**Rule of thumb for 3+ table federated joins:**
+- **2 tables**: broadcast is almost always right when the small side fits in worker memory.
+- **3 tables, one large fact + two small dims**: works fine IF stats are populated AND the two small dims together fit in worker memory.
+- **3+ tables with multiple large JDBC sources**: ingest at least one side into Iceberg first (Section 6 on federate-vs-ingest) — federated multi-table joins with two large JDBC sources hit the JDBC single-split bottleneck twice AND the broadcast memory budget twice.
 
 ### 5.6 Dynamic filtering with Postgres-partitioned probe tables
 

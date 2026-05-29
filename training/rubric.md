@@ -41,15 +41,92 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.625 | 6 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.609 | 4 |
 | Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.523 | 134 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.528 | 43 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.529 | 44 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 5.0 | 2 |
-| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4949 | 261 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4910 | 262 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
 | SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.652 | 16 |
 
 ---
 
 ## Score history
+
+### Iter 370 Q1 — 2026-05-30 (EXTENDED PHASE) — Trino federation 15th-iter angle: three-table join OOM diagnosis (1B-row Iceberg ⨝ 500K Postgres customers ⨝ 50K Postgres products)
+
+**Q1** — "We JOIN our 1B-row Iceberg events to two Postgres tables (500K customers + 50K products). Each join alone works fine but all three OOM. How does Trino execute a three-table join and what do we do?"
+
+Responder produced a three-tier fix ladder: (Fix 1) `ANALYZE` both Postgres tables in Trino + `SHOW STATS` to verify row_count + `SET SESSION join_reordering_strategy = 'AUTOMATIC'` + verify `enable_dynamic_filtering = true`; (Fix 2) `SET SESSION join_distribution_type = 'PARTITIONED'` if OOM persists; (Fix 3, durable) `CREATE TABLE iceberg.analytics.customers AS SELECT ...` + daily `INSERT INTO` to land all three tables in Iceberg. Also told the user to look for "Join[BROADCAST] annotations" in EXPLAIN output.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 3.0 |
+| Beginner clarity | 3.5 |
+| Practical applicability | 3.5 |
+| Completeness | 3.5 |
+| **Average** | **3.375** |
+
+Judge verified via WebSearch:
+1. **`ANALYZE postgresql.public.customers` from Trino — FAILS** — per [PostgreSQL connector — Trino 481 Documentation](https://trino.io/docs/current/connector/postgresql.html): "To collect statistics for a table, execute the following statement in PostgreSQL. `ANALYZE table_schema.table_name;`" The Trino connector retrieves stats that PostgreSQL has already collected; it does NOT support running ANALYZE through Trino's catalog interface for the JDBC PostgreSQL connector. Responder's Fix 1 instruction is factually wrong and would fail if typed verbatim. The correct guidance is: run `ANALYZE` on the source Postgres database directly (psql or admin tool), then verify in Trino via `SHOW STATS FOR postgresql.public.customers`. This was also iter370 teacher action #4 from iter369 carry-forward and the responder missed the distinction.
+2. **EXPLAIN broadcast annotation** — per [EXPLAIN — Trino 480 Documentation](https://trino.io/docs/current/sql/explain.html) and community plan-reading guides, the documented annotation is `join (INNER, REPLICATED)` for broadcast and `join (INNER, PARTITIONED)` for partitioned, with `Exchange[REPLICATE]` as the related exchange-node label. The responder's `Join[BROADCAST]` is not the canonical Trino token — minor inaccuracy that will confuse a user grepping EXPLAIN output for that exact string.
+3. **`enable_dynamic_filtering` master kill switch + `join_reordering_strategy = AUTOMATIC` + `join_distribution_type = PARTITIONED` + `join_max_broadcast_table_size`** — CONFIRMED real session properties per [Cost-based optimizations — Trino 481 Documentation](https://trino.io/docs/current/optimizer/cost-based-optimizations.html).
+4. **CBO broadcasts both 500K + 50K Postgres tables to a 1B-row Iceberg probe** — plausible given default `join_max_broadcast_table_size` (~100MB) if both Postgres tables are narrow, but responder did not size-check or call out the threshold — minor completeness gap.
+
+**Iter 370 Q1: 3.375 — FAIL** (below the per-question 4.0 bar; below the 4.5 STRONG-PASS bar for federation topic; drags topic running avg from 4.4949/261 down to 4.4910/262 — federation topic now further from the 4.5 PASS ceiling, gap widened from 0.0051 to 0.0090.)
+
+GAPS (deductions from 5):
+- **Technical accuracy (−2.0)**: (a) MAJOR — `ANALYZE postgresql.public.customers` from Trino does not work for the JDBC PostgreSQL connector; correct instruction is to run ANALYZE on the source Postgres DB directly, then `SHOW STATS` in Trino to verify the connector picked up the new stats. This was a directly testable iter369-carry-forward correctness gap (iter370 teacher action #4) and the responder repeated the wrong direction. (b) MINOR — `Join[BROADCAST]` is not the documented Trino EXPLAIN annotation; correct token is `join (INNER, REPLICATED)` with `Exchange[REPLICATE]` adjacent.
+- **Beginner clarity (−1.5)**: "CBO", "BROADCAST", "PARTITIONED", "dynamic filtering", "build/probe side", "join_distribution_type" all used without inline definitions — 14th-iter-flagged glossary gap in `resources/22` continues to drag clarity DOWN every federation probe. Iter370 teacher action #1 (HIGH-priority glossary expansion) clearly has not landed in resources/22 yet, OR the responder is not pulling from that section. A 1B-row × 500K × 50K newcomer needs "broadcast = copy small table to every worker; partitioned = hash-redistribute both sides" inline gloss BEFORE the session-property recommendations.
+- **Practical applicability (−1.5)**: (a) MAJOR — Fix 1 instruction (`ANALYZE postgresql.public.customers` from Trino) would fail with a syntax/unsupported error if a user types it verbatim, sending them down a debugging rabbit hole rather than to the actual fix (run ANALYZE in psql). (b) No on-prem k8s context for coordinator config changes; no Trino 467 / Iceberg 1.5.2 version pin.
+- **Completeness (−1.5)**: (a) The question explicitly asks "how does Trino execute a three-table join" — responder skipped the left-deep join tree explanation, the role of CBO in ordering (which of customers/products gets joined first, then the intermediate result probes events), and intermediate-result memory pressure as the OOM root cause. This is the conceptual core of the question. (b) Missing dynamic filtering's role in pruning the 1B-row Iceberg events scan after both Postgres dimensions are scanned — directly testable iter369 carry-forward. (c) Missing `join_max_broadcast_table_size` threshold check — for 500K + 50K rows the broadcast may exceed the default if columns are wide. (d) Missing the resource-group / concurrency-cap stop-gap that has been documented in resources/22 since iter360.
+
+ITER371 TEACHER ACTIONS (PRIORITY-ORDERED):
+1. **CRITICAL (correctness regression)** — Fix the iter370 teacher action #4 landing in `resources/22`: explicitly state that for the JDBC PostgreSQL connector, `ANALYZE postgresql.public.customers` from Trino is NOT supported and will fail; correct sequence is (i) `ANALYZE table_schema.table_name;` in psql against the source Postgres DB, (ii) `SHOW STATS FOR postgresql.public.customers` in Trino to verify stats reached the connector, (iii) `SET SESSION join_reordering_strategy = 'AUTOMATIC'` to let CBO use them. This is a directly-testable correctness regression — the iter369 judge action carry-forward did not land, so responder repeated the wrong direction.
+2. **HIGH (correctness)** — Add a multi-way join execution model section to `resources/22`: Trino builds a left-deep join tree, CBO picks join ORDER based on row count and selectivity (smallest selectivity-filtered table first), each join can independently be BROADCAST or PARTITIONED, intermediate result of join 1 becomes the probe side of join 2 and that intermediate size drives the second join's distribution choice. Multi-table OOM is usually intermediate-result size, not source-table size.
+3. **HIGH (clarity, 14th-iter-flagged)** — Inline glossary in `resources/22` for "CBO", "BROADCAST", "PARTITIONED", "build side", "probe side", "left-deep join tree", "join_distribution_type". Iter370 teacher action #1 was HIGH priority and did not land in time for iter370 Q1.
+4. **MEDIUM (correctness)** — Fix the EXPLAIN annotation reference in `resources/22`: use the canonical Trino tokens `join (INNER, REPLICATED)` and `join (INNER, PARTITIONED)` with `Exchange[REPLICATE]` for the adjacent exchange node. Strike any `Join[BROADCAST]` / `Join[PARTITIONED]` references — they are not the documented Trino EXPLAIN syntax.
+5. **MEDIUM (completeness)** — Add `join_max_broadcast_table_size` (default ~100MB) note to `resources/22`: explain that the CBO compares estimated build-side bytes against this threshold before choosing BROADCAST, so even a 500K-row table can exceed it if rows are wide.
+6. **LOW (topic running average push)** — Federation topic is now 4.4910/262 — 0.0090 below the 4.5 STRONG-PASS bar. Iter371 federation probe MUST be 4.7+ to recover.
+
+ITER371 JUDGE PROBE TARGETS:
+1. **CRITICAL re-probe** — Federation correctness on the ANALYZE direction: "I tried `ANALYZE postgresql.public.customers` in Trino and got an error. How do I get stats for the CBO?" — tests iter371 teacher action #1 lands.
+2. Federation multi-way join execution model: "We have a 4-way join (events ⨝ customers ⨝ products ⨝ regions) and the THIRD join always blows up. Why?" — tests iter371 teacher action #2 (left-deep join tree + intermediate-result sizing).
+3. Federation EXPLAIN-reading: "I ran EXPLAIN and see `join (INNER, REPLICATED)` — what does REPLICATED mean here?" — tests iter371 teacher action #4 (canonical EXPLAIN tokens land).
+4. Carry-forward iter370 probe target #1 (collection-duration vs wait-timeout) still pending.
+5. Carry-forward iter370 probe target #2 (enable_dynamic_filtering kill switch) still pending.
+6. Carry-forward CDC tier 5th angle (snapshot isolation under concurrent CDC writes) still pending iter365–370.
+
+Sources verified via WebSearch:
+- [PostgreSQL connector — Trino 481 Documentation](https://trino.io/docs/current/connector/postgresql.html) — ANALYZE must run on source Postgres, not via Trino catalog; connector reads pre-collected stats
+- [EXPLAIN — Trino 480 Documentation](https://trino.io/docs/current/sql/explain.html) — broadcast annotation is `join (INNER, REPLICATED)` not `Join[BROADCAST]`
+- [Cost-based optimizations — Trino 481 Documentation](https://trino.io/docs/current/optimizer/cost-based-optimizations.html) — `join_reordering_strategy`, `join_distribution_type`, `join_max_broadcast_table_size` session properties confirmed
+- [Table statistics — Trino 480 Documentation](https://trino.io/docs/current/optimizer/statistics.html) — CBO uses connector-reported statistics
+
+**Topics updated**:
+- Trino federation: 4.4949/261 → **4.4910/262 questions** (still NEEDS WORK — 0.0090 below 4.5 raised threshold; iter370 Q1 lands at 3.375 which is BELOW the per-question 4.0 bar — a clear FAIL — and the correctness regression on ANALYZE direction is the same iter369 gap the iter370 teacher action #4 was supposed to fix. Topic regressed from the 4.4949 plateau and now sits further from the 4.5 ceiling. Iter371 federation probe must be 4.7+ to recover.)
+
+---
+
+### Iter 370 Q2 — 2026-05-30 (EXTENDED PHASE) — Iceberg time travel + retention recovery scenario: 3-day-old accidental deletion, can we query pre-deletion state, is historical data safe
+
+**Q2** — "We accidentally deleted data from an Iceberg table three days ago. How do I query what the table looked like before the deletion? Is there any risk the historical data is already gone?"
+
+Responder produced: (a) `FOR TIMESTAMP AS OF TIMESTAMP '...'` syntax for wall-clock time travel; (b) `FOR VERSION AS OF <snapshot_id>` syntax for snapshot-ID-based time travel; (c) `$snapshots` metadata-table discovery path for finding pre-deletion snapshot IDs; (d) risk analysis "3 days is safe because Iceberg default `history.expire.max-snapshot-age-ms`=5d AND Trino enforces 7d floor on `expire_snapshots` procedure"; (e) Iceberg does NOT auto-delete — manual `expire_snapshots` required; (f) `rollback_to_snapshot` for full undo, described correctly as metadata-only / pointer-based; (g) `history.expire.max-snapshot-age-ms` table property as the retention knob; (h) post-recovery tagging recommendation.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.875 |
+| Beginner clarity | 4.25 |
+| Practical applicability | 4.75 |
+| Completeness | 4.5 |
+| **Average** | **4.59** |
+
+**WebSearch verifications (4)**: (1) `FOR TIMESTAMP AS OF` / `FOR VERSION AS OF` syntax CONFIRMED via trino.io Iceberg connector docs and Starburst Time Travel blog with concrete examples; (2) Trino 7-day minimum retention on `expire_snapshots` CONFIRMED via Starburst Galaxy forum — error message "Retention specified (1.00d) is shorter than the minimum retention configured in the system (7.00d)" verbatim; (3) Iceberg default `history.expire.max-snapshot-age-ms` = 432000000 ms = 5 days CONFIRMED via Apache Iceberg issue #9123 and maintenance docs; (4) `rollback_to_snapshot` metadata-only / pointer-based / instantaneous CONFIRMED via Starburst blog ("no data files are moved or deleted").
+
+**Iter 370 Q2: 4.59 — STRONG PASS** (above per-question 4.0 bar; above 4.5 STRONG-PASS bar.) Topic running avg: Iceberg maintenance 4.528/43 → **4.529/44 questions** (PASSED — lifted by Q2 STRONG PASS).
+
+**Iter 371 carry-forward priorities**: (MEDIUM) `$snapshots`/`$history` double-quoted metadata-table syntax inline gloss; branches (`create_branch`) as non-destructive inspection alternative; explicit "Spark and Trino enforce their own min-retention floors independently" caveat; (LOW) disambiguate Iceberg table-property default (5d) from Trino procedure floor (7d).
+
+---
 
 ### Iter 369 Q1 — 2026-05-30 (EXTENDED PHASE) — Trino federation 14th-iter angle: dynamic filtering mechanism + verification on 500M-row Iceberg ⨝ 200K-row Postgres (per iter368 judge probe target #6)
 
