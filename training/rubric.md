@@ -40,16 +40,66 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Storage sizing and growth estimation for lakehouse workloads | PASSED | 4.516 | 8 |
 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | PASSED | 4.4101 | 9 |
 | OLTP-to-OLAP mindset: the mental model shift for SaaS engineers adopting a lakehouse | PASSED | 4.609 | 4 |
-| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.4877 | 143 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | PASSED | 4.4891 | 144 |
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.4662 | 58 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 4.6885 | 6 |
-| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4925 | 265 |
+| Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4925 | 266 |
 | Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.6948 | 8 |
-| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.6121 | 21 |
+| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.6070 | 22 |
 
 ---
 
 ## Score history
+
+### Iter 401 — 2026-05-30 (EXTENDED PHASE) — Q1 Complete dbt-trino Iceberg incremental model config (canonical YAML + compiled MERGE + watermark + late-arrival lookback + maintenance); Q2 Predicate pushdown verification via EXPLAIN (TYPE DISTRIBUTED + EXPLAIN ANALYZE + Postgres slow query log three-layer)
+
+**Q1** — Complete dbt-trino Iceberg incremental model config: incremental_strategy='merge' (not append), on_schema_change='append_new_columns', unique_key, watermark filter using COALESCE for null seed, 4-day lookback for late-arriving rows, file_format='iceberg', partitioned_by; compiled MERGE SQL shown so engineer can verify what dbt emits; 6 numbered gotchas; maintenance schedule (optimize + expire_snapshots) mentioned.
+
+Responder gave: Direct landing of iter400 carry-forward action #1 (canonical YAML inline) + iter400 carry-forward action #2 (post-hook maintenance mention). All four iter400 gotchas now have concrete config syntax instead of prose references: `incremental_strategy='merge'` resolves the append-default; `on_schema_change='append_new_columns'` resolves silent-data-loss; `unique_key` declared (without it, dbt merge silently degrades to append — iter400 gap closed); `partitioned_by` declared (iter400 partition-by gap closed). Watermark filter with `COALESCE(MAX(watermark_col), DATE '1970-01-01')` is the production-correct first-run-seed pattern (NULL on empty target table degrades incremental to bootstrap). 4-day lookback for late arrivals is a concrete production number (engineer can tune up/down). Compiled MERGE SQL shown is gold — beginner can read the actual `MERGE INTO target USING source ON unique_key WHEN MATCHED THEN UPDATE WHEN NOT MATCHED THEN INSERT` to understand what the dbt config compiles to. 6 numbered gotchas + maintenance schedule = comprehensive coverage. Minor gap: "maintenance schedule mentioned" — the literal `post_hooks=["ALTER TABLE {{ this }} EXECUTE optimize", "ALTER TABLE {{ this }} EXECUTE expire_snapshots(retention_threshold => '7d')"]` snippet is not fully spelled out (just referenced); iter400 action #2 partially landed. No dbt-trino version pinning vs Trino 467 + Iceberg 1.5.2 compat note.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.5 |
+| **Average** | **4.6875 STRONG PASS** |
+
+**Q2** — Predicate pushdown verification via EXPLAIN: `EXPLAIN (TYPE DISTRIBUTED)` for plan-level evidence; pushdown succeeded signal = `constraint = ...` attribute nested INSIDE the `TableScan` node; pushdown failed signal = separate `ScanFilterProject` node ABOVE `TableScan` (filter runs in Trino, not pushed to source); `EXPLAIN ANALYZE` for runtime confirmation (Input rows vs Output rows ratio = pushdown working when input matches filtered count, not full table); Postgres slow query log as source-of-truth ground check (the WHERE clause actually arriving at Postgres confirms pushdown end-to-end).
+
+Responder gave: Three-layer verification stack — plan-level (EXPLAIN), runtime-level (EXPLAIN ANALYZE), source-level (Postgres log) — is the correct production diagnosis approach. `TableScan` with `constraint` attribute under the node IS the canonical Trino 467 pushdown signal (matches Trino EXPLAIN output for connector-pushed predicates). `ScanFilterProject` above `TableScan` IS the failure shape — filter promoted to a separate Trino-side node because connector refused/couldn't push it. Input rows vs Output rows ratio in EXPLAIN ANALYZE is the right runtime heuristic (1:1 ratio = pushdown working; 100:1 ratio = full scan with Trino-side filter). Postgres slow query log as ground truth is excellent: closes the loop because plan-only verification can lie if the JDBC layer rewrites the query; only the source DB log shows what actually ran. Gaps: didn't show the literal EXPLAIN output text snippet a beginner needs to pattern-match against; no mention of `pushdownFilters` / `aggregation-pushdown.enabled` connector config check; no warning that some predicate types (LIKE with leading wildcard, function calls on column) are unpushable by design; no Postgres `pg_stat_statements` mention as alternative to slow query log.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 4.75 |
+| Beginner clarity | 4.0 |
+| Practical applicability | 4.75 |
+| Completeness | 4.5 |
+| **Average** | **4.5 STRONG PASS** |
+
+**Iter 401 average: 4.59375 STRONG PASS** (Q1 4.6875 + Q2 4.5 — both well above 4.0; iter400 dbt-trino YAML-missing gap fully closed by Q1; predicate pushdown three-layer verification stack from Q2 strengthens federation topic)
+
+**Topic score updates**:
+- Postgres-to-Iceberg ingestion: 4.4877/143 → 4.4891/144 (Q1 4.6875 PASSED — dbt-trino incremental is ingestion/transformation pattern)
+- Trino federation / cross-source connectors: 4.4925/265 → 4.4925/266 (Q2 4.5 PASSED — predicate pushdown verification is core federation skill; running avg unchanged at the 4.4925 floor)
+- SQL query best practices for OLAP (EXPLAIN verification): 4.6121/21 → 4.6070/22 (Q2 4.5 PASSED but pulled topic avg down slightly because topic was running above 4.6)
+
+**Pattern observation iter392-401** (10-iter window: 4.75/4.125/3.9375F/4.625/4.75/3.125F/4.3125/4.375/4.34375/4.09375/4.0625/3.8125F/4.59375P): iter401 4.59375 PASS recovers from iter400 3.8125 FAIL — teacher's iter401 actions (HIGH dbt-trino canonical YAML + HIGH post-hook maintenance) both landed in Q1. Two-thirds of iter400 carry-forward closed; one-third (post-hook literal snippet) partial.
+
+**Teacher actions next (iter402)**:
+1. **LOW** — complete iter400 post-hook carry-forward: ensure `post_hooks=["ALTER TABLE {{ this }} EXECUTE optimize", "ALTER TABLE {{ this }} EXECUTE expire_snapshots(retention_threshold => '7d')"]` literal snippet is in dbt-trino resource (Q1 referenced but did not show literal)
+2. **LOW** — add EXPLAIN output text snippets to predicate-pushdown resource showing literal `TableScan[table=postgresql:public.events, constraint = ...]` vs `ScanFilterProject[...]\n  - TableScan[...]` so beginner can pattern-match (Q2 mentioned the shape but no literal)
+3. **LOW** — add `pushdownFilters` / `aggregation-pushdown.enabled` connector config check + unpushable predicate types (LIKE leading wildcard, function-on-column) to predicate pushdown resource
+
+**Judge probe targets next (iter402)**:
+1. **2nd-angle dbt-trino merge** — "my incremental merge model is producing duplicates — what to check" probes unique_key + strategy=append default (carry from iter400 probe backlog)
+2. **2nd-angle predicate pushdown** — "I confirmed pushdown via EXPLAIN but Postgres slow log shows full table scan — what's happening" probes JDBC query rewrite + unpushable predicate types
+3. **CoW vs MoR 3rd-angle** — "MERGE INTO rewriting 80GB per run on 200GB table — how to switch to row-level deletes" probes `write.merge.mode=merge-on-read` (carry from iter400)
+4. Carry-forward standing backlog: write.isolation-level 2nd-angle, SHOW SESSION/catalog-prefix 2nd-angle, HMS->Nessie no-downtime, SPILL_FAILED 60GB at 200GB cap, MERGE INTO rollback, OPA-override timeout, schema registry compat, EXPLAIN TYPE IO + VALIDATE, result caching 2nd-angle, Iceberg branches fast_forward 2nd-angle, JWT+OPA concurrency, partition spec migration + rewrite_data_files, Iceberg tagging 3rd-angle, fs.cache 3rd-angle JMX, bucket(tenant_id) high-cardinality 2nd-angle, PERCENT_RANK/NTILE 3rd-angle, RANGE INTERVAL gap-day semantics
+
+**Trajectory iter370-401**: 4.625->4.375->4.47->3.98F->4.5625->4.75->4.1875->4.4375->4.40625->4.5625->3.25F->4.71875->4.8125->4.78125->4.375->4.094->4.4375->4.4375->4.4375->4.25->3.125F->4.75P->4.125P->3.9375F->4.625P->4.75P->3.125F->4.3125P->4.375P->4.34375P->4.09375P->4.0625P->3.8125F->4.59375P.
+
+---
 
 ### Iter 400 — 2026-05-30 (EXTENDED PHASE) — Q1 Iceberg format v1 vs v2 (append-only vs delete-files; v1→v2 metadata-only upgrade); Q2 dbt + Trino for Iceberg (dbt-trino adapter; four critical gotchas: append-default, on_schema_change=ignore, no MATCH conditional, insert_overwrite spark-only)
 

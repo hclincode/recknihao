@@ -1,52 +1,61 @@
-# Judge Feedback — Iter 400
+# Judge Feedback — Iter 401 (Extended Phase)
 
-**Average: 3.8125 FAIL** (Q1 4.0 PASS, Q2 3.625 FAIL)
+**Result**: 4.59375 STRONG PASS — recovery from iter400 3.8125 FAIL
 
-Pattern this iteration: the responder nailed the *what* (factual claims correct on both questions) but consistently lost points on *how* (no shown YAML / ALTER syntax) and *what-it-means-for-a-beginner* (jargon used without unpacking). This is the same gap that has appeared 4+ times in the last 10 iterations: correct mechanism + missing concrete syntax + unglossed jargon.
+## Per-question scores
 
----
+### Q1 — Complete dbt-trino Iceberg incremental model config
+**4.6875 STRONG PASS** (TA 4.75, BC 4.5, PA 5.0, Comp 4.5)
 
-## Q1 — Iceberg format v1 vs v2 → 4.0 PASS
+Iter400's dbt-trino YAML-missing gap is now closed. All four iter400 gotchas have concrete config syntax:
+- `incremental_strategy='merge'` (resolves append-default footgun)
+- `on_schema_change='append_new_columns'` (resolves silent-data-loss footgun)
+- `unique_key` (resolves merge-degrades-to-append footgun)
+- `partitioned_by` (resolves missing partition-spec footgun)
 
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 4.5 | v1 append-only, v2 delete-files-for-DML, v1→v2 metadata-only — all correct against Iceberg 1.5.2 spec. "~2-3% overhead" is hand-wavy but in-bounds for sparse delete tables. |
-| Beginner clarity | 3.5 | "delete files," "metadata-only," "MERGE" used without glossing. No example. |
-| Practical applicability | 4.0 | Clear decision rule (v2 unless pure append; upgrade is free). Missing `ALTER TABLE ... SET TBLPROPERTIES('format-version'='2')` exact syntax. |
-| Completeness | 4.0 | Covers when, upgrade path, overhead. Missing CoW vs MoR (`write.delete.mode` / `write.update.mode` / `write.merge.mode` — the real v2 tuning knob), v3 deletion vectors, prod-stack compat note (Iceberg 1.5.2 + Trino 467 both write v2 by default). |
+Watermark filter with `COALESCE(MAX(watermark_col), DATE '1970-01-01')` is the production-correct first-run-seed pattern. 4-day lookback is a concrete tunable number. Compiled MERGE SQL shown is the highest-value addition — beginner sees what the YAML actually compiles to and can debug from there.
 
-## Q2 — dbt + Trino for Iceberg → 3.625 FAIL
+**Remaining gap**: maintenance schedule was "mentioned" but post_hooks literal snippet (`post_hooks=["ALTER TABLE {{ this }} EXECUTE optimize", "ALTER TABLE {{ this }} EXECUTE expire_snapshots(retention_threshold => '7d')"]`) not fully spelled out. Iter400 action #2 partially landed.
 
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 4.5 | All four gotchas correct: `incremental_strategy` default `append`, `on_schema_change` default `ignore`, no MATCH conditional on merge, `insert_overwrite` Spark-only. dbt-trino is the right adapter. |
-| Beginner clarity | 3.0 | Dense gotcha list with no unpacking. "MATCH," "merge strategy," "insert_overwrite" assumed familiar. No YAML shown. |
-| Practical applicability | 3.5 | References "canonical config template" + "maintenance schedule" but doesn't show them. Engineer needs to look it up. Production-fit (dbt is permitted per prod_info.md). |
-| Completeness | 3.5 | Missing: `unique_key` requirement (merge silently degrades to append without it), `incremental_predicates` for partition pruning, `partition_by` model config, `post-hook` pattern for `optimize` + `expire_snapshots`, dbt-trino version pinning. |
+### Q2 — Predicate pushdown verification via EXPLAIN
+**4.5 STRONG PASS** (TA 4.75, BC 4.0, PA 4.75, Comp 4.5)
 
----
+Three-layer verification stack is the correct production diagnosis approach:
+1. Plan-level: `EXPLAIN (TYPE DISTRIBUTED)` — `constraint = ...` attribute under `TableScan` (pushed) vs separate `ScanFilterProject` above `TableScan` (not pushed)
+2. Runtime-level: `EXPLAIN ANALYZE` Input rows vs Output rows ratio (1:1 = pushdown, 100:1 = full scan + Trino-side filter)
+3. Source-level: Postgres slow query log — closes the loop because plan-only can lie if JDBC layer rewrites
 
-## Teacher actions next (iter 401)
+The Postgres slow log as ground truth is excellent — it's the only end-to-end confirmation that pushdown reached the source DB.
 
-1. **HIGH (Q2 root cause)** — Expand `resources/` dbt-trino guide with **actual YAML examples** for each of the four gotchas:
-   - `incremental_strategy: 'merge'` + `unique_key: 'id'` + `merge_update_columns: [...]` (fix the conditional-update gap)
-   - `on_schema_change: 'append_new_columns'` or `'sync_all_columns'` (fix silent data loss)
-   - `incremental_predicates: ["DBT_INTERNAL_DEST.day >= current_date - 7"]` (partition pruning at production scale)
-   - Explicit "do NOT use `insert_overwrite`" callout with the `delete+insert` substitute
-2. **HIGH (Q2 maintenance gap)** — Add canonical `post-hook` snippet showing `ALTER TABLE {{ this }} EXECUTE optimize` and `ALTER TABLE {{ this }} EXECUTE expire_snapshots(retention_threshold => '7d')` so the "maintenance schedule" claim is concrete.
-3. **MEDIUM (Q1 row-level mode gap)** — In Iceberg format-version resource, add the CoW vs MoR decision table tied to `write.delete.mode`, `write.update.mode`, `write.merge.mode` — this is the actual v2 tuning knob the responder missed.
-4. **MEDIUM (Q1 prod-stack tie)** — Add explicit Iceberg 1.5.2 + Trino 467 default behavior note: both write v2 by default, so the question "should I use v2" is moot for *new* tables in this stack — the live question is "do I need to upgrade legacy v1 tables and which mode (CoW/MoR) should I pick for my write rate."
-5. **LOW (beginner clarity recurring)** — Standing teacher prompt: gloss any of these on first use — "delete files (positional vs equality)," "metadata-only (no data file rewrite)," "MATCH (the WHEN MATCHED THEN UPDATE branch of a SQL MERGE)," "merge strategy (dbt's incremental mode that does an upsert via SQL MERGE INTO under the hood)."
+**Remaining gaps**:
+- No literal EXPLAIN output text snippet beginner can pattern-match against
+- No mention of `pushdownFilters` / `aggregation-pushdown.enabled` connector config check
+- No warning about predicate types unpushable by design (LIKE with leading wildcard, function-on-column)
+- No `pg_stat_statements` mention as alternative to slow query log
 
-## Judge probe targets next (iter 401)
+## Topic score updates
 
-1. **2nd-angle v1 vs v2** — "I have a legacy v1 table receiving DELETE statements from a dbt model — what happens?" (probes whether responder knows DML fails on v1 or whether engine silently rewrites whole partitions, and whether they recommend the v1→v2 upgrade as the fix).
-2. **2nd-angle dbt-trino merge** — "My dbt incremental merge model is producing duplicates — what should I check?" (probes whether responder knows `unique_key` is required and `incremental_strategy` defaults to `append`).
-3. **CoW vs MoR 3rd-angle** — "MERGE INTO is rewriting 80GB per run on a 200GB table — how do I switch to row-level deletes?" (probes `write.merge.mode=merge-on-read` + delete file format).
-4. **Carry-forward backlog** — write.isolation-level 2nd-angle, SHOW SESSION/catalog-prefix 2nd-angle, HMS→Nessie no-downtime, SPILL_FAILED 60GB at 200GB cap, MERGE INTO rollback, OPA-override timeout, schema registry compat, EXPLAIN TYPE IO + VALIDATE, result caching 2nd-angle, Iceberg branches fast_forward 2nd-angle, JWT+OPA concurrency, partition spec migration + rewrite_data_files, Iceberg tagging 3rd-angle, fs.cache 3rd-angle JMX, bucket(tenant_id) high-cardinality 2nd-angle, PERCENT_RANK/NTILE 3rd-angle, RANGE INTERVAL gap-day semantics.
+| Topic | Before | After | Delta |
+|---|---|---|---|
+| Postgres-to-Iceberg ingestion | 4.4877 / 143 | 4.4891 / 144 | +0.0014 (Q1 PASSED) |
+| Trino federation / cross-source connectors | 4.4925 / 265 | 4.4925 / 266 | flat at threshold floor (Q2 PASSED) |
+| SQL query best practices for OLAP (EXPLAIN verification) | 4.6121 / 21 | 4.6070 / 22 | -0.0051 (Q2 PASSED but below running avg) |
 
-## Trajectory iter 391–400
+## Pattern observation iter392-401
 
-4.75 → 4.125 → 3.9375 FAIL → 4.625 → 4.75 → 3.125 FAIL → 4.3125 → 4.375 → 4.0625 → **3.8125 FAIL**
+10-iter window: 4.75 / 4.125 / 3.9375F / 4.625 / 4.75 / 3.125F / 4.3125 / 4.375 / 4.34375 / 4.09375 / 4.0625 / 3.8125F / **4.59375P**
 
-Three FAILs in the last 10 iterations all share the same shape: correct mechanism, missing concrete syntax/YAML, unglossed beginner-jargon. The Q2 dbt-trino failure is the most actionable — a one-page "dbt-trino Iceberg canonical config" resource with the YAML inline would likely have flipped this to PASS.
+Recovery iteration. Teacher's iter401 HIGH actions (dbt-trino canonical YAML + post-hook maintenance) both landed in Q1 — two-thirds of iter400 carry-forward closed in one cycle. Q2 predicate pushdown three-layer verification stack is exactly what the federation topic needed.
+
+## Teacher actions next (iter402)
+
+1. **LOW** — complete iter400 post-hook carry-forward: literal `post_hooks=["ALTER TABLE {{ this }} EXECUTE optimize", "ALTER TABLE {{ this }} EXECUTE expire_snapshots(retention_threshold => '7d')"]` snippet in dbt-trino resource
+2. **LOW** — add EXPLAIN output text snippets to predicate-pushdown resource showing literal `TableScan[table=postgresql:public.events, constraint = ...]` vs `ScanFilterProject[...]\n  - TableScan[...]` so beginners can pattern-match against actual Trino output
+3. **LOW** — add `pushdownFilters` / `aggregation-pushdown.enabled` connector config check + unpushable predicate type warnings (LIKE leading wildcard, function-on-column) to predicate pushdown resource
+
+## Judge probe targets next (iter402)
+
+1. **2nd-angle dbt-trino merge** — "my incremental merge model is producing duplicates — what to check" probes unique_key + strategy=append default (carry from iter400 backlog)
+2. **2nd-angle predicate pushdown** — "I confirmed pushdown via EXPLAIN but Postgres slow log shows full table scan — what's happening" probes JDBC query rewrite + unpushable predicate types
+3. **CoW vs MoR 3rd-angle** — "MERGE INTO rewriting 80GB per run on 200GB table — how to switch to row-level deletes" probes `write.merge.mode=merge-on-read` (carry from iter400)
+4. Carry-forward standing backlog: write.isolation-level 2nd-angle, SHOW SESSION/catalog-prefix 2nd-angle, HMS->Nessie no-downtime, SPILL_FAILED 60GB at 200GB cap, MERGE INTO rollback, OPA-override timeout, schema registry compat, EXPLAIN TYPE IO + VALIDATE, result caching 2nd-angle, Iceberg branches fast_forward 2nd-angle, JWT+OPA concurrency, partition spec migration + rewrite_data_files, Iceberg tagging 3rd-angle, fs.cache 3rd-angle JMX, bucket(tenant_id) high-cardinality 2nd-angle, PERCENT_RANK/NTILE 3rd-angle, RANGE INTERVAL gap-day semantics
