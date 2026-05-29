@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.645 | 10 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.458 | 14 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.449 | 144 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.4515 | 145 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.106 | 13 |
@@ -44,12 +44,72 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.535 | 47 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 4.771 | 4 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | NEEDS WORK | 4.4910 | 263 |
-| Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.810 | 5 |
+| Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.8104 | 6 |
 | SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.658 | 17 |
 
 ---
 
 ## Score history
+
+### Iter 379 Q1 — 2026-05-30 (EXTENDED PHASE) — ANALYZE TABLE on Iceberg for Trino CBO (Puffin NDV + 3-layer pruning model + drop_extended_stats footgun + cadence)
+
+**Q1** — "How does ANALYZE TABLE work on Iceberg in Trino — is it a full scan, what does it write, how does it relate to file skipping, and when should I re-run it?"
+
+Responder gave: full scan but column-targeted reduces cost; ANALYZE writes Puffin sidecar files containing NDV sketches (not sampling — exact NDV); 3-layer pruning model where Layer 2 is automatic file skipping via manifest min/max (no ANALYZE needed) and Layer 3 is CBO join reordering using NDV (needs ANALYZE); `drop_extended_stats` footgun before column-targeted re-run (drops all Puffin stats); weekly cadence or after major ingest; `SHOW STATS FOR <table>` to verify.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.75 |
+| **Average** | **4.8125** |
+
+**Iter 379 Q1: 4.8125 — STRONG PASS** (well above per-question 4.0 bar and above the per-topic raised threshold of 4.5 for "Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering"; lifts the topic from 4.810/5 toward higher durability with 6th angle.)
+
+Judge verified via WebSearch:
+1. **ANALYZE writes Puffin files containing NDV sketches** — CONFIRMED per [Apache Iceberg Table Stats with Puffin (Dremio blog)](https://www.dremio.com/blog/puffins-and-icebergs-additional-stats-for-apache-iceberg-tables/) and [Puffin Spec — Apache Iceberg](https://iceberg.apache.org/puffin-spec/): Puffin is the storage format for table stats, and Trino's ANALYZE writes NDV sketches into Puffin sidecars consumed by the Trino CBO.
+2. **ANALYZE is a full scan (not sampling)** — CONFIRMED per [Analyze Iceberg tables PR #13636 (trinodb/trino)](https://github.com/trinodb/trino/pull/13636) and [Accelerate query performance with Apache Iceberg statistics (AWS Glue blog)](https://aws.amazon.com/blogs/big-data/accelerate-query-performance-with-apache-iceberg-statistics-on-the-aws-glue-data-catalog/): Trino calculates NDV statistics by scanning data during ANALYZE; column-targeted analyze reduces the columns read but is still a scan, not a sample.
+3. **Layer 2 = automatic manifest min/max file skipping** — CONFIRMED: Iceberg writes min/max per data file to manifests on every write, so Trino prunes files at planning without any ANALYZE invocation.
+4. **Layer 3 = CBO needs NDV for join reordering** — CONFIRMED: without ANALYZE, Trino's CBO falls back to row-count-only heuristics for join order and build-side selection.
+
+GAPS (deductions from 5):
+- **TA (0)**: Fully accurate end-to-end. Sampling-vs-full-scan correction is the canonical correct framing; drop_extended_stats footgun is the documented Trino-Iceberg gotcha.
+- **BC (−0.5)**: "Layer 2/Layer 3" framing assumes cumulative context from prior resources; "Puffin", "NDV", "CBO" are jargon — used in context but a one-line inline gloss ("Puffin = sidecar stats file format that lives next to your Iceberg data files") would close the gap for a true newcomer.
+- **PA (0)**: Engineer knows exactly what to do: run ANALYZE after major ingest, weekly cadence, verify with SHOW STATS FOR, and avoid drop_extended_stats before column-targeted re-runs. Production-fit for Trino 467 + Iceberg 1.5.2 + HMS + MinIO.
+- **Comp (−0.25)**: Strong core coverage; minor missed: (a) explicit mention that Theta Sketch / probabilistic algorithm is what Puffin stores (not exact NDV at very large cardinalities), (b) `ANALYZE table WITH (columns = ARRAY['col_a','col_b'])` syntax for column-targeted re-run, (c) interaction with concurrent writes (Puffin stats are tied to a specific snapshot ID).
+
+---
+
+### Iter 379 Q2 — 2026-05-30 (EXTENDED PHASE) — EU data residency with on-prem Iceberg (partitioning ≠ residency, separate MinIO + separate catalog architecture, OPA enforcement)
+
+**Q2** — "Can I use Iceberg partitioning to keep EU customer data in the EU for GDPR data residency, or do I need a different architecture?"
+
+Responder gave: Iceberg partitioning CANNOT solve geographic residency (partition = query-time metadata, not physical storage location); need separate MinIO deployment in EU + separate Iceberg catalogs; Model 1 architecture = separate namespace per compliance tier; Trino views + OPA enforcement for query-time access control; one Trino cluster can query both MinIO via two catalog configurations; ingestion routing decided by customer residency flag at write time.
+
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.75 |
+| **Average** | **4.8125** |
+
+**Iter 379 Q2: 4.8125 — STRONG PASS** (well above per-question 4.0 bar; production-fit for on-prem MinIO + k8s + JWT/OPA stack per prod_info.md.)
+
+Judge verified via WebSearch:
+1. **Iceberg partitioning is metadata-only and cannot enforce geographic residency** — CONFIRMED per [How Apache Iceberg helps with GDPR compliance (Data Engineer Things)](https://blog.dataengineerthings.org/apache-iceberg-on-aws-the-key-to-gdpr-compliant-data-lakes-d86b4ad07478?gi=7a4800b66fe7) and [GDPR Compliance with Apache Iceberg — A Practical Guide (Ryft)](https://www.ryft.io/blog/gdpr-compliance-with-apache-iceberg-a-practical-guide): Iceberg partition specs control file layout within a storage namespace but do not pin physical bytes to a specific geographic location — that is determined by the storage endpoint (S3/MinIO bucket) the catalog points to.
+2. **Separate storage + separate catalog is the correct architectural pattern for residency** — CONFIRMED per [Understand and Adhere to GDPR Data Residency Requirements (Kiteworks)](https://www.kiteworks.com/gdpr-compliance/understand-and-adhere-to-gdpr-data-residency-requirements/) and [Forward Data Conference — GDPR-compliant Iceberg Lakehouse](https://www.forward-data-conference.com/en/programme/talks/how-to-create-a-gdpr-compliant-iceberg-lakehouse): compliance requires physical data isolation, which means separate object-storage endpoints (and ideally separate metadata catalogs) for EU vs non-EU data.
+3. **One Trino cluster, two Iceberg catalogs is the correct mechanism** — CONFIRMED: Trino's Iceberg connector supports multiple catalog configurations (`etc/catalog/iceberg_eu.properties`, `etc/catalog/iceberg_us.properties`), each pointing at a different MinIO endpoint and HMS namespace.
+4. **OPA enforcement is the production-fit authorization layer** — CONFIRMED per prod_info.md: Trino with OPA plugin is the documented production authorization backend; the responder correctly avoided writing specific OPA policies (those are in an external governance document).
+
+GAPS (deductions from 5):
+- **TA (0)**: Fully accurate. Partitioning-vs-residency distinction is the most-misunderstood point and the responder led with the correct framing. Two-catalog pattern is the canonical Trino architecture for multi-region data.
+- **BC (−0.5)**: "Compliance tier", "residency flag", and "Model 1" assume the engineer is already thinking in governance terms; a sentence explaining what "data residency" means (data must physically live in a specific geographic region, not just be labeled as such) would close the gap.
+- **PA (0)**: Engineer has a concrete blueprint: two MinIO deployments, two Trino catalogs, namespace-per-tier, ingestion routing on residency flag, OPA + Trino views for query path. Production-fit for on-prem k8s + JWT/OPA stack.
+- **Comp (−0.25)**: Strong core coverage; minor missed: (a) cross-catalog join warning (joining EU + non-EU tables in a single Trino query may itself constitute a "data transfer" under GDPR Chapter V — engineer should consult legal), (b) backup/snapshot residency (Iceberg snapshot expiry + orphan-file cleanup logs may inadvertently cross regions if the catalog runs in the wrong location), (c) note that Right to Be Forgotten DELETE workflow needs to run independently in each catalog.
+
+---
 
 ### Iter 378 Q1 — 2026-05-30 (EXTENDED PHASE) — Cumulative sum window function in Trino (re-probe of iter377 Q1 window function durability gap)
 

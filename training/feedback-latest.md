@@ -1,94 +1,118 @@
-# Iter 378 Feedback — 2026-05-30 (EXTENDED PHASE)
+# Judge Feedback — Iter 379 (EXTENDED PHASE)
 
-## Overall: 4.71875 — STRONG PASS (recovery from iter377 3.25 FAIL)
-
-Both questions targeted iter377 critical teacher actions and BOTH passed cleanly. Recovery profile is the textbook outcome of mid-cycle judge feedback: content gap (Q1, window function SQL) closed with canonical syntax; factual error (Q2, bloom filter cardinality) inverted from backwards to correct.
-
-| Question | Topic | TA | BC | PA | Comp | Avg | Result |
-|---|---|---|---|---|---|---|---|
-| Q1 | Window functions: cumulative sum | 5.0 | 4.5 | 5.0 | 4.5 | 4.75 | STRONG PASS |
-| Q2 | Bloom filters: high-cardinality UUIDs | 5.0 | 4.5 | 4.75 | 4.5 | 4.6875 | STRONG PASS |
+**Date**: 2026-05-30
+**Overall**: **4.8125 STRONG PASS** (combined Q1 + Q2 average; both questions cleared 4.5)
 
 ---
 
-## Q1 — Cumulative sum window function in Trino
+## Per-question scores
 
-**Probe target**: Iter378 #1 — window function durability re-probe (iter377 Q1 content-coverage gap closure).
+### Q1 — ANALYZE TABLE on Iceberg for Trino CBO
 
-**Answer summary**: Provided canonical `SUM(revenue) OVER (PARTITION BY customer_id ORDER BY event_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_revenue` with explanations of PARTITION BY (per-customer isolation), ORDER BY (cumulative ordering), frame clause, and an example output table walking through cumulative values row by row.
+**Score: 4.8125 / 5.0 — STRONG PASS**
 
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 5.0 | Canonical Trino syntax verified vs [Window functions — Trino 480 Documentation](https://trino.io/docs/current/functions/window.html) and [Trino blog — Introducing new window features](https://trino.io/blog/2021/03/10/introducing-new-window-features.html). `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` is exactly the documented running-total frame. |
-| Beginner clarity | 4.5 | Example output table walking through cumulative values row by row is a strong beginner aid. Minor: "frame clause" used without inline gloss for newcomer who has never seen window-function frame syntax. |
-| Practical applicability | 5.0 | Copy-paste-ready SQL with named columns; engineer can run against Trino 467 immediately. |
-| Completeness | 4.5 | Strong core. Missed: (a) `ROWS` vs `RANGE` distinction (physical row offset vs value-based offset on ORDER BY column), (b) NULL handling note (`SUM` skips NULLs but running total still progresses), (c) explicit "window functions execute after FROM/WHERE — partition pruning on scan preserved" callout for multi-tenant SaaS scale. |
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.75 |
 
-**Q1 verdict: 4.75 STRONG PASS.** Closes iter377 Q1 content-coverage gap (canonical SUM() OVER() syntax now in responder output). Lifts "Analytical query patterns on Iceberg+Trino" running avg from 4.375/7 → 4.422/8.
+**What the responder got right**:
+- Correctly framed ANALYZE as a **full scan** (column-targeted reduces the columns read but is not sampling) — this is the canonical correct framing and corrects a common misconception.
+- **Puffin sidecar files with NDV sketches** — exact tool name, exact storage format, exact statistic type. Verified vs [Puffin Spec — Apache Iceberg](https://iceberg.apache.org/puffin-spec/) and [Trino PR #13636 — Analyze Iceberg tables](https://github.com/trinodb/trino/pull/13636).
+- **3-layer pruning model**: Layer 2 = automatic file skipping via manifest min/max (no ANALYZE needed), Layer 3 = CBO join reordering via NDV (needs ANALYZE). This is the exactly correct mental model that separates "what Iceberg gives you for free" from "what ANALYZE buys you."
+- **`drop_extended_stats` footgun before column-targeted re-runs** — this is the documented Trino-Iceberg gotcha (drop_extended_stats wipes ALL Puffin stats, so a subsequent `ANALYZE WITH (columns = ARRAY[...])` leaves the un-listed columns without NDV). Critical production warning.
+- **Cadence**: weekly or after major ingest — production-realistic guidance.
+- **Verification**: `SHOW STATS FOR <table>` — correct Trino syntax.
 
----
-
-## Q2 — Bloom filters on high-cardinality user_id UUID columns
-
-**Probe target**: Iter378 #2 — bloom filter cardinality re-probe (iter377 Q2 factual error inversion).
-
-**Answer summary**: YES for high-cardinality UUIDs/user_ids where min/max statistics are useless; NO for low-cardinality status / country / plan_type (already pruned by dictionary encoding + min/max). Provided `ALTER TABLE ... SET PROPERTIES parquet_bloom_filter_columns = ARRAY['user_id']` (correct Trino-Iceberg property name vs Spark's `write.parquet.bloom-filter-enabled.column.<col>`). Noted existing data needs Spark rewrite (Trino can't write bloom filters). Cited 10-100x speedup for point lookups.
-
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 5.0 | Fully accurate — INVERTS iter377 backwards advice correctly. Verified vs [Iceberg Bloom Filters with Spark — Cazpian](https://cazpian.ai/blog/iceberg-bloom-filters-with-spark-configuration-validation-and-performance-guide), [Bloom Filter — Apache Parquet](https://parquet.apache.org/docs/file-format/bloomfilter/). High-cardinality (UUIDs, user IDs, session IDs, trace IDs) is the correct use case; low-cardinality columns already prune via min/max + dictionary encoding. 80-90% I/O reduction confirmed for point lookups → 10-100x speedup ballpark is reasonable. |
-| Beginner clarity | 4.5 | Concrete examples (UUID, user_id as YES; status, country, plan_type as NO) anchor the cardinality concept well. Could gloss "cardinality" (= number of distinct values) and "dictionary encoding" (= Parquet stores repeated values once, references via integer ID) inline. |
-| Practical applicability | 4.75 | ALTER TABLE syntax + Spark-rewrite caveat is actionable on the on-prem Iceberg 1.5.2 + Trino 467 + HMS stack. Minor: did not call out `parquet_bloom_filter_fpp` tunable for very-high-cardinality where the default 1MB size may produce too many false positives. |
-| Completeness | 4.5 | Strong core. Missed: (a) probabilistic nature — bloom filter says "NOT in file" definitively but "yes" means "maybe in file" (engine still reads), (b) 1MB default size per column per row group, (c) explicit note that bloom filters only help equality predicates (`=`, `IN`) not range predicates (`>`, `<`, `BETWEEN`) — beginner might think they accelerate all WHERE clauses. |
-
-**Q2 verdict: 4.6875 STRONG PASS.** Inverts iter377 backwards bloom filter cardinality recommendation. Lifts "Iceberg partition design for SaaS" running avg from 4.526/20 → 4.534/21.
+**Gaps (minor, BC and Comp)**:
+- "Layer 2/Layer 3" framing assumes the engineer has read prior resources on the cumulative pruning model — a one-line inline gloss ("Puffin = sidecar file format that stores stats next to your Iceberg data files") would close BC for a true newcomer.
+- Could mention: (a) Puffin stores **Theta Sketch / probabilistic NDV** at very large cardinalities (not always exact); (b) explicit `ANALYZE table WITH (columns = ARRAY['col_a','col_b'])` syntax; (c) Puffin stats are tied to a specific snapshot ID (interaction with concurrent writes).
 
 ---
 
-## Iter 379 Teacher Actions (priority-ordered)
+### Q2 — EU data residency with on-prem Iceberg
 
-1. **MEDIUM (Comp Q1)** — Window function depth: add to running-total resource (a) `ROWS` vs `RANGE` distinction (physical row offset vs value-based offset on ORDER BY column), (b) NULL handling note (`SUM` skips NULLs, running total progresses), (c) explicit "window functions execute after FROM/WHERE — partition pruning on the scan is preserved" callout for multi-tenant SaaS scale. Add `RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW` 7-day rolling average example since iter379 probe #1 will target this.
+**Score: 4.8125 / 5.0 — STRONG PASS**
 
-2. **MEDIUM (Comp Q2)** — Bloom filter depth: add (a) probabilistic nature — bloom filter says "NOT in file" definitively but "yes" means "maybe in file" (engine still reads), (b) 1MB default size per column per row group, (c) explicit note bloom filters only help equality predicates (`=`, `IN`) not range predicates (`>`, `<`, `BETWEEN`), (d) `parquet_bloom_filter_fpp` tunable.
+| Dimension | Score |
+|---|---|
+| Technical accuracy | 5.0 |
+| Beginner clarity | 4.5 |
+| Practical applicability | 5.0 |
+| Completeness | 4.75 |
 
-3. **LOW (BC inline glosses)** — Cascade still open: "frame clause" (window function), "cardinality" (= distinct value count), "dictionary encoding" (= Parquet stores repeated values once, references via integer ID). Plus iter376 carry-forward: Trino UI vocab (Queued, Scheduled, Physical Input, Blocked, Spilled, EXPLAIN ANALYZE, TYPE DISTRIBUTED), lakehouse tx vocab (atomic, idempotent, destructive, partial commit), federation vocab (CBO, BROADCAST, PARTITIONED, build/probe side, left-deep). HyperLogLog open since iter372. MinIO TCO open since iter374.
+**What the responder got right**:
+- **Led with the most important correction**: Iceberg partitioning is metadata, not physical location. A partition spec controls file layout within a storage namespace; it does NOT pin bytes to a specific geographic region. This is the #1 misconception engineers have and the responder addressed it first.
+- **Separate MinIO + separate Iceberg catalog** is the correct production architecture for residency. Verified vs [GDPR Compliance with Apache Iceberg — A Practical Guide (Ryft)](https://www.ryft.io/blog/gdpr-compliance-with-apache-iceberg-a-practical-guide) and [Forward Data Conference — GDPR-compliant Iceberg Lakehouse](https://www.forward-data-conference.com/en/programme/talks/how-to-create-a-gdpr-compliant-iceberg-lakehouse).
+- **Model 1 = namespace per compliance tier** within each catalog — concrete architectural pattern the engineer can implement.
+- **One Trino cluster querying both MinIO via two catalog configs** — correct Trino multi-catalog mechanism (`etc/catalog/iceberg_eu.properties`, `etc/catalog/iceberg_us.properties`).
+- **Trino views + OPA for query-time enforcement** — production-fit per prod_info.md (Trino + OPA is the documented authorization backend). The responder correctly did NOT attempt to write specific OPA policies (those belong in the external governance document).
+- **Ingestion routing by customer residency flag** — correct write-time pattern that closes the loop on residency from end to end.
 
-4. **LOW (carry-forward iter377 unprobed actions)** — `format_version = 2` for row-level deletes, `location` property for MinIO path control, Spark-vs-Trino write property split (table-level `write.target-file-size-bytes` unhonored by Trino — session property `target_max_file_size` needed per Trino issue #28250), `write.distribution-mode='hash'` Spark-vs-Trino split + skew caveat per Trino issue #12966. Did not surface this iteration because questions did not probe them.
-
----
-
-## Iter 379 Judge Probe Targets
-
-1. **Window function 3rd angle**: "How do I compute a 7-day rolling average per tenant in Trino?" — tests sliding `RANGE` frame (`RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW`) vs cumulative `UNBOUNDED PRECEDING`. Builds topic durability from 8 → 9 angles.
-
-2. **Bloom filter 3rd angle (low-cardinality side)**: "I have a `country_code` column with 200 distinct values used in WHERE clauses — should I add a bloom filter on it?" — explicit low-cardinality probe (CORRECT: NO, dictionary encoding + min/max already prunes). Tests Q2 win durability.
-
-3. **Iceberg table property production-stack-fit (carry-forward iter378 #3)**: "I set `write.target-file-size-bytes = 512MB` on my Iceberg table via Spark DDL but Trino is still writing 200MB files. Why?" — tests Trino-vs-Spark write property split per Trino issue #28250.
-
-4. **Distribution mode probe (carry-forward iter378 #4)**: "Should I set `write.distribution-mode='hash'` on my bucket-partitioned Iceberg table?" — tests Spark vs Trino split + skew caveat per Trino issue #12966.
-
-5. **EXPLAIN ANALYZE warning** (carry-forward iter376): probe whether responder warns EXPLAIN ANALYZE actually executes the query on an already-slow query.
-
-6. **Federation glossary** (carry-forward iter370+): re-probe CBO / BROADCAST / PARTITIONED / build-vs-probe vocab inline glosses.
+**Gaps (minor, BC and Comp)**:
+- "Compliance tier", "residency flag", and "Model 1" assume governance vocabulary; a one-line definition of "data residency" (data must physically live in a specific geographic region, not merely be labeled as such) would close BC.
+- Could mention: (a) **cross-catalog join warning** — joining EU + non-EU tables in one Trino query may itself constitute a "data transfer" under GDPR Chapter V (engineer should consult legal); (b) **backup/snapshot residency** — Iceberg snapshot expiry + orphan-file cleanup logs may cross regions if the maintenance job runs in the wrong location; (c) **Right to Be Forgotten** DELETE workflow must run independently in each catalog.
 
 ---
 
-## Pattern Observations
+## Pattern observations across both questions
 
-- **Iter 378 ends 4.71875 — STRONG PASS, recovering from iter377 3.25 FAIL.** Both teacher critical actions from iter377 closed: window function canonical SQL provided (action #2), bloom filter cardinality inverted (action #1).
-- Recovery profile is clean: Q1 closes content-coverage gap, Q2 inverts factual error. Both answers production-ready for SaaS engineer on the Iceberg 1.5.2 + Trino 467 + HMS + MinIO + k8s on-prem stack.
-- Remaining drag is BC inline gloss cascade (cardinality, dictionary encoding, frame clause) and Comp depth (ROWS vs RANGE, false-positive nature of bloom filter) — both secondary to iter377 TA + PA failures. Drag is small (each dimension <0.5 below 5.0 across both questions).
-- Production-stack-fit was good: `parquet_bloom_filter_columns` correctly used as Trino-Iceberg name (not Spark's `write.parquet.bloom-filter-enabled.column.<col>`), Spark-rewrite caveat correctly surfaces Trino-can't-write-bloom-filters constraint.
-- Topic running averages all improve: "Analytical query patterns on Iceberg+Trino" 4.375/7 → 4.422/8, "Iceberg partition design for SaaS" 4.526/20 → 4.534/21, "Common analytical query patterns" 4.633/9 → 4.645/10.
-- Iter370-378 trajectory restored above 4.0 pass band: 4.625 → 4.375 → 4.47 → 3.98 FAIL → 4.5625 → 4.75 → 4.1875 → 4.4375 → 4.40625 → 4.5625 → 3.25 FAIL → **4.71875 STRONG PASS**. Iter377 was a single-iteration anomaly driven by a content gap + factual error pair, both now corrected.
+1. **TA at ceiling**: Both questions scored 5.0 on technical accuracy. The responder gave exact tool names (`Puffin`, `SHOW STATS FOR`, `drop_extended_stats`), exact architectural patterns (two catalogs, namespace-per-tier), and exact production-fit constraints (on-prem MinIO, OPA, Trino 467 + Iceberg 1.5.2). Zero factual errors detected by WebSearch verification.
+
+2. **PA at ceiling**: Both questions scored 5.0 on practical applicability. The engineer has actionable next steps in both cases:
+   - Q1: Run ANALYZE on schedule, use SHOW STATS to verify, avoid the drop_extended_stats sequence.
+   - Q2: Stand up a second MinIO in EU, mount two Iceberg catalogs in Trino, namespace per compliance tier, route ingestion by residency flag, enforce at query time via OPA + views.
+
+3. **BC drag is the recurring weak dimension**: Both questions lost 0.5 on Beginner Clarity due to jargon used without inline gloss ("Layer 2/Layer 3", "Puffin", "NDV", "CBO", "compliance tier", "residency flag", "Model 1"). The terms are USED in context, but a true beginner with zero OLAP background would not immediately parse them. This is a small, consistent gap that has appeared in the last several iterations.
+
+4. **Comp drag is minor depth on edge cases**: Both questions lost 0.25 on Completeness due to missing one or two edge-case nuances (Theta Sketch probabilistic nature on Q1; cross-catalog join + backup residency on Q2). Core question is fully answered; only depth on adjacent concerns is missing.
+
+5. **Production-stack fit**: Both answers are correctly scoped to the on-prem Trino 467 + Iceberg 1.5.2 + HMS + MinIO + k8s + JWT/OPA stack from prod_info.md. Q2 in particular correctly deferred specific OPA policy details to the external governance document (matching prod_info.md guidance).
 
 ---
 
-## Sources verified via WebSearch
+## Teacher actions for iter 380
 
-- [Window functions — Trino 480 Documentation](https://trino.io/docs/current/functions/window.html) — `SUM() OVER (PARTITION BY ... ORDER BY ... ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` is canonical running-total syntax
-- [Trino blog — Introducing new window features](https://trino.io/blog/2021/03/10/introducing-new-window-features.html) — `sum(totalprice) OVER (PARTITION BY clerk ORDER BY orderdate ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` documented pattern
-- [Iceberg Bloom Filters with Spark — Cazpian](https://cazpian.ai/blog/iceberg-bloom-filters-with-spark-configuration-validation-and-performance-guide) — high-cardinality (UUIDs, user IDs, session IDs, trace IDs) is the correct bloom filter use case
-- [Bloom Filter — Apache Parquet](https://parquet.apache.org/docs/file-format/bloomfilter/) — bloom filter for high-cardinality point lookups
-- [Iceberg Query Performance Tuning — Cazpian](https://www.cazpian.ai/blog/iceberg-query-performance-tuning-partition-pruning-bloom-filters-and-spark-configs) — 80-90% I/O reduction confirmed
-- [Iceberg connector — Trino 481 Documentation](https://trino.io/docs/current/connector/iceberg.html) — `parquet_bloom_filter_columns` is the Trino-Iceberg property name
+1. **LOW (BC inline gloss carry-forward)**: Add one-line inline glosses on next pass:
+   - "Puffin = Iceberg sidecar file format that stores table-level statistics (NDV sketches, theta sketches) next to your data files."
+   - "NDV (Number of Distinct Values) = an estimate of how many unique values are in a column, used by the query planner to decide join order."
+   - "CBO (Cost-Based Optimizer) = the Trino planner module that uses statistics to pick the cheapest query plan."
+   - "Data residency = a legal requirement that data physically lives in a specific geographic region (not just labeled as such)."
+   - "Compliance tier = a category of data that has different regulatory requirements (e.g., EU PII vs US business metrics)."
+
+2. **LOW (Comp depth carry-forward Q1)**: Add to ANALYZE TABLE / Puffin / CBO resources:
+   - Theta Sketch is probabilistic at very large cardinalities (typical default ~16K buckets, ~2% error).
+   - `ANALYZE table WITH (columns = ARRAY['col_a','col_b'])` syntax for column-targeted re-runs.
+   - Puffin stats are tied to a specific snapshot ID; concurrent writes invalidate stats for the new snapshot until the next ANALYZE.
+
+3. **LOW (Comp depth carry-forward Q2)**: Add to data residency / multi-region Iceberg resources:
+   - Cross-catalog join may constitute a "data transfer" under GDPR Chapter V — flag for legal review.
+   - Snapshot expiry + orphan-file cleanup must run from a maintenance job that has the same residency as the data it touches.
+   - Right to Be Forgotten DELETE workflow runs independently per catalog (no single SQL DELETE spans regions).
+
+4. **LOW (carry-forward unprobed open items from iter378+)**:
+   - 7-day rolling average per tenant in Trino — RANGE BETWEEN INTERVAL '6' DAY PRECEDING (window function 3rd angle still unprobed).
+   - Bloom filter low-cardinality side (country_code 200 distinct values WHERE — correct answer NO, still unprobed as 3rd angle).
+   - `write.target-file-size-bytes=512MB` via Spark DDL but Trino writes 200MB files — Trino-vs-Spark write property split (iter378 carry-forward).
+   - `write.distribution-mode=hash` on bucket-partitioned Iceberg — Spark vs Trino split + skew caveat (iter378 carry-forward).
+   - EXPLAIN ANALYZE warning carry-forward iter376.
+   - Federation glossary carry-forward iter370+.
+   - HyperLogLog inline gloss open since iter372.
+   - MinIO TCO open since iter374.
+
+---
+
+## Topic score updates
+
+- **Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering** (per-topic threshold 4.5): running avg 4.810/5 → **4.8104/6** (added iter379 Q1 at 4.8125). PASSED at raised threshold sustained.
+- **Multi-tenant analytics: isolating customer data in SaaS**: running avg 4.449/144 → **4.4515/145** (added iter379 Q2 at 4.8125). PASSED sustained.
+
+---
+
+## Iter 370–379 trajectory
+
+4.625 → 4.375 → 4.47 → 3.98 FAIL → 4.5625 → 4.75 → 4.1875 → 4.4375 → 4.40625 → 4.5625 → 3.25 FAIL → 4.71875 → **4.8125 STRONG PASS**
+
+The recovery from iter377 (3.25 FAIL) is now sustained across iter378 (4.71875) and iter379 (4.8125). Iter379 is the highest score in the last 10 iterations, with both per-question scores at the same high water mark (4.8125 each). Two consecutive strong PASS iterations indicate the resource base is stable for the topics being probed. No critical actions needed; only minor BC inline-gloss and Comp depth refinements remain.
