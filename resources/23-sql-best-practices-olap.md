@@ -455,9 +455,48 @@ WHERE NOT EXISTS (
   AND e.event_date = DATE '2026-05-26';
 ```
 
-`NOT EXISTS` checks row-by-row whether a matching row exists. It returns TRUE/FALSE, never UNKNOWN — so NULLs in `premium_users.user_id` are simply ignored (they don't match anything). Trino decorrelates `NOT EXISTS` into an **anti-join** internally; EXPLAIN typically shows `SemiJoin` with a "FilterMode = ANTI" hint or a `LEFT JOIN ... IS NULL` shape. Performance is on par with the SemiJoin path for `IN`.
+`NOT EXISTS` checks row-by-row whether a matching row exists. It returns TRUE/FALSE, never UNKNOWN — so NULLs in `premium_users.user_id` are simply ignored (they don't match anything). Trino decorrelates **non-correlated** `NOT EXISTS` into an **anti-join** (`SemiJoin` with FilterMode = ANTI) internally; in that case, EXPLAIN looks identical to the `NOT IN` plan and performance is comparable. **Correlated** `NOT EXISTS` is a different story — see the dedicated callout below.
 
-> **Anti-join — what the term means.** An **anti-join** returns rows from the left side that have **NO matching row on the right side**. It's the relational-algebra opposite of a regular (inner) JOIN, which returns rows that DO have a match. `NOT EXISTS (SELECT 1 FROM right WHERE right.key = left.key)` and `LEFT JOIN right ON right.key = left.key WHERE right.key IS NULL` both produce anti-join semantics. Trino's optimizer rewrites both into a single physical anti-join node, which is why their EXPLAIN plans look identical and they perform similarly. The "anti" is doing the same job as `NOT` in `NOT EXISTS`: keep the rows that did NOT find a match. Unlike `NOT IN`, an anti-join is **NULL-safe** — NULL rows on the right side simply don't match anything, instead of poisoning the WHERE clause via three-valued logic. This is exactly why the recommended fix for the `NOT IN` + NULL zero-rows bug is to switch to `NOT EXISTS` (which decorrelates to an anti-join), not just to add an `IS NOT NULL` filter to the subquery.
+> **Anti-join — what the term means.** An **anti-join** returns rows from the left side that have **NO matching row on the right side**. It's the relational-algebra opposite of a regular (inner) JOIN, which returns rows that DO have a match. `NOT EXISTS (SELECT 1 FROM right WHERE right.key = left.key)` and `LEFT JOIN right ON right.key = left.key WHERE right.key IS NULL` both produce anti-join semantics. For **non-correlated** subqueries, Trino's optimizer rewrites both into a single physical anti-join node (`SemiJoin`, FilterMode = ANTI), which is why their EXPLAIN plans look identical and they perform similarly. The "anti" is doing the same job as `NOT` in `NOT EXISTS`: keep the rows that did NOT find a match. Unlike `NOT IN`, an anti-join is **NULL-safe** — NULL rows on the right side simply don't match anything, instead of poisoning the WHERE clause via three-valued logic. This is exactly why the recommended fix for the `NOT IN` + NULL zero-rows bug is to switch to `NOT EXISTS` (which decorrelates to an anti-join), not just to add an `IS NOT NULL` filter to the subquery.
+
+> **CRITICAL — correlated `NOT EXISTS` is NOT always as fast as `NOT IN`. Read this before claiming "performance should be identical."**
+>
+> The common shorthand "`NOT IN` and `NOT EXISTS` decorrelate to the same anti-join so performance is identical" is **only true for the non-correlated case**. For correlated `NOT EXISTS`, Trino's current implementation can be **measurably slower** than the equivalent `NOT IN` — and this is inherent executor cost, NOT a planner regression.
+>
+> **The two cases — be precise about which one you're looking at:**
+>
+> | Subquery shape | Lowered to | Performance characteristic |
+> |---|---|---|
+> | **Non-correlated** `NOT IN (SELECT col FROM t)` (no reference to outer row) | `SemiJoin` (FilterMode = ANTI) via the *Semi-Join (IN) Decorrelation* rule | Optimal anti-join. Hash-join, broadcast small side, probe big side, returns TRUE/FALSE per probe row. |
+> | **Non-correlated** `NOT EXISTS (SELECT 1 FROM t WHERE <constant>)` (no outer-row reference inside the WHERE) | Same `SemiJoin` (FilterMode = ANTI) via the *Decorrelate Subqueries* rule | Comparable to NOT IN — both rules target the same physical operator. EXPLAIN plans look identical. |
+> | **Correlated** `NOT EXISTS (SELECT 1 FROM t WHERE t.k = outer.k AND ...)` (the WHERE references the outer row) | `LeftJoin` + `Aggregation` + `Filter[not exists]` — **NOT** a SemiJoin | Can be **measurably slower** than the equivalent non-correlated NOT IN even when decorrelation succeeds. See below. |
+>
+> **Why the correlated NOT EXISTS path is slower** ([trinodb/trino #21859](https://github.com/trinodb/trino/issues/21859), still open as of mid-2026): the *Decorrelate Subqueries* rule rewrites a correlated `NOT EXISTS` into a plan shaped like `Filter[not exists] → Projection[exists] → Aggregation → LeftJoin(probe, build)`. The problem is the **`LeftJoin` enumerates ALL matches** — but for `NOT EXISTS`, a single match is enough to know the result is FALSE. The proposed optimization is to add a `singleMatch` flag to `JoinNode` so the LeftJoin can short-circuit on the first matching build row; **that optimization has not landed**. Result: a correlated NOT EXISTS produces many duplicate join rows that the downstream Aggregation must process and dedupe — work the `SemiJoin` operator avoids by construction (SemiJoin is built to return exactly one TRUE/FALSE per probe row, no duplicates ever).
+>
+> **What this looks like in EXPLAIN — the exact diagnostic that confirms the issue:**
+>
+> ```text
+> -- Correlated NOT EXISTS in Trino — what you actually see, NOT a SemiJoin:
+> Filter[not exists]
+>   Project[exists := IS NOT NULL(p.user_id)]
+>     Aggregate[group by e.event_id, e.user_id]   <- this aggregate dedupes the join blowup
+>       LeftJoin[e.user_id = p.user_id]            <- enumerates all matches; cannot short-circuit
+>         - TableScan[events e]
+>         - TableScan[premium_users p]
+> ```
+>
+> If EXPLAIN shows `LeftJoin` + `Aggregate` (without a `SemiJoin` node) on what you wrote as `NOT EXISTS`, you are hitting the #21859 path. **This is not a missing-stats problem and `ANALYZE` will not fix it** — it is the inherent shape of the current correlated-NOT-EXISTS plan.
+>
+> **Diagnostic flowchart when a user reports "NOT EXISTS is slower than NOT IN":**
+>
+> 1. **Is the subquery correlated?** Look at the subquery's WHERE clause — does it reference the outer table (e.g., `WHERE p.user_id = e.user_id`)? If NO (non-correlated), perf gap is unexpected — re-EXPLAIN and confirm both plans use `SemiJoin`; if so, the difference should be noise. If YES, continue.
+> 2. **EXPLAIN both versions, compare physical operators.** `NOT IN` should show `SemiJoin` (FilterMode = ANTI). Correlated `NOT EXISTS` will show `LeftJoin` + `Aggregate` (without a SemiJoin). If you see this asymmetry, you are hitting [trinodb/trino #21859](https://github.com/trinodb/trino/issues/21859) — the correctness premium of NOT EXISTS comes at an executor cost.
+> 3. **Pick a workaround based on nullability:**
+>    - **Right-side column is `NOT NULL` (schema-enforced)**: stick with `NOT IN` — `SemiJoin` is the optimal physical operator and you don't need NOT EXISTS's NULL safety. This is the fastest option.
+>    - **Right-side column is nullable but you want NOT EXISTS performance**: **rewrite as a non-correlated anti-join** — `LEFT JOIN ... ON ... WHERE right.key IS NULL` combined with `SELECT DISTINCT` on the inner side (see Rewrite B below and the "Worked example" section further down). This decorrelates back to `SemiJoin` (FilterMode = ANTI) and avoids the LeftJoin enumeration problem entirely.
+>    - **You need correlated NOT EXISTS for correctness and can't rewrite**: accept the correctness premium. Document the cost. The fix has to come from Trino upstream — there is no user-side perf knob today.
+>
+> **Bottom line — what to tell a user who asks "I switched NOT IN to NOT EXISTS and it got slower, why?":** "Because Trino's executor for correlated NOT EXISTS uses a LeftJoin that cannot short-circuit on the first match (open Trino issue #21859), unlike NOT IN's SemiJoin which is built for one-true-or-false-per-probe-row semantics. EXPLAIN both — you'll see LeftJoin + Aggregate vs SemiJoin. If your column is NOT NULL, stay on NOT IN. If it's nullable, rewrite as `LEFT JOIN ... WHERE right IS NULL` with a `DISTINCT` on the inner side to get NULL-safe semantics AND SemiJoin performance." Do **not** tell users "perf should be identical" — that is the inaccuracy this section is here to correct.
 
 **Rewrite B: `LEFT JOIN ... WHERE right IS NULL` (anti-join pattern)**
 
@@ -748,6 +787,6 @@ If you can answer "yes" to all thirteen, you avoid the most common 10x-cost mist
 - **ScanFilterProject vs TableScan with constraint**: in EXPLAIN, the former means filtering happens in Trino memory; the latter means Iceberg already filtered the files.
 - **SemiJoin**: the join type Trino uses internally for `IN (SELECT ...)` subqueries. Unlike an INNER JOIN, a SemiJoin returns at most one output row per probe row (no duplication), which is the correct semantic for IN predicates. Trino's `optimize-hash-generation` property applies precomputed hashes to SemiJoin nodes by default.
 - **CorrelatedJoin**: a subquery that references columns from the outer query. Trino tries to decorrelate these automatically; if it can't (shown as `CorrelatedJoin` in EXPLAIN), the subquery re-runs once per outer row — expensive. Fix by running ANALYZE on the subquery table first, then rewriting if needed.
-- **Decorrelate Subqueries rule**: Trino's optimizer rule that converts correlated `EXISTS`, `NOT EXISTS`, and correlated scalar subqueries into flat joins (often LEFT JOIN + IS NOT NULL / IS NULL). Sibling of the `Semi-Join (IN) Decorrelation` rule which handles uncorrelated `IN`. If either rule fires, EXPLAIN replaces `CorrelatedJoin` with `SemiJoin`.
+- **Decorrelate Subqueries rule**: Trino's optimizer rule that converts correlated `EXISTS`, `NOT EXISTS`, and correlated scalar subqueries into flat joins (often LEFT JOIN + IS NOT NULL / IS NULL). Sibling of the `Semi-Join (IN) Decorrelation` rule which handles uncorrelated `IN`. **Important asymmetry:** the IN-decorrelation rule produces a `SemiJoin` (optimal anti/semi-join with one-true-or-false-per-probe-row semantics). The Decorrelate Subqueries rule for **correlated** `NOT EXISTS` produces a `LeftJoin + Aggregation` shape that enumerates all matches (cannot short-circuit on the first match) — see [trinodb/trino #21859](https://github.com/trinodb/trino/issues/21859). The proposed `singleMatch` JoinNode flag has not landed, so correlated `NOT EXISTS` can be measurably slower than the equivalent `NOT IN` even when decorrelation "succeeds." Workaround: rewrite as a non-correlated anti-join (`LEFT JOIN ... WHERE right IS NULL` with a `DISTINCT` inner subquery) to force the SemiJoin path while keeping NULL-safe semantics.
 - **Anti-join**: a join that returns rows from the left side that have **no** match on the right side. The relational algebra operator behind `NOT EXISTS` and `LEFT JOIN ... WHERE right IS NULL`. Unlike `NOT IN`, anti-joins are NULL-safe: NULL rows on the right side are simply ignored, never returning UNKNOWN.
 - **Three-valued logic (3VL)**: SQL's logical system with TRUE / FALSE / UNKNOWN. NULL comparisons produce UNKNOWN, which the WHERE clause treats as "exclude this row." The `NOT IN` + NULL gotcha (zero-row results when the right subquery has any NULL) is a direct consequence of 3VL.

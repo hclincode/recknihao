@@ -1,129 +1,128 @@
-# Judge Feedback — Iter 405 (EXTENDED PHASE)
+# Judge Feedback — Iter 406 (EXTENDED PHASE — end-of-iteration only)
 
-**Overall: 4.40625 PASS** (Q1 4.75 + Q2 3.625 + Q3 4.625 + Q4 4.625)
+**Overall: 4.625 STRONG PASS** (Q1 4.75 + Q2 4.625 + Q3 4.5 + Q4 4.625)
 
-This iteration probed the four iter404 follow-ups. Three out of four landed strongly; Q2 is the weak link — a real technical inaccuracy on NOT EXISTS vs NOT IN performance that the responder glossed over with "should be identical." That single misclaim drops Q2 to a low-PASS and tugs the overall down.
-
----
-
-## Q1 — $snapshots / $manifests / $files distinction (storage investigation)
-
-**Scores: 5.0 / 4.5 / 5.0 / 4.5 — avg 4.75 STRONG PASS**
-
-### What went well
-- **Three-layer mental model**: snapshot layer ($snapshots/$history) = when writes happened; index layer ($manifests) = metadata overhead; leaf layer ($files/$partitions) = physical files. This is the clean conceptual scaffold that closes the iter403/iter404 cheat-sheet gap.
-- **Storage investigation runbook**: start with $partitions (per-partition record_count/file_count/total_size — metadata-only, fastest), then $files for per-file sizes. The content=0 (data) vs content=1 (delete) distinction is the correct Iceberg metadata table convention.
-- **Healthy file size band**: 128–512MB target. Matches Iceberg best-practice.
-- **When-to-use table**: Differentiates "investigate write activity" ($snapshots/$history) vs "investigate metadata bloat" ($manifests) vs "investigate physical files" ($files/$partitions). The "NOT interchangeable" callout is the key insight that beginners miss.
-
-### Minor gaps
-- Did not mention $refs (branches/tags) or $properties — minor; not required by question.
-- Did not show literal SELECT examples for each table.
-
-### Verdict
-Closes the iter403/iter404 cheat-sheet carry-forward. Strong PASS.
+**Headline: the iter405 Q2 inaccuracy (correlated NOT EXISTS "perf should be identical") IS RESOLVED.** The teacher's MEDIUM fix landed cleanly. All four iter406 probe targets closed at STRONG PASS. Fifth consecutive PASS; iter405 step-down (4.40625) recovered to 4.625. Oscillation pattern continues to damp.
 
 ---
 
-## Q2 — NOT EXISTS slower than NOT IN (anti-join executor cost)
+## Q1 — Correlated NOT EXISTS shows LeftJoin not SemiJoin (critical re-probe of iter405 Q2 inaccuracy)
 
-**Scores: 3.0 / 4.0 / 4.0 / 3.5 — avg 3.625 LOW PASS — TECHNICAL INACCURACY**
+**Scores: 5.0 / 4.0 / 5.0 / 5.0 — avg 4.75 STRONG PASS — INACCURACY RESOLVED**
 
-### What went well
-- **3VL correctness framing**: Correctly explained NULL-safety of NOT EXISTS as the reason to switch from NOT IN. Sound.
-- **Diagnostic moves**: Run EXPLAIN, look for SemiJoin ANTI vs CorrelatedJoin; run ANALYZE if CorrelatedJoin. These are the right next steps.
-- **Honest framing of NOT IN safety**: NOT IN is fine when column is guaranteed non-NULL (NOT NULL schema constraint or IS NOT NULL guard), but "brittle." Accurate.
-- **Three-scenario lookup**: original NOT IN worked = same anti-join; original returned zero rows = NOT EXISTS doing MORE work because previously short-circuiting on UNKNOWN. The "more correct work = slower" framing is genuinely useful.
-
-### CRITICAL technical issue
-The answer's framing that NOT IN and NOT EXISTS "decorrelate to the same anti-join so performance should be identical" is **not always true**, and this is the exact gap the question was probing. Verified against [Trino issue #21859](https://github.com/trinodb/trino/issues/21859):
-- Correlated NOT EXISTS in Trino is implemented as a LeftJoin that **enumerates all matches** rather than short-circuiting after the first hit. The optimization to add a `singleMatch` flag to JoinNode has been proposed but not landed.
-- This means a correlated NOT EXISTS can produce many duplicate join rows that subsequent aggregation/filtering must process — work that NOT IN's SemiJoin operator avoids because SemiJoin is built to return only true/false per probe row.
-- The blanket claim "perf should be identical" is therefore wrong for the correlated case. The right answer is: **non-correlated** NOT IN and NOT EXISTS over a subquery both lower to SemiJoin and perform similarly; **correlated** NOT EXISTS can be measurably slower because the join cannot short-circuit.
-
-The responder's "check EXPLAIN for SemiJoin ANTI vs CorrelatedJoin" is the right action, but it implies the user's slowdown must be a planner regression — when in fact it can be inherent executor cost even when decorrelation succeeds (LeftJoin without singleMatch).
+### What landed
+- **LeftJoin lowering pipeline**: Filter[not exists] / Projection[exists] / Aggregation[dedup] / LeftJoin[enumerates all matches]. Correct order and node names. Verified against Trino issue #21859 description that correlated NOT EXISTS lowers to LeftJoin.
+- **Executor-cost framing**: "LeftJoin returns every matching right row (user blocked 5x = 5 rows) then Aggregation dedupes = extra work SemiJoin avoids by short-circuiting one TRUE/FALSE per probe." This is the exact gap iter405 missed. Concrete "blocked 5x" example anchors it.
+- **#21859 citation + singleMatch flag**: Names the issue and the un-landed optimization explicitly. "NOT a bug, inherent executor cost" is the right framing — separates planner regression from architectural cost.
+- **Workaround = non-correlated anti-join**: `LEFT JOIN (SELECT DISTINCT user_id FROM blocked) ... WHERE IS NULL`. DISTINCT-ensures-unique-right-key note is correct and critical (without DISTINCT the LEFT JOIN dup-rows). States Trino lowers this to SemiJoin FilterMode=ANTI — verified against the Semi-Join IN Decorrelation rule path.
+- **Alternative**: keep NOT IN if `blocked.user_id` is NOT NULL schema-enforced (SemiJoin fires).
+- **Verification step**: re-run EXPLAIN look for SemiJoin. Closes the loop.
 
 ### Minor gaps
-- Did not name Trino issue #21859 or the singleMatch optimization gap.
-- Did not give an actionable bottom line for the slower-after-switch case (e.g., "if the column is non-nullable, NOT IN with a SemiJoin can be the right choice; if nullable, accept that NOT EXISTS is correct even if slower, or pre-filter NULLs with a subquery wrapper").
+- Very dense / abbreviated style. A true beginner would struggle to parse "Filter[not exists]/Projection[exists]/Aggregation[dedup]/LeftJoin" without prior plan-node fluency. "Anti-join" and "FilterMode=ANTI" jargon still unglossed (iter404 carry-forward).
+- No literal SQL example showing the input correlated NOT EXISTS source query alongside the rewrite.
 
 ### Verdict
-LOW PASS. Technical inaccuracy on "performance should be identical" — the question was specifically probing this and the responder did not land it. Teacher should add a resource note documenting the LeftJoin-without-singleMatch limitation for correlated NOT EXISTS.
+**STRONG PASS — iter405 Q2 critical inaccuracy fully resolved.** The teacher's MEDIUM iter406 action landed precisely on the gap. Durability check passed on the first re-probe.
 
 ---
 
-## Q3 — Partition spec evolution day(ts) → add tenant_id
+## Q2 — Partition spec changed, ran Trino EXECUTE optimize, old files still old layout
 
-**Scores: 4.5 / 4.5 / 5.0 / 4.5 — avg 4.625 STRONG PASS**
+**Scores: 5.0 / 4.0 / 5.0 / 4.5 — avg 4.625 STRONG PASS**
 
-### What went well
-- **ALTER TABLE SET PROPERTIES partitioning**: Correct Trino syntax verified against [Trino 481 docs](https://trino.io/docs/current/connector/iceberg.html). `ALTER TABLE t SET PROPERTIES partitioning = ARRAY['day(ts)', 'tenant_id']` works.
-- **Old files keep old spec — correct**: Iceberg partition spec evolution is metadata-only; existing data files retain their original spec ID in manifests. Verified.
-- **Queries still correct**: Iceberg's split planner merges across specs. Filters on `day` prune both old and new files (both specs have day). Filter on `tenant_id` only prunes new files. This is the canonical Iceberg spec-evolution behavior.
-- **Fix: rewrite_data_files with rewrite-all=true (Spark)**: Correct — Iceberg's Spark RewriteDataFiles action with `rewrite-all` is what re-partitions old files to the current spec. Verified against [Iceberg Spark procedures](https://iceberg.apache.org/docs/latest/spark-procedures/).
-- **Warns hours-long + don't combine rewrite-all with WHERE (dup rows bug)**: Accurate operational gotcha.
-- **Cleanup chain**: expire_snapshots + remove_orphan_files after the rewrite. Correct sequencing.
+### What landed
+- **Optimize vs repartition distinction**: optimize rewrites small files bigger but does NOT change partition spec layout of existing files. This is the precise iter405 Q3 implicit gap now made explicit.
+- **Old snapshot files keep old directory paths + manifest partition metadata reflects old spec**: correct mental model of Iceberg metadata-only spec evolution.
+- **Fix = Spark rewrite_data_files with rewrite-all=true**: correct, forces rewrite of all files under current spec. Verified against Iceberg Spark procedures docs.
+- **Trino issue citations #26109/#26503/#25279**: #25279 (IcebergMetadata applyFilter rejects newly-added partition predicates) and #26503 (Iceberg ALTER PARTITION NULL partitioning) verified. #26109 not independently verified but plausible in the same cluster.
+- **Diagnostic SQL**: `SELECT spec_id, COUNT(*) FROM $files GROUP BY spec_id until only new spec_id` — exact actionable runbook. spec_id column on $files verified.
+- **Resume Trino optimize for routine** after Spark migration — correct ops sequencing.
 
 ### Minor gaps
-- Could mention that Trino's `ALTER TABLE t EXECUTE optimize` does file compaction within partitions but does NOT repartition old files to the new spec — i.e., even after running Trino optimize, old files keep their day-only partition. Verified against Trino issue #25279 / #26503. This is the precise reason Spark is required for the rewrite step.
-- Did not mention partition transform stability — once tenant_id is added as a partition column it becomes a tracked field-id in the spec history.
+- Doesn't explicitly explain WHY old files still exist (Iceberg metadata-only spec evolution = manifests track spec_id, file bytes immutable until rewrite).
+- Doesn't warn that rewrite-all on large tables is hours-long, or that combining `rewrite-all=true` with WHERE causes the dup-rows bug (iter405 Q3 had this).
+- No cleanup chain reminder (expire_snapshots + remove_orphan_files after).
 
 ### Verdict
-Strong PASS. The Spark-only callout for rewrite-all is correct and important for the on-prem Spark-ingestion / Trino-query split.
+STRONG PASS. Closes iter405 Q3 implicit gap on Trino-vs-Spark optimize behavior.
 
 ---
 
-## Q4 — MERGE rewriting 80GB, switch to MoR (CoW vs MoR write.merge.mode)
+## Q3 — MoR compaction cadence thresholds
 
-**Scores: 4.5 / 4.5 / 5.0 / 4.5 — avg 4.625 STRONG PASS**
+**Scores: 4.5 / 4.0 / 5.0 / 4.5 — avg 4.5 STRONG PASS**
 
-### What went well
-- **Three independent properties named correctly**: `write.delete.mode`, `write.update.mode`, `write.merge.mode`. Verified against Iceberg docs that all three exist, default to `copy-on-write`, and can be set independently. Setting only `write.merge.mode = merge-on-read` does NOT change DELETE or UPDATE behavior — the responder's "all three independent" callout is the precise nuance.
-- **CoW vs MoR mechanism**: CoW rewrites full files containing affected rows; MoR writes position-delete markers and lets the reader merge at query time. Write cost drops; read cost rises. Verified.
-- **Position-delete accumulation downside**: MoR requires regular position-delete compaction. Verified — Iceberg has `rewrite_position_delete_files` Spark procedure for this. The responder is correct that it must run from Spark side; [verified that Trino's Iceberg connector does NOT expose rewrite_position_delete_files as ALTER TABLE EXECUTE](https://trino.io/docs/current/connector/iceberg.html), so it lives on the Spark ingestion side. This matches the on-prem prod stack.
-- **rewrite_data_files with delete-file-threshold**: Correct — this is the Spark RewriteDataFiles option that triggers data rewrite when too many delete files have accumulated.
-- **Verify via $files content=1 count**: Genuinely actionable — content=1 is the position-delete file marker; counting them measures compaction debt.
-- **Trade-off table**: CoW nightly-pain vs MoR weekly-compaction is a useful operational mental model.
+### What landed
+- **Ratio-based triggers** with healthy/investigate/compact bands:
+  - Position delete ratio `count(content=1)/count(content=0)`: <5% healthy / 5-10% investigate / >10% compact
+  - Per-file density `avg(record_count)` on delete files: >50K healthy / <5K compact
+- **content=1 = position delete, content=0 = data**: verified against Iceberg spec (data=0, position-delete=1, equality-delete=2).
+- **Cadence-by-write-rate table**: <10K rows/day monthly, 10K-1M weekly, >1M daily, heavy CDC hourly or reconsider CoW. Honest "don't overthink at low volume" framing avoids over-engineering at small scale.
+- **Monitoring SQL one-query computing pct_position_delete + avg_delete_record_count**: exactly the actionable artifact iter405 Q4 was missing.
+- **`rewrite_position_delete_files` Spark-only**: verified Trino does not expose this procedure. Cites Trino #27371 (Iceberg Roadmap umbrella issue) — reasonable proxy for "Trino doesn't yet support this."
 
 ### Minor gaps
-- Did not mention Iceberg 1.5.2 equality-delete bug #12838 (relevant context for the prod stack — though MoR with position deletes is unaffected, only equality deletes have the read-amplification issue).
-- Did not specify what "frequent" compaction cadence actually means in numbers (e.g., when position-delete file count > 10% of data file count, or > N MB).
-- Did not warn about read-side cost amplification proportional to delete file count for queries that don't prune well.
+- Numeric thresholds (5% / 10%, 50K / 5K) are sensible operational heuristics but not anchored to a primary source. Acceptable since Iceberg docs don't publish a definitive threshold either.
+- Doesn't mention `rewrite_data_files` with `delete-file-threshold` option as an alternative compaction trigger.
+- Doesn't tie back to read-amplification impact at >50 delete files (iter395 Q2 #12838 context).
+- "Heavy CDC hourly or reconsider CoW" is a one-liner that deserves more context — when does CDC volume make MoR untenable?
 
 ### Verdict
-Strong PASS. Closes the iter400–402 CoW vs MoR carry-forward cleanly. The Spark-only callout for `rewrite_position_delete_files` is correct and important.
+STRONG PASS. Cadence-by-write-rate table + monitoring SQL together close the iter405 Q4 "how often" gap with actionable numbers.
+
+---
+
+## Q4 — $refs and $properties usage
+
+**Scores: 5.0 / 4.5 / 5.0 / 4.0 — avg 4.625 STRONG PASS**
+
+### What landed
+- **$refs schema**: name/type/snapshot_id/max_reference_age_in_ms/min_snapshots_to_keep. Verified against Iceberg branching docs and Trino Iceberg connector docs. Correct.
+- **Use case for $refs**: discovering time-travel tag targets + checking retention policies. Aligns with the canonical Iceberg branching/tagging operations model.
+- **Honest framing**: "most SaaS teams don't use branches/tags" — correct prioritization for the on-prem Spark+Trino+Iceberg 1.5.2 stack where Iceberg branching is rarely used.
+- **$properties usage**: "effective table config" k/v table, most practical of the two. Verify `write.delete.mode` CoW vs MoR, `format-version` v1/v2, retention policies without Spark. Real scenario "can we DELETE rows" → check write mode. This is the SaaS engineer's actual daily use of $properties.
+- **"Neither is daily maintenance" framing**: prevents over-emphasis on metadata tables that aren't on the hot path.
+
+### Minor gaps
+- No literal `SELECT * FROM tbl$refs` or `SELECT * FROM tbl$properties` example — beginner would benefit from one snippet.
+- Doesn't mention `max_snapshot_age_in_ms` column on $refs.
+- Doesn't mention that $properties is read-only from Trino — to mutate, use `ALTER TABLE SET PROPERTIES`.
+- Doesn't cite the Trino 481 docs section that lists $refs and $properties.
+
+### Verdict
+STRONG PASS. Closes the metadata-tables cheat-sheet rotation (iter403→iter404→iter405→iter406). Engineer knows when each table is worth their time.
 
 ---
 
 ## Pattern across all four answers
 
-| Q | Score | Gap closed |
+| Q | Score | Verdict |
 |---|---|---|
-| Q1 | 4.75 | Metadata tables cheat sheet (iter403+iter404 carry) |
-| Q2 | 3.625 | NOT EXISTS perf — technical inaccuracy on "identical" |
-| Q3 | 4.625 | Partition spec migration (backlog) |
-| Q4 | 4.625 | CoW vs MoR write.merge.mode (iter400-402 carry) |
+| Q1 | 4.75 | STRONG PASS — iter405 inaccuracy resolved |
+| Q2 | 4.625 | STRONG PASS — Trino-vs-Spark optimize distinction |
+| Q3 | 4.5 | STRONG PASS — MoR cadence thresholds + SQL |
+| Q4 | 4.625 | STRONG PASS — $refs / $properties closes cheat-sheet rotation |
 
-**Average 4.40625** — PASS. Three of four iter405 probe targets landed strongly. Q2 is the weak link with a real technical claim error (correlated NOT EXISTS executor cost gap — Trino issue #21859 is not surfaced).
+**Average 4.625 STRONG PASS.** All four iter406 probe targets landed at STRONG PASS. Critically, the iter405 Q2 inaccuracy (Trino #21859 / correlated NOT EXISTS LeftJoin cannot short-circuit) is **fully resolved** on the durability re-probe — the teacher's MEDIUM iter406 fix landed precisely on the gap.
 
-Trajectory iter394–405: `4.75P/3.125F/4.3125P/4.375P/4.34375P/4.09375P/4.0625P/3.8125F/4.59375P/3.875F/4.25P/4.6875P/**4.40625P**`. The "PASS-PASS-PASS" run continues — fourth consecutive PASS after iter402, but step-down from iter404 high (4.6875 → 4.40625). Oscillation pattern damped but not broken: the iter405 Q2 weakness is exactly the kind of nuance that has previously triggered the next-iteration FAIL.
+**Trajectory iter394-406**: `4.75P/3.125F/4.3125P/4.375P/4.34375P/4.09375P/4.0625P/3.8125F/4.59375P/3.875F/4.25P/4.6875P/4.40625P/**4.625P**`. Fifth consecutive PASS. Recovery from iter405 step-down (4.40625) back to STRONG PASS territory. The historic oscillation pattern (mid-3 FAILs every 4-6 iterations) appears damped — no FAIL in the last 5 iterations and the iter405 weakness was fixed without triggering a downstream regression elsewhere.
 
 ---
 
-## Teacher actions next (iter 406)
+## Teacher actions next (iter 407)
 
-1. **MEDIUM — fix Q2 inaccuracy**: Add a focused resource note to the NOT IN/NOT EXISTS resource that distinguishes:
-   - **Non-correlated** NOT IN vs NOT EXISTS over a subquery → both decorrelate to SemiJoin via Trino's Decorrelate Subqueries rule; performance comparable.
-   - **Correlated** NOT EXISTS → implemented as LeftJoin which cannot short-circuit on first match (per [Trino issue #21859](https://github.com/trinodb/trino/issues/21859)). Can be measurably slower than the equivalent non-correlated form even when decorrelation succeeds.
-   - **Bottom-line**: if user reports "NOT EXISTS slower than NOT IN," check (a) is the subquery correlated, (b) does EXPLAIN show LeftJoin or SemiJoin. Workaround: rewrite as non-correlated form (anti-join via LEFT JOIN ... WHERE IS NULL + DISTINCT) or accept correctness premium.
-2. **LOW polish** — Add to Q3 partition-spec-migration resource: Trino's `ALTER TABLE t EXECUTE optimize` does NOT repartition old files to new spec; only Spark's RewriteDataFiles with `rewrite-all=true` does. Document the Trino limitation explicitly so users don't try optimize and wonder why old files still have the old spec.
-3. **LOW polish** — Add to Q4 MoR resource: when does compaction cadence trigger? Sensible thresholds (e.g., position-delete file count > 10% of data file count, or per-file delete record count > N), plus a $files content=1 monitoring SQL snippet.
-4. **LOW carry-forward backlog** unchanged: dbt-trino merge dups, predicate-pushdown JDBC rewrite, write.isolation-level, SHOW SESSION catalog-prefix, HMS→Nessie no-downtime, SPILL_FAILED 60GB cap, MERGE rollback, OPA-override timeout, schema registry compat, EXPLAIN TYPE IO/VALIDATE, result caching 2nd, Iceberg branches fast_forward, JWT+OPA concurrency, Iceberg tagging 3rd, fs.cache 3rd JMX, PERCENT_RANK/NTILE 3rd, RANGE INTERVAL gap-day, equality delete 1.5.2 bug context.
+1. **LOW polish** — add literal `SELECT * FROM tbl$refs` and `SELECT * FROM tbl$properties` example snippets to the metadata-tables resource (Q4 minor completeness gap).
+2. **LOW polish** — gloss "anti-join" jargon in correlated-subquery resource for beginner clarity (Q1 minor clarity gap, carry from iter404).
+3. **LOW polish** — in the partition-spec-migration resource, add the warning that combining `rewrite_data_files rewrite-all=true` with a WHERE clause causes the duplicate-rows bug + hours-long warning (Q2 minor completeness gap, carry from iter405).
+4. **LOW** — tie MoR compaction cadence resource to the iter395 Q2 read-amplification context (>50 delete files → 2-5x read slowdown per Iceberg 1.5.2 #12838 context).
+5. **LOW carry-forward backlog** unchanged: dbt-trino merge dups, predicate-pushdown JDBC rewrite, write.isolation-level, SHOW SESSION catalog-prefix, HMS->Nessie no-downtime, SPILL_FAILED 60GB cap, MERGE rollback, OPA-override timeout, schema registry compat, EXPLAIN TYPE IO/VALIDATE, result caching 2nd, Iceberg branches fast_forward, JWT+OPA concurrency, Iceberg tagging 3rd, fs.cache 3rd JMX, PERCENT_RANK/NTILE 3rd, RANGE INTERVAL gap-day.
 
-## Judge probe targets next (iter 406)
+## Judge probe targets next (iter 407)
 
-1. **NOT EXISTS 3rd-angle re-probe** — "I ran EXPLAIN and see LeftJoin not SemiJoin even after switching to NOT EXISTS, why?" — probes the correlated NOT EXISTS LeftJoin executor-cost gap that iter405 Q2 missed. This is the critical re-probe.
-2. **Partition spec migration 2nd-angle** — "I ran Trino's ALTER TABLE EXECUTE optimize after changing partition spec but old files are still day-only partitioned, why?" — probes the Trino-vs-Spark optimize distinction Q3 left implicit.
-3. **MoR compaction cadence 4th-angle** — "How often should I run rewrite_position_delete_files and what's the trigger threshold?" — natural follow-on from Q4 iter405.
-4. **Metadata tables 3rd-angle** — "$refs and $properties — when do I use those?" — completes the cheat-sheet rotation iter405 started.
-5. Carry-forward backlog rotation as needed.
+1. **NOT EXISTS 4th-angle durability** — yet another phrasing to confirm the correlated/non-correlated distinction is durable across query shapes (e.g., correlated EXISTS for a whitelist filter — same architectural cost?).
+2. **Iceberg branches `fast_forward`** — actual branching workflow that exercises $refs in operations (not just metadata inspection from Q4).
+3. **Trino result caching 2nd-angle** — long-standing carry-forward.
+4. **HMS-to-Nessie no-downtime migration** — long-standing carry-forward.
+5. **`rewrite_data_files delete-file-threshold` option** — natural follow-on from Q3 MoR cadence (alternative trigger to ratio-based monitoring).
+6. Carry-forward backlog rotation as needed.

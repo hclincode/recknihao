@@ -657,10 +657,61 @@ GROUP BY content
 ORDER BY content;
 ```
 
-**Thresholds (rule of thumb):**
+**Thresholds (rule of thumb) — absolute file count:**
 - < 50 position delete files total → healthy; no action needed.
 - 50–500 → monitor; consider running monthly if query latency is degrading.
 - 500+ → run `rewrite_position_delete_files` weekly alongside `rewrite_data_files`.
+
+**Better triggers — RATIO-based thresholds (use these for tables of any size, especially > 1 TB where the absolute counts above stop scaling):**
+
+| Trigger | Healthy | Investigate | Action required |
+|---|---|---|---|
+| **Ratio**: `count(content=1)` / `count(content=0)` — position delete files vs data files | < 5% | 5–10% | **> 10%** — schedule `rewrite_position_delete_files` |
+| **Per-file delete record density**: avg `record_count` of `content=1` files | > 50,000 records/file | 5,000–50,000 | **< 5,000** — many tiny delete files; compact them |
+| **Read amplification**: per-query stats — delete files opened per data file scanned | < 1× | 1–3× | **> 3×** — readers spending more I/O on deletes than data |
+| **Storage proportion**: `sum(file_size_in_bytes WHERE content=1)` / `sum(file_size_in_bytes WHERE content=0)` | < 1% | 1–5% | **> 5%** — delete-file storage is bloating |
+
+Any one of these crossing into the **action required** column is a sufficient trigger. The ratio trigger (`content=1 count > 10% of content=0 count`) is the most reliable single metric — it captures both "lots of tiny deletes" and "MoR write rate is outpacing compaction." The Iceberg upstream `rewrite_data_files` procedure exposes a `delete-file-threshold` option that targets this same intuition (rewrite a data file if it has more than N delete files attached); see [Iceberg Spark procedures](https://iceberg.apache.org/docs/latest/spark-procedures/#rewrite_data_files).
+
+**Monitoring SQL — drop this into an Airflow / k8s CronJob to alert when the ratio crosses 10%:**
+
+```sql
+-- Trino 467 OR Spark — compute the position-delete ratio in one query.
+-- Use this as a scheduled monitor; alert if pct_position_delete > 10 OR avg_delete_record_count < 5000.
+WITH file_stats AS (
+  SELECT
+    content,                                                       -- 0 = data, 1 = position delete
+    COUNT(*)                                AS file_count,
+    SUM(file_size_in_bytes) / 1024 / 1024   AS total_mb,
+    AVG(record_count)                       AS avg_record_count
+  FROM iceberg.analytics."events$files"
+  WHERE content IN (0, 1)
+  GROUP BY content
+)
+SELECT
+  MAX(CASE WHEN content = 0 THEN file_count END)        AS data_file_count,
+  MAX(CASE WHEN content = 1 THEN file_count END)        AS pos_delete_file_count,
+  MAX(CASE WHEN content = 1 THEN avg_record_count END)  AS avg_delete_record_count,
+  -- The key trigger metric — alert when > 10:
+  100.0 * MAX(CASE WHEN content = 1 THEN file_count END)
+        / NULLIF(MAX(CASE WHEN content = 0 THEN file_count END), 0)
+                                                        AS pct_position_delete,
+  MAX(CASE WHEN content = 0 THEN total_mb END)          AS data_total_mb,
+  MAX(CASE WHEN content = 1 THEN total_mb END)          AS pos_delete_total_mb,
+  100.0 * MAX(CASE WHEN content = 1 THEN total_mb END)
+        / NULLIF(MAX(CASE WHEN content = 0 THEN total_mb END), 0)
+                                                        AS pct_storage_delete
+FROM file_stats;
+```
+
+**Cadence guidance based on write rate** (the underlying driver of position-delete accumulation):
+
+| MoR write rate (DELETEs + UPDATEs + MERGEs per day) | Recommended `rewrite_position_delete_files` cadence |
+|---|---|
+| < 10,000 rows/day affected | Monthly is fine; threshold-based trigger above usually catches anything sooner |
+| 10,000–1M rows/day | Weekly, immediately after `rewrite_data_files` in the maintenance window |
+| > 1M rows/day | Daily, or trigger-based: poll the monitoring SQL every hour and run when ratio > 10% |
+| Heavy CDC / high-frequency updates (e.g., Debezium streaming into a MoR-mode table) | Hourly threshold checks; consider switching the table back to CoW if MoR maintenance is overwhelming |
 
 **Scheduling:** when applicable, run **immediately after `rewrite_data_files`** in the same Spark job, BEFORE `expire_snapshots`. The canonical sequence on an MoR table becomes:
 

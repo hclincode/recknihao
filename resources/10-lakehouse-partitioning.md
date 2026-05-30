@@ -773,6 +773,31 @@ CALL iceberg.system.rewrite_data_files(
 
 > **WARNING: Do not use Trino's `ALTER TABLE ... EXECUTE optimize` for post-partition-evolution migration.** Confirmed bugs in Trino ([trinodb/trino #26109](https://github.com/trinodb/trino/issues/26109), [#26503](https://github.com/trinodb/trino/issues/26503), [#25279](https://github.com/trinodb/trino/issues/25279)) mean that after a partition spec change, Trino's native `OPTIMIZE` command may produce files with **incorrect partition values** (e.g., NULL partition keys) or fail to reorganize data by the new partition column at all. For the initial spec migration, **always use Spark's `CALL iceberg.system.rewrite_data_files` with `rewrite-all=true`**. Once the migration is complete and all files are on the new spec (verify via the `$files` `spec_id` check in step 3 — wait until the old `spec_id` row reports 0 files), you can resume using Trino's `OPTIMIZE` for routine compaction.
 
+> **EXPLICITLY — what Trino `ALTER TABLE ... EXECUTE optimize` does and does NOT do after a partition spec change. Read this if you ran optimize and your old files are STILL on the old spec.**
+>
+> `ALTER TABLE iceberg.analytics.user_events EXECUTE optimize` performs **file-size compaction within the partition layout each file already has**. It merges small files into larger ones — but it does **NOT repartition** files to the current (new) partition spec. After running Trino `EXECUTE optimize` on a table that just had a new partition column added:
+>
+> - Files originally written under spec_id=0 (the old `day(occurred_at)` spec) **stay tagged with spec_id=0** and remain in the old partition layout.
+> - Trino's optimize may merge small spec_id=0 files into bigger spec_id=0 files, but they still don't carry the new partition column (`tenant_id`) in the manifest's partition struct.
+> - Queries filtering on the new partition column (`tenant_id`) still cannot prune those files — exactly the original problem you were trying to fix.
+>
+> **Why:** Trino's `EXECUTE optimize` is wired to the IcebergMetadata applyFilter / TableExecuteStructureValidator code path, which currently rejects predicates on newly-added partition columns and cannot push a cross-spec rewrite plan ([trinodb/trino #25279](https://github.com/trinodb/trino/issues/25279), [#26503](https://github.com/trinodb/trino/issues/26503)). The bin-pack rewrite strategy Trino uses only changes file *sizes*, not partition *layout*.
+>
+> **The ONLY procedure on this stack that repartitions old files to the new spec is Spark's `CALL iceberg.system.rewrite_data_files(..., options => map('rewrite-all', 'true'))`.** `rewrite-all=true` forces Spark to rewrite every file regardless of size — this is what re-stamps each file with the current (new) spec_id and places it in the new partition directory structure. Without `rewrite-all=true`, even Spark's `rewrite_data_files` may skip well-sized old-spec files (the default bin-pack strategy only targets undersized files).
+>
+> **Diagnostic — confirm Trino optimize did NOT repartition by checking spec_id distribution:**
+>
+> ```sql
+> -- Run this BEFORE and AFTER trying Trino EXECUTE optimize on a freshly-evolved table.
+> -- If the spec_id=0 row count is unchanged, optimize did not repartition (expected behavior).
+> SELECT spec_id, COUNT(*) AS file_count, SUM(file_size_in_bytes)/1024/1024 AS total_mb
+> FROM iceberg.analytics."user_events$files"
+> GROUP BY spec_id
+> ORDER BY spec_id;
+> ```
+>
+> If you see `spec_id=0` files persist after Trino optimize, that is expected — switch to Spark `rewrite_data_files` with `rewrite-all=true` to actually migrate them. Once `spec_id=0` row count reaches 0, the migration is complete and Trino `EXECUTE optimize` is fine to resume for routine compaction.
+
 ```sql
 -- Step 3: verify rewrite progress (works in BOTH Spark and Trino — metadata query).
 -- Each data file is tagged with the spec_id it was written under: 0 = original spec,
