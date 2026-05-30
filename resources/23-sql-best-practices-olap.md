@@ -457,6 +457,8 @@ WHERE NOT EXISTS (
 
 `NOT EXISTS` checks row-by-row whether a matching row exists. It returns TRUE/FALSE, never UNKNOWN — so NULLs in `premium_users.user_id` are simply ignored (they don't match anything). Trino decorrelates `NOT EXISTS` into an **anti-join** internally; EXPLAIN typically shows `SemiJoin` with a "FilterMode = ANTI" hint or a `LEFT JOIN ... IS NULL` shape. Performance is on par with the SemiJoin path for `IN`.
 
+> **Anti-join — what the term means.** An **anti-join** returns rows from the left side that have **NO matching row on the right side**. It's the relational-algebra opposite of a regular (inner) JOIN, which returns rows that DO have a match. `NOT EXISTS (SELECT 1 FROM right WHERE right.key = left.key)` and `LEFT JOIN right ON right.key = left.key WHERE right.key IS NULL` both produce anti-join semantics. Trino's optimizer rewrites both into a single physical anti-join node, which is why their EXPLAIN plans look identical and they perform similarly. The "anti" is doing the same job as `NOT` in `NOT EXISTS`: keep the rows that did NOT find a match. Unlike `NOT IN`, an anti-join is **NULL-safe** — NULL rows on the right side simply don't match anything, instead of poisoning the WHERE clause via three-valued logic. This is exactly why the recommended fix for the `NOT IN` + NULL zero-rows bug is to switch to `NOT EXISTS` (which decorrelates to an anti-join), not just to add an `IS NOT NULL` filter to the subquery.
+
 **Rewrite B: `LEFT JOIN ... WHERE right IS NULL` (anti-join pattern)**
 
 ```sql
@@ -530,6 +532,100 @@ WHERE p.user_id IS NOT NULL;
 ```
 
 Why the `DISTINCT` matters: without it, if `premium_users` has duplicate `user_id` rows (a single user with two `tier='gold'` entries), the LEFT JOIN would multiply event rows — silently inflating any downstream COUNT or SUM. `EXISTS` doesn't multiply rows; `DISTINCT` on the inner side restores that semantic for the JOIN form.
+
+#### Worked example end-to-end: BEFORE / AFTER with EXPLAIN snippets
+
+Use this to convince yourself that the manual rewrite actually fixes the problem. Suppose `events` has 100M rows and `premium_users` has 200K rows (50K with `tier='gold'`).
+
+**BEFORE — original correlated EXISTS, `ANALYZE premium_users` skipped, NO stats.**
+
+```sql
+EXPLAIN (TYPE LOGICAL)
+SELECT e.user_id, e.event_id
+FROM events e
+WHERE EXISTS (
+  SELECT 1 FROM premium_users p
+  WHERE p.user_id = e.user_id AND p.tier = 'gold'
+);
+```
+
+Trimmed EXPLAIN output (the diagnostic shape — leaf-level stats counts removed for clarity):
+
+```
+- Output[user_id, event_id]
+    - CorrelatedJoin[type = INNER, correlation = [e.user_id]]
+        - TableScan[iceberg:analytics.events]
+            user_id := events.user_id
+            event_id := events.event_id
+        - Filter[p.user_id = e.user_id AND p.tier = 'gold']
+            - TableScan[iceberg:analytics.premium_users]
+                user_id := premium_users.user_id
+                tier := premium_users.tier
+```
+
+The diagnostic word in this plan is **`CorrelatedJoin`**. That means Trino's `Decorrelate Subqueries` optimizer rule bailed out, so the subquery executes once for every row in `events` — 100M subquery scans of `premium_users`. Wall-clock time runs into hours; the query frequently exceeds the per-query time limit and gets killed.
+
+**Diagnostic — run `SHOW STATS` first.** Before rewriting, see if missing stats are the cause:
+
+```sql
+SHOW STATS FOR iceberg.analytics.premium_users;
+-- If row_count is NULL or distinct_values_count for user_id is NULL:
+ANALYZE iceberg.analytics.premium_users;
+-- Re-run the EXPLAIN above.
+```
+
+After `ANALYZE`, the CBO sometimes converts `CorrelatedJoin` to `SemiJoin` on its own — that's the cheapest fix and you're done. If EXPLAIN still shows `CorrelatedJoin`, proceed with the manual rewrite.
+
+**AFTER — manual rewrite to LEFT JOIN + IS NOT NULL + DISTINCT.**
+
+```sql
+EXPLAIN (TYPE LOGICAL)
+SELECT e.user_id, e.event_id
+FROM events e
+LEFT JOIN (
+  SELECT DISTINCT user_id
+  FROM premium_users
+  WHERE tier = 'gold'
+) p ON p.user_id = e.user_id
+WHERE p.user_id IS NOT NULL;
+```
+
+Trimmed EXPLAIN output:
+
+```
+- Output[user_id, event_id]
+    - Filter[p.user_id IS NOT NULL]
+        - LeftJoin[e.user_id = p.user_id]
+            - TableScan[iceberg:analytics.events]
+                user_id := events.user_id
+                event_id := events.event_id
+            - Aggregate[group by p.user_id]
+                - Filter[p.tier = 'gold']
+                    - TableScan[iceberg:analytics.premium_users]
+```
+
+The structural change: the outer `CorrelatedJoin` node is gone. Trino sees this is a flat LEFT JOIN with a NULL-filter, recognizes the anti-join-complement pattern (rows that DID match), and may further rewrite the `LeftJoin + Filter[IS NOT NULL]` into a `SemiJoin` node:
+
+```
+- Output[user_id, event_id]
+    - SemiJoin[e.user_id = p.user_id, output: SEMI]
+        - TableScan[iceberg:analytics.events]
+        - Aggregate[group by p.user_id]
+            - Filter[p.tier = 'gold']
+                - TableScan[iceberg:analytics.premium_users]
+```
+
+That `SemiJoin` is the optimal physical operator for "rows in `events` that have at least one match in filtered `premium_users`." It runs as a hash-join with the small filtered side broadcast to all workers, then probes the big `events` side once. Runtime collapses from hours to seconds.
+
+**The three plan shapes you might see after the rewrite — and what each means:**
+
+| EXPLAIN shape after rewrite | What happened | What to do next |
+|---|---|---|
+| `SemiJoin[...]` | Trino's `Transform Correlated Subquery to Join` rule fired and recognized the anti-pattern. Optimal. | Done. |
+| `LeftJoin` + `Filter[IS NOT NULL]` (no SemiJoin) | Trino kept the literal LEFT JOIN shape (didn't further collapse it to SemiJoin). Still correct and still fast — the `Aggregate` (from DISTINCT) on the right side prevents row duplication. | Done. Optionally drop the DISTINCT and retry — Trino sometimes folds the join into SemiJoin only when it can prove the right side is unique-keyed. |
+| `CorrelatedJoin` still present | Either you accidentally kept correlation (e.g., the rewrite still references `e.x` inside the subquery), or the inner side has stats missing on a column the planner needs. | Re-check the rewrite for residual correlation. Run `ANALYZE` on both tables. If still stuck, file the EXPLAIN in your ticket — this is a planner-edge-case escalation. |
+
+**The exact same NOT EXISTS before/after pattern** — the manual rewrite changes the `WHERE p.user_id IS NOT NULL` to `WHERE p.user_id IS NULL` (the anti-join half: rows from `events` that did NOT match). EXPLAIN should produce the same SemiJoin physical operator, but with a "filter mode = ANTI" annotation or an equivalent inversion. The CorrelatedJoin → SemiJoin transformation is identical; only the post-join filter flips.
 
 **Correlated `NOT EXISTS` — manual rewrite to LEFT JOIN + IS NULL**
 

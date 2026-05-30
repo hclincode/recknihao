@@ -287,6 +287,98 @@ WHERE key = 'write.delete.mode';
 
 > **Why this matters operationally:** every one of these queries reads ONLY manifest files (kilobytes), not Parquet data (potentially gigabytes). You can run them all day without touching MinIO data files. Make `$snapshots`, `$partitions`, and `$files` the first thing you check when diagnosing any Iceberg performance, storage, or correctness issue — before running a real `SELECT COUNT(*)` or `SHOW STATS`.
 
+### `$snapshots` vs `$manifests` vs `$files` — the three-layer mental model
+
+These three metadata tables are the ones engineers confuse most often, because all three sound like "metadata about the table." They are not interchangeable. They sit at **three different layers of the Iceberg metadata tree**, and each one answers a different class of question. Internalizing this hierarchy collapses 80% of "which table do I query?" confusion.
+
+**The Iceberg metadata tree, top-down:**
+
+```
+catalog (Hive Metastore)
+   |
+   v points at the current pointer file (vN.metadata.json)
+metadata.json
+   |
+   v lists every snapshot the table has ever had
+snapshot (rows in $snapshots) — one per write commit
+   |
+   v points at one manifest list (an avro file)
+manifest list (snapshot.manifest_list column in $snapshots)
+   |
+   v contains the set of manifest files for that snapshot
+manifest file (rows in $manifests) — one per partition group
+   |
+   v lists the actual data + delete files in that manifest
+data / delete file (rows in $files) — one per Parquet file on MinIO
+   |
+   v the actual rows of your table
+row (only visible via real SELECT against the table)
+```
+
+**One-table-per-question — when to pick each:**
+
+| Layer | Metadata table | Granularity | Pick it when you ask | Pick it when you DON'T |
+|---|---|---|---|---|
+| Commit | `$snapshots` | one row per snapshot | "What WRITES has this table seen?" (time travel, rollback, audit "what changed Tuesday 02:00") | You want to inspect file-level details — `$snapshots` does not list files, only commit-level summaries. |
+| Index | `$manifests` | one row per manifest file in the **current** snapshot | "How much MANIFEST OVERHEAD does this table have?" (do I need `rewrite_manifests`? Why is query planning slow?) | You want history — `$manifests` only reflects the CURRENT snapshot. For older snapshots, query `iceberg.analytics."events$manifests"` after switching context via `FOR VERSION AS OF`. |
+| Leaf | `$files` | one row per data/delete file in the **current** snapshot | "What DATA FILES exist? What are their sizes, partition values, column min/max?" (find tiny files; debug predicate pushdown via `lower_bounds`/`upper_bounds`; count position vs equality deletes via `content`) | You want a commit-level summary — `$files` has no `committed_at` column. For "how many rows did each commit add," that's `$snapshots.summary['added-records']`. |
+
+**Same question, three layers — concrete example.** Someone asks: "What happened to this table on May 28?"
+
+```sql
+-- Layer 1 — $snapshots: WHEN did writes happen on May 28 and what kind?
+SELECT snapshot_id, committed_at, operation,
+       CAST(summary AS JSON) AS summary
+FROM iceberg.analytics."events$snapshots"
+WHERE committed_at::DATE = DATE '2026-05-28'
+ORDER BY committed_at;
+-- Result: 3 rows. snapshot_id=4451 at 02:10 (operation=append, added 12M rows),
+-- snapshot_id=4452 at 14:30 (operation=replace, rewrite_data_files compaction),
+-- snapshot_id=4453 at 16:00 (operation=delete, dropped 800K rows).
+```
+
+```sql
+-- Layer 2 — $manifests: of those 3 snapshots, what is the MANIFEST shape now?
+-- (Default $manifests shows the CURRENT snapshot's manifests.)
+SELECT count(*) AS manifest_count, sum(length) AS total_bytes,
+       sum(added_data_files_count) AS added_files,
+       sum(existing_data_files_count) AS existing_files,
+       sum(deleted_data_files_count) AS deleted_files
+FROM iceberg.analytics."events$manifests";
+-- Result: 14 manifests, 28MB total. Tells you how many manifest files Trino's
+-- planner has to read before any data scan can begin.
+```
+
+```sql
+-- Layer 3 — $files: WHICH actual data files exist right now? Where are they?
+SELECT file_path, file_size_in_bytes, record_count,
+       partition, content  -- content: 0=data, 1=pos-delete, 2=eq-delete
+FROM iceberg.analytics."events$files"
+WHERE partition.event_date = DATE '2026-05-28'
+ORDER BY file_size_in_bytes DESC;
+-- Result: ~120 rows. One row per actual Parquet file on MinIO for that day's
+-- partition. This is where you see "this partition has 47 files under 10MB —
+-- compaction candidate."
+```
+
+**Heuristic — the 30-second decision rule:**
+
+- If the question is about **time** ("when did X happen?", "show me the table at time T", "rollback to last Tuesday"), it's `$snapshots`. Filter by `committed_at`.
+- If the question is about **planning cost** ("why is the planner slow?", "do I need rewrite_manifests?"), it's `$manifests`. Look at `count(*)` and `sum(length)`.
+- If the question is about **physical files** ("how big are the files?", "are there tiny files?", "find delete files", "is predicate pushdown working?"), it's `$files`. Look at `file_size_in_bytes`, `content`, `lower_bounds`, `upper_bounds`.
+
+**Three quick gotchas in this distinction:**
+
+1. **`$manifests` and `$files` reflect the CURRENT snapshot only by default.** They do not show historical state. If you need "what did this table look like 3 days ago," combine with `FOR VERSION AS OF '<snapshot_id_from_$snapshots>'` first, then query `$manifests` / `$files` in that context. (Trino 467 supports `FOR VERSION AS OF` on regular tables but **not** on metadata tables themselves — you'd need to run the query against the data table at that version and rely on `$snapshots.summary` for file-level deltas.)
+2. **`$snapshots` does NOT list files.** A common dead-end is to expect `$snapshots` to show "which 47 files this snapshot added." Those file lists live in the manifest-list file referenced by `snapshot.manifest_list`, and Iceberg does not expose that as a queryable metadata table — `$manifests` is the closest you get, but it operates on the current snapshot. For "which files did snapshot 4451 add," the summary map (`summary['added-data-files']` gives a count; for the actual paths you need a `read_snapshot` Spark procedure).
+3. **`$files.partition` is a STRUCT, not a string.** If the table is `PARTITIONED BY day(ts), bucket(tenant_id, 128)`, then `$files.partition` has fields `partition.ts_day` (date) and `partition.tenant_id_bucket` (integer). Quote-escape and access with dot notation: `WHERE partition.ts_day = DATE '2026-05-28'`. **And on a `bucket(...)`-partitioned column, this is the BUCKET INTEGER, NOT the original column value** — see the `$partitions` gotcha section above for the full UUID-irrecoverable explanation; the same constraint applies to `$files.partition`.
+
+**Bottom-line one-liner each — write this on a sticky note:**
+
+- `$snapshots` = "the commit log" — every write the table has ever received.
+- `$manifests` = "the index of file groups for the current snapshot" — measures planning overhead.
+- `$files` = "every Parquet on MinIO, with stats" — measures storage + answers pushdown debugging.
+
 ---
 
 ## The four maintenance operations (plus one for MoR tables)
@@ -396,6 +488,41 @@ What the options mean:
 > 3. (Optional belt-and-suspenders) `remove_orphan_files` — sweeps any stragglers that escaped step 2 (e.g., files from failed writes that were never in any snapshot).
 >
 > After all three, storage drops. After only step 1, it grows.
+
+#### DROP COLUMN reclaim runbook — literal Trino 467 syntax (copy-paste)
+
+When a `DROP COLUMN` runs against a wide table, the column's bytes do NOT leave MinIO until the same 3-step reclamation sequence runs against the post-DROP snapshots. The DDL itself is metadata-only — Iceberg simply retires the field ID from the current schema, and Trino's reader stops projecting it. The physical Parquet bytes remain in every pre-DROP file, and those files stay on MinIO **because prior snapshots still reference them** (the same protection that makes time-travel work).
+
+Copy-paste these three statements in order, **from a Trino session** (the cheat-sheet column above translates to Spark if you prefer). Replace `iceberg.analytics.events` with your fully qualified catalog.schema.table.
+
+```sql
+-- Step 1 — compact pre-DROP files into new files that omit the dropped column.
+-- The newly-written files are projected from the CURRENT schema, so they only
+-- contain the columns the current schema retains. The new files do NOT contain
+-- the dropped column's bytes. (Trino 467 default file_size_threshold is 100MB.)
+ALTER TABLE iceberg.analytics.events EXECUTE optimize;
+
+-- Step 2 — expire the snapshots that still reference the old pre-DROP files.
+-- This is the CRITICAL step that actually reclaims storage. Once those
+-- snapshots are gone, the old files become unreferenced and expire_snapshots
+-- issues S3 DELETE calls to MinIO. retention_threshold must be >= 7d on
+-- Trino 467 (catalog floor); for routine maintenance just use '7d'.
+ALTER TABLE iceberg.analytics.events EXECUTE expire_snapshots(retention_threshold => '7d');
+
+-- Step 3 — belt-and-suspenders sweep for any stragglers from failed writes.
+-- 7d minimum on Trino 467 (same floor as expire_snapshots).
+ALTER TABLE iceberg.analytics.events EXECUTE remove_orphan_files(retention_threshold => '7d');
+```
+
+**Critical mental model — old pre-DROP files are NOT orphans.** A common mistake is to reach for `remove_orphan_files` alone, hoping it will sweep the column's bytes. It will not, because the pre-DROP files are still referenced by snapshots within the retention window — they fail the "no live snapshot points at this file" test that `remove_orphan_files` uses to decide deletion. The sequence above must be run in order: Step 2 (`expire_snapshots`) is the step that converts those files from "snapshot-referenced" to "unreferenced and therefore deletable" — and `expire_snapshots` performs the S3 DELETE calls itself for the files it newly orphans. Step 3 catches stragglers from a different garbage class (files written by jobs that crashed before committing a snapshot).
+
+**Why DROP COLUMN does not reclaim by itself.** Iceberg files are immutable. `DROP COLUMN` updates the table's current schema and creates a new snapshot, but it never touches the underlying Parquet files. Old files keep the column's bytes in their `column_sizes` / `value_counts` metadata and on disk; readers simply stop projecting that field ID. You'll see this with `SELECT * FROM iceberg.analytics."events$files"` — the `column_sizes` map still contains an entry for the dropped column's field ID even after the DDL succeeds. Storage only drops after Step 1 rewrites those files without the column and Step 2 expires the snapshots that referenced the old versions.
+
+**Expected timeline for a 3-weeks-ago DROP.** If the DROP ran 3 weeks ago and you've been running `expire_snapshots(retention_threshold => '7d')` weekly since then, the snapshots from before the DROP are already gone — but **the old Parquet files still exist on MinIO** because `expire_snapshots` only deletes a file when NO live snapshot references it, and post-DROP snapshots keep referencing the original files until compaction creates new files that supersede them. **Run Step 1 (`EXECUTE optimize`) first**, then Step 2 finally has the new (file-superseding) snapshot it needs to drop the originals on the next pass.
+
+**Edge case — DROP COLUMN on a partition column.** You cannot drop a column that is part of the table's current partition spec. The DDL itself fails with `Cannot find source column for partition field`. To remove a partition column, you must first evolve the partition spec to no longer include it (`ALTER TABLE ... SET PARTITION SPEC (...)`), wait for new writes to use the new spec, and only then can you drop the column. Old data files keep the column's bytes until rewritten under the new partition spec via `rewrite_data_files(where => 'old_partition_predicate')`.
+
+**Edge case — re-adding a dropped column name.** Iceberg tracks columns by stable field IDs, not by name. If you `DROP COLUMN status` and later `ADD COLUMN status VARCHAR`, the new `status` column gets a **new, different field ID**. Old files do not satisfy the new field ID — readers return NULL for the new column on all rows written before the ADD. The old `status` bytes are still in the files (under the retired field ID), but no current-schema query can see them. Plan around this: do not re-add a dropped name unless you're prepared for all-NULL legacy rows; if you want to restore the dropped column, prefer `rollback_to_snapshot` to a pre-DROP snapshot instead.
 
 #### Trino-native compaction: `ALTER TABLE ... EXECUTE optimize`
 
