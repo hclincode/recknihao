@@ -1,71 +1,118 @@
-# Judge Feedback — Iter 403 (EXTENDED PHASE)
+# Judge Feedback — Iter 404 (EXTENDED PHASE)
 
-**Overall: 4.25 PASS** (Q1 4.25 PASS + Q2 4.25 PASS, average 4.25)
+**Overall: 4.6875 STRONG PASS** (Q1 4.75 + Q2 4.75 + Q3 4.5 + Q4 4.75)
+
+This iteration probed exactly the four gaps iter403 flagged. **All four landed cleanly.** Highest score since iter400 (4.59375). Teacher's iter404 resource additions closed the gaps the judge called out.
 
 ---
 
-## Q1 — Trino IN subquery vs JOIN (re-probe after iter402 punt)
+## Q1 — NOT IN returns zero rows (3VL + NOT EXISTS)
 
-**Scores: 4.5 / 4.0 / 4.5 / 4.0 — avg 4.25 PASS**
+**Scores: 5.0 / 4.5 / 5.0 / 4.5 — avg 4.75 STRONG PASS**
 
 ### What went well
-- Correctly stated that "IN is slow" advice is **wrong** for Trino — no false equivalence with other engines.
-- Named the actual optimizer rule: **Semi-Join (IN) Decorrelation** producing a **SemiJoinNode**.
-- Mentioned **optimize-hash-generation** session/config property and that it's **default=true** (this is the property that backs efficient SemiJoin execution).
-- Warned that **manual rewrite IN -> JOIN can introduce duplicates** when the right-side subquery has duplicate keys — SemiJoin deduplicates implicitly, JOIN does not. This is the single most important gotcha and the responder nailed it.
-- Provided an **EXPLAIN lookup table** mapping SemiJoin / InnerJoin / CorrelatedJoin operators to what each means, which gives the engineer the diagnostic vocabulary they need.
+- **3VL framing crisp**: TRUE/FALSE/UNKNOWN named explicitly. A single NULL in `blocked_tenants` makes every NOT IN comparison evaluate to UNKNOWN, WHERE filters out UNKNOWN → zero rows. This is the canonical mental model and the responder nailed it.
+- **Two fixes ranked**: Fix A `NOT EXISTS` recommended because it decorrelates to an anti-join (Trino's optimizer handles this) and NULLs in the right side are ignored. Fix B `IS NOT NULL` filter in subquery labeled "fragile" — accurate, because one missed NULL re-breaks the query.
+- **Bottom-line rule**: "Never use NOT IN with a nullable column" is the actionable rule the engineer needs.
 
-### Gaps
-- **NOT IN with NULL gotcha** not explicit. NOT IN with a nullable right side returns zero rows when any NULL is present; rewrite to NOT EXISTS or LEFT JOIN ... WHERE right.key IS NULL. This is a recurring real-world failure mode and the canonical companion to the IN/SemiJoin discussion. Add it.
-- **CorrelatedJoin diagnosis path** not explored — if EXPLAIN shows CorrelatedJoin instead of SemiJoin, decorrelation **failed** and manual rewrite may be warranted. The lookup table mentions CorrelatedJoin but doesn't tell the engineer what to **do** about it.
-- No mention of the **Decorrelate Subqueries** rule for correlated subqueries (sibling of Semi-Join Decorrelation).
+### Minor gaps
+- Could mention `EXCEPT` as a third option (set-difference semantics, also NULL-safe).
+- Did not contrast NOT IN with non-nullable column (which IS safe).
 
 ### Verdict
-Recovery from iter402 punt confirmed. Solid PASS but not strong — the NOT IN NULL and CorrelatedJoin remediation angles remain gaps.
+Closes the iter403 NOT IN NULL gap completely. Strong PASS.
 
 ---
 
-## Q2 — Iceberg $partitions metadata table for row counts
+## Q2 — $partitions on bucket-transformed table (pivot to GROUP BY)
 
-**Scores: 4.5 / 4.0 / 4.5 / 4.0 — avg 4.25 PASS**
+**Scores: 5.0 / 4.5 / 5.0 / 4.5 — avg 4.75 STRONG PASS**
 
 ### What went well
-- Correctly framed **$partitions** as **pre-aggregated metadata** — no data scan, reads only manifest files. This is the right mental model.
-- Named real columns: **record_count**, **file_count**, **total_size**. All three are present on Iceberg $partitions output.
-- Made the critical distinction: **identity partition on tenant_id works** (partition value IS tenant_id, GROUP BY trivially gives per-tenant counts); **bucket(tenant_id, N) does NOT work** because the partition value is the **bucket integer**, not the original tenant_id. Engineer cannot recover tenant_id from $partitions on a bucket-transformed column.
-- Recommended **DESCRIBE "tbl$partitions"** for column discovery — practical and correct (column names depend on the partition spec).
-- Mentioned **$files** as an alternative when $partitions is insufficient.
+- **Bucket integer vs UUID**: Correctly explained that bucket transform stores the bucket integer (0 to N-1) in manifests, NOT the original tenant UUID. $partitions reflects manifests, so it shows integers.
+- **Hash collision irreversibility**: Multiple tenants share a bucket (by design). UUID cannot be recovered from the bucket integer. This is the key insight that closes the gap.
+- **Two-option pivot**: (1) identity partition → metadata-only direct answer (no scan); (2) bucket-partitioned → must scan via `GROUP BY tenant_id` (Trino uses min/max stats to prune files but count requires reading the tenant_id column). The pivot to GROUP BY is exactly what iter403 flagged as missing.
+- **Trade-off framing**: "bucket = even write distribution but loses metadata-only per-tenant queries" is the right ops mental model.
 
-### Gaps
-- No mention of what to do **instead** when the table is bucket-partitioned — the engineer is left without a path (the answer should pivot them to `SELECT tenant_id, count(*) FROM tbl GROUP BY tenant_id` with metadata-only optimization caveats, or to maintaining a separate rollup).
-- **$snapshots / $manifests / $history** ecosystem not contextualized — engineer would benefit from a one-line cheat sheet of Iceberg metadata tables.
-- Did not mention that **stats freshness on $partitions depends on recent commits** — if a write is in progress or compaction just ran, counts reflect committed manifests only.
+### Minor gaps
+- Could mention `$files` as an inspection alternative (per-file partition + column stats) when $partitions aggregation isn't sufficient.
+- Did not contextualize the broader metadata-tables ecosystem (cheat sheet still missing).
 
 ### Verdict
-Solid PASS. The bucket-vs-identity distinction is the right insight and it was delivered correctly.
+Closes the iter403 bucket-pivot gap completely. Strong PASS.
 
 ---
 
-## Pattern across Q1 + Q2
+## Q3 — EXPLAIN shows CorrelatedJoin not SemiJoin (failed-decorrelation remediation)
 
-Both answers landed at 4.25 — the **same** score on both. That's a moderate PASS, not a strong one. The pattern through iter392-403 shows oscillation between mid-4 PASS and mid-3 FAIL roughly every 4-6 iterations:
+**Scores: 4.5 / 4.0 / 5.0 / 4.5 — avg 4.5 STRONG PASS**
 
-`4.75P / 4.125P / 3.9375F / 4.625P / 4.75P / 3.125F / 4.3125P / 4.375P / 4.34375P / 4.09375P / 4.0625P / 3.8125F / 4.59375P / 3.875F / **4.25P**`
+### What went well
+- **Named the rule**: Decorrelate Subqueries failed (correct — this is the rule sibling of Semi-Join Decorrelation).
+- **Why it's expensive**: Subquery executes once per outer row (O(n*m)). Beginner needs to understand WHY CorrelatedJoin is bad, not just that it is.
+- **First diagnostic step**: Run ANALYZE / SHOW STATS first. CBO bails conservatively without row-count stats — this is verified Trino behavior and exactly the right first move before manual rewrite.
+- **Manual rewrite pattern**: `LEFT JOIN (SELECT DISTINCT...) ... WHERE IS NULL` is the canonical anti-join pattern. The **DISTINCT critical to avoid duplicate rows** callout is the gotcha most beginners miss (right-side duplicates cause JOIN row inflation; SemiJoin dedupes implicitly, manual LEFT JOIN does not).
+- **EXPLAIN lookup**: SemiJoin = optimal, InnerJoin = check for dups, CorrelatedJoin = ANALYZE then rewrite. Three-row decision matrix is exactly the runbook.
 
-Recovery from iter402 fail is real but not strongly stabilized. The responder is on a knife edge; one second-angle probe that hits an uncovered gap (e.g., NOT IN NULL, CorrelatedJoin diagnosis, bucket-partition row count pivot) could swing the next iteration back to FAIL.
+### Minor gaps
+- "Anti-join" terminology not glossed for the zero-OLAP-background beginner. A one-line "anti-join = rows from left that have NO match in right" would tighten clarity.
+- No worked example showing input SQL → CorrelatedJoin plan → rewritten LEFT JOIN SQL → SemiJoin-equivalent plan. The pattern is described but not demonstrated end-to-end.
+
+### Verdict
+Closes the iter403 CorrelatedJoin remediation gap. Strong PASS with room to add a worked example.
 
 ---
 
-## Teacher actions next (iter 404)
+## Q4 — DROP COLUMN 3 weeks ago, MinIO usage didn't drop
 
-1. **MEDIUM** — Add explicit **NOT IN NULL** gotcha section to the Trino subquery optimization resource: example query that returns zero rows when right-side has one NULL, then NOT EXISTS / LEFT JOIN-IS-NULL rewrites.
-2. **MEDIUM** — Add an **Iceberg metadata tables cheat sheet**: $snapshots, $manifests, $partitions, $files, $history, $refs, $properties — one-line "use for X" per table. The cheat sheet would have given Q2 an extra half-point.
-3. **MEDIUM** — Add a **CorrelatedJoin remediation** snippet: if EXPLAIN shows CorrelatedJoin, decorrelation failed; show one common pattern (correlated EXISTS in WHERE) that can be manually rewritten as LEFT JOIN + IS NOT NULL.
-4. **LOW** — Carry-forward backlog unchanged (dbt-trino merge duplicates, predicate-pushdown JDBC rewrite, CoW vs MoR write.merge.mode, write.isolation-level, SHOW SESSION catalog-prefix, HMS->Nessie no-downtime, SPILL_FAILED 60GB cap, MERGE INTO rollback, OPA-override timeout, schema registry compat, EXPLAIN TYPE IO + VALIDATE, result caching 2nd-angle, Iceberg branches fast_forward, JWT+OPA concurrency, partition spec migration, Iceberg tagging 3rd-angle, fs.cache 3rd-angle JMX, bucket(tenant_id) 2nd-angle, PERCENT_RANK/NTILE 3rd-angle, RANGE INTERVAL gap-day semantics).
+**Scores: 5.0 / 4.5 / 5.0 / 4.5 — avg 4.75 STRONG PASS**
 
-## Judge probe targets next (iter 404)
+### What went well
+- **Root cause**: Iceberg files are immutable. DROP COLUMN creates a new snapshot without the column in the schema, but old Parquet files (still referenced by prior snapshots) keep the column bytes. Verified against Iceberg docs.
+- **Three-step sequence**: (1) optimize compaction (optional), (2) `expire_snapshots(7d)` — labeled as the critical step that actually reclaims, (3) `remove_orphan_files(7d)` sweep. Order matches Iceberg maintenance docs (expire → orphan cleanup).
+- **The subtle correct framing**: "Old files are NOT orphans yet — they are referenced by snapshots kept for time-travel." This is the precise distinction that prevents beginners from incorrectly reaching for `remove_orphan_files` alone (which would do nothing because the files aren't yet orphans).
+- **Common-mistake callout**: "Assuming compaction alone drops storage" names the failure mode iter402 left open. This is the operational gotcha.
 
-1. **NOT IN NULL gotcha** — "My NOT IN query returns zero rows but I know matching data exists, what gives?" — probes NULL semantics directly.
-2. **$partitions on bucket-transformed table** — "I have bucket(tenant_id, 128) and $partitions shows bucket integer not tenant_id — how do I get per-tenant counts?" — probes responder's ability to pivot to GROUP BY when metadata can't help.
-3. **2nd-angle CorrelatedJoin diagnosis** — "My EXPLAIN shows CorrelatedJoin not SemiJoin — what does that mean and how do I fix it?" — probes failed-decorrelation remediation, the gap iter403 left open.
-4. **Iceberg DROP COLUMN reclaim path** — "I dropped a column 3 weeks ago but MinIO usage didn't drop — what's wrong?" — probes rewrite_data_files + expire_snapshots ordering (carry-forward from iter402).
+### Minor gaps
+- Did not show literal Trino 467 syntax: `ALTER TABLE catalog.schema.table EXECUTE expire_snapshots(retention_threshold => '7d')`. Engineer has to look up syntax.
+- Did not mention the partition-column DROP edge case (cannot drop a partition column without spec migration).
+- Did not mention column-name reuse risk (field IDs are immutable; reusing the dropped name with a different field ID is the schema-evolution footgun).
+
+### Verdict
+Closes the iter402 + iter403 DROP COLUMN reclaim carry-forward completely. Strong PASS.
+
+---
+
+## Pattern across all four answers
+
+| Q | Score | Gap closed |
+|---|---|---|
+| Q1 | 4.75 | NOT IN NULL gotcha (iter403 flag) |
+| Q2 | 4.75 | $partitions bucket-pivot (iter403 flag) |
+| Q3 | 4.5 | CorrelatedJoin remediation (iter403 flag) |
+| Q4 | 4.75 | DROP COLUMN reclaim (iter402 carry-forward) |
+
+**Average 4.6875** — highest since iter400. All four iter403 probe targets landed. The pattern of "judge flags gap → teacher adds resource → next iteration scores well" is working this round.
+
+Trajectory iter394-404: `4.75P/3.125F/4.3125P/4.375P/4.34375P/4.09375P/4.0625P/3.8125F/4.59375P/3.875F/4.25P/**4.6875P**`. The oscillation between mid-4 PASS and mid-3 FAIL every 4-6 iterations may finally be breaking — but we need 2-3 more iterations to confirm durability.
+
+---
+
+## Teacher actions next (iter 405)
+
+1. **LOW polish** — Add literal Trino 467 syntax snippets to the DROP COLUMN reclaim resource:
+   - `ALTER TABLE catalog.schema.table EXECUTE optimize`
+   - `ALTER TABLE catalog.schema.table EXECUTE expire_snapshots(retention_threshold => '7d')`
+   - `ALTER TABLE catalog.schema.table EXECUTE remove_orphan_files(retention_threshold => '7d')`
+2. **LOW polish** — Gloss "anti-join" in the correlated-subquery / NOT IN resource for beginner clarity: "anti-join = return rows from the left side that have NO matching row on the right side."
+3. **LOW** — Add a worked correlated EXISTS rewrite example to the CorrelatedJoin remediation resource: input SQL → CorrelatedJoin EXPLAIN snippet → manual LEFT JOIN + IS NULL rewrite → SemiJoin-equivalent EXPLAIN snippet. End-to-end before/after.
+4. **LOW** — Iceberg metadata tables cheat sheet ($snapshots / $manifests / $partitions / $files / $history / $refs / $properties — one-line "use for X" per table). Still missing from resources after iter403 flagged it.
+5. **LOW carry-forward backlog** unchanged: dbt-trino merge dups, predicate-pushdown JDBC rewrite, CoW vs MoR write.merge.mode, write.isolation-level, SHOW SESSION catalog-prefix, HMS->Nessie no-downtime, SPILL_FAILED 60GB cap, MERGE rollback, OPA-override timeout, schema registry compat, EXPLAIN TYPE IO/VALIDATE, result caching 2nd, Iceberg branches fast_forward, JWT+OPA concurrency, partition spec migration, Iceberg tagging 3rd, fs.cache 3rd JMX, bucket(tenant_id) 3rd-angle, PERCENT_RANK/NTILE 3rd, RANGE INTERVAL gap-day.
+
+## Judge probe targets next (iter 405)
+
+1. **Iceberg metadata tables cheat sheet 2nd-angle** — "what's the difference between $snapshots, $manifests, $files — when do I use each?" — probes the cheat-sheet gap iter403 flagged that the teacher has not yet landed.
+2. **NOT EXISTS performance follow-up** — "I switched NOT IN to NOT EXISTS but my query got slower — what gives?" — probes anti-join executor cost + when NOT IN with a non-nullable column is actually fine. Natural second-angle on the iter404 Q1 win.
+3. **Partition spec migration** — "I want to change PARTITIONED BY day(ts) to PARTITIONED BY day(ts), tenant_id without rebuilding the table" — probes Iceberg partition spec evolution + how `rewrite_data_files` handles the new spec. Carry-forward from backlog.
+4. **CoW vs MoR `write.merge.mode` 3rd-angle** — "MERGE INTO is rewriting 80GB per run on a 200GB table — how do I switch to row-level deletes?" — carry from iter400-402.
+5. Carry-forward backlog rotation as needed.

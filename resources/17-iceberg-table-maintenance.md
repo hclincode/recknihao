@@ -196,6 +196,99 @@ WHERE tenant_id = 'acme';
 
 ---
 
+## Iceberg metadata tables cheat sheet (read this before you debug ANY Iceberg issue)
+
+> **The single most underused tool in the Iceberg stack.** Every Iceberg table exposes a family of read-only metadata tables alongside the real data — query them like any other table by appending `$<name>` to the table name (quote the suffix because `$` is a special character). They return pre-aggregated metadata from manifest files: **no data scan, sub-second responses, no S3 / MinIO data egress**. Use them BEFORE running expensive `SELECT COUNT(*)` or `SHOW STATS` calls.
+
+**Trino 467 syntax (note the double-quotes around the `tbl$name` suffix):**
+```sql
+SELECT * FROM iceberg.analytics."events$snapshots";
+SELECT * FROM iceberg.analytics."events$partitions";
+```
+
+**Spark 3.5 syntax (dot, no quotes):**
+```sql
+SELECT * FROM iceberg.analytics.events.snapshots;
+SELECT * FROM iceberg.analytics.events.partitions;
+```
+
+**One-line "use for X" per metadata table** — pick the right one and you'll answer most diagnostic questions in seconds:
+
+| Metadata table | Use it for | Key columns |
+|---|---|---|
+| `$snapshots` | Every snapshot ever committed to the table — find a snapshot ID for time travel, rollback, or "what changed last Tuesday." | `snapshot_id`, `committed_at`, `operation` (`append` / `delete` / `replace` / `overwrite`), `summary` (Map with `added-data-files`, `deleted-records`, etc.), `manifest_list` |
+| `$manifests` | Manifest files for the CURRENT snapshot — how many manifests does this table have? When does it need `rewrite_manifests`? | `path`, `length`, `partition_spec_id`, `added_data_files_count`, `existing_data_files_count`, `deleted_data_files_count`, `partition_summaries` |
+| `$partitions` | **Pre-aggregated per-partition row counts and file counts** — answer "how many rows per tenant?" or "which partitions have the most small files?" WITHOUT a `COUNT(*)`. | `partition` (struct of partition values), `record_count`, `file_count`, `total_size`, `data` (per-column min/max/null counts) |
+| `$files` | Every data file in the current snapshot, with per-column stats — find tiny files, locate position delete files, see column-level min/max for predicate-pushdown debugging. | `file_path`, `file_format`, `record_count`, `file_size_in_bytes`, `content` (0=data, 1=position-delete, 2=equality-delete), `column_sizes`, `value_counts`, `null_value_counts`, `lower_bounds`, `upper_bounds` |
+| `$history` | Audit log of every snapshot transition (what was current at any given moment, including rollbacks) — answer "who rolled this table back at 02:14?" | `made_current_at`, `snapshot_id`, `parent_id`, `is_current_ancestor` |
+| `$refs` | Every named ref (branches AND tags) with their target snapshot IDs and retention settings — discover what tags exist for time travel queries. | `name`, `type` (`BRANCH` / `TAG`), `snapshot_id`, `max_reference_age_in_ms`, `min_snapshots_to_keep` (branches), `max_snapshot_age_in_ms` |
+| `$properties` | Effective TBLPROPERTIES on the table — confirm `write.delete.mode`, `write.format.default`, `commit.retry.num-retries`, etc. | `key`, `value` |
+
+**Common diagnostic queries (copy-pasteable):**
+
+```sql
+-- Find the snapshot ID committed at a specific time (for FOR VERSION AS OF rollback).
+SELECT snapshot_id, committed_at, operation, summary
+FROM iceberg.analytics."events$snapshots"
+WHERE committed_at BETWEEN TIMESTAMP '2026-05-29 02:00' AND TIMESTAMP '2026-05-29 03:00'
+ORDER BY committed_at;
+
+-- How many manifest files does this table have? (>30 -> schedule rewrite_manifests.)
+SELECT count(*) AS manifest_count, sum(length) / 1024 / 1024 AS total_mb
+FROM iceberg.analytics."events$manifests";
+
+-- Per-partition row counts WITHOUT scanning data (identity-partitioned tables only).
+SELECT partition, record_count, file_count, total_size
+FROM iceberg.analytics."events$partitions"
+ORDER BY record_count DESC
+LIMIT 20;
+
+-- Count position delete files (MoR cleanup candidates).
+SELECT count(*) FILTER (WHERE content = 1) AS pos_delete_files,
+       count(*) FILTER (WHERE content = 2) AS eq_delete_files,
+       count(*) FILTER (WHERE content = 0) AS data_files
+FROM iceberg.analytics."events$files";
+
+-- Find tiny files (<10MB) — candidates for rewrite_data_files.
+SELECT file_path, file_size_in_bytes, record_count
+FROM iceberg.analytics."events$files"
+WHERE content = 0 AND file_size_in_bytes < 10 * 1024 * 1024
+ORDER BY file_size_in_bytes;
+
+-- See all branches and tags (engine support for create/drop varies — see tags section).
+SELECT name, type, snapshot_id, max_reference_age_in_ms
+FROM iceberg.analytics."events$refs";
+
+-- Verify a critical write-mode property without ALTER TABLE.
+SELECT value
+FROM iceberg.analytics."events$properties"
+WHERE key = 'write.delete.mode';
+```
+
+**Two important gotchas:**
+
+1. **`$partitions` on a `bucket(col, N)`-transformed column shows the BUCKET INTEGER, not the original column value.** If your table is partitioned by `bucket(tenant_id, 128)`, `$partitions.partition` shows integers 0..127 — you **cannot** recover the original `tenant_id` from this column. For per-tenant row counts on a bucket-partitioned table, you must run a real `SELECT tenant_id, count(*) FROM tbl GROUP BY tenant_id` (Trino will use min/max metadata to prune files, but the count itself is a real scan). Identity partitioning on `tenant_id` is the only configuration where `$partitions` trivially gives you per-tenant counts.
+
+2. **Stats reflect committed snapshots only.** If a Spark `INSERT INTO` is currently writing and hasn't committed yet, `$partitions` / `$files` show pre-write counts. After `expire_snapshots` runs, `$snapshots` reflects only retained snapshots — `$history` is the right table for "what was current at time T" because it survives expiry. If counts look stale, check `$snapshots` to confirm the latest snapshot committed when you expected.
+
+**Quick reference — which metadata table answers which question:**
+
+| Question | Use |
+|---|---|
+| "What's the snapshot ID from 02:00 last Tuesday?" | `$snapshots` (filter by `committed_at`) |
+| "Was this table rolled back recently?" | `$history` (rollback shows as a non-linear `parent_id` chain) |
+| "How many files per partition? Any tiny-file problems?" | `$partitions` (file_count, total_size) OR `$files` (file_size_in_bytes) |
+| "How many rows per tenant?" | `$partitions` if identity-partitioned on tenant; otherwise `SELECT tenant_id, count(*) GROUP BY tenant_id` |
+| "Does this table need `rewrite_manifests`?" | `$manifests` (count >30 or total length >100MB -> yes) |
+| "Are there position delete files accumulating? (MoR)" | `$files` (filter `content = 1`) |
+| "What tags or branches exist for time travel?" | `$refs` |
+| "What's the current effective value of `write.merge.mode`?" | `$properties` |
+| "Why is predicate pushdown not pruning files?" | `$files` (inspect `lower_bounds`/`upper_bounds` for the filter column) |
+
+> **Why this matters operationally:** every one of these queries reads ONLY manifest files (kilobytes), not Parquet data (potentially gigabytes). You can run them all day without touching MinIO data files. Make `$snapshots`, `$partitions`, and `$files` the first thing you check when diagnosing any Iceberg performance, storage, or correctness issue — before running a real `SELECT COUNT(*)` or `SHOW STATS`.
+
+---
+
 ## The four maintenance operations (plus one for MoR tables)
 
 **These are presented in the CANONICAL EXECUTION ORDER per [iceberg.apache.org/docs/latest/spark-procedures/](https://iceberg.apache.org/docs/latest/spark-procedures/):**

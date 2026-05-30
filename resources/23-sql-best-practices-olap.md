@@ -423,6 +423,169 @@ If `row_count` is NULL, run `ANALYZE iceberg.analytics.premium_users` first — 
 
 ---
 
+### The `NOT IN` + NULL gotcha — wrong-results trap (read this BEFORE you debug)
+
+**Symptom you'll see in production**: a `NOT IN (SELECT ...)` query returns **zero rows**, but you can prove with your own eyes that matching rows exist. No error, no warning — just an empty result.
+
+**Root cause**: SQL uses **three-valued logic** (TRUE / FALSE / UNKNOWN). When the right-hand subquery of `NOT IN` contains **even a single NULL**, every comparison `outer_value NOT IN (..., NULL, ...)` evaluates to UNKNOWN — never TRUE — so the WHERE clause filters out every row. This is **standard SQL semantics**, not a Trino bug; Postgres, MySQL, BigQuery, and Snowflake all behave the same way.
+
+**Example that silently breaks**:
+
+```sql
+-- premium_users.user_id has one stray NULL row from a buggy ingestion job.
+-- This query returns ZERO rows even though plenty of non-premium events exist.
+SELECT user_id, event_id
+FROM events
+WHERE user_id NOT IN (SELECT user_id FROM premium_users)
+  AND event_date = DATE '2026-05-26';
+```
+
+Why: as soon as the subquery contains one `NULL`, `events.user_id NOT IN (1, 2, NULL, ...)` evaluates to UNKNOWN for every row. UNKNOWN is not TRUE, so the WHERE filters everything out.
+
+**Two safe rewrites — pick one**:
+
+**Rewrite A: `NOT EXISTS` (recommended — works regardless of NULLs)**
+
+```sql
+SELECT e.user_id, e.event_id
+FROM events e
+WHERE NOT EXISTS (
+  SELECT 1 FROM premium_users p WHERE p.user_id = e.user_id
+)
+  AND e.event_date = DATE '2026-05-26';
+```
+
+`NOT EXISTS` checks row-by-row whether a matching row exists. It returns TRUE/FALSE, never UNKNOWN — so NULLs in `premium_users.user_id` are simply ignored (they don't match anything). Trino decorrelates `NOT EXISTS` into an **anti-join** internally; EXPLAIN typically shows `SemiJoin` with a "FilterMode = ANTI" hint or a `LEFT JOIN ... IS NULL` shape. Performance is on par with the SemiJoin path for `IN`.
+
+**Rewrite B: `LEFT JOIN ... WHERE right IS NULL` (anti-join pattern)**
+
+```sql
+SELECT e.user_id, e.event_id
+FROM events e
+LEFT JOIN premium_users p ON e.user_id = p.user_id
+WHERE p.user_id IS NULL
+  AND e.event_date = DATE '2026-05-26';
+```
+
+This explicit anti-join is equivalent to `NOT EXISTS` and is what Trino produces internally after decorrelation. It's slightly more verbose but is sometimes easier to reason about when the matching condition is multi-column or has additional predicates.
+
+**Defensive option: filter NULLs from the subquery before NOT IN**
+
+If you really want to keep `NOT IN`, scrub NULLs out of the right side:
+
+```sql
+SELECT user_id, event_id
+FROM events
+WHERE user_id NOT IN (
+  SELECT user_id FROM premium_users WHERE user_id IS NOT NULL
+)
+  AND event_date = DATE '2026-05-26';
+```
+
+This works, but it's fragile — every future `NOT IN` against this column needs the same `IS NOT NULL` guard. **Standardize on `NOT EXISTS`** instead.
+
+**Rule of thumb**: never use `NOT IN` with a subquery on a nullable column. Always reach for `NOT EXISTS` first. The `IN`/`NOT IN` asymmetry is one of the most common silently-wrong-results bugs in real production SQL.
+
+---
+
+### When EXPLAIN shows `CorrelatedJoin` instead of `SemiJoin` — failed decorrelation remediation
+
+**Symptom**: EXPLAIN shows a `CorrelatedJoin[...]` node where you expected `SemiJoin[...]`. This means **Trino's `Decorrelate Subqueries` optimizer rule could not transform your subquery into a flat join** — and the subquery will execute once per outer row at runtime. On a 100M-row outer table, that's 100M subquery executions.
+
+**Two diagnostic paths in order**:
+
+**Step 1 — Did stats cause the failure?** The CBO needs row count estimates to decorrelate safely. If the inner table has no stats, decorrelation rules sometimes bail out conservatively. Run `ANALYZE` and re-EXPLAIN:
+
+```sql
+SHOW STATS FOR iceberg.analytics.premium_users;
+-- If row_count is NULL or data_size is NULL:
+ANALYZE iceberg.analytics.premium_users;
+-- Then re-run EXPLAIN. If CorrelatedJoin -> SemiJoin, you're done.
+```
+
+**Step 2 — If `CorrelatedJoin` persists after ANALYZE, rewrite by hand.** Trino can't decorrelate every shape — common blockers are aggregates with non-equality correlation, LIMIT inside the subquery without a strong unique-key signal, or NULL-sensitive predicates. Apply the LEFT JOIN + IS NOT NULL pattern below.
+
+**Correlated `EXISTS` — manual rewrite to LEFT JOIN**
+
+```sql
+-- ORIGINAL: correlated EXISTS — EXPLAIN shows CorrelatedJoin.
+SELECT e.user_id, e.event_id
+FROM events e
+WHERE EXISTS (
+  SELECT 1
+  FROM premium_users p
+  WHERE p.user_id = e.user_id
+    AND p.tier = 'gold'
+);
+```
+
+```sql
+-- MANUAL REWRITE: LEFT JOIN + IS NOT NULL — produces SemiJoin or InnerJoin in EXPLAIN.
+SELECT e.user_id, e.event_id
+FROM events e
+LEFT JOIN (
+  SELECT DISTINCT user_id FROM premium_users WHERE tier = 'gold'
+) p ON p.user_id = e.user_id
+WHERE p.user_id IS NOT NULL;
+```
+
+Why the `DISTINCT` matters: without it, if `premium_users` has duplicate `user_id` rows (a single user with two `tier='gold'` entries), the LEFT JOIN would multiply event rows — silently inflating any downstream COUNT or SUM. `EXISTS` doesn't multiply rows; `DISTINCT` on the inner side restores that semantic for the JOIN form.
+
+**Correlated `NOT EXISTS` — manual rewrite to LEFT JOIN + IS NULL**
+
+```sql
+-- ORIGINAL:
+SELECT e.user_id
+FROM events e
+WHERE NOT EXISTS (
+  SELECT 1 FROM blocked_users b WHERE b.user_id = e.user_id
+);
+```
+
+```sql
+-- MANUAL REWRITE:
+SELECT e.user_id
+FROM events e
+LEFT JOIN blocked_users b ON b.user_id = e.user_id
+WHERE b.user_id IS NULL;
+```
+
+**Correlated scalar subquery — manual rewrite to JOIN on pre-aggregated CTE**
+
+```sql
+-- ORIGINAL: correlated scalar (per-row average) — likely CorrelatedJoin.
+SELECT e.event_id, e.amount
+FROM events e
+WHERE e.amount > (
+  SELECT AVG(amount) FROM events WHERE event_date = e.event_date
+);
+```
+
+```sql
+-- MANUAL REWRITE: pre-aggregate then JOIN — fully decorrelated.
+WITH daily_avg AS (
+  SELECT event_date, AVG(amount) AS avg_amount
+  FROM events
+  GROUP BY event_date
+)
+SELECT e.event_id, e.amount
+FROM events e
+JOIN daily_avg d ON d.event_date = e.event_date
+WHERE e.amount > d.avg_amount;
+```
+
+**The `Decorrelate Subqueries` rule**: this is the optimizer rule that handles correlated `EXISTS`, `NOT EXISTS`, and correlated scalar subqueries — the sibling of `Semi-Join (IN) Decorrelation` which handles uncorrelated `IN`. Both rules target the same goal (eliminate per-row subquery execution); they cover different subquery shapes.
+
+**Quick triage table — what EXPLAIN told you and what to do**
+
+| EXPLAIN node | What it means | Action |
+|---|---|---|
+| `SemiJoin[...]` | IN / EXISTS decorrelated into anti/semi-join — optimal. | Done. Leave it alone. |
+| `InnerJoin[...]` | You wrote (or got rewritten to) a regular JOIN. | Check the right side for duplicates — JOIN does NOT dedupe like SemiJoin does. |
+| `CorrelatedJoin[...]` | Decorrelation **failed** — subquery runs per outer row. | (1) ANALYZE inner table; re-EXPLAIN. (2) If still correlated, manually rewrite per patterns above. |
+
+---
+
 ## 11. Use CTEs or subqueries — don't re-run the same expensive query twice
 
 **Why**: A common Postgres habit is to run a heavy query once, store the result in the app, and reuse it. In Trino you don't have a session-scoped temp result, but you can let the planner share a subquery within a single statement using a CTE (`WITH`). Avoid pasting the same expensive subquery in two places — Trino will execute it twice.
@@ -471,9 +634,11 @@ GROUP BY user_id;
 8. Are filters in `WHERE`, not `HAVING`?
 9. Is the **smaller table on the left** of the JOIN, and was `ANALYZE` run?
 10. Does EXPLAIN show `SemiJoin` for any IN subqueries? (If yes, leave them — do not rewrite to a JOIN.)
-11. Are duplicate subqueries collapsed into a CTE or `FILTER (WHERE ...)`?
+11. If you wrote `NOT IN (SELECT ...)`, is the right-side column **guaranteed non-NULL**? (If not, rewrite to `NOT EXISTS` — otherwise you risk zero-row results.)
+12. Does EXPLAIN show `CorrelatedJoin`? (If yes, ANALYZE the inner table; if still `CorrelatedJoin`, manually rewrite per the patterns in section 10.)
+13. Are duplicate subqueries collapsed into a CTE or `FILTER (WHERE ...)`?
 
-If you can answer "yes" to all eleven, you avoid the most common 10x-cost mistakes that OLTP engineers make on their first day in Trino.
+If you can answer "yes" to all thirteen, you avoid the most common 10x-cost mistakes that OLTP engineers make on their first day in Trino.
 
 ---
 
@@ -487,3 +652,6 @@ If you can answer "yes" to all eleven, you avoid the most common 10x-cost mistak
 - **ScanFilterProject vs TableScan with constraint**: in EXPLAIN, the former means filtering happens in Trino memory; the latter means Iceberg already filtered the files.
 - **SemiJoin**: the join type Trino uses internally for `IN (SELECT ...)` subqueries. Unlike an INNER JOIN, a SemiJoin returns at most one output row per probe row (no duplication), which is the correct semantic for IN predicates. Trino's `optimize-hash-generation` property applies precomputed hashes to SemiJoin nodes by default.
 - **CorrelatedJoin**: a subquery that references columns from the outer query. Trino tries to decorrelate these automatically; if it can't (shown as `CorrelatedJoin` in EXPLAIN), the subquery re-runs once per outer row — expensive. Fix by running ANALYZE on the subquery table first, then rewriting if needed.
+- **Decorrelate Subqueries rule**: Trino's optimizer rule that converts correlated `EXISTS`, `NOT EXISTS`, and correlated scalar subqueries into flat joins (often LEFT JOIN + IS NOT NULL / IS NULL). Sibling of the `Semi-Join (IN) Decorrelation` rule which handles uncorrelated `IN`. If either rule fires, EXPLAIN replaces `CorrelatedJoin` with `SemiJoin`.
+- **Anti-join**: a join that returns rows from the left side that have **no** match on the right side. The relational algebra operator behind `NOT EXISTS` and `LEFT JOIN ... WHERE right IS NULL`. Unlike `NOT IN`, anti-joins are NULL-safe: NULL rows on the right side are simply ignored, never returning UNKNOWN.
+- **Three-valued logic (3VL)**: SQL's logical system with TRUE / FALSE / UNKNOWN. NULL comparisons produce UNKNOWN, which the WHERE clause treats as "exclude this row." The `NOT IN` + NULL gotcha (zero-row results when the right subquery has any NULL) is a direct consequence of 3VL.
