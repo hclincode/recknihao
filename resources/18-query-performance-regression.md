@@ -759,6 +759,121 @@ If the CronJob is failing silently, queries degrade over days as small files acc
 
 ---
 
+## Step 7b: Non-partition predicate is the bottleneck — Filter-above-TableScan + tightening min/max stats
+
+A common variant of the residual-filter case: the WHERE clause filters on a **non-partition column** (e.g., `plan_type = 'enterprise'`), Iceberg's manifest min/max can't prune files because every file's range covers the wanted value, and `EXPLAIN ANALYZE` shows a Filter node above TableScan with a `physicalInputDataSize` much bigger than the post-filter row count would justify.
+
+> **Lead with the truth.** A Filter node above TableScan is NOT itself a pushdown failure (see Common Myths #1). It is residual filtering. The question to answer is: **what does `physicalInputDataSize` look like compared to selectivity?** If a 0.1%-selective predicate reads 200 GB, you have a file-clustering problem (not a pushdown problem) — the column you're filtering on has overlapping min/max ranges across most files, so file-skipping can't help.
+
+### Diagnose: `$files` lower_bounds / upper_bounds per-file
+
+```sql
+-- Verify per-file min/max for the predicate column.
+-- If most files have (lower_bound='basic', upper_bound='enterprise'),
+-- their ranges all overlap your filter value 'enterprise' — file-skipping
+-- CANNOT help; you need to either re-cluster files OR add a bloom filter.
+SELECT
+  file_path,
+  CAST(lower_bounds['plan_type'] AS VARCHAR) AS lo,
+  CAST(upper_bounds['plan_type'] AS VARCHAR) AS hi,
+  record_count,
+  file_size_in_bytes / 1024 / 1024 AS size_mb
+FROM iceberg.analytics."feature_usage$files"
+WHERE content = 0
+ORDER BY file_size_in_bytes DESC
+LIMIT 20;
+```
+
+If most rows in the output have `lo = 'basic'` and `hi = 'enterprise'`, the column's values are uniformly distributed across files and min/max pruning cannot help.
+
+### Fix recommendations — and which are available on Trino 467 (the production version)
+
+> **READ THIS FIRST.** Several plausible-looking "set a Trino property" fixes for this case are **gated on Trino versions later than 467** and will fail with "unknown property" errors on prod. The table below lists each fix lever with its Trino-version availability so you don't recommend a fix that doesn't work on prod. Verified against [Trino 469 release notes](https://trino.io/docs/current/release/release-469.html) and [Iceberg Spark bloom-filter table properties](https://iceberg.apache.org/docs/latest/configuration/#write-properties).
+
+| Fix lever | Available on Trino 467? | How to use |
+|---|---|---|
+| **Sort-strategy data rewrite (Spark)** — cluster files by the filter column so each file's min/max becomes a tight range that prunes well. THE primary fix on this stack. | YES (runs in Spark, not Trino) | `CALL iceberg.system.rewrite_data_files(table => 'analytics.feature_usage', strategy => 'sort', sort_order => 'plan_type ASC NULLS LAST', options => map('rewrite-all', 'true'))`. After the rewrite, verify with `$files` that the new files have non-overlapping `(lower_bound, upper_bound)` ranges for `plan_type`. |
+| **Z-order data rewrite (Spark)** — multi-column clustering when you filter on more than one non-partition column simultaneously (e.g., `plan_type AND region`). | YES (runs in Spark, not Trino) | `CALL iceberg.system.rewrite_data_files(table => 'analytics.feature_usage', strategy => 'sort', sort_order => 'zorder(plan_type, region)')`. |
+| **Spark write-time bloom filter** — Spark writes Parquet bloom filter indexes per-file at write time; Trino 467 reads them at query time via its bloom-filter pushdown. THIS IS THE 467 BLOOM-FILTER PATH. | YES (write configured via Iceberg table properties on Spark; read happens automatically in Trino 467 with `parquet.use-bloom-filter=true`, the default) | Set the Iceberg table property in Spark: `ALTER TABLE iceberg.analytics.feature_usage SET TBLPROPERTIES ('write.parquet.bloom-filter-enabled.column.plan_type'='true')`. Then trigger a Spark `rewrite_data_files` so existing files are rewritten WITH bloom filters baked in. Subsequent Trino 467 queries with `WHERE plan_type = ...` get bloom-filter file-skipping for free. |
+| **Trino `parquet_bloom_filter_columns` table property** — Trino-side write-time bloom filter config exposed via `ALTER TABLE ... SET PROPERTIES parquet_bloom_filter_columns = ARRAY['plan_type']`. | **NO — Trino 469+ only.** This property was added in [Trino 469 (Jan 27 2025) via PR #24573](https://github.com/trinodb/trino/pull/24573). On Trino 467 setting it fails with **"unknown table property: parquet_bloom_filter_columns"**. | Until the cluster is upgraded to 469+, use the **Spark write-time bloom filter row above** — same on-disk outcome (Parquet bloom filters in the files), Trino 467 READS them just fine. |
+| **Schema redesign — re-partition by the filter column** (e.g., add `plan_type` to the partition spec) | YES — partition evolution is in-place via `ALTER TABLE ... SET PROPERTIES partitioning = ARRAY[..., 'plan_type']` | Best when the filter column has low cardinality (< 100 distinct values) and is filtered on most queries. High-cardinality filter columns would create too many partitions — use sort-strategy rewrite instead. See resource 10 (Lakehouse partitioning). |
+| **Pre-aggregated rollup table** — for known dashboard queries, materialize the result so the dashboard reads K rows instead of scanning N billion. | YES (Trino + dbt or Spark) | See resource 25 (Trino materialized views) and resource 17 (rollup patterns). |
+| **Trino native fs.cache** — caches Parquet blocks on worker local disk so repeated identical scans avoid MinIO round-trips. Does NOT fix the underlying selectivity problem, but speeds up repeated scans. | YES on Trino 467 | See Step 10 in this resource. |
+
+> **Why parquet_bloom_filter_columns is version-gated and what you do on Trino 467.** Trino has **two** layers of bloom-filter support:
+>
+> 1. **Read-side (TRINO 467+)** — `parquet.use-bloom-filter=true` (catalog or session property, default `true`) makes Trino READ Parquet bloom filters that already exist in the files for filter pushdown at query time. This works on Trino 467 today, no upgrade needed.
+> 2. **Write-side configuration via `parquet_bloom_filter_columns` table property (TRINO 469+)** — exposes which columns Trino-side WRITES will create bloom filters for. **This was added in Trino 469 (Jan 2025).** On Trino 467, setting this table property fails with "unknown table property."
+>
+> The 467-valid alternative is to configure bloom filters at the Iceberg-table-property level via Spark: `ALTER TABLE iceberg.x.y SET TBLPROPERTIES ('write.parquet.bloom-filter-enabled.column.<col>'='true')`. Then run a Spark `rewrite_data_files` to bake bloom filters into existing files. Trino 467's read side then uses those bloom filters automatically. The Iceberg-spec table properties (`write.parquet.bloom-filter-enabled.column.<col>`, `write.parquet.bloom-filter-fpp.column.<col>`, `write.parquet.bloom-filter-max-bytes`) are honored by Spark's Iceberg writer ([Iceberg PR #5035](https://github.com/apache/iceberg/pull/5035)) — confirmed available on Iceberg 1.5.2 which is the prod ingestion version. See also the **Trino-version feature matrix in resource 17**, which is the canonical place for version-gated Trino-Iceberg features on this stack.
+
+### Worked example — diagnose then fix on Trino 467
+
+```sql
+-- Step 1: confirm the residual filter on plan_type is the problem.
+EXPLAIN ANALYZE
+SELECT tenant_id, SUM(amount)
+FROM iceberg.analytics.feature_usage
+WHERE event_date BETWEEN DATE '2026-05-01' AND DATE '2026-05-07'
+  AND plan_type = 'enterprise'
+GROUP BY tenant_id;
+-- Expected pattern: Filter[plan_type = 'enterprise'] sits ABOVE TableScan.
+-- physicalInputDataSize on TableScan is much larger than what the final
+-- output rows imply — confirms file-skipping isn't helping on plan_type.
+
+-- Step 2: confirm per-file min/max for plan_type are too wide to prune.
+SELECT
+  CAST(lower_bounds['plan_type'] AS VARCHAR) AS lo,
+  CAST(upper_bounds['plan_type'] AS VARCHAR) AS hi,
+  count(*) AS files,
+  sum(file_size_in_bytes) / 1024 / 1024 / 1024 AS gb
+FROM iceberg.analytics."feature_usage$files"
+WHERE content = 0
+GROUP BY 1, 2
+ORDER BY files DESC;
+-- If most rows show lo='basic', hi='enterprise', file-skipping cannot help
+-- for plan_type — every file's range covers 'enterprise'.
+```
+
+```sql
+-- Step 3 (Spark) — sort-strategy rewrite. The 467-valid primary fix.
+CALL iceberg.system.rewrite_data_files(
+  table       => 'analytics.feature_usage',
+  strategy    => 'sort',
+  sort_order  => 'plan_type ASC NULLS LAST, event_date ASC',
+  options     => map('rewrite-all', 'true', 'target-file-size-bytes', '268435456')
+);
+
+-- Step 3-alt (Spark, additional or instead of sort) — write-time bloom filter.
+ALTER TABLE iceberg.analytics.feature_usage
+SET TBLPROPERTIES (
+  'write.parquet.bloom-filter-enabled.column.plan_type' = 'true',
+  'write.parquet.bloom-filter-fpp.column.plan_type'     = '0.01'
+);
+
+-- Then run rewrite_data_files so existing files are rewritten with bloom filters.
+CALL iceberg.system.rewrite_data_files(
+  table   => 'analytics.feature_usage',
+  options => map('rewrite-all', 'true')
+);
+```
+
+```sql
+-- Step 4 — re-run the original query in Trino 467. Verify physicalInputDataSize
+-- drops sharply because file-skipping (sort-clustered min/max) and/or
+-- bloom-filter-skipping (in the read path) now eliminate non-enterprise files.
+EXPLAIN ANALYZE
+SELECT tenant_id, SUM(amount)
+FROM iceberg.analytics.feature_usage
+WHERE event_date BETWEEN DATE '2026-05-01' AND DATE '2026-05-07'
+  AND plan_type = 'enterprise'
+GROUP BY tenant_id;
+```
+
+> **DO NOT recommend** `ALTER TABLE iceberg.analytics.feature_usage SET PROPERTIES parquet_bloom_filter_columns = ARRAY['plan_type']` **on this stack.** That syntax is Trino 469+ and fails on prod 467 with "unknown table property." The 467 path is the Spark `write.parquet.bloom-filter-enabled.column.<col>` Iceberg table property (or equivalently the iceberg-spark write option) plus a Spark `rewrite_data_files`. The read side on Trino 467 is unchanged and benefits automatically.
+
+---
+
 ## Step 8: Check data volume growth
 
 Sometimes "performance regression" is actually "the table grew 3x last month." This isn't a bug — it's expected growth. But the query plan hasn't adapted.

@@ -216,6 +216,37 @@ WHERE tenant_id = 'acme';
 
 ---
 
+## Trino-version feature matrix (Iceberg-connector features) — read FIRST when recommending a fix
+
+> **The RULE for any fix recommendation on this stack.** Any recommended session property, table property, procedure, `ALTER TABLE ... EXECUTE` form, or argument must carry its **minimum Trino version** and (if it post-dates 467) a **valid 467 fallback**. The production version is **Trino 467** — anything added in 468+ is unavailable and will fail with "unknown property" / "procedure not found" / syntax errors at runtime. This consolidated matrix collects the version gates that have caused the most "I tried the fix and got an error" incidents on this stack. Each row was verified against the Trino release notes (trino.io/docs/current/release/release-<NNN>.html) and the linked Trino PR.
+>
+> Use this table BEFORE writing any "the fix is X" answer that references a Trino-Iceberg feature added in a recent release.
+>
+> Trino release timeline relevant here: **467** (current prod, Dec 2024) → **469** (Jan 2025, [release-469](https://trino.io/docs/current/release/release-469.html)) → **470** (Feb 2025) → **479** (Dec 2025, [release-479](https://trino.io/docs/current/release/release-479.html)).
+
+| Feature / form | Minimum Trino version | Available on prod 467? | 467-valid fallback |
+|---|---|---|---|
+| `ALTER TABLE ... EXECUTE expire_snapshots(retention_threshold => '...')` (argument: `retention_threshold` only) | 467 | YES | — (this is the prod form) |
+| `ALTER TABLE ... EXECUTE expire_snapshots(retain_last => N)` | **479** (Dec 2025, [trinodb/trino #27357](https://github.com/trinodb/trino/issues/27357)) | NO | Spark: `CALL iceberg.system.expire_snapshots(table => '...', retain_last => N)` |
+| `ALTER TABLE ... EXECUTE expire_snapshots(clean_expired_metadata => true)` | **479** (Dec 2025) | NO | Spark: `CALL iceberg.system.expire_snapshots(table => '...', clean_expired_metadata => true)` (cleans up unreferenced partition specs / schemas) |
+| `CALL iceberg.system.rollback_to_snapshot('schema', 'table', <snapshot_id>)` (positional args — the **only** rollback form on 467) | 467 | YES | — (this is the prod form) |
+| `ALTER TABLE ... EXECUTE rollback_to_snapshot(snapshot_id => ...)` (table-procedure form) | **469** (Jan 2025, [trinodb/trino #24580](https://github.com/trinodb/trino/pull/24580)) | NO | Use the `CALL iceberg.system.rollback_to_snapshot('schema', 'table', <id>)` positional form (which is the only 467 form anyway) |
+| `ALTER TABLE ... EXECUTE optimize_manifests` (Trino-native manifest rewrite) | **470** (Feb 2025) | NO | Spark: `CALL iceberg.system.rewrite_manifests(table => '...')` |
+| `ALTER TABLE ... SET PROPERTIES parquet_bloom_filter_columns = ARRAY['col1', ...]` (Iceberg connector table property — Trino-side write-time bloom filter config) | **469** (Jan 2025, [trinodb/trino #24573](https://github.com/trinodb/trino/pull/24573)) | NO | Spark write-time table property: `ALTER TABLE iceberg.x.y SET TBLPROPERTIES ('write.parquet.bloom-filter-enabled.column.<col>'='true')` then run Spark `rewrite_data_files` to bake bloom filters into existing files. Trino 467 then READS those bloom filters at query time via the `parquet.use-bloom-filter` session property / `parquet.use-bloom-filter` catalog property (set to `true`, which is the default on 467) — read-side support is fine on 467; only write-side configuration via `parquet_bloom_filter_columns` table property is gated. |
+| `parquet.use-bloom-filter` session/catalog property (Trino reads Parquet bloom filters when filter pushdown can use them) | 467 (read-side support landed pre-467) | YES | — Trino 467 already reads bloom filters at query time if the Parquet files were written with bloom filters (by Spark Iceberg or any other writer). |
+| `iceberg.expire-snapshots.min-retention` / `iceberg.remove-orphan-files.min-retention` (catalog properties for 7-day floor override) | 467 | YES | — set in `etc/catalog/iceberg.properties` and restart coordinator. |
+| `optimize` with `WHERE` on partition columns (per-partition compaction) | 467 | YES | — supported but ONLY on partition columns; non-partition WHERE clauses fail. |
+| `optimize` after partition evolution (newly-added partition column or changed spec) | NOT RELIABLE on Trino 467 — bugs [#26109](https://github.com/trinodb/trino/issues/26109), [#26503](https://github.com/trinodb/trino/issues/26503), [#25279](https://github.com/trinodb/trino/issues/25279) | Partial | Use Spark `rewrite_data_files` with `rewrite-all=true` for re-layout after evolution. |
+| `rewrite_position_delete_files` (compact position-delete files on MoR tables) | NOT supported in Trino 467 ([trinodb/trino #27371](https://github.com/trinodb/trino/issues/27371)) | NO | Spark: `CALL iceberg.system.rewrite_position_delete_files(table => 'analytics.events')`. There is no Trino 467 form. |
+| `rewrite_manifests` | NOT supported in Trino 467 (added as `optimize_manifests` in **470**) | NO | Spark: `CALL iceberg.system.rewrite_manifests(table => '...')`. |
+| `ALTER MATERIALIZED VIEW ... SET PROPERTIES grace_period = INTERVAL '...'` | **479** (Dec 2025) | NO | Drop and recreate the MV with the new `GRACE PERIOD` literal; or set `GRACE PERIOD` at `CREATE MATERIALIZED VIEW` time. |
+
+**How to use this matrix.** Before recommending any "the fix is X" answer that touches Trino-Iceberg config: (1) find the feature in this table; (2) if "Available on prod 467?" is NO, lead the answer with "this feature requires Trino \<NNN\>+ which is NOT on prod 467 — the 467-valid path is \<fallback\>"; (3) if "Available on prod 467?" is YES, recommend it directly. The single biggest source of "the fix didn't work" feedback in iter402-416 was recommending a 469+ feature on prod 467.
+
+> **Verification rule (for every future fix recommendation in this resource).** Whenever a new fix is added below that references a Trino-Iceberg table property, session property, `CALL` procedure, or `ALTER TABLE ... EXECUTE` form, the writer MUST either (a) verify it is available on Trino 467 by checking the [Trino 467 release notes](https://trino.io/docs/current/release/release-467.html) or the connector docs as of that release, or (b) include the minimum Trino version + 467-valid fallback in this matrix and reference it from the fix. NO unqualified "use X" recommendations for properties added post-467.
+
+---
+
 ## Iceberg metadata tables cheat sheet (read this before you debug ANY Iceberg issue)
 
 > **The single most underused tool in the Iceberg stack.** Every Iceberg table exposes a family of read-only metadata tables alongside the real data — query them like any other table by appending `$<name>` to the table name (quote the suffix because `$` is a special character). They return pre-aggregated metadata from manifest files: **no data scan, sub-second responses, no S3 / MinIO data egress**. Use them BEFORE running expensive `SELECT COUNT(*)` or `SHOW STATS` calls.
