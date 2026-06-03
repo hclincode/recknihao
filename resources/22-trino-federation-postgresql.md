@@ -8675,6 +8675,68 @@ These properties are SYSTEM-level (no catalog prefix), and they apply to ALL joi
 
 #### 13.5A.4 OR-with-mixed-types predicate pushdown — when does the OR push, and to which side
 
+> ### VARCHAR-EQUALITY-OR-PUSHDOWN GUARDRAIL — iter426 Q2 confident-inaccuracy fix (READ THIS FIRST; commit the answer BEFORE elaborating)
+>
+> **The iter426 Q2 failure mode:** the responder claimed VARCHAR `email = 'a@b.com'` equality does NOT push to Postgres, therefore the full `WHERE user_id = 123 OR email = 'a@b.com'` OR does NOT push, and recommended a needless `UNION ALL` workaround. The responder ALSO oscillated within the same answer ("Postgres DOES push VARCHAR equality" → later "email equality doesn't push"). Both the central claim AND the internal contradiction are banned by this GUARDRAIL.
+>
+> **LEADING CANONICAL STATEMENT — commit to this in your first sentence before elaborating:**
+>
+> > **VARCHAR EQUALITY (`col = 'x'`, `col != 'x'`, `IN (...)`) PUSHES to PostgreSQL by default (default collation).** It is **VARCHAR RANGE** (`<`, `>`, `BETWEEN` on text) and **leading-wildcard LIKE** (`'%x'`, `'%x%'`) that do **NOT** push by default. **Naked equality always pushes; range and leading-wildcard LIKE do not.** Confusing equality with range is the iter426 Q2 failure mode.
+>
+> **Verbatim trino.io/docs/current/connector/postgresql.html (verified WebFetch 2026-06-04):** *"Equality predicates, such as `IN` or `=`, and inequality predicates, such as `!=` on columns with textual types are pushed down."* And separately: *"The connector does not support pushdown of range predicates, such as `>`, `<`, or `BETWEEN`, on columns with [character string types] like `CHAR` or `VARCHAR`."* **Read both sentences carefully — `=`, `!=`, `IN` PUSH; `<`, `>`, `BETWEEN` DON'T. Do not collapse the two halves into a single "VARCHAR doesn't push" claim.**
+>
+> **The CANONICAL WORKED EXAMPLE — commit to this output:**
+>
+> > **Question:** Does `WHERE user_id = 123 OR email = 'a@b.com'` push to Postgres?
+> >
+> > **Answer (one sentence):** **YES — the entire OR pushes down to PostgreSQL as a single SQL `WHERE (user_id = 123 OR email = 'a@b.com')` clause.** Both disjuncts are individually-pushable equality predicates: `user_id = 123` is numeric equality (pushes); `email = 'a@b.com'` is VARCHAR equality on default collation (pushes per the doc-quoted rule above). When every disjunct is individually pushable, the OR pushes as a compound predicate. EXPLAIN signature: the predicate appears **INSIDE** the `TableScan` constraint (`TableScan[app_pg.users, constraint=((user_id = 123) OR (email = 'a@b.com'))]`); there is NO separate `Filter` or `ScanFilterProject` operator above the `TableScan`. **NO `UNION ALL` workaround is needed** for this query.
+>
+> **DO-NOT-WRITE table — every cell below banned in iter427+ answers:**
+>
+> | BANNED claim (load-bearing wrong) | Why it's wrong | What to say INSTEAD |
+> |---|---|---|
+> | "VARCHAR equality (`email = '...'`) does NOT push to PostgreSQL." | Contradicts trino.io/docs/current/connector/postgresql.html verbatim: *"Equality predicates, such as `IN` or `=`, and inequality predicates, such as `!=` on columns with textual types are pushed down."* This is the iter426 Q2 central confident-inaccuracy. | "VARCHAR equality (`email = '...'`) PUSHES to PostgreSQL by default (default collation), per the trino.io postgresql.html doc-quoted rule. Only VARCHAR RANGE and leading-wildcard LIKE do not push by default." |
+> | "An OR of mixed-type equalities (numeric `=` OR VARCHAR `=`) does NOT push, because the VARCHAR side doesn't push." | The premise is wrong — VARCHAR equality DOES push. Both disjuncts are individually pushable equality predicates → the OR pushes as a compound predicate. | "Both disjuncts are individually-pushable equality predicates → the OR pushes as a single compound `WHERE (... OR ...)` clause to Postgres. EXPLAIN: predicate INSIDE the `TableScan` constraint, no `Filter` above." |
+> | "Use `UNION ALL` as the default workaround for any `WHERE a OR b` against Postgres." | `UNION ALL` is a workaround **only** for genuinely non-pushable ORs (one disjunct is VARCHAR range, leading-wildcard LIKE, function-wrapped column, or other non-pushable shape). For an OR of two equalities (both push), recommending UNION ALL bloats the query, adds latency, and creates maintenance burden. | "If every disjunct individually pushes (e.g., two equalities, two INs, equality OR IN), the OR pushes as-is — no UNION ALL needed. Reserve UNION ALL for the case where one or more disjuncts genuinely don't push (range / leading-wildcard LIKE / function-wrapped column)." |
+> | Internal self-contradiction: "Postgres DOES push VARCHAR equality" in one sentence, then later "but the email equality doesn't push here." | The same column type with the same operator cannot push in one breath and not push in the next. This is the iter420/423 oscillation pattern. The cause is conflating VARCHAR equality (pushes) with VARCHAR range (doesn't push) — they are TWO DIFFERENT operator categories. | Commit to "VARCHAR equality pushes" as the LEADING statement of the answer. Do NOT later qualify it with "but in this case it might not push" unless the column has non-default collation OR the predicate is function-wrapped — both of which would be visible in the question's SQL. |
+> | "It depends on collation, so let's assume it doesn't push to be safe." | The default-collation Postgres column (the overwhelmingly common case, and what the question's `email` column will be unless stated otherwise) DOES push. Defaulting to "doesn't push" is the wrong default — it leads to needless UNION ALL recommendations. | "Default collation = VARCHAR equality pushes. Only flag a non-push possibility if the question explicitly mentions a non-default collation (per-column `COLLATE` clause, ICU collation) OR a function-wrapped column. Otherwise commit to PUSHES." |
+>
+> **DO-NOT-RECOMMEND table:**
+>
+> | BANNED recommendation | When it's wrong | Correct recommendation |
+> |---|---|---|
+> | "Rewrite `WHERE user_id = 123 OR email = 'a@b.com'` as `SELECT ... WHERE user_id = 123 UNION ALL SELECT ... WHERE email = 'a@b.com'` followed by `DISTINCT`." | Both disjuncts already push; the OR pushes as-is. The UNION ALL adds two round-trips, a Trino-side DISTINCT, and zero benefit. The engineer reading this would needlessly split many federation queries. | "Run the query as-is. The OR pushes down to Postgres in one round-trip. EXPLAIN to confirm: predicate INSIDE the `TableScan`." |
+>
+> **The 3-WAY CATEGORY REMINDER — never conflate these three categories again:**
+>
+> | Category | Examples | Default behavior on PostgreSQL connector |
+> |---|---|---|
+> | **1. EQUALITY / IN / `!=`** on VARCHAR (with default collation) | `email = 'a@b.com'`, `status IN ('paid', 'pending')`, `name != 'unknown'` | **PUSHES** (doc-quoted, see verbatim above). |
+> | **2. RANGE** (`<`, `>`, `<=`, `>=`, `BETWEEN`) on VARCHAR | `name BETWEEN 'a' AND 'm'`, `status > 'paid'` | **DOES NOT push** by default. Opt-in via experimental `postgresql.experimental.enable-string-pushdown-with-collate=true` (correctness/perf trade-off). |
+> | **3a. LEADING-WILDCARD LIKE** (`'%x'`, `'%x%'`) | `email LIKE '%@bigcorp.com'`, `name LIKE '%foo%'` | **DOES NOT push** usefully (no anchored prefix = no B-tree index can satisfy it). Flag does NOT help — separate index-shape problem; fix at schema level with `pg_trgm` GIN. |
+> | **3b. ANCHORED PREFIX LIKE** (`'x%'`) | `email LIKE 'alice@%'`, `path LIKE '/api/%'` | **CAN push** (collation-sensitive; verify with EXPLAIN). Different from leading-wildcard. |
+> | **3c. FUNCTION-WRAPPED column** | `LOWER(email) = 'a@b.com'`, `CAST(id AS VARCHAR) = '123'` | **DOES NOT push** (connector cannot translate Trino expressions to Postgres SQL). Fix: denormalize a generated column on Postgres, index, query naked column. |
+>
+> **Memorize:** Category 1 pushes; Categories 2, 3a, 3c do not push by default; Category 3b can push (verify EXPLAIN). When the question is about EQUALITY (Category 1), the answer is PUSHES — full stop. When the question is about RANGE / leading-wildcard LIKE / function-wrapped (Categories 2, 3a, 3c), the answer is DOES NOT PUSH. **Do not conflate.**
+>
+> **The SELF-CONTRADICTION GUARD — first-sentence rule:** Your first sentence on an `OR` predicate question MUST commit to either "the OR pushes" or "the OR does not push" with a one-clause reason. Examples of acceptable opening sentences:
+>
+> > - "**The OR pushes** — both disjuncts are equality predicates on a numeric column and a VARCHAR column with default collation, both of which push per the postgresql.html doc-quoted rule."
+> > - "**The OR does NOT push** — one disjunct is a leading-wildcard LIKE (`email LIKE '%bigcorp'`), which cannot push at any collation, so the whole OR stays on Trino."
+>
+> Examples of BANNED opening sentences (oscillation/hedging):
+>
+> > - "Well, VARCHAR equality DOES push... but in this specific case the email equality might not push..." ← BANNED — commit first, qualify second
+> > - "It depends on collation and indexes..." ← BANNED — default-collation is the assumed common case; don't hedge in sentence one
+> > - "Numeric equality pushes, VARCHAR equality is conditional..." ← BANNED — VARCHAR equality on default collation IS unconditional per the doc rule
+>
+> **Reserve `UNION ALL` ONLY for the genuinely-non-pushable OR.** Use it when at least one disjunct is a VARCHAR range, a leading-wildcard LIKE, or a function-wrapped column — i.e., a Category 2, 3a, or 3c predicate. Do NOT use it as the default response to any `WHERE a OR b` query.
+>
+> **Sources verified (WebFetch 2026-06-04):**
+> - trino.io/docs/current/connector/postgresql.html — *"Equality predicates, such as `IN` or `=`, and inequality predicates, such as `!=` on columns with textual types are pushed down."*
+> - trino.io/docs/current/connector/postgresql.html — *"The connector does not support pushdown of range predicates, such as `>`, `<`, or `BETWEEN`, on columns with character string types."*
+> - trino.io/docs/current/optimizer/pushdown.html — predicate pushdown semantics; EXPLAIN absence-of-`ScanFilterProject` success signature.
+
 **The single canonical statement.** `WHERE (user_id = 123 OR email = 'a@b.com')` against a Postgres table — both predicates individually push (numeric equality always; VARCHAR equality always with default collation). **The OR-of-two-pushed-predicates also pushes** as a single `WHERE (user_id = 123 OR email = 'a@b.com')` clause inside the JDBC SQL Trino sends to Postgres. Postgres handles the OR using whichever index plan it prefers (a `BitmapOr` of two index scans is typical).
 
 **The OR-disjunct rule — labeled by source type (iter426 attribution audit).** Two parts:
