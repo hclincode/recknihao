@@ -563,6 +563,30 @@ This restriction applies to all the **ranking functions** in Trino (`ROW_NUMBER`
 | Custom (non-equal-size) buckets like "0-1k MAU", "1k-10k MAU", "10k+ MAU" | `CASE WHEN ... THEN ... END` over the column directly — `NTILE` only does equal-size bucketing |
 | Exact "top 10% of tenants" — guaranteed cutoff regardless of count | `PERCENT_RANK() >= 0.9` filter — avoids the `NTILE` remainder-row off-by-one |
 
+**NULL handling — filter NULLs out BEFORE the NTILE.** When the column you're bucketing on contains NULL values, NTILE doesn't skip them — it sorts them and assigns them to a bucket like any other value. Trino's **default NULL ordering is `NULLS LAST`** (regardless of `ASC` or `DESC`), per the [Trino SELECT docs](https://trino.io/docs/current/sql/select.html). So in `NTILE(10) OVER (ORDER BY revenue)` with some NULL revenues, the NULL rows land in the **highest deciles** (buckets 9 and 10) — which is almost certainly wrong for a "top decile = highest revenue" interpretation. Always filter NULLs explicitly:
+
+```sql
+-- WRONG — NULLs sort to the end (NULLS LAST default), landing in the top deciles.
+SELECT
+  tenant_id,
+  monthly_revenue,
+  NTILE(10) OVER (ORDER BY monthly_revenue) AS revenue_decile
+FROM iceberg.analytics.tenant_revenue;
+-- Result: tenants with NULL revenue get assigned to decile 9 or 10, polluting your "top 10%" answer.
+
+-- CORRECT — pre-filter NULLs before the window function.
+SELECT
+  tenant_id,
+  monthly_revenue,
+  NTILE(10) OVER (ORDER BY monthly_revenue) AS revenue_decile
+FROM iceberg.analytics.tenant_revenue
+WHERE monthly_revenue IS NOT NULL;          -- explicit NULL filter
+-- Alternative: keep NULLs in the result set but exclude them from the windowing.
+-- The cleanest pattern is the WHERE filter above; Trino does NOT support `NTILE(...) OVER (... NULLS EXCLUDE)`.
+```
+
+If you can't drop the NULL rows (e.g., the result set needs all tenants present), bucket only the non-NULL rows via a subquery and `LEFT JOIN` the NULL rows back with `revenue_decile = NULL`. Do not rely on `NULLS FIRST` to "hide" them in bucket 1 — that just moves the bug.
+
 ### Pattern D: Sliding window (last 7 days rolling)
 
 "7-day rolling average of daily active users per tenant."

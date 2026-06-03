@@ -141,6 +141,8 @@ df_for_date.writeTo("iceberg.analytics.events").overwritePartitions()
 - The table is already partitioned by that key.
 - You don't need an explicit "keep yesterday's snapshot aside for rollback" handle — Iceberg's snapshot history already provides rollback via `rollback_to_snapshot` for ~7 days.
 
+> **Concurrent-write conflicts (serializable vs snapshot isolation, `commit.retry.num-retries`, partition-disjoint MERGE false positives) — see [`resources/26-iceberg-concurrent-write-conflicts.md`](26-iceberg-concurrent-write-conflicts.md).** If your `overwritePartitions()` or `MERGE INTO` keeps failing with `ValidationException: Found conflicting files` or `CommitFailedException` when run alongside another writer, that resource walks through the four fix paths (explicit partition pruning, relax to snapshot, raise retries, schedule-level serialization) and the `$properties` + `$snapshots` diagnostic recipe. The three properties are namespaced per operation: `write.delete.isolation-level`, `write.update.isolation-level`, `write.merge.isolation-level` — there is NO global `write.isolation-level`.
+
 **When you still need the staging table + view swap pattern:**
 - The table is **unpartitioned** (no partition key to scope the overwrite to).
 - The reload **spans many partitions at once** (e.g., a full historical rebuild touching every day from 2020 onward — at that scale you want a fresh staging table and a single view swap, not hundreds of `overwritePartitions()` calls).
@@ -267,7 +269,7 @@ Late-arriving events are the most common silent data-loss scenario in incrementa
 
 **Fix options** (pick one — do not skip):
 
-1. **Use MERGE INTO instead of `overwritePartitions()`.** MERGE INTO only modifies rows matched by the join key, leaving unmatched rows intact. The 8,432 existing rows are untouched; the 12 late rows are inserted (or, if any match an existing `event_id`, updated in place). This is the correct shape for any pipeline where late-arriving rows are possible.
+1. **Use MERGE INTO instead of `overwritePartitions()`.** MERGE INTO only modifies rows matched by the join key, leaving unmatched rows intact. The 8,432 existing rows are untouched; the 12 late rows are inserted (or, if any match an existing `event_id`, updated in place). This is the correct shape for any pipeline where late-arriving rows are possible. **MERGE INTO concurrency**: when MERGE runs concurrently with appends (e.g., a streaming ingest), the default `serializable` isolation level can false-positive on partition-disjoint conflicts; see [`resources/26-iceberg-concurrent-write-conflicts.md`](26-iceberg-concurrent-write-conflicts.md) for the fix paths (relax to `write.merge.isolation-level = 'snapshot'`, raise `commit.retry.num-retries`, or serialize in the scheduler).
 
    ```python
    df.createOrReplaceTempView("events_delta")

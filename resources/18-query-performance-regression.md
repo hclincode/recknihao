@@ -468,6 +468,8 @@ GROUP BY tnant_id;
 
 **Format options for `TYPE IO`:** the only documented format is `FORMAT JSON`. Trino does NOT support a text form for `TYPE IO` output — always write `EXPLAIN (TYPE IO, FORMAT JSON) <query>` exactly.
 
+> **`EXPLAIN (TYPE IO, FORMAT JSON)` IS the canonical predicate-pushdown verification tool at plan time.** When an engineer asks "did my WHERE predicate push down to the Iceberg connector without me running the query?", the answer is: run `EXPLAIN (TYPE IO, FORMAT JSON)` and look for the predicate's column in `inputTableColumnInfos[].columnConstraints[]` with a `domain.ranges[]` entry containing your literal bounds. If the column appears with a domain → **pushed down at plan time, no scan**. If the column is missing from `columnConstraints` but appears in your SQL → **the predicate did NOT push down**; Trino will filter on the worker side after scanning all rows. Contrast with `EXPLAIN ANALYZE`, which is the runtime-confirmation tool but actually executes the query (full scan, full cost). TYPE IO is **cheap** (no scan, no execution — just the CBO walking the plan) and is the right first step before reaching for `EXPLAIN ANALYZE`.
+
 ---
 
 ## Step 4: Check partition pruning
@@ -875,6 +877,14 @@ The 50 GB per-query cap prevents one bad query from consuming all 200 GB and OOM
 3. **Enable spill**: cluster-level config change for the workloads that can't be restructured. Use as the safety net; don't let it become the default crutch.
 
 On a stack where workers cannot scale horizontally on demand (the production setup here: on-prem k8s with fixed worker replica counts), spill is the **right** overflow valve for legitimately-large queries that you can't restructure away. The trade-off is real (slower) but bounded; the alternative (OOM-kill and a user-facing failure) is worse.
+
+> **Spill-to-disk is now legacy — Fault-Tolerant Execution (FTE) is the modern alternative as of Trino 454.** [Trino issue #22845](https://github.com/trinodb/trino/issues/22845) and the [Trino spilling docs](https://trino.io/docs/current/admin/spill.html) explicitly recommend migrating off spill-to-disk to FTE. On the production stack (Trino 467 + on-prem k8s + MinIO):
+>
+> - **Spill-to-disk** writes intermediate operator state (hash tables, sort buffers) to the worker pod's local disk. Per-query, per-worker, unmaintained, and can fail with `SPILL_FAILED` when the pod's `ephemeral-storage` cap is hit.
+> - **FTE** writes intermediate exchange data to an external **exchange manager** — typically S3-protocol object storage (MinIO on this stack). Survives worker pod restarts, supports task-level retries, and decouples query memory from per-pod ephemeral disk. Configured via `retry-policy=TASK` + `exchange.base-directory=s3a://trino-fte-spool/...` in `etc/config.properties`.
+> - **When to migrate**: if you've been hitting `SPILL_FAILED` repeatedly or your worker pods are at their `ephemeral-storage` limits, FTE is the architecturally right answer — it moves intermediate state off per-pod disk and onto MinIO. Cost: latency overhead (~10–30% per query) because intermediate exchanges write to MinIO instead of RAM, and MinIO write capacity becomes a query-resiliency dependency.
+> - **When to stay on spill**: if SPILL_FAILED is rare (one query per week) and you have room on the worker pods, spill is still supported on Trino 467 and a smaller config change than standing up FTE. Spill is "legacy but supported" — not "deprecated and removed."
+> - **Don't run both at the same time** without careful workload separation — FTE's exchange spooling and spill-to-disk share the same memory-pressure root cause, and double-configuring them gives no extra resilience. Pick one per workload.
 
 ### 9c. `SPILL_FAILED` error code — when spill itself runs out of disk
 

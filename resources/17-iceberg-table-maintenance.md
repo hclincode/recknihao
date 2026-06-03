@@ -2107,6 +2107,8 @@ If you also see a `version-hint.text` file in `metadata/`, it points to the curr
 
 ## `write.isolation-level` — serializable vs snapshot (concurrent-write conflict semantics)
 
+> **DEDICATED RESOURCE: [`resources/26-iceberg-concurrent-write-conflicts.md`](26-iceberg-concurrent-write-conflicts.md)** is the discovery-friendly entry point for concurrent MERGE/UPDATE/DELETE conflicts on disjoint partitions — the most common operational pain point. The section below stays in resource 17 because writer-conflict tuning is part of the maintenance story; resource 26 covers the same content with more diagnostic depth and is cross-linked from `resources/13-postgres-to-iceberg-ingestion.md` so an engineer searching from the ingestion side lands on it.
+
 > **One-sentence summary:** `write.isolation-level` is an Iceberg table property that controls how strict the conflict-detection is when `UPDATE` / `DELETE` / `MERGE INTO` operations run concurrently with other writes — `serializable` (the safer default) aborts a write if a concurrent commit MIGHT have added rows matching your WHERE clause; `snapshot` only aborts if the rows actually changed. **Verified against [Iceberg IsolationLevel javadoc](https://iceberg.apache.org/javadoc/1.7.1/org/apache/iceberg/IsolationLevel.html) and [Iceberg Reliability docs](https://iceberg.apache.org/docs/latest/reliability/).**
 
 ### The two isolation levels in plain English
