@@ -425,6 +425,15 @@ If `row_count` is NULL, run `ANALYZE iceberg.analytics.premium_users` first — 
 
 ### The `NOT IN` + NULL gotcha — wrong-results trap (read this BEFORE you debug)
 
+> **One-line jargon gloss before you start.** This section uses a few terms that beginners often haven't seen before. Skim these once so the rest reads cleanly:
+> - **Anti-join** = rows from the LEFT side that have **NO match** on the right side. Opposite of an inner JOIN (which returns rows that DO match). `NOT EXISTS` and `LEFT JOIN ... WHERE right IS NULL` both compute anti-join semantics.
+> - **Semi-join** = rows from the left side that have **at least one match** on the right side, returned **without duplication** (one output row per left row, even if there are 5 matches on the right). Trino's `IN (SELECT ...)` becomes a SemiJoin internally.
+> - **FilterMode = ANTI** = a flag on Trino's `SemiJoin` physical operator that inverts its output — instead of "return rows that match" it returns "return rows that DON'T match." A `SemiJoin` with `FilterMode = ANTI` is just the physical realization of an anti-join.
+> - **SemiJoin (the Trino plan node)** = the EXPLAIN output you want to see. It runs as a hash join, broadcasts the small side, probes the big side once, and returns exactly one TRUE/FALSE per probe row — no duplicates, no per-row subquery loops.
+> - **LeftJoin (the Trino plan node)** = a regular left outer join. It enumerates **every** matching right-side row for each left row, so 5 matches on the right = 5 output rows. The downstream operator must dedupe. This is why correlated `NOT EXISTS` (which lowers to LeftJoin + Aggregation, not SemiJoin) can be slower than NOT IN.
+>
+> Keep these five terms in mind and the rest of this section reads as one consistent story: you always want SemiJoin in EXPLAIN; LeftJoin + Aggregation on a `NOT EXISTS` is the slow path that the rewrite-to-non-correlated trick avoids.
+
 **Symptom you'll see in production**: a `NOT IN (SELECT ...)` query returns **zero rows**, but you can prove with your own eyes that matching rows exist. No error, no warning — just an empty result.
 
 **Root cause**: SQL uses **three-valued logic** (TRUE / FALSE / UNKNOWN). When the right-hand subquery of `NOT IN` contains **even a single NULL**, every comparison `outer_value NOT IN (..., NULL, ...)` evaluates to UNKNOWN — never TRUE — so the WHERE clause filters out every row. This is **standard SQL semantics**, not a Trino bug; Postgres, MySQL, BigQuery, and Snowflake all behave the same way.

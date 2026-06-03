@@ -265,6 +265,84 @@ FROM iceberg.analytics."events$properties"
 WHERE key = 'write.delete.mode';
 ```
 
+**Worked examples — `$refs` and `$properties` with column projections + WHERE filters.** Below are the most common operational queries against these two metadata tables. Both run in Trino 467 (use the `"table$refs"` / `"table$properties"` quoted form) and Spark 3.5 (use the `table.refs` / `table.properties` dot form). The schema column lists below are verified against the Iceberg metadata-tables docs.
+
+```sql
+-- $refs schema (columns you can project / filter on):
+--   name                    VARCHAR  (ref name, e.g., 'main', 'audit-branch', '2026-03-billing-close')
+--   type                    VARCHAR  ('BRANCH' or 'TAG')
+--   snapshot_id             BIGINT   (the snapshot this ref points at)
+--   max_reference_age_in_ms BIGINT   (when the ref itself expires; NULL = never)
+--   min_snapshots_to_keep   INT      (branches only — how many snapshots to retain on this branch)
+--   max_snapshot_age_in_ms  BIGINT   (branches only — max age of snapshots on this branch)
+
+-- 1. List every ref on a table — quickest sanity check before time-travel queries.
+SELECT name, type, snapshot_id
+FROM iceberg.analytics."events$refs"
+ORDER BY type, name;
+
+-- 2. Show only TAGS (snapshot labels) — what audit / billing-close points exist?
+SELECT name, snapshot_id, max_reference_age_in_ms
+FROM iceberg.analytics."events$refs"
+WHERE type = 'TAG'
+ORDER BY name;
+
+-- 3. Show only BRANCHES with their retention settings — what's protecting WAP / audit branches?
+SELECT name, snapshot_id, min_snapshots_to_keep, max_snapshot_age_in_ms
+FROM iceberg.analytics."events$refs"
+WHERE type = 'BRANCH';
+
+-- 4. Find a specific tag by exact name — resolve a billing-close label to a snapshot_id.
+SELECT snapshot_id, max_reference_age_in_ms
+FROM iceberg.analytics."events$refs"
+WHERE type = 'TAG' AND name = '2026-03-billing-close';
+
+-- 5. Are any tags pointing at snapshots that expire_snapshots can't touch?
+--    (Anything in $refs is protected from expiry — useful pre-flight check before tightening retention.)
+SELECT name, type, snapshot_id
+FROM iceberg.analytics."events$refs";
+```
+
+```sql
+-- $properties schema (only two columns — it's just a key/value view of TBLPROPERTIES):
+--   key    VARCHAR  (property name, e.g., 'write.delete.mode', 'format-version')
+--   value  VARCHAR  (property value as a string — cast as needed)
+
+-- 1. Dump the whole effective config — first thing to run when diagnosing "why is this table behaving differently."
+SELECT key, value
+FROM iceberg.analytics."events$properties"
+ORDER BY key;
+
+-- 2. Is this table CoW or MoR? — single-property lookup with WHERE.
+SELECT value AS write_delete_mode
+FROM iceberg.analytics."events$properties"
+WHERE key = 'write.delete.mode';
+-- If row is missing -> CoW (Iceberg 1.5.2 default). Value 'merge-on-read' -> MoR.
+
+-- 3. Check all three write-mode properties together (CoW/MoR can be set per-operation).
+SELECT key, value
+FROM iceberg.analytics."events$properties"
+WHERE key IN ('write.delete.mode', 'write.update.mode', 'write.merge.mode');
+
+-- 4. What format-version is the table on? (v1 vs v2 — v2 is required for MoR.)
+SELECT value AS format_version
+FROM iceberg.analytics."events$properties"
+WHERE key = 'format-version';
+
+-- 5. Look up retention guardrails (these silently override expire_snapshots arguments).
+SELECT key, value
+FROM iceberg.analytics."events$properties"
+WHERE key LIKE 'history.expire.%';
+
+-- 6. Pattern-match for a property family — e.g., everything related to write behavior.
+SELECT key, value
+FROM iceberg.analytics."events$properties"
+WHERE key LIKE 'write.%'
+ORDER BY key;
+```
+
+> **Reading these tables is non-destructive — both are read-only views from Trino's perspective.** To *change* a property, use `ALTER TABLE ... SET TBLPROPERTIES` from Spark (Trino 467's `ALTER TABLE ... SET PROPERTIES` only handles a small set of connector-level properties; see the ENGINE CALLOUT earlier in this document). `$refs` itself cannot be mutated via SQL — create/drop tags and branches via `ALTER TABLE ... CREATE TAG` / `CREATE BRANCH` from Spark (Trino 467 has no DDL for refs).
+
 **Two important gotchas:**
 
 1. **`$partitions` on a `bucket(col, N)`-transformed column shows the BUCKET INTEGER, not the original column value.** If your table is partitioned by `bucket(tenant_id, 128)`, `$partitions.partition` shows integers 0..127 — you **cannot** recover the original `tenant_id` from this column. For per-tenant row counts on a bucket-partitioned table, you must run a real `SELECT tenant_id, count(*) FROM tbl GROUP BY tenant_id` (Trino will use min/max metadata to prune files, but the count itself is a real scan). Identity partitioning on `tenant_id` is the only configuration where `$partitions` trivially gives you per-tenant counts.
@@ -551,6 +629,15 @@ The `file_size_threshold` parameter tells Trino: any data file **smaller** than 
 
 > **Post-partition-evolution exception — do NOT use `ALTER TABLE ... EXECUTE optimize` after a partition spec change.** If you recently changed the table's partition spec with `ALTER TABLE ... SET PROPERTIES partitioning = ARRAY[...]`, do NOT use `ALTER TABLE ... EXECUTE optimize` for the initial migration of old-spec files. Confirmed Trino bugs ([trinodb/trino #26109](https://github.com/trinodb/trino/issues/26109), [#26503](https://github.com/trinodb/trino/issues/26503), [#25279](https://github.com/trinodb/trino/issues/25279)) mean Trino's native `OPTIMIZE` may produce files with **incorrect partition values** (e.g., NULL partition keys) or fail to reorganize data by the new column at all. Use Spark's `CALL iceberg.system.rewrite_data_files` with `rewrite-all=true` instead — `rewrite-all=true` forces Spark to rewrite every file regardless of size, which is required for cross-spec migration (the default bin-pack strategy skips well-sized old-spec files). Resume using Trino's `EXECUTE optimize` for routine compaction only **after** all files are on the new spec — verify via `SELECT spec_id, COUNT(*) FROM iceberg.analytics."events$files" GROUP BY spec_id` and wait until the old `spec_id` row disappears.
 
+> **CRITICAL CAVEAT — do NOT combine `rewrite-all=true` with a `where` predicate.** Apache Iceberg has a known bug ([apache/iceberg #14667](https://github.com/apache/iceberg/issues/14667)) where running `CALL iceberg.system.rewrite_data_files(where => '...', options => map('rewrite-all', 'true'))` **silently produces duplicate rows**: the procedure writes the new rewritten files, but the previous data files matched by the WHERE filter remain referenced by the table snapshot. Both the old and the new files end up being scanned by subsequent queries — so every row in the filtered range appears twice. There is no error, no warning, and the snapshot looks committed cleanly.
+>
+> **What you must do instead for post-partition-evolution migration:**
+> - **Run the full-table form** — call `rewrite_data_files` with `rewrite-all=true` **and NO `where` clause** so the procedure rewrites every file in one commit. This is the safe form for cross-spec migration.
+> - **Accept the runtime cost** — on a large table, a full-table `rewrite-all=true` is **hours-long, sometimes day-long** (it reads and rewrites every Parquet file, then commits). Schedule it as a one-shot Spark job in a dedicated maintenance window with enough Spark executor headroom (typically 2–3x your normal nightly compaction allocation), and disable concurrent writes for the duration. For a 1 TB table on a typical k8s Spark setup, plan for 3–8 hours; for 10 TB+, plan for 12–24 hours. Use `partial-progress.enabled=true` and `partial-progress.max-commits` (e.g., 100) so progress is incrementally checkpointed and a mid-run failure doesn't lose all the work.
+> - **If you absolutely must scope by partition** (e.g., one tenant only), do it WITHOUT `rewrite-all=true` — use the default bin-pack strategy with `where => 'tenant_id = ''acme'''` (no `rewrite-all` option). Bin-pack-with-WHERE is the supported and safe form. The trade-off: bin-pack skips already-well-sized files, so old-spec files that are already big enough won't be re-laid-out under the new spec. For true cross-spec migration of one partition, the only safe option is to wait out the full-table `rewrite-all=true` run.
+>
+> Verified against the upstream Iceberg issue tracker and the linked test reproduction. Do NOT silently mix `rewrite-all=true` with `where` in any tooling you write — the duplicate-rows outcome is reliably reproducible.
+
 #### Per-tenant compaction (fairness, noisy-neighbor cleanup, urgent fixes)
 
 When one tenant's partition is the source of slow queries — e.g., `tenant_id='acme'` just bulk-loaded 50K small files and is dragging down dashboard latency for everyone else — you want to compact **only that tenant**, not the entire table. Both engines support this; pick based on whether the job is ad-hoc or scheduled.
@@ -661,6 +748,19 @@ ORDER BY content;
 - < 50 position delete files total → healthy; no action needed.
 - 50–500 → monitor; consider running monthly if query latency is degrading.
 - 500+ → run `rewrite_position_delete_files` weekly alongside `rewrite_data_files`.
+
+> **Why these thresholds exist — read amplification context.** The reason "50+ position delete files" is the inflection point isn't arbitrary; it's the count at which **per-query read amplification becomes user-visible**. In Iceberg v2 (the format your MoR tables use), **every read of a data file requires reading every position delete file that overlaps it** — the engine merges deletes into the scan at query time. Read amplification therefore **scales roughly linearly with the number of position delete files attached to the data files being scanned**. Concretely:
+>
+> | Position delete file count (per scanned partition) | Typical query latency impact |
+> |---|---|
+> | < 50 | < 10% overhead — negligible |
+> | 50–200 | 1.5–2× slowdown — noticeable on dashboards |
+> | 200–500 | 2–5× slowdown — users start filing tickets |
+> | 500+ | 5–10×+ slowdown — query plans start spending more time merging deletes than reading data |
+>
+> This is the same MoR read-amplification dynamic discussed in the Iceberg v3 deletion-vectors design ([deletion vectors replaced position-delete-file accumulation precisely to fix this scaling problem](https://iceberg.apache.org/spec/)). Your stack is on Iceberg 1.5.2 / v2, so you do NOT have deletion vectors — accumulated position delete files are your reality and `rewrite_position_delete_files` (Spark only on Trino 467) is your only tool. Tying cadence to this scaling: **if your monitoring SQL shows position-delete file count crossing 200 on any frequently-queried table, you have a window of perhaps a week before users start noticing — schedule compaction within that window**, not "next monthly maintenance window."
+>
+> **Equality delete files are even worse and have a known 1.5.2 dangling-delete bug.** Equality delete files (`content = 2`) have **the same linear read-amplification scaling** as position deletes — every scan of a partition with N equality delete files pays an additional N delete-file reads. Unlike position deletes, on Iceberg 1.5.2 they have the additional problem that `rewrite_data_files` cannot reliably clean them up across partition boundaries due to [apache/iceberg #12838](https://github.com/apache/iceberg/issues/12838) (still open as of mid-2026; `remove-dangling-deletes` lands in Iceberg 1.8). For Debezium CDC pipelines on 1.5.2, equality delete files **will accumulate** and **read amplification will grow without bound** — there is no in-version workaround. **Alert at 50+ equality delete files** (`content = 2`); the only complete fix is upgrading to Iceberg 1.8+. See the equality-delete section below for the full incident playbook and the `remove_orphan_files` non-workaround.
 
 **Better triggers — RATIO-based thresholds (use these for tables of any size, especially > 1 TB where the absolute counts above stop scaling):**
 
