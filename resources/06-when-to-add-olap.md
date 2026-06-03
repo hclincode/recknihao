@@ -183,6 +183,8 @@ You already have MinIO + Iceberg + Trino + Spark. **"Migrating a table" is days-
 
 Start with **one table** (usually `events` or `feature_usage`) and one dashboard. Prove the pattern, then expand.
 
+> **Once you're on Trino + Iceberg and the same fixed-shape aggregation runs on every page-load:** Trino has a built-in `CREATE MATERIALIZED VIEW` feature on the Iceberg connector that caches the aggregation result in a hidden Iceberg storage table — see resource 25 (`25-trino-materialized-views-iceberg.md`) for the full pattern. It's the Trino-side analogue of the Postgres MV you may already be familiar with, with one key difference: there is NO auto-refresh — you trigger `REFRESH MATERIALIZED VIEW` yourself via cron / dbt / k8s CronJob.
+
 ---
 
 ## The #1 mistake: adding OLAP too early

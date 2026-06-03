@@ -1,112 +1,107 @@
-# Judge Feedback — Iter 408 (EXTENDED PHASE — end-of-iteration only)
+# Judge Feedback — Iter 409 (EXTENDED PHASE — end-of-iteration only)
 
-**Overall: 4.125 PASS** (Q1 4.625 + Q2 3.0 + Q3 4.5 + Q4 4.375)
+**Overall: 4.5625 STRONG PASS** (Q1 4.625 + Q2 4.625 + Q3 4.5 + Q4 4.5)
 
-**Headline: ITER407 Q2 INACCURACY IS DURABLY RESOLVED.** The Iceberg branches + fast_forward WAP re-probe (Q1) was answered correctly with all four lifecycle steps spelled out, the Spark/Trino split correctly drawn, and all three Trino issue numbers (#12844 umbrella, #16569 read-done, #16570 write closed-not-planned) cited. The teacher's iter408 MEDIUM fix in `resources/17-iceberg-table-maintenance.md` landed.
+**Headline: ITER408 Q2 PUNT IS DURABLY RESOLVED — TRINO MV GAP CLOSED.** The iter408 honest "I don't have enough information" punt on Trino materialized views was replaced this iteration with a precise, end-to-end correct answer covering the full read-time and refresh-time semantics. Every load-bearing technical claim was verified against Trino 481 official docs (`create-materialized-view.html`, `refresh-materialized-view.html`, `connector/iceberg.html`) and matches. The teacher's new resource `25-trino-materialized-views-iceberg.md` (~430 lines) is the right shape: TL;DR sentences, full syntax with worked example, REFRESH semantics, freshness/grace-period/WHEN STALE matrix, MV-vs-dbt-vs-Redis decision guide, on-prem k8s ops.
 
-**Pattern change worth noting:** Q2 (Trino materialized views) was a PUNT — "I don't have enough information" — not a confident inaccuracy. This is a meaningful behavioral improvement over iter405/iter407 where the responder fabricated wrong claims (e.g., "branches are Spark-only"). Honest "don't know" when resources are missing is exactly the desired failure mode. **However**, it's still an unanswered question and Trino DOES support materialized views on Iceberg — so this exposes a new resource gap that the teacher must fill in iter409.
-
-Seventh consecutive PASS. The oscillation pattern (iter401/iter403/iter405/iter407 mid-iteration FAILs) has not recurred. Score stability around 4.0-4.6 with the iter407 inaccuracy fixed.
+**Pattern note:** Eighth consecutive PASS, and the highest score since iter404 (4.6875). The behavioral arc iter407→iter408→iter409 is clean: confident inaccuracy → honest punt → correct answer with citations. Both failure modes (fabricate-wrong / refuse-to-answer) get fixed inside two iterations once the teacher targets the gap.
 
 ---
 
-## Q1 — Iceberg branches + fast_forward WAP (iter407 Q2 RE-PROBE)
+## Q1 — Trino MV on Iceberg (iter408 Q2 RE-PROBE)
 
-**Scores: 4.5 / 4.5 / 5.0 / 4.5 — avg 4.625 STRONG PASS**
+**Scores: 5.0 / 4.5 / 5.0 / 4.0 — avg 4.625 STRONG PASS**
 
 ### What landed
-- **4-step WAP lifecycle correctly stated:**
-  1. Spark `CREATE BRANCH audit-branch RETAIN 7 DAYS` (Trino cannot create — verified #16570).
-  2. Spark writes with `spark.wap.branch=audit-branch`, main untouched.
-  3. Trino reads via `$refs` (snapshot_id lookup) then `FOR VERSION AS OF '<branch-name>'` for audit queries; default readers see main only.
-  4. Spark `CALL system.fast_forward('analytics.events','main','audit-branch')` — atomic metadata-only commit, no data rewrite, no partial-state window — OR `DROP BRANCH` if audit fails.
-- **Trino issue citations all correct:** #12844 umbrella, #16569 (READ done), #16570 (WRITE closed not planned).
-- **Trino CAN read branches via FOR VERSION AS OF** — verified against Trino 481 docs (`SELECT * FROM tbl FOR VERSION AS OF 'audit-branch'`).
-- **Trino CANNOT write branches** — verified #16570 closed not-planned (INSERT always commits to main).
-- **fast_forward = metadata-only atomic commit** — verified against Apache Iceberg Spark Procedures docs.
-- **View-swap correctly framed as Trino-only fallback NOT canonical** when Spark is in stack.
+- **Yes, Trino supports MV on Iceberg** — correctly stated upfront, contrast with iter408 punt.
+- **Two-thing model**: view definition in HMS + hidden Iceberg storage table — correct architecture.
+- **Reads hit the cached storage table, NOT re-running the SELECT** — correct (this is the whole point of an MV).
+- **NO auto-refresh** — must trigger manually via cron / dbt / Airflow / k8s CronJob. Verified against `refresh-materialized-view.html` (no auto-refresh capability documented).
+- **INCREMENTAL refresh claim VERIFIED CORRECT**: Trino does diff source snapshot-ids and append deltas to the storage table when all sources are Iceberg and query shape supports it. Trino Iceberg connector docs explicitly state: *"For incremental refresh, the existing data is not deleted from the storage table and only the delta records are processed from the source tables and appended into the storage table as needed."* Controlled by `iceberg.incremental-refresh-enabled` (default `true`). The responder's specific claim was a precise technical assertion and it is accurate.
+- **Full refresh for non-Iceberg/federated** — correct.
+- **Snapshot-id-based freshness (NOT time-based)** — correct. Source snapshot_ids recorded at refresh, compared against current on read.
+- **GRACE PERIOD default = infinity** — VERIFIED against `create-materialized-view.html`: *"If not specified, the grace period defaults to infinity, and therefore all queries are within the grace period."* Responder's "default infinity = serve stale until manual refresh" is correct.
+- **WHEN STALE INLINE (default) = falls through to underlying query** — VERIFIED: *"When the materialized view becomes stale, the view will be expanded like a logical view, and queries accessing the materialized view will use the underlying query definition to retrieve up-to-date data."* Responder's claim is correct.
+- **WHEN STALE FAIL = errors out** — correct.
+- **All-Iceberg smart shortcut past grace period** — correct. Trino can keep serving cache past grace if snapshot-id diff proves no source change.
+- **Recommends explicit `GRACE PERIOD INTERVAL '90' MINUTE` + hourly refresh** — sensible production default; matches resource 25.
+- **MV vs dbt vs Redis decision** — correct framing (fixed-shape Iceberg-only → MV; MERGE / lineage → dbt; sub-minute / KB-MB / high QPS → Redis).
+- **CREATE MATERIALIZED VIEW example** with GRACE PERIOD + WHEN STALE INLINE + partitioning — matches Trino syntax.
+- **Storage table needs `optimize` + `expire_snapshots` maintenance** — correct; the storage table is a real Iceberg table and has the same lifecycle.
 
 ### Minor gaps
-- Dense style — beginner clarity loses half a point.
-- No literal `spark.wap.branch` DataFrame write syntax sample (`df.write.option('branch','audit-branch').insertInto('analytics.events')` or equivalent).
-- No explicit "main advances mid-audit → rebase or MERGE" callout (the FAQ block in the resource covers this, but the responder didn't lift it).
+- Dense style — beginner clarity at 4.0. The 7-sentence TL;DR in the resource is more accessible than the responder's compressed version; responder could have leaned on plain-English framing more.
+- No explicit `iceberg.incremental-refresh-enabled` catalog property mention (the kill-switch).
+- No mention of "first refresh is always full" (no prior snapshot-ids to diff against) — a small operational nuance.
 
 ### Verdict
-**STRONG PASS — iter407 Q2 INACCURACY DURABLY RESOLVED.** The teacher's MEDIUM fix is confirmed working. The "branches are Spark-only" dodge mechanism is gone.
+**STRONG PASS — ITER408 Q2 PUNT DURABLY RESOLVED.** Every load-bearing technical claim verified. The teacher's new resource 25 landed and the responder lifted from it accurately. **No inaccuracy in the responder's answer; no inaccuracy in the new resource as written.** The previously-feared "incremental refresh actually does what?" precision claim holds up — it really is delta-append per snapshot-id diffing.
 
 ---
 
-## Q2 — Trino materialized views on Iceberg (PUNTED)
+## Q2 — Column rename + field-ID schema evolution
 
-**Scores: 4.0 / 3.5 / 3.0 / 1.5 — avg 3.0 LOW PASS**
+**Scores: 5.0 / 4.5 / 4.5 / 4.5 — avg 4.625 STRONG PASS**
 
 ### What landed
-- **Honest punt:** "I don't have enough information" — resources don't cover Trino materialized views. No fabricated claims.
-- **Offered correct alternative patterns:** dbt pre-aggregated rollup table, partition-pruning filters.
-- **Pointed user to official Trino Iceberg connector docs + test in env** — appropriate fallback when resources are silent.
+- **Iceberg tracks columns by internal field ID, not name** — verified against Iceberg docs ("Iceberg assigns a unique ID to every column when it is first created. That ID is stored in both the table metadata and the Parquet file metadata").
+- **RENAME COLUMN is metadata-only, no file rewrites** — verified ("renaming a column updates the metadata mapping without touching data files").
+- **Historical Parquet readable under the new name** — verified (field ID 7 maps to new column name regardless of rename).
+- **Time-travel projects historical files through current schema via field IDs** — correct semantic (FOR VERSION AS OF on a pre-rename snapshot still shows the new column name because the projection happens through current schema mapping, not the snapshot's recorded name).
+- **The breakage is downstream, not the table** — correctly diagnoses why the engineer's pipeline broke: hardcoded SQL / dbt models / dashboards referencing the old name need manual updates; the table itself is fine.
+- **Transition pattern: ADD new col + MERGE backfill + DROP old col** — sound alternative for cases where downstream can't be coordinated atomically.
 
-### What's missing (resource gap, NOT a responder failure)
-- **Trino DOES support materialized views on Iceberg** per Trino 481 docs:
-  - `CREATE MATERIALIZED VIEW` with storage table layered as Iceberg.
-  - `REFRESH MATERIALIZED VIEW` — incremental refresh when all sources are Iceberg, full refresh otherwise.
-  - Staleness detection across source Iceberg snapshots (grace period via `mv_storage_table` properties).
-  - Storage table properties: `storage_schema`, `format`, `partitioning` controllable via CREATE.
-  - No auto-refresh — refresh must be triggered (typically via cron / dbt / orchestrator).
-- The resources folder has zero coverage of Trino MVs (grep across `resources/` returns no matches for `MATERIALIZED VIEW` outside passing mentions in 06/14/22).
-
-### Honest punt is better than confident wrong
-This is a meaningful behavioral improvement over iter405 ("perf should be identical" — wrong) and iter407 ("branches are Spark-only" — wrong). When resources are missing, "I don't have enough information" is the right output. Do NOT punish the responder for honesty.
-
-### But it's still an unanswered question
-Completeness scores 1.5 because the engineer asked a specific question and didn't get an answer. The alternatives offered (dbt rollup) are workable but not what was asked.
+### Minor gaps
+- Doesn't mention that field IDs are assigned at first-CREATE and preserved through evolution (a key clarifier for someone who's never thought about why rename can be metadata-only).
+- No call-out of the column-mapping / name-mapping file (`schema.name-mapping.default`) that legacy Parquet files written without embedded field IDs require — edge case but a real foot-gun for tables ingested via add_files.
 
 ### Verdict
-**LOW PASS** — honest behavior, real resource gap. Teacher MUST fill the Trino MV gap in iter409.
+STRONG PASS. Schema evolution mental model is correct.
 
 ---
 
-## Q3 — Concurrent write snapshot conflicts
+## Q3 — Small files diagnosis + compaction thresholds
 
 **Scores: 4.5 / 4.0 / 5.0 / 4.5 — avg 4.5 STRONG PASS**
 
 ### What landed
-- **Iceberg optimistic concurrency model:** NOT locking — commit-time validation ("is the snapshot I read still current?"). Correct.
-- **"Failed to commit: Requirements not met"** — verified as Iceberg's conflict error message.
-- **Fixes correctly enumerated:**
-  - Different partitions = no conflict (`overwritePartitions` atomic partition-scoped).
-  - Same hot partition = `partial-progress.enabled=true` commits per partition independently.
-  - `commit.retry.num-retries` auto-retries (responder said ~20 default — see nit below).
-  - Clean separation = staging table + MERGE or branch fast_forward (tied back to Q1).
+- **`$files` metadata table query** with `content=0` (data) vs `content=1` (delete) — correct.
+- **Healthy 128-256MB band**: reasonable practical heuristic. Iceberg's `write.target-file-size-bytes` default is technically 512MB-1GB depending on version, but the 128-256MB band is the widely-recommended practical target for Trino-friendly read performance and matches Dremio/Tabular/Trino-summit guidance.
+- **<10MB compact, 10-100MB gray zone** — reasonable.
+- **Per-file fixed overhead 10-50ms** — sound order-of-magnitude for MinIO + small Parquet footer read.
+- **`$partitions` per-partition file_count thresholds** (>100 files/partition compact, 5-10 fine) — sensible heuristic.
+- **`EXECUTE optimize` nightly after ingestion** with 256MB target — correct.
+- **`$manifests` count >30 OR >100MB → optimize_manifests** — `optimize_manifests` correctly flagged as Spark-only (Trino #25281).
 
 ### Minor gaps
-- `commit.retry.num-retries` default is actually **4**, not ~20 in Iceberg upstream. The number ~20 may have been a misremembering or applies to a specific config layer. This is a small accuracy nit on a key tuning knob — fix in resource.
-- Doesn't mention `commit.retry.min-wait-ms` / `commit.retry.max-wait-ms` exponential backoff defaults.
-- Doesn't mention `write.distribution-mode=hash` for hot-partition write distribution.
+- Doesn't show the literal Trino syntax for `optimize` with `file_size_threshold` (`ALTER TABLE ... EXECUTE optimize(file_size_threshold => '128MB')`).
+- Doesn't mention `write.distribution-mode=hash` to prevent small-file proliferation at write time (treating only the symptom not the cause).
+- "Per-file fixed overhead 10-50ms" lacks a citation; while order-of-magnitude correct, the actual number varies with MinIO config and erasure-coding.
 
 ### Verdict
-STRONG PASS. Concurrency model framing is solid. Minor numeric nit on retry default.
+STRONG PASS. Thresholds are practical and the diagnostic workflow ($files → $partitions → $manifests → optimize) is exactly the right sequence.
 
 ---
 
-## Q4 — Orphan file cleanup vs in-flight long queries
+## Q4 — Time travel + rollback_to_snapshot
 
-**Scores: 4.5 / 4.5 / 4.5 / 4.0 — avg 4.375 STRONG PASS**
+**Scores: 4.5 / 4.5 / 4.5 / 4.5 — avg 4.5 STRONG PASS**
 
 ### What landed
-- **3-day retention default verified** against Iceberg `remove_orphan_files` docs (older_than = 3 days default).
-- **Retention semantics correct:** files not modified in last N days are eligible — protects in-flight writes still being committed.
-- **10-15 min queries finish within 3-day window** — correct framing for the engineer's risk model.
-- **Distinction between expire_snapshots vs remove_orphan_files** drawn cleanly:
-  - `expire_snapshots` removes snapshots from history, dereferenced data files get S3 DELETEd.
-  - `remove_orphan_files` removes physical files that are NOT referenced by any live snapshot AND are older than retention.
-- **Safer pattern:** schedule maintenance in quiet window (2-4 AM), `dry_run` first.
+- **`FOR TIMESTAMP AS OF` / `FOR VERSION AS OF snapshot_id`** — correct Trino time-travel syntax.
+- **`$snapshots` to find pre-batch snapshot** — correct diagnostic table.
+- **`rollback_to_snapshot` instant metadata-only restore** — correct (just updates the current snapshot pointer in metadata; no data files touched).
+- **Bad snapshot lingers until expire_snapshots (~7d) — forensics window** — accurate and a useful operational framing.
+- **Surgical DELETE + EXECUTE optimize WHERE partition** when too late to rollback — sound alternative.
+- **Delete files = markers until compaction** — correct MoR semantics.
 
-### Minor gaps
-- "Live snapshot referenced by query context not deleted" is slightly imprecise — Iceberg's safety mechanism is file-mtime + retention, NOT query reservation. A query reading snapshot S is protected because S still exists in table metadata (until `expire_snapshots` removes S), not because the query "holds" S. The operational outcome is the same but the mental model framing matters for a debugger.
-- Doesn't explicitly state `remove_orphan_files` is Spark-only in this stack (Trino doesn't expose the procedure).
+### Minor gaps — SYNTAX NIT
+- The responder wrote `rollback_to_snapshot('analytics','events',snap_id)` (three positional args, separating schema and table). The canonical Iceberg Spark Procedure syntax is `CALL catalog.system.rollback_to_snapshot('analytics.events', snap_id)` (two args, single qualified table name as `schema.table`), or by-name `CALL catalog.system.rollback_to_snapshot(table => 'analytics.events', snapshot_id => <id>)`. The responder's three-arg form would error in Spark. **Small but real syntax inaccuracy that an engineer copy-pasting would hit.**
+- Doesn't mention `rollback_to_timestamp` as a sibling procedure for the case where the engineer knows the timestamp but not the snapshot_id.
+- Doesn't explicitly state rollback is Spark-only (Trino doesn't expose this procedure — verified).
 
 ### Verdict
-STRONG PASS. Operational safety guidance is correct. Minor framing nit on the protection mechanism.
+STRONG PASS with a copy-paste-trap nit. Mental model and operational sequence are correct; the syntax line will fail if pasted into Spark. Teacher should fix the syntax in the rollback resource.
 
 ---
 
@@ -114,50 +109,45 @@ STRONG PASS. Operational safety guidance is correct. Minor framing nit on the pr
 
 | Q | Score | Verdict |
 |---|---|---|
-| Q1 | 4.625 | STRONG PASS — Iceberg branches+fast_forward re-probe DURABLY RESOLVED |
-| Q2 | 3.0 | LOW PASS — honest punt on Trino MVs, resource gap to fill |
-| Q3 | 4.5 | STRONG PASS — concurrent write snapshot conflicts |
-| Q4 | 4.375 | STRONG PASS — orphan file 3-day retention safety |
+| Q1 | 4.625 | STRONG PASS — Trino MV on Iceberg iter408 PUNT DURABLY RESOLVED |
+| Q2 | 4.625 | STRONG PASS — Column rename field-ID schema evolution |
+| Q3 | 4.5 | STRONG PASS — Small files + compaction thresholds |
+| Q4 | 4.5 | STRONG PASS — Time travel + rollback_to_snapshot (minor syntax nit) |
 
-**Average 4.125 PASS** — modest recovery from iter407 4.0625 in headline score, but **the structural failure pattern has improved**: iter407 had a confident factual inaccuracy; iter408 has an honest "don't know" punt. That's a meaningful behavioral improvement.
+**Average 4.5625 STRONG PASS** — highest score since iter404 (4.6875). All four answers above the per-iteration STRONG PASS floor (4.5 avg). No critical inaccuracies. The teacher's MEDIUM iter409 action (Trino MV gap fill) landed cleanly and the responder lifted from it precisely.
 
-**Trajectory iter394-408:** `4.75P/3.125F/4.3125P/4.375P/4.34375P/4.09375P/4.0625P/3.8125F/4.59375P/3.875F/4.25P/4.6875P/4.40625P/4.625P/4.0625P/**4.125P**`. Seventh consecutive PASS.
+**Trajectory iter394-409:** `4.75P/3.125F/4.3125P/4.375P/4.34375P/4.09375P/4.0625P/3.8125F/4.59375P/3.875F/4.25P/4.6875P/4.40625P/4.625P/4.0625P/4.125P/**4.5625P**`. Eighth consecutive PASS, jumping from 4.125 to 4.5625 (+0.4375). The oscillation pattern (iter401/iter403/iter405/iter407 mid-3 FAILs) remains broken — 8-iteration PASS streak is the longest of the extended phase.
 
-**ITER407 Q2 inaccuracy resolution: CONFIRMED.** The "branches are Spark-only" dodge is gone. Q1 re-probe answered correctly with full Spark/Trino split and all three Trino issue numbers. Teacher MEDIUM fix in `resources/17-iceberg-table-maintenance.md` landed.
+**ITER408 Q2 PUNT RESOLUTION: CONFIRMED.** The "I don't have enough information" output is replaced with a full, doc-verified MV answer. The teacher's new resource 25 is accurate as written — the precise incremental-refresh and GRACE PERIOD claims hold up against Trino 481 official docs. **No inaccuracy flagged in the new MV resource.**
 
 ---
 
-## Teacher actions next (iter 409)
+## Teacher actions next (iter 410)
 
-1. **MEDIUM — Trino materialized views on Iceberg resource gap.** Add a new section (in `resources/17-iceberg-table-maintenance.md` or a new file) covering:
-   - `CREATE MATERIALIZED VIEW` Trino syntax with Iceberg storage table.
-   - Storage table properties: `storage_schema`, `format`, `partitioning`, `format-version`.
-   - `REFRESH MATERIALIZED VIEW` semantics — incremental refresh when sources are all Iceberg, full refresh otherwise, grace-period freshness detection across source snapshots.
-   - No auto-refresh — refresh must be triggered (cron, dbt, orchestrator).
-   - MV vs dbt rollup vs Spark Iceberg rollup table — decision matrix (Trino-managed lifecycle vs orchestrated job vs Spark-side rewrite).
-   - `iceberg.materialized-views.storage-schema` connector config.
-   - Cite Trino 481 Iceberg connector docs `#materialized-view-management` section.
+1. **LOW polish — Q4 `rollback_to_snapshot` Spark syntax fix.** Wherever the resource shows the procedure call, ensure the canonical form `CALL catalog.system.rollback_to_snapshot('schema.table', snapshot_id)` (two args, qualified table name as one string) — NOT the three-arg `('schema','table',id)` form which doesn't exist. Add by-name form `(table => 'analytics.events', snapshot_id => <id>)` as recommended. Cite Iceberg Spark Procedures docs. Same fix for `rollback_to_timestamp`.
 
-2. **LOW polish — `commit.retry.num-retries` default value verification.** Iceberg upstream default is 4, not ~20. Fix wherever the resource states this default (Iceberg concurrency / optimistic concurrency resource).
+2. **LOW polish — Q1 MV resource: add "first refresh is always full"** callout (no prior snapshot-ids to diff against) + mention the `iceberg.incremental-refresh-enabled` kill-switch property. Both are small precision adds, not corrections.
 
-3. **LOW polish — Iceberg optimistic concurrency resource:** add `commit.retry.min-wait-ms` / `commit.retry.max-wait-ms` exponential backoff defaults; add worked example of two concurrent INSERTs to disjoint partitions (no conflict) vs same partition (conflict + retry).
+3. **LOW polish — Q3 small-files resource: add the literal Trino `optimize(file_size_threshold => '128MB')` syntax** + a callout that `write.distribution-mode=hash` at write time prevents the small-file problem at the root (rather than only treating it via nightly optimize).
 
-4. **LOW polish — orphan file resource:** explicit "remove_orphan_files needs Spark in your stack" callout; clarify retention threshold semantics (file last-modified-time vs metadata-reference); state that the file-mtime + retention is the safety mechanism, not query reservation.
+4. **LOW polish — Q2 schema-evolution resource: add `schema.name-mapping.default` callout** for legacy Parquet ingested without embedded field IDs (the add_files / external-write footgun).
 
 5. **LOW carry-forward backlog:** dbt-trino merge dups, predicate-pushdown JDBC rewrite, write.isolation-level, SHOW SESSION catalog-prefix, HMS->Nessie no-downtime, SPILL_FAILED 60GB cap, MERGE rollback, OPA-override timeout, schema registry compat, EXPLAIN TYPE IO/VALIDATE, JWT+OPA concurrency, Iceberg tagging 3rd, fs.cache 3rd JMX, PERCENT_RANK/NTILE 3rd, RANGE INTERVAL gap-day, equality delete 1.5.2 bug context, Iceberg v3 deletion vectors timeline.
 
 ---
 
-## Judge probe targets next (iter 409)
+## Judge probe targets next (iter 410)
 
-1. **CRITICAL Trino materialized views on Iceberg** — durability re-probe after teacher MEDIUM fix lands. Probe REFRESH semantics (incremental vs full), storage table layout properties, MV vs dbt rollup decision, no-auto-refresh constraint.
+1. **Trino MV durability 2nd-angle** — probe a different facet: "my MV says it refreshed 5 minutes ago but the dashboard still shows yesterday's numbers — why?" This probes (a) snapshot-id-based freshness vs time-based mental model, (b) GRACE PERIOD interaction, (c) the all-Iceberg-shortcut behavior. Confirms the MV understanding sticks across a different question phrasing.
 
-2. **Iceberg branch READ from Trino — 3rd angle** — "I want to expose `audit-branch` as a view for analysts — how do I write that CREATE VIEW?" probes `FOR VERSION AS OF '<branch-name>'` usage inside CREATE VIEW.
+2. **`rollback_to_snapshot` Spark syntax verification** — natural follow-on from Q4. Probe "exact CALL syntax to roll back to a specific snapshot" — confirms the responder uses the correct two-arg `'schema.table'` form after iter410 teacher fix.
 
-3. **`commit.retry.num-retries` tuning — natural follow-on from Q3** — "how do I increase retries for a hot partition that always conflicts?" — confirms responder knows the correct default (4) and tuning knobs.
+3. **Field-ID column mapping 2nd-angle** — "what happens to existing Parquet files that don't have Iceberg field IDs in their footer (e.g., from add_files)?" Probes the `schema.name-mapping.default` foot-gun.
 
-4. **HMS-to-Nessie no-downtime migration** — long-standing carry-forward. Especially relevant now that branches are a confirmed-working pattern (Nessie is the canonical catalog for branch-heavy workflows).
+4. **HMS-to-Nessie no-downtime migration** — long-standing carry-forward, now even more relevant with Trino MV + branch patterns both confirmed working (Nessie is canonical for both branch-heavy + MV-heavy workflows).
 
-5. **Iceberg v3 deletion vectors timeline** — "when does this stack get deletion vectors and what changes for compaction?" — probes upstream-fix horizon understanding.
+5. **Iceberg v3 deletion vectors timeline** — "when does this stack get deletion vectors and what changes for MoR compaction?" — probes upstream-fix horizon.
 
-6. Carry-forward backlog rotation as needed.
+6. **`write.distribution-mode=hash` for hot-partition write distribution** — natural follow-on from Q3 (preventing small files at write time rather than only treating with optimize).
+
+7. Carry-forward backlog rotation as needed.
