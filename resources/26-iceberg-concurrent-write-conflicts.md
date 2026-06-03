@@ -197,6 +197,44 @@ The right answer for **disjoint-partition false positives** is almost always (b)
 | The table is the source of truth for billing / compliance and you cannot tolerate a phantom-read where a concurrent insert went unseen by a concurrent UPDATE/MERGE. | The table is an append-mostly fact table where updates and inserts target disjoint partitions (most multi-tenant SaaS analytics tables fit this shape). |
 | You are running a one-off MERGE that synchronizes a table from an external source and the source has the full ground truth (any phantom-read would corrupt the merge). | Your UPDATE/DELETE/MERGE operations are partition-scoped and idempotent — the worst case of a missed concurrent insert is "we'll catch it next run." |
 
+### 8.1 The phantom-row risk under `snapshot` — a worked example
+
+The price of `snapshot` is precisely defined: a concurrent **INSERT** of a row that **logically should have been included** in your `UPDATE`/`DELETE`/`MERGE`'s WHERE filter goes **un-seen**. Walk through this to internalize it:
+
+**Setup.** `iceberg.analytics.orders` is configured with `write.update.isolation-level = 'snapshot'`. Two writers run in parallel:
+
+- **Writer A (Spark batch)** at time T: `INSERT INTO orders VALUES (order_id=42, tenant_id='acme', amount=100, status='pending')`. Commits at T+50ms with new snapshot S2.
+- **Writer B (Trino UPDATE)** at time T+10ms: `UPDATE orders SET status = 'cancelled' WHERE tenant_id = 'acme' AND status = 'pending'`. Reads at snapshot S1 (BEFORE Writer A's insert). Commits at T+80ms with new snapshot S3 derived from S1.
+
+**What `snapshot` isolation does:**
+1. Writer B plans its UPDATE against snapshot S1. At S1, the order_id=42 row does not yet exist.
+2. Writer B's plan rewrites the files that contain matching rows AS OF S1. No file from S2 (the one containing order_id=42) is in B's plan.
+3. Writer B commits. Iceberg's `snapshot` check asks: *"did writer A modify or delete any of the row positions writer B is about to overwrite?"* Answer: no — A only appended a new file. Commit succeeds.
+4. Final state at snapshot S3: order_id=42 has `status='pending'` (Writer A's insert), NOT `'cancelled'`. **Writer B's UPDATE silently missed it** — the row logically matches the WHERE filter but was invisible to B at plan time.
+
+Under **`serializable`**, Iceberg's manifest-level overlap check would have detected that A's new file's `tenant_id` min/max range overlaps `'acme'` and the `status` min/max range overlaps `'pending'`, and **rejected Writer B's commit** with `ValidationException: Found conflicting files`. Writer B would retry, re-plan at S2, include order_id=42 in the plan, and produce a correct final state with `status='cancelled'`.
+
+**The trade-off is exactly:** `snapshot` skips the manifest-level overlap check, so writers commit more often without retries, but ACCEPTS that a concurrent INSERT can land "in the WHERE-filter blind spot" of a concurrent UPDATE/DELETE/MERGE. The phantom row exists in the final table with its pre-UPDATE value.
+
+**When this is OK in SaaS analytics:**
+- **Idempotent re-runs catch the drift.** If Writer B is part of a nightly dbt model that re-evaluates the WHERE filter every run, the NEXT run will see order_id=42 at status='pending' and set it to 'cancelled'. The phantom-row is fixed within one cycle of the pipeline.
+- **The application is the source of truth, not the warehouse.** If order_id=42's "cancelled" state is recorded in Postgres and the warehouse is a downstream mirror, the next ingestion sync re-pulls the row's correct status from Postgres.
+- **The table is append-mostly with rare cross-partition updates.** The window for phantom-row anomalies is small — only writes whose plan time overlaps with another writer's commit time.
+
+**When this is NOT OK:**
+- **The warehouse is the source of truth for billing/compliance.** Missing a status flip on an in-flight order can mean a customer is billed for a cancelled order. Stay on `serializable` and pay the retry cost.
+- **The UPDATE is a one-shot reconciliation against an external source.** You synchronize from external data once, and you need the final state to reflect the full set as of plan time. Stay on `serializable`.
+- **You cannot tolerate ANY drift between concurrent commits.** Either use `serializable` or serialize the writers (only one runs at a time) — `snapshot` is fundamentally a "accept some drift" knob.
+
+### 8.2 Defenses to layer on top of `snapshot`
+
+If you choose `snapshot` for throughput but want to bound the phantom-row exposure:
+
+1. **Partition-prune the UPDATE/MERGE explicitly.** If your `UPDATE` says `WHERE order_date = DATE '2026-05-29'` and the concurrent INSERT writes to a different partition, the partition predicate AT THE QUERY LEVEL (not the isolation check) already excludes the new file. The phantom risk is only on UPDATEs that span the same partitions as concurrent INSERTs.
+2. **Schedule re-runs.** Make the UPDATE/MERGE idempotent and run it on a cadence (every N minutes / hourly / nightly). Phantom-row drift gets caught on the next run. This is the canonical pattern for dbt incremental models.
+3. **Verify drift periodically.** Run a Trino sanity query (`SELECT COUNT(*) FROM orders WHERE status = 'pending' AND tenant_id = 'acme' AND order_date < CURRENT_DATE - INTERVAL '1' DAY`) on a schedule. A non-zero count after the daily reconciliation means you have drift; alert and re-run the UPDATE.
+4. **Use `snapshot` per-operation, not per-table.** If only the high-contention MERGE needs `snapshot`, set only `write.merge.isolation-level = 'snapshot'` and leave `write.delete` / `write.update` at `serializable`. The trade-off becomes targeted.
+
 ---
 
 ## 9. Pitfalls and footguns

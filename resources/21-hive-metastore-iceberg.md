@@ -373,6 +373,75 @@ For on-prem with MinIO, the realistic choices are: **HMS** (status quo), **REST 
 
 ---
 
+## HMS -> Nessie no-downtime migration — the mechanics
+
+> **The migration is metadata-only.** Iceberg tables in HMS and in Nessie point at the **same `metadata.json` files in MinIO** — no data files move, no Parquet rewrites, no compaction. The migration changes WHICH catalog holds the current-`metadata.json` pointer; the data is shared. This is what makes a true no-downtime migration possible.
+
+### The atomic unit of migration: one table's catalog registration
+
+For each Iceberg table, the migration does ONE of two things:
+
+1. **`registerTable`** (Java API: `Catalog.registerTable(TableIdentifier, metadataLocation)`) — Nessie reads the current `metadata.json` location from HMS, then writes a new pointer record in Nessie to the **same** `metadata.json`. Both catalogs now know about the table; both can read it. Writes from either catalog produce new `metadata.json` files in MinIO, but only the WRITING catalog's pointer advances. This is the **dual-write window** below.
+2. **Cutover** — flip writers from HMS-pointed-Trino/Spark to Nessie-pointed-Trino/Spark. HMS still has the old `metadata.json` pointer (it remains queryable for a frozen view); Nessie now holds the live pointer that writers advance.
+
+### The [iceberg-catalog-migrator](https://github.com/projectnessie/iceberg-catalog-migrator) tool
+
+Project Nessie ships an official CLI that bulk-registers tables between any two Iceberg catalog implementations. Typical invocation:
+
+```bash
+java -jar iceberg-catalog-migrator-cli.jar register \
+  --source-catalog-type HIVE \
+  --source-catalog-properties uri=thrift://hms.iceberg.svc.cluster.local:9083 \
+  --source-catalog-hadoop-conf fs.s3a.endpoint=http://minio.minio.svc.cluster.local:9000 \
+  --target-catalog-type NESSIE \
+  --target-catalog-properties uri=http://nessie.nessie.svc.cluster.local:19120/api/v1,ref=main \
+  --identifiers-from-file tables_to_migrate.txt
+```
+
+The tool walks the source catalog, reads each table's current `metadata.json` location, and calls `registerTable` on the target catalog with the SAME location. **No data movement, no `metadata.json` rewrites.** A 10,000-table catalog migrates in minutes (limited by HMS read throughput, not by MinIO data motion).
+
+### The dual-write window — the no-downtime mechanism
+
+The migration follows a four-phase pattern that keeps writes available the entire time:
+
+| Phase | HMS state | Nessie state | Trino writers point at | Spark writers point at | Readers point at |
+|---|---|---|---|---|---|
+| **0. Baseline** | All tables, live pointer | (Nessie not yet deployed) | HMS | HMS | HMS |
+| **1. Nessie deployed, tables registered** | All tables, live pointer | All tables registered, **pointer matches HMS** | HMS | HMS | HMS (Nessie shadow-readable for testing) |
+| **2. Readers cut over** | All tables, live pointer | All tables, **pointer matches HMS** | HMS (still writing) | HMS (still writing) | **Nessie** (catches all writes via re-register) |
+| **3. Writers cut over** | All tables, **pointer frozen** at cutover moment | All tables, **live pointer** | **Nessie** | **Nessie** | **Nessie** |
+| **4. HMS decommissioned** | (deleted) | All tables, live pointer | Nessie | Nessie | Nessie |
+
+**The critical phase is Phase 2 -> Phase 3.** Between registering tables in Nessie (Phase 1) and cutting writers over (Phase 3), there is a window where readers use Nessie but writers still use HMS. **Any write during this window advances HMS's pointer but NOT Nessie's** — Nessie now has a stale pointer. The two reconciliation patterns:
+
+- **Re-register periodically.** Run the migrator tool's `register --overwrite` mode every N minutes during Phase 2 to copy HMS's latest pointer into Nessie. Each re-register is metadata-only and atomic. Readers using Nessie see slightly-stale snapshots; if your reader workload tolerates 5-minute staleness, this is fine.
+- **Freeze writes briefly at cutover.** Run a final re-register, then within seconds flip writers from HMS to Nessie. This is the "near-zero-downtime" form — typically ~30 seconds where writes pause; readers are unaffected.
+
+### What can go wrong (and how to avoid it)
+
+- **Stale Nessie pointer after Phase 2.** Symptom: a reader using Nessie misses recent writes that landed via HMS. **Fix**: schedule periodic `register --overwrite` during the dual-write window, OR cut writers over quickly (within minutes of registering tables).
+- **Concurrent writes from both catalogs.** Symptom: Spark writing via HMS and another Spark job writing via Nessie produce two divergent `metadata.json` chains. **Fix**: **never allow concurrent writes from both catalogs to the same table.** Cutover writers atomically — flip the Spark / Trino config to point at Nessie in one deployment, not gradually.
+- **Old `metadata.json` chain orphaned in HMS.** After cutover, HMS's pointer still references the pre-cutover `metadata.json`. **This is fine — the data is shared in MinIO.** The HMS pointer becomes a frozen view of the table at cutover time, useful for audit / rollback. Decommission HMS once you're confident the migration succeeded.
+- **`fs.s3a.endpoint` / MinIO credentials missing from the migrator's Hadoop config.** Symptom: the migrator tool fails to read `metadata.json` from MinIO. **Fix**: pass the S3A endpoint, access key, and secret to the migrator via `--source-catalog-hadoop-conf` so it can read the metadata files; the same config the production Spark and Trino use applies here.
+- **View / schema definitions.** The catalog migrator handles Iceberg tables only — Hive **views** (non-Iceberg `_VIEW` rows in HMS) do NOT migrate. Plan a separate inventory + manual recreate step for any Hive views that downstream queries depend on.
+
+### Why HMS -> Nessie is structurally cheaper than data migration
+
+A re-platform that required moving data files (e.g., switching from Parquet to a different format) would mean: read every file, rewrite it, update catalog pointers, validate, decommission old files. That's hours-to-days per terabyte, plus 2x storage during the transition. **HMS -> Nessie is not that** — it's purely a metadata-layer swap. **No data motion. No storage doubling. No compaction. No file format change.** The cost is bounded by the count of tables, not the volume of data. A 100 TB Iceberg warehouse migrates in the same wall-clock time as a 100 GB one (both are dominated by catalog round-trips, not data I/O).
+
+### When to do it vs not
+
+| Situation | Recommendation |
+|---|---|
+| HMS HA is working, no Nessie-specific feature need | Stay on HMS. Migration cost > benefit. |
+| Need catalog-level branching (PR-style data workflows, "dev" branch for testing migrations) | **Migrate to Nessie** — branching is the unique feature Nessie offers over HMS. |
+| Need multi-engine catalog (Trino + Spark + Flink + Dremio all hitting one HTTP API) | Migrate to a REST catalog — Nessie, Polaris, or Lakekeeper. Choice between them is operational preference. |
+| Frequent HMS outages from Postgres failover, HMS OOM, Thrift socket exhaustion | Migrate to a REST catalog. Eliminates the Thrift + Postgres operational pair. |
+
+For this on-prem stack with MinIO, the migration playbook above works the same for **Nessie, Polaris, or Lakekeeper** — the catalog choice is a deployment decision, not a migration mechanism difference. The `iceberg-catalog-migrator` supports all three target types.
+
+---
+
 ## Quick reference
 
 | Question | Answer |

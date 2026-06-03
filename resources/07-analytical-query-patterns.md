@@ -604,8 +604,17 @@ SELECT
 FROM iceberg.analytics.daily_dau;
 ```
 
-- `RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW` — a value-based frame: include all rows whose `day` is within 6 days before this row. Works correctly even when some days are missing (gaps).
-- `ROWS BETWEEN 6 PRECEDING AND CURRENT ROW` is the row-count alternative — strict last 7 rows. Use this only when you know there are no day gaps.
+- `RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW` — a **value-based** frame: include all rows whose `day` is within 6 days before this row. **Gap-day correct** — if a tenant has no events on `day = 2026-05-25` but has events on `2026-05-24` and `2026-05-26`, the frame for the `2026-05-26` row correctly includes the 5 days from `2026-05-20` through `2026-05-25` AND the 1 row from `2026-05-26`, even though `2026-05-25` is absent.
+- `ROWS BETWEEN 6 PRECEDING AND CURRENT ROW` is the row-count alternative — **strict last 7 rows by position**. Use this only when you know there are no day gaps; if `2026-05-25` is missing, this frame at `2026-05-26` instead includes the 7 PHYSICAL ROWS ending at `2026-05-26`, which may span 8+ calendar days because of the gap. **This is the most common cause of "my 7-day rolling average looks wrong on holidays / weekends with no data" bugs.**
+
+> **RANGE vs ROWS gap-day semantics — the rule.** For time-series rolling windows on dense daily data with **no missing days**, `RANGE BETWEEN INTERVAL '6' DAY PRECEDING` and `ROWS BETWEEN 6 PRECEDING` produce identical results. The instant any day is missing (a tenant with no events on Sundays, a holiday with zero traffic, a maintenance window) the two diverge:
+>
+> - **`RANGE` is calendar-aware** — `INTERVAL '6' DAY PRECEDING` always means "any row whose ORDER BY value (the `day` column) is between `current_day - INTERVAL '6' DAY` and `current_day`, inclusive." Missing days simply contribute zero rows to the frame; the value-based boundary is unchanged.
+> - **`ROWS` is position-aware** — `6 PRECEDING` means "the 6 input rows immediately preceding this one in ORDER BY order." A gap shifts the frame backward by the count of the gap in physical rows.
+>
+> For SaaS analytics on DAU / MAU / revenue rollups where you frequently have missing days (holidays, idle tenants, ingestion blackouts), **default to `RANGE BETWEEN INTERVAL` over `ROWS BETWEEN N PRECEDING`**. The `RANGE` form requires the `ORDER BY` column to be one of: a numeric type (INTEGER, BIGINT, DOUBLE), a `DATE`, a `TIMESTAMP`, or a `TIMESTAMP WITH TIME ZONE`. The offset must be the matching `INTERVAL` type. Verified against [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html) — Trino supports `RANGE` value-based frames since the [March 2021 window-features release](https://trino.io/blog/2021/03/10/introducing-new-window-features.html).
+>
+> **Empty-frame edge case.** A `RANGE` frame can produce ZERO rows if the ORDER BY values around the current row don't fall inside the offset window. Window aggregates over an empty frame return: `COUNT()` -> 0, `SUM/AVG/MIN/MAX` -> NULL, `array_agg` -> NULL. Downstream consumers must handle NULL — `COALESCE(rolling_7d_avg_dau, 0)` is the standard guard. A `ROWS` frame **cannot** produce an empty frame at non-edge rows (it always has `N+1` rows), which is one reason engineers reach for it — but the cost is incorrect calendar semantics on sparse data.
 
 ### Performance: when window functions get expensive
 

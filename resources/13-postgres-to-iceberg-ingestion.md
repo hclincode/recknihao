@@ -4714,7 +4714,62 @@ HAVING COUNT(*) > 1
 LIMIT 20;
 ```
 
-If this returns rows, duplicates exist and either Question 1 or Question 2 (or both) is the cause. To address Question 2 specifically, add **deduplication before the MERGE** using the `ROW_NUMBER()` window pattern already documented in this resource (see the "Spark job skeleton" section, step 3):
+If this returns rows, duplicates exist and either Question 1 or Question 2 (or both) is the cause. To address Question 2 specifically, add **deduplication before the MERGE** using the `ROW_NUMBER()` window pattern already documented in this resource (see the "Spark job skeleton" section, step 3).
+
+> **CRITICAL — Trino 467 does NOT support the `QUALIFY` clause.** A very common AI-generated mistake on "dedup before MERGE" questions is to recommend `... QUALIFY ROW_NUMBER() OVER (PARTITION BY key ORDER BY ts DESC) = 1`. **`QUALIFY` is Snowflake / BigQuery / Databricks syntax — it is NOT in Trino's SELECT grammar** (verified against [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) — `QUALIFY` is absent from the documented clause list, which is: `WITH`, `SELECT`, `FROM`, `WHERE`, `GROUP BY`, `HAVING`, `WINDOW`, set operations, `ORDER BY`, `OFFSET`, `LIMIT`/`FETCH FIRST`). The [Starburst community forum thread "Available window functions and Qualify statement"](https://www.starburst.io/community/forum/t/available-window-functions-and-qualify-statement/515/) confirms `QUALIFY` is a long-standing **feature request**, not a supported clause; the [Trino 467 release notes (6 Dec 2024)](https://trino.io/docs/current/release/release-467.html) do not add it; the [Trino 475 release notes (23 Apr 2025)](https://trino.io/docs/current/release/release-475.html) do not add it. **Engineer copy-paste of any `QUALIFY ...` recipe against Trino 467 produces an immediate parse error.**
+>
+> **The Trino-compatible canonical dedup-before-MERGE pattern is the `ROW_NUMBER()` subquery with an outer `WHERE rn = 1`:**
+>
+> ```sql
+> -- WRONG — Snowflake / BigQuery / Databricks syntax. FAILS ON TRINO 467 with a parse error:
+> -- SELECT *
+> -- FROM source
+> -- QUALIFY ROW_NUMBER() OVER (PARTITION BY key ORDER BY updated_at DESC) = 1;
+>
+> -- RIGHT — Trino 467 canonical dedup pattern (subquery + outer WHERE):
+> SELECT *  -- list real columns in production; star is for brevity here
+> FROM (
+>     SELECT *,
+>            ROW_NUMBER() OVER (PARTITION BY key ORDER BY updated_at DESC) AS rn
+>     FROM source
+> )
+> WHERE rn = 1;
+>
+> -- EQUIVALENT — CTE form (same semantics, often more readable inside a MERGE USING):
+> WITH ranked AS (
+>     SELECT *,
+>            ROW_NUMBER() OVER (PARTITION BY key ORDER BY updated_at DESC) AS rn
+>     FROM source
+> )
+> SELECT * FROM ranked WHERE rn = 1;
+> ```
+>
+> **Inside a dbt-trino incremental MERGE, the dedup goes in the model's source SELECT** so the compiled MERGE's USING-subquery is already deduped:
+>
+> ```sql
+> {{ config(
+>     materialized='incremental',
+>     unique_key='order_id',
+>     incremental_strategy='merge'
+> ) }}
+>
+> -- Source SELECT with built-in dedup (Trino-compatible, NO QUALIFY):
+> SELECT order_id, customer_id, amount, status, updated_at
+> FROM (
+>     SELECT *,
+>            ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY updated_at DESC) AS rn
+>     FROM {{ source('app', 'orders') }}
+>     {% if is_incremental() %}
+>     WHERE updated_at > (SELECT COALESCE(MAX(updated_at), TIMESTAMP '1970-01-01') FROM {{ this }})
+>     {% endif %}
+> ) WHERE rn = 1
+> ```
+>
+> **Why this matters even when `unique_key` is set.** dbt-trino's `unique_key` only governs the MERGE's `ON` clause join key — it does NOT dedup the source. If the source SELECT produces two rows for the same `order_id`, the MERGE fails with `MERGE_TARGET_ROW_MULTIPLE_MATCHES` (the ISO SQL "one source row per target row" rule — see resource 22's MERGE section). The Trino-compatible dedup MUST be inside the source SELECT.
+>
+> **General rule for this stack: when in doubt about a SQL feature, verify against [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) and the relevant [release notes](https://trino.io/docs/current/release.html) — DO NOT carry features over from Snowflake / BigQuery / Databricks tutorials.** A `Trino 467 SQL-dialect anti-patterns` cheat sheet is in resource 23 ("SQL best practices for OLAP").
+
+Inline `ROW_NUMBER()` window pattern (Spark / PySpark form referenced above):
 
 ```python
 from pyspark.sql import Window

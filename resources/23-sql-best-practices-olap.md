@@ -798,6 +798,66 @@ If you can answer "yes" to all thirteen, you avoid the most common 10x-cost mist
 
 ---
 
+## Trino 467 SQL-dialect anti-patterns — do NOT carry these over from other warehouses
+
+Trino has its own SQL dialect. A surprising number of features that "feel like standard SQL" because they exist in Snowflake / BigQuery / Databricks / Postgres are **NOT in Trino's grammar** and produce immediate parse errors when copy-pasted. Verify against [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) and the [release notes](https://trino.io/docs/current/release.html) before assuming a feature works on this stack.
+
+### Anti-patterns and their Trino-compatible rewrites
+
+| Feature you might reach for | Where it comes from | Status in Trino 467 | Trino-compatible rewrite |
+|---|---|---|---|
+| **`QUALIFY ROW_NUMBER() OVER (...) = 1`** (dedup / top-N-per-group) | Snowflake, BigQuery, Databricks, Teradata | **NOT supported.** Parse error. Long-standing feature request only (see [Starburst forum](https://www.starburst.io/community/forum/t/available-window-functions-and-qualify-statement/515/)). | Subquery + outer `WHERE rn = 1`: `SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY k ORDER BY t DESC) AS rn FROM src) WHERE rn = 1;` |
+| **`SELECT * EXCEPT (col1, col2)`** (column-exclusion projection) | BigQuery, Databricks, ClickHouse | **NOT supported.** Parse error. Open feature request [trinodb/trino #26969](https://github.com/trinodb/trino/issues/26969). | Spell out the columns you want. Use `DESCRIBE <table>` to list them, then copy/edit. |
+| **`SELECT * REPLACE (expr AS col)`** (column-replacement projection) | BigQuery | **NOT supported.** Parse error. | Spell out columns: `SELECT col1, expr AS col2, col3 FROM t;` |
+| **`LIMIT N BY col`** (per-group LIMIT) | ClickHouse | **NOT supported.** Parse error. | `ROW_NUMBER()` subquery + outer `WHERE rn <= N` (same pattern as the QUALIFY rewrite). |
+| **`TOP N`** (Microsoft / Sybase row limit) | SQL Server, Sybase | **NOT supported.** Parse error. | `LIMIT N` (Trino's documented form) or `FETCH FIRST N ROWS ONLY` (also supported per Trino SELECT grammar). |
+| **`DISTINCT ON (col)`** (Postgres' "one row per group") | PostgreSQL | **NOT supported.** Parse error. | `ROW_NUMBER()` subquery + outer `WHERE rn = 1` (same pattern as QUALIFY). |
+| **`GENERATE_SERIES(...)`** as a table function | PostgreSQL | **NOT supported by that name.** Use Trino's `sequence(start, stop, step)` returning an array, then `UNNEST`. | `SELECT n FROM UNNEST(sequence(1, 10)) AS t(n);` |
+| **`NOW() AT TIME ZONE 'UTC'`** | PostgreSQL syntax | **Different semantics.** Trino's `current_timestamp AT TIME ZONE 'UTC'` works on `TIMESTAMP WITH TIME ZONE`. | Use `current_timestamp AT TIME ZONE 'UTC'`, or `at_timezone(ts, 'UTC')`. |
+| **`EXTRACT(EPOCH FROM ts)`** | PostgreSQL | **NOT supported as `EPOCH`.** | `to_unixtime(ts)` returns seconds-since-epoch as `DOUBLE`. |
+| **`::cast` syntax** (`col::int`) | PostgreSQL | **NOT supported.** Parse error. | Use ANSI `CAST(col AS INTEGER)` or Trino's `try_cast(col AS INTEGER)`. |
+| **`TIMESTAMPDIFF(MINUTE, a, b)`** | MySQL, SQL Server | **NOT supported.** | `date_diff('minute', a, b)` returns BIGINT. |
+| **`DATE_FORMAT(d, '%Y-%m-%d')`** with MySQL specifiers | MySQL | **Format-string is different.** Trino uses Java/JodaTime patterns. | `format_datetime(d, 'yyyy-MM-dd')` or `date_format(d, '%Y-%m-%d')` — the second form accepts MySQL-style specifiers, but the recommended Trino form is `format_datetime` with Java patterns. |
+| **`STRING_AGG(col, sep ORDER BY ...)`** | PostgreSQL | **NOT under that name.** | `listagg(col, sep) WITHIN GROUP (ORDER BY ...)` is Trino's ANSI-standard form. Added as a window function in Trino 467 release. |
+| **`ARRAY_AGG` with implicit ORDER BY** | various | **No implicit ORDER BY** — Trino's `array_agg` is unordered unless specified. | `array_agg(col ORDER BY ts)` — always specify ORDER BY when order matters. |
+| **`MERGE` on non-Iceberg connectors without flag** | various | **Per-connector gate.** Iceberg MERGE is supported by default; MySQL/PostgreSQL MERGE requires connector-specific flags (see resource 22 section 2A). | Check the connector's MERGE support matrix before assuming MERGE works. |
+| **Postgres `RETURNING` clause** on INSERT/UPDATE/DELETE | PostgreSQL | **NOT supported.** Parse error. | Run a follow-up SELECT or use the `Trino transaction count(...) - count(...)` row-count diagnostics. |
+| **`ILIKE`** (case-insensitive LIKE) | PostgreSQL | **Supported** — Trino has `ILIKE` as a keyword. But **pushdown** to PostgreSQL is conditional on `enable_string_pushdown_with_collate=true` + compatible column collation (see resource 22). | Use `col ILIKE 'pat%'` freely in Trino-evaluated filters; verify EXPLAIN for pushdown if the col is in a JDBC catalog. |
+| **`GROUP BY ALL`** (group by every non-aggregate) | Snowflake, Databricks | **SUPPORTED** in Trino's SELECT grammar (`GROUP BY [ ALL | DISTINCT ] ...`). | Free to use, but explicit `GROUP BY col1, col2` is more grep-able. |
+| **`FETCH FIRST N ROWS ONLY`** (ANSI) | ANSI SQL, DB2, Oracle | **SUPPORTED** alongside `LIMIT N`. | Either is fine; `LIMIT N` is shorter. |
+| **Window function in WHERE** (`WHERE ROW_NUMBER() OVER (...) = 1`) | none — never legal in standard SQL | **NOT supported in any SQL dialect, including Trino.** | Wrap in a subquery: `SELECT * FROM (SELECT *, ROW_NUMBER() OVER (...) AS rn FROM t) WHERE rn = 1;` — same pattern as the QUALIFY rewrite. |
+
+### The most-common Trino-dialect rewrite pattern
+
+**90% of the dialect-mismatch errors a SaaS engineer hits on Trino can be fixed with one pattern**: the `ROW_NUMBER()` subquery + outer `WHERE rn = 1` (or `rn <= N` for top-N-per-group). Memorize this:
+
+```sql
+-- Generic top-N-per-group dedup pattern — works on Trino 467 for:
+-- - "dedup before MERGE" (Snowflake's QUALIFY)
+-- - "top-N-per-group" (ClickHouse's LIMIT N BY)
+-- - "one row per group with max(ts)" (Postgres' DISTINCT ON)
+-- - "TOP N per partition" (SQL Server's PARTITION BY in TOP)
+
+SELECT col1, col2, col3   -- list real columns, avoid SELECT *
+FROM (
+    SELECT
+        col1,
+        col2,
+        col3,
+        ROW_NUMBER() OVER (PARTITION BY group_key ORDER BY ts DESC) AS rn
+    FROM source_table
+    WHERE <any_filters>
+) WHERE rn <= 1   -- =1 for dedup; <=N for top-N
+```
+
+This is the canonical Trino form. Any "dedup" / "latest per group" / "top N per group" recipe you find online that uses `QUALIFY` / `LIMIT N BY` / `DISTINCT ON` / `TOP N PARTITION BY` translates 1:1 to this pattern.
+
+### Why this matters for the prod stack
+
+The production stack is **Trino 467 OSS + Iceberg 1.5.2**. dbt models compile to Trino SQL. Ad-hoc queries run through Trino. AI-assistant tools (including Cursor, Copilot, and ChatGPT) routinely suggest QUALIFY / LIMIT BY / DISTINCT ON because they pattern-match on more popular warehouses. **Every such suggestion fails immediately on this stack** — there is no graceful degradation, just a parse error at the coordinator. If a copy-pasted query fails with `mismatched input 'QUALIFY'` / `mismatched input 'BY'` / `mismatched input 'ON'`, reach for the `ROW_NUMBER()` subquery pattern above.
+
+---
+
 ## Key terms
 
 - **Predicate pushdown**: passing a WHERE condition down to the storage layer (Iceberg) so it can skip files instead of returning everything to Trino.
