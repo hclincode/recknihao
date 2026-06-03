@@ -8346,7 +8346,7 @@ Caveats for `system.query()` (same as elsewhere in this doc — see §9.4 for th
 5. **The fallback for any failure shape**: `system.query()` passthrough — Postgres does the whole sort+limit; add an outer Trino ORDER BY to preserve client ordering.
 6. **DO NOT conclude from one failed-pushdown query that "OSS Trino can't push TopN"** — the feature IS available; that one query's specific shape blocked the push. Each shape has a different workaround.
 
-### 13.5A The least-explored federation angles — aggregation pushdown EXPLAIN, HAVING pushdown, 3-way cross-catalog JOIN execution location, OR-with-mixed-types
+### 13.5A The least-explored federation angles — aggregation pushdown EXPLAIN, HAVING pushdown, 3-way cross-catalog JOIN execution location, OR-with-mixed-types, Limit-without-ORDER-BY pushdown
 
 > **SCOPE.** This sub-section consolidates the four most-probed federation angles that section 13.1-13.5 cover only briefly. Each angle leads with a single canonical statement, an EXPLAIN signature, and a verbatim trino.io doc citation where available. **Use this sub-section as the answer template for any question framed as "does X push" / "where does X execute" / "what's the EXPLAIN signature for X."**
 
@@ -8791,6 +8791,118 @@ SELECT DISTINCT * FROM (
 ```
 
 **The contrast in one sentence.** AND-of-mixed-pushability: the pushable predicates still push; the un-pushable ones become residual filters on Trino. OR-of-mixed-pushability: **none of the predicates push if even one disjunct is un-pushable** — because skipping any disjunct would change the result set. AND is composable; OR is not. **This asymmetry is the single most important predicate-pushdown semantics rule on the JDBC connectors.**
+
+---
+
+#### 13.5A.5 Limit pushdown WITHOUT ORDER BY — a separate connector capability from Top-N pushdown
+
+> **LIMIT-WITHOUT-ORDER-BY GUARDRAIL — read this BEFORE answering any `LIMIT N`-without-ORDER-BY question.** **Limit pushdown** and **Top-N pushdown** are listed as TWO DIFFERENT connector capabilities by Trino docs. Do NOT conflate them. The PostgreSQL connector supports both, but the EXPLAIN signature, the doc-quoted definition, and the failure-shape catalog differ.
+>
+> **THE ONE SENTENCE TO BURN INTO MEMORY (the leading canonical statement for `LIMIT N` without an ORDER BY on the PostgreSQL connector):**
+>
+> > For a **PLAIN** `SELECT ... FROM app_pg.<schema>.<table> LIMIT N` query (no ORDER BY, no GROUP BY, no JOIN, no UNION) on the OSS Trino 467 PostgreSQL connector — **Limit pushdown FIRES BY DEFAULT.** Trino sends `SELECT ... FROM <table> LIMIT N` (or `FETCH FIRST N ROWS ONLY`) directly to Postgres over JDBC. Postgres stops scanning at N rows. **N rows cross the JDBC wire — Trino does NOT pull the full table.**
+>
+> **Doc-quoted source — trino.io/docs/current/optimizer/pushdown.html (verbatim, doc-quoted):**
+>
+> > *"A LIMIT or FETCH FIRST clause reduces the number of returned records for a statement. Limit pushdown enables a connector to push processing of such queries of unsorted record to the underlying data source."*
+>
+> Note the verbatim phrase **"unsorted record"** — Limit pushdown is the capability that applies to LIMIT queries WITHOUT an ORDER BY. When ORDER BY is present, the relevant capability is Top-N pushdown (the OTHER capability — see §13.5).
+>
+> **Doc-quoted source — trino.io/docs/current/connector/postgresql.html (verbatim, doc-quoted):**
+>
+> > *"The connector supports pushdown for a number of operations: [Join pushdown] [Limit pushdown] [Top-N pushdown]"*
+>
+> Both Limit pushdown AND Top-N pushdown are listed as supported PostgreSQL-connector capabilities — as two **separate** items. They are not the same capability under different names.
+
+**The canonical pushed case — `SELECT ... FROM pg.t LIMIT N` (no ORDER BY):**
+
+```sql
+-- Your Trino query (the canonical shape that DOES push):
+SELECT id, customer_name, revenue
+FROM app_pg.public.customers
+LIMIT 100;
+-- No ORDER BY. No GROUP BY. No JOIN. No UNION. Plain LIMIT.
+
+-- What Trino sends to Postgres over JDBC (Limit pushdown fires):
+SELECT id, customer_name, revenue FROM public.customers LIMIT 100;
+-- Or equivalently (depending on connector dialect): ... FETCH FIRST 100 ROWS ONLY.
+
+-- Postgres stops scanning at row 100. 100 rows cross the JDBC wire.
+-- Trino does NOT receive the full table.
+```
+
+**EXPLAIN signature for SUCCESS (the canonical case — what you want):**
+
+```
+Output
+└── TableScan[app_pg:public.customers, limit=100]
+    -- limit=100 is an annotation INSIDE the TableScan.
+    -- NO separate Limit Trino operator above the TableScan.
+    -- (Compare to the TopN case where you also see sortOrder=[...] inside the TableScan.
+    --  For pure Limit pushdown there is NO sortOrder= annotation — only limit=.)
+```
+
+**EXPLAIN signature for FAILURE (the slow path):**
+
+```
+Output
+└── Limit[100]
+    └── TableScan[app_pg:public.customers]
+    -- A separate Limit operator is PRESENT as its own node above the TableScan.
+    -- The TableScan has NO limit= annotation.
+    -- Trino fetched some unknown number of rows from Postgres
+    -- and is applying LIMIT 100 in worker memory.
+```
+
+> **EMPIRICAL note (EXPLAIN-observable, not doc-quoted).** The above presence-vs-absence convention follows the same operator-ABSENT-equals-pushed pattern documented for Top-N pushdown verbatim on trino.io/docs/current/optimizer/pushdown.html (*"The absence of the TopN Trino operator in the Fragment 0 from the query plan demonstrates that the query benefits of the Top-N pushdown optimization."*). Trino docs do not provide a parallel verbatim quote for Limit pushdown's EXPLAIN signature, but the convention is the same — verify on your cluster with `EXPLAIN (TYPE DISTRIBUTED) SELECT ... FROM pg.t LIMIT N` and look for `limit=N` inside the TableScan versus a separate `Limit[N]` operator above it.
+
+**The critical distinction — Limit pushdown vs Top-N pushdown (memorize this table):**
+
+| Query shape | Capability that applies | EXPLAIN success signature | EXPLAIN failure signature |
+|---|---|---|---|
+| `SELECT ... FROM pg.t LIMIT N` (no ORDER BY) | **Limit pushdown** (capability #6 of the seven) | `TableScan[..., limit=N]` — `limit=` INSIDE the TableScan, NO `sortOrder=`, NO separate operator above | A separate `Limit[N]` operator above a bare `TableScan` |
+| `SELECT ... FROM pg.t ORDER BY col LIMIT N` | **Top-N pushdown** (capability #7 of the seven) | `TableScan[..., sortOrder=[col DESC NULLS LAST], limit=N]` — BOTH `sortOrder=` AND `limit=` INSIDE the TableScan, NO separate operator above | A separate `TopN[N, orderBy=[col DESC]]` operator above a bare `TableScan` |
+| `SELECT ... FROM pg.t GROUP BY x LIMIT N` (no ORDER BY) | **Limit pushdown is BLOCKED by the GROUP BY** — the Limit must run AFTER the GROUP BY, and the GROUP BY's pushability is governed separately by Aggregation pushdown (§13.5A.1) | Depends on whether the aggregate pushes; the `Limit[N]` operator typically sits ABOVE the `Aggregate` (or above the `TableScan` if the aggregate also pushed and Postgres emitted pre-aggregated rows — verify with EXPLAIN) | n/a — this is a different code path |
+
+> **DO NOT WRITE — the conflation trap.** Limit pushdown and Top-N pushdown are NOT the same capability. They appear as SEPARATE entries in the connector's pushdown-support list on trino.io/docs/current/connector/postgresql.html. A query with no ORDER BY does NOT use Top-N pushdown — it uses Limit pushdown. Conversely, a query with ORDER BY + LIMIT does NOT use Limit pushdown — it uses Top-N pushdown. **The relevant doc-quote ("unsorted record") explicitly scopes Limit pushdown to LIMIT-without-ORDER-BY queries.**
+
+**DO-NOT-WRITE table — sentences that conflate Limit and Top-N pushdown:**
+
+| DO NOT WRITE | Why it's wrong | WRITE THIS INSTEAD |
+|---|---|---|
+| "`SELECT * FROM pg.t LIMIT 100` triggers Top-N pushdown." | FALSE. There is no ORDER BY — Top-N pushdown applies to ORDER BY + LIMIT. Without ORDER BY, the applicable capability is **Limit pushdown** (separate connector capability per trino.io/docs/current/connector/postgresql.html). | "`SELECT * FROM pg.t LIMIT 100` triggers **Limit pushdown** (not Top-N pushdown). Trino sends `LIMIT 100` to Postgres; Postgres stops scanning at 100 rows. EXPLAIN: `limit=100` annotation inside the TableScan, NO `sortOrder=` annotation, NO separate operator above." |
+| "Limit pushdown and Top-N pushdown are the same thing under different names." | FALSE. They are LISTED AS SEPARATE CAPABILITIES on trino.io/docs/current/connector/postgresql.html. The Trino docs at trino.io/docs/current/optimizer/pushdown.html define Limit pushdown as applying to "queries of **unsorted record**" — explicitly distinct from Top-N (which combines ORDER BY + LIMIT). | "Limit pushdown applies to LIMIT-without-ORDER-BY; Top-N pushdown applies to ORDER BY + LIMIT. They are separate capabilities. EXPLAIN signatures differ: Limit pushdown shows only `limit=N`; Top-N pushdown shows BOTH `sortOrder=[...]` AND `limit=N`." |
+| "`LIMIT 100` after a GROUP BY pushes as Limit pushdown." | MISLEADING. The Limit lives ABOVE the GROUP BY in the plan tree — whether it pushes to Postgres depends on whether the GROUP BY also pushes (which is Aggregation pushdown, §13.5A.1). For the typical case where the aggregate pushes, EXPLAIN ANALYZE will sometimes show the limit folded into the synthetic JDBC query; for the case where the aggregate stays on Trino, the Limit also stays on Trino above the Aggregate. **Verify with EXPLAIN — don't assume.** | "Limit pushdown for a `GROUP BY ... LIMIT N` query is plan-shape-dependent: if the aggregate pushes (§13.5A.1 IFF rule), the Limit may also push as part of the synthetic JDBC query; if the aggregate stays on Trino, the Limit also stays on Trino above the Aggregate operator. Always verify with EXPLAIN." |
+| "Limit pushdown to Postgres returns the FIRST N rows by primary key." | FALSE / UNDEFINED. Without an ORDER BY, the rows Postgres returns are in **physical / heap order** — typically insertion order, but the SQL standard says ORDER OF ROWS IS UNDEFINED without ORDER BY. The N rows returned may differ across runs (e.g., after a VACUUM FULL, or due to parallel scans). | "Without ORDER BY, the N rows Postgres returns are in undefined order (typically heap/physical order, but this is implementation-dependent and may change across runs). If your application needs a deterministic N rows, add an ORDER BY — which switches the capability from Limit pushdown to Top-N pushdown." |
+
+**Failure shapes — when Limit pushdown does NOT fire (EXPLAIN-observable, not exhaustively doc-quoted):**
+
+The Trino docs verbatim state Limit pushdown is "connector-specific" in its implementation and do NOT enumerate every failure shape. The following list is **EXPLAIN-observable / empirical** based on the same operator-presence convention used by Top-N pushdown:
+
+1. **`LIMIT N` above a JOIN node** — `SELECT ... FROM a JOIN b ON ... LIMIT 100`. The Limit sits above the Join, the Join sits above two TableScans. The Limit typically does NOT push past the Join because limiting before the join would change the join result. EXPLAIN: a separate `Limit[100]` operator above the `Join`. **Workaround:** push a selective WHERE predicate so the join input is small; or `system.query()` passthrough that performs the entire join + LIMIT inside Postgres.
+
+2. **`LIMIT N` above a UNION / UNION ALL** — `SELECT ... FROM a UNION ALL SELECT ... FROM b LIMIT 100`. The Limit applies to the union result, not to either branch individually. EXPLAIN: a separate `Limit[100]` operator above the union. **Workaround:** apply `LIMIT 100` inside each branch (`SELECT ... FROM a LIMIT 100 UNION ALL SELECT ... FROM b LIMIT 100`), each of which pushes individually.
+
+3. **`LIMIT N` above an Aggregation that did NOT push** — `SELECT customer_id, SUM(amount) FROM pg.orders GROUP BY customer_id LIMIT 100`. If the aggregate stayed on Trino (e.g., WHERE predicate didn't push, or aggregate function not on the supported-16 list), the Limit also stays on Trino above the Aggregate. **Workaround:** make the WHERE predicate push (§13.5A.1) so the aggregate pushes, OR `system.query()` passthrough.
+
+4. **`LIMIT N` above a non-identity Projection on the TableScan** — same shape as the TopN issue [#25138](https://github.com/trinodb/trino/issues/25138). When a projection (e.g., `SELECT LOWER(name) FROM pg.users LIMIT 100`) sits between the Limit and the TableScan, the Limit may not push. EXPLAIN: `Limit[100]` above `Project` above `TableScan`. **Workaround:** apply the function in an outer SELECT after the LIMIT (`SELECT LOWER(name) FROM (SELECT name FROM pg.users LIMIT 100)`), so the inner LIMIT pushes against the bare TableScan.
+
+5. **`LIMIT N OFFSET M`** — OFFSET pushdown is more limited than LIMIT pushdown (same caveat as the OFFSET failure shape in TopN pushdown §13.5). Trino may pull `N + M` rows from Postgres and apply OFFSET on workers, or it may not push at all depending on connector version. **Workaround:** for pagination, prefer **keyset pagination** (`WHERE id > :last_seen LIMIT N`) — the predicate pushes and the LIMIT pushes; no OFFSET needed.
+
+> **EMPIRICAL note (EXPLAIN-observable).** The five failure shapes above are EXPLAIN-observable on the OSS Trino 467 PostgreSQL connector but are NOT individually enumerated as failure shapes in the trino.io docs. They are the same operator-positioning patterns that block Top-N pushdown (§13.5). Always verify on YOUR cluster with `EXPLAIN (TYPE DISTRIBUTED)` before claiming pushdown succeeded or failed.
+
+**The clean answer template — paste this verbatim when asked about `SELECT ... FROM pg.t LIMIT N` (no ORDER BY):**
+
+1. **The applicable capability is Limit pushdown** — capability #6 of the seven pushdown categories on trino.io/docs/current/optimizer/pushdown.html. It is a SEPARATE capability from Top-N pushdown (capability #7). The PostgreSQL connector supports both — they are listed as two separate entries on trino.io/docs/current/connector/postgresql.html.
+2. **For the canonical PLAIN shape (no ORDER BY, no GROUP BY, no JOIN, no UNION)** — Limit pushdown fires by default. Postgres receives `SELECT ... LIMIT N` and stops scanning at row N. N rows cross the JDBC wire.
+3. **EXPLAIN success signature** — `limit=N` annotation INSIDE the `TableScan`. NO `sortOrder=` annotation (that would indicate Top-N, a different capability). NO separate `Limit` operator above the TableScan.
+4. **EXPLAIN failure signature** — a separate `Limit[N]` operator above a bare `TableScan` (no `limit=` annotation on the scan).
+5. **Failure shapes (EXPLAIN-observable)** — Limit above JOIN/UNION/non-pushing-Aggregate/non-identity-Projection-on-TableScan/OFFSET. Verify with EXPLAIN per query.
+6. **Result ordering caveat** — without ORDER BY, the rows returned are in undefined order. If the application needs deterministic ordering, add ORDER BY (which switches the capability to Top-N pushdown — see §13.5).
+
+> **Source URLs (cite verbatim if pressed for sourcing):**
+> - trino.io/docs/current/optimizer/pushdown.html — verbatim: *"A LIMIT or FETCH FIRST clause reduces the number of returned records for a statement. Limit pushdown enables a connector to push processing of such queries of unsorted record to the underlying data source."* (Limit pushdown definition; **"unsorted record"** explicitly scopes it to LIMIT-without-ORDER-BY.)
+> - trino.io/docs/current/connector/postgresql.html — verbatim: *"The connector supports pushdown for a number of operations: [Join pushdown] [Limit pushdown] [Top-N pushdown]"* (Limit pushdown and Top-N pushdown listed as TWO SEPARATE supported capabilities).
 
 ---
 
