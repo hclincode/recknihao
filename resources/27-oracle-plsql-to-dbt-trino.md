@@ -521,6 +521,241 @@ Once your models compile and run, before you turn off Oracle:
 
 ---
 
+## 7A. Deep-dive: the 2nd-angle Oracle constructs (added iter424)
+
+> **Scope.** Section 4 covered the canonical 1-line translations (DECODE, NVL, SYSDATE, etc.). This section bulletproofs the **deeper** Oracle constructs that frequently break a migration but that section 4 only mentions briefly. Treat this as the answer template for any "how do I migrate Oracle X to dbt+Trino" question that goes beyond simple function rewrites.
+
+### 7A.1 `CONNECT BY` hierarchical query → `WITH RECURSIVE` (with the experimental + depth + quadratic-plan caveats)
+
+**The single canonical rewrite.** Oracle's `SELECT id, parent_id, name, LEVEL FROM employees START WITH manager_id IS NULL CONNECT BY PRIOR id = manager_id` becomes:
+
+```sql
+WITH RECURSIVE org_tree(id, manager_id, name, level) AS (
+    -- Base case (Oracle's START WITH):
+    SELECT id, manager_id, name, 1 AS level
+    FROM   {{ ref('stg_employees') }}
+    WHERE  manager_id IS NULL
+  UNION ALL
+    -- Recursive step (Oracle's CONNECT BY PRIOR id = manager_id):
+    SELECT e.id, e.manager_id, e.name, t.level + 1
+    FROM   {{ ref('stg_employees') }} e
+    JOIN   org_tree t ON e.manager_id = t.id
+)
+SELECT * FROM org_tree;
+```
+
+**The three caveats that matter for production:**
+
+1. **Experimental flag.** Trino docs explicitly mark `WITH RECURSIVE` as experimental: *"This feature is experimental only. Proceed to use it only if you understand potential query failures and the impact of the recursion processing on your workload."* (trino.io/docs/current/sql/select.html). This has not been promoted to GA as of Trino 467. For mission-critical hierarchical traversals in production, prefer **materialized closure-table dbt models** (next bullet).
+2. **`max_recursion_depth` default = 10.** Any hierarchy deeper than 10 levels truncates. Tune via `SET SESSION max_recursion_depth = 100;` (or whatever bound your tree has). In a dbt model, set the session property via a pre-hook: `pre_hook="SET SESSION max_recursion_depth = 100"`. **Do not set this unboundedly high** — runaway recursion will OOM a worker.
+3. **Quadratic plan-growth** with recursion depth. Each iteration of the recursive CTE is planned as a separate logical operator; for a tree 50 levels deep, the planner builds a 50-stage UnionAll. For deep org charts or BOMs (bill-of-materials), the canonical Trino-friendly pattern is a **closure table**: precompute every (ancestor, descendant, distance) triple in a dbt incremental model, then JOIN against it at read time. The dbt model can use a loop in Jinja (`{% for i in range(max_depth) %}...{% endfor %}`) to build the closure deterministically without depending on `WITH RECURSIVE`.
+
+**The dbt-recommended shape — the closure table:**
+
+```sql
+-- models/intermediate/int_org_closure.sql
+{{ config(materialized='table') }}
+
+WITH base AS (
+    SELECT id, manager_id FROM {{ ref('stg_employees') }}
+)
+{% for depth in range(1, 11) %}
+    {% if depth == 1 %}
+        SELECT id AS ancestor, id AS descendant, 0 AS distance FROM base
+        UNION ALL
+        SELECT manager_id AS ancestor, id AS descendant, 1 AS distance FROM base WHERE manager_id IS NOT NULL
+    {% else %}
+        UNION ALL
+        SELECT a.ancestor, b.descendant, a.distance + 1 AS distance
+        FROM int_org_closure_d{{ depth - 1 }} a
+        JOIN base b ON a.descendant = b.manager_id
+    {% endif %}
+{% endfor %}
+```
+
+(The pattern above is illustrative — production closure-table builds typically use a single recursive CTE with a small `max_recursion_depth` AND materialize the result as a regular `table` model so downstream queries don't pay the recursion cost.)
+
+**DO NOT WRITE:** `CONNECT BY PRIOR ... START WITH ...` in any dbt model targeting Trino — it is a parse error on Trino 467.
+
+**DO NOT WRITE:** an unbounded `WITH RECURSIVE` query without verifying recursion depth — set `max_recursion_depth` explicitly and validate against the data's known max depth.
+
+---
+
+### 7A.2 Oracle analytic functions → Trino window functions (mostly portable) — and the QUALIFY landmine
+
+**Most Oracle analytic functions migrate as-is.** The window-function syntax in Oracle and Trino is virtually identical — `LAG`, `LEAD`, `RANK`, `DENSE_RANK`, `ROW_NUMBER`, `FIRST_VALUE`, `LAST_VALUE`, `NTH_VALUE`, `NTILE`, plus all the aggregate-as-window forms (`SUM(...) OVER (...)`, `AVG(...) OVER (...)`). The OVER clause syntax (`PARTITION BY ... ORDER BY ... ROWS BETWEEN ...`) is identical.
+
+| Oracle analytic | Trino window | Notes |
+|---|---|---|
+| `LAG(col, 1, default) OVER (PARTITION BY p ORDER BY o)` | Same — identical | Portable. |
+| `LEAD(col, 1, default) OVER (PARTITION BY p ORDER BY o)` | Same — identical | Portable. |
+| `RANK() OVER (ORDER BY x DESC)` | Same — identical | Portable. |
+| `DENSE_RANK() OVER (ORDER BY x DESC)` | Same — identical | Portable. |
+| `ROW_NUMBER() OVER (PARTITION BY p ORDER BY o)` | Same — identical | Portable. |
+| `FIRST_VALUE(col) OVER (PARTITION BY p ORDER BY o)` | Same — identical | Portable. |
+| `LAST_VALUE(col) OVER (PARTITION BY p ORDER BY o ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)` | Same — identical (but the unbounded-following clause IS required in both, easy footgun) | Portable. |
+| `SUM(amount) OVER (PARTITION BY customer_id ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)` | Same — identical (rolling 7-row sum) | Portable. |
+| `NTILE(4) OVER (ORDER BY revenue)` | Same — identical | Portable. |
+| `LISTAGG(col, ',') WITHIN GROUP (ORDER BY col)` | `array_join(array_agg(col ORDER BY col), ',')` or `listagg(col, ',') WITHIN GROUP (ORDER BY col)` (Trino 396+) | LISTAGG was added to Trino in PR #6418 (release 396). For older Trino, use `array_join(array_agg(...))`. |
+| `KEEP (DENSE_RANK FIRST/LAST ORDER BY ...)` clause | NO direct equivalent — rewrite as window function + filter | Oracle-specific. |
+
+**THE QUALIFY LANDMINE.** Oracle does NOT have `QUALIFY` (it's a Snowflake / BigQuery / Databricks / Teradata extension), but engineers migrating Oracle code who have ALSO worked in Snowflake/BigQuery often accidentally write `QUALIFY ROW_NUMBER() OVER (...) = 1` in their Trino dbt models. **`QUALIFY` is a PARSE ERROR on Trino 467.** The canonical Trino rewrite is the subquery + outer WHERE:
+
+```sql
+-- Oracle / Snowflake / BigQuery (FAILS on Trino):
+SELECT customer_id, order_date, amount
+FROM orders
+QUALIFY ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date DESC) = 1;
+
+-- Trino-compatible rewrite (the canonical "latest-per-group" pattern):
+SELECT customer_id, order_date, amount
+FROM (
+    SELECT customer_id, order_date, amount,
+           ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date DESC) AS rn
+    FROM   orders
+) t
+WHERE rn = 1;
+```
+
+**Open feature request:** [trinodb/trino #20687](https://github.com/trinodb/trino/issues/20687) — `QUALIFY` not yet implemented as of Trino 467.
+
+---
+
+### 7A.3 Oracle PL/SQL packages and stored functions → dbt macros + Jinja
+
+**Oracle PL/SQL packages bundle related procedures and functions.** A typical package looks like:
+
+```plsql
+CREATE OR REPLACE PACKAGE fx_utils AS
+    FUNCTION to_usd(amount NUMBER, from_currency VARCHAR2, on_date DATE) RETURN NUMBER;
+    FUNCTION business_day_offset(start_date DATE, offset_days INTEGER) RETURN DATE;
+END fx_utils;
+```
+
+**Trino has NO `CREATE PACKAGE` / `CREATE FUNCTION` for stored UDFs.** (Trino has a stored-function feature that's plugin-dependent and not widely used in OSS deployments — for the on-prem Trino 467 stack in production, treat stored functions as unavailable.)
+
+**The dbt replacement: macros.** A dbt macro is a Jinja-templated SQL snippet that expands inline when the model compiles. Macros live in `macros/` and are reused via `{{ macro_name(args) }}`:
+
+```jinja
+-- macros/fx_utils.sql
+{% macro to_usd(amount_col, from_currency_col, on_date_col) %}
+    (
+        {{ amount_col }} * (
+            SELECT rate FROM {{ ref('stg_currency_fx') }} fx
+            WHERE fx.currency_code = {{ from_currency_col }}
+              AND fx.effective_date = {{ on_date_col }}
+        )
+    )
+{% endmacro %}
+
+{% macro business_day_offset(start_date_col, offset_days) %}
+    -- Inline SQL that computes business-day offset using a calendar table.
+    (
+        SELECT cal.business_date
+        FROM   {{ ref('dim_calendar') }} cal
+        WHERE  cal.business_date_seq = (
+            SELECT business_date_seq FROM {{ ref('dim_calendar') }}
+            WHERE business_date = CAST({{ start_date_col }} AS DATE)
+        ) + {{ offset_days }}
+    )
+{% endmacro %}
+```
+
+**Use site:**
+
+```sql
+-- models/fct_revenue_usd.sql
+SELECT
+    order_id,
+    {{ to_usd('amount', 'currency_code', 'order_date') }} AS amount_usd,
+    {{ business_day_offset('order_date', 3) }} AS settle_date
+FROM {{ ref('stg_orders') }}
+```
+
+**Key differences from Oracle packages:**
+
+| Oracle PL/SQL package | dbt macro |
+|---|---|
+| Compiled once, called at runtime; can have state | Expanded inline at compile time; **stateless** — each call is just SQL substitution |
+| Can have `PRAGMA` directives, overloading, complex types | Plain text templating; no overloading, no types |
+| Cross-schema reusable via grants | Cross-project reusable via `dbt deps` packages (e.g., `dbt_utils`) |
+| Versioned via `ALTER PACKAGE` | Versioned via git on the dbt project |
+| Can raise EXCEPTION | Cannot — failures bubble up as model SQL errors or compile errors |
+| `EXECUTE IMMEDIATE 'dynamic SQL'` | `{% if %} {% endif %}` Jinja branching at compile time (the dynamic SQL is resolved BEFORE Trino sees it) |
+
+**Important nuance — function call semantics differ.** In Oracle, `fx_utils.to_usd(amount, 'EUR', order_date)` is a function call evaluated row-by-row by the database engine. In dbt, `{{ to_usd('amount', "'EUR'", 'order_date') }}` is **textual SQL substitution at compile time** — the macro inlines its body into the SQL, and the resulting SQL runs as a normal correlated subquery (or JOIN) on Trino. This means macros can be MORE expensive than Oracle stored functions if they introduce correlated subqueries — always inspect the compiled SQL (`dbt compile` then read `target/compiled/...`) before assuming the macro is cheap.
+
+---
+
+### 7A.4 Oracle EXCEPTION handling → dbt tests + WHERE guards + ROLLBACK semantics
+
+**Oracle PL/SQL has a rich exception model**: `EXCEPTION WHEN NO_DATA_FOUND THEN ...`, `WHEN DUP_VAL_ON_INDEX THEN ...`, `WHEN OTHERS THEN ROLLBACK; RAISE_APPLICATION_ERROR(-20001, '...');`. Inside a transaction, the EXCEPTION block can ROLLBACK partial work and either suppress the error or re-raise it.
+
+**Trino + dbt has NONE of this.** There is no `EXCEPTION` keyword, no try/catch, no programmatic ROLLBACK inside a query. The replacement is three-fold:
+
+1. **dbt tests** for post-run data quality assertions. Tests run after the model materializes and fail the dbt run if violated. These are the dbt-shaped replacement for `RAISE_APPLICATION_ERROR(-20001, 'data quality violation')`.
+
+   ```yaml
+   # models/marts/schema.yml
+   models:
+     - name: fct_orders_daily
+       columns:
+         - name: order_id
+           tests: [not_null, unique]
+         - name: customer_id
+           tests:
+             - relationships:
+                 to: ref('dim_customer')
+                 field: id
+         - name: amount_usd
+           tests:
+             - dbt_utils.accepted_range:
+                 min_value: 0
+                 max_value: 1000000
+   ```
+
+   And the custom singular test for "no orphan records":
+
+   ```sql
+   -- tests/no_orphan_orders.sql
+   SELECT order_id
+   FROM   {{ ref('fct_orders_daily') }}
+   WHERE  customer_id IS NOT NULL
+     AND  customer_id NOT IN (SELECT id FROM {{ ref('dim_customer') }})
+   ```
+
+   Any row returned by a singular test fails the run.
+
+2. **In-query guards** for the "if X is missing, default to Y" pattern that an Oracle PL/SQL block would handle with `EXCEPTION WHEN NO_DATA_FOUND THEN x := 0;`. These guards are: `COALESCE(col, default)`, `LEFT JOIN` with a fallback NULL, `CASE WHEN col IS NULL THEN ... END`, `NULLIF(col, '')` for the empty-string-vs-NULL Oracle quirk.
+
+   ```sql
+   -- Oracle PL/SQL: BEGIN SELECT rate INTO v_rate FROM fx WHERE ...;
+   --                EXCEPTION WHEN NO_DATA_FOUND THEN v_rate := 1.0; END;
+   -- dbt + Trino:
+   SELECT
+       o.order_id,
+       o.amount * COALESCE(fx.rate, 1.0) AS amount_usd
+   FROM   {{ ref('stg_orders') }} o
+   LEFT JOIN {{ ref('stg_currency_fx') }} fx
+       ON fx.currency_code = o.currency
+       AND fx.effective_date = o.order_date
+   ```
+
+3. **ROLLBACK semantics: Iceberg snapshots + dbt model atomicity.** Oracle's `ROLLBACK` aborts a transaction so partial writes are not visible. The Trino + Iceberg replacement uses two layers:
+   - **dbt model atomicity.** Each dbt model materializes via `CREATE TABLE AS SELECT` (for `table`) or `MERGE INTO` (for `incremental`). If the SQL fails partway, dbt does NOT commit the result — the existing table stays at its previous snapshot. Effectively, dbt model runs are atomic per-model.
+   - **Iceberg snapshot rollback** for "I committed bad data, restore the previous snapshot." Trino: `ALTER TABLE my_table EXECUTE rollback_to_snapshot(<previous_snapshot_id>)`. This rolls the table back to a prior known-good state. See [resource 17 § Iceberg time travel and rollback](17-iceberg-table-maintenance.md).
+
+**The GLOBAL TEMPORARY TABLE → dbt ephemeral / intermediate model mapping.** Oracle `CREATE GLOBAL TEMPORARY TABLE staging_orders ON COMMIT DELETE ROWS` becomes either:
+
+- **dbt ephemeral model** (`materialized='ephemeral'`) — the model produces no table; it's inlined as a CTE in every downstream `ref()`. Best when the staging set is used once.
+- **dbt intermediate model** (`materialized='table'`) — produces a real Iceberg table that downstream models JOIN against. Best when the staging set is reused across 3+ downstream models and is expensive to recompute.
+
+The semantic difference: Oracle's GLOBAL TEMPORARY TABLE is session-scoped (gets cleaned up at session end). dbt-managed intermediate tables persist across runs but are recreated on each `dbt run`. The session-scoped semantic is rarely needed in a dbt DAG world — the DAG itself defines the "intermediate" scope.
+
+**DO NOT WRITE:** `EXCEPTION WHEN ... THEN ROLLBACK; INSERT INTO error_log ...;` — there is no SQL-level EXCEPTION block in Trino. The dbt-shaped replacement is the **on-failure hook**: `on-run-end: ["{% if results | selectattr('status', 'eq', 'error') | list | length > 0 %}INSERT INTO error_log SELECT '{{ invocation_id }}', CURRENT_TIMESTAMP{% endif %}"]` — runs at the end of the dbt run, can detect model failures and emit an audit row.
+
+---
+
 ## 8. Cross-references
 
 - **Performance of migrated queries:** [resource 28 — Improving complex SQL performance on Trino with dbt](28-complex-sql-performance-trino-dbt.md) — addresses correlated subqueries, deep CTE chains, OR-heavy predicates, EXPLAIN-driven optimization. **READ THIS NEXT** if your migrated dbt models are slow.

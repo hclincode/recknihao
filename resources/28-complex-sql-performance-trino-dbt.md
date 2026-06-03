@@ -11,7 +11,7 @@
 1. **A migrated SQL query that "works" is not the same as a fast SQL query.** Naive Oracle->Trino translations almost always reproduce three Trino-hostile patterns: correlated subqueries in the SELECT list, deep CTE chains that re-evaluate, and function-wrapped partition-column predicates that defeat partition pruning.
 2. **Trino CTEs are INLINED, not materialized.** `WITH x AS (SELECT ...) SELECT * FROM x JOIN x ON ...` evaluates `x` TWICE. There is NO optimization fence, NO caching of the CTE result. To materialize once, write a dbt intermediate model (`materialized='table'` or `'incremental'`) and `ref()` it.
 3. **Trino has NO query result cache** (OSS Trino 467). Re-running the exact same SQL re-executes from scratch. The "cache" your dashboard appears to have is the underlying Iceberg storage table (already-aggregated rollups) — that's what dbt incremental models, materialized views ([resource 25](25-trino-materialized-views-iceberg.md)), and dashboard-side caching give you.
-4. **Predicate pushdown to Iceberg is the single biggest performance lever**, and the single easiest one to accidentally break — by wrapping the partition column in a function (`WHERE date_trunc('day', event_ts) = ...`), by casting it (`WHERE CAST(event_date AS varchar) = ...`), or by comparing it across types. Keep partition columns naked on one side of the predicate.
+4. **Predicate pushdown to Iceberg is the single biggest performance lever**, and the single easiest one to accidentally break — by casting the partition column (`WHERE CAST(event_date AS varchar) = ...`), by wrapping it in arithmetic (`WHERE event_date + INTERVAL '1' DAY = ...`), or by comparing it across types. `date_trunc('day', event_ts) = DATE '...'` is **fragile, not absolutely broken** on Trino 400+: the `SimplifyDateTrunc` optimizer rule simplifies this into a naked range for identity / `day()` partition transforms (verified via [trino.io blog 2023/04/11](https://trino.io/blog/2023/04/11/date-predicates.html) + [PR #14011](https://github.com/trinodb/trino/pull/14011)), but it does NOT cover `bucket()` / `hour()` transforms, function compositions, or non-literal RHS. The defensive recommendation is still to keep partition columns naked on one side and write the explicit range form (`event_ts >= TIMESTAMP '...' AND event_ts < TIMESTAMP '...'`) — and always verify with `EXPLAIN` by inspecting the `TableScan` `constraint=` annotation.
 5. **Correlated subqueries are the migration-shaped slowness champion.** Trino tries to decorrelate them into joins; when it succeeds, the EXPLAIN shows `SemiJoin` / `Join` / `Project`. When decorrelation fails, EXPLAIN shows `CorrelatedJoin` — an O(N×M) nested-loop in worker memory. **Always EXPLAIN your migrated queries and search for `CorrelatedJoin`.**
 6. **Joins**: tiny dim + huge fact -> BROADCAST (default for builds under ~100MB); large + large -> PARTITIONED; cross-source -> rely on **dynamic filtering** (Trino sends build-side keys to probe side at runtime). Run `ANALYZE TABLE` so the optimizer has stats to pick correctly ([resource 24](24-trino-cbo-analyze.md)).
 7. **dbt-specific levers**: choose `materialized='incremental'` to skip recomputing unchanged rows; partition the dbt-built Iceberg table with `properties={'partitioning': "ARRAY[...]"}`; cluster files with `sorted_by` + run `ALTER TABLE ... EXECUTE optimize` ([resource 17](17-iceberg-table-maintenance.md)).
@@ -31,7 +31,7 @@ These are the absolutes most often stated incorrectly when an engineer with Post
 | "Adding more Trino workers always speeds up a slow query." | **FALSE — only true when the query is CPU-bound or scan-bound AND parallelizable.** Adding workers does NOT help when: (a) the bottleneck is a non-distributable operator (single-stage final aggregation; `CorrelatedJoin` nested-loop; ordered global sort), (b) the bottleneck is a SOURCE that can't be scanned in parallel (MySQL via JDBC = 1 split, regardless of workers — see [resource 22](22-trino-federation-postgresql.md)), (c) the bottleneck is the coordinator's planning time, (d) data is skewed so one worker holds 90% of the rows. **Always EXPLAIN ANALYZE first to find the bottleneck — don't reflexively scale out.** | [Trino tuning](https://trino.io/docs/current/admin/tuning.html) |
 | "`QUALIFY ROW_NUMBER() OVER (...) = 1` is faster than the equivalent subquery + WHERE rn = 1." | **FALSE on Trino 467 — QUALIFY is a PARSE ERROR.** QUALIFY is a Snowflake/BigQuery/Databricks/Teradata extension, not in the SQL standard, NOT in Trino. The canonical Trino rewrite is `SELECT * FROM (SELECT *, row_number() OVER (PARTITION BY ... ORDER BY ...) AS rn FROM t) WHERE rn = 1`. There is no faster shape; that IS the canonical pattern. **DO NOT WRITE `QUALIFY ...` in a dbt model targeting Trino — it will fail to compile.** | [resource 23](23-sql-best-practices-olap.md) |
 | "`rewrite_data_files` is the Trino procedure to compact Iceberg files." | **FALSE — `rewrite_data_files` is the SPARK procedure (`CALL iceberg.system.rewrite_data_files(...)`). On Trino 467 the equivalent is `ALTER TABLE ... EXECUTE optimize`, which honors the table's `sorted_by` property if set.** Pasting Spark `CALL` syntax into a Trino query yields `Procedure not registered`. See [resource 17 § Trino EXECUTE vs Spark CALL disambiguation](17-iceberg-table-maintenance.md). | [Trino Iceberg connector](https://trino.io/docs/current/connector/iceberg.html); [Iceberg Spark procedures](https://iceberg.apache.org/docs/latest/spark-procedures/) |
-| "Wrapping a partition column in `date_trunc()` is fine — Iceberg understands the function." | **FALSE on Trino 467 — `WHERE date_trunc('day', event_ts) = DATE '2026-05-30'` does NOT prune partitions** even if the table is partitioned by `day(event_ts)`. The function on the LEFT side of the predicate prevents Trino from translating the predicate into a partition constraint, so the connector scans every partition. **The fix:** rewrite to `WHERE event_ts >= TIMESTAMP '2026-05-30 00:00:00' AND event_ts < TIMESTAMP '2026-05-31 00:00:00'` — Iceberg's hidden partitioning + transform-aware constraint solver will then prune. Verify with `EXPLAIN` and look at the `constraint=` annotation on the `TableScan`. | [resource 10](10-lakehouse-partitioning.md), [resource 23 § Always include the partition column in WHERE](23-sql-best-practices-olap.md) |
+| "Wrapping a partition column in `date_trunc()` is fine — Iceberg understands the function." | **NUANCED — version-sensitive, NOT an absolute "breaks pruning" rule (refined iter424).** On modern Trino (400+, including 467), there is an optimizer rule that **DOES simplify** `date_trunc('day', event_ts) = DATE '2026-05-30'` into the equivalent naked range `event_ts >= TIMESTAMP '2026-05-30 00:00:00' AND event_ts < TIMESTAMP '2026-05-31 00:00:00'`, AFTER which **partition pruning CAN still fire** on identity-partitioned `event_ts` and on `day(event_ts)` transforms. Doc-quoted source: [trino.io/blog/2023/04/11/date-predicates.html](https://trino.io/blog/2023/04/11/date-predicates.html) — *"Trino again replaces the initial temporal filter to a filter testing whether the column event_time is within the constant timestamp range corresponding to the date used in the initial filter."* Implemented in [trinodb/trino PR #14011](https://github.com/trinodb/trino/pull/14011) ("Simplify predicates involving date_trunc"). **BUT this simplification is fragile**: it works for `date_trunc` against an identity-partitioned timestamp column or `day(event_ts)` transform, NOT guaranteed for `bucket()` / `hour()` transforms wrapped in `date_trunc`, NOT guaranteed for arbitrary function compositions (`LOWER(date_trunc(...))`, etc.), NOT guaranteed when the predicate constant is itself an expression rather than a literal. **The naked-range form** (`WHERE event_ts >= TIMESTAMP '2026-05-30 00:00:00' AND event_ts < TIMESTAMP '2026-05-31 00:00:00'`) **remains the recommended defensive practice** because it works on every Trino version and every partition transform without relying on optimizer-rule presence. **DO NOT WRITE** *"date_trunc breaks pruning"* as an absolute rule on Trino 400+; **DO WRITE** *"date_trunc-to-range simplification fires on identity / `day()` partitions in Trino 400+; it's fragile for `bucket()` / non-trivial transforms / function compositions. Use naked-range form when in doubt, and verify the actual plan with `EXPLAIN` and inspect the `TableScan` `constraint=` annotation."* | [resource 10](10-lakehouse-partitioning.md), [resource 23 § Always include the partition column in WHERE](23-sql-best-practices-olap.md), [trino.io/blog/2023/04/11/date-predicates.html](https://trino.io/blog/2023/04/11/date-predicates.html), [trinodb/trino PR #14011](https://github.com/trinodb/trino/pull/14011) |
 | "Correlated subqueries are fine — Trino's optimizer handles them." | **PARTIALLY TRUE — and partially DANGEROUS.** Trino's optimizer ATTEMPTS to decorrelate correlated subqueries via the `TransformCorrelatedJoinToJoin` rule (and related rules for LIMIT, TopN, scalar subqueries). When decorrelation SUCCEEDS, the EXPLAIN shows the rewritten Join/SemiJoin and the query is fast. When decorrelation FAILS (common shapes: aggregates inside the correlated subquery referencing outer cols, correlated WHERE with non-equality conditions, complex outer-references), the EXPLAIN shows a `CorrelatedJoin` operator — a nested-loop executed in worker memory, O(N×M). **The fix is to manually rewrite as a window function or explicit JOIN — don't rely on the optimizer to always win.** Always EXPLAIN and search for `CorrelatedJoin`. | [Trino - Decorrelate subqueries (episode 7)](https://trino.io/episodes/7.html) |
 | "BROADCAST joins are always faster than PARTITIONED joins." | **FALSE — only when the BUILD side fits in worker memory.** BROADCAST replicates the build to every worker (fast for small builds, OOM for large). PARTITIONED hash-shuffles BOTH sides by join key (extra shuffle, scales to TB-scale joins). The optimizer picks based on `join-max-broadcast-table-size` (100MB default) when stats are available. **If you have a 5GB dim table joining 500GB fact, BROADCAST will OOM — let Trino pick PARTITIONED.** Run `ANALYZE TABLE` so the optimizer can choose; see [resource 24](24-trino-cbo-analyze.md). | [resource 22 § BROADCAST vs PARTITIONED](22-trino-federation-postgresql.md) |
 | "Dynamic filtering doesn't apply to my query — it's only for federated joins." | **FALSE — dynamic filtering is for INNER and RIGHT joins regardless of source.** When you join Iceberg fact x Iceberg dim, build-side keys are still sent to the probe scan at runtime to prune the probe Parquet row-groups. EXPLAIN ANALYZE VERBOSE shows `dynamicFilterSplitsProcessed` and pruned-row counts. Caveat: dynamic filtering does NOT apply to LEFT or FULL OUTER joins. | [Trino - Dynamic filtering](https://trino.io/docs/current/admin/dynamic-filtering.html) |
@@ -290,9 +290,11 @@ WHERE tenant_id IN (42, 43, 44)         -- IN-list partition prune
 
 ### 4.2 What breaks pushdown (and how to fix it)
 
-| Broken shape | Why it breaks | Fix |
+> **VERSION-SENSITIVE NOTE on `date_trunc` (refined iter424).** On Trino 400+ (including 467), there is a `SimplifyDateTrunc` optimizer rule that DOES simplify `date_trunc('day', event_ts) = DATE '2026-05-30'` into the equivalent naked range, after which partition pruning CAN fire on identity-partitioned `event_ts` or `day(event_ts)` transforms (per [trino.io/blog/2023/04/11/date-predicates.html](https://trino.io/blog/2023/04/11/date-predicates.html) and [PR #14011](https://github.com/trinodb/trino/pull/14011)). The simplification is FRAGILE — not guaranteed for `bucket()` / non-default transforms, function compositions, or non-literal constants. The naked-range form below remains the **recommended defensive practice** because it works on every Trino version and every partition transform; verify the actual plan with `EXPLAIN` and inspect the `constraint=` annotation on the `TableScan`.
+
+| Broken shape | Why it breaks (or doesn't, on Trino 400+) | Fix (defensive form) |
 |---|---|---|
-| `WHERE date_trunc('day', event_ts) = DATE '2026-05-30'` | Function on partition column prevents Trino from translating to a partition constraint. | `WHERE event_ts >= TIMESTAMP '2026-05-30 00:00:00' AND event_ts < TIMESTAMP '2026-05-31 00:00:00'` |
+| `WHERE date_trunc('day', event_ts) = DATE '2026-05-30'` | **FRAGILE on Trino 400+** — the simplifier MAY rewrite this to the naked range and prune on identity / `day()` partitions, but it's NOT guaranteed for `bucket()` / function-compositions. Always verify with `EXPLAIN`. | `WHERE event_ts >= TIMESTAMP '2026-05-30 00:00:00' AND event_ts < TIMESTAMP '2026-05-31 00:00:00'` (works on every Trino version + every transform) |
 | `WHERE CAST(event_date AS varchar) = '2026-05-30'` | Cast wraps the column. | `WHERE event_date = DATE '2026-05-30'` |
 | `WHERE event_date + INTERVAL '1' DAY = DATE '2026-05-31'` | Arithmetic on partition col. | `WHERE event_date = DATE '2026-05-30'` |
 | `WHERE LOWER(tenant_id) = 'tenant_42'` | Function wraps the partition col. | If `tenant_id` is already lowercase in storage, drop `LOWER`; otherwise reconsider partitioning. |
@@ -471,7 +473,7 @@ WHERE date_trunc('day', e.event_ts) >= CURRENT_DATE - INTERVAL '7' DAY
 Three problems wrapped in one query:
 
 1. `SELECT *` — opens every column of a 50-column wide table.
-2. `date_trunc('day', e.event_ts)` — function-wrapped partition column, no partition prune.
+2. `date_trunc('day', e.event_ts) >= CURRENT_DATE - INTERVAL '7' DAY` — function-wrapped partition column on the LEFT, AND a non-literal constant on the RIGHT (`CURRENT_DATE - INTERVAL '7' DAY`). The Trino 400+ `SimplifyDateTrunc` rule handles the simple `date_trunc(...) = LITERAL` shape on identity / `day()` partitions, but the `>= NON_LITERAL` shape here is fragile — in practice, `EXPLAIN` on this query shows the `Filter` operator did NOT get fused into the `TableScan` `constraint=`, so the connector scanned every partition. The defensive fix below uses the naked-range form on `event_ts` which works regardless of version. (See myth-table row "Wrapping a partition column in `date_trunc()` is fine" for the full version-sensitivity treatment.)
 3. Correlated `EXISTS` on `customers` — may or may not decorrelate.
 
 ### 8.2 EXPLAIN before any fix
@@ -534,6 +536,252 @@ EXPLAIN: `Join[INNER]` (or `SemiJoin`) with `RemoteExchange[REPLICATE]` for the 
 | Fix 3: EXISTS -> JOIN | `Join` (broadcast) + dynamic filter on probe | 12s | **110x** |
 
 The first two fixes are essentially free (no architecture change). The third was the only one that required understanding what `CorrelatedJoin` means and rewriting it.
+
+---
+
+## 8A. Deep-dive: the 2nd-angle complex-SQL-perf patterns (added iter424)
+
+> **Scope.** Sections 2-8 covered the canonical perf killers (correlated subqueries, CTE inlining, partition-prune predicate shape, join distribution basics). This section bulletproofs the **deeper** complex-perf patterns that frequently surface in migrated workloads but that sections 2-8 only mention briefly. Treat this as the answer template for "I have a 40-minute query, where do I even start" / "my star-join broadcasts and OOMs" / "my incremental model misses late-arriving data" questions.
+
+### 8A.1 The deeply-nested view chain — diagnosing a 5-level chain that takes 40 minutes
+
+**The problem shape.** A typical migrated reporting query reads from a view that selects from another view that selects from another view, often 4-6 levels deep. Each view is "just a SELECT," so the engineer assumes the chain composes for free. In practice, Trino **inlines every view textually** into the final query plan, exactly like a CTE — and the resulting plan can have 30+ joins, 10+ aggregates, and dozens of redundant scans of the same base tables.
+
+**The five-step diagnosis recipe.**
+
+1. **`SHOW CREATE VIEW` recursively to extract the chain.** Start at the outermost view and walk inward until you reach base tables. Note which base tables appear MULTIPLE times across the chain — those are the candidates for materialization.
+
+   ```sql
+   SHOW CREATE VIEW iceberg.analytics.v_executive_dashboard;
+   -- Read the SELECT, find the inner views, repeat for each one.
+   ```
+
+2. **`EXPLAIN (FORMAT TEXT)` the outermost view.** Count three numbers:
+   - **Total `TableScan` operators** — how many times the chain scans base tables. If a base table appears in 5 different `TableScan` nodes, you're scanning it 5 times.
+   - **Total `Aggregate` operators** — how many GROUP BYs the plan does. Each one is an exchange + shuffle.
+   - **Total `Join` operators** — how many joins. Each one is a potential broadcast/partitioned decision.
+
+   On the canonical "40-minute 5-view chain," typical numbers are 12-20 `TableScan`, 5-8 `Aggregate`, 15-25 `Join` — far more than a SaaS engineer expects, because each view inlines fully.
+
+3. **`EXPLAIN ANALYZE` on a tight WHERE filter that returns fast.** Find the operator with the highest `wall time`. The bottleneck is usually one of:
+   - A single `TableScan` reading 100+GB because partition pruning failed somewhere deep in the chain.
+   - A single `Aggregate` that hash-shuffles billions of rows.
+   - A `CorrelatedJoin` from a deeply-nested correlated subquery.
+   - A `Join` with `RemoteExchange[REPLICATE]` (broadcast) on a 5GB build side — close to OOM.
+
+4. **Identify the "shared expensive subtree."** Look for the same `TableScan` (or the same expensive aggregate) appearing 2+ times in the plan. That subtree is what you materialize.
+
+5. **Refactor view-chain into a layered dbt DAG.** Each view becomes a dbt model with an EXPLICIT materialization choice — view, table, or incremental. The layering rule:
+
+   ```text
+   Layer 1 (staging, materialized='view'):
+       stg_orders, stg_customers, stg_products
+       — type-clean, rename, light filter. Cheap to inline.
+
+   Layer 2 (intermediate, materialized='table' OR 'ephemeral'):
+       int_order_enriched     (orders + customers + products joined)
+       int_customer_metrics   (per-customer aggregates over orders)
+       — reused 3+ times downstream -> 'table'.
+       — reused 1-2 times, cheap to recompute -> 'ephemeral' (still inlines).
+
+   Layer 3 (fact, materialized='incremental'):
+       fct_orders_daily       (daily rollup, partitioned by event_date)
+       — large, expensive, accumulates over time -> 'incremental' with merge or append.
+
+   Layer 4 (mart, materialized='table'):
+       mart_executive_dashboard  (smaller pre-joined for dashboards)
+       — daily-refreshed full rebuild (small enough), partitioned by report_date.
+   ```
+
+**The materialization-choice decision tree for chain refactor.**
+
+| Where in the chain | Reuse pattern | Materialization |
+|---|---|---|
+| Source-touching, light transform | Read once, fed to one downstream layer | `view` |
+| Source-touching, multiple downstream consumers (3+) | Heavy join, aggregate | `table` (or `incremental` if delta-friendly) |
+| Mid-chain aggregate, reused 2-3x | Medium cost | `ephemeral` (inlined as CTE — but watch for double-evaluation on re-reference) |
+| Mid-chain aggregate, reused 4+ times | Heavy aggregate | `table` (always materialize to avoid N-fold re-evaluation) |
+| Mid-chain time-series with append-only delta | Daily incremental, retain history | `incremental` with `incremental_strategy='append'` |
+| Mid-chain dimension with updates | SCD-1 upsert | `incremental` with `incremental_strategy='merge'` and `unique_key` |
+| Final dashboard layer | Small enough for full rebuild | `table` |
+| Final dashboard layer | Too big for full rebuild | `incremental` (merge or insert_overwrite by partition) |
+
+**The canonical refactor result.** A 5-view chain that ran in 40 minutes typically refactors into a 4-layer dbt DAG that runs each layer in 1-5 minutes individually, with downstream consumers reading pre-materialized tables instead of inlined views. **The aggregate run time becomes 8-15 minutes of dbt build cost (amortized across all downstream queries), and the dashboard read becomes seconds-to-tens-of-seconds.** This is the 10x-20x speedup that's available from materialization alone — before any partition-prune or join-distribution tuning.
+
+**DO NOT WRITE:** *"Just rewrite the views as CTEs"* — that doesn't help, since Trino CTEs are also inlined. Materialization (writing the intermediate result to a real Iceberg table) is what breaks the inlining chain.
+
+**DO NOT WRITE:** *"Materialize every view as a table"* — over-materializing wastes storage and adds DAG runtime. Use the decision tree above to pick per-layer materialization.
+
+---
+
+### 8A.2 Broadcast vs partitioned join tuning for a migrated star-join (with the OOM failure mode)
+
+**The problem shape.** A migrated star-schema query joins a large fact table to 4-8 dimension tables. Trino's CBO picks `BROADCAST` (build replicated to every worker) for each dim, EXCEPT when stats are missing or wrong — then it might pick PARTITIONED (both sides hash-shuffled by join key) or worse, pick BROADCAST on a 5GB dim and OOM the workers.
+
+**The four diagnostic questions.**
+
+1. **Do all source tables have stats?** Run `SHOW STATS FOR <table>` for the fact and every dim. If `row_count` shows `null` or `data_size` shows `null`, the CBO is making decisions without information — likely wrong. Fix: `ANALYZE TABLE <table>` (Trino) or rely on Iceberg's auto-collected NDV stats (depends on connector + version). See [resource 24](24-trino-cbo-analyze.md).
+
+2. **What does `EXPLAIN` show as the `RemoteExchange` type for each join?**
+   - `RemoteExchange[REPLICATE]` = BROADCAST (build replicated). Best for small builds (<100 MB by default — controlled by `join-max-broadcast-table-size`).
+   - `RemoteExchange[REPARTITION]` = PARTITIONED (both sides hash-shuffled). Adds a network shuffle; scales to TB-scale joins.
+   - `RemoteExchange[GATHER]` = single-stage gather to coordinator. Rare in star joins; usually a final aggregation.
+
+3. **For each BROADCAST join, what's the BUILD-side total size?** Look at `EXPLAIN ANALYZE` and find the `TableScan` feeding the build side of the join. `Output: X rows (Y MB)`. If `Y` is > 100 MB and you're seeing OOMs on workers, the broadcast is the problem.
+
+4. **For each PARTITIONED join, is dynamic filtering firing?** `EXPLAIN ANALYZE VERBOSE` and look for `dynamicFilterSplitsProcessed` on the probe-side `TableScan`. If 0, dynamic filtering didn't help; the probe is reading the whole table.
+
+**The three remediation patterns.**
+
+**Pattern A — broadcast OOMs because the build is too big.** Force the planner to use PARTITIONED for this join:
+
+```sql
+SET SESSION join_distribution_type = 'PARTITIONED';
+-- or in dbt model:
+{{ config(pre_hook="SET SESSION join_distribution_type = 'PARTITIONED'") }}
+```
+
+This forces every join in the query to use PARTITIONED. Heavy hammer — if some joins are legitimately broadcast-friendly, you lose that optimization for them. For per-join control, raise `join-max-broadcast-table-size` for the small dims while letting the planner pick PARTITIONED for the large one:
+
+```sql
+SET SESSION join_max_broadcast_table_size = '500MB';
+-- Now dims up to 500MB will broadcast; bigger ones will partition.
+```
+
+**Pattern B — bad stats causing wrong distribution choice.** Run `ANALYZE TABLE` on every source:
+
+```sql
+ANALYZE iceberg.analytics.fact_orders;
+ANALYZE iceberg.analytics.dim_customer;
+ANALYZE iceberg.analytics.dim_product;
+-- etc. for every star-schema table.
+```
+
+In dbt, schedule this as a post-hook on a "warehouse maintenance" model that runs daily:
+
+```sql
+-- models/maintenance/analyze_all.sql
+{{ config(materialized='table', post_hook=[
+    "ANALYZE iceberg.analytics.fact_orders",
+    "ANALYZE iceberg.analytics.dim_customer",
+    "ANALYZE iceberg.analytics.dim_product"
+]) }}
+SELECT 1 AS analyzed;
+```
+
+**Pattern C — join reordering for selectivity.** The CBO chooses join order based on stats; without stats, it joins left-to-right as written. Write joins in **selectivity order** (most selective first) to give the planner a good starting point:
+
+```sql
+-- BAD — biggest tables joined first, big intermediate result:
+SELECT ...
+FROM   fact_orders f                              -- 500M rows
+JOIN   dim_product p ON f.product_id = p.id      -- 100K rows, 0.1% selectivity
+JOIN   dim_customer c ON f.customer_id = c.id    -- 10M rows
+WHERE  c.region = 'US'                            -- filters to 30%
+  AND  p.category = 'BOOKS';                      -- filters to 5%
+
+-- GOOD — apply selective filters early:
+SELECT ...
+FROM   (SELECT id FROM dim_product WHERE category = 'BOOKS') p   -- 5K rows
+JOIN   fact_orders f ON f.product_id = p.id                       -- prunes f early
+JOIN   (SELECT id FROM dim_customer WHERE region = 'US') c        -- 3M rows
+       ON f.customer_id = c.id;
+-- Dynamic filtering kicks in on f's TableScan, pruning Parquet row-groups by product_id.
+```
+
+The planner's `reorder_joins_max_reordered_joins` (default 9) determines how many joins it'll try to reorder. For 10+ way star joins, raise this:
+
+```sql
+SET SESSION reorder_joins_max_reordered_joins = 16;
+```
+
+**The session-level knobs reference.**
+
+| Knob | Default | When to change |
+|---|---|---|
+| `join_distribution_type` | `AUTOMATIC` | Force `PARTITIONED` to debug a BROADCAST OOM; force `BROADCAST` when you KNOW the build fits. |
+| `join_max_broadcast_table_size` | 100 MB | Raise to allow bigger dim broadcasts; lower to be conservative. |
+| `join_reordering_strategy` | `AUTOMATIC` | Set to `ELIMINATE_CROSS_JOINS` if the CBO is making bad choices. |
+| `reorder_joins_max_reordered_joins` | 9 | Raise for 10+ way star joins. |
+| `enable_dynamic_filtering` | `true` | Should always be on. Turn off only for debugging. |
+
+---
+
+### 8A.3 Incremental-model late-arriving data and lookback windows
+
+**The problem shape.** An incremental dbt model uses `is_incremental()` to filter to "new" rows: `WHERE event_ts > (SELECT MAX(event_ts) FROM {{ this }})`. But upstream events sometimes arrive HOURS or DAYS late (network retries, batch CDC catches up, mobile clients sync after being offline). The first run after the late events lands sees them, but the incremental filter (`event_ts > previous_max`) has ALREADY moved past their timestamps — so the late events are silently dropped.
+
+**The fix: a lookback window.** Re-process the last N hours/days every run, idempotently. Pick N to match the upstream's worst-case lateness (e.g., 2 days for nightly batch CDC, 6 hours for streaming).
+
+**The canonical incremental model with lookback:**
+
+```sql
+-- models/marts/fct_events_daily.sql
+{{ config(
+    materialized='incremental',
+    incremental_strategy='merge',
+    unique_key='event_id',
+    partition_by={'field': 'event_date', 'data_type': 'date'},
+    on_schema_change='fail'
+) }}
+
+SELECT
+    event_id,
+    event_ts,
+    CAST(event_ts AS DATE) AS event_date,
+    customer_id,
+    event_type,
+    amount
+FROM   {{ ref('stg_events') }}
+{% if is_incremental() %}
+    -- Lookback: re-process the last 2 days every run.
+    -- merge strategy + unique_key=event_id makes this IDEMPOTENT — late rows update;
+    -- already-seen rows match on event_id and overwrite identically.
+    WHERE event_ts >= (
+        SELECT date_add('day', -2, COALESCE(MAX(event_ts), TIMESTAMP '1900-01-01'))
+        FROM   {{ this }}
+    )
+{% endif %}
+```
+
+**Why this is idempotent.** The `incremental_strategy='merge'` with `unique_key='event_id'` generates a `MERGE INTO` SQL that:
+- `WHEN MATCHED`: updates the row (no duplicate)
+- `WHEN NOT MATCHED`: inserts the new row
+
+Re-running over the same 2-day window is a no-op for already-seen events; late-arriving events get UPSERTed correctly.
+
+**The four lookback-window failure modes to avoid.**
+
+1. **`incremental_strategy='append'` with a lookback.** This INSERTS duplicate rows for already-seen events. Always use `merge` (or `delete+insert` / `insert_overwrite` for partition-replace patterns) when using lookback. The `append` strategy is correct only when the upstream guarantees no late arrivals AND you use a strict `event_ts > MAX` filter (no lookback).
+
+2. **Lookback shorter than upstream worst-case lateness.** If CDC can be 72 hours late but your lookback is 24 hours, you'll still drop rows. Audit upstream: `SELECT MAX(NOW() - event_ts) FROM stg_events` and pick N to cover the long-tail.
+
+3. **Lookback longer than necessary.** A 30-day lookback on a 500M-row table re-reads 30 days of data EVERY run, which defeats the point of incremental. Pick N to match upstream lateness, no longer.
+
+4. **Forgetting `partition_by`** on the incremental table. Without partitioning, the `MERGE INTO` has to scan the whole table to find matching `event_id`s. With `partition_by='event_date'` AND a lookback WHERE on `event_date >= ...`, the merge only scans the lookback-window partitions. **Always partition incremental tables on the same column the lookback filters on.**
+
+**The `insert_overwrite` alternative for partition-replace patterns.** For TRULY append-only data where you re-process whole partitions atomically (e.g., "re-run yesterday's partition"), use `incremental_strategy='insert_overwrite'` (where supported) or the equivalent dbt-trino pattern:
+
+```sql
+{{ config(
+    materialized='incremental',
+    incremental_strategy='delete+insert',
+    unique_key='event_date',  -- partition key, not row key
+    partition_by={'field': 'event_date', 'data_type': 'date'}
+) }}
+
+SELECT * FROM {{ ref('stg_events') }}
+{% if is_incremental() %}
+    WHERE event_date >= CURRENT_DATE - INTERVAL '2' DAY
+{% endif %}
+```
+
+This deletes the last 2 partitions and re-inserts them — atomic per partition (each partition flips to a new Iceberg snapshot), idempotent, and faster than `merge` for partition-scale rewrites.
+
+**EXPLAIN-driven validation.** After implementing the lookback, run `EXPLAIN ANALYZE` on a sample incremental run and check:
+- The `TableScan` of `stg_events` has `constraint=(event_date >= DATE '...')` (lookback predicate pushed).
+- The MERGE/DELETE row counts in `EXPLAIN ANALYZE` output match the expected lookback-window size.
+- `physicalInputDataSize` on the scan equals roughly N days × daily-volume (not the full table).
 
 ---
 

@@ -8354,6 +8354,47 @@ Caveats for `system.query()` (same as elsewhere in this doc — see §9.4 for th
 
 #### 13.5A.1 Aggregation pushdown to PostgreSQL — the canonical EXPLAIN signature, supported functions, session property
 
+> **AGGREGATION-PUSHDOWN GUARDRAIL — read this FIRST before writing any answer.** (Added iter424 after iter423 Q3 self-contradiction.)
+>
+> **THE ONE RULE — restate this VERBATIM as the opening of any aggregation-pushdown answer:**
+>
+> > **"Aggregation pushdown to a JDBC connector fires IFF (a) every WHERE-clause predicate also pushes AND (b) every aggregate function used is on the connector's supported-aggregates list. When both hold, the `Aggregate` operator is ABSENT from the EXPLAIN plan and Postgres returns pre-aggregated rows; when either fails, the `Aggregate` operator stays in Trino, above the `TableScan`."**
+>
+> Doc-quoted source — **trino.io/docs/current/optimizer/pushdown.html (verbatim):** *"If an aggregate function is successfully pushed down to the connector, the explain plan does not show that `Aggregate` operator."*
+>
+> **DO-NOT-WRITE table — these openings are FACTUALLY WRONG for the canonical `WHERE status='paid' GROUP BY customer_id` shape and will mislead a SaaS engineer who stops reading at the lead sentence:**
+>
+> | DO NOT WRITE (banned opening) | Why it's wrong | WRITE THIS INSTEAD |
+> |---|---|---|
+> | **"Trino DOES NOT push the GROUP BY / aggregate down."** (iter423 Q3 failure mode) | FALSE for any query whose WHERE predicates push. `status='paid'` is a VARCHAR equality (default collation) and **DOES push** per trino.io/docs/current/connector/postgresql.html. Therefore the aggregate ALSO pushes by the IFF rule above. Aggregation pushdown is ON by default (`aggregation_pushdown_enabled=true`). | "Aggregation pushdown fires IFF every WHERE predicate also pushes; here `status='paid'` is VARCHAR equality which pushes, so the aggregate ALSO pushes — EXPLAIN will show NO `Aggregate` operator above the `TableScan`." |
+> | "Aggregates always stay on Trino — connectors only do storage." | FALSE. JDBC connectors model aggregation as a synthetic SELECT issued to the remote DB (per PR #6667). The PostgreSQL connector pushes the 16-function list (avg, count, sum, min, max, stddev_*, variance_*, covar_*, corr, regr_*). | "JDBC connectors model aggregation as a synthetic SELECT; the PostgreSQL connector pushes the 16-function list. The aggregate runs on Postgres when the conditions in §13.5A.1 hold." |
+> | "You need `system.query()` passthrough to push GROUP BY." | FALSE for the canonical equality-WHERE shape. `system.query()` is only needed for connector-unsupported aggregates (e.g., `COUNT(DISTINCT)` shapes) or to bypass non-pushing WHERE predicates. For `WHERE status='paid' GROUP BY customer_id`, normal Trino SQL pushes by default. | "For the equality-WHERE + supported-aggregate shape, normal Trino SQL pushes by default — no `system.query()` needed. Use `system.query()` only for connector-unsupported aggregates or non-pushing WHERE predicates." |
+> | "Aggregation pushdown only fires for `count(*)`." | FALSE. The supported-aggregates list has 16 functions including `sum`, `avg`, `min`, `max`, `stddev_*`, `variance_*`. `count(*)` is one of many. The blocked cases are `count(1)` with GROUP BY (issue #7251), `COUNT(DISTINCT)` (most JDBC connectors), and aggregations on expressions inside the call (`SUM(a*b)`). | "16 aggregate functions push (avg/count/sum/min/max/stddev_*/variance_*/covar_*/corr/regr_*). Aggregations on expressions inside the call (`SUM(a*b)`), `COUNT(DISTINCT)`, and `count(1)` with GROUP BY do NOT push." |
+>
+> **THE CLEAN TWO-BRANCH DECISION — paste this verbatim when asked "does X push?":**
+>
+> ```
+> BRANCH A — predicate pushes (e.g., VARCHAR equality `status='paid'`, numeric =/<,>, BETWEEN on numeric):
+>     → aggregate ALSO pushes (assuming supported aggregate functions)
+>     → EXPLAIN: the `Aggregate` operator is ABSENT above the `TableScan`
+>     → the TableScan's synthetic Query contains the full
+>       `SELECT customer_id, sum(amount), count(*) FROM public.orders
+>        WHERE status='paid' GROUP BY customer_id`
+>     → Postgres returns ~K pre-aggregated rows; trivial network egress
+>
+> BRANCH B — predicate does NOT push (e.g., LOWER(email)=..., LIKE '%suffix', non-default collation VARCHAR range):
+>     → aggregate stays on TRINO (because it needs post-filter rows)
+>     → EXPLAIN: the `Aggregate` operator is PRESENT above a `ScanFilterProject` / `Filter` / `TableScan`
+>     → Postgres returns the full unaggregated table over JDBC
+>     → EXPLAIN ANALYZE shows millions of input rows on the `TableScan`
+> ```
+>
+> **WHY the iter423 Q3 failure mode happened.** A weak responder opened with "Trino DOES NOT push the GROUP BY and SUM/COUNT down" then later corrected itself in the body. The opening absolute statement is wrong for the specific query the engineer asked about (`WHERE status='paid' GROUP BY customer_id`), and an engineer who stops reading at the lead sentence will write `system.query()` passthroughs they don't need. **NEVER open an aggregation-pushdown answer with the word "NOT" unless the query's WHERE predicates demonstrably fail to push.** Always state the IFF rule first, then apply it to the specific predicate.
+>
+> **Source URLs (cite verbatim in any answer):**
+> - trino.io/docs/current/optimizer/pushdown.html — *"If an aggregate function is successfully pushed down to the connector, the explain plan does not show that `Aggregate` operator."*
+> - trino.io/docs/current/connector/postgresql.html — supported-aggregates list (16 functions) + predicate pushdown rules (VARCHAR equality pushes by default; range/LIKE on VARCHAR requires `enable-string-pushdown-with-collate=true` for non-default collations).
+
 **The single canonical statement.** `SELECT customer_id, SUM(amount), COUNT(*), AVG(amount) FROM app_pg.public.orders WHERE status = 'paid' GROUP BY customer_id` pushes aggregation to PostgreSQL **when the WHERE predicate also pushes** (here `status = 'paid'` is a VARCHAR equality, pushes). Postgres runs the entire `SELECT customer_id, SUM(amount), COUNT(*), AVG(amount) FROM public.orders WHERE status = 'paid' GROUP BY customer_id` and returns one row per `customer_id` over JDBC. Trino streams the already-aggregated rows.
 
 **EXPLAIN signature — the trino.io DOC-QUOTED success rule:**
@@ -8418,6 +8459,51 @@ RESET SESSION app_pg.aggregation_pushdown_enabled;
 **Catalog-file form is `aggregation-pushdown.enabled=true`** (hyphens, no `postgresql.` prefix — it's a base JDBC property). Pasting the underscore-form into the `.properties` file is silently ignored. Same footgun as `domain-compaction-threshold` (Section 3.3A).
 
 **The ordering dependency, restated.** Aggregate pushdown requires that **every** WHERE-clause predicate also push. If a `ScanFilterProject` node sits between the `Aggregate` and the `TableScan`, the rewrite rule that fuses the aggregate into the connector scan no longer matches — the aggregate stays on Trino. This is **EXPLAIN-observable**; it is NOT a doc-quoted rule. See §13.2 for the detailed sourcing note.
+
+**The 2nd-angle worked example — `COUNT(DISTINCT)` + numeric range + GROUP BY.**
+
+> **Query (iter424 probe target):**
+> ```sql
+> SELECT region, AVG(amount), COUNT(DISTINCT customer_id)
+> FROM app_pg.public.orders
+> WHERE created_at > DATE '2026-01-01'
+> GROUP BY region;
+> ```
+>
+> **Apply the IFF rule, function-by-function:**
+>
+> 1. **WHERE predicate**: `created_at > DATE '2026-01-01'` is a numeric/timestamp range — **pushes** by default on the PostgreSQL connector. ✓ Branch A is alive so far.
+> 2. **`AVG(amount)`** — on the 16-function supported-aggregates list. ✓ Pushes.
+> 3. **`COUNT(DISTINCT customer_id)`** — **NOT on the supported-aggregates list for JDBC pushdown by default.** The PostgreSQL connector pushes `count()` but does NOT push `COUNT(DISTINCT col)` as a single aggregate operation by default. This is a SEPARATE pushdown gate from regular `count()`.
+> 4. **Net result: MIXED.** Because the `COUNT(DISTINCT customer_id)` aggregate fails the supported-function check, the **entire aggregation falls back to Trino** — even though the WHERE predicate pushes AND `AVG(amount)` would individually push. The IFF rule requires *every* aggregate to push; a single unsupported aggregate breaks the whole-query pushdown.
+>
+> **EXPLAIN signature (mixed case — the aggregate fell back to Trino):**
+>
+> ```
+> Output[region, _col1, _col2]
+> └── Aggregate[GROUP BY region] avg(amount), count(DISTINCT customer_id)
+>     └── TableScan[app_pg:Query[SELECT region, amount, customer_id
+>                                FROM public.orders
+>                                WHERE created_at > DATE '2026-01-01']]
+>     -- The `Aggregate` operator is PRESENT (pushdown failed because COUNT DISTINCT isn't supported).
+>     -- But the WHERE pushes — Postgres returns only post-2026-01-01 rows, not the full table.
+>     -- That's the "partial push" shape: PREDICATE pushes, AGGREGATE doesn't.
+> ```
+>
+> **The three remediation options** (rank-ordered by typical SaaS-engineer preference):
+>
+> 1. **Switch to `approx_distinct(customer_id)`** — an approximate distinct (HyperLogLog) which is treated like the supported aggregates and pushes in supported shapes. Accuracy ~99%. Best when exact count isn't required. (Verify pushdown via EXPLAIN — some `approx_distinct` shapes may still stay on Trino on certain connector versions.)
+> 2. **Two-stage rewrite** — push the DISTINCT and the GROUP BY in a `system.query()` passthrough that returns the exact count per region:
+>    ```sql
+>    SELECT region, avg_amount, distinct_customers FROM TABLE(app_pg.system.query(
+>      query => 'SELECT region, AVG(amount) AS avg_amount, COUNT(DISTINCT customer_id) AS distinct_customers
+>                FROM public.orders WHERE created_at > DATE ''2026-01-01''
+>                GROUP BY region'));
+>    ```
+>    Postgres runs the entire query natively; Trino receives one row per region. This is the canonical exact-count workaround.
+> 3. **Accept the partial push** — if `orders` post-2026-01-01 is small enough (say < 1M rows over the wire), let the predicate push and let Trino do the `COUNT(DISTINCT)` on workers. EXPLAIN ANALYZE the `physicalInputDataSize` on the `TableScan` — if it's a few hundred MB, the partial push is fine.
+>
+> **DO NOT WRITE:** *"The aggregate pushes because the WHERE pushes."* It's a NECESSARY condition (the WHERE must push for the aggregate to even be a candidate), not SUFFICIENT. Every individual aggregate function must also be on the supported list. `COUNT(DISTINCT)` is the most common landmine; `SUM(a*b)` (aggregation on expression-inside-aggregate-call) is the second.
 
 ---
 
