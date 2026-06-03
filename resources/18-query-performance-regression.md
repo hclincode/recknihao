@@ -19,6 +19,7 @@ These are the absolutes most often stated incorrectly during query-perf triage o
 | "Partition pruning works automatically — I don't need to write `WHERE day(occurred_at) = ...` against partition columns explicitly." | **CORRECT — but only if the predicate is on the SOURCE COLUMN of the partition transform, in a form Trino can simplify.** `WHERE occurred_at >= TIMESTAMP '2026-05-01 00:00:00' AND occurred_at < TIMESTAMP '2026-05-02 00:00:00'` PRUNES on a `day(occurred_at)` partitioned table. `WHERE date_trunc('day', occurred_at) = DATE '2026-05-01'` may NOT prune (depending on whether the optimizer can simplify the function call against the transform). `WHERE CAST(occurred_at AS DATE) = DATE '2026-05-01'` may NOT prune. **The safe predicate shape is a range comparison against the raw source column.** See [trino.io/blog/2023/04/11/date-predicates.html](https://trino.io/blog/2023/04/11/date-predicates.html). | [§ Predicate shapes that prune](#predicate-shapes-that-prune) callout |
 | "`SELECT COUNT(*) FROM iceberg.x.y` reads the whole table to count rows." | **NO — on Iceberg, `COUNT(*)` is a METADATA query.** Iceberg manifests track `record_count` per file. Trino 467's Iceberg connector sums the per-file record counts from manifests — no Parquet files are opened. Verify by running `EXPLAIN ANALYZE SELECT COUNT(*) FROM iceberg.x.y` and noting `physicalInputDataSize = 0B` for the TableScan. Caveat: if the table has format-version 2 with position-delete files, the connector must subtract delete-file counts (still cheap; still no data-file reads). | [§ Cheap queries on Iceberg](#cheap-queries-on-iceberg) COUNT callout |
 | "Too many small files always causes slow queries — that's the only file-count problem." | **THERE ARE TWO DISTINCT PROBLEMS.** (1) Too many SMALL data files (each <16MB): per-file overhead dominates I/O, and Parquet row-group benefits vanish. Fix with `OPTIMIZE` / `rewrite_data_files`. (2) Too many MANIFEST files: planning time spikes because Trino reads every manifest list entry to do file-level pruning. Fix with `rewrite_manifests` (Spark-only on Trino 467). Both can compound. Diagnose by looking at `splitsCreated` (data-file side) vs `analysisTime`/`planningTime` (manifest-side). | [§ Small files vs many manifests](#small-files-vs-many-manifests-two-different-problems) callout |
+| "To cluster files by a non-partition column on Trino 467, run `ALTER TABLE ... EXECUTE rewrite_data_files(sort_order => ARRAY[...])`." | **NO — that's Spark CALL named-arg syntax pasted into a Trino EXECUTE statement, which Trino 467 rejects with `Procedure not registered`.** Trino 467's EXECUTE registry is exactly: `optimize` (only `file_size_threshold` arg), `optimize_manifests` (Trino 470+, NOT 467), `expire_snapshots`, `remove_orphan_files`, `drop_extended_stats`. `rewrite_data_files` is **NOT** in Trino's EXECUTE registry. The Trino-467-valid clustering recipe is two statements: `ALTER TABLE ... SET PROPERTIES sorted_by = ARRAY['col']` then `ALTER TABLE ... EXECUTE optimize(file_size_threshold => '512MB')`. The `sorted_by` table property is in Trino's modifiable-properties list since release 409 and Trino's EXECUTE optimize honors it at rewrite time. Drop to Spark CALL only for z-order, rewrite-all-true, MoR position-delete cleanup, post-partition-evolution rewrite, or `delete-file-threshold`. | [§ Fix recommendations table](#fix-recommendations--and-which-are-available-on-trino-467-the-production-version), [resources/17 EXECUTE-vs-CALL matrix](17-iceberg-table-maintenance.md#trino-execute-procedures-vs-spark-call-procedures--the-engine-confusion-disambiguation-matrix-read-before-writing-any-procedure-call) |
 
 > **Why these specific myths matter.** Each is a load-bearing topic-specific claim about Trino/Iceberg query performance. Stated as an absolute, it causes engineers to either build expensive workarounds for non-problems (filing a Trino bug instead of running ANALYZE; adding workers when the bottleneck is skew) OR to confidently misdiagnose (claiming "pushdown failed" because of a Filter-above-TableScan when residual filtering is cheap; claiming `COUNT(*)` is expensive on Iceberg when it's metadata-only). **The correct discipline:** when about to say "this is slow because X", check (a) EXPLAIN ANALYZE for the actual mechanism, (b) `physicalInputDataSize` for real I/O, (c) `system.runtime.queries` for whether concurrency is the cause, (d) the team's own resource 18.
 
@@ -790,10 +791,13 @@ If most rows in the output have `lo = 'basic'` and `hi = 'enterprise'`, the colu
 
 > **READ THIS FIRST.** Several plausible-looking "set a Trino property" fixes for this case are **gated on Trino versions later than 467** and will fail with "unknown property" errors on prod. The table below lists each fix lever with its Trino-version availability so you don't recommend a fix that doesn't work on prod. Verified against [Trino 469 release notes](https://trino.io/docs/current/release/release-469.html) and [Iceberg Spark bloom-filter table properties](https://iceberg.apache.org/docs/latest/configuration/#write-properties).
 
+> **ENGINE-CONFUSION GUARDRAIL (READ BEFORE COPYING ANY ROW BELOW).** The single most common iter-failure pattern when recommending a fix here is naming a **Spark `CALL iceberg.system.<proc>` procedure** as if it were a **Trino `ALTER TABLE ... EXECUTE` form**. Most recently, iter417 Q1 recommended `ALTER TABLE ... EXECUTE rewrite_data_files(sort_order => ARRAY[...])` on Trino 467 — that's Spark CALL named-arg syntax pasted into a Trino EXECUTE statement, which Trino 467 rejects with `Procedure not registered`. **The Trino 467 EXECUTE registry is exactly:** `optimize` (only `file_size_threshold` arg), `optimize_manifests` (Trino 470+, NOT 467), `expire_snapshots` (only `retention_threshold` arg on 467), `remove_orphan_files` (only `retention_threshold`), `drop_extended_stats`. **`rewrite_data_files`, `rewrite_position_delete_files`, `rewrite_manifests` are NOT in Trino's EXECUTE registry — they are Spark CALL procedures only.** See [resources/17 — Trino EXECUTE vs Spark CALL disambiguation matrix](17-iceberg-table-maintenance.md#trino-execute-procedures-vs-spark-call-procedures--the-engine-confusion-disambiguation-matrix-read-before-writing-any-procedure-call) for the full table. Below, the FIRST row is the Trino-467-native clustering recipe (no Spark hop needed); the Spark-CALL rows that follow are clearly marked as Spark-only.
+
 | Fix lever | Available on Trino 467? | How to use |
 |---|---|---|
-| **Sort-strategy data rewrite (Spark)** — cluster files by the filter column so each file's min/max becomes a tight range that prunes well. THE primary fix on this stack. | YES (runs in Spark, not Trino) | `CALL iceberg.system.rewrite_data_files(table => 'analytics.feature_usage', strategy => 'sort', sort_order => 'plan_type ASC NULLS LAST', options => map('rewrite-all', 'true'))`. After the rewrite, verify with `$files` that the new files have non-overlapping `(lower_bound, upper_bound)` ranges for `plan_type`. |
-| **Z-order data rewrite (Spark)** — multi-column clustering when you filter on more than one non-partition column simultaneously (e.g., `plan_type AND region`). | YES (runs in Spark, not Trino) | `CALL iceberg.system.rewrite_data_files(table => 'analytics.feature_usage', strategy => 'sort', sort_order => 'zorder(plan_type, region)')`. |
+| **Trino 467 native clustering** — `sorted_by` table property + `EXECUTE optimize`. THE Trino-only path. No Spark required for lexicographic single- or multi-column sort. | YES (Trino-native) | Two statements: `ALTER TABLE iceberg.analytics.feature_usage SET PROPERTIES sorted_by = ARRAY['plan_type ASC NULLS LAST', 'event_date ASC'];` then `ALTER TABLE iceberg.analytics.feature_usage EXECUTE optimize(file_size_threshold => '512MB');` (use a threshold larger than your largest existing file to force every file to rewrite for the initial sort migration). After the rewrite, verify with `$files` that `lower_bounds['plan_type'] = upper_bounds['plan_type']` for most files. **WATCH OUT:** Trino's `sorted_by` is lexicographic only — does NOT support z-order; for that, drop to Spark (next row). |
+| **Sort-strategy data rewrite (Spark)** — cluster files by the filter column via Spark CALL. Use when you need `rewrite-all => 'true'` (forces every file to rewrite regardless of size), or when you want Spark's richer tuning knobs. | YES (runs in Spark, not Trino) | `CALL iceberg.system.rewrite_data_files(table => 'analytics.feature_usage', strategy => 'sort', sort_order => 'plan_type ASC NULLS LAST', options => map('rewrite-all', 'true'))`. **This is Spark SQL only — do NOT paste into Trino as `ALTER TABLE ... EXECUTE rewrite_data_files(sort_order => ...)`; Trino 467 has no such procedure and will reject the statement.** After the rewrite, verify with `$files` that the new files have non-overlapping `(lower_bound, upper_bound)` ranges for `plan_type`. |
+| **Z-order data rewrite (Spark)** — multi-column clustering when you filter on more than one non-partition column simultaneously (e.g., `plan_type AND region`). | YES (runs in Spark, not Trino) — **no Trino equivalent at any release**; Trino's `sorted_by` is lexicographic only. | `CALL iceberg.system.rewrite_data_files(table => 'analytics.feature_usage', strategy => 'sort', sort_order => 'zorder(plan_type, region)')`. **Spark SQL only.** |
 | **Spark write-time bloom filter** — Spark writes Parquet bloom filter indexes per-file at write time; Trino 467 reads them at query time via its bloom-filter pushdown. THIS IS THE 467 BLOOM-FILTER PATH. | YES (write configured via Iceberg table properties on Spark; read happens automatically in Trino 467 with `parquet.use-bloom-filter=true`, the default) | Set the Iceberg table property in Spark: `ALTER TABLE iceberg.analytics.feature_usage SET TBLPROPERTIES ('write.parquet.bloom-filter-enabled.column.plan_type'='true')`. Then trigger a Spark `rewrite_data_files` so existing files are rewritten WITH bloom filters baked in. Subsequent Trino 467 queries with `WHERE plan_type = ...` get bloom-filter file-skipping for free. |
 | **Trino `parquet_bloom_filter_columns` table property** — Trino-side write-time bloom filter config exposed via `ALTER TABLE ... SET PROPERTIES parquet_bloom_filter_columns = ARRAY['plan_type']`. | **NO — Trino 469+ only.** This property was added in [Trino 469 (Jan 27 2025) via PR #24573](https://github.com/trinodb/trino/pull/24573). On Trino 467 setting it fails with **"unknown table property: parquet_bloom_filter_columns"**. | Until the cluster is upgraded to 469+, use the **Spark write-time bloom filter row above** — same on-disk outcome (Parquet bloom filters in the files), Trino 467 READS them just fine. |
 | **Schema redesign — re-partition by the filter column** (e.g., add `plan_type` to the partition spec) | YES — partition evolution is in-place via `ALTER TABLE ... SET PROPERTIES partitioning = ARRAY[..., 'plan_type']` | Best when the filter column has low cardinality (< 100 distinct values) and is filtered on most queries. High-cardinality filter columns would create too many partitions — use sort-strategy rewrite instead. See resource 10 (Lakehouse partitioning). |
@@ -836,15 +840,36 @@ ORDER BY files DESC;
 ```
 
 ```sql
--- Step 3 (Spark) — sort-strategy rewrite. The 467-valid primary fix.
+-- Step 3-PREFERRED (Trino 467 native) — sorted_by + EXECUTE optimize.
+-- No Spark hop required. Use this when you just need lexicographic clustering
+-- by one or more columns and the table's files aren't all already maximally-sized.
+ALTER TABLE iceberg.analytics.feature_usage
+  SET PROPERTIES sorted_by = ARRAY['plan_type ASC NULLS LAST', 'event_date ASC'];
+
+ALTER TABLE iceberg.analytics.feature_usage
+  EXECUTE optimize(file_size_threshold => '512MB');
+-- (Set file_size_threshold > the largest existing file to force every file to
+-- rewrite for the initial sort migration. Default is '100MB' — files larger
+-- than that are skipped, which is what you want for routine compaction but NOT
+-- for a one-shot sort migration.)
+```
+
+```sql
+-- Step 3-ALT (Spark CALL) — when you need rewrite-all behavior unavailable in
+-- Trino's EXECUTE optimize, or z-order, or post-partition-evolution rewrite.
+-- This is SPARK SQL — do NOT paste into Trino as ALTER TABLE EXECUTE.
 CALL iceberg.system.rewrite_data_files(
   table       => 'analytics.feature_usage',
   strategy    => 'sort',
   sort_order  => 'plan_type ASC NULLS LAST, event_date ASC',
   options     => map('rewrite-all', 'true', 'target-file-size-bytes', '268435456')
 );
+```
 
--- Step 3-alt (Spark, additional or instead of sort) — write-time bloom filter.
+```sql
+-- Step 3-alt2 (Spark, additional or instead of sort) — write-time bloom filter.
+-- These Iceberg TBLPROPERTIES must be set via Spark — Trino's SET PROPERTIES
+-- does not pass these through.
 ALTER TABLE iceberg.analytics.feature_usage
 SET TBLPROPERTIES (
   'write.parquet.bloom-filter-enabled.column.plan_type' = 'true',
@@ -852,6 +877,7 @@ SET TBLPROPERTIES (
 );
 
 -- Then run rewrite_data_files so existing files are rewritten with bloom filters.
+-- SPARK SQL only.
 CALL iceberg.system.rewrite_data_files(
   table   => 'analytics.feature_usage',
   options => map('rewrite-all', 'true')

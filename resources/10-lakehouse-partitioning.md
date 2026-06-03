@@ -114,20 +114,58 @@ Iceberg's pruner checks: "is 'enterprise' in the range ['basic', 'starter']?" An
 
 **The fix is to narrow the per-file min/max ranges by physically clustering the data, not to add `plan_type` to the partition spec.**
 
-### Fix 1 (canonical, recommended): sort the data with `rewrite_data_files`
+### Fix 1 (canonical, recommended): cluster files by sort order
 
-Use Iceberg's compaction procedure with a sort strategy. This physically reorders rows within files so that rows with the same `plan_type` cluster together — after which most files will contain only one or two plan types and the manifest min/max will be narrow.
+Iceberg can cluster rows within each file by a sort key so that most files contain only one or two `plan_type` values — after which the manifest min/max range narrows enough for pruning to skip non-matching files. There are **two ways** to do this on the production stack; pick by engine first.
 
-> **ENGINE: Spark SQL only. `CALL iceberg.system.rewrite_data_files` does not exist in Trino.**
+> **ENGINE-CONFUSION GUARDRAIL.** The single most common iter-failure pattern in this resource family was pasting Spark CALL named-arg syntax `rewrite_data_files(sort_order => ARRAY[...])` into a Trino `ALTER TABLE ... EXECUTE` statement. **Trino 467 has no `rewrite_data_files` EXECUTE procedure** — it returns `Procedure not registered`. The Trino-467-native clustering path is `sorted_by` table property + `EXECUTE optimize`, shown FIRST below. The Spark CALL form follows as the fallback for cases the Trino-native path can't cover (z-order, `rewrite-all=true`, post-partition-evolution). See [resources/17 — Trino EXECUTE vs Spark CALL disambiguation matrix](17-iceberg-table-maintenance.md#trino-execute-procedures-vs-spark-call-procedures--the-engine-confusion-disambiguation-matrix-read-before-writing-any-procedure-call) for the full reference.
+
+#### Path A (Trino 467 native, no Spark required) — `sorted_by` + `EXECUTE optimize`
+
+The Trino Iceberg connector's `sorted_by` table property is in the modifiable-properties list (since Trino release 409 via [PR #14891](https://github.com/trinodb/trino/pull/14891)). Setting it then running `EXECUTE optimize` produces files sorted by the listed columns. **Use this as the default Trino-only path for lexicographic clustering by one or more columns.**
 
 ```sql
--- Spark SQL only — CALL iceberg.system.rewrite_data_files does not exist in Trino.
--- Trino equivalent: ALTER TABLE iceberg.analytics.user_events EXECUTE optimize
---   — but Trino's OPTIMIZE only does bin-pack file compaction. It does NOT accept
---   strategy => 'sort' or sort_order => '...'. Sort order on the Trino side must be
---   configured at table creation via the `sorted_by` table property, then Trino's
---   OPTIMIZE will preserve that sort within rewritten files. For one-shot reordering
---   of existing data by a new sort key, use Spark as shown below.
+-- Trino 467 (CORRECT — this is the only first-class Trino path to cluster by a column).
+-- Step 1: set the table's sort order. Multi-column lex sort is supported.
+ALTER TABLE iceberg.analytics.user_events
+  SET PROPERTIES sorted_by = ARRAY['plan_type ASC NULLS LAST', 'occurred_at ASC'];
+
+-- Step 2: rewrite existing files so they pick up the sort order.
+-- IMPORTANT: file_size_threshold must be LARGER than your existing files
+-- to force a rewrite. Default '100MB' skips files larger than that, which is
+-- what you want for routine compaction but NOT for one-shot sort migration.
+ALTER TABLE iceberg.analytics.user_events
+  EXECUTE optimize(file_size_threshold => '512MB');
+
+-- Verify the sort took effect via the $files metadata table.
+SELECT
+  CAST(lower_bounds['plan_type'] AS VARCHAR) AS plan_lo,
+  CAST(upper_bounds['plan_type'] AS VARCHAR) AS plan_hi,
+  count(*) AS files
+FROM iceberg.analytics."user_events$files"
+WHERE content = 0
+GROUP BY 1, 2
+ORDER BY files DESC;
+-- After sort: most rows show plan_lo = plan_hi (each file holds one plan_type).
+```
+
+> **WRONG syntax (do NOT recommend — Spark CALL form pasted into Trino EXECUTE).** Each line below is Spark CALL syntax that Trino 467 rejects:
+> ```sql
+> -- WRONG: rewrite_data_files is NOT a Trino EXECUTE procedure.
+> ALTER TABLE iceberg.analytics.user_events EXECUTE rewrite_data_files(sort_order => ARRAY['plan_type']);
+> ALTER TABLE iceberg.analytics.user_events EXECUTE rewrite_data_files(strategy => 'sort', sort_order => 'plan_type ASC');
+> -- WRONG: Trino's optimize does NOT accept sort_order or strategy arguments.
+> ALTER TABLE iceberg.analytics.user_events EXECUTE optimize(sort_order => 'plan_type');
+> ALTER TABLE iceberg.analytics.user_events EXECUTE optimize(strategy => 'sort');
+> ```
+
+#### Path B (Spark CALL fallback) — when Trino-native isn't enough
+
+Drop to Spark `CALL iceberg.system.rewrite_data_files` only when the Trino-native path can't cover the case. Specifically: **z-order**, **rewrite-all-true** (force rewrite of every file regardless of size — needed after partition evolution), **`delete-file-threshold`** (compact MoR files with many delete entries), or richer tuning.
+
+```sql
+-- Spark SQL only. Do NOT paste this into a Trino session as ALTER TABLE ... EXECUTE
+-- rewrite_data_files(...) — Trino 467 has no such procedure (Procedure not registered).
 CALL iceberg.system.rewrite_data_files(
   table      => 'analytics.user_events',
   strategy   => 'sort',
@@ -150,7 +188,9 @@ After this runs, each file holds a contiguous run of one plan type (or two adjac
 For higher-cardinality clustering — e.g., a `user_id` filter on a multi-billion-row table — use `zorder` instead of `sort` (multi-column clustering with no leading-column bias):
 
 ```sql
--- Spark SQL only — Trino's OPTIMIZE does not accept strategy => 'sort' or zorder.
+-- Spark SQL only. Trino 467 has no rewrite_data_files EXECUTE procedure, and
+-- Trino's sorted_by is lexicographic only (no z-order support). For multi-column
+-- z-order clustering, Spark is the only path on this stack.
 CALL iceberg.system.rewrite_data_files(
   table      => 'analytics.user_events',
   strategy   => 'sort',
@@ -185,7 +225,7 @@ ALTER TABLE iceberg.analytics.user_events
 
 Once set, future writes embed a bloom filter for the configured columns in each Parquet row group. Trino's Parquet reader consults the filter before reading column data. Bloom filters add ~1–5% to file size; they pay off only for selective equality predicates on **high-cardinality** columns.
 
-**Bloom filters do NOT apply to historical files.** Re-run `rewrite_data_files` after enabling them to rebuild existing files with bloom filters embedded.
+**Bloom filters do NOT apply to historical files.** To bake them into existing files, re-run a Spark `CALL iceberg.system.rewrite_data_files(table => '...', options => map('rewrite-all', 'true'))` after enabling the table property (Spark only — Trino's `EXECUTE optimize` cannot force-rewrite files that are already at target size, which is what you need for retrofit).
 
 **When NOT to use bloom filters:**
 - Low-cardinality columns (`<1000` distinct values): use dictionary encoding + min/max — they already prune well.
@@ -237,7 +277,7 @@ WHERE occurred_at >= TIMESTAMP '2026-05-01 00:00:00'
 - **After sort:** Input bytes drops to ~2% of May (only the 'enterprise' files).
 - **After sort + bloom filter:** Input bytes drops further as row groups within partial files also skip.
 
-If you do not see a drop after `rewrite_data_files`, check that the rewrite actually completed (use the `$files` query in the partition-evolution section to see file counts and sort order) and that the predicate is on the same column you sorted by.
+If you do not see a drop after the rewrite (either Trino's `EXECUTE optimize` or Spark's `rewrite_data_files`), check that the rewrite actually completed (use the `$files` query in the partition-evolution section to see file counts and sort order) and that the predicate is on the same column you sorted by.
 
 ---
 

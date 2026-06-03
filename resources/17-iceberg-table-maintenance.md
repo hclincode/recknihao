@@ -43,6 +43,113 @@ These are the absolutes most often stated incorrectly about Iceberg maintenance 
 
 ---
 
+## Trino EXECUTE procedures vs Spark CALL procedures — the engine-confusion disambiguation matrix (READ BEFORE WRITING ANY PROCEDURE CALL)
+
+> **The single most common load-bearing inaccuracy in iter402-417 was naming a Spark `CALL iceberg.system.<proc>` procedure as if it were a Trino `ALTER TABLE ... EXECUTE` form** — most recently in iter417 Q1, where `rewrite_data_files(sort_order => ARRAY['plan_type', 'event_ts'])` (Spark CALL named-arg syntax) was presented as a Trino 467 EXECUTE recommendation. An engineer running that SQL on Trino 467 gets `Procedure not registered` or `unknown procedure argument` and the fix breaks.
+>
+> **Use this section as the single authoritative reference before writing any procedure call recommendation.** It lists every Iceberg maintenance procedure, marks which engine accepts it, and gives the Trino-467-valid recipe when the user wants a Spark-only behavior. Cross-referenced from [resources/10 partitioning](10-lakehouse-partitioning.md) and [resources/18 query-perf-regression](18-query-performance-regression.md).
+
+### What Trino 467 actually accepts via `ALTER TABLE ... EXECUTE`
+
+Verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) and [trino.io/docs/current/sql/alter-table.html](https://trino.io/docs/current/sql/alter-table.html). **These are the ONLY procedures Trino 467 implements via `ALTER TABLE ... EXECUTE`:**
+
+| Trino EXECUTE procedure | Accepted arguments on Trino 467 | One-line purpose |
+|---|---|---|
+| `optimize` | `file_size_threshold` (VARCHAR, e.g. `'128MB'`) — **THAT'S IT.** No `sort_order`, no `strategy`, no `target_file_size`, no `where` argument (use a separate `WHERE` clause on partition columns instead). | Bin-pack-compact data files. Honors the table's `sorted_by` property if set — see clustering recipe below. |
+| `optimize_manifests` | None | Rewrites manifest files clustered by partition values. **Trino 470+ only — NOT on 467.** |
+| `expire_snapshots` | `retention_threshold` (VARCHAR duration, default `'7d'`, minimum `'7d'` unless catalog `iceberg.expire-snapshots.min-retention` overridden). **NO `retain_last`, NO `clean_expired_metadata` on Trino 467** — those were added in Trino 479. | Drops old snapshot metadata; physically deletes data files referenced ONLY by dropped snapshots. |
+| `remove_orphan_files` | `retention_threshold` (VARCHAR duration, default `'7d'`, minimum `'7d'` unless catalog `iceberg.remove-orphan-files.min-retention` overridden). **NO `dry_run` on Trino** — only Spark's CALL form has dry-run. | Sweeps unreferenced files from MinIO/S3 left by failed writers. |
+| `drop_extended_stats` | None | Drops extended statistics computed by `ANALYZE`. |
+
+**Also valid in Trino 467 via `CALL iceberg.system.*` (the only `CALL` forms Trino implements):**
+
+| Trino CALL procedure | Trino 467 argument style | Purpose |
+|---|---|---|
+| `rollback_to_snapshot` | **Positional** `('schema', 'table', <snapshot_id>)` — NOT named args. | Revert table state. The `ALTER TABLE ... EXECUTE rollback_to_snapshot(snapshot_id => ...)` form is Trino 469+. |
+| `register_table` | Named args `(schema_name => ..., table_name => ..., metadata_file => ...)` (schema/table split). | Re-attach a dropped table from a surviving `v*.metadata.json`. |
+
+**Anything else you saw in Iceberg docs is Spark-only on this stack. Specifically, these are Spark CALL procedures that Trino 467 does NOT implement (do NOT translate them to `EXECUTE <name>` — Trino will return `Procedure not registered`):**
+
+| Spark-only `CALL iceberg.system.<proc>` | Why someone tries it from Trino | What to do on Trino 467 |
+|---|---|---|
+| `rewrite_data_files(table => ..., strategy => 'sort', sort_order => 'col ASC')` | They want to cluster files by a non-partition column. | Use Trino's `sorted_by` table property + `EXECUTE optimize` — see clustering recipe below. |
+| `rewrite_data_files(table => ..., strategy => 'sort', sort_order => 'zorder(c1, c2)')` | They want multi-column z-order clustering. | **No Trino 467 equivalent.** Z-order clustering MUST run from Spark; Trino's `sorted_by` supports lexicographic sort only, not z-order. |
+| `rewrite_data_files(table => ..., options => map('delete-file-threshold', ...))` | They want to compact only files with many delete entries. | Not exposed in Trino's `EXECUTE optimize`. Run from Spark. |
+| `rewrite_position_delete_files(table => ...)` | They want to compact position delete files on MoR tables. | **No Trino 467 equivalent at any release.** Must run from Spark. ([trinodb/trino #27371](https://github.com/trinodb/trino/issues/27371)) |
+| `rewrite_manifests(table => ...)` | They want to rebalance manifest files. | No Trino 467 equivalent. `ALTER TABLE ... EXECUTE optimize_manifests` is Trino 470+. Run from Spark. |
+| `fast_forward(table => ..., branch => ..., to => ...)` | Branch fast-forward operation. | Spark only. |
+| `publish_changes`, `cherrypick_snapshot`, `migrate`, `snapshot` (table-snapshot form) | Various migration/WAP flows. | Spark only. |
+| `create_tag`, `drop_tag`, `create_branch`, `drop_branch` | Branch/tag DDL. | Spark only (DDL form on Spark, not a CALL); see [§ Write-Audit-Publish](#write-audit-publish-wap-with-iceberg-branches). |
+
+> **Mental model: if it's not in the "Trino EXECUTE" table or the "Trino CALL" table above, it's Spark-only on this stack.** Do NOT speculate that pasting Spark CALL named-arg syntax into a Trino `ALTER TABLE ... EXECUTE` form will work — Trino's executor accepts only the procedure names hard-coded in the connector, and only the arguments those procedures expose. The Spark-only procedures literally do not exist in Trino 467's procedure registry.
+
+### The Trino-467-valid recipe for clustering files by a non-partition column (THE iter417 fix)
+
+When a user asks "how do I sort/cluster files by `plan_type` on Trino 467 so file-skipping works?" the correct answer is **NOT** `ALTER TABLE ... EXECUTE rewrite_data_files(sort_order => ...)` (that's Spark CALL syntax — Trino will reject it). The Trino-467-valid recipe is **two statements**: set the `sorted_by` table property, then run `EXECUTE optimize`. Verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) — `sorted_by` is in the modifiable-properties list, and `EXECUTE optimize` honors the property when rewriting files.
+
+```sql
+-- Trino 467 (CORRECT — this is the only first-class Trino path to cluster by a column).
+-- Step 1: set the table's sort order via the sorted_by table property.
+-- (Property added in Trino release 409 via PR #14891; supported continuously since.
+-- ALTER TABLE SET PROPERTIES for sorted_by is in the connector's modifiable list.)
+ALTER TABLE iceberg.analytics.events
+  SET PROPERTIES sorted_by = ARRAY['plan_type ASC NULLS LAST', 'occurred_at ASC'];
+
+-- Step 2: rewrite existing files so they get clustered by the new sort order.
+-- Trino's EXECUTE optimize reads sorted_by at OPTIMIZE time and produces sorted output.
+ALTER TABLE iceberg.analytics.events
+  EXECUTE optimize(file_size_threshold => '512MB');
+-- (Set file_size_threshold > the largest existing file to force rewrite of every
+-- file. Default is '100MB' — files larger than that are skipped, so for a one-shot
+-- sort migration of well-sized existing files, pass a larger threshold.)
+
+-- Step 3: verify the sort took effect.
+SELECT
+  CAST(lower_bounds['plan_type'] AS VARCHAR) AS plan_lo,
+  CAST(upper_bounds['plan_type'] AS VARCHAR) AS plan_hi,
+  count(*) AS files,
+  sum(file_size_in_bytes) / 1024 / 1024 AS mb
+FROM iceberg.analytics."events$files"
+WHERE content = 0
+GROUP BY 1, 2
+ORDER BY files DESC;
+-- After sort: most rows show plan_lo = plan_hi (each file holds one plan_type)
+-- — pruning on plan_type now skips files cleanly.
+```
+
+> **WRONG (do NOT recommend these — engine confusion).** Each line below is Spark CALL syntax that Trino 467 rejects:
+> ```sql
+> -- WRONG: Spark CALL syntax pasted as Trino EXECUTE — Trino returns "Procedure not registered".
+> ALTER TABLE iceberg.analytics.events EXECUTE rewrite_data_files(sort_order => ARRAY['plan_type']);
+> ALTER TABLE iceberg.analytics.events EXECUTE rewrite_data_files(strategy => 'sort', sort_order => 'plan_type ASC');
+> ALTER TABLE iceberg.analytics.events EXECUTE rewrite_position_delete_files;
+> ALTER TABLE iceberg.analytics.events EXECUTE rewrite_manifests;
+> -- WRONG: trying to pass sort_order to Trino's optimize procedure (it doesn't accept that arg).
+> ALTER TABLE iceberg.analytics.events EXECUTE optimize(sort_order => 'plan_type');
+> ALTER TABLE iceberg.analytics.events EXECUTE optimize(strategy => 'sort');
+> ```
+
+### When to use Spark CALL `rewrite_data_files` anyway (legitimate Spark-only cases)
+
+The Trino `sorted_by + EXECUTE optimize` recipe above covers the most common case (lexicographic clustering by one or more columns). **But Spark `rewrite_data_files` IS the only path** for these cases:
+
+| Need | Why Spark only | Spark recipe |
+|---|---|---|
+| **Z-order multi-column clustering** | Trino's `sorted_by` is lexicographic only. Z-order interleaves bits across columns — no `sorted_by` syntax expresses this. | `CALL iceberg.system.rewrite_data_files(table => 'analytics.events', strategy => 'sort', sort_order => 'zorder(user_id, session_id)')` |
+| **Whole-table rewrite** (e.g., after partition-spec change, or to apply newly-added bloom filters to existing files) | Trino's `EXECUTE optimize` skips files above `file_size_threshold` — for forcing a rewrite of every file regardless of size, only Spark's `options => map('rewrite-all', 'true')` works reliably. Also, Trino's OPTIMIZE has [#26109](https://github.com/trinodb/trino/issues/26109) / [#26503](https://github.com/trinodb/trino/issues/26503) / [#25279](https://github.com/trinodb/trino/issues/25279) bugs after partition evolution — Spark is the only safe path post-evolution. | `CALL iceberg.system.rewrite_data_files(table => 'analytics.events', strategy => 'sort', sort_order => 'plan_type ASC', options => map('rewrite-all', 'true', 'target-file-size-bytes', '268435456'))` |
+| **Compact files with many delete entries (MoR tables)** | Trino's `EXECUTE optimize` exposes only `file_size_threshold`, not `delete-file-threshold`. | `CALL iceberg.system.rewrite_data_files(table => 'analytics.events', options => map('delete-file-threshold', '5'))` |
+| **Compact position delete files (MoR tables)** | Procedure not implemented in Trino 467 at all ([trinodb/trino #27371](https://github.com/trinodb/trino/issues/27371)). | `CALL iceberg.system.rewrite_position_delete_files(table => 'analytics.events')` |
+| **Rewrite manifests** | `ALTER TABLE ... EXECUTE optimize_manifests` is Trino 470+ — NOT on 467. | `CALL iceberg.system.rewrite_manifests(table => 'analytics.events')` |
+| **Expire snapshots younger than 7 days** (GDPR same-day purge) | Trino enforces a 7-day min-retention floor by default. | `CALL iceberg.system.expire_snapshots(table => 'analytics.events', older_than => current_timestamp - interval '1' hour, retain_last => 1)` |
+
+### One-line rule for every "how do I cluster / compact / sort" question
+
+1. **First ask:** does the user want Trino-only single-column-or-lexicographic sort? -> recommend `sorted_by + EXECUTE optimize` (the recipe above).
+2. **Otherwise** (z-order, post-evolution, rewrite-all, MoR position-delete cleanup, manifest rewrite, sub-7-day expiry) -> recommend the Spark `CALL iceberg.system.<proc>` form. **State explicitly that it runs from Spark, not Trino.**
+3. **NEVER** mix Spark CALL syntax into a Trino `ALTER TABLE ... EXECUTE` recommendation. The two surface forms are not interchangeable.
+
+---
+
 ## Why maintenance is needed (the immutable-file model)
 
 Iceberg is built on **immutable Parquet files**. Once a file is written, it is never modified. This is the foundation of Iceberg's ACID guarantees (Atomicity, Consistency, Isolation, Durability — meaning concurrent reads and writes see a consistent, complete picture of the table even mid-update). But it has a cost: every operation creates more files.
