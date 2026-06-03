@@ -10,10 +10,10 @@ A practical guide for SaaS engineers who want to **join their live OLTP Postgres
 
 Search this document by keyword. Major topics and where they live:
 
-- **THE THRESHOLD-PUSH REFERENCE CARD — Section 13.** Six-question paste-ready answer template covering: (13.1) connector pushdown LIMITATION MATRIX — predicate / projection / aggregate / join / limit / topN / cross-join supported-vs-not per JDBC connector; (13.2) **PUSHDOWN ORDERING DEPENDENCY** — predicate must push FIRST for aggregate to push (the "all WHERE predicates must push for aggregate to push" rule) + literal EXPLAIN ANALYZE 50M-row smoking-gun snippet + `aggregation_pushdown_enabled` session-property worked example + `jdbc-types-mapped-to-varchar` foot-gun callout + collation equality-perf-regression caveat; (13.3) **dynamic filtering for federated joins** — build-side-to-probe-side direction + `join_distribution_type='BROADCAST'` + `enable-dynamic-filtering` + EXPLAIN ANALYZE `dynamicFilterSplitsProcessed` verification + INNER/RIGHT vs LEFT/FULL OUTER join-type support; (13.4) **federated-join cost & data-movement mental model** — why a 50M-row table without pushdown is a full network transfer + remediation tree; (13.5) **TopN / LIMIT pushdown** — under-known, high-impact + EXPLAIN signature + `topn_pushdown_enabled`; (13.6) **WHEN TO MATERIALIZE a federated lookup locally** — Iceberg CTAS / refreshed snapshot instead of live federation + the 6-signal decision table; (13.7) the six-question answer template; (13.8) verifiable trino.io URLs.
+- **THE THRESHOLD-PUSH REFERENCE CARD — Section 13.** Six-question paste-ready answer template covering: (13.1) connector pushdown LIMITATION MATRIX — predicate / projection / aggregate / join / limit / topN / cross-join supported-vs-not per JDBC connector; (13.2) **PUSHDOWN ORDERING DEPENDENCY** — predicate must push FIRST for aggregate to push (the "all WHERE predicates must push for aggregate to push" rule) + literal EXPLAIN ANALYZE 50M-row smoking-gun snippet + `aggregation_pushdown_enabled` session-property worked example + `jdbc-types-mapped-to-varchar` foot-gun callout + collation equality-perf-regression caveat; (13.3) **dynamic filtering for federated joins** — build-side-to-probe-side direction + `join_distribution_type='BROADCAST'` + `enable-dynamic-filtering` + EXPLAIN ANALYZE `dynamicFilterSplitsProcessed` verification + INNER/RIGHT vs LEFT/FULL OUTER join-type support; (13.4) **federated-join cost & data-movement mental model** — why a 50M-row table without pushdown is a full network transfer + remediation tree; (13.5) **TopN / LIMIT pushdown — RECONCILED single source of truth** (TopN IS supported in OSS Trino 467 since release 353/354 in 2021; canonical pushed case + EXPLAIN-signature absence-of-TopN-operator + failure-shape catalog with the GROUP-BY-aggregate / multi-source-federated-join / non-default-collation / issue-#25138 shapes called out; myth-buster table making explicit that "OSS Trino can't push TopN" is wrong); (13.6) **WHEN TO MATERIALIZE a federated lookup locally** — Iceberg CTAS / refreshed snapshot instead of live federation + the 6-signal decision table; (13.7) the six-question answer template; (13.8) verifiable trino.io URLs.
 - **Predicate pushdown**: Section 2A.2 (MySQL/PostgreSQL — what pushes, what doesn't, VARCHAR no-pushdown)
 - **PostgreSQL VARCHAR pushdown — equality vs range** (the most-confused fact): Section 3.2 canonical callout — equality/IN/IS NULL/dynamic-filter IN-lists ALL push; only RANGE (`<`,`>`,`BETWEEN`) does not push by default
-- **Top-N pushdown (`ORDER BY <col> LIMIT N`) on PostgreSQL**: Section 3.3A — **YES, it pushes** by default (session `app_pg.topn_pushdown_enabled = true`); EXPLAIN signature for SUCCESS = `sortOrder=[...] limit=N` annotations INSIDE the TableScan with NO separate TopN operator above; signature for FAILURE = a separate `TopN [topN=N, orderBy=[...]]` operator sitting ABOVE a bare TableScan. Doesn't push above Joins, Unions, Aggregations, or when sort key is a function. Fallback when it refuses: `system.query()` passthrough.
+- **Top-N pushdown (`ORDER BY <col> LIMIT N`) on PostgreSQL**: Sections 3.3A (introductory treatment) and **13.5 (reconciled single source of truth for the failure-shape catalog)** — **YES, TopN pushdown IS supported in OSS Trino 467** by default (session `app_pg.topn_pushdown_enabled = true`; in OSS Trino since release 353/354 in March 2021 — NOT a later-version or Starburst Enterprise-only feature). EXPLAIN signature for SUCCESS = `sortOrder=[...] limit=N` annotations INSIDE the TableScan with NO separate TopN operator above (**the absence IS the signature**); signature for FAILURE = a separate `TopN[topN=N, orderBy=[...]]` operator sitting ABOVE a bare TableScan. Failure shapes (see §13.5 for the full enumeration with workarounds): ORDER BY on a Trino-computed aggregate (`GROUP BY ... ORDER BY COUNT(*) DESC LIMIT N`), ORDER BY spanning multiple sources in a federated join, ORDER BY on a non-default-collation VARCHAR column, non-identity projection between TopN and TableScan ([Trino issue #25138](https://github.com/trinodb/trino/issues/25138)), TopN above a Join/Union/Aggregation, sort on a derived expression, standalone ORDER BY without LIMIT, OFFSET on top of LIMIT, subquery/CTE obscuring the pattern. **Each failure shape has a workaround; do NOT generalize one failed-pushdown query into "OSS Trino can't push TopN" — the feature is available, that one query's specific shape blocked the push.** Fallback: `system.query()` passthrough plus an outer Trino ORDER BY to preserve client ordering.
 - **Iceberg time travel + live PostgreSQL federation** (FOR VERSION AS OF, FOR TIMESTAMP AS OF, snapshot expiry, tags for audits, DF wait-timeout asymmetry, **why `domain-compaction-threshold` is JDBC-only and does NOT work on Iceberg**): Section 4.7
 - **Dynamic filtering (runtime join pruning)**: Section 5 — how build-side IN-lists prune probe-side Iceberg scans; wait-timeout defaults (JDBC 20s, Iceberg 1s); VARCHAR key caveat; EXPLAIN ANALYZE VERBOSE verification
 - **DF build/probe direction rule (CRITICAL mental model)**: Section 5.1.1 — DF flows from SMALLER (build) table TO LARGER (probe) table, not the reverse; worked examples for both directions
@@ -2675,7 +2675,9 @@ The session property takes effect immediately for your current connection — no
 
 ### 3.3A Top-N pushdown — `ORDER BY ... LIMIT N` pushes down to PostgreSQL (CRITICAL — do not miss this)
 
-> **Top-N pushdown IS supported by the OSS Trino 467 PostgreSQL connector.** When you write `SELECT ... FROM app_pg.public.<table> ORDER BY <col> [DESC|ASC] LIMIT N`, Trino sends an `ORDER BY ... LIMIT N` clause directly to Postgres. Postgres uses the existing B-tree index on the sort column (e.g., `created_at`) and returns only N rows — typically with sub-second latency on a million-row table. Trino does NOT pull every row and sort in-memory.
+> **RECONCILIATION POINTER**: This section is the introductory treatment of TopN pushdown. **The canonical, comprehensive single source of truth — including the full failure-shape catalog, the myth-buster table making explicit that "OSS Trino can't push TopN" is wrong, the release-353/354 history, and the workaround tree — is [Section 13.5](#135-topn--limit-pushdown--under-known-high-impact-reconciled--single-source-of-truth).** If anything in this section appears to contradict §13.5, §13.5 wins.
+
+> **Top-N pushdown IS supported by the OSS Trino 467 PostgreSQL connector** — has been since release 353/354 (March 2021). It is **not** a later-version feature or a Starburst Enterprise / commercial-fork feature. When you write `SELECT ... FROM app_pg.public.<table> ORDER BY <col> [DESC|ASC] LIMIT N`, Trino sends an `ORDER BY ... LIMIT N` clause directly to Postgres. Postgres uses the existing B-tree index on the sort column (e.g., `created_at`) and returns only N rows — typically with sub-second latency on a million-row table. Trino does NOT pull every row and sort in-memory.
 >
 > **This is one of the most common questions SaaS engineers ask about Postgres federation** — "if I just want the 20 most recent orders, will Trino pull all 50M rows or just the 20 I asked for?" The answer is: **just the 20**, as long as the pattern is recognized as a Top-N and pushed. This subsection tells you how to confirm it.
 
@@ -5524,7 +5526,7 @@ REFRESH MATERIALIZED VIEW iceberg.analytics.events_enriched_mv;
 This re-executes the materialized view's SELECT (which can federate across catalogs) and writes the result into the storage Iceberg table. Two refresh modes are possible:
 
 - **Full refresh** — Trino deletes the existing data in the storage table and writes the full result of the SELECT. Always available; used when the materialized view's query shape doesn't allow incremental computation, or when the underlying source tables have non-Iceberg snapshot semantics (e.g., a federated Postgres source — Postgres doesn't expose a snapshot-id mechanism Trino can diff against).
-- **Incremental refresh** — when **all source tables are Iceberg** and the query shape allows it, Trino reads only the deltas (new Iceberg snapshots since the last refresh) and appends them. Faster for large fact tables, but **not available when the SELECT joins a federated Postgres or MySQL source** — those connectors have no snapshot-id concept Trino can use for delta computation. Federated materialized views always do **full refresh**.
+- **Incremental refresh** — when **all source tables are Iceberg** and the query shape allows it, Trino reads only the deltas (new Iceberg snapshots since the last refresh) and appends them. Faster for large fact tables, but **not available when the SELECT joins a federated Postgres or MySQL source** — those JDBC connectors have no snapshot-id concept Trino can diff against for delta computation. **As of OSS Trino 467, materialized views that include a federated JDBC source in their SELECT always fall back to full refresh** (verify with `EXPLAIN (TYPE DISTRIBUTED) REFRESH MATERIALIZED VIEW ...` if you're testing this on a different Trino version; the OSS roadmap could add JDBC snapshot-id integration in a future release). The defensive operational stance for THIS stack (Trino 467): assume full refresh for any MV that touches a JDBC source.
 
 After a successful refresh, Trino stores the snapshot-ids of all participating Iceberg tables in the materialized view metadata. This is how the **WHEN STALE** mechanism works: a future query can be told "if the underlying Iceberg snapshots haven't advanced past the recorded values, this materialized view is fresh; otherwise it's stale."
 
@@ -7980,20 +7982,31 @@ NET RESULT: 5GB of network egress from Postgres + 200M-row Iceberg scan + 5GB of
 - **"Just add more worker memory."** At 50M rows of JDBC-sourced data, Trino is operating as a JDBC scan-and-join service, which is exactly what Trino is bad at. The same engineering effort spent on the ingest pipeline gives a permanent fix.
 - **Increasing `query.max-memory-per-node`.** Allows the query to limp through at the cost of starving every other query on the cluster. Not a fix; a delay.
 
-### 13.5 TopN / LIMIT pushdown — under-known, high-impact
+### 13.5 TopN / LIMIT pushdown — under-known, high-impact (RECONCILED — single source of truth)
 
-> **`SELECT ... ORDER BY x LIMIT N` against Postgres pushes the whole Top-N to Postgres.** This is one of the most under-appreciated PostgreSQL connector features. With an index on the ORDER BY column, Postgres can return the top N rows by walking the index — no full table sort, no full table scan. Trino gets N rows back. For dashboard "top 10 customers by revenue" queries against a 50M-row Postgres table with an index on `revenue`, this is the difference between "30 seconds" and "5 milliseconds."
+> **TopN pushdown IS supported in OSS Trino 467's PostgreSQL connector. This is the canonical, default behavior — not a later-version feature, not a Starburst Enterprise/commercial-fork feature.** When you write `SELECT ... FROM app_pg.<schema>.<table> ORDER BY <col> [ASC|DESC] LIMIT N`, Trino sends `ORDER BY ... LIMIT N` directly to Postgres over JDBC. Postgres uses an index on the sort column (if one exists) and returns only N rows. Trino does NOT pull the full table to sort it.
+>
+> **History**: Top-N pushdown infrastructure landed in **Trino release 353 (5 March 2021)**, and **release 354 (19 March 2021) made it enabled-by-default for the JDBC connectors** including PostgreSQL (after a release-353 char/varchar correctness fix). Every Trino version from 354 onward — Trino 467 included — has this feature on out of the box. For dashboard queries like "top 10 customers by revenue" against a 50M-row Postgres table with an index on `revenue`, this is the difference between "30 seconds + multi-GB JDBC traffic" and "5 milliseconds + 10 rows over the wire."
 
-**The canonical Top-N query and what Trino sends:**
+**Myth-buster — what TopN pushdown is NOT:**
+
+| Common wrong claim | Correct fact |
+|---|---|
+| "OSS Trino 467 can't push TopN; that's a Starburst Enterprise / commercial-fork feature" | **Wrong.** TopN pushdown is in OSS Trino since release 353 (March 2021). It is on by default in OSS Trino 467 via `topn_pushdown_enabled=true`. |
+| "TopN pushdown was added in a much later Trino version" | **Wrong.** It has been in OSS Trino for 5 years (since 353/354 in 2021). |
+| "If TopN doesn't push for my query, the whole feature is broken / unavailable" | **Wrong.** TopN pushdown DOES work; it just doesn't apply to specific plan shapes (listed below). The right framing is: TopN pushes in the canonical `SELECT ... FROM pg.t ORDER BY col LIMIT N` shape; specific shapes (ORDER BY on a computed aggregate, ORDER BY spanning multiple sources, non-default collation, non-identity projection between TopN and TableScan) prevent it. Each shape has a different workaround. |
+| "I see no `TopN` operator in EXPLAIN — that means pushdown failed" | **Inverted.** The **absence** of a `TopN` operator in EXPLAIN is the **success** signature (Postgres did the TopN). A **separate `TopN[topN=N, orderBy=[...]]`** operator sitting above a bare `TableScan` is the **failure** signature (Trino is doing it). |
+
+**The canonical pushed case — `SELECT ... FROM pg.t ORDER BY col LIMIT N`:**
 
 ```sql
--- Your Trino query:
+-- Your Trino query (the canonical shape that DOES push):
 SELECT id, customer_name, revenue
 FROM app_pg.public.customers
 ORDER BY revenue DESC
 LIMIT 10;
 
--- What Trino sends to Postgres over JDBC (when Top-N pushdown fires):
+-- What Trino sends to Postgres over JDBC (TopN pushdown fires):
 SELECT id, customer_name, revenue FROM public.customers ORDER BY revenue DESC LIMIT 10;
 
 -- Postgres uses an index on revenue (if one exists) to return 10 rows in milliseconds.
@@ -8003,51 +8016,114 @@ SELECT id, customer_name, revenue FROM public.customers ORDER BY revenue DESC LI
 **Verification — the EXPLAIN signature:**
 
 ```
--- TOP-N PUSHED — what you want:
+-- TOP-N PUSHED (the canonical case — what you want):
 Output
-└── TableScan[app_pg:Query[SELECT ... FROM customers ORDER BY revenue DESC LIMIT 10]]
-    -- The TopN Trino operator is ABSENT from the plan. The absence IS the signature.
+└── TableScan[app_pg:public.customers, sortOrder=[revenue DESC NULLS LAST], limit=10]
+    -- sortOrder=[...] and limit=N are annotations INSIDE the TableScan.
+    -- The TopN Trino operator is ABSENT from the plan tree above the TableScan.
+    -- The ABSENCE is the success signature.
     -- See trino.io/docs/current/optimizer/pushdown.html:
     --   "The absence of the TopN Trino operator in the Fragment ... demonstrates that
     --    the query benefits of the Top-N pushdown optimization."
 
--- TOP-N NOT PUSHED — the slow path:
+-- TOP-N NOT PUSHED (the slow path):
 Output
 └── TopN[10, revenue DESC]
-    └── TableScan[app_pg.public.customers]
-    -- The TopN operator is PRESENT above the TableScan. Trino fetched all 50M rows
-    -- and is sorting them in worker memory. This is the catastrophe path.
+    └── TableScan[app_pg:public.customers]
+    -- The TopN operator is PRESENT as a separate node above the TableScan.
+    -- The TableScan has NO sortOrder= or limit= annotations.
+    -- Trino fetched all 50M rows over JDBC and is sorting in worker memory.
 ```
 
-**Session property — confirm Top-N pushdown is enabled (default true):**
+**Session property — confirm Top-N pushdown is enabled (default `true` in OSS Trino 467):**
 
 ```sql
 SHOW SESSION LIKE 'app_pg.topn_pushdown_enabled';
+-- Default: true. You do NOT need to enable this; it is on out of the box.
 
--- Force off for debugging:
+-- Force off for debugging (compare pushed vs not-pushed plans on the same query):
 SET SESSION app_pg.topn_pushdown_enabled = false;
 RESET SESSION app_pg.topn_pushdown_enabled;
 ```
 
-**When Top-N pushdown may NOT fire even though the query looks like a Top-N:**
+#### Failure shapes — when TopN does NOT push (and why)
 
-- **ORDER BY a computed column or function** (`ORDER BY LOWER(name) LIMIT 10`) — Trino cannot guarantee Postgres's sort order matches its own for arbitrary functions.
-- **VARCHAR ORDER BY without `enable_string_pushdown_with_collate`** — collation-dependent sort ordering is the same correctness concern that blocks VARCHAR range pushdown (Section 3.3). VARCHAR ORDER BY pushes only under the same collation-flag conditions as VARCHAR range predicates.
-- **`OFFSET N`** combined with `LIMIT` — Trino may push only `LIMIT N + OFFSET`, but verification is needed; pagination through deep OFFSETs is generally an anti-pattern.
-- **A WHERE predicate that didn't push** — same ordering dependency as aggregate pushdown (13.2). If a WHERE predicate stays on Trino, the Top-N must also stay on Trino because the sort must see post-filter rows.
+The TopN-pushdown feature exists and works; specific plan shapes prevent it from firing for that individual query. **Read this as "the feature applies to the canonical case; here are the exceptions" — NOT as "the feature is broken or unavailable."** Each shape has its own workaround.
 
-**Fallback when Top-N doesn't push — `system.query()` passthrough:**
+1. **ORDER BY on a Trino-computed aggregate** (the most common failure shape — and the one engineers most often hit). Example:
+   ```sql
+   -- TopN does NOT push here:
+   SELECT account_id, event_type, COUNT(*)
+   FROM app_pg.public.events
+   GROUP BY account_id, event_type
+   ORDER BY COUNT(*) DESC
+   LIMIT 50;
+   ```
+   **Why:** The connector cannot sort on a value (`COUNT(*)`) that Postgres has not produced yet. The ORDER BY column is computed AFTER the GROUP BY rows arrive at Trino — so by the time the sort key exists, the rows are already on Trino workers. **What MAY still push** for this shape: (a) the GROUP BY may push down as **aggregate pushdown** if it satisfies §13.2's ordering dependency (all WHERE predicates must push first); (b) a plain `LIMIT N` without ORDER BY can push as Limit pushdown. But the TopN itself stays on Trino. **Workaround:** use `system.query()` passthrough so Postgres does the entire GROUP BY + ORDER BY + LIMIT end-to-end (see fallback section below); or materialize the rollup nightly into Iceberg (§13.6).
+
+2. **ORDER BY spanning multiple sources in a federated join.** Example:
+   ```sql
+   -- TopN does NOT push here:
+   SELECT i.event_id, p.account_name
+   FROM iceberg.analytics.events i
+   JOIN app_pg.public.accounts p ON i.account_id = p.id
+   ORDER BY i.event_ts DESC, p.account_name
+   LIMIT 100;
+   ```
+   **Why:** TopN can only push to ONE connector — not across a federated join. The TopN sits ABOVE the join in the plan tree, and the connector that receives the push would need to see rows from the other source to sort across them. **Workaround:** filter the smaller side aggressively first to make the join cheap, then accept the in-memory TopN on Trino on the join result; or restructure the query so the ORDER BY column lives entirely on one side (then TopN may push to that side's connector below the join, version-dependent — verify with EXPLAIN).
+
+3. **ORDER BY on a column with non-default collation that the connector cannot reproduce.** For VARCHAR/CHAR sort keys, OSS Trino's bytewise string comparison can disagree with PostgreSQL's locale-aware collation (e.g., `en_US.UTF-8`, ICU collations, or any per-column `COLLATE` clause). **Pushing the sort would produce different results than executing it on Trino**, so the connector refuses the push to preserve correctness. This is the same correctness concern that blocks VARCHAR range pushdown (§3.3). The fix is the same: set the experimental `postgresql.experimental.enable-string-pushdown-with-collate=true` flag (catalog property) AND the per-session `enable_string_pushdown_with_collate` (session property), and verify with EXPLAIN. Equality-comparison performance can regress when this flag is on (§3.3) — measure both before committing.
+
+4. **Non-identity projection between the TopN and the TableScan** (Trino issue [#25138](https://github.com/trinodb/trino/issues/25138)). When a projection node sits between the TopN and the TableScan — for example, a scalar function applied to a returned column — Trino's `PushTopNIntoTableScan` rule requires a direct `TopN -> TableScan` sequence, and the `PushTopNThroughProject` rule intentionally skips the case where the source is a TableScan. **Result:** TopN does NOT push even though the projection is harmless to sort order. **Workaround:** rewrite the projection so it doesn't sit between the TopN and the TableScan (move the function call to the outer SELECT after the LIMIT, or use `system.query()` passthrough).
+
+5. **TopN above a JOIN/UNION (single-source variants).** When TopN sits above an in-Trino join or union (even between two tables in the same Postgres catalog), the connector typically can't push it — the join result row order depends on how Trino executed the join, not on a Postgres `ORDER BY` over a derived join. **Workaround:** `system.query()` passthrough that performs the entire join + ORDER BY + LIMIT inside Postgres (see fallback below). Version-dependent: verify with EXPLAIN.
+
+6. **ORDER BY a computed column or function** (`ORDER BY LOWER(name) LIMIT 10`, `ORDER BY (price * quantity) DESC LIMIT 20`). Sort key is an expression, not a bare column reference — the connector cannot translate arbitrary expressions for ordering. **Workaround:** add a generated column on the Postgres side that stores the derived value, then sort by the stored column (which is a bare column reference and pushes).
+
+7. **`OFFSET N` after the LIMIT** (`ORDER BY ... LIMIT 20 OFFSET 1000`). OFFSET pushdown is more limited than LIMIT pushdown; some plan shapes will pull rows and apply OFFSET on Trino. **Workaround:** for paginated UIs against federated Postgres, prefer **keyset pagination** (`WHERE created_at < :cursor ORDER BY created_at DESC LIMIT 20`) — that pattern pushes cleanly as predicate + Top-N using the same index.
+
+8. **A WHERE predicate that didn't push** — same ordering dependency as aggregate pushdown (§13.2). If a WHERE predicate stays on Trino, the Top-N must also stay on Trino because the sort must see post-filter rows.
+
+> **Critical disambiguation — DO NOT over-generalize from a single failure shape.** When EXPLAIN shows a separate `TopN` operator for one specific query, the correct conclusion is **"TopN didn't push for THIS query because of THIS specific plan shape"** — NOT "TopN pushdown isn't supported / isn't available / requires a newer or commercial Trino." The feature is in OSS Trino 467; the specific shape is what's blocking the push for that one query.
+
+**Fallback when TopN doesn't push — `system.query()` passthrough:**
 
 ```sql
--- Raw Postgres SQL with whatever Postgres-specific syntax is needed:
-SELECT * FROM TABLE(
-  app_pg.system.query(query => 'SELECT id, customer_name, revenue
-                                FROM public.customers
-                                ORDER BY revenue DESC NULLS LAST LIMIT 10')
-);
--- This bypasses Trino's planner. Postgres receives the exact SQL string and runs it.
--- Trino just streams the result.
+-- Raw Postgres SQL — the entire GROUP BY + ORDER BY + LIMIT runs inside Postgres.
+-- Postgres's planner picks the best execution; Trino just streams the result.
+SELECT *
+FROM TABLE(
+  app_pg.system.query(query => '
+    SELECT account_id, event_type, COUNT(*) AS cnt
+    FROM public.events
+    GROUP BY account_id, event_type
+    ORDER BY COUNT(*) DESC
+    LIMIT 50
+  ')
+)
+ORDER BY cnt DESC;
+-- IMPORTANT: system.query() does NOT preserve ordering (see Section 9.4).
+-- Add an outer ORDER BY in Trino to re-sort the (already-limited) 50 rows.
 ```
+
+Caveats for `system.query()` (same as elsewhere in this doc — see §9.4 for the full set):
+- Trino does NO planning / rewrite on the inner SQL. You get exactly what Postgres's planner does.
+- ORDER BY inside the passthrough is not preserved when Trino emits rows; add an outer ORDER BY in Trino over the (already-limited) result.
+- Single-quote escaping uses Trino's `''` doubling convention inside the passthrough string.
+
+#### Quick recap — TopN pushdown on PostgreSQL (OSS Trino 467)
+
+1. **TopN pushdown IS supported in OSS Trino 467** — `SELECT ... FROM app_pg.t ORDER BY col [ASC|DESC] LIMIT N` pushes by default (since Trino 353/354 in 2021). Default `topn_pushdown_enabled = true`.
+2. **EXPLAIN signature for SUCCESS**: `sortOrder=[...] limit=N` annotations INSIDE the TableScan; **NO separate `TopN` operator** anywhere in the plan. **The absence IS the signature.**
+3. **EXPLAIN signature for FAILURE**: a separate `TopN[topN=N, orderBy=[...]]` operator sitting ABOVE a bare TableScan (no sortOrder/limit on the TableScan).
+4. **Failure shapes — does NOT push** (read each as a SPECIFIC exception, not a global feature gap):
+   - ORDER BY on a Trino-computed aggregate (e.g., `GROUP BY ... ORDER BY COUNT(*) DESC LIMIT N`).
+   - ORDER BY spanning multiple sources in a federated join.
+   - ORDER BY on a column with non-default collation the connector can't reproduce.
+   - Non-identity projection between the TopN and the TableScan (issue #25138).
+   - TopN above a JOIN/UNION/Aggregation; sort on a derived expression; standalone ORDER BY without LIMIT; OFFSET on top of LIMIT; subquery/CTE that obscures the pattern.
+5. **The fallback for any failure shape**: `system.query()` passthrough — Postgres does the whole sort+limit; add an outer Trino ORDER BY to preserve client ordering.
+6. **DO NOT conclude from one failed-pushdown query that "OSS Trino can't push TopN"** — the feature IS available; that one query's specific shape blocked the push. Each shape has a different workaround.
 
 ### 13.6 When to MATERIALIZE a federated lookup locally — the decision in one table
 
@@ -8105,6 +8181,9 @@ SELECT * FROM app_pg.public.accounts;
 | All pushdown kinds + ordering dependency + `Aggregate operator absent = pushed` quote | trino.io/docs/current/optimizer/pushdown.html |
 | PostgreSQL connector supported aggregates (`count`, `min`, `max`, `sum`, `avg`); VARCHAR equality pushes, range does not; UUID/DATE pushdown; `aggregation_pushdown_enabled` session property; `jdbc-types-mapped-to-varchar` foot-gun | trino.io/docs/current/connector/postgresql.html |
 | Dynamic filtering build-side / probe-side direction; `enable-dynamic-filtering` default true; INNER/RIGHT vs LEFT/FULL OUTER support; inequality-on-join-key derives min/max range | trino.io/docs/current/admin/dynamic-filtering.html |
-| Top-N pushdown signature (absence of `TopN` operator) | trino.io/docs/current/optimizer/pushdown.html (PostgreSQL connector section) |
+| Top-N pushdown signature (absence of `TopN` operator) + canonical PostgreSQL example | trino.io/docs/current/optimizer/pushdown.html (PostgreSQL connector section) |
+| Top-N pushdown initial release (Trino 353, 5 Mar 2021) | trino.io/docs/current/release/release-353.html |
+| Top-N pushdown enabled-by-default after VARCHAR correctness fix (Trino 354, 19 Mar 2021) | trino.io/docs/current/release/release-354.html |
+| TopN pushdown non-identity-projection limitation (failure shape #4 in §13.5) | github.com/trinodb/trino/issues/25138 |
 | String range pushdown PR + collation caveat | github.com/trinodb/trino/pull/9746 |
 

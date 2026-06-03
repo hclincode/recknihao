@@ -616,6 +616,53 @@ FROM iceberg.analytics.daily_dau;
 >
 > **Empty-frame edge case.** A `RANGE` frame can produce ZERO rows if the ORDER BY values around the current row don't fall inside the offset window. Window aggregates over an empty frame return: `COUNT()` -> 0, `SUM/AVG/MIN/MAX` -> NULL, `array_agg` -> NULL. Downstream consumers must handle NULL — `COALESCE(rolling_7d_avg_dau, 0)` is the standard guard. A `ROWS` frame **cannot** produce an empty frame at non-edge rows (it always has `N+1` rows), which is one reason engineers reach for it — but the cost is incorrect calendar semantics on sparse data.
 
+> **CRITICAL — "fallback choices change metric semantics" callout.** When a rolling-window aggregate returns NULL on a gap day, **the choice of fallback is a semantic decision, not a syntactic detail**. Each fallback expresses a different definition of the metric. **Always flag the semantic change to your stakeholders before shipping** — engineers who reach for `COALESCE(rolling_avg, current_value)` because it "fills the gap" frequently ship a metric that no longer means "7-day rolling average."
+
+| Fallback pattern | What the gap-day value becomes | Semantic effect — read carefully before using |
+|---|---|---|
+| `COALESCE(rolling_avg, 0)` | Zero on gap days. | **Skews downward.** A genuine "no activity → zero engagement" interpretation. Correct when zero is the right business meaning for "no events that day." Wrong when the metric is supposed to represent *prior activity even if today is missing*. |
+| `COALESCE(rolling_avg, current_value)` | Today's raw `session_count` (or `dau`, etc.) on gap days. | **Defeats the rolling intent.** On a gap day the metric reports today's single-row value, NOT a rolling average. Two days later the same value smooths in. Dashboards labelled "7-day rolling average" silently report point values on gap days. **Almost always wrong** for a rolling-average use case. |
+| `COALESCE(rolling_avg, LAG(rolling_avg, 1) OVER (...))` (carry-forward) | Yesterday's rolling-avg value. | **"Persistence" semantic.** Treats a missing day as "no new information" — preserves the last known average. Correct when you want a stable trend line across gaps; incorrect when zero or true-NULL is the meaningful signal. |
+| Switch to `UNBOUNDED PRECEDING` (cumulative average instead of rolling) | A running average from earliest history to today. | **Different metric.** This is NOT a 7-day rolling average. It is a cumulative all-time mean. Don't relabel a "7d rolling" dashboard tile with this — change the label too. |
+| Switch frame to `RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW` (already calendar-aware) | Still NULL when ZERO rows fall in the calendar window. | **No fallback** — RANGE just removes the gap-shifting bug. The empty-frame NULL is still possible if the entire 7-day window has zero rows. You still need one of the choices above on top of RANGE if you must fill the NULL. |
+| **LEFT JOIN a calendar dimension + densify with zero-fill BEFORE the window** | Gap days get a zero `dau`/`session_count` row injected before the window runs; the rolling avg then includes that zero as a real data point. | **The only semantically-clean fix** when you want a true 7-day rolling average that doesn't return NULL on gap days. The denominator stays at 7 (or the actual number of calendar days in the window), gap days contribute zero values to the numerator, and the dashboard label "7-day rolling average" stays accurate. Recipe below. |
+
+**LEFT JOIN calendar-dim densification recipe (the semantically-clean fix):**
+
+```sql
+-- Step 1: build a calendar spine for the date range you care about.
+WITH calendar AS (
+  SELECT day, tenant_id
+  FROM UNNEST(SEQUENCE(DATE '2026-01-01', DATE '2026-12-31', INTERVAL '1' DAY)) AS t(day)
+  CROSS JOIN (SELECT DISTINCT tenant_id FROM iceberg.analytics.daily_dau) AS t
+),
+-- Step 2: LEFT JOIN raw activity onto the calendar; missing days surface as NULL.
+densified AS (
+  SELECT
+    c.day,
+    c.tenant_id,
+    COALESCE(d.dau, 0) AS dau  -- gap day -> 0, NOT NULL
+  FROM calendar c
+  LEFT JOIN iceberg.analytics.daily_dau d
+    ON d.day = c.day AND d.tenant_id = c.tenant_id
+)
+-- Step 3: run the rolling window over the densified series.
+SELECT
+  day,
+  tenant_id,
+  dau,
+  AVG(dau) OVER (
+    PARTITION BY tenant_id
+    ORDER BY day
+    ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+  ) AS rolling_7d_avg_dau
+FROM densified;
+```
+
+After densification, ROWS-based windows are correct again (because positions and calendar days now align), and the rolling-average value on a gap day genuinely is "average over the last 7 days, where the gap day counted as zero" — which is what most SaaS dashboards mean by "7-day rolling average on a holiday."
+
+> **Decision rule:** ask your stakeholder, "What should this dashboard show on a day with no activity?" The four typical answers — "show zero," "show yesterday's value," "show today's raw value," "show a true rolling average treating the gap as zero" — map directly to four different SQL patterns above. Picking the SQL pattern without asking the semantic question is how dashboards silently change meaning during code review.
+
 ### Performance: when window functions get expensive
 
 Window functions force Trino to **sort the probe data** by `(PARTITION BY columns, ORDER BY columns)` before computing the window. This sort happens after `WHERE` filtering but before producing output. For large input sets the sort can spill to disk or OOM the worker.

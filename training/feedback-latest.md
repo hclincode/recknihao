@@ -1,113 +1,101 @@
-# Judge Feedback — Iter 413 (EXTENDED PHASE — end-of-iteration only)
+# Judge Feedback — Iter 414 (EXTENDED PHASE — end-of-iteration only)
 
-**Overall: 4.21875 PASS** (Q1 4.875 + Q2 3.125 + Q3 4.625 + Q4 4.25) — above the 3.5 overall PASS threshold, but **step-DOWN of 0.406 from iter412 4.625**, driven entirely by Q2's federation TopN-pushdown accuracy slip. Twelfth consecutive overall PASS in the iter402-413 window, but the failure-mode pattern (confident inaccuracy on a load-bearing claim) reappears for the third time in the last seven iterations (iter407 branches-Spark-only, iter411 QUALIFY-on-Trino, iter413 OSS-Trino-can't-push-TopN).
+**Overall: 4.0625 PASS** (Q1 4.75 + Q2 3.75 + Q3 3.25 + Q4 4.5) — above the 3.5 overall PASS threshold, but **step-DOWN of 0.156 from iter413 4.21875**, second consecutive iteration decline. Thirteenth consecutive overall PASS in the iter402-414 window, but the iter414 Q3 NEW critical inaccuracy on a DIFFERENT topic (Iceberg branches/expire_snapshots) replaces last iteration's Q2 federation TopN failure — same failure-mode CLASS (confident inaccuracy on load-bearing topic-specific claim), different topic.
 
 **Headline:**
-1. **CRITICAL — Q2 FEDERATION TopN-PUSHDOWN ACCURACY FAIL (3.125).** Responder claims "ORDER BY and LIMIT do NOT push down automatically in Trino 467 for the PostgreSQL connector" and frames TopN pushdown as a "later Trino version / commercial fork" feature. **VERIFIED WRONG** against trino.io/docs/current/optimizer/pushdown.html + trino.io/docs/current/connector/postgresql.html: the OSS Trino PostgreSQL connector has supported TopN pushdown (TableScan with sortOrder + limit) for years. The responder reaches the right conclusion for THIS SPECIFIC query shape (`GROUP BY ... ORDER BY COUNT(*) DESC LIMIT 50` — TopN does NOT push because ORDER BY is on a Trino-computed aggregate), but via a WRONG GENERAL CLAIM. The engineer who internalizes "Trino 467 OSS can't push TopN" will over-apply `system.query()` passthrough, rewrite already-pushed queries, and push for a commercial fork they don't need.
-2. **WIN — Q1 federation dynamic filtering (4.875).** Teacher's iter413 Section 13.3 landed cleanly. dynamicFilterAssignments EXPLAIN signature, INNER/RIGHT vs LEFT/FULL OUTER restriction, VARCHAR-vs-BIGINT type-mismatch foot-gun, enable_dynamic_filtering kill switch — all verified accurate.
-3. **WIN — Q3 dbt --vars parameterized backfill (4.625).** var()/--vars JSON, run_started_at + modules.datetime.timedelta, dbt_project.yml overridable by CLI — all verified against docs.getdbt.com.
-4. **WIN with minor flag — Q4 window NULL fix (4.25).** COALESCE/UNBOUNDED PRECEDING/RANGE INTERVAL alternatives all syntactically correct, but responder did NOT flag that `COALESCE(avg, session_count)` SUBSTITUTES the raw current value for a true rolling average — that's a metric-semantics change the engineer should be warned about.
+1. **WIN — Q1 TopN-pushdown re-probe (4.75 STRONG).** Iter413 inaccuracy FULLY RESOLVED. Responder now correctly leads with affirmative "Top-N pushdown supported in OSS Trino 467 PostgreSQL connector since release 353/354" + canonical pushed-down EXPLAIN signature (sortOrder + limit inside TableScan, no TopN operator above). Teacher's iter414 §13.5 rewrite (lead with affirmative + myth-buster table) landed cleanly.
+2. **PASS with quality flag — Q2 aggregate TopN does NOT push (3.75).** Right conclusion via right mechanism (ORDER BY on Trino-computed aggregate can't push because connector can't sort on values it hasn't produced), but mid-answer COPY-PASTE BLEED of MERGE-broadcast-join phrasing ("the staging table contains all today's events", "the MERGE is joining every source row") that belongs to Q4, not the Postgres GROUP BY query. Bleed doesn't change conclusion but muddies mechanism explanation.
+3. **CRITICAL — Q3 NEW accuracy defect (3.25 FAIL).** Responder claims "expire_snapshots CAN orphan files a branch points to" and frames branch retention as governing "snapshots WITHIN branch not data-file protection". **VERIFIED WRONG** against iceberg.apache.org/docs/latest/branching/ + maintenance/ + spark-procedures/: "Snapshots that are still referenced by branches or tags won't be removed" + "expire_snapshots procedure will never remove files which are still required by a non-expired snapshot". The team's own resource 17 line 1657 explicitly states "A snapshot referenced by any named tag or branch is protected from expire_snapshots regardless of its age." Same failure-mode CLASS as iter411 Q2 (QUALIFY-on-Trino), iter413 Q2 (TopN can't push), iter407 Q2 (branches-Spark-only).
+4. **WIN — Q4 MERGE slow / pre-filter source (4.5 STRONG).** Broadcast-join + target-table-scan + partition-pruning via source dynamic-filter is the canonical Trino-Iceberg MERGE explanation; pre-filter fix + EXPLAIN diagnostic correct.
 
-**Trino federation topic status (CRITICAL):**
-- **Previous: 4.4925 / 267 (NEEDS WORK, 0.0075 below 4.5 threshold)**
-- **NEW: 4.4892 / 269 (NEEDS WORK, 0.0108 below 4.5 threshold) — REGRESSED 0.0033 further from threshold**
-- The Q2 inaccuracy actively MOVED THE TOPIC AWAY from passing despite teacher's iter413 Section 13 threshold-push effort. The Q1 STRONG PASS (4.875) lifted the topic, but the Q2 FAIL (3.125) dragged it down more.
-- **The Trino federation topic does NOT cross the 4.5 threshold this iteration. It REGRESSED.**
+**Trino federation topic status:**
+- **Previous: 4.4892 / 269 (NEEDS WORK, 0.0108 below 4.5 threshold)**
+- **NEW: 4.4874 / 271 (NEEDS WORK, 0.0126 below 4.5 threshold) — REGRESSED 0.0018 further**
+- The Q1 strong landing (4.75) was offset by Q2 quality penalty (3.75 below 4.5). Topic remains stuck below threshold for the 14th consecutive iteration. **Does NOT cross 4.5.**
 
-**Pattern note:** Third confident-inaccuracy-on-load-bearing-claim failure in seven iterations:
-- iter407 Q2: "branches are Spark-only" (WRONG — Trino reads branches) → fixed iter408 Q1.
-- iter411 Q2: QUALIFY recommended on Trino 467 (WRONG — QUALIFY not in Trino grammar) → fixed iter412 Q1.
-- iter413 Q2: "OSS Trino 467 PG connector can't push TopN" (WRONG — TopN pushdown supported since Trino 353) → needs fix iter414.
+**Pattern note:** Fourth confident-inaccuracy-on-load-bearing-claim failure in eight iterations across DIFFERENT topics:
+- iter407 Q2: "branches are Spark-only" (federation/Iceberg) → fixed iter408.
+- iter411 Q2: QUALIFY recommended on Trino (federation/dbt) → fixed iter412.
+- iter413 Q2: "OSS Trino can't push TopN" (federation) → fixed iter414 (DURABLE — confirmed in iter414 Q1).
+- iter414 Q3: "expire_snapshots can orphan branch-referenced files" (Iceberg table maintenance) → needs fix iter415.
 
-The teacher's recovery pattern remains tight (each previous instance recovered within one iteration), but the **structural risk** is that the responder produces a confident factual claim about a TOPIC-SPECIFIC connector behavior that the engineer would act on. For federation specifically, this is the third such inaccuracy on the topic (each in a different facet: branches/dialect/connector-capability), and it keeps the topic stuck below the 4.5 threshold.
+The teacher's recovery pattern remains tight (each previous instance recovered within one iteration), but the **structural risk** is that the responder produces confident factual claims about TOPIC-SPECIFIC semantics that contradict both official docs AND the team's own resources. For Iceberg-branches specifically, the correct framing IS in resource 17 (line 1657), but the responder didn't find/apply it — suggesting a findability gap, not a content gap.
 
 ---
 
-## Q1 — Dynamic filtering federated join (FEDERATION)
+## Q1 — Plain TopN pushdown to Postgres (FEDERATION re-probe)
 
-**Scores: 5.0 / 4.5 / 5.0 / 5.0 — avg 4.875 STRONG PASS**
+**Scores: 5.0 / 4.5 / 5.0 / 4.5 — avg 4.75 STRONG PASS**
 
 ### What landed
-- **DF mechanism: build hash of small PG side + extract join-key IN-list + push to Iceberg scan to prune files 10-100x** — CORRECT canonical mechanism (verified against trino.io/blog/2019/06/30/dynamic-filtering.html).
-- **The shuffle is the partitioned join (expected, not a problem)** — correct framing; helps the engineer not chase a non-issue.
-- **EXPLAIN (TYPE DISTRIBUTED) shows dynamicFilterAssignments in events TableScan** — VERIFIED against trino.io/docs/current/admin/dynamic-filtering.html.
-- **Absent reasons enumerated correctly:**
-  - VARCHAR-vs-BIGINT type mismatch disables DF — VERIFIED.
-  - LEFT/FULL OUTER not supported (DF only INNER/RIGHT) — VERIFIED ("Dynamic filtering cannot be used for LEFT OUTER and FULL OUTER joins because all records from the left side must be returned at least once").
-  - enable_dynamic_filtering=false session-property kill switch — CORRECT.
-- **EXPLAIN ANALYZE Physical Input to confirm** — correct diagnostic.
-- **Partition column must match join column to benefit** — correct semantic.
+- **Leads with affirmative**: "Top-N pushdown supported in OSS Trino 467 PostgreSQL connector since release 353 (March 2021), enabled by default in release 354 after VARCHAR fix" — VERIFIED against trino.io/docs/current/release/release-353.html + release-354.html + optimizer/pushdown.html.
+- **EXPLAIN signature**: "sortOrder=[created_at DESC NULLS LAST] limit=100 INSIDE TableScan, NO TopN operator above the scan = pushed" — VERIFIED canonical signature.
+- **Postgres index-on-created_at returns 100 rows directly** — CORRECT mechanism (no 50M-row pull; PG btree handles ORDER BY+LIMIT).
+- **Contrast case**: "TopN operator above TableScan = failed/local sort in Trino" — CORRECT diagnostic.
 
 ### Verdict
-STRONG PASS. Teacher's iter413 Section 13.3 landed cleanly.
+STRONG PASS. **Iter413 inaccuracy resolved durably.** Teacher's iter414 §13.5 rewrite (lead with affirmative + myth-buster + cite release notes) confirmed effective.
 
 ---
 
-## Q2 — TopN/LIMIT pushdown to Postgres (FEDERATION)
+## Q2 — Aggregate TopN does NOT push (FEDERATION contrast)
 
-**Scores: 2.5 / 4.0 / 3.0 / 3.0 — avg 3.125 FAIL**
+**Scores: 4.5 / 3.0 / 3.5 / 4.0 — avg 3.75 PASS (below STRONG)**
+
+### What landed
+- **Core technical claim CORRECT**: GROUP BY customer_id ORDER BY COUNT(*) DESC LIMIT 20 does NOT match the Top-N pushdown pattern. Postgres must materialize the full GROUP BY aggregate result before sorting by count + LIMIT picks top 20.
+- **Mitigation options sound**: pre-filter via WHERE on indexed col, load to Iceberg for parallel agg with Trino-native partition pruning, materialized view for nightly precompute.
+
+### Quality defect (the deduction)
+- Mid-answer the responder discusses **"the staging table contains all today's events"** and **"the MERGE is joining every source row"** — content that belongs to Q4 (MERGE broadcast join), not a Postgres GROUP BY query.
+- This conflates a Postgres GROUP BY semantic (single-source agg pushdown failure) with a MERGE broadcast-join semantic (target-table-scan + partition pruning).
+- An engineer reading mid-answer may think their Postgres query involves a MERGE or that the fix involves a join-strategy change — both wrong for this query shape.
+- Bleed didn't change the BOTTOM-LINE conclusion, but it muddies the mechanism explanation. Not as severe as iter413's wrong-general-claim (which actively misled with a false absolute).
+
+### Verdict
+PASS but below STRONG. Right conclusion with mechanism-muddle. Score reflects clarity penalty for cross-question bleed.
+
+---
+
+## Q3 — Branch retention vs expire_snapshots (NON-FED, Iceberg maintenance)
+
+**Scores: 2.5 / 4.0 / 3.0 / 3.5 — avg 3.25 FAIL**
 
 ### Critical accuracy defect (the headline issue)
-- Responder claims **"ORDER BY and LIMIT do NOT push down automatically in Trino 467 for the PostgreSQL connector"** and frames TopN pushdown as a **"later Trino version / commercial fork"** feature.
+- Responder claims **"expire_snapshots CAN orphan files a branch points to"** and frames branch retention (max_snapshot_age_in_ms / min_snapshots_to_keep) as governing "snapshots WITHIN branch not data-file protection on main expiry".
 - **VERIFIED WRONG** against:
-  - trino.io/docs/current/optimizer/pushdown.html: "The combination of a LIMIT or FETCH FIRST clause with an ORDER BY clause creates a small set of records to return out of a large sorted dataset, and the pushdown for such a query is called a Top-N pushdown."
-  - trino.io/docs/current/connector/postgresql.html: PostgreSQL connector explicitly listed as supporting TopN pushdown.
-  - Trino release 353 (March 2021) added Top-N pushdown infrastructure; the PG connector has supported it for years.
-- The right framing: **OSS Trino 467 PG connector DOES support TopN pushdown**. For a query like `SELECT * FROM pg.orders ORDER BY total DESC LIMIT 100`, the TableScan shows sortOrder + limit parameters and the TopN operator is absent from the plan — that's the pushed case.
+  - iceberg.apache.org/docs/latest/branching/: "Snapshots that are still referenced by branches or tags won't be removed".
+  - iceberg.apache.org/docs/latest/maintenance/ + spark-procedures/: "The expire_snapshots procedure will never remove files which are still required by a non-expired snapshot".
+  - **The team's own resources/17-iceberg-table-maintenance.md line 1657 states: "A snapshot referenced by any named tag or branch is protected from expire_snapshots regardless of its age. Iceberg will not physically delete a snapshot (or its exclusively-owned data files) while a live ref points at it."**
+- There IS a known bug (apache/iceberg issue #13568) where expire_snapshots in multi-ref edge cases can erroneously delete data files referenced by active branches, but: (a) affects Iceberg 1.6.1+ (prod runs 1.5.2 per prod_info.md), (b) it is documented as a BUG not the design, (c) the responder did not frame it as such — presented as default behavior.
 
-### Right conclusion via wrong general claim
-- The SPECIFIC query in the question — `SELECT account_id, event_type, COUNT(*) FROM pg.events GROUP BY account_id, event_type ORDER BY COUNT(*) DESC LIMIT 50` — TopN does NOT push because ORDER BY is on a computed aggregate (`COUNT(*)`) that Trino computes after GROUP BY rows are returned. So the **outcome** the responder predicts (all rows pulled to Trino, sort+limit in Trino) is CORRECT for THIS query.
-- BUT the **mechanism** the responder cites is WRONG. The engineer who reads "OSS Trino 467 can't push TopN" will internalize that and over-apply `system.query()` passthrough, rewrite queries that would have pushed cleanly, and seek a commercial fork.
-
-### What's accurate
-- `system.query()` passthrough running GROUP BY/ORDER BY/LIMIT on PG with outer ORDER BY because passthrough doesn't preserve order — CORRECT workaround for the specific query shape (PG-side compute, return aggregated rows).
-- EXPLAIN diagnostic to check TopN operator above TableScan — correct diagnostic in principle.
+### Right framing the responder should have given
+- **"Branches and tags ARE protective by default — they are the canonical mechanism for keeping snapshots safe from expire_snapshots."**
+- Legitimate operational risks: (i) forgotten refs hold old data indefinitely (resource 17 already covers this well), (ii) Iceberg 1.6.1+ multi-ref bug (NOT prod on 1.5.2), (iii) ALTER TABLE EXECUTE expire_snapshots(older_than=>ts) does NOT bypass ref protection in normal code paths.
+- "Create TAG with max_reference_age_in_ms" is a real Iceberg feature, but it's a HARDENING pattern (auto-expire-the-ref-itself-after-N), not a fix for a non-existent default-deletion problem.
 
 ### Verdict
-FAIL on per-question federation threshold (4.5 raised). The right outcome via the wrong general claim is exactly the iter407/iter411 confident-inaccuracy failure pattern. Engineer would act on the wrong mental model.
+FAIL. Load-bearing factual claim wrong. Same failure-mode class as iter411 Q2 / iter413 Q2 / iter407 Q2 (confident-inaccuracy-on-load-bearing-claim). The right info IS in resource 17 — this looks like a findability gap not a content gap.
 
 ---
 
-## Q3 — dbt --vars parameterized backfill (NON-FED)
+## Q4 — MERGE slow / pre-filter source (NON-FED, Ingestion topic)
 
-**Scores: 5.0 / 4.5 / 4.5 / 4.5 — avg 4.625 STRONG PASS**
-
-### What landed
-- **var() / --vars JSON syntax** — VERIFIED against docs.getdbt.com/reference/dbt-jinja-functions/var ("--vars argument accepts a YAML dictionary as a string on the command line").
-- **Model template `{% set start_date = var('backfill_start_date','default') %}` + WHERE event_date BETWEEN** — CORRECT canonical pattern.
-- **CLI dbt run --vars '{...}'** — CORRECT.
-- **Default 2nd arg safe** — CORRECT (var() returns 2nd arg if variable not set; useful for prod-default + CLI-override).
-- **Rolling 90d via run_started_at + modules.datetime.timedelta** — VERIFIED against docs.getdbt.com/reference/dbt-jinja-functions/run_started_at (Python datetime UTC) + docs.getdbt.com/reference/dbt-jinja-functions/modules (modules.datetime exposes Python datetime module in Jinja).
-- **dbt_project.yml vars defaults overridable by CLI** — CORRECT.
-
-### Verdict
-STRONG PASS. The iter413 LOW backlog item for parameterized-backfill was deferred but the responder still landed the answer cleanly from existing resources — suggests the existing resource 13 dbt incremental section already supports this pattern.
-
----
-
-## Q4 — Window AVG NULL on gap day (NON-FED)
-
-**Scores: 4.0 / 4.5 / 4.5 / 4.0 — avg 4.25 PASS (below STRONG)**
+**Scores: 4.5 / 4.5 / 5.0 / 4.0 — avg 4.5 STRONG PASS**
 
 ### What landed
-- **AVG over empty/all-NULL frame returns NULL** — CORRECT (verified against trino.io/docs/current/functions/window.html: "if x is null for all rows ... null is returned").
-- **ROWS 6 PRECEDING looks back 6 physical rows** — CORRECT.
-- **UNBOUNDED PRECEDING cumulative alternative** — CORRECT but different metric (cumulative running average vs rolling).
-- **RANGE INTERVAL '6' DAY PRECEDING alternative** — VERIFIED against trino.io/blog/2021/03/10/introducing-new-window-features.html.
-- **Diagnostic COUNT(*) OVER rows_in_window** — useful pattern.
+- **Broadcast-join mechanism for MERGE** (small staging side broadcast to all workers) — CORRECT for typical small-source case.
+- **"Reads staging small but scans main table target partitions for matches"** — CORRECT canonical pattern (verified against starburst.io/blog Iceberg-partitioning-and-performance-optimizations-in-trino + community Medium posts: "During a MERGE operation, Trino scans the entire target table to find matching records, even if your source data only corresponds to a single partition").
+- **Pre-filter source narrows broadcast set + flows partition pruning to target via dynamic filtering** — CORRECT mechanism.
+- **EXPLAIN diagnostic for main TableScan constraint on partition column** (present = pruned, absent = full scan) — CORRECT verification pattern.
+- **Fix: add partition filter matching ON clause / source WHERE on partition col** — CORRECT canonical workaround.
 
-### Semantic flag missing (the deduction)
-- Responder recommends `COALESCE(avg, session_count)` as a fallback. **This SUBSTITUTES the raw current row's `session_count` for a NULL rolling average** — on gap days the metric becomes "today's value" instead of "7-day rolling average". That defeats the purpose of the rolling metric.
-- Other fallback choices have different semantic implications:
-  - `COALESCE(avg, 0)` — treats gap as zero (skews downward).
-  - `COALESCE(avg, current_value)` — what the responder recommended; defeats rolling intent.
-  - UNBOUNDED PRECEDING — cumulative, NOT rolling (different metric).
-  - RANGE INTERVAL '6' DAY PRECEDING — true calendar rolling, but still NULL when zero rows fall in window.
-  - **LEFT JOIN calendar dim + densify with zero-fill** — only semantically-clean fix.
-- The responder didn't explicitly flag this; the engineer would copy-paste the COALESCE pattern and silently change their metric.
+### Minor (not gating)
+- Could mention the $partition hidden column pattern as a backup when source-side filtering alone is insufficient.
+- Could note that the ON clause itself doesn't trigger partition pruning on target without dynamic filtering / explicit predicate.
 
 ### Verdict
-PASS but below STRONG due to missing semantic-change flag on the recommended COALESCE fallback.
+STRONG PASS. Solid mechanism + diagnostic + fix sequence.
 
 ---
 
@@ -115,57 +103,60 @@ PASS but below STRONG due to missing semantic-change flag on the recommended COA
 
 | Q | Score | Verdict |
 |---|---|---|
-| Q1 | 4.875 | STRONG PASS — DF mechanism + EXPLAIN signature + INNER/RIGHT-only + type-mismatch foot-gun |
-| Q2 | 3.125 | FAIL — TopN-pushdown wrong general claim (right outcome via wrong mechanism) |
-| Q3 | 4.625 | STRONG PASS — dbt --vars JSON + run_started_at + modules.datetime.timedelta |
-| Q4 | 4.25 | PASS — fallback options correct but semantic-change flag missing |
+| Q1 | 4.75 | STRONG PASS — TopN-pushdown affirmative + EXPLAIN signature + release 353/354 (iter413 inaccuracy RESOLVED) |
+| Q2 | 3.75 | PASS — Aggregate TopN correctly explained but MERGE-broadcast-join bleed muddies mechanism |
+| Q3 | 3.25 | FAIL — "expire_snapshots can orphan branch-referenced files" CONTRADICTS Iceberg docs + own resource 17 |
+| Q4 | 4.5 | STRONG PASS — MERGE-broadcast-join + pre-filter + EXPLAIN partition-pruning verification |
 
-**Average 4.21875 PASS** — twelfth consecutive overall PASS in the iter402-413 window, but **step-DOWN of 0.406 from iter412 4.625**.
+**Average 4.0625 PASS** — thirteenth consecutive overall PASS in the iter402-414 window, but second consecutive step-DOWN (iter412 4.625 → iter413 4.21875 → iter414 4.0625).
 
-**Trajectory iter394-413:** `4.75P/3.125F/4.3125P/4.375P/4.34375P/4.09375P/4.0625P/3.8125F/4.59375P/3.875F/4.25P/4.6875P/4.40625P/4.625P/4.0625P/4.125P/4.5625P/4.0P/4.219P/4.625P/**4.21875P**`.
+**Trajectory iter394-414:** `4.75P/3.125F/4.3125P/4.375P/4.34375P/4.09375P/4.0625P/3.8125F/4.59375P/3.875F/4.25P/4.6875P/4.40625P/4.625P/4.0625P/4.125P/4.5625P/4.0P/4.219P/4.625P/4.21875P/**4.0625P**`.
 
 **Topic status table:**
-- Postgres-to-Iceberg ingestion: 4.4917/145 -> 4.4926/146 — PASSED (above threshold).
-- Iceberg table maintenance: 4.4102/77 — unchanged this iteration.
-- Analytical query patterns Iceberg+Trino: 4.4233/11 -> 4.4214/12 — PASSED.
-- **Trino federation / cross-source: 4.4925/267 -> 4.4892/269 — NEEDS WORK (REGRESSED 0.0033 further from threshold; now 0.0108 below 4.5 raised threshold).**
+- Postgres-to-Iceberg ingestion: 4.4926/146 -> 4.4927/147 — PASSED (above threshold; Q4 nudges marginally up).
+- Iceberg table maintenance: 4.4102/77 -> 4.3953/78 — PASSED but DROPPED 0.0149 in one question (Q3 FAIL drag); the largest single-Q topic-avg movement in recent iterations.
+- **Trino federation / cross-source: 4.4892/269 -> 4.4874/271 — NEEDS WORK (REGRESSED 0.0018; now 0.0126 below 4.5 raised threshold; 14th consecutive iteration stuck below threshold).**
 
 ---
 
-## Teacher actions next (iter 414)
+## Did the iter413 inaccuracy resolve?
 
-1. **HIGH — TopN-pushdown accuracy correction in resources/22-trino-federation-postgresql.md Section 13.5.** The teacher's iter413 Section 13 threshold-push effort included Section 13.5 on TopN/LIMIT pushdown, but the responder still produced the wrong general claim — the Section 13.5 framing may have been read as "TopN doesn't push" rather than "TopN pushes in the canonical case and fails only in specific shapes". Rewrite Section 13.5 to lead with the **canonical pushed case**:
-   - Lead: "**TopN pushdown DOES work in OSS Trino 467 PostgreSQL connector.** Example: `SELECT * FROM pg.orders ORDER BY total DESC LIMIT 100` — TableScan shows sortOrder + limit; TopN operator is ABSENT from the EXPLAIN plan (this is the pushed case)."
-   - Then explicitly list **shapes where TopN does NOT push** (and why), with the GROUP BY + ORDER BY agg + LIMIT shape as the headline example: "ORDER BY is on a computed aggregate that Trino computes after GROUP BY — the connector can't sort on a value it hasn't produced yet."
-   - Show what DOES push for the aggregate case: "The GROUP BY + COUNT(*) may push as aggregate pushdown if connector supports it; the LIMIT 50 may push as Limit pushdown without TopN."
-   - **Add citation row to Section 13.8 mapping the TopN-pushdown claim to trino.io/docs/current/optimizer/pushdown.html#topn-pushdown.**
+**YES — iter413 Q2 TopN-pushdown inaccuracy is RESOLVED.** Responder now leads with the correct affirmative claim ("OSS Trino 467 PostgreSQL connector supports TopN pushdown since release 353/354"), gives the canonical pushed-down EXPLAIN signature (sortOrder + limit inside TableScan, no TopN operator above), and correctly explains the aggregate-ORDER-BY non-push case in Q2. The teacher's iter414 §13.5 rewrite (lead with affirmative + myth-buster table + cite release notes) landed cleanly. **Durability confirmed via the Q1 re-probe.**
 
-2. **MEDIUM — Q4 window NULL semantic-change flag in resources/07-analytical-query-patterns.md.** Add a "fallback choices change metric semantics" callout listing four options:
-   - `COALESCE(avg, 0)` — treat gap as zero (skews avg downward toward 0).
-   - `COALESCE(avg, current_value)` — use raw current value (gap day metric = today's metric, defeats rolling intent).
-   - UNBOUNDED PRECEDING — cumulative running average (DIFFERENT metric, not rolling).
-   - RANGE INTERVAL '6' DAY PRECEDING — true calendar rolling, but still NULL when zero rows fall in window.
-   - **LEFT JOIN calendar dim + densify with zero-fill** — only semantically-clean fix.
+## Did the Trino federation topic cross 4.5 threshold?
 
-3. **LOW carry-forward backlog**: HMS->Nessie write-freeze alternative + Hive-views-don't-migrate gotcha (deferred from iter412); equality-perf-regression caveat for enable-string-pushdown-with-collate; MERGE rollback; OPA-override timeout; schema registry compat; JWT+OPA concurrency; Iceberg tagging 3rd-angle; fs.cache JMX 3rd-angle; Iceberg v3 deletion vectors timeline; snapshot vs serializable phantom-row 3rd-angle.
+**NO — federation topic remains NEEDS WORK at 4.4874/271, 0.0126 below threshold.** The Q1 4.75 STRONG was offset by Q2 3.75 quality penalty (bleed defect). Net effect: -0.0018 regression. Topic is now slightly FURTHER from threshold than at end of iter413. **14th consecutive iteration stuck below the 4.5 raised threshold.**
 
 ---
 
-## Judge probe targets next (iter 414)
+## Teacher actions next (iter 415)
 
-1. **CRITICAL — TopN-pushdown 2nd-angle (durability of iter414 fix).** Different phrasing, e.g.:
-   - "I have `SELECT order_id, total FROM pg.orders ORDER BY total DESC LIMIT 100` — does this pull all 50M rows to Trino?" — confirms responder NOW states TopN pushes cleanly for this shape (TableScan with sortOrder + limit; TopN operator absent from EXPLAIN).
-   - Or: "Trino EXPLAIN shows no TopN operator on my `ORDER BY ... LIMIT 100` query — did it push?" — confirms responder reads absence-of-TopN-operator as the pushed signal.
+1. **HIGH — Iceberg expire_snapshots vs branches accuracy correction in resources/17-iceberg-table-maintenance.md.** Existing line 1657 already states the correct framing, but the responder did NOT internalize it for Q3. Likely cause: there is no SECTION DEDICATED to the "branches vs expire_snapshots" question shape, and the engineer's framing biased the responder toward agreeing with the framing rather than correcting it. Add a dedicated "Branches/tags are protective by default — common myths" callout block to resource 17 with:
+   - Lead with affirmative: "expire_snapshots NEVER removes data files referenced by an active branch or tag in normal operation (Iceberg's documented design)."
+   - Myth-buster table listing 3 common wrong claims with corrections:
+     - WRONG: "branch retention controls only snapshots WITHIN the branch — it does NOT protect data files" → RIGHT: branches are top-level refs; while a ref points at a snapshot, that snapshot and its data files are protected.
+     - WRONG: "expire_snapshots can orphan branch-referenced files" → RIGHT: it cannot in normal operation; only a known bug (Iceberg 1.6.1+ #13568) on multi-ref edge cases.
+     - WRONG: "you need to tag-protect or tighten retention to keep branch data safe" → RIGHT: an active branch IS the protection; tag-with-max_reference_age is a hardening pattern, not a fix.
+   - Legitimate ops risks: (i) forgotten refs hold old data indefinitely, (ii) Iceberg 1.6.1+ multi-ref bug (not prod on 1.5.2), (iii) ALTER TABLE EXECUTE expire_snapshots respects ref protection.
+   - Cite iceberg.apache.org/docs/latest/maintenance/, branching/, spark-procedures/.
 
-2. **HIGH — Trino federation topic threshold-push continuation.** After iter413's 0.0033 regression, the topic is 0.0108 below threshold. To cross:
-   - ONE more 4.5 federation answer puts it at ~4.4929 (still 0.0071 below).
-   - TWO more at ~4.4966 (still 0.0034 below).
-   - THREE more 4.6+ answers needed to cross threshold cleanly.
-   - **Probe federation in iter414, iter415, iter416 consistently** — the topic needs a sustained sequence of high scores.
+2. **MEDIUM — Q2 copy-paste bleed prevention in resources/22-trino-federation-postgresql.md §13.5.** The bleed in Q2 (MERGE-broadcast-join phrasing in a Postgres GROUP BY answer) suggests resource 22 §13.5 may be cross-linking too aggressively with the MERGE pattern from resource 13/17. Audit §13.5 + §3.3A for any inline MERGE/staging-table phrasing that could leak into a non-MERGE federation answer; isolate the TopN-failure-shape explanation to single-source Postgres GROUP BY context.
 
-3. **Window NULL 2nd-angle.** "Rolling 7-day metric shows NULL gaps but I need zero-fill — what's the right pattern?" — probes the calendar-dim LEFT JOIN densification alternative as the semantically-clean fix.
+3. **LOW carry-forward backlog**: HMS->Nessie write-freeze alternative + Hive-views-don't-migrate gotcha (deferred); equality-perf-regression caveat for enable-string-pushdown-with-collate; MERGE rollback; OPA-override timeout; schema registry compat; JWT+OPA concurrency; Iceberg tagging 3rd-angle; fs.cache JMX 3rd-angle; Iceberg v3 deletion vectors timeline; snapshot vs serializable phantom-row 3rd-angle.
 
-4. **Snapshot vs serializable phantom-row 3rd-angle** — still pending durability re-probe from iter412 teacher's resource 26 § 8.1/8.2 fix.
+---
+
+## Judge probe targets next (iter 415)
+
+1. **CRITICAL — Iceberg branches-vs-expire_snapshots 2nd-angle (durability of iter415 fix).** Different phrasing, e.g.:
+   - "Our nightly expire_snapshots job runs with retention_threshold=7d but we want to keep a snapshot from 30 days ago for audit — can a branch protect it?" — confirms responder NOW affirms branches ARE protective by default and points to creating/keeping a branch or tag as the canonical mechanism.
+   - Or: "After running expire_snapshots, an old snapshot I thought was branch-protected is gone — why?" — probes the legitimate failure modes (forgotten ref dropped, bug #13568, manual ref-retention tightening).
+
+2. **HIGH — Trino federation topic threshold-push continuation.** After iter414's 0.0018 regression, topic is 0.0126 below threshold. ONE more 4.6+ federation answer pushes to ~4.4878 (still below), THREE consecutive 4.6+ at ~4.4888 (still below), need sustained sequence of 4.7+ scores to cross. **Probe federation in iter415 consistently.**
+
+3. **Window NULL 2nd-angle still pending**: "Rolling 7-day metric shows NULL gaps but I need zero-fill — what's the right pattern?" — probes the calendar-dim LEFT JOIN densification alternative as the only semantically-clean fix.
+
+4. **Snapshot vs serializable phantom-row 3rd-angle** — still pending durability re-probe from iter412 teacher's resource 26 §8.1/8.2 fix.
 
 5. **HMS->Nessie 2nd-angle for write-freeze alternative** — still pending.
 
@@ -173,27 +164,27 @@ PASS but below STRONG due to missing semantic-change flag on the recommended COA
 
 ---
 
-## Critical message to teacher for iter414: the TopN-pushdown nuance
+## Critical message to teacher for iter 415: the Iceberg branches-as-protection truth
 
-The right mental model the teacher must instill in resources/22 Section 13.5:
+The right mental model the teacher must instill in resources/17 (the existing line 1657 statement needs to be elevated to a leading callout):
 
-> **TopN pushdown in OSS Trino 467 PostgreSQL connector — DOES work, but only in specific shapes.**
+> **Branches and tags ARE the Iceberg-native mechanism for protecting snapshots from expire_snapshots — by design, not by accident.**
 >
-> **PUSHES (canonical case):** `SELECT * FROM pg.t [WHERE pushed_predicate] ORDER BY col LIMIT N`
-> - TableScan in EXPLAIN shows `sortOrder = [...]` and `limit = N`.
-> - TopN operator is ABSENT from the EXPLAIN plan (that's the pushed-down signal).
+> **DEFAULT BEHAVIOR (documented):**
+> - "Snapshots that are still referenced by branches or tags won't be removed" (iceberg.apache.org/docs/latest/branching/).
+> - "The expire_snapshots procedure will never remove files which are still required by a non-expired snapshot" (spark-procedures/).
+> - **An active branch IS the protection. You do NOT need to create a tag to protect a snapshot that an active branch already references.**
 >
-> **DOES NOT PUSH (common failure shapes):**
-> 1. **ORDER BY on Trino-computed expression** (e.g., `ORDER BY COUNT(*)`, `ORDER BY col_a + col_b`): connector can't sort on values it hasn't produced.
-> 2. **ORDER BY across multiple sources** (federated join): TopN can only push to one connector, not across.
-> 3. **ORDER BY on column with non-default collation** the connector can't reproduce.
-> 4. **Non-identity projection between TopN and TableScan** (Trino issue #25138): rule limitation.
+> **WHAT branch retention (max-snapshot-age-ms / min-snapshots-to-keep) controls:**
+> - These properties control which snapshots within the branch's ancestor history are eligible for expiry.
+> - They do NOT cause data files of currently-referenced snapshots to be deleted while the ref is alive.
+> - max-ref-age-ms controls when the BRANCH ITSELF expires (the ref is removed); once the ref is gone, snapshots not referenced elsewhere become expire-eligible.
 >
-> **For the failure shapes — the workaround tree:**
-> 1. **First check what DID push** for the failure case — GROUP BY + COUNT(*) often pushes as aggregate pushdown, and a plain LIMIT (no TopN) may also push as Limit pushdown.
-> 2. **`system.query()` passthrough** if you need PG-side compute end-to-end (write the GROUP BY/ORDER BY/LIMIT in passthrough SQL, accept that the outer Trino ORDER BY isn't preserved by passthrough).
-> 3. **Materialize the rollup nightly** if the agg query is hot and federation overhead is unacceptable.
+> **LEGITIMATE OPS RISKS:**
+> 1. Forgotten refs hold old snapshots/data files indefinitely → monitor $refs and drop unused refs.
+> 2. Iceberg 1.6.1+ bug #13568 — multi-ref edge cases can erroneously delete branch-referenced files (NOT prod on 1.5.2 but worth flagging for future upgrades).
+> 3. Explicitly dropping a ref (DROP BRANCH / ALTER TABLE...DROP) makes its previously-protected snapshots expire-eligible.
 
-The wrong framing the responder produced ("OSS Trino 467 can't push TopN, that's a commercial-fork feature") is the inversion of the right framing. The right framing leads with the canonical pushed case, then enumerates exceptions. The wrong framing leads with the exception and presents it as the default.
+The wrong framing the responder produced ("expire_snapshots can orphan branch-referenced files; you need tag-protection / retention-tightening to protect data files") inverts the default semantic. The right framing leads with the affirmative protection-by-default + enumerates the legitimate-but-narrow exceptions. The wrong framing presents the rare bug case as the default.
 
-This is the third confident-inaccuracy-on-load-bearing-claim failure on the federation topic in seven iterations. Each instance keeps the topic stuck below the 4.5 raised threshold.
+This is the fourth confident-inaccuracy-on-load-bearing-claim failure in eight iterations across the iter402-414 window — three on federation (iter407, iter411, iter413) and now one on Iceberg-branches (iter414). The same recovery-within-one-iteration pattern should apply, but the structural risk persists.
