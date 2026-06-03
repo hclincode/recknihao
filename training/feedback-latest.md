@@ -1,99 +1,113 @@
-# Judge Feedback — Iter 412 (EXTENDED PHASE — end-of-iteration only)
+# Judge Feedback — Iter 413 (EXTENDED PHASE — end-of-iteration only)
 
-**Overall: 4.625 STRONG PASS** (Q1 4.875 + Q2 4.5 + Q3 4.625 + Q4 4.5) — well above the 3.5 PASS threshold; **+0.406 step-up from iter411 4.219**; highest score since iter404 4.6875. **ITER411 Q2 DIALECT-ACCURACY FAIL IS FULLY AND DURABLY RESOLVED.** All four answers STRONG PASS; no failure mode surfaced this iteration.
+**Overall: 4.21875 PASS** (Q1 4.875 + Q2 3.125 + Q3 4.625 + Q4 4.25) — above the 3.5 overall PASS threshold, but **step-DOWN of 0.406 from iter412 4.625**, driven entirely by Q2's federation TopN-pushdown accuracy slip. Twelfth consecutive overall PASS in the iter402-413 window, but the failure-mode pattern (confident inaccuracy on a load-bearing claim) reappears for the third time in the last seven iterations (iter407 branches-Spark-only, iter411 QUALIFY-on-Trino, iter413 OSS-Trino-can't-push-TopN).
 
 **Headline:**
-1. **WIN — Q1 iter411 QUALIFY/dialect-accuracy FAILURE FULLY RESOLVED (4.875, up from 3.25 FAIL).** Teacher's iter412 PRIMARY FIX landed exactly as planned: the explicit "Trino 467 does NOT support QUALIFY" callout in resources/13-postgres-to-iceberg-ingestion.md with literal WRONG/RIGHT examples + the new "Trino 467 SQL-dialect anti-patterns" section in resources/23-sql-best-practices-olap.md (with the universal ROW_NUMBER subquery + outer WHERE rn<=N pattern). The responder now produces the canonical Trino-compatible dedup-before-MERGE pattern verbatim.
-2. **WIN — Q2 HMS->Nessie carry-forward (4.5).** Teacher's LOW backlog fix in resources/21-hive-metastore-iceberg.md (metadata-only nature, iceberg-catalog-migrator CLI, 4-phase dual-write-window playbook, register --overwrite for stale-pointer handling, no-callback-to-catalog-during-execution semantic) landed and is verifiably accurate against projectnessie.org docs + Dremio's catalog migration blog.
-3. **WIN — Q3 RANGE vs ROWS carry-forward (4.625).** Teacher's resources/07-analytical-query-patterns.md expansion landed — calendar-vs-position frame semantics + SaaS gap-day gotcha + supported ORDER BY types.
-4. **WIN — Q4 aggregate pushdown (4.5).** Cleanly separates aggregate pushdown from predicate pushdown, gives the EXPLAIN Aggregation-node diagnostic, lists supported simple aggs, and explains the "all WHERE predicates must push for aggregate to push" requirement correctly.
+1. **CRITICAL — Q2 FEDERATION TopN-PUSHDOWN ACCURACY FAIL (3.125).** Responder claims "ORDER BY and LIMIT do NOT push down automatically in Trino 467 for the PostgreSQL connector" and frames TopN pushdown as a "later Trino version / commercial fork" feature. **VERIFIED WRONG** against trino.io/docs/current/optimizer/pushdown.html + trino.io/docs/current/connector/postgresql.html: the OSS Trino PostgreSQL connector has supported TopN pushdown (TableScan with sortOrder + limit) for years. The responder reaches the right conclusion for THIS SPECIFIC query shape (`GROUP BY ... ORDER BY COUNT(*) DESC LIMIT 50` — TopN does NOT push because ORDER BY is on a Trino-computed aggregate), but via a WRONG GENERAL CLAIM. The engineer who internalizes "Trino 467 OSS can't push TopN" will over-apply `system.query()` passthrough, rewrite already-pushed queries, and push for a commercial fork they don't need.
+2. **WIN — Q1 federation dynamic filtering (4.875).** Teacher's iter413 Section 13.3 landed cleanly. dynamicFilterAssignments EXPLAIN signature, INNER/RIGHT vs LEFT/FULL OUTER restriction, VARCHAR-vs-BIGINT type-mismatch foot-gun, enable_dynamic_filtering kill switch — all verified accurate.
+3. **WIN — Q3 dbt --vars parameterized backfill (4.625).** var()/--vars JSON, run_started_at + modules.datetime.timedelta, dbt_project.yml overridable by CLI — all verified against docs.getdbt.com.
+4. **WIN with minor flag — Q4 window NULL fix (4.25).** COALESCE/UNBOUNDED PRECEDING/RANGE INTERVAL alternatives all syntactically correct, but responder did NOT flag that `COALESCE(avg, session_count)` SUBSTITUTES the raw current value for a true rolling average — that's a metric-semantics change the engineer should be warned about.
 
-**Pattern note:** eleventh consecutive PASS in the extended phase (iter402-412), and the third clean recovery from a failure mode in three tries:
-- **iter408 content gap** (Trino MVs not in resources) → fixed iter409 (4.5625 STRONG PASS).
-- **iter410 findability gap** (write.isolation-level buried in resource 17) → fixed iter411 (4.875 STRONG PASS).
-- **iter411 dialect-accuracy gap** (QUALIFY recommended on Trino) → fixed iter412 (4.875 STRONG PASS).
+**Trino federation topic status (CRITICAL):**
+- **Previous: 4.4925 / 267 (NEEDS WORK, 0.0075 below 4.5 threshold)**
+- **NEW: 4.4892 / 269 (NEEDS WORK, 0.0108 below 4.5 threshold) — REGRESSED 0.0033 further from threshold**
+- The Q2 inaccuracy actively MOVED THE TOPIC AWAY from passing despite teacher's iter413 Section 13 threshold-push effort. The Q1 STRONG PASS (4.875) lifted the topic, but the Q2 FAIL (3.125) dragged it down more.
+- **The Trino federation topic does NOT cross the 4.5 threshold this iteration. It REGRESSED.**
 
-The teacher's recovery pattern remains tight and is the most reliable signal in the loop.
+**Pattern note:** Third confident-inaccuracy-on-load-bearing-claim failure in seven iterations:
+- iter407 Q2: "branches are Spark-only" (WRONG — Trino reads branches) → fixed iter408 Q1.
+- iter411 Q2: QUALIFY recommended on Trino 467 (WRONG — QUALIFY not in Trino grammar) → fixed iter412 Q1.
+- iter413 Q2: "OSS Trino 467 PG connector can't push TopN" (WRONG — TopN pushdown supported since Trino 353) → needs fix iter414.
 
----
-
-## Q1 — Trino 467 QUALIFY dialect re-probe + dbt incremental idempotency (RESOLVED)
-
-**Scores: 5.0 / 5.0 / 5.0 / 4.5 — avg 4.875 STRONG PASS**
-
-### Dialect-accuracy failure resolution confirmed
-- **Trino 467 does NOT support QUALIFY** — VERIFIED. trino.io/docs/current/sql/select.html lists no QUALIFY in the SELECT grammar through Trino 481; the Starburst forum 2024 feature-request thread "Available window functions and Qualify statement" confirms QUALIFY remains a feature request. The responder now explicitly states this and provides the canonical workaround.
-- **Canonical Trino dedup-before-MERGE pattern** — `SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY updated_at DESC) rn FROM source) WHERE rn = 1` — VERIFIED as the standard Trino-compatible rewrite; CTE-equivalent form also given.
-- **dbt incremental idempotency framing** — embedding the dedup in the source SELECT + `is_incremental` WHERE `updated_at > (SELECT MAX(updated_at) FROM {{ this }})` is the canonical microbatch idempotency pattern — VERIFIED against docs.getdbt.com/docs/build/incremental-models.
-- **unique_key only governs MERGE ON, not source dedup** — VERIFIED. dbt-labs community guidance explicitly recommends "always include deduplication in your SELECT rather than relying solely on unique_key."
-- **MERGE_TARGET_ROW_MULTIPLE_MATCHES** error name + semantics — VERIFIED against trino.io/docs/current/sql/merge.html and supporting-merge.html. The mechanism is exactly as described: AssignUniqueId on target + MarkDistinct adding is_distinct column + check raises the exception if any row has is_distinct = false.
-- **Retry-causes-duplicates root cause** — MERGE re-running over an overlapping window with non-idempotent source SELECT — sound.
-
-### Verdict
-**STRONG PASS. The iter411 dialect-accuracy FAIL is fully and durably resolved.** Engineer gets a copy-paste-ready Trino-compatible recipe + the dbt-side idempotency framing.
+The teacher's recovery pattern remains tight (each previous instance recovered within one iteration), but the **structural risk** is that the responder produces a confident factual claim about a TOPIC-SPECIFIC connector behavior that the engineer would act on. For federation specifically, this is the third such inaccuracy on the topic (each in a different facet: branches/dialect/connector-capability), and it keeps the topic stuck below the 4.5 threshold.
 
 ---
 
-## Q2 — HMS->Nessie no-downtime migration
+## Q1 — Dynamic filtering federated join (FEDERATION)
 
-**Scores: 4.5 / 4.5 / 4.5 / 4.5 — avg 4.5 STRONG PASS**
+**Scores: 5.0 / 4.5 / 5.0 / 5.0 — avg 4.875 STRONG PASS**
 
 ### What landed
-- **Metadata-only, no data move** — VERIFIED. Iceberg's metadata.json + manifest list + manifest files all sit in MinIO; the catalog only holds the pointer to the current metadata.json. Switching catalogs swaps pointers, not data.
-- **iceberg-catalog-migrator CLI** — VERIFIED against github.com/projectnessie/iceberg-catalog-migrator (the canonical projectnessie tool) and Dremio's "Introducing the Apache Iceberg Catalog Migration Tool" blog. The `register` subcommand is the correct verb.
-- **4-phase dual-write-window playbook** (setup/register, readers cutover, writers cutover, decommission HMS) — sound canonical pattern; the brief window where HMS still has writes but Nessie pointer is stale is correctly identified as the risk surface.
-- **register --overwrite for stale-pointer handling** — CORRECT semantic; the migrator supports re-registration to refresh stale pointers during the cutover window.
-- **In-flight queries unaffected because scan is self-contained after planning** — CORRECT load-bearing claim. Once Trino's coordinator resolves metadata.json -> manifest list -> data file URIs and produces splits, executor splits read directly from MinIO without further catalog roundtrips. A catalog switch mid-execution does not interrupt.
-- **No catalog callback during execution** — CORRECT.
-
-### Minor opportunities (not gating)
-- Could mention the brief write-freeze alternative to dual-write window for users who prefer simpler reasoning over zero downtime.
-- Could mention Hive-views-don't-migrate gotcha (Nessie doesn't carry Hive view definitions; views must be recreated).
+- **DF mechanism: build hash of small PG side + extract join-key IN-list + push to Iceberg scan to prune files 10-100x** — CORRECT canonical mechanism (verified against trino.io/blog/2019/06/30/dynamic-filtering.html).
+- **The shuffle is the partitioned join (expected, not a problem)** — correct framing; helps the engineer not chase a non-issue.
+- **EXPLAIN (TYPE DISTRIBUTED) shows dynamicFilterAssignments in events TableScan** — VERIFIED against trino.io/docs/current/admin/dynamic-filtering.html.
+- **Absent reasons enumerated correctly:**
+  - VARCHAR-vs-BIGINT type mismatch disables DF — VERIFIED.
+  - LEFT/FULL OUTER not supported (DF only INNER/RIGHT) — VERIFIED ("Dynamic filtering cannot be used for LEFT OUTER and FULL OUTER joins because all records from the left side must be returned at least once").
+  - enable_dynamic_filtering=false session-property kill switch — CORRECT.
+- **EXPLAIN ANALYZE Physical Input to confirm** — correct diagnostic.
+- **Partition column must match join column to benefit** — correct semantic.
 
 ### Verdict
-**STRONG PASS.** Teacher's LOW backlog fix in resources/21 landed cleanly. Engineer gets a clear phased playbook with the right tool name.
+STRONG PASS. Teacher's iter413 Section 13.3 landed cleanly.
 
 ---
 
-## Q3 — RANGE vs ROWS window frame on gap-day SaaS data
+## Q2 — TopN/LIMIT pushdown to Postgres (FEDERATION)
+
+**Scores: 2.5 / 4.0 / 3.0 / 3.0 — avg 3.125 FAIL**
+
+### Critical accuracy defect (the headline issue)
+- Responder claims **"ORDER BY and LIMIT do NOT push down automatically in Trino 467 for the PostgreSQL connector"** and frames TopN pushdown as a **"later Trino version / commercial fork"** feature.
+- **VERIFIED WRONG** against:
+  - trino.io/docs/current/optimizer/pushdown.html: "The combination of a LIMIT or FETCH FIRST clause with an ORDER BY clause creates a small set of records to return out of a large sorted dataset, and the pushdown for such a query is called a Top-N pushdown."
+  - trino.io/docs/current/connector/postgresql.html: PostgreSQL connector explicitly listed as supporting TopN pushdown.
+  - Trino release 353 (March 2021) added Top-N pushdown infrastructure; the PG connector has supported it for years.
+- The right framing: **OSS Trino 467 PG connector DOES support TopN pushdown**. For a query like `SELECT * FROM pg.orders ORDER BY total DESC LIMIT 100`, the TableScan shows sortOrder + limit parameters and the TopN operator is absent from the plan — that's the pushed case.
+
+### Right conclusion via wrong general claim
+- The SPECIFIC query in the question — `SELECT account_id, event_type, COUNT(*) FROM pg.events GROUP BY account_id, event_type ORDER BY COUNT(*) DESC LIMIT 50` — TopN does NOT push because ORDER BY is on a computed aggregate (`COUNT(*)`) that Trino computes after GROUP BY rows are returned. So the **outcome** the responder predicts (all rows pulled to Trino, sort+limit in Trino) is CORRECT for THIS query.
+- BUT the **mechanism** the responder cites is WRONG. The engineer who reads "OSS Trino 467 can't push TopN" will internalize that and over-apply `system.query()` passthrough, rewrite queries that would have pushed cleanly, and seek a commercial fork.
+
+### What's accurate
+- `system.query()` passthrough running GROUP BY/ORDER BY/LIMIT on PG with outer ORDER BY because passthrough doesn't preserve order — CORRECT workaround for the specific query shape (PG-side compute, return aggregated rows).
+- EXPLAIN diagnostic to check TopN operator above TableScan — correct diagnostic in principle.
+
+### Verdict
+FAIL on per-question federation threshold (4.5 raised). The right outcome via the wrong general claim is exactly the iter407/iter411 confident-inaccuracy failure pattern. Engineer would act on the wrong mental model.
+
+---
+
+## Q3 — dbt --vars parameterized backfill (NON-FED)
 
 **Scores: 5.0 / 4.5 / 4.5 / 4.5 — avg 4.625 STRONG PASS**
 
 ### What landed
-- **ROWS BETWEEN 6 PRECEDING AND CURRENT ROW = physical row count, breaks on gap days** — CORRECT. With sparse data (weekends, holidays, idle tenants) the 6-row window pulls in older calendar days than intended.
-- **RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW = calendar-aware value-based range** — VERIFIED against trino.io/blog/2021/03/10/introducing-new-window-features.html ("Range frames with INTERVAL bounds") + trino.io/docs/current/functions/window.html. Trino supports this syntax; the offset interval applies to the ORDER BY column.
-- **Missing days don't shift the window** — CORRECT semantic; RANGE filters by value, not by row position.
-- **RANGE requires numeric / DATE / TIMESTAMP / TIMESTAMPTZ ORDER BY** — CORRECT. Trino docs explicitly require the offset to be compatible with the sorting column type.
-- **SaaS weekend/holiday/idle-tenant gap-day framing** — practical and on-brand.
-
-### Minor opportunities (not gating)
-- Could mention the empty-frame NULL-aggregate edge case (if no rows fall in the calendar window, aggregates return NULL).
-- Could mention the per-row-densification alternative (LEFT JOIN with calendar dimension) for cases where the engineer needs both window semantics and zero-fill.
+- **var() / --vars JSON syntax** — VERIFIED against docs.getdbt.com/reference/dbt-jinja-functions/var ("--vars argument accepts a YAML dictionary as a string on the command line").
+- **Model template `{% set start_date = var('backfill_start_date','default') %}` + WHERE event_date BETWEEN** — CORRECT canonical pattern.
+- **CLI dbt run --vars '{...}'** — CORRECT.
+- **Default 2nd arg safe** — CORRECT (var() returns 2nd arg if variable not set; useful for prod-default + CLI-override).
+- **Rolling 90d via run_started_at + modules.datetime.timedelta** — VERIFIED against docs.getdbt.com/reference/dbt-jinja-functions/run_started_at (Python datetime UTC) + docs.getdbt.com/reference/dbt-jinja-functions/modules (modules.datetime exposes Python datetime module in Jinja).
+- **dbt_project.yml vars defaults overridable by CLI** — CORRECT.
 
 ### Verdict
-**STRONG PASS.** Teacher's expansion of resources/07-analytical-query-patterns.md landed.
+STRONG PASS. The iter413 LOW backlog item for parameterized-backfill was deferred but the responder still landed the answer cleanly from existing resources — suggests the existing resource 13 dbt incremental section already supports this pattern.
 
 ---
 
-## Q4 — Aggregate pushdown to Postgres separate from predicate pushdown
+## Q4 — Window AVG NULL on gap day (NON-FED)
 
-**Scores: 4.5 / 4.5 / 4.5 / 4.5 — avg 4.5 STRONG PASS**
+**Scores: 4.0 / 4.5 / 4.5 / 4.0 — avg 4.25 PASS (below STRONG)**
 
 ### What landed
-- **Aggregate pushdown is SEPARATE from predicate pushdown** — VERIFIED against trino.io/docs/current/optimizer/pushdown.html (distinct sections for each).
-- **"All WHERE predicates must also push for aggregate to push"** — CORRECT in spirit. If Trino can't push a filter, it must apply that filter locally; the aggregate must then run on Trino too because it operates on post-filter rows. The pushdown doc states this dependency.
-- **Simple aggs COUNT/SUM/AVG/MIN/MAX** — CORRECT for the PostgreSQL connector (verified against trino.io/docs/current/connector/postgresql.html).
-- **Default aggregate-pushdown-enabled** — CORRECT for PG connector; can be disabled via `aggregation_pushdown_enabled` session property.
-- **EXPLAIN diagnostic — Aggregation node above TableScan = NOT pushed; Aggregation absent = pushed** — VERIFIED ("If an aggregate function is successfully pushed down to the connector, the explain plan does not show that Aggregate operator").
-- **EXPLAIN ANALYZE Input row count as smoking gun** — canonical 50M-row-pulled diagnostic. The fix paths (tighten WHERE to use pushdown-compatible predicates, materialized view on PG) are sound.
+- **AVG over empty/all-NULL frame returns NULL** — CORRECT (verified against trino.io/docs/current/functions/window.html: "if x is null for all rows ... null is returned").
+- **ROWS 6 PRECEDING looks back 6 physical rows** — CORRECT.
+- **UNBOUNDED PRECEDING cumulative alternative** — CORRECT but different metric (cumulative running average vs rolling).
+- **RANGE INTERVAL '6' DAY PRECEDING alternative** — VERIFIED against trino.io/blog/2021/03/10/introducing-new-window-features.html.
+- **Diagnostic COUNT(*) OVER rows_in_window** — useful pattern.
 
-### Minor opportunities (not gating)
-- Could mention `jdbc-types-mapped-to-varchar` connector property as a foot-gun (unrecognized PG types get mapped to VARCHAR and break pushdown).
-- Could mention `pushdown.computations.enabled` session property.
-- For the Trino federation topic this datum nudges the average to **4.4925 (267 datapoints)** — still 0.0075 below the raised 4.5 threshold. The topic **REMAINS NEEDS WORK** in the rubric. Crossing the threshold will require a sustained sequence of ≥4.55 scores; the marginal lift per single datum at this volume is now <0.001.
+### Semantic flag missing (the deduction)
+- Responder recommends `COALESCE(avg, session_count)` as a fallback. **This SUBSTITUTES the raw current row's `session_count` for a NULL rolling average** — on gap days the metric becomes "today's value" instead of "7-day rolling average". That defeats the purpose of the rolling metric.
+- Other fallback choices have different semantic implications:
+  - `COALESCE(avg, 0)` — treats gap as zero (skews downward).
+  - `COALESCE(avg, current_value)` — what the responder recommended; defeats rolling intent.
+  - UNBOUNDED PRECEDING — cumulative, NOT rolling (different metric).
+  - RANGE INTERVAL '6' DAY PRECEDING — true calendar rolling, but still NULL when zero rows fall in window.
+  - **LEFT JOIN calendar dim + densify with zero-fill** — only semantically-clean fix.
+- The responder didn't explicitly flag this; the engineer would copy-paste the COALESCE pattern and silently change their metric.
 
 ### Verdict
-**STRONG PASS.** The structural separation is right; the EXPLAIN diagnostic is the canonical verification.
+PASS but below STRONG due to missing semantic-change flag on the recommended COALESCE fallback.
 
 ---
 
@@ -101,51 +115,85 @@ The teacher's recovery pattern remains tight and is the most reliable signal in 
 
 | Q | Score | Verdict |
 |---|---|---|
-| Q1 | 4.875 | STRONG PASS — iter411 DIALECT-ACCURACY FAILURE RESOLVED via "no QUALIFY" callout + canonical ROW_NUMBER pattern |
-| Q2 | 4.5 | STRONG PASS — HMS->Nessie phased playbook + iceberg-catalog-migrator + self-contained scan semantic |
-| Q3 | 4.625 | STRONG PASS — RANGE INTERVAL vs ROWS calendar-vs-position semantics + Trino syntax verified |
-| Q4 | 4.5 | STRONG PASS — aggregate pushdown vs predicate pushdown separation + EXPLAIN diagnostic |
+| Q1 | 4.875 | STRONG PASS — DF mechanism + EXPLAIN signature + INNER/RIGHT-only + type-mismatch foot-gun |
+| Q2 | 3.125 | FAIL — TopN-pushdown wrong general claim (right outcome via wrong mechanism) |
+| Q3 | 4.625 | STRONG PASS — dbt --vars JSON + run_started_at + modules.datetime.timedelta |
+| Q4 | 4.25 | PASS — fallback options correct but semantic-change flag missing |
 
-**Average 4.625 STRONG PASS** — eleventh consecutive PASS in the iter402-412 window; +0.406 step-up from iter411 4.219; highest score since iter404 4.6875.
+**Average 4.21875 PASS** — twelfth consecutive overall PASS in the iter402-413 window, but **step-DOWN of 0.406 from iter412 4.625**.
 
-**Trajectory iter394-412:** `4.75P/3.125F/4.3125P/4.375P/4.34375P/4.09375P/4.0625P/3.8125F/4.59375P/3.875F/4.25P/4.6875P/4.40625P/4.625P/4.0625P/4.125P/4.5625P/4.0P/4.219P/**4.625P**`.
+**Trajectory iter394-413:** `4.75P/3.125F/4.3125P/4.375P/4.34375P/4.09375P/4.0625P/3.8125F/4.59375P/3.875F/4.25P/4.6875P/4.40625P/4.625P/4.0625P/4.125P/4.5625P/4.0P/4.219P/4.625P/**4.21875P**`.
 
 **Topic status table:**
-- Postgres-to-Iceberg ingestion: 4.4891/144 -> 4.4917/145 — PASSED (above threshold).
-- Iceberg table maintenance: 4.4067/76 -> 4.4102/77 — PASSED.
-- Analytical query patterns Iceberg+Trino: 4.4031/10 -> 4.4233/11 — PASSED.
-- Trino federation / cross-source: 4.4925/266 -> **4.4925/267 — NEEDS WORK (still 0.0075 below raised 4.5 threshold)**.
+- Postgres-to-Iceberg ingestion: 4.4917/145 -> 4.4926/146 — PASSED (above threshold).
+- Iceberg table maintenance: 4.4102/77 — unchanged this iteration.
+- Analytical query patterns Iceberg+Trino: 4.4233/11 -> 4.4214/12 — PASSED.
+- **Trino federation / cross-source: 4.4925/267 -> 4.4892/269 — NEEDS WORK (REGRESSED 0.0033 further from threshold; now 0.0108 below 4.5 raised threshold).**
 
 ---
 
-## Teacher actions next (iter 413)
+## Teacher actions next (iter 414)
 
-1. **HIGH — Trino federation topic threshold push.** This topic remains NEEDS WORK at 4.4925/267, only 0.0075 below the raised 4.5 threshold. The marginal lift per single datum is now tiny (<0.001), so reaching the threshold requires either (a) a sustained sequence of high-quality answers (≥4.55) over multiple iterations, or (b) reducing the test-point denominator by re-scoping the topic. **Recommend (a) — polish the federation resources to produce consistently ≥4.6 answers.** Specifically:
-   - Add a literal EXPLAIN ANALYZE output snippet to resources/16-trino-federation.md or similar, showing the exact "Input rows: 50,000,000" vs "Input rows: 5" smoking-gun pattern for aggregate pushdown.
-   - Add a worked example of `aggregation_pushdown_enabled` session property + how to confirm via EXPLAIN.
-   - Add the `jdbc-types-mapped-to-varchar` foot-gun callout.
-   - Add the equality-perf-regression caveat for `enable-string-pushdown-with-collate` (may disable PG indexes on equality).
+1. **HIGH — TopN-pushdown accuracy correction in resources/22-trino-federation-postgresql.md Section 13.5.** The teacher's iter413 Section 13 threshold-push effort included Section 13.5 on TopN/LIMIT pushdown, but the responder still produced the wrong general claim — the Section 13.5 framing may have been read as "TopN doesn't push" rather than "TopN pushes in the canonical case and fails only in specific shapes". Rewrite Section 13.5 to lead with the **canonical pushed case**:
+   - Lead: "**TopN pushdown DOES work in OSS Trino 467 PostgreSQL connector.** Example: `SELECT * FROM pg.orders ORDER BY total DESC LIMIT 100` — TableScan shows sortOrder + limit; TopN operator is ABSENT from the EXPLAIN plan (this is the pushed case)."
+   - Then explicitly list **shapes where TopN does NOT push** (and why), with the GROUP BY + ORDER BY agg + LIMIT shape as the headline example: "ORDER BY is on a computed aggregate that Trino computes after GROUP BY — the connector can't sort on a value it hasn't produced yet."
+   - Show what DOES push for the aggregate case: "The GROUP BY + COUNT(*) may push as aggregate pushdown if connector supports it; the LIMIT 50 may push as Limit pushdown without TopN."
+   - **Add citation row to Section 13.8 mapping the TopN-pushdown claim to trino.io/docs/current/optimizer/pushdown.html#topn-pushdown.**
 
-2. **LOW — Q1 polish.** Add a `dbt --vars '{batch_date: "2026-06-01"}'` parameterized-backfill example to the dbt incremental section in resources/13.
+2. **MEDIUM — Q4 window NULL semantic-change flag in resources/07-analytical-query-patterns.md.** Add a "fallback choices change metric semantics" callout listing four options:
+   - `COALESCE(avg, 0)` — treat gap as zero (skews avg downward toward 0).
+   - `COALESCE(avg, current_value)` — use raw current value (gap day metric = today's metric, defeats rolling intent).
+   - UNBOUNDED PRECEDING — cumulative running average (DIFFERENT metric, not rolling).
+   - RANGE INTERVAL '6' DAY PRECEDING — true calendar rolling, but still NULL when zero rows fall in window.
+   - **LEFT JOIN calendar dim + densify with zero-fill** — only semantically-clean fix.
 
-3. **LOW — Q2 polish.** Add the brief write-freeze alternative + Hive-views-don't-migrate gotcha to resources/21.
-
-4. **LOW — Q3 polish.** Add empty-frame NULL-aggregate edge case + per-row-densification alternative (LEFT JOIN calendar dim) to resources/07.
-
-5. **LOW carry-forward backlog**: MERGE rollback, OPA-override timeout, schema registry compat, JWT+OPA concurrency, Iceberg tagging 3rd-angle, fs.cache JMX 3rd-angle, equality delete 1.5.2 bug context, Iceberg v3 deletion vectors timeline, snapshot vs serializable phantom-row 3rd-angle (still pending re-probe from iter412 teacher's resource 26 § 8.1/8.2 fix).
+3. **LOW carry-forward backlog**: HMS->Nessie write-freeze alternative + Hive-views-don't-migrate gotcha (deferred from iter412); equality-perf-regression caveat for enable-string-pushdown-with-collate; MERGE rollback; OPA-override timeout; schema registry compat; JWT+OPA concurrency; Iceberg tagging 3rd-angle; fs.cache JMX 3rd-angle; Iceberg v3 deletion vectors timeline; snapshot vs serializable phantom-row 3rd-angle.
 
 ---
 
-## Judge probe targets next (iter 413)
+## Judge probe targets next (iter 414)
 
-1. **CRITICAL — Trino dialect-accuracy 2nd-angle (durability of iter412 fix).** Different question that probes SQL-dialect awareness. E.g., "how do I write a TOP-N-per-group query in Trino?" — confirms responder doesn't reach for QUALIFY, TOP, DISTINCT ON, or LIMIT N BY. Or "Trino equivalent of MySQL's `GROUP_CONCAT`?" — confirms responder uses `array_join(array_agg(...))` or `listagg`.
+1. **CRITICAL — TopN-pushdown 2nd-angle (durability of iter414 fix).** Different phrasing, e.g.:
+   - "I have `SELECT order_id, total FROM pg.orders ORDER BY total DESC LIMIT 100` — does this pull all 50M rows to Trino?" — confirms responder NOW states TopN pushes cleanly for this shape (TableScan with sortOrder + limit; TopN operator absent from EXPLAIN).
+   - Or: "Trino EXPLAIN shows no TopN operator on my `ORDER BY ... LIMIT 100` query — did it push?" — confirms responder reads absence-of-TopN-operator as the pushed signal.
 
-2. **Trino federation topic threshold-push probe.** Same kind of question that scored 4.5 in Q4 above but in a slightly different shape — e.g., "my federated PG join still pulls 100M rows from PG even after I added a WHERE — what's going on?" — probes the predicate-pushdown-as-prerequisite-for-aggregate-pushdown dependency at a different entry point.
+2. **HIGH — Trino federation topic threshold-push continuation.** After iter413's 0.0033 regression, the topic is 0.0108 below threshold. To cross:
+   - ONE more 4.5 federation answer puts it at ~4.4929 (still 0.0071 below).
+   - TWO more at ~4.4966 (still 0.0034 below).
+   - THREE more 4.6+ answers needed to cross threshold cleanly.
+   - **Probe federation in iter414, iter415, iter416 consistently** — the topic needs a sustained sequence of high scores.
 
-3. **HMS->Nessie 2nd-angle.** "We started migrating to Nessie but a write hit HMS after the cutover — how do I reconcile?" — probes the stale-pointer reconciliation + register --overwrite recipe.
+3. **Window NULL 2nd-angle.** "Rolling 7-day metric shows NULL gaps but I need zero-fill — what's the right pattern?" — probes the calendar-dim LEFT JOIN densification alternative as the semantically-clean fix.
 
-4. **Snapshot vs serializable phantom-row 3rd-angle.** Still pending durability re-probe from teacher's iter412 resource 26 § 8.1/8.2 fix — "when should I use snapshot isolation in Iceberg, and what's the phantom-row risk?"
+4. **Snapshot vs serializable phantom-row 3rd-angle** — still pending durability re-probe from iter412 teacher's resource 26 § 8.1/8.2 fix.
 
-5. **RANGE vs ROWS 2nd-angle.** "I need a 7-day rolling average for tenants with sparse activity — which window frame and why?" — natural follow-on probing the calendar-vs-position distinction in a different shape.
+5. **HMS->Nessie 2nd-angle for write-freeze alternative** — still pending.
 
 6. **Iceberg v3 deletion vectors timeline** carry-forward (long-standing backlog item).
+
+---
+
+## Critical message to teacher for iter414: the TopN-pushdown nuance
+
+The right mental model the teacher must instill in resources/22 Section 13.5:
+
+> **TopN pushdown in OSS Trino 467 PostgreSQL connector — DOES work, but only in specific shapes.**
+>
+> **PUSHES (canonical case):** `SELECT * FROM pg.t [WHERE pushed_predicate] ORDER BY col LIMIT N`
+> - TableScan in EXPLAIN shows `sortOrder = [...]` and `limit = N`.
+> - TopN operator is ABSENT from the EXPLAIN plan (that's the pushed-down signal).
+>
+> **DOES NOT PUSH (common failure shapes):**
+> 1. **ORDER BY on Trino-computed expression** (e.g., `ORDER BY COUNT(*)`, `ORDER BY col_a + col_b`): connector can't sort on values it hasn't produced.
+> 2. **ORDER BY across multiple sources** (federated join): TopN can only push to one connector, not across.
+> 3. **ORDER BY on column with non-default collation** the connector can't reproduce.
+> 4. **Non-identity projection between TopN and TableScan** (Trino issue #25138): rule limitation.
+>
+> **For the failure shapes — the workaround tree:**
+> 1. **First check what DID push** for the failure case — GROUP BY + COUNT(*) often pushes as aggregate pushdown, and a plain LIMIT (no TopN) may also push as Limit pushdown.
+> 2. **`system.query()` passthrough** if you need PG-side compute end-to-end (write the GROUP BY/ORDER BY/LIMIT in passthrough SQL, accept that the outer Trino ORDER BY isn't preserved by passthrough).
+> 3. **Materialize the rollup nightly** if the agg query is hot and federation overhead is unacceptable.
+
+The wrong framing the responder produced ("OSS Trino 467 can't push TopN, that's a commercial-fork feature") is the inversion of the right framing. The right framing leads with the canonical pushed case, then enumerates exceptions. The wrong framing leads with the exception and presents it as the default.
+
+This is the third confident-inaccuracy-on-load-bearing-claim failure on the federation topic in seven iterations. Each instance keeps the topic stuck below the 4.5 raised threshold.
