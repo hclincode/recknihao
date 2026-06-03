@@ -1968,6 +1968,38 @@ CALL iceberg.system.rollback_to_snapshot(
 
 > **Argument-style gotcha — do not cross the syntaxes.** On **Trino 467** (the current production version), rollback is exposed only as `CALL iceberg.system.rollback_to_snapshot(<schema>, <table>, <snapshot_id>)` with positional VARCHAR, VARCHAR, BIGINT — NO `=>` named-arg syntax. The `ALTER TABLE iceberg.<schema>.<table> EXECUTE rollback_to_snapshot(snapshot_id => <id>)` form requires Trino 469+ (Jan 2025) and does NOT exist on Trino 467. **Spark** exposes only `CALL iceberg.system.rollback_to_snapshot(table => '...', snapshot_id => ...)` with named args. **Never** mix: passing Spark-style named args into Trino's `CALL` form, or Trino positional args into Spark, fails with a parse / argument-count error. The procedure name is identical across engines — only the calling convention differs.
 
+> **CANONICAL FORMS CARD — copy this; do NOT mix engines.** This is the single source of truth for `rollback_to_snapshot` syntax. Verified against [Iceberg Spark Procedures docs](https://iceberg.apache.org/docs/latest/spark-procedures/#rollback_to_snapshot) and [Trino Iceberg connector docs](https://trino.io/docs/current/connector/iceberg.html). If a copy-paste into Spark errors with "argument count mismatch", you used the Trino three-arg form by mistake; if Trino errors with "unexpected `=>`", you used the Spark named-arg form by mistake.
+>
+> | Engine | Canonical syntax | Notes |
+> |---|---|---|
+> | **Spark (canonical, two-arg, qualified `'schema.table'`)** | `CALL iceberg.system.rollback_to_snapshot('analytics.events', 4823511203987654321)` (positional, table as ONE string) **OR** `CALL iceberg.system.rollback_to_snapshot(table => 'analytics.events', snapshot_id => 4823511203987654321)` (named — recommended) | The Spark procedure takes the table identifier as a **single qualified string `'schema.table'`**, NOT as two separate `'schema', 'table'` arguments. Writing `('analytics', 'events', <id>)` ERRORS in Spark with "argument count mismatch" — Spark expects two arguments (`table`, `snapshot_id`), not three. |
+> | **Trino 467 (positional, three-arg)** | `CALL iceberg.system.rollback_to_snapshot('analytics', 'events', 4823511203987654321)` (positional VARCHAR, VARCHAR, BIGINT) | Trino's `CALL` framework requires positional args; the procedure exposes schema and table as TWO separate VARCHAR args, not one qualified string. Named-arg syntax (`table =>`, `snapshot_id =>`) does NOT work in Trino's `CALL`. |
+> | **Trino 469+ (table procedure, ALTER TABLE EXECUTE)** | `ALTER TABLE iceberg.analytics.events EXECUTE rollback_to_snapshot(snapshot_id => 4823511203987654321)` | Added in Trino 469 (released Jan 2025). The qualified table name lives in the `ALTER TABLE` clause; only `snapshot_id` (and optional `ref`) is passed as a named arg to the procedure. **Does NOT exist on Trino 467** — use the Trino 467 `CALL` form above. |
+>
+> **The single most common copy-paste mistake:** writing `CALL iceberg.system.rollback_to_snapshot('analytics', 'events', <id>)` against **Spark**. That is the **Trino** positional form; Spark errors. Spark needs `'analytics.events'` (one qualified string) or named args.
+
+> **Sibling procedure — `rollback_to_timestamp` (when you know the time, not the snapshot_id).** Same canonical-forms rules as `rollback_to_snapshot`. Useful when the bad write occurred at a known wall-clock time and you don't want to look up the snapshot_id first.
+>
+> | Engine | Syntax |
+> |---|---|
+> | **Spark** | `CALL iceberg.system.rollback_to_timestamp('analytics.events', TIMESTAMP '2026-05-29 01:59:59.999')` (positional, two-arg) **OR** `CALL iceberg.system.rollback_to_timestamp(table => 'analytics.events', timestamp => TIMESTAMP '2026-05-29 01:59:59.999')` (named) |
+> | **Trino 467** | **NOT EXPOSED** — Trino does not implement `rollback_to_timestamp` as a `CALL` procedure. Workaround: query `$snapshots` for the snapshot_id at the target timestamp, then call `rollback_to_snapshot` with that ID. |
+>
+> ```sql
+> -- Trino workaround for "roll back to a wall-clock time":
+> -- Step 1: resolve timestamp -> snapshot_id via $snapshots.
+> SELECT snapshot_id
+> FROM iceberg.analytics."events$snapshots"
+> WHERE committed_at < TIMESTAMP '2026-05-29 02:00:00'
+> ORDER BY committed_at DESC
+> LIMIT 1;
+>
+> -- Step 2: feed that ID into the Trino 467 rollback_to_snapshot CALL form.
+> CALL iceberg.system.rollback_to_snapshot('analytics', 'events', <id_from_step_1>);
+> ```
+>
+> Resolves [Iceberg docs `rollback_to_timestamp`](https://iceberg.apache.org/docs/latest/spark-procedures/#rollback_to_timestamp) ↔ Trino's lack of the sibling procedure cleanly.
+
 Why this works:
 - Iceberg's "current snapshot" is just a pointer in the table metadata. Rollback moves the pointer back.
 - The bad data is still in MinIO, but no query sees it (no snapshot references it).
@@ -2070,6 +2102,131 @@ If you also see a `version-hint.text` file in `metadata/`, it points to the curr
 - **Enable MinIO bucket versioning on the warehouse bucket.** This is the single most effective protection against accidental PURGE — versioning preserves deleted object versions and lets you restore them.
 - **Use OPA policy to require explicit confirmation for `DROP TABLE ... PURGE`** (or block it entirely for production schemas). Plain `DROP TABLE` without PURGE is the recoverable form; PURGE is the destructive one.
 - **Keep your snapshot retention generous (7d+).** This gives you a rollback window for bad writes that's independent of the drop/register path.
+
+---
+
+## `write.isolation-level` — serializable vs snapshot (concurrent-write conflict semantics)
+
+> **One-sentence summary:** `write.isolation-level` is an Iceberg table property that controls how strict the conflict-detection is when `UPDATE` / `DELETE` / `MERGE INTO` operations run concurrently with other writes — `serializable` (the safer default) aborts a write if a concurrent commit MIGHT have added rows matching your WHERE clause; `snapshot` only aborts if the rows actually changed. **Verified against [Iceberg IsolationLevel javadoc](https://iceberg.apache.org/javadoc/1.7.1/org/apache/iceberg/IsolationLevel.html) and [Iceberg Reliability docs](https://iceberg.apache.org/docs/latest/reliability/).**
+
+### The two isolation levels in plain English
+
+Iceberg uses **optimistic concurrency** for writes: each writer assumes nothing else is running, writes new metadata, then atomically swaps the metadata pointer. If two writers race, the first wins and the second has to either retry or fail. The question `write.isolation-level` answers is: **for `UPDATE` / `DELETE` / `MERGE INTO`, how aggressively should the second writer be told "your write conflicts with the new commit and you must retry / fail"?**
+
+| Level | What it does | When the second writer FAILS |
+|---|---|---|
+| **`serializable`** (Iceberg default) | Treats concurrent writes as if they ran one after another (no overlap allowed). | If ANOTHER concurrent commit added a new data file that **might contain rows matching your UPDATE/DELETE/MERGE WHERE clause** — even if you can't prove the rows actually matched. The check is at the manifest level, not the row level. |
+| **`snapshot`** | Treats concurrent writes as independent if they don't touch the same rows. | Only if your UPDATE/DELETE/MERGE actually touches a row that was also modified by a concurrent commit. New rows added by other writers are fine. |
+
+### The concrete scenario that catches engineers
+
+Two jobs run at the same time against `iceberg.analytics.orders`:
+
+- **Job A** (a nightly Spark backfill): `INSERT INTO orders` appending 5M new rows for `order_date = '2026-05-29'`.
+- **Job B** (an analyst's correction): `UPDATE orders SET amount = amount * 1.10 WHERE tenant_id = 'acme' AND order_date < '2026-05-29'`.
+
+**Both jobs target the same table but read/write disjoint partitions.** No row is touched by both jobs.
+
+- Under **`serializable`** (the default): Job B may FAIL with `ValidationException: Found conflicting files` because Job A's commit added new files to the table, and Iceberg conservatively asks "could the new files contain rows matching `tenant_id = 'acme' AND order_date < '2026-05-29'`?" — it can't prove they don't (the new files cover `order_date = '2026-05-29'` which is NOT `< '2026-05-29'`, but the partition-spec-driven check varies by writer). Many production teams hit this surprise.
+- Under **`snapshot`**: Job B succeeds. The new rows Job A inserted are in `order_date = '2026-05-29'`; Job B's UPDATE only touches `< '2026-05-29'`; there is no row-level overlap, so the commit goes through.
+
+### How to set it
+
+```sql
+-- At table creation (Iceberg 1.5.2, both Trino 467 and Spark accept this):
+CREATE TABLE iceberg.analytics.orders (
+  order_id BIGINT,
+  tenant_id VARCHAR,
+  order_date DATE,
+  amount DOUBLE
+) WITH (
+  partitioning = ARRAY['order_date'],
+  -- Default is serializable; override to snapshot for higher concurrency tolerance:
+  format_version = 2
+);
+
+-- Set on an existing table (Trino 467):
+ALTER TABLE iceberg.analytics.orders
+SET PROPERTIES "write.delete.isolation-level" = 'snapshot',
+               "write.update.isolation-level" = 'snapshot',
+               "write.merge.isolation-level" = 'snapshot';
+
+-- Set on an existing table (Spark):
+ALTER TABLE iceberg.analytics.orders
+SET TBLPROPERTIES (
+  'write.delete.isolation-level' = 'snapshot',
+  'write.update.isolation-level' = 'snapshot',
+  'write.merge.isolation-level' = 'snapshot'
+);
+
+-- Verify the effective value with $properties (Trino 467):
+SELECT key, value
+FROM iceberg.analytics."orders$properties"
+WHERE key LIKE 'write.%.isolation-level';
+```
+
+> **There are THREE properties, one per operation type — set all three if you want consistent behavior.** Iceberg exposes the level separately for DELETE, UPDATE, and MERGE INTO. A common mistake is setting only `write.merge.isolation-level` and being surprised when a concurrent DELETE still fails. Set all three to the same value.
+
+### When to choose each
+
+| You should pick `serializable` (the default) if... | You should pick `snapshot` if... |
+|---|---|
+| Your team has a small number of writers (one ingest job, occasional ad-hoc fixes); commit conflicts are rare; correctness matters more than throughput. | You have many concurrent writers (multiple dbt models, multiple ingestion streams, multiple analysts running corrections) and you keep hitting `ValidationException` retries that slow the pipeline. |
+| The table is the source of truth for billing / compliance and you cannot tolerate a phantom-read where a concurrent insert went unseen by a concurrent UPDATE/MERGE. | The table is an append-mostly fact table where updates and inserts target disjoint partitions (most multi-tenant SaaS analytics tables fit this shape). |
+| You are running a one-off MERGE that synchronizes a table from an external source and the source has the full ground truth (any phantom-read would corrupt the merge). | Your UPDATE/DELETE/MERGE operations are partition-scoped and idempotent — the worst case of a missed concurrent insert is "we'll catch it next run." |
+
+### What `serializable` actually checks under the hood
+
+The check is **at the manifest level**, not the row level. When Job B (the UPDATE/DELETE/MERGE) tries to commit, Iceberg looks at the snapshot lineage between the snapshot Job B read and the current snapshot. For each newly-added data file in that lineage, Iceberg asks: "does this file's partition / column min-max stats overlap with Job B's WHERE-clause predicate?" If yes, the commit is rejected with `ValidationException: Found conflicting files`. So the false-positive rate depends on (a) how selective your partition spec is and (b) how well column min-max stats line up with your predicate.
+
+This is why **partition-scoped UPDATE/DELETE/MERGE with literal partition values in the WHERE clause tends to survive `serializable`** — Iceberg can prove via the partition spec that newly-added files in other partitions can't match. Predicates on non-partition columns (e.g., `WHERE customer_email = 'a@b.com'` on a non-partitioned column) fall back to column min-max stats, which are conservative.
+
+### Retry-vs-fail behavior — `commit.retry.num-retries` is your second knob
+
+Even at `serializable`, Iceberg can **transparently retry** a write that hits a conflict, as long as the retry produces the same logical result. Two table properties control this:
+
+| Property | Default (Iceberg 1.5.2) | What it does |
+|---|---|---|
+| `commit.retry.num-retries` | `4` | How many times Iceberg retries a write that fails due to a concurrent commit conflict. After the retries are exhausted, the write fails with `CommitFailedException`. |
+| `commit.retry.min-wait-ms` | `100` | Initial backoff between retries (exponential — doubles each attempt). |
+
+If you see `CommitFailedException` after a few seconds of retries, the table is genuinely contended. Either (a) lower the contention (stagger jobs, partition the work) or (b) relax the isolation level to `snapshot` if the workload tolerates it.
+
+### Operational diagnostic — "my MERGE keeps failing during ingestion window"
+
+The symptom: a dbt MERGE that always succeeded suddenly starts failing with `ValidationException: Found conflicting files` or `CommitFailedException` after a new ingestion stream was added.
+
+The diagnostic sequence:
+
+```sql
+-- 1. Confirm the current isolation level (Trino 467).
+SELECT key, value
+FROM iceberg.analytics."orders$properties"
+WHERE key LIKE 'write.%.isolation-level';
+-- Expect: 'serializable' (the default), unless explicitly relaxed.
+
+-- 2. Look at recent commit operations on the table — is something else writing in your MERGE window?
+SELECT snapshot_id, committed_at, operation, summary['total-records'] AS total_rows
+FROM iceberg.analytics."orders$snapshots"
+ORDER BY committed_at DESC
+LIMIT 20;
+-- Look for interleaved 'append' (from ingestion) and 'overwrite' / 'delete' (from MERGE).
+
+-- 3. Confirm the MERGE's partition predicate excludes the ingestion's partitions.
+-- If both the ingestion INSERT and the MERGE touch the same partition, the conflict is real
+-- (not a false positive from serializable's manifest-level check).
+```
+
+**Two viable fixes** depending on what you find:
+
+- **The MERGE and the ingestion target disjoint partitions** → relax to `snapshot` isolation. The conflict is a false positive at `serializable`.
+- **The MERGE and the ingestion really do touch the same rows** → serialize them in your scheduler (run them sequentially via Airflow / k8s CronJob dependencies). No isolation level can paper over genuinely-conflicting writes; you have a workflow design issue, not a config issue.
+
+### Pitfalls and footguns
+
+- **Changing `write.*.isolation-level` does NOT affect already-running writes.** The level is read at write-plan time. If you flip the property mid-incident, in-flight writes continue under the old level.
+- **`snapshot` isolation does NOT mean "no isolation"** — readers still see snapshot-isolated reads (a query started before a commit doesn't see that commit's data). The property only changes the WRITER conflict-detection strictness, not the READER consistency model.
+- **The property is namespaced per operation** (`write.delete.isolation-level`, `write.update.isolation-level`, `write.merge.isolation-level`) — there is NO global `write.isolation-level` property that sets all three at once. The shortcut form `write.isolation-level` you may see in older docs / blog posts was deprecated; use the three operation-specific properties.
 
 ---
 

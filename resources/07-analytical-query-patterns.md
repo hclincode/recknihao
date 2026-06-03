@@ -474,8 +474,94 @@ Rank function variants:
 - `ROW_NUMBER()` — assigns a strictly increasing integer (1, 2, 3, 4) within the partition. Ties break arbitrarily.
 - `RANK()` — ties get the same rank, then the next rank skips (1, 2, 2, 4).
 - `DENSE_RANK()` — ties get the same rank, no gap (1, 2, 2, 3).
+- `PERCENT_RANK()` — relative position as a fraction in `[0.0, 1.0]`. Formula: `(rank - 1) / (n - 1)` where `n` is partition row count. The top row gets `0.0`, the bottom row gets `1.0`. **Returns NULL when the partition has only one row** (divide-by-zero). Useful for "what percentile is this tenant in?" without computing a histogram.
+- `NTILE(n)` — divides the partition into `n` roughly-equal buckets (quartiles=4, deciles=10, percentiles=100), returning the bucket number `1..n` for each row. **Remainder rows go to the EARLIEST buckets**: e.g., 10 rows with `NTILE(3)` → buckets are size 4/3/3, not 3/3/4. **The frame clause MUST be omitted** (Trino errors if you specify `ROWS BETWEEN ...` with `NTILE`).
 
 Pick `ROW_NUMBER()` if you literally need "exactly 10 rows per tenant"; pick `RANK()`/`DENSE_RANK()` if you want to include all ties at rank 10.
+
+### Pattern C2: `PERCENT_RANK` — "what percentile is this tenant in?"
+
+"For each tenant, compute their relative position in the revenue distribution across the SaaS customer base."
+
+```sql
+SELECT
+  tenant_id,
+  total_revenue,
+  PERCENT_RANK() OVER (ORDER BY total_revenue) AS revenue_percentile
+FROM (
+  SELECT tenant_id, SUM(amount) AS total_revenue
+  FROM iceberg.analytics.orders
+  WHERE order_date >= CURRENT_DATE - INTERVAL '90' DAY
+  GROUP BY tenant_id
+);
+-- Returns one row per tenant with their percentile in [0.0, 1.0].
+-- tenant with the lowest revenue: 0.0
+-- tenant with the highest revenue: 1.0
+-- median tenant: ~0.5
+```
+
+**When to pick `PERCENT_RANK` over computing percentiles directly:**
+- You want a percentile **per row** (not just a few summary percentiles for the whole table). `PERCENT_RANK` returns the percentile of each individual row's value; `approx_percentile` returns only the value at a specified percentile.
+- You're building a "your tenant is in the top X%" widget for a SaaS dashboard — one query, no second pass.
+- The data set fits in a window-sort (a few million rows or fewer). For 500M+ rows where you only need summary percentiles (p50, p95, p99), use `approx_percentile` instead — sorting that many rows in a window is expensive.
+
+**Edge case — single-row partition.** `PERCENT_RANK` returns NULL (the formula divides by `n - 1` which is 0). Guard with `COALESCE(PERCENT_RANK() OVER (...), 0.0)` if your downstream consumer can't handle NULLs.
+
+**Sibling: `CUME_DIST` (cumulative distribution).** Trino also supports `CUME_DIST()` which returns `count_of_peers_or_lower / n` — slightly different math (the top row is `1.0`, not `(n-1)/n`). Use `PERCENT_RANK` for "fraction of rows STRICTLY below this one" and `CUME_DIST` for "fraction of rows AT OR BELOW this one."
+
+### Pattern C3: `NTILE` — bucket rows into equal-size groups (quartiles, deciles, percentile buckets)
+
+"Bucket each tenant into one of 10 deciles based on monthly active users so a dashboard can show 'top decile' / 'bottom decile' segments."
+
+```sql
+SELECT
+  tenant_id,
+  monthly_active_users,
+  NTILE(10) OVER (ORDER BY monthly_active_users) AS mau_decile
+FROM (
+  SELECT tenant_id, COUNT(DISTINCT user_id) AS monthly_active_users
+  FROM iceberg.analytics.feature_usage
+  WHERE event_date >= CURRENT_DATE - INTERVAL '30' DAY
+  GROUP BY tenant_id
+);
+-- Each tenant assigned a bucket 1..10.
+-- Bucket 1 = lowest MAU tenants, Bucket 10 = highest MAU tenants.
+```
+
+**The remainder rule (this trips up engineers — read carefully).** `NTILE(n)` divides `rows_in_partition` by `n` and distributes the remainder `r` to the **first `r` buckets**, each of which gets one extra row.
+
+| Rows in partition | `NTILE(4)` bucket sizes |
+|---|---|
+| 12 (12 ÷ 4 = 3, no remainder) | `3, 3, 3, 3` |
+| 13 (13 ÷ 4 = 3 remainder 1) | `4, 3, 3, 3` — bucket 1 gets the extra row |
+| 14 (14 ÷ 4 = 3 remainder 2) | `4, 4, 3, 3` — buckets 1 and 2 each get an extra |
+| 15 (15 ÷ 4 = 3 remainder 3) | `4, 4, 4, 3` — buckets 1, 2, 3 each get an extra |
+
+**This matters for SaaS metrics.** If you have 9,997 tenants and you compute `NTILE(10)` for "decile of revenue", the deciles are NOT all 999.7 rows each — they are `1000, 1000, 1000, 1000, 1000, 1000, 1000, 999, 999, 999` (first 7 buckets get the rounding-up). If a dashboard says "top decile = top 1000 tenants" and the real answer is "top decile = 999 tenants on this distribution", an audit may flag the off-by-one. State the rule explicitly in dashboard documentation, or use `PERCENT_RANK() >= 0.9` instead for an exact-cutoff threshold.
+
+**The no-frame restriction.** Per the [Trino window functions docs](https://trino.io/docs/current/functions/window.html), `NTILE` **must not** be invoked with a window frame:
+
+```sql
+-- WRONG — Trino errors with "ntile cannot be used with a window frame".
+SELECT NTILE(10) OVER (
+  ORDER BY revenue
+  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW   -- ILLEGAL with NTILE
+) FROM customers;
+
+-- CORRECT — omit the frame clause entirely.
+SELECT NTILE(10) OVER (ORDER BY revenue) FROM customers;
+```
+
+This restriction applies to all the **ranking functions** in Trino (`ROW_NUMBER`, `RANK`, `DENSE_RANK`, `PERCENT_RANK`, `CUME_DIST`, `NTILE`) — frames are only meaningful for value-aggregating window functions like `SUM` / `AVG` / `LAG` / `LEAD`. Ranking functions operate over the entire partition by definition.
+
+**When to pick `NTILE` over `PERCENT_RANK` or manual `CASE` bucketing:**
+
+| Need | Use |
+|---|---|
+| Bucket every row into one of `N` named groups (deciles, quartiles, percentile bands) | `NTILE(N)` — concise, single window pass |
+| Continuous percentile score per row (`0.0–1.0`) | `PERCENT_RANK()` — gives you the fraction, you decide the bucket boundaries |
+| Custom (non-equal-size) buckets like "0-1k MAU", "1k-10k MAU", "10k+ MAU" | `CASE WHEN ... THEN ... END` over the column directly — `NTILE` only does equal-size bucketing |
+| Exact "top 10% of tenants" — guaranteed cutoff regardless of count | `PERCENT_RANK() >= 0.9` filter — avoids the `NTILE` remainder-row off-by-one |
 
 ### Pattern D: Sliding window (last 7 days rolling)
 

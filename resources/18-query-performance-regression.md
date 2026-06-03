@@ -370,6 +370,104 @@ For day-to-day partition-pruning diagnosis, **`Physical Input:` from default `EX
 
 If `Physical Input:` is much higher than expected: the WHERE clause isn't filtering on a partition column. See step 4.
 
+### `EXPLAIN TYPE IO` and `EXPLAIN TYPE VALIDATE` — the two other EXPLAIN variants you should know
+
+> **One-sentence summary:** `EXPLAIN (TYPE DISTRIBUTED)` is the everyday plan-only inspector you already know; **`EXPLAIN (TYPE IO, FORMAT JSON)`** answers "which tables/columns/partitions will this query touch and what predicates will hit them" (impact analysis without running the query); **`EXPLAIN (TYPE VALIDATE)`** answers "does this query parse and resolve against the catalog without executing" (a cheap pre-flight check). **Verified against [Trino EXPLAIN docs](https://trino.io/docs/current/sql/explain.html).**
+
+The full set of `EXPLAIN TYPE` modes in Trino 467:
+
+| Type | What it does | When to reach for it |
+|---|---|---|
+| `TYPE LOGICAL` | Single-fragment plan tree (pre-distribution). Concise but doesn't show exchange boundaries. | Quick sanity check on join order and predicate placement. |
+| `TYPE DISTRIBUTED` (the everyday one) | Multi-fragment plan with exchange operators and distribution choices. Shows REPARTITION vs REPLICATE, dynamic filter wiring, predicate pushdown signatures. | Default plan-only inspection. Use 90% of the time. |
+| `TYPE IO, FORMAT JSON` | JSON describing the input/output tables, columns accessed, column-level constraints (predicates pushed down), and estimated row counts per table scan. | **Impact analysis** — "what does this query touch?" Useful for change-impact review before running an unknown query on prod, for governance audits (which columns will the query read?), and for catalog observability. |
+| `TYPE VALIDATE` | Returns a single boolean column `Valid`. Parses the SQL, resolves identifiers against the catalog, and confirms the query plans — without executing. Errors out on missing tables, type mismatches, or unresolvable references. | **Pre-flight check** — validate a generated SQL string (e.g., from a templating engine, BI tool, or user input) before exposing it to the cluster. Cheaper than `EXPLAIN DISTRIBUTED` because the optimizer doesn't have to produce a full plan. |
+
+**`EXPLAIN (TYPE IO, FORMAT JSON)` — worked example.**
+
+```sql
+EXPLAIN (TYPE IO, FORMAT JSON)
+SELECT tenant_id, SUM(amount)
+FROM iceberg.analytics.orders
+WHERE order_date BETWEEN DATE '2026-05-01' AND DATE '2026-05-31'
+  AND tenant_id = 'acme'
+GROUP BY tenant_id;
+```
+
+Returns a JSON object that looks (abbreviated) like:
+
+```json
+{
+  "inputTableColumnInfos": [{
+    "table": {
+      "catalog": "iceberg",
+      "schemaTable": {"schema": "analytics", "table": "orders"}
+    },
+    "columnConstraints": [
+      {
+        "columnName": "order_date",
+        "type": "date",
+        "domain": {
+          "nullsAllowed": false,
+          "ranges": [{"low": {"value": "2026-05-01", "bound": "EXACTLY"},
+                      "high": {"value": "2026-05-31", "bound": "EXACTLY"}}]
+        }
+      },
+      {
+        "columnName": "tenant_id",
+        "type": "varchar",
+        "domain": {
+          "nullsAllowed": false,
+          "ranges": [{"low": {"value": "acme", "bound": "EXACTLY"},
+                      "high": {"value": "acme", "bound": "EXACTLY"}}]
+        }
+      }
+    ],
+    "estimate": {"outputRowCount": 1.4E6, "outputSizeInBytes": 4.2E7}
+  }],
+  "outputTable": null
+}
+```
+
+**Reading this output:**
+- `inputTableColumnInfos[].table` — the tables this query will read. **Impact analysis: what does this query touch?** For an unknown query you've been asked to review, this is the fastest way to confirm it doesn't accidentally scan a sensitive table.
+- `columnConstraints[].domain` — the predicates that Trino has resolved into ranges. **The presence of a `domain` with `EXACTLY` bounds confirms predicate pushdown** at plan time. If a predicate you wrote does NOT appear here, it didn't push down — Trino will filter on the worker side instead of asking the connector to filter.
+- `estimate.outputRowCount` — CBO estimate of how many rows this table scan will produce after the predicates apply. Compare to the table's total row count to gauge selectivity.
+- `outputTable` — null for `SELECT`; populated for `INSERT` / `CREATE TABLE AS` to show the write target.
+
+**`EXPLAIN (TYPE VALIDATE)` — worked example.**
+
+```sql
+-- Valid query — returns Valid: true.
+EXPLAIN (TYPE VALIDATE)
+SELECT tenant_id, COUNT(*)
+FROM iceberg.analytics.orders
+WHERE order_date >= CURRENT_DATE - INTERVAL '7' DAY
+GROUP BY tenant_id;
+-- Result: a single column 'Valid' with value 'true'.
+
+-- Invalid query — errors at validation, not execution.
+EXPLAIN (TYPE VALIDATE)
+SELECT tnant_id, COUNT(*)            -- typo: 'tnant_id' not 'tenant_id'
+FROM iceberg.analytics.orders
+GROUP BY tnant_id;
+-- Result: error 'Column tnant_id cannot be resolved'.
+```
+
+**Why this is cheap.** `TYPE VALIDATE` stops after parse + identifier resolution + type checking — it does NOT produce a distributed plan, does NOT run the CBO, does NOT touch any data. On a query that takes 2 seconds to `EXPLAIN DISTRIBUTED`, `EXPLAIN VALIDATE` returns in < 50 ms.
+
+**When to use each in practice:**
+
+| Scenario | Reach for |
+|---|---|
+| "Why is this query slow?" — performance debugging | `EXPLAIN ANALYZE` (runs the query) or `EXPLAIN (TYPE DISTRIBUTED)` (plan only) |
+| "Does this generated SQL even parse?" — before submitting templated SQL to the cluster | `EXPLAIN (TYPE VALIDATE)` — fastest sanity check |
+| "What tables/columns does this query touch?" — impact analysis, governance, change review | `EXPLAIN (TYPE IO, FORMAT JSON)` — answers via the `inputTableColumnInfos` array |
+| "Did my predicate push down?" — pushdown debugging | `EXPLAIN (TYPE DISTRIBUTED)` (look for `constraint=` on TableScan) AND/OR `EXPLAIN (TYPE IO, FORMAT JSON)` (look for `domain` ranges in `columnConstraints`) |
+| "Will this query hit a sensitive column?" — pre-submit access-control review | `EXPLAIN (TYPE IO, FORMAT JSON)` — explicit list of accessed columns |
+
+**Format options for `TYPE IO`:** the only documented format is `FORMAT JSON`. Trino does NOT support a text form for `TYPE IO` output — always write `EXPLAIN (TYPE IO, FORMAT JSON) <query>` exactly.
+
 ---
 
 ## Step 4: Check partition pruning
@@ -777,6 +875,53 @@ The 50 GB per-query cap prevents one bad query from consuming all 200 GB and OOM
 3. **Enable spill**: cluster-level config change for the workloads that can't be restructured. Use as the safety net; don't let it become the default crutch.
 
 On a stack where workers cannot scale horizontally on demand (the production setup here: on-prem k8s with fixed worker replica counts), spill is the **right** overflow valve for legitimately-large queries that you can't restructure away. The trade-off is real (slower) but bounded; the alternative (OOM-kill and a user-facing failure) is worse.
+
+### 9c. `SPILL_FAILED` error code — when spill itself runs out of disk
+
+> **One-sentence summary:** `SPILL_FAILED` (an `INTERNAL_ERROR` subclass in Trino) means "the query needed to spill but the spill operation itself failed" — usually because the spill path's local disk is full, the path is not writable, or the per-query / per-node spill cap was exceeded. **Verified against [Trino spill-to-disk admin docs](https://trino.io/docs/current/admin/spill.html) and [Trino spilling properties](https://trino.io/docs/current/admin/properties-spilling.html).**
+
+`SPILL_FAILED` is the failure mode you see **after** enabling `spill-enabled=true`. The query was going to OOM, Trino tried to spill it, and the spill itself failed — so the query died anyway, often with a confusing dual-symptom ("we enabled spill but it still failed!"). The root causes are operational, not configuration-level.
+
+**The five concrete root causes (in order of frequency on this stack):**
+
+| Root cause | Symptom | Fix |
+|---|---|---|
+| **Spill path's local disk is FULL** | `SPILL_FAILED: No space left on device` in the worker log; `df -h /var/trino/spill` on the worker pod shows `Use% = 100%`. | Free disk on the spill path (a previous spill session may have left orphan spill files — `ls /var/trino/spill/`). For k8s `emptyDir` volumes, the cause is usually the pod's ephemeral storage limit. Raise the ephemeral-storage request/limit on the worker pod spec, or move the spill path to a hostPath with more room. |
+| **`max-spill-per-node` exceeded by aggregate spill across concurrent queries** | `SPILL_FAILED: Total spill size for node exceeds limit X bytes`; one query is fine in isolation but fails when run alongside other spilling queries (e.g., during a busy dashboard refresh window). | Raise `max-spill-per-node` (default `100GB`) if you have local disk room, or stagger the workload via session-level `query_priority` so the spilling queries don't all hit the cap at once. |
+| **`query-max-spill-per-node` exceeded by a single runaway query** | `SPILL_FAILED: Query spill size for node exceeds limit X bytes`; one specific query consistently fails while others succeed. | This is usually the right behavior — the query is genuinely too large for spill on a single node. Either restructure the query (Step 9a/9b above) or raise `query-max-spill-per-node` from the default `100GB`. **Do not blindly raise both caps** — they protect concurrent queries from being starved by one runaway. |
+| **60 GB disk-cap-on-pod symptom (the on-prem k8s footgun)** | `SPILL_FAILED` reliably at ~60 GB of spill per worker pod, regardless of how much `max-spill-per-node` you set; symptom matches the pod's `ephemeral-storage` limit in the Helm chart, not Trino's config. | Check `kubectl describe pod trino-worker-N | grep -A3 'ephemeral-storage'`. If the pod has `ephemeral-storage: 64Gi` and the spill path uses `emptyDir` (which counts against ephemeral-storage), Trino's spill is limited by the pod limit, not by `max-spill-per-node`. **Two fixes:** (a) raise the pod's `ephemeral-storage` limit in the Helm values, OR (b) mount the spill path as a hostPath / PVC on each worker (NOT counted against pod ephemeral-storage limits). |
+| **Spill path is read-only or wrong permissions** | `SPILL_FAILED: Permission denied: /var/trino/spill/...`; usually after a Helm-chart upgrade that changed the worker pod's `securityContext.runAsUser`. | Verify the spill path is writable by the Trino process UID: `kubectl exec trino-worker-0 -- ls -la /var/trino`. The directory should be owned by the user Trino runs as (typically `trino` or UID 1000). Fix via init container that `chown`s the path, or by aligning the Helm `securityContext` with the spill path's ownership. |
+
+**Diagnostic recipe — `SPILL_FAILED` on Trino 467:**
+
+```bash
+# Step 1: confirm the spill path's free disk on a worker pod.
+kubectl exec -it trino-worker-0 -- df -h /var/trino/spill
+# Look for "Avail" near zero or "Use% = 100%".
+
+# Step 2: list any orphan spill files (Trino normally cleans them up; failures leave them behind).
+kubectl exec -it trino-worker-0 -- ls -la /var/trino/spill/
+# Files older than your longest-running query are probably orphans — safe to delete with the worker NOT actively spilling.
+
+# Step 3: check the pod's ephemeral-storage limit (the most common on-prem k8s footgun).
+kubectl describe pod trino-worker-0 | grep -A2 'ephemeral-storage'
+# If this is set lower than max-spill-per-node, the pod limit wins.
+
+# Step 4: check the recent spilling-query JMX counters (cluster-wide).
+# trino.execution:name=SpillerStats exposes:
+#   - SpillCount  -- total spill operations
+#   - SpilledBytes -- bytes spilled (per node)
+#   - SpillFailures -- count of SPILL_FAILED errors
+# Scrape via Prometheus / JMX exporter; alert when SpillFailures > 0 over a 5-minute window.
+```
+
+**Why this matters operationally:** spill is the safety net for OOM. When spill itself fails, the query falls all the way through — Trino has no further fallback. The user sees `Query failed (SPILL_FAILED)` and you see a sad worker log. **On this stack (on-prem k8s, fixed worker pod size, no autoscale), `SPILL_FAILED` is one of the few errors you cannot solve by "running the query again later"** — the disk pressure that caused it persists until you free space or raise the limits.
+
+**Preventive monitoring (Prometheus alerts to set up before this bites you):**
+
+- `node_filesystem_avail_bytes{mountpoint="/var/trino/spill"} / node_filesystem_size_bytes` < 20% → page-out warning.
+- `trino_execution_SpillerStats_SpillFailures` > 0 over a 5-minute window → page on the next failure.
+- Pod-level `kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes` > 80% on worker pods using `emptyDir` for spill → ephemeral-storage limit approaching.
 
 ---
 
