@@ -299,6 +299,35 @@ ORDER BY committed_at DESC LIMIT 20;
 
 ---
 
+## 12. Branch-and-tag protection vs. `expire_snapshots` — common myths
+
+Engineers asking concurrent-write questions often surface a parallel question: *"my nightly `expire_snapshots` job runs with `retention_threshold=7d`, but I want to keep a 30-day-old snapshot for audit — can a branch protect it, or will the cleanup delete the data files anyway?"* This is the same factual question that comes up in maintenance context (resource 17). The answer is the same; this section restates it here so the responder finds the right framing whichever doorway the engineer enters from.
+
+> **TRUTH (Iceberg default, verified against [iceberg.apache.org/docs/latest/branching/](https://iceberg.apache.org/docs/latest/branching/), [maintenance/](https://iceberg.apache.org/docs/latest/maintenance/), [spark-procedures/](https://iceberg.apache.org/docs/latest/spark-procedures/)):** while a named ref (branch or tag) points at a snapshot, that snapshot AND its exclusively-owned data files are **protected from `expire_snapshots`**, regardless of age, regardless of `retention_threshold` / `older_than` / `retain_last` arguments. The official wording: *"snapshots that are still referenced by branches or tags won't be removed"* and *"the expire_snapshots procedure will never remove files which are still required by a non-expired snapshot."*
+
+**Myth-buster table (mirrors resource 17's leading callout for findability):**
+
+| MYTH (wrong) | TRUTH (right) |
+|---|---|
+| "`expire_snapshots` can orphan files an active branch points at." | **No, not in normal operation.** While the ref is alive, the snapshot and its exclusively-owned files are protected. The only ways files behind a branch get deleted are: (a) the branch's own snapshot-retention ages snapshots OUT OF the branch's ancestor chain (the tip is always retained); (b) the branch ref itself is dropped (`ALTER TABLE ... DROP BRANCH` or `max-ref-age-ms` fires); (c) the [Iceberg #13568 multi-ref bug](https://github.com/apache/iceberg/issues/13568) — affects **1.6.1+**, NOT this stack on **1.5.2**. |
+| "Branch retention (`max_snapshot_age_in_ms` / `min_snapshots_to_keep`) controls only snapshots inside the branch; it does NOT protect data files of currently-referenced snapshots from being deleted on `main`'s expiry." | **There is no separate `main`-only expiry pass.** `expire_snapshots` looks at ALL live refs across the table — branches, tags, and `main`. While any ref points at a snapshot, that snapshot is protected globally. Branch retention controls which ancestors are dropped from the branch's history; it does NOT cause the tip's data files to be deleted while the ref is alive. |
+| "To keep a snapshot safe for audit, you must create a tag — an active branch alone is not enough." | **A live branch IS the protection.** Both branches and tags are refs in `$refs`; both protect snapshots from `expire_snapshots`. Use **tag** for immutable labels (billing close, compliance cutoff); use **branch** for refs that advance with new commits (WAP staging). Either keeps the snapshot safe. |
+
+**The operational answer to the canonical question:** *"Can a branch protect a 30-day-old snapshot from my nightly `expire_snapshots(retention_threshold => '7d')` job?"* → **YES.** Create the branch (Spark: `ALTER TABLE ... CREATE BRANCH \`audit-2026-05-01\` AS OF VERSION <snapshot_id>`) and run the cleanup unchanged. The branch's existence is the entire mechanism — no need to tighten retention, skip the cleanup, or pass special arguments.
+
+**What can actually delete branch-referenced data (the narrow legitimate exceptions):**
+
+1. **Forgotten refs hold old data indefinitely** — the OPPOSITE problem from the myth. Monitor `$refs` and drop unused refs to reclaim storage.
+2. **Explicit `DROP BRANCH`** — removes the ref intentionally; the snapshot becomes eligible if no other ref still points at it.
+3. **`max-ref-age-ms` firing on the ref** — if you set `RETAIN N DAYS` on the branch/tag, the ref auto-expires after N days, and the snapshot becomes eligible at that point. This is by design (auto-cleanup of forgotten refs); the ref is no longer "active" when this happens.
+4. **Iceberg #13568 bug** — multi-ref edge case affecting Iceberg 1.6.1+. **NOT prod-relevant on 1.5.2.** Flag as a known item for future upgrades only.
+
+**Cross-references:**
+- The leading callout in [`resources/17-iceberg-table-maintenance.md` § 2. `expire_snapshots`](17-iceberg-table-maintenance.md#2-expire_snapshots--run-weekly) — the primary authoritative location with the full property semantics table (`min-snapshots-to-keep`, `max-snapshot-age-ms`, `max-ref-age-ms`, `history.expire.max-snapshot-age-ms` and what each one controls).
+- The WAP / branches section in [`resources/17` § Write-Audit-Publish (WAP) with Iceberg branches](17-iceberg-table-maintenance.md#write-audit-publish-wap-with-iceberg-branches) — the canonical use case for protective branches.
+
+---
+
 ## See also
 
 - **[resource 13](13-postgres-to-iceberg-ingestion.md)** — the ingestion stack uses `overwritePartitions()` (append) and `MERGE INTO` (upsert); see those sections for the write patterns that this resource covers the concurrency semantics for.

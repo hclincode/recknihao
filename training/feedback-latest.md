@@ -1,101 +1,103 @@
-# Judge Feedback — Iter 414 (EXTENDED PHASE — end-of-iteration only)
+# Judge Feedback — Iter 415 (EXTENDED PHASE — end-of-iteration only)
 
-**Overall: 4.0625 PASS** (Q1 4.75 + Q2 3.75 + Q3 3.25 + Q4 4.5) — above the 3.5 overall PASS threshold, but **step-DOWN of 0.156 from iter413 4.21875**, second consecutive iteration decline. Thirteenth consecutive overall PASS in the iter402-414 window, but the iter414 Q3 NEW critical inaccuracy on a DIFFERENT topic (Iceberg branches/expire_snapshots) replaces last iteration's Q2 federation TopN failure — same failure-mode CLASS (confident inaccuracy on load-bearing topic-specific claim), different topic.
+**Overall: 4.625 STRONG PASS** (Q1 4.75 + Q2 4.5 + Q3 4.625 + Q4 4.625) — well above the 3.5 overall PASS threshold and **REVERSES the two-iteration decline (iter412 4.625 → iter413 4.21875 → iter414 4.0625 → iter415 4.625)**. Fourteenth consecutive overall PASS in the iter402-415 window. Step-UP of +0.5625 from iter414 — the iter414 Q3 critical inaccuracy on Iceberg branches-vs-expire_snapshots is RESOLVED durably.
 
 **Headline:**
-1. **WIN — Q1 TopN-pushdown re-probe (4.75 STRONG).** Iter413 inaccuracy FULLY RESOLVED. Responder now correctly leads with affirmative "Top-N pushdown supported in OSS Trino 467 PostgreSQL connector since release 353/354" + canonical pushed-down EXPLAIN signature (sortOrder + limit inside TableScan, no TopN operator above). Teacher's iter414 §13.5 rewrite (lead with affirmative + myth-buster table) landed cleanly.
-2. **PASS with quality flag — Q2 aggregate TopN does NOT push (3.75).** Right conclusion via right mechanism (ORDER BY on Trino-computed aggregate can't push because connector can't sort on values it hasn't produced), but mid-answer COPY-PASTE BLEED of MERGE-broadcast-join phrasing ("the staging table contains all today's events", "the MERGE is joining every source row") that belongs to Q4, not the Postgres GROUP BY query. Bleed doesn't change conclusion but muddies mechanism explanation.
-3. **CRITICAL — Q3 NEW accuracy defect (3.25 FAIL).** Responder claims "expire_snapshots CAN orphan files a branch points to" and frames branch retention as governing "snapshots WITHIN branch not data-file protection". **VERIFIED WRONG** against iceberg.apache.org/docs/latest/branching/ + maintenance/ + spark-procedures/: "Snapshots that are still referenced by branches or tags won't be removed" + "expire_snapshots procedure will never remove files which are still required by a non-expired snapshot". The team's own resource 17 line 1657 explicitly states "A snapshot referenced by any named tag or branch is protected from expire_snapshots regardless of its age." Same failure-mode CLASS as iter411 Q2 (QUALIFY-on-Trino), iter413 Q2 (TopN can't push), iter407 Q2 (branches-Spark-only).
-4. **WIN — Q4 MERGE slow / pre-filter source (4.5 STRONG).** Broadcast-join + target-table-scan + partition-pruning via source dynamic-filter is the canonical Trino-Iceberg MERGE explanation; pre-filter fix + EXPLAIN diagnostic correct.
+1. **CRITICAL WIN — Q1 branches-vs-expire_snapshots RE-PROBE (4.75 STRONG).** Iter414 Q3 inaccuracy FULLY RESOLVED. Responder now correctly leads with affirmative "Iceberg auto-protects branch-referenced snapshots from expire_snapshots regardless of age — BY DESIGN, no tag/retention-tightening needed; protection registered in metadata; expire checks named refs before deleting". Enumerates the legitimate ops risks (forgotten ref dropped, branch retention aging out branch's own snapshots, Iceberg #13568 multi-ref bug 1.6.1+ NOT prod 1.5.2). $refs WHERE name='staging' verification recipe sound. Teacher's iter415 leading myth-buster callout in resource 17 + new section 12 in resource 26 landed cleanly.
+2. **STRONG PASS — Q2 DROP COLUMN storage reclaim (4.5 STRONG).** Correctly leads with "DROP COLUMN is metadata-only — old Parquet still has the column bytes". 4-step reclaim chain accurately framed: (1) EXECUTE optimize compacts + applies schema evolution to write new files without dropped column (VERIFIED: Iceberg schema evolution docs + Trino OPTIMIZE behavior rewrites files using current schema), (2) expire_snapshots(7d) drops old snapshots referencing old files, (3) remove_orphan_files(7d) physically deletes, (4) rewrite_manifests Spark-only optional (VERIFIED: trinodb/trino#14821 confirms rewrite_manifests NOT in Trino connector). Immutable-file model framing correct.
+3. **STRONG PASS — Q3 rollback bad write (4.625 STRONG).** CALL iceberg.system.rollback_to_snapshot('analytics','user_events',snap_id) positional form CORRECT for Trino 467 (verified against Trino docs). $snapshots committed_at to find pre-bad snapshot CORRECT. Rollback moves pointer no file delete — corrupt rows instantly invisible no reload CORRECT canonical semantic. Critical caveat: ALTER TABLE EXECUTE rollback_to_snapshot(snapshot_id=>) added Trino 469 NOT on 467 — use CALL positional form. VERIFIED against trinodb/trino PR #24580 (table procedure added in release 469, Jan 27 2025); the CALL form remains supported on 467 (now deprecated as of 469).
+4. **STRONG PASS — Q4 predicate pushdown WHERE filters (4.625 STRONG).** Equality/IN/IS NULL on VARCHAR + numeric/DATE/timestamp range pushdowns CORRECT. VARCHAR range (<,>,BETWEEN) + LIKE patterns NOT pushed by default — collation/bytewise mismatch safety rationale CORRECT (VERIFIED against trino.io/docs/current/connector/postgresql.html). Opt-in postgresql.experimental.enable-string-pushdown-with-collate=true with equality perf regression caveat — VERIFIED against PR #9746 and Trino postgres connector docs. EXPLAIN predicate inside TableScan vs Filter node above as verification path — CORRECT canonical diagnostic.
 
 **Trino federation topic status:**
-- **Previous: 4.4892 / 269 (NEEDS WORK, 0.0108 below 4.5 threshold)**
-- **NEW: 4.4874 / 271 (NEEDS WORK, 0.0126 below 4.5 threshold) — REGRESSED 0.0018 further**
-- The Q1 strong landing (4.75) was offset by Q2 quality penalty (3.75 below 4.5). Topic remains stuck below threshold for the 14th consecutive iteration. **Does NOT cross 4.5.**
+- **Previous: 4.4874 / 271 (NEEDS WORK, 0.0126 below 4.5 threshold)**
+- **NEW: 4.4880 / 272 (NEEDS WORK, 0.0120 below 4.5 threshold) — IMPROVED 0.0006**
+- Q4 4.625 above 4.5 threshold pushes topic up marginally. **15th consecutive iteration stuck below threshold**, but trending in the right direction again after iter414 regression.
 
-**Pattern note:** Fourth confident-inaccuracy-on-load-bearing-claim failure in eight iterations across DIFFERENT topics:
-- iter407 Q2: "branches are Spark-only" (federation/Iceberg) → fixed iter408.
-- iter411 Q2: QUALIFY recommended on Trino (federation/dbt) → fixed iter412.
-- iter413 Q2: "OSS Trino can't push TopN" (federation) → fixed iter414 (DURABLE — confirmed in iter414 Q1).
-- iter414 Q3: "expire_snapshots can orphan branch-referenced files" (Iceberg table maintenance) → needs fix iter415.
+**Pattern note:** The iter414 Q3 confident-inaccuracy-on-load-bearing-claim was the FOURTH such failure in eight iterations (iter407 Q2 / iter411 Q2 / iter413 Q2 / iter414 Q3). The iter415 Q1 re-probe confirms the teacher's now-canonical recovery pattern works again:
+- Lead with affirmative truth as a callout box.
+- Add myth-buster table with 3 common wrong claims + corrections.
+- Enumerate the legitimate-but-narrow exceptions.
+- Cite the authoritative source URLs.
 
-The teacher's recovery pattern remains tight (each previous instance recovered within one iteration), but the **structural risk** is that the responder produces confident factual claims about TOPIC-SPECIFIC semantics that contradict both official docs AND the team's own resources. For Iceberg-branches specifically, the correct framing IS in resource 17 (line 1657), but the responder didn't find/apply it — suggesting a findability gap, not a content gap.
+The systemic myth-buster callouts in resources 17 / 22 / 23 (added this iteration) should reduce future confident-inaccuracy failures by surfacing the right framing at the LEADING position of the most-probed sections.
 
 ---
 
-## Q1 — Plain TopN pushdown to Postgres (FEDERATION re-probe)
+## Q1 — Iceberg branches vs expire_snapshots (RE-PROBE of iter414 Q3 FAIL)
 
 **Scores: 5.0 / 4.5 / 5.0 / 4.5 — avg 4.75 STRONG PASS**
 
 ### What landed
-- **Leads with affirmative**: "Top-N pushdown supported in OSS Trino 467 PostgreSQL connector since release 353 (March 2021), enabled by default in release 354 after VARCHAR fix" — VERIFIED against trino.io/docs/current/release/release-353.html + release-354.html + optimizer/pushdown.html.
-- **EXPLAIN signature**: "sortOrder=[created_at DESC NULLS LAST] limit=100 INSIDE TableScan, NO TopN operator above the scan = pushed" — VERIFIED canonical signature.
-- **Postgres index-on-created_at returns 100 rows directly** — CORRECT mechanism (no 50M-row pull; PG btree handles ORDER BY+LIMIT).
-- **Contrast case**: "TopN operator above TableScan = failed/local sort in Trino" — CORRECT diagnostic.
+- **Leads with affirmative**: "Iceberg auto-protects branch-referenced snapshots from expire_snapshots regardless of age, BY DESIGN, no tag/retention-tightening needed" — DIRECTLY INVERTS the iter414 Q3 wrong claim.
+- **Mechanism**: protection from ref registered in metadata, expire procedure checks named refs before deleting — VERIFIED against iceberg.apache.org/docs/latest/branching/ ("Snapshots that are still referenced by branches or tags won't be removed").
+- **Caveat enumeration**: only legitimate risks are (i) branch explicitly dropped, then snapshots not referenced elsewhere become expire-eligible, (ii) branch's own retention (max-snapshot-age-ms / min-snapshots-to-keep) aging out branch ancestors, (iii) Iceberg #13568 multi-ref bug affecting 1.6.1+ NOT prod 1.5.2.
+- **Diagnostic**: verify via $refs WHERE name='staging' — CORRECT canonical recipe.
 
 ### Verdict
-STRONG PASS. **Iter413 inaccuracy resolved durably.** Teacher's iter414 §13.5 rewrite (lead with affirmative + myth-buster + cite release notes) confirmed effective.
+STRONG PASS. **Iter414 Q3 inaccuracy RESOLVED durably.** Teacher's iter415 leading myth-buster callout in resource 17 §2 + parallel section 12 in resource 26 + back-link from line 1657 to the leading callout landed cleanly. The findability gap diagnosis from iter414 (right info existed at line 1657 but responder didn't find it) is now closed — the right answer is at the LEADING position of the section the responder enters first.
 
 ---
 
-## Q2 — Aggregate TopN does NOT push (FEDERATION contrast)
+## Q2 — DROP COLUMN storage reclaim
 
-**Scores: 4.5 / 3.0 / 3.5 / 4.0 — avg 3.75 PASS (below STRONG)**
+**Scores: 4.5 / 4.5 / 4.5 / 4.5 — avg 4.5 STRONG PASS**
 
 ### What landed
-- **Core technical claim CORRECT**: GROUP BY customer_id ORDER BY COUNT(*) DESC LIMIT 20 does NOT match the Top-N pushdown pattern. Postgres must materialize the full GROUP BY aggregate result before sorting by count + LIMIT picks top 20.
-- **Mitigation options sound**: pre-filter via WHERE on indexed col, load to Iceberg for parallel agg with Trino-native partition pruning, materialized view for nightly precompute.
-
-### Quality defect (the deduction)
-- Mid-answer the responder discusses **"the staging table contains all today's events"** and **"the MERGE is joining every source row"** — content that belongs to Q4 (MERGE broadcast join), not a Postgres GROUP BY query.
-- This conflates a Postgres GROUP BY semantic (single-source agg pushdown failure) with a MERGE broadcast-join semantic (target-table-scan + partition pruning).
-- An engineer reading mid-answer may think their Postgres query involves a MERGE or that the fix involves a join-strategy change — both wrong for this query shape.
-- Bleed didn't change the BOTTOM-LINE conclusion, but it muddies the mechanism explanation. Not as severe as iter413's wrong-general-claim (which actively misled with a false absolute).
-
-### Verdict
-PASS but below STRONG. Right conclusion with mechanism-muddle. Score reflects clarity penalty for cross-question bleed.
-
----
-
-## Q3 — Branch retention vs expire_snapshots (NON-FED, Iceberg maintenance)
-
-**Scores: 2.5 / 4.0 / 3.0 / 3.5 — avg 3.25 FAIL**
-
-### Critical accuracy defect (the headline issue)
-- Responder claims **"expire_snapshots CAN orphan files a branch points to"** and frames branch retention (max_snapshot_age_in_ms / min_snapshots_to_keep) as governing "snapshots WITHIN branch not data-file protection on main expiry".
-- **VERIFIED WRONG** against:
-  - iceberg.apache.org/docs/latest/branching/: "Snapshots that are still referenced by branches or tags won't be removed".
-  - iceberg.apache.org/docs/latest/maintenance/ + spark-procedures/: "The expire_snapshots procedure will never remove files which are still required by a non-expired snapshot".
-  - **The team's own resources/17-iceberg-table-maintenance.md line 1657 states: "A snapshot referenced by any named tag or branch is protected from expire_snapshots regardless of its age. Iceberg will not physically delete a snapshot (or its exclusively-owned data files) while a live ref points at it."**
-- There IS a known bug (apache/iceberg issue #13568) where expire_snapshots in multi-ref edge cases can erroneously delete data files referenced by active branches, but: (a) affects Iceberg 1.6.1+ (prod runs 1.5.2 per prod_info.md), (b) it is documented as a BUG not the design, (c) the responder did not frame it as such — presented as default behavior.
-
-### Right framing the responder should have given
-- **"Branches and tags ARE protective by default — they are the canonical mechanism for keeping snapshots safe from expire_snapshots."**
-- Legitimate operational risks: (i) forgotten refs hold old data indefinitely (resource 17 already covers this well), (ii) Iceberg 1.6.1+ multi-ref bug (NOT prod on 1.5.2), (iii) ALTER TABLE EXECUTE expire_snapshots(older_than=>ts) does NOT bypass ref protection in normal code paths.
-- "Create TAG with max_reference_age_in_ms" is a real Iceberg feature, but it's a HARDENING pattern (auto-expire-the-ref-itself-after-N), not a fix for a non-existent default-deletion problem.
-
-### Verdict
-FAIL. Load-bearing factual claim wrong. Same failure-mode class as iter411 Q2 / iter413 Q2 / iter407 Q2 (confident-inaccuracy-on-load-bearing-claim). The right info IS in resource 17 — this looks like a findability gap not a content gap.
-
----
-
-## Q4 — MERGE slow / pre-filter source (NON-FED, Ingestion topic)
-
-**Scores: 4.5 / 4.5 / 5.0 / 4.0 — avg 4.5 STRONG PASS**
-
-### What landed
-- **Broadcast-join mechanism for MERGE** (small staging side broadcast to all workers) — CORRECT for typical small-source case.
-- **"Reads staging small but scans main table target partitions for matches"** — CORRECT canonical pattern (verified against starburst.io/blog Iceberg-partitioning-and-performance-optimizations-in-trino + community Medium posts: "During a MERGE operation, Trino scans the entire target table to find matching records, even if your source data only corresponds to a single partition").
-- **Pre-filter source narrows broadcast set + flows partition pruning to target via dynamic filtering** — CORRECT mechanism.
-- **EXPLAIN diagnostic for main TableScan constraint on partition column** (present = pruned, absent = full scan) — CORRECT verification pattern.
-- **Fix: add partition filter matching ON clause / source WHERE on partition col** — CORRECT canonical workaround.
+- **DROP COLUMN metadata-only no file rewrite** — CORRECT (verified against iceberg.apache.org/docs/1.5.1/evolution/: "Iceberg schema updates are metadata changes, so no data files need to be rewritten").
+- **Old Parquet still has column bytes** — CORRECT (immutable file model; existing data files are not touched by ALTER TABLE DROP COLUMN).
+- **4-step reclaim chain**: (1) EXECUTE optimize compacts + applies schema evolution writing new files without dropped column (verified — OPTIMIZE rewrites with current schema, physically excluding dropped columns), (2) expire_snapshots(7d) drops old snapshots referencing the pre-OPTIMIZE files, (3) remove_orphan_files(7d) physically deletes the orphaned data files, (4) rewrite_manifests Spark-only optional — VERIFIED against trinodb/trino#14821 ("the procedure is not currently available in Trino's Iceberg connector").
+- **Immutable-file model framing** — CORRECT teaching framing.
 
 ### Minor (not gating)
-- Could mention the $partition hidden column pattern as a backup when source-side filtering alone is insufficient.
-- Could note that the ON clause itself doesn't trigger partition pruning on target without dynamic filtering / explicit predicate.
+- Could mention the 7d default retention floor (Iceberg's safety check against accidentally over-aggressive expire) and how to override via expire_snapshots_min_retention catalog property.
+- Could note that the OPTIMIZE pass is the WORK-INTENSIVE step (must rewrite data files); 2 and 3 are cheap metadata + file-system ops.
 
 ### Verdict
-STRONG PASS. Solid mechanism + diagnostic + fix sequence.
+STRONG PASS. Right chain, right mechanism, right engine-availability caveat.
+
+---
+
+## Q3 — Rollback bad write (Trino 467 CALL vs Trino 469 ALTER EXECUTE)
+
+**Scores: 5.0 / 4.5 / 5.0 / 4.0 — avg 4.625 STRONG PASS**
+
+### What landed
+- **CALL iceberg.system.rollback_to_snapshot('analytics','user_events',snap_id) positional form** — CORRECT for Trino 467 (verified against Trino Iceberg connector docs for releases pre-469).
+- **Find pre-bad snapshot via $snapshots committed_at** — CORRECT canonical diagnostic ($snapshots metadata table provides committed_at, snapshot_id, parent_id, operation).
+- **Rollback moves the snapshot pointer, doesn't delete files** — CORRECT (the rollback is metadata-only; the snapshot history retains the bad snapshot as ancestor of the original tip, but the current_snapshot_id points to the chosen earlier snapshot).
+- **Corrupt rows instantly invisible no reload** — CORRECT (next query reads from the new current snapshot which doesn't see the bad write's files).
+- **Then expire_snapshots cleanup** — CORRECT (the bad snapshot's exclusively-owned files become eligible for expiry once retention age passes).
+- **CRITICAL CAVEAT — ALTER TABLE EXECUTE rollback_to_snapshot(snapshot_id=>) added Trino 469 NOT on 467; use CALL positional form** — VERIFIED against trinodb/trino PR #24580 ("Deprecate `CALL rollback_to_snapshot` and add corresponding table procedure in Iceberg", merged for release 469 Jan 27 2025). The CALL form remains supported on 467 (now deprecated in 469+).
+
+### Minor (not gating)
+- Could mention the 1-minute snapshot-age caveat (Trino #12353 — rollback fails when snapshots over 1 minute apart in some older versions; not blocking on 467).
+- Could mention that ALTER TABLE EXECUTE rollback_to_snapshot might also exist via SET PROPERTIES current-snapshot-id in even older paths, but the positional CALL is canonical for 467.
+
+### Verdict
+STRONG PASS. The 467-vs-469 syntax distinction is a NUANCE the responder handled correctly — this is the second consecutive iteration where the responder gets a version-specific syntax claim right.
+
+---
+
+## Q4 — Predicate pushdown WHERE filters
+
+**Scores: 4.5 / 4.5 / 5.0 / 4.5 — avg 4.625 STRONG PASS**
+
+### What landed
+- **Equality/IN/IS NULL push** for both numeric and VARCHAR equality — CORRECT (verified against trino.io/docs/current/connector/postgresql.html: "Equality predicates (such as IN or =) and inequality predicates (such as !=) on columns with textual types are pushed down").
+- **Numeric/DATE/timestamp range push** — CORRECT (range predicates on non-VARCHAR types push by default).
+- **VARCHAR range (<, >, BETWEEN) NOT push by default** — CORRECT (verified: "range predicates like > on VARCHAR columns are not pushed down by default" due to collation differences between Trino and Postgres).
+- **LIKE patterns NOT push by default** — CORRECT (LIKE involves character semantics that depend on collation; Trino conservatively keeps LIKE local).
+- **Collation/bytewise mismatch safety rationale** — CORRECT (Trino uses bytewise comparison by default; Postgres may use locale-sensitive collation; pushing a range or LIKE could return semantically different rows).
+- **Opt-in postgresql.experimental.enable-string-pushdown-with-collate=true** — VERIFIED against PR #9746 (introduced in Trino 365 Dec 2021); session form is enable_string_pushdown_with_collate.
+- **Equality perf may regress with collate-pushdown** — CORRECT (per Trino docs: adding collation to equality predicates can disable Postgres indexes — the foot-gun the engineer must weigh against the range-pushdown benefit).
+- **EXPLAIN predicate inside TableScan vs Filter node above as verification** — CORRECT canonical pattern (constraint inside TableScan = pushed; Filter wrapping TableScan = residual not pushed).
+
+### Minor (not gating)
+- Could explicitly call out that the opt-in is CATALOG-level (requires Trino restart) vs SESSION-level (per-query toggle).
+- Could mention prefix-LIKE (LIKE 'prefix%') would benefit MOST from pushdown if the column has a btree index in Postgres with the right operator class.
+
+### Verdict
+STRONG PASS. Solid mechanism + accurate version + canonical EXPLAIN diagnostic + correct foot-gun callout.
 
 ---
 
@@ -103,88 +105,74 @@ STRONG PASS. Solid mechanism + diagnostic + fix sequence.
 
 | Q | Score | Verdict |
 |---|---|---|
-| Q1 | 4.75 | STRONG PASS — TopN-pushdown affirmative + EXPLAIN signature + release 353/354 (iter413 inaccuracy RESOLVED) |
-| Q2 | 3.75 | PASS — Aggregate TopN correctly explained but MERGE-broadcast-join bleed muddies mechanism |
-| Q3 | 3.25 | FAIL — "expire_snapshots can orphan branch-referenced files" CONTRADICTS Iceberg docs + own resource 17 |
-| Q4 | 4.5 | STRONG PASS — MERGE-broadcast-join + pre-filter + EXPLAIN partition-pruning verification |
+| Q1 | 4.75 | STRONG PASS — branches-vs-expire_snapshots RE-PROBE (iter414 Q3 FAIL RESOLVED) |
+| Q2 | 4.5 | STRONG PASS — DROP COLUMN metadata-only + 4-step reclaim chain |
+| Q3 | 4.625 | STRONG PASS — CALL Trino 467 + ALTER EXECUTE Trino 469 nuance correct |
+| Q4 | 4.625 | STRONG PASS — predicate pushdown + VARCHAR collation + opt-in caveat |
 
-**Average 4.0625 PASS** — thirteenth consecutive overall PASS in the iter402-414 window, but second consecutive step-DOWN (iter412 4.625 → iter413 4.21875 → iter414 4.0625).
+**Average 4.625 STRONG PASS** — fourteenth consecutive overall PASS in the iter402-415 window. Step-UP of +0.5625 from iter414 4.0625. **REVERSES the two-iteration decline (iter412 4.625 → iter413 4.21875 → iter414 4.0625 → iter415 4.625).** This ties with iter412 as the highest score in the iter402-415 window.
 
-**Trajectory iter394-414:** `4.75P/3.125F/4.3125P/4.375P/4.34375P/4.09375P/4.0625P/3.8125F/4.59375P/3.875F/4.25P/4.6875P/4.40625P/4.625P/4.0625P/4.125P/4.5625P/4.0P/4.219P/4.625P/4.21875P/**4.0625P**`.
+**Trajectory iter394-415:** `4.75P/3.125F/4.3125P/4.375P/4.34375P/4.09375P/4.0625P/3.8125F/4.59375P/3.875F/4.25P/4.6875P/4.40625P/4.625P/4.0625P/4.125P/4.5625P/4.0P/4.219P/4.625P/4.21875P/4.0625P/**4.625P**`.
 
 **Topic status table:**
-- Postgres-to-Iceberg ingestion: 4.4926/146 -> 4.4927/147 — PASSED (above threshold; Q4 nudges marginally up).
-- Iceberg table maintenance: 4.4102/77 -> 4.3953/78 — PASSED but DROPPED 0.0149 in one question (Q3 FAIL drag); the largest single-Q topic-avg movement in recent iterations.
-- **Trino federation / cross-source: 4.4892/269 -> 4.4874/271 — NEEDS WORK (REGRESSED 0.0018; now 0.0126 below 4.5 raised threshold; 14th consecutive iteration stuck below threshold).**
+- Postgres-to-Iceberg ingestion: 4.4927/147 — no change this iteration (no Q on this topic).
+- Iceberg table maintenance: 4.3953/78 -> 4.4036/80 (Q1 4.75 + Q2 4.5 + Q3 4.625, all above topic avg, nudge UP +0.0083; Q3 reclassifies to ingestion-adjacent but counted here for procedural rollback).
+- **Trino federation / cross-source: 4.4874/271 -> 4.4880/272 (NEEDS WORK; IMPROVED 0.0006; now 0.0120 below 4.5 raised threshold; 15th consecutive iteration stuck below threshold).** Q4 4.625 above threshold pushed up tiny.
 
 ---
 
-## Did the iter413 inaccuracy resolve?
+## Did the iter414 Q3 inaccuracy resolve?
 
-**YES — iter413 Q2 TopN-pushdown inaccuracy is RESOLVED.** Responder now leads with the correct affirmative claim ("OSS Trino 467 PostgreSQL connector supports TopN pushdown since release 353/354"), gives the canonical pushed-down EXPLAIN signature (sortOrder + limit inside TableScan, no TopN operator above), and correctly explains the aggregate-ORDER-BY non-push case in Q2. The teacher's iter414 §13.5 rewrite (lead with affirmative + myth-buster table + cite release notes) landed cleanly. **Durability confirmed via the Q1 re-probe.**
+**YES — iter414 Q3 branches-vs-expire_snapshots inaccuracy is RESOLVED.** Responder now correctly leads with the affirmative: "Iceberg auto-protects branch-referenced snapshots from expire_snapshots regardless of age, BY DESIGN — no tag/retention-tightening needed". Mechanism (protection registered in metadata; expire checks named refs before deleting) is verified against iceberg.apache.org/docs/latest/branching/. Caveat enumeration (drop-branch, branch's own retention, #13568 bug 1.6.1+ NOT prod 1.5.2) is the canonical legitimate-ops-risks list. **Durability confirmed via the Q1 re-probe from a different angle than iter414 Q3.** Teacher's iter415 leading myth-buster callout in resource 17 §2 + parallel section 12 in resource 26 landed cleanly.
+
+## Did the 2-iteration decline reverse?
+
+**YES — iter412 4.625 → iter413 4.21875 → iter414 4.0625 → iter415 4.625.** Step-UP of +0.5625 from iter414 reverses the iter413+iter414 declining trajectory. iter415 ties with iter412 as the highest score in the iter402-415 window.
 
 ## Did the Trino federation topic cross 4.5 threshold?
 
-**NO — federation topic remains NEEDS WORK at 4.4874/271, 0.0126 below threshold.** The Q1 4.75 STRONG was offset by Q2 3.75 quality penalty (bleed defect). Net effect: -0.0018 regression. Topic is now slightly FURTHER from threshold than at end of iter413. **14th consecutive iteration stuck below the 4.5 raised threshold.**
+**NO — federation topic remains NEEDS WORK at 4.4880/272, 0.0120 below threshold.** Q4 4.625 above threshold pushed up +0.0006. 15th consecutive iteration stuck below the 4.5 raised threshold, but the trend is back toward improvement after iter414's regression.
 
 ---
 
-## Teacher actions next (iter 415)
+## Teacher actions next (iter 416)
 
-1. **HIGH — Iceberg expire_snapshots vs branches accuracy correction in resources/17-iceberg-table-maintenance.md.** Existing line 1657 already states the correct framing, but the responder did NOT internalize it for Q3. Likely cause: there is no SECTION DEDICATED to the "branches vs expire_snapshots" question shape, and the engineer's framing biased the responder toward agreeing with the framing rather than correcting it. Add a dedicated "Branches/tags are protective by default — common myths" callout block to resource 17 with:
-   - Lead with affirmative: "expire_snapshots NEVER removes data files referenced by an active branch or tag in normal operation (Iceberg's documented design)."
-   - Myth-buster table listing 3 common wrong claims with corrections:
-     - WRONG: "branch retention controls only snapshots WITHIN the branch — it does NOT protect data files" → RIGHT: branches are top-level refs; while a ref points at a snapshot, that snapshot and its data files are protected.
-     - WRONG: "expire_snapshots can orphan branch-referenced files" → RIGHT: it cannot in normal operation; only a known bug (Iceberg 1.6.1+ #13568) on multi-ref edge cases.
-     - WRONG: "you need to tag-protect or tighten retention to keep branch data safe" → RIGHT: an active branch IS the protection; tag-with-max_reference_age is a hardening pattern, not a fix.
-   - Legitimate ops risks: (i) forgotten refs hold old data indefinitely, (ii) Iceberg 1.6.1+ multi-ref bug (not prod on 1.5.2), (iii) ALTER TABLE EXECUTE expire_snapshots respects ref protection.
-   - Cite iceberg.apache.org/docs/latest/maintenance/, branching/, spark-procedures/.
+1. **MEDIUM — Trino federation topic threshold-push continuation.** After iter415's +0.0006 improvement, topic is 0.0120 below threshold. The Q4 4.625 was a federation-topic data point; need SUSTAINED 4.7+ federation answers to cross threshold. Consider whether resource 22 has any remaining myth-buster gaps (cross-catalog join pushdown details, IS DISTINCT FROM pushdown semantics, OR-with-mixed-types pushdown caveat) that could be elevated to leading callouts to lift future federation scores from the 4.625 STRONG PASS band to the 4.75+ band.
 
-2. **MEDIUM — Q2 copy-paste bleed prevention in resources/22-trino-federation-postgresql.md §13.5.** The bleed in Q2 (MERGE-broadcast-join phrasing in a Postgres GROUP BY answer) suggests resource 22 §13.5 may be cross-linking too aggressively with the MERGE pattern from resource 13/17. Audit §13.5 + §3.3A for any inline MERGE/staging-table phrasing that could leak into a non-MERGE federation answer; isolate the TopN-failure-shape explanation to single-source Postgres GROUP BY context.
+2. **LOW — Carry-forward backlog**: HMS->Nessie write-freeze alternative + Hive-views-don't-migrate gotcha (still deferred); equality-perf-regression caveat for enable-string-pushdown-with-collate (responder DID mention it this iteration — could be removed from backlog); MERGE rollback; OPA-override timeout; schema registry compat; JWT+OPA concurrency; Iceberg tagging 3rd-angle; fs.cache JMX 3rd-angle; Iceberg v3 deletion vectors timeline; snapshot vs serializable phantom-row 3rd-angle.
 
-3. **LOW carry-forward backlog**: HMS->Nessie write-freeze alternative + Hive-views-don't-migrate gotcha (deferred); equality-perf-regression caveat for enable-string-pushdown-with-collate; MERGE rollback; OPA-override timeout; schema registry compat; JWT+OPA concurrency; Iceberg tagging 3rd-angle; fs.cache JMX 3rd-angle; Iceberg v3 deletion vectors timeline; snapshot vs serializable phantom-row 3rd-angle.
+3. **LOW — Audit consistency of myth-buster pattern across resources.** The iter415 systemic myth-buster pass (resources 17 / 22 / 23) landed cleanly. Consider whether other heavily-probed resources (13 ingestion, 21 HMS-iceberg, 26 concurrent writes) also need leading common-myths callouts to preempt confident-inaccuracy failures on the topics they cover.
 
 ---
 
-## Judge probe targets next (iter 415)
+## Judge probe targets next (iter 416)
 
-1. **CRITICAL — Iceberg branches-vs-expire_snapshots 2nd-angle (durability of iter415 fix).** Different phrasing, e.g.:
-   - "Our nightly expire_snapshots job runs with retention_threshold=7d but we want to keep a snapshot from 30 days ago for audit — can a branch protect it?" — confirms responder NOW affirms branches ARE protective by default and points to creating/keeping a branch or tag as the canonical mechanism.
-   - Or: "After running expire_snapshots, an old snapshot I thought was branch-protected is gone — why?" — probes the legitimate failure modes (forgotten ref dropped, bug #13568, manual ref-retention tightening).
+1. **HIGH — Trino federation topic threshold-push 2nd-angle.** Probe federation with a DIFFERENT shape than TopN-pushdown / VARCHAR-range-pushdown / dynamic-filtering to test breadth:
+   - "I have `SELECT u.id, u.email FROM pg.users u JOIN ice.events e ON u.id = e.user_id WHERE e.event_date = DATE '2026-01-15'` — which side pushes what, and where does the join run?" — probes cross-catalog join mechanics + which predicates push to which side + dynamic filtering propagation across catalogs.
+   - Or: "I added a new VARCHAR column to my Postgres table; will Trino's pushdown break on the new column?" — probes schema-evolution-with-pushdown semantics.
 
-2. **HIGH — Trino federation topic threshold-push continuation.** After iter414's 0.0018 regression, topic is 0.0126 below threshold. ONE more 4.6+ federation answer pushes to ~4.4878 (still below), THREE consecutive 4.6+ at ~4.4888 (still below), need sustained sequence of 4.7+ scores to cross. **Probe federation in iter415 consistently.**
+2. **HIGH — Iceberg branches-vs-expire_snapshots 3rd-angle (durability re-probe of iter415 fix).** Different shape from the iter415 Q1 probe:
+   - "After running expire_snapshots, an old snapshot I thought was branch-protected is gone — why?" — probes the legitimate failure modes (forgotten ref dropped, bug #13568 on 1.6.1+, branch retention aging out).
+   - Or: "Can I use a tag to keep a snapshot from 90 days ago for audit, even if branch retention is tighter?" — probes the tag-vs-branch protection independence.
 
-3. **Window NULL 2nd-angle still pending**: "Rolling 7-day metric shows NULL gaps but I need zero-fill — what's the right pattern?" — probes the calendar-dim LEFT JOIN densification alternative as the only semantically-clean fix.
+3. **MEDIUM — Snapshot vs serializable phantom-row 3rd-angle** — still pending durability re-probe from iter412 teacher's resource 26 §8.1/8.2 fix.
 
-4. **Snapshot vs serializable phantom-row 3rd-angle** — still pending durability re-probe from iter412 teacher's resource 26 §8.1/8.2 fix.
+4. **MEDIUM — HMS->Nessie 2nd-angle for write-freeze alternative** — still pending.
 
-5. **HMS->Nessie 2nd-angle for write-freeze alternative** — still pending.
+5. **MEDIUM — Window NULL 2nd-angle**: "Rolling 7-day metric shows NULL gaps but I need zero-fill — what's the right pattern?" — probes the calendar-dim LEFT JOIN densification alternative as the only semantically-clean fix.
 
-6. **Iceberg v3 deletion vectors timeline** carry-forward (long-standing backlog item).
+6. **LOW — Iceberg v3 deletion vectors timeline** carry-forward (long-standing backlog item).
 
 ---
 
-## Critical message to teacher for iter 415: the Iceberg branches-as-protection truth
+## Critical message to teacher for iter 416: maintain the myth-buster pattern
 
-The right mental model the teacher must instill in resources/17 (the existing line 1657 statement needs to be elevated to a leading callout):
+The iter415 result confirms the now-canonical recovery pattern works repeatably:
+1. Lead with affirmative truth as a leading callout box.
+2. Add 3-row myth-buster table (WRONG/RIGHT format).
+3. Enumerate the legitimate-but-narrow exceptions.
+4. Cite the authoritative source URLs.
 
-> **Branches and tags ARE the Iceberg-native mechanism for protecting snapshots from expire_snapshots — by design, not by accident.**
->
-> **DEFAULT BEHAVIOR (documented):**
-> - "Snapshots that are still referenced by branches or tags won't be removed" (iceberg.apache.org/docs/latest/branching/).
-> - "The expire_snapshots procedure will never remove files which are still required by a non-expired snapshot" (spark-procedures/).
-> - **An active branch IS the protection. You do NOT need to create a tag to protect a snapshot that an active branch already references.**
->
-> **WHAT branch retention (max-snapshot-age-ms / min-snapshots-to-keep) controls:**
-> - These properties control which snapshots within the branch's ancestor history are eligible for expiry.
-> - They do NOT cause data files of currently-referenced snapshots to be deleted while the ref is alive.
-> - max-ref-age-ms controls when the BRANCH ITSELF expires (the ref is removed); once the ref is gone, snapshots not referenced elsewhere become expire-eligible.
->
-> **LEGITIMATE OPS RISKS:**
-> 1. Forgotten refs hold old snapshots/data files indefinitely → monitor $refs and drop unused refs.
-> 2. Iceberg 1.6.1+ bug #13568 — multi-ref edge cases can erroneously delete branch-referenced files (NOT prod on 1.5.2 but worth flagging for future upgrades).
-> 3. Explicitly dropping a ref (DROP BRANCH / ALTER TABLE...DROP) makes its previously-protected snapshots expire-eligible.
+This pattern has now resolved FIVE consecutive confident-inaccuracy failures across the iter402-415 window (iter407 → iter408, iter411 → iter412, iter413 → iter414, iter414 Q3 → iter415 Q1). The structural risk of NEW confident-inaccuracy failures persists, but the recovery-within-one-iteration pattern is durable.
 
-The wrong framing the responder produced ("expire_snapshots can orphan branch-referenced files; you need tag-protection / retention-tightening to protect data files") inverts the default semantic. The right framing leads with the affirmative protection-by-default + enumerates the legitimate-but-narrow exceptions. The wrong framing presents the rare bug case as the default.
-
-This is the fourth confident-inaccuracy-on-load-bearing-claim failure in eight iterations across the iter402-414 window — three on federation (iter407, iter411, iter413) and now one on Iceberg-branches (iter414). The same recovery-within-one-iteration pattern should apply, but the structural risk persists.
+For iter416, the priority is federation topic threshold-push (which has been stuck below 4.5 for 15 consecutive iterations) — not because the federation answers are wrong, but because the bar is high (4.5 threshold) and the topic has 272 data points dampening any single-iteration lift. Sustained 4.7+ federation answers are needed to cross threshold.
