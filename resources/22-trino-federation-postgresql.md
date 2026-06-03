@@ -10,7 +10,7 @@ A practical guide for SaaS engineers who want to **join their live OLTP Postgres
 
 Search this document by keyword. Major topics and where they live:
 
-- **THE THRESHOLD-PUSH REFERENCE CARD — Section 13.** Six-question paste-ready answer template covering: (13.1) connector pushdown LIMITATION MATRIX — predicate / projection / aggregate / join / limit / topN / cross-join supported-vs-not per JDBC connector; (13.2) **PUSHDOWN ORDERING DEPENDENCY** — predicate must push FIRST for aggregate to push (the "all WHERE predicates must push for aggregate to push" rule) + literal EXPLAIN ANALYZE 50M-row smoking-gun snippet + `aggregation_pushdown_enabled` session-property worked example + `jdbc-types-mapped-to-varchar` foot-gun callout + collation equality-perf-regression caveat; (13.3) **dynamic filtering for federated joins** — build-side-to-probe-side direction + `join_distribution_type='BROADCAST'` + `enable-dynamic-filtering` + EXPLAIN ANALYZE `dynamicFilterSplitsProcessed` verification + INNER/RIGHT vs LEFT/FULL OUTER join-type support; (13.4) **federated-join cost & data-movement mental model** — why a 50M-row table without pushdown is a full network transfer + remediation tree; (13.5) **TopN / LIMIT pushdown — RECONCILED single source of truth** (TopN IS supported in OSS Trino 467 since release 353/354 in 2021; canonical pushed case + EXPLAIN-signature absence-of-TopN-operator + failure-shape catalog with the GROUP-BY-aggregate / multi-source-federated-join / non-default-collation / issue-#25138 shapes called out; myth-buster table making explicit that "OSS Trino can't push TopN" is wrong); (13.6) **WHEN TO MATERIALIZE a federated lookup locally** — Iceberg CTAS / refreshed snapshot instead of live federation + the 6-signal decision table; (13.7) the six-question answer template; (13.8) verifiable trino.io URLs.
+- **THE THRESHOLD-PUSH REFERENCE CARD — Section 13.** Nine-question paste-ready answer template covering: (13.1) connector pushdown LIMITATION MATRIX — predicate / projection / aggregate / join / limit / topN / cross-join supported-vs-not per JDBC connector; (13.2) **PUSHDOWN ORDERING DEPENDENCY** — predicate must push FIRST for aggregate to push (the "all WHERE predicates must push for aggregate to push" rule) + literal EXPLAIN ANALYZE 50M-row smoking-gun snippet + `aggregation_pushdown_enabled` session-property worked example + `jdbc-types-mapped-to-varchar` foot-gun callout + collation equality-perf-regression caveat; (13.3) **dynamic filtering for federated joins** — build-side-to-probe-side direction + `join_distribution_type='BROADCAST'` + `enable-dynamic-filtering` + EXPLAIN ANALYZE `dynamicFilterSplitsProcessed` verification + INNER/RIGHT vs LEFT/FULL OUTER join-type support; (13.4) **federated-join cost & data-movement mental model** — why a 50M-row table without pushdown is a full network transfer + remediation tree; (13.5) **TopN / LIMIT pushdown — RECONCILED single source of truth** (TopN IS supported in OSS Trino 467 since release 353/354 in 2021; canonical pushed case + EXPLAIN-signature absence-of-TopN-operator + failure-shape catalog with the GROUP-BY-aggregate / multi-source-federated-join / non-default-collation / issue-#25138 shapes called out; myth-buster table making explicit that "OSS Trino can't push TopN" is wrong); **(13.5A) THE LEAST-EXPLORED FEDERATION ANGLES — bulletproof EXPLAIN signatures + verbatim doc citations**: (13.5A.1) **aggregation pushdown** — verbatim trino.io rule *"the explain plan does not show that Aggregate operator"* + supported function list (16 functions) + `aggregation_pushdown_enabled` worked example + `count(1)` vs `count(*)` PR #6667/issue #7251 caveat; (13.5A.2) **HAVING-clause pushdown** — when HAVING pushes (only when the aggregate also pushes), EXPLAIN signature (HAVING embedded inside the TableScan synthetic query), what blocks HAVING pushdown (unsupported aggregate, ROLLUP/CUBE, collation issues), PR #6667 sourcing note; (13.5A.3) **3-way cross-catalog JOIN execution location** — all joins execute on Trino workers (cross-catalog joins NEVER push), how to read `RemoteExchange[REPLICATE]` vs `RemoteExchange[REPARTITION]` in EXPLAIN, the BROADCAST/PARTITIONED-per-pairwise-join mental model, the "which side dominates wall-clock" operational rule; (13.5A.4) **OR-with-mixed-types pushdown** — when the OR pushes (every disjunct individually pushable, e.g., numeric `=` OR VARCHAR `=` default collation) vs when it doesn't (leading-wildcard LIKE / VARCHAR range / function-wrapped column as any disjunct = entire OR stays on Trino, full table over JDBC), 4-shape table + EXPLAIN signature + `UNION ALL + DISTINCT` workaround with `system.query()` passthrough; the AND-vs-OR pushability-composition asymmetry rule; (13.6) **WHEN TO MATERIALIZE a federated lookup locally** — Iceberg CTAS / refreshed snapshot instead of live federation + the 6-signal decision table; (13.7) the nine-question answer template; (13.8) verifiable trino.io URLs.
 - **Predicate pushdown**: Section 2A.2 (MySQL/PostgreSQL — what pushes, what doesn't, VARCHAR no-pushdown)
 - **PostgreSQL VARCHAR pushdown — equality vs range** (the most-confused fact): Section 3.2 canonical callout — equality/IN/IS NULL/dynamic-filter IN-lists ALL push; only RANGE (`<`,`>`,`BETWEEN`) does not push by default
 - **Top-N pushdown (`ORDER BY <col> LIMIT N`) on PostgreSQL**: Sections 3.3A (introductory treatment) and **13.5 (reconciled single source of truth for the failure-shape catalog)** — **YES, TopN pushdown IS supported in OSS Trino 467** by default (session `app_pg.topn_pushdown_enabled = true`; in OSS Trino since release 353/354 in March 2021 — NOT a later-version or Starburst Enterprise-only feature). EXPLAIN signature for SUCCESS = `sortOrder=[...] limit=N` annotations INSIDE the TableScan with NO separate TopN operator above (**the absence IS the signature**); signature for FAILURE = a separate `TopN[topN=N, orderBy=[...]]` operator sitting ABOVE a bare TableScan. Failure shapes (see §13.5 for the full enumeration with workarounds): ORDER BY on a Trino-computed aggregate (`GROUP BY ... ORDER BY COUNT(*) DESC LIMIT N`), ORDER BY spanning multiple sources in a federated join, ORDER BY on a non-default-collation VARCHAR column, non-identity projection between TopN and TableScan ([Trino issue #25138](https://github.com/trinodb/trino/issues/25138)), TopN above a Join/Union/Aggregation, sort on a derived expression, standalone ORDER BY without LIMIT, OFFSET on top of LIMIT, subquery/CTE obscuring the pattern. **Each failure shape has a workaround; do NOT generalize one failed-pushdown query into "OSS Trino can't push TopN" — the feature is available, that one query's specific shape blocked the push.** Fallback: `system.query()` passthrough plus an outer Trino ORDER BY to preserve client ordering.
@@ -8346,6 +8346,238 @@ Caveats for `system.query()` (same as elsewhere in this doc — see §9.4 for th
 5. **The fallback for any failure shape**: `system.query()` passthrough — Postgres does the whole sort+limit; add an outer Trino ORDER BY to preserve client ordering.
 6. **DO NOT conclude from one failed-pushdown query that "OSS Trino can't push TopN"** — the feature IS available; that one query's specific shape blocked the push. Each shape has a different workaround.
 
+### 13.5A The least-explored federation angles — aggregation pushdown EXPLAIN, HAVING pushdown, 3-way cross-catalog JOIN execution location, OR-with-mixed-types
+
+> **SCOPE.** This sub-section consolidates the four most-probed federation angles that section 13.1-13.5 cover only briefly. Each angle leads with a single canonical statement, an EXPLAIN signature, and a verbatim trino.io doc citation where available. **Use this sub-section as the answer template for any question framed as "does X push" / "where does X execute" / "what's the EXPLAIN signature for X."**
+
+---
+
+#### 13.5A.1 Aggregation pushdown to PostgreSQL — the canonical EXPLAIN signature, supported functions, session property
+
+**The single canonical statement.** `SELECT customer_id, SUM(amount), COUNT(*), AVG(amount) FROM app_pg.public.orders WHERE status = 'paid' GROUP BY customer_id` pushes aggregation to PostgreSQL **when the WHERE predicate also pushes** (here `status = 'paid'` is a VARCHAR equality, pushes). Postgres runs the entire `SELECT customer_id, SUM(amount), COUNT(*), AVG(amount) FROM public.orders WHERE status = 'paid' GROUP BY customer_id` and returns one row per `customer_id` over JDBC. Trino streams the already-aggregated rows.
+
+**EXPLAIN signature — the trino.io DOC-QUOTED success rule:**
+
+> **trino.io/docs/current/optimizer/pushdown.html (verbatim):** *"If an aggregate function is successfully pushed down to the connector, the explain plan does not show that `Aggregate` operator."*
+
+So the success signature is: **the `Aggregate` Trino operator is ABSENT** from the plan above the `TableScan`. Concretely:
+
+```
+-- SUCCESS — aggregate pushed to Postgres:
+Output[customer_id, _col1, _col2, _col3]
+└── TableScan[app_pg:Query[SELECT customer_id, sum(amount), count(*), avg(amount)
+                            FROM public.orders WHERE status = 'paid'
+                            GROUP BY customer_id]]
+    -- No `Aggregate` operator. No `Filter`. Postgres did the GROUP BY + WHERE.
+
+-- FAILURE — aggregate stayed on Trino (e.g., a WHERE predicate failed to push):
+Output[customer_id, _col1, _col2, _col3]
+└── Aggregate[GROUP BY customer_id] sum(amount), count(*), avg(amount)
+    └── ScanFilterProject[filter = LOWER(email) = 'foo@bar.com']
+        └── TableScan[app_pg.orders, constraint=(status = 'paid')]
+    -- The `Aggregate` operator is PRESENT. Postgres returned post-`status` rows;
+    -- Trino applied the `LOWER(email)` residual filter, then aggregated on workers.
+```
+
+**EXPLAIN ANALYZE — the runtime smoking gun:**
+
+```
+-- SUCCESS: only ~K rows (one per group) cross the wire from Postgres:
+TableScan[app_pg:Query[SELECT customer_id, sum(amount), ... GROUP BY customer_id]]
+    CPU: 95ms, Input: 1,200 rows (84 kB), Output: 1,200 rows (84 kB)
+    -- 1,200 groups came back. Trivial network egress.
+
+-- FAILURE: the full unaggregated table crossed the wire:
+TableScan[app_pg.orders]
+    CPU: 14.8s, Input: 50,000,000 rows (4.0 GB), Output: 50,000,000 rows (4.0 GB)
+    -- 50M rows on JDBC. The aggregate ran on Trino workers AFTER the residual filter.
+```
+
+**Supported aggregate functions (trino.io/docs/current/connector/postgresql.html — verbatim list):** `avg()`, `count()`, `max()`, `min()`, `sum()`, `stddev()`, `stddev_pop()`, `stddev_samp()`, `variance()`, `var_pop()`, `var_samp()`, `covar_pop()`, `covar_samp()`, `corr()`, `regr_intercept()`, `regr_slope()`.
+
+**NOT supported for pushdown (by trino.io optimizer/pushdown.html):**
+
+- Aggregations on **expressions inside the aggregate call** — e.g., `SUM(a * b)`, `SUM(CASE WHEN ... END)`, `COUNT(DISTINCT col)` on most JDBC connectors. The connector falls back to in-Trino aggregation; the `Aggregate` operator appears.
+- Complex grouping operations — `ROLLUP`, `CUBE`, `GROUPING SETS`. These never push to PostgreSQL; Trino does the rollup itself.
+- `COUNT(DISTINCT col)` — does NOT push on the PostgreSQL connector by default (it's not one of the simple "five-and-related" supported list above for distinct counts). For exact distinct counts, run inside `system.query()`; for an approximate count, switch to `approx_distinct(col)` which pushes as part of the supported `count`/`sum`/etc family in some shapes — verify with EXPLAIN.
+- `count(1)` — the `count(*)` form pushes cleanly; the `count(1)` form has historically been blocked when used with `GROUP BY` ([trinodb/trino issue #7251](https://github.com/trinodb/trino/issues/7251)). Prefer `count(*)` in federated queries.
+
+**Session property — `aggregation_pushdown_enabled` (default `true`):**
+
+```sql
+-- Confirm enabled:
+SHOW SESSION LIKE 'app_pg.aggregation_pushdown_enabled';
+-- Default: true.
+
+-- Disable for A/B debugging (force aggregation onto Trino workers):
+SET SESSION app_pg.aggregation_pushdown_enabled = false;
+-- Re-run EXPLAIN; the `Aggregate` operator should now reliably appear above the scan.
+RESET SESSION app_pg.aggregation_pushdown_enabled;
+```
+
+**Catalog-file form is `aggregation-pushdown.enabled=true`** (hyphens, no `postgresql.` prefix — it's a base JDBC property). Pasting the underscore-form into the `.properties` file is silently ignored. Same footgun as `domain-compaction-threshold` (Section 3.3A).
+
+**The ordering dependency, restated.** Aggregate pushdown requires that **every** WHERE-clause predicate also push. If a `ScanFilterProject` node sits between the `Aggregate` and the `TableScan`, the rewrite rule that fuses the aggregate into the connector scan no longer matches — the aggregate stays on Trino. This is **EXPLAIN-observable**; it is NOT a doc-quoted rule. See §13.2 for the detailed sourcing note.
+
+---
+
+#### 13.5A.2 HAVING-clause pushdown — what pushes, what doesn't, and the EXPLAIN signature
+
+**The single canonical statement.** `SELECT customer_id, SUM(amount) FROM app_pg.public.orders GROUP BY customer_id HAVING SUM(amount) > 1000` pushes the **HAVING predicate together with the aggregation** to PostgreSQL **when the aggregation itself pushes** — i.e., when every WHERE predicate (if any) already pushes AND the aggregate functions are in the supported list (§13.5A.1). In that case Postgres runs `SELECT customer_id, SUM(amount) FROM public.orders GROUP BY customer_id HAVING SUM(amount) > 1000` end-to-end and returns only the groups above the threshold.
+
+**EXPLAIN signature — the success case (HAVING pushed alongside the aggregate):**
+
+```
+Output[customer_id, _col1]
+└── TableScan[app_pg:Query[SELECT customer_id, sum(amount) FROM public.orders
+                            GROUP BY customer_id HAVING sum(amount) > 1000]]
+    -- The TableScan's synthetic query embeds the HAVING.
+    -- No `Aggregate` operator. No `Filter` operator above the TableScan.
+    -- Postgres did the GROUP BY + HAVING; Trino just streams the result rows.
+```
+
+**EXPLAIN signature — the failure case (HAVING stayed on Trino):**
+
+```
+Output[customer_id, _col1]
+└── Filter[sum_amount > 1000]                          <-- HAVING ran on Trino
+    └── Aggregate[GROUP BY customer_id] sum(amount)    <-- Aggregate ran on Trino
+        └── TableScan[app_pg.orders]
+    -- Either the aggregate didn't push (a WHERE predicate didn't push),
+    -- OR a connector limitation prevented HAVING pushdown for that shape.
+```
+
+**The pushdown ordering, in one sentence.** HAVING pushdown follows aggregation pushdown — if the aggregation isn't pushed (because a WHERE predicate stayed on Trino, or the aggregate function isn't supported, or the GROUP BY uses ROLLUP/CUBE), then HAVING also stays on Trino, because Trino must apply the HAVING to the rows it just produced via its own aggregate. **No HAVING push without an aggregate push first.**
+
+**Sourcing note — empirical vs doc-quoted.** The trino.io/docs/current/optimizer/pushdown.html page covers aggregation pushdown but does NOT explicitly enumerate a separate "HAVING pushdown" rule. The mechanism comes from [trinodb/trino PR #6667 — "HAVING pushdown and more advanced aggregation pushdown in JDBC connectors"](https://github.com/trinodb/trino/pull/6667), which restructured the JDBC `JdbcTableHandle` to convert aggregation directly into a query (instead of separate `groupingSets` + `expression` components), enabling subsequent pushdowns such as predicate-after-aggregation — i.e., HAVING. **Treat HAVING pushdown as "an EXPLAIN-observable consequence of aggregation pushdown" rather than a doc-asserted separate optimization.** Verify on your specific query with EXPLAIN.
+
+**What does NOT push (HAVING-side):**
+
+- HAVING on **expressions inside the aggregate** — e.g., `HAVING SUM(a * b) > 1000`. The underlying aggregate `SUM(a * b)` itself doesn't push (expression inside the aggregate is unsupported), so HAVING cannot push either.
+- HAVING that references columns not in the GROUP BY — Trino-side parse error before pushdown even runs.
+- HAVING after a `ROLLUP`/`CUBE`/`GROUPING SETS` — those complex grouping shapes don't push, so neither does HAVING above them.
+- HAVING on a column with a non-default collation in the comparison — same correctness concern as VARCHAR range pushdown (§3.3); blocked unless `enable_string_pushdown_with_collate=true` is set.
+
+**Common mistake.** Engineers see "HAVING didn't push" in EXPLAIN and conclude HAVING pushdown is "not supported in Trino." It IS supported; the cause for THIS query is almost always upstream — either the aggregate didn't push, or the aggregate function isn't in the supported list. Fix the aggregate-pushdown problem and HAVING follows.
+
+---
+
+#### 13.5A.3 3-way cross-catalog JOIN — where does each join execute, and how to read EXPLAIN
+
+**The single canonical statement.** A 3-way join like `iceberg.analytics.events e JOIN app_pg.public.accounts a ON e.account_id = a.id JOIN iceberg.analytics.regions r ON a.region_id = r.id` **never pushes any of the joins to a connector** — joins across catalogs are structurally impossible to push (one side knows about Iceberg, the other doesn't know about PostgreSQL, etc.). **All three joins execute on Trino workers.** Each catalog's `TableScan` is performed in parallel against its respective source; the join results are exchanged across worker stages.
+
+**The execution-location rule, in three sentences.** (1) Each `TableScan` runs on Trino workers, **fetching from the respective connector** (Iceberg from MinIO via the Iceberg connector; PostgreSQL over JDBC). (2) Each pairwise `Join` operator runs on Trino workers — there is no "Postgres does the join" or "Iceberg does the join" option when sides live in different catalogs. (3) Trino's CBO picks the **join order and distribution strategy** (BROADCAST vs PARTITIONED) for each pairwise join based on table statistics — run `ANALYZE TABLE` on each source so the CBO has reliable row-count estimates.
+
+**The EXPLAIN signature — three `TableScan` nodes under two `InnerJoin` operators:**
+
+```
+Output[...]
+└── InnerJoin[a.region_id = r.id]                           <-- 2nd join: events+accounts JOIN regions
+    │   distribution: REPLICATED (regions broadcast as build)
+    ├── InnerJoin[e.account_id = a.id]                      <-- 1st join: events JOIN accounts
+    │   │   distribution: REPLICATED (accounts broadcast as build)
+    │   ├── TableScan[iceberg.analytics.events]             <-- Iceberg scan (probe of 1st join)
+    │   │       constraint = (event_date >= DATE '2026-05-01')
+    │   │       dynamicFilters = {account_id = (build-side IN-list)}
+    │   └── RemoteExchange[REPLICATE]                       <-- broadcast accounts to every worker
+    │       └── TableScan[app_pg:public.accounts]           <-- Postgres scan over JDBC
+    │               constraint = (region_id IN (...))       (build-side filter pushed to PG)
+    └── RemoteExchange[REPLICATE]                           <-- broadcast regions to every worker
+        └── TableScan[iceberg.analytics.regions]            <-- Iceberg scan of dim
+```
+
+**How to read the plan in five bullets:**
+
+1. **Three `TableScan` nodes — one per catalog.** Each runs against its own connector in parallel. Iceberg scans pull files from MinIO; PostgreSQL scans send a JDBC SQL with the pushed predicates.
+2. **Two `InnerJoin` operators — both on Trino workers.** Trino's CBO orders them; the leaf join runs first, then the result feeds the upper join.
+3. **`RemoteExchange[REPLICATE]` = BROADCAST distribution.** The build side (the smaller, the dimension) is replicated to every worker; the probe side (the larger fact, or the join result) stays partitioned where it was scanned.
+4. **`RemoteExchange[REPARTITION]` = PARTITIONED distribution.** Both sides hash-shuffled by join key. The CBO picks this when the build side is bigger than `join-max-broadcast-table-size` (default 100MB) — see §13.3 / §5.
+5. **Dynamic filtering crosses catalogs.** The build-side scan's distinct join-key values are turned into an IN-list and pushed INTO the probe-side scan's connector — including JDBC. On the EXPLAIN, look for `dynamicFilters = {col = #df_N}` on the probe `TableScan`. On Iceberg-probe, this prunes data files at split-generation time; on Postgres-probe, the JDBC SQL gets `AND col IN (...)` appended.
+
+**Reading "which side dominates" — the operational rule of thumb:**
+
+- The **biggest probe scan dominates wall-clock time.** Optimize THAT scan first: partition pruning on Iceberg (§4 in resource 28), pushdown on Postgres (§13.1), narrow projection (only the columns the join needs).
+- The **dimension tables' size** determines whether they BROADCAST (small) or PARTITION (big). Run `ANALYZE TABLE` on each dim so the CBO knows.
+- A 3-way join can have **mixed strategies** — e.g., 1st join BROADCAST (small dim accounts), 2nd join BROADCAST (small dim regions), or 1st BROADCAST + 2nd PARTITIONED if the join result after the 1st join exceeds the broadcast threshold. **EXPLAIN tells you which is which** via `RemoteExchange[REPLICATE]` vs `RemoteExchange[REPARTITION]`.
+
+**Doc-quoted execution-location rule (from §13.1 already):**
+
+> **trino.io/docs/current/connector/postgresql.html and trino.io/docs/current/optimizer/pushdown.html** — Join pushdown applies only when both tables live in the SAME catalog. Cross-catalog joins are NEVER pushed; they always execute on Trino workers.
+
+**Common myth — debunked.** "If I join Postgres + Iceberg + Iceberg, the two Iceberg-side joins might push because they're the same catalog." **WRONG.** As soon as a Postgres `TableScan` is fed into a Trino-side join, the **join result** lives on Trino workers and is no longer a "table in the Iceberg catalog." Subsequent joins above that join operator also run on Trino workers. Push only happens between two `TableScan`s of the SAME catalog at the leaf level — and Trino's CBO doesn't typically reorder a 3-way join to make that possible if it would change semantics.
+
+**Forcing a strategy — when CBO picks wrong:**
+
+```sql
+-- Force BROADCAST (only when you know all build sides fit in worker memory):
+SET SESSION join_distribution_type = 'BROADCAST';
+
+-- Force PARTITIONED (when a build side would OOM via BROADCAST):
+SET SESSION join_distribution_type = 'PARTITIONED';
+
+-- Reset to CBO-driven choice:
+SET SESSION join_distribution_type = 'AUTOMATIC';
+```
+
+These properties are SYSTEM-level (no catalog prefix), and they apply to ALL joins in the session — including the federated ones.
+
+---
+
+#### 13.5A.4 OR-with-mixed-types predicate pushdown — when does the OR push, and to which side
+
+**The single canonical statement.** `WHERE (user_id = 123 OR email = 'a@b.com')` against a Postgres table — both predicates individually push (numeric equality always; VARCHAR equality always with default collation). **The OR-of-two-pushed-predicates also pushes** as a single `WHERE (user_id = 123 OR email = 'a@b.com')` clause inside the JDBC SQL Trino sends to Postgres. Postgres handles the OR using whichever index plan it prefers (a `BitmapOr` of two index scans is typical).
+
+**Verbatim trino.io rule (trino.io/docs/current/optimizer/pushdown.html and trino.io/docs/current/connector/postgresql.html):** Predicate pushdown supports compound predicates built from individually pushable predicates combined with `AND` and `OR`. If **any** disjunct in an `OR` is NOT individually pushable, the **entire OR** stays on Trino — because skipping one disjunct would silently change the result set.
+
+**The four shapes — what pushes, what doesn't:**
+
+| `WHERE` shape | Pushes? | Why |
+|---|---|---|
+| `(user_id = 123 OR email = 'a@b.com')` — numeric `=` OR VARCHAR `=`, default collation | **YES — entire OR pushes.** Both disjuncts individually push (numeric equality always; VARCHAR equality with default collation). | Trino sends `WHERE (user_id = 123 OR email = 'a@b.com')` to Postgres as a single SQL clause. |
+| `(user_id = 123 OR email LIKE '%bigcorp.com')` — numeric `=` OR leading-wildcard LIKE | **NO — entire OR stays on Trino.** The leading-wildcard LIKE doesn't push regardless of collation (no anchored prefix = no B-tree range scan; §3.3). So the OR cannot push as a unit. Trino pulls **all rows matching the OR via no predicate at all** (or only what the AND-side predicates push) and applies the OR in worker memory. | The connector cannot safely omit the LIKE disjunct — that would return fewer rows than the OR requires. |
+| `(user_id = 123 OR name BETWEEN 'a' AND 'm')` — numeric `=` OR VARCHAR range | **NO by default.** VARCHAR range doesn't push by default (§3.3). The OR fails to push as a unit. **MAY push** if `enable_string_pushdown_with_collate=true` is set AND the column has a `text_pattern_ops` index — verify with EXPLAIN, and measure equality regression (§3.3). | Same correctness rule as above — one disjunct is not pushable, so the whole OR stays. |
+| `(user_id = 123 OR LOWER(email) = 'a@b.com')` — numeric `=` OR function-wrapped column | **NO — entire OR stays on Trino.** The function wraps the column on the right disjunct; that disjunct never pushes. The OR therefore never pushes. | Connector cannot push `LOWER(email) = ...` for any column. **Fix:** denormalize a generated column `email_lower` on Postgres (indexed via `LOWER(email)`), then `(user_id = 123 OR email_lower = 'a@b.com')` pushes cleanly. |
+
+**EXPLAIN signature — OR-pushed vs OR-not-pushed:**
+
+```
+-- OR PUSHED — both disjuncts pushable:
+TableScan[app_pg.users, constraint=((user_id = 123) OR (email = 'a@b.com'))]
+    -- Constraint is INSIDE the TableScan. The OR is part of the JDBC SQL sent to Postgres.
+
+-- OR NOT PUSHED — at least one disjunct unpushable:
+Filter[(user_id = 123) OR (email LIKE '%bigcorp.com')]
+    └── TableScan[app_pg.users]
+        -- TableScan has NO constraint on user_id or email.
+        -- Trino pulled the FULL table over JDBC (no WHERE clause at all),
+        -- then evaluated the OR in worker memory. This is a serious anti-pattern.
+```
+
+**Performance consequence — read carefully.** When an OR fails to push, Trino does NOT push the pushable side either — because doing so would return only the rows matching the pushable disjunct and SILENTLY MISS the rows matching the un-pushable disjunct. So **the entire WHERE clause becomes a no-op as far as JDBC is concerned**, and the full table crosses the wire. **A single un-pushable disjunct in an OR is enough to convert a fast targeted query into a full-table JDBC pull.** This is the most catastrophic pushdown failure mode on the PostgreSQL connector. The fix is always to make every disjunct individually pushable — usually via denormalization (generated columns indexed on the un-pushable predicate's underlying expression).
+
+**The two-step workaround for an un-pushable OR — `UNION ALL` of two pushable queries:**
+
+```sql
+-- Original (entire OR stays on Trino, full-table pull):
+SELECT * FROM app_pg.public.users
+WHERE (user_id = 123 OR email LIKE '%bigcorp.com');
+
+-- Workaround — split into two queries, each with a pushable predicate, then UNION ALL + DISTINCT:
+SELECT DISTINCT * FROM (
+  SELECT * FROM app_pg.public.users WHERE user_id = 123                  -- numeric equality, pushes
+  UNION ALL
+  SELECT * FROM TABLE(app_pg.system.query(query =>                       -- raw SQL passthrough for LIKE '%...'
+    'SELECT * FROM public.users WHERE email LIKE ''%bigcorp.com'''))
+) u;
+-- Each subquery pushes its WHERE individually; the UNION ALL + DISTINCT
+-- replicates the OR semantics. Total bytes over JDBC drop by orders of magnitude
+-- for selective predicates.
+```
+
+**The contrast in one sentence.** AND-of-mixed-pushability: the pushable predicates still push; the un-pushable ones become residual filters on Trino. OR-of-mixed-pushability: **none of the predicates push if even one disjunct is un-pushable** — because skipping any disjunct would change the result set. AND is composable; OR is not. **This asymmetry is the single most important predicate-pushdown semantics rule on the JDBC connectors.**
+
+---
+
 ### 13.6 When to MATERIALIZE a federated lookup locally — the decision in one table
 
 > **Federation is a tool, not a code smell. But specific signals tell you to stop federating and ingest into Iceberg.** This section gives the materialization-decision logic as a compact table; see Section 6.2A for the full signals and 6.2B for the row-count gradient.
@@ -8385,15 +8617,21 @@ SELECT * FROM app_pg.public.accounts;
 
 1. **"Does WHERE x push down to Postgres?"** → Use the matrix in Section 13.1. Equality/IN unconditional; VARCHAR range and ILIKE conditional on `enable_string_pushdown_with_collate`; functions in predicate never push. Verify with `EXPLAIN` — `TableScan[..., constraint=(...)]` = pushed; `Filter` or `ScanFilterProject` above the scan = not pushed.
 
-2. **"Why is my COUNT(*)/GROUP BY query still slow against Postgres even though aggregate pushdown is enabled?"** → Section 13.2. Almost always because a WHERE predicate failed to push; the aggregate then has to run on Trino because it needs post-filter rows. Check `EXPLAIN` for a `ScanFilterProject` above the `TableScan` — that's the unpushed predicate. Rewrite it (denormalize, generated column, etc.) so it pushes; the aggregate will follow.
+2. **"Why is my COUNT(*)/GROUP BY query still slow against Postgres even though aggregate pushdown is enabled?"** → Section 13.2 + Section 13.5A.1. Almost always because a WHERE predicate failed to push; the aggregate then has to run on Trino because it needs post-filter rows. Check `EXPLAIN` for a `ScanFilterProject` above the `TableScan` — that's the unpushed predicate. Rewrite it (denormalize, generated column, etc.) so it pushes; the aggregate will follow. **The EXPLAIN success signature is the ABSENCE of the `Aggregate` operator** — doc-quoted: *"If an aggregate function is successfully pushed down to the connector, the explain plan does not show that `Aggregate` operator."*
 
-3. **"My cross-catalog join is pulling 50M Postgres rows even though I have a WHERE on the Postgres side — why?"** → Section 13.4. Check (a) is the WHERE actually pushing — `EXPLAIN` for the `TableScan` constraint; (b) is dynamic filtering firing — `EXPLAIN ANALYZE` for `dynamicFilterSplitsProcessed > 0` on the Iceberg-side probe; (c) is the build small enough for BROADCAST — force with `SET SESSION join_distribution_type = 'BROADCAST'`. If the table is fundamentally 50M+ rows without a selective predicate, the answer is "stop federating, ingest into Iceberg" — Section 13.6.
+3. **"My cross-catalog join is pulling 50M Postgres rows even though I have a WHERE on the Postgres side — why?"** → Section 13.4 + Section 13.5A.3. Check (a) is the WHERE actually pushing — `EXPLAIN` for the `TableScan` constraint; (b) is dynamic filtering firing — `EXPLAIN ANALYZE` for `dynamicFilterSplitsProcessed > 0` on the Iceberg-side probe; (c) is the build small enough for BROADCAST — force with `SET SESSION join_distribution_type = 'BROADCAST'`. If the table is fundamentally 50M+ rows without a selective predicate, the answer is "stop federating, ingest into Iceberg" — Section 13.6.
 
 4. **"Should I use INNER JOIN, LEFT JOIN, or rewrite to a subquery to enable dynamic filtering?"** → Section 13.3. INNER and RIGHT joins support DF; LEFT and FULL OUTER do not. Rewriting INNER → LEFT to "enable" DF actually DISABLES it. If DF is not firing on INNER, the cause is wait-timeout / build-row-cap / IN-list compaction — fix those, do not change the join shape.
 
 5. **"How do I make `SELECT ... ORDER BY x LIMIT 10` against my Postgres table fast?"** → Section 13.5. Top-N pushdown handles this if the ORDER BY column has an index. Verify with `EXPLAIN` — the `TopN` Trino operator should be ABSENT from the plan; absence is the success signature. If it's not pushing, check session property `topn_pushdown_enabled`, check that ORDER BY isn't on a function/expression, check that all WHERE predicates pushed.
 
 6. **"When should I stop federating this Postgres table and ingest it into Iceberg?"** → Section 13.6. Row count is the primary lever (5M+ if joined in every dashboard; 10M+ always; 100M+ requires CDC). Operational signals — replica CPU sustained > 70%, query latency > 2s vs SLO < 500ms, query volume share > 20%, schema churn > 1× per quarter, freshness tolerance loosening to T-15min — each independently triggers the materialization decision.
+
+7. **"Does `HAVING SUM(amount) > 1000` push to Postgres?"** → Section 13.5A.2. **YES — but only when the underlying aggregate also pushes.** HAVING pushdown is a consequence of aggregation pushdown — if the aggregate stays on Trino (because a WHERE predicate didn't push, or the aggregate function isn't one of the supported ones, or the GROUP BY uses ROLLUP/CUBE), HAVING also stays on Trino. EXPLAIN success signature: HAVING embedded inside the `TableScan` synthetic query; no separate `Filter` or `Aggregate` operator above the scan.
+
+8. **"In a 3-way join Postgres-dim + Iceberg-fact + Iceberg-dim, where does each join execute?"** → Section 13.5A.3. **All joins execute on Trino workers** — cross-catalog joins NEVER push to a connector. Each `TableScan` runs against its own connector in parallel; the pairwise `Join` operators run on Trino workers. CBO picks BROADCAST vs PARTITIONED per join based on stats; EXPLAIN shows `RemoteExchange[REPLICATE]` for BROADCAST and `RemoteExchange[REPARTITION]` for PARTITIONED. Run `ANALYZE TABLE` on every source so the CBO has reliable estimates.
+
+9. **"Does `WHERE (user_id = 123 OR email LIKE '%bigcorp.com')` push to Postgres?"** → Section 13.5A.4. **NO — entire OR stays on Trino.** OR-of-mixed-pushability has different semantics than AND: if **any** disjunct is un-pushable, the **entire OR** stays on Trino (because skipping any disjunct would change the result set). With a leading-wildcard LIKE as one disjunct, the OR never pushes regardless of collation. The full table crosses the JDBC wire. The fix is `UNION ALL` of two individually-pushable queries (one for the numeric equality, one via `system.query()` passthrough for the LIKE) with an outer `DISTINCT`.
 
 ### 13.8 One-line citations — verify any claim above
 
@@ -8412,4 +8650,8 @@ SELECT * FROM app_pg.public.accounts;
 | `postgresql.experimental.enable-string-pushdown-with-collate` flag added in Trino 365 (Dec 2021) via PR #9746 | trino.io/docs/current/release/release-365.html + github.com/trinodb/trino/pull/9746 | **Doc-quoted** (release notes + PR). |
 | TopN pushdown non-identity-projection limitation (failure shape #4 in §13.5) | github.com/trinodb/trino/issues/25138 |
 | String range pushdown PR + collation caveat | github.com/trinodb/trino/pull/9746 |
+| HAVING pushdown mechanism (§13.5A.2) — JDBC connectors model aggregation as a synthetic query, enabling subsequent pushdowns including HAVING | github.com/trinodb/trino/pull/6667 ("HAVING pushdown and more advanced aggregation pushdown in JDBC connectors") | **PR-quoted** — not separately enumerated on trino.io. The EXPLAIN signature (HAVING embedded inside the TableScan's synthetic query; no `Filter` above) is EXPLAIN-observable on Trino 467. |
+| `count(1)` + `GROUP BY` does NOT push (use `count(*)` instead) — §13.5A.1 | github.com/trinodb/trino/issues/7251 ("count(1) aggregation is not pushed into JDBC connectors when used with GROUP BY") | **Issue-quoted.** |
+| Cross-catalog joins NEVER push (§13.5A.3) — joins between two different catalogs always execute on Trino workers | trino.io/docs/current/optimizer/pushdown.html ("Join pushdown" section); trino.io/docs/current/connector/postgresql.html ("Join pushdown" section: applies only when both tables are in the same catalog) | **Doc-quoted.** |
+| OR-of-mixed-pushability blocks the entire OR (§13.5A.4) — single un-pushable disjunct makes the whole OR stay on Trino | trino.io/docs/current/optimizer/pushdown.html (predicate pushdown semantics); **empirically EXPLAIN-observable** on Trino 467 — `Filter` node above bare `TableScan` for any OR with one un-pushable disjunct. | **Mixed** — pushdown semantics are doc-described; the specific OR-blocking behavior is EXPLAIN-observable on a live cluster. |
 
