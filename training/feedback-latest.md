@@ -1,181 +1,209 @@
-# Judge Feedback — Iter 421 (EXTENDED PHASE — end-of-iteration only)
+# Judge Feedback — Iter 422 (EXTENDED PHASE — end-of-iteration only)
 
-**Overall: 4.7656 STRONG PASS** (Q1 4.875 + Q2 4.6875 + Q3 4.75 + Q4 4.75) — **+0.219 step-UP from iter420 4.547, HIGHEST overall score in iter402-421 window**, twentieth consecutive overall PASS. The iter420 Q3 self-contradiction is FULLY RESOLVED in one iteration; zero new confident-inaccuracies; federation topic moves UP +0.0021 to 4.4925 (closest to threshold in 13 iters) but STILL 0.0075 below 4.5.
+**Overall: 4.7969 STRONG PASS** (Q1 4.875 + Q2 4.8125 + Q3 4.75 + Q4 4.75) — **+0.0313 step-UP from iter421 4.7656, HIGHEST overall score in iter402-422 window**, twenty-first consecutive overall PASS. The iter421 Q2 leading-wildcard LIKE imprecision is FULLY RESOLVED in one iteration with the canonical three-case framing (exact equality / anchored prefix / leading wildcard). Zero new confident-inaccuracies anywhere. **Federation topic moves 4.4925 -> 4.4950 (+0.0025), CLOSEST POSITION TO 4.5 IN 14 ITERATIONS, but STILL 0.0050 BELOW threshold — DOES NOT CROSS.**
 
-**Headline:**
-1. **ITER420 PLAIN-TOPN SELF-CONTRADICTION FULLY RESOLVED — Q1 4.875.** Responder now states UNAMBIGUOUSLY that plain ORDER BY+LIMIT on PostgreSQL connector PUSHES BY DEFAULT since release 354 (19 Mar 2021), Postgres does sort+limit, returns only N rows, Trino does NOT pull millions. EXPLAIN success signature: sortOrder+limit folded inside TableScan node, NO separate TopN operator above the scan (absence IS the signature). Failed case correctly distinguished (separate TopN above scan for computed aggregate ORDER BY or non-default collation). **CRITICAL: zero "Trino pulls all rows" or "Postgres does no work" sentences anywhere in the answer — the iter420 dual-framing failure mode is ABSENT.** Teacher's iter421 r22 TOP-OF-DOC GUARDRAIL + TOP-OF-SECTION GUARDRAIL with DO-NOT-WRITE table + DISAMBIGUATION TABLE + MENTAL MODEL ANCHOR + LEADING WORKED EXAMPLE landed precisely on target.
-2. **FEDERATION PAIR STRONG — Q1 4.875 + Q2 4.6875.** Q2 (predicate pushdown types) delivered clean push-vs-not table: equality/IN/IS NULL/numeric range/date range push; VARCHAR equality usually YES with non-default-collation caveat; VARCHAR range does NOT push by default; EXPLAIN TYPE IO FORMAT JSON columnConstraints/domain verification path correctly documented. **One minor TA imprecision:** `email LIKE '%@bigcorp.com'` framed as "pushes if default collation" — leading-wildcard LIKE is range-class semantics and generally does NOT push regardless of collation without the experimental collate flag.
-3. **TABLE-MAINTENANCE PAIR STRONG — Q3 4.75 + Q4 4.75.** Q3 DROP COLUMN reclaim: metadata-only, Parquet bytes remain, lifecycle optimize→expire(7d Trino floor)→remove_orphan_files, Spark CALL escape hatch with older_than+retain_last. Q4 concurrent Spark+Trino: optimistic concurrency Git-like, snapshot pointer swap with CAS, loser retries (default 4), serializable (default) vs snapshot weaker, three write.{delete,update,merge}.isolation-level properties, disjoint partitions no conflict. Both fully accurate.
+---
+
+## Headline
+
+1. **ITER421 LEADING-WILDCARD-LIKE IMPRECISION FULLY RESOLVED — Q2 4.8125.** The responder now states the canonical THREE cases unambiguously: (a) exact equality `status='active'` PUSHES (verified push for default and non-default collation with equality semantics); (b) anchored prefix `LIKE 'alice@%'` CAN push (collation-sensitive, maps to a range scan; the experimental `enable-string-pushdown-with-collate` flag enables for non-default collation); (c) leading-wildcard `LIKE '%@bigcorp.com'` does **NOT** push (no anchored prefix means no B-tree range scan, and the experimental collate flag does NOT rescue leading-wildcard semantics) — Trino pulls all rows and filters in memory. Fixes provided: `system.query()` passthrough with `pg_trgm` similarity / GIN trigram index, normalized `domain_name` column (= pushes as equality), Postgres materialized view with PRE-EXTRACTED domain, full materialization to Iceberg. **CRITICAL: ZERO "pushes if default collation" framing for leading-wildcard LIKE anywhere; the iter421 imprecision is structurally ABSENT.** Teacher's r22 anchored-vs-leading-wildcard LIKE callout landed precisely on target.
+
+2. **ITER421 RECOVERY-WITHIN-ONE-ITERATION PATTERN HOLDS — EIGHTH CONSECUTIVE RECOVERY.** This is the eighth consecutive confident-inaccuracy / nuance-imprecision failure resolved in a single iteration (iter407->408, iter411->412, iter413->414, iter414->415, iter417->418, iter419->420, iter420->421, iter421->422). The most consistent recovery pattern in the iter402-422 window. The teacher's structural-fix recipe (leading canonical example + DO-NOT-WRITE callouts + disambiguation tables + cite source URLs) is now PROVEN-DURABLE across nine recovery events.
+
+3. **FEDERATION TOPIC AT CLOSEST-TO-THRESHOLD POSITION IN 14 ITERS — STILL DOES NOT CROSS.** Math: 4.4925 * 280 = 1257.90; +Q1 4.875 +Q2 4.8125 = 1267.5875; / 282 = **4.4950**. Topic now **0.0050 BELOW the 4.5 threshold** — the closest position in 14 iterations (last position closer was iter408 at 4.4969). Both federation datapoints in iter422 were 4.75+ as required for a topic-crossing trajectory, but the prior cumulative average is dense enough at 280 datapoints that even two 4.75+ STRONG-PASS-plus answers move the topic only +0.0025. **Two MORE 4.85+ federation answers in iter423 should push the topic across the 4.5 threshold** — a 4.85+/4.85+ pair would add ~0.0026, crossing to 4.4976+; a 5.0/4.875 pair would cross to 4.4988+; a 5.0/5.0 pair would cross to 4.5001 exactly. The path is narrowing but the topic-density wall is real: 280 datapoints means each new pair moves the average by approximately (delta - 4.4925)/141 ~ 0.0028 per pair at 5.0.
+
+4. **TABLE-MAINTENANCE PAIR HOLDS STRONG — Q3 4.75 + Q4 4.75.** Q3 rollback semantics fully accurate: positional `CALL iceberg.system.rollback_to_snapshot('analytics','events',id)` on Trino 467; rollback CREATES a new snapshot in `$snapshots` pointing back at old data files; bad snapshot REMAINS in history (not deleted, not current); reversible roll-forward; `expire_snapshots` later reclaims orphaned bad files; atomic metadata-only operation. Q4 compaction + storage reclaim fully accurate: `ALTER TABLE ... EXECUTE optimize`, `optimize(file_size_threshold => '256MB')`, WHERE scope ONLY on partition columns (event_date / tenant_id, not arbitrary columns), `$files content=0` count drops + avg_mb rises verifies success; compaction ALONE does NOT free MinIO storage — must follow with `expire_snapshots(7d)` then `remove_orphan_files(7d)` for actual byte reclaim.
 
 ---
 
 ## Critical confirmations (explicit)
 
-### (a) Is the iter420 plain-TopN self-contradiction RESOLVED?
+### (a) Is the iter421 leading-wildcard-LIKE imprecision FULLY RESOLVED with zero new inaccuracies?
 
-**YES — FULLY RESOLVED with zero new self-contradictions.** Q1 4.875 STRONG. Responder leads with: "plain ORDER BY+LIMIT on Postgres connector Trino 467 PUSHES BY DEFAULT since release 354 (19 Mar 2021)." EXPLAIN success signature correctly described as `TableScan[..., sortOrder=[created_at DESC NULLS LAST], limit=100]` with sortOrder= and limit= FOLDED INTO the TableScan node, NO separate TopN operator above the scan (absence IS the signature, quoting trino.io/docs/current/optimizer/pushdown.html). Failed case correctly distinguished as separate TopN operator above the scan when computed aggregate ORDER BY is involved or non-default collation blocks the push.
+**YES — FULLY RESOLVED with zero new confident-inaccuracies.** Q2 4.8125 STRONG. The responder leads with the canonical three-case table:
+- `status = 'active'` (exact equality) — **PUSHES** for any collation (equality semantics are collation-independent for ASCII/typical default).
+- `email LIKE 'alice@%'` (anchored prefix) — **CAN PUSH** (collation-sensitive; on default `C` collation Postgres uses B-tree range scan; on non-default collation requires `postgresql.experimental.enable-string-pushdown-with-collate=true` + matching `text_pattern_ops` index or COLLATE clause).
+- `email LIKE '%@bigcorp.com'` (leading wildcard) — **DOES NOT PUSH** by default. No anchored prefix means no B-tree range scan is possible. The experimental collate flag does NOT rescue this case (it enables range pushdown semantics for anchored predicates only, not leading-wildcard patterns which lack a range to scan).
 
-**ZERO self-contradiction.** The iter420 dual-framing ("Trino pulls ALL rows" + "TopN pushdown fires" in same paragraph for same query) is ABSENT from this answer. The responder does NOT also say "pulls all rows / Postgres does no work" anywhere. The leading mental model is correct on the first attempt.
+**ZERO "leading-wildcard LIKE pushes if default collation" framing anywhere.** The iter421 nudge is absent. Teacher's r22 anchored-vs-leading-wildcard distinction callout landed precisely.
+
+Fixes documented for the leading-wildcard case:
+- `system.query()` passthrough to Postgres with `pg_trgm` extension + GIN trigram index + `similarity()` function for fuzzy domain match;
+- Normalized `domain_name` column populated by trigger / dbt model + index on `domain_name` (= pushes as equality);
+- Postgres materialized view with pre-extracted `split_part(email, '@', 2)` materialized as `domain` column + index;
+- Full materialization to Iceberg with `domain_name` as a separate column (best fit for the on-prem MinIO+Iceberg stack).
 
 Verified against:
-- trino.io/docs/current/release/release-354.html: "the optimization is now enabled by default"
-- trino.io/docs/current/optimizer/pushdown.html: "absence of the TopN Trino operator in the Fragment 0 from the query plan demonstrates that the query benefits of the Top-N pushdown optimization"
+- trino.io/docs/current/connector/postgresql.html: "By default, the connector does not support pushdown of range predicates, such as >, <, or BETWEEN, on columns with character string types..."
+- trino.io/docs/current/connector/postgresql.html: experimental `postgresql.experimental.enable-string-pushdown-with-collate` enables range predicate pushdown for string columns with collation; documented as applicable to range predicates (anchored prefix LIKE maps to range), NOT leading-wildcard LIKE.
 
-Teacher's iter421 structural fix (TWO guardrails in r22 — TOP-OF-DOC at section 0 and TOP-OF-SECTION at 3.3A — with DO-NOT-WRITE table containing 5 banned phrasings + DISAMBIGUATION TABLE with plain-vs-aggregate rows + MENTAL MODEL ANCHOR + LEADING WORKED EXAMPLE + iter420 FAILURE MODE NAMED) is now a proven recovery pattern for self-contradiction-within-single-answer failures.
+### (b) Federation topic — does it CROSS 4.5?
 
-### (b) Federation topic — does it cross 4.5?
+**NO — federation topic moved 4.4925 -> 4.4950 (+0.0025), STILL 0.0050 BELOW the 4.5 threshold.**
 
-**NO — federation topic moved 4.4904 → 4.4925 (+0.0021), STILL 0.0075 BELOW the 4.5 threshold.**
+Math:
+- Prior: 4.4925 * 280 datapoints = 1257.90 sum
+- + Q1 4.875 + Q2 4.8125 = +9.6875
+- New sum: 1257.90 + 9.6875 = 1267.5875
+- New count: 282
+- New average: 1267.5875 / 282 = **4.4950**
 
-Math: prior 4.4904 * 278 = 1248.331; + Q1 4.875 + Q2 4.6875 = 1257.894; / 280 = 4.4925.
+**Closest position to 4.5 in 14 iterations** (last position closer was iter408 at 4.4969). 22nd consecutive iteration below threshold but trending UP for the 2nd consecutive iter after the iter420 regression.
 
-This is the **closest to the 4.5 threshold in 13 iterations** (last position closer was iter408 at 4.4969). 21st consecutive iteration stuck below threshold, but trending UP for the 1st iter after the iter420 regression. The Q1 4.875 alone would have crossed if Q2 had also been 4.75+; the Q2 4.6875 (the leading-wildcard LIKE imprecision dragged Q2 TA from 5.0 to 4.5) was a small but threshold-relevant nudge.
+**Why the topic did not cross despite both datapoints being 4.75+**: the cumulative dataset of 280 prior datapoints averaging 4.4925 acts as a density wall — even two 4.8+ answers move the average by approximately +0.0025. To cross, iter423 needs a 4.85+/4.85+ pair (or one 5.0 paired with anything >=4.85+); a 5.0/5.0 pair would cross to 4.5001 exactly. The path is narrowing but the topic-density wall is real and the responder must sustain near-perfect federation answers for multiple iterations to cross.
 
-**Two more 4.75+ federation answers would push the topic ACROSS the 4.5 threshold.** This is the most actionable threshold-push position in 13 iters.
+### (c) Any NEW confident-inaccuracy / engine-version-API confusion / self-contradiction in iter422?
 
-### (c) Any NEW confident-inaccuracy / engine-version-API confusion / self-contradiction in iter421?
+**NO — zero new confident-inaccuracies, zero new self-contradictions, zero new engine/version/API confusions.** All four answers were technically clean. The iter421 imprecision was the only nudge to resolve and it is structurally resolved.
 
-**NO — zero new confident-inaccuracies, zero new self-contradictions, zero new engine/version/API confusions.** The only nudge is the Q2 leading-wildcard LIKE example imprecision (small TA nudge, not load-bearing).
-
-**Myth-buster zero-confident-inaccuracy streak RESTARTED at 1.** The recovery-within-one-iteration pattern (leading canonical example + DO-NOT-WRITE callouts + disambiguation tables + cite source URLs) has now resolved SEVEN consecutive confident-inaccuracy / self-contradiction failures (iter407→408, iter411→412, iter413→414, iter414→415, iter417→418, iter419→420, iter420→421).
+**Myth-buster zero-confident-inaccuracy streak ADVANCES to 2.** The recovery-within-one-iteration pattern has now resolved EIGHT consecutive confident-inaccuracy / nuance-imprecision failures.
 
 ---
 
 ## Per-question scoring
 
-### Q1 — Plain TopN re-probe (Trino federation / cross-source connectors)
+### Q1 — Dynamic filtering (Trino federation / cross-source connectors)
 
-**Scores: 5.0 / 4.75 / 5.0 / 4.75 — avg 4.875 STRONG PASS**
-
-What landed:
-- Plain ORDER BY+LIMIT on PG connector Trino 467 pushes by default since release 354 (19 Mar 2021) — VERIFIED.
-- Trino sends ORDER BY+LIMIT to Postgres; Postgres sorts (uses index if available) returns only N rows; Trino does NOT pull millions — CORRECT.
-- EXPLAIN success signature: `TableScan[..., sortOrder=[created_at DESC NULLS LAST], limit=100]` with sortOrder+limit FOLDED inside TableScan, NO separate TopN operator above — VERIFIED against trino.io/docs/current/optimizer/pushdown.html.
-- Failed case: separate TopN operator above the scan (computed aggregate ORDER BY, non-default collation) — CORRECT distinction.
-- Plain single-column case very solid on Trino 467 — CORRECT.
-
-**Critical: ZERO "Trino pulls all rows" or "Postgres does no work" framing anywhere. The iter420 self-contradiction failure mode is ABSENT.**
-
-**Verdict:** STRONG PASS. The iter420 plain-TopN self-contradiction is fully resolved in one iteration. The leading mental model is the correct one on first attempt.
-
-### Q2 — Predicate pushdown types (Trino federation / cross-source connectors)
-
-**Scores: 5.0 / 4.5 / 4.75 / 4.5 — avg 4.6875 STRONG PASS**
+**Scores: 5.0 / 4.75 / 4.75 / 5.0 — avg 4.875 STRONG PASS**
 
 What landed:
-- Equality on any column type pushes — VERIFIED against trino.io/docs/current/connector/postgresql.html.
-- IN-list pushes — VERIFIED.
-- IS NULL pushes — CORRECT.
-- Numeric range (>, <, BETWEEN on integer/numeric) pushes — CORRECT.
-- Date range pushes — CORRECT.
-- VARCHAR equality "usually YES, non-default collation NOT pushed without enable-string-pushdown-with-collate" — TECHNICALLY ACCURATE (verified via PR #9746 and postgresql.html: collation-aware flag needed for correctness on non-default collation; performance regression risk on equality with collation since indexes cannot be used).
-- VARCHAR range does NOT push by default — VERIFIED.
-- VARCHAR LIKE collation-dependent — CORRECT NUANCE.
-- EXPLAIN (TYPE IO, FORMAT JSON) `columnConstraints` / `domain` field present = pushed — VERIFIED as documented method.
+- INNER and RIGHT joins (plus semi-joins with IN) support dynamic filtering; LEFT and FULL OUTER do NOT — VERIFIED against trino.io/docs/current/admin/dynamic-filtering.html ("Currently inner and right joins with =, <, <=, >, >= or IS NOT DISTINCT FROM join conditions, and semi-joins with IN conditions are supported.").
+- CBO picks the smaller side as the build (Postgres-enterprise dimension) and the larger as the probe (Iceberg 500M-row fact) — CORRECT.
+- Build-side predicate must push first so the dynamic filter is computed from the filtered build values, not the entire dimension — CORRECT (this is the critical correctness condition).
+- Join-order in the SQL text and which-side-is-on-the-left of ON does NOT matter — CBO reorders based on stats — CORRECT.
+- VARCHAR join-key collation caveat (mismatched collation may block dynamic filtering correctness) — CORRECT NUANCE.
+- ANALYZE for table statistics required for CBO to pick the correct build side — CORRECT.
+- `enable_dynamic_filtering = true` default — CORRECT (verified against trino.io/docs/current/admin/dynamic-filtering.html).
+- Broadcast vs partitioned switchpoint at `join-max-broadcast-table-size` ~100MB default — CORRECT (verified against trino.io/docs/current/admin/dynamic-filtering.html).
+- EXPLAIN ANALYZE verification: `dynamicFilterSplitsProcessed < totalSplits` (split pruning fired) + `PhysicalInputDataSize` reduced on the probe scan + `dynamicFilters` annotation present on the join — CORRECT verification path.
+- Absent dynamicFilters annotation = dynamic filtering did not fire (diagnostic signal) — CORRECT.
 
-**Minor TA imprecision:** Example `email LIKE '%@bigcorp.com'` framed as "pushes if default collation" — this is slightly wrong because leading-wildcard LIKE is range-class semantics and generally does NOT push regardless of collation without the experimental collate flag. The broader VARCHAR/LIKE framing is correct; the slip is on this one example. Small TA nudge from 5.0 to 4.5.
+**Verdict:** STRONG PASS. All checklist items addressed accurately. The CBO build/probe assignment, the join-order-doesn't-matter framing, the broadcast-size threshold, and the EXPLAIN ANALYZE verification path are all canonical and verified against Trino docs.
 
-**Verdict:** STRONG PASS. One small imprecision on the leading-wildcard LIKE example; the rest is exemplary. If this had been 4.75+, the federation topic would have crossed 4.5.
+### Q2 — Predicate pushdown + LIKE nuance (Trino federation / cross-source connectors)
 
-### Q3 — DROP COLUMN storage reclaim (Iceberg table maintenance)
-
-**Scores: 5.0 / 4.5 / 5.0 / 4.5 — avg 4.75 STRONG PASS**
+**Scores: 5.0 / 4.75 / 4.75 / 4.75 — avg 4.8125 STRONG PASS**
 
 What landed:
-- NOT immediate — VERIFIED. DROP COLUMN in Iceberg v2 is metadata-only (column marked dropped in schema-update; Parquet column-chunk bytes remain in existing files).
-- Lifecycle: optimize(file_size_threshold => '512MB') → expire_snapshots (7d Trino floor) → remove_orphan_files (7d) — CORRECT canonical sequence. optimize rewrites Parquet files without the dropped column; expire_snapshots ages out snapshots still referencing pre-rewrite files; remove_orphan_files reclaims unreferenced bytes from MinIO.
-- Trino 467 expire_snapshots 7d minimum retention floor enforced — VERIFIED.
-- Same-day Spark escape hatch: `CALL spark_catalog.system.expire_snapshots(table => ..., older_than => TIMESTAMP '...', retain_last => 1)` + `CALL ... remove_orphan_files` — CORRECT. Spark has no min-retention floor.
-- Storage freed ~7d after the DROP on a Trino-only stack — CORRECT operational expectation.
+- Exact equality `status = 'active'` PUSHES for any collation — CORRECT (verified against trino.io/docs/current/connector/postgresql.html: equality and inequality on textual types push by default).
+- Anchored prefix `LIKE 'alice@%'` CAN push (collation-sensitive, maps to B-tree range scan on default `C` collation; non-default collation requires experimental flag + appropriate index/COLLATE) — CORRECT NUANCE.
+- Leading-wildcard `LIKE '%@bigcorp.com'` does **NOT** push by default (no anchored prefix = no range to scan; experimental flag does NOT rescue this case) — **CORRECT** (this is the iter421 imprecision now resolved).
+- Trino pulls all rows and filters in memory for leading-wildcard LIKE — CORRECT (this is the performance pain point).
+- Fix options for leading-wildcard:
+  - `system.query()` passthrough with `pg_trgm` + GIN trigram index + similarity()
+  - Normalized `domain_name` column populated by trigger / dbt + indexed (= pushes as equality)
+  - Postgres materialized view with pre-extracted `domain` + index
+  - Full materialization to Iceberg with `domain_name` separate column
+- EXPLAIN verification: `constraint` field on TableScan node (pushed) vs Filter node above scan (not pushed) — CORRECT.
 
-**Verdict:** STRONG PASS. Small completeness nudge for not mentioning that `optimize` alone is sometimes sufficient if column chunks are the dominant byte source and the engineer is willing to wait for natural snapshot expiry — but the full lifecycle answer is the safer recommendation.
+**Verdict:** STRONG PASS. The iter421 leading-wildcard-LIKE imprecision is fully resolved with the canonical three-case framing. Zero "pushes if default collation" for leading-wildcard anywhere. Slight nudge on completeness for not explicitly mentioning the on-prem MinIO+Iceberg materialization as the preferred fix given the production stack (small applicability nudge from 5.0 to 4.75).
 
-### Q4 — Concurrent Spark+Trino writes (Iceberg concurrency model)
+### Q3 — Rollback to snapshot (Iceberg table maintenance)
 
 **Scores: 5.0 / 4.5 / 4.75 / 4.75 — avg 4.75 STRONG PASS**
 
 What landed:
-- Optimistic concurrency, Git-like analogy — CORRECT.
-- A reads snap-123, writes files, swaps metadata.json pointer with CAS → wins — CORRECT.
-- B detects stale base after writing files, retries: re-reads new snap-456, replays write plan, re-commits — CORRECT.
-- Default `commit.retry.num-retries = 4` — VERIFIED against iceberg.apache.org/docs/latest/configuration/.
-- Never corrupts — CORRECT (one writer wins, loser retries or hard-fails after exhausting retries).
-- Serializable isolation default vs snapshot isolation weaker — CORRECT per Iceberg docs.
-- Three table properties: `write.delete.isolation-level`, `write.update.isolation-level`, `write.merge.isolation-level` — VERIFIED.
-- Disjoint partitions (Spark writes 2026-05-30, Trino writes 2026-05-29) = no conflict — CORRECT (partition-spec-aware conflict detection via DataFile partition tuple in manifests).
-- Override path: Spark `ALTER TABLE ... SET TBLPROPERTIES (...)` or Trino `ALTER TABLE ... SET PROPERTIES (...)` — CORRECT engine-disambiguation.
+- `CALL iceberg.system.rollback_to_snapshot('analytics', 'events', 4823511203987654321)` positional 3-argument signature on Trino 467 — CORRECT (verified against trino.io/docs/current/connector/iceberg.html).
+- Find pre-bad snapshot via `SELECT snapshot_id, committed_at, operation FROM "events$snapshots" ORDER BY committed_at DESC` — CORRECT.
+- Rollback CREATES a new snapshot in `$snapshots` (operation = `replace` / `rollback`) pointing back at the good data files — CORRECT.
+- Bad snapshot REMAINS in history (NOT deleted, NOT current) — CORRECT (verified against Iceberg docs: "Rolling back to a previous snapshot reverts the table to an earlier state without losing history").
+- Reversible: roll-forward by calling `rollback_to_snapshot` again with the bad snapshot ID (or `set_current_snapshot`) — CORRECT.
+- Atomic metadata-only operation; no data file movement or deletion — CORRECT.
+- `expire_snapshots(7d)` later reclaims orphaned bad files; storage freed after the retention floor — CORRECT.
 
-**Verdict:** STRONG PASS. Small practical nudge for not foregrounding that the longer-running writer is more likely to be the loser in the retry race (Spark batch typically loses to Trino fast commits when both target the same partition).
+**Verdict:** STRONG PASS. All rollback semantics fully accurate. Small completeness nudge for not explicitly mentioning the alternative `set_current_snapshot` (or `iceberg.system.rollback_to_snapshot` vs `iceberg.system.set_current_snapshot` differences on Trino 467 if applicable), but the canonical answer is solid.
+
+### Q4 — Compaction + storage reclaim (Iceberg table maintenance)
+
+**Scores: 5.0 / 4.5 / 4.75 / 4.75 — avg 4.75 STRONG PASS**
+
+What landed:
+- `ALTER TABLE events EXECUTE optimize` (default file_size_threshold 100MB) — CORRECT (verified against trino.io/docs/current/connector/iceberg.html).
+- `ALTER TABLE events EXECUTE optimize(file_size_threshold => '256MB')` — CORRECT syntax.
+- WHERE clause scope: ONLY on partition columns (event_date, tenant_id) — CORRECT. Non-partition predicate in WHERE fails with error.
+- Verification via `$files` metadata table: `content = 0` (data files) count drops and avg `file_size_in_bytes` rises after compaction — CORRECT.
+- Compaction ALONE does NOT free MinIO storage — CORRECT (this is the key insight). Compaction writes new merged files but old small files remain referenced by older snapshots.
+- Sequence: `optimize` (rewrites files), then `expire_snapshots(7d)` (ages out old snapshots referencing the small files), then `remove_orphan_files(7d)` (deletes the unreferenced files from MinIO) — CORRECT canonical sequence.
+- Storage only shrinks after `remove_orphan_files` — CORRECT.
+- Trino 467 7-day retention floor enforced on `expire_snapshots` — CORRECT.
+
+**Verdict:** STRONG PASS. The "compaction alone does NOT free MinIO" insight is the critical correctness nuance and it's stated clearly. Small completeness nudge for not mentioning the same-day Spark CALL escape hatch (`older_than` + `retain_last => 1`) for engineers who can't wait 7 days, but the canonical Trino-only answer is solid.
 
 ---
 
 ## Pattern across all four answers
 
-| Q | Score | Verdict |
-|---|---|---|
-| Q1 | 4.875 | STRONG PASS — iter420 plain-TopN self-contradiction FULLY RESOLVED, zero "Trino pulls all rows" framing |
-| Q2 | 4.6875 | STRONG PASS — predicate pushdown types clean, one small imprecision on leading-wildcard LIKE |
-| Q3 | 4.75 | STRONG PASS — DROP COLUMN reclaim lifecycle + Spark escape hatch fully accurate |
-| Q4 | 4.75 | STRONG PASS — concurrent writes optimistic concurrency model fully accurate |
+| Q | Score | Topic | Verdict |
+|---|---|---|---|
+| Q1 | 4.875 | Trino federation | STRONG PASS — dynamic filtering join types, build/probe assignment, broadcast threshold, EXPLAIN ANALYZE all accurate |
+| Q2 | 4.8125 | Trino federation | STRONG PASS — iter421 leading-wildcard LIKE imprecision FULLY RESOLVED with canonical three-case framing |
+| Q3 | 4.75 | Iceberg table maintenance | STRONG PASS — rollback semantics + history retention + reversibility all accurate |
+| Q4 | 4.75 | Iceberg table maintenance | STRONG PASS — optimize + expire + remove_orphan_files sequence; "compaction alone does NOT free MinIO" insight stated |
 
-**Average 4.7656 STRONG PASS — twentieth consecutive overall PASS, +0.219 step-UP from iter420 4.547, HIGHEST overall score in iter402-421 window (matches iter413/iter415 4.625 territory and exceeds).**
+**Average 4.7969 STRONG PASS — twenty-first consecutive overall PASS, +0.0313 step-UP from iter421 4.7656, HIGHEST overall score in iter402-422 window.**
 
 **Headline outcomes:**
-- ITER420 SELF-CONTRADICTION FULLY RESOLVED in ONE iteration — Q1 4.875 STRONG, zero "Trino pulls all rows" framing anywhere.
-- Federation topic 4.4904 → 4.4925 (+0.0021) — closest to 4.5 threshold in 13 iters but STILL 0.0075 below, DOES NOT CROSS.
-- Zero new confident-inaccuracies anywhere in iter421 — myth-buster zero-confident-inaccuracy streak RESTARTED at 1.
-- Q3+Q4 table-maintenance pair both 4.75 STRONG — strongest table-maintenance contribution in recent iters.
+- ITER421 leading-wildcard-LIKE imprecision FULLY RESOLVED in ONE iteration — Q2 4.8125 STRONG, zero "pushes if default collation" framing.
+- Federation topic 4.4925 -> 4.4950 (+0.0025) — **closest to 4.5 threshold in 14 iters but STILL 0.0050 below, DOES NOT CROSS**.
+- Zero new confident-inaccuracies anywhere in iter422 — myth-buster zero-confident-inaccuracy streak ADVANCES to 2.
+- Q3+Q4 table-maintenance pair both 4.75 STRONG — sustained strong table-maintenance contribution.
 
-**Failure-mode count: 7 of prior 19 iterations** (unchanged; iter421 was a clean STRONG PASS).
-
----
-
-## Teacher actions next (iter 422)
-
-1. **MEDIUM — Trino federation threshold-push continuation.** Topic at 4.4925 / 0.0075 below threshold — the closest position to crossing in 13 iters. **Two more 4.75+ federation answers would push the topic ACROSS the 4.5 threshold.** Continue auditing r22 for remaining myth-buster gaps in unexplored angles: aggregation pushdown to Postgres (SUM/COUNT/AVG, aggregation_pushdown setting, EXPLAIN signature); cross-catalog 3-way JOIN execution location; schema-evolution-with-pushdown; OR-with-mixed-types pushdown; anchored-prefix-LIKE-vs-leading-wildcard-LIKE pushdown distinction.
-
-2. **LOW — Q2 leading-wildcard LIKE example refinement.** The iter421 Q2 imprecision (`email LIKE '%@bigcorp.com'` framed as "pushes if default collation") is small but a polished framing would explicitly distinguish:
-   - Anchored prefix LIKE 'alice@%' (collation-dependent, may push with experimental collate flag)
-   - Leading-wildcard LIKE '%@bigcorp.com' (does NOT push regardless of collation by default, range-class semantics)
-   
-   Add a 2-line callout in r22 under the LIKE-pushdown section to harden this against future probes.
-
-3. **LOW — Carry-forward backlog:** HMS->Nessie write-freeze alternative; branches-vs-expire 3rd-angle; Snapshot vs serializable phantom-row 3rd-angle; Window NULL 2nd-angle; Iceberg v3 deletion vectors timeline; MERGE rollback; OPA-override timeout; schema registry compat; JWT+OPA concurrency.
+**Failure-mode count: 7 of prior 20 iterations** (unchanged; iter422 was a clean STRONG PASS).
 
 ---
 
-## Judge probe targets next (iter 422)
+## Teacher actions next (iter 423)
 
-1. **HIGH — Federation threshold-push 7th-angle continuation.** Topic 0.0075 below threshold — two 4.75+ federation answers cross. Probe angles where r22 may have remaining gaps:
-   - "Does `SELECT customer_id, SUM(amount) FROM postgres.public.orders GROUP BY customer_id` push the aggregation to Postgres? What's the EXPLAIN signature? What's the aggregation_pushdown setting?" (aggregation pushdown).
-   - "I have a 3-way join Postgres dim + Iceberg fact + Iceberg dim — which side dominates execution and how do I read the EXPLAIN to confirm?" (cross-catalog 3-way JOIN execution location).
-   - "Does `WHERE (user_id = 123 OR email = 'a@b.com')` push the OR clause when one side is numeric and the other is VARCHAR?" (OR-with-mixed-types pushdown).
-   - "What's the difference between anchored prefix LIKE 'alice@%' and leading-wildcard LIKE '%@bigcorp.com' for pushdown to Postgres on Trino 467?" (probes the iter421 Q2 imprecision).
+1. **HIGH — Trino federation threshold-push final stretch.** Topic at 4.4950 / 0.0050 below threshold — the closest position to crossing in 14 iters. **Two 4.85+ federation answers needed to cross.** With 282 datapoints in the denominator, marginal moves are small. Audit r22 for any remaining myth-buster gaps in the LEAST-explored angles:
+   - Aggregation pushdown to Postgres (SUM/COUNT/AVG/COUNT DISTINCT, `aggregation_pushdown` session property, EXPLAIN signature)
+   - Cross-catalog 3-way JOIN execution location (which side does the join, broadcast vs partitioned with mixed connectors)
+   - OR-with-mixed-types pushdown (numeric OR VARCHAR, when does the OR push)
+   - HAVING clause pushdown (pushes only after aggregation pushdown succeeds)
+   - DECIMAL precision/scale truncation edge cases on Postgres connector
+   - Date/timestamp timezone behavior across connectors
 
-2. **HIGH — TopN-pushdown durability RE-PROBE in NEW 2nd-angle shape.** Probe whether the iter421 TopN fix carries across question phrasings: "On Trino 467 + PostgreSQL connector, write `SELECT * FROM postgres.public.orders ORDER BY created_at DESC LIMIT 50` and explain what Trino sends to Postgres and what Postgres returns" (probes whether the canonical pushed-case framing is durable across slightly different question shapes — selecting all columns instead of single column).
+2. **LOW — Q3/Q4 maintenance pair already at sustained 4.75 STRONG.** No structural changes needed; carry-forward backlog only.
 
-3. **MEDIUM — Iceberg concurrency 4th-angle continuation** carry-forward: "After 4 commit.retry retries fail, what error does Spark return and how do I handle it in production?".
-
-4. **MEDIUM — Iceberg branches-vs-expire 3rd-angle** carry-forward.
-
-5. **MEDIUM — Snapshot vs serializable phantom-row 3rd-angle** carry-forward.
-
-6. **MEDIUM — HMS->Nessie 2nd-angle for write-freeze alternative** carry-forward.
-
-7. **MEDIUM — Window NULL 2nd-angle (calendar-dim LEFT JOIN densification)** carry-forward.
+3. **LOW — Carry-forward backlog:** HMS->Nessie write-freeze; branches-vs-expire 3rd-angle; Snapshot vs serializable phantom-row 3rd-angle; Window NULL 2nd-angle; Iceberg v3 deletion vectors timeline; MERGE rollback; OPA-override timeout; schema registry compat; JWT+OPA concurrency.
 
 ---
 
-## Critical message to teacher for iter 422: durable recovery pattern + threshold-push close
+## Judge probe targets next (iter 423)
 
-The iter421 result is a clean **proof of the recovery-within-one-iteration pattern's durability**: the teacher's r22 TWO-guardrail structural fix (TOP-OF-DOC GUARDRAIL at section 0 + TOP-OF-SECTION GUARDRAIL at 3.3A, with DO-NOT-WRITE table + DISAMBIGUATION TABLE + MENTAL MODEL ANCHOR + LEADING WORKED EXAMPLE + iter420 FAILURE MODE NAMED) resolved the iter420 self-contradiction in ONE iteration. **Q1 4.875 STRONG validates the structural-fix pattern: leading canonical example + DO-NOT-WRITE banned phrasings + cite source URLs.**
+1. **HIGH — Federation threshold-push final stretch angles** (need 4.85+/4.85+ pair to cross):
+   - "Does `SELECT customer_id, SUM(amount), COUNT(*) FROM postgres.public.orders WHERE status = 'paid' GROUP BY customer_id` push aggregation to Postgres? What's the EXPLAIN signature? What's the `aggregation_pushdown` session property?" (aggregation pushdown — least-explored angle)
+   - "3-way join Postgres dim + Iceberg fact + Iceberg dim — which side dominates execution? How do I read EXPLAIN to confirm the broadcast/partitioned choice with mixed connectors?" (cross-catalog 3-way JOIN execution location)
+   - "Does `WHERE (user_id = 123 OR email = 'a@b.com')` push the OR when one side is numeric and the other is VARCHAR with potentially non-default collation?" (OR-with-mixed-types)
+   - "Does `HAVING SUM(amount) > 1000` push to Postgres? When does Trino push HAVING vs filter post-aggregation?"
 
-The recovery-within-one-iteration pattern has now resolved SEVEN consecutive confident-inaccuracy / self-contradiction failures. This is the most consistent recovery pattern in the iter402-421 window.
+2. **HIGH — TopN-pushdown durability RE-PROBE in NEW 3rd-angle shape** (sustain iter421 fix across phrasings):
+   - "On Trino 467 + Postgres connector, does `SELECT a, b, c FROM postgres.public.t ORDER BY a, b LIMIT 100` push when the ORDER BY has TWO columns instead of one? What about with NULLS FIRST / NULLS LAST?"
 
-**Federation topic is at the closest position to crossing the 4.5 threshold in 13 iterations.** Two more 4.75+ federation answers cross. The iter421 Q2 4.6875 (instead of 4.75) was the only nudge that kept the topic below threshold this iter; if the leading-wildcard LIKE example had been precise, the topic would have crossed at 4.4953. **The path to crossing is now: (1) sustain Q1-style 4.875+ on bulletproofed federation angles; (2) polish remaining myth-buster gaps in unexplored federation angles (aggregation pushdown, 3-way JOIN, OR-with-mixed-types, anchored-vs-leading-wildcard LIKE).**
+3. **MEDIUM — Iceberg branches-vs-expire 3rd-angle**: "If I create a `prod` branch and tag a snapshot, will `expire_snapshots(7d)` delete the snapshots referenced by the branch or tag?"
 
-**The pattern across iter402-421 is now fully durable:**
-- Bulletproofed content delivers 4.75+ on the targeted angle.
-- New failure modes appear in unexplored angles.
-- Recovery within one iteration via structural fix (leading canonical example + DO-NOT-WRITE callouts + disambiguation tables + cite source URLs) is a proven pattern, demonstrated across SEVEN consecutive recoveries.
-- Federation topic remains 0.0075 below the 4.5 threshold; two more sustained 4.75+ federation answers needed to cross.
+4. **MEDIUM — Iceberg concurrency 4th-angle**: "After 4 `commit.retry.num-retries` retries fail, what error does Spark return? How do I handle it in production?"
+
+5. **MEDIUM — HMS->Nessie 2nd-angle**: write-freeze alternative path
+
+6. **MEDIUM — Snapshot vs serializable phantom-row 3rd-angle**
+
+---
+
+## Critical message to teacher for iter 423: federation threshold-push final stretch
+
+The iter422 result is a clean **proof of the recovery-within-one-iteration pattern's eighth consecutive durability**: the teacher's r22 anchored-vs-leading-wildcard LIKE distinction callout resolved the iter421 Q2 leading-wildcard-LIKE imprecision in ONE iteration. **Q2 4.8125 STRONG validates the structural-fix pattern**: canonical three-case framing (exact equality / anchored prefix / leading wildcard) + explicit "experimental flag does NOT rescue leading-wildcard" callout + fix options including the production-stack-aligned Iceberg materialization.
+
+The recovery-within-one-iteration pattern has now resolved EIGHT consecutive confident-inaccuracy / nuance-imprecision failures across iter407->408, iter411->412, iter413->414, iter414->415, iter417->418, iter419->420, iter420->421, iter421->422. This is the most consistent recovery pattern in the iter402-422 window.
+
+**Federation topic is at the closest position to crossing the 4.5 threshold in 14 iterations (4.4950, just 0.0050 below).** The path to crossing is now narrow but achievable:
+- Two 4.85+ federation answers (best case 5.0+/4.875) ADD ~0.0026, crossing to 4.4976+ — STILL below
+- Two 5.0 federation answers ADD ~0.0050, crossing to 4.5001 exactly — JUST crosses
+- Realistically, the topic crosses in iter423 IFF the responder sustains 4.85+ on BOTH federation answers AND the topic-density wall doesn't keep moving the trajectory back
+
+**The pattern across iter402-422 is now fully durable:**
+- Bulletproofed content delivers 4.75+ on the targeted angle
+- New failure modes appear in unexplored angles
+- Recovery within one iteration via structural fix (leading canonical example + DO-NOT-WRITE callouts + disambiguation tables + cite source URLs) is proven across EIGHT consecutive recoveries
+- Federation topic remains 0.0050 below the 4.5 threshold; two more sustained 4.85+ federation answers needed to cross
+
+**Probe in iter423 should target the least-explored federation angles (aggregation pushdown, HAVING pushdown, 3-way JOIN, OR-with-mixed-types) where r22 may still have polish gaps that could limit the score to 4.75 instead of the 4.85+ needed to cross threshold.**
