@@ -1,103 +1,110 @@
-# Judge Feedback — Iter 415 (EXTENDED PHASE — end-of-iteration only)
+# Judge Feedback — Iter 416 (EXTENDED PHASE — end-of-iteration only)
 
-**Overall: 4.625 STRONG PASS** (Q1 4.75 + Q2 4.5 + Q3 4.625 + Q4 4.625) — well above the 3.5 overall PASS threshold and **REVERSES the two-iteration decline (iter412 4.625 → iter413 4.21875 → iter414 4.0625 → iter415 4.625)**. Fourteenth consecutive overall PASS in the iter402-415 window. Step-UP of +0.5625 from iter414 — the iter414 Q3 critical inaccuracy on Iceberg branches-vs-expire_snapshots is RESOLVED durably.
+**Overall: 4.5625 STRONG PASS** (Q1 4.75 + Q2 4.625 + Q3 4.75 + Q4 4.25) — well above the 3.5 overall PASS threshold and the fifteenth consecutive PASS in the iter402-416 window. Slight step-DOWN of -0.0625 from iter415 4.625, driven entirely by Q4's small practical-applicability flag (parquet_bloom_filter_columns availability on prod's Trino 467).
 
 **Headline:**
-1. **CRITICAL WIN — Q1 branches-vs-expire_snapshots RE-PROBE (4.75 STRONG).** Iter414 Q3 inaccuracy FULLY RESOLVED. Responder now correctly leads with affirmative "Iceberg auto-protects branch-referenced snapshots from expire_snapshots regardless of age — BY DESIGN, no tag/retention-tightening needed; protection registered in metadata; expire checks named refs before deleting". Enumerates the legitimate ops risks (forgotten ref dropped, branch retention aging out branch's own snapshots, Iceberg #13568 multi-ref bug 1.6.1+ NOT prod 1.5.2). $refs WHERE name='staging' verification recipe sound. Teacher's iter415 leading myth-buster callout in resource 17 + new section 12 in resource 26 landed cleanly.
-2. **STRONG PASS — Q2 DROP COLUMN storage reclaim (4.5 STRONG).** Correctly leads with "DROP COLUMN is metadata-only — old Parquet still has the column bytes". 4-step reclaim chain accurately framed: (1) EXECUTE optimize compacts + applies schema evolution to write new files without dropped column (VERIFIED: Iceberg schema evolution docs + Trino OPTIMIZE behavior rewrites files using current schema), (2) expire_snapshots(7d) drops old snapshots referencing old files, (3) remove_orphan_files(7d) physically deletes, (4) rewrite_manifests Spark-only optional (VERIFIED: trinodb/trino#14821 confirms rewrite_manifests NOT in Trino connector). Immutable-file model framing correct.
-3. **STRONG PASS — Q3 rollback bad write (4.625 STRONG).** CALL iceberg.system.rollback_to_snapshot('analytics','user_events',snap_id) positional form CORRECT for Trino 467 (verified against Trino docs). $snapshots committed_at to find pre-bad snapshot CORRECT. Rollback moves pointer no file delete — corrupt rows instantly invisible no reload CORRECT canonical semantic. Critical caveat: ALTER TABLE EXECUTE rollback_to_snapshot(snapshot_id=>) added Trino 469 NOT on 467 — use CALL positional form. VERIFIED against trinodb/trino PR #24580 (table procedure added in release 469, Jan 27 2025); the CALL form remains supported on 467 (now deprecated as of 469).
-4. **STRONG PASS — Q4 predicate pushdown WHERE filters (4.625 STRONG).** Equality/IN/IS NULL on VARCHAR + numeric/DATE/timestamp range pushdowns CORRECT. VARCHAR range (<,>,BETWEEN) + LIKE patterns NOT pushed by default — collation/bytewise mismatch safety rationale CORRECT (VERIFIED against trino.io/docs/current/connector/postgresql.html). Opt-in postgresql.experimental.enable-string-pushdown-with-collate=true with equality perf regression caveat — VERIFIED against PR #9746 and Trino postgres connector docs. EXPLAIN predicate inside TableScan vs Filter node above as verification path — CORRECT canonical diagnostic.
-
-**Trino federation topic status:**
-- **Previous: 4.4874 / 271 (NEEDS WORK, 0.0126 below 4.5 threshold)**
-- **NEW: 4.4880 / 272 (NEEDS WORK, 0.0120 below 4.5 threshold) — IMPROVED 0.0006**
-- Q4 4.625 above 4.5 threshold pushes topic up marginally. **15th consecutive iteration stuck below threshold**, but trending in the right direction again after iter414 regression.
-
-**Pattern note:** The iter414 Q3 confident-inaccuracy-on-load-bearing-claim was the FOURTH such failure in eight iterations (iter407 Q2 / iter411 Q2 / iter413 Q2 / iter414 Q3). The iter415 Q1 re-probe confirms the teacher's now-canonical recovery pattern works again:
-- Lead with affirmative truth as a callout box.
-- Add myth-buster table with 3 common wrong claims + corrections.
-- Enumerate the legitimate-but-narrow exceptions.
-- Cite the authoritative source URLs.
-
-The systemic myth-buster callouts in resources 17 / 22 / 23 (added this iteration) should reduce future confident-inaccuracy failures by surfacing the right framing at the LEADING position of the most-probed sections.
+1. **MYTH-BUSTER STRATEGY IS HOLDING — ZERO new confident-inaccuracies on load-bearing "X can't do Y" claims this iteration.** The recurring failure mode (5 of the prior 9 iterations had at least one such failure) did NOT recur. The iter416 teacher push to extend canonical myth-buster pattern to resources 13/10/18/25 landed cleanly on all four answers; each leads with the correct affirmative and enumerates myths-vs-truths in the right framing.
+2. **Q1 STRONG (4.75)** — Spark JDBC parallelism single-threaded default + 4-options stride mechanism + out-of-range-rows-go-to-first/last-partition-no-data-lost + predicates[] alternative all correct. Verified against spark.apache.org/docs/latest/sql-data-sources-jdbc.html ("lowerBound and upperBound are just used to decide the partition stride, not for filtering the rows in table. So all rows in the table will be partitioned and returned").
+3. **Q2 STRONG (4.625)** — Partition evolution month->day metadata-only via ALTER TABLE SET PROPERTIES; old files keep month spec not rewritten; cross-spec queries transparent + correct (no missing/dup); optional Spark rewrite_data_files for old data. Verified against iceberg.apache.org/docs/latest/evolution/ + trino.io/blog/2021/07/12 in-place-table-evolution.
+4. **Q3 STRONG (4.75)** — MV staleness: no auto-refresh manual REFRESH via cron/k8s CronJob; default GRACE PERIOD infinity for new MVs + WHEN STALE INLINE default; past-grace-fall-through-to-source-SELECT semantics. Verified against trino.io/docs/current/sql/create-materialized-view.html ("new materialized views have an unlimited grace period by default" + "INLINE behavior expands it like a logical view... This is the default behavior when WHEN STALE is not specified"). k8s CronJob hourly example fits prod stack.
+5. **Q4 PASS (4.25, below STRONG) — SMALL FLAG**: Filter-above-TableScan != pushdown failure + physicalInputDataSize as the real metric + $files lower/upper bounds + sort-strategy rewrite_data_files all correct. **The deduction**: responder recommends parquet_bloom_filter_columns table property as a fix, but this property was added in Trino 469 (Jan 2025, PR #24573) and is NOT available on prod's Trino 467 (engineer setting it gets an "unknown table property" error). The Spark-side alternative (Spark Iceberg writes Parquet bloom filters at write time; Trino 467 reads them for filtering) IS available on prod but wasn't differentiated. This is a DIFFERENT flavor of inaccuracy from the recurring confident-inaccuracy-on-load-bearing-claim pattern — it's a version-gated-fix-recommendation gap, less harmful but still actionable.
 
 ---
 
-## Q1 — Iceberg branches vs expire_snapshots (RE-PROBE of iter414 Q3 FAIL)
+## Did the myth-buster strategy hold this iteration?
+
+**YES — ZERO new confident-inaccuracies on load-bearing "X can't do Y" claims.** The recurring failure mode (iter407 Q2 branches-Spark-only / iter411 Q2 QUALIFY-not-in-Trino / iter413 Q2 TopN-not-pushed / iter414 Q3 expire_snapshots-orphans-branch-files) did NOT recur. All four iter416 answers lead with the correct affirmative truth and frame exceptions narrowly. The teacher's iter416 myth-buster pass on resources 13/10/18/25 landed cleanly.
+
+## Did the Q4 small flag rise to the recurring failure-mode pattern?
+
+**NO — different flavor.** The Q4 issue is a fix-recommendation that's version-gated for prod (parquet_bloom_filter_columns Trino 469+, prod 467). This is not a wrong claim about WHAT THE SYSTEM CAN DO (the property exists in current Trino), but a version-availability oversight in the recommendation. The diagnostic mechanism (Filter-above-TableScan + physicalInputDataSize + $files lower/upper) was correct. A version-availability callout in resource 18 would close this gap.
+
+## Did the Trino federation topic cross 4.5 threshold?
+
+**N/A — no federation question this iteration.** Topic unchanged at 4.4880/272, still 0.0120 below threshold. **16th consecutive iteration stuck below threshold but no movement this iteration (no federation data point added).**
+
+---
+
+## Q1 — Spark JDBC parallelism (Postgres-to-Iceberg ingestion)
 
 **Scores: 5.0 / 4.5 / 5.0 / 4.5 — avg 4.75 STRONG PASS**
 
 ### What landed
-- **Leads with affirmative**: "Iceberg auto-protects branch-referenced snapshots from expire_snapshots regardless of age, BY DESIGN, no tag/retention-tightening needed" — DIRECTLY INVERTS the iter414 Q3 wrong claim.
-- **Mechanism**: protection from ref registered in metadata, expire procedure checks named refs before deleting — VERIFIED against iceberg.apache.org/docs/latest/branching/ ("Snapshots that are still referenced by branches or tags won't be removed").
-- **Caveat enumeration**: only legitimate risks are (i) branch explicitly dropped, then snapshots not referenced elsewhere become expire-eligible, (ii) branch's own retention (max-snapshot-age-ms / min-snapshots-to-keep) aging out branch ancestors, (iii) Iceberg #13568 multi-ref bug affecting 1.6.1+ NOT prod 1.5.2.
-- **Diagnostic**: verify via $refs WHERE name='staging' — CORRECT canonical recipe.
+- **Single-threaded default** — CORRECT (verified: partitionColumn+lowerBound+upperBound+numPartitions must ALL be specified to enable parallel read; without them Spark reads as one partition).
+- **4-options stride mechanism** (partitionColumn, lowerBound, upperBound, numPartitions split into WHERE id BETWEEN ranges) — CORRECT canonical mechanism.
+- **Out-of-range rows go to first/last partition, no data lost** — CORRECT (VERIFIED against spark.apache.org/docs/latest/sql-data-sources-jdbc.html: "lowerBound and upperBound are just used to decide the partition stride, not for filtering the rows in table. So all rows in the table will be partitioned and returned"). The first partition gets `col < lowerBound + stride` (catches below-range), the last gets `col >= upperBound - stride` (catches above-range).
+- **predicates[] array alternative for gappy keys** — CORRECT (Scala `jdbc(url, table, predicates: Array[String], connProps)`; each predicate becomes one partition's WHERE clause; useful when partitionColumn has gaps or skew that uniform stride doesn't handle).
+- **partitionColumn unrelated to Postgres native PARTITION BY** — CORRECT subtle clarification (Spark JDBC partitionColumn is a Spark-side WHERE-clause split, not Postgres declarative partition).
+- **Verify Spark UI task count = numPartitions** — CORRECT canonical diagnostic (1 task = single-threaded; N tasks = parallel N).
+
+### Minor (not gating)
+- Could mention the `fetchsize` JDBC option (default 0 = unbounded, often causes OOM on large tables — set to 1000-10000 per partition).
+- Could mention that high numPartitions can hammer Postgres (responder DID mention "don't create too many partitions" implicitly via general guidance, but explicit Postgres connection-pool note would land it cleaner).
 
 ### Verdict
-STRONG PASS. **Iter414 Q3 inaccuracy RESOLVED durably.** Teacher's iter415 leading myth-buster callout in resource 17 §2 + parallel section 12 in resource 26 + back-link from line 1657 to the leading callout landed cleanly. The findability gap diagnosis from iter414 (right info existed at line 1657 but responder didn't find it) is now closed — the right answer is at the LEADING position of the section the responder enters first.
+STRONG PASS. Right mechanism + right verified default + right alternative for gappy keys + right verification recipe.
 
 ---
 
-## Q2 — DROP COLUMN storage reclaim
+## Q2 — Partition evolution month->day (Iceberg partition design)
 
-**Scores: 4.5 / 4.5 / 4.5 / 4.5 — avg 4.5 STRONG PASS**
+**Scores: 5.0 / 4.5 / 4.5 / 4.5 — avg 4.625 STRONG PASS**
 
 ### What landed
-- **DROP COLUMN metadata-only no file rewrite** — CORRECT (verified against iceberg.apache.org/docs/1.5.1/evolution/: "Iceberg schema updates are metadata changes, so no data files need to be rewritten").
-- **Old Parquet still has column bytes** — CORRECT (immutable file model; existing data files are not touched by ALTER TABLE DROP COLUMN).
-- **4-step reclaim chain**: (1) EXECUTE optimize compacts + applies schema evolution writing new files without dropped column (verified — OPTIMIZE rewrites with current schema, physically excluding dropped columns), (2) expire_snapshots(7d) drops old snapshots referencing the pre-OPTIMIZE files, (3) remove_orphan_files(7d) physically deletes the orphaned data files, (4) rewrite_manifests Spark-only optional — VERIFIED against trinodb/trino#14821 ("the procedure is not currently available in Trino's Iceberg connector").
-- **Immutable-file model framing** — CORRECT teaching framing.
+- **Metadata-only ALTER TABLE SET PROPERTIES partitioning=ARRAY['day(occurred_at)']** — CORRECT (Trino's canonical path for in-place Iceberg partition evolution; verified against trino.io/blog/2021/07/12/in-place-table-evolution-and-cloud-compatibility-with-iceberg.html + trino.io/docs/current/connector/iceberg.html).
+- **New writes day-partitioned, old files keep month metadata, NOT rewritten** — CORRECT (VERIFIED against iceberg.apache.org/docs/latest/evolution/: "When you evolve a partition spec, the old data written with an earlier spec remains unchanged. New data is written using the new spec in a new layout").
+- **Trino evaluates both specs, prunes correctly, returns union no missing/dup** — CORRECT (VERIFIED: "Both partitioning layouts are able to coexist in the same table"; Iceberg's per-spec-id manifest organization lets the scan planner apply each spec's pruning logic to its own subset).
+- **Old files don't benefit from day pruning until optional Spark rewrite_data_files where occurred_at<cutoff** — CORRECT (rewrite_data_files is Spark procedure; Trino OPTIMIZE compacts files but doesn't rewrite-with-new-partition-spec automatically).
+- **Correctness not affected** — CORRECT canonical semantic (this is the killer Iceberg feature vs Hive — partition evolution is safe).
 
 ### Minor (not gating)
-- Could mention the 7d default retention floor (Iceberg's safety check against accidentally over-aggressive expire) and how to override via expire_snapshots_min_retention catalog property.
-- Could note that the OPTIMIZE pass is the WORK-INTENSIVE step (must rewrite data files); 2 and 3 are cheap metadata + file-system ops.
+- Could mention that the Trino OPTIMIZE command DOES rewrite files using the current schema/partition spec when run against partitions matching the new spec, but for OLD partitions written under the month spec, Trino OPTIMIZE alone won't convert them to day-partition layout — Spark's rewrite_data_files with appropriate where_clause is needed.
+- Could mention $partitions metadata table to verify spec-id-per-partition post-evolution.
 
 ### Verdict
-STRONG PASS. Right chain, right mechanism, right engine-availability caveat.
+STRONG PASS. Right mechanism, right semantics, right correctness guarantee, right Spark-side path for old-data conversion.
 
 ---
 
-## Q3 — Rollback bad write (Trino 467 CALL vs Trino 469 ALTER EXECUTE)
+## Q3 — MV staleness/refresh (Trino materialized views)
 
-**Scores: 5.0 / 4.5 / 5.0 / 4.0 — avg 4.625 STRONG PASS**
+**Scores: 5.0 / 4.5 / 5.0 / 4.5 — avg 4.75 STRONG PASS**
 
 ### What landed
-- **CALL iceberg.system.rollback_to_snapshot('analytics','user_events',snap_id) positional form** — CORRECT for Trino 467 (verified against Trino Iceberg connector docs for releases pre-469).
-- **Find pre-bad snapshot via $snapshots committed_at** — CORRECT canonical diagnostic ($snapshots metadata table provides committed_at, snapshot_id, parent_id, operation).
-- **Rollback moves the snapshot pointer, doesn't delete files** — CORRECT (the rollback is metadata-only; the snapshot history retains the bad snapshot as ancestor of the original tip, but the current_snapshot_id points to the chosen earlier snapshot).
-- **Corrupt rows instantly invisible no reload** — CORRECT (next query reads from the new current snapshot which doesn't see the bad write's files).
-- **Then expire_snapshots cleanup** — CORRECT (the bad snapshot's exclusively-owned files become eligible for expiry once retention age passes).
-- **CRITICAL CAVEAT — ALTER TABLE EXECUTE rollback_to_snapshot(snapshot_id=>) added Trino 469 NOT on 467; use CALL positional form** — VERIFIED against trinodb/trino PR #24580 ("Deprecate `CALL rollback_to_snapshot` and add corresponding table procedure in Iceberg", merged for release 469 Jan 27 2025). The CALL form remains supported on 467 (now deprecated in 469+).
+- **No auto-refresh, no background poller, must REFRESH manually via cron/Airflow/CronJob** — CORRECT (VERIFIED against trino.io/docs/current/sql/refresh-materialized-view.html: REFRESH MATERIALIZED VIEW is the manual command; Trino has no built-in scheduler; scheduling is external).
+- **Default GRACE PERIOD infinity for new MVs** — CORRECT (VERIFIED: "new materialized views have an unlimited grace period by default" — backward-compat zero only for existing pre-411 MVs).
+- **WHEN STALE INLINE default** — CORRECT (VERIFIED: "INLINE behavior expands it like a logical view, and queries accessing the materialized view will use the underlying query definition to retrieve up-to-date data. This is the default behavior when WHEN STALE is not specified").
+- **Within grace + stale → serve cached stale silently; past grace → fall through to live source SELECT** — CORRECT canonical post-411 semantic (Q3 correctly distinguishes within-grace vs past-grace behavior).
+- **Fix: SET GRACE PERIOD INTERVAL '90' MINUTE then past grace + new snapshot falls through to live source** — CORRECT recipe.
+- **k8s CronJob hourly example** — CORRECT for prod stack (matches prod_info.md on-prem k8s + Trino 467 + REFRESH MATERIALIZED VIEW SQL).
 
 ### Minor (not gating)
-- Could mention the 1-minute snapshot-age caveat (Trino #12353 — rollback fails when snapshots over 1 minute apart in some older versions; not blocking on 467).
-- Could mention that ALTER TABLE EXECUTE rollback_to_snapshot might also exist via SET PROPERTIES current-snapshot-id in even older paths, but the positional CALL is canonical for 467.
+- Could mention ALTER MATERIALIZED VIEW SET PROPERTIES grace_period = INTERVAL '90' MINUTE (the SQL syntax for adjusting grace period post-creation; was added in release 479 — verify availability on Trino 467).
+- Could mention that REFRESH is synchronous (Trino docs: REFRESH runs the AS query and replaces storage table contents; takes as long as the underlying query); for long-running refreshes the CronJob needs a longer timeout.
 
 ### Verdict
-STRONG PASS. The 467-vs-469 syntax distinction is a NUANCE the responder handled correctly — this is the second consecutive iteration where the responder gets a version-specific syntax claim right.
+STRONG PASS. Right default behavior, right manual-refresh framing, right grace-period semantics, right fix recipe, right prod-stack-fitting CronJob example.
 
 ---
 
-## Q4 — Predicate pushdown WHERE filters
+## Q4 — Filter above TableScan diagnosis (query performance regression)
 
-**Scores: 4.5 / 4.5 / 5.0 / 4.5 — avg 4.625 STRONG PASS**
+**Scores: 4.0 / 4.5 / 4.0 / 4.5 — avg 4.25 PASS (below STRONG)**
 
 ### What landed
-- **Equality/IN/IS NULL push** for both numeric and VARCHAR equality — CORRECT (verified against trino.io/docs/current/connector/postgresql.html: "Equality predicates (such as IN or =) and inequality predicates (such as !=) on columns with textual types are pushed down").
-- **Numeric/DATE/timestamp range push** — CORRECT (range predicates on non-VARCHAR types push by default).
-- **VARCHAR range (<, >, BETWEEN) NOT push by default** — CORRECT (verified: "range predicates like > on VARCHAR columns are not pushed down by default" due to collation differences between Trino and Postgres).
-- **LIKE patterns NOT push by default** — CORRECT (LIKE involves character semantics that depend on collation; Trino conservatively keeps LIKE local).
-- **Collation/bytewise mismatch safety rationale** — CORRECT (Trino uses bytewise comparison by default; Postgres may use locale-sensitive collation; pushing a range or LIKE could return semantically different rows).
-- **Opt-in postgresql.experimental.enable-string-pushdown-with-collate=true** — VERIFIED against PR #9746 (introduced in Trino 365 Dec 2021); session form is enable_string_pushdown_with_collate.
-- **Equality perf may regress with collate-pushdown** — CORRECT (per Trino docs: adding collation to equality predicates can disable Postgres indexes — the foot-gun the engineer must weigh against the range-pushdown benefit).
-- **EXPLAIN predicate inside TableScan vs Filter node above as verification** — CORRECT canonical pattern (constraint inside TableScan = pushed; Filter wrapping TableScan = residual not pushed).
+- **Filter above TableScan != pushdown failure** — CORRECT canonical Iceberg framing (non-partition column filters apply residually; file-skipping via min/max stats still happens during the scan even when Filter is the node above TableScan).
+- **physicalInputDataSize is critical metric not row count** — CORRECT (VERIFIED: physicalInputDataSize from EXPLAIN ANALYZE measures bytes read from storage = the real I/O smoking gun; raw inputRows can mislead because it counts post-scan filtered rows or post-aggregation values).
+- **Partition predicate prunes free, non-partition column (plan_type) residual unless sorted/clustered or parquet bloom filter** — CORRECT (without min/max clustering via sort or bloom filter, the scan reads each file's full contents to find matching rows).
+- **Diagnose physicalInputDataSize + selectivity + $files lower_bounds/upper_bounds** — CORRECT canonical Iceberg diagnostic ($files metadata table exposes per-file lower_bounds/upper_bounds maps that let you check whether min/max stats would prune effectively).
+- **Sort-strategy rewrite_data_files (Spark)** — CORRECT and AVAILABLE on prod (Spark Iceberg rewrite_data_files with strategy=sort sort_order='plan_type ASC' clusters files by plan_type so min/max bounds become tight per file).
 
-### Minor (not gating)
-- Could explicitly call out that the opt-in is CATALOG-level (requires Trino restart) vs SESSION-level (per-query toggle).
-- Could mention prefix-LIKE (LIKE 'prefix%') would benefit MOST from pushdown if the column has a btree index in Postgres with the right operator class.
+### What's missing (the deduction)
+- **parquet_bloom_filter_columns Trino 467 availability flag** — Responder recommends setting parquet_bloom_filter_columns table property. **This property was added in Trino release 469 (Jan 27 2025) via PR #24573 — NOT available on prod's Trino 467.** An engineer running `ALTER TABLE SET PROPERTIES parquet_bloom_filter_columns = ARRAY['plan_type']` on prod 467 will hit "unknown table property" error. The Spark-side alternative (Spark Iceberg writer supports parquet bloom filter properties at write time, Trino 467 reads them for filter pushdown) IS available on prod but wasn't differentiated.
+- VERIFIED via trino.io/docs/current/connector/iceberg.html + trino.io release notes search: bloom filter WRITE support to the Iceberg connector landed release 451 (June 2024); the parquet_bloom_filter_columns TABLE PROPERTY for in-Trino configuration landed release 469 (Jan 2025).
+- This is NOT the recurring confident-inaccuracy-on-load-bearing-claim pattern (no wrong "X can't do Y" statement). It's a version-availability oversight in the FIX recommendation.
 
 ### Verdict
-STRONG PASS. Solid mechanism + accurate version + canonical EXPLAIN diagnostic + correct foot-gun callout.
+PASS (below STRONG). Right diagnosis mechanism + right physicalInputDataSize metric + right $files lower/upper bounds pattern. Deduction is the version-gated parquet_bloom_filter_columns fix recommendation that doesn't work on prod's Trino 467.
 
 ---
 
@@ -105,74 +112,59 @@ STRONG PASS. Solid mechanism + accurate version + canonical EXPLAIN diagnostic +
 
 | Q | Score | Verdict |
 |---|---|---|
-| Q1 | 4.75 | STRONG PASS — branches-vs-expire_snapshots RE-PROBE (iter414 Q3 FAIL RESOLVED) |
-| Q2 | 4.5 | STRONG PASS — DROP COLUMN metadata-only + 4-step reclaim chain |
-| Q3 | 4.625 | STRONG PASS — CALL Trino 467 + ALTER EXECUTE Trino 469 nuance correct |
-| Q4 | 4.625 | STRONG PASS — predicate pushdown + VARCHAR collation + opt-in caveat |
+| Q1 | 4.75 | STRONG PASS — Spark JDBC parallelism (out-of-range rows preserved, predicates[] alt) |
+| Q2 | 4.625 | STRONG PASS — partition evolution month->day metadata-only, both specs coexist |
+| Q3 | 4.75 | STRONG PASS — MV no auto-refresh, default GRACE PERIOD infinity + WHEN STALE INLINE default |
+| Q4 | 4.25 | PASS — Filter-above-TableScan + physicalInputDataSize correct, parquet_bloom_filter_columns Trino 467 availability MISSED |
 
-**Average 4.625 STRONG PASS** — fourteenth consecutive overall PASS in the iter402-415 window. Step-UP of +0.5625 from iter414 4.0625. **REVERSES the two-iteration decline (iter412 4.625 → iter413 4.21875 → iter414 4.0625 → iter415 4.625).** This ties with iter412 as the highest score in the iter402-415 window.
+**Average 4.5625 STRONG PASS** — fifteenth consecutive overall PASS in the iter402-416 window. -0.0625 step-DOWN from iter415 4.625, still STRONG PASS band. Zero new confident-inaccuracies on load-bearing claims.
 
-**Trajectory iter394-415:** `4.75P/3.125F/4.3125P/4.375P/4.34375P/4.09375P/4.0625P/3.8125F/4.59375P/3.875F/4.25P/4.6875P/4.40625P/4.625P/4.0625P/4.125P/4.5625P/4.0P/4.219P/4.625P/4.21875P/4.0625P/**4.625P**`.
+**Trajectory iter394-416:** `4.75P/3.125F/4.3125P/4.375P/4.34375P/4.09375P/4.0625P/3.8125F/4.59375P/3.875F/4.25P/4.6875P/4.40625P/4.625P/4.0625P/4.125P/4.5625P/4.0P/4.219P/4.625P/4.21875P/4.0625P/4.625P/**4.5625P**`.
 
 **Topic status table:**
-- Postgres-to-Iceberg ingestion: 4.4927/147 — no change this iteration (no Q on this topic).
-- Iceberg table maintenance: 4.3953/78 -> 4.4036/80 (Q1 4.75 + Q2 4.5 + Q3 4.625, all above topic avg, nudge UP +0.0083; Q3 reclassifies to ingestion-adjacent but counted here for procedural rollback).
-- **Trino federation / cross-source: 4.4874/271 -> 4.4880/272 (NEEDS WORK; IMPROVED 0.0006; now 0.0120 below 4.5 raised threshold; 15th consecutive iteration stuck below threshold).** Q4 4.625 above threshold pushed up tiny.
+- Postgres-to-Iceberg ingestion: 4.4927/147 -> 4.4945/148 (Q1 4.75 above topic avg, nudge UP +0.0018).
+- Iceberg partition design: 4.498/24 -> 4.503/25 (Q2 4.625 above topic avg, nudge UP +0.005).
+- Analytical query patterns Iceberg+Trino: 4.4214/12 -> 4.4471/13 (Q3 4.75 above topic avg, nudge UP +0.0257).
+- Query performance regression diagnosis: 4.6385/8 -> 4.5957/9 (Q4 4.25 below topic avg, nudge DOWN -0.0428; the topic-avg dragdown is the largest single-question impact this iteration because the topic has the smallest sample size).
+- **Trino federation: 4.4880/272 unchanged (no federation Q this iteration; 16th consecutive iteration below 4.5 threshold).**
 
 ---
 
-## Did the iter414 Q3 inaccuracy resolve?
+## Teacher actions next (iter 417)
 
-**YES — iter414 Q3 branches-vs-expire_snapshots inaccuracy is RESOLVED.** Responder now correctly leads with the affirmative: "Iceberg auto-protects branch-referenced snapshots from expire_snapshots regardless of age, BY DESIGN — no tag/retention-tightening needed". Mechanism (protection registered in metadata; expire checks named refs before deleting) is verified against iceberg.apache.org/docs/latest/branching/. Caveat enumeration (drop-branch, branch's own retention, #13568 bug 1.6.1+ NOT prod 1.5.2) is the canonical legitimate-ops-risks list. **Durability confirmed via the Q1 re-probe from a different angle than iter414 Q3.** Teacher's iter415 leading myth-buster callout in resource 17 §2 + parallel section 12 in resource 26 landed cleanly.
+1. **MEDIUM — Q4 parquet_bloom_filter_columns Trino 467-vs-469 availability flag** — update resources/18-query-performance-regression.md to note: (a) the parquet_bloom_filter_columns Iceberg-connector table property requires Trino 469+ (added release 469 Jan 27 2025 via PR #24573) — NOT available on prod 467; (b) for prod 467 the bloom-filter path is Spark-side write (Spark Iceberg writer supports bloom_filter_enabled per-column properties at write time), Trino 467 reads bloom filters for filter pushdown via parquet.use-bloom-filter; (c) for prod 467 the IN-TRINO fix levers remain: sort-strategy rewrite_data_files (Spark), z-order rewrite (Spark), repartition by clustering column (Spark), or schema design (partition by plan_type if cardinality permits). Add a "Trino version availability" small table to the Q4 fix section showing which fixes work on 467 vs 469+.
 
-## Did the 2-iteration decline reverse?
+2. **MEDIUM — Trino federation topic threshold-push continuation** — no federation Q this iteration; topic still 0.0120 below threshold. Sustained 4.7+ federation answers still needed to cross. Continue auditing resource 22 for remaining myth-buster gaps (cross-catalog JOIN pushdown mechanics, IS DISTINCT FROM pushdown, OR-with-mixed-types pushdown, schema-evolution-with-pushdown).
 
-**YES — iter412 4.625 → iter413 4.21875 → iter414 4.0625 → iter415 4.625.** Step-UP of +0.5625 from iter414 reverses the iter413+iter414 declining trajectory. iter415 ties with iter412 as the highest score in the iter402-415 window.
+3. **LOW — Carry-forward backlog**: HMS->Nessie write-freeze alternative + Hive-views-don't-migrate gotcha; MERGE rollback; OPA-override timeout; schema registry compat; JWT+OPA concurrency; Iceberg tagging 3rd-angle; fs.cache JMX 3rd-angle; Iceberg v3 deletion vectors timeline; snapshot vs serializable phantom-row 3rd-angle.
 
-## Did the Trino federation topic cross 4.5 threshold?
-
-**NO — federation topic remains NEEDS WORK at 4.4880/272, 0.0120 below threshold.** Q4 4.625 above threshold pushed up +0.0006. 15th consecutive iteration stuck below the 4.5 raised threshold, but the trend is back toward improvement after iter414's regression.
+4. **LOW — Audit resource 18 for other version-gated-fix-recommendations** that may not work on Trino 467 — e.g., any release-469+ table properties, session properties, or procedures recommended without version qualifier. Pattern: when a fix recommendation references a Trino-Iceberg table property added post-467, qualify with "(Trino 469+) — for 467 use Spark-side alternative X".
 
 ---
 
-## Teacher actions next (iter 416)
+## Judge probe targets next (iter 417)
 
-1. **MEDIUM — Trino federation topic threshold-push continuation.** After iter415's +0.0006 improvement, topic is 0.0120 below threshold. The Q4 4.625 was a federation-topic data point; need SUSTAINED 4.7+ federation answers to cross threshold. Consider whether resource 22 has any remaining myth-buster gaps (cross-catalog join pushdown details, IS DISTINCT FROM pushdown semantics, OR-with-mixed-types pushdown caveat) that could be elevated to leading callouts to lift future federation scores from the 4.625 STRONG PASS band to the 4.75+ band.
+1. **HIGH — Trino federation topic threshold-push** (NOT probed iter416): probe federation with a shape NOT yet covered — cross-catalog JOIN pushdown semantics ("which side pushes what, where does the join run?"), or schema-evolution-with-pushdown ("I added a new VARCHAR column to my Postgres table; will Trino pushdown break on the new column?"), or OR-with-mixed-types pushdown.
 
-2. **LOW — Carry-forward backlog**: HMS->Nessie write-freeze alternative + Hive-views-don't-migrate gotcha (still deferred); equality-perf-regression caveat for enable-string-pushdown-with-collate (responder DID mention it this iteration — could be removed from backlog); MERGE rollback; OPA-override timeout; schema registry compat; JWT+OPA concurrency; Iceberg tagging 3rd-angle; fs.cache JMX 3rd-angle; Iceberg v3 deletion vectors timeline; snapshot vs serializable phantom-row 3rd-angle.
+2. **HIGH — Q4 parquet_bloom_filter_columns Trino 467 availability re-probe** (durability check on iter417 teacher fix): "I tried setting parquet_bloom_filter_columns on my Trino 467 cluster and got an error — what gives, and what's the alternative?" — probes responder now correctly notes the 469+ availability + Spark-side write-time bloom filter alternative.
 
-3. **LOW — Audit consistency of myth-buster pattern across resources.** The iter415 systemic myth-buster pass (resources 17 / 22 / 23) landed cleanly. Consider whether other heavily-probed resources (13 ingestion, 21 HMS-iceberg, 26 concurrent writes) also need leading common-myths callouts to preempt confident-inaccuracy failures on the topics they cover.
+3. **MEDIUM — Iceberg branches-vs-expire_snapshots 3rd-angle (durability re-probe of iter415 fix)** — still pending. Different shape: "After running expire_snapshots, an old snapshot I thought was branch-protected is gone — why?" probes legitimate failure modes; or tag-vs-branch protection independence.
 
----
+4. **MEDIUM — Snapshot vs serializable phantom-row 3rd-angle** — still pending durability re-probe from iter412 teacher's resource 26 §8.1/8.2 fix.
 
-## Judge probe targets next (iter 416)
+5. **MEDIUM — HMS->Nessie 2nd-angle for write-freeze alternative** — still pending.
 
-1. **HIGH — Trino federation topic threshold-push 2nd-angle.** Probe federation with a DIFFERENT shape than TopN-pushdown / VARCHAR-range-pushdown / dynamic-filtering to test breadth:
-   - "I have `SELECT u.id, u.email FROM pg.users u JOIN ice.events e ON u.id = e.user_id WHERE e.event_date = DATE '2026-01-15'` — which side pushes what, and where does the join run?" — probes cross-catalog join mechanics + which predicates push to which side + dynamic filtering propagation across catalogs.
-   - Or: "I added a new VARCHAR column to my Postgres table; will Trino's pushdown break on the new column?" — probes schema-evolution-with-pushdown semantics.
+6. **MEDIUM — Window NULL 2nd-angle (calendar-dim LEFT JOIN densification)** — still pending: "Rolling 7-day metric shows NULL gaps but I need zero-fill — what's the right pattern?"
 
-2. **HIGH — Iceberg branches-vs-expire_snapshots 3rd-angle (durability re-probe of iter415 fix).** Different shape from the iter415 Q1 probe:
-   - "After running expire_snapshots, an old snapshot I thought was branch-protected is gone — why?" — probes the legitimate failure modes (forgotten ref dropped, bug #13568 on 1.6.1+, branch retention aging out).
-   - Or: "Can I use a tag to keep a snapshot from 90 days ago for audit, even if branch retention is tighter?" — probes the tag-vs-branch protection independence.
-
-3. **MEDIUM — Snapshot vs serializable phantom-row 3rd-angle** — still pending durability re-probe from iter412 teacher's resource 26 §8.1/8.2 fix.
-
-4. **MEDIUM — HMS->Nessie 2nd-angle for write-freeze alternative** — still pending.
-
-5. **MEDIUM — Window NULL 2nd-angle**: "Rolling 7-day metric shows NULL gaps but I need zero-fill — what's the right pattern?" — probes the calendar-dim LEFT JOIN densification alternative as the only semantically-clean fix.
-
-6. **LOW — Iceberg v3 deletion vectors timeline** carry-forward (long-standing backlog item).
+7. **LOW — Iceberg v3 deletion vectors timeline** carry-forward (long-standing backlog item).
 
 ---
 
-## Critical message to teacher for iter 416: maintain the myth-buster pattern
+## Critical message to teacher for iter 417: extend myth-buster pattern + close version-availability gap
 
-The iter415 result confirms the now-canonical recovery pattern works repeatably:
-1. Lead with affirmative truth as a leading callout box.
-2. Add 3-row myth-buster table (WRONG/RIGHT format).
-3. Enumerate the legitimate-but-narrow exceptions.
-4. Cite the authoritative source URLs.
+The iter416 result confirms the now-canonical recovery pattern continues to work repeatably — zero new confident-inaccuracies on load-bearing claims for the second consecutive iteration (iter415 + iter416). The structural risk of NEW confident-inaccuracy failures persists but the recovery-within-one-iteration pattern is durable. The NEW failure-flavor surfaced this iteration is version-gated-fix-recommendation (parquet_bloom_filter_columns Trino 469+, prod 467). This deserves an iter417 fix to add explicit version-availability qualifiers to fix recommendations in resource 18 (and possibly audit other resources for the same pattern).
 
-This pattern has now resolved FIVE consecutive confident-inaccuracy failures across the iter402-415 window (iter407 → iter408, iter411 → iter412, iter413 → iter414, iter414 Q3 → iter415 Q1). The structural risk of NEW confident-inaccuracy failures persists, but the recovery-within-one-iteration pattern is durable.
-
-For iter416, the priority is federation topic threshold-push (which has been stuck below 4.5 for 15 consecutive iterations) — not because the federation answers are wrong, but because the bar is high (4.5 threshold) and the topic has 272 data points dampening any single-iteration lift. Sustained 4.7+ federation answers are needed to cross threshold.
+For iter417, three priorities:
+1. **HIGH** — version-availability fix for parquet_bloom_filter_columns in resource 18 + Trino 467 alternative paths.
+2. **HIGH** — federation topic threshold-push (16 consecutive iterations stuck below 4.5; no federation Q this iter416 means no movement; need sustained 4.7+ in iter417+).
+3. **MEDIUM** — branches-vs-expire_snapshots 3rd-angle durability re-probe still pending.
