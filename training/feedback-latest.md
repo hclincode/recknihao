@@ -1,98 +1,111 @@
-# Judge Feedback — Iter 418 (EXTENDED PHASE — end-of-iteration only)
+# Judge Feedback — Iter 419 (EXTENDED PHASE — end-of-iteration only)
 
-**Overall: 4.65625 STRONG PASS** (Q1 4.75 + Q2 4.75 + Q3 4.625 + Q4 4.5) — well above the 3.5 PASS threshold and the seventeenth consecutive PASS in the iter402-418 window. **+0.28125 step-UP from iter417 4.375**, second-highest score in the iter402-418 window (tied region with iter413/iter415 4.625 highs).
+**Overall: 4.578 PASS** (Q1 4.875 + Q2 4.875 + Q3 3.9375 + Q4 4.625) — comfortably above the 3.5 PASS threshold and the eighteenth consecutive overall PASS in the iter402-419 window. **-0.078 step-down from iter418 4.65625**, but the headline is split: federation threshold-push DELIVERED on the bulletproofed content (Q1 + Q2 both at 4.875, the strongest federation pair in the topic's threshold-push history), and a NEW confident-inaccuracy returned in Q3 (self-contradiction with the responder's own r13 myth box on Spark write API).
 
 **Headline:**
-1. **ITER417 Q1 ENGINE-CONFUSION FULLY RESOLVED IN 1 ITERATION.** The Q1 durability re-probe landed cleanly: the responder now leads with the Trino-467-native two-statement recipe (`ALTER TABLE SET PROPERTIES sorted_by = ARRAY[...]` then `ALTER TABLE EXECUTE optimize(file_size_threshold => '512MB')`) AND explicitly disambiguates: "Trino 467 has NO `rewrite_data_files` procedure — that's Spark-only `CALL iceberg.system.rewrite_data_files`". The teacher's iter418 fix (resource 17 disambiguation matrix + resource 18 ENGINE-CONFUSION GUARDRAIL + resource 10 Path A/Path B restructure) is the SIXTH consecutive successful one-iteration recovery from a confident-inaccuracy failure.
-2. **MYTH-BUSTER ZERO-CONFIDENT-INACCURACY STREAK RESTARTED AT 1.** No new confident-inaccuracies appeared anywhere in iter418. Clean streak resumes; the failure-mode count remains 6 of prior 17 iterations.
-3. **Q2 STRONG (4.75)** — clean Trino-vs-Spark CALL/EXECUTE matrix, correctly framing rewrite_manifests as Spark-only on Trino 467 (optimize_manifests is 470+, NOT on prod 467).
-4. **Q3 STRONG (4.625) — federation +0.0005 nudge UP**, 18th consecutive iter below threshold but trending UP for the 4th iteration in a row.
-5. **Q4 STRONG (4.5)** — CALL positional 467 vs ALTER EXECUTE 469+ disambiguation correct; small nudge for not foregrounding Trino EXECUTE remove_orphan_files.
+1. **FEDERATION THRESHOLD-PUSH LANDED — BOTH Q1 + Q2 AT 4.875.** The teacher's iter419 bulletproofing of resource 22 (verbatim doc quotes for join-type support, dynamicFilterSplitsProcessed semantics, wait-timeout default; doc-quoted equality/inequality vs range pushdown; explicit empirical-vs-doc-quoted sourcing labels) produced the largest single-iteration federation pair in the topic's recent threshold-push history. **+0.0028 nudge UP for the federation topic (4.4894 -> 4.4922)**. Topic now 0.0078 below threshold (was 0.0106). **19th consecutive iteration below threshold but trending UP for the 5th iteration in a row.**
+2. **MYTH-BUSTER ZERO-CONFIDENT-INACCURACY STREAK BROKEN AT 1.** A NEW confident-inaccuracy appeared in Q3: the responder closed an otherwise-solid Spark JDBC parallelism recipe with `events_df.write.format("iceberg").mode("append").saveAsTable("iceberg.analytics.events")` — the EXACT legacy save() / saveAsTable API that the r13 myth box (row 7) explicitly flags as wrong. **This is a SELF-CONTRADICTION with the responder's own resource.** Failure-mode count is now 7 of prior 18 iterations.
+3. **Q4 STRONG (4.625)** — file_size_threshold semantics correctly framed as "rewrite files SMALLER than" (NOT target output size); no-Trino-target-size-knob claim verified; clean engine-disambiguation to Spark `rewrite_data_files(target-file-size-bytes => ...)` for target-size control.
 
 ---
 
 ## Critical watch items — explicit confirmations
 
-### (a) Is the iter417 Q1 ENGINE-CONFUSION RESOLVED? Did any NEW confident-inaccuracy appear?
+### (a) Did any NEW confident-inaccuracy / engine-confusion / version-gated-fix appear?
 
-**RESOLVED — YES** for Q1; **NO new confident-inaccuracies anywhere** in iter418. The responder:
-- Gave the correct Trino-467-native two-statement clustering recipe (`ALTER TABLE SET PROPERTIES sorted_by = ARRAY['plan_type ASC NULLS LAST','occurred_at ASC']` then `ALTER TABLE EXECUTE optimize(file_size_threshold => '512MB')`).
-- Explicitly said `rewrite_data_files` is Spark-only `CALL iceberg.system.rewrite_data_files` — NOT a Trino EXECUTE procedure.
-- Verified against trino.io/docs/current/connector/iceberg.html: EXECUTE registry is exactly `optimize` / `optimize_manifests` / `expire_snapshots` / `remove_orphan_files` / `drop_extended_stats`; `sorted_by` IS in the modifiable table properties list; `EXECUTE optimize` accepts ONLY `file_size_threshold`.
-- Correctly recommended $files lower/upper bounds verification (plan_lo = plan_hi means clustering succeeded).
+**YES — ONE NEW CONFIDENT-INACCURACY in Q3** (the API-confusion sub-flavor of the recurring pattern). The responder closed the JDBC parallelism recipe with:
 
-**Clean streak restarted at 1.** The teacher's disambiguation matrix in resource 17 + the GUARDRAIL callout in resource 18 + the Path A (Trino native) / Path B (Spark CALL) split in resource 10 all landed cleanly.
+```python
+events_df.write.format("iceberg").mode("append").saveAsTable("iceberg.analytics.events")
+```
+
+This is the LEGACY save() / saveAsTable API. r13's own MYTH BOX (row 7) states verbatim:
+
+> "NO — that path is the legacy `save(path)` API and doesn't work cleanly with the SparkCatalog plugin. The correct Iceberg-1.5.2 write API is the catalog-aware DataFrameWriterV2: `df.writeTo('iceberg.x.y').append()` ... The `save()` form will sometimes write to the wrong location or skip the catalog entirely."
+
+**This is a SELF-CONTRADICTION with the responder's own resource.** It is in the same family as iter417's Spark-CALL-syntax-as-Trino-EXECUTE inversion (API-confusion sub-flavor) — the resource HAS the correct answer in a load-bearing myth box, and the responder still emitted the WRONG form. An engineer running this exact code in prod gets either a silently-wrong write path (skipping the catalog), partition spec ignored, or a hard CatalogPlugin error.
+
+**Penalty applied:** Q3 technical accuracy 3.5 (from 4.5), practical applicability 3.75 (from 4.75). Avg 3.9375 LOW PASS. The READ-side mechanics of JDBC parallelism were solid — partitionColumn / lowerBound / upperBound / numPartitions / min(cores, max_connections) / index-on-partition-column gotcha all correct — but the WRITE-side closer was the failure point.
+
+**Q1, Q2, Q4: ZERO new confident-inaccuracies.** Clean for federation and compaction.
 
 ### (b) Updated Trino federation topic average
 
-**4.4889/273 -> 4.4894/274** (Q3 4.625 above 4.5 threshold, +0.0005 nudge UP). Topic now **0.0106 below** the 4.5 pass threshold. **18th consecutive iteration stuck below threshold** but trending UP for the 4th iteration in a row (iter415 4.625 → iter416 (no Q) → iter417 4.75 → iter418 4.625). Sustained 4.7+ federation answers continue to be the path to cross threshold; Q3 4.625 helped but the 4.75+ band is what creates meaningful threshold movement.
+**4.4894/274 -> 4.4922/276** (Q1 4.875 + Q2 4.875 — both well above the 4.5 threshold, +0.0028 nudge UP from the double-strong federation pair). Topic now **0.0078 below** the 4.5 pass threshold (was 0.0106 — moved 0.0028 closer). **19th consecutive iteration stuck below threshold** but trending UP for the **5th iteration in a row** (iter415 4.625 → iter417 4.75 → iter418 4.625 → iter419 [Q1 4.875 + Q2 4.875]).
 
-### (c) Trino 467 rewrite_manifests / optimize_manifests confirmation
+**Does it cross 4.5?** NO — still 0.0078 below. But the iter419 result is the strongest single-iteration federation pair in the topic's recent threshold-push history. The bulletproofed content in resource 22 (verbatim doc quotes for join-type support, dynamicFilterSplitsProcessed semantics, wait-timeout default; doc-quoted pushdown categories) delivered exactly what the strategy predicted: 4.75+ on both federation questions. Sustained 4.75+ federation answers will continue to close the remaining 0.0078 gap.
 
-**Responder's "rewrite_manifests = Spark only on Trino 467" is CORRECT for the prod 467 version.** Verified:
-- `optimize_manifests` was added in Trino release 470 (Feb 5 2025) via PR #25378.
-- Trino 467 has NO manifest-rewrite EXECUTE procedure.
-- The only manifest-rewrite path on Trino 467 is to drop to Spark `CALL iceberg.system.rewrite_manifests`.
-- The responder's prod-specific answer is precisely right; mentioning 470+ availability would have been a nice optional note but its absence is not an inaccuracy.
+### (c) Q3 SELF-CONTRADICTION verdict
+
+**The responder used the API that the resource's own myth box explicitly flags as wrong.** This is the most concerning category of failure — not "the resource didn't cover it" or "the responder confused two engines on an edge case", but "the resource has a verbatim TRUTH callout for this exact question, and the responder produced the corresponding MYTH form anyway." 
+
+Probable cause: the API form (`df.write.format("iceberg").mode("append").saveAsTable(...)`) is the dominant Spark idiom for non-Iceberg use cases (Hive, Parquet path-based), and the responder pattern-matched to the Spark-general idiom instead of pulling the Iceberg-specific form from r13's catalog-aware-DataFrameWriterV2 callout. The recovery is to make the myth box's TRUTH form more discoverable — e.g., a leading "Spark JDBC parallelism worked example" subsection in r13 that closes with the canonical `df.writeTo("iceberg.analytics.events").append()` form inline, not just in the myth box.
 
 ---
 
 ## Per-question scoring
 
-### Q1 — Sort/cluster on Trino 467 (RE-PROBE of iter417 Q1 FAIL)
+### Q1 — Dynamic filtering verification (Trino federation / cross-source connectors)
 
-**Scores: 5.0 / 4.5 / 5.0 / 4.5 — avg 4.75 STRONG PASS**
-
-**What landed:**
-- Two-statement recipe: `ALTER TABLE foo SET PROPERTIES sorted_by = ARRAY['plan_type ASC NULLS LAST','occurred_at ASC']` then `ALTER TABLE foo EXECUTE optimize(file_size_threshold => '512MB')` — VERIFIED Trino-467-valid.
-- Explicit Spark-only disambiguation for `rewrite_data_files` — RESOLVES iter417 inaccuracy.
-- `EXECUTE optimize` honors `sorted_by` table property at OPTIMIZE time, clusters rows narrow min/max within files — CORRECT (PR #14891 release 412 Feb 2023, on 467).
-- `file_size_threshold` larger than existing files (512MB default 100MB) forces full rewrite — CORRECT strategy.
-- $files lower/upper bounds verification (plan_lo = plan_hi means clustering succeeded) — CORRECT canonical diagnostic.
-
-**Verdict:** STRONG PASS — iter417 ENGINE-CONFUSION FULLY RESOLVED. Engineer running this on Trino 467 will get a clean rewrite.
-
-### Q2 — Which Iceberg maintenance procedures run in Trino vs Spark
-
-**Scores: 5.0 / 4.5 / 5.0 / 4.5 — avg 4.75 STRONG PASS**
+**Scores: 5.0 / 4.75 / 5.0 / 4.75 — avg 4.875 STRONG PASS**
 
 **What landed:**
-- Compact small files via `EXECUTE optimize` Trino YES (file_size_threshold arg only) — CORRECT.
-- `expire_snapshots` Trino YES with 7d minimum default; Spark needed for sub-7d override — CORRECT.
-- Rewrite manifests Spark-only `CALL iceberg.system.rewrite_manifests` on Trino 467 — CORRECT (optimize_manifests is Trino 470+, NOT 467).
-- `remove_orphan_files` Trino YES — CORRECT (in EXECUTE registry).
-- One-window Spark script canonical order: compact → expire → orphan → manifests with reasoning (compaction creates new snapshot, expire after same window drops pre-compaction snapshot) — CORRECT.
+- `dynamicFilterSplitsProcessed` > 0 from EXPLAIN ANALYZE VERBOSE operator stats as runtime proof — VERIFIED ("records the number of splits processed after a dynamic filter is pushed down to the table scan") against admin/dynamic-filtering.html.
+- EXPLAIN (TYPE DISTRIBUTED) shows `dynamicFilters` annotation on probe-side TableScan as plan-time proof — CORRECT.
+- Join-type support INNER + RIGHT JOIN with =/</<=/>/>=/IS NOT DISTINCT FROM + semi-join with IN — VERIFIED VERBATIM against admin/dynamic-filtering.html. LEFT OUTER and FULL OUTER explicitly do NOT fire because "all records from the left side must be returned at least once".
+- `iceberg.dynamic-filtering.wait-timeout` default 1s — VERIFIED against connector/iceberg.html. Raise to 15-30s when build-side Postgres scan is slow — CORRECT operational advice. NO session-property form on the Iceberg connector (catalog-level only) — VERIFIED.
+- Iceberg-must-be-probe-side (large fact table) framing — CORRECT (DF builds the IN-list from the small build side; probe side filters against it).
+- VARCHAR join-key caveat (high-cardinality VARCHAR domains compact to ranges and lose selectivity at the 256 default) — CORRECT.
+- IN-list-to-range compaction at 256 default mentioned — CORRECT.
 
-**Verdict:** STRONG PASS — precisely correct matrix for prod 467 specifically.
+**Verdict:** STRONG PASS. Bulletproofed content delivered the 4.75+ federation threshold-push. Engineer running this gets a complete verification stack (plan-time EXPLAIN + runtime EXPLAIN ANALYZE) + a complete debug checklist (join type / probe side / timeout / VARCHAR caveat).
 
-### Q3 — LIKE pushdown on Postgres connector
+### Q2 — Predicate pushdown categories (Trino federation / cross-source connectors)
 
-**Scores: 4.5 / 4.5 / 5.0 / 4.5 — avg 4.625 STRONG PASS**
-
-**What landed:**
-- Leading wildcard `LIKE '%@bigcorp.com'` does NOT push to Postgres, stays in Trino with full table pull + post-scan filter — CORRECT.
-- Equality VARCHAR pushes by default — CORRECT (verified against trino.io/docs/current/connector/postgresql.html).
-- Anchored `LIKE 'alice@%'` collation-dependent — CORRECT NUANCE.
-- IN pushes — CORRECT.
-- Better recommendation: rewrite to equality/IN whenever feasible — CORRECT practical guidance.
-- Experimental flag `postgresql.experimental.enable-string-pushdown-with-collate` (catalog or session) with collation-correctness risk + equality perf regression flag — VERIFIED (PR #9746 release 365 Dec 2021, on 467).
-
-**Verdict:** STRONG PASS; small TA nudge for slight imprecision around whether anchored prefix LIKE pushes without the experimental flag (in practice mostly does not, even when anchored).
-
-### Q4 — Rollback bad write (Trino 467 CALL vs Trino 469 ALTER EXECUTE)
-
-**Scores: 4.5 / 4.5 / 4.5 / 4.5 — avg 4.5 STRONG PASS**
+**Scores: 5.0 / 4.75 / 5.0 / 4.75 — avg 4.875 STRONG PASS**
 
 **What landed:**
-- `CALL iceberg.system.rollback_to_snapshot('analytics','user_events',snap_id)` positional Trino 467 — CORRECT.
-- ALTER TABLE EXECUTE rollback_to_snapshot table procedure form 469+ — CORRECT (PR #24580, release 469 Jan 27 2025).
-- $snapshots committed_at to find pre-bad snapshot — CORRECT canonical diagnostic.
-- Rollback resets current pointer; rows in bad snapshot HIDDEN not deleted; data files orphaned on MinIO — CORRECT (metadata-only operation; immutable file model).
-- Queries see old state immediately — CORRECT.
-- Cleanup via Spark `remove_orphan_files` with dry_run — VALID; small nudge for not foregrounding Trino 467's own `EXECUTE remove_orphan_files` as the primary path.
-- Can roll forward again until expire_snapshots removes bad snapshot — CORRECT.
+- = / IN / IS NULL / numeric range / date range — VERIFIED PUSH against connector/postgresql.html.
+- VARCHAR/text range does NOT push by default — VERIFIED against the same source.
+- LIKE anchored prefix framed as "MAYBE / conservative — verify via EXPLAIN" — CORRECT NUANCE. Official docs do not explicitly say anchored LIKE pushes by default; in practice it generally does NOT push without the experimental flag because LIKE is range-class semantically. The "maybe / verify with EXPLAIN" framing is exactly the right calibrated answer; an absolute "anchored LIKE pushes" would be wrong, an absolute "no LIKE pushes" would be over-conservative.
+- `postgresql.experimental.enable-string-pushdown-with-collate` (catalog + session forms) — VERIFIED (PR #9746, release 365, on 467). Correctly framed as opt-in with collation-correctness risk.
+- Always verify EXPLAIN (TYPE DISTRIBUTED) for plan-time pushdown evidence — exemplary practical guidance.
+- One-sentence model ("connector pushes equality+inequality on any type, numeric+date ranges, IS NULL; text range needs the collate flag") — clear and correct.
 
-**Verdict:** STRONG PASS; small completeness nudge for not leading with Trino EXECUTE remove_orphan_files.
+**Verdict:** STRONG PASS. Bulletproofed content delivered the 4.75+ federation threshold-push. LIKE "MAYBE" framing is the most defensible calibration of an ambiguous behavior.
+
+### Q3 — Spark JDBC parallelism (Postgres-to-Iceberg ingestion)
+
+**Scores: 3.5 / 4.5 / 3.75 / 4.0 — avg 3.9375 LOW PASS**
+
+**What landed (READ side — solid):**
+- `column` / `lowerBound` / `upperBound` / `numPartitions` — CORRECT.
+- Bounds via `SELECT min(id), max(id)` collect — CORRECT.
+- Splits as id-range BETWEEN WHERE clauses on parallel connections, no overlap — CORRECT.
+- Out-of-range rows folded to first/last partition — CORRECT.
+- numPartitions sizing = min(spark cores, Postgres max_connections budget) — CORRECT.
+- Index-on-partition-column gotcha (without an index, Postgres falls back to sequential scan per split — n times the scan cost) — CORRECT.
+
+**What FAILED (WRITE side — confident-inaccuracy):**
+- The responder closed with `events_df.write.format("iceberg").mode("append").saveAsTable("iceberg.analytics.events")` — the LEGACY save() / saveAsTable API.
+- r13's own MYTH BOX (row 7) explicitly flags this as wrong: "the legacy `save(path)` API ... doesn't work cleanly with the SparkCatalog plugin. The correct Iceberg-1.5.2 write API is the catalog-aware DataFrameWriterV2: `df.writeTo('iceberg.x.y').append()`".
+- **This is a SELF-CONTRADICTION with the responder's own resource.** It is in the API-confusion sub-flavor of the recurring confident-inaccuracy pattern.
+
+**Verdict:** LOW PASS. The read-parallelism mechanics are textbook correct, but the write-side closer is a confident-inaccuracy that an engineer would copy-paste into prod. If the read-side were the only ask, this would be a 4.75. The write-side slip drags it to LOW PASS.
+
+### Q4 — Compaction on Trino 467 (Iceberg table maintenance)
+
+**Scores: 4.75 / 4.5 / 4.75 / 4.5 — avg 4.625 STRONG PASS**
+
+**What landed:**
+- `ALTER TABLE iceberg.analytics.events EXECUTE optimize(file_size_threshold => '512MB')` syntax — VERIFIED CORRECT.
+- **file_size_threshold semantics correctly framed: "rewrite files SMALLER than" threshold, NOT a target output size** — VERIFIED against connector/iceberg.html ("All files with a size below the optional file_size_threshold parameter (default value for the threshold is 100MB) are merged"). This is the exact watch-item.
+- No Trino target-output-size knob — CORRECT (verified against current connector docs).
+- For explicit target file size drop to Spark `CALL iceberg.system.rewrite_data_files(table => '...', options => map('target-file-size-bytes', '536870912'))` — CORRECT engine-disambiguation. Clean separation Trino-EXECUTE-optimize vs Spark-CALL-rewrite_data_files; NO inversion.
+- Partition-scoped `EXECUTE optimize WHERE day = DATE '2026-06-02'` — CORRECT.
+- Nightly optimize + weekly expire_snapshots + weekly remove_orphan_files lifecycle — CORRECT.
+
+**Verdict:** STRONG PASS. Small nudge for not foregrounding the 512MB-vs-default-100MB rationale (when 512MB is appropriate vs when default 100MB is enough). file_size_threshold-as-rewrite-smaller-than is the key technical watch-item and the responder got it correctly.
 
 ---
 
@@ -100,51 +113,65 @@
 
 | Q | Score | Verdict |
 |---|---|---|
-| Q1 | 4.75 | STRONG PASS — iter417 engine-confusion FULLY RESOLVED |
-| Q2 | 4.75 | STRONG PASS — clean Trino-vs-Spark CALL/EXECUTE matrix for 467 |
-| Q3 | 4.625 | STRONG PASS — LIKE pushdown collation nuance + experimental flag risk |
-| Q4 | 4.5 | STRONG PASS — CALL positional 467 vs ALTER EXECUTE 469+ correct |
+| Q1 | 4.875 | STRONG PASS — federation threshold-push delivered (4.75+ band) |
+| Q2 | 4.875 | STRONG PASS — federation threshold-push delivered (4.75+ band) |
+| Q3 | 3.9375 | LOW PASS — NEW confident-inaccuracy on Spark write API (self-contradiction with r13 myth box) |
+| Q4 | 4.625 | STRONG PASS — file_size_threshold semantics correct + clean engine-disambiguation |
 
-**Average 4.65625 STRONG PASS** — seventeenth consecutive overall PASS, +0.28125 step-UP from iter417 4.375. **Myth-buster zero-confident-inaccuracy streak RESTARTED at 1.**
+**Average 4.578 PASS** — eighteenth consecutive overall PASS, -0.078 step-down from iter418 4.65625. **The headline is split:** the federation threshold-push DELIVERED (Q1 + Q2 both at the 4.75+ band, the strongest federation pair in the topic's threshold-push history), and a NEW confident-inaccuracy returned in Q3 (self-contradiction with the responder's own r13 myth box).
 
-**Trajectory iter394-418:** `4.75P/3.125F/4.3125P/4.375P/4.34375P/4.09375P/4.0625P/3.8125F/4.59375P/3.875F/4.25P/4.6875P/4.40625P/4.625P/4.0625P/4.125P/4.5625P/4.0P/4.219P/4.625P/4.21875P/4.0625P/4.625P/4.5625P/4.375P/**4.65625P**`.
+**Trajectory iter394-419:** `4.75P/3.125F/4.3125P/4.375P/4.34375P/4.09375P/4.0625P/3.8125F/4.59375P/3.875F/4.25P/4.6875P/4.40625P/4.625P/4.0625P/4.125P/4.5625P/4.0P/4.219P/4.625P/4.21875P/4.0625P/4.625P/4.5625P/4.375P/4.65625P/**4.578P**`.
 
 **Topic status updates:**
-- **Iceberg table maintenance: 4.4036/81 -> 4.4130/84** (Q1 4.75 + Q2 4.75 + Q4 4.5 all above topic avg, +0.0094 nudge UP from 3 STRONG PASS contributions in one iteration — strongest table-maintenance triple in many iters).
-- **Trino federation: 4.4889/273 -> 4.4894/274** (Q3 4.625 above 4.5 threshold, +0.0005 nudge UP; topic now 0.0106 below threshold; **18th consecutive iter below threshold** but trending UP for 4th iter in a row).
+- **Trino federation: 4.4894/274 -> 4.4922/276** (Q1 4.875 + Q2 4.875 both above 4.5 threshold, +0.0028 nudge UP — largest single-iteration federation movement in many iters; topic now 0.0078 below threshold, 19th consecutive iter below threshold but trending UP for 5th iter in a row).
+- **Postgres-to-Iceberg ingestion: 4.4945/148 -> 4.4907/149** (Q3 3.9375 below topic avg, -0.0038 nudge DOWN).
+- **Iceberg table maintenance: 4.4130/84 -> 4.4155/85** (Q4 4.625 above topic avg, +0.0025 nudge UP).
 
 ---
 
-## Teacher actions next (iter 419)
+## Teacher actions next (iter 420)
 
-1. **MEDIUM — Trino federation topic threshold-push continuation.** Topic 0.0106 below threshold; needs sustained 4.7+ federation answers to cross. Q3 4.625 was a STRONG federation answer but still below the 4.75+ band needed for meaningful threshold movement. Continue auditing resource 22 for any remaining myth-buster gaps that could be elevated to leading callouts (aggregation pushdown, schema-evolution-with-pushdown, OR-with-mixed-types semantics).
+1. **HIGH — Spark write API DURABILITY FIX for r13.** The Q3 self-contradiction is the most concerning failure mode this iteration. The myth box has the correct TRUTH form but the responder still emitted the MYTH form. Recovery moves:
+   - Add a LEADING worked example "Spark JDBC parallelism end-to-end recipe" subsection EARLY in r13 (before the myth box) that ends with the canonical `df.writeTo("iceberg.analytics.events").append()` form inline — so the responder pattern-matches on the worked example FIRST.
+   - Add an **API-CONFUSION GUARDRAIL** callout in r13 in the style of r18's ENGINE-CONFUSION GUARDRAIL: "When closing a Spark-to-Iceberg write recipe, the FINAL line must be `df.writeTo('iceberg.x.y').append()` / `.overwritePartitions()` / `.createOrReplace()`. NEVER `df.write.format('iceberg').mode(...).save()` or `.saveAsTable()` — those are the legacy save() path that the SparkCatalog plugin does NOT handle cleanly."
+   - Cross-reference: the myth-box row 7 should be promoted to a numbered TOP-OF-DOC callout, not just one row in the myth table.
 
-2. **LOW — Optional refinement for resource 17 §rollback section:** foreground Trino 467 `EXECUTE remove_orphan_files` as the primary cleanup path after rollback (with Spark CALL as alternative for sub-7d retention). Small nudge to make the canonical lifecycle Trino-native first.
+2. **MEDIUM — Continue Trino federation threshold-push.** Topic is 0.0078 below threshold (was 0.0106). The iter419 result PROVED that bulletproofed content delivers 4.75+ federation answers. Continue the bulletproofing pattern for the remaining federation angles likely to come up: cross-catalog 3-way JOIN execution location; aggregation pushdown to Postgres semantics; schema-evolution-with-pushdown mid-query; OR-with-mixed-types pushdown.
 
-3. **LOW — Carry-forward backlog:** HMS->Nessie write-freeze alternative; branches-vs-expire_snapshots 3rd-angle; Snapshot vs serializable phantom-row 3rd-angle; Window NULL 2nd-angle calendar-dim densification; Iceberg v3 deletion vectors timeline; MERGE rollback; OPA-override timeout; schema registry compat; JWT+OPA concurrency.
+3. **LOW — Iter418 carry-forward optional refinement still pending:** foreground Trino 467 `EXECUTE remove_orphan_files` as the primary cleanup path after rollback in r17.
 
----
-
-## Judge probe targets next (iter 419)
-
-1. **HIGH — Trino federation threshold-push 5th-angle** (different shape than iter417 DF / iter418 LIKE pushdown): cross-catalog 3-way JOIN execution location; schema-evolution-with-pushdown when Postgres ADDs a new column mid-query; OR-with-mixed-types pushdown; aggregation pushdown to Postgres semantics.
-
-2. **MEDIUM — Iceberg branches-vs-expire_snapshots 3rd-angle** — still pending: "After running expire_snapshots, an old snapshot I thought was branch-protected is gone — why?" probes legitimate failure modes.
-
-3. **MEDIUM — Snapshot vs serializable phantom-row 3rd-angle** — still pending.
-
-4. **MEDIUM — HMS->Nessie 2nd-angle for write-freeze alternative** — still pending.
-
-5. **MEDIUM — Window NULL 2nd-angle (calendar-dim LEFT JOIN densification)** — still pending.
-
-6. **LOW — Iceberg v3 deletion vectors timeline** carry-forward.
-
-7. **OPTIONAL — durability re-probe of iter418 Q1 engine-confusion fix in a NEW shape**: e.g., "I want to z-order by 3 columns on Trino 467 — what's the syntax?" probes whether responder correctly answers "Trino has no z-order at any release, drop to Spark CALL rewrite_data_files(strategy=>'sort') for sort-order" — confirms the disambiguation matrix holds under a different angle.
+4. **LOW — Carry-forward backlog:** HMS->Nessie write-freeze alternative; branches-vs-expire_snapshots 3rd-angle; Snapshot vs serializable phantom-row 3rd-angle; Window NULL 2nd-angle calendar-dim densification; Iceberg v3 deletion vectors timeline; MERGE rollback; OPA-override timeout; schema registry compat; JWT+OPA concurrency.
 
 ---
 
-## Critical message to teacher for iter 419: the engine-confusion sub-flavor is now durably resolved; federation threshold continues to be the only structural gap
+## Judge probe targets next (iter 420)
 
-The iter418 result is a clean recovery from the iter417 setback. The Q1 inaccuracy was the engine-confusion sub-flavor of the recurring confident-inaccuracy pattern (Spark CALL syntax presented as Trino EXECUTE) — and the teacher's disambiguation matrix in resource 17, the GUARDRAIL callout in resource 18, and the Path A/Path B restructure in resource 10 all landed cleanly in the durability re-probe. The myth-buster zero-confident-inaccuracy streak restarts at 1. The structural risk of NEW confident-inaccuracy failures persists (6 of prior 17 iters had one) but the recovery-within-one-iteration pattern is durable across SIX consecutive cases (iter407→408, iter411→412, iter413→414, iter414 Q3→iter415 Q1, iter417 Q1→iter418 Q1).
+1. **HIGH — Spark write API durability RE-PROBE in NEW shape.** Probe whether the iter419 Q3 API-confusion fix in r13 holds:
+   - "I have a Spark JDBC read with parallelism set up — show me the complete end-to-end recipe to write the result to Iceberg." (direct re-probe in same shape)
+   - "I want to do an idempotent backfill from Postgres to Iceberg for a single day partition — what's the Spark code?" (probes whether `.overwritePartitions()` is used, NOT `mode('overwrite').save()`)
+   - "I'm bootstrapping a new Iceberg table from a Postgres dump — Spark recipe?" (probes whether `.createOrReplace()` is used, NOT `mode('overwrite').saveAsTable()`)
 
-The only structural gap that remains is the Trino federation topic threshold-push: 18 consecutive iterations stuck below the 4.5 threshold, currently 0.0106 below. The 4-iter upward trend (iter415→416→417→418) is encouraging but the 4.75+ band is what creates meaningful threshold movement. Q3's 4.625 nudged the topic UP by 0.0005 — needs sustained 4.75+ federation answers (not 4.625) to cross within the next ~20 iters.
+2. **HIGH — Trino federation threshold-push continuation in different shape.** Topic is 0.0078 below; iter419 Q1+Q2 delivered 4.875 each. Continue with bulletproofed-content-aligned angles:
+   - Cross-catalog 3-way JOIN execution location (Postgres+Iceberg+Iceberg — which side dominates execution?)
+   - Aggregation pushdown to Postgres (when does `SUM/COUNT/AVG` push? what's the EXPLAIN signature?)
+   - Schema-evolution-with-pushdown (Postgres ADDs a new column mid-query — does the in-flight Trino plan still push the predicate?)
+
+3. **MEDIUM — Iceberg branches-vs-expire_snapshots 3rd-angle** — still pending: "After running expire_snapshots, an old snapshot I thought was branch-protected is gone — why?"
+
+4. **MEDIUM — Snapshot vs serializable phantom-row 3rd-angle** — still pending.
+
+5. **MEDIUM — HMS->Nessie 2nd-angle for write-freeze alternative** — still pending.
+
+6. **MEDIUM — Window NULL 2nd-angle (calendar-dim LEFT JOIN densification)** — still pending.
+
+7. **LOW — Iceberg v3 deletion vectors timeline** carry-forward.
+
+---
+
+## Critical message to teacher for iter 420: federation bulletproofing WORKS — extend it to the Spark write API
+
+The iter419 result is a clean **proof of concept** for the bulletproofing strategy: when the teacher loads verbatim doc quotes + explicit empirical-vs-doc-quoted sourcing labels into the resource, the responder lands 4.75+ on the question. Q1 + Q2 both at 4.875 are the strongest federation pair in the topic's recent threshold-push history.
+
+The Q3 failure is structurally different from a content gap: r13 already HAS the correct answer in the myth box, but the responder pattern-matched to the dominant Spark-general idiom (`df.write.format(...).saveAsTable(...)`) instead of the Iceberg-specific catalog-aware DataFrameWriterV2 form. The fix is **discoverability and surfacing**, not new content: promote the myth-box row 7 to a leading numbered TOP-OF-DOC callout, add an API-CONFUSION GUARDRAIL in the style of r18's ENGINE-CONFUSION GUARDRAIL, and lead r13 with a complete end-to-end worked example that closes with the canonical writeTo() form inline.
+
+The structural pattern is clear: when bulletproofed content is present and the responder uses it, the answer lands in the 4.75+ band. When a peripheral API form falls back to the dominant generic Spark/Trino idiom, a self-contradiction with the resource's own myth box appears. The recovery move is to make the correct form the **first thing the responder sees** for that API category.
