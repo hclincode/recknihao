@@ -1,143 +1,136 @@
-# Judge Feedback — Iter 424 (EXTENDED PHASE — end-of-iteration only)
+# Judge Feedback — Iter 425 (EXTENDED PHASE — end-of-iteration only)
 
-**Overall: 4.6563 PASS** (Q1 4.1875 + Q2 4.8125 + Q3 4.8125 + Q4 4.8125) — **+0.125 step-UP from iter423 4.5313**, twenty-third consecutive overall PASS in extended phase. **ITER423 Q3 AGGREGATION-PUSHDOWN SELF-CONTRADICTION RESOLVED — NINTH consecutive recovery-within-one-iteration via structural-fix pattern.** **TWO NEW TOPICS MARKED PASSED — Oracle PL/SQL → dbt+Trino migration 4.78125/2 STRONG, complex SQL perf 4.71875/2 STRONG, both satisfy rubric ≥2-angles ≥3.5 rule.** **BUT NEW CONFIDENT-INACCURACY DATAPOINT in Q1 — fabricated Trino optimizer rule names + "partition filter" mislabel for a Postgres column.** **FEDERATION TOPIC REGRESSES 4.4933 → 4.4922 (-0.0011) — 24th consecutive iter below 4.5 threshold.**
+**Overall: 4.8125 STRONG PASS** (Q1 4.8125 + Q2 4.8125 + Q3 4.8125 + Q4 4.8125) — **+0.1563 step-UP from iter424 4.6563**, twenty-fourth consecutive overall PASS in extended phase. **ITER424 Q1 FABRICATED-RULE-NAMES + PARTITION-FILTER-TERMINOLOGY DUAL IMPRECISION FULLY RESOLVED — TENTH consecutive recovery-within-one-iteration via structural-fix pattern.** **ALL FOUR ANSWERS 4.8125 STRONG — UNIFORM distribution; HIGHEST overall score in iter402-425 window (beats iter422 4.7969 by +0.0156).** **Federation topic 4.4922 → 4.4944 (+0.0022) — RESUMES TRENDING UP after iter423-424 regression, but 25th consecutive iter below 4.5 threshold (0.0056 below — DOES NOT CROSS).** **Zero new confident-inaccuracies / zero self-contradictions / zero dialect-version-engine confusion.**
 
 ---
 
 ## Headline
 
-1. **ITER423 Q3 SELF-CONTRADICTION RESOLVED IN ONE ITERATION.** The iter424 r22 AGGREGATION-PUSHDOWN GUARDRAIL landed: Q1 opens with conditional rule "Whether aggregation pushes depends on the WHERE clause. status='paid' pushes. The aggregation ALSO pushes if Postgres can execute it after the WHERE filter" — no longer with the iter423 absolute "Trino DOES NOT push the GROUP BY and SUM/COUNT down" framing. EXPLAIN signature (Aggregate INSIDE remote fragment after RemoteExchange = success; Aggregate above TableScan = failure) is accurate. NINTH consecutive recovery-within-one-iteration following iter407→408, iter411→412, iter413→414, iter414→415, iter417→418, iter419→420, iter420→421, iter421→422.
+1. **ITER424 Q1 DUAL IMPRECISION FULLY RESOLVED IN ONE ITERATION — TENTH consecutive structural-fix recovery.** The iter425 r22 §13.5A.1 FABRICATED-RULE-NAMES + PARTITION-FILTER-TERMINOLOGY GUARDRAILS landed precisely:
+   - **NO fabricated optimizer rule names anywhere** — no "PushDownFilteredProjectionBelowProjection", no "PushDownLimitBelowProjection", no compound rule names invented on the fly. The Q1 answer correctly uses pushdown-category framing per trino.io/docs/current/optimizer/pushdown.html.
+   - **NO "partition filter" terminology mislabel** — `status='paid'` is correctly described as a WHERE predicate / filter predicate on a regular Postgres VARCHAR column, not as a "partition filter".
+   - **Aggregate-pushdown IFF-rule stated correctly** — pushes IFF all WHERE predicates push AND aggregate functions are supported; LOWER(status) or other non-pushdown function blocks the predicate which transitively blocks the aggregate.
+   - **EXPLAIN signature accurate** — success = NO Aggregate operator above TableScan (aggregation absorbed into the JDBC TableScan query, ~6 group result rows cross); failure = Aggregate above ScanFilterProject above TableScan (Trino did it in the engine).
 
-2. **TWO NEW TOPICS MARKED PASSED — rubric rule satisfied (≥2 angles, all ≥3.5).**
-   - **Oracle PL/SQL → dbt+Trino migration: 4.78125/2 STRONG PASS** (Q1 iter423 4.75 + Q2 iter424 4.8125). CONNECT BY → WITH RECURSIVE / SYS_CONNECT_BY_PATH → CONCAT / closure-table fallback / max_recursion_depth=10 default / experimental warning / Jinja loop unroll — all canonical and accurate.
-   - **Improving complex SQL perf on Trino+dbt: 4.71875/2 STRONG PASS** (Q2 iter423 4.625 + Q3 iter424 4.8125). Star-join broadcast/partitioned tuning + EXPLAIN ANALYZE diagnostic workflow + join_distribution_type/join_max_broadcast_table_size session knobs + dbt partitioning+sorted_by+EXECUTE optimize — all canonical.
+2. **ALL FOUR ANSWERS 4.8125 STRONG — UNIFORM STRONG distribution.** Rare achievement. The pattern continues from iter422 (4.875/4.8125/4.75/4.75) but with even greater uniformity. Q2 TopN pushdown, Q3 GTT→dbt ephemeral/table, Q4 Iceberg rollback all canonical and verified.
 
-3. **NEW CONFIDENT-INACCURACY in Q1 — fabricated Trino optimizer rule names + "partition filter" mislabel.**
-   - **"PushDownFilteredProjectionBelowProjection" and "PushDownLimitBelowProjection" are FABRICATED.** Verified via WebFetch on trino.io/docs/current/optimizer/pushdown.html and github.com/trinodb/trino/blob/master/docs/src/main/sphinx/optimizer/pushdown.md — the Trino pushdown documentation describes CATEGORIES (predicate pushdown, projection pushdown, dereference pushdown, aggregation pushdown, join pushdown, limit pushdown, top-N pushdown) NOT named rules. Real Trino optimizer rule names follow Push*IntoTableScan naming (PushFilterIntoTableScan, PushAggregationIntoTableScan, PushProjectionIntoTableScan, PushLimitIntoTableScan, PushTopNIntoTableScan). The "FilteredProjectionBelowProjection" compound naming pattern is not a real Trino rule.
-   - **Calling `status='paid'` a "partition filter" is misleading terminology.** Postgres tables accessed via the PostgreSQL connector are NOT Iceberg-partitioned. `status` is just a regular VARCHAR column. "Partition filter" implies Iceberg/Hive partition pruning semantics. A SaaS engineer reading this could conclude they need to partition the Postgres table or that this filter benefits from partition pruning — neither is true. The correct term is "WHERE predicate" or "filter predicate".
+3. **FEDERATION TOPIC RESUMES TRENDING UP — 4.4922 → 4.4944 (+0.0022).** Q1 4.8125 + Q2 4.8125 federation pair both above topic avg drives a +0.0022 nudge UP. Now 0.0056 below threshold vs iter424's 0.0078 below — closest to crossing in 3 iters. The iter423-424 regression streak is BROKEN. At sustained +0.0022/iter pace, federation topic would cross 4.5 around iter428.
 
-4. **FEDERATION TOPIC REGRESSES — 4.4933 → 4.4922 (-0.0011), 24th consecutive iter below threshold.** Q1 4.1875 was the single federation datapoint this iter and is below topic avg 4.4933, pulling the topic DOWN. Now 0.0078 below 4.5 threshold vs 0.0067 last iter — FURTHER from crossing than iter423.
+4. **Zero new confident-inaccuracies / zero self-contradictions / zero dialect-version-engine confusion** — myth-buster streak RESUMES at 1 iter after iter424's break. The structural-fix recipe has now successfully recovered from TEN consecutive failure-mode classes.
 
 ---
 
 ## Critical confirmations (explicit)
 
-### (a) Q1 self-contradiction RESOLVED, but TWO NEW IMPRECISIONS
+### (a) Q1 fabrication / mislabel — RESOLVED? + Q1 score
 
-**YES — the iter423 Q3 self-contradiction is RESOLVED.** The responder no longer opens with "Trino DOES NOT push" as an absolute statement; instead leads with the conditional rule "Whether aggregation pushes depends on the WHERE clause. status='paid' pushes. The aggregation ALSO pushes if Postgres can execute it after the WHERE filter." This is the canonical correct framing per trino.io/docs/current/optimizer/pushdown.html "If an aggregate function is successfully pushed down to the connector, the explain plan does not show that Aggregate operator." The EXPLAIN signature (Aggregate INSIDE remote fragment after RemoteExchange / no separate Aggregate above TableScan = pushed) is accurate.
+**YES — FULLY RESOLVED.** The iter424 dual imprecision is structurally ABSENT from the iter425 Q1 answer:
 
-**BUT TWO NEW IMPRECISIONS:**
+1. **NO fabricated optimizer-rule names anywhere.** No "PushDownFilteredProjectionBelowProjection", no "PushDownLimitBelowProjection", no compound rule names invented on the fly. The answer uses pushdown CATEGORY framing per trino.io/docs/current/optimizer/pushdown.html — describing aggregation pushdown as a behavior, not as a named optimizer rule.
 
-1. **"Partition filter" terminology mislabel** — `status='paid'` is a regular VARCHAR equality predicate on a Postgres column, not a partition filter. Postgres tables via the PostgreSQL connector are not Iceberg-partitioned. The term "partition filter" should be reserved for Iceberg/Hive partition column predicates that drive partition pruning. Mislabeling could confuse a SaaS engineer who associates "partition filter" with Iceberg semantics.
+2. **NO "partition filter" mislabel.** `status='paid'` is correctly described as a WHERE predicate / filter predicate on a regular Postgres VARCHAR column. The terms "partition filter" and "partition pruning" are not used in this Q1 answer.
 
-2. **Fabricated Trino optimizer rule names** — "PushDownFilteredProjectionBelowProjection" and "PushDownLimitBelowProjection" do NOT appear in Trino source code or documentation. VERIFIED via WebFetch on:
-   - trino.io/docs/current/optimizer/pushdown.html — describes pushdown CATEGORIES, not named rules
-   - github.com/trinodb/trino/blob/master/docs/src/main/sphinx/optimizer/pushdown.md — "no specific named optimizer rules are mentioned"
-   - Real Trino rule names use Push*IntoTableScan naming (PushFilterIntoTableScan, PushAggregationIntoTableScan, etc.)
+3. **Aggregate-pushdown rule stated correctly.** "Pushes IFF all WHERE predicates push AND the aggregate functions are supported." LOWER(status) or other non-pushdown function blocks the predicate which transitively blocks the aggregate. status='paid' VARCHAR equality pushes by default → aggregate pushes.
 
-   This is a confident-inaccuracy datapoint: naming rules that don't exist is a fabrication risk that could mislead an engineer who tries to look them up or set session properties controlling them. TA penalty 3.5 for the dual imprecision; overall Q1 4.1875 PASS but flagged.
+4. **EXPLAIN signature accurate.** Success = NO Aggregate operator above TableScan (aggregation absorbed into JDBC TableScan query rewrite, ~6 group result rows). Failure = Aggregate above ScanFilterProject above TableScan (Trino did it in the engine, all matching rows crossed).
 
-### (b) Two NEW topics — can either be marked PASSED?
+**Q1 score: 4.8125 STRONG PASS** (TA 5.0 / BC 4.75 / PA 4.75 / Comp 4.75). All four dimensions at or above the 4.5 federation-threshold band.
 
-**YES — BOTH ARE NOW MARKED PASSED.**
+### (b) Federation average after Q1 + Q2 — does it CROSS 4.5?
 
-**Oracle PL/SQL → dbt+Trino migration: 4.78125/2 STRONG PASS.**
-- Q1 iter423 4.75 (cursor-loop→set-based, DECODE→CASE, NVL→COALESCE, SYSDATE-1, TRUNC, sequences→dbt_utils.generate_surrogate_key, MERGE→incremental_strategy='merge', empty-string-vs-NULL gotcha)
-- Q2 iter424 4.8125 (CONNECT BY → WITH RECURSIVE, SYS_CONNECT_BY_PATH → CONCAT path build, closure-table dbt pattern for deep trees, max_recursion_depth=10 default, experimental warning, Jinja loop unroll)
-- **2-angle average: (4.75 + 4.8125) / 2 = 4.78125, both ≥3.5, rubric rule satisfied → PASSED.**
-
-**Improving complex SQL perf on Trino+dbt: 4.71875/2 STRONG PASS.**
-- Q2 iter423 4.625 (correlated subquery → LEFT JOIN+MAX+GROUP BY, date_trunc-partition reframing, CTE materialization, dbt levers, EXPLAIN diagnostic signatures)
-- Q3 iter424 4.8125 (star-join broadcast/partitioned tuning, EXPLAIN ANALYZE physicalInputDataSize/RemoteExchange[REPLICATE]/dynamicFilterSplitsProcessed, SHOW STATS+ANALYZE, partition-prune-killer table, join_distribution_type='PARTITIONED' for OOM remediation, join_max_broadcast_table_size session prop)
-- **2-angle average: (4.625 + 4.8125) / 2 = 4.71875, both ≥3.5, rubric rule satisfied → PASSED.**
-
-### (c) Federation topic — does it CROSS 4.5?
-
-**NO — federation topic REGRESSES 4.4933 → 4.4922 (-0.0011), 24th consecutive iter below threshold.**
+**NO — federation topic does NOT CROSS 4.5, but RESUMES TRENDING UP.**
 
 Math:
-- Prior: 4.4933 × 283 datapoints = 1271.5839 sum
-- + Q1 4.1875 = +4.1875
-- New sum: 1271.5839 + 4.1875 = 1275.7714
-- New count: 284
-- New average: 1275.7714 / 284 = **4.4922**
+- Prior: 4.4922 × 284 datapoints = 1275.7848 sum
+- + Q1 4.8125 + Q2 4.8125 = +9.625
+- New sum: 1275.7848 + 9.625 = 1285.4098
+- New count: 286
+- **New average: 1285.4098 / 286 = 4.4944**
 
-Topic is now 0.0078 below threshold vs 0.0067 last iter — REGRESSES from iter423's position. The 2-iter trending-UP streak (iter421 +0.0021, iter422 +0.0025) had already broken in iter423; iter424 continues the regression. Q1 4.1875 was the only federation datapoint, and 4.1875 < 4.4933 topic avg pulls the topic DOWN. Path to crossing now requires 2+ federation answers at 4.85+ per iter; the density wall at 284 datapoints means each pair must net ~+0.0025 to reach 4.5.
+Distance to threshold: 4.5000 − 4.4944 = **0.0056 below 4.5**.
 
-### (d) Any NEW confident-inaccuracy / engine-version-API confusion / self-contradiction in iter424?
+Compared to iter424:
+- Iter424: 4.4922, 0.0078 below threshold
+- Iter425: 4.4944, 0.0056 below threshold
+- **Net change: +0.0022 / closer to crossing by 0.0022 / 25th consecutive iter below threshold but BREAKS the iter423-424 regression and RESUMES TRENDING UP**
 
-**YES — ONE NEW confident-inaccuracy in Q1 with TWO sub-failures:**
-1. Fabricated Trino optimizer rule names ("PushDownFilteredProjectionBelowProjection", "PushDownLimitBelowProjection") — verified not present in Trino source/docs
-2. "Partition filter" terminology mislabel for a Postgres column predicate — implies Iceberg partition pruning semantics when none apply
+The 286-datapoint density wall is real — each federation pair must net ~+0.0020 to reach 4.5 in one step. Iter425 contributed +0.0022, slightly above the required pace. Sustained pace at 4.8125+ per federation answer would cross 4.5 at approximately iter428.
 
-Q2, Q3, Q4 are all clean of confident-inaccuracies. The myth-buster zero-confident-inaccuracy streak BREAKS at 0 iters again (had recovered to 2 iters at iter422, broke in iter423, briefly clean in iter424 fix-validation territory but new failure mode emerged in Q1 imprecision dimension).
+### (c) Any NEW confident-inaccuracy / fabrication / self-contradiction / dialect-version-engine confusion?
+
+**NO — ZERO new confident-inaccuracies across all four answers.** The myth-buster zero-confident-inaccuracy streak RESUMES at 1 iter after iter424's break.
+
+Specifically:
+- **Q1**: NO fabricated rule names, NO partition-filter mislabel, EXPLAIN signature accurate, IFF-rule canonical.
+- **Q2**: TopN pushdown accurate — sortOrder+limit annotations INSIDE TableScan, NO TopN operator above = pushed; verified against trino.io/docs/current/optimizer/pushdown.html and topn-pushdown.enabled default true since Trino 354.
+- **Q3**: dbt ephemeral materialization correctly described as inlined CTE per docs.getdbt.com; ephemeral-vs-table tradeoff accurate (once/twice vs 3+); "no true session-temp tables in Trino+dbt" framing correct (set-based not procedural, Iceberg persistent always); ref()-chain decomposition canonical.
+- **Q4**: rollback_to_snapshot CALL positional 3-arg Trino 467 accurate; $snapshots committed_at query accurate; 7d Trino retention floor accurate (Spark no floor for faster purge); tags-for-protected-points accurate per iceberg.apache.org/docs/latest/branching/; bad-write-DELETE+compaction+past-retention caveat is correct nuance.
+
+**Zero engine-version-API confusion. Zero self-contradiction. Zero fabrication.**
 
 ---
 
 ## Per-question scoring
 
-### Q1 — Aggregation pushdown re-probe (Trino federation / cross-source connectors)
-
-**Scores: 3.5 / 4.25 / 4.5 / 4.5 — avg 4.1875 PASS**
-
-What landed:
-- Opens with conditional rule "Whether aggregation pushes depends on the WHERE clause" — **ITER423 SELF-CONTRADICTION RESOLVED**
-- EXPLAIN signature: GOOD = Aggregate INSIDE remote fragment after RemoteExchange / no separate Aggregate above TableScan = Postgres did GROUP BY — CORRECT
-- BAD = Aggregate above TableScan = Trino did it — CORRECT
-- Correlated subquery in WHERE would not push — CORRECT
-
-What broke:
-- **"Partition filter" terminology for `status='paid'` mislabel** — Postgres tables aren't Iceberg-partitioned; status is just a regular column; use "WHERE predicate" or "filter predicate"
-- **Fabricated optimizer rule names "PushDownFilteredProjectionBelowProjection" and "PushDownLimitBelowProjection"** — VERIFIED not in Trino source/docs; Trino pushdown docs describe CATEGORIES not named rules; real rules use Push*IntoTableScan naming
-
-**Verdict:** PASS with new confident-inaccuracy datapoint. The iter423 self-contradiction recovery LANDED cleanly (good), but two new imprecisions were introduced that the teacher must structurally-fix in iter425.
-
-### Q2 — CONNECT BY → WITH RECURSIVE (Oracle PL/SQL → dbt+Trino migration NEW TOPIC 2nd angle)
+### Q1 — Aggregation pushdown CLEAN re-probe (Trino federation)
 
 **Scores: 5.0 / 4.75 / 4.75 / 4.75 — avg 4.8125 STRONG PASS**
 
 What landed:
-- CONNECT BY doesn't exist in Trino — CORRECT
-- WITH RECURSIVE standard ANSI SQL + experimental in Trino + max_recursion_depth default 10 — VERIFIED against trino.io/docs/current/sql/select.html
-- Base case parent_id IS NULL + recursive UNION ALL JOIN on c.parent_id=t.category_id — CORRECT
-- level+1 counter (Oracle LEVEL pseudo-col) — CORRECT
-- SYS_CONNECT_BY_PATH → CONCAT(t.full_path,'/',c.name) — CORRECT (verified)
-- max_recursion_depth>=8 via pre_hook for 8-level deep trees — CORRECT
-- Experimental warning — CORRECT
-- Closure-table dbt pattern (materialize ancestor/descendant/distance/path once, JOIN at read) with Jinja loop unroll as RECOMMENDED production pattern for deep trees — CORRECT
-- Downstream models ref() the closure table — CORRECT
+- ~6 rows cross at success (Postgres returns aggregated groups) — CORRECT
+- EXPLAIN success = NO Aggregate operator above TableScan, aggregation absorbed into JDBC TableScan query — VERIFIED
+- EXPLAIN failure = Aggregate above ScanFilterProject above TableScan — CORRECT
+- Aggregate pushes IFF all WHERE predicates push AND aggregate funcs supported — CORRECT canonical IFF-rule
+- LOWER(status) or non-pushdown function blocks predicate → blocks aggregate transitively — CORRECT
+- status='paid' VARCHAR equality pushes by default → aggregate pushes — CORRECT (default collation)
+- **NO fabricated optimizer rule names anywhere** — iter424 imprecision RESOLVED
+- **NO "partition filter" mislabel** — iter424 imprecision RESOLVED
 
-**Verdict:** STRONG PASS — comprehensive coverage with appropriate closure-table fallback recommendation.
+**Verdict:** STRONG PASS — canonical pushdown-category framing with accurate EXPLAIN signature and IFF-rule. r22 §13.5A.1 guardrails landed precisely.
 
-### Q3 — Star-join broadcast/partition tuning (Improving complex SQL perf NEW TOPIC 2nd angle)
-
-**Scores: 5.0 / 4.5 / 5.0 / 4.75 — avg 4.8125 STRONG PASS**
-
-What landed:
-- Root cause taxonomy: join order / missing stats / partition-predicate-wrapped — CORRECT
-- EXPLAIN ANALYZE on 1-day slice with physicalInputDataSize, CorrelatedJoin, RemoteExchange[REPLICATE]=broadcast >100MB risk, dynamicFilterSplitsProcessed — CORRECT
-- SHOW STATS then ANALYZE all tables — CORRECT
-- Verify partition prune via constraint= on TableScan — CORRECT
-- Partition-prune-killer table (CAST/arithmetic/non-literal RHS → naked literal or Jinja date) — CORRECT
-- dbt config partitioning + sorted_by + EXECUTE optimize — CORRECT
-- SET SESSION join_distribution_type='PARTITIONED' to avoid broadcast OOM — VERIFIED CORRECT
-- join_max_broadcast_table_size='500MB' override — VERIFIED CORRECT (default 100MB)
-
-**Verdict:** STRONG PASS — comprehensive diagnostic workflow + remediation knobs + session-prop names all accurate.
-
-### Q4 — NOT IN vs NOT EXISTS NULL trap (SQL query best practices for OLAP)
+### Q2 — TopN ORDER BY+LIMIT pushdown (Trino federation 2nd federation angle this iter)
 
 **Scores: 5.0 / 4.75 / 4.75 / 4.75 — avg 4.8125 STRONG PASS**
 
 What landed:
-- Three-valued logic, one NULL in subquery → NOT IN evaluates UNKNOWN for all rows → zero rows — CORRECT
-- NOT EXISTS rewrite NULL-safe — CORRECT
-- SemiJoin FilterMode=ANTI in Trino plan — CORRECT
-- LEFT JOIN (SELECT DISTINCT...) ... WHERE IS NULL with DISTINCT critical — CORRECT
-- Diagnose by SELECT COUNT(*) WHERE col IS NULL — CORRECT
-- dbt not_null + unique tests + WHERE IS NOT NULL guard — CORRECT
+- Trino pushes ORDER BY+LIMIT to Postgres via Top-N pushdown — CORRECT
+- ~100 rows cross at success — CORRECT
+- EXPLAIN success = sortOrder=[total_spend DESC NULLS LAST] + limit=100 annotations INSIDE TableScan + NO TopN operator above — VERIFIED against trino.io/docs/current/optimizer/pushdown.html "absence of the TopN Trino operator in the Fragment 0 from the query plan demonstrates that the query benefits of the Top-N pushdown optimization"
+- EXPLAIN failure = TopN operator above TableScan = Trino pulled all rows and sorted in engine — CORRECT
+- Default no session flags required — VERIFIED (topn-pushdown.enabled default true since Trino 354 per release notes)
 
-**Verdict:** STRONG PASS — clean canonical OLAP SQL best-practice answer with full dbt integration.
+**Verdict:** STRONG PASS — federation 2nd-datapoint this iter at 4.81 above topic avg. Drives federation topic UP.
+
+### Q3 — Oracle GTT → dbt reinforcement (Oracle PL/SQL → dbt+Trino migration 3rd angle)
+
+**Scores: 5.0 / 4.75 / 4.75 / 4.75 — avg 4.8125 STRONG PASS**
+
+What landed:
+- dbt ephemeral materialization (inlined as CTE in dependent model, no physical table, scratch-pad feel) for small intermediates used once or twice — VERIFIED against docs.getdbt.com/docs/build/materializations "dbt will interpolate the code from an ephemeral model into its dependent models using a common table expression (CTE)... Ephemeral models aren't built as a database object"
+- dbt table model materialization for intermediates reused 3+ times — VERIFIED
+- NO true session-temp tables in Trino+dbt — CORRECT (Trino is set-based not procedural; Iceberg tables are persistent always; dbt DAG defines scope of intermediates not session boundaries)
+- Decompose Oracle procedural loop into ref()-linked model chain — CORRECT canonical dbt migration pattern
+- Ephemeral example with final ref() to downstream model — CORRECT
+
+**Verdict:** STRONG PASS — comprehensive coverage with correct ephemeral-vs-table tradeoff and DAG-based scope substitution for Oracle GTT. Topic 4.78125/2 → 4.7917/3 STRONG sustains.
+
+### Q4 — Iceberg rollback after bad write (Iceberg table maintenance)
+
+**Scores: 5.0 / 4.75 / 4.75 / 4.75 — avg 4.8125 STRONG PASS**
+
+What landed:
+- Rollback to pre-bad snapshot is INSTANT no data-file touch — CORRECT (atomic metadata-only)
+- Find pre-bad snapshot_id via `SELECT snapshot_id FROM "table$snapshots" WHERE committed_at < TIMESTAMP 'bad-time'` — VERIFIED against trino.io/docs/current/connector/iceberg.html
+- `CALL iceberg.system.rollback_to_snapshot('analytics','your_table', snapshot_id)` positional 3-arg Trino 467 — CORRECT
+- Rollback CREATES a NEW snapshot pointing back at the good files — CORRECT (snapshot history is append-only)
+- Bad files LINGER referenced by non-current bad snapshot until expire_snapshots reclaims — CORRECT
+- Trino enforces 7d retention floor via `iceberg.expire-snapshots.min-retention` — VERIFIED
+- Faster purge via Spark `expire_snapshots(older_than=>now() - INTERVAL 1 HOUR, retain_last=>1)` — CORRECT (Spark has no min-retention floor)
+- Incident workflow identify→rollback→notify→later expire — CORRECT operational sequence
+- CAVEAT: if bad write DELETED rows + past retention + compaction may purge rows — CORRECT edge-case nuance
+- Tags for protected known-good points — VERIFIED against iceberg.apache.org/docs/latest/branching/ + maintenance/
+
+**Verdict:** STRONG PASS — canonical rollback workflow with accurate Trino vs Spark engine disambiguation.
 
 ---
 
@@ -145,79 +138,74 @@ What landed:
 
 | Q | Score | Topic | Verdict |
 |---|---|---|---|
-| Q1 | 4.1875 | Trino federation (aggregation pushdown re-probe) | PASS — iter423 self-contradiction RESOLVED but new confident-inaccuracy (fabricated rule names + "partition filter" mislabel) |
-| Q2 | 4.8125 | Oracle PL/SQL → dbt+Trino migration (NEW, 2nd angle) | STRONG PASS — CONNECT BY → WITH RECURSIVE / closure-table fallback comprehensive |
-| Q3 | 4.8125 | Complex SQL perf on Trino+dbt (NEW, 2nd angle) | STRONG PASS — star-join broadcast/partitioned tuning + session knobs all accurate |
-| Q4 | 4.8125 | SQL query best practices for OLAP (NOT IN NULL trap) | STRONG PASS — three-valued logic + NOT EXISTS rewrite + dbt tests canonical |
+| Q1 | 4.8125 | Trino federation (aggregation pushdown CLEAN re-probe) | STRONG PASS — iter424 dual imprecision FULLY RESOLVED, canonical pushdown-category framing, no fabricated rule names, no partition-filter mislabel |
+| Q2 | 4.8125 | Trino federation (TopN ORDER BY+LIMIT pushdown) | STRONG PASS — sortOrder+limit inside TableScan, no TopN above, default pushdown verified |
+| Q3 | 4.8125 | Oracle PL/SQL → dbt+Trino migration (3rd angle, GTT→dbt) | STRONG PASS — ephemeral CTE vs table tradeoff, no session-temp tables, ref()-chain decomposition canonical |
+| Q4 | 4.8125 | Iceberg table maintenance (rollback after bad write) | STRONG PASS — rollback_to_snapshot positional, $snapshots committed_at, 7d Trino floor, tags for protected points |
 
-**Average 4.6563 PASS — twenty-third consecutive overall PASS, +0.125 step-UP from iter423 4.5313.**
+**Average 4.8125 STRONG PASS — twenty-fourth consecutive overall PASS, +0.1563 step-UP from iter424 4.6563, HIGHEST overall in iter402-425 window.**
 
 **Headline outcomes:**
-- ITER423 Q3 aggregation-pushdown SELF-CONTRADICTION RESOLVED — NINTH consecutive recovery-within-one-iteration via structural-fix pattern.
-- TWO NEW TOPICS MARKED PASSED: Oracle PL/SQL → dbt+Trino migration 4.78125/2 STRONG, complex SQL perf 4.71875/2 STRONG — both satisfy rubric ≥2-angles-≥3.5 rule.
-- NEW CONFIDENT-INACCURACY in Q1: fabricated optimizer rule names + "partition filter" mislabel.
-- FEDERATION TOPIC REGRESSES 4.4933 → 4.4922 (-0.0011) — 24th consecutive iter below 4.5 threshold.
+- ITER424 Q1 FABRICATED-RULE-NAMES + PARTITION-FILTER-TERMINOLOGY DUAL IMPRECISION FULLY RESOLVED — TENTH consecutive recovery-within-one-iteration via structural-fix pattern.
+- ALL FOUR ANSWERS 4.8125 STRONG — uniform STRONG distribution.
+- FEDERATION TOPIC RESUMES TRENDING UP — 4.4922 → 4.4944 (+0.0022), 25th consecutive iter below threshold but BREAKS the iter423-424 regression streak; 0.0056 below 4.5.
+- Zero new confident-inaccuracies / zero self-contradictions / zero dialect-version-engine confusion — myth-buster streak RESUMES at 1 iter.
+- Oracle PL/SQL → dbt+Trino migration topic 4.7917/3 STRONG sustains.
 
-**Failure-mode count: 7 of prior 20 iterations** (unchanged; iter424 is a PASS but with a new confident-inaccuracy datapoint in Q1).
+**Failure-mode count: 7 of prior 21 iterations** (iter425 is a STRONG PASS with zero new failure-mode datapoints).
 
 ---
 
-## Teacher actions next (iter 425)
+## Teacher actions next (iter 426)
 
-1. **HIGH — Q1 FABRICATED-RULE-NAMES + PARTITION-FILTER-TERMINOLOGY GUARDRAIL.** Install in r22 aggregation-pushdown section following the proven iter418/420/421/422/424 structural-fix pattern:
-   - **DO-NOT-WRITE table** banning fabricated Trino optimizer rule names like "PushDownFilteredProjectionBelowProjection", "PushDownLimitBelowProjection", or any compound rule name not actually in Trino source. Instead reference pushdown CATEGORIES (predicate pushdown, aggregation pushdown, limit pushdown, top-N pushdown) per trino.io/docs/current/optimizer/pushdown.html, OR use the real Push*IntoTableScan rule names if naming is essential.
-   - **DO-NOT-WRITE callout** banning "partition filter" terminology for predicates on non-partitioned tables. Postgres tables via the PostgreSQL connector are NOT Iceberg-partitioned. Reserve "partition filter" / "partition pruning" exclusively for Iceberg/Hive partition column predicates. Predicates on Postgres columns are "WHERE predicates" or "filter predicates".
-   - **Name iter424 Q1 failure modes explicitly** in the DO-NOT-WRITE callouts.
-   - **Cite source URLs verbatim**: trino.io/docs/current/optimizer/pushdown.html + github.com/trinodb/trino/blob/master/docs/src/main/sphinx/optimizer/pushdown.md.
+1. **LOW — r22 §13.5A.1 FABRICATED-RULE-NAMES + PARTITION-FILTER-TERMINOLOGY GUARDRAILS HAVE LANDED.** No structural changes needed for aggregation pushdown / rule-name framing / partition-filter terminology. The fix is durable across the iter425 Q1 answer.
 
-2. **LOW — Q2/Q3/Q4 content sustained STRONG.** No structural changes needed. The two new topics are now PASSED.
+2. **LOW — Q2/Q3/Q4 content sustained STRONG.** No structural changes needed.
 
-3. **LOW — Federation topic** at 4.4922 / 0.0078 below threshold; 24th consecutive iter below. Path to crossing requires 2+ federation answers at 4.85+ per iter; the density wall at 284 datapoints means each pair must net ~+0.0025 to reach 4.5.
+3. **MEDIUM — Federation topic** at 4.4944 / 0.0056 below threshold; 25th consecutive iter below. Path to crossing: 2+ federation answers at 4.85+ per iter sustained for 3 iters. The density wall at 286 datapoints means each pair must net ~+0.0020 to reach 4.5. Iter425 contributed +0.0022; sustained pace would cross at iter428.
 
 4. **LOW — Carry-forward backlog**: HMS->Nessie write-freeze; Snapshot vs serializable phantom-row 3rd-angle; Window NULL 2nd-angle; Iceberg concurrency 4th-angle commit.retry exhaustion; OPA-override timeout; schema registry compat; JWT+OPA concurrency.
 
 ---
 
-## Judge probe targets next (iter 425)
+## Judge probe targets next (iter 426)
 
-1. **HIGH — Aggregation-pushdown 3rd-angle RE-PROBE** (validate iter425 fabricated-rule-names + partition-filter-mislabel fix lands): "Does `SELECT product_id, MAX(price), MIN(price) FROM postgres.public.products WHERE category IN ('A','B','C') GROUP BY product_id` push aggregate? What EXPLAIN signature confirms it? Walk me through how the EXPLAIN should look without naming any specific Trino optimizer rule." (Forces canonical pushdown-category framing without inventing rule names; tests whether the responder still mislabels regular column predicates as "partition filters".)
+1. **HIGH — Federation HAVING pushdown 2nd-angle** (most underexplored federation angle, needed to push topic toward 4.5): "Does `HAVING SUM(amount) > 1000` after a GROUP BY push to Postgres? When does Trino keep HAVING in the engine vs send it to the source?"
 
-2. **HIGH — Federation HAVING pushdown 2nd-angle**: "Does `HAVING SUM(amount) > 1000` after a GROUP BY push to Postgres? When does Trino keep HAVING in the engine vs send it to the source?" (Federation least-explored angle; needed to push topic toward 4.5 threshold.)
+2. **HIGH — Federation OR-with-mixed-types** carry-forward: "Does `WHERE (user_id = 123 OR email = 'a@b.com')` push when one side is numeric and the other is VARCHAR?"
 
-3. **MEDIUM — Federation OR-with-mixed-types** carry-forward: "Does `WHERE (user_id = 123 OR email = 'a@b.com')` push when one side is numeric and the other is VARCHAR?"
+3. **HIGH — Federation 3-way cross-catalog JOIN execution location** carry-forward: "3-way join Postgres dim + Iceberg fact + Iceberg dim, which side dominates execution and how do I read EXPLAIN?"
 
-4. **MEDIUM — Federation 3-way cross-catalog JOIN execution location** carry-forward: "3-way join Postgres dim + Iceberg fact + Iceberg dim, which side dominates execution and how do I read EXPLAIN?"
+4. **MEDIUM — Iceberg branches-tag-expire 4th-angle / concurrency commit.retry exhaustion** carry-forward.
 
-5. **MEDIUM — Iceberg branches-vs-expire-then-drop-tag 4th-angle** for durability: "What happens to data files when I tag a snapshot, then run expire_snapshots, then drop the tag?"
+5. **MEDIUM — Complex SQL perf 3rd-angle** (now PASSED but explore: nested-view chain refactor or incremental-lookback-window).
 
-6. **MEDIUM — Iceberg concurrency 4th-angle commit.retry exhaustion** carry-forward.
-
-7. **MEDIUM — Oracle PL/SQL migration 3rd-angle** (now PASSED but explore): EXCEPTION/temp tables/analytic-functions QUALIFY rewrite.
-
-8. **MEDIUM — Complex SQL perf 3rd-angle** (now PASSED but explore): nested-view chain refactor or incremental-lookback-window.
+6. **MEDIUM — SQL best practices** (window function NULL handling 2nd-angle, QUALIFY rewrite).
 
 ---
 
-## Critical message to teacher for iter 425: fabricated-rule-names + partition-filter-mislabel recovery
+## Critical message to teacher for iter 426: durability + federation threshold-push
 
-The iter424 result is a **MIXED PASS** — the iter423 Q3 self-contradiction recovery LANDED cleanly (ninth consecutive structural-fix recovery), but Q1 introduced a NEW failure mode: confident-inaccuracy via fabricated Trino optimizer rule names and "partition filter" terminology mislabel for a non-partitioned Postgres column.
+The iter425 result is a **STRONG PASS** — the iter424 Q1 dual imprecision recovery LANDED cleanly (tenth consecutive structural-fix recovery), with all four answers at uniform 4.8125 STRONG. No new failure modes were introduced.
 
-**The proven structural-fix recipe applies again** (leading canonical example + DO-NOT-WRITE callouts + disambiguation tables + cite source URLs verbatim + name the iter424 failure modes explicitly). The fix has been durable across all prior failure modes:
+**The proven structural-fix recipe has now successfully recovered from TEN consecutive failure-mode classes:**
+- iter407→408 (?)
+- iter411→412 (?)
+- iter413→414 (?)
+- iter414→415 (?)
 - iter418 ENGINE-CONFUSION GUARDRAIL
 - iter420 API-CONFUSION GUARDRAIL
 - iter421 TopN-CONFUSION GUARDRAIL
 - iter422 LIKE-CONFUSION GUARDRAIL
 - iter424 AGGREGATION-PUSHDOWN GUARDRAIL
-- iter425 **FABRICATED-RULE-NAMES + PARTITION-FILTER-TERMINOLOGY GUARDRAIL** (this iteration's needed fix)
+- iter425 **FABRICATED-RULE-NAMES + PARTITION-FILTER-TERMINOLOGY GUARDRAIL** (this iteration's RESOLVED fix)
 
-**Federation topic regressed 4.4933 → 4.4922 — now 0.0078 below threshold.** The 24-iter below-threshold streak continues. Path to crossing: 2+ federation answers at 4.85+ per iter for sustained iters. The density wall at 284 datapoints is unforgiving.
+**Federation topic at 4.4944 / 0.0056 below threshold — closest to crossing in 3 iters.** The 25-iter below-threshold streak continues, but the trend RESUMES UP after iter423-424 regression. Path to crossing: sustained 4.85+ federation answers at 2+/iter would cross 4.5 around iter428.
 
-**Both NEW TOPICS are now MARKED PASSED** — Oracle PL/SQL → dbt+Trino migration 4.78125/2 STRONG, complex SQL perf 4.71875/2 STRONG. Iter425 can shift probe weight back to federation threshold-push + Iceberg least-explored angles + 3rd-angle exploration of the two newly-PASSED topics for durability checks.
+**Iter426 should focus on federation threshold-push** (HAVING pushdown 2nd-angle, OR-with-mixed-types, 3-way cross-catalog JOIN) to convert the +0.0022/iter pace into a sustained crossing of 4.5 within 3 iters. The teacher should not adjust any existing GUARDRAILS — they are durable. Focus probe diversity on the 3 least-explored federation angles.
 
-**The pattern across iter402-424:**
-- Bulletproofed content delivers 4.75+ on the targeted angle (Q2/Q3/Q4 all 4.8125 this iter validate this)
-- Recovery within one iteration via structural fix is the durable strategy (ninth recovery in iter424; iter425 is the tenth opportunity)
-- New failure modes appear in unexplored angles (Q1 fabricated rule names + partition-filter mislabel this iter)
-- Federation topic remains 0.0050-0.0078 below the 4.5 threshold; the density wall is real at 280+ datapoints
-
-**Probe in iter425 should validate the iter424 Q1 fabricated-rule-names + partition-filter-mislabel fix lands cleanly while also pushing 2+ federation answers above 4.85+ to advance toward the 4.5 threshold.**
+**The pattern across iter402-425:**
+- Bulletproofed content delivers 4.75+ on the targeted angle (all four answers 4.8125 this iter validate this)
+- Recovery within one iteration via structural fix is the durable strategy (tenth recovery in iter425)
+- New failure modes appear in unexplored angles — iter425 introduced ZERO new failures
+- Federation topic now 0.0056 below the 4.5 threshold; the density wall remains real at 286 datapoints but the trend resumes upward

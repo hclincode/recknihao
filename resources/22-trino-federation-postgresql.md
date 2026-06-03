@@ -8395,7 +8395,71 @@ Caveats for `system.query()` (same as elsewhere in this doc — see §9.4 for th
 > - trino.io/docs/current/optimizer/pushdown.html — *"If an aggregate function is successfully pushed down to the connector, the explain plan does not show that `Aggregate` operator."*
 > - trino.io/docs/current/connector/postgresql.html — supported-aggregates list (16 functions) + predicate pushdown rules (VARCHAR equality pushes by default; range/LIKE on VARCHAR requires `enable-string-pushdown-with-collate=true` for non-default collations).
 
-**The single canonical statement.** `SELECT customer_id, SUM(amount), COUNT(*), AVG(amount) FROM app_pg.public.orders WHERE status = 'paid' GROUP BY customer_id` pushes aggregation to PostgreSQL **when the WHERE predicate also pushes** (here `status = 'paid'` is a VARCHAR equality, pushes). Postgres runs the entire `SELECT customer_id, SUM(amount), COUNT(*), AVG(amount) FROM public.orders WHERE status = 'paid' GROUP BY customer_id` and returns one row per `customer_id` over JDBC. Trino streams the already-aggregated rows.
+> **FABRICATED-RULE-NAMES GUARDRAIL — read this BEFORE you name any "optimizer rule" in an answer.** (Added iter425 after iter424 Q1 failure mode: responder invented `PushDownFilteredProjectionBelowProjection` and `PushDownLimitBelowProjection` — neither exists in Trino source or docs.)
+>
+> > **DO NOT WRITE: Never cite specific optimizer-rule class names for pushdown — Trino docs describe pushdown CATEGORIES, not named rules. Describe the category + the EXPLAIN signature (operator ABSENT = pushed) instead.**
+>
+> **The seven official pushdown CATEGORIES** per trino.io/docs/current/optimizer/pushdown.html (verbatim) — these are the ONLY pushdown labels you may use in answers:
+>
+> 1. Predicate pushdown
+> 2. Projection pushdown
+> 3. Dereference pushdown
+> 4. Aggregation pushdown
+> 5. Join pushdown
+> 6. Limit pushdown
+> 7. Top-N pushdown
+>
+> **DO-NOT-WRITE table — fabricated / invented rule names that DO NOT EXIST in Trino source or docs:**
+>
+> | DO NOT WRITE (banned rule name) | Why it's wrong | WRITE THIS INSTEAD |
+> |---|---|---|
+> | **"PushDownFilteredProjectionBelowProjection"** (iter424 Q1 failure mode) | NOT A REAL RULE. Verified via WebFetch on trino.io/docs/current/optimizer/pushdown.html — the page lists pushdown CATEGORIES, not named rules. No such compound name exists in github.com/trinodb/trino source. | "Predicate pushdown (or projection pushdown) — verify via EXPLAIN: the `Filter` / `Project` operator is ABSENT above the `TableScan` when it pushed, or PRESENT when it didn't." |
+> | **"PushDownLimitBelowProjection"** (iter424 Q1 failure mode) | NOT A REAL RULE. Same WebFetch verification — no such rule name in Trino source. | "Limit pushdown — verify via EXPLAIN: the `Limit` operator is ABSENT above the `TableScan` when it pushed; the `TableScan`'s synthetic query contains `LIMIT N`." |
+> | Any other **"PushDownXBelowY" / "PushXThroughY" / "PushDownFilteredX" compound name** | The compound naming pattern is not how Trino exposes pushdown in the public docs. Internal Trino rules (in `io.trino.sql.planner.iterative.rule.*`) do exist and follow `Push*IntoTableScan` naming (`PushFilterIntoTableScan`, `PushAggregationIntoTableScan`, `PushProjectionIntoTableScan`, `PushLimitIntoTableScan`, `PushTopNIntoTableScan`), but these are implementation details — **do NOT cite them in answers** unless the question is specifically about Trino internals AND you have a verified source URL. | Use the pushdown CATEGORY name (from the seven-item list above) + EXPLAIN signature. Operator-ABSENT means pushed; operator-PRESENT above `TableScan` means not pushed. |
+> | "Aggregation pushdown is implemented by the `PushAggregateThroughExchange` rule" / any specific named-rule explanation | Even if such a rule name exists internally, you don't need it to answer "does X push?" — answer with category + EXPLAIN signature, which is what the SaaS engineer can actually verify on their cluster. | "Aggregation pushdown fires when the IFF rule holds (§13.5A.1); verify by checking EXPLAIN — the `Aggregate` operator is ABSENT above the `TableScan` if it pushed." |
+>
+> **WHY this rule exists.** A SaaS engineer who reads "PushDownFilteredProjectionBelowProjection" will try to grep Trino source / set a session property / look up the rule in docs and find NOTHING. They lose trust in the answer. **Always describe pushdown by (a) the seven-category vocabulary and (b) the EXPLAIN operator-presence/absence signature — both of which are verifiable on their cluster in 30 seconds.**
+>
+> **Source URLs (cite verbatim if pressed for sourcing):**
+> - trino.io/docs/current/optimizer/pushdown.html — the seven pushdown categories
+> - github.com/trinodb/trino/blob/master/docs/src/main/sphinx/optimizer/pushdown.md — same content, GitHub-sourced
+> - **NEVER cite a rule-name URL you have not personally WebFetched.** If you can't quote the URL, don't name the rule.
+
+> **PARTITION-FILTER TERMINOLOGY GUARDRAIL — read this BEFORE you call any predicate a "partition filter."** (Added iter425 after iter424 Q1 failure mode: responder called `status='paid'` on a Postgres VARCHAR column a "partition filter" — Postgres tables via the PostgreSQL connector are NOT Iceberg-partitioned; `status` is a regular VARCHAR column.)
+>
+> > **DO NOT WRITE: A predicate on a regular JDBC/Postgres column is just a WHERE/predicate filter that pushes down. Reserve the terms "partition filter" / "partition pruning" for Iceberg/Hive PARTITION columns only.**
+>
+> **The terminology rule, in one table:**
+>
+> | Source type | Column type | Correct terminology | Wrong terminology to AVOID |
+> |---|---|---|---|
+> | **PostgreSQL connector (or any JDBC connector — MySQL, Oracle, SQL Server)** | Any regular column (`VARCHAR`, `INTEGER`, `TIMESTAMP`, `BOOLEAN`, etc.) — Postgres tables accessed via the `postgresql` connector are NOT Iceberg-partitioned, regardless of whether Postgres itself has declarative partitioning | **"WHERE predicate"** / **"filter predicate"** / **"predicate that pushes down"** / **"pushed predicate"** — this is **predicate pushdown** (category 1 of the seven) | NEVER call it a "partition filter" or say it benefits from "partition pruning". The Postgres table has no Iceberg partition spec. |
+> | **Postgres native partitioning** (Postgres parent table with child partitions — `PARTITION BY RANGE`/`LIST`/`HASH`) | The Postgres partition key | **"Postgres partition pruning"** (server-side, internal to Postgres) — the JDBC predicate first pushes down, THEN Postgres's planner does its own partition pruning. From Trino's perspective this is still **predicate pushdown**; the partition pruning happens inside Postgres, invisible to Trino's EXPLAIN. | NEVER conflate this with Iceberg partition pruning. They are independent mechanisms in different systems. |
+> | **Iceberg connector** | An Iceberg PARTITION column (declared via `PARTITIONED BY` / `partitioning=ARRAY[...]` — `day(occurred_at)`, `bucket(tenant_id, 16)`, etc.) | **"Partition filter"** / **"partition pruning"** — predicates on Iceberg partition columns drive manifest-level file skipping. This is what Trino's optimizer/pushdown.html describes as "predicate pushdown to Iceberg" plus Iceberg's own partition-aware planning. | Don't call a predicate on a non-partition Iceberg column (e.g., `WHERE amount > 100` on an `orders` table partitioned by `day(occurred_at)`) a "partition filter" — that's just a Parquet min/max file-skip predicate, NOT partition pruning. |
+> | **Iceberg connector** | A regular (non-partition) Iceberg column | **"Predicate pushdown"** + **"Parquet min/max file skipping"** + **"projection pushdown"** | Don't say "partition pruning fires" — file skipping is min/max-based, NOT partition-based. |
+> | **Hive connector** | A Hive PARTITION column (declared in CREATE TABLE PARTITIONED BY) | **"Partition pruning"** / **"partition filter"** — same semantics as Iceberg partition columns (predicate on partition column drives directory-skip). | Don't apply to non-partition Hive columns. |
+>
+> **DO-NOT-WRITE specific phrases banned for non-partitioned tables:**
+>
+> | DO NOT WRITE (banned phrase) | Why it's wrong | WRITE THIS INSTEAD |
+> |---|---|---|
+> | **"`status='paid'` is a partition filter."** (iter424 Q1 failure mode — `status` is a regular Postgres VARCHAR column) | The Postgres `orders` table is NOT Iceberg-partitioned. `status` is a regular VARCHAR column. "Partition filter" implies Iceberg partition column semantics that do not apply here. A SaaS engineer reading this might conclude they need to partition the Postgres table, or that the filter benefits from manifest-level skipping — both false. | "`status='paid'` is a **VARCHAR equality WHERE predicate** that pushes down to Postgres as a SQL `WHERE` clause via predicate pushdown (per trino.io/docs/current/optimizer/pushdown.html). Postgres runs the filter using its own indexes; Iceberg-style partition pruning does not apply because this is a JDBC table, not an Iceberg table." |
+> | "This predicate triggers partition pruning on Postgres" — when the Postgres table has no declarative partitioning | The predicate pushes down via JDBC; whether Postgres does partition pruning depends on Postgres's OWN partition spec (which most non-DBA-managed Postgres tables don't have). Don't assume partition pruning fires server-side. | "This predicate pushes down to Postgres as a SQL `WHERE`. If the Postgres table is declaratively partitioned (PARTITION BY RANGE/LIST/HASH) on the predicate column, Postgres's planner will additionally prune child partitions — see §6.5 for the dynamic-filtering-triggers-Postgres-partition-pruning case. If not, Postgres uses its indexes (or a sequential scan) like any normal query." |
+> | "Aggregation pushdown is gated by the partition filter on `status='paid'`" | Aggregation pushdown is gated by the **WHERE predicate pushing** (the IFF rule in §13.5A.1) — not by a "partition filter". `status='paid'` is a WHERE predicate. The right framing: "VARCHAR equality WHERE predicate pushes → aggregation pushdown IFF rule satisfied → aggregate also pushes." | "Aggregation pushdown fires IFF every WHERE-clause predicate pushes; here `status='paid'` is a VARCHAR equality predicate that pushes by default → the aggregate also pushes. EXPLAIN: `Aggregate` operator is ABSENT above the `TableScan`." |
+> | "Predicate pruning" (verbatim — confusing 'partition pruning' with 'predicate pushdown') | "Predicate pruning" is not standard terminology. Pick either "predicate pushdown" (the predicate pushes to the source as a WHERE) or "partition pruning" (Iceberg/Hive partition-column-driven file/directory skip). | Either "predicate pushdown" (JDBC) or "partition pruning" (Iceberg/Hive partition column). They are NOT synonyms. |
+>
+> **The correct terminology in the aggregation-pushdown context (§13.5A.1) — paste this verbatim:**
+>
+> > "For `SELECT ... FROM app_pg.public.orders WHERE status='paid' GROUP BY customer_id`, the `status='paid'` is a **VARCHAR equality WHERE predicate** (category: **predicate pushdown**) — it pushes to Postgres as a SQL `WHERE status='paid'` clause via the PostgreSQL connector. Postgres applies it using its own indexes or sequential scan, NOT via Iceberg-style partition pruning (which doesn't apply — Postgres tables via the JDBC connector are not Iceberg-partitioned). Because the WHERE predicate pushes AND `SUM`/`COUNT`/`AVG` are on the 16-function supported-aggregates list, the **aggregation pushdown** IFF rule is satisfied — the aggregate ALSO pushes. EXPLAIN signature: the `Aggregate` operator is ABSENT above the `TableScan`."
+>
+> **WHY this matters for a SaaS engineer.** Mislabeling a JDBC predicate as a "partition filter" suggests partition-pruning mechanics that do not exist on a non-partitioned Postgres table. The engineer may then waste time investigating Iceberg partition specs, adding partition columns to their Postgres schema, or asking why `SHOW STATS` doesn't show partition cardinality — none of which apply. **Reserve "partition filter" and "partition pruning" for Iceberg/Hive partition columns. Everything else is "predicate pushdown" / "WHERE predicate".**
+>
+> **Source URLs:**
+> - trino.io/docs/current/optimizer/pushdown.html — the seven pushdown categories; predicate pushdown is category 1, distinct from any Iceberg-specific partition semantics
+> - trino.io/docs/current/connector/iceberg.html — partition specs, `$partitions` metadata table, partition transforms (`day`, `bucket`, etc.) — the ONLY context where "partition filter" / "partition pruning" is the correct term
+> - trino.io/docs/current/connector/postgresql.html — predicate pushdown rules for the JDBC PostgreSQL connector; no concept of "partition filter" at this layer (any Postgres-side partition pruning is server-side, internal to Postgres, and invisible to Trino's EXPLAIN)
+
+**The single canonical statement.** `SELECT customer_id, SUM(amount), COUNT(*), AVG(amount) FROM app_pg.public.orders WHERE status = 'paid' GROUP BY customer_id` pushes aggregation to PostgreSQL **when the WHERE predicate also pushes** (here `status = 'paid'` is a VARCHAR equality WHERE predicate — NOT a "partition filter"; Postgres tables via the JDBC connector are not Iceberg-partitioned — and VARCHAR equality on default collation pushes by default per trino.io/docs/current/connector/postgresql.html). Postgres runs the entire `SELECT customer_id, SUM(amount), COUNT(*), AVG(amount) FROM public.orders WHERE status = 'paid' GROUP BY customer_id` and returns one row per `customer_id` over JDBC. Trino streams the already-aggregated rows.
 
 **EXPLAIN signature — the trino.io DOC-QUOTED success rule:**
 
