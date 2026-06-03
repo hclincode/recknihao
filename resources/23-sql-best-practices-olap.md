@@ -358,6 +358,18 @@ If a join hangs or OOMs, check `EXPLAIN` to see which side is being broadcast. F
 
 ## 10. IN subqueries vs JOINs — let Trino's optimizer decide
 
+> **JARGON GLOSS — five terms you'll see in this section (and in EXPLAIN output).** Bookmark this if you're new to query plans:
+>
+> | Term | Plain-English meaning | What it looks like in EXPLAIN |
+> |---|---|---|
+> | **Semi-join** | "Did this left row match ANY right row? TRUE/FALSE per left row — never duplicates the left row." This is the physical operator Trino wants `IN (SELECT ...)` and non-correlated `EXISTS` / `NOT EXISTS` to lower to. | `SemiJoin[...]` |
+> | **Anti-join** | "Return left rows that have NO match on the right." It's a semi-join with the output inverted. `NOT IN` and `NOT EXISTS` both compute this semantically. | `SemiJoin[..., FilterMode = ANTI]` |
+> | **SemiJoinNode** | Trino's physical plan node implementing semi-join (and anti-join via FilterMode=ANTI). Hash-build the small side, probe the big side once, output TRUE/FALSE per probe row. Fast. | `SemiJoin[...]` |
+> | **CorrelatedJoin** | Trino plan node when a subquery references the outer row and the optimizer COULDN'T decorrelate it. Means the subquery runs per outer row — usually catastrophic. You want to NEVER see this. | `CorrelatedJoin[...]` |
+> | **LeftJoin (the plan node)** | A regular LEFT OUTER JOIN — enumerates EVERY matching right row per left row. When correlated `NOT EXISTS` decorrelates, it lowers to LeftJoin + Aggregation, not SemiJoin (the slow path documented in [trinodb/trino #21859](https://github.com/trinodb/trino/issues/21859)). | `LeftJoin[...]` followed by `Aggregation` + `Filter[not exists]` |
+>
+> **The whole section in one sentence:** you want `SemiJoin` in your EXPLAIN output for IN / EXISTS / NOT EXISTS / NOT IN. If you see `CorrelatedJoin` instead, the optimizer gave up — rewrite. If you see `LeftJoin` + `Aggregation` on a correlated NOT EXISTS, you're on the slow #21859 path — rewrite to non-correlated form. If you see `SemiJoin` already, leave it alone.
+
 **The short answer**: you do NOT need to manually rewrite `IN (SELECT ...)` to a JOIN. Trino converts IN subqueries to efficient semi-joins automatically. Manual rewriting can produce wrong results.
 
 **How it works**

@@ -773,6 +773,42 @@ ORDER BY content;
 
 Any one of these crossing into the **action required** column is a sufficient trigger. The ratio trigger (`content=1 count > 10% of content=0 count`) is the most reliable single metric — it captures both "lots of tiny deletes" and "MoR write rate is outpacing compaction." The Iceberg upstream `rewrite_data_files` procedure exposes a `delete-file-threshold` option that targets this same intuition (rewrite a data file if it has more than N delete files attached); see [Iceberg Spark procedures](https://iceberg.apache.org/docs/latest/spark-procedures/#rewrite_data_files).
 
+**Literal Spark syntax for `delete-file-threshold` (copy-pasteable — this MUST run from Spark; both `rewrite_data_files` and `rewrite_position_delete_files` are Spark-only on this stack):**
+
+```sql
+-- Spark SQL — rewrite any data file that has >= 5 delete files attached, even if file size is fine.
+-- The `delete-file-threshold` option only applies to rewrite_data_files (it does NOT exist on
+-- rewrite_position_delete_files — that procedure compacts the delete files themselves,
+-- not the data files they reference).
+CALL iceberg.system.rewrite_data_files(
+  table   => 'analytics.events',
+  options => map(
+    'delete-file-threshold', '5',
+    'target-file-size-bytes', '268435456'  -- 256 MB target; optional but commonly paired
+  )
+);
+
+-- Combine with a partition predicate to scope the rewrite to recently-deleted partitions
+-- (avoids rewriting the whole table when only one window had heavy MoR deletes):
+CALL iceberg.system.rewrite_data_files(
+  table   => 'analytics.events',
+  where   => 'event_date >= DATE ''2026-05-25'' AND event_date <= DATE ''2026-05-30''',
+  options => map('delete-file-threshold', '5', 'target-file-size-bytes', '268435456')
+);
+
+-- Compact the DELETE FILES THEMSELVES (no data file rewrite) — cheap, keeps deleted rows
+-- physically present but consolidates the position delete files. Run this when delete
+-- files are tiny and numerous but data files are well-sized.
+CALL iceberg.system.rewrite_position_delete_files(
+  table   => 'analytics.events',
+  options => map('target-file-size-bytes', '67108864')  -- 64 MB delete-file target
+);
+```
+
+> **CRITICAL CALLOUT — both procedures are Spark-only in your stack.** `rewrite_data_files` (with or without `delete-file-threshold`) and `rewrite_position_delete_files` are **NOT available** in Trino 467 — `rewrite_data_files`' nearest Trino equivalent is `ALTER TABLE ... EXECUTE optimize(file_size_threshold => '128MB')` but it does NOT expose `delete-file-threshold`, and `rewrite_position_delete_files` has no Trino equivalent at any version ([trinodb/trino #27371](https://github.com/trinodb/trino/issues/27371)). If you need either of these capabilities — and on a MoR table with accumulating delete files you will — you MUST run them from a Spark job. The production stack has Spark 3.5 with Iceberg 1.5.2 SQL extensions, so this is operationally fine; just schedule the Spark job as a k8s CronJob alongside the routine Trino-side `EXECUTE optimize`. Do NOT try to run these from Trino — both fail with procedure-not-found.
+
+> **Future note on Iceberg v3 deletion vectors.** Iceberg v3 introduces "deletion vectors" (compact bitmap-based deletes) which obsolete the position-delete-file accumulation problem entirely — instead of N tiny delete files per data file, each data file gets a single compact bitmap of deleted rows. **Iceberg 1.5.2 does NOT have deletion vectors** — they're in Iceberg v3 (1.7+ for the Spark write side, still gated on table format version). On this stack (Iceberg 1.5.2 = format v2), you live with position delete files and use `rewrite_position_delete_files` + `delete-file-threshold` as the operational answer. When the cluster upgrades to Iceberg 1.7+ and you migrate tables to format v3, this whole class of operational pain goes away.
+
 **Monitoring SQL — drop this into an Airflow / k8s CronJob to alert when the ratio crosses 10%:**
 
 ```sql
@@ -1624,6 +1660,14 @@ A snapshot referenced by any named tag or branch is **protected** from `expire_s
 
 The WAP pattern lets you write data, **audit it**, and only then make it visible to readers — instead of having every ingestion job commit directly to `main` where bad data is immediately seen by every dashboard. On this stack (Iceberg 1.5.2 + Spark + Trino 467), WAP is implemented via **Iceberg branches**. This section covers what branches are, the four-step WAP workflow, and the critical engine-support caveat: **branch DDL is Spark-only on Trino 467**.
 
+> **READ THIS FIRST — branches + `fast_forward` ARE the canonical Iceberg WAP pattern, and your stack supports them.** If a SaaS engineer asks "what's the standard Iceberg WAP pattern for validating ingestion before exposing it to Trino dashboards?", the answer is **YES, use Iceberg branches and `fast_forward` — your production stack (Spark 3.5 with Iceberg 1.5.2) supports both, and Trino 467 supports reading from branches for the audit step**. Do NOT dismiss branches because the `fast_forward` procedure and `CREATE BRANCH` DDL are Spark-only — **Spark IS in this stack**, so those tools are available to you. The correct division of responsibilities is:
+>
+> - **Spark** runs `ALTER TABLE ... CREATE BRANCH`, writes new data to the branch (via `spark.wap.branch` or explicit branch-targeting writes), runs `CALL iceberg.system.fast_forward(...)` to publish, and runs `ALTER TABLE ... DROP BRANCH` to clean up.
+> - **Trino 467** runs the audit-step `SELECT` queries against the branch via `FOR VERSION AS OF '<branch-name>'` (Trino [does](https://trino.io/docs/current/connector/iceberg.html) support reading from named branches by name — verified against Trino 481 docs and supported on Trino 467 for reads). Dashboards on `main` keep returning the pre-branch data throughout — Trino's default reads ignore branches other than `main`.
+> - **What Trino 467 cannot do** is *write* to a branch ([trinodb/trino #16570 — closed not planned](https://github.com/trinodb/trino/issues/16570)) or *create/drop* branch DDL ([trinodb/trino #12844 — open umbrella](https://github.com/trinodb/trino/issues/12844)). `INSERT INTO ... <branch-targeting syntax>` from Trino is NOT a thing — Trino's INSERT always commits to `main`. The branch-read support comes from a separate path ([trinodb/trino #16569](https://github.com/trinodb/trino/issues/16569)) which IS in place.
+>
+> So the Spark+Trino division is: **Spark handles every state-changing step of WAP; Trino handles the read-side audit**. This is the documented Iceberg pattern (see [Apache Iceberg branching docs](https://iceberg.apache.org/docs/latest/branching/) and the [`fast_forward` procedure docs](https://iceberg.apache.org/docs/latest/spark-procedures/#fast_forward)). The view-swap pattern described at the end of this section is a **fallback for Trino-only pipelines** — it is NOT a replacement for branches on a stack that already has Spark in the write path. On THIS stack, the right answer to a WAP question is branches + fast_forward, period.
+
 ### What an Iceberg branch is
 
 A **branch** in Iceberg is an independent named pointer into the table's snapshot DAG (directed acyclic graph). Conceptually:
@@ -1634,7 +1678,14 @@ A **branch** in Iceberg is an independent named pointer into the table's snapsho
 
 This is exactly the property WAP needs: a place to stage data, run validation, and either promote (atomically merge into `main`) or discard (drop the branch) without ever exposing bad data to production readers.
 
-> **ENGINE CALLOUT — branch DDL is Spark-only on Trino 467.** `CREATE BRANCH`, `DROP BRANCH`, the `fast_forward` procedure, and the `spark.wap.branch` write-redirect mechanism are all **Spark-only** on Trino 467. Trino 467 can **READ** from a branch (via `FOR VERSION AS OF <branch-snapshot-id>` or, in recent Trino versions, `FOR VERSION AS OF '<branch-name>'`) but cannot **CREATE**, **MODIFY**, **fast-forward**, or **DROP** branches. All branch management — every step of the WAP workflow except the read-side audit query — must go through Spark. Do NOT attempt `CALL iceberg.system.create_branch(...)` or `CALL iceberg.system.fast_forward(...)` from Trino — those procedures do not exist in Trino 467 and the call fails with a procedure-not-found error.
+> **ENGINE CALLOUT — branch DDL and writes are Spark-only on Trino 467; branch reads work in Trino.** `CREATE BRANCH`, `DROP BRANCH`, the `fast_forward` procedure, INSERT/UPDATE/DELETE/MERGE *into a branch*, and the `spark.wap.branch` write-redirect mechanism are all **Spark-only** on Trino 467. Trino 467 **CAN read** from a branch (via `FOR VERSION AS OF '<branch-name>'` or `FOR VERSION AS OF <branch-snapshot-id>`) but **CANNOT WRITE** to a branch and cannot **CREATE**, **MODIFY**, **fast-forward**, or **DROP** branches. All branch management — every step of the WAP workflow except the read-side audit query — must go through Spark.
+>
+> **The exact Trino issues that define this boundary** (cite these when an engineer asks):
+> - [trinodb/trino #12844 — Support branching of Iceberg tables](https://github.com/trinodb/trino/issues/12844) — the umbrella tracking issue for any branch operation in Trino.
+> - [trinodb/trino #16569 — Support Iceberg branch READ](https://github.com/trinodb/trino/issues/16569) — DONE; this is why `FOR VERSION AS OF '<branch-name>'` works on modern Trino.
+> - [trinodb/trino #16570 — Support Iceberg branch WRITE](https://github.com/trinodb/trino/issues/16570) — **closed as NOT PLANNED.** Trino has chosen to leave branch writes to Spark. There is no Trino-side workaround coming. Do NOT promise the engineer a future Trino version will add INSERT-to-branch — that work is not on Trino's roadmap.
+>
+> Do NOT attempt `CALL iceberg.system.create_branch(...)`, `CALL iceberg.system.fast_forward(...)`, or `INSERT INTO ...` targeting a branch from Trino — those operations do not exist in Trino 467 and the call fails with a procedure-not-found or syntax error.
 
 ### The WAP workflow in four steps
 
@@ -1828,6 +1879,52 @@ finally:
 | DROP BRANCH | Spark only |
 
 The Trino role in WAP is read-only auditing. Every state-changing step requires Spark.
+
+### FAQ — common WAP / branches questions
+
+**Q: Can I `INSERT INTO some_table FOR VERSION AS OF 'audit-branch'` from Trino?**
+**A: No.** Trino 467 cannot write to a branch. The feature was requested as [trinodb/trino #16570](https://github.com/trinodb/trino/issues/16570) and **closed as not planned** (Trino chose to leave Iceberg branch-write to Spark — the Trino philosophy is that DDL-style table-lifecycle operations live in the engine that owns the write path). `INSERT INTO` from Trino always commits to `main`. If you need to land new data on a branch, you MUST run the write from Spark using `spark.wap.branch=<name>` (session conf) or by targeting the branch directly. There is no Trino-side workaround — proxying the branch behind a view does not help because the view-target is still `main`. Trino's only WAP role is the read-side audit step.
+
+**Q: Can I read a branch from Trino?**
+**A: Yes.** Trino 467 supports `SELECT * FROM tbl FOR VERSION AS OF '<branch-name>'` and `SELECT * FROM tbl FOR VERSION AS OF <snapshot-id>`. The branch-name form resolves through Iceberg's `$refs` table to the current branch tip at query plan time. This is what enables Trino dashboards to safely audit a branch without ever exposing it to default `main` readers. The read support was tracked as [trinodb/trino #16569](https://github.com/trinodb/trino/issues/16569). Prefer the numeric snapshot ID over the branch name when audit-step reproducibility matters — the branch can advance mid-audit if Spark commits to it again.
+
+**Q: I don't have Spark in my pipeline — can I still do WAP?**
+**A: Not the canonical branches+fast_forward way.** See the "staging-table + view-swap fallback" below. That pattern is a legitimate alternative when Spark is not in the write path. **But on this production stack, Spark IS in the write path** (Iceberg 1.5.2 ingestion runs via Spark) — so the right answer is branches + fast_forward, not view-swap.
+
+**Q: Does fast_forward rewrite data?**
+**A: No.** `fast_forward` is a metadata-only operation. It advances the `main` ref pointer to the branch's snapshot in a single Iceberg commit — no data files are copied, rewritten, or read. Cost is microseconds (one metadata.json write). This is why publish is atomic: every query before the commit sees old-main, every query after sees new-main, no intermediate state.
+
+**Q: What if `main` advances while my branch is being audited?**
+**A: `fast_forward` fails with "not a fast-forward."** The branch must remain a descendant of `main` for fast_forward to work. If a concurrent writer commits to `main` between your branch-create and your fast_forward call, you have two options: (1) rebase — drop the branch, re-create it from the new `main`, re-write your data; (2) use a regular `MERGE` instead of fast-forward. On a single-ingestor stack (the typical SaaS pattern: one nightly Spark job per table), this is rare. On tables with multiple concurrent writers, watch for it.
+
+**Q: How do I name an audit branch?**
+**A: Use a job-run-id or timestamp suffix.** Long-lived branch names like `audit` are fine if a single job uses them serially (`RETAIN N DAYS` auto-cleans stuck branches). For parallel ingest jobs, suffix with the run ID: `audit-2026-05-30-01`. Branch names are queryable from `$refs` so operators can see what's outstanding.
+
+### Staging-table + view-swap fallback (when Spark is NOT in the write path)
+
+The staging-table + `CREATE OR REPLACE VIEW` swap pattern is an alternative WAP implementation that requires **only Trino** — useful if your pipeline writes through dbt-trino or another Trino-only path with no Spark in the loop. It is **NOT a replacement for branches when Spark is available** — branches are cheaper (no double-write), atomic at the snapshot level, and preserve historical lineage; view-swap doubles your storage during the swap window and introduces a separate view object to manage.
+
+**The pattern, briefly:**
+
+1. Write new data into a staging table (separate Iceberg table, e.g., `analytics.events_staging_2026_05_30`).
+2. Run audit queries against the staging table from Trino.
+3. If audit passes: `CREATE OR REPLACE VIEW analytics.events_v AS SELECT * FROM analytics.events_staging_2026_05_30;` (atomically swaps the view from the old staging table to the new one, or from the prior production table to the new staging table).
+4. Drop the old staging table after a retention window.
+
+**Why view-swap is a worse fit when Spark IS in the stack:**
+
+- **Doubles your MinIO storage during the swap window.** Old table + new staging table both exist. Branches reuse `main`'s files (snapshot deltas only) — typically <5% storage overhead vs view-swap's 100%.
+- **Requires consumers to query the view, not the underlying table.** Anyone pinned to `iceberg.analytics.events` directly bypasses the swap and sees stale data (this is the silent-failure trap documented in resource 13). Branches publish to `main` itself, so every reader is updated.
+- **Doesn't preserve a per-snapshot audit trail of the publish event.** With branches+fast_forward, `$history` records the publish as a single labeled commit on `main`. With view-swap, the swap is a Hive Metastore view DDL operation — not visible in Iceberg's snapshot history.
+- **Coordinator-level metadata commit, not engine-level ACID.** A view swap is a single Hive Metastore commit (atomic at the HMS level). A branch fast_forward is an Iceberg-level atomic commit on `main`. Both are atomic for readers, but the branch path gives you the full Iceberg snapshot machinery (rollback, time-travel, `$snapshots` audit).
+
+**When view-swap IS the right call:**
+
+- The pipeline is pure-Trino (dbt-trino without Spark in the chain).
+- You're swapping the table *type* itself (e.g., migrating from a non-Iceberg source to Iceberg) — branches can't help here because you're swapping the underlying table identity.
+- You need a *durable* parallel-table window for human inspection that lasts hours/days (branches can also do this, but a separate table is more discoverable to non-Iceberg-savvy operators).
+
+**Bottom line:** on this production stack, default to branches + fast_forward via Spark. Reach for view-swap only when the constraint is "no Spark in the write path." Do NOT recommend view-swap as the canonical WAP pattern — that's an inaccurate framing for any stack with Spark.
 
 ---
 

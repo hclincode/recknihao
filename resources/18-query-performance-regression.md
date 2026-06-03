@@ -855,14 +855,52 @@ volumes:
 
 Setting both `fs.cache.enabled=true` and `iceberg.metadata-cache.enabled=true` results in the metadata cache being silently ignored — `fs.cache` takes over. Only set `fs.cache.enabled=true` and leave out `iceberg.metadata-cache.enabled`.
 
+### Why this wins biggest on MinIO specifically
+
+The fs.cache payoff is bigger on a MinIO-backed stack than on, say, S3 in AWS — three reasons:
+
+1. **Object-listing latency is the hot path on MinIO.** Every Parquet open requires a HEAD/GET round-trip for the file footer (Parquet metadata) BEFORE any data is read. On MinIO over a single-rack network, that round-trip is typically 5-15 ms per file. A query touching 500 small files spends 2.5-7 seconds just opening files before reading a byte. fs.cache caches the footer reads too, so the second run pays zero round-trip cost for the files it already has.
+2. **MinIO bandwidth is finite and shared across the cluster.** Every dashboard refresh that bypasses the cache competes with ingestion and ad-hoc queries for the same NIC bandwidth on the MinIO nodes. Caching shifts read load off MinIO entirely for hot partitions.
+3. **No object-store "free tier" cost concern.** On AWS, S3 GET costs ($0.0004 / 1k requests) sometimes argue against caching small files. On on-prem MinIO, every request is free (capex sunk cost) — so the only constraint is whether you have local SSD to spare on workers. If you do, caching is pure win.
+
+The combination means fs.cache typically delivers 5-15x speedup on dashboard queries the second time they run on the same partition window, vs 2-4x on a cloud-native stack where the underlying object storage already has more aggressive caching upstream.
+
 ### Verify the cache is working
 
-After enabling and restarting workers, run a dashboard query twice. The second run should be noticeably faster. Trino's JMX MBeans expose cache hit and miss counters under `trino.filesystem.cache:*` — scrape these with Prometheus to confirm cache hit rate is increasing for your hot-partition queries.
+After enabling and restarting workers, run a dashboard query twice. The second run should be noticeably faster. Trino's JMX MBeans expose cache hit and miss counters that you can scrape with Prometheus to confirm cache hit rate is increasing for your hot-partition queries.
+
+**Key JMX metric names to scrape** (under the Iceberg connector's filesystem-cache MBean tree — exact name depends on Trino release, verify in your cluster's `/v1/jmx` REST endpoint or in the Trino UI's JMX page):
+
+| Metric | What it tells you |
+|---|---|
+| `trino.filesystem.cache:name=*,type=CacheStats` (`hitCount`, `missCount`, `hitRate`) | The headline cache effectiveness number — `hitRate` above ~0.7 means the cache is paying for itself; below ~0.3 means workloads aren't repeating files often enough to benefit. |
+| `trino.filesystem.cache:type=Bytes` (`cacheSize`, `maxCacheSize`) | Current and max cache size on disk per worker — if `cacheSize` is at `maxCacheSize`, the cache is full and is evicting old entries (LRU). Confirms the size config is binding. |
+| `trino.filesystem.cache:type=Evictions` (`evictionCount`) | How often the cache is evicting entries — high churn (thousands per minute) on a small cache means you need to size up. |
+| `trino.execution.executor.OperatorStats` (`physicalInputDataSize` per query) | Cross-reference with `EXPLAIN ANALYZE`: physicalInputDataSize should drop dramatically on cache-hit reruns even though logicalInputDataSize stays the same. |
+
+Scrape these into Prometheus, alert on `hitRate < 0.3` for the dashboards path (means caching isn't working as expected and you should investigate the queries).
 
 If the second run is NOT faster, check:
 1. The cache directory exists and is writable by the Trino process on the worker pod (`ls -la /var/trino/cache` from inside the pod).
 2. The worker pods actually have local SSD mounted (not a network PVC — watch for slow first reads that indicate the "cache" is itself going over the network).
 3. The queries are actually re-reading the same Parquet files (check `Physical Input:` in `EXPLAIN ANALYZE` before and after — if it drops to near-zero on the second run, caching is working).
+4. The hit-rate JMX metric is actually climbing (curl the JMX REST endpoint or watch the Trino UI's JMX MBean view) — if it stays at zero, the cache isn't intercepting reads (usually a config issue — the property isn't loaded, or the path isn't writable).
+
+### What about caching query RESULTS (not just file blocks)?
+
+A common follow-on question: "Can Trino cache the final query results so the second identical dashboard refresh doesn't re-execute the plan at all?"
+
+**Short answer: no, not in production-supported form on Trino 467.** Trino does NOT cache query results, query plans, or per-table compiled metadata between query executions. Every query re-plans and re-executes — even if the SQL text is byte-identical to a query that ran 100 ms ago. This is a long-standing feature request ([trinodb/trino #13115](https://github.com/trinodb/trino/issues/13115) and related) that has not been implemented as a first-class feature in open-source Trino.
+
+There is an **experimental query results cache plugin** mentioned in some Trino developer threads, but it is NOT in the production-supported feature set on Trino 467 — there's no `query-results-cache.*` configuration in the official docs, and the consensus from Trino maintainers is that result caching is intentionally left out of the core engine (it conflicts with Trino's federated-query model where cache invalidation is hard to reason about across heterogeneous catalogs).
+
+**What to use instead for repeated identical queries:**
+
+- **Application-layer Redis cache** in front of Trino: hash the SQL text + tenant_id, cache the JSON results with a TTL (typically 1-5 minutes for dashboards). This is the standard SaaS pattern — Redis handles invalidation policy and keeps Trino out of the cache-coherence problem. See resource 20 for client-side patterns.
+- **Pre-aggregated rollup tables** built nightly via dbt or Spark: convert the "live SUM over 90 days" query into a "SELECT FROM daily_rollup" query. The dashboard now reads a thousand pre-aggregated rows instead of a billion raw rows. This is the durable answer for any query the dashboard runs more than 10x/hour.
+- **fs.cache (this section)**: caches the underlying Parquet blocks. The query still re-plans and re-executes, but the data reads complete in tens of ms instead of seconds. Best when query shapes vary slightly but always touch the same partitions.
+
+The combination of all three (Redis at the app layer for exact-text repeats + rollup tables for known dashboard queries + fs.cache for everything else) is the standard layered approach. Do not wait for first-class result caching in Trino — it isn't coming on the 467 line.
 
 ---
 
