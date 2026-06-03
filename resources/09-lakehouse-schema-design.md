@@ -428,7 +428,90 @@ Trade-off: MAP gives faster fallback access at query time (no JSON parsing per r
 >
 > **This ID-based matching is the foundational mechanism that makes Iceberg schema evolution safe.** Plain Parquet (without Iceberg) falls back to name-based matching, which is fragile: rename a column and old files lose the match. Iceberg's ID-based matching means rename is also metadata-only — the schema gets a new name for the same field ID, and old files keep matching correctly. ADD COLUMN, DROP COLUMN, and RENAME COLUMN are ALL metadata-only in Iceberg because of this design. Do not assume "name-based" anywhere in Iceberg — that's the wrong mental model and leads to the wrong conclusions about safety.
 >
-> **ADD COLUMN is always nullable.** Iceberg's `ALTER TABLE ... ADD COLUMN col TYPE` adds the column as nullable; there is no way to ADD a NOT NULL column directly (the constraint cannot apply to historical rows that will read NULL). If you need a NOT NULL constraint, do this in three steps: (1) `ALTER TABLE ... ADD COLUMN col TYPE` (nullable), (2) backfill the column for all historical rows with a Spark `MERGE INTO` or rewrite, (3) `ALTER TABLE ... ALTER COLUMN col SET NOT NULL`. Step 3 will fail if any row still has NULL — that's the validation gate that prevents accidentally adding a constraint that the existing data violates.
+> **ADD COLUMN is always nullable.** Iceberg's `ALTER TABLE ... ADD COLUMN col TYPE` adds the column as nullable; there is no way to ADD a NOT NULL column directly (the constraint cannot apply to historical rows that will read NULL).
+
+#### SCHEMA-EVOLUTION CONSTRAINT-TIGHTENING GUARDRAIL — you CANNOT tighten an existing nullable Iceberg column to NOT NULL via `ALTER COLUMN ... SET NOT NULL` on Trino 467
+
+> **Read this BEFORE answering any question about "tightening" / "adding NOT NULL" / "enforcing not-null" on an existing Iceberg column on Trino 467.** This guardrail exists because the iter429 Q4 confident-inaccuracy recommended `ALTER COLUMN ... SET NOT NULL` as the final step of the nullable → backfill → tighten pattern — and that operation does NOT exist in Trino.
+>
+> **Q-PATTERN matcher (top-of-section):** "How do I tighten an existing column to NOT NULL?" / "How do I add a NOT NULL column to an Iceberg table after backfilling?" / "Can I run `ALTER COLUMN ... SET NOT NULL`?" — **answer with the four supported ops list below + the CTAS-swap / dbt-test workarounds. NEVER recommend `ALTER COLUMN ... SET NOT NULL` — it is not Trino SQL.**
+>
+> **Per [trino.io/docs/current/sql/alter-table.html](https://trino.io/docs/current/sql/alter-table.html), the COMPLETE list of `ALTER TABLE ... ALTER COLUMN` operations supported on Trino 467 is:**
+>
+> | Operation | Syntax | Direction |
+> |---|---|---|
+> | **SET DEFAULT** | `ALTER TABLE name ALTER COLUMN col SET DEFAULT expr` | adds/changes a default value |
+> | **DROP DEFAULT** | `ALTER TABLE name ALTER COLUMN col DROP DEFAULT` | removes a default value |
+> | **SET DATA TYPE** | `ALTER TABLE name ALTER COLUMN col SET DATA TYPE new_type` | changes column type (Iceberg widening only — int→long, float→double, decimal precision-widen) |
+> | **DROP NOT NULL** | `ALTER TABLE name ALTER COLUMN col DROP NOT NULL` | LOOSENS NOT NULL → nullable (one-way; you cannot un-drop it via ALTER) |
+>
+> **There is NO `ALTER COLUMN ... SET NOT NULL` operation in Trino 467. You cannot tighten a nullable column to NOT NULL with an ALTER statement.** Per [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html), the Iceberg connector states: *"The `NOT NULL` constraint can be set on the columns, while creating tables by using the CREATE TABLE syntax"* — i.e., NOT NULL is settable **only at CREATE TABLE time**, never via ALTER.
+>
+> **DO-NOT-WRITE:** Never write the sentence `ALTER TABLE <name> ALTER COLUMN <col> SET NOT NULL` (or any paraphrase: "set it to NOT NULL", "tighten via ALTER COLUMN to NOT NULL", "run SET NOT NULL on the column", "make the column NOT NULL with ALTER") — **that operation does not exist in Trino 467.** An engineer who follows this advice hits a SQL parser/semantic error.
+>
+> **Two correct workarounds for the "nullable + backfill + tighten" pattern on this stack:**
+>
+> **(a) CTAS-swap (heavy — full table rewrite; choose only when you need a hard storage-level constraint):**
+>
+> ```sql
+> -- Step 1: backfill the nullable column on the live table (Trino UPDATE or MERGE).
+> UPDATE iceberg.analytics.events
+> SET tenant_id = 'unknown'
+> WHERE tenant_id IS NULL;
+>
+> -- Verify zero NULLs before the rewrite:
+> SELECT COUNT(*) FROM iceberg.analytics.events WHERE tenant_id IS NULL;
+> -- must return 0
+>
+> -- Step 2: CREATE a NEW table with NOT NULL in the column definition (at CREATE TABLE time — the ONLY place NOT NULL can be set on Iceberg).
+> CREATE TABLE iceberg.analytics.events_new (
+>     event_id BIGINT NOT NULL,
+>     user_id  BIGINT NOT NULL,
+>     tenant_id VARCHAR NOT NULL,   -- the tightened column
+>     event_ts TIMESTAMP(6) WITH TIME ZONE NOT NULL,
+>     payload  JSON
+> )
+> WITH (partitioning = ARRAY['day(event_ts)'], format = 'PARQUET');
+>
+> -- Step 3: copy the backfilled rows in (fails fast if any NULL slipped through —
+> -- the NOT NULL constraint on events_new is the validation gate).
+> INSERT INTO iceberg.analytics.events_new
+> SELECT event_id, user_id, tenant_id, event_ts, payload FROM iceberg.analytics.events;
+>
+> -- Step 4: atomic rename swap (drop old, rename new) — coordinate with downstream readers
+> -- since this is a brief window where the table is missing/renamed.
+> DROP TABLE iceberg.analytics.events;
+> ALTER TABLE iceberg.analytics.events_new RENAME TO iceberg.analytics.events;
+> ```
+>
+> Trade-off: this rewrites the entire table (every Parquet file is re-written), throws away the old snapshot/time-travel history, and requires a coordinated downstream cutover. Only do this when the storage-level NOT NULL constraint is genuinely required (regulatory, contract-with-downstream-consumer).
+>
+> **(b) RECOMMENDED — enforce via a dbt `not_null` test at the model layer (cheap, no rewrite, fails the run if a NULL appears):**
+>
+> ```yaml
+> # models/schema.yml (in your dbt project)
+> version: 2
+>
+> models:
+>   - name: events
+>     columns:
+>       - name: tenant_id
+>         tests:
+>           - not_null    # built-in dbt test — fails the dbt run if any row has NULL tenant_id
+>       - name: event_id
+>         tests:
+>           - not_null
+>           - unique
+> ```
+>
+> Then `dbt test --select events` runs `SELECT COUNT(*) FROM events WHERE tenant_id IS NULL` and fails the build (and your CI / Airflow / orchestrator) if any row has NULL. This gives you the **operational guarantee** of NOT NULL (any future writer that produces NULL is caught and the pipeline fails) without rewriting the table and without losing snapshot history. **This is the recommended pattern for this stack** — the column stays nullable in the Iceberg schema, but downstream contracts are enforced by dbt tests run on every refresh.
+>
+> The conceptual intent of "tighten the column after backfill" is preserved — the difference is **where** the enforcement lives: at the Iceberg schema level (option (a), requires a rewrite) vs at the dbt model-test level (option (b), no rewrite, run on every model build).
+>
+> **Sources:**
+> - [trino.io/docs/current/sql/alter-table.html](https://trino.io/docs/current/sql/alter-table.html) — verbatim list of supported ALTER COLUMN operations (SET DEFAULT, DROP DEFAULT, SET DATA TYPE, DROP NOT NULL — no SET NOT NULL).
+> - [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) — *"The `NOT NULL` constraint can be set on the columns, while creating tables by using the CREATE TABLE syntax"* (i.e., CREATE TABLE only — not via ALTER).
+> - [docs.getdbt.com/reference/resource-properties/data-tests](https://docs.getdbt.com/reference/resource-properties/data-tests) — built-in `not_null` dbt test.
 >
 > **DROP COLUMN is also metadata-only — no file rewrite required.** When you run `ALTER TABLE ... DROP COLUMN col`, Iceberg removes the column from the table schema (the field ID is retired). The column's bytes remain physically present in old Parquet files on storage — but at query time, Iceberg's reader uses the current schema's field IDs to project columns, and the retired field ID is simply not requested. Queries no longer see the column. The unused bytes only get physically removed if you later run `CALL system.rewrite_data_files(...)` to compact and rewrite the files. DROP COLUMN itself is instant and free.
 >
