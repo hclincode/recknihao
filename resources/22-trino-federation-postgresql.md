@@ -8650,9 +8650,9 @@ Output[...]
 - The **dimension tables' size** determines whether they BROADCAST (small) or PARTITION (big). Run `ANALYZE TABLE` on each dim so the CBO knows.
 - A 3-way join can have **mixed strategies** — e.g., 1st join BROADCAST (small dim accounts), 2nd join BROADCAST (small dim regions), or 1st BROADCAST + 2nd PARTITIONED if the join result after the 1st join exceeds the broadcast threshold. **EXPLAIN tells you which is which** via `RemoteExchange[REPLICATE]` vs `RemoteExchange[REPARTITION]`.
 
-**Doc-quoted execution-location rule (from §13.1 already):**
+**Doc-quoted execution-location rule (from §13.1 already) — iter426 verbatim-quote audit:**
 
-> **trino.io/docs/current/connector/postgresql.html and trino.io/docs/current/optimizer/pushdown.html** — Join pushdown applies only when both tables live in the SAME catalog. Cross-catalog joins are NEVER pushed; they always execute on Trino workers.
+> **trino.io/docs/current/optimizer/pushdown.html (verbatim, the "Join pushdown" section's generic condition for pushdown):** *"the tables in the join must be from the same catalog"*. By the contrapositive, cross-catalog joins (two different catalogs in the FROM clause) cannot meet this condition and therefore NEVER push — they always execute on Trino workers. The PostgreSQL connector's join pushdown (trino.io/docs/current/connector/postgresql.html — "Join pushdown" section: cost-based via `join-pushdown.strategy=AUTOMATIC` or `EAGER`, requires Postgres table statistics) applies ONLY to intra-catalog Postgres-to-Postgres joins; it has no cross-catalog mode. The same-catalog condition is doc-quoted; the "cross-catalog NEVER pushes" phrasing is the contrapositive, EXPLAIN-observable on every Trino 467 cluster.
 
 **Common myth — debunked.** "If I join Postgres + Iceberg + Iceberg, the two Iceberg-side joins might push because they're the same catalog." **WRONG.** As soon as a Postgres `TableScan` is fed into a Trino-side join, the **join result** lives on Trino workers and is no longer a "table in the Iceberg catalog." Subsequent joins above that join operator also run on Trino workers. Push only happens between two `TableScan`s of the SAME catalog at the leaf level — and Trino's CBO doesn't typically reorder a 3-way join to make that possible if it would change semantics.
 
@@ -8677,7 +8677,11 @@ These properties are SYSTEM-level (no catalog prefix), and they apply to ALL joi
 
 **The single canonical statement.** `WHERE (user_id = 123 OR email = 'a@b.com')` against a Postgres table — both predicates individually push (numeric equality always; VARCHAR equality always with default collation). **The OR-of-two-pushed-predicates also pushes** as a single `WHERE (user_id = 123 OR email = 'a@b.com')` clause inside the JDBC SQL Trino sends to Postgres. Postgres handles the OR using whichever index plan it prefers (a `BitmapOr` of two index scans is typical).
 
-**Verbatim trino.io rule (trino.io/docs/current/optimizer/pushdown.html and trino.io/docs/current/connector/postgresql.html):** Predicate pushdown supports compound predicates built from individually pushable predicates combined with `AND` and `OR`. If **any** disjunct in an `OR` is NOT individually pushable, the **entire OR** stays on Trino — because skipping one disjunct would silently change the result set.
+**The OR-disjunct rule — labeled by source type (iter426 attribution audit).** Two parts:
+>
+> **Part A (DOC-QUOTED — trino.io/docs/current/optimizer/pushdown.html, verbatim):** *"Predicate pushdown optimizes row-based filtering. It uses the inferred filter, typically resulting from a condition in a `WHERE` clause to omit unnecessary rows. The processing is pushed down to the data source by the connector and then processed by the data source."* and *"If predicate pushdown for a specific clause is successful, the `EXPLAIN` plan for the query does not include a `ScanFilterProject` operation for that clause."* (Note: the optimizer/pushdown.html page does NOT separately enumerate compound AND/OR composition rules.)
+>
+> **Part B (EXPLAIN-OBSERVABLE — NOT doc-quoted; verifiable on Trino 467 with `EXPLAIN`):** If **any** disjunct in an `OR` is NOT individually pushable, the **entire OR** stays on Trino (a `Filter` node sits above the `TableScan` with NO `constraint` on either column). Skipping one disjunct would silently change the result set — so the connector keeps the whole OR. This rule is EXPLAIN-observable on a live cluster; it is NOT enumerated as a separate sentence on trino.io/docs/current/optimizer/pushdown.html. **Treat the OR-blocking behavior as "EXPLAIN-observable connector semantics" rather than a doc-asserted rule.** Verify on your specific query with `EXPLAIN` — the operator-presence-or-absence of `Filter` above the `TableScan` is the ground truth.
 
 **The four shapes — what pushes, what doesn't:**
 
