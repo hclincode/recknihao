@@ -210,7 +210,7 @@ These are the per-expression rewrites you'll do on almost every migrated SELECT.
 | `LENGTH(s)` | `length(s)` | Identical. |
 | `LPAD(s, n, pad)` / `RPAD(s, n, pad)` | `lpad(s, n, pad)` / `rpad(s, n, pad)` | Identical. |
 | `LTRIM(s)` / `RTRIM(s)` / `TRIM(s)` | `ltrim(s)` / `rtrim(s)` / `trim(s)` | Identical. |
-| ``a || b`` (concatenation) | `a \|\| b` OR `concat(a, b)` | Same operator. **BUT** Oracle treats `NULL \|\| 'x'` as `'x'` (quirk); Trino returns `NULL` (standard). Wrap in `COALESCE`. |
+| ``a || b`` (concatenation) | `a \|\| b` OR `concat(a, b)` | Same operator. **BUT two big differences**: (1) Oracle treats `NULL \|\| 'x'` as `'x'` (quirk); Trino returns `NULL` (standard) — wrap in `COALESCE`. (2) **Oracle implicitly coerces numbers/dates to strings inside `\|\|`; Trino does NOT** — `CONCAT` and `\|\|` both require all-VARCHAR args, so `CAST(year_int AS VARCHAR)` or use `format('FQ-%d', year_int)`. See §7A.3.1 for the canonical fix. |
 | `UPPER(s)` / `LOWER(s)` / `INITCAP(s)` | `upper(s)` / `lower(s)` / no direct INITCAP — use `regexp_replace` or `array_join(transform(...))`. | INITCAP needs a workaround. |
 | `REPLACE(s, from, to)` | `replace(s, from, to)` | Identical. |
 | `REGEXP_LIKE(s, pattern)` | `regexp_like(s, pattern)` | Identical. |
@@ -684,6 +684,72 @@ FROM {{ ref('stg_orders') }}
 | `EXECUTE IMMEDIATE 'dynamic SQL'` | `{% if %} {% endif %}` Jinja branching at compile time (the dynamic SQL is resolved BEFORE Trino sees it) |
 
 **Important nuance — function call semantics differ.** In Oracle, `fx_utils.to_usd(amount, 'EUR', order_date)` is a function call evaluated row-by-row by the database engine. In dbt, `{{ to_usd('amount', "'EUR'", 'order_date') }}` is **textual SQL substitution at compile time** — the macro inlines its body into the SQL, and the resulting SQL runs as a normal correlated subquery (or JOIN) on Trino. This means macros can be MORE expensive than Oracle stored functions if they introduce correlated subqueries — always inspect the compiled SQL (`dbt compile` then read `target/compiled/...`) before assuming the macro is cheap.
+
+#### 7A.3.1 Trino dialect landmine in macro examples — CONCAT and `||` require all-VARCHAR args (NO implicit numeric/date coercion)
+
+**This is the single most common Trino dialect bug when porting Oracle PL/SQL string-building helpers** — and a typical place it crops up is a fiscal-quarter / period-label macro that concatenates a literal prefix with `EXTRACT(YEAR FROM ...)` or `EXTRACT(MONTH FROM ...)`. Oracle implicitly coerces numbers and dates to strings inside `||`; **Trino does not**. Per [trino.io/docs/current/functions/conversion.html](https://trino.io/docs/current/functions/conversion.html) verbatim: *"Trino will not convert between character and numeric types. For example, a query that expects a varchar will not automatically convert a bigint value to an equivalent varchar."* This applies to BOTH `concat(...)` and the `||` operator (the latter is sugar for the former per [trino.io/docs/current/functions/string.html](https://trino.io/docs/current/functions/string.html)). And `EXTRACT(YEAR FROM date_col)` / `EXTRACT(MONTH FROM ...)` / `EXTRACT(QUARTER FROM ...)` all return **BIGINT** in Trino — so concatenating an EXTRACT result with a string literal requires an explicit CAST or use of `format()`.
+
+**WRONG (Oracle-style, errors at runtime in strict Trino with "Unexpected parameters (varchar(N), bigint) for function concat")**:
+
+```sql
+-- macros/period_utils.sql  --  BROKEN on Trino, would compile but fail at execution
+{% macro fiscal_quarter_label(date_col) %}
+    CASE
+        WHEN EXTRACT(MONTH FROM {{ date_col }}) IN (1,2,3)  THEN CONCAT('FQ1-', EXTRACT(YEAR FROM {{ date_col }}))
+        WHEN EXTRACT(MONTH FROM {{ date_col }}) IN (4,5,6)  THEN CONCAT('FQ2-', EXTRACT(YEAR FROM {{ date_col }}))
+        WHEN EXTRACT(MONTH FROM {{ date_col }}) IN (7,8,9)  THEN CONCAT('FQ3-', EXTRACT(YEAR FROM {{ date_col }}))
+        ELSE CONCAT('FQ4-', EXTRACT(YEAR FROM {{ date_col }}))
+    END
+{% endmacro %}
+```
+
+The literals `'FQ1-'`, `'FQ2-'`, ... are VARCHAR; `EXTRACT(YEAR FROM ...)` is BIGINT. `CONCAT(varchar, bigint)` has no match in Trino's function registry — runtime error.
+
+**RIGHT — option A: explicit CAST AS VARCHAR**:
+
+```sql
+{% macro fiscal_quarter_label(date_col) %}
+    CASE
+        WHEN EXTRACT(MONTH FROM {{ date_col }}) IN (1,2,3)  THEN CONCAT('FQ1-', CAST(EXTRACT(YEAR FROM {{ date_col }}) AS VARCHAR))
+        WHEN EXTRACT(MONTH FROM {{ date_col }}) IN (4,5,6)  THEN CONCAT('FQ2-', CAST(EXTRACT(YEAR FROM {{ date_col }}) AS VARCHAR))
+        WHEN EXTRACT(MONTH FROM {{ date_col }}) IN (7,8,9)  THEN CONCAT('FQ3-', CAST(EXTRACT(YEAR FROM {{ date_col }}) AS VARCHAR))
+        ELSE CONCAT('FQ4-', CAST(EXTRACT(YEAR FROM {{ date_col }}) AS VARCHAR))
+    END
+{% endmacro %}
+```
+
+**RIGHT — option B: use `format()` (cleaner, printf-style, handles the type conversion via the `%d` placeholder)**:
+
+```sql
+{% macro fiscal_quarter_label(date_col) %}
+    CASE
+        WHEN EXTRACT(MONTH FROM {{ date_col }}) IN (1,2,3)  THEN format('FQ1-%d', EXTRACT(YEAR FROM {{ date_col }}))
+        WHEN EXTRACT(MONTH FROM {{ date_col }}) IN (4,5,6)  THEN format('FQ2-%d', EXTRACT(YEAR FROM {{ date_col }}))
+        WHEN EXTRACT(MONTH FROM {{ date_col }}) IN (7,8,9)  THEN format('FQ3-%d', EXTRACT(YEAR FROM {{ date_col }}))
+        ELSE format('FQ4-%d', EXTRACT(YEAR FROM {{ date_col }}))
+    END
+{% endmacro %}
+```
+
+`format()` returns VARCHAR and uses Java's `Formatter` syntax — `%d` for integer/bigint, `%s` for already-VARCHAR, `%.2f` for fixed-precision decimals.
+
+**The general rule (memorize this when porting Oracle string-building code to Trino):**
+
+> In Trino, **`CONCAT(...)` and `||` require ALL arguments to be character types (VARCHAR / CHAR)**. Cast every non-VARCHAR argument explicitly with `CAST(... AS VARCHAR)`, or use `format('...%d...%s...', a, b)` instead. Oracle implicitly coerces numerics/dates to strings inside `||`; Trino does not. This trips up almost every Oracle → Trino port that builds composite labels.
+
+**Other common landmines from the same root cause:**
+
+| Pattern | Wrong (Oracle-style) | Right (Trino) |
+|---|---|---|
+| Date → label | `'order-' \|\| order_date` | `'order-' \|\| CAST(order_date AS VARCHAR)` or `format('order-%s', CAST(order_date AS VARCHAR))` |
+| Bigint id → key | `'cust:' \|\| customer_id` | `'cust:' \|\| CAST(customer_id AS VARCHAR)` or `format('cust:%d', customer_id)` |
+| Decimal → display | `'$' \|\| amount` | `'$' \|\| CAST(amount AS VARCHAR)` or `format('$%.2f', amount)` |
+| Timestamp → log key | `'evt-' \|\| event_ts` | `'evt-' \|\| CAST(event_ts AS VARCHAR)` or `format('evt-%s', CAST(event_ts AS VARCHAR))` |
+| Boolean → flag | `'active-' \|\| is_active` | `'active-' \|\| CAST(is_active AS VARCHAR)` (returns `'true'`/`'false'`) |
+
+**One subtle exception that's NOT a landmine**: `concat(varchar1, varchar2, varchar3, ...)` with all-VARCHAR args works fine, AND if a column is already typed `varchar(N)` you don't need to CAST it (different VARCHAR widths concat fine — the result type is the sum-widened VARCHAR). The landmine is ONLY when a non-character type (BIGINT, INTEGER, DATE, TIMESTAMP, DECIMAL, BOOLEAN) appears as an argument.
+
+**Why this matters for macros specifically**: a dbt macro is **textual substitution at compile time** — the macro body is dropped verbatim into the model SQL. If the macro author wrote `CONCAT('FQ1-', EXTRACT(YEAR FROM x))`, that compiles fine in dbt (Jinja doesn't type-check), and `dbt parse` / `dbt compile` succeed. The error only surfaces when Trino tries to execute the model SQL — at which point dbt reports it as a generic model failure with the Trino error message buried in the stderr. Use `dbt compile` and read `target/compiled/<model>.sql` to inspect what Trino will actually see, and visually scan for any `CONCAT(...)` or `||` with non-VARCHAR arguments.
 
 ---
 
