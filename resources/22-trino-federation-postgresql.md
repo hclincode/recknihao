@@ -66,6 +66,75 @@ These are the absolutes most often stated incorrectly about what OSS Trino 467's
 
 ---
 
+## TOP-OF-DOC GUARDRAIL — TopN-CONFUSION GUARDRAIL (read BEFORE answering any `ORDER BY ... LIMIT N` question)
+
+> **This callout exists because the iter420 self-contradiction failure mode (the responder said "Trino pulls ALL rows" AND "TopN pushdown fires" in the same answer about the same query) keeps surfacing on TopN-related federation questions. Read this before reaching for any other TopN material.**
+>
+> **THE ONE SENTENCE TO BURN INTO MEMORY (the leading mental model for plain TopN on Postgres):**
+>
+> > For a **PLAIN** `SELECT ... FROM app_pg.<schema>.<table> ORDER BY <col> [DESC|ASC] LIMIT N` query on the OSS Trino 467 PostgreSQL connector — **TopN pushdown FIRES BY DEFAULT (since Trino release 354, 19 March 2021).** Postgres does the sort+limit (uses an index on the sort column if present) and returns only **N rows over JDBC. Trino does NOT pull all rows.** This is the FAST, idiomatic shape — not a federation anti-pattern.
+>
+> **Leading worked example — the canonical pushed shape (the FIRST thing to think about when you read `ORDER BY x LIMIT N`):**
+>
+> ```sql
+> -- Trino SQL (plain ORDER BY+LIMIT, no GROUP BY, no aggregate, no federated join):
+> SELECT id, user_id, amount, created_at
+> FROM app_pg.public.orders          -- 50M-row OLTP table
+> ORDER BY created_at DESC
+> LIMIT 50;
+>
+> -- Trino sends to Postgres over JDBC (TopN pushdown FIRES — default behavior):
+> --   SELECT id, user_id, amount, created_at FROM public.orders
+> --     ORDER BY created_at DESC LIMIT 50;
+> --
+> -- Postgres:
+> --   - Uses the B-tree index on created_at (if present) to read the 50 newest rows.
+> --   - Returns 50 rows over JDBC.
+> -- Trino:
+> --   - Receives 50 rows. Emits them. NO sort in Trino memory. NO pull of all rows.
+> --
+> -- Wire traffic: 50 rows.  Latency: low ms on an indexed sort column.
+> ```
+>
+> **EXPLAIN signature for the pushed case — `sortOrder=` and `limit=` FOLDED INTO the TableScan, NO separate `TopN` operator anywhere above:**
+>
+> ```
+> Fragment 0 [SINGLE]
+>     Output[id, user_id, amount, created_at]
+>     └─ TableScan[table = app_pg:public.orders,
+>                  sortOrder=[created_at DESC NULLS LAST],
+>                  limit=50]
+> ```
+>
+> The **ABSENCE** of a separate `TopN` Trino operator above the TableScan IS the success signature (trino.io/docs/current/optimizer/pushdown.html quote: *"The absence of the TopN Trino operator in the Fragment 0 from the query plan demonstrates that the query benefits of the Top-N pushdown optimization."*).
+>
+> **DO NOT WRITE — sentences that produce the iter420 self-contradiction (factually wrong for plain TopN on the PG connector, Trino 467):**
+>
+> | DO NOT WRITE (about plain `ORDER BY col LIMIT N`) | THE FACTUAL FIX |
+> |---|---|
+> | "Trino pulls ALL rows from Postgres and sorts in memory." | TopN pushdown is on by default since release 354 (Mar 2021); Postgres returns only N rows. |
+> | "Postgres does NO work — Trino does everything." | Postgres does the sort+limit (often using an index on the sort column). Postgres does most of the work. |
+> | "This is slow / a federation anti-pattern." | This is the FAST, idiomatic shape — sub-second on indexed sort columns even on 50M-row tables. |
+> | "TopN pushdown is a Starburst Enterprise / commercial-fork feature." | TopN pushdown is in OSS Trino since release 353 (5 Mar 2021), enabled by default since release 354 (19 Mar 2021); ships with OSS Trino 467 out of the box. |
+> | "TopN pushdown was added in a much later Trino version." | It is 5+ years old in OSS Trino. |
+>
+> **THE "Trino pulls all rows" framing applies ONLY when the ORDER BY column is a Trino-computed aggregate (e.g., `GROUP BY ... ORDER BY COUNT(*) DESC LIMIT N`), or another listed failure shape (federated-join ORDER BY, non-default collation, non-identity projection above the TableScan, etc.). For a PLAIN `ORDER BY col LIMIT N` on a single Postgres table, the "Trino pulls all rows" framing is WRONG — never use it. If you have written a sentence with "Trino pulls all rows" or "Postgres does no work" while answering a plain `ORDER BY col LIMIT N` question on Trino 467 / PG connector, STOP — that is the iter420 failure mode; rewrite to the canonical pushed-case framing above.**
+>
+> **DISAMBIGUATION TABLE — Plain TopN (PUSHES) vs Aggregate ORDER BY (does NOT push). KEEP THESE TWO CASES VISUALLY DISTINCT in your answer.**
+>
+> | Query shape | Example SQL | Pushes? | EXPLAIN signature |
+> |---|---|---|---|
+> | **PLAIN ORDER BY + LIMIT** (the canonical TopN) | `SELECT id, amount, created_at FROM app_pg.public.orders ORDER BY created_at DESC LIMIT 50;` | **YES — pushes by default (Trino release 354+)** | `TableScan[..., sortOrder=[created_at DESC NULLS LAST], limit=50]` — `sortOrder=` and `limit=` annotations FOLDED INTO the TableScan. **NO separate `TopN` operator above.** Postgres does the sort+limit. |
+> | **GROUP BY + aggregate ORDER BY + LIMIT** (the exception) | `SELECT customer_id, COUNT(*) FROM app_pg.public.orders GROUP BY customer_id ORDER BY COUNT(*) DESC LIMIT 50;` | **NO — TopN itself does NOT push** (the GROUP BY aggregate may or may not push, separately) | A separate `TopN[count = 50, orderBy=[count DESC]]` operator sits ABOVE the `Aggregate` / `TableScan`. The sort key (`COUNT(*)`) is a value Postgres has not produced yet — Trino computes it after the GROUP BY rows arrive, so the sort must happen in Trino. |
+>
+> **Read the table as: "the SQL shape determines the answer." Bare-column sort key on a single Postgres table = PUSHES. Computed-aggregate sort key = DOES NOT push. Do not conflate the aggregate non-push case with the plain TopN case — that conflation IS the iter420 failure mode.**
+>
+> **Mental model anchor — the FIRST question to ask yourself when you see `ORDER BY ... LIMIT N`:** Is the sort key a **bare column** on a **single Postgres table** (no GROUP BY above, no aggregate function in the ORDER BY, no federated join, no expression in the sort key)? If YES → **pushes by default**; describe the `sortOrder=`+`limit=` inside the TableScan; never say "Trino pulls all rows." If NO (aggregate, federated join, expression, etc.) → it's a specific failure shape; describe that shape and its workaround (Section 13.5).
+>
+> Full canonical treatment with failure-shape catalog + history + citations: **[Section 3.3A](#33a-top-n-pushdown--order-by--limit-n-pushes-down-to-postgresql-critical--do-not-miss-this) and [Section 13.5](#135-topn--limit-pushdown--under-known-high-impact-reconciled--single-source-of-truth).**
+
+---
+
 ## 0. CRITICAL — OSS Trino 467 has NO native PostgreSQL connection pooling
 
 > **Read this before you touch any catalog properties file.**
@@ -2691,6 +2760,84 @@ EXPLAIN ANALYZE SELECT * FROM billing_pg.public.table WHERE text_col > 'M';
 The session property takes effect immediately for your current connection — no coordinator restart needed. Use this to test whether string pushdown helps before committing to the catalog-level property (which requires a coordinator restart). Substitute your actual Postgres catalog name (`app_pg`, `billing_pg`, etc.) for the `billing_pg.` prefix — this is a connector session property, so the catalog prefix is mandatory (see the connector-session-property rule in Section 5.4).
 
 ### 3.3A Top-N pushdown — `ORDER BY ... LIMIT N` pushes down to PostgreSQL (CRITICAL — do not miss this)
+
+---
+
+#### TOP-OF-SECTION GUARDRAIL — TopN-CONFUSION GUARDRAIL (read this first, then read everything else)
+
+> **THE ONE SENTENCE TO BURN INTO MEMORY:**
+>
+> > For a **PLAIN** `SELECT ... FROM app_pg.<schema>.<table> ORDER BY <col> [DESC|ASC] LIMIT N` query on the OSS Trino 467 PostgreSQL connector, **TopN pushdown FIRES BY DEFAULT (since Trino release 354, 19 March 2021). Postgres does the sort+limit (using an index on the sort column if one exists) and returns only N rows. Trino does NOT pull all rows from Postgres.**
+>
+> This is the **leading mental model** you must reach for whenever someone asks "what does `SELECT ... ORDER BY x LIMIT N` against my Postgres table do?" The exception cases (aggregate ORDER BY, federated-join ORDER BY, non-default collation, etc.) are listed below — but the **default** is "pushes cleanly to Postgres."
+>
+> **Leading worked example — the canonical pushed shape (the FIRST thing to think about):**
+>
+> ```sql
+> -- Trino SQL (plain ORDER BY + LIMIT, no GROUP BY, no aggregate, no federated join):
+> SELECT id, user_id, amount, created_at
+> FROM app_pg.public.orders                            -- 50M-row OLTP table
+> ORDER BY created_at DESC
+> LIMIT 50;
+>
+> -- What Trino sends to Postgres over JDBC (TopN pushdown FIRES):
+> --   SELECT id, user_id, amount, created_at FROM public.orders
+> --     ORDER BY created_at DESC LIMIT 50;
+> --
+> -- What Postgres does:
+> --   - Uses the B-tree index on created_at (if one exists) to read the 50 newest rows.
+> --   - Returns 50 rows over JDBC.
+> --
+> -- What Trino does:
+> --   - Receives 50 rows. Emits them to the client.
+> --   - Trino does NOT pull all 50M rows. Trino does NOT sort anything in memory.
+> --
+> -- Wire traffic: 50 rows (NOT 50M).  Latency: low milliseconds on an indexed sort column.
+> ```
+>
+> **EXPLAIN signature for the pushed case (memorize this — `sortOrder=` and `limit=` FOLDED INTO the TableScan, NO `TopN` operator above):**
+>
+> ```
+> Fragment 0 [SINGLE]
+>     Output[id, user_id, amount, created_at]
+>     └─ TableScan[table = app_pg:public.orders,
+>                  sortOrder=[created_at DESC NULLS LAST],
+>                  limit=50]
+>            Layout: [id, user_id, amount, created_at]
+>
+> -- KEY READING SKILL: The `TopN` Trino operator is ABSENT from above the TableScan.
+> -- The ABSENCE of a separate TopN node IS the success signature.
+> -- (Quoted from trino.io/docs/current/optimizer/pushdown.html:
+> --   "The absence of the TopN Trino operator in the Fragment 0 from the query plan
+> --    demonstrates that the query benefits of the Top-N pushdown optimization.")
+> ```
+
+> **DO NOT WRITE — the iter420 self-contradiction trap.** When asked about a plain `ORDER BY col LIMIT N` query against a PostgreSQL connector table on Trino 467, **NEVER write any of the following sentences**:
+>
+> | DO NOT WRITE (factually wrong for plain TopN) | WHY IT'S WRONG |
+> |---|---|
+> | "Trino pulls ALL rows from Postgres and sorts in memory." | TopN pushdown is enabled by default since release 354 (Mar 2021) — Postgres does the sort+limit; Trino receives only N rows. |
+> | "Postgres does NO work — Trino does everything." | Postgres does the sort+limit (and uses an index on the sort column if available). Postgres does most of the work. |
+> | "This is slow / a federation anti-pattern." | This is the FAST, idiomatic shape. The Top-N pushed-to-Postgres path is sub-second on indexed sort columns even on 50M+ row tables. |
+> | "TopN pushdown is a Starburst Enterprise feature / commercial-fork-only." | TopN pushdown has been in OSS Trino since release 353 (5 Mar 2021), enabled by default since release 354 (19 Mar 2021). It is in OSS Trino 467 out of the box. |
+> | "TopN pushdown was added in a much later Trino version." | It is 5+ years old in OSS Trino. |
+>
+> **The "Trino pulls all rows" framing applies ONLY when the ORDER BY is over a Trino-computed aggregate (e.g., `GROUP BY ... ORDER BY COUNT(*) DESC LIMIT N`) or another listed failure shape (federated-join ORDER BY, non-default collation, non-identity projection above the TableScan, etc.). For a PLAIN `ORDER BY col LIMIT N` on a single Postgres table, NEVER use the "Trino pulls all rows" framing — that mental model is wrong for the default case.**
+>
+> **If you find yourself starting a sentence with "Trino pulls all rows from Postgres and sorts in memory" while answering a plain `ORDER BY col LIMIT N` question — STOP. That is the iter420 failure mode. Replace it with: "TopN pushdown fires. Postgres does the sort+limit (uses an index if present) and returns only N rows. Trino does not pull all rows."**
+
+> **DISAMBIGUATION TABLE — Plain TopN (PUSHES) vs Aggregate ORDER BY (does NOT push). KEEP THESE TWO CASES MENTALLY DISTINCT. Confusing them is the root cause of the iter420 self-contradiction.**
+>
+> | Query shape | What it looks like | Pushes? | Why | EXPLAIN signature |
+> |---|---|---|---|---|
+> | **Plain ORDER BY + LIMIT** (the canonical TopN — DEFAULT BEHAVIOR) | `SELECT id, amount, created_at FROM app_pg.public.orders ORDER BY created_at DESC LIMIT 50;` | **YES — pushes by default since release 354** | The sort key (`created_at`) is a bare column reference on the Postgres table. Postgres can sort using an index on that column and return N rows. | `TableScan[..., sortOrder=[created_at DESC NULLS LAST], limit=50]` — `sortOrder=` and `limit=` annotations FOLDED INTO the TableScan node. **NO separate `TopN` operator above the TableScan.** |
+> | **GROUP BY + aggregate ORDER BY + LIMIT** (the exception case — does NOT push) | `SELECT customer_id, COUNT(*) FROM app_pg.public.orders GROUP BY customer_id ORDER BY COUNT(*) DESC LIMIT 50;` | **NO — TopN itself does NOT push (the aggregate may or may not, separately)** | The sort key (`COUNT(*)`) is a value Postgres has not produced yet — it is computed by Trino AFTER the GROUP BY rows arrive at Trino workers. The connector cannot ship the sort to Postgres because the sort column does not exist in Postgres's row set. | A separate `TopN[count = 50, orderBy=[count DESC]]` operator sits ABOVE an `Aggregate` (or above the TableScan if the aggregate also failed to push). The Sort happens on Trino workers, post-aggregation. |
+>
+> **Read this table as: "the SQL shape determines the answer." A bare-column sort key on a single Postgres table = PUSHES. A computed-aggregate sort key = DOES NOT push. Do not generalize the aggregate non-push case into a blanket 'Trino pulls all rows for any ORDER BY+LIMIT on Postgres' claim — that conflates the two cases.**
+>
+> **Mental model anchor.** When the engineer asks about `ORDER BY ... LIMIT N`, your **FIRST question to yourself** is: "is the sort key a bare column on a single Postgres table?" If YES → pushes by default; explain the EXPLAIN signature with `sortOrder=`+`limit=` inside the TableScan; do NOT mention "Trino pulls all rows." If NO (aggregate, federated join, expression, etc.) → describe the specific failure shape and its workaround.
+
+---
 
 > **RECONCILIATION POINTER**: This section is the introductory treatment of TopN pushdown. **The canonical, comprehensive single source of truth — including the full failure-shape catalog, the myth-buster table making explicit that "OSS Trino can't push TopN" is wrong, the release-353/354 history, and the workaround tree — is [Section 13.5](#135-topn--limit-pushdown--under-known-high-impact-reconciled--single-source-of-truth).** If anything in this section appears to contradict §13.5, §13.5 wins.
 
