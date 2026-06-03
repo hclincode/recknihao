@@ -465,13 +465,14 @@ The fix is one table property — `write.distribution-mode = 'hash'` — which t
 >    .tableProperty("write.distribution-mode", "hash")
 >    .create())
 > ```
-> Or set on an existing write:
+> Or append to an already-existing table (canonical DataFrameWriterV2 form):
 > ```python
-> df.write.format("iceberg") \
->   .option("write.distribution-mode", "hash") \
->   .mode("append") \
->   .save("iceberg.analytics.events")
+> (df.writeTo("iceberg.analytics.events")
+>    .option("write.distribution-mode", "hash")
+>    .append())
 > ```
+>
+> > **DO NOT** close a Spark-to-Iceberg write with `df.write.format("iceberg").mode("append").save(...)` or `.saveAsTable(...)`. That is the **legacy save() path** and does NOT route through the SparkCatalog plugin cleanly — see resource 13's "Spark write API — the API-CONFUSION GUARDRAIL" callout. On the production stack (Iceberg 1.5.2 + SparkCatalog with HMS), the canonical and ONLY supported write API is **DataFrameWriterV2**: `df.writeTo("iceberg.x.y").append()` / `.overwritePartitions()` / `.create()` / `.createOrReplace()`.
 >
 > Remember the `bucket()` argument-order difference between engines: Trino is `bucket(column, N)`, Spark is `bucket(N, column)`.
 

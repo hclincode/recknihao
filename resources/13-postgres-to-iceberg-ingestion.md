@@ -16,6 +16,138 @@
 
 ---
 
+## TOP-OF-DOC CALLOUT #1 — Spark write API: the API-CONFUSION GUARDRAIL (read BEFORE writing any Spark-to-Iceberg recipe)
+
+> **The single most important rule in this entire document.** When you are writing a Spark-to-Iceberg ingestion recipe, the **final line that emits the write** MUST be one of these four DataFrameWriterV2 forms. Anything else is wrong on this stack (Iceberg 1.5.2 + Spark + SparkCatalog plugin + Hive Metastore).
+>
+> | Intent | Canonical form (USE THIS) | Wrong forms (NEVER USE) |
+> |---|---|---|
+> | Append new rows to existing table | `df.writeTo("iceberg.analytics.events").append()` | `df.write.format("iceberg").mode("append").save("iceberg.analytics.events")` `df.write.format("iceberg").mode("append").saveAsTable("iceberg.analytics.events")` |
+> | Idempotent overwrite of one or more partitions (e.g., a single day) | `df.writeTo("iceberg.analytics.events").overwritePartitions()` | `df.write.format("iceberg").mode("overwrite").save(...)` `df.write.format("iceberg").mode("overwrite").saveAsTable(...)` |
+> | Bootstrap a brand-new table from a write | `df.writeTo("iceberg.analytics.events").using("iceberg").create()` | `df.write.format("iceberg").mode("overwrite").saveAsTable(...)` `df.write.format("iceberg").mode("ErrorIfExists").saveAsTable(...)` |
+> | Drop and rebuild whole table from a write (rare; destructive) | `df.writeTo("iceberg.analytics.events").using("iceberg").createOrReplace()` | `df.write.format("iceberg").mode("overwrite").saveAsTable(...)` |
+>
+> **Verbatim from [iceberg.apache.org/docs/1.5.1/spark-writes/](https://iceberg.apache.org/docs/1.5.1/spark-writes/):**
+> > "Spark 3 introduced the new DataFrameWriterV2 API for writing to tables using data frames... To append a dataframe to an Iceberg table, use append: `data.writeTo("prod.db.table").append()`. To overwrite partitions dynamically, use overwritePartitions(): `data.writeTo("prod.db.table").overwritePartitions()`. To run a CTAS or RTAS, use create, replace, or createOrReplace operations."
+>
+> **Why the legacy `.save()` / `.saveAsTable()` path is wrong here:** the legacy v1 path (`df.write.format("iceberg").mode(...).save(...)` / `.saveAsTable(...)`) is the dominant Spark idiom for Hive tables and path-based Parquet writes. On the Iceberg + SparkCatalog plugin stack it does NOT work cleanly: it can route around the catalog plugin entirely, write to the wrong location (interpreting the table identifier as a path), silently ignore the table's partition spec, or fail with a confusing CatalogPlugin error mid-job. The Iceberg docs explicitly direct you to the DataFrameWriterV2 (`writeTo()`) path.
+>
+> **The simple discipline:** if the LAST line of your Spark recipe is `df.write.format("iceberg")...` or contains `.saveAsTable(`, STOP — replace it with the corresponding `df.writeTo("iceberg.x.y").<verb>()` form from the table above. Every worked example in this document follows this rule, and so should every snippet you copy from this document into production.
+>
+> See also the myth box below (row 7) and the "Spark JDBC end-to-end worked recipe" subsection immediately below this callout.
+
+---
+
+## TOP-OF-DOC CALLOUT #2 — Spark JDBC end-to-end worked recipe (canonical: read parallelism + Iceberg write)
+
+> **Use this as the template for any "read N million rows from Postgres in parallel and write to Iceberg" task.** Every detail (parallelism options, MAX(id) lookup, dedup, watermark advance, final write API) is canonical for the production stack.
+>
+> ```python
+> from pyspark.sql import SparkSession
+> from pyspark.sql.functions import current_timestamp, row_number
+> from pyspark.sql.window import Window
+>
+> spark = (SparkSession.builder
+>     .config("spark.sql.catalog.iceberg", "org.apache.iceberg.spark.SparkCatalog")
+>     .config("spark.sql.catalog.iceberg.type", "hive")
+>     .config("spark.sql.catalog.iceberg.uri", "thrift://hive-metastore:9083")
+>     .config("spark.sql.catalog.iceberg.warehouse", "s3a://lakehouse/warehouse")
+>     .config("spark.hadoop.fs.s3a.endpoint", "http://minio:9000")
+>     .config("spark.hadoop.fs.s3a.path.style.access", "true")
+>     .getOrCreate())
+>
+> PG_URL = "jdbc:postgresql://pg-replica:5432/app"
+> PG_PROPS = {
+>     "user": PG_USER, "password": PG_PASS,
+>     "driver": "org.postgresql.Driver",
+>     "fetchsize": "10000",
+> }
+>
+> last_ts = read_watermark("events")
+>
+> # Step 1: pull actual MIN/MAX(id) at job start — do NOT hardcode upperBound.
+> bounds = spark.read.jdbc(
+>     url=PG_URL,
+>     table=(
+>         f"(SELECT COALESCE(MIN(id),0) AS lo, COALESCE(MAX(id),0) AS hi "
+>         f"   FROM events WHERE updated_at > '{last_ts}') t"
+>     ),
+>     properties=PG_PROPS,
+> ).collect()[0]
+> min_id, max_id = bounds.lo, bounds.hi
+> if max_id == 0:
+>     print("No new rows; skipping run.")
+>     return
+>
+> # Step 2: parallel JDBC read with explicit partitionColumn/lowerBound/upperBound/numPartitions.
+> # numPartitions = min(spark executor cores, postgres max_connections budget) — see § choosing numPartitions.
+> events_df = (spark.read.format("jdbc")
+>     .option("url", PG_URL)
+>     .option("dbtable", f"(SELECT * FROM events WHERE updated_at > '{last_ts}') t")
+>     .option("user", PG_USER).option("password", PG_PASS)
+>     .option("partitionColumn", "id")
+>     .option("lowerBound", min_id)
+>     .option("upperBound", max_id)
+>     .option("numPartitions", 16)
+>     .option("fetchsize", "10000")
+>     .load()
+>     .withColumn("batch_loaded_at", current_timestamp()))
+>
+> # Step 3: dedup defensively on event_id.
+> w = Window.partitionBy("event_id").orderBy(events_df.updated_at.desc())
+> events_df = (events_df
+>     .withColumn("_rn", row_number().over(w))
+>     .filter("_rn = 1")
+>     .drop("_rn"))
+>
+> # Step 4: persist before the dual-consumer pattern (write + watermark agg).
+> events_df.persist()
+>
+> # Step 5: ===== CANONICAL ICEBERG WRITE — DataFrameWriterV2 .writeTo(...).append() =====
+> # This is the ONLY supported write API on this stack. NEVER close with
+> # .write.format("iceberg").mode("append").save(...) or .saveAsTable(...) — see the
+> # API-CONFUSION GUARDRAIL above.
+> events_df.writeTo("iceberg.analytics.events").append()
+>
+> # Step 6: advance the watermark from the persisted df.
+> new_ts = events_df.agg({"updated_at": "max"}).collect()[0][0]
+> write_watermark("events", new_ts)
+> events_df.unpersist()
+> ```
+>
+> **Key checkpoints (in order):**
+> 1. `numPartitions=16` is illustrative — pick it as `min(spark_executor_cores, postgres_max_connections_budget)`. See the dedicated subsection below.
+> 2. `lowerBound` and `upperBound` MUST be derived from a `MIN/MAX(id)` query, not hardcoded.
+> 3. `fetchsize=10000` MUST be set in PG_PROPS (default 0 = "fetch all into memory" = OOM).
+> 4. **The final write line is `events_df.writeTo("iceberg.analytics.events").append()`** — DataFrameWriterV2. If you find yourself reaching for `.write.format("iceberg")...` , STOP and re-read TOP-OF-DOC CALLOUT #1 above.
+>
+> **Variant A — Idempotent backfill of a single day partition** (replace step 5 with):
+> ```python
+> # batch_date passed as CLI argument, e.g. --batch-date 2026-06-02
+> # df was filtered to date(occurred_at) = batch_date at the JDBC read stage.
+> events_df.writeTo("iceberg.analytics.events").overwritePartitions()
+> ```
+> Re-running with the same `batch_date` is idempotent — the target day's partition is replaced atomically with the same rows. NEVER `.write.format("iceberg").mode("overwrite").save(...)`.
+>
+> **Variant B — Bootstrapping a brand-new Iceberg table from a Postgres dump** (replace step 5 with):
+> ```python
+> # First-time table creation. Table does not yet exist in HMS.
+> (events_df.writeTo("iceberg.analytics.events")
+>     .using("iceberg")
+>     .partitionedBy(days("occurred_at"))
+>     .tableProperty("write.distribution-mode", "hash")
+>     .create())
+> ```
+> Use `.create()` for first-time creation (errors if table exists); `.createOrReplace()` only when you genuinely want to drop and rebuild. NEVER `.write.format("iceberg").mode("overwrite").saveAsTable(...)`.
+>
+> **Variant C — Replacing an existing table's contents** (rare; destructive):
+> ```python
+> events_df.writeTo("iceberg.analytics.events").using("iceberg").createOrReplace()
+> ```
+> See the "Pattern A — Full refresh" section below for warnings about `createOrReplace()` on partitioned production tables (it wipes ALL partitions).
+
+---
+
 ## Common myths about Postgres-to-Iceberg ingestion — read FIRST (the load-bearing wrong claims)
 
 These are the absolutes most often stated incorrectly about Spark JDBC ingestion + Iceberg writes on the Spark 3.x + Iceberg 1.5.2 + Trino 467 stack. Each TRUTH below has been verified against the [Apache Iceberg docs](https://iceberg.apache.org/docs/1.5.1/), [Spark JDBC reference](https://spark.apache.org/docs/latest/sql-data-sources-jdbc.html), and [Trino Iceberg connector docs](https://trino.io/docs/current/connector/iceberg.html). **Lead with the TRUTH; state the nuance.**
@@ -3414,7 +3546,10 @@ df = (df
 w = Window.partitionBy("event_id").orderBy(df.updated_at.desc())
 df = df.withColumn("_rn", row_number().over(w)).filter("_rn = 1").drop("_rn")
 
-# 4. Append to Iceberg
+# 4. Append to Iceberg — CANONICAL DataFrameWriterV2 API.
+#    NEVER close this step with df.write.format("iceberg").mode("append").save(...)
+#    or .saveAsTable(...). Those are the LEGACY v1 paths and do not route through
+#    the SparkCatalog plugin cleanly on Iceberg 1.5.2 — see TOP-OF-DOC CALLOUT #1.
 df.writeTo("iceberg.analytics.events").append()
 
 # 5. Advance watermark
@@ -3426,6 +3561,7 @@ Key points:
 - `partitionColumn` / `numPartitions` parallelize the JDBC read — without it, one Spark task drags the whole Postgres table through one connection.
 - `batch_loaded_at` is your audit column for "when did this row arrive in the lake."
 - Dedup is *defensive* — assume Postgres has duplicates from retries.
+- **The write closes with `df.writeTo("iceberg.analytics.events").append()` — DataFrameWriterV2.** This is non-negotiable on this stack. See TOP-OF-DOC CALLOUT #1 at the top of this resource for the full API-CONFUSION GUARDRAIL.
 
 ### How lowerBound / upperBound / numPartitions actually work
 
