@@ -138,6 +138,81 @@ When you read Trino's EXPLAIN ANALYZE output, you'll hit these terms. Definition
 
 ---
 
+## LEADING CANONICAL ONCALL TUNING-LEVERS — "Which Trino session properties should I set to speed up a slow query?" (read this FIRST for SET SESSION / session-property tuning questions)
+
+> **This is the findable canonical answer for the oncall session-property-tuning question. Every property name below has been verified against [trino.io/docs/current/admin/properties-general.html](https://trino.io/docs/current/admin/properties-general.html), [trino.io/docs/current/admin/dynamic-filtering.html](https://trino.io/docs/current/admin/dynamic-filtering.html), [trino.io/docs/current/admin/properties-task.html](https://trino.io/docs/current/admin/properties-task.html), [trino.io/docs/current/admin/properties-resource-management.html](https://trino.io/docs/current/admin/properties-resource-management.html), and [trino.io/docs/current/admin/spill.html](https://trino.io/docs/current/admin/spill.html). Do NOT invent property names — paste verbatim.**
+>
+> **The naming rule that traps everyone (read this FIRST).** Every Trino tuning knob exists in TWO forms with DIFFERENT spellings — getting them mixed up is the #1 fab class under oncall pressure:
+>
+> | Form | Where it lives | Spelling convention | Example |
+> |---|---|---|---|
+> | **Config property** (cluster-wide, requires restart) | `etc/config.properties` on the coordinator/workers | **DOTS and HYPHENS** (no underscores) | `query.max-memory-per-node=8GB` |
+> | **Session property** (per-query, no restart) | `SET SESSION <name> = <value>;` in your SQL session | **UNDERSCORES** (no dots/hyphens) | `SET SESSION query_max_memory_per_node = '8GB';` |
+>
+> The two forms control the SAME underlying setting. The session form can OVERRIDE the config default but **only DOWNWARD** for memory limits (you can lower the cap for a specific query, not raise it). For non-limit settings (`join_distribution_type`, `enable_dynamic_filtering`, `task_concurrency`) the session form can override in either direction.
+>
+> **The five session properties that matter most for query-perf oncall (verbatim).** Use these IN ORDER — each lever earlier in the list is cheaper to try and reversible:
+>
+> | # | Session property (UNDERSCORES) | Config equivalent (DOTS/HYPHENS) | What it does | When to reach for it |
+> |---|---|---|---|---|
+> | **1** | `join_distribution_type` (`'AUTOMATIC'` / `'BROADCAST'` / `'PARTITIONED'`) | `join-distribution-type` | The lever between broadcast (small build, replicated to every worker) and partitioned (hash-repartitioned across workers) join distribution. **Primary cost-based-optimizer override.** Default `AUTOMATIC`. | OOM on fact-to-dim join (try `'PARTITIONED'`); slow fact-to-dim join with a small dim (try `'BROADCAST'`). See r24 LEADING CANONICAL join-distribution block. |
+> | **2** | `join_max_broadcast_table_size` (DURATION-like string `'50MB'`) | `join-max-broadcast-table-size` | The AUTOMATIC-mode broadcast threshold. If the planner estimates the smaller side is below this, it chooses BROADCAST. Default `100MB`. | Tune the auto-broadcast threshold down (force PARTITIONED) when you've blown memory on a "small but not that small" dim. Tune up to encourage BROADCAST when you have ample RAM. |
+> | **3** | `enable_dynamic_filtering` (`true`/`false`, default `true`) | `enable-dynamic-filtering` | Master on/off for dynamic filtering — the runtime mechanism that pushes IN-list / range predicates from the build side of a join into the probe-side scan. Default ON. | NEVER disable in prod (huge perf loss). Only set `false` for diagnostic A/B testing when you suspect DF is producing wrong results — a rare path. |
+> | **4** | `query_max_memory_per_node` (`'8GB'`) | `query.max-memory-per-node` | Per-query memory cap on ONE worker. Session form can only LOWER, not raise. Default **30% of JVM max heap** per [trino.io/docs/current/admin/properties-resource-management.html](https://trino.io/docs/current/admin/properties-resource-management.html). | Throttle a heavy ad-hoc query to keep it from hogging cluster memory: `SET SESSION query_max_memory_per_node = '4GB';`. |
+> | **5** | `task_concurrency` (integer, default = node physical CPU count, clamped to min 2 / max 32) | `task.concurrency` | Number of parallel drivers per worker for an operator (join/aggregation). Higher = more parallelism per worker; lower = leaves room for other concurrent queries. Default auto-derived from physical CPUs per [trino.io/docs/current/admin/properties-task.html](https://trino.io/docs/current/admin/properties-task.html) (8 under fault-tolerant execution mode). | Lower (e.g., `SET SESSION task_concurrency = 4`) when many queries run concurrently and you want each to use less worker CPU. Raise (e.g., `SET SESSION task_concurrency = 32`) for a single-tenant heavy query on an idle cluster. |
+>
+> **Verbatim usage examples (paste these, don't paraphrase):**
+>
+> ```sql
+> -- Per-query tuning for a specific slow dashboard query.
+> -- Issued in the SAME SQL session before the SELECT — Trino scopes session properties to the session only.
+> SET SESSION join_distribution_type = 'BROADCAST';
+> SET SESSION join_max_broadcast_table_size = '50MB';
+> SET SESSION query_max_memory_per_node = '8GB';
+>
+> -- Run the actual query.
+> SELECT ... FROM iceberg.analytics.events e JOIN iceberg.analytics.tenants t ON ...;
+>
+> -- Optional: clear an override when done (next query reverts to cluster default).
+> RESET SESSION join_distribution_type;
+> ```
+>
+> **Verify what's actually set in your current session:**
+>
+> ```sql
+> -- Shows every session property that has been set / overridden in THIS session.
+> SHOW SESSION LIKE 'join_distribution_type';
+> SHOW SESSION LIKE '%dynamic_filter%';
+> SHOW SESSION LIKE 'query_max_%';
+> -- Bare `SHOW SESSION` lists all session properties and their current/default values.
+> ```
+>
+> ### DO-NOT-WRITE — banned session-property forms in the oncall tuning checklist
+>
+> | DO NOT write this | What is wrong | The right answer |
+> |---|---|---|
+> | `SET SESSION query.max-memory-per-node = '8GB'` | **Mixing config-property spelling into a session statement.** `SET SESSION` requires the UNDERSCORE form. Trino rejects the dot/hyphen form with `Session property 'query.max-memory-per-node' does not exist`. | `SET SESSION query_max_memory_per_node = '8GB';` (underscores). |
+> | `SET SESSION enable-dynamic-filtering = false` | Same class — config spelling pasted into session syntax. Hyphens are config-property delimiters, NOT session-property delimiters. | `SET SESSION enable_dynamic_filtering = false;` (underscores). |
+> | `SET SESSION task.concurrency = 8` | Same class — dot is config-property delimiter, not session. | `SET SESSION task_concurrency = 8;` (underscores). |
+> | `SET join_distribution_type = 'BROADCAST'` (missing `SESSION` keyword) | Trino requires the `SESSION` keyword (`SET SESSION <prop> = ...`). Bare `SET <prop>` is **PostgreSQL/MySQL syntax** for setting a session variable, NOT Trino. Trino rejects with `mismatched input '=' expecting ...`. | `SET SESSION join_distribution_type = 'BROADCAST';` (include the `SESSION` keyword). |
+> | `SET SESSION join_distribution_type = 'HASH'` or `'SHUFFLE'` or `'REPARTITIONED'` | Invented values. The three valid values per [trino.io/docs/current/optimizer/cost-based-optimizations.html](https://trino.io/docs/current/optimizer/cost-based-optimizations.html) are `'AUTOMATIC'`, `'BROADCAST'`, `'PARTITIONED'`. | `SET SESSION join_distribution_type = 'PARTITIONED';` (uppercase, exact). |
+> | `SET SESSION iceberg.dynamic_filtering_wait_timeout = '30s'` ← **without** the catalog prefix on a federation case | This catalog-prefixed form IS correct for per-catalog DF tuning, but a bare-form `dynamic_filtering_wait_timeout` (no catalog prefix) does NOT exist as a system session property. The system-level master switch is `enable_dynamic_filtering` (boolean), NOT a wait-timeout. | Per-catalog: `SET SESSION iceberg.dynamic_filtering_wait_timeout = '30s';` (catalog prefix required). System-level on/off only: `SET SESSION enable_dynamic_filtering = true;`. |
+> | `SET SESSION /*+ BROADCAST(t) */ join_distribution_type = ...` (combining session set with `/*+ ... */` hint) | Trino 467 has NO query-hint syntax. `/*+ ... */` is silently parsed as a block comment (zero effect). Mixing hint syntax with `SET SESSION` is a sign the writer is composing from another engine's playbook (Oracle/Spark/Hive). | Just `SET SESSION join_distribution_type = 'BROADCAST';` — no hint comment. See r24 LEADING CANONICAL join-distribution block + r23 anti-patterns table. |
+> | `ALTER SESSION SET join_distribution_type = 'BROADCAST'` | **`ALTER SESSION SET ...` is Oracle syntax.** Trino rejects with parse error. | `SET SESSION join_distribution_type = 'BROADCAST';` |
+> | `SET LOCAL join_distribution_type = 'BROADCAST'` | **`SET LOCAL` is PostgreSQL syntax** (transaction-scoped variable). Trino has no transaction-scoped session variables and no `SET LOCAL` syntax. | `SET SESSION join_distribution_type = 'BROADCAST';` (session-scoped is the only form). |
+> | "Disable dynamic filtering to speed up the query" | DF is enabled by default and almost always helps. Disabling it is rarely the right answer — usually the suggestion comes from someone debugging a corner case. | Leave `enable_dynamic_filtering = true`. If DF is causing measurable harm (very rare), file a Trino issue with EXPLAIN ANALYZE output rather than turning it off in prod. |
+>
+> **Why this DO-NOT-WRITE block exists:** under oncall pressure engineers paste session-property `SET` commands from memory. The dot-vs-underscore confusion is the single highest-frequency Trino-tuning fab (it spans every property family — memory, joins, DF, tasks) and produces a `Session property X does not exist` parse error that's easy to misdiagnose as "the property doesn't exist on this version." It exists; you wrote it in the wrong form. Also banned: `ALTER SESSION` (Oracle), `SET LOCAL` (Postgres), bare `SET <prop>` (Postgres/MySQL), hint-in-session-set composites (Spark/Oracle). **Always paste from this document; never paste a session-property `SET` from cloud-warehouse / Spark / Oracle muscle memory.**
+>
+> ### Cross-references for session-property tuning
+>
+> - **Resource 24 §"LEADING CANONICAL — How do I influence Trino's join distribution"** — the canonical three-lever join-distribution recipe with the same DO-NOT-WRITE matrix banning `/*+ USE_HASH_JOIN */` and other hint forms.
+> - **Resource 23 §"SQL anti-patterns"** — the consolidated cross-dialect-spillover table including hint syntax, `ALTER SESSION`, `SET LOCAL`.
+> - **Resource 22 §5.1** — federation-side dynamic filtering with the per-catalog `<catalog>.dynamic_filtering_wait_timeout` form.
+> - **Resource 27 §4.4B** — the consolidated CROSS-DIALECT-SPILLOVER guardrail covering Oracle/Postgres/Snowflake/Spark forms that look valid but parse-error against Trino 467.
+
+---
+
 ## Triage priority order
 
 When someone reports "queries are slow," work through these in order — each step takes 1–5 minutes and the answer in step 1 often makes the later steps irrelevant:
@@ -1180,7 +1255,7 @@ The three modes:
 
 **Why BROADCAST helps with OOM on fact-to-dimension joins.** Under `PARTITIONED`, every worker builds a partial hash table on the fact side and waits for the dimension shuffle — peak memory per worker scales with the fact-side hash plus its share of the dimension. Under `BROADCAST`, every worker receives the full dimension once (small, fixed memory cost), then streams its local fact partition through the join without building a fact-side hash at all. Peak memory per worker drops from "fact-side hash + dimension share" to "full dimension + streaming probe" — usually much smaller when the dimension is small.
 
-**Concrete sizing rule of thumb:** if the smaller side fits comfortably in `query.max-memory-per-node` (e.g., a 100 MB hash table on workers with a multi-GB per-node memory budget), BROADCAST is safe and usually faster. If the smaller side is in the gigabytes and starts pushing into half of `query.max-memory-per-node`, stay on PARTITIONED — broadcasting it to every worker would blow memory on each one. Note: `query.max-memory-per-node` defaults to **20% of the JVM max heap** (not a fixed 4 GB) — on a worker with a 32 GB heap, that's ~6.4 GB; on 16 GB heap, ~3.2 GB. Check the actual value in your `etc/config.properties` (or the rendered config in the worker pod) before sizing the broadcast threshold.
+**Concrete sizing rule of thumb:** if the smaller side fits comfortably in `query.max-memory-per-node` (e.g., a 100 MB hash table on workers with a multi-GB per-node memory budget), BROADCAST is safe and usually faster. If the smaller side is in the gigabytes and starts pushing into half of `query.max-memory-per-node`, stay on PARTITIONED — broadcasting it to every worker would blow memory on each one. Note: `query.max-memory-per-node` defaults to **30% of the JVM max heap** (not a fixed 4 GB) per [trino.io/docs/current/admin/properties-resource-management.html](https://trino.io/docs/current/admin/properties-resource-management.html) — on a worker with a 32 GB heap, that's ~9.6 GB; on 16 GB heap, ~4.8 GB. Check the actual value in your `etc/config.properties` (or the rendered config in the worker pod) before sizing the broadcast threshold.
 
 **Syntax options:**
 

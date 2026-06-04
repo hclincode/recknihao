@@ -206,6 +206,90 @@ These are the absolutes most often stated incorrectly when an engineer asks "wha
 
 ---
 
+## LEADING CANONICAL COST WORKED EXAMPLE — "How do I attribute Trino query cost per tenant / per team for chargeback?" (read this FIRST for per-tenant cost-attribution questions)
+
+> **This is the findable canonical answer for the per-tenant chargeback question. Every claim below has been verified against [trino.io/docs/current/connector/system.html](https://trino.io/docs/current/connector/system.html) (system.runtime schema) and [trino.io/docs/current/admin/event-listeners.html](https://trino.io/docs/current/admin/event-listeners.html) (event listener for persistence). Do NOT invent columns or per-query dollar amounts — paste verbatim.**
+>
+> **The framing problem.** On this on-prem Trino stack, there is **NO per-query dollar charge** (Trino is open-source, the cluster cost is fixed 24/7). "Cost per tenant" therefore means **share of cluster work consumed**, not a dollar figure billed per query. Translate the question to: "what fraction of CPU-seconds and physical bytes scanned did each tenant consume in the last N hours/days?" Multiply by an internal chargeback rate (e.g., `$0.03 per vCPU-hour` × cluster total cost / cluster vCPU-hours) only if your org has agreed on one. Otherwise report percentages.
+>
+> **Step 1 — identify the tenant on the query.** Trino does NOT have a built-in `tenant_id` column on `system.runtime.queries`. The tenant must arrive via ONE of these three vectors set by the client at submit time, which then show up in the system tables:
+>
+> | Vector | Trino column | Set by client via |
+> |---|---|---|
+> | **`source`** (single string, ~5–20 chars) | `system.runtime.queries.source` | JDBC URL `?source=tenant_acme`, CLI `--source=tenant_acme`, HTTP `X-Trino-Source: tenant_acme` |
+> | **`"user"`** (the authenticated principal) | `system.runtime.queries."user"` (DOUBLE-QUOTED — `user` is reserved) | JWT `sub` claim or Basic auth username |
+> | **client tags** (free-form list) | NOT on `system.runtime.queries` — only on persisted `QueryCompletedEvent.context.clientTags` via event listener | HTTP `X-Trino-Client-Tags: tenant_acme,prod`, CLI `--client-tags=tenant_acme,prod` |
+>
+> **Recommended pattern for SaaS multi-tenant**: have the BI tool / app server inject `X-Trino-Source: tenant_<id>` (or a stable tag) on every query. This is the cleanest way to bucket cost; one column on `system.runtime.queries`, no JOIN to anything, survives the few minutes of in-memory retention. For audit-grade attribution that survives coordinator restarts, also configure an event listener to persist `QueryCompletedEvent` with `context.clientTags` — see r18 §"`system.runtime.*` is EPHEMERAL".
+>
+> **Step 2 — query share-of-cluster (CPU-seconds + bytes scanned) by tenant.** This is the verbatim recipe. Every column name and table name has been verified against Trino 467:
+>
+> ```sql
+> -- Trino 467 — per-tenant cost-share over the in-memory retention window
+> -- (last ~100 queries OR ~15 min, whichever is shorter — see r18 ephemeral note).
+> -- Tenant identity comes from the `source` column (set client-side at submit).
+> -- The JOIN is REQUIRED — `physical_input_bytes` and `split_cpu_time_ms` live on
+> -- `system.runtime.tasks`, NOT on `system.runtime.queries`.
+> SELECT
+>   q.source                                          AS tenant,
+>   COUNT(DISTINCT q.query_id)                        AS query_count,
+>   ROUND(SUM(t.split_cpu_time_ms) / 1000.0, 1)       AS total_cpu_sec,
+>   ROUND(SUM(t.physical_input_bytes) / 1e9, 2)       AS total_input_gb,
+>   ROUND(100.0 * SUM(t.split_cpu_time_ms) / NULLIF(
+>     SUM(SUM(t.split_cpu_time_ms)) OVER (), 0), 2)   AS pct_cluster_cpu
+> FROM system.runtime.queries q
+> JOIN system.runtime.tasks t ON q.query_id = t.query_id
+> WHERE q.state = 'FINISHED'
+>   AND q.source IS NOT NULL
+> GROUP BY q.source
+> ORDER BY total_cpu_sec DESC;
+> ```
+>
+> **Output** (one row per tenant): tenant identifier, number of queries, total CPU-seconds, total GB scanned from MinIO, and the percentage of cluster CPU consumed within the in-memory window. The `pct_cluster_cpu` column is the right metric for "whose queries did the most work" — it normalizes for query count and naturally handles tenants whose queries are heavy-but-rare vs light-but-frequent.
+>
+> **Step 3 — convert to dollars (optional, requires an internal chargeback rate).** Multiply `total_cpu_sec` by a `$/vCPU-second` derived from the cluster's fixed annual cost:
+>
+> ```sql
+> -- $/vCPU-sec example: cluster fixed cost $X/year, cluster has N vCPUs running 24/7.
+> -- Rate = $X / (N * 365 * 86400). For 4 workers × 16 vCPU × $200k cluster cost:
+> --   rate = 200000 / (64 * 31536000) = $0.0000992 / vCPU-sec
+> -- Substitute your number; this is just illustrative.
+> SELECT
+>   tenant,
+>   total_cpu_sec,
+>   ROUND(total_cpu_sec * 0.0000992, 2) AS attributed_usd
+> FROM (
+>   /* paste the per-tenant query from Step 2 here as a subquery */
+> );
+> ```
+>
+> **Step 4 — for longer than 15 minutes of history, use the event listener (NOT the in-memory tables).** `system.runtime.queries` evicts queries past `query.min-expire-age` (default 15 min) or once `query.max-history` (default 100) is exceeded — whichever comes first. For monthly chargeback, configure the **HTTP event listener** or **MySQL event listener** (see r18 ephemeral section) to persist `QueryCompletedEvent` records. The persisted record includes `metadata.queryStats.totalCpuTime`, `metadata.queryStats.physicalInputDataSize`, `context.user`, `context.source`, and `context.clientTags` — query that durable store for any window longer than a few hours.
+>
+> ### DO-NOT-WRITE — banned forms in the per-tenant cost-attribution checklist
+>
+> | DO NOT write this | What is wrong | The right answer |
+> |---|---|---|
+> | `SELECT tenant_id, SUM(cost_usd) FROM system.runtime.queries GROUP BY tenant_id` | `tenant_id` and `cost_usd` do NOT exist on `system.runtime.queries`. Tenant identity comes from the `source` column or `"user"` column; there is NO native dollar field — Trino on-prem has NO per-query billing. | Use the `source`-based recipe in Step 2 above. Convert to dollars in a derived column using your org's chargeback rate, NOT a fabricated `cost_usd` field. |
+> | `SELECT * FROM system.runtime.queries WHERE catalog = 'iceberg'` | The `catalog` column does NOT exist on `system.runtime.queries` (see r18 §"`system.runtime.queries` — Actual Column Reference"). | Search the SQL text: `WHERE query LIKE '%iceberg.%'`. For audit-grade catalog attribution, use the event listener's `metadata.catalog` field. |
+> | `SELECT * FROM system.runtime.query_stats` | The `query_stats` table does NOT exist in Trino. The real tables are `system.runtime.queries` (lifecycle, SQL text) and `system.runtime.tasks` (per-task CPU/bytes). | JOIN `queries` to `tasks` on `query_id` as shown in Step 2. |
+> | `SELECT q.source, SUM(q.peak_memory_bytes) FROM system.runtime.queries q` | `peak_memory_bytes` does NOT exist on `system.runtime.queries` OR `system.runtime.tasks`. Peak memory per query lives in JMX MBeans (`trino.execution:name=QueryManager`) — NOT in these tables. | For CPU+I/O attribution, use `t.split_cpu_time_ms` and `t.physical_input_bytes` (both on `system.runtime.tasks`). For peak memory, scrape JMX or persist via `QueryCompletedEvent`. |
+> | `SELECT q.user, ...` (bare `user`, no double-quote) | `user` is parsed as the `current_user` builtin in expression contexts — silently returns the SESSION user on every row instead of the column value. **Wrong-value bug, not a syntax error** — easy to miss in code review. | `q."user"` — double-quoted. Every recipe in r16/r18 uses the quoted form. |
+> | `SELECT * FROM system.runtime.queries WHERE created > NOW() - INTERVAL '30' DAY` | The `system.runtime.queries` table evicts past ~`query.min-expire-age` (15 min default) or `query.max-history` (100 queries default) — whichever first. A 30-day window is meaningless against the in-memory table. | For windows >1h, query the persisted event-listener table (HTTP / Kafka / MySQL listener — see r18). Do NOT rely on `system.runtime.queries` for monthly chargeback. |
+> | "Each Trino query on our stack costs $X — bill the tenant by query count." | Trino on-prem has NO per-query dollar charge. The cluster is fixed-cost; per-query marginal $ = 0. Billing by query COUNT punishes well-behaved tenants who write efficient SQL. | Bill by **share of cluster work** — `pct_cluster_cpu` or `pct_cluster_bytes_scanned` in the Step 2 recipe. This rewards efficient SQL and naturally caps heavy tenants. |
+> | `SELECT source, billed_amount FROM system.runtime.queries` (any `billed_amount` / `cost_usd` / `dollars` / `credits` column) | None of these columns exist. They're invented from cloud-warehouse vocabulary (Snowflake credits, BigQuery $/TB scanned, Athena $/TB scanned). On-prem Trino has no native dollar field on any system table. | Compute dollars in your application layer by multiplying `total_cpu_sec` × `$/vCPU-sec` (derived from the cluster's fixed annual cost ÷ vCPU-seconds-available). |
+> | `INSERT INTO chargeback_log SELECT ... FROM system.runtime.queries` (writing system tables back) | `system.runtime.queries` is a **read-only** in-memory view. You cannot INSERT INTO derived rows of it. | Persist via event listener (durable) OR run the Step 2 SELECT periodically and INSERT INTO an Iceberg observability table you OWN: `iceberg.observability.tenant_cost_daily`. |
+>
+> **Why this DO-NOT-WRITE block exists:** "show me cost per tenant" is one of the highest-frequency SaaS-engineer questions and the temptation is to paste a cloud-warehouse recipe (Snowflake `query_history.credits_used_cloud_services`, BigQuery `INFORMATION_SCHEMA.JOBS.total_bytes_billed`). Those cloud recipes do NOT translate to on-prem Trino — there is no native dollar field, and the system tables have a different (smaller) column set. **Always paste from this document, not from a cloud-warehouse SQL guide.**
+>
+> ### Cross-references for the per-tenant cost-attribution workflow
+>
+> - **Resource 18 §"`system.runtime.queries` — Actual Column Reference"** — the full Trino 467 column list with the three most-frequently-invented columns (`catalog`, `peak_memory_bytes`, `completed_at`) explicitly banned.
+> - **Resource 18 §"CRITICAL — `system.runtime.*` is EPHEMERAL"** — event listener setup (HTTP / Kafka / MySQL / OpenLineage) for durable chargeback.
+> - **Resource 05 §"Resource groups"** — per-tenant concurrency caps and memory limits (the enforcement side of chargeback — preventing one tenant from monopolizing the cluster in the first place).
+> - **Resource 22 §"Federation query attribution"** — when a tenant's query touches multiple catalogs (Trino + Postgres), how the cost-attribution math splits.
+
+---
+
 ## Three cost layers every SaaS engineer forgets
 
 When engineers think "analytics cost" they usually picture only #1. The big bills hide in #2 and #3.
@@ -448,7 +532,7 @@ These don't show up in any cost dashboard. They show up as a slow dashboard, a s
 - **Idle Spark pods**: if you keep a long-running SparkSession (e.g., a streaming app), idle executors consume RAM even between batches.
 - **Compaction jobs**: nightly (or hourly for streaming-heavy tables) — every compaction reads N small files, writes one big file, and burns CPU on both reads and writes. Budget for this in your k8s capacity plan.
 - **Snapshot expiry forgotten**: Iceberg keeps every old snapshot forever by default. Without `expire_snapshots`, MinIO storage grows ~20–30%/year from orphaned files even if your raw data volume is flat. This is the most common storage cost surprise.
-- **No built-in cost alerts**: BigQuery and Snowflake have billing alarms ("alert me when this user spends >$500"). Trino has none — a runaway `SELECT * FROM events` from a curious analyst can burn the cluster for hours with no warning. You must build query-cost monitoring yourself (Trino exposes `query_stats` you can scrape).
+- **No built-in cost alerts**: BigQuery and Snowflake have billing alarms ("alert me when this user spends >$500"). Trino has none — a runaway `SELECT * FROM events` from a curious analyst can burn the cluster for hours with no warning. You must build query-cost monitoring yourself by scraping `system.runtime.queries` + `system.runtime.tasks` (JOIN on `query_id`; sum `t.physical_input_bytes` and `t.split_cpu_time_ms`) or by configuring an event listener for durable `QueryCompletedEvent` records. **Do NOT write `system.runtime.query_stats` — that table does NOT exist in Trino.** See the LEADING CANONICAL per-tenant attribution block earlier in this doc + r18 §"`system.runtime.queries` — Actual Column Reference".
 - **Failure recovery**: a crashed Spark ingestion job means stale dashboards until someone notices. Without a dead-job alerting layer, the first signal is usually a Slack message from a confused analyst.
 - **Metastore as single point of failure**: Hive Metastore is shared by Spark, Trino, and dbt. If it goes down, the entire stack stops. Treat it as Tier-1 infra; budget HA and backups.
 
@@ -468,7 +552,7 @@ Concrete, ordered roughly by impact-per-effort:
 
 5. **Autoscale Trino workers if your traffic is bursty.** Run k8s HPA on Trino workers based on CPU. If your analyst usage is concentrated 9 AM – 6 PM, scale workers down at night (you still need at least 1 to serve any straggler queries).
 
-6. **Set a soft per-query memory cap.** Trino's `query_max_memory_per_node` prevents one bad query from monopolizing the cluster. Default in Trino 467 is 30% of pool; tune lower if analysts run many concurrent heavy queries.
+6. **Set a soft per-query memory cap.** Trino's `query_max_memory_per_node` (session, underscores) / `query.max-memory-per-node` (config, dots/hyphens) prevents one bad query from monopolizing the cluster. Default in Trino 467 is **30% of the JVM max heap** per [trino.io/docs/current/admin/properties-resource-management.html](https://trino.io/docs/current/admin/properties-resource-management.html); tune lower if analysts run many concurrent heavy queries. Note: the session form can only LOWER the limit, not raise it. See r18 LEADING CANONICAL ONCALL TUNING-LEVERS for the underscore-vs-dot/hyphen distinction.
 
 7. **Use `approx_distinct`** instead of `COUNT(DISTINCT user_id)` for cardinality estimates on large tables — 100x less memory, ~2% error. Cheap compute trade.
 
@@ -570,7 +654,7 @@ The cloud path looks cheaper *if* you can actually reduce engineering headcount 
 
 Ask three questions before you spend a dollar (or an hour) optimizing:
 
-1. **What does this query/table cost today?** Use Trino's `query_stats` to find the top 10 most expensive queries per week.
+1. **What does this query/table cost today?** Use the per-tenant attribution recipe in the "LEADING CANONICAL COST WORKED EXAMPLE — How do I attribute Trino query cost per tenant" section above (JOIN `system.runtime.queries` to `system.runtime.tasks` on `query_id` and SUM `physical_input_bytes` + `split_cpu_time_ms`). Do **NOT** write `system.runtime.query_stats` — that table does **NOT** exist in Trino; the real surface is `queries` + `tasks` joined by `query_id`.
 2. **What's the cheapest fix?** (Usually: better partitioning, a rollup table, or a `WHERE` clause.)
 3. **What's the engineering hour cost vs the compute savings?** If a 2-hour fix saves 5 minutes of compute per day, that's a year-long payback. If it saves 30 minutes, it pays back in a month. Optimize the second case first.
 

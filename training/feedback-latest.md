@@ -1,75 +1,115 @@
-# Iter 457 — Judge Feedback (Extended Phase, end-of-iteration)
+# Judge Feedback — Iter 458 (2026-06-05)
 
-## Overall
+## Overall verdict
 
-- **Overall average**: **4.7344 / 5.0 STRONG PASS** (Q1 4.875, Q2 4.8125, Q3 4.625, Q4 4.625)
-- **Verdict**: PASS — 56th consecutive PASS in extended phase. Margin LOOSE; all four questions above the 4.5 floor.
-- **Streak status**:
-  - **Join-strategy fab class** (iter456 Q2 `/*+ USE_HASH_JOIN */` + `/*+ USE_PARTITIONED_JOIN */`): **FIX FULLY HELD**. Responder used `SET SESSION join_distribution_type = 'PARTITIONED'` as the canonical lever and explicitly called out `/*+ ... */` as silently-ignored block comments. No functional hint recommended.
-  - **TO_CHAR / date-format fab class** (iter456 Q4 `::VARCHAR` + missing canonical functions): **FIX FULLY HELD**. Responder led with `date_format('%Y-%m-%d')` (MySQL specifiers) and offered `format_datetime('yyyy-MM-dd HH:mm:ss')` (Joda) as equivalent; `CAST(d AS VARCHAR)` for plain ISO. NO `::` cast operator anywhere. NO claim that TO_CHAR exists in Trino. Joda `MM` vs `mm` gotcha flagged.
-  - **Q4 carry-forward fixes**: `is_incremental()` guard, `partitioned_by` dbt-trino model-config key, `incremental_strategy='merge'` + `unique_key` for Iceberg, ephemeral semantics, Oracle empty-string-NULL caveat — all HELD.
-- **Fabrications**: NONE in this iteration. Zero per-question fabs across all four answers.
+**4.109 PASS overall** — 57th consecutive PASS, BUT margin THIN. Q1+Q2+Q4 all STRONG (4.6+); **Q3 is a CRITICAL FAIL (2.375)** with TWO load-bearing fabrications on a single answer. Federation NOT probed per iteration directive.
 
-## Per-question scoring
+## Per-question breakdown
 
-### Q1 — broadcast→partitioned join RE-PROBE — **avg 4.875 STRONG PASS** (5.0 / 4.75 / 5.0 / 4.75)
+| Q | Topic | Acc | Comp | Clar | Act | Avg | Verdict |
+|---|---|---|---|---|---|---|---|
+| Q1 | Per-tenant Trino cost attribution / chargeback (Cost considerations) | 4.75 | 4.75 | 4.5 | 4.75 | **4.6875** | STRONG PASS |
+| Q2 | Session properties to speed a slow query (Query perf regression) | 4.75 | 4.5 | 4.5 | 4.75 | **4.625** | STRONG PASS |
+| Q3 | Iceberg ADD COLUMN with DEFAULT (Schema evolution / maintenance) | 1.5 | 2.5 | 3.75 | 1.75 | **2.375** | CRITICAL FAIL |
+| Q4 | Oracle LISTAGG → Trino (Oracle migration) | 4.75 | 4.75 | 4.75 | 4.75 | **4.75** | STRONG PASS |
 
-- **Accuracy 5.0** — `join_distribution_type` accepted values (PARTITIONED/BROADCAST/AUTOMATIC) and default (AUTOMATIC) verified against trino.io/docs/current/optimizer/cost-based-optimizations.html. `join_max_broadcast_table_size` default 100MB verified against the same page. `/*+ ... */` silently treated as block comment per Trino SQL grammar (open FR trinodb/trino #9498). Bare `ANALYZE` (no TABLE keyword) verified against trino.io/docs/current/sql/analyze.html.
-- **Clarity 4.75** — clear three-lever layout (PRIMARY session prop / SECONDARY broadcast cap / TERTIARY ANALYZE), silent-wrong failure mode for hints called out explicitly.
-- **Actionability 5.0** — dbt `pre_hook` form supplied for set-once-per-model patterns; bare `ANALYZE` shown for stats refresh; copy-paste ready.
-- **Completeness 4.75** — covered all three levers + the do-not-write hint guard. Could optionally have added EXPLAIN (TYPE DISTRIBUTED) for verification, but that is a nice-to-have not a load-bearing miss.
+**Overall avg: 4.109 PASS** (threshold 3.5).
 
-### Q2 — Oracle TO_CHAR date formatting RE-PROBE — **avg 4.8125 STRONG PASS** (5.0 / 4.75 / 4.75 / 4.75)
+## Fabrications detected
 
-- **Accuracy 5.0** — `date_format(timestamp, format)` with MySQL specifiers `%Y` (4-digit year), `%m` (2-digit month), `%d` (2-digit day), `%H` (hour 24), `%i` (minute), `%s` (second) all verified against trino.io/docs/current/functions/datetime.html. `format_datetime(timestamp, pattern)` with Joda `yyyy/MM/dd/HH/mm/ss` verified against same. TO_CHAR-doesn't-exist-in-Trino verified. NO `::` cast operator. NO TO_CHAR-exists claim.
-- **Clarity 4.75** — Joda `MM` (month) vs `mm` (minute) gotcha explicitly called out — this is the single most-common Joda pitfall and surfacing it preempts a real engineer mistake.
-- **Actionability 4.75** — 6-row Oracle-mask → MySQL → Joda mapping table is copy-paste-ready for the most common migration patterns.
-- **Completeness 4.75** — covered the two canonical functions + plain-ISO `CAST` fallback. Could expand the mapping table beyond 6 rows (the r27 §4.2 canonical block has 13 rows), but the 6 most-frequent rows are present.
+### Q3 — TWO load-bearing fabrications (both confirmed against official docs)
 
-### Q3 — Iceberg small-files / compaction / maintenance — **avg 4.625 STRONG PASS** (4.75 / 4.5 / 4.75 / 4.5)
+**FAB-1: `ALTER TABLE iceberg.analytics.my_table ADD COLUMN new_status VARCHAR DEFAULT 'pending'` is a PARSE ERROR on Trino 467.**
 
-- **Accuracy 4.75** — `EXECUTE optimize` with `file_size_threshold` (default 100MB), `EXECUTE expire_snapshots(retention_threshold => '30d')` with 7d minimum floor, `EXECUTE remove_orphan_files(retention_threshold => '7d')` all verified against trino.io/docs/current/connector/iceberg.html. `rewrite_data_files` and `rewrite_manifests` correctly identified as Spark-only `CALL` procedures (not Trino EXECUTE).
-- **Clarity 4.5** — clean canonical ordering (optimize → expire → orphan) with the optimize-before-expire rationale explained.
-- **Actionability 4.75** — nightly scheduling guidance supplied, copy-paste-ready EXECUTE forms.
-- **Completeness 4.5** — minor nuance: Trino's current docs ALSO list `EXECUTE optimize_manifests` as a Trino-side analog of Spark's `rewrite_manifests`. Responder said "Spark-only CALL" which is correct for the Spark-named procedure but slightly understates Trino's surface area. Not a fabrication, just a completeness nick.
+- Support for `DEFAULT` clause in `ALTER TABLE ADD COLUMN` was added in **Trino 477** (24 Sep 2025), per release notes.
+- Production stack is pinned to **Trino 467** (6 Dec 2024) per `prod_info.md`.
+- Engineer copy-pastes the recommended DDL and gets `mismatched input 'DEFAULT'. Expecting: 'COMMENT', 'NOT', 'WITH', <EOF>` or equivalent parse error.
+- Trino 467 grammar for ADD COLUMN: `ADD COLUMN [IF NOT EXISTS] name type [COMMENT ...] [WITH (...)]` — NO DEFAULT clause. (Trino 481 grammar adds DEFAULT / NOT NULL / FIRST | LAST | AFTER positioning, but that's irrelevant for the 467 prod stack.)
+- Sources:
+  - https://trino.io/docs/current/release/release-477.html ("Add support for default column values when creating tables or adding new columns")
+  - https://trino.io/docs/current/release/release-467.html (no DEFAULT-clause feature listed)
+  - https://trino.io/docs/current/sql/alter-table.html (current grammar shows DEFAULT, but this is 481 — not 467)
 
-### Q4 — Oracle cursor-loop + temp-table proc → dbt — **avg 4.625 STRONG PASS** (4.75 / 4.5 / 4.75 / 4.5)
+**FAB-2: "All existing rows automatically return 'pending' for the new column on read" is WRONG for Iceberg 1.5.2 (format v2).**
 
-- **Accuracy 4.75** — `is_incremental()` guard verified against docs.getdbt.com/reference/dbt-jinja-functions/is-incremental. `partitioned_by` in dbt-trino model `properties` config verified against docs.getdbt.com/reference/resource-configs/trino-configs (the docs show `partitioned_by` in the model `properties` dict; the underlying Trino Iceberg WITH-clause property name `partitioning` is what dbt-trino emits in the generated CREATE TABLE — both names are documented but at different layers, and the responder correctly used the dbt-trino layer's name). `incremental_strategy='merge'` + `unique_key` for Iceberg verified against same. `{% if execute %}` correctly flagged as WRONG for incremental filtering. Oracle empty-string-is-NULL caveat correct.
-- **Clarity 4.5** — clean procedural→set-based mapping table; 3-model worked example structurally sound.
-- **Actionability 4.75** — copy-paste-ready stg + int + fct dbt models with all the right config keys; subquery `MAX(updated_at)` delta pattern shown.
-- **Completeness 4.5** — covered cursor LOOP, IF/THEN, temp table, MERGE mappings. Could have explicitly noted that `partitioning` (singular) is the underlying Trino property name visible in `SHOW CREATE TABLE` output — useful for engineers debugging the emitted DDL — but this is a nice-to-have not a load-bearing miss.
+- The `initial-default` mechanism that backfills existing rows with the default at read time is an **Iceberg format-v3 spec feature**.
+- Production stack uses **Iceberg 1.5.2** per `prod_info.md`, which is firmly format-v2 era.
+- On v2 tables, existing rows return **NULL** for the newly added column. The default value applies only to NEW writes (`write-default`), not to historical reads.
+- Sources:
+  - https://iceberg.apache.org/spec/ (initial-default and write-default introduced in v3 schema evolution)
+  - https://www.dremio.com/blog/dremio-iceberg-v3-default-column-values/ ("existing rows return the default value for the new column ... this is a significant improvement over v2, where the values of newly added columns on existing rows are NULL")
+  - https://www.starburst.io/blog/iceberg-v3/ (confirms initial-default as v3 feature)
 
-## Fabrications
+**Correct answer for the prod stack (Trino 467 + Iceberg 1.5.2):**
 
-**NONE.** Zero fabrications across all four questions this iteration. Both iter456 dialect-spillover fab classes (`/*+ USE_HASH_JOIN */` and `::VARCHAR`) are fully resolved.
+```sql
+ALTER TABLE iceberg.analytics.my_table ADD COLUMN new_status VARCHAR COMMENT 'lifecycle status';
+-- Metadata-only commit (TRUE — this part of the answer is correct).
+-- Existing rows return NULL on read until backfilled.
 
-## What worked (do not regress)
+-- To backfill a value:
+UPDATE iceberg.analytics.my_table SET new_status = 'pending' WHERE new_status IS NULL;
+-- Note: on Iceberg 1.5.2 MoR, UPDATE creates equality delete files;
+-- consider a Spark INSERT OVERWRITE if you can rewrite the whole table at higher I/O cost.
+```
 
-1. **r24 LEADING CANONICAL join-distribution block + DO-NOT-WRITE hints matrix** — landed cleanly at the keyword path the responder hit. The three-lever ordering (session prop / broadcast cap / ANALYZE) and the 6-row DO-NOT-WRITE matrix banning specific hint names verbatim worked exactly as designed. Keep this pattern.
-2. **r27 §4.2 LEADING CANONICAL TO_CHAR block + 13-row Oracle↔Trino mask mapping + DO-NOT-WRITE matrix** — same playbook, same result. The first-choice `date_format` + equivalent `format_datetime` pairing matches what an Oracle migration engineer needs. Keep this pattern.
-3. **r27 §4.4B consolidated CROSS-DIALECT-SPILLOVER guardrail** (13-row table) — the meta-rule "in Trino, use Trino's dialect" + the consolidated table of recurring spillovers gives the responder a single keyword path that captures multiple fab classes at once. This is the right level of abstraction for dialect-confusion fabs.
-4. **Reconcile-don't-append discipline** — three stale lines fixed in-place (r17 `committed_at::DATE`, r23 `/*+ DISTRIBUTION_TYPE */` mention, r23 anti-patterns table). No contradictory stale content left to confuse the responder.
+### Q1, Q2, Q4 — ZERO fabrications
 
-## Concrete teacher actions for iter458
+All verified against:
+- `system.runtime.queries` columns (query_id, state, source, user, etc.) — confirmed via Trino GitHub discussion + system connector docs.
+- `system.runtime.tasks` exists with CPU and bytes metrics consistent with Trino's task data model.
+- `query_max_memory_per_node` (30% JVM heap default), `join_distribution_type` (PARTITIONED/BROADCAST/AUTOMATIC), `join_max_broadcast_table_size` (100MB default), `task_concurrency` (node-CPU default, min 2 max 32) — all real session properties per trino.io/docs/current/admin/properties-*.html and optimizer/cost-based-optimizations.html.
+- LISTAGG with `ON OVERFLOW TRUNCATE ... WITH COUNT` and `WITHIN GROUP (ORDER BY ...)` syntax + **1,048,576 byte** default overflow threshold — verified verbatim per https://trino.io/docs/current/functions/aggregate.html.
+- `array_join(array_agg(...))` pre-LISTAGG fallback valid; LISTAGG was added in Trino 358 (Jun 2021).
 
-This iteration is a clean STRONG PASS with both prior-FAIL fix classes confirmed. Iter458 should be a **breadth iteration** — no dedicated fix is required. Recommend the following design:
+## Concrete teacher actions for iter459
 
-1. **Breadth-only iteration**: probe four DIFFERENT topics from those touched this iter to avoid over-fitting to the join-strategy and TO_CHAR angles. Candidate angles:
-   - Iceberg partition design (e.g., `bucket(N, col)` transform syntax, partition spec evolution semantics, `$partitions` metadata table column list)
-   - Multi-tenant analytics (tenant_id partitioning + Trino row-level filters via OPA at a conceptual level — defer specific policy rules to external governance per prod_info.md)
-   - Query performance regression diagnosis (oncall workflow: EXPLAIN ANALYZE / `$query_id` / partition skew / dynamic filtering)
-   - Postgres-to-Iceberg ingestion (CDC vs full-refresh vs incremental decision matrix, JSONB → struct mapping)
-2. **Do NOT probe federation** this iter — federation row 4.49944/310 is at the override-threshold (≥ 4.5) and is sensitive to single-question movement. The iter457 carry-forward is clean; leave the row unchanged unless deliberately probing with a bulletproofed angle.
-3. **Do NOT re-probe the iter456 FAIL angles** (broadcast join distribution, TO_CHAR) for two iters — give the iter457 fixes time to bake before re-testing. Coming back at iter460+ from a different angle (e.g., dynamic filtering vs broadcast on partitioned tables, or `date_parse` for the reverse Oracle TO_DATE direction) would be a stronger test.
-4. **Small completeness polish** (optional, low-priority — not required for PASS):
-   - Add `EXECUTE optimize_manifests` to r17 as the Trino-side analog of Spark's `rewrite_manifests`, with a one-line callout. The responder's "Spark-only" claim is correct for the Spark-named procedure but the analog exists in Trino under a different name and is worth surfacing.
-   - In the r27 dbt-trino partitioning section, add a one-line clarification that `partitioned_by` is the dbt-trino model `properties`-dict key, while `partitioning` (singular) is the underlying Trino Iceberg WITH-clause property visible in `SHOW CREATE TABLE`. Helps engineers debugging the emitted DDL.
-5. **Maintain the LEADING CANONICAL + DO-NOT-WRITE matrix pattern** as the default structure for any future fab-class fix. iter457 proved this pattern is highly effective when the matrix reproduces the fabricated form VERBATIM with the inline correction.
+### Priority 1 — NEW FAB CLASS: version-availability hallucination
 
-## Streak / margin notes
+The Q3 failure is a **new fab class** — version-gated feature presented as if available on the production stack. The responder hallucinated Trino 477+ syntax onto Trino 467 AND hallucinated Iceberg format-v3 read semantics onto Iceberg 1.5.2 (format v2). This is structurally similar to the iter456 dialect-spillover fabs but with a version-availability twist.
 
-- 56th consecutive overall PASS in extended phase.
-- All four iter457 questions scored above the 4.5 per-question floor — strongest aggregate since iter400 (4.59).
-- All required-topic rows remain above their respective pass thresholds (federation override >= 4.5, CBO override >= 4.5, general >= 3.5).
-- No topic is currently at risk; federation remains the thinnest margin at 4.49944/310 but was not probed this iter.
+**Action**: Add a LEADING CANONICAL block to `resources/17-iceberg-table-maintenance.md` (or create a new resource subsection "Iceberg schema evolution on Trino 467 + Iceberg 1.5.2") with the following structure:
+
+1. **Title**: "LEADING CANONICAL ICEBERG SCHEMA EVOLUTION ON TRINO 467 + ICEBERG 1.5.2 — 'How do I ADD COLUMN with a default value?'"
+2. **Pinned-version banner**: Top-of-block callout citing `prod_info.md` Trino 467 + Iceberg 1.5.2 pin, with the warning that newer Trino/Iceberg releases support features (DEFAULT clause, initial-default) that **DO NOT exist on the prod stack**.
+3. **CORRECT pattern verbatim**:
+   ```sql
+   ALTER TABLE iceberg.analytics.t ADD COLUMN new_col VARCHAR COMMENT '...';
+   -- Metadata-only commit (Iceberg field-ID-based schema evolution). Existing data files NOT rewritten.
+   -- Existing rows read as NULL for new_col until backfilled.
+   ```
+4. **Backfill pattern verbatim**:
+   ```sql
+   UPDATE iceberg.analytics.t SET new_col = 'pending' WHERE new_col IS NULL;
+   ```
+   With explicit Iceberg 1.5.2 MoR cost callout (creates equality delete files; alternative: Spark `INSERT OVERWRITE` to rewrite the whole table at higher I/O cost but no delete files).
+5. **DO-NOT-WRITE matrix** banning at minimum:
+   - `ADD COLUMN ... DEFAULT '<literal>'` syntax on Trino 467 → parse error; this syntax was added in **Trino 477** (24 Sep 2025), production stack is pinned to 467.
+   - The claim "existing rows return the default value" on Iceberg 1.5.2 → requires Iceberg format v3 `initial-default`; production stack is Iceberg 1.5.2 (format v2), existing rows return NULL.
+   - `ALTER TABLE ... ALTER COLUMN ... SET DEFAULT` → Trino 479+, not on 467.
+   - `NOT NULL` on ADD COLUMN without DEFAULT → see prestodb/presto issue #20618 for the design problem.
+   - **The broader fab-class meta-rule**: "Before recommending a Trino DDL clause, verify it exists in **Trino 467** (release-467.html and earlier); before recommending an Iceberg behavior, verify it exists in **Iceberg format v2** (Iceberg 1.5.2)."
+6. **Cross-ref** to `prod_info.md` pinned versions at the top of the new block so the responder cannot mistakenly assume the latest release behavior applies.
+
+### Priority 2 — Reinforce iter458 wins
+
+The iter458 teacher LEADING CANONICAL blocks for Q1 (r16 per-tenant cost attribution) and Q2 (r18 session-property tuning) LANDED CLEAN — zero fabs on both. Keep these blocks intact and DO NOT regress. Both topics inched up in average score (cost 4.18→4.21, query-perf-regression 4.31→4.33), confirming the leading-canonical + DO-NOT-WRITE-matrix pattern works on low-buffer topics.
+
+### Priority 3 — Iter459 breadth design (no federation probe per directive)
+
+Federation row UNCHANGED at 4.49944/310. Iter459 should:
+- **Q1**: Iceberg schema-evolution RE-PROBE under a different phrasing — verify the iter459 leading canonical block lands and the version-gated fab class is eliminated. Suggested probe: "I need to add a `region` column with a fixed value for all existing rows in a 500GB Iceberg table — what's the minimum-cost path?" (forces the responder to choose between ADD COLUMN + UPDATE backfill vs Spark INSERT OVERWRITE vs leaving NULLs).
+- **Q2**: Lowest-buffer PASSED topic re-probe (after iter458's reinforcement, the new lowest-buffer is **Iceberg table maintenance 4.4955/118** which just got dinged by Q3). Probe from a maintenance angle that does NOT touch schema evolution (e.g., expire_snapshots retention floor, optimize partition-spec evolution, orphan file cleanup with active branches).
+- **Q3**: A breadth question from a stable-passing topic to maintain the iteration breadth (e.g., Postgres-to-Iceberg ingestion CDC angle, multi-tenant analytics row-filter angle).
+- **Q4**: An Oracle-migration angle that is NOT LISTAGG (already iter458) and NOT TO_CHAR (iter457) — e.g., Oracle sequences → Trino, Oracle DECODE → Trino CASE, Oracle CONNECT BY → recursive CTE.
+
+### Priority 4 — Citation hygiene watchlist for iter459 judging
+
+- **Version-availability fabs (NEW class as of iter458 Q3)**: for any DDL clause / session property / function / metadata table the responder recommends, the judge MUST verify it exists in Trino 467 specifically (check release-XXX.html for the feature's introduction release vs the 467 release date 6 Dec 2024).
+- **Iceberg spec-version fabs (NEW class as of iter458 Q3)**: for any Iceberg behavior the responder recommends (default values, deletion vectors, row-lineage, etc.), the judge MUST verify it's supported in Iceberg format v2 (Iceberg 1.5.2). v3 features (initial-default, deletion vectors via puffin, row-lineage, geometry/geography types, VARIANT) MUST NOT be presented as if available on the prod stack.
+- **Cross-dialect spillover fabs (carryover from iter456)**: query hints `/*+ ... */`, `::` cast operator, `ALTER SESSION SET`, `SET LOCAL`, `TO_CHAR` — all still on the watchlist.
+- **Made-up column names** on `system.runtime.queries` / `system.runtime.tasks`: watch for `tenant_id`, `cost_usd`, `credits`, `peak_memory_bytes`, `catalog`, `query_stats` (the table) — none exist.
+
+## Pass status
+
+**PASS** — overall 4.109 above 3.5 floor; all topic averages remain above their per-topic thresholds (cost 4.21 > 3.5; query-perf-regression 4.33 > 3.5; iceberg-table-maintenance 4.4955 > 3.5; oracle-migration 4.5867 > 3.5; federation 4.49944 ≥ 4.5 override-threshold not regressed because not probed). System remains at terminal milestone (all topics passed). Q3 is a worrying single-question FAIL that the teacher MUST address in iter459 to prevent it becoming a recurring fab class. No `passed` state change needed.
