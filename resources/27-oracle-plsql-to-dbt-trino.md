@@ -558,6 +558,44 @@ models:
 
 These tests run after `dbt run`. A failure breaks the pipeline — same semantic role as `EXCEPTION WHEN ...` in the Oracle procedure, except cleaner because the test condition is declarative.
 
+### 6.8 DBT-IS-INCREMENTAL-WHERE CANONICAL-PATTERN GUARDRAIL — the WHERE clause inside `{% if is_incremental() %}`
+
+**Why this section exists.** When porting an Oracle `MERGE INTO target USING source ON ...` procedure to a dbt incremental model, the part that has NO direct Oracle analog is the **delta filter** — the WHERE clause inside the `{% if is_incremental() %}` block that selects only the rows the MERGE should process. The single most common AI-generated mistake here is to put a **bare aggregate** directly in the predicate (e.g., `WHERE order_date >= MAX(order_date)`), which Trino rejects with **"aggregate function not allowed in WHERE clause."** Verified against [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html) (aggregate functions reference: aggregates appear in `SELECT`/`HAVING`/subqueries, NOT in `WHERE`) and [docs.getdbt.com — Incremental models](https://docs.getdbt.com/docs/build/incremental-models).
+
+**The CANONICAL delta filter (append/merge):**
+
+```jinja
+{% if is_incremental() %}
+  WHERE order_date >= (
+    SELECT COALESCE(MAX(order_date), DATE '1970-01-01')
+    FROM {{ this }}
+  )
+{% endif %}
+```
+
+The `MAX(order_date)` **MUST be wrapped in a subquery** — `(SELECT MAX(...) FROM {{ this }})`. The subquery is what makes the aggregate legal inside `WHERE`. The `COALESCE(..., DATE '1970-01-01')` handles the edge case of an empty `{{ this }}` (first run, or after a manual TRUNCATE) so the predicate evaluates to "everything" rather than `NULL` (which filters to zero rows).
+
+**The CANONICAL late-arriving-data LOOKBACK variant** (pair with `incremental_strategy='merge'` + `unique_key` for idempotence):
+
+```jinja
+{% if is_incremental() %}
+  WHERE order_date >= (
+    SELECT date_add('day', -3, COALESCE(MAX(order_date), DATE '1970-01-01'))
+    FROM {{ this }}
+  )
+{% endif %}
+```
+
+Subtract a fixed lookback window (here 3 days) so late-arriving rows still get caught. `incremental_strategy='merge'` + `unique_key` guarantees idempotence: matched rows update in place, unmatched insert — re-running the same lookback window produces no duplicates.
+
+**DO-NOT-WRITE callout (load-bearing — both bullets are invalid SQL or anti-patterns):**
+
+> **(i) NEVER write a bare aggregate directly in a `WHERE` clause** — for example `WHERE order_date >= MAX(order_date)`, `WHERE x > MIN(x)`, `WHERE cnt < COUNT(*)`. Aggregate functions are not allowed in `WHERE` in Trino (or any ANSI-SQL engine). They MUST be wrapped in a subquery: `WHERE order_date >= (SELECT MAX(order_date) FROM {{ this }})`. **(ii) NEVER write the convoluted full-history re-scan `WHERE id IN (SELECT id FROM {{ this }} WHERE load_date < CURRENT_DATE) OR load_date >= ...` as a delta filter.** That clause forces the model to re-read every historic row from the target on every run, defeating the entire purpose of `materialized='incremental'`. The canonical delta filter is a single subquery-wrapped `MAX(...)` comparison, not an IN-against-the-target.
+
+**Q-pattern matcher.** If the question is "what does my dbt `is_incremental()` WHERE clause look like" — or any equivalent phrasing ("dbt watermark predicate", "scan only new rows in dbt", "is_incremental delta filter") — the answer is `WHERE <watermark_col> >= (SELECT COALESCE(MAX(<watermark_col>), <safe_default>) FROM {{ this }})` with the subquery wrapper. NOT a bare `MAX(...)` in WHERE. NOT an `IN (SELECT ... FROM {{ this }} ...)` against the target.
+
+For the deeper lookback-window discussion (failure modes, partition_by pairing, EXPLAIN ANALYZE validation), see [resource 28 § 8A.3](28-complex-sql-performance-trino-dbt.md#8a3-incremental-model-late-arriving-data-and-lookback-windows).
+
 ---
 
 ## 7. Cutover checklist (the non-obvious gotchas)

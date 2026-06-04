@@ -709,6 +709,66 @@ SET SESSION reorder_joins_max_reordered_joins = 16;
 
 ### 8A.3 Incremental-model late-arriving data and lookback windows
 
+#### 8A.3.0 DBT-IS-INCREMENTAL-WHERE CANONICAL-PATTERN GUARDRAIL
+
+> **Why this section exists.** The single most common AI-generated mistake when writing a dbt `is_incremental()` WHERE clause is to put a **bare aggregate** directly in the predicate — for example `WHERE load_date >= MAX(load_date)`. This is **INVALID SQL**: Trino rejects it at parse time with an error like "aggregate function not allowed in WHERE clause." Aggregates may only appear in a `SELECT` list, a `HAVING` clause, or **inside a subquery**. They are not permitted in a plain `WHERE`. Verified against [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html) (Aggregate functions reference) and [docs.getdbt.com — Incremental models](https://docs.getdbt.com/docs/build/incremental-models).
+>
+> The second-most-common mistake is a **convoluted full-history re-scan** disguised as a delta filter — e.g., `WHERE id IN (SELECT id FROM {{this}} WHERE load_date < CURRENT_DATE) OR load_date >= ...`. That clause re-reads every historic row from the target on every run, which is the *opposite* of what incrementality is for.
+
+**The CANONICAL is_incremental() delta filter — append/merge model:**
+
+```sql
+{% if is_incremental() %}
+  WHERE load_date >= (
+    SELECT COALESCE(MAX(load_date), DATE '1970-01-01')
+    FROM {{ this }}
+  )
+{% endif %}
+```
+
+The `MAX(load_date)` **MUST be wrapped in a subquery** (the `(SELECT MAX(...) FROM {{ this }})` form). The subquery is what makes the aggregate legal inside `WHERE`. The `COALESCE(..., DATE '1970-01-01')` handles the edge case where `{{ this }}` exists but is empty (e.g., after a manual `TRUNCATE` or first-run-after-restart) so the predicate evaluates to "everything" rather than `NULL` (which would filter to zero rows).
+
+**The CANONICAL late-arriving-data LOOKBACK variant — pair with `incremental_strategy='merge'` + `unique_key` for idempotence:**
+
+```sql
+{% if is_incremental() %}
+  WHERE load_date >= (
+    SELECT date_add('day', -3, COALESCE(MAX(load_date), DATE '1970-01-01'))
+    FROM {{ this }}
+  )
+{% endif %}
+```
+
+The `date_add('day', -3, ...)` subtracts a fixed lookback window (here 3 days) from the prior watermark so late-arriving rows still get picked up. Idempotence is guaranteed by `incremental_strategy='merge'` + `unique_key`: matched rows update in place, unmatched insert — re-running the same lookback window produces no duplicates.
+
+**DO-NOT-WRITE callout (load-bearing — both bullets are invalid SQL or anti-patterns):**
+
+> **(i) NEVER write a bare aggregate directly in a `WHERE` clause** — for example `WHERE load_date >= MAX(load_date)`, `WHERE x > MIN(x)`, `WHERE cnt < COUNT(*)`. Aggregate functions are not allowed in `WHERE` in Trino (or any ANSI-SQL engine). They MUST be wrapped in a subquery: `WHERE load_date >= (SELECT MAX(load_date) FROM {{ this }})`. **(ii) NEVER write the convoluted full-history re-scan `WHERE id IN (SELECT id FROM {{ this }} WHERE load_date < CURRENT_DATE) OR load_date >= ...` as a delta filter.** That clause forces the model to read every historic row from the target on every run, defeating the entire purpose of `materialized='incremental'`. The canonical delta filter is a single subquery-wrapped `MAX(...)` comparison, not an IN-against-the-target.
+
+**Q-pattern matcher.** If the question is "what does my dbt `is_incremental()` WHERE clause look like" — or any equivalent phrasing ("incremental delta filter", "watermark predicate", "scan only new rows in dbt") — the answer is `WHERE <watermark_col> >= (SELECT COALESCE(MAX(<watermark_col>), <safe_default>) FROM {{ this }})` with the subquery wrapper. NOT a bare `MAX(...)` in `WHERE`. NOT an `IN (SELECT ... FROM {{ this }} ...)` against the target.
+
+**Worked example pair.**
+
+```sql
+-- (a) APPEND-style delta (no late arrivals expected) — pair with incremental_strategy='append'
+{% if is_incremental() %}
+  WHERE event_ts > (SELECT COALESCE(MAX(event_ts), TIMESTAMP '1970-01-01') FROM {{ this }})
+{% endif %}
+
+-- (b) MERGE-style delta with 3-day lookback (late arrivals expected) — pair with
+--     incremental_strategy='merge' + unique_key for idempotent re-processing
+{% if is_incremental() %}
+  WHERE event_ts >= (
+    SELECT date_add('day', -3, COALESCE(MAX(event_ts), TIMESTAMP '1970-01-01'))
+    FROM {{ this }}
+  )
+{% endif %}
+```
+
+(a) uses a strict `>` because we trust the watermark is monotonic. (b) uses `>=` plus a lookback window to absorb late arrivals; the `merge` strategy + `unique_key` make it idempotent.
+
+#### 8A.3.1 The lookback-window failure mode (background)
+
 **The problem shape.** An incremental dbt model uses `is_incremental()` to filter to "new" rows: `WHERE event_ts > (SELECT MAX(event_ts) FROM {{ this }})`. But upstream events sometimes arrive HOURS or DAYS late (network retries, batch CDC catches up, mobile clients sync after being offline). The first run after the late events lands sees them, but the incremental filter (`event_ts > previous_max`) has ALREADY moved past their timestamps — so the late events are silently dropped.
 
 **The fix: a lookback window.** Re-process the last N hours/days every run, idempotently. Pick N to match the upstream's worst-case lateness (e.g., 2 days for nightly batch CDC, 6 hours for streaming).
