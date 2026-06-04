@@ -515,6 +515,80 @@ These are the per-expression rewrites you'll do on almost every migrated SELECT.
 >
 > **Meta-rule**: in Trino, use Trino's dialect — Oracle / PostgreSQL / Snowflake / Spark / SQL-Server function names and operators that look idiomatic in other engines parse-error or function-not-registered against Trino 467.
 
+> ### LEADING CANONICAL — Oracle `ADD_MONTHS(dt, n)` → Trino (END-OF-MONTH CLAMP SEMANTICS DIFFER)
+>
+> **Question shape this answers**: "what's the Trino equivalent of Oracle `ADD_MONTHS(dt, 3)`", "how do I add months to a date in Trino", "is `date_add('month', n, dt)` the same as Oracle `ADD_MONTHS`".
+>
+> **Short answer**: a naive translation works for non-month-end inputs but is **silently wrong** for month-end inputs. Oracle `ADD_MONTHS` applies a special END-OF-MONTH CLAMP rule; Trino `date_add('month', n, dt)` and `dt + INTERVAL 'n' MONTH` do NOT.
+>
+> **Trino month arithmetic — the two equivalent forms** (verified at [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html)):
+>
+> - `date_add('month', n, ts)` — function form. Signature: `date_add(unit, value, timestamp)`; `'month'` is a valid unit; negative `n` subtracts.
+> - `ts + INTERVAL 'n' MONTH` — interval-literal form. Equivalent result.
+>
+> **SEMANTIC DIFFERENCE — Oracle ADD_MONTHS has TWO month-end rules Trino does not replicate** (verified at [docs.oracle.com — ADD_MONTHS](https://docs.oracle.com/en/database/oracle/oracle-database/19/sqlrf/ADD_MONTHS.html)):
+>
+> 1. **Last-day-in → last-day-out (CLAMP UP)**: if the input is the last day of its month, the result is FORCED to the last day of the target month — even when the target month has more days. Examples:
+>    - Oracle: `ADD_MONTHS(DATE '2026-02-28', 1)` → `DATE '2026-03-31'` (Feb 28 is last-of-Feb in a non-leap year, so the result is clamped to last-of-Mar, NOT Mar 28).
+>    - Oracle: `ADD_MONTHS(DATE '2024-02-29', 1)` → `DATE '2024-03-31'` (Feb 29 is last-of-Feb in a leap year, so clamped to Mar 31).
+> 2. **Overflow → last-day (CLAMP DOWN)**: if the target month has fewer days than the input's day-number, the result is the last day of the target month. Example:
+>    - Oracle: `ADD_MONTHS(DATE '2026-01-31', 1)` → `DATE '2026-02-28'` (Jan 31 + 1 month overflows Feb, clamps to Feb 28).
+>
+> **Trino does NOT detect last-of-month** — it preserves the day-number for the in-range case and only handles overflow by its own normalization. The Trino result diverges from Oracle whenever the input falls on the last day of a month whose target month has more days:
+>
+> - Trino: `date_add('month', 1, DATE '2026-02-28')` → `DATE '2026-03-28'` (NOT Oracle's `2026-03-31`).
+> - Trino: `DATE '2026-02-28' + INTERVAL '1' MONTH` → `DATE '2026-03-28'` (same — INTERVAL form is identical in semantics).
+> - For the overflow case, both engines land on Feb 28 (`ADD_MONTHS(DATE '2026-01-31', 1)` = Trino `date_add('month', 1, DATE '2026-01-31')` = `2026-02-28`), so the overflow case is NOT where the silent divergence shows up — only the last-day-in → last-day-out case is.
+>
+> **REPLICATION PATTERN — portable Trino-467 wrapper that matches Oracle ADD_MONTHS semantics** (uses `last_day_of_month(x) → date`, verified to exist in Trino 467 at [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html)):
+>
+> ```sql
+> -- Replicates Oracle ADD_MONTHS(input, n) including end-of-month CLAMP UP.
+> -- Read: "if input is the last day of its month, force the result to the last day
+> --        of the target month; otherwise, plain date_add('month', n, input)."
+> CASE
+>   WHEN input = last_day_of_month(input)
+>     THEN last_day_of_month(date_add('month', n, input))
+>   ELSE date_add('month', n, input)
+> END
+> ```
+>
+> Apply it as a dbt macro / SQL UDF to keep the call sites readable:
+>
+> ```sql
+> -- Inline at call site (most common):
+> SELECT
+>   order_id,
+>   CASE
+>     WHEN order_date = last_day_of_month(order_date)
+>       THEN last_day_of_month(date_add('month', 3, order_date))
+>     ELSE date_add('month', 3, order_date)
+>   END AS due_date_oracle_compat
+> FROM orders;
+> ```
+>
+> **Walk-through to confirm the wrapper matches Oracle's two rules**:
+> - `input = DATE '2026-02-28'`, `n = 1`. `last_day_of_month(input) = 2026-02-28` → input equals last-of-month → return `last_day_of_month(date_add('month', 1, 2026-02-28))` = `last_day_of_month(2026-03-28)` = `2026-03-31`. Matches Oracle.
+> - `input = DATE '2026-01-31'`, `n = 1`. `last_day_of_month(input) = 2026-01-31` → input equals last-of-month → return `last_day_of_month(date_add('month', 1, 2026-01-31))` = `last_day_of_month(2026-02-28)` = `2026-02-28`. Matches Oracle.
+> - `input = DATE '2026-01-15'`, `n = 1`. `last_day_of_month(input) = 2026-01-31` ≠ input → return `date_add('month', 1, 2026-01-15)` = `2026-02-15`. Matches Oracle's "preserve day-number when not last-of-month".
+>
+> **DO-NOT-WRITE matrix — Oracle ADD_MONTHS migration**:
+>
+> | Forbidden claim / form | Why it's wrong | Trino-correct equivalent |
+> |---|---|---|
+> | "Oracle `ADD_MONTHS(dt, n)` maps directly to `date_add('month', n, dt)` with identical semantics." | FALSE at month-end. Oracle clamps last-day-in to last-day-out (`ADD_MONTHS(DATE '2026-02-28', 1)` = `2026-03-31`); Trino preserves day-number (`date_add('month', 1, DATE '2026-02-28')` = `2026-03-28`). Migration-correctness defect on any month-end-tagged data (period-close, billing cycles, statement dates). | Use the `CASE WHEN input = last_day_of_month(input) THEN last_day_of_month(date_add('month', n, input)) ELSE date_add('month', n, input) END` wrapper shown above. |
+> | "`dt + INTERVAL 'n' MONTH` IS the drop-in Trino replacement for `ADD_MONTHS(dt, n)`." | Same defect — INTERVAL MONTH and `date_add('month', ...)` are equivalent in Trino; neither implements Oracle's last-day-in → last-day-out clamp. | Same wrapper. |
+> | "Trino normalizes month-end the same way Oracle does." | Misconception. Trino's normalization handles target-month-overflow (Jan 31 + 1 month → Feb 28) — which matches Oracle in that one case — but does NOT detect last-day-of-month for the CLAMP UP rule. | Use the wrapper to make both rules portable. |
+> | Using Oracle `LAST_DAY(dt)` directly in Trino | Trino has no `LAST_DAY` function — only `last_day_of_month(dt)`. Bare `LAST_DAY(dt)` → `Function 'last_day' not registered`. | Replace `LAST_DAY(dt)` with `last_day_of_month(dt)`. |
+>
+> **MONTHS_BETWEEN — fractional vs integer** (verified at [docs.oracle.com — MONTHS_BETWEEN](https://docs.oracle.com/en/database/oracle/oracle-database/21/sqlrf/MONTHS_BETWEEN.html) and [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html)):
+>
+> - Oracle `MONTHS_BETWEEN(d1, d2)` returns a **FRACTIONAL** number — when `d1` and `d2` are on different days-of-month (and not both last-of-month), Oracle computes the fractional portion treating the residual as 31-day-month thirty-firsts. Example: `MONTHS_BETWEEN(DATE '2026-03-15', DATE '2026-01-31')` returns a non-integer.
+> - Trino `date_diff('month', d2, d1)` returns an **INTEGER (bigint) count of month boundaries crossed**. No fractional part is produced. Example: `date_diff('month', DATE '2026-01-31', DATE '2026-03-15')` = `2`.
+> - **Migration implication**: if downstream logic depended on the fractional component (e.g., proration, accrual, billing-day arithmetic), `date_diff('month', ...)` will silently drop it. For exact Oracle-style fractional behavior, compute it yourself with `date_diff('day', d2, d1)` divided by 31 (Oracle's convention) — but only do this when the downstream consumer actually requires the fractional behavior; the integer count is what most reporting workloads want.
+>
+> **LAST_DAY → last_day_of_month** (verified at [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html)): Oracle `LAST_DAY(dt)` returns the last day of the month containing `dt`. Trino's equivalent is `last_day_of_month(dt) → date`. Function name is different — `LAST_DAY(dt)` in Trino produces `Function 'last_day' not registered`. Use `last_day_of_month(dt)`.
+
 | Oracle | Trino | Notes |
 |---|---|---|
 | `SYSDATE` (current date + time, server time zone) | `current_timestamp` (timestamp with time zone, session TZ) OR `localtimestamp` (no TZ) | Beware: `SYSDATE` returns DATE-with-time in Oracle; `CURRENT_DATE` in Trino is just DATE (no time). Use `current_timestamp` for "now()" semantics. **NOTE: `current_date` drops the time component — do NOT use it as a SYSDATE replacement when you need hours/minutes/seconds.** See §4.2A for how to change the session time zone (it is NOT a `SET SESSION` property — it is a dedicated `SET TIME ZONE` command). |
@@ -526,9 +600,9 @@ These are the per-expression rewrites you'll do on almost every migrated SELECT.
 | `EXTRACT(YEAR FROM dt)` | `EXTRACT(YEAR FROM dt)` OR `year(dt)` | Identical syntax + convenience functions. |
 | `dt + 1` (add one day) | `dt + INTERVAL '1' DAY` | Trino requires explicit INTERVAL — no implicit day-arithmetic on dates. |
 | `dt - SYSDATE` (interval) | `date_diff('day', current_timestamp, dt)` returns bigint | Trino doesn't subtract timestamps to get a bare number; use `date_diff`. |
-| `ADD_MONTHS(dt, 3)` | `dt + INTERVAL '3' MONTH` OR `date_add('month', 3, dt)` | Both work. |
-| `MONTHS_BETWEEN(d1, d2)` | `date_diff('month', d2, d1)` | Trino's date_diff returns bigint, not the Oracle-style fractional. |
-| `LAST_DAY(dt)` | `last_day_of_month(dt)` | Trino has it; just renamed. |
+| `ADD_MONTHS(dt, 3)` | `date_add('month', 3, dt)` OR `dt + INTERVAL '3' MONTH` for the non-month-end case ONLY; for full Oracle-compatible semantics use the `CASE WHEN dt = last_day_of_month(dt) THEN last_day_of_month(date_add('month', 3, dt)) ELSE date_add('month', 3, dt) END` wrapper. | **Naive translation is silently wrong for month-end inputs** — Oracle clamps last-day-in to last-day-out (`ADD_MONTHS(DATE '2026-02-28', 1)` = `2026-03-31`); Trino preserves day-number (`date_add('month', 1, DATE '2026-02-28')` = `2026-03-28`). See the LEADING CANONICAL block above for the portable wrapper, the worked walk-through, and the DO-NOT-WRITE matrix. |
+| `MONTHS_BETWEEN(d1, d2)` | `date_diff('month', d2, d1)` (integer count of month boundaries) | Oracle's `MONTHS_BETWEEN` returns a **FRACTIONAL** number; Trino's `date_diff('month', ...)` returns an **INTEGER bigint**. If downstream depended on the fractional residual (proration, accrual), compute it yourself with `date_diff('day', d2, d1) / 31.0`. See the LEADING CANONICAL block above. |
+| `LAST_DAY(dt)` | `last_day_of_month(dt)` | Same purpose, different function name. Bare `LAST_DAY(dt)` produces `Function 'last_day' not registered` in Trino 467. |
 
 ### 4.2A TRINO-SESSION-TIMEZONE GUARDRAIL — `SET TIME ZONE` is a DEDICATED COMMAND, not a session-property assignment
 
