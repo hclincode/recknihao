@@ -491,6 +491,134 @@ GROUP BY tnant_id;
 
 > **`EXPLAIN (TYPE IO, FORMAT JSON)` IS the canonical predicate-pushdown verification tool at plan time.** When an engineer asks "did my WHERE predicate push down to the Iceberg connector without me running the query?", the answer is: run `EXPLAIN (TYPE IO, FORMAT JSON)` and look for the predicate's column in `inputTableColumnInfos[].columnConstraints[]` with a `domain.ranges[]` entry containing your literal bounds. If the column appears with a domain → **pushed down at plan time, no scan**. If the column is missing from `columnConstraints` but appears in your SQL → **the predicate did NOT push down**; Trino will filter on the worker side after scanning all rows. Contrast with `EXPLAIN ANALYZE`, which is the runtime-confirmation tool but actually executes the query (full scan, full cost). TYPE IO is **cheap** (no scan, no execution — just the CBO walking the plan) and is the right first step before reaching for `EXPLAIN ANALYZE`.
 
+### GUARDRAIL — Trino EXPLAIN pushdown signature (Trino terms only; do NOT borrow Spark Catalyst terminology)
+
+> **One-sentence summary.** Trino's predicate-pushdown EXPLAIN signature is a `constraint = {...}` annotation **INSIDE** the `TableScan` node (pushed) versus a separate `Filter` or `ScanFilterProject` operator **ABOVE** the `TableScan` (NOT pushed, filtered in Trino). **Verified per [trino.io/docs/current/optimizer/pushdown.html](https://trino.io/docs/current/optimizer/pushdown.html) + [trino.io/docs/current/sql/explain.html](https://trino.io/docs/current/sql/explain.html).**
+>
+> **Q-pattern matchers this section answers:**
+> - "How do I tell from Trino EXPLAIN output whether my WHERE predicate pushed to PostgreSQL / Iceberg / MySQL?"
+> - "How do I read Trino EXPLAIN to verify predicate pushdown?"
+> - "Where do I see pushdown info in a Trino plan?"
+
+**The two signatures, side by side.**
+
+```text
+-- PUSHED — TableScan has constraint = {...} annotation INSIDE the node.
+-- No Filter / ScanFilterProject operator sits above it.
+Fragment 1 [SOURCE]
+    Output layout: [...]
+    Output partitioning: SINGLE []
+    TableScan[table = postgresql:public.users
+              constraint = {customer_id = 12345}]
+        Layout: [customer_id:bigint, email:varchar, ...]
+        customer_id := customer_id:bigint
+        email      := email:varchar
+```
+
+```text
+-- NOT PUSHED — a Filter operator sits ABOVE the TableScan, applying
+-- the predicate on Trino workers after pulling rows from the source.
+Fragment 1 [SOURCE]
+    Output layout: [...]
+    Output partitioning: SINGLE []
+    Filter[customer_id = 12345]
+        TableScan[table = postgresql:public.users]
+            Layout: [customer_id:bigint, email:varchar, ...]
+```
+
+`ScanFilterProject[...]` (a fused operator that combines scan + filter + projection) above a TableScan-equivalent node also indicates Trino is doing the filtering itself — same diagnosis as a bare `Filter`. The presence of either operator above the scan means the predicate **did not** push down; the data source is being asked for all rows and Trino is filtering after.
+
+**Read-the-plan checklist:**
+
+1. Locate the `TableScan` (or scan-equivalent) node for the source table named in your WHERE clause.
+2. Is there a `constraint = {...}` (or `predicate = {...}` on older grammars) inside that node mentioning the column from your WHERE? → **pushed.**
+3. Is there a separate `Filter[...]` or `ScanFilterProject[...]` operator sitting on top of that TableScan, referencing your WHERE column? → **NOT pushed.** Trino is filtering after pulling rows from the source.
+4. Both can co-exist when the WHERE has multiple predicates and only some are pushable — read the predicate references in each node, not just the operator names.
+
+> **DO-NOT-WRITE — cross-engine EXPLAIN terminology CAUTION.** When reading **Trino** EXPLAIN output, **DO NOT** write or look for:
+> - `PushedFilters: [...]`
+> - `PostScanFilters: [...]`
+> - `PartitionFilters: [...]`
+> - `DataFilters: [...]`
+>
+> **These are SPARK Catalyst / DataSourceV2 EXPLAIN field names** (from `org.apache.spark.sql.connector.read.SupportsPushDownFilters` and Spark's `FileScan` operator). They DO NOT appear anywhere in Trino EXPLAIN output at any release. A reader who greps a Trino EXPLAIN plan text for `PushedFilters` or `PostScanFilters` will find nothing and conclude either that pushdown is broken or that the answer doesn't apply to their cluster — both wrong conclusions caused by wrong-engine terminology.
+>
+> Spark uses `PushedFilters` because Catalyst tracks a JVM list of pushed `Filter` objects on the `FileScan` / JDBC scan node. Trino uses an entirely different mechanism: `ConnectorMetadata.applyFilter(...)` returns a `TupleDomain<ColumnHandle>` that the planner attaches as the `constraint` annotation inside the `TableScan` node. The wire-level concepts (push a predicate to the source) are similar; the EXPLAIN output is unrelated.
+>
+> Trino EXPLAIN pushdown vocabulary you CAN write: `TableScan`, `constraint = {...}`, `predicate = {...}`, `Filter[...]`, `ScanFilterProject[...]`, `inputTableColumnInfos`, `columnConstraints`, `domain`. That is the complete list.
+
+### GUARDRAIL — Validate or preview a query WITHOUT executing it (TYPE VALIDATE + TYPE IO)
+
+> **Q-pattern matchers this section answers:**
+> - "How can I cheaply validate a Trino SQL statement without executing it?"
+> - "How do I check whether a generated SQL string is syntactically valid before running it?"
+> - "How can I preview what a query will scan / what tables and columns it will touch without running it?"
+> - "How do I validate templated SQL from dbt / a BI tool / user input before submitting to the cluster?"
+> - "Is there a Trino built-in syntax checker?"
+
+**The canonical two-tool answer:**
+
+| You want to ... | Use | What it returns | Does it execute? |
+|---|---|---|---|
+| Check the SQL parses + identifiers resolve + types check | `EXPLAIN (TYPE VALIDATE) <query>` | Single boolean column `Valid` (value `true` on success; an error message surfaces parser/analyzer failure) | **NO** — no plan produced, no data touched |
+| Preview which tables, columns, and predicate domains a query will scan | `EXPLAIN (TYPE IO, FORMAT JSON) <query>` | JSON document with `inputTableColumnInfos[]` (table + columnConstraints + per-column `domain`) | **NO** — CBO walks the plan only |
+
+Both are verified per [trino.io/docs/current/sql/explain.html](https://trino.io/docs/current/sql/explain.html).
+
+> **DO-NOT-WRITE — anti-claims and anti-patterns on validation/preview.**
+>
+> 1. **DO NOT WRITE: "Trino has no built-in syntax-checker."** That claim is **WRONG.** `EXPLAIN (TYPE VALIDATE)` **IS** the built-in syntax + semantic checker. It validates parser + identifier resolution + type checking without executing, returning a single boolean `Valid` column. It is the canonical answer to "is this SQL valid before I run it?"
+> 2. **DO NOT WRITE: "Trino has no syntax checker outside of EXPLAIN parsing."** Same problem — TYPE VALIDATE is documented, supported, and canonical.
+> 3. **DO NOT RECOMMEND `SELECT ... LIMIT 1` as a cheap validation alternative.** `LIMIT 1` **EXECUTES the query** (it just stops after one row is returned to the client); Trino still plans, dispatches splits to workers, opens connections to source connectors, scans data, and runs joins. The engineer who follows this advice pays real query cost on every "cheap" validation — and a query that fails on row two (e.g., a divide-by-zero, a type-coercion overflow) will pass the LIMIT 1 test and still fail in production. `LIMIT 1` is **NOT** validation.
+> 4. **DO NOT WRITE: "Trino has no preview tool — you have to run the query."** That claim is **WRONG.** `EXPLAIN (TYPE IO, FORMAT JSON)` IS the canonical preview-what-will-it-scan tool. It returns the `inputTableColumnInfos` array describing every table the query will read, with per-column `domain` constraints showing exactly which value ranges Trino will request. No execution, no scan, no cost — just the CBO walking the logical plan and the connector returning the constraint shape.
+
+**Worked example — validate a templated SQL string from dbt before submitting.**
+
+```sql
+-- Generated by a Jinja template; you want to confirm it parses against the catalog.
+EXPLAIN (TYPE VALIDATE)
+SELECT tenant_id,
+       SUM(amount) AS revenue
+FROM   iceberg.analytics.orders
+WHERE  order_date >= CURRENT_DATE - INTERVAL '30' DAY
+GROUP BY tenant_id;
+
+-- Result: a single column 'Valid' with value 'true' if everything resolves.
+-- If the template produced a typo'd column or unknown table, the statement
+-- errors out at validation (cheap; no execution).
+```
+
+**Worked example — preview which tables/columns/predicates a query will touch.**
+
+```sql
+EXPLAIN (TYPE IO, FORMAT JSON)
+SELECT tenant_id, SUM(amount)
+FROM   iceberg.analytics.orders
+WHERE  tenant_id = 'acme'
+  AND  order_date BETWEEN DATE '2026-05-01' AND DATE '2026-05-31'
+GROUP BY tenant_id;
+
+-- Returns a JSON document with inputTableColumnInfos[] listing the
+-- (catalog, schema, table), the columnConstraints with per-column
+-- 'domain' ranges (your literal bounds appear here when pushed down),
+-- and an estimate.outputRowCount from the CBO. No data is scanned.
+```
+
+**Pre-flight wrapper pattern (validate THEN preview):**
+
+```sql
+-- 1. Cheapest sanity check first: does the SQL even parse + resolve?
+EXPLAIN (TYPE VALIDATE) <query>;
+
+-- 2. If TYPE VALIDATE returned Valid=true, preview the IO impact.
+EXPLAIN (TYPE IO, FORMAT JSON) <query>;
+
+-- 3. Only after both pass, run the query for real (or run EXPLAIN ANALYZE
+--    on a known-fast variant for performance characterization).
+```
+
+This three-step ladder is the canonical "validate generated SQL without paying execution cost" pattern. `LIMIT 1` is NOT on this ladder — it executes.
+
 ---
 
 ## Step 4: Check partition pruning

@@ -1034,8 +1034,53 @@ WITH base AS (
 | `LAST_VALUE(col) OVER (PARTITION BY p ORDER BY o ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)` | Same — identical (but the unbounded-following clause IS required in both, easy footgun) | Portable. |
 | `SUM(amount) OVER (PARTITION BY customer_id ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)` | Same — identical (rolling 7-row sum) | Portable. |
 | `NTILE(4) OVER (ORDER BY revenue)` | Same — identical | Portable. |
-| `LISTAGG(col, ',') WITHIN GROUP (ORDER BY col)` | `array_join(array_agg(col ORDER BY col), ',')` or `listagg(col, ',') WITHIN GROUP (ORDER BY col)` (Trino 396+) | LISTAGG was added to Trino in PR #6418 (release 396). For older Trino, use `array_join(array_agg(...))`. |
+| `LISTAGG(col, ',') WITHIN GROUP (ORDER BY col)` | `array_join(array_agg(col ORDER BY col), ',')` or `listagg(col, ',') WITHIN GROUP (ORDER BY col)` (Trino 396+) | LISTAGG was added to Trino in PR #6418 (release 396). For older Trino, use `array_join(array_agg(...))`. See the ON OVERFLOW mapping callout immediately below — Trino supports `ON OVERFLOW ERROR | TRUNCATE` natively and direct 1:1 to Oracle. |
 | `KEEP (DENSE_RANK FIRST/LAST ORDER BY ...)` clause | NO direct equivalent — rewrite as window function + filter | Oracle-specific. |
+
+#### LISTAGG `ON OVERFLOW` — direct 1:1 Oracle-to-Trino mapping (NOT a gap)
+
+> **One-sentence summary.** Trino `listagg(expr, separator [ON OVERFLOW ERROR | ON OVERFLOW TRUNCATE '<filler>' WITH COUNT | WITHOUT COUNT]) WITHIN GROUP (ORDER BY ...)` supports **the same `ON OVERFLOW` syntax as Oracle** — `ON OVERFLOW ERROR` is the default (raises when the concatenated result exceeds 1,048,576 bytes ≈ 1 MiB), and `ON OVERFLOW TRUNCATE '<filler>' WITH COUNT | WITHOUT COUNT` mirrors Oracle exactly. **Verified per [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html).**
+
+| Oracle source | Trino target | Mapping notes |
+|---|---|---|
+| `LISTAGG(product_name, ', ') WITHIN GROUP (ORDER BY product_name)` | `listagg(product_name, ', ') WITHIN GROUP (ORDER BY product_name)` | Identical. Implicitly `ON OVERFLOW ERROR` on both sides. |
+| `LISTAGG(product_name, ', ' ON OVERFLOW ERROR) WITHIN GROUP (ORDER BY product_name)` | `listagg(product_name, ', ' ON OVERFLOW ERROR) WITHIN GROUP (ORDER BY product_name)` | **Direct 1:1** — same keywords, same default behavior. Errors when the concatenated string exceeds the limit (Oracle: 4000 bytes VARCHAR2 / 32767 bytes if `MAX_STRING_SIZE=EXTENDED`; Trino: 1,048,576 bytes ≈ 1 MiB). |
+| `LISTAGG(product_name, ', ' ON OVERFLOW TRUNCATE '...' WITH COUNT) WITHIN GROUP (ORDER BY product_name)` | `listagg(product_name, ', ' ON OVERFLOW TRUNCATE '...' WITH COUNT) WITHIN GROUP (ORDER BY product_name)` | **Direct 1:1.** Same keywords, same semantics: when the result would exceed the limit, truncate, append the filler string `'...'`, then append a count of the omitted (non-null) values. |
+| `LISTAGG(product_name, ', ' ON OVERFLOW TRUNCATE '...' WITHOUT COUNT) WITHIN GROUP (ORDER BY product_name)` | `listagg(product_name, ', ' ON OVERFLOW TRUNCATE '...' WITHOUT COUNT) WITHIN GROUP (ORDER BY product_name)` | **Direct 1:1.** Same keywords, same semantics: truncate + filler, no count of omitted values appended. |
+| `LISTAGG(product_name, ', ' ON OVERFLOW TRUNCATE WITHOUT COUNT) WITHIN GROUP (ORDER BY product_name)` (filler defaulted) | `listagg(product_name, ', ' ON OVERFLOW TRUNCATE WITHOUT COUNT) WITHIN GROUP (ORDER BY product_name)` | **Direct 1:1.** Both Oracle and Trino accept the omitted-filler form; both default the filler to `'...'`. |
+
+**Default overflow behavior on both engines.** When `ON OVERFLOW` is omitted, both Oracle and Trino default to `ON OVERFLOW ERROR` — overflowing the per-result limit raises an error rather than silently truncating. This is the conservative default; choose it when correctness matters (a truncated revenue report is worse than a failed report). Choose `ON OVERFLOW TRUNCATE '...' WITH COUNT` when the read-ability of the partial result plus an "and N more" marker is more valuable than failing the query.
+
+**Trino size limit (different from Oracle but the SYNTAX is identical).** Trino's `listagg` errors out (or truncates, depending on the clause) at the documented **1,048,576-byte** (1 MiB) per-row result limit. Oracle's `LISTAGG` limit depends on the database `MAX_STRING_SIZE` setting (4000 bytes for VARCHAR2 standard, 32767 bytes when set to EXTENDED). The numeric threshold differs; the `ON OVERFLOW` syntax to handle the threshold does **not** differ.
+
+> **DO-NOT-WRITE — anti-claims on Trino LISTAGG ON OVERFLOW.**
+>
+> 1. **DO NOT WRITE: "Trino `listagg` has no `ON OVERFLOW` equivalent."** That claim is **WRONG.** Trino supports `ON OVERFLOW ERROR` and `ON OVERFLOW TRUNCATE '<filler>' WITH | WITHOUT COUNT` with the same keywords as Oracle.
+> 2. **DO NOT WRITE: "Oracle's `ON OVERFLOW TRUNCATE` clause has no Trino equivalent — you need a CASE WHEN length() workaround."** That claim is **WRONG.** Use the direct Trino syntax `listagg(x, ',' ON OVERFLOW TRUNCATE '...' WITH COUNT) WITHIN GROUP (ORDER BY ...)`. Workaround code such as `CASE WHEN length(array_join(array_agg(x), ',')) > N THEN substr(...) || ' (truncated, ' || cast(count(*) AS varchar) || ' more)' END` is unnecessary and harder to read — use the native `ON OVERFLOW TRUNCATE` clause instead.
+> 3. **DO NOT WRITE: "Only the WITHIN GROUP (ORDER BY ...) part migrates; the ON OVERFLOW clause must be hand-rewritten."** That claim is **WRONG.** Both the `WITHIN GROUP (ORDER BY ...)` part AND the `ON OVERFLOW ERROR | TRUNCATE '<filler>' WITH | WITHOUT COUNT` part migrate **directly, keyword-for-keyword**, to Trino — they are the same SQL:2016 LISTAGG grammar that Oracle implements.
+
+**Worked example — migrating a `LISTAGG` with `ON OVERFLOW TRUNCATE` to Trino dbt.**
+
+```sql
+-- Oracle source (PL/SQL or analytical view):
+SELECT customer_id,
+       LISTAGG(product_name, ', ' ON OVERFLOW TRUNCATE '...' WITH COUNT)
+           WITHIN GROUP (ORDER BY order_date DESC) AS recent_products
+FROM   orders
+GROUP BY customer_id;
+
+-- Trino dbt model (same keywords, same semantics; Trino 396+):
+{{ config(materialized='table') }}
+SELECT customer_id,
+       listagg(product_name, ', ' ON OVERFLOW TRUNCATE '...' WITH COUNT)
+           WITHIN GROUP (ORDER BY order_date DESC) AS recent_products
+FROM   {{ ref('stg_orders') }}
+GROUP BY customer_id;
+```
+
+The migration is a **keyword-for-keyword copy** — no rewrite, no workaround, no CASE expression. The only difference an engineer needs to remember is the byte threshold (1 MiB on Trino) and the NULL-handling behavior (Oracle and Trino both skip NULLs in `listagg` — the `array_join(array_agg(...))` alternative does NOT skip NULLs unless you add `FILTER (WHERE x IS NOT NULL)`).
+
+**When to choose `array_join(array_agg(...))` instead.** If you're on a Trino release older than 396 (rare in 2026 — the production stack is Trino 467), or if you specifically need to control NULL handling differently, fall back to `array_join(array_agg(col ORDER BY col) FILTER (WHERE col IS NOT NULL), ',')`. Note that `array_join` and `array_agg` have NO `ON OVERFLOW` clause — if the joined string exceeds Trino's 1 MiB row limit you must handle it with explicit `substr` + length checks. For Trino 467, the production stack, prefer the native `listagg(... ON OVERFLOW TRUNCATE ...)` form.
 
 **THE QUALIFY LANDMINE.** Oracle does NOT have `QUALIFY` (it's a Snowflake / BigQuery / Databricks / Teradata extension), but engineers migrating Oracle code who have ALSO worked in Snowflake/BigQuery often accidentally write `QUALIFY ROW_NUMBER() OVER (...) = 1` in their Trino dbt models. **`QUALIFY` is a PARSE ERROR on Trino 467.** The canonical Trino rewrite is the subquery + outer WHERE:
 
