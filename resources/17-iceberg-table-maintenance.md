@@ -382,6 +382,15 @@ SELECT * FROM iceberg.analytics.events.partitions;
 | `$refs` | Every named ref (branches AND tags) with their target snapshot IDs and retention settings — discover what tags exist for time travel queries. | `name`, `type` (`BRANCH` / `TAG`), `snapshot_id`, `max_reference_age_in_ms`, `min_snapshots_to_keep` (branches), `max_snapshot_age_in_ms` |
 | `$properties` | Effective TBLPROPERTIES on the table — confirm `write.delete.mode`, `write.format.default`, `commit.retry.num-retries`, etc. | `key`, `value` |
 
+> **`$snapshots` vs `$history` — column-placement gotcha you WILL hit if you confuse them.** These two metadata tables overlap conceptually but have **disjoint column sets** — get this straight or you'll write queries that fail at analysis time with "Column 'X' cannot be resolved." Verified against [Trino Iceberg connector docs](https://trino.io/docs/current/connector/iceberg.html) (Metadata tables section):
+>
+> | Table | Columns (verified Trino 467/481 schema) | Mental model |
+> |---|---|---|
+> | `$snapshots` | `committed_at`, `snapshot_id`, `parent_id`, `operation`, `manifest_list`, `summary` | Every snapshot EVER committed — including ones that were never the live `current` pointer (e.g., snapshots reachable only from a branch). |
+> | `$history` | `made_current_at`, `snapshot_id`, `parent_id`, **`is_current_ancestor`** | The ORDERED commit chain — which snapshot was the `current` pointer at each moment, and whether that snapshot is still on the current ancestor lineage. |
+>
+> **`is_current_ancestor` lives on `$history`, NOT on `$snapshots`.** A query like `SELECT * FROM "events$snapshots" WHERE is_current_ancestor = true` fails because `$snapshots` has no such column. The canonical pre-rollback verification query joins the two on `snapshot_id` — see the "Pre-rollback verification" query in the rollback section below, and the deeper `$history` vs `$snapshots` audit-reconstruction comparison further down in this document.
+
 **Common diagnostic queries (copy-pasteable):**
 
 ```sql
@@ -2140,6 +2149,31 @@ SELECT snapshot_id, committed_at, operation, summary
 FROM iceberg.analytics."events$snapshots"
 ORDER BY committed_at DESC
 LIMIT 10;
+
+-- Step 1b (RECOMMENDED): verify the candidate snapshot is on the CURRENT
+-- ancestor chain before rolling back. `rollback_to_snapshot` requires the
+-- target to be a current-ancestor (you can roll back, not jump sideways
+-- to a branch-only snapshot). The `is_current_ancestor` column lives on
+-- the `$history` metadata table, NOT on `$snapshots`. Join the two on
+-- snapshot_id to combine ancestor-chain proof ($history) with commit
+-- detail ($snapshots) in one query.
+SELECT
+    h.snapshot_id,
+    h.made_current_at,            -- when this snapshot was the live `current` pointer
+    h.is_current_ancestor,        -- TRUE = safe target for rollback_to_snapshot
+    s.committed_at,
+    s.operation,                  -- append / overwrite / delete / replace
+    s.summary
+FROM iceberg.analytics."events$history" h
+JOIN iceberg.analytics."events$snapshots" s
+  ON h.snapshot_id = s.snapshot_id
+WHERE h.is_current_ancestor = true
+ORDER BY h.made_current_at DESC
+LIMIT 10;
+-- If `is_current_ancestor = false` for your target snapshot, do NOT use
+-- rollback_to_snapshot — it will error with "Cannot roll back to snapshot,
+-- not an ancestor of the current state." Use `set_current_snapshot`
+-- instead (the escape hatch — see the section below the rollback CALL).
 
 -- Step 2: roll back to the snapshot just before the bad one.
 

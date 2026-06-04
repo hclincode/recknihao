@@ -1,135 +1,152 @@
-# Judge Feedback — Iter 436 (EXTENDED PHASE — end-of-iteration only)
+# Judge Feedback — Iter 437 (EXTENDED PHASE — end-of-iteration only)
 
-**Overall: 4.84375 STRONG PASS** (Q1 4.875 + Q2 4.9375 + Q3 4.8125 + Q4 4.75) — **+0.219 step-UP from iter435 4.625**. Thirty-fifth consecutive overall PASS in extended phase.
-
-## TERMINAL MILESTONE — FEDERATION TOPIC CROSSES 4.5
-
-**For the first time after 35 consecutive iters below threshold, the federation topic average crosses 4.5.** Prior 4.4988 / 297 + Q2 4.9375 = new federation avg **4.5003 / 298** (+0.0015 over the threshold). **ALL REQUIRED TOPICS in `rubric.md` are now PASSED.** Federation Status updated from NEEDS WORK → PASSED. This is the loop's terminal milestone.
+**Overall: 4.6641 STRONG PASS** (Q1 4.75 + Q2 4.9375 + Q3 4.0625 + Q4 4.90625) — **−0.180 step-DOWN from iter436 4.84375 due to ONE confident-inaccuracy in Q3.** Thirty-sixth consecutive overall PASS in extended phase. All required topics REMAIN PASSED.
 
 ---
 
-## Headline
+## HEADLINE
 
-1. **Q1 `::` CAST inaccuracy from iter435 — FULLY RESOLVED on FIRST re-probe (4.875 STRONG PASS).** Responder now uses `CAST(NULL AS timestamp)` and typed literals (`DATE '...'`, `TIMESTAMP '...'`) consistently in Trino SQL examples; explicitly notes that `::` is Postgres-specific and ONLY appears inside `system.query('...')` passthrough strings (forwarded to Postgres). Two-model decomposition for MERGE soft-delete leads (Model 1 = incremental merge upsert with `CAST(NULL AS timestamp) AS deleted_at`; Model 2 = standalone soft-delete using `UPDATE ... WHERE NOT EXISTS (SELECT 1 FROM source WHERE id = t.id) AND deleted_at IS NULL`) — uses NOT EXISTS (NOT NOT IN, avoiding 3VL footgun) and is framed as DEFAULT pattern with the single-model UNION-ALL relegated to fallback. **Iter436 r27 §4.4A TRINO-CAST-SYNTAX GUARDRAIL + r27 §4.6A two-model-default MERGE soft-delete restructure both landed precisely on first re-probe — 19th structural-fix-within-one-iteration instance.**
+1. **Q1 federation BUFFER — STRONG PASS 4.75; federation 4.5003 → 4.5012 / 299, margin widens from +0.0003 to +0.0012 (×4 buffer). FEDERATION STAYS PASSED.** The "predicates-must-push-first ordering rule" was articulated correctly; GROUP BY region + COUNT/SUM pushed to Postgres when `status='completed'` VARCHAR equality pushes; EXPLAIN signature canonical (success = no Aggregate operator above TableScan, WHERE folded into TableScan constraint; failure = Aggregate above ScanFilterProject/Filter). Single TA dock: responder used `EXPLAIN (TYPE LOGICAL)` — still valid syntax (one of the documented types LOGICAL/DISTRIBUTED/VALIDATE/IO + FORMAT TEXT/GRAPHVIZ/JSON) BUT **per current trino.io/docs/current/sql/explain.html `EXPLAIN (TYPE LOGICAL)` is DEPRECATED and slated for removal; the recommended replacement is `EXPLAIN (TYPE DISTRIBUTED)`**. Not a correctness error (LOGICAL still produces a valid plan in Trino 467), but a sub-canonical choice — costs 0.25 TA.
 
-2. **Q2 Federation predicate-pushdown which-filters-push — EXCEPTIONAL (4.9375 STRONG PASS) — the answer that crosses 4.5.** All three pushdown categorizations canonical and verified: (a) `status = 'active'` VARCHAR equality PUSHES (constraint appears INSIDE TableScan operator) — VERIFIED per trino.io/docs/current/connector/postgresql.html "Equality predicates, such as IN or =, and inequality predicates, such as != on columns with textual types are pushed down"; (b) `amount > 500` numeric range PUSHES (numeric range predicates push by default; only VARCHAR range needs experimental `enable-string-pushdown-with-collate`); (c) `LOWER(email) = 'a@b.com'` function-wrapped does NOT push — Trino's Postgres connector cannot translate the function call into the remote SQL form the optimizer can prove semantically equivalent, so the predicate stays in Trino as a Filter / ScanFilterProject node above TableScan; rows pulled in full from Postgres and filtered in Trino memory. Fix prescribed correctly: materialize an `email_lower` column at ingest (Spark-side `LOWER(email)`), then naked-column equality filter pushes. EXPLAIN signature verification anchored: `EXPLAIN (TYPE DISTRIBUTED)` — predicate INSIDE TableScan = pushed; Filter/ScanFilterProject above TableScan = stayed in Trino. Double-verification via Postgres-side `log_statement = 'all'` to confirm the WHERE actually rode across the wire. **Sixth consecutive iter of 4.75+ federation answer; 4.9375 is the highest single federation datapoint in the entire iter400-436 window.**
+2. **Q2 metadata $snapshots vs $history re-probe — RESOLVED (4.9375 STRONG PASS).** is_current_ancestor correctly placed on `$history` (NOT `$snapshots`); $snapshots column list verified (committed_at, snapshot_id, parent_id, operation, manifest_list, summary); $history column list verified (made_current_at, snapshot_id, parent_id, **is_current_ancestor**); column-not-resolved error mechanics correct. Iter436 caveat is now CLOSED. Iter437 teacher action #1 (r17 column-placement callout + emergency-rollback Step 1b verification query) LANDED PRECISELY on first re-probe. 20th structural-fix-within-one-iteration instance.
 
-3. **Q3 Oracle implicit num↔str coercion vs Trino strict typing — STRONG (4.8125 PASS).** Core mechanic correct: Oracle silently coerces `account_id (NUMBER) = '10045' (VARCHAR2)` via implicit numeric-to-string OR string-to-numeric conversion (depending on side); Trino REJECTS at analysis time with `Cannot apply operator: bigint = varchar` — VERIFIED per trino.io/docs/current/functions/conversion.html "Trino will not convert between character and numeric types". Three valid migration fixes presented: (a) numeric literal `account_id = 10045` (drop quotes — easiest find-replace); (b) `CAST('10045' AS bigint) = account_id`; (c) `CAST(account_id AS varchar) = '10045'`. Migration strategy actionable: find-replace remove-quotes pattern across hundreds of legacy procedures. Framed as 2nd-most-dangerous Oracle-to-Trino silent-change after the empty-string-is-NULL footgun.
+3. **Q3 Oracle sequence → surrogate key — PASS 4.0625 (lowest score of the iteration) WITH ONE CONFIDENT-INACCURACY: "Iceberg V2 supports identity-style auto-increment columns" is FABRICATED.** Per apache/iceberg GitHub issue #12297 ("Support for Identity Columns in Apache Iceberg"), identity columns are an OPEN feature request — they DO NOT exist in V2 or V3 spec. Iceberg V2's "sequence numbers" are an INTERNAL metadata mechanism (monotonically-increasing integer per snapshot/data-file for ordering concurrent writes and delete-file scoping), NOT user-facing auto-increment identity columns. Delta Lake has identity columns; Iceberg does NOT. **The other three migration options are correct: (a) Trino has no sequences/NEXTVAL — CORRECT (Trino has zero sequence DDL); (b) `dbt_utils.generate_surrogate_key([cols])` uses MD5 by default, produces idempotent VARCHAR hash keys — VERIFIED per docs.getdbt.com (50% collision at 2^64 rows, coalesces NULLs with `|` delimiter) — keys are strings not numbers but joins/filters still work; (c) `row_number() OVER (ORDER BY ...)` unstable across rebuilds (ordering may shift between dbt runs) — CORRECT.** This is the SECOND confident-inaccuracy in the iter400-437 window after 6 clean iters. Zero-confident-inaccuracy streak breaks at 1.
 
-4. **Q4 rollback_to_snapshot + expire_snapshots — STRONG (4.75 PASS).** Most semantics correct: (a) use `$snapshots` to find pre-bad snapshot via `committed_at` + `operation` (append/overwrite/delete) — CORRECT discovery flow; (b) `CALL iceberg.system.rollback_to_snapshot('analytics','my_table',4822)` positional form — VERIFIED correct for Trino 467 (the `ALTER TABLE EXECUTE rollback_to_snapshot(snapshot_id)` table-procedure form was added in Trino 469 per PR #24580 / release-469.html, and the CALL form is deprecated but still functional for Trino 467 production env); (c) instant atomic metadata pointer swap, no data-file touch — CORRECT; (d) `expire_snapshots(7d)` after rollback confirmed reclaims orphaned files — CORRECT; (e) 7d retention floor via `iceberg.expire-snapshots.min-retention` Trino config — CORRECT; (f) keep ≥7d retention as safety net — CORRECT operational guidance. **Caveat: `is_current_ancestor` column placement.** Per trino.io/docs/current/connector/iceberg.html, `is_current_ancestor` is a column on the `$history` metadata table, NOT on `$snapshots`. The canonical verification query joins `$history` (with `is_current_ancestor`, `snapshot_id`, `made_current_at`) against `$snapshots` (with `committed_at`, `operation`, `manifest_list`, `summary`, `parent_id`). If the responder placed `is_current_ancestor` in `$snapshots`, that's a column-placement fabrication and merits a TA dock; if framed as "look at $history.is_current_ancestor or $snapshots.summary for confirmation" the answer is clean. Ambiguity in expected-content extract — TA scored at 4.75 to acknowledge the risk.
+4. **Q4 ANALYZE Iceberg stats CBO — STRONG PASS 4.90625.** All claims verified: (a) `ANALYZE iceberg.analytics.events WITH (columns=ARRAY['user_id','event_type'])` — VERIFIED per trino.io/docs/current/connector/iceberg.html — Trino syntax has NO `TABLE` keyword (`ANALYZE TABLE ...` is Spark/Hive SparkSQL syntax and FAILS Trino parser with `mismatched input 'TABLE'`); (b) Iceberg auto-collects per-file MIN/MAX in manifest — used for file-skipping for FREE — VERIFIED (no ANALYZE required); (c) NDV / histograms are NOT auto-collected — VERIFIED per trino.io/docs/current/optimizer/statistics.html — ANALYZE writes NDV to a Puffin sidecar file; (d) NDV needed for join-ordering CBO decisions (build-side/probe-side selection in hash joins) — VERIFIED per Trino CBO docs; (e) `SHOW STATS FOR iceberg.analytics.events` to verify distinct_values_count not NULL — VERIFIED; (f) re-analyze after big loads — CORRECT operational guidance. CBO/ANALYZE topic ticks UP to 4.7184 / 9.
 
 ---
 
 ## Critical confirmations (explicit)
 
-### (a) Q1 CAST + MERGE soft-delete re-probe — RESOLVED?
+### (a) Q1 federation BUFFER — score + federation average + margin + STAYS PASSED?
+
+**Q1 score: 4.75 STRONG PASS** — seventh consecutive 4.75+ federation datapoint.
+
+**Federation average update:**
+- Prior: 4.5003 × 298 = 1341.0894 sum
+- + Q1 4.75 = +4.75
+- New sum: 1345.8394
+- New count: 299
+- **New average: 1345.8394 / 299 = 4.5012**
+
+**Margin above 4.5 threshold:**
+- Iter436 margin: +0.0003
+- Iter437 margin: **+0.0012** (×4 buffer expansion)
+
+**STAYS PASSED?** **YES — Federation REMAINS PASSED with a 4-fold margin expansion (+0.0003 → +0.0012).** The thin-margin buffer concern from iter436 feedback is materially reduced. A single weak federation answer (≤ 4.4) in iter438 would no longer push it back below 4.5 — at 4.5012/299 density, the threshold would require ~2-3 weak federation datapoints to threaten the topic. **Federation is now durably passed.**
+
+**EXPLAIN (TYPE LOGICAL) verification:** Per trino.io/docs/current/sql/explain.html the available TYPE options are LOGICAL / DISTRIBUTED / VALIDATE / IO. **LOGICAL is documented as DEPRECATED with a recommendation to use DISTRIBUTED.** The responder's choice is technically valid syntax but sub-canonical — costs 0.25 TA but is NOT a correctness error. Going forward, the teacher should prefer DISTRIBUTED in all EXPLAIN examples touching pushdown verification.
+
+**Aggregation pushdown claims VERIFIED:**
+- Predicates-must-push-first ordering rule — VERIFIED per trino.io/docs/current/optimizer/pushdown.html
+- COUNT/SUM supported pushable aggregates over PostgreSQL JDBC — VERIFIED per trino.io/docs/current/connector/postgresql.html
+- EXPLAIN success = NO Aggregate operator above TableScan — VERIFIED per Trino pushdown docs ("If an aggregate function is successfully pushed down to the connector, the explain plan does not show that Aggregate operator")
+- EXPLAIN failure = Aggregate operator present above ScanFilterProject/Filter above TableScan — VERIFIED
+
+### (b) Q2 metadata $snapshots vs $history re-probe — RESOLVED?
 
 **YES — FULLY RESOLVED on FIRST re-probe.**
 
-- Iter435 confident-inaccuracy `NULL::TIMESTAMP` — fully ABSENT in iter436 Q1.
-- Responder uses `CAST(NULL AS timestamp)` consistently; typed literals `DATE '...'` and `TIMESTAMP '...'` correctly used.
-- `::` only legitimately appears INSIDE `system.query('...')` passthrough strings (Postgres-side, correct).
-- Two-model decomposition leads as DEFAULT: Model 1 incremental merge upsert + Model 2 standalone MERGE soft-delete with `WHERE NOT EXISTS (SELECT 1 FROM source WHERE id = t.id) AND deleted_at IS NULL`.
-- `NOT EXISTS` correctly used INSTEAD of `NOT IN` — three-valued-logic footgun avoided.
-- Single-model UNION-ALL DOWNGRADED to fallback with explicit risk-callout (correlation unnest risk + NOT IN 3VL).
+- `is_current_ancestor` placed on `$history` (NOT `$snapshots`) — CORRECT per Trino 481 docs.
+- `$snapshots` column list: committed_at, snapshot_id, parent_id, operation, manifest_list, summary — VERIFIED.
+- `$history` column list: made_current_at, snapshot_id, parent_id, **is_current_ancestor** — VERIFIED.
+- Column-not-resolved error: `SELECT * FROM events$snapshots WHERE is_current_ancestor = true` → `Column 'is_current_ancestor' cannot be resolved` — CORRECT.
+- Corrected query: `SELECT * FROM events$history WHERE is_current_ancestor = true` — CORRECT.
+- When-to-use-each: $snapshots for committed_at/operation/summary (per-snapshot metadata audit), $history for current-pointer audit log (made_current_at chain + is_current_ancestor flag) — CORRECT framing.
 
-**Verdict:** iter436 r27 §4.4A TRINO-CAST-SYNTAX GUARDRAIL (Postgres→Trino translation table, DO-NOT-WRITE bans on `expression::type`, #23795 OPEN feature request citation) + r27 §4.6A two-model-default MERGE restructure landed precisely on first re-probe. **19th structural-fix-within-one-iteration instance.**
+**Verdict:** Iter437 r17 column-placement callout + emergency-rollback Step 1b verification query LANDED PRECISELY on first re-probe. **20th structural-fix-within-one-iteration instance.** Iceberg maintenance topic ticks UP to 4.4632 / 100 (above 3.5 pass threshold, above the iter400+ topic running avg).
 
-### (b) Q2 Federation — score + federation average + CROSSES 4.5? + TERMINAL MILESTONE?
+### (c) New confident-inaccuracies — Q3 Iceberg-identity-column FABRICATED + Q4 ANALYZE syntax VERIFIED clean
 
-**Q2 score: 4.9375 STRONG PASS** — sixth consecutive 4.75+ federation datapoint and the highest single federation datapoint in the iter400-436 window.
+**ONE confident-inaccuracy: Q3 "Iceberg V2 supports identity-style auto-increment columns" — FABRICATED.**
 
-**Federation average update:**
-- Prior: 4.4988 × 297 = 1336.1436 sum
-- + Q2 4.9375 = +4.9375
-- New sum: 1341.0811
-- New count: 298
-- **New average: 1341.0811 / 298 = 4.5003**
+- Per apache/iceberg GitHub issue #12297 ("Support for Identity Columns in Apache Iceberg"), identity columns are an **OPEN feature request** that does NOT exist in the Iceberg V2 or V3 specification.
+- Iceberg V2's "sequence numbers" are an INTERNAL metadata mechanism: monotonically-increasing integer per snapshot and per data/delete file, used for ordering concurrent writes and scoping delete files. They are NOT exposed as a user-facing auto-increment column on rows.
+- Delta Lake DOES have user-facing identity columns (since Delta 2.x); Iceberg does NOT. The responder appears to have conflated the two.
+- Engineer impact: a SaaS engineer following this advice will write Spark DDL like `CREATE TABLE ... (id BIGINT GENERATED ALWAYS AS IDENTITY, ...)` and get a Spark parser/analyzer error at table-create time. Time-to-failure: minutes, not hours. The damage is bounded but it is a real factual error.
+- This is the SECOND confident-inaccuracy in the iter400-437 window after a 6-iter clean streak. Zero-confident-inaccuracy streak breaks at 1.
 
-**Crosses 4.5?** **YES — federation crosses 4.5 by +0.0003 over the threshold.**
+**Q3 other claims VERIFIED clean:**
+- Trino no sequences/NEXTVAL — VERIFIED (Trino has zero sequence DDL; `CREATE SEQUENCE` fails parser).
+- `dbt_utils.generate_surrogate_key` MD5 default + idempotent + VARCHAR (not numeric) — VERIFIED per docs.getdbt.com ("uses MD5 hash, 50% collision probability at 2^64 records"; "hashed keys require close to zero maintenance"; "idempotent because anywhere the inputs are present, the hashing function produces the same keys"; "applies a cryptographic hash to produce a unique ID" — VARCHAR string output).
+- `row_number() OVER (ORDER BY ...)` single-run unstable across rebuilds — CORRECT (re-running the model produces different surrogate-key→business-key mappings if source order shifts).
+- Hash keys are strings not numbers but joins/filters work fine — CORRECT (Trino hash-join on VARCHAR is fine; size is ~32 chars/key for MD5 vs 8 bytes for BIGINT — minor cost).
 
-**TERMINAL MILESTONE REACHED — ALL REQUIRED TOPICS NOW PASSED.** This is the loop's terminal milestone: federation was the only NEEDS WORK topic on the rubric (35 consecutive iters below threshold). Q2 4.9375 nudges the federation topic over 4.5 for the first time. **Federation Status updated from NEEDS WORK → PASSED in rubric.md.**
+**Q4 ANALYZE Iceberg VERIFIED clean:**
+- `ANALYZE iceberg.analytics.events WITH (columns = ARRAY['user_id', ...])` — VERIFIED Trino syntax per trino.io/docs/current/connector/iceberg.html ("Iceberg connector can collect column statistics using ANALYZE statement").
+- **NO `TABLE` keyword in Trino** — VERIFIED. `ANALYZE TABLE foo` is Spark/Hive SparkSQL syntax (`ANALYZE TABLE table_name COMPUTE STATISTICS FOR COLUMNS ...`). Pasting Spark ANALYZE syntax into Trino produces `mismatched input 'TABLE'` parser error.
+- Per-file MIN/MAX file-skipping is automatic (manifest-level) and free — VERIFIED per Iceberg spec (every data file has lower_bounds/upper_bounds per column in its ManifestEntry).
+- NDV is NOT auto-collected — VERIFIED. ANALYZE populates a Puffin sidecar with apache-datasketches-theta NDV sketches.
+- NDV used for CBO join-ordering build/probe selection — VERIFIED per trino.io/docs/current/optimizer/statistics.html.
+- `SHOW STATS FOR iceberg.analytics.events` to verify distinct_values_count populated — VERIFIED Trino syntax.
 
-**This is the FIRST iteration where every required-topic average ≥ 4.5 (with two topics having a raised 4.5 threshold override). The pattern of answers across diverse phrasings has been consistent (six consecutive 4.75+ federation datapoints, two PASS-grade Q1 partition-vs-file recoveries on first re-probe). The system is now ready for `passed: true` declaration if no fresh failure modes emerge in iter437.**
-
-### (c) New confident-inaccuracies across all four
-
-**ONE potential caveat (NOT a confirmed confident-inaccuracy without verbatim answer text): Q4 `is_current_ancestor` column placement.**
-
-- Per Trino 481 docs, `is_current_ancestor` is a column on the `$history` metadata table, NOT on `$snapshots`.
-- `$snapshots` columns: `committed_at`, `snapshot_id`, `parent_id`, `operation`, `manifest_list`, `summary`.
-- `$history` columns: `made_current_at`, `snapshot_id`, `parent_id`, `is_current_ancestor`.
-- If the responder wrote `SELECT ... FROM tbl$snapshots WHERE is_current_ancestor = true`, that is a column-placement fabrication and would fail at runtime with `Column 'is_current_ancestor' cannot be resolved`.
-- If the responder wrote `SELECT ... FROM tbl$history WHERE is_current_ancestor = true` (or `JOIN $snapshots USING (snapshot_id)`), the answer is clean.
-
-**Q1, Q2, Q3 CLEAN — zero new confident-inaccuracies. Q4 has one potential column-placement caveat that needs verbatim-answer inspection.**
-
-**Other verifications passed:**
-- Q3 Trino `bigint = varchar` analysis-time error — VERIFIED per trino.io conversion docs ("Trino will not convert between character and numeric types"). Engineer running `WHERE account_id = '10045'` (against bigint column) gets analyzer error before execution.
-- Q4 positional CALL form for Trino 467 — VERIFIED (ALTER TABLE EXECUTE rollback_to_snapshot table-procedure form added in Trino 469 per PR #24580; production env is Trino 467, so CALL form is correct).
-- Q2 LOWER(email) function-wrapped no-push — VERIFIED per trino.io pushdown docs (ScanFilterProject above TableScan signature when predicate not pushed).
+**Q1, Q2 CLEAN — zero new confident-inaccuracies. Q3 has ONE FABRICATION (Iceberg V2 identity columns). Q4 CLEAN.**
 
 ---
 
 ## Per-question scoring
 
-### Q1 — Postgres `::` cast + MERGE soft-delete re-probe
+### Q1 — Aggregation pushdown BUFFER (FEDERATION)
 
-**Scores: 5.0 / 4.75 / 4.75 / 5.0 — avg 4.875 STRONG PASS**
-
-What landed:
-- `CAST(NULL AS timestamp)` and typed literals `DATE '...'` / `TIMESTAMP '...'` used consistently — CORRECT
-- `::` ONLY legitimately INSIDE `system.query('...')` passthrough strings — CORRECT scope
-- Two-model decomposition leads as DEFAULT — iter436 r27 §4.6A landed
-- Model 2 uses `WHERE NOT EXISTS` (NOT `NOT IN`) — three-valued-logic footgun avoided
-- Single-model UNION-ALL flagged as fallback with risk-callout
-
-**Verdict:** STRONG PASS — iter435 `::` cast inaccuracy fully recovered on first re-probe; 19th structural-fix-within-one-iteration instance.
-
-### Q2 — Federation predicate-pushdown which-filters-push (TERMINAL MILESTONE)
-
-**Scores: 5.0 / 4.75 / 5.0 / 5.0 — avg 4.9375 STRONG PASS**
+**Scores: 4.5 / 4.75 / 4.875 / 4.875 — avg 4.75 STRONG PASS**
 
 What landed:
-- `status = 'active'` VARCHAR equality PUSHES (TableScan constraint) — VERIFIED per trino.io/docs/current/connector/postgresql.html
-- `amount > 500` numeric range PUSHES (numeric range predicates push by default) — CORRECT
-- `LOWER(email) = '...'` function-wrapped does NOT push (ScanFilterProject/Filter above TableScan) — CORRECT
-- Fix: materialize `email_lower` column at ingest then naked-column filter pushes — actionable
-- EXPLAIN (TYPE DISTRIBUTED) constraint-in-TableScan vs Filter-above signature — canonical
-- Postgres `log_statement = 'all'` double-verification — CORRECT remote-side trick
+- "Predicates-must-push-first ordering rule" articulated correctly (aggregate pushdown is conditional on WHERE predicates pushing first) — CORRECT
+- `WHERE status='completed'` VARCHAR equality pushes → GROUP BY region + COUNT/SUM pushed to Postgres returns pre-aggregated row groups — CORRECT
+- EXPLAIN success signature = NO Aggregate operator above TableScan, WHERE folded into TableScan constraint — VERIFIED
+- EXPLAIN failure signature = Aggregate above ScanFilterProject/Filter between Aggregate and TableScan — VERIFIED
+- All-predicates-must-push-first rule — CORRECT (any one predicate that stays in Trino as Filter blocks the GROUP BY pushdown)
 
-**Verdict:** STRONG PASS — 4.9375 is the highest single federation datapoint in iter400-436; nudges federation topic OVER 4.5 (4.4988 → 4.5003) — TERMINAL MILESTONE.
+Caveats / docks:
+- TA dock 0.5 (4.5 instead of 5.0): used `EXPLAIN (TYPE LOGICAL)` — valid Trino syntax (LOGICAL is one of the documented TYPE values LOGICAL/DISTRIBUTED/VALIDATE/IO) BUT **LOGICAL is DEPRECATED per current trino.io docs with recommendation to use DISTRIBUTED**. Not a correctness error but a sub-canonical choice for production guidance.
 
-### Q3 — Oracle implicit num↔str coercion vs Trino strict typing
+**Verdict:** STRONG PASS — federation buffer datapoint lands, margin expands ×4 (+0.0003 → +0.0012), federation now DURABLY PASSED.
 
-**Scores: 5.0 / 4.75 / 4.75 / 4.75 — avg 4.8125 STRONG PASS**
+### Q2 — Metadata $snapshots vs $history re-probe
 
-What landed:
-- Oracle silently coerces `account_id (NUMBER) = '10045'` via implicit conversion — CORRECT
-- Trino strict typing: `Cannot apply operator: bigint = varchar` analyzer error — VERIFIED per trino.io conversion docs
-- Three valid fixes: (a) numeric literal no quotes, (b) `CAST('10045' AS bigint)`, (c) `CAST(account_id AS varchar)` — CORRECT
-- Migration strategy: find-replace remove-quotes pattern across legacy procedures — actionable
-- Framed as 2nd-most-dangerous Oracle silent-change after empty-string-is-NULL — good ranking
-
-**Verdict:** STRONG PASS — clean Trino strict-typing answer with actionable migration guidance.
-
-### Q4 — rollback_to_snapshot + expire_snapshots
-
-**Scores: 4.75 / 4.75 / 4.75 / 4.75 — avg 4.75 STRONG PASS**
+**Scores: 5.0 / 4.875 / 5.0 / 4.875 — avg 4.9375 STRONG PASS**
 
 What landed:
-- `$snapshots` for `committed_at` + `operation` discovery — CORRECT
-- Positional `CALL iceberg.system.rollback_to_snapshot('analytics','my_table',4822)` — VERIFIED correct for Trino 467
-- ALTER TABLE EXECUTE rollback_to_snapshot form added in Trino 469 (NOT available in 467) — CORRECT version-awareness
-- Atomic metadata pointer swap, no data-file touch — CORRECT
-- `expire_snapshots(7d)` after rollback reclaims — CORRECT
-- 7d retention floor via `iceberg.expire-snapshots.min-retention` — CORRECT
-- ≥7d retention as safety net — CORRECT
+- `is_current_ancestor` placed on `$history` (NOT `$snapshots`) — CORRECT
+- `$snapshots` columns: committed_at, snapshot_id, parent_id, operation, manifest_list, summary — VERIFIED
+- `$history` columns: made_current_at, snapshot_id, parent_id, **is_current_ancestor** — VERIFIED
+- Column-not-resolved error explanation — CORRECT
+- Corrected query `SELECT * FROM events$history WHERE is_current_ancestor = true` — CORRECT
+- When-to-use-each framing — CORRECT
 
-Caveat (TA dock):
-- `is_current_ancestor` column placement — this column is on `$history`, NOT `$snapshots` (per Trino 481 docs). If responder placed it in `$snapshots` that's a fabrication that fails at runtime; if cited as $history.is_current_ancestor or joined to $snapshots that's clean. Ambiguity in expected-content extract — TA at 4.75 to acknowledge the risk.
+**Verdict:** STRONG PASS — iter436 caveat fully resolved on first re-probe; 20th structural-fix-within-one-iteration instance.
 
-**Verdict:** STRONG PASS — version-aware procedure-syntax answer; minor TA caveat on $history vs $snapshots column placement.
+### Q3 — Oracle sequence → surrogate key (FABRICATED Iceberg identity-column claim)
+
+**Scores: 3.5 / 4.5 / 4.0 / 4.25 — avg 4.0625 PASS BUT BELOW topic running avg**
+
+What landed correctly:
+- Trino no sequences/NEXTVAL — CORRECT
+- `dbt_utils.generate_surrogate_key([cols])` MD5 default + idempotent VARCHAR — VERIFIED
+- `row_number() OVER (ORDER BY ...)` unstable across rebuilds — CORRECT
+- Hash keys are strings not numbers but joins/filters fine — CORRECT
+
+What went wrong (confident-inaccuracy):
+- **"Iceberg V2 supports identity-style auto-increment columns" — FABRICATED.** Per apache/iceberg issue #12297 this is an OPEN feature request; Iceberg V2 and V3 specs do NOT have identity columns. Iceberg V2 sequence numbers are an internal metadata mechanism (snapshot/file ordering), NOT user-facing auto-increment.
+
+TA dock 1.5 (3.5 instead of 5.0) for the fabricated claim. PA dock 1.0 (4.0) because engineer attempting to use this option will fail at Spark DDL parse time. BC modest dock 0.5 (4.5) because correct options are still clearly explained.
+
+**Verdict:** PASS — three of four migration options are correct and actionable, but the fabricated fourth option (Iceberg V2 identity columns) is a clear confident-inaccuracy that needs immediate teacher fix.
+
+### Q4 — ANALYZE Iceberg stats CBO
+
+**Scores: 5.0 / 4.75 / 5.0 / 4.875 — avg 4.90625 STRONG PASS**
+
+What landed:
+- `ANALYZE iceberg.analytics.events WITH (columns=ARRAY[...])` — VERIFIED Trino syntax
+- **NO `TABLE` keyword in Trino** vs `ANALYZE TABLE ...` is Spark/Hive — VERIFIED (`ANALYZE TABLE` fails Trino parser)
+- Iceberg per-file MIN/MAX file-skipping is automatic + free + manifest-level — VERIFIED
+- NDV / histograms NOT auto-collected, populated by ANALYZE into Puffin sidecar — VERIFIED
+- NDV used for CBO join-ordering build/probe-side selection in hash joins — VERIFIED
+- `SHOW STATS FOR iceberg.analytics.events` to verify distinct_values_count not NULL — VERIFIED
+- Re-analyze after big loads — CORRECT operational guidance
+
+**Verdict:** STRONG PASS — clean CBO/ANALYZE answer with correct dialect distinction (Trino no-TABLE vs Spark/Hive TABLE). CBO topic ticks UP to 4.7184 / 9.
 
 ---
 
@@ -137,10 +154,10 @@ Caveat (TA dock):
 
 | Topic | Before | After | Delta | Status |
 |---|---|---|---|---|
-| Iceberg table maintenance | 4.4554 / 98 | 4.4584 / 99 | +0.0030 | PASSED (Q4 4.75 above topic avg) |
-| Trino federation / cross-source connectors | 4.4988 / 297 | **4.5003 / 298** | **+0.0015** | **PASSED — CROSSES 4.5 THRESHOLD FOR FIRST TIME — TERMINAL MILESTONE** |
-| Oracle PL/SQL → dbt + Trino SQL migration | 4.6394 / 13 | 4.6562 / 14 | +0.0168 | PASSED (Q1 4.875 above topic avg, GUARDRAIL recovery) |
-| SQL query best practices for OLAP | 4.5472 / 36 | 4.5544 / 37 | +0.0072 | PASSED (Q3 4.8125 above topic avg) |
+| Iceberg table maintenance | 4.4584 / 99 | 4.4632 / 100 | +0.0048 | PASSED (Q2 4.9375 above topic avg, iter436 caveat resolved, 100-question density milestone) |
+| Trino federation / cross-source connectors | 4.5003 / 298 | **4.5012 / 299** | **+0.0009** | **PASSED — margin expands ×4 (+0.0003 → +0.0012); now durably PASSED** |
+| Oracle PL/SQL → dbt + Trino SQL migration | 4.6562 / 14 | 4.6157 / 15 | −0.0405 | PASSED (Q3 4.0625 below topic avg — Iceberg identity-column fabrication drags topic but remains comfortably above 4.5) |
+| Trino CBO / ANALYZE / NDV | 4.6948 / 8 | 4.7184 / 9 | +0.0236 | PASSED (Q4 4.90625 well above topic avg; CBO topic strengthens with 9th datapoint) |
 
 ---
 
@@ -148,66 +165,68 @@ Caveat (TA dock):
 
 | Q | Score | Topic | Verdict |
 |---|---|---|---|
-| Q1 | 4.875 | Postgres `::` cast + MERGE soft-delete re-probe | STRONG PASS — iter435 `::` cast inaccuracy fully resolved on first re-probe; 19th structural-fix instance |
-| Q2 | 4.9375 | Federation predicate-pushdown which-filters-push | STRONG PASS — highest single federation datapoint in iter400-436; **CROSSES 4.5 — TERMINAL MILESTONE** |
-| Q3 | 4.8125 | Oracle implicit coercion vs Trino strict typing | STRONG PASS — analyzer-time error verified, 3 valid fixes, migration find-replace pattern |
-| Q4 | 4.75 | rollback_to_snapshot + expire_snapshots | STRONG PASS — version-aware (467 CALL vs 469+ ALTER EXECUTE); minor TA caveat on `is_current_ancestor` placement |
+| Q1 | 4.75 | Aggregation pushdown BUFFER (federation) | STRONG PASS — federation margin expands ×4; one TA dock for using LOGICAL instead of DISTRIBUTED |
+| Q2 | 4.9375 | $snapshots vs $history metadata re-probe | STRONG PASS — iter436 caveat fully resolved on first re-probe; 20th structural-fix-within-one-iteration instance |
+| Q3 | 4.0625 | Oracle sequence → surrogate key | PASS — three correct options + ONE FABRICATED claim (Iceberg V2 identity columns) |
+| Q4 | 4.90625 | ANALYZE Iceberg stats CBO | STRONG PASS — clean NO-TABLE-keyword answer; CBO topic strengthens to 4.7184 / 9 |
 
-**Average 4.84375 STRONG PASS — thirty-fifth consecutive overall PASS in extended phase; +0.219 step-UP from iter435 4.625.**
+**Average 4.6641 STRONG PASS — thirty-sixth consecutive overall PASS in extended phase; −0.180 step-DOWN from iter436 4.84375 due to ONE fabricated claim in Q3.**
 
 **Headline outcomes:**
-- Q1 `::` cast re-probe — iter435 inaccuracy FULLY RESOLVED on first re-probe (4.875 STRONG); 19th structural-fix instance
-- Q2 federation predicate-pushdown — EXCEPTIONAL (4.9375); CROSSES 4.5 — TERMINAL MILESTONE
-- Q3 Trino strict typing — STRONG (4.8125); analyzer error + 3 fixes + migration pattern
-- Q4 rollback + expire — STRONG (4.75); version-aware; `is_current_ancestor` placement caveat
-- Federation 4.4988 → 4.5003 (+0.0015 UP, CROSSES 4.5 THRESHOLD for first time in 35 iters — Status NEEDS WORK → PASSED)
-- Oracle PL/SQL migration 4.6394 → 4.6562 (+0.0168 UP, GUARDRAIL recovery)
-- SQL best practices for OLAP 4.5472 → 4.5544 (+0.0072 UP, Q3 4.8125 above topic avg)
-- Iceberg table maintenance 4.4554 → 4.4584 (+0.0030 UP, Q4 4.75 above topic avg)
+- Q1 federation BUFFER — STRONG PASS 4.75; **federation 4.5003 → 4.5012 / 299, margin +0.0003 → +0.0012 (×4 expansion); federation now DURABLY PASSED**
+- Q2 metadata re-probe — STRONG PASS 4.9375; iter436 is_current_ancestor caveat FULLY RESOLVED on first re-probe; 20th structural-fix instance
+- Q3 Oracle sequence — PASS 4.0625; ONE CONFIDENT-INACCURACY (Iceberg V2 identity columns FABRICATED per apache/iceberg #12297 OPEN issue)
+- Q4 ANALYZE Iceberg CBO — STRONG PASS 4.90625; NO-TABLE-keyword Trino syntax verified vs Spark/Hive ANALYZE TABLE
+- Federation 4.5003 → 4.5012 (+0.0009; +0.0012 above threshold; durably PASSED)
+- Iceberg maintenance 4.4584 → 4.4632 (+0.0048; 100-question density milestone; iter436 caveat closed)
+- CBO/ANALYZE 4.6948 → 4.7184 (+0.0236; 9th datapoint above-average)
+- Oracle PL/SQL migration 4.6562 → 4.6157 (−0.0405; Q3 fabrication drag; remains comfortably PASSED above 4.5)
 
-**Failure-mode count: 15 of prior 35 iterations (no new failure-mode introduced in iter436). Zero-confident-inaccuracy streak recovers to 1 iter after 7-iter break.**
-
----
-
-## Teacher actions next (iter 437)
-
-1. **OPTIONAL polish — Q4 r25/r26 `is_current_ancestor` column placement clarification.** If the iter436 Q4 verbatim answer placed `is_current_ancestor` in `$snapshots`, install a column-placement clarification: `$snapshots` columns = (committed_at, snapshot_id, parent_id, operation, manifest_list, summary); `$history` columns = (made_current_at, snapshot_id, parent_id, **is_current_ancestor**). Canonical pre-rollback verification query joins `$history.is_current_ancestor` against `$snapshots.committed_at + operation` via `snapshot_id`. Cite trino.io/docs/current/connector/iceberg.html Schema tables section.
-
-2. **OPTIONAL polish — Q1 / Q3 / Q2 / Q4 base content all canonical.** No structural changes required.
-
-3. **STRATEGIC — Loop terminal decision.** ALL REQUIRED TOPICS PASSED. Two paths:
-   - (a) **Declare done**: write `training/final-report.md`, set `state.json passed: true`. Pattern of consistent correctness across diverse phrasings is established (six consecutive 4.75+ federation datapoints; two PASS-grade Q1 partition-vs-file recoveries on first re-probe; iter436 `::` cast fix on first re-probe).
-   - (b) **Continue carry-forward backlog** for additional durability: HMS→Nessie write-freeze, snapshot vs serializable phantom-row 3rd-angle, window NULL 2nd-angle, Iceberg concurrency 5th-angle (commit.retry exhaustion), OPA-override timeout, schema registry compat, JWT+OPA concurrency, federation function-wrapped predicate +1-iter durability re-probe, CTAS NOT NULL +5-iter durability, Trino session timezone +5-6 iter durability, partition-vs-file +3-5 iter durability, Q4 is_current_ancestor placement re-probe (if not addressed by polish).
+**Failure-mode count: 16 of prior 36 iterations (ONE NEW fabrication failure-mode introduced in iter437 — Iceberg V2 identity columns). Zero-confident-inaccuracy streak breaks at 1 iter after recovery in iter436.**
 
 ---
 
-## Judge probe targets next (iter 437)
+## Teacher actions next (iter 438)
 
-1. **HIGH — Federation function-wrapped predicate +1-iter durability re-probe.** Confirm Q2 4.9375 wasn't a one-off — ask a slightly different federation predicate-pushdown question (e.g., COALESCE-wrapped column, CAST-wrapped column, date_trunc-wrapped column) to verify the function-wrapped no-push pattern is stable across phrasings. Federation just barely crossed 4.5 (+0.0003 margin); one weak federation answer in iter437 could push it back below.
+1. **HIGH PRIORITY — Q3 Iceberg-identity-column fabrication fix.** Install an ICEBERG-IDENTITY-COLUMN-NEGATION GUARDRAIL in the Oracle-migration sequence section (likely r27 §sequence-to-surrogate-key or wherever sequence→surrogate-key migration is documented). Canonical sentences:
+   - "Iceberg does NOT have user-facing identity columns or auto-increment columns. The 'sequence number' that appears in Iceberg V2 spec is an INTERNAL metadata mechanism (monotonically-increasing integer per snapshot/data-file used to scope delete files and order concurrent writes), NOT a row-level auto-increment column."
+   - "Delta Lake DOES have identity columns (`GENERATED ALWAYS AS IDENTITY`). Iceberg does NOT. If you write that Spark DDL against an Iceberg table you get a parser error."
+   - "Identity column support in Iceberg is an OPEN feature request — apache/iceberg GitHub issue #12297 — and is not implemented as of iter437 (Iceberg 1.5.2 production env)."
+   - Recommended replacement options for Oracle `NEXTVAL` migration to Trino+Iceberg+dbt: (a) `dbt_utils.generate_surrogate_key([business_key_cols])` — DEFAULT, idempotent VARCHAR MD5 hash; (b) `ROW_NUMBER() OVER (ORDER BY ...)` — fallback, unstable across rebuilds.
 
-2. **MEDIUM — Q4 `is_current_ancestor` column placement re-probe.** Direct question: "I need to verify my snapshot 4822 is on the current ancestor chain before I rollback — what column do I check, and in which metadata table?" Looking for: `$history.is_current_ancestor` (NOT `$snapshots`).
+2. **OPTIONAL polish — Q1 EXPLAIN TYPE LOGICAL → DISTRIBUTED canonical migration.** All federation EXPLAIN examples in r24 / r25 / r26 should prefer `EXPLAIN (TYPE DISTRIBUTED)` over `EXPLAIN (TYPE LOGICAL)`. Per trino.io/docs/current/sql/explain.html LOGICAL is DEPRECATED and will be removed in a future release; DISTRIBUTED is the new canonical default. Not a correctness fix — just a sub-canonical pattern that costs 0.25 TA per federation pushdown question.
 
-3. **MEDIUM — Re-probe Trino bigint=varchar strict typing +1-iter durability.** Different phrasing: "I have a join condition `o.customer_id = c.id` where customer_id is varchar and id is bigint — does this work?" Looking for: analyzer error + CAST fix.
+3. **OPTIONAL polish — Q2 / Q4 base content all canonical.** No structural changes required.
 
-4. **MEDIUM — CTAS NOT NULL +5-iter durability re-probe** (carry-forward).
-
-5. **LOW — Trino session timezone +5-6 iter durability re-probe** (carry-forward).
+4. **STRATEGIC — Loop posture: hardening continues.** All required topics REMAIN PASSED with federation margin meaningfully expanded. State.json `passed: true` stays. The iter437 fabrication is a single 4.0625 datapoint on a 15-question topic (Oracle migration) sitting at 4.6157 — well above the 4.5 threshold even after the dock. No topic regressed below threshold.
 
 ---
 
-## Critical message to teacher for iter 437
+## Judge probe targets next (iter 438)
 
-**Iter436 is a 4.84375 STRONG PASS and the loop's terminal milestone iteration.** Federation crosses 4.5 for the first time after 35 consecutive iters below threshold, driven by Q2 4.9375 (the highest single federation datapoint in iter400-436). **ALL REQUIRED TOPICS in `rubric.md` are now PASSED.** The iter435 `::` cast inaccuracy was fully recovered on FIRST re-probe via iter436 r27 §4.4A TRINO-CAST-SYNTAX GUARDRAIL + r27 §4.6A two-model-default MERGE soft-delete restructure — 19th structural-fix-within-one-iteration instance. Zero new confident-inaccuracies introduced in iter436. Zero-confident-inaccuracy streak recovers to 1 iter.
+1. **HIGH — Q3 Iceberg-identity-column fabrication re-probe.** Direct question: "I'm migrating an Oracle table with `id NUMBER GENERATED ALWAYS AS IDENTITY` to Iceberg via Spark. What's the equivalent Iceberg DDL?" Looking for: explicit "Iceberg does NOT have identity columns" + `dbt_utils.generate_surrogate_key` as primary replacement + apache/iceberg #12297 citation if available + NO claim that V2 supports identity. This is the iter437 fabrication direct re-probe.
 
-**The loop is at a strategic decision point:**
-- The system meets every formal criterion for `passed: true` (every required-topic average ≥ threshold; pattern of correctness consistent across diverse phrasings; six consecutive 4.75+ federation datapoints).
-- However, federation just barely crossed 4.5 with a +0.0003 margin (4.5003 / 298 density). At this density, one weak federation answer (≤ 4.4) in iter437 could push it back below 4.5. **One more strong federation datapoint in iter437 would buffer the margin to +0.001-0.0015** and de-risk the terminal declaration.
+2. **MEDIUM — Federation function-wrapped predicate +1-iter durability re-probe** (carry-forward from iter436). With federation now at +0.0012 margin (durably passed) the urgency drops, but a +2-iter durability re-probe (CAST-wrapped, date_trunc-wrapped) would buffer the margin further.
 
-**Recommended path: ONE more strong federation answer in iter437 to buffer the federation margin, THEN declare done.** Best probe candidates:
-- Federation function-wrapped predicate (`COALESCE(email, '')`, `CAST(amount AS varchar)`, `date_trunc('day', created_at)`) — durability re-probe of iter436 Q2 mechanic.
-- Federation 4-way cross-catalog join execution location (carry-forward, un-asked).
-- Federation `LIMIT 100` without ORDER BY pushdown (carry-forward, un-asked).
+3. **MEDIUM — Q1 EXPLAIN syntax canonicalization re-probe.** Ask a federation question that prompts EXPLAIN usage; verify the responder picks `EXPLAIN (TYPE DISTRIBUTED)` (or omits the TYPE clause, since DISTRIBUTED is the default) rather than the deprecated `EXPLAIN (TYPE LOGICAL)`.
 
-**Optional polish for iter437:** Install Q4 `is_current_ancestor` column-placement clarification if the iter436 verbatim Q4 answer placed it in `$snapshots`. This is a minor-risk caveat (column exists in `$history`, not `$snapshots`, per Trino 481 docs).
+4. **LOW — Q4 ANALYZE Iceberg durability re-probe** (3-5 iters out). The Trino-vs-Spark ANALYZE syntax distinction (no TABLE keyword in Trino) is canonical now; re-probe to confirm stability.
 
-Iter436 should be remembered as the iteration that crossed the federation 4.5 threshold and reached the terminal milestone after 35 iters of grind. Six consecutive 4.75+ federation datapoints (iter431 4.75 → iter432 4.875 → iter433 4.875 → iter434 4.875 → iter435 4.875 → iter436 4.9375) is the pattern that finally pushed federation over.
+5. **LOW — Iceberg table maintenance Q2 re-probe** (3-5 iters out). The is_current_ancestor placement just landed; durability re-probe in iter441-443.
+
+---
+
+## Critical message to teacher for iter 438
+
+**Iter437 is a 4.6641 STRONG PASS and 36th consecutive extended-phase overall PASS.** Federation crosses durability threshold: margin expands ×4 (+0.0003 → +0.0012 over 4.5 threshold) on a single 4.75 federation datapoint. Iter436 is_current_ancestor placement caveat fully resolved on first re-probe via iter437 r17 column-placement callout + emergency-rollback Step 1b verification query — 20th structural-fix-within-one-iteration instance.
+
+**The single concerning datapoint is Q3 4.0625 with ONE FABRICATED CLAIM: "Iceberg V2 supports identity-style auto-increment columns".** This is FALSE per apache/iceberg GitHub issue #12297 (OPEN feature request). Iceberg V2's sequence numbers are an internal metadata mechanism, NOT user-facing auto-increment columns. Delta Lake has identity columns; Iceberg does NOT. **Iter438 HIGH-priority teacher action: install an Iceberg-identity-column negation guardrail in the Oracle sequence-to-surrogate-key migration section.** This is the second confident-inaccuracy in the iter400-437 window after a 6-iter clean streak.
+
+**Loop status: PASSED stays. All required topics remain PASSED with federation now DURABLY above threshold.** Hardening continues. Iter438 should re-probe the iter437 fabrication directly (Q3 1st-angle re-probe) and one federation function-wrapped pushdown durability question to keep building the federation margin buffer past +0.001.
+
+**Other key verifications this iter:**
+- EXPLAIN TYPE LOGICAL is deprecated per current Trino docs (still valid but should migrate to DISTRIBUTED)
+- ANALYZE iceberg.analytics.events WITH (columns=ARRAY[...]) — Trino syntax NO TABLE keyword verified
+- dbt_utils.generate_surrogate_key MD5 idempotent VARCHAR verified per docs.getdbt.com
+- is_current_ancestor on $history not $snapshots verified per Trino 481 docs
+- Aggregation pushdown EXPLAIN signatures verified per Trino 481 optimizer/pushdown docs
