@@ -1,74 +1,78 @@
-# Judge Feedback — Iter 431 (EXTENDED PHASE — end-of-iteration only)
+# Judge Feedback — Iter 432 (EXTENDED PHASE — end-of-iteration only)
 
-**Overall: 4.625 PASS** (Q1 4.9375 + Q2 4.75 + Q3 4.0 + Q4 4.8125) — **+0.156 step-UP from iter430 4.469**. Thirtieth consecutive overall PASS in extended phase. **TWO of the three deliberate re-probes RESOLVED CLEANLY** (Q1 CTAS NOT NULL + Q2 LIMIT-pushdown terminology); **ONE NEW confident-inaccuracy emerges in Q3** — the Trino session-property name `time_zone` does NOT exist (only the `SET TIME ZONE 'zone'` command form is valid). Zero-confident-inaccuracy streak does NOT recover (broken at 0 for the 3rd consecutive iter).
+**Overall: 4.6875 PASS** (Q1 4.9375 + Q2 4.875 + Q3 4.125 + Q4 4.8125) — **+0.0625 step-UP from iter431 4.625**. Thirty-first consecutive overall PASS in extended phase. **The deliberate Q1 timezone re-probe RESOLVED CLEANLY** on the first re-probe; **ONE NEW confident-inaccuracy in Q3** (is_incremental WHERE-clause example contains an invalid bare aggregate `OR load_date >= MAX(load_date)`). Zero-confident-inaccuracy streak still does NOT recover (broken at 0 for the 4th consecutive iter).
 
 ---
 
 ## Headline
 
-1. **Q1 CTAS-NOT-NULL re-probe — FULLY RESOLVED (4.9375 STRONG PASS).** Responder now correctly states "CTAS does NOT carry/preserve NOT NULL — types only" and gives the EXPLICIT 2-step pattern: `CREATE TABLE accounts_new (account_id BIGINT NOT NULL, company_id VARCHAR NOT NULL, ...) WITH (...)` then `INSERT INTO accounts_new SELECT ... FROM accounts` (fails fast on a NULL row), then DROP+RENAME swap. Includes "backfill first via UPDATE + verify zero nulls" prerequisite. Offers the dbt not_null test as the RECOMMENDED no-rewrite alternative (keeps time-travel intact). Cites r09 CTAS-NOT-NULL-INFERENCE GUARDRAIL. The iter430 confident-inaccuracy ("CREATE TABLE AS SELECT will have tier as NOT NULL") is fully absent. **iter431 r09 + r13 + §13.5A.5 14th GUARDRAIL landed precisely on the first re-probe.**
+1. **Q1 SET-SESSION-TIME_ZONE re-probe — FULLY RESOLVED (4.9375 STRONG PASS).** Responder now correctly states (a) "there is no `time_zone` session property; you cannot set it via `SET SESSION time_zone=...`", (b) PRIMARY recommendation is `SET TIME ZONE 'America/Chicago'` — the dedicated COMMAND form, session-scoped, doesn't persist across connections, must be re-issued every connection or in dbt pre_hook, (c) PREFERRED for dbt models is per-expression `AT TIME ZONE 'America/Chicago'` because pre_hook session state is fragile across multi-connection runs (idempotent + composable), (d) server-config alternative `sql.forced-session-time-zone` for cluster-wide overrides. Function mapping intact: SYSDATE → current_timestamp/localtimestamp (NOT current_date), with the "Chicago vs UTC cluster default" drift call-out. **Iter432 r27 TRINO-SESSION-TIMEZONE GUARDRAIL landed precisely on the first re-probe — the proven structural-fix-within-one-iteration recipe extends to 15 instances.**
 
-2. **Q2 plain-LIMIT terminology re-probe — TERMINOLOGY NOW CLEAN (4.75 STRONG PASS).** PRIMARY framing is now "Limit pushdown (distinct from TopN pushdown)" — leads with the correct term per trino.io/docs/current/optimizer/pushdown.html. Distinguishes Limit pushdown (plain LIMIT, no ORDER BY, "unsorted record" capability) vs Top-N pushdown (ORDER BY + LIMIT). EXPLAIN success signal: `limit=200` folded inside TableScan with no separate Limit operator above (CORRECT). EXPLAIN failure signal: separate `Limit[200]` operator above TableScan (CORRECT — not `TopN[...]` as iter430 had). No release-number assertion (responder follows the teacher's iter431 directive to stop at "supported by default in Trino 467" since neither release 354 nor 466 are verified for PG-connector LIMIT pushdown). **The 2-iter terminology streak is BROKEN; primacy fix landed.**
+2. **Q2 cross-catalog semi-join / dynamic filtering — STRONG PASS (4.875).** Responder cleanly explains (a) IN(SELECT) decorrelates into SemiJoin, explicit JOIN drives dynamic filtering, EXISTS decorrelates into semi/anti-join, (b) cross-catalog: PG accounts as build side feeds runtime predicate into lakehouse events probe — works across catalogs, (c) EXPLAIN good signal: `SemiJoin[e.account_id=a.id]` build side 200 rows, probe side events table, (d) EXPLAIN bad signal: `CorrelatedJoin` re-executes the subquery per row, (e) EXPLAIN ANALYZE VERBOSE shows `dynamicFilterSplitsProcessed` counter for splits pruned by the runtime filter, (f) cross-catalog caveat: PG connector statistics and pushdown affect CBO's join-side choice but the semi-join shape itself works. **Verified against trino.io/docs/current/admin/dynamic-filtering.html: semi-joins with IN conditions support dynamic filtering; `dynamicFilterSplitsProcessed` is reported in ScanFilterProject node stats in EXPLAIN ANALYZE.** No fabricated detail.
 
-3. **Q3 SYSDATE/SYSTIMESTAMP timezone — STRONG content + ONE NEW confident-inaccuracy (4.0 PASS).** The function-mapping core is CORRECT: SYSDATE → current_timestamp or localtimestamp (NOT current_date which drops the time component); SYSTIMESTAMP → current_timestamp; Oracle SYSDATE returns server-local time (no TZ) per docs.oracle.com (VERIFIED); Trino current_timestamp is session-TZ-aware (VERIFIED per trino.io/docs/current/functions/datetime.html). Excellent TRUNC(SYSDATE) ET vs CAST(current_timestamp AS DATE) UTC date-boundary gotcha. **HOWEVER**: cites `SET SESSION time_zone='America/New_York'` as a fix. **This session-property name does NOT exist in Trino.** Per trino.io/docs/current/sql/set-time-zone.html, the syntax is the dedicated `SET TIME ZONE 'America/New_York'` COMMAND (a separate statement form), not a session-property assignment. An engineer running `SET SESSION time_zone='...'` will get "Session property time_zone does not exist" / "Unknown session property". The correct fix line should be either `SET TIME ZONE 'America/New_York'` (command) or `sql.forced-session-time-zone` (server config property). Also: `localtimestamp` and `AT TIME ZONE 'UTC'` citations are CORRECT.
+3. **Q3 dbt incremental merge (Oracle MERGE INTO migration) — PASS with NEW confident-inaccuracy (4.125 PASS).** The dbt-trino mapping core is CORRECT: `incremental_strategy='merge'` + `unique_key='id'` generates `MERGE INTO ... WHEN MATCHED THEN UPDATE / WHEN NOT MATCHED THEN INSERT` (VERIFIED per docs.getdbt.com/docs/build/incremental-strategy + dbt-trino plugin docs). First run is CTAS; subsequent runs are MERGE on the delta. Gotcha that dupe unique_key triggers `MERGE_TARGET_ROW_MULTIPLE_MATCHES` is CORRECT (VERIFIED per trino.io/docs/current/sql/merge.html — MarkDistinct node detects multi-match). `on_schema_change='append_new_columns'` correct. Iceberg MERGE no flag — CORRECT (Iceberg connector supports MERGE natively). **HOWEVER:** the example is_incremental() WHERE delta is convoluted AND syntactically broken — `WHERE id IN (SELECT id FROM {{this}} WHERE load_date<CURRENT_DATE) OR load_date >= MAX(load_date)` contains a bare `MAX(load_date)` aggregate in a WHERE clause, which is INVALID SQL (aggregates not permitted in WHERE without a subquery wrapper). The canonical pattern is `WHERE load_date >= (SELECT MAX(load_date) FROM {{this}})`. The `IN (SELECT id ...)` for "rows that need updating" is overcomplicated for the standard append+merge pattern. An engineer pasting this template will get a Trino parse error like "aggregate function not allowed in WHERE clause".
 
-4. **Q4 $files small-file diagnosis — STRONG PASS (4.8125).** All claims verified: `content=0` filters to DATA files (CORRECT per trino.io/docs/current/connector/iceberg.html: `DATA(0)/POSITION_DELETES(1)/EQUALITY_DELETES(2)`); columns `file_size_in_bytes` and `record_count` (CORRECT); tiny-file query with size brackets; threshold heuristics (10k+ files median <5MB = urgent / <1000 files median >256MB = healthy); per-file open overhead ~1-5ms framing; fix `ALTER TABLE ... EXECUTE optimize(file_size_threshold => '128MB')` (VERIFIED syntax); `expire_snapshots(retention_threshold)` with Trino 7d floor (VERIFIED `iceberg.expire-snapshots.min-retention` default 7d) or Spark for sub-7d; weekly schedule.
+4. **Q4 NOT IN + NULL three-valued logic — STRONG PASS (4.8125).** All claims verified: (a) single NULL in the subquery → NOT IN result is UNKNOWN for every row → zero rows returned, not a Trino bug, all SQL engines behave this way per ANSI three-valued logic; (b) Verify diagnostic: `SELECT id FROM ... WHERE id IS NULL` to confirm NULLs are present; (c) Fix A: NOT EXISTS rewrite is NULL-safe, Trino decorrelates into an anti-semi-join shown as `SemiJoin` with `FilterMode=ANTI` in EXPLAIN; (d) Fix B: `WHERE id IS NOT NULL` filter in the subquery — works but fragile (one new NULL row reintroduces the bug); (e) correlated NOT EXISTS can be slower (LeftJoin + Aggregate plan shape) but non-correlated NOT EXISTS is comparable to NOT IN — CORRECT nuance. **Verified against trino.io/docs/current/functions/comparison.html and logical.html — NULL produces UNKNOWN, NOT IN follows standard nulls rules.**
 
 ---
 
 ## Critical confirmations (explicit)
 
-### (a) Q1 CTAS NOT NULL RE-PROBE — RESOLVED?
+### (a) Q1 Trino session timezone RE-PROBE — RESOLVED?
 
-**YES — FULLY RESOLVED.** The iter430 confident-inaccuracy "CREATE TABLE AS SELECT will have tier as NOT NULL" is absent. The answer correctly leads with "CTAS carries column types ONLY, not NOT NULL — newly-created columns are NULLABLE by default; an INSERT of NULL into the CTAS-result table will SUCCEED." Provides the explicit 2-step form `CREATE TABLE <new> (col TYPE NOT NULL, ...) WITH (...)` + `INSERT INTO <new> SELECT ... FROM <old>` (which fails fast if any row has NULL). Includes backfill-first UPDATE + verify-zero-nulls prerequisite. Mentions dbt not_null test as the RECOMMENDED no-rewrite alternative (preserves snapshot lineage / time-travel). Cites r09 CTAS-NOT-NULL-INFERENCE GUARDRAIL inline. **Per trino.io/docs/current/sql/create-table-as.html, CTAS has no column-list position for constraints — confirmed.** Verdict: iter430 inaccuracy fully resolved on first re-probe.
+**YES — FULLY RESOLVED.** Iter431 confident-inaccuracy (`SET SESSION time_zone='America/New_York'` invalid syntax) is FULLY ABSENT. Iter432 answer leads with: "Cannot use `SET SESSION time_zone=...` — that session property does NOT exist in Trino." Then enumerates the three VALID mechanisms in order: (1) `SET TIME ZONE 'America/Chicago'` — dedicated COMMAND statement, session-scoped, doesn't persist across connections, must be re-issued every connection; (2) `AT TIME ZONE 'America/Chicago'` — per-expression operator, idempotent, RECOMMENDED for dbt models because pre_hook session state is fragile across multi-connection runs; (3) `sql.forced-session-time-zone` — server config property for cluster-wide overrides (overrides per-session SET TIME ZONE). Function mapping intact: SYSDATE → current_timestamp or localtimestamp (NOT current_date — drops time component). Drift framing intact: ET-on-Oracle vs UTC-on-Trino default → 4-7h shift on TRUNC(SYSDATE) date boundaries. **Per trino.io/docs/current/sql/set-time-zone.html: SET TIME ZONE is a dedicated statement; the time zone is stored as a session property with LOWER precedence than `sql.forced-session-time-zone`; SET TIME ZONE LOCAL resets to initial session TZ — all corroborated.** **Verdict: iter431 inaccuracy fully resolved on first re-probe; iter432 r27 §4.2A TRINO-SESSION-TIMEZONE GUARDRAIL + DO-NOT-WRITE row banning `SET SESSION time_zone=...` landed precisely.**
 
-### (b) Q2 LIMIT pushdown TERMINOLOGY — CLEAN NOW? + federation average + direction + crosses 4.5?
+### (b) Q2 federation score + federation average + direction + crosses 4.5?
 
-**YES — TERMINOLOGY NOW CLEAN.** PRIMARY label is "Limit pushdown (distinct from TopN pushdown)" — the FIRST term out of the responder's mouth is "Limit pushdown", per the iter431 §13.5A.5 FIRST-WORD DIRECTIVE. The Limit-vs-TopN distinction is explicit: Limit pushdown = plain LIMIT N (no ORDER BY), "unsorted record" per optimizer/pushdown.html; Top-N pushdown = ORDER BY + LIMIT separate capability. EXPLAIN signals correct: success = `limit=200` inside TableScan, no separate Limit operator above (folded); failure = separate `Limit[200]` operator above TableScan (NOT `TopN[...]` — that would be the Top-N pushdown failure signal). No wrong release number cited — answer correctly stops at "supported by default on the PostgreSQL connector in Trino 467". The teacher's iter431 PRIMACY fix (hard rename inversion + FIRST-WORD directive + EXPLAIN signal correction + DO-NOT-WRITE banning "release 354 for LIMIT") landed.
+**Q2 score: 4.875 STRONG PASS** — second-highest federation datapoint in this 8-iter window.
 
 **Federation average update:**
-- Prior: 4.4929 × 292 = 1311.9268 sum
-- + Q2 4.75 = +4.75
-- New sum: 1316.6768
-- New count: 293
-- **New average: 1316.6768 / 293 = 4.4937**
+- Prior: 4.4937 × 293 = 1316.6541 sum
+- + Q2 4.875 = +4.875
+- New sum: 1321.5291
+- New count: 294
+- **New average: 1321.5291 / 294 = 4.4950**
 
-Distance to threshold: 4.5000 − 4.4937 = **0.0063 below 4.5**.
+Distance to threshold: 4.5000 − 4.4950 = **0.0050 below 4.5**.
 
-Compared to iter430:
-- Iter430: 4.4929, 0.0071 below threshold (DIRECTION DOWN −0.0010)
+Compared to iter431:
 - Iter431: 4.4937, 0.0063 below threshold (DIRECTION UP +0.0008)
-- **Net change: +0.0008 / 0.0008 CLOSER to threshold / 31st consecutive iter below threshold / DIRECTION REVERSED back to UP after iter430's reversal**
+- Iter432: 4.4950, 0.0050 below threshold (DIRECTION UP +0.0013)
+- **Net change: +0.0013 / 0.0013 CLOSER to threshold / 32nd consecutive iter below threshold / DIRECTION SUSTAINS UP for second consecutive iter after iter430 reversal**
 
-**Crosses 4.5?** NO — still 0.0063 below threshold. But the Q2 4.75 datapoint pushes the average UP after iter430's −0.0010 down move; the 2-iter terminology-mislabel streak (iter429+iter430) is broken; direction back to UP. At this density (293 datapoints) each Q2 datapoint moves the average ~+0.0009 per 0.25-point delta-above-topic-avg, so sustained 4.75+ federation answers would cross 4.5 in roughly 7-8 iters.
+**Crosses 4.5?** NO — still 0.0050 below threshold. But the closing pace ACCELERATES (+0.0008 → +0.0013) for the 2nd straight iter after iter430's dip. The Q2 4.875 datapoint is significantly above the topic average (+0.380) and the second-highest in recent memory. At this density (294 datapoints) each Q2 datapoint above topic-avg moves the average by roughly +0.0013 per 0.38 delta. **Sustained 4.75+ federation answers would cross 4.5 in roughly 4-5 iters at current density (vs the 7-8 estimate from iter431 — the closing pace is now faster).** Yes — score is 4.8+ (4.875). Direction continues UP. Does NOT cross 4.5 this iter.
 
 ### (c) Any NEW confident-inaccuracy across all four
 
-**YES — ONE new confident inaccuracy in Q3.** The `SET SESSION time_zone='America/New_York'` syntax is INVALID. Per trino.io/docs/current/sql/set-time-zone.html (verified via WebFetch), the only valid Trino syntax is:
-- Command form: `SET TIME ZONE 'America/New_York'` (or `SET TIME ZONE LOCAL` / `SET TIME ZONE INTERVAL '10' HOUR`)
-- Server config: `sql.forced-session-time-zone` (config property, not session property)
+**YES — ONE new confident inaccuracy in Q3.** The is_incremental() WHERE-clause example is syntactically broken:
 
-There is NO `time_zone` session property — an engineer running `SET SESSION time_zone='America/New_York'` will get "Session property time_zone does not exist" or similar error. This is a load-bearing PA penalty because the engineer will paste this line into a dbt pre_hook or a session-init script and the query will fail at runtime.
+```sql
+WHERE id IN (SELECT id FROM {{this}} WHERE load_date<CURRENT_DATE) OR load_date >= MAX(load_date)
+```
+
+Two problems:
+1. **Bare aggregate `MAX(load_date)` in WHERE clause is INVALID SQL.** Aggregates require either a subquery wrapper or appear in HAVING/SELECT. Per ANSI SQL and Trino: aggregate functions are not allowed in the WHERE clause of the same SELECT (they need a subquery). An engineer running this template gets a Trino parse error.
+2. **The logic is convoluted.** The canonical dbt incremental pattern is `WHERE load_date >= (SELECT MAX(load_date) FROM {{this}})` for append-style, or for late-arriving-data merge: `WHERE load_date >= DATE_ADD('day', -3, (SELECT MAX(load_date) FROM {{this}}))`. The `IN (SELECT id FROM {{this}} WHERE load_date<CURRENT_DATE)` clause for "rows that need re-evaluation" is unusual and would re-process every historic row — likely the OPPOSITE of the engineer's intent (which is to LIMIT scanned rows).
+
+**Net inaccuracy count this iter: 1 confident issue** (Q3 is_incremental WHERE delta example invalid + convoluted). Q1, Q2, Q4 all CLEAN.
 
 **The other Q3 claims are CORRECT and verified:**
-- SYSDATE → current_timestamp / localtimestamp (NOT current_date) — CORRECT (current_date returns DATE only, no time component)
-- current_timestamp is session-TZ-aware — CORRECT per trino.io/docs/current/functions/datetime.html
-- Oracle SYSDATE = OS server local time (no TZ, cannot be changed per session) — CORRECT per docs.oracle.com / juliandontcheff.wordpress.com Autonomous Database article
-- Oracle SYSTIMESTAMP = TZ-aware version of SYSDATE (TIMESTAMP WITH TIME ZONE) — CORRECT
-- TRUNC(SYSDATE) ET vs CAST(current_timestamp AS DATE) in UTC/PT can return different "today" — CORRECT date-boundary gotcha
-- localtimestamp / AT TIME ZONE 'UTC' usage — CORRECT
-- On-prem vs Trino timezone disagreement audit — CORRECT migration discipline
+- dbt-trino merge strategy generates MERGE INTO WHEN MATCHED/NOT MATCHED — VERIFIED per dbt-trino docs / Starburst lakehouse pipeline blog
+- unique_key='id' maps to ON-condition — CORRECT
+- First run CTAS, subsequent MERGE — CORRECT
+- Dupe unique_key fails Trino MERGE — CORRECT, error name `MERGE_TARGET_ROW_MULTIPLE_MATCHES` VERIFIED per trino.io/docs/current/sql/merge.html (MarkDistinct + is_distinct flag mechanism)
+- on_schema_change='append_new_columns' — CORRECT dbt option
+- MERGE on Iceberg no flag — CORRECT (Iceberg connector natively supports MERGE)
 
-**Net inaccuracy count this iter: 1 confident issue** (Q3 `SET SESSION time_zone` invalid syntax). Q1, Q2, Q4 all CLEAN.
+The function-mapping/MERGE-error-name core is INTACT — only the is_incremental WHERE-clause example template is broken.
 
-### (d) Q4 $files columns + optimize syntax verification
+### (d) Q4 NOT IN/NOT EXISTS plan-node verification
 
-VERIFIED per trino.io/docs/current/connector/iceberg.html (via WebFetch):
-- `$files` content column = "Type of content stored in the file" with `DATA(0) / POSITION_DELETES(1) / EQUALITY_DELETES(2)` — responder's `content=0` filter for data files is CORRECT.
-- `file_size_in_bytes` and `record_count` columns present — CORRECT.
-- `ALTER TABLE ... EXECUTE optimize(file_size_threshold => '128MB')` syntax — VERIFIED (named-arg rocket assignment, default 100MB).
-- `expire_snapshots(retention_threshold => '7d')` with `iceberg.expire-snapshots.min-retention` floor default 7d — VERIFIED.
-- Spark bypass for sub-7d retention — CORRECT (Spark Iceberg has no min-retention floor).
+VERIFIED per trino.io/docs:
+- NULL produces UNKNOWN per three-valued logic in `WHERE x NOT IN (NULL)` — CORRECT (functions/comparison.html and logical.html)
+- NOT EXISTS decorrelation into anti-semi-join — CORRECT (Trino optimizer rewrites correlated NOT EXISTS into a SemiJoin in anti mode)
+- `SemiJoin` operator with `FilterMode=ANTI` — CORRECT (Trino's anti-semi-join plan node)
+- Correlated NOT EXISTS slower (LeftJoin + Aggregate fallback when decorrelation fails) — CORRECT nuance
 
 All Q4 claims CONFIRMED. No inaccuracy.
 
@@ -76,75 +80,69 @@ All Q4 claims CONFIRMED. No inaccuracy.
 
 ## Per-question scoring
 
-### Q1 — CTAS NOT NULL re-probe (Lakehouse schema design)
+### Q1 — Trino session timezone change re-probe (Oracle migration)
 
 **Scores: 5.0 / 4.75 / 5.0 / 5.0 — avg 4.9375 STRONG PASS**
 
 What landed:
-- "CTAS does NOT carry/preserve NOT NULL — types only" — CORRECT, RESOLVED iter430
-- "New columns are NULLABLE; INSERT NULL into the CTAS result will SUCCEED" — CORRECT
-- Explicit 2-step pattern: `CREATE TABLE accounts_new (account_id BIGINT NOT NULL, company_id VARCHAR NOT NULL, ...) WITH (...)` + `INSERT INTO accounts_new SELECT ... FROM accounts` — CORRECT canonical
-- INSERT fails fast on a NULL row — CORRECT
-- DROP + RENAME swap — CORRECT
-- Backfill first via UPDATE + verify zero nulls before INSERT — CORRECT prerequisite
-- dbt not_null test as RECOMMENDED no-rewrite alternative (keeps time-travel) — CORRECT canonical workaround
-- Cites r09 CTAS-NOT-NULL-INFERENCE GUARDRAIL — teacher's 14th GUARDRAIL landed
+- "There is NO `time_zone` session property; `SET SESSION time_zone=...` is INVALID" — CORRECT, iter431 inaccuracy RESOLVED
+- PRIMARY: `SET TIME ZONE 'America/Chicago'` dedicated COMMAND form, session-scoped, doesn't persist across connections, re-issue every connection or in dbt pre_hook — CORRECT per trino.io/docs/current/sql/set-time-zone.html
+- PREFERRED for dbt models: `AT TIME ZONE 'America/Chicago'` per-expression operator (idempotent, composable across multi-connection runs) — CORRECT recommendation
+- Server config alternative: `sql.forced-session-time-zone` cluster-wide override (HIGHER precedence than SET TIME ZONE) — CORRECT
+- Drift framing: ET vs UTC default cluster TZ — CORRECT mental model
+- SYSDATE → current_timestamp/localtimestamp NOT current_date (drops time component) — CORRECT
+- Explicit rationale for dbt: pre_hook session state is fragile because multiple connections in a dbt run reset — CORRECT
+- Iter432 r27 §4.2A TRINO-SESSION-TIMEZONE GUARDRAIL cited inline — CORRECT discipline
 
-**Verdict:** STRONG PASS — full clean recovery on first re-probe. iter430 confident-inaccuracy fully absent.
+**Verdict:** STRONG PASS — full clean recovery on first re-probe. Iter431 confident-inaccuracy fully absent.
 
-### Q2 — Plain LIMIT pushdown (Trino federation re-probe)
+### Q2 — cross-catalog semi-join / dynamic filtering (Federation)
 
-**Scores: 4.75 / 4.75 / 4.75 / 4.75 — avg 4.75 STRONG PASS**
-
-What landed:
-- PRIMARY framing "Limit pushdown (distinct from TopN pushdown)" — CORRECT, FIRST-WORD DIRECTIVE landed
-- Limit pushdown = plain LIMIT N (no ORDER BY) per optimizer/pushdown.html — CORRECT
-- Top-N pushdown = ORDER BY + LIMIT, separate capability — CORRECT distinction
-- Postgres returns only 200 rows (not all 5M) — CORRECT behavior
-- EXPLAIN success: `limit=200` folded inside TableScan, no separate Limit operator above — CORRECT
-- EXPLAIN failure: separate `Limit[200]` operator above TableScan (NOT `TopN[...]`) — CORRECT
-- No release-number assertion (correctly omitted per iter431 directive — neither 354 nor 466 verified for PG-connector LIMIT pushdown) — CORRECT discipline
-- ORDER BY LIMIT also pushes (Top-N) but with sortOrder= annotation, different capability — CORRECT distinction
-
-**Verdict:** STRONG PASS — terminology now CLEAN, 2-iter mislabel streak broken.
-
-### Q3 — SYSDATE/SYSTIMESTAMP timezone (Oracle PL/SQL migration)
-
-**Scores: 3.25 / 4.75 / 3.5 / 4.5 — avg 4.0 PASS**
+**Scores: 5.0 / 4.75 / 5.0 / 4.75 — avg 4.875 STRONG PASS**
 
 What landed:
-- SYSDATE → current_timestamp or localtimestamp (NOT current_date which drops time) — CORRECT
-- SYSTIMESTAMP → current_timestamp — CORRECT (both TZ-aware in Trino)
-- Oracle SYSDATE returns OS server local time (no TZ, cannot change per session) — CORRECT per docs.oracle.com
-- Oracle SYSTIMESTAMP is TIMESTAMP WITH TIME ZONE (TZ-aware) — CORRECT
-- Trino current_timestamp is session-TZ-aware — CORRECT per trino.io/docs/current/functions/datetime.html
-- TRUNC(SYSDATE) ET vs CAST(current_timestamp AS DATE) UTC date-boundary gotcha — CORRECT mental model
-- localtimestamp + AT TIME ZONE 'UTC' usage — CORRECT
-- Audit every SYSDATE/TRUNC(SYSDATE) before migration — CORRECT discipline
-- On-prem servers have no canonical TZ; Spark vs Trino may disagree — CORRECT prod-env nuance
+- IN(SELECT) → SemiJoin operator — CORRECT
+- Explicit JOIN → dynamic filtering runtime predicate — CORRECT
+- EXISTS → decorrelated semi/anti-join — CORRECT
+- Works ACROSS catalogs: PG accounts feed runtime filter into lakehouse events scan — CORRECT
+- EXPLAIN good: `SemiJoin[e.account_id = a.id]` build 200 rows, probe events — CORRECT
+- EXPLAIN bad: `CorrelatedJoin` re-execs the subquery per row — CORRECT
+- EXPLAIN ANALYZE VERBOSE `dynamicFilterSplitsProcessed` counter for pruned splits — CORRECT per trino.io/docs/current/admin/dynamic-filtering.html
+- Cross-catalog CBO caveat: PG connector statistics quality + predicate pushdown shape can affect build-side choice — CORRECT, nuanced
+
+**Verdict:** STRONG PASS — clean, technically dense, no fabrication. Federation +0.0013 UP, direction sustains UP for 2nd straight iter.
+
+### Q3 — dbt incremental merge (Oracle MERGE INTO migration)
+
+**Scores: 3.75 / 4.5 / 3.75 / 4.5 — avg 4.125 PASS**
+
+What landed:
+- `incremental_strategy='merge'` + `unique_key='id'` config — CORRECT per dbt docs
+- dbt-trino generates MERGE INTO WHEN MATCHED UPDATE / WHEN NOT MATCHED INSERT — VERIFIED
+- First run CTAS, subsequent MERGE — CORRECT
+- Dupe unique_key triggers `MERGE_TARGET_ROW_MULTIPLE_MATCHES` Trino error — VERIFIED per trino.io/docs/current/sql/merge.html
+- `on_schema_change='append_new_columns'` — CORRECT
+- MERGE on Iceberg connector default no flag needed — CORRECT
+- is_incremental() WHERE delta is the engineer's responsibility — CORRECT pattern claim
 
 What is INACCURATE:
-- **`SET SESSION time_zone='America/New_York'`** — WRONG. There is NO `time_zone` session property in Trino. Per trino.io/docs/current/sql/set-time-zone.html (verified via WebFetch), the only valid forms are: (1) `SET TIME ZONE 'America/New_York'` command form (a dedicated statement), or (2) `sql.forced-session-time-zone` server config property. An engineer running `SET SESSION time_zone='...'` will get an error.
+- **is_incremental WHERE example: `WHERE id IN (SELECT id FROM {{this}} WHERE load_date<CURRENT_DATE) OR load_date >= MAX(load_date)`** — bare `MAX(load_date)` aggregate in WHERE clause is INVALID SQL (aggregates need subquery wrapper); the `IN (SELECT id ...)` clause is convoluted and would re-process every historic row (opposite of intent). Canonical pattern: `WHERE load_date >= (SELECT MAX(load_date) FROM {{this}})`. An engineer pasting this template gets a Trino parse error "aggregate not allowed in WHERE".
 
-**Verdict:** PASS but with new confident-inaccuracy. TA dock to 3.25; PA dock to 3.5 because the engineer following this line breaks at runtime. The function-mapping core (SYSDATE/SYSTIMESTAMP → current_timestamp/localtimestamp + TZ-awareness gotcha) is CORRECT — only the session-property invocation is wrong.
+**Verdict:** PASS but with new confident-inaccuracy. TA dock to 3.75; PA dock to 3.75 because the engineer following this is_incremental template breaks at runtime. The dbt-trino merge strategy core + MERGE_TARGET_ROW_MULTIPLE_MATCHES error name + on_schema_change all CORRECT — only the example delta-clause template is broken.
 
-### Q4 — $files small-file diagnosis (Iceberg table maintenance)
+### Q4 — NOT IN + NULL three-valued logic (SQL best practices)
 
 **Scores: 5.0 / 4.75 / 4.75 / 4.75 — avg 4.8125 STRONG PASS**
 
 What landed:
-- `$files content=0` filter for DATA files — CORRECT per trino.io/docs/current/connector/iceberg.html (DATA(0)/POSITION_DELETES(1)/EQUALITY_DELETES(2))
-- `file_size_in_bytes`, `record_count` columns — CORRECT
-- Tiny-file query (e.g., file_size_in_bytes < 10MB) — CORRECT diagnostic
-- Size-bracket distribution query — CORRECT remediation prep
-- Threshold heuristics 10k+ files median <5MB urgent / <1000 files median >256MB healthy — REASONABLE rule of thumb
-- Per-file open overhead ~1-5ms framing — CORRECT magnitude
-- Fix: `ALTER TABLE ... EXECUTE optimize(file_size_threshold => '128MB')` — VERIFIED named-arg syntax (default 100MB)
-- Then `expire_snapshots(retention_threshold)` with Trino 7d floor via `iceberg.expire-snapshots.min-retention` — CORRECT
-- Spark bypass for sub-7d retention — CORRECT
-- Weekly cadence — CORRECT operational cadence
+- Three-valued logic: single NULL in subquery → NOT IN result UNKNOWN for every row → zero rows — CORRECT
+- Not a Trino bug; all ANSI-SQL engines behave this way — CORRECT
+- Verify diagnostic: `SELECT id FROM ... WHERE id IS NULL` to confirm NULLs in subquery source — CORRECT
+- Fix A: NOT EXISTS rewrite is NULL-safe; Trino decorrelates into SemiJoin with FilterMode=ANTI — CORRECT
+- Fix B: `WHERE id IS NOT NULL` inside subquery — works but fragile (one new NULL row reintroduces the bug) — CORRECT
+- Correlated NOT EXISTS can be slower (LeftJoin + Aggregate plan fallback) but non-correlated NOT EXISTS is comparable to NOT IN — CORRECT performance nuance
 
-**Verdict:** STRONG PASS — all syntax verified, $files columns canonical.
+**Verdict:** STRONG PASS — all claims verified, plan-node names canonical.
 
 ---
 
@@ -152,10 +150,9 @@ What landed:
 
 | Topic | Before | After | Delta | Status |
 |---|---|---|---|---|
-| Lakehouse schema design | 4.5234 / 8 | 4.5694 / 9 | +0.0460 | PASSED (Q1 4.9375 above topic avg) |
-| Trino federation / cross-source connectors | 4.4929 / 292 | 4.4937 / 293 | +0.0008 | NEEDS WORK (0.0063 below 4.5 raised threshold; 31st consecutive iter below; DIRECTION REVERSED back to UP after iter430 down) |
-| Oracle PL/SQL → dbt + Trino SQL migration | 4.8125 / 8 | 4.7222 / 9 | −0.0903 | PASSED (Q3 4.0 below topic avg drags down; still well above 3.5) |
-| Iceberg table maintenance | 4.4479 / 96 | 4.4517 / 97 | +0.0038 | PASSED |
+| Oracle PL/SQL → dbt + Trino SQL migration | 4.7222 / 9 | 4.6875 / 11 | −0.0347 | PASSED (Q1 4.9375 above topic avg, Q3 4.125 below topic avg drags down; still well above 3.5) |
+| Trino federation / cross-source connectors | 4.4937 / 293 | 4.4950 / 294 | +0.0013 | NEEDS WORK (0.0050 below 4.5 raised threshold; 32nd consecutive iter below; DIRECTION UP for 2nd straight iter; pace accelerating) |
+| SQL query best practices for OLAP | 4.5369 / 34 | 4.5450 / 35 | +0.0081 | PASSED (Q4 4.8125 well above topic avg) |
 
 ---
 
@@ -163,43 +160,43 @@ What landed:
 
 | Q | Score | Topic | Verdict |
 |---|---|---|---|
-| Q1 | 4.9375 | Lakehouse schema design (CTAS NOT NULL re-probe) | STRONG PASS — iter430 confident-inaccuracy FULLY RESOLVED; explicit 2-step + dbt not_null alternative + r09 guardrail cited |
-| Q2 | 4.75 | Trino federation (plain LIMIT pushdown re-probe) | STRONG PASS — TERMINOLOGY CLEAN; "Limit pushdown" PRIMARY; correct EXPLAIN signals; no wrong release |
-| Q3 | 4.0 | Oracle PL/SQL migration (SYSDATE/SYSTIMESTAMP TZ) | PASS — function mapping CORRECT; NEW confident-inaccuracy: `SET SESSION time_zone=...` is invalid syntax |
-| Q4 | 4.8125 | Iceberg table maintenance ($files small-file) | STRONG PASS — all syntax verified, $files columns canonical |
+| Q1 | 4.9375 | Oracle migration (Trino session timezone re-probe) | STRONG PASS — iter431 confident-inaccuracy FULLY RESOLVED; `SET TIME ZONE 'zone'` command PRIMARY + AT TIME ZONE per-expr + sql.forced-session-time-zone + r27 GUARDRAIL cited |
+| Q2 | 4.875 | Trino federation (cross-catalog semi-join / dynamic filtering) | STRONG PASS — CLEAN; SemiJoin vs CorrelatedJoin EXPLAIN signals correct; dynamicFilterSplitsProcessed verified |
+| Q3 | 4.125 | Oracle migration (MERGE INTO → dbt incremental merge) | PASS — dbt-trino mapping core CORRECT; NEW confident-inaccuracy: is_incremental WHERE example bare aggregate `MAX(load_date)` invalid + convoluted |
+| Q4 | 4.8125 | SQL best practices (NOT IN + NULL three-valued logic) | STRONG PASS — three-valued logic CORRECT; NOT EXISTS anti-semi-join + FilterMode=ANTI canonical; performance nuance accurate |
 
-**Average 4.625 PASS — thirtieth consecutive overall PASS in extended phase; +0.156 step-UP from iter430 4.469.**
+**Average 4.6875 PASS — thirty-first consecutive overall PASS in extended phase; +0.0625 step-UP from iter431 4.625.**
 
 **Headline outcomes:**
-- Q1 CTAS NOT NULL re-probe — RESOLVED on first re-probe (4.9375 STRONG); iter430 confident-inaccuracy absent; 14th GUARDRAIL landed
-- Q2 LIMIT pushdown re-probe — TERMINOLOGY CLEAN (4.75 STRONG); FIRST-WORD DIRECTIVE landed; 2-iter mislabel streak broken
-- Q3 SYSDATE/SYSTIMESTAMP — STRONG content but NEW confident-inaccuracy (`SET SESSION time_zone=...` invalid Trino syntax); zero-confident-inaccuracy streak does NOT recover
-- Q4 $files small-file diagnosis — STRONG (canonical); all syntax verified
-- Federation 4.4929 → 4.4937 (+0.0008 UP, direction REVERSED back to UP after iter430 reversal; 31st consecutive iter below threshold; 0.0063 below)
-- Lakehouse schema design 4.5234 → 4.5694 (+0.0460 UP, Q1 4.9375 well above topic avg)
-- Oracle migration 4.8125 → 4.7222 (−0.0903 DOWN due to Q3 4.0 dragging)
-- Iceberg table maintenance 4.4479 → 4.4517 (+0.0038 UP marginal)
+- Q1 Trino session timezone re-probe — RESOLVED on first re-probe (4.9375 STRONG); iter431 confident-inaccuracy absent; 15th GUARDRAIL landed
+- Q2 cross-catalog semi-join / dynamic filtering — STRONG (4.875); EXPLAIN signals verified; cross-catalog applicability correct
+- Q3 MERGE→dbt incremental merge — STRONG mapping core but NEW confident-inaccuracy (is_incremental WHERE example: bare aggregate `MAX(load_date)` is invalid SQL + convoluted IN-subquery logic); zero-confident-inaccuracy streak does NOT recover
+- Q4 NOT IN+NULL — STRONG (canonical); three-valued logic + NOT EXISTS rewrite + FilterMode=ANTI all verified
+- Federation 4.4937 → 4.4950 (+0.0013 UP, direction sustains UP for 2nd straight iter; 32nd consecutive iter below threshold; 0.0050 below; closing pace accelerating)
+- Oracle migration 4.7222 → 4.6875 (−0.0347 DOWN due to Q3 4.125 dragging — but Q1 4.9375 also contributed positively)
+- SQL best practices 4.5369 → 4.5450 (+0.0081 UP marginal, Q4 4.8125 well above topic avg)
 
-**Failure-mode count: 11 of prior 27 iterations** (iter431 introduces 1 new failure-mode class: TRINO-SESSION-PROPERTY-NAME-INVENTION — the `time_zone` session-property assignment form is fabricated; only `SET TIME ZONE 'zone'` command + `sql.forced-session-time-zone` config exist).
+**Failure-mode count: 12 of prior 28 iterations** (iter432 introduces 1 new failure-mode class: DBT-IS-INCREMENTAL-AGGREGATE-IN-WHERE — the is_incremental WHERE example uses a bare `MAX(load_date)` aggregate without a subquery wrapper, plus an overcomplicated IN-subquery that reprocesses every historic row).
 
 ---
 
-## Teacher actions next (iter 432)
+## Teacher actions next (iter 433)
 
-1. **HIGH — Fix Q3 `SET SESSION time_zone` invalid syntax inaccuracy.** Install in r25 (Oracle migration) or r07 (Trino dialect) following the proven structural-fix pattern:
-   - Add a TRINO-SESSION-TIMEZONE GUARDRAIL: correct syntax is `SET TIME ZONE 'America/New_York'` (a dedicated COMMAND, not a session-property assignment) — cite trino.io/docs/current/sql/set-time-zone.html.
-   - DO-NOT-WRITE entry banning the phrasing `SET SESSION time_zone='...'` / `SET SESSION timezone='...'` — these session-property names DO NOT EXIST. The runtime error would be "Session property time_zone does not exist".
-   - Note the server-config alternative: `sql.forced-session-time-zone` (a server config property, not a per-session toggle).
-   - Add a Q-pattern matcher line: "if the question is 'how do I change Trino's session timezone', the answer is the command `SET TIME ZONE 'zone'` — NOT a SET SESSION property assignment."
-   - Cross-reference from r25 Oracle SYSDATE/SYSTIMESTAMP migration section so the next SYSDATE re-probe doesn't re-introduce the wrong syntax.
+1. **HIGH — Fix Q3 is_incremental() WHERE-clause invalid-aggregate inaccuracy.** Install in r25 (Oracle migration) or r28 (dbt incremental patterns) following the proven structural-fix recipe:
+   - Add a DBT-IS-INCREMENTAL-WHERE-CANONICAL-PATTERN GUARDRAIL: the canonical delta clause is `WHERE load_date >= (SELECT MAX(load_date) FROM {{this}})` — the subquery wrapper around the aggregate is REQUIRED. For late-arriving-data variants: `WHERE load_date >= DATE_ADD('day', -3, (SELECT MAX(load_date) FROM {{this}}))`.
+   - DO-NOT-WRITE entry banning bare aggregates in WHERE: `WHERE col >= MAX(col)` — invalid SQL, will trigger Trino parse error "aggregate not allowed in WHERE".
+   - DO-NOT-WRITE entry banning the convoluted `WHERE id IN (SELECT id FROM {{this}} ...) OR load_date >= ...` template — re-processes every historic row, defeats the purpose of incremental delta scanning.
+   - Worked example pair: (a) simple append-style WHERE delta, (b) merge-style WHERE delta with late-arriving lookback window.
+   - Q-pattern matcher: "if the question is 'what does my is_incremental() WHERE clause look like', the answer is `WHERE <partition_col> >= (SELECT MAX(<partition_col>) FROM {{this}})` with a SUBQUERY WRAPPER — NOT a bare aggregate."
+   - Cite docs.getdbt.com/docs/build/incremental-models for the canonical pattern.
 
-2. **LOW — Q1 CTAS-NOT-NULL-INFERENCE GUARDRAIL landed precisely.** No structural changes needed. Re-probe at +3-5 iter horizon to confirm durability.
+2. **LOW — Q1 TRINO-SESSION-TIMEZONE GUARDRAIL landed precisely.** No structural changes needed. Re-probe at +3-5 iter horizon to confirm durability.
 
-3. **LOW — Q2 §13.5A.5 LIMIT-vs-TopN PRIMACY landed precisely.** No structural changes needed. The FIRST-WORD DIRECTIVE + hard rename inversion + DO-NOT-WRITE for release 354 all held on the first re-probe.
+3. **LOW — Q2 federation cross-catalog semi-join + dynamic filtering** answered cleanly without resource gap. No structural changes needed.
 
-4. **MEDIUM — Federation topic** at 4.4937 / 0.0063 below threshold; 31st consecutive iter below. Direction REVERSED back to UP after iter430 dip. Sustained 4.75+ federation answers would cross 4.5 in roughly 7-8 iters at this density. Carry-forward angles still un-asked: HAVING pushdown 2nd-angle, function-wrapped predicate, 4-way cross-catalog join.
+4. **MEDIUM — Federation topic** at 4.4950 / 0.0050 below threshold; 32nd consecutive iter below. Direction sustains UP for 2nd straight iter; pace accelerating (+0.0008 → +0.0013). Sustained 4.75+ federation answers would cross 4.5 in roughly 4-5 iters at this density. Carry-forward angles still un-asked: HAVING pushdown 2nd-angle, function-wrapped predicate, 4-way cross-catalog join.
 
-5. **LOW — Carry-forward backlog (mostly unchanged from iter430-431)**:
+5. **LOW — Carry-forward backlog (mostly unchanged from iter431-432)**:
    - HMS→Nessie write-freeze
    - Snapshot vs serializable phantom-row 3rd-angle
    - Window NULL 2nd-angle
@@ -209,12 +206,14 @@ What landed:
    - JWT+OPA concurrency
    - Federation HAVING pushdown 2nd-angle
    - Federation function-wrapped predicate contrast (LOWER/COALESCE-wrapped column)
+   - CTAS NOT NULL +3-iter durability re-probe
+   - Iceberg schema evolution column-type widening
 
 ---
 
-## Judge probe targets next (iter 432)
+## Judge probe targets next (iter 433)
 
-1. **HIGH — Re-probe Trino session timezone change syntax** — to verify the new GUARDRAIL lands. A direct question: "How do I change my Trino session's timezone to America/Los_Angeles so SYSDATE-equivalent queries use the right wall clock?" — looking for: (a) `SET TIME ZONE 'America/Los_Angeles'` command form as PRIMARY, (b) explicit "this is a dedicated statement, NOT a `SET SESSION property=value` form" callout, (c) NO mention of a `time_zone` or `timezone` session property, (d) optional mention of `sql.forced-session-time-zone` server config alternative.
+1. **HIGH — Re-probe dbt is_incremental() WHERE delta clause** — to verify the new GUARDRAIL lands. A direct question: "My dbt incremental model needs to only scan new rows from a partitioned events table — what's the exact WHERE clause I put inside the is_incremental() block?" — looking for: (a) `WHERE load_date >= (SELECT MAX(load_date) FROM {{this}})` with subquery wrapper, (b) optional late-arrival lookback variant `DATE_ADD('day', -3, (SELECT MAX(load_date) FROM {{this}}))`, (c) NO bare aggregate `MAX(col)` in WHERE, (d) NO convoluted `IN (SELECT id FROM {{this}} ...)` template.
 
 2. **HIGH — Federation HAVING pushdown 2nd-angle** (carry-forward, still un-asked): "Does `HAVING SUM(amount) > 1000` after a GROUP BY push to Postgres?"
 
@@ -222,24 +221,26 @@ What landed:
 
 4. **MEDIUM — Federation 4-way cross-catalog join execution location** (extends the iter426 3-way angle): "Postgres dim + Iceberg fact + Iceberg dim + Postgres lookup — where does the join run, and what does EXPLAIN show for each TableScan?"
 
-5. **MEDIUM — CTAS NOT NULL durability re-probe** (+3 iter horizon): "I want to add a strict UNIQUE-ish constraint via CTAS-swap — walk me through the exact SQL."
+5. **MEDIUM — CTAS NOT NULL durability re-probe** (+3 iter horizon from iter431): "I want to add a strict NOT NULL via CTAS-swap — walk me through the exact SQL."
 
 6. **MEDIUM — Iceberg schema evolution column-type widening** (un-probed): INTEGER → BIGINT, REAL → DOUBLE, DECIMAL precision-widen — distinct from NOT NULL tightening.
 
-7. **LOW — Iceberg concurrency 5th-angle** (carry-forward): commit.retry.num-retries exhaustion behavior.
+7. **MEDIUM — Trino session timezone command re-probe** (+3-5 iter durability): "How do I make Trino's SYSDATE-equivalent return Chicago wall clock when the cluster default is UTC?" — verify SET TIME ZONE / AT TIME ZONE / forced-session config stay clean.
+
+8. **LOW — Iceberg concurrency 5th-angle** (carry-forward): commit.retry.num-retries exhaustion behavior.
 
 ---
 
-## Critical message to teacher for iter 432
+## Critical message to teacher for iter 433
 
-Iter431 is a strong step-UP PASS (4.625 vs iter430's 4.469) with two of three deliberate re-probes fully resolved (Q1 CTAS NOT NULL + Q2 LIMIT-pushdown terminology). The teacher's iter431 plan — adding the 14th GUARDRAIL (CTAS-NOT-NULL-INFERENCE) and strengthening §13.5A.5 PRIMACY with the FIRST-WORD DIRECTIVE + hard rename inversion + EXPLAIN signal correction + DO-NOT-WRITE for "release 354 for LIMIT" — landed precisely on the first re-probe. The proven structural-fix-within-one-iteration recipe extends to 14 instances.
+Iter432 is a strong step-UP PASS (4.6875 vs iter431's 4.625) with the deliberate Q1 timezone re-probe FULLY RESOLVED on the first re-probe. The iter432 teacher plan — installing the TRINO-SESSION-TIMEZONE GUARDRAIL in r27 §4.2A with explicit `SET TIME ZONE 'zone'` command primacy + DO-NOT-WRITE banning `SET SESSION time_zone=...` + worked 3-translation SYSDATE/ET example + AT TIME ZONE per-expression as the dbt-recommended preferred pattern — landed precisely on the first re-probe. The proven structural-fix-within-one-iteration recipe extends to 15 instances.
 
-**However, the zero-confident-inaccuracy streak does NOT recover.** A new failure-mode class emerges in Q3: the responder invents a `time_zone` Trino session property and recommends `SET SESSION time_zone='America/New_York'` — a syntactically valid-looking line that does NOT exist in Trino. Per trino.io/docs/current/sql/set-time-zone.html, the only valid forms are the `SET TIME ZONE 'zone'` COMMAND (a dedicated statement, NOT a session-property assignment) and the `sql.forced-session-time-zone` SERVER CONFIG property. The function-mapping core (SYSDATE → current_timestamp / localtimestamp / TZ-aware gotchas) is CORRECT — only the session-invocation line is wrong. **The teacher needs to install a TRINO-SESSION-TIMEZONE GUARDRAIL in r25 (or r07) banning `SET SESSION time_zone=...` and recommending the correct `SET TIME ZONE 'zone'` command form.**
+**However, the zero-confident-inaccuracy streak does NOT recover (now 4 consecutive iters).** A NEW failure-mode class emerges in Q3: the responder's is_incremental() WHERE example contains a bare `MAX(load_date)` aggregate in a WHERE clause — INVALID SQL (Trino parse error) — plus a convoluted `IN (SELECT id FROM {{this}} WHERE load_date<CURRENT_DATE)` clause that defeats the purpose of incremental scanning. The dbt-trino merge strategy mapping, `MERGE_TARGET_ROW_MULTIPLE_MATCHES` error name, and on_schema_change config are all CORRECT — only the example template is broken. **The teacher needs to install a DBT-IS-INCREMENTAL-WHERE-CANONICAL-PATTERN GUARDRAIL in r25 or r28 banning bare aggregates in WHERE and providing the canonical `WHERE load_date >= (SELECT MAX(load_date) FROM {{this}})` template with subquery wrapper.**
 
-**Federation topic moved +0.0008 UP to 4.4937**, now 0.0063 below threshold (31st consecutive iter below). Direction REVERSED back to UP after iter430's dip. The Q2 4.75 datapoint is well above topic avg and resumes the closing pace. With sustained 4.75+ federation answers, the topic could cross 4.5 in ~7-8 iters at this density.
+**Federation topic moved +0.0013 UP to 4.4950**, now 0.0050 below threshold (32nd consecutive iter below). Direction sustains UP for 2nd straight iter; closing pace ACCELERATES (+0.0008 → +0.0013). With sustained 4.75+ federation answers, the topic could cross 4.5 in ~4-5 iters at this density. Q2 4.875 is the second-highest federation datapoint in the recent window.
 
-**Iter432 should focus on:**
-(1) Add TRINO-SESSION-TIMEZONE GUARDRAIL with explicit command-form recommendation + DO-NOT-WRITE for `SET SESSION time_zone=...` (Q3 fix)
-(2) Re-probe Trino session timezone change syntax to verify the fix lands
+**Iter433 should focus on:**
+(1) Add DBT-IS-INCREMENTAL-WHERE-CANONICAL-PATTERN GUARDRAIL with explicit subquery-wrapper recommendation + DO-NOT-WRITE for bare aggregates in WHERE (Q3 fix)
+(2) Re-probe dbt is_incremental WHERE delta clause to verify the fix lands
 (3) Continue carry-forward federation HAVING pushdown / function-wrapped predicate angles to grind federation topic toward 4.5
-(4) CTAS NOT NULL and LIMIT pushdown both held; +3-iter horizon durability re-probes
+(4) Trino session timezone +3-5 iter durability re-probe

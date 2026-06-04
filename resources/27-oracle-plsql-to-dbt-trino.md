@@ -34,6 +34,7 @@ These are the absolutes most often stated incorrectly when an engineer with Orac
 | "Oracle `(+)` outer-join syntax is also valid in Trino." | **FALSE — `(+)` is Oracle-proprietary, parse error in Trino.** Rewrite to ANSI `LEFT JOIN` / `RIGHT JOIN` syntax. (Modern Oracle docs also recommend ANSI joins over `(+)`.) | [Trino SELECT - JOIN](https://trino.io/docs/current/sql/select.html#join-clause) |
 | "Oracle implicit `varchar` -> `number` coercion (`WHERE int_col = '42'`) works in Trino." | **FALSE — Trino is strict about types.** Comparing `int_col = '42'` (`bigint = varchar`) raises `TYPE_MISMATCH`. You must `CAST(int_col AS varchar) = '42'` or `int_col = CAST('42' AS bigint)`. Most Oracle PL/SQL written before ~2015 relies heavily on implicit coercion; expect to add explicit `CAST` calls everywhere. | [Trino types](https://trino.io/docs/current/language/types.html) |
 | "I should port my Oracle exception handlers (`EXCEPTION WHEN NO_DATA_FOUND THEN ...`) to dbt." | **FALSE — there is no exception block in dbt or Trino SQL.** The replacement is **dbt tests** (`not_null`, `unique`, `accepted_values`, `relationships`, plus custom singular tests) which run after the model builds and fail the run if violated. For "soft" guards inside a transformation (e.g., "if dim is missing, default to UNKNOWN"), use `COALESCE`, `CASE WHEN`, or `LEFT JOIN` with a NULL fallback. **DO NOT WRITE `EXCEPTION WHEN ...` in a dbt model.** | [dbt tests](https://docs.getdbt.com/docs/build/data-tests) |
+| "I can change Trino's session timezone with `SET SESSION time_zone = 'America/New_York'` (like PostgreSQL / MySQL)." | **FALSE — there is NO `time_zone` session property in Trino.** Running `SET SESSION time_zone = '...'` errors with "Session property time_zone does not exist". The valid forms are: (a) the dedicated **`SET TIME ZONE 'America/New_York'`** COMMAND (a separate statement form, NOT a `SET SESSION property = value` assignment); (b) `SET TIME ZONE LOCAL` / `SET TIME ZONE INTERVAL '-08:00' HOUR TO MINUTE`; (c) `sql.forced-session-time-zone` SERVER CONFIG property (cluster-level, overrides session); (d) `expr AT TIME ZONE 'zone'` per-expression. See **§4.2A TRINO-SESSION-TIMEZONE GUARDRAIL** for the worked SYSDATE/ET example. **DO NOT WRITE `SET SESSION time_zone = '...'` or `SET SESSION timezone = '...'` — both are invented syntax.** | [Trino SET TIME ZONE](https://trino.io/docs/current/sql/set-time-zone.html); [Trino datetime functions](https://trino.io/docs/current/functions/datetime.html) |
 
 > **Why these specific myths matter.** Each is a load-bearing translation that an engineer with Oracle muscle memory will write reflexively on day one — and each will either fail to parse (visible failure, easy to fix) OR silently change query results (invisible failure, hard to detect). The empty-string-is-NULL myth and the implicit-coercion myth are the two most dangerous because they don't produce a parse error: the migrated model runs, but the numbers no longer match the Oracle source. **Always diff a representative sample of rows between Oracle and Trino during cutover.**
 
@@ -187,8 +188,8 @@ These are the per-expression rewrites you'll do on almost every migrated SELECT.
 
 | Oracle | Trino | Notes |
 |---|---|---|
-| `SYSDATE` (current date + time, server time zone) | `current_timestamp` (timestamp with time zone, session TZ) OR `localtimestamp` (no TZ) | Beware: `SYSDATE` returns DATE-with-time in Oracle; `CURRENT_DATE` in Trino is just DATE (no time). Use `current_timestamp` for "now()" semantics. |
-| `SYSTIMESTAMP` | `current_timestamp` | Identical semantics. |
+| `SYSDATE` (current date + time, server time zone) | `current_timestamp` (timestamp with time zone, session TZ) OR `localtimestamp` (no TZ) | Beware: `SYSDATE` returns DATE-with-time in Oracle; `CURRENT_DATE` in Trino is just DATE (no time). Use `current_timestamp` for "now()" semantics. **NOTE: `current_date` drops the time component — do NOT use it as a SYSDATE replacement when you need hours/minutes/seconds.** See §4.2A for how to change the session time zone (it is NOT a `SET SESSION` property — it is a dedicated `SET TIME ZONE` command). |
+| `SYSTIMESTAMP` | `current_timestamp` | Identical semantics (both TZ-aware). Oracle `SYSTIMESTAMP` is `TIMESTAMP WITH TIME ZONE`; Trino `current_timestamp` is `timestamp with time zone` keyed on the session time zone. |
 | `TRUNC(dt)` (truncate to day) | `date_trunc('day', dt)` | Also `'week'`, `'month'`, `'quarter'`, `'year'`, `'hour'`, `'minute'`, `'second'`. |
 | `TO_DATE('2026-05-30', 'YYYY-MM-DD')` | `date_parse('2026-05-30', '%Y-%m-%d')` returning timestamp, OR `CAST('2026-05-30' AS DATE)` for ISO-8601 dates. | Trino's format strings use `%Y %m %d %H %i %s` (MySQL-style), NOT Oracle's `YYYY MM DD HH24 MI SS`. |
 | `TO_CHAR(dt, 'YYYY-MM-DD')` | `format_datetime(dt, 'yyyy-MM-dd')` returning varchar (Joda-time format), OR `CAST(dt AS varchar)`. | Trino's `format_datetime` uses Joda-style `yyyy MM dd HH mm ss`. |
@@ -199,6 +200,61 @@ These are the per-expression rewrites you'll do on almost every migrated SELECT.
 | `ADD_MONTHS(dt, 3)` | `dt + INTERVAL '3' MONTH` OR `date_add('month', 3, dt)` | Both work. |
 | `MONTHS_BETWEEN(d1, d2)` | `date_diff('month', d2, d1)` | Trino's date_diff returns bigint, not the Oracle-style fractional. |
 | `LAST_DAY(dt)` | `last_day_of_month(dt)` | Trino has it; just renamed. |
+
+### 4.2A TRINO-SESSION-TIMEZONE GUARDRAIL — `SET TIME ZONE` is a DEDICATED COMMAND, not a session-property assignment
+
+**Why this section exists.** When migrating Oracle SYSDATE / TRUNC(SYSDATE) / SYSTIMESTAMP code, engineers reflexively reach for a session-property-style toggle to "set the timezone for the session" — the same way they would in PostgreSQL (`SET timezone='America/New_York'`) or MySQL (`SET SESSION time_zone='+00:00'`). **Trino does NOT have a `time_zone` session property.** Writing `SET SESSION time_zone='America/New_York'` will fail at runtime with **"Session property time_zone does not exist"** (or "Unknown session property"). This is the #1 silent failure when porting SYSDATE-heavy Oracle procedures.
+
+**The three valid mechanisms in Trino — verified against [trino.io/docs/current/sql/set-time-zone.html](https://trino.io/docs/current/sql/set-time-zone.html) and [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html):**
+
+1. **`SET TIME ZONE 'zone'` — a DEDICATED STATEMENT** (NOT a session-property assignment). Examples:
+   - `SET TIME ZONE 'America/New_York'` — region-based identifier
+   - `SET TIME ZONE 'America/Los_Angeles'`
+   - `SET TIME ZONE '-08:00'` — UTC offset string
+   - `SET TIME ZONE LOCAL` — reset to the session's initial time zone
+   - `SET TIME ZONE INTERVAL '10' HOUR` — interval-based UTC offset (range −14 to +14 hours)
+   - `SET TIME ZONE INTERVAL -'08:00' HOUR TO MINUTE`
+   - `SET TIME ZONE concat_ws('/', 'America', 'Los_Angeles')` — dynamic expression returning a zone string
+   This affects subsequent `current_timestamp` and `localtimestamp` calls inside that session.
+
+2. **`sql.forced-session-time-zone` — a SERVER CONFIG PROPERTY** (cluster-level, in `etc/config.properties`, NOT a per-session toggle). When this is set on the server, the per-session `SET TIME ZONE` command has **no effect** — the cluster forces the time zone. This is typically used in production to enforce UTC across all queries regardless of client locale.
+
+3. **`expr AT TIME ZONE 'zone'` — per-expression conversion** for one specific timestamp without changing session state. Example: `current_timestamp AT TIME ZONE 'America/New_York'`, or `order_ts AT TIME ZONE 'UTC'`. Most production migrations prefer this over session-level toggling because it makes the conversion explicit at the call site.
+
+**Functions affected by the session time zone:**
+- `current_timestamp` — session-TZ-aware; returns `timestamp with time zone`
+- `localtimestamp` — session-local wall clock, **no TZ attached** (returns `timestamp` without TZ); precision 3 by default
+- `current_date` — session-TZ-aware day boundary
+- `current_time` — session-TZ-aware time-of-day
+
+**DO-NOT-WRITE callout (load-bearing):**
+
+> **There is NO `time_zone` session property in Trino — never write `SET SESSION time_zone = '...'`.** Use the `SET TIME ZONE 'zone'` command, the `sql.forced-session-time-zone` server property, or `AT TIME ZONE` per-expression. The phrasing `SET SESSION timezone = '...'` is also invalid (no such property either). PostgreSQL and MySQL muscle memory is the trap — Trino takes the dedicated-statement form instead.
+
+**Q-pattern matcher.** If the question is "how do I change Trino's session timezone" (or equivalently "Trino equivalent of PostgreSQL `SET timezone`" / "how do I get SYSDATE to use Eastern time"), the answer is the command **`SET TIME ZONE 'America/New_York'`** — NOT a `SET SESSION property = value` form. If the deployment forces a cluster-wide time zone, mention `sql.forced-session-time-zone`. If only one expression needs conversion, mention `AT TIME ZONE 'zone'`.
+
+**Worked example — porting Oracle SYSDATE to Trino with Eastern time semantics:**
+
+```sql
+-- Oracle (server has been deployed in ET; SYSDATE returns ET wall clock)
+SELECT TRUNC(SYSDATE) AS today_et FROM dual;
+
+-- Trino — three valid translations depending on cluster posture:
+
+-- (1) If the cluster time zone is already ET (or forced via sql.forced-session-time-zone='America/New_York'):
+SELECT date_trunc('day', current_timestamp) AS today_et;
+
+-- (2) If the cluster is UTC and you want ET for this session only:
+SET TIME ZONE 'America/New_York';   -- dedicated statement, NOT SET SESSION property=value
+SELECT date_trunc('day', current_timestamp) AS today_et;
+
+-- (3) Per-expression conversion (most explicit, recommended for dbt models):
+SELECT date_trunc('day', current_timestamp AT TIME ZONE 'America/New_York') AS today_et;
+```
+
+**Why option (3) is preferred for dbt models.** A dbt model that depends on session state (via `SET TIME ZONE` in a `pre_hook`) is fragile: different runners, different ad-hoc query tools, and the Trino UI may inject different defaults. Embedding `AT TIME ZONE 'America/New_York'` in the SELECT itself makes the conversion explicit, idempotent, and reviewable.
+
+**Cross-reference.** The on-prem-vs-cloud server-TZ audit discipline (Oracle SYSDATE returns OS server local time with no TZ attached; Trino is session-TZ-aware) is covered alongside this guardrail because the two reflexes — "set my session timezone" and "trust the server's clock" — co-occur in SYSDATE-heavy procedures.
 
 ### 4.3 String functions
 
@@ -842,6 +898,9 @@ The semantic difference: Oracle's GLOBAL TEMPORARY TABLE is session-scoped (gets
 - Trino Iceberg connector: https://trino.io/docs/current/connector/iceberg.html
 - Trino types: https://trino.io/docs/current/language/types.html
 - Trino functions and operators: https://trino.io/docs/current/functions.html
+- Trino datetime functions (current_timestamp / localtimestamp / AT TIME ZONE): https://trino.io/docs/current/functions/datetime.html
+- Trino SET TIME ZONE command: https://trino.io/docs/current/sql/set-time-zone.html
+- Trino properties reference (sql.forced-session-time-zone): https://trino.io/docs/current/admin/properties-general.html
 - dbt-trino configurations: https://docs.getdbt.com/reference/resource-configs/trino-configs
 - dbt materializations: https://docs.getdbt.com/docs/build/materializations
 - dbt incremental strategies: https://docs.getdbt.com/docs/build/incremental-strategy
