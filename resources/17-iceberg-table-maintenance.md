@@ -1899,6 +1899,30 @@ CALL iceberg.system.rewrite_manifests(
 
 > **READ THIS FIRST before writing any time-travel SQL.** Trino's Iceberg connector exposes time travel through **two distinct, non-interchangeable clauses**. They look similar at a glance — both start with `FOR ... AS OF` — but they take **different argument types** and a Trino parser will reject any mismatch. Engineers from Snowflake, Delta Lake, Spark, or Oracle backgrounds frequently produce a *welded* hybrid that "looks Trino-flavored" but parses as neither. Pasting the wrong form is the most common load-bearing time-travel fab in this stack.
 
+> **Q-PATTERN MATCHER (read FIRST if your question contains the words `branch`, `tag`, `named snapshot`, `$refs`, `Nessie`, or `Hive Metastore`).** The four common Q-patterns and their one-line answers:
+>
+> | Q-pattern keyword | One-line Trino 467 answer | Where the full answer lives |
+> |---|---|---|
+> | "Read from a **branch** / **tag** / **named snapshot** on HMS-backed Iceberg from Trino" | `SELECT * FROM iceberg.<schema>.<table> FOR VERSION AS OF '<branch_or_tag_name>';` (string literal) — **same clause as snapshot-id travel; the string-vs-BIGINT type tells Trino which to look up**. Works identically on HMS, REST catalog, JDBC catalog. | This section (the side-by-side table directly below, plus the `'2026-03-billing-close'` worked example in the cheat sheet). |
+> | "Do Iceberg branches / tags need **Nessie**?" | **No.** Branches and tags are TABLE-LEVEL Iceberg metadata (stored in `metadata.json`, listed in `"<table>$refs"`), catalog-agnostic per [iceberg.apache.org/docs/latest/branching/](https://iceberg.apache.org/docs/latest/branching/). Nessie adds CATALOG-LEVEL **multi-table** branch transactions — a different, separate feature. HMS-backed Iceberg supports single-table branches/tags fully. | This section + [resources/21 § Open-source REST catalog implementations XR REDIRECT](21-hive-metastore-iceberg.md#open-source-rest-catalog-implementations). |
+> | "Are branches / tags supported on **Hive Metastore**?" | **Yes, fully.** HMS just stores a pointer to `metadata.json`; the branches/tags live inside the `metadata.json`. Same answer for REST catalog and JDBC catalog. | Same as above. |
+> | "Can Trino CREATE / DROP a branch or tag?" | **No on Trino 467.** Ref-write DDL (`ALTER TABLE ... CREATE BRANCH/TAG`, `DROP BRANCH/TAG`, `fast_forward`) is Spark-only per [trinodb/trino #16570](https://github.com/trinodb/trino/issues/16570) (closed as NOT PLANNED). Trino 467 reads them only ([#16569](https://github.com/trinodb/trino/issues/16569) landed). Same answer regardless of catalog type. | This section + [§ Pinning billing-period snapshots with tags](#pinning-billing-period-snapshots-with-tags). |
+>
+> **Worked example for the #1 Q-pattern** (read a branch / tag from Trino 467 on HMS-backed Iceberg):
+>
+> ```sql
+> -- Trino 467 + Iceberg 1.5.2 — read from a named branch or tag on HMS-backed Iceberg.
+> -- 'audit-2026-q1' is the tag/branch NAME (string literal); Trino looks it up in $refs
+> -- and resolves to the snapshot the ref currently points at.
+> SELECT tenant_id, SUM(api_calls) AS calls
+> FROM iceberg.analytics.events
+> FOR VERSION AS OF 'audit-2026-q1'
+> WHERE billing_month = '2026-03'
+> GROUP BY tenant_id;
+> ```
+>
+> **No Nessie required. No HMS migration required. No external `branch_name -> snapshot_id` mapping table required.** The string literal IS the branch/tag name; Trino resolves it via the table's own `metadata.json` refs through whatever catalog (HMS / REST / JDBC) is configured.
+
 ### The two clauses, side by side
 
 Verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (Time travel queries section, Trino 467 + Iceberg 1.5.2):
@@ -1963,6 +1987,7 @@ Each row below has been seen in real responder output or in junior-engineer code
 | `SELECT * FROM events VERSION AS OF 4823511203987654321` | **Spark SQL syntax — missing the `FOR` keyword.** Same as above. | `FOR VERSION AS OF 4823511203987654321`. |
 | `SELECT * FROM events FOR SYSTEM_TIME AS OF TIMESTAMP '...'` | The SQL-standard `SYSTEM_TIME` form is informally **accepted by Trino's Iceberg connector** in some versions but the **documented canonical form is `FOR TIMESTAMP AS OF`** per trino.io/docs/current/connector/iceberg.html. Prefer the canonical form in new code so the example matches the docs page an engineer will read. | `FOR TIMESTAMP AS OF TIMESTAMP '...'`. |
 | `SELECT * FROM events FOR VERSION AS OF current_timestamp` | **A `TIMESTAMP`-typed expression passed to the snapshot-id clause.** Even though `current_timestamp` is a real function, the clause expects a BIGINT (or branch/tag name string) — not a TIMESTAMP. Parse error. | `FOR TIMESTAMP AS OF current_timestamp` (which is also rarely what you want — see "How FOR TIMESTAMP AS OF T actually resolves" below; prefer pinning a snapshot ID for audits). |
+| "Iceberg branches / tags require Nessie" / "branches / tags are not supported on Hive Metastore" / "you'd need to migrate to Nessie to read from a branch" / "named-snapshot refs are a Nessie-only feature" | **FABRICATED capability restriction (iter463 Q1 class — 2026-06-05 fab).** Iceberg branches and tags are **TABLE-LEVEL Iceberg metadata** stored inside the table's `metadata.json` file and readable via the `"<table>$refs"` metadata table. They are **catalog-agnostic** — fully supported on **Hive Metastore-backed Iceberg**, REST-catalog-backed Iceberg, and JDBC-catalog-backed Iceberg alike. Verified at [iceberg.apache.org/docs/latest/branching/](https://iceberg.apache.org/docs/latest/branching/) (Branching and Tagging listed under the **Tables** section, NOT under any catalog-specific section) and [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (`FOR VERSION AS OF '<branch-name>'` documented as supported on the Iceberg connector regardless of catalog type). **What Nessie ADDS** is a *separate* feature — **CATALOG-LEVEL multi-table branch transactions** (atomic branching across many tables at once); single-table branches/tags are NOT Nessie-only. | **HMS users CAN read branches/tags.** From Trino 467: `SELECT * FROM iceberg.<schema>.<table> FOR VERSION AS OF '<branch_or_tag_name>';` (string literal). Branch/tag DDL is Spark-only (the read/write split is Trino-vs-Spark, NOT a catalog matter): `ALTER TABLE ... CREATE BRANCH \`<name>\`` / `CREATE TAG \`<name>\` AS OF VERSION <snapshot_id>`. See [§ Pinning billing-period snapshots with tags](#pinning-billing-period-snapshots-with-tags) for the engine-by-engine breakdown. |
 
 ### Why this fab happens (muscle-memory map across engines)
 

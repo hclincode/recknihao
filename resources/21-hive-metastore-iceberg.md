@@ -331,12 +331,22 @@ The benefits for your stack:
 
 All of these can run on-prem in k8s and work with MinIO:
 
+> **XR REDIRECT — READING an Iceberg branch or tag from Trino on HMS-backed Iceberg? You do NOT need Nessie.** This is the most common load-bearing fab on this topic (iter463 Q1, 2026-06-05). Iceberg **branches and tags are TABLE-LEVEL Iceberg metadata** — they live inside the table's `metadata.json` file in MinIO and are listed in the `"<table>$refs"` metadata table. They are **catalog-agnostic**: fully supported on **Hive Metastore-backed Iceberg**, on REST-catalog-backed Iceberg, on JDBC-catalog-backed Iceberg, etc. The Apache Iceberg docs list "Branching and Tagging" under the **Tables** section at [iceberg.apache.org/docs/latest/branching/](https://iceberg.apache.org/docs/latest/branching/), NOT under any catalog-specific section.
+>
+> **What Nessie ADDS on top is a DIFFERENT, SEPARATE feature — CATALOG-LEVEL multi-table branch transactions** (atomic branching across MANY tables at once, "PR-style" data workflows that touch multiple tables in one ref). That is the *unique* Nessie value-add over HMS. **Single-table branches/tags are NOT a Nessie-only feature.**
+>
+> **How to READ a branch or tag from Trino 467 on HMS-backed Iceberg** — `SELECT * FROM iceberg.<schema>.<table> FOR VERSION AS OF '<branch_or_tag_name>';` (string literal name; the same `FOR VERSION AS OF` clause also accepts an unquoted BIGINT snapshot_id). The full canonical block — with the BIGINT-vs-string disambiguation table, the cross-dialect-spillover DO-NOT-WRITE matrix, and engine-by-engine muscle-memory map — is in [§ LEADING CANONICAL — Iceberg time travel on Trino 467 in resources/17-iceberg-table-maintenance.md](17-iceberg-table-maintenance.md#leading-canonical--iceberg-time-travel-on-trino-467-two-separate-clauses-not-interchangeable).
+>
+> **How branches and tags are CREATED on HMS-backed Iceberg** — from **Spark**, via `ALTER TABLE ... CREATE BRANCH \`<name>\`` and `ALTER TABLE ... CREATE TAG \`<name>\` AS OF VERSION <snapshot_id>` (Spark Iceberg DDL). **Trino 467 cannot create or drop branches/tags from any catalog type** (HMS, REST, or Nessie); ref-write DDL is Spark-only on Trino 467 per [trinodb/trino #16570](https://github.com/trinodb/trino/issues/16570) (request closed as NOT PLANNED). Trino 467 **CAN read** a branch / tag via the `FOR VERSION AS OF '<name>'` form above per [trinodb/trino #16569](https://github.com/trinodb/trino/issues/16569). Same engine-support matrix on HMS, REST catalog, and Nessie — the read/write split is a **Trino vs Spark** matter, NOT a catalog matter.
+>
+> Verified at [iceberg.apache.org/docs/latest/branching/](https://iceberg.apache.org/docs/latest/branching/) (Branching and Tagging under the Tables section, catalog-agnostic), [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (Time travel — `FOR VERSION AS OF '<branch-name>'` documented as supported on the Iceberg connector regardless of catalog type).
+
 | Implementation | Notes |
 |---|---|
 | **Apache Polaris** | Donated to ASF by Snowflake in 2024; first-class Iceberg REST catalog. Active community. Backed by a generic relational DB (Postgres works). |
 | **Lakekeeper** | Rust-based REST catalog. Lightweight; lower memory footprint than JVM-based options. Active development. |
 | **Apache Gravitino** | Broader metadata platform that includes a REST catalog for Iceberg plus catalogs for other systems. Heavier; choose if you want a unified metadata service across multiple data systems. |
-| **Project Nessie** | Git-style branching/tagging for Iceberg tables on top of REST catalog semantics. Choose if you want catalog-level branching (multi-environment isolation, "PR" workflows on data). |
+| **Project Nessie** | **CATALOG-LEVEL multi-table branch transactions** (atomic multi-table branching, "PR-style" workflows that touch many tables in one ref). Choose if you want catalog-level branching across many tables at once. **Note:** single-table branches and tags do NOT require Nessie — they are catalog-agnostic table-level Iceberg metadata available on HMS too (see XR REDIRECT above). |
 | **Tabular's catalog (now Databricks Unity Catalog OSS)** | Mature REST catalog, OSS edition available. Heavier dependency footprint. |
 
 For an on-prem k8s deployment that just wants to escape the HMS SPOF, **Polaris** or **Lakekeeper** are the simplest first steps — both are dedicated Iceberg REST catalogs without extra scope.
@@ -453,7 +463,7 @@ A re-platform that required moving data files (e.g., switching from Parquet to a
 | Situation | Recommendation |
 |---|---|
 | HMS HA is working, no Nessie-specific feature need | Stay on HMS. Migration cost > benefit. |
-| Need catalog-level branching (PR-style data workflows, "dev" branch for testing migrations) | **Migrate to Nessie** — branching is the unique feature Nessie offers over HMS. |
+| Need catalog-level **multi-table** branching (PR-style workflows that atomically branch many tables at once, "dev" branch spanning the entire warehouse) | **Migrate to Nessie** — multi-table catalog-level branch transactions are the unique feature Nessie offers over HMS. **NOT to be confused with single-table branches/tags**, which are TABLE-LEVEL Iceberg metadata available on HMS too — see the XR REDIRECT in [§ Open-source REST catalog implementations](#open-source-rest-catalog-implementations) above. |
 | Need multi-engine catalog (Trino + Spark + Flink + Dremio all hitting one HTTP API) | Migrate to a REST catalog — Nessie, Polaris, or Lakekeeper. Choice between them is operational preference. |
 | Frequent HMS outages from Postgres failover, HMS OOM, Thrift socket exhaustion | Migrate to a REST catalog. Eliminates the Thrift + Postgres operational pair. |
 

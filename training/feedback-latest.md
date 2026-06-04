@@ -1,122 +1,127 @@
-# Judge Feedback — Iter 463 (EXTENDED PHASE)
+# Judge Feedback — Iter 464 (EXTENDED PHASE, end-of-iteration)
 
-**Phase**: extended (end-of-iteration feedback only)
-**Date**: 2026-06-05
-**Overall: 3.656 THIN PASS** (62nd consecutive PASS in extended phase but the thinnest margin in many iters; Q1 is a TRUE FAIL on its own at 2.50 — only the strength of Q2/Q3/Q4 keeps the overall above the 3.5 floor.)
+## Overall
+- **Overall avg: 4.406 — PASS** (63rd consecutive extended-phase PASS).
+- **Per-question**: Q1 4.875 / Q2 4.75 / Q3 3.25 / Q4 4.75.
+- **Headline good news**: iter463 Q1 fabricated-capability-restriction class (branches/tags require Nessie / not native on HMS) FULLY RESOLVED at Q1 on first re-probe. r17 Q-PATTERN MATCHER + r21 XR REDIRECT LANDED at the keyword path.
+- **Headline gap**: NEW topic exposed at Q3 — dbt source freshness — not currently in `resources/`. Responder honestly hedged ("I don't have enough information to answer this well") which is the right behavior given the gap (preferable to confident fabrication), but the engineer is left without a usable answer.
+- **Fabrications detected**: ZERO. Iter464 introduces no new fab classes.
 
-## Per-question breakdown
+---
 
-| Q | Topic | Accuracy | Clarity | Completeness | Actionability | Avg | Verdict |
-|---|---|---|---|---|---|---|---|
-| Q1 | Iceberg time-travel — branch/tag read | 2.0 | 4.0 | 2.0 | 2.0 | **2.50** | **FAIL** |
-| Q2 | dbt incremental MERGE slowdown (MoR deletes) | 3.5 | 4.5 | 4.5 | 3.5 | **4.0** | PASS |
-| Q3 | Trino+Iceberg+MinIO cost justification vs Postgres | 4.5 | 4.0 | 3.0 | 3.5 | **3.75** | PASS |
-| Q4 | Oracle CONNECT BY → Trino WITH RECURSIVE | 4.0 | 4.5 | 4.5 | 4.5 | **4.375** | PASS |
+## Per-question scoring
 
-Overall: (2.50 + 4.0 + 3.75 + 4.375) / 4 = **3.656**
-
-## Fabrications + load-bearing inaccuracies
-
-### Q1 — TWO LOAD-BEARING FABRICATIONS + FINDABILITY MISS + REGRESSION (PRIMARY ISSUE THIS ITER)
-
-**FAB-1**: "the resources do NOT provide detailed syntax for named branches and tags"
-- **FALSE.** r17 (resources/17-iceberg-table-maintenance.md) has a full LEADING CANONICAL block (added iter462) covering:
-  - `FOR VERSION AS OF '<branch_or_tag_name>'` (string literal)
-  - The BIGINT-vs-string clause-disambiguation table
-  - The Snowflake / Delta / Spark / Oracle / BigQuery muscle-memory map
-  - Worked examples for audit-tag reads and WAP branch reads
-- Grep on r17 confirms multiple instances of `FOR VERSION AS OF '<branch-name>'` worked examples, including the explicit statement "Trino 467 cannot create or drop tags, but it CAN query a tagged snapshot using `FOR VERSION AS OF '<tag-name>'`."
-
-**FAB-2**: "With Hive Metastore, branches and named tags are NOT a native feature" / "they are a Project Nessie (REST catalog) feature" / "you'd need to migrate to Nessie"
-- **FALSE.** Iceberg branches/tags are a TABLE-LEVEL metadata feature stored in the Iceberg `metadata.json` and readable via the `$refs` metadata table — INDEPENDENT of the catalog.
-- Verified at iceberg.apache.org/docs/latest/branching/ — "Branching and Tagging" is listed under the **Tables** section across versions 1.9.x–1.11.x, NOT under any catalog-specific section.
-- Verified at trino.io/docs/current/connector/iceberg.html — both `FOR VERSION AS OF 8954597067493422955` (BIGINT) and `FOR VERSION AS OF 'historical-tag'` / `FOR VERSION AS OF 'test-branch'` (string name) are documented; no catalog-type restriction.
-- HMS-backed Iceberg supports branches/tags fully: Spark `ALTER TABLE ... CREATE BRANCH` / `CREATE TAG` writes them to `metadata.json`; HMS just keeps the pointer to that file. Nessie adds CATALOG-LEVEL multi-table branch transactions, which is a SEPARATE feature from TABLE-LEVEL branches/tags.
-
-**FINDABILITY MISS**: The correct answer IS in the resources. The responder's keyword search ('branch' + 'Nessie' + 'HMS') landed on r21 (HMS/Nessie interaction) instead of r17 (time-travel + branches/tags). The r17 LEADING CANONICAL block exists; the responder didn't reach it.
-
-**REGRESSION SIGNAL**: iter452/iter453 the responder correctly used `FOR VERSION AS OF '<branch>'` for branch reads. iter463 regressed and projected a fabricated catalog-level restriction onto a catalog-agnostic feature.
-
-**Impact on the engineer**: They either (a) waste weeks evaluating Nessie migration when their HMS already supports the feature, or (b) build a brittle external `branch_name → snapshot_id` mapping table by hand.
-
-### Q2 — LOAD-BEARING SYNTAX FAB (malformed `$files` quoting)
-
-Responder wrote `FROM iceberg.analytics.your_fact_table_here"$files"` — the double-quoted string starts AFTER `your_fact_table_here` instead of wrapping the entire `table$files` identifier.
-
-**Correct form** (per trino.io/docs/current/connector/iceberg.html and trinodb/trino PR #13026):
-`FROM iceberg.analytics."your_fact_table_here$files"` — the `$` requires the ENTIRE composite identifier `table$files` to live inside ONE pair of double quotes.
-
-**Consistency note**: iter462 Q3 used the correct form `iceberg.analytics."events$files"`. So this is a quoting drift, not a doc gap — but a load-bearing one: the responder's form fails to parse, so the very first diagnostic step the engineer would run on the production stack doesn't work.
-
-### Q3 — Double "I don't have enough information" hedge
-
-Two hedges in one answer undersell the answerable content (measure storage ratio + amortized Trino cluster $/hr + concurrency multiplier + EXPLAIN-driven CPU on representative queries). No fabrications, but the conclusion is hedged below what the resources actually support. Accuracy stays high (4.5); completeness docked to 3.0.
-
-### Q4 — MINOR VERSION-PIN + "EXPERIMENTAL" OVERSTATEMENT
-
-- "WITH RECURSIVE since release 343" — actually milestoned for release **340** per github.com/trinodb/trino/pull/4250 ("martint added this to the 340 milestone Aug 8, 2020"). Release 343 (25 Sep 2020) notes contain no recursive-CTE entry. Off-by-3 version pin; both are eight-year-old historical releases, so practical impact on a 467 stack is zero, but the citation is wrong.
-- "experimental" — WITH RECURSIVE is documented stable in trino.io/docs/current/sql/select.html with no experimental warning. "Fixed recursion depth + quadratic plan growth" are limitations but not "experimental" status.
-
-## Topic-row updates
-
-| Topic | Before | After | Delta | Driver |
-|---|---|---|---|---|
-| Iceberg table maintenance | 4.4961 / 123 | **4.4842 / 125** | −0.0119 | Q1 2.50 FAIL well below avg + Q2 4.0 slightly below avg (two-question hit) |
-| Cost considerations | 4.2079 / 18 | **4.1846 / 19** | −0.0233 | Q3 3.75 below avg (double-hedge) |
-| Oracle PL/SQL → dbt/Trino migration | 4.5895 / 36 | **4.5840 / 37** | −0.0055 | Q4 4.375 slightly below avg (minor version-pin + "experimental" overstatement) |
-| Improving complex SQL perf on Trino with dbt | 4.7781 / 4 | **4.7781 / 4** | unchanged | Q2 maps to maintenance/MoR-deletes topic, not the dbt-perf topic |
-| Trino federation / cross-source | 4.49944 / 310 | **4.49944 / 310** | unchanged | NOT probed per directive |
-
-## Concrete teacher actions for iter464
-
-### (1) PRIMARY — Q1 branch/tag-read findability fix
-
-The r17 LEADING CANONICAL block IS correct and complete; the problem is the responder didn't reach it. The fix is in cross-references and keyword anchoring, not new canonical content.
-
-**1a. Add an XR/redirect line at the top of r21's branches/tags section** (resources/21-hive-metastore-iceberg.md):
-```
-> **READING a branch or tag from Trino on HMS-backed Iceberg?** See r17 § "FOR VERSION AS OF '<branch_or_tag_name>'". Iceberg branches/tags are **TABLE-LEVEL metadata** stored in `metadata.json`, NOT a Nessie-only feature. HMS-backed Iceberg supports them fully — Spark writes them via `ALTER TABLE ... CREATE BRANCH/TAG`, Trino reads them via `FOR VERSION AS OF '<name>'`. Nessie adds **CATALOG-LEVEL multi-table branch transactions**, which is a SEPARATE feature from TABLE-LEVEL branches/tags.
-```
-
-**1b. Add a dedicated DO-NOT-WRITE row to r17's time-travel DO-NOT-WRITE table**:
-| DO NOT write | Why it's wrong | Correct form |
+### Q1 — Branch/tag READ on HMS RE-PROBE (iter463 Q1 fix verification)
+| Dim | Score | Justification |
 |---|---|---|
-| "Iceberg branches/tags require Nessie" / "branches/tags are not supported on Hive Metastore" / "you'd need to migrate to Nessie to use branches" | **FABRICATED capability restriction.** Branches and tags are TABLE-LEVEL Iceberg metadata stored in `metadata.json`, catalog-agnostic per iceberg.apache.org/docs/latest/branching/ (listed under Tables, not Catalogs). HMS-backed Iceberg supports them fully; Nessie's separate value is CATALOG-LEVEL multi-table branch transactions. | HMS users CAN use branches/tags. Spark writes via `ALTER TABLE ... CREATE BRANCH/TAG`; Trino reads via `FOR VERSION AS OF '<name>'`. |
+| Accuracy | 5.0 | All claims verified — branches/tags are TABLE-LEVEL Iceberg metadata.json content (catalog-agnostic), `FOR VERSION AS OF '<branch_or_tag_name>'` for string-name reads, `FOR VERSION AS OF 12345` for BIGINT snapshot reads, Spark-only DDL (`ALTER TABLE ... CREATE BRANCH/TAG`), Trino 467 reads-but-cannot-write (Trino-vs-Spark engine matter, NOT catalog matter), Nessie's separate value-add is catalog-level multi-table branch transactions. |
+| Clarity | 4.5 | Clear delineation between Nessie-only multi-table catalog branches vs table-level single-table branches/tags. |
+| Applicability | 5.0 | Engineer knows exact SQL syntax + which engine creates vs reads. |
+| Completeness | 5.0 | Covers read, create, Nessie carve-out, Trino-vs-Spark split. |
 
-**1c. Reinforce the keyword anchor in r17** — add a short paragraph near the top of the time-travel section: "**Q-pattern matcher**: 'How do I read from a branch / tag on HMS-backed Iceberg from Trino?' → `FOR VERSION AS OF '<branch_or_tag_name>'` (string literal). Works on Trino 467 + HMS. Branches/tags are TABLE-LEVEL Iceberg metadata, NOT catalog-level; do NOT need Nessie." This ensures the responder's keyword search 'branch read HMS Trino' lands here directly.
+**Avg: 4.875 STRONG PASS. Iter463 fab class FULLY RESOLVED on first re-probe. Streak status: FIXED, 1 PASS post-fix — needs another angle at iter465+ to lock across phrasings.**
 
-### (2) Q2 — quoting consistency audit
+Sources verified: iceberg.apache.org/docs/latest/branching/, trino.io/docs/current/connector/iceberg.html, trinodb/trino #16569 and #16570.
 
-Grep r17 + r28 + r16 (and any other file referencing metadata tables) for any `table"$files"` / `table"$snapshots"` / `table"$refs"` malformed forms. The correct uniform form is `"table$files"` / `"table$snapshots"` / `"table$refs"` (entire composite identifier inside ONE pair of double quotes). If any malformed examples exist, fix in place — do not just append a callout.
+### Q2 — Join distribution / shuffle wrong side
+| Dim | Score | Justification |
+|---|---|---|
+| Accuracy | 5.0 | All claims verified — bare `ANALYZE table_name` (no `TABLE` keyword), no query hints in Trino, `join_distribution_type` values PARTITIONED/BROADCAST/AUTOMATIC, `join_max_broadcast_table_size` default 100MB, `EXPLAIN (TYPE DISTRIBUTED)` is valid Trino 467. |
+| Clarity | 4.5 | Clear ordered levers. |
+| Applicability | 5.0 | Session SQL + dbt pre_hook recipe + EXPLAIN verification step. |
+| Completeness | 4.5 | All key levers + verification + dbt context covered. |
 
-### (3) Q3 — strengthen the concrete Trino-vs-Postgres comparison in r16
+**Avg: 4.75 STRONG PASS.**
 
-The responder hedged twice on the Postgres-vs-Trino CPU comparison even though the resources support a concrete answer. Add a short LEADING CANONICAL block in r16 with:
-- Storage ratio (Postgres on-disk vs Iceberg-Parquet+Zstd on MinIO, with the 5–10x anchor)
-- Amortized Trino-cluster $/hr (fixed) vs Postgres per-query CPU (scales with concurrency)
-- Concurrency-multiplier framing — how to compute break-even between fixed cluster cost and per-query DB cost
-- EXPLAIN-driven CPU profiling on representative queries (`split_cpu_time_ms` or equivalent from `system.runtime.tasks` — confirm exact column name from `DESCRIBE system.runtime.tasks` on the production stack)
+Sources verified: trino.io/docs/current/sql/analyze.html (bare ANALYZE syntax), trino.io/docs/current/optimizer/cost-based-optimizations.html (PARTITIONED/BROADCAST/AUTOMATIC + 100MB default), trino.io/docs/current/admin/properties-general.html.
 
-So the responder doesn't fall back to "I don't have enough information" when the question is well-defined.
+### Q3 — dbt source freshness (CONTENT GAP)
+| Dim | Score | Justification |
+|---|---|---|
+| Accuracy | 4.5 | The one substantive claim made ("typically checks a loaded_at timestamp") is accurate. Honest non-answer is NOT a fabrication. |
+| Clarity | 4.0 | Clear about knowledge boundary. |
+| Applicability | 2.5 | Engineer told to consult dbt docs; cannot act immediately. |
+| Completeness | 2.0 | Both sub-questions effectively unanswered (what it checks + does it block downstream). |
 
-### (4) Q4 — minor cleanup (low priority)
+**Avg: 3.25 THIN PASS (below 3.5 floor on completeness/actionability, content-gap classification).**
 
-Change "WITH RECURSIVE since release 343" → "WITH RECURSIVE since release 340 (Aug 2020)" in whatever resource the responder pulled this from. Drop the "experimental" framing — feature is stable, just has fixed recursion depth and quadratic plan growth.
+**Classification: CONTENT GAP, NOT fabrication.** Confirmed dbt source freshness is not covered in any existing `resources/` file. Per judge directive, an honest "I don't have enough information" when resources genuinely lack content is preferable to a confident fabrication — scored as incompleteness/actionability hit, NOT an accuracy hit.
 
-### (5) Breadth design for iter464
+For the teacher's reference, the correct facts the resources SHOULD support:
+- `freshness:` block under sources YAML with `loaded_at_field` (timestamp column name) + `warn_after: {count: N, period: hour/day}` + `error_after: {count: N, period: hour/day}`.
+- Invoked by `dbt source freshness` command (separate from `dbt run` / `dbt build`).
+- Adapter runs `SELECT MAX({{ loaded_at_field }}) FROM {{ source }}` and compares to current time.
+- A freshness FAILURE does NOT automatically block downstream models in a normal `dbt run` or `dbt build` — freshness is a SEPARATE command/build step, not a model dependency gate.
+- Opt-in node selector: `dbt build --select source_status:fresher+` to chain freshness to downstream model selection.
 
-Pick a NON-time-travel, NON-MoR-delete angle to test that the Q1 branch/tag-read fix doesn't crowd out other content. Candidates:
-- dbt macro syntax (e.g., adapter.dispatch, custom test macros)
-- Trino EXPLAIN-driven CPU profiling (ties to Q3 hedge fix)
-- Multi-tenant partitioning re-probe (older PASSED topic, hasn't been touched recently)
-- Postgres-to-Iceberg CDC (large topic with 158 datapoints, due for a re-probe)
+Sources to cite when writing the content: docs.getdbt.com/reference/resource-properties/freshness, docs.getdbt.com/docs/deploy/source-freshness, docs.getdbt.com/reference/commands/source.
 
-### (6) Federation — DO NOT PROBE in iter464
+### Q4 — Oracle `(+)` outer join → Trino
+| Dim | Score | Justification |
+|---|---|---|
+| Accuracy | 5.0 | All claims verified — `(+)` Oracle-proprietary (Trino parse error), `b.id(+)` = LEFT JOIN when `b` is the optional/null-filled side, `(+)` cannot express FULL OUTER (Oracle limitation), OR with `(+)` produces non-simple-join semantics, ON-vs-WHERE predicate placement matters. |
+| Clarity | 4.5 | Side-by-side mapping clear. |
+| Applicability | 5.0 | Row-count validation + ON-vs-WHERE caution + edge case. |
+| Completeness | 4.5 | Mapping + FULL OUTER restriction + OR edge case + predicate placement. |
 
-The 4.49944/310 row sits 0.001 below the 4.5 raised threshold. A thin probe in either direction locks or breaks the row depending on which side it lands. Skip federation in iter464 unless a specific bulletproofed angle emerges.
+**Avg: 4.75 STRONG PASS.**
 
-## Streak status
+Sources verified: docs.oracle.com/cd/B19306_01/server.102/b14200/queries006.htm, atlassian.com Oracle outer-join writeup.
 
-- **Citation-hygiene streak**: BROKEN at iter463. Iter463 introduces a NEW load-bearing fab class — **capability-restriction fab** (claiming Iceberg branches/tags require Nessie when they are catalog-agnostic table-level metadata). Distinct from prior cross-dialect-spillover (iter456, iter459) and version-pin / Trino-internal-clause-conflation (iter458, iter461) classes.
-- **Branch/tag-read regression**: iter452/iter453 correctly handled this; iter463 regressed. After iter464 reconciliation, MUST re-probe this exact angle in iter465+ to confirm the fix at the 2nd-angle bar.
-- **Margin**: VERY THIN at 3.656. The PASS is only the average — Q1's 2.50 is a TRUE FAIL on its own. Do not treat this iter as a clean pass.
+---
+
+## Fabrications / inaccuracies — NONE
+
+Iter464 is CLEAN. Zero fabrications across all four questions. No cross-dialect-spillover, no version-pin-spillover, no Trino-internal-clause-conflation, no fabricated-capability-restriction (iter463 class FIXED). All factual claims verified against trino.io, iceberg.apache.org, docs.oracle.com, and docs.getdbt.com.
+
+Honest "I don't have enough information" on Q3 is explicitly preferable to a confident fabrication — scored as content-gap incompleteness, NOT as fabrication.
+
+---
+
+## Teacher actions for iter465 (PRIORITY ORDER)
+
+### PRIMARY — dbt source freshness content (NEW topic, content gap)
+
+Create new resource file (or extend an existing dbt resource — there is no current dedicated dbt-sources file) covering:
+
+1. **Sources YAML structure**: `sources:` -> `tables:` -> per-table `freshness:` block with `loaded_at_field` (column name string) + `warn_after: {count: N, period: hour/day/minute}` + `error_after: {count: N, period: hour/day/minute}`.
+2. **The `dbt source freshness` command**: separate from `dbt run` / `dbt build`. Runs `SELECT MAX({{ loaded_at_field }}) FROM {{ source }}` via the adapter (dbt-trino in this stack), computes age, emits WARN/ERROR/PASS per source.
+3. **Downstream blocking semantics**: a freshness FAILURE does NOT block downstream models in a normal `dbt run` or `dbt build`. Freshness is a SEPARATE command/step, not a model dependency gate. This is intentional in dbt-core design.
+4. **Opt-in chaining**: `dbt build --select source_status:fresher+` is the explicit way to build models downstream of fresher sources only. `source_status:fresher+` is a node selector that requires a prior freshness run state file (`sources.json`) to compare against.
+5. **dbt-trino adapter specifics**: the freshness query is a vanilla `SELECT MAX(col)` so it works without dbt-trino-specific extensions; engineer should ensure the source table has a reliable monotonic load timestamp (Iceberg `_ingestion_ts` partition column or similar).
+6. **Worked example**: a `sources.yml` for an Iceberg-backed source table with `loaded_at_field: ingestion_ts`, `warn_after: {count: 12, period: hour}`, `error_after: {count: 24, period: hour}`, then the CLI invocation and a sample run output.
+7. **DO-NOT-WRITE row**: "dbt source freshness failure blocks downstream `dbt run`" — FALSE. Freshness is a separate command/step.
+
+Citations to embed: docs.getdbt.com/reference/resource-properties/freshness, docs.getdbt.com/docs/deploy/source-freshness, docs.getdbt.com/reference/commands/source.
+
+### SECONDARY — Findability for the new content
+
+Place keyword anchors so the responder routes correctly on:
+- `source freshness`, `freshness`, `loaded_at_field`, `warn_after`, `error_after`, `dbt source freshness command`, `does freshness block downstream`, `stale source detection`.
+
+Add a Q-PATTERN MATCHER block at the top of the new content (same style as r17's branch/tag matcher) so a Haiku keyword search on any of these terms lands directly on the canonical answer.
+
+### TERTIARY — Breadth design for iter465
+
+- Re-probe dbt source freshness immediately at iter465 to lock the new content at the 2nd-angle bar.
+- Consider one additional non-overlapping angle to verify the iter464 fixes don't crowd out other content. Candidates: Iceberg WAP workflow, Postgres-to-Iceberg JSONB handling, query-perf-regression triage on partition skew, dbt incremental materialization choice.
+- **NO dedicated federation probe** — the 4.49944/310 row sits 0.001 below the 4.5 raised threshold; a thin probe in either direction locks or breaks the row.
+
+### Q1 streak continuation
+
+iter463 fabricated-capability-restriction class is FIXED on first re-probe (streak 1 PASS post-fix). To lock the fix across phrasings, iter466+ could probe a different branch/tag angle — e.g., reading from `<table>$refs` metadata table, branch+time-travel interaction, WAP branch read pattern. Not urgent for iter465; the PRIMARY action is the new dbt source freshness content.
+
+---
+
+## Verification log (WebSearch / WebFetch this iter)
+
+- trino.io/docs/current/connector/iceberg.html — `FOR VERSION AS OF '<branch-name>'` and `FOR VERSION AS OF '<tag-name>'` string-literal form documented; BIGINT snapshot_id form also documented.
+- iceberg.apache.org/docs/latest/branching/ — "Branching and Tagging" listed under Tables section, catalog-agnostic.
+- trinodb/trino #16569 — branch/tag READ via FOR VERSION AS OF '<name>' (Trino 423+).
+- trinodb/trino #16570 — branch/tag WRITE closed as NOT PLANNED.
+- trino.io/docs/current/sql/analyze.html — bare `ANALYZE table_name` syntax confirmed (no `TABLE` keyword).
+- trino.io/docs/current/optimizer/cost-based-optimizations.html — `join_distribution_type` values PARTITIONED/BROADCAST/AUTOMATIC + `join_max_broadcast_table_size` default 100MB.
+- docs.getdbt.com/reference/resource-properties/freshness — `loaded_at_field`, `warn_after`, `error_after` schema.
+- docs.getdbt.com/docs/deploy/source-freshness — freshness is a separate command, downstream blocking is opt-in via `source_status:fresher+`.
+- docs.getdbt.com/reference/commands/source — `dbt source freshness` CLI.
+- docs.oracle.com/cd/B19306_01/server.102/b14200/queries006.htm — `(+)` operator semantics, the optional side gets NULLs, restrictions.
