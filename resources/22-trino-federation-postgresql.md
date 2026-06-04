@@ -2781,27 +2781,82 @@ For predictable, collation-independent case-insensitive matching that ALWAYS pus
 
 #### String range pushdown — the experimental flag and its caveats
 
-There is an experimental flag to enable string-range pushdown:
+There is an experimental flag to enable VARCHAR-range (and ILIKE) pushdown. **The flag has TWO NAMESPACES — catalog-config form and session-property form — and they are SPELLED DIFFERENTLY. Do not conflate them.** Verified per trino.io/docs/current/connector/postgresql.html ("...by setting the `postgresql.experimental.enable-string-pushdown-with-collate` catalog configuration property or the corresponding `enable_string_pushdown_with_collate` session property to true").
+
+**CANONICAL WORKED-EXAMPLE BLOCK — the two correct forms, side by side:**
 
 ```properties
+# (1) CATALOG CONFIG form — in etc/catalog/<catalog>.properties (set once; coordinator restart required).
+#     Dotted + hyphenated. INCLUDES the `experimental.` segment. NO catalog-name prefix
+#     (the catalog name is implicit from the .properties filename).
 postgresql.experimental.enable-string-pushdown-with-collate=true
 ```
 
-This adds a `COLLATE` clause to pushed-down range predicates so the comparison matches Trino's byte-wise semantics. The caveats:
+```sql
+-- (2) SET SESSION form — per-session toggle (no restart). Underscored.
+--     DOES NOT include `experimental_`. MUST be prefixed with your catalog name
+--     (substitute your actual catalog name for `app_pg` — e.g., `billing_pg`).
+SET SESSION app_pg.enable_string_pushdown_with_collate = true;
+```
+
+**Read the two forms side-by-side:**
+
+| Aspect | Catalog-config form | SET SESSION form |
+|---|---|---|
+| Where it lives | `etc/catalog/<catalog>.properties` | Runs interactively in a Trino client session |
+| Punctuation | Dots `.` between segments, hyphens `-` inside the last segment | Underscores `_` throughout |
+| Contains `experimental` segment? | **YES** — `postgresql.experimental.enable-string-pushdown-with-collate` | **NO** — session property is `enable_string_pushdown_with_collate` (no `experimental_` prefix) |
+| Catalog-name prefix? | **NO** — implicit from the filename (`postgresql.properties`) | **YES** — mandatory `<catalog>.` prefix (`app_pg.enable_string_pushdown_with_collate`) per Section 4.5 connector-session-property rule |
+| Restart required? | YES (coordinator restart after editing the .properties file) | NO (takes effect immediately for the current session) |
+
+**DO-NOT-WRITE banner — three FABRICATED / MANGLED forms that will fail with `Session property '...' does not exist`** (these are NOT valid session properties or catalog properties anywhere; do not paste these into a Trino client or properties file):
+
+| DO NOT WRITE (does not exist anywhere) | Why it's wrong |
+|---|---|
+| `SET SESSION postgresql.experimental_enable_string_pushdown_with_collate = true;` | **WRONG — combines the catalog-config name with the SET SESSION form.** Replaces the catalog-form dots/hyphens with underscores and keeps the `experimental_` segment. Result: a name that exists in NEITHER namespace. (This is the iter446 fabrication this section exists to ban.) |
+| `SET SESSION experimental_enable_string_pushdown_with_collate = true;` | **WRONG — missing the catalog-name prefix.** Connector session properties always require the `<catalog>.` prefix (see §4.5). Also, the session property does not carry the `experimental_` segment at all. |
+| `SET SESSION postgresql.experimental.enable_string_pushdown_with_collate = true;` | **WRONG — keeps the `.experimental.` segment in the SET SESSION form.** The session property does not include `experimental` at all (in any spelling). |
+| `SET SESSION app_pg.experimental.enable-string-pushdown-with-collate = true;` | **WRONG — pastes the catalog-config form into SET SESSION.** Session properties never use hyphens or dots inside the property name. |
+
+**Verify a session property exists before you trust it** — paste this into your Trino client first:
+
+```sql
+-- Lists every session property the PostgreSQL connector exposes for your `app_pg` catalog.
+-- If the property name you want appears in the `Name` column, it's safe to SET SESSION it.
+-- If it does NOT appear, you have a fabricated/mistyped name — Trino will reject the SET.
+SHOW SESSION LIKE 'app_pg.%';
+
+-- Expected hit when scanning for the string-pushdown toggle:
+--   app_pg.enable_string_pushdown_with_collate | false | false | boolean | Enable ...
+```
+
+When `SET SESSION app_pg.<property>` returns `Session property 'app_pg.<property>' does not exist`, the cause is almost always one of these three mistakes: (1) the property name was mangled (this section's DO-NOT-WRITE table), (2) the wrong catalog prefix, or (3) the property is from a different connector (e.g., `postgresql.experimental.enable-string-pushdown-with-collate` does NOT exist on the MySQL connector — see §2A.2).
+
+**Caveats for the flag itself** (apply to BOTH the catalog-config and SET SESSION forms — same underlying knob):
 - It requires a Postgres version with the right collation support.
 - It **can disable Postgres index usage** in some cases (collation mismatch with the existing index — Postgres can no longer use a default-collation index for a query that demands a different collation).
 - It is labeled **experimental**. **Test on a non-prod replica first.**
 - Don't enable it cluster-wide just because one query is slow — first try to fix that query (often by adding a more selective non-string predicate, or by switching the predicate to an equality on a denormalized column per the LIKE workaround above).
 
-**Session-level alternative (no coordinator restart required)**:
+**Recommended rollout pattern — session first, catalog later (no restart, fast feedback loop):**
 
 ```sql
-SET SESSION billing_pg.enable_string_pushdown_with_collate = true;
--- Now test your query with the flag enabled for this session only:
-EXPLAIN ANALYZE SELECT * FROM billing_pg.public.table WHERE text_col > 'M';
-```
+-- Step 1 — session-only test (NO restart, NO blast radius). Substitute your catalog name.
+SET SESSION app_pg.enable_string_pushdown_with_collate = true;
 
-The session property takes effect immediately for your current connection — no coordinator restart needed. Use this to test whether string pushdown helps before committing to the catalog-level property (which requires a coordinator restart). Substitute your actual Postgres catalog name (`app_pg`, `billing_pg`, etc.) for the `billing_pg.` prefix — this is a connector session property, so the catalog prefix is mandatory (see the connector-session-property rule in Section 5.4).
+-- Step 2 — re-run the query you want to fix, with EXPLAIN:
+EXPLAIN ANALYZE SELECT * FROM app_pg.public.table WHERE text_col > 'M';
+
+-- Step 3 — read the plan:
+--   * SUCCESS: `ScanFilterProject` (or standalone `Filter`) above the TableScan DISAPPEARS;
+--     the predicate is now inside the TableScan `constraint=`.
+--   * NO CHANGE: column collation may still block pushdown — re-check Postgres column collation.
+--
+-- Step 4 — ONLY if step 3 shows success AND you have measured no equality-pushdown regression
+--          on other queries, promote to the catalog form (requires coordinator restart):
+--          add `postgresql.experimental.enable-string-pushdown-with-collate=true`
+--          to etc/catalog/app_pg.properties and restart.
+```
 
 ### 3.3A Top-N pushdown — `ORDER BY ... LIMIT N` pushes down to PostgreSQL (CRITICAL — do not miss this)
 

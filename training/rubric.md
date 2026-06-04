@@ -30,7 +30,7 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Common analytical query patterns: aggregations, funnels, cohort, time-series | PASSED | 4.645 | 10 |
 | Schema design for analytics: denormalization, star schema basics | PASSED | 4.60 | 5 |
 | When to add an OLAP layer vs staying on the transactional DB | PASSED | 4.458 | 14 |
-| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.4549 | 147 |
+| Multi-tenant analytics: isolating customer data in SaaS | PASSED | 4.4505 | 148 |
 | Popular tools overview: BigQuery, Snowflake, ClickHouse, DuckDB, Iceberg | PASSED | 4.75 | 2 |
 | Real-time vs batch analytics trade-offs | PASSED | 4.771 | 6 |
 | Cost considerations for analytical workloads at SaaS scale | PASSED | 4.1088 | 15 |
@@ -44,9 +44,9 @@ Each topic must reach the pass threshold before the system can enter final phase
 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | PASSED | 4.5095 | 110 |
 | Query performance regression diagnosis: oncall workflow for slow queries — concurrency, partition skew, data model, file layout | PASSED | 4.2596 | 13 |
 | Trino federation / cross-source connectors (PostgreSQL connector, predicate pushdown, cross-catalog join limits, when to federate vs ingest) | FAIL | 4.49944 | 310 |
-| Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.7341 | 10 |
-| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.5726 | 40 |
-| Oracle PL/SQL procedure → dbt + Trino SQL migration: translating procedural constructs (cursors/loops, IF/THEN, temp tables, MERGE, sequences, exceptions) into set-based dbt models; Oracle-specific SQL/function rewrites for Trino dialect; incremental/materialization strategy choice | PASSED | 4.6407 | 22 |
+| Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | PASSED | 4.6618 | 11 |
+| SQL query best practices for OLAP: partition column in WHERE, avoid SELECT *, approximate functions, EXPLAIN verification, type-safe predicates, avoiding pushdown-breaking patterns | PASSED | 4.5739 | 41 |
+| Oracle PL/SQL procedure → dbt + Trino SQL migration: translating procedural constructs (cursors/loops, IF/THEN, temp tables, MERGE, sequences, exceptions) into set-based dbt models; Oracle-specific SQL/function rewrites for Trino dialect; incremental/materialization strategy choice | PASSED | 4.6371 | 23 |
 | Improving complex SQL performance on Trino with dbt: rewriting correlated subqueries/nested views/deep CTE chains, dbt materialization & incremental tuning, partition-aware predicates, join-order/broadcast & dynamic filtering, EXPLAIN-driven optimization of migrated queries | PASSED | 4.71875 | 2 |
 
 ---
