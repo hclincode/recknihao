@@ -167,7 +167,33 @@ When auditing legacy Oracle source for migration:
 > | "Trino defaults `NULLS LAST` for `ASC` and `NULLS FIRST` for `DESC`." | That is Oracle's rule projected onto Trino — the exact cross-dialect-spillover fab class iter456 / iter459 flagged. | Trino defaults `NULLS LAST` for both `ASC` and `DESC`. |
 > | "Trino's NULLS-default behavior matches Oracle's." | It does NOT. Oracle's default depends on direction; Trino's default does not. | The two engines disagree on `DESC` (Oracle puts NULLs first, Trino puts NULLs last). |
 > | "Trino follows ANSI SQL's default for NULLS ordering." | ANSI SQL leaves the NULLS-default **implementation-defined**. Trino chose `NULLS LAST` regardless of direction; Oracle chose a direction-dependent rule. Neither is "the ANSI default." | Trino's NULLS default is its own design choice (`NULLS LAST` for both directions); cite the Trino docs directly. |
+> | **"Trino (and standard SQL) defaults to `NULLS LAST`."** / **"Trino and standard SQL both default `NULLS LAST`."** | **The exact iter460 imprecision.** ANSI SQL is **silent / implementation-defined** on the NULLS default — only Trino is bound to `NULLS LAST`. Welding the words "Trino" and "standard SQL" together as if they share a default is wrong: each implementation picks its own. PostgreSQL defaults `NULLS LAST` for `ASC` / `NULLS FIRST` for `DESC` (same as Oracle); SQL Server treats NULLs as the lowest value (NULLs first on `ASC`, last on `DESC`) and does NOT support the `NULLS FIRST`/`LAST` syntax; Snowflake's default is **configurable** via `DEFAULT_NULL_ORDERING` (not a fixed engine constant). "Standard SQL" picks none of them. | "**Trino** defaults `NULLS LAST` regardless of direction **per the [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) docs**" — bind the claim to the Trino docs, NOT to "standard SQL." |
 > | "You don't need `NULLS FIRST` / `NULLS LAST` because Trino does the right thing by default." | Trino has a default, but "the right thing" is consumer-specific. A migration that relied on Oracle's `NULLS FIRST` DESC default will silently break unless the Trino target explicitly preserves it. | Always specify `NULLS FIRST` / `NULLS LAST` explicitly when migrating Oracle `ORDER BY`. |
+
+### Named callout — ANSI SQL does NOT pin a default for NULLS ordering
+
+> **CRITICAL — read before binding "Trino" and "standard SQL" together in the same sentence.**
+>
+> The SQL:2016 standard (ISO/IEC 9075) **does not specify** a default for NULLS placement in `ORDER BY`. The standard introduces the optional `NULLS FIRST` / `NULLS LAST` clause but leaves the default *implementation-defined*. This means:
+>
+> - **Trino's default = `NULLS LAST` regardless of direction** (per [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) verbatim).
+> - **Oracle's default = `NULLS LAST` for `ASC`, `NULLS FIRST` for `DESC`** (per docs.oracle.com — Oracle SQL Language Reference).
+> - **PostgreSQL's default = `NULLS LAST` for `ASC`, `NULLS FIRST` for `DESC`** (same shape as Oracle, per postgresql.org/docs/current/queries-order.html — verbatim: "By default, null values sort as if larger than any non-null value; that is, NULLS FIRST is the default for DESC order, and NULLS LAST otherwise.").
+> - **SQL Server's default = NULLs treated as lowest value** (so NULLs appear first on `ASC`, last on `DESC`); SQL Server does **NOT support the `NULLS FIRST` / `NULLS LAST` syntax** — workaround is `ORDER BY CASE WHEN col IS NULL THEN 0 ELSE 1 END, col` (per learn.microsoft.com).
+> - **Snowflake's default is configurable** via the `DEFAULT_NULL_ORDERING` parameter (default `FIRST`: NULLs first on `ASC`, last on `DESC`); the default itself can be changed at the account/session level — so even within Snowflake the "default" is not a fixed engine constant (per docs.snowflake.com/en/sql-reference/constructs/order-by).
+>
+> **There is no "ANSI default" or "standard SQL default" to fall back on.** When you cite a NULLS-ordering default, **you must name the specific engine** (Trino) and **point to its docs** — never write "Trino and standard SQL both default to NULLS LAST" or "Trino follows the SQL standard's NULLS default." Both phrasings are factually wrong.
+>
+> **Allowed phrasings (copy these):**
+> - "Trino defaults to `NULLS LAST` regardless of direction (per the Trino docs)."
+> - "Trino's NULLS default — defined by Trino, not by ANSI SQL — is `NULLS LAST` for both `ASC` and `DESC`."
+> - "Per [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html), Trino's default NULLS ordering is `NULLS LAST` regardless of the ordering direction."
+>
+> **Banned phrasings (do NOT write these):**
+> - "Trino (and standard SQL) defaults to `NULLS LAST`."
+> - "Trino and standard SQL both default `NULLS LAST`."
+> - "Trino follows the ANSI/SQL-standard NULLS default."
+> - "Per the SQL standard, NULLs go last by default."
 
 ### Cross-reference — this is the 3rd confirmed cross-dialect-spillover variant
 

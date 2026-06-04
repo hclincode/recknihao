@@ -6,7 +6,10 @@
 
 ## Quick answer (TL;DR)
 
-- **Sizing formula:** `raw row bytes × row count ÷ compression ratio = on-disk Parquet size`.
+- **Sizing formula (two equivalent forms — pick the one your inputs match):**
+  - **Total-form (use when you already know total raw bytes — e.g., from a CSV file size, `pg_total_relation_size`, or a `du -sh`):** `on_disk_iceberg_size ≈ total_raw_bytes ÷ compression_ratio`.
+  - **Per-row-form (use when you only know schema + row count):** `on_disk_iceberg_size ≈ avg_bytes_per_row × row_count ÷ compression_ratio`.
+  - The two forms are algebraically identical because `total_raw_bytes = avg_bytes_per_row × row_count`. **Never multiply `total_raw_bytes` BY `row_count` — that is the dimensionally-wrong double-count and yields nonsense (PB instead of GB).** See [§ DO-NOT-WRITE — banned forms of the sizing formula](#do-not-write--banned-forms-of-the-sizing-formula) below.
 - Typical Parquet compression for SaaS event data is **5–10x** (sometimes 20x+ for low-cardinality columns).
 - A 100M-row event table with ~200 bytes/row raw → ~2–4 GB compressed. Easily fits on a single MinIO node.
 - Iceberg metadata adds **~1–3%** overhead — negligible. Snapshot retention is the real growth driver — schedule `expire_snapshots` (Iceberg's `history.expire.max-snapshot-age-ms` default is 5 days, Trino's `iceberg.expire-snapshots.min-retention` floor is 7 days; many teams pick 30 days as an operator preference for a comfortable rollback window).
@@ -17,9 +20,79 @@
 
 ## The sizing formula
 
+There are **two equivalent forms** of the on-disk Iceberg sizing formula. Pick the one whose inputs you have. **Never mix them — multiplying total raw bytes by row count double-counts the rows.**
+
+### Form A — total-form (use when you have total raw bytes)
+
 ```
-on-disk size = (avg raw bytes per row × number of rows) ÷ compression ratio
+on_disk_iceberg_size ≈ total_raw_bytes ÷ compression_ratio
 ```
+
+Use this when you already know the total raw byte count — for example:
+- A CSV file's `ls -l` size (50 GB CSV → divide by compression ratio).
+- A Postgres heap size from `pg_total_relation_size('public.events')` minus index size.
+- A `du -sh` of an existing data directory.
+
+**Worked example (total-form): 50 GB raw CSV → Iceberg.**
+
+```
+total_raw_bytes      = 50 GB
+compression_ratio    = 7 (typical Parquet+Zstd for mixed SaaS event data)
+on_disk_iceberg_size ≈ 50 GB ÷ 7
+                     ≈ 7.1 GB
+```
+
+That's it. **Do NOT multiply by row_count.** The 50 GB CSV size already accounts for all the rows.
+
+### Form B — per-row-form (use when you only have schema + row count)
+
+```
+on_disk_iceberg_size ≈ avg_bytes_per_row × row_count ÷ compression_ratio
+```
+
+Use this when you're sizing a hypothetical or future table and you only know the column types and row count:
+- "200M events at ~200 bytes/row" — total raw is **derived** as the product.
+- A Postgres table you haven't yet measured but whose schema you know.
+
+**Worked example (per-row-form): 200M events at 200 bytes/row.**
+
+```
+avg_bytes_per_row    = 200 B
+row_count            = 200,000,000
+total_raw_bytes      = 200 B × 200,000,000 = 40 GB   (derived)
+compression_ratio    = 7
+on_disk_iceberg_size ≈ 40 GB ÷ 7
+                     ≈ 5.7 GB
+```
+
+### The two forms are algebraically identical
+
+Because `total_raw_bytes = avg_bytes_per_row × row_count`, substituting Form B's product into Form A gives Form B exactly:
+
+```
+on_disk_iceberg_size ≈ total_raw_bytes ÷ compression_ratio
+                     ≈ (avg_bytes_per_row × row_count) ÷ compression_ratio
+```
+
+**Pick the form your inputs match. Never write `total_raw_bytes × row_count` anywhere — that multiplies the rows in twice.**
+
+### DO-NOT-WRITE — banned forms of the sizing formula
+
+> | Banned form | Why it is wrong | Correct form |
+> |---|---|---|
+> | `on_disk ≈ total_raw_bytes × row_count ÷ compression_ratio` | **Double-counts rows.** `total_raw_bytes` is already `avg_bytes_per_row × row_count`. Multiplying by `row_count` again gives you `avg_bytes × row_count²` — for a 50 GB CSV with 100M rows you get ~700 PB (off by ~100M×). | Form A: `on_disk ≈ total_raw_bytes ÷ compression_ratio` |
+> | `on_disk ≈ raw_bytes × row_count ÷ compression_ratio` (where `raw_bytes` is total) | Same double-count error. The word "bytes" is ambiguous — be explicit whether you mean **per-row bytes** or **total bytes**. | Form A or Form B with the variable name spelled out |
+> | `on_disk ≈ avg_bytes_per_row ÷ compression_ratio` (forgot `× row_count`) | **Missing the row count.** This gives you the per-row size after compression, not the table size. For 200 B/row at 7x you'd compute ~28 bytes — that's per-row, not the table total. | Form B: `on_disk ≈ avg_bytes_per_row × row_count ÷ compression_ratio` |
+> | `on_disk ≈ row_count ÷ compression_ratio` (no bytes term) | Dimensionally nonsense — rows divided by a ratio is still rows, not bytes. | Form A or Form B |
+> | "Compression ratio measures bytes-per-row" | Compression ratio is **dimensionless** — it's the multiplicative reduction from raw to compressed (e.g., 7x means compressed is 1/7 of raw). | Compression ratio is dimensionless; multiply or divide accordingly. |
+
+**Dimensional sanity check (always run this before quoting a size):** the units of every term on the right side should multiply/divide to **bytes**.
+
+- `total_raw_bytes ÷ compression_ratio` → `bytes ÷ dimensionless` = **bytes**. ✓
+- `avg_bytes_per_row × row_count ÷ compression_ratio` → `(bytes/row) × rows ÷ dimensionless` = **bytes**. ✓
+- `total_raw_bytes × row_count ÷ compression_ratio` → `bytes × rows ÷ dimensionless` = **bytes·rows**. ✗ (extra `rows` factor)
+
+If your right-hand side does not reduce to plain `bytes`, you have a dimensional error. Fix the formula before quoting any number.
 
 ### Worked example: `user_events`
 

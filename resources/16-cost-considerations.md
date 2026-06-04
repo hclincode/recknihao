@@ -290,6 +290,81 @@ These are the absolutes most often stated incorrectly when an engineer asks "wha
 
 ---
 
+## LEADING CANONICAL COST WORKED EXAMPLE — "How do I find the most expensive single Trino queries (by CPU and bytes scanned) in the last 15 minutes?" (read this FIRST for single-query-cost questions)
+
+> **This is the findable canonical answer for the "expensive query" question, distinct from the per-tenant chargeback recipe above.** When an engineer asks "which queries are costing us the most?" they almost always mean: *which individual queries consumed the most CPU and scanned the most bytes?* — NOT a per-tenant rollup. Every column reference below has been verified against [trino.io/docs/current/connector/system.html](https://trino.io/docs/current/connector/system.html). Do NOT invent columns or per-query dollar amounts.
+>
+> **The framing problem (same as the per-tenant section above, repeated here for findability).** On this on-prem stack there is **NO per-query dollar charge** — Trino is open-source and the cluster cost is fixed 24/7. "Cost" of a single query therefore means **resource consumption**: CPU-seconds, peak memory, and physical bytes scanned. There is no native dollar field anywhere in `system.runtime.*`. If you want a dollar figure, derive it in your application layer as `cpu_seconds × $/vCPU-second` (see Step 3 below).
+>
+> ### The recipe — top-N most-expensive queries in the recent window
+>
+> ```sql
+> -- Trino 467 — top 20 most-expensive recent queries by CPU time.
+> -- The system.runtime.queries view holds queries currently running OR
+> -- in the in-memory history (default ~15 min / 100 queries, whichever first).
+> -- For longer windows, use the event listener (see Step 4).
+> SELECT
+>   q.query_id,
+>   q.state,
+>   q."user",                                              -- DOUBLE-QUOTE: bare `user` is the current_user builtin
+>   q.source,                                              -- where you injected X-Trino-Source: tenant_<id> or dashboard name
+>   substr(q.query, 1, 200) AS sql_preview,
+>   SUM(t.split_cpu_time_ms) / 1000.0  AS total_cpu_sec,   -- aggregate across tasks
+>   SUM(t.physical_input_bytes) / 1e9   AS gb_scanned,     -- physical bytes off MinIO
+>   COUNT(t.task_id)                    AS task_count
+> FROM        system.runtime.queries q
+> LEFT JOIN   system.runtime.tasks   t  ON t.query_id = q.query_id
+> WHERE       q.created > current_timestamp - INTERVAL '15' MINUTE
+> GROUP BY    q.query_id, q.state, q."user", q.source, q.query
+> ORDER BY    total_cpu_sec DESC
+> LIMIT       20;
+> ```
+>
+> **What this returns:** for each query in the recent window, the SQL preview, the user, the source tag, total CPU-seconds across all tasks, and total physical input bytes (data read off MinIO). Sort by either `total_cpu_sec` (CPU-bound) or `gb_scanned` (I/O-bound) depending on which axis you suspect is the cost driver. Both come from the same JOIN; switch the `ORDER BY`.
+>
+> ### Interpreting the output
+>
+> | Pattern | Likely cost driver | Fix in r18 / r24 |
+> |---|---|---|
+> | One query has 1000+ CPU-seconds, others have <10 | A single runaway query is the cost driver — investigate that query's plan with `EXPLAIN (TYPE DISTRIBUTED) <sql>` | r18 § runaway-query diagnosis |
+> | Many queries, each with high `gb_scanned` relative to result size | Missing partition pruning — engineers are scanning the full table when they could be scanning one day | r24 § partition pruning + `EXPLAIN (TYPE IO)` |
+> | `gb_scanned` is high but `total_cpu_sec` is low | I/O-bound (lots of bytes read, fast pass-through) — usually fine, but check if the result set is similarly sized | r18 § "high scan ratio" |
+> | `total_cpu_sec` is high but `gb_scanned` is low | CPU-bound — usually a complex JOIN or aggregation; check the plan for broadcast vs partitioned join | r28 § join-order tuning |
+>
+> ### Step 3 — convert to dollars (optional)
+>
+> Same derivation as the per-tenant section: derive `$/vCPU-second` from your cluster's fixed annual cost ÷ vCPU-seconds-available. For a 4-worker cluster (16 vCPU each, 64 vCPU total) costing $200k/year:
+>
+> ```
+> rate = $200,000 / (64 vCPU × 365 days × 86,400 sec/day)
+>      = $200,000 / 2,018,304,000 vCPU-sec
+>      ≈ $0.0000991 per vCPU-second
+>      ≈ $0.357 per vCPU-hour
+> ```
+>
+> A query with 100 CPU-seconds therefore costs ≈ `100 × 0.0000991 = $0.0099` of shared cluster work. **This is a derived attribution number, not a per-query bill** — Trino on-prem charges nothing per query.
+>
+> ### DO-NOT-WRITE — banned forms in the expensive-query checklist
+>
+> | DO NOT write this | What is wrong | The right answer |
+> |---|---|---|
+> | `SELECT query_id, cost_usd FROM system.runtime.queries ORDER BY cost_usd DESC` | `cost_usd` does NOT exist on `system.runtime.queries`. Invented from Snowflake/BigQuery vocabulary. | Use the recipe above — derive dollars from `cpu_seconds × $/vCPU-sec`, do not select a fabricated `cost_usd` column. |
+> | `SELECT * FROM system.runtime.queries ORDER BY total_bytes_scanned DESC` | `total_bytes_scanned` does NOT exist on `system.runtime.queries`. The actual column is `t.physical_input_bytes` on `system.runtime.tasks`. | `SUM(t.physical_input_bytes)` per query, JOIN `tasks` to `queries` on `query_id`. |
+> | `SELECT * FROM system.runtime.queries ORDER BY peak_memory_bytes DESC` | `peak_memory_bytes` does NOT exist on `queries` or `tasks`. Peak memory is in JMX MBeans (`trino.execution:name=QueryManager`). | Persist `QueryCompletedEvent` via event listener — the durable record has `metadata.queryStats.peakUserMemoryReservation`. |
+> | `SELECT q.cpu_time FROM system.runtime.queries q` | `cpu_time` is NOT a column on `queries`. CPU time is aggregated from `system.runtime.tasks.split_cpu_time_ms`. | Use the JOIN-to-tasks recipe; aggregate `split_cpu_time_ms` per `query_id`. |
+> | `EXPLAIN ANALYZE <query>` to find historical expensive queries | `EXPLAIN ANALYZE` runs the query to get actuals — it's a debugging tool for ONE query you're about to run, NOT a historical scan tool. It does not query past queries. | For history: `system.runtime.queries` (15 min) or the event-listener-persisted Iceberg table (long-term). |
+> | "The most expensive query is the one with the longest `elapsed_time`" | Elapsed time is wall-clock; a query that waited 10 minutes in the queue but ran for 1 second is NOT expensive — it's just blocked. | Sort by `total_cpu_sec` (work done) or `gb_scanned` (I/O done), not by `elapsed_time`. |
+> | `SELECT * FROM system.runtime.queries WHERE created > NOW() - INTERVAL '7' DAY` | The in-memory table evicts past ~15 minutes or ~100 queries — whichever first. A 7-day window is meaningless. | For >1h windows, configure event listener and query the persisted Iceberg observability table. |
+>
+> ### Cross-references for the expensive-query workflow
+>
+> - **Resource 18 §"`system.runtime.queries` — Actual Column Reference"** — full column list with the most-frequently-invented columns explicitly banned.
+> - **Resource 18 §"`system.runtime.*` is EPHEMERAL"** — event listener setup for durable history.
+> - **Resource 24 §"`EXPLAIN (TYPE IO)`"** — diagnose partition-pruning misses on the heavy queries this recipe finds.
+> - **Resource 28 §"join-order tuning"** — fix the CPU-bound heavy queries.
+
+---
+
 ## Three cost layers every SaaS engineer forgets
 
 When engineers think "analytics cost" they usually picture only #1. The big bills hide in #2 and #3.
