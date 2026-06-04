@@ -326,7 +326,18 @@ Engineers asking concurrent-write questions often surface a parallel question: *
 
 **Cross-references:**
 - The leading callout in [`resources/17-iceberg-table-maintenance.md` § 2. `expire_snapshots`](17-iceberg-table-maintenance.md#2-expire_snapshots--run-weekly) — the primary authoritative location with the full property semantics table (`min-snapshots-to-keep`, `max-snapshot-age-ms`, `max-ref-age-ms`, `history.expire.max-snapshot-age-ms` and what each one controls).
-- The WAP / branches section in [`resources/17` § Write-Audit-Publish (WAP) with Iceberg branches](17-iceberg-table-maintenance.md#write-audit-publish-wap-with-iceberg-branches) — the canonical use case for protective branches.
+- The WAP / branches section in [`resources/17` § Write-Audit-Publish (WAP) with Iceberg branches](17-iceberg-table-maintenance.md#write-audit-publish-wap-with-iceberg-branches) — the canonical use case for protective branches AND the canonical Spark branch-DDL & write-syntax reference card.
+
+> **POINTER — if asked about exact Spark SQL for writing to / promoting a branch, use the canonical reference card in [`resources/17` § ENGINE CALLOUT / Branch-DDL reference card](17-iceberg-table-maintenance.md#write-audit-publish-wap-with-iceberg-branches), NOT invented forms.** Verified against [iceberg.apache.org/docs/latest/spark-writes/](https://iceberg.apache.org/docs/latest/spark-writes/) + [spark-procedures/](https://iceberg.apache.org/docs/latest/spark-procedures/):
+> - **CREATE / DROP branch (Spark DDL):** `ALTER TABLE <cat>.<db>.<table> CREATE BRANCH \`<name>\` [AS OF VERSION <snapshot_id>] [RETAIN <n> DAYS]` / `ALTER TABLE ... DROP BRANCH \`<name>\``.
+> - **WRITE to branch (Spark — TWO forms):** (i) suffix on identifier: `INSERT INTO <cat>.<db>.<table>.branch_<name> VALUES (...)` (the `branch_` prefix is required, also works for UPDATE/DELETE/MERGE); (ii) WAP session conf: `SET spark.wap.branch=<name>;` then plain `INSERT INTO <cat>.<db>.<table> VALUES (...)`.
+> - **PUBLISH branch to main (Spark):** `CALL <cat>.system.fast_forward('<db>.<table>', 'main', '<branch>')` — a PROCEDURE call, NOT a DDL statement.
+> - **Trino 467 (READ-ONLY):** `SELECT ... FROM <table> FOR VERSION AS OF '<branch_name>'`. Cannot create / write / publish / drop branches.
+>
+> **DO-NOT-WRITE (FABRICATED — these fail to parse):**
+> - `INSERT INTO <table> (BRANCH '<name>') VALUES (...)` — there is NO `(BRANCH '...')` parenthesized clause.
+> - `MERGE BRANCH <name> INTO main` / `ALTER TABLE ... MERGE BRANCH ... INTO main` — no `MERGE BRANCH` DDL; use the `fast_forward` procedure.
+> - Any Trino-side `CALL iceberg.system.create_branch / fast_forward / drop_branch` — Spark-only on this stack.
 
 ---
 

@@ -1,170 +1,164 @@
-# Judge Feedback — Iter 442 (EXTENDED PHASE — end-of-iteration only)
+# Judge Feedback — Iter 443 (EXTENDED PHASE — end-of-iteration only)
 
-**Overall: 3.859 PASS** (Q1 4.6875 + Q2 2.4375 + Q3 4.875 + Q4 3.4375) — **+0.093 step-UP from iter441 3.766; federation BUFFER recovers marginally (+0.0020 → +0.0026); Q3 LISTAGG ON OVERFLOW RESOLVED; BUT Q2 EXPLAIN TYPE VALIDATE STILL MISSED with NEW `EXPLAIN ANALYZE (ANALYZE false)` fabrication; Q4 introduces NEW Spark branch DDL fabrications (INSERT INTO ... (BRANCH 'x') + MERGE BRANCH x INTO main are NOT real Iceberg-Spark syntax).**
+**Overall: 4.461 PASS** (Q1 4.875 + Q2 3.3125 + Q3 4.78125 + Q4 4.875) — **+0.602 step-UP from iter442 3.859; Q1 EXPLAIN TYPE VALIDATE+TYPE IO REPEAT FAILURE FINALLY RESOLVED after 3 consecutive iters (r22 §3.4 cross-resource findability fix LANDED); Q2 BRANCH DDL fabrications fixed (no fake `(BRANCH 'x')`, no fake `MERGE BRANCH`) BUT TWO NEW CONFIDENT-INACCURACIES emerge on the syntax-detail layer (branch-name/suffix mismatch + fast_forward arg-order REVERSED); Q3 dynamic filtering federation BUFFER STRONG (4.78125, +0.0009 margin expansion → +0.0035 above 4.5 threshold STAYS PASSED); Q4 ANALYZE/CBO canonical STRONG.**
 
 ---
 
 ## HEADLINE
 
-1. **Q1 federation CRITICAL re-probe — STRONG PASS 4.6875 — iter441 PushedFilters/PostScanFilters guardrail LANDED.** Responder now uses CORRECT Trino EXPLAIN terminology: `constraint = {...}` annotation INSIDE the `TableScan` (pushed) vs separate `Filter` / `ScanFilterProject` operator ABOVE the scan (not pushed). Did NOT use Spark `PushedFilters` / `PostScanFilters`. Four-predicate categorization correct: integer equality `account_id=12345` pushes; string `IN('active','trial')` pushes; date range `created_at > '2025-01-01'` pushes; function-wrapped `LOWER(email) LIKE '%acme%'` does NOT push (function-wrap + leading-wildcard). Verified per trino.io/docs/current/optimizer/pushdown.html + trino.io/docs/current/connector/postgresql.html. **Federation 4.5020 → 4.5026 / 304 (+0.0006); margin +0.0020 → +0.0026 (+0.0006 expansion). STAYS PASSED.** Margin restoration confirmed but still thin — one more sub-4.5 datapoint puts the topic in danger.
+1. **Q1 EXPLAIN TYPE VALIDATE + TYPE IO — STRONG PASS 4.875 — FINALLY RESOLVED.** Third consecutive iter the canonical content has been probed; the r22 §3.4 cross-resource duplication + DO-NOT-WRITE block landed in iter443. Responder produces: (a) `EXPLAIN (TYPE VALIDATE) <query>` returns boolean `Valid`, no execution, the built-in validator (verified per trino.io/docs/current/sql/explain.html); (b) `EXPLAIN (TYPE DISTRIBUTED)` with `constraint = {...}` annotation INSIDE TableScan = pushed, `Filter` / `ScanFilterProject` operator ABOVE = not pushed (iter441 guardrail held, no Spark PushedFilters); (c) `EXPLAIN (TYPE IO, FORMAT JSON)` returns `inputTableColumnInfos` with per-column `domain.ranges` constraints; (d) `EXPLAIN ANALYZE VERBOSE` for `dynamicFilterSplitsProcessed`; (e) EXPLICITLY rejects LIMIT 0 / LIMIT 1 as "still goes through planner, may execute, not cheap validation"; (f) NO `(ANALYZE false)` fabrication; (g) NO "Trino has no validate-syntax-without-execute command" denial. **Iter441+iter442 REPEAT confident-inaccuracies on TYPE VALIDATE FIXED; iter442 NEW `EXPLAIN ANALYZE (ANALYZE false)` fabrication FIXED.** Query performance regression diagnosis 4.2085 → 4.2596 / 13 (+0.0511, single Q1 4.875 datapoint well above topic avg).
 
-2. **Q2 EXPLAIN re-probe — FAIL 2.4375 — TWO confident-inaccuracies; teacher r18 guardrail did NOT land.** (a) Responder AGAIN claimed "Trino does NOT have a validate-syntax-without-execute command" — VERIFIED FALSE per trino.io/docs/current/sql/explain.html: `EXPLAIN (TYPE VALIDATE) <query>` returns single boolean column `Valid`, validates without executing, detects unknown keywords + invalid object names. **REPEAT confident-inaccuracy across two consecutive iters.** (b) Responder gave `EXPLAIN ANALYZE (ANALYZE false) <query>` claiming it's "plan only, don't execute" — VERIFIED FABRICATED per trino.io/docs/current/sql/explain-analyze.html: the ONLY documented option for `EXPLAIN ANALYZE` is `VERBOSE`; there is NO `(ANALYZE false)` option; `EXPLAIN ANALYZE` ALWAYS executes the query. **NEW confident-inaccuracy with fabricated syntax.** (c) For use-case (a) "what will it scan" the responder gave plain `EXPLAIN` + `$partitions` metadata-table queries instead of the canonical `EXPLAIN (TYPE IO, FORMAT JSON)` (returns `inputTableColumnInfos` with per-column `domain` constraints). (d) Improvement: responder said "never use LIMIT 1" — agrees with iter441 anti-pattern callout — but still suggested `LIMIT 0` (still executes the planner). This is a **REPEAT FAILURE on the SAME topic the teacher guardrailed in iter441**, indicating the r18 §EXPLAIN-TYPE-IO/VALIDATE content is either (i) not being reached by the responder for this question phrasing (findability gap), or (ii) overridden by content in a different resource file (likely r22 if the responder is reading EXPLAIN content from the federation resource).
+2. **Q2 Branch DDL re-probe — FAIL 3.3125 — iter442 fabrications fixed BUT TWO NEW confident-inaccuracies at syntax-detail layer.** The gross iter442 fabrications (`INSERT INTO t (BRANCH 'x')` parenthesized clause; `MERGE BRANCH x INTO main` non-existent DDL) are GONE — responder correctly uses (i) suffix notation on table identifier OR (ii) WAP session conf for branch writes, AND uses `fast_forward` procedure call NOT `MERGE BRANCH` DDL. **But two new confident-inaccuracies emerge at the next level of detail:**
+   - **(2a) Branch-name / suffix-name inconsistency.** Responder declared branch as `staging-branch` (with a hyphen) but wrote suffix `INSERT INTO iceberg.analytics.orders.branch_staging_branch` (with underscores throughout). Per iceberg.apache.org/docs/latest/spark-writes/ the suffix is LITERAL `branch_<name>` — a hyphenated branch name needs the hyphen preserved AND identifier-quoting (`` `branch_staging-branch` `` ). As written, the suffix targets a different branch (`staging_branch` with underscore) than was created (`staging-branch` with hyphen). Engineer copy-pastes → either errors ("branch staging_branch not found") or accidentally creates a separate unrelated branch.
+   - **(2b) fast_forward ARG ORDER REVERSED (LOAD-BEARING).** Responder wrote `CALL iceberg.system.fast_forward(table => 'analytics.orders', branch => 'staging-branch', to => 'main')`. **Verified per iceberg.apache.org/docs/latest/spark-procedures/: the signature is `fast_forward(table, branch, to)` where `branch` is the TARGET branch being fast-forwarded and `to` is the SOURCE branch whose tip is taken.** The canonical WAP-publish example is `CALL catalog.system.fast_forward('table', 'main', 'audit-branch')` — publish means moving MAIN's pointer to staging's tip. The responder reversed it: their call would attempt to move staging-branch's pointer up to main's tip (which abandons the staged data instead of publishing it; also typically errors because main is not a descendant of staging-branch in WAP). **LOAD-BEARING WRONG CLAIM — the publish step of WAP is broken if the engineer copy-pastes.**
 
-3. **Q3 LISTAGG re-probe — STRONG PASS 4.875 — RESOLVED.** Responder produced direct 1:1 Trino mapping: `listagg(product_name, ', ' ON OVERFLOW TRUNCATE '...' WITH COUNT) WITHIN GROUP (ORDER BY ...)`. All three overflow variants surfaced: `ON OVERFLOW ERROR` (default), `ON OVERFLOW TRUNCATE '<filler>' WITH COUNT`, `ON OVERFLOW TRUNCATE '<filler>' WITHOUT COUNT`. Trino 1,048,576-byte limit vs Oracle 4,000/32,767-byte limit comparison surfaced correctly. No unnecessary `array_join`/`array_agg` fallback steered to. Verified per trino.io/docs/current/functions/aggregate.html. **Iter441 Q3 guardrail LANDED.**
+3. **Q3 dynamic filtering federation BUFFER — STRONG PASS 4.78125.** Canonical federation answer: CBO picks small Postgres-region-filtered build / Iceberg events probe; region predicate pushes to Postgres FIRST (planner pushdown); Trino collects customer_id values from build side at runtime as IN-list/range; IN-list/range pushed AS dynamic filter to Iceberg probe scan, prunes Parquet row-groups via min/max + manifest file-skipping; `EXPLAIN ANALYZE VERBOSE` shows `dynamicFilterSplitsProcessed N` where N << M unfiltered; NOT-FIRE cases LEFT/FULL OUTER (only INNER + RIGHT support DF per Trino docs), stale stats so wrong build, VARCHAR-key collation; Trino terminology only — no Spark PushedFilters. All verified per trino.io/docs/current/admin/dynamic-filtering.html. **Federation 4.5026 → 4.5035 / 305 (+0.0009); margin +0.0026 → +0.0035 (+0.0009 expansion). STAYS PASSED — 2nd consecutive iter of margin restoration.**
 
-4. **Q4 Iceberg branches / WAP — FAIL 3.4375 — TWO new fabricated Spark branch DDL forms.** The high-level direction is correct (Trino 467 reads branches via `FOR VERSION AS OF 'branch'`; CREATE/write/merge/DROP BRANCH are Spark-only; expire_snapshots cleans abandoned branch snapshots). BUT specific Spark syntax examples are wrong: (a) `INSERT INTO accounts (BRANCH 'staging')` — FABRICATED. Real Iceberg-Spark branch-write SQL is `INSERT INTO prod.db.table.branch_staging` (suffix notation on table identifier) OR `SET spark.wap.branch = staging; INSERT INTO prod.db.table ...` (WAP session config). There is NO `(BRANCH '...')` parenthesized clause in Iceberg-Spark INSERT. (b) `MERGE BRANCH x INTO main` — FABRICATED. Real Iceberg branch fast-forward is `CALL catalog.system.fast_forward('table', 'main', 'audit-branch')` procedure call, NOT a `MERGE BRANCH` DDL statement. (c) `.writeTo().option("branch", ...)` — PARTIAL fabrication: documented forms are `data.writeTo("prod.db.table.branch_audit").overwritePartitions()` (suffix) OR `df.write.format("iceberg").option("branch", "x")...save(...)` (write+option). The `writeTo().option("branch")` cross combination is not the documented form. Verified per iceberg.apache.org/docs/latest/spark-writes/ + iceberg.apache.org/docs/latest/branching/. Engineer who copy-pastes the fabricated SQL gets parse errors. **TWO new confident-inaccuracies on Spark branch DDL.**
+4. **Q4 ANALYZE / CBO — STRONG PASS 4.875.** Canonical answer: `ANALYZE iceberg.analytics.events` no TABLE keyword (Trino differs from Postgres); `WITH(columns=ARRAY['col1','col2'])` column-targeted; Puffin NDV sketch file written alongside Parquet data files; `join_reordering_strategy=AUTOMATIC` enumerates orders with stats-based cost, fallback to ELIMINATE_CROSS_JOINS if no stats (verified per trino.io/docs/current/optimizer/cost-based-optimizations.html); `EXPLAIN` shows Estimates rows N concrete vs `?` guessing; `SHOW STATS FOR table` displays distinct_values_count; `ALTER TABLE ... EXECUTE drop_extended_stats` procedure BEFORE column-subset re-ANALYZE (otherwise broader pre-existing stats stay cached). All verified.
 
 ---
 
 ## Critical confirmations (explicit)
 
-### (a) Q1 federation CRITICAL re-probe — margin recovery + STAYS PASSED
+### (a) Q1 EXPLAIN re-probe — FINALLY RESOLVED?
 
-**Q1 score: 4.6875 STRONG PASS.** Scores: TA 4.75 / BC 4.5 / PA 4.75 / Comp 4.75.
+**YES — Q1 RESOLVED.** Score 4.875 STRONG PASS. r22 §3.4 cross-resource findability fix LANDED after THIRE consecutive failure. Responder produces:
+- `EXPLAIN (TYPE VALIDATE) <query>` returns boolean `Valid`, no execution — CORRECT per trino.io/docs/current/sql/explain.html (the built-in validator).
+- Explicit rejection of LIMIT 0 / LIMIT 1: "LIMIT 0 still goes through the planner, may execute distribution — not cheap validation."
+- NO "Trino has no syntax-checker" denial (iter441+iter442 REPEAT inaccuracy FIXED).
+- NO fabricated `EXPLAIN ANALYZE (ANALYZE false)` form (iter442 NEW fabrication FIXED).
+- `EXPLAIN (TYPE DISTRIBUTED)` with `constraint = {...}` INSIDE TableScan = pushed; `Filter`/`ScanFilterProject` ABOVE TableScan = not pushed (iter441 PushedFilters/PostScanFilters guardrail held).
+- `EXPLAIN (TYPE IO, FORMAT JSON)` returns `inputTableColumnInfos` with per-column `domain.ranges` for pre-execution constraint preview.
+- `EXPLAIN ANALYZE VERBOSE` for `dynamicFilterSplitsProcessed` metric.
+
+**Query performance regression diagnosis topic: 4.2085 → 4.2596 / 13 (+0.0511). The two-consecutive sub-3.0 datapoint pattern is BROKEN.**
+
+### (b) Q2 Branch DDL re-probe — RESOLVED on iter442 fabrications BUT fast_forward arg-order REVERSED
+
+**Q2 score: 3.3125 FAIL.** Mixed verdict:
+- **RESOLVED (iter442 fabrications):** No `INSERT INTO (BRANCH 'x')` parenthesized clause; no `MERGE BRANCH x INTO main` DDL; no `writeTo + .option("branch")` cross combination. Uses suffix notation OR WAP session conf, AND uses `fast_forward` procedure (not MERGE BRANCH DDL).
+- **NEW INACCURACY (2a) — branch name / suffix mismatch:** Branch literally named `staging-branch` (hyphen) but suffix written `branch_staging_branch` (underscore). The hyphen-to-underscore conversion is NOT how Iceberg branch suffix-notation works — per iceberg.apache.org/docs/latest/spark-writes/, the suffix is literal `branch_<exact-name>`. Engineer copy-paste targets a nonexistent branch.
+- **NEW INACCURACY (2b) — fast_forward arg order REVERSED — LOAD-BEARING.** Responder wrote `fast_forward(table => 'analytics.orders', branch => 'staging-branch', to => 'main')`. **Verified per iceberg.apache.org/docs/latest/spark-procedures/: signature is `fast_forward(table, branch, to)` where `branch` = target being fast-forwarded, `to` = source whose tip is taken.** Canonical WAP-publish: `fast_forward('table', 'main', 'audit-branch')`. The responder's args are REVERSED — they would attempt to fast-forward STAGING to MAIN's tip (abandons the staged work instead of publishing it; also typically errors since main is not a descendant of staging in a WAP flow). An engineer who copy-pastes this loses the audit work entirely.
+
+**Verdict: Q2 RESOLVED at the gross-DDL level, FAILED at the syntax-detail level. fast_forward arg-order reversal is confirmed.**
+
+### (c) Q3 dynamic filtering — federation BUFFER score + margin + STAYS PASSED
+
+**Q3 score: 4.78125 STRONG PASS.**
 
 **Federation average recompute:**
-- Prior: 4.5020 × 303 = 1364.106 (using cleaner precision: new_avg = old_avg + (new − old)/new_count = 4.5020 + (4.6875 − 4.5020)/304 = 4.5020 + 0.000610)
-- **New average: 4.5026 / 304**
+- Prior: 4.5026 × 304 = 1368.79
+- New: (1368.79 + 4.78125) / 305 = 4.50346
+- **New average: 4.5035 / 305**
 
 **Margin above 4.5 threshold:**
-- Iter440 margin: +0.00554
-- Iter441 margin: +0.00200 (×0.36 contraction)
-- **Iter442 margin: +0.00261 (+0.00061 expansion vs iter441)**
+- Iter441 margin: +0.0020
+- Iter442 margin: +0.0026 (+0.0006 expansion)
+- **Iter443 margin: +0.0035 (+0.0009 expansion vs iter442)**
 
-**STAYS PASSED?** **YES — Federation buffer marginally recovers.** Margin restored from +0.00200 to +0.00261 (a +0.00061 expansion). Still THIN — at 304 datapoints, the topic now needs roughly 30 consecutive 4.6+ datapoints to climb the buffer back to the iter440 +0.00554 level. **Federation STAYS PASSED but the iter441 buffer compression is only partially undone.**
+**STAYS PASSED?** **YES — Federation buffer continues marginal recovery for 2nd consecutive iter.** Margin restored from +0.0020 → +0.0026 → +0.0035. Still THIN at 305 datapoints; each strong Q3-pair datapoint contributes ~+0.001 to the margin. **Federation STAYS PASSED.**
 
-**Iter441 PushedFilters/PostScanFilters Spark-terminology guardrail LANDED:** Responder correctly named `TableScan[constraint = {...}]` (pushed) vs separate `Filter` / `ScanFilterProject` operator (not pushed); did NOT use any Spark Catalyst field names.
+### (d) Q4 ANALYZE / CBO + drop_extended_stats + join_reordering_strategy
 
-### (b) Q2 EXPLAIN re-probe — TYPE VALIDATE miss + EXPLAIN ANALYZE (ANALYZE false) fabrication verdict
+**Q4 score: 4.875 STRONG PASS.** All semantics canonical:
+- `ANALYZE iceberg.analytics.events` (no TABLE keyword — Trino syntax). VERIFIED.
+- `WITH(columns=ARRAY['col1','col2'])` column-targeted form. VERIFIED.
+- Puffin NDV sketch file written alongside Parquet data files. VERIFIED per trino.io/docs/current/optimizer/statistics.html.
+- `join_reordering_strategy=AUTOMATIC` enumerates orders, stats-based cost; falls back to `ELIMINATE_CROSS_JOINS` if no stats. VERIFIED per trino.io/docs/current/optimizer/cost-based-optimizations.html verbatim.
+- `EXPLAIN` Estimates rows concrete N vs `?` (CBO guessing without stats).
+- `SHOW STATS FOR <table>` displays distinct_values_count column.
+- `ALTER TABLE ... EXECUTE drop_extended_stats` procedure BEFORE column-subset re-ANALYZE — CORRECT footgun callout.
 
-**Q2 score: 2.4375 FAIL.** Scores: TA 2.0 / BC 3.75 / PA 2.0 / Comp 2.0.
+**No fabricated procedure names, no incorrect property defaults.**
 
-**TYPE VALIDATE miss verdict: REPEAT CONFIDENT-INACCURACY.** Responder AGAIN claimed "Trino does NOT have a validate-syntax-without-execute command." This is the SECOND consecutive iter the responder has denied TYPE VALIDATE's existence despite state.json iter441 + iter442 claiming r18 tightened to surface it. Verified per trino.io/docs/current/sql/explain.html: `EXPLAIN (TYPE VALIDATE) <query>` validates statement WITHOUT executing, returns single boolean column `Valid`, detects unknown keywords AND invalid object names.
+### (e) NEW confident-inaccuracies this iter
 
-**EXPLAIN ANALYZE (ANALYZE false) fabrication verdict: NEW CONFIDENT-INACCURACY.** Responder gave `EXPLAIN ANALYZE (ANALYZE false) <query>` claiming "plan only, don't execute." Verified per trino.io/docs/current/sql/explain-analyze.html:
-- The ONLY documented option for `EXPLAIN ANALYZE` is `VERBOSE` ("EXPLAIN ANALYZE [VERBOSE] <statement>").
-- There is NO `(ANALYZE false)` option.
-- The documentation explicitly states `EXPLAIN ANALYZE` "Execute the statement and show the distributed execution plan of the statement along with the cost of each operation" — it ALWAYS executes.
-- The fabricated syntax would fail to parse at the Trino prompt.
+**TWO new confident-inaccuracies, BOTH on Q2:**
+1. Branch-name vs suffix-name mismatch (`staging-branch` declared but `branch_staging_branch` written in suffix).
+2. fast_forward arg order REVERSED (`branch => 'staging-branch', to => 'main'` instead of the correct `branch => 'main', to => 'staging-branch'`).
 
-**An engineer who copy-pastes this `EXPLAIN ANALYZE (ANALYZE false)` fabrication gets a SQL parse error.** This is a higher-severity confident-inaccuracy than iter441's TYPE VALIDATE denial because the syntax itself is invented.
-
-**TYPE IO miss verdict.** Responder gave plain `EXPLAIN` + `SELECT ... FROM <table>$partitions` queries for use-case (a) "what will it scan" instead of the canonical `EXPLAIN (TYPE IO, FORMAT JSON) <query>` which returns `inputTableColumnInfos` with per-column `domain` constraints. The `$partitions` metadata table approach is useful for browsing actual partitions in storage but is NOT a substitute for `TYPE IO`'s pre-execution constraint-domain analysis.
-
-**LIMIT 0 verdict.** Improvement over iter441's LIMIT 1: responder now says "never use LIMIT 1" — correct anti-pattern. BUT then suggests `LIMIT 0` as cheap validation. `LIMIT 0` still goes through the parser + analyzer + planner (so it catches errors TYPE VALIDATE catches), but it ALSO triggers query distribution and may execute. TYPE VALIDATE is the cleaner answer.
-
-**Findability hypothesis (HIGH-PRIORITY TEACHER ACTION for iter443).** The EXPLAIN guardrail content is in r18 per state.json, but the responder may be reading EXPLAIN-related content from r22 (federation pushdown EXPLAIN signature) for this question type. **Teacher must ensure the TYPE VALIDATE + TYPE IO canonical content is duplicated/cross-referenced into r22 §EXPLAIN-flavors OR into a dedicated EXPLAIN-flavor resource that surfaces FIRST when the responder searches for "validate syntax without execute" / "what will it scan."** This is the second consecutive iter the canonical content has failed to land — the guardrail is not where the responder is looking.
-
-### (c) Q3 LISTAGG ON OVERFLOW — RESOLVED
-
-**Q3 score: 4.875 STRONG PASS.** Scores: TA 5.0 / BC 4.75 / PA 5.0 / Comp 4.75.
-
-**RESOLVED?** **YES.** All three overflow variants surface: `ON OVERFLOW ERROR` (default), `ON OVERFLOW TRUNCATE '...' WITH COUNT`, `ON OVERFLOW TRUNCATE '...' WITHOUT COUNT`. Direct 1:1 mapping to Oracle. Trino 1,048,576-byte limit vs Oracle 4,000/32,767-byte limit comparison correctly stated. No unnecessary `array_join`/`array_agg` workaround steered to. Verified per trino.io/docs/current/functions/aggregate.html. **Iter441 Q3 confident-inaccuracy ("Oracle ON OVERFLOW has no Trino equivalent") FIXED.**
-
-### (d) Q4 Iceberg branches — Spark DDL verification + new confident-inaccuracies
-
-**Q4 score: 3.4375 FAIL.** Scores: TA 2.75 / BC 4.0 / PA 3.0 / Comp 4.0.
-
-**What landed correct (verified per iceberg.apache.org/docs/latest/branching/ + iceberg.apache.org/docs/latest/spark-ddl/ + iceberg.apache.org/docs/latest/spark-writes/):**
-- Trino 467 reads branches via `FOR VERSION AS OF 'branch_name'` — CORRECT.
-- Trino 467 cannot CREATE / WRITE TO / MERGE / DROP branches — CORRECT (Spark-only).
-- Spark `ALTER TABLE ... CREATE BRANCH name [AS OF VERSION snapshot_id] [IF NOT EXISTS]` — CORRECT.
-- Spark `ALTER TABLE ... DROP BRANCH name` — CORRECT.
-- Abandoned-branch snapshots cleaned by `expire_snapshots` once branch DROPPED — CORRECT.
-- Per-op table of Trino-can / Trino-cannot — CORRECT direction.
-
-**Fabricated Spark DDL forms (NEW confident-inaccuracies):**
-- **`INSERT INTO accounts (BRANCH 'staging') VALUES (...)`** — FABRICATED. The documented Iceberg-Spark branch-write SQL is:
-  - Suffix notation: `INSERT INTO prod.db.table.branch_staging VALUES (...)` (or `UPDATE prod.db.table.branch_audit SET val='c'`, or `DELETE FROM prod.db.table.branch_audit WHERE id=2`).
-  - WAP session config: `SET spark.wap.branch = staging; INSERT INTO prod.db.table VALUES (...)`.
-  - There is NO `(BRANCH '...')` parenthesized clause in INSERT INTO.
-- **`MERGE BRANCH staging INTO main`** — FABRICATED. The documented Iceberg branch fast-forward is:
-  - `CALL catalog.system.fast_forward('table', 'main', 'audit-branch')` procedure call.
-  - There is NO `MERGE BRANCH` DDL statement in Iceberg-Spark.
-- **`.writeTo("table").option("branch", "x")`** — PARTIAL fabrication. Documented forms:
-  - `data.writeTo("prod.db.table.branch_audit").overwritePartitions()` (suffix on writeTo identifier).
-  - `df.write.format("iceberg").option("branch", "ML_exp").mode("append").save("glue.test.employees")` (write + option).
-  - The `writeTo + .option("branch")` cross combination is not in the docs.
-
-An engineer who copy-pastes any of these fabricated forms gets a SQL parse error. The direction (read-only Trino, Spark for writes, expire_snapshots cleanup) is CORRECT but the concrete syntax examples are WRONG. This is the **third consecutive question (Q2 + Q4) with NEW fabricated syntax** in iter442.
+**Zero-confident-inaccuracy streak BROKEN at 2 iters (iter427 + iter428). New confident-inaccuracy datapoint on iter443.**
 
 ---
 
 ## Per-question scoring
 
-### Q1 — Predicate pushdown EXPLAIN (Trino federation CRITICAL re-probe)
+### Q1 — EXPLAIN TYPE VALIDATE + TYPE IO + DISTRIBUTED (re-probe FINALLY RESOLVED)
 
-**Scores: 4.75 / 4.5 / 4.75 / 4.75 — avg 4.6875 STRONG PASS**
+**Scores: 5.0 / 4.75 / 4.875 / 4.875 — avg 4.875 STRONG PASS**
 
 What landed correct:
-- `account_id=12345` integer equality pushes to PG — CORRECT
-- `status IN('active','trial')` string IN pushes — CORRECT (IN is equality-set per Trino PG connector docs)
-- `created_at > '2025-01-01'` date range pushes — CORRECT (temporal types push)
-- `LOWER(email) LIKE '%acme%'` does NOT push — CORRECT (function-wrap + leading wildcard)
-- VARCHAR equality pushes; VARCHAR range stays unless `postgresql.experimental.enable-string-pushdown-with-collate` flag — CORRECT nuance
-- **Trino EXPLAIN signature: `TableScan` with `constraint = {...}` annotation INSIDE = pushed; `Filter` / `ScanFilterProject` operator ABOVE = not pushed — CORRECT** (verified per trino.io/docs/current/optimizer/pushdown.html "If predicate pushdown for a specific clause is successful, the EXPLAIN plan for the query does not include a ScanFilterProject operation for that clause")
-- **NO Spark `PushedFilters` / `PostScanFilters` / `PartitionFilters` terms** — iter441 guardrail LANDED
+- `EXPLAIN (TYPE VALIDATE) <query>` returns boolean `Valid` no execution — CORRECT
+- `EXPLAIN (TYPE DISTRIBUTED)` with `constraint = {...}` INSIDE TableScan = pushed; `Filter`/`ScanFilterProject` ABOVE = not pushed — CORRECT
+- `EXPLAIN (TYPE IO, FORMAT JSON)` returns `inputTableColumnInfos` with `domain.ranges` — CORRECT
+- `EXPLAIN ANALYZE VERBOSE` for `dynamicFilterSplitsProcessed` — CORRECT
+- Explicit rejection of LIMIT 0 / LIMIT 1 as "still executes through planner" — CORRECT anti-pattern
+- NO `(ANALYZE false)` fabrication — iter442 NEW fabrication FIXED
+- NO "Trino has no syntax-checker" denial — iter441+iter442 REPEAT denial FIXED
 
 Minor docks:
-- BC dock 0.5: could briefly unpack what `ScanFilterProject` vs `Filter` operator difference means for a beginner.
+- BC dock 0.25: could give a one-line beginner translation of what `inputTableColumnInfos.columnConstraints.domain.ranges` means in plain English.
 
-**Verdict:** STRONG PASS — federation BUFFER re-probe restoring margin from +0.0020 to +0.0026 (+0.0006 expansion). 4.5020 → 4.5026 / 304.
+**Verdict:** STRONG PASS — iter441+iter442 REPEAT FAILURE FINALLY RESOLVED. Query perf regression diagnosis 4.2085 → 4.2596 / 13 (+0.0511).
 
-### Q2 — EXPLAIN preview + validate (re-probe REPEAT FAILURE)
+### Q2 — Iceberg branch write/audit/publish DDL (re-probe partial RESOLVED + NEW inaccuracies)
 
-**Scores: 2.0 / 3.75 / 2.0 / 2.0 — avg 2.4375 FAIL (WORSE than iter441 2.75)**
-
-What landed correct:
-- "Never use LIMIT 1" anti-pattern callout — improvement over iter441
-- Plain `EXPLAIN <query>` does NOT execute — TRUE for the EXPLAIN form (just not what was asked)
-
-Confident-inaccuracies + docks:
-- **TA dock 3.0 (TWO confident-inaccuracies):**
-  - REPEAT: "Trino does NOT have a validate-syntax-without-execute command" — WRONG. `EXPLAIN (TYPE VALIDATE)` exists per trino.io/docs/current/sql/explain.html.
-  - NEW: `EXPLAIN ANALYZE (ANALYZE false) <query>` — FABRICATED. `EXPLAIN ANALYZE` has only `VERBOSE` option per trino.io/docs/current/sql/explain-analyze.html and ALWAYS executes.
-- **Comp dock 3.0**: Missed BOTH canonical tools the question targeted — `EXPLAIN (TYPE IO, FORMAT JSON)` (with `inputTableColumnInfos`) and `EXPLAIN (TYPE VALIDATE)` (boolean `Valid`).
-- **PA dock 3.0**: Engineer following the advice would (a) believe no validator exists, (b) try `EXPLAIN ANALYZE (ANALYZE false)` and get a parse error; both block real work.
-
-**Verdict:** FAIL — WORSE than iter441. Query performance regression diagnosis topic drops 4.3695 → 4.2085 / 12 (-0.1610 step-down; still above the 3.5 standard threshold so topic stays PASSED, but second consecutive sub-3.0 datapoint on this topic at only 12 datapoints density means topic-level fragility is increasing).
-
-### Q3 — LISTAGG ON OVERFLOW (re-probe RESOLVED)
-
-**Scores: 5.0 / 4.75 / 5.0 / 4.75 — avg 4.875 STRONG PASS**
+**Scores: 3.0 / 3.75 / 2.5 / 4.0 — avg 3.3125 FAIL**
 
 What landed correct:
-- `listagg(product_name, ', ' ON OVERFLOW TRUNCATE '...' WITH COUNT) WITHIN GROUP (ORDER BY ...)` direct 1:1 — CORRECT
-- All three variants: `ON OVERFLOW ERROR` (default), `ON OVERFLOW TRUNCATE '...' WITH COUNT`, `ON OVERFLOW TRUNCATE '...' WITHOUT COUNT` — CORRECT per trino.io/docs/current/functions/aggregate.html
-- Trino 1,048,576-byte limit — CORRECT
-- Oracle 4,000/32,767-byte limit comparison — CORRECT (Oracle 4000 chars without MAX_STRING_SIZE=EXTENDED; 32,767 with EXTENDED)
-- No unnecessary `array_join`/`array_agg` workaround — CORRECT
-
-Minor docks:
-- BC dock 0.25: solid clarity.
-- Comp dock 0.25: could mention NULL-skip semantics like Oracle.
-
-**Verdict:** STRONG PASS — iter441 confident-inaccuracy ("Oracle ON OVERFLOW has no Trino equivalent") FIXED. Oracle PL/SQL migration 4.6103 → 4.6242 / 19 (+0.0139 step-UP).
-
-### Q4 — Iceberg branches / WAP
-
-**Scores: 2.75 / 4.0 / 3.0 / 4.0 — avg 3.4375 FAIL**
-
-What landed correct:
-- Trino 467 reads branches via `FOR VERSION AS OF 'branch'` — CORRECT
-- Trino 467 cannot CREATE / WRITE / MERGE / DROP branches — CORRECT
-- Spark `ALTER TABLE ... CREATE BRANCH name [AS OF VERSION snapshot_id]` — CORRECT
+- CREATE BRANCH via Spark `ALTER TABLE ... CREATE BRANCH name [AS OF VERSION ...] [RETAIN num DAYS]` — CORRECT
+- Spark write to branch via suffix notation `INSERT INTO ...table.branch_<name>` OR WAP `SET spark.wap.branch=<name>` — CORRECT structure
+- Trino 467 audit-read via `FOR VERSION AS OF '<branch>'` — CORRECT
+- Publish via `CALL ...fast_forward(...)` procedure (NOT a `MERGE BRANCH` DDL) — CORRECT direction
 - Spark `ALTER TABLE ... DROP BRANCH name` — CORRECT
-- `expire_snapshots` cleans abandoned-branch snapshots once branch dropped — CORRECT
-- Per-op table direction (what Trino can / cannot do) — CORRECT
+- No `INSERT INTO t (BRANCH 'x')` fabrication — iter442 inaccuracy FIXED
+- No `MERGE BRANCH x INTO main` fabrication — iter442 inaccuracy FIXED
 
 Confident-inaccuracies + docks:
-- **TA dock 2.25 (TWO new fabrications):**
-  - `INSERT INTO accounts (BRANCH 'staging') VALUES (...)` — FABRICATED. Real Iceberg-Spark forms: `INSERT INTO prod.db.table.branch_staging VALUES (...)` suffix notation, OR `SET spark.wap.branch=staging; INSERT INTO ...` WAP config.
-  - `MERGE BRANCH staging INTO main` — FABRICATED. Real Iceberg branch fast-forward: `CALL catalog.system.fast_forward('table', 'main', 'audit-branch')` procedure.
-  - `.writeTo("table").option("branch", "x")` — partial fabrication; documented forms are `writeTo("table.branch_x")` OR `df.write.option("branch","x")...save(...)`.
-- **PA dock 2.0**: Engineer who copy-pastes fabricated SQL gets parse errors.
-- **Comp dock 1.0**: Branch retention properties (min-snapshots-to-keep, max-snapshot-age-ms) not mentioned; tag-vs-branch distinction not surfaced (relevant for WAP workflow).
+- **TA dock 2.0 (TWO inaccuracies):**
+  - Branch-name `staging-branch` (hyphen) vs suffix `branch_staging_branch` (underscore) — mismatch; suffix targets nonexistent branch.
+  - `fast_forward(table=>'analytics.orders', branch=>'staging-branch', to=>'main')` — REVERSED. Per iceberg.apache.org/docs/latest/spark-procedures/, signature is `fast_forward(table, branch, to)` where `branch` = target being moved, `to` = source whose tip is taken. WAP-publish staging-to-main should be `branch=>'main', to=>'staging-branch'`.
+- **PA dock 2.5**: Engineer who copy-pastes the publish step either errors (branch suffix mismatch / FF direction error) or abandons their staging work entirely.
+- **BC 3.75**: Structure is clear and well-organized; problem is wrong details inside otherwise clear instructions.
+- **Comp 4.0**: Direction-wise complete (create/write/audit/publish/drop all covered) but specific publish syntax inverted.
 
-**Verdict:** FAIL — Iceberg table maintenance 4.4680 → 4.4582 / 105 (-0.0098 step-down; still well above 3.5 standard threshold). Direction was correct but specific Spark syntax examples were fabricated.
+**Verdict:** FAIL — Iceberg table maintenance 4.4582 → 4.4459 / 106 (-0.0123). Iter442 gross fabrications RESOLVED but new syntax-detail inaccuracies introduced. The pattern is the same as iter441+iter442 — fixed fabrications surface new ones at the next level of detail.
+
+### Q3 — Dynamic filtering on Postgres-Iceberg federation (BUFFER probe)
+
+**Scores: 5.0 / 4.5 / 4.875 / 4.75 — avg 4.78125 STRONG PASS**
+
+What landed correct:
+- CBO picks small Postgres-region-filtered build / Iceberg events probe — CORRECT
+- Region predicate pushes to Postgres FIRST (planner pushdown) — CORRECT
+- DF collects customer_id values at runtime as IN-list/range — CORRECT
+- IN-list/range pushed AS DF to Iceberg probe scan, prunes Parquet row-groups via min/max + manifest file-skipping — CORRECT
+- `EXPLAIN ANALYZE VERBOSE` shows `dynamicFilterSplitsProcessed N` where N << total — CORRECT per trino.io/docs/current/admin/dynamic-filtering.html
+- NOT-FIRE cases: LEFT/FULL OUTER (only INNER + RIGHT support DF), stale stats so wrong build, VARCHAR-key collation — CORRECT exhaustive list
+- Correct Trino terminology — NO Spark PushedFilters/PushedDynamicFilters (iter441 guardrail held)
+
+Minor docks:
+- BC dock 0.5: could briefly explain that the "probe side" is the larger table and "build side" is the smaller table in beginner terms.
+
+**Verdict:** STRONG PASS — federation BUFFER expansion 4.5026 → 4.5035 / 305, margin +0.0026 → +0.0035 (+0.0009).
+
+### Q4 — ANALYZE TABLE / CBO / NDV / Puffin / join_reordering_strategy
+
+**Scores: 5.0 / 4.75 / 4.875 / 4.875 — avg 4.875 STRONG PASS**
+
+What landed correct:
+- `ANALYZE iceberg.analytics.events` (no TABLE keyword — differs from Postgres) — CORRECT
+- `WITH(columns=ARRAY['user_id','region','event_type'])` column-targeted — CORRECT
+- Puffin NDV sketch file written alongside Parquet data files; holds HLL/NDV sketches CBO uses for join cardinality — CORRECT per trino.io/docs/current/optimizer/statistics.html
+- `join_reordering_strategy=AUTOMATIC` enumerates orders + stats-based cost; fallback ELIMINATE_CROSS_JOINS if no stats — CORRECT verbatim per trino.io/docs/current/optimizer/cost-based-optimizations.html
+- `EXPLAIN <query>` Estimates rows concrete N vs `?` guessing — CORRECT
+- `SHOW STATS FOR <table>` displays distinct_values_count — CORRECT
+- `ALTER TABLE ... EXECUTE drop_extended_stats` procedure BEFORE column-subset re-ANALYZE — CORRECT footgun callout
+
+Minor docks:
+- BC dock 0.25: solid; could spell out the cadence recommendation (nightly for high-churn, weekly for stable).
+
+**Verdict:** STRONG PASS — Trino CBO/ANALYZE 4.7184 → 4.7341 / 10 (+0.0157).
 
 ---
 
@@ -172,12 +166,12 @@ Confident-inaccuracies + docks:
 
 | Topic | Before | After | Delta | Status |
 |---|---|---|---|---|
-| Trino federation / cross-source connectors | 4.5020 / 303 | **4.5026 / 304** | **+0.0006** | **PASSED — margin recovers +0.0020 → +0.0026 (+0.0006 expansion)** |
-| Query performance regression diagnosis | 4.3695 / 11 | **4.2085 / 12** | -0.1610 | PASSED (above 3.5 standard threshold; second consecutive sub-3.0 datapoint) |
-| Oracle PL/SQL → dbt + Trino migration | 4.6103 / 18 | **4.6242 / 19** | +0.0139 | PASSED — RESOLVED |
-| Iceberg table maintenance | 4.4680 / 104 | **4.4582 / 105** | -0.0098 | PASSED (above 3.5 standard threshold) |
+| Query performance regression diagnosis | 4.2085 / 12 | **4.2596 / 13** | **+0.0511** | PASSED — REPEAT FAILURE RESOLVED |
+| Iceberg table maintenance | 4.4582 / 105 | **4.4459 / 106** | -0.0123 | PASSED (above 3.5 standard threshold; new syntax-detail inaccuracies drag down) |
+| Trino federation / cross-source connectors | 4.5026 / 304 | **4.5035 / 305** | **+0.0009** | **PASSED — margin +0.0026 → +0.0035 (+0.0009 expansion)** |
+| Trino CBO / ANALYZE TABLE / NDV / join ordering | 4.7184 / 9 | **4.7341 / 10** | +0.0157 | PASSED |
 
-(Q1 federation CRITICAL re-probe; Q2 query-perf-regression REPEAT FAILURE; Q3 Oracle migration RESOLVED; Q4 Iceberg table maintenance NEW fabrications.)
+(Q1 EXPLAIN re-probe RESOLVED; Q2 branch DDL partial RESOLVED + new fast_forward arg-order inaccuracy; Q3 federation BUFFER expansion; Q4 ANALYZE/CBO strong.)
 
 ---
 
@@ -185,82 +179,83 @@ Confident-inaccuracies + docks:
 
 | Q | Score | Topic | Verdict |
 |---|---|---|---|
-| Q1 | 4.6875 | Federation CRITICAL (predicate pushdown EXPLAIN signature) | STRONG PASS — Spark-term guardrail LANDED |
-| Q2 | 2.4375 | Query perf regression (EXPLAIN TYPE IO / VALIDATE) | FAIL — REPEAT TYPE VALIDATE miss + NEW EXPLAIN ANALYZE (ANALYZE false) fabrication |
-| Q3 | 4.875 | Oracle migration (LISTAGG ON OVERFLOW) | STRONG PASS — RESOLVED |
-| Q4 | 3.4375 | Iceberg branches / WAP | FAIL — NEW Spark branch DDL fabrications (INSERT INTO (BRANCH 'x') + MERGE BRANCH INTO main) |
+| Q1 | 4.875 | Query perf regression (EXPLAIN TYPE VALIDATE + TYPE IO) | STRONG PASS — RESOLVED after 3 consecutive iters of failure |
+| Q2 | 3.3125 | Iceberg table maintenance (branch WAP write/audit/publish) | FAIL — gross fabrications RESOLVED, syntax-detail inaccuracies NEW |
+| Q3 | 4.78125 | Federation (dynamic filtering Postgres-Iceberg) | STRONG PASS — buffer expands |
+| Q4 | 4.875 | Trino CBO / ANALYZE / NDV | STRONG PASS — canonical |
 
-**Average 3.859 PASS — +0.093 step-UP from iter441 3.766. Federation margin recovers marginally; Q3 RESOLVED; BUT TWO new confident-inaccuracies on Q2 + Q4 + a REPEAT confident-inaccuracy on Q2.**
+**Average 4.461 PASS — +0.602 step-UP from iter442 3.859. Major recovery on Q1 EXPLAIN (3-iter chronic failure RESOLVED); Q2 partial — iter442 fabrications fixed but introduces TWO new inaccuracies at the syntax-detail layer; Q3 federation buffer continues marginal recovery; Q4 canonical.**
 
 **Headline outcomes:**
-- THREE confident-inaccuracies this iter (Q2 REPEAT TYPE VALIDATE denial + Q2 NEW EXPLAIN ANALYZE (ANALYZE false) fabrication + Q4 NEW Spark branch DDL fabrications) — zero-confident-inaccuracy streak STILL BROKEN (now 2 consecutive iters with confident-inaccuracies).
-- Federation 4.5020 → 4.5026 / 304 (+0.0006; margin +0.0020 → +0.0026 — +0.0006 expansion; restoration partial).
-- Query perf regression diagnosis 4.3695 → 4.2085 / 12 (Q2 2.4375 well below topic avg AND below iter441 2.75; topic drops further but stays above 3.5 standard threshold).
-- Oracle PL/SQL migration 4.6103 → 4.6242 / 19 (Q3 4.875 well above topic avg; RESOLVED).
-- Iceberg table maintenance 4.4680 → 4.4582 / 105 (Q4 3.4375 below topic avg; nudges down but well above 3.5 standard).
+- TWO new confident-inaccuracies this iter (both on Q2: branch name/suffix mismatch + fast_forward arg order reversed) — zero-confident-inaccuracy streak STILL BROKEN at 2 iters (iter427+iter428).
+- Federation 4.5026 → 4.5035 / 305 (+0.0009; margin +0.0026 → +0.0035 — 2nd consecutive iter of margin restoration).
+- Query perf regression diagnosis 4.2085 → 4.2596 / 13 (+0.0511, Q1 4.875 well above topic avg — REPEAT FAILURE RESOLVED).
+- Iceberg table maintenance 4.4459 / 106 (-0.0123, Q2 3.3125 below topic avg).
+- Trino CBO 4.7341 / 10 (+0.0157, Q4 4.875 above topic avg).
 - ALL REQUIRED TOPICS REMAIN PASSED on aggregate.
 
-**Failure-mode count: 16+1=17 of prior 41 extended-phase iterations with FAIL or confident-inaccuracy; iter441 broke the 40-iter zero-fail streak; iter442 PASSES overall but introduces NEW fabrications on a different topic (Q4) while REPEATING the iter441 Q2 inaccuracy and adding a NEW Q2 fabrication.**
+**Failure-mode pattern observation:** iter441 → iter442 → iter443 shows a recurring "fabrication-at-current-layer fixed, new-inaccuracy-at-next-detail-layer appears" pattern on Iceberg branch DDL. Iter441 had gross Spark-vs-Trino confusion; iter442 had fabricated SQL forms (`(BRANCH 'x')`, `MERGE BRANCH`); iter443 has correct SQL forms but wrong argument values inside the right procedure. The teacher's fixes are landing one layer at a time. Suggest a SINGLE comprehensive canonical example (named branch `audit_branch` with underscore for safety; complete CREATE→write→fast_forward→DROP sequence with exact arg names and values) to break this pattern.
 
 ---
 
-## Teacher actions next (iter 443) — HIGH PRIORITY
+## Teacher actions next (iter 444) — HIGH PRIORITY
 
-1. **CRITICAL — FIX Q2 EXPLAIN-TYPE-IO/VALIDATE findability problem.** The teacher tightened r18 §EXPLAIN-TYPE-IO/VALIDATE in iter441 per state.json, but the canonical content has now FAILED TO LAND for TWO consecutive iterations. Hypothesis: the responder is reading EXPLAIN-related content from a DIFFERENT resource (most likely r22 if the question phrasing trips federation/pushdown content) and never reaching r18. Action items:
-   - **(a) DUPLICATE the canonical TYPE VALIDATE + TYPE IO content into every resource that mentions EXPLAIN** (especially r22 federation + any SQL-best-practices resource + any query-perf-diagnosis resource). Use a §EXPLAIN-FLAVORS-MASTER-TABLE shared block.
-   - **(b) ADD an explicit anti-claim block: "Do NOT say Trino has no validate-syntax-without-execute command. TYPE VALIDATE IS that command. Do NOT invent EXPLAIN ANALYZE options like `(ANALYZE false)` — the ONLY documented option is VERBOSE; EXPLAIN ANALYZE always executes."**
-   - **(c) ADD a "fabricated-syntax-detector" anti-pattern: list `EXPLAIN ANALYZE (ANALYZE false)`, `EXPLAIN (EXECUTE false)`, and similar invented forms as DO-NOT-WRITE patterns.**
+1. **HIGH — FIX Q2 fast_forward arg-order canonical example.** Add or update the Iceberg branch resource (r17 per state.json) with an EXPLICIT canonical WAP-publish example using the exact arg names from iceberg.apache.org/docs/latest/spark-procedures/:
+   - **Signature:** `CALL catalog.system.fast_forward(table, branch, to)` where `branch` = TARGET (being fast-forwarded), `to` = SOURCE (whose tip is taken).
+   - **WAP-publish canonical pattern:** `CALL catalog.system.fast_forward(table => 'analytics.orders', branch => 'main', to => 'audit_branch')` — publish means moving MAIN to audit's tip.
+   - **DO-NOT-WRITE block:** "Do NOT write `branch => 'audit_branch', to => 'main'` — this is REVERSED and would attempt to fast-forward audit's pointer to main (the wrong direction; abandons the staged work)."
+   - **Mnemonic:** "branch = the one that MOVES; to = the one being MOVED TO. Publish staging to main means MAIN moves; staging stays where it is."
 
-2. **HIGH — FIX Q4 Iceberg branch SQL syntax (Iceberg table maintenance resource).** Add explicit Spark DDL section:
-   - SQL CREATE/DROP: `ALTER TABLE prod.db.t CREATE BRANCH name [AS OF VERSION snapshot_id] [RETAIN num {DAYS|HOURS|MINUTES}] [WITH SNAPSHOT RETENTION min_snapshots SNAPSHOTS]`; `ALTER TABLE prod.db.t REPLACE BRANCH name AS OF VERSION snapshot_id`; `ALTER TABLE prod.db.t DROP BRANCH name`.
-   - SQL writes to branch (TWO documented forms): **(i)** suffix on table identifier: `INSERT INTO prod.db.t.branch_staging VALUES (...)`, `UPDATE prod.db.t.branch_staging SET ...`, `DELETE FROM prod.db.t.branch_staging WHERE ...`; **(ii)** WAP session config: `SET spark.wap.branch = staging; INSERT INTO prod.db.t VALUES (...)`.
-   - DataFrame writes (TWO documented forms): **(i)** `df.writeTo("prod.db.t.branch_audit").overwritePartitions()` (suffix on writeTo identifier); **(ii)** `df.write.format("iceberg").option("branch", "ML_exp").mode("append").save("glue.test.employees")`.
-   - Fast-forward (NOT MERGE BRANCH DDL): `CALL catalog.system.fast_forward('table', 'main', 'audit-branch')` procedure call.
-   - Explicit anti-claim: "Do NOT write `INSERT INTO t (BRANCH 'x')` or `MERGE BRANCH x INTO main` — neither is real Iceberg-Spark syntax."
+2. **HIGH — FIX Q2 branch-name vs suffix-name consistency.** Add or update the branch resource:
+   - **Suffix is LITERAL.** A branch named `audit-branch` (with hyphen) requires suffix `` `branch_audit-branch` `` (with backticks because of the hyphen identifier rule). A branch named `audit_branch` (with underscore) requires suffix `branch_audit_branch` (no backticks needed).
+   - **RECOMMENDED CONVENTION:** Use underscore-only branch names (e.g., `audit_branch`, `staging`, `wap_2026_01_01`) to avoid identifier-quoting complications.
+   - **DO-NOT-WRITE block:** "Do NOT silently convert hyphens to underscores in the suffix — a branch named `staging-branch` is a DIFFERENT branch from `staging_branch`. If the engineer wants to reuse the canonical suffix `branch_staging_branch`, name the branch `staging_branch` from the start."
 
-3. **MEDIUM — RETAIN Q3 LISTAGG RESOLVED.** Re-probe LISTAGG ON OVERFLOW from a different angle (e.g., 32K-byte truncation policy on a customer-name list) 3-5 iters out to confirm durability.
+3. **MEDIUM — RETAIN Q1 EXPLAIN findability fix.** r22 §3.4 cross-resource duplication LANDED in iter443. Re-probe in iter446 or iter447 from a slightly different question phrasing (e.g., "what's the cheapest way to confirm my DBT MERGE compiles in Trino without running it?") to confirm durability.
 
-4. **STRATEGIC — Loop posture: iter442 PASSES (3.859) but contains THREE confident-inaccuracies and a REPEAT of iter441 Q2 inaccuracy.** The pattern indicates the teacher's r18 guardrail is failing the findability test. Confident-inaccuracy clusters are now spanning consecutive iterations (iter441 + iter442 each have 3+ confident-inaccuracies). Federation buffer recovers only +0.0006 of the iter441 -0.0035 contraction. Teacher must prioritize CROSS-RESOURCE DUPLICATION of canonical EXPLAIN content + fabricated-syntax anti-pattern block.
+4. **MEDIUM — RETAIN Q3 federation buffer.** Q3 4.78125 contributes +0.0009 to margin. Federation buffer is on 2-iter expansion streak (+0.0006 + 0.0009). Continue Q3-pair re-probes at current cadence to compound the buffer recovery.
 
----
-
-## Judge probe targets next (iter 443) — MANDATORY DIRECT RE-PROBES
-
-1. **CRITICAL — Q2 EXPLAIN TYPE VALIDATE + TYPE IO direct re-probe (THIRD consecutive iter).** Ask "How can I cheaply validate a Trino SQL statement without executing it?" AND separately "How can I see what tables and columns Trino will scan for a query, with the constraint ranges?" — confirm TYPE VALIDATE (single boolean `Valid` column) and TYPE IO + FORMAT JSON (`inputTableColumnInfos` / `columnConstraints` / `domain` structure) both surface canonically. **MUST land cleanly to repair the topic.** Also probe specifically against the `EXPLAIN ANALYZE (ANALYZE false)` fabrication by asking "does EXPLAIN ANALYZE have any option to skip execution?" — expected answer: NO; only VERBOSE; EXPLAIN ANALYZE always executes; use TYPE VALIDATE for syntax-only.
-
-2. **HIGH — Q4 Iceberg branch DDL direct re-probe.** Ask "show me the exact Iceberg-Spark SQL to insert rows into a 'staging' branch of prod.db.accounts" AND "how do I promote the staging branch to main?" — confirm responder uses suffix-notation `INSERT INTO prod.db.accounts.branch_staging` OR WAP `SET spark.wap.branch=staging` form; confirm responder uses `CALL catalog.system.fast_forward('table','main','staging')` for promotion, NOT `MERGE BRANCH x INTO main` DDL.
-
-3. **MEDIUM — Q1 federation EXPLAIN signature durability** (3-5 iters out) — confirm guardrail durable against different question phrasings (e.g., "WHERE customer_id IN (...) AND created_at > ...").
-
-4. **MEDIUM — Q3 LISTAGG ON OVERFLOW durability** (3-5 iters out) — confirm guardrail durable from a different angle (different overflow filler / byte limit context).
-
-5. **LOW — Carry forward backlog**: iter440 Q1/Q2 guardrail durability (federation pushdown corner cases CAST-wrapped col, LIKE prefix, OR-of-equality); isolation-level write props; Iceberg identity-column durability; iter441 Q4 partition-spec-evolution different-angle (e.g., add tier column).
+5. **STRATEGIC — Loop posture: iter443 PASSES (4.461) with major recovery on Q1 (3-iter chronic failure RESOLVED) but introduces TWO new confident-inaccuracies on Q2 syntax-detail layer.** The recurring "fix the gross issue, surface the next-detail issue" pattern on Iceberg branches suggests the teacher's fixes are one detail layer at a time. The remedy is a SINGLE comprehensive end-to-end canonical example (named branch, suffix form, fast_forward args, DROP) with explicit DO-NOT-WRITE blocks at each detail level.
 
 ---
 
-## Critical message to teacher for iter 443
+## Judge probe targets next (iter 444) — MANDATORY DIRECT RE-PROBES
 
-**Iter442 is a 3.859 PASS — +0.093 recovery from iter441 3.766 FAIL — BUT contains THREE confident-inaccuracies including a REPEAT of the iter441 Q2 TYPE VALIDATE denial and a NEW fabricated `EXPLAIN ANALYZE (ANALYZE false)` syntax that does not exist.**
+1. **HIGH — Q2 Iceberg branch fast_forward arg-order direct re-probe.** Ask "how do I promote my Spark audit branch to main using fast_forward?" — expected answer: `CALL catalog.system.fast_forward('table', 'main', 'audit-branch')` where `'main'` is the BRANCH arg (target being moved) and `'audit-branch'` is the TO arg (source whose tip is taken). Confirm responder does NOT reverse the args.
 
-**The r18 §EXPLAIN-TYPE-IO/VALIDATE guardrail you tightened in iter441 did NOT land in iter442.** The responder once again said "Trino does NOT have a validate-syntax-without-execute command" — the EXACT confident-inaccuracy iter441 flagged. Worse, the responder ALSO invented a syntax `EXPLAIN ANALYZE (ANALYZE false) <query>` claiming "plan only, don't execute" — this is NOT real Trino; `EXPLAIN ANALYZE` has only `VERBOSE` option per trino.io/docs/current/sql/explain-analyze.html and ALWAYS executes.
+2. **HIGH — Q2 Iceberg branch-name vs suffix-name consistency direct re-probe.** Ask "I created a branch called `monthly-audit-2026` — show me the exact INSERT INTO suffix" — expected answer: suffix `` `branch_monthly-audit-2026` `` with backticks (because of hyphens) OR a recommendation to rename the branch to `monthly_audit_2026` for simplicity.
 
-**Findability hypothesis (act on this in iter443):** the canonical TYPE VALIDATE / TYPE IO content lives in r18, but the responder is likely reaching for EXPLAIN content via r22 (federation EXPLAIN) or another SQL-best-practices resource for this question phrasing. The fix is to DUPLICATE the canonical content into every resource that mentions EXPLAIN + add a "fabricated-syntax-detector" anti-pattern block listing `EXPLAIN ANALYZE (ANALYZE false)`, `EXPLAIN (EXECUTE false)` as DO-NOT-WRITE forms.
+3. **MEDIUM — Q1 EXPLAIN findability durability** (3-5 iters out) — confirm r22 §3.4 fix durable against slightly different question phrasing (e.g., "validate this dbt model SQL without running it" / "preview what tables a query touches without execution").
 
-**Q1 federation BUFFER:** Iter441 PushedFilters/PostScanFilters Spark-term guardrail LANDED. Responder correctly used `TableScan[constraint = {...}]` (pushed) vs `Filter` / `ScanFilterProject` operator (not pushed). Federation 4.5020 → 4.5026 / 304; margin +0.0020 → +0.0026 (+0.0006 expansion — partial restoration of iter441 -0.0035 contraction).
+4. **MEDIUM — Q3 federation BUFFER continuation** — continue Q3-pair re-probes (CBO subtleties / runtime DF / pushdown corner cases) to compound federation margin recovery beyond +0.0035.
 
-**Q3 LISTAGG ON OVERFLOW: RESOLVED.** Responder produced direct 1:1 Trino mapping with all three overflow variants. Iter441 Q3 confident-inaccuracy FIXED.
+5. **LOW — Carry forward backlog**: pushdown corner cases (CAST-wrapped col, LIKE prefix, OR-of-equality); isolation-level write props; Iceberg identity-column durability; partition-spec-evolution different-angle.
 
-**Q4 Iceberg branches:** Direction correct (Trino reads via FOR VERSION AS OF; Spark for writes; expire_snapshots cleans dropped-branch snapshots) but SPECIFIC SPARK DDL FORMS FABRICATED — `INSERT INTO t (BRANCH 'x')` and `MERGE BRANCH x INTO main` are NOT real Iceberg-Spark syntax. Real forms (per iceberg.apache.org/docs/latest/spark-writes/): suffix-on-identifier `INSERT INTO prod.db.t.branch_staging VALUES (...)` OR WAP config `SET spark.wap.branch=staging; INSERT INTO prod.db.t VALUES (...)`; fast-forward via `CALL catalog.system.fast_forward('table', 'main', 'audit-branch')` procedure NOT a `MERGE BRANCH` DDL.
+---
 
-**Loop status:** PASSED stays on aggregate (all required topics still above their thresholds), federation margin marginally restored, BUT cluster of confident-inaccuracies persists across two consecutive iters. The r18 guardrail findability problem is the SINGLE HIGHEST-PRIORITY teacher action for iter443. state.json `passed: true` stays.
+## Critical message to teacher for iter 444
+
+**Iter443 is a 4.461 PASS — +0.602 major recovery from iter442 3.859 — with the 3-iter chronic Q1 EXPLAIN failure FINALLY RESOLVED (iter441+iter442 REPEAT TYPE VALIDATE denial + iter442 NEW `(ANALYZE false)` fabrication ALL FIXED).** The r22 §3.4 cross-resource findability fix LANDED.
+
+**BUT Q2 branch DDL re-probe introduces TWO NEW confident-inaccuracies at the syntax-detail layer:**
+1. **Branch-name `staging-branch` (hyphen) declared but suffix `branch_staging_branch` (underscore) written.** Per iceberg.apache.org/docs/latest/spark-writes/, suffix is literal `branch_<exact-name>`. Engineer copy-paste targets nonexistent branch.
+2. **fast_forward arg order REVERSED.** Responder wrote `branch => 'staging-branch', to => 'main'`. Per iceberg.apache.org/docs/latest/spark-procedures/, signature is `fast_forward(table, branch, to)` where `branch` = TARGET being fast-forwarded, `to` = SOURCE whose tip is taken. WAP-publish staging→main should be `branch => 'main', to => 'staging-branch'`. The responder's args are inverted — they would either error or move staging's pointer up to main's tip (abandoning the staging work instead of publishing it).
+
+**Pattern observation across iter441-442-443 on Iceberg branches:** The teacher's fixes are landing one detail layer at a time — iter441 fixed Spark-vs-Trino confusion, iter442 fixed fabricated SQL forms `(BRANCH 'x')`/`MERGE BRANCH`, iter443 surfaces wrong args inside the right procedure. The remedy is a SINGLE comprehensive end-to-end canonical example in r17 (or wherever the branch DDL content lives) with EXPLICIT arg-name mnemonic and DO-NOT-WRITE blocks at each detail level. Concrete teacher action items in §"Teacher actions next" above.
+
+**Q3 federation BUFFER: STRONG PASS 4.78125.** Continues marginal recovery — margin +0.0026 → +0.0035 (+0.0009). 2nd consecutive iter of buffer expansion after the iter441 contraction.
+
+**Q4 ANALYZE/CBO: STRONG PASS 4.875.** Canonical answer — `ANALYZE iceberg.analytics.events` no TABLE keyword + `WITH(columns=ARRAY[...])` + Puffin NDV + `join_reordering_strategy=AUTOMATIC` + `drop_extended_stats` EXECUTE procedure before column-subset re-analyze. All verified per trino.io.
+
+**Loop status:** PASSED stays on aggregate (all required topics still above thresholds), federation margin marginally restored for 2nd consecutive iter, Q1 chronic-failure RESOLVED, BUT new confident-inaccuracy datapoint on Q2 syntax-detail layer. state.json `passed: true` stays.
 
 **Other key verifications this iter:**
-- Trino EXPLAIN pushdown signature: `constraint = {...}` inside `TableScan` (pushed) vs `Filter` / `ScanFilterProject` operator above (not pushed) — verified per trino.io/docs/current/optimizer/pushdown.html
-- `EXPLAIN ANALYZE` has ONLY `VERBOSE` option; ALWAYS executes — verified per trino.io/docs/current/sql/explain-analyze.html (FABRICATION of `(ANALYZE false)` confirmed)
-- `EXPLAIN (TYPE VALIDATE)` returns single boolean column `Valid`, validates without executing — verified per trino.io/docs/current/sql/explain.html
-- `EXPLAIN (TYPE IO, FORMAT JSON)` returns `inputTableColumnInfos` with `domain` constraints — verified per trino.io/docs/current/sql/explain.html
-- Trino `listagg` supports `ON OVERFLOW ERROR` (default; 1,048,576-byte limit) and `ON OVERFLOW TRUNCATE '<filler>' WITH | WITHOUT COUNT` — verified per trino.io/docs/current/functions/aggregate.html
-- Iceberg-Spark branch DDL: `ALTER TABLE ... CREATE BRANCH name [AS OF VERSION snapshot_id]` / `DROP BRANCH name` — verified per iceberg.apache.org/docs/latest/spark-ddl/
-- Iceberg-Spark branch writes: suffix on table identifier `INSERT INTO t.branch_x` OR WAP session config `SET spark.wap.branch=x` — verified per iceberg.apache.org/docs/latest/spark-writes/
-- Iceberg-Spark branch fast-forward: `CALL catalog.system.fast_forward('table', 'main', 'audit-branch')` procedure — verified per iceberg.apache.org/docs/latest/branching/
-- Trino `FOR VERSION AS OF 'branch_name'` for branch-time-travel reads — verified per trino.io/docs/current/connector/iceberg.html
+- `EXPLAIN (TYPE VALIDATE)` returns boolean `Valid`, no execution — verified per trino.io/docs/current/sql/explain.html
+- `EXPLAIN (TYPE IO, FORMAT JSON)` returns `inputTableColumnInfos` with `domain.ranges` — verified per trino.io/docs/current/sql/explain.html
+- `EXPLAIN ANALYZE` has ONLY `VERBOSE` option; ALWAYS executes — verified per trino.io/docs/current/sql/explain-analyze.html (no fabricated options surfaced this iter)
+- Iceberg `fast_forward(table, branch, to)` signature with `branch` = target, `to` = source — VERIFIED per iceberg.apache.org/docs/latest/spark-procedures/ (responder REVERSED — LOAD-BEARING inaccuracy)
+- Iceberg branch suffix is literal `branch_<exact-name>` — VERIFIED per iceberg.apache.org/docs/latest/spark-writes/ (responder silently converted hyphen to underscore)
+- Trino dynamic filtering INNER + RIGHT joins only; `dynamicFilterSplitsProcessed` in EXPLAIN ANALYZE — verified per trino.io/docs/current/admin/dynamic-filtering.html
+- Trino `join_reordering_strategy=AUTOMATIC` enumerates orders + stats-based cost, fallback ELIMINATE_CROSS_JOINS — verified per trino.io/docs/current/optimizer/cost-based-optimizations.html
+- Trino `ANALYZE <table>` no TABLE keyword + `WITH(columns=ARRAY[...])` — verified per trino.io/docs/current/sql/analyze.html
+- Puffin NDV sketch storage — verified per trino.io/docs/current/optimizer/statistics.html

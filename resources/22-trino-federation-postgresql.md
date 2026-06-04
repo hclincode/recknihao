@@ -3037,6 +3037,34 @@ See Section 2A.6 for the analogous MySQL `system.query()` recipe and Section 9 f
 
 ### 3.4 How to verify pushdown actually happens — `EXPLAIN`
 
+> **CANONICAL EXPLAIN-MODES REFERENCE CARD — paste this verbatim when an engineer asks "how do I validate generated SQL without running it?", "how do I preview what a query will scan?", or "how do I confirm my filter pushed to Postgres?".** **Verified against [trino.io/docs/current/sql/explain.html](https://trino.io/docs/current/sql/explain.html) + [trino.io/docs/current/sql/explain-analyze.html](https://trino.io/docs/current/sql/explain-analyze.html).** This card is the canonical source-of-truth for Trino's four EXPLAIN modes — they answer FOUR DIFFERENT operational questions and an engineer must NEVER conflate them:
+>
+> | Mode | Exact syntax | What it returns | Executes the query? | Use it when |
+> |---|---|---|---|---|
+> | **VALIDATE** | `EXPLAIN (TYPE VALIDATE) <query>` | A single boolean column `Valid`. Errors out on parser/semantic failure (unknown keywords, missing tables, type mismatches). | **NO — no plan produced, no data touched.** | Validate a generated SQL string (BI tool output, templated dbt query, user input) cheaply before submitting to the cluster. **This IS Trino's built-in syntax/semantic checker.** |
+> | **IO (FORMAT JSON)** | `EXPLAIN (TYPE IO, FORMAT JSON) <query>` | JSON document with `inputTableColumnInfos[]` listing every accessed table + per-column `columnConstraints` with `domain.ranges[]` showing the value bounds that will be requested. | **NO — CBO walks the plan only; no scan, no execution.** | Preview what the query will scan AND verify predicate-pushdown impact at plan time. If a WHERE-clause column appears in `columnConstraints` with a `domain` → that predicate pushed. If missing → it did NOT push. |
+> | **(default) / DISTRIBUTED** | `EXPLAIN <query>` or `EXPLAIN (TYPE DISTRIBUTED) <query>` | The textual distributed plan: TableScan / Filter / ScanFilterProject / Project / Aggregate / Join / Exchange nodes with operator annotations. | **NO — plan only.** | Inspect predicate-pushdown structure (constraint INSIDE TableScan = pushed; Filter/ScanFilterProject node ABOVE TableScan = NOT pushed), join order, distribution type, dynamic-filter wiring. |
+> | **EXPLAIN ANALYZE** | `EXPLAIN ANALYZE [VERBOSE] <query>` | Plan with runtime per-operator stats (`Input:` rows, `Output:` rows, CPU, Wall, `Physical Input:`, `dynamicFilterSplitsProcessed`). | **YES — the query EXECUTES IN FULL.** A 30-minute query takes 30 minutes to diagnose. | Confirm at RUNTIME that pushdown worked, DF fired, and the actual row reduction matches expectations. The ONLY documented option is `VERBOSE` — no other modifiers exist. |
+>
+> **The two-step recommended workflow when an engineer asks "is my query plan right?"**:
+> 1. **`EXPLAIN (TYPE VALIDATE) <query>`** — does it even parse and resolve? (milliseconds, no execution).
+> 2. **`EXPLAIN (TYPE IO, FORMAT JSON) <query>`** OR **`EXPLAIN (TYPE DISTRIBUTED) <query>`** — what will it scan, and did my predicates push? (seconds, no execution).
+> Only escalate to `EXPLAIN ANALYZE` once you NEED runtime numbers and are willing to pay the full execution cost.
+>
+> > **DO-NOT-WRITE forms (these are FABRICATED — they fail to parse in Trino 467 and an engineer who copy-pastes them gets a SQL error):**
+> >
+> > 1. **`EXPLAIN ANALYZE (ANALYZE false) <query>`** — **FABRICATED.** There is NO `(ANALYZE false)` option. Per [trino.io/docs/current/sql/explain-analyze.html](https://trino.io/docs/current/sql/explain-analyze.html), the ONLY documented option for `EXPLAIN ANALYZE` is `VERBOSE`. `EXPLAIN ANALYZE` ALWAYS executes the query. If you want plan-only-no-execute, drop the word `ANALYZE` entirely and use plain `EXPLAIN <query>` (with optional `(TYPE DISTRIBUTED)` / `(TYPE IO, FORMAT JSON)` / `(TYPE VALIDATE)`).
+> > 2. **`EXPLAIN (EXECUTE false) <query>`** — **FABRICATED.** No such option exists. Same fix: use plain `EXPLAIN` or one of the documented TYPE modes.
+> > 3. **"Trino has no built-in syntax-checker."** / **"Trino has no validate-syntax-without-execute command."** — **WRONG.** `EXPLAIN (TYPE VALIDATE) <query>` IS that command. It returns a single boolean column `Valid`, validates parser + identifier resolution + type checking, and does NOT execute. Per [trino.io/docs/current/sql/explain.html](https://trino.io/docs/current/sql/explain.html).
+> > 4. **"Use `SELECT ... LIMIT 1` (or `LIMIT 0`) to cheaply validate a query."** — **WRONG approach.** `LIMIT 1` executes the query (the planner builds a distributed plan, splits are dispatched, source connectors open, scans start; the query just stops after one row reaches the client). `LIMIT 0` ALSO executes (the planner runs and the query is distributed; only the result set is empty). Neither is validation. **Use `EXPLAIN (TYPE VALIDATE) <query>` instead** — it stops after parse + analyzer, never reaches the planner, never touches data.
+> >
+> > **Q-pattern matcher — when the user's question matches any of these phrasings, the canonical answer above is the right one (NOT federation-specific pushdown content, NOT `$partitions` metadata-table queries, NOT `EXPLAIN ANALYZE`):**
+> > - "How do I cheaply validate generated/templated SQL without running it?" → **`EXPLAIN (TYPE VALIDATE) <query>`**.
+> > - "Is there a Trino syntax checker / SQL linter / pre-flight validator?" → **YES — `EXPLAIN (TYPE VALIDATE)`.**
+> > - "How do I preview what tables/columns a query will scan?" → **`EXPLAIN (TYPE IO, FORMAT JSON) <query>`** — read `inputTableColumnInfos[]`.
+> > - "How do I confirm my WHERE filter pushed down to Postgres without running the query?" → **`EXPLAIN (TYPE IO, FORMAT JSON) <query>`** — predicate column appears in `columnConstraints` with `domain.ranges[]` → pushed. AND/OR **`EXPLAIN (TYPE DISTRIBUTED) <query>`** — predicate inside TableScan's `constraint on [cols]` block = pushed; standalone `Filter` or `ScanFilterProject` node above the TableScan = NOT pushed.
+> > - "Does EXPLAIN ANALYZE have an option to skip execution?" → **NO.** The only option is `VERBOSE`. `EXPLAIN ANALYZE` ALWAYS executes. For plan-only inspection use plain `EXPLAIN` (or one of its TYPE modes).
+
 > **QUICK VISUAL REFERENCE — real Trino EXPLAIN output, two-line cheat sheet.** Before diving into the detailed examples below, this is the answer most engineers need at a glance when reading real Trino 467 EXPLAIN output:
 >
 > - **Pushdown SUCCEEDED:** the predicate appears as **`constraint on [columns]` indented underneath the `TableScan` node** (in `EXPLAIN (TYPE DISTRIBUTED)` — the canonical mode; `TYPE LOGICAL` is **deprecated** per [trino.io/docs/current/sql/explain.html](https://trino.io/docs/current/sql/explain.html) and slated for removal). **NO `Filter` or `ScanFilterProject` node sits above the `TableScan`.** The TableScan is the topmost node for that branch of the plan.
