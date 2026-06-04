@@ -1587,26 +1587,51 @@ SELECT "$partition" FROM iceberg.tenant_acme.events LIMIT 1;
 SELECT "$file_modified_time" FROM iceberg.tenant_acme.events LIMIT 1;
 ```
 
-### `system.metadata.table_properties` — Iceberg `location` leak via the system catalog
+### `system.metadata.*` — per-table location leak surfaces (the right framing)
 
-The `system` catalog deny rule from the earlier "system catalog isolation" section covers `system.runtime.*` (the query/transaction/nodes tables) and is the right shape — but it is worth calling out specifically that `system.metadata.table_properties` also belongs on the deny list. For every Iceberg table the principal can see, this view returns the table's full property bag — including the Iceberg **`location`** property, which is the MinIO warehouse path of the table:
+The `system` catalog deny rule from the earlier "system catalog isolation" section covers `system.runtime.*` (the query/transaction/nodes tables) and is the right shape — but the `system.metadata.*` schema also belongs on the same deny list, for a separate reason that needs to be stated PRECISELY because the column schemas are easy to mis-remember.
+
+**What `system.metadata.table_properties` actually exposes (verified against [trino.io/docs/current/connector/system.html](https://trino.io/docs/current/connector/system.html) and [trinodb/trino #14000](https://github.com/trinodb/trino/issues/14000)).** This view has exactly these columns:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `catalog_name` | VARCHAR | The catalog this property is defined for (e.g., `iceberg`, `hive`). |
+| `property_name` | VARCHAR | The property name supported in `CREATE TABLE WITH (...)`. |
+| `default_value` | VARCHAR | The default value if the property is not set at table creation. |
+| `type` | VARCHAR | The Trino type of the property (e.g., `varchar`, `array(varchar)`, `boolean`). |
+| `description` | VARCHAR | Human-readable description of what the property does. |
+
+**Critical correction (load-bearing).** This view returns ONE ROW per (catalog, property_name) — meaning it tells you "the iceberg connector accepts a `partitioning` property of type `array(varchar)`". It does **NOT** have `table_schema` / `table_name` / `property_key` / `property_value` columns, and it does **NOT** have per-table rows. **A query like `SELECT property_key, property_value FROM system.metadata.table_properties WHERE table_name = 'events'` fails immediately with `Column 'property_key' cannot be resolved`.** This view alone is **NOT** a per-table location-leak surface for Iceberg tables — it leaks the connector's property schema, not any specific table's bound location.
+
+**The ACTUAL per-table location-leak surfaces for an Iceberg table (each is a separate exfil shape that OPA must block):**
+
+| Surface | What a tenant can extract | OPA mitigation |
+|---|---|---|
+| `SHOW CREATE TABLE iceberg.analytics.events` (Trino DDL command, not a SELECT) | The full `WITH (...)` clause INCLUDING the `location = 's3a://...'` value bound to THIS table | OPA must deny `ShowCreateTable` for tenant principals on any table they shouldn't see locations for. The Trino OPA plugin issues a `SHOW_CREATE_TABLE` action that Rego can block. |
+| `SELECT * FROM iceberg.analytics."events$properties"` (Iceberg `$properties` metadata table — base-table-scoped) | Per-table key/value rows for properties set on the table, which on Iceberg can include path-shaped values for downstream tooling | OPA must deny `SELECT` on `$`-suffix metadata tables — the same rule already documented in the "Iceberg metadata table leak" section above (the `$partitions`, `$files`, `$snapshots`, `$properties` family). |
+| The hidden `"$path"` column on the BASE table (`SELECT "$path" FROM iceberg.tenant_acme.events`) | The full MinIO object path of each row's data file | OPA `FilterColumns` rule denying `"$path"` — already documented in the "Iceberg hidden columns" section above. |
+| `system.metadata.materialized_view_properties` | Has per-MV rows including storage-table location for materialized views (different schema from `table_properties`; this one IS per-object) | Catalog-level `system` deny covers it. |
+| `system.metadata.table_properties` (this view) | The connector's PROPERTY SCHEMA — what keys exist, defaults, types — NOT a specific table's bound `location`. Useful intelligence for an attacker preparing other attacks, but not a direct location leak. | Same catalog-level `system` deny covers it. |
+
+**The fix is the catalog-level `system` deny rule already documented above** — it covers `system.runtime.*` AND `system.metadata.*` in one shot. The reason to call this out explicitly: engineers reviewing a partial OPA policy sometimes see "the deny rule says `system.runtime.queries`" and assume `system.metadata.*` is a separate concern. It is not — both live in the same `system` catalog and are both blocked by a single `catalog = "system"` deny. **But denying `system.metadata.*` is NOT a substitute for the OTHER mitigations above** — `SHOW CREATE TABLE`, `"<table>$properties"`, and the hidden `"$path"` column are SEPARATE leak surfaces that must each be denied independently.
+
+**Verification recipe (add to CI alongside the other system-catalog tests).** As a tenant service account, each of these must fail with Access Denied:
 
 ```sql
--- For a tenant principal with SELECT on tenant_acme.events:
-SELECT property_name, property_value
-FROM system.metadata.table_properties
-WHERE catalog_name = 'iceberg'
-  AND schema_name  = 'analytics'
-  AND table_name   = 'events';
--- Returns rows including:
---   ('location', 's3a://lakehouse/warehouse/analytics/events')
---   ('format-version', '2')
---   ...
+-- Catalog-level system.metadata.* deny (single rule covers all of these):
+SELECT * FROM system.metadata.table_properties LIMIT 1;
+SELECT * FROM system.metadata.materialized_view_properties LIMIT 1;
+SELECT * FROM system.metadata.analyze_properties LIMIT 1;
+
+-- Per-table surfaces (separate rules per the sections above):
+SHOW CREATE TABLE iceberg.analytics.events;
+SELECT * FROM iceberg.analytics."events$properties" LIMIT 1;
+SELECT "$path" FROM iceberg.analytics.events LIMIT 1;
 ```
 
-Once a tenant has the `location` value, they have the MinIO path to attempt direct object download — the same exfil pathway as the hidden `"$path"` column and the `$files` metadata table, but reachable through a different surface. The same applies to `system.metadata.materialized_view_properties` (and any other `system.metadata.*` view) — anything that returns a `location`, file path, or storage URI is in scope.
+If any of these returns a result instead of Access Denied, treat it as a P0 — each one is an independent location-leak path.
 
-**The fix is the catalog-level `system` deny rule already documented above** — it covers `system.runtime.*` AND `system.metadata.*` in one shot. The reason to call this out explicitly: engineers reviewing a partial OPA policy sometimes see "the deny rule says `system.runtime.queries`" and assume `system.metadata.*` is a separate concern. It is not — both live in the same `system` catalog and are both blocked by a single `catalog = "system"` deny. **Confirm both surfaces are covered when you write or review the OPA rule**, and include `SELECT * FROM system.metadata.table_properties LIMIT 1` in the verification recipe (as already shown in the system catalog section above).
+> **For engineers asking "how do I see THIS table's partition spec / location / properties" (a legitimate internal question, not a tenant-attack scenario):** the canonical surfaces are `SHOW CREATE TABLE iceberg.<schema>.<table>` (most useful, shows the full bound `WITH (...)` clause) and `SELECT key, value FROM iceberg.<schema>."<table>$properties"` (structured, returns key/value rows). See **Resource 10 §"LEADING CANONICAL RECIPE — How do I see this Iceberg table's CURRENT partition spec and properties on Trino 467?"** for the full inspection runbook. **Never** use `system.metadata.table_properties` as a per-table query — its column schema does not support that and the view is per-connector, not per-table.
 
 ### CTAS / INSERT INTO ... SELECT — the write-side exfiltration surface
 

@@ -140,6 +140,133 @@ These are the absolutes most often stated incorrectly about Iceberg partitioning
 
 ---
 
+## LEADING CANONICAL RECIPE — "How do I see this Iceberg table's CURRENT partition spec and properties on Trino 467?" (read this FIRST for inspection questions)
+
+> **Keywords this block answers:** "show partitioning of an Iceberg table", "what's the current partition spec", "see table properties", "inspect Iceberg table on Trino", "what columns is this table partitioned by", "is partition evolution applied yet". **The FIRST tool to reach for is `SHOW CREATE TABLE`; the metadata tables `"<table>$properties"` and `"<table>$partitions"` cover the structured follow-ups.** Every form below has been verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) ("Metadata tables" section) and [trino.io/docs/current/connector/system.html](https://trino.io/docs/current/connector/system.html) (System connector).
+>
+> ### Step 1 (canonical) — `SHOW CREATE TABLE` shows the bound partition spec verbatim
+>
+> ```sql
+> -- This is the SINGLE most useful command for "what's the current partition spec".
+> -- The Trino DDL docs explicitly state: "you can see the value with SHOW CREATE TABLE".
+> SHOW CREATE TABLE iceberg.analytics.events;
+> ```
+>
+> Expected output (abridged) — the `WITH (...)` clause contains the BOUND partition spec and properties for THIS table:
+>
+> ```sql
+> CREATE TABLE iceberg.analytics.events (
+>    event_id        BIGINT,
+>    tenant_id       VARCHAR,
+>    occurred_at     TIMESTAMP(6) WITH TIME ZONE,
+>    payload         VARCHAR
+> )
+> WITH (
+>    partitioning   = ARRAY['day(occurred_at)', 'bucket(tenant_id, 64)'],
+>    format         = 'PARQUET',
+>    format_version = 2,
+>    location       = 's3a://lakehouse/warehouse/analytics/events'
+> );
+> ```
+>
+> Read the `partitioning = ARRAY[...]` line — that is the current spec.
+>
+> ### Step 2 (structured) — `"<table>$properties"` returns the table's BOUND key/value properties as rows
+>
+> ```sql
+> -- Returns key/value pairs of properties actually set on the table.
+> -- Columns: key VARCHAR, value VARCHAR (both NOT NULL).
+> SELECT key, value
+> FROM iceberg.analytics."events$properties"
+> ORDER BY key;
+> ```
+>
+> Expected output shape — one row per property bound on the table (`write.format.default`, `format-version`, `write.distribution-mode`, custom keys, etc.). The `partitioning` value itself is NOT a row in this view (it lives in the Iceberg schema's `partition-specs` metadata, surfaced via `SHOW CREATE TABLE`), but the surrounding properties (`write.target-file-size-bytes`, `write.distribution-mode`, `write.metadata.delete-after-commit.enabled`) ARE here. Use this when you need to programmatically diff property bags between tables or assert a property in CI.
+>
+> ### Step 3 (structured) — `"<table>$partitions"` enumerates partition VALUES with per-partition counts/sizes
+>
+> ```sql
+> -- Columns (verified against trino.io/docs/current/connector/iceberg.html):
+> --   partition        ROW(...)       -- struct with one field per partition column
+> --   record_count     BIGINT
+> --   file_count       INTEGER
+> --   total_size       BIGINT
+> --   data             ROW(...)       -- per-column min/max/null_count statistics
+> SELECT
+>   partition,
+>   record_count,
+>   file_count,
+>   total_size
+> FROM iceberg.analytics."events$partitions"
+> ORDER BY partition DESC
+> LIMIT 20;
+>
+> -- To access a specific partition field by name, dot into the struct:
+> SELECT
+>   partition.tenant_id     AS tenant_bucket,
+>   partition.occurred_at_day AS day,         -- transform-named field
+>   record_count,
+>   file_count
+> FROM iceberg.analytics."events$partitions"
+> WHERE partition.tenant_id = 42
+> ORDER BY day DESC;
+> ```
+>
+> > **Field-name caveat for transforms.** When the partition spec contains a transform (e.g., `day(occurred_at)`, `bucket(tenant_id, 64)`), the resulting field name inside the `partition` struct is **transform-derived**, not the source column name. For `day(occurred_at)` the field is typically named `occurred_at_day`; for `bucket(tenant_id, 64)` it is `tenant_id_bucket`. If a dotted access fails, run the unqualified `SELECT partition FROM ...$partitions LIMIT 1` first and read the struct field names off the output — do NOT guess.
+>
+> ### DO-NOT-WRITE — banned forms for "see this table's partition spec"
+>
+> ```sql
+> -- WRONG (a) — this query FABRICATES columns. system.metadata.table_properties
+> -- is a REAL Trino system table, BUT its columns are
+> --   (catalog_name VARCHAR, property_name VARCHAR, default_value VARCHAR,
+> --    type VARCHAR, description VARCHAR)
+> -- per https://trino.io/docs/current/connector/system.html.
+> -- There is NO table_schema column, NO table_name column, NO property_key column,
+> -- NO property_value column. Pasting this fails IMMEDIATELY at parse time with
+> --   Column 'property_key' cannot be resolved
+> SELECT property_key, property_value
+> FROM system.metadata.table_properties
+> WHERE table_schema = 'analytics'
+>   AND table_name   = 'events'
+>   AND property_key = 'partitioning';     -- WRONG: ALL FOUR REFERENCED COLUMNS ARE FABRICATED.
+> ```
+>
+> > **Why the misconception keeps surfacing.** `system.metadata.table_properties` IS a real Trino system view — it just exposes a DIFFERENT thing. It enumerates the **AVAILABLE table-property NAMES** that each connector supports (e.g., for the `iceberg` catalog, it lists `partitioning`, `format`, `format_version`, `location`, `write.target-file-size-bytes`, ... — the menu of legal `WITH (...)` keys). It does **NOT** have per-table rows and does **NOT** expose the BOUND values for a specific table. The right query against it looks like this (verified against [trino.io/docs/current/connector/system.html](https://trino.io/docs/current/connector/system.html) and [trinodb/trino #14000](https://github.com/trinodb/trino/issues/14000)):
+> >
+> > ```sql
+> > -- CORRECT use of system.metadata.table_properties — list the property NAMES the Iceberg connector accepts.
+> > -- Real columns: catalog_name, property_name, default_value, type, description.
+> > SELECT catalog_name, property_name, default_value, type
+> > FROM system.metadata.table_properties
+> > WHERE catalog_name = 'iceberg'
+> > ORDER BY property_name;
+> > ```
+> >
+> > **To see the BOUND partition spec for a SPECIFIC TABLE, use `SHOW CREATE TABLE` (step 1) or `"<table>$properties"` (step 2). To enumerate partition VALUES, use `"<table>$partitions"` (step 3). The catalog-level `system.metadata.*` views are NEVER the right surface for "what is THIS table's partition spec".**
+>
+> ### Other banned forms
+>
+> | DO NOT write this | What is wrong | The right answer |
+> |---|---|---|
+> | `SELECT * FROM system.metadata.table_properties WHERE table_name = 'events'` | Same fabrication as above — no `table_name` column on this view. | `SHOW CREATE TABLE iceberg.analytics.events` |
+> | `SELECT partitioning FROM information_schema.tables WHERE table_name = 'events'` | Trino's `information_schema.tables` (per [trino.io/docs/current/connector/system.html](https://trino.io/docs/current/connector/system.html)) exposes `table_catalog, table_schema, table_name, table_type` — no `partitioning` column. | `SHOW CREATE TABLE iceberg.analytics.events` |
+> | `DESCRIBE iceberg.analytics.events` to see partitioning | `DESCRIBE` shows column names + types ONLY, not the partition spec. Engineers running `DESCRIBE` and seeing no partition info sometimes conclude the table is unpartitioned. | `SHOW CREATE TABLE iceberg.analytics.events` |
+> | `SELECT * FROM iceberg.analytics.events_partitions` (no quoting, underscore form) | The Iceberg connector requires the `$`-suffix metadata table to be quoted as `"events$partitions"` — without quoting, Trino looks for a real table named `events_partitions`. | `SELECT * FROM iceberg.analytics."events$partitions"` |
+> | `SELECT * FROM iceberg.analytics.events."$partitions"` (split quoting) | The whole `events$partitions` token must sit inside ONE pair of double quotes; splitting the quote produces `Column 'partition' cannot be resolved` or schema errors. | `SELECT * FROM iceberg.analytics."events$partitions"` |
+>
+> ### Meta-rule (memorize this)
+>
+> > **If you want to introspect a SPECIFIC TABLE's properties / partition spec / column statistics, use `SHOW CREATE TABLE` or the `"<table>$<metatable>"` Iceberg metadata tables (`$properties`, `$partitions`, `$files`, `$snapshots`, ...). NEVER use the catalog-level `system.metadata.*` views — those describe what the CONNECTOR supports, not what THIS TABLE is bound to.**
+>
+> ### Cross-references
+>
+> - Resource 17 §"Iceberg metadata tables cheat sheet" — full column lists for `$snapshots`, `$files`, `$partitions`, `$manifests`, `$history`, `$refs`, `$properties`.
+> - Resource 17 §"Metadata-table quoting — canonical Trino syntax" — the canonical quoting rule for every `$`-suffix table.
+> - Resource 24 §"Statistics inspection" — `SHOW STATS FOR <table>` for CBO statistics (different surface, different question).
+
+---
+
 ## PARTITIONS-ARE-NOT-FILES — read before estimating file counts
 
 > **GUARDRAIL — Partition count NEVER equals file count.** A *partition* in Iceberg is a **logical grouping** (one distinct partition-key value, e.g., `day=2026-05-01` or `(day=2026-05-01, tenant_id='acme')`). The number of *data files* inside that partition is a separate, downstream quantity driven by three independent forces. **A partition typically holds many data files.** State this in every answer that estimates file counts from partition counts.

@@ -540,6 +540,52 @@ The `customer_id` here is a 32-character MD5 hex VARCHAR (e.g., `'7d3f...e2a1'`)
 - §4.5 query-shape table: `SELECT my_seq.NEXTVAL FROM DUAL` row says "NO equivalent — sequences don't exist in Trino. Use hash-based surrogate key."
 - §7 cutover checklist item 5 (line 888): surrogate-key stability — hash-based keys are stable across re-runs but will NOT match the Oracle-generated values; plan a one-time mapping table or re-keying pass.
 
+### 4.5B ROWNUM CANONICAL FORMS — Oracle row-limiting and pagination (READ THIS when auditing legacy Oracle top-N / pagination code)
+
+**Why this section exists.** The §4.5 one-liner `WHERE ROWNUM <= 10 → LIMIT 10 (after ORDER BY)` is correct as a destination, but the Oracle SOURCE-side examples engineers paste into migration audits frequently use INVALID Oracle syntax. The most common mistake is `SELECT ... FROM t ORDER BY col WHERE ROWNUM <= N` — that is a parse error in Oracle (and ANSI: `ORDER BY` must come AFTER `WHERE`). The slightly subtler mistake is `SELECT ... FROM t WHERE ROWNUM <= N ORDER BY col` — syntactically valid in Oracle, but **semantically wrong**: Oracle assigns `ROWNUM` **BEFORE** `ORDER BY`, so you get an unspecified set of N rows that are THEN sorted. **Neither form is "Oracle top-N".** This section establishes the canonical Oracle forms so engineers can recognize them in legacy code and translate correctly.
+
+**The non-negotiable Oracle ROWNUM evaluation order (verified against [docs.oracle.com/en/database/oracle/oracle-database/19/sqlrf/ROWNUM-Pseudocolumn.html](https://docs.oracle.com/en/database/oracle/oracle-database/19/sqlrf/ROWNUM-Pseudocolumn.html) and Tom Kyte's canonical post at [asktom.oracle.com/Misc/oramag/on-rownum-and-limiting-results.html](https://asktom.oracle.com/Misc/oramag/on-rownum-and-limiting-results.html)):**
+
+> Oracle assigns `ROWNUM` to each row **AS IT IS RETRIEVED**, BEFORE `ORDER BY` is applied. This means `WHERE ROWNUM <= N` on the same query level as `ORDER BY` picks an UNSPECIFIED N rows from the underlying table and then sorts them. **To get the TOP-N-by-order, you MUST sort first in an inline view and apply `ROWNUM` in the outer query.**
+
+#### Canonical Oracle row-limiting forms — read this table, audit your legacy SQL against it
+
+| Oracle source form | Valid Oracle? | What it actually does | Canonical Trino 467 translation |
+|---|---|---|---|
+| `SELECT * FROM events ORDER BY event_id DESC WHERE ROWNUM <= 100` | **INVALID** — `ORDER BY` cannot appear before `WHERE`. Parse error: `ORA-00933: SQL command not properly ended`. | Nothing — query never runs. | n/a — fix the Oracle source first. If the engineer's intent is "top 100 by event_id DESC", translate to `SELECT * FROM events ORDER BY event_id DESC LIMIT 100`. |
+| `SELECT * FROM events WHERE ROWNUM <= 100 ORDER BY event_id DESC` | Valid syntax | **SEMANTICALLY WRONG for top-N.** Picks 100 unspecified rows (full-table-scan order), then sorts THOSE 100 by `event_id DESC`. Does NOT return the top 100 from the whole table. | If the intent was top-N: `SELECT * FROM events ORDER BY event_id DESC LIMIT 100`. If the intent was "any 100 rows, sorted for display" (rare), use `SELECT * FROM (SELECT * FROM events LIMIT 100) ORDER BY event_id DESC`. |
+| `SELECT * FROM (SELECT * FROM events ORDER BY event_id DESC) WHERE ROWNUM <= 100` | Valid syntax | **CANONICAL Oracle 11g top-N pattern.** Inner inline view sorts the full table; outer `WHERE ROWNUM <= 100` takes the first 100 from the sorted stream. This is what migration audits SHOULD find. | `SELECT * FROM events ORDER BY event_id DESC LIMIT 100` |
+| `SELECT * FROM events ORDER BY event_id DESC FETCH FIRST 100 ROWS ONLY` | Valid syntax (Oracle 12c+) | **CANONICAL Oracle 12c+ ANSI row-limiting clause.** Equivalent to the inline-view wrap, much cleaner. | `SELECT * FROM events ORDER BY event_id DESC LIMIT 100` |
+| `SELECT * FROM (SELECT a.*, ROWNUM rnum FROM (SELECT * FROM events ORDER BY event_id DESC) a WHERE ROWNUM <= 100) WHERE rnum >= 51` | Valid syntax | **CANONICAL Oracle 11g pagination pattern.** Two-level inline view: inner sorts, middle assigns ROWNUM and caps at upper bound, outer filters to lower bound. Returns rows 51-100 in sorted order. | `SELECT * FROM events ORDER BY event_id DESC OFFSET 50 LIMIT 50` (or `LIMIT 50 OFFSET 50`). |
+| `SELECT * FROM events ORDER BY event_id DESC OFFSET 50 ROWS FETCH NEXT 50 ROWS ONLY` | Valid syntax (Oracle 12c+) | Canonical Oracle 12c+ pagination via the ANSI clause. | `SELECT * FROM events ORDER BY event_id DESC OFFSET 50 LIMIT 50` |
+| Keyset pagination: `SELECT * FROM events WHERE event_id < :cursor ORDER BY event_id DESC FETCH FIRST 50 ROWS ONLY` | Valid syntax (Oracle 12c+) | The right pattern for deep pagination — uses an index seek rather than offset-scan. | `SELECT * FROM events WHERE event_id < :cursor ORDER BY event_id DESC LIMIT 50` — identical structure, just `LIMIT` instead of `FETCH FIRST`. |
+
+#### DO-NOT-WRITE — banned Oracle source-dialect examples in migration audits
+
+> | DO NOT show this Oracle source | What is wrong | What to show instead |
+> |---|---|---|
+> | `SELECT * FROM events ORDER BY event_id DESC WHERE ROWNUM <= 100` | INVALID Oracle SQL — parse error. Engineers reading a migration guide should never see invalid Oracle labeled as Oracle. | The canonical Oracle 11g `SELECT * FROM (SELECT * FROM events ORDER BY event_id DESC) WHERE ROWNUM <= 100` OR the Oracle 12c+ `SELECT * FROM events ORDER BY event_id DESC FETCH FIRST 100 ROWS ONLY`. |
+> | `SELECT * FROM events WHERE ROWNUM <= 100 ORDER BY event_id DESC` labeled as "Oracle top-N" | Valid Oracle SQL but **NOT top-N** — picks 100 unspecified rows then sorts them. If a legacy Oracle program has this, it is almost certainly a bug — engineers planning migration should FLAG it, not translate it as if it were top-N. | Audit hint: when you grep Oracle source for `WHERE ROWNUM`, flag any line where `ORDER BY` appears on the SAME query level (not inside an inner subquery) — that program likely had a top-N bug in Oracle that the migration is a good opportunity to fix. |
+> | `SELECT TOP 100 * FROM events ORDER BY event_id DESC` as Oracle | `TOP N` is SQL Server / Sybase syntax, NOT Oracle. Oracle's row-limiting is ROWNUM (11g) or FETCH FIRST (12c+). | Use the canonical Oracle forms in the table above. |
+> | `ROWNUM = N` for N > 1 (e.g., `WHERE ROWNUM = 5` to get "the 5th row") | This NEVER returns a row in Oracle. Oracle assigns ROWNUM incrementally as rows pass the WHERE filter, so the first row that survives WHERE always gets ROWNUM=1; the test `ROWNUM = 5` fails for that row, the row is discarded, and ROWNUM stays at 1 for the next row tested. Only `ROWNUM = 1` works on the bare table; for "the Nth row", use a `row_number() OVER (...)` analytic function. | Trino: `SELECT * FROM (SELECT *, row_number() OVER (ORDER BY event_id DESC) AS rn FROM events) WHERE rn = 5;` |
+
+#### Trino-side canonical forms (the destination)
+
+| Intent | Trino 467 form |
+|---|---|
+| First N by order | `SELECT * FROM events ORDER BY event_id DESC LIMIT 100` |
+| Page M through M+N | `SELECT * FROM events ORDER BY event_id DESC OFFSET 50 LIMIT 50` (`OFFSET` clause goes BEFORE `LIMIT`, per [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html)) |
+| Keyset pagination (recommended for deep pages) | `SELECT * FROM events WHERE event_id < :cursor ORDER BY event_id DESC LIMIT 50` |
+| Top-N-per-group | `SELECT * FROM (SELECT *, row_number() OVER (PARTITION BY tenant_id ORDER BY event_id DESC) AS rn FROM events) WHERE rn <= 10` (Trino 467 has NO `QUALIFY` — see resource 23) |
+| The Nth row exactly | `SELECT * FROM (SELECT *, row_number() OVER (ORDER BY event_id DESC) AS rn FROM events) WHERE rn = 5` |
+
+> **Why `LIMIT` is safe in Trino while `ROWNUM` was deterministic-only-with-inline-view in Oracle.** Trino's `LIMIT` clause is defined to apply AFTER `ORDER BY` (per [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) — "LIMIT count [OFFSET start]" appears after ORDER BY in the canonical clause order). There is no Oracle-style "ROWNUM is assigned before ORDER BY" trap; `ORDER BY ... LIMIT N` in Trino does exactly what an engineer reading it expects.
+
+**Cross-references.**
+- §4.5 query-shape table — the one-liner translation for `WHERE ROWNUM <= 10`.
+- Resource 23 §"Trino 467 SQL-dialect anti-patterns" — `QUALIFY` is NOT in Trino 467; use the outer-`WHERE rn <= N` pattern for top-N-per-group.
+- Resource 28 §"Pagination patterns" — keyset pagination on big Iceberg tables, plus the row_number-vs-LIMIT distinction in dbt incremental models.
+
 ### 4.6 DML and procedural constructs
 
 | Oracle | Trino + dbt | Notes |
