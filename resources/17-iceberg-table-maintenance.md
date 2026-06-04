@@ -1907,6 +1907,133 @@ A snapshot referenced by any named tag or branch is **protected** from `expire_s
 
 The WAP pattern lets you write data, **audit it**, and only then make it visible to readers — instead of having every ingestion job commit directly to `main` where bad data is immediately seen by every dashboard. On this stack (Iceberg 1.5.2 + Spark + Trino 467), WAP is implemented via **Iceberg branches**. This section covers what branches are, the four-step WAP workflow, and the critical engine-support caveat: **branch DDL is Spark-only on Trino 467**.
 
+> ### CANONICAL END-TO-END WAP WORKED EXAMPLE — copy this whole block verbatim when asked any WAP / branch question
+>
+> **This is the single authoritative WAP example. All scattered branch snippets elsewhere in this resource and in `resources/26-iceberg-concurrent-write-conflicts.md` are pointers back here. Read this whole block before answering ANY question about branch DDL, branch writes, `fast_forward`, or publishing a branch to main.**
+>
+> **Scenario:** Nightly ingestion into `iceberg.analytics.orders`. We want to write today's batch to a side branch, audit it from Trino without exposing it to dashboards, then atomically promote it to `main` if the audit passes.
+>
+> **Branch name convention — use underscores only (`audit_2026_06_04`).** This sidesteps the hyphen-quoting trap entirely. A hyphenated branch name like `audit-2026-06-04` requires backtick-quoting in Spark DDL (`` `audit-2026-06-04` ``) AND in the suffix used by the write form (`` `branch_audit-2026-06-04` ``) because hyphens are not legal in unquoted identifiers. Engineers routinely forget the second set of backticks and the write fails with "branch not found" or silently targets a different name. Recommend underscore-only branch names from the start (`audit_2026_06_04`, `staging`, `wap_run_42`) — no quoting needed anywhere.
+>
+> #### Step 1 — CREATE the branch (Spark only)
+>
+> ```sql
+> -- Spark SQL only. Trino 467 cannot CREATE BRANCH.
+> -- Branch starts at main's current tip; future writes to the branch diverge from main.
+> ALTER TABLE iceberg.analytics.orders
+>   CREATE BRANCH audit_2026_06_04
+>   RETAIN 7 DAYS;
+> ```
+>
+> The `RETAIN 7 DAYS` is optional but recommended — if anyone forgets to drop the branch, Iceberg auto-expires the ref after 7 days. Without backticks because `audit_2026_06_04` is underscore-only.
+>
+> #### Step 2 — WRITE to the branch (Spark only — two equivalent forms)
+>
+> **Form A — suffix on the table identifier (explicit per-statement targeting):**
+>
+> ```sql
+> -- Spark SQL. The suffix is LITERALLY `branch_<exact-branch-name>`.
+> -- For branch `audit_2026_06_04` the suffix is `branch_audit_2026_06_04` (underscores throughout).
+> INSERT INTO iceberg.analytics.orders.branch_audit_2026_06_04
+> SELECT * FROM iceberg.staging.orders_today;
+> ```
+>
+> **Form B — WAP session conf (one config sets the branch for all subsequent writes in the session):**
+>
+> ```sql
+> -- Spark SQL. After SET, every plain INSERT/UPDATE/DELETE/MERGE on the table
+> -- routes to the branch instead of main. Don't forget to clear it at the end.
+> SET spark.wap.branch = audit_2026_06_04;
+>
+> INSERT INTO iceberg.analytics.orders
+> SELECT * FROM iceberg.staging.orders_today;
+>
+> -- After the WAP cycle finishes, clear the conf so later writes don't accidentally
+> -- land on the branch:
+> RESET spark.wap.branch;
+> ```
+>
+> Both forms produce identical results: new snapshots live on `audit_2026_06_04`; `main` is untouched; Trino queries against `iceberg.analytics.orders` (default `main`) still return yesterday's data.
+>
+> #### Step 3 — AUDIT the branch (Trino read-only, no execution side-effects on main)
+>
+> ```sql
+> -- Trino 467. Trino CANNOT create / write / publish / drop branches — only read.
+> -- FOR VERSION AS OF '<branch-name>' resolves the branch ref to its current tip snapshot.
+> SELECT COUNT(*) AS row_count,
+>        MIN(order_date) AS min_date,
+>        MAX(order_date) AS max_date,
+>        COUNT(DISTINCT tenant_id) AS tenant_count
+> FROM iceberg.analytics.orders
+> FOR VERSION AS OF 'audit_2026_06_04';
+>
+> -- Per-tenant sanity check — no tenant doubled, none missing:
+> SELECT tenant_id, COUNT(*) AS rows
+> FROM iceberg.analytics.orders
+> FOR VERSION AS OF 'audit_2026_06_04'
+> GROUP BY tenant_id
+> ORDER BY rows DESC;
+> ```
+>
+> Dashboards continue to read from `main` and see unchanged data throughout the audit. If any audit check fails, skip Step 4 (Publish), go straight to drop-branch, and the bad data never reaches production.
+>
+> #### Step 4 — PUBLISH to main (Spark only — fast_forward procedure)
+>
+> ```sql
+> -- Spark SQL only. Trino 467 cannot run fast_forward.
+> -- Atomic metadata-only commit: moves main's pointer up to audit_2026_06_04's tip.
+> -- After this commit, every Trino query against the table immediately sees the new data.
+> CALL iceberg.system.fast_forward('analytics.orders', 'main', 'audit_2026_06_04');
+> ```
+>
+> **`fast_forward` ARGUMENT MNEMONIC (read this twice — getting these args wrong abandons your work):**
+>
+> **Signature: `fast_forward(table, branch, to)`** where:
+> - `table` (1st arg) = the table identifier (`'analytics.orders'`).
+> - `branch` (2nd arg) = the branch being MOVED — the one whose pointer advances. To publish into `main`, this is `'main'`.
+> - `to` (3rd arg) = the SOURCE whose tip is taken — the branch we want `main` to catch up TO. This is `'audit_2026_06_04'`.
+>
+> **Mnemonic: "fast-forward MAIN to the audit branch."** The subject of the sentence (MAIN) is the `branch` arg (2nd arg). The destination (audit branch) is the `to` arg (3rd arg). The verb is "fast-forward TO." Read the call out loud: "fast-forward main to audit_2026_06_04" — that maps directly to `(table, branch='main', to='audit_2026_06_04')`.
+>
+> Named-args form for clarity: `CALL iceberg.system.fast_forward(table => 'analytics.orders', branch => 'main', to => 'audit_2026_06_04')` — same call, same arg-order, same outcome.
+>
+> #### Step 5 — DROP the branch (Spark only — cleanup)
+>
+> ```sql
+> -- Spark SQL only. Release the branch ref now that main has caught up.
+> ALTER TABLE iceberg.analytics.orders DROP BRANCH audit_2026_06_04;
+> ```
+>
+> If you set `RETAIN 7 DAYS` in Step 1, this drop is belt-and-suspenders — Iceberg would auto-expire it after 7 days anyway.
+>
+> ---
+>
+> #### DO-NOT-WRITE block — these are FABRICATED or LOAD-BEARING-WRONG; an engineer who copy-pastes any of them either errors, abandons their staged work, or silently writes to the wrong branch
+>
+> 1. **REVERSED `fast_forward` args** — `CALL iceberg.system.fast_forward('analytics.orders', 'audit_2026_06_04', 'main')` or `CALL iceberg.system.fast_forward(table => 'analytics.orders', branch => 'audit_2026_06_04', to => 'main')`. **LOAD-BEARING WRONG.** This swaps the meanings: it asks Iceberg to move the AUDIT branch UP TO main's tip — which abandons the audit's staged work (resets the audit pointer to a snapshot that has none of the new data) and almost always errors with "not a fast-forward" because main is not a descendant of the audit branch in WAP. The correct order is **`branch='main', to='audit_2026_06_04'`** (publish = MOVE MAIN). Mnemonic: "fast-forward MAIN to the audit branch."
+>
+> 2. **Mismatched suffix that silently converts hyphens to underscores** — branch declared as `staging-branch` (hyphen) but suffix written `branch_staging_branch` (underscore). **WRONG.** The suffix is LITERALLY `branch_<exact-branch-name>`. A hyphenated branch name keeps the hyphen in the suffix and requires backtick-quoting (`` `branch_staging-branch` ``). The silent hyphen→underscore conversion targets a different branch — typically nonexistent, so the write errors. **Recommended fix: use underscore-only branch names from Step 1 to avoid the whole quoting problem.**
+>
+> 3. **`INSERT INTO t (BRANCH 'x') VALUES (...)`** — **FABRICATED.** No parenthesized `(BRANCH '...')` clause exists in Iceberg-Spark INSERT/UPDATE/DELETE/MERGE syntax. The two real branch-write forms are (i) suffix on identifier (Form A above), (ii) WAP session conf (Form B above). Nothing else.
+>
+> 4. **`MERGE BRANCH x INTO main`** or **`ALTER TABLE ... MERGE BRANCH ... INTO main`** — **FABRICATED.** No `MERGE BRANCH` DDL exists in Iceberg-Spark. Publish a branch via the `fast_forward` procedure call (Step 4 above), not via any DDL statement.
+>
+> 5. **Any Trino-side `CALL iceberg.system.create_branch(...)`, `CALL iceberg.system.fast_forward(...)`, `CALL iceberg.system.drop_branch(...)`, or `INSERT INTO <table>.branch_<name>` from Trino** — **FABRICATED for Trino 467.** Trino's only branch role is read-only via `FOR VERSION AS OF '<branch-name>'`. Every state-changing branch operation requires Spark.
+>
+> 6. **`writeTo(table).option("branch", ...)` cross combination** — the V2 `writeTo` API + the V1 `.option("branch", ...)` are mutually exclusive surfaces. Use either `df.writeTo("<table>.branch_<name>").append()` (suffix on the writeTo identifier) OR `df.write.format("iceberg").option("branch", "<name>").mode("append").save("<table>")` (V1 + option), not the cross.
+>
+> ---
+>
+> **Verified against:**
+> - [iceberg.apache.org/docs/latest/spark-procedures/](https://iceberg.apache.org/docs/latest/spark-procedures/) — `fast_forward(table, branch, to)` signature; named-args form `(table => ..., branch => ..., to => ...)`; constraint that `branch` (2nd arg) must be an ancestor of `to` (3rd arg).
+> - [iceberg.apache.org/docs/latest/spark-writes/](https://iceberg.apache.org/docs/latest/spark-writes/) — branch suffix syntax `INSERT INTO prod.db.table.branch_<name>`; the suffix is literal `branch_<name>` with the exact branch name preserved; WAP session conf form `SET spark.wap.branch = <name>` followed by plain `INSERT INTO`.
+> - [iceberg.apache.org/docs/latest/spark-ddl/](https://iceberg.apache.org/docs/latest/spark-ddl/) — `ALTER TABLE ... CREATE BRANCH [RETAIN N DAYS]` / `DROP BRANCH` Spark DDL.
+> - [trinodb/trino #16569](https://github.com/trinodb/trino/issues/16569) — Trino branch READ support `FOR VERSION AS OF '<branch-name>'` landed.
+> - [trinodb/trino #16570](https://github.com/trinodb/trino/issues/16570) — Trino branch WRITE support closed as NOT PLANNED.
+>
+> **This worked example supersedes any other branch snippet in this file.** If you see a hyphenated branch name elsewhere in the doc, treat THIS underscore-named example as authoritative for syntax. The hyphenated examples below ARE syntactically correct (the backticks ARE present in those examples), but the underscore convention here is the recommended posture for production use because it eliminates the quoting trap entirely.
+
+
 > **READ THIS FIRST — branches + `fast_forward` ARE the canonical Iceberg WAP pattern, and your stack supports them.** If a SaaS engineer asks "what's the standard Iceberg WAP pattern for validating ingestion before exposing it to Trino dashboards?", the answer is **YES, use Iceberg branches and `fast_forward` — your production stack (Spark 3.5 with Iceberg 1.5.2) supports both, and Trino 467 supports reading from branches for the audit step**. Do NOT dismiss branches because the `fast_forward` procedure and `CREATE BRANCH` DDL are Spark-only — **Spark IS in this stack**, so those tools are available to you. The correct division of responsibilities is:
 >
 > - **Spark** runs `ALTER TABLE ... CREATE BRANCH`, writes new data to the branch (via `spark.wap.branch` or explicit branch-targeting writes), runs `CALL iceberg.system.fast_forward(...)` to publish, and runs `ALTER TABLE ... DROP BRANCH` to clean up.
