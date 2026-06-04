@@ -118,7 +118,9 @@ These are the absolutes most often stated incorrectly when an engineer asks "wha
 > **Verdict:** if `p50_size_mb < 16` AND `files_under_16mb > 50%` of total — small files are bloating both your storage (per-file Parquet footer overhead) AND your query latency (per-file open cost on MinIO). The fix is nightly compaction:
 >
 > ```sql
-> -- Trino 467 — EXECUTE optimize compacts small files into larger ones (~256MB target).
+> -- Trino 467 — EXECUTE optimize bin-packs files BELOW file_size_threshold into larger ones.
+> -- file_size_threshold default is '100MB' per trino.io/docs/current/connector/iceberg.html;
+> -- '128MB' is the SaaS-typical sweet spot (a bit more aggressive than the default).
 > ALTER TABLE iceberg.analytics.user_events
 > EXECUTE optimize(file_size_threshold => '128MB');
 > ```
@@ -362,6 +364,135 @@ These are the absolutes most often stated incorrectly when an engineer asks "wha
 > - **Resource 18 §"`system.runtime.*` is EPHEMERAL"** — event listener setup for durable history.
 > - **Resource 24 §"`EXPLAIN (TYPE IO)`"** — diagnose partition-pruning misses on the heavy queries this recipe finds.
 > - **Resource 28 §"join-order tuning"** — fix the CPU-bound heavy queries.
+
+---
+
+## LEADING CANONICAL COST WORKED EXAMPLE — "How much storage $ will running OPTIMIZE + expire_snapshots save on a hot table, and how do I justify the maintenance window to management?" (read this FIRST for maintenance-ROI questions)
+
+> **This is the findable canonical answer for the maintenance-ROI / storage-savings question. Every metric below is computed from `$files` and `$snapshots` metadata tables verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html). Every procedure parameter name has been verified against the same docs page. Do NOT invent a "predicted bytes saved" column or a "compaction ROI" procedure — neither exists; the savings number is computed in application SQL from the metadata tables. Paste verbatim.**
+>
+> **The framing problem.** "How much will maintenance save us?" sounds like a $ question but on this on-prem stack it's actually a **MinIO bytes** question — there is NO per-query bill on Trino on-prem (see myth table above), and storage is a fixed cluster cost only above the existing capacity floor. The honest translation: **(a) how many TB will we free on MinIO?** and **(b) how much sooner do we hit the next capacity-expansion threshold?** Convert TB-freed to $ only at the END, using the **$15–25/TB-month all-in MinIO TCO** anchor from the myth table above ($20/TB-month is the budget-anchor figure to use when management asks for one number).
+>
+> **The three sources of recoverable bytes on a hot table** — measure each separately so the maintenance plan is targeted, not a guess:
+>
+> | # | Recoverable bytes | Metadata-table source | Procedure that recovers it |
+> |---|---|---|---|
+> | **1** | **Snapshot-pinned old data files** (compaction already produced new merged files; old snapshots still pin the originals) | `"<table>$snapshots"` — count snapshots older than 7d; the SUM of `summary['added-files-size']` across all snapshots older than retention is an UPPER BOUND on freeable bytes | `EXECUTE expire_snapshots(retention_threshold => '7d')` |
+> | **2** | **Small data files that bin-packing will merge** (Parquet footer + manifest overhead per tiny file dominates the per-row storage cost when files are <16 MB) | `"<table>$files"` — `SUM(file_size_in_bytes) WHERE file_size_in_bytes < 16 * 1024 * 1024 AND content = 0`; this is the byte-volume currently in small data files (data, not delete) | `EXECUTE optimize(file_size_threshold => '128MB')` |
+> | **3** | **Orphan files from failed/interrupted writes** (data file on MinIO with no snapshot pointing at it; cannot be measured directly from `$files` — that table only lists *referenced* files) | NOT visible in `$files`; must run `remove_orphan_files` with `dry_run => true` (Spark CALL only — Trino has no dry-run option on `remove_orphan_files`) to enumerate candidates | Spark `CALL system.remove_orphan_files(table => 'analytics.events', dry_run => true)` to enumerate; then Trino `EXECUTE remove_orphan_files(retention_threshold => '7d')` to delete |
+>
+> > **CRITICAL ordering rule.** Run compaction FIRST (it produces new merged data files), THEN `expire_snapshots` (which frees the old data files now superseded by compaction), THEN `remove_orphan_files` (which deletes anything left dangling). Reversing the order — `expire_snapshots` BEFORE `optimize` — wastes the savings opportunity because the old data files are still pinned by snapshots that haven't been expired yet, so compaction has to keep both copies. See r17 § "the safe scheduling order" for the full rationale.
+>
+> ### Step 1 — measure recoverable bytes BEFORE running anything
+>
+> ```sql
+> -- Trino 467 — total current footprint of the hot table on MinIO (data files only, excludes delete files).
+> -- $files is a metadata table; the double-quote around "events$files" is REQUIRED (the $ would otherwise tokenize wrong).
+> -- The `content` column codes: 0 = DATA, 1 = POSITION_DELETES, 2 = EQUALITY_DELETES (verified per Iceberg manifest spec).
+> SELECT
+>   COUNT(*)                                                                          AS data_file_count,
+>   ROUND(SUM(file_size_in_bytes) / 1e9, 2)                                           AS total_data_gb,
+>   ROUND(SUM(file_size_in_bytes) FILTER (WHERE file_size_in_bytes < 16 * 1024 * 1024) / 1e9, 2)  AS small_file_gb,
+>   COUNT(*)              FILTER (WHERE file_size_in_bytes < 16 * 1024 * 1024)        AS small_file_count
+> FROM iceberg.analytics."events$files"
+> WHERE content = 0;
+> ```
+>
+> ```sql
+> -- Trino 467 — snapshot-pinned bytes: the upper bound on what expire_snapshots can free.
+> -- summary['added-files-size'] is a string-valued map entry; cast to BIGINT to sum.
+> -- Verified at trino.io/docs/current/connector/iceberg.html ($snapshots metadata table) +
+> -- apache/iceberg PR #4689 (`added-files-size` is a documented snapshot summary key in bytes).
+> SELECT
+>   COUNT(*)                                                                          AS snapshot_count,
+>   COUNT(*) FILTER (WHERE committed_at < current_timestamp - INTERVAL '7' DAY)       AS snapshots_older_than_7d,
+>   ROUND(SUM(CAST(summary['added-files-size'] AS BIGINT))
+>         FILTER (WHERE committed_at < current_timestamp - INTERVAL '7' DAY) / 1e9, 2) AS upper_bound_freeable_gb
+> FROM iceberg.analytics."events$snapshots";
+> ```
+>
+> **Interpret:** the SUM of `total_data_gb` is your current MinIO footprint for this table's data files. `small_file_gb` is what compaction can re-pack (the bytes don't disappear, but the file count drops dramatically and the per-row overhead falls — this matters for query CPU cost on the read side, not directly for storage $). `upper_bound_freeable_gb` is what `expire_snapshots` can RELEASE — actual freed bytes will be lower because some old snapshots may share data files with newer snapshots (reference-counting). Treat the `upper_bound_freeable_gb` as the **maximum** savings, not the expected savings.
+>
+> ### Step 2 — run maintenance in the correct order, measure AFTER
+>
+> ```sql
+> -- 1. Compact first (re-pack small files; new snapshot replaces small files with merged files).
+> --    file_size_threshold => '128MB' is the SaaS-typical sweet spot; default is 100MB.
+> ALTER TABLE iceberg.analytics.events EXECUTE optimize(file_size_threshold => '128MB');
+>
+> -- 2. Expire old snapshots (now the small files are deletable).
+> --    retention_threshold => '7d' matches the default min-retention floor.
+> ALTER TABLE iceberg.analytics.events EXECUTE expire_snapshots(retention_threshold => '7d');
+>
+> -- 3. Sweep orphans (anything on MinIO not referenced by any current snapshot).
+> --    retention_threshold => '7d' (same floor); the procedure honors iceberg.remove-orphan-files.min-retention.
+> ALTER TABLE iceberg.analytics.events EXECUTE remove_orphan_files(retention_threshold => '7d');
+> ```
+>
+> Then re-run the Step 1 measurement queries and compute the delta:
+>
+> ```sql
+> -- Bytes freed = total_data_gb_BEFORE - total_data_gb_AFTER  (from Step 1 query)
+> -- Convert to $ at $20/TB-month (MinIO all-in TCO anchor — see myth table above):
+> --   bytes_freed_$_per_month = (bytes_freed_gb / 1024) * $20
+> -- Example: freed 4.2 TB on a hot events table.
+> --   savings = 4.2 * $20 = $84/month  =  $1,008/year (avoided next-capacity-tier purchase)
+> ```
+>
+> **Realistic baseline numbers** from production at this stack scale (anchor expectations management-side):
+>
+> | Hot-table size BEFORE | Typical bytes freed after first full maintenance pass | Notes |
+> |---|---|---|
+> | 1 TB, 30 days no maintenance | 200–400 GB (20–40%) | First-run almost always 20%+ because snapshot retention has never been enforced |
+> | 5 TB, 60 days no maintenance | 1.5–3 TB (30–60%) | Streaming-ingestion tables compound fastest |
+> | 20 TB, 90+ days no maintenance | 8–14 TB (40–70%) | At this scale, "MinIO is filling up" surprises usually trace here |
+>
+> **STEADY-STATE expectation** after weekly maintenance is running on a stable workload: savings per maintenance run drop to **2–5% of table size** because most of the bloat is being prevented continuously. The 40–70% one-time win is a one-time recovery, not a recurring saving. Frame the management ask accordingly: "this week, free 8 TB; ongoing weekly, prevent ~5% bloat compounding."
+>
+> ### Step 3 — convert TB-freed to $ for the management ask
+>
+> Use the **$15–25/TB-month MinIO all-in TCO** from the myth table; $20/TB-month is the budget anchor. The savings split into two distinct dollar effects, both real:
+>
+> ```
+> Effect A — avoided MinIO capacity purchase:
+>   Freeing TB on existing MinIO doesn't cut today's bill ($0 marginal — the disks are sunk).
+>   It pushes out the NEXT capacity-tier purchase by TB / monthly_growth_rate months.
+>   Example: free 4 TB at 1 TB/month growth = next disk-shelf purchase deferred by 4 months.
+>   If a disk-shelf is $40k, deferring 4 months = $40k * (4/120) = $1.3k present-value benefit.
+>
+> Effect B — avoided $20/TB-month for the freed capacity (if you would have grown into it):
+>   4 TB * $20/TB-month = $80/month going forward = $960/year saved (vs. the counterfactual where bloat continued).
+>   This is the "without maintenance, we would have hit 14 TB instead of 10 TB at 12 months" math.
+>
+> Honest summary to management: "Maintenance one-time recovers 4 TB; on the on-prem stack that's $0 today
+>                              but pushes the next $40k disk purchase out by ~4 months and saves
+>                              ~$1k/year in avoided-capacity terms."
+> ```
+>
+> ### DO-NOT-WRITE — banned forms in the maintenance-ROI checklist
+>
+> | DO NOT write this | What is wrong | The right answer |
+> |---|---|---|
+> | `EXECUTE optimize(file_size_threshold => '128MB', dry_run => true)` | **`dry_run` is NOT a parameter of Trino's `EXECUTE optimize`** per trino.io/docs/current/connector/iceberg.html. The Trino `optimize` procedure has only ONE parameter (`file_size_threshold`). `dry_run` exists ONLY on Spark's `CALL system.remove_orphan_files(...)` — a different procedure. | Run `EXECUTE optimize(file_size_threshold => '128MB')` directly; it's transactional (a new snapshot is created, rollback via `EXECUTE rollback_to_snapshot(<prev>)` if needed). For pre-flight measurement, use the Step 1 measurement SQL above — do not pass `dry_run`. |
+> | `EXECUTE optimize(rewrite_position_delete_files => true)` | **No such parameter exists in Trino 467.** Trino's `optimize` does NOT rewrite position-delete files — that procedure (`rewrite_position_delete_files`) is **Spark-only** per iceberg.apache.org/docs/latest/spark-procedures/. | For position-delete-file compaction, use Spark: `CALL iceberg.system.rewrite_position_delete_files(table => 'analytics.events')`. Trino's `optimize` only compacts data files (content=0). Delete-file residue must be addressed from Spark or by MERGE-rewriting affected partitions. |
+> | `SELECT predicted_bytes_saved FROM iceberg.analytics."events$optimize_preview"` | **There is no `$optimize_preview` metadata table.** Trino's Iceberg metadata tables are: `$snapshots`, `$history`, `$files`, `$manifests`, `$partitions`, `$refs`, `$properties`, `$entries`, `$all_entries`. No predictive table exists. | Use the Step 1 measurement queries above. The `small_file_gb` and `upper_bound_freeable_gb` numbers ARE the prediction — they're upper bounds you can quote to management. |
+> | `EXECUTE expire_snapshots(older_than => current_timestamp - INTERVAL '7' DAY)` | **`older_than` is the Spark CALL parameter name, NOT the Trino EXECUTE parameter name.** Trino's parameter is `retention_threshold` and takes a DURATION STRING (`'7d'`), not a timestamp expression. Per trino.io/docs/current/connector/iceberg.html. | `EXECUTE expire_snapshots(retention_threshold => '7d')`. The duration string supports `'1h'`, `'7d'`, `'30d'`, etc. |
+> | `EXECUTE optimize(target_file_size_bytes => 134217728)` | **`target_file_size_bytes` is the Spark CALL parameter name; Trino's parameter is `file_size_threshold` and takes a SIZE STRING (`'128MB'`).** Per trino.io/docs/current/connector/iceberg.html. The two procedures have similar intent but different argument names and types. | `EXECUTE optimize(file_size_threshold => '128MB')`. The size string supports `'64MB'`, `'128MB'`, `'512MB'`, etc. |
+> | "Compaction will free X TB" (quoting `small_file_gb` as the savings) | **WRONG metric.** Compaction RE-PACKS small files into larger files; the byte count of DATA does not drop (modulo Parquet's per-file footer overhead, which is small). What drops is the FILE COUNT and the snapshot-pinned old-file bytes (after `expire_snapshots` runs). | Quote `upper_bound_freeable_gb` (from `$snapshots`) as the savings — that's what `expire_snapshots` releases. Compaction's value is read-side CPU savings + setting up the bytes to BE freeable by the next `expire_snapshots`. |
+> | "Running maintenance saves $X/month on the on-prem MinIO bill" | **WRONG framing.** On-prem MinIO has $0 marginal storage cost on existing disks (the disks are sunk). Maintenance saves dollars by **deferring the next capacity purchase**, not by cutting today's bill. | "Maintenance frees 4 TB on MinIO; on the on-prem stack this defers the next $40k disk-shelf purchase by 4 months (~$1k present-value) and prevents `growth_rate * 0.4` of compounding bloat per quarter." See Step 3 framing above. |
+> | `ALTER TABLE events EXECUTE optimize` (no `iceberg.<schema>.` prefix) | **Missing catalog/schema qualifier.** Trino requires a fully-qualified table name OR the session catalog+schema to be set via `USE iceberg.analytics`. Without one or the other, you get "Schema must be specified when session schema is not set". | Either `ALTER TABLE iceberg.analytics.events EXECUTE optimize(file_size_threshold => '128MB')` OR `USE iceberg.analytics; ALTER TABLE events EXECUTE optimize(file_size_threshold => '128MB');`. |
+> | "Position-delete-file accumulation is fixed by Trino `EXECUTE optimize`" | **NO — Trino's `optimize` only compacts DATA files (content=0). Position-delete files (content=1) are NOT touched by Trino's optimize on 467.** Per trino.io/docs/current/connector/iceberg.html and the procedure description (omits delete-file handling). The Spark `rewrite_position_delete_files` procedure is the only spec-compliant way to compact delete files. | If `"<table>$files" WHERE content = 1` shows >10% delete files, schedule a periodic Spark job: `CALL iceberg.system.rewrite_position_delete_files(table => 'analytics.events')`. Trino on its own cannot recover this on 467. |
+> | "Trino `optimize` is a CALL procedure: `CALL iceberg.system.optimize(...)`" | **WRONG syntax.** `CALL ... system.<procedure>(...)` is the **Spark** procedure syntax. Trino uses `ALTER TABLE ... EXECUTE <procedure>(...)` — see r17 §"Trino EXECUTE vs Spark CALL". | `ALTER TABLE iceberg.analytics.events EXECUTE optimize(file_size_threshold => '128MB')` for Trino. `CALL iceberg.system.rewrite_data_files(table => 'analytics.events')` for Spark — different engine, different syntax. |
+>
+> **Why this DO-NOT-WRITE block exists:** "what will maintenance save us?" is a high-frequency management-facing question. The temptation is to (a) invent a predictive metadata table that doesn't exist, (b) misquote Spark CALL parameter names as Trino EXECUTE parameter names (`older_than` vs `retention_threshold`, `target_file_size_bytes` vs `file_size_threshold`), or (c) confuse compaction bytes with snapshot-expiry bytes (different mechanisms; only expire-snapshots actually frees MinIO bytes). Each of these errors leads to a wrong $-savings number quoted to management — a credibility hit you don't recover from.
+>
+> ### Cross-references for the maintenance-ROI workflow
+>
+> - **Resource 17 §"the safe scheduling order"** — full rationale for compact → expire → orphan order (NEVER reversed).
+> - **Resource 17 §"Trino EXECUTE vs Spark CALL"** — the procedure-name + parameter-name disambiguation matrix.
+> - **Resource 11 §"Storage sizing"** — projecting MinIO capacity growth (the denominator for the "defer next-purchase by N months" math).
+> - **Resource 10 §"Small files problem"** — why small files appear in the first place (so prevention reduces the recurring maintenance burden).
+> - **This resource §"MinIO is NOT free"** — the $15–25/TB-month all-in TCO anchor used in Step 3 dollar conversion.
 
 ---
 

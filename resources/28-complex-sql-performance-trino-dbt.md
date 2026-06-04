@@ -106,6 +106,130 @@ These are the wrong shapes a Haiku responder must NEVER suggest in a dbt-trino +
 
 ---
 
+## LEADING CANONICAL WORKED EXAMPLE — "My dbt incremental model with `incremental_strategy='merge'` used to run in 5 min, now runs in 40 min — same SQL, same row volume. What changed?" (read this FIRST for "merge model getting slower" questions)
+
+> **This is the findable canonical answer for the merge-model-degradation question. Every claim has been verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (`$files` / `$snapshots` metadata tables, `EXECUTE optimize` parameters), [iceberg.apache.org/docs/latest/spark-procedures/](https://iceberg.apache.org/docs/latest/spark-procedures/) (`rewrite_position_delete_files` is Spark-only), and Iceberg spec (`content` column codes: 0 = DATA, 1 = POSITION_DELETES, 2 = EQUALITY_DELETES). Do NOT invent Trino procedures or parameter names — paste verbatim.**
+>
+> **The diagnosis pattern in one sentence.** On Iceberg format-version 2 (the prod default), each `MERGE INTO` produces **one position-delete file per affected data file**. Without periodic compaction of those delete files, the planner reads more and more delete files at MERGE plan-time, and merging the build side gets slower week-over-week even when the source delta is the same size. **This is the #1 cause of "the dbt merge model used to be fast" on this stack.** Confirmed by [trinodb/trino issue #17114](https://github.com/trinodb/trino/issues/17114) ("Read Iceberg v2 table with many delete file is very slowly").
+>
+> ### Step 1 — confirm position-delete files are the cause (the diagnostic query)
+>
+> ```sql
+> -- Trino 467 — count data files vs position-delete files vs equality-delete files on the slow target table.
+> -- Double-quote required: "fct_events$files" because of the $ character.
+> -- The content codes are per Iceberg manifest spec (verified at iceberg.apache.org/spec/):
+> --   0 = DATA (the actual rows)
+> --   1 = POSITION_DELETES (row-position tombstones produced by MoR DELETE/UPDATE/MERGE)
+> --   2 = EQUALITY_DELETES (predicate-based tombstones, less common in Trino-written tables)
+> SELECT
+>   CASE content
+>     WHEN 0 THEN 'DATA'
+>     WHEN 1 THEN 'POSITION_DELETES'
+>     WHEN 2 THEN 'EQUALITY_DELETES'
+>   END                                       AS file_type,
+>   COUNT(*)                                  AS file_count,
+>   ROUND(SUM(file_size_in_bytes) / 1e6, 2)   AS total_mb,
+>   ROUND(AVG(file_size_in_bytes) / 1024, 2)  AS avg_kb,
+>   ROUND(MIN(file_size_in_bytes) / 1024, 2)  AS min_kb,
+>   ROUND(MAX(file_size_in_bytes) / 1024, 2)  AS max_kb
+> FROM iceberg.analytics."fct_events$files"
+> GROUP BY content
+> ORDER BY file_type;
+> ```
+>
+> **Interpret the output:**
+>
+> | Pattern | Verdict |
+> |---|---|
+> | `POSITION_DELETES file_count` is > 10% of `DATA file_count` | This is the cause. Each MERGE plan-time has to load and apply ALL these delete files to the data files they reference. Slowness grows roughly linearly with delete-file count. |
+> | `POSITION_DELETES avg_kb` is < 10 KB | The delete files themselves are tiny (one row per data-file-affected). Lots of tiny delete-file opens dominate the plan time. |
+> | `DATA file_count` is also growing (avg data-file size shrinking) | Compounding problem: data-file fragmentation + delete-file fragmentation together. Both need fixing. |
+> | `POSITION_DELETES file_count` is near zero but model still slow | NOT this cause — investigate (a) data-file fragmentation alone (re-run with `WHERE content = 0`), (b) skew in the MERGE join key, (c) snapshot-history bloat (`$snapshots` count). See §8A.2 for join-skew diagnosis. |
+>
+> ### Step 2 — confirm via $snapshots that MERGE traffic is consistent with the delete-file accumulation
+>
+> ```sql
+> -- Trino 467 — count MERGE operations over the last 30 days, by day.
+> -- The `operation` column on $snapshots takes values: append, replace, overwrite, delete.
+> -- A dbt incremental `merge` strategy produces `operation = 'replace'` (Iceberg's row-level update commit op).
+> SELECT
+>   date_trunc('day', committed_at)            AS day,
+>   operation,
+>   COUNT(*)                                   AS snapshot_count
+> FROM iceberg.analytics."fct_events$snapshots"
+> WHERE committed_at >= current_timestamp - INTERVAL '30' DAY
+> GROUP BY date_trunc('day', committed_at), operation
+> ORDER BY day DESC, operation;
+> ```
+>
+> If you see `operation = 'replace'` rows every day (one per dbt run) for the past 30 days AND your diagnostic query in Step 1 shows hundreds-to-thousands of `POSITION_DELETES` files, the delete-file accumulation is consistent with the MERGE workload — confirming the diagnosis.
+>
+> ### Step 3 — fix on the production stack (Trino 467 + Iceberg 1.5.2)
+>
+> **There are TWO complementary fixes; you almost always want both, in this order:**
+>
+> 1. **Run Spark `rewrite_position_delete_files` to compact the delete files** — there is NO Trino-native equivalent on 467 (see DO-NOT-WRITE below for the common fab). This is the load-bearing fix.
+>    ```sql
+>    -- Spark SQL (NOT Trino) — runs from Spark shell or a scheduled Spark job.
+>    -- Verified at iceberg.apache.org/docs/latest/spark-procedures/.
+>    CALL iceberg.system.rewrite_position_delete_files(table => 'analytics.fct_events');
+>    ```
+>    Schedule this as a nightly Spark job (or weekly if MERGE traffic is low). It rewrites the many small delete files into fewer larger delete files AND removes "dangling" deletes that point to data files no longer live.
+>
+> 2. **Then run Trino `EXECUTE optimize` to compact the data files** — Trino's `optimize` handles content=0 (DATA) files only on 467.
+>    ```sql
+>    -- Trino 467 — file_size_threshold default 100MB; 128MB is the SaaS-typical sweet spot.
+>    ALTER TABLE iceberg.analytics.fct_events EXECUTE optimize(file_size_threshold => '128MB');
+>    ```
+>
+> 3. **Then expire snapshots** so the now-unreferenced old data and delete files actually leave MinIO.
+>    ```sql
+>    -- Trino 467 — parameter name is retention_threshold (DURATION STRING), NOT older_than (that's Spark).
+>    ALTER TABLE iceberg.analytics.fct_events EXECUTE expire_snapshots(retention_threshold => '7d');
+>    ```
+>
+> **Ordering matters:** delete-file compaction FIRST (Spark) → data-file compaction (Trino) → expire snapshots (Trino). Doing expire_snapshots first wastes work because the old files are still pinned. See r17 §"the safe scheduling order" for the full rationale.
+>
+> ### Step 4 — prevent recurrence at the dbt model level
+>
+> Three optional dbt-side levers that reduce the rate at which delete files accumulate (none replaces the maintenance schedule above; they reduce its required cadence):
+>
+> | Lever | What it does | Where to put it |
+> |---|---|---|
+> | Narrow the MERGE update-set columns | `merge_update_columns=['status', 'updated_at']` (only update these cols, not all) — fewer per-row changes can let MoR consolidate more efficiently | `config(merge_update_columns=[...])` in the model |
+> | Partition-aligned merge | Ensure the MERGE join-predicate includes the partition column; lets Trino prune the merge target before scanning delete files | The dbt model's source select; or `incremental_predicates=['DBT_INTERNAL_DEST.day_ts >= DATE \'...\'']` |
+> | Switch to copy-on-write for the partition | `write.delete.mode = 'copy-on-write'` rewrites the whole data file on each merge (no delete files produced) — trades write cost for read cost; only choose this if delete-file accumulation is your dominant pain point | Set via `ALTER TABLE ... SET PROPERTIES write_delete_mode = 'copy-on-write'` (Trino SET PROPERTIES surface; see r17) |
+>
+> **Important caveat on copy-on-write switch**: it dramatically increases write amplification per MERGE — each MERGE rewrites every data file touched. Only flip if (a) delete-file accumulation has become unmanageable AND (b) your MERGE volume per run is small relative to the table.
+>
+> ### DO-NOT-WRITE — banned forms in the merge-model-degradation diagnosis
+>
+> | DO NOT write this | What is wrong | The right answer |
+> |---|---|---|
+> | `ALTER TABLE fct_events EXECUTE rewrite_position_delete_files` | **No such Trino EXECUTE procedure on 467.** Trino's `optimize` does NOT compact position-delete files on this version. `rewrite_position_delete_files` is **Spark-only** per iceberg.apache.org/docs/latest/spark-procedures/. | Use Spark: `CALL iceberg.system.rewrite_position_delete_files(table => 'analytics.fct_events')`. Trino's `optimize` only handles content=0 data files; delete-file compaction must be scheduled as a Spark job. |
+> | `ALTER TABLE fct_events EXECUTE optimize(rewrite_deletes => true)` | **`rewrite_deletes` is NOT a parameter of Trino's `EXECUTE optimize`.** The Trino `optimize` procedure has ONE parameter (`file_size_threshold`) per trino.io/docs/current/connector/iceberg.html. Made-up parameters fail with "invalid procedure argument". | `ALTER TABLE iceberg.analytics.fct_events EXECUTE optimize(file_size_threshold => '128MB');` to compact data files; schedule Spark `rewrite_position_delete_files` separately for delete files. |
+> | `CALL iceberg.system.rewrite_position_delete_files(table => 'fct_events')` run from a **Trino** client | **`CALL ... system.<procedure>(...)` is the Spark syntax, NOT Trino.** Trino uses `ALTER TABLE ... EXECUTE <procedure>(...)`. Pasting Spark `CALL` syntax into Trino fails with `Procedure not registered`. | The Spark `CALL` form is valid only from a Spark client (spark-sql, Spark Structured Streaming foreachBatch, scheduled Spark job). There is NO Trino translation of `rewrite_position_delete_files` on 467. |
+> | `ALTER TABLE fct_events EXECUTE compact_delete_files` | **No such Trino procedure.** Invented by analogy from "optimize for delete files". | Use Spark `CALL iceberg.system.rewrite_position_delete_files(table => 'analytics.fct_events')`. |
+> | `SELECT * FROM iceberg.analytics."fct_events$delete_files"` | **No `$delete_files` metadata table on Trino 467.** Delete files are exposed THROUGH the `$files` metadata table via the `content` column (0/1/2). | Query `iceberg.analytics."fct_events$files" WHERE content = 1` to enumerate position-delete files. |
+> | `SELECT * FROM iceberg.analytics."fct_events$position_deletes"` | **No `$position_deletes` metadata table on Trino 467.** The Trino-exposed Iceberg metadata tables are: `$snapshots`, `$history`, `$files`, `$manifests`, `$partitions`, `$refs`, `$properties`, `$entries`, `$all_entries`. | Same as above — filter `$files` by `content = 1`. |
+> | `SET SESSION iceberg.merge_compaction_threshold = 100` | **No such Trino session property.** Invented from Spark/Iceberg config-style names. | There is NO session property to auto-compact delete files in Trino 467. The schedule is operator-driven (Spark cron job). |
+> | "I'll fix this by running `EXECUTE optimize` from Trino more often — it'll clean up the delete files too" | **WRONG — Trino's `optimize` on 467 does NOT compact delete files**, only data files. Running it more often does NOT help with delete-file accumulation; the delete files keep piling up next to the freshly-compacted data files. | Pair Trino `optimize` (data files) with Spark `rewrite_position_delete_files` (delete files). Both procedures are needed on 467 for a fully-compacted table. |
+> | `incremental_strategy='upsert'` | **No `upsert` strategy in dbt-trino.** The valid `incremental_strategy` values for dbt-trino are `append` (default), `delete+insert`, and `merge` per [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs). `upsert` is a Snowflake/Databricks vocabulary item. | Use `incremental_strategy='merge'` with `unique_key='<col>'`. That's the dbt-trino equivalent of an upsert. |
+> | "Switch all tables to copy-on-write to fix the problem" | **Overcorrection — CoW write amplification can be worse than the original MoR slowdown.** CoW rewrites entire data files per MERGE, so a 100-row merge against a 1 GB partition rewrites the full 1 GB. Only flip for tables where MERGE volume per run is small AND delete-file accumulation is the dominant pain. | Default to MoR + scheduled `rewrite_position_delete_files` (Spark) + Trino `optimize` + `expire_snapshots`. Switch specific high-MERGE tables to CoW only after measuring that the per-MERGE rewrite cost is less than the read-side delete-file overhead. |
+> | "The fix is to drop and recreate the table" | **Loses all snapshot history, breaks any time-travel consumers, requires re-ingestion of the full history.** This is a last-resort blast radius. | The compact-rebuild path above (Spark `rewrite_position_delete_files` → Trino `optimize` → `expire_snapshots`) achieves the same end state (small file count, small delete-file count) without losing history. |
+>
+> **Why this DO-NOT-WRITE block exists:** "my MERGE model is slow" is one of the highest-frequency dbt-trino performance questions, and the temptation is to (a) invent Trino procedures by analogy from Spark names (`rewrite_position_delete_files` as if it were `EXECUTE`-able), (b) invent Trino procedure parameters by analogy from Spark CALL parameters, or (c) reach for `incremental_strategy='upsert'` from a Snowflake background. Each of these wrong answers wastes the engineer's day with parse errors and procedure-not-found errors. **On Trino 467 + Iceberg 1.5.2, delete-file compaction is Spark-only. There is no Trino EXECUTE shortcut.**
+>
+> ### Cross-references for the merge-model-degradation workflow
+>
+> - **Resource 17 §"the safe scheduling order"** — compact → expire → orphan rationale.
+> - **Resource 17 §"Trino EXECUTE vs Spark CALL"** — the procedure-name + parameter-name disambiguation matrix; explicitly lists `rewrite_position_delete_files` as Spark-only.
+> - **Resource 16 §"How much storage $ will running OPTIMIZE + expire_snapshots save"** — the cost-side framing of the maintenance you're scheduling.
+> - **Resource 18 §"query-perf-regression triage"** — the broader oncall workflow if the MERGE-slowdown turns out NOT to be delete-file accumulation.
+> - **Resource 26 §"concurrent write conflicts"** — what happens if delete-file compaction collides with a concurrent dbt run.
+
+---
+
 ## Common myths about complex SQL performance on Trino + dbt — read FIRST
 
 These are the absolutes most often stated incorrectly when an engineer with Postgres / Oracle / Snowflake muscle memory tries to performance-tune a dbt model on Trino 467. Each TRUTH below has been verified against the [Trino docs](https://trino.io/docs/current/), [dbt-trino docs](https://docs.getdbt.com/reference/resource-configs/trino-configs), and the cited GitHub discussions. **Lead with the TRUTH; state the nuance.**

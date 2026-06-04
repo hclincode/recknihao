@@ -1,75 +1,122 @@
-# Iter 462 — Judge Feedback (End-of-Iteration, Extended Phase)
+# Judge Feedback — Iter 463 (EXTENDED PHASE)
 
 **Phase**: extended (end-of-iteration feedback only)
 **Date**: 2026-06-05
-**Overall**: 4.8125 STRONG PASS (61st consecutive extended-phase PASS)
-
-All four questions cleared the 3.5 floor by wide margin. Two critical streak fixes confirmed; zero new fabrications across all four questions.
+**Overall: 3.656 THIN PASS** (62nd consecutive PASS in extended phase but the thinnest margin in many iters; Q1 is a TRUE FAIL on its own at 2.50 — only the strength of Q2/Q3/Q4 keeps the overall above the 3.5 floor.)
 
 ## Per-question breakdown
 
-| Q | Topic | Acc | Comp | Clar | Act | Avg |
-|---|---|---|---|---|---|---|
-| Q1 | Iceberg time-travel — TWO clauses (re-probe iter461 Q4 conflation) | 5.0 | 4.75 | 5.0 | 5.0 | 4.9375 |
-| Q2 | NULLS-default inside window function ORDER BY | 5.0 | 4.75 | 5.0 | 4.75 | 4.875 |
-| Q3 | Iceberg small-files: cause/detect/fix order | 4.75 | 4.75 | 4.75 | 4.75 | 4.75 |
-| Q4 | Oracle NVL2 → Trino CASE + empty-string-NULL quirk | 4.75 | 4.5 | 4.75 | 4.75 | 4.6875 |
+| Q | Topic | Accuracy | Clarity | Completeness | Actionability | Avg | Verdict |
+|---|---|---|---|---|---|---|---|
+| Q1 | Iceberg time-travel — branch/tag read | 2.0 | 4.0 | 2.0 | 2.0 | **2.50** | **FAIL** |
+| Q2 | dbt incremental MERGE slowdown (MoR deletes) | 3.5 | 4.5 | 4.5 | 3.5 | **4.0** | PASS |
+| Q3 | Trino+Iceberg+MinIO cost justification vs Postgres | 4.5 | 4.0 | 3.0 | 3.5 | **3.75** | PASS |
+| Q4 | Oracle CONNECT BY → Trino WITH RECURSIVE | 4.0 | 4.5 | 4.5 | 4.5 | **4.375** | PASS |
 
-Overall avg = (4.9375 + 4.875 + 4.75 + 4.6875) / 4 = **4.8125 — STRONG PASS**
+Overall: (2.50 + 4.0 + 3.75 + 4.375) / 4 = **3.656**
 
-## Per-question justification
+## Fabrications + load-bearing inaccuracies
 
-**Q1 (4.9375 STRONG PASS — time-travel two-clause RE-PROBE)**: Responder produced TWO SEPARATE Trino clauses — `FOR TIMESTAMP AS OF TIMESTAMP '2026-05-23 14:00:00'` for the time-based case and `FOR VERSION AS OF 1234567890123456789` (BIGINT, unquoted) for the snapshot-id case. NO conflation, NO welded `FOR VERSION AS OF TIMESTAMP '...'` hybrid. 7-day default retention correct. Partition-filter advice on time-travel queries sound (historical snapshot still encodes partition bounds, so the predicate prunes manifests). Both clauses verified verbatim at trino.io/docs/current/connector/iceberg.html (Time travel queries section). Iter461 Q4 clause-conflation fab fully resolved.
+### Q1 — TWO LOAD-BEARING FABRICATIONS + FINDABILITY MISS + REGRESSION (PRIMARY ISSUE THIS ITER)
 
-**Q2 (4.875 STRONG PASS — NULLS-default in window function)**: Oracle DESC default places NULLs FIRST, Trino DESC default places NULLs LAST — correct dialect contrast. Same query different ordering with no error (silent semantic drift) — correct framing. Fix `ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY last_event_at DESC NULLS LAST)` is the canonical migration pattern. Responder explicitly stated "Trino defaults to NULLS LAST for BOTH ASC and DESC — no direction-dependent behavior like Oracle" — matches trino.io/docs/current/sql/select.html verbatim ("The default null ordering is NULLS LAST, regardless of the ordering direction"). Window function ORDER BY honors same null-ordering rule per trino.io/docs/current/functions/window.html. Did NOT claim Trino defaults NULLS FIRST for DESC.
+**FAB-1**: "the resources do NOT provide detailed syntax for named branches and tags"
+- **FALSE.** r17 (resources/17-iceberg-table-maintenance.md) has a full LEADING CANONICAL block (added iter462) covering:
+  - `FOR VERSION AS OF '<branch_or_tag_name>'` (string literal)
+  - The BIGINT-vs-string clause-disambiguation table
+  - The Snowflake / Delta / Spark / Oracle / BigQuery muscle-memory map
+  - Worked examples for audit-tag reads and WAP branch reads
+- Grep on r17 confirms multiple instances of `FOR VERSION AS OF '<branch-name>'` worked examples, including the explicit statement "Trino 467 cannot create or drop tags, but it CAN query a tagged snapshot using `FOR VERSION AS OF '<tag-name>'`."
 
-**Q3 (4.75 STRONG PASS — small-files cause/detect/fix)**: Cause attribution (per-write new files + MERGE delete files + small writes never compacted) correct per iceberg.apache.org/docs/latest/maintenance/. Detection query against `iceberg.analytics."events$files" WHERE content = 0` correct — `$files` columns (content, file_path, record_count, file_size_in_bytes) verified at trino.io/docs/current/connector/iceberg.html; `content=0` for data files (excluding positional/equality delete files) verified per Iceberg manifest spec. Double-quoted `"events$files"` syntax correct (required because of `$`). Fix order `optimize → expire_snapshots → remove_orphan_files` with correct rationale (compact into live snapshot, expire snapshots that pinned the small files, then sweep orphans). All procedure parameter names verified (`file_size_threshold => '128MB'`, `retention_threshold => '7d'`). No-data-loss claim correct.
+**FAB-2**: "With Hive Metastore, branches and named tags are NOT a native feature" / "they are a Project Nessie (REST catalog) feature" / "you'd need to migrate to Nessie"
+- **FALSE.** Iceberg branches/tags are a TABLE-LEVEL metadata feature stored in the Iceberg `metadata.json` and readable via the `$refs` metadata table — INDEPENDENT of the catalog.
+- Verified at iceberg.apache.org/docs/latest/branching/ — "Branching and Tagging" is listed under the **Tables** section across versions 1.9.x–1.11.x, NOT under any catalog-specific section.
+- Verified at trino.io/docs/current/connector/iceberg.html — both `FOR VERSION AS OF 8954597067493422955` (BIGINT) and `FOR VERSION AS OF 'historical-tag'` / `FOR VERSION AS OF 'test-branch'` (string name) are documented; no catalog-type restriction.
+- HMS-backed Iceberg supports branches/tags fully: Spark `ALTER TABLE ... CREATE BRANCH` / `CREATE TAG` writes them to `metadata.json`; HMS just keeps the pointer to that file. Nessie adds CATALOG-LEVEL multi-table branch transactions, which is a SEPARATE feature from TABLE-LEVEL branches/tags.
 
-**Q4 (4.6875 STRONG PASS — NVL2 → Trino CASE + empty-string-NULL)**: Trino has no NVL2 function — verified (not in trino.io/docs/current/functions/comparison.html or any other Trino function reference). `NVL2(last_login,'active','never')` → `CASE WHEN last_login IS NOT NULL THEN 'active' ELSE 'never' END` is the exact logical equivalent per Oracle docs. Oracle empty-string-is-NULL quirk verified per docs.oracle.com and EDB/ABCloudz Oracle-vs-Postgres migration writeups — Oracle treats `''` and NULL as the same entity; Trino/Postgres treat `''` as a distinct zero-length string. Defensive rewrite `WHERE name IS NOT NULL AND name != ''` is the standard migration pattern. Minor nit: could have called out that the `''`-vs-NULL drift only matters for VARCHAR columns ingested from Oracle (a fresh greenfield Trino table won't have the artifact), but the engineer asked about migration so the warning is the right framing.
+**FINDABILITY MISS**: The correct answer IS in the resources. The responder's keyword search ('branch' + 'Nessie' + 'HMS') landed on r21 (HMS/Nessie interaction) instead of r17 (time-travel + branches/tags). The r17 LEADING CANONICAL block exists; the responder didn't reach it.
 
-## Streak status — both critical streaks resolved
+**REGRESSION SIGNAL**: iter452/iter453 the responder correctly used `FOR VERSION AS OF '<branch>'` for branch reads. iter463 regressed and projected a fabricated catalog-level restriction onto a catalog-agnostic feature.
 
-### (a) Trino-internal-clause-conflation streak — FIXED on 1st re-probe (Q1)
-- Iter461 Q4 fab: `FOR VERSION AS OF TIMESTAMP '...'` (welded snapshot-id keyword with timestamp literal)
-- Iter462 Q1: TWO SEPARATE clauses, NO welded hybrid. Used `FOR TIMESTAMP AS OF TIMESTAMP '...'` for time-based and `FOR VERSION AS OF <bigint>` for snapshot-based.
-- iter462 teacher r17 LEADING CANONICAL block + 9-row DO-NOT-WRITE table + 5-engine muscle-memory map LANDED at the keyword path.
-- Streak now at 1 PASS post-fix. Needs another angle at iter463+ to lock across phrasings (candidates: branch/tag time travel, $snapshots snapshot-id-finder pattern, time-travel + partition-pruning interaction).
+**Impact on the engineer**: They either (a) waste weeks evaluating Nessie migration when their HMS already supports the feature, or (b) build a brittle external `branch_name → snapshot_id` mapping table by hand.
 
-### (b) NULLS-default concept — NOW LOCKED across 2nd angle (Q2)
-- Iter460 Q1 confirmed it on top-level ORDER BY DESC.
-- Iter462 Q2 confirms it INSIDE window function ORDER BY (`ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ... DESC NULLS LAST)`).
-- Verified per trino.io/docs/current/sql/select.html and trino.io/docs/current/functions/window.html.
-- Concept no longer fragile to question phrasing — confirmed on two distinct surface forms.
+### Q2 — LOAD-BEARING SYNTAX FAB (malformed `$files` quoting)
 
-## Fabrications / inaccuracies — NONE
+Responder wrote `FROM iceberg.analytics.your_fact_table_here"$files"` — the double-quoted string starts AFTER `your_fact_table_here` instead of wrapping the entire `table$files` identifier.
 
-Every load-bearing claim verified against official docs. No cross-dialect spillover. No version-pin spillover. No Trino-internal clause conflation. No fabricated PR/issue/function/property/column/DDL-clause.
+**Correct form** (per trino.io/docs/current/connector/iceberg.html and trinodb/trino PR #13026):
+`FROM iceberg.analytics."your_fact_table_here$files"` — the `$` requires the ENTIRE composite identifier `table$files` to live inside ONE pair of double quotes.
 
-## Topic avg updates
-- Iceberg table maintenance: 4.4941/121 → **4.4961/123** (+0.0020, Q1 4.9375 + Q3 4.75 both above topic avg)
-- Oracle PL/SQL→dbt/Trino migration: 4.5811/34 → **4.5895/36** (+0.0084, Q2 4.875 + Q4 4.6875 both above topic avg)
-- Federation: 4.49944/310 UNCHANGED (not probed this iteration per directive)
+**Consistency note**: iter462 Q3 used the correct form `iceberg.analytics."events$files"`. So this is a quoting drift, not a doc gap — but a load-bearing one: the responder's form fails to parse, so the very first diagnostic step the engineer would run on the production stack doesn't work.
 
-## Teacher actions for iter463 — concrete
+### Q3 — Double "I don't have enough information" hedge
 
-### 1. Breadth design — pick angles that don't touch just-fixed surfaces
-Avoid time-travel, avoid NULLS-default, avoid storage-sizing formula (locked across multiple iterations). Candidates ranked by gap-coverage value:
-- **Hive Metastore + Iceberg interaction** under-probed recently — try a question on schema evolution visibility across HMS+Iceberg (e.g., "I added a column via Trino — why doesn't Spark see it?").
-- **Iceberg WAP (write-audit-publish) workflow** in r17 documented but rarely probed — try a question on staging a backfill before publishing.
-- **Multi-tenant partitioning trade-off** at 4.4562/151 has steady traffic; one angle on bucket-partitioning vs identity-partitioning for tenant_id would test r10/r05 cross-refs.
-- **Query-perf-regression triage** at 4.3338/16 is the lowest-margin PASSED topic outside federation — one EXPLAIN-driven walkthrough would lift it.
+Two hedges in one answer undersell the answerable content (measure storage ratio + amortized Trino cluster $/hr + concurrency multiplier + EXPLAIN-driven CPU on representative queries). No fabrications, but the conclusion is hedged below what the resources actually support. Accuracy stays high (4.5); completeness docked to 3.0.
 
-### 2. Lock the just-fixed Trino-internal-clause-conflation class with a 2nd-angle re-probe
-1 PASS at 1 angle is fragile. Pick ONE of these for iter463 to bring it to a 2-angle lock:
-- **Branch/tag time travel**: "I have a tagged snapshot called `month-end-2026-05` — how do I query it?" (Expected: `FOR VERSION AS OF 'month-end-2026-05'` — string literal for ref-name, distinct from BIGINT for snapshot-id. Tests whether the responder collapses ref-name into snapshot-id form vs keeping them straight.)
-- **Snapshot-id-finder from $snapshots**: "I want to query 'as of 2 days ago' but I only have $snapshots — how do I find the right snapshot_id first, then time-travel?" (Tests whether responder chains the two-step pattern: `SELECT snapshot_id FROM ...$snapshots WHERE committed_at < ...` → plug BIGINT into `FOR VERSION AS OF`. Fab risk: responder shortcuts to `FOR VERSION AS OF (SELECT ...)` which is invalid — `FOR VERSION AS OF` requires a literal.)
-- **Time-travel + partition-pruning interaction**: "Does a partition filter prune partitions on the historical snapshot, or does it scan the full historical snapshot first?" (Tests deeper understanding — partition pruning applies because the historical snapshot's manifest list still encodes partition bounds.)
+### Q4 — MINOR VERSION-PIN + "EXPERIMENTAL" OVERSTATEMENT
 
-### 3. One Oracle migration sub-topic NOT recently touched
-Migration topic now confirmed clean on NULLS-default (iter460 Q1, iter462 Q2), surrogate keys (iter461 Q2), NVL2 + empty-string-NULL (iter462 Q4). Untouched recently: ROWNUM → LIMIT, DECODE → CASE, MERGE syntax differences (Oracle's USING clause vs Trino's), PL/SQL cursor → set-based dbt model, exception block → dbt test, package-level constants → dbt vars. Pick one for breadth coverage.
+- "WITH RECURSIVE since release 343" — actually milestoned for release **340** per github.com/trinodb/trino/pull/4250 ("martint added this to the 340 milestone Aug 8, 2020"). Release 343 (25 Sep 2020) notes contain no recursive-CTE entry. Off-by-3 version pin; both are eight-year-old historical releases, so practical impact on a 467 stack is zero, but the citation is wrong.
+- "experimental" — WITH RECURSIVE is documented stable in trino.io/docs/current/sql/select.html with no experimental warning. "Fixed recursion depth + quadratic plan growth" are limitations but not "experimental" status.
 
-### 4. Federation — do NOT probe unless a specific bulletproofed angle emerges
-Row sits at 4.49944/310, fractionally below the 4.5 raised threshold. A new probe risks a thin FAIL that locks the gap, or a thin PASS that only barely crosses. Only probe if the teacher has installed a fresh resource fix that addresses a specific known fab pattern (none identified this iteration).
+## Topic-row updates
 
-### 5. No resource edits required from this iteration's findings
-Zero fabs. Teacher r17 LEADING CANONICAL block from iter462 LANDED clean. No reconciliation needed for iter463.
+| Topic | Before | After | Delta | Driver |
+|---|---|---|---|---|
+| Iceberg table maintenance | 4.4961 / 123 | **4.4842 / 125** | −0.0119 | Q1 2.50 FAIL well below avg + Q2 4.0 slightly below avg (two-question hit) |
+| Cost considerations | 4.2079 / 18 | **4.1846 / 19** | −0.0233 | Q3 3.75 below avg (double-hedge) |
+| Oracle PL/SQL → dbt/Trino migration | 4.5895 / 36 | **4.5840 / 37** | −0.0055 | Q4 4.375 slightly below avg (minor version-pin + "experimental" overstatement) |
+| Improving complex SQL perf on Trino with dbt | 4.7781 / 4 | **4.7781 / 4** | unchanged | Q2 maps to maintenance/MoR-deletes topic, not the dbt-perf topic |
+| Trino federation / cross-source | 4.49944 / 310 | **4.49944 / 310** | unchanged | NOT probed per directive |
+
+## Concrete teacher actions for iter464
+
+### (1) PRIMARY — Q1 branch/tag-read findability fix
+
+The r17 LEADING CANONICAL block IS correct and complete; the problem is the responder didn't reach it. The fix is in cross-references and keyword anchoring, not new canonical content.
+
+**1a. Add an XR/redirect line at the top of r21's branches/tags section** (resources/21-hive-metastore-iceberg.md):
+```
+> **READING a branch or tag from Trino on HMS-backed Iceberg?** See r17 § "FOR VERSION AS OF '<branch_or_tag_name>'". Iceberg branches/tags are **TABLE-LEVEL metadata** stored in `metadata.json`, NOT a Nessie-only feature. HMS-backed Iceberg supports them fully — Spark writes them via `ALTER TABLE ... CREATE BRANCH/TAG`, Trino reads them via `FOR VERSION AS OF '<name>'`. Nessie adds **CATALOG-LEVEL multi-table branch transactions**, which is a SEPARATE feature from TABLE-LEVEL branches/tags.
+```
+
+**1b. Add a dedicated DO-NOT-WRITE row to r17's time-travel DO-NOT-WRITE table**:
+| DO NOT write | Why it's wrong | Correct form |
+|---|---|---|
+| "Iceberg branches/tags require Nessie" / "branches/tags are not supported on Hive Metastore" / "you'd need to migrate to Nessie to use branches" | **FABRICATED capability restriction.** Branches and tags are TABLE-LEVEL Iceberg metadata stored in `metadata.json`, catalog-agnostic per iceberg.apache.org/docs/latest/branching/ (listed under Tables, not Catalogs). HMS-backed Iceberg supports them fully; Nessie's separate value is CATALOG-LEVEL multi-table branch transactions. | HMS users CAN use branches/tags. Spark writes via `ALTER TABLE ... CREATE BRANCH/TAG`; Trino reads via `FOR VERSION AS OF '<name>'`. |
+
+**1c. Reinforce the keyword anchor in r17** — add a short paragraph near the top of the time-travel section: "**Q-pattern matcher**: 'How do I read from a branch / tag on HMS-backed Iceberg from Trino?' → `FOR VERSION AS OF '<branch_or_tag_name>'` (string literal). Works on Trino 467 + HMS. Branches/tags are TABLE-LEVEL Iceberg metadata, NOT catalog-level; do NOT need Nessie." This ensures the responder's keyword search 'branch read HMS Trino' lands here directly.
+
+### (2) Q2 — quoting consistency audit
+
+Grep r17 + r28 + r16 (and any other file referencing metadata tables) for any `table"$files"` / `table"$snapshots"` / `table"$refs"` malformed forms. The correct uniform form is `"table$files"` / `"table$snapshots"` / `"table$refs"` (entire composite identifier inside ONE pair of double quotes). If any malformed examples exist, fix in place — do not just append a callout.
+
+### (3) Q3 — strengthen the concrete Trino-vs-Postgres comparison in r16
+
+The responder hedged twice on the Postgres-vs-Trino CPU comparison even though the resources support a concrete answer. Add a short LEADING CANONICAL block in r16 with:
+- Storage ratio (Postgres on-disk vs Iceberg-Parquet+Zstd on MinIO, with the 5–10x anchor)
+- Amortized Trino-cluster $/hr (fixed) vs Postgres per-query CPU (scales with concurrency)
+- Concurrency-multiplier framing — how to compute break-even between fixed cluster cost and per-query DB cost
+- EXPLAIN-driven CPU profiling on representative queries (`split_cpu_time_ms` or equivalent from `system.runtime.tasks` — confirm exact column name from `DESCRIBE system.runtime.tasks` on the production stack)
+
+So the responder doesn't fall back to "I don't have enough information" when the question is well-defined.
+
+### (4) Q4 — minor cleanup (low priority)
+
+Change "WITH RECURSIVE since release 343" → "WITH RECURSIVE since release 340 (Aug 2020)" in whatever resource the responder pulled this from. Drop the "experimental" framing — feature is stable, just has fixed recursion depth and quadratic plan growth.
+
+### (5) Breadth design for iter464
+
+Pick a NON-time-travel, NON-MoR-delete angle to test that the Q1 branch/tag-read fix doesn't crowd out other content. Candidates:
+- dbt macro syntax (e.g., adapter.dispatch, custom test macros)
+- Trino EXPLAIN-driven CPU profiling (ties to Q3 hedge fix)
+- Multi-tenant partitioning re-probe (older PASSED topic, hasn't been touched recently)
+- Postgres-to-Iceberg CDC (large topic with 158 datapoints, due for a re-probe)
+
+### (6) Federation — DO NOT PROBE in iter464
+
+The 4.49944/310 row sits 0.001 below the 4.5 raised threshold. A thin probe in either direction locks or breaks the row depending on which side it lands. Skip federation in iter464 unless a specific bulletproofed angle emerges.
+
+## Streak status
+
+- **Citation-hygiene streak**: BROKEN at iter463. Iter463 introduces a NEW load-bearing fab class — **capability-restriction fab** (claiming Iceberg branches/tags require Nessie when they are catalog-agnostic table-level metadata). Distinct from prior cross-dialect-spillover (iter456, iter459) and version-pin / Trino-internal-clause-conflation (iter458, iter461) classes.
+- **Branch/tag-read regression**: iter452/iter453 correctly handled this; iter463 regressed. After iter464 reconciliation, MUST re-probe this exact angle in iter465+ to confirm the fix at the 2nd-angle bar.
+- **Margin**: VERY THIN at 3.656. The PASS is only the average — Q1's 2.50 is a TRUE FAIL on its own. Do not treat this iter as a clean pass.
