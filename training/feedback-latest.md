@@ -1,158 +1,165 @@
-# Judge Feedback — Iter 440 (EXTENDED PHASE — end-of-iteration only)
+# Judge Feedback — Iter 441 (EXTENDED PHASE — end-of-iteration only)
 
-**Overall: 4.96875 STRONG PASS** (Q1 5.0 + Q2 5.0 + Q3 4.9375 + Q4 4.9375) — **+0.28125 step-UP from iter439 4.6875, RECOVERING from the iter439 -0.2344 dip; BOTH iter439 confident-inaccuracies fully RESOLVED on direct re-probe; zero-confident-inaccuracy this iter (streak RESETS to 1).** 39th consecutive overall PASS in extended phase. All required topics REMAIN PASSED.
+**Overall: 3.766 FAIL** (Q1 3.4375 + Q2 2.75 + Q3 3.9375 + Q4 4.9375) — **-1.20 step-DOWN from iter440 4.96875; THREE confident-inaccuracies this iter (two on Q1+Q2, one on Q3); zero-confident-iteracy streak BROKEN (was 1 iter); 40th overall extended-phase iter ends in FAIL but all required topics REMAIN PASSED on aggregate.**
 
 ---
 
 ## HEADLINE
 
-1. **Q1 metadata-table-quoting re-probe — RESOLVED, STRONG PASS 5.0.** Responder produces canonical `iceberg.analytics."events$snapshots"` / `"events$files"` / `"events$partitions"` whole-token-quoted form. Explicit DO-NOT-WRITE-style explanation: `events."$snapshots"` parses as table.column (column `$snapshots` cannot be resolved); `"events"."$snapshots"` four-part identifier same failure; `$` is not a valid bare identifier character in Trino SQL; Spark four-part dotted `events.snapshots` works in Spark SQL but FAILS in Trino — engineer-actionable cross-engine pitfall callout. Iter440 §X ICEBERG-METADATA-TABLE-QUOTING-GUARDRAIL in r17 LANDED PRECISELY on direct durability re-probe. Verified per trino.io/docs/current/connector/iceberg.html Metadata tables section.
+1. **Q1 federation BUFFER probe — FAIL 3.4375 — CONFIDENT-INACCURACY: Spark Catalyst EXPLAIN terms used as Trino terms.** Responder told the engineer to look in Trino EXPLAIN output for **`PushedFilters`** (pushed) and **`PostScanFilters`** (ran on Trino). **These are SPARK Catalyst / DataSourceV2 terms, NOT Trino.** Verified: Trino's actual pushdown signature is a `constraint = {...}` annotation INSIDE the `TableScan` node (pushed) vs a separate `Filter` or `ScanFilterProject` operator ABOVE the scan (not pushed) — per trino.io/docs/current/optimizer/pushdown.html. Spark `PushedFilters` / `PostScanFilters` (from `org.apache.spark.sql.connector.read.SupportsPushDownFilters` / Catalyst optimization) is canonical Spark terminology — confirmed via Cazpian Spark EXPLAIN deep dive + MungingData "Fast Filtering with Spark PartitionFilters and PushedFilters" + DataStax DSE docs. The engineer would search Trino EXPLAIN output for these field names, find nothing, and either conclude pushdown is broken or that the answer doesn't apply. This is a **wrong-engine load-bearing terminology error** on the federation BUFFER probe — must dock TA heavily.
 
-2. **Q2 conditional-aggregation-vs-SCD-1 terminology re-probe — RESOLVED, STRONG PASS 5.0.** Responder labels correctly as "conditional aggregation" / "manual pivot" / "crosstab" (NOT SCD-1). Both idioms shown: `SUM(CASE WHEN quarter='Q1' THEN revenue END) AS q1_revenue ... GROUP BY dept` AND alternative `SUM(revenue) FILTER (WHERE quarter='Q1')`, both verified Trino 467-supported. Explicit "do NOT call it SCD-1 (Kimball dimension overwrite, unrelated)" — exactly the corrective callout planned. Iter440 §Y CONDITIONAL-AGGREGATION-PIVOT-TERMINOLOGY-GUARDRAIL in r07 + r23 LANDED PRECISELY on direct durability re-probe.
+2. **Q2 EXPLAIN TYPE IO / TYPE VALIDATE — FAIL 2.75 — CONFIDENT-INACCURACY: "Trino has no built-in syntax-checker outside of EXPLAIN parsing" is wrong; both TYPE IO and TYPE VALIDATE were missed.** The question explicitly targeted `EXPLAIN (TYPE IO, FORMAT JSON)` (canonical what-will-it-scan / inputTableColumnInfos / columnConstraints / domain) and `EXPLAIN (TYPE VALIDATE)` (single boolean column 'Valid'; validates syntax + semantics without executing). Responder gave plain `EXPLAIN` / `EXPLAIN (FORMAT JSON)` / `LIMIT 1` and stated "Trino has no built-in syntax-checker outside of EXPLAIN parsing." Both `TYPE IO` and `TYPE VALIDATE` are canonical, documented per trino.io/docs/current/sql/explain.html — the responder's "no built-in syntax-checker" claim is a CONFIDENT-INACCURACY. Worse, `LIMIT 1` still **executes** the query (just returns one row), so the engineer who follows this advice for "cheap validation" pays real query cost — practical-applicability dock.
 
-3. **Q3 federation BUFFER probe — STRONG PASS 4.9375; federation 4.5041 → 4.50554 / 302, margin widens from +0.00410 to +0.00554 (×1.35 expansion); FEDERATION STAYS PASSED — durability extends further at 302-datapoint density.** All canonical pushdown claims verified per trino.io/docs/current/connector/postgresql.html + trino.io/docs/current/optimizer/pushdown.html. **CRITICAL: The "UnwrapDateTruncInComparison" optimizer rule name is REAL, NOT FABRICATED** — verified per trinodb/trino PR #14011 + PR #14161 source file `trino/sql/planner/iterative/rule/UnwrapDateTruncInComparison.java`. The rule rewrites `date_trunc('day', created_at) = DATE '2024-01-01'` into an equivalent range predicate (`created_at >= '2024-01-01' AND created_at < '2024-01-02'`), which DOES then push to the PG JDBC connector since temporal-range predicates are pushable on DATE/TIMESTAMP columns per the PG connector pushdown docs. iter424-fabricated-rule-names failure mode does NOT recur this iter.
+3. **Q3 LISTAGG — PASS 3.9375 with CONFIDENT-INACCURACY: "Oracle ON OVERFLOW has NO Trino equivalent" is wrong.** Trino's `listagg` DOES support `ON OVERFLOW ERROR` (default — raises when exceeding ~1,048,576 bytes) AND `ON OVERFLOW TRUNCATE '<filler>' WITH COUNT | WITHOUT COUNT`. Verified per trino.io/docs/current/functions/aggregate.html. Otherwise canonical: `listagg(product_name, ', ') WITHIN GROUP (ORDER BY ...)` (added Trino 396, June 2022); `array_join(array_agg(... ORDER BY ...) FILTER (WHERE x IS NOT NULL), ', ')` alternative; Oracle skips NULLs vs `array_agg` includes them; size-limit caveat (default 1 MiB) correct. The ON OVERFLOW miss costs TA + completeness but the rest of the answer is solid enough to clear 3.5.
 
-4. **Q4 NOT IN + NULL three-valued-logic — STRONG PASS 4.9375.** Not a Trino bug; SQL three-valued logic (`x NOT IN (..., NULL)` → UNKNOWN → row excluded); single NULL in subquery → zero rows. Fixes: NOT EXISTS (NULL-safe), LEFT JOIN ... WHERE c.id IS NULL anti-join; defensive `WHERE user_id IS NOT NULL` in subquery (flagged as fragile). Rule: never NOT IN on a nullable column. Verified per ANSI SQL three-valued logic + trino.io/docs/current/functions/comparison.html. Canonical answer.
+4. **Q4 partition evolution add region — STRONG PASS 4.9375 — canonical answer.** `ALTER TABLE ... SET PROPERTIES partitioning = ARRAY['month(occurred_at)', 'region']` is metadata-only, old files keep month-only spec but retain their partition values, new writes use both specs. Queries against both specs work transparently (Iceberg manages spec evolution internally). For old data to be region-pruned, run Spark `rewrite_data_files` (Trino's `optimize` does NOT rewrite to new spec). `sorted_by region` is a valid alternative when region is queried in <50% of workloads. All claims verified per iceberg.apache.org/docs/latest/evolution/ + trino.io/docs/current/connector/iceberg.html.
 
 ---
 
 ## Critical confirmations (explicit)
 
-### (a) Q1 metadata-table-quoting re-probe — RESOLVED?
+### (a) Q1 federation — PushedFilters/PostScanFilters Trino-vs-Spark verdict + score
 
-**YES — RESOLVED on direct durability re-probe. Score 5.0.**
+**Q1 score: 3.4375 FAIL.** Scores: TA 3.0 / BC 4.0 / PA 2.75 / Comp 4.0.
 
-- Whole-token-quoted form `iceberg.analytics."events$snapshots"` — CORRECT (matches canonical Trino syntax per trino.io/docs/current/connector/iceberg.html)
-- Mistake explanation `events."$snapshots"` parses as table.column → column `$snapshots` cannot be resolved — CORRECT and engineer-actionable
-- `"events"."$snapshots"` four-part identifier same failure — CORRECT
-- `$` not valid bare identifier — CORRECT
-- Spark cross-engine pitfall (`iceberg.schema.table.metadata` dot form works in Spark, fails in Trino) — CORRECT and prevents porting confusion
+**Verdict: PushedFilters / PostScanFilters are SPARK Catalyst terms, NOT Trino. CONFIDENT-INACCURACY confirmed.**
 
-Iter439 Q4 inaccuracy (`your_table."$snapshots"`) does NOT recur this iter. Iter440 r17 guardrail LANDED PRECISELY.
+- Trino's pushdown EXPLAIN signature (verified per trino.io/docs/current/optimizer/pushdown.html):
+  - **Pushed**: `TableScan[...]` with `constraint = {...}` annotation (or `predicate = {...}` for older formats); NO `Filter`/`ScanFilterProject` operator above.
+  - **Not pushed**: `Filter[...]` or `ScanFilterProject[...]` operator ABOVE the `TableScan`.
+- Spark Catalyst (verified per MungingData + Cazpian Spark EXPLAIN docs + DataStax DSE docs):
+  - `PushedFilters: [IsNotNull(city), EqualTo(city, San Francisco)]` field on the FileScan node = predicates pushed to data source.
+  - `PartitionFilters: [...]` = partition pruning.
+  - `PostScanFilters` (a.k.a. residual / data filters retained above the scan) = predicates Spark must apply after reading.
 
-### (b) Q2 conditional-aggregation-vs-SCD-1 terminology re-probe — RESOLVED?
+- The two named fields are Spark `org.apache.spark.sql.connector.read.SupportsPushDownFilters` interface concepts, never present in any Trino release.
+- The engineer would run `EXPLAIN SELECT ... FROM postgresql.public.users WHERE customer_id = 12345`, search the plan text for `PushedFilters` / `PostScanFilters`, find neither, and be stranded.
 
-**YES — RESOLVED on direct durability re-probe. Score 5.0.**
+Other Q1 content was correct: customer_id=12345 equality pushes to PG; cast type-mismatch can break pushdown; VARCHAR equality pushes; range on VARCHAR is nuanced. The wrong-engine EXPLAIN terminology is the single load-bearing issue.
 
-- "conditional aggregation" / "manual pivot" / "crosstab" labels — CORRECT
-- `SUM(CASE WHEN quarter='Q1' THEN revenue END) AS q1_revenue ... GROUP BY dept` — CORRECT canonical SQL
-- Alternative `SUM(revenue) FILTER (WHERE quarter='Q1')` — CORRECT, both verified Trino 467-supported per trino.io/docs/current/functions/aggregate.html
-- Explicit "do NOT call it SCD-1 (Kimball dimension overwrite, unrelated)" — exactly the corrective callout
-- No PIVOT keyword in Trino — CORRECT
+This is the federation BUFFER probe — the dock matters because Trino EXPLAIN reading is exactly what federation answers must enable the engineer to do correctly.
 
-Iter439 Q3 inaccuracy ("SCD-1 pivot pattern" mislabel) does NOT recur this iter. Iter440 r07 + r23 guardrails LANDED PRECISELY.
+### (b) Q2 EXPLAIN TYPE IO / TYPE VALIDATE — score + miss verdict + "no built-in syntax-checker" verdict
 
-### (c) Q3 federation BUFFER — score + federation average + margin + STAYS PASSED + UnwrapDateTruncInComparison verification
+**Q2 score: 2.75 FAIL.** Scores: TA 2.5 / BC 4.0 / PA 2.5 / Comp 2.0.
 
-**Q3 score: 4.9375 STRONG PASS** — tenth consecutive 4.75+ federation datapoint.
+**Verdict: BOTH `EXPLAIN (TYPE IO, FORMAT JSON)` and `EXPLAIN (TYPE VALIDATE)` are real, canonical, documented Trino features. The "no built-in syntax-checker outside EXPLAIN parsing" claim is a CONFIDENT-INACCURACY.**
 
-**Federation average update:**
-- Prior: 4.5041 × 301 = 1355.7341 sum
-- + Q3 4.9375 = +4.9375
-- New sum: 1360.6716
-- New count: 302
-- **New average: 1360.6716 / 302 = 4.50554** (margin +0.00554 above 4.5 threshold)
+Per trino.io/docs/current/sql/explain.html:
+
+- **`EXPLAIN (TYPE VALIDATE) <query>`** validates syntax and semantics WITHOUT executing the query. Returns a single boolean column named `Valid`. If the statement has errors (e.g., non-existent table, unknown function), validation fails and surfaces the error. **This IS the built-in syntax-checker the responder claimed does not exist.**
+- **`EXPLAIN (TYPE IO, FORMAT JSON) <query>`** is the canonical "what will it scan" tool. Returns a JSON document including `inputTableColumnInfos` for each input table, with `catalog`, `schema`, `table`, and per-column `constraint` entries containing `domain` info (ranges, bounds, discrete values). This is precisely what the engineer was asking for — without executing.
+
+Responder gave:
+- Plain `EXPLAIN <query>` — useful for logical plan but does NOT surface the `inputTableColumnInfos` constraint structure.
+- `EXPLAIN (FORMAT JSON) <query>` — JSON of the logical plan, NOT the IO-target structure.
+- `SELECT ... LIMIT 1` — **executes** the query (returns one row), so it is NOT a cheap-validation alternative; the engineer pays real query cost.
+- "Trino has no built-in syntax-checker outside of EXPLAIN parsing" — **WRONG.** TYPE VALIDATE is exactly that.
+
+This is a foundational EXPLAIN-flavor miss on a question that explicitly named both flavors. Heavy TA + completeness + practical-applicability dock.
+
+### (c) Federation average + margin + STAYS PASSED?
+
+- Prior: 4.5055 × 302 = 1359.6610 sum
+- + Q1 3.4375 = +3.4375
+- New sum: 1363.0985
+- New count: 303
+- **New average: 1363.0985 / 303 = 4.5020** (margin +0.00200 above 4.5 threshold)
 
 **Margin above 4.5 threshold:**
-- Iter439 margin: +0.00410
-- Iter440 margin: **+0.00554** (×1.35 buffer expansion)
+- Iter440 margin: +0.00554
+- Iter441 margin: **+0.00200** (margin shrinks by 0.00354 — contracts to ~36% of prior buffer; ×0.36 contraction)
 
-**STAYS PASSED?** **YES — Federation REMAINS PASSED with margin widening from +0.00410 to +0.00554 (×1.35 buffer expansion).** Federation now at 302 datapoints. Federation durability continues to reinforce.
+**STAYS PASSED?** **YES — Federation REMAINS PASSED but margin tightens significantly from +0.00554 to +0.00200.** A single sub-4.5 datapoint (Q1 3.4375) erased most of the iter440 buffer expansion. Federation is now at 303 datapoints but with a thin +0.00200 margin — **one more sub-4.0 federation datapoint could drop below 4.5**. PASSED stays this iter but durability is now fragile.
 
-**UnwrapDateTruncInComparison rule-name verification:**
-- **The rule name is REAL, NOT FABRICATED.** Verified per trinodb/trino PR #14011 "Simplify predicates involving date_trunc" by findepi AND PR #14161 "Simplify predicates involving date_trunc('hour')" by findepi. Source file: `trino/sql/planner/iterative/rule/UnwrapDateTruncInComparison.java`.
-- **The rule's behavior is correct as described:** it rewrites `date_trunc('day', created_at) = DATE '2024-01-01'` into an equivalent range predicate `created_at >= TIMESTAMP '2024-01-01 00:00:00' AND created_at < TIMESTAMP '2024-01-02 00:00:00'`.
-- **PG-connector applicability is CORRECT:** the unwrapped range predicate then pushes to the PG JDBC connector because the PG connector supports range pushdown on DATE/TIMESTAMP columns (per trino.io/docs/current/connector/postgresql.html "Predicates are pushed down for most types, including UUID and temporal types, such as DATE").
-- **Caveat noted in trino docs (not flagged by responder, minor completeness gap):** `UnwrapDateTruncInComparison` does NOT help with `timestamp with time zone` due to local-time semantics. The responder used plain `created_at` which is fine, but a complete answer might mention the TIMESTAMP WITH TIME ZONE corner case.
-- iter424-fabricated-rule-names failure mode does NOT recur — the rule is verifiable in upstream Trino source. **No fabrication flag.**
+### (d) Q3 ON OVERFLOW verdict + any other new confident-inaccuracy
 
-**Other federation claims all verified:**
-- VARCHAR equality/IN/IS NULL push — VERIFIED per PG connector docs ("equality predicates, such as IN or =, and inequality predicates, such as !=, on columns with textual types are pushed down")
-- VARCHAR range does NOT push by default; experimental `postgresql.experimental.enable-string-pushdown-with-collate` / session `enable_string_pushdown_with_collate` — VERIFIED per PG connector docs + PR #9746 (introduced Trino 365)
-- LOWER(status)='active' function-wrapped does NOT push — VERIFIED (any non-trivial function on a column blocks pushdown)
-- numeric equality pushes, timestamp range pushes — VERIFIED
-- EXPLAIN signature constraint-inside-TableScan = pushed; Filter-above-TableScan = Trino-side — VERIFIED per trino.io/docs/current/optimizer/pushdown.html
+**Q3 ON OVERFLOW verdict: CONFIDENT-INACCURACY.** "Oracle LISTAGG ON OVERFLOW has no Trino equivalent" is WRONG. Per trino.io/docs/current/functions/aggregate.html, Trino `listagg` supports both:
+- `listagg(value, ',' ON OVERFLOW ERROR)` — raises when output exceeds 1,048,576 bytes (this is the default behavior).
+- `listagg(value, ',' ON OVERFLOW TRUNCATE '...' WITH COUNT)` — truncates with optional filler string and optional `WITH COUNT | WITHOUT COUNT` of omitted non-null values.
 
-### (d) Any other new confident-inaccuracy across all four?
+This maps almost 1:1 to Oracle's ON OVERFLOW ERROR / ON OVERFLOW TRUNCATE syntax. The responder steered the engineer toward unnecessary workaround code.
 
-**NO — ZERO confident-inaccuracies this iter across all four answers.**
+**Other confident-inaccuracies summary across all four answers this iter:**
+- Q1: PushedFilters/PostScanFilters wrong-engine terms (SPARK not Trino) — confident-inaccuracy #1.
+- Q2: "Trino has no built-in syntax-checker outside EXPLAIN parsing" — confident-inaccuracy #2 (TYPE VALIDATE exists and does exactly this).
+- Q3: "Oracle ON OVERFLOW has no Trino equivalent" — confident-inaccuracy #3 (Trino listagg supports ON OVERFLOW ERROR | TRUNCATE).
+- Q4: NONE — canonical answer.
 
-- Q1 CLEAN — metadata-table-quoting canonical and exactly resolves iter439 Q4 inaccuracy
-- Q2 CLEAN — conditional-aggregation labeling canonical and exactly resolves iter439 Q3 mislabel
-- Q3 CLEAN — pushdown claims all verified including the verified-REAL `UnwrapDateTruncInComparison` rule name
-- Q4 CLEAN — three-valued-logic NOT-IN-NULL canonical answer
-
-**Zero-confident-inaccuracy streak RESETS to 1 iter** (iter439 broke the iter438 streak with TWO inaccuracies; iter440 is clean).
+**Total: THREE confident-inaccuracies this iter — zero-confident-inaccuracy streak BROKEN (was 1 iter as of iter440).**
 
 ---
 
 ## Per-question scoring
 
-### Q1 — Iceberg metadata-table quoting (Iceberg table maintenance) — DURABILITY RE-PROBE
+### Q1 — Predicate pushdown EXPLAIN (Trino federation BUFFER probe)
 
-**Scores: 5.0 / 5.0 / 5.0 / 5.0 — avg 5.0 STRONG PASS**
+**Scores: 3.0 / 4.0 / 2.75 / 4.0 — avg 3.4375 FAIL**
 
-What landed:
-- Whole-token-quoted `iceberg.analytics."events$snapshots"` canonical form — CORRECT
-- Failure mode explanation `events."$snapshots"` → parses as table.column → `$snapshots` column resolution error — CORRECT and load-bearing actionable
-- `"events"."$snapshots"` four-part identifier — CORRECT same failure
-- `$` not valid bare identifier — CORRECT rationale
-- Spark four-part dotted form works in Spark / fails in Trino — CORRECT cross-engine porting pitfall
+What landed correct:
+- customer_id=12345 equality predicate on PG int column pushes — CORRECT
+- cast type-mismatch (e.g., VARCHAR col compared to INT literal) can block pushdown — CORRECT
+- VARCHAR equality pushes; VARCHAR range nuanced (collation-dependent / experimental flag) — CORRECT
+- Iceberg scan "Input rows" / partition-filter visibility — CORRECT mental model
 
-No caveats / docks. Verified per trino.io/docs/current/connector/iceberg.html metadata-tables section.
+Confident-inaccuracy + docks:
+- **TA dock 2.0**: `PushedFilters` and `PostScanFilters` are SPARK Catalyst / DataSourceV2 EXPLAIN field names, NOT Trino. Trino EXPLAIN uses `constraint = {...}` inside `TableScan` (pushed) vs `Filter` / `ScanFilterProject` operator above (not pushed) per trino.io/docs/current/optimizer/pushdown.html. Wrong-engine terminology the engineer would act on.
+- **PA dock 2.25**: Engineer follows the answer, searches Trino EXPLAIN text for these field names, finds nothing — stranded or misled.
+- **BC dock 1.0**: Otherwise structurally clear, but mis-naming Trino concepts confuses a beginner.
 
-**Verdict:** STRONG PASS — iter440 r17 ICEBERG-METADATA-TABLE-QUOTING-GUARDRAIL LANDED PRECISELY on direct durability re-probe. iter439 Q4 inaccuracy fully RESOLVED.
+**Verdict:** FAIL — federation BUFFER probe takes a hit; federation 4.5055 → 4.5020 / 303; margin +0.00554 → +0.00200 (×0.36 contraction); STAYS PASSED but fragile.
 
-### Q2 — Conditional aggregation pivot (SQL best practices for OLAP) — DURABILITY RE-PROBE
+### Q2 — EXPLAIN TYPE IO / TYPE VALIDATE (Query performance regression diagnosis)
 
-**Scores: 5.0 / 5.0 / 5.0 / 5.0 — avg 5.0 STRONG PASS**
+**Scores: 2.5 / 4.0 / 2.5 / 2.0 — avg 2.75 FAIL**
 
-What landed:
-- No PIVOT keyword in Trino — CORRECT
-- "conditional aggregation" / "manual pivot" / "crosstab" labels — CORRECT
-- `SUM(CASE WHEN quarter='Q1' THEN revenue END) AS q1_revenue ... GROUP BY dept` — CORRECT
-- Alt `SUM(revenue) FILTER (WHERE quarter='Q1')` Trino 467-supported — CORRECT
-- Explicit "do NOT call it SCD-1 (Kimball dimension overwrite, unrelated)" — exactly the corrective callout
+What landed correct:
+- Plain `EXPLAIN <query>` shows the logical plan — TRUE but not what was asked
+- `EXPLAIN (FORMAT JSON)` exists — TRUE but produces logical plan JSON, not IO target structure
+- "EXPLAIN does not execute the query" — TRUE for the EXPLAIN forms (but `LIMIT 1` DOES execute)
 
-No caveats / docks. Verified per trino.io/docs/current/functions/aggregate.html FILTER clause.
+Confident-inaccuracy + docks:
+- **TA dock 2.5**: "Trino has no built-in syntax-checker outside of EXPLAIN parsing" is WRONG. `EXPLAIN (TYPE VALIDATE)` validates syntax + semantics without executing, returning boolean column `Valid` per trino.io/docs/current/sql/explain.html. CONFIDENT-INACCURACY.
+- **Comp dock 3.0**: Missed BOTH canonical tools the question targeted — `EXPLAIN (TYPE IO, FORMAT JSON)` (with `inputTableColumnInfos` / `columnConstraints` / `domain`) and `EXPLAIN (TYPE VALIDATE)`.
+- **PA dock 2.5**: Steered to plain `EXPLAIN` + `LIMIT 1` — the latter EXECUTES the query so it is NOT cheap validation, and plain EXPLAIN does not surface the IO target structure cleanly.
 
-**Verdict:** STRONG PASS — iter440 r07 + r23 CONDITIONAL-AGGREGATION-PIVOT-TERMINOLOGY-GUARDRAIL LANDED PRECISELY on direct durability re-probe. iter439 Q3 SCD-1 mislabel fully RESOLVED.
+**Verdict:** FAIL — Query performance regression diagnosis topic drops 4.5314 → 4.3695 / 11 (-0.1619 step-down; still above the standard 3.5 threshold so topic stays PASSED, but this is a noticeable durability hit on a topic with only 11 datapoints).
 
-### Q3 — Predicate pushdown (Trino federation BUFFER)
+### Q3 — LISTAGG (Oracle PL/SQL → dbt + Trino SQL migration)
+
+**Scores: 3.5 / 4.5 / 4.0 / 3.75 — avg 3.9375 PASS**
+
+What landed correct:
+- `listagg(product_name, ', ') WITHIN GROUP (ORDER BY ...)` Trino 396+ — CORRECT (Trino 396 release notes confirm)
+- `array_join(array_agg(x ORDER BY ...) FILTER (WHERE x IS NOT NULL), ', ')` alternative — CORRECT
+- Oracle LISTAGG skips NULLs vs Trino `array_agg` includes them — CORRECT semantic nuance
+- ~1 MiB output cap mention — CORRECT (1,048,576 bytes is the documented limit)
+
+Confident-inaccuracy + docks:
+- **TA dock 1.5**: "Oracle ON OVERFLOW has no Trino equivalent" is WRONG. Trino `listagg` supports `ON OVERFLOW ERROR` (default) and `ON OVERFLOW TRUNCATE '<filler>' WITH | WITHOUT COUNT` per trino.io/docs/current/functions/aggregate.html. Maps 1:1 to Oracle.
+- **Comp dock 1.25**: Missing the direct ON OVERFLOW syntax mapping forces engineer to write workaround code (CASE WHEN length > N THEN ...) that is not needed.
+- **BC dock 0.5**: Otherwise generally clear.
+
+**Verdict:** PASS — Oracle PL/SQL migration topic 4.6499 → 4.6103 / 18 (-0.0396; stays PASSED).
+
+### Q4 — Iceberg partition evolution (add region) — STRONG PASS
 
 **Scores: 5.0 / 4.75 / 5.0 / 5.0 — avg 4.9375 STRONG PASS**
 
-What landed:
-- timestamp range `created_at > '2024-01-01'` pushes — CORRECT
-- date_trunc rewrite via UnwrapDateTruncInComparison rule pushes — **CORRECT, rule name VERIFIED REAL** (NOT fabricated)
-- VARCHAR equality/IN/IS NULL push — CORRECT
-- VARCHAR range does NOT push by default; experimental `enable-string-pushdown-with-collate` flag — CORRECT
-- LOWER(status)='active' function-wrapped does NOT push — CORRECT
-- numeric equality pushes — CORRECT
-- EXPLAIN constraint-in-TableScan vs Filter-above — CORRECT
+What landed correct:
+- `ALTER TABLE ... SET PROPERTIES partitioning = ARRAY['month(occurred_at)', 'region']` is metadata-only — CORRECT
+- Old files keep month-only spec, retain their partition values — CORRECT (Iceberg's partition spec evolution preserves historical writes' specs)
+- New writes use the new spec (both `month(occurred_at)` AND `region`) — CORRECT
+- Queries transparently union both specs (Iceberg manages spec-id per data file in manifests) — CORRECT
+- Old data NOT region-pruned until Spark `rewrite_data_files` rewrite-all to new spec — CORRECT (Trino's `optimize` does NOT rewrite to new spec by default)
+- Month-only queries continue to work efficiently — CORRECT (month partition still applies to all data)
+- `sorted_by region` alternative when region rare (<50% of queries) — CORRECT recommendation
+- Multi-hour rewrite estimate — REALISTIC for non-trivial tables
 
 Caveats / docks:
-- BC dock 0.25 (4.75 instead of 5.0): "UnwrapDateTruncInComparison" optimizer rule name is technically correct but jargon-heavy for a beginner — minor clarity dock.
-- Minor completeness gap (not docked): could mention the `timestamp with time zone` corner case where `UnwrapDateTruncInComparison` does NOT help (per trino docs caveat).
+- BC dock 0.25: Could briefly unpack "spec-id" / "partition spec evolution" jargon for a beginner. Minor.
 
-**Verdict:** STRONG PASS — federation BUFFER probe lands; federation 4.5041 → 4.50554 / 302; margin +0.00410 → +0.00554 (×1.35 expansion); federation durability reinforced. **CRITICAL: rule-name VERIFIED REAL — no fabrication.**
-
-### Q4 — NOT IN + NULL three-valued logic (SQL best practices for OLAP)
-
-**Scores: 5.0 / 4.75 / 5.0 / 5.0 — avg 4.9375 STRONG PASS**
-
-What landed:
-- "Not a Trino bug, SQL three-valued logic" — CORRECT framing (prevents engineer from filing a bug)
-- Single NULL in subquery → `x NOT IN (..., NULL)` evaluates UNKNOWN → row excluded → zero rows — CORRECT semantic explanation
-- Fix NOT EXISTS (NULL-safe, returns TRUE/FALSE) — CORRECT canonical fix
-- LEFT JOIN ... WHERE c.id IS NULL anti-join — CORRECT alternative
-- Defensive `WHERE user_id IS NOT NULL` in subquery (flagged fragile) — CORRECT nuance
-- Never NOT IN on nullable column — CORRECT rule
-
-Caveats / docks:
-- BC dock 0.25 (4.75 instead of 5.0): "three-valued logic" / "UNKNOWN" terminology may need brief unpacking for a beginner — minor clarity dock.
-
-**Verdict:** STRONG PASS — canonical three-valued-logic NOT-IN-NULL answer with NULL-safe remediation menu.
+**Verdict:** STRONG PASS — canonical Iceberg partition-spec-evolution answer with explicit Spark-side rewrite step and `sorted_by` alternative. Iceberg partition design 4.5098 → 4.5251 / 28 (+0.0153 step-UP).
 
 ---
 
@@ -160,11 +167,12 @@ Caveats / docks:
 
 | Topic | Before | After | Delta | Status |
 |---|---|---|---|---|
-| Trino federation / cross-source connectors | 4.5041 / 301 | **4.50554 / 302** | **+0.00144** | **PASSED — margin expands ×1.35 (+0.00410 → +0.00554); 302-datapoint density; durably PASSED** |
-| Iceberg table maintenance | 4.4628 / 103 | **4.4680 / 104** | +0.0052 | PASSED (Q1 5.0 well above topic avg) |
-| SQL query best practices for OLAP | 4.5518 / 38 | **4.5726 / 40** | +0.0208 | PASSED (Q2 5.0 + Q4 4.9375 both well above topic avg, double bump up) |
+| Trino federation / cross-source connectors | 4.5055 / 302 | **4.5020 / 303** | **-0.0035** | **PASSED — margin shrinks +0.00554 → +0.00200 (×0.36 contraction); fragile** |
+| Query performance regression diagnosis | 4.5314 / 10 | **4.3695 / 11** | -0.1619 | PASSED (still above 3.5 standard threshold; not the raised 4.5 threshold) |
+| Oracle PL/SQL → dbt + Trino migration | 4.6499 / 17 | **4.6103 / 18** | -0.0396 | PASSED |
+| Iceberg partition design for SaaS | 4.5098 / 27 | **4.5251 / 28** | +0.0153 | PASSED |
 
-(Q1 metadata-table quoting contributes to Iceberg maintenance topic. Q2 conditional aggregation + Q4 NOT IN + NULL both contribute to SQL OLAP best practices topic.)
+(Q1 federation BUFFER; Q2 query-perf-regression; Q3 Oracle migration; Q4 Iceberg partition design.)
 
 ---
 
@@ -172,74 +180,82 @@ Caveats / docks:
 
 | Q | Score | Topic | Verdict |
 |---|---|---|---|
-| Q1 | 5.0 | Metadata-table quoting (Iceberg maintenance) | STRONG PASS — iter439 Q4 inaccuracy RESOLVED |
-| Q2 | 5.0 | Conditional aggregation (SQL best practices for OLAP) | STRONG PASS — iter439 Q3 SCD-1 mislabel RESOLVED |
-| Q3 | 4.9375 | Predicate pushdown (federation BUFFER) | STRONG PASS — federation margin expands ×1.35 (+0.00410 → +0.00554); UnwrapDateTruncInComparison rule VERIFIED REAL |
-| Q4 | 4.9375 | NOT IN + NULL three-valued logic (SQL best practices for OLAP) | STRONG PASS — canonical NULL-safe answer |
+| Q1 | 3.4375 | Federation BUFFER (predicate pushdown EXPLAIN) | FAIL — PushedFilters/PostScanFilters are SPARK terms not Trino |
+| Q2 | 2.75 | Query perf regression diagnosis (EXPLAIN TYPE IO / VALIDATE) | FAIL — missed both TYPE IO and TYPE VALIDATE; "no built-in syntax-checker" wrong |
+| Q3 | 3.9375 | Oracle migration (LISTAGG) | PASS — but "ON OVERFLOW no Trino equivalent" wrong; Trino DOES support ON OVERFLOW |
+| Q4 | 4.9375 | Iceberg partition design (add region partition) | STRONG PASS — canonical, metadata-only + Spark rewrite |
 
-**Average 4.96875 STRONG PASS — 39th consecutive overall PASS in extended phase; +0.28125 step-UP from iter439 4.6875.**
+**Average 3.766 FAIL — first FAIL iter in 40 extended-phase iterations; -1.20 step-DOWN from iter440 4.96875.**
 
 **Headline outcomes:**
-- BOTH iter439 confident-inaccuracies fully RESOLVED on direct durability re-probe (metadata-table quoting Q1 + conditional-aggregation Q2)
-- Q3 federation BUFFER STRONG PASS 4.9375; **federation 4.5041 → 4.50554 / 302, margin +0.00410 → +0.00554 (×1.35 expansion); federation durability reinforced at 302-datapoint density**
-- Q4 STRONG PASS 4.9375; canonical three-valued-logic answer
-- UnwrapDateTruncInComparison rule name VERIFIED REAL (not fabricated) — iter424 fabricated-rule-names failure mode does NOT recur
-- Federation 4.5041 → 4.50554 (+0.00144; +0.00554 above threshold; durably PASSED with margin expanded ×1.35)
-- Iceberg maintenance 4.4628 → 4.4680 (+0.0052; Q1 5.0 lift)
-- SQL best practices for OLAP 4.5518 → 4.5726 (+0.0208; Q2 5.0 + Q4 4.9375 double-lift)
+- THREE confident-inaccuracies this iter (Q1 wrong-engine EXPLAIN terms, Q2 wrong "no built-in syntax-checker", Q3 wrong "no ON OVERFLOW equivalent") — zero-confident-inaccuracy streak BROKEN at 1 iter.
+- Federation 4.5055 → 4.5020 / 303 (-0.0035; margin +0.00554 → +0.00200 — ×0.36 contraction; fragile).
+- Query perf regression diagnosis 4.5314 → 4.3695 / 11 (Q2 2.75 well below topic avg; topic drops below the once-comfortable 4.5+ but still PASSES the standard 3.5 threshold).
+- Oracle PL/SQL migration 4.6499 → 4.6103 / 18 (Q3 3.9375 below topic avg; nudges down but well above threshold).
+- Iceberg partition design 4.5098 → 4.5251 / 28 (Q4 4.9375 well above topic avg; nudges up).
+- All required topics REMAIN PASSED on aggregate, but federation buffer is now precarious.
 
-**Failure-mode count: 16 of prior 39 iterations + ZERO confident-inaccuracies in iter440. Zero-confident-inaccuracy streak RESETS to 1 iter.**
-
----
-
-## Teacher actions next (iter 441)
-
-1. **MAINTAIN — Iter440 guardrails landed cleanly; do NOT regress.** §X ICEBERG-METADATA-TABLE-QUOTING-GUARDRAIL in r17 and §Y CONDITIONAL-AGGREGATION-PIVOT-TERMINOLOGY-GUARDRAIL in r07 + r23 both LANDED PRECISELY on direct re-probe. No changes needed; keep both guardrails intact. Periodic 5-7-iter durability re-probes will catch any drift.
-
-2. **OPTIONAL polish — r22 federation §13.x (UnwrapDateTruncInComparison context).** The responder named the rule correctly. To future-proof against the iter424 fabricated-rule-names failure mode recurring, consider adding to r22 a §13.x ANNOTATED canonical Trino optimizer-rule names list (only rules verified to exist in trinodb/trino source). Include: UnwrapCastInComparison, UnwrapDateTruncInComparison, UnwrapYearInComparison (PR #11515). Add a footnote caveat: "UnwrapDateTruncInComparison does NOT help with TIMESTAMP WITH TIME ZONE due to local-time semantics" (per trino docs). Marginal completeness gain; low priority.
-
-3. **OPTIONAL polish — r05 three-valued-logic NOT-IN-NULL §X.** Q4 answer was canonical but "three-valued logic" / "UNKNOWN" terminology could be more beginner-friendly. Consider adding a one-line plain-English unpacking: "In SQL, comparing anything to NULL returns UNKNOWN (not TRUE or FALSE), and WHERE drops UNKNOWN rows just like FALSE rows." Marginal clarity gain; low priority.
-
-4. **STRATEGIC — Loop posture: hardening continues; iter440 is a clean STRONG PASS recovery from iter439 dip.** All required topics REMAIN PASSED. Federation margin continues widening (+0.00410 → +0.00554). State.json `passed: true` stays. Zero-confident-inaccuracy this iter — the iter440 corrective guardrails worked exactly as designed. Hardening posture: maintain vigilance, avoid introducing new unvetted technical claims.
+**Failure-mode count: 16 of prior 40 iterations + THREE confident-inaccuracies in iter441 — sharp recurrence.**
 
 ---
 
-## Judge probe targets next (iter 441)
+## Teacher actions next (iter 442) — HIGH PRIORITY
 
-1. **MEDIUM — Q1/Q2 guardrail durability extension re-probes (3-5 iters out).** Both iter440 guardrails landed cleanly on direct re-probe. Schedule a 3-5-iter-out indirect re-probe from a different angle: for Q1 metadata-table-quoting, probe "show me partition statistics for an Iceberg table" or "list manifests for events table"; for Q2 conditional aggregation, probe "weekly active user breakdown by tier" or "monthly revenue pivot by region" — confirm canonical labels and syntax reproduce.
+1. **HIGH PRIORITY — FIX Q1 federation EXPLAIN terminology (r22 §13.x or new §PUSHDOWN-EXPLAIN-SIGNATURE).** Add an explicit GUARDRAIL block:
+   - Trino EXPLAIN pushdown signature: `TableScan[...]` with `constraint = {...}` inside (or empty constraint) = pushed; `Filter[...]` or `ScanFilterProject[...]` operator ABOVE the `TableScan` = not pushed. Per trino.io/docs/current/optimizer/pushdown.html.
+   - Concrete example Trino EXPLAIN output snippet for a pushed predicate vs not pushed.
+   - Explicit cross-engine CAUTION: `PushedFilters` / `PostScanFilters` / `PartitionFilters` are SPARK Catalyst / DataSourceV2 field names — **do NOT use these terms when reading Trino EXPLAIN output**. They will not appear in Trino plans.
+   - Reference: Spark uses `org.apache.spark.sql.connector.read.SupportsPushDownFilters`; Trino uses `ConnectorMetadata.applyFilter` + `TupleDomain` constraint propagation — totally different mechanisms.
 
-2. **MEDIUM — Q3 federation predicate-pushdown corner cases.** Federation now at +0.00554 margin and 302-datapoint density. Probe additional pushdown corner cases: CAST-wrapped column predicate (does NOT push), LIKE prefix-only pattern on VARCHAR (depends on collation/connector), OR-of-equality predicates (pushes if simple, may not if complex). Build margin further.
+2. **HIGH PRIORITY — FIX Q2 EXPLAIN TYPE IO / TYPE VALIDATE coverage (r18 §EXPLAIN-TYPE-IO / §EXPLAIN-TYPE-VALIDATE).** Per state.json iter441 already tightened r18; teacher must verify the actual content surfaces both canonical forms when asked:
+   - `EXPLAIN (TYPE VALIDATE) <query>` — validates without executing; returns single boolean column `Valid`; surfaces parser + analyzer errors (unknown table, unknown function, type mismatch).
+   - `EXPLAIN (TYPE IO, FORMAT JSON) <query>` — canonical "what will it scan"; JSON output includes `inputTableColumnInfos` array with per-column `domain` constraints (ranges, bounds, discrete values).
+   - Explicit anti-pattern callout: `SELECT ... LIMIT 1` **executes** the query — NOT a cheap validation; use TYPE VALIDATE instead.
+   - Explicit anti-claim: do NOT write "Trino has no built-in syntax-checker" — TYPE VALIDATE IS the built-in syntax + semantic checker.
 
-3. **MEDIUM — Q4 NOT IN nuances and related three-valued-logic patterns.** Probe related: COUNT(DISTINCT) on nullable column, OUTER JOIN with NULL on join key, COALESCE in WHERE predicates. Reinforce the three-valued-logic mental model.
+3. **MEDIUM PRIORITY — FIX Q3 LISTAGG ON OVERFLOW coverage (relevant Oracle migration resource).** Add explicit mapping:
+   - Oracle `LISTAGG(x, ',' ON OVERFLOW ERROR) WITHIN GROUP (ORDER BY ...)` → Trino `listagg(x, ',' ON OVERFLOW ERROR) WITHIN GROUP (ORDER BY ...)` — direct 1:1.
+   - Oracle `LISTAGG(x, ',' ON OVERFLOW TRUNCATE '...' WITH COUNT) WITHIN GROUP (ORDER BY ...)` → Trino `listagg(x, ',' ON OVERFLOW TRUNCATE '...' WITH COUNT) WITHIN GROUP (ORDER BY ...)` — direct 1:1.
+   - Trino default behavior is `ON OVERFLOW ERROR` with 1,048,576-byte limit.
+   - Per trino.io/docs/current/functions/aggregate.html.
 
-4. **LOW — Q2 isolation-level write.{merge,delete,update} props durability re-probe** (5-7 iters out, carry-forward from iter439 notes). Long-tail durability check.
-
-5. **LOW — Iceberg identity-column durability re-probe** (3-5 iters out, carry-forward from iter439 notes).
+4. **STRATEGIC — Loop posture: iter441 broke the iter440 STRONG PASS recovery; three confident-inaccuracies in a single iter is a regression cluster.** All required topics still PASSED on aggregate but federation buffer at +0.00200 is fragile — one more sub-4.0 federation datapoint could drop below 4.5. Teacher must address the three Q1/Q2/Q3 inaccuracies immediately in iter442 and the judge should re-probe each on direct repeat within 1-3 iters to confirm guardrails land.
 
 ---
 
-## Critical message to teacher for iter 441
+## Judge probe targets next (iter 442) — MANDATORY DIRECT RE-PROBES
 
-**Iter440 is a 4.96875 STRONG PASS and 39th consecutive extended-phase overall PASS, +0.28125 step-UP from iter439 4.6875, with BOTH iter439 confident-inaccuracies fully RESOLVED on direct durability re-probe.**
+1. **HIGH PRIORITY — Q1 federation EXPLAIN signature direct re-probe.** Ask "How do I tell from Trino EXPLAIN output whether my WHERE predicate pushed to PostgreSQL?" — confirm responder names `constraint = {...}` inside `TableScan` (pushed) vs separate `Filter` / `ScanFilterProject` above (not pushed); confirm responder does NOT say `PushedFilters` / `PostScanFilters` (Spark terms). This re-probe MUST land cleanly to repair federation buffer.
 
-**Q1 metadata-table-quoting:** Responder produced canonical `iceberg.analytics."events$snapshots"` (whole-token-quoted) with explicit failure-mode explanation for the wrong `events."$snapshots"` form (parses as table.column, `$snapshots` column resolution error). Iter440 r17 guardrail LANDED PRECISELY.
+2. **HIGH PRIORITY — Q2 EXPLAIN TYPE VALIDATE / TYPE IO direct re-probe.** Ask "How can I cheaply validate a Trino SQL statement without executing it?" AND separately "How can I see what Trino will scan for a query?" — confirm TYPE VALIDATE (single boolean `Valid` column) and TYPE IO + FORMAT JSON (`inputTableColumnInfos` / `columnConstraints` / `domain` structure) both surface canonically.
 
-**Q2 conditional aggregation:** Responder labeled "conditional aggregation" / "manual pivot" / "crosstab" (NOT SCD-1), showed both `SUM(CASE...)` and `SUM(...) FILTER (WHERE ...)` Trino 467-supported variants, and explicitly called out "do NOT call it SCD-1 (Kimball dimension overwrite, unrelated)." Iter440 r07 + r23 guardrail LANDED PRECISELY.
+3. **MEDIUM PRIORITY — Q3 LISTAGG ON OVERFLOW direct re-probe.** Ask "I'm migrating Oracle LISTAGG(x, ',' ON OVERFLOW TRUNCATE) — how do I write this in Trino?" — confirm responder produces the direct 1:1 Trino `listagg(x, ',' ON OVERFLOW TRUNCATE '...' WITH COUNT)` syntax, NOT a workaround.
 
-**Q3 federation BUFFER:** STRONG PASS 4.9375. **CRITICAL VERIFICATION: the "UnwrapDateTruncInComparison" optimizer rule name is REAL** — verified per trinodb/trino PR #14011 + PR #14161 source file `trino/sql/planner/iterative/rule/UnwrapDateTruncInComparison.java`. The rule rewrites date_trunc-in-comparison into a range predicate, which then pushes to the PG JDBC connector since temporal-range predicates are pushable on DATE/TIMESTAMP. iter424 fabricated-rule-names failure mode does NOT recur. **Federation 4.5041 → 4.50554 / 302, margin +0.00410 → +0.00554 (×1.35 expansion); durably PASSED.**
+4. **MEDIUM — Q4 partition-spec-evolution durability re-probe** (3-5 iters out) from a different angle — e.g., "add a tier column to partitioning on an existing Iceberg table" — confirm metadata-only + Spark rewrite_data_files reproduces.
 
-**Q4 NOT IN + NULL:** STRONG PASS 4.9375. Canonical three-valued-logic explanation with NULL-safe NOT EXISTS / anti-join LEFT JOIN remediation menu.
+5. **LOW — Carry forward iter440 backlog**: Q1/Q2 guardrail durability 3-5 iters out; Q3 federation pushdown corner cases (CAST-wrapped col, LIKE prefix, OR-of-equality); isolation-level write.{merge,delete,update} props; Iceberg identity-column durability.
 
-**ZERO confident-inaccuracies this iter** — the iter439 dip was a one-iter spike that the iter440 corrective guardrails fully closed. Zero-confident-inaccuracy streak RESETS to 1.
+---
 
-**Loop status: PASSED stays. All required topics remain PASSED with federation now durably above threshold at +0.00554 margin (302-datapoint density). Hardening continues; keep iter440 guardrails intact; avoid introducing new unvetted claims.**
+## Critical message to teacher for iter 442
+
+**Iter441 is a 3.766 FAIL — the first FAIL in 40 extended-phase iters, with THREE confident-inaccuracies (Q1 Spark-vs-Trino EXPLAIN terms, Q2 "no built-in syntax-checker" denial of TYPE VALIDATE, Q3 "no ON OVERFLOW equivalent" denial of Trino listagg overflow clauses). Zero-confident-inaccuracy streak BROKEN at 1 iter.**
+
+**Q1 federation BUFFER:** Responder told the engineer to look for `PushedFilters` (pushed) and `PostScanFilters` (Trino-side) in Trino EXPLAIN output. These are SPARK Catalyst / DataSourceV2 field names — Trino uses `TableScan[constraint = {...}]` (pushed) vs `Filter` / `ScanFilterProject` operator above the scan (not pushed). Wrong-engine terminology the engineer would act on. Federation 4.5055 → 4.5020 / 303; margin +0.00554 → +0.00200 (×0.36 contraction; fragile).
+
+**Q2 EXPLAIN TYPE IO / TYPE VALIDATE:** Responder gave plain EXPLAIN + LIMIT 1 (the latter EXECUTES) and said "Trino has no built-in syntax-checker outside EXPLAIN parsing." Both `EXPLAIN (TYPE VALIDATE)` (returns boolean `Valid`) and `EXPLAIN (TYPE IO, FORMAT JSON)` (returns `inputTableColumnInfos` with `domain` constraints) are real, canonical, documented per trino.io/docs/current/sql/explain.html. Despite state.json claiming iter441 r18 tightened, the canonical TYPE VALIDATE / TYPE IO content did not surface in the actual answer. Teacher must verify r18 §EXPLAIN-TYPE-IO/VALIDATE content is reachable from the relevant question phrasings, and add explicit anti-patterns: `LIMIT 1` is NOT cheap validation; do not write "no built-in syntax-checker."
+
+**Q3 LISTAGG:** Responder gave canonical `listagg(x, ',') WITHIN GROUP (ORDER BY ...)` and array_join alternative, but said "Oracle ON OVERFLOW has no Trino equivalent" — WRONG. Trino `listagg` supports `ON OVERFLOW ERROR` (default) and `ON OVERFLOW TRUNCATE '...' WITH | WITHOUT COUNT` per trino.io/docs/current/functions/aggregate.html. Direct 1:1 mapping to Oracle.
+
+**Q4 partition evolution:** STRONG PASS 4.9375. Canonical answer.
+
+**Loop status: PASSED stays on aggregate (all required topics still PASSED), but federation buffer is now precarious at +0.00200 (was +0.00554) and three concurrent confident-inaccuracies indicate a regression cluster. Teacher must immediately address all three Q1/Q2/Q3 inaccuracies for iter442; judge will direct-re-probe each within 1-3 iters to confirm guardrails land. state.json `passed: true` stays for now but watch federation: one more sub-4.0 federation datapoint could drop below 4.5.**
 
 **Other key verifications this iter:**
-- Iceberg metadata-table whole-token-quoted syntax `iceberg.<schema>."<table>$<metadata>"` — verified per trino.io/docs/current/connector/iceberg.html
-- Trino FILTER (WHERE ...) clause supported for all aggregates — verified per trino.io/docs/current/functions/aggregate.html
-- Trino has NO PIVOT keyword — verified (only conditional aggregation idioms)
-- UnwrapDateTruncInComparison rule REAL — verified per trinodb/trino PR #14011 + PR #14161
-- PG connector VARCHAR equality pushes / range does NOT push by default — verified per trino.io/docs/current/connector/postgresql.html
-- Experimental `postgresql.experimental.enable-string-pushdown-with-collate` flag — verified per PG connector docs + PR #9746 (Trino 365)
-- PG connector temporal-range pushdown (DATE/TIMESTAMP) — verified per PG connector docs
-- SQL three-valued logic NOT IN NULL → UNKNOWN → zero rows — verified per ANSI SQL semantics + trino.io functions/comparison
+- Trino EXPLAIN pushdown signature: `constraint = {...}` inside `TableScan` (pushed) vs `Filter` / `ScanFilterProject` above (not pushed) — verified per trino.io/docs/current/optimizer/pushdown.html
+- Spark Catalyst `PushedFilters` / `PostScanFilters` / `PartitionFilters` — verified Spark-only terminology per Cazpian + MungingData + DataStax DSE docs
+- `EXPLAIN (TYPE VALIDATE)` returns single boolean column `Valid`, validates without executing — verified per trino.io/docs/current/sql/explain.html
+- `EXPLAIN (TYPE IO, FORMAT JSON)` returns `inputTableColumnInfos` with `domain` constraints — verified per trino.io/docs/current/sql/explain.html
+- Trino `listagg` supports `ON OVERFLOW ERROR` (default; 1,048,576-byte limit) and `ON OVERFLOW TRUNCATE '<filler>' WITH | WITHOUT COUNT` — verified per trino.io/docs/current/functions/aggregate.html
+- Trino `listagg` WITHIN GROUP (ORDER BY ...) added in Trino 396 — verified per release notes
+- Iceberg `ALTER TABLE SET PROPERTIES partitioning = ARRAY[...]` is metadata-only; old files keep old spec; Spark `rewrite_data_files` required to rewrite-all to new spec — verified per iceberg.apache.org/docs/latest/evolution/ + trino.io/docs/current/connector/iceberg.html
