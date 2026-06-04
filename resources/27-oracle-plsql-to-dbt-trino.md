@@ -35,8 +35,151 @@ These are the absolutes most often stated incorrectly when an engineer with Orac
 | "Oracle implicit `varchar` -> `number` coercion (`WHERE int_col = '42'`) works in Trino." | **FALSE — Trino is strict about types.** Comparing `int_col = '42'` (`bigint = varchar`) raises `TYPE_MISMATCH`. You must `CAST(int_col AS varchar) = '42'` or `int_col = CAST('42' AS bigint)`. Most Oracle PL/SQL written before ~2015 relies heavily on implicit coercion; expect to add explicit `CAST` calls everywhere. | [Trino types](https://trino.io/docs/current/language/types.html) |
 | "I should port my Oracle exception handlers (`EXCEPTION WHEN NO_DATA_FOUND THEN ...`) to dbt." | **FALSE — there is no exception block in dbt or Trino SQL.** The replacement is **dbt tests** (`not_null`, `unique`, `accepted_values`, `relationships`, plus custom singular tests) which run after the model builds and fail the run if violated. For "soft" guards inside a transformation (e.g., "if dim is missing, default to UNKNOWN"), use `COALESCE`, `CASE WHEN`, or `LEFT JOIN` with a NULL fallback. **DO NOT WRITE `EXCEPTION WHEN ...` in a dbt model.** | [dbt tests](https://docs.getdbt.com/docs/build/data-tests) |
 | "I can change Trino's session timezone with `SET SESSION time_zone = 'America/New_York'` (like PostgreSQL / MySQL)." | **FALSE — there is NO `time_zone` session property in Trino.** Running `SET SESSION time_zone = '...'` errors with "Session property time_zone does not exist". The valid forms are: (a) the dedicated **`SET TIME ZONE 'America/New_York'`** COMMAND (a separate statement form, NOT a `SET SESSION property = value` assignment); (b) `SET TIME ZONE LOCAL` / `SET TIME ZONE INTERVAL '-08:00' HOUR TO MINUTE`; (c) `sql.forced-session-time-zone` SERVER CONFIG property (cluster-level, overrides session); (d) `expr AT TIME ZONE 'zone'` per-expression. See **§4.2A TRINO-SESSION-TIMEZONE GUARDRAIL** for the worked SYSDATE/ET example. **DO NOT WRITE `SET SESSION time_zone = '...'` or `SET SESSION timezone = '...'` — both are invented syntax.** | [Trino SET TIME ZONE](https://trino.io/docs/current/sql/set-time-zone.html); [Trino datetime functions](https://trino.io/docs/current/functions/datetime.html) |
+| "Trino's NULLS-default ordering matches Oracle's — `ORDER BY ts DESC` puts NULLs at the top in both engines." | **FALSE — Trino and Oracle disagree on the NULLS default, and it is the silent-wrong row-ordering champion of the migration.** Per [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) verbatim: "The default null ordering is `NULLS LAST`, regardless of the ordering direction." Trino defaults `NULLS LAST` for **both** `ASC` and `DESC`. Oracle defaults `NULLS LAST` for `ASC` and `NULLS FIRST` for `DESC`. So `ORDER BY ts DESC` puts NULLs at the **top** in Oracle but at the **bottom** in Trino — same query, different row order, **no error message**. See **§ LEADING CANONICAL — Oracle vs Trino NULLS-default semantics in ORDER BY** immediately below. **Always write explicit `NULLS FIRST` / `NULLS LAST` when migrating Oracle `ORDER BY ... DESC` queries (and inside window-function `OVER (... ORDER BY ...)`).** | [Trino SELECT — ORDER BY](https://trino.io/docs/current/sql/select.html); [Oracle SQL Language Reference — ORDER BY](https://docs.oracle.com/en/database/oracle/oracle-database/19/sqlrf/SELECT.html) |
 
-> **Why these specific myths matter.** Each is a load-bearing translation that an engineer with Oracle muscle memory will write reflexively on day one — and each will either fail to parse (visible failure, easy to fix) OR silently change query results (invisible failure, hard to detect). The empty-string-is-NULL myth and the implicit-coercion myth are the two most dangerous because they don't produce a parse error: the migrated model runs, but the numbers no longer match the Oracle source. **Always diff a representative sample of rows between Oracle and Trino during cutover.**
+> **Why these specific myths matter.** Each is a load-bearing translation that an engineer with Oracle muscle memory will write reflexively on day one — and each will either fail to parse (visible failure, easy to fix) OR silently change query results (invisible failure, hard to detect). The empty-string-is-NULL myth, the implicit-coercion myth, and the **NULLS-default myth (Trino defaults `NULLS LAST` regardless of direction, while Oracle defaults `NULLS FIRST` for `DESC`)** are the three most dangerous because none of them produce a parse error: the migrated model runs, but the numbers — or the row ordering — no longer match the Oracle source. **Always diff a representative sample of rows between Oracle and Trino during cutover.**
+
+---
+
+## LEADING CANONICAL — Oracle vs Trino NULLS-default semantics in ORDER BY (read this BEFORE migrating any `ORDER BY ... DESC` query)
+
+> **Read this section every time you migrate an Oracle `ORDER BY` clause.** This is the third confirmed cross-dialect-spillover variant (after `/*+ hints */` and `::` cast — see §4.4B). It is the most subtle because the failure mode is **silent-wrong row ordering with no error message**.
+
+### The two facts, side by side (WebSearch-verified at trino.io/docs/current/sql/select.html and docs.oracle.com)
+
+| Engine | Default `NULLS` placement for `ORDER BY col ASC` | Default `NULLS` placement for `ORDER BY col DESC` | Authoritative pointer |
+|---|---|---|---|
+| **Trino 467** | **`NULLS LAST`** (NULLs at the bottom) | **`NULLS LAST`** (NULLs at the bottom — **regardless of direction**) | [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) — verbatim: "The default null ordering is `NULLS LAST`, regardless of the ordering direction." |
+| **Oracle 11g/12c/19c/23c** | **`NULLS LAST`** (NULLs at the bottom) | **`NULLS FIRST`** (NULLs at the **top**) | [Oracle SQL Language Reference — ORDER BY](https://docs.oracle.com/en/database/oracle/oracle-database/19/sqlrf/SELECT.html) — "if the null ordering is not specified, then the handling of the null values is `NULLS LAST` if the sort is `ASC`, `NULLS FIRST` if the sort is `DESC`." |
+
+**The one-sentence summary.** `ORDER BY col DESC` puts NULLs at the **top** in Oracle but at the **bottom** in Trino — and there is no parse error, no warning, no `EXPLAIN` annotation telling you the ordering differs. Reports and downstream consumers that depended on Oracle's "NULLs-first-for-DESC" default will silently produce different output on Trino.
+
+### The silent-wrong worked example — same data, same query, different row order
+
+Source table `tasks` on both engines:
+
+| id | priority | description |
+|---|---|---|
+| 1 | 5 | urgent fix |
+| 2 | NULL | unassigned |
+| 3 | 3 | review docs |
+| 4 | NULL | triage backlog |
+| 5 | 1 | nice-to-have |
+
+The migrated query (same SQL text on both engines):
+
+```sql
+SELECT id, priority, description
+FROM tasks
+ORDER BY priority DESC;
+```
+
+**On Oracle** (NULLS FIRST is the DESC default):
+
+| id | priority | description |
+|---|---|---|
+| 2 | NULL | unassigned |
+| 4 | NULL | triage backlog |
+| 1 | 5 | urgent fix |
+| 3 | 3 | review docs |
+| 5 | 1 | nice-to-have |
+
+**On Trino 467** (NULLS LAST is the default for BOTH directions):
+
+| id | priority | description |
+|---|---|---|
+| 1 | 5 | urgent fix |
+| 3 | 3 | review docs |
+| 5 | 1 | nice-to-have |
+| 2 | NULL | unassigned |
+| 4 | NULL | triage backlog |
+
+**Same data, same SQL, no errors — but rows 2 and 4 moved from the top to the bottom of the result set.** Any consumer that read the first row, the top-N rows, or assumed NULLs would be visually grouped at the top will silently break.
+
+### The defensive rule — ALWAYS write explicit `NULLS FIRST` / `NULLS LAST` on migration
+
+When migrating Oracle `ORDER BY` to Trino, **never rely on either engine's default**. Always specify `NULLS FIRST` or `NULLS LAST` explicitly. This eliminates the ambiguity and makes the migration grep-able for review.
+
+Preserving Oracle behavior (NULLs at the top on DESC):
+
+```sql
+-- Trino target — preserves Oracle's NULLs-at-top DESC ordering:
+SELECT id, priority, description
+FROM tasks
+ORDER BY priority DESC NULLS FIRST;
+```
+
+Preserving Trino's default (NULLs at the bottom on DESC) — explicit so reviewers see the intent:
+
+```sql
+-- Trino target — explicit Trino default, NULLs at the bottom:
+SELECT id, priority, description
+FROM tasks
+ORDER BY priority DESC NULLS LAST;
+```
+
+### Window functions inside `OVER (... ORDER BY ...)` — same rule applies
+
+The NULLS-default disagreement also affects `ROW_NUMBER()`, `RANK()`, `LAG()`, `LEAD()`, `FIRST_VALUE()`, `LAST_VALUE()`, and every other window function whose `OVER` clause has an `ORDER BY`. The "latest per group" pattern is the canonical victim:
+
+```sql
+-- Oracle source — RELIED on Oracle's DESC default (NULLs at the top, so NULL ts rows
+-- get rn = 1 and would be picked as the "latest"):
+SELECT *
+FROM (
+    SELECT customer_id, order_date, amount,
+           ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date DESC) AS rn
+    FROM   orders
+)
+WHERE rn = 1;
+
+-- Trino target — by default NULLs go LAST in DESC, so a row with NULL order_date
+-- gets the HIGHEST rn (not 1), and a NON-NULL row is picked as rn = 1. This is
+-- usually what the engineer ACTUALLY wanted, but it DIFFERS from Oracle behavior.
+-- If you need to preserve Oracle behavior verbatim, add NULLS FIRST:
+SELECT *
+FROM (
+    SELECT customer_id, order_date, amount,
+           ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date DESC NULLS FIRST) AS rn
+    FROM   {{ ref('stg_orders') }}
+)
+WHERE rn = 1;
+```
+
+The defensive discipline is identical to the top-level `ORDER BY` rule: **always write `NULLS FIRST` or `NULLS LAST` inside `OVER (... ORDER BY ...)` when migrating Oracle window-function code**. Do not assume the Trino default matches Oracle's.
+
+### Migration checklist — Oracle `ORDER BY ... DESC` audit
+
+When auditing legacy Oracle source for migration:
+
+1. **Grep the source Oracle code for `ORDER BY ... DESC`** (both top-level and inside `OVER (... ORDER BY ... DESC)`).
+2. **For each hit, decide whether Oracle's NULLS-FIRST-for-DESC default was load-bearing for downstream consumers.** Common signals: the consumer is a report that displays NULLs as "Unassigned" at the top; a dashboard that fetches the first row; a top-N feed; a `WHERE ROWNUM <= N` wrapper that depended on the NULL rows being in the top-N.
+3. **Rewrite the Trino target with explicit NULLS placement:**
+   - If Oracle's NULLs-at-top behavior must be preserved → `ORDER BY col DESC NULLS FIRST`.
+   - If downstream is robust to NULL placement (or NULLs were never in the column) → `ORDER BY col DESC NULLS LAST` (explicit, matches Trino default, but spelled out for grep-ability).
+4. **Diff a representative sample of rows between Oracle and Trino during cutover** — for any query whose first-row identity matters, run the same SQL on both engines, compare the top-K rows, and confirm the row order matches.
+
+### DO-NOT-WRITE — banned claims about Trino's NULLS-default behavior
+
+> | Banned claim | Why it is wrong | Correct claim |
+> |---|---|---|
+> | "Trino defaults `NULLS FIRST` for `DESC`." | That is **Oracle's** default rule, NOT Trino's. Trino's docs say verbatim: "The default null ordering is `NULLS LAST`, regardless of the ordering direction." | Trino defaults `NULLS LAST` for `DESC` (and for `ASC`). |
+> | "Trino defaults `NULLS LAST` for `ASC` and `NULLS FIRST` for `DESC`." | That is Oracle's rule projected onto Trino — the exact cross-dialect-spillover fab class iter456 / iter459 flagged. | Trino defaults `NULLS LAST` for both `ASC` and `DESC`. |
+> | "Trino's NULLS-default behavior matches Oracle's." | It does NOT. Oracle's default depends on direction; Trino's default does not. | The two engines disagree on `DESC` (Oracle puts NULLs first, Trino puts NULLs last). |
+> | "Trino follows ANSI SQL's default for NULLS ordering." | ANSI SQL leaves the NULLS-default **implementation-defined**. Trino chose `NULLS LAST` regardless of direction; Oracle chose a direction-dependent rule. Neither is "the ANSI default." | Trino's NULLS default is its own design choice (`NULLS LAST` for both directions); cite the Trino docs directly. |
+> | "You don't need `NULLS FIRST` / `NULLS LAST` because Trino does the right thing by default." | Trino has a default, but "the right thing" is consumer-specific. A migration that relied on Oracle's `NULLS FIRST` DESC default will silently break unless the Trino target explicitly preserves it. | Always specify `NULLS FIRST` / `NULLS LAST` explicitly when migrating Oracle `ORDER BY`. |
+
+### Cross-reference — this is the 3rd confirmed cross-dialect-spillover variant
+
+This NULLS-default fab is the **third** confirmed variant of the same cross-dialect-spillover failure class flagged in §4.4B:
+
+| Variant # | Iteration | Spillover form | Why it is wrong on Trino 467 |
+|---|---|---|---|
+| 1 | iter456 Q2 | `/*+ USE_HASH_JOIN */` Oracle/Spark query-hint | Trino has no hint mechanism — the comment is parsed and ignored, silent no-op |
+| 2 | iter456 Q4 | `expr::type` PostgreSQL cast operator | Trino has no `::` operator — parse error |
+| 3 | **iter459 Q4** | **Oracle NULLS-FIRST-for-DESC default semantics** | **Trino defaults `NULLS LAST` regardless of direction — silent-wrong row ordering** |
+
+**The meta-rule (memorize and apply EVERY time you state a Trino default or semantic):** whenever you cite a Trino behavior that "matches" another engine's behavior, **WebSearch trino.io/docs to confirm** — do NOT trust muscle memory from Oracle, PostgreSQL, Spark, or Snowflake. The default rules differ in subtle, silently-wrong ways that a parse error will never catch. Cross-ref **§4.4B CROSS-DIALECT-SPILLOVER GUARDRAIL** for the consolidated table of every confirmed spillover form.
 
 ---
 
@@ -556,6 +699,7 @@ FROM {{ ref('stg_users') }}
 > | Iceberg WITH-clause shape | `WITH (..., properties = map('k','v'))` | native Iceberg / Spark API style | Parse / property error | `WITH (key1 = 'v1', key2 = 'v2')` — flat name=value pairs |
 > | Spark TBLPROPERTIES | `ALTER TABLE t SET TBLPROPERTIES ('k' = 'v')` | Spark SQL | Parse error | `ALTER TABLE t SET PROPERTIES key = 'v'` — bare identifier LHS, string-literal RHS |
 > | Iceberg snapshot timestamp | `WHERE timestamp_ms = ...` on `$snapshots` | Iceberg Java API field name | Column does not exist | `WHERE committed_at = TIMESTAMP '...'` — the Trino metadata-table column |
+> | NULLS-default ordering in `ORDER BY ... DESC` | Assuming `ORDER BY ts DESC` puts NULLs at the top (Oracle's default) | Oracle's documented default | **SILENT-WRONG row ordering** — Trino puts NULLs at the BOTTOM on `DESC` (default `NULLS LAST` regardless of direction); no error, just different row order than Oracle | Always write `ORDER BY ts DESC NULLS FIRST` (preserve Oracle behavior) or `ORDER BY ts DESC NULLS LAST` (explicit Trino default). See **§ LEADING CANONICAL — Oracle vs Trino NULLS-default semantics in ORDER BY** at the top of this resource. |
 >
 > **Meta-rule (memorize)**: when unsure, **prefer ANSI / standard SQL forms (`CAST(... AS ...)`, `COALESCE`, `CASE WHEN`) and SESSION properties (`SET SESSION ...`)**; do **not** paste PostgreSQL / Oracle / Snowflake / Spark / native-Iceberg idioms into Trino. If the form parses-and-runs without error but the optimizer behavior didn't change, suspect a silent-no-op hint or wrong session property — Trino has no hint mechanism, so the answer is always a SESSION property.
 >
@@ -564,6 +708,7 @@ FROM {{ ref('stg_users') }}
 > - Resource 24 § LEADING CANONICAL — How do I influence Trino's join distribution — the canonical replacement for any `/*+ hint */` form.
 > - Resource 11 § Trino dialect ↔ native-Iceberg name translation — the canonical replacement for any `write.*-codec` / `TBLPROPERTIES` / `properties = map(...)` form.
 > - Resource 17 § LEADING CANONICAL — `$snapshots` column list — the canonical column names (`committed_at`, NOT `timestamp_ms`).
+> - **§ LEADING CANONICAL — Oracle vs Trino NULLS-default semantics in ORDER BY (top of this resource) — the canonical Oracle-to-Trino NULLS-default migration pattern.**
 
 ### 4.5 Query-shape and pseudo-column constructs
 
@@ -1259,6 +1404,8 @@ WITH base AS (
 ### 7A.2 Oracle analytic functions → Trino window functions (mostly portable) — and the QUALIFY landmine
 
 **Most Oracle analytic functions migrate as-is.** The window-function syntax in Oracle and Trino is virtually identical — `LAG`, `LEAD`, `RANK`, `DENSE_RANK`, `ROW_NUMBER`, `FIRST_VALUE`, `LAST_VALUE`, `NTH_VALUE`, `NTILE`, plus all the aggregate-as-window forms (`SUM(...) OVER (...)`, `AVG(...) OVER (...)`). The OVER clause syntax (`PARTITION BY ... ORDER BY ... ROWS BETWEEN ...`) is identical.
+
+> **THE NULLS-DEFAULT LANDMINE — read the LEADING CANONICAL block at the top of this resource BEFORE migrating any window function whose `OVER` clause uses `ORDER BY ... DESC`.** The window-function syntax is portable, but the NULLS-default behavior is NOT. Oracle defaults `NULLS FIRST` for `DESC`; Trino defaults `NULLS LAST` for `DESC`. A `ROW_NUMBER() OVER (PARTITION BY x ORDER BY ts DESC)` migrated verbatim from Oracle will assign `rn = 1` to a different row on Trino if there are NULLs in `ts`. **Always write `OVER (... ORDER BY ts DESC NULLS FIRST)` (preserve Oracle) or `... DESC NULLS LAST` (explicit Trino default).** See **§ LEADING CANONICAL — Oracle vs Trino NULLS-default semantics in ORDER BY** at the top.
 
 | Oracle analytic | Trino window | Notes |
 |---|---|---|

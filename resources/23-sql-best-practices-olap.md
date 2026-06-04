@@ -849,6 +849,7 @@ Trino has its own SQL dialect. A surprising number of features that "feel like s
 | **`GROUP BY ALL`** (group by every non-aggregate) | Snowflake, Databricks | **SUPPORTED** in Trino's SELECT grammar (`GROUP BY [ ALL | DISTINCT ] ...`). | Free to use, but explicit `GROUP BY col1, col2` is more grep-able. |
 | **`FETCH FIRST N ROWS ONLY`** (ANSI) | ANSI SQL, DB2, Oracle | **SUPPORTED** alongside `LIMIT N`. | Either is fine; `LIMIT N` is shorter. |
 | **Window function in WHERE** (`WHERE ROW_NUMBER() OVER (...) = 1`) | none — never legal in standard SQL | **NOT supported in any SQL dialect, including Trino.** | Wrap in a subquery: `SELECT * FROM (SELECT *, ROW_NUMBER() OVER (...) AS rn FROM t) WHERE rn = 1;` — same pattern as the QUALIFY rewrite. |
+| **Assuming `ORDER BY ts DESC` puts NULLs at the top** (Oracle's default) | Oracle | **SILENT-WRONG row ordering on Trino.** Per [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) verbatim: "The default null ordering is `NULLS LAST`, regardless of the ordering direction." Trino defaults `NULLS LAST` for BOTH `ASC` and `DESC` — Oracle defaults `NULLS LAST` for `ASC` and `NULLS FIRST` for `DESC`. Same SQL, different row order, no error message. | Always write `ORDER BY ts DESC NULLS FIRST` (preserve Oracle behavior) or `ORDER BY ts DESC NULLS LAST` (explicit Trino default). See [resource 27 § LEADING CANONICAL — Oracle vs Trino NULLS-default semantics in ORDER BY](27-oracle-plsql-to-dbt-trino.md). |
 
 ### The most-common Trino-dialect rewrite pattern
 
