@@ -26,7 +26,7 @@ These are the absolutes most often stated incorrectly when an engineer with Orac
 |---|---|---|
 | "Trino 467 supports `CREATE PROCEDURE` / PL/SQL blocks / `BEGIN ... END` — I just need to translate the syntax." | **FALSE — there is no procedural language in Trino.** Trino 467 has NO stored procedures, NO PL/SQL, NO `BEGIN ... END`, NO loops, NO local variables, NO cursors. The only "procedures" Trino exposes are **table maintenance procedures** invoked via `ALTER TABLE ... EXECUTE` (e.g., `optimize`, `expire_snapshots`, `remove_orphan_files`) — those are not user-definable. **The replacement for an Oracle procedure is a dbt model (a `.sql` file)** that emits ONE SET-based SQL statement; dbt run orchestrates the chain via `ref()`. **DO NOT write `CREATE OR REPLACE PROCEDURE` in a dbt model — it will fail to parse.** | [Trino SQL statement support](https://trino.io/docs/current/language/sql-support.html); [dbt-trino configs](https://docs.getdbt.com/reference/resource-configs/trino-configs) |
 | "`QUALIFY ROW_NUMBER() OVER (...) = 1` works on Trino — it's standard SQL." | **FALSE on Trino 467 — parse error.** `QUALIFY` is a Snowflake / BigQuery / Databricks / Teradata extension, not in the SQL standard, NOT in Trino. The Trino-compatible rewrite is the canonical `ROW_NUMBER()` subquery + outer `WHERE rn = 1` (or `WHERE rn <= N` for top-N-per-group). **DO NOT WRITE `QUALIFY ...` in a dbt model targeting Trino — it will fail at compile time.** See resource 23 § Trino 467 SQL-dialect anti-patterns for the canonical rewrite. | [resource 23](23-sql-best-practices-olap.md) |
-| "Trino has `sequence.NEXTVAL` for surrogate keys — I'll port my Oracle sequences directly." | **FALSE — Trino has NO sequences, NO `NEXTVAL`, NO `CURRVAL`.** There is a `sequence()` table function and a `sequence` array generator, but those are different (range generators, not persistent counters). For surrogate keys on Iceberg, use one of: (a) **hash-based surrogate key** — `md5(concat(natural_key_col1, natural_key_col2, ...))` (idempotent, the dbt convention); (b) **`row_number() OVER (ORDER BY ...)`** (only safe inside a single CTAS, not stable across runs); (c) **identity column** — Iceberg V2 supports identity-style surrogate generation but it requires Spark-side DDL. **DO NOT WRITE `my_seq.NEXTVAL` in a dbt model — it will fail.** The dbt-trino best practice is hash-based surrogate keys via `dbt_utils.generate_surrogate_key([...])`. | [Trino SELECT docs](https://trino.io/docs/current/sql/select.html); [dbt_utils](https://github.com/dbt-labs/dbt-utils) |
+| "Trino has `sequence.NEXTVAL` for surrogate keys — I'll port my Oracle sequences directly." | **FALSE — Trino has NO sequences, NO `NEXTVAL`, NO `CURRVAL`.** There is a `sequence()` table function and a `sequence` array generator, but those are different (range generators, not persistent counters). For surrogate keys on Iceberg, use one of: (a) **PRIMARY — `dbt_utils.generate_surrogate_key([col_list])`** (MD5 hash, idempotent across runs/clusters, returns VARCHAR — not numeric); (b) **FALLBACK — `row_number() OVER (ORDER BY ...)`** (only stable within a single full-refresh run; the mapping changes on rebuild — do NOT use for stable cross-run keys). **Iceberg does NOT have user-facing identity / auto-increment columns** — that is an open feature request, NOT in the V2 or V3 spec. See §4.5A ICEBERG-IDENTITY-COLUMN-NEGATION GUARDRAIL for the canonical fix. **DO NOT WRITE `my_seq.NEXTVAL` in a dbt model — it will fail.** | [Trino SELECT docs](https://trino.io/docs/current/sql/select.html); [dbt_utils](https://github.com/dbt-labs/dbt-utils); [apache/iceberg #12297](https://github.com/apache/iceberg/issues/12297) |
 | "Trino has `ROWNUM` — I can use it for top-N just like Oracle." | **FALSE on Trino 467 — `ROWNUM` is an Oracle-only pseudocolumn, not in Trino.** The Trino-equivalent patterns are: (a) **`LIMIT N`** (for "first N rows" — Trino's order-preserving LIMIT after ORDER BY); (b) **`row_number() OVER (PARTITION BY ... ORDER BY ...)`** (for top-N-per-group, accessed via outer `WHERE rn <= N`). Oracle's `WHERE ROWNUM <= N` translates to `... ORDER BY ... LIMIT N`. **DO NOT WRITE `WHERE ROWNUM <= 10` in Trino — parse error.** | [Trino SELECT - LIMIT](https://trino.io/docs/current/sql/select.html) |
 | "Oracle's `''` = NULL behavior carries over to Trino — I don't need to change my WHERE clauses." | **FALSE — and this is the silent-bug champion of the migration.** Oracle treats the empty string `''` as NULL (a long-standing quirk: `'' IS NULL` returns TRUE in Oracle). **Trino treats `''` as a normal zero-length string distinct from NULL: `'' IS NULL` returns FALSE in Trino.** Real-world consequence: an Oracle query `WHERE name IS NOT NULL` that historically filtered out both NULL names AND empty-string names will, after migration, **silently start including empty-string names**, often changing aggregate counts and breaking downstream joins. **The fix:** audit every `IS NULL` / `IS NOT NULL` / `NVL(col, ...)` in the source procedures and, where the original logic depended on the Oracle quirk, rewrite to explicit `col IS NULL OR col = ''` (or the inverse). | [Oracle SQL Language Reference](https://docs.oracle.com/en/database/oracle/oracle-database/19/sqlrf/Nulls.html) — "Oracle Database currently treats a character value with a length of zero as null" |
 | "Trino's `MERGE INTO` doesn't work on Iceberg / requires a special connector flag." | **FALSE — MERGE on Iceberg is supported in Trino 467 by default, no flag.** MERGE is the canonical Trino-side upsert form for Iceberg tables. dbt-trino's `incremental_strategy='merge'` is built on top of it and is the recommended SCD-1 pattern. (What MAY require flags is MERGE on JDBC connectors like PostgreSQL/MySQL — see [resource 22](22-trino-federation-postgresql.md). On the Iceberg connector it's on out of the box.) | [Trino Iceberg connector](https://trino.io/docs/current/connector/iceberg.html); [dbt-trino merge strategy](https://docs.getdbt.com/reference/resource-configs/trino-configs#the-merge-strategy) |
@@ -390,6 +390,71 @@ FROM {{ ref('stg_users') }}
 | `UNION` / `UNION ALL` | `UNION` / `UNION ALL` | Identical. |
 | `WHERE col IN (subquery)` | Same; Trino's optimizer converts to a SemiJoin. | See [resource 22 §13.6](22-trino-federation-postgresql.md). |
 | `WHERE EXISTS (correlated subquery)` | Same; Trino tries to decorrelate to a SemiJoin. If decorrelation fails, you get a `CorrelatedJoin` operator in EXPLAIN — expensive. See [resource 28](28-complex-sql-performance-trino-dbt.md) for rewrites. | Decorrelation is the optimizer's job, not always automatic. |
+
+### 4.5A ICEBERG-IDENTITY-COLUMN-NEGATION GUARDRAIL — Iceberg has NO user-facing identity / auto-increment columns; use `dbt_utils.generate_surrogate_key` instead
+
+**Why this section exists (iter437 fabrication fix).** An engineer migrating an Oracle table with `id NUMBER GENERATED ALWAYS AS IDENTITY` (or `id NUMBER DEFAULT my_seq.NEXTVAL`) to Iceberg via Spark will reflexively ask: "what's the equivalent Iceberg DDL for an identity column?" The reflexive — and WRONG — answer is "Iceberg V2 supports identity-style auto-increment columns, just generate them via Spark DDL". **That claim is FABRICATED.** This subsection installs the authoritative negation.
+
+**The canonical truth (memorize this paragraph):**
+
+> **Iceberg does NOT have user-facing identity columns or auto-increment columns.** The "sequence number" that appears in the Iceberg V2 spec is an **INTERNAL metadata mechanism** (a monotonically-increasing integer assigned per snapshot and per data/delete file, used to **scope delete files** to the data files they apply to and to **order concurrent writes**). It is **NOT** a row-level auto-increment column, is **NOT** queryable as a regular column, and is **NOT** exposed in any user-facing DDL. **Delta Lake DOES have user-facing identity columns** (`GENERATED ALWAYS AS IDENTITY`, since Delta 2.x). **Iceberg does NOT.** Identity-column support in Iceberg is tracked as an **OPEN feature request** at **[apache/iceberg #12297](https://github.com/apache/iceberg/issues/12297)** ("Support for Identity Columns in Apache Iceberg") and is **NOT implemented as of Iceberg 1.5.2 (the production version on this stack) or any current V2/V3 spec revision.**
+
+Verified against [iceberg.apache.org/spec](https://iceberg.apache.org/spec/) — the V2 sequence-number fields (`sequence_number`, `file_sequence_number`) are metadata-table fields used by the snapshot/manifest layer for delete-file scoping, NOT row-level column DDL. Verified against [apache/iceberg #12297](https://github.com/apache/iceberg/issues/12297) — identity columns are an OPEN feature request, not in V2 or V3 spec.
+
+**DO-NOT-WRITE callout (load-bearing — copy this into your code-review checklist):**
+
+> **Never write, suggest, or imply any of the following in resources, code reviews, or migration guides targeting this stack:**
+> - **"Iceberg has identity columns"** — FALSE. Iceberg has NO user-facing identity columns.
+> - **"Iceberg has auto-increment columns"** — FALSE. Iceberg has NO user-facing auto-increment columns.
+> - **"Iceberg V2 supports identity-style auto-increment columns"** — FABRICATED. The V2 spec's "sequence number" is INTERNAL metadata for delete-file scoping, NOT a user-facing column.
+> - **"Iceberg V2 sequence numbers are user-facing surrogate keys"** — FABRICATED. They are not exposed as row-level columns at all.
+> - **"Use an Iceberg identity column instead of a sequence"** — FABRICATED advice. There is no such feature to use.
+> - **"`CREATE TABLE ... (id BIGINT GENERATED ALWAYS AS IDENTITY, ...)` works on an Iceberg table via Spark DDL"** — FALSE. The Spark parser/analyzer rejects this against an Iceberg catalog; it is a Delta-Lake-only DDL form.
+> - Any other phrasing that ascribes user-facing identity-column / auto-increment / `GENERATED ALWAYS AS IDENTITY` semantics to Iceberg.
+
+**The canonical Oracle `seq.NEXTVAL` replacement on THIS stack (Iceberg 1.5.2 + Trino 467 + dbt-trino):**
+
+| Priority | Replacement | Output type | Stability across runs | When to use |
+|---|---|---|---|---|
+| **PRIMARY** | `{{ dbt_utils.generate_surrogate_key([col_list]) }}` | **VARCHAR** (MD5 hex string, ~32 chars) | **Idempotent across runs AND clusters** — same input cols always produce same key | Default for surrogate keys on dimensions / facts. The dbt-trino canonical pattern. Keys are strings not numbers; joins/filters still work. |
+| **FALLBACK** | `ROW_NUMBER() OVER (ORDER BY <stable_ordering>)` | **BIGINT** | **Only stable within a single full-refresh run.** A second `dbt run --full-refresh` typically produces a different surrogate-key → business-key mapping because the source row order may shift. | Use ONLY for ephemeral / single-run scratch keys. **DO NOT use** for stable cross-run keys that downstream models or external systems reference. |
+| **BANNED** | Iceberg identity column / `GENERATED ALWAYS AS IDENTITY` | N/A | N/A | **Does not exist.** Writing this DDL against an Iceberg catalog via Spark fails at parse/analyze time. |
+| **BANNED** | Trino `CREATE SEQUENCE my_seq` / `my_seq.NEXTVAL` | N/A | N/A | **Does not exist in Trino.** `CREATE SEQUENCE` fails the Trino parser; there is no sequence DDL in Trino 467 or any released version. |
+
+**Worked replacement example.** Migrating `customers.customer_id NUMBER GENERATED ALWAYS AS IDENTITY` from Oracle to Iceberg via dbt:
+
+```sql
+-- WRONG (Oracle DDL ported as-is) — Spark+Iceberg rejects this; Iceberg has no identity columns:
+-- CREATE TABLE iceberg.dw.customers (
+--   customer_id BIGINT GENERATED ALWAYS AS IDENTITY,
+--   email VARCHAR,
+--   ...
+-- );
+
+-- WRONG (Trino sequence DDL) — Trino has no sequences; parser error:
+-- CREATE SEQUENCE iceberg.dw.customer_id_seq START WITH 1;
+-- INSERT INTO iceberg.dw.customers VALUES (customer_id_seq.NEXTVAL, ...);
+
+-- CORRECT — dbt model materializes the customers dimension with a hash-based surrogate key:
+-- models/dw/dim_customers.sql
+{{ config(materialized='table') }}
+
+SELECT
+  {{ dbt_utils.generate_surrogate_key(['email', 'signup_source']) }} AS customer_id,  -- VARCHAR MD5
+  email,
+  signup_source,
+  created_at
+FROM {{ ref('stg_customers') }}
+```
+
+The `customer_id` here is a 32-character MD5 hex VARCHAR (e.g., `'7d3f...e2a1'`). It is **idempotent** — re-running `dbt run` produces the same `customer_id` for the same `(email, signup_source)` natural key — and **stable across clusters**, so downstream joins, foreign-key references, and external system lookups work consistently.
+
+**Two-engine note.** This guardrail is specifically about the **Iceberg** spec / catalog, NOT about Delta Lake. Delta Lake has had user-facing identity columns since Delta 2.x (`CREATE TABLE ... (id BIGINT GENERATED ALWAYS AS IDENTITY, ...)` works on Delta). If you read a blog post about "lakehouse identity columns" and it shows Delta DDL, that DDL does NOT port to Iceberg. The two table formats have different feature sets here.
+
+**Cross-references.**
+- §1.2 procedural-construct map: `my_seq.NEXTVAL` row already points to `dbt_utils.generate_surrogate_key` as the PRIMARY replacement.
+- §4.5 query-shape table: `SELECT my_seq.NEXTVAL FROM DUAL` row says "NO equivalent — sequences don't exist in Trino. Use hash-based surrogate key."
+- §7 cutover checklist item 5 (line 888): surrogate-key stability — hash-based keys are stable across re-runs but will NOT match the Oracle-generated values; plan a one-time mapping table or re-keying pass.
 
 ### 4.6 DML and procedural constructs
 

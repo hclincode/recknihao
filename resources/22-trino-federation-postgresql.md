@@ -3039,7 +3039,7 @@ See Section 2A.6 for the analogous MySQL `system.query()` recipe and Section 9 f
 
 > **QUICK VISUAL REFERENCE — real Trino EXPLAIN output, two-line cheat sheet.** Before diving into the detailed examples below, this is the answer most engineers need at a glance when reading real Trino 467 EXPLAIN output:
 >
-> - **Pushdown SUCCEEDED:** the predicate appears **inside the `TableHandle` constraint block** (in `EXPLAIN (TYPE LOGICAL)`) or as **`constraint on [columns]` indented underneath the `TableScan` node** (in `EXPLAIN (TYPE DISTRIBUTED)`). **NO `Filter` or `ScanFilterProject` node sits above the `TableScan`.** The TableScan is the topmost node for that branch of the plan.
+> - **Pushdown SUCCEEDED:** the predicate appears as **`constraint on [columns]` indented underneath the `TableScan` node** (in `EXPLAIN (TYPE DISTRIBUTED)` — the canonical mode; `TYPE LOGICAL` is **deprecated** per [trino.io/docs/current/sql/explain.html](https://trino.io/docs/current/sql/explain.html) and slated for removal). **NO `Filter` or `ScanFilterProject` node sits above the `TableScan`.** The TableScan is the topmost node for that branch of the plan.
 > - **Pushdown FAILED:** a separate **`ScanFilterProject` (or standalone `FilterProject` / `Filter`) node sits ABOVE the `TableScan`** with the predicate carried as its `filterPredicate`. The `TableScan` itself has no `constraint on` line for that predicate. The filter is being applied by Trino workers in-memory after pulling rows from Postgres.
 >
 > The signature lives in **vertical position of the predicate** in the plan tree, not in any keyword. Predicate **under** the TableScan = pushed. Predicate **above** the TableScan in a Filter/ScanFilterProject node = NOT pushed.

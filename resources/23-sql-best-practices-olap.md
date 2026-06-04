@@ -616,7 +616,7 @@ Use this to convince yourself that the manual rewrite actually fixes the problem
 **BEFORE — original correlated EXISTS, `ANALYZE premium_users` skipped, NO stats.**
 
 ```sql
-EXPLAIN (TYPE LOGICAL)
+EXPLAIN (TYPE DISTRIBUTED)
 SELECT e.user_id, e.event_id
 FROM events e
 WHERE EXISTS (
@@ -655,7 +655,7 @@ After `ANALYZE`, the CBO sometimes converts `CorrelatedJoin` to `SemiJoin` on it
 **AFTER — manual rewrite to LEFT JOIN + IS NOT NULL + DISTINCT.**
 
 ```sql
-EXPLAIN (TYPE LOGICAL)
+EXPLAIN (TYPE DISTRIBUTED)
 SELECT e.user_id, e.event_id
 FROM events e
 LEFT JOIN (

@@ -273,7 +273,7 @@ The CBO can:
 ### 5.4 How to see what the CBO is doing
 
 ```sql
-EXPLAIN (TYPE LOGICAL)
+EXPLAIN (TYPE DISTRIBUTED)
 SELECT u.email, t.name, COUNT(*)
 FROM iceberg.analytics.events e
 JOIN iceberg.app.users     u ON e.user_id   = u.id
@@ -463,7 +463,7 @@ When a join is mysteriously slow on Iceberg:
 1. **Are CBO stats populated?** `SHOW STATS FOR <table>` for each joined table. If `distinct_values_count` is NULL for the join key, run `ANALYZE`.
 2. **Are the stats actually fresh, or are you looking at a stale Puffin?** If you recently ran a column-targeted ANALYZE but `SHOW STATS` shows what look like the old full-table NDV values, run `ALTER TABLE <table> EXECUTE drop_extended_stats` then re-run the column-targeted ANALYZE. See section 4.5.
 3. **Is `join_reordering_strategy` set to AUTOMATIC?** `SHOW SESSION LIKE 'join_reordering_strategy'`. If `NONE`, set it to `AUTOMATIC` and re-run.
-4. **Did the join order actually change?** Compare `EXPLAIN (TYPE LOGICAL)` before and after `ANALYZE`. Look at the order of the Join nodes from inside-out.
+4. **Did the join order actually change?** Compare `EXPLAIN (TYPE DISTRIBUTED)` before and after `ANALYZE`. Look at the order of the Join nodes from inside-out.
 5. **Did broadcast vs partitioned decision change?** Look for `Join[BROADCAST]` vs `Join[PARTITIONED]` annotations in the EXPLAIN output. The right call depends on build-side cardinality estimates, which only become accurate with stats.
 6. **Are the row estimates concrete numbers?** Each operator's `Estimates: {rows: N, ...}` line should show real numbers, not `?`. A `?` means the CBO has no estimate and is falling back to defaults.
 
