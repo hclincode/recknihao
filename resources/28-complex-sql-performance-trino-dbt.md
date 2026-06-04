@@ -14,8 +14,95 @@
 4. **Predicate pushdown to Iceberg is the single biggest performance lever**, and the single easiest one to accidentally break — by casting the partition column (`WHERE CAST(event_date AS varchar) = ...`), by wrapping it in arithmetic (`WHERE event_date + INTERVAL '1' DAY = ...`), or by comparing it across types. `date_trunc('day', event_ts) = DATE '...'` is **fragile, not absolutely broken** on Trino 400+: the `SimplifyDateTrunc` optimizer rule simplifies this into a naked range for identity / `day()` partition transforms (verified via [trino.io blog 2023/04/11](https://trino.io/blog/2023/04/11/date-predicates.html) + [PR #14011](https://github.com/trinodb/trino/pull/14011)), but it does NOT cover `bucket()` / `hour()` transforms, function compositions, or non-literal RHS. The defensive recommendation is still to keep partition columns naked on one side and write the explicit range form (`event_ts >= TIMESTAMP '...' AND event_ts < TIMESTAMP '...'`) — and always verify with `EXPLAIN` by inspecting the `TableScan` `constraint=` annotation.
 5. **Correlated subqueries are the migration-shaped slowness champion.** Trino tries to decorrelate them into joins; when it succeeds, the EXPLAIN shows `SemiJoin` / `Join` / `Project`. When decorrelation fails, EXPLAIN shows `CorrelatedJoin` — an O(N×M) nested-loop in worker memory. **Always EXPLAIN your migrated queries and search for `CorrelatedJoin`.**
 6. **Joins**: tiny dim + huge fact -> BROADCAST (default for builds under ~100MB); large + large -> PARTITIONED; cross-source -> rely on **dynamic filtering** (Trino sends build-side keys to probe side at runtime). Run `ANALYZE <table>` (Trino syntax: bare `ANALYZE`, NO `TABLE` keyword) so the optimizer has stats to pick correctly ([resource 24](24-trino-cbo-analyze.md)).
-7. **dbt-specific levers**: choose `materialized='incremental'` to skip recomputing unchanged rows; partition the dbt-built Iceberg table with `properties={'partitioning': "ARRAY[...]"}`; cluster files with `sorted_by` + run `ALTER TABLE ... EXECUTE optimize` ([resource 17](17-iceberg-table-maintenance.md)).
+7. **dbt-specific levers**: choose `materialized='incremental'` to skip recomputing unchanged rows; partition the dbt-built Iceberg table with `properties={'partitioned_by': "ARRAY[...]"}` (dbt-trino's documented key for incremental Iceberg models — see [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs)); cluster files with `sorted_by` + run `ALTER TABLE ... EXECUTE optimize` ([resource 17](17-iceberg-table-maintenance.md)).
 8. **EXPLAIN ANALYZE is the source of truth**, not folklore. `physicalInputDataSize` tells you how many bytes were read from MinIO; `CorrelatedJoin` vs `SemiJoin` tells you whether decorrelation fired; `dynamicFilterSplitsProcessed` tells you whether dynamic filtering worked; partition-prune constraint on `TableScan` tells you whether you scanned the whole table or one partition.
+
+---
+
+## LEADING CANONICAL WORKED EXAMPLE — dbt-trino incremental model on Iceberg (the load-bearing recipe)
+
+> **Why this section is FIRST (above the myths table).** Iter452 broke the citation-hygiene streak on two dbt-trino incremental syntax bugs: (1) using `{% if execute %}` instead of `{% if is_incremental() %}` as the delta-filter guard, and (2) using `properties={'partitioning': ...}` instead of `properties={'partitioned_by': ...}` inside the dbt config. Both were doc-verifiable mistakes. This section is the single source of truth for the dbt-trino + Iceberg incremental recipe on Trino 467 — every other dbt-incremental block in this resource and in [resource 27](27-oracle-plsql-to-dbt-trino.md) follows this shape. **When in doubt about dbt-incremental syntax on Trino 467 + Iceberg 1.5.2, copy this block.**
+
+### The canonical full block — append/merge incremental on Iceberg
+
+```jinja
+-- models/fct_events.sql
+{{ config(
+    materialized='incremental',
+    incremental_strategy='merge',
+    unique_key='event_id',
+    on_schema_change='append_new_columns',
+    properties={
+      'format': 'PARQUET',
+      'partitioned_by': "ARRAY['day(occurred_at)']",
+      'sorted_by': "ARRAY['tenant_id']",
+      'format_version': 2
+    }
+) }}
+
+SELECT
+  event_id,
+  tenant_id,
+  occurred_at,
+  event_type,
+  payload
+FROM {{ ref('stg_events') }}
+{% if is_incremental() %}
+  WHERE occurred_at >= (SELECT COALESCE(MAX(occurred_at), TIMESTAMP '1970-01-01') FROM {{ this }})
+{% endif %}
+```
+
+### The 3-day-lookback variant for late-arriving data (pair with `merge` + `unique_key` for idempotence)
+
+```jinja
+{% if is_incremental() %}
+  WHERE occurred_at >= (
+    SELECT date_add('day', -3, COALESCE(MAX(occurred_at), TIMESTAMP '1970-01-01'))
+    FROM {{ this }}
+  )
+{% endif %}
+```
+
+`incremental_strategy='merge'` + `unique_key='event_id'` makes the re-processed lookback window idempotent: matched rows update in place, unmatched rows insert. Re-running the same lookback window produces no duplicates. See [resource 27 § 6.8](27-oracle-plsql-to-dbt-trino.md) for the worked example with full reasoning and [resource 28 § 7](28-complex-sql-performance-trino-dbt.md) for the late-arriving-data pattern in depth.
+
+### Why each line of the config is the way it is
+
+| Line | Why it's canonical | Doc pointer |
+|---|---|---|
+| `materialized='incremental'` | First run does a CTAS; subsequent runs apply the delta via the incremental_strategy. | [docs.getdbt.com/docs/build/incremental-models](https://docs.getdbt.com/docs/build/incremental-models) |
+| `incremental_strategy='merge'` | Generates Trino `MERGE INTO`; safe for re-runs of overlapping windows. | [docs.getdbt.com/reference/resource-configs/trino-configs#the-merge-strategy](https://docs.getdbt.com/reference/resource-configs/trino-configs#the-merge-strategy) |
+| `unique_key='event_id'` | The MERGE join-key. Required for `merge` strategy. Use a list `['tenant_id', 'event_id']` for composite keys. | Same as above. |
+| `on_schema_change='append_new_columns'` | Adds new source columns automatically on incremental runs (the safe default). | [docs.getdbt.com/docs/build/incremental-models#what-if-the-columns-of-my-incremental-model-change](https://docs.getdbt.com/docs/build/incremental-models#what-if-the-columns-of-my-incremental-model-change) |
+| `properties={'partitioned_by': "ARRAY['day(occurred_at)']"}` | **`partitioned_by` (snake_case) is the dbt-trino documented properties-dict key**, NOT `partitioning`. The bare-Trino DDL form `WITH (partitioning = ARRAY[...])` uses `partitioning` without an underscore — but that's the raw-SQL surface, NOT the dbt-trino properties dict. The dbt-trino adapter translates `partitioned_by` to the underlying Trino property. | [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs) — Iceberg/Hive incremental example. |
+| `sorted_by` | Iceberg writer sorts rows within each file. Sharpens Parquet min/max stats for range pushdowns. | [Trino Iceberg connector — Table properties](https://trino.io/docs/current/connector/iceberg.html) |
+| `format_version: 2` | Iceberg V2 (default since the connector started supporting V2). Required for `MERGE`/row-level deletes. | [iceberg.apache.org/spec/](https://iceberg.apache.org/spec/) |
+| `{% if is_incremental() %}` | **The CANONICAL incremental guard.** True ONLY when: (a) the target table already exists, AND (b) this run is NOT `--full-refresh`, AND (c) the model is configured as incremental. NOT `{% if execute %}` (see DO-NOT-WRITE below). | [docs.getdbt.com/docs/build/incremental-models](https://docs.getdbt.com/docs/build/incremental-models) |
+| `WHERE occurred_at >= (SELECT COALESCE(MAX(occurred_at), TIMESTAMP '1970-01-01') FROM {{ this }})` | The watermark-subquery delta. `COALESCE(..., <safe_default>)` lets the very first run before the table exists work (`{{ this }}` evaluates correctly because `is_incremental()` is FALSE on first run, so this whole branch is skipped — the COALESCE is belt-and-suspenders for re-runs after manual table drops). | [docs.getdbt.com/docs/build/incremental-models](https://docs.getdbt.com/docs/build/incremental-models) |
+
+### DO-NOT-WRITE — load-bearing dbt-trino incremental mistakes
+
+These are the wrong shapes a Haiku responder must NEVER suggest in a dbt-trino + Iceberg 1.5.2 + Trino 467 context. Each row pairs the WRONG form with the RIGHT one and a doc pointer.
+
+| WRONG (will FAIL or silently misbehave) | RIGHT (canonical) | Why / doc |
+|---|---|---|
+| `{% if execute %}` used as the incremental delta-filter guard | `{% if is_incremental() %}` | `execute` is True during both `dbt compile` AND `dbt run` AND `dbt build` — it is **NOT** an incremental gate. It also does NOT distinguish `--full-refresh` from a normal run, so a delta filter wrapped in `{% if execute %}` would WRONGLY filter on the first build (when `{{ this }}` is empty) AND on `--full-refresh` runs (when the entire table should be rebuilt unfiltered). `is_incremental()` is the only correct guard. [docs.getdbt.com/reference/dbt-jinja-functions/execute](https://docs.getdbt.com/reference/dbt-jinja-functions/execute) + [docs.getdbt.com/docs/build/incremental-models](https://docs.getdbt.com/docs/build/incremental-models). |
+| `properties={'partitioning': "ARRAY['day(event_ts)']"}` (inside a dbt-trino `config(properties=...)` block) | `properties={'partitioned_by': "ARRAY['day(event_ts)']"}` | Inside the dbt-trino `properties` dict, the documented key for partitioning is **`partitioned_by`** (snake_case). The bare-Trino raw-DDL form `CREATE TABLE ... WITH (partitioning = ARRAY[...])` DOES use `partitioning` — but that's a different surface (raw Trino DDL, NOT the dbt-trino properties dict). Pasting `partitioning` into the dbt `properties` dict either silently no-ops or errors depending on the dbt-trino version. [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs). |
+| Bare `partitioning=ARRAY[...]` or `partitioned_by=ARRAY[...]` as a TOP-LEVEL `config(...)` kwarg (outside `properties=...`) | Always nest inside `properties={...}`: `properties={'partitioned_by': "ARRAY[...]"}` | The dbt-trino adapter accepts table-creation properties only through the `properties` dict. There is no top-level `partition_by` / `partitioning` / `partitioned_by` kwarg on `config()` for dbt-trino as of the current adapter version. ([starburstdata/dbt-trino issue #412](https://github.com/starburstdata/dbt-trino/issues/412) requested adding a top-level `partition_by`; the documented form remains the `properties` dict.) |
+| `{% if is_incremental() %} WHERE occurred_at > MAX(occurred_at) {% endif %}` (bare aggregate in WHERE) | `{% if is_incremental() %} WHERE occurred_at >= (SELECT COALESCE(MAX(occurred_at), TIMESTAMP '1970-01-01') FROM {{ this }}) {% endif %}` | Trino (and ANSI SQL) reject aggregates in a bare `WHERE` with "aggregate function not allowed in WHERE clause." The aggregate must be wrapped in a subquery. See [resource 27 § 6.8](27-oracle-plsql-to-dbt-trino.md) and [resource 28 § 7](28-complex-sql-performance-trino-dbt.md) — full canonical-pattern guardrail. |
+| `WHERE id IN (SELECT id FROM {{ this }} ...) OR occurred_at >= ...` as a delta filter | `WHERE occurred_at >= (SELECT COALESCE(MAX(occurred_at), <safe_default>) FROM {{ this }})` | The `IN`-against-target form forces a re-scan of every historic row in the target on every run, defeating the entire point of `materialized='incremental'`. The canonical delta is a single subquery-wrapped `MAX(...)` comparison. |
+| `incremental_strategy='append'` paired with a lookback window | `incremental_strategy='merge'` + `unique_key='...'` + lookback | `append` will INSERT duplicate rows for already-seen events in the lookback window. `merge` matches on `unique_key` and updates in place, preserving idempotence. |
+| `materialized='incremental'` without ANY `is_incremental()` filter | Always pair `materialized='incremental'` with `{% if is_incremental() %} WHERE ... {% endif %}` | Without the filter, every run scans the FULL source — you get the merge-overhead cost without the scan savings. The whole point of `incremental` is the delta filter. |
+
+### Quick-decision cheatsheet — which guard, which key
+
+| Question | Answer |
+|---|---|
+| "What's the jinja guard for the incremental delta filter?" | `{% if is_incremental() %}` — NEVER `{% if execute %}`. |
+| "What's the properties-dict key for Iceberg partitioning in dbt-trino?" | `partitioned_by` (snake_case) — NEVER `partitioning` inside the dbt-trino properties dict. |
+| "What about bare-Trino `CREATE TABLE ... WITH (...)`?" | That's `partitioning` (without underscore) — but that's raw Trino DDL, NOT the dbt-trino properties dict. Different surface. |
+| "Can I put `partition_by='day(event_ts)'` at the top level of config()?" | NO — not currently supported by dbt-trino. Always nest inside `properties={...}`. |
+| "When is `is_incremental()` False?" | First build (table doesn't exist), `--full-refresh` runs, and non-incremental models. In all those cases, the WHERE is skipped — the model rebuilds from scratch. |
+| "What's the safe default in the COALESCE for the watermark?" | A value strictly LESS than any real source row's watermark. For timestamps: `TIMESTAMP '1970-01-01'`. For dates: `DATE '1970-01-01'`. For numeric watermarks: `0` or `-1`. |
 
 ---
 
@@ -212,7 +299,7 @@ Move `heavy_cte` to its own dbt model with `materialized='table'`:
     materialized='table',
     properties={
       'format': 'PARQUET',
-      'partitioning': "ARRAY['order_month']",
+      'partitioned_by': "ARRAY['order_month']",
       'sorted_by': "ARRAY['customer_id']",
       'format_version': 2
     }
@@ -405,7 +492,7 @@ If your model rebuilds a full fact table from yesterday's source — but only 0.
     unique_key='event_id',
     properties={
       'format': 'PARQUET',
-      'partitioning': "ARRAY['day(event_ts)']",  -- Iceberg partition transform
+      'partitioned_by': "ARRAY['day(event_ts)']",  -- Iceberg partition transform (dbt-trino key: partitioned_by, snake_case)
       'sorted_by': "ARRAY['tenant_id']",
       'format_version': 2
     }

@@ -149,7 +149,7 @@ dbt-trino supports four incremental strategies. Verified against [docs.getdbt.co
     on_schema_change='append_new_columns',
     properties={
       'format': 'PARQUET',
-      'partitioning': "ARRAY['order_date']",
+      'partitioned_by': "ARRAY['order_date']",
       'sorted_by': "ARRAY['tenant_id']",
       'format_version': 2
     }
@@ -163,8 +163,8 @@ FROM {{ ref('int_orders_enriched') }}
 ```
 
 Notes:
-- `properties` is the dbt-trino-specific block that maps directly to Iceberg `WITH (...)` table properties. **Partition the migrated table by the same column the Oracle table was partitioned on (or whatever the dominant filter is — see [resource 10](10-lakehouse-partitioning.md)).**
-- `is_incremental()` is dbt's compile-time check; on first run it's FALSE (no WHERE filter, full CTAS); on subsequent runs it's TRUE (filter applied, MERGE on the delta).
+- `properties` is the dbt-trino-specific block. **Inside this dict the documented partitioning key is `partitioned_by` (snake_case)** — NOT `partitioning`. The bare-Trino raw-DDL form `CREATE TABLE ... WITH (partitioning = ARRAY[...])` DOES use `partitioning` without an underscore, but that's the raw-SQL surface, not the dbt-trino properties dict. See [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs) and [resource 28 § LEADING CANONICAL WORKED EXAMPLE](28-complex-sql-performance-trino-dbt.md) for the canonical block + DO-NOT-WRITE list. **Partition the migrated table by the same column the Oracle table was partitioned on (or whatever the dominant filter is — see [resource 10](10-lakehouse-partitioning.md)).**
+- `{% if is_incremental() %}` is the CANONICAL incremental delta-filter guard. It is True ONLY when (a) the target table already exists, (b) the run is NOT `--full-refresh`, and (c) the model is configured as incremental. On first run it's FALSE (no WHERE filter, full CTAS); on subsequent runs it's TRUE (filter applied, MERGE on the delta). **NOTE: do NOT use `{% if execute %}` here — `execute` is True during both `dbt compile` and `dbt run` and does NOT gate first-build / `--full-refresh` vs incremental.** See [docs.getdbt.com/reference/dbt-jinja-functions/execute](https://docs.getdbt.com/reference/dbt-jinja-functions/execute) and [docs.getdbt.com/docs/build/incremental-models](https://docs.getdbt.com/docs/build/incremental-models).
 - `on_schema_change='append_new_columns'` adds new source columns automatically on incremental runs (the safe default). Other options: `'ignore'` (don't add), `'fail'`, `'sync_all_columns'` (also drops removed columns — dangerous).
 
 ---
@@ -825,7 +825,7 @@ FROM {{ source('app', 'currency_fx') }}
     on_schema_change='append_new_columns',
     properties={
       'format': 'PARQUET',
-      'partitioning': "ARRAY['order_date']",
+      'partitioned_by': "ARRAY['order_date']",
       'sorted_by': "ARRAY['tenant_id']",
       'format_version': 2
     }
@@ -953,7 +953,7 @@ Once your models compile and run, before you turn off Oracle:
 5. **Surrogate key stability.** If your Oracle pipeline relied on `seq.NEXTVAL` for surrogate keys, downstream foreign keys reference those values. The hash-based replacement (`md5(natural_keys)`) is stable across re-runs but will NOT match the Oracle-generated values. You need either a one-time migration table mapping old-key -> new-key OR a re-keying pass on all dependent tables.
 6. **Row diff against Oracle.** Pick 3-5 representative rollup rows, compute them in Oracle and in Trino on the same source data, and diff. Don't trust column-level aggregate sums alone — they can match even when row-level results differ.
 7. **EXPLAIN the migrated SELECTs.** Look for `CorrelatedJoin` in the EXPLAIN — it's a sign decorrelation failed (your cursor-loop translated naively). See [resource 28 §3](28-complex-sql-performance-trino-dbt.md) for rewrites.
-8. **Partition the migrated table to match the dominant filter.** Oracle table partitioning hints don't carry over — set `partitioning=ARRAY['<column>']` in the dbt `properties` block. See [resource 10](10-lakehouse-partitioning.md).
+8. **Partition the migrated table to match the dominant filter.** Oracle table partitioning hints don't carry over — set `partitioned_by=ARRAY['<column>']` inside the dbt `properties` block for an incremental Iceberg model (snake_case, dbt-trino documented key; the bare-Trino raw-DDL form `WITH (partitioning = ARRAY[...])` uses `partitioning` without an underscore, but inside the dbt `properties` dict use `partitioned_by`). See [resource 10](10-lakehouse-partitioning.md) and [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs).
 9. **Schedule the dbt run.** Oracle's `DBMS_SCHEDULER.CREATE_JOB` has no dbt equivalent — schedule `dbt run --select fct_orders_daily+` from cron, k8s CronJob, or Airflow.
 10. **Maintenance.** Iceberg tables need `ALTER TABLE ... EXECUTE optimize` and `expire_snapshots` regularly — see [resource 17](17-iceberg-table-maintenance.md). Oracle's auto-segment-management has no direct equivalent; you schedule the maintenance.
 
