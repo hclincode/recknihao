@@ -180,9 +180,93 @@ These are the per-expression rewrites you'll do on almost every migrated SELECT.
 | `NVL(col, default)` | `COALESCE(col, default)` | `COALESCE` accepts N args; `NVL` only 2. Always prefer `COALESCE` going forward. |
 | `NVL2(col, val_if_not_null, val_if_null)` | `CASE WHEN col IS NOT NULL THEN val_if_not_null ELSE val_if_null END` | No direct Trino built-in; `IF(condition, val_if_true, val_if_false)` also works for the boolean form. |
 | `NULLIF(a, b)` | `NULLIF(a, b)` | Identical. |
-| `DECODE(col, 'A', 1, 'B', 2, 0)` | `CASE col WHEN 'A' THEN 1 WHEN 'B' THEN 2 ELSE 0 END` (or chained `CASE WHEN`s) | Trino has NO `DECODE`. CASE is more readable anyway. |
+| `DECODE(col, 'A', 1, 'B', 2, 0)` | `CASE col WHEN 'A' THEN 1 WHEN 'B' THEN 2 ELSE 0 END` (or chained `CASE WHEN`s) | Trino has NO `DECODE`. CASE is more readable anyway. **CRITICAL NULL-MATCHING NUANCE: see §4.1A below — DECODE treats NULL=NULL as a match; simple CASE does NOT, so NULL-bearing columns silently change result on migration.** |
 | `'' IS NULL` -> TRUE (Oracle quirk) | `'' IS NULL` -> **FALSE** in Trino | The single most dangerous silent-result-change in the migration. See myths box. |
 | `nvl(col, '')` (sentinel "no value" Oracle idiom) | `COALESCE(col, '')` BUT this now produces a row where `col` is `''` (not null) — downstream `WHERE col IS NULL` checks BREAK. Audit and rewrite. | Oracle's quirk made this idiom round-trip cleanly; Trino's strictness breaks it. |
+
+### 4.1A Oracle DECODE → Trino CASE — the silent NULL-matching nuance
+
+> **The trap.** Oracle `DECODE(col, val, result, ...)` treats **NULL = NULL as a match**: `DECODE(NULL, NULL, 'is_null', 'other')` returns `'is_null'`. Trino's **simple** CASE form `CASE col WHEN val THEN result END` uses **`=` semantics** where `NULL = NULL` is UNKNOWN — so `CASE NULL WHEN NULL THEN 'is_null' ELSE 'other' END` returns `'other'` (the ELSE branch). When you mechanically translate `DECODE` to simple `CASE col WHEN ...`, rows where `col` is NULL **silently change result**: in Oracle they hit the NULL branch; in Trino they fall through to the ELSE.
+>
+> Sources: Oracle 19c [`DECODE` docs](https://docs.oracle.com/en/database/oracle/oracle-database/19/sqlrf/DECODE.html) — *"DECODE considers two nulls to be equivalent. If expr is null, then Oracle returns the result of the first search that is also null."* Trino [conditional expressions docs](https://trino.io/docs/current/functions/conditional.html) document the simple CASE form as searching by equality; standard SQL equality (`=`) returns UNKNOWN when either side is NULL, so a simple `WHEN` value of NULL never matches.
+>
+> **The correct migration form on NULL-bearing inputs — use SEARCHED CASE** (an explicit `WHEN col IS NULL` branch BEFORE the value-comparison branches):
+>
+> ```sql
+> -- Oracle (DECODE matches NULL=NULL as TRUE)
+> SELECT
+>   order_id,
+>   DECODE(status, NULL, 'unknown', 'A', 'active', 'C', 'cancelled', 'other') AS status_label
+> FROM orders;
+>
+> -- WRONG Trino translation — simple CASE on a NULL-bearing column.
+> -- Rows where status IS NULL fall through to ELSE 'other', NOT to 'unknown'.
+> SELECT
+>   order_id,
+>   CASE status
+>     WHEN NULL THEN 'unknown'                  -- NEVER MATCHES (status=NULL is UNKNOWN)
+>     WHEN 'A'  THEN 'active'
+>     WHEN 'C'  THEN 'cancelled'
+>     ELSE 'other'
+>   END AS status_label
+> FROM iceberg.analytics.orders;
+>
+> -- CORRECT Trino translation — searched CASE with an explicit IS NULL branch.
+> SELECT
+>   order_id,
+>   CASE
+>     WHEN status IS NULL THEN 'unknown'         -- explicit NULL match
+>     WHEN status = 'A'   THEN 'active'
+>     WHEN status = 'C'   THEN 'cancelled'
+>     ELSE 'other'
+>   END AS status_label
+> FROM iceberg.analytics.orders;
+> ```
+>
+> **Alternative: COALESCE-wrap with a sentinel** when the rewrite must stay in the simple-CASE shape (e.g., a code generator emits simple CASE). Replace NULL with a sentinel string the simple CASE can match on:
+>
+> ```sql
+> -- Wrap with COALESCE so NULL becomes the sentinel '__NULL__'; the simple
+> -- CASE then has a real value to match. Works only when no legitimate column
+> -- value collides with the sentinel.
+> SELECT
+>   order_id,
+>   CASE COALESCE(status, '__NULL__')
+>     WHEN '__NULL__' THEN 'unknown'
+>     WHEN 'A'        THEN 'active'
+>     WHEN 'C'        THEN 'cancelled'
+>     ELSE 'other'
+>   END AS status_label
+> FROM iceberg.analytics.orders;
+> ```
+>
+> **DO-NOT-WRITE block — banned patterns when translating Oracle DECODE on NULL-bearing inputs:**
+>
+> ```sql
+> -- WRONG (a) — simple CASE with WHEN NULL. The branch is unreachable; the
+> -- expression NULL = NULL evaluates to UNKNOWN, not TRUE, so WHEN NULL never
+> -- fires. Trino does NOT emit a warning; the result silently differs from
+> -- Oracle DECODE.
+> CASE col WHEN NULL THEN 'is_null' WHEN 'A' THEN 'a' ELSE 'other' END
+>
+> -- WRONG (b) — relying on the order of WHEN branches to "catch" NULL in a
+> -- simple CASE. Order is irrelevant; every WHEN clause uses `=` and NULL
+> -- never equals anything (including itself).
+> CASE col
+>   WHEN 'A'  THEN 'a'
+>   WHEN NULL THEN 'is_null'   -- still never matches
+>   ELSE 'other'
+> END
+>
+> -- WRONG (c) — adding ELSE 'unknown' as a stand-in for the NULL branch.
+> -- ELSE catches ALL non-matching values, NOT just NULLs. Any future value
+> -- not in the explicit WHEN list is incorrectly labeled 'unknown'.
+> CASE col WHEN 'A' THEN 'a' WHEN 'C' THEN 'c' ELSE 'unknown' END
+> ```
+>
+> **When the input is guaranteed NOT NULL**, simple `CASE col WHEN ...` is a clean drop-in for `DECODE` — the NULL-matching divergence does not apply. The rule: **before translating `DECODE` → simple CASE, check whether the column is NULL-bearing**. If yes, use searched `CASE WHEN col IS NULL THEN ...` (the safe default). If no (column is `NOT NULL` constrained), simple CASE is fine.
+>
+> **Audit hint for a bulk migration.** Grep the Oracle source for every `DECODE(<col>, NULL, ...)` literal — those calls SPECIFICALLY exploit Oracle's NULL=NULL semantics, so they MUST be translated to searched CASE with `WHEN col IS NULL`. Calls like `DECODE(<col>, 'A', ..., 'B', ...)` without an explicit NULL branch are safe to translate to simple CASE only if `<col>` is `NOT NULL`-constrained. When in doubt, default to searched CASE — it is always correct.
 
 ### 4.2 Date/time functions
 

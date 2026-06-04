@@ -2338,6 +2338,94 @@ The staging-table + `CREATE OR REPLACE VIEW` swap pattern is an alternative WAP 
 
 ## Emergency rollback (the safest cleanup tool)
 
+> **CANONICAL SNAPSHOT-LOOKUP + ROLLBACK RUNBOOK — read this FIRST before pasting any SQL.** Keywords: undo bad load, rollback Iceberg table, find snapshot id before bad load, list snapshots, $snapshots metadata table. This block is the single source of truth for the snapshot-lookup → rollback → cleanup flow on Trino 467 + Iceberg 1.5.2. **The metadata-table FROM clause MUST quote the WHOLE `<table>$snapshots` token inside ONE pair of double quotes** — `iceberg.analytics."events$snapshots"`, NOT `iceberg.analytics.events` (the base data table has NO `snapshot_id` / `committed_at` / `operation` / `summary` columns; that query fails with `Column 'snapshot_id' cannot be resolved`). Verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) ("Metadata tables" section).
+>
+> **The four-step runbook (paste-ready, Trino 467 + Iceberg 1.5.2):**
+>
+> ```sql
+> -- STEP 1: list recent snapshots to find the one that existed BEFORE the bad load.
+> -- The FROM clause MUST be the QUOTED metadata table — iceberg.<schema>."<table>$snapshots".
+> -- Do NOT write FROM iceberg.<schema>.<table>; the base table has no snapshot columns.
+> SELECT snapshot_id, committed_at, operation, summary
+> FROM iceberg.analytics."events$snapshots"
+> ORDER BY committed_at DESC
+> LIMIT 20;
+> -- Pick the snapshot_id whose committed_at is JUST BEFORE the bad write.
+> -- (operation column tells you what kind of write each snapshot was:
+> --  'append' = INSERT, 'overwrite' = INSERT OVERWRITE / dbt full-refresh,
+> --  'delete' = DELETE, 'replace' = compaction / rewrite_data_files.)
+>
+> -- STEP 2: verify the good state by reading the table AS OF that snapshot.
+> -- This proves the row count / data shape is what you expect BEFORE rolling back.
+> SELECT count(*) FROM iceberg.analytics.events
+> FOR VERSION AS OF 4823511203987654321;
+> -- If the count matches the pre-bad-load expectation, the snapshot_id is correct.
+> -- If it does not, go back to Step 1 and pick a different (earlier) snapshot.
+>
+> -- STEP 3: roll back atomically. Trino 467 uses CALL with POSITIONAL args
+> -- (schema VARCHAR, table VARCHAR, snapshot_id BIGINT) — not named args, not
+> -- ALTER TABLE EXECUTE (which is Trino 469+ only). The rollback is metadata-only:
+> -- it moves the current-snapshot pointer back; no data files are deleted yet.
+> CALL iceberg.system.rollback_to_snapshot('analytics', 'events', 4823511203987654321);
+>
+> -- STEP 4: (later, NOT in the incident) clean up the now-orphaned snapshots and
+> -- their exclusive data files. The 7-day floor is the Trino 467 minimum unless
+> -- you override iceberg.expire-snapshots.min-retention. Keep at least 24-48h
+> -- as a rollback-of-rollback window before running this.
+> ALTER TABLE iceberg.analytics.events
+>   EXECUTE expire_snapshots(retention_threshold => '7d');
+> ```
+>
+> **DO-NOT-WRITE — banned patterns (each one is a real copy-paste defect; the rule is "the FROM clause MUST MATCH the explanatory comment"):**
+>
+> ```sql
+> -- WRONG (a) — comment says "$snapshots metadata table" but FROM is the BASE TABLE.
+> -- The base table has NO snapshot_id / committed_at / operation / summary columns.
+> -- Trino fails with: Column 'snapshot_id' cannot be resolved
+> -- Query the $snapshots metadata table:
+> SELECT snapshot_id, committed_at, operation, summary
+> FROM iceberg.analytics.events                           -- WRONG: base table
+> ORDER BY committed_at DESC;
+>
+> -- WRONG (b) — split quoting; parses as catalog.schema.table.column, so Trino
+> -- looks for a column named "$snapshots" on the base events table. FAILS.
+> SELECT * FROM iceberg.analytics.events."$snapshots";    -- WRONG: split quoting
+>
+> -- WRONG (c) — Spark four-part dotted form. Trino's parser does NOT accept this.
+> -- FAILS with a parse error in Trino; works only in Spark.
+> SELECT * FROM iceberg.analytics.events.snapshots;       -- WRONG: Spark form
+>
+> -- WRONG (d) — Spark backtick form. Trino does NOT recognise backticks; use
+> -- double-quotes around the whole "table$metadata" token.
+> SELECT * FROM iceberg.analytics.`events$snapshots`;     -- WRONG: Spark backticks
+>
+> -- WRONG (e) — Trino 469+ ALTER TABLE EXECUTE form on Trino 467. The table-
+> -- procedure form was added in Trino 469 (Jan 2025); on Trino 467 it fails
+> -- with a procedure / syntax error. Use the CALL positional form in Step 3.
+> ALTER TABLE iceberg.analytics.events
+>   EXECUTE rollback_to_snapshot(snapshot_id => 4823511203987654321);  -- WRONG: 469+
+>
+> -- WRONG (f) — Spark named-arg form pasted into Trino's CALL. Trino's CALL
+> -- requires POSITIONAL args; named args fail with "unexpected '=>'".
+> CALL iceberg.system.rollback_to_snapshot(
+>   table       => 'analytics.events',
+>   snapshot_id => 4823511203987654321);                  -- WRONG: Spark named args
+> ```
+>
+> **The meta-rule (commit this to memory): the FROM clause MUST MATCH the explanatory comment.** If the comment says "$snapshots metadata table", the FROM clause MUST name the QUOTED `iceberg.<schema>."<table>$snapshots"` form — NEVER the base table. The same rule applies to every Iceberg metadata-table family:
+>
+> | Comment / intent | CORRECT FROM clause (Trino 467) | WRONG (base table — no such columns) |
+> |---|---|---|
+> | "Query the $snapshots metadata table" | `FROM iceberg.analytics."events$snapshots"` | `FROM iceberg.analytics.events` |
+> | "Query the $history metadata table" | `FROM iceberg.analytics."events$history"` | `FROM iceberg.analytics.events` |
+> | "Query the $files metadata table" | `FROM iceberg.analytics."events$files"` | `FROM iceberg.analytics.events` |
+> | "Query the $partitions metadata table" | `FROM iceberg.analytics."events$partitions"` | `FROM iceberg.analytics.events` |
+> | "Query the $refs metadata table" | `FROM iceberg.analytics."events$refs"` | `FROM iceberg.analytics.events` |
+> | "Query the $manifests metadata table" | `FROM iceberg.analytics."events$manifests"` | `FROM iceberg.analytics.events` |
+> | "Query the $properties metadata table" | `FROM iceberg.analytics."events$properties"` | `FROM iceberg.analytics.events` |
+>
+> The base data table is for ROWS. The quoted `"table$metadata"` form is for METADATA. They are different objects with disjoint column schemas. The single most common load-bearing copy-paste defect on this stack is writing the metadata-table COMMENT but pasting the base-table FROM clause — the engineer then hits `Column 'snapshot_id' cannot be resolved` and the runbook breaks.
+
 When a bad ingestion job runs — duplicates, wrong schema, partial load — **roll back the snapshot before you try anything else.** It's instant, atomic, and doesn't touch a single data file.
 
 `CALL iceberg.system.rollback_to_snapshot` is available in **BOTH Trino 467 AND Spark**. In an active incident, prefer the **Trino form** because you almost certainly already have a Trino session open from investigating the problem — there's no reason to spin up a Spark job just to move a pointer.

@@ -1,118 +1,91 @@
-# Judge Feedback — Iter 453 → Teacher Actions for Iter 454
+# Judge feedback — iter 454 (extended phase, end-of-iteration)
 
-## Iter 453 verdict
+**Overall**: 4.40625 PASS (53rd consecutive overall PASS in extended phase). Iter453 Q3 $snapshots-quoting copy-paste defect FULLY RESOLVED at iter454 Q1. NEW load-bearing fabrication emerged at Q2 (`system.metadata.table_properties` with phantom columns + wrong semantics) plus a minor source-dialect bug at Q4 (malformed Oracle ROWNUM example).
 
-**Overall: 4.53125 PASS** (52nd consecutive PASS in extended phase).
-- Q1 dbt-trino incremental RE-PROBE: **4.8125 STRONG** — iter452 both confident-inaccuracies RESOLVED.
-- Q2 Oracle DECODE → Trino: **4.5 PASS** — minor NULL-matching nuance gap.
-- Q3 snapshot rollback via $snapshots: **4.0 PASS-WITH-BUG** — load-bearing copy-paste defect on metadata-table FROM clause.
-- Q4 ANALYZE on Iceberg: **4.8125 STRONG** — pedagogically excellent 3-layer framing.
+## Per-question scores
 
-## Per-question scoring
+| Q | Topic angle | Acc | Comp | Clar | Act | Avg | Verdict |
+|---|---|---|---|---|---|---|---|
+| Q1 | list snapshots + rollback RE-PROBE | 5.0 | 4.75 | 4.75 | 4.75 | **4.8125** | STRONG PASS — iter453 fix LANDED |
+| Q2 | WHERE on tenant_id+date not pruning | 3.0 | 3.75 | 3.5 | 3.75 | **3.5** | PASS-WITH-FABRICATION |
+| Q3 | per-tenant cost isolation 80 tenants | 5.0 | 4.5 | 4.5 | 4.0 | **4.5** | PASS-STRONG |
+| Q4 | Oracle ROWNUM → Trino pagination | 4.25 | 4.5 | 4.5 | 4.375 | **4.40625** | PASS-WITH-MINOR-BUG |
 
-### Q1 (dbt incremental RE-PROBE) — avg 4.8125 STRONG PASS
-- Accuracy 5.0: `{% if is_incremental() %}` canonical guard + `partitioned_by` canonical dbt-trino key + `incremental_strategy='merge'` + `unique_key` + `on_schema_change='append_new_columns'` + `sorted_by` + `format_version=2` + COALESCE-watermark — ALL verified against docs.getdbt.com.
-- Clarity 4.75: DO-NOT callouts pedagogically strong.
-- Actionability 4.75: paste-ready canonical block.
-- Completeness 4.75: covers config + body + late-arrival + anti-patterns.
+**Q1 streak status — CONFIRMED**: responder used the correct double-quoted `FROM iceberg.analytics."events$snapshots"` form (the entire `events$snapshots` token sits inside one pair of double quotes, not split as `events."$snapshots"`), AND the explanatory comment matches the FROM clause. The iter453 Q3 copy-paste defect is fully resolved on the metadata-table angle. The iter454 teacher leading canonical block in r17 emergency-rollback section worked as intended.
 
-### Q2 (Oracle DECODE → Trino) — avg 4.5 PASS
-- Accuracy 4.75: Trino 467 has NO DECODE CORRECT; CASE rewrite syntactically valid.
-- Clarity 4.75: simple substitution explained cleanly.
-- Actionability 4.5: paste-ready for non-NULL inputs.
-- Completeness 4.0: Oracle DECODE NULL-matching nuance MISSING (DECODE treats NULL=NULL as TRUE, simple CASE does NOT — silent migration bug for NULL-bearing columns).
+## Fabrications and inaccuracies (this iter)
 
-### Q3 (undo bad 200k-row load via Iceberg snapshots) — avg 4.0 PASS-WITH-BUG
-- Accuracy 3.5: `CALL iceberg.system.rollback_to_snapshot('analytics','events_table',<id>)` 3-arg positional CORRECT for Trino 467 (per Starburst blog + trinodb/trino #12353 + PR #9921; PR #24580 deprecates for later versions). Metadata-only/atomic CORRECT. expire_snapshots/remove_orphan_files CORRECT. **BUT: the snapshot-lookup query comment says "Query the $snapshots metadata table" but FROM clause is `FROM iceberg.analytics.events_table` (the BASE table), NOT `FROM iceberg.analytics."events_table$snapshots"`** — base table has no snapshot_id/committed_at/operation/summary columns, that query will fail with `Column 'snapshot_id' cannot be resolved`.
-- Clarity 4.25: explanation otherwise clean.
-- Actionability 3.75: engineer pastes lookup query, hits parse error, must self-correct.
-- Completeness 4.5: rollback + cleanup + warnings all present.
+1. **Q2 — `system.metadata.table_properties` query is FABRICATED** (load-bearing).
+   - Responder wrote `SELECT property_key, property_value FROM system.metadata.table_properties WHERE table_schema='analytics' AND table_name='events' AND property_key='partitioning'`.
+   - **Wrong columns**: real columns are `catalog_name, property_name, default_value, type, description` per https://trino.io/docs/current/connector/system.html and https://github.com/trinodb/trino/issues/14000. The columns `table_schema`, `table_name`, `property_key`, `property_value` do NOT exist.
+   - **Wrong semantics**: `system.metadata.table_properties` lists AVAILABLE table property NAMES per connector (a catalog-level metadata listing of WITH-clause keys), NOT bound property values for a specific table. It has no per-table rows at all.
+   - **Canonical fix**: `SHOW CREATE TABLE iceberg.analytics.events` (per Trino DDL docs explicitly stating "you can see the value with SHOW CREATE TABLE"); or `SELECT * FROM iceberg.analytics."events$properties"` for bound table-level properties; or `SELECT * FROM iceberg.analytics."events$partitions"` to enumerate partition values.
+   - Engineer pasting the responder's snippet hits `Column 'property_key' cannot be resolved` parse error immediately.
 
-### Q4 (ANALYZE on Iceberg) — avg 4.8125 STRONG PASS
-- Accuracy 5.0: bare `ANALYZE table WITH (columns = ARRAY[...])` no-TABLE-keyword CORRECT per trino.io/docs/current/sql/analyze.html; SHOW STATS FOR CORRECT; CBO/NDV claim CORRECT; Puffin-backed stats CORRECT.
-- Clarity 4.75: 3-layer model (partition pruning / file skipping / CBO join ordering — ANALYZE only affects layer 3) is pedagogically EXCELLENT.
-- Actionability 4.75: EXPLAIN (TYPE DISTRIBUTED) before/after verification pattern.
-- Completeness 4.75: scan vs join perf distinction made explicitly.
+2. **Q4 — Oracle ROWNUM example is MALFORMED** (minor source-dialect bug).
+   - Responder wrote `SELECT * FROM events ORDER BY event_id DESC WHERE ROWNUM <= 100` — invalid in Oracle (and ANSI): ORDER BY must come AFTER WHERE.
+   - Even if reordered to `SELECT * FROM events WHERE ROWNUM <= 100 ORDER BY event_id DESC`, the result is semantically WRONG because Oracle assigns ROWNUM BEFORE ORDER BY — you'd get unspecified 100 rows then sorted.
+   - **Canonical Oracle 11g pattern**: `SELECT * FROM (SELECT * FROM events ORDER BY event_id DESC) WHERE ROWNUM <= 100` (inline-view wrap mandatory).
+   - **Canonical Oracle 12c+ pattern**: `SELECT * FROM events ORDER BY event_id DESC FETCH FIRST 100 ROWS ONLY`.
+   - Trino migration target is fully correct; the bug is on the Oracle source-dialect example.
 
-## Q1 confirmation — DID iter453 restore dbt-trino syntax?
+3. **No federation probe this iter** — federation row at 4.49944/310 stays UNCHANGED per directive.
 
-**YES, both iter452 confident-inaccuracies are fully resolved on the responder side:**
+## Concrete teacher actions for iter 455 (breadth design; no dedicated federation probe)
 
-| iter452 defect | iter453 responder produced | Status |
+### PRIMARY FIX — Q2 fabrication reconciliation
+
+Add a leading canonical block to **resources/17-iceberg-table-maintenance.md** AND **resources/14-iceberg-partitioning-saas.md** (responder may keyword-match into either) titled something like:
+
+> "How do I see the current partition spec for an Iceberg table on Trino 467?"
+
+The block must contain, in this order:
+
+1. **Canonical recipe**: `SHOW CREATE TABLE iceberg.analytics.events` — quote the Trino DDL docs note: "you can see the value with SHOW CREATE TABLE". Show example output highlighting the `partitioning = ARRAY[...]` clause inside the `WITH (...)` section.
+2. **Alternate recipe (bound table-level properties)**: `SELECT * FROM iceberg.analytics."events$properties"` — Iceberg metadata table that lists key/value pairs of properties actually set on the table.
+3. **Alternate recipe (enumerate partition values)**: `SELECT partition, record_count, file_count, total_size FROM iceberg.analytics."events$partitions"`.
+4. **DO-NOT-WRITE callout** (load-bearing): explicitly ban `SELECT ... FROM system.metadata.table_properties WHERE table_schema=... AND table_name=...`. State the two reasons: (i) wrong column names (real columns are `catalog_name, property_name, default_value, type, description`), (ii) wrong semantics — this view lists AVAILABLE property names per connector, not bound values for a specific table.
+5. **Cross-reference**: the meta-rule that emerged from iter453/iter454 — "if you're trying to introspect a SPECIFIC TABLE's properties or partition spec, use SHOW CREATE TABLE or the `"table$<metatable>"` Iceberg metadata tables, never the catalog-level `system.metadata.*` views".
+
+### SECONDARY FIX — Q4 Oracle source-dialect canonical reference
+
+Add a small canonical mini-table to **resources/27-oracle-plsql-to-dbt-trino.md** showing the three valid Oracle row-limiting forms side-by-side with their Trino equivalents:
+
+| Oracle form | Valid? | Trino equivalent |
 |---|---|---|
-| `{% if execute %}` as incremental guard | `{% if is_incremental() %}` | RESOLVED — canonical per docs.getdbt.com/docs/build/incremental-models |
-| `properties={'partitioning': "ARRAY[...]"}` dbt-trino key | `properties={'partitioned_by': "ARRAY['day(event_timestamp)']", ...}` | RESOLVED — canonical per docs.getdbt.com/reference/resource-configs/trino-configs |
+| `SELECT * FROM events ORDER BY event_id DESC WHERE ROWNUM <= 100` | INVALID — ORDER BY before WHERE is a parse error | n/a |
+| `SELECT * FROM events WHERE ROWNUM <= 100 ORDER BY event_id DESC` | Valid syntax but SEMANTICALLY WRONG — ROWNUM assigned before ORDER BY; result is unspecified 100 rows then sorted | n/a |
+| `SELECT * FROM (SELECT * FROM events ORDER BY event_id DESC) WHERE ROWNUM <= 100` | CANONICAL Oracle 11g — inline-view wrap | `SELECT * FROM events ORDER BY event_id DESC LIMIT 100` |
+| `SELECT * FROM events ORDER BY event_id DESC FETCH FIRST 100 ROWS ONLY` | CANONICAL Oracle 12c+ ANSI row-limiting clause | `SELECT * FROM events ORDER BY event_id DESC LIMIT 100` |
 
-Plus the responder added explicit DO-NOT-WRITE callouts against `{% if execute %}`, bare `MAX(...)` in WHERE, and `IN (SELECT id FROM {{this}})`. The iter453 teacher reconciliation (new leading canonical worked example in r28, 5 config-block + 2 prose fixes across r27/r28) **LANDED CLEAN**. Citation-hygiene streak RESTORED on this topic.
+Plus the keyset-pagination side-by-side (Oracle `WHERE event_id < :cursor ORDER BY event_id DESC FETCH FIRST 50 ROWS ONLY` → Trino `WHERE event_id < :cursor ORDER BY event_id DESC LIMIT 50`).
 
-## New defect this iter — Q3 $snapshots FROM-clause bug
+DO-NOT-WRITE callout: warn against showing the malformed Oracle `ORDER BY ... WHERE ROWNUM` form in migration-audit examples — engineers reading the resource to audit legacy code shouldn't see invalid Oracle SQL labeled as Oracle.
 
-**Real accuracy error**: the responder's snapshot-lookup query has a comment `Query the $snapshots metadata table` but the FROM clause reads `FROM iceberg.analytics.events_table` (the BASE table). The base data table has no `snapshot_id` / `committed_at` / `operation` / `summary` columns — those are only on the `"events_table$snapshots"` metadata-table form per trino.io/docs/current/connector/iceberg.html.
+### REINFORCEMENT — Q1 metadata-table quoting (no source change needed)
 
-**Engineer impact**: copy-paste hits an immediate `Column 'snapshot_id' cannot be resolved` parse-time error.
+The iter454 teacher leading canonical block at r17 emergency-rollback (the `"events$snapshots"`-first paste-ready runbook) is doing its job. NO new content needed — the existing canonical block + DO-NOT-WRITE matrix is sufficient.
 
-**Root cause class**: same as iter452 Q2 — the explanatory comment in a code block doesn't match the actual SQL surface. The responder learned the metadata table by NAME but pasted the WRONG table reference. Findability gap: the canonical `$snapshots` query example in resources isn't being reached from "rollback" / "undo bad load" keyword paths.
+### Breadth design for iter 455 (no federation)
 
-## Fabrications & inaccuracies — full list with correct facts
+- Stay away from federation per directive.
+- Probe one **Iceberg partition design** angle (topic just nudged down at iter454; needs a passing reinforcement).
+- Probe one **Oracle migration** angle that ISN'T pagination/ROWNUM (e.g., MERGE rewrite, CONNECT BY hierarchy, analytic-functions migration) to broaden migration coverage and offset the iter454 ROWNUM bug.
+- Probe one **Iceberg table maintenance** OR **multi-tenant** topic to keep both at healthy buffer.
+- Probe one CBO/ANALYZE OR SQL-best-practices OR query-perf-regression angle for breadth coverage on override-threshold topics.
 
-| # | Q | Defect | Correct fact | Source |
-|---|---|---|---|---|
-| 1 | Q3 | Comment says "Query the $snapshots metadata table" but FROM is base table | Must be `FROM iceberg.<schema>."<table>$snapshots"` (double-quoted suffix). Base table has no snapshot_id column. | trino.io/docs/current/connector/iceberg.html (metadata tables section) |
-| 2 | Q2 | Simple `CASE status WHEN 'A' ...` doesn't replicate Oracle DECODE's NULL=NULL match | Oracle DECODE treats NULL=NULL as TRUE; simple CASE uses `=` semantics where NULL=NULL is UNKNOWN. Full equivalence requires searched CASE with `WHEN col IS NULL` branch or COALESCE-wrap. | Oracle DECODE docs + trino.io/docs/current/language/expressions.html#case-expression |
+### Root-cause pattern (cross-iter)
 
-**No fabricated PR#/issue#/function name/DDL clause/property/config-key/version-gated feature detected in Q1 or Q4.** The `CALL iceberg.system.rollback_to_snapshot('schema','table',id)` 3-arg positional form in Q3 IS valid in Trino 467 (verified via Starburst blog + trinodb/trino issue #12353 + PR #9921; PR #24580 deprecates it for later Trino versions, but the form works in 467).
+Three of the last four citation-hygiene breaks share the same root cause: **the responder constructs a plausible-looking query against a real Trino system table or metadata table without verifying the column schema**. Specifically:
+- iter452 Q2: `properties={'partitioning': ...}` (real key in dbt-trino is `partitioned_by`).
+- iter453 Q3: `FROM iceberg.analytics.events_table` for snapshot columns (correct is `"events_table$snapshots"`).
+- iter454 Q2: `system.metadata.table_properties` with `table_schema/table_name/property_key/property_value` columns (real columns are `catalog_name, property_name, default_value, type, description`; wrong semantics).
 
-## Teacher actions for iter 454
+Pattern: responder remembers there IS a system table for some metadata, but invents columns by analogy. Teacher mitigation: every time a resource introduces a system/metadata table, include (a) the exact column list with types, (b) a one-line "this exposes X, NOT Y" semantic note, (c) cross-link to the canonical query for the inverse intent. This is already done well for `"table$snapshots"`, `"table$files"`, `"table$partitions"`. Extend the same pattern to `system.metadata.table_properties` — clarify it lists AVAILABLE properties per catalog, NOT bound values per table; the bound-value surfaces are `SHOW CREATE TABLE` and `"table$properties"`.
 
-### PRIMARY FIX — Reconcile $snapshots metadata-table query pattern
+## Files to modify in iter 455
 
-The Q3 bug is a findability + canonical-form gap on Iceberg metadata tables. Add a leading canonical block to **resources/17-iceberg-table-maintenance.md** (or wherever the snapshot rollback content lives — verify with `grep -l rollback_to_snapshot resources/`):
+- `resources/17-iceberg-table-maintenance.md` (or `resources/14-iceberg-partitioning-saas.md` — whichever the responder keyword-matches for "see this table's partition spec") — add canonical "how to see a table's partition spec" block + DO-NOT-WRITE callout against `system.metadata.table_properties WHERE table_name=...`.
+- `resources/27-oracle-plsql-to-dbt-trino.md` — add Oracle ROWNUM vs FETCH FIRST canonical mini-table.
 
-```sql
--- CORRECT — query the $snapshots metadata table with double-quoted suffix
-SELECT snapshot_id, committed_at, operation, summary
-FROM iceberg.analytics."events_table$snapshots"
-ORDER BY committed_at DESC;
-
--- WRONG — querying the base table for snapshot metadata
--- SELECT snapshot_id, committed_at FROM iceberg.analytics.events_table
--- ERROR: Column 'snapshot_id' cannot be resolved
-```
-
-Place this **BEFORE** any `CALL iceberg.system.rollback_to_snapshot(...)` or `EXECUTE rollback_to_snapshot(...)` example, with the heading containing keywords engineers search for: "undo bad load", "rollback Iceberg", "find snapshot id", "$snapshots metadata table". Add a DO-NOT-WRITE callout explicitly contrasting the two FROM clauses.
-
-Verify NO other resource has a stale `FROM iceberg.<schema>.<base_table>` example that purports to read `snapshot_id`/`committed_at` — grep for `snapshot_id FROM iceberg` across all resources and fix any that don't have the `"$snapshots"` suffix.
-
-### SECONDARY FIX — Oracle DECODE NULL-matching nuance
-
-Add a one-paragraph note to **resources/27-oracle-plsql-to-dbt-trino.md** under the DECODE → CASE rewrite section:
-
-> Oracle DECODE matches NULL=NULL as TRUE; Trino simple `CASE col WHEN NULL THEN ...` does NOT match NULL because CASE uses `=` semantics. For full DECODE equivalence on NULL-bearing inputs, use searched CASE: `CASE WHEN col IS NULL THEN 'is_null' WHEN col = 'A' THEN 'a' ELSE 'other' END`. Or COALESCE-wrap with a sentinel.
-
-Add a DO-NOT-WRITE callout against `CASE col WHEN NULL THEN ... END` because it never matches.
-
-### BREADTH DESIGN for iter454 question selection
-
-- **AVOID a dedicated federation probe** — topic remains at 4.49944/310 (just under the 4.5 override threshold). Per existing memory directive, only probe federation on bulletproofed angles. Skip federation this iter.
-- **DO re-probe Q3 $snapshots** with different phrasing (e.g., "list snapshots before rollback", "find the snapshot ID committed just before the bad load") to verify the iter454 reconciliation lands on the responder side.
-- **DO probe a new angle**: Iceberg `$history` vs `$snapshots` distinction (history shows is_current_ancestor flag; snapshots is the broader audit log). This tests the same metadata-table-name-suffix surface but from a different keyword path.
-- **DO re-probe Oracle migration** with a NULL-bearing input case to verify the DECODE NULL-nuance fix lands.
-- **Continue probing CBO/ANALYZE** — Q4 was strong; a different angle like `drop_extended_stats` procedure or PARTITION-aware ANALYZE would reinforce the override-threshold topic.
-
-### Citation-hygiene streak status
-
-- Iter452 BROKEN (Q2 dbt-trino syntax — 2 defects).
-- Iter453 PARTIALLY RESTORED on dbt-trino topic; NEW BREAK on Iceberg metadata-table FROM clause (Q3 — 1 defect).
-- **Pattern**: responder pastes code blocks where the explanatory comment doesn't match the SQL surface. Teacher fix is canonical leading examples + DO-NOT-WRITE callouts that contrast the wrong form against the right form on the same page.
-
-## Topic average updates (iter453)
-
-| Topic | iter452 | iter453 | delta |
-|---|---|---|---|
-| Postgres-to-Iceberg ingestion (dbt incremental Q1) | 4.4914/153 | 4.4936/154 | +0.0022 |
-| Oracle PL/SQL→dbt/Trino migration (Q2) | 4.6465/25 | 4.6403/26 | -0.0062 |
-| Iceberg table maintenance (Q3) | 4.5117/113 | 4.5072/114 | -0.0045 |
-| Trino CBO/ANALYZE (Q4) | 4.6588/12 | 4.6707/13 | +0.0119 |
-| Trino federation (NOT probed) | 4.49944/310 | 4.49944/310 | 0 |
-
-All probed topics remain PASSED. CBO/ANALYZE override-threshold topic strengthening (4.6707 well above 4.5 floor). Federation gap unchanged — needs different strategy than incremental probes.
+No federation changes; federation guardrails remain untouched (4.49944/310, near-miss row UNCHANGED).
