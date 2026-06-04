@@ -1,144 +1,75 @@
-# Judge Feedback — Iteration 461
+# Iter 462 — Judge Feedback (End-of-Iteration, Extended Phase)
 
 **Phase**: extended (end-of-iteration feedback only)
 **Date**: 2026-06-05
-**Overall**: 4.625 PASS (60th consecutive extended-phase PASS)
+**Overall**: 4.8125 STRONG PASS (61st consecutive extended-phase PASS)
 
-## Verdict
+All four questions cleared the 3.5 floor by wide margin. Two critical streak fixes confirmed; zero new fabrications across all four questions.
 
-**PASS** — overall 4-question avg **4.625** (PASS threshold 3.5).
+## Per-question breakdown
 
-## Per-question scores
-
-| Q | Topic angle | Accuracy | Completeness | Clarity | Actionability | Avg |
+| Q | Topic | Acc | Comp | Clar | Act | Avg |
 |---|---|---|---|---|---|---|
-| Q1 | Iceberg storage sizing 200GB CSV / 500M rows (iter460 Q3 formula RE-PROBE) | 5.0 | 4.75 | 5.0 | 5.0 | **4.9375** |
-| Q2 | Oracle NEXTVAL → Trino surrogate keys (`dbt_utils.generate_surrogate_key` / `ROW_NUMBER()` / no Iceberg identity) | 5.0 | 4.75 | 4.75 | 5.0 | **4.875** |
-| Q3 | dbt materialization choice per model (view / table / incremental+merge / ephemeral) | 5.0 | 4.5 | 5.0 | 5.0 | **4.875** |
-| Q4 | Iceberg time-travel real? snapshots = full copies? (`FOR VERSION AS OF` / `$snapshots` / `expire_snapshots`) | 3.0 | 4.5 | 4.5 | 3.25 | **3.8125** |
+| Q1 | Iceberg time-travel — TWO clauses (re-probe iter461 Q4 conflation) | 5.0 | 4.75 | 5.0 | 5.0 | 4.9375 |
+| Q2 | NULLS-default inside window function ORDER BY | 5.0 | 4.75 | 5.0 | 4.75 | 4.875 |
+| Q3 | Iceberg small-files: cause/detect/fix order | 4.75 | 4.75 | 4.75 | 4.75 | 4.75 |
+| Q4 | Oracle NVL2 → Trino CASE + empty-string-NULL quirk | 4.75 | 4.5 | 4.75 | 4.75 | 4.6875 |
 
-Overall avg = (4.9375 + 4.875 + 4.875 + 3.8125) / 4 = **4.625** -> PASS.
+Overall avg = (4.9375 + 4.875 + 4.75 + 4.6875) / 4 = **4.8125 — STRONG PASS**
 
-## CRITICAL FINDING #1 -- Q1 formula streak status: FIXED, FULLY CONFIRMED
+## Per-question justification
 
-The iter460 Q3 dimensionally-wrong formula (`(raw bytes x row count) ÷ compression ratio`) class is **FULLY RESOLVED** on first re-probe.
+**Q1 (4.9375 STRONG PASS — time-travel two-clause RE-PROBE)**: Responder produced TWO SEPARATE Trino clauses — `FOR TIMESTAMP AS OF TIMESTAMP '2026-05-23 14:00:00'` for the time-based case and `FOR VERSION AS OF 1234567890123456789` (BIGINT, unquoted) for the snapshot-id case. NO conflation, NO welded `FOR VERSION AS OF TIMESTAMP '...'` hybrid. 7-day default retention correct. Partition-filter advice on time-travel queries sound (historical snapshot still encodes partition bounds, so the predicate prunes manifests). Both clauses verified verbatim at trino.io/docs/current/connector/iceberg.html (Time travel queries section). Iter461 Q4 clause-conflation fab fully resolved.
 
-- Responder used `on_disk ~ total_raw_bytes ÷ compression_ratio = 200GB / 7 ~ 29GB` -- dimensionally correct.
-- Responder explicitly self-corrected: "never multiply by row count again -- double-counting".
-- iter461 teacher r11 two-forms rewrite (Form A `total_raw_bytes ÷ compression_ratio` + Form B `avg_bytes_per_row x row_count ÷ compression_ratio` with explicit "algebraically identical") + DO-NOT-WRITE table banning the double-count form LANDED at the keyword path.
-- Formula streak now at **1 PASS post-fix**. Needs another angle at iter462+ to lock the fix across phrasings (e.g. starting from per-row size, mixed-type schema sizing, year-over-year growth projection) -- not just a verbatim "200GB CSV -> ?" re-probe.
+**Q2 (4.875 STRONG PASS — NULLS-default in window function)**: Oracle DESC default places NULLs FIRST, Trino DESC default places NULLs LAST — correct dialect contrast. Same query different ordering with no error (silent semantic drift) — correct framing. Fix `ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY last_event_at DESC NULLS LAST)` is the canonical migration pattern. Responder explicitly stated "Trino defaults to NULLS LAST for BOTH ASC and DESC — no direction-dependent behavior like Oracle" — matches trino.io/docs/current/sql/select.html verbatim ("The default null ordering is NULLS LAST, regardless of the ordering direction"). Window function ORDER BY honors same null-ordering rule per trino.io/docs/current/functions/window.html. Did NOT claim Trino defaults NULLS FIRST for DESC.
 
-## CRITICAL FINDING #2 -- Q4 syntax fab ruling: `FOR VERSION AS OF TIMESTAMP '...'` is INVALID Trino syntax
+**Q3 (4.75 STRONG PASS — small-files cause/detect/fix)**: Cause attribution (per-write new files + MERGE delete files + small writes never compacted) correct per iceberg.apache.org/docs/latest/maintenance/. Detection query against `iceberg.analytics."events$files" WHERE content = 0` correct — `$files` columns (content, file_path, record_count, file_size_in_bytes) verified at trino.io/docs/current/connector/iceberg.html; `content=0` for data files (excluding positional/equality delete files) verified per Iceberg manifest spec. Double-quoted `"events$files"` syntax correct (required because of `$`). Fix order `optimize → expire_snapshots → remove_orphan_files` with correct rationale (compact into live snapshot, expire snapshots that pinned the small files, then sweep orphans). All procedure parameter names verified (`file_size_threshold => '128MB'`, `retention_threshold => '7d'`). No-data-loss claim correct.
 
-Responder wrote:
-```
-SELECT * FROM iceberg.analytics.events FOR VERSION AS OF TIMESTAMP '2026-05-29 14:30:00 UTC';
-```
+**Q4 (4.6875 STRONG PASS — NVL2 → Trino CASE + empty-string-NULL)**: Trino has no NVL2 function — verified (not in trino.io/docs/current/functions/comparison.html or any other Trino function reference). `NVL2(last_login,'active','never')` → `CASE WHEN last_login IS NOT NULL THEN 'active' ELSE 'never' END` is the exact logical equivalent per Oracle docs. Oracle empty-string-is-NULL quirk verified per docs.oracle.com and EDB/ABCloudz Oracle-vs-Postgres migration writeups — Oracle treats `''` and NULL as the same entity; Trino/Postgres treat `''` as a distinct zero-length string. Defensive rewrite `WHERE name IS NOT NULL AND name != ''` is the standard migration pattern. Minor nit: could have called out that the `''`-vs-NULL drift only matters for VARCHAR columns ingested from Oracle (a fresh greenfield Trino table won't have the artifact), but the engineer asked about migration so the warning is the right framing.
 
-Per **trino.io/docs/current/connector/iceberg.html** (Time travel queries section), Trino has TWO distinct, non-interchangeable time-travel clauses:
+## Streak status — both critical streaks resolved
 
-1. **Snapshot-id form** (integer-only):
-   ```
-   SELECT * FROM example.testdb.customer_orders FOR VERSION AS OF 8954597067493422955;
-   ```
-   `FOR VERSION AS OF` accepts ONLY a snapshot-id BIGINT literal.
+### (a) Trino-internal-clause-conflation streak — FIXED on 1st re-probe (Q1)
+- Iter461 Q4 fab: `FOR VERSION AS OF TIMESTAMP '...'` (welded snapshot-id keyword with timestamp literal)
+- Iter462 Q1: TWO SEPARATE clauses, NO welded hybrid. Used `FOR TIMESTAMP AS OF TIMESTAMP '...'` for time-based and `FOR VERSION AS OF <bigint>` for snapshot-based.
+- iter462 teacher r17 LEADING CANONICAL block + 9-row DO-NOT-WRITE table + 5-engine muscle-memory map LANDED at the keyword path.
+- Streak now at 1 PASS post-fix. Needs another angle at iter463+ to lock across phrasings (candidates: branch/tag time travel, $snapshots snapshot-id-finder pattern, time-travel + partition-pruning interaction).
 
-2. **Timestamp form** (separate clause):
-   ```
-   SELECT * FROM example.testdb.customer_orders FOR TIMESTAMP AS OF TIMESTAMP '2022-03-23 09:59:29.803 Europe/Vienna';
-   ```
-   `FOR TIMESTAMP AS OF` accepts ONLY a TIMESTAMP literal.
+### (b) NULLS-default concept — NOW LOCKED across 2nd angle (Q2)
+- Iter460 Q1 confirmed it on top-level ORDER BY DESC.
+- Iter462 Q2 confirms it INSIDE window function ORDER BY (`ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ... DESC NULLS LAST)`).
+- Verified per trino.io/docs/current/sql/select.html and trino.io/docs/current/functions/window.html.
+- Concept no longer fragile to question phrasing — confirmed on two distinct surface forms.
 
-`FOR VERSION AS OF TIMESTAMP '...'` welds the snapshot-id clause keyword with a timestamp literal that belongs to a different clause -- it is a Trino parse error. An engineer migrating off Oracle Flashback Query (`AS OF TIMESTAMP ...`) who copies the responder's example gets a syntax error on the exact use case they came to time-travel for. **Load-bearing syntax fab.** Accuracy docked 5.0 -> 3.0, Actionability docked to 3.25.
+## Fabrications / inaccuracies — NONE
 
-This is a new fab class -- **clause-conflation within Trino** (not strictly cross-dialect-spillover, but same mechanism). Engineers from Snowflake/Delta backgrounds know `AT (TIMESTAMP => ...)` / `AT (VERSION => ...)` (single clause + parameterized arg); engineers from Spark know `TIMESTAMP AS OF` / `VERSION AS OF` (separate clauses, but both standalone). Trino splits the two forms into two distinct clauses, so muscle memory from other engines can produce a welded hybrid that "looks Trino-flavored" but parses as neither.
+Every load-bearing claim verified against official docs. No cross-dialect spillover. No version-pin spillover. No Trino-internal clause conflation. No fabricated PR/issue/function/property/column/DDL-clause.
 
-## Fabrication / inaccuracy list (with correct fact + source)
+## Topic avg updates
+- Iceberg table maintenance: 4.4941/121 → **4.4961/123** (+0.0020, Q1 4.9375 + Q3 4.75 both above topic avg)
+- Oracle PL/SQL→dbt/Trino migration: 4.5811/34 → **4.5895/36** (+0.0084, Q2 4.875 + Q4 4.6875 both above topic avg)
+- Federation: 4.49944/310 UNCHANGED (not probed this iteration per directive)
 
-1. **Q4 -- `FOR VERSION AS OF TIMESTAMP '2026-05-29 14:30:00 UTC'`** (load-bearing syntax fab)
-   - **Correct**: For timestamp travel, use `FOR TIMESTAMP AS OF TIMESTAMP '2026-05-29 14:30:00 UTC'`. `FOR VERSION AS OF` is snapshot-id-only.
-   - **Source**: trino.io/docs/current/connector/iceberg.html (Time travel queries section).
+## Teacher actions for iter463 — concrete
 
-No other fabrications. Q1 / Q2 / Q3 each ZERO fabrications. Specifically:
-- Q1 -- `$files` columns `file_size_in_bytes` and `record_count` verified at trino.io/docs/current/connector/iceberg.html (Files columns reference). Formula dimensionally correct.
-- Q2 -- `dbt_utils.generate_surrogate_key` MD5-by-default, VARCHAR ~32 hex chars verified at github.com/dbt-labs/dbt-utils/blob/main/macros/sql/generate_surrogate_key.sql. Iceberg issue #12297 "Support for Identity Columns in Apache Iceberg" status is "Closed as not planned" at github.com/apache/iceberg/issues/12297. Trino has no `CREATE SEQUENCE` / NEXTVAL verified per Trino SQL grammar.
-- Q3 -- All four materialization semantics match docs.getdbt.com/docs/build/materializations and docs.getdbt.com/docs/build/incremental-models. Minor omission of the 5th type `materialized_view` is acceptable in dbt-trino + Iceberg production context.
+### 1. Breadth design — pick angles that don't touch just-fixed surfaces
+Avoid time-travel, avoid NULLS-default, avoid storage-sizing formula (locked across multiple iterations). Candidates ranked by gap-coverage value:
+- **Hive Metastore + Iceberg interaction** under-probed recently — try a question on schema evolution visibility across HMS+Iceberg (e.g., "I added a column via Trino — why doesn't Spark see it?").
+- **Iceberg WAP (write-audit-publish) workflow** in r17 documented but rarely probed — try a question on staging a backfill before publishing.
+- **Multi-tenant partitioning trade-off** at 4.4562/151 has steady traffic; one angle on bucket-partitioning vs identity-partitioning for tenant_id would test r10/r05 cross-refs.
+- **Query-perf-regression triage** at 4.3338/16 is the lowest-margin PASSED topic outside federation — one EXPLAIN-driven walkthrough would lift it.
 
-## Cross-cutting patterns
+### 2. Lock the just-fixed Trino-internal-clause-conflation class with a 2nd-angle re-probe
+1 PASS at 1 angle is fragile. Pick ONE of these for iter463 to bring it to a 2-angle lock:
+- **Branch/tag time travel**: "I have a tagged snapshot called `month-end-2026-05` — how do I query it?" (Expected: `FOR VERSION AS OF 'month-end-2026-05'` — string literal for ref-name, distinct from BIGINT for snapshot-id. Tests whether the responder collapses ref-name into snapshot-id form vs keeping them straight.)
+- **Snapshot-id-finder from $snapshots**: "I want to query 'as of 2 days ago' but I only have $snapshots — how do I find the right snapshot_id first, then time-travel?" (Tests whether responder chains the two-step pattern: `SELECT snapshot_id FROM ...$snapshots WHERE committed_at < ...` → plug BIGINT into `FOR VERSION AS OF`. Fab risk: responder shortcuts to `FOR VERSION AS OF (SELECT ...)` which is invalid — `FOR VERSION AS OF` requires a literal.)
+- **Time-travel + partition-pruning interaction**: "Does a partition filter prune partitions on the historical snapshot, or does it scan the full historical snapshot first?" (Tests deeper understanding — partition pruning applies because the historical snapshot's manifest list still encodes partition bounds.)
 
-1. **Citation-hygiene streak status**:
-   - iter460 dimensional-error formula class: FULLY RESOLVED at Q1 (1 PASS post-fix).
-   - iter460 NULLS-default fix held across a different Oracle migration sub-topic (surrogate keys at Q2 -- no Oracle-vs-Trino default leakage when surrogate-key generation was the only angle).
-   - NEW FAB at Q4: Trino-internal-clause-conflation (`FOR VERSION AS OF TIMESTAMP '...'`). Distinct fab class from prior cross-dialect-spillover (iter456) and version-pin-spillover (iter458/459). Same mechanism (muscle memory) but the conflated clauses are both internal to Trino.
+### 3. One Oracle migration sub-topic NOT recently touched
+Migration topic now confirmed clean on NULLS-default (iter460 Q1, iter462 Q2), surrogate keys (iter461 Q2), NVL2 + empty-string-NULL (iter462 Q4). Untouched recently: ROWNUM → LIMIT, DECODE → CASE, MERGE syntax differences (Oracle's USING clause vs Trino's), PL/SQL cursor → set-based dbt model, exception block → dbt test, package-level constants → dbt vars. Pick one for breadth coverage.
 
-2. **Topic margin movements**:
-   - Storage sizing 4.5072/9 -> **4.55023/10** (+0.04303) -- Q1 4.9375 well above topic avg, dimensional-error class resolved.
-   - Oracle PL/SQL->dbt/Trino migration 4.5722/33 -> **4.5811/34** (+0.0089) -- Q2 4.875 above topic avg, surrogate-key clean.
-   - Improving complex SQL performance on Trino with dbt 4.7458/3 -> **4.7781/4** (+0.0323) -- Q3 4.875 above topic avg, low-population topic still above 4.7.
-   - Iceberg table maintenance 4.4998/120 -> **4.4941/121** (-0.0057) -- Q4 3.8125 below topic avg, time-travel timestamp syntax fab docks margin slightly; still above 3.5 floor but tightened.
-   - Federation NOT probed -- 4.49944/310 row UNCHANGED per directive.
+### 4. Federation — do NOT probe unless a specific bulletproofed angle emerges
+Row sits at 4.49944/310, fractionally below the 4.5 raised threshold. A new probe risks a thin FAIL that locks the gap, or a thin PASS that only barely crosses. Only probe if the teacher has installed a fresh resource fix that addresses a specific known fab pattern (none identified this iteration).
 
-## Concrete teacher actions for iter462 (breadth design; no dedicated federation probe)
-
-### (1) PRIMARY ACTION -- Fix the Q4 time-travel clause-conflation fab class
-
-**Resource target**: locate the file containing Iceberg time-travel content (likely r17, r18, or the Iceberg table maintenance resource -- grep for `FOR VERSION AS OF` and `FOR TIMESTAMP AS OF`). Plan:
-
-- **Add a LEADING CANONICAL block** titled "Iceberg time travel on Trino -- TWO distinct clauses, NOT interchangeable":
-  - Side-by-side table of the two clauses with explicit type rules.
-  - **Rule A**: `FOR VERSION AS OF <integer-snapshot-id>` -- takes ONLY a snapshot-id BIGINT literal (look up via `SELECT snapshot_id FROM iceberg.<schema>."<table>$snapshots"`).
-  - **Rule B**: `FOR TIMESTAMP AS OF TIMESTAMP '...'` -- takes ONLY a TIMESTAMP literal (with timezone preferred for cross-cluster reproducibility).
-  - Explicit ban: "`FOR VERSION AS OF TIMESTAMP '...'` is NOT valid; the two clauses cannot be combined or substituted."
-  - Verbatim quote from trino.io/docs/current/connector/iceberg.html for each clause.
-  - Two worked examples (one for snapshot-id, one for timestamp) using the same `iceberg.analytics.events` table that recurs across the resources.
-
-- **DO-NOT-WRITE table** banning:
-  - `FOR VERSION AS OF TIMESTAMP '...'` (the iter461 Q4 fab verbatim).
-  - `FOR TIMESTAMP AS OF <integer>` (symmetric error -- timestamp clause cannot take an integer).
-  - `AT (TIMESTAMP => ...)` / `AT (VERSION => ...)` (Snowflake/Delta cross-dialect leakage).
-  - `TIMESTAMP AS OF '...'` (Spark-style clause without the `FOR` keyword).
-  - `VERSION AS OF '...'` (Spark-style clause without the `FOR` keyword).
-
-- **Cross-ref to §4.4B cross-dialect-spillover guardrail** explaining the muscle-memory mechanism: Snowflake/Delta unify version/timestamp under a single clause (`AT (...)`); Spark uses separate clauses but without the `FOR` keyword (`TIMESTAMP AS OF '...'` / `VERSION AS OF <id>`); Trino requires `FOR` + two separate clauses with disjoint argument types. Engineers from those backgrounds will instinctively weld keywords.
-
-- **Reconciliation discipline**: if any existing resource shows a `FOR VERSION AS OF` example, audit it to ensure the literal type matches; do NOT append the new block -- fix in place and remove any stale or imprecise wording.
-
-### (2) BREADTH -- Lock the storage-sizing formula fix across a NEW angle
-
-iter461 Q1 was the verbatim 200GB CSV re-probe. To confirm the fix persists across phrasings (not just the re-probe phrasing), iter462 should probe storage sizing from a NEW angle:
-- Per-row sizing starting from a Postgres schema (rows-per-month projection over 12 months, mixed-type columns).
-- OR year-over-year growth projection with retention policy (90d hot + 1y warm + 3y cold).
-- OR include compaction overhead / snapshot retention overhead in the total.
-
-Either of these probes the same Form A/Form B logic from a different starting point. If the fix is robust, both forms should be applied correctly.
-
-### (3) BREADTH -- Mid-tier topic rotation (keep cost / multi-tenant / query-perf-regression warm)
-
-- **Cost considerations** is the LOWEST-buffer PASSED topic (4.2079/18). Pick a fresh cost angle (e.g. tenant chargeback at month-end accounting close, or per-query cost attribution for a specific noisy-neighbor incident).
-- OR **Multi-tenant analytics** (4.4562/151) -- pick a new isolation angle.
-- OR **Query performance regression diagnosis** (4.3338/16) -- oncall workflow.
-
-### (4) BREADTH -- One Oracle migration angle to confirm iter460+iter461 fixes hold across question phrasings
-
-iter461 Q2 covered surrogate keys / sequences. Pick a non-NULLS, non-sequence Oracle angle:
-- PL/SQL cursor -> set-based rewrite.
-- `MERGE INTO` Oracle vs Trino/Iceberg MERGE.
-- `NVL` / `DECODE` / `CONNECT BY` rewrites.
-- Oracle `ROWNUM` vs Trino `LIMIT` / `OFFSET` / window functions.
-
-This widens the topic's coverage rather than re-probing the just-fixed angles.
-
-### (5) FEDERATION -- NOT probed unless a specific bulletproofed angle emerges
-
-Federation row stays at 4.49944/310 (FAIL threshold raised to 4.5; current 4.49944 is the recorded near-miss). Do NOT probe federation unless a specific, doc-verifiable angle is ready (e.g. a Trino release note that closes a known federation fab class). Random federation probes risk re-opening unresolved fab classes.
-
-### (6) Reconciliation hygiene reminder
-
-When updating the time-travel resource, do NOT append the new canonical block at the end -- locate and REPLACE/FIX in place any stale content that contradicts the two-clause rule. If multiple files mention time travel, audit all of them and either unify on a single canonical source or cross-ref from secondary mentions to the canonical block. iter460+iter461 has shown that leaving the responder to find the right cross-ref is fragile when keyword paths diverge.
-
-## Streak summary
-
-- 60 consecutive overall PASS in extended phase.
-- Formula streak: 1 PASS post-fix (needs another angle to lock).
-- NULLS-default streak: held across a different Oracle migration sub-topic at iter461 Q2 (incidental confirmation -- not a dedicated re-probe).
-- New fab class introduced at iter461 Q4: Trino-internal-clause-conflation in time travel. Must be resolved at iter462.
+### 5. No resource edits required from this iteration's findings
+Zero fabs. Teacher r17 LEADING CANONICAL block from iter462 LANDED clean. No reconciliation needed for iter463.

@@ -1895,21 +1895,134 @@ CALL iceberg.system.rewrite_manifests(
 
 ---
 
-## Time travel for audits and billing disputes
+## LEADING CANONICAL — Iceberg time travel on Trino 467: TWO separate clauses, NOT interchangeable
 
-Iceberg's snapshot history isn't only a maintenance concern — it's a query feature. You can run any `SELECT` **as of** a past snapshot or timestamp, which is exactly what you need when a customer disputes a billing line ("the August invoice says 1.2M API calls, prove it"), or when an auditor asks "show me the state of the `usage_report` table at end of Q1." This section covers the Trino 467 query syntax, how timestamp resolution actually works, and how to pin snapshots that must survive routine `expire_snapshots`.
+> **READ THIS FIRST before writing any time-travel SQL.** Trino's Iceberg connector exposes time travel through **two distinct, non-interchangeable clauses**. They look similar at a glance — both start with `FOR ... AS OF` — but they take **different argument types** and a Trino parser will reject any mismatch. Engineers from Snowflake, Delta Lake, Spark, or Oracle backgrounds frequently produce a *welded* hybrid that "looks Trino-flavored" but parses as neither. Pasting the wrong form is the most common load-bearing time-travel fab in this stack.
 
-### Query syntax (Trino 467)
+### The two clauses, side by side
+
+Verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (Time travel queries section, Trino 467 + Iceberg 1.5.2):
+
+| Clause | Accepts ONLY | Trino docs example (verbatim) |
+|---|---|---|
+| **`FOR VERSION AS OF <snapshot_id>`** | A `BIGINT` snapshot identifier **OR** a string branch / tag NAME (e.g. `'audit-tag'`, `'wap-branch'`). Looks the ref up via Iceberg's `$refs` table and resolves to the current tip snapshot. | `SELECT * FROM example.testdb.customer_orders FOR VERSION AS OF 8954597067493422955;` |
+| **`FOR TIMESTAMP AS OF <timestamp>`** | A `TIMESTAMP` or `DATE` literal. Resolves to the **latest snapshot with `committed_at <= T`** (not necessarily a snapshot committed at exactly T). | `SELECT * FROM example.testdb.customer_orders FOR TIMESTAMP AS OF TIMESTAMP '2022-03-23 09:59:29.803 Europe/Vienna';` |
+
+The two clauses are **disjoint**. You cannot pass a timestamp literal to `FOR VERSION AS OF`, and you cannot pass an integer snapshot ID to `FOR TIMESTAMP AS OF`. There is no Trino syntax that combines them into a single welded form.
+
+### Two worked examples on the canonical `iceberg.analytics.events` table
+
+**1. Snapshot-ID travel (audit reproducibility — exact, byte-for-byte stable):**
 
 ```sql
--- Query the table as it existed at a specific timestamp.
+-- Query the table at one EXACT, named snapshot. The argument is a BIGINT.
+SELECT tenant_id, event_type, COUNT(*) AS event_count
+FROM iceberg.analytics.events
+FOR VERSION AS OF 4823511203987654321
+WHERE billing_month = '2026-05'
+GROUP BY tenant_id, event_type;
+```
+
+**2. Timestamp travel (ad-hoc "what did the table look like at T?"):**
+
+```sql
+-- Query the table as of a specific wall-clock moment. The argument is a TIMESTAMP literal.
+-- Trino resolves to the latest snapshot whose committed_at is <= the given timestamp.
+SELECT tenant_id, event_type, COUNT(*) AS event_count
+FROM iceberg.analytics.events
+FOR TIMESTAMP AS OF TIMESTAMP '2026-05-29 14:30:00 UTC'
+WHERE billing_month = '2026-05'
+GROUP BY tenant_id, event_type;
+```
+
+**3. How to find a snapshot ID (so you can switch from timestamp form to version form for reproducibility):**
+
+```sql
+-- Trino 467: list snapshots for the table, newest first. The double-quoted
+-- "events$snapshots" is the Iceberg metadata table — see § Iceberg $snapshots / $history / $files / $manifests below.
+SELECT snapshot_id, committed_at, operation, summary
+FROM iceberg.analytics."events$snapshots"
+ORDER BY committed_at DESC
+LIMIT 20;
+```
+
+Copy the `snapshot_id` BIGINT from the row whose `committed_at` matches your audit window and substitute it into `FOR VERSION AS OF <snapshot_id>`. Once pinned, every re-run returns the same bytes.
+
+### DO-NOT-WRITE — Trino-internal clause conflation, cross-dialect spillover
+
+Each row below has been seen in real responder output or in junior-engineer code reviews. Every one is a Trino 467 parse error or a silently-wrong query. If you find yourself about to type any of these, STOP and re-read the side-by-side table above.
+
+| DO NOT write | Why it's wrong | Correct Trino 467 form |
+|---|---|---|
+| `FOR VERSION AS OF TIMESTAMP '2026-05-29 14:30:00 UTC'` | **Welds the snapshot-id keyword `VERSION` with a TIMESTAMP literal that belongs to the other clause.** This is the iter461 Q4 fab class. Trino parse error — the two clauses cannot be combined. | `FOR TIMESTAMP AS OF TIMESTAMP '2026-05-29 14:30:00 UTC'` (timestamp travel) **OR** `FOR VERSION AS OF <bigint_snapshot_id>` (version travel). Pick one. |
+| `FOR VERSION AS OF '4823511203987654321'` | **Snapshot ID is a `BIGINT`, not a quoted string.** Wrapping the ID in single quotes makes Trino interpret it as a branch / tag NAME and look it up in `$refs` — your number is not a ref, so the query fails with "branch not found". | `FOR VERSION AS OF 4823511203987654321` (unquoted BIGINT). The string form is reserved for branch / tag names like `'audit_2026_q1'`. |
+| `FOR TIMESTAMP AS OF 4823511203987654321` | **Timestamp clause cannot take an integer.** Symmetric error to the conflation above — wrong literal type for the clause. | `FOR VERSION AS OF 4823511203987654321` (if you have a snapshot ID) **OR** `FOR TIMESTAMP AS OF TIMESTAMP '2026-05-29 14:30:00 UTC'`. |
+| `SELECT * FROM events AT (TIMESTAMP => '2026-05-29 14:30:00 UTC')` | **Snowflake / Delta Lake syntax — not Trino.** Trino does NOT support the unified `AT(...)` clause with named arguments. Cross-dialect-spillover from Snowflake (`AT (TIMESTAMP => ...)` / `AT (OFFSET => ...)` / `AT (STATEMENT => ...)`) or Databricks Delta. | `FOR TIMESTAMP AS OF TIMESTAMP '2026-05-29 14:30:00 UTC'`. |
+| `SELECT * FROM events AT (VERSION => 4823511203987654321)` | **Snowflake / Delta Lake syntax — not Trino.** Same root cause as the row above. | `FOR VERSION AS OF 4823511203987654321`. |
+| `SELECT * FROM events TIMESTAMP AS OF '2026-05-29 14:30:00 UTC'` | **Spark SQL syntax — missing the `FOR` keyword.** Spark accepts `TIMESTAMP AS OF ...` and `VERSION AS OF ...` as standalone clauses without `FOR`. Trino requires `FOR`. | `FOR TIMESTAMP AS OF TIMESTAMP '2026-05-29 14:30:00 UTC'` (also note: the timestamp literal needs the `TIMESTAMP` keyword prefix, not just a quoted string). |
+| `SELECT * FROM events VERSION AS OF 4823511203987654321` | **Spark SQL syntax — missing the `FOR` keyword.** Same as above. | `FOR VERSION AS OF 4823511203987654321`. |
+| `SELECT * FROM events FOR SYSTEM_TIME AS OF TIMESTAMP '...'` | The SQL-standard `SYSTEM_TIME` form is informally **accepted by Trino's Iceberg connector** in some versions but the **documented canonical form is `FOR TIMESTAMP AS OF`** per trino.io/docs/current/connector/iceberg.html. Prefer the canonical form in new code so the example matches the docs page an engineer will read. | `FOR TIMESTAMP AS OF TIMESTAMP '...'`. |
+| `SELECT * FROM events FOR VERSION AS OF current_timestamp` | **A `TIMESTAMP`-typed expression passed to the snapshot-id clause.** Even though `current_timestamp` is a real function, the clause expects a BIGINT (or branch/tag name string) — not a TIMESTAMP. Parse error. | `FOR TIMESTAMP AS OF current_timestamp` (which is also rarely what you want — see "How FOR TIMESTAMP AS OF T actually resolves" below; prefer pinning a snapshot ID for audits). |
+
+### Why this fab happens (muscle-memory map across engines)
+
+Engineers arrive with different time-travel reflexes. The table below explains what their previous engine taught them — so when you spot a welded hybrid, you can identify the source and reach for the right Trino form.
+
+| Engineer's prior engine | Time-travel syntax they're used to | Common spillover into Trino | Correct Trino 467 form |
+|---|---|---|---|
+| **Snowflake** | `SELECT ... FROM tbl AT (TIMESTAMP => '...')` / `AT (OFFSET => -60*60)` / `AT (STATEMENT => 'qid')` — unified single clause + parameterized arg | They write `FOR VERSION AS OF (TIMESTAMP => ...)` or `AT (TIMESTAMP => ...)`, expecting Trino to follow the same single-clause pattern | Two separate clauses: `FOR TIMESTAMP AS OF TIMESTAMP '...'` for timestamps; `FOR VERSION AS OF <bigint>` for snapshot IDs |
+| **Databricks / Delta Lake** | `SELECT ... FROM tbl TIMESTAMP AS OF '...'` (no `FOR` keyword) or `VERSION AS OF <int>` | They omit the `FOR` keyword, e.g. `SELECT ... FROM tbl VERSION AS OF 12345` | Trino REQUIRES `FOR`: `FOR VERSION AS OF 12345`, `FOR TIMESTAMP AS OF TIMESTAMP '...'` |
+| **Apache Spark (open source)** | Same as Delta Lake — separate clauses, no `FOR` keyword | Same — drops the `FOR` keyword | Add `FOR` |
+| **Oracle Flashback Query** | `SELECT ... FROM tbl AS OF TIMESTAMP TO_TIMESTAMP('...')` / `AS OF SCN <number>` | They write `FOR VERSION AS OF TIMESTAMP '...'` (welding `VERSION` with a `TIMESTAMP` literal because Oracle uses `AS OF TIMESTAMP` for the timestamp form) — **this is the iter461 Q4 fab** | `FOR TIMESTAMP AS OF TIMESTAMP '...'` (note: NOT `AS OF TIMESTAMP TIMESTAMP '...'` either — that's Oracle, not Trino) |
+| **BigQuery** | `SELECT ... FROM tbl FOR SYSTEM_TIME AS OF TIMESTAMP '...'` | They write `FOR SYSTEM_TIME AS OF ...` which works but is not the documented canonical form | Use `FOR TIMESTAMP AS OF TIMESTAMP '...'` (Trino's canonical name; see trino.io docs) |
+
+> **Cross-ref:** This is the SAME mechanism as the cross-dialect-spillover class documented in [§ 4.4B of resource 27](27-oracle-plsql-to-dbt-trino.md). Muscle memory from a prior engine produces SQL that "looks right" but uses a clause shape another engine invented. The fix is always: **bind the syntax claim to the engine + the docs URL**, never paraphrase from memory.
+
+### One-screen cheat sheet (copy-paste safe)
+
+```sql
+-- Trino 467 + Iceberg 1.5.2 time travel — the only two valid clause shapes:
+
+-- A) Snapshot-id travel (BIGINT argument). Use for audit reproducibility.
+SELECT * FROM iceberg.analytics.events FOR VERSION AS OF 4823511203987654321;
+
+-- B) Timestamp travel (TIMESTAMP literal). Use for ad-hoc "as of T" questions.
+SELECT * FROM iceberg.analytics.events
+FOR TIMESTAMP AS OF TIMESTAMP '2026-05-29 14:30:00 UTC';
+
+-- C) Branch / tag NAME travel (string ref name, looked up via $refs).
+--    Branch / tag DDL is Spark-only on Trino 467 (see § engine callout below);
+--    Trino reads via the string-name form work since trinodb/trino #16569.
+SELECT * FROM iceberg.analytics.events FOR VERSION AS OF '2026-03-billing-close';
+
+-- D) Finding a snapshot id to plug into form A:
+SELECT snapshot_id, committed_at, operation, summary
+FROM iceberg.analytics."events$snapshots"
+ORDER BY committed_at DESC;
+```
+
+That is the complete surface area. Anything else is from a different engine or a welded hybrid.
+
+---
+
+## Time travel for audits and billing disputes
+
+Iceberg's snapshot history isn't only a maintenance concern — it's a query feature. You can run any `SELECT` **as of** a past snapshot or timestamp, which is exactly what you need when a customer disputes a billing line ("the August invoice says 1.2M API calls, prove it"), or when an auditor asks "show me the state of the `usage_report` table at end of Q1." This section assumes you've already read the **LEADING CANONICAL** block above, which covers the two-clause syntax rules and the DO-NOT-WRITE list; here we apply those rules to the audit / billing-dispute use case.
+
+### Query syntax (Trino 467) — applied to a billing audit
+
+(For the general syntax rules see the LEADING CANONICAL block above. The forms below are the same `FOR TIMESTAMP AS OF` / `FOR VERSION AS OF` clauses, applied to `usage_report`.)
+
+```sql
+-- Timestamp form — argument is a TIMESTAMP literal (clause B above).
 SELECT tenant_id, SUM(api_calls) AS calls
 FROM iceberg.analytics.usage_report
 FOR TIMESTAMP AS OF TIMESTAMP '2026-04-01 00:00:00 UTC'
 WHERE billing_month = '2026-03'
 GROUP BY tenant_id;
 
--- Query the table at a specific snapshot ID (exact, no ambiguity).
+-- Snapshot-id form — argument is a BIGINT (clause A above).
+-- Always prefer this for audit reproducibility once you've pinned the snapshot ID.
 SELECT tenant_id, SUM(api_calls) AS calls
 FROM iceberg.analytics.usage_report
 FOR VERSION AS OF 4823511203987654321
