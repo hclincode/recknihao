@@ -37,6 +37,32 @@ The rule: **choose the slowest tier that satisfies your PM's real requirement.**
 
 ---
 
+## DO-NOT-CHASE — when "near-real-time" is almost never worth it
+
+**STOP and stay on hourly (or daily) batch** if your situation matches **any** of these. The rejection criterion is sharper than "let's see if the PM really needs it":
+
+1. **Downstream consumer is a dashboard that a human checks fewer than 10 times/day.** A human looking at a Looker / Metabase / Superset dashboard a few times daily cannot perceive the difference between 5-minute-old and 60-minute-old data. The freshness improvement is *invisible to the consumer* and the streaming cost is *fully visible to ops*.
+2. **The source system already batches its own writes.** If the source is a nightly ETL from a vendor (Salesforce export, Stripe webhook batched daily, partner CSV drops), there is no upstream signal to stream — the upstream "real-time" event is itself a 24-hour batch. Streaming downstream of a daily-batch upstream is pure waste.
+3. **Your team has no on-call rotation for streaming ops.** Kafka, Spark Structured Streaming, Debezium, and stateful-stream-job operations require someone awake to triage lag, schema-evolution failures, exactly-once semantics breaks, and back-pressure issues. If you don't have it, you will discover the gap during an outage. Do not stand up streaming without naming the on-call rotation first.
+4. **The SLA is defined in business hours, not minutes.** "Refreshed by 9am every business day" is a batch SLA, not a streaming one. Building streaming infrastructure to meet a batch SLA is over-engineering — pick the matching tier (daily/hourly batch) and ship.
+5. **There is no automated action downstream of the data.** Streaming wins when an automated system (alerting, fraud-detection model, real-time feature flag) consumes the freshness within seconds. Streaming for a human-eyeball dashboard is almost never the right ROI.
+6. **You have not yet shipped the hourly-batch version.** If hourly batch has not been built and proven yet, do NOT skip straight to streaming. Build hourly first. If the business still needs more freshness after hourly is running for a quarter, then escalate. Teams that jump to streaming first regret it 80% of the time.
+
+If **any one** of these applies, the answer is **stay on batch**. Do not let "is real-time worth it?" turn into a yes from a single PM phrase like "we'd love it to be real-time." Apply the criterion: if 1+ of the above is true, the answer is no.
+
+### What "the answer is yes, build streaming" actually looks like
+
+Streaming wins are real but specific. The yes cases share these traits:
+
+- **Automated consumer downstream** (alerting, fraud-detection ML model, real-time feature flag service, in-app recommendation).
+- **Concrete business cost** for staleness measured in dollars per minute of lag, not "would be nice."
+- **Source system emits genuine streams** (Kafka producer, change-data-capture from an OLTP DB, IoT device telemetry) — not a periodic batch that arrives quickly.
+- **On-call rotation already exists** or is funded.
+
+If all four are true, escalate to near-real-time. Otherwise, batch wins.
+
+---
+
 ## The late-arriving events problem
 
 Scenario: a mobile app loses Wi-Fi at 9:00 AM. The user keeps clicking. The app buffers events locally. At 9:30 AM the phone reconnects and dumps 30 minutes of events at your server.

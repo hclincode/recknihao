@@ -2,6 +2,93 @@
 
 ---
 
+## LEADING CANONICAL WORKED EXAMPLE — "Is standing up a warehouse premature for our 20-person SaaS?"
+
+> **The exact question this section answers**: *"We're a 20-person SaaS, ~3M events/day, currently doing analytics off a Postgres read replica with materialized views. The data team wants to spend a quarter standing up a warehouse / lakehouse — how do I know if that's premature?"*
+
+### The honest one-sentence answer
+
+It is **premature if** the analytics you actually run today fit comfortably on the Postgres read replica AND your questions only touch *one* source system; it is **not premature if** you are already (a) joining across multiple SaaS tools to answer real questions, (b) seeing the replica buckle under analytical load while still serving its OLTP job, or (c) you have more than ~3 people who need to query data independently and they are tripping over each other's heavy queries.
+
+### Four sharp diagnostic questions — answer these BEFORE recommending a quarter of work
+
+Ask the team these four. Do not move forward on a warehouse build until at least two are clearly "yes":
+
+| Question | If "yes" | If "no" |
+|---|---|---|
+| **1. Do at least 2 of our real business questions require joining data from Stripe, Mixpanel/Amplitude, Salesforce/HubSpot, or another vendor AGAINST our app DB?** | Warehouse is justified — the multi-source consolidation case. Stripe data simply does not live in your Postgres replica and cannot be JOINed otherwise. | Premature. A read replica + materialized views handles single-source analytics just fine at 3M events/day. |
+| **2. Is the read replica being used for BOTH analytics AND any user-facing reads (failover, geo-distributed reads, async lookups)?** | Warehouse is justified — analytical queries should not compete with user-facing load. A heavy `GROUP BY` over a wide table on the replica freezes user-facing reads. | Lower urgency. If the replica is *only* for analytics, you can scale it vertically until the data shape no longer fits. |
+| **3. At 3M events/day, is our events table over ~500M rows AND are typical analytical queries scanning more than ~2 weeks of data?** | Warehouse is justified — columnar storage (Iceberg/Parquet) and partition pruning give 10-100x query-time wins over Postgres heap scans at that scale. | Probably premature for the OLAP performance angle alone. Materialized views + good indexing on Postgres still wins at this row count. |
+| **4. Do we have more than ~3 people writing ad-hoc analytical SQL, and are they stepping on each other (long queries blocking the replica, queries timing out under load)?** | Warehouse is justified — concurrency on a single Postgres replica falls over quickly. Trino / Snowflake / BigQuery is designed for many concurrent analyst queries against the same data. | Probably premature. One or two analysts can share a beefy replica indefinitely. |
+
+**Decision rule**: 2+ yeses → build the warehouse. 0–1 yeses → keep the read replica another quarter and revisit. The quarter you spend on a warehouse is real cost — engineer-months, hardware, BI-tool reconfiguration, dbt-model writing, on-call rotation for the new system. Do not pay that without a clear "yes" answer.
+
+### What "the read replica is buckling" actually looks like
+
+If question 2 is the driver, here are the concrete signals:
+
+- The replica's CPU sits above 70% during business hours from analytical queries alone.
+- pg_stat_activity shows multiple long-running `GROUP BY` or `JOIN` queries blocking each other (`waiting on lock` / `idle in transaction`).
+- A heavy analytical query causes replication lag spikes that affect failover readiness.
+- Materialized view refreshes take longer than the freshness SLA the dashboards need.
+- A single dashboard's auto-refresh causes the BI tool to fan out 8-30 queries per page-load and the replica chokes.
+
+If NONE of these are happening, the analytical performance case for a warehouse is weak. Keep the replica.
+
+### What a "quarter to stand up a warehouse" actually costs
+
+When the data team says "a quarter," what they are actually committing to is approximately:
+
+| Workstream | Engineer-weeks (rough) |
+|---|---|
+| Choose the platform (cloud warehouse vs lakehouse), POC, security review | 2-4 |
+| Set up ingestion pipelines (CDC from Postgres, Stripe/Mixpanel/Salesforce connectors via Fivetran/Airbyte/custom) | 4-6 |
+| Stand up dbt and write the first 20-30 transformation models | 4-6 |
+| Migrate existing dashboards/queries from Postgres to the warehouse | 2-4 |
+| Set up monitoring, alerting, freshness checks, cost dashboards | 1-2 |
+| Documentation, team training, governance | 1-2 |
+| **Total** | **~14-24 engineer-weeks** (= 3-6 months for one engineer, or one quarter for a small data team) |
+
+This is real. A 20-person SaaS spending 1 quarter of one or two engineers on this is committing 2-5% of total engineering capacity. The yes/no diagnostic above is what justifies that spend.
+
+### The realistic alternative: tiered Postgres analytics first
+
+Before standing up a full warehouse, consider this cheaper escalation ladder (each step buys you 6-12 months):
+
+1. **Step 1 — Read replica + indexes + materialized views.** Likely where you are. Refresh daily/hourly. Good for ~100M-row tables on Postgres.
+2. **Step 2 — Read replica + dbt running against Postgres.** dbt against Postgres works fine. You get transformation discipline (model files, tests, lineage) without changing infrastructure. Often a 1-2 week win.
+3. **Step 3 — Read replica + a single columnar add-on** (Citus, TimescaleDB, or a small DuckDB/Postgres column-store for the heavy fact tables). Adds 1-3 weeks of work and pushes the scaling ceiling by another 5-10x.
+4. **Step 4 — Full warehouse / lakehouse.** When 2+ of the diagnostic questions above flipped to "yes."
+
+Skipping steps 1-3 to jump straight to step 4 is a common cause of cancelled / abandoned warehouse projects. The team gets 4 months in, discovers the answer to "what does the business actually need" was already on the replica, and the warehouse becomes shelfware.
+
+### When the answer is unambiguously "build it now"
+
+To balance the conservatism above: there ARE situations where the warehouse case is so strong you should skip the diagnostic and go:
+
+- You are required by an enterprise customer's procurement / security review to demonstrate analytics that join your product + their identity provider + your billing system. (Compliance demand.)
+- You're trying to ship product features that depend on cross-source data the user sees in-app — recommendations, usage-based-pricing math, churn risk scores. (Product demand.)
+- The finance team needs MRR / ARR / NRR / cohort retention numbers reconciled against Stripe AND your app, and the current process is "an analyst exports two CSVs to Excel each Friday." (Finance demand — measurable risk of revenue reporting error.)
+
+If any of these three are present, the diagnostic above already passed and the answer is "build it." The diagnostic exists to help teams that are *building because the data team wants to*, not because the business asked.
+
+---
+
+## DO-NOT-WRITE — recommendations the responder must NEVER give for "do I need a warehouse?"
+
+Each of the following has been observed as a fabrication or wrong recommendation in past evaluations. If a responder is tempted to write any of these, STOP — they are wrong.
+
+1. **DO NOT WRITE**: "Every SaaS with more than 1M users / 1M events / 1TB of data needs a warehouse." There is no universal row-count threshold. Need is determined by question shape (single-source vs multi-source), replica contention, and analyst concurrency — see the four diagnostic questions above. Threshold-only answers mislead teams into premature builds.
+2. **DO NOT WRITE**: "If your Postgres is slow on analytics queries, you need a warehouse." Wrong first move. First try: missing indexes, materialized views, query rewrite, replica scaling. Warehouse is the move only after these are exhausted OR you need multi-source JOINs.
+3. **DO NOT WRITE**: "Snowflake / BigQuery are appropriate for the production stack described in prod_info.md." Both are cloud-only and the production stack is on-prem. The on-prem lakehouse (Iceberg + Trino + MinIO) is the relevant warehouse equivalent for this environment.
+4. **DO NOT WRITE**: "Standing up a warehouse takes a couple of weeks." It does not. Realistic budget is 14-24 engineer-weeks end-to-end — see the cost table above. Quoting a "couple of weeks" sets the requesting team up for a stalled / cancelled project.
+5. **DO NOT WRITE**: "OLAP vs OLTP is the only reason for a warehouse." Multi-source data consolidation is at least as common a driver, and often the primary one at small SaaS scale. The judge weighs answers that surface BOTH reasons. (See "the two value propositions" section below.)
+6. **DO NOT WRITE**: "ETL is the modern way." ELT (extract-load-then-transform-in-warehouse) is the modern way; classic ETL (transform-before-load) is the older pattern. Surface ELT first, mention ETL only as historical context.
+7. **DO NOT WRITE**: "dbt is a data warehouse." dbt is a **transformation tool** that runs SQL inside a warehouse / lakehouse / database. It is the "T" in ELT, not the storage system. Saying "use dbt as your warehouse" is a category error.
+8. **DO NOT WRITE**: "Postgres can never serve analytical workloads." Postgres serves analytical workloads for many small SaaS teams indefinitely. The right answer is "Postgres scales fine until specific signals appear" — see the four diagnostic questions.
+
+---
+
 ## Concept in one sentence
 
 A **data warehouse** is a central database built specifically for analysis — it pulls data from multiple sources, stores it in a structure optimized for queries, and serves as the single source of truth for your company's numbers.
@@ -80,10 +167,12 @@ Tools like Fivetran, Airbyte, or dbt are commonly used for this pipeline. But at
 
 ## When a SaaS product needs a warehouse
 
+(For the rigorous diagnostic, see the LEADING CANONICAL WORKED EXAMPLE at the top of this file. This section is the quick-check summary.)
+
 **Early signals that you're ready:**
 - Your BI/analytics queries are slow on production and you can't afford to keep a read replica just for analytics
-- You need to join data from more than one source (app DB + payments + events + CRM)
-- Multiple people (data analysts, CS, finance, PMs) need to query data independently
+- You need to join data from more than one source (app DB + payments + events + CRM) — this is the most common driver at small SaaS scale
+- Multiple people (data analysts, CS, finance, PMs) need to query data independently and are blocking each other
 - You want to track metrics over time that don't live in your app DB (e.g., Stripe MRR trends joined with user behavior)
 - Your data team spends most of their time exporting CSVs and wrangling spreadsheets
 
@@ -91,22 +180,26 @@ Tools like Fivetran, Airbyte, or dbt are commonly used for this pipeline. But at
 - You're pre-PMF and your team is fewer than ~10 people
 - All the data you care about lives in one database and fits on a read replica
 - Your analytics needs are met by a tool like Metabase or Redash pointed at a read replica
+- 0–1 of the four diagnostic questions above answer "yes"
 
-**A common growth path:** Postgres read replica → Postgres replica + dbt → BigQuery/Snowflake/ClickHouse with a proper pipeline.
+**A common growth path on cloud teams:** Postgres read replica → Postgres replica + dbt → cloud warehouse (Snowflake/BigQuery) with a proper pipeline.
+
+**A common growth path on the production stack (on-prem):** Postgres read replica → Postgres replica + dbt → Iceberg + Trino + MinIO lakehouse (already in place — see resources/04-data-lakehouse.md).
 
 ---
 
 ## Popular warehouse options (brief overview)
 
-| Tool | Best for | Pricing model |
-|---|---|---|
-| **BigQuery** (Google) | Serverless, pay-per-query, integrates well with GCP | Per TB scanned |
-| **Snowflake** | Multi-cloud, large enterprise, flexible scaling | Per credit (compute time) |
-| **ClickHouse** | Extremely fast on time-series and event data; self-hosted or cloud | Per resource used |
-| **DuckDB** | Local/embedded analytics; great for small-to-medium data or development | Free / open-source |
-| **Redshift** (AWS) | AWS-native, good for existing AWS shops | Per node-hour |
+| Tool | Best for | Pricing model | On-prem? |
+|---|---|---|---|
+| **Iceberg + Trino + MinIO** (this stack) | On-prem, large data, in-house engineering team, no vendor lock-in | Hardware + engineer salaries | YES |
+| **BigQuery** (Google) | Serverless, pay-per-query, integrates well with GCP | Per TB scanned (or capacity slots) | NO (cloud-only) |
+| **Snowflake** | Multi-cloud, large enterprise, flexible scaling | Per credit (compute time) | NO (cloud-only) |
+| **ClickHouse** | Extremely fast on time-series and event data; self-hosted or cloud | Per resource used | YES (self-hosted edition) |
+| **DuckDB** | Local/embedded analytics; great for small-to-medium data or development | Free / open-source | YES (embedded) |
+| **Redshift** (AWS) | AWS-native, good for existing AWS shops | Per node-hour | NO (cloud-only) |
 
-A dedicated resource covers each of these in depth. The right choice depends heavily on your cloud provider and data scale — see `prod_info.md` for constraints.
+A dedicated comparison is in resources/15-tools-comparison.md. **On the production stack described in prod_info.md (on-prem only), only the lakehouse + ClickHouse + DuckDB rows are eligible** — the cloud-only options are disqualified up front.
 
 ---
 
