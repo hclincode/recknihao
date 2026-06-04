@@ -109,6 +109,44 @@ The fix is to populate NDV statistics by running `ANALYZE`.
 
 Trino's Iceberg connector exposes an `ANALYZE` statement that walks the table, computes column statistics (including NDV), and writes them to a **Puffin file** alongside the table's existing metadata in MinIO.
 
+> ### LEADING CANONICAL STATEMENT — TRINO `ANALYZE` SYNTAX (memorize, then copy-paste)
+>
+> **Trino's stats command is `ANALYZE <catalog>.<schema>.<table>` and `ANALYZE <catalog>.<schema>.<table> WITH (columns = ARRAY['c1','c2'])` — with NO `TABLE` keyword.** Use `SHOW STATS FOR <catalog>.<schema>.<table>` to inspect what the CBO will use. Verified against [trino.io/docs/current/sql/analyze.html](https://trino.io/docs/current/sql/analyze.html) (syntax: `ANALYZE table_name [ WITH ( property_name = expression [, ...] ) ]`; docs examples use `ANALYZE web;` and `ANALYZE hive.default.stores;`).
+>
+> **WORKED EXAMPLE — TRINO (correct) vs SPARK (different syntax, do not confuse):**
+>
+> ```sql
+> -- ===== CORRECT TRINO SYNTAX (paste into Trino CLI / JDBC / dbt run-operation) =====
+> ANALYZE iceberg.analytics.orders;
+> ANALYZE iceberg.analytics.orders WITH (columns = ARRAY['user_id', 'created_at']);
+> SHOW STATS FOR iceberg.analytics.orders;
+> ```
+>
+> ```python
+> # ===== CORRECT SPARK SYNTAX (different keyword set; ONLY valid inside a Spark session, NOT Trino) =====
+> spark.sql("ANALYZE TABLE iceberg.analytics.orders COMPUTE STATISTICS FOR ALL COLUMNS")
+> ```
+>
+> ### DO-NOT-WRITE — TRINO-CONTEXT FORMS THAT FAIL TO PARSE
+>
+> The following are **WRONG when run against Trino** (they are Spark/Hive syntax that leaks into Trino contexts via copy-paste). Trino will respond with `mismatched input 'iceberg'. Expecting: '.', 'WITH'`:
+>
+> - `ANALYZE TABLE iceberg.analytics.orders;` — WRONG. There is no `TABLE` keyword between `ANALYZE` and the table name in Trino. Remove `TABLE`.
+> - `ANALYZE TABLE iceberg.analytics.orders COMPUTE STATISTICS;` — WRONG. Trino has no `COMPUTE STATISTICS` clause. Remove both `TABLE` and `COMPUTE STATISTICS`; if you wanted a column subset, use `WITH (columns = ARRAY[...])`.
+> - `ANALYZE TABLE iceberg.analytics.orders COMPUTE STATISTICS FOR ALL COLUMNS;` — WRONG (in Trino context). This IS valid Spark syntax but **only** inside a Spark session (e.g. `spark.sql("...")`). Do not paste it into a Trino CLI, JDBC connection, or dbt `on-run-end` hook that targets Trino.
+>
+> **In dbt `on-run-end` / `post-hook` that runs against the Trino adapter, the correct form is `{{ post_hook("ANALYZE iceberg.analytics.orders") }}` — bare `ANALYZE`, no `TABLE`.**
+>
+> ### CITATION HYGIENE — APPLIES TO ALL DDL, FUNCTIONS, AND PR NUMBERS
+>
+> **Any DDL clause, built-in function name, or GitHub PR/issue number you cite MUST be verifiable in the official docs — otherwise OMIT it or carry a `VERIFY: not in trino.io/docs` disclaimer. Never invent PR numbers or function names.** Authoritative sources:
+> - Trino SQL & functions: [trino.io/docs/current/sql/](https://trino.io/docs/current/sql/) and [trino.io/docs/current/functions/](https://trino.io/docs/current/functions/)
+> - Iceberg spec: [iceberg.apache.org/spec/](https://iceberg.apache.org/spec/) and [iceberg.apache.org/puffin-spec/](https://iceberg.apache.org/puffin-spec/)
+> - dbt-trino adapter: [docs.getdbt.com](https://docs.getdbt.com/) and [github.com/starburstdata/dbt-trino](https://github.com/starburstdata/dbt-trino)
+> - Spark Iceberg integration: [iceberg.apache.org/docs/latest/spark-procedures/](https://iceberg.apache.org/docs/latest/spark-procedures/)
+>
+> Common confidently-wrong patterns to avoid: invented PR numbers paired with plausible-sounding feature names (e.g., do not pair a real PR number with the wrong feature); function names that "sound right" but do not exist (e.g., `CONTEXT_PRINCIPAL()` — not a Trino function; use `current_user` or `current_groups()`); DDL clauses copied from other dialects (e.g., `ANALYZE TABLE ...`, `SET ROW FILTER ...`, `SET COLUMN MASK ...` — none of those exist in Trino).
+
 ### 4.1 Basic syntax
 
 ```sql
@@ -118,6 +156,8 @@ ANALYZE iceberg.analytics.events;
 -- Analyze just specific columns (cheaper for wide tables):
 ANALYZE iceberg.analytics.events WITH (columns = ARRAY['user_id', 'tenant_id', 'event_type']);
 ```
+
+> **Reminder — Trino's keyword is bare `ANALYZE`, no `TABLE`.** `ANALYZE TABLE <t>` is Spark/Hive; it fails in Trino with a parser error. The Spark-side equivalent `spark.sql("ANALYZE TABLE ... COMPUTE STATISTICS")` is correct ONLY inside a Spark block — never inside Trino CLI/JDBC/dbt-trino. See the LEADING CANONICAL STATEMENT above.
 
 > **CRITICAL — `partitions` property is Hive-only, NOT Iceberg.** The Trino **Iceberg connector's `ANALYZE` only supports ONE property: `columns`**. The `partitions = ARRAY[...]` property is a **Hive connector feature only**. If you paste an Iceberg ANALYZE with `WITH (partitions = ARRAY[...])`, Trino will fail with:
 >

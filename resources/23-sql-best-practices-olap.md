@@ -192,7 +192,7 @@ GROUP BY user_id;
 
 - `RemoteExchange` with a huge `Estimates: {rows: 10B}` — a giant intermediate result is being shuffled. Add filters or reduce columns first.
 
-- Missing `dynamicFilter` on a join — joins between fact and dim tables should show dynamic filters; if not, ensure both tables have stats (`ANALYZE TABLE`).
+- Missing `dynamicFilter` on a join — joins between fact and dim tables should show dynamic filters; if not, ensure both tables have stats (Trino syntax: bare `ANALYZE <table>`, NO `TABLE` keyword — `ANALYZE TABLE ...` is Spark/Hive and fails in Trino; see resource 24 §4 leading canonical statement).
 
 **For deeper inspection** use `EXPLAIN (TYPE DISTRIBUTED)` or `EXPLAIN ANALYZE` (runs the query and reports actual rows/time per stage).
 

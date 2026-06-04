@@ -18,6 +18,43 @@ If you're a B2B SaaS moving analytics off Postgres and you need to guarantee one
 
 ---
 
+## LEADING CANONICAL STATEMENT — ROW-LEVEL TENANT ISOLATION ON TRINO 467 + ICEBERG (memorize, then design)
+
+**Row-level tenant isolation on Trino 467 + Iceberg is enforced by ONE of TWO mechanisms — there is NO third "row filter DDL" option.** Verified against [trino.io/docs/current/security/](https://trino.io/docs/current/security/), [trino.io/docs/current/security/opa-access-control.html](https://trino.io/docs/current/security/opa-access-control.html), [trino.io/docs/current/security/file-system-access-control.html](https://trino.io/docs/current/security/file-system-access-control.html), and the [Iceberg table spec](https://iceberg.apache.org/spec/) (which has no row-filter DDL).
+
+**Mechanism A — System access control plugin (the prod default per `prod_info.md`).** A Trino plugin evaluates **every query action** against a centralized policy and may inject row filters and column masks at query time. The two production-supported backends are:
+- **OPA (Open Policy Agent) plugin** — `access-control.name=opa`. **This is the prod backend per `prod_info.md`.** Policies live in Rego inside OPA; Trino calls OPA over HTTP per query (single-call `uri` + optional batched `batched-uri`). Row filters and column masks are returned by OPA in the decision payload and applied by Trino's filter/mask hooks. Specific policy rules and role hierarchies are in the **external governance document** (not in this repo) — do not author them here.
+- **File-based rules plugin** — `access-control.name=file`, `security.config-file=etc/rules.json`. Rules use `tables.filter` (per-role row filter expression) and `tables.columns[].mask` (per-role column mask expression). **Conceptual illustration only — the prod stack uses OPA.**
+
+**Mechanism B — Per-tenant Trino VIEWS that hard-code the filter, plus REVOKE on the base table.** SQL-only fallback when OPA is unavailable or for SQL-portable isolation. Pattern: `CREATE VIEW tenant_acme_events AS SELECT * FROM events WHERE tenant_id = 'acme';` then `REVOKE SELECT ON events FROM acme_role;` and `GRANT SELECT ON tenant_acme_events TO acme_role;`. Set `SECURITY DEFINER` (the default) explicitly so the view runs as a high-privilege user but only ever returns the filtered rows. The user-to-tenant mapping must come from a trusted source like a JWT claim — never a user-controllable parameter.
+
+**Iceberg has NO row-filter table DDL.** The Iceberg spec defines table schema, partitioning, and snapshot/manifest metadata — it does NOT define any per-table row-filter clause. There is no `ALTER TABLE ... SET ROW FILTER ...`, no `ALTER TABLE ... SET COLUMN MASK ...`, and no equivalent in Trino's Iceberg connector. **Anyone telling you to enable row-level isolation by altering the table DDL is wrong** — the mechanism lives in the query engine's access-control layer (A) or in view definitions (B), never in the storage-layer table definition.
+
+### DO-NOT-WRITE — FABRICATED DDL AND FUNCTIONS (these do not exist in Iceberg or Trino 467)
+
+The following appear plausible but **do not exist** in Iceberg or Trino. They will fail with parser errors or "no such function" errors:
+
+- `ALTER TABLE iceberg.<schema>.<table> SET ROW FILTER column(tenant_id) = <expr>;` — **FABRICATED.** No `SET ROW FILTER` DDL clause exists in Iceberg or in Trino's Iceberg connector. Row filtering is via OPA / file-based access control (Mechanism A) or per-tenant views (Mechanism B). Verified via [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (no such clause documented) and [iceberg.apache.org/spec/](https://iceberg.apache.org/spec/) (no row-filter syntax in the spec).
+- `ALTER TABLE ... SET COLUMN MASK column(ssn) = <expr>;` — **FABRICATED.** Same reason. Column masking is via OPA or file-based `tables.columns[].mask` rules.
+- `CONTEXT_PRINCIPAL()` — **NOT a Trino function.** Trino's session/context functions are `current_user` (varchar of the calling user), `current_groups()` (array of group names), `current_catalog`, and `current_schema`. Verified via [trino.io/docs/current/functions/session.html](https://trino.io/docs/current/functions/session.html). If you need "the calling principal" inside a view body, use `current_user`.
+- Citing `trinodb/trino #16569` for row-filter support — **WRONG CITATION.** Per [github.com/trinodb/trino/issues/16569](https://github.com/trinodb/trino/issues/16569), that issue is **"Support Iceberg branch read"** (`SELECT * FROM "table$branch_name"`), NOT row filters. There is no per-table row-filter PR/issue number to cite — the feature lives in the access-control plugin layer.
+
+### CITATION HYGIENE — APPLIES TO ALL DDL, FUNCTIONS, AND PR NUMBERS
+
+**Any DDL clause, built-in function name, or GitHub PR/issue number you cite MUST be verifiable in the official docs — otherwise OMIT it or carry a `VERIFY: not in trino.io/docs` disclaimer. Never invent PR numbers or function names.** Authoritative sources:
+- Trino SQL & functions: [trino.io/docs/current/sql/](https://trino.io/docs/current/sql/) and [trino.io/docs/current/functions/](https://trino.io/docs/current/functions/)
+- Trino security/access-control: [trino.io/docs/current/security/](https://trino.io/docs/current/security/)
+- Iceberg spec: [iceberg.apache.org/spec/](https://iceberg.apache.org/spec/)
+- Trino Iceberg connector: [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html)
+
+If you cannot find a clause or function in those sources, **do not include it**. If you must mention an experimental or branch feature, mark it explicitly: `VERIFY: not in trino.io/docs/current — sourced from <link>`. This rule applies equally to resource 24 (Trino CBO / ANALYZE) — see that resource's matching citation-hygiene block.
+
+### Where the specific policy rules live (per `prod_info.md`)
+
+Per the prod environment description in `prod_info.md`: **specific OPA policy rules, role hierarchies, and tenant-to-user mappings live in an external governance document** that is NOT included in this repository. Resources here describe the MECHANISM (how Mechanism A and Mechanism B work in Trino + Iceberg conceptually). Do NOT attempt to write specific Rego rules or role assignments — defer those to the external governance doc when the user asks.
+
+---
+
 ## Common myths about multi-tenant analytics on Iceberg + Trino — read FIRST (the load-bearing wrong claims)
 
 > **Lead with the TRUTH, state the nuance.** These are the absolutes most often stated incorrectly when designing tenant isolation on the Trino 467 + Iceberg + MinIO stack. Verified against the [Trino access control docs](https://trino.io/docs/current/security/built-in-system-access-control.html), [Iceberg partition transforms](https://iceberg.apache.org/spec/#partition-transforms), and the prod stack's JWT+OPA auth model.
@@ -82,9 +119,9 @@ The application layer is responsible for adding `WHERE tenant_id = ?` to every q
 Same physical layout as Model 2 — one big table partitioned by `tenant_id` — but isolation is enforced **inside Trino**, not by the app. The app cannot bypass it even if it forgets the WHERE clause.
 
 This is done with one or more of:
-- **Trino views** that hard-code the tenant filter. Customers only get SELECT permission on the view, never on the underlying table.
-- **Trino system access control** (file-based rules or OPA) that rejects any query touching another tenant's rows.
-- **Iceberg row filters and column masks** exposed through Trino's connector.
+- **Trino views** that hard-code the tenant filter. Customers only get SELECT permission on the view, never on the underlying table. (Mechanism B in the leading canonical statement above.)
+- **Trino system access control** — **OPA plugin (prod default per `prod_info.md`)** or file-based rules — that rejects any query touching another tenant's rows AND/OR injects per-caller row filters and column masks at query time. (Mechanism A in the leading canonical statement above.)
+- **NOT a third option.** There is **no `ALTER TABLE ... SET ROW FILTER` Iceberg DDL** and no `CONTEXT_PRINCIPAL()` Trino function. Row filtering lives in the access-control plugin layer (Mechanism A) or in view definitions (Mechanism B) — never in the table DDL. See the DO-NOT-WRITE block in the leading canonical statement.
 
 - **Pros**:
   - Defense in depth. Even buggy app code can't leak data.
