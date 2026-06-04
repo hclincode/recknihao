@@ -451,7 +451,92 @@ Trade-off: MAP gives faster fallback access at query time (no JSON parsing per r
 >
 > **Two correct workarounds for the "nullable + backfill + tighten" pattern on this stack:**
 >
+> ---
+>
+> ### CTAS-NOT-NULL-INFERENCE GUARDRAIL — `CREATE TABLE AS SELECT` does NOT preserve, infer, or imply NOT NULL constraints
+>
+> **Read this BEFORE writing the CTAS-swap workaround in (a) below.** This guardrail exists because the iter430 Q1 confident-inaccuracy described the CTAS-swap as a plain `CREATE TABLE new_table AS SELECT * FROM old_table WHERE col IS NOT NULL` and CLAIMED the new table would have the column as NOT NULL — **that claim is WRONG.**
+>
+> **The fact you must memorize:** Trino's `CREATE TABLE AS SELECT` (CTAS) carries column **TYPES** only — it does **NOT** preserve, infer, or imply NOT NULL constraints from either the source table's schema OR from a `WHERE col IS NOT NULL` filter in the SELECT. The new table's columns are **nullable by default** no matter what the SELECT looks like.
+>
+> Per [trino.io/docs/current/sql/create-table-as.html](https://trino.io/docs/current/sql/create-table-as.html) and [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html): NOT NULL is settable **only** through an EXPLICIT column-list in `CREATE TABLE name (col TYPE NOT NULL, ...)`. The CTAS form `CREATE TABLE name AS SELECT ...` does not have a column-list syntax position where NOT NULL can be declared, and the SELECT clause does not carry the constraint over from source.
+>
+> **THE TWO-STEP RULE — to produce a NOT NULL column on the new table, you MUST use:**
+>
+> **Step 1.** `CREATE TABLE <new> (col1 TYPE NOT NULL, col2 TYPE, ...)` — **EXPLICIT full column-list** with `NOT NULL` declared on the tightened column(s). Note: this is `CREATE TABLE` (not `CREATE TABLE AS`).
+>
+> **Step 2.** `INSERT INTO <new> SELECT col1, col2, ... FROM <old>` — separate INSERT statement that copies rows. If any row has NULL in a NOT NULL column, this INSERT fails fast (the NOT NULL on the new table is the validation gate).
+>
+> **DO-NOT-WRITE (the iter430 Q1 inaccuracy that must not be repeated):**
+>
+> 1. **"`CREATE TABLE accounts_new AS SELECT * FROM accounts WHERE tier IS NOT NULL` will have `tier` as NOT NULL on the new table"** — FALSE. The new table's `tier` column is **nullable**, because CTAS does not carry over or infer the NOT NULL constraint. A later `INSERT INTO accounts_new ... VALUES (..., NULL, ...)` will succeed and put NULL into `tier`. The `WHERE tier IS NOT NULL` filter only constrains which rows are copied during CTAS — it does **not** apply NOT NULL to the destination column.
+> 2. **"`CREATE TABLE AS SELECT` will have <col> as NOT NULL"** — FALSE in all forms. CTAS infers column TYPES only.
+> 3. **"`CREATE TABLE AS SELECT ... WHERE col IS NOT NULL` gives NOT NULL on the new table"** — FALSE. The WHERE filter and the NOT NULL constraint are unrelated mechanisms.
+> 4. **"plain CTAS preserves NOT NULL from the source table's schema"** — FALSE. CTAS does not preserve constraints; it creates a new table whose columns are nullable unless an explicit column-list with NOT NULL is supplied (and CTAS has no syntax position for that — you must use the 2-step pattern).
+>
+> **Worked example — the iter430 Q1 BEFORE / AFTER fix:**
+>
+> **BEFORE (the iter430 INACCURATE pattern — do NOT do this if you want NOT NULL):**
+>
+> ```sql
+> -- WRONG: this creates accounts_new with tier as NULLABLE, despite the WHERE filter.
+> CREATE TABLE iceberg.analytics.accounts_new AS
+> SELECT * FROM iceberg.analytics.accounts
+> WHERE tier IS NOT NULL;
+> --                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+> -- The WHERE filter restricts WHICH ROWS get copied — it does NOT apply a NOT NULL
+> -- constraint to the destination table's `tier` column. After this runs:
+> --   DESCRIBE iceberg.analytics.accounts_new;
+> -- will show `tier VARCHAR` (no NOT NULL). A subsequent
+> --   INSERT INTO iceberg.analytics.accounts_new VALUES (..., NULL, ...);
+> -- SUCCEEDS, defeating the entire point of the swap.
+> ```
+>
+> **AFTER (the CORRECT EXPLICIT 2-step pattern — this is the only form that actually produces NOT NULL):**
+>
+> ```sql
+> -- Step 1: backfill the live table first so no row has a NULL tier.
+> UPDATE iceberg.analytics.accounts SET tier = 'free' WHERE tier IS NULL;
+> SELECT COUNT(*) FROM iceberg.analytics.accounts WHERE tier IS NULL;  -- must return 0
+>
+> -- Step 2: CREATE TABLE with an EXPLICIT FULL COLUMN-LIST (NOT CREATE TABLE AS SELECT).
+> --         NOT NULL is declared in the column definition — the only place it can be.
+> CREATE TABLE iceberg.analytics.accounts_new (
+>     account_id BIGINT NOT NULL,
+>     name       VARCHAR NOT NULL,
+>     tier       VARCHAR NOT NULL,   -- the tightened column
+>     created_at TIMESTAMP(6) WITH TIME ZONE NOT NULL,
+>     plan_json  JSON
+> )
+> WITH (partitioning = ARRAY['bucket(account_id, 16)'], format = 'PARQUET');
+>
+> -- Step 3: copy rows via separate INSERT. If any row has NULL in a NOT NULL column,
+> -- this INSERT fails fast — the NOT NULL on the destination is the validation gate.
+> INSERT INTO iceberg.analytics.accounts_new
+> SELECT account_id, name, tier, created_at, plan_json FROM iceberg.analytics.accounts;
+>
+> -- Step 4: atomic swap (coordinate with downstream readers; brief window).
+> DROP TABLE iceberg.analytics.accounts;
+> ALTER TABLE iceberg.analytics.accounts_new RENAME TO iceberg.analytics.accounts;
+>
+> -- VERIFY the new table has NOT NULL by inspecting the schema:
+> SHOW CREATE TABLE iceberg.analytics.accounts;
+> -- The output should include `tier VARCHAR NOT NULL` on the column definition line.
+> -- Attempting INSERT VALUES (..., NULL, ...) into the swapped table will now fail.
+> ```
+>
+> **Sources:**
+> - [trino.io/docs/current/sql/create-table-as.html](https://trino.io/docs/current/sql/create-table-as.html) — CTAS syntax; no column-list / NOT NULL syntax position.
+> - [trino.io/docs/current/sql/create-table.html](https://trino.io/docs/current/sql/create-table.html) — explicit `CREATE TABLE name (col TYPE NOT NULL, ...)` form (Step 2 above).
+> - [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) — *"The `NOT NULL` constraint can be set on the columns, while creating tables by using the CREATE TABLE syntax"* (CREATE TABLE column-list only; not CTAS, not ALTER).
+>
+> **Q-pattern matcher addendum:** if the question is "how do I CTAS-swap to apply NOT NULL", the answer is the EXPLICIT 2-step **CREATE TABLE column-list + INSERT** pattern above — NEVER plain CTAS. If you wrote `CREATE TABLE <new> AS SELECT ... WHERE col IS NOT NULL` and called the result "NOT NULL", you wrote the iter430 inaccuracy — go back and rewrite using the 2-step form.
+>
+> ---
+>
 > **(a) CTAS-swap (heavy — full table rewrite; choose only when you need a hard storage-level constraint):**
+>
+> The CTAS-swap is a misnomer kept for historical familiarity — **the swap itself uses an EXPLICIT `CREATE TABLE` (with full column-list + `NOT NULL`) followed by a separate `INSERT INTO ... SELECT`, NOT a plain `CREATE TABLE AS SELECT`.** See the CTAS-NOT-NULL-INFERENCE guardrail above. The code block below uses the correct 2-step form:
 >
 > ```sql
 > -- Step 1: backfill the nullable column on the live table (Trino UPDATE or MERGE).

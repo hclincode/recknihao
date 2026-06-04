@@ -3937,8 +3937,49 @@ That's it. Iceberg's schema evolution is **column-ID-based** (each column carrie
 > **SCHEMA-EVOLUTION CONSTRAINT-TIGHTENING GUARDRAIL — `ALTER COLUMN ... SET NOT NULL` does NOT exist in Trino 467 (read this BEFORE answering any "tighten to NOT NULL after backfill" question).** Per [trino.io/docs/current/sql/alter-table.html](https://trino.io/docs/current/sql/alter-table.html) the COMPLETE list of supported `ALTER TABLE ... ALTER COLUMN` operations on Trino 467 is: **`SET DEFAULT`, `DROP DEFAULT`, `SET DATA TYPE`, `DROP NOT NULL`**. There is NO `SET NOT NULL`. Per [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) the Iceberg connector says: *"The `NOT NULL` constraint can be set on the columns, while creating tables by using the CREATE TABLE syntax"* — i.e., NOT NULL is settable **only at CREATE TABLE time**, never via ALTER. **DO-NOT-WRITE: Never recommend `ALTER TABLE ... ALTER COLUMN ... SET NOT NULL` (or any paraphrase: "set it to NOT NULL via ALTER", "tighten with SET NOT NULL", "run SET NOT NULL on the existing column") — that operation does not exist on Trino 467 and an engineer who pastes it hits a parser/semantic error.**
 >
 > **Two correct workarounds for the "nullable + backfill + tighten" pattern on this stack:**
-> 1. **CTAS-swap (heavy — full rewrite):** `UPDATE` the live table to backfill NULLs → `CREATE TABLE events_new (... col VARCHAR NOT NULL ...)` with NOT NULL in the column definition (the ONLY place NOT NULL can be set on Iceberg) → `INSERT INTO events_new SELECT ... FROM events` (this fails fast if any NULL slipped through — the new table's NOT NULL is the validation gate) → `DROP TABLE events; ALTER TABLE events_new RENAME TO events`. Loses snapshot history and rewrites every file; only use when a storage-level constraint is genuinely required.
+> 1. **CTAS-swap (heavy — full rewrite, EXPLICIT 2-STEP FORM — see CTAS-NOT-NULL-INFERENCE GUARDRAIL below):** `UPDATE` the live table to backfill NULLs → Step (a) `CREATE TABLE events_new (... col VARCHAR NOT NULL ...)` with **EXPLICIT FULL COLUMN-LIST including NOT NULL** in the column definition (the ONLY place NOT NULL can be set on Iceberg — NOT via CTAS) → Step (b) `INSERT INTO events_new SELECT ... FROM events` as a **separate statement** (this fails fast if any NULL slipped through — the new table's NOT NULL is the validation gate) → `DROP TABLE events; ALTER TABLE events_new RENAME TO events`. Loses snapshot history and rewrites every file; only use when a storage-level constraint is genuinely required. **CRITICAL: do NOT collapse this into `CREATE TABLE events_new AS SELECT * FROM events WHERE col IS NOT NULL` — plain CTAS does NOT preserve or infer NOT NULL constraints; the new table's column will be nullable despite the WHERE filter. See CTAS-NOT-NULL-INFERENCE GUARDRAIL immediately below.**
 > 2. **RECOMMENDED — dbt `not_null` test (cheap, no rewrite):** declare `tests: [not_null]` on the column in `schema.yml` and let `dbt test --select <model>` fail the run if any row has NULL. The column stays nullable in the Iceberg schema, but the operational contract is enforced on every dbt build. This is the recommended pattern on this stack — see resources/09-lakehouse-schema-design.md "SCHEMA-EVOLUTION CONSTRAINT-TIGHTENING GUARDRAIL" for the full code example.
+>
+> **CTAS-NOT-NULL-INFERENCE GUARDRAIL — `CREATE TABLE AS SELECT` does NOT preserve, infer, or imply NOT NULL constraints (read this BEFORE writing any CTAS-swap workaround).** Per [trino.io/docs/current/sql/create-table-as.html](https://trino.io/docs/current/sql/create-table-as.html) and [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html), Trino's CTAS carries column **TYPES** only — it does **NOT** carry NOT NULL from the source table's schema AND does **NOT** infer NOT NULL from a `WHERE col IS NOT NULL` filter in the SELECT. The new table's columns are **nullable by default** regardless of how the SELECT is written. The Iceberg connector states verbatim: *"The `NOT NULL` constraint can be set on the columns, while creating tables by using the CREATE TABLE syntax"* — i.e., NOT NULL is settable **only at explicit-column-list CREATE TABLE time**, never via CTAS and never via ALTER. **The CTAS-swap workaround therefore requires the EXPLICIT 2-step form: (a) `CREATE TABLE _new (col TYPE NOT NULL, ...)` with full column-list, (b) `INSERT INTO _new SELECT ...` as a separate statement.** Never collapse it to a single `CREATE TABLE _new AS SELECT ... WHERE col IS NOT NULL` — that produces a NULLABLE column on the new table, defeating the entire workaround.
+>
+> **DO-NOT-WRITE (the iter430 Q1 inaccuracy that must not be repeated):**
+> 1. **"`CREATE TABLE events_new AS SELECT * FROM events WHERE col IS NOT NULL` will have `col` as NOT NULL on the new table"** — FALSE. CTAS does not preserve or infer NOT NULL; the new table's `col` is nullable.
+> 2. **"`CREATE TABLE AS SELECT` will have <col> as NOT NULL"** — FALSE. CTAS infers column TYPES only.
+> 3. **"plain CTAS preserves NOT NULL from the source table's schema"** — FALSE.
+> 4. **"the `WHERE col IS NOT NULL` filter in the SELECT applies NOT NULL to the destination"** — FALSE. The filter restricts WHICH ROWS get copied; it does not apply a constraint to the destination column.
+>
+> **Worked example — BEFORE (the iter430 INACCURATE pattern) vs AFTER (the CORRECT explicit 2-step form):**
+>
+> ```sql
+> -- BEFORE — WRONG: this creates accounts_new with `tier` STILL NULLABLE,
+> -- despite the WHERE filter. A later INSERT VALUES (..., NULL, ...) will succeed.
+> CREATE TABLE iceberg.analytics.accounts_new AS
+> SELECT * FROM iceberg.analytics.accounts WHERE tier IS NOT NULL;
+> --                                       ^^^^^^^^^^^^^^^^^^^^^^^
+> -- DESCRIBE iceberg.analytics.accounts_new; → `tier VARCHAR` (no NOT NULL).
+>
+> -- AFTER — CORRECT 2-STEP form:
+> -- Step 1 (backfill): UPDATE iceberg.analytics.accounts SET tier = 'free' WHERE tier IS NULL;
+>
+> -- Step 2a: EXPLICIT CREATE TABLE with full column-list + NOT NULL (NOT "CREATE TABLE AS").
+> CREATE TABLE iceberg.analytics.accounts_new (
+>     account_id BIGINT NOT NULL,
+>     name       VARCHAR NOT NULL,
+>     tier       VARCHAR NOT NULL,   -- the tightened column
+>     created_at TIMESTAMP(6) WITH TIME ZONE NOT NULL
+> )
+> WITH (partitioning = ARRAY['bucket(account_id, 16)'], format = 'PARQUET');
+>
+> -- Step 2b: copy rows via separate INSERT (fails fast if NULL slipped through).
+> INSERT INTO iceberg.analytics.accounts_new
+> SELECT account_id, name, tier, created_at FROM iceberg.analytics.accounts;
+>
+> -- Step 3: atomic swap.
+> DROP TABLE iceberg.analytics.accounts;
+> ALTER TABLE iceberg.analytics.accounts_new RENAME TO iceberg.analytics.accounts;
+> ```
+>
+> **Q-pattern matcher addendum:** if the question is "how do I CTAS-swap to apply NOT NULL to an existing Iceberg column", the answer is the EXPLICIT 2-step `CREATE TABLE (col TYPE NOT NULL, ...)` + `INSERT INTO _new SELECT ...` form — NEVER a single `CREATE TABLE _new AS SELECT ... WHERE col IS NOT NULL` statement. See resources/09-lakehouse-schema-design.md "CTAS-NOT-NULL-INFERENCE GUARDRAIL" for the full worked example and source citations.
 >
 > **DROP COLUMN is also metadata-only.** Iceberg's `ALTER TABLE ... DROP COLUMN` is instant and rewrite-free, the same as ADD. The column's bytes remain in old Parquet files on storage, but the field ID is retired from the table schema and readers no longer project that column — so queries simply never see it. The unused bytes only get physically removed if you later run `CALL system.rewrite_data_files(...)` for compaction. Both Trino 467 and Spark behave identically here: they share the same Iceberg metadata layer.
 
