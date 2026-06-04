@@ -430,8 +430,70 @@ ORDER BY day;
 Why each piece matters:
 - `PARTITION BY tenant_id` — every tenant gets its own running total. Without this, the cumulative sum would mix all tenants together. **Always partition by `tenant_id` for multi-tenant SaaS** so a tenant's window can't see another tenant's data.
 - `ORDER BY day` — defines the order in which "previous rows" accumulate.
-- `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` — the frame clause. "Sum every row from the start of the partition through this row." This is the canonical running-total frame.
+- `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` — the frame clause. "Sum every row from the start of the partition through this row." This is the canonical **positional** running-total frame.
 - The `WHERE` clause executes BEFORE the window function, so partition pruning on `day` and `tenant_id` still works on the base scan. Window functions are not a barrier to file skipping — only to the final aggregation phase.
+
+> **The default frame when ORDER BY is present (and you OMIT the frame clause) is `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`.** This is value-based and **groups rows with the same ORDER BY value (peers/ties) into the SAME frame** — they all see the same cumulative sum. Verified at [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html) (ANSI SQL default). If the running total above had two rows with `day = 2026-05-01` for `acme`, writing `SUM(amount) OVER (PARTITION BY tenant_id ORDER BY day)` with NO explicit frame would give BOTH rows the same cumulative value (the sum through end-of-May-1). The explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` form differs: each tied row gets its own positional frame, so the two May-1 rows would show different cumulative values depending on physical row order — which is **non-deterministic** when ORDER BY is non-unique. See the next callout for how to handle ties cleanly.
+
+#### ROWS vs RANGE on tied ORDER BY values — pick the right tool, avoid INTERVAL '0' DAY
+
+`ROWS` and `RANGE` differ in how they handle rows that share the same `ORDER BY` value ("peers"). Get this wrong on a non-unique ORDER BY (e.g., two events on the same day) and the same query returns different numbers on different runs because Trino is free to order tied rows arbitrarily.
+
+| Frame form | Peer semantics | Determinism on non-unique ORDER BY |
+|---|---|---|
+| `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` (positional) | Each tied row gets its OWN frame — the running total visibly increments across peers. | **Non-deterministic** order-among-peers. Tied row that "sorts first" gets the smaller value; the other gets the larger. The choice is arbitrary unless you add a tiebreaker. |
+| `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` (value-based, **also the default when ORDER BY is present and no frame is specified**) | All tied rows share ONE frame — they all see the same cumulative value (sum through the end of the peer group). | **Deterministic** by definition — the answer doesn't depend on intra-peer ordering. |
+| `RANGE BETWEEN INTERVAL '0' DAY PRECEDING AND CURRENT ROW` | Same as the default RANGE — peers share one frame. | Deterministic, but **REDUNDANT** — Trino's default RANGE frame already includes peers; spelling it out as `INTERVAL '0' DAY PRECEDING` adds no semantic information. **Avoid this idiom.** |
+
+> **GUARDRAIL — do NOT write `RANGE BETWEEN INTERVAL '0' DAY PRECEDING AND CURRENT ROW` as a tie-handling fix.** It is syntactically valid in Trino (`RANGE` value-based frames support `INTERVAL` offsets since Trino release 346, per the [March 2021 window-features blog](https://trino.io/blog/2021/03/10/introducing-new-window-features.html)) but semantically REDUNDANT — it produces the SAME result as the default RANGE frame (`RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`). The cleaner patterns are below.
+
+**Two CORRECT patterns for deterministic running totals — pick one based on intent:**
+
+**Pattern 1 (preferred when peer semantics are what you want): rely on the default RANGE frame.** Omit the frame clause entirely and Trino applies `RANGE UNBOUNDED PRECEDING TO CURRENT ROW` — peers share a single value, no determinism question to answer.
+
+```sql
+-- Two events on 2026-05-01 → both rows show the SAME cumulative value through end of May 1.
+-- No frame clause → default RANGE, deterministic across ties, peer-correct.
+SELECT
+  day,
+  tenant_id,
+  amount,
+  SUM(amount) OVER (
+    PARTITION BY tenant_id
+    ORDER BY day
+    -- no frame → default RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+  ) AS cumulative_revenue
+FROM iceberg.analytics.daily_revenue
+WHERE day >= DATE '2026-01-01' AND tenant_id = 'acme'
+ORDER BY day;
+```
+
+**Pattern 2 (preferred when you need positional row-by-row accumulation): add a UNIQUE tiebreaker to ORDER BY and keep `ROWS`.** Pick a column guaranteed to be distinct within the partition (`event_id`, a UUID, a serial, or a `(day, event_id)` tuple). Now `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` is deterministic because there are no peers to tie.
+
+```sql
+-- Tiebreaker `event_id` makes the ORDER BY unique → ROWS frame is deterministic.
+-- Each row gets its own cumulative value even when multiple rows share `day`.
+SELECT
+  day,
+  event_id,
+  tenant_id,
+  amount,
+  SUM(amount) OVER (
+    PARTITION BY tenant_id
+    ORDER BY day, event_id            -- unique tuple eliminates peers
+    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+  ) AS cumulative_revenue
+FROM iceberg.analytics.revenue_events
+WHERE day >= DATE '2026-01-01' AND tenant_id = 'acme'
+ORDER BY day, event_id;
+```
+
+**Decision rule:**
+- "Two events on the same day should report the same cumulative value" → **Pattern 1 (default RANGE)** — peer semantics are exactly what you want.
+- "Each event needs its own cumulative value even on tied days" → **Pattern 2 (unique tiebreaker + ROWS)** — make ORDER BY unique, keep ROWS.
+- **Never** reach for `RANGE BETWEEN INTERVAL '0' DAY PRECEDING AND CURRENT ROW` — it expresses Pattern 1's semantics with more syntax and no benefit; either omit the frame or use the unique-tiebreaker form.
+
+This is distinct from Pattern D below (`RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW`) — there the non-zero `INTERVAL '6' DAY` actually does work (it defines a calendar-aware sliding window). The redundancy only applies to the **zero-width** `INTERVAL '0' DAY` case, which collapses to the default RANGE frame.
 
 ### Pattern B: Lag / Lead (compare to previous or next row)
 

@@ -29,8 +29,104 @@ These are the absolutes most often stated incorrectly about Iceberg partitioning
 | "Partition pruning means a query only reads files for the partitions in my WHERE clause — no other I/O happens." | **MOSTLY TRUE for data files, but Iceberg ALSO reads METADATA files (manifest list + manifests) for every query, regardless of pruning.** For a 100K-file table with poorly-organized manifests, the metadata I/O alone can dominate query time before any data file is opened. The fix is `rewrite_manifests` (Spark-only on Trino 467) to consolidate manifests after large schema/partition churn. Manifest reads are usually small (~MB per manifest) but a 10,000-manifest table sees significant planning overhead. | [§ Why manifests matter](#why-manifests-matter-the-other-half-of-pruning) callout |
 | "If I drop a partition column from my partition spec, the old data partitioned by that column gets re-partitioned automatically." | **NO — partition evolution is METADATA-ONLY. Old data files are NOT rewritten.** When you remove `tenant_id` from the partition spec, new writes won't partition by `tenant_id`, but old files retain their original `tenant_id` partition value in metadata. The connector queries both partition specs transparently. To physically un-partition the old data, you must run `rewrite_data_files` AFTER evolving the spec. Reference: [iceberg.apache.org/docs/1.5.1/evolution/#partition-evolution](https://iceberg.apache.org/docs/1.5.1/evolution/). | [§ Changing partitioning later](#changing-partitioning-later) "metadata only" callout |
 | "Trino 467 can run `OPTIMIZE` on just one partition — I can target the hot day without rewriting the table." | **YES — Trino 467 supports `ALTER TABLE x EXECUTE optimize WHERE day = DATE '2026-05-01'`.** The WHERE clause filters which files participate in compaction; only files whose partition matches are rewritten. This is the right pattern for hot recent partitions. Verified at [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html). Note the Spark equivalent is `CALL system.rewrite_data_files(table => 'x', where => 'day = DATE \\'2026-05-01\\'')`. | [§ Compaction by partition](#compaction-by-partition) targeted callout |
+| "If I have 18 month-partitions, that's about 18 data files — one file per partition." | **NO — a partition is a LOGICAL grouping (one distinct partition-key value), NOT a single data file.** The number of data files INSIDE a partition is driven by (a) `write.target-file-size-bytes` (Trino default write target ~512 MB; `EXECUTE optimize` uses `file_size_threshold`), (b) ingestion cadence — every write/commit adds at least one new file per partition it touches, so 15-min micro-batches → many files/day, (c) writer parallelism — each Spark task / Trino writer emits its own file. **It is NEVER one file per partition.** A single month-partition holding 27M rows can easily contain dozens to hundreds of Parquet files. That is exactly why compaction (`EXECUTE optimize` / `rewrite_data_files`) exists. To see ACTUAL file counts, use the `$partitions.file_count` column or `$files WHERE content=0`. | [§ PARTITIONS-ARE-NOT-FILES guardrail](#partitions-are-not-files--read-before-estimating-file-counts) leading callout |
 
 > **Why these specific myths matter.** Each is a load-bearing topic-specific claim about what Iceberg partitioning "can / can't / does" do. Stated as an absolute, it causes engineers to either build expensive workarounds for non-problems (rebuilding tables from scratch because they thought partition spec was immutable; adding low-cardinality columns to the partition spec for skip-by-filter optimization that file-level min/max already supports) OR to confidently break things (creating `bucket(user_id, 10000)` partitions thinking "more buckets = more parallelism"; assuming `partitionBy()` in Spark `df.write` partitions the Iceberg table — it doesn't, see resource 13). **The correct discipline:** when about to say "partitioning can't / does / doesn't X", check (a) Iceberg evolution docs for whether partition spec changes are supported, (b) Iceberg manifest layout docs for whether file-level pruning needs the column to be in the spec, (c) Trino 467 release notes for procedure availability, (d) the team's own resource 10.
+
+---
+
+## PARTITIONS-ARE-NOT-FILES — read before estimating file counts
+
+> **GUARDRAIL — Partition count NEVER equals file count.** A *partition* in Iceberg is a **logical grouping** (one distinct partition-key value, e.g., `day=2026-05-01` or `(day=2026-05-01, tenant_id='acme')`). The number of *data files* inside that partition is a separate, downstream quantity driven by three independent forces. **A partition typically holds many data files.** State this in every answer that estimates file counts from partition counts.
+
+### Three forces that drive files-per-partition
+
+1. **Target file size.** Iceberg's write target is set by the `write.target-file-size-bytes` table property — **default 512 MB** per [iceberg.apache.org/docs/latest/configuration/#write-properties](https://iceberg.apache.org/docs/latest/configuration/#write-properties). Trino's `EXECUTE optimize` accepts a `file_size_threshold` argument (default `100MB` — files larger than this are skipped during routine compaction; raise it for one-shot rewrites). Spark's `rewrite_data_files` accepts `target-file-size-bytes` in `options`. A partition holding more bytes than the target produces more files: `files_per_partition ≈ partition_bytes / target_file_size`.
+
+2. **Ingestion cadence.** **EVERY write/commit adds AT LEAST one new file per partition it touches.** A streaming or micro-batch ingestion job that commits every 15 minutes touches the current day-partition 96 times/day → at least 96 new files/day land in that partition, regardless of how small each file is. Daily compaction reduces them, but until compaction runs, files-per-partition is `commits_per_day × writer_parallelism`.
+
+3. **Writer parallelism.** Each Spark task (or Trino writer) emits its own Parquet file per partition it touches. A Spark job with 200 executors that writes to one day-partition produces up to 200 files for that partition in a single commit (unless `write.distribution-mode = 'hash'` is set — see the bucket-partitioning section for why this matters for bucket-partitioned tables).
+
+### Worked example — 500M rows / 18 months partitioned monthly
+
+The wrong claim (frequently stated): *"18 monthly partitions = ~18 files at most, one file per month."*
+
+The correct math:
+- 500M rows / 18 months ≈ 27.8M rows per month-partition.
+- At an average row size of ~2 KB (typical SaaS event with a few JSON-ish columns), each month-partition ≈ 27.8M × 2 KB ≈ **~54 GB**.
+- At Iceberg's default 512 MB target file size, that's `54 GB / 512 MB ≈ 108 files per month-partition`.
+- 18 partitions × 108 files ≈ **~2,000 total data files**, not 18.
+
+If the table is ingested via 15-min micro-batches without compaction, the live count is *much* higher — easily 5,000–20,000 files before the nightly `EXECUTE optimize` runs. **Compaction is what brings file count back toward the target-file-size estimate; it is also why compaction exists.**
+
+### DO-NOT-WRITE list (banned framings)
+
+When asked "how many files will N partitions produce?" or "what's the file count for monthly vs daily partitioning?", **never** write any of these:
+
+- **"N partitions = N files"** — FALSE.
+- **"One file per partition"** — FALSE (except in the trivial case of one tiny commit that hasn't been compacted yet, and even then only at writer parallelism 1).
+- **"Monthly partitioning = ~12 files/year"** — FALSE.
+- **"18 month-partitions = ~18 files at most"** — FALSE (iter434 confident-inaccuracy template; this exact phrasing produced the iter434 Q4 dock).
+- **"547 day-partitions = ~547 files"** — FALSE for the same reason.
+- **Any phrasing that treats `partition_count` as a proxy for `file_count`** — wrong abstraction.
+
+The correct framing is always: **"18 month-partitions vs 547 day-partitions; the *file count per partition* is a separate concern determined by target-file-size and ingestion cadence — count actual files via `$partitions.file_count` or `$files WHERE content=0`."**
+
+### How to see the ACTUAL file counts (run these queries, don't guess)
+
+Iceberg exposes two metadata tables for this exact question (verified at [iceberg.apache.org/docs/latest/spark-queries/#inspecting-tables](https://iceberg.apache.org/docs/latest/spark-queries/#inspecting-tables) and the Trino Iceberg connector's metadata tables docs at [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html)):
+
+```sql
+-- Method 1: $partitions has a `file_count` column per partition — the fastest answer
+-- to "how many files does each partition hold?". Works in both Trino and Spark.
+SELECT
+  partition,
+  record_count,
+  file_count,
+  total_size
+FROM iceberg.analytics."events$partitions"
+ORDER BY file_count DESC
+LIMIT 20;
+
+-- Method 2: $files lists EVERY data file. Group by partition for an exact count.
+-- content = 0 is a data file (vs 1 = position delete file, 2 = equality delete file).
+SELECT
+  partition,
+  COUNT(*) AS files,
+  SUM(file_size_in_bytes) / 1024 / 1024 AS total_mb,
+  AVG(file_size_in_bytes) / 1024 / 1024 AS avg_mb
+FROM iceberg.analytics."events$files"
+WHERE content = 0
+GROUP BY partition
+ORDER BY files DESC
+LIMIT 20;
+
+-- Method 3: total file count and average per partition — sanity check.
+SELECT
+  COUNT(DISTINCT partition) AS partitions,
+  COUNT(*)                  AS files,
+  CAST(COUNT(*) AS DOUBLE) / COUNT(DISTINCT partition) AS files_per_partition_avg
+FROM iceberg.analytics."events$files"
+WHERE content = 0;
+```
+
+If `files_per_partition_avg` is ≥ 1 and well above 1 on a non-trivial table, that confirms the rule: **partitions are logical groupings, files are physical artifacts, and there are typically many of the latter inside each of the former.** If you see a very small `file_count` (e.g., 1–2) on a busy partition, that means compaction has been aggressive and the partition is already at target size — that's the *goal* state of compaction, not the default state.
+
+### Q-pattern matcher — when the question is "how many files will N partitions have?"
+
+| Question shape | Correct answer shape |
+|---|---|
+| "I'll have 18 monthly partitions for 500M rows — how many files is that?" | **Files ≠ partitions.** "18 month-partitions, but each partition holds many files. At ~27M rows/month and 512MB target, expect ~100+ files per partition before compaction. Use `$partitions.file_count` to see actual counts on your table." |
+| "Will monthly partitioning give me 12 files/year?" | **No.** "Monthly = 12 partitions/year, NOT 12 files/year. File count per partition depends on data volume and target-file-size; a busy table has dozens to hundreds of files per month-partition." |
+| "How do I count files in my table?" | "Use `SELECT COUNT(*) FROM tbl\$files WHERE content=0` (data files only). For per-partition counts, `SELECT partition, file_count FROM tbl\$partitions`." |
+| "Why are there 5,000 files in my one month-partition?" | "Frequent commits (each adds at least one file per partition touched) and writer parallelism (each Spark task emits one file). Run `EXECUTE optimize` or Spark `rewrite_data_files` to compact toward target-file-size." |
+
+### Cross-references
+
+- The "small-files problem" section below covers what to do when files-per-partition gets out of hand (compaction).
+- The "Bucket partitioning — the two production footguns" section covers a specific case where forgetting `write.distribution-mode = 'hash'` causes per-commit file counts to multiply by writer count × bucket count.
+- The "Don't over-partition time" anti-pattern covers the dual failure mode: too many partitions, each one too small to hold healthy files.
+- Resource 17 (Iceberg table maintenance) covers `$partitions` and `$files` metadata tables in depth, including the `spec_id` column for diagnosing partition-evolution rewrite progress.
 
 ---
 
