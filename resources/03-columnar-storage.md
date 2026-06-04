@@ -184,6 +184,53 @@ Parquet uses dictionary encoding *by default* for low-cardinality string columns
 
 ---
 
+### LEADING CANONICAL — How do I set Parquet compression on this stack (Trino 467 + Iceberg 1.5.2)?
+
+> **The ONE correct Trino-Iceberg compression property and its valid values.** Verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (Connector → Iceberg → Table properties). On Trino 467, the table property is **`compression_codec`** (one Trino-side identifier, BARE — no quotes on the LHS), with valid values exactly `'ZSTD'`, `'SNAPPY'`, `'GZIP'`, `'LZ4'`, `'NONE'`. Iceberg 1.5.2's default is `ZSTD`; SaaS engineers rarely need to override.
+>
+> **(a) At table creation — FLAT `name = value` pairs in `WITH (...)`:**
+>
+> ```sql
+> -- Canonical Trino 467 DDL — explicit ZSTD on a partitioned events table.
+> CREATE TABLE iceberg.analytics.events (
+>   event_id    BIGINT,
+>   tenant_id   BIGINT,
+>   event_name  VARCHAR,
+>   occurred_at TIMESTAMP(6) WITH TIME ZONE,
+>   payload     MAP(VARCHAR, VARCHAR)
+> )
+> WITH (
+>   format            = 'PARQUET',
+>   compression_codec = 'ZSTD',
+>   partitioning      = ARRAY['day(occurred_at)']
+> );
+> ```
+>
+> **(b) On an existing table — `ALTER TABLE ... SET PROPERTIES` with a BARE identifier on the LHS:**
+>
+> ```sql
+> -- Canonical Trino 467 alter — bare identifier on the LHS, string literal on the RHS.
+> -- Affects NEW writes only. To recompress existing files, also run EXECUTE optimize.
+> ALTER TABLE iceberg.analytics.events
+>   SET PROPERTIES compression_codec = 'ZSTD';
+>
+> -- Recompress existing data files with the new codec (Trino-native):
+> ALTER TABLE iceberg.analytics.events EXECUTE optimize;
+> ```
+>
+> **DO-NOT-WRITE on Trino 467 (each of these will parse-error or no-op):**
+>
+> | DO NOT write | Why it's wrong | Correct Trino form |
+> |---|---|---|
+> | `WITH (format = 'PARQUET', properties = map('write.parquet.compression-codec', 'snappy'))` | Trino's `WITH (...)` takes FLAT `property_name = expression` pairs ([trino.io/docs/current/sql/create-table.html](https://trino.io/docs/current/sql/create-table.html)). There is no `properties` wrapper key and no `map(...)` value form here — that shape is borrowed from the native-Iceberg metadata-JSON layout. | `WITH (format = 'PARQUET', compression_codec = 'SNAPPY')` |
+> | `WITH (..., "write.parquet.compression-codec" = 'snappy')` | `write.parquet.compression-codec` is the **NATIVE Iceberg** property key (used by Spark and the Iceberg Java API). It is NOT a Trino WITH-clause property. Trino exposes compression under the name `compression_codec`. Pasting it into Trino fails with `Property 'write.parquet.compression-codec' does not exist`. | `WITH (..., compression_codec = 'SNAPPY')` |
+> | `ALTER TABLE ... SET PROPERTIES ('compression_codec' = 'ZSTD')` (string-literal LHS) | `SET PROPERTIES` takes BARE identifiers on the LHS per [trino.io/docs/current/sql/alter-table.html](https://trino.io/docs/current/sql/alter-table.html). Only the value is quoted. | `ALTER TABLE ... SET PROPERTIES compression_codec = 'ZSTD'` |
+> | `ALTER TABLE ... SET TBLPROPERTIES ('write.parquet.compression-codec' = 'zstd')` | `SET TBLPROPERTIES` is **Spark SQL** syntax + native-Iceberg key. Trino's clause is `SET PROPERTIES` with the Trino name `compression_codec`. | `ALTER TABLE ... SET PROPERTIES compression_codec = 'ZSTD'` |
+>
+> **Meta-rule:** in Trino, use Trino's dialect names. Native Iceberg / Spark property and API names do not parse against the Trino Iceberg connector. See [§ Trino dialect ↔ native-Iceberg name translation in resource 11](11-lakehouse-storage-sizing.md#trino-dialect--native-iceberg-name-translation-meta-canonical) for the full translation table covering compression, file format, target file size, snapshot timestamp, WITH-clause shape, and `SET PROPERTIES` LHS form.
+
+---
+
 ## How compression makes queries faster (not just smaller)
 
 This is the key insight beginners miss: **compression isn't just about saving disk space — it directly speeds up queries.**

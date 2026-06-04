@@ -1,99 +1,152 @@
-# Judge Feedback — Iter 455 (extended phase, end-of-iteration)
+# Judge Feedback — Iter 456 (extended phase, end-of-iteration)
 
 ## Overall
 
-- **Overall average: 4.0469 (PASS)** — 54th consecutive overall PASS in extended phase
-- **Per-question**: Q1 **3.6875 PASS-WITH-FAB** / Q2 **4.625 STRONG PASS** / Q3 **4.625 STRONG PASS** / Q4 **3.25 FAIL**
-- Margin thin (4.0469) — Q4 alone pulled the iteration down. Q1 carries a new column-name fab.
+- **Overall average: 3.8594 (PASS, THIN MARGIN)** — 55th consecutive overall PASS in extended phase
+- **Per-question**: Q1 **4.6875 STRONG PASS** / Q2 **3.1875 FAIL** / Q3 **4.6875 STRONG PASS** / Q4 **2.875 FAIL**
+- Margin THIN (3.8594) — Q1+Q3 carry the iteration; Q2+Q4 BOTH below 3.5 floor with load-bearing fabs.
 
 ## Per-question scores
 
 | Q | Topic angle | Acc | Comp | Clar | Act | Avg | Verdict |
 |---|---|---|---|---|---|---|---|
-| Q1 | Inspect partition spec + properties RE-PROBE | 3.5 | 3.75 | 4.0 | 3.5 | **3.6875** | PASS-WITH-FAB |
-| Q2 | dbt snapshots vs Iceberg snapshots | 4.75 | 4.5 | 4.75 | 4.5 | **4.625** | STRONG PASS |
-| Q3 | Rename + drop column metadata-only | 4.75 | 4.5 | 4.5 | 4.75 | **4.625** | STRONG PASS |
-| Q4 | Snappy vs Zstd Parquet compression | 2.5 | 3.75 | 4.0 | 2.75 | **3.25** | **FAIL** |
+| Q1 | Trino ZSTD compression DDL RE-PROBE | 4.75 | 4.75 | 4.5 | 4.75 | **4.6875** | STRONG PASS — iter455 Q4 fab fix CONFIRMED |
+| Q2 | Broadcast join concern + how to influence + does ANALYZE help | 2.75 | 3.0 | 4.0 | 3.0 | **3.1875** | FAIL — fabricated `/*+ USE_HASH_JOIN */` hints + missing `join_distribution_type` |
+| Q3 | dbt ref() vs source() | 4.75 | 4.5 | 4.75 | 4.75 | **4.6875** | STRONG PASS — clean dbt semantics |
+| Q4 | Oracle TO_CHAR(date,'YYYY-MM-DD') → Trino | 2.5 | 2.5 | 3.75 | 2.75 | **2.875** | FAIL — `::VARCHAR` PostgreSQL fab + missing `date_format`/`format_datetime` |
 
 ## Streak status
 
-- **iter454 Q2 `system.metadata.table_properties` fab — FIX CONFIRMED at iter455 Q1**. The responder did NOT recite the fabricated `system.metadata.table_properties WHERE table_name=...` form. Used the correct double-quoted `"<table>$partitions"` / `"<table>$properties"` metadata-table forms instead. The leading canonical block inserted at `resources/10-lakehouse-partitioning.md` + the reconciled `resources/05-multi-tenant-analytics.md` section LANDED clean for THAT specific angle.
-- **NEW BREAK: two fresh load-bearing fabrications surfaced** — Q1 invented `timestamp_ms` as a `$snapshots` column, and Q4 invented `write.parquet.compression-codec` as a Trino WITH-clause table property + invented `properties = map(...)` as Trino WITH syntax.
+**Compression-DDL fab class (iter455 Q4 FAB-2 + FAB-3): FULLY RESOLVED at Q1.** Responder used Trino `compression_codec` (NOT native `write.parquet.compression-codec`); flat `WITH` pairs (NOT `properties = map(...)`); bare-identifier LHS in SET PROPERTIES (NOT string-literal). Explicitly called out the native name as WRONG. iter456 teacher LEADING CANONICAL block in r03 + r11 + meta-canonical translation table LANDED CLEAN.
 
-## Fabrications
+**Bare-ANALYZE-vs-ANALYZE-TABLE: HELD AT Q2.** Responder did not take the "ANALYZE TABLE" bait planted by the question; used the correct bare `ANALYZE iceberg.analytics.events` Trino syntax.
 
-### FAB-1 (Q1, Iceberg partition design) — `timestamp_ms` column in `$snapshots`
-- **Responder wrote**: `SELECT snapshot_id, timestamp_ms, summary FROM iceberg.your_schema."your_table$snapshots" ORDER BY timestamp_ms DESC LIMIT 20;`
-- **Why wrong**: `timestamp_ms` is the Iceberg Java API / Spark internal field name (a Unix-epoch-millis long inside the metadata.json snapshot record). It is NOT a column exposed by Trino's `$snapshots` metadata table.
-- **Correct columns** per https://trino.io/docs/current/connector/iceberg.html (Metadata tables → $snapshots):
-  - `committed_at` TIMESTAMP(3) WITH TIME ZONE
-  - `snapshot_id` BIGINT
-  - `parent_id` BIGINT
-  - `operation` VARCHAR
-  - `manifest_list` VARCHAR
-  - `summary` map(VARCHAR, VARCHAR)
-- **Correct SQL**: `SELECT snapshot_id, committed_at, operation, summary FROM iceberg.your_schema."your_table$snapshots" ORDER BY committed_at DESC LIMIT 20;`
-- **Failure mode for the engineer**: `Column 'timestamp_ms' cannot be resolved` parse error.
+## Fabrications detected
 
-### FAB-2 (Q4, Column-oriented storage) — `write.parquet.compression-codec` as a Trino WITH-clause property
-- **Responder wrote**: `WITH (format='PARQUET', properties = map('write.parquet.compression-codec','snappy'))` and `ALTER TABLE ... SET PROPERTIES ('write.parquet.compression-codec' = 'zstd')`.
-- **Why wrong**: `write.parquet.compression-codec` is the NATIVE Iceberg table property (key inside the Iceberg metadata.json `properties` map, used in Spark and the Iceberg Java API). It is NOT the Trino WITH-clause property name. Trino exposes compression as the property `compression_codec`.
-- **Correct fact**: Per https://trino.io/docs/current/connector/iceberg.html the valid Trino Iceberg WITH-clause properties are exactly: `format`, `compression_codec`, `partitioning`, `sorted_by`, `location`, `format_version`, `max_commit_retry`, `delete_after_commit_enabled`, `max_previous_versions`, `orc_bloom_filter_columns`, `orc_bloom_filter_fpp`, `parquet_bloom_filter_columns`, `object_store_layout_enabled`, `data_location`, `extra_properties`.
-- **Verified via**: PR https://github.com/trinodb/trino/pull/24851 (Set write compression codec in Iceberg) and PR https://github.com/trinodb/trino/pull/25755 (Support setting compression_codec table property for Iceberg).
-- **Correct SQL**:
-  - Create: `CREATE TABLE iceberg.s.t (...) WITH (format = 'PARQUET', compression_codec = 'SNAPPY')`
-  - Alter: `ALTER TABLE iceberg.s.t SET PROPERTIES compression_codec = 'ZSTD'`
-- **Failure mode**: `Property 'write.parquet.compression-codec' does not exist`.
+### FAB-1 (Q2) — `/*+ USE_HASH_JOIN(a,b) */` and `/*+ USE_PARTITIONED_JOIN(a,b) */` query hints
 
-### FAB-3 (Q4, Column-oriented storage) — `properties = map(...)` as Trino WITH syntax
-- **Responder wrote**: `WITH (format='PARQUET', properties = map('write.parquet.compression-codec','snappy'))`.
-- **Why wrong**: Trino's `CREATE TABLE ... WITH (...)` takes a FLAT list of `property_name = expression` pairs. There is no `properties` wrapper property; there is no `map(...)` value form in this context. The responder appears to have confused Trino's flat WITH syntax with the native Iceberg properties map representation.
-- **Correct fact**: Per https://trino.io/docs/current/sql/create-table.html the WITH clause syntax is `WITH ( property_name = expression [, ...] )`.
-- **Correct SQL**: `CREATE TABLE iceberg.s.t (...) WITH (format = 'PARQUET', compression_codec = 'SNAPPY', partitioning = ARRAY['day(ts)'])`.
+- **Claim**: responder recommended Trino query hints `SELECT /*+ USE_HASH_JOIN(a,b) */ ...` and `/*+ USE_PARTITIONED_JOIN(a,b) */ ...` with hedge "if your Trino version supports hints, verify docs".
+- **Reality**: Trino does NOT support `/*+ ... */` query hints AT ALL — neither these specific hint names nor any hint mechanism. Per [trinodb/trino issue #9498 "Support query hints"](https://github.com/trinodb/trino/issues/9498) (still open, not implemented as of Trino 467/481), Trino has no query-hint syntax. The names `USE_HASH_JOIN` / `USE_PARTITIONED_JOIN` are Oracle/Spark-specific.
+- **Failure mode**: SILENT-WRONG. Trino 467 treats `/*+ ... */` as a regular block comment per Trino SQL grammar, silently ignores the hint, optimizer makes the default cost-based decision. Engineer thinks the hint applied; it didn't. Worse than a parse error because no immediate feedback.
+- **Hedge does not save it**: the hedge "if your Trino version supports hints" implies hints might exist somewhere — they don't. Even if Trino added hints in a future release, the names `USE_HASH_JOIN`/`USE_PARTITIONED_JOIN` are not what Trino would use.
+- **Correct fact**: per [Trino CBO docs](https://trino.io/docs/current/optimizer/cost-based-optimizations.html), the canonical Trino lever is `SET SESSION join_distribution_type = 'PARTITIONED'` (or `'BROADCAST'` or `'AUTOMATIC'`).
+- **Source**: https://github.com/trinodb/trino/issues/9498
 
-### Q4 minor — `SET PROPERTIES` quoting
-- Responder quoted the property name as a string literal: `SET PROPERTIES ('write.parquet.compression-codec' = 'zstd')`. Per https://trino.io/docs/current/sql/alter-table.html property names in `SET PROPERTIES` are bare identifiers (only the value is quoted).
-- Correct: `ALTER TABLE iceberg.s.t SET PROPERTIES compression_codec = 'ZSTD'`.
+### FAB-2 (Q4) — `::VARCHAR` PostgreSQL cast operator
 
-### Q1 minor completeness — did not lead with `SHOW CREATE TABLE`
-- The iter455 teacher's leading canonical block in r10 starts with `SHOW CREATE TABLE` as STEP 1, but the iter455 Q1 responder did not surface that as the first answer — split inspection across three metadata-table queries (`$partitions`, `$properties`, `DESCRIBE`) without using SHOW CREATE TABLE.
-- Misleading framing: the responder claimed `$properties` shows `partitioning` / `sorted_by` as rows. The partition spec lives in the table metadata's `partition-specs` structure and surfaces via `SHOW CREATE TABLE`'s `partitioning = ARRAY[...]` WITH clause, not necessarily as rows in `$properties` (which is for the key/value `properties` bag — `format-version`, `write.format.default`, etc.).
+- **Claim**: responder recommended `CAST(order_ts AS DATE)::VARCHAR` as "more idiomatically" with `::VARCHAR` called "syntactic sugar for CAST".
+- **Reality**: Trino does NOT support the PostgreSQL `x::type` cast operator syntax. Per [trinodb/trino issue #23795 "Cast operator `::`"](https://github.com/trinodb/trino/issues/23795) (still open as a feature request, not implemented as of Trino 467/481), `::` is not valid Trino syntax — only standard SQL `CAST(x AS type)` is supported.
+- **Failure mode**: PARSE ERROR. Engineer copy-pastes the preferred form, hits `mismatched input '::'. Expecting: ...`.
+- **Compounding factor**: this is in the PREFERRED-form position of the answer (responder explicitly says "more idiomatically"), so the engineer would try this form first.
+- **Root-cause class**: PostgreSQL/Snowflake/DuckDB dialect spillover into Trino — same pattern as Q2 (recommending another dialect's syntax as Trino's). Calling `::` "syntactic sugar" implies it's just an alternative spelling; it's not — it's a different dialect's syntax.
+- **Correct fact**: per [Trino datetime functions](https://trino.io/docs/current/functions/datetime.html), the canonical Trino equivalents of Oracle TO_CHAR are `date_format(ts, '%Y-%m-%d')` (MySQL-style) and `format_datetime(ts, 'yyyy-MM-dd')` (Joda) — both FIRST-CHOICE answers, both missing from the responder.
+- **Source**: https://github.com/trinodb/trino/issues/23795
 
-## Concrete teacher actions for iter456
+## Major completeness gaps
 
-### Priority 1 — `$snapshots` column-list canonical block (covers FAB-1)
-- Add (and cross-reference from r17 + r10) a leading canonical block explicitly listing the 6 columns of Trino's `$snapshots` metadata table with their exact types: `committed_at TIMESTAMP(3) WITH TIME ZONE`, `snapshot_id BIGINT`, `parent_id BIGINT`, `operation VARCHAR`, `manifest_list VARCHAR`, `summary map(VARCHAR, VARCHAR)`.
-- Include a DO-NOT-WRITE matrix banning the Iceberg-Java / Spark internal field names: `timestamp_ms`, `epoch_ms`, `ts_ms`, `committed_at_ms`, `parent_snapshot_id`. Each banned name paired with the correct Trino column name.
-- Reproduce the iter455 fabricated query VERBATIM with the inline correction so the responder learns the precise mistake shape.
-- Place where keyword "$snapshots" leads (per the responder findability rule). r17 (Iceberg table maintenance) is the natural primary home; r10 (partitioning) should cross-ref.
+### MISS-1 (Q2) — `join_distribution_type` session property
 
-### Priority 2 — Trino-Iceberg WITH-clause table-properties canonical block (covers FAB-2 + FAB-3)
-- Add to r09 (lakehouse schema design / DDL) and/or r10 (partitioning) and r17 (maintenance):
-  - A leading canonical enumeration of all 15 valid Trino Iceberg WITH-clause properties with the value type each accepts (e.g., `format VARCHAR`, `compression_codec VARCHAR`, `partitioning ARRAY[VARCHAR]`, `sorted_by ARRAY[VARCHAR]`, `format_version INTEGER`).
-  - A DO-NOT-WRITE matrix banning the NATIVE Iceberg property names that look plausible to a responder: `write.parquet.compression-codec`, `write.orc.compression-codec`, `write.format.default`, `write.target-file-size-bytes`, `commit.retry.num-retries`, `history.expire.min-snapshots-to-keep`. Each paired with the correct Trino WITH-clause name (or "not exposed as a Trino property; use catalog-level config / session property").
-  - A DO-NOT-WRITE callout against `properties = map(...)` wrapper syntax. Show the correct flat form.
-  - A DO-NOT-WRITE callout against quoting property names in `SET PROPERTIES`. Show the correct bare-identifier form.
-  - Reproduce the iter455 fabricated DDL + ALTER statements VERBATIM with inline correction.
+- The canonical Trino lever for influencing per-query join distribution is `SET SESSION join_distribution_type = 'PARTITIONED'` (or `'BROADCAST'` / `'AUTOMATIC'`). Accepts three values, default AUTOMATIC. This is THE direct switch.
+- The responder gave only the secondary cap (`join_max_broadcast_table_size`), which is the AUTOMATIC-mode broadcast-build-side cap, not the primary distribution switch.
+- Engineer asking "how do I influence broadcast" needs the primary switch first; the cap is a secondary mechanism.
+- **Source**: https://trino.io/docs/current/optimizer/cost-based-optimizations.html
 
-### Priority 3 — Lead with `SHOW CREATE TABLE` for partition-spec inspection
-- Reinforce the SHOW-CREATE-TABLE-first framing by:
-  - Making `SHOW CREATE TABLE iceberg.s.t` the FIRST sentence of the partition-inspection answer template (not just step 1 of a numbered list buried in r10).
-  - Adding a top-line summary callout at the start of the r10 canonical block: "If you only have time for one query, use `SHOW CREATE TABLE` — it returns the full DDL with partitioning, sorted_by, format, compression_codec, format_version, location, and all WITH-clause properties in one shot."
-  - Clarifying that `$properties` does NOT include partition spec — the partition spec lives in the table metadata's `partition-specs` structure and is surfaced via `SHOW CREATE TABLE`'s `partitioning = ARRAY[...]` clause.
+### MISS-2 (Q4) — `date_format` and `format_datetime`
 
-### Priority 4 — Meta-canonical guardrail against native-Iceberg-name spillover
-Three iterations in a row (iter453, iter454, iter455) have featured a fabrication where the responder reaches for the NATIVE Iceberg / Spark / Java API name instead of the Trino exposed name. Add a META-CANONICAL guardrail near the top of r17 (or as a sidebar in r10) stating:
-- "When you need a Trino-Iceberg column name or property name, the canonical source is https://trino.io/docs/current/connector/iceberg.html — NOT the Iceberg Java API, NOT the Spark Iceberg connector docs, NOT a stack overflow answer. Native Iceberg names like `write.parquet.compression-codec`, `timestamp_ms`, `committed-at-ms`, `write.format.default` are NOT Trino-exposed identifiers."
-- Include an explicit translation table of the most common native-Iceberg → Trino name pairs (Iceberg native `write.parquet.compression-codec` → Trino WITH `compression_codec`; Iceberg native `timestamp_ms` field → Trino `$snapshots.committed_at` column; Iceberg native `write.format.default` → Trino WITH `format`; Iceberg native `write.target-file-size-bytes` → Trino EXECUTE `optimize(file_size_threshold => ...)`).
+- Per [Trino datetime functions docs](https://trino.io/docs/current/functions/datetime.html), the canonical Trino equivalents of Oracle TO_CHAR for arbitrary date format strings are:
+  - `date_format(timestamp, '%Y-%m-%d')` — MySQL-style format specifiers (capital `%Y` = 4-digit year, `%m` = 2-digit month, `%d` = 2-digit day, `%H` = hour, `%i` = minute, `%s` = second). **FIRST-CHOICE.**
+  - `format_datetime(timestamp, 'yyyy-MM-dd')` — Joda DateTime pattern (lowercase `yyyy` = 4-digit year, `MM` = 2-digit month, `dd` = 2-digit day, `HH` = hour, `mm` = minute, `ss` = second).
+- Both exist in Trino 467, both documented, both are the canonical Oracle TO_CHAR migration answers.
+- Responder gave NEITHER. Instead recommended `format('%1$td/%1$tm/%1$tY', order_ts)` Java Formatter syntax — which IS a real Trino function but the NICHE choice, not the canonical TO_CHAR equivalent.
+- Engineer migrating hundreds of Oracle TO_CHAR calls in legacy PL/SQL needs `date_format`/`format_datetime` first, `format()` as fallback for niche cases.
+- **Source**: https://trino.io/docs/current/functions/datetime.html
 
-### Reconciliation, not append
-Apply each of the above as IN-PLACE edits to the existing canonical blocks (r10, r17, r09, r05). Do NOT append a separate section that contradicts existing prose — the responder may cite the wrong one. If existing prose mentions `$snapshots` columns at all, update those mentions to include the full 6-column list. If existing prose shows compression in a CREATE TABLE WITH example, ensure every such example uses `compression_codec = 'SNAPPY'` (not `write.parquet.compression-codec`).
+## Concrete teacher actions for iter457
 
-### Breadth design for iter456
-- Federation NOT probed this iter — record stays at 4.49944/310, just 0.00056 below the 4.5 override threshold. Do NOT add a dedicated federation probe; let the natural breadth rotation surface federation when appropriate. Avoid contrived federation questions that could break the streak before the floor stabilizes.
-- Q1 angle (Iceberg metadata-table column-name fab) and Q4 angle (Trino WITH-clause property-name fab) are the active hot spots. Plan one Q in iter456 that probes a DIFFERENT metadata table column list (e.g., `$history`, `$manifests`, `$files`, `$partitions` column list) to verify the Priority-1 reconciliation generalizes, AND one Q that probes a DIFFERENT Trino-Iceberg WITH-clause property (e.g., `sorted_by`, `format_version`, `partitioning`, `orc_bloom_filter_columns`) to verify the Priority-2 reconciliation generalizes.
-- Avoid back-to-back probes on the SAME topic in two consecutive iterations unless the topic is below threshold.
+Both new fabrications are **dialect-spillover** fabs (Oracle/Spark in Q2, PostgreSQL/Snowflake/DuckDB in Q4). The pattern is the same as iter455 Q4 (native Iceberg name spillover): responder recommends another dialect's syntax as Trino's because the syntax is plausible-looking and widespread elsewhere. Teacher needs TWO new canonical blocks plus DO-NOT-WRITE matrices.
 
-## Pattern observation across the iteration
+### Action 1 — Trino join-strategy canonical lever block (r25 / r26)
 
-Two fresh load-bearing fabrications, both the same root-cause class as the iter454 Q2 and iter453 Q3 breaks: the responder constructs a plausible-looking SQL statement against a real Trino/Iceberg surface (metadata table column, WITH clause property) by reaching for the NATIVE Iceberg / Spark / Java API name instead of the Trino-exposed name, and never verifies before pasting. The reconciliation pattern (leading canonical block + DO-NOT-WRITE callout reproducing the fabricated query verbatim) works on the SPECIFIC angle it covers (iter454 → iter455 streak HOLDS on `system.metadata.table_properties`), but the responder generalizes the failure mode to OTHER plausible-looking surfaces (next iter's `$snapshots.timestamp_ms`, then `write.parquet.compression-codec`). Teacher must escalate from per-fab patches to a meta-canonical guardrail (Priority 4) plus broader native-Iceberg → Trino translation tables — otherwise the fab-of-the-iter pattern will continue surfacing on whichever Iceberg surface the responder reaches into next.
+**Where to install**: resources/25-trino-cbo-analyze-stats.md (and/or resources/26-query-performance-regression-diagnosis.md) — the keyword path is "broadcast join" / "join strategy" / "how do I make Trino use a hash join". Use a LEADING CANONICAL `### LEADING CANONICAL — How do I influence Trino's join strategy?` subsection BEFORE any prose discussion of broadcast vs partitioned.
+
+**Content to teach (verified syntax)**:
+1. **Primary lever**: `SET SESSION join_distribution_type = 'PARTITIONED';` (accepted values: `PARTITIONED`, `BROADCAST`, `AUTOMATIC`; default `AUTOMATIC`). One line — this is the direct switch.
+2. **Secondary cap (AUTOMATIC mode only)**: `SET SESSION join_max_broadcast_table_size = '50MB';` (default 100MB). Caps the broadcast build side when CBO is choosing.
+3. **Tertiary (improve the optimizer's input)**: bare `ANALYZE iceberg.analytics.events;` (no TABLE keyword) → populates NDV stats in the Iceberg Puffin sketch file → CBO makes better join-distribution choices.
+4. **EXPLAIN (TYPE DISTRIBUTED)** before/after to verify the chosen distribution.
+
+**DO-NOT-WRITE matrix** (reproduce iter456 Q2 fab verbatim with inline correction):
+- `SELECT /*+ USE_HASH_JOIN(a,b) */ ...` — **WRONG**: Trino has NO query hints per trinodb/trino issue #9498. `/*+ ... */` is silently treated as a regular block comment — the hint is IGNORED with no error. Use `SET SESSION join_distribution_type = 'PARTITIONED'` before the query instead.
+- `SELECT /*+ USE_PARTITIONED_JOIN(a,b) */ ...` — **WRONG**: same as above. These are Oracle/Spark hint names; Trino has neither the syntax nor these names.
+- Any `/*+ ANY_HINT_NAME(...) */` — **WRONG**: Trino has NO query hint mechanism at all. Use SET SESSION properties instead.
+
+**Failure-mode callout**: emphasize the SILENT-WRONG nature. Unlike a parse error, the engineer gets no feedback that the hint was ignored — the query runs with default distribution and the engineer thinks the hint worked.
+
+**Verification anchors**: trino.io/docs/current/optimizer/cost-based-optimizations.html + trinodb/trino issue #9498.
+
+### Action 2 — Trino TO_CHAR canonical equivalents block (r27 — Oracle migration)
+
+**Where to install**: resources/27-oracle-plsql-dbt-trino-migration.md — the keyword path is "TO_CHAR" / "date format" / "Oracle date string". Use a LEADING CANONICAL `### LEADING CANONICAL — Oracle TO_CHAR(date, format) → Trino` subsection.
+
+**Content to teach (verified syntax)**:
+1. **For ISO format (`'YYYY-MM-DD'`)** — three valid Trino forms in preference order:
+   - `CAST(date_column AS VARCHAR)` (DATE column, implicit 'YYYY-MM-DD' format)
+   - `date_format(ts, '%Y-%m-%d')` (TIMESTAMP column, MySQL-style — FIRST-CHOICE general answer)
+   - `format_datetime(ts, 'yyyy-MM-dd')` (TIMESTAMP column, Joda pattern)
+2. **For arbitrary formats** — `date_format` and `format_datetime` are THE canonical answers. Include a side-by-side Oracle TO_CHAR ↔ Trino format-string mapping table:
+
+| Oracle TO_CHAR | Trino `date_format` (MySQL) | Trino `format_datetime` (Joda) |
+|---|---|---|
+| `'YYYY-MM-DD'` | `'%Y-%m-%d'` | `'yyyy-MM-dd'` |
+| `'YYYY-MM-DD HH24:MI:SS'` | `'%Y-%m-%d %H:%i:%s'` | `'yyyy-MM-dd HH:mm:ss'` |
+| `'DD/MM/YYYY'` | `'%d/%m/%Y'` | `'dd/MM/yyyy'` |
+| `'Mon DD, YYYY'` | `'%b %d, %Y'` | `'MMM dd, yyyy'` |
+| `'HH24:MI'` | `'%H:%i'` | `'HH:mm'` |
+
+3. **For niche needs only**: `format('%1$td/%1$tm/%1$tY', ts)` Java Formatter syntax — but only when you need Formatter-specific features.
+
+**DO-NOT-WRITE matrix** (reproduce iter456 Q4 fab verbatim with inline correction):
+- `CAST(order_ts AS DATE)::VARCHAR` — **WRONG**: Trino does NOT support the PostgreSQL `::` cast operator per trinodb/trino issue #23795. Hits parse error `mismatched input '::'`. Use `CAST(CAST(order_ts AS DATE) AS VARCHAR)` instead.
+- `order_ts::TIMESTAMP` / `col::INT` / any `expr::type` — **WRONG**: same reason. Always use `CAST(expr AS type)`.
+- Calling `::` "syntactic sugar for CAST" — **WRONG**: it's another dialect's syntax (PostgreSQL/Snowflake/DuckDB), not a Trino spelling.
+- `TO_CHAR(date, 'YYYY-MM-DD')` — **WRONG (Oracle, not Trino)**: TO_CHAR does not exist in Trino. Use `date_format(...)` or `format_datetime(...)`.
+
+**Meta-canonical dialect-spillover guardrail** (extend the iter456 native-Iceberg translation table in r17 with a NEW table at the top of r27 for Oracle migration):
+
+| Concept | Oracle / PG / Snowflake | Trino 467 |
+|---|---|---|
+| Cast operator | `expr::type` (PG/Snowflake/DuckDB) | `CAST(expr AS type)` ONLY |
+| Date-to-string | `TO_CHAR(date, fmt)` (Oracle) | `date_format(ts, fmt)` (MySQL) / `format_datetime(ts, fmt)` (Joda) |
+| String-to-date | `TO_DATE(str, fmt)` (Oracle) | `date_parse(str, fmt)` (MySQL) / `parse_datetime(str, fmt)` (Joda) |
+| Conditional null | `NVL(a, b)` (Oracle) | `COALESCE(a, b)` |
+| Pattern match | `DECODE(...)` (Oracle) | `CASE WHEN ...` (with `IS NULL` for NULL-bearing inputs) |
+| Row limit | `ROWNUM <= 100` (Oracle 11g) | `LIMIT 100` |
+
+Closing meta-rule (verbatim, mirror the iter456 native-Iceberg guardrail style): "in Trino, use Trino's dialect — Oracle/PostgreSQL/Snowflake/Spark function names and operators that look idiomatic in other engines parse-error or silently no-op against Trino 467."
+
+**Verification anchors**: trino.io/docs/current/functions/datetime.html + trino.io/docs/current/functions/conversion.html + trinodb/trino issue #23795.
+
+### Breadth design for iter457
+
+- Do NOT add a dedicated federation probe — federation row 4.49944/310 unchanged per directive.
+- Re-probe BOTH new fab classes from a different angle to confirm fix:
+  - **Q2 hint fab re-probe**: ask a different join-strategy question (e.g., "how do I force a partitioned join when I know the right side is too big to broadcast?") — fix CONFIRMED only if responder leads with `SET SESSION join_distribution_type = 'PARTITIONED'` and explicitly calls out that Trino has no query hints.
+  - **Q4 `::` cast operator re-probe**: ask a different cast question (e.g., "what's the Trino way to convert a string to a TIMESTAMP?") — fix CONFIRMED only if responder uses `CAST(... AS TIMESTAMP)` or `date_parse(...)` / `parse_datetime(...)` and does NOT use `::`.
+- Use the other 2 questions for breadth coverage — recommend: (a) Iceberg partition design (one of the lower-margin near-threshold topics — 4.4854/31) or storage sizing (4.516/8), (b) something on dbt-Trino incrementals to keep the dbt-on-Trino topics warm.
+
+### Reconcile-don't-append reminder
+
+When adding the join-strategy and TO_CHAR canonical blocks, search for and **reconcile in place** any stale or contradictory content in r25/r26/r27 — do not just append. Specifically:
+- Grep r25/r26 for any existing mention of `USE_HASH_JOIN` / `USE_PARTITIONED_JOIN` / `/*+` — if any exists, fix or remove it.
+- Grep r27 for any existing mention of `::` as a cast operator or `TO_CHAR` without a Trino equivalent — fix in place.
+- Verify no resource file uses `properties = map(...)` Trino-context wrapper or `write.parquet.compression-codec` as a Trino property name (these should already be reconciled per iter456 teacher work).
+
+## Topic average changes this iter
+
+| Topic | Before | After | Δ | Note |
+|---|---|---|---|---|
+| Column-oriented storage | 4.4664/12 | **4.4835/13** | +0.0171 | Q1 4.6875 above topic avg — compression-DDL fab class FULLY RESOLVED |
+| Trino CBO/ANALYZE | 4.6707/13 | **4.5651/14** | -0.1056 | Q2 3.1875 well below topic avg — hint fab + missing `join_distribution_type`; still above override-threshold 4.5 but margin TIGHTER |
+| Postgres-to-Iceberg ingestion | 4.4944/155 | **4.4957/156** | +0.0013 | Q3 4.6875 above topic avg marginal — dbt ref/source clean |
+| Oracle PL/SQL→dbt/Trino migration | 4.6324/27 | **4.5697/28** | -0.0627 | Q4 2.875 well below topic avg — `::VARCHAR` PG fab + missing date_format/format_datetime |
+| Federation (NOT probed) | 4.49944/310 | 4.49944/310 | 0 | unchanged per directive |

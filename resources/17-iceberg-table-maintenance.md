@@ -416,6 +416,75 @@ SELECT * FROM iceberg.analytics.`events$snapshots`;
 
 > **Cross-engine pitfall.** A Spark snippet like `iceberg.analytics.events.snapshots` looks "obviously right" to engineers who came in via Spark — but pasting it into Trino fails. Trino's parser only recognises the metadata table when the WHOLE `events$snapshots` token sits inside ONE quoted identifier. When porting Spark notebooks to Trino, mechanically rewrite every `iceberg.<schema>.<table>.<metadata>` → `iceberg.<schema>."<table>$<metadata>"`.
 
+### LEADING CANONICAL — Trino 467 `$snapshots` column list (6 columns, exact types)
+
+> **THE 6 columns Trino exposes on `$snapshots`.** Verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (Connector → Iceberg → Metadata tables → `$snapshots`). Memorise this list — every `$snapshots` query you write must project / filter only these names:
+>
+> | Column | Type | What it is |
+> |---|---|---|
+> | `committed_at` | `TIMESTAMP(3) WITH TIME ZONE` | When the snapshot was committed (engine-side wall clock at commit time). This is the column you ORDER BY / filter against for time travel and rollback. |
+> | `snapshot_id` | `BIGINT` | Stable snapshot identifier. Use with `FOR VERSION AS OF <snapshot_id>` or `rollback_to_snapshot(<id>)`. |
+> | `parent_id` | `BIGINT` | Parent snapshot's `snapshot_id` (NULL for the table's first snapshot). Walk this chain to reconstruct lineage. |
+> | `operation` | `VARCHAR` | `'append'` / `'delete'` / `'replace'` / `'overwrite'` — what kind of commit this was. |
+> | `manifest_list` | `VARCHAR` | Path to the manifest-list file backing this snapshot (one S3/MinIO object). Not directly queryable as a metadata table. |
+> | `summary` | `map(VARCHAR, VARCHAR)` | Key/value bag of commit statistics: `added-data-files`, `added-records`, `deleted-records`, `total-records`, `total-data-files`, etc. Access via `summary['added-records']`. |
+>
+> **Canonical inspection query:**
+>
+> ```sql
+> -- The right form on Trino 467 — order by committed_at (NOT by any *_ms field).
+> SELECT snapshot_id, committed_at, parent_id, operation, summary
+> FROM iceberg.analytics."events$snapshots"
+> ORDER BY committed_at DESC
+> LIMIT 20;
+> ```
+>
+> **DO-NOT-WRITE — native-Iceberg / Spark / Java API field names that LOOK like `$snapshots` columns but are NOT:**
+>
+> | DO NOT write (Iceberg Java API / Spark internal name) | What it actually is | Correct Trino 467 `$snapshots` column |
+> |---|---|---|
+> | `timestamp_ms` | The Iceberg Java API field `Snapshot.timestampMillis()` — a `LONG` Unix-epoch-millis value stored inside the metadata.json snapshot record. NOT exposed by Trino's `$snapshots` metadata table. Pasting into Trino fails with `Column 'timestamp_ms' cannot be resolved`. | `committed_at` (TIMESTAMP(3) WITH TIME ZONE) |
+> | `epoch_ms` / `ts_ms` / `committed_at_ms` | Iceberg-internal millisecond-epoch field name variations. NONE are Trino `$snapshots` columns. The `_ms` suffix is the Java-API style; Trino's column is the human-readable timestamp `committed_at`. | `committed_at` |
+> | `parent_snapshot_id` | The Java API getter `Snapshot.parentId()` returns the parent ID, but the Trino `$snapshots` metadata-table column is named `parent_id` (no `_snapshot_` infix). | `parent_id` |
+> | `is_current_ancestor` | This column EXISTS — but on `$history`, NOT `$snapshots`. Filtering `$snapshots` by it fails. See the disambiguation table immediately below. | (use `$history.is_current_ancestor`) |
+> | `made_current_at` | This column EXISTS — but on `$history`, NOT `$snapshots`. `$snapshots` carries `committed_at` (when committed); `$history` carries `made_current_at` (when promoted to be the live pointer — different timestamps after a rollback). | `$snapshots.committed_at` for commit time; `$history.made_current_at` for promotion time. |
+>
+> **Reproducing the iter455 Q1 fabrication verbatim — and the precise correction.**
+>
+> ```sql
+> -- WRONG (iter455 Q1 fabrication) — `timestamp_ms` is NOT a Trino $snapshots column:
+> SELECT snapshot_id, timestamp_ms, summary
+> FROM iceberg.your_schema."your_table$snapshots"
+> ORDER BY timestamp_ms DESC
+> LIMIT 20;
+> -- Fails on Trino 467 with: Column 'timestamp_ms' cannot be resolved.
+>
+> -- RIGHT — the Trino column name is `committed_at`:
+> SELECT snapshot_id, committed_at, operation, summary
+> FROM iceberg.your_schema."your_table$snapshots"
+> ORDER BY committed_at DESC
+> LIMIT 20;
+> ```
+>
+> **Meta-rule:** the Iceberg Java API uses ms-epoch field names (`timestamp_ms`, `parent_snapshot_id`); Trino's `$snapshots` metadata table uses human-readable, dialect-translated column names (`committed_at`, `parent_id`). The two are NOT interchangeable. Source the Trino names from [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) — NOT from the Iceberg Java API docs or a Spark example.
+
+### LEADING CANONICAL — Trino dialect ↔ native-Iceberg name translation (meta-canonical)
+
+> **The single guardrail against the most common Iceberg-on-Trino fabrication.** Three iterations in a row featured a load-bearing fabrication where the responder reached for a NATIVE Iceberg / Spark / Java API name instead of the Trino-exposed name. The fix is to memorise the translation table below and never copy an Iceberg name from a Spark/Java-API source into a Trino statement without checking it against [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html).
+>
+> | Concept | Trino 467 name (use in this stack) | Native Iceberg / Spark / Java-API name (DO NOT paste into Trino) | Where each applies |
+> |---|---|---|---|
+> | `$snapshots` commit timestamp | `committed_at` (TIMESTAMP(3) WITH TIME ZONE) | `timestamp_ms` (LONG; `Snapshot.timestampMillis()` in Java API) | Trino: `SELECT committed_at FROM "t$snapshots"`. Java API: `snapshot.timestampMillis()`. |
+> | `$snapshots` parent pointer | `parent_id` (BIGINT) | `parent_snapshot_id` / `parentId()` | Trino: `parent_id`. Java API: `Snapshot.parentId()`. |
+> | Parquet compression (table property) | `compression_codec` (BARE identifier; `'ZSTD'`, `'SNAPPY'`, `'GZIP'`, `'LZ4'`, `'NONE'`) | `write.parquet.compression-codec` (string key in TBLPROPERTIES / native properties map) | Trino: `WITH (compression_codec = 'ZSTD')` / `SET PROPERTIES compression_codec = 'ZSTD'`. Spark: `TBLPROPERTIES ('write.parquet.compression-codec' = 'zstd')`. |
+> | File format (table property) | `format` (`'PARQUET'` / `'ORC'` / `'AVRO'`) | `write.format.default` (string key) | Trino: `WITH (format = 'PARQUET')`. Spark: `TBLPROPERTIES ('write.format.default' = 'PARQUET')`. |
+> | Target write file size | NOT exposed as a Trino WITH-clause property. Use Trino session `iceberg.target_max_file_size` for Trino-side writes. Native `write.target-file-size-bytes` is honored by **Spark** writers only — Trino 467 ignores it ([trinodb/trino #28250](https://github.com/trinodb/trino/issues/28250)). | `write.target-file-size-bytes` (string key) | Trino-side writes: `SET SESSION iceberg.target_max_file_size = 134217728;`. Spark-side: `TBLPROPERTIES ('write.target-file-size-bytes' = '134217728')`. |
+> | Compaction file-size threshold | `EXECUTE optimize(file_size_threshold => '256MB')` (Trino-native named arg) | `target-file-size-bytes` inside Spark `rewrite_data_files` `options` map | Trino: `ALTER TABLE ... EXECUTE optimize(file_size_threshold => '256MB')`. Spark: `CALL iceberg.system.rewrite_data_files(table=>'…', options=>map('target-file-size-bytes','268435456'))`. |
+> | WITH-clause shape | FLAT `name = expression` pairs ([trino.io/docs/current/sql/create-table.html](https://trino.io/docs/current/sql/create-table.html)) | `properties = map('key', 'value', ...)` (native-Iceberg metadata.json layout); Spark `TBLPROPERTIES (...)` | Trino: ALWAYS flat pairs — `WITH (format = 'PARQUET', compression_codec = 'ZSTD', partitioning = ARRAY['day(occurred_at)'])`. The `properties = map(...)` shape is NOT Trino. |
+> | `SET PROPERTIES` LHS form | BARE identifier ([trino.io/docs/current/sql/alter-table.html](https://trino.io/docs/current/sql/alter-table.html)) | String literal in Spark `TBLPROPERTIES` | Trino: `SET PROPERTIES compression_codec = 'ZSTD'` (LHS bare, RHS quoted). Spark: `SET TBLPROPERTIES ('write.parquet.compression-codec' = 'zstd')`. |
+>
+> **The meta-rule, one sentence:** in Trino, use Trino's dialect names — native Iceberg / Spark property and API names parse-error or no-op against the Trino Iceberg connector.
+
 **One-line "use for X" per metadata table** — pick the right one and you'll answer most diagnostic questions in seconds:
 
 | Metadata table | Use it for | Key columns |
