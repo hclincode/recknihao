@@ -306,7 +306,37 @@ The SUM form counts *event rows*, not users. If a user fires 5 events in the 7-d
 
 ### Wide-pivot variant: percentage retention as columns
 
-The query above returns the cohort grid in **long format** (one row per cohort_week × week_offset). That's fine for some BI tools, but stakeholders usually want the **wide format** with one column per week, showing percentage retention (week_N / week_0 × 100). Pivot it with `CASE WHEN` and divide by the cohort size:
+> **Terminology — call the pattern by its right name.** The `SUM(CASE WHEN <key>=<value> THEN <metric> END) AS <value_col>` idiom shown below is **conditional aggregation** — also called **manual pivot** or **crosstab**. The CASE returns `<metric>` on match and `NULL` otherwise; `SUM` (like all Trino aggregates) ignores `NULL`, so each output column collapses to the metric for the matching key. This is the canonical Trino-native pivot pattern; there is **no `PIVOT` keyword** in Trino's SQL grammar — you write the manual conditional aggregation as shown.
+>
+> **DO-NOT-WRITE — these labels are WRONG and will mislead anyone who later looks them up:**
+> - "SCD-1 pivot" / "Type-1 pivot" / "SCD pivot pattern" — **WRONG.** SCD-1 (Slowly Changing Dimension Type 1) is an **unrelated Kimball dimension-modeling concept**: a strategy for **overwriting** a dimension attribute on change with **no history retention** (e.g., overwriting `customer_email` when a user updates it). It has nothing to do with pivoting rows into columns. Conflating SCD-1 with the conditional-aggregation pivot pollutes the mental model — an engineer who later googles "SCD-1" will land on dimension-update content and waste time reverse-inferring a non-existent connection.
+> - Correct labels to use: **"conditional aggregation"**, **"manual pivot"**, **"crosstab"**.
+>
+> **Alternative idiom — Trino aggregate `FILTER (WHERE ...)` clause.** Trino supports the SQL-standard aggregate `FILTER (WHERE <condition>)` modifier, which is **equivalent** to the `CASE WHEN` form and slightly cleaner. Both forms produce identical query plans on Trino 467/481. Verified against [Trino aggregate functions docs](https://trino.io/docs/current/functions/aggregate.html) ("The FILTER keyword can be used to remove rows from aggregation processing with a condition expressed using a WHERE clause … supported for all aggregate functions"):
+>
+> ```sql
+> -- Quarterly revenue pivot — CASE WHEN form (canonical, works on every dialect):
+> SELECT region,
+>        SUM(CASE WHEN quarter = 'Q1' THEN revenue END) AS q1_revenue,
+>        SUM(CASE WHEN quarter = 'Q2' THEN revenue END) AS q2_revenue,
+>        SUM(CASE WHEN quarter = 'Q3' THEN revenue END) AS q3_revenue,
+>        SUM(CASE WHEN quarter = 'Q4' THEN revenue END) AS q4_revenue
+> FROM iceberg.analytics.sales
+> GROUP BY region;
+>
+> -- Equivalent FILTER (WHERE ...) form (Trino-supported, cleaner):
+> SELECT region,
+>        SUM(revenue) FILTER (WHERE quarter = 'Q1') AS q1_revenue,
+>        SUM(revenue) FILTER (WHERE quarter = 'Q2') AS q2_revenue,
+>        SUM(revenue) FILTER (WHERE quarter = 'Q3') AS q3_revenue,
+>        SUM(revenue) FILTER (WHERE quarter = 'Q4') AS q4_revenue
+> FROM iceberg.analytics.sales
+> GROUP BY region;
+> ```
+>
+> Both forms run on Trino 467/481 with the Iceberg connector. Use whichever reads more naturally to your team — the `FILTER` form is slightly more compact and signals "conditional aggregation" intent without the CASE noise. Note: when you want `COUNT(*)` for matching rows (not summing a metric), the FILTER form `COUNT(*) FILTER (WHERE event_type='purchase')` is the canonical idiom — the CASE-WHEN form `SUM(CASE WHEN event_type='purchase' THEN 1 ELSE 0 END)` is also valid but more verbose.
+
+The query above returns the cohort grid in **long format** (one row per cohort_week × week_offset). That's fine for some BI tools, but stakeholders usually want the **wide format** with one column per week, showing percentage retention (week_N / week_0 × 100). Pivot it with `CASE WHEN` (conditional aggregation) and divide by the cohort size:
 
 ```sql
 WITH cohorts AS (

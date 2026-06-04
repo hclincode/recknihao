@@ -1,163 +1,158 @@
-# Judge Feedback — Iter 439 (EXTENDED PHASE — end-of-iteration only)
+# Judge Feedback — Iter 440 (EXTENDED PHASE — end-of-iteration only)
 
-**Overall: 4.6875 PASS** (Q1 4.9375 + Q2 4.9375 + Q3 4.5625 + Q4 4.3125) — **-0.2344 step-DOWN from iter438 4.921875 driven by TWO confident inaccuracies: (Q3) "SCD-1 pivot pattern" mislabel and (Q4) WRONG metadata-table quoting `your_table."$snapshots"` instead of canonical `"your_table$snapshots"`.** 38th consecutive overall PASS in extended phase. All required topics REMAIN PASSED. Zero-confident-inaccuracy streak BREAKS at 1 iter — TWO confident-inaccuracies in one iteration.
+**Overall: 4.96875 STRONG PASS** (Q1 5.0 + Q2 5.0 + Q3 4.9375 + Q4 4.9375) — **+0.28125 step-UP from iter439 4.6875, RECOVERING from the iter439 -0.2344 dip; BOTH iter439 confident-inaccuracies fully RESOLVED on direct re-probe; zero-confident-inaccuracy this iter (streak RESETS to 1).** 39th consecutive overall PASS in extended phase. All required topics REMAIN PASSED.
 
 ---
 
 ## HEADLINE
 
-1. **Q1 federation BUFFER probe — STRONG PASS 4.9375; federation 4.5027 → 4.5041 / 301, margin widens from +0.00265 to +0.00410 (×1.55 expansion); FEDERATION STAYS PASSED — durability extended further.** Pushdown EXPLAIN signature canonical: constraint-inside-TableScan = pushed (no separate ScanFilterProject); Filter-above-TableScan = Trino-side, all rows pulled to memory. 50k-of-10M-cross-JDBC quantification accurate. Web UI input rows/bytes verification step + read-replica-latency callout actionable. Verified per trino.io/docs/current/optimizer/pushdown.html. 301-datapoint density milestone reached.
+1. **Q1 metadata-table-quoting re-probe — RESOLVED, STRONG PASS 5.0.** Responder produces canonical `iceberg.analytics."events$snapshots"` / `"events$files"` / `"events$partitions"` whole-token-quoted form. Explicit DO-NOT-WRITE-style explanation: `events."$snapshots"` parses as table.column (column `$snapshots` cannot be resolved); `"events"."$snapshots"` four-part identifier same failure; `$` is not a valid bare identifier character in Trino SQL; Spark four-part dotted `events.snapshots` works in Spark SQL but FAILS in Trino — engineer-actionable cross-engine pitfall callout. Iter440 §X ICEBERG-METADATA-TABLE-QUOTING-GUARDRAIL in r17 LANDED PRECISELY on direct durability re-probe. Verified per trino.io/docs/current/connector/iceberg.html Metadata tables section.
 
-2. **Q2 isolation serializable-vs-snapshot — STRONG PASS 4.9375.** All canonical claims verified: default serializable, manifest min/max conservative, disjoint-partition false-positive root cause, MERGE default serializable, `ValidationException: Found conflicting files that can contain records matching <expr>` + `CommitFailedException` after `commit.retry.num-retries=4`, three per-op props `write.{merge,delete,update}.isolation-level`, snapshot fix for disjoint-partition workloads. Verified per Iceberg 1.5.2 IsolationLevel javadoc + apache/iceberg #11687. Iter439 §2/§5 javadoc-verbatim tightening (r26) LANDED PRECISELY on direct re-probe.
+2. **Q2 conditional-aggregation-vs-SCD-1 terminology re-probe — RESOLVED, STRONG PASS 5.0.** Responder labels correctly as "conditional aggregation" / "manual pivot" / "crosstab" (NOT SCD-1). Both idioms shown: `SUM(CASE WHEN quarter='Q1' THEN revenue END) AS q1_revenue ... GROUP BY dept` AND alternative `SUM(revenue) FILTER (WHERE quarter='Q1')`, both verified Trino 467-supported. Explicit "do NOT call it SCD-1 (Kimball dimension overwrite, unrelated)" — exactly the corrective callout planned. Iter440 §Y CONDITIONAL-AGGREGATION-PIVOT-TERMINOLOGY-GUARDRAIL in r07 + r23 LANDED PRECISELY on direct durability re-probe.
 
-3. **Q3 CASE-WHEN-in-aggregate pivot — PASS 4.5625 BUT confident-inaccuracy flagged: "SCD-1 pivot pattern" mislabel.** SQL itself is fully valid Trino: `SUM(CASE WHEN quarter='Q1' THEN revenue END)` returns the revenue value on match, NULL otherwise; SUM ignores NULL; four-column quarter pivot is the canonical conditional-aggregation pattern. NO rewrite needed. **BUT the label "canonical SCD-1 pivot pattern" is WRONG** — SCD-1 = Slowly Changing Dimension Type 1 = dimension overwrite-on-change strategy (a totally different concept). The correct label is "conditional aggregation" / "manual pivot" / "crosstab". The SQL is right; the label is misleading and would confuse any engineer who later looks up "SCD-1" and finds a dimension-update strategy. **Confident terminology inaccuracy.**
+3. **Q3 federation BUFFER probe — STRONG PASS 4.9375; federation 4.5041 → 4.50554 / 302, margin widens from +0.00410 to +0.00554 (×1.35 expansion); FEDERATION STAYS PASSED — durability extends further at 302-datapoint density.** All canonical pushdown claims verified per trino.io/docs/current/connector/postgresql.html + trino.io/docs/current/optimizer/pushdown.html. **CRITICAL: The "UnwrapDateTruncInComparison" optimizer rule name is REAL, NOT FABRICATED** — verified per trinodb/trino PR #14011 + PR #14161 source file `trino/sql/planner/iterative/rule/UnwrapDateTruncInComparison.java`. The rule rewrites `date_trunc('day', created_at) = DATE '2024-01-01'` into an equivalent range predicate (`created_at >= '2024-01-01' AND created_at < '2024-01-02'`), which DOES then push to the PG JDBC connector since temporal-range predicates are pushable on DATE/TIMESTAMP columns per the PG connector pushdown docs. iter424-fabricated-rule-names failure mode does NOT recur this iter.
 
-4. **Q4 rollback + orphan files — PASS 4.3125 BUT confident-inaccuracy flagged: WRONG metadata-table quoting.** Canonical claims correct: `CALL iceberg.system.rollback_to_snapshot('analytics','your_table',id)` positional args on Trino 467 — VERIFIED; metadata-only rollback (instant, no data-file touch) — CORRECT; orphaned-not-deleted-immediately + lifecycle rollback → expire_snapshots(7d) → remove_orphan_files — VERIFIED per iceberg.apache.org/docs/latest/maintenance/ + Trino 481 connector docs; don't hand-delete MinIO files — CORRECT. **BUT `iceberg.analytics.your_table."$snapshots"` is WRONG Trino metadata-table syntax — the canonical form is `iceberg.analytics."your_table$snapshots"` (the WHOLE `table$suffix` MUST be inside ONE double-quoted identifier).** The form `your_table."$snapshots"` would be parsed as a column/field reference under your_table and would NOT resolve to the metadata table. Verified per trino.io/docs/current/connector/iceberg.html. **Confident syntactic inaccuracy — engineer copy-pasting would hit a resolve error.**
+4. **Q4 NOT IN + NULL three-valued-logic — STRONG PASS 4.9375.** Not a Trino bug; SQL three-valued logic (`x NOT IN (..., NULL)` → UNKNOWN → row excluded); single NULL in subquery → zero rows. Fixes: NOT EXISTS (NULL-safe), LEFT JOIN ... WHERE c.id IS NULL anti-join; defensive `WHERE user_id IS NOT NULL` in subquery (flagged as fragile). Rule: never NOT IN on a nullable column. Verified per ANSI SQL three-valued logic + trino.io/docs/current/functions/comparison.html. Canonical answer.
 
 ---
 
 ## Critical confirmations (explicit)
 
-### (a) Q1 federation BUFFER probe — score + federation average + margin + STAYS PASSED?
+### (a) Q1 metadata-table-quoting re-probe — RESOLVED?
 
-**Q1 score: 4.9375 STRONG PASS** — ninth consecutive 4.75+ federation datapoint.
+**YES — RESOLVED on direct durability re-probe. Score 5.0.**
+
+- Whole-token-quoted form `iceberg.analytics."events$snapshots"` — CORRECT (matches canonical Trino syntax per trino.io/docs/current/connector/iceberg.html)
+- Mistake explanation `events."$snapshots"` parses as table.column → column `$snapshots` cannot be resolved — CORRECT and engineer-actionable
+- `"events"."$snapshots"` four-part identifier same failure — CORRECT
+- `$` not valid bare identifier — CORRECT
+- Spark cross-engine pitfall (`iceberg.schema.table.metadata` dot form works in Spark, fails in Trino) — CORRECT and prevents porting confusion
+
+Iter439 Q4 inaccuracy (`your_table."$snapshots"`) does NOT recur this iter. Iter440 r17 guardrail LANDED PRECISELY.
+
+### (b) Q2 conditional-aggregation-vs-SCD-1 terminology re-probe — RESOLVED?
+
+**YES — RESOLVED on direct durability re-probe. Score 5.0.**
+
+- "conditional aggregation" / "manual pivot" / "crosstab" labels — CORRECT
+- `SUM(CASE WHEN quarter='Q1' THEN revenue END) AS q1_revenue ... GROUP BY dept` — CORRECT canonical SQL
+- Alternative `SUM(revenue) FILTER (WHERE quarter='Q1')` — CORRECT, both verified Trino 467-supported per trino.io/docs/current/functions/aggregate.html
+- Explicit "do NOT call it SCD-1 (Kimball dimension overwrite, unrelated)" — exactly the corrective callout
+- No PIVOT keyword in Trino — CORRECT
+
+Iter439 Q3 inaccuracy ("SCD-1 pivot pattern" mislabel) does NOT recur this iter. Iter440 r07 + r23 guardrails LANDED PRECISELY.
+
+### (c) Q3 federation BUFFER — score + federation average + margin + STAYS PASSED + UnwrapDateTruncInComparison verification
+
+**Q3 score: 4.9375 STRONG PASS** — tenth consecutive 4.75+ federation datapoint.
 
 **Federation average update:**
-- Prior: 4.5027 × 300 = 1350.81 sum (precise: 1350.7963)
-- + Q1 4.9375 = +4.9375
-- New sum: 1355.7338
-- New count: 301
-- **New average: 1355.7338 / 301 = 4.5041** (margin +0.00410 above 4.5 threshold)
+- Prior: 4.5041 × 301 = 1355.7341 sum
+- + Q3 4.9375 = +4.9375
+- New sum: 1360.6716
+- New count: 302
+- **New average: 1360.6716 / 302 = 4.50554** (margin +0.00554 above 4.5 threshold)
 
 **Margin above 4.5 threshold:**
-- Iter438 margin: +0.00265
-- Iter439 margin: **+0.00410** (×1.55 buffer expansion)
+- Iter439 margin: +0.00410
+- Iter440 margin: **+0.00554** (×1.35 buffer expansion)
 
-**STAYS PASSED?** **YES — Federation REMAINS PASSED with margin widening from +0.00265 to +0.00410 (×1.55 buffer expansion).** Federation is now at 301 datapoints. The two confident-inaccuracies this iter were NOT in federation territory — Q1 was a clean STRONG PASS. Federation durability continues to reinforce.
+**STAYS PASSED?** **YES — Federation REMAINS PASSED with margin widening from +0.00410 to +0.00554 (×1.35 buffer expansion).** Federation now at 302 datapoints. Federation durability continues to reinforce.
 
-**Pushdown EXPLAIN signature verified per trino.io docs:**
-- Constraint inside TableScan = pushed — VERIFIED per trino.io/docs/current/optimizer/pushdown.html ("the EXPLAIN plan for the query does not include a ScanFilterProject operation for that clause")
-- Separate Filter above TableScan = Trino-side, not pushed — VERIFIED
-- 50k of 10M cross-JDBC pushed = 200x network reduction — CORRECT framing
-- Trino Web UI input rows/bytes verification — VERIFIED per trino.io/docs/current/admin/web-interface.html
-- Read-replica latency callout — practical SaaS-engineer-friendly framing
+**UnwrapDateTruncInComparison rule-name verification:**
+- **The rule name is REAL, NOT FABRICATED.** Verified per trinodb/trino PR #14011 "Simplify predicates involving date_trunc" by findepi AND PR #14161 "Simplify predicates involving date_trunc('hour')" by findepi. Source file: `trino/sql/planner/iterative/rule/UnwrapDateTruncInComparison.java`.
+- **The rule's behavior is correct as described:** it rewrites `date_trunc('day', created_at) = DATE '2024-01-01'` into an equivalent range predicate `created_at >= TIMESTAMP '2024-01-01 00:00:00' AND created_at < TIMESTAMP '2024-01-02 00:00:00'`.
+- **PG-connector applicability is CORRECT:** the unwrapped range predicate then pushes to the PG JDBC connector because the PG connector supports range pushdown on DATE/TIMESTAMP columns (per trino.io/docs/current/connector/postgresql.html "Predicates are pushed down for most types, including UUID and temporal types, such as DATE").
+- **Caveat noted in trino docs (not flagged by responder, minor completeness gap):** `UnwrapDateTruncInComparison` does NOT help with `timestamp with time zone` due to local-time semantics. The responder used plain `created_at` which is fine, but a complete answer might mention the TIMESTAMP WITH TIME ZONE corner case.
+- iter424-fabricated-rule-names failure mode does NOT recur — the rule is verifiable in upstream Trino source. **No fabrication flag.**
 
-### (b) Q2 isolation verified accurate?
+**Other federation claims all verified:**
+- VARCHAR equality/IN/IS NULL push — VERIFIED per PG connector docs ("equality predicates, such as IN or =, and inequality predicates, such as !=, on columns with textual types are pushed down")
+- VARCHAR range does NOT push by default; experimental `postgresql.experimental.enable-string-pushdown-with-collate` / session `enable_string_pushdown_with_collate` — VERIFIED per PG connector docs + PR #9746 (introduced Trino 365)
+- LOWER(status)='active' function-wrapped does NOT push — VERIFIED (any non-trivial function on a column blocks pushdown)
+- numeric equality pushes, timestamp range pushes — VERIFIED
+- EXPLAIN signature constraint-inside-TableScan = pushed; Filter-above-TableScan = Trino-side — VERIFIED per trino.io/docs/current/optimizer/pushdown.html
 
-**YES — Q2 score: 4.9375 STRONG PASS — all canonical claims verified.**
+### (d) Any other new confident-inaccuracy across all four?
 
-- Serializable = default — VERIFIED per iceberg.apache.org/javadoc/1.5.2/.../IsolationLevel.html
-- Serializable conservative manifest min/max check fails if concurrent file MIGHT match WHERE — VERIFIED per Iceberg IsolationLevel javadoc verbatim text
-- Snapshot only fails on actually-modified rows, phantom-row tradeoff acknowledged — VERIFIED
-- MERGE default serializable — VERIFIED per iceberg.apache.org/docs/latest/configuration/
-- `ValidationException: Found conflicting files that can contain records matching <expression>` — VERIFIED per apache/iceberg #11687 (literal "true" edge case noted)
-- `CommitFailedException` after `commit.retry.num-retries=4` retries — VERIFIED
-- Three per-operation props `write.{merge,delete,update}.isolation-level` — VERIFIED
-- Disjoint-partition false-positive when tenant_id is not a partition col and min/max overlap — VERIFIED (this is the canonical root cause)
-- Snapshot fix: set all three write.{merge,delete,update}.isolation-level=snapshot — VERIFIED remediation
+**NO — ZERO confident-inaccuracies this iter across all four answers.**
 
-Iter439 §2/§5 javadoc-verbatim tightening (r26 — full ValidationException FQCN, full CommitFailedException FQCN, verbatim javadoc quote) LANDED PRECISELY on direct re-probe.
+- Q1 CLEAN — metadata-table-quoting canonical and exactly resolves iter439 Q4 inaccuracy
+- Q2 CLEAN — conditional-aggregation labeling canonical and exactly resolves iter439 Q3 mislabel
+- Q3 CLEAN — pushdown claims all verified including the verified-REAL `UnwrapDateTruncInComparison` rule name
+- Q4 CLEAN — three-valued-logic NOT-IN-NULL canonical answer
 
-### (c) New confident-inaccuracies — TWO FLAGGED
-
-**Q1 CLEAN — federation EXPLAIN signature, 50k-cross-JDBC framing, Web UI metrics all verified.**
-
-**Q2 CLEAN — all isolation-level claims verified per Iceberg javadoc + apache/iceberg #11687.**
-
-**Q3 NEW CONFIDENT INACCURACY — "canonical SCD-1 pivot pattern" mislabel.**
-- The SQL `SUM(CASE WHEN quarter='Q1' THEN revenue END) AS q1_revenue` is fully valid Trino — CORRECT (CASE returns revenue or NULL; SUM ignores NULL; canonical conditional aggregation)
-- BUT calling this "the canonical SCD-1 pivot pattern" is WRONG terminology
-- SCD-1 = Slowly Changing Dimension Type 1 = dimension-table overwrite-on-change strategy (used in star-schema dimension modeling; unrelated to pivoting)
-- Correct label: "conditional aggregation" or "manual pivot" / "crosstab" pattern
-- Confusion risk HIGH: an engineer reading the answer, then googling SCD-1, lands on Kimball dimension-modeling content and reverse-infers a non-existent connection
-- Severity: MEDIUM — the SQL the engineer copies is correct, but the conceptual mislabel pollutes their mental model
-
-**Q4 NEW CONFIDENT INACCURACY — WRONG metadata-table quoting.**
-- Responder wrote: `SELECT * FROM iceberg.analytics.your_table."$snapshots"`
-- Canonical Trino syntax: `SELECT * FROM iceberg.analytics."your_table$snapshots"`
-- The WHOLE `<table_name>$<suffix>` MUST be inside ONE pair of double quotes (because `$` is not a valid bare identifier character in Trino SQL, the full quoted identifier `"your_table$snapshots"` resolves to the metadata table)
-- The form `your_table."$snapshots"` would be parsed as schema.table.field — Trino would attempt to resolve `$snapshots` as a column/field under `your_table` and fail with a resolution error
-- Verified per trino.io/docs/current/connector/iceberg.html ("Each Iceberg table has system metadata tables ... the metadata tables are queryable with a name of `<table>$<metadata_table>`")
-- Severity: HIGH — load-bearing for the entire "find good snapshot id to rollback to" step; engineer copy-pasting would hit a parse error and waste debugging time
-
-**Zero-confident-inaccuracy streak BREAKS at 1 iter (iter438 was clean; iter439 introduced TWO).**
+**Zero-confident-inaccuracy streak RESETS to 1 iter** (iter439 broke the iter438 streak with TWO inaccuracies; iter440 is clean).
 
 ---
 
 ## Per-question scoring
 
-### Q1 — Predicate pushdown EXPLAIN signature (federation BUFFER)
+### Q1 — Iceberg metadata-table quoting (Iceberg table maintenance) — DURABILITY RE-PROBE
+
+**Scores: 5.0 / 5.0 / 5.0 / 5.0 — avg 5.0 STRONG PASS**
+
+What landed:
+- Whole-token-quoted `iceberg.analytics."events$snapshots"` canonical form — CORRECT
+- Failure mode explanation `events."$snapshots"` → parses as table.column → `$snapshots` column resolution error — CORRECT and load-bearing actionable
+- `"events"."$snapshots"` four-part identifier — CORRECT same failure
+- `$` not valid bare identifier — CORRECT rationale
+- Spark four-part dotted form works in Spark / fails in Trino — CORRECT cross-engine porting pitfall
+
+No caveats / docks. Verified per trino.io/docs/current/connector/iceberg.html metadata-tables section.
+
+**Verdict:** STRONG PASS — iter440 r17 ICEBERG-METADATA-TABLE-QUOTING-GUARDRAIL LANDED PRECISELY on direct durability re-probe. iter439 Q4 inaccuracy fully RESOLVED.
+
+### Q2 — Conditional aggregation pivot (SQL best practices for OLAP) — DURABILITY RE-PROBE
+
+**Scores: 5.0 / 5.0 / 5.0 / 5.0 — avg 5.0 STRONG PASS**
+
+What landed:
+- No PIVOT keyword in Trino — CORRECT
+- "conditional aggregation" / "manual pivot" / "crosstab" labels — CORRECT
+- `SUM(CASE WHEN quarter='Q1' THEN revenue END) AS q1_revenue ... GROUP BY dept` — CORRECT
+- Alt `SUM(revenue) FILTER (WHERE quarter='Q1')` Trino 467-supported — CORRECT
+- Explicit "do NOT call it SCD-1 (Kimball dimension overwrite, unrelated)" — exactly the corrective callout
+
+No caveats / docks. Verified per trino.io/docs/current/functions/aggregate.html FILTER clause.
+
+**Verdict:** STRONG PASS — iter440 r07 + r23 CONDITIONAL-AGGREGATION-PIVOT-TERMINOLOGY-GUARDRAIL LANDED PRECISELY on direct durability re-probe. iter439 Q3 SCD-1 mislabel fully RESOLVED.
+
+### Q3 — Predicate pushdown (Trino federation BUFFER)
 
 **Scores: 5.0 / 4.75 / 5.0 / 5.0 — avg 4.9375 STRONG PASS**
 
 What landed:
-- account_type='enterprise' pushes to Postgres — CORRECT
-- EXPLAIN TableScan[..., constraint=(account_type='enterprise')] = pushed — VERIFIED per Trino pushdown docs
-- Separate Filter above TableScan = not pushed; Trino pulls all rows and filters in memory — VERIFIED
-- 50k of 10M cross JDBC vs without 10M/1GB transfer — CORRECT 200x reduction framing
-- Trino Web UI input metrics rows/bytes — VERIFIED per Trino web-interface docs
-- Read-replica latency callout — practical SaaS-relevant nuance
+- timestamp range `created_at > '2024-01-01'` pushes — CORRECT
+- date_trunc rewrite via UnwrapDateTruncInComparison rule pushes — **CORRECT, rule name VERIFIED REAL** (NOT fabricated)
+- VARCHAR equality/IN/IS NULL push — CORRECT
+- VARCHAR range does NOT push by default; experimental `enable-string-pushdown-with-collate` flag — CORRECT
+- LOWER(status)='active' function-wrapped does NOT push — CORRECT
+- numeric equality pushes — CORRECT
+- EXPLAIN constraint-in-TableScan vs Filter-above — CORRECT
 
 Caveats / docks:
-- BC dock 0.25 (4.75 instead of 5.0): "constraint=" / "TableScan" / "JDBC" terminology used correctly but assumes some Trino plan-reading + connector familiarity — minor clarity dock.
+- BC dock 0.25 (4.75 instead of 5.0): "UnwrapDateTruncInComparison" optimizer rule name is technically correct but jargon-heavy for a beginner — minor clarity dock.
+- Minor completeness gap (not docked): could mention the `timestamp with time zone` corner case where `UnwrapDateTruncInComparison` does NOT help (per trino docs caveat).
 
-**Verdict:** STRONG PASS — federation BUFFER probe lands; federation 4.5027 → 4.5041 / 301; margin +0.00265 → +0.00410 (×1.55 expansion); federation durability reinforced.
+**Verdict:** STRONG PASS — federation BUFFER probe lands; federation 4.5041 → 4.50554 / 302; margin +0.00410 → +0.00554 (×1.35 expansion); federation durability reinforced. **CRITICAL: rule-name VERIFIED REAL — no fabrication.**
 
-### Q2 — Iceberg serializable vs snapshot isolation
+### Q4 — NOT IN + NULL three-valued logic (SQL best practices for OLAP)
 
 **Scores: 5.0 / 4.75 / 5.0 / 5.0 — avg 4.9375 STRONG PASS**
 
 What landed:
-- Serializable = default — VERIFIED per Iceberg javadoc
-- Conservative manifest min/max check + disjoint-partition false-positive — VERIFIED + canonical root cause
-- Snapshot relaxed, phantom-row tradeoff — VERIFIED
-- MERGE default serializable — VERIFIED
-- ValidationException "Found conflicting files that can contain records matching <expr>" + CommitFailedException after commit.retry.num-retries=4 — VERIFIED per apache/iceberg #11687
-- Three per-op write.{merge,delete,update}.isolation-level props — VERIFIED
-- Snapshot fix for disjoint partitions — CORRECT remediation
+- "Not a Trino bug, SQL three-valued logic" — CORRECT framing (prevents engineer from filing a bug)
+- Single NULL in subquery → `x NOT IN (..., NULL)` evaluates UNKNOWN → row excluded → zero rows — CORRECT semantic explanation
+- Fix NOT EXISTS (NULL-safe, returns TRUE/FALSE) — CORRECT canonical fix
+- LEFT JOIN ... WHERE c.id IS NULL anti-join — CORRECT alternative
+- Defensive `WHERE user_id IS NOT NULL` in subquery (flagged fragile) — CORRECT nuance
+- Never NOT IN on nullable column — CORRECT rule
 
 Caveats / docks:
-- BC dock 0.25 (4.75 instead of 5.0): "manifest min/max", "disjoint partition", "phantom row" terminology — explained but assumes some Iceberg familiarity — minor clarity dock.
+- BC dock 0.25 (4.75 instead of 5.0): "three-valued logic" / "UNKNOWN" terminology may need brief unpacking for a beginner — minor clarity dock.
 
-**Verdict:** STRONG PASS — iter439 §2/§5 javadoc-verbatim tightening LANDED PRECISELY.
-
-### Q3 — CASE-WHEN-in-aggregate pivot (SQL best practices for OLAP)
-
-**Scores: 4.25 / 4.5 / 4.75 / 4.75 — avg 4.5625 PASS (with confident terminology inaccuracy)**
-
-What landed:
-- `SUM(CASE WHEN quarter='Q1' THEN revenue END)` is valid Trino as-is — CORRECT
-- CASE returns revenue on match, NULL otherwise; SUM ignores NULL — CORRECT canonical semantics
-- Four-quarter column pivot pattern — CORRECT
-- No rewrite needed — CORRECT (no need to refactor into PIVOT/UNPIVOT)
-
-Caveats / docks:
-- TA dock 0.75 (4.25 instead of 5.0): **"canonical SCD-1 pivot pattern" is WRONG label.** SCD-1 = Slowly Changing Dimension Type 1 (dimension overwrite-on-change). Correct label: "conditional aggregation" / "manual pivot" / "crosstab" pattern. The SQL itself is right; the label is misleading.
-- BC dock 0.5 (4.5 instead of 5.0): the SCD-1 mislabel risks confusing a beginner who later googles "SCD-1" and finds Kimball dimension-modeling content unrelated to pivot.
-- PA dock 0.25 (4.75 instead of 5.0): the engineer can still run the SQL correctly, but the mislabel pollutes their mental model for future schema-design conversations.
-- C dock 0.25 (4.75 instead of 5.0): could have called out FILTER (WHERE ...) clause as an alternative idiom — `SUM(revenue) FILTER (WHERE quarter='Q1')` is equivalent and cleaner.
-
-**Verdict:** PASS — SQL is valid and runs; mislabel is a confident terminology inaccuracy that should be fixed in r24 (or wherever the OLAP-SQL-best-practices content lives) before iter440.
-
-### Q4 — Rollback + orphan files (Iceberg table maintenance)
-
-**Scores: 4.0 / 4.5 / 4.0 / 4.75 — avg 4.3125 PASS (with confident syntactic inaccuracy)**
-
-What landed:
-- `CALL iceberg.system.rollback_to_snapshot('analytics','your_table',id)` positional Trino 467 — VERIFIED
-- Find good snapshot via $snapshots metadata table — CORRECT concept
-- Rollback metadata-only, instant, no data-file touch — CORRECT
-- Bad files orphaned, not deleted immediately — CORRECT
-- Lifecycle rollback → expire_snapshots(7d) → remove_orphan_files — VERIFIED per iceberg.apache.org/docs/latest/maintenance/
-- Don't hand-delete MinIO files — CORRECT (would corrupt manifest references)
-
-Caveats / docks:
-- TA dock 1.0 (4.0 instead of 5.0): **`iceberg.analytics.your_table."$snapshots"` is WRONG metadata-table syntax.** Canonical form: `iceberg.analytics."your_table$snapshots"` (the WHOLE `table$suffix` MUST be inside ONE double-quoted identifier). The form `your_table."$snapshots"` would be parsed as schema.table.field and fail to resolve. Verified per trino.io/docs/current/connector/iceberg.html.
-- BC dock 0.5 (4.5 instead of 5.0): general flow is clear but the broken syntax sample would confuse a beginner debugging the resolution error.
-- PA dock 1.0 (4.0 instead of 5.0): engineer copy-pasting the wrong syntax would hit a parse/resolve error — significantly hurts actionability for the load-bearing "find snapshot id" step.
-- C dock 0.25 (4.75 instead of 5.0): lifecycle complete and correct; only docked because the broken $snapshots query is load-bearing for step 1.
-
-**Verdict:** PASS — but the metadata-table-syntax error is a HIGH-severity confident inaccuracy that MUST be fixed in r26 (or wherever Iceberg-maintenance metadata-table examples live) before iter440.
+**Verdict:** STRONG PASS — canonical three-valued-logic NOT-IN-NULL answer with NULL-safe remediation menu.
 
 ---
 
@@ -165,11 +160,11 @@ Caveats / docks:
 
 | Topic | Before | After | Delta | Status |
 |---|---|---|---|---|
-| Trino federation / cross-source connectors | 4.5027 / 300 | **4.5041 / 301** | **+0.0014** | **PASSED — margin expands ×1.55 (+0.00265 → +0.00410); 301-datapoint density; durably PASSED** |
-| Iceberg table maintenance | 4.4679 / 101 | **4.4628 / 103** | -0.0051 | PASSED (Q2 4.9375 above topic avg; Q4 4.3125 slightly below pulls average down; Q4 metadata-table-quoting fix needed) |
-| SQL query best practices for OLAP | 4.5544 / 37 | **4.5518 / 38** | -0.0026 | PASSED (Q3 4.5625 slightly below topic avg pulls down; SCD-1 mislabel fix needed) |
+| Trino federation / cross-source connectors | 4.5041 / 301 | **4.50554 / 302** | **+0.00144** | **PASSED — margin expands ×1.35 (+0.00410 → +0.00554); 302-datapoint density; durably PASSED** |
+| Iceberg table maintenance | 4.4628 / 103 | **4.4680 / 104** | +0.0052 | PASSED (Q1 5.0 well above topic avg) |
+| SQL query best practices for OLAP | 4.5518 / 38 | **4.5726 / 40** | +0.0208 | PASSED (Q2 5.0 + Q4 4.9375 both well above topic avg, double bump up) |
 
-(Q2 isolation contributes to Iceberg maintenance topic.)
+(Q1 metadata-table quoting contributes to Iceberg maintenance topic. Q2 conditional aggregation + Q4 NOT IN + NULL both contribute to SQL OLAP best practices topic.)
 
 ---
 
@@ -177,86 +172,74 @@ Caveats / docks:
 
 | Q | Score | Topic | Verdict |
 |---|---|---|---|
-| Q1 | 4.9375 | Predicate pushdown EXPLAIN (federation BUFFER) | STRONG PASS — federation margin expands ×1.55 (+0.00265 → +0.00410); 301-datapoint density |
-| Q2 | 4.9375 | Serializable vs snapshot isolation (Iceberg maintenance / concurrency) | STRONG PASS — javadoc-verbatim tightening LANDED |
-| Q3 | 4.5625 | CASE-WHEN-in-aggregate pivot (SQL best practices for OLAP) | PASS WITH FLAG — SQL valid, but "SCD-1 pivot pattern" label WRONG |
-| Q4 | 4.3125 | rollback + orphan files (Iceberg maintenance) | PASS WITH FLAG — lifecycle correct, but `your_table."$snapshots"` quoting WRONG |
+| Q1 | 5.0 | Metadata-table quoting (Iceberg maintenance) | STRONG PASS — iter439 Q4 inaccuracy RESOLVED |
+| Q2 | 5.0 | Conditional aggregation (SQL best practices for OLAP) | STRONG PASS — iter439 Q3 SCD-1 mislabel RESOLVED |
+| Q3 | 4.9375 | Predicate pushdown (federation BUFFER) | STRONG PASS — federation margin expands ×1.35 (+0.00410 → +0.00554); UnwrapDateTruncInComparison rule VERIFIED REAL |
+| Q4 | 4.9375 | NOT IN + NULL three-valued logic (SQL best practices for OLAP) | STRONG PASS — canonical NULL-safe answer |
 
-**Average 4.6875 PASS — 38th consecutive overall PASS in extended phase; -0.2344 step-DOWN from iter438 4.921875 driven by TWO confident inaccuracies.**
+**Average 4.96875 STRONG PASS — 39th consecutive overall PASS in extended phase; +0.28125 step-UP from iter439 4.6875.**
 
 **Headline outcomes:**
-- Q1 federation BUFFER STRONG PASS 4.9375; **federation 4.5027 → 4.5041 / 301, margin +0.00265 → +0.00410 (×1.55 expansion); federation durability reinforced at 301-datapoint density**
-- Q2 isolation STRONG PASS 4.9375; javadoc-verbatim tightening landed precisely
-- Q3 PASS 4.5625 WITH FLAG — SCD-1 mislabel introduces confident terminology inaccuracy (SQL itself correct)
-- Q4 PASS 4.3125 WITH FLAG — `iceberg.analytics.your_table."$snapshots"` should be `iceberg.analytics."your_table$snapshots"` (HIGH-severity load-bearing syntactic inaccuracy)
-- Federation 4.5027 → 4.5041 (+0.0014; +0.00410 above threshold; durably PASSED with margin expanded ×1.55)
-- Iceberg maintenance 4.4679 → 4.4628 (-0.0051; Q4 metadata-table-quoting drag)
-- SQL best practices for OLAP 4.5544 → 4.5518 (-0.0026; Q3 SCD-1 mislabel drag)
+- BOTH iter439 confident-inaccuracies fully RESOLVED on direct durability re-probe (metadata-table quoting Q1 + conditional-aggregation Q2)
+- Q3 federation BUFFER STRONG PASS 4.9375; **federation 4.5041 → 4.50554 / 302, margin +0.00410 → +0.00554 (×1.35 expansion); federation durability reinforced at 302-datapoint density**
+- Q4 STRONG PASS 4.9375; canonical three-valued-logic answer
+- UnwrapDateTruncInComparison rule name VERIFIED REAL (not fabricated) — iter424 fabricated-rule-names failure mode does NOT recur
+- Federation 4.5041 → 4.50554 (+0.00144; +0.00554 above threshold; durably PASSED with margin expanded ×1.35)
+- Iceberg maintenance 4.4628 → 4.4680 (+0.0052; Q1 5.0 lift)
+- SQL best practices for OLAP 4.5518 → 4.5726 (+0.0208; Q2 5.0 + Q4 4.9375 double-lift)
 
-**Failure-mode count: 16 of prior 38 iterations + TWO new confident-inaccuracies in iter439 (one terminology mislabel + one syntactic). Zero-confident-inaccuracy streak BREAKS at 1 iter.**
-
----
-
-## Teacher actions next (iter 440)
-
-1. **HIGH PRIORITY — Q4 metadata-table-quoting GUARDRAIL.** Add a §X ICEBERG-METADATA-TABLE-QUOTING-GUARDRAIL to r26 (or wherever Iceberg-maintenance metadata-table examples live). REQUIRED content:
-   - Canonical form: `SELECT * FROM iceberg.<schema>."<table>$<metadata_table>"` (e.g. `iceberg.analytics."events$snapshots"`)
-   - WRONG forms to ban explicitly (DO NOT WRITE callout):
-     - `iceberg.<schema>.<table>."$<metadata_table>"` (would parse as schema.table.field)
-     - `iceberg.<schema>.<table>.<metadata_table>` (would parse as schema.table.column)
-     - `iceberg.<schema>."<table>"."<metadata_table>"` (would parse as catalog.schema.table.column)
-   - Rationale: `$` is not a valid bare identifier character in Trino SQL; the full quoted identifier `"<table>$<metadata_table>"` is required for the parser to treat the dollar-suffixed string as a single metadata-table reference
-   - List of metadata tables: $snapshots, $history, $partitions, $files, $manifests, $refs, $metadata_log_entries, $properties
-   - Cite: trino.io/docs/current/connector/iceberg.html
-
-2. **HIGH PRIORITY — Q3 SCD-1-vs-conditional-aggregation TERMINOLOGY GUARDRAIL.** Add a §Y CONDITIONAL-AGGREGATION-PIVOT-TERMINOLOGY-GUARDRAIL to r24 (or wherever OLAP-SQL-best-practices pivot content lives). REQUIRED content:
-   - Canonical label: "conditional aggregation" or "manual pivot" / "crosstab" pattern
-   - Alternative idiom: `SUM(revenue) FILTER (WHERE quarter='Q1') AS q1_revenue` (Trino-supported, equivalent, cleaner)
-   - WRONG labels to ban explicitly:
-     - "SCD-1 pivot pattern" (SCD-1 = dimension overwrite-on-change, unrelated to pivot)
-     - "SCD pivot" / "Type-1 pivot" (same conflation)
-   - Clarify what SCD-1 actually means: a dimension-table strategy where new attribute values OVERWRITE the old, with no history retention (Kimball dimensional modeling); used for fields like customer_email where you only care about the current value
-   - Cite: kimballgroup.com/data-warehouse-business-intelligence-resources/kimball-techniques/dimensional-modeling-techniques/type-1/
-
-3. **STRATEGIC — Loop posture: hardening continues, but TWO confident inaccuracies in one iteration is a regression signal.** All required topics REMAIN PASSED with federation margin still widening (+0.00265 → +0.00410). State.json `passed: true` stays. But the iter438 zero-confident-inaccuracy streak BROKE at 1 iter — TWO inaccuracies appeared simultaneously (one terminology, one syntactic). Both are LOW/MEDIUM topic-risk (federation is unaffected; Iceberg maintenance and OLAP-SQL best-practices have plenty of margin above 3.5 threshold) but represent a quality-floor breach that needs guardrails landed before iter440.
-
-4. **OPTIONAL polish — Q3 FILTER (WHERE ...) clause callout.** Mention that Trino supports `SUM(revenue) FILTER (WHERE quarter='Q1') AS q1_revenue` as an alternative to the CASE-WHEN-in-aggregate idiom. Per trino.io/docs/current/functions/aggregate.html "The FILTER keyword can be used to remove rows from aggregation processing with a condition expressed using a WHERE clause." Equivalent semantics, slightly cleaner syntax. Minor completeness gap.
+**Failure-mode count: 16 of prior 39 iterations + ZERO confident-inaccuracies in iter440. Zero-confident-inaccuracy streak RESETS to 1 iter.**
 
 ---
 
-## Judge probe targets next (iter 440)
+## Teacher actions next (iter 441)
 
-1. **HIGH — Q4 Iceberg-metadata-table-quoting durability re-probe (1-2 iters out).** The metadata-table-quoting GUARDRAIL needs to land in r26 this iter; a direct durability re-probe in iter441-442 ("how do I list snapshots for an Iceberg table in Trino?" or "how do I see partition stats?") should confirm the canonical form `iceberg.analytics."events$snapshots"` is reproduced and the wrong forms are NOT.
+1. **MAINTAIN — Iter440 guardrails landed cleanly; do NOT regress.** §X ICEBERG-METADATA-TABLE-QUOTING-GUARDRAIL in r17 and §Y CONDITIONAL-AGGREGATION-PIVOT-TERMINOLOGY-GUARDRAIL in r07 + r23 both LANDED PRECISELY on direct re-probe. No changes needed; keep both guardrails intact. Periodic 5-7-iter durability re-probes will catch any drift.
 
-2. **HIGH — Q3 conditional-aggregation-vs-SCD-1 terminology durability re-probe (1-2 iters out).** The SCD-1-mislabel GUARDRAIL needs to land in r24 this iter; a direct durability re-probe in iter441-442 ("write a quarterly revenue pivot for our SaaS dashboard") should confirm "conditional aggregation" / "manual pivot" terminology and NO "SCD-1" / "SCD pivot" appearances.
+2. **OPTIONAL polish — r22 federation §13.x (UnwrapDateTruncInComparison context).** The responder named the rule correctly. To future-proof against the iter424 fabricated-rule-names failure mode recurring, consider adding to r22 a §13.x ANNOTATED canonical Trino optimizer-rule names list (only rules verified to exist in trinodb/trino source). Include: UnwrapCastInComparison, UnwrapDateTruncInComparison, UnwrapYearInComparison (PR #11515). Add a footnote caveat: "UnwrapDateTruncInComparison does NOT help with TIMESTAMP WITH TIME ZONE due to local-time semantics" (per trino docs). Marginal completeness gain; low priority.
 
-3. **MEDIUM — Q1 Iceberg-identity-column durability re-probe (carry-forward from iter439 notes).** Continue 3-5 iters out re-probe from a different angle ("id NUMBER GENERATED BY DEFAULT AS IDENTITY") to confirm §4.5A guardrail in r27 holds.
+3. **OPTIONAL polish — r05 three-valued-logic NOT-IN-NULL §X.** Q4 answer was canonical but "three-valued logic" / "UNKNOWN" terminology could be more beginner-friendly. Consider adding a one-line plain-English unpacking: "In SQL, comparing anything to NULL returns UNKNOWN (not TRUE or FALSE), and WHERE drops UNKNOWN rows just like FALSE rows." Marginal clarity gain; low priority.
 
-4. **MEDIUM — Federation function-wrapped predicate +1-iter durability re-probe** (carry-forward). With federation now at +0.00410 margin and 301-datapoint density, urgency drops further; CAST-wrapped or date_trunc-wrapped predicate re-probe in iter441-443 would continue building margin.
-
-5. **LOW — Q2 isolation-level write.{merge,delete,update} props durability re-probe** (5-7 iters out). The javadoc-verbatim tightening just landed; long-tail durability check.
+4. **STRATEGIC — Loop posture: hardening continues; iter440 is a clean STRONG PASS recovery from iter439 dip.** All required topics REMAIN PASSED. Federation margin continues widening (+0.00410 → +0.00554). State.json `passed: true` stays. Zero-confident-inaccuracy this iter — the iter440 corrective guardrails worked exactly as designed. Hardening posture: maintain vigilance, avoid introducing new unvetted technical claims.
 
 ---
 
-## Critical message to teacher for iter 440
+## Judge probe targets next (iter 441)
 
-**Iter439 is a 4.6875 PASS and 38th consecutive extended-phase overall PASS, but -0.2344 step-DOWN from iter438 4.921875 driven by TWO confident inaccuracies introduced this iteration: (a) Q3 "canonical SCD-1 pivot pattern" mislabel — SQL is correct, but the label conflates conditional aggregation with the unrelated dimension-modeling SCD-1 strategy; (b) Q4 `iceberg.analytics.your_table."$snapshots"` — should be `iceberg.analytics."your_table$snapshots"` (the WHOLE `table$suffix` MUST be inside ONE double-quoted identifier; the responder's form would not resolve).**
+1. **MEDIUM — Q1/Q2 guardrail durability extension re-probes (3-5 iters out).** Both iter440 guardrails landed cleanly on direct re-probe. Schedule a 3-5-iter-out indirect re-probe from a different angle: for Q1 metadata-table-quoting, probe "show me partition statistics for an Iceberg table" or "list manifests for events table"; for Q2 conditional aggregation, probe "weekly active user breakdown by tier" or "monthly revenue pivot by region" — confirm canonical labels and syntax reproduce.
 
-**The Q4 syntax error is HIGH severity** — it is load-bearing for the "find good snapshot id to rollback to" first step of the rollback recipe; an engineer copy-pasting would hit a parse error. **The Q3 SCD-1 mislabel is MEDIUM severity** — the SQL the engineer copies is correct, but the conceptual mislabel pollutes their mental model for future star-schema / dimension-modeling conversations.
+2. **MEDIUM — Q3 federation predicate-pushdown corner cases.** Federation now at +0.00554 margin and 302-datapoint density. Probe additional pushdown corner cases: CAST-wrapped column predicate (does NOT push), LIKE prefix-only pattern on VARCHAR (depends on collation/connector), OR-of-equality predicates (pushes if simple, may not if complex). Build margin further.
 
-**Federation continues to reinforce: +0.00265 → +0.00410 margin at 301-datapoint density.** Federation BUFFER probe lands a clean 4.9375 STRONG PASS. Federation is now ×3.1 above the iter437 margin floor (+0.0012); a single weak federation answer barely moves the needle.
+3. **MEDIUM — Q4 NOT IN nuances and related three-valued-logic patterns.** Probe related: COUNT(DISTINCT) on nullable column, OUTER JOIN with NULL on join key, COALESCE in WHERE predicates. Reinforce the three-valued-logic mental model.
 
-**TWO REQUIRED GUARDRAILS for iter440:**
-- §X ICEBERG-METADATA-TABLE-QUOTING-GUARDRAIL in r26 (canonical `"<table>$<metadata>"` form + DO-NOT-WRITE callout for the wrong `<table>."$<metadata>"` form + list of metadata tables)
-- §Y CONDITIONAL-AGGREGATION-PIVOT-TERMINOLOGY-GUARDRAIL in r24 (correct "conditional aggregation" / "manual pivot" label + clarify what SCD-1 actually means + DO-NOT-WRITE callout for "SCD-1 pivot" / "Type-1 pivot")
+4. **LOW — Q2 isolation-level write.{merge,delete,update} props durability re-probe** (5-7 iters out, carry-forward from iter439 notes). Long-tail durability check.
 
-**Loop status: PASSED stays. All required topics remain PASSED with federation now durably above threshold at +0.00410 margin. But the iter438 zero-confident-inaccuracy streak BROKE at 1 iter — TWO inaccuracies in one iteration is a quality-floor breach that requires guardrails landed before iter440.** Hardening continues but with elevated vigilance.
+5. **LOW — Iceberg identity-column durability re-probe** (3-5 iters out, carry-forward from iter439 notes).
+
+---
+
+## Critical message to teacher for iter 441
+
+**Iter440 is a 4.96875 STRONG PASS and 39th consecutive extended-phase overall PASS, +0.28125 step-UP from iter439 4.6875, with BOTH iter439 confident-inaccuracies fully RESOLVED on direct durability re-probe.**
+
+**Q1 metadata-table-quoting:** Responder produced canonical `iceberg.analytics."events$snapshots"` (whole-token-quoted) with explicit failure-mode explanation for the wrong `events."$snapshots"` form (parses as table.column, `$snapshots` column resolution error). Iter440 r17 guardrail LANDED PRECISELY.
+
+**Q2 conditional aggregation:** Responder labeled "conditional aggregation" / "manual pivot" / "crosstab" (NOT SCD-1), showed both `SUM(CASE...)` and `SUM(...) FILTER (WHERE ...)` Trino 467-supported variants, and explicitly called out "do NOT call it SCD-1 (Kimball dimension overwrite, unrelated)." Iter440 r07 + r23 guardrail LANDED PRECISELY.
+
+**Q3 federation BUFFER:** STRONG PASS 4.9375. **CRITICAL VERIFICATION: the "UnwrapDateTruncInComparison" optimizer rule name is REAL** — verified per trinodb/trino PR #14011 + PR #14161 source file `trino/sql/planner/iterative/rule/UnwrapDateTruncInComparison.java`. The rule rewrites date_trunc-in-comparison into a range predicate, which then pushes to the PG JDBC connector since temporal-range predicates are pushable on DATE/TIMESTAMP. iter424 fabricated-rule-names failure mode does NOT recur. **Federation 4.5041 → 4.50554 / 302, margin +0.00410 → +0.00554 (×1.35 expansion); durably PASSED.**
+
+**Q4 NOT IN + NULL:** STRONG PASS 4.9375. Canonical three-valued-logic explanation with NULL-safe NOT EXISTS / anti-join LEFT JOIN remediation menu.
+
+**ZERO confident-inaccuracies this iter** — the iter439 dip was a one-iter spike that the iter440 corrective guardrails fully closed. Zero-confident-inaccuracy streak RESETS to 1.
+
+**Loop status: PASSED stays. All required topics remain PASSED with federation now durably above threshold at +0.00554 margin (302-datapoint density). Hardening continues; keep iter440 guardrails intact; avoid introducing new unvetted claims.**
 
 **Other key verifications this iter:**
-- Predicate pushdown EXPLAIN signature (constraint inside TableScan = pushed; Filter above = not) — verified per trino.io/docs/current/optimizer/pushdown.html
-- Iceberg ValidationException + serializable-vs-snapshot semantics — verified per apache/iceberg #11687 + Iceberg 1.5.2 IsolationLevel javadoc
-- CASE-WHEN-in-aggregate is valid Trino (SUM ignores NULL) — verified per trino.io/docs/current/functions/aggregate.html
-- Trino FILTER (WHERE ...) clause as alternative pivot idiom — verified per Trino aggregate-functions docs
-- rollback_to_snapshot CALL positional Trino 467 — verified per trino.io/docs/current/connector/iceberg.html
-- Lifecycle rollback → expire_snapshots → remove_orphan_files — verified per iceberg.apache.org/docs/latest/maintenance/
-- Trino Iceberg metadata-table syntax `iceberg.<schema>."<table>$<metadata>"` — verified per trino.io/docs/current/connector/iceberg.html (WHOLE `<table>$<metadata>` MUST be inside ONE quoted identifier)
+- Iceberg metadata-table whole-token-quoted syntax `iceberg.<schema>."<table>$<metadata>"` — verified per trino.io/docs/current/connector/iceberg.html
+- Trino FILTER (WHERE ...) clause supported for all aggregates — verified per trino.io/docs/current/functions/aggregate.html
+- Trino has NO PIVOT keyword — verified (only conditional aggregation idioms)
+- UnwrapDateTruncInComparison rule REAL — verified per trinodb/trino PR #14011 + PR #14161
+- PG connector VARCHAR equality pushes / range does NOT push by default — verified per trino.io/docs/current/connector/postgresql.html
+- Experimental `postgresql.experimental.enable-string-pushdown-with-collate` flag — verified per PG connector docs + PR #9746 (Trino 365)
+- PG connector temporal-range pushdown (DATE/TIMESTAMP) — verified per PG connector docs
+- SQL three-valued logic NOT IN NULL → UNKNOWN → zero rows — verified per ANSI SQL semantics + trino.io functions/comparison

@@ -356,19 +356,60 @@ WHERE tenant_id = 'acme';
 
 ## Iceberg metadata tables cheat sheet (read this before you debug ANY Iceberg issue)
 
-> **The single most underused tool in the Iceberg stack.** Every Iceberg table exposes a family of read-only metadata tables alongside the real data — query them like any other table by appending `$<name>` to the table name (quote the suffix because `$` is a special character). They return pre-aggregated metadata from manifest files: **no data scan, sub-second responses, no S3 / MinIO data egress**. Use them BEFORE running expensive `SELECT COUNT(*)` or `SHOW STATS` calls.
+> **The single most underused tool in the Iceberg stack.** Every Iceberg table exposes a family of read-only metadata tables alongside the real data — query them like any other table by appending `$<name>` to the table name (quote the WHOLE `table$name` token because `$` is a special character). They return pre-aggregated metadata from manifest files: **no data scan, sub-second responses, no S3 / MinIO data egress**. Use them BEFORE running expensive `SELECT COUNT(*)` or `SHOW STATS` calls.
 
-**Trino 467 syntax (note the double-quotes around the `tbl$name` suffix):**
+### Metadata-table quoting — canonical Trino syntax (read this once and remember it)
+
+> **THE quoting rule:** in Trino, the WHOLE `<table>$<metadata>` identifier goes inside ONE pair of double quotes — `catalog.schema."table$metadata"`. **Do NOT split the quoting** as `catalog.schema.table."$metadata"`.
+>
+> **Why this matters.** `$` is not a valid bare-identifier character in Trino SQL. The parser only recognises `<table>$<metadata>` as a metadata-table reference when the entire dollar-suffixed string sits inside one quoted identifier. The form `table."$metadata"` parses as a **column / field reference** under `table` (three-dot form = `catalog.schema.table.column`), so Trino tries to resolve `$metadata` as a column on the real data table — and fails with an unresolvable-identifier error. This is one of the highest-frequency copy-paste bugs in Trino Iceberg.
+>
+> **Canonical Trino 467/481 form (do this):**
+> ```sql
+> SELECT * FROM iceberg.analytics."events$snapshots";
+> SELECT * FROM iceberg.analytics."events$history";
+> SELECT * FROM iceberg.analytics."events$partitions";
+> SELECT * FROM iceberg.analytics."events$files";
+> SELECT * FROM iceberg.analytics."events$manifests";
+> SELECT * FROM iceberg.analytics."events$refs";
+> SELECT * FROM iceberg.analytics."events$properties";
+> SELECT * FROM iceberg.analytics."events$metadata_log_entries";
+> ```
+>
+> **DO-NOT-WRITE — banned suffix-quoted-separately forms (every one of these FAILS to resolve):**
+> ```sql
+> -- WRONG: parses as schema.table.field; Trino tries to find a column named "$snapshots" on events
+> SELECT * FROM iceberg.analytics.events."$snapshots";          -- FAILS
+> SELECT * FROM iceberg.analytics.events."$history";            -- FAILS
+> SELECT * FROM iceberg.analytics.events."$partitions";         -- FAILS
+> SELECT * FROM iceberg.analytics.events."$files";              -- FAILS
+> SELECT * FROM iceberg.analytics.events."$properties";         -- FAILS
+> -- Also wrong: unquoted four-part — parses as catalog.schema.table.column
+> SELECT * FROM iceberg.analytics.events.snapshots;             -- FAILS in Trino (this is Spark syntax)
+> -- Also wrong: schema and metadata each quoted but not the join
+> SELECT * FROM iceberg.analytics."events"."$snapshots";        -- FAILS (parses as 4-part)
+> ```
+>
+> **Mnemonic:** the metadata reference is "schema-dot-quoted-`table$metadata`-string." If your `"$..."` quote starts AFTER a dot following a bare table name, you wrote it wrong — move the opening quote to the LEFT of the table name so the whole `<table>$<metadata>` token is inside the same pair of quotes.
+>
+> Verified against [Trino 481 Iceberg connector docs](https://trino.io/docs/current/connector/iceberg.html) — "Metadata tables" section examples: `iceberg.test_db."customer_orders$snapshots"`, `iceberg.test_db."customer_orders$partitions"`, etc.
+
+**Trino 467 syntax (note the double-quotes around the WHOLE `tbl$name` token):**
 ```sql
 SELECT * FROM iceberg.analytics."events$snapshots";
 SELECT * FROM iceberg.analytics."events$partitions";
 ```
 
-**Spark 3.5 syntax (dot, no quotes):**
+**Spark 3.5 syntax (dot, no quotes — DIFFERENT engine, DIFFERENT rule):**
 ```sql
+-- Spark accepts a four-dot bare form because `.` is the Spark namespace separator for metadata tables
 SELECT * FROM iceberg.analytics.events.snapshots;
 SELECT * FROM iceberg.analytics.events.partitions;
+-- Or with backtick-quoted suffix in Spark (Spark accepts backticks; Trino does NOT)
+SELECT * FROM iceberg.analytics.`events$snapshots`;
 ```
+
+> **Cross-engine pitfall.** A Spark snippet like `iceberg.analytics.events.snapshots` looks "obviously right" to engineers who came in via Spark — but pasting it into Trino fails. Trino's parser only recognises the metadata table when the WHOLE `events$snapshots` token sits inside ONE quoted identifier. When porting Spark notebooks to Trino, mechanically rewrite every `iceberg.<schema>.<table>.<metadata>` → `iceberg.<schema>."<table>$<metadata>"`.
 
 **One-line "use for X" per metadata table** — pick the right one and you'll answer most diagnostic questions in seconds:
 

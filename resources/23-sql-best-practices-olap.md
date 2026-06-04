@@ -777,6 +777,10 @@ FROM events
 WHERE event_date = DATE '2026-05-26';
 ```
 
+> **Terminology note — call this pattern by its right name.** The `aggregate(...) FILTER (WHERE <cond>)` form above and the equivalent `SUM(CASE WHEN <cond> THEN <metric> END)` form are both **conditional aggregation** — also called **manual pivot** or **crosstab** when you build a multi-column pivot (e.g., quarterly revenue as `q1_revenue, q2_revenue, q3_revenue, q4_revenue` columns). Trino has **no `PIVOT` keyword** — you write the conditional aggregation explicitly. The `FILTER (WHERE ...)` clause is supported on every Trino aggregate per [Trino aggregate functions docs](https://trino.io/docs/current/functions/aggregate.html).
+>
+> **DO-NOT-WRITE — banned mislabels:** "SCD-1 pivot", "Type-1 pivot", "SCD pivot pattern". SCD-1 (Slowly Changing Dimension Type 1) is an **unrelated Kimball dimension-modeling concept** — a strategy where new attribute values **overwrite** the old with no history retention (e.g., overwriting `customer_email` when a user updates it). It is **not** a pivot pattern. Conflating SCD-1 with conditional aggregation misleads anyone who later looks up the term. See [resource 07 § "Wide-pivot variant"](07-analytical-query-patterns.md) for the full quarterly-revenue worked example with both CASE-WHEN and FILTER forms side by side.
+
 **For multi-step pipelines**, use a CTE:
 ```sql
 WITH recent_events AS (
