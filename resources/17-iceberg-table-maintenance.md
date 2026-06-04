@@ -150,6 +150,156 @@ The Trino `sorted_by + EXECUTE optimize` recipe above covers the most common cas
 
 ---
 
+## LEADING CANONICAL — Adding a column to an Iceberg table on Trino 467 / Iceberg 1.5.2 (read this BEFORE recommending any `ADD COLUMN` syntax)
+
+> **Why this section exists (iter458 Q3 fab class).** A SaaS engineer asked: "How do I add a column with a default value to an Iceberg table?" The previous responder hallucinated `ALTER TABLE ... ADD COLUMN <col> <type> DEFAULT '<value>'` syntax as if it worked on Trino 467, AND claimed "existing rows automatically return the default value" — **both wrong for the production stack** (Trino 467 + Iceberg 1.5.2 / format v2). The engineer copy-pasted the DDL and got `mismatched input 'DEFAULT'` at parse time. This section installs the canonical truth so the next responder gets it right.
+>
+> **The stack pin (re-read this every time):** `prod_info.md` declares **Trino 467 (released 6 Dec 2024)** with the Iceberg connector backed by Hive Metastore, plus **Apache Spark + Iceberg 1.5.2** for ingestion. Iceberg 1.5.2 writes tables at **format version 2 (v2)** — not v3. **Any DDL clause / semantic added in Trino 468+ or Iceberg format v3 does NOT apply to this stack.** When in doubt, assume 467 / v2 behavior.
+
+### The CORRECT pattern (Trino 467 + Iceberg 1.5.2 / v2)
+
+```sql
+-- CORRECT on Trino 467: NO DEFAULT clause. The 467 ADD COLUMN grammar is:
+--   ALTER TABLE <name> ADD COLUMN [IF NOT EXISTS] <col> <type> [COMMENT '...'] [WITH (...)]
+-- See trino.io/docs/current/sql/alter-table.html (current docs show DEFAULT — that's
+-- Trino 477+, not 467). The 467 release notes (release-467.html, 6 Dec 2024) do NOT
+-- list a DEFAULT clause for ADD COLUMN.
+
+ALTER TABLE iceberg.analytics.events
+  ADD COLUMN new_status VARCHAR COMMENT 'lifecycle status (added 2026-06-05)';
+```
+
+**What this DDL actually does:**
+
+1. **Metadata-only commit.** Iceberg assigns a new **field ID** to `new_status`, writes a new snapshot, and updates the current schema pointer. **No Parquet data files are read, rewritten, or touched.** The DDL completes in **milliseconds even on a 10 TB table** — there is no file rewrite, no backfill, no full-table scan. This is one of Iceberg's biggest wins vs Hive.
+2. **Existing rows read as NULL for `new_status`.** Iceberg reads data files by matching the file's column field IDs against the current schema's field IDs. Old files have no chunk for the new field ID, so the reader returns NULL for `new_status` on every row written before the ADD. This is the **v2 semantic** — verified against [iceberg.apache.org/spec/](https://iceberg.apache.org/spec/) and [iceberg.apache.org/docs/latest/evolution/](https://iceberg.apache.org/docs/latest/evolution/). The column is automatically **nullable** — Iceberg cannot guarantee NOT NULL for historical rows that genuinely have no value, so `ADD COLUMN ... NOT NULL` is not supported here either.
+3. **New writes can populate the column normally.** Any `INSERT` / `MERGE INTO` after the ADD will include `new_status` in the new data files; old files keep returning NULL for that column.
+
+### To backfill existing rows with a value (the v2-correct path)
+
+If you want existing rows to have a non-NULL value for `new_status`, you must **explicitly backfill** — the DDL alone will not do it on Iceberg 1.5.2. There are two patterns:
+
+**Pattern A — Trino `UPDATE` (simpler, but creates MoR delete files if the table is MoR-configured).**
+
+```sql
+-- Trino 467 UPDATE. Works on Iceberg 1.5.2.
+UPDATE iceberg.analytics.events
+   SET new_status = 'pending'
+ WHERE new_status IS NULL;
+```
+
+- **On CoW tables (the Iceberg 1.5.2 default for `write.update.mode`):** Trino rewrites every affected data file with the new column populated. Storage temporarily grows by ~table size during the rewrite; old files are released by the next `expire_snapshots` window.
+- **On MoR tables (only if you explicitly set `write.update.mode = 'merge-on-read'` via Spark):** Trino writes **equality delete files** that mask the old (NULL) rows, plus new data files for the new (`'pending'`) rows. Equality delete files have the known [apache/iceberg #12838](https://github.com/apache/iceberg/issues/12838) dangling-delete bug on Iceberg 1.5.2 (no clean workaround until you upgrade to Iceberg 1.8+). See [§ 1c. Equality delete files from CDC pipelines](#1c-equality-delete-files-from-cdc-pipelines-debezium--no-standalone-procedure-exists-in-iceberg-152) for the full incident playbook. **On MoR, prefer Pattern B (Spark INSERT OVERWRITE) for backfill instead.**
+
+**Pattern B — Spark `INSERT OVERWRITE` (rewrites the whole table; no delete files).**
+
+```sql
+-- Spark SQL (NOT Trino). Rewrites every data file in one commit; produces no delete files.
+INSERT OVERWRITE iceberg.analytics.events
+SELECT
+  -- all existing columns
+  event_id, tenant_id, occurred_at, action, payload,
+  -- new column with backfill expression
+  COALESCE(new_status, 'pending') AS new_status
+FROM iceberg.analytics.events;
+```
+
+- **Cost:** high I/O — reads and rewrites every Parquet file in the table. For a 500 GB table on the production Spark setup, expect 30 min – 2 h depending on parallelism. **Do this in a maintenance window.** Disable concurrent writes for the duration (or use the WAP / branch staging pattern in `[§ Write-Audit-Publish](#write-audit-publish-wap-with-iceberg-branches)`).
+- **Benefit:** no MoR delete files, no equality-delete dangling-bug exposure, the table is clean afterward and reads have no MoR amplification.
+- **Production rule of thumb:** for tables ≤ 500 GB, Spark `INSERT OVERWRITE` is the safest backfill on this stack. For larger tables (≥ 1 TB) where rewriting the whole table is prohibitive, accept NULL for historical rows and only populate `new_status` for new writes — or partition the backfill by partition column (`INSERT OVERWRITE ... WHERE day = DATE '...'` one day at a time) so each commit is a bounded unit of work.
+
+### Verifying the ADD COLUMN took effect
+
+```sql
+-- Confirm the new column is in the current schema (Trino 467):
+DESCRIBE iceberg.analytics.events;
+-- new_status should appear at the bottom of the column list as VARCHAR, NULL allowed.
+
+-- Confirm the operation was metadata-only (no files rewritten):
+SELECT operation, summary
+  FROM iceberg.analytics."events$snapshots"
+ ORDER BY committed_at DESC
+ LIMIT 3;
+-- The latest snapshot should have operation = 'replace' (schema change) and
+-- summary entries showing 0 added-data-files and 0 deleted-data-files.
+
+-- Confirm existing rows return NULL for the new column:
+SELECT COUNT(*) AS rows_with_null
+  FROM iceberg.analytics.events
+ WHERE new_status IS NULL;
+-- Equal to the row count that existed before the ADD.
+```
+
+### DO-NOT-WRITE (for the Trino 467 / Iceberg 1.5.2 / v2 stack)
+
+> **The following forms or claims are FORBIDDEN in any Trino-467 or Iceberg-1.5.2 context. Each row lists the bad form, why it fails on prod, and the correct alternative.**
+>
+> | DO NOT WRITE | Why it fails on Trino 467 + Iceberg 1.5.2 | Correct form on this stack |
+> |---|---|---|
+> | `ALTER TABLE iceberg.x.y ADD COLUMN c VARCHAR DEFAULT 'pending'` | **Parse error** on Trino 467. `Add support for default column values when creating tables or adding new columns` was added in **Trino 477 (released 24 Sep 2025)** per [trino.io/docs/current/release/release-477.html](https://trino.io/docs/current/release/release-477.html). Production is on Trino 467 (6 Dec 2024) — 10 releases earlier. Engineer gets `mismatched input 'DEFAULT'. Expecting: 'COMMENT', 'NOT', 'WITH', <EOF>`. | `ALTER TABLE iceberg.x.y ADD COLUMN c VARCHAR COMMENT '...';` then `UPDATE ... SET c = 'pending' WHERE c IS NULL;` (Pattern A) or Spark `INSERT OVERWRITE` (Pattern B). |
+> | "Existing rows automatically return the default value for the new column" | **False on Iceberg format v2.** The `initial-default` mechanism that backfills existing rows with the default at read time is an **Iceberg format-v3 spec feature** (verified via [Dremio's Iceberg v3 default-column-values blog](https://www.dremio.com/blog/dremio-iceberg-v3-default-column-values/) and [Starburst's Iceberg v3 announcement](https://www.starburst.io/blog/iceberg-v3/)). Production is on Iceberg 1.5.2 (format v2) — existing rows return **NULL**, not the default, for newly added columns. | Explicitly backfill via `UPDATE` or Spark `INSERT OVERWRITE` (see Patterns A / B above). Plan the backfill BEFORE running `ADD COLUMN` if non-NULL historical values matter (e.g., for a dashboard that aggregates by `new_status`). |
+> | `ALTER TABLE iceberg.x.y ALTER COLUMN c SET DEFAULT 'pending'` | **Parse error** on Trino 467. `Add support for setting and dropping column defaults via ALTER TABLE ... ALTER COLUMN statement` was added in **Trino 479 (released 14 Dec 2025)** per [trino.io/docs/current/release/release-479.html](https://trino.io/docs/current/release/release-479.html). | No 467-native equivalent. If you need a default for *new writes* only, encode it in the application's INSERT path or in the dbt model's SELECT (e.g., `COALESCE(src.c, 'pending') AS c`). |
+> | `ALTER TABLE iceberg.x.y ADD COLUMN c VARCHAR NOT NULL` | **Cannot enforce** on Iceberg — would be a lie about historical rows that genuinely have no value for `c`. Iceberg makes every `ADD COLUMN` nullable by design, regardless of the engine. See [resource 13 § ADD COLUMN nullability note](13-postgres-to-iceberg-ingestion.md). | `ADD COLUMN c VARCHAR;` then backfill, then (if the engineer really needs the constraint) enforce NOT NULL via an external check at write time (no Iceberg native NOT NULL on existing nullable column on 1.5.2). |
+> | `CREATE TABLE iceberg.x.y (c VARCHAR DEFAULT 'pending', ...)` | **Parse error** on Trino 467. Same Trino 477 gate as above — `DEFAULT` in `CREATE TABLE` column definitions is also Trino 477+. | Omit the DEFAULT; populate the column explicitly in every INSERT, or use a dbt model that wraps the SELECT with `COALESCE(src.c, 'pending') AS c`. |
+> | `ALTER TABLE iceberg.x.y ADD COLUMN c VARCHAR FIRST` / `... AFTER other_col` | **Parse error** on Trino 467. Column-position clauses (`FIRST`, `AFTER`) for `ADD COLUMN` are post-467 grammar additions. Iceberg appends new columns to the end of the schema regardless. | Drop the position clause; new columns always go to the end on Iceberg. Column order in `SELECT *` follows the schema order; use explicit column lists in production queries if order matters. |
+>
+> **Why the DO-NOT-WRITE matters: TWO load-bearing facts are mistakable.** Both halves of the Q3 fab were wrong: (a) the syntax (`DEFAULT '<lit>'`) doesn't parse on 467 — it's a Trino 477 feature; (b) the semantic ("existing rows return the default") doesn't apply on Iceberg 1.5.2 — it's an Iceberg format-v3 feature. The two are independent gates: **even if** the engineer's cluster were upgraded to Trino 477, the *read* semantic would still require Iceberg format v3 (i.e., Iceberg 1.7+ writing v3-format tables) to actually back-fill existing rows on read. On the current 467 / 1.5.2 stack, NEITHER half is available.
+
+### Cross-references
+
+- **VERSION-PIN guardrail (below)** — the generalized "do not assume latest-docs features apply" rule that this section is one instance of.
+- **`[§ DROP COLUMN reclaim runbook](#drop-column-reclaim-runbook--literal-trino-467-syntax-copy-paste)`** — the complementary schema-evolution operation; same metadata-only behavior, but storage reclamation requires the 3-step `optimize` + `expire_snapshots` + `remove_orphan_files` runbook.
+- **`resources/13` § "Iceberg `ADD COLUMN` nullability note"** — why Iceberg makes every new column nullable regardless of source DDL.
+- **`resources/09` § JSON / MAP promotion to top-level column** — the dominant use case for `ADD COLUMN` on a SaaS analytics table.
+- **`resources/27` § 4.4B cross-dialect spillover guardrail** — the sibling guardrail that catches PostgreSQL / Oracle / Snowflake syntax leaks; this VERSION-PIN guardrail catches the *version-availability* leak (different fab class, same defensive discipline).
+
+---
+
+## VERSION-PIN GUARDRAIL — do NOT assume Trino-latest-docs syntax or Iceberg-format-v3 semantics apply (read this every time you cite a Trino/Iceberg feature)
+
+> **Why this section exists (consolidated meta-canonical, iter459).** The iter458 Q3 fab class was distinct from the iter456 cross-dialect-spillover class: instead of pasting Oracle / PostgreSQL syntax into a Trino context, the responder pasted **future-Trino-release syntax** into the Trino 467 context, AND pasted **Iceberg format-v3 read semantics** onto Iceberg 1.5.2 (format v2). Both forms are documented at trino.io/docs/current and iceberg.apache.org/spec — but "current" docs reflect the latest release, NOT what is available on the production stack. This section establishes the canonical defensive discipline.
+>
+> **The stack pin (re-read this for every fix recommendation):** `prod_info.md` declares **Trino 467 (6 Dec 2024)** and **Apache Spark + Iceberg 1.5.2** writing tables at **format version 2 (v2)**. Any DDL clause, session/catalog/table property, table procedure, function, or semantic that was added in **Trino 468 or later**, OR in **Iceberg format v3 / Iceberg 1.6+**, is **NOT available on this stack**. The trino.io and iceberg.apache.org docs default to "current" — so a feature you find documented there may post-date your production cluster by many releases.
+
+### The high-impact version gates (verified via WebSearch against official release notes)
+
+> **The forbidden features and their actual minimum versions** — each row was WebSearch-verified against the linked release-notes page or spec page. When you see any of these in a Trino-467 or Iceberg-1.5.2 context, fix it.
+>
+> | Feature | Forbidden on prod 467 / v2? | Minimum version that adds it | 467 / v2 fallback |
+> |---|---|---|---|
+> | `ALTER TABLE ... ADD COLUMN <c> <t> DEFAULT <expr>` (column-level default clause on ADD COLUMN) | YES — **forbidden on Trino 467**, parse error. | **Trino 477** (released 24 Sep 2025) per [release-477.html](https://trino.io/docs/current/release/release-477.html): *"Add support for default column values when creating tables or adding new columns."* | `ADD COLUMN <c> <t>` (no DEFAULT); explicitly backfill via `UPDATE` or Spark `INSERT OVERWRITE` (see LEADING CANONICAL above). |
+> | `CREATE TABLE ... (<c> <t> DEFAULT <expr>, ...)` (column-level default in CREATE TABLE) | YES — **forbidden on Trino 467**, parse error. | **Trino 477** (same release note as above). | Omit DEFAULT; encode the default in every INSERT path / dbt model SELECT via `COALESCE(src.c, 'value') AS c`. |
+> | `ALTER TABLE ... ALTER COLUMN <c> SET DEFAULT <expr>` / `DROP DEFAULT` | YES — **forbidden on Trino 467**, parse error. | **Trino 479** (released 14 Dec 2025) per [release-479.html](https://trino.io/docs/current/release/release-479.html): *"Add support for setting and dropping column defaults via ALTER TABLE ... ALTER COLUMN statement."* | No 467-native equivalent. Use application-level defaulting (INSERT path or dbt model). |
+> | Iceberg `initial-default` (existing rows return the default value on read for a newly-added column) | YES — **forbidden on Iceberg 1.5.2 / format v2**, returns NULL for existing rows. | **Iceberg format v3 spec** (`initial-default` is a v3-only schema-evolution feature) per [Dremio Iceberg v3 default-column-values blog](https://www.dremio.com/blog/dremio-iceberg-v3-default-column-values/) and the [Iceberg spec page](https://iceberg.apache.org/spec/). Format v3 requires Iceberg library 1.7+ AND a table written/migrated to v3. | Explicit backfill via Trino `UPDATE` (Pattern A) or Spark `INSERT OVERWRITE` (Pattern B). Existing rows are NULL until backfilled on v2. |
+> | Iceberg deletion vectors (compact bitmap deletes replacing position-delete files) | YES — **forbidden on Iceberg 1.5.2**. | Iceberg format v3 (Iceberg library 1.7+, table at format v3). | Accept position-delete-file accumulation; run `rewrite_position_delete_files` from Spark on MoR tables. See [§ 1b](#1b-rewrite_position_delete_files--mor-tables-only-spark-only-runs-after-compact-and-before-expire_snapshots). |
+> | `CALL iceberg.system.rollback_to_snapshot` deprecation → `ALTER TABLE ... EXECUTE rollback_to_snapshot(snapshot_id => ...)` (table-procedure form) | YES — **forbidden on Trino 467**, procedure not registered. | **Trino 469** (released 27 Jan 2025) per [release-469.html](https://trino.io/docs/current/release/release-469.html) via [PR #24580](https://github.com/trinodb/trino/pull/24580). | Use the positional `CALL iceberg.system.rollback_to_snapshot('schema','table',<id>)` form (the only 467-valid rollback). |
+> | `ALTER TABLE ... SET PROPERTIES parquet_bloom_filter_columns = ARRAY[...]` (Trino-side Iceberg bloom-filter write config) | YES — **forbidden on Trino 467**, property not registered. | **Trino 469** (27 Jan 2025) per [release-469.html](https://trino.io/docs/current/release/release-469.html): *"Allow configuring the parquet_bloom_filter_columns table property."* | Configure bloom filters via Spark `ALTER TABLE ... SET TBLPROPERTIES ('write.parquet.bloom-filter-enabled.column.<col>'='true')` then run Spark `rewrite_data_files`. Trino 467 reads bloom filters at query time fine (read-side support is pre-467). |
+> | `ALTER TABLE ... EXECUTE optimize_manifests` (Trino-native Iceberg manifest rewrite) | YES — **forbidden on Trino 467**, procedure not registered. | **Trino 470** (released 5 Feb 2025) per [release-470.html](https://trino.io/docs/current/release/release-470.html): *"Add the optimize_manifests table procedure."* | Spark: `CALL iceberg.system.rewrite_manifests(table => '...')`. |
+> | `ALTER TABLE ... EXECUTE expire_snapshots(retain_last => N)` / `(clean_expired_metadata => true)` | YES — **forbidden on Trino 467**, argument not accepted. | **Trino 479** (14 Dec 2025) per [release-479.html](https://trino.io/docs/current/release/release-479.html): *"Add retain_last and clean_expired_metadata options to expire_snapshots command."* | Trino 467 accepts ONLY `retention_threshold`. For `retain_last`, use Spark `CALL iceberg.system.expire_snapshots(table => '...', retain_last => N)`. |
+>
+> *(Each Trino release date and Iceberg spec citation above was WebSearch-verified against the linked official release-notes page or spec page on 2026-06-05. If you add a new version-gated row, verify the introduction release the same way — do NOT cite a version number you cannot confirm.)*
+
+### The defensive discipline (memorize this)
+
+When you are about to recommend any Trino DDL clause, session/catalog/table property, table procedure, function, or Iceberg behavior:
+
+1. **Check the version gate.** Find the feature in the table above OR in [resource 17 § Trino-version feature matrix](#trino-version-feature-matrix-iceberg-connector-features--read-first-when-recommending-a-fix). If it's not there, search the [Trino release notes](https://trino.io/docs/current/release.html) for the feature name; find the release that introduced it; confirm that release number is **≤ 467** (the production version). If the feature is Iceberg-spec-gated, check [iceberg.apache.org/spec/](https://iceberg.apache.org/spec/) to confirm it exists in format v2 — v3-only features are NOT available on Iceberg 1.5.2.
+2. **If the feature is post-467 / v3-only, lead the answer with the version gate.** Do NOT recommend it as if it were available; instead say "this feature requires Trino \<NNN\>+ / Iceberg format v3 which is NOT on the prod stack (467 / v2) — the prod-valid path is \<fallback\>."
+3. **If you cannot verify the introduction version, OMIT THE VERSION NUMBER.** It is better to say "this is post-467; see the Trino release notes to find the exact introduction release" than to cite a wrong number. **Do NOT invent version numbers** — they are easy to fact-check and easy to get wrong.
+4. **Default to 467 / v2 behavior when unsure.** If you're not 100% sure whether a feature is on the prod stack, assume it is NOT and recommend the conservative fallback. A correct answer with an unnecessary fallback is harmless; an incorrect answer with confident DDL the engineer copy-pastes is a production incident.
+
+### Why this is a different fab class from cross-dialect spillover
+
+The [resource 27 § 4.4B cross-dialect-spillover guardrail](27-oracle-plsql-to-dbt-trino.md#44b-cross-dialect-spillover-guardrail--syntax-that-looks-valid-but-is-not-trino-467) catches PostgreSQL `::` casts, Oracle `TO_CHAR`, Snowflake `QUALIFY`, Spark `TBLPROPERTIES`, native-Iceberg `write.parquet.compression-codec` — i.e., syntax that is valid in ANOTHER ENGINE but not in Trino. This **VERSION-PIN guardrail** catches a different fab class: syntax that IS valid Trino — but only in a release **later than 467**. The trino.io/docs/current pages reflect the latest Trino release (currently 481+); copy-pasting from those docs without checking the introduction release is the failure mode. **Cross-dialect**: wrong engine. **Version-pin**: right engine, wrong year. Both are responder failure modes; both need defensive discipline.
+
+### Cross-references
+
+- **`resources/27` § 4.4B cross-dialect-spillover guardrail** — the sibling defensive discipline for the wrong-engine fab class.
+- **`[§ Trino-version feature matrix](#trino-version-feature-matrix-iceberg-connector-features--read-first-when-recommending-a-fix)`** below — the consolidated Trino-Iceberg feature version table; this guardrail is the meta-canonical, that matrix is the canonical lookup table.
+- **`prod_info.md`** — the source of truth for the production-version pins. Re-read it before answering any version-gated question.
+
+---
+
 ## Why maintenance is needed (the immutable-file model)
 
 Iceberg is built on **immutable Parquet files**. Once a file is written, it is never modified. This is the foundation of Iceberg's ACID guarantees (Atomicity, Consistency, Isolation, Durability — meaning concurrent reads and writes see a consistent, complete picture of the table even mid-update). But it has a cost: every operation creates more files.
@@ -352,6 +502,10 @@ WHERE tenant_id = 'acme';
 | `rewrite_position_delete_files` (compact position-delete files on MoR tables) | NOT supported in Trino 467 ([trinodb/trino #27371](https://github.com/trinodb/trino/issues/27371)) | NO | Spark: `CALL iceberg.system.rewrite_position_delete_files(table => 'analytics.events')`. There is no Trino 467 form. |
 | `rewrite_manifests` | NOT supported in Trino 467 (added as `optimize_manifests` in **470**) | NO | Spark: `CALL iceberg.system.rewrite_manifests(table => '...')`. |
 | `ALTER MATERIALIZED VIEW ... SET PROPERTIES grace_period = INTERVAL '...'` | **479** (Dec 2025) | NO | Drop and recreate the MV with the new `GRACE PERIOD` literal; or set `GRACE PERIOD` at `CREATE MATERIALIZED VIEW` time. |
+| `ALTER TABLE ... ADD COLUMN <c> <t> DEFAULT <expr>` (DEFAULT clause on ADD COLUMN) | **477** (24 Sep 2025) per [release-477.html](https://trino.io/docs/current/release/release-477.html): *"Add support for default column values when creating tables or adding new columns."* | NO | `ADD COLUMN <c> <t>` (no DEFAULT); explicitly backfill via `UPDATE` (Trino) or `INSERT OVERWRITE` (Spark). See [§ LEADING CANONICAL — Adding a column to an Iceberg table](#leading-canonical--adding-a-column-to-an-iceberg-table-on-trino-467--iceberg-152-read-this-before-recommending-any-add-column-syntax). |
+| `CREATE TABLE ... (<c> <t> DEFAULT <expr>, ...)` (DEFAULT in CREATE TABLE) | **477** (24 Sep 2025) — same release note. | NO | Omit DEFAULT; populate via every INSERT path / dbt model SELECT (`COALESCE(src.c, 'value') AS c`). |
+| `ALTER TABLE ... ALTER COLUMN <c> SET DEFAULT <expr>` / `DROP DEFAULT` | **479** (14 Dec 2025) per [release-479.html](https://trino.io/docs/current/release/release-479.html): *"Add support for setting and dropping column defaults via ALTER TABLE ... ALTER COLUMN statement."* | NO | No 467-native equivalent. Use application-level defaulting. |
+| Iceberg `initial-default` (existing rows return the default value on read for a newly-added column) | **Iceberg format v3** spec feature (Iceberg library 1.7+ AND table at format v3) per [iceberg.apache.org/spec/](https://iceberg.apache.org/spec/) and [Dremio Iceberg v3 default-column-values blog](https://www.dremio.com/blog/dremio-iceberg-v3-default-column-values/) | NO (Iceberg 1.5.2 is format v2) | Explicit backfill via Trino `UPDATE` or Spark `INSERT OVERWRITE`. Existing rows return NULL on v2. |
 
 **How to use this matrix.** Before recommending any "the fix is X" answer that touches Trino-Iceberg config: (1) find the feature in this table; (2) if "Available on prod 467?" is NO, lead the answer with "this feature requires Trino \<NNN\>+ which is NOT on prod 467 — the 467-valid path is \<fallback\>"; (3) if "Available on prod 467?" is YES, recommend it directly. The single biggest source of "the fix didn't work" feedback in iter402-416 was recommending a 469+ feature on prod 467.
 

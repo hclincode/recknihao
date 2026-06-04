@@ -1,115 +1,170 @@
-# Judge Feedback — Iter 458 (2026-06-05)
+# Judge Feedback — Iter 459 (Extended Phase, end-of-iteration only)
 
-## Overall verdict
+## Overall
 
-**4.109 PASS overall** — 57th consecutive PASS, BUT margin THIN. Q1+Q2+Q4 all STRONG (4.6+); **Q3 is a CRITICAL FAIL (2.375)** with TWO load-bearing fabrications on a single answer. Federation NOT probed per iteration directive.
+- **Overall avg: 4.547 — PASS** (threshold ≥ 3.5).
+- 58th consecutive overall PASS in extended phase.
+- Federation NOT probed this iteration (per directive); near-miss row 4.49944/310 UNCHANGED.
+- **iter458 Q3 version-pin FAIL FIX FULLY CONFIRMED at Q1**: responder correctly did NOT use `ADD COLUMN ... DEFAULT` on Trino 467, and correctly stated existing rows return NULL (not the default) on Iceberg 1.5.2 (format v2). The iter459 LEADING CANONICAL block in r17 + VERSION-PIN GUARDRAIL sibling section landed clean at the keyword path.
+- **ONE NEW LOAD-BEARING CROSS-DIALECT-SPILLOVER FAB at Q4** — Oracle's NULLS-default semantics projected onto Trino. Same root-cause class as iter456 Q2 (`/*+ USE_HASH_JOIN */` Oracle/Spark hint) and iter456 Q4 (`::VARCHAR` Postgres cast). Requires teacher reconciliation in iter460.
 
-## Per-question breakdown
+## Per-question scores
 
-| Q | Topic | Acc | Comp | Clar | Act | Avg | Verdict |
+| Q | Topic | Accuracy | Completeness | Clarity | Actionability | Avg | Verdict |
 |---|---|---|---|---|---|---|---|
-| Q1 | Per-tenant Trino cost attribution / chargeback (Cost considerations) | 4.75 | 4.75 | 4.5 | 4.75 | **4.6875** | STRONG PASS |
-| Q2 | Session properties to speed a slow query (Query perf regression) | 4.75 | 4.5 | 4.5 | 4.75 | **4.625** | STRONG PASS |
-| Q3 | Iceberg ADD COLUMN with DEFAULT (Schema evolution / maintenance) | 1.5 | 2.5 | 3.75 | 1.75 | **2.375** | CRITICAL FAIL |
-| Q4 | Oracle LISTAGG → Trino (Oracle migration) | 4.75 | 4.75 | 4.75 | 4.75 | **4.75** | STRONG PASS |
+| Q1 | ADD COLUMN + backfill (Iceberg table maintenance / schema-evolution) | 5.0 | 4.75 | 4.75 | 5.0 | **4.875** | STRONG PASS |
+| Q2 | dbt data-quality tests (Postgres-to-Iceberg ingestion / dbt) | 5.0 | 4.5 | 4.5 | 4.75 | **4.6875** | STRONG PASS |
+| Q3 | sorted_by sort order / clustering (Iceberg partition design) | 5.0 | 4.75 | 4.75 | 5.0 | **4.875** | STRONG PASS |
+| Q4 | Oracle window functions → Trino (Oracle PL/SQL→dbt/Trino migration) | 3.0 | 4.25 | 4.5 | 3.25 | **3.75** | PASS (thin) |
 
-**Overall avg: 4.109 PASS** (threshold 3.5).
+**Overall avg: (4.875 + 4.6875 + 4.875 + 3.75) / 4 = 4.547 PASS**
 
-## Fabrications detected
+## Per-question detail
 
-### Q3 — TWO load-bearing fabrications (both confirmed against official docs)
+### Q1 — ADD COLUMN + backfill RE-PROBE (4.875 STRONG PASS — VERSION-PIN STREAK HOLDS)
 
-**FAB-1: `ALTER TABLE iceberg.analytics.my_table ADD COLUMN new_status VARCHAR DEFAULT 'pending'` is a PARSE ERROR on Trino 467.**
+Responder said:
+- `ALTER TABLE iceberg.analytics.events ADD COLUMN status VARCHAR;` — NO DEFAULT clause on Trino 467.
+- Explicitly noted DEFAULT clause added in Trino 477+.
+- Existing rows always nullable; backfill via `UPDATE ... SET status='pending' WHERE status IS NULL;`.
+- ADD COLUMN is metadata-only (ms scale, no data rewrite).
+- UPDATE rewrites only CoW files containing NULL rows, commits new snapshot.
+- Old files cleaned by expire_snapshots.
 
-- Support for `DEFAULT` clause in `ALTER TABLE ADD COLUMN` was added in **Trino 477** (24 Sep 2025), per release notes.
-- Production stack is pinned to **Trino 467** (6 Dec 2024) per `prod_info.md`.
-- Engineer copy-pastes the recommended DDL and gets `mismatched input 'DEFAULT'. Expecting: 'COMMENT', 'NOT', 'WITH', <EOF>` or equivalent parse error.
-- Trino 467 grammar for ADD COLUMN: `ADD COLUMN [IF NOT EXISTS] name type [COMMENT ...] [WITH (...)]` — NO DEFAULT clause. (Trino 481 grammar adds DEFAULT / NOT NULL / FIRST | LAST | AFTER positioning, but that's irrelevant for the 467 prod stack.)
-- Sources:
-  - https://trino.io/docs/current/release/release-477.html ("Add support for default column values when creating tables or adding new columns")
-  - https://trino.io/docs/current/release/release-467.html (no DEFAULT-clause feature listed)
-  - https://trino.io/docs/current/sql/alter-table.html (current grammar shows DEFAULT, but this is 481 — not 467)
+VERIFICATION (trino.io/docs/current/sql/alter-table.html, release-477.html, connector/iceberg.html):
+- Trino 467 ADD COLUMN grammar is `ADD COLUMN [IF NOT EXISTS] name type [COMMENT ...] [WITH (...)]` — NO DEFAULT clause confirmed.
+- DEFAULT clause added in Trino 477 (24 Sep 2025): "Add support for default column values when creating tables or adding new columns" — CONFIRMED.
+- UPDATE on Iceberg tables supported, CoW is Trino's default Iceberg write mode for v2 tables — CONFIRMED.
+- Metadata-only ADD COLUMN (new metadata.json with new schema, no data file rewrite) — CONFIRMED per Iceberg spec.
 
-**FAB-2: "All existing rows automatically return 'pending' for the new column on read" is WRONG for Iceberg 1.5.2 (format v2).**
+ZERO fabrications. iter459 teacher LEADING CANONICAL block in r17 + VERSION-PIN GUARDRAIL sibling section + 8-row version-gates table LANDED clean. **Version-pin spillover streak FULLY HOLDS.**
 
-- The `initial-default` mechanism that backfills existing rows with the default at read time is an **Iceberg format-v3 spec feature**.
-- Production stack uses **Iceberg 1.5.2** per `prod_info.md`, which is firmly format-v2 era.
-- On v2 tables, existing rows return **NULL** for the newly added column. The default value applies only to NEW writes (`write-default`), not to historical reads.
-- Sources:
-  - https://iceberg.apache.org/spec/ (initial-default and write-default introduced in v3 schema evolution)
-  - https://www.dremio.com/blog/dremio-iceberg-v3-default-column-values/ ("existing rows return the default value for the new column ... this is a significant improvement over v2, where the values of newly added columns on existing rows are NULL")
-  - https://www.starburst.io/blog/iceberg-v3/ (confirms initial-default as v3 feature)
+### Q2 — dbt data-quality tests (4.6875 STRONG PASS)
 
-**Correct answer for the prod stack (Trino 467 + Iceberg 1.5.2):**
+Responder said:
+- 4 built-in generic tests: `not_null`, `unique`, `relationships`, `accepted_values`.
+- schema.yml example.
+- `dbt test` and `dbt build` commands.
+- Singular tests in `tests/` directory.
+- Tests fail the run (non-zero exit code).
 
-```sql
-ALTER TABLE iceberg.analytics.my_table ADD COLUMN new_status VARCHAR COMMENT 'lifecycle status';
--- Metadata-only commit (TRUE — this part of the answer is correct).
--- Existing rows return NULL on read until backfilled.
+VERIFICATION (docs.getdbt.com/docs/build/data-tests, /reference/commands/test, /reference/commands/build, /reference/resource-configs/severity):
+- All 4 built-in generic tests CONFIRMED real per docs.getdbt.com: "dbt ships with four generic data tests already defined: unique, not_null, accepted_values, and relationships".
+- schema.yml syntax CONFIRMED (`tests: - not_null`, `- accepted_values: values: [...]`, `- relationships: to: ref('customers') field: id`).
+- `dbt test` (runs all tests) and `dbt build` (runs tests after each model) both real CLI commands.
+- Singular tests in `tests/` directory CONFIRMED.
+- Default `severity: error` causes non-zero exit on failure CONFIRMED.
 
--- To backfill a value:
-UPDATE iceberg.analytics.my_table SET new_status = 'pending' WHERE new_status IS NULL;
--- Note: on Iceberg 1.5.2 MoR, UPDATE creates equality delete files;
--- consider a Spark INSERT OVERWRITE if you can rewrite the whole table at higher I/O cost.
-```
+ZERO fabrications.
 
-### Q1, Q2, Q4 — ZERO fabrications
+### Q3 — Iceberg sort order / clustering (4.875 STRONG PASS)
 
-All verified against:
-- `system.runtime.queries` columns (query_id, state, source, user, etc.) — confirmed via Trino GitHub discussion + system connector docs.
-- `system.runtime.tasks` exists with CPU and bytes metrics consistent with Trino's task data model.
-- `query_max_memory_per_node` (30% JVM heap default), `join_distribution_type` (PARTITIONED/BROADCAST/AUTOMATIC), `join_max_broadcast_table_size` (100MB default), `task_concurrency` (node-CPU default, min 2 max 32) — all real session properties per trino.io/docs/current/admin/properties-*.html and optimizer/cost-based-optimizations.html.
-- LISTAGG with `ON OVERFLOW TRUNCATE ... WITH COUNT` and `WITHIN GROUP (ORDER BY ...)` syntax + **1,048,576 byte** default overflow threshold — verified verbatim per https://trino.io/docs/current/functions/aggregate.html.
-- `array_join(array_agg(...))` pre-LISTAGG fallback valid; LISTAGG was added in Trino 358 (Jun 2021).
+Responder said:
+- `sorted_by` is the real Trino Iceberg table property.
+- New table: `WITH (partitioning = ARRAY['day(occurred_at)'], sorted_by = ARRAY['customer_id'])`.
+- Existing table: `ALTER TABLE ... SET PROPERTIES sorted_by = ARRAY['customer_id']` then `EXECUTE optimize(file_size_threshold => '512MB')`.
+- Narrows per-file min/max so Trino skips files.
+- Second-order optimization after partitioning for high-cardinality filtered columns.
 
-## Concrete teacher actions for iter459
+VERIFICATION (trino.io/docs/current/connector/iceberg.html):
+- `sorted_by` listed as real table property — CONFIRMED.
+- `sorted_by` is among properties updatable via ALTER TABLE SET PROPERTIES — CONFIRMED VERBATIM: "The following table properties can be updated after a table is created: format, format_version, partitioning, sorted_by, ...".
+- `EXECUTE optimize(file_size_threshold => '...')` syntax CONFIRMED (default 100MB).
+- min/max per-file pruning rationale CONFIRMED — Trino uses manifest column-level min/max statistics to skip files.
 
-### Priority 1 — NEW FAB CLASS: version-availability hallucination
+ZERO fabrications.
 
-The Q3 failure is a **new fab class** — version-gated feature presented as if available on the production stack. The responder hallucinated Trino 477+ syntax onto Trino 467 AND hallucinated Iceberg format-v3 read semantics onto Iceberg 1.5.2 (format v2). This is structurally similar to the iter456 dialect-spillover fabs but with a version-availability twist.
+### Q4 — Oracle window functions → Trino (3.75 PASS, thin — ONE LOAD-BEARING CROSS-DIALECT-SPILLOVER FAB)
 
-**Action**: Add a LEADING CANONICAL block to `resources/17-iceberg-table-maintenance.md` (or create a new resource subsection "Iceberg schema evolution on Trino 467 + Iceberg 1.5.2") with the following structure:
+Responder said:
+- RANK()/LAG()/LEAD()/ROW_NUMBER()/MAX() OVER all work identically (standard SQL).
+- Identical Oracle-vs-Trino side-by-side.
+- Gotcha 1: no QUALIFY in Trino — rewrite as ROW_NUMBER subquery.
+- **Gotcha 2: "Trino defaults to NULLS LAST for ASC and NULLS FIRST for DESC."**
 
-1. **Title**: "LEADING CANONICAL ICEBERG SCHEMA EVOLUTION ON TRINO 467 + ICEBERG 1.5.2 — 'How do I ADD COLUMN with a default value?'"
-2. **Pinned-version banner**: Top-of-block callout citing `prod_info.md` Trino 467 + Iceberg 1.5.2 pin, with the warning that newer Trino/Iceberg releases support features (DEFAULT clause, initial-default) that **DO NOT exist on the prod stack**.
-3. **CORRECT pattern verbatim**:
-   ```sql
-   ALTER TABLE iceberg.analytics.t ADD COLUMN new_col VARCHAR COMMENT '...';
-   -- Metadata-only commit (Iceberg field-ID-based schema evolution). Existing data files NOT rewritten.
-   -- Existing rows read as NULL for new_col until backfilled.
-   ```
-4. **Backfill pattern verbatim**:
-   ```sql
-   UPDATE iceberg.analytics.t SET new_col = 'pending' WHERE new_col IS NULL;
-   ```
-   With explicit Iceberg 1.5.2 MoR cost callout (creates equality delete files; alternative: Spark `INSERT OVERWRITE` to rewrite the whole table at higher I/O cost but no delete files).
-5. **DO-NOT-WRITE matrix** banning at minimum:
-   - `ADD COLUMN ... DEFAULT '<literal>'` syntax on Trino 467 → parse error; this syntax was added in **Trino 477** (24 Sep 2025), production stack is pinned to 467.
-   - The claim "existing rows return the default value" on Iceberg 1.5.2 → requires Iceberg format v3 `initial-default`; production stack is Iceberg 1.5.2 (format v2), existing rows return NULL.
-   - `ALTER TABLE ... ALTER COLUMN ... SET DEFAULT` → Trino 479+, not on 467.
-   - `NOT NULL` on ADD COLUMN without DEFAULT → see prestodb/presto issue #20618 for the design problem.
-   - **The broader fab-class meta-rule**: "Before recommending a Trino DDL clause, verify it exists in **Trino 467** (release-467.html and earlier); before recommending an Iceberg behavior, verify it exists in **Iceberg format v2** (Iceberg 1.5.2)."
-6. **Cross-ref** to `prod_info.md` pinned versions at the top of the new block so the responder cannot mistakenly assume the latest release behavior applies.
+VERIFICATION:
+- RANK/LAG/LEAD/ROW_NUMBER all real per trino.io/docs/current/functions/window.html — CONFIRMED.
+- QUALIFY NOT supported in Trino, CTE/subquery + `WHERE rn = 1` workaround correct — CONFIRMED (Starburst forum, Trino docs).
+- **NULLS-default claim FABRICATED**: per trino.io/docs/current/sql/select.html VERBATIM: "The default null ordering is NULLS LAST, regardless of the ordering direction." Trino defaults to NULLS LAST for **BOTH** ASC and DESC, NOT NULLS FIRST for DESC.
 
-### Priority 2 — Reinforce iter458 wins
+The responder projected **Oracle's** NULLS-default semantics (NULLS LAST for ASC, NULLS FIRST for DESC — Oracle's documented default) onto Trino. This is the exact cross-dialect-spillover fab class iter456 flagged (`/*+ USE_HASH_JOIN */` Oracle/Spark hint and `::VARCHAR` Postgres cast both projected onto Trino).
 
-The iter458 teacher LEADING CANONICAL blocks for Q1 (r16 per-tenant cost attribution) and Q2 (r18 session-property tuning) LANDED CLEAN — zero fabs on both. Keep these blocks intact and DO NOT regress. Both topics inched up in average score (cost 4.18→4.21, query-perf-regression 4.31→4.33), confirming the leading-canonical + DO-NOT-WRITE-matrix pattern works on low-buffer topics.
+Failure mode is silent-wrong: an engineer migrating Oracle `ORDER BY ts DESC` that relied on Oracle's NULLS-FIRST-for-DESC default will get DIFFERENT row ordering on Trino (NULLs at the bottom instead of top) — regression tests fail, no obvious error message, debugging needed to discover the real Trino default.
 
-### Priority 3 — Iter459 breadth design (no federation probe per directive)
+The advice to "always specify NULLS FIRST/LAST explicitly" is correct defensive guidance, but the specific Trino-default claim that justifies it is wrong.
 
-Federation row UNCHANGED at 4.49944/310. Iter459 should:
-- **Q1**: Iceberg schema-evolution RE-PROBE under a different phrasing — verify the iter459 leading canonical block lands and the version-gated fab class is eliminated. Suggested probe: "I need to add a `region` column with a fixed value for all existing rows in a 500GB Iceberg table — what's the minimum-cost path?" (forces the responder to choose between ADD COLUMN + UPDATE backfill vs Spark INSERT OVERWRITE vs leaving NULLs).
-- **Q2**: Lowest-buffer PASSED topic re-probe (after iter458's reinforcement, the new lowest-buffer is **Iceberg table maintenance 4.4955/118** which just got dinged by Q3). Probe from a maintenance angle that does NOT touch schema evolution (e.g., expire_snapshots retention floor, optimize partition-spec evolution, orphan file cleanup with active branches).
-- **Q3**: A breadth question from a stable-passing topic to maintain the iteration breadth (e.g., Postgres-to-Iceberg ingestion CDC angle, multi-tenant analytics row-filter angle).
-- **Q4**: An Oracle-migration angle that is NOT LISTAGG (already iter458) and NOT TO_CHAR (iter457) — e.g., Oracle sequences → Trino, Oracle DECODE → Trino CASE, Oracle CONNECT BY → recursive CTE.
+Accuracy DOCKED 5.0 → 3.0. Actionability DOCKED 5.0 → 3.25. Completeness 4.25 (covers main functions + QUALIFY + NULLS gotcha but the gotcha is taught with wrong Trino-default). Clarity 4.5.
 
-### Priority 4 — Citation hygiene watchlist for iter459 judging
+## Fabrications inventory (this iteration)
 
-- **Version-availability fabs (NEW class as of iter458 Q3)**: for any DDL clause / session property / function / metadata table the responder recommends, the judge MUST verify it exists in Trino 467 specifically (check release-XXX.html for the feature's introduction release vs the 467 release date 6 Dec 2024).
-- **Iceberg spec-version fabs (NEW class as of iter458 Q3)**: for any Iceberg behavior the responder recommends (default values, deletion vectors, row-lineage, etc.), the judge MUST verify it's supported in Iceberg format v2 (Iceberg 1.5.2). v3 features (initial-default, deletion vectors via puffin, row-lineage, geometry/geography types, VARIANT) MUST NOT be presented as if available on the prod stack.
-- **Cross-dialect spillover fabs (carryover from iter456)**: query hints `/*+ ... */`, `::` cast operator, `ALTER SESSION SET`, `SET LOCAL`, `TO_CHAR` — all still on the watchlist.
-- **Made-up column names** on `system.runtime.queries` / `system.runtime.tasks`: watch for `tenant_id`, `cost_usd`, `credits`, `peak_memory_bytes`, `catalog`, `query_stats` (the table) — none exist.
+| # | Question | Fabrication | Correct fact | Source |
+|---|---|---|---|---|
+| FAB-1 | Q4 | "Trino defaults to NULLS LAST for ASC and NULLS FIRST for DESC" | Trino default is **NULLS LAST regardless of direction** for BOTH ASC and DESC | https://trino.io/docs/current/sql/select.html |
 
-## Pass status
+That is the only fabrication this iteration. Q1/Q2/Q3 are clean.
 
-**PASS** — overall 4.109 above 3.5 floor; all topic averages remain above their per-topic thresholds (cost 4.21 > 3.5; query-perf-regression 4.33 > 3.5; iceberg-table-maintenance 4.4955 > 3.5; oracle-migration 4.5867 > 3.5; federation 4.49944 ≥ 4.5 override-threshold not regressed because not probed). System remains at terminal milestone (all topics passed). Q3 is a worrying single-question FAIL that the teacher MUST address in iter459 to prevent it becoming a recurring fab class. No `passed` state change needed.
+## Version-pin streak status
+
+**HOLDS — FULLY CONFIRMED at Q1.** The iter458 Q3 critical fab (responder hallucinated Trino 477+ `ADD COLUMN ... DEFAULT` syntax AND Iceberg format-v3 initial-default read semantics onto pinned Trino 467 / Iceberg 1.5.2) is fixed. The responder explicitly used the Trino 467 grammar (no DEFAULT clause), explicitly stated DEFAULT was added in Trino 477+, and explicitly said existing rows return NULL until backfilled via UPDATE — exactly the correct pattern for the pinned stack. iter459 teacher LEADING CANONICAL block in r17 + VERSION-PIN GUARDRAIL sibling section landed at the keyword path.
+
+## Cross-dialect-spillover class status
+
+**NEW VARIANT EMERGED at Q4.** The pattern (recommending another dialect's behavior as Trino's) has now been seen across three different attack surfaces:
+- iter456 Q2 — Oracle/Spark `/*+ USE_HASH_JOIN */` query-hint syntax projected onto Trino (Trino has no query hints).
+- iter456 Q4 — PostgreSQL `::VARCHAR` cast operator projected onto Trino (Trino has no `::` operator).
+- **iter459 Q4 — Oracle NULLS-FIRST-for-DESC default semantics projected onto Trino (Trino defaults NULLS LAST for both directions).**
+
+This variant is more subtle than the iter456 fabs because the responder's *defensive advice* ("always specify NULLS FIRST/LAST explicitly") is correct — only the *justification* (the claimed Trino default) is wrong. An engineer who follows the defensive advice unconditionally is safe; an engineer who skips it because they think Trino "already does the right thing" by default gets silently-wrong row ordering.
+
+## Topic average updates
+
+| Topic | Before | After | Delta | Reason |
+|---|---|---|---|---|
+| Iceberg table maintenance | 4.4955/118 | 4.4987/119 | +0.0032 | Q1 4.875 above topic avg — ADD COLUMN canonical block landed clean |
+| Postgres-to-Iceberg ingestion | 4.4957/156 | 4.4969/157 | +0.0012 | Q2 4.6875 above topic avg — dbt generic-tests baseline clean |
+| Iceberg partition design for SaaS | 4.4854/31 | 4.4976/32 | +0.0122 | Q3 4.875 above topic avg — sorted_by clustering clean |
+| Oracle PL/SQL→dbt/Trino migration | 4.5867/31 | 4.5606/32 | -0.0261 | Q4 3.75 below topic avg — NULLS-default cross-dialect-spillover fab |
+| Trino federation (near-miss) | 4.49944/310 | 4.49944/310 | unchanged | NOT probed per directive |
+
+## Concrete teacher actions for iter460
+
+**Breadth design — no dedicated federation probe.** Iter460 should hit topics not probed in iter459 (e.g., multi-tenant analytics, cost considerations, query performance regression, lakehouse schema design, OLTP-vs-OLAP) so the rubric stays balanced. The federation row stays untouched.
+
+### Required reconciliation — Oracle vs Trino NULLS-default semantics (r27 §4)
+
+1. **Add a LEADING CANONICAL block to r27** (Oracle PL/SQL→dbt/Trino migration) — title: "Oracle vs Trino NULLS-default semantics in ORDER BY (read this BEFORE migrating any ORDER BY ... DESC query)".
+   - State VERBATIM the Trino default: "Per trino.io/docs/current/sql/select.html the default null ordering is NULLS LAST, regardless of the ordering direction. ASC defaults NULLS LAST; DESC also defaults NULLS LAST."
+   - State the Oracle default for contrast: "Oracle defaults to NULLS LAST for ASC and NULLS FIRST for DESC."
+   - **Side-by-side row-output diff** with a small example table containing NULLs to make the silent-wrong failure mode concrete (e.g., `SELECT * FROM t ORDER BY priority DESC` — Oracle returns NULLs at the top, Trino returns NULLs at the bottom).
+   - **Defensive-coding rule**: "Always specify `NULLS FIRST` or `NULLS LAST` explicitly when migrating Oracle ORDER BY ... DESC queries. The two engines disagree by default — preserving Oracle's ordering on Trino requires explicit `NULLS FIRST` on DESC sorts."
+
+2. **DO-NOT-WRITE callout** in r27 §4.x banning the fabricated claim:
+   - DO NOT WRITE: "Trino defaults NULLS FIRST for DESC" — that's Oracle's default, not Trino's. Trino defaults NULLS LAST for both ASC and DESC.
+   - DO NOT WRITE: "Trino's NULLS-default behavior matches Oracle's." — it does not.
+   - DO NOT WRITE: "Trino follows ANSI SQL's default for NULLS ordering." — ANSI SQL leaves it implementation-defined; Trino chose NULLS LAST regardless of direction, which differs from Oracle's choice.
+
+3. **Cross-ref to §4.4B cross-dialect-spillover guardrail** in r27 — this is the third instance of the same fab class (Oracle/Spark hints, Postgres `::` cast, now Oracle NULLS-default). Reinforce the broader pattern: "Whenever you cite a Trino semantic that 'matches' another engine's, WebSearch trino.io/docs to confirm — don't trust muscle memory from Oracle/Postgres/Spark/Snowflake."
+
+4. **Add to r27 the Oracle ORDER BY ... DESC migration checklist**: a 3-step pattern (a) identify all `ORDER BY ... DESC` clauses in source Oracle code, (b) verify whether Oracle's NULLS-FIRST default was load-bearing for downstream consumers, (c) rewrite Trino target as `ORDER BY ... DESC NULLS FIRST` to preserve Oracle behavior, or leave bare if downstream is robust to NULL placement.
+
+### Topic breadth for iter460 (suggested probe matrix)
+
+To keep the rubric balanced, iter460 should rotate to topics that have not been probed recently:
+- **Multi-tenant analytics: isolating customer data in SaaS** (4.4562/151 — large but stable, can probe a fresh angle like tenant_id partition design vs row-level OPA filters).
+- **Cost considerations for analytical workloads at SaaS scale** (4.2079/18 — low-buffer, recently probed iter458 Q1; could probe a different cost angle like MinIO storage tiering or compute right-sizing).
+- **Query performance basics: partitioning, indexing strategy for analytics** (4.4314/11 — under-probed, can ask about partition-key choice tradeoffs).
+- **OLTP-to-OLAP mindset: the mental model shift** (4.609/4 — under-probed, can ask about transactional patterns that break on lakehouse).
+
+Avoid dedicated federation probes per directive — federation stays at near-miss 4.49944/310 untouched.
+
+### Verification discipline (carry forward from iter458/459)
+
+- Continue the WebSearch-against-official-docs discipline for every claim that names a function/property/operator/default-semantic/version-gate.
+- The version-pin guardrail in r17 should be cross-referenced from any resource that recommends Trino DDL — engineer should never see DDL advice without a pinned-version reminder.
+- Add NULLS-ordering verification to the Oracle migration checklist in r27 — the NULLS-default behavior is now confirmed as an iter459 attack surface.
+
+## Streak summary
+
+- Overall PASS streak: 58 iterations in extended phase.
+- Citation-hygiene streak: MIXED — version-pin spillover (iter458 Q3 fab class) fully resolved, but a NEW cross-dialect-spillover variant (Trino-NULLS-default fab) emerged at Q4.
+- Federation near-miss: UNCHANGED at 4.49944/310 (not probed per directive).
