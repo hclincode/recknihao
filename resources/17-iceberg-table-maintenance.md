@@ -690,7 +690,7 @@ row (only visible via real SELECT against the table)
 SELECT snapshot_id, committed_at, operation,
        CAST(summary AS JSON) AS summary
 FROM iceberg.analytics."events$snapshots"
-WHERE committed_at::DATE = DATE '2026-05-28'
+WHERE CAST(committed_at AS DATE) = DATE '2026-05-28'   -- NOT committed_at::DATE — Trino 467 has no `::` cast operator
 ORDER BY committed_at;
 -- Result: 3 rows. snapshot_id=4451 at 02:10 (operation=append, added 12M rows),
 -- snapshot_id=4452 at 14:30 (operation=replace, rewrite_data_files compaction),

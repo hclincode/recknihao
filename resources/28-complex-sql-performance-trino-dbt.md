@@ -425,6 +425,17 @@ The optimizer picks based on the table's stats. **If you've never run `ANALYZE i
 
 ### 5.1 The single-query session overrides (when you need to force it)
 
+> **Canonical lever (verified against [trino.io/docs/current/optimizer/cost-based-optimizations.html](https://trino.io/docs/current/optimizer/cost-based-optimizations.html))** — use `SET SESSION join_distribution_type = '<value>';` BEFORE the query. Three accepted values: `'AUTOMATIC'` (default), `'PARTITIONED'`, `'BROADCAST'`. See [resource 24 § LEADING CANONICAL — How do I influence Trino's join distribution](24-trino-cbo-analyze.md) for the full three-lever block (primary `join_distribution_type`, secondary `join_max_broadcast_table_size`, tertiary `ANALYZE`).
+>
+> **DO-NOT-WRITE — Trino 467 has NO query-hint syntax.** Per [trinodb/trino #9498](https://github.com/trinodb/trino/issues/9498), the `/*+ ... */` form is parsed as a block comment and **silently ignored**. Never write:
+> - `SELECT /*+ USE_HASH_JOIN(a,b) */ ...` (Oracle hint name) — silent no-op
+> - `SELECT /*+ USE_PARTITIONED_JOIN(a,b) */ ...` (made-up hint name) — silent no-op
+> - `SELECT /*+ BROADCAST(small_dim) */ ...` (Spark hint name) — silent no-op
+> - `SELECT /*+ MAPJOIN(small_dim) */ ...` (Hive hint name) — silent no-op
+> - Any `/*+ ANY_HINT(...) */` form
+>
+> Failure mode is **silent-wrong**: the query runs with the default cost-based distribution and the engineer thinks the hint applied. Use the SESSION property below instead.
+
 ```sql
 -- Force BROADCAST (use only when you KNOW the build side is small):
 SET SESSION join_distribution_type = 'BROADCAST';

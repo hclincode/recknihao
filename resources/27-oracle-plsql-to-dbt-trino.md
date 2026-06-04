@@ -270,13 +270,89 @@ These are the per-expression rewrites you'll do on almost every migrated SELECT.
 
 ### 4.2 Date/time functions
 
+> ### LEADING CANONICAL — Oracle `TO_CHAR(date, fmt)` → Trino
+>
+> **Question shape this answers**: "what's the Trino equivalent of Oracle `TO_CHAR(order_ts, 'YYYY-MM-DD')`", "how do I format a timestamp as a string in Trino", "how do I migrate `TO_CHAR(dt, 'YYYY-MM-DD HH24:MI:SS')` from Oracle to Trino".
+>
+> **The two canonical Trino 467 functions** — both verified against [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html):
+>
+> - **`date_format(timestamp, format)`** — MySQL-style format specifiers (capital `%Y`, lowercase `%m`, etc.). **FIRST-CHOICE** for general TO_CHAR migration when the format string is anything other than plain ISO.
+> - **`format_datetime(timestamp, pattern)`** — Joda DateTime pattern (lowercase `yyyy`, `MM`, `dd`, etc.). Equivalent capability, different pattern grammar. Use whichever pattern grammar you're already comfortable with.
+>
+> **Trino has NO `TO_CHAR` function** — copy-pasting `TO_CHAR(dt, 'YYYY-MM-DD')` from Oracle into a Trino query or a dbt-Trino model produces `Function 'to_char' not registered` (function-resolution error).
+>
+> **Three-line worked example:**
+>
+> ```sql
+> -- Oracle:
+> SELECT TO_CHAR(order_ts, 'YYYY-MM-DD') AS order_date_str FROM orders;
+>
+> -- Trino (FIRST-CHOICE, MySQL-style):
+> SELECT date_format(order_ts, '%Y-%m-%d') AS order_date_str FROM orders;
+>
+> -- Trino (Joda-style — equivalent, pick one consistent style across your codebase):
+> SELECT format_datetime(order_ts, 'yyyy-MM-dd') AS order_date_str FROM orders;
+> ```
+>
+> **For plain ISO output ONLY (DATE column → `'YYYY-MM-DD'` string)**, a bare `CAST(d AS VARCHAR)` works:
+>
+> ```sql
+> -- DATE column, default ISO 'YYYY-MM-DD' rendering:
+> SELECT CAST(order_date AS VARCHAR) FROM orders;        -- produces '2026-05-30'
+> -- TIMESTAMP column, default ISO render is 'YYYY-MM-DD HH:MM:SS.fff':
+> SELECT CAST(order_ts AS VARCHAR) FROM orders;          -- produces '2026-05-30 14:30:00.000'
+> ```
+>
+> **CAST is restricted to the engine's default formatting.** For any non-ISO format (slashes, month abbreviation, custom layout, etc.), use `date_format` or `format_datetime`.
+>
+> **Oracle TO_CHAR ↔ Trino format-string mapping** (the patterns engineers migrate most often):
+>
+> | Oracle `TO_CHAR(dt, ...)` mask | Trino `date_format(ts, ...)` (MySQL) | Trino `format_datetime(ts, ...)` (Joda) |
+> |---|---|---|
+> | `'YYYY-MM-DD'` | `'%Y-%m-%d'` | `'yyyy-MM-dd'` |
+> | `'YYYY-MM-DD HH24:MI:SS'` | `'%Y-%m-%d %H:%i:%s'` | `'yyyy-MM-dd HH:mm:ss'` |
+> | `'DD/MM/YYYY'` | `'%d/%m/%Y'` | `'dd/MM/yyyy'` |
+> | `'MM/DD/YYYY'` | `'%m/%d/%Y'` | `'MM/dd/yyyy'` |
+> | `'Mon DD, YYYY'` | `'%b %d, %Y'` | `'MMM dd, yyyy'` |
+> | `'Month DD, YYYY'` | `'%M %d, %Y'` | `'MMMM dd, yyyy'` |
+> | `'HH24:MI'` | `'%H:%i'` | `'HH:mm'` |
+> | `'HH24:MI:SS'` | `'%H:%i:%s'` | `'HH:mm:ss'` |
+> | `'YYYY'` (year only) | `'%Y'` | `'yyyy'` |
+> | `'MM'` (month-of-year, zero-padded) | `'%m'` | `'MM'` |
+> | `'DD'` (day-of-month, zero-padded) | `'%d'` | `'dd'` |
+> | `'D'` (day-of-week 1-7) | `'%w'` (0-6, Sun=0) | `'e'` (1-7, Mon=1) |
+> | `'WW'` (week-of-year) | `'%U'` (Sun-start) / `'%v'` (Mon-start, ISO) | `'ww'` (ISO week-of-weekyear) |
+> | `'Q'` (quarter 1-4) | no single specifier — use `quarter(ts)` then format separately | no single specifier — use `quarter(ts)` |
+>
+> **Pattern-grammar pitfalls to remember:**
+>
+> - **MySQL `%Y` = 4-digit year**; lowercase `%y` = 2-digit year. **Joda `yyyy` = 4-digit year**; `yy` = 2-digit year.
+> - **MySQL `%m` (lowercase) = month 01-12**. **Joda `MM` (uppercase) = month 01-12**; Joda lowercase `mm` = MINUTE not month. This trips engineers most often — `format_datetime(ts, 'yyyy-mm-dd')` (lowercase `mm`) silently renders the minute-of-hour where you expected month-of-year.
+> - **MySQL `%i` = minute** (`%M` is month NAME). **Joda `mm` = minute** (`MM` is month). The two grammars disagree about the case of the minute-of-hour specifier.
+> - **Hour 24-clock**: MySQL `%H`, Joda `HH`. **Hour 12-clock**: MySQL `%h`, Joda `hh` (also need `%p` / `a` for AM/PM).
+>
+> **For niche needs only** — `format('%1$td/%1$tm/%1$tY', ts)` Java Formatter syntax IS a real Trino function but a niche choice. Use it only when you need Java Formatter-specific features (positional args, indexed reuse). For ordinary TO_CHAR migration, `date_format` / `format_datetime` are the canonical answers.
+>
+> ### DO-NOT-WRITE matrix — Trino has NO `::` cast operator and NO `TO_CHAR` function
+>
+> | Forbidden form | Where it comes from | What it does in Trino 467 | Trino-correct equivalent |
+> |---|---|---|---|
+> | `TO_CHAR(order_ts, 'YYYY-MM-DD')` | Oracle | `Function 'to_char' not registered` (function-resolution error) | `date_format(order_ts, '%Y-%m-%d')` or `format_datetime(order_ts, 'yyyy-MM-dd')` |
+> | `CAST(order_ts AS DATE)::VARCHAR` | PostgreSQL / Snowflake / DuckDB `::` cast operator | `mismatched input '::'` parse error (Trino has no `::` operator per [trinodb/trino #23795](https://github.com/trinodb/trino/issues/23795), open feature request, NOT in 467 / 481) | `CAST(CAST(order_ts AS DATE) AS VARCHAR)` (chained ANSI cast) or `date_format(order_ts, '%Y-%m-%d')` |
+> | `order_ts::VARCHAR` / `col::INT` / any `expr::type` | PostgreSQL / Snowflake / DuckDB | `mismatched input '::'` parse error | `CAST(expr AS type)` (or `TRY_CAST(...)` if NULL-on-failure is desired) |
+> | Calling `::` "syntactic sugar for CAST" | misconception | It's another dialect's syntax, not a Trino spelling | Always use `CAST(expr AS type)` ANSI form |
+> | `STR_TO_DATE('2026-05-30', '%Y-%m-%d')` | MySQL | `Function 'str_to_date' not registered` | `date_parse('2026-05-30', '%Y-%m-%d')` (MySQL-style) or `parse_datetime('2026-05-30', 'yyyy-MM-dd')` (Joda) |
+> | `CONVERT(VARCHAR, order_ts, 23)` | SQL Server style-coded conversion | Trino's `CONVERT` does not take SQL-Server style codes | `date_format(order_ts, '%Y-%m-%d')` |
+>
+> **Meta-rule**: in Trino, use Trino's dialect — Oracle / PostgreSQL / Snowflake / Spark / SQL-Server function names and operators that look idiomatic in other engines parse-error or function-not-registered against Trino 467.
+
 | Oracle | Trino | Notes |
 |---|---|---|
 | `SYSDATE` (current date + time, server time zone) | `current_timestamp` (timestamp with time zone, session TZ) OR `localtimestamp` (no TZ) | Beware: `SYSDATE` returns DATE-with-time in Oracle; `CURRENT_DATE` in Trino is just DATE (no time). Use `current_timestamp` for "now()" semantics. **NOTE: `current_date` drops the time component — do NOT use it as a SYSDATE replacement when you need hours/minutes/seconds.** See §4.2A for how to change the session time zone (it is NOT a `SET SESSION` property — it is a dedicated `SET TIME ZONE` command). |
 | `SYSTIMESTAMP` | `current_timestamp` | Identical semantics (both TZ-aware). Oracle `SYSTIMESTAMP` is `TIMESTAMP WITH TIME ZONE`; Trino `current_timestamp` is `timestamp with time zone` keyed on the session time zone. |
 | `TRUNC(dt)` (truncate to day) | `date_trunc('day', dt)` | Also `'week'`, `'month'`, `'quarter'`, `'year'`, `'hour'`, `'minute'`, `'second'`. |
 | `TO_DATE('2026-05-30', 'YYYY-MM-DD')` | `date_parse('2026-05-30', '%Y-%m-%d')` returning timestamp, OR `CAST('2026-05-30' AS DATE)` for ISO-8601 dates. | Trino's format strings use `%Y %m %d %H %i %s` (MySQL-style), NOT Oracle's `YYYY MM DD HH24 MI SS`. |
-| `TO_CHAR(dt, 'YYYY-MM-DD')` | `format_datetime(dt, 'yyyy-MM-dd')` returning varchar (Joda-time format), OR `CAST(dt AS varchar)`. | Trino's `format_datetime` uses Joda-style `yyyy MM dd HH mm ss`. |
+| `TO_CHAR(dt, 'YYYY-MM-DD')` | `date_format(dt, '%Y-%m-%d')` (MySQL-style, FIRST-CHOICE) OR `format_datetime(dt, 'yyyy-MM-dd')` (Joda) OR `CAST(dt AS VARCHAR)` for ISO of a DATE column only. | See the LEADING CANONICAL block at the top of this section for the full Oracle TO_CHAR ↔ Trino format-string mapping table and DO-NOT-WRITE matrix. `TO_CHAR` itself is NOT a Trino function. |
 | `TO_NUMBER('123')` | `CAST('123' AS bigint)` or `CAST('1.5' AS double)` | Trino has no `TO_NUMBER`; use `CAST`. |
 | `EXTRACT(YEAR FROM dt)` | `EXTRACT(YEAR FROM dt)` OR `year(dt)` | Identical syntax + convenience functions. |
 | `dt + 1` (add one day) | `dt + INTERVAL '1' DAY` | Trino requires explicit INTERVAL — no implicit day-arithmetic on dates. |
@@ -457,6 +533,37 @@ FROM {{ ref('stg_users') }}
 - Resource 23 §"Trino 467 SQL-dialect anti-patterns" lists `::cast` syntax alongside `QUALIFY`, `DISTINCT ON`, `LIMIT N BY` as Trino-incompatible.
 - Resource 13 §"Postgres → Trino translation table" lists `ts::DATE` → `CAST(ts AS DATE)`. Inside the Postgres-side ingestion examples in resource 13 (Spark JDBC `dbtable` subqueries, pg_attribute lookups, gen_random_uuid()), the `::` cast IS valid because that SQL runs in Postgres, not Trino.
 - Resource 22 §3.2 (Postgres connector pushdown table) — the UUID typed-literal example `WHERE tenant_id = UUID 'a1b2c3d4-...'` is the Trino-compatible form for the equivalent Postgres `tenant_id = 'a1b2c3d4-...'::uuid` filter.
+
+### 4.4B CROSS-DIALECT-SPILLOVER GUARDRAIL — syntax that looks valid but is NOT Trino 467
+
+**Why this section exists (consolidated meta-canonical).** Across iter402–iter456 the most-repeated failure mode in Trino-context answers has been **cross-dialect syntax spillover** — recommending Oracle / PostgreSQL / Snowflake / Spark / native-Iceberg syntax as if it were Trino's. The forms look idiomatic (because they ARE idiomatic in those other engines) but they either parse-error or, worse, **silently no-op** in Trino 467. This table consolidates every recurring spillover so a single grep on this section catches all of them.
+
+> **The cross-dialect-spillover table — when you see any of these in Trino-context SQL, fix it.**
+>
+> | Concept | Forbidden form (other dialect) | Where it comes from | What it does in Trino 467 | Trino-correct form (verified) |
+> |---|---|---|---|---|
+> | Cast operator | `expr::type` | PostgreSQL, Snowflake, DuckDB | Parse error: `mismatched input '::'` (open FR [#23795](https://github.com/trinodb/trino/issues/23795), not implemented in 467/481) | `CAST(expr AS type)` (or `TRY_CAST(...)` for NULL-on-failure) |
+> | Query hint (any) | `SELECT /*+ ANY_HINT(...) */ ...` | Oracle, Spark, Hive | **SILENTLY IGNORED** — treated as a block comment (open FR [#9498](https://github.com/trinodb/trino/issues/9498), not implemented). Failure mode is silent-wrong, not an error. | `SET SESSION <property> = <value>;` BEFORE the query (e.g., `SET SESSION join_distribution_type = 'PARTITIONED';`) |
+> | Top-N-per-group / dedup | `QUALIFY ROW_NUMBER() OVER (...) = 1` | Snowflake, BigQuery, Databricks, Teradata | Parse error | `ROW_NUMBER()` subquery + outer `WHERE rn = 1` (see [resource 23](23-sql-best-practices-olap.md)) |
+> | Stats DDL | `ANALYZE TABLE schema.table` | Spark, Hive, MySQL | Parse error | `ANALYZE schema.table` — bare, no `TABLE` keyword |
+> | Date → string | `TO_CHAR(dt, 'YYYY-MM-DD')` | Oracle | `Function 'to_char' not registered` | `date_format(dt, '%Y-%m-%d')` (MySQL) or `format_datetime(dt, 'yyyy-MM-dd')` (Joda) |
+> | String → date | `STR_TO_DATE('2026-05-30', '%Y-%m-%d')` | MySQL | `Function 'str_to_date' not registered` | `date_parse('2026-05-30', '%Y-%m-%d')` (MySQL-style) or `parse_datetime('2026-05-30', 'yyyy-MM-dd')` (Joda) |
+> | Conditional null | `NVL(a, b)` | Oracle | Parse / resolution error | `COALESCE(a, b)` |
+> | Conditional zero | `NVL2(a, b, c)` | Oracle | `Function 'nvl2' not registered` | `CASE WHEN a IS NOT NULL THEN b ELSE c END` |
+> | Decode-with-NULL semantics | `DECODE(col, NULL, 'x', ...)` | Oracle | Parse / resolution error | Searched `CASE WHEN col IS NULL THEN 'x' WHEN col = ... END` (see §4.1A) |
+> | Row limit | `WHERE ROWNUM <= 100` | Oracle 11g | Parse error (no `ROWNUM` pseudocolumn) | `LIMIT 100` (with `ORDER BY` for determinism) |
+> | Iceberg table property: compression | `WITH (..., "write.parquet.compression-codec" = 'zstd')` | native Iceberg property key | Parse error — that key is the native Iceberg name, not a Trino WITH property | `WITH (..., compression_codec = 'ZSTD')` — flat name=value, Trino name |
+> | Iceberg WITH-clause shape | `WITH (..., properties = map('k','v'))` | native Iceberg / Spark API style | Parse / property error | `WITH (key1 = 'v1', key2 = 'v2')` — flat name=value pairs |
+> | Spark TBLPROPERTIES | `ALTER TABLE t SET TBLPROPERTIES ('k' = 'v')` | Spark SQL | Parse error | `ALTER TABLE t SET PROPERTIES key = 'v'` — bare identifier LHS, string-literal RHS |
+> | Iceberg snapshot timestamp | `WHERE timestamp_ms = ...` on `$snapshots` | Iceberg Java API field name | Column does not exist | `WHERE committed_at = TIMESTAMP '...'` — the Trino metadata-table column |
+>
+> **Meta-rule (memorize)**: when unsure, **prefer ANSI / standard SQL forms (`CAST(... AS ...)`, `COALESCE`, `CASE WHEN`) and SESSION properties (`SET SESSION ...`)**; do **not** paste PostgreSQL / Oracle / Snowflake / Spark / native-Iceberg idioms into Trino. If the form parses-and-runs without error but the optimizer behavior didn't change, suspect a silent-no-op hint or wrong session property — Trino has no hint mechanism, so the answer is always a SESSION property.
+>
+> **Cross-reference chain.**
+> - Resource 23 anti-patterns table — extends this with QUALIFY, DISTINCT ON, LIMIT N BY, TOP N, EXTRACT(EPOCH FROM ...), TIMESTAMPDIFF, STRING_AGG, RETURNING.
+> - Resource 24 § LEADING CANONICAL — How do I influence Trino's join distribution — the canonical replacement for any `/*+ hint */` form.
+> - Resource 11 § Trino dialect ↔ native-Iceberg name translation — the canonical replacement for any `write.*-codec` / `TBLPROPERTIES` / `properties = map(...)` form.
+> - Resource 17 § LEADING CANONICAL — `$snapshots` column list — the canonical column names (`committed_at`, NOT `timestamp_ms`).
 
 ### 4.5 Query-shape and pseudo-column constructs
 

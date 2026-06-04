@@ -1,152 +1,75 @@
-# Judge Feedback — Iter 456 (extended phase, end-of-iteration)
+# Iter 457 — Judge Feedback (Extended Phase, end-of-iteration)
 
 ## Overall
 
-- **Overall average: 3.8594 (PASS, THIN MARGIN)** — 55th consecutive overall PASS in extended phase
-- **Per-question**: Q1 **4.6875 STRONG PASS** / Q2 **3.1875 FAIL** / Q3 **4.6875 STRONG PASS** / Q4 **2.875 FAIL**
-- Margin THIN (3.8594) — Q1+Q3 carry the iteration; Q2+Q4 BOTH below 3.5 floor with load-bearing fabs.
+- **Overall average**: **4.7344 / 5.0 STRONG PASS** (Q1 4.875, Q2 4.8125, Q3 4.625, Q4 4.625)
+- **Verdict**: PASS — 56th consecutive PASS in extended phase. Margin LOOSE; all four questions above the 4.5 floor.
+- **Streak status**:
+  - **Join-strategy fab class** (iter456 Q2 `/*+ USE_HASH_JOIN */` + `/*+ USE_PARTITIONED_JOIN */`): **FIX FULLY HELD**. Responder used `SET SESSION join_distribution_type = 'PARTITIONED'` as the canonical lever and explicitly called out `/*+ ... */` as silently-ignored block comments. No functional hint recommended.
+  - **TO_CHAR / date-format fab class** (iter456 Q4 `::VARCHAR` + missing canonical functions): **FIX FULLY HELD**. Responder led with `date_format('%Y-%m-%d')` (MySQL specifiers) and offered `format_datetime('yyyy-MM-dd HH:mm:ss')` (Joda) as equivalent; `CAST(d AS VARCHAR)` for plain ISO. NO `::` cast operator anywhere. NO claim that TO_CHAR exists in Trino. Joda `MM` vs `mm` gotcha flagged.
+  - **Q4 carry-forward fixes**: `is_incremental()` guard, `partitioned_by` dbt-trino model-config key, `incremental_strategy='merge'` + `unique_key` for Iceberg, ephemeral semantics, Oracle empty-string-NULL caveat — all HELD.
+- **Fabrications**: NONE in this iteration. Zero per-question fabs across all four answers.
 
-## Per-question scores
+## Per-question scoring
 
-| Q | Topic angle | Acc | Comp | Clar | Act | Avg | Verdict |
-|---|---|---|---|---|---|---|---|
-| Q1 | Trino ZSTD compression DDL RE-PROBE | 4.75 | 4.75 | 4.5 | 4.75 | **4.6875** | STRONG PASS — iter455 Q4 fab fix CONFIRMED |
-| Q2 | Broadcast join concern + how to influence + does ANALYZE help | 2.75 | 3.0 | 4.0 | 3.0 | **3.1875** | FAIL — fabricated `/*+ USE_HASH_JOIN */` hints + missing `join_distribution_type` |
-| Q3 | dbt ref() vs source() | 4.75 | 4.5 | 4.75 | 4.75 | **4.6875** | STRONG PASS — clean dbt semantics |
-| Q4 | Oracle TO_CHAR(date,'YYYY-MM-DD') → Trino | 2.5 | 2.5 | 3.75 | 2.75 | **2.875** | FAIL — `::VARCHAR` PostgreSQL fab + missing `date_format`/`format_datetime` |
+### Q1 — broadcast→partitioned join RE-PROBE — **avg 4.875 STRONG PASS** (5.0 / 4.75 / 5.0 / 4.75)
 
-## Streak status
+- **Accuracy 5.0** — `join_distribution_type` accepted values (PARTITIONED/BROADCAST/AUTOMATIC) and default (AUTOMATIC) verified against trino.io/docs/current/optimizer/cost-based-optimizations.html. `join_max_broadcast_table_size` default 100MB verified against the same page. `/*+ ... */` silently treated as block comment per Trino SQL grammar (open FR trinodb/trino #9498). Bare `ANALYZE` (no TABLE keyword) verified against trino.io/docs/current/sql/analyze.html.
+- **Clarity 4.75** — clear three-lever layout (PRIMARY session prop / SECONDARY broadcast cap / TERTIARY ANALYZE), silent-wrong failure mode for hints called out explicitly.
+- **Actionability 5.0** — dbt `pre_hook` form supplied for set-once-per-model patterns; bare `ANALYZE` shown for stats refresh; copy-paste ready.
+- **Completeness 4.75** — covered all three levers + the do-not-write hint guard. Could optionally have added EXPLAIN (TYPE DISTRIBUTED) for verification, but that is a nice-to-have not a load-bearing miss.
 
-**Compression-DDL fab class (iter455 Q4 FAB-2 + FAB-3): FULLY RESOLVED at Q1.** Responder used Trino `compression_codec` (NOT native `write.parquet.compression-codec`); flat `WITH` pairs (NOT `properties = map(...)`); bare-identifier LHS in SET PROPERTIES (NOT string-literal). Explicitly called out the native name as WRONG. iter456 teacher LEADING CANONICAL block in r03 + r11 + meta-canonical translation table LANDED CLEAN.
+### Q2 — Oracle TO_CHAR date formatting RE-PROBE — **avg 4.8125 STRONG PASS** (5.0 / 4.75 / 4.75 / 4.75)
 
-**Bare-ANALYZE-vs-ANALYZE-TABLE: HELD AT Q2.** Responder did not take the "ANALYZE TABLE" bait planted by the question; used the correct bare `ANALYZE iceberg.analytics.events` Trino syntax.
+- **Accuracy 5.0** — `date_format(timestamp, format)` with MySQL specifiers `%Y` (4-digit year), `%m` (2-digit month), `%d` (2-digit day), `%H` (hour 24), `%i` (minute), `%s` (second) all verified against trino.io/docs/current/functions/datetime.html. `format_datetime(timestamp, pattern)` with Joda `yyyy/MM/dd/HH/mm/ss` verified against same. TO_CHAR-doesn't-exist-in-Trino verified. NO `::` cast operator. NO TO_CHAR-exists claim.
+- **Clarity 4.75** — Joda `MM` (month) vs `mm` (minute) gotcha explicitly called out — this is the single most-common Joda pitfall and surfacing it preempts a real engineer mistake.
+- **Actionability 4.75** — 6-row Oracle-mask → MySQL → Joda mapping table is copy-paste-ready for the most common migration patterns.
+- **Completeness 4.75** — covered the two canonical functions + plain-ISO `CAST` fallback. Could expand the mapping table beyond 6 rows (the r27 §4.2 canonical block has 13 rows), but the 6 most-frequent rows are present.
 
-## Fabrications detected
+### Q3 — Iceberg small-files / compaction / maintenance — **avg 4.625 STRONG PASS** (4.75 / 4.5 / 4.75 / 4.5)
 
-### FAB-1 (Q2) — `/*+ USE_HASH_JOIN(a,b) */` and `/*+ USE_PARTITIONED_JOIN(a,b) */` query hints
+- **Accuracy 4.75** — `EXECUTE optimize` with `file_size_threshold` (default 100MB), `EXECUTE expire_snapshots(retention_threshold => '30d')` with 7d minimum floor, `EXECUTE remove_orphan_files(retention_threshold => '7d')` all verified against trino.io/docs/current/connector/iceberg.html. `rewrite_data_files` and `rewrite_manifests` correctly identified as Spark-only `CALL` procedures (not Trino EXECUTE).
+- **Clarity 4.5** — clean canonical ordering (optimize → expire → orphan) with the optimize-before-expire rationale explained.
+- **Actionability 4.75** — nightly scheduling guidance supplied, copy-paste-ready EXECUTE forms.
+- **Completeness 4.5** — minor nuance: Trino's current docs ALSO list `EXECUTE optimize_manifests` as a Trino-side analog of Spark's `rewrite_manifests`. Responder said "Spark-only CALL" which is correct for the Spark-named procedure but slightly understates Trino's surface area. Not a fabrication, just a completeness nick.
 
-- **Claim**: responder recommended Trino query hints `SELECT /*+ USE_HASH_JOIN(a,b) */ ...` and `/*+ USE_PARTITIONED_JOIN(a,b) */ ...` with hedge "if your Trino version supports hints, verify docs".
-- **Reality**: Trino does NOT support `/*+ ... */` query hints AT ALL — neither these specific hint names nor any hint mechanism. Per [trinodb/trino issue #9498 "Support query hints"](https://github.com/trinodb/trino/issues/9498) (still open, not implemented as of Trino 467/481), Trino has no query-hint syntax. The names `USE_HASH_JOIN` / `USE_PARTITIONED_JOIN` are Oracle/Spark-specific.
-- **Failure mode**: SILENT-WRONG. Trino 467 treats `/*+ ... */` as a regular block comment per Trino SQL grammar, silently ignores the hint, optimizer makes the default cost-based decision. Engineer thinks the hint applied; it didn't. Worse than a parse error because no immediate feedback.
-- **Hedge does not save it**: the hedge "if your Trino version supports hints" implies hints might exist somewhere — they don't. Even if Trino added hints in a future release, the names `USE_HASH_JOIN`/`USE_PARTITIONED_JOIN` are not what Trino would use.
-- **Correct fact**: per [Trino CBO docs](https://trino.io/docs/current/optimizer/cost-based-optimizations.html), the canonical Trino lever is `SET SESSION join_distribution_type = 'PARTITIONED'` (or `'BROADCAST'` or `'AUTOMATIC'`).
-- **Source**: https://github.com/trinodb/trino/issues/9498
+### Q4 — Oracle cursor-loop + temp-table proc → dbt — **avg 4.625 STRONG PASS** (4.75 / 4.5 / 4.75 / 4.5)
 
-### FAB-2 (Q4) — `::VARCHAR` PostgreSQL cast operator
+- **Accuracy 4.75** — `is_incremental()` guard verified against docs.getdbt.com/reference/dbt-jinja-functions/is-incremental. `partitioned_by` in dbt-trino model `properties` config verified against docs.getdbt.com/reference/resource-configs/trino-configs (the docs show `partitioned_by` in the model `properties` dict; the underlying Trino Iceberg WITH-clause property name `partitioning` is what dbt-trino emits in the generated CREATE TABLE — both names are documented but at different layers, and the responder correctly used the dbt-trino layer's name). `incremental_strategy='merge'` + `unique_key` for Iceberg verified against same. `{% if execute %}` correctly flagged as WRONG for incremental filtering. Oracle empty-string-is-NULL caveat correct.
+- **Clarity 4.5** — clean procedural→set-based mapping table; 3-model worked example structurally sound.
+- **Actionability 4.75** — copy-paste-ready stg + int + fct dbt models with all the right config keys; subquery `MAX(updated_at)` delta pattern shown.
+- **Completeness 4.5** — covered cursor LOOP, IF/THEN, temp table, MERGE mappings. Could have explicitly noted that `partitioning` (singular) is the underlying Trino property name visible in `SHOW CREATE TABLE` output — useful for engineers debugging the emitted DDL — but this is a nice-to-have not a load-bearing miss.
 
-- **Claim**: responder recommended `CAST(order_ts AS DATE)::VARCHAR` as "more idiomatically" with `::VARCHAR` called "syntactic sugar for CAST".
-- **Reality**: Trino does NOT support the PostgreSQL `x::type` cast operator syntax. Per [trinodb/trino issue #23795 "Cast operator `::`"](https://github.com/trinodb/trino/issues/23795) (still open as a feature request, not implemented as of Trino 467/481), `::` is not valid Trino syntax — only standard SQL `CAST(x AS type)` is supported.
-- **Failure mode**: PARSE ERROR. Engineer copy-pastes the preferred form, hits `mismatched input '::'. Expecting: ...`.
-- **Compounding factor**: this is in the PREFERRED-form position of the answer (responder explicitly says "more idiomatically"), so the engineer would try this form first.
-- **Root-cause class**: PostgreSQL/Snowflake/DuckDB dialect spillover into Trino — same pattern as Q2 (recommending another dialect's syntax as Trino's). Calling `::` "syntactic sugar" implies it's just an alternative spelling; it's not — it's a different dialect's syntax.
-- **Correct fact**: per [Trino datetime functions](https://trino.io/docs/current/functions/datetime.html), the canonical Trino equivalents of Oracle TO_CHAR are `date_format(ts, '%Y-%m-%d')` (MySQL-style) and `format_datetime(ts, 'yyyy-MM-dd')` (Joda) — both FIRST-CHOICE answers, both missing from the responder.
-- **Source**: https://github.com/trinodb/trino/issues/23795
+## Fabrications
 
-## Major completeness gaps
+**NONE.** Zero fabrications across all four questions this iteration. Both iter456 dialect-spillover fab classes (`/*+ USE_HASH_JOIN */` and `::VARCHAR`) are fully resolved.
 
-### MISS-1 (Q2) — `join_distribution_type` session property
+## What worked (do not regress)
 
-- The canonical Trino lever for influencing per-query join distribution is `SET SESSION join_distribution_type = 'PARTITIONED'` (or `'BROADCAST'` / `'AUTOMATIC'`). Accepts three values, default AUTOMATIC. This is THE direct switch.
-- The responder gave only the secondary cap (`join_max_broadcast_table_size`), which is the AUTOMATIC-mode broadcast-build-side cap, not the primary distribution switch.
-- Engineer asking "how do I influence broadcast" needs the primary switch first; the cap is a secondary mechanism.
-- **Source**: https://trino.io/docs/current/optimizer/cost-based-optimizations.html
+1. **r24 LEADING CANONICAL join-distribution block + DO-NOT-WRITE hints matrix** — landed cleanly at the keyword path the responder hit. The three-lever ordering (session prop / broadcast cap / ANALYZE) and the 6-row DO-NOT-WRITE matrix banning specific hint names verbatim worked exactly as designed. Keep this pattern.
+2. **r27 §4.2 LEADING CANONICAL TO_CHAR block + 13-row Oracle↔Trino mask mapping + DO-NOT-WRITE matrix** — same playbook, same result. The first-choice `date_format` + equivalent `format_datetime` pairing matches what an Oracle migration engineer needs. Keep this pattern.
+3. **r27 §4.4B consolidated CROSS-DIALECT-SPILLOVER guardrail** (13-row table) — the meta-rule "in Trino, use Trino's dialect" + the consolidated table of recurring spillovers gives the responder a single keyword path that captures multiple fab classes at once. This is the right level of abstraction for dialect-confusion fabs.
+4. **Reconcile-don't-append discipline** — three stale lines fixed in-place (r17 `committed_at::DATE`, r23 `/*+ DISTRIBUTION_TYPE */` mention, r23 anti-patterns table). No contradictory stale content left to confuse the responder.
 
-### MISS-2 (Q4) — `date_format` and `format_datetime`
+## Concrete teacher actions for iter458
 
-- Per [Trino datetime functions docs](https://trino.io/docs/current/functions/datetime.html), the canonical Trino equivalents of Oracle TO_CHAR for arbitrary date format strings are:
-  - `date_format(timestamp, '%Y-%m-%d')` — MySQL-style format specifiers (capital `%Y` = 4-digit year, `%m` = 2-digit month, `%d` = 2-digit day, `%H` = hour, `%i` = minute, `%s` = second). **FIRST-CHOICE.**
-  - `format_datetime(timestamp, 'yyyy-MM-dd')` — Joda DateTime pattern (lowercase `yyyy` = 4-digit year, `MM` = 2-digit month, `dd` = 2-digit day, `HH` = hour, `mm` = minute, `ss` = second).
-- Both exist in Trino 467, both documented, both are the canonical Oracle TO_CHAR migration answers.
-- Responder gave NEITHER. Instead recommended `format('%1$td/%1$tm/%1$tY', order_ts)` Java Formatter syntax — which IS a real Trino function but the NICHE choice, not the canonical TO_CHAR equivalent.
-- Engineer migrating hundreds of Oracle TO_CHAR calls in legacy PL/SQL needs `date_format`/`format_datetime` first, `format()` as fallback for niche cases.
-- **Source**: https://trino.io/docs/current/functions/datetime.html
+This iteration is a clean STRONG PASS with both prior-FAIL fix classes confirmed. Iter458 should be a **breadth iteration** — no dedicated fix is required. Recommend the following design:
 
-## Concrete teacher actions for iter457
+1. **Breadth-only iteration**: probe four DIFFERENT topics from those touched this iter to avoid over-fitting to the join-strategy and TO_CHAR angles. Candidate angles:
+   - Iceberg partition design (e.g., `bucket(N, col)` transform syntax, partition spec evolution semantics, `$partitions` metadata table column list)
+   - Multi-tenant analytics (tenant_id partitioning + Trino row-level filters via OPA at a conceptual level — defer specific policy rules to external governance per prod_info.md)
+   - Query performance regression diagnosis (oncall workflow: EXPLAIN ANALYZE / `$query_id` / partition skew / dynamic filtering)
+   - Postgres-to-Iceberg ingestion (CDC vs full-refresh vs incremental decision matrix, JSONB → struct mapping)
+2. **Do NOT probe federation** this iter — federation row 4.49944/310 is at the override-threshold (≥ 4.5) and is sensitive to single-question movement. The iter457 carry-forward is clean; leave the row unchanged unless deliberately probing with a bulletproofed angle.
+3. **Do NOT re-probe the iter456 FAIL angles** (broadcast join distribution, TO_CHAR) for two iters — give the iter457 fixes time to bake before re-testing. Coming back at iter460+ from a different angle (e.g., dynamic filtering vs broadcast on partitioned tables, or `date_parse` for the reverse Oracle TO_DATE direction) would be a stronger test.
+4. **Small completeness polish** (optional, low-priority — not required for PASS):
+   - Add `EXECUTE optimize_manifests` to r17 as the Trino-side analog of Spark's `rewrite_manifests`, with a one-line callout. The responder's "Spark-only" claim is correct for the Spark-named procedure but the analog exists in Trino under a different name and is worth surfacing.
+   - In the r27 dbt-trino partitioning section, add a one-line clarification that `partitioned_by` is the dbt-trino model `properties`-dict key, while `partitioning` (singular) is the underlying Trino Iceberg WITH-clause property visible in `SHOW CREATE TABLE`. Helps engineers debugging the emitted DDL.
+5. **Maintain the LEADING CANONICAL + DO-NOT-WRITE matrix pattern** as the default structure for any future fab-class fix. iter457 proved this pattern is highly effective when the matrix reproduces the fabricated form VERBATIM with the inline correction.
 
-Both new fabrications are **dialect-spillover** fabs (Oracle/Spark in Q2, PostgreSQL/Snowflake/DuckDB in Q4). The pattern is the same as iter455 Q4 (native Iceberg name spillover): responder recommends another dialect's syntax as Trino's because the syntax is plausible-looking and widespread elsewhere. Teacher needs TWO new canonical blocks plus DO-NOT-WRITE matrices.
+## Streak / margin notes
 
-### Action 1 — Trino join-strategy canonical lever block (r25 / r26)
-
-**Where to install**: resources/25-trino-cbo-analyze-stats.md (and/or resources/26-query-performance-regression-diagnosis.md) — the keyword path is "broadcast join" / "join strategy" / "how do I make Trino use a hash join". Use a LEADING CANONICAL `### LEADING CANONICAL — How do I influence Trino's join strategy?` subsection BEFORE any prose discussion of broadcast vs partitioned.
-
-**Content to teach (verified syntax)**:
-1. **Primary lever**: `SET SESSION join_distribution_type = 'PARTITIONED';` (accepted values: `PARTITIONED`, `BROADCAST`, `AUTOMATIC`; default `AUTOMATIC`). One line — this is the direct switch.
-2. **Secondary cap (AUTOMATIC mode only)**: `SET SESSION join_max_broadcast_table_size = '50MB';` (default 100MB). Caps the broadcast build side when CBO is choosing.
-3. **Tertiary (improve the optimizer's input)**: bare `ANALYZE iceberg.analytics.events;` (no TABLE keyword) → populates NDV stats in the Iceberg Puffin sketch file → CBO makes better join-distribution choices.
-4. **EXPLAIN (TYPE DISTRIBUTED)** before/after to verify the chosen distribution.
-
-**DO-NOT-WRITE matrix** (reproduce iter456 Q2 fab verbatim with inline correction):
-- `SELECT /*+ USE_HASH_JOIN(a,b) */ ...` — **WRONG**: Trino has NO query hints per trinodb/trino issue #9498. `/*+ ... */` is silently treated as a regular block comment — the hint is IGNORED with no error. Use `SET SESSION join_distribution_type = 'PARTITIONED'` before the query instead.
-- `SELECT /*+ USE_PARTITIONED_JOIN(a,b) */ ...` — **WRONG**: same as above. These are Oracle/Spark hint names; Trino has neither the syntax nor these names.
-- Any `/*+ ANY_HINT_NAME(...) */` — **WRONG**: Trino has NO query hint mechanism at all. Use SET SESSION properties instead.
-
-**Failure-mode callout**: emphasize the SILENT-WRONG nature. Unlike a parse error, the engineer gets no feedback that the hint was ignored — the query runs with default distribution and the engineer thinks the hint worked.
-
-**Verification anchors**: trino.io/docs/current/optimizer/cost-based-optimizations.html + trinodb/trino issue #9498.
-
-### Action 2 — Trino TO_CHAR canonical equivalents block (r27 — Oracle migration)
-
-**Where to install**: resources/27-oracle-plsql-dbt-trino-migration.md — the keyword path is "TO_CHAR" / "date format" / "Oracle date string". Use a LEADING CANONICAL `### LEADING CANONICAL — Oracle TO_CHAR(date, format) → Trino` subsection.
-
-**Content to teach (verified syntax)**:
-1. **For ISO format (`'YYYY-MM-DD'`)** — three valid Trino forms in preference order:
-   - `CAST(date_column AS VARCHAR)` (DATE column, implicit 'YYYY-MM-DD' format)
-   - `date_format(ts, '%Y-%m-%d')` (TIMESTAMP column, MySQL-style — FIRST-CHOICE general answer)
-   - `format_datetime(ts, 'yyyy-MM-dd')` (TIMESTAMP column, Joda pattern)
-2. **For arbitrary formats** — `date_format` and `format_datetime` are THE canonical answers. Include a side-by-side Oracle TO_CHAR ↔ Trino format-string mapping table:
-
-| Oracle TO_CHAR | Trino `date_format` (MySQL) | Trino `format_datetime` (Joda) |
-|---|---|---|
-| `'YYYY-MM-DD'` | `'%Y-%m-%d'` | `'yyyy-MM-dd'` |
-| `'YYYY-MM-DD HH24:MI:SS'` | `'%Y-%m-%d %H:%i:%s'` | `'yyyy-MM-dd HH:mm:ss'` |
-| `'DD/MM/YYYY'` | `'%d/%m/%Y'` | `'dd/MM/yyyy'` |
-| `'Mon DD, YYYY'` | `'%b %d, %Y'` | `'MMM dd, yyyy'` |
-| `'HH24:MI'` | `'%H:%i'` | `'HH:mm'` |
-
-3. **For niche needs only**: `format('%1$td/%1$tm/%1$tY', ts)` Java Formatter syntax — but only when you need Formatter-specific features.
-
-**DO-NOT-WRITE matrix** (reproduce iter456 Q4 fab verbatim with inline correction):
-- `CAST(order_ts AS DATE)::VARCHAR` — **WRONG**: Trino does NOT support the PostgreSQL `::` cast operator per trinodb/trino issue #23795. Hits parse error `mismatched input '::'`. Use `CAST(CAST(order_ts AS DATE) AS VARCHAR)` instead.
-- `order_ts::TIMESTAMP` / `col::INT` / any `expr::type` — **WRONG**: same reason. Always use `CAST(expr AS type)`.
-- Calling `::` "syntactic sugar for CAST" — **WRONG**: it's another dialect's syntax (PostgreSQL/Snowflake/DuckDB), not a Trino spelling.
-- `TO_CHAR(date, 'YYYY-MM-DD')` — **WRONG (Oracle, not Trino)**: TO_CHAR does not exist in Trino. Use `date_format(...)` or `format_datetime(...)`.
-
-**Meta-canonical dialect-spillover guardrail** (extend the iter456 native-Iceberg translation table in r17 with a NEW table at the top of r27 for Oracle migration):
-
-| Concept | Oracle / PG / Snowflake | Trino 467 |
-|---|---|---|
-| Cast operator | `expr::type` (PG/Snowflake/DuckDB) | `CAST(expr AS type)` ONLY |
-| Date-to-string | `TO_CHAR(date, fmt)` (Oracle) | `date_format(ts, fmt)` (MySQL) / `format_datetime(ts, fmt)` (Joda) |
-| String-to-date | `TO_DATE(str, fmt)` (Oracle) | `date_parse(str, fmt)` (MySQL) / `parse_datetime(str, fmt)` (Joda) |
-| Conditional null | `NVL(a, b)` (Oracle) | `COALESCE(a, b)` |
-| Pattern match | `DECODE(...)` (Oracle) | `CASE WHEN ...` (with `IS NULL` for NULL-bearing inputs) |
-| Row limit | `ROWNUM <= 100` (Oracle 11g) | `LIMIT 100` |
-
-Closing meta-rule (verbatim, mirror the iter456 native-Iceberg guardrail style): "in Trino, use Trino's dialect — Oracle/PostgreSQL/Snowflake/Spark function names and operators that look idiomatic in other engines parse-error or silently no-op against Trino 467."
-
-**Verification anchors**: trino.io/docs/current/functions/datetime.html + trino.io/docs/current/functions/conversion.html + trinodb/trino issue #23795.
-
-### Breadth design for iter457
-
-- Do NOT add a dedicated federation probe — federation row 4.49944/310 unchanged per directive.
-- Re-probe BOTH new fab classes from a different angle to confirm fix:
-  - **Q2 hint fab re-probe**: ask a different join-strategy question (e.g., "how do I force a partitioned join when I know the right side is too big to broadcast?") — fix CONFIRMED only if responder leads with `SET SESSION join_distribution_type = 'PARTITIONED'` and explicitly calls out that Trino has no query hints.
-  - **Q4 `::` cast operator re-probe**: ask a different cast question (e.g., "what's the Trino way to convert a string to a TIMESTAMP?") — fix CONFIRMED only if responder uses `CAST(... AS TIMESTAMP)` or `date_parse(...)` / `parse_datetime(...)` and does NOT use `::`.
-- Use the other 2 questions for breadth coverage — recommend: (a) Iceberg partition design (one of the lower-margin near-threshold topics — 4.4854/31) or storage sizing (4.516/8), (b) something on dbt-Trino incrementals to keep the dbt-on-Trino topics warm.
-
-### Reconcile-don't-append reminder
-
-When adding the join-strategy and TO_CHAR canonical blocks, search for and **reconcile in place** any stale or contradictory content in r25/r26/r27 — do not just append. Specifically:
-- Grep r25/r26 for any existing mention of `USE_HASH_JOIN` / `USE_PARTITIONED_JOIN` / `/*+` — if any exists, fix or remove it.
-- Grep r27 for any existing mention of `::` as a cast operator or `TO_CHAR` without a Trino equivalent — fix in place.
-- Verify no resource file uses `properties = map(...)` Trino-context wrapper or `write.parquet.compression-codec` as a Trino property name (these should already be reconciled per iter456 teacher work).
-
-## Topic average changes this iter
-
-| Topic | Before | After | Δ | Note |
-|---|---|---|---|---|
-| Column-oriented storage | 4.4664/12 | **4.4835/13** | +0.0171 | Q1 4.6875 above topic avg — compression-DDL fab class FULLY RESOLVED |
-| Trino CBO/ANALYZE | 4.6707/13 | **4.5651/14** | -0.1056 | Q2 3.1875 well below topic avg — hint fab + missing `join_distribution_type`; still above override-threshold 4.5 but margin TIGHTER |
-| Postgres-to-Iceberg ingestion | 4.4944/155 | **4.4957/156** | +0.0013 | Q3 4.6875 above topic avg marginal — dbt ref/source clean |
-| Oracle PL/SQL→dbt/Trino migration | 4.6324/27 | **4.5697/28** | -0.0627 | Q4 2.875 well below topic avg — `::VARCHAR` PG fab + missing date_format/format_datetime |
-| Federation (NOT probed) | 4.49944/310 | 4.49944/310 | 0 | unchanged per directive |
+- 56th consecutive overall PASS in extended phase.
+- All four iter457 questions scored above the 4.5 per-question floor — strongest aggregate since iter400 (4.59).
+- All required-topic rows remain above their respective pass thresholds (federation override >= 4.5, CBO override >= 4.5, general >= 3.5).
+- No topic is currently at risk; federation remains the thinnest margin at 4.49944/310 but was not probed this iter.

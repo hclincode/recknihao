@@ -368,7 +368,7 @@ WHERE e.event_date = DATE '2026-05-26'
 GROUP BY u.name;
 ```
 
-If a join hangs or OOMs, check `EXPLAIN` to see which side is being broadcast. Force the layout if needed with `/*+ DISTRIBUTION_TYPE(PARTITIONED) */` style session properties (`join_distribution_type = 'PARTITIONED'`).
+If a join hangs or OOMs, check `EXPLAIN (TYPE DISTRIBUTED)` to see which side is being broadcast. Force the layout if needed with `SET SESSION join_distribution_type = 'PARTITIONED';` before the query (or `'BROADCAST'` / `'AUTOMATIC'`). **Do NOT write `/*+ DISTRIBUTION_TYPE(PARTITIONED) */` or any other `/*+ ... */` hint form — Trino 467 has NO query-hint syntax; per [trinodb/trino #9498](https://github.com/trinodb/trino/issues/9498) the `/*+ ... */` shape is silently treated as a block comment and the hint has zero effect.** See [resource 24 — CBO / ANALYZE § LEADING CANONICAL — How do I influence Trino's join distribution](24-trino-cbo-analyze.md) for the full lever set (primary `join_distribution_type`, secondary `join_max_broadcast_table_size`, tertiary `ANALYZE`).
 
 ---
 
@@ -835,7 +835,10 @@ Trino has its own SQL dialect. A surprising number of features that "feel like s
 | **`GENERATE_SERIES(...)`** as a table function | PostgreSQL | **NOT supported by that name.** Use Trino's `sequence(start, stop, step)` returning an array, then `UNNEST`. | `SELECT n FROM UNNEST(sequence(1, 10)) AS t(n);` |
 | **`NOW() AT TIME ZONE 'UTC'`** | PostgreSQL syntax | **Different semantics.** Trino's `current_timestamp AT TIME ZONE 'UTC'` works on `TIMESTAMP WITH TIME ZONE`. | Use `current_timestamp AT TIME ZONE 'UTC'`, or `at_timezone(ts, 'UTC')`. |
 | **`EXTRACT(EPOCH FROM ts)`** | PostgreSQL | **NOT supported as `EPOCH`.** | `to_unixtime(ts)` returns seconds-since-epoch as `DOUBLE`. |
-| **`::cast` syntax** (`col::int`) | PostgreSQL | **NOT supported.** Parse error. | Use ANSI `CAST(col AS INTEGER)` or Trino's `try_cast(col AS INTEGER)`. |
+| **`::cast` syntax** (`col::int`) | PostgreSQL, Snowflake, DuckDB | **NOT supported.** Parse error. Open feature request [trinodb/trino #23795](https://github.com/trinodb/trino/issues/23795). | Use ANSI `CAST(col AS INTEGER)` or Trino's `try_cast(col AS INTEGER)`. |
+| **`/*+ HINT_NAME(...) */` query hints** (e.g., `USE_HASH_JOIN`, `BROADCAST`, `MAPJOIN`, `USE_PARTITIONED_JOIN`, `DISTRIBUTION_TYPE`) | Oracle, Spark, Hive | **SILENTLY IGNORED.** Trino has no query-hint mechanism — per [trinodb/trino #9498](https://github.com/trinodb/trino/issues/9498), open feature request, NOT implemented as of Trino 467/481. The `/*+ ... */` is parsed as a regular block comment; the "hint" never fires. **Failure mode: silent no-op, no error message.** | Use `SET SESSION <property> = <value>` before the query — e.g., `SET SESSION join_distribution_type = 'PARTITIONED';` (see [resource 24 § LEADING CANONICAL — How do I influence Trino's join distribution](24-trino-cbo-analyze.md)). |
+| **`TO_CHAR(date, fmt)`** (Oracle date-to-string) | Oracle | **NOT a Trino built-in.** No `TO_CHAR` function exists. | `date_format(ts, '%Y-%m-%d')` (MySQL-style) or `format_datetime(ts, 'yyyy-MM-dd')` (Joda). See [resource 27 § 4.2A — Oracle TO_CHAR → Trino canonical](27-oracle-plsql-to-dbt-trino.md). |
+| **`ANALYZE TABLE <t>`** (Spark / Hive stats DDL) | Spark, Hive, MySQL | **NOT supported.** Parse error. Trino's keyword is bare `ANALYZE`. | `ANALYZE iceberg.schema.table` — no `TABLE` keyword. See [resource 24 § 4.1](24-trino-cbo-analyze.md). |
 | **`TIMESTAMPDIFF(MINUTE, a, b)`** | MySQL, SQL Server | **NOT supported.** | `date_diff('minute', a, b)` returns BIGINT. |
 | **`DATE_FORMAT(d, '%Y-%m-%d')`** with MySQL specifiers | MySQL | **Format-string is different.** Trino uses Java/JodaTime patterns. | `format_datetime(d, 'yyyy-MM-dd')` or `date_format(d, '%Y-%m-%d')` — the second form accepts MySQL-style specifiers, but the recommended Trino form is `format_datetime` with Java patterns. |
 | **`STRING_AGG(col, sep ORDER BY ...)`** | PostgreSQL | **NOT under that name.** | `listagg(col, sep) WITHIN GROUP (ORDER BY ...)` is Trino's ANSI-standard form. Added as a window function in Trino 467 release. |

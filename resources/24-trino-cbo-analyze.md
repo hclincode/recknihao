@@ -26,6 +26,83 @@ A guide for SaaS engineers who have never heard of a "cost-based optimizer" and 
 
 ---
 
+### LEADING CANONICAL — How do I influence Trino's join distribution (broadcast vs partitioned)?
+
+**Question shape this answers**: "how do I force Trino to use a hash join", "how do I stop Trino from broadcasting a giant table and OOMing my workers", "how do I make Trino use a broadcast / partitioned join", "Trino broadcast vs partitioned join — how do I pick".
+
+**The three canonical Trino 467 levers** — verified against [trino.io/docs/current/optimizer/cost-based-optimizations.html](https://trino.io/docs/current/optimizer/cost-based-optimizations.html) and [trino.io/docs/current/admin/properties-general.html](https://trino.io/docs/current/admin/properties-general.html):
+
+**1. PRIMARY LEVER — `join_distribution_type` session property (the direct on/off switch).**
+
+```sql
+-- Force a partitioned (hash-shuffle) join — use when broadcast OOMs because the build side is too big:
+SET SESSION join_distribution_type = 'PARTITIONED';
+
+-- Force a broadcast (replicated build) join — use ONLY when you KNOW the build side fits in worker memory:
+SET SESSION join_distribution_type = 'BROADCAST';
+
+-- Let the cost-based optimizer pick (default):
+SET SESSION join_distribution_type = 'AUTOMATIC';
+```
+
+Three accepted values: `'AUTOMATIC'` (default), `'PARTITIONED'`, `'BROADCAST'`. Session-scoped (not query-scoped) — applies to every join in every query in the session until you `RESET SESSION join_distribution_type` or open a new session. Inside a dbt-trino model, set it via `pre_hook`:
+
+```jinja
+{{ config(materialized='table', pre_hook="SET SESSION join_distribution_type = 'PARTITIONED'") }}
+```
+
+**2. SECONDARY CAP — `join_max_broadcast_table_size` (only fires in AUTOMATIC mode).**
+
+```sql
+-- Lower the broadcast threshold to 50MB — anything bigger will partition under AUTOMATIC:
+SET SESSION join_max_broadcast_table_size = '50MB';
+```
+
+This is the build-side size cap below which the CBO will choose broadcast in `AUTOMATIC` mode. Default is `100MB`. Has NO effect when `join_distribution_type` is explicitly set to `PARTITIONED` or `BROADCAST` — those forms are unconditional overrides.
+
+**3. TERTIARY — `ANALYZE <table>` (improves the CBO's build-side size estimate).**
+
+```sql
+-- Bare ANALYZE — NO `TABLE` keyword (see §4 below):
+ANALYZE iceberg.analytics.events;
+ANALYZE iceberg.analytics.tenants;
+```
+
+Without stats, `AUTOMATIC` mode falls back to defaults and may pick the wrong distribution. With stats, the CBO has accurate row counts + NDV and makes a correct broadcast-vs-partitioned decision on its own. Re-run after big ingests.
+
+**Verify the chosen distribution with EXPLAIN before/after:**
+
+```sql
+EXPLAIN (TYPE DISTRIBUTED)
+SELECT f.*, d.tenant_name
+FROM iceberg.analytics.events f
+JOIN iceberg.analytics.tenants d ON f.tenant_id = d.id;
+-- Look for: Join[INNER][...][BROADCAST]   <- broadcast picked
+--      OR: Join[INNER][...][PARTITIONED]  <- partitioned picked
+-- Equivalently: RemoteExchange[REPLICATE] = broadcast; RemoteExchange[REPARTITION] = partitioned.
+```
+
+> ### DO-NOT-WRITE matrix — Trino has NO query-hint syntax
+>
+> Trino 467 has **no query-hint mechanism at all** — neither the Oracle `/*+ ... */` form nor the Spark `BROADCAST(t)` / `MAPJOIN(t)` hint names. Per [trinodb/trino issue #9498 "Support query hints"](https://github.com/trinodb/trino/issues/9498), query hints are an OPEN feature request, **NOT implemented as of Trino 467 (or Trino 481).** Anything in the `/*+ ... */` shape is parsed as a regular block comment and **silently ignored** — the engineer gets no error, the hint has zero effect, and the optimizer makes its default cost-based decision. This is worse than a parse error because there is no immediate feedback that the "hint" was a no-op.
+>
+> **Never write these forms in Trino SQL or in any dbt model that compiles to Trino.** Use `SET SESSION join_distribution_type = '...'` (a session property) instead:
+>
+> | Forbidden form | Where it comes from | What it does in Trino 467 | Trino-correct equivalent |
+> |---|---|---|---|
+> | `SELECT /*+ USE_HASH_JOIN(a, b) */ ...` | Oracle hint syntax | Silently treated as a block comment — NO effect | `SET SESSION join_distribution_type = 'PARTITIONED';` before the query |
+> | `SELECT /*+ USE_PARTITIONED_JOIN(a, b) */ ...` | Spark / Hive-influenced naming | Silently treated as a block comment — NO effect | `SET SESSION join_distribution_type = 'PARTITIONED';` |
+> | `SELECT /*+ BROADCAST(small_dim) */ ...` | Spark `BROADCAST(t)` hint | Silently treated as a block comment — NO effect | `SET SESSION join_distribution_type = 'BROADCAST';` (when build fits in worker memory) |
+> | `SELECT /*+ MAPJOIN(small_dim) */ ...` | Hive `MAPJOIN(t)` hint | Silently treated as a block comment — NO effect | `SET SESSION join_distribution_type = 'BROADCAST';` |
+> | `SELECT /*+ DISTRIBUTION_TYPE(PARTITIONED) */ ...` | Plausible-looking guess | Silently treated as a block comment — NO effect | `SET SESSION join_distribution_type = 'PARTITIONED';` |
+> | Any `/*+ ANY_HINT_NAME(...) */` | any dialect | Silently treated as a block comment — NO effect | Use `SET SESSION <property> = <value>` |
+>
+> **The meta-rule**: every `/*+ ... */` in Trino source is a comment, not a hint. If you need to influence the optimizer per-query, set a SESSION property before the query (and `RESET SESSION` after if needed).
+
+**Failure-mode callout (read this).** The most dangerous thing about the `/*+ ... */` "hint" form in Trino is that it is **silent-wrong** — the query runs, returns correct results, and the engineer thinks the hint applied. The only feedback is performance: the optimizer keeps making the default choice, and the engineer keeps adjusting the "hint" without effect. If you suspect a hint isn't firing, the answer is "it isn't, because Trino has no hints" — switch to `SET SESSION` properties immediately.
+
+---
+
 ## 1. What is a "cost-based optimizer" and why should a SaaS engineer care?
 
 When you write a query that joins three tables:
