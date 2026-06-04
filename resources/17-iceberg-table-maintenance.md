@@ -251,10 +251,15 @@ ALTER TABLE iceberg.analytics.events EXECUTE remove_orphan_files(retention_thres
 -- Trino 467 form — CALL with POSITIONAL args (schema, table, snapshot_id):
 CALL iceberg.system.rollback_to_snapshot('analytics', 'events', 4823511203987654321);
 
--- NOTE: the `ALTER TABLE iceberg.analytics.events EXECUTE rollback_to_snapshot(snapshot_id => ...)`
--- syntax requires Trino 469+ (released Jan 2025). On Trino 467 (the current
--- production version), that form does NOT exist and fails with a procedure /
--- syntax error — use the CALL form above.
+-- FUTURE-PROOFING NOTE: the `CALL iceberg.system.rollback_to_snapshot(schema, table, id)`
+-- form above is the VALID and ONLY rollback form on Trino 467. It is DEPRECATED
+-- (and slated for eventual removal post-467) in favor of the new table procedure
+-- `ALTER TABLE iceberg.<schema>.<table> EXECUTE rollback_to_snapshot(snapshot_id => <id>)`
+-- which was added in Trino 469 (Jan 2025) by trinodb/trino PR #24580. **Both forms
+-- still work on Trino 469-478; on Trino 467, ONLY the CALL form works** — the ALTER
+-- TABLE EXECUTE form fails with a procedure / syntax error. When the cluster is
+-- eventually upgraded past 467, plan to switch to the table-procedure form in any
+-- scripts / runbooks. Until then, the CALL form above is the correct prod recipe.
 -- Do NOT use the Spark named-arg form (table => ..., snapshot_id => ...) from Trino either.
 
 -- Per-tenant ad-hoc compaction (Trino-native; WHERE on partition columns only)
@@ -336,8 +341,8 @@ WHERE tenant_id = 'acme';
 | `ALTER TABLE ... EXECUTE expire_snapshots(retention_threshold => '...')` (argument: `retention_threshold` only) | 467 | YES | — (this is the prod form) |
 | `ALTER TABLE ... EXECUTE expire_snapshots(retain_last => N)` | **479** (Dec 2025, [trinodb/trino #27357](https://github.com/trinodb/trino/issues/27357)) | NO | Spark: `CALL iceberg.system.expire_snapshots(table => '...', retain_last => N)` |
 | `ALTER TABLE ... EXECUTE expire_snapshots(clean_expired_metadata => true)` | **479** (Dec 2025) | NO | Spark: `CALL iceberg.system.expire_snapshots(table => '...', clean_expired_metadata => true)` (cleans up unreferenced partition specs / schemas) |
-| `CALL iceberg.system.rollback_to_snapshot('schema', 'table', <snapshot_id>)` (positional args — the **only** rollback form on 467) | 467 | YES | — (this is the prod form) |
-| `ALTER TABLE ... EXECUTE rollback_to_snapshot(snapshot_id => ...)` (table-procedure form) | **469** (Jan 2025, [trinodb/trino #24580](https://github.com/trinodb/trino/pull/24580)) | NO | Use the `CALL iceberg.system.rollback_to_snapshot('schema', 'table', <id>)` positional form (which is the only 467 form anyway) |
+| `CALL iceberg.system.rollback_to_snapshot('schema', 'table', <snapshot_id>)` (positional args — the **only** rollback form on 467) | 467 | YES | — (this is the prod form). **DEPRECATION FUTURE-PROOFING:** [trinodb/trino #24580](https://github.com/trinodb/trino/pull/24580) (merged Jan 2025) marks this `CALL iceberg.system.rollback_to_snapshot` form as **deprecated** in favor of the new table procedure `ALTER TABLE ... EXECUTE rollback_to_snapshot(...)` (Trino 469+). On Trino 467, this CALL form is STILL VALID and is the only working form — keep using it. When the cluster is eventually upgraded past 467, plan to migrate scripts to the table-procedure form. |
+| `ALTER TABLE ... EXECUTE rollback_to_snapshot(snapshot_id => ...)` (table-procedure form — **new preferred form post-467**) | **469** (Jan 2025, [trinodb/trino #24580](https://github.com/trinodb/trino/pull/24580)) | NO | Use the `CALL iceberg.system.rollback_to_snapshot('schema', 'table', <id>)` positional form (which is the only 467 form anyway). After cluster upgrade past 467, switch scripts/runbooks to this table-procedure form. |
 | `ALTER TABLE ... EXECUTE optimize_manifests` (Trino-native manifest rewrite) | **470** (Feb 2025) | NO | Spark: `CALL iceberg.system.rewrite_manifests(table => '...')` |
 | `ALTER TABLE ... SET PROPERTIES parquet_bloom_filter_columns = ARRAY['col1', ...]` (Iceberg connector table property — Trino-side write-time bloom filter config) | **469** (Jan 2025, [trinodb/trino #24573](https://github.com/trinodb/trino/pull/24573)) | NO | Spark write-time table property: `ALTER TABLE iceberg.x.y SET TBLPROPERTIES ('write.parquet.bloom-filter-enabled.column.<col>'='true')` then run Spark `rewrite_data_files` to bake bloom filters into existing files. Trino 467 then READS those bloom filters at query time via the `parquet.use-bloom-filter` session property / `parquet.use-bloom-filter` catalog property (set to `true`, which is the default on 467) — read-side support is fine on 467; only write-side configuration via `parquet_bloom_filter_columns` table property is gated. |
 | `parquet.use-bloom-filter` session/catalog property (Trino reads Parquet bloom filters when filter pushdown can use them) | 467 (read-side support landed pre-467) | YES | — Trino 467 already reads bloom filters at query time if the Parquet files were written with bloom filters (by Spark Iceberg or any other writer). |

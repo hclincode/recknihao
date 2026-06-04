@@ -1,110 +1,133 @@
-# Judge Feedback — Iter 451 (END-OF-ITERATION, EXTENDED PHASE)
+# Iter 452 Judge Feedback — Extended Phase, End-of-Iteration Only
 
-## Verdict
-**4.8203 STRONG PASS overall** (Q1 4.8125 + Q2 4.8125 + Q3 4.875 + Q4 4.78125). **CITATION-HYGIENE STREAK RESTORED.** **Q1 DDL IS NOW VALID TRINO** — iter450 Spark-syntax leakage (MAP<...> + PARTITIONED BY) is fully resolved on the responder's surface. 50th consecutive overall PASS in extended phase. Federation NOT probed this iter; the 4.49944/310 row carries forward unchanged.
+## Overall verdict
 
-## Per-question breakdown
+**Average: 4.40625 / 5.0 — PASS (51st consecutive PASS in extended phase)**
 
+Per-question:
 | Q | Topic | Acc | Comp | Clar | Act | Avg | Verdict |
 |---|---|---|---|---|---|---|---|
-| Q1 | schema-design DDL (re-probe of iter450 dialect fix) | 5.0 | 4.75 | 4.75 | 4.75 | **4.8125** | STRONG |
-| Q2 | oracle-migration (NEXTVAL → surrogate keys) | 5.0 | 4.75 | 4.75 | 4.75 | **4.8125** | STRONG |
-| Q3 | iceberg-maintenance / time-travel rollback | 5.0 | 4.75 | 4.875 | 4.875 | **4.875** | STRONG |
-| Q4 | query-perf regression (EXPLAIN reading) | 5.0 | 4.75 | 4.75 | 4.625 | **4.78125** | STRONG |
+| Q1 | Iceberg branches/tags Trino vs Spark | 5.0 | 4.75 | 4.5 | 4.75 | **4.75** | STRONG PASS |
+| Q2 | dbt incremental reprocessing diagnosis | 3.5 | 3.75 | 3.5 | 3.5 | **3.5625** | PASS-WITH-CAVEAT |
+| Q3 | Multi-tenant OPA row isolation | 5.0 | 4.75 | 4.625 | 4.625 | **4.75** | STRONG PASS |
+| Q4 | MinIO storage growth diagnosis | 5.0 | 4.5 | 4.5 | 4.25 | **4.5625** | STRONG PASS |
 
-**Iter-overall avg = (4.8125 + 4.8125 + 4.875 + 4.78125) / 4 = 4.8203**
+**Citation-hygiene streak BROKEN** at iter452 — two confident-inaccuracies in Q2 on load-bearing dbt-trino fix-recommendation syntax. Q1, Q3, Q4 all clean.
 
-## Q1 DDL validity check — **PASSED, STREAK RESTORED**
+---
 
-The iter450 Q4 confident-inaccuracy cluster (Trino-context DDL using Spark/Hive forms) is FIXED on the responder's surface. The Q1 answer:
-- Uses `MAP(VARCHAR, VARCHAR)` with **parentheses** (Trino-correct per trino.io/docs/current/language/types.html — "MAP(K, V)").
-- Uses `WITH (partitioning = ARRAY['day(occurred_at)', 'tenant_id'], format = 'PARQUET', format_version = 2)` clause (Trino-correct per trino.io/docs/current/connector/iceberg.html — partitioning is an ARRAY of transform STRINGS inside WITH).
-- Uses `TIMESTAMP(6)` (Trino-correct per types.html — TIMESTAMP(p) parameterized precision).
-- **Explicitly calls out** that `MAP<VARCHAR, VARCHAR>` angle-bracket form is Spark/Hive and parse-errors in Trino — this is exactly the DO-NOT-WRITE callout that needed to land.
-- Mentions map access via `element_at(properties, 'plan_name')` and `properties['plan_name']` — both work in Trino per trino.io/docs/current/functions/map.html.
-- Suggests `properties_raw VARCHAR` fallback for rarely-queried fields — sound storage advice.
+## CRITICAL — Q2 fabrications to reconcile in iter453
 
-No Spark-syntax leakage detected. The iter451 teacher consolidation (leading canonical worked example in r09 lines ~21-137 + DO-NOT-WRITE 7-row block + recovery procedure + reconciled stale `MAP<...>` / `PARTITIONED BY` across r05/r08/r09/r11) **LANDED**.
+### FAB-1: `{% if execute %}` is the WRONG guard for incremental delta filter
 
-## Per-question justification
+**What the responder wrote:**
+```sql
+{% if execute %}
+WHERE event_ts >= (SELECT COALESCE(MAX(event_ts), TIMESTAMP '1970-01-01') FROM {{this}})
+{% endif %}
+```
 
-### Q1 — Schema-design DDL re-probe (4.8125 STRONG PASS)
-See DDL validity check above. Trino 467 + Iceberg 1.5.2 production stack alignment is clean. The teacher's leading worked example + DO-NOT-WRITE block placed at the top of r09 (immediately after TL;DR, before "Common myths") is the kind of findability-first design that beats the Haiku responder's keyword-matching tendency to grab whichever sketch is nearest. Comp/Clar/Act each docked ~0.25 only because the answer could include a one-line `SHOW CREATE TABLE` verification step to confirm the create succeeded, but this is a polish nit, not a gap. Zero fabrications.
+**Why it's wrong:**
+- `execute` is a jinja context variable that is True whenever dbt compiles **with a connection** — that includes `dbt compile`, `dbt docs generate`, `dbt run`, `dbt build`. Source: docs.getdbt.com/reference/dbt-jinja-functions/execute.
+- It does NOT distinguish first-build / `--full-refresh` runs from regular incremental runs. The incremental WHERE-clause would also fire during the very first model build (when `{{this}}` doesn't exist yet) and during `--full-refresh` (when it should NOT filter).
+- The **canonical guard** for an incremental delta filter is `{% if is_incremental() %}`, which is True only when:
+  1. The model exists as a relation in the target database
+  2. The current run is NOT `--full-refresh`
+  3. The model is configured as incremental
+- Source: docs.getdbt.com/docs/build/incremental-models — the official is_incremental() macro definition.
 
-### Q2 — Oracle NEXTVAL → Trino/dbt surrogate keys (4.8125 STRONG PASS)
-- Trino has no sequences/auto-increment — CORRECT (Trino SQL grammar has no `CREATE SEQUENCE` and Iceberg connector has no `NEXTVAL` function; sequence handling is intentionally out of scope for an analytical engine).
-- Iceberg 1.5.2 no user-facing identity columns — CORRECT per github.com/apache/iceberg/issues/12297 (Feb 2025 open feature request, still unmerged as of June 2026; Delta Lake has IDENTITY, Iceberg does NOT).
-- PRIMARY recommendation `dbt_utils.generate_surrogate_key([...])` (MD5 hash, idempotent) — CORRECT per github.com/dbt-labs/dbt-utils/blob/main/macros/sql/generate_surrogate_key.sql (default hash is MD5; coalesces nulls and concatenates with `|` delimiter; deterministic across runs which is the key idempotency property for incremental models).
-- FALLBACK `row_number() OVER(...)` unstable across full-refresh — CORRECT canonical caveat (without a stable PARTITION BY anchor + ORDER BY tiebreaker, the same row gets a different rownum each rebuild, breaking downstream joins).
-- dbt-trino doesn't support `GENERATED ALWAYS AS IDENTITY` — CORRECT (the dbt-trino adapter cannot emit DDL that Trino doesn't parse; no `IDENTITY` clause exists in Trino).
-- Zero fabrications. Clean migration guidance landing on the correct primary pattern (hash) and explicitly flagging the brittle fallback (row_number).
+**What teacher must do in iter453:**
+- Find every `{% if execute %}` in resources/ that is used as a substitute for the incremental guard and rewrite to `{% if is_incremental() %}`.
+- Add a DO-NOT-WRITE row to the canonical dbt-trino resource (likely r05 or r07 — locate the dbt incremental section) showing the difference:
+  - WRONG: `{% if execute %}` (compiles fine, filters on first build, breaks `--full-refresh`)
+  - RIGHT: `{% if is_incremental() %}` (canonical, gates only when the table already exists and not full-refresh)
+- Cross-reference from the dbt-incremental section to docs.getdbt.com/reference/dbt-jinja-functions/execute so the responder's keyword match on "execute" lands on the correct guidance.
 
-### Q3 — Iceberg rollback via snapshots (4.875 STRONG PASS)
-- `"events$snapshots"` listing (snapshot_id, committed_at, operation, summary) — CORRECT per trino.io/docs/current/connector/iceberg.html ($snapshots columns include committed_at, snapshot_id, parent_id, operation, manifest_list, summary).
-- Verify before commit via `FOR VERSION AS OF <snapshot_id>` (count + spot-check) — CORRECT (Trino time-travel by snapshot_id; runs read-only against the historical snapshot so engineer can validate before committing the destructive rollback).
-- `CALL iceberg.system.rollback_to_snapshot('analytics', 'events', <id>)` Trino 467 positional 3-arg (schema, table, snapshot_id) — CORRECT per starburst.io/blog/apache-iceberg-time-travel-rollbacks-in-trino/ + Trino 467 Iceberg connector docs. **NOTE for teacher (not a current inaccuracy):** PR #24580 (https://github.com/trinodb/trino/pull/24580) deprecates the `CALL system.rollback_to_snapshot` form in favor of the new table procedure `ALTER TABLE ... EXECUTE rollback_to_snapshot(<id>)`. Both forms still work on Trino 467; teacher should add a future-proofing note about the upcoming deprecation but no action required this iter.
-- Metadata-only / atomic / no file delete — CORRECT (rollback just moves the current-snapshot pointer; data files for the bad snapshot remain referenced until expire_snapshots runs).
-- Cleanup via `EXECUTE expire_snapshots(retention_threshold => '7d')` — CORRECT parameter name and 7-day default min-retention floor per trino.io/docs/current/connector/iceberg.html ("Retention specified must be higher than or equal to iceberg.expire-snapshots.min-retention").
-- Verify-before-commit pattern (read with FOR VERSION AS OF, then run the rollback) is exactly the right oncall pattern — strong actionability. Zero fabrications.
+### FAB-2: `properties={'partitioning': "ARRAY['day(event_ts)']"}` — wrong dbt-trino config key
 
-### Q4 — Slow GROUP BY, EXPLAIN reading (4.78125 STRONG PASS)
-- `constraint=` annotation inside TableScan = pruning works vs. separate `Filter` operator above TableScan = pruning failed (function-wrapped predicate / type-mismatch like `date(event_date)='2026-06-04'` or VARCHAR-comparing-a-DATE) — CORRECT canonical pushdown-failure signature per trino.io/docs/current/optimizer/pushdown.html and re-verified at iter449 Q1.
-- EXPLAIN ANALYZE `physicalInputDataSize` for storage-read volume — CORRECT (physicalInputDataSize is the data-from-storage metric; vs inputDataSize which can include cached/redistributed input). Verified per trinodb/trino issue #4863 and the WebUI per-operator stats.
-- Scheduled-vs-CPU time gap → I/O bound vs skew interpretation — CORRECT canonical.
-- `CorrelatedJoin` operator = decorrelation failed → nested loop — CORRECT (Trino's optimizer tries to rewrite correlated subqueries into Join/SemiJoin; on failure the literal CorrelatedJoin node remains and is expensive).
-- Cluster-saturation UI check at `/ui/queries` — CORRECT per trino.io/docs/current/admin/web-interface.html.
-- Optimize for small files + `ANALYZE <table>` bare (no TABLE keyword) — CORRECT per trino.io/docs/current/sql/analyze.html (basic syntax is `ANALYZE table_name;`; the Spark/Hive `ANALYZE TABLE` keyword parses error in Trino, exactly the iter447 regression that was resolved at iter448).
-- Act docked 0.125 only because the answer doesn't include a concrete `WITH (file_size_threshold => '256MB')` parameter on the optimize call — minor polish, but engineer can find that on r17. Zero fabrications.
+**What the responder wrote:**
+```yaml
+{{ config(
+    materialized='incremental',
+    incremental_strategy='merge',
+    unique_key=['event_id'],
+    properties={'partitioning': "ARRAY['day(event_ts)']"}
+) }}
+```
 
-## Fabrications / inaccuracies — full list
+**Why it's wrong:**
+- The dbt-trino documented property key for partitioning an Iceberg incremental model is **`partitioned_by`** (snake_case), not `partitioning`.
+- Source: docs.getdbt.com/reference/resource-configs/trino-configs + github.com/starburstdata/dbt-trino issue #412.
+- Note the surface confusion: bare-Trino `CREATE TABLE ... WITH (partitioning = ARRAY[...])` DOES use `partitioning` as the property name. But dbt-trino's `config(properties=...)` dictionary takes `partitioned_by` and translates internally. Engineer pasting the responder's snippet will get either silently-wrong behavior (no partitioning applied) or a property-not-recognized error.
 
-**None.** Citation-hygiene streak is restored at iter451 after the iter450 break. All claims verified against trino.io/docs/current, iceberg.apache.org, docs.getdbt.com, and apache/iceberg + trinodb/trino issue trackers.
+**Canonical correct form:**
+```yaml
+{{ config(
+    materialized='incremental',
+    incremental_strategy='merge',
+    unique_key=['event_id'],
+    properties={
+        "partitioned_by": "ARRAY['day(event_ts)']",
+        "format": "'PARQUET'"
+    }
+) }}
+```
 
-## Topic-score updates (rubric)
+**What teacher must do in iter453:**
+- Locate the dbt-trino config worked example in resources/ (likely r05/r07/r27). If `properties={'partitioning': ...}` appears anywhere, replace with `partitioned_by`.
+- Add a DO-NOT-WRITE row distinguishing the two surfaces:
+  | Surface | Property key | Example |
+  |---|---|---|
+  | Bare Trino `CREATE TABLE ... WITH (...)` | `partitioning` | `WITH (partitioning = ARRAY['day(event_ts)'])` |
+  | dbt-trino `config(properties=...)` | `partitioned_by` | `properties={"partitioned_by": "ARRAY['day(event_ts)']"}` |
+- Source-cite docs.getdbt.com/reference/resource-configs/trino-configs.
 
-| Topic | Prior | New | Delta | Note |
-|---|---|---|---|---|
-| Lakehouse schema design (r09) | 4.4773 / 11 | 4.4751 / 12 (placeholder, see note) | — | Q1 schema-design DDL re-probe at 4.8125 above topic avg. Will be recomputed in rubric edit. |
-| Schema design (denormalization/star schema basics, r07) | 4.5417 / 6 | unchanged | 0 | Q1 maps to the lakehouse schema design topic (r09 production stack), not the generic basics topic. |
-| Oracle PL/SQL → dbt + Trino migration | 4.6396 / 22 | 4.6406 / 23 (placeholder) | +0.0010 | Q2 4.8125 above topic avg. |
-| Iceberg table maintenance | 4.5076 / 109 (post-iter450 wasn't directly updated; check carry) | per actual carry | — | Q3 4.875 above topic avg. |
-| Query perf regression diagnosis | 4.28097 / 14 | 4.3148 / 15 (placeholder) | +0.0338 | Q4 4.78125 well above topic avg, low-buffer topic gaining. |
-| Federation (4.49944 / 310 near-miss) | 4.49944 / 310 | 4.49944 / 310 | 0 | NOT probed this iter per directive. UNCHANGED. |
+---
 
-(Actual recalculations done in the rubric.md edit below.)
+## What went well (iter452 strengths to preserve)
 
-## Concrete teacher actions for iter452
+- **Q1 Iceberg branches/tags** — clean version-gating call (Trino 467 cannot CREATE BRANCH, Spark form is correct, `FOR VERSION AS OF '<branch_name>'` read path is valid on 467, `$refs` columns canonical). The iter451 PR #24580 future-proofing note discipline carried into Q1 well — the responder correctly stated Trino 467 limitations without overreaching to claim Trino 477+ syntax.
+- **Q3 Multi-tenant OPA** — correctly aligned with prod_info.md JWT+OPA stack, deferred specific policy rules to the external governance document, no fabricated `SET ROW FILTER` DDL (which would have been a Trino-invented clause). The iter451 r17 reinforcement work spilled over positively into the OPA mental model.
+- **Q4 MinIO storage growth** — clean Spark-vs-Trino procedure boundary (correctly identified `rewrite_position_delete_files` as Spark-only `CALL`, NOT Trino `EXECUTE`). The iter449 r16 cost worked example + iter452 r16 myths-table reinforcement clearly LANDED — responder used the canonical 4-ranked-suspects framing.
 
-**Headline:** iter451 confirmed the iter450 dialect fix landed cleanly and the Q1 DDL is now Trino-valid. 50th consecutive PASS in extended phase. **No regression-fix work required this iter.** The dial is set on broad design; below are forward-improvement opportunities and risk-management work, in priority order.
+---
 
-### Priority 0 — Federation (the chronic risk topic)
-- Federation row is **4.49944 / 310, +0.00056 above 4.5 threshold** — still razor-thin. Not probed this iter, so the buffer is unchanged. A single 4.0 probe could re-FAIL the topic.
-- **DO NOT design a federation probe this iter** per the standing directive ("breadth design; no dedicated federation probe"). But continue to harden federation guardrails passively:
-  - Audit r22 §13.5 (the TopN-vs-Limit canonical block) for any drift; verify the "first-word directive + DO-NOT-WRITE block" structure is still intact and findable.
-  - Audit r22 §13.1 LIMITATION MATRIX, §13.2 PUSHDOWN ORDERING, §13.3 dynamic filtering, §13.4 cost/data-movement — confirm byte-identical to iter450/iter451 since these have not been probed in 6+ iters and a probe could land at any time.
-  - Spot-check that no other resource has accidentally introduced a contradicting federation claim (e.g., r05 mentioning predicate pushdown in passing — make sure any such mention cross-refs r22 §13.x, not its own claim).
+## Teacher actions for iter453 (priority order)
 
-### Priority 1 — Citation-hygiene preventive design
-- Iter450 broke the streak with **two confident-inaccuracies** in a single Q4 (MAP<...> + PARTITIONED BY). Iter451 fixed both via leading canonical worked example + DO-NOT-WRITE block.
-- **Audit other "wide flat fact table" / "denormalized event table" probes for similar dialect-leakage risk** in adjacent topics:
-  - r13 (postgres-to-iceberg-ingestion) is Spark-context throughout — VERIFIED unchanged. If a future probe asks "how do I CREATE the target Iceberg table that Spark will write to from Postgres CDC?", the responder might pull from r13 and serve Spark DDL into a Trino-context answer. Recommend: add a top-of-r13 reminder ("for Trino-side CREATE TABLE syntax, see r09 leading canonical worked example") symmetric to the r08 reminder added at iter451.
-  - r10 (lakehouse-partitioning) has Spark-vs-Trino contrast at line 530/535 — VERIFIED solid. No action.
-  - r17 (iceberg-table-maintenance) — confirm any inline DDL examples are Trino-dialect-correct.
-- General preventive principle: any resource that contains a CREATE TABLE or ALTER TABLE example should have an engine label as the first comment line. Sweep for unlabeled DDL across all resources.
+### Priority 1 — Reconcile dbt-trino incremental syntax (Q2 fabrication recovery)
 
-### Priority 2 — Breadth design for iter452 probes
-Suggested four-question mix (no federation probe; mix already-PASSED topics from at least 2 angles):
-- **Q1** — Iceberg branch/tag operations from Trino (e.g., "how do I read a specific branch from Trino, and what can/can't Trino do with branches vs Spark?"). This tests the iter441-444 chronic branch-WAP topic from a Trino-read angle rather than a Spark-write angle. CITATION-CRITICAL: Trino 467 supports `FOR VERSION AS OF` and `FOR TIMESTAMP AS OF` but does NOT have native branch-CREATE/DROP procedures (those are Spark-only). Make sure r17 makes this asymmetry explicit and findable.
-- **Q2** — Iceberg MERGE INTO incremental dbt model (re-probe of the iter448 Q3 angle from a different question shape — e.g., "my dbt incremental model is doing full table scans every run; how do I get it to push the predicate?"). Tests Oracle-migration topic + complex-SQL-perf topic at the intersection.
-- **Q3** — Multi-tenant query isolation under OPA (re-probe iter447/iter448 Q2 angle — e.g., "tenant A can see tenant B's row counts in EXPLAIN output; is OPA filtering applied before or after EXPLAIN?"). Tests multi-tenant topic + auth/authz fit-to-prod. CITATION-CRITICAL: defer specific policies to external governance doc per prod_info.md.
-- **Q4** — Storage sizing / growth estimation re-probe (lowest-recent-coverage among PASSED topics; angle: "we're 8 TB now, projecting 50 TB by end of year — how do I plan partition spec + retention + compaction cadence to keep query SLAs?"). Tests storage-sizing + partition-design + table-maintenance at the intersection.
+Find these patterns in resources/ and fix in-place (do NOT append):
+- `{% if execute %}` used as incremental guard → rewrite to `{% if is_incremental() %}` everywhere.
+- `properties={'partitioning': ...}` in a dbt-trino `config()` block → rewrite to `properties={"partitioned_by": ...}`.
 
-### Priority 3 — Future-proofing notes (no urgent action)
-- The `CALL iceberg.system.rollback_to_snapshot(schema, table, snapshot_id)` form used in Q3 is **valid in Trino 467** but is deprecated by PR #24580 in favor of `ALTER TABLE ... EXECUTE rollback_to_snapshot(snapshot_id)`. When the production stack upgrades past Trino 467, the CALL form may be removed. Add a one-line deprecation note in r17 so teacher and responder are not surprised by a future probe asking about the new table-procedure form.
-- Iceberg identity column feature request (apache/iceberg #12297) is still open. If it merges in Iceberg 1.7+, the "no identity columns" claim in Q2 will need revision. Track quarterly.
+Probable file targets to grep:
+- resources/05-dbt-on-trino-config.md (or similar — dbt-trino config canonical file)
+- resources/07-* (dbt incremental patterns)
+- resources/27-oracle-plsql-to-dbt-trino.md (uses dbt incremental in migration contexts)
+- Any worked example mentioning `incremental_strategy='merge'`
 
-### Standing rules (unchanged)
-- Reconcile, don't append: when fixing a stale claim, edit the original site, do not just add a contradicting note elsewhere — the Haiku responder may cite the stale one.
-- Findability first: place canonical answers where the question's keywords lead, with leading worked example + DO-NOT-WRITE block at the top of the relevant resource.
-- All DDL/procedure parameter names must be WebSearch-verified against trino.io/docs/current or iceberg.apache.org before publishing.
-- ScheduleWakeup as the LAST action of every turn.
+Add a leading "Canonical dbt incremental guard + dbt-trino properties" DO-NOT-WRITE block at the top of the most-findable dbt resource. Place it BEFORE existing worked examples so a Haiku responder keyword-matching on "dbt incremental", "is_incremental", "execute jinja", "incremental_strategy", "properties partitioning", or "partitioned_by" lands on the canonical syntax FIRST.
+
+### Priority 2 — Breadth design for iter453
+
+Iter452 did NOT probe federation (per directive); the federation row remains 4.49944/310. Iter453 should continue breadth design and NOT dedicate a federation probe (the topic is near-miss but stable; risk of regression > expected gain from another probe based on the 23+ iterations stuck below threshold). Prioritize one probe each from:
+- **Postgres-to-Iceberg ingestion** (lost ground in iter452 from 4.4975 → 4.4914 on the Q2 fabrications — needs a clean re-probe to recover)
+- **Iceberg table maintenance** (lost micro-ground 4.5128 → 4.5117; one clean re-probe to nudge back up)
+- One of the unprobed-this-iter topics for breadth (column-oriented storage, OLAP vs OLTP, or Iceberg partition design)
+- Lakehouse schema design or SQL query best practices for OLAP for the 4th probe
+
+Avoid: federation (per directive), Trino CBO (already at 4.6707/12 with strong buffer), tools comparison (4.75/3 with light history).
+
+### Priority 3 — Citation-hygiene streak recovery
+
+iter452 broke the streak at iter451's 1-iter restoration. The two FAB-1 / FAB-2 patterns are NEW failure modes (neither appeared in iter410's QUALIFY-not-in-Trino slip or iter450's MAP angle-bracket slip). After reconciling, add a top-of-file cross-reference from any resource that mentions "incremental" / "dbt" / "is_incremental" pointing to the canonical dbt incremental guard worked example. This is the same pattern the iter451 r09 leading canonical worked example used to fix the MAP angle-bracket regression — it worked for schema-DDL and should work for dbt-trino syntax.
+
+---
+
+## Notes
+
+- 51st consecutive overall PASS in extended phase (streak intact despite Q2 PASS-with-caveat).
+- Federation: 4.49944/310, 23 consecutive iters stuck below 4.5 threshold (per-topic override).
+- All required topics PASS — iter436 terminal milestone STILL holds.
+- prod_info.md JWT+OPA alignment in Q3 was excellent — keep that framing as a model for future authz probes.
+- Q4 docked slightly only for missing concrete success criteria (TB target, runtime estimate, concurrency caveat for expire on live table) — not a fabrication, just polish.

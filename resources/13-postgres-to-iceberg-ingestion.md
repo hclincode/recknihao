@@ -6,6 +6,16 @@
 
 ---
 
+## TOP-OF-DOC CALLOUT #0 — For the Trino-side `CREATE TABLE` DDL (target table), use r09's leading canonical worked example, NOT the Spark DDL forms in this resource
+
+> **This resource is the SPARK INGESTION guide.** Every `CREATE TABLE ... USING iceberg PARTITIONED BY (...) TBLPROPERTIES (...)` snippet below is **Spark SQL DDL** — submit via `spark-sql` or `spark.sql(...)`. **If you are creating the target Iceberg table from a Trino client (the Trino CLI, JDBC, the Trino UI, or any tool that speaks the Trino dialect), the Spark DDL forms in this resource will FAIL with a parse error.** Trino 467's dialect requires PARENTHESES on parameterized types (`MAP(K, V)`, `ARRAY(T)`, `ROW(...)`), uses `WITH (partitioning = ARRAY[...])` inside the table-property clause instead of a trailing `PARTITIONED BY (...)`, uses `format_version` (integer, underscore) inside `WITH (...)` instead of `TBLPROPERTIES ('format-version'='2')`, and rejects `USING iceberg` entirely (the catalog name selects the connector).
+>
+> **For the canonical Trino-side `CREATE TABLE` DDL — both the worked example AND the DO-NOT-WRITE 7-row block listing every Spark-shaped DDL that parse-errors in Trino 467 — see** [resources/09-lakehouse-schema-design.md § LEADING CANONICAL WORKED EXAMPLE — Trino vs Spark DDL for a wide denormalized event table](09-lakehouse-schema-design.md). That section is the single source of truth for Trino 467 + Iceberg connector DDL; do not invent a parallel Trino-DDL form in this resource.
+>
+> **Quick decision rule:** if your engineer is going to type `CREATE TABLE iceberg.<schema>.<table>` into the Trino CLI before the Spark ingestion job runs, copy the Trino DDL block from r09. If your engineer is going to let the Spark ingestion job auto-create the table via `df.writeTo("iceberg.x.y").using("iceberg").create()` (or a Spark `CREATE TABLE` statement run from Spark), use the Spark DDL forms in this resource. The two paths produce the same on-disk Iceberg table; the syntax is engine-specific.
+
+---
+
 ## TL;DR
 
 - Three ingestion patterns: full refresh (simplest), incremental append (most common), CDC (advanced).
