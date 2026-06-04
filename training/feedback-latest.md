@@ -1,160 +1,143 @@
-# Judge Feedback — Iter 445 (EXTENDED PHASE — end-of-iteration only)
+# Judge Feedback — Iter 446 (EXTENDED PHASE — end-of-iteration only)
 
-**Overall: 4.823 STRONG PASS** (Q1 4.90625 + Q2 4.8125 + Q3 4.78125 + Q4 4.8125) — **+0.745 step-UP from iter444 4.078**. **FEDERATION RESTORE SUCCESS (RAZOR-THIN): topic crosses back above 4.5 threshold from 4.4977/306 to 4.50005/308; margin -0.0023 → +0.00005 (+0.0024 swing).** Iter444 3-confident-inaccuracy cluster on Q2 plain-LIMIT pushdown FULLY RESOLVED via iter445 r22 §13.5 leading-position canonical worked example. Iter431 → iter440 → iter444 → iter445 4-cycle Limit-vs-TopN regression FINALLY BROKEN. Zero new confident-inaccuracies this iter.
+**Overall: 4.5547 PASS** (Q1 4.625 + Q2 4.1875 + Q3 4.6875 + Q4 4.71875) — **-0.268 step-DOWN from iter445 4.823**. **FEDERATION FLIPS BACK TO FAIL (RAZOR-THIN): topic crosses below 4.5 threshold from 4.50005/308 to 4.49944/310; margin +0.00005 → -0.00056 (-0.00061 swing).** The razor-thin iter445 federation restore is wiped out by a Q2 confident-inaccuracy on the VARCHAR-range-pushdown session-property NAME. Iter445 streak (0 confident-inaccuracies) BROKEN at 1 iter — **iter446 adds 1 new confident-inaccuracy on Q2** (fabricated session-property form `postgresql.experimental_enable_string_pushdown_with_collate`).
 
 ---
 
 ## HEADLINE
 
-1. **Q1 Plain LIMIT pushdown federation CRITICAL restore — STRONG PASS 4.90625 — iter444 3-confident-inaccuracy cluster FULLY RESOLVED.** The iter445 teacher consolidation in r22 §13.5 leading worked example landed all three iter444 fixes simultaneously:
-   - **(1a) Limit-vs-TopN mislabel FIXED.** Answer LEADS with the canonical verbatim phrasing: "This is Limit pushdown (NOT Top-N pushdown), and it DOES push to Postgres." Per **trino.io/docs/current/optimizer/pushdown.html**: "Limit pushdown enables a connector to push processing of such queries of unsorted record" — plain LIMIT calls `applyLimit`; Top-N pushdown is the SEPARATE capability for `ORDER BY + LIMIT` calling `applyTopN`.
-   - **(1b) Self-contradiction FIXED.** No "DOES push" + "does NOT push" both in same answer. Single coherent claim: plain LIMIT DOES push.
-   - **(1c) Fabricated EXPLAIN operators FIXED.** Zero occurrences of `RemoteOffset`, `LimitPartial`, `OffsetPartial`, `RemoteLimit` in the answer. Real operators only: `Limit[100]` (above TableScan = NOT pushed) and `limit=100` annotation folded INTO TableScan (= pushed).
+1. **Q2 PREDICATE PUSHDOWN — NEW CONFIDENT-INACCURACY: SESSION-PROPERTY NAME FABRICATED.** The responder gave `SET SESSION postgresql.experimental_enable_string_pushdown_with_collate = true`. This form is WRONG. Per trino.io/docs/current/connector/postgresql.html: the catalog-config form is `postgresql.experimental.enable-string-pushdown-with-collate` (dotted + hyphenated, used in `etc/catalog/postgresql.properties`); the SESSION-property form is `enable_string_pushdown_with_collate` (no `postgresql.` prefix, no `experimental_` prefix). The correct SET SESSION invocation is `SET SESSION postgresql.enable_string_pushdown_with_collate = true` (catalog name dot session-property name). The responder mangled the catalog property by replacing dots/hyphens with underscores and prepending the catalog name — producing a form that does NOT exist as either a session property or a catalog property. An engineer pasting this exact line will hit "Session property not found." This is a confident-inaccuracy because the responder leads the recovery path with a non-functional copy-paste-ready command.
 
-2. **Q2 Predicate pushdown which-filters-push federation BUFFER — STRONG PASS 4.8125.** Per-case correctness verified against trino.io PostgreSQL docs:
-   - Numeric equality `account_id = 12345` PUSHES — CORRECT.
-   - IN-list `status IN (...)` PUSHES — CORRECT.
-   - Numeric range `revenue > 1000` PUSHES — CORRECT.
-   - VARCHAR equality `name = 'foo'` PUSHES — CORRECT (PostgreSQL docs: "equality predicates ... on columns with textual types are pushed down").
-   - VARCHAR range `name > 'm'` does NOT push by default — CORRECT (docs: "does not support pushdown of range predicates ... on columns with character string types").
-   - IS NULL PUSHES — CORRECT.
-   - EXPLAIN signature: `constraint=...` inside TableScan = pushed vs separate `Filter` operator above = Trino-side — CORRECT.
-   - Combined predicate `account_id = 12345 AND status IN (...) OR revenue > 1000` written verbatim per question echo — not penalized for precedence per judge directive.
+2. **Q1 AGGREGATION PUSHDOWN — STRONG PASS 4.625.** EXPLAIN SUCCESS signature CORRECT: Aggregate operator ABSENT above TableScan, `grouping=`/`aggregations=` folded INTO TableScan. EXPLAIN FAILURE signature CORRECT: separate Aggregate operator above TableScan. Predicate-ordering dependency CORRECT (all WHERE predicates must push first for aggregate to push). physicalInputDataSize check CORRECT. No fabricated operators. Verified per trino.io/docs/current/optimizer/pushdown.html.
 
-3. **Q3 Oracle DECODE → CASE WHEN — STRONG PASS 4.78125.** Migration semantics canonical:
-   - Trino has NO DECODE — must use CASE WHEN.
-   - Positional 1:1 mechanical mapping `DECODE(col, k1, v1, k2, v2, default)` → `CASE WHEN col = k1 THEN v1 WHEN col = k2 THEN v2 ELSE default END`.
-   - NULL gotcha — Oracle DECODE treats NULL as matchable (`DECODE(NULL, NULL, 1, 2) = 1`); Trino CASE simple form `CASE col WHEN NULL THEN 1 ELSE 2 END` returns 2 because `NULL = NULL` is UNKNOWN — must rewrite as searched CASE `WHEN col IS NULL` — CORRECT per sqlines.com / cleverence.com Oracle DECODE NULL docs.
-   - Strict type coercion in Trino — DECODE allowed mixed numeric/string via Oracle implicit coercion; CASE WHEN in Trino requires explicit CAST.
-   - Oracle empty-string-is-NULL quirk flagged with `NULLIF(col, '')` guard pattern.
+3. **Q3 ROWNUM → ORDER BY+LIMIT/keyset — STRONG PASS 4.6875.** Oracle ROWNUM not in Trino; TopN (default Trino 354+) via ORDER BY+LIMIT; OFFSET expensive on large N (scan+skip); keyset/cursor pagination preferred (`WHERE created_at < last_seen_ts ORDER BY created_at DESC LIMIT N`); bare-column ORDER BY (not `date_trunc(...)`) for pushdown; partition filter prune-before-sort. Canonical.
 
-4. **Q4 Iceberg rollback_to_snapshot — STRONG PASS 4.8125.** All semantics canonical for Trino 467:
-   - `CALL iceberg.system.rollback_to_snapshot('analytics', 'event_table', snap_id)` positional 3-arg — CORRECT per starburst.io blog + trino.io/docs/current/connector/iceberg.html (note: deprecated in newer Trino in favor of table procedure form, but canonical for 467 production).
-   - Find pre-bad snapshot via `SELECT snapshot_id, committed_at FROM "iceberg.analytics.event_table$snapshots" WHERE committed_at < TIMESTAMP '2026-06-04 01:00:00' ORDER BY committed_at DESC LIMIT 1` — CORRECT.
-   - Rollback moves snapshot pointer atomically — no data file deletion, bad snapshot remains accessible until expired — CORRECT.
-   - `expire_snapshots(retention_threshold => '7d')` Trino 7-day floor for cleanup — CORRECT default.
-   - Spark `CALL system.expire_snapshots(table => '...', older_than => TIMESTAMP '...')` for sub-7d immediate cleanup — CORRECT escape hatch.
+4. **Q4 COMPACTION → EXPIRE_SNAPSHOTS STORAGE RECLAIM — STRONG PASS 4.71875.** Correct identification: optimize merges small files but old data files NOT deleted; `expire_snapshots(retention_threshold => '7d')` is the MISSING step that frees MinIO bytes (drops old snapshots + their exclusive files); `remove_orphan_files` for unreferenced; immutable model; verify via `$files content=0` count/total_gb before/after; 7d Trino floor vs Spark `older_than` sub-7d escape hatch. Verified per iceberg.apache.org/docs/latest/maintenance/.
 
 ---
 
 ## Critical confirmations (explicit)
 
-### (a) Q1 plain-LIMIT re-probe — Limit-vs-TopN re-regression FIXED?
+### (a) Federation average after Q1 + Q2 — DOES THE BUFFER COMPOUND UPWARD, OR FLIP BACK BELOW 4.5?
 
-**YES — Q1 STRONG PASS 4.90625.** All three iter444 confident-inaccuracies resolved in a single iter445 teacher consolidation at r22 §13.5 leading worked example:
-- LEADS with "This is Limit pushdown (NOT Top-N pushdown), and it DOES push to Postgres" — verbatim per the FIRST-WORD directive.
-- `limit=100` folded-into-TableScan SUCCESS signature given; separate `Limit[100]` operator above = not-pushed FAILURE signature given as the contrast.
-- NO self-contradiction — single coherent "DOES push" claim throughout.
-- NO fabricated operators — zero occurrences of `RemoteOffset`, `LimitPartial`, `OffsetPartial`, `RemoteLimit`.
-
-**Iter431 → iter440 → iter444 → iter445 4-cycle Limit-vs-TopN regression FINALLY BROKEN.** The teacher consolidation strategy that worked on Q1 Iceberg branches (single comprehensive leading worked example + FIRST-WORD directive + DO-NOT-WRITE block) was successfully applied to federation pushdown vocabulary. The fix is durable to the degree that this iteration's probe passed at the highest score of the 4-cycle — needs iter448-450 durability re-probe with varied connector (MySQL/SQL Server) to confirm generalization.
-
-### (b) Federation average after Q1 + Q2 — CROSSES BACK ABOVE 4.5?
-
-**YES — FEDERATION RESTORED to PASSED (razor-thin).**
+**FLIPS BACK TO FAIL. Buffer does NOT compound; it ERODES.**
 
 Arithmetic:
-- Prior: 4.4977 × 306 = 1376.2962
-- + Q1 4.90625 → 1381.20245, count 307
-- + Q2 4.8125 → 1386.01495, count 308
-- **New average: 1386.01495 / 308 = 4.50005**
-- Margin: **+0.00005 above 4.5 threshold**
-- Swing from iter444: **+0.0024 (margin -0.0023 → +0.00005)**
+- Prior: 4.50005 × 308 = 1386.01495 (margin +0.00005)
+- + Q1 4.625 → 1390.63995, count 309
+- + Q2 4.1875 → 1394.82745, count 310
+- **New average: 1394.82745 / 310 = 4.49944**
+- Margin: **-0.00056 below 4.5 threshold**
+- Swing from iter445: **-0.00061 (margin +0.00005 → -0.00056)**
 
-**FEDERATION CROSSES BACK ABOVE 4.5 THRESHOLD — flipped from FAIL to PASSED, BARELY.** This is the second consecutive flip on federation (iter441 → iter442/443 PASSED → iter444 FAIL → iter445 PASSED). The +0.00005 margin is so razor-thin that a single sub-4.5 federation datapoint in iter446 would flip federation back to FAIL. Federation needs 2-3 more strong federation datapoints at 4.75+ avg to compound the margin to a safe +0.005+ range.
+**FEDERATION CROSSES BACK BELOW 4.5 THRESHOLD — FLIPS BACK from PASSED to FAIL.** This is the THIRD consecutive flip on federation in 4 iters (iter441 PASS → iter442/443 PASS → iter444 FAIL → iter445 PASS → iter446 FAIL). The Q2 hit at 4.1875 is below the topic average and well below the 4.75+ band needed to compound the buffer. The iter445 restore was always fragile (+0.00005); a single sub-4.5 federation datapoint flips it.
 
-### (c) New confident-inaccuracies — any?
+### (b) Q2 session-property name verdict — CORRECT or FABRICATED?
 
-**NONE this iter.** All four answers are canonical against verified official docs:
-- Q1: trino.io/docs/current/optimizer/pushdown.html Limit pushdown vs Top-N pushdown distinction VERIFIED.
-- Q2: trino.io/docs/current/connector/postgresql.html VARCHAR range non-pushdown + equality/IN/numeric range/numeric eq pushdown VERIFIED.
-- Q3: sqlines.com Oracle-to-SQL-Server DECODE NULL handling note + cleverence.com Oracle DECODE docs CONFIRM DECODE(NULL,NULL,1,2)=1 vs CASE simple WHEN NULL never matches → searched CASE with IS NULL required.
-- Q4: starburst.io Iceberg rollback/expire blog + iceberg.apache.org/docs/latest/maintenance/ CONFIRM positional 3-arg syntax + pointer-only-no-file-delete semantics + expire_snapshots 7d Trino floor.
+**FABRICATED.** The responder's `SET SESSION postgresql.experimental_enable_string_pushdown_with_collate = true` is wrong and will not execute. The correct forms are:
 
-Zero-confident-inaccuracy streak (broken at iter443+iter444 with 5 total inaccuracies) RE-STARTS at 1 iter. Iter444 cluster of 3 inaccuracies on Q2 federation Limit-vs-TopN ALL RESOLVED.
+- Catalog config (in `etc/catalog/postgresql.properties`):
+  ```
+  postgresql.experimental.enable-string-pushdown-with-collate=true
+  ```
+  (dotted + hyphenated, contains `experimental.`)
+
+- SET SESSION (per-session toggle):
+  ```sql
+  SET SESSION postgresql.enable_string_pushdown_with_collate = true;
+  ```
+  (catalog-name dot session-property name; the session property is `enable_string_pushdown_with_collate` — NO `experimental_` prefix, NO `postgresql.` inside the property name).
+
+The responder's form conflates the two: prepends the catalog name `postgresql.` to the catalog property name then replaces `.` and `-` with `_`, keeping the `experimental_` segment. The result is a name that exists in NEITHER namespace. Verified per trino.io/docs/current/connector/postgresql.html: "...by setting the postgresql.experimental.enable-string-pushdown-with-collate catalog configuration property or the corresponding enable_string_pushdown_with-collate session property to true." (The corresponding session property does not carry the `experimental_` segment.)
+
+**This is a confident-inaccuracy** — the responder presents the line as a working remediation command. An engineer pasting it will hit `Session property 'postgresql.experimental_enable_string_pushdown_with_collate' does not exist`.
+
+### (c) New confident-inaccuracies this iter — any?
+
+**ONE NEW.** Q2 session-property NAME fabrication described in (b). Zero-confident-inaccuracy streak BROKEN at 1 iter.
+
+No other inaccuracies on Q1, Q3, Q4.
 
 ### (d) Verified-claim spot checks
 
-- **Limit pushdown vs Top-N pushdown separate capabilities** — VERIFIED per trino.io/docs/current/optimizer/pushdown.html: "When the query plan contains a Sort and Limit operations, the engine tries to push down the limit into the connector by calling the applyTopN method. If there's no Sort operation, but only a Limit, the applyLimit method is called instead."
-- **PostgreSQL connector VARCHAR range non-pushdown** — VERIFIED per trino.io/docs/current/connector/postgresql.html: "The connector does not support pushdown of range predicates, such as >, <, or BETWEEN, on columns with character string types like CHAR or VARCHAR. However, equality predicates, such as IN or =, and inequality predicates, such as != on columns with textual types are pushed down."
-- **Oracle DECODE NULL semantics** — VERIFIED per sqlines.com/oracle-to-sql-server/decode: "In a DECODE function, Oracle considers two nulls to be equivalent" + "When you convert DECODE to CASE expression, and there is NULL condition, you have to use searched CASE form."
-- **rollback_to_snapshot positional Trino 467 syntax** — VERIFIED per starburst.io blog: `CALL iceberg.system.rollback_to_snapshot('demo_tpch', 'customer_iceberg', 5043425904354141100)` (3 positional args: schema, table, snapshot_id).
-- **expire_snapshots 7d Trino floor** — VERIFIED per Starburst forum + trino.io: `iceberg.expire-snapshots.min-retention` default 7d; retention_threshold must be ≥ this floor.
+- **Aggregate pushdown EXPLAIN signature (Q1)** — VERIFIED per trino.io/docs/current/optimizer/pushdown.html: when aggregate pushdown succeeds the Aggregate operator is absent and the count/aggregations are visible as part of the TableScan operator. Predicate-ordering dependency (all WHERE must push for aggregate to push) is well-known empirical behavior covered in trinodb/trino issue #7251.
+- **PostgreSQL string-pushdown experimental property (Q2)** — VERIFIED per trino.io/docs/current/connector/postgresql.html: catalog property is `postgresql.experimental.enable-string-pushdown-with-collate`; session property is `enable_string_pushdown_with_collate` (no `experimental_` prefix).
+- **Trino TopN / Limit pushdown (Q3)** — VERIFIED per trino.io/docs/current/optimizer/pushdown.html: `applyTopN` for ORDER BY+LIMIT; `applyLimit` for plain LIMIT.
+- **expire_snapshots is the file-reclaim step (Q4)** — VERIFIED per iceberg.apache.org/docs/latest/maintenance/: "The expire_snapshots command removes all snapshots and all related metadata and data files." Trino-side procedure `ALTER TABLE ... EXECUTE expire_snapshots(retention_threshold => '7d')` correct.
 
 ---
 
 ## Per-question scoring
 
-### Q1 — Plain LIMIT pushdown (federation CRITICAL restore re-probe)
+### Q1 — Aggregation pushdown (federation BUFFER)
 
-**Scores: 5.0 / 4.75 / 5.0 / 4.875 — avg 4.90625 STRONG PASS**
+**Scores: 4.75 / 4.5 / 4.75 / 4.5 — avg 4.625 PASS**
 
 What landed correct:
-- LEADS with verbatim canonical: "This is Limit pushdown (NOT Top-N pushdown), and it DOES push to Postgres."
-- EXPLAIN SUCCESS signature: `TableScan[catalog=postgresql, table=users, ..., limit=100]` — `limit=100` folded INTO TableScan, no separate Limit operator above — CORRECT.
-- EXPLAIN FAILURE signature: separate `Limit[100]` operator ABOVE TableScan — CORRECT.
-- Scope explicit: applies only to plain LIMIT no ORDER BY/GROUP BY/join, unsorted record.
-- ZERO fabricated EXPLAIN operators (`RemoteOffset`, `LimitPartial`, `OffsetPartial`, `RemoteLimit` all absent).
-- ZERO self-contradiction.
+- Aggregate operator ABSENT above TableScan when pushed; `grouping=`/`aggregations=` folded INTO TableScan — CORRECT.
+- Separate Aggregate operator above TableScan = NOT pushed — CORRECT.
+- All-WHERE-predicates-must-push-first ordering dependency surfaced — CORRECT (empirical caveat documented in trinodb/trino #7251).
+- physicalInputDataSize EXPLAIN ANALYZE check for verification — CORRECT.
+- No fabricated operators — clean.
 
-Minor docks:
-- BC dock 0.25: could add 1-line `applyLimit` vs `applyTopN` connector-method aside (minor; the explicit naming was reserved for r22 cite).
-- Comp dock 0.125: could mention that LIMIT pushdown for PostgreSQL has been default since Trino 354.
+Docks:
+- BC dock 0.5: dense enumeration of EXPLAIN signatures; could use a 2-row "pushed vs not pushed" comparison table for faster scanning.
+- Comp dock 0.5: no mention that `applyAggregation` is the connector method called, and no note on which aggregations are pushable (count/sum/min/max/avg standard; count(DISTINCT) often not).
 
-**Verdict:** STRONG PASS — iter444 3-confident-inaccuracy cluster FULLY RESOLVED; 4-cycle Limit-vs-TopN regression FINALLY BROKEN.
+**Verdict:** PASS — federation buffer datapoint solid but below the 4.75+ band needed to compound the iter445 razor-thin margin.
 
 ### Q2 — Predicate pushdown which-filters-push (federation BUFFER)
 
-**Scores: 5.0 / 4.75 / 4.75 / 4.75 — avg 4.8125 STRONG PASS**
+**Scores: 4.0 / 4.5 / 3.75 / 4.5 — avg 4.1875 PASS (below 4.5 — drags federation BELOW threshold)**
 
 What landed correct:
 - Numeric equality `account_id = 12345` PUSHES — CORRECT.
-- IN-list `status IN (...)` PUSHES — CORRECT.
-- Numeric range `revenue > 1000` PUSHES — CORRECT.
-- VARCHAR equality PUSHES default — CORRECT per trino.io PostgreSQL docs.
-- VARCHAR range does NOT push by default — CORRECT (Trino docs explicit on this).
-- IS NULL PUSHES — CORRECT.
-- EXPLAIN `constraint=...` inside TableScan = pushed vs separate `Filter` above = Trino-side — CORRECT canonical signature.
+- IN-list `status IN ('active', 'trial')` PUSHES — CORRECT.
+- VARCHAR range `plan_name > 'basic'` does NOT push by default — CORRECT.
+- EXPLAIN `constraint=...` inside TableScan vs separate `Filter` above — CORRECT canonical signature.
+- physicalInputDataSize check + correctness/perf risk warning + denormalize-to-numeric-tier alternative — CORRECT.
 
-Minor docks:
-- BC dock 0.25: per-case enumeration is dense; could compact into a 6-row table for faster scanning.
-- PA dock 0.25: could add a 1-line "how to verify with EXPLAIN" walkthrough on the combined predicate.
-- Comp dock 0.25: could mention the empirical aggregate-needs-all-predicates-push ordering caveat more explicitly.
+What landed WRONG (CONFIDENT-INACCURACY):
+- `SET SESSION postgresql.experimental_enable_string_pushdown_with_collate = true` is a FABRICATED session-property name (see Critical Confirmation (b)). The correct SET SESSION form is `SET SESSION postgresql.enable_string_pushdown_with_collate = true`; the catalog-config form (different namespace) is `postgresql.experimental.enable-string-pushdown-with-collate`.
 
-**Verdict:** STRONG PASS — federation BUFFER datapoint canonical.
+Docks:
+- TA dock 1.0: copy-paste-ready command is non-functional (session property doesn't exist under that name). This is the kind of error that costs engineer trust the first time they paste it.
+- PA dock 1.25: the remediation path is the most actionable part of the answer and it's the part that breaks. The denormalize-to-numeric-tier alternative is a strong recovery, but the engineer would burn cycles on the broken SET SESSION first.
 
-### Q3 — Oracle DECODE → CASE WHEN migration
+**Verdict:** PASS overall but BELOW federation 4.5 threshold and drags federation topic BELOW threshold (4.50005 → 4.49944, margin +0.00005 → -0.00056).
 
-**Scores: 5.0 / 4.75 / 4.75 / 4.625 — avg 4.78125 STRONG PASS**
+### Q3 — Oracle ROWNUM → ORDER BY+LIMIT/keyset
 
-What landed correct:
-- Trino has NO DECODE — must use CASE WHEN.
-- Positional 1:1 mechanical mapping correct.
-- NULL gotcha — DECODE(NULL,NULL,1,2)=1 vs CASE simple form `WHEN NULL` never matches → use searched CASE `WHEN x IS NULL` — CORRECT per sqlines.com.
-- Strict type coercion — Trino requires explicit CAST where Oracle DECODE accepted implicit coercion — CORRECT.
-- Oracle empty-string-is-NULL quirk — `NULLIF(col, '')` guard pattern — CORRECT canonical migration pattern.
-
-Minor docks:
-- Comp dock 0.375: could mention DECODE allows fall-through ordering matters (first match wins) — CORRECT translation must preserve order; not explicit in this answer.
-
-**Verdict:** STRONG PASS — Oracle migration topic +0.0071 nudge.
-
-### Q4 — Iceberg rollback_to_snapshot
-
-**Scores: 5.0 / 4.75 / 4.875 / 4.625 — avg 4.8125 STRONG PASS**
+**Scores: 4.75 / 4.75 / 4.75 / 4.5 — avg 4.6875 STRONG PASS**
 
 What landed correct:
-- `CALL iceberg.system.rollback_to_snapshot('analytics', 'event_table', snap_id)` positional 3-arg Trino 467 — CORRECT per starburst.io.
-- `$snapshots` lookup via `committed_at < TIMESTAMP '...'` window — CORRECT canonical pattern.
-- Pointer-only no-file-delete semantics — CORRECT.
-- `expire_snapshots(retention_threshold => '7d')` Trino 7-day floor — CORRECT default.
-- Spark `older_than` escape hatch for sub-7d immediate cleanup — CORRECT.
-- Snapshots retained by default — rollback as far back as files exist — CORRECT.
+- ROWNUM Oracle-only, not in Trino — CORRECT.
+- ORDER BY + LIMIT (TopN, default since Trino 354) — CORRECT.
+- OFFSET on large N is expensive (scan + skip) — CORRECT.
+- Keyset/cursor pagination preferred: `WHERE created_at < last_seen ORDER BY created_at DESC LIMIT N` — CORRECT canonical pattern.
+- Bare-column ORDER BY (not `date_trunc(...)`) for pushdown + partition filter prune-before-sort — CORRECT pushdown gotcha.
 
-Minor docks:
-- Comp dock 0.375: could add a brief note on the deprecated-in-newer-Trino path (rollback_to_snapshot table procedure replacement) for forward-compat — but for Trino 467 the system procedure form is the canonical answer, so this is a minor nice-to-have.
+Docks:
+- Comp dock 0.5: could explicitly mention that Oracle pattern `WHERE ROWNUM <= N` order-of-evaluation gotcha (ROWNUM assigned before ORDER BY) is exactly the pitfall Trino's LIMIT after ORDER BY avoids.
 
-**Verdict:** STRONG PASS — Iceberg maintenance topic +0.0028 nudge.
+**Verdict:** STRONG PASS — Oracle migration topic +0.0022 nudge UP.
+
+### Q4 — Compaction → expire_snapshots storage reclaim
+
+**Scores: 4.875 / 4.75 / 4.75 / 4.5 — avg 4.71875 STRONG PASS**
+
+What landed correct:
+- optimize merges small files but old files NOT deleted — CORRECT (the "missing step" framing matches the user's confusion exactly).
+- expire_snapshots(retention_threshold => '7d') is THE step that frees MinIO bytes — CORRECT.
+- remove_orphan_files for unreferenced files — CORRECT.
+- Immutable model — CORRECT.
+- $files content=0 count/total_gb verification before/after — CORRECT.
+- 7d Trino floor / Spark `older_than` sub-7d escape hatch — CORRECT.
+
+Docks:
+- Comp dock 0.5: could explicitly add that expire_snapshots default retention from table property `history.expire.max-snapshot-age-ms` must be set from Spark (Trino SET PROPERTIES does not accept it on Iceberg tables in 467).
+
+**Verdict:** STRONG PASS — Iceberg maintenance topic +0.0019 nudge UP.
 
 ---
 
@@ -162,9 +145,9 @@ Minor docks:
 
 | Topic | Before | After | Delta | Status |
 |---|---|---|---|---|
-| Trino federation / cross-source connectors | 4.4977 / 306 | **4.50005 / 308** | **+0.00235** | **PASSED — RESTORED from FAIL; margin -0.0023 → +0.00005 (razor-thin, +0.0024 swing); Q1 4.90625 + Q2 4.8125 both above 4.5 threshold** |
-| Iceberg table maintenance | 4.5048 / 108 | **4.5076 / 109** | +0.0028 | PASSED — Q4 4.8125 above topic avg |
-| Oracle PL/SQL → dbt + Trino SQL migration | 4.6314 / 20 | **4.6385 / 21** | +0.0071 | PASSED — Q3 4.78125 above topic avg |
+| Trino federation / cross-source connectors | 4.50005 / 308 | **4.49944 / 310** | **-0.00061** | **FAIL — RAZOR-THIN; margin +0.00005 → -0.00056; Q1 4.625 above 4.5 but Q2 4.1875 well below; iter445 restore wiped out by Q2 session-property fabrication** |
+| Iceberg table maintenance | 4.5076 / 109 | **4.5095 / 110** | +0.0019 | PASSED — Q4 4.71875 above topic avg |
+| Oracle PL/SQL → dbt + Trino SQL migration | 4.6385 / 21 | **4.6407 / 22** | +0.0022 | PASSED — Q3 4.6875 above topic avg |
 
 ---
 
@@ -172,75 +155,85 @@ Minor docks:
 
 | Q | Score | Topic | Verdict |
 |---|---|---|---|
-| Q1 | 4.90625 | Trino federation (plain LIMIT pushdown CRITICAL restore) | STRONG PASS — iter444 3-confident-inaccuracy cluster RESOLVED |
-| Q2 | 4.8125 | Trino federation (predicate pushdown BUFFER) | STRONG PASS — per-case correctness verified |
-| Q3 | 4.78125 | Oracle migration (DECODE → CASE) | STRONG PASS — NULL gotcha + type coercion canonical |
-| Q4 | 4.8125 | Iceberg maintenance (rollback_to_snapshot) | STRONG PASS — positional syntax + pointer-only semantics canonical |
+| Q1 | 4.625 | Trino federation (aggregation pushdown BUFFER) | PASS — EXPLAIN semantics canonical but below 4.75+ buffer-compound band |
+| Q2 | 4.1875 | Trino federation (predicate pushdown BUFFER) | PASS overall — but FABRICATED SESSION-PROPERTY NAME drags below 4.5 federation threshold |
+| Q3 | 4.6875 | Oracle migration (ROWNUM pagination) | STRONG PASS — keyset pagination canonical |
+| Q4 | 4.71875 | Iceberg maintenance (compaction → expire_snapshots reclaim) | STRONG PASS — missing-step framing perfect |
 
-**Average 4.823 STRONG PASS — +0.745 step-UP from iter444 4.078.** Iter445 is a clean restore iteration: the iter444 federation Q2 3-inaccuracy cluster is fully resolved, federation crosses back above threshold (razor-thin), Iceberg maintenance and Oracle migration both nudge up from above-topic-avg Q3/Q4 datapoints, and ZERO new confident-inaccuracies anywhere.
+**Average 4.5547 PASS — -0.268 step-DOWN from iter445 4.823.** Iter446 is a buffer-erosion iteration: Q1+Q3+Q4 strong but Q2 fabricated-session-property inaccuracy drags federation BELOW threshold by -0.00056 (after passing by +0.00005 in iter445). The iter445 razor-thin restore was always fragile.
 
 **Headline outcomes:**
-- ZERO new confident-inaccuracies this iter (iter443 + iter444 had 5 total; iter445 has 0).
-- FEDERATION RESTORE 4.4977 → 4.50005 / 308 (+0.0024 swing; margin -0.0023 → +0.00005 RAZOR-THIN).
-- Iceberg table maintenance 4.5048 → 4.5076 / 109 (+0.0028).
-- Oracle migration 4.6314 → 4.6385 / 21 (+0.0071).
-- Iter431 → iter440 → iter444 → iter445 4-cycle Limit-vs-TopN regression FINALLY BROKEN.
+- ONE new confident-inaccuracy this iter (Q2 session-property NAME fabrication).
+- FEDERATION FLIPS BACK TO FAIL 4.50005 → 4.49944 / 310 (-0.00061 swing; margin +0.00005 → -0.00056).
+- Iceberg table maintenance 4.5076 → 4.5095 / 110 (+0.0019).
+- Oracle migration 4.6385 → 4.6407 / 22 (+0.0022).
+- Pattern: federation restoration via "one strong + one weak" pair cannot hold; the buffer-compound strategy requires BOTH datapoints ≥ 4.75 to lift the average above the topic mean.
 
-**Strategic observation:** The teacher-consolidation strategy that worked on Q1 Iceberg branches at iter444 (single comprehensive leading worked example + FIRST-WORD directive + DO-NOT-WRITE block) was successfully applied at iter445 to federation Limit-vs-TopN. Same recipe, different topic, same successful outcome. This validates the consolidation-into-leading-position pattern for resolving chronic recurring regressions.
+**Strategic observation:** The iter445 strategy of restoring federation via a single comprehensive teacher consolidation worked for one iteration but did not durably compound the margin. Each fresh federation question is an independent draw against a 4.5 mean — a single sub-4.5 datapoint will tip it back. The teacher must focus resources/22 on the SECONDARY federation gotchas (string-pushdown experimental property names, CAST-wrapped predicates, LIKE prefix, OR decomposition) NOT just the headline Limit-vs-TopN distinction.
 
 ---
 
-## Teacher actions next (iter 446)
+## Teacher actions next (iter 447)
 
-1. **HIGH — HOLD r22 §13.5 leading worked example.** Do NOT touch the canonical leading block — let it bake. Federation margin is razor-thin (+0.00005), so any unrelated edit that accidentally weakens the leading worked example will tip federation back below threshold.
+1. **CRITICAL — FIX r22 string-pushdown session-property name.** Add a canonical worked-example block in r22 (predicate pushdown section) showing the EXACT correct forms:
+   ```
+   # Catalog config (etc/catalog/postgresql.properties — set once, restart required):
+   postgresql.experimental.enable-string-pushdown-with-collate=true
 
-2. **HIGH — Plan iter448-450 durability re-probe with VARIED connector.** The r22 §13.5 leading example uses PostgreSQL. Judge will probe in iter448-450 with MySQL or SQL Server connector variant to confirm the canonical "Limit pushdown (NOT Top-N pushdown), and it DOES push" phrasing generalizes beyond Postgres. Teacher should pre-emptively add a one-line aside in r22 §13.5 noting "applies equally to MySQL, SQL Server, and other JDBC connectors that implement applyLimit."
+   # Session toggle (per-session, no restart):
+   SET SESSION postgresql.enable_string_pushdown_with_collate = true;
+   ```
+   Add a DO-NOT-WRITE block explicitly listing the wrong forms:
+   - `SET SESSION postgresql.experimental_enable_string_pushdown_with_collate = true;` (WRONG — combines catalog-config name with SET SESSION form)
+   - `SET SESSION experimental_enable_string_pushdown_with_collate = true;` (WRONG — missing catalog prefix)
+   - `SET SESSION postgresql.experimental.enable_string_pushdown_with_collate = true;` (WRONG — keeps the `.experimental.` segment)
+   The session property name is `enable_string_pushdown_with_collate` — NO `experimental_` prefix and NO inner dots. The catalog property name is `postgresql.experimental.enable-string-pushdown-with-collate` — used ONLY in `etc/catalog/postgresql.properties`, never in `SET SESSION`.
 
-3. **MEDIUM — Federation margin compounding via Q3-pair re-probes.** Federation passes by only +0.00005. Need 2-3 more strong federation datapoints at 4.75+ avg to compound the margin to a safe +0.005+ range. Continue federation re-probes (Postgres pushdown corner cases, CBO / runtime DF cross-source, federated-join cost, when-to-federate-vs-ingest) at higher cadence next 2-3 iters.
+2. **HIGH — Federation buffer compounding requires BOTH datapoints ≥ 4.75.** The iter445 strategy of leading-position canonical phrasing worked for ONE iteration but did not durably lift the margin. Teacher must improve r22 SECONDARY federation gotchas (string-pushdown property names, CAST-wrapped predicates, LIKE prefix, OR decomposition) so that ANY federation question — not just the headline ones — lands at 4.75+.
+
+3. **HIGH — Add a canonical "verify your session property exists" debugging step.** In r22 add: "Before using `SET SESSION <catalog>.<property> = true`, verify the property exists with `SHOW SESSION LIKE '<catalog>.%';` — this lists all session properties available in your current Trino version for that catalog. Pasting an invented property name will fail with `Session property '<name>' does not exist`."
 
 4. **MEDIUM — Carry forward backlog probes.** Pushdown corner cases not yet covered:
-   - CAST-wrapped column (e.g. `CAST(id AS VARCHAR) = '123'`) breaks pushdown — canonical anti-pattern.
+   - CAST-wrapped column (e.g. `CAST(id AS VARCHAR) = '123'`) breaks pushdown.
    - LIKE prefix `name LIKE 'foo%'` — push behavior varies by connector.
    - OR-of-equality `id = 1 OR id = 2` — may decompose to IN list or not.
-   - Aggregate pushdown ordering — empirical caveat that ALL predicates must push for aggregate to push.
 
-5. **STRATEGIC — Loop posture: iter445 strong restore.** Aggregate PASSED stays + federation FLIPS BACK to PASSED (razor-thin). 4-cycle Limit-vs-TopN regression resolved via consolidation-into-leading-position strategy. Apply the same pattern proactively to any future chronic regression: identify recurring failure mode, write ONE leading worked example at top of relevant resource section, add FIRST-WORD directive + DO-NOT-WRITE block listing the specific wrong phrasings.
-
----
-
-## Judge probe targets next (iter 446) — RECOMMENDED
-
-1. **HIGH — Limit-vs-TopN durability re-probe with VARIED connector.** Ask "does `SELECT * FROM mysql.app.orders LIMIT 50` push the LIMIT to MySQL?" or "does SQL Server connector push plain LIMIT?" — expected answer should follow the same canonical phrasing: "This is Limit pushdown (NOT Top-N pushdown), and it DOES push." Confirm r22 §13.5 worked example generalizes beyond Postgres.
-
-2. **HIGH — Fabricated EXPLAIN operator direct re-probe.** Ask "I see an operator called `RemoteLimit` in my EXPLAIN — what does it mean?" or "is `OffsetPartial` a real Trino operator?" — expected answer: "There is no such operator in Trino EXPLAIN output. Real operators are TableScan, Filter, ScanFilterProject, Project, Limit, TopN, TopNPartial, Aggregate (partial/final), LocalExchange, RemoteExchange, RemoteSource, Output. For limit pushdown the signature is `limit=N` annotation folded INTO TableScan, not a separate operator."
-
-3. **MEDIUM — Federation buffer compound: federated-join cost / when-to-federate-vs-ingest.** Ask "I have a 10M-row Postgres `users` table and a 500M-row Iceberg `events` table — should I federate or ingest users into Iceberg?" — expected answer: build-side / probe-side reasoning + broadcast vs partitioned join + Trino cross-catalog join limits + ingest-when-Postgres-table-grows-large reasoning.
-
-4. **MEDIUM — Iceberg branch WAP durability (3-5 iters out).** Confirm iter444 r17 consolidated worked example holds against slightly different phrasing (e.g. "I want to publish my audit branch tomorrow — exact Spark calls?" or "I'm hitting 'not a fast-forward' during WAP publish").
-
-5. **LOW — Carry forward backlog**: CAST-wrapped predicate pushdown break; LIKE prefix pushdown; OR-of-equality decomposition; isolation-level write props; Iceberg identity-column durability; partition-spec-evolution different-angle.
+5. **STRATEGIC — Loop posture: federation in 3rd flip in 4 iters.** Iter441 PASS → iter442/443 PASS → iter444 FAIL → iter445 PASS → iter446 FAIL. The 4.5 threshold is too close to the topic mean for stability. Teacher should aim to push the topic average to **4.52+** by sustained 4.8+ datapoints across 6-10 questions, building a margin that survives one weak draw.
 
 ---
 
-## Critical message to teacher for iter 446
+## Judge probe targets next (iter 447) — RECOMMENDED
 
-**Iter445 is a 4.823 STRONG PASS overall — +0.745 step-UP from iter444 4.078 — with FEDERATION RESTORED to PASSED (razor-thin +0.00005 margin) and ZERO new confident-inaccuracies anywhere.** The iter445 teacher consolidation strategy at r22 §13.5 (leading worked example with FIRST-WORD directive + DO-NOT-WRITE block listing fabricated operator names) SUCCESSFULLY broke the iter431 → iter440 → iter444 4-cycle Limit-vs-TopN regression. Same consolidation recipe that fixed Q1 Iceberg branches at iter444 worked for Q2 federation Limit-vs-TopN at iter445.
+1. **HIGH — Re-probe string-pushdown experimental property NAME directly.** Ask: "Show me the exact `SET SESSION` line to enable VARCHAR range pushdown to PostgreSQL." Expected answer: `SET SESSION postgresql.enable_string_pushdown_with_collate = true;` (catalog-name dot session-property name; NO `experimental_` prefix). Confirm the iter446 fabrication is fixed.
 
-**KEY iter446 PRIORITY: HOLD r22 §13.5 leading worked example untouched.** Federation passes by only +0.00005. Any unintended weakening of the leading block will tip federation back below threshold. Plan iter448-450 durability probes with varied connectors (MySQL, SQL Server) to confirm generalization beyond the Postgres example; add a one-line connector-agnostic aside in r22 §13.5 to pre-empt connector-variant probes.
+2. **HIGH — Federation BUFFER COMPOUND probe with VARIED angle.** Ask a NEW federation question (not Limit-vs-TopN, not VARCHAR range): "Does `WHERE CAST(account_id AS VARCHAR) = '12345'` push to Postgres?" Expected answer: NO — CAST on the column side breaks pushdown; rewrite as `WHERE account_id = 12345` (or `WHERE account_id = CAST('12345' AS BIGINT)` if the literal must be a string).
 
-**Q1 plain LIMIT pushdown federation CRITICAL: STRONG PASS 4.90625.** First-word verbatim "This is Limit pushdown (NOT Top-N pushdown), and it DOES push to Postgres" landed exactly; EXPLAIN success/failure signatures both canonical; zero fabricated operators; zero self-contradiction. 4-cycle regression FINALLY RESOLVED.
+3. **MEDIUM — Aggregate pushdown ordering caveat re-probe.** Ask: "I have `SELECT user_id, COUNT(*) FROM pg.app.events WHERE plan_name > 'basic' GROUP BY user_id` — does the COUNT(*) push?" Expected answer: NO — because the VARCHAR range predicate `plan_name > 'basic'` doesn't push (by default), the residual Filter blocks the Aggregate from pushing too. Engineer must rewrite as numeric tier or enable the experimental session property.
 
-**Q2 predicate pushdown federation BUFFER: STRONG PASS 4.8125.** Per-case correctness on numeric eq/range/IN/VARCHAR-eq PUSH + VARCHAR range NO-push all verified against trino.io PostgreSQL docs.
+4. **MEDIUM — Iceberg expire_snapshots durability re-probe at 3-5 iters out** (from iter446 Q4 STRONG PASS).
 
-**Q3 Oracle DECODE → CASE: STRONG PASS 4.78125.** NULL gotcha (DECODE(NULL,NULL,1,2)=1 vs CASE simple WHEN NULL never matches → searched CASE with IS NULL) + type coercion + empty-string-is-NULL all canonical.
+5. **LOW — Carry forward**: LIKE prefix pushdown; OR-of-equality decomposition; isolation-level write props; identity-column durability; partition-spec-evolution.
 
-**Q4 Iceberg rollback_to_snapshot: STRONG PASS 4.8125.** Trino 467 positional 3-arg + $snapshots committed_at lookup + pointer-only-no-file-delete + 7d Trino expire floor + Spark sub-7d escape hatch all canonical.
+---
 
-**Loop status:** Aggregate PASSED stays + FEDERATION FLIPS BACK to PASSED (razor-thin). 44th consecutive overall PASS in extended phase. Iter445 is the cleanest single-iter result in 4 iters — zero new confident-inaccuracies + chronic 4-cycle regression resolved + federation restored. Iter446 priority is buffer compounding (federation margin from +0.00005 to a safer +0.005+ via 2-3 more strong federation datapoints) plus iter448-450 durability re-probe planning.
+## Critical message to teacher for iter 447
+
+**Iter446 is a 4.5547 PASS overall but FEDERATION FLIPS BACK TO FAIL by -0.00056 margin** (after passing by +0.00005 in iter445). The single confident-inaccuracy this iter is a **FABRICATED SESSION-PROPERTY NAME on Q2**: the responder wrote `SET SESSION postgresql.experimental_enable_string_pushdown_with_collate = true`, which is a non-existent session property. The CORRECT session-property form is `SET SESSION postgresql.enable_string_pushdown_with_collate = true` (NO `experimental_` prefix); the `experimental.` segment belongs ONLY in the catalog config name `postgresql.experimental.enable-string-pushdown-with-collate` (dotted + hyphenated, used in `etc/catalog/postgresql.properties`).
+
+**KEY iter447 PRIORITY: FIX r22 string-pushdown session-property name with a canonical worked-example block + DO-NOT-WRITE list of the three wrong forms.** Same consolidation recipe that fixed Limit-vs-TopN at iter445.
+
+**Q1 aggregation pushdown PASS 4.625** — EXPLAIN semantics canonical (Aggregate absent + grouping=/aggregations= folded into TableScan when pushed; separate Aggregate above when not); predicate-ordering dependency correctly surfaced; physicalInputDataSize check correct; no fabricated operators.
+
+**Q2 predicate pushdown PASS 4.1875** — per-case correctness (numeric eq / IN-list / VARCHAR range) verified, EXPLAIN constraint signature correct, denormalize-to-numeric-tier alternative correct — BUT the SET SESSION recovery command is fabricated.
+
+**Q3 Oracle ROWNUM → ORDER BY+LIMIT/keyset STRONG PASS 4.6875** — keyset pagination canonical; bare-column ORDER BY pushdown gotcha correct.
+
+**Q4 Iceberg compaction → expire_snapshots reclaim STRONG PASS 4.71875** — "missing step" framing matches user confusion exactly; $files content=0 verification + 7d Trino floor + Spark sub-7d escape hatch all canonical.
+
+**Loop status:** FEDERATION FLIPS to FAIL (3rd flip in 4 iters). 45th consecutive overall PASS in extended phase. The iter445 razor-thin restore strategy is structurally fragile — federation needs sustained 4.8+ datapoints across 6-10 questions to lift the topic average to a stable +0.02 margin (4.52+).
 
 **Other key verifications this iter:**
-- Trino Limit pushdown vs Top-N pushdown separate capabilities (`applyLimit` vs `applyTopN`) — VERIFIED per trino.io/docs/current/optimizer/pushdown.html.
-- PostgreSQL connector VARCHAR range non-pushdown + equality/IN/numeric-range PUSH — VERIFIED per trino.io/docs/current/connector/postgresql.html.
-- Oracle DECODE NULL=NULL matchable vs CASE simple WHEN NULL never matches → searched CASE IS NULL — VERIFIED per sqlines.com / cleverence.com.
-- Trino 467 `CALL iceberg.system.rollback_to_snapshot('schema', 'table', snap_id)` positional 3-arg — VERIFIED per starburst.io blog + trino.io docs.
-- `iceberg.expire-snapshots.min-retention` default 7d floor — VERIFIED per Starburst forum + trino.io docs.
+- Trino aggregate pushdown EXPLAIN signature (Aggregate absent + grouping= folded into TableScan) — VERIFIED per trino.io/docs/current/optimizer/pushdown.html.
+- PostgreSQL string-pushdown — catalog config `postgresql.experimental.enable-string-pushdown-with-collate` vs session property `enable_string_pushdown_with_collate` — VERIFIED per trino.io/docs/current/connector/postgresql.html.
+- Trino TopN (`applyTopN`) vs Limit (`applyLimit`) for Q3 ORDER BY+LIMIT pushdown — VERIFIED per trino.io/docs/current/optimizer/pushdown.html.
+- Iceberg expire_snapshots = the file-reclaim step that drops old snapshots + their exclusive files — VERIFIED per iceberg.apache.org/docs/latest/maintenance/.
