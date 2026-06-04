@@ -3780,7 +3780,9 @@ For per-tenant **bytes scanned**, this runtime table does not help — `system.r
 **Store cost metrics in Iceberg, not a separate database:**
 
 ```sql
--- Create cost tracking table in Iceberg (run once)
+-- Trino 467 DDL — create cost tracking table in Iceberg (run once).
+-- Uses Trino's Iceberg-connector WITH (partitioning = ARRAY[...]) syntax, NOT Spark's
+-- USING iceberg PARTITIONED BY (...) — see the earlier engine note above.
 CREATE TABLE iceberg.analytics.tenant_query_costs (
     query_id          VARCHAR,
     tenant_id         VARCHAR,   -- extracted from context.user (JWT principal)
@@ -3792,8 +3794,10 @@ CREATE TABLE iceberg.analytics.tenant_query_costs (
     error_code        VARCHAR,   -- NULL on success; set on FAILED (e.g., 'QUERY_QUEUE_FULL')
     query_date        DATE
 )
-USING iceberg
-PARTITIONED BY (day(query_date));
+WITH (
+    format        = 'PARQUET',
+    partitioning  = ARRAY['day(query_date)']
+);
 ```
 
 Your HTTP receiver writes each event to this Iceberg table. The production stack already has Iceberg + MinIO — no external database (PostgreSQL, etc.) is needed. CS teams can then run SQL directly via Trino:

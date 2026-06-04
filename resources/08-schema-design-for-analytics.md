@@ -1,6 +1,8 @@
 # Schema Design for Analytics: Denormalization and Star Schema
 
 > **Production note:** On your stack (Iceberg + MinIO + Trino), storage is cheap and JOINs across many tables are expensive. The schema rules from Postgres are *the opposite* of what you want here. This is the single biggest mistake teams make when migrating to a lakehouse.
+>
+> **DDL dialect — read this BEFORE writing any `CREATE TABLE`:** All CREATE TABLE / ALTER TABLE / MAP / ARRAY / ROW type DDL on this stack is **Trino 467 dialect** unless explicitly labeled `-- Spark SQL`. In Trino, `MAP(K, V)` uses **parentheses** (not angle brackets — that's Hive/Spark) and Iceberg partitioning goes inside `WITH (partitioning = ARRAY[...])` (not `PARTITIONED BY (...)` — that's Spark/Hive). See [resource 09 § LEADING CANONICAL WORKED EXAMPLE — Trino vs Spark DDL for a wide denormalized event table](09-lakehouse-schema-design.md) for the side-by-side canonical recipe and the DO-NOT-WRITE list of parse-error patterns.
 
 ---
 
@@ -130,8 +132,8 @@ Plus small dimension tables for things that genuinely change over time independe
 
 - **Schema evolution.** Adding a new column to a fact table (`ALTER TABLE user_events ADD COLUMN device_type VARCHAR`) is metadata-only — Iceberg does *not* rewrite existing files. New rows have the column; old rows return NULL. This makes denormalization additions painless.
 - **Hidden partitioning.** Partition by `days(event_time)` and Iceberg handles the directory layout. Queries with `WHERE event_time >= ...` automatically skip files. You never have to write `WHERE event_date = '...' AND event_time >= '...'` like in old Hive setups.
-- **Partition anti-pattern: never identity-partition on a high-cardinality column.** `PARTITIONED BY (day(occurred_at), user_id)` with 1M users creates 1M partitions — metadata balloons and queries slow down from metadata overhead alone. For a secondary partition on user_id, use `bucket(user_id, 16)` (Trino syntax) or just omit the secondary partition and rely on Bloom filters or sorting for user-level lookups. `PARTITIONED BY (day(occurred_at), tenant_id)` is safe because tenant cardinality in a B2B SaaS is typically low (hundreds, not millions).
-- **Column types.** Use `MAP<VARCHAR, VARCHAR>` for flexible event properties — keeps the schema clean while still letting you index frequently-used keys by promoting them to top-level columns later.
+- **Partition anti-pattern: never identity-partition on a high-cardinality column.** A Trino-context partition spec `WITH (partitioning = ARRAY['day(occurred_at)', 'user_id'])` with 1M users creates 1M partitions — metadata balloons and queries slow down from metadata overhead alone. For a secondary partition on user_id, use `'bucket(user_id, 16)'` (Trino column-first syntax) or just omit the secondary partition and rely on Bloom filters or sorting for user-level lookups. `WITH (partitioning = ARRAY['day(occurred_at)', 'tenant_id'])` is safe because tenant cardinality in a B2B SaaS is typically low (hundreds, not millions). (The Spark-SQL equivalent of the same spec is `PARTITIONED BY (day(occurred_at), tenant_id)` — Spark-only spelling; do not paste into the Trino console.)
+- **Column types.** Use `MAP(VARCHAR, VARCHAR)` for flexible event properties — keeps the schema clean while still letting you index frequently-used keys by promoting them to top-level columns later. (In Trino 467, the map type is `MAP(K, V)` with parentheses; angle-bracket `MAP<K, V>` is Hive/Spark syntax and parse-errors in Trino. See resource 09's leading worked example.)
 
 ---
 

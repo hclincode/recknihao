@@ -207,7 +207,7 @@ This applies to **future writes only**. Existing Parquet files keep their origin
 > **Note for Iceberg < 1.4.0:** Snappy was the default before 1.4.0. If you're on an older version, the Zstd switch is worth applying explicitly.
 
 ### Practical implications
-- **Promote enum-like strings to top-level columns.** A `MAP<VARCHAR,VARCHAR>` storing `"plan_type"="pro"` once per row is much bigger than a `plan_type VARCHAR` column with dictionary encoding.
+- **Promote enum-like strings to top-level columns.** A `MAP(VARCHAR, VARCHAR)` (Trino syntax — parentheses, not the angle-bracket Spark form `MAP<VARCHAR, VARCHAR>`) storing `"plan_type"="pro"` once per row is much bigger than a `plan_type VARCHAR` column with dictionary encoding.
 - **Store UUIDs as `VARCHAR` only if you need to.** A binary `UUID` type halves storage. If you store many high-cardinality UUIDs, that adds up.
 - **Don't shove everything into JSON.** A JSON blob with 20 fields will be 5–10x larger than the same 20 fields as top-level Parquet columns.
 

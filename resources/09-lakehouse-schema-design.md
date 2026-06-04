@@ -16,6 +16,126 @@
 
 ---
 
+## LEADING CANONICAL WORKED EXAMPLE — Trino vs Spark DDL for a wide denormalized event table (read this FIRST for any "how do I CREATE this table?" question)
+
+> **This is the findable canonical answer for schema-design DDL questions on the production stack (Trino 467 + Iceberg 1.5.2 + Spark + HMS + MinIO).** Two engines, two dialects, same Iceberg table on disk. Pick the engine you're typing into and paste the matching block — do NOT mix syntaxes. Both forms have been verified against [trino.io/docs/current/language/types.html](https://trino.io/docs/current/language/types.html), [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html), and [iceberg.apache.org/docs/1.5.1/spark-ddl/](https://iceberg.apache.org/docs/1.5.1/spark-ddl/).
+
+**Scenario:** A SaaS engineer needs a wide, denormalized fact table for product events. ~30 columns: a handful of identifiers, a timestamp, ~20 typed "hot" columns that show up in dashboard `GROUP BY`/`WHERE` (plan_name, country_code, device_type, plan_tier, browser, referrer_source, etc.), plus a long-tail `properties` bag for event-specific keys you don't want to schema-evolve over.
+
+### Trino 467 DDL — the canonical form (paste this when you are in the Trino query console)
+
+```sql
+-- Trino 467 + Iceberg connector. Catalog is `iceberg`; schema is `analytics`.
+CREATE TABLE iceberg.analytics.user_events (
+  -- Identifiers
+  event_id           VARCHAR,                  -- UUID-as-string per event
+  tenant_id          VARCHAR,                  -- B2B customer
+  user_id            VARCHAR,                  -- user within tenant
+  session_id         VARCHAR,
+  -- Event shape
+  event_name         VARCHAR,                  -- 'signup', 'page_view', etc.
+  event_category     VARCHAR,                  -- DENORMALIZED — for dashboards
+  event_source       VARCHAR,                  -- 'web', 'ios', 'android', 'api'
+  occurred_at        TIMESTAMP(6),             -- event time (use for partitioning)
+  ingested_at        TIMESTAMP(6),             -- when Spark wrote it
+  -- Promoted "hot" columns — typed, columnar, prunable
+  plan_name          VARCHAR,                  -- 'free', 'pro', 'enterprise' — DENORMALIZED
+  plan_tier          VARCHAR,
+  country_code       VARCHAR,                  -- 'US', 'DE', 'JP'
+  region             VARCHAR,
+  device_type        VARCHAR,                  -- 'desktop', 'mobile', 'tablet'
+  browser            VARCHAR,
+  os                 VARCHAR,
+  referrer_source    VARCHAR,
+  utm_campaign       VARCHAR,
+  is_paying          BOOLEAN,
+  is_trial           BOOLEAN,
+  is_internal_user   BOOLEAN,
+  -- Numeric facts
+  duration_ms        INTEGER,
+  page_load_ms       INTEGER,
+  -- Long-tail fallback (Tier 2) — pick ONE of the two
+  properties         MAP(VARCHAR, VARCHAR),    -- Parquet-native MAP — element_at(properties, 'key')
+  properties_raw     VARCHAR                   -- OR keep raw JSON if rarely queried
+)
+WITH (
+  partitioning    = ARRAY['day(occurred_at)', 'tenant_id'],
+  format          = 'PARQUET',
+  format_version  = 2
+);
+```
+
+**Why every piece looks the way it does on Trino:**
+
+| Piece | Trino spelling | Why |
+|---|---|---|
+| Map type | `MAP(VARCHAR, VARCHAR)` with **parentheses** | Per [trino.io/docs/current/language/types.html](https://trino.io/docs/current/language/types.html), Trino's map-type literal is `MAP(K, V)`. Angle-bracket `MAP<K, V>` is Hive/Spark DDL and produces a parse error on Trino 467. |
+| Partitioning | `WITH (partitioning = ARRAY['day(occurred_at)', 'tenant_id'])` | Per [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html), Iceberg-connector partitioning is a table property in the `WITH` clause, expressed as an ARRAY of partition-transform **strings**. Transforms (`day(...)`, `bucket(col, N)`, `truncate(col, N)`) and identity columns (`'tenant_id'`) both go inside the same `ARRAY[...]`. |
+| Bucket transform | `bucket(column, N)` — column FIRST | Trino's column-first form. Spark uses `bucket(N, column)` — see resource 10 for the Trino-vs-Spark `bucket()` argument-order footgun. |
+| Format version | `format_version = 2` | Required for MERGE INTO, MoR deletes, and row-level updates. Default is 2 in recent Trino versions; set explicitly for clarity. |
+| Timestamp type | `TIMESTAMP(6)` (microsecond precision) | Trino's Iceberg connector maps to `timestamp` (6) by default. |
+
+### Spark SQL DDL — the equivalent table (paste this ONLY when you are in Spark SQL or a Spark job)
+
+```sql
+-- Spark SQL — DO NOT paste into the Trino console.
+-- Same Iceberg table on disk; different DDL spelling.
+CREATE TABLE iceberg.analytics.user_events (
+  event_id           STRING,
+  tenant_id          STRING,
+  user_id            STRING,
+  session_id         STRING,
+  event_name         STRING,
+  event_category     STRING,
+  event_source       STRING,
+  occurred_at        TIMESTAMP,
+  ingested_at        TIMESTAMP,
+  plan_name          STRING,
+  plan_tier          STRING,
+  country_code       STRING,
+  region             STRING,
+  device_type        STRING,
+  browser            STRING,
+  os                 STRING,
+  referrer_source    STRING,
+  utm_campaign       STRING,
+  is_paying          BOOLEAN,
+  is_trial           BOOLEAN,
+  is_internal_user   BOOLEAN,
+  duration_ms        INT,
+  page_load_ms       INT,
+  properties         MAP<STRING, STRING>,      -- Spark's angle-bracket map type
+  properties_raw     STRING
+)
+USING iceberg
+PARTITIONED BY (days(occurred_at), tenant_id)   -- Spark uses PARTITIONED BY (...)
+TBLPROPERTIES (
+  'format-version' = '2'
+);
+```
+
+**The two DDLs produce the same Iceberg table on disk** — same partition spec, same schema, same Parquet files, same manifest layout. Both Trino and Spark will see it via Hive Metastore. The only thing that differs is the SQL spelling of the CREATE statement.
+
+### DO-NOT-WRITE — Trino-context DDL forms that LOOK valid but PARSE-ERROR in Trino 467
+
+> **When you are writing Trino 467 DDL, NEVER use the forms in the left column. Trino 467's SQL parser will reject them with a syntax error. These are Hive/Spark spellings that DO NOT translate.**
+
+| DO NOT WRITE (Trino context) | WRITE THIS INSTEAD (Trino 467) | Why it parse-errors on Trino |
+|---|---|---|
+| `MAP<VARCHAR, VARCHAR>` (angle brackets) | `MAP(VARCHAR, VARCHAR)` (parentheses) | Trino's type grammar uses parentheses for parameterized types — `ARRAY(VARCHAR)`, `MAP(K, V)`, `ROW(...)`. The angle-bracket form is Hive/Spark/Java-generic syntax. Trino's parser does not accept `<` as a type-parameter delimiter. Verified per [trino.io/docs/current/language/types.html](https://trino.io/docs/current/language/types.html). |
+| `MAP<STRING, STRING>` | `MAP(VARCHAR, VARCHAR)` | Same bug, plus `STRING` is the Spark/Hive name for the type Trino calls `VARCHAR`. Trino's parser does not recognize `STRING` as a type. |
+| `PARTITIONED BY (day(occurred_at), tenant_id)` AFTER the column list | `WITH (partitioning = ARRAY['day(occurred_at)', 'tenant_id'])` | Trino has no top-level `PARTITIONED BY` clause for the Iceberg connector. Partitioning is declared as the `partitioning` table property inside `WITH (...)`, and the values are **strings** (note the single quotes). Verified per [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html). |
+| `USING iceberg` clause | Drop the clause; the catalog `iceberg.<schema>.<table>` already names the connector | `USING iceberg` is Spark SQL's "use this DataSource" syntax. Trino infers the connector from the catalog name in the fully-qualified table reference (`iceberg.analytics.events` → Iceberg connector). |
+| `TBLPROPERTIES ('format-version' = '2', ...)` | `WITH (format_version = 2, ...)` (note: integer, no quotes; underscore not hyphen) | Trino uses `WITH (...)` for table properties; the Iceberg connector exposes them with Trino naming conventions (`format_version` underscore, integer value). Spark uses `TBLPROPERTIES` with quoted string values and dotted/hyphenated keys. |
+| `STRING`, `INT`, `BIGINT` (Spark types in a Trino block) | `VARCHAR`, `INTEGER`, `BIGINT` | Trino names: `VARCHAR` for strings, `INTEGER` for 32-bit ints. `BIGINT` is the same in both. `STRING` and `INT` parse-error on Trino. |
+| `bucket(64, tenant_id)` (N first) in a Trino block | `bucket(tenant_id, 64)` (column first) | Trino's `bucket()` transform takes **column first, then bucket count**. Spark's `bucket()` takes **bucket count first, then column**. Mixing them up either parse-errors (when types don't match) or silently swaps argument meanings. See resource 10. |
+
+> **The rule, in one sentence: in Trino, every parameterized type uses PARENTHESES (`MAP(K,V)`, `ARRAY(T)`, `ROW(...)`) and every Iceberg table property goes inside the `WITH (...)` clause — including partitioning, which is an `ARRAY[...]` of transform STRINGS.**
+
+> **Recovery procedure when you copy-paste from a Spark tutorial and Trino rejects the CREATE:** (1) Replace every `MAP<X, Y>` with `MAP(X, Y)`; (2) move `PARTITIONED BY (...)` into a `WITH (partitioning = ARRAY[...])` clause, quoting each transform/column as a string; (3) drop `USING iceberg` (the catalog name does that work); (4) rename `STRING` → `VARCHAR`, `INT` → `INTEGER`; (5) reverse `bucket(N, col)` → `bucket(col, N)`; (6) move `TBLPROPERTIES (...)` keys into the same `WITH (...)` clause using Trino property names (`format-version` → `format_version`).
+
+---
+
 ## Common myths about lakehouse schema design — read FIRST (the load-bearing wrong claims)
 
 > **Lead with the TRUTH, state the nuance.** These are absolutes most often stated incorrectly when porting a Postgres-style schema to Iceberg + Trino. Verified against [Iceberg evolution docs](https://iceberg.apache.org/docs/latest/evolution/), [Iceberg partition transforms](https://iceberg.apache.org/spec/#partition-transforms), and [Trino Iceberg connector docs](https://trino.io/docs/current/connector/iceberg.html).
@@ -26,9 +146,9 @@
 | "Fact tables should be normalized to 3NF like Postgres tables." | **NO — that breaks analytical query performance.** A 3NF fact table forces every dashboard to JOIN 4-7 dimensions, which on billions of rows turns sub-second queries into minutes. The standard analytical pattern is **star schema** (one fact, multiple small dimensions) with denormalized hot columns INTO the fact table to skip the JOIN entirely on common queries. See resource 08 for star schema theory and the "Denormalization rules" section below. |
 | "I should index frequently-queried columns in Iceberg like I would in Postgres." | **NO — Iceberg has no B-tree indexes.** The lakehouse "index" equivalents are: (a) **partition transforms** (`day(occurred_at)`, `bucket(tenant_id, N)`) for coarse-grained file skipping; (b) **sort order on write** (clustering files by frequently-filtered columns so per-file min/max bounds prune well); (c) **Parquet bloom filters** for high-cardinality point lookups (write side configured via Iceberg's `write.parquet.bloom-filter-enabled.column.<col>` table property on Spark, read by Trino 467 automatically). There is no `CREATE INDEX ON fact_table (column)` — and trying to retrofit Postgres-style indexing thinking onto Iceberg causes engineers to over-partition (one partition per high-cardinality value, leading to small-files problems). |
 | "UUID primary keys are fine in Iceberg — they're fine in Postgres." | **PARTIALLY TRUE — but UUIDs as the SORT key or BUCKET key cause real problems.** UUIDs are random, so files sorted by UUID have wide overlapping min/max ranges per file (no pruning possible on UUID filters). And `bucket(uuid_col, N)` hashes uniformly across N buckets, defeating any locality. UUIDs are FINE as a primary-key-like column you carry through, but NOT as the sort/cluster key for partition design. Use timestamps (`day(occurred_at)`) or low-cardinality category columns (`tenant_id`) for partitioning instead. |
-| "MAP<VARCHAR, VARCHAR> columns let me store arbitrary properties forever without schema changes." | **TRUE FOR STORAGE, BUT QUERIES ON MAP KEYS ARE EXPENSIVE.** Accessing `properties['button_name']` in a WHERE clause cannot use partition pruning or per-file min/max (Parquet doesn't store min/max for individual map keys). Trino must scan every file's properties column and extract the key. **The pattern: use MAP for the long tail of low-frequency keys; promote any key you query 10+ times to a top-level column** (a simple schema evolution: `ALTER TABLE ADD COLUMN button_name VARCHAR` — Iceberg makes this metadata-only, no file rewrite required). See resource 17 for ADD COLUMN semantics. |
+| "`MAP(VARCHAR, VARCHAR)` columns let me store arbitrary properties forever without schema changes." | **TRUE FOR STORAGE, BUT QUERIES ON MAP KEYS ARE EXPENSIVE.** Accessing `properties['button_name']` in a WHERE clause cannot use partition pruning or per-file min/max (Parquet doesn't store min/max for individual map keys). Trino must scan every file's properties column and extract the key. **The pattern: use MAP for the long tail of low-frequency keys; promote any key you query 10+ times to a top-level column** (a simple schema evolution: `ALTER TABLE ADD COLUMN button_name VARCHAR` — Iceberg makes this metadata-only, no file rewrite required). See resource 17 for ADD COLUMN semantics. (Note: Trino spells the map type `MAP(VARCHAR, VARCHAR)` with parentheses — the angle-bracket form `MAP<...>` is Hive/Spark syntax and parse-errors in Trino 467.) |
 | "Iceberg schema evolution will break my old data when I add a column." | **NO — `ALTER TABLE ADD COLUMN` is metadata-only and old files are read with NULL for the new column.** Iceberg uses column IDs (not names) under the hood, so adding a column writes the new column ID to the schema; old data files that don't have that column read as NULL for that column at query time. No file rewrite. Same for `DROP COLUMN` (metadata-only soft-delete) and `RENAME COLUMN` (rename by ID, files unchanged). See [Iceberg evolution docs](https://iceberg.apache.org/docs/latest/evolution/). |
-| "Iceberg partition columns must be top-level columns in the schema." | **NO — Iceberg partitions are TRANSFORMS over source columns, not separate columns.** When you write `PARTITIONED BY (day(occurred_at), tenant_id)`, Iceberg stores `day(occurred_at)` as a derived value in the metadata — you do NOT add a separate `day` column to the schema. Queries that filter on the SOURCE column (`WHERE occurred_at BETWEEN ...`) still prune via the transform. This is different from Hive-style partitioning where you'd write a separate `year/month/day` column. See resource 10. |
+| "Iceberg partition columns must be top-level columns in the schema." | **NO — Iceberg partitions are TRANSFORMS over source columns, not separate columns.** When you declare `WITH (partitioning = ARRAY['day(occurred_at)', 'tenant_id'])` in Trino (or the Spark equivalent `PARTITIONED BY (day(occurred_at), tenant_id)`), Iceberg stores `day(occurred_at)` as a derived value in the metadata — you do NOT add a separate `day` column to the schema. Queries that filter on the SOURCE column (`WHERE occurred_at BETWEEN ...`) still prune via the transform. This is different from Hive-style partitioning where you'd write a separate `year/month/day` column. See resource 10. |
 | "Adding a column to an Iceberg table requires re-ingesting all the data." | **NO — `ALTER TABLE ADD COLUMN` is metadata-only.** This is one of Iceberg's biggest wins vs Hive. The new column shows up in queries immediately with NULL for old rows. Backfilling the new column from a derived value or upstream source IS a separate decision — you might run a Spark `UPDATE` to backfill, or leave NULL for historical rows. But ADD COLUMN itself does not rewrite data files. |
 | "Partition evolution (changing from `month(occurred_at)` to `day(occurred_at)`) requires rewriting all historical data." | **NO — Iceberg's in-place partition evolution is metadata-only.** `ALTER TABLE iceberg.x.y SET PROPERTIES partitioning = ARRAY['day(occurred_at)']` updates the spec; **new writes** use the day spec, **old files keep their month spec**, and Trino correctly handles BOTH simultaneously at query time (per-spec-id manifests + per-spec pruning). No missing rows, no duplicates. The old data doesn't benefit from the new pruning until you (optionally) run Spark `rewrite_data_files` to convert it. See [Iceberg evolution docs](https://iceberg.apache.org/docs/latest/evolution/). |
 
@@ -63,30 +183,36 @@
 
 ### 1. `user_events` — the general event log
 
-```
-user_events (
-  event_id          VARCHAR,        -- UUID, unique per event
-  tenant_id         VARCHAR,        -- which customer (B2B SaaS)
-  user_id           VARCHAR,        -- which user within that tenant
-  event_name        VARCHAR,        -- 'signup', 'login', 'page_view', etc.
-  occurred_at       TIMESTAMP(6),   -- when the event happened (event time)
-  ingested_at       TIMESTAMP(6),   -- when Spark wrote it (processing time)
-  plan_type         VARCHAR,        -- DENORMALIZED from users dim
-  country           VARCHAR,        -- DENORMALIZED from users dim
-  signup_cohort_week DATE,          -- DENORMALIZED from users dim
-  properties        MAP<VARCHAR,VARCHAR>  -- flexible bag for event-specific attrs
+```sql
+-- Trino 467 DDL — paste directly into the Trino query console.
+CREATE TABLE iceberg.analytics.user_events (
+  event_id            VARCHAR,                  -- UUID, unique per event
+  tenant_id           VARCHAR,                  -- which customer (B2B SaaS)
+  user_id             VARCHAR,                  -- which user within that tenant
+  event_name          VARCHAR,                  -- 'signup', 'login', 'page_view', etc.
+  occurred_at         TIMESTAMP(6),             -- when the event happened (event time)
+  ingested_at         TIMESTAMP(6),             -- when Spark wrote it (processing time)
+  plan_type           VARCHAR,                  -- DENORMALIZED from users dim
+  country             VARCHAR,                  -- DENORMALIZED from users dim
+  signup_cohort_week  DATE,                     -- DENORMALIZED from users dim
+  properties          MAP(VARCHAR, VARCHAR)     -- flexible bag for event-specific attrs
 )
-PARTITIONED BY (day(occurred_at), tenant_id)
+WITH (
+  partitioning    = ARRAY['day(occurred_at)', 'tenant_id'],
+  format          = 'PARQUET',
+  format_version  = 2
+);
 ```
 
 - **Denormalize:** `plan_type`, `country`, `signup_cohort_week` — these get grouped/filtered constantly.
 - **Leave for JOIN:** user's current email, display name, profile_image_url. These change without changing reality, and you usually want the current value from the `users_dim` at query time.
-- **Why `MAP<VARCHAR,VARCHAR>` for properties:** lets you store event-specific keys (`{"button":"Save","page":"/dashboard"}`) without changing the schema. Promote keys to top-level columns once you query them often.
+- **Why `MAP(VARCHAR, VARCHAR)` for properties:** lets you store event-specific keys (`{"button":"Save","page":"/dashboard"}`) without changing the schema. Promote keys to top-level columns once you query them often.
 
 ### 2. `subscription_changes` — billing fact
 
-```
-subscription_changes (
+```sql
+-- Trino 467 DDL.
+CREATE TABLE iceberg.analytics.subscription_changes (
   change_id         VARCHAR,
   tenant_id         VARCHAR,
   user_id           VARCHAR,
@@ -100,7 +226,11 @@ subscription_changes (
   country           VARCHAR,        -- DENORMALIZED — for geo revenue cuts
   industry          VARCHAR         -- DENORMALIZED from tenants dim
 )
-PARTITIONED BY (month(changed_at))
+WITH (
+  partitioning    = ARRAY['month(changed_at)'],
+  format          = 'PARQUET',
+  format_version  = 2
+);
 ```
 
 - One row per plan transition. Don't try to model "current plan" here — that's what `tenants_dim` (or `users_dim`) is for.
@@ -110,8 +240,9 @@ PARTITIONED BY (month(changed_at))
 
 ### 3. `feature_usage` — product analytics
 
-```
-feature_usage (
+```sql
+-- Trino 467 DDL.
+CREATE TABLE iceberg.analytics.feature_usage (
   usage_id          VARCHAR,
   tenant_id         VARCHAR,
   user_id           VARCHAR,
@@ -123,7 +254,11 @@ feature_usage (
   plan_type         VARCHAR,        -- DENORMALIZED — "which plans use this feature?"
   is_paying         BOOLEAN         -- DENORMALIZED — converted vs trial activity
 )
-PARTITIONED BY (day(used_at), tenant_id)
+WITH (
+  partitioning    = ARRAY['day(used_at)', 'tenant_id'],
+  format          = 'PARQUET',
+  format_version  = 2
+);
 ```
 
 - **Denormalize:** `feature_category`, `plan_type`, `is_paying` — the "who uses what" dashboards always group by these.
@@ -263,8 +398,9 @@ INSERT INTO iceberg.analytics.users_dim SELECT ..., now, NULL, true FROM changed
 
 Once `user_events` is in the billions, even Trino on a well-partitioned table feels slow for dashboards. The fix is a **rollup table** — a smaller fact table that pre-summarizes the granular events.
 
-```
-daily_user_activity (
+```sql
+-- Trino 467 DDL.
+CREATE TABLE iceberg.analytics.daily_user_activity (
   activity_date  DATE,
   tenant_id      VARCHAR,
   user_id        VARCHAR,
@@ -273,7 +409,11 @@ daily_user_activity (
   session_count  INTEGER,
   features_used  INTEGER
 )
-PARTITIONED BY (month(activity_date))
+WITH (
+  partitioning    = ARRAY['month(activity_date)'],
+  format          = 'PARQUET',
+  format_version  = 2
+);
 ```
 
 - Built nightly by a Spark job (or dbt model) that aggregates `user_events`.
@@ -302,12 +442,13 @@ Every query has to read the entire JSON for every row to extract one key. Trino'
 
 ## Two-tier pattern: promoted columns + MAP / JSON fallback
 
-This is the standard SaaS pattern when you have an existing event source (like a Postgres `events.properties JSONB` column) and you don't know up front which fields will become hot. You promote the fields you query often to first-class typed columns and keep the rest in a fallback structure (a `MAP<VARCHAR, VARCHAR>` or the raw JSON string). It gives you the columnar/pruning benefits of typed columns for the 80% of dashboard queries that hit known fields, plus the schema flexibility of a bag for the long tail.
+This is the standard SaaS pattern when you have an existing event source (like a Postgres `events.properties JSONB` column) and you don't know up front which fields will become hot. You promote the fields you query often to first-class typed columns and keep the rest in a fallback structure (a `MAP(VARCHAR, VARCHAR)` or the raw JSON string). It gives you the columnar/pruning benefits of typed columns for the 80% of dashboard queries that hit known fields, plus the schema flexibility of a bag for the long tail.
 
 ### Shape of the two-tier table
 
-```
-user_events (
+```sql
+-- Trino 467 DDL.
+CREATE TABLE iceberg.analytics.user_events (
   event_id           VARCHAR,
   tenant_id          VARCHAR,
   user_id            VARCHAR,
@@ -318,17 +459,21 @@ user_events (
   browser_type       VARCHAR,
   country_code       VARCHAR,
   -- Tier 2: fallback for everything else (pick ONE of the two below, not both)
-  properties         MAP<VARCHAR, VARCHAR>,   -- Option A: Parquet-native MAP
+  properties         MAP(VARCHAR, VARCHAR),   -- Option A: Parquet-native MAP
   properties_raw     VARCHAR                  -- Option B: raw JSON string
 )
-PARTITIONED BY (day(occurred_at), tenant_id)
+WITH (
+  partitioning    = ARRAY['day(occurred_at)', 'tenant_id'],
+  format          = 'PARQUET',
+  format_version  = 2
+);
 ```
 
 Pick **MAP** if downstream queries hit lots of different fallback keys and you want simple `element_at(properties, 'key')` access. Pick **VARCHAR JSON string** if the fallback fields are queried very rarely (truly long-tail) and you want minimum write-side complexity — `json_extract_scalar(properties_raw, '$.key')` works fine for occasional access.
 
 ### MAP access — Parquet-native, NOT JSON parsing (important!)
 
-> **`MAP<VARCHAR, VARCHAR>` in Iceberg/Parquet is a NATIVE NESTED TYPE — not a JSON string.** When Trino reads a MAP column it reads the binary Parquet MAP encoding (a pair of repeated key/value child columns) — there is no JSON parser involved per row. The correct mental model is: **"Trino reads the full MAP column and applies a key lookup per row — no JSON parsing, but also no file-level pruning for MAP keys."**
+> **`MAP(VARCHAR, VARCHAR)` in Iceberg/Parquet is a NATIVE NESTED TYPE — not a JSON string.** When Trino reads a MAP column it reads the binary Parquet MAP encoding (a pair of repeated key/value child columns) — there is no JSON parser involved per row. The correct mental model is: **"Trino reads the full MAP column and applies a key lookup per row — no JSON parsing, but also no file-level pruning for MAP keys."** (Trino spells the type with parentheses: `MAP(K, V)`. The angle-bracket form `MAP<K, V>` is Hive/Spark syntax and parse-errors in Trino 467 — see [trino.io/docs/current/language/types.html](https://trino.io/docs/current/language/types.html).)
 
 This matters because the distinction drives the right optimization advice:
 
