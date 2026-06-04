@@ -2559,7 +2559,7 @@ As of Trino 467, the PostgreSQL connector pushes these predicate types down to P
 |---|---|---|
 | Equality on numeric columns | YES | `WHERE id = 12345` |
 | Range on numeric columns | YES | `WHERE amount BETWEEN 100 AND 500` |
-| Equality on UUID columns | YES | `WHERE tenant_id = 'a1b2c3d4-...'::uuid` |
+| Equality on UUID columns | YES | `WHERE tenant_id = UUID 'a1b2c3d4-...'` (Trino UUID typed-literal; do NOT write `'...'::uuid` — Postgres `::` cast is invalid in Trino, use `CAST('...' AS UUID)` or the `UUID '...'` literal form) |
 | Equality on temporal columns | YES | `WHERE created_at = TIMESTAMP '2026-05-01 12:00:00'` |
 | Range on temporal columns | YES | `WHERE created_at > TIMESTAMP '2026-05-01 00:00:00'` |
 | `DATE` comparisons | YES | `WHERE order_date = DATE '2026-05-01'` |

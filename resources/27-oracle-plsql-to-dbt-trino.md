@@ -288,6 +288,92 @@ SELECT date_trunc('day', current_timestamp AT TIME ZONE 'America/New_York') AS t
 | `TIMESTAMP WITH TIME ZONE` | `timestamp(p) with time zone` | Trino's TZ-aware timestamp is fine; Iceberg connector has some precision caveats — verify your model output. |
 | `WHERE int_col = '42'` (implicit coerce) | `WHERE int_col = 42` (explicit) OR `WHERE int_col = CAST('42' AS bigint)` | Trino is strict; no implicit varchar<->bigint coercion. |
 
+### 4.4A TRINO-CAST-SYNTAX GUARDRAIL — Trino has NO `expr::type` cast operator; ALWAYS write `CAST(expr AS type)`
+
+**Why this section exists.** Engineers migrating from Oracle frequently also have PostgreSQL muscle memory (or Snowflake / DuckDB muscle memory) and reflexively reach for the Postgres double-colon cast operator (`value::type`, e.g., `NULL::TIMESTAMP`, `id::int`, `'2026-05-30'::DATE`, `account_uuid::text`) in Trino SQL or dbt models targeting Trino. **Trino does NOT support the `::` cast operator.** Running such SQL through Trino produces an immediate parse error:
+
+```
+mismatched input '::'. Expecting: ...
+```
+
+Verified against [trino.io/docs/current/functions/conversion.html](https://trino.io/docs/current/functions/conversion.html): the **only** cast forms in Trino are:
+
+| Form | Behavior | Use when |
+|---|---|---|
+| `CAST(expr AS type)` | Throws on failure (query error) | You want strict typing and any cast failure should fail the query. |
+| `TRY_CAST(expr AS type)` | Returns `NULL` on failure | You want soft typing — bad input becomes NULL instead of failing the query. |
+
+The Postgres-style `expr::type` operator is tracked as an **OPEN feature request** at [trinodb/trino #23795](https://github.com/trinodb/trino/issues/23795) — **NOT implemented as of Trino 467** (the production version on this stack) and **NOT implemented as of Trino 481** (the latest documented release). Treat `::` as permanently unavailable in Trino SQL; do not wait for it.
+
+**DO-NOT-WRITE callout (load-bearing — copy this into your code-review checklist):**
+
+> **Never write the Postgres-style `expr::type` cast operator in Trino SQL or in any dbt model that compiles to Trino.** Specifically banned forms:
+> - `NULL::TIMESTAMP` — Trino parse error. Write `CAST(NULL AS TIMESTAMP)`.
+> - `col::INT` / `col::INTEGER` / `col::BIGINT` — Trino parse error. Write `CAST(col AS INTEGER)` (or `BIGINT`).
+> - `'2026-05-30'::DATE` — Trino parse error. Write `CAST('2026-05-30' AS DATE)` or `DATE '2026-05-30'`.
+> - `'2026-05-30 12:00:00'::TIMESTAMP` — Trino parse error. Write `CAST('2026-05-30 12:00:00' AS TIMESTAMP)` or `TIMESTAMP '2026-05-30 12:00:00'`.
+> - `col::VARCHAR` / `col::TEXT` — Trino parse error. Write `CAST(col AS VARCHAR)`.
+> - `col::UUID` / `'a1b2c3d4-...'::uuid` — Trino parse error. Write `CAST(col AS UUID)` or the `UUID 'a1b2c3d4-...'` typed-literal.
+> - `col::DECIMAL(18,2)` — Trino parse error. Write `CAST(col AS DECIMAL(18,2))`.
+> - Any other `expression::type` form. The `::` token is unsupported anywhere in Trino's grammar.
+
+**Worked Postgres → Trino translation table.** These are the most common `::` patterns and their Trino-compatible rewrites:
+
+| Postgres (uses `::`) | Trino (use `CAST` or `TRY_CAST`) | Notes |
+|---|---|---|
+| `NULL::TIMESTAMP` | `CAST(NULL AS TIMESTAMP)` | Typed-null pattern (common in dbt incremental MERGE soft-delete models, see §4.6 soft-delete). |
+| `NULL::TIMESTAMP(6) WITH TIME ZONE` | `CAST(NULL AS TIMESTAMP(6) WITH TIME ZONE)` | Always wrap typed nulls when the destination column requires explicit type info (e.g., MERGE target). |
+| `'42'::INTEGER` | `CAST('42' AS INTEGER)` | For literals, prefer the explicit literal: `42` (no cast needed). |
+| `col::BIGINT` | `CAST(col AS BIGINT)` | For nullable conversions where bad rows should become NULL: `TRY_CAST(col AS BIGINT)`. |
+| `'2026-05-30'::DATE` | `DATE '2026-05-30'` (typed-literal, preferred) OR `CAST('2026-05-30' AS DATE)` | Trino's typed-literal `DATE '...'` is the most idiomatic. |
+| `'2026-05-30 12:00:00'::TIMESTAMP` | `TIMESTAMP '2026-05-30 12:00:00'` (typed-literal) OR `CAST('...' AS TIMESTAMP)` | Same — prefer the typed-literal form. |
+| `col::VARCHAR` | `CAST(col AS VARCHAR)` | For numeric → string in `\|\|` concatenation, see §7A.3.1 — Trino does NOT implicitly coerce numbers to strings inside `\|\|`. |
+| `col::TEXT` | `CAST(col AS VARCHAR)` | Trino has no `TEXT` type; the analog is `VARCHAR`. |
+| `'a1b2c3d4-...'::UUID` | `UUID 'a1b2c3d4-...'` (typed-literal) OR `CAST('a1b2c3d4-...' AS UUID)` | UUID typed-literal is concise and pushes down cleanly across the JDBC layer (verified for the Postgres connector — see resource 22 §3.2). |
+| `col::DECIMAL(18,2)` | `CAST(col AS DECIMAL(18,2))` | No shortcut — precision and scale must be in the `AS` clause. |
+| `col::JSON` | `CAST(col AS JSON)` | Trino has `JSON` type; `CAST` works. For JSON parsing from VARCHAR, also see `json_parse(varchar)`. |
+| `col::INET` / `col::CIDR` / `col::HSTORE` | NO Trino equivalent. | These are Postgres-only types. Either use `system.query()` passthrough to Postgres (see resource 22 §3.4) or materialize as `VARCHAR` / structured `MAP` during ingestion. |
+
+**Q-pattern matcher.** If you see ANY of these patterns in a code-review of Trino-targeted SQL, REJECT and rewrite:
+
+| You see in the code | Rewrite |
+|---|---|
+| `something::type` (Postgres-style cast) | `CAST(something AS type)` (or `TRY_CAST(...)` if a NULL fallback is desired) |
+| Any chained cast `a::type1::type2` | `CAST(CAST(a AS type1) AS type2)` — same precedence, ANSI form |
+| A dbt model with `{{ var('start_date') }}::DATE` | `CAST({{ var('start_date') }} AS DATE)` or `DATE '{{ var("start_date") }}'` |
+| A Postgres-style typed-null in a UNION/MERGE branch (`NULL::TIMESTAMP`) | `CAST(NULL AS TIMESTAMP)` (the most common typed-null trap — see §4.6 soft-delete pattern) |
+
+**Two-engine note.** The `::` cast operator is **Postgres-specific** (and DuckDB-specific — DuckDB inherits the Postgres parser). It is **NOT** in Spark SQL either (Spark uses `CAST(... AS ...)` like Trino) and **NOT** in Snowflake's primary cast syntax (Snowflake supports `::` as an extension but its canonical form is also `CAST`). The bottom line for this stack: **only Postgres SQL itself accepts `::`. Trino SQL, Spark SQL, and dbt models targeting Trino MUST use `CAST(... AS ...)` or `TRY_CAST(... AS ...)`.**
+
+The one place a `::` cast is legitimate in a Trino-stack codebase is **inside the query string passed to `system.query('...')` passthrough on the Postgres connector** — that string is forwarded verbatim to Postgres and runs in Postgres's parser, not Trino's. Outside passthrough, treat `::` as a banned token.
+
+**Worked dbt example — typed NULL in a MERGE soft-delete (the iter435 failure case).** A common pattern in incremental MERGE models is to insert a typed `NULL` for a `deleted_at TIMESTAMP` column on the upsert branch. The Postgres-style `NULL::TIMESTAMP` is wrong:
+
+```sql
+-- WRONG — Postgres syntax; Trino parse error "mismatched input '::'"
+SELECT
+  id,
+  email,
+  updated_at,
+  NULL::TIMESTAMP AS deleted_at   -- INVALID in Trino
+FROM {{ ref('stg_users') }}
+```
+
+```sql
+-- CORRECT — Trino-compatible
+SELECT
+  id,
+  email,
+  updated_at,
+  CAST(NULL AS TIMESTAMP) AS deleted_at   -- works in Trino 467
+FROM {{ ref('stg_users') }}
+```
+
+**Cross-references.**
+- Resource 23 §"Trino 467 SQL-dialect anti-patterns" lists `::cast` syntax alongside `QUALIFY`, `DISTINCT ON`, `LIMIT N BY` as Trino-incompatible.
+- Resource 13 §"Postgres → Trino translation table" lists `ts::DATE` → `CAST(ts AS DATE)`. Inside the Postgres-side ingestion examples in resource 13 (Spark JDBC `dbtable` subqueries, pg_attribute lookups, gen_random_uuid()), the `::` cast IS valid because that SQL runs in Postgres, not Trino.
+- Resource 22 §3.2 (Postgres connector pushdown table) — the UUID typed-literal example `WHERE tenant_id = UUID 'a1b2c3d4-...'` is the Trino-compatible form for the equivalent Postgres `tenant_id = 'a1b2c3d4-...'::uuid` filter.
+
 ### 4.5 Query-shape and pseudo-column constructs
 
 | Oracle | Trino | Notes |
@@ -317,6 +403,199 @@ SELECT date_trunc('day', current_timestamp AT TIME ZONE 'America/New_York') AS t
 | `TRUNCATE TABLE t` | `DELETE FROM t WHERE TRUE` — but for full-refresh, `materialized='table'` is cleaner (atomic replace via Iceberg snapshot). | Trino does NOT have `TRUNCATE` for Iceberg tables. |
 | `BEGIN ... END` / `LOOP` / `IF` / `EXCEPTION` / `RAISE` / `COMMIT` | N/A — restructure as a dbt DAG. See section 2 decomposition recipe. | See myths and section 1.2 mapping. |
 | `EXECUTE IMMEDIATE 'dynamic sql'` | dbt Jinja templating composes the SQL at compile time; no runtime EXECUTE IMMEDIATE in Trino. | Move dynamic logic to Jinja. |
+
+### 4.6A Oracle `MERGE ... WHEN NOT MATCHED BY SOURCE` soft-delete migration — TWO-MODEL DECOMPOSITION IS THE DEFAULT
+
+**Why this section exists.** Oracle 12c+ supports `MERGE ... WHEN NOT MATCHED BY SOURCE THEN UPDATE SET deleted_at = SYSDATE` — the "rows that exist in target but no longer in source get soft-deleted" branch — in a single MERGE statement. **Trino's MERGE statement has NO `WHEN NOT MATCHED BY SOURCE` clause.** Per [trino.io/docs/current/sql/merge.html](https://trino.io/docs/current/sql/merge.html), Trino's MERGE supports only:
+
+- `WHEN MATCHED [AND condition]` THEN `UPDATE SET ...` | `DELETE`
+- `WHEN NOT MATCHED [AND condition]` THEN `INSERT ...`
+
+There is no `WHEN NOT MATCHED BY SOURCE` variant. (Verified against the Trino 481 grammar; the feature has not landed.) When migrating an Oracle MERGE that uses `WHEN NOT MATCHED BY SOURCE` for soft-deletes, you cannot lift-and-shift the single statement.
+
+#### 4.6A.1 The DEFAULT recommended pattern — TWO-MODEL DECOMPOSITION
+
+Split the Oracle MERGE into **two separate dbt models**, each owning one branch of the original Oracle statement. This is the canonical pattern. It is the simplest, the most diff-readable, the most testable, and the one a code reviewer can verify at a glance.
+
+**Model 1 — `fct_customers__upsert` (the incremental MERGE handling matched + not-matched-in-target):**
+
+```sql
+-- models/marts/fct_customers__upsert.sql
+{{ config(
+    materialized = 'incremental',
+    incremental_strategy = 'merge',
+    unique_key = 'customer_id'
+) }}
+
+SELECT
+    customer_id,
+    email,
+    plan,
+    updated_at,
+    CAST(NULL AS TIMESTAMP) AS deleted_at   -- typed-NULL, see §4.4A — never write NULL::TIMESTAMP
+FROM {{ ref('stg_customers') }}
+
+{% if is_incremental() %}
+WHERE updated_at > (SELECT COALESCE(MAX(updated_at), TIMESTAMP '1970-01-01') FROM {{ this }})
+{% endif %}
+```
+
+This model owns the `WHEN MATCHED THEN UPDATE` and `WHEN NOT MATCHED THEN INSERT` halves of the Oracle MERGE. It does NOT touch `deleted_at` on the soft-delete side. The dbt-trino adapter compiles this to a Trino `MERGE INTO ... WHEN MATCHED THEN UPDATE ... WHEN NOT MATCHED THEN INSERT` statement that uses the `unique_key` for the ON clause.
+
+**Model 2 — `fct_customers__soft_delete` (the standalone MERGE handling the missing-in-source soft-delete):**
+
+```sql
+-- models/marts/fct_customers__soft_delete.sql
+{{ config(
+    materialized = 'incremental',
+    incremental_strategy = 'merge',
+    unique_key = 'customer_id'
+) }}
+
+-- The "source" CTE is the set of customer_ids that are still live in the staging table.
+-- The MERGE finds target rows whose customer_id is NOT in that live set
+-- and stamps deleted_at on them.
+WITH live_in_source AS (
+    SELECT DISTINCT customer_id
+    FROM {{ ref('stg_customers') }}
+),
+to_soft_delete AS (
+    SELECT
+        t.customer_id,
+        t.email,
+        t.plan,
+        t.updated_at,
+        CURRENT_TIMESTAMP AS deleted_at
+    FROM {{ this }} t
+    WHERE t.deleted_at IS NULL
+      AND NOT EXISTS (
+          SELECT 1 FROM live_in_source s WHERE s.customer_id = t.customer_id
+      )
+)
+SELECT * FROM to_soft_delete
+```
+
+Notes on Model 2:
+- **`NOT EXISTS` (not `NOT IN`)** — see §4.6A.3 for the three-valued-logic footgun on `NOT IN`. Always use `NOT EXISTS` when the subquery could return NULL.
+- **`WHERE t.deleted_at IS NULL`** — only soft-delete rows that are not already soft-deleted; this makes the model idempotent (re-running it does not bump `deleted_at` forward for already-soft-deleted rows).
+- **Reads from `{{ this }}`** — Model 2 explicitly reads the current state of the target fact table. dbt allows `{{ this }}` references in incremental models.
+- **DAG ordering:** Model 2 must run **after** Model 1. Use `{{ ref('fct_customers__upsert') }}` somewhere in Model 2 (e.g., as a no-op `WHERE EXISTS` against the upsert model) to express the dependency, OR rely on dbt's `tags` + a `+` selector in the production schedule.
+
+**Why this is the default:**
+- **Two distinct MERGEs compile to two distinct Trino statements** — each owns exactly one of Oracle's three branches (MATCHED, NOT MATCHED, NOT MATCHED BY SOURCE), making the migration auditable branch-by-branch.
+- **Idempotent and reviewable** — a code reviewer can read Model 1 ("upsert from source") and Model 2 ("soft-delete the missing") independently. The intent of each model is one sentence.
+- **Testable independently** — `dbt test` can verify each model's contract: Model 1 has zero rows with `deleted_at IS NOT NULL`; Model 2 only writes to rows where the customer_id is missing from the source. Each test is one selector.
+- **No correlated-subquery decorrelation risk** — Model 2 uses `NOT EXISTS` against a CTE, which Trino's optimizer reliably decorrelates into a SemiJoin (see resource 22 §13.6 and resource 28).
+- **No three-valued-logic footgun** — `NOT EXISTS` is NULL-safe by construction (see §4.6A.3).
+
+#### 4.6A.2 The FALLBACK (single-model UNION-ALL) pattern — use only with the caveats below
+
+A single-model alternative exists: write one incremental model whose SELECT is `UNION ALL` of (a) the upserted source rows and (b) a soft-delete branch that finds target rows missing from source. This **CAN** work, but it is a FALLBACK — only choose it if there is a concrete reason the two-model decomposition is unacceptable (e.g., strict DAG-node-count limits, an existing audit framework that expects one model per fact table, or a materialization-cost analysis that shows the second model is prohibitive). The caveats below are not optional.
+
+```sql
+-- models/marts/fct_customers__single_model.sql
+-- FALLBACK pattern — see caveats in §4.6A.2 before using.
+{{ config(
+    materialized = 'incremental',
+    incremental_strategy = 'merge',
+    unique_key = 'customer_id'
+) }}
+
+WITH live_in_source AS (
+    SELECT DISTINCT customer_id, email, plan, updated_at
+    FROM {{ ref('stg_customers') }}
+)
+-- Branch A: upsert from source (the WHEN MATCHED / WHEN NOT MATCHED halves)
+SELECT
+    customer_id,
+    email,
+    plan,
+    updated_at,
+    CAST(NULL AS TIMESTAMP) AS deleted_at     -- typed NULL — §4.4A
+FROM live_in_source
+
+UNION ALL
+
+-- Branch B: stamp deleted_at on target rows missing from source.
+-- Re-emits the row with deleted_at filled so the MERGE on unique_key=customer_id
+-- updates the target row's deleted_at.
+SELECT
+    t.customer_id,
+    t.email,
+    t.plan,
+    t.updated_at,
+    CURRENT_TIMESTAMP AS deleted_at
+FROM {{ this }} t
+WHERE t.deleted_at IS NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM live_in_source s WHERE s.customer_id = t.customer_id
+  )
+```
+
+**FALLBACK caveats — read these BEFORE choosing this pattern:**
+
+1. **Use `NOT EXISTS`, NEVER `NOT IN`.** The "missing in source" predicate MUST be `NOT EXISTS (SELECT 1 FROM live_in_source s WHERE s.customer_id = t.customer_id)`. If you write `WHERE t.customer_id NOT IN (SELECT customer_id FROM live_in_source)` and `live_in_source.customer_id` contains a single NULL, **`NOT IN` returns UNKNOWN for every row in the target, which is filtered out the same as FALSE — so the soft-delete branch emits ZERO rows and silently no-ops**. See §4.6A.3 for the full three-valued-logic walkthrough. This is the most common copy-paste failure in this pattern.
+
+2. **Correlated-subquery decorrelation risk.** Branch B references `{{ this }}` and uses a correlated `NOT EXISTS` against `live_in_source`. Trino's optimizer attempts to decorrelate the correlation into a SemiJoin (the `RelationalExpressionDecorrelation` rule). **Decorrelation can fail on Iceberg-backed sources** when the correlated subquery has side conditions or when the source CTE has type mismatches — you then get a `CorrelatedJoin` operator in EXPLAIN, which executes per-target-row and is catastrophically slow. **Always EXPLAIN this branch before shipping**; if you see `CorrelatedJoin`, fall back to the two-model decomposition in §4.6A.1.
+
+3. **One MERGE statement, two semantic branches** — code reviews are harder. The single `UNION ALL` SELECT mixes "upsert from source" and "stamp deleted_at on missing" into one model, but they're two distinct intents. A future maintainer changing branch A's filters risks accidentally narrowing the missing-in-source set in branch B.
+
+4. **Materialization cost is comparable, not lower.** Both patterns scan the source once and the target once. The two-model pattern compiles to two MERGE statements; the single-model pattern compiles to one MERGE whose SELECT contains a UNION ALL. **There is no Trino-side performance advantage to the single-model form** in the common case — the only theoretical saving is avoiding writing the intermediate result twice, which Iceberg snapshot semantics make negligible (each MERGE is its own atomic snapshot; coalescing them does not reduce I/O).
+
+5. **DO NOT use a `WHERE customer_id NOT IN (subquery)` filter against the live source on an Iceberg-backed source if you've ever seen NULLs in customer_id.** This is a special case of (1) but applies even when the column is "supposed to be" NOT NULL — bad ingestion data is exactly when soft-delete logic matters most, and a single bad NULL converts the soft-delete branch into a silent no-op for the entire run.
+
+#### 4.6A.3 Why `NOT EXISTS` over `NOT IN` — the three-valued-logic footgun
+
+**The rule:** when the subquery in the `NOT (...)` predicate could contain NULL, **`NOT IN` returns UNKNOWN for every outer row, which a `WHERE` clause filters out the same as FALSE — and your "missing in source" set silently becomes empty.**
+
+```sql
+-- WRONG — three-valued-logic footgun on NOT IN
+-- If live_in_source.customer_id contains even one NULL,
+-- the entire branch returns zero rows. Soft-delete silently no-ops.
+SELECT *
+FROM fct_customers t
+WHERE t.customer_id NOT IN (
+    SELECT customer_id FROM stg_customers
+);
+```
+
+Mechanics: `NOT IN (..., NULL, ...)` is equivalent to `customer_id <> v1 AND customer_id <> v2 AND ... AND customer_id <> NULL`. The final `customer_id <> NULL` clause evaluates to UNKNOWN; the AND-chain short-circuits to UNKNOWN; the `WHERE` clause excludes the row. **Every** outer row is excluded — not just the one with the NULL. The soft-delete branch becomes a silent no-op.
+
+```sql
+-- CORRECT — NOT EXISTS is NULL-safe by construction
+SELECT *
+FROM fct_customers t
+WHERE NOT EXISTS (
+    SELECT 1 FROM stg_customers s WHERE s.customer_id = t.customer_id
+);
+```
+
+Mechanics: `NOT EXISTS` is binary (the subquery either has a matching row or it does not). NULL columns in the subquery cannot trigger UNKNOWN — they just don't match the correlation predicate `s.customer_id = t.customer_id` (which is itself UNKNOWN, treated as no-match). Trino decorrelates this into a SemiJoin reliably (`LeftSemiHashJoin` in EXPLAIN). Alternative equivalent forms:
+
+```sql
+-- Equally NULL-safe — anti-join via LEFT JOIN + IS NULL on the right side
+SELECT t.*
+FROM fct_customers t
+LEFT JOIN stg_customers s ON s.customer_id = t.customer_id
+WHERE s.customer_id IS NULL;
+```
+
+Both `NOT EXISTS` and `LEFT JOIN ... WHERE rhs IS NULL` are the recommended Trino forms. **Never write `NOT IN` against a subquery in a Trino-targeted dbt model** unless you have a strict `NOT NULL` constraint on the inner column AND a dbt test enforcing it — and even then, prefer `NOT EXISTS` for code-review clarity.
+
+#### 4.6A.4 Summary — the migration decision table
+
+| Oracle source | Trino + dbt translation | Notes |
+|---|---|---|
+| `MERGE ... USING src ON t.id = s.id WHEN MATCHED THEN UPDATE ... WHEN NOT MATCHED THEN INSERT ...` (no soft-delete branch) | **Single dbt incremental model**, `incremental_strategy='merge'`, `unique_key='id'`. | Vanilla MERGE — covered in §4.6 row 1. |
+| `MERGE ... WHEN MATCHED THEN UPDATE ... WHEN NOT MATCHED THEN INSERT ... WHEN NOT MATCHED BY SOURCE THEN UPDATE SET deleted_at = SYSDATE` | **TWO dbt models** (§4.6A.1, DEFAULT). Model 1 = the upsert MERGE. Model 2 = the soft-delete MERGE using `NOT EXISTS` against the live source set. | Trino has NO `WHEN NOT MATCHED BY SOURCE` — verified [trino.io/docs/current/sql/merge.html](https://trino.io/docs/current/sql/merge.html). |
+| Same Oracle source, but DAG-node-count or audit-framework constraints preclude two models | **Single-model UNION ALL** (§4.6A.2, FALLBACK). MUST use `NOT EXISTS`. MUST EXPLAIN-check for `CorrelatedJoin`. | Caveats are not optional — see §4.6A.2 list of 5 caveats. |
+| `MERGE ... WHEN NOT MATCHED BY SOURCE THEN DELETE` (hard delete instead of soft) | **TWO models**: Model 1 = upsert as above. Model 2 = standalone `DELETE FROM fct_customers WHERE NOT EXISTS (SELECT 1 FROM stg_customers s WHERE s.customer_id = fct_customers.customer_id)` (Trino DELETE on Iceberg). | Hard-delete via DELETE is simpler than soft-delete via MERGE because there's no `deleted_at` column to fill. |
+
+**Cross-references.**
+- §4.4A — typed NULL syntax (`CAST(NULL AS TIMESTAMP)`, NOT `NULL::TIMESTAMP`) — used in every soft-delete model above.
+- Resource 22 §13.6 — Trino SemiJoin decorrelation of `IN` and `EXISTS`.
+- Resource 28 — correlated-subquery rewrite patterns when EXPLAIN shows `CorrelatedJoin`.
+- [trino.io/docs/current/sql/merge.html](https://trino.io/docs/current/sql/merge.html) — official Trino MERGE grammar (only `WHEN MATCHED` and `WHEN NOT MATCHED` clauses; no `BY SOURCE` variant).
 
 ---
 
