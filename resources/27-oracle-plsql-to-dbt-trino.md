@@ -1310,6 +1310,127 @@ models:
 
 These tests run after `dbt run`. A failure breaks the pipeline — same semantic role as `EXCEPTION WHEN ...` in the Oracle procedure, except cleaner because the test condition is declarative.
 
+### 6.7B LEADING CANONICAL — dbt source freshness (`sources.yml`, `loaded_at_field`, `dbt source freshness` command)
+
+> **READ THIS FIRST if your question contains any of these keywords: `source freshness`, `freshness`, `loaded_at_field`, `loaded_at`, `warn_after`, `error_after`, `dbt source freshness` command, `sources.yml`, `stale source`, `does freshness block downstream`, `freshness CI`.** This block is the canonical reference for declaring and checking source staleness in dbt-trino on this stack. All claims below are verified at [docs.getdbt.com/reference/resource-properties/freshness](https://docs.getdbt.com/reference/resource-properties/freshness), [docs.getdbt.com/reference/commands/source](https://docs.getdbt.com/reference/commands/source), and [docs.getdbt.com/docs/deploy/source-freshness](https://docs.getdbt.com/docs/deploy/source-freshness) (WebFetched 2026-06-05).
+
+**Q-PATTERN MATCHER.** Use this table to route to the right answer paragraph below.
+
+| If the question is... | Answer in one line | Detail in this section |
+|---|---|---|
+| "How do I declare source freshness in dbt?" | A `freshness:` block under `config:` on a `source:` (or per `table:`) with `warn_after`/`error_after`, plus `loaded_at_field:` naming a timestamp column. | § Declaring freshness on a source |
+| "What command runs the freshness check?" | `dbt source freshness` — a SEPARATE command, NOT part of `dbt run`. | § The `dbt source freshness` command |
+| "Does a stale source fail my `dbt run` / `dbt build`?" | NO. A freshness failure does NOT block downstream models in ordinary `dbt run` or `dbt build`. Freshness is a SEPARATE command/step; you gate a pipeline on it by running `dbt source freshness` as its own CI stage. | § Does freshness block downstream? |
+| "What's the worked example for an Iceberg source on dbt-trino?" | `loaded_at_field: ingested_at` + `warn_after: {count: 12, period: hour}` + `error_after: {count: 24, period: hour}`. | § Worked example — dbt-trino + Iceberg |
+
+#### Declaring freshness on a source
+
+`freshness` is a property of a **source**, not a model. It lives in your `sources.yml` (or any `_sources.yml` file under `models/`), under the `config:` wrapper introduced in dbt 1.9+. Two ingredients:
+
+1. **`loaded_at_field:`** — the name of a timestamp column on the source table that reliably advances every time new data lands (for example `ingested_at`, `_loaded_at`, `batch_loaded_at`). On dbt-trino / Iceberg you MUST provide this field explicitly — the warehouse-metadata fallback (no `loaded_at_field`) is supported only on Snowflake, Redshift, BigQuery 1.7.3+, and Databricks Fusion (verified at [docs.getdbt.com/reference/resource-properties/freshness](https://docs.getdbt.com/reference/resource-properties/freshness)), and dbt-trino is NOT in that list. The column may be a simple identifier or a SQL expression (`"CAST(completed_date AS TIMESTAMP)"`).
+2. **`freshness:` block** with `warn_after: {count: N, period: minute|hour|day}` and `error_after: {count: N, period: minute|hour|day}`. At least one of `warn_after` or `error_after` must be present. `period` is `minute`, `hour`, or `day` only.
+
+Optional knob: a `filter:` key inside `freshness:` adds a `WHERE` clause to the freshness query — useful to scope the `MAX(loaded_at_field)` scan to a recent partition so the freshness check itself stays cheap on a large Iceberg table.
+
+Hierarchy: `freshness:` declared at the source level applies to every table under it; a per-`table:` `freshness:` overrides the source-level one; setting `freshness: null` on a table opts that table out.
+
+#### The `dbt source freshness` command
+
+The freshness check is invoked by the dedicated CLI command:
+
+```bash
+dbt source freshness
+# or scoped to a single source / source table:
+dbt source freshness --select "source:app"
+dbt source freshness --select "source:app.orders"
+```
+
+Under the hood the dbt-trino adapter runs roughly `SELECT MAX({{ loaded_at_field }}) FROM {{ source_table }} [WHERE {{ filter }}]` against Trino, computes the age between that timestamp and the current time, and emits one of four states per source: `pass`, `warn`, `error`, or `runtime error` (the last when the query itself fails). The result is written to `target/sources.json` for tooling and for the `source_status` state selector.
+
+**Crucially: `dbt source freshness` is its own command.** It is NOT run automatically by `dbt run`, and per [docs.getdbt.com/reference/commands/source](https://docs.getdbt.com/reference/commands/source) it is NOT included in `dbt build` either. If you want freshness checked in a pipeline, you have to invoke `dbt source freshness` as its own step.
+
+#### Does freshness block downstream models?
+
+**No — a freshness failure does NOT block downstream models in an ordinary `dbt run` or `dbt build`.** Freshness is a separate command/build step; it is NOT a model-dependency gate. The dbt graph runs sources -> models based on `{{ source(...) }}` and `{{ ref(...) }}` references; freshness state is not consulted by that traversal.
+
+The way you gate a pipeline on freshness is **operationally**, by running `dbt source freshness` as its own CI stage:
+
+```bash
+# CI pipeline pseudo-steps (the dbt project root)
+dbt deps
+dbt source freshness          # <-- if any source is in 'error' state, this exits non-zero
+dbt build                     # only reached if the freshness step passed
+```
+
+Whether a non-zero exit from `dbt source freshness` actually halts the pipeline is a property of your CI runner (`set -e` in a shell script, or GitLab CI / GitHub Actions / Argo Workflows / k8s Job failure semantics) — NOT a dbt internal dependency gate.
+
+There is also a dbt state selector named `source_status:fresher+` that selects models downstream of sources that became fresher since a previous `sources.json` artifact. It exists for incremental-build patterns, but its detailed selector semantics are out of scope for this canonical block — consult [docs.getdbt.com/reference/node-selection/methods](https://docs.getdbt.com/reference/node-selection/methods) directly when adopting it.
+
+#### Worked example — dbt-trino + Iceberg source
+
+Suppose your ingestion (Spark) stamps every row with an `ingested_at` Iceberg column. You want a WARN at 12 hours stale, an ERROR at 24 hours stale.
+
+```yaml
+# models/staging/_sources.yml
+version: 2
+
+sources:
+  - name: app
+    description: "App-side Iceberg ingest tables (Hive Metastore-backed)."
+    schema: app                              # Iceberg schema in the HMS-backed catalog
+    config:
+      freshness:
+        warn_after:  {count: 12, period: hour}
+        error_after: {count: 24, period: hour}
+      loaded_at_field: ingested_at           # Iceberg column written by the Spark ingest job
+    tables:
+      - name: orders
+      - name: payments
+        config:
+          freshness:                         # tighter per-table override
+            warn_after:  {count: 1, period: hour}
+            error_after: {count: 4, period: hour}
+      - name: currency_fx
+        config:
+          freshness: null                    # opt out — this is a slowly-changing dim
+```
+
+The CLI:
+
+```bash
+$ dbt source freshness
+17:02:11  Running with dbt=1.9.x
+17:02:14  1 of 2 START freshness of app.orders ......................... [RUN]
+17:02:15  1 of 2 PASS  freshness of app.orders ......................... [PASS in 1.18s]
+17:02:15  2 of 2 START freshness of app.payments ....................... [RUN]
+17:02:16  2 of 2 WARN  freshness of app.payments ....................... [WARN in 1.06s]
+17:02:16  Done.
+```
+
+A `pass`/`warn`/`error` line per source is written; the full state lands in `target/sources.json` for `source_status:fresher+` re-use.
+
+#### DO-NOT-WRITE — banned freshness claims (cite-or-omit)
+
+| DO NOT write | Why it's wrong |
+|---|---|
+| "Use the `freshness()` jinja function in your model." | **FABRICATED.** dbt has NO `freshness()` jinja function. Freshness is YAML-declared, not Jinja-expressed. |
+| "`dbt run` will skip downstream models when their source is stale." | **WRONG.** `dbt run` does not consult freshness state. The dbt DAG runs sources -> models based on `{{ source(...) }}` and `{{ ref(...) }}` references only. Gate freshness operationally with a separate `dbt source freshness` CI step. |
+| "`dbt build` runs source freshness as part of the build." | **WRONG per [docs.getdbt.com/reference/commands/source](https://docs.getdbt.com/reference/commands/source).** `dbt build` runs models + tests + snapshots + seeds, but NOT `dbt source freshness`. Invoke `dbt source freshness` as its own step. |
+| "Add a `stale_after:` or `max_age:` key to the freshness block." | **FABRICATED.** The only valid threshold keys are `warn_after` and `error_after`, each taking `{count: N, period: minute\|hour\|day}`. No `stale_after`, no `max_age`, no `min_age`. |
+| "`period:` can be `second`, `week`, or `month`." | **WRONG.** Valid values are exactly `minute`, `hour`, `day` per [docs.getdbt.com/reference/resource-properties/freshness](https://docs.getdbt.com/reference/resource-properties/freshness). No second, week, month, year. |
+| "Write a custom dbt test or macro to assert source freshness." | **UNNECESSARY and WRONG-LAYER.** dbt has built-in source freshness — declare a `freshness:` block on the source and run `dbt source freshness`. A custom test/macro re-implements existing functionality and won't write to `target/sources.json`, so `source_status:fresher+` selectors will not work. |
+| "On dbt-trino you can omit `loaded_at_field` and dbt will use warehouse metadata." | **WRONG on this stack.** The warehouse-metadata fallback is supported only on Snowflake, Redshift, BigQuery 1.7.3+, and Databricks Fusion. dbt-trino is NOT in that list — you must provide `loaded_at_field` explicitly. |
+| "Put `freshness:` at the top level of the source (not under `config:`)." | **DEPRECATED in dbt 1.9+.** The canonical placement is under `config:` (both source-level and per-table). The pre-1.9 top-level form still parses but emits a `PropertyMovedToConfigDeprecation` warning — prefer `config:` in new code. |
+| "Freshness state is stored in `manifest.json`." | **WRONG.** The freshness state file is `target/sources.json`, written by `dbt source freshness`. `manifest.json` carries graph state, not freshness state. |
+
+#### Cross-references
+
+- For the dbt `source()` / `ref()` macros and where `sources.yml` files live: see [§ 6.3-6.4](#63-stg_orderssql) — the worked example uses `{{ source('app', 'orders') }}`, which resolves to the `app.orders` source declared above.
+- For the dbt model dependency graph (what `dbt run` and `dbt build` actually traverse): see [docs.getdbt.com/docs/build/sources](https://docs.getdbt.com/docs/build/sources).
+- For the broader CI-pipeline picture (how `dbt source freshness` slots in alongside `dbt build`): see [§ 7. Cutover checklist](#7-cutover-checklist-the-non-obvious-gotchas) item 9 (schedule the dbt run).
+
+---
+
 ### 6.8 DBT-IS-INCREMENTAL-WHERE CANONICAL-PATTERN GUARDRAIL — the WHERE clause inside `{% if is_incremental() %}`
 
 **Why this section exists.** When porting an Oracle `MERGE INTO target USING source ON ...` procedure to a dbt incremental model, the part that has NO direct Oracle analog is the **delta filter** — the WHERE clause inside the `{% if is_incremental() %}` block that selects only the rows the MERGE should process. The single most common AI-generated mistake here is to put a **bare aggregate** directly in the predicate (e.g., `WHERE order_date >= MAX(order_date)`), which Trino rejects with **"aggregate function not allowed in WHERE clause."** Verified against [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html) (aggregate functions reference: aggregates appear in `SELECT`/`HAVING`/subqueries, NOT in `WHERE`) and [docs.getdbt.com — Incremental models](https://docs.getdbt.com/docs/build/incremental-models).
@@ -1741,5 +1862,9 @@ The semantic difference: Oracle's GLOBAL TEMPORARY TABLE is session-scoped (gets
 - dbt-trino configurations: https://docs.getdbt.com/reference/resource-configs/trino-configs
 - dbt materializations: https://docs.getdbt.com/docs/build/materializations
 - dbt incremental strategies: https://docs.getdbt.com/docs/build/incremental-strategy
+- dbt source freshness (resource property): https://docs.getdbt.com/reference/resource-properties/freshness
+- dbt `source` command (CLI): https://docs.getdbt.com/reference/commands/source
+- dbt source freshness (deploy guide): https://docs.getdbt.com/docs/deploy/source-freshness
+- dbt sources overview: https://docs.getdbt.com/docs/build/sources
 - Apache Iceberg docs: https://iceberg.apache.org/docs/latest/
 - Oracle SQL Language Reference (NULLs): https://docs.oracle.com/en/database/oracle/oracle-database/19/sqlrf/Nulls.html
