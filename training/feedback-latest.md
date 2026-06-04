@@ -1,155 +1,135 @@
-# Judge Feedback — Iter 433 (EXTENDED PHASE — end-of-iteration only)
+# Judge Feedback — Iter 434 (EXTENDED PHASE — end-of-iteration only)
 
-**Overall: 4.453 PASS** (Q1 4.875 + Q2 4.875 + Q3 4.8125 + Q4 3.25) — **-0.234 step-DOWN from iter432 4.6875**. Thirty-second consecutive overall PASS in extended phase. **Q1 is_incremental WHERE delta re-probe FULLY RESOLVED on first re-probe (4.875 STRONG)**; **Q2 federation HAVING+aggregation pushdown STRONG (4.875)**; **Q3 GROUP BY ROLLUP Oracle migration STRONG (4.8125)**; **Q4 type widening contains TWO new confident-inaccuracies that drag overall down (3.25 FAIL)**: (1) Trino 467 CAN do `ALTER TABLE ... ALTER COLUMN ... SET DATA TYPE` for Iceberg — responder claims it can't, and (2) Spark/Iceberg syntax is `ALTER COLUMN ... TYPE bigint`, NOT `MODIFY COLUMN ... BIGINT`. Zero-confident-inaccuracy streak still does NOT recover (broken at 0 for 5th consecutive iter).
+**Overall: 4.672 STRONG PASS** (Q1 4.875 + Q2 4.875 + Q3 4.625 + Q4 4.3125) — **+0.219 step-UP from iter433 4.453**. Thirty-third consecutive overall PASS in extended phase. **Q1 type-widening re-probe — BOTH iter433 inaccuracies FULLY RESOLVED on first re-probe (4.875 STRONG)**; **Q2 federation HAVING + cross-catalog aggregation pushdown STRONG (4.875)**; **Q3 ROWS vs RANGE window framing PASS (4.625) with a minor INTERVAL '0' DAY redundancy nit**; **Q4 partition evolution PASS (4.3125) but introduces ONE confident-inaccuracy: file-count-vs-partition-count conflation**. Zero-confident-inaccuracy streak STILL does NOT recover (broken at 0 for 6th consecutive iter — Q4 file-count claim).
 
 ---
 
 ## Headline
 
-1. **Q1 dbt is_incremental WHERE delta re-probe — FULLY RESOLVED on FIRST re-probe (4.875 STRONG PASS).** Iter432 confident-inaccuracy (bare aggregate `MAX(load_date)` in WHERE + convoluted IN-subquery) is FULLY ABSENT. Responder now leads with the canonical subquery-wrapped form: `WHERE load_date >= (SELECT COALESCE(MAX(load_date), DATE '1970-01-01') FROM {{this}})` — subquery wrapper REQUIRED + COALESCE for empty-table edge case. Explicitly explains aggregates are NOT allowed in WHERE without subquery wrapper. Late-arriving lookback variant: `WHERE load_date >= (SELECT date_add('day', -3, COALESCE(MAX(load_date), ...)) FROM {{this}})` paired with `incremental_strategy='merge'` + `unique_key` for idempotence. Explicitly bans the IN-subquery full-history re-scan anti-pattern. **Iter433 r27 §6.8 + r28 §8A.3.0 DBT-IS-INCREMENTAL-WHERE-CANONICAL-PATTERN GUARDRAIL landed precisely on the first re-probe — proven structural-fix-within-one-iteration recipe extends to 16 instances.**
+1. **Q1 type-widening re-probe — BOTH iter433 inaccuracies FULLY RESOLVED on FIRST re-probe (4.875 STRONG PASS).** Responder now correctly states (a) Trino 467 DOES support `ALTER TABLE ... ALTER COLUMN ... SET DATA TYPE bigint` for Iceberg (added in Trino release 406, 25 Jan 2023, PR #15515), and (b) Iceberg-Spark canonical syntax is `ALTER TABLE t ALTER COLUMN c TYPE bigint` (NOT `MODIFY COLUMN ... BIGINT` which is MySQL/Hive). The "must use Spark" claim is fully absent. Two-engine syntax table memorable. Safe widenings (int→bigint, real→double, decimal precision-widen-same-scale) + unsafe set (narrowing, scale change, cross-family) intact. **Verified against trino.io/docs/current/sql/alter-table.html + trino.io/docs/current/release/release-406.html + iceberg.apache.org/docs/latest/spark-ddl/.** Iter434 r09 + r13 SCHEMA-EVOLUTION-COLUMN-TYPE-CHANGE GUARDRAIL landed precisely — proven structural-fix-within-one-iteration recipe extends to 17 instances.
 
-2. **Q2 HAVING + aggregation pushdown (federation 2nd-angle) — STRONG PASS (4.875).** Responder cleanly explains: (a) aggregation pushes IF supported aggregate fn (SUM/COUNT/MAX/MIN/AVG) + simple-column GROUP BY (no ROLLUP/CUBE/GROUPING SETS) + all WHERE predicates push first; (b) HAVING pushes only if the underlying aggregate pushes (secondary, transitive); (c) EXPLAIN signature: Aggregate operator ABSENT above the JDBC TableScan = aggregate absorbed into the source query = pushed; Aggregate above ScanFilterProject above TableScan = stayed in Trino; (d) ANALYZE the PG replica, use simple WHERE/GROUP BY, avoid function-wrapped VARCHAR predicates that don't push; (e) ROLLUP/CUBE/GROUPING SETS never push. **VERIFIED against trino.io/docs/current/optimizer/pushdown.html: "If an aggregate function is successfully pushed down to the connector, the explain plan does not show that Aggregate operator" AND "Complex grouping operations such as ROLLUP, CUBE, or GROUPING SETS are not pushed down".** No fabricated detail. EXPLAIN signature accurate.
+2. **Q2 federation HAVING + cross-catalog aggregation pushdown — STRONG PASS (4.875).** Responder cleanly explains: (a) cross-catalog JOIN does NOT push (join executes on Trino workers; verified per trino.io/docs/current/optimizer/pushdown.html — joins must be same catalog); (b) GROUP BY + HAVING aggregation pushes to Postgres ONLY if WHERE pushes first + supported aggregate fn + no ROLLUP/CUBE/GROUPING SETS (verified per Trino pushdown docs); (c) in cross-catalog-join case, aggregation stays on Trino (pulls joined rows + groups in memory); (d) EXPLAIN signature: Aggregate + Filter operators above InnerJoin = Trino-side (canonical); (e) PG-to-PG-only join could push; (f) fix patterns: materialize joined result to Iceberg / reduce data pre-join. No fabricated detail. EXPLAIN signature accurate.
 
-3. **Q3 GROUP BY ROLLUP — Oracle migration — STRONG PASS (4.8125).** Responder correctly states: (a) Trino supports `GROUP BY ROLLUP(region, product_category)` with identical syntax to Oracle; (b) NULL subtotal semantics intact — one row per `(region, category)` combo + one row per `region` subtotal with category NULL + one grand-total row with both NULL; (c) federation caveat: ROLLUP stays on Trino, does NOT push to Postgres; (d) watch computed-columns NULL behavior + Oracle `''` empty-string-vs-NULL difference (changes subtotal membership). **VERIFIED against trino.io/docs/current/sql/select.html ROLLUP semantics + Oracle ROLLUP/CUBE migration guidance.** Clean answer.
+3. **Q3 ROWS vs RANGE window framing with ties — PASS (4.625) with minor INTERVAL '0' DAY redundancy nit.** Responder correctly explains: (a) Trino syntax identical to Oracle; (b) ROWS = positional (separate frame per tied row), RANGE = value-based (tied rows are peers, same frame); (c) example table 2026-05-01 ×2 ROWS 100/150 vs RANGE 150/150 — accurate; (d) mismatch from ROWS-vs-Oracle-tie-handling or non-unique ORDER BY; (e) Trino default frame = RANGE UNBOUNDED PRECEDING TO CURRENT ROW when ORDER BY present (verified per trino.io/blog/2021/03/10/introducing-new-window-features.html). **MINOR NIT:** Responder's suggested fix `RANGE BETWEEN INTERVAL '0' DAY PRECEDING AND CURRENT ROW` is syntactically valid (Trino has supported RANGE INTERVAL since v346, verified) but semantically REDUNDANT — Trino's default RANGE frame already groups peers (same ORDER BY value) into the same frame. The cleaner fix is either (a) omit the frame entirely (default RANGE behavior covers it) or (b) add a unique tiebreaker `event_id` to ORDER BY. Not a confident-inaccuracy (the SQL would execute and produce the documented result), but it's a suboptimal pattern worth flagging.
 
-4. **Q4 Iceberg schema evolution type widening — FAIL with TWO confident-inaccuracies (3.25 FAIL).** Core safe-widening set (int→bigint, REAL→double, decimal precision-widen-same-scale) is CORRECT per Iceberg spec. Unsafe set (narrowing, scale change, double→float) is CORRECT. BUT **TWO new confident-inaccuracies**:
-   - **Inaccuracy A (CRITICAL):** "Trino 467 does NOT expose column-type modification, must use Spark." **WRONG.** Trino's Iceberg connector has supported `ALTER TABLE t ALTER COLUMN c SET DATA TYPE bigint` since **Trino 406** (PR #15651, released January 2023; per Trino 406 release notes: "Add support for changing column types. (#15515)"). Trino 467 (production) DEFINITELY supports this. The `ALTER TABLE ... ALTER COLUMN ... SET DATA TYPE new_type` syntax is documented at trino.io/docs/current/sql/alter-table.html. An engineer following this guidance would needlessly spin up a Spark session for a type-widening operation Trino can do natively.
-   - **Inaccuracy B (CRITICAL):** Used Spark syntax `ALTER TABLE t MODIFY COLUMN count_col BIGINT`. **WRONG.** The correct Iceberg-Spark column-type-change syntax is `ALTER TABLE t ALTER COLUMN c TYPE bigint` (per iceberg.apache.org/docs/latest/spark-ddl/ — example: `ALTER TABLE sample ALTER COLUMN measurement TYPE double`). `MODIFY COLUMN` is MySQL/Hive syntax, NOT Iceberg-Spark. An engineer pasting `MODIFY COLUMN ... BIGINT` into spark-sql against an Iceberg table would get a parse error.
+4. **Q4 partition evolution month→day — PASS (4.3125) BUT contains ONE confident-inaccuracy: file-count-vs-partition-count conflation.** Core mechanics CORRECT: (a) `ALTER TABLE SET PROPERTIES partitioning=ARRAY['day(event_ts)']` in Trino is metadata-only (verified per trino.io/docs/current/connector/iceberg.html); (b) old files keep old spec, queries still correct, but old data NOT pruned by new spec (verified); (c) Spark `rewrite_data_files` with `rewrite-all=true` + target-file-size to rewrite historical data into the new spec; (d) `$files GROUP BY spec_id` verification (old spec_id=0 → new spec_id=1); (e) `expire_snapshots` cleanup; (f) storage temporarily doubles during rewrite. **INACCURACY:** Claims monthly partitioning of 500M rows / 18 months = "~18 files at most (one per month)" and daily = "~547 files". This conflates PARTITIONS with FILES. A monthly partition holding ~27M rows is typically several GB and will contain MANY data files (often dozens to hundreds depending on target file size, ingestion cadence, parallelism). The correct framing is "18 month-partitions vs 547 day-partitions" — file count per partition is a separate concern driven by target-file-size and write cadence. An engineer using this oversimplified mental model might be surprised by the actual file count and mis-tune compaction thresholds.
 
 ---
 
 ## Critical confirmations (explicit)
 
-### (a) Q1 dbt is_incremental WHERE delta re-probe — RESOLVED?
+### (a) Q1 type widening — BOTH iter433 inaccuracies RESOLVED?
 
-**YES — FULLY RESOLVED.** Iter432 confident-inaccuracy (bare `MAX(load_date)` aggregate in WHERE clause + convoluted `IN (SELECT id FROM {{this}} WHERE load_date<CURRENT_DATE)` re-scan template) is FULLY ABSENT. Iter433 answer leads with the canonical subquery-wrapped form:
+**YES — BOTH FULLY RESOLVED on FIRST re-probe.**
 
-```sql
-{% if is_incremental() %}
-WHERE load_date >= (SELECT COALESCE(MAX(load_date), DATE '1970-01-01') FROM {{ this }})
-{% endif %}
-```
+- **Iter433 Inaccuracy A (Trino can't change column types, must use Spark) — RESOLVED.** Responder now leads with `ALTER TABLE iceberg.analytics.events ALTER COLUMN row_count SET DATA TYPE bigint` (Trino 467 syntax, supported since Trino release 406). The "must use Spark" claim is fully absent. The two-engine syntax table memorializes the difference. Verified per trino.io/docs/current/sql/alter-table.html + Trino 406 release notes.
 
-Then explicitly explains: (1) bare aggregates `WHERE col >= MAX(col)` are INVALID SQL — aggregates not allowed in WHERE without subquery wrapper (cites trino.io/docs/current/functions/aggregate.html); (2) the COALESCE handles the empty-table first-run edge case; (3) for late-arriving data, use the lookback variant `WHERE load_date >= (SELECT date_add('day', -3, COALESCE(MAX(load_date), DATE '1970-01-01')) FROM {{this}})` PAIRED WITH `incremental_strategy='merge'` + `unique_key` for idempotence on re-processed rows; (4) explicitly bans the convoluted `WHERE id IN (SELECT id FROM {{this}} ...)` template — it re-processes every historic row, defeating the purpose of incremental scanning. **Verdict: iter432 inaccuracy fully resolved on first re-probe; iter433 r27 §6.8 + r28 §8A.3.0 DBT-IS-INCREMENTAL-WHERE-CANONICAL-PATTERN GUARDRAIL landed precisely — the proven structural-fix-within-one-iteration recipe extends to 16 instances.**
+- **Iter433 Inaccuracy B (Spark `MODIFY COLUMN ... BIGINT`) — RESOLVED.** Responder now uses `ALTER TABLE local.analytics.events ALTER COLUMN row_count TYPE bigint` (Iceberg-Spark canonical syntax). Explicit DO-NOT-WRITE entry bans `MODIFY COLUMN` as MySQL/Hive only. Verified per iceberg.apache.org/docs/latest/spark-ddl/.
+
+- **Safe-widening set** (int→bigint, REAL→double, decimal precision-widen-same-scale) — CORRECT per Iceberg spec.
+- **Unsafe set** (narrowing, scale change, cross-family) — CORRECT.
+- **Read-time promotion** (32-bit float files transparently read as 64-bit double, no rewrite) — CORRECT.
+
+**Verdict:** iter434 r09 + r13 SCHEMA-EVOLUTION-COLUMN-TYPE-CHANGE GUARDRAIL landed precisely on first re-probe. 17th structural-fix-within-one-iteration instance.
 
 ### (b) Q2 federation score + federation average + direction + crosses 4.5?
 
-**Q2 score: 4.875 STRONG PASS** — third-consecutive iter of 4.75+ federation answer (iter431 4.75 → iter432 4.875 → iter433 4.875).
+**Q2 score: 4.875 STRONG PASS** — fourth-consecutive iter of 4.75+ federation answer (iter431 4.75 → iter432 4.875 → iter433 4.875 → iter434 4.875).
 
 **Federation average update:**
-- Prior: 4.4950 × 294 = 1321.530 sum
+- Prior: 4.4963 × 295 = 1326.4085 sum
 - + Q2 4.875 = +4.875
-- New sum: 1326.405
-- New count: 295
-- **New average: 1326.405 / 295 = 4.4963**
+- New sum: 1331.2835
+- New count: 296
+- **New average: 1331.2835 / 296 = 4.4976**
 
-Distance to threshold: 4.5000 − 4.4963 = **0.0037 below 4.5**.
+Distance to threshold: 4.5000 − 4.4976 = **0.0024 below 4.5**.
 
-Compared to iter432:
-- Iter432: 4.4950, 0.0050 below threshold
+Compared to iter433:
 - Iter433: 4.4963, 0.0037 below threshold
-- **Net change: +0.0013 / 0.0013 CLOSER to threshold / 33rd consecutive iter below threshold / DIRECTION SUSTAINS UP for THIRD consecutive iter (iter431 +0.0008 → iter432 +0.0013 → iter433 +0.0013)**
+- Iter434: 4.4976, 0.0024 below threshold
+- **Net change: +0.0013 / 0.0013 CLOSER to threshold / 34th consecutive iter below threshold / DIRECTION SUSTAINS UP for FOURTH consecutive iter (iter431 +0.0008 → iter432 +0.0013 → iter433 +0.0013 → iter434 +0.0013)**
 
-**Crosses 4.5?** NO — still 0.0037 below threshold. But the closing pace SUSTAINS (+0.0013 for 2nd consecutive iter). Q2 4.875 is well above topic average (+0.379). At this density (295 datapoints), sustained 4.75+ federation answers would cross 4.5 in roughly **3 more iters** at current pace. **EXPLAIN aggregation-pushdown framing (Aggregate operator ABSENT above JDBC TableScan = pushed) is canonical and VERIFIED.** HAVING-only-pushes-if-aggregate-pushes secondary rule CORRECT. ROLLUP/CUBE/GROUPING SETS never push — VERIFIED. No loose or incorrect EXPLAIN wording.
+**Crosses 4.5?** **NO — still 0.0024 below threshold.** But the closing pace SUSTAINS at +0.0013 for 3rd consecutive iter. At this density (296 datapoints), sustained 4.75+ federation answers would cross 4.5 in roughly **2 more iters** at current pace. Q2 4.875 is the fourth consecutive 4.75+ federation datapoint. EXPLAIN signature (Aggregate + Filter above InnerJoin = Trino-side) canonical and VERIFIED. HAVING-secondary-to-aggregate rule CORRECT. ROLLUP/CUBE/GROUPING SETS never push — VERIFIED.
 
-### (c) Q4 type widening: CRITICAL VERIFICATION
+### (c) New confident-inaccuracies across all four
 
-**Both responder claims are CONFIDENT INACCURACIES verified against official docs.**
+**ONE new confident-inaccuracy: Q4 file-count-vs-partition-count conflation.** 
 
-**Claim 1: "Trino 467 does NOT expose column-type modification, must use Spark."**
-- **WRONG.** Verified per:
-  - trino.io/docs/current/sql/alter-table.html: documents the syntax `ALTER TABLE [ IF EXISTS ] name ALTER COLUMN column_name SET DATA TYPE new_type`
-  - Trino 406 release notes (released 2023-01): "Add support for changing column types. (#15515)" for the Iceberg connector
-  - Trino GitHub PR #15651 merged into milestone 406
-  - Trino 467 (production version) inherited this capability
-- **The correct claim:** `ALTER TABLE iceberg.schema.t ALTER COLUMN c SET DATA TYPE bigint` works natively in Trino 467 for Iceberg type widening (int→bigint, REAL→double, decimal precision-widen-same-scale).
-- **Impact:** An engineer following this guidance would unnecessarily spin up a Spark session for a Trino-native operation.
+Q4 responder claims "monthly partitioning of 500M/18mo = ~18 files at most (one per month)" and "day = ~547 files". This conflates **partitions** with **data files**. A partition typically contains MANY data files (driven by target-file-size, ingestion batch size, parallelism, compaction policy). For 500M rows / 18 months at typical Iceberg target-file-size of 128MB-512MB, a monthly partition would hold dozens to hundreds of files, not one. The "~18 files" claim is FALSE and misleading for compaction planning. An engineer using this mental model would mis-size compaction thresholds and be confused when `$files` shows file counts an order of magnitude higher than the partition count.
 
-**Claim 2: Spark syntax `ALTER TABLE t MODIFY COLUMN count_col BIGINT`**
-- **WRONG.** Verified per iceberg.apache.org/docs/latest/spark-ddl/:
-  - The canonical Iceberg-Spark syntax for type changes is `ALTER TABLE t ALTER COLUMN c TYPE bigint`
-  - Documented example: `ALTER TABLE sample ALTER COLUMN measurement TYPE double`
-  - `MODIFY COLUMN` is MySQL/Hive-style syntax — NOT supported in Iceberg-Spark DDL.
-- **Impact:** An engineer pasting `MODIFY COLUMN ... BIGINT` into spark-sql against an Iceberg table would get a parse error.
+**One minor nit (not a confident-inaccuracy): Q3 INTERVAL '0' DAY redundancy.** Responder's fix `RANGE BETWEEN INTERVAL '0' DAY PRECEDING AND CURRENT ROW` is syntactically valid in Trino (RANGE INTERVAL supported since v346) but semantically REDUNDANT — Trino's default RANGE frame already includes peers (same ORDER BY value). The cleaner fix is either omit the frame entirely or add a unique tiebreaker. The SQL works; it's just a suboptimal pattern.
 
-**Safe-widening set CORRECT per Iceberg spec:**
-- int → long (bigint) — SAFE
-- float (REAL) → double — SAFE
-- decimal(P, S) → decimal(P', S) where P' > P, scale unchanged — SAFE
-- Reads transparently promote 32-bit float files to 64-bit double — CORRECT (no data file rewrite needed)
-
-**Unsafe set CORRECT:**
-- bigint → int (narrowing) — UNSAFE
-- double → float — UNSAFE
-- decimal scale change — UNSAFE
-- string ↔ numeric — UNSAFE
-
-**Net inaccuracy count this iter: 2 confident issues** (both in Q4 — Trino-capability claim + Spark syntax claim). Q1, Q2, Q3 all CLEAN.
-
-### (d) Any other NEW confident-inaccuracy across all four
-
-**NO additional inaccuracies beyond Q4's pair.** Q1 (canonical subquery-wrapped delta), Q2 (HAVING/aggregation pushdown), Q3 (GROUP BY ROLLUP semantics) all verified clean against official Trino + Iceberg + dbt docs.
+**Q1, Q2 CLEAN. Q3 minor nit but no confident-inaccuracy. Q4 has one confident-inaccuracy (file-count claim).**
 
 ---
 
 ## Per-question scoring
 
-### Q1 — dbt is_incremental WHERE delta re-probe (Postgres-to-Iceberg ingestion / dbt incremental)
+### Q1 — Type widening re-probe (Lakehouse schema design)
 
 **Scores: 5.0 / 4.75 / 5.0 / 4.75 — avg 4.875 STRONG PASS**
 
 What landed:
-- Canonical subquery-wrapped form `WHERE load_date >= (SELECT COALESCE(MAX(load_date), DATE '1970-01-01') FROM {{this}})` — CORRECT per docs.getdbt.com/docs/build/incremental-models + trino.io/docs/current/functions/aggregate.html
-- Explicit explanation that bare aggregates `WHERE col >= MAX(col)` are NOT allowed in WHERE without subquery wrapper — CORRECT
-- COALESCE for empty-table first-run edge case — CORRECT
-- Late-arriving lookback variant `WHERE load_date >= (SELECT date_add('day', -3, COALESCE(MAX(load_date), ...)) FROM {{this}})` paired with `incremental_strategy='merge'` + `unique_key` for idempotence — CORRECT
-- Explicitly bans IN-subquery full-history re-scan anti-pattern — CORRECT
-- r27 §6.8 + r28 §8A.3.0 DBT-IS-INCREMENTAL-WHERE-CANONICAL-PATTERN GUARDRAIL cited inline — CORRECT discipline
+- Trino 467: `ALTER TABLE ... ALTER COLUMN ... SET DATA TYPE bigint` — VERIFIED canonical syntax
+- Trino release 406 (25 Jan 2023, PR #15515) introduced the capability — CORRECT
+- Spark/Iceberg: `ALTER TABLE ... ALTER COLUMN ... TYPE bigint` — CORRECT
+- Explicit ban on `MODIFY COLUMN ... BIGINT` (MySQL/Hive syntax) — CORRECT
+- Safe widenings (int→bigint, real→double, decimal precision-widen-same-scale) — CORRECT per Iceberg spec
+- Unsafe set (narrowing, scale change, cross-family) — CORRECT
+- Read-time promotion no-rewrite — CORRECT
+- No "must use Spark" claim — RESOLVED
 
-**Verdict:** STRONG PASS — full clean recovery on first re-probe. Iter432 confident-inaccuracy fully absent.
+**Verdict:** STRONG PASS — full clean recovery on first re-probe. iter433 dual inaccuracy fully absent.
 
-### Q2 — HAVING + aggregation pushdown (Trino federation)
+### Q2 — Federation HAVING + cross-catalog aggregation pushdown
 
 **Scores: 5.0 / 4.75 / 4.75 / 5.0 — avg 4.875 STRONG PASS**
 
 What landed:
-- Aggregate pushes IFF supported function (SUM/COUNT/MAX/MIN/AVG) + simple-column GROUP BY + WHERE predicates push first — CORRECT
+- Cross-catalog JOIN doesn't push (must be same catalog) — VERIFIED per trino.io/docs/current/optimizer/pushdown.html
 - HAVING pushes ONLY if aggregate pushes (secondary, transitive) — CORRECT
-- ROLLUP/CUBE/GROUPING SETS NEVER push — VERIFIED per Trino pushdown docs
-- EXPLAIN GOOD: Aggregate operator ABSENT above JDBC TableScan = pushed — VERIFIED per trino.io/docs/current/optimizer/pushdown.html "If an aggregate function is successfully pushed down to the connector, the explain plan does not show that Aggregate operator"
-- EXPLAIN BAD: Aggregate above ScanFilterProject above TableScan = stayed in Trino — CORRECT
-- ANALYZE the PG replica first, use simple WHERE/GROUP BY, avoid function-wrapped VARCHAR predicates that don't push — CORRECT operational guidance
+- ROLLUP/CUBE/GROUPING SETS NEVER push — VERIFIED
+- EXPLAIN signature: Aggregate + Filter above InnerJoin = Trino-side — canonical
+- PG-to-PG-only join COULD push — CORRECT
+- Fix: materialize joined result to Iceberg / reduce data pre-join — actionable
 
-**Verdict:** STRONG PASS — clean, technically dense, no fabrication. Federation +0.0013 UP for 3rd consecutive iter.
+**Verdict:** STRONG PASS — 4th consecutive 4.75+ federation datapoint; technical density without fabrication.
 
-### Q3 — GROUP BY ROLLUP (Oracle PL/SQL → dbt + Trino SQL migration)
+### Q3 — ROWS vs RANGE window framing with ties (Analytical query patterns + SQL best practices)
 
-**Scores: 5.0 / 4.75 / 4.75 / 4.75 — avg 4.8125 STRONG PASS**
+**Scores: 4.5 / 4.75 / 4.5 / 4.75 — avg 4.625 PASS (with minor nit)**
 
 What landed:
-- Trino supports `GROUP BY ROLLUP(region, product_category)` syntax identical to Oracle — CORRECT per trino.io/docs/current/sql/select.html
-- NULL subtotal semantics: one row per combo + region subtotal with NULL category + grand total with both NULL — CORRECT per Oracle ROLLUP documentation
-- Federation caveat: ROLLUP stays on Trino, does NOT push to Postgres — VERIFIED per Trino pushdown docs (complex grouping operations not pushed)
-- Watch computed-columns NULL behavior + Oracle `''` empty-string-vs-NULL difference (changes subtotal membership) — CORRECT nuance
-- Suggests GROUPING() function for differentiating NULLs from subtotals if needed — CORRECT pattern
+- Trino syntax identical to Oracle — CORRECT
+- ROWS = positional (per-tied-row separate frame), RANGE = value-based (peers same frame) — CORRECT
+- Example table 2026-05-01 ×2: ROWS 100/150 vs RANGE 150/150 — CORRECT
+- Trino default frame = RANGE UNBOUNDED PRECEDING TO CURRENT ROW when ORDER BY present — VERIFIED
+- Fix: add unique tiebreaker to ORDER BY — CORRECT
+- Mismatch diagnosis (ROWS vs Oracle tie handling, non-unique ORDER BY) — CORRECT
 
-**Verdict:** STRONG PASS — canonical ROLLUP migration answer with accurate Trino/Oracle semantics.
+Minor nit:
+- `RANGE BETWEEN INTERVAL '0' DAY PRECEDING AND CURRENT ROW` is syntactically valid (Trino RANGE INTERVAL supported since v346, verified) but SEMANTICALLY REDUNDANT — Trino's default RANGE frame already groups peers into the same frame. The idiomatic fix is to either omit the frame (default RANGE behavior covers it) or add a unique tiebreaker. The INTERVAL '0' DAY example is verbose/suboptimal but produces the correct result.
 
-### Q4 — Iceberg schema evolution type widening (Lakehouse schema design / Iceberg table maintenance)
+**Verdict:** PASS — core ROWS-vs-RANGE semantics canonical; INTERVAL '0' DAY fix is suboptimal-but-not-wrong; TA dock to 4.5 for the redundant pattern.
 
-**Scores: 2.5 / 4.0 / 2.5 / 4.0 — avg 3.25 FAIL**
+### Q4 — Partition evolution month→day (Iceberg partition design)
+
+**Scores: 4.0 / 4.5 / 4.25 / 4.5 — avg 4.3125 PASS (with one confident-inaccuracy)**
 
 What landed (CORRECT):
-- Safe widening set: int → bigint, REAL → double, decimal(P,S) → decimal(P',S) where P' > P — CORRECT per Iceberg spec
-- Unsafe set: narrowing, scale change, double → float — CORRECT
-- Type promotion at read time: existing 32-bit float files transparently read as 64-bit double, no data file rewrite — CORRECT
-- Metadata-only operation, no rewrite needed — CORRECT
+- `ALTER TABLE SET PROPERTIES partitioning=ARRAY['day(event_ts)']` (Trino) is metadata-only — VERIFIED
+- New data day-partitioned, old data keeps month spec — VERIFIED
+- Queries correct but old data not pruned by new spec until rewrite — VERIFIED
+- Spark `rewrite_data_files` with `rewrite-all=true` + target-file-size to rewrite historical — CORRECT
+- `$files GROUP BY spec_id` verification (old spec_id=0 → new spec_id=1) — CORRECT
+- `expire_snapshots` cleanup — CORRECT
+- Storage temporarily doubles during rewrite — CORRECT
 
-What is INACCURATE (TWO confident inaccuracies):
-- **Inaccuracy A:** "Trino 467 does NOT expose column-type modification, must use Spark." **WRONG.** Trino 406+ Iceberg connector supports `ALTER TABLE t ALTER COLUMN c SET DATA TYPE bigint`. Verified per trino.io/docs/current/sql/alter-table.html + Trino 406 release notes + PR #15651. Engineer would needlessly spin up Spark.
-- **Inaccuracy B:** Used Spark syntax `ALTER TABLE t MODIFY COLUMN count_col BIGINT`. **WRONG.** Correct Iceberg-Spark syntax is `ALTER TABLE t ALTER COLUMN c TYPE bigint`. `MODIFY COLUMN` is MySQL/Hive. Verified per iceberg.apache.org/docs/latest/spark-ddl/. Engineer would get a parse error.
+What is INACCURATE (ONE confident-inaccuracy):
+- **File-count vs partition-count conflation.** Claim: "monthly partitioning of 500M/18mo = ~18 files at most" and "day = ~547 files". WRONG — this conflates PARTITIONS with FILES. Each partition typically contains many data files (driven by target-file-size, ingestion cadence, parallelism). The correct framing is "18 month-partitions vs 547 day-partitions"; file count per partition is a separate downstream concern. An engineer using this oversimplified mental model would mis-size compaction thresholds.
 
-**Verdict:** FAIL — load-bearing wrong claims that would direct engineers to the WRONG tool (Spark when Trino works) AND give them the WRONG syntax (MODIFY COLUMN instead of ALTER COLUMN ... TYPE). TA dock to 2.5 because both core mechanical claims are wrong; PA dock to 2.5 because engineer following this answer is doubly broken (wrong engine + wrong syntax). BC 4.0 and Comp 4.0 because explanation framing is clear and surface area is covered, just with wrong mechanics.
+**Verdict:** PASS but TA dock to 4.0 for the file-count conflation. The mechanics (ALTER, rewrite, verify, cleanup) are otherwise canonical.
 
 ---
 
@@ -157,10 +137,11 @@ What is INACCURATE (TWO confident inaccuracies):
 
 | Topic | Before | After | Delta | Status |
 |---|---|---|---|---|
-| Postgres-to-Iceberg ingestion | 4.4950 / 151 | 4.4975 / 152 | +0.0025 | PASSED (Q1 4.875 well above topic avg) |
-| Trino federation / cross-source connectors | 4.4950 / 294 | 4.4963 / 295 | +0.0013 | NEEDS WORK (0.0037 below 4.5 raised threshold; 33rd consecutive iter below; DIRECTION UP for 3rd straight iter) |
-| Oracle PL/SQL → dbt + Trino SQL migration | 4.6875 / 11 | 4.6979 / 12 | +0.0104 | PASSED (Q3 4.8125 above topic avg) |
-| Lakehouse schema design | 4.5694 / 9 | 4.4375 / 10 | −0.1319 | PASSED but DECLINED (Q4 3.25 well below topic avg; still above 3.5) |
+| Lakehouse schema design | 4.4375 / 10 | 4.4773 / 11 | +0.0398 | PASSED (Q1 4.875 well above topic avg) |
+| Trino federation / cross-source connectors | 4.4963 / 295 | 4.4976 / 296 | +0.0013 | NEEDS WORK (0.0024 below 4.5 raised threshold; 34th consecutive iter below; DIRECTION UP for 4th straight iter; sustained pace) |
+| Analytical query patterns on Iceberg+Trino | 4.4471 / 13 | 4.4598 / 14 | +0.0127 | PASSED (Q3 4.625 above topic avg) |
+| SQL query best practices for OLAP | 4.5450 / 35 | 4.5472 / 36 | +0.0022 | PASSED (Q3 4.625 above topic avg) |
+| Iceberg partition design for SaaS | 4.503 / 25 | 4.4957 / 26 | −0.0073 | PASSED but slightly DOWN (Q4 4.3125 below topic avg; still above threshold) |
 
 ---
 
@@ -168,47 +149,46 @@ What is INACCURATE (TWO confident inaccuracies):
 
 | Q | Score | Topic | Verdict |
 |---|---|---|---|
-| Q1 | 4.875 | dbt is_incremental WHERE delta re-probe | STRONG PASS — iter432 confident-inaccuracy FULLY RESOLVED; canonical subquery-wrapped form + COALESCE + lookback variant + bans IN-subquery anti-pattern; r27 §6.8 + r28 §8A.3.0 GUARDRAIL landed |
-| Q2 | 4.875 | Federation HAVING + aggregation pushdown | STRONG PASS — CLEAN; aggregation pushes IFF rule + EXPLAIN signature correct; HAVING-secondary-to-aggregate verified; ROLLUP/CUBE/GROUPING SETS never push |
-| Q3 | 4.8125 | Oracle migration GROUP BY ROLLUP | STRONG PASS — canonical ROLLUP semantics; federation caveat correct; NULL subtotal handling accurate |
-| Q4 | 3.25 | Iceberg type widening | FAIL — TWO confident-inaccuracies: (A) "Trino can't do it, must use Spark" WRONG (Trino 406+ supports SET DATA TYPE); (B) Spark `MODIFY COLUMN BIGINT` WRONG (correct: `ALTER COLUMN ... TYPE bigint`) |
+| Q1 | 4.875 | Type widening re-probe | STRONG PASS — BOTH iter433 inaccuracies FULLY RESOLVED on first re-probe; r09 + r13 SCHEMA-EVOLUTION-COLUMN-TYPE-CHANGE GUARDRAIL landed; 17th structural-fix-within-one-iteration instance |
+| Q2 | 4.875 | Federation HAVING + cross-catalog aggregation pushdown | STRONG PASS — 4th consecutive 4.75+ federation datapoint; cross-catalog join blocks pushdown verified; ROLLUP/CUBE/GROUPING SETS never push verified; EXPLAIN signature canonical |
+| Q3 | 4.625 | ROWS vs RANGE window framing with ties | PASS — canonical ROWS-vs-RANGE peer semantics; Trino default RANGE frame correct; minor nit: INTERVAL '0' DAY fix is suboptimal-but-valid (default RANGE already groups peers) |
+| Q4 | 4.3125 | Partition evolution month→day | PASS — ALTER mechanics + rewrite_data_files + $files spec_id verification + expire_snapshots all canonical; ONE confident-inaccuracy: file-count-vs-partition-count conflation ("~18 files monthly / ~547 daily" mistakes partitions for files) |
 
-**Average 4.453 PASS — thirty-second consecutive overall PASS in extended phase; -0.234 step-DOWN from iter432 4.6875.**
+**Average 4.672 STRONG PASS — thirty-third consecutive overall PASS in extended phase; +0.219 step-UP from iter433 4.453.**
 
 **Headline outcomes:**
-- Q1 dbt is_incremental WHERE delta re-probe — RESOLVED on first re-probe (4.875 STRONG); iter432 confident-inaccuracy absent; 16th GUARDRAIL landed
-- Q2 federation HAVING + aggregation pushdown 2nd-angle — STRONG (4.875); EXPLAIN signature verified; ROLLUP/CUBE/GROUPING SETS never-push verified
-- Q3 GROUP BY ROLLUP Oracle migration — STRONG (4.8125); canonical semantics + federation caveat correct
-- Q4 type widening — FAIL (3.25) with TWO confident-inaccuracies: Trino-can't-do-it claim WRONG + Spark MODIFY COLUMN syntax WRONG; safe-widening set otherwise correct
-- Federation 4.4950 → 4.4963 (+0.0013 UP, direction sustains UP for 3rd consecutive iter; 33rd consecutive iter below threshold; 0.0037 below; sustained 4.75+ federation answers would cross in ~3 iters at current density)
-- Oracle migration 4.6875 → 4.6979 (+0.0104 UP, Q3 4.8125 above topic avg)
-- Postgres-to-Iceberg ingestion 4.4950 → 4.4975 (+0.0025 UP, Q1 4.875 above topic avg)
-- Lakehouse schema design 4.5694 → 4.4375 (-0.1319 DOWN, Q4 3.25 well below topic avg)
+- Q1 type-widening re-probe — BOTH iter433 inaccuracies RESOLVED on first re-probe (4.875 STRONG); 17th structural-fix instance
+- Q2 federation HAVING + cross-catalog pushdown — STRONG (4.875); 4th consecutive 4.75+ datapoint
+- Q3 ROWS vs RANGE window framing — PASS (4.625); minor INTERVAL '0' DAY redundancy nit
+- Q4 partition evolution — PASS (4.3125); ONE confident-inaccuracy: file-count-vs-partition-count conflation
+- Federation 4.4963 → 4.4976 (+0.0013 UP, direction sustains UP for 4th consecutive iter; 34th consecutive iter below threshold; 0.0024 below; could cross 4.5 in ~2 iters at current pace)
+- Lakehouse schema design 4.4375 → 4.4773 (+0.0398 UP, Q1 4.875 well above topic avg)
+- Analytical query patterns 4.4471 → 4.4598 (+0.0127 UP, Q3 4.625 above topic avg)
+- SQL best practices 4.5450 → 4.5472 (+0.0022 UP, Q3 4.625 above topic avg)
+- Iceberg partition design 4.503 → 4.4957 (-0.0073 DOWN, Q4 4.3125 below topic avg but still above threshold)
 
-**Failure-mode count: 13 of prior 29 iterations** (iter433 introduces 2 new failure-mode classes simultaneously in Q4: (1) TRINO-ICEBERG-ALTER-COLUMN-CAPABILITY-MISCLAIM — confident "Trino can't do it, must use Spark" when Trino 406+ has supported it for 3+ years; (2) SPARK-ICEBERG-MODIFY-COLUMN-SYNTAX-ERROR — confident `MODIFY COLUMN ... BIGINT` (MySQL/Hive syntax) when Iceberg-Spark requires `ALTER COLUMN ... TYPE bigint`).
+**Failure-mode count: 14 of prior 33 iterations** (iter434 introduces 1 new failure-mode class in Q4: PARTITION-COUNT-VS-FILE-COUNT-CONFLATION — claiming "N month-partitions = N files at most" when each partition typically holds many files driven by target-file-size and ingestion cadence).
 
 ---
 
-## Teacher actions next (iter 434)
+## Teacher actions next (iter 435)
 
-1. **HIGH — Fix Q4 TYPE-WIDENING DUAL-INACCURACY.** Install in r09 (lakehouse schema design) OR r17 (Iceberg table maintenance) following the proven structural-fix recipe:
-   - **GUARDRAIL A — TRINO-ICEBERG-ALTER-COLUMN-CAPABILITY:** Trino's Iceberg connector DOES support `ALTER TABLE t ALTER COLUMN c SET DATA TYPE new_type` for safe widening (since Trino 406, released January 2023; current production Trino 467 supports it). The DO-NOT-WRITE entry must ban "Trino can't change column types, must use Spark" — that claim is FALSE.
-   - **GUARDRAIL B — SPARK-ICEBERG-ALTER-COLUMN-TYPE-SYNTAX:** Canonical Iceberg-Spark syntax is `ALTER TABLE t ALTER COLUMN c TYPE bigint` (NOT `MODIFY COLUMN ... BIGINT`). The DO-NOT-WRITE entry must ban `MODIFY COLUMN` — that's MySQL/Hive syntax and will fail in spark-sql against Iceberg.
-   - **Worked example pair:** (a) Trino: `ALTER TABLE iceberg.analytics.events ALTER COLUMN row_count SET DATA TYPE bigint;` (b) Spark: `ALTER TABLE local.analytics.events ALTER COLUMN row_count TYPE bigint;`
-   - **Safe-widening set table** (already correct in answer — preserve): int→bigint, REAL→double, decimal(P,S)→decimal(P',S) where P'>P (scale unchanged).
-   - **Unsafe set table** (already correct in answer — preserve): narrowing, scale change, double→float, string↔numeric.
-   - **Q-pattern matcher:** "How do I widen an INTEGER column to BIGINT in Iceberg?" → Trino: `ALTER COLUMN ... SET DATA TYPE bigint`; Spark: `ALTER COLUMN ... TYPE bigint`. NEVER `MODIFY COLUMN`.
-   - Cite trino.io/docs/current/sql/alter-table.html + Trino 406 release notes + iceberg.apache.org/docs/latest/spark-ddl/.
+1. **HIGH — Fix Q4 PARTITION-COUNT-VS-FILE-COUNT-CONFLATION.** Install in r09 (lakehouse schema design) OR r17 (Iceberg table maintenance) OR r18/r19 (partition design) a GUARDRAIL:
+   - **GUARDRAIL — PARTITIONS-ARE-NOT-FILES:** A partition in Iceberg is a logical grouping; each partition typically contains MANY data files driven by target-file-size, ingestion batch size, parallelism, and compaction. For example, a 27M-row month-partition at typical 128-512MB target-file-size will hold dozens to hundreds of files, not one.
+   - **DO-NOT-WRITE entries banning:** (a) "N partitions = N files" claim, (b) "~18 files monthly (one per month)" style oversimplification, (c) conflating partition count with file count in any compaction context.
+   - **Worked example:** 500M rows / 18 months at 256MB target-file-size with avg row size 2KB → each month-partition ≈ 27M rows × 2KB ≈ 54GB → 54GB / 256MB ≈ 210 files per month-partition → 18 partitions × 210 files ≈ 3,780 total files (not 18).
+   - **Q-pattern matcher:** "How many files will N partitions have?" → "Files ≠ partitions. Files = (partition data volume) / (target-file-size). Use `SELECT spec_id, COUNT(*) FROM tbl\\$files GROUP BY spec_id` to count actual files."
+   - Cite iceberg.apache.org/docs/latest/configuration/#write-properties for target-file-size and iceberg.apache.org/docs/latest/spark-procedures/#rewrite_data_files for compaction.
 
-2. **LOW — Q1 DBT-IS-INCREMENTAL-WHERE-CANONICAL-PATTERN GUARDRAIL landed precisely.** No structural changes needed. Re-probe at +3-5 iter horizon to confirm durability.
+2. **MEDIUM — Polish Q3 RANGE-INTERVAL idiom.** In r-window-functions resource, note that Trino's default RANGE frame (RANGE UNBOUNDED PRECEDING TO CURRENT ROW) already groups peers (same ORDER BY value) into the same frame. The idiomatic fix for tie-handling is to either (a) omit the frame entirely (default behavior covers it) or (b) add a unique tiebreaker to ORDER BY. Avoid suggesting `RANGE BETWEEN INTERVAL '0' DAY PRECEDING AND CURRENT ROW` as the primary fix — it's syntactically valid but redundant and verbose.
 
-3. **LOW — Q2 federation HAVING + aggregation pushdown** answered cleanly. EXPLAIN signature canonical. No structural changes needed.
+3. **LOW — Q1 SCHEMA-EVOLUTION-COLUMN-TYPE-CHANGE GUARDRAIL landed precisely.** No structural changes needed. Re-probe at +3-5 iter horizon to confirm durability.
 
-4. **LOW — Q3 GROUP BY ROLLUP Oracle migration** answered cleanly. No structural changes needed.
+4. **LOW — Q2 federation HAVING + cross-catalog aggregation pushdown** answered cleanly. EXPLAIN signature canonical. No structural changes needed.
 
-5. **MEDIUM — Federation topic** at 4.4963 / 0.0037 below threshold; 33rd consecutive iter below. Direction sustains UP for 3rd straight iter (+0.0013 sustained pace). Sustained 4.75+ federation answers would cross 4.5 in ~3 iters at this density. Carry-forward angles still un-asked: function-wrapped predicate contrast, 4-way cross-catalog join.
+5. **MEDIUM — Federation topic** at 4.4976 / 0.0024 below threshold; 34th consecutive iter below. Direction sustains UP for 4th straight iter (+0.0013 sustained pace). At this density, sustained 4.75+ federation answers would cross 4.5 in ~2 iters. Carry-forward angles still un-asked: function-wrapped predicate contrast (LOWER/COALESCE-wrapped column), 4-way cross-catalog join.
 
-6. **LOW — Carry-forward backlog (mostly unchanged from iter432-433)**:
+6. **LOW — Carry-forward backlog** (mostly unchanged from iter433):
    - HMS→Nessie write-freeze
    - Snapshot vs serializable phantom-row 3rd-angle
    - Window NULL 2nd-angle
@@ -222,40 +202,39 @@ What is INACCURATE (TWO confident inaccuracies):
 
 ---
 
-## Judge probe targets next (iter 434)
+## Judge probe targets next (iter 435)
 
-1. **HIGH — Re-probe Iceberg type widening** to verify the new GUARDRAIL lands. A direct question: "I have an INTEGER column that's about to overflow — what's the exact SQL to widen it to BIGINT on an Iceberg table, using Trino 467? And if I had to use Spark instead, what's the syntax?" — looking for: (a) Trino: `ALTER TABLE ... ALTER COLUMN ... SET DATA TYPE bigint`, (b) Spark: `ALTER TABLE ... ALTER COLUMN ... TYPE bigint`, (c) NO claim that Trino can't do it, (d) NO `MODIFY COLUMN` syntax.
+1. **HIGH — Re-probe partition evolution / partition-vs-file-count framing** to verify the new GUARDRAIL lands. A direct question: "I'm thinking about partitioning my 1B-row Iceberg table by month vs day — how many data files will that produce, and how does file count relate to partition count?" Looking for: (a) explicit distinction between partitions and files, (b) target-file-size as the driver, (c) `$files` metadata table to count actual files, (d) NO claim that "N partitions = N files".
 
 2. **HIGH — Federation function-wrapped predicate contrast** (carry-forward, still un-asked): "Does `WHERE LOWER(email) = 'a@b.com'` push to Postgres? Contrast with naked equality."
 
 3. **HIGH — Federation 4-way cross-catalog join execution location** (extends iter426 3-way angle): "Postgres dim + Iceberg fact + Iceberg dim + Postgres lookup — where does the join run, and what does EXPLAIN show for each TableScan?"
 
-4. **MEDIUM — CTAS NOT NULL durability re-probe** (+3 iter horizon from iter431): "I want to add a strict NOT NULL via CTAS-swap — walk me through the exact SQL."
+4. **MEDIUM — Type widening +3-5 iter durability re-probe** to confirm iter434 fix holds.
 
-5. **MEDIUM — Trino session timezone command re-probe** (+3-5 iter durability): "How do I make Trino's SYSDATE-equivalent return Chicago wall clock when the cluster default is UTC?"
+5. **MEDIUM — CTAS NOT NULL durability re-probe** (+4 iter horizon from iter431): "I want to add a strict NOT NULL via CTAS-swap — walk me through the exact SQL."
 
-6. **MEDIUM — dbt is_incremental WHERE delta +3-5 iter durability re-probe** to confirm the iter433 fix holds.
+6. **MEDIUM — Trino session timezone command re-probe** (+4-5 iter durability): "How do I make Trino's SYSDATE-equivalent return Chicago wall clock when the cluster default is UTC?"
 
 7. **LOW — Iceberg concurrency 5th-angle** (carry-forward): commit.retry.num-retries exhaustion behavior.
 
 ---
 
-## Critical message to teacher for iter 434
+## Critical message to teacher for iter 435
 
-Iter433 is a PASS (4.453) but a step-DOWN (-0.234) from iter432 4.6875, driven entirely by Q4's dual confident-inaccuracy on Iceberg type widening. The iter433 teacher plan for Q1 — installing the DBT-IS-INCREMENTAL-WHERE-CANONICAL-PATTERN GUARDRAIL in r27 §6.8 + r28 §8A.3.0 with explicit subquery-wrapper requirement + COALESCE for empty-table edge case + late-arrival lookback variant + DO-NOT-WRITE banning bare aggregate in WHERE + DO-NOT-WRITE banning IN-subquery full-history re-scan — landed precisely on the first re-probe. The proven structural-fix-within-one-iteration recipe extends to 16 instances.
+Iter434 is a STRONG PASS (4.672) and a +0.219 step-UP from iter433 4.453, driven by Q1's full recovery from iter433's dual confident-inaccuracy. The iter434 teacher plan — installing the SCHEMA-EVOLUTION-COLUMN-TYPE-CHANGE GUARDRAIL in r09 + r13 with Trino `SET DATA TYPE` + Spark `ALTER COLUMN ... TYPE` + DO-NOT-WRITE banning `MODIFY COLUMN` and "must use Spark" + worked example pair — landed precisely on the first re-probe. The proven structural-fix-within-one-iteration recipe extends to 17 instances.
 
-**However, the zero-confident-inaccuracy streak does NOT recover (now 5 consecutive iters).** TWO new failure-mode classes emerge simultaneously in Q4:
+**However, the zero-confident-inaccuracy streak does NOT recover (now 6 consecutive iters).** ONE new failure-mode class emerges in Q4:
 
-1. **TRINO-ICEBERG-ALTER-COLUMN-CAPABILITY-MISCLAIM:** Responder confidently asserts "Trino 467 does NOT expose column-type modification, must use Spark." This is FACTUALLY WRONG — Trino 406+ (released January 2023, three years before production Trino 467) has supported `ALTER TABLE ... ALTER COLUMN ... SET DATA TYPE` for the Iceberg connector. An engineer following this guidance would needlessly fire up Spark for a Trino-native operation.
+1. **PARTITION-COUNT-VS-FILE-COUNT-CONFLATION:** Responder claims "monthly partitioning of 500M/18mo = ~18 files at most (one per month)" and "day = ~547 files". This is FACTUALLY WRONG — a partition is a logical grouping that typically holds many data files driven by target-file-size and ingestion cadence. For 500M rows / 18 months at typical 128-512MB target-file-size, a monthly partition would hold dozens to hundreds of files. An engineer using this oversimplified mental model would mis-size compaction thresholds and be confused when `$files` shows file counts an order of magnitude higher than partition count.
 
-2. **SPARK-ICEBERG-MODIFY-COLUMN-SYNTAX-ERROR:** Responder uses `ALTER TABLE t MODIFY COLUMN count_col BIGINT` as the Spark fallback. This is MySQL/Hive syntax — not Iceberg-Spark. The correct syntax is `ALTER TABLE t ALTER COLUMN c TYPE bigint`. An engineer pasting `MODIFY COLUMN` into spark-sql against an Iceberg table gets a parse error.
+**The teacher needs to install a PARTITIONS-ARE-NOT-FILES GUARDRAIL in r09 (lakehouse schema design) or r17 (Iceberg table maintenance) or r18/r19 (partition design) explicitly banning the partition-count-equals-file-count claim and providing a worked example with target-file-size division.**
 
-**The teacher needs to install a SCHEMA-EVOLUTION-TYPE-WIDENING GUARDRAIL in r09 (lakehouse schema design) or r17 (Iceberg table maintenance) banning both inaccuracies and providing the canonical Trino + Spark syntax pair (`ALTER COLUMN ... SET DATA TYPE` and `ALTER COLUMN ... TYPE` respectively).**
+**Federation topic moved +0.0013 UP to 4.4976**, now 0.0024 below threshold (34th consecutive iter below). Direction sustains UP for 4th consecutive iter at sustained pace. With sustained 4.75+ federation answers, the topic could cross 4.5 in ~2 iters at this density. Q2 4.875 is the fourth consecutive iter of 4.75+ federation datapoints — the federation topic is on the cusp of crossing the raised threshold.
 
-**Federation topic moved +0.0013 UP to 4.4963**, now 0.0037 below threshold (33rd consecutive iter below). Direction sustains UP for 3rd consecutive iter at sustained pace. With sustained 4.75+ federation answers, the topic could cross 4.5 in ~3 iters at this density. Q2 4.875 is the third consecutive iter of 4.75+ federation datapoints.
-
-**Iter434 should focus on:**
-(1) Add SCHEMA-EVOLUTION-TYPE-WIDENING GUARDRAIL with Trino-CAN-do-SET-DATA-TYPE + Spark-uses-ALTER-COLUMN-TYPE-NOT-MODIFY-COLUMN + worked example pair + safe/unsafe set tables (Q4 fix)
-(2) Re-probe Iceberg type widening to verify the fix lands
-(3) Continue carry-forward federation function-wrapped predicate / 4-way join angles to grind federation topic toward 4.5
-(4) dbt is_incremental WHERE delta +3-5 iter durability re-probe
+**Iter435 should focus on:**
+(1) Add PARTITIONS-ARE-NOT-FILES GUARDRAIL with worked example (target-file-size → files-per-partition arithmetic) + DO-NOT-WRITE banning "N partitions = N files" (Q4 fix)
+(2) Polish Q3 RANGE-INTERVAL idiom (prefer default RANGE or unique tiebreaker over redundant INTERVAL '0' DAY)
+(3) Re-probe partition evolution / partition-vs-file-count to verify the GUARDRAIL lands
+(4) Continue federation function-wrapped predicate / 4-way join angles to grind federation topic across 4.5
+(5) Type widening +3-5 iter durability re-probe

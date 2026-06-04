@@ -430,6 +430,77 @@ Trade-off: MAP gives faster fallback access at query time (no JSON parsing per r
 >
 > **ADD COLUMN is always nullable.** Iceberg's `ALTER TABLE ... ADD COLUMN col TYPE` adds the column as nullable; there is no way to ADD a NOT NULL column directly (the constraint cannot apply to historical rows that will read NULL).
 
+#### SCHEMA-EVOLUTION COLUMN-TYPE-CHANGE GUARDRAIL — Trino 467 CAN widen Iceberg column types natively; Iceberg-Spark uses `ALTER COLUMN ... TYPE`, NOT `MODIFY COLUMN`
+
+> **Read this BEFORE answering ANY question about "widen INT to BIGINT", "change column type", "promote float to double", "widen decimal precision", or "do I need Spark to change a column type" on an Iceberg table.** This guardrail exists because the iter433 Q4 confident-inaccuracy claimed **(A)** "Trino 467 does NOT expose column-type modification, must use Spark" — that is **WRONG** — and **(B)** used Spark syntax `ALTER TABLE t MODIFY COLUMN col BIGINT` — that is **WRONG** (`MODIFY COLUMN` is MySQL/Hive, not Iceberg).
+>
+> **Q-PATTERN matcher (top-of-section):** "How do I widen INTEGER to BIGINT in Iceberg?" / "How do I promote REAL to DOUBLE on an Iceberg column?" / "What's the SQL to widen decimal precision?" / "Can I change a column type in Trino, or do I need Spark?" — **answer with the two-engine syntax table below. Both Trino AND Spark support native Iceberg type widening. They use DIFFERENT keywords. NEVER `MODIFY COLUMN`.**
+>
+> **Fact 1 — Trino 467 (the production version on this stack) DOES support changing an Iceberg column's type natively.** Per [trino.io/docs/current/sql/alter-table.html](https://trino.io/docs/current/sql/alter-table.html), Trino's `ALTER TABLE ... ALTER COLUMN ... SET DATA TYPE new_type` is the supported form. This was added in **Trino 406** (released **25 January 2023**, per [trino.io/docs/current/release/release-406.html](https://trino.io/docs/current/release/release-406.html) — release-note entry: "Add support for changing column types" for the Iceberg connector, [trinodb/trino #15515](https://github.com/trinodb/trino/pull/15515) / [#15651](https://github.com/trinodb/trino/pull/15651)). Trino 467 inherited this capability — you do NOT need to spin up Spark for safe widening.
+>
+> **Fact 2 — Iceberg-Spark uses `ALTER COLUMN ... TYPE`, NOT `MODIFY COLUMN`.** Per [iceberg.apache.org/docs/latest/spark-ddl/](https://iceberg.apache.org/docs/latest/spark-ddl/) the canonical Iceberg-Spark column-type-change syntax is `ALTER TABLE t ALTER COLUMN c TYPE new_type`. The Iceberg docs use exactly: `ALTER TABLE prod.db.sample ALTER COLUMN measurement TYPE double`. **`MODIFY COLUMN` is MySQL/Hive-style DDL — it is NOT Iceberg-Spark.** Pasting `ALTER TABLE t MODIFY COLUMN col BIGINT` into spark-sql against an Iceberg table produces a parser error.
+>
+> **Two-engine syntax table — memorize this:**
+>
+> | Engine | Exact column-type-change syntax | Note |
+> |---|---|---|
+> | **Trino 467** (Iceberg connector — `iceberg` catalog) | `ALTER TABLE iceberg.analytics.events ALTER COLUMN row_count SET DATA TYPE bigint;` | SQL-standard `SET DATA TYPE`. Supported since Trino 406 (Jan 2023). Documented at [trino.io/docs/current/sql/alter-table.html](https://trino.io/docs/current/sql/alter-table.html). |
+> | **Spark 3.5 + Iceberg 1.5.2** (spark-sql / Spark Thrift / pyspark.sql) | `ALTER TABLE iceberg.analytics.events ALTER COLUMN row_count TYPE bigint;` | The Iceberg-canonical form. Documented at [iceberg.apache.org/docs/latest/spark-ddl/](https://iceberg.apache.org/docs/latest/spark-ddl/). Spark also accepts Hive-compatible `CHANGE COLUMN row_count row_count BIGINT` (column name repeated twice) — `ALTER COLUMN TYPE` is the canonical Iceberg-Spark form. |
+>
+> **Mnemonic:** Trino has the SQL word `SET DATA` between `COLUMN` and the type. Spark has only the SQL word `TYPE` between `COLUMN` and the type. Neither uses `MODIFY`.
+>
+> **Safe widenings (metadata-only, no Parquet rewrite — per [iceberg.apache.org/docs/latest/evolution/](https://iceberg.apache.org/docs/latest/evolution/) and the [Iceberg spec, schema evolution / type promotion](https://iceberg.apache.org/spec/#schema-evolution)):**
+>
+> | From | To | Notes |
+> |---|---|---|
+> | `int` (32-bit) | `long` (Iceberg `long` = Trino `bigint` = Spark `bigint`) | Pure metadata update. Existing 32-bit Parquet INT files transparently read as 64-bit at query time. |
+> | `float` (32-bit, Trino/Spark `real`) | `double` (64-bit) | Pure metadata update. Existing 32-bit FLOAT Parquet files transparently read as 64-bit DOUBLE at query time. |
+> | `decimal(P, S)` | `decimal(P', S)` where `P' > P`, **scale unchanged** | Pure metadata update. Scale (digits after decimal point) MUST stay the same. |
+>
+> **Unsafe / NOT permitted by Iceberg spec (will be rejected, OR require a multi-step add-column + backfill + drop-old migration):**
+>
+> | Attempt | Why it's rejected |
+> |---|---|
+> | `bigint` → `int` (narrowing) | Would lose data on values > 2^31. Iceberg refuses. |
+> | `double` → `float` (narrowing) | Would lose precision. Iceberg refuses. |
+> | `decimal(10, 4)` → `decimal(10, 2)` (scale narrowing) | Scale change rejected — Iceberg only allows precision widening at the **same** scale. |
+> | `decimal(10, 2)` → `decimal(12, 4)` (scale change — even if precision also widens) | Scale must be identical. Different scales mean different stored byte interpretations. |
+> | `int` → `varchar`, `bigint` → `date`, `timestamp` → `varchar`, etc. (cross-family) | Type-family change — not on the safe-promotion list. Multi-step migration required. |
+> | `date` → `timestamp` | NOT on the Iceberg safe-promotion list. Multi-step migration required. |
+> | `timestamp(3)` → `timestamp(6)` (precision change) | Iceberg stores timestamps at microsecond precision by default — precision is a query-engine concern, not an Iceberg storage knob. |
+>
+> **Worked example pair — widen `row_count INTEGER` to `BIGINT` on an Iceberg table:**
+>
+> From a Trino session (Trino CLI, Trino query editor, Trino JDBC client — the engineer's default on this stack):
+>
+> ```sql
+> ALTER TABLE iceberg.analytics.events ALTER COLUMN row_count SET DATA TYPE bigint;
+> ```
+>
+> From a Spark session (spark-sql, Spark Thrift, pyspark.sql — used for Spark Structured Streaming consumers or bulk Spark ingestion jobs that own the table):
+>
+> ```sql
+> ALTER TABLE iceberg.analytics.events ALTER COLUMN row_count TYPE bigint;
+> ```
+>
+> **Both forms emit the IDENTICAL metadata-only schema update to the Iceberg catalog** (a new column-type assertion against the existing Iceberg field ID; zero Parquet files are rewritten). The choice between them is purely **which client session you have open**. If you have a Trino session, use Trino. If you have a Spark session (because your ingestion or maintenance job already runs there), use Spark.
+>
+> **DO-NOT-WRITE (the iter433 Q4 inaccuracies — never reproduce):**
+>
+> 1. **"Trino 467 does NOT expose column-type modification, must use Spark."** — FALSE. Trino's Iceberg connector has supported `ALTER COLUMN ... SET DATA TYPE` since Trino 406 (January 2023, three years before production Trino 467). An engineer following this advice would needlessly spin up Spark for a Trino-native operation.
+> 2. **"Trino can't change column types in Iceberg."** — FALSE (same as #1, paraphrase).
+> 3. **"To widen a column on Iceberg you need to use Spark."** — FALSE (same as #1, paraphrase).
+> 4. **`ALTER TABLE t MODIFY COLUMN col BIGINT`** — FALSE syntax for Iceberg on BOTH engines. `MODIFY COLUMN` is MySQL/Hive DDL. Iceberg-Spark uses `ALTER COLUMN ... TYPE`; Trino-Iceberg uses `ALTER COLUMN ... SET DATA TYPE`. Pasting `MODIFY COLUMN` into either engine against an Iceberg table produces a parser error.
+> 5. **"Spark's syntax is `ALTER TABLE t MODIFY COLUMN col BIGINT`."** — FALSE. The correct Spark/Iceberg form is `ALTER TABLE t ALTER COLUMN col TYPE bigint`.
+> 6. **"Use `CHANGE COLUMN col col BIGINT` in Trino."** — FALSE. `CHANGE COLUMN` is Hive-compatible and works in Spark but does NOT parse in Trino — Trino rejects it as `mismatched input 'CHANGE'`.
+>
+> **Sources verified:**
+> - [trino.io/docs/current/sql/alter-table.html](https://trino.io/docs/current/sql/alter-table.html) — `ALTER TABLE ... ALTER COLUMN ... SET DATA TYPE new_type` is the supported Trino form; documented example `ALTER TABLE users ALTER COLUMN id SET DATA TYPE bigint`.
+> - [trino.io/docs/current/release/release-406.html](https://trino.io/docs/current/release/release-406.html) — release-note entry confirming the Iceberg connector gained `SET DATA TYPE` support in Trino 406 (Jan 2023).
+> - [iceberg.apache.org/docs/latest/spark-ddl/](https://iceberg.apache.org/docs/latest/spark-ddl/) — Iceberg-Spark canonical syntax `ALTER TABLE t ALTER COLUMN c TYPE new_type`.
+> - [iceberg.apache.org/docs/latest/evolution/](https://iceberg.apache.org/docs/latest/evolution/) — defines the safe widening set (int→long, float→double, decimal precision-widen-same-scale).
+> - [iceberg.apache.org/spec/#schema-evolution](https://iceberg.apache.org/spec/#schema-evolution) — the spec listing of safe type promotions.
+
 #### SCHEMA-EVOLUTION CONSTRAINT-TIGHTENING GUARDRAIL — you CANNOT tighten an existing nullable Iceberg column to NOT NULL via `ALTER COLUMN ... SET NOT NULL` on Trino 467
 
 > **Read this BEFORE answering any question about "tightening" / "adding NOT NULL" / "enforcing not-null" on an existing Iceberg column on Trino 467.** This guardrail exists because the iter429 Q4 confident-inaccuracy recommended `ALTER COLUMN ... SET NOT NULL` as the final step of the nullable → backfill → tighten pattern — and that operation does NOT exist in Trino.
