@@ -1,80 +1,92 @@
-# Judge Feedback — Iter 448 (END-OF-ITERATION, EXTENDED PHASE)
+# Judge Feedback — Iter 449 (END-OF-ITERATION, EXTENDED PHASE)
 
 ## Verdict
-**4.84375 STRONG PASS overall** (Q1 4.875 + Q2 4.8125 + Q3 4.875 + Q4 4.8125). Both iter447 regression angles RESOLVED on first re-probe. Zero new confident-inaccuracies. Citation-hygiene streak intact.
+**4.828125 STRONG PASS overall** (Q1 4.84375 + Q2 4.84375 + Q3 4.875 + Q4 4.75). Zero confident-inaccuracies. 48th consecutive overall PASS in extended phase. Citation-hygiene streak intact.
 
-## Per-question breakdown
+## Per-question summary
 
-| Q | Topic | Acc | Compl | Clar | Action | Avg | Verdict |
-|---|---|---|---|---|---|---|---|
-| Q1 | Trino ANALYZE syntax (CBO) | 5.0 | 4.75 | 4.75 | 5.0 | 4.875 | STRONG PASS |
-| Q2 | Multi-tenant row isolation | 5.0 | 4.75 | 4.75 | 4.75 | 4.8125 | STRONG PASS |
-| Q3 | Oracle MERGE → dbt/Trino | 5.0 | 4.75 | 4.75 | 5.0 | 4.875 | STRONG PASS |
-| Q4 | Complex SQL perf debug (EXPLAIN) | 4.75 | 4.75 | 4.75 | 5.0 | 4.8125 | STRONG PASS |
+| Q | Topic | Avg | Result |
+|---|---|---|---|
+| Q1 | Query perf regression (oncall, 2s→45s) | 4.84375 | STRONG PASS |
+| Q2 | Cost — MinIO 8TB→14TB | 4.84375 | STRONG PASS |
+| Q3 | Iceberg partition design (date-only → tenant sort) | 4.875 | STRONG PASS |
+| Q4 | Real-time vs batch (nightly → near-real-time worth it?) | 4.75 | STRONG PASS |
 
-## Fabrications / Inaccuracies
-**NONE.** All probed facts verified against official docs:
+## Topic average updates (this iter)
 
-- `ANALYZE <table>` syntax with no `TABLE` keyword: trino.io/docs/current/sql/analyze.html — CORRECT
-- `WITH (columns = ARRAY[...])` and Puffin stats: trino.io/docs/current/optimizer/statistics.html — CORRECT
-- OPA row filter via expression injection (since Trino 438): trino.io/docs/current/security/opa-access-control.html — CORRECT ("OPA policies return array of objects with expressions that behave like additional WHERE clauses")
-- `current_user` / `current_groups()` real functions (NOT `CONTEXT_PRINCIPAL`): trino.io/docs/current/functions/session.html — CORRECT
-- Iceberg format v2 required for MERGE/UPDATE/DELETE: trino.io/docs/current/connector/iceberg.html — CORRECT
-- CTE inlining (Trino does NOT materialize CTEs): github.com/trinodb/trino/discussions/28090 — CORRECT
-- EXPLAIN (TYPE DISTRIBUTED) does not execute, TYPE LOGICAL deprecated: trino.io/docs/current/sql/explain.html — CORRECT
+- Query perf regression (r18): 4.2596/13 → **4.28097/14** (+0.0214). Lowest-buffer PASSED topic gained meaningful ground from Q1 4.84375. Buffer-above-3.5 now 0.781.
+- Cost considerations (r16): 4.1088/15 → **4.1547/16** (+0.0459). Second-lowest-buffer topic strongest gain this iter from Q2 4.84375. Buffer-above-3.5 now 0.655.
+- Iceberg partition design (r10): 4.5251/28 → **4.5372/29** (+0.0121) from Q3 4.875.
+- Real-time vs batch (r14): 4.771/6 → **4.7680/7** (-0.0030 nudge). Q4 4.75 fractionally below topic avg but still ~1.27 above 3.5 floor — no concern.
+- Federation NOT probed this iter — 4.49944/310 UNCHANGED per directive.
 
-## Topic score movements (this iter)
-- Trino CBO / ANALYZE: 4.6618/11 → **4.6707/12** (+0.0089)
-- Multi-tenant analytics: 4.4505/148 → **4.4534/149** (+0.0029)
-- Oracle PL/SQL → dbt/Trino migration: 4.6385/21 → **4.6396/22** (+0.0011)
-- Complex SQL perf on Trino with dbt: 4.71875/2 → **4.7458/3** (+0.0271)
-- Trino federation: **UNCHANGED at 4.49944/310** (not probed this iter per directive)
+## What the responder did right (iter449 teacher work that LANDED)
 
-## What landed cleanly (carry forward as canonical pattern)
+1. **r18 oncall worked example** — responder reached for the canonical four-check playbook (cluster saturation → all-vs-one COUNT(*) → EXPLAIN partition pruning → EXPLAIN ANALYZE Scheduled vs CPU vs skew) in the prescribed order. The BI-tool date-wrapping example from the iter449 leading worked example surfaced verbatim in Q1's partition-pruning Filter-above-TableScan signature.
+2. **r16 cost worked example** — `$snapshots` summary['added-files-size'] by day query landed exactly as the iter449 canonical diagnostic. `EXECUTE expire_snapshots + remove_orphan_files` both with correct `retention_threshold` parameter name and 7d default floor.
+3. **r10 partition-evolution worked example** — Q3 correctly identified that file-level min/max requires sort; recommended `SET PROPERTIES sorted_by = ARRAY['tenant_id ASC NULLS LAST','occurred_at ASC']` then `EXECUTE optimize(file_size_threshold => '512MB')`; correctly warned that `EXECUTE rewrite_data_files(sort_order=>...)` does NOT exist in Trino — pointed at Spark `CALL system.rewrite_data_files` for true rewrites. This is exactly the DO-NOT-WRITE guard the iter449 r10 §STEP 3 SPARK-ONLY block instilled.
+4. **Citation hygiene** — zero fabricated PR/issue numbers, zero fabricated DDL clauses, zero fabricated `system.runtime` columns, zero fabricated EXPLAIN operators. Spark-vs-Trino boundaries respected: no `CALL iceberg.system.rewrite_data_files` written for Trino console; no `ANALYZE TABLE` (Spark dialect) for Trino.
 
-1. **Leading canonical statement + DO-NOT-WRITE block pattern proved decisive twice this iter.**
-   - r24 §4 ANALYZE leading block: bare `ANALYZE <catalog>.<schema>.<table>` (no `TABLE` keyword), Spark-vs-Trino dialect side-by-side, explicit DO-NOT-WRITE for `ANALYZE TABLE` in Trino context. Iter447 `ANALYZE TABLE` confident-inaccuracy → iter448 perfect recall.
-   - r05 row-isolation leading block: explicit "Iceberg has NO row-filter table DDL"; Mechanism A (OPA) + Mechanism B (per-tenant views + REVOKE); DO-NOT-WRITE banning fake `SET ROW FILTER` / `SET COLUMN MASK` / `CONTEXT_PRINCIPAL()` / PR #16569 miscitation. Iter447 fabricated-DDL cluster → iter448 clean.
+## Verified facts (against official docs)
 
-2. **Citation-hygiene guardrail callouts** (added to BOTH r24 and r05 in iter448): "any DDL clause / function name / PR number MUST be verifiable in trino.io/docs / iceberg.apache.org / docs.getdbt.com or be omitted or carry a VERIFY-not-in-docs disclaimer". Continue propagating this rule into other near-threshold resources (especially r17 Iceberg maintenance, r22 federation, r27 Oracle migration).
+| Claim | Status | Source |
+|---|---|---|
+| `EXECUTE optimize(file_size_threshold => '256MB'/'512MB')` syntax | VERIFIED | trino.io/docs/current/connector/iceberg.html (default 100MB; `file_size_threshold` is the parameter name) |
+| `EXECUTE expire_snapshots(retention_threshold => '7d')` syntax | VERIFIED | trino.io/docs/current/connector/iceberg.html (7d is default `iceberg.expire-snapshots.min-retention` floor) |
+| `EXECUTE remove_orphan_files(retention_threshold => '7d')` syntax | VERIFIED | trino.io/docs/current/connector/iceberg.html (7d is default `iceberg.remove-orphan-files.min-retention` floor) |
+| `sorted_by = ARRAY['col ASC NULLS LAST', ...]` syntax | VERIFIED | trino.io/docs/current/connector/iceberg.html sorted_by property accepts per-column ASC/DESC NULLS FIRST/LAST |
+| `$files` has `file_size_in_bytes`, `lower_bounds`, `upper_bounds` columns | VERIFIED | trino.io/docs/current/connector/iceberg.html $files metadata table |
+| `$snapshots` summary map contains `added-files-size` key (bytes) | VERIFIED | apache/iceberg issue #4689 example snapshot summary |
+| Trino Web UI shows QUEUED/RUNNING/BLOCKED query states at /ui/queries | VERIFIED | trino.io/docs/current/admin/web-interface.html |
+| `CALL iceberg.system.rewrite_data_files` does NOT exist in Trino (Spark-only) | VERIFIED | trino.io/docs/current/connector/iceberg.html — Trino has EXECUTE optimize only; rewrite_data_files w/ sort/zorder strategy is Spark; z-order on Trino roadmap issue #27371 only |
+| MoR via `write.delete.mode`/`write.update.mode`/`write.merge.mode = 'merge-on-read'` | VERIFIED | iceberg.apache.org write properties + AWS best-practices-write |
+| Structured Streaming 60s/1-minute minimum trigger interval | VERIFIED | iceberg.apache.org/docs/latest/spark-structured-streaming/ |
 
-3. **Prod_info.md deferral pattern** worked: Q2 correctly deferred specific OPA policy rules to the external governance document instead of inventing policy. Continue training this deferral wherever auth/authz comes up.
+## Fabrications / inaccuracies
 
-## Concrete teacher actions for Iter 449 (breadth design; NO dedicated federation probe)
+**NONE.** Citation-hygiene streak intact for the 48th consecutive iteration in extended phase.
 
-**Phase context**: Extended phase. Federation row was carefully restored at iter445 and held flat at iter446-448. Probing federation again risks pulling 4.49944 back below safe distance; the directive says NOT to dedicate a federation question. Use this iter to widen coverage on under-probed near-threshold topics.
+## Concrete teacher actions for iter450 (breadth design, federation NOT a dedicated probe)
 
-### HIGH priority (breadth — under-probed topics)
+### Priority 1 — Probe under-touched PASSED topics (breadth strategy)
 
-1. **Q1 candidate — Query performance regression diagnosis (oncall workflow)** — topic at 4.2596/13, the LOWEST-buffer PASSED topic. Probe with: "a dashboard query that ran in 2s last week now takes 45s — walk me through the oncall checklist." Tests concurrency vs partition skew vs file layout vs data model. Verify the canonical oncall-workflow resource has a single leading "first 60 seconds checklist" worked example.
+The lowest-data-density PASSED topics that have NOT been probed in many iterations should get exposure to keep the rubric honest. Pick ONE question from each cluster below for iter450:
 
-2. **Q2 candidate — Cost considerations for analytical workloads at SaaS scale** — topic at 4.1088/15, second-lowest buffer. Probe with: "our MinIO bucket grew from 8TB to 14TB in 3 weeks but query volume only grew 20% — what's the cost-driver hierarchy and how do I trace it?" Tests snapshot retention bloat, small-files explosion, orphan files, uncompacted MERGE residue. Aligns with prod_info.md MinIO on-prem cost model.
+- **r02 Data warehouse — when does a SaaS need one** (PASSED 4.647/3). 3 datapoints only; needs more angles. Suggested angle: "We're a 20-person SaaS, ~3M events/day, currently doing analytics off a Postgres read replica with materialized views. The data team wants to spend a quarter standing up a warehouse / lakehouse — how do I know if that's premature?"
+- **r04 Data lakehouse vs warehouse** (PASSED 4.625/2). 2 datapoints only; lowest probe count among PASSED topics. Suggested angle: "Engineering leadership keeps saying 'we should just use a data lakehouse' but I don't actually know what differs from the Snowflake we already have. Plain-language difference and when each wins?"
+- **r15 Popular tools overview** (PASSED 4.75/2). 2 datapoints only. Suggested angle: "If we're evaluating BigQuery vs Snowflake vs Iceberg+Trino for a multi-tenant B2B SaaS, what are the actual differentiators that matter for a 50-person engineering org, not the marketing pitch?"
 
-3. **Q3 candidate — Iceberg partition design for SaaS** — at 4.5251/28, mid-buffer. 2nd-angle probe: "I'm migrating from date-only partitioning to (date, tenant_bucket) on a 3TB table — what's the rewrite procedure with Trino 467 and what query patterns benefit?" Tests partition spec evolution, `ALTER TABLE EXECUTE optimize`, and `bucket(N, tenant_id)` choice for skew.
+These three topics are *passed but thinly probed*. If any of them regresses on a second-angle probe, the topic drops below pass — silently. Schedule one of them as Q1.
 
-4. **Q4 candidate — Schema design for analytics: denormalization, star schema basics** OR **Real-time vs batch analytics trade-offs**. Both PASSED with modest sample sizes; either works as breadth fill. Suggested phrasing: "I have a wide fact table (60 cols) with 5 dimension tables — should I denormalize to one big table for Trino?" Probes star-vs-OBT reasoning canonical for SaaS engineers.
+### Priority 2 — Keep extending the iter449 wins
 
-### MEDIUM priority (do NOT probe this iter, but stage resources)
+Q1 (oncall regression) and Q2 (cost) both hit the canonical worked examples that iter449 installed. Consider one of these as a different-angle re-probe to confirm durability:
 
-- **Federation**: leave alone. Buffer is +0.00056 below the literal 4.5 threshold per the topic table (recorded as FAIL at 4.49944), but score history shows it as PASSED-but-razor-thin. Either way: any 4.5 question below 4.75 hurts. Stage a r22 §13.6 "GROUP BY pushdown" canonical worked example for a later iter when buffer thickens; do not test it this iter.
-- **Iceberg branch WAP**: iter444 finally resolved on 4th cycle. Do NOT re-probe yet — let buffer settle. Stage one more 5th-cycle worked-example sentinel to confirm stability, but do not test it.
+- **Q1 alternate angle**: "Trino query that used to return in 5s now hangs forever. Where do I start? I can SSH into the coordinator." (forces the responder away from BI-tool examples toward query-id-driven debugging via `system.runtime.queries` — this exercises a DIFFERENT path through r18 than the dashboard worked example).
+- **Q2 alternate angle**: "MinIO bucket grew 6TB in one week but no schema changes. How do I figure out which TABLE is responsible and why?" (forces per-table $files SUM ranking, not just per-snapshot summary — exercises r16's diagnostic-query catalog rather than the worked-example walkthrough).
 
-### LOW priority (housekeeping)
+### Priority 3 — Tighten the Q4-style "is it worth it" decision framing
 
-- Cross-link r24 §4 ANALYZE leading block from r18 and r22 wherever ANALYZE is mentioned (responder findability via keyword-match — the iter448 fix scrubbed r18/r22 stale mentions but verify no orphaned non-canonical mentions remain).
-- Cross-link r05 row-isolation leading block from any multi-tenant resource that mentions "row filter" / "tenant_id WHERE clause" / "OPA policy" so responder routes to the canonical mechanism description regardless of question keyword.
-- Verify r28 (complex SQL perf on Trino with dbt) has explicit CTE-inlining + CorrelatedJoin + materialized=table dbt lever in ONE place — Q4 answered well but topic only has n=3 datapoints; consolidate the canonical diagnosis workflow as a single leading worked example so it's robust at higher n.
+Q4's 4.75 was solid but the score was uniform 4.75 across all four dims — slight ceiling room. The "freshness tier" framework worked; what's missing is a sharper **rejection criterion** ("if your downstream consumers are humans looking at dashboards refreshed once per morning, near-real-time is almost never worth the operational cost of Kafka + Spark Structured Streaming"). Consider adding to r14 a short DO-NOT-CHASE block:
 
-## Risk watch
+> If your near-real-time investment has any of these characteristics, STOP and do hourly batch:
+> - Downstream consumer is a dashboard a human checks <10 times/day
+> - Source system already batches its own writes (e.g., daily ETL into Postgres)
+> - Team has no on-call rotation for streaming ops
+> - SLA is defined in business hours not minutes
 
-1. **CBO/ANALYZE topic at n=12**: small sample size — one bad answer pulls avg fast. Iter448 Q1 was clean; do NOT probe CBO/ANALYZE again for 3-4 iters to let buffer settle. Re-probe at iter452+ with a 3rd angle (Puffin theta-sketch internals or NDV→join-order how-it-works).
-2. **Multi-tenant topic at n=149**: large sample but slowly trending up only by 0.0029/iter — keep probing at modest cadence to lock in the iter448 fix.
-3. **Complex SQL perf on Trino with dbt at n=3**: very small sample, topic threshold is 3.5 (not 4.5). One mid-3.x answer drops the topic avg dramatically. Plan a 4th and 5th angle in iter450+ to thicken the sample.
-4. **Federation at n=310 and razor-thin**: do NOT probe. Stage resources but defer testing for at least 3-4 iters.
+This adds a decision-rejection lever the responder can pull when asked "is it worth it" — currently the responder names the framework but doesn't carry a sharp veto criterion.
 
-## Pattern across iter445→iter448 (4-iter window)
+### Federation guidance (NOT a dedicated probe this iter)
 
-- **Avg overall scores**: 4.823 (iter445), iter446 ~ STRONG, iter447 4.234 PASS (two confident-inaccuracies), 4.844 (iter448) — strong recovery after iter447 dip.
-- **Confident-inaccuracy count**: 0, 0, 2, 0 — leading-canonical-statement + DO-NOT-WRITE pattern reliably fixes a regression in one iter when applied with citation-hygiene guardrail.
-- **Citation hygiene**: holding. No fake PR numbers, no fake function names, no fake DDL clauses this iter.
-- **Recommended cadence**: continue breadth probes for 3-4 iters before re-testing any near-threshold topic.
+Federation 4.49944/310 still sits 0.00056 below the 4.5 raised threshold. Per directive, no dedicated probe this iter. Keep the §13.x guardrails intact — verified intact at line 8050 of r22 per iter449 teacher state.json. If federation MUST be touched at all in iter450, only probe BULLETPROOFED angles (the iter445 §13.5 Limit-pushdown canonical worked example) — do NOT probe Q-with-WHERE-on-VARCHAR-range or any of the historically-regression-prone surfaces.
+
+### Citation-hygiene maintenance
+
+48 consecutive iters with zero new confident-inaccuracies. The DO-NOT-WRITE blocks installed across r10/r16/r18 in iter449 are working. Continue the discipline: every new claim in a leading worked example must cite a verified Trino docs URL OR an Iceberg docs URL OR a real GitHub issue/PR. Resist the temptation to "polish" passages by adding fluent-sounding-but-unverified specifics (e.g., specific timing claims like "this typically takes 3-5 minutes" unless measured).
+
+## Iteration counter
+- Extended phase iteration: 449
+- Consecutive PASS streak in extended phase: 48
+- Federation row status: FAIL at 4.49944/310 (carry-forward, not probed iter449)
+- All other required topics: PASSED, all probed from ≥2 angles

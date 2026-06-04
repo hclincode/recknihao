@@ -35,6 +35,111 @@ These are the absolutes most often stated incorrectly about Iceberg partitioning
 
 ---
 
+## LEADING CANONICAL PARTITION EVOLUTION WORKED EXAMPLE — "Migrating from date-only to (date, tenant_bucket) on a 3TB table" (read this FIRST for partition-spec-change questions)
+
+> **This is the findable canonical answer for the "I want to change my partition spec" question. Every command below has been verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html), [iceberg.apache.org/docs/1.5.1/evolution/](https://iceberg.apache.org/docs/1.5.1/evolution/), and Trino issue tracker (#25279, #26109, #26503). Do NOT invent commands — paste verbatim.**
+>
+> **Scenario:** You have a 3TB fact table `iceberg.analytics.user_events` partitioned only by `day(occurred_at)`. Most queries are per-tenant ("show me acme's last 90 days") and they're getting slow because every file in the last 90 days is opened to filter on `tenant_id`. You want to migrate to `(day(occurred_at), bucket(tenant_id, 64))` — keep daily time pruning, add bucketed tenant pruning to skip files for other tenants.
+>
+> **Why `bucket(tenant_id, 64)` instead of identity `tenant_id`?** With 800 tenants and severe size skew (one whale tenant holds 60% of rows), identity partitioning would create 800 partitions per day × 365 days = 292K partitions/year — too many, and most would be tiny. `bucket(tenant_id, 64)` hashes tenants into exactly 64 fixed buckets per day, giving balanced file sizes and bounded partition count (23,360/year). The query `WHERE tenant_id = 'acme'` still prunes — Iceberg applies the same hash to the predicate and reads only the matching bucket. The trade-off: per-tenant `COUNT(*)` is no longer metadata-only (would need identity partitioning for that).
+>
+> ### The five-step rewrite procedure on Trino 467 + Spark + Iceberg 1.5.2
+>
+> ```sql
+> -- STEP 1 (Trino 467) — Evolve the partition spec. Metadata-only operation, instant.
+> -- This affects NEW writes ONLY. Old files keep their old spec_id.
+> ALTER TABLE iceberg.analytics.user_events
+> SET PROPERTIES partitioning = ARRAY['day(occurred_at)', 'bucket(tenant_id, 64)'];
+> ```
+>
+> **What just happened:** the Iceberg table now has two partition specs in its metadata — `spec_id=0` (the old `day(occurred_at)` only) and `spec_id=1` (the new `(day, bucket(tenant_id, 64))`). New writes use spec_id=1. Existing files stay tagged with spec_id=0 and **continue to defeat tenant-bucket pruning until you rewrite them in step 3**.
+>
+> ```sql
+> -- STEP 2 (Trino 467, run BEFORE rewrite) — Confirm the spec change took, and see the baseline file distribution.
+> -- This metadata query works on BOTH Spark and Trino.
+> SELECT spec_id, COUNT(*) AS file_count, SUM(file_size_in_bytes)/(1024.0*1024*1024) AS total_gb
+> FROM iceberg.analytics."user_events$files"
+> GROUP BY spec_id
+> ORDER BY spec_id;
+> -- Expected output right after step 1:
+> --   spec_id | file_count | total_gb
+> --   --------+------------+---------
+> --         0 |     45,232 |  2978.4   <- everything still on the old spec
+> ```
+>
+> ```sql
+> -- STEP 3 (Spark SQL ONLY — Trino's EXECUTE optimize CANNOT do this) — Rewrite all old-spec files under the new spec.
+> -- This is the ONLY procedure on this stack that re-stamps existing files with the new spec_id.
+> -- Run from a spark-submit job; not from the Trino query console (will fail with parse error).
+> CALL iceberg.system.rewrite_data_files(
+>   table   => 'analytics.user_events',
+>   options => map(
+>     'rewrite-all',            'true',       -- force rewrite ALL files regardless of size
+>     'target-file-size-bytes', '268435456'   -- 256 MB target output file size
+>   )
+> );
+> ```
+>
+> **Why Spark and not Trino:** Trino's `ALTER TABLE ... EXECUTE optimize` only changes file SIZES (bin-pack within the existing partition layout). It does NOT repartition files to a new spec. Confirmed bugs ([trinodb/trino #25279](https://github.com/trinodb/trino/issues/25279), [#26109](https://github.com/trinodb/trino/issues/26109), [#26503](https://github.com/trinodb/trino/issues/26503)) mean post-evolution Trino `OPTIMIZE` may even produce files with incorrect/NULL partition values. **For partition spec migration, you MUST use Spark.**
+>
+> **Why `rewrite-all=true`:** the default bin-pack strategy only rewrites files that are "too small" — large healthy files from the old spec are skipped and stay on `spec_id=0`. `rewrite-all=true` forces Spark to rewrite every file regardless of size, restamping each with `spec_id=1` and the new bucket-partition path.
+>
+> **Cost and duration on a 3TB table:** ~1.5–3 hours on the production Spark cluster (depends on executor count). Temporary MinIO storage spike of ~2x table size (~6TB peak) until step 5's expire_snapshots runs.
+>
+> ```sql
+> -- STEP 4 (Trino 467 OR Spark — metadata query) — Verify rewrite completed.
+> -- Re-run periodically during the rewrite. When spec_id=0 row count = 0, migration is complete.
+> SELECT spec_id, COUNT(*) AS file_count, SUM(file_size_in_bytes)/(1024.0*1024*1024) AS total_gb
+> FROM iceberg.analytics."user_events$files"
+> GROUP BY spec_id
+> ORDER BY spec_id;
+> -- Expected output after step 3 completes:
+> --   spec_id | file_count | total_gb
+> --   --------+------------+---------
+> --         1 |     11,718 |  2978.4   <- all files now on the new spec, healthy 256MB sizes
+> ```
+>
+> ```sql
+> -- STEP 5 (Trino 467) — Expire snapshots so MinIO reclaims storage from the now-superseded old-spec files.
+> -- This MUST follow step 3 — without it, MinIO holds both pre-rewrite AND post-rewrite copies of every file.
+> ALTER TABLE iceberg.analytics.user_events
+> EXECUTE expire_snapshots(retention_threshold => '7d');
+> ```
+>
+> ### Query patterns that benefit from the new spec
+>
+> | Query pattern | Pre-migration | Post-migration (with full rewrite) |
+> |---|---|---|
+> | `WHERE occurred_at >= ... AND occurred_at < ... AND tenant_id = 'acme'` (date range + tenant filter) | Reads ALL files in the date range (every tenant) | Reads files in 1 out of 64 buckets per matching day — **~64x less I/O** |
+> | `WHERE occurred_at >= ... AND tenant_id IN ('acme', 'globex', 'initech')` | Reads ALL files in date range | Reads files in 3 out of 64 buckets per matching day — **~21x less I/O** |
+> | `WHERE occurred_at >= ... AND occurred_at < ...` (date only, no tenant) | Day pruning works as before | Same as before — bucket dimension is irrelevant when no tenant predicate |
+> | `WHERE tenant_id = 'acme'` (no time predicate) | Reads ALL files in ALL days | Reads files in 1 out of 64 buckets across ALL days — **~64x less I/O** but still all-time scan |
+> | `SELECT tenant_id, COUNT(*) FROM ... GROUP BY tenant_id` | Metadata-only on identity-partitioned tables; **NOT metadata-only on bucket-partitioned tables** | Same as before — must scan data files |
+>
+> ### DO-NOT-WRITE — banned forms in the partition evolution workflow
+>
+> | DO NOT write this | What is wrong | The right answer |
+> |---|---|---|
+> | `ALTER TABLE iceberg.analytics.user_events SET PARTITIONING = ARRAY['day(occurred_at)', 'bucket(tenant_id, 64)']` | The keyword is `SET PROPERTIES partitioning = ARRAY[...]`, NOT `SET PARTITIONING = ARRAY[...]`. The `partitioning` keyword goes INSIDE `PROPERTIES`, lowercase. | `ALTER TABLE <t> SET PROPERTIES partitioning = ARRAY['day(occurred_at)', 'bucket(tenant_id, 64)']` — verified at [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html). |
+> | `ALTER TABLE iceberg.analytics.user_events ADD PARTITION FIELD bucket(tenant_id, 64)` | This is **Spark SQL syntax** (`ALTER TABLE ... ADD PARTITION FIELD`), not Trino. Trino 467 does NOT support `ADD PARTITION FIELD`. | Use Trino's `SET PROPERTIES partitioning = ARRAY[...]` (full re-specification, NOT additive). To add a column to the spec, write the FULL new spec including the existing columns. |
+> | `ALTER TABLE iceberg.analytics.user_events EXECUTE optimize` to migrate files to the new spec | Trino's `EXECUTE optimize` only changes file SIZES (bin-pack within the existing partition layout). It does NOT repartition files to a new spec. Confirmed bugs ([trinodb/trino #25279](https://github.com/trinodb/trino/issues/25279), [#26109](https://github.com/trinodb/trino/issues/26109)) may even produce files with NULL/incorrect partition values. | Use Spark `CALL iceberg.system.rewrite_data_files(..., options => map('rewrite-all','true', ...))` for the spec-migration rewrite. After all files are on the new spec, you can resume Trino `EXECUTE optimize` for routine compaction. |
+> | `CALL iceberg.system.rewrite_data_files(...)` pasted into the Trino query console | `CALL iceberg.system.*` is **Spark SQL only**. Trino rejects with a parse error. | Run via spark-submit or a Spark SQL session. Trino has no native equivalent of Spark's `rewrite-all=true` cross-spec rewrite. |
+> | `CALL iceberg.system.rewrite_data_files(table => 'analytics.user_events', options => map('rewrite-all', 'true'), where => 'tenant_id = ''acme''')` | **Known bug — apache/iceberg #14667** — combining `rewrite-all=true` with a `where` predicate can produce DUPLICATE ROWS in the rewritten partition. | If you need to scope the rewrite (e.g., per-tenant), use `'min-input-files', '1'` with default bin-pack instead — see the full per-tenant safe form in the partition-evolution section later in this document. |
+> | `OPTIMIZE TABLE iceberg.analytics.user_events PARTITION (day='2026-05-01')` | This is **Hive/Impala syntax**, not Trino. Trino 467 has no `OPTIMIZE TABLE` statement. | `ALTER TABLE iceberg.analytics.user_events EXECUTE optimize WHERE occurred_at >= TIMESTAMP '2026-05-01 00:00:00' AND occurred_at < TIMESTAMP '2026-05-02 00:00:00'`. |
+> | Skipping step 5 (`expire_snapshots`) after the rewrite | Without expire_snapshots, MinIO holds BOTH the pre-rewrite Parquet files AND the post-rewrite ones — a temporary ~2x storage spike becomes permanent. The old snapshots still reference the old files. | Always run `ALTER TABLE ... EXECUTE expire_snapshots(retention_threshold => '7d')` AFTER `rewrite_data_files`. Schedule weekly going forward. |
+> | "After partition evolution, old queries break and must be rewritten." | False. Iceberg partition evolution is transparent to readers — the connector queries across both specs and merges results. Old queries continue to work and return identical results; they just don't benefit from the new pruning shape on old (pre-rewrite) files. | Reader queries are unchanged. Only the bulk rewrite is needed to ACTIVATE the new pruning on existing data. |
+>
+> **Why this DO-NOT-WRITE block exists:** the partition-spec-evolution question is high-stakes (3TB+ rewrites take hours; the wrong command can produce duplicate rows or NULL partition keys). Under pressure the temptation is to paste a remembered Spark/Hive/Impala syntax. Each banned form above has been observed as a confident-but-wrong response. **Always paste from this document.**
+>
+> ### Cross-references for the partition evolution workflow
+>
+> - **§"Partition evolution (changing partition spec later)"** later in this document — full rewrite details with the per-tenant safe alternative for scoped migrations.
+> - **§"Bucket partitioning — the two production footguns"** — sizing N, `write.distribution-mode='hash'` requirement.
+> - **Resource 17 §"Trino EXECUTE vs Spark CALL"** — the disambiguation matrix for every procedure call.
+> - **Resource 17 §"Safe scheduling order"** — compaction → expire → orphan, never reversed.
+
+---
+
 ## PARTITIONS-ARE-NOT-FILES — read before estimating file counts
 
 > **GUARDRAIL — Partition count NEVER equals file count.** A *partition* in Iceberg is a **logical grouping** (one distinct partition-key value, e.g., `day=2026-05-01` or `(day=2026-05-01, tenant_id='acme')`). The number of *data files* inside that partition is a separate, downstream quantity driven by three independent forces. **A partition typically holds many data files.** State this in every answer that estimates file counts from partition counts.

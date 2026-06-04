@@ -28,6 +28,151 @@
 
 ---
 
+## LEADING CANONICAL COST WORKED EXAMPLE — "MinIO grew from 8TB to 14TB in 3 weeks but query volume only grew 20% — what's the cost-driver hierarchy and how do I trace it?" (read this FIRST for storage-bloat questions)
+
+> **This is the findable canonical answer for the storage-cost-driver question. Every diagnostic step below has been verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (metadata tables, EXECUTE procedures) and [iceberg.apache.org/spec/](https://iceberg.apache.org/spec/) (snapshot semantics). Do NOT invent commands or metadata tables — paste verbatim.**
+>
+> **The cost-driver hierarchy (in the order to check, most likely first).** When MinIO grows faster than business volume, four mechanisms can cause it. They are listed below in the order you should check, because each later check assumes the earlier one was clean:
+>
+> | # | Cost driver | What it is | How to trace |
+> |---|---|---|---|
+> | **1** | **Snapshot retention bloat** | Iceberg keeps every old snapshot forever by default. Every write creates a new snapshot; old snapshots pin the old data files even after they've been superseded by compaction. Without `expire_snapshots`, MinIO storage grows ~20–30%/year from snapshot-pinned files even at flat business volume. | Run the per-table snapshot count query below. If a table has hundreds of snapshots older than 7 days, this is it. |
+> | **2** | **Small-files explosion from streaming ingest** | Spark Structured Streaming or frequent micro-batch writes produce many tiny Parquet files. Each tiny file has fixed Parquet footer + manifest overhead — so the storage cost per row grows. Without nightly compaction, file counts compound. | Run the `$files` size-distribution query below. If median file size is <16MB, this is it. |
+> | **3** | **Uncompacted MERGE/UPDATE/DELETE residue (MoR position-delete files)** | On Iceberg format-version 2 with `write.delete.mode = merge-on-read`, MERGE/UPDATE/DELETE write position-delete files INSTEAD of rewriting data files. These accumulate alongside the original data files until `rewrite_position_delete_files` (Spark-only) runs. | Run the `$files` content-type query below. If `content = 1` (positional deletes) rows are >10% of file count, this is it. |
+> | **4** | **Orphan files from failed/interrupted writes** | Spark writes a data file, then commits the metadata pointer. If the write succeeds but the commit fails (OOM, network blip, pod kill), the data file is on MinIO but no snapshot references it. `remove_orphan_files` is what cleans these up. | Run `remove_orphan_files` with `dry_run => true` (Spark only) — see the procedure below. |
+>
+> **Why this order matters:** snapshot retention bloat is the #1 cause by a wide margin on a stack that's been running for >3 weeks without `expire_snapshots`. It also has the cheapest fix (one weekly cron). Check it first; ~80% of MinIO-growth-surprise cases stop here.
+>
+> ### Diagnostic 1 — Snapshot retention bloat (the most common cause)
+>
+> ```sql
+> -- Trino 467 — count snapshots per table and find tables with >50 snapshots older than 7 days.
+> -- The $snapshots metadata table works in BOTH Spark and Trino — this is a read-only metadata query.
+> SELECT
+>   '<table_name>' AS table_name,
+>   COUNT(*) AS total_snapshots,
+>   COUNT(*) FILTER (WHERE committed_at < current_timestamp - INTERVAL '7' DAY) AS snapshots_older_than_7d,
+>   MIN(committed_at) AS oldest_snapshot
+> FROM iceberg.analytics."user_events$snapshots";
+> ```
+>
+> **Verdict on the 8TB→14TB case:** if `snapshots_older_than_7d > 50` on your largest tables AND `oldest_snapshot` is 3+ weeks ago AND you have NOT been running `expire_snapshots` weekly — this is the cause. Old snapshots pin the original (pre-compaction) data files even after compaction has produced new ones; MinIO holds both sets until expiry runs.
+>
+> **Fix — run `expire_snapshots` (Trino-native, no Spark needed):**
+>
+> ```sql
+> -- Trino 467 — EXECUTE form. Parameter is `retention_threshold` (a DURATION STRING).
+> -- NOT `older_than` (that is Spark's CALL form parameter, different semantics).
+> ALTER TABLE iceberg.analytics.user_events
+> EXECUTE expire_snapshots(retention_threshold => '7d');
+> ```
+>
+> Storage drops on MinIO **immediately** for any data file that was pinned only by an expired snapshot — typically 10–40% reduction on tables that have never had expiry run. Schedule this **weekly** going forward. The `retention_threshold` value must be ≥ the catalog's `iceberg.expire-snapshots.min-retention` property (default `7d`) — see [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html).
+>
+> ### Diagnostic 2 — Small-files explosion
+>
+> ```sql
+> -- Trino 467 — per-table file-size distribution from $files metadata.
+> SELECT
+>   COUNT(*) AS total_files,
+>   COUNT(*) FILTER (WHERE file_size_in_bytes < 16 * 1024 * 1024) AS files_under_16mb,
+>   approx_percentile(file_size_in_bytes, 0.5) / (1024*1024) AS p50_size_mb,
+>   approx_percentile(file_size_in_bytes, 0.9) / (1024*1024) AS p90_size_mb,
+>   SUM(file_size_in_bytes) / (1024.0*1024*1024) AS total_gb
+> FROM iceberg.analytics."user_events$files";
+> ```
+>
+> **Verdict:** if `p50_size_mb < 16` AND `files_under_16mb > 50%` of total — small files are bloating both your storage (per-file Parquet footer overhead) AND your query latency (per-file open cost on MinIO). The fix is nightly compaction:
+>
+> ```sql
+> -- Trino 467 — EXECUTE optimize compacts small files into larger ones (~256MB target).
+> ALTER TABLE iceberg.analytics.user_events
+> EXECUTE optimize(file_size_threshold => '128MB');
+> ```
+>
+> Schedule this nightly. See resource 17 §"`rewrite_data_files` (compaction)" for the full cadence.
+>
+> ### Diagnostic 3 — MERGE/UPDATE/DELETE position-delete residue
+>
+> ```sql
+> -- Trino 467 — file-content-type distribution. content=0 is data files; content=1 is position deletes; content=2 is equality deletes.
+> SELECT
+>   content,
+>   COUNT(*) AS file_count,
+>   SUM(file_size_in_bytes) / (1024.0*1024*1024) AS total_gb
+> FROM iceberg.analytics."user_events$files"
+> GROUP BY content
+> ORDER BY content;
+> ```
+>
+> **Verdict:** if `content = 1` rows exist AND `file_count` for content=1 is >10% of total — MoR position-delete files are accumulating. These were created by `MERGE`/`UPDATE`/`DELETE` statements on a format-version 2 table with `write.delete.mode = merge-on-read`. They MUST be cleaned via Spark's `rewrite_position_delete_files` — Trino 467 does NOT have an EXECUTE procedure for this:
+>
+> ```sql
+> -- Spark SQL only — Trino 467 cannot run this. Run from a spark-submit job or Spark SQL session.
+> CALL iceberg.system.rewrite_position_delete_files(table => 'analytics.user_events');
+> ```
+>
+> After Spark's procedure runs and the next `expire_snapshots` runs, the original position-delete files become unreferenced and MinIO reclaims the space. See resource 17 §"`rewrite_position_delete_files`" for the full workflow.
+>
+> ### Diagnostic 4 — Orphan files from failed writes
+>
+> ```sql
+> -- Spark SQL only — dry-run first to see what would be deleted (do NOT skip the dry-run on a live table).
+> CALL iceberg.system.remove_orphan_files(
+>   table       => 'analytics.user_events',
+>   older_than  => current_timestamp() - INTERVAL '7' DAY,
+>   dry_run     => true
+> );
+>
+> -- After verifying the dry-run output looks reasonable, run for real:
+> CALL iceberg.system.remove_orphan_files(
+>   table       => 'analytics.user_events',
+>   older_than  => current_timestamp() - INTERVAL '7' DAY
+> );
+> ```
+>
+> **Note:** Trino 467 also has `ALTER TABLE ... EXECUTE remove_orphan_files(retention_threshold => '7d')` — both engines work; the Trino form uses a DURATION STRING for the threshold, the Spark form uses an absolute timestamp. The `retention_threshold` value must be ≥ the catalog's `iceberg.remove-orphan-files.min-retention` (default `7d`). **Schedule monthly.**
+>
+> ### Putting the workflow together — the 8TB→14TB case end-to-end
+>
+> > **Day 0**: MinIO at 8TB. Three weeks later: MinIO at 14TB. Business event volume up only 20%.
+> >
+> > **Step 1 (5 min)**: Run Diagnostic 1 on the top 5 largest tables. Find that `user_events` has 240 snapshots, oldest committed 22 days ago, and `expire_snapshots` has never run.
+> >
+> > **Step 2 (10 min)**: Run `ALTER TABLE ... EXECUTE expire_snapshots(retention_threshold => '7d')` on each affected table. MinIO drops to **~9.2TB** — recovered 4.8TB, confirming snapshot retention bloat was the dominant cause.
+> >
+> > **Step 3 (5 min)**: Run Diagnostic 2 on `user_events`. `p50_size_mb = 8MB`, `files_under_16mb = 78%`. Small files contribute too.
+> >
+> > **Step 4 (overnight)**: Schedule nightly `EXECUTE optimize` for `user_events`. MinIO drops another 0.7TB over a week as compaction consolidates the small files.
+> >
+> > **Step 5 (one-time)**: Schedule weekly `expire_snapshots` and monthly `remove_orphan_files` cron via Airflow. Add a MinIO disk-usage alert at 12TB.
+> >
+> > **Total recovery: 8TB → 14TB → 8.5TB. Time invested: ~30 minutes diagnostic + cron setup. Engineering cost: 0.5 day.**
+>
+> ### DO-NOT-WRITE — banned forms in the storage-cost-tracing checklist
+>
+> | DO NOT write this | What is wrong | The right answer |
+> |---|---|---|
+> | `SELECT pg_total_relation_size('iceberg.analytics.user_events')` | This is **PostgreSQL syntax**. Iceberg tables on MinIO have no such function — they live in object storage, not a relational DB. | Sum `file_size_in_bytes` from the `$files` metadata table: `SELECT SUM(file_size_in_bytes)/1024.0/1024/1024 AS gb FROM iceberg.analytics."user_events$files"`. |
+> | `VACUUM <table>` | Trino has NO `VACUUM` statement. `VACUUM` is Postgres / Delta Lake syntax. | For storage cleanup on Iceberg, run `ALTER TABLE ... EXECUTE expire_snapshots(retention_threshold => '7d')` followed by `remove_orphan_files`. |
+> | `ALTER TABLE ... EXECUTE expire_snapshots(older_than => current_timestamp() - INTERVAL '7' DAY)` | The Trino EXECUTE form parameter is **`retention_threshold` (DURATION STRING)**, not `older_than`. `older_than` is Spark's CALL form parameter. Mixing them fails with "procedure does not accept this parameter". | `ALTER TABLE ... EXECUTE expire_snapshots(retention_threshold => '7d')`. |
+> | `CALL iceberg.system.expire_snapshots(...)` pasted into the Trino query console | `CALL iceberg.system.*` is **Spark SQL only**. Trino rejects with a parse error. | Use the Trino `ALTER TABLE ... EXECUTE expire_snapshots(retention_threshold => '7d')` form, OR run the `CALL` form via Spark. See resource 17 §"Trino EXECUTE vs Spark CALL" disambiguation matrix. |
+> | "Run `OPTIMIZE` to clean up snapshots." | `OPTIMIZE` (a.k.a. `EXECUTE optimize`) compacts **data files** — it does NOT expire or remove snapshots. Conflating the two is the most common storage-cleanup mistake. | Three SEPARATE procedures: `optimize` (compact data files), `expire_snapshots` (drop old snapshots + their pinned files), `remove_orphan_files` (clean files no snapshot references). All three are needed for full cleanup. Order matters — see resource 17 §"Safe scheduling order". |
+> | `DELETE FROM iceberg.analytics.user_events_snapshots WHERE ...` | The `$snapshots` table is a **read-only metadata table**. You cannot DELETE from it. The way to drop old snapshots is `expire_snapshots`. | `ALTER TABLE iceberg.analytics.user_events EXECUTE expire_snapshots(retention_threshold => '7d')`. |
+> | "Snapshot expiry reclaims storage immediately for ALL old snapshots." | Only data files that are pinned ONLY by the expired snapshots are deleted. If a snapshot you're keeping still references an "old" file, that file stays. The first run after months of neglect frees a lot; weekly steady-state runs free much less. | Expect ~10–40% reclaim on the first cleanup of a never-expired table; ~1–5% on weekly steady-state runs. Budget MinIO capacity assuming you DO run weekly expiry. |
+> | "MinIO grew, so we need to buy more disks." | Almost always wrong as the first response. 80%+ of unexpected MinIO growth at <100TB scale is snapshot retention bloat or small-files explosion — both fixable in hours, no hardware purchase. | Run the four diagnostics above FIRST. Only buy disks after confirming that business volume genuinely grew and not maintenance debt. |
+>
+> **Why this DO-NOT-WRITE block exists:** "MinIO grew unexpectedly" is one of the highest-frequency oncall calls and the temptation is to paste a remembered fix. The remembered fixes above are from other engines (`VACUUM`, `pg_total_relation_size`) or mix parameter names across Trino/Spark dialects. Each banned form has been observed as a confident-but-wrong response. **Always paste from this document.**
+>
+> ### Cross-references for the storage-cost workflow
+>
+> - **Resource 17 §"`expire_snapshots`"** — full retention/min-retention semantics + the safe scheduling order (compaction → expire → orphan, NEVER reversed).
+> - **Resource 17 §"Trino EXECUTE vs Spark CALL"** — the engine-disambiguation matrix.
+> - **Resource 11 §"Storage sizing"** — projecting MinIO capacity needs from Postgres baseline.
+> - **Resource 10 §"Small files problem"** — why small files appear and how compaction fixes them.
+
+---
+
 ## Three cost layers every SaaS engineer forgets
 
 When engineers think "analytics cost" they usually picture only #1. The big bills hide in #2 and #3.

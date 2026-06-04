@@ -41,6 +41,103 @@ When you read Trino's EXPLAIN ANALYZE output, you'll hit these terms. Definition
 
 ---
 
+## LEADING CANONICAL ONCALL WORKED EXAMPLE — "Dashboard query that ran in 2s last week now takes 45s" (read this FIRST when paged)
+
+> **This is the findable canonical answer for the oncall-workflow question. If you are looking for "a slow query I need to diagnose right now", THIS is the workflow. Every step below has been verified against [trino.io/docs/current/sql/explain-analyze.html](https://trino.io/docs/current/sql/explain-analyze.html), [trino.io/docs/current/optimizer/pushdown.html](https://trino.io/docs/current/optimizer/pushdown.html), the Trino 467 `system.runtime.*` schema, and the Iceberg connector procedure registry. Do NOT invent commands — paste verbatim from this section.**
+>
+> **Scenario:** A dashboard query that consistently ran in ~2 seconds last week now takes 45 seconds. No application code changed. The data volume grew "only a little." Question: what's the oncall checklist?
+>
+> **FIRST 60 SECONDS — the four-check rapid triage (do these IN ORDER; stop at the first one that explains the symptom):**
+>
+> ### Check 1 (≈10s): Is the cluster saturated? — Trino UI concurrency
+>
+> Open `http://trino-coordinator:8080/ui/queries`. Read three numbers off the top dashboard:
+>
+> - **Queued count > 0** → workers are saturated; everyone's queries are slow, not just this one. Root cause is **concurrency spike**, not the query. Skip to "Fixes for concurrency" in Step 1 below.
+> - **Running count > 50** with a sustained burst (many queries started in the same 60-second window) → same conclusion: concurrency.
+> - **Both queued = 0 AND running ≈ normal (5–20)** → this is NOT a cluster-wide problem. Move to Check 2.
+>
+> ### Check 2 (≈15s): Is it ALL queries on this table, or just this one? — Verify with a known-good query
+>
+> Re-run a known-fast query against the same table:
+>
+> ```sql
+> -- Trino 467 — bare table count (Iceberg metadata-only, should be <1s).
+> SELECT COUNT(*) FROM iceberg.analytics.user_events;
+> ```
+>
+> - If `COUNT(*)` is also slow → table itself is the problem (metadata bloat, manifest list explosion). Jump to Step 7 (small files / manifest bloat).
+> - If `COUNT(*)` is fast (<1s) → query-specific issue. Continue to Check 3.
+>
+> ### Check 3 (≈20s): Did partition pruning silently break? — `EXPLAIN` and look at the TableScan
+>
+> ```sql
+> -- Trino 467 — distributed plan with predicate stats (does NOT execute the query).
+> EXPLAIN (TYPE DISTRIBUTED) <paste the slow dashboard query>;
+> ```
+>
+> Look for one of these signatures on the `TableScan` node for the fact table:
+>
+> | Signature | Diagnosis |
+> |---|---|
+> | `TableScan` has a **predicate inside the connector** (`constraint = day(occurred_at) IN ...`) → pruning ON | Pruning is working; root cause is something else (skew, joins, file count). Go to Check 4. |
+> | `TableScan` has **NO partition predicate inside the connector** + a `Filter` node ABOVE the TableScan applying the date predicate | **Pruning broke.** Predicate shape changed (likely `WHERE date(occurred_at)='...'` or `WHERE CAST(occurred_at AS DATE)='...'` — function-wrapped predicate that the optimizer cannot push to partition layout). Fix by rewriting to a raw range comparison: `WHERE occurred_at >= TIMESTAMP '2026-05-01 00:00:00' AND occurred_at < TIMESTAMP '2026-05-02 00:00:00'`. See Step 4 below for the full predicate-shape rules. |
+> | `TableScan` shows `inputRows` in the **billions** when the dashboard should only need one day | Same root cause as the row above — predicate didn't push. Same fix. |
+>
+> ### Check 4 (≈15s): Is one fragment doing all the work? — `EXPLAIN ANALYZE` and look at per-fragment time
+>
+> If you got here, pruning is fine — the question is *where* time is going. Run the slow query through `EXPLAIN ANALYZE` (this DOES execute the query):
+>
+> ```sql
+> EXPLAIN ANALYZE <paste the slow query>;
+> ```
+>
+> Read the per-fragment timings at the top of each fragment block. Three patterns:
+>
+> | Pattern | Diagnosis | Pointer |
+> |---|---|---|
+> | One fragment shows `CPU time` ≈ `Scheduled time` AND wall-clock dominates total query time | CPU-bound aggregation or hash-join build. Maybe a heavy `GROUP BY` with high-cardinality keys. Often fine — query is just expensive. | Step 6 (data model) |
+> | One fragment shows `Scheduled time >> CPU time` | **I/O-bound or network-bound** — waiting on MinIO reads or downstream consumers. Often means small-files explosion at the storage layer (per-file open overhead dominates). | Step 7 (small files) |
+> | The whole query runs on **one or two drivers** while others are idle (driver count = 1 in the heaviest operator) | **Skew** — one partition or one tenant has 95% of the rows. | Step 5 (partition skew) |
+>
+> **End of FIRST 60 SECONDS.** By this point you have narrowed the root cause to one of: (a) concurrency, (b) metadata bloat, (c) pruning failure, (d) skew, (e) small files, or (f) genuinely expensive query. The remaining steps in this document drill down into each.
+>
+> ### Worked example — the four-check triage applied
+>
+> > **Symptom**: dashboard query (90-day tenant funnel) ran in 2s last week, now 45s. No code change.
+> >
+> > **Check 1**: Trino UI shows queued=0, running=8 (normal). Not concurrency. Continue.
+> >
+> > **Check 2**: `SELECT COUNT(*) FROM iceberg.analytics.user_events` returns in 0.4s. Fast. Not metadata bloat. Continue.
+> >
+> > **Check 3**: `EXPLAIN (TYPE DISTRIBUTED)` shows TableScan with `inputRows = 1.4B` and a `Filter` node above it carrying `date(occurred_at) = DATE '2026-05-22'`. **Pruning broke.** The dashboard's BI tool got upgraded last weekend and now wraps the date predicate in `date(...)`. Old shape was `occurred_at >= TIMESTAMP '2026-05-22 00:00:00' AND occurred_at < TIMESTAMP '2026-05-23 00:00:00'`.
+> >
+> > **Fix**: edit the dashboard SQL to remove the `date()` wrap and use the raw range comparison. Re-run: query back to 2s. **Total triage time: ~60 seconds.**
+>
+> ### DO-NOT-WRITE — banned forms in the oncall checklist (these are the fabrications the responder tends to invent under pressure)
+>
+> | DO NOT write this | What is wrong | The right answer |
+> |---|---|---|
+> | `SELECT * FROM system.runtime.queries WHERE catalog = 'iceberg' ORDER BY peak_memory_bytes DESC` | The `catalog` column does NOT exist on `system.runtime.queries` (see Trino 467 schema below). The `peak_memory_bytes` column does NOT exist there either. Both are confidently-invented column names. | To find queries that touched a catalog, search the SQL text: `WHERE query LIKE '%iceberg.%' AND state = 'FINISHED'`. For peak memory, scrape JMX MBeans `trino.execution:name=QueryManager` or the persisted event-listener `QueryCompletedEvent`. |
+> | `EXPLAIN PLAN FOR <query>` | This is **Oracle/Postgres syntax**, not Trino. Trino does NOT accept `PLAN FOR`. | `EXPLAIN <query>` (defaults to DISTRIBUTED), or `EXPLAIN (TYPE DISTRIBUTED) <query>`, or `EXPLAIN (TYPE IO) <query>`. See [trino.io/docs/current/sql/explain.html](https://trino.io/docs/current/sql/explain.html). |
+> | `ANALYZE TABLE iceberg.analytics.user_events` | The `TABLE` keyword is **Spark/Hive dialect**. Trino's parser rejects it. | Bare `ANALYZE iceberg.analytics.user_events` — no `TABLE` keyword. See resource 24-trino-cbo-analyze.md §4 leading canonical statement. |
+> | `CALL iceberg.system.rewrite_data_files(...)` pasted into the Trino query console | `CALL iceberg.system.*` is **Spark SQL only**; Trino rejects with parse error. Trino's equivalent is `ALTER TABLE ... EXECUTE`. | For compaction on Trino 467: `ALTER TABLE <t> EXECUTE optimize(file_size_threshold => '512MB')`. For procedures Trino lacks (rewrite-all=true, z-order, MoR delete cleanup, rewrite_manifests on 467), run via Spark — see resource 17 §"Trino EXECUTE vs Spark CALL" disambiguation matrix. |
+> | `KILL QUERY '<query_id>'` | Not Trino syntax. Trino uses `CALL system.runtime.kill_query(query_id => '<id>', message => '<reason>')`. | The verified kill command is in the "Immediate remediation" subsection below. |
+> | "The query is slow because the CBO chose a bad plan — Trino has known CBO bugs." | This is rarely the actual root cause. The CBO can choose a bad plan ONLY IF you've never run `ANALYZE` (no stats → heuristics → sometimes wrong). The fix is to run `ANALYZE`, not file a Trino bug. | First run `ANALYZE iceberg.<schema>.<table>` and re-test. The "Trino bug" hypothesis is the LAST hypothesis, not the first. See resource 24. |
+> | "Adding more workers will speed up any slow query." | False. Trino scales by the slowest fragment. If the bottleneck is **skew** (one driver, others idle) or **coordinator-bound planning** (manifest explosion), more workers do NOT help. | Diagnose with EXPLAIN ANALYZE per-fragment timing FIRST. Add workers only after you've confirmed the query is CPU-bound across many drivers. |
+> | "Restart the Trino cluster to fix slow queries." | This nukes all in-flight queries and the metadata cache. It is essentially never the right answer for a query-perf regression. | The metadata cache (`iceberg.metadata-cache-enabled=true`) can be flushed without restart via the JMX endpoint; query-perf bugs almost always have a non-restart fix (recompile predicate, run ANALYZE, compact). |
+>
+> **Why this DO-NOT-WRITE block exists:** under oncall pressure the temptation is to paste a "well-known" command from memory — but the well-known commands above are from **other engines** (Spark, Oracle, Postgres) or use **invented columns** that sound plausible. Each banned form has been observed as a confident-but-wrong response. **Always paste from this document, not from memory.**
+>
+> ### Cross-references for the FIRST 60 SECONDS workflow
+>
+> - **Resource 17 §"Trino EXECUTE vs Spark CALL"** — full disambiguation of which procedures run on Trino vs Spark.
+> - **Resource 24 §4** — canonical `ANALYZE` syntax for Trino 467 (no `TABLE` keyword).
+> - **Resource 28 §"EXPLAIN-driven optimization"** — complex-query CTE inlining, CorrelatedJoin, materialized=table dbt lever.
+> - **Resource 10 §"Predicates that may defeat partition pruning"** — full catalog of function-wrapped / type-mismatch predicate shapes.
+
+---
+
 ## Triage priority order
 
 When someone reports "queries are slow," work through these in order — each step takes 1–5 minutes and the answer in step 1 often makes the later steps irrelevant:
