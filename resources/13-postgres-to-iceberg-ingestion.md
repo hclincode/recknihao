@@ -5404,6 +5404,8 @@ VALUES (DBT_INTERNAL_SOURCE.order_id, DBT_INTERNAL_SOURCE.customer_id, ...);
 
 ### `on_schema_change` — the FOUR options and the correct default
 
+> **Findability anchor (read first if your question contains any of these phrasings):** "added a column to incremental model", "incremental model schema change", "new column silently missing", "new column silently dropped", "on_schema_change", "incremental column not appearing", "dbt incremental add column", "make incremental model pick up new column", "I added a column to my incremental dbt model and it's not in the output", "incremental model new column missing after dbt run", "dbt build succeeded but new column absent". **This section is the canonical answer.** **DO-NOT-CONFUSE: dbt CONTRACTS = build-time schema/type preflight (fails build on declared-vs-actual mismatch); `on_schema_change` = incremental-merge column handling (what happens to the TARGET table when the model SELECT gains/loses a column). For "I added a column to an incremental model and it's silently missing", the answer is `on_schema_change`, NOT contracts.** See [resource 27 § 6.7C](27-oracle-plsql-to-dbt-trino.md) for the contracts canonical and the distinction.
+
 > **CRITICAL — the dbt default for `on_schema_change` is `ignore`, NOT `fail`.** Another very common AI-generated mistake is to claim `fail` is the default. **It is not.** If you do not set `on_schema_change` explicitly, dbt uses `ignore` semantics: any new column added to the source SELECT is **silently dropped** from the INSERT/UPDATE, never propagates to the target Iceberg table, and never appears in downstream queries. This is silent data loss for newly-added source columns.
 
 | Value | Behavior on a new source column | Behavior on a removed source column |
