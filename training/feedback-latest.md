@@ -1,101 +1,122 @@
-# Judge Feedback — Iter 477 (extended phase, end-of-iteration)
+# Iter 478 Judge Feedback — Extended phase, end-of-iteration
 
-## Overall verdict
+**Overall: 4.0625 PASS** (avg of 4.5 / 5.0 / 1.75 / 5.0 across Q1–Q4). 77th consecutive overall PASS in extended phase, BUT softest in many iters — Q3 is a HARD FAIL (1.75) with TWO fabricated session-property names. The high Q2 + Q4 scores (both 5.0) and a clean Q1 (4.5) saved the iteration. Federation NOT probed this iter (4.49944/310 row stays held per iter472-477 directive).
 
-**4.75 STRONG PASS** (avg of 4 questions). 76th consecutive overall PASS in extended phase. +0.73 above iter476's 4.0156 thin pass; matches/exceeds iter475's 4.6953. CITATION-HYGIENE STREAK FULLY RESTORED — zero load-bearing fabrications across all four answers.
-
-## Re-probe statuses (both CONFIRMED FIXED)
-
-- **Q1 truncate-fix — CONFIRMED HELD.** Responder used lowercase `truncate(amount * 100) / 100`, explicitly stated 1-arg only, gave general form `truncate(amount * power(10, d)) / power(10, d)`, flagged uppercase `TRUNC` as Oracle (not Trino), flagged 2-arg `truncate(x, 2)` as fabricated, distinguished truncate-toward-zero vs round-HALF_UP semantics for billing. r27 §4.4 numeric-table row + §4.4C TRUNC-truncate guardrail + §4.4B consolidated DO-NOT-WRITE entries (iter476 EDITS A+B+C) all FOUND AND APPLIED.
-- **Q2 star-shorthand-fix — CONFIRMED HELD.** Responder gave full 3-branch MERGE with EXPLICIT column lists in both UPDATE SET (`customer_id=s.customer_id, amount=s.amount, status=s.status, updated_at=s.updated_at`) AND INSERT (`INSERT (id, customer_id, amount, status, updated_at) VALUES (s.id, ...)`); DELETE-first ordering for first-match-wins; explicit call-out that `UPDATE SET *` / `INSERT *` is Spark/Snowflake/Databricks-only and NOT Trino. r27 §4.6B MERGE star-shorthand guardrail + §4.4B consolidated DO-NOT-WRITE entries (iter476 EDITS C+D) + r13 line-5214 + line-5239 reconciliations (EDITS E+F) all flowed through to the answer.
+---
 
 ## Per-question breakdown
 
-| Q | Topic | Accuracy | Completeness | Clarity | Actionability | Avg | Verdict |
-|---|---|---|---|---|---|---|---|
-| Q1 | Oracle TRUNC(amount,2) → Trino (re-probe) | 4.75 | 4.75 | 4.75 | 4.75 | **4.75** | STRONG PASS |
-| Q2 | Trino MERGE upsert+conditional-DELETE (re-probe) | 5.0 | 4.75 | 4.75 | 5.0 | **4.875** | STRONG PASS |
-| Q3 | OPA row-level filtering | 4.75 | 4.5 | 4.5 | 4.75 | **4.625** | STRONG PASS |
-| Q4 | Iceberg snapshot rollback | 4.5 | 4.75 | 4.75 | 5.0 | **4.75** | STRONG PASS |
+### Q1 — Spark writeTo vs saveAsTable / createOrReplace (4.5 STRONG PASS)
+- **Accuracy 5.0**: All three API claims verified against iceberg.apache.org/docs/latest/spark-writes/. `df.writeTo("iceberg.analytics.events").append()` is the canonical DataFrameWriterV2 API. v1 `saveAsTable` with `format("iceberg")` "loads an isolated table reference that will not automatically refresh tables used by queries" — the catalog-routing caveat is real. `createOrReplace()` drops + recreates (erases snapshot history) — correct.
+- **Completeness 4.0**: Three APIs + semantics covered. Could mention Hive Metastore catalog routing on the production stack.
+- **Clarity 4.0**: Legacy-vs-v2 framing is clear.
+- **Actionability 5.0**: Exact API + code snippet copy-paste runnable.
+- **Fabs**: None.
 
-**Overall: (4.75 + 4.875 + 4.625 + 4.75) / 4 = 4.75 STRONG PASS.**
+### Q2 — Iceberg partition transforms + bucket arg order (5.0 STRONG PASS)
+- **Accuracy 5.0**: The Trino `bucket(column, N)` (column FIRST) vs Spark `bucket(N, column)` (count FIRST) cross-engine distinction is the known real difference, verified at:
+  - trino.io/docs/current/connector/iceberg.html — `partitioning = ARRAY['city', 'bucket(userid, 16)']` (column-first)
+  - iceberg.apache.org/docs/latest/spark-ddl/ — `PARTITIONED BY (bucket(16, id), days(ts), category)` (count-first)
+  - day()/month()/truncate(col,N) transforms all valid in Trino.
+- **Completeness 5.0**: Decision tree (day for time-range, bucket for high-cardinality IDs, truncate for coarse buckets) + arg-order table + worked CREATE TABLE with `partitioning = ARRAY['day(occurred_at)','bucket(tenant_id, 64)']`.
+- **Clarity 5.0**: Decision-tree format excellent for beginners.
+- **Actionability 5.0**: Engineer can copy-paste the DDL.
+- **Fabs**: None.
 
-### Q1 — Oracle `TRUNC(amount, 2)` decimal truncation → Trino (re-probe)
-- Accuracy 4.75: core claims (`truncate` 1-arg only, lowercase, no `TRUNC`, no 2-arg `truncate(x, 2)`) all docs-anchored at trino.io/docs/current/functions/math.html. Minor: responder attributed `Function 'trunc' not registered` error wording to a 2-arg `truncate(x, 2)` call — that exact error text is what uppercase `TRUNC` produces; a 2-arg lowercase `truncate(...)` would fail with wrong-arity / function-resolution, not the not-registered text. Conceptual claim correct; error-message attribution slightly imprecise.
-- Completeness 4.75: general form + worked example + 2-arg ban + Oracle-side `TRUNC` ban + truncate-vs-round HALF_UP billing distinction.
-- Clarity 4.75: jargon-free, billing example concrete.
-- Actionability 4.75: copy-pasteable; HALF_UP vs toward-zero call-out gives the criterion for engineer choice.
+### Q3 — Trino memory limit / spill / resource groups (1.75 HARD FAIL — TWO FABS)
+- **Accuracy 1.0**: Of the three "knobs" in the responder's table:
+  - **`query_max_memory` — REAL session property** (per trino.io/docs/current/admin/properties-memory-management.html; "this session property cannot increase the limit above the limit set by the query.max-memory configuration option"). VERIFIED.
+  - **`task_max_memory` — FABRICATED**. No such Trino session property exists. Per-node task memory is the CONFIG property `query.max-memory-per-node` (set in `config.properties` at cluster start, NOT session-settable). There is an experimental `task.max-memory-per-task` config but no session counterpart. Engineer copy-pasting `SET SESSION task_max_memory='4GB'` gets `Session property task_max_memory does not exist`.
+  - **`memory_revoking_enabled` — FABRICATED, AND the functional claim is wrong**. There is no such Trino session property. The claim that it "enables spill-to-disk for GROUP BY" is incorrect: the correct lever is `SET SESSION spill_enabled = true` (config `spill-enabled`), per trino.io/docs/current/admin/properties-spilling.html. The terms `memory-revoking-threshold` and `memory-revoking-target` are CONFIG (not session) properties that control WHEN spill triggers (e.g., when JVM heap exceeds 90%, revoke memory until it drops to 70%) — NOT a knob to enable/disable spill. Engineer copy-pasting `SET SESSION memory_revoking_enabled=true` gets `Session property memory_revoking_enabled does not exist` AND has no spill behavior because `spill_enabled` was never set.
+  - The resource-groups-cluster-level claim is CORRECT (resource groups in `etc/resource-groups.properties` are cluster-level, not query-level).
+- **Completeness 2.0**: Covers three knobs but two are invented. Missing: `query_max_total_memory` (real session property — user+system limit), `spill_enabled` (the actually correct spill-enable lever), the config-only nature of per-node limits, the resource-groups soft-vs-hard memory limit framing.
+- **Clarity 3.0**: Table format is clear and skimmable — but clarity of confidently-wrong facts is anti-helpful (responder writes the wrong fact crisply, which makes the engineer trust it).
+- **Actionability 1.0**: 2 of 3 copy-paste examples FAIL with "Session property does not exist" parse errors. Engineer trying to fix an OOM will run these, see the error, and lose trust. No actionable correct guidance for spill-to-disk.
+- **Fabs**:
+  - **FAB 1**: `task_max_memory` — fabricated session-property name. Correct lever: per-node memory is config-only `query.max-memory-per-node` (cluster-level, in `config.properties`, requires restart). Source: trino.io/docs/current/admin/properties-memory-management.html.
+  - **FAB 2**: `memory_revoking_enabled` — fabricated session-property name. Correct lever to enable spill-to-disk: `SET SESSION spill_enabled = true` (or cluster-level `spill-enabled=true` in `config.properties`). `memory-revoking-threshold` / `memory-revoking-target` are config-only knobs that tune WHEN spill triggers, not WHETHER it is enabled. Source: trino.io/docs/current/admin/properties-spilling.html + trino.io/docs/current/admin/spill.html.
+- **Fab class**: Same as iter474 (`distributed_join_distribution_type`) — fabricated-session-property-name via sibling-name extrapolation. The responder reaches for a plausible-sounding name (`task_max_memory` looks like a sibling of `query_max_memory`; `memory_revoking_enabled` looks like a sibling of `spill_enabled`) and presents it as real.
 
-### Q2 — Trino MERGE upsert + conditional DELETE full pattern (re-probe)
-- Accuracy 5.0: every claim docs-anchored at trino.io/docs/current/sql/merge.html. DELETE-first ordering correctly grounded in the docs quote `For each source row, the WHEN clauses are processed in order. Only the first matching WHEN clause is executed.`
-- Completeness 4.75: 3-branch CDC pattern (DELETE/UPDATE/INSERT) + DELETE-first ordering + star-shorthand ban call-out + explicit column lists in both branches.
-- Clarity 4.75: op-code CDC framing (`'d'` / `'u'` / `'c'` / `'r'`) makes the structure concrete.
-- Actionability 5.0: full copy-paste runnable MERGE.
+### Q4 — dbt-trino incremental_strategy (5.0 STRONG PASS)
+- **Accuracy 5.0**: All three strategies real per docs.getdbt.com/reference/resource-configs/trino-configs:
+  - `append` — default, insert-only, no `unique_key` needed, NOT idempotent on re-run.
+  - `delete+insert` — two-phase, idempotent, no MERGE required.
+  - `merge` — constructs Trino MERGE, requires `unique_key`, idempotent.
+  - `partitioned_by`, `is_incremental()` guard, COALESCE(MAX) watermark, 3-day lookback variant — all valid.
+- **Completeness 5.0**: Strategy comparison table + canonical merge model + watermark + lookback variant.
+- **Clarity 5.0**: Decision-tree-friendly table.
+- **Actionability 5.0**: Canonical model template ready to copy-paste.
+- **Fabs**: None.
 
-### Q3 — OPA row-level filtering in Trino
-- Accuracy 4.75: model matches docs at trino.io/docs/current/security/opa-access-control.html. Minor: responder did not name the specific `opa.policy.row-filters-uri` / `opa.policy.column-masking-uri` config keys, but the conceptual model (Trino sends user/action/table/columns JSON over HTTP per query; OPA returns row filters + column masks; Trino applies the WHERE at query time) is right. No fabricated `SET ROW FILTER` DDL or fabricated OPA endpoint paths.
-- Completeness 4.5: good coverage; specific Rego correctly deferred to external governance doc per prod_info.md. Could be stronger by naming the row-filters-uri / column-masking-uri config keys.
-- Clarity 4.5: Rego/OPA jargon used but defined inline; SECURITY DEFINER fallback gives a concrete escape hatch.
-- Actionability 4.75: engineer knows the production flow + fallback path (per-tenant view + REVOKE/GRANT).
+---
 
-### Q4 — Iceberg snapshot rollback for bad load
-- Accuracy 4.5: `$snapshots` columns (snapshot_id, committed_at, operation, summary) match trino.io/docs/current/connector/iceberg.html; double-quoting `"events$snapshots"` correct; `CALL iceberg.system.rollback_to_snapshot('analytics', 'events', <id>)` positional 3-arg form is the legacy 467-era syntax; `ALTER TABLE ... EXECUTE rollback_to_snapshot(<id>)` table-procedure form was introduced in Release 469 (Jan 2025) per PR #24580 trinodb/trino — responder correctly version-gated this to post-467; 7-day retention caveat correct. Minor: responder showed the 469+ EXECUTE form as `EXECUTE rollback_to_snapshot(snapshot_id => <id>)` with named-arg syntax — the Trino doc example for the 469+ EXECUTE form shows positional `EXECUTE rollback_to_snapshot(<id>)`. Whether the named-arg form is also accepted is plausible but not explicitly demonstrated in the connector-doc example — treat as unverified-but-plausible, not a hard fab.
-- Completeness 4.75: lookup query + rollback call + atomic / metadata-only claim + 7d retention warning.
-- Clarity 4.75: DESC ORDER + LIMIT 10 + numeric example all jargon-free.
-- Actionability 5.0: full copy-pasteable lookup + rollback + retention warning.
+## Topic averages updated
 
-## Fabrications
+- **Iceberg partition design** 4.4995/33 → 4.5147/34 (Q2 5.0 above topic avg, +0.0152).
+- **Query performance basics** 4.4598/14 → 4.2791/15 (Q3 1.75 HARD FAIL drag, -0.1807 — biggest single-iter topic drag in extended-phase streak; topic still PASSED at 4.2791 above 3.5 but margin tightened by ~0.18).
+- **Oracle PL/SQL→dbt/Trino migration** 4.5230/53 → 4.5318/54 (Q4 5.0 above topic avg, +0.0088 — dbt-trino incremental_strategy probe maps here via "incremental/materialization strategy choice").
+- **Postgres-to-Iceberg ingestion** 4.5/159 → 4.5/160 (Q1 at topic avg, no change).
+- **Federation** 4.49944/310 — UNCHANGED, NOT probed this iter, held per iter472-477 directive.
 
-None substantive. Two minor non-load-bearing imprecisions (engineer copy-pasting any answer still gets working SQL):
+---
 
-1. **Q1 error-message attribution slip**: Responder said the 2-arg `truncate(x, 2)` form fails with `Function 'trunc' not registered`. That exact error text is what uppercase `TRUNC` produces. A 2-arg lowercase `truncate(...)` would fail with a wrong-arity / function-resolution error. Both fail, so the conceptual claim is correct; the error-message attribution is slightly imprecise. Source: trino.io/docs/current/functions/math.html (1-arg only).
-2. **Q4 `snapshot_id =>` named-arg over-spec**: Responder showed the 469+ EXECUTE form as `EXECUTE rollback_to_snapshot(snapshot_id => <id>)` with named-arg syntax — the Trino doc example shows positional `EXECUTE rollback_to_snapshot(<id>)`. The named-arg form is plausible (Trino EXECUTE generally supports both positional and named for procedure parameters) but not explicitly demonstrated. Unverified-but-plausible, not a hard fab. Source: trino.io/docs/current/connector/iceberg.html.
+## Teacher actions for iter479
 
-## Topic-row impact
+### PRIMARY: Fix Q3 fabricated session-property names (memory + spill)
 
-| Topic | Before | After | Delta |
-|---|---|---|---|
-| Oracle PL/SQL → dbt/Trino migration | 4.5116/51 | **4.5230/53** | +0.0114 (Q1 4.75 + Q2 4.875, both above topic avg; recovers iter476's -0.0464 drag, ground back above iter474's 4.5539 baseline) |
-| Multi-tenant analytics | 4.4582/153 | **4.4593/154** | +0.0011 (Q3 4.625 above topic avg) |
-| Iceberg table maintenance | 4.4917/134 | **4.4936/135** | +0.0019 (Q4 4.75 above topic avg) |
-| Trino federation | 4.49944/310 | **4.49944/310** | unchanged (NOT probed per directive) |
+This is the SAME fab class as iter474 (`distributed_join_distribution_type` → `join_distribution_type`). The fix pattern is identical: explicit DO-NOT-WRITE rows + canonical-form card + sibling-name fab variant list.
 
-## Teacher actions for iter478
+Find or create a "Trino memory/spill tuning" leading-canonical block (likely in r24 or wherever Trino tuning lives — grep for `query.max-memory-per-node` and `spill_enabled` to locate). Add:
 
-### PRIMARY — breadth design with NO dedicated federation probe
+1. **DO-NOT-WRITE table** banning these fabricated session-property names with the correct alternative:
 
-Federation row (4.49944/310) sits 0.0006 below the raised 4.5 threshold; held per iter472-477 judge directive. Let the count grow naturally with non-federation breadth probes. **DO NOT design a dedicated federation question for iter478.**
+   | Fabricated (do NOT write) | Correct lever | Reason |
+   |---|---|---|
+   | `SET SESSION task_max_memory='4GB'` | Per-node memory is CONFIG-only: `query.max-memory-per-node=4GB` in `config.properties` at cluster start (requires Trino restart). Not session-settable. | No such session property exists. |
+   | `SET SESSION memory_revoking_enabled=true` | `SET SESSION spill_enabled = true` (or cluster config `spill-enabled=true`) | Spill-to-disk is gated on `spill_enabled` session property; `memory_revoking_*` are CONFIG-only knobs (`memory-revoking-threshold`, `memory-revoking-target`) that control WHEN spill triggers after spill is enabled, not WHETHER it is enabled. |
+   | `SET SESSION distributed_join_distribution_type='PARTITIONED'` (iter474 regression — keep in matrix) | `SET SESSION join_distribution_type = 'PARTITIONED'` | No `distributed_` prefix in Trino session-property name. |
 
-### Possible breadth angles for iter478 (pick 4, one each — keep diversity)
+2. **Canonical-form card** with the FULL set of real Trino memory/spill session properties + their config-property counterparts:
 
-1. **3rd-angle re-probe on dbt-snapshots-SCD2 micro-topic** (still locked at only 2 datapoints at 4.5625/2). Angles not yet probed:
-   - Hard-deletes config (`invalidate_hard_deletes: true` for timestamp strategy)
-   - `target_schema` / `target_database` overrides
-   - `snapshot_meta_column_names` config (renaming `dbt_valid_from` etc. to custom names)
-   - dbt 1.9+ `dbt_is_deleted` metadata column semantics
+   - **Session properties (per-query, SET SESSION):**
+     - `query_max_memory` — cluster-wide user-memory cap for this query (cannot exceed config `query.max-memory`).
+     - `query_max_total_memory` — cluster-wide user+system memory cap for this query.
+     - `spill_enabled` — enable spill-to-disk for this query (default false unless config `spill-enabled=true`).
+   - **Config properties (cluster-wide, config.properties, restart required):**
+     - `query.max-memory-per-node` — per-worker user-memory cap (NOT session-settable).
+     - `query.max-memory` — cluster-wide user-memory cap.
+     - `query.max-total-memory` — cluster-wide user+system memory cap.
+     - `spill-enabled` — default for spill across all queries.
+     - `memory-revoking-threshold` — heap fraction at which memory revocation triggers (default ~0.9).
+     - `memory-revoking-target` — heap fraction to drop to during revocation (default ~0.7).
+     - `spiller-spill-path` — local disk path(s) for spill files.
 
-2. **Oracle-migration cross-dialect-spillover 4th-angle probe from a phrasing the responder hasn't seen yet.** The iter476 fabs (`TRUNC` + `UPDATE SET *`) closed via 6 r27/r13 edits, and iter477 re-probes both held; harden the win by probing cousin patterns the DO-NOT-WRITE matrix in r27 §4.4B doesn't yet cover:
-   - Oracle `LISTAGG(col, ',') WITHIN GROUP (ORDER BY ...)` → Trino `array_join(array_agg(col ORDER BY ...), ',')` (DO-NOT-WRITE LISTAGG as Trino function name)
-   - Oracle `NVL2(expr, val_if_not_null, val_if_null)` → Trino `CASE WHEN expr IS NOT NULL THEN ... ELSE ... END`
-   - Oracle `REGEXP_LIKE(str, pattern)` → Trino `regexp_like(str, pattern)` (case-sensitivity check)
-   - Oracle `SUBSTR(str, start, len)` → Trino `substr(str, start, len)` (verify Trino 1-based start index matches Oracle)
+3. **Sources to cite inline:**
+   - trino.io/docs/current/admin/properties-memory-management.html
+   - trino.io/docs/current/admin/properties-spilling.html
+   - trino.io/docs/current/admin/spill.html
 
-3. **OPA row-filter/column-mask 2nd-angle re-probe**:
-   - "How does Trino call OPA per query and how often does the OPA decision get cached / batched?" probes the batch endpoint (`opa.policy.batch-column-masking-uri`) and cache TTL semantics
-   - "Show me an OPA decision response shape that returns BOTH a row filter AND a column mask in the same query" probes the response-format JSON shape
+4. **Sibling-name fab variant list to ban explicitly** (pre-empt future regressions in this fab class):
+   - `task_max_memory`, `task.max-memory`, `task_memory_limit`, `query_max_memory_per_node` (the per-node knob is config-only, not session).
+   - `memory_revoking_enabled`, `memory_revoke_enabled`, `spill_to_disk_enabled`, `enable_spill`.
+   - `distributed_join_distribution_type`, `broadcast_join_distribution_type` (kept from iter474).
 
-4. **Iceberg-rollback adjacent angle**:
-   - `iceberg.system.set_current_snapshot(table, snapshot_id)` vs `rollback_to_snapshot` — distinct procedure for branch-aware reset
-   - Tag-based rollback: rollback to a TAG name vs a numeric snapshot_id, using `FOR VERSION AS OF '<tag>'` read pattern as the audit step
-   - `expire_snapshots` retention threshold interaction: how to GUARANTEE a snapshot can still be rolled back to over a 30-day window despite the production default 7d expire
+5. **Reconcile, do not append**: if the existing resource has stale memory/spill content showing any of these fabricated names, fix in place — do not append a new section. Responder may cite the wrong one if both exist.
 
-### SECONDARY — citation hygiene around the two iter477 minor imprecisions
+### SECONDARY: breadth design 4-Q for iter479
 
-These two are non-load-bearing (engineer gets working SQL either way) but worth surfacing in r27 + r17 with a one-line clarifier each:
+- Continue NO dedicated federation probe (4.49944/310 held).
+- Consider a Q3-style re-probe in iter479 or iter480 to confirm the memory/spill fab fixes landed (different phrasing than iter478 Q3 — e.g., "how do I prevent a single query from consuming all cluster memory" or "my GROUP BY OOMs on the coordinator, what session properties should I set"). Confirm both `task_max_memory` and `memory_revoking_enabled` get explicitly rejected by the responder.
+- Other topic-row health: Query-performance-basics dropped -0.18 to 4.2791 — still PASSED but the margin is now thinner than most extended-phase passes; another fab here would put it close to threshold. Watch for additional Trino-tuning fabs.
 
-- **r27 §4.4C TRUNC-truncate guardrail**: add a one-line "expected error message" note distinguishing (a) `TRUNC(x, 2)` → `Function 'trunc' not registered` from (b) `truncate(x, 2)` 2-arg lowercase → wrong-arity / function-resolution error. Pre-empts the iter477 Q1 minor slip from recurring.
-- **r17 (or wherever the rollback section lives) Iceberg rollback 469+ EXECUTE form**: clarify that the documented form is positional `EXECUTE rollback_to_snapshot(<id>)`; if the named-arg `snapshot_id => <id>` form is also accepted (which Trino EXECUTE generally supports for procedure parameters), note that the positional form is the doc-canonical one to prefer in production examples.
+### Fab-class hygiene reminders (carry forward)
 
-### Federation hygiene held
+- **fabricated-session-property-name** class: iter474 + iter478 both hit this. Pattern is sibling-name extrapolation (`distributed_` prefix; `task_` instead of `query_`; `memory_revoking_enabled` instead of `spill_enabled`). Every session-property recommendation in resources MUST be docs-anchored — if not in trino.io/docs/current/admin/properties-*.html, do not write it.
+- **cross-dialect-spillover**: held this iter (Spark vs Trino bucket arg-order was correctly distinguished in Q2 — that is a WIN, the responder did not conflate them).
+- **version-pin**: held (no 468+/Iceberg-v3 features cited).
 
-Do NOT touch §13.x federation guardrails in resources/22 or any federation-adjacent content (TopN pushdown, predicate pushdown, JOIN pushdown). Federation row near-miss is being walked toward 4.5 via natural count growth from non-federation iterations; injecting fresh content risks an unforced regression.
+---
+
+## Verdict
+
+**4.0625 PASS** — but the Q3 fab pair is the kind of regression-class issue that should not slip twice. Iter474 closed `distributed_join_distribution_type`; iter478 opened TWO more in the same class. Iter479 PRIMARY action is the memory/spill DO-NOT-WRITE matrix + canonical-form card, then optional re-probe in iter480 to verify it landed.
