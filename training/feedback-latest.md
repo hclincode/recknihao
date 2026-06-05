@@ -1,105 +1,107 @@
-# Judge Feedback — Iter 489
+# Judge Feedback — Iter 490
 
 **Phase**: extended (end-of-iteration feedback only)
-**Overall**: 4.031 PASS (~0.531 above 3.5 floor; -0.313 below iter488's 4.344)
-**Federation**: NOT probed this iter — 4.49944/310 row HELD per iter472-489+ directive
+**Overall**: 4.156 PASS (~0.656 above 3.5 floor)
+**Federation**: NOT probed this iter — 4.49944/310 row HELD per iter472-490+ directive
 
 ---
 
 ## Headline
 
-**iter488 PRIMARY FIX (not_null_proportion + _dbt_test__audit) CONFIRMED LANDED on Q1 first re-probe.** But two regressions hit Q3 and Q4:
+**$snapshots SPLIT-QUOTE RECURRED FOR THE THIRD TIME (iter454 fixed, iter489 recurred, iter490 teacher re-fixed via LEADING CANONICAL diff section at line 2390 of r17, iter490 responder STILL produced split-quote form).** This is a CRITICAL REPEAT REGRESSION. The resource now has four separate blocks banning the split-quote form, but the responder is not routing to them.
 
-- **REGRESSION 1 (Q3)**: `$snapshots` split-quote form returned — `table."$snapshots"` (wrong) instead of `"table$snapshots"` (correct). This was fixed at iter454 and has re-surfaced.
-- **REGRESSION 2 (Q4)**: `{% if execute %}` incremental guard returned — this was fixed at iter452 and has re-surfaced.
+**Q2 execute-guard fix CONFIRMED LANDED** — responder correctly used `{% if is_incremental() %}`.
 
-Both regressions are load-bearing (paste-and-fail or paste-and-wrong-behavior). Q1 and Q2 are clean.
+**Q3 new TYPE ERROR** — `cardinality(element_at(map, key))` on MAP(VARCHAR,VARCHAR) is a SQL type error: `element_at` returns a scalar VARCHAR, and `cardinality()` accepts only arrays/maps, not scalars. Not load-bearing on the answer (the core element_at vs bracket advice is correct), but is a concrete SQL error that would fail if the engineer ran it.
+
+**Q4 CLEAN** — partition evolution metadata-only, SET PROPERTIES partitioning, bucket(col,N) arg order, and Spark rewrite_data_files-vs-Trino-optimize framing all correct.
 
 ---
 
 ## Per-question breakdown
 
-### Q1 — dbt test WARN if >5% null + store_failures re-probe (4.3125 PASS)
+### Q1 — Iceberg snapshot history + DIFF for audit (3.375 FAIL)
 
-**CORE FIX STATUS: CONFIRMED LANDED.**
+**CONFIRMED REGRESSION — $snapshots SPLIT-QUOTE RECURRED.**
 
-- `dbt_utils.not_null_proportion: at_least: 0.95` — CORRECT (not expression_is_true with aggregate)
-- `config: severity: warn` — CORRECT
-- `store_failures_as: table` — CORRECT
-- Failures land in `<target_schema>_dbt_test__audit` — CORRECT (`analytics_dbt_test__audit`)
-- Explicitly said do NOT use expression_is_true with COUNT aggregate — CORRECT
+Responder produced: `FROM iceberg.analytics.your_table_name."$snapshots"`
 
-**MINOR NUANCE INACCURACY (non-load-bearing)**: Responder said store_failures lets you "see exactly which rows were null" and "join back by primary key to identify problematic records." For `not_null_proportion`, the stored failure is the **aggregate proportion result** (one row: the computed proportion value that breached the threshold), NOT the individual null rows. Confirmed via WebFetch of github.com/dbt-labs/dbt-utils/blob/main/macros/generic_tests/not_null_proportion.sql — the macro returns aggregated proportion statistics per group, not individual records with null values. To capture individual null row failures, use the plain `not_null` test with store_failures.
+This is the split-quote form. Trino parses `catalog.schema.table.column` and resolves `"$snapshots"` as a column named `$snapshots` on the table `your_table_name`. This fails with an unresolvable-identifier error.
 
-An engineer looking in `_dbt_test__audit` after running this test will find a single proportion value (e.g., `0.07` meaning 7% were null), not a table of individual rows to join back. This is confusing and creates false expectations, but the test still runs correctly.
-
-- Accuracy 4.0 | Clarity 4.5 | Actionability 4.25 | Completeness 4.5
-- **Q1 avg: 4.3125**
-- Fab status: ZERO load-bearing fabs. One non-load-bearing nuance error on store_failures output semantics.
-
-### Q2 — Trino percentiles p50/p95 over 100M rows (4.8125 STRONG PASS)
-
-- `approx_percentile(col, 0.5)` — CONFIRMED REAL (trino.io/docs/current/functions/aggregate.html)
-- Array form `approx_percentile(col, ARRAY[0.5, 0.95, 0.99])` — CONFIRMED REAL
-- PERCENTILE_CONT WITHIN GROUP (ORDER BY) — CONFIRMED NOT in Trino docs (only LISTAGG uses WITHIN GROUP in Trino; no PERCENTILE_CONT listed)
-- T-Digest / quantile sketch / memory-bounded — CORRECT class of algorithm
-- ~2.3% standard error: NOTE — Trino docs explicitly state 2.3% for `approx_distinct` (HyperLogLog), not explicitly for `approx_percentile`. The resource (r23 line 105) contains "approx_percentile uses a quantile-sketch algorithm with 2.3% standard error (per Trino docs)" — responder citing the resource faithfully. This is a resource inaccuracy, not a responder fabrication. Non-load-bearing for this question.
-- ZERO responder fabrications.
-
-- Accuracy 4.5 | Clarity 5.0 | Actionability 5.0 | Completeness 4.75
-- **Q2 avg: 4.8125**
-- Fab status: ZERO responder fabrications.
-
-### Q3 — Iceberg time-travel + diff (3.6875 PASS)
-
-**CONFIRMED REGRESSION on iter454 $snapshots quoting fix.**
-
-Responder used: `FROM iceberg.analytics.your_table_name."$snapshots"`
-
-This is the SPLIT-QUOTE form: the table name and `$snapshots` suffix are separate identifier tokens. Trino parses this as accessing a field named `$snapshots` from the table `your_table_name` — it will produce either a column-not-found error or schema-mismatch error.
-
-Correct form per WebFetch trino.io/docs/current/connector/iceberg.html:
+Correct form per trino.io/docs/current/connector/iceberg.html:
 ```sql
-SELECT snapshot_id FROM example.testdb."customer_orders$snapshots"
+SELECT * FROM iceberg.analytics."your_table_name$snapshots"
 ```
-The WHOLE table name + `$snapshots` suffix together in ONE pair of double quotes, as a single quoted identifier.
+The WHOLE `<tablename>$snapshots` token must be inside ONE pair of double quotes.
 
-This was explicitly documented as the correct form at iter454 and apparently has re-surfaced. The fix is needed in whatever resource contains the `$snapshots` query examples.
+**Resource status**: The iter490 teacher ADDED a LEADING CANONICAL diff section to r17 at line 2390, which includes:
+- Step 1 showing `FROM iceberg.analytics."events$snapshots"` (correct one-quote form)
+- An explicit DO-NOT-WRITE table row at line 2518 banning `iceberg.analytics.events."$snapshots"` (split-quote)
+- The ban notice at line 2396: "DO NOT write the split-quote form `iceberg.<schema>.<table>."$snapshots"`"
 
-FOR VERSION AS OF `<bigint>`, FOR TIMESTAMP AS OF TIMESTAMP, and EXCEPT-diff patterns are all CORRECT.
+Despite these resources being present, the responder STILL produced the wrong form. This is the THIRD RECURRENCE of this specific regression.
 
-- Accuracy 3.0 | Clarity 4.5 | Actionability 3.0 | Completeness 4.25
-- **Q3 avg: 3.6875**
-- Fab status: ONE confirmed regression — split-quote `table."$snapshots"` (iter454 fix re-surfaced).
+**Regression history**: iter454 (first fix) → iter489 (first recurrence) → iter490 teacher fixed → iter490 responder STILL WRONG.
 
-### Q4 — Oracle ROWNUM pagination + sequence surrogate key → Trino (3.3125 FAIL)
+The `FOR VERSION AS OF <bigint>` + `EXCEPT` diff pattern IS correct.
+`ORDER BY committed_at DESC` column name IS correct.
 
-**CONFIRMED REGRESSION on iter452 is_incremental() guard fix.**
+- Accuracy 2.5 | Clarity 4.5 | Actionability 2.5 | Completeness 4.0
+- **Q1 avg: 3.375 FAIL**
+- Fab status: ONE CONFIRMED REPEAT REGRESSION — split-quote `table."$snapshots"` (load-bearing SQL error on Trino 467)
 
-Responder used `{% if execute %}` + `{% if 'event_id' in adapter.get_columns_in_relation(this) %}` as the incremental delta guard.
+### Q2 — dbt incremental hourly only-new-rows (4.75 STRONG PASS)
 
-`{% if execute %}` is WRONG as an incremental guard. Confirmed via WebFetch docs.getdbt.com/reference/dbt-jinja-functions/execute + docs.getdbt.com/docs/build/incremental-models:
+**CONFIRMED FIXED — `{% if is_incremental() %}` guard correctly used.**
 
-- `execute` is True whenever dbt compiles WITH a database connection. This includes `dbt compile`, `dbt docs generate`, etc. It does NOT check if the model is running in incremental mode, if the table already exists, or if `--full-refresh` was passed.
-- Using `{% if execute %}` would cause the WHERE filter to attempt to run even during `--full-refresh`, and could attempt `SELECT MAX(...) FROM {{ this }}` when the table doesn't exist yet.
+- `{% if is_incremental() %}` — CORRECT (NOT `{% if execute %}`)
+- `WHERE occurred_at >= (SELECT COALESCE(MAX(occurred_at), TIMESTAMP '1970-01-01') FROM {{ this }})` — CORRECT pattern: subquery-wrapped MAX, COALESCE sentinel, correct watermark field
+- `partitioned_by` in dbt model properties — CORRECT per dbt-trino docs (dbt-trino uses `partitioned_by` inside the `properties` config dict for incremental models)
+- merge strategy + unique_key — CORRECT
 
-The CANONICAL incremental guard is `{% if is_incremental() %}`, which returns True ONLY when:
-1. The materialization is `incremental`
-2. The model already exists as a table in the database
-3. `--full-refresh` was NOT passed
+The iter489 Q4 execute-guard regression (iter452/iter489 double recurrence) is CONFIRMED FIXED as of iter490. Resource r27 LEADING CANONICAL surrogate-key + incremental section (line 999) with the `{% if is_incremental() %}` pattern and the DO-NOT-WRITE banning `{% if execute %}` LANDED.
 
-Canonical example from dbt docs:
-```sql
-{% if is_incremental() %}
-  where event_time >= (select coalesce(max(event_time),'1900-01-01') from {{ this }})
-{% endif %}
-```
+- Accuracy 5.0 | Clarity 4.5 | Actionability 5.0 | Completeness 4.5
+- **Q2 avg: 4.75 STRONG PASS**
+- Fab status: ZERO fabrications.
 
-ROWNUM→LIMIT/OFFSET table is CORRECT. `dbt_utils.generate_surrogate_key([...])` is CORRECT (idempotent MD5, real macro). `ROW_NUMBER() OVER(ORDER BY...)` for stable-within-run is CORRECT.
+### Q3 — Trino MAP(VARCHAR,VARCHAR) key access (4.0 PASS)
 
-- Accuracy 2.5 | Clarity 4.25 | Actionability 2.5 | Completeness 4.0
-- **Q4 avg: 3.3125**
-- Fab status: ONE confirmed regression — `{% if execute %}` incremental guard (iter452 fix re-surfaced).
+**CORE ADVICE CORRECT — ONE TYPE ERROR in secondary check.**
+
+CORRECT:
+- `element_at(properties, 'key')` returns NULL for missing key (NULL-safe) — CORRECT
+- `properties['key']` bracket form raises "Key not present in map" if key absent (strict) — CORRECT
+- `element_at(properties, 'key') IS NOT NULL` for existence check — CORRECT
+- Both forms confirmed against trino.io/docs/current/functions/map.html
+
+TYPE ERROR (confirmed):
+- Responder offered `WHERE cardinality(element_at(properties, 'some_key')) > 0` as an existence check
+- `element_at` on `MAP(VARCHAR,VARCHAR)` returns `VARCHAR` (the value type, a scalar)
+- `cardinality()` accepts only maps or arrays, NOT scalar types per trino.io/docs/current/functions/map.html and trino.io/docs/current/functions/array.html
+- `cardinality(VARCHAR_scalar)` is a SQL type error — Trino analyzer would reject this query
+- Source: trino.io/docs/current/functions/map.html confirms `element_at(map(K,V), key) -> V`; trino.io/docs/current/functions/array.html + map.html confirm `cardinality(x)` accepts array or map, not scalar
+
+This error is secondary (presented alongside the correct `IS NOT NULL` check) but it IS a concrete SQL parse error if an engineer uses the cardinality form.
+
+- Accuracy 3.5 | Clarity 4.5 | Actionability 3.5 | Completeness 4.5
+- **Q3 avg: 4.0 PASS**
+- Fab status: ONE type error — `cardinality(element_at(map, key))` on MAP(VARCHAR,VARCHAR) (SQL type error; element_at returns scalar VARCHAR, cardinality requires array/map).
+
+### Q4 — Add partition column to existing Iceberg table (4.5 STRONG PASS)
+
+**ALL CLAIMS CORRECT.**
+
+- Partition evolution is metadata-only — CORRECT per trino.io/docs/current/connector/iceberg.html: "Partitioning can also be changed and the connector can still query data created before the partitioning change"
+- Trino reads old+new partition specs transparently — CORRECT (dual-spec read-compat confirmed)
+- `ALTER TABLE ... SET PROPERTIES partitioning = ARRAY['day(occurred_at)','bucket(tenant_id, 64)']` — CORRECT: `partitioning` is the Trino Iceberg SET PROPERTIES key per trino.io/docs/current/connector/iceberg.html; `bucket(col, N)` arg order confirmed correct per doc example `bucket(account_number, 10)` (column first, N second)
+- spec_id 0 (old) vs 1 (new) conceptually CORRECT
+- Old files don't get new pruning benefit until rewritten — CORRECT (files written under the old spec remain under the old spec until explicitly rewritten)
+- Spark `rewrite_data_files` for forcing files into new partition layout — DIRECTIONALLY CORRECT: Spark's `rewrite_data_files` is the established procedure for this (iceberg.apache.org/docs/latest/spark-procedures/); Trino `EXECUTE optimize` is a bin-packing compaction that does not explicitly restructure files to a new partition spec per the documentation; evidence from trino.io search results indicates optimize "acts separately on each partition selected for optimization" (bin-pack within existing spec boundaries)
+
+- Accuracy 4.5 | Clarity 4.5 | Actionability 4.5 | Completeness 4.5
+- **Q4 avg: 4.5 STRONG PASS**
+- Fab status: ZERO fabrications.
 
 ---
 
@@ -107,126 +109,95 @@ ROWNUM→LIMIT/OFFSET table is CORRECT. `dbt_utils.generate_surrogate_key([...])
 
 | Q | Topic | Acc | Clarity | Action | Complete | Avg |
 |---|---|---|---|---|---|---|
-| Q1 | dbt test severity + store_failures | 4.0 | 4.5 | 4.25 | 4.5 | 4.3125 |
-| Q2 | Trino approx_percentile | 4.5 | 5.0 | 5.0 | 4.75 | 4.8125 |
-| Q3 | Iceberg time-travel + diff | 3.0 | 4.5 | 3.0 | 4.25 | 3.6875 |
-| Q4 | Oracle ROWNUM + surrogate key + incremental | 2.5 | 4.25 | 2.5 | 4.0 | 3.3125 |
-| **Overall** | | **3.5** | **4.5625** | **3.6875** | **4.375** | **4.031** |
+| Q1 | Iceberg snapshot diff + $snapshots quoting | 2.5 | 4.5 | 2.5 | 4.0 | 3.375 |
+| Q2 | dbt incremental guard (is_incremental re-probe) | 5.0 | 4.5 | 5.0 | 4.5 | 4.75 |
+| Q3 | Trino MAP element_at vs bracket | 3.5 | 4.5 | 3.5 | 4.5 | 4.0 |
+| Q4 | Iceberg partition evolution | 4.5 | 4.5 | 4.5 | 4.5 | 4.5 |
+| **Overall** | | **3.875** | **4.5** | **3.875** | **4.375** | **4.156** |
 
-**PASS** (4.031 > 3.5, margin +0.531)
-
----
-
-## Core-fix status (iter488 primary)
-
-**CONFIRMED LANDED** — Q1 re-probe confirms:
-- `not_null_proportion: at_least: 0.95` correct (not expression_is_true with aggregate)
-- `_dbt_test__audit` schema suffix correct (not `dbt_internal`)
-- `severity: warn` correct
-- `store_failures_as: table` correct
-- DO NOT use expression_is_true with COUNT — correctly stated
-
-One non-load-bearing nuance to fix: store_failures on not_null_proportion stores the aggregate proportion row, not individual null rows.
+**PASS** (4.156 > 3.5, margin +0.656)
 
 ---
 
-## Fabrications / regressions inventory (iter489)
+## Regression / fabrication inventory (iter490)
 
 | # | Q | Class | Severity | Correct fact | Source |
 |---|---|---|---|---|---|
-| 1 | Q3 | REGRESSION — $snapshots split-quote (iter454 fix re-surfaced) | LOAD-BEARING — SQL error/column-not-found | Correct form: `iceberg.schema."tablename$snapshots"` (whole name + suffix in ONE quote pair) | trino.io/docs/current/connector/iceberg.html |
-| 2 | Q4 | REGRESSION — execute-guard instead of is_incremental() (iter452 fix re-surfaced) | LOAD-BEARING — wrong behavior on full-refresh and initial run | Canonical incremental guard: `{% if is_incremental() %}` checks materialization + table-exists + no-full-refresh; `{% if execute %}` is True during compile/docs/run regardless | docs.getdbt.com/reference/dbt-jinja-functions/execute + docs.getdbt.com/docs/build/incremental-models |
-| 3 | Q1 | nuance-error — store_failures output semantics (non-load-bearing) | MINOR — wrong expectation for engineer | `not_null_proportion` store_failures stores aggregate proportion result row (one row per group), NOT individual null rows; use plain `not_null` test + store_failures for row-level audit | github.com/dbt-labs/dbt-utils/blob/main/macros/generic_tests/not_null_proportion.sql |
+| 1 | Q1 | REPEAT REGRESSION — $snapshots split-quote (3rd recurrence: iter454 fixed, iter489 recurred, iter490 teacher re-fixed, iter490 responder STILL wrong) | LOAD-BEARING — SQL error in Trino 467 (column-not-found) | Correct form: `iceberg.schema."tablename$snapshots"` (WHOLE token in ONE pair of double quotes) | trino.io/docs/current/connector/iceberg.html ("Metadata tables" section: `iceberg.test_db."customer_orders$snapshots"`) |
+| 2 | Q3 | TYPE ERROR — `cardinality(element_at(map, key))` on MAP(VARCHAR,VARCHAR) | NON-LOAD-BEARING on core advice but is a concrete SQL type error | `element_at` on MAP(K,V) returns V (scalar); `cardinality()` accepts array/map NOT scalar; correct existence check is `element_at(map, key) IS NOT NULL` | trino.io/docs/current/functions/map.html + trino.io/docs/current/functions/array.html |
 
-Q2: ZERO fabrications or regressions.
-
----
-
-## Topic average updates
-
-| Topic | Before | After | Delta |
-|---|---|---|---|
-| SQL query best practices for OLAP (Q1 dbt test config) | 4.5275/53 | **4.5236/54** | -0.004 |
-| Analytical query patterns on Iceberg+Trino (Q2 approx_percentile) | 4.5131/15 | **4.5318/16** | +0.0187 |
-| Iceberg table maintenance (Q3 time-travel) | 4.4969/142 | **4.4912/143** | -0.0057 |
-| Oracle PL/SQL→dbt+Trino migration (Q4 ROWNUM+surrogate+incremental) | 4.5029/59 | **4.4831/60** | -0.0198 |
-| Trino federation / cross-source connectors | 4.49944/310 | **4.49944/310 UNCHANGED** | NOT PROBED |
+Q2: ZERO fabrications — execute-guard FIXED.
+Q4: ZERO fabrications.
 
 ---
 
-## Teacher actions for iter490
+## Fix status (iter489 regressions)
 
-### PRIMARY — Fix the two confirmed regressions
+| Regression | Status |
+|---|---|
+| $snapshots split-quote (Q3 iter489, iter454 original fix) | STILL BROKEN — iter490 teacher added LEADING CANONICAL diff section (r17 line 2390) but responder STILL produced split-quote form. Resource fix did not take at the keyword path the responder routes through. |
+| {% if execute %} incremental guard (Q4 iter489, iter452 original fix) | CONFIRMED FIXED — iter490 Q2 re-probe used `{% if is_incremental() %}`. Resource r27 LEADING CANONICAL surrogate-key + incremental block (line 999) LANDED. |
 
-**Fix 1: $snapshots quoting regression (Q3 — Iceberg metadata tables)**
+---
 
-Search resources/ (especially r17 iceberg-table-maintenance.md and any file containing `$snapshots`, `$history`, `$files`, `$manifests`) for ANY occurrence of the split-quote pattern `table_name."$snapshots"` or `<table>."$<suffix>"`.
+## Topic average updates (iter490)
 
-Install or reinforce the LEADING CANONICAL anchor:
+| Topic | Before | After | Delta | Probed |
+|---|---|---|---|---|
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | 4.4912/143 | **4.4835/144** | -0.0077 | Q1 (snapshot diff + $snapshots quoting) |
+| Oracle PL/SQL→dbt/Trino migration | 4.4831/60 | **4.4875/61** | +0.0044 | Q2 (dbt incremental guard) |
+| Analytical query patterns on Iceberg+Trino | 4.5318/16 | **4.5005/17** | -0.0313 | Q3 (MAP element_at type error) |
+| Iceberg partition design for SaaS | 4.4946/35 | **4.4947/36** | +0.0001 | Q4 (partition evolution) |
+| Trino federation / cross-source connectors | 4.49944/310 | **4.49944/310 UNCHANGED** | NOT PROBED | — |
+
+---
+
+## Teacher actions for iter491
+
+### PRIMARY — ESCALATE the $snapshots split-quote recurring regression (THIRD recurrence)
+
+This is an ESCALATION from the iter490 actions. The regression has now recurred THREE TIMES. The current resource (r17) has FOUR separate places banning the split-quote form:
+1. Line 712-736: Metadata-table quoting LEADING CANONICAL section (general)
+2. Line 2390: LEADING CANONICAL Snapshot DIFF section (added iter490)
+3. Line 2396: Explicit "DO NOT write" inline note
+4. Line 2518: DO-NOT-WRITE table row
+
+Yet the responder STILL routes to the wrong form. This means the keyword path for "snapshot history query" / "list snapshots" is NOT routing through any of these blocks.
+
+**The required escalation step**: make the `$snapshots` canonical form THE VERY FIRST CONTENT in r17 — ahead of any other section. The responder's keyword path for "snapshot history" / "audit trail" / "snapshot list" must hit the correct quoting form BEFORE anything else. Consider:
+
+1. Adding a ZERO-th section at the absolute top of r17 (before §1/§2/§3 maintenance procedures) titled "CRITICAL QUOTING RULE — read this FIRST before any `$snapshots` query" with the correct form and a two-line DO-NOT-WRITE for the split-quote.
+
+2. Also place a standalone "snapshot history query" mini-block (3-4 lines) at the TOP of the file with the correct `"tablename$snapshots"` form, so it is the FIRST match when the responder scans for "snapshot" / "history" / "list snapshots" keywords.
+
+3. VERIFY that the keyword path "snapshot history" → r17 → finds the correct quoting before finding any old example. The existing anchors are buried mid-file; the responder may be generating the split-quote form from its base training data before reaching any DO-NOT-WRITE block.
+
+The failing pattern is consistent: the responder writes `table_name."$snapshots"` which appears to come from a templated mental model where the `$suffix` is a quoted suffix added AFTER the table name. The cure is to make the first thing the responder reads for ANY snapshot-related query be the correct one-quote-pair form, not just a mid-file note.
+
+### SECONDARY — Fix `cardinality(element_at(map, key))` type error
+
+In the resource covering Trino MAP functions (likely r07 analytical-query-patterns or r23 sql-best-practices), add to the MAP access section:
 
 ```
-CORRECT (one quote pair for the whole identifier):
-  SELECT * FROM iceberg.analytics."my_table$snapshots"
-  SELECT * FROM iceberg.analytics."my_table$history"
-  SELECT * FROM iceberg.analytics."my_table$files"
-
-WRONG (split-quote — column-not-found error in Trino):
-  SELECT * FROM iceberg.analytics.my_table."$snapshots"   -- DO NOT WRITE
-  SELECT * FROM iceberg.analytics.my_table."$history"     -- DO NOT WRITE
-```
-
-DO-NOT-WRITE matrix entry: `table_name."$<suffix>"` form is a SQL error in Trino; the table name and metadata suffix must form a single quoted identifier.
-
-Citation: trino.io/docs/current/connector/iceberg.html (search "customer_orders$snapshots" for the doc example).
-
-This fix was originally applied at iter454. Wherever it was placed, it either got stale, was removed, or the responder's keyword path doesn't lead through it. Verify the fix is in a location that keyword-matches "snapshots", "time travel", "history", "metadata table" queries.
-
-**Fix 2: {% if execute %} incremental guard regression (Q4 — Oracle migration / dbt incremental)**
-
-Search resources/ (especially r27 oracle-plsql-to-dbt-trino.md and r28 complex-sql-performance-trino-dbt.md) for ANY occurrence of `{% if execute %}` used as an incremental guard. Also search for `adapter.get_columns_in_relation` used as an incremental guard.
-
-Install or reinforce the LEADING CANONICAL anchor:
-
-```
-CANONICAL incremental guard in dbt:
-
-{% if is_incremental() %}
-  where event_time >= (select coalesce(max(event_time), timestamp '1970-01-01 00:00:00') from {{ this }})
-{% endif %}
+CORRECT existence check:
+  element_at(properties, 'key') IS NOT NULL
 
 DO NOT WRITE:
-  {% if execute %}  -- WRONG: True during compile, docs generate, AND run; does not gate on incremental
-  {% if execute and 'col' in adapter.get_columns_in_relation(this) %}  -- WRONG: same class
+  cardinality(element_at(properties, 'key')) > 0
+  -- TYPE ERROR: element_at on MAP(VARCHAR,VARCHAR) returns a VARCHAR scalar.
+  -- cardinality() accepts only arrays or maps, not scalars. Trino analyzer rejects this.
 ```
 
-is_incremental() returns True ONLY when:
-1. materialized='incremental'
-2. the model already exists as a table in the database
-3. --full-refresh was NOT passed
+Source: trino.io/docs/current/functions/map.html (`element_at(map(K,V), key) -> V`) + trino.io/docs/current/functions/array.html (`cardinality(x) -> bigint` where x is array or map).
 
-Citation: docs.getdbt.com/reference/dbt-jinja-functions/execute (explicit statement: "not the correct guard for incremental models") + docs.getdbt.com/docs/build/incremental-models (canonical example uses is_incremental()).
+### SECONDARY — breadth design for iter491
 
-This fix was originally applied at iter452. Verify it is placed where keywords "incremental", "surrogate key", "Oracle sequence", "ROWNUM" would lead the responder.
-
-### SECONDARY — Add clarifying note on not_null_proportion store_failures semantics
-
-In the dbt test configs section (r27 §6.7A or wherever not_null_proportion is documented):
-
-Add a single-sentence clarifier after the store_failures_as example:
-
-> Note: `not_null_proportion` is an **aggregate test** — when `store_failures_as: table` is set, the audit table contains **one row per group** (or one row total if no `group_by_columns`) showing the computed proportion value, not individual rows where the column was null. To audit which individual rows are null, use the plain `not_null` test with `store_failures_as: table` instead.
-
-This is non-load-bearing but prevents engineer confusion when they open the audit table and find a proportion value instead of row-level failures.
-
-### SECONDARY — breadth design for iter490
-
-- Federation 4.49944/310 row HELD per iter472-489+ directive. DO NOT count any iter490 probe as a federation probe.
-- Low-count topics worth additional datapoints:
-  - dbt sources / source freshness (3, 4.219) — re-probe loaded_at_field + warn_after/error_after blocking semantics from a 2nd angle
-  - dbt model contracts (3, 4.1146) — re-probe contract.enforced + not_null runtime-enforced via Iceberg
-  - Storage tiering on Trino+Iceberg+MinIO (2, 4.25) — re-probe MinIO lifecycle `mc ilm tier add` recipe
-  - dbt snapshots SCD2 (2, 4.5625) — re-probe dbt_valid_from/dbt_valid_to + check vs timestamp strategy
-- Consider a 2nd-angle re-probe on `$snapshots` quoting at iter491-492 to confirm the regression fix landed (iter454 fix landed but apparently re-surfaced; needs 2-probe confirmation after fix).
+- Federation 4.49944/310 row HELD per iter472-490+ directive. DO NOT probe.
+- Low-count topics worth additional probes:
+  - dbt sources / source freshness (4.219/3) — re-probe from a "stale source blocking downstream model" angle
+  - dbt model contracts (4.1146/3) — re-probe contract.enforced runtime behavior
+  - Storage tiering (4.25/2) — re-probe MinIO lifecycle approach
+- Q1 $snapshots fix needs a THIRD-ANGLE re-probe at iter492 (after the escalated fix) to confirm the fix actually landed this time. Do NOT consider the iter490 re-probe sufficient evidence.
 
 ### Schedule note
 
@@ -236,11 +207,9 @@ This is non-load-bearing but prevents engineer confusion when they open the audi
 
 ## Streak / margin status
 
-- **88th consecutive overall PASS in extended phase.**
-- Margin at 4.031 (THIN PASS) — +0.531 above 3.5 floor; -0.313 below iter488's 4.344.
-- Q3 3.6875 + Q4 3.3125 dragged overall from what would have been ~4.5625 STRONG PASS.
-- **TWO REGRESSIONS confirmed**: both are previously-fixed items that re-surfaced.
-  - $snapshots split-quote (iter454 fix) — must reinforce the quoting rule in the right keyword-findable location.
-  - {% if execute %} incremental guard (iter452 fix) — must reinforce is_incremental() anchor in the right keyword-findable location.
-- **Citation-hygiene status**: Q1 ZERO load-bearing fabs (fix confirmed landed). Q2 ZERO fabs. Q3 one regression. Q4 one regression.
-- **Federation**: 4.49944/310 — 25th+ consecutive iteration with the row HELD per iter472-489+ directive.
+- **89th consecutive overall PASS in extended phase.**
+- Margin at 4.156 — +0.656 above 3.5 floor; Q1 3.375 dragging; Q2/Q3/Q4 all above 4.0.
+- **$snapshots split-quote RECURRING REGRESSION is the primary open issue.** The iter490 teacher fix landed the LEADING CANONICAL diff section in the right place (line 2390) but the responder's keyword path is not routing through it. Need TOP-OF-FILE escalation.
+- **Execute-guard (`{% if execute %}`) CONFIRMED FIXED** — iter490 Q2 is clean. No longer a concern.
+- **Q3 cardinality type error** is a secondary inaccuracy — non-load-bearing on the core MAP advice but produces a SQL type error if the engineer copies the existence-check variant.
+- **Citation-hygiene**: Q2 ZERO fabs (execute-guard fixed). Q4 ZERO fabs. Q1 one recurring regression. Q3 one type error (secondary).

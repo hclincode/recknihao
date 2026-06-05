@@ -2387,6 +2387,148 @@ LIMIT 20;
 
 The `made_current_at` column is the timestamp at which each snapshot became `current`. A rollback shows up as an older `snapshot_id` reappearing with a fresh `made_current_at` — that is the audit trail you can't reconstruct from `$snapshots` alone.
 
+### LEADING CANONICAL — Snapshot DIFF: "what changed between snapshot X and the current table?" (compare snapshots / time-travel diff)
+
+> **READ THIS FIRST when an engineer asks "show me the diff between two snapshots", "what changed between version X and now", "compare snapshot A vs snapshot B", or "audit trail of row-level changes between snapshots."** This is the canonical pattern. Every line of SQL below has been verified against Trino 467 + Iceberg 1.5.2 syntax. **The most common load-bearing bug here is split-quote metadata-table syntax — re-read the [§ Metadata-table quoting](#metadata-table-quoting--canonical-trino-syntax-read-this-once-and-remember-it) block above before writing any `$snapshots` query.**
+
+#### Step 1 — Find the two snapshot IDs you want to compare
+
+The snapshot list comes from the `$snapshots` metadata table. **Quote the WHOLE `<table>$snapshots` token inside ONE pair of double quotes** — `iceberg.<schema>."<table>$snapshots"`. **DO NOT write the split-quote form `iceberg.<schema>.<table>."$snapshots"`** — that parses as a column reference and fails (see DO-NOT-WRITE row below).
+
+```sql
+-- Trino 467: list snapshots newest-first. Copy the two snapshot_id BIGINTs you want to diff.
+SELECT snapshot_id, committed_at, operation, summary
+FROM iceberg.analytics."events$snapshots"
+ORDER BY committed_at DESC
+LIMIT 20;
+```
+
+Pick:
+- `<OLD_ID>` — the older snapshot you want to compare *from* (e.g., `4823511203987654321` — the snapshot at end-of-day yesterday).
+- `<NEW_ID>` — the newer snapshot (often the current tip, or another past pin).
+
+#### Step 2 — Pattern A: rows-added-and-removed via `EXCEPT` (no key needed, full-row diff)
+
+`EXCEPT` returns rows present on the left side but absent on the right. Run it twice (one for each direction) and `UNION ALL` the results with a label, and you get the full diff. Each side is a separate time-travel SELECT against the same table.
+
+```sql
+-- Trino 467: full-row diff between snapshot <OLD_ID> and snapshot <NEW_ID>.
+-- "ADDED" = rows in the NEW snapshot that did NOT exist (with identical column values) in OLD.
+-- "REMOVED" = rows that existed in OLD but no longer exist (with identical column values) in NEW.
+WITH old_state AS (
+  SELECT event_id, tenant_id, event_type, occurred_at, payload
+  FROM iceberg.analytics.events FOR VERSION AS OF 4823511203987654321   -- <OLD_ID>
+),
+new_state AS (
+  SELECT event_id, tenant_id, event_type, occurred_at, payload
+  FROM iceberg.analytics.events FOR VERSION AS OF 8954597067493422955   -- <NEW_ID>
+)
+SELECT 'ADDED'   AS diff_kind, event_id, tenant_id, event_type, occurred_at, payload
+FROM   (SELECT * FROM new_state EXCEPT SELECT * FROM old_state)
+UNION ALL
+SELECT 'REMOVED' AS diff_kind, event_id, tenant_id, event_type, occurred_at, payload
+FROM   (SELECT * FROM old_state EXCEPT SELECT * FROM new_state);
+```
+
+**When to use `EXCEPT`-diff:**
+- You don't have a stable primary key, OR you want to catch *any* column change as a "removed-then-added" pair.
+- The table is small enough that a full-row anti-join is acceptable (`EXCEPT` is implemented as a hash-grouped anti-join; cost scales with row count).
+- You want the simplest possible audit pattern that's robust against schema drift.
+
+**Caveats:**
+- An UPDATE to a single column shows up as one REMOVED row (old values) AND one ADDED row (new values) — that's correct for an immutable lakehouse but may surprise engineers expecting an "UPDATED" diff_kind.
+- `EXCEPT` deduplicates each side first (set semantics, not multiset). If you need bag semantics, use `EXCEPT ALL`.
+
+#### Step 3 — Pattern B: row-by-row update diff via `FULL OUTER JOIN` (key needed, captures UPDATEs as one row)
+
+When the table has a stable business key (e.g., `event_id`) and you want UPDATEs collapsed into a single row showing both before-and-after column values, use `FULL OUTER JOIN` on the key.
+
+```sql
+-- Trino 467: keyed diff — one row per event_id, with classify(diff_kind) ∈ {'ADDED', 'REMOVED', 'UPDATED', 'UNCHANGED'}.
+-- Only emits rows that actually differ; UNCHANGED rows are filtered out at the end.
+WITH old_state AS (
+  SELECT event_id, tenant_id, event_type, occurred_at, payload
+  FROM iceberg.analytics.events FOR VERSION AS OF 4823511203987654321   -- <OLD_ID>
+),
+new_state AS (
+  SELECT event_id, tenant_id, event_type, occurred_at, payload
+  FROM iceberg.analytics.events FOR VERSION AS OF 8954597067493422955   -- <NEW_ID>
+)
+SELECT
+  CASE
+    WHEN o.event_id IS NULL THEN 'ADDED'
+    WHEN n.event_id IS NULL THEN 'REMOVED'
+    WHEN o.tenant_id IS DISTINCT FROM n.tenant_id
+      OR o.event_type IS DISTINCT FROM n.event_type
+      OR o.occurred_at IS DISTINCT FROM n.occurred_at
+      OR o.payload IS DISTINCT FROM n.payload
+    THEN 'UPDATED'
+    ELSE 'UNCHANGED'
+  END AS diff_kind,
+  COALESCE(o.event_id, n.event_id) AS event_id,
+  o.tenant_id   AS old_tenant_id,   n.tenant_id   AS new_tenant_id,
+  o.event_type  AS old_event_type,  n.event_type  AS new_event_type,
+  o.occurred_at AS old_occurred_at, n.occurred_at AS new_occurred_at,
+  o.payload     AS old_payload,     n.payload     AS new_payload
+FROM       old_state o
+FULL OUTER JOIN new_state n ON o.event_id = n.event_id
+WHERE
+  o.event_id IS NULL
+  OR n.event_id IS NULL
+  OR o.tenant_id   IS DISTINCT FROM n.tenant_id
+  OR o.event_type  IS DISTINCT FROM n.event_type
+  OR o.occurred_at IS DISTINCT FROM n.occurred_at
+  OR o.payload     IS DISTINCT FROM n.payload;
+```
+
+**Why `IS DISTINCT FROM`** — Trino's `IS DISTINCT FROM` operator is NULL-safe: `NULL IS DISTINCT FROM NULL` returns `FALSE` (treated as equal); `NULL IS DISTINCT FROM 'x'` returns `TRUE` (treated as different). A bare `<>` would return UNKNOWN whenever either side is NULL, silently classifying NULL-bearing UPDATEs as UNCHANGED. Use `IS DISTINCT FROM` whenever comparing nullable columns for diff purposes. Verified against [trino.io/docs/current/functions/comparison.html](https://trino.io/docs/current/functions/comparison.html).
+
+**When to use keyed FULL OUTER JOIN diff:**
+- You have a stable primary / business key.
+- You want UPDATEs reported as one row (with both old + new column values) rather than two rows.
+- You want to ignore truly unchanged rows.
+
+#### Step 4 — Pattern C: aggregate snapshot summary (row counts, sums per key)
+
+For a fast "what changed in aggregate" view (without scanning every row), compare `summary` map keys from the two `$snapshots` rows themselves:
+
+```sql
+-- Trino 467: compare the commit summaries of two snapshots from $snapshots metadata.
+-- This is metadata-only (sub-second), no data scan; values come from Iceberg's per-commit accounting.
+SELECT
+  snapshot_id,
+  committed_at,
+  operation,
+  summary['added-records']    AS added_records,
+  summary['deleted-records']  AS deleted_records,
+  summary['total-records']    AS total_records,
+  summary['added-data-files'] AS added_data_files,
+  summary['total-data-files'] AS total_data_files
+FROM iceberg.analytics."events$snapshots"
+WHERE snapshot_id IN (4823511203987654321, 8954597067493422955)
+ORDER BY committed_at;
+```
+
+The `summary` map is per-commit (one snapshot's data); subtract values between rows to get the delta between snapshots. This is the fastest path when the question is "how many rows changed?" and you don't need row-level detail.
+
+#### DO-NOT-WRITE — snapshot-diff anti-patterns (re-read before pasting)
+
+| DO NOT write | Why it's wrong | Correct form |
+|---|---|---|
+| `SELECT ... FROM iceberg.analytics.events."$snapshots"` (split-quote) | **SQL error — split-quote metadata-table form.** Trino parses this as `catalog.schema.table.column` and tries to resolve `$snapshots` as a column on `events`. Fails with an unresolvable-identifier error. The `$` must sit INSIDE the same double-quote pair as the table name. | `SELECT ... FROM iceberg.analytics."events$snapshots"` — the WHOLE `events$snapshots` token in ONE pair of double quotes. |
+| `SELECT ... FROM iceberg.analytics.events.$snapshots` (bare dollar after dot) | **SQL error.** `$` is not a valid bare-identifier character in Trino; the unquoted form does not parse. Spark accepts the dotted form (`iceberg.analytics.events.snapshots`); Trino does NOT. | `iceberg.analytics."events$snapshots"`. |
+| `SELECT ... FROM iceberg.analytics."events"."$snapshots"` (each separately quoted) | **SQL error — parses as 4-part name** (`catalog.schema.table.column`). Quotes must wrap the WHOLE `events$snapshots` token, not the table and suffix separately. | `iceberg.analytics."events$snapshots"`. |
+| `... FROM events FOR VERSION AS OF '4823511203987654321'` (snapshot ID in single quotes) | **Snapshot ID is a `BIGINT`, not a string.** Quoting it makes Trino treat it as a branch / tag name and look it up in `$refs` — your numeric ID is not a ref, so the query fails with "branch not found". | `FOR VERSION AS OF 4823511203987654321` (unquoted BIGINT). The string form is reserved for branch / tag names like `'audit_2026_q1'`. |
+| `... FROM events FOR VERSION AS OF TIMESTAMP '2026-05-29 14:30:00 UTC'` | **Welds the snapshot-id clause with a TIMESTAMP literal.** Trino parse error — `FOR VERSION AS OF` takes a BIGINT (or ref-name string), NOT a timestamp. See the LEADING CANONICAL time-travel block above. | `FOR TIMESTAMP AS OF TIMESTAMP '2026-05-29 14:30:00 UTC'` (timestamp clause) OR `FOR VERSION AS OF 4823511203987654321` (snapshot-id clause). |
+| `WHERE old.col <> new.col` to classify UPDATED (in keyed diff) | **NULL-unsafe.** Returns UNKNOWN whenever either side is NULL, so NULL-bearing UPDATEs get silently classified as UNCHANGED. | `WHERE old.col IS DISTINCT FROM new.col` (NULL-safe). |
+| `EXCEPT` with different column lists or different column orders on the two sides | **Trino requires identical column types in identical positional order across both sides** of `EXCEPT` (set ops are positional, not by name). | Project the same explicit column list on both sides (as in Pattern A above); don't `SELECT *` unless both tables have the same column set in the same order. |
+
+#### Cross-references
+
+- **Above:** [§ Metadata-table quoting — canonical Trino syntax](#metadata-table-quoting--canonical-trino-syntax-read-this-once-and-remember-it) — the full set of failed-quoting variants for ALL `$<metadata>` tables (`$snapshots`, `$refs`, `$history`, `$files`, `$manifests`, `$partitions`, `$properties`).
+- **Above:** [§ LEADING CANONICAL — Iceberg time travel on Trino 467: TWO separate clauses](#leading-canonical--iceberg-time-travel-on-trino-467-two-separate-clauses-not-interchangeable) — the `FOR VERSION AS OF` / `FOR TIMESTAMP AS OF` clause rules.
+- **Above:** [§ LEADING CANONICAL — Trino 467 `$snapshots` column list](#leading-canonical--trino-467-snapshots-column-list-6-columns-exact-types) — the 6 columns of `$snapshots` (`committed_at`, `snapshot_id`, `parent_id`, `operation`, `manifest_list`, `summary`) and the Iceberg-Java-API name DO-NOT-WRITE matrix.
+
 ### How `FOR TIMESTAMP AS OF T` actually resolves
 
 > **`FOR TIMESTAMP AS OF T` resolves to the latest snapshot with `committed_at <= T`** — not necessarily a snapshot committed at exactly T. If your report job ran at 09:00 but committed at 09:03, querying `FOR TIMESTAMP AS OF TIMESTAMP '09:00:00'` returns the pre-09:00 snapshot (the state **before** the report ran), not the snapshot that includes the report. Use `$snapshots` metadata to find the exact `committed_at` and query by snapshot ID with `FOR VERSION AS OF` for precision.

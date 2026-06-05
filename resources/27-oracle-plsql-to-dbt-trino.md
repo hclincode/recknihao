@@ -996,6 +996,87 @@ FROM {{ ref('stg_customers') }}
 
 The `customer_id` here is a 32-character MD5 hex VARCHAR (e.g., `'7d3f...e2a1'`). It is **idempotent** — re-running `dbt run` produces the same `customer_id` for the same `(email, signup_source)` natural key — and **stable across clusters**, so downstream joins, foreign-key references, and external system lookups work consistently.
 
+#### LEADING CANONICAL — surrogate-key + incremental together (the framing iter489 Q4 surfaced)
+
+> **READ THIS BLOCK FIRST when an engineer asks for a dbt model that migrates an Oracle "sequence-keyed nightly MERGE" — i.e., the migration combines (a) `seq.NEXTVAL` → `dbt_utils.generate_surrogate_key` AND (b) Oracle nightly MERGE → dbt `materialized='incremental'`.** The two pieces have to work together correctly: the surrogate key is computed in the SELECT; the incremental delta filter is computed in the `WHERE` clause under a `{% if is_incremental() %}` guard. **The guard is `is_incremental()` — never `{% if execute %}`** (see DO-NOT-WRITE row below).
+
+```sql
+-- models/dw/fct_orders.sql
+-- Oracle source pattern this replaces:
+--   MERGE INTO dw.fct_orders t
+--   USING (SELECT order_seq.NEXTVAL AS order_pk, ... FROM stg_orders WHERE load_date > <last_run>) s
+--   ON (t.order_pk = s.order_pk)
+--   WHEN MATCHED THEN UPDATE SET ...
+--   WHEN NOT MATCHED THEN INSERT ...;
+--
+-- dbt-trino translation: incremental MERGE + hash-based surrogate key.
+{{ config(
+    materialized='incremental',
+    incremental_strategy='merge',
+    unique_key='order_pk',
+    on_schema_change='append_new_columns',
+    properties={
+      'format': 'PARQUET',
+      'partitioned_by': "ARRAY['order_date']",
+      'sorted_by': "ARRAY['tenant_id']",
+      'format_version': 2
+    }
+) }}
+
+SELECT
+  -- Surrogate key — computed in SELECT, NOT from a sequence.
+  -- Idempotent across runs/clusters: same (tenant_id, natural_order_id) -> same MD5 -> same order_pk.
+  {{ dbt_utils.generate_surrogate_key(['tenant_id', 'natural_order_id']) }} AS order_pk,
+  tenant_id,
+  natural_order_id,
+  order_date,
+  status,
+  total_amount,
+  updated_at
+FROM {{ ref('stg_orders') }}
+
+{% if is_incremental() %}
+  -- Delta filter — applied ONLY on incremental runs (not first build, not --full-refresh).
+  -- The watermark MAX(...) MUST be wrapped in a SELECT subquery; Trino rejects bare aggregates in WHERE.
+  WHERE updated_at >= (
+    SELECT COALESCE(MAX(updated_at), TIMESTAMP '1970-01-01 00:00:00 UTC')
+    FROM {{ this }}
+  )
+{% endif %}
+```
+
+**Why this shape (every line is load-bearing):**
+
+1. **`{{ dbt_utils.generate_surrogate_key(['tenant_id', 'natural_order_id']) }}`** is the surrogate-key replacement for Oracle's `order_seq.NEXTVAL`. It's a MACRO that emits `md5(cast(coalesce(cast(tenant_id as varchar), '_dbt_utils_surrogate_key_null_') || '-' || coalesce(cast(natural_order_id as varchar), '_dbt_utils_surrogate_key_null_') as varchar))` in the compiled SQL. Same natural keys -> same MD5 hash -> same `order_pk`, every run, every cluster.
+
+2. **`unique_key='order_pk'`** tells dbt-trino which column to MERGE on. Because `order_pk` is deterministic from the natural keys, the same source row always lands on the same target row — UPSERT semantics work cleanly.
+
+3. **`{% if is_incremental() %}`** is the CANONICAL incremental-run guard. It returns `True` ONLY when **all three** conditions hold:
+   - The target table already exists in the database, AND
+   - The current run is NOT `--full-refresh`, AND
+   - The model is configured with `materialized='incremental'`.
+
+   On the very first build (no table yet) AND on every `--full-refresh` run, `is_incremental()` returns `False`, the WHERE clause is skipped, and dbt does a full CTAS. On every subsequent normal run, it returns `True`, the watermark filter applies, and dbt-trino emits a MERGE on the delta. Verified against [docs.getdbt.com/docs/build/incremental-models](https://docs.getdbt.com/docs/build/incremental-models) and [docs.getdbt.com/reference/dbt-jinja-functions/is_incremental](https://docs.getdbt.com/reference/dbt-jinja-functions/is_incremental).
+
+4. **`(SELECT COALESCE(MAX(updated_at), TIMESTAMP '1970-01-01 ...') FROM {{ this }})`** is the watermark expression. The `COALESCE` to a safe sentinel is belt-and-suspenders in case the table exists but is empty (`MAX` returns NULL on an empty table, which would make the `>=` comparison return UNKNOWN for every row and drop everything). The subquery wrapper is REQUIRED — Trino rejects bare aggregates in `WHERE` (`MAX(...)` must be inside a `SELECT`).
+
+#### DO-NOT-WRITE — surrogate-key + incremental anti-patterns (iter489 Q4 fab class)
+
+| DO NOT write | Why it's wrong | Correct form |
+|---|---|---|
+| `{% if execute %} WHERE updated_at >= ... {% endif %}` (using `execute` as the incremental guard) | **WRONG GUARD — `execute` is NOT an incremental gate.** The dbt Jinja variable `execute` is `True` during `dbt compile`, `dbt run`, `dbt build`, AND `dbt docs generate` — it does NOT distinguish first-build from incremental-run from `--full-refresh`. Using it as the delta-filter guard would wrongly apply the WHERE on the very first build (when `{{ this }}` is empty / doesn't exist yet) AND on `--full-refresh` runs (when the entire table should be rebuilt unfiltered). Verified against [docs.getdbt.com/reference/dbt-jinja-functions/execute](https://docs.getdbt.com/reference/dbt-jinja-functions/execute). | `{% if is_incremental() %} WHERE updated_at >= ... {% endif %}` — the ONLY correct guard for an incremental delta filter. |
+| `{% if 'order_pk' in adapter.get_columns_in_relation(this) %} WHERE ... {% endif %}` (using column-existence as the incremental guard) | **WRONG GUARD — same class as `{% if execute %}`.** Column-existence checks tell you about the target schema, not about the run mode. They don't distinguish `--full-refresh` from a normal incremental run. They also fail on the very first build (when `this` doesn't exist yet and `get_columns_in_relation` errors). | `{% if is_incremental() %}` — the canonical guard. |
+| `WHERE updated_at >= MAX(updated_at) FROM {{ this }}` (bare aggregate in WHERE) | **TRINO PARSE ERROR** — aggregates are not allowed in a bare `WHERE`. Must be wrapped in a SELECT subquery. | `WHERE updated_at >= (SELECT COALESCE(MAX(updated_at), TIMESTAMP '1970-01-01 00:00:00 UTC') FROM {{ this }})`. |
+| `SELECT order_seq.NEXTVAL AS order_pk, ...` (Oracle sequence pasted into Trino) | **TRINO PARSE ERROR** — Trino has no sequences, no `NEXTVAL`. | `{{ dbt_utils.generate_surrogate_key(['tenant_id', 'natural_order_id']) }} AS order_pk`. |
+| `ROW_NUMBER() OVER (ORDER BY natural_order_id) AS order_pk` as a stable cross-run key | **NOT STABLE ACROSS RUNS.** `ROW_NUMBER()` produces a BIGINT that depends on the input row order at the time of the SELECT. A second `dbt run --full-refresh` can produce a DIFFERENT mapping for the same natural keys because the source ordering may shift. Downstream foreign keys break silently. | `{{ dbt_utils.generate_surrogate_key([...]) }}` — MD5 of the natural keys is bit-for-bit identical across every run. Use `ROW_NUMBER()` only for single-run scratch keys (e.g., within one CTAS that never re-runs incrementally). |
+| `properties={'partitioning': "ARRAY['order_date']"}` (wrong key name in the dbt-trino properties dict) | The dbt-trino `properties` dict uses **`partitioned_by`** (snake_case). The raw-Trino DDL form `CREATE TABLE ... WITH (partitioning = ...)` uses `partitioning` without an underscore, but that's the raw-SQL surface — the dbt-trino properties dict uses `partitioned_by`. | `properties={'partitioned_by': "ARRAY['order_date']"}`. See [resource 28 § LEADING CANONICAL WORKED EXAMPLE](28-complex-sql-performance-trino-dbt.md). |
+
+#### Cross-references
+
+- **Above:** [§ 3.3 minimum-viable dbt config for a migrated MERGE procedure](#33-the-minimum-viable-dbt-config-for-a-migrated-merge-procedure) — the canonical `is_incremental()` recipe in the materialization section, with the same `{% if execute %}` DO-NOT-WRITE callout.
+- **Below:** [§ 4.5B ROWNUM CANONICAL FORMS](#45b-rownum-canonical-forms--oracle-row-limiting-and-pagination-read-this-when-auditing-legacy-oracle-top-n--pagination-code) — the Oracle ROWNUM → Trino LIMIT translations engineers will hit alongside this surrogate-key migration.
+- **Resource 28:** [§ LEADING CANONICAL WORKED EXAMPLE — the canonical dbt-trino + Iceberg incremental block](28-complex-sql-performance-trino-dbt.md) — the single-source-of-truth recipe for the dbt-incremental shape, with the full DO-NOT-WRITE matrix (`{% if execute %}`, `partitioning` vs `partitioned_by`, bare-aggregate-in-WHERE, etc.).
+
 **Two-engine note.** This guardrail is specifically about the **Iceberg** spec / catalog, NOT about Delta Lake. Delta Lake has had user-facing identity columns since Delta 2.x (`CREATE TABLE ... (id BIGINT GENERATED ALWAYS AS IDENTITY, ...)` works on Delta). If you read a blog post about "lakehouse identity columns" and it shows Delta DDL, that DDL does NOT port to Iceberg. The two table formats have different feature sets here.
 
 **Cross-references.**

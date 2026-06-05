@@ -102,7 +102,7 @@ SELECT approx_percentile(latency_ms, 0.99) AS p99 FROM api_logs;
 SELECT approx_percentile(latency_ms, ARRAY[0.5, 0.95, 0.99]) AS percentiles FROM api_logs;
 ```
 
-`approx_percentile` uses a quantile-sketch algorithm with **2.3% standard error** (per Trino docs). Trino does NOT support `PERCENTILE_CONT WITHIN GROUP (ORDER BY ...)` — that is Postgres/Snowflake syntax. Always use `approx_percentile(col, fraction)` in Trino.
+`approx_percentile` uses a **quantile-sketch (T-Digest) algorithm** that bounds memory regardless of input size. **Accuracy note — do NOT confuse with `approx_distinct`'s 2.3% figure.** The 2.3% standard-error number that Trino docs publish belongs specifically to **`approx_distinct`** (HyperLogLog) — it is NOT the documented error for `approx_percentile`. Trino's [`approx_percentile`](https://trino.io/docs/current/functions/aggregate.html) page does not publish a single fixed-percentage error bound; the accuracy depends on the T-Digest compression parameter and the value distribution. For most analytical-dashboard use cases the error on p50/p95/p99 is very small (typically well under a percent for well-conditioned distributions), but if you need a doc-grade guarantee you cite it as "T-Digest sketch-based; error depends on the `accuracy` parameter" — never as "2.3%". Trino does NOT support `PERCENTILE_CONT WITHIN GROUP (ORDER BY ...)` — that is Postgres/Snowflake syntax. Always use `approx_percentile(col, fraction)` in Trino.
 
 **When to use exact**: billing, compliance, contractual SLA values, audit reports. **When to use approximate**: internal dashboards, monitoring, trend charts, queries refreshed every minute.
 
