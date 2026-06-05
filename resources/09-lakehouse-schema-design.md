@@ -349,17 +349,41 @@ To find every user's **current** state, filter `WHERE is_current = TRUE`.
 
 **Practical note:** You can maintain SCD Type 2 via Spark `MERGE INTO` (write the close-old / insert-new logic yourself) or via dbt snapshots (dbt automates it). Two patterns:
 
-**Option 1 — dbt snapshot (recommended for teams already using dbt):**
+**Option 1 — dbt snapshot (recommended for teams already using dbt).**
+
+dbt offers TWO strategies — pick exactly one per snapshot:
+
+**1a. `strategy='timestamp'` — when the source has a reliable last-modified column (PREFERRED, more efficient).** Required config key is `updated_at='<column_name>'`. dbt compares the source row's `updated_at` value against the snapshot's last seen value for that `unique_key`; if the source is newer, the old version is closed (`dbt_valid_to` stamped) and a new row is inserted.
 
 ```sql
--- snapshots/users_snapshot.sql
+-- snapshots/users_snapshot.sql — timestamp strategy
+{% snapshot users_snapshot %}
+{{
+  config(
+    target_schema='analytics',
+    unique_key='id',
+    strategy='timestamp',
+    updated_at='updated_at'   -- REQUIRED for timestamp strategy: the source-table column dbt reads to detect changes
+  )
+}}
+SELECT id AS user_id, email, display_name, plan_name, country, account_tier, updated_at
+FROM {{ source('postgres', 'users') }}
+{% endsnapshot %}
+```
+
+The `updated_at` column you point at MUST be projected by the snapshot's SELECT (dbt reads it directly). Verified at [docs.getdbt.com/reference/resource-configs/strategy](https://docs.getdbt.com/reference/resource-configs/strategy) and [docs.getdbt.com/reference/resource-configs/updated_at](https://docs.getdbt.com/reference/resource-configs/updated_at).
+
+**1b. `strategy='check'` — when the source has NO reliable last-modified column.** Required config key is `check_cols`. dbt re-hashes the listed columns each run and detects changes via hash diff. Two valid forms for `check_cols`:
+
+```sql
+-- snapshots/users_snapshot.sql — check strategy with explicit column LIST (preferred — faster)
 {% snapshot users_snapshot %}
 {{
   config(
     target_schema='analytics',
     unique_key='id',
     strategy='check',
-    check_cols=['plan_name', 'country', 'account_tier']
+    check_cols=['plan_name', 'country', 'account_tier']   -- LIST form: only these columns trigger an SCD2 update
   )
 }}
 SELECT id AS user_id, email, display_name, plan_name, country, account_tier
@@ -367,13 +391,36 @@ FROM {{ source('postgres', 'users') }}
 {% endsnapshot %}
 ```
 
-dbt adds these metadata columns automatically:
+```sql
+-- Same snapshot, alternative — check_cols='all' STRING shorthand (use only when you want EVERY column tracked)
+{{
+  config(
+    target_schema='analytics',
+    unique_key='id',
+    strategy='check',
+    check_cols='all'   -- STRING shorthand: track every column in the SELECT; per dbt docs "this may be less performant"
+  )
+}}
+```
+
+`check_cols` accepts **either a list of column names OR the literal string `'all'`** — no other shorthand exists. Per [docs.getdbt.com/reference/resource-configs/check_cols](https://docs.getdbt.com/reference/resource-configs/check_cols): *"A list of columns within the results of your snapshot query to check for changes. Alternatively, use all columns using the `all` value (however this may be less performant)."* Prefer the explicit list — `'all'` re-hashes columns like `email`, `display_name`, etc. that you may not care about for SCD2 purposes and makes every run slower.
+
+**Either strategy adds the same metadata columns automatically:**
 - `dbt_valid_from` — when this version became true
 - `dbt_valid_to` — when it stopped (NULL = still active)
 - `dbt_is_deleted` — whether the source row was deleted (dbt 1.9+)
 - `dbt_scd_id` — unique ID per version row
 
 **There is no `dbt_is_current` column.** To query current records: `WHERE dbt_valid_to IS NULL`.
+
+> **DO NOT WRITE** (snapshot-strategy citation-hygiene):
+> - `strategy='timestamp'` with NO `updated_at='<col>'` config key — dbt errors at parse: *"snapshot 'X' is using the 'timestamp' strategy and must have an 'updated_at' configured"*. The `updated_at` key is required for timestamp strategy.
+> - `strategy='check'` with NO `check_cols` config key — dbt errors at parse: *"snapshot 'X' is using the 'check' strategy and must have a 'check_cols' configured"*. The `check_cols` key is required for check strategy.
+> - `check_cols=['all']` (list-wrapped string) — that asks dbt to track a column literally named `all` and silently won't detect changes on the real columns. The `all` form is a BARE STRING `'all'`, never wrapped in brackets.
+> - `compare_cols`, `monitor_cols`, `watch_cols`, `track_cols` — none exist; only `check_cols` does.
+> - `updated_at_field`, `last_modified_column` — none exist; the key is exactly `updated_at`.
+> - `strategy='hash'` / `strategy='merge'` / `strategy='changes'` — none exist; the only built-in strategies are `timestamp` and `check`.
+> - `dbt_is_current` column — does NOT exist; query current rows via `WHERE dbt_valid_to IS NULL`.
 
 **Option 2 — Spark MERGE INTO (for teams maintaining SCD2 inside their Spark ingestion job):**
 
