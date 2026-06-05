@@ -1,50 +1,77 @@
-# Judge Feedback — Iter 487
+# Judge Feedback — Iter 488
 
 **Phase**: extended (end-of-iteration feedback only)
-**Overall**: 4.7344 STRONG PASS (~1.23 above 3.5 floor; +0.34 above iter486)
-**Federation**: NOT probed this iter — 4.49944/310 row HELD per iter472-487+ directive
+**Overall**: 4.344 PASS (~0.844 above 3.5 floor; -0.39 below iter487's 4.7344 STRONG PASS)
+**Federation**: NOT probed this iter — 4.49944/310 row HELD per iter472-488+ directive
 
 ---
 
 ## Headline
 
-**Both iter486 surgical fixes CONFIRMED LANDED on 1st re-probe.** Q1 (dbt seed path) and Q2 (Spark Iceberg file-size conf key) closed their respective fab classes (outdated-default-path / fabricated-conf-property) cleanly. The LEADING CANONICAL anchor + DO-NOT-WRITE matrix pattern is now validated for both stale-default-path and fabricated-namespaced-key fab classes.
+**Q3 dbt test severity/store_failures failed with two confirmed fabrications.** Q1, Q2, and Q4 are all STRONG PASS with zero fabs. The Q3 drag (2.75 avg) pulled the overall from what would have been a 4.875 STRONG PASS down to a thin 4.344 PASS.
 
-One small new fab surfaced on Q2 (option-key-prefix-confusion) that is NOT load-bearing and is addressable with a small clarifier in the same r13 card.
+Both suspicions from the task prompt are CONFIRMED by WebSearch + WebFetch:
+- SUSPICION A CONFIRMED: `dbt_utils.expression_is_true` is row-level only. Using it with an aggregate expression (`COUNT(*) FILTER (WHERE ...) / COUNT(*) < 0.05`) generates `SELECT ... FROM model WHERE NOT (COUNT(*) FILTER (WHERE ...) / COUNT(*) < 0.05)` — a SQL error at runtime because aggregate functions cannot appear in WHERE clauses without GROUP BY + HAVING.
+- SUSPICION B CONFIRMED: The responder cited `dbt_internal.<model>_<test>` as the failure schema — this is fabricated. The correct default is `<target_schema>_dbt_test__audit` per docs.getdbt.com/reference/resource-configs/store_failures. `dbt_internal` does not exist in dbt's store_failures implementation.
 
 ---
 
 ## Per-question breakdown
 
-### Q1 — dbt seed RE-PROBE (4.875 STRONG PASS)
-- **Accuracy 5.0** — `seeds/` default since dbt 1.0 (Dec-2021) cited correctly; pre-1.0 `data/` flagged as deprecated; override path via `seed-paths: ["data"]` correctly identified as the only way to keep `data/`. ref('plans') basename no-extension correct. `dbt seed` not run by `dbt run`/`dbt build` correct, `dbt build --select seeds+` correct. Size guidance (<1MB) matches dbt docs best practice.
-- **Completeness 4.75** — covers default dir + override + load command + ref usage + when-to-use vs source + size threshold.
-- **Clarity 4.75** — zero unexplained jargon; clear seed-vs-source decision rule.
-- **Actionability 5.0** — paste-and-run on a default dbt 1.0+ project.
-- **Fab status**: ZERO fabs. iter486 teacher edit (r27 §6.7D LEADING CANONICAL dbt seeds anchor) **LANDED on 1st re-probe**.
-- **Doc verification**: docs.getdbt.com/reference/project-configs/seed-paths CONFIRMS "By default, dbt expects seeds to be located in the `seeds` directory. For example, `seed-paths: [\"seeds\"]`".
-
-### Q2 — Spark Iceberg write tiny-files + OOM RE-PROBE (4.50 STRONG PASS)
-- **Accuracy 4.25** — primary recipe correct: TABLE PROPERTY `write.target-file-size-bytes` + `write.distribution-mode='hash'` (default since Iceberg 1.2 / Spark 3.3); explicit DO-NOT-WRITE on fabricated `spark.sql.iceberg.target_file_size_bytes` session conf (iter486 fix LANDED). **MINOR key-nuance inaccuracy (not load-bearing)**: responder's DataFrameWriter per-write OPTION was written as `.option("write.target-file-size-bytes", "134217728")` — per iceberg.apache.org/docs/latest/spark-writes#controlling-file-sizes the documented DataFrameWriterV2 OPTION key is `target-file-size-bytes` (NO `write.` prefix). Doc example: `df.writeTo("catalog.db.table").option("target-file-size-bytes", "268435456").append()`. The `write.` prefix is the TABLE-PROPERTY form only (via `TBLPROPERTIES` or `.tableProperty()`). The ALTER TABLE SET TBLPROPERTIES 'write.target-file-size-bytes' form that the responder ALSO gave IS correct.
-- **Completeness 4.75** — both levers covered, default values cited, fanout-writer OOM mechanism explained.
-- **Clarity 4.5** — 3-tier explanation clear; per-write OPTION vs persistent TBLPROPERTY distinction was the missed nuance.
-- **Actionability 4.5** — engineer applying the ALTER TABLE form succeeds; engineer pasting the `.option("write.target-file-size-bytes", ...)` per-write form gets the key silently ignored (Spark accepts any string option without validation), file size stays at the table-property/default value.
-- **Fab status**: iter486 fabricated-conf-property fab class **CLOSED on 1st re-probe**. NEW small fab class logged: **option-key-prefix-confusion** (conflating the TABLE-PROPERTY namespace `write.*` with the DataFrameWriter OPTION key namespace which strips the `write.` prefix).
-- **Side note**: `.save("s3a://...")` path-style write is the legacy non-catalog write; preferred is catalog-aware `writeTo("catalog.db.t")` API on Iceberg-Spark. Minor.
-
-### Q3 — Trino CTE inlining vs materialization (4.8125 STRONG PASS)
-- **Accuracy 5.0** — "Trino INLINES CTEs and re-runs them every reference" CONFIRMED via trino.io/docs/current/sql/select.html WITH clause: "Currently, the SQL for the `WITH` clause will be inlined anywhere the named relation is used. This means that if the relation is used more than once and the query is non-deterministic, the results may be different each time"; doc quote cited verbatim; CTE-referenced-2x-runs-the-GROUP-BY-2x is the correct behavioral implication; ephemeral=CTE-inlined matches dbt-trino adapter behavior; "2+ references → dbt table" operationally sound.
-- **Completeness 4.75** — covers inlining behavior + dbt materialization choice (ephemeral=CTE vs table=materialized) + rule of thumb.
-- **Clarity 4.5** — clear lay explanation of inlining vs materialization.
-- **Actionability 5.0** — engineer knows exactly when to switch from ephemeral to table.
+### Q1 — OLAP vs OLTP / Postgres slow for analytics (4.875 STRONG PASS)
+- **Accuracy 5.0** — row-oriented reads-all-columns tax (10-50x) correct characterization; WAL lag + OLTP contention on analytics-on-replica correct; tuning checklist all valid: partial indexes, materialized views, EXPLAIN ANALYZE Seq Scan, pg_partman (CONFIRMED real: github.com/pgpartman/pg_partman — active PostgreSQL extension for partition management), PgBouncer. Move to Trino+Iceberg only when checklist is exhausted — operationally sound.
+- **Clarity 4.75** — zero assumed OLAP knowledge; Seq Scan, WAL lag explained in engineer-friendly terms.
+- **Actionability 5.0** — specific ordered checklist: try these first, measure, then escalate to Trino+Iceberg. Engineer knows exactly what to do next.
+- **Completeness 4.75** — covers row-oriented cost, operational interference, tuning-first discipline, and migration trigger threshold.
 - **Fab status**: ZERO fabs.
 
-### Q4 — Oracle CONNECT BY → Trino WITH RECURSIVE (4.75 STRONG PASS)
-- **Accuracy 5.0** — `WITH RECURSIVE` real Trino feature CONFIRMED via trino.io/docs/current/sql/select.html "Trino supports `WITH RECURSIVE` common table expressions"; experimental flag CONFIRMED in doc warning; default `max_recursion_depth`=10 CONFIRMED; session-property override `SET SESSION max_recursion_depth = N` CONFIRMED; "quadratic plan growth with recursion depth" matches the doc verbatim. Base-case (START WITH → WHERE) + recursive-step (CONNECT BY PRIOR → JOIN org_tree) + UNION ALL + manual `level+1` mapping is the canonical Oracle→Trino rewrite.
-- **Completeness 4.75** — covers structure + experimental flag + depth tuning + pre_hook + closure-table fallback for deep trees.
-- **Clarity 4.5** — Oracle-to-Trino side-by-side mapping clear; doesn't assume prior Trino recursive-CTE knowledge.
-- **Actionability 4.75** — paste-and-run with pre_hook scaffolding for per-model depth raising; closure-table fallback is operationally sound for deep hierarchies.
+### Q2 — NOT IN with NULLs → zero rows (4.875 STRONG PASS)
+- **Accuracy 5.0** — three-valued logic (UNKNOWN propagation from NULL in NOT IN list → WHERE filters all rows) textbook correct; NOT EXISTS fix (TRUE/FALSE only, NULLs ignored, Trino optimizes to anti-join) correct; LEFT JOIN ... IS NULL correct; "never use NOT IN on a nullable subquery column" is the right rule.
+- **Clarity 4.75** — three-valued logic explained without assumed SQL-internals knowledge; example walkthrough makes the NULL → UNKNOWN → zero-rows chain concrete.
+- **Actionability 5.0** — two concrete alternative patterns given; engineer can paste and run.
+- **Completeness 4.75** — covers why zero rows, two fix patterns, and the governing rule.
 - **Fab status**: ZERO fabs.
+
+### Q3 — dbt test severity:warn + store_failures:true (2.75 FAIL)
+- **Accuracy 2.0** — two confirmed fabrications/misuses drag accuracy to 2.0 despite correct identification of `severity: warn` and `store_failures: true` as real configs:
+  - FAB-A (aggregate-in-row-level-test MISUSE): `dbt_utils.expression_is_true: expression: "COUNT(*) FILTER (WHERE discount_pct IS NULL)/COUNT(*) < 0.05"` is a SQL error at runtime. Confirmed via WebFetch of github.com/dbt-labs/dbt-utils/blob/main/macros/generic_tests/expression_is_true.sql — the macro generates `SELECT ... FROM model WHERE NOT (expression)`. COUNT is an aggregate function; placing it in a WHERE clause without GROUP BY + HAVING is invalid SQL. The correct purpose-built macro for this use case is `dbt_utils.not_null_proportion: at_least: 0.95`, which computes `sum(case when col is null then 0 else 1 end) / count(*)` at the aggregate level. Confirmed real via github.com/dbt-labs/dbt-utils/blob/main/macros/generic_tests/not_null_proportion.sql.
+  - FAB-B (fabricated schema name): `dbt_internal.<model>_<test>` — `dbt_internal` does not exist in dbt's store_failures implementation. Confirmed via WebFetch of docs.getdbt.com/reference/resource-configs/store_failures: default schema is `<target_schema>_dbt_test__audit` (e.g., `dev_username_dbt_test__audit`). Configurable via `+schema:` in `dbt_project.yml` under `data_tests:`.
+- **Clarity 3.5** — the conceptual explanation of severity:warn and store_failures:true is clear, but the example code would confuse any engineer who tries to run it.
+- **Actionability 2.0** — paste-and-fail on two counts: (1) aggregate expression_is_true → SQL execution error; (2) `dbt_internal` schema doesn't exist → engineer looks in wrong place for failure rows.
+- **Completeness 3.5** — covers severity:warn, store_failures:true configs (real); purpose (log+continue, persist failure rows) correct conceptually. Missing: correct macro (`not_null_proportion`) and correct schema name (`_dbt_test__audit`).
+- **Fab status**: TWO confirmed fabrications — expression_is_true aggregate misuse (class: wrong-test-type / aggregate-in-row-level-test) + fabricated-schema-name (`dbt_internal`).
+
+### Q4 — Subtotals + grand total one query: GROUPING SETS / ROLLUP / GROUPING() (4.875 STRONG PASS)
+- **Accuracy 5.0** — `GROUP BY GROUPING SETS ((region,product_line),(region),())` valid Trino SQL, CONFIRMED via WebFetch trino.io/docs/current/sql/select.html; `ROLLUP(region,product_line)` = those exact 3 grouping sets CONFIRMED correct (Trino doc: "ROLLUP(a,b) is equivalent to GROUPING SETS ((a,b),(a),())"); GROUPING() function for level-detection (returns bit-set decimal; 0 if column included in grouping, 1 if excluded) CONFIRMED real Trino feature; NULL-in-subtotal-column meaning "this is an aggregate row" correct.
+- **Clarity 4.75** — explains GROUPING SETS without assumed knowledge; ROLLUP as shorthand is explained clearly; GROUPING() level detection is concrete.
+- **Actionability 5.0** — paste-and-run SQL for the exact use case; ROLLUP shorthand reduces YAML line count.
+- **Completeness 4.75** — covers GROUPING SETS, ROLLUP shorthand, GROUPING() level detection, NULL semantics for subtotals.
+- **Fab status**: ZERO fabs.
+
+---
+
+## Overall score
+
+| Q | Topic | Acc | Clarity | Action | Complete | Avg |
+|---|---|---|---|---|---|---|
+| Q1 | OLAP vs OLTP / Postgres slow | 5.0 | 4.75 | 5.0 | 4.75 | 4.875 |
+| Q2 | NOT IN + NULLs anti-join | 5.0 | 4.75 | 5.0 | 4.75 | 4.875 |
+| Q3 | dbt test severity + store_failures | 2.0 | 3.5 | 2.0 | 3.5 | 2.75 |
+| Q4 | GROUPING SETS / ROLLUP / GROUPING() | 5.0 | 4.75 | 5.0 | 4.75 | 4.875 |
+| **Overall** | | **4.25** | **4.4375** | **4.25** | **4.4375** | **4.344** |
+
+**PASS** (4.344 > 3.5, margin +0.844)
+
+---
+
+## Fabrications / misuses inventory (iter488)
+
+| # | Q | Class | Severity | Correct fact | Source |
+|---|---|---|---|---|---|
+| 1 | Q3 | aggregate-in-row-level-test (MISUSE) | LOAD-BEARING — SQL error at runtime | `expression_is_true` generates `WHERE NOT (expression)` — aggregate functions illegal in WHERE; use `dbt_utils.not_null_proportion: at_least: 0.95` for null-proportion threshold | github.com/dbt-labs/dbt-utils/blob/main/macros/generic_tests/expression_is_true.sql + not_null_proportion.sql |
+| 2 | Q3 | fabricated-schema-name | LOAD-BEARING — engineer looks in wrong schema | Default store_failures schema is `<target_schema>_dbt_test__audit` (suffix `_dbt_test__audit`); no `dbt_internal` schema in dbt | docs.getdbt.com/reference/resource-configs/store_failures |
+
+Q1, Q2, Q4: ZERO fabrications.
 
 ---
 
@@ -52,60 +79,46 @@ One small new fab surfaced on Q2 (option-key-prefix-confusion) that is NOT load-
 
 | Topic | Before | After | Delta |
 |---|---|---|---|
-| SQL query best practices (Q1 dbt seed maps here) | 4.5492/50 | **4.5556/51** | +0.0064 |
-| Iceberg partition design (Q2 file-size + distribution-mode) | 4.4946/35 | **4.4948/36** | +0.0002 |
-| Improving complex SQL perf on Trino with dbt (Q3 CTE materialization) | 4.7781/4 | **4.785/5** | +0.0069 |
-| Oracle PL/SQL->dbt/Trino migration (Q4 CONNECT BY) | 4.5029/59 | **4.5070/60** | +0.0041 |
+| When to add an OLAP layer vs staying on the transactional DB (Q1) | 4.458/14 | **4.4858/15** | +0.0278 |
+| SQL query best practices for OLAP (Q2 NOT IN trap + Q3 dbt test misuse) | 4.5556/51 | **4.5275/53** | -0.0281 |
+| Analytical query patterns on Iceberg+Trino (Q4 GROUPING SETS / ROLLUP) | 4.4872/14 | **4.5131/15** | +0.0259 |
 | Trino federation / cross-source connectors | 4.49944/310 | **4.49944/310 UNCHANGED** | NOT PROBED |
 
 ---
 
-## Fix-landing status
+## Teacher actions for iter489
 
-| iter486 fab | Q | Class | Status iter487 |
-|---|---|---|---|
-| `data/plans.csv` as seed dir | Q1 | outdated-default-path / version-pin-spillover | **CONFIRMED FIXED** (responder used `seeds/`, banned `data/` as deprecated default) |
-| `spark.conf.set("spark.sql.iceberg.target_file_size_bytes", ...)` | Q2 | fabricated-conf-property | **CONFIRMED FIXED** (responder explicitly banned the fake conf, used TABLE PROPERTY + distribution-mode='hash') |
+### PRIMARY — SURGICAL FIX in dbt testing resource (wherever dbt test configs are documented, likely r27 or a dedicated dbt testing card)
 
-Both iter486 LEADING CANONICAL + DO-NOT-WRITE pattern edits landed on **1st re-probe**.
+**Fix 1: expression_is_true vs not_null_proportion disambiguation**
 
----
+Install a LEADING CANONICAL card with:
+- Clear statement: "`dbt_utils.expression_is_true` is a ROW-LEVEL test. It generates `SELECT 1 FROM model WHERE NOT (your_expression)`. You CANNOT use aggregate functions (COUNT, SUM, AVG) in the expression — that is a SQL error."
+- The correct macro for null-proportion threshold: `dbt_utils.not_null_proportion: at_least: 0.95` (column-level test; computes `COUNT(non-null) / COUNT(*) >= 0.95` at the aggregate level).
+- DO-NOT-WRITE rows:
+  - `dbt_utils.expression_is_true: expression: "COUNT(*) FILTER (WHERE col IS NULL)/COUNT(*) < 0.05"` — WRONG, aggregate in row-level WHERE clause = SQL error.
+  - `dbt_utils.expression_is_true: expression: "AVG(amount) > 0"` — WRONG, same class.
+- Working example of the correct pattern: `- dbt_utils.not_null_proportion: at_least: 0.95` on a column config.
+- Citation: github.com/dbt-labs/dbt-utils README section on `not_null_proportion`.
 
-## Fabrications / inaccuracies inventory (iter487)
+**Fix 2: store_failures schema name**
 
-| # | Question | Class | Severity | Correct fact | Source |
-|---|---|---|---|---|---|
-| 1 | Q2 | option-key-prefix-confusion | MINOR (non-load-bearing) | DataFrameWriter OPTION key is bare `target-file-size-bytes` (no `write.` prefix); `write.` prefix is TABLE-PROPERTY form only | iceberg.apache.org/docs/latest/spark-writes#controlling-file-sizes |
-| 2 | Q2 | legacy-API-preference (style nit) | TRIVIAL | Path-style `.save("s3a://...")` is the legacy non-catalog write; catalog-aware `writeTo("catalog.db.t")` is preferred for Iceberg-Spark | iceberg.apache.org/docs/latest/spark-writes |
+Install explicit LEADING CANONICAL statement:
+- "When `store_failures: true`, dbt writes failure rows to `<your_target_schema>_dbt_test__audit`. For example, if your target schema is `analytics`, failures go to `analytics_dbt_test__audit`."
+- DO-NOT-WRITE: `dbt_internal` is NOT a dbt schema — this name does not exist in dbt's store_failures implementation.
+- Configure a custom suffix via `+schema: my_custom_suffix` under `data_tests:` in `dbt_project.yml`.
+- Citation: docs.getdbt.com/reference/resource-configs/store_failures.
 
-No load-bearing fabrications this iter. Q1, Q3, Q4 all ZERO fabs.
+### SECONDARY — breadth design for iter489 (NO dedicated federation probe)
 
----
-
-## Teacher actions for iter488
-
-### PRIMARY — SMALL clarifier in r13 LEADING CANONICAL 3-tier Spark write file-size card
-
-The iter487 r13 LEADING CANONICAL card already has the 3-tier hierarchy (TABLE PROPERTY / DataFrameWriter OPTION / NO session-conf). Tighten the DataFrameWriter OPTION tier to disambiguate the key:
-
-- **Before/after pair**: clearly show the DataFrameWriter OPTION key is `target-file-size-bytes` (NO `write.` prefix), distinct from the TABLE PROPERTY `write.target-file-size-bytes` (WITH the `write.` prefix).
-- **Working example** from the official doc: `df.writeTo("catalog.db.table").option("target-file-size-bytes", "268435456").append()`.
-- **DO-NOT-WRITE row**: ban `.option("write.target-file-size-bytes", ...)` as the silently-ignored variant (Spark accepts any string option key without validation; the `write.` prefix on a DataFrameWriter OPTION makes it a no-op).
-- **Mnemonic**: "TABLE PROPERTY uses the FULL `write.*` namespace; DataFrameWriter OPTION strips the `write.` prefix."
-- **Citation**: iceberg.apache.org/docs/latest/spark-writes#controlling-file-sizes.
-
-Also worth adding a tiny line preferring catalog-aware `writeTo("catalog.db.t")` over legacy path-style `.save("s3a://...")` for Iceberg-Spark on the MinIO+Hive Metastore stack — keeps writes inside the catalog so Trino's Iceberg connector sees them.
-
-### SECONDARY — breadth design for iter488 (NO dedicated federation probe)
-
-- Federation 4.49944/310 row HELD per iter472-487+ directive. **DO NOT count any iter488 probe as a federation probe.**
-- Low-count topics worth additional datapoints (each tested from >=2 angles for durability):
+- Federation 4.49944/310 row HELD per iter472-488+ directive. DO NOT count any iter489 probe as a federation probe.
+- Low-count topics worth additional datapoints:
   - dbt sources / source freshness (3, 4.219) — re-probe loaded_at_field + warn_after/error_after blocking semantics
   - dbt model contracts (3, 4.1146) — re-probe contract.enforced + not_null runtime-enforced via Iceberg
   - Storage tiering on Trino+Iceberg+MinIO (2, 4.25) — re-probe MinIO lifecycle `mc ilm tier add` recipe
   - dbt snapshots SCD2 (2, 4.5625) — re-probe dbt_valid_from/dbt_valid_to + check vs timestamp strategy
-  - complex-SQL-perf-on-Trino-with-dbt (5, 4.785) — keep probing dbt materialization tuning
-- Consider 2nd-angle re-probe on either iter487 fix (dbt seed-path OR Spark write file-size key prefix) to lock 2+ confirmations.
+  - complex-SQL-perf-on-Trino-with-dbt (5, 4.785) — continue probing dbt materialization tuning
+- Consider a re-probe on Q3 NOT IN + NULLs from a 2nd angle (e.g., LEFT JOIN IS NULL vs NOT EXISTS performance on Trino, or IN with NULLs symmetric behavior) to lock 2+ confirmations.
 
 ### Schedule note
 
@@ -115,8 +128,9 @@ Also worth adding a tiny line preferring catalog-aware `writeTo("catalog.db.t")`
 
 ## Streak / margin status
 
-- **86th consecutive overall PASS in extended phase.**
-- Margin at 4.7344 (STRONG PASS) — +0.34 above iter486's 4.3906 PASS; comfortably above 3.5 floor.
-- **Double-fix landing iter**: both iter486 surgical fixes (Q1 seeds/-not-data/ + Q2 Spark conf-key DO-NOT-WRITE) confirmed on 1st re-probe.
-- **Citation-hygiene status**: 3 of 4 Qs ZERO-fab; Q2 has one minor non-load-bearing option-key nuance.
-- **Federation**: 4.49944/310 — 23rd+ consecutive iteration with the row HELD per iter472-487+ directive. **DO NOT probe federation in iter488.**
+- **87th consecutive overall PASS in extended phase.**
+- Margin at 4.344 (THIN PASS) — +0.844 above 3.5 floor; -0.39 below iter487's 4.7344 STRONG PASS.
+- Q3 2.75 FAIL dragged overall from what would have been a 4.875 STRONG PASS.
+- **Two new fab classes logged**: expression_is_true-aggregate-misuse + fabricated-schema-name (`dbt_internal`).
+- **Citation-hygiene status**: Q1, Q2, Q4 ZERO fab. Q3 two load-bearing fabs; neither is new in type (aggregate-misuse and name-fabrication are recurring patterns), but this is the first time they appeared on dbt test configs specifically.
+- **Federation**: 4.49944/310 — 24th+ consecutive iteration with the row HELD per iter472-488+ directive. DO NOT probe federation in iter489.

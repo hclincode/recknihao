@@ -3872,9 +3872,9 @@ After creation, Trino and Spark both see the same table because both point at th
 
 ## LEADING CANONICAL — Spark Iceberg write file size: controlling tiny-file production and fanout-writer OOM
 
-> **READ THIS FIRST if your question contains any of: `tiny files`, `small files`, `too many files`, `target-file-size`, `target_file_size`, `write.target-file-size-bytes`, `distribution-mode`, `fanout OOM`, `fanout writer`, `Spark write file size`, `Iceberg write file size`, `spark.sql.iceberg.target`, `spark.conf.set iceberg`.** This is the canonical 3-tier reference for controlling Iceberg write file size from Spark. Citations: [iceberg.apache.org/docs/latest/spark-writes](https://iceberg.apache.org/docs/latest/spark-writes/) and [iceberg.apache.org/docs/latest/spark-configuration](https://iceberg.apache.org/docs/latest/spark-configuration/).
+> **READ THIS FIRST if your question contains any of: `tiny files`, `small files`, `too many files`, `target-file-size`, `target_file_size`, `write.target-file-size-bytes` (with `write.` prefix), `target-file-size-bytes` (no `write.` prefix), `distribution-mode`, `fanout OOM`, `fanout writer`, `Spark write file size`, `Iceberg write file size`, `option key prefix`, `spark.sql.iceberg.target`, `spark.conf.set iceberg`, `writeTo vs save`.** This is the canonical 3-tier reference for controlling Iceberg write file size from Spark. Citations: [iceberg.apache.org/docs/latest/spark-writes](https://iceberg.apache.org/docs/latest/spark-writes/) and [iceberg.apache.org/docs/latest/spark-configuration](https://iceberg.apache.org/docs/latest/spark-configuration/) (Write options table).
 
-Tiny Parquet files (< ~10 MB) hurt Trino query performance: each file requires a separate footer read during planning, and a partition with 500 small files has ~500x the planning overhead of one well-sized file. On Iceberg 1.5.2 + Spark 3.x, there are exactly **two documented mechanisms** to control write target file size. There is **no Spark session conf key** for this — any `spark.conf.set(...)` claim for file sizing is fabricated.
+Tiny Parquet files (< ~10 MB) hurt Trino query performance: each file requires a separate footer read during planning, and a partition with 500 small files has ~500x the planning overhead of one well-sized file. On Iceberg 1.5.2 + Spark 3.x, there are exactly **two documented mechanisms** to control write target file size — and the **key name differs between the two**: TABLE PROPERTY uses **`write.target-file-size-bytes`** (with `write.` prefix); DataFrameWriter OPTION uses **`target-file-size-bytes`** (NO `write.` prefix). Same setting, different key in each namespace; see the KEY-PREFIX DISAMBIGUATION callout in Tier 2 below. There is **no Spark session conf key** for file sizing — any `spark.conf.set(...)` claim for file sizing is fabricated.
 
 ### Tier 1 — TABLE PROPERTY `write.target-file-size-bytes` (persistent; recommended)
 
@@ -3905,11 +3905,42 @@ SET TBLPROPERTIES ('write.target-file-size-bytes' = '134217728');
 Overrides the table property for a single write. Use for one-off bulk loads where you want tighter file sizing without permanently changing the table property.
 
 ```python
-# Per-write override — overrides the table property for this write only
+# Per-write override — overrides the table property for this write only.
+# Note the catalog-aware writeTo("iceberg.<schema>.<table>") form — see KEY-PREFIX note below.
 df.writeTo("iceberg.analytics.events") \
   .option("target-file-size-bytes", "134217728") \
   .append()
 ```
+
+> **KEY-PREFIX DISAMBIGUATION — read this BEFORE writing any `.option(...)` line for Iceberg-Spark file sizing.** The TABLE-PROPERTY namespace and the DataFrameWriter-OPTION namespace are **two different namespaces** that use **different keys for the same setting**. Conflating them is the single most common iter487-class fab in this area.
+>
+> | Namespace | Key (file size) | Where you set it | Persistent? |
+> |---|---|---|---|
+> | TABLE PROPERTY | **`write.target-file-size-bytes`** (WITH `write.` prefix) | `TBLPROPERTIES (...)` on CREATE TABLE, `ALTER TABLE ... SET TBLPROPERTIES (...)`, or `writeTo(...).tableProperty(...)` at create time | YES — applies to every subsequent write |
+> | DataFrameWriter OPTION | **`target-file-size-bytes`** (NO `write.` prefix) | `.option("target-file-size-bytes", "<bytes>")` chained on `writeTo(...)` before the verb (`.append()` / `.overwritePartitions()` / `.create()`) | NO — single write only; reverts to table property next write |
+>
+> **Mnemonic:** *TABLE PROPERTY uses the FULL `write.*` namespace; DataFrameWriter OPTION strips the `write.` prefix.* Per [iceberg.apache.org/docs/latest/spark-configuration](https://iceberg.apache.org/docs/latest/spark-configuration/) "Write options" table, the documented per-write override key is **`target-file-size-bytes`** with the description "Overrides this table's `write.target-file-size-bytes`". Same setting, different key name in each namespace.
+>
+> **Before / After — the iter487 Q2 minor nuance, fixed:**
+>
+> ```python
+> # BEFORE — WRONG (silently ignored, file size stays at table-property/default value):
+> df.writeTo("iceberg.analytics.events") \
+>   .option("write.target-file-size-bytes", "134217728") \
+>   .append()
+> # The `write.` prefix on a DataFrameWriter OPTION key makes it a no-op.
+> # Spark accepts ANY string option key without validation — there is NO parse error
+> # to warn you. The write completes, but the target size is whatever the TABLE
+> # PROPERTY says (or the 512 MB default if no property is set). Engineer believes
+> # they tuned file size; in reality nothing changed.
+>
+> # AFTER — CORRECT (bare key, no `write.` prefix, override IS applied):
+> df.writeTo("iceberg.analytics.events") \
+>   .option("target-file-size-bytes", "134217728") \
+>   .append()
+> ```
+>
+> **Catalog-aware `writeTo("iceberg.<schema>.<table>")` is the canonical form on this stack — NOT legacy `.save("s3a://...")`.** On the Iceberg + SparkCatalog plugin stack the catalog-aware DataFrameWriterV2 (`writeTo(...)`) is the documented write path; the legacy v1 `.save("s3a://...")` path-style write can route around the catalog plugin entirely, write to the wrong location, silently ignore the table's partition spec, or fail with a confusing CatalogPlugin error. Every `.option("target-file-size-bytes", ...)` example in this resource uses `writeTo(...)` for that reason. See the TOP-OF-DOC CALLOUT #1 "API-CONFUSION GUARDRAIL" at the top of this resource for the full reasoning.
 
 ### Tier 3 — TABLE PROPERTY `write.distribution-mode` (prevents fanout-writer OOM)
 
@@ -3942,13 +3973,15 @@ SET TBLPROPERTIES (
 );
 ```
 
-### DO-NOT-WRITE — fabricated Spark session conf for Iceberg file size
+### DO-NOT-WRITE — fabricated Spark session conf + option-key-prefix-confusion for Iceberg file size
 
 | DO NOT write | Why it's wrong |
 |---|---|
 | `spark.conf.set("spark.sql.iceberg.target_file_size_bytes", "134217728")` | **FABRICATED — this key does not exist.** Spark stores arbitrary string conf keys without error, but Iceberg never reads `spark.sql.iceberg.target_file_size_bytes`. File size remains at the table property default (512 MB) or whatever `write.target-file-size-bytes` says. Engineer thinks they fixed tiny files but nothing changes. |
 | `spark.conf.set("spark.sql.iceberg.target-file-size-bytes", "134217728")` | **Same fabrication, hyphen variant.** Also silently ignored by Iceberg. |
 | Any `spark.conf.set("spark.sql.iceberg.*", ...)` claim for file sizing | **The `spark.sql.iceberg.*` namespace is REAL for other keys** (`spark.sql.iceberg.handle-timestamp-without-timezone`, `spark.sql.iceberg.vectorization.enabled`, `spark.sql.iceberg.check-nullability`, `spark.wap.id`, `spark.wap.branch`) **but NOT for target file size.** Use TABLE PROPERTY or `.option()` only. |
+| `df.writeTo("iceberg.x.y").option("write.target-file-size-bytes", "134217728").append()` | **WRONG NAMESPACE — silently ignored.** This is the **option-key-prefix-confusion** class: the DataFrameWriter OPTION key drops the `write.` prefix (it is bare `target-file-size-bytes`); the `write.` prefix belongs ONLY to the TABLE-PROPERTY namespace (`TBLPROPERTIES`, `ALTER TABLE SET TBLPROPERTIES`, or `writeTo(...).tableProperty(...)`). Spark accepts any string option key without validation, so this write completes with no error — but the per-write override is NOT applied, and the file size stays at whatever the table property says (or the 512 MB default). Correct shape: `.option("target-file-size-bytes", "134217728")` (no prefix). Per [iceberg.apache.org/docs/latest/spark-configuration](https://iceberg.apache.org/docs/latest/spark-configuration/) "Write options" table. |
+| `df.write.format("iceberg").option("target-file-size-bytes", "134217728").save("s3a://bucket/...")` | **LEGACY non-catalog write path — disallowed on this stack.** The v1 `.save("s3a://...")` path-style write can route around the SparkCatalog plugin, skip the Iceberg table's partition spec, and write to the wrong location. Even if the option key is correct, the catalog isn't notified, so Trino's Iceberg connector won't see the new files. Use catalog-aware `df.writeTo("iceberg.<schema>.<table>").option(...).append()` instead. See TOP-OF-DOC CALLOUT #1. |
 
 **The correct shape for "adjust file size on an existing table"** (the most common operational case):
 
