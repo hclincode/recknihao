@@ -1193,10 +1193,15 @@ A common variant of the residual-filter case: the WHERE clause filters on a **no
 -- If most files have (lower_bound='basic', upper_bound='enterprise'),
 -- their ranges all overlap your filter value 'enterprise' — file-skipping
 -- CANNOT help; you need to either re-cluster files OR add a bloom filter.
+--
+-- IMPORTANT: use readable_metrics (JSON, name-keyed) — NOT lower_bounds['plan_type'].
+-- lower_bounds/upper_bounds are typed map(INTEGER, BIGINT) keyed by Iceberg
+-- field id; a VARCHAR subscript fails Trino's analyzer.
+-- See resources/10 § "LEADING CANONICAL — how to query $files.lower_bounds".
 SELECT
   file_path,
-  CAST(lower_bounds['plan_type'] AS VARCHAR) AS lo,
-  CAST(upper_bounds['plan_type'] AS VARCHAR) AS hi,
+  json_extract_scalar(readable_metrics, '$.plan_type.lower_bound') AS lo,
+  json_extract_scalar(readable_metrics, '$.plan_type.upper_bound') AS hi,
   record_count,
   file_size_in_bytes / 1024 / 1024 AS size_mb
 FROM iceberg.analytics."feature_usage$files"
@@ -1215,7 +1220,7 @@ If most rows in the output have `lo = 'basic'` and `hi = 'enterprise'`, the colu
 
 | Fix lever | Available on Trino 467? | How to use |
 |---|---|---|
-| **Trino 467 native clustering** — `sorted_by` table property + `EXECUTE optimize`. THE Trino-only path. No Spark required for lexicographic single- or multi-column sort. | YES (Trino-native) | Two statements: `ALTER TABLE iceberg.analytics.feature_usage SET PROPERTIES sorted_by = ARRAY['plan_type ASC NULLS LAST', 'event_date ASC'];` then `ALTER TABLE iceberg.analytics.feature_usage EXECUTE optimize(file_size_threshold => '512MB');` (use a threshold larger than your largest existing file to force every file to rewrite for the initial sort migration). After the rewrite, verify with `$files` that `lower_bounds['plan_type'] = upper_bounds['plan_type']` for most files. **WATCH OUT:** Trino's `sorted_by` is lexicographic only — does NOT support z-order; for that, drop to Spark (next row). |
+| **Trino 467 native clustering** — `sorted_by` table property + `EXECUTE optimize`. THE Trino-only path. No Spark required for lexicographic single- or multi-column sort. | YES (Trino-native) | Two statements: `ALTER TABLE iceberg.analytics.feature_usage SET PROPERTIES sorted_by = ARRAY['plan_type ASC NULLS LAST', 'event_date ASC'];` then `ALTER TABLE iceberg.analytics.feature_usage EXECUTE optimize(file_size_threshold => '512MB');` (use a threshold larger than your largest existing file to force every file to rewrite for the initial sort migration). After the rewrite, verify with `$files` that `json_extract_scalar(readable_metrics, '$.plan_type.lower_bound') = json_extract_scalar(readable_metrics, '$.plan_type.upper_bound')` for most files (use `readable_metrics` JSON, NOT `lower_bounds['plan_type']` — see resources/10 § "LEADING CANONICAL — how to query $files.lower_bounds"). **WATCH OUT:** Trino's `sorted_by` is lexicographic only — does NOT support z-order; for that, drop to Spark (next row). |
 | **Sort-strategy data rewrite (Spark)** — cluster files by the filter column via Spark CALL. Use when you need `rewrite-all => 'true'` (forces every file to rewrite regardless of size), or when you want Spark's richer tuning knobs. | YES (runs in Spark, not Trino) | `CALL iceberg.system.rewrite_data_files(table => 'analytics.feature_usage', strategy => 'sort', sort_order => 'plan_type ASC NULLS LAST', options => map('rewrite-all', 'true'))`. **This is Spark SQL only — do NOT paste into Trino as `ALTER TABLE ... EXECUTE rewrite_data_files(sort_order => ...)`; Trino 467 has no such procedure and will reject the statement.** After the rewrite, verify with `$files` that the new files have non-overlapping `(lower_bound, upper_bound)` ranges for `plan_type`. |
 | **Z-order data rewrite (Spark)** — multi-column clustering when you filter on more than one non-partition column simultaneously (e.g., `plan_type AND region`). | YES (runs in Spark, not Trino) — **no Trino equivalent at any release**; Trino's `sorted_by` is lexicographic only. | `CALL iceberg.system.rewrite_data_files(table => 'analytics.feature_usage', strategy => 'sort', sort_order => 'zorder(plan_type, region)')`. **Spark SQL only.** |
 | **Spark write-time bloom filter** — Spark writes Parquet bloom filter indexes per-file at write time; Trino 467 reads them at query time via its bloom-filter pushdown. THIS IS THE 467 BLOOM-FILTER PATH. | YES (write configured via Iceberg table properties on Spark; read happens automatically in Trino 467 with `parquet.use-bloom-filter=true`, the default) | Set the Iceberg table property in Spark: `ALTER TABLE iceberg.analytics.feature_usage SET TBLPROPERTIES ('write.parquet.bloom-filter-enabled.column.plan_type'='true')`. Then trigger a Spark `rewrite_data_files` so existing files are rewritten WITH bloom filters baked in. Subsequent Trino 467 queries with `WHERE plan_type = ...` get bloom-filter file-skipping for free. |
@@ -1246,9 +1251,12 @@ GROUP BY tenant_id;
 -- output rows imply — confirms file-skipping isn't helping on plan_type.
 
 -- Step 2: confirm per-file min/max for plan_type are too wide to prune.
+-- Use readable_metrics (JSON, name-keyed); lower_bounds/upper_bounds are
+-- integer-keyed (Iceberg field id), so a string subscript like
+-- lower_bounds['plan_type'] is a Trino analyzer type error.
 SELECT
-  CAST(lower_bounds['plan_type'] AS VARCHAR) AS lo,
-  CAST(upper_bounds['plan_type'] AS VARCHAR) AS hi,
+  json_extract_scalar(readable_metrics, '$.plan_type.lower_bound') AS lo,
+  json_extract_scalar(readable_metrics, '$.plan_type.upper_bound') AS hi,
   count(*) AS files,
   sum(file_size_in_bytes) / 1024 / 1024 / 1024 AS gb
 FROM iceberg.analytics."feature_usage$files"

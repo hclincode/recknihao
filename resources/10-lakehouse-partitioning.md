@@ -399,6 +399,41 @@ There are **three independent pruning layers** in an Iceberg + Parquet read. Mos
 
 Verify it yourself — the Iceberg table spec defines manifest entries with `lower_bounds: map<int, binary>` and `upper_bounds: map<int, binary>` keyed by **field ID for every column** (not just partition fields). Spark/Trino populate both maps on every write.
 
+> **LEADING CANONICAL — how to query `$files.lower_bounds` / `upper_bounds` on Trino 467 WITHOUT the column-id subscript landmine.** All claims below verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (Iceberg connector → `$files` metadata table column list, WebFetched 2026-06-05) and [trinodb/trino PR #13026](https://github.com/trinodb/trino/pull/13026) (the "name-keyed map" proposal that was **NOT merged** — auto-closed stale on 2024-09-26). Keywords this block answers: "lower_bounds", "upper_bounds", "$files map key", "lower_bounds by column name", "subscript", "file pruning verify SQL", "readable_metrics".
+>
+> **The one rule.** On Trino 467 (and current 481), the `$files` metadata table's `lower_bounds`, `upper_bounds`, `column_sizes`, `value_counts`, `null_value_counts`, and `nan_value_counts` columns are typed `map(INTEGER, BIGINT)` keyed by **Iceberg field-id integers**, NOT by column-name strings. Writing `lower_bounds['plan_type']` fails at planning time with a Trino type error (the subscript `'plan_type'` is `VARCHAR`, but the map key is `INTEGER`). The user-friendly path is the `readable_metrics` JSON column on the same `$files` row, which IS keyed by column name.
+>
+> **What to write instead — three working patterns:**
+>
+> 1. **Recommended (engineer-friendly, name-keyed) — use `readable_metrics` JSON:**
+>    ```sql
+>    SELECT
+>      file_path,
+>      json_extract_scalar(readable_metrics, '$.plan_type.lower_bound') AS plan_lo,
+>      json_extract_scalar(readable_metrics, '$.plan_type.upper_bound') AS plan_hi,
+>      record_count,
+>      file_size_in_bytes
+>    FROM iceberg.analytics."user_events$files"
+>    WHERE content = 0
+>    ORDER BY file_size_in_bytes DESC
+>    LIMIT 20;
+>    ```
+>    `readable_metrics` is `JSON`-typed and keys metrics by column name; `json_extract_scalar` returns `VARCHAR`. Cast to the column's actual type if you need a typed comparison (e.g., `CAST(... AS DATE)` for a date column). This is the only `$files` pattern you should hand a SaaS engineer who doesn't have field IDs memorized.
+>
+> 2. **Field-id subscript (only if you already looked up the column ID):** look up the column's Iceberg field ID via `SHOW CREATE TABLE` (Iceberg field IDs are stable across schema-evolution renames) or via the Iceberg metadata JSON, then use the INTEGER literal as the subscript: `lower_bounds[5]` if `plan_type` has Iceberg field id `5`. Brittle — if anyone reorders/adds columns the literal is wrong. Prefer pattern 1.
+>
+> 3. **DO NOT WRITE — banned `$files` subscript forms (paste into the file-pruning verification checklist):**
+>
+>    | Banned form | Why wrong | Use this instead |
+>    |---|---|---|
+>    | `lower_bounds['plan_type']` (string subscript) | Map type is `map(INTEGER, BIGINT)`; VARCHAR subscript fails Trino's analyzer with a type-mismatch error. | `json_extract_scalar(readable_metrics, '$.plan_type.lower_bound')` (pattern 1). |
+>    | `upper_bounds[plan_type]` (bareword) | Iceberg column names are not bound as identifiers inside the map subscript. Same type error class. | Same as above. |
+>    | `lower_bounds.plan_type` (dot syntax) | Map fields are NOT row fields; dot-syntax field access doesn't apply to map types in Trino. | Same as above. |
+>    | "The map is keyed by column name on Trino 467" | FALSE. PR #13026 proposed name-keying but was auto-closed stale and never merged. Trino 467 / 481 still ship integer-keyed maps. | Use `readable_metrics` (pattern 1) for name-keyed access. |
+>    | `CAST(lower_bounds['plan_type'] AS VARCHAR)` (legacy pattern from older versions of this resource) | Was incorrect even in older copies — never worked on Trino 467. Reconciled across r10, r17, r18 examples this iter. | Use pattern 1 verbatim. |
+>
+> **Cross-references:** the same fix applies to identical examples elsewhere — see `17-iceberg-table-maintenance.md` § sort verification, and `18-query-performance-regression.md` § residual-filter diagnosis. All four sites in this repo have been reconciled to pattern 1.
+
 ### Why `WHERE plan_type = 'enterprise'` on a day-partitioned table doesn't skip files
 
 A common day-partitioned event table with a low-cardinality `plan_type` column ('basic', 'pro', 'starter', 'enterprise'):
@@ -468,9 +503,12 @@ ALTER TABLE iceberg.analytics.user_events
   EXECUTE optimize(file_size_threshold => '512MB');
 
 -- Verify the sort took effect via the $files metadata table.
+-- Use readable_metrics (JSON, name-keyed) — NOT lower_bounds['plan_type']
+-- (lower_bounds is map(INTEGER, BIGINT) keyed by Iceberg field id, see
+-- "LEADING CANONICAL — how to query $files.lower_bounds" block above).
 SELECT
-  CAST(lower_bounds['plan_type'] AS VARCHAR) AS plan_lo,
-  CAST(upper_bounds['plan_type'] AS VARCHAR) AS plan_hi,
+  json_extract_scalar(readable_metrics, '$.plan_type.lower_bound') AS plan_lo,
+  json_extract_scalar(readable_metrics, '$.plan_type.upper_bound') AS plan_hi,
   count(*) AS files
 FROM iceberg.analytics."user_events$files"
 WHERE content = 0

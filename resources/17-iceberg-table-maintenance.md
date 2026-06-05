@@ -123,9 +123,13 @@ ALTER TABLE iceberg.analytics.events
 -- sort migration of well-sized existing files, pass a larger threshold.)
 
 -- Step 3: verify the sort took effect.
+-- Use readable_metrics (JSON, name-keyed) — lower_bounds/upper_bounds are
+-- typed map(INTEGER, BIGINT) keyed by Iceberg field id, NOT by column name.
+-- Writing lower_bounds['plan_type'] is a Trino analyzer type error.
+-- See resources/10 § "LEADING CANONICAL — how to query $files.lower_bounds".
 SELECT
-  CAST(lower_bounds['plan_type'] AS VARCHAR) AS plan_lo,
-  CAST(upper_bounds['plan_type'] AS VARCHAR) AS plan_hi,
+  json_extract_scalar(readable_metrics, '$.plan_type.lower_bound') AS plan_lo,
+  json_extract_scalar(readable_metrics, '$.plan_type.upper_bound') AS plan_hi,
   count(*) AS files,
   sum(file_size_in_bytes) / 1024 / 1024 AS mb
 FROM iceberg.analytics."events$files"
