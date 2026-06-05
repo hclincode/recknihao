@@ -39,6 +39,83 @@
 
 ---
 
+## CRITICAL QUOTING RULE — read THIS FIRST before writing ANY metadata-table query (list snapshots, snapshot history, show snapshots, $snapshots, $history, $files, $partitions, $manifests, $refs, $properties, metadata table, diff snapshots, what changed between versions, audit trail)
+
+> **THE rule (the THIRD-recurrence-cure for the `$snapshots` split-quote regression — iter454 fixed, iter489 recurred, iter490 re-fixed mid-file, iter490 still wrong; this block is now THE FIRST thing the keyword path hits).** To query ANY Iceberg metadata table in Trino 467, the WHOLE `<table>$<metatable>` token goes inside ONE pair of double quotes — no more, no fewer:
+>
+> ```
+> iceberg.<schema>."<table>$snapshots"
+> iceberg.<schema>."<table>$history"
+> iceberg.<schema>."<table>$refs"
+> iceberg.<schema>."<table>$files"
+> iceberg.<schema>."<table>$partitions"
+> iceberg.<schema>."<table>$manifests"
+> iceberg.<schema>."<table>$properties"
+> ```
+>
+> **The CANONICAL "list snapshot history" query — copy this VERBATIM:**
+>
+> ```sql
+> SELECT snapshot_id, committed_at, operation, summary
+> FROM iceberg.analytics."events$snapshots"
+> ORDER BY committed_at DESC;
+> ```
+>
+> That is the ONLY correct form on Trino 467. The opening double-quote sits BEFORE the table name (`"events`), not after a dot following the table name. The closing double-quote sits AFTER the metatable suffix (`$snapshots"`). Whole token, one pair of quotes.
+>
+> **One more example each for `$files` and `$partitions` — the same rule generalizes to every metadata table:**
+>
+> ```sql
+> -- $files: per-file inventory (file_path, file_size_in_bytes, record_count, content, partition, ...).
+> SELECT file_path, file_size_in_bytes, record_count
+> FROM iceberg.analytics."events$files"
+> ORDER BY file_size_in_bytes DESC
+> LIMIT 20;
+>
+> -- $partitions: per-partition aggregates (partition, record_count, file_count, total_size, data, ...).
+> SELECT partition, record_count, file_count, total_size
+> FROM iceberg.analytics."events$partitions"
+> ORDER BY record_count DESC;
+> ```
+>
+> **DO-NOT-WRITE — every one of these FAILS on Trino 467; all are concrete SQL errors, none are merely stylistic:**
+>
+> ```sql
+> -- SPLIT-QUOTE — the recurring regression. Trino parses this as catalog.schema.table.column
+> -- and tries to resolve "$snapshots" as a COLUMN named $snapshots on the table `events`.
+> -- Fails with: Column '$snapshots' cannot be resolved (or equivalent unresolvable-identifier error).
+> SELECT * FROM iceberg.analytics.events."$snapshots";     -- FAILS — split-quote
+> SELECT * FROM iceberg.analytics.events."$history";       -- FAILS — split-quote
+> SELECT * FROM iceberg.analytics.events."$files";         -- FAILS — split-quote
+> SELECT * FROM iceberg.analytics.events."$partitions";    -- FAILS — split-quote
+> SELECT * FROM iceberg.analytics.events."$refs";          -- FAILS — split-quote
+> SELECT * FROM iceberg.analytics.events."$manifests";     -- FAILS — split-quote
+>
+> -- BARE-DOLLAR (no quotes at all) — `$` is not a valid bare-identifier character; parse error.
+> SELECT * FROM iceberg.analytics.events.$snapshots;       -- FAILS — bare $ identifier
+> SELECT * FROM iceberg.analytics.events.$files;           -- FAILS — bare $ identifier
+> SELECT * FROM iceberg.analytics.events.$partitions;      -- FAILS — bare $ identifier
+>
+> -- SPARK-STYLE DOTTED (no quotes, no $) — Spark's metadata-table namespace separator,
+> -- NOT recognised by Trino's parser; resolves as a 4-part name and fails.
+> SELECT * FROM iceberg.analytics.events.snapshots;        -- FAILS in Trino (Spark syntax)
+> SELECT * FROM iceberg.analytics.events.history;          -- FAILS in Trino (Spark syntax)
+> SELECT * FROM iceberg.analytics.events.files;            -- FAILS in Trino (Spark syntax)
+>
+> -- TABLE-AND-SUFFIX EACH SEPARATELY QUOTED — parses as 4-part name (catalog.schema.table.column).
+> SELECT * FROM iceberg.analytics."events"."$snapshots";   -- FAILS — quotes don't unify the token
+> ```
+>
+> **Mnemonic:** if your `"$..."` quote opens AFTER a dot following a bare table name, you wrote it wrong. Move the opening quote to the LEFT of the table name so the whole `<table>$<metatable>` token sits inside ONE pair of double quotes. Whole-token quoting — not table-then-suffix quoting.
+>
+> **Keyword anchors (so you find this block on every related question):** *list snapshots, list snapshot history, snapshot history query, show snapshots, snapshot list, audit trail of an Iceberg table, query Iceberg metadata, metadata table, $snapshots, $history, $refs, $files, $partitions, $manifests, $properties, diff snapshots, compare snapshots, what changed between two versions, time travel snapshot id lookup.* — All these question shapes route THROUGH this block FIRST.
+>
+> Verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (Connector → Iceberg → Metadata tables), where the docs themselves use exactly the canonical one-quote-pair form: `iceberg.test_db."customer_orders$snapshots"`, `iceberg.test_db."customer_orders$partitions"`, `iceberg.test_db."customer_orders$files"`, etc.
+>
+> **For DEEPER content** on `$snapshots` (column list, operation values, parent_id semantics), `$refs` (branch/tag lookups), the `$snapshots` vs `$history` distinction, the snapshot-DIFF worked example, and the full DO-NOT-WRITE matrix, see [§ Iceberg metadata tables cheat sheet](#iceberg-metadata-tables-cheat-sheet-read-this-before-you-debug-any-iceberg-issue) (deeper canonical) and the time-travel DIFF section (worked EXCEPT + keyed FULL OUTER JOIN pattern). This top block is the keyword-path interceptor; the deeper sections carry the worked examples and supporting rationale.
+
+---
+
 ## Common myths about Iceberg maintenance — read FIRST (the load-bearing wrong claims)
 
 These are the absolutes most often stated incorrectly about Iceberg maintenance procedures on Trino 467 + Iceberg 1.5.2. Each TRUTH below has been verified against the [Apache Iceberg docs](https://iceberg.apache.org/docs/latest/) and [Trino release notes](https://trino.io/docs/current/release.html). Lead with the TRUTH; state the nuance.

@@ -550,6 +550,48 @@ WHERE element_at(properties, 'debug_mode') = 'true';
 
 The `[]` subscript operator on Trino MAPs is "strict" — it raises an error if the key is absent on any row in the scan, which is almost always the wrong behavior for analytical workloads on heterogeneous event data. `element_at()` is the safe lookup that returns NULL on missing keys and lets `WHERE` filter them out. Make `element_at()` the default in your team's SQL style guide; `[]` is appropriate only when you're certain the key exists on every row (e.g., querying a config table you control end-to-end).
 
+#### Existence check on a MAP key — the CORRECT form, and a common TYPE ERROR to avoid
+
+> **TYPE-LEVEL fact (memorize before writing any existence check on a MAP column).** On a `MAP(K, V)` column, `element_at(map_col, key)` returns the value type `V` — i.e. a **scalar** (e.g. `VARCHAR`, `BIGINT`, `DOUBLE`), NOT a collection. Verified at [trino.io/docs/current/functions/map.html](https://trino.io/docs/current/functions/map.html) (`element_at(map(K, V), key) -> V`). Trino's `cardinality(x)` accepts only `ARRAY(E)` or `MAP(K, V)`, NOT scalars — verified at [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html) and [trino.io/docs/current/functions/map.html](https://trino.io/docs/current/functions/map.html). Composing them produces a SQL **type error**, not a runtime NULL.
+
+```sql
+-- CORRECT — existence check on a MAP key. element_at returns NULL when the key
+-- is absent; IS NOT NULL filters the present rows.
+SELECT user_id
+FROM iceberg.analytics.user_events
+WHERE element_at(properties, 'debug_mode') IS NOT NULL;
+```
+
+```sql
+-- DO NOT WRITE — cardinality(element_at(map_col, key)) is a Trino TYPE ERROR.
+SELECT user_id
+FROM iceberg.analytics.user_events
+WHERE cardinality(element_at(properties, 'debug_mode')) > 0;
+-- WHY THIS FAILS: on a MAP(VARCHAR, VARCHAR), element_at(properties, 'debug_mode')
+-- returns a VARCHAR scalar (the value at that key, or NULL). cardinality() accepts
+-- only ARRAY or MAP arguments — not VARCHAR (or any other scalar). The Trino
+-- analyzer rejects this query with a type-mismatch error before execution.
+--   Source: trino.io/docs/current/functions/map.html (element_at(map(K,V), key) -> V)
+--   Source: trino.io/docs/current/functions/array.html (cardinality(x) on array/map only)
+-- The correct existence check is `element_at(properties, 'debug_mode') IS NOT NULL`.
+```
+
+```sql
+-- ALSO DO NOT WRITE — these adjacent "key-existence" forms have their own problems:
+SELECT user_id FROM iceberg.analytics.user_events
+WHERE properties['debug_mode'] IS NOT NULL;
+-- WHY THIS FAILS: bracket access on a MAP raises "Key not present in map" on
+-- ANY row missing the key, so the query errors before IS NOT NULL is evaluated.
+-- Use element_at() for the same intent.
+
+SELECT user_id FROM iceberg.analytics.user_events
+WHERE contains(map_keys(properties), 'debug_mode');
+-- LEGAL but slow — materializes the full key array per row purely to ask one
+-- membership question. Prefer `element_at(properties, 'debug_mode') IS NOT NULL`.
+```
+
+**Mnemonic:** `element_at` on a MAP returns the **value** (a scalar). `cardinality` wants a **collection** (array or map). You can't wrap one in the other. The correct existence check is always `element_at(map_col, key) IS NOT NULL`.
+
 ### Working PySpark migration: JSON column → promoted columns + raw JSON fallback
 
 Use this when you're flattening an incoming JSON column from Postgres CDC (`events.properties` JSONB) into an Iceberg table with promoted hot columns plus a raw-JSON fallback for the long tail. **Use explicit `StructType` — not a JSON-string schema** (the string form is invalid PySpark API):
