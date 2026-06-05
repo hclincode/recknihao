@@ -206,10 +206,121 @@ When you read Trino's EXPLAIN ANALYZE output, you'll hit these terms. Definition
 >
 > ### Cross-references for session-property tuning
 >
+> - **THIS RESOURCE, "LEADING CANONICAL — Trino 467 memory limits + spill-to-disk"** (immediately below) — the dedicated memory/spill card with the full session-vs-config split + the FAB matrix banning `task_max_memory` and `memory_revoking_enabled` (the two most-fabricated memory session-property names). Read this for OOM / `Query exceeded per-node memory limit` / spill questions.
 > - **Resource 24 §"LEADING CANONICAL — How do I influence Trino's join distribution"** — the canonical three-lever join-distribution recipe with the same DO-NOT-WRITE matrix banning `/*+ USE_HASH_JOIN */` and other hint forms.
 > - **Resource 23 §"SQL anti-patterns"** — the consolidated cross-dialect-spillover table including hint syntax, `ALTER SESSION`, `SET LOCAL`.
 > - **Resource 22 §5.1** — federation-side dynamic filtering with the per-catalog `<catalog>.dynamic_filtering_wait_timeout` form.
 > - **Resource 27 §4.4B** — the consolidated CROSS-DIALECT-SPILLOVER guardrail covering Oracle/Postgres/Snowflake/Spark forms that look valid but parse-error against Trino 467.
+
+---
+
+## LEADING CANONICAL — "Trino 467 memory limits + spill-to-disk: what knobs actually exist" (read this FIRST for `Query exceeded per-node memory limit`, OOM, spill, spill-to-disk, out of memory, memory limit, per-node memory questions)
+
+> **This is the findable canonical answer for memory-limit-and-spill tuning. Every property name below has been verified against [trino.io/docs/current/admin/properties-memory-management.html](https://trino.io/docs/current/admin/properties-memory-management.html), [trino.io/docs/current/admin/properties-resource-management.html](https://trino.io/docs/current/admin/properties-resource-management.html), [trino.io/docs/current/admin/properties-spilling.html](https://trino.io/docs/current/admin/properties-spilling.html), and [trino.io/docs/current/admin/spill.html](https://trino.io/docs/current/admin/spill.html). Do NOT invent session-property names. If a property name is not at one of those URLs, do NOT write it.**
+>
+> **Keywords this card answers**: `Query exceeded per-node memory limit`, `Query exceeded distributed memory limit`, `EXCEEDED_LOCAL_MEMORY_LIMIT`, `EXCEEDED_DISTRIBUTED_MEMORY_LIMIT`, OOM, out of memory, memory limit, per-node memory, spill, spill to disk, spill-to-disk, enable spill, `SPILL_FAILED`.
+>
+> ### The session-vs-config split (read this FIRST)
+>
+> Trino's memory and spill knobs come in TWO categories with VERY different semantics. **Confusing the two is the single most common fab class for this topic** — engineers write `SET SESSION <plausible_memory_name>` for a knob that is actually CONFIG-only, get `Session property <name> does not exist`, and waste an hour. Memorize this split:
+>
+> | Category | Where it lives | Spelling | Change requires | Per-query? |
+> |---|---|---|---|---|
+> | **SESSION property** | `SET SESSION <name> = <value>;` in your SQL session | UNDERSCORES (no dots/hyphens) | Nothing — applies to next query in this session | Yes — per-query / per-session |
+> | **CONFIG property** | `etc/config.properties` on coordinator + every worker | DOTS and HYPHENS (no underscores) | Cluster restart (rolling worker + coordinator restart) | No — cluster-wide |
+>
+> **The REAL session properties for memory + spill (Trino 467) — these are the only ones that exist.** Every name below is verifiable at `trino.io/docs/current/admin/properties-*.html` or `trino.io/docs/current/admin/spill.html`:
+>
+> | # | Session property (UNDERSCORES) | Config equivalent (DOTS/HYPHENS) | What it does | Notes |
+> |---|---|---|---|---|
+> | **1** | `query_max_memory` | `query.max-memory` | Cluster-wide user-memory cap for THIS query (summed across all workers). | **CAN ONLY LOWER** the config ceiling — you cannot raise it above the `query.max-memory` config value. Default config value: `20GB` per [trino.io/docs/current/admin/properties-resource-management.html](https://trino.io/docs/current/admin/properties-resource-management.html). |
+> | **2** | `query_max_memory_per_node` | `query.max-memory-per-node` | Per-worker user-memory cap for THIS query. | **CAN ONLY LOWER** the config ceiling — you cannot raise it above the `query.max-memory-per-node` config value. Default config value: **30% of the JVM max heap** per [trino.io/docs/current/admin/properties-resource-management.html](https://trino.io/docs/current/admin/properties-resource-management.html). |
+> | **3** | `query_max_total_memory` | `query.max-total-memory` | Cluster-wide user+system memory cap for THIS query. | Same lower-only override semantics. Default config: `query.max-memory × 2`. |
+> | **4** | `spill_enabled` | `spill-enabled` | The MASTER ENABLE switch for spill-to-disk on THIS query. | Default config: `false`. **This is the actual lever** to enable spill per-query: `SET SESSION spill_enabled = true;`. Spill applies to hash joins (build side), final/partial aggregations, `ORDER BY` sort buffers, and window functions. |
+>
+> **CONFIG-ONLY properties (NOT session-settable; live in `etc/config.properties`; require cluster restart).** These control HOW the cluster behaves cluster-wide; you cannot toggle them per-query:
+>
+> | Config property | Default | What it does | Why it's config-only |
+> |---|---|---|---|
+> | `memory.heap-headroom-per-node` | 30% of max heap | Reserves a fraction of JVM heap that Trino refuses to use for query memory (kept for GC and non-query JVM overhead). | Process-level tuning; can't be per-query. |
+> | `memory-revoking-threshold` | `0.9` | Fraction of the memory pool that triggers **revoking** (i.e., starts spilling memory from running queries) once `spill-enabled=true`. | Cluster-wide spill-trigger tuning; not session-settable. **Controls WHEN spill triggers, NOT whether spill is enabled.** |
+> | `memory-revoking-target` | `0.5` | After revoking triggers, the fraction of the memory pool to drop to before stopping revocation. | Same — cluster-wide spill behavior tuning, not session-settable. |
+> | `spiller-spill-path` | (none — required when `spill-enabled=true`) | Local disk path(s) for spill files (comma-separated for striping). | Filesystem path, can't be per-query. |
+> | `max-spill-per-node` | `100GB` | Aggregate spill cap across ALL queries on one worker node. | Cluster-wide quota. |
+> | `query-max-spill-per-node` | `100GB` | Per-query spill cap on one worker. | Cluster-wide quota per-query (set at config time). |
+>
+> **The key conceptual point about `memory-revoking-threshold` / `memory-revoking-target`**: these are NOT "spill enable/disable" knobs. They are tuning knobs that control WHEN spill triggers AFTER `spill-enabled=true` is set. Setting `memory-revoking-threshold=0.85` makes spill trigger sooner (at 85% of memory pool); setting `0.95` makes it trigger later. Neither value enables spill — only `spill-enabled=true` (config) or `SET SESSION spill_enabled = true;` does that.
+>
+> ### Practical fix for `Query exceeded per-node memory limit` (the canonical OOM remediation)
+>
+> When you see `Query exceeded per-node memory limit` or `EXCEEDED_LOCAL_MEMORY_LIMIT`, work through these in order — each step is cheaper to try than the next:
+>
+> 1. **Enable spill-to-disk for this query** (the actual enable-spill lever):
+>    ```sql
+>    SET SESSION spill_enabled = true;
+>    -- Now re-run the failing query in the SAME session.
+>    SELECT ... ;  -- the query that OOMed
+>    ```
+>    This is the single most actionable session-only fix. Requires `spill-enabled=false` cluster default (which is the Trino default) AND a worker `spiller-spill-path` configured in `etc/config.properties` (a one-time cluster config). If `spiller-spill-path` is not set, `SET SESSION spill_enabled = true` succeeds but no spill actually happens.
+>
+> 2. **Reduce the query's memory footprint** (no cluster config change needed):
+>    - Add a tighter partition filter (smaller scan ⇒ smaller hash table).
+>    - Pre-aggregate in a CTE or staging dbt model before the heavy join / GROUP BY.
+>    - Replace `COUNT(DISTINCT high_cardinality_column)` with `approx_distinct(high_cardinality_column)` (HyperLogLog — bounded memory).
+>    - Avoid high-cardinality GROUP BY that explodes the aggregation state (e.g., `GROUP BY user_id` on a billion-user table without partition filter).
+>    - For fact-to-dim joins: `SET SESSION join_distribution_type = 'BROADCAST'` (when the dim is small) — see §9a above and r24 LEADING CANONICAL join-distribution block.
+>
+> 3. **Cluster-side: raise the per-node memory cap** (requires worker restart, NOT session-settable):
+>    ```properties
+>    # /etc/trino/config.properties on every worker + coordinator — requires restart.
+>    query.max-memory-per-node=8GB
+>    ```
+>    This is the LAST-resort fix because it requires a cluster restart and raises the ceiling for ALL queries (so one bad query can hog more memory cluster-wide). Prefer the session-only fixes above.
+>
+> 4. **Resource groups (cluster-level workload throttling — NOT a single-query memory lever)**: resource groups in `etc/resource-groups.properties` control concurrency, CPU, and memory **per workload class** (e.g., "BI dashboards get 30% of cluster memory and max 10 concurrent queries; ad-hoc analyst queries get 20% and max 3 concurrent"). They are NOT a knob you reach for to fix ONE query's OOM — they are a knob to prevent the "noisy neighbor" pattern where one workload starves another. If your OOM root cause is "this query genuinely needs more memory than the cluster has", resource groups are NOT the answer; spill (Step 1) or restructuring (Step 2) is.
+>
+> ### DO-NOT-WRITE — FABRICATED memory/spill session-property names (banned in every Trino 467 resource)
+>
+> | DO NOT write this | Why it's wrong | The right answer |
+> |---|---|---|
+> | `SET SESSION task_max_memory = '4GB'` | **FABRICATION.** No such Trino session property exists. There is no `task_max_memory` at [trino.io/docs/current/admin/properties-memory-management.html](https://trino.io/docs/current/admin/properties-memory-management.html) or anywhere else in the Trino 467 session-property catalog. The plausible-but-wrong sibling-name mash-up (looks like a sibling of `query_max_memory`). Per-node memory is CONFIG-only: `query.max-memory-per-node` in `etc/config.properties`. Trino rejects: `Session property task_max_memory does not exist`. | For per-query/per-node throttling DOWNWARD: `SET SESSION query_max_memory_per_node = '4GB';` (the session form that LOWERS the cap). For raising the cap cluster-wide: `query.max-memory-per-node=8GB` in `etc/config.properties` + worker restart. |
+> | `SET SESSION memory_revoking_enabled = true` | **FABRICATION.** No such Trino session property exists. The `memory-revoking-*` family (`memory-revoking-threshold`, `memory-revoking-target`) are CONFIG-ONLY in `etc/config.properties` and they control WHEN spill triggers, NOT whether spill is enabled. Trino rejects: `Session property memory_revoking_enabled does not exist`. | To enable spill per-query: `SET SESSION spill_enabled = true;` (the real master switch). Worth setting at the cluster level too: `spill-enabled=true` in `etc/config.properties` + `spiller-spill-path=/var/trino/spill`. |
+> | `SET SESSION distributed_join_distribution_type = 'PARTITIONED'` (iter474-class regression, kept in matrix) | **FABRICATION** — dead `distributed_` prefix splice. Trino rejects: `Session property distributed_join_distribution_type does not exist`. | `SET SESSION join_distribution_type = 'PARTITIONED';` |
+> | `SET SESSION task.max-memory = '4GB'` | **FABRICATION** + dot-spelling mash-up. There IS a config property `task.max-memory-per-task` (experimental, config-only), but NO session counterpart, and the bare `task.max-memory` form is not a valid property name. | Per-node: `query.max-memory-per-node` (config-only). Per-query downward override: `SET SESSION query_max_memory_per_node = '4GB';` (session). |
+> | `SET SESSION task_memory_limit = '4GB'` | **FABRICATION** — plausible-looking sibling-name mash-up. No `task_memory_limit` session property exists. | Same as above — `SET SESSION query_max_memory_per_node = '...';` (session) or `query.max-memory-per-node` (config). |
+> | `SET SESSION memory_revoke_enabled = true` | **FABRICATION** — variant spelling of the `memory_revoking_enabled` fab above. Still does not exist. | `SET SESSION spill_enabled = true;` |
+> | `SET SESSION spill_to_disk_enabled = true` | **FABRICATION** — verbose-name variant. No such session property. | `SET SESSION spill_enabled = true;` |
+> | `SET SESSION enable_spill = true` | **FABRICATION** — `enable_*`-prefix variant. The actual session property is `spill_enabled` (suffix form), NOT `enable_spill`. | `SET SESSION spill_enabled = true;` |
+> | `SET SESSION query.max-memory-per-node = '4GB'` (dot-spelling in a SET SESSION) | **WRONG FORM** — config-property spelling in a session statement. `SET SESSION` requires UNDERSCORE form. Trino rejects: `Session property query.max-memory-per-node does not exist`. | `SET SESSION query_max_memory_per_node = '4GB';` (underscores). |
+> | `SET SESSION memory-revoking-threshold = 0.85` | **CATEGORY ERROR** — `memory-revoking-threshold` is CONFIG-ONLY. It is not session-settable in any form (with hyphens OR underscores). | Set in `etc/config.properties` cluster-wide: `memory-revoking-threshold=0.85` + cluster restart. There is no session knob for this. |
+>
+> **The general rule that pre-empts the entire fab class**: do NOT write `SET SESSION <plausible_memory_name>` from memory or by extrapolating sibling names. Every session-property name MUST be verifiable at one of:
+> - [trino.io/docs/current/admin/properties-memory-management.html](https://trino.io/docs/current/admin/properties-memory-management.html)
+> - [trino.io/docs/current/admin/properties-resource-management.html](https://trino.io/docs/current/admin/properties-resource-management.html)
+> - [trino.io/docs/current/admin/properties-spilling.html](https://trino.io/docs/current/admin/properties-spilling.html)
+> - [trino.io/docs/current/admin/spill.html](https://trino.io/docs/current/admin/spill.html)
+>
+> If the property name you are about to write is NOT listed at one of those URLs as session-settable, **do not write it**. The four real memory/spill session properties for Trino 467 are exactly: `query_max_memory`, `query_max_memory_per_node`, `query_max_total_memory`, `spill_enabled`. There are no others in this family.
+>
+> ### Quick verify — what session properties are actually set in your session?
+>
+> ```sql
+> -- Trino 467 — shows every session property + current/default value.
+> SHOW SESSION LIKE 'query_max_%';      -- the three memory session properties
+> SHOW SESSION LIKE '%spill%';          -- spill_enabled (and only spill_enabled)
+> SHOW SESSION LIKE 'memory%';          -- there is NO memory_revoking_enabled — confirms the fab
+> SHOW SESSION LIKE 'task_max_%';       -- empty result — confirms task_max_memory is a fab
+> ```
+>
+> Running `SHOW SESSION LIKE 'task_max_%'` will return ZERO rows on Trino 467 — that is the empirical proof that `task_max_memory` is fabricated. Same with `SHOW SESSION LIKE '%revoking%'` — empty (no `memory_revoking_*` session properties exist).
+>
+> ### Cross-references for memory + spill
+>
+> - **§Step 9 (this resource)** — the full memory pressure remediation workflow (join distribution → spill → SPILL_FAILED diagnostic).
+> - **§9b (this resource)** — full spill-to-disk operational config (paths, compression, max-spill-per-node).
+> - **§9c (this resource)** — `SPILL_FAILED` error code diagnosis (disk full, ephemeral-storage limit, permission errors).
+> - **Resource 24 §LEADING CANONICAL join-distribution** — `join_distribution_type` BROADCAST/PARTITIONED lever (the cheapest OOM fix before reaching for spill).
+> - **Resource 28** — complex SQL on Trino + dbt; covers approx_distinct, pre-aggregation patterns to reduce memory footprint.
 
 ---
 
