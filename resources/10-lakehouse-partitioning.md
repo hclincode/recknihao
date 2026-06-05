@@ -452,6 +452,8 @@ Iceberg can cluster rows within each file by a sort key so that most files conta
 
 The Trino Iceberg connector's `sorted_by` table property is in the modifiable-properties list (since Trino release 409 via [PR #14891](https://github.com/trinodb/trino/pull/14891)). Setting it then running `EXECUTE optimize` produces files sorted by the listed columns. **Use this as the default Trino-only path for lexicographic clustering by one or more columns.**
 
+> **Two-step requirement — `ALTER TABLE ... SET PROPERTIES sorted_by` ALONE does NOT re-sort existing files.** It is a metadata-only change that governs **future** writes only (new INSERTs, new dbt incremental batches). Existing data files keep their original on-disk order until `EXECUTE optimize` physically rewrites them. If your goal is to make TODAY's query faster on TODAY's data, you MUST chain Step 2 below — skipping it leaves the file-level min/max stats unchanged and the pruner sees no improvement. Confirmed behavior per [trinodb/trino #26112](https://github.com/trinodb/trino/issues/26112) ("sorted_by not working" — root cause was users setting the property and expecting existing files to re-sort without optimize).
+
 ```sql
 -- Trino 467 (CORRECT — this is the only first-class Trino path to cluster by a column).
 -- Step 1: set the table's sort order. Multi-column lex sort is supported.

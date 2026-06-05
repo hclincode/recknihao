@@ -640,10 +640,15 @@ Partition by the column that dominates your downstream WHERE clauses. See [resou
 
 The `sorted_by` property tells Iceberg writers to sort rows within each file by the specified columns. This dramatically improves Parquet's data skipping for range predicates on the sort key — because each file's min/max statistics for the sort col have a much narrower range.
 
+> **`ALTER TABLE ... SET PROPERTIES sorted_by = ARRAY[...]` alone ONLY governs FUTURE writes.** It is a metadata-only change. Existing data files are NOT physically re-sorted until you run `EXECUTE optimize` to rewrite them — without that second step, the file-level min/max stats stay unchanged and the pruner sees no improvement on today's data. (Reference: [trinodb/trino #26112](https://github.com/trinodb/trino/issues/26112).)
+
 To enforce ordering across existing files (e.g., after many small incremental writes), run:
 
 ```sql
--- Trino 467: bin-packs and re-sorts to honor the table's sorted_by property
+-- Trino 467: bin-packs and re-sorts to honor the table's sorted_by property.
+-- This is the step that physically re-orders existing files; the ALTER ... SET PROPERTIES
+-- sorted_by = ARRAY[...] step above (or in your dbt config on first build) only sets
+-- the writer hint for future inserts.
 ALTER TABLE iceberg.analytics.events EXECUTE optimize;
 ```
 

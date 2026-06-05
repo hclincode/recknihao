@@ -1,83 +1,146 @@
-# Judge Feedback — Iter 467 (Extended Phase, end-of-iteration)
+# Judge Feedback — Iter 468 (Extended Phase, end-of-iteration)
 
-## Verdict: STRONG PASS — overall avg 4.672
+**Date**: 2026-06-05
+**Phase**: Extended (end-of-iteration feedback only)
+**Overall**: 4.625 STRONG PASS
+**Per-question breakdown**: Q1 4.75 STRONG, Q2 4.375 PASS (thin), Q3 4.75 STRONG, Q4 4.625 STRONG
+**Federation probed**: NO (per directive — 4.49944/310 row UNCHANGED)
+**Iteration streak**: 67th consecutive overall PASS in extended phase
 
-All four questions cleared the 3.5 threshold by a comfortable margin. Three of four landed STRONG PASS at 4.656+. **Critical milestone: the Oracle ADD_MONTHS end-of-month CLAMP streak is RESTORED** after iter466's thin 4.0 PASS gap was closed by the iter467 teacher reconciliation in r27 §4.2.
+---
 
-## Per-question breakdown
+## Headline takeaways for the teacher
 
-| Q | Topic angle | Accuracy | Completeness | Clarity | Actionability | Avg | Verdict |
-|---|---|---|---|---|---|---|---|
-| Q1 | Oracle ADD_MONTHS month-end re-probe | 4.875 | 4.75 | 4.625 | 4.75 | **4.75** | STRONG PASS |
-| Q2 | dbt incremental on Iceberg + MoR position-deletes | 4.75 | 4.625 | 4.5 | 4.75 | **4.656** | STRONG PASS |
-| Q3 | Partition explosion + sorted_by file-level pruning | 4.375 | 4.625 | 4.625 | 4.625 | **4.563** | PASS |
-| Q4 | UPDATE on V2 + expire_snapshots safety | 4.875 | 4.625 | 4.625 | 4.75 | **4.719** | STRONG PASS |
+1. **Version-gating discipline is real and durable** — Q3 was a deliberate version-pin probe and the responder PASSED it cleanly. `parquet_bloom_filter_columns` is a Trino 469+ property (PR #24573, merged Dec 25 2024, milestone 469); responder correctly did NOT claim it on Trino 467 and pushed the writer-side path to Spark `write.parquet.bloom-filter-enabled.column.<col>` / `write.parquet.bloom-filter-fpp.column.<col>` instead, while crediting Trino 467 with read-side bloom-filter pushdown (release 406+ per posulliv.github.io/posts/parquet-predicate-pushdown). This is a textbook CREDIT and confirms the iter416 nuance miss on this exact property is now consistently corrected. **No content edit needed for the column-storage / bloom-filter topic.**
 
-Overall avg = (4.75 + 4.656 + 4.563 + 4.719) / 4 = **4.672**
+2. **One verified syntax slip at Q2 — needs a targeted fix.** The responder wrote `CREATE VIEW tenant_acme_events AS SELECT ... WITH (SECURITY DEFINER)`. This is WRONG. Per trino.io/docs/current/sql/create-view.html the syntax is:
+   ```
+   CREATE [ OR REPLACE ] VIEW view_name
+   [ COMMENT view_comment ]
+   [ SECURITY { DEFINER | INVOKER } ]
+   AS query
+   ```
+   The `SECURITY` clause is a **standalone clause placed BEFORE `AS`**, NOT a `WITH (...)` table property. `WITH (...)` does not exist on Trino CREATE VIEW at all. Additionally, DEFINER is the default — explicit omission is fine. This slip happened on a single load-bearing DDL example a SaaS engineer would copy-paste; it would fail to parse on first run.
 
-## ADD_MONTHS streak status: RESTORED
+3. **Federation stays untouched.** 4.49944/310 sits 0.0006 below the 4.5 raised threshold. A thin probe in either direction would lock or break the row. Hold the line on no federation probe for iter469.
 
-The iter466 thin-PASS Q3 gap (clamp rule omission) is closed. iter467 Q1 explicitly:
-- Flagged the clamp difference (Trino `date_add('month',...)` does NOT replicate Oracle's last-day-in→last-day-out).
-- Gave the divergent example pair (Feb 28→Mar 31 Oracle vs Mar 28 Trino) AND the convergent overflow pair (Jan 31→Feb 28 both).
-- Provided the canonical CASE wrapper using `last_day_of_month`.
-- Did NOT make any naive-equivalence claim.
+---
 
-This is exactly what the iter467 teacher reconciliation in r27 §4.2 was designed to deliver. The LEADING CANONICAL block landed on FIRST re-probe.
+## iter469 teacher actions (concrete)
 
-## Carry-forward verification: dbt + partitioning fixes HELD
+### PRIMARY — fix the `CREATE VIEW SECURITY DEFINER` syntax (reconcile-in-place, no append)
 
-- **Q2 dbt-trino keys** (materialized, incremental_strategy, unique_key, on_schema_change, properties.partitioned_by, properties.format_version): all real per docs.getdbt.com/reference/resource-configs/trino-configs. The MoR position-delete remediation correctly attributed to Spark `rewrite_position_delete_files` (Trino has no equivalent EXECUTE form). Carry-forward fix held.
-- **Q3 sorted_by partition design**: sorted_by is a real Trino Iceberg property; partition-explosion math (547 days × 10k = 5.5M) is correct; file-level min/max pruning rationale via lower_bounds/upper_bounds is correct per Iceberg spec. The ALTER + EXECUTE optimize hook addresses the "sorted_by alone doesn't rewrite existing files" caveat (trinodb/trino#26112). Carry-forward fix held.
+**Where**: search resources/ for any existing multi-tenant view / RBAC content. The multi-tenant analytics resource (resources/12) and the OPA/RBAC resource (if separate) are the highest-keyword-routing-probability locations. Run:
+```
+rg -n "CREATE VIEW.*WITH \(SECURITY" resources/
+rg -n "SECURITY DEFINER" resources/
+rg -n "CREATE VIEW" resources/
+```
+to locate every existing example. If any existing resource shows the wrong `WITH (SECURITY ...)` form, FIX IT IN PLACE (reconcile-don't-append). Do not just add a new section — the responder may cite the wrong existing one.
 
-## Fabrications / inaccuracies found
+**What to write (canonical block)**:
+- LEADING gate near the top of the multi-tenant views / RBAC section with keywords: `create view security definer`, `create view security invoker`, `view-based row filter`, `per-tenant view`, `tenant view`, `view fallback opa`.
+- The correct syntax in code block form:
+  ```sql
+  -- Correct Trino CREATE VIEW with SECURITY clause:
+  CREATE [ OR REPLACE ] VIEW view_name
+  [ COMMENT 'optional comment' ]
+  [ SECURITY { DEFINER | INVOKER } ]
+  AS query
+  ```
+  Plus a concrete worked example for a tenant view:
+  ```sql
+  CREATE VIEW tenant_acme_events
+  SECURITY DEFINER
+  AS
+  SELECT event_id, occurred_at, event_type, payload
+  FROM iceberg.analytics.events
+  WHERE tenant_id = 'acme';
+  ```
+- DO-NOT-WRITE matrix entries (banning the slip and adjacent fabrications):
+  | Wrong form | Why wrong | Correct form |
+  |---|---|---|
+  | `CREATE VIEW v AS SELECT ... WITH (SECURITY DEFINER)` | `WITH (...)` does not exist on Trino CREATE VIEW; it's a table-property syntax used on CREATE TABLE | `CREATE VIEW v SECURITY DEFINER AS SELECT ...` |
+  | `CREATE VIEW v WITH (security_mode = 'DEFINER') AS SELECT ...` | Fabricated property key; CREATE VIEW has no properties map | `CREATE VIEW v SECURITY DEFINER AS SELECT ...` |
+  | `CREATE VIEW v AS SELECT ... SECURITY DEFINER` | SECURITY clause must come BEFORE `AS`, not after the query | `CREATE VIEW v SECURITY DEFINER AS SELECT ...` |
+  | `ALTER VIEW v SET SECURITY INVOKER` | Trino has no ALTER VIEW SET SECURITY form on 467 | Drop + recreate with `CREATE OR REPLACE VIEW ... SECURITY INVOKER AS ...` |
+- One-line callouts:
+  - "DEFINER is the default — explicit `SECURITY DEFINER` is allowed but redundant."
+  - "`current_user` inside the view ALWAYS returns the query-executing user regardless of DEFINER/INVOKER — useful for dynamic per-user row filters embedded in the view body."
+- Cite: trino.io/docs/current/sql/create-view.html.
 
-**ZERO fabrications across all four answers.** Every claim was WebSearch-verified against:
-- docs.oracle.com (ADD_MONTHS clamp man) — Q1 clamp rule.
-- trino.io/docs/current/functions/datetime.html — Q1 `last_day_of_month(x) -> date`, `date_add('month', n, ts)`, timestamp arithmetic.
-- docs.getdbt.com/reference/resource-configs/trino-configs — Q2 dbt-trino incremental keys.
-- iceberg.apache.org/docs/latest/spark-procedures — Q2 `rewrite_position_delete_files`.
-- starburst.io / trino.io/docs/current/connector/iceberg.html — Q3 sorted_by + file-level pruning.
-- iceberg.apache.org/spec — Q3 lower_bounds/upper_bounds tracking.
-- trino.io/docs/current/connector/iceberg.html — Q4 UPDATE on V2 MoR + expire_snapshots + $snapshots columns + 7d-floor.
+### Breadth design for iter469 (no federation probe)
 
-Mild caveat (NOT a fabrication, just a completeness note): Q3 could have more explicitly stated that `ALTER TABLE SET PROPERTIES sorted_by = ...` only governs FUTURE writes — existing files are not re-sorted until `EXECUTE optimize` rewrites them. The responder did chain optimize after the ALTER, so the actionable flow is correct, but the rationale could be tightened. Not a score-dragging issue.
+Pick 4 non-federation angles:
+1. **CREATE VIEW SECURITY DEFINER re-probe** — verify the syntax fix lands on the first re-probe (similar pattern to the iter464→465 dbt-source-freshness lock-in). Phrase the question to surface a copy-paste DDL request, e.g., "give me the SQL to create a per-tenant view that runs as the view owner."
+2. **Trino MERGE INTO clause coverage** — Trino 467 supports `WHEN MATCHED` and `WHEN NOT MATCHED` only. `WHEN NOT MATCHED BY SOURCE` is Spark/Snowflake and is NOT in Trino 467 (or current docs). Probe whether responder fabricates it.
+3. **dbt snapshots SCD2** — config keys strategy / unique_key / check_cols / updated_at / target_schema / target_database / hard_deletes. Probe whether responder invents extra keys (e.g., fake `track_columns`, `scd_version`).
+4. **Query timeout split** — `query.max-run-time` vs `query.max-execution-time` vs `query.max-cpu-time` (server-side properties) vs session-level overrides. Probe whether responder fabricates a single `query.timeout` key.
 
-## Teacher actions for iter468 (concrete, breadth design, no federation probe)
+### Citation-hygiene watchlist for iter469
 
-### NO new urgent reconciliations
+- Fabricated CREATE VIEW `WITH (...)` table-property form (the iter468 slip — re-probe target).
+- Fabricated `ALTER VIEW SET SECURITY` (does not exist on 467 — drop+recreate is the right pattern).
+- Fabricated Trino MERGE clause `WHEN NOT MATCHED BY SOURCE` (Spark/Snowflake only; not in Trino 467).
+- Fabricated `query.timeout` single-config-key (real: `query.max-run-time` / `query.max-execution-time` / `query.max-cpu-time`).
+- Fabricated dbt snapshot config keys beyond the real set (strategy, unique_key, check_cols, updated_at, target_schema, target_database, hard_deletes, invalidate_hard_deletes).
+- Fabricated `parquet_bloom_filter_columns` on Trino 467 (CONFIRMED HELD this iter — keep watching; was held by Q3 cleanly).
 
-All four Q1–Q4 topics PASS at 4.563+. No semantic gaps, no fabrications, no carry-forward breakages. Resource state is healthy.
+### What NOT to do
 
-### Breadth-design candidates (pick 4 non-overlapping, non-federation)
+- **Do NOT touch the bloom filter / parquet write-path content.** Q3 showed responder already gives the correct Spark-write + Trino-read split with correct version-pin. Any edit here risks regressing a working answer.
+- **Do NOT probe federation.** 4.49944/310 sits 0.0006 below 4.5; a thin probe locks or breaks the row.
+- **Do NOT add a new top-level section appending the CREATE VIEW fix.** Reconcile in place where existing CREATE VIEW examples live, per the "reconcile don't append" rule. The responder may cite the wrong one if both versions coexist.
 
-1. **dbt snapshots / SCD2** — angle: `strategy='check'` vs `strategy='timestamp'`, `check_cols`, `unique_key`, `updated_at`, `target_schema`, hard-deletes handling. (dbt-trino snapshots topic adjacent to Oracle migration / dbt-incremental but not yet a probed angle.)
-2. **Trino MERGE INTO** — angle: `WHEN MATCHED`, `WHEN NOT MATCHED`, dynamic filtering on MERGE, position-delete generation on V2. **Watchlist: `WHEN NOT MATCHED BY SOURCE` is Spark/Snowflake/T-SQL; Trino 467 does NOT have it** — responder must not invent it.
-3. **Iceberg branch/tag on Trino 467** — angle: `EXECUTE fast_forward`, `EXECUTE create_branch`, `EXECUTE drop_branch`, `EXECUTE create_tag`, `FOR VERSION AS OF` / `FOR TIMESTAMP AS OF` time-travel. **Watchlist: confirm exact procedure names in Trino 467 — Spark uses different names (`CALL ... .system.create_branch`); cross-engine spillover risk.**
-4. **Query governor / timeout settings** — angle: `query.max-run-time` (wall-clock) vs `query.max-execution-time` (excluding queuing) vs `query.max-cpu-time`, per-session SET SESSION overrides, OPA gating. **Watchlist: do NOT invent `query.max-elapsed-time` or `query.timeout` — they don't exist; cite real keys only.**
+---
 
-### NO dedicated federation probe
+## Per-dimension scores (for the record)
 
-Federation row sits at 4.49944/310 — only 0.0006 below the raised 4.5 threshold. A thin probe in either direction locks or breaks the row. Keep federation OUT of iter468 unless explicitly directed. Status remains FAIL (just below threshold) but is not the priority gap.
+| Q | Topic | Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|---|---|
+| Q1 | Oracle MINUS → Trino EXCEPT | 4.875 | 4.625 | 4.75 | 4.75 | 4.75 |
+| Q2 | Multi-tenant OPA row-level + view fallback | 4.0 | 4.625 | 4.625 | 4.25 | 4.375 |
+| Q3 | Bloom filters high-cardinality user_id | 4.875 | 4.75 | 4.625 | 4.75 | 4.75 |
+| Q4 | Real-time vs batch freshness + cost | 4.625 | 4.5 | 4.75 | 4.625 | 4.625 |
 
-### Citation-hygiene watchlist for iter468
+**Overall**: 4.625 STRONG PASS.
 
-Carry forward iter467's clean slate. Specific fab-classes to watch:
+---
 
-- **Cross-dialect spillover**: Trino MERGE has NO `WHEN NOT MATCHED BY SOURCE`. Trino has NO Oracle/MySQL bare `LAST_DAY` (use `last_day_of_month`). Trino has NO `MONTHS_BETWEEN` (use `date_diff('month', ...)`).
-- **Version-pin spillover**: any Iceberg branch/tag procedure must be verified against Trino 467 (not 470+, not Spark). Confirm exact EXECUTE form vs CALL form per engine.
-- **Fabricated dbt snapshot keys**: only `strategy`, `unique_key`, `check_cols`, `updated_at`, `target_schema`, `target_database`, `invalidate_hard_deletes`, `hard_deletes`, `dbt_valid_from`, `dbt_valid_to` are real. Watch for invented snapshot config.
-- **Fabricated Trino governor config keys**: real are `query.max-run-time`, `query.max-execution-time`, `query.max-cpu-time`, `query.max-memory`, `query.max-memory-per-node`. Watch for invented `query.timeout`, `query.max-wall-time`, etc.
-- **Fabricated capability restrictions**: do NOT claim Trino "cannot do MERGE on Iceberg" — it can on V2. Do NOT claim Iceberg branches "require Spark only" — Trino 467 supports them via EXECUTE procedures.
+## Q3 version-gating verdict (called out per directive)
 
-### Resource state summary
+**CREDIT** — textbook clean three-check pass:
 
-- r27 (Oracle PL/SQL→dbt/Trino migration): healthy at 4.5792/41. ADD_MONTHS canonical landed.
-- r17 (Iceberg table maintenance): healthy at 4.4907/129. UPDATE+expire_snapshots clean.
-- r09/r10 (partition design): healthy at 4.4995/33. sorted_by canonical clean.
-- r22 (federation): UNCHANGED at 4.49944/310. Do not probe.
-- dbt-trino incremental resources: healthy. All config keys real per latest re-verification.
+1. **Trino-side writer property `parquet_bloom_filter_columns` is 469+, NOT 467**: VERIFIED at github.com/trinodb/trino PR #24573 (merged Dec 25 2024, milestone 469). Responder correctly AVOIDED claiming it on 467 and explicitly stated the Trino-side write path does not exist on 467 — pushing the writer-side configuration to Spark.
+2. **Spark-side native Iceberg property names**: `write.parquet.bloom-filter-enabled.column.<col>` and `write.parquet.bloom-filter-fpp.column.<col>` (default 0.01) are real Iceberg write properties — VERIFIED at iceberg.apache.org/docs/latest/configuration/ and apache/iceberg PR #5035 (the original write-path bloom filter PR).
+3. **Trino 467 reads Parquet bloom filters automatically**: VERIFIED at posulliv.github.io/posts/parquet-predicate-pushdown ("bloom filters to be used by the parquet reader in trino you will need to use version 406 or newer") plus github.com/trinodb/trino issue #9471. 467 > 406, so read-side pushdown is in place.
 
-## Bottom line
+Plus ~1-5% file-size overhead and equality-only (not range) guidance are standard correct framing.
 
-iter467 is a clean breadth pass with the primary iter466 reconciliation goal achieved. No new resource gaps surfaced. Recommended approach for iter468: continue breadth-design rotation on non-federation angles with the watchlist above. The system is in a stable extended-phase plateau.
+This is exactly the version-pin discipline the rubric watchlist has been targeting since iter416. Hold the line — no edits to bloom filter content in iter469.
+
+---
+
+## Fabrications and inaccuracies — full list
+
+1. **Q2 — CREATE VIEW syntax error** (load-bearing copy-paste example, would fail to parse):
+   - Wrong: `CREATE VIEW tenant_acme_events AS SELECT ... WITH (SECURITY DEFINER)`
+   - Correct: `CREATE VIEW tenant_acme_events SECURITY DEFINER AS SELECT ...`
+   - Source: trino.io/docs/current/sql/create-view.html
+   - Note: DEFINER is the default; explicit `SECURITY DEFINER` allowed but redundant. The `WITH (...)` clause does not exist on Trino CREATE VIEW at all.
+
+(No other fabrications or inaccuracies found across Q1, Q3, Q4. Q3 version-gating textbook clean.)
+
+---
+
+## Sources verified
+
+- trino.io/docs/current/sql/select.html (EXCEPT [ALL | DISTINCT] [CORRESPONDING]; MINUS not a Trino keyword)
+- trino.io/docs/current/sql/create-view.html (SECURITY DEFINER/INVOKER as standalone clause before AS; DEFINER default)
+- trino.io/docs/current/security/opa-access-control.html (OPA row filter + column masking + batch column masking)
+- github.com/trinodb/trino PR #24573 (parquet_bloom_filter_columns added in milestone 469, merged Dec 25 2024)
+- iceberg.apache.org/docs/latest/configuration/ (write.parquet.bloom-filter-enabled.column.<col>, write.parquet.bloom-filter-fpp.column.<col>, default 0.01)
+- apache/iceberg PR #5035 (Parquet Row Group Bloom Filter write-path support)
+- posulliv.github.io/posts/parquet-predicate-pushdown (Trino 406+ reads Parquet bloom filters)
+- github.com/trinodb/trino issue #9471 (Trino Parquet bloom filter implementation tracking)
+- docs.oracle.com Set Operators (Oracle MINUS = distinct; EXCEPT/EXCEPT ALL added in 21c)
