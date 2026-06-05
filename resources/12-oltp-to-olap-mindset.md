@@ -80,7 +80,7 @@ Follow in order. Don't skip steps. **The most common mistake: skipping step 3 (S
 3. **Write a Spark job** that reads from Postgres JDBC and writes an Iceberg table to MinIO via Hive Metastore. See `13-postgres-to-iceberg-ingestion.md` for the full template.
 4. **Choose your partitions: `(day(event_ts), tenant_id)`** for B2B SaaS event tables. Date prunes time-range queries; tenant prunes single-customer queries.
 5. **Schedule compaction from day one.** Run `CALL iceberg.system.rewrite_data_files('analytics.events')` nightly. Without this, you accumulate thousands of tiny files and queries crawl.
-6. **Create per-tenant views in Trino** for tenant isolation. `CREATE VIEW tenant_42.events AS SELECT * FROM analytics.events WHERE tenant_id = 42;`
+6. **Create per-tenant views in Trino** for tenant isolation. `CREATE VIEW tenant_42.events SECURITY DEFINER AS SELECT * FROM analytics.events WHERE tenant_id = 42;` — the `SECURITY DEFINER` clause goes **between the view name and `AS`** (NOT as a `WITH (...)` property, which does not exist on Trino `CREATE VIEW`). DEFINER is Trino's default but write it explicitly for security-relevant views. See `resources/05-multi-tenant-analytics.md` "CANONICAL — CORRECT TRINO 467 `CREATE VIEW ... SECURITY` GRAMMAR" for the full grammar, DEFINER-vs-INVOKER table, and DO-NOT-WRITE forms.
 7. **Point your BI tool at Trino.** Trino speaks standard SQL via a JDBC driver — Metabase, Superset, Tableau all connect.
 
 ---
@@ -89,14 +89,16 @@ Follow in order. Don't skip steps. **The most common mistake: skipping step 3 (S
 >
 > If you are building a multi-tenant B2B product, **step 6 (per-tenant Trino views) is a hard requirement, not a nice-to-have.** Skipping it means any analyst, any BI user, or any compromised credential can run `SELECT * FROM analytics.events` and see every customer's data. This is a security incident, a contract violation, and (depending on your jurisdiction) a regulatory breach.
 >
-> **The non-skippable pattern:**
+> **The non-skippable pattern (note `SECURITY DEFINER` between the view name and `AS` — NOT a `WITH (...)` property, which does not exist on Trino `CREATE VIEW`):**
 > ```sql
-> CREATE VIEW tenant_42.events AS
+> CREATE VIEW tenant_42.events SECURITY DEFINER AS
 >   SELECT * FROM analytics.events WHERE tenant_id = 42;
 >
 > GRANT SELECT ON tenant_42.events TO ROLE tenant_42_role;
 > REVOKE ALL ON analytics.events FROM ROLE tenant_42_role;
 > ```
+>
+> **Why `SECURITY DEFINER` here:** the view runs with the view owner's grants (a privileged service account that holds SELECT on `analytics.events`), so the tenant role needs ONLY SELECT on the view — never on the base table. Under `SECURITY INVOKER` the tenant would need direct base-table SELECT, which defeats the isolation. See `resources/05-multi-tenant-analytics.md` for the full grammar, DEFINER-vs-INVOKER table, and DO-NOT-WRITE forms (`WITH (SECURITY DEFINER)`, `WITH (security='definer')`, and `ALTER VIEW SET SECURITY` all do NOT exist on Trino 467).
 >
 > **Why this step is the one that gets dropped:** the first 5 steps "feel done" the moment dashboards show data, so engineers stop there. But "data shows up correctly when I query it as admin" is not the same as "data is isolated when a tenant or BI user queries it." Trino does **not** do per-tenant filtering automatically — there is no Postgres-row-level-security equivalent enabled by default. If you don't build the view + grant + revoke layer, every query runs against the raw fact table.
 >

@@ -26,7 +26,62 @@ If you're a B2B SaaS moving analytics off Postgres and you need to guarantee one
 - **OPA (Open Policy Agent) plugin** — `access-control.name=opa`. **This is the prod backend per `prod_info.md`.** Policies live in Rego inside OPA; Trino calls OPA over HTTP per query (single-call `uri` + optional batched `batched-uri`). Row filters and column masks are returned by OPA in the decision payload and applied by Trino's filter/mask hooks. Specific policy rules and role hierarchies are in the **external governance document** (not in this repo) — do not author them here.
 - **File-based rules plugin** — `access-control.name=file`, `security.config-file=etc/rules.json`. Rules use `tables.filter` (per-role row filter expression) and `tables.columns[].mask` (per-role column mask expression). **Conceptual illustration only — the prod stack uses OPA.**
 
-**Mechanism B — Per-tenant Trino VIEWS that hard-code the filter, plus REVOKE on the base table.** SQL-only fallback when OPA is unavailable or for SQL-portable isolation. Pattern: `CREATE VIEW tenant_acme_events AS SELECT * FROM events WHERE tenant_id = 'acme';` then `REVOKE SELECT ON events FROM acme_role;` and `GRANT SELECT ON tenant_acme_events TO acme_role;`. Set `SECURITY DEFINER` (the default) explicitly so the view runs as a high-privilege user but only ever returns the filtered rows. The user-to-tenant mapping must come from a trusted source like a JWT claim — never a user-controllable parameter.
+**Mechanism B — Per-tenant Trino VIEWS that hard-code the filter, plus REVOKE on the base table.** SQL-only fallback when OPA is unavailable or for SQL-portable isolation. Pattern: `CREATE VIEW iceberg.tenant_acme.events SECURITY DEFINER AS SELECT * FROM iceberg.analytics.events WHERE tenant_id = 'acme';` then `REVOKE SELECT ON iceberg.analytics.events FROM acme_role;` and `GRANT SELECT ON iceberg.tenant_acme.events TO acme_role;`. Note the `SECURITY DEFINER` clause sits **between the view name and `AS`**, NOT as a `WITH (...)` property — see the canonical grammar block immediately below. DEFINER is Trino's default but write it explicitly for security-relevant views. The user-to-tenant mapping must come from a trusted source like a JWT claim — never a user-controllable parameter.
+
+### CANONICAL — CORRECT TRINO 467 `CREATE VIEW ... SECURITY` GRAMMAR (memorize before writing tenant-view DDL)
+
+> **Keyword-routing gate.** This block is the canonical answer for questions matching: `create view security definer`, `create view security invoker`, `trino view security mode`, `per-tenant view DDL`, `view-based row filter`, `tenant view fallback`, `view runs as owner`, `view runs as caller`, `view fallback opa`. Read this BEFORE writing any `CREATE VIEW` with a security clause.
+
+**The grammar — verified at [trino.io/docs/current/sql/create-view.html](https://trino.io/docs/current/sql/create-view.html):**
+
+```sql
+CREATE [ OR REPLACE ] VIEW view_name
+  [ COMMENT 'optional comment' ]
+  [ SECURITY { DEFINER | INVOKER } ]
+  AS query
+```
+
+**The SECURITY clause is a standalone clause placed BEFORE `AS`. There is NO `WITH (...)` properties clause on Trino `CREATE VIEW` — `WITH (...)` is the `CREATE TABLE` properties syntax, not `CREATE VIEW`. Confusing the two is the single most common copy-paste failure on this DDL.**
+
+**Worked example — the canonical per-tenant DEFINER view (copy-paste ready):**
+
+```sql
+-- CORRECT — SECURITY DEFINER clause sits BEFORE `AS`.
+-- Verified parseable on Trino 467.
+CREATE VIEW iceberg.tenant_acme.events SECURITY DEFINER AS
+  SELECT event_id, occurred_at, event_type, payload
+  FROM iceberg.analytics.events
+  WHERE tenant_id = 'acme';
+```
+
+**DEFINER vs INVOKER — which one for multi-tenant isolation, and why.**
+
+| Mode | Whose grants read the base table? | Caller needs base-table SELECT? | Use for tenant isolation? |
+|---|---|---|---|
+| **`SECURITY DEFINER` (Trino default)** | The **view owner's** grants. | NO — only `SELECT` on the view itself. | **YES — this is the multi-tenant isolation pattern.** Tenant principals have NO direct base-table grant; OPA denies them direct base-table SELECT; the view's WHERE clause is the only path to the data, and it always applies. |
+| `SECURITY INVOKER` | The **calling user's** grants. | YES — must already have SELECT on every base table the view body touches. | **NO — defeats tenant isolation here.** A tenant principal with no base-table grant would get `Access Denied` at planning; granting them base-table SELECT to "make the view work" would let them bypass the view entirely with `SELECT * FROM iceberg.analytics.events`. |
+
+**Enforcement recipe under DEFINER for tenant isolation:** (1) `CREATE VIEW iceberg.tenant_acme.events SECURITY DEFINER AS SELECT ... WHERE tenant_id = 'acme';` issued by a privileged service account that holds SELECT on `iceberg.analytics.events`; (2) `GRANT SELECT ON iceberg.tenant_acme.events TO ROLE acme_role;`; (3) ensure the tenant principal has NO direct SELECT on `iceberg.analytics.events` — on this prod stack, OPA's Rego policy denies it (on default Trino with file-based or built-in access control, `REVOKE ALL PRIVILEGES ON iceberg.analytics.events FROM USER "acme-service-account";` is the SQL equivalent). The view's WHERE clause is the isolation boundary; OPA's base-table deny is the back-door close.
+
+**`current_user` returns the CALLER, NOT the owner, even under DEFINER.** `current_user` always reports the principal who submitted the SELECT, regardless of DEFINER/INVOKER. The security mode only controls **whose grants are used to read base tables**, not what `current_user` evaluates to inside the view body. This is exactly the property that lets you write a single dynamic view (`WHERE tenant_id = (SELECT tenant_id FROM config.user_tenant_map WHERE username = current_user)`) under DEFINER and have it filter correctly per-caller — without granting tenants direct base-table access.
+
+#### DO-NOT-WRITE — wrong forms of `CREATE VIEW ... SECURITY` (all parse-fail or fabricate clauses on Trino 467)
+
+> **Banning the iter468 syntax slip.** The `WITH (SECURITY DEFINER)` / `WITH (security = 'definer')` / `WITH (security_mode = ...)` forms below LOOK plausible because (a) Trino does use a `WITH (...)` properties bag on `CREATE TABLE` / `CREATE SCHEMA` / `CREATE MATERIALIZED VIEW`, and (b) some OTHER dialects accept property-bag-style view options. **None of these forms parse on Trino's `CREATE VIEW`.** Trino's `CREATE VIEW` grammar has NO `WITH (...)` clause at all — the SECURITY clause is a standalone keyword pair BEFORE `AS`.
+
+| Wrong form | Why wrong on Trino 467 | Correct form |
+|---|---|---|
+| `CREATE VIEW v AS SELECT ... WITH (SECURITY DEFINER);` | `WITH (...)` does not exist on `CREATE VIEW`; it is the `CREATE TABLE` properties syntax. The SECURITY clause is a standalone clause BEFORE `AS`. Parse error. | `CREATE VIEW v SECURITY DEFINER AS SELECT ...;` |
+| `CREATE VIEW v WITH (security = 'DEFINER') AS SELECT ...;` | Fabricated property key. There is no `security` property on Trino `CREATE VIEW`; there is no `WITH (...)` clause on `CREATE VIEW` at all. Parse error. | `CREATE VIEW v SECURITY DEFINER AS SELECT ...;` |
+| `CREATE VIEW v WITH (security_mode = 'definer') AS SELECT ...;` | Same fabrication; `security_mode` is not a Trino property anywhere. Parse error. | `CREATE VIEW v SECURITY DEFINER AS SELECT ...;` |
+| `CREATE VIEW v AS SELECT ... SECURITY DEFINER;` | Clause-placement error. SECURITY must come BEFORE `AS`, not after the query body. Parse error. | `CREATE VIEW v SECURITY DEFINER AS SELECT ...;` |
+| `CREATE VIEW v SECURITY = DEFINER AS SELECT ...;` | Fabricated `=` separator. Grammar is `SECURITY DEFINER` (two keywords, no `=`). Parse error. | `CREATE VIEW v SECURITY DEFINER AS SELECT ...;` |
+| `ALTER VIEW v SET SECURITY INVOKER;` | No `ALTER VIEW SET SECURITY` form exists on Trino 467. To change a view's security mode, drop and recreate (or use `CREATE OR REPLACE VIEW`). | `CREATE OR REPLACE VIEW v SECURITY INVOKER AS SELECT ...;` |
+| `CREATE VIEW v WITH SECURITY DEFINER AS SELECT ...;` | The bare keyword `WITH` is wrong here — Trino's grammar uses `SECURITY` as the clause keyword directly, not `WITH SECURITY`. Parse error. | `CREATE VIEW v SECURITY DEFINER AS SELECT ...;` |
+
+**Cross-dialect note (why this slip happens).** Some other dialects DO accept property-bag-style view options (e.g., as a `WITH (...)` map). Trino's `CREATE VIEW` does NOT — the only valid clauses are `[ COMMENT '...' ]` and `[ SECURITY { DEFINER | INVOKER } ]`, both BEFORE `AS`. When porting view DDL from another dialect, strip any `WITH (...)` clause and replace with the standalone `SECURITY` keyword pair.
+
+---
 
 **Iceberg has NO row-filter table DDL.** The Iceberg spec defines table schema, partitioning, and snapshot/manifest metadata — it does NOT define any per-table row-filter clause. There is no `ALTER TABLE ... SET ROW FILTER ...`, no `ALTER TABLE ... SET COLUMN MASK ...`, and no equivalent in Trino's Iceberg connector. **Anyone telling you to enable row-level isolation by altering the table DDL is wrong** — the mechanism lives in the query engine's access-control layer (A) or in view definitions (B), never in the storage-layer table definition.
 

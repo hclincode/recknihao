@@ -1,146 +1,136 @@
-# Judge Feedback — Iter 468 (Extended Phase, end-of-iteration)
+# Judge Feedback — Iter 469 (Extended Phase, End-of-Iteration)
 
 **Date**: 2026-06-05
 **Phase**: Extended (end-of-iteration feedback only)
-**Overall**: 4.625 STRONG PASS
-**Per-question breakdown**: Q1 4.75 STRONG, Q2 4.375 PASS (thin), Q3 4.75 STRONG, Q4 4.625 STRONG
-**Federation probed**: NO (per directive — 4.49944/310 row UNCHANGED)
-**Iteration streak**: 67th consecutive overall PASS in extended phase
+**Overall**: **4.648 STRONG PASS** (68th consecutive overall PASS in extended phase)
 
----
+## Verdict summary
 
-## Headline takeaways for the teacher
+| Question | Avg | Verdict | Topic |
+|---|---|---|---|
+| Q1 — per-tenant CREATE VIEW SECURITY DEFINER (re-probe of iter468 syntax slip) | **4.78** | STRONG PASS | Multi-tenant analytics / view-security syntax |
+| Q2 — Oracle REGEXP_LIKE / REGEXP_REPLACE → Trino | **4.5625** | PASS | Oracle PL/SQL→dbt/Trino migration / regex mapping |
+| Q3 — Iceberg compaction verify + metadata inspect | **4.59** | STRONG PASS | Iceberg table maintenance / metadata inspection |
+| Q4 — EXPLAIN partition pruning | **4.66** | STRONG PASS | Query performance basics / EXPLAIN reading |
 
-1. **Version-gating discipline is real and durable** — Q3 was a deliberate version-pin probe and the responder PASSED it cleanly. `parquet_bloom_filter_columns` is a Trino 469+ property (PR #24573, merged Dec 25 2024, milestone 469); responder correctly did NOT claim it on Trino 467 and pushed the writer-side path to Spark `write.parquet.bloom-filter-enabled.column.<col>` / `write.parquet.bloom-filter-fpp.column.<col>` instead, while crediting Trino 467 with read-side bloom-filter pushdown (release 406+ per posulliv.github.io/posts/parquet-predicate-pushdown). This is a textbook CREDIT and confirms the iter416 nuance miss on this exact property is now consistently corrected. **No content edit needed for the column-storage / bloom-filter topic.**
+## Per-question scores
 
-2. **One verified syntax slip at Q2 — needs a targeted fix.** The responder wrote `CREATE VIEW tenant_acme_events AS SELECT ... WITH (SECURITY DEFINER)`. This is WRONG. Per trino.io/docs/current/sql/create-view.html the syntax is:
-   ```
-   CREATE [ OR REPLACE ] VIEW view_name
-   [ COMMENT view_comment ]
-   [ SECURITY { DEFINER | INVOKER } ]
-   AS query
-   ```
-   The `SECURITY` clause is a **standalone clause placed BEFORE `AS`**, NOT a `WITH (...)` table property. `WITH (...)` does not exist on Trino CREATE VIEW at all. Additionally, DEFINER is the default — explicit omission is fine. This slip happened on a single load-bearing DDL example a SaaS engineer would copy-paste; it would fail to parse on first run.
+### Q1 — 4.78 STRONG PASS — view-security fix CONFIRMED (streak 1/1)
 
-3. **Federation stays untouched.** 4.49944/310 sits 0.0006 below the 4.5 raised threshold. A thin probe in either direction would lock or break the row. Hold the line on no federation probe for iter469.
+| Dim | Score | Justification |
+|---|---|---|
+| Accuracy | 4.875 | `CREATE VIEW iceberg.tenant_acme.events SECURITY DEFINER AS SELECT ... WHERE tenant_id = 'acme'` matches the canonical Trino 467 grammar `CREATE [OR REPLACE] VIEW name [COMMENT '...'] [SECURITY {DEFINER \| INVOKER}] AS query` verified at trino.io/docs/current/sql/create-view.html. REVOKE/GRANT ON ... TO ROLE syntax matches trino.io/docs/current/sql/grant.html + /sql/revoke.html. |
+| Completeness | 4.625 | DEFINER rationale (owner's perms, tenant has no base-table grant), OPA-also-denies-base layered defense, subset projection (dropping tenant_id) all covered. Could have mentioned `current_user` returns CALLER under DEFINER nuance but not load-bearing. |
+| Clarity | 4.75 | Explicitly stated "SECURITY DEFINER goes BETWEEN view name and AS, NOT after query, NOT in WITH(...)" — directly addresses the iter468 slip. |
+| Actionability | 4.875 | Copy-paste DDL parses on Trino 467; REVOKE/GRANT pair is sufficient to enforce isolation on top of OPA. |
 
----
+**ZERO fabrications.** Did NOT use `WITH (SECURITY DEFINER)`, `WITH (security = 'DEFINER')`, `SECURITY = DEFINER`, `ALTER VIEW SET SECURITY ...`, or any post-AS placement. **Iter468 syntax slip is FIXED. Streak start 1/1.**
 
-## iter469 teacher actions (concrete)
+### Q2 — 4.5625 PASS — regex function mapping
 
-### PRIMARY — fix the `CREATE VIEW SECURITY DEFINER` syntax (reconcile-in-place, no append)
+| Dim | Score | Justification |
+|---|---|---|
+| Accuracy | 4.75 | `regexp_like(string, pattern)` returns boolean, `regexp_replace(string, pattern, replacement)`, `regexp_extract` as REGEXP_SUBSTR replacement — all verified at trino.io/docs/current/functions/regexp.html. Lowercase naming convention correct. |
+| Completeness | 4.25 | Missed: (a) Trino `regexp_like` is CONTAINS-semantic vs Oracle's full-match-with-anchors split that bites migrators; (b) Trino uses Java/Joni regex flavor vs Oracle POSIX extended (backreferences, lookaround support differ); (c) `$N` capture-group reference syntax in Trino regexp_replace. |
+| Clarity | 4.625 | Side-by-side framing, lowercase note, REGEXP_SUBSTR→regexp_extract rename callout. |
+| Actionability | 4.625 | Engineer can do a literal s/REGEXP_LIKE/regexp_like/ on most cases; the missing regex-flavor nuance means edge cases may break silently. |
 
-**Where**: search resources/ for any existing multi-tenant view / RBAC content. The multi-tenant analytics resource (resources/12) and the OPA/RBAC resource (if separate) are the highest-keyword-routing-probability locations. Run:
-```
-rg -n "CREATE VIEW.*WITH \(SECURITY" resources/
-rg -n "SECURITY DEFINER" resources/
-rg -n "CREATE VIEW" resources/
-```
-to locate every existing example. If any existing resource shows the wrong `WITH (SECURITY ...)` form, FIX IT IN PLACE (reconcile-don't-append). Do not just add a new section — the responder may cite the wrong existing one.
+**ZERO fabrications.** No invented `regexp_substr` on Trino, no fake signatures.
 
-**What to write (canonical block)**:
-- LEADING gate near the top of the multi-tenant views / RBAC section with keywords: `create view security definer`, `create view security invoker`, `view-based row filter`, `per-tenant view`, `tenant view`, `view fallback opa`.
-- The correct syntax in code block form:
-  ```sql
-  -- Correct Trino CREATE VIEW with SECURITY clause:
-  CREATE [ OR REPLACE ] VIEW view_name
-  [ COMMENT 'optional comment' ]
-  [ SECURITY { DEFINER | INVOKER } ]
-  AS query
-  ```
-  Plus a concrete worked example for a tenant view:
-  ```sql
-  CREATE VIEW tenant_acme_events
-  SECURITY DEFINER
-  AS
-  SELECT event_id, occurred_at, event_type, payload
-  FROM iceberg.analytics.events
-  WHERE tenant_id = 'acme';
-  ```
-- DO-NOT-WRITE matrix entries (banning the slip and adjacent fabrications):
-  | Wrong form | Why wrong | Correct form |
-  |---|---|---|
-  | `CREATE VIEW v AS SELECT ... WITH (SECURITY DEFINER)` | `WITH (...)` does not exist on Trino CREATE VIEW; it's a table-property syntax used on CREATE TABLE | `CREATE VIEW v SECURITY DEFINER AS SELECT ...` |
-  | `CREATE VIEW v WITH (security_mode = 'DEFINER') AS SELECT ...` | Fabricated property key; CREATE VIEW has no properties map | `CREATE VIEW v SECURITY DEFINER AS SELECT ...` |
-  | `CREATE VIEW v AS SELECT ... SECURITY DEFINER` | SECURITY clause must come BEFORE `AS`, not after the query | `CREATE VIEW v SECURITY DEFINER AS SELECT ...` |
-  | `ALTER VIEW v SET SECURITY INVOKER` | Trino has no ALTER VIEW SET SECURITY form on 467 | Drop + recreate with `CREATE OR REPLACE VIEW ... SECURITY INVOKER AS ...` |
-- One-line callouts:
-  - "DEFINER is the default — explicit `SECURITY DEFINER` is allowed but redundant."
-  - "`current_user` inside the view ALWAYS returns the query-executing user regardless of DEFINER/INVOKER — useful for dynamic per-user row filters embedded in the view body."
-- Cite: trino.io/docs/current/sql/create-view.html.
+### Q3 — 4.59 STRONG PASS — Iceberg compaction + metadata
 
-### Breadth design for iter469 (no federation probe)
+| Dim | Score | Justification |
+|---|---|---|
+| Accuracy | 4.75 | `$files` content codes 0=DATA / 1=POSITION_DELETES / 2=EQUALITY_DELETES per Iceberg spec; `$snapshots` columns (snapshot_id, committed_at, operation, summary) per trino.io/docs/current/connector/iceberg.html; `operation='replace'` for MERGE/compaction (Iceberg RewriteFiles commits as `replace`) confirmed; `EXECUTE remove_orphan_files(retention_threshold => '7d')` syntax verified. Double-quoted `"events$files"` and `"events$snapshots"` correctly applied. |
+| Completeness | 4.375 | Missed: `expire_snapshots` as complementary procedure (remove_orphan_files cleans non-referenced files, but expired snapshot data files require expire_snapshots first); didn't surface that compaction-induced `replace` produces new files even when row count is unchanged. |
+| Clarity | 4.625 | Three concrete query patterns, content-code legend, operation-code legend. |
+| Actionability | 4.625 | Three runnable queries + procedure call; engineer can verify compaction landed by checking before/after file count + content distribution. |
 
-Pick 4 non-federation angles:
-1. **CREATE VIEW SECURITY DEFINER re-probe** — verify the syntax fix lands on the first re-probe (similar pattern to the iter464→465 dbt-source-freshness lock-in). Phrase the question to surface a copy-paste DDL request, e.g., "give me the SQL to create a per-tenant view that runs as the view owner."
-2. **Trino MERGE INTO clause coverage** — Trino 467 supports `WHEN MATCHED` and `WHEN NOT MATCHED` only. `WHEN NOT MATCHED BY SOURCE` is Spark/Snowflake and is NOT in Trino 467 (or current docs). Probe whether responder fabricates it.
-3. **dbt snapshots SCD2** — config keys strategy / unique_key / check_cols / updated_at / target_schema / target_database / hard_deletes. Probe whether responder invents extra keys (e.g., fake `track_columns`, `scd_version`).
-4. **Query timeout split** — `query.max-run-time` vs `query.max-execution-time` vs `query.max-cpu-time` (server-side properties) vs session-level overrides. Probe whether responder fabricates a single `query.timeout` key.
+**ZERO fabrications.** No fake `$files` columns (no `deletion_count` or `compaction_run_id`), no fake `$snapshots` operations, no fake procedure params.
 
-### Citation-hygiene watchlist for iter469
+### Q4 — 4.66 STRONG PASS — EXPLAIN partition pruning
 
-- Fabricated CREATE VIEW `WITH (...)` table-property form (the iter468 slip — re-probe target).
-- Fabricated `ALTER VIEW SET SECURITY` (does not exist on 467 — drop+recreate is the right pattern).
-- Fabricated Trino MERGE clause `WHEN NOT MATCHED BY SOURCE` (Spark/Snowflake only; not in Trino 467).
-- Fabricated `query.timeout` single-config-key (real: `query.max-run-time` / `query.max-execution-time` / `query.max-cpu-time`).
-- Fabricated dbt snapshot config keys beyond the real set (strategy, unique_key, check_cols, updated_at, target_schema, target_database, hard_deletes, invalidate_hard_deletes).
-- Fabricated `parquet_bloom_filter_columns` on Trino 467 (CONFIRMED HELD this iter — keep watching; was held by Q3 cleanly).
+| Dim | Score | Justification |
+|---|---|---|
+| Accuracy | 4.625 | `TableScan[... constraint on [...]]` annotation is real per trino.io/blog/2023/04/11/date-predicates.html. Filter-residual-above-TableScan = pruning defeated is the correct interpretation. Function-wrap (date_trunc(event_ts)) and type-mismatch (string vs DATE) pruning-defeat patterns are the canonical examples from that blog. Naked-range form is the canonical safest recipe. |
+| Completeness | 4.5 | Slight oversimplification: predicate may still partially push down with `predicate=` even when a residual Filter is present; the Filter residual is the negative signal but not 100% binary. Didn't mention EXPLAIN ANALYZE for actual row-count verification of pruning. |
+| Clarity | 4.75 | Two-state heuristic (constraint-in-TableScan = good, separate Filter = bad), concrete naked-range example with TIMESTAMP literals, "verify both forms with EXPLAIN" actionable. |
+| Actionability | 4.75 | Engineer has a recipe: rewrite to naked range, run EXPLAIN, look for constraint annotation, fix function-wrap or cast on partition col. |
 
-### What NOT to do
+**ZERO fabrications.** No fake EXPLAIN node names, no fake `constraint_satisfied=true` flag, no fake EXPLAIN format options.
 
-- **Do NOT touch the bloom filter / parquet write-path content.** Q3 showed responder already gives the correct Spark-write + Trino-read split with correct version-pin. Any edit here risks regressing a working answer.
-- **Do NOT probe federation.** 4.49944/310 sits 0.0006 below 4.5; a thin probe locks or breaks the row.
-- **Do NOT add a new top-level section appending the CREATE VIEW fix.** Reconcile in place where existing CREATE VIEW examples live, per the "reconcile don't append" rule. The responder may cite the wrong one if both versions coexist.
+## View-security streak status
 
----
+**1/1 PASS** — Iter468 Q2 `WITH (SECURITY DEFINER)` syntax slip is FIXED at iter469 Q1. The r05 canonical block + r12 inline pattern update + 7-form DO-NOT-WRITE matrix landed cleanly. **Needs at least one more re-probe in a different phrasing to lock the fix at 2/2.** Candidates for iter470 re-probe: SHOW CREATE VIEW round-trip, DEFINER-vs-INVOKER tradeoff matrix, `CREATE OR REPLACE VIEW ... SECURITY INVOKER` (test the INVOKER branch), view-on-view security inheritance.
 
-## Per-dimension scores (for the record)
+## Fabrications
 
-| Q | Topic | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|---|---|
-| Q1 | Oracle MINUS → Trino EXCEPT | 4.875 | 4.625 | 4.75 | 4.75 | 4.75 |
-| Q2 | Multi-tenant OPA row-level + view fallback | 4.0 | 4.625 | 4.625 | 4.25 | 4.375 |
-| Q3 | Bloom filters high-cardinality user_id | 4.875 | 4.75 | 4.625 | 4.75 | 4.75 |
-| Q4 | Real-time vs batch freshness + cost | 4.625 | 4.5 | 4.75 | 4.625 | 4.625 |
+**ZERO across all four answers.** Specifically NOT present:
+- No `WITH (SECURITY DEFINER)` (the iter468 fab pattern — fixed)
+- No fake Trino function names (no `regexp_substr` on Trino, no fake signature)
+- No fake `$files` / `$snapshots` column names
+- No fake `remove_orphan_files` parameters (the real `retention_threshold => '7d'` was used correctly)
+- No fake EXPLAIN node names (no `PartitionScan`, no `constraint_satisfied=true`)
+- No invented version-gated features
 
-**Overall**: 4.625 STRONG PASS.
+## Topic average updates
 
----
+| Topic | Before | After | Delta |
+|---|---|---|---|
+| Multi-tenant analytics | 4.4561 / 152 | **4.4582 / 153** | +0.0021 (Q1 4.78 above topic avg) |
+| Oracle PL/SQL→dbt/Trino migration | 4.5832 / 42 | **4.5827 / 43** | -0.0005 (Q2 4.5625 essentially at topic avg) |
+| Iceberg table maintenance | 4.4907 / 129 | **4.4915 / 130** | +0.0008 (Q3 4.59 just above topic avg) |
+| Query performance basics | 4.4314 / 11 | **4.4501 / 12** | +0.0187 (Q4 4.66 above topic avg) |
+| **Federation NOT probed** | 4.49944 / 310 | **4.49944 / 310** | UNCHANGED per directive (0.0006 below 4.5 raised threshold) |
 
-## Q3 version-gating verdict (called out per directive)
+## Teacher actions for iter470
 
-**CREDIT** — textbook clean three-check pass:
+**Breadth design — 4 non-federation angles. NO dedicated federation probe (the 4.49944/310 row sits 0.0006 below the 4.5 raised threshold — thin probe locks or breaks it; let the count grow naturally).**
 
-1. **Trino-side writer property `parquet_bloom_filter_columns` is 469+, NOT 467**: VERIFIED at github.com/trinodb/trino PR #24573 (merged Dec 25 2024, milestone 469). Responder correctly AVOIDED claiming it on 467 and explicitly stated the Trino-side write path does not exist on 467 — pushing the writer-side configuration to Spark.
-2. **Spark-side native Iceberg property names**: `write.parquet.bloom-filter-enabled.column.<col>` and `write.parquet.bloom-filter-fpp.column.<col>` (default 0.01) are real Iceberg write properties — VERIFIED at iceberg.apache.org/docs/latest/configuration/ and apache/iceberg PR #5035 (the original write-path bloom filter PR).
-3. **Trino 467 reads Parquet bloom filters automatically**: VERIFIED at posulliv.github.io/posts/parquet-predicate-pushdown ("bloom filters to be used by the parquet reader in trino you will need to use version 406 or newer") plus github.com/trinodb/trino issue #9471. 467 > 406, so read-side pushdown is in place.
+### Required (1) — Lock view-security streak at 2/2
 
-Plus ~1-5% file-size overhead and equality-only (not range) guidance are standard correct framing.
+Pick ONE of these phrasings to re-probe CREATE VIEW SECURITY mode from a DIFFERENT angle than iter469 Q1 (which was DEFINER + REVOKE/GRANT):
 
-This is exactly the version-pin discipline the rubric watchlist has been targeting since iter416. Hold the line — no edits to bloom filter content in iter469.
+- **SHOW CREATE VIEW round-trip**: ask how to inspect an existing view's SECURITY mode without re-running the DDL. Correct answer is `SHOW CREATE VIEW iceberg.tenant_acme.events` — the output preserves the SECURITY clause. Tests whether the responder can READ the DDL not just write it.
+- **DEFINER-vs-INVOKER decision matrix**: "We have a view that joins customer data with a finance-team-owned reference table. Should the view use SECURITY DEFINER or INVOKER?" Tests whether the responder understands DEFINER = owner's grants used (good for tenant isolation), INVOKER = caller's grants used (caller must have base-table SELECT — defeats isolation but is correct for shared dimension tables where the caller already has access).
+- **CREATE OR REPLACE VIEW with INVOKER**: tests the INVOKER branch + the `OR REPLACE` keyword.
+- **View-on-view security inheritance**: does a view built on top of a SECURITY DEFINER view inherit the upstream view's owner grants? Tests deeper Trino semantics.
 
----
+### Recommended (2) — 3 additional breadth probes
 
-## Fabrications and inaccuracies — full list
+Candidate pool for the remaining three probes:
 
-1. **Q2 — CREATE VIEW syntax error** (load-bearing copy-paste example, would fail to parse):
-   - Wrong: `CREATE VIEW tenant_acme_events AS SELECT ... WITH (SECURITY DEFINER)`
-   - Correct: `CREATE VIEW tenant_acme_events SECURITY DEFINER AS SELECT ...`
-   - Source: trino.io/docs/current/sql/create-view.html
-   - Note: DEFINER is the default; explicit `SECURITY DEFINER` allowed but redundant. The `WITH (...)` clause does not exist on Trino CREATE VIEW at all.
+- **Trino MERGE INTO clause set** — `WHEN MATCHED [AND condition] THEN UPDATE/DELETE/INSERT` vs `WHEN NOT MATCHED [AND condition] THEN INSERT`. Watchlist: ban `WHEN NOT MATCHED BY SOURCE` (Spark/Snowflake-only; NOT in Trino 467).
+- **dbt snapshots SCD2 config** — `strategy=timestamp|check`, `updated_at`, `unique_key`, `check_cols`, `target_schema`, `target_database`, `hard_deletes`. Watchlist: ban any non-listed snapshot config key.
+- **Trino query timeout properties** — session vs config split. Real: `query.max-run-time`, `query.max-execution-time`, `query.max-cpu-time`. Watchlist: ban fabricated `query.timeout` config key.
+- **Iceberg `expire_snapshots` vs `remove_orphan_files` ordering** — complementary to Q3 from iter469. expire_snapshots first (drops snapshot references), then remove_orphan_files (cleans unreferenced files).
+- **Trino EXPLAIN ANALYZE vs EXPLAIN** — extends Q4 from iter469. EXPLAIN ANALYZE actually runs the query and reports row counts at each node, EXPLAIN is plan-only.
 
-(No other fabrications or inaccuracies found across Q1, Q3, Q4. Q3 version-gating textbook clean.)
+### Resource-side patches recommended
 
----
+- **r27 (oracle-plsql-to-dbt-trino)**: add a one-paragraph Oracle-vs-Trino-regex-flavor callout — POSIX-extended (Oracle) vs Joni/Java (Trino); regexp_like CONTAINS-vs-FULL-MATCH semantic split; `$N` vs `\N` capture-group reference syntax differences; regexp_replace lambda variant available in Trino but not Oracle. Q2 completeness gap was here; easy patch.
+- **r17 (iceberg-table-maintenance)** or wherever metadata inspection is canonicalized: add an explicit note that `expire_snapshots` and `remove_orphan_files` are complementary and have a required ordering (expire snapshots first to drop references, then orphan_files to clean unreferenced files). Q3 completeness gap was here.
+- **r05 (multi-tenant-analytics) — DEFENSIVE**: DO NOT modify the new canonical CREATE VIEW SECURITY block until the streak reaches 3/3. Reconcile-don't-append: if a third re-probe still passes, the block is durable.
 
-## Sources verified
+### Citation-hygiene watchlist for iter470
 
-- trino.io/docs/current/sql/select.html (EXCEPT [ALL | DISTINCT] [CORRESPONDING]; MINUS not a Trino keyword)
-- trino.io/docs/current/sql/create-view.html (SECURITY DEFINER/INVOKER as standalone clause before AS; DEFINER default)
-- trino.io/docs/current/security/opa-access-control.html (OPA row filter + column masking + batch column masking)
-- github.com/trinodb/trino PR #24573 (parquet_bloom_filter_columns added in milestone 469, merged Dec 25 2024)
-- iceberg.apache.org/docs/latest/configuration/ (write.parquet.bloom-filter-enabled.column.<col>, write.parquet.bloom-filter-fpp.column.<col>, default 0.01)
-- apache/iceberg PR #5035 (Parquet Row Group Bloom Filter write-path support)
-- posulliv.github.io/posts/parquet-predicate-pushdown (Trino 406+ reads Parquet bloom filters)
-- github.com/trinodb/trino issue #9471 (Trino Parquet bloom filter implementation tracking)
-- docs.oracle.com Set Operators (Oracle MINUS = distinct; EXCEPT/EXCEPT ALL added in 21c)
+- **fabricated `ALTER VIEW ... SET SECURITY ...` DDL** — does NOT exist on Trino 467. To change a view's SECURITY mode, must use `CREATE OR REPLACE VIEW ... SECURITY {DEFINER | INVOKER} AS query`.
+- **fabricated `WITH (SECURITY ...)` property-bag form** — keep on watchlist until 3-probe streak achieved (iter468 root-cause class).
+- **fabricated `current_user` returns CREATOR/OWNER under DEFINER** — it returns the CALLER even under DEFINER mode. Only the row-access permission check uses the owner's grants; `current_user` in the view body still resolves to the caller.
+- **fabricated Iceberg `$snapshots` columns** beyond the spec list (snapshot_id, parent_id, committed_at, operation, manifest_list, summary). No invented `deletion_count` or `compaction_id`.
+- **fabricated Trino MERGE `WHEN NOT MATCHED BY SOURCE` clause** — Spark/Snowflake only; Trino 467 has `WHEN MATCHED` and `WHEN NOT MATCHED` only.
+- **fabricated dbt snapshot config keys** beyond `strategy / unique_key / check_cols / updated_at / target_schema / target_database / hard_deletes`.
+- **fabricated `query.timeout` config key** — real keys are `query.max-run-time`, `query.max-execution-time`, `query.max-cpu-time`.
+
+## Sources
+
+- [Trino CREATE VIEW — trino.io/docs/current/sql/create-view.html](https://trino.io/docs/current/sql/create-view.html)
+- [Trino GRANT — trino.io/docs/current/sql/grant.html](https://trino.io/docs/current/sql/grant.html)
+- [Trino REVOKE — trino.io/docs/current/sql/revoke.html](https://trino.io/docs/current/sql/revoke.html)
+- [Trino Regular expression functions — trino.io/docs/current/functions/regexp.html](https://trino.io/docs/current/functions/regexp.html)
+- [Trino Iceberg connector — trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html)
+- [Iceberg spec — iceberg.apache.org/spec/](https://iceberg.apache.org/spec/)
+- [Trino blog — Just the right time date predicates with Iceberg](https://trino.io/blog/2023/04/11/date-predicates.html)
+- [Trino PR #621 — Use enforced constraint in EffectivePredicateExtractor](https://github.com/trinodb/trino/pull/621)
+- [Trino PR #10810 — Expire Snapshot and Remove Orphan files](https://github.com/trinodb/trino/pull/10810)
+- [Trino Issue #16473 — Metadata $files table on iceberg connector throws an error (double-quoting context)](https://github.com/trinodb/trino/issues/16473)
