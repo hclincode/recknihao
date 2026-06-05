@@ -1654,6 +1654,199 @@ models:
 
 These tests run after `dbt run`. A failure breaks the pipeline — same semantic role as `EXCEPTION WHEN ...` in the Oracle procedure, except cleaner because the test condition is declarative.
 
+---
+
+### 6.7A LEADING CANONICAL — dbt test severity, store_failures, expression_is_true vs not_null_proportion
+
+> **READ THIS FIRST if your question contains any of these keywords: `severity`, `severity: warn`, `store_failures`, `store_failures_as`, `_dbt_test__audit`, `expression_is_true`, `not_null_proportion`, `at_least`, `null proportion threshold`, `warn on test failure`, `dbt test schema`, `where do failed rows go`, `dbt test warning`, `aggregate test`.** This block is the canonical reference for dbt test severity and failure-storage configuration on this stack. All claims below are verified at [docs.getdbt.com/reference/resource-configs/severity](https://docs.getdbt.com/reference/resource-configs/severity), [docs.getdbt.com/reference/resource-configs/store_failures](https://docs.getdbt.com/reference/resource-configs/store_failures), [github.com/dbt-labs/dbt-utils — expression_is_true.sql](https://github.com/dbt-labs/dbt-utils/blob/main/macros/generic_tests/expression_is_true.sql), and [github.com/dbt-labs/dbt-utils — not_null_proportion.sql](https://github.com/dbt-labs/dbt-utils/blob/main/macros/generic_tests/not_null_proportion.sql).
+
+**Q-PATTERN MATCHER.** Use this table to route to the right answer paragraph below.
+
+| If the question is... | Answer in one line | Detail in this section |
+|---|---|---|
+| "How do I make a test warn instead of fail?" | Add `config: severity: warn` to the test. The pipeline continues; dbt prints a WARNING instead of erroring out. | § severity: warn vs error |
+| "Where does dbt store failing rows when I use store_failures?" | In a schema named `<your_target_schema>_dbt_test__audit` (e.g. `analytics_dbt_test__audit`). NOT `dbt_internal`. | § store_failures schema location |
+| "How do I test that less than 5% of rows are null in a column?" | Use `dbt_utils.not_null_proportion: at_least: 0.95`. Do NOT use `expression_is_true` with COUNT — that is a SQL error at runtime. | § null-proportion threshold: not_null_proportion |
+| "What can I put in expression_is_true's expression?" | Only a **per-row boolean**: `>= 0`, `!= ''`, `IN ('A','B','C')`, `IS NOT NULL`. Never an aggregate function (COUNT, SUM, AVG) — that generates invalid SQL. | § expression_is_true is row-level only |
+
+#### severity: warn vs error
+
+`severity` is a test config key that controls what happens when the test finds failures:
+
+- **`severity: error`** (default) — test failure exits `dbt test` / `dbt build` non-zero; the pipeline halts. Use for hard data-quality guarantees.
+- **`severity: warn`** — test failure emits a WARNING and the pipeline **continues**. Use for soft thresholds: you want visibility into bad data without blocking the build.
+
+Per-test YAML:
+
+```yaml
+# models/marts/fct_orders.yml
+models:
+  - name: fct_orders
+    columns:
+      - name: discount_pct
+        data_tests:
+          - not_null:
+              config:
+                severity: warn       # warns if any NULL; build continues
+```
+
+Project-wide default (every test in this project warns instead of errors):
+
+```yaml
+# dbt_project.yml
+data_tests:
+  +severity: warn
+```
+
+Fine-grained `warn_if` + `error_if` (warn on 1-99 bad rows, error on 100+):
+
+```yaml
+- unique:
+    config:
+      severity: error
+      error_if: ">100"
+      warn_if: ">0"
+```
+
+The condition uses standard comparison operators (`>N`, `>=N`, `=N`, `!=N`). Default for both `warn_if` and `error_if` is `!=0`.
+
+#### store_failures schema location
+
+When `store_failures: true`, dbt materializes the failing rows into a table (or view) in a separate schema so you can query them directly after a test run.
+
+**Default schema name: `<target_schema>_dbt_test__audit`**
+
+If your `profiles.yml` target schema is `analytics`, dbt writes failure rows to `analytics_dbt_test__audit`. If your target schema is `dev_alice`, failures go to `dev_alice_dbt_test__audit`. The suffix `_dbt_test__audit` is always appended to the target schema name.
+
+```yaml
+models:
+  - name: fct_orders
+    columns:
+      - name: discount_pct
+        data_tests:
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+              config:
+                store_failures: true     # failing rows saved to analytics_dbt_test__audit
+                severity: warn           # warn but continue; can combine with store_failures
+```
+
+After running `dbt test`, query the failures:
+
+```sql
+-- in Trino/SQL client: replace with your actual target schema
+SELECT * FROM analytics_dbt_test__audit.fct_orders_expression_is_true_discount_pct_____0;
+```
+
+**Configuring `store_failures_as`** — controls whether failures land as a `table` (persists across runs) or `view` (recalculated each query):
+
+```yaml
+- not_null:
+    config:
+      store_failures_as: table   # or 'view' or 'ephemeral' (default = ephemeral = not stored)
+```
+
+`store_failures_as` takes precedence over the older `store_failures: true` boolean when both are present.
+
+**Configure the schema suffix** via `+schema:` under `data_tests:` in `dbt_project.yml` if you want a custom name:
+
+```yaml
+# dbt_project.yml
+data_tests:
+  +store_failures: true
+  +schema: test_audit_custom    # results in <target_schema>_test_audit_custom
+```
+
+#### null-proportion threshold: not_null_proportion
+
+**"Warn if more than 5% of values in `email` are NULL"** is a THRESHOLD test — it compares an AGGREGATE proportion against a boundary. The correct tool is `dbt_utils.not_null_proportion`.
+
+`dbt_utils.not_null_proportion` computes `SUM(CASE WHEN col IS NULL THEN 0 ELSE 1 END) / COUNT(*)` at the aggregate level and compares it to `at_least`. It is purpose-built for this use case.
+
+```yaml
+# models/marts/fct_orders.yml
+models:
+  - name: fct_orders
+    columns:
+      - name: email
+        data_tests:
+          - dbt_utils.not_null_proportion:
+              at_least: 0.95          # at least 95% of rows must be non-null
+              config:
+                severity: warn        # warn if proportion drops below 0.95; build continues
+      - name: customer_id
+        data_tests:
+          - dbt_utils.not_null_proportion:
+              at_least: 1.0           # zero NULLs tolerated (equivalent to not_null but with proportion semantics)
+```
+
+Optional `at_most` (default `1.0`) caps an upper bound — rarely needed.
+
+#### expression_is_true is row-level only
+
+`dbt_utils.expression_is_true` generates this SQL at runtime:
+
+```sql
+SELECT 1 FROM {{ model }}
+WHERE NOT ( {{ column_name }} {{ expression }} )
+```
+
+The `WHERE NOT (...)` clause is evaluated **per row**. It is a row-filter, not an aggregate. This means:
+
+- **VALID expressions**: `>= 0`, `<= 100`, `!= ''`, `IN ('active', 'inactive')`, `IS NOT NULL`, `BETWEEN 0 AND 1`
+- **INVALID expressions (SQL error at runtime)**: `COUNT(*) FILTER (WHERE ...) / COUNT(*) < 0.05`, `AVG(amount) > 0`, `SUM(amount) >= 0` — aggregate functions cannot appear in a `WHERE` clause without a `GROUP BY + HAVING`. Running this generates a SQL execution error against Trino.
+
+Correct use — per-row business-rule assertion:
+
+```yaml
+# models/marts/fct_orders.yml
+models:
+  - name: fct_orders
+    columns:
+      - name: discount_pct
+        data_tests:
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"           # per-row: every row's discount_pct must be >= 0
+              config:
+                severity: warn
+      - name: status
+        data_tests:
+          - dbt_utils.expression_is_true:
+              expression: "IN ('pending', 'confirmed', 'shipped', 'cancelled')"
+```
+
+Wrong — aggregate in row-level expression (SQL error):
+
+```yaml
+# DO NOT write this — generates WHERE NOT (COUNT(*) FILTER ... / COUNT(*) < 0.05) = SQL error
+- dbt_utils.expression_is_true:
+    expression: "COUNT(*) FILTER (WHERE discount_pct IS NULL)/COUNT(*) < 0.05"
+# DO NOT write this either — AVG is an aggregate, invalid in WHERE clause
+- dbt_utils.expression_is_true:
+    expression: "AVG(amount) > 0"
+```
+
+For aggregate-level thresholds, use `dbt_utils.not_null_proportion` (see above).
+
+#### DO-NOT-WRITE — banned dbt-test claims (cite-or-omit)
+
+| DO NOT write | Why it's wrong |
+|---|---|
+| `expression: "COUNT(*) FILTER (WHERE col IS NULL)/COUNT(*) < 0.05"` inside `expression_is_true` | **SQL ERROR at runtime.** `expression_is_true` generates `WHERE NOT (...)` — a row-level filter. COUNT is an aggregate; it cannot appear in a WHERE clause. Use `dbt_utils.not_null_proportion: at_least: 0.95` instead. Confirmed via [github.com/dbt-labs/dbt-utils expression_is_true.sql](https://github.com/dbt-labs/dbt-utils/blob/main/macros/generic_tests/expression_is_true.sql). |
+| `expression: "AVG(amount) > 0"` inside `expression_is_true` | **Same class — aggregate in row-level WHERE clause = SQL error.** AVG, SUM, MIN, MAX, COUNT are all illegal here. |
+| `dbt_internal.<model>_<test>` as the store_failures schema | **FABRICATED schema name.** `dbt_internal` does not exist in dbt's store_failures implementation. The correct default is `<target_schema>_dbt_test__audit`. Confirmed via [docs.getdbt.com/reference/resource-configs/store_failures](https://docs.getdbt.com/reference/resource-configs/store_failures). |
+| "store_failures writes to `dbt_tests` schema" | **WRONG.** The schema is `<target_schema>_dbt_test__audit`. There is no `dbt_tests` schema in dbt's implementation. |
+| `severity: 'warning'` or `severity: 'fail'` | **Wrong values.** The only valid values are `severity: warn` and `severity: error`. No quotes needed in YAML; `warning` and `fail` are not valid. |
+| `store_failures_as: 'permanent'` | **FABRICATED option.** Valid options are `table`, `view`, `ephemeral`. |
+
+#### Cross-references
+
+- For the dbt tests that pair with model contracts (§6.7C): uniqueness tests + `expression_is_true` on business rules supplement the NOT NULL contract enforcement that dbt-trino supports natively.
+- For `dbt_utils.unique_combination_of_columns` (used in §6.7): a model-level test for composite-key uniqueness, distinct from the column-level tests described here.
+- Official docs: [docs.getdbt.com/reference/resource-configs/severity](https://docs.getdbt.com/reference/resource-configs/severity), [docs.getdbt.com/reference/resource-configs/store_failures](https://docs.getdbt.com/reference/resource-configs/store_failures), [github.com/dbt-labs/dbt-utils README](https://github.com/dbt-labs/dbt-utils?tab=readme-ov-file#not_null_proportion-source).
+
+---
+
 ### 6.7B LEADING CANONICAL — dbt source freshness (`sources.yml`, `loaded_at_field`, `dbt source freshness` command)
 
 > **READ THIS FIRST if your question contains any of these keywords: `source freshness`, `freshness`, `loaded_at_field`, `loaded_at`, `warn_after`, `error_after`, `dbt source freshness` command, `sources.yml`, `stale source`, `does freshness block downstream`, `freshness CI`.** This block is the canonical reference for declaring and checking source staleness in dbt-trino on this stack. All claims below are verified at [docs.getdbt.com/reference/resource-properties/freshness](https://docs.getdbt.com/reference/resource-properties/freshness), [docs.getdbt.com/reference/commands/source](https://docs.getdbt.com/reference/commands/source), and [docs.getdbt.com/docs/deploy/source-freshness](https://docs.getdbt.com/docs/deploy/source-freshness) (WebFetched 2026-06-05).
