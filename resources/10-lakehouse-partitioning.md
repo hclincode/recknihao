@@ -28,6 +28,8 @@
 > **DO NOT use `'partitioned_by'` as the dbt-trino properties-dict key for an Iceberg-catalog model.** `partitioned_by` is the HIVE connector's table-property name (different connector). The Iceberg connector defines its partition-spec property as `partitioning` — and dbt-trino is a pass-through. Writing `'partitioned_by'` against an Iceberg catalog either errors at apply time or is silently dropped. See [resource 28 § LEADING CANONICAL — dbt-trino partition key for Iceberg vs Hive](28-complex-sql-performance-trino-dbt.md) for the full three-surface DO-WRITE / DO-NOT-WRITE contrast block.
 >
 > See also [resource 27 § 3.3](27-oracle-plsql-to-dbt-trino.md) for the migrated-from-Oracle MERGE dbt config that uses the same `properties={'partitioning': ...}` shape.
+>
+> **Cross-ref — dbt snapshots / SCD2 / timestamp vs check strategy / check_cols / dbt_valid_from / dbt_valid_to / dbt_scd_id / dbt_is_deleted:** see **[resource 09 § Slowly Changing Dimensions — Option 1 dbt snapshot (§1a `strategy='timestamp'`, §1b `strategy='check'`)](09-lakehouse-schema-design.md#slowly-changing-dimensions-scd)** — the SINGLE source of truth on this stack. Snapshots are a separate dbt resource type from the `materialized=` options; snapshot mechanics are NOT duplicated in this resource.
 
 ---
 

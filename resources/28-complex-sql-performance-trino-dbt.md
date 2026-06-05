@@ -667,6 +667,8 @@ Now the expensive aggregation runs ONCE during `dbt run` (when `int_customer_tot
 
 ### 3.3 When to use `ephemeral` vs `table` vs `view` for the intermediate
 
+> **Cross-ref — dbt snapshots / SCD2 / timestamp vs check strategy / check_cols / dbt_valid_from / dbt_valid_to / dbt_scd_id / dbt_is_deleted:** see **[resource 09 § Slowly Changing Dimensions — Option 1 dbt snapshot (§1a `strategy='timestamp'`, §1b `strategy='check'`)](09-lakehouse-schema-design.md#slowly-changing-dimensions-scd)** — the SINGLE source of truth on this stack. Snapshots are a separate dbt resource type (NOT one of the four `materialized=` values below); snapshot mechanics are NOT duplicated here.
+
 > ### LEADING CANONICAL — the dbt materialization COST MODEL (storage + runtime + DB object)
 >
 > **Question shape this answers**: "does a dbt `view` take up storage / cost storage / get persisted as a table", "what is the storage cost of `view` vs `table` vs `ephemeral`", "how do I speed up a dbt view in Trino — can I add an index?", "what's the difference between `view` and `ephemeral` in dbt", "what database object does each dbt materialization create", "dbt view vs ephemeral at scale".

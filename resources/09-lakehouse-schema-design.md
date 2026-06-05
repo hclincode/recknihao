@@ -351,6 +351,8 @@ To find every user's **current** state, filter `WHERE is_current = TRUE`.
 
 **Option 1 — dbt snapshot (recommended for teams already using dbt).**
 
+> **Findability anchor — keywords this Option-1 block answers (so a Haiku responder routing on these phrases lands here, the single source of truth, not on r10/r23/r27/r28 where only one-line forward pointers live):** "dbt snapshot", "dbt snapshots", "SCD2 strategy", "SCD Type 2", "snapshot strategy", "dbt snapshot strategy", "timestamp vs check strategy", "check strategy vs timestamp strategy", "which snapshot strategy", "snapshot strategy=timestamp", "snapshot strategy=check", "check_cols", "tracked columns dbt snapshot", "no reliable updated_at column", "snapshot has no updated_at", "dbt_valid_from", "dbt_valid_to", "dbt_scd_id", "dbt_is_deleted", "dbt snapshot metadata columns", "current rows from a dbt snapshot", "dbt_is_current does not exist".
+
 dbt offers TWO strategies — pick exactly one per snapshot:
 
 **1a. `strategy='timestamp'` — when the source has a reliable last-modified column (PREFERRED, more efficient).** Required config key is `updated_at='<column_name>'`. dbt compares the source row's `updated_at` value against the snapshot's last seen value for that `unique_key`; if the source is newer, the old version is closed (`dbt_valid_to` stamped) and a new row is inserted.

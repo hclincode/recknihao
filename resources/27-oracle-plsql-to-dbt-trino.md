@@ -286,6 +286,8 @@ Three things to note:
 
 The single most important decision per migrated model is which `materialized=` to use. Get this right and the pipeline is fast and idempotent. Get it wrong and you'll either rebuild terabytes every night (`table` where `incremental` was needed) or re-run an expensive 8-join query on every downstream read (`view` where `table` was needed).
 
+> **Cross-ref — dbt snapshots / SCD2 / timestamp vs check strategy / check_cols / dbt_valid_from / dbt_valid_to / dbt_scd_id / dbt_is_deleted:** see **[resource 09 § Slowly Changing Dimensions — Option 1 dbt snapshot (§1a `strategy='timestamp'`, §1b `strategy='check'`)](09-lakehouse-schema-design.md#slowly-changing-dimensions-scd)** — the SINGLE source of truth on this stack. The Oracle SCD-2 procedure typically becomes a dbt **snapshot** (Option 1) rather than a `materialized='incremental'` model. Snapshot mechanics are NOT duplicated here.
+
 ### 3.1 The four materializations supported by dbt-trino
 
 Verified against [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs) and [docs.getdbt.com/docs/build/materializations](https://docs.getdbt.com/docs/build/materializations).

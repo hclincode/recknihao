@@ -22,6 +22,8 @@ These are the five "X is not supported in Trino" / "Y can't be done on Iceberg" 
 
 > **Why these myths are dangerous.** Each is a load-bearing topic-specific claim about what Trino/Iceberg "can't do." When an engineer hears them stated confidently as absolutes, they redesign around a non-existent limitation — abandoning TopN pushdown, rewriting queries to avoid QUALIFY incorrectly, building Trino-only WAP workarounds that drop the protection branches provide, tightening retention to "protect" snapshots that were already protected, or building manual upsert pipelines because they think MERGE doesn't work. The correct mental discipline: when you find yourself about to write "Trino/Iceberg can't do X," check the docs (`trino.io/docs/current/connector/<x>`, `iceberg.apache.org/docs/latest/<x>`) AND verify the feature's release-note introduction. Most "can't" claims have an exception, a version cutoff, or a specific-plan-shape limitation that flips the answer.
 
+> **Cross-ref — dbt snapshots / SCD2 / timestamp vs check strategy / check_cols / dbt_valid_from / dbt_valid_to / dbt_scd_id / dbt_is_deleted:** see **[resource 09 § Slowly Changing Dimensions — Option 1 dbt snapshot (§1a `strategy='timestamp'`, §1b `strategy='check'`)](09-lakehouse-schema-design.md#slowly-changing-dimensions-scd)** — the SINGLE source of truth on this stack. Snapshot mechanics (the four `dbt_*` metadata columns, the `WHERE dbt_valid_to IS NULL` current-rows pattern, the parse-error matrix for missing `updated_at` / missing `check_cols` / list-wrapped `['all']` / non-existent strategies) are NOT duplicated here.
+
 ---
 
 ## 1. Always include the partition column in WHERE
