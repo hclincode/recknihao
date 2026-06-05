@@ -3870,6 +3870,100 @@ After creation, Trino and Spark both see the same table because both point at th
 
 ---
 
+## LEADING CANONICAL — Spark Iceberg write file size: controlling tiny-file production and fanout-writer OOM
+
+> **READ THIS FIRST if your question contains any of: `tiny files`, `small files`, `too many files`, `target-file-size`, `target_file_size`, `write.target-file-size-bytes`, `distribution-mode`, `fanout OOM`, `fanout writer`, `Spark write file size`, `Iceberg write file size`, `spark.sql.iceberg.target`, `spark.conf.set iceberg`.** This is the canonical 3-tier reference for controlling Iceberg write file size from Spark. Citations: [iceberg.apache.org/docs/latest/spark-writes](https://iceberg.apache.org/docs/latest/spark-writes/) and [iceberg.apache.org/docs/latest/spark-configuration](https://iceberg.apache.org/docs/latest/spark-configuration/).
+
+Tiny Parquet files (< ~10 MB) hurt Trino query performance: each file requires a separate footer read during planning, and a partition with 500 small files has ~500x the planning overhead of one well-sized file. On Iceberg 1.5.2 + Spark 3.x, there are exactly **two documented mechanisms** to control write target file size. There is **no Spark session conf key** for this — any `spark.conf.set(...)` claim for file sizing is fabricated.
+
+### Tier 1 — TABLE PROPERTY `write.target-file-size-bytes` (persistent; recommended)
+
+Set this on the table at CREATE time or ALTER afterward. Spark honors this at every write (batch, streaming, MERGE INTO).
+
+```sql
+-- At CREATE time (Spark SQL or Trino DDL):
+CREATE TABLE iceberg.analytics.events (
+    event_id    BIGINT,
+    occurred_at TIMESTAMP,
+    tenant_id   BIGINT
+)
+USING iceberg
+TBLPROPERTIES (
+    'write.target-file-size-bytes' = '134217728',  -- 128 MB
+    'format-version' = '2'
+);
+
+-- On an EXISTING table (Spark SQL):
+ALTER TABLE iceberg.analytics.events
+SET TBLPROPERTIES ('write.target-file-size-bytes' = '134217728');
+```
+
+**Default value: 536870912 (512 MB).** If your writes produce many files smaller than 512 MB, the issue is usually data volume per partition being small, not the target-size setting. Set to 128 MB (134217728) for tables with moderate row volumes per partition to get reasonable file counts.
+
+### Tier 2 — DataFrameWriter `.option("target-file-size-bytes", ...)` (per-write override)
+
+Overrides the table property for a single write. Use for one-off bulk loads where you want tighter file sizing without permanently changing the table property.
+
+```python
+# Per-write override — overrides the table property for this write only
+df.writeTo("iceberg.analytics.events") \
+  .option("target-file-size-bytes", "134217728") \
+  .append()
+```
+
+### Tier 3 — TABLE PROPERTY `write.distribution-mode` (prevents fanout-writer OOM)
+
+`write.distribution-mode` controls how Spark shuffles data before writing. Set to `hash` (the recommended value) to ensure each Spark task writes to one partition at a time — preventing the fanout-writer pattern where one task writes to hundreds of partitions simultaneously, consuming huge amounts of executor memory and causing OOM.
+
+| Value | Behavior | When to use |
+|---|---|---|
+| `hash` | Spark hash-shuffles by partition key before writing. Each task writes to one partition. Prevents fanout OOM. **Default since Iceberg 1.2.0 / Spark 3.3** (so on Iceberg 1.5.2 this is the default). | Standard production setting. Best for partitioned tables where partition cardinality is bounded. |
+| `range` | Spark range-partitions by sort key before writing. Produces well-sorted files within each partition. | Tables with a declared `SORTORDER` where sort-order-aware compaction matters. |
+| `none` | No shuffle — writer uses a fanout writer to handle multiple partitions from one task. **Required for multi-day overwrite backfills** (e.g., `write.spark.fanout.enabled=true` pattern). | Backfill jobs where source data spans many partitions and pre-sorting is impractical. |
+
+Set at CREATE time:
+
+```python
+(events_df.writeTo("iceberg.analytics.events")
+    .using("iceberg")
+    .partitionedBy(days("occurred_at"))
+    .tableProperty("write.distribution-mode", "hash")
+    .tableProperty("write.target-file-size-bytes", "134217728")
+    .create())
+```
+
+Or on an existing table:
+
+```sql
+ALTER TABLE iceberg.analytics.events
+SET TBLPROPERTIES (
+    'write.distribution-mode'    = 'hash',
+    'write.target-file-size-bytes' = '134217728'
+);
+```
+
+### DO-NOT-WRITE — fabricated Spark session conf for Iceberg file size
+
+| DO NOT write | Why it's wrong |
+|---|---|
+| `spark.conf.set("spark.sql.iceberg.target_file_size_bytes", "134217728")` | **FABRICATED — this key does not exist.** Spark stores arbitrary string conf keys without error, but Iceberg never reads `spark.sql.iceberg.target_file_size_bytes`. File size remains at the table property default (512 MB) or whatever `write.target-file-size-bytes` says. Engineer thinks they fixed tiny files but nothing changes. |
+| `spark.conf.set("spark.sql.iceberg.target-file-size-bytes", "134217728")` | **Same fabrication, hyphen variant.** Also silently ignored by Iceberg. |
+| Any `spark.conf.set("spark.sql.iceberg.*", ...)` claim for file sizing | **The `spark.sql.iceberg.*` namespace is REAL for other keys** (`spark.sql.iceberg.handle-timestamp-without-timezone`, `spark.sql.iceberg.vectorization.enabled`, `spark.sql.iceberg.check-nullability`, `spark.wap.id`, `spark.wap.branch`) **but NOT for target file size.** Use TABLE PROPERTY or `.option()` only. |
+
+**The correct shape for "adjust file size on an existing table"** (the most common operational case):
+
+```sql
+-- In a Spark SQL session or pasted into a Jupyter notebook:
+ALTER TABLE iceberg.analytics.events
+SET TBLPROPERTIES ('write.target-file-size-bytes' = '134217728');
+-- Verify:
+SHOW TBLPROPERTIES iceberg.analytics.events;
+```
+
+After this ALTER, every subsequent Spark write to the table targets 128 MB files. No session conf needed.
+
+---
+
 ## Schema evolution: handling new columns added to Postgres
 
 Sooner or later a Postgres engineer adds a column to a source table (`ALTER TABLE events ADD COLUMN ab_variant VARCHAR`) and your Spark ingestion job either silently drops the new column or starts failing in confusing ways at 2 AM. **The correct fix depends on which ingestion pattern you use.** The wrong fix for the wrong pattern is worse than no fix — it looks like it works for one run and silently breaks on the next.

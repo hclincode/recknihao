@@ -2003,6 +2003,107 @@ If a future PR changes the SELECT to project `total_usd` as `double` (instead of
 
 ---
 
+### 6.7D LEADING CANONICAL — dbt seeds (small static CSVs as lookup tables: `seeds/`, `dbt seed`, `{{ ref(...) }}`)
+
+> **READ THIS FIRST if your question contains any of these keywords: `dbt seed`, `seeds/`, `seed-paths`, `static lookup`, `plan codes CSV`, `reference table CSV`, `dbt seed command`, `small CSV table`, `lookup CSV`, `seed directory`, `data/ CSV`, `seeds directory`.** This block is the canonical reference for loading small static CSVs as dbt-managed lookup tables. Verified against [docs.getdbt.com/reference/project-configs/seed-paths](https://docs.getdbt.com/reference/project-configs/seed-paths) and [docs.getdbt.com/docs/build/seeds](https://docs.getdbt.com/docs/build/seeds).
+
+**What a dbt seed is.** A dbt seed is a small static CSV file that dbt loads into a table in the data warehouse (on this stack: an Iceberg table in the Trino catalog). Seeds are for lookup/reference data that changes infrequently and is small enough to live in version control alongside your dbt models — plan codes, country codes, feature-flag mappings, product tiers. They are NOT for large or frequently-changing datasets (use a dbt source + ingestion job for those).
+
+#### Default seed directory — `seeds/` (since dbt 1.0, Dec 2021)
+
+**The default seed directory is `seeds/`, NOT `data/`.** Place CSV files at `dbt_project_root/seeds/<name>.csv`. This default has been `seeds/` since dbt 1.0 (released December 2021). The pre-1.0 default was `data/` — that is **stale and deprecated**. A new project placing CSVs in `data/` will fail `dbt seed` with "No seed files found" unless `seed-paths: ["data"]` is explicitly configured in `dbt_project.yml`.
+
+| | Correct (dbt 1.0+) | Wrong (pre-1.0 / stale) |
+|---|---|---|
+| File location | `dbt_project_root/seeds/plans.csv` | `dbt_project_root/data/plans.csv` |
+| Config in dbt_project.yml | Default — no config needed, OR `seed-paths: ["seeds"]` | Requires `seed-paths: ["data"]` (not needed; don't use) |
+
+To override the default: add `seed-paths: ["custom_dir"]` to `dbt_project.yml`. For any new project, leave it at the default — no config needed.
+
+#### Canonical recipe — plan-code lookup
+
+**Step 1.** Create the CSV at `seeds/plans.csv` (default location, no config change needed):
+
+```csv
+plan_code,plan_name,max_seats,is_enterprise
+free,Free,5,false
+pro,Pro,25,false
+business,Business,100,false
+enterprise,Enterprise,10000,true
+```
+
+**Step 2.** (Optional) Configure column types in `dbt_project.yml` to prevent implicit type coercion:
+
+```yaml
+seeds:
+  your_project_name:
+    plans:
+      +column_types:
+        plan_code: varchar
+        plan_name: varchar
+        max_seats: integer
+        is_enterprise: boolean
+```
+
+Without `+column_types`, dbt infers types from CSV content — usually fine for string columns, but `max_seats` might land as VARCHAR if not declared.
+
+**Step 3.** Load the seed:
+
+```bash
+dbt seed
+# Or load only this one seed:
+dbt seed --select plans
+```
+
+`dbt seed` creates (or replaces) the `plans` table in the Iceberg catalog. It runs a `CREATE TABLE AS SELECT` from the CSV content.
+
+**Step 4.** Reference the seed from any dbt model:
+
+```sql
+-- models/marts/fct_subscriptions.sql
+SELECT
+    s.subscription_id,
+    s.plan_code,
+    p.plan_name,
+    p.max_seats,
+    p.is_enterprise
+FROM {{ ref('stg_subscriptions') }} s
+LEFT JOIN {{ ref('plans') }} p ON s.plan_code = p.plan_code
+```
+
+`{{ ref('plans') }}` resolves to the Iceberg table created by `dbt seed`. The argument is the CSV basename without extension (`plans`, not `plans.csv`).
+
+**Step 5.** `dbt seed` is NOT run by `dbt run` or `dbt build` by default. Include it in CI:
+
+```bash
+dbt seed && dbt run   # or: dbt seed && dbt build
+```
+
+Or use a single `dbt build` with `--select seeds+` to include seeds and their dependents.
+
+#### When to use seeds vs. other patterns
+
+| Situation | Use |
+|---|---|
+| Small static lookup (< ~1 MB CSV, changes rarely) | `dbt seed` — put in `seeds/`, version in git |
+| Lookup table managed by application (e.g., Postgres `plans` table) | `dbt source` — declare in `sources.yml`, use `{{ source(...) }}` |
+| Large reference table (millions of rows) | Ingest via Spark/Debezium → dbt source |
+| Frequently-changing data (updated daily) | Ingest job + dbt model, not seed (dbt seed truncates and reloads the full CSV every time) |
+
+#### DO-NOT-WRITE — banned seed claims
+
+| DO NOT write | Why it's wrong |
+|---|---|
+| `dbt_project_root/data/plans.csv` (without `seed-paths: ["data"]` config) | **Stale pre-dbt-1.0 default path.** Default since dbt 1.0 (Dec 2021) is `seeds/`. Placing CSV in `data/` makes `dbt seed` report "No seed files found" unless `seed-paths: ["data"]` is explicitly set. |
+| `{{ ref('plans.csv') }}` (with `.csv` extension) | **Wrong.** `{{ ref() }}` takes the basename without extension: `{{ ref('plans') }}`. |
+| "Run `dbt run --select plans` to load the seed." | **Wrong command.** `dbt run` does not load seeds — it materializes SQL models. Load seeds with `dbt seed` (or `dbt seed --select plans`). |
+| "Seeds are loaded automatically during `dbt run` or `dbt build`." | **Wrong.** `dbt build` does include seeds IF you pass `--select seeds+` or the seeds are upstream of selected models via `ref()`. But a plain `dbt build` or `dbt run` without explicit seed selection does NOT re-run `dbt seed`. Seeds must be explicitly seeded before or as part of the build command. |
+| "`seed-paths: [\"data\"]` is the recommended default." | **Wrong.** The default is `seeds/`. Use `data/` only if you have a legacy project already using that path and cannot migrate. |
+
+Citation: [docs.getdbt.com/reference/project-configs/seed-paths](https://docs.getdbt.com/reference/project-configs/seed-paths) — "By default, dbt expects seeds to be located in the `seeds` directory."
+
+---
+
 ### 6.8 DBT-IS-INCREMENTAL-WHERE CANONICAL-PATTERN GUARDRAIL — the WHERE clause inside `{% if is_incremental() %}`
 
 **Why this section exists.** When porting an Oracle `MERGE INTO target USING source ON ...` procedure to a dbt incremental model, the part that has NO direct Oracle analog is the **delta filter** — the WHERE clause inside the `{% if is_incremental() %}` block that selects only the rows the MERGE should process. The single most common AI-generated mistake here is to put a **bare aggregate** directly in the predicate (e.g., `WHERE order_date >= MAX(order_date)`), which Trino rejects with **"aggregate function not allowed in WHERE clause."** Verified against [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html) (aggregate functions reference: aggregates appear in `SELECT`/`HAVING`/subqueries, NOT in `WHERE`) and [docs.getdbt.com — Incremental models](https://docs.getdbt.com/docs/build/incremental-models).
