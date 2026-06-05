@@ -1,52 +1,105 @@
-# Judge Feedback — Iter 488
+# Judge Feedback — Iter 489
 
 **Phase**: extended (end-of-iteration feedback only)
-**Overall**: 4.344 PASS (~0.844 above 3.5 floor; -0.39 below iter487's 4.7344 STRONG PASS)
-**Federation**: NOT probed this iter — 4.49944/310 row HELD per iter472-488+ directive
+**Overall**: 4.031 PASS (~0.531 above 3.5 floor; -0.313 below iter488's 4.344)
+**Federation**: NOT probed this iter — 4.49944/310 row HELD per iter472-489+ directive
 
 ---
 
 ## Headline
 
-**Q3 dbt test severity/store_failures failed with two confirmed fabrications.** Q1, Q2, and Q4 are all STRONG PASS with zero fabs. The Q3 drag (2.75 avg) pulled the overall from what would have been a 4.875 STRONG PASS down to a thin 4.344 PASS.
+**iter488 PRIMARY FIX (not_null_proportion + _dbt_test__audit) CONFIRMED LANDED on Q1 first re-probe.** But two regressions hit Q3 and Q4:
 
-Both suspicions from the task prompt are CONFIRMED by WebSearch + WebFetch:
-- SUSPICION A CONFIRMED: `dbt_utils.expression_is_true` is row-level only. Using it with an aggregate expression (`COUNT(*) FILTER (WHERE ...) / COUNT(*) < 0.05`) generates `SELECT ... FROM model WHERE NOT (COUNT(*) FILTER (WHERE ...) / COUNT(*) < 0.05)` — a SQL error at runtime because aggregate functions cannot appear in WHERE clauses without GROUP BY + HAVING.
-- SUSPICION B CONFIRMED: The responder cited `dbt_internal.<model>_<test>` as the failure schema — this is fabricated. The correct default is `<target_schema>_dbt_test__audit` per docs.getdbt.com/reference/resource-configs/store_failures. `dbt_internal` does not exist in dbt's store_failures implementation.
+- **REGRESSION 1 (Q3)**: `$snapshots` split-quote form returned — `table."$snapshots"` (wrong) instead of `"table$snapshots"` (correct). This was fixed at iter454 and has re-surfaced.
+- **REGRESSION 2 (Q4)**: `{% if execute %}` incremental guard returned — this was fixed at iter452 and has re-surfaced.
+
+Both regressions are load-bearing (paste-and-fail or paste-and-wrong-behavior). Q1 and Q2 are clean.
 
 ---
 
 ## Per-question breakdown
 
-### Q1 — OLAP vs OLTP / Postgres slow for analytics (4.875 STRONG PASS)
-- **Accuracy 5.0** — row-oriented reads-all-columns tax (10-50x) correct characterization; WAL lag + OLTP contention on analytics-on-replica correct; tuning checklist all valid: partial indexes, materialized views, EXPLAIN ANALYZE Seq Scan, pg_partman (CONFIRMED real: github.com/pgpartman/pg_partman — active PostgreSQL extension for partition management), PgBouncer. Move to Trino+Iceberg only when checklist is exhausted — operationally sound.
-- **Clarity 4.75** — zero assumed OLAP knowledge; Seq Scan, WAL lag explained in engineer-friendly terms.
-- **Actionability 5.0** — specific ordered checklist: try these first, measure, then escalate to Trino+Iceberg. Engineer knows exactly what to do next.
-- **Completeness 4.75** — covers row-oriented cost, operational interference, tuning-first discipline, and migration trigger threshold.
-- **Fab status**: ZERO fabs.
+### Q1 — dbt test WARN if >5% null + store_failures re-probe (4.3125 PASS)
 
-### Q2 — NOT IN with NULLs → zero rows (4.875 STRONG PASS)
-- **Accuracy 5.0** — three-valued logic (UNKNOWN propagation from NULL in NOT IN list → WHERE filters all rows) textbook correct; NOT EXISTS fix (TRUE/FALSE only, NULLs ignored, Trino optimizes to anti-join) correct; LEFT JOIN ... IS NULL correct; "never use NOT IN on a nullable subquery column" is the right rule.
-- **Clarity 4.75** — three-valued logic explained without assumed SQL-internals knowledge; example walkthrough makes the NULL → UNKNOWN → zero-rows chain concrete.
-- **Actionability 5.0** — two concrete alternative patterns given; engineer can paste and run.
-- **Completeness 4.75** — covers why zero rows, two fix patterns, and the governing rule.
-- **Fab status**: ZERO fabs.
+**CORE FIX STATUS: CONFIRMED LANDED.**
 
-### Q3 — dbt test severity:warn + store_failures:true (2.75 FAIL)
-- **Accuracy 2.0** — two confirmed fabrications/misuses drag accuracy to 2.0 despite correct identification of `severity: warn` and `store_failures: true` as real configs:
-  - FAB-A (aggregate-in-row-level-test MISUSE): `dbt_utils.expression_is_true: expression: "COUNT(*) FILTER (WHERE discount_pct IS NULL)/COUNT(*) < 0.05"` is a SQL error at runtime. Confirmed via WebFetch of github.com/dbt-labs/dbt-utils/blob/main/macros/generic_tests/expression_is_true.sql — the macro generates `SELECT ... FROM model WHERE NOT (expression)`. COUNT is an aggregate function; placing it in a WHERE clause without GROUP BY + HAVING is invalid SQL. The correct purpose-built macro for this use case is `dbt_utils.not_null_proportion: at_least: 0.95`, which computes `sum(case when col is null then 0 else 1 end) / count(*)` at the aggregate level. Confirmed real via github.com/dbt-labs/dbt-utils/blob/main/macros/generic_tests/not_null_proportion.sql.
-  - FAB-B (fabricated schema name): `dbt_internal.<model>_<test>` — `dbt_internal` does not exist in dbt's store_failures implementation. Confirmed via WebFetch of docs.getdbt.com/reference/resource-configs/store_failures: default schema is `<target_schema>_dbt_test__audit` (e.g., `dev_username_dbt_test__audit`). Configurable via `+schema:` in `dbt_project.yml` under `data_tests:`.
-- **Clarity 3.5** — the conceptual explanation of severity:warn and store_failures:true is clear, but the example code would confuse any engineer who tries to run it.
-- **Actionability 2.0** — paste-and-fail on two counts: (1) aggregate expression_is_true → SQL execution error; (2) `dbt_internal` schema doesn't exist → engineer looks in wrong place for failure rows.
-- **Completeness 3.5** — covers severity:warn, store_failures:true configs (real); purpose (log+continue, persist failure rows) correct conceptually. Missing: correct macro (`not_null_proportion`) and correct schema name (`_dbt_test__audit`).
-- **Fab status**: TWO confirmed fabrications — expression_is_true aggregate misuse (class: wrong-test-type / aggregate-in-row-level-test) + fabricated-schema-name (`dbt_internal`).
+- `dbt_utils.not_null_proportion: at_least: 0.95` — CORRECT (not expression_is_true with aggregate)
+- `config: severity: warn` — CORRECT
+- `store_failures_as: table` — CORRECT
+- Failures land in `<target_schema>_dbt_test__audit` — CORRECT (`analytics_dbt_test__audit`)
+- Explicitly said do NOT use expression_is_true with COUNT aggregate — CORRECT
 
-### Q4 — Subtotals + grand total one query: GROUPING SETS / ROLLUP / GROUPING() (4.875 STRONG PASS)
-- **Accuracy 5.0** — `GROUP BY GROUPING SETS ((region,product_line),(region),())` valid Trino SQL, CONFIRMED via WebFetch trino.io/docs/current/sql/select.html; `ROLLUP(region,product_line)` = those exact 3 grouping sets CONFIRMED correct (Trino doc: "ROLLUP(a,b) is equivalent to GROUPING SETS ((a,b),(a),())"); GROUPING() function for level-detection (returns bit-set decimal; 0 if column included in grouping, 1 if excluded) CONFIRMED real Trino feature; NULL-in-subtotal-column meaning "this is an aggregate row" correct.
-- **Clarity 4.75** — explains GROUPING SETS without assumed knowledge; ROLLUP as shorthand is explained clearly; GROUPING() level detection is concrete.
-- **Actionability 5.0** — paste-and-run SQL for the exact use case; ROLLUP shorthand reduces YAML line count.
-- **Completeness 4.75** — covers GROUPING SETS, ROLLUP shorthand, GROUPING() level detection, NULL semantics for subtotals.
-- **Fab status**: ZERO fabs.
+**MINOR NUANCE INACCURACY (non-load-bearing)**: Responder said store_failures lets you "see exactly which rows were null" and "join back by primary key to identify problematic records." For `not_null_proportion`, the stored failure is the **aggregate proportion result** (one row: the computed proportion value that breached the threshold), NOT the individual null rows. Confirmed via WebFetch of github.com/dbt-labs/dbt-utils/blob/main/macros/generic_tests/not_null_proportion.sql — the macro returns aggregated proportion statistics per group, not individual records with null values. To capture individual null row failures, use the plain `not_null` test with store_failures.
+
+An engineer looking in `_dbt_test__audit` after running this test will find a single proportion value (e.g., `0.07` meaning 7% were null), not a table of individual rows to join back. This is confusing and creates false expectations, but the test still runs correctly.
+
+- Accuracy 4.0 | Clarity 4.5 | Actionability 4.25 | Completeness 4.5
+- **Q1 avg: 4.3125**
+- Fab status: ZERO load-bearing fabs. One non-load-bearing nuance error on store_failures output semantics.
+
+### Q2 — Trino percentiles p50/p95 over 100M rows (4.8125 STRONG PASS)
+
+- `approx_percentile(col, 0.5)` — CONFIRMED REAL (trino.io/docs/current/functions/aggregate.html)
+- Array form `approx_percentile(col, ARRAY[0.5, 0.95, 0.99])` — CONFIRMED REAL
+- PERCENTILE_CONT WITHIN GROUP (ORDER BY) — CONFIRMED NOT in Trino docs (only LISTAGG uses WITHIN GROUP in Trino; no PERCENTILE_CONT listed)
+- T-Digest / quantile sketch / memory-bounded — CORRECT class of algorithm
+- ~2.3% standard error: NOTE — Trino docs explicitly state 2.3% for `approx_distinct` (HyperLogLog), not explicitly for `approx_percentile`. The resource (r23 line 105) contains "approx_percentile uses a quantile-sketch algorithm with 2.3% standard error (per Trino docs)" — responder citing the resource faithfully. This is a resource inaccuracy, not a responder fabrication. Non-load-bearing for this question.
+- ZERO responder fabrications.
+
+- Accuracy 4.5 | Clarity 5.0 | Actionability 5.0 | Completeness 4.75
+- **Q2 avg: 4.8125**
+- Fab status: ZERO responder fabrications.
+
+### Q3 — Iceberg time-travel + diff (3.6875 PASS)
+
+**CONFIRMED REGRESSION on iter454 $snapshots quoting fix.**
+
+Responder used: `FROM iceberg.analytics.your_table_name."$snapshots"`
+
+This is the SPLIT-QUOTE form: the table name and `$snapshots` suffix are separate identifier tokens. Trino parses this as accessing a field named `$snapshots` from the table `your_table_name` — it will produce either a column-not-found error or schema-mismatch error.
+
+Correct form per WebFetch trino.io/docs/current/connector/iceberg.html:
+```sql
+SELECT snapshot_id FROM example.testdb."customer_orders$snapshots"
+```
+The WHOLE table name + `$snapshots` suffix together in ONE pair of double quotes, as a single quoted identifier.
+
+This was explicitly documented as the correct form at iter454 and apparently has re-surfaced. The fix is needed in whatever resource contains the `$snapshots` query examples.
+
+FOR VERSION AS OF `<bigint>`, FOR TIMESTAMP AS OF TIMESTAMP, and EXCEPT-diff patterns are all CORRECT.
+
+- Accuracy 3.0 | Clarity 4.5 | Actionability 3.0 | Completeness 4.25
+- **Q3 avg: 3.6875**
+- Fab status: ONE confirmed regression — split-quote `table."$snapshots"` (iter454 fix re-surfaced).
+
+### Q4 — Oracle ROWNUM pagination + sequence surrogate key → Trino (3.3125 FAIL)
+
+**CONFIRMED REGRESSION on iter452 is_incremental() guard fix.**
+
+Responder used `{% if execute %}` + `{% if 'event_id' in adapter.get_columns_in_relation(this) %}` as the incremental delta guard.
+
+`{% if execute %}` is WRONG as an incremental guard. Confirmed via WebFetch docs.getdbt.com/reference/dbt-jinja-functions/execute + docs.getdbt.com/docs/build/incremental-models:
+
+- `execute` is True whenever dbt compiles WITH a database connection. This includes `dbt compile`, `dbt docs generate`, etc. It does NOT check if the model is running in incremental mode, if the table already exists, or if `--full-refresh` was passed.
+- Using `{% if execute %}` would cause the WHERE filter to attempt to run even during `--full-refresh`, and could attempt `SELECT MAX(...) FROM {{ this }}` when the table doesn't exist yet.
+
+The CANONICAL incremental guard is `{% if is_incremental() %}`, which returns True ONLY when:
+1. The materialization is `incremental`
+2. The model already exists as a table in the database
+3. `--full-refresh` was NOT passed
+
+Canonical example from dbt docs:
+```sql
+{% if is_incremental() %}
+  where event_time >= (select coalesce(max(event_time),'1900-01-01') from {{ this }})
+{% endif %}
+```
+
+ROWNUM→LIMIT/OFFSET table is CORRECT. `dbt_utils.generate_surrogate_key([...])` is CORRECT (idempotent MD5, real macro). `ROW_NUMBER() OVER(ORDER BY...)` for stable-within-run is CORRECT.
+
+- Accuracy 2.5 | Clarity 4.25 | Actionability 2.5 | Completeness 4.0
+- **Q4 avg: 3.3125**
+- Fab status: ONE confirmed regression — `{% if execute %}` incremental guard (iter452 fix re-surfaced).
 
 ---
 
@@ -54,24 +107,38 @@ Both suspicions from the task prompt are CONFIRMED by WebSearch + WebFetch:
 
 | Q | Topic | Acc | Clarity | Action | Complete | Avg |
 |---|---|---|---|---|---|---|
-| Q1 | OLAP vs OLTP / Postgres slow | 5.0 | 4.75 | 5.0 | 4.75 | 4.875 |
-| Q2 | NOT IN + NULLs anti-join | 5.0 | 4.75 | 5.0 | 4.75 | 4.875 |
-| Q3 | dbt test severity + store_failures | 2.0 | 3.5 | 2.0 | 3.5 | 2.75 |
-| Q4 | GROUPING SETS / ROLLUP / GROUPING() | 5.0 | 4.75 | 5.0 | 4.75 | 4.875 |
-| **Overall** | | **4.25** | **4.4375** | **4.25** | **4.4375** | **4.344** |
+| Q1 | dbt test severity + store_failures | 4.0 | 4.5 | 4.25 | 4.5 | 4.3125 |
+| Q2 | Trino approx_percentile | 4.5 | 5.0 | 5.0 | 4.75 | 4.8125 |
+| Q3 | Iceberg time-travel + diff | 3.0 | 4.5 | 3.0 | 4.25 | 3.6875 |
+| Q4 | Oracle ROWNUM + surrogate key + incremental | 2.5 | 4.25 | 2.5 | 4.0 | 3.3125 |
+| **Overall** | | **3.5** | **4.5625** | **3.6875** | **4.375** | **4.031** |
 
-**PASS** (4.344 > 3.5, margin +0.844)
+**PASS** (4.031 > 3.5, margin +0.531)
 
 ---
 
-## Fabrications / misuses inventory (iter488)
+## Core-fix status (iter488 primary)
+
+**CONFIRMED LANDED** — Q1 re-probe confirms:
+- `not_null_proportion: at_least: 0.95` correct (not expression_is_true with aggregate)
+- `_dbt_test__audit` schema suffix correct (not `dbt_internal`)
+- `severity: warn` correct
+- `store_failures_as: table` correct
+- DO NOT use expression_is_true with COUNT — correctly stated
+
+One non-load-bearing nuance to fix: store_failures on not_null_proportion stores the aggregate proportion row, not individual null rows.
+
+---
+
+## Fabrications / regressions inventory (iter489)
 
 | # | Q | Class | Severity | Correct fact | Source |
 |---|---|---|---|---|---|
-| 1 | Q3 | aggregate-in-row-level-test (MISUSE) | LOAD-BEARING — SQL error at runtime | `expression_is_true` generates `WHERE NOT (expression)` — aggregate functions illegal in WHERE; use `dbt_utils.not_null_proportion: at_least: 0.95` for null-proportion threshold | github.com/dbt-labs/dbt-utils/blob/main/macros/generic_tests/expression_is_true.sql + not_null_proportion.sql |
-| 2 | Q3 | fabricated-schema-name | LOAD-BEARING — engineer looks in wrong schema | Default store_failures schema is `<target_schema>_dbt_test__audit` (suffix `_dbt_test__audit`); no `dbt_internal` schema in dbt | docs.getdbt.com/reference/resource-configs/store_failures |
+| 1 | Q3 | REGRESSION — $snapshots split-quote (iter454 fix re-surfaced) | LOAD-BEARING — SQL error/column-not-found | Correct form: `iceberg.schema."tablename$snapshots"` (whole name + suffix in ONE quote pair) | trino.io/docs/current/connector/iceberg.html |
+| 2 | Q4 | REGRESSION — execute-guard instead of is_incremental() (iter452 fix re-surfaced) | LOAD-BEARING — wrong behavior on full-refresh and initial run | Canonical incremental guard: `{% if is_incremental() %}` checks materialization + table-exists + no-full-refresh; `{% if execute %}` is True during compile/docs/run regardless | docs.getdbt.com/reference/dbt-jinja-functions/execute + docs.getdbt.com/docs/build/incremental-models |
+| 3 | Q1 | nuance-error — store_failures output semantics (non-load-bearing) | MINOR — wrong expectation for engineer | `not_null_proportion` store_failures stores aggregate proportion result row (one row per group), NOT individual null rows; use plain `not_null` test + store_failures for row-level audit | github.com/dbt-labs/dbt-utils/blob/main/macros/generic_tests/not_null_proportion.sql |
 
-Q1, Q2, Q4: ZERO fabrications.
+Q2: ZERO fabrications or regressions.
 
 ---
 
@@ -79,46 +146,87 @@ Q1, Q2, Q4: ZERO fabrications.
 
 | Topic | Before | After | Delta |
 |---|---|---|---|
-| When to add an OLAP layer vs staying on the transactional DB (Q1) | 4.458/14 | **4.4858/15** | +0.0278 |
-| SQL query best practices for OLAP (Q2 NOT IN trap + Q3 dbt test misuse) | 4.5556/51 | **4.5275/53** | -0.0281 |
-| Analytical query patterns on Iceberg+Trino (Q4 GROUPING SETS / ROLLUP) | 4.4872/14 | **4.5131/15** | +0.0259 |
+| SQL query best practices for OLAP (Q1 dbt test config) | 4.5275/53 | **4.5236/54** | -0.004 |
+| Analytical query patterns on Iceberg+Trino (Q2 approx_percentile) | 4.5131/15 | **4.5318/16** | +0.0187 |
+| Iceberg table maintenance (Q3 time-travel) | 4.4969/142 | **4.4912/143** | -0.0057 |
+| Oracle PL/SQL→dbt+Trino migration (Q4 ROWNUM+surrogate+incremental) | 4.5029/59 | **4.4831/60** | -0.0198 |
 | Trino federation / cross-source connectors | 4.49944/310 | **4.49944/310 UNCHANGED** | NOT PROBED |
 
 ---
 
-## Teacher actions for iter489
+## Teacher actions for iter490
 
-### PRIMARY — SURGICAL FIX in dbt testing resource (wherever dbt test configs are documented, likely r27 or a dedicated dbt testing card)
+### PRIMARY — Fix the two confirmed regressions
 
-**Fix 1: expression_is_true vs not_null_proportion disambiguation**
+**Fix 1: $snapshots quoting regression (Q3 — Iceberg metadata tables)**
 
-Install a LEADING CANONICAL card with:
-- Clear statement: "`dbt_utils.expression_is_true` is a ROW-LEVEL test. It generates `SELECT 1 FROM model WHERE NOT (your_expression)`. You CANNOT use aggregate functions (COUNT, SUM, AVG) in the expression — that is a SQL error."
-- The correct macro for null-proportion threshold: `dbt_utils.not_null_proportion: at_least: 0.95` (column-level test; computes `COUNT(non-null) / COUNT(*) >= 0.95` at the aggregate level).
-- DO-NOT-WRITE rows:
-  - `dbt_utils.expression_is_true: expression: "COUNT(*) FILTER (WHERE col IS NULL)/COUNT(*) < 0.05"` — WRONG, aggregate in row-level WHERE clause = SQL error.
-  - `dbt_utils.expression_is_true: expression: "AVG(amount) > 0"` — WRONG, same class.
-- Working example of the correct pattern: `- dbt_utils.not_null_proportion: at_least: 0.95` on a column config.
-- Citation: github.com/dbt-labs/dbt-utils README section on `not_null_proportion`.
+Search resources/ (especially r17 iceberg-table-maintenance.md and any file containing `$snapshots`, `$history`, `$files`, `$manifests`) for ANY occurrence of the split-quote pattern `table_name."$snapshots"` or `<table>."$<suffix>"`.
 
-**Fix 2: store_failures schema name**
+Install or reinforce the LEADING CANONICAL anchor:
 
-Install explicit LEADING CANONICAL statement:
-- "When `store_failures: true`, dbt writes failure rows to `<your_target_schema>_dbt_test__audit`. For example, if your target schema is `analytics`, failures go to `analytics_dbt_test__audit`."
-- DO-NOT-WRITE: `dbt_internal` is NOT a dbt schema — this name does not exist in dbt's store_failures implementation.
-- Configure a custom suffix via `+schema: my_custom_suffix` under `data_tests:` in `dbt_project.yml`.
-- Citation: docs.getdbt.com/reference/resource-configs/store_failures.
+```
+CORRECT (one quote pair for the whole identifier):
+  SELECT * FROM iceberg.analytics."my_table$snapshots"
+  SELECT * FROM iceberg.analytics."my_table$history"
+  SELECT * FROM iceberg.analytics."my_table$files"
 
-### SECONDARY — breadth design for iter489 (NO dedicated federation probe)
+WRONG (split-quote — column-not-found error in Trino):
+  SELECT * FROM iceberg.analytics.my_table."$snapshots"   -- DO NOT WRITE
+  SELECT * FROM iceberg.analytics.my_table."$history"     -- DO NOT WRITE
+```
 
-- Federation 4.49944/310 row HELD per iter472-488+ directive. DO NOT count any iter489 probe as a federation probe.
+DO-NOT-WRITE matrix entry: `table_name."$<suffix>"` form is a SQL error in Trino; the table name and metadata suffix must form a single quoted identifier.
+
+Citation: trino.io/docs/current/connector/iceberg.html (search "customer_orders$snapshots" for the doc example).
+
+This fix was originally applied at iter454. Wherever it was placed, it either got stale, was removed, or the responder's keyword path doesn't lead through it. Verify the fix is in a location that keyword-matches "snapshots", "time travel", "history", "metadata table" queries.
+
+**Fix 2: {% if execute %} incremental guard regression (Q4 — Oracle migration / dbt incremental)**
+
+Search resources/ (especially r27 oracle-plsql-to-dbt-trino.md and r28 complex-sql-performance-trino-dbt.md) for ANY occurrence of `{% if execute %}` used as an incremental guard. Also search for `adapter.get_columns_in_relation` used as an incremental guard.
+
+Install or reinforce the LEADING CANONICAL anchor:
+
+```
+CANONICAL incremental guard in dbt:
+
+{% if is_incremental() %}
+  where event_time >= (select coalesce(max(event_time), timestamp '1970-01-01 00:00:00') from {{ this }})
+{% endif %}
+
+DO NOT WRITE:
+  {% if execute %}  -- WRONG: True during compile, docs generate, AND run; does not gate on incremental
+  {% if execute and 'col' in adapter.get_columns_in_relation(this) %}  -- WRONG: same class
+```
+
+is_incremental() returns True ONLY when:
+1. materialized='incremental'
+2. the model already exists as a table in the database
+3. --full-refresh was NOT passed
+
+Citation: docs.getdbt.com/reference/dbt-jinja-functions/execute (explicit statement: "not the correct guard for incremental models") + docs.getdbt.com/docs/build/incremental-models (canonical example uses is_incremental()).
+
+This fix was originally applied at iter452. Verify it is placed where keywords "incremental", "surrogate key", "Oracle sequence", "ROWNUM" would lead the responder.
+
+### SECONDARY — Add clarifying note on not_null_proportion store_failures semantics
+
+In the dbt test configs section (r27 §6.7A or wherever not_null_proportion is documented):
+
+Add a single-sentence clarifier after the store_failures_as example:
+
+> Note: `not_null_proportion` is an **aggregate test** — when `store_failures_as: table` is set, the audit table contains **one row per group** (or one row total if no `group_by_columns`) showing the computed proportion value, not individual rows where the column was null. To audit which individual rows are null, use the plain `not_null` test with `store_failures_as: table` instead.
+
+This is non-load-bearing but prevents engineer confusion when they open the audit table and find a proportion value instead of row-level failures.
+
+### SECONDARY — breadth design for iter490
+
+- Federation 4.49944/310 row HELD per iter472-489+ directive. DO NOT count any iter490 probe as a federation probe.
 - Low-count topics worth additional datapoints:
-  - dbt sources / source freshness (3, 4.219) — re-probe loaded_at_field + warn_after/error_after blocking semantics
+  - dbt sources / source freshness (3, 4.219) — re-probe loaded_at_field + warn_after/error_after blocking semantics from a 2nd angle
   - dbt model contracts (3, 4.1146) — re-probe contract.enforced + not_null runtime-enforced via Iceberg
   - Storage tiering on Trino+Iceberg+MinIO (2, 4.25) — re-probe MinIO lifecycle `mc ilm tier add` recipe
   - dbt snapshots SCD2 (2, 4.5625) — re-probe dbt_valid_from/dbt_valid_to + check vs timestamp strategy
-  - complex-SQL-perf-on-Trino-with-dbt (5, 4.785) — continue probing dbt materialization tuning
-- Consider a re-probe on Q3 NOT IN + NULLs from a 2nd angle (e.g., LEFT JOIN IS NULL vs NOT EXISTS performance on Trino, or IN with NULLs symmetric behavior) to lock 2+ confirmations.
+- Consider a 2nd-angle re-probe on `$snapshots` quoting at iter491-492 to confirm the regression fix landed (iter454 fix landed but apparently re-surfaced; needs 2-probe confirmation after fix).
 
 ### Schedule note
 
@@ -128,9 +236,11 @@ Install explicit LEADING CANONICAL statement:
 
 ## Streak / margin status
 
-- **87th consecutive overall PASS in extended phase.**
-- Margin at 4.344 (THIN PASS) — +0.844 above 3.5 floor; -0.39 below iter487's 4.7344 STRONG PASS.
-- Q3 2.75 FAIL dragged overall from what would have been a 4.875 STRONG PASS.
-- **Two new fab classes logged**: expression_is_true-aggregate-misuse + fabricated-schema-name (`dbt_internal`).
-- **Citation-hygiene status**: Q1, Q2, Q4 ZERO fab. Q3 two load-bearing fabs; neither is new in type (aggregate-misuse and name-fabrication are recurring patterns), but this is the first time they appeared on dbt test configs specifically.
-- **Federation**: 4.49944/310 — 24th+ consecutive iteration with the row HELD per iter472-488+ directive. DO NOT probe federation in iter489.
+- **88th consecutive overall PASS in extended phase.**
+- Margin at 4.031 (THIN PASS) — +0.531 above 3.5 floor; -0.313 below iter488's 4.344.
+- Q3 3.6875 + Q4 3.3125 dragged overall from what would have been ~4.5625 STRONG PASS.
+- **TWO REGRESSIONS confirmed**: both are previously-fixed items that re-surfaced.
+  - $snapshots split-quote (iter454 fix) — must reinforce the quoting rule in the right keyword-findable location.
+  - {% if execute %} incremental guard (iter452 fix) — must reinforce is_incremental() anchor in the right keyword-findable location.
+- **Citation-hygiene status**: Q1 ZERO load-bearing fabs (fix confirmed landed). Q2 ZERO fabs. Q3 one regression. Q4 one regression.
+- **Federation**: 4.49944/310 — 25th+ consecutive iteration with the row HELD per iter472-489+ directive.
