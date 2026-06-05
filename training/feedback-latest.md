@@ -1,123 +1,124 @@
-# Iter 511 Judge Feedback — 2026-06-06 (EXTENDED PHASE)
+# Judge Feedback — Iter 512 (Extended Phase, 2026-06-06)
 
-## Overall: 4.7969 STRONG PASS — Q1 LPAD-cast fix LANDED CLEAN; Q2 has a TERMINOLOGY error (anti-join should be semi-join)
+## Overall: 4.234 PASS — narrow margin (+0.734 above 3.5 floor)
 
-**Federation NOT probed** this iter (per directive). Federation rubric row stays **4.49944/310** UNTOUCHED.
+| Q | Topic | Acc | Clar | Appl | Comp | Avg | Verdict |
+|---|---|---|---|---|---|---|---|
+| Q1 | INTERSECT/EXCEPT plan re-probe (SemiJoin) | 4.0 | 4.5 | 4.5 | 4.5 | **4.375** | PASS (fix LANDED + one fabricated annotation) |
+| Q2 | SUM of DECIMAL over 400M rows | 1.5 | 4.0 | 3.5 | 3.0 | **3.000** | **FAIL** (core diagnosis wrong) |
+| Q3 | 7-day rolling avg with window frame | 5.0 | 5.0 | 5.0 | 4.5 | **4.875** | STRONG PASS clean |
+| Q4 | dbt --full-refresh on incremental + schema change | 4.5 | 4.75 | 4.75 | 4.75 | **4.6875** | STRONG PASS (one mechanism nit) |
 
-OVERALL AVG = (4.9375 + 4.4375 + 4.9375 + 4.875) / 4 = 19.1875 / 4 = **4.7969 STRONG PASS** (margin +1.2969 above 3.5 floor). 110th consecutive overall PASS in extended phase. Margin slightly below iter510's +1.4219 due to the Q2 anti-join-vs-semi-join terminology nit (-1.25 Accuracy on Q2 dominated the drop).
-
----
-
-## Per-question scores
-
-### Q1 — LPAD on numeric (iter510 Q2 LPAD-cast re-probe) — **4.9375 STRONG PASS clean**
-
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5.0 | `lpad(varchar, bigint, varchar) → varchar` signature CORRECT (verified verbatim against trino.io/docs/current/functions/string.html). Trino-no-implicit-numeric→string-coercion rule CORRECT. Oracle LPAD auto-coercion contrast CORRECT. Fix `LPAD(CAST(invoice_number AS VARCHAR), 8, '0')` parses cleanly Trino 467. Result `'00000042'` CORRECT (8-char zero-padded). |
-| Clarity | 5.0 | Direct CAST-first pattern + Oracle-vs-Trino implicit-coercion explanation lands in <5 sentences. No unexplained jargon. |
-| Practical | 5.0 | One-line drop-in fix. Engineer can paste verbatim. "Always CAST(col AS VARCHAR) first / NO bare lpad on numeric" is the right takeaway. |
-| Completeness | 4.75 | Covers the fix, the root cause (no implicit coercion), the Oracle-vs-Trino contrast, the always-CAST rule. -0.25 for no explicit error-message quote ("Unexpected parameters (bigint, integer, varchar(1)) for function lpad. Expected: lpad(varchar, bigint, varchar)") that would have nailed the symptom→fix mapping; non-load-bearing. |
-
-**LPAD-cast fix LANDED**: The responder NOW writes `LPAD(CAST(invoice_number AS VARCHAR), 8, '0')` (cast applied) and correctly attributes the Trino-strict / no-implicit-coercion-vs-Oracle root cause. **This is THE key check for iter511** — iter510 Q2 wrote bare `lpad(account_id, 10, '0')` AND called Oracle→Trino LPAD "identical syntax"; iter511 responder fixed BOTH defects. Teacher's iter511 r27 line 868 reconcile-in-place edit (replaced "Identical." with `lpad(varchar, bigint, varchar)` signature + "MUST `CAST` first" + DO-NOT-WRITE example + cross-ref to §7A.3.1) is **EXERCISED AND CONFIRMED LANDED**. Bulletproofing payoff achieved.
-
-### Q2 — INTERSECT vs INNER JOIN — **4.4375 PASS with ONE TERMINOLOGY ERROR**
-
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 3.75 | INTERSECT supported in Trino CORRECT (trino.io/docs/current/sql/select.html confirms set ops). Set-semantics dedup CORRECT. INTERSECT ALL preserves duplicates CORRECT. INNER JOIN better when you need columns from both sides CORRECT. **TERMINOLOGY ERROR**: claim "INTERSECT is implemented as a hash-based ANTI-JOIN internally" is WRONG. INTERSECT returns rows present in BOTH inputs — that's **SEMI-JOIN** semantics. An **ANTI-JOIN** returns rows in the LEFT NOT in the right (that's EXCEPT / NOT EXISTS / NOT IN). Trino's actual planner uses a SemiJoin operator (or aggregate/mark-distinct in some plans) for INTERSECT — confirmed by trinodb/trino PR #5981 "Set operators EXCEPT and INTERSECT may use the same Semi Join physical operators" + O'Reilly Trino Definitive Guide. The mislabel could mislead an engineer reading EXPLAIN ("why isn't there an AntiJoin node?"). -1.25 Accuracy. |
-| Clarity | 4.75 | Clean explanation of set-semantics + ALL variant + when-to-use-JOIN-instead. -0.25 for not defining "anti-join" / "semi-join" terms inline (which made the mislabel hit harder). |
-| Practical | 4.75 | Engineer gets a working pattern (INTERSECT for both-lists, INTERSECT ALL for dup-preserving, JOIN for column-projecting). -0.25 because the wrong perf-note framing ("comparable to inner join because anti-join") could lead to wrong EXPLAIN expectations. |
-| Completeness | 4.5 | Covers supported, dedup vs ALL, JOIN-when-columns-needed. -0.5 for no NULL-handling callout (INTERSECT treats NULLs as equal for matching, unlike `=`) — non-load-bearing for the question as asked but a useful nuance. |
-
-**CORRECTION TO DELIVER TO TEACHER**: INTERSECT plans as a **SEMI-JOIN** (rows in both inputs), **NOT** an anti-join. ANTI-JOIN is the physical form for EXCEPT / NOT EXISTS / NOT IN (rows in left not in right). The two are opposite-direction filters and confusing them is a meaningful technical error.
-
-### Q3 — CTE re-execution + break into dbt models — **4.9375 STRONG PASS clean**
-
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5.0 | Trino INLINES CTEs (no result caching / materialization) — CORRECT per techjogging.com Trino CTE writeup + trinodb/trino issue #19115 + #28085 confirming Trino 467 still has no `WITH ... AS MATERIALIZED` hint (that's PostgreSQL). Referenced N times = evaluated N times — CORRECT. "Materialize as a dbt model + ref() it" — the canonical workaround, CORRECT and matches the production stack (dbt-trino supported). Single-use CTE fine — CORRECT (one reference = one execution either way; just a readability win). |
-| Clarity | 5.0 | "Inlined not materialized" + the N-references = N-executions framing nails the mental model in two sentences. |
-| Practical | 5.0 | Decision rule is concrete: expensive + multi-ref → break into dbt model + `{{ ref() }}`; single-ref → leave as CTE. Engineer can apply immediately. |
-| Completeness | 4.75 | -0.25 for no explicit "Trino 467 has no `WITH ... AS MATERIALIZED` hint (that's PostgreSQL); don't expect an inline materialization knob to exist" callout — useful for an engineer migrating from Postgres habits. Non-load-bearing. |
-
-### Q4 — late-arriving data in hourly incremental dbt model — **4.875 STRONG PASS**
-
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5.0 | `incremental_strategy='merge'` + `unique_key='event_id'` + `is_incremental()` guard + `date_add('day', -3, COALESCE(MAX(created_at), TIMESTAMP '1970-01-01'))` lookback subquery — ALL valid Trino 467 / dbt-trino. `date_add('day', -3, ts)` signature CORRECT (verified `date_add(varchar, bigint, timestamp(p)) → timestamp(p)` per trino.io/docs/current/functions/datetime.html). COALESCE-with-epoch-fallback watermark CORRECT (handles empty-target-on-first-incremental-run). Merge-makes-reprocessing-idempotent CORRECT. Pattern matches docs.getdbt.com lookback-window canonical for late-arriving data verbatim. |
-| Clarity | 4.75 | -0.25 for not explicitly walking through WHY the subquery wrapping `{{ this }}` works on incremental runs only (the `is_incremental()` guard is mentioned but the new-engineer might still wonder how it short-circuits on first run). |
-| Practical | 5.0 | Drop-in config + WHERE clause. Engineer can paste verbatim. Tune-lookback-to-lateness + full-refresh-fallback gives the operational escape hatch. |
-| Completeness | 4.75 | Covers lookback, merge, unique_key, watermark fallback, tuning, full-refresh escape. -0.25 for no microbatch-strategy callout (dbt 1.9+ microbatch is an alternative to manual lookback) — not load-bearing for this specific question but a useful "modern alternative" nudge. |
+OVERALL AVG = (4.375 + 3.000 + 4.875 + 4.6875) / 4 = 16.9375 / 4 = **4.234** PASS (above the 3.5 floor; Q2 drags hard but Q3+Q4 absorb).
 
 ---
 
-## Topic average updates
+## Q1 — INTERSECT/EXCEPT plan terminology — 4.375 PASS
 
-| Topic | Before | After | Delta |
-|---|---|---|---|
-| SQL query best practices for OLAP (Q1 LPAD-cast re-probe + Q2 INTERSECT + Q3 CTE-inlining map here) | 4.5613/63 | (4.5613·63 + 4.9375 + 4.4375 + 4.9375)/66 = 301.6694/66 = **4.5707/66** | +0.0094 |
-| Oracle PL/SQL → dbt + Trino SQL migration (Q1 LPAD reads as Oracle→Trino migration; Q4 dbt incremental migration pattern map here) | 4.5381/75 | (4.5381·75 + 4.9375 + 4.875)/77 = 350.1700/77 = **4.5476/77** | +0.0095 |
-| Improving complex SQL performance on Trino with dbt (Q3 CTE-break-into-models is the canonical perf rewrite; Q4 incremental tuning is materialization tuning) | 4.5840/11 | (4.5840·11 + 4.9375 + 4.875)/13 = 60.2365/13 = **4.6336/13** | +0.0496 |
+**THE ITER511 ANTI-JOIN TERMINOLOGY FIX LANDED.** The responder no longer calls INTERSECT an anti-join. It now correctly states:
+- SemiJoin IS the correct/expected plan node for INTERSECT (rows in both inputs = semi-join semantics, like `WHERE EXISTS` / `IN`).
+- EXCEPT has anti-join semantics (rows in left NOT in right).
+- Seeing `SemiJoin` in `EXPLAIN` of an INTERSECT/EXCEPT is correct, not a bug.
 
-Federation rubric row UNTOUCHED at **4.49944/310** per directive.
+This is the **22nd leading-canonical bulletproofing instance** to land on first re-probe and confirms the iter512 teacher's r27 §4.5 set-op rows reconcile-in-place edit at lines 1131-1133 hit. The "INTERSECT = anti-join" iter511 Q2 mislabel is GONE.
 
----
+**FABRICATED ANNOTATION — citation hygiene nit (-0.5 Accuracy, -0.5 Completeness):** The answer claims EXPLAIN renders `SemiJoin[..., FilterMode = ANTI]` on the plan node. **This annotation does not exist in Trino's EXPLAIN output.** Verified against trinodb/trino wiki Plan-nodes page + trino.io/docs/current/sql/explain.html:
+- Trino's actual SemiJoin node renders as `SemiJoin[joinkey = joinkey_n]` with output symbols including a boolean `semijoinoutput` column.
+- Anti-join semantics for EXCEPT/NOT EXISTS/NOT IN come from a **downstream Filter on `NOT semijoinoutput`**, not from a `FilterMode = ANTI` token on the SemiJoin node itself.
+- The literal string `FilterMode = ANTI` appears nowhere in Trino's plan-renderer source or docs.
 
-## Iter512 probe targets
-
-1. **INTERSECT semi-join 2nd-angle re-probe (HIGH)** — verifies teacher lands a fix for the anti-join→semi-join terminology error. Ask something like: "I read in EXPLAIN that my INTERSECT query has a SemiJoin node — is that expected? Some sources say INTERSECT uses anti-joins. Which is right?" Verifies whether the responder now correctly says SEMI-JOIN (rows in both) vs ANTI-JOIN (rows in left not right) and attributes the physical plan to SemiJoin.
-2. **LPAD numeric-cast 3rd-angle (LOW)** — iter511 just landed Q1, but one more probe at a slightly different angle (e.g., `RPAD` on a `DECIMAL(18,2)` column, or chain `CAST` + `LPAD` inside a CONCAT) would confirm bulletproofing extends past INTEGER. Optional.
-3. **CTE inlining + Trino-has-no-WITH-AS-MATERIALIZED (MEDIUM)** — re-probe to verify responder still gets "no MATERIALIZED hint in Trino 467 (that's PostgreSQL)" right and the dbt-model + ref() workaround.
-4. **Late-arriving microbatch alternative (MEDIUM)** — probe whether responder can also recommend dbt 1.9+ microbatch strategy as an alternative to manual lookback windows, since iter511 only covered the manual lookback pattern.
-5. **Federation STAYS UNPROBED (LOW)** — per locked directive, federation rubric row at 4.49944/310 stays untouched.
+The conceptual semi-join-vs-anti-join distinction is correct, so this is a partial deduction (fabricated internal EXPLAIN syntax — same failure-class as past r17 `file_size_in_bytes` $partitions fabrication). An engineer searching plan output for the literal "FilterMode = ANTI" will not find it and will be confused.
 
 ---
 
-## Concrete next-teacher actions
+## Q2 — SUM of DECIMAL over 400M rows — 3.000 FAIL (sub-threshold individually; core diagnosis WRONG)
 
-### 1. (PRIMARY, LOAD-BEARING) Fix the INTERSECT anti-join → semi-join terminology error in resources
+**CRITICAL ACCURACY ERROR — verified against trino.io/docs/current/functions/aggregate.html + Trino issues #20227 / #10732:**
 
-**Where**: Find the resource that documents INTERSECT/EXCEPT set operations on Trino (likely r07 analytical query patterns or r23 dialect/translation matrix). Grep for "anti-join" + "INTERSECT" to locate the source of the confusion if it exists in resources/.
+The answer claims:
+> "Trino's aggregate does NOT automatically widen the result type — it stays the same precision/scale as the input."
 
-**What to write**: A clear callout that:
-- INTERSECT returns rows in BOTH inputs → **semi-join** semantics (matches `WHERE EXISTS (SELECT 1 FROM B WHERE B.x = A.x)`).
-- EXCEPT returns rows in LEFT NOT in RIGHT → **anti-join** semantics (matches `WHERE NOT EXISTS (...)` / `NOT IN`).
-- Trino's physical planner for INTERSECT uses a SemiJoin operator (or aggregate/mark-distinct in some plans) — confirmed by trinodb/trino PR #5981: "Set operators EXCEPT and INTERSECT may use the same Semi Join physical operators".
-- DO-NOT-WRITE example: "INTERSECT is implemented as an anti-join" (this is the bug — it's a semi-join).
-- Keyword anchors for findability: "INTERSECT semi-join", "EXCEPT anti-join", "INTERSECT plan", "INTERSECT EXPLAIN SemiJoin node", "set operation join type Trino".
+This is **FALSE**. The correct behavior:
+- `sum(decimal(p, s))` returns **`decimal(38, s)`** — Trino DOES auto-widen the result to precision 38, retaining the input scale. Verified verbatim via aggregate-functions docs ("For decimal input of decimal(p, s), the return type is decimal(38, s)").
+- A `DECIMAL(10, 2)` summed across 400M rows yields max `~4 × 10^16` (~17 digits) — **comfortably under precision 38**, no overflow risk from row count alone.
+- On true overflow, Trino raises an **error** (`NUMERIC_VALUE_OUT_OF_RANGE` / "Value is out of range"), per trinodb/trino #20227 + #10732 — it does **NOT** "truncate silently."
 
-**Why load-bearing**: An engineer reading the responder's wrong answer and running EXPLAIN will see a SemiJoin node (not AntiJoin) and get confused, OR they'll incorrectly reason that "INTERSECT = anti-join = expensive" and avoid it. The mislabel could distort optimization decisions.
+The answer's core diagnosis (no auto-widen + silent truncation + likely overflow on 400M `DECIMAL(10,2)` rows) is largely wrong. The user's "too small" symptom is almost certainly something else:
+- A filtered subset (a WHERE clause that excludes more than expected).
+- A JOIN fan-out that's dropping rows, not duplicating them.
+- Scale rounding from an upstream CAST/divide that shaved the scale.
+- A NULL-heavy column with `SUM` ignoring NULLs (legitimate but unexpected).
 
-### 2. (SECONDARY, OPTIONAL) Cross-reference the dbt 1.9+ microbatch strategy at the late-arriving lookback canonical
+The mitigation `SUM(CAST(revenue AS DECIMAL(18, 2)))` is harmless but **redundant** — the SUM result is `decimal(38, 2)` regardless of whether you cast input to `DECIMAL(18, 2)` or leave it `DECIMAL(10, 2)`. The DECIMAL(18, 2) default for currency advice is reasonable but doesn't address the actual problem.
 
-Q4 answer was strong but only covered the manual lookback pattern. dbt 1.9+ introduced `incremental_strategy='microbatch'` which natively handles the lookback + per-batch boundary problem. Adding a 2-3 line cross-ref ("see also: microbatch strategy for natively-managed lookback windows") at the lookback canonical would future-proof the answer.
+`SHOW CREATE TABLE` to check column precision/scale is a fine practice — but won't reveal the real root cause if it's a filter/join issue.
 
-### 3. (TERTIARY, OPTIONAL) Add a one-line "no WITH ... AS MATERIALIZED in Trino 467 (that's PostgreSQL)" callout
-
-Q3 answer was clean but didn't pre-empt the engineer who knows Postgres CTE materialization hints and wonders if Trino has one. A 1-line callout at the CTE canonical would prevent a future probe from hitting this gap.
-
----
-
-## Federation guardrails
-
-§13.x federation guardrails in resources/22 NOT TOUCHED. Federation rubric row stays **4.49944/310**. Federation not probed in iter511.
-
----
-
-## Score history append
-
-Iter511 score line appended to `training/rubric.md` score history below the iter510 entry.
+**Scoring:**
+- Accuracy 1.5 — load-bearing "no auto-widen" + "silent truncate" claims are both factually wrong; user is sent down a wrong-fix path.
+- Clarity 4.0 — well-written and easy to follow (which makes the wrongness worse — confidently wrong).
+- Applicability 3.5 — the mitigation runs and won't error, but doesn't fix the symptom.
+- Completeness 3.0 — misses the actually-likely causes (filter/join/scale/NULL).
 
 ---
 
-## Sources (WebSearch verification)
+## Q3 — 7-day rolling average — 4.875 STRONG PASS clean
 
-- [String functions and operators — Trino Documentation](https://trino.io/docs/current/functions/string.html) — verified `lpad(varchar, bigint, varchar) → varchar` signature, first arg MUST be varchar.
-- [SELECT — Trino Documentation](https://trino.io/docs/current/sql/select.html) — verified INTERSECT, INTERSECT ALL, EXCEPT supported set operations + WITH clause inlining behavior.
-- [Optimize execution for output duplicates insensitive joins — trinodb/trino PR #5981](https://github.com/trinodb/trino/pull/5981) — confirms "Set operators EXCEPT and INTERSECT may use the same Semi Join physical operators" (not anti-join).
-- [Common Table Expressions in Trino — techjogging](https://techjogging.com/common-table-expressions-in-trino.html) — verified CTEs are inlined, referenced N times = executed N times.
-- [Does trino support CTE Materialization? — trinodb/trino issue #28085](https://github.com/trinodb/trino/issues/28085) — confirms Trino 467 still has NO `WITH ... AS MATERIALIZED` hint.
-- [Date and time functions and operators — Trino Documentation](https://trino.io/docs/current/functions/datetime.html) — verified `date_add(varchar, bigint, timestamp(p)) → timestamp(p)` signature.
-- [Incremental patterns for near real-time data — dbt Developer Hub](https://docs.getdbt.com/best-practices/how-we-handle-real-time-data/2-incremental-patterns) — verified lookback-window pattern with `is_incremental()` + `dateadd(..., -N, max(...))` for late-arriving data.
-- [About incremental strategy — dbt Developer Hub](https://docs.getdbt.com/docs/build/incremental-strategy) — verified `merge` strategy + `unique_key` semantics in dbt-trino.
+Verified against trino.io/docs/current/functions/window.html + trinodb/trino #5162 (RANGE BETWEEN support shipped in version 346):
+- `AVG(dau) OVER (PARTITION BY tenant_id ORDER BY day RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW)` is **valid Trino 467** syntax.
+- RANGE-with-INTERVAL is **value/calendar-based** — frame is "all rows whose ORDER BY value is within 6 days of current" — gap-correct (missing days don't shift the window).
+- ROWS is **position-based** — frame is "the previous 6 rows" — wrong on missing days because it counts rows, not calendar dates.
+- Empty-frame day → AVG returns NULL → COALESCE/stakeholder discussion is correct production guidance.
+
+Minor -0.5 Completeness: no callout that the source data must already be at one-row-per-tenant-per-day grain (with explicit zeroes for no-activity days) for the rolling avg to be true rolling 7-day; otherwise pre-aggregate via `GROUP BY tenant_id, day` first or use a calendar-spine LEFT JOIN. Non-load-bearing.
+
+---
+
+## Q4 — dbt --full-refresh on incremental with schema change — 4.6875 STRONG PASS (one minor mechanism nit)
+
+Verified against docs.getdbt.com/reference/resource-configs/full_refresh + docs.getdbt.com/docs/build/incremental-models:
+- `--full-refresh` makes `is_incremental()` return FALSE, skipping the WHERE filter and rebuilding from scratch — CORRECT.
+- Required-after list (changed WHERE/watermark logic, structural column changes like widened DECIMAL or NOT NULL flip, changed unique_key, manual data corruption) is **accurate and well-scoped**.
+- `on_schema_change='append_new_columns'` handling nullable-add without full-refresh — CORRECT.
+
+**Minor mechanism nit (-0.25 Accuracy):** Answer says rebuild happens via "INSERT OVERWRITE (operation='overwrite')". For **dbt-trino on Iceberg**, the actual mechanism is closer to **DROP + CREATE TABLE AS** (or `CREATE OR REPLACE TABLE`) — the docs explicitly say "drop cascade the existing table before rebuilding it." `INSERT OVERWRITE` is more of a Hive/Spark idiom and is not the literal Trino-Iceberg path. The conceptual outcome (table fully replaced with rebuilt rows) is identical, so this is a minor terminology nit, not a correctness break.
+
+---
+
+## Iter-wide patterns and next-teacher actions
+
+**Wins:**
+- Iter511 INTERSECT-anti-join fix LANDED on first re-probe (Q1) — r27 §4.5 lines 1131-1133 reconcile-in-place confirmed effective. **22nd consecutive leading-canonical bulletproofing landing.**
+- Q3 (rolling window) and Q4 (full-refresh) both STRONG PASS clean against authoritative docs.
+- Zero federation probing — 4.49944/310 row untouched per directive.
+
+**New gap (iter513 HIGH-PRIORITY reconcile target):**
+- Q2 **DECIMAL SUM auto-widen** is a **load-bearing technical error**. Two false claims:
+  1. "Trino does NOT automatically widen the SUM result" — FALSE. `sum(decimal(p,s)) → decimal(38, s)`.
+  2. "Trino will either truncate silently or throw an overflow error" — FALSE. Trino raises an error on decimal overflow (`NUMERIC_VALUE_OUT_OF_RANGE`); it does NOT truncate silently.
+
+**Iter513 teacher reconcile-in-place target — DECIMAL aggregate behavior canonical:**
+- File: likely `resources/23-sql-best-practices-olap.md` or `resources/03-column-storage.md` or wherever DECIMAL precision/scale is taught (grep `sum(decimal` / `DECIMAL.*overflow` / `decimal.*precision`).
+- Add (or reconcile) a callout: **`sum(decimal(p,s))` returns `decimal(38, s)` in Trino 467 — the result auto-widens to maximum precision 38, retaining the input scale. A `DECIMAL(10,2)` summed across billions of rows will not overflow until the accumulated value exceeds ~`10^36`. Overflow raises `NUMERIC_VALUE_OUT_OF_RANGE`, not silent truncation. If a SUM "looks too small," the cause is almost always (1) an unintended WHERE filter, (2) JOIN row loss / fan-out, (3) scale truncation from an upstream CAST, or (4) NULL-heavy column with SUM ignoring NULLs — NOT precision overflow.**
+- DO-NOT-WRITE bans: "Trino does not widen the SUM result"; "SUM of DECIMAL truncates silently on overflow"; "you need `SUM(CAST(x AS DECIMAL(38,...)))` to avoid overflow".
+- Verified against trino.io/docs/current/functions/aggregate.html + trinodb/trino issue #20227.
+
+**Iter513 teacher MEDIUM-PRIORITY citation-hygiene nit:**
+- Q1 fabricated `SemiJoin[..., FilterMode = ANTI]` annotation. The conceptual answer (SemiJoin is correct, anti-semantics via downstream Filter) is right, but the literal annotation is invented. Recommend r27 §4.5 set-op rows (or r23 §10 semi/anti jargon gloss) clarify that:
+  - Trino's plan-renderer shows `SemiJoin[joinkey = joinkey_n]` with output symbol `semijoinoutput:boolean`.
+  - Anti-semantics for EXCEPT come from a **`Filter[NOT semijoinoutput]`** node downstream of the SemiJoin — not from a `FilterMode = ANTI` token on the SemiJoin itself.
+  - DO-NOT-WRITE: any literal `FilterMode = ANTI` plan-node annotation that isn't taken verbatim from a real EXPLAIN output.
+
+**Iter513 teacher MINOR Q4 nit (optional):**
+- `dbt-trino` full-refresh mechanism on Iceberg uses `DROP` + `CREATE TABLE AS`, not `INSERT OVERWRITE`. Worth a callout if there's a natural place at r27 §6.7 or wherever full-refresh is taught.
+
+**Iter513 probe targets:**
+- **DECIMAL SUM re-probe (HIGH)**: "I summed a `DECIMAL(8,2)` revenue column across 2B rows and the total looks suspiciously rounded — is Trino's SUM precision-limited? do I need to cast?" — verifies the auto-widen + error-not-truncate fix lands.
+- **DECIMAL overflow second angle (HIGH)**: "What happens if a SUM(DECIMAL) result exceeds `10^38`? does Trino error out or wrap?" — verifies "error not silent" claim is corrected in resources.
+- **INTERSECT/EXCEPT plan EXPLAIN annotation 3rd angle (MEDIUM)**: "I ran EXPLAIN on `a EXCEPT b` and don't see any `FilterMode = ANTI` — is the EXCEPT being optimized away?" — verifies fabricated annotation does not reappear.
+- **dbt full-refresh on Iceberg mechanism (MEDIUM)**: "Does dbt --full-refresh on a dbt-trino Iceberg model `INSERT OVERWRITE` or `DROP+CREATE`?" — verifies Q4 mechanism nit.
+- **RANGE vs ROWS frame on a gappy series (LOW)**: "If my DAU table has missing days, does ROWS 6 PRECEDING give wrong rolling avgs?" — confirms Q3 robustness.
+- **Federation stays UNPROBED (LOW)** per iter472-512 directive.
+
+**Margin:** +0.734 above 3.5 floor (4.234 iter avg). This is the **narrowest extended-phase margin in recent memory** and the **first FAIL-grade individual answer (Q2 = 3.000) in many iters**. The iter-wide PASS is preserved by Q1/Q3/Q4 strength, but Q2's confidently-wrong DECIMAL diagnosis is a real production-risk error — an engineer following Q2 ships the wrong mitigation and never finds the real cause. **This is the iter513 primary fix target.**
+
+**111th consecutive overall PASS in extended phase**, but the narrowest in 10+ iters. Recommend teacher prioritize the DECIMAL SUM canonical fix above all other adjustments for iter513.
