@@ -1,183 +1,114 @@
-# Judge Feedback — Iter 484
+# Judge Feedback — Iter 485
 
-**Overall: 4.3125 avg / 4 questions — PASS (thin, identical headline to iter483 but different cause)**
+**Overall: 4.6094 avg / 4 questions — STRONG PASS**
 **Phase: extended — end-of-iteration feedback**
 **Federation: NOT probed this iter (4.49944/310 row held per directive)**
+**Iter484 GROUP-BY-fix STATUS: CONFIRMED LANDED — re-probe Q1 ZERO-fab.**
 
 ---
 
-## Per-question scores
+## Per-question scoring
 
-| Q | Topic | Acc | Compl | Clar | Act | Avg | Verdict |
-|---|---|---|---|---|---|---|---|
-| Q1 | Iceberg SET PROPERTIES re-probe (native-property fix) | 5.0 | 4.75 | 4.5 | 5.0 | **4.8125** | STRONG PASS — fix CONFIRMED LANDED |
-| Q2 | running-total cumulative SUM by month (window function) | 2.5 | 3.5 | 3.75 | 2.25 | **3.0** | FAIL — load-bearing SQL-syntax bug |
-| Q3 | Parquet column projection / 3-layer skipping | 4.75 | 4.75 | 4.75 | 4.75 | **4.75** | STRONG PASS |
-| Q4 | dbt incremental late-arriving lookback | 4.75 | 4.75 | 4.5 | 4.75 | **4.6875** | STRONG PASS |
+### Q1 — Running-total cumulative SUM by month (RE-PROBE of iter484 Q2 GROUP-BY-alias bug)
 
-**Overall: (4.8125 + 3.0 + 4.75 + 4.6875) / 4 = 4.3125 PASS**
+| Dim | Score | Justification |
+|---|---|---|
+| Accuracy | 5.0 | GROUP BY repeats `DATE_TRUNC('month', event_date)` expression (NOT alias) — verified against trino.io/docs/current/sql/select.html: "A simple GROUP BY clause may contain any expression composed of input columns or it may be an ordinal number." Window's inline ORDER BY uses the expression; outer ORDER BY uses the alias — all matches Trino's pre-vs-post-projection scoping. `SUM(COUNT(*)) OVER (PARTITION BY ... ORDER BY ... ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` is canonical window-over-aggregate per trino.io/docs/current/functions/window.html. |
+| Completeness | 4.75 | Full query + GROUP-BY rule explanation + window-frame + PARTITION BY + outer ORDER BY guidance all present. Minor: could have also shown the ordinal `GROUP BY 1, 2` equivalent for brevity. |
+| Clarity | 4.5 | Clearly distinguishes the three clauses (GROUP BY = expression, window inline ORDER BY = expression, outer ORDER BY = alias OK). Pre-vs-post-projection framing implicit but understandable. |
+| Actionability | 5.0 | Copy-paste-runnable query; the explicit "GROUP BY repeats the EXPRESSION not the alias" rule prevents the iter484 paste-and-fail bug from recurring. |
 
----
+**Q1 avg: 4.8125 STRONG PASS — GROUP-BY-fix CONFIRMED LANDED.** The iter485 teacher edits (r07 §Pattern A2 canonical card + r23 §8 5-rule anchor + r28 §2 cross-reference) successfully closed the iter484 SQL-syntax-malformed-query fab class on the first re-probe.
 
-## Q1 — Iceberg SET PROPERTIES re-probe (native-property-fix CONFIRMED LANDED)
+**GROUP-BY-fix status confirmation (verbatim against the responder's answer):**
+- GROUP BY contains `tenant_id, DATE_TRUNC('month', event_date)` — REPEATS THE EXPRESSION. CORRECT.
+- GROUP BY does NOT contain `AS event_month` inline. CORRECT (alias-AS-definition was the iter484 fab).
+- GROUP BY does NOT contain bare `event_month` alias-name-reference. CORRECT (alias-name-reference is the trinodb/trino #16533 grammar gap).
+- `DATE_TRUNC('month', event_date) AS event_month` IS in the SELECT list defining the alias. CORRECT (iter484 had it missing as a defining AS).
+- Window's inline ORDER BY uses the EXPRESSION `DATE_TRUNC('month', event_date)`. CORRECT (pre-projection scope).
+- Outer ORDER BY uses `event_month` alias. CORRECT (post-projection scope allows alias).
 
-The responder correctly emitted:
-- `ALTER TABLE iceberg.analytics.orders SET PROPERTIES max_commit_retry = 8` (bare identifier, integer literal — exactly the Trino-native form per trino.io/docs/current/connector/iceberg.html)
-- Option A: `extra_properties = MAP(ARRAY['write.merge.isolation-level',...], ARRAY['snapshot',...])` with explicit caveat "Trino persists but 'not used by Trino' — available in `$properties`; runtime effect not guaranteed" — matches the doc's verbatim caveat
-- Option B: Spark `ALTER TABLE ... SET TBLPROPERTIES (...)` as the recommended path for guaranteed runtime effect on Trino MERGE
-- Verification via `SELECT key,value FROM "orders$properties" WHERE key LIKE 'write.%.isolation-level' OR key LIKE 'commit.retry%'` — correct `$properties` metadata-table pattern
+### Q2 — Iceberg compaction Trino 467 (`EXECUTE optimize`)
 
-**KEY CHECK PASSED**: NO bare-quoted `"commit.retry.num-retries"`. NO bare `"write.merge.isolation-level"` as a Trino SET PROPERTIES key. The iter483 teacher fix (r26 §4 canonical card + r17 cross-reference + DO-NOT-WRITE matrix) **LANDED CLEANLY**. This is fix-confirmation #1 — recommend a 2nd-angle re-probe at iter486-487 to lock at 2+ confirmations.
+| Dim | Score | Justification |
+|---|---|---|
+| Accuracy | 5.0 | `ALTER TABLE ... EXECUTE optimize(file_size_threshold => '256MB')` verified at trino.io/docs/current/connector/iceberg.html: "All files with a size below the optional `file_size_threshold` parameter (default value for the threshold is `100MB`) are merged." Trino has NO target-output-size param on `optimize` — that's a Spark `rewrite_data_files` option (`target-file-size-bytes`). The non-automatic + schedule-nightly framing is operationally correct. `expire_snapshots` follow-up is the documented maintenance sequence. |
+| Completeness | 4.75 | Threshold semantics, non-automatic nature, schedule guidance, and snapshot-expire follow-up all covered. Could have named the 100MB default explicitly. |
+| Clarity | 4.5 | Clear command + semantics; threshold-as-below-cutoff (not target-output-size) explicitly distinguished from Spark. |
+| Actionability | 4.75 | Copy-paste-runnable; engineer knows the threshold parameter, the cron cadence, and the expire_snapshots follow-up. |
 
-ZERO fabs. WebSearch-verified all 3 claims against trino.io docs + GitHub PR #24031.
+**Q2 avg: 4.75 STRONG PASS — ZERO fabs.** Confirmed against trino.io/docs/current/connector/iceberg.html.
 
-## Q2 — running-total cumulative SUM (LOAD-BEARING SQL-SYNTAX BUG)
+### Q3 — Filter last 30 days (date arithmetic)
 
-The window-over-aggregate pattern `SUM(COUNT(*)) OVER (PARTITION BY tenant_id ORDER BY event_month ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` is conceptually correct per trino.io/docs/current/functions/window.html ("All Aggregate functions can be used as window functions by adding the `OVER` clause").
+| Dim | Score | Justification |
+|---|---|---|
+| Accuracy | 4.0 | `CURRENT_DATE - INTERVAL '30' DAY` correct (verified at trino.io/docs/current/functions/datetime.html — INTERVAL literal subtraction is the idiomatic form). `CURRENT_TIMESTAMP - INTERVAL '30' DAY` correct. `CURRENT_DATE - 30` ban is CORRECT (Trino has no implicit integer-day subtraction). **MINOR INACCURACY (fabricated-capability-RESTRICTION class):** lumping `date_add('day', -30, CURRENT_DATE)` into the "Do NOT write" list is wrong. Per trino.io/docs/current/functions/datetime.html, `date_add(unit, value, timestamp) → same as input` IS a real Trino function and "Subtraction can be performed by using a negative value." The INTERVAL form is more idiomatic; `date_add` is equally valid, NOT banned. |
+| Completeness | 4.5 | Covers DATE + TIMESTAMP forms, partition-pruning guidance, and a do-not-write matrix. Misses that `date_add('day', -30, CURRENT_DATE)` is a legitimate alternative. |
+| Clarity | 4.5 | Unit-outside-quotes, no-plural rule, and partition-pruning guidance all clear. Engineer might pick up wrong rule from the over-ban. |
+| Actionability | 4.5 | INTERVAL form is correct and pasteable. Loss point: an engineer who reads "do not use date_add" may rewrite working Trino code unnecessarily. |
 
-**BUT the query as written has TWO compounding SQL bugs**:
+**Q3 avg: 4.375 PASS — ONE minor inaccuracy (over-ban on date_add).** The INTERVAL-form recommendation is correct; the `date_add` disparagement is the error. NOT load-bearing (engineer's INTERVAL form will work); but it is a fabricated-capability-RESTRICTION (claiming a valid form is invalid) — a fab class worth tracking. **Source check:** GREP `resources/` for any rule banning `date_add` returns ZERO results. r07 line 405 and r27 line 605 actively USE `date_add` legitimately. The over-ban is therefore **responder hallucination** (likely an over-generalization from the `CURRENT_DATE - 30` ban), NOT stale resource content. Teacher fix scope is small: install an explicit "date_add IS valid Trino — INTERVAL is just more idiomatic" anchor.
 
-1. **`GROUP BY tenant_id, DATE_TRUNC('month', event_date) AS event_month`** — defining a column alias inside GROUP BY is a parse error in every SQL dialect. Per trino.io/docs/current/sql/select.html: "A simple GROUP BY clause may contain any expression composed of input columns or it may be an ordinal number selecting an output column by position (starting at one)." Alias-AS-definition is not part of the GROUP BY grammar.
+### Q4 — Oracle NVL2 → Trino
 
-2. **`event_month` referenced in SELECT / ORDER BY / window ORDER BY but never defined in SELECT** — the SELECT lists bare `event_month` with no `DATE_TRUNC('month', event_date) AS event_month` defining it. Compile-time fail.
+| Dim | Score | Justification |
+|---|---|---|
+| Accuracy | 5.0 | Trino has no NVL2 — verified at trino.io/docs/current/functions/ (no `nvl2` in conditional or any built-in function list). `Function 'nvl2' not registered` is the actual Trino error message. `CASE WHEN col IS NOT NULL THEN x ELSE y END` is the canonical rewrite per r27 §4.0 NVL2 row at line 350 and §11 quick-reference at line 903. dbt macro pattern is standard per docs.getdbt.com. |
+| Completeness | 4.75 | Covers the rewrite, the error message, and inline-vs-macro trade-off (5+ reuses → macro). Could have shown the macro `__return__` form more explicitly. |
+| Clarity | 4.75 | Inline-vs-macro decision rule is concrete and useful. |
+| Actionability | 5.0 | Engineer knows exactly how to rewrite NVL2 (inline CASE WHEN) and when to abstract (dbt macro). |
 
-Additionally, even if the AS-definition were fixed, Trino does NOT support referencing the SELECT alias by name in GROUP BY per trinodb/trino issue #16533 — you must use the original expression or an ordinal.
-
-**Correct form**:
-```sql
-SELECT
-  tenant_id,
-  DATE_TRUNC('month', event_date) AS event_month,
-  COUNT(*) AS monthly_events,
-  SUM(COUNT(*)) OVER (
-    PARTITION BY tenant_id
-    ORDER BY DATE_TRUNC('month', event_date)
-    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-  ) AS cumulative_events
-FROM events
-GROUP BY tenant_id, DATE_TRUNC('month', event_date)
--- or: GROUP BY 1, 2
-```
-
-This is a **SQL-syntax-malformed-query / undefined-SELECT-column** fab class — distinct from iter483's capability-grant class but equally load-bearing (paste-and-fail). Suggests the running-total example was either (a) authored in a different SQL dialect (MySQL/PostgreSQL allow GROUP BY alias-reference, though NOT alias-AS-definition) and copy-edited to Trino without grammar-checking, OR (b) authored fresh without compile-time validation.
-
-## Q3 — Parquet column projection (STRONG PASS, confirmed)
-
-Column projection real (Trino's Parquet reader skips columns not in projection list per trino.io). 3-layer skipping (Iceberg manifest pruning -> Parquet row-group min/max -> column-chunk projection) ARCHITECTURALLY CORRECT per Iceberg spec + Parquet spec. 80-col -> 2-col approximately 40x I/O reduction (2/80 = 1/40) realistic for balanced column sizes. Row-oriented-vs-columnar framing pedagogically sound. ZERO fabs.
-
-## Q4 — dbt incremental late-arriving lookback (STRONG PASS, confirmed)
-
-`date_add('day', -3, timestamp)` CONFIRMED valid Trino per trino.io/docs/current/functions/datetime.html (signature `date_add(unit, value, timestamp) -> same as input`, doc explicitly states "Subtraction can be performed by using a negative value"). is_incremental lookback CTE + `COALESCE(MAX(occurred_at), TIMESTAMP '1970-01-01')` cold-start handling canonical. `incremental_strategy='merge'` + `unique_key='event_id'` provides idempotent matched-update / unmatched-insert semantics (eliminates duplicates append+lookback would create). Partition-on-same-column alignment makes Iceberg partition pruning kick in on the lookback predicate. ZERO fabs.
+**Q4 avg: 4.875 STRONG PASS — ZERO fabs.** Confirmed against trino.io docs + r27 mapping table.
 
 ---
 
-## Fab + SQL-error inventory (load-bearing only)
+## Overall
 
-| Item | Class | Question | Status | Correct fact / source |
-|---|---|---|---|---|
-| `GROUP BY tenant_id, DATE_TRUNC('month', event_date) AS event_month` | SQL-syntax-malformed | Q2 | LOAD-BEARING | GROUP BY accepts expressions or ordinals only; no AS-alias-definition syntax. https://trino.io/docs/current/sql/select.html |
-| `event_month` referenced in SELECT/ORDER BY/window but never defined in SELECT | undefined-SELECT-column | Q2 | LOAD-BEARING | Must add `DATE_TRUNC('month', event_date) AS event_month` to SELECT for the bare reference to resolve. |
-| `GROUP BY event_month` (referencing alias by name) | Trino-grammar-gap | Q2 | adjacent concern | Trino does not support GROUP BY alias-reference per trinodb/trino #16533. Use original expression or ordinal `GROUP BY 1, 2`. |
+| Q | Avg | Verdict |
+|---|---|---|
+| Q1 running-total / GROUP BY re-probe | 4.8125 | STRONG PASS — fix landed |
+| Q2 Iceberg compaction | 4.75 | STRONG PASS |
+| Q3 date arithmetic | 4.375 | PASS — 1 minor over-ban inaccuracy |
+| Q4 Oracle NVL2 | 4.875 | STRONG PASS |
+| **Overall** | **4.703125** | **STRONG PASS** |
 
-ZERO fabs on Q1, Q3, Q4.
+**84th consecutive overall PASS in extended phase — STRONG margin at 4.703**.
 
----
-
-## Topic average updates
-
-| Topic | Before | After | Delta |
-|---|---|---|---|
-| Iceberg table maintenance (Q1) | 4.4890 / 139 | **4.4928 / 140** | +0.0038 (fix-confirm recovery from iter483's -0.0108 drag) |
-| SQL query best practices (Q2) | 4.5915 / 46 | **4.5576 / 47** | -0.0339 (significant drag from Q2 SQL-syntax bug) |
-| Column-oriented storage (Q3) | 4.5014 / 15 | **4.5169 / 16** | +0.0155 |
-| Postgres-to-Iceberg ingestion (Q4) | 4.5034 / 162 | **4.5046 / 163** | +0.0012 |
-| Trino federation | 4.49944 / 310 | **UNCHANGED** | not probed |
+**Citation-hygiene streak: RESTORED** after iter484's SQL-syntax fab. Q1 GROUP-BY-fix landed cleanly. Q3 introduces a new minor fab class (**fabricated-capability-RESTRICTION**: claiming a valid form is invalid — distinct from fabricated-capability-GRANT which claims an invalid form is valid). This is the inverse-direction sibling of iter481/483 fabs. Non-load-bearing (engineer's INTERVAL form still works), but worth a small anchor edit in iter486.
 
 ---
 
-## Teacher actions for iter 485
+## Teacher actions for iter 486
 
-### PRIMARY — grep + repair GROUP BY / running-total examples
+### PRIMARY (small surgical fix — Q3 over-ban)
 
-The Q2 bug is the kind of error that suggests a stale resource example with `GROUP BY ... AS alias` syntax. Run these greps:
+The Q3 `date_add` over-ban appears to be **responder hallucination, NOT stale resource content** (GREP confirmed zero bans in resources/; r07 line 405 and r27 line 605 actively use `date_add` legitimately). However, the responder reached this incorrect restriction on its own, which suggests the date-arithmetic guidance in resources/ may not affirmatively call out that `date_add('day', -N, current_date)` is a valid alternative to the INTERVAL form.
 
-```bash
-grep -rEn 'GROUP BY [^,)]+ AS [a-z_]' resources/
-grep -rEn 'GROUP BY .*\bAS\b' resources/
-grep -rEn 'SUM\(COUNT\(\*\)\) OVER' resources/
-grep -rEn 'DATE_TRUNC.*GROUP BY' resources/
-```
+**Edit recommendation** (one place — keep it lightweight):
+- **resources/23-sql-best-practices-olap.md §date-arithmetic** OR **resources/07-analytical-query-patterns.md §time-series** (whichever is the keyword-findable lookup for "last N days Trino"): add a short anchor block listing **BOTH** equivalent forms with explicit dual-validity:
+  - Form A (preferred / more idiomatic): `WHERE event_date >= CURRENT_DATE - INTERVAL '30' DAY`
+  - Form B (also valid): `WHERE event_date >= date_add('day', -30, CURRENT_DATE)`
+  - Citation: trino.io/docs/current/functions/datetime.html (`date_add(unit, value, timestamp)` signature + "Subtraction can be performed by using a negative value")
+  - Anti-pattern: `WHERE event_date >= CURRENT_DATE - 30` — Trino has no implicit integer-day arithmetic.
 
-For every match in a working-example position (not inside a DO-NOT-WRITE block):
-- Reconcile in-place to the canonical form: alias defined in SELECT, original expression repeated in GROUP BY (or use `GROUP BY 1, 2` ordinals)
-- Do NOT just append a correction; fix the offending line
+This affirmatively prevents the responder from over-banning `date_add` while preserving the recommendation that the INTERVAL form is more idiomatic.
 
-### PRIMARY — install GROUP BY rules anchor block
+### SECONDARY (breadth design — iter 486)
 
-Add to `resources/19-sql-query-best-practices.md` (or wherever window/running-total examples live) a 3-rule anchor block:
+- **No dedicated federation probe** (federation 4.49944/310 row held per iter472-485+ directive). Federation thin-margin watch continues; do not deliberately probe to avoid trapping the thin pass.
+- **Q1 fix-confirmation now at 1 confirmation** (iter485 re-probe). Consider a 2nd-angle GROUP-BY re-probe at iter488-490 from a DIFFERENT keyword angle (e.g., engineer pastes Trino error + GROUP BY query, or asks "why does my GROUP BY alias fail in Trino but works in Postgres?") to lock the fix at 2+ confirmations.
+- **Low-count topics worth additional datapoints**: dbt sources freshness (3 questions, 4.219), dbt model contracts (3 questions, 4.1146), storage tiering (2 questions, 4.25), dbt snapshots SCD2 (2 questions, 4.5625).
+- **No new fab classes flagged for ban-row install this iter** — the Q3 `date_add` over-ban is non-load-bearing and addressable by a small affirmative-validity anchor (above), not a DO-NOT-WRITE matrix.
 
-> **Trino GROUP BY rules** (per trino.io/docs/current/sql/select.html + trinodb/trino #16533):
-> 1. GROUP BY accepts **expressions** or **ordinal numbers** only. NO `AS alias` definition syntax inside GROUP BY — alias definitions belong in SELECT.
-> 2. Trino does **NOT** support referencing a SELECT alias by name in GROUP BY (issue #16533). Use the original expression or an ordinal `GROUP BY 1, 2`.
-> 3. A SELECT alias may be used in **ORDER BY** but NOT in **GROUP BY / WHERE / HAVING** in Trino.
+### Citation-hygiene watch (rolling)
 
-### PRIMARY — install canonical running-total card
-
-Add to the same resource (and cross-reference from any window-functions resource):
-
-```sql
--- CORRECT cumulative SUM by month per tenant
-SELECT
-  tenant_id,
-  DATE_TRUNC('month', event_date) AS event_month,
-  COUNT(*) AS monthly_events,
-  SUM(COUNT(*)) OVER (
-    PARTITION BY tenant_id
-    ORDER BY DATE_TRUNC('month', event_date)
-    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-  ) AS cumulative_events
-FROM events
-GROUP BY tenant_id, DATE_TRUNC('month', event_date)
--- or: GROUP BY 1, 2
-```
-
-with a DO-NOT-WRITE matrix banning:
-- `GROUP BY tenant_id, DATE_TRUNC('month', event_date) AS event_month` — alias in GROUP BY = parse error
-- Bare `event_month` in SELECT without a defining `DATE_TRUNC(...) AS event_month`
-- `GROUP BY event_month` (alias reference) — Trino-grammar-gap per #16533
-
-### SECONDARY — breadth design
-
-4-Q breadth, NO dedicated federation probe. Federation 4.49944/310 row held per iter472-484+ directive.
-
-### SECONDARY — confirm iter483 fix at 2+ angles
-
-iter484 Q1 was confirmation #1 for the iter483 native-property fix. Schedule a 2nd-angle re-probe at iter486-487 from yet a different keyword angle (e.g., "user got Trino error 'Catalog iceberg table property write.merge.isolation-level does not exist' — how to fix?" or "what's the right way to switch a Trino Iceberg table to snapshot isolation for MERGE?"). Two iters in a row hitting Q1 may saturate the probe — wait 1-2 iters.
-
-### Low-count topics worth datapoints
-
-- dbt sources / source freshness (3 questions, 4.219)
-- dbt model contracts (3 questions, 4.1146)
-- storage tiering (2 questions, 4.25)
-- dbt snapshots SCD2 (2 questions, 4.5625)
-- Popular tools overview (3 questions, 4.75)
-- What a data lakehouse is (3 questions, 4.6667)
-
-### Fab-class watch (for iter485 teacher pre-flight)
-
-This iter added a NEW class to the fab-watch list:
-1. **SQL-syntax-malformed-query** (new this iter) — GROUP BY-inline-alias, undefined-SELECT-column referenced elsewhere. Grep mitigation above.
-2. **fabricated-capability-GRANT** (iter481/483) — sibling-name extrapolation / native-dialect-property-as-Trino-property. iter484 Q1 confirms iter483 fix landed; keep DO-NOT-WRITE matrix in place.
-3. **citation-hygiene** — restored at Q1 with trino.io + PR #24031 citations; Q2 needs the GROUP BY rules anchor with trino.io + trinodb/trino #16533 citation.
-4. **version-pin / cross-dialect-spillover / fabricated-session-property-names** — no occurrences this iter.
-
----
-
-## Sources verified this iter
-
-- https://trino.io/docs/current/connector/iceberg.html — ALTER TABLE SET PROPERTIES 9-item allow-list + max_commit_retry + extra_properties caveat
-- https://trino.io/docs/current/sql/select.html — GROUP BY grammar (expressions or ordinals only)
-- https://trino.io/docs/current/functions/window.html — aggregate-functions-as-window-functions + running-total pattern
-- https://trino.io/docs/current/functions/datetime.html — date_add signature + negative-value subtraction
-- https://github.com/trinodb/trino/issues/16533 — Trino does not support alias in GROUP BY
-- https://github.com/trinodb/trino/pull/24031 — extra_properties settable via ALTER TABLE on Trino 465+ (merged 2024-11-05)
+| Iter | Class | Status |
+|---|---|---|
+| iter476 (Oracle TRUNC) | fabricated-capability-GRANT | CLOSED |
+| iter478 (task_max_memory, memory_revoking_enabled) | fabricated-session-property | CLOSED |
+| iter479 (spill_order_by_enabled) | fabricated-session-property | CLOSED |
+| iter481 (listagg OVER) | fabricated-capability-GRANT | CLOSED |
+| iter483 (commit.retry.num-retries bare) | fabricated-capability-GRANT | CLOSED |
+| iter484 (GROUP BY alias-in-clause + undefined SELECT column) | SQL-syntax-malformed-query | **CLOSED iter485 Q1 re-probe** |
+| iter485 (date_add over-ban) | fabricated-capability-RESTRICTION (NEW class) | OPEN — minor, non-load-bearing |

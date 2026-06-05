@@ -525,6 +525,76 @@ ORDER BY day, event_id;
 
 This is distinct from Pattern D below (`RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW`) — there the non-zero `INTERVAL '6' DAY` actually does work (it defines a calendar-aware sliding window). The redundancy only applies to the **zero-width** `INTERVAL '0' DAY` case, which collapses to the default RANGE frame.
 
+### Pattern A2: Bucketed running total — `GROUP BY` + window-over-aggregate (CANONICAL CARD)
+
+**The SaaS question family:** "Per tenant, show monthly event counts AND a running cumulative total of events through the end of each month." Same family: weekly active users with running totals, daily revenue with month-to-date, signups per week with cumulative YTD.
+
+The shape is **`GROUP BY` to bucket + aggregate, then a window function over the aggregate** (`SUM(COUNT(*)) OVER (...)`, `SUM(SUM(amount)) OVER (...)`). The window-over-aggregate trick is supported in Trino per [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html) ("All Aggregate functions can be used as window functions by adding the OVER clause") — the aggregate is computed first (one row per group), then the window function runs over those grouped rows.
+
+This pattern is where engineers from MySQL/PostgreSQL/Snowflake backgrounds most often write Trino-invalid SQL. Read the **GROUP BY rules anchor** below FIRST, then copy the canonical form.
+
+#### Trino GROUP BY rules (anchor — apply to EVERY GROUP BY query)
+
+Verified at [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) + [trinodb/trino #16533](https://github.com/trinodb/trino/issues/16533):
+
+1. **GROUP BY accepts EXPRESSIONS or ORDINAL NUMBERS only.** Per the Trino SELECT doc verbatim: *"A simple `GROUP BY` clause may contain any expression composed of input columns or it may be an ordinal number selecting an output column by position (starting at one)."*
+2. **NO `AS alias` definition syntax inside GROUP BY.** Defining an alias is a SELECT-list operation. `GROUP BY DATE_TRUNC('month', event_date) AS event_month` is a **parse error in every SQL dialect** — the GROUP BY grammar does not include the `AS <name>` production.
+3. **Trino does NOT support referencing a SELECT-list alias by NAME in GROUP BY** (issue [trinodb/trino #16533](https://github.com/trinodb/trino/issues/16533), still open). You must repeat the original expression OR use an ordinal `GROUP BY 1, 2`. Note: PostgreSQL and MySQL allow alias-reference in GROUP BY, which is the most common source of cross-dialect spillover. Trino does not.
+4. **A SELECT alias may be referenced in `ORDER BY`** (the outer final-sort ORDER BY, after projection) but **NOT in `GROUP BY` / `WHERE` / `HAVING`** (all evaluated before or during projection).
+5. **A window-clause's inline `ORDER BY` (inside `OVER (...)`) references the PRE-PROJECTION expression**, not the SELECT alias. Use `ORDER BY DATE_TRUNC('month', event_date)` inside `OVER (...)`, not `ORDER BY event_month`.
+
+#### Canonical worked example — per-tenant monthly events + cumulative running total
+
+```sql
+-- CORRECT — bucket by month with DATE_TRUNC, COUNT per bucket, then SUM(COUNT(*)) OVER for the running total.
+SELECT
+  tenant_id,
+  DATE_TRUNC('month', event_date) AS event_month,    -- alias DEFINED in SELECT
+  COUNT(*) AS events_this_month,                      -- aggregate over the GROUP BY
+  SUM(COUNT(*)) OVER (
+    PARTITION BY tenant_id
+    ORDER BY DATE_TRUNC('month', event_date)          -- window ORDER BY uses the EXPRESSION, not the alias
+    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+  ) AS cumulative_events
+FROM iceberg.analytics.events
+WHERE event_date >= DATE '2026-01-01'
+GROUP BY tenant_id, DATE_TRUNC('month', event_date)   -- GROUP BY REPEATS the EXPRESSION
+ORDER BY tenant_id, event_month;                       -- outer ORDER BY CAN use the SELECT alias
+```
+
+Equivalent form using ordinals (some teams prefer this — fewer characters, but less grep-friendly):
+
+```sql
+GROUP BY 1, 2          -- ordinal positions of tenant_id and DATE_TRUNC(...)
+ORDER BY 1, 2;
+```
+
+**Why each piece is the way it is:**
+- `DATE_TRUNC('month', event_date) AS event_month` — alias **defined** in SELECT. The alias name `event_month` only exists *after* projection. Anywhere the alias appears before projection (GROUP BY, WHERE, HAVING, OVER's ORDER BY), use the **expression** instead.
+- `GROUP BY tenant_id, DATE_TRUNC('month', event_date)` — repeats the expression. NEVER write `GROUP BY ... AS event_month` (rule 2) and NEVER write `GROUP BY event_month` (rule 3 — Trino-grammar gap #16533).
+- `SUM(COUNT(*)) OVER (...)` — the window-over-aggregate. After the GROUP BY collapses to one row per `(tenant_id, month)`, the window function runs over those rows. The `COUNT(*)` is what would be each row's `events_this_month`; `SUM(COUNT(*)) OVER (...)` sums them across the partition.
+- `ORDER BY DATE_TRUNC('month', event_date)` *inside* `OVER (...)` — must be the expression, not the alias. The window clause is evaluated alongside the projection, not after it.
+- `ORDER BY tenant_id, event_month` *outside* (final sort) — the alias is fine here. Final sort runs **after** projection, so the alias exists.
+
+#### DO-NOT-WRITE matrix (every line below is a Trino parse error or analysis error)
+
+| DO NOT WRITE | Why it breaks | Correct form |
+|---|---|---|
+| `GROUP BY tenant_id, DATE_TRUNC('month', event_date) AS event_month` | **Parse error.** Alias-definition syntax (`expr AS name`) is a SELECT-list-only production. The GROUP BY grammar does not include `AS`. Fails in EVERY SQL dialect, not just Trino. | `GROUP BY tenant_id, DATE_TRUNC('month', event_date)` — repeat the expression. |
+| `GROUP BY tenant_id, event_month` (alias referenced by name) | **Trino-grammar gap** — issue [trinodb/trino #16533](https://github.com/trinodb/trino/issues/16533) (still open). Trino's analyzer errors with `Column 'event_month' cannot be resolved`. PostgreSQL/MySQL allow this; Trino does NOT. | `GROUP BY tenant_id, DATE_TRUNC('month', event_date)` — OR `GROUP BY 1, 2` (ordinals). |
+| `SELECT tenant_id, event_month, COUNT(*) ... FROM events GROUP BY tenant_id, DATE_TRUNC('month', event_date)` (bare `event_month` in SELECT with no defining `AS event_month`) | **Analysis error — `Column 'event_month' cannot be resolved`.** The SELECT list references an undefined name. An alias must be **defined** by `<expr> AS event_month` somewhere in the SELECT list (or the table must have a real `event_month` column). | Add `DATE_TRUNC('month', event_date) AS event_month` to the SELECT list. |
+| `SUM(COUNT(*)) OVER (PARTITION BY tenant_id ORDER BY event_month ...)` (alias inside `OVER`'s ORDER BY) | **Analysis error.** The window clause is evaluated with pre-projection scope; the alias `event_month` is not yet visible. Same root cause as GROUP-BY-by-alias. | `ORDER BY DATE_TRUNC('month', event_date)` inside `OVER (...)`. |
+| `WHERE DATE_TRUNC('month', event_date) AS event_month >= DATE '2026-01-01'` | **Parse error.** WHERE accepts predicates, not alias-definitions. | Move the alias definition to the SELECT list; in WHERE, predicate on `event_date >= DATE '2026-01-01'` directly (better — preserves partition pruning). |
+| `HAVING event_month >= DATE '2026-01-01'` (alias in HAVING) | **Same as GROUP-BY-by-alias** — Trino does not resolve SELECT aliases in HAVING. | `HAVING DATE_TRUNC('month', event_date) >= DATE '2026-01-01'` — repeat the expression. (Better: push the filter to WHERE for partition pruning.) |
+
+#### When to use `GROUP BY` + window-over-aggregate vs raw window function
+
+| Need | Pick |
+|---|---|
+| Per-row running total over raw events (each event keeps its own row, running total computed across them) | Pattern A (raw window, no GROUP BY) |
+| Per-bucket aggregate + running total across buckets (one row per `(tenant, month)` showing both monthly count and cumulative count) | **Pattern A2 (this card)** — GROUP BY + `SUM(COUNT(*)) OVER (...)` |
+| Top-N per group with a bucketed metric | Pattern A2 followed by an outer `WHERE rank <= N` filter on a `RANK() OVER (PARTITION BY tenant_id ORDER BY events_this_month DESC)` column |
+
 ### Pattern B: Lag / Lead (compare to previous or next row)
 
 "Day-over-day change in revenue per tenant."

@@ -325,6 +325,15 @@ GROUP BY feature_name;
 
 ## 8. Filter with WHERE before GROUP BY, not HAVING
 
+> **Trino GROUP BY rules (anchor — applies to every `GROUP BY` query):**
+> 1. GROUP BY accepts **expressions or ordinal numbers ONLY** (per [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) verbatim).
+> 2. **NO `AS alias` definition syntax inside GROUP BY** — `GROUP BY DATE_TRUNC('month', event_date) AS event_month` is a **parse error in every SQL dialect**. Alias definitions belong in the SELECT list.
+> 3. Trino does **NOT support referencing a SELECT-list alias by name** in GROUP BY (issue [trinodb/trino #16533](https://github.com/trinodb/trino/issues/16533), still open). PostgreSQL/MySQL allow this; Trino does NOT. Repeat the expression or use an ordinal `GROUP BY 1, 2`.
+> 4. A SELECT alias **may be used in the outer `ORDER BY`** (after projection) but **NOT in `GROUP BY` / `WHERE` / `HAVING`** (all evaluated before/during projection).
+> 5. A window's inline `ORDER BY` inside `OVER (...)` also uses **pre-projection scope** — `ORDER BY DATE_TRUNC('month', event_date)`, not `ORDER BY event_month`.
+>
+> For the canonical bucketed-running-total worked example (`GROUP BY` + `SUM(COUNT(*)) OVER (...)`), see [resource 07 § Pattern A2 — Bucketed running total](07-analytical-query-patterns.md).
+
 **Why**: `WHERE` is evaluated before aggregation, so rows are dropped before they enter the expensive GROUP BY. `HAVING` runs after aggregation — every row contributes to the group, then the group is discarded.
 
 **Bad** — aggregates every event, then throws most away:

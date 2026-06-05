@@ -384,7 +384,7 @@ One pass over the table, hash-partitioned by `customer_id`, sorted within each p
 | `SELECT ... FROM a WHERE EXISTS (SELECT 1 FROM b WHERE b.id = a.id)` | `SELECT a.* FROM a WHERE a.id IN (SELECT id FROM b)` (Trino converts to SemiJoin) OR explicit `JOIN ... DISTINCT` |
 | `SELECT ... FROM a WHERE NOT EXISTS (SELECT 1 FROM b WHERE b.id = a.id)` | `SELECT a.* FROM a LEFT JOIN b ON b.id = a.id WHERE b.id IS NULL` (anti-join) |
 | `SELECT (SELECT COUNT(*) FROM b WHERE b.cid = a.cid) FROM a` | `SELECT a.*, b_cnt.cnt FROM a LEFT JOIN (SELECT cid, COUNT(*) AS cnt FROM b GROUP BY cid) b_cnt ON b_cnt.cid = a.cid` |
-| Per-row "running total" via correlated `(SELECT SUM(x) FROM t t2 WHERE t2.dt <= t.dt)` | `SELECT ..., SUM(x) OVER (ORDER BY dt ROWS UNBOUNDED PRECEDING) FROM t` (window function) |
+| Per-row "running total" via correlated `(SELECT SUM(x) FROM t t2 WHERE t2.dt <= t.dt)` | `SELECT ..., SUM(x) OVER (ORDER BY dt ROWS UNBOUNDED PRECEDING) FROM t` (window function) — for the bucketed `GROUP BY` + `SUM(COUNT(*)) OVER (...)` variant, see [resource 07 § Pattern A2 — Bucketed running total](07-analytical-query-patterns.md). **Trino GROUP BY caveat:** GROUP BY accepts only expressions or ordinals — never `AS alias` definitions and never SELECT-alias references ([trinodb/trino #16533](https://github.com/trinodb/trino/issues/16533)). |
 | "Most recent N per group" via `WHERE n_rows_with_later_date < N` correlated count | `SELECT * FROM (SELECT *, row_number() OVER (PARTITION BY g ORDER BY dt DESC) rn FROM t) WHERE rn <= N` |
 
 ---
