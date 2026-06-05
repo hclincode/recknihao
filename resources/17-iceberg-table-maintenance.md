@@ -1048,6 +1048,24 @@ ORDER  BY s.committed_at DESC;
 >
 > **`is_current_ancestor` lives on `$history`, NOT on `$snapshots`.** A query like `SELECT * FROM "events$snapshots" WHERE is_current_ancestor = true` fails because `$snapshots` has no such column. The canonical pre-rollback verification query joins the two on `snapshot_id` — see the "Pre-rollback verification" query in the rollback section below, and the deeper `$history` vs `$snapshots` audit-reconstruction comparison further down in this document.
 
+> **`$partitions` vs `$files` — per-partition size/count column-placement gotcha (read before writing `SUM(file_size_in_bytes) FROM "<t>$partitions"`).** These two metadata tables answer overlapping questions but have **disjoint column sets**. Keyword anchors: `$partitions` columns, `$partitions` vs `$files`, per-partition file count and size, `total_size` partition, biggest partitions by size, `file_size_in_bytes` is `$files` not `$partitions`. Verified at [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (Metadata tables section).
+>
+> | Table | Row shape | Size column | Count column | Aggregation needed? |
+> |---|---|---|---|---|
+> | `$files` | **ONE ROW PER FILE.** Columns: `content` (0=data, 1=position-delete, 2=equality-delete), `file_path`, `file_format`, `record_count`, `file_size_in_bytes`, `column_sizes`, `value_counts`, `null_value_counts`, `lower_bounds`, `upper_bounds`, `sort_order_id`. | `file_size_in_bytes` (BIGINT, per-file) | `COUNT(*)` over rows (each row = 1 file) | YES — `SUM(file_size_in_bytes)` for totals, `COUNT(*)` for file count, with `WHERE content = 0` to exclude deletes. |
+> | `$partitions` | **ALREADY ONE ROW PER PARTITION.** Columns: `partition` (ROW of partition column values), `record_count` BIGINT, `file_count` BIGINT, `total_size` BIGINT, `data` (ROW of per-column `min`/`max`/`null_count`/`nan_count`). | `total_size` (BIGINT, pre-aggregated per partition) | `file_count` (BIGINT, pre-aggregated per partition) | NO — values are pre-aggregated; project columns directly, no `SUM`/`COUNT`/`GROUP BY`. |
+>
+> **Table-wide totals (use `$files`):** `SELECT COUNT(*) AS files, SUM(file_size_in_bytes) AS bytes FROM iceberg.analytics."events$files" WHERE content = 0;`
+>
+> **Per-partition file count and size (use `$partitions`, NO `GROUP BY`):** `SELECT partition, file_count, total_size FROM iceberg.analytics."events$partitions" ORDER BY total_size DESC;` — find the biggest partitions by size, or by `file_count DESC` for fragmentation hotspots.
+>
+> **DO NOT WRITE — common shape errors that fail at analysis or produce wrong results:**
+>
+> | Wrong shape | Why it breaks | Correct form |
+> |---|---|---|
+> | `SELECT partition, SUM(file_size_in_bytes) FROM "<t>$partitions" GROUP BY partition` | **`Column 'file_size_in_bytes' cannot be resolved`** — that column is **`$files`-only**. `$partitions` exposes the per-partition byte total under the column name **`total_size`** (BIGINT). | `SELECT partition, total_size FROM iceberg.analytics."events$partitions" ORDER BY total_size DESC;` |
+> | `SELECT partition, COUNT(*) AS file_count FROM "<t>$partitions" GROUP BY partition` | **Redundant** — `$partitions` is **already one row per partition**, so `COUNT(*) GROUP BY partition` returns `1` for every partition. The actual per-partition file count is already exposed as the **`file_count`** column. | `SELECT partition, file_count FROM iceberg.analytics."events$partitions" ORDER BY file_count DESC;` |
+
 **Common diagnostic queries (copy-pasteable):**
 
 ```sql

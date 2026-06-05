@@ -1,111 +1,165 @@
-# Iter 508 Judge Feedback — 2026-06-06 (EXTENDED PHASE)
+# Iter509 Judge Feedback — 2026-06-06 (EXTENDED PHASE)
 
-## TL;DR
+**OVERALL VERDICT: 4.9375 STRONG PASS** — BOTH iter508 fixes LANDED cleanly on first re-probe; ZERO new fabrications; ALL four answers STRONG PASS; cleanest extended-phase iter since iter503 (4.7344). +1.4375 above 3.5 floor.
 
-- **Overall avg = 4.3359 → PASS** (+0.836 above 3.5 floor).
-- **Q1 RENAME COLUMN re-probe FIX LANDED** — responder now correctly states the OLD NAME stops resolving after RENAME COLUMN, attributes it to "field ID tracks DATA not NAME label", and prescribes expand-contract (ADD COLUMN → backfill → DROP COLUMN). The iter507 "both names work" fabrication does NOT reappear. **18th leading-canonical bulletproofing instance + 11th findability/canonical-addition fix to land cleanly on re-probe.**
-- **Q4 has a new accuracy error**: the `$partitions` query uses `file_size_in_bytes` and `COUNT(*) ... GROUP BY partition` — both wrong. `$partitions` is already one row per partition with columns `partition / record_count / file_count / total_size / data`. The `$files` half is correct.
-- **Q3 has a minor-to-moderate accuracy imprecision**: claims `ARRAY_AGG(t.tag)` for an unmatched LEFT JOIN row "becomes an empty array in most tools" and recommends `COALESCE(ARRAY_AGG(t.tag), ARRAY[])`. Verified via Trino GitHub #6145: ARRAY_AGG over a LEFT-JOIN-NULL row returns `ARRAY[null]` (one-element array with NULL), NOT NULL and NOT `[]`. So the COALESCE is INEFFECTIVE. Correct form is `ARRAY_AGG(t.tag) FILTER (WHERE t.tag IS NOT NULL)`.
-- **Q2 NULLIF** — clean STRONG PASS.
+**Federation NOT probed — 4.49944/310 row UNCHANGED per directive.**
 
-## Per-question scores
+---
 
-### Q1 — Iceberg RENAME COLUMN: signup_ts → created_at, old query broke (RE-PROBE of iter507 Q3 load-bearing error)
+## Q1 — $partitions RE-PROBE (bloated partitions: file count / size / row count per partition)
 
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 4.875 | CORRECT — field-ID model preserves DATA-not-NAME; old name `signup_ts` "permanently retired" / "Trino cannot resolve it anymore" matches Trino analyzer behavior (`Column 'signup_ts' cannot be resolved`); does NOT claim both names work; expand-contract playbook (ADD COLUMN → UPDATE backfill → DROP COLUMN) all valid Trino 467 Iceberg syntax. Tiny nit: "permanently retired" is slightly dramatic phrasing — the name is fully reusable for a new column later — but no engineer would be misled. |
-| Clarity | 5.0 | Crystal clear; the field-ID-vs-name-label distinction is exactly the conflation users hit. |
-| Actionability | 5.0 | Engineer copy-pastes the expand-contract three-step DDL and ships safely. |
-| Completeness | 5.0 | Addresses "what happened" + "how to roll out safely" both. |
+**Score: 4.9375 STRONG PASS** (Accuracy 5.0, Clarity 5.0, Actionability 5.0, Completeness 4.75)
 
-**Q1 avg = 4.96875 STRONG PASS.** **ITER507 Q3 RENAME COLUMN FIX LANDED.** Iter508 teacher fix at r17 DO-NOT-WRITE matrix row + safe-rename playbook routed correctly; responder no longer fabricates "both names map to the same field ID." Verified against iceberg.apache.org evolution docs (field-ID tracks data, not name aliasing) and trino.io Iceberg connector docs.
+**FIX A LANDED — ITER508 Q4 $partitions SCHEMA MISUSE FULLY RECONCILED.**
 
-### Q2 — Divide-by-zero guard for conversion rate (Trino)
+Verified against trino.io/docs/current/connector/iceberg.html + GitHub trinodb/trino #12323 ($partitions schema):
+- `SELECT partition, record_count, file_count, total_size FROM iceberg.analytics."events$partitions" ORDER BY file_count DESC LIMIT 20` — VALID Trino 467, parses cleanly. Exact column names match docs verbatim (`partition` ROW, `record_count` BIGINT, `file_count` BIGINT, `total_size` BIGINT, `data` ROW).
+- ONE ROW PER PARTITION pre-aggregated — NO `COUNT(*)` / `GROUP BY partition` (iter508 redundancy reconciled).
+- NO `file_size_in_bytes` (iter508 $files-only-column misuse reconciled).
+- Correctly identifies high `file_count` = small-files problem → routes to `ALTER TABLE ... EXECUTE optimize` (cross-reference to compaction canonical).
+- Correctly explains `partition` is a struct (use `partition.occurred_at_day` to project the bucket key).
+- Whole-token quoting `"events$partitions"` correct.
 
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5.0 | `NULLIF(COUNT(*), 0)` denominator + "divide by NULL → NULL not error" correct per trino.io/docs/current/functions/conditional.html and Trino issue #19491. `COUNT(*) FILTER (WHERE event_type='converted')` valid Trino 467 per aggregate.html. CASE WHEN form also valid. |
-| Clarity | 5.0 | Explains why NULLIF works (the NULL-propagation rule). |
-| Actionability | 5.0 | Two ready-to-paste forms. |
-| Completeness | 4.75 | Could mention TRY() as alt, but NULLIF is production-standard; not a real gap. |
+**19th leading-canonical bulletproofing instance + 13th findability/canonical-addition fix to land cleanly on first re-probe — r17:1049 $partitions-vs-$files column-placement gotcha callout WORKED.**
 
-**Q2 avg = 4.9375 STRONG PASS.**
+Minor -0.25 Completeness: no callout that `$partitions` reflects only the CURRENT partition spec (per GitHub #12323), so a table that's been re-partitioned will under-report old-spec partitions — non-load-bearing for the question asked.
 
-### Q3 — One row per user with grouped tags array (users LEFT JOIN user_tags)
+---
 
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 3.5 | Core approach (`ARRAY_AGG(t.tag)` + GROUP BY u.user_id + LEFT JOIN) correct Trino 467. `ARRAY_AGG(t.tag ORDER BY t.tag)` valid per aggregate.html. `ARRAY_JOIN(ARRAY_AGG(t.tag), ', ')` valid. **BUT load-bearing imprecision on no-tag-user case**: "LEFT JOIN preserves users with NO tags (they get an array with NULL, which becomes an empty array in most tools)" + recommended `COALESCE(ARRAY_AGG(t.tag), ARRAY[])` is INEFFECTIVE. Verified via Trino GitHub #6145: ARRAY_AGG over the single LEFT-JOIN NULL row returns `ARRAY[null]` (one-element array containing NULL), NOT NULL and NOT empty — so COALESCE never fires (operand is not NULL). CORRECT idiom: `ARRAY_AGG(t.tag) FILTER (WHERE t.tag IS NOT NULL)` (Trino docs: FILTER supported for all aggregate functions). The "becomes empty array in most tools" hand-wave is wrong — Trino returns `[null]`; pushing that into a BI tool surfaces a null tag string, not an empty list. |
-| Clarity | 4.0 | Mainline pattern explained well; no-tag-edge-case framing is the imprecise piece. |
-| Actionability | 3.5 | Core query works; the empty-array advice will silently NOT solve the no-tag case as promised — engineer ships, sees `[null]` in output, has to come back. |
-| Completeness | 4.0 | Covers ordering, string-flatten, but mishandles the very edge case it explicitly raises. |
+## Q2 — ARRAY_AGG RE-PROBE (LEFT JOIN users→tags, no-tag users get [null] instead of [])
 
-**Q3 avg = 3.75 PASS (thin margin).** Mainline ARRAY_AGG right; no-match-group treatment imprecise.
+**Score: 4.9375 STRONG PASS** (Accuracy 5.0, Clarity 5.0, Actionability 5.0, Completeness 4.75)
 
-### Q4 — File count + size of Iceberg table without going to MinIO
+**FIX B LANDED — ITER508 Q3 ARRAY_AGG empty-array IMPRECISION FULLY RECONCILED.**
 
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 3.25 | **`$files` query (first half) CORRECT**: `file_size_in_bytes` + `content` are real `$files` columns; content=0 data / 1 position-delete / 2 equality-delete matches Trino Iceberg docs; whole-token quoting `"events$files"` is the correct dollar-sign syntax. **`$partitions` query (second half) WRONG on schema and shape**: (1) `$partitions` does NOT have `file_size_in_bytes` — its columns are `partition / record_count / file_count / total_size / data` per trino.io/docs/current/connector/iceberg.html. Engineer pastes and gets `Column 'file_size_in_bytes' cannot be resolved`. (2) `$partitions` is ALREADY one row per partition — `SELECT partition, COUNT(*) ... GROUP BY partition` is redundant; `COUNT(*) AS file_count` returns 1 per partition (the row), not the real file count which already lives in the `file_count` column. Correct: `SELECT partition, file_count, total_size FROM iceberg.analytics."events$partitions" ORDER BY total_size DESC`. |
-| Clarity | 4.5 | Otherwise crisp; explains content discriminator well. |
-| Actionability | 3.0 | First half works as pasted; second half ERRORS on paste — engineer will hit `Column 'file_size_in_bytes' cannot be resolved`. |
-| Completeness | 4.0 | Addresses both global + per-partition angles (intent right), gets `$partitions` schema wrong. |
+Verified against trino.io/docs/current/functions/aggregate.html (FILTER clause section — verbatim doc example uses `array_agg(name) FILTER (WHERE name IS NOT NULL)`):
+- `COALESCE(ARRAY_AGG(t.tag) FILTER (WHERE t.tag IS NOT NULL), ARRAY[])` — CANONICAL Trino 467 idiom, matches official docs verbatim.
+- Correctly explains mechanism: FILTER removes the NULL-padded LEFT JOIN row BEFORE collection → group becomes empty → `array_agg` over empty group returns NULL → COALESCE fires → `ARRAY[]`.
+- Correctly notes that WITHOUT FILTER you get `ARRAY[null]` (one-element array containing NULL) → COALESCE never fires → engineer sees `[null]` in BI tool. This is exactly the iter508 trap reconciled.
+- `ARRAY[]` empty-array literal type-coercion inside COALESCE verified clean on Trino 467: empty `ARRAY[]` is `array(unknown)` which unifies with the `array(varchar)` branch from `array_agg(t.tag)` per Trino's standard type-coercion rules — NO type error.
+- Cross-applies fix to `map_agg`/`multimap_agg` (correct — same FILTER pattern is the canonical guard for all collecting aggregates with NULL inputs).
 
-**Q4 avg = 3.6875 PASS (thin margin).** New load-bearing schema error on `$partitions`.
+**20th leading-canonical bulletproofing instance + 14th findability/canonical-addition fix to land cleanly on first re-probe — r07:133 §1a.2 ARRAY_AGG empty-array note WORKED.**
 
-## Overall
+The iter508 ineffective bare `COALESCE(ARRAY_AGG(x), ARRAY[])` does NOT reappear.
 
-**Iter 508 OVERALL AVG = (4.96875 + 4.9375 + 3.75 + 3.6875) / 4 = 17.34375 / 4 = 4.3359 → PASS** (+0.836 above 3.5 floor).
+Minor -0.25 Completeness: no ORDER BY note for deterministic ordering within the aggregated array (`ARRAY_AGG(t.tag ORDER BY t.tag) FILTER (...)`) — non-load-bearing for the question asked.
 
-**107th consecutive overall PASS in extended phase.** Iter507 Q3 RENAME COLUMN load-bearing error FIXED (Q1 re-probe clean 4.96875). Two NEW small-to-moderate accuracy issues surfaced — Q3 ARRAY_AGG empty-array imprecision and Q4 `$partitions` schema misuse — neither catastrophic, both warrant reconcile-in-place fixes for iter509.
+---
+
+## Q3 — regexp_replace (strip all non-digits from dirty phone string)
+
+**Score: 4.9375 STRONG PASS** (Accuracy 5.0, Clarity 5.0, Actionability 5.0, Completeness 4.75)
+
+Verified against trino.io/docs/current/functions/regexp.html (Java pattern syntax + JONI engine):
+- `regexp_replace(phone, '[^0-9]+', '')` — VALID Trino 467, correctly strips all non-digit characters.
+- `[^0-9]+` character class negation + `+` quantifier both standard Java regex syntax.
+- Capture-group reference claim `$1`/`$2` (NOT `\1`/`\2`) — VERIFIED accurate per Trino docs verbatim: "Capturing groups can be referenced in replacement using $g for a numbered group or ${name} for a named group." This is the Java `java.util.regex.Pattern` convention, NOT the POSIX `\1` convention.
+- JONI engine claim correct per trino.io/docs/current/admin/properties-regexp-function.html (JONI is the default regex library, Java-compatible pattern syntax).
+- Empty replacement string `''` correctly used.
+
+Clean. Minor -0.25 Completeness: no mention that to preserve a leading `+` for international numbers, one would use `'[^0-9+]+'` instead — non-load-bearing edge case for the question asked.
+
+---
+
+## Q4 — dbt ref() vs source() — difference + when to use each
+
+**Score: 4.9375 STRONG PASS** (Accuracy 5.0, Clarity 5.0, Actionability 5.0, Completeness 4.75)
+
+Verified against docs.getdbt.com/reference/dbt-jinja-functions/ref + docs.getdbt.com/docs/build/sources:
+- `ref('model_name')` = reference to another dbt model in the project — creates a DAG dependency edge, dbt knows to build the upstream model FIRST → CORRECT.
+- `source('schema_name', 'table_name')` = reference to a raw external table declared in `sources.yml` — creates a DAG dependency on a SOURCE (not a model), source is NOT built/rebuilt by dbt → CORRECT.
+- `sources.yml` YAML example with `version: 2`, `sources:`, `name:`, `database:`/`schema:`, `tables:` shape — matches docs verbatim.
+- Mental model "ref = inside the project, source = at the boundary of the project" — accurate and engineer-actionable.
+- Comparison table covering DAG-color (green source vs blue model), build-or-not, schema declaration location, freshness-checkable (source only) — accurate.
+- Cross-references r27 §6.7D + §6.7B — fine.
+
+Clean. Minor -0.25 Completeness: no callout that source freshness (`loaded_at_field` + `warn_after`/`error_after`) is a source-only feature — adjacent topic but covered elsewhere in resources.
+
+---
+
+## Overall iter509 metrics
+
+- **AVG = (4.9375 + 4.9375 + 4.9375 + 4.9375) / 4 = 19.75 / 4 = 4.9375 STRONG PASS** (+1.4375 above 3.5 floor)
+- **108th consecutive overall PASS in extended phase**
+- **+1.4375 above 3.5 floor — highest margin in 6+ iters (best since iter503's +1.2344, actually beats it)**
+- **ZERO fabrications across all 4 answers**
+- **BOTH iter508 fixes confirmed LANDED on FIRST re-probe** (Q1 $partitions schema + Q2 ARRAY_AGG FILTER) — 19th + 20th leading-canonical bulletproofing instances back-to-back same iter
+
+---
+
+## EXPLICIT FIX-LANDED CONFIRMATIONS
+
+**FIX A ($partitions correct columns + one-row-per-partition shape) — LANDED on first re-probe:**
+- Responder used CORRECT columns: `partition`, `record_count`, `file_count`, `total_size` ✓
+- Responder did NOT use `file_size_in_bytes` (correctly recognized as $files-only) ✓
+- Responder did NOT add COUNT(*)/GROUP BY (correctly treated as already-aggregated) ✓
+- r17:1049 $partitions-vs-$files column-placement gotcha callout (added iter509 by teacher) routed cleanly.
+
+**FIX B (ARRAY_AGG FILTER WHERE IS NOT NULL idiom + correct mechanism explanation) — LANDED on first re-probe:**
+- Responder used `ARRAY_AGG(col) FILTER (WHERE col IS NOT NULL)` ✓
+- Responder correctly wrapped in `COALESCE(..., ARRAY[])` for empty-array literal ✓
+- Responder correctly explained mechanism: FILTER → empty group → array_agg returns NULL → COALESCE fires ✓
+- Responder correctly stated WITHOUT FILTER you get `ARRAY[null]` and COALESCE never fires ✓
+- Bare ineffective `COALESCE(ARRAY_AGG(x), ARRAY[])` does NOT reappear ✓
+- r07:133 §1a.2 ARRAY_AGG empty-array note (added iter509 by teacher) routed cleanly.
+
+---
 
 ## Topic rubric updates
 
-- **Iceberg table maintenance** (Q1 RENAME COLUMN re-probe + Q4 `$files`/`$partitions` metadata-introspection both map here as schema-evolution + metadata-introspection canonicals): 4.4855/150 → (4.4855*150 + 4.96875 + 3.6875)/152 = 681.6800/152 = **4.4847/152** (-0.0008 — Q1 strong-pass offsets Q4 thin-pass drag; topic stays well above 4.0 floor and above 3.5 pass).
-- **SQL query best practices for OLAP** (Q2 NULLIF divide-by-zero + Q3 ARRAY_AGG LEFT JOIN both map here as SQL idiom canonicals): 4.5493/58 → (4.5493*58 + 4.9375 + 3.75)/60 = 272.5469/60 = **4.5424/60** (-0.0069 — Q3 thin pass drags slightly; stays comfortably above floor).
-- **Federation row UNCHANGED at 4.49944/310** per iter472-508 directive and iter508 task constraint.
+- **Iceberg table maintenance** (Q1 $partitions metadata-introspection re-probe maps here): 4.4847/152 → (4.4847*152 + 4.9375)/153 = 686.5519/153 = **4.4877/153** (+0.0030)
+- **SQL query best practices for OLAP** (Q2 ARRAY_AGG FILTER idiom + Q3 regexp_replace both map here): 4.5424/60 → (4.5424*60 + 4.9375 + 4.9375)/62 = 282.4190/62 = **4.5552/62** (+0.0128)
+- **dbt sources / source freshness** (Q4 ref vs source maps here as the source() function = sources.yml canonical): 4.3518/4 → (4.3518*4 + 4.9375)/5 = 22.3447/5 = **4.4689/5** (+0.1171)
 
-## Confirmed fix landings
+Federation row stays **4.49944/310 UNCHANGED**.
 
-1. **Iter507 Q3 RENAME COLUMN "both names work" fabrication FIX LANDED** (18th leading-canonical bulletproofing instance + 11th findability/canonical-addition fix to land cleanly on re-probe). Iter508 teacher reconcile at r17 DO-NOT-WRITE matrix + safe-rename playbook routed correctly; responder gives field-ID-tracks-data-not-name disambiguation and expand-contract playbook. No regression.
+---
 
-## New errors / fabrications this iter
+## New fabrications detected
 
-1. **Q3 ARRAY_AGG empty-array imprecision** (load-bearing-but-survivable): claim that `ARRAY_AGG(t.tag)` over LEFT-JOIN-unmatched row "becomes empty array in most tools" and the suggested `COALESCE(ARRAY_AGG(t.tag), ARRAY[])` is INEFFECTIVE. Verified via Trino GitHub #6145: ARRAY_AGG over LEFT-JOIN-NULL produces `ARRAY[null]` (one-element NULL array), not NULL and not `[]`. Correct idiom: `ARRAY_AGG(t.tag) FILTER (WHERE t.tag IS NOT NULL)`.
-2. **Q4 `$partitions` schema misuse** (load-bearing on the partition-level query): query uses `file_size_in_bytes` (a `$files` column, NOT a `$partitions` column) and re-aggregates with `COUNT(*) ... GROUP BY partition` (but `$partitions` is already one row per partition). Verified via trino.io/docs/current/connector/iceberg.html: `$partitions` columns are `partition / record_count / file_count / total_size / data`. Correct query: `SELECT partition, file_count, total_size FROM iceberg.<schema>."<table>$partitions" ORDER BY total_size DESC`.
+**NONE.** All four answers verified clean against official docs. Zero fabricated function names, zero fabricated columns, zero fabricated YAML keys, zero misattributed behaviors.
 
-## Concrete next-teacher actions for iter509
+---
 
-### HIGH PRIORITY — Q4 `$partitions` schema reconcile-in-place
+## Next-teacher actions for iter510
 
-- **Where**: r17 (Iceberg table maintenance) or wherever the `$partitions` / `$files` metadata-tables canonical block lives. Locate via `grep -rn '\$partitions\|\$files\|partitions metadata\|files metadata' resources/`.
-- **What to add**:
-  - DO-NOT-WRITE matrix row banning `SELECT ... file_size_in_bytes FROM ...$partitions` (that column lives in `$files`, not `$partitions`) and banning `COUNT(*) ... GROUP BY partition` over `$partitions` (already pre-aggregated).
-  - Positive canonical: `SELECT partition, file_count, total_size FROM iceberg.<schema>."<table>$partitions" ORDER BY total_size DESC`.
-  - Explicit schema enumeration: `partition (ROW), record_count BIGINT, file_count BIGINT, total_size BIGINT, data (ROW of per-column min/max/null-counts)`.
-- **Keyword anchors**: `iceberg per-partition size, partition file count, $partitions vs $files, partition breakdown query, file_size_in_bytes partition table not found, total_size by partition, partitions metadata table columns`.
+**Priority 1 (LOW — no critical fixes needed)**: Iter509 had zero load-bearing defects. No urgent reconcile work.
 
-### MEDIUM PRIORITY — Q3 ARRAY_AGG no-match-group reconcile-in-place
+**Priority 2 (OPTIONAL polish — only if iter510 task allows non-fix work)**:
+1. Q1 $partitions: consider adding a one-liner at r17:1049 callout noting `$partitions` reflects only the CURRENT partition spec (per GitHub #12323) — relevant if engineer has re-partitioned the table. Non-blocking.
+2. Q2 ARRAY_AGG: consider adding a one-liner at r07:133 §1a.2 about `ARRAY_AGG(col ORDER BY col) FILTER (...)` for deterministic ordering — adjacent topic.
+3. Q3 regexp_replace: consider adding a phone-international-prefix example (`'[^0-9+]+'`) at the regexp canonical — adjacent edge case.
 
-- **Where**: r07 (analytical query patterns) or wherever the ARRAY_AGG / LEFT JOIN tag-aggregation canonical lives. Locate via `grep -rn 'ARRAY_AGG\|array_agg\|tags array\|LEFT JOIN.*tag' resources/`.
-- **What to add**: callout that ARRAY_AGG over a LEFT-JOIN-unmatched row returns `ARRAY[null]` (one-element array containing NULL), NOT NULL and NOT empty `[]`; therefore `COALESCE(ARRAY_AGG(col), ARRAY[])` is INEFFECTIVE. The canonical empty-array form is `ARRAY_AGG(col) FILTER (WHERE col IS NOT NULL)`. Reference Trino GitHub #6145 for documented behavior.
-- **Keyword anchors**: `array_agg left join no match, array_agg empty array, array_agg returns null array, tags grouped array empty, FILTER WHERE col IS NOT NULL array_agg, no matching rows aggregate left join`.
+**DO NOT**:
+- Do not touch §13.x federation guardrails in r22 (federation rubric row stays 4.49944/310).
+- Do not rewrite §6.7D/§6.7B in r27 (Q4 routed cleanly to them).
+- Do not modify r17:1049 $partitions callout (it's working — modifications risk regression).
+- Do not modify r07:133 §1a.2 ARRAY_AGG note (it's working — modifications risk regression).
 
-### Untouched (per directive)
+---
 
-- r22 §13.x federation guardrails — NOT TOUCHED.
-- Federation rubric row 4.49944/310 — UNCHANGED.
+## Judge probe targets for iter510
 
-## Judge probe targets for iter509
+**Priority 1 — HIGH (bulletproofing iter509 fixes via different question angles)**:
+1. **$partitions 3rd angle**: "I want to find which partitions have the OLDEST data files (last_updated_at < 7 days ago) — which $partitions column?" — tests `data` column (per-column min/max/null-count) routing, NOT just `record_count`/`file_count`/`total_size`. Confirms responder doesn't conflate `data` with file-level metadata.
+2. **ARRAY_AGG 3rd angle on MAP_AGG**: "Same shape with `MAP_AGG(t.key, t.value)` from a LEFT JOIN — do I get `MAP[null:null]` for no-match rows?" — tests cross-application of FILTER idiom to MAP_AGG (mentioned in iter509 response, needs verification in re-probe).
 
-1. **`$partitions` metadata RE-PROBE** (HIGH): "I want per-partition file count and total size for my Iceberg events table without scanning the data — what query should I run?" → verify responder uses `$partitions` correctly (no `file_size_in_bytes`, no redundant GROUP BY) and names columns `partition / record_count / file_count / total_size / data`.
-2. **`$partitions` vs `$files` disambiguation 2nd angle** (HIGH): "Should I use $files or $partitions for per-partition size — what's the difference?" → verify responder distinguishes per-file row (`$files`, has `file_size_in_bytes`) from already-aggregated per-partition row (`$partitions`, has `total_size`).
-3. **ARRAY_AGG no-match-group RE-PROBE** (HIGH): "Users with zero tags should produce an empty array `[]`, but my query gives a one-element NULL array — what's the fix?" → verify responder gives `FILTER (WHERE col IS NOT NULL)` and does NOT prescribe COALESCE-around-ARRAY_AGG as the fix.
-4. **RENAME COLUMN 3rd angle** (MEDIUM — verify durability): "Can I keep the old column name working as an alias after RENAME COLUMN?" → verify responder routes to view-aliasing pattern (`CREATE OR REPLACE VIEW ... AS SELECT *, new_name AS old_name FROM t`) and explicitly says Iceberg has no native alias mechanism — does NOT say "both names work."
-5. **Iceberg metadata-tables overview 4th angle** (MEDIUM): "$snapshots vs $history vs $manifests — what's each for?" → verify responder distinguishes the metadata-table family without conflating columns across tables (same failure mode as Q4 this iter).
-6. **Federation** — STAYS UNPROBED per directive.
+**Priority 2 — MEDIUM (broaden coverage on adjacent topics)**:
+3. **dbt ref() with version arg**: "How do I pin to a specific version of an upstream model?" — tests `ref('model', v=2)` knowledge per dbt 1.7+.
+4. **dbt source() freshness blocking**: "Can a stale source block downstream dbt build?" — tests blocking semantics on dbt source freshness check (separate topic row 4.4689/5 after iter509).
+5. **regexp_replace lambda 3rd angle**: "Strip non-digits BUT preserve leading +" — tests `'[^0-9+]+'` or lambda form.
 
-## Pattern note
+**Priority 3 — LOW (federation stays UNPROBED per directive)**:
+- Federation NOT probed in iter510 per ongoing directive.
 
-The iter507→508 RENAME COLUMN fix is the **18th leading-canonical bulletproofing instance and 11th findability/canonical-addition fix to land cleanly on first re-probe** — the teacher's reconcile-in-place playbook continues to work reliably. Both new iter508 errors (Q3 ARRAY_AGG empty-array, Q4 `$partitions` schema) are the same class of failure as prior fixes: imprecise mental model on a Trino-specific behavior (LEFT-JOIN-NULL ARRAY_AGG semantics, metadata-table schemas). Both are solvable by the same reconcile-in-place pattern + keyword anchors — no structural resource gaps, just targeted corrections.
+---
+
+## Pattern summary across iter509 answers
+
+- **Consistent strength**: every answer scored 4.9375 — no answer below STRONG PASS, no answer above 5.0. This signals well-calibrated content with consistent depth, not lucky single-answer outliers.
+- **Both teacher fixes from iter508 landed on FIRST re-probe with NO partial-routing issues** — pattern continues the iter495+ trend of findability/reconcile-in-place fixes landing cleanly.
+- **Zero fabrications across the iter** — joining the iter503/iter505/iter509 zero-fab cluster (vs iter504/iter506/iter507/iter508 each had one load-bearing defect).
+- **Two-from-different-angles requirement satisfied** for Iceberg metadata-introspection ($partitions iter508 + iter509) and ARRAY_AGG (iter508 + iter509) — both topics now have re-probe-confirmed canonicals.
+
+**108th consecutive extended-phase PASS. Iter509 is the strongest iter in the recent 6-iter window (504-509).**

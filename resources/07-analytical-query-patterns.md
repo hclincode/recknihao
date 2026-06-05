@@ -132,6 +132,34 @@ Functionally equivalent to the one-block form above for an Iceberg partitioned t
 
 **The minimal mental model.** "JOIN before WHERE" is not optional in standard SQL — it is the grammar. Every JOIN form (INNER, LEFT, RIGHT, CROSS, FULL OUTER, CROSS JOIN UNNEST, LEFT JOIN UNNEST ON TRUE, lateral joins) sits inside the FROM clause and must be written before the WHERE clause. Verified at [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) (Trino SELECT grammar — FROM/relation precedes WHERE).
 
+### 1a.2 `ARRAY_AGG` over LEFT-JOIN unmatched groups returns `ARRAY[null]`, NOT NULL and NOT `[]` — use `FILTER (WHERE col IS NOT NULL)`
+
+**Keyword anchor:** array_agg empty array, collect tags into list, users with no tags empty list not null, array_agg filter where not null, array_agg LEFT JOIN no match, COALESCE array_agg ARRAY[], reverse of UNNEST collect.
+
+**The trap.** You write `SELECT u.user_id, ARRAY_AGG(t.tag) AS tags FROM users u LEFT JOIN user_tags t ON t.user_id = u.user_id GROUP BY u.user_id`. For a user with NO matching tag rows, the LEFT JOIN emits ONE row with `t.tag = NULL`. `ARRAY_AGG(t.tag)` over that single NULL-padded row produces **`ARRAY[null]`** — a one-element array whose only element is NULL. It is **NOT** NULL and **NOT** `ARRAY[]` (empty). So the popular guard `COALESCE(ARRAY_AGG(t.tag), ARRAY[])` **never fires** — the aggregate result is non-NULL, so COALESCE returns the original `ARRAY[null]` unchanged.
+
+**The fix — `FILTER (WHERE col IS NOT NULL)` (per [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html) — "A common and very useful example is to use FILTER to remove nulls from consideration when using array_agg").** With FILTER, the unmatched LEFT-JOIN row's NULL is excluded from aggregation BEFORE `array_agg` sees it — leaving zero rows for that group, which makes `array_agg` return NULL. Wrap THAT NULL in `COALESCE(..., ARRAY[])` if you need an empty array literal for no-match groups:
+
+```sql
+-- CORRECT — empty array for users with no tags (and no spurious [null] elements).
+SELECT u.user_id,
+       COALESCE(ARRAY_AGG(t.tag) FILTER (WHERE t.tag IS NOT NULL), ARRAY[]) AS tags
+FROM iceberg.analytics.users u
+LEFT JOIN iceberg.analytics.user_tags t ON t.user_id = u.user_id
+GROUP BY u.user_id;
+-- Result for user 42 with no matching tags: ARRAY[]
+-- Result for user 43 with tags ['vip', 'beta']: ARRAY['vip', 'beta']
+```
+
+**DO NOT WRITE:**
+
+| Wrong shape | Why it doesn't work |
+|---|---|
+| `COALESCE(ARRAY_AGG(t.tag), ARRAY[])` (no FILTER) | Ineffective. The LEFT-JOIN unmatched row gives `ARRAY_AGG` one NULL input — the result is `ARRAY[null]` (non-NULL). `COALESCE` never fires; you still get `[null]` instead of `[]`. |
+| "`ARRAY_AGG` returns NULL or empty array for no-match LEFT JOIN groups." | False in this exact scenario. The unmatched LEFT-JOIN row IS a row (NULL-padded) — `ARRAY_AGG` aggregates over one row, returning `ARRAY[null]`. NULL is what you get when ZERO rows reach the aggregate, which only happens AFTER FILTER excludes the NULL row. |
+
+**Mental model.** `ARRAY_AGG` is the reverse of `UNNEST` — it collects rows into an array. LEFT JOIN's NULL-padding is an actual row, not an absence of a row, so it gets collected too. `FILTER (WHERE x IS NOT NULL)` removes that NULL row BEFORE collection, restoring "no matching tags = empty array" semantics. Same fix applies to `MAP_AGG`, `MULTIMAP_AGG`, and any other collection aggregate over a LEFT-JOIN unmatched side.
+
 ---
 
 ## 2. Funnels (drop-off across a sequence of events)
