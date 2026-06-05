@@ -358,6 +358,40 @@ ALTER TABLE iceberg.analytics.events RENAME COLUMN user_id_v2 TO user_id;
 > | `ALTER TABLE iceberg.x.y ALTER COLUMN col SET DATA TYPE VARCHAR` (incompatible: INTEGER → VARCHAR) | **Iceberg spec rejects.** | Same 4-step pattern; backfill is `SET col_v2 = CAST(col AS VARCHAR)`. |
 > | "Trino 467 has a `column_order` session property" / "set `iceberg.column_order` to reorder" | **FABRICATED.** No such property exists at session, catalog, or table level on Trino 467 — verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (Iceberg-connector properties list). | Same as above — Trino 467 has no reorder primitive; Spark `ALTER COLUMN FIRST | AFTER` is the only way; reorder is cosmetic anyway. |
 > | `ALTER TABLE ... RENAME COLUMN col TO new` followed by silent assumption "old Parquet data is now unreachable" | **FALSE.** Iceberg's field-ID model preserves the field ID through rename; ALL historical data is immediately readable under the new name with zero file rewrites. | Renames are loss-less metadata-only on Iceberg — emphasize this when migrating from Hive (where rename was destructive). |
+> | "After `RENAME COLUMN old TO new`, both the old AND the new name resolve / dbt models can keep referencing the old name / the field ID maps to both names simultaneously" | **FALSE — conflates DATA preservation with NAME preservation.** Iceberg's field-ID model preserves the **old DATA** (pre-rename Parquet files are read under the **new name** with no rewrite — the field ID still matches). It does NOT preserve the **old NAME**. The SQL-facing schema exposes ONLY the current (new) name; after the rename, `SELECT old_name FROM t` errors with `Column 'old_name' cannot be resolved` (Trino parser-side — the planner consults only the current schema). Field IDs are an INTERNAL physical-to-logical mapping, not a user-visible alias list. | Two TRUE statements that the DO-NOT-WRITE row conflates: (a) "old DATA files readable under the new name" = TRUE, lossless; (b) "old NAME still queryable after rename" = FALSE, errors. Never assert (b). After rename, every reference (dbt models, views, ad-hoc queries) MUST use `new_name`; the old name is gone from the schema the instant the ALTER commits. |
+
+### Safe-rename playbook — so downstream dbt models / views / dashboards don't break
+
+> **Why this exists (iter508 — RENAME-COLUMN downstream-breakage fab).** `RENAME COLUMN` is metadata-only and lossless on the DATA side, but the OLD NAME stops resolving the instant the ALTER commits. A dbt build that referenced `old_name` will fail the next run with `Column 'old_name' cannot be resolved`. Choose ONE of the three patterns below BEFORE you run the ALTER — do not just rename and discover the breakage on the next dbt run.
+
+```sql
+-- Pattern A — atomic rename + downstream update in the SAME PR (preferred for small blast radius).
+--   1. Grep your dbt project + BI catalog for every reference to old_name.
+--   2. In a SINGLE PR: update every reference to new_name AND include the ALTER TABLE.
+--   3. Merge + deploy together. There is no window where the schema and the code disagree.
+ALTER TABLE iceberg.analytics.events RENAME COLUMN old_name TO new_name;
+
+-- Pattern B — expand/contract (preferred when downstream owners are external / can't update in lockstep).
+--   1. ADD the new column (metadata-only):
+ALTER TABLE iceberg.analytics.events ADD COLUMN new_name VARCHAR;
+--   2. Backfill + dual-write for a release cycle (writers populate BOTH columns):
+UPDATE iceberg.analytics.events SET new_name = old_name WHERE new_name IS NULL;
+--   3. Migrate every reader from old_name to new_name on its own schedule.
+--   4. After all readers cut over, DROP the old column (metadata-only):
+ALTER TABLE iceberg.analytics.events DROP COLUMN old_name;
+-- This is SLOWER than Pattern A but eliminates the lockstep requirement.
+
+-- Pattern C — bridging VIEW (use when Pattern A's PR is too large to land atomically).
+--   1. Run the rename:
+ALTER TABLE iceberg.analytics.events RENAME COLUMN old_name TO new_name;
+--   2. Immediately expose a compatibility VIEW that aliases the new name back to the old:
+CREATE OR REPLACE VIEW iceberg.analytics.events_compat AS
+SELECT *, new_name AS old_name FROM iceberg.analytics.events;
+--   3. Point legacy consumers at the _compat view; migrate them to the base table over time;
+--      drop the view when no consumer references it.
+```
+
+> **Keyword anchors (for findability).** RENAME COLUMN Iceberg, old column name broke after rename, dbt model column not found after rename, rename column safely Iceberg, does old name still work after RENAME COLUMN, Column 'old_name' cannot be resolved, safe column rename Iceberg, expand/contract rename pattern, RENAME COLUMN downstream breakage.
 
 ### Evolving the partition spec on Trino 467 — the ONE canonical form (NOT `SET PARTITION SPEC`)
 

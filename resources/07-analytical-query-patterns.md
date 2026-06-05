@@ -523,7 +523,7 @@ LEFT JOIN signups s ON s.day = c.day
 ORDER BY c.day;
 ```
 
-`date_trunc('day' | 'week' | 'month', col)` is the Trino function you'll use constantly. It rounds a timestamp down to the start of a bucket.
+`date_trunc('day' | 'week' | 'month', col)` is the Trino function you'll use constantly. It rounds a timestamp down to the start of a bucket. **Return type — same as input** (per [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html): `date_trunc(unit, x) -> [same as input]`): `timestamp -> timestamp`, `timestamp(p) with time zone -> timestamp(p) with time zone`, `date -> date`, `time -> time`. It does **NOT** convert to DATE — `date_trunc('day', some_timestamp)` returns a `timestamp` at midnight, not a `date`. If you need the result as a DATE, wrap in `CAST(... AS DATE)` explicitly.
 
 ---
 
