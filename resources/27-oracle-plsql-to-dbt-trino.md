@@ -2547,13 +2547,13 @@ LEFT JOIN {{ ref('plans') }} p ON s.plan_code = p.plan_code
 
 `{{ ref('plans') }}` resolves to the Iceberg table created by `dbt seed`. The argument is the CSV basename without extension (`plans`, not `plans.csv`).
 
-**Step 5.** `dbt seed` is NOT run by `dbt run` or `dbt build` by default. Include it in CI:
+**Step 5.** Pick the right command. Per [docs.getdbt.com/reference/commands/build](https://docs.getdbt.com/reference/commands/build), `dbt build` runs **seeds + models + snapshots + tests together in DAG order** — so a plain `dbt build` (no `--select`) already loads every seed in `seeds/` as part of the build. `dbt run`, by contrast, runs **models only** and does NOT load seeds — if you use `dbt run`, you must pre-seed with `dbt seed` first.
 
 ```bash
-dbt seed && dbt run   # or: dbt seed && dbt build
+dbt build                  # RECOMMENDED — runs seeds + models + snapshots + tests in DAG order
+dbt seed && dbt run        # equivalent for the run-only path (no snapshots, no tests)
+dbt seed                   # load seeds only (or: dbt seed --select plans)
 ```
-
-Or use a single `dbt build` with `--select seeds+` to include seeds and their dependents.
 
 #### When to use seeds vs. other patterns
 
@@ -2571,7 +2571,7 @@ Or use a single `dbt build` with `--select seeds+` to include seeds and their de
 | `dbt_project_root/data/plans.csv` (without `seed-paths: ["data"]` config) | **Stale pre-dbt-1.0 default path.** Default since dbt 1.0 (Dec 2021) is `seeds/`. Placing CSV in `data/` makes `dbt seed` report "No seed files found" unless `seed-paths: ["data"]` is explicitly set. |
 | `{{ ref('plans.csv') }}` (with `.csv` extension) | **Wrong.** `{{ ref() }}` takes the basename without extension: `{{ ref('plans') }}`. |
 | "Run `dbt run --select plans` to load the seed." | **Wrong command.** `dbt run` does not load seeds — it materializes SQL models. Load seeds with `dbt seed` (or `dbt seed --select plans`). |
-| "Seeds are loaded automatically during `dbt run` or `dbt build`." | **Wrong.** `dbt build` does include seeds IF you pass `--select seeds+` or the seeds are upstream of selected models via `ref()`. But a plain `dbt build` or `dbt run` without explicit seed selection does NOT re-run `dbt seed`. Seeds must be explicitly seeded before or as part of the build command. |
+| "`dbt build` does NOT run seeds — you have to pass `--select seeds+`." | **Wrong per [docs.getdbt.com/reference/commands/build](https://docs.getdbt.com/reference/commands/build).** Plain `dbt build` (no `--select`) runs **seeds + models + snapshots + tests together in DAG order** across the whole project — seeds are loaded automatically. The half-truth is `dbt run`: `dbt run` alone runs models only and does NOT load seeds, so the `dbt seed && dbt run` two-step is required only on the run-only path. |
 | "`seed-paths: [\"data\"]` is the recommended default." | **Wrong.** The default is `seeds/`. Use `data/` only if you have a legacy project already using that path and cannot migrate. |
 
 Citation: [docs.getdbt.com/reference/project-configs/seed-paths](https://docs.getdbt.com/reference/project-configs/seed-paths) — "By default, dbt expects seeds to be located in the `seeds` directory."
