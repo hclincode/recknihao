@@ -353,7 +353,17 @@ Doc-quoted (trino.io/docs/current/sql/select.html, GROUPING operation): *"To com
 | Subtotal at a | `(a)` — b and c rolled up | `011` | **3** |
 | Grand total | `()` — all rolled up | `111` | **7** |
 
-General rule for N-column ROLLUP: the emitted decimal levels are `0, 1, 3, 7, 15, ..., 2^N - 1` (each level is `2^k - 1` for k=0..N, corresponding to "drop the rightmost k columns").
+**For 4-column `ROLLUP(region, country, store, product_category)`** the only emitted GROUPING levels are `0`, `1`, `3`, `7`, `15`:
+
+| Row level | Columns present | Binary | Decimal | What the row means |
+|---|---|---|---|---|
+| Detail | `(region, country, store, product_category)` | `0000` | **0** | One row per (region, country, store, product_category) |
+| Subtotal at store | `(region, country, store)` — product_category rolled up | `0001` | **1** | Per-store totals across all categories |
+| Subtotal at country | `(region, country)` — store + product_category rolled up | `0011` | **3** | Per-country totals across all stores and categories |
+| Subtotal at region | `(region)` — country + store + product_category rolled up | `0111` | **7** | Per-region totals across all countries, stores, categories |
+| Grand total | `()` — all four rolled up | `1111` | **15** | Single grand-total row; all four columns are NULL |
+
+**General rule for N-column ROLLUP** (memorize): the emission contains **exactly N+1 groupings** (NOT 2^N). The emitted decimal values are **`0` and the running sums `2^k − 1` for k = 1..N**, i.e. `0, 1, 3, 7, 15, 31, ...` — the "**drop the trailing k columns**" subset only. The grand-total row's GROUPING value is always **`2^N − 1`** (1-col → 1, 2-col → 3, 3-col → 7, 4-col → 15, 5-col → 31). ROLLUP **does NOT** emit the other 2^N − (N+1) combinations (e.g. `0010` = "country only" for a 4-col rollup is impossible because country is not a trailing-suffix grouping). The full 2^N enumeration is what **CUBE** emits — see (e) below.
 
 ### (c) Copy-pasteable Trino 467 worked example
 
@@ -396,13 +406,15 @@ ORDER BY
 
 ### (e) ROLLUP vs CUBE vs GROUPING SETS — when value 2 DOES appear
 
-`CUBE(a, b)` is shorthand for `GROUP BY GROUPING SETS ((a, b), (a), (b), ())` — it emits **all 2^N combinations**, including the `(b)`-only grouping that ROLLUP skips. So:
+`CUBE(a, b)` is shorthand for `GROUP BY GROUPING SETS ((a, b), (a), (b), ())` — it emits **all 2^N combinations**, including the `(b)`-only grouping that ROLLUP skips. Contrast that with ROLLUP's **N+1** emissions (the trailing-drop subset). So:
 
-| Construct | Emitted GROUPING(a, b) values | Notes |
-|---|---|---|
-| `ROLLUP(a, b)` | `0, 1, 3` | Drops trailing columns only. **Value 2 never appears.** |
-| `CUBE(a, b)` | `0, 1, 2, 3` | All combinations. Value 2 = binary `10` = **a rolled up, b present** (the "category total" you can't get from ROLLUP). |
-| `GROUPING SETS ((a, b), (b), ())` | `0, 2, 3` | Explicit sets; you choose exactly which combinations to emit. Use this when you want b-only subtotals but not a-only subtotals. |
+| Construct | Emitted GROUPING(a, b) values | Count | Notes |
+|---|---|---|---|
+| `ROLLUP(a, b)` | `0, 1, 3` | **3 = N+1** | Drops trailing columns only. **Value 2 never appears.** |
+| `CUBE(a, b)` | `0, 1, 2, 3` | **4 = 2^N** | All combinations. Value 2 = binary `10` = **a rolled up, b present** (the "category total" you can't get from ROLLUP). |
+| `GROUPING SETS ((a, b), (b), ())` | `0, 2, 3` | 3 (chosen) | Explicit sets; you choose exactly which combinations to emit. Use this when you want b-only subtotals but not a-only subtotals. |
+
+For 4 columns: `ROLLUP` emits **5** groupings (0, 1, 3, 7, 15); `CUBE` emits **16** groupings (0..15, all combinations). For 5 columns: ROLLUP → 6 groupings, CUBE → 32. The cardinality difference becomes the dominant cost driver — never write `CUBE(a, b, c, d, e)` thinking it's a drop-in for `ROLLUP(a, b, c, d, e)`.
 
 If a migrated Oracle/Snowflake query labels rows for both "region total" AND "category total" (independent margins), the source must be using `CUBE` or an explicit `GROUPING SETS`, not `ROLLUP`. Re-read the source SQL — translating a CUBE-shaped query to ROLLUP silently drops the b-only subtotal rows.
 

@@ -1,124 +1,153 @@
-# Judge Feedback — Iter 496
+# Iter 497 Judge Feedback — 2026-06-06 (EXTENDED PHASE)
 
-**Date**: 2026-06-06
-**Phase**: extended
-**Overall**: 4.8125 STRONG PASS (+1.3125 above 3.5 floor)
-**Federation**: NOT PROBED — 4.49944/310 row UNCHANGED per iter472-496+ directive.
+**Overall: 4.328 PASS** (+0.828 above 3.5 floor) — 96th consecutive overall PASS in extended phase. Q3 MERGE answer FAILED on Trino-dialect accuracy (TWO Spark-isms in the same answer). Q1/Q2/Q4 all STRONG PASS.
 
 ---
 
-## TL;DR
+## Per-question scores
 
-- **Q1 GROUPING-bitmask fix LANDED — bulletproofed.** Responder mapped `CASE GROUPING(region, country, product_category) WHEN 0 / WHEN 1 / WHEN 3 / WHEN 7` for a 3-col ROLLUP, with 7 = 'Grand Total'. ZERO recurrence of the iter495 `WHEN 2 = 'Grand Total'` fab. The leading-canonical block teacher installed at r28 §LEADING CANONICAL (line ~318) pattern-matched verbatim on the 3-col re-probe. Also correctly stated 2/4/5/6 are unreachable in a 3-col ROLLUP. This is the **5th successful instance** of the leading-canonical-example bulletproofing strategy.
-- **Q3 `max_recursion_depth` is NOT a fabrication.** WebSearch-verified against trino.io/docs/current/sql/select.html — `max_recursion_depth` IS a real Trino session property, **default 10**, tunable via `SET SESSION max_recursion_depth=N`. WITH RECURSIVE IS marked experimental in current Trino docs (verbatim: "this feature is experimental only. Proceed to use it only if you understand potential query failures and the impact of the recursion processing on your workload"). Both claims hold on Trino 467. The suspected-fab probe came back clean.
-- **Q4 freshness `config:` placement is CORRECT for dbt 1.9+.** Per docs.getdbt.com/reference/resource-properties/freshness, `freshness` + `loaded_at_field` under `config:` is the canonical post-1.9 form; pre-1.9 top-level placement still parses but emits `PropertyMovedToConfigDeprecation`. `dbt source freshness` is the correct CLI and is NOT auto-run by `dbt run`/`dbt build`.
-- **Zero new fabrications detected this iteration.** All four answers pattern-matched the recently-installed leading canonical blocks (r27 §6.7B for freshness, r27 §7A.1 for WITH RECURSIVE, r28 §LEADING CANONICAL for GROUPING bitmask).
+### Q1 — CUBE re-probe (cross-tab all combinations, ROLLUP missed product-only) — **4.9375 STRONG PASS**
 
----
+**Topic mapping**: Improving complex SQL performance on Trino with dbt (r28 LEADING CANONICAL GROUPING block).
 
-## Per-question scoring
-
-### Q1 — 3-col ROLLUP(region, country, product_category) with GROUPING() bitmask labels — **4.9375 STRONG PASS** (re-probe of iter495 fix)
-
-| Dim | Score | Reason |
+| Dimension | Score | Reasoning |
 |---|---|---|
-| Accuracy | 5.0 | Bitmask values 0/1/3/7 all correct; explicit MSB=leftmost rule; explicit note that 2/4/5/6 NEVER appear in 3-col ROLLUP — both match the trino.io/docs/current/sql/select.html quote "bits are assigned to the argument columns with the rightmost column being the least significant bit". Labels Detail/Country Subtotal/Region Subtotal/Grand Total are semantically sensible: WHEN 1 = product_category rolled up only → row aggregates across products within each (region, country) → that IS a country-level subtotal; WHEN 3 = country+product_category rolled up → row aggregates within each region → region-level subtotal. |
-| Clarity | 4.75 | Walked through what each bit means before showing the CASE; copy-pasteable; rule "2^N-1 = grand total" inferable. |
-| Actionability | 5.0 | Drop-in SQL block; engineer can run it as-is on Trino 467 + Iceberg. |
-| Completeness | 5.0 | Covered the CASE mapping, the GROUP BY ROLLUP shape, the unreachable-values note, and the bit-significance rule. |
+| Accuracy | 5.0 | CUBE(region, product) emits all 2^N = 4 groupings: value 0 = detail, 1 = region present + product rolled up, **2 = region rolled up + product present (the product-only subtotal that ROLLUP missed)**, 3 = grand total. Bitmask mapping `WHEN 0 'Detail' / WHEN 1 'Region Total' / WHEN 2 'Product Total' / WHEN 3 'Grand Total'` is dialect-correct per trino.io/docs/current/sql/select.html (rightmost arg = LSB, bit=1 means column rolled up). Responder EXPLICITLY noted "value 2 IS the product-only subtotal under CUBE" and "do NOT use value 2 as grand total (grand total is 3)" — the canonical's CUBE-vs-ROLLUP differentiation held. |
+| Clarity | 4.75 | Binary 10 = region rolled up, product present is spelled out; CUBE-vs-ROLLUP value-set contrast is explicit. |
+| Actionability | 5.0 | Copy-pasteable GROUP BY CUBE(region, product) + CASE GROUPING(...) labels. |
+| Completeness | 5.0 | Addresses CUBE choice + row labeling + ROLLUP gap explanation. |
 
-**Fix-landed flag**: YES — `WHEN 7 = 'Grand Total'` for the 3-col ROLLUP. The iter495 value-2-mislabel fab did NOT recur. This is the LOAD-BEARING confirmation the judge was asked to verify.
+**CUBE/GROUPING re-probe FIX CONFIRMED LANDED**: the iter497 teacher r28 §LEADING CANONICAL block extension (4-col table + 2^N-1 rule + CUBE vs ROLLUP Count column) pattern-matched on the CUBE-angle re-probe. Zero recurrence of any ROLLUP-only "value 2 never appears" mis-application to the CUBE case. 6th successful instance of leading-canonical-example bulletproofing.
 
-### Q2 — Iceberg time-travel by timestamp + finding available snapshots — **4.8125 STRONG PASS**
+---
 
-| Dim | Score | Reason |
+### Q2 — Trino map column extract by key — **4.8125 STRONG PASS**
+
+**Topic mapping**: SQL query best practices for OLAP.
+
+| Dimension | Score | Reasoning |
 |---|---|---|
-| Accuracy | 5.0 | `FOR TIMESTAMP AS OF TIMESTAMP '2026-05-16 14:30:00 UTC'` is valid Trino 467 Iceberg-connector syntax (verified at trino.io/docs/current/connector/iceberg.html); `iceberg.analytics."orders$snapshots"` with the whole `table$snapshots` token inside one quote pair is the correct metadata-table form; selecting `snapshot_id / committed_at / operation / summary` matches the documented metadata-table columns; the "resolves to latest snapshot at-or-before" semantics are correct per Iceberg spec. |
-| Clarity | 4.75 | Two ways spelled out (TIMESTAMP vs VERSION); engineer knows to query snapshots first to pick a target. |
-| Actionability | 4.75 | Both queries copy-pasteable; explicit guidance on the quoting rule for metadata tables (common foot-gun). |
-| Completeness | 4.75 | Covered both the time-travel query AND the snapshot-discovery query; could optionally have mentioned the 7-day snapshot retention floor (downstream of expire_snapshots) but that wasn't asked. |
+| Accuracy | 5.0 | `element_at(map_column, 'key')` returns NULL if missing key — verified at trino.io/docs/current/functions/map.html ("Returns value for given key, or NULL if the key is not contained in the map"). Correctly contrasted with `map[key]` subscript that throws on missing key. json_extract_scalar alternative for VARCHAR-JSON columns is correct. MAP+element_at being prunable/faster than VARCHAR-JSON parsing is defensible. |
+| Clarity | 4.75 | Both forms shown with the NULL-vs-error distinction. |
+| Actionability | 4.75 | Copy-pasteable; engineer knows what to do for MAP vs JSON columns. |
+| Completeness | 4.75 | Covers happy path + missing-key + JSON-string alternative. |
 
-### Q3 — Oracle CONNECT BY PRIOR → Trino WITH RECURSIVE — **4.75 STRONG PASS** (suspected-fab probe came back clean)
+---
 
-| Dim | Score | Reason |
+### Q3 — CDC upserts to Iceberg via MERGE in Trino — **2.6875 FAIL** (LOAD-BEARING — two Spark-isms in same answer)
+
+**Topic mapping**: Postgres-to-Iceberg ingestion (CDC subdomain) + Improving complex SQL performance on Trino with dbt (MERGE subdomain).
+
+| Dimension | Score | Reasoning |
 |---|---|---|
-| Accuracy | 4.75 | WITH RECURSIVE structure (anchor `manager_id IS NULL` UNION ALL recursive JOIN on org_tree) is the correct Trino 467 shape — column aliases are correctly declared, single recursive reference, UNION ALL not UNION. Experimental flag claim is **VERIFIED** at trino.io/docs/current/sql/select.html (verbatim: "this feature is experimental only. Proceed to use it only if you understand potential query failures and the impact of the recursion processing on your workload"). `max_recursion_depth` session property is **VERIFIED REAL**, default **10**, tunable via `SET SESSION max_recursion_depth=N` (and via `WITH SESSION` clause on a single SELECT). The pre-hook variant `pre_hook="SET SESSION max_recursion_depth=100"` for dbt is correct. -0.25 because the answer didn't surface that plan size grows **quadratically** with recursion depth (the trino.io docs warn this explicitly) and didn't mention the option to use `WITH SESSION max_recursion_depth=N` on a single query when the session-wide property is undesirable. |
-| Clarity | 4.75 | Walked Oracle engineer through the syntactic translation; explained why a closure-table materialization is the production-grade alternative for deep trees. |
-| Actionability | 4.75 | Drop-in SQL + dbt pre-hook + escape-hatch (materialized closure-table model). |
-| Completeness | 4.75 | Covered translation, depth bound, dbt integration, production escape hatch. Could add the quadratic-plan-growth warning verbatim. |
+| Accuracy | 2.0 | **TWO confirmed Spark-isms in a Trino MERGE answer** — both load-bearing because the example is presented as copy-pasteable. (See verification details below.) MERGE INTO IS supported on Iceberg in Trino 467 — that part is correct. ON clause structure is correct. But the WHEN MATCHED / WHEN NOT MATCHED bodies and the format-version setup line are both wrong dialect. |
+| Clarity | 3.25 | Pattern is readable but the wrong examples mis-teach the engineer. |
+| Actionability | 2.5 | Engineer copy-pasting this gets parse errors on both `SET TBLPROPERTIES (...)` and `UPDATE SET *` / `INSERT *`. |
+| Completeness | 3.0 | Covers MERGE support + setup intent + concurrent-write cross-ref, but two of the three concrete code artifacts are wrong-dialect. |
 
-**Fabrication probe outcome**: NO FAB. The judge's prior `max_recursive_iterations` hypothesis was the wrong correction — Trino's actual property IS `max_recursion_depth` (default 10). The leading-canonical block at r27 §7A.1 cited the source correctly.
+**Spark-ism #1 — `ALTER TABLE ... SET TBLPROPERTIES ('format-version' = '2')` is NOT Trino syntax.**
+- Verified at trino.io/docs/current/connector/iceberg.html and trino.io/docs/current/sql/alter-table.html.
+- **Correct Trino form**: `ALTER TABLE iceberg.analytics.events SET PROPERTIES format_version = 2;` — bare identifier key (snake_case `format_version`, NOT hyphenated string `'format-version'`), integer literal value (NOT quoted string `'2'`).
+- `SET TBLPROPERTIES (...)` with string-literal hyphenated keys is **Spark/Hive** syntax. Wrong engine.
+- **ADDITIONAL FACT THE ANSWER MISSED**: Trino-created Iceberg tables already default to `format_version = 2` (docs verbatim: "Optionally specifies the format version of the Iceberg specification to use for new tables; 1, 2, or 3. **Defaults to 2.**"). So the upgrade step is only needed for v1 tables migrated in from elsewhere — for a fresh Trino-created table the line is unnecessary noise that mis-teaches "you must set this before MERGE." The answer's framing ("v1 (Hive-migrated default) lacks delete files") is half-right for Hive-migrated tables but wrong for Trino-native tables.
 
-### Q4 — dbt source freshness on Postgres upstream — **4.75 STRONG PASS**
+**Spark-ism #2 — `WHEN MATCHED THEN UPDATE SET *` and `WHEN NOT MATCHED THEN INSERT *` wildcards are NOT Trino syntax.**
+- Verified at trino.io/docs/current/sql/merge.html. Trino MERGE BNF: `WHEN MATCHED [ AND condition ] THEN UPDATE SET ( column = expression [, ...] )` and `WHEN NOT MATCHED [ AND condition ] THEN INSERT [ column_list ] VALUES (expression, ...)`. **No wildcard form documented or supported.**
+- `UPDATE SET *` / `INSERT *` is **Spark/Databricks-Delta** MERGE syntax (Delta Lake's auto-mapping shorthand). Wrong engine.
+- **Correct Trino form** (the canonical CDC-upsert example the responder should have written):
+  ```sql
+  MERGE INTO iceberg.analytics.events t
+  USING incoming_cdc s
+    ON t.event_id = s.event_id
+  WHEN MATCHED AND s.op = 'DELETE' THEN DELETE
+  WHEN MATCHED THEN UPDATE SET
+    payload     = s.payload,
+    updated_at  = s.updated_at,
+    op          = s.op
+  WHEN NOT MATCHED THEN INSERT (event_id, payload, updated_at, op)
+    VALUES (s.event_id, s.payload, s.updated_at, s.op);
+  ```
 
-| Dim | Score | Reason |
+**Combined classification**: this is the iter497 NEW LOAD-BEARING FAB CLASS — engine-confusion (Spark dialect spilled into a Trino answer) appearing TWICE in the SAME answer on the SAME topic (MERGE / Iceberg DDL). This is exactly the dialect-accuracy failure pattern that single-line stale-content corrections do NOT fix; the teacher must install a LEADING CANONICAL block in r27 §3.2 (or r28 MERGE subdomain) with the full explicit-column Trino MERGE example UP FRONT, plus a DO-NOT-WRITE banner listing both `SET TBLPROPERTIES` and `SET *` / `INSERT *` as Spark-isms that parse-fail on Trino.
+
+---
+
+### Q4 — Oracle (+) outer-join → Trino ANSI join — **4.875 STRONG PASS**
+
+**Topic mapping**: Oracle PL/SQL → dbt + Trino SQL migration.
+
+| Dimension | Score | Reasoning |
 |---|---|---|
-| Accuracy | 5.0 | `freshness: {warn_after, error_after}` + `loaded_at_field` UNDER a `config:` block IS the canonical dbt 1.9+ placement (verified at docs.getdbt.com/reference/resource-properties/freshness — pre-1.9 top-level form is deprecated and emits `PropertyMovedToConfigDeprecation`). `dbt source freshness` is the correct CLI. The claim that freshness does NOT auto-block downstream models in `dbt run`/`dbt build` is CORRECT (verified at docs.getdbt.com/docs/deploy/source-freshness — freshness is a separate command, NOT included in `dbt build`); the recommended gate (`dbt source freshness` as its own CI stage, exit-code-driven) is the correct operational pattern. |
-| Clarity | 4.75 | Engineer can see exactly which YAML keys go where, which command runs the check, and what happens if a source is stale. |
-| Actionability | 4.5 | Copy-pasteable YAML, copy-pasteable CLI, copy-pasteable CI step. Could optionally have shown the `filter:` knob for scoping `MAX(loaded_at_field)` to a recent partition (useful on large tables) but that's enhancement, not gap. |
-| Completeness | 4.75 | Declaration shape + CLI + downstream behavior + CI gating all covered. |
+| Accuracy | 5.0 | "(+) is Oracle-proprietary, parse error in Trino" CORRECT. `WHERE a.id = b.id(+)` → LEFT JOIN CORRECT (a-side preserved because (+) is on b). `WHERE a.id(+) = b.id` → RIGHT JOIN CORRECT. Rule "(+) always preserves the side it's NOT on" is the standard Oracle outer-join rule — verified at docs.oracle.com/cd/B19306_01/server.102/b14200/queries006.htm and atlassian.com/data/databases/left-and-right-joins-using-the-plus-sign-in-oracle. Side-dependent (NOT always LEFT) is the correct answer to the asked question. |
+| Clarity | 4.75 | Worked example comma-join + WHERE(+) → ANSI LEFT JOIN ON is exactly what a migrating engineer needs. |
+| Actionability | 5.0 | Copy-pasteable rewrite pattern. |
+| Completeness | 4.75 | Directly answers "always LEFT or side-dependent" with the side-dependent rule + worked example for both directions. |
 
 ---
 
-## Overall
+## OVERALL = (4.9375 + 4.8125 + 2.6875 + 4.875) / 4 = 17.3125 / 4 = **4.328 PASS**
 
-`(4.9375 + 4.8125 + 4.75 + 4.75) / 4 = 19.25 / 4 = 4.8125`
-
-**Verdict: STRONG PASS (95th consecutive overall PASS in extended phase). Margin +1.3125 above 3.5 floor. Highest overall since iter493 (4.7813) and iter400 (4.59).**
+Q3 2.6875 drags but the other three STRONG PASS scores keep the iteration above the 3.5 floor by +0.828.
 
 ---
 
-## Topic-row updates (append-to-history math)
+## Topic average updates
 
-- **Improving complex SQL performance on Trino with dbt** (Q1 GROUPING re-probe maps here): 4.5964/7 → (4.5964*7 + 4.9375)/8 = (32.1748 + 4.9375)/8 = 37.1123/8 = **4.6390/8** (+0.0426 — recoups the iter495 -0.1511 drag from the GROUPING bug; the leading-canonical block did its job).
-- **Iceberg table maintenance** (Q2 time-travel maps here — snapshot discovery/time-travel is the maintenance-domain subtopic): 4.4896/147 → (4.4896*147 + 4.8125)/148 = (660.1712 + 4.8125)/148 = 664.9837/148 = **4.4931/148** (+0.0035).
-- **Oracle PL/SQL → dbt + Trino migration** (Q3 CONNECT BY translation maps here): 4.5175/67 → (4.5175*67 + 4.75)/68 = (302.6725 + 4.75)/68 = 307.4225/68 = **4.5209/68** (+0.0034).
-- **dbt sources / source freshness** (Q4 maps here directly): 4.219/3 → (4.219*3 + 4.75)/4 = (12.657 + 4.75)/4 = 17.407/4 = **4.3518/4** (+0.1328 — meaningful bump on a low-sample-count row; topic now has 4 data points).
+- **Improving complex SQL performance on Trino with dbt** (Q1 CUBE re-probe maps here) — 4.6390/8 → (4.6390*8 + 4.9375)/9 = 42.0495/9 = **4.6722/9** (+0.0332).
+- **SQL query best practices for OLAP** (Q2 element_at maps here) — 4.5236/54 → (4.5236*54 + 4.8125)/55 = (244.2744 + 4.8125)/55 = 249.0869/55 = **4.5288/55** (+0.0052).
+- **Postgres-to-Iceberg ingestion** (Q3 CDC MERGE maps here) — 4.4992/166 → (4.4992*166 + 2.6875)/167 = (746.8672 + 2.6875)/167 = 749.5547/167 = **4.4884/167** (-0.0108 — Q3 FAIL drags this row; still PASS overall).
+- **Oracle PL/SQL → dbt + Trino SQL migration** (Q4 (+) → ANSI join maps here) — 4.5209/68 → (4.5209*68 + 4.875)/69 = (307.4212 + 4.875)/69 = 312.2962/69 = **4.5260/69** (+0.0051).
 
-Federation: **4.49944/310 UNCHANGED** per iter472-496+ directive — NOT PROBED this iteration.
-
----
-
-## What landed and what to keep probing
-
-### Confirmed-landed canonical blocks (do not regress)
-
-1. **r28 §LEADING CANONICAL — GROUPING SETS / ROLLUP / CUBE with the GROUPING() bitmask** (installed iter496, line ~318). 3-col ROLLUP confirmed today. **Next probe: 2-col ROLLUP re-probe (the original iter495 phrasing) to confirm the WHEN 3 = grand total mapping ALSO holds when the question shape matches the iter495 trigger.**
-2. **r27 §7A.1 — CONNECT BY → WITH RECURSIVE with experimental + depth + quadratic-plan caveats** (installed earlier). Confirmed today on org-chart phrasing.
-3. **r27 §6.7B LEADING CANONICAL — dbt source freshness** (installed earlier). Confirmed today on Postgres-source phrasing. **`config:` placement holds.**
-
-### Open guardrails (keep untouched)
-
-- **r22 §13.x federation guardrails** (lines 8691 + 8793): ROLLUP/CUBE/GROUPING SETS do NOT push down to PostgreSQL via JDBC. Untouched.
-- **Federation rubric row 4.49944/310**: not probed; do not back-fill.
-- **r07 §5 Pattern B2 YoY canonical**, **r27 §4.1A DECODE-NULL canonical**, **r28 LEADING CANONICAL dbt-trino partitioning canonical** all untouched and holding from prior iterations.
+**Federation NOT probed — 4.49944/310 row UNCHANGED** per iter472-497 directive. r22 §13.x federation guardrails not touched.
 
 ---
 
-## Next-iter (iter497) judge probe targets
+## Verification confirmations
 
-To keep accumulating data-points on the leading-canonical blocks that have only had ONE successful probe each:
+**A. Q1 CUBE/GROUPING re-probe HELD** — CUBE(region, product) emits all four GROUPING values 0/1/2/3; WHEN 2 = product-only subtotal is correct under CUBE; WHEN 3 = grand total is correct. Responder did NOT mis-apply the ROLLUP "value 2 never appears" rule to CUBE. iter496 GROUPING canonical bulletproofing extended successfully to the CUBE angle. **Re-probe CONFIRMED PASS.**
 
-1. **GROUPING bitmask — 4-col ROLLUP** (e.g., `ROLLUP(region, country, store, product_category)` with labels) — probe whether the responder generalizes the 2^N-1 grand-total value (15) without seeing it explicitly enumerated in the canonical block. If it errors, the canonical block needs an N-col table extension.
-2. **GROUPING bitmask — CUBE vs ROLLUP differentiation** — probe a `CUBE(region, category)` question; the canonical block §(e) says value 2 IS valid under CUBE. Confirm responder doesn't blanket-apply the ROLLUP "value 2 never appears" rule to CUBE.
-3. **WITH RECURSIVE — second angle** — bill-of-materials hierarchy or category tree (different domain, same recursion shape) to confirm the `max_recursion_depth=10` + experimental notes route from non-org-chart phrasing.
-4. **dbt source freshness — third angle** — probe the `filter:` knob (scope `MAX(loaded_at_field)` to a partition) and/or the per-table override + `freshness: null` opt-out semantics. r27 §6.7B documents both but they're untested.
-5. **Federation**: still NOT probed per the standing directive.
+**B. Q3 MERGE TWO SPARK-ISMS CONFIRMED**:
+  1. `SET TBLPROPERTIES ('format-version'='2')` is Spark/Hive — Trino requires `SET PROPERTIES format_version = 2` (bare identifier + integer literal). Also Trino-native Iceberg tables already default to format_version 2.
+  2. `WHEN MATCHED THEN UPDATE SET *` / `WHEN NOT MATCHED THEN INSERT *` wildcards are Spark/Databricks-Delta — Trino requires explicit `UPDATE SET (col = expr, ...)` and `INSERT (col_list) VALUES (...)`.
+Both verified against trino.io/docs/current/sql/merge.html, trino.io/docs/current/connector/iceberg.html, trino.io/docs/current/sql/alter-table.html.
 
----
-
-## Teacher actions for iter497
-
-**No mandatory teacher work this iteration — all four answers were STRONG PASS with zero fabrications.** Optional polish:
-
-1. **r27 §7A.1 minor enhancement (LOW priority)**: add a one-line callout that plan size grows **quadratically** with `max_recursion_depth` (current text says "do not set unboundedly high — runaway recursion will OOM a worker" which is correct but less precise than the docs' quadratic-growth warning). Verbatim Trino doc text: "the size of the query plan growth is quadratic with the recursion depth".
-2. **r28 §LEADING CANONICAL §(b) bitmask table (LOW priority)**: extend the table with a 4-col ROLLUP row (values 0/1/3/7/15) so iter497 probe target #1 has a direct lookup, and inline the general rule "for N-col ROLLUP, grand total = 2^N - 1, with N+1 total emitted groupings".
-3. **r27 §6.7B (LOW priority)**: nothing missing — block is complete and pattern-matched today.
-
-**Do NOT touch**: r22 §13.x federation guardrails; federation rubric row; r07 §5 Pattern B2; r27 §4.1A DECODE-NULL canonical; r28 LEADING CANONICAL dbt-trino partitioning block.
+**C. Q4 Oracle (+) mapping CORRECT** — (+) preserves the side OPPOSITE to it; `a.id = b.id(+)` = LEFT JOIN; `a.id(+) = b.id` = RIGHT JOIN. Side-dependent answer is correct.
 
 ---
 
-## State.json directive
+## Concrete next-teacher actions (HIGH priority for iter498)
 
-Per the user instruction: **DO NOT bump state.json** — teacher set it to 496; leave `iteration: 496`, `phase: "extended"`, `passed: true` as-is.
+1. **HIGH — Install a r27 §3.2 (or r28 MERGE subdomain) LEADING CANONICAL block for Trino MERGE INTO** — this is the highest-priority fix because the Spark-ism class slipped twice in the same answer. The block must contain:
+   - **Leading canonical Trino MERGE example** with EXPLICIT column assignments (full CDC upsert pattern showing `WHEN MATCHED AND s.op = 'DELETE' THEN DELETE`, `WHEN MATCHED THEN UPDATE SET col1 = s.col1, col2 = s.col2`, `WHEN NOT MATCHED THEN INSERT (col1, col2) VALUES (s.col1, s.col2)`).
+   - **DO-NOT-WRITE banner** listing both Spark-isms by name with parse-error annotations:
+     - DO NOT WRITE: `UPDATE SET *` (Spark/Databricks-Delta wildcard — Trino MERGE has no wildcard form, requires explicit column list per trino.io/docs/current/sql/merge.html).
+     - DO NOT WRITE: `INSERT *` (same — Spark-only).
+     - DO NOT WRITE: `ALTER TABLE ... SET TBLPROPERTIES ('format-version' = '2')` (Spark/Hive syntax — Trino uses `SET PROPERTIES format_version = 2` per trino.io/docs/current/sql/alter-table.html + iceberg connector docs).
+   - **Format-version default callout**: Trino-created Iceberg tables default to format_version 2 (verbatim quote from trino.io/docs/current/connector/iceberg.html: "Defaults to 2."). The upgrade ALTER is ONLY needed for tables migrated in from Hive or other engines that defaulted to v1.
+   - **Cross-link from the Postgres-to-Iceberg CDC subdomain in r16/r17** so the responder finds this block via "CDC upsert" / "MERGE" / "Iceberg merge" / "row-level update" keyword routing.
+
+2. **MEDIUM — Reconcile any other resources/ files that show the Spark dialect forms.** Grep for:
+   - `SET TBLPROPERTIES` across all resources/ files.
+   - `UPDATE SET \*` and `INSERT \*` across all resources/ files.
+   - If any other resource shows these forms even as a Spark contrast, ensure each is tagged as Spark-only with a "Trino equivalent: ..." sibling. Per the reconcile-don't-append rule: fix in place, don't just add a new block.
+
+3. **LOW — r28 §LEADING CANONICAL GROUPING block extension confirmed effective.** No further action on the CUBE/ROLLUP canonical this iter — iter497 enhancement pattern-matched verbatim. Leave the (a)-(g) layout as-is.
+
+---
+
+## Judge probe targets for iter498
+
+1. **MERGE RE-PROBE (HIGH priority)** — re-probe MERGE INTO on Iceberg from a DIFFERENT keyword phrasing (e.g., "I have a Trino MERGE statement that errors on `SET *` — what's the right form?" or "How do I write an idempotent upsert from a staging table into iceberg.analytics.fact_orders with these columns?"). Confirm BOTH Spark-isms purged.
+2. **format_version probe** — ask "Do I need to ALTER TABLE format_version on a fresh Trino-created Iceberg table before I can MERGE into it?" to test whether the "defaults to 2" fix landed.
+3. **CUBE angle 2nd probe** — ask a CUBE(a, b, c) 3-column question to confirm the canonical generalizes to 2^3 = 8 emitted values (0/1/2/3/4/5/6/7) cleanly under CUBE while ROLLUP(a,b,c) stays at 0/1/3/7.
+4. **Federation NOT probed** — per iter472-497 directive, leave federation alone (4.49944/310 row UNCHANGED).
+5. **Oracle migration second-angle** — re-probe (+) outer join from a different angle (e.g., "self outer join with (+)" or "multi-table (+)" — Oracle's (+) does not allow OR conditions and is limited to one side per join; could test if responder knows these limitations).
+
+---
+
+## Iteration meta
+
+- **96th consecutive overall PASS in extended phase**; margin +0.828 above 3.5 floor.
+- Q3 FAIL is the FIRST significant accuracy fail since iter495 Q4 (GROUPING bitmask, since fixed) — pattern shows that single-question dialect slips still appear when a topic lacks a leading-canonical bulletproofing block.
+- Q1 CUBE re-probe extends the leading-canonical-bulletproofing streak to **6 successful instances** (r13 Spark writeTo iter420; r07 GROUP-BY-expression iter485; r07 §5 YoY Pattern B2 iter493; r27 §4.1A DECODE-NULL iter494; r28 LEADING CANONICAL GROUPING iter496; r28 GROUPING extension to CUBE-angle iter497).
+- training/state.json NOT bumped per directive (teacher set it to 497; left intact).
