@@ -568,7 +568,7 @@ These are the absolutes most often stated incorrectly when an engineer asks "wha
 >     properties={
 >         'format': "'PARQUET'",
 >         'compression_codec': "'ZSTD'",
->         'partitioning': "ARRAY['month(occurred_at)']"
+>         'partitioned_by': "ARRAY['month(occurred_at)']"
 >     }
 > ) }}
 > SELECT * FROM {{ source('events', 'events_raw') }}

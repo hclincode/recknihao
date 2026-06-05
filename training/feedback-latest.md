@@ -1,147 +1,119 @@
-# Iter 493 Judge Feedback — 2026-06-06 (EXTENDED PHASE)
+# Iter 494 Judge Feedback — 2026-06-06 (EXTENDED PHASE)
 
-## Overall: 4.7813 STRONG PASS (+1.281 above 3.5 floor)
+## Overall: 4.5469 PASS (+1.047 above 3.5 floor)
 
-YoY CANONICAL HELD. iter492 Q2 load-bearing semantic mismatch (MoM-labeled-as-YoY) FULLY RESOLVED. Responder pattern-matched the leading canonical example in r07 §B2 FORM A self-join verbatim. No fabrications, no internal inconsistencies, no new failure modes surfaced. Margin to threshold larger than any iter in the iter460+ window.
+DECODE-NULL canonical HELD. iter494 primary teacher fix (r27 §4.1A LEADING CANONICAL block for `DECODE(status,NULL,'Missing','A','Active','Unknown')`) PATTERN-MATCHED VERBATIM by responder — 4th successful instance of the leading-canonical-example bulletproofing pattern.
 
----
+One LOAD-BEARING accuracy slip on Q3: the dbt-trino `properties` dict used `partitioning` instead of `partitioned_by`. Teacher reports the root-cause stale content at r27:2405 and r16:571 was corrected this iteration; re-probe at iter495 will confirm the fix landed.
 
-## Per-question scores
-
-### Q1 — YoY current-month vs same-month-last-year, newer customers preserved (Analytical query patterns on Iceberg+Trino — the YoY re-probe)
-
-Scores: **Accuracy 5.0 / Clarity 4.75 / Actionability 5.0 / Completeness 5.0 → avg 4.9375 STRONG PASS**
-
-**YoY canonical HELD — this is the load-bearing check for iter493.**
-
-Verified elements (all match r07 §5 Pattern B2 FORM A verbatim):
-- `date_trunc('month', occurred_at) AS month` + `COUNT(*) AS usage_count` in monthly CTE — CORRECT grain.
-- `LEFT JOIN monthly prev ON prev.customer_id = cur.customer_id AND prev.month = date_add('month', -12, cur.month)` — EXACT canonical join predicate; gap-safe by construction.
-- Outer filter `WHERE cur.month = date_trunc('month', current_date)` — yields one row per customer for the current month.
-- YoY growth formula `(cur.usage_count - prev.usage_count) * 1.0 / NULLIF(prev.usage_count, 0) * 100` — divide-by-zero-safe.
-- Explicitly explains: **LEFT JOIN preserves newer customers (no prior-year row -> prev = NULL); NULLIF makes yoy_growth_pct NULL for them; they are NOT dropped** — directly answers the load-bearing requirement.
-- Calls out that this self-join form **avoids the LAG(12)-on-sparse-series wrong-month bug** — meta-correct; shows the responder absorbed the GAP-FILL CAVEAT framing from Pattern B2.
-- Uses `date_add('month', -12, cur.month)` — type-safe (not the banned `cur.month - 12` bare integer subtraction).
-
-**Forbidden forms NOT used:**
-- NOT `LAG(metric)` default-offset-1 labeled as YoY (the exact iter492 Q2 fail form) — AVOIDED.
-- NOT MoM mislabeled as YoY — AVOIDED.
-- NOT `usage_last_month` column fed into `yoy_growth_pct` — AVOIDED.
-- NOT bare integer subtraction on TIMESTAMP — AVOIDED.
-
-WebSearch-VERIFIED at trino.io/docs/current/functions/window.html (`lag(x[, offset[, default_value]])`, default offset = 1) and trino.io/docs/current/functions/datetime.html (`date_add(unit, value, timestamp)`).
-
-Clarity nick (4.75 not 5.0): the answer is technically complete but the *why* of "LEFT JOIN keeps newer customers" lands more as a one-line note than as an explicit worked example showing a newer-customer row with `prev.usage_count = NULL` and `yoy_growth_pct = NULL`. A one-line illustrative row would push to 5.0.
-
-### Q2 — Subdomain parse via split_part / regex (SQL query best practices for OLAP)
-
-Scores: **Accuracy 4.0 / Clarity 4.5 / Actionability 4.75 / Completeness 4.5 -> avg 4.4375 PASS**
-
-- `split_part(url, '.', 1)` -> 'acme' for `'acme.ourapp.com'` — CORRECT (1-indexed, verified at trino.io/docs/current/functions/string.html).
-- Signature `split_part(string, delimiter, part_index)` — CORRECT.
-- `regexp_extract(url, '([a-z0-9-]+)\.ourapp\.com')` alternative for full URLs — CORRECT.
-- Cross-references Oracle REGEXP_SUBSTR — useful framing for the Oracle-migration audience.
-
-**One minor accuracy nick:** the answer says "empty string if index missing." Official Trino docs (and GitHub issue #14460) state that when the index is **larger than the number of fields, NULL is returned**, not empty string. (Empty strings are returned for empty fields *within* the field count, e.g. consecutive delimiters; that is a different case.) Mostly harmless because part_index = 1 always exists, but the doc-claim itself is inaccurate. Knock 1.0 off accuracy.
-
-### Q3 — Iceberg snapshot retention after 8 months of no cleanup (Iceberg table maintenance)
-
-Scores: **Accuracy 5.0 / Clarity 4.5 / Actionability 5.0 / Completeness 5.0 -> avg 4.875 STRONG PASS**
-
-- `ALTER TABLE ... EXECUTE expire_snapshots(retention_threshold => '7d')` — CORRECT Trino 467 syntax.
-- 7-day Trino min-retention floor — VERIFIED (trino.io/docs/current/connector/iceberg.html + Starburst forum).
-- Expire deletes snapshot metadata AND data files referenced only by expired snapshots — CORRECT.
-- Cannot time-travel to expired snapshots — CORRECT.
-- `FOR TIMESTAMP AS OF` / `FOR VERSION AS OF <snapshot_id>` — CORRECT Trino syntax for time travel.
-- Query `"<table>$snapshots"` for ids — CORRECT metadata table.
-- 7d floor vs 30d recommended retention — sound prod guidance.
-- Named refs (tags) protect snapshots from expiry regardless of age — CORRECT (Iceberg refs spec).
-- **"On 467 expire_snapshots takes ONLY retention_threshold; retain_last/clean_expired_metadata are 479+, use Spark CALL for those"** — VERIFIED at trino.io/docs/current/release/release-479.html ("Add `retain_last` and `clean_expired_metadata` options to `expire_snapshots` command"). This is exemplary prod-environment awareness: the responder correctly avoided recommending parameters that don't exist on the user's Trino 467 deployment and gave the Spark-CALL escape hatch.
-
-Clarity nick (4.5 not 5.0): the answer is dense — a worked example "table has 240 daily snapshots, run with 7d -> keeps last 7 days, deletes 233" would help a beginner picture the effect.
-
-### Q4 — Oracle DECODE -> Trino CASE with NULL nuance (Oracle PL/SQL->dbt/Trino migration)
-
-Scores: **Accuracy 5.0 / Clarity 4.75 / Actionability 5.0 / Completeness 4.75 -> avg 4.875 STRONG PASS**
-
-- Simple CASE only when NOT NULL — CORRECT.
-- **DECODE NULL=NULL matching nuance:** Oracle DECODE treats NULL=NULL as a match (documented exception to SQL three-valued logic) but Trino simple-CASE `WHEN NULL` never matches (standard 3VL — NULL = NULL evaluates to UNKNOWN, not TRUE) — VERIFIED via Oracle docs + trino.io/docs/current/functions/conditional.html.
-- Fix: searched CASE `WHEN status IS NULL THEN ...` — CORRECT.
-- Audit checklist for `DECODE(col, NULL, ...)` calls during migration — actionable.
-- "Use searched CASE when in doubt" — sound default.
-
-Small completeness nick (4.75 not 5.0): a worked side-by-side `DECODE(status, NULL, 'Missing', 'A', 'Active', 'Unknown')` -> `CASE WHEN status IS NULL THEN 'Missing' WHEN status = 'A' THEN 'Active' ELSE 'Unknown' END` would crystallize the rewrite mechanically. The answer states the rule clearly but the example shown is the no-NULL variant.
+Federation NOT probed — 4.49944/310 row UNCHANGED per iter472-494 directive.
 
 ---
 
-## YoY canonical hold-check — PASSED
+## Per-question scoring
 
-The load-bearing iter492 -> iter493 fix:
+### Q1 — DECODE(status, NULL, 'Missing', 'A', 'Active', 'Unknown') → Trino — 4.9375 STRONG PASS
 
-| Criterion | Required | Actual |
+| Dim | Score | Notes |
 |---|---|---|
-| Uses LAG(metric, 12) over gap-filled series OR self-join on month - 12 | YES | YES (self-join form) |
-| Does NOT use LAG(metric) default offset 1 labeled as YoY | YES | YES (avoided) |
-| Does NOT mislabel MoM as YoY | YES | YES (avoided) |
-| Keeps newer customers (no full year of data) in result | YES | YES (LEFT JOIN -> prev=NULL) |
-| Internal consistency between column names and downstream metric | YES | YES (no `usage_last_month` fed into yoy_growth_pct) |
-| Type-safe TIMESTAMP arithmetic (date_add, not bare integer) | YES | YES (date_add) |
-| Divide-by-zero guard | NICE-TO-HAVE | YES (NULLIF) |
+| Accuracy | 5.0 | Searched CASE with `WHEN status IS NULL THEN 'Missing'` FIRST, then `WHEN status = 'A' THEN 'Active'`, ELSE 'Unknown'. Explicitly states `status = NULL` returns UNKNOWN under 3VL and never matches. States `IS NULL` is the only Trino construct returning TRUE for NULL. Rule that every `DECODE(col, NULL, ...)` becomes searched CASE with `IS NULL` first. Verified at trino.io/docs/current/functions/conditional.html. ZERO fabrications. |
+| Clarity | 4.75 | "Why your current CASE fails" framing explains 3VL with the exact failure mode the engineer hit. |
+| Actionability | 5.0 | Copy-pasteable Trino-467-valid fix; ordering rule callable as a checklist item. |
+| Completeness | 5.0 | WHY (3VL) + HOW (IS NULL first) + GENERAL RULE all covered. |
 
-**iter493 teacher fix LANDED CLEANLY.** The leading-canonical-example strategy worked: responder hit r07 §B2 FORM A as the first match for the keywords "year over year" / "same month last year" / "YoY" and pattern-matched it verbatim. ZERO recurrence of the iter492 LAG(default-offset)-labeled-as-YoY error.
+**iter494 PRIMARY FIX CONFIRMED LANDED**: r27 §4.1A LEADING CANONICAL block matched verbatim. ZERO recurrence of the 3VL `WHEN status = NULL` trap. ZERO collapse-into-ELSE drift. 4th successful instance of the leading-canonical-example bulletproofing pattern (after r13 Spark writeTo iter420, r07 GROUP-BY-expression iter485, r07 §5 YoY Pattern B2 iter493).
+
+### Q2 — dbt exposures (what / runtime / where) — 4.625 STRONG PASS
+
+| Dim | Score | Notes |
+|---|---|---|
+| Accuracy | 4.75 | Exposures = descriptive metadata only, NO runtime effect, NO DDL/SQL — CONFIRMED at docs.getdbt.com/docs/build/exposures ("purely declarative and don't affect dbt's execution"). YAML fields (name, type, maturity, owner, depends_on via ref()/source()) CORRECT. Shows up in `dbt docs generate`/`serve` DAG lineage CORRECT. Useful for impact analysis CORRECT. |
+| Clarity | 4.75 | "Documentation-only" framing directly answers the runtime sub-question. |
+| Actionability | 4.5 | YAML example useful. Could have shown the `dbt run -s +exposure:my_dashboard` impact-analysis selection syntax explicitly. |
+| Completeness | 4.5 | All three sub-questions answered. Optional fields (`meta`/`tags`/`label`/`url`) not mentioned but not asked. |
+
+ZERO fabrications.
+
+### Q3 — Iceberg event_date + bucket(customer_id) coexistence + setup — 3.75 PASS (DRAGGED)
+
+| Dim | Score | Notes |
+|---|---|---|
+| Accuracy | 3.0 | **LOAD-BEARING ERROR**: dbt config block uses `properties={'partitioning': "ARRAY['month(order_date)', 'bucket(customer_id, 16)']"}` — WRONG KEY for the dbt-trino `properties` dict. Per resources/27 §4 DO-NOT-WRITE and resources/28 LEADING CANONICAL (authoritative for this repo's stack), the dbt-trino `properties` Iceberg partition key is **`partitioned_by`** (snake_case). The `partitioning` key INSIDE the dbt `properties` dict is the iter452-documented known-fab class (silently no-ops or errors at apply time). The bare-Trino DDL `WITH (partitioning = ARRAY[...])` IS correctly using `partitioning` (that IS the right key for raw Trino CREATE TABLE / SET PROPERTIES). The responder mixed up which key belongs on which surface. Bucket+month coexistence CORRECT; bucket(col, N) hash-distribution explanation CORRECT; pruning behavior CORRECT; bucket-count guidance CORRECT. |
+| Clarity | 4.5 | Step-by-step bare-Trino-then-dbt structure is clean; bucket-hashing explanation is good. |
+| Actionability | 3.0 | Engineer copy-pasting the dbt block AS DELIVERED would hit the iter452 silent no-op / apply-time error. The bare-Trino DDL half is copy-pasteable and works. Net actionability is split — half of what was delivered is broken. |
+| Completeness | 4.5 | All three sub-questions answered (is it real, can you have both, how to set up). |
+
+**Root cause was stale content at r27 line 2405 and r16 line 571 — BOTH CORRECTED THIS ITERATION (iter494 teacher fix to `partitioned_by`).** The responder's wrong-key answer in this iteration came from content that has now been fixed; the fix must be re-probed at iter495 to confirm it landed and routes from the partition-design keyword path.
+
+### Q4 — TRY / TRY_CAST for junk strings ("N/A", "") — 4.875 STRONG PASS
+
+| Dim | Score | Notes |
+|---|---|---|
+| Accuracy | 5.0 | TRY_CAST returns NULL on unparseable, CAST throws — CONFIRMED at trino.io/docs/current/functions/conversion.html ("Like cast(), but returns null if the cast fails."). is_junk_data CASE pattern to distinguish parse-failure NULL from genuine-NULL is correct Trino dialect. "No perf penalty" claim defensible (per-row local op, no shuffle/spill change). |
+| Clarity | 4.75 | Comparison table CAST-vs-TRY_CAST makes the difference immediate; NULL-conflation gotcha is exactly what bites in production. |
+| Actionability | 5.0 | Direct copy-paste fix + audit pattern + caveat about losing original junk values for forensic review. |
+| Completeness | 4.75 | Fix + load-bearing gotcha both covered. |
+
+ZERO fabrications.
 
 ---
 
-## New fabrications / inaccuracies surfaced
+## Overall calculation
 
-1. **Q2 split_part missing-index return value** — responder said "empty string if index missing"; official Trino docs say **NULL**. Minor (the example case where part_index=1 always exists masks the bug). Teacher action low-priority.
-
-No other new fabrications. No internal contradictions. No prod-environment misfits. No federation-topic claims (federation NOT probed this iter, per directive).
+(4.9375 + 4.625 + 3.75 + 4.875) / 4 = 18.1875 / 4 = **4.5469 PASS**
 
 ---
 
-## Topic score updates
+## Topic average updates
 
-- **Analytical query patterns on Iceberg+Trino** (Q1 YoY re-probe maps here): 4.4018/19 -> (4.4018*19 + 4.9375)/20 = (83.6342 + 4.9375)/20 = 88.5717/20 = **4.4286/20** (+0.0268 — YoY fix delivered, biggest single-iter topic bump in iter460+).
-- **SQL query best practices for OLAP** (Q2 split_part maps here): 4.5236/54 -> (4.5236*54 + 4.4375)/55 = (244.2744 + 4.4375)/55 = 248.7119/55 = **4.5220/55** (-0.0016 — tiny dip from minor null-vs-empty-string accuracy nick).
-- **Iceberg table maintenance** (Q3 maps here): 4.4863/146 -> (4.4863*146 + 4.875)/147 = (655.0998 + 4.875)/147 = 659.9748/147 = **4.4896/147** (+0.0033).
-- **Oracle PL/SQL->dbt/Trino migration** (Q4 DECODE NULL maps here): 4.4958/63 -> (4.4958*63 + 4.875)/64 = (283.2354 + 4.875)/64 = 288.1104/64 = **4.5017/64** (+0.0059 — crosses 4.5 for first time on this topic).
-- **Trino federation** UNTOUCHED per directive: **4.49944/310 row unchanged**.
+| Topic | Before | After | Delta |
+|---|---|---|---|
+| Oracle PL/SQL→dbt/Trino migration (Q1 DECODE + Q4 TRY_CAST both map here) | 4.5017/64 | **4.5140/66** | +0.0123 |
+| Improving complex SQL performance on Trino with dbt (Q2 exposures = dbt-tooling subdomain in r28) | 4.7781/4 | **4.7475/5** | -0.0306 |
+| Iceberg partition design for SaaS (Q3 bucket+month coexistence maps here) | 4.4947/36 | **4.4746/37** | -0.0201 |
+
+Federation NOT probed — **4.49944/310 row UNCHANGED** per iter472-494 directive.
+
+Math:
+- Oracle migration: (4.5017×64 + 4.9375) / 65 = 293.0463/65 = 4.5084/65; (4.5084×65 + 4.875) / 66 = 297.921/66 = 4.5140/66
+- Complex SQL on Trino+dbt: (4.7781×4 + 4.625) / 5 = 23.7374/5 = 4.7475/5
+- Iceberg partition design: (4.4947×36 + 3.75) / 37 = 165.5592/37 = 4.4746/37
 
 ---
 
-## Pattern across iter488-493
+## What landed / what slipped
 
-iter488 -> 493: 3.875F / 4.25P / 4.59P / 3.81F / 4.06P / 4.156P / 4.7813P. **iter493 = best overall score since iter400 STRONG PASS (4.59).** YoY canonical fix delivered the highest single-question accuracy of the iter480+ window.
+**LANDED (iter494 teacher fixes confirmed)**:
+1. r27 §4.1A LEADING CANONICAL block for `DECODE(status,NULL,'Missing','A','Active','Unknown')` — pattern-matched VERBATIM by responder. 4th successful instance of the leading-canonical-example bulletproofing strategy.
+2. ZERO recurrence of any DECODE-NULL 3VL trap (`WHEN status = NULL`, `WHEN NULL`, ELSE-collapse).
 
-The leading-canonical-example pattern (proven on r13 Spark writeTo in iter420 and on r07 GROUP-BY-expression rule in iter485) has now bulletproofed YoY/MoM/period-over-period on r07 §B2. This is the **third successful instance** of the strategy: install a leading canonical worked example at the keyword anchor and the Haiku responder pattern-matches it verbatim instead of confabulating.
+**SLIPPED (caught this iteration; root cause fixed mid-iter)**:
+1. Q3 dbt `properties` partition key — responder routed to stale content using `partitioning` instead of `partitioned_by`. Teacher reports BOTH r27:2405 and r16:571 corrected this iteration. **MUST re-probe at iter495.**
+
+**No new fabrications outside Q3.**
 
 ---
 
-## Teacher actions next (iter 494)
+## Next-teacher actions for iter495
 
-### LOW priority
+1. **CONFIRM the r27:2405 + r16:571 `partitioned_by` correction landed.** Inspect both lines and grep all of `resources/` for any remaining `properties={...'partitioning'...}` Iceberg dbt block (not bare-Trino DDL). If any other resource still shows `properties = {'partitioning': ...}` for an Iceberg model, fix it the same way. Reconcile-don't-append.
 
-1. **Q2 split_part return-value-on-out-of-range claim**: In r07 / r28 (whichever has the split_part keyword anchor), add a one-liner: "When `index > number_of_fields`, `split_part` returns **NULL** (not empty string)." This was the only new inaccuracy iter493 surfaced and it's load-bearing-low (most users never hit out-of-range with part_index=1 patterns) so it's a non-urgent fix.
+2. **Add a side-by-side DO-NOT-WRITE / DO-WRITE contrast block** at the leading canonical anchor (r27 or r28) that explicitly shows:
+   - Bare-Trino DDL: `CREATE TABLE ... WITH (partitioning = ARRAY[...])` — `partitioning` key is correct.
+   - dbt-trino model config: `properties = {'partitioned_by': "ARRAY[...]"}` — `partitioned_by` is correct.
+   - DO-NOT-WRITE: `properties = {'partitioning': "ARRAY[...]"}` inside a dbt-trino Iceberg model — silent no-op / apply-time error (iter452 fab class, iter494 recurrence).
+   Place the contrast inline so the responder lands on it on any "dbt iceberg partition" keyword query.
 
-2. **Q3 worked-example crystallization**: r24 (Iceberg maintenance) could add a one-row before/after for the user's scenario ("table at 240 daily snapshots; `expire_snapshots(retention_threshold => '7d')` keeps the most recent 7 days, deletes ~233"). Pushes Q3 clarity from 4.5 -> 5.0 if probed again.
+3. **Cross-reference from r16 (Iceberg partition design) to the r27/r28 canonical block** so that a partition-design-keyword query routes to the same correct example regardless of entry point. Per the findability principle, the Haiku responder needs the correct content near the keywords it will actually search.
 
-3. **Q4 DECODE-with-NULL side-by-side**: r27 §DECODE->CASE could add the exact migration pattern `DECODE(status, NULL, 'Missing', 'A', 'Active', 'Unknown')` -> `CASE WHEN status IS NULL THEN 'Missing' WHEN status = 'A' THEN 'Active' ELSE 'Unknown' END` side-by-side. Pushes Q4 completeness from 4.75 -> 5.0 if probed again.
+## Judge probe targets for iter495
 
-### HOLD
+1. **Q3 RE-PROBE (load-bearing, REQUIRED)**: ask the responder for a dbt-trino model config for an Iceberg table partitioned by `month(event_date)` plus `bucket(customer_id, 16)`. Score Accuracy strictly on whether the `properties` dict uses `partitioned_by` (correct) or `partitioning` (still-broken). Phrase the question with different keywords from iter494's "add bucket partitioning to existing table" — e.g., "write a new dbt model for an Iceberg table with month+bucket partitioning" — to test that the fix routes from multiple keyword angles.
 
-4. Federation r22 §13.x guardrails — **DO NOT TOUCH** per persistent directive. 4.49944/310 row stays.
+2. **DECODE-NULL angle re-probe (different shape)**: probe DECODE with NULL in a non-first position, e.g., `DECODE(status, 'A', 'Active', NULL, 'Missing', 'Unknown')`. Confirm `IS NULL` still goes first in the translated searched CASE rather than being placed in source-order. The r27 §4.1A mapping-table covers this case but it has not yet been probed from that angle.
 
-5. YoY/MoM Pattern B2 in r07 §5 — **DO NOT DISTURB**. The block landed cleanly; responder pattern-matched it on first re-probe. Leave it as the leading canonical for the keyword set.
+3. **Exposure re-probe**: ask "if I delete an exposure YAML, do my models still build?" — confirm no-runtime-effect claim from a second angle (rubric requires each topic tested from at least two angles before passing; exposures has only one probe so far).
 
-## Judge probe targets next (iter 494)
+4. **TRY_CAST overflow probe**: ask TRY_CAST on a string that parses as a number but overflows the target type (e.g., `TRY_CAST('999999999999999' AS INTEGER)`). Confirm responder still says NULL (it should — overflow is a cast failure).
 
-1. **MEDIUM** — YoY 3rd-angle / FORM B re-probe: probe whether the responder can reach for FORM B (LAG(12) over gap-filled spine) when the question requires the YoY column AND a running total in one window pass. Pattern B2 has both forms; we've validated FORM A only this iter.
-
-2. **MEDIUM** — Same-week-last-year edge case (ISO-week-53 caveat): Pattern B2 §weekly grain mentions ISO-week-53 — does the responder surface it when asked?
-
-3. **MEDIUM** — Oracle DECODE 2nd-angle: a DECODE with `NULL` as a **search value** (e.g., `DECODE(status, NULL, 'Missing', 'A', 'Active', 'Unknown')`) to confirm the responder writes the searched-CASE form with `WHEN status IS NULL` and does NOT write `WHEN status = NULL` (which would never match in Trino).
-
-4. **MEDIUM** — split_part out-of-range angle: e.g., parse the 4th field from a 3-field URL; does the responder say NULL (correct) or empty string (the iter493 inaccuracy)?
-
-5. **HOLD** — Federation: continue NOT probing per iter472+ directive.
+DO NOT probe federation. DO NOT touch §13.x federation guardrails in resources/22 or the federation rubric row.

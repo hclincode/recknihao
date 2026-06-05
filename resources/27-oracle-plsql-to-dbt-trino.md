@@ -355,6 +355,90 @@ These are the per-expression rewrites you'll do on almost every migrated SELECT.
 
 ### 4.1A Oracle DECODE → Trino CASE — the silent NULL-matching nuance
 
+> ### LEADING CANONICAL — `DECODE` with NULL as a search value → searched `CASE WHEN col IS NULL`
+>
+> **Question shape this answers**: "how do I migrate `DECODE(status, NULL, 'Missing', 'A', 'Active', 'Unknown')` to Trino", "Trino equivalent of Oracle DECODE that matches NULL", "DECODE with NULL as the first search argument", "rewrite Oracle DECODE NULL branch in Trino".
+>
+> **The exact mechanical rewrite — side by side.** When the Oracle `DECODE` lists `NULL` as a SEARCH VALUE (i.e., one of the `value_to_compare` positions, not just inside the result), translate to **searched** `CASE` with an explicit `WHEN col IS NULL` branch FIRST. Do NOT write `WHEN col = NULL` — `col = NULL` is UNKNOWN in Trino three-valued logic and never matches.
+>
+> ```sql
+> -- ORACLE source — DECODE matches NULL=NULL as TRUE (Oracle quirk).
+> -- The 4 positional args after the column are: search_1, result_1, search_2,
+> -- result_2; the trailing single arg 'Unknown' is the DECODE default.
+> SELECT
+>   order_id,
+>   DECODE(status, NULL, 'Missing', 'A', 'Active', 'Unknown') AS status_label
+> FROM orders;
+>
+> -- TRINO TRANSLATION — searched CASE with explicit IS NULL branch FIRST.
+> -- The order matters: the IS NULL branch MUST come before the value-equality
+> -- branches because once you write `WHEN status = 'A'` the comparison evaluates
+> -- to UNKNOWN for NULL rows and they would otherwise fall to ELSE.
+> SELECT
+>   order_id,
+>   CASE
+>     WHEN status IS NULL THEN 'Missing'
+>     WHEN status = 'A'   THEN 'Active'
+>     ELSE 'Unknown'
+>   END AS status_label
+> FROM iceberg.analytics.orders;
+> ```
+>
+> **The DECODE → searched-CASE positional mapping (memorize this).**
+>
+> | Oracle DECODE position | Trino searched CASE branch |
+> |---|---|
+> | `DECODE(col, NULL, X, ...)` (NULL as search value) | `WHEN col IS NULL THEN X` (FIRST branch) |
+> | `DECODE(col, 'A', Y, ...)` (literal search value) | `WHEN col = 'A' THEN Y` |
+> | `DECODE(col, ..., Z)` (trailing single arg = default) | `ELSE Z` |
+> | `DECODE(col, ...)` no trailing default | (omit ELSE — Trino returns NULL when no WHEN matches, which matches Oracle's "no default" behavior) |
+>
+> **DO-NOT-WRITE — banned forms when rewriting `DECODE(col, NULL, ...)`:**
+>
+> ```sql
+> -- WRONG (1) — `WHEN status = NULL` in either simple OR searched CASE.
+> -- `status = NULL` evaluates to UNKNOWN (not TRUE) under Trino three-valued
+> -- logic, so this branch NEVER matches. Rows with status=NULL silently fall
+> -- to ELSE 'Unknown' instead of returning 'Missing'. Trino emits NO warning.
+> SELECT order_id,
+>   CASE
+>     WHEN status = NULL THEN 'Missing'   -- NEVER MATCHES
+>     WHEN status = 'A'  THEN 'Active'
+>     ELSE 'Unknown'
+>   END AS status_label
+> FROM iceberg.analytics.orders;
+>
+> -- WRONG (2) — simple CASE with `WHEN NULL`. Same trap: simple CASE
+> -- compares with `=`, and `NULL = NULL` is UNKNOWN. NEVER fires.
+> SELECT order_id,
+>   CASE status
+>     WHEN NULL THEN 'Missing'             -- NEVER MATCHES
+>     WHEN 'A'  THEN 'Active'
+>     ELSE 'Unknown'
+>   END AS status_label
+> FROM iceberg.analytics.orders;
+>
+> -- WRONG (3) — relying on the `ELSE 'Unknown'` branch to also catch NULLs.
+> -- ELSE is hit when no WHEN matched (which IS true for NULL inputs), BUT
+> -- the original Oracle DECODE distinguishes NULL ('Missing') from "any other
+> -- non-A value" ('Unknown'). Collapsing them into one ELSE silently changes
+> -- the result for legitimately-unknown statuses like 'Z'.
+> SELECT order_id,
+>   CASE
+>     WHEN status = 'A' THEN 'Active'
+>     ELSE 'Unknown'                       -- NULL rows now get 'Unknown', not 'Missing'
+>   END AS status_label
+> FROM iceberg.analytics.orders;
+> ```
+>
+> **The one-rule memorize**: any Oracle `DECODE(col, NULL, ...)` MUST become a Trino **searched CASE** whose **first branch is `WHEN col IS NULL THEN ...`**. There is no other correct mechanical rewrite. The `IS NULL` predicate is the ONLY Trino construct that returns TRUE when `col` is NULL.
+>
+> Verified against [trino.io/docs/current/functions/conditional.html](https://trino.io/docs/current/functions/conditional.html) (CASE semantics) and Oracle 19c [`DECODE` docs](https://docs.oracle.com/en/database/oracle/oracle-database/19/sqlrf/DECODE.html) — *"DECODE considers two nulls to be equivalent."*
+>
+> See the deeper trap explanation, alternative COALESCE-sentinel pattern, and bulk-migration audit hint immediately below.
+>
+> ---
+>
 > **The trap.** Oracle `DECODE(col, val, result, ...)` treats **NULL = NULL as a match**: `DECODE(NULL, NULL, 'is_null', 'other')` returns `'is_null'`. Trino's **simple** CASE form `CASE col WHEN val THEN result END` uses **`=` semantics** where `NULL = NULL` is UNKNOWN — so `CASE NULL WHEN NULL THEN 'is_null' ELSE 'other' END` returns `'other'` (the ELSE branch). When you mechanically translate `DECODE` to simple `CASE col WHEN ...`, rows where `col` is NULL **silently change result**: in Oracle they hit the NULL branch; in Trino they fall through to the ELSE.
 >
 > Sources: Oracle 19c [`DECODE` docs](https://docs.oracle.com/en/database/oracle/oracle-database/19/sqlrf/DECODE.html) — *"DECODE considers two nulls to be equivalent. If expr is null, then Oracle returns the result of the first search that is also null."* Trino [conditional expressions docs](https://trino.io/docs/current/functions/conditional.html) document the simple CASE form as searching by equality; standard SQL equality (`=`) returns UNKNOWN when either side is NULL, so a simple `WHEN` value of NULL never matches.
@@ -2318,9 +2402,12 @@ The matching model SELECT (skeleton):
 {{ config(
     materialized='table',
     properties={
-      'partitioning': "ARRAY['month(order_date)', 'bucket(tenant_id, 16)']"
+      'partitioned_by': "ARRAY['month(order_date)', 'bucket(tenant_id, 16)']"
     }
 ) }}
+{#- dbt-trino properties-dict key is `partitioned_by` (snake_case), NOT `partitioning`.
+    Bare-Trino raw DDL `WITH (partitioning = ARRAY[...])` uses `partitioning`,
+    but the dbt config properties dict uses `partitioned_by`. See resource 28 § LEADING CANONICAL. -#}
 
 SELECT
   {{ dbt_utils.generate_surrogate_key(['tenant_id', 'natural_order_id']) }} AS order_id,
