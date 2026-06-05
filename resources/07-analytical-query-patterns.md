@@ -396,6 +396,16 @@ GROUP BY 1
 ORDER BY 1;
 ```
 
+> **Trino "last N days" — both forms are VALID; INTERVAL is just more idiomatic.** Per [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html), Trino supports BOTH equivalent forms for date subtraction. Pick either; do NOT rewrite working code to switch between them.
+>
+> | Form | Example | Valid? | Notes |
+> |---|---|---|---|
+> | A — INTERVAL literal (preferred / idiomatic) | `WHERE event_date >= current_date - INTERVAL '30' DAY` | YES | Most common in Trino code; reads naturally. |
+> | B — `date_add` with negative value | `WHERE event_date >= date_add('day', -30, current_date)` | YES | Signature `date_add(unit, value, timestamp) → same as input`; the docs explicitly state "Subtraction can be performed by using a negative value." Equally valid; use when programmatically computing the offset. |
+> | C — bare integer subtraction | `WHERE event_date >= current_date - 30` | **NO — parse/type error** | Trino has NO implicit integer-day arithmetic on DATE/TIMESTAMP. The `-` operator requires an INTERVAL on the right side. This is the ONLY form that is invalid. |
+>
+> **Do NOT over-ban:** `date_add('day', -N, current_date)` is a real, supported Trino function — not a workaround, not deprecated. The only banned form is the bare integer `current_date - N`.
+
 **The gotcha:** if no one signed up on Jan 14, that day is *missing from the result* — not zero. Dashboards then show a deceiving line that "skips" days.
 
 **Fix: generate a calendar and LEFT JOIN.**
