@@ -1,149 +1,128 @@
-# Judge Feedback — Iteration 506 (2026-06-06, EXTENDED PHASE)
+# Iter 507 Judge Feedback — 2026-06-06 (EXTENDED PHASE)
 
-## Overall result
+## Overall: 4.4375 PASS
 
-**Overall avg = (4.9375 + 4.9375 + 3.6875 + 4.9375) / 4 = 18.5 / 4 = 4.625 — PASS**
+(4.875 + 4.9375 + 3.0625 + 4.875) / 4 = 17.75 / 4 = **4.4375**
 
-- 105th consecutive overall PASS in extended phase.
-- Margin +1.125 above the 3.5 floor.
-- **BOTH iter505 Q3 fixes LANDED CLEANLY on re-probe** (Q1 clause-order + Q2 split_to_map).
-- **ONE new fabrication on Q3** — fabricated `end_of_month(...)` function (Trino 467 has no such function; the correct name is `last_day_of_month(x) -> date`).
-- Federation NOT probed (per directive — §13.x guardrails and 4.49944/310 row untouched).
+Above the 3.5 floor by +0.9375. **106th consecutive overall PASS in extended phase.** One load-bearing Q3 accuracy error (`old name still works` claim) drags ~0.5 below what would otherwise be a 4.9+ STRONG PASS cluster.
+
+Federation NOT probed per directive — `4.49944/310` row UNCHANGED.
 
 ---
 
-## Per-question scores
+## Per-question breakdown
 
-### Q1 — Pipe-delimited `categories` split + count per category — RE-PROBE of iter505 Q3 clause-order parse error
+### Q1 — ADD_MONTHS month-end RE-PROBE (Oracle → Trino) — 4.875 STRONG PASS
 
-**Score: 4.9375 STRONG PASS** (Accuracy 5.0, Clarity 5.0, Actionability 5.0, Completeness 4.75)
+**iter506 `end_of_month` fab FIX LANDED. Confirmed.**
 
-**Answer summary**: `SELECT TRIM(category) AS category, COUNT(*) AS product_count FROM products CROSS JOIN UNNEST(SPLIT(categories, '|')) AS t(category) GROUP BY TRIM(category) ORDER BY product_count DESC` — `CROSS JOIN UNNEST(...)` placed in the FROM clause with NO WHERE-before-JOIN; explicit statement that "CROSS JOIN UNNEST must appear BEFORE the WHERE clause"; secondary form showing subquery wrap to push partition pruning before the explode.
+- Accuracy: 5.0 — Core forms `date_add('month', n, d)` and `d + INTERVAL 'n' MONTH` both valid Trino 467. Month-end wrapper now correctly uses `last_day_of_month(...)` in BOTH positions of the CASE expression (the exact iter506 fab `end_of_month(...)` does NOT reappear). Verified via WebFetch trino.io/docs/current/functions/datetime.html: `last_day_of_month(x) -> date` is present and documented as "Returns the last day of the month"; `end_of_month` is NOT present on the page. Divergence example also accurate: Trino `date_add('month', 1, DATE '2026-02-28')` = 2026-03-28 (does NOT snap to month-end), while Oracle `ADD_MONTHS` = 2026-03-31 — this is the exact behavioral gap the wrapper closes.
+- Clarity: 4.75 — Concrete Oracle-vs-Trino example contrast; CASE wrapper spelled out inline.
+- Actionability: 5.0 — Engineer pastes the wrapper and it parses on Trino 467 first try.
+- Completeness: 4.75 — Mentions canonical form + wrapper + divergence + cites docs; minor -0.25 for not separately calling out that the integer-month overflow case (e.g., Jan 31 → Feb) lands on Feb 28 naturally without the wrapper.
 
-**Verification (WebFetch trino.io/docs/current/sql/select.html)**: Confirmed standard SQL clause order FROM → JOIN → WHERE → GROUP BY → HAVING → SELECT → ORDER BY. CROSS JOIN UNNEST is part of the FROM clause and parses cleanly in Trino 467. SPLIT(string, delimiter) → ARRAY(VARCHAR) correct. TRIM(category) correct. The query as written parses cleanly on Trino 467.
+**Verdict on the iter506 fab fix: LANDED.** The reconcile-in-place fix at r27 §4.x DO-NOT-WRITE matrix steered correctly: the responder used `last_day_of_month` in BOTH positions, NEVER wrote `end_of_month`. 17th leading-canonical bulletproofing instance + 10th findability/canonical-addition fix to land cleanly on re-probe.
 
-**FIX A (iter506 §1a.1 clause-order rule) — LANDED**: The iter505 Q3 broken query (WHERE-before-CROSS-JOIN) does NOT reappear. The responder routes the rule explicitly ("CROSS JOIN UNNEST must appear BEFORE the WHERE clause") + uses the subquery-wrap form as the partition-pushdown escape hatch. This is the 15th leading-canonical bulletproofing instance and the 8th findability/canonical-addition fix to land cleanly on re-probe.
+### Q2 — Count paid vs unpaid in ONE pass — 4.9375 STRONG PASS
 
-Minor -0.25 Completeness: no explicit call-out of NULL-on-empty-string behavior (`SPLIT(NULL, '|')` → NULL, `SPLIT('', '|')` → `['']` single-empty element). Not load-bearing here.
+- Accuracy: 5.0 — Both `SUM(CASE WHEN paid=true THEN 1 ELSE 0 END)` and `COUNT(*) FILTER (WHERE paid=true)` are valid Trino 467 conditional-aggregation forms. Verified at trino.io/docs/current/functions/aggregate.html: FILTER clause documented as "supported for all aggregate functions"; example shown for COUNT. "Identical plans on Trino 467" claim — both forms compile to a CASE-based partial aggregation in Trino so the plan-equivalence claim is reasonable and accurate.
+- Clarity: 5.0 — Both forms shown side-by-side, no jargon.
+- Actionability: 5.0 — Engineer can pick either and ship.
+- Completeness: 4.75 — Two canonical idioms covered; minor -0.25 for not noting that FILTER is slightly more readable / standard-SQL-portable.
 
----
+### Q3 — Iceberg RENAME / DROP COLUMN safety — 3.0625 FAIL
 
-### Q2 — `metadata` = 'plan=pro;seats=50;region=us' — extract `plan` value — RE-PROBE of iter505 Q3 "no split_to_map" fab
+**LOAD-BEARING ACCURACY ERROR.** This drags the whole iter.
 
-**Score: 4.9375 STRONG PASS** (Accuracy 5.0, Clarity 5.0, Actionability 5.0, Completeness 4.75)
+- Accuracy: **2.5** — Most of the answer is correct, BUT the load-bearing claim "A dbt model written before the rename can still reference the column by its original name OR the new name — they both map to the same field ID and read the same bytes" is **factually wrong and internally inconsistent with the user's own premise** (the user explicitly said their dbt models referencing the old name BROKE).
 
-**Answer summary**: `ELEMENT_AT(SPLIT_TO_MAP(metadata, ';', '='), 'plan')`. Explained `SPLIT_TO_MAP(string, entryDelim, keyValueDelim) -> MAP(VARCHAR,VARCHAR)` signature, `element_at` returns NULL if key absent, explicit "No regex required" call-out.
+  **Correction**: Iceberg's field-ID model means that after `ALTER TABLE ... RENAME COLUMN old TO new`:
+  - OLD DATA FILES on disk keep their field IDs, so reads of those files under the NEW name return the same bytes WITHOUT requiring a rewrite. This part of the answer is correct.
+  - The SQL-facing schema exposes ONLY the NEW name. Querying `SELECT old_name FROM tbl` after the rename FAILS with a column-not-found error (the Trino analyzer resolves identifiers against the current schema, which has only `new_name`).
+  - The "transparent to historical reads" framing conflates two distinct ideas: (a) old data files remain readable under the new name — TRUE, no rewrite needed; (b) old NAME remains queryable — FALSE, only the new name is queryable.
+  - This is exactly why the user's dbt models broke: their SQL referred to the old name, which the analyzer no longer recognizes.
 
-**Verification (WebFetch trino.io/docs/current/functions/string.html via WebSearch)**: Confirmed verbatim — `split_to_map(string, entryDelimiter, keyValueDelimiter) -> map<varchar, varchar>`. `element_at(map, key)` on a missing key returns NULL (per trino.io/docs/current/functions/map.html). Production approach correct.
+  Correct safe practice for dbt: bump the model SQL to the new name in the same commit, OR keep the old name as a view alias / select-alias for a deprecation window, OR avoid the rename entirely and add a new column + sunset the old one.
 
-**FIX B (iter506 §3.1A split family reference) — LANDED**: The iter505 Q3 fab "Trino has NO SPLIT_TO_MAP" does NOT reappear. The responder uses the function directly with the correct signature + the correct `element_at` companion. This is the 16th leading-canonical bulletproofing instance and the 9th findability/canonical-addition fix to land cleanly on re-probe.
+  Other parts of the answer ARE correct and earn partial credit:
+  - Field-ID-not-name tracking: TRUE.
+  - RENAME COLUMN is metadata-only, no Parquet rewrite: TRUE.
+  - DROP COLUMN is metadata-only (retires the field ID), storage reclaim needs `optimize` + `expire_snapshots` + `remove_orphan_files`: TRUE per Trino 467 Iceberg connector docs.
+  - Partition-column-drop edge case (evolve spec first): TRUE.
 
-Minor -0.25 Completeness: no mention of duplicate-key behavior (split_to_map throws on duplicate keys — `split_to_multimap` is the companion for repeated keys). Not asked, but the canonical §3.1A documents this so it would have been a natural cite.
+  Net Accuracy: 2.5 — the load-bearing claim is wrong and contradicts the user's own observation, but the surrounding mechanics are correct.
 
----
+- Clarity: 4.0 — Reasonably structured; the "both names work" claim is stated confidently which makes it more dangerous (engineer would not double-check).
+- Actionability: 2.0 — Engineer following this advice would NOT fix their dbt-models-broken problem because the answer tells them the old name should still work (so they'd hunt for some other issue and waste time). The DROP COLUMN maintenance sequence is actionable for that subquestion.
+- Completeness: 3.75 — Covers field-ID + metadata-only + DROP storage reclaim + partition-column edge case; misses the actual safe-rename-with-dbt playbook (bump SQL in same PR, or use view aliases as a deprecation step, or prefer add-new + sunset-old over rename for tables with downstream consumers).
 
-### Q3 — Oracle ADD_MONTHS / MONTHS_BETWEEN → Trino — FABRICATED FUNCTION
+### Q4 — date_trunc for week/month buckets — 4.875 STRONG PASS
 
-**Score: 3.6875 PASS** (Accuracy 2.75, Clarity 4.25, Actionability 3.75, Completeness 4.0)
+- Accuracy: 4.75 — `date_trunc('week', event_time)` and `date_trunc('month', event_time)` are valid Trino 467. Verified at trino.io/docs/current/functions/datetime.html: signature is `date_trunc(unit, x) -> [same as input]` — the return type matches the input type (timestamp in → timestamp out, date in → date out; NOT always a DATE). The answer is INTERNALLY INCONSISTENT: states "returns a DATE" early then later corrects to "returns the same type as the input." The latter is correct; the former is wrong. Minor nit, but visible to a careful reader. The `time_bucket` "not in Trino, that's PostgreSQL/TimescaleDB" disclaimer is correct. The GROUP-BY-must-repeat-expression rule (Trino #16533) is correct — verified the issue exists at github.com/trinodb/trino/issues/16533 ("Using alias in group by is not supported by Trino").
+- Clarity: 5.0 — Both `'week'` and `'month'` units shown; the GROUP BY repeat-expression caveat is the right gotcha to surface for engineers used to Postgres/BigQuery alias-in-GROUP-BY.
+- Actionability: 5.0 — Engineer pastes and it works.
+- Completeness: 4.75 — Covers `date_trunc` + units + GROUP-BY caveat + `time_bucket` clarification; could mention that week truncation in Trino starts on Monday (ISO 8601) for engineers used to Sunday-start, but minor.
 
-**Answer summary**:
-- ADD_MONTHS: `date_add('month', 3, start_date)` or `start_date + INTERVAL '3' MONTH` — CORRECT.
-- MONTHS_BETWEEN: `date_diff('month', start_date, end_date)` returns INTEGER (boundaries only, not fractional like Oracle) — CORRECT semantic flag.
-- Fractional approximation: `date_diff('day', start_date, end_date) / 31.0` — workable approximation, called out as approximate. ACCEPTABLE.
-- Oracle last-day clamping caveat — CORRECT raise.
-- **EXACT-semantics wrapper**: `CASE WHEN end_of_month(start_date) = start_date THEN end_of_month(date_add('month', 3, start_date)) ELSE date_add('month', 3, start_date) END` — **FABRICATED FUNCTION**.
-
-**Verification (WebFetch trino.io/docs/current/functions/datetime.html)**:
-- **`end_of_month` is NOT a Trino function.** Direct WebFetch confirms: "end_of_month: Not present in this documentation."
-- **The correct function is `last_day_of_month(x) -> date`** — confirmed present at trino.io/docs/current/functions/datetime.html ("Returns the last day of the month").
-- `date_add(unit, value, timestamp)` signature confirmed CORRECT.
-- `date_diff(unit, timestamp1, timestamp2) -> bigint` signature confirmed CORRECT (returns month-boundary count, not fractional — matches the responder's flag).
-- `start_date + INTERVAL '3' MONTH` valid in Trino 467 — CORRECT.
-- Month-end clamp behavior of `date_add('month', N, ...)`: Trino's runtime DOES clamp (e.g. `date_add('month', 1, DATE '2024-01-31')` → `2024-02-29`), though the docs don't spell this out explicitly. The responder's clamp claim is consistent with observed Trino behavior, so not flagged.
-
-**The `end_of_month` fabrication is load-bearing**: an engineer copy-pasting the EXACT-semantics wrapper will hit `Function 'end_of_month' not registered` at parse/analyze time. The wrapper must use `last_day_of_month(...)` in both positions:
-```sql
-CASE WHEN last_day_of_month(start_date) = start_date
-     THEN last_day_of_month(date_add('month', 3, start_date))
-     ELSE date_add('month', 3, start_date)
-END
-```
-
-Accuracy 2.75 (the wrapper is the deliverable; ADD_MONTHS/MONTHS_BETWEEN core correct, but the load-bearing snippet fabricates a function name). Clarity 4.25 (well-organized, jargon explained). Actionability 3.75 (engineer can use the ADD_MONTHS/MONTHS_BETWEEN parts directly; the exact-semantics wrapper breaks at runtime — drag). Completeness 4.0 (covers both Oracle functions + caveat + workaround, but missed the right function name).
+**Minor nit to fix**: the responder contradicts itself about `date_trunc` return type within the same answer. The "same type as input" sentence wins, but the earlier "returns a DATE" sentence is misleading. Reconcile-in-place at the `date_trunc` canonical to remove the misleading "returns a DATE" framing — return type is ALWAYS [same as input].
 
 ---
 
-### Q4 — CASE expressions in Trino + dbt value-mapping pattern
+## iter506 fab fix outcome
 
-**Score: 4.9375 STRONG PASS** (Accuracy 5.0, Clarity 5.0, Actionability 5.0, Completeness 4.75)
+- `end_of_month(...)` fab: **FIX LANDED** (Q1, see above). The reconcile-in-place at r27 §4.x DO-NOT-WRITE matrix (2 new rows + keyword anchor) steered the responder to `last_day_of_month` cleanly. 17th leading-canonical bulletproofing instance + 10th findability/canonical-addition fix to land cleanly on first re-probe.
 
-**Answer summary**: Simple CASE (`CASE status_code WHEN 'active' THEN 'Active' ... ELSE 'Unknown' END`) + searched CASE; dbt staging value-mapping pattern; incremental example with `is_incremental()` guard.
+## NEW iter507 load-bearing accuracy error
 
-**Verification (WebFetch trino.io/docs/current/functions/conditional.html)**: Both simple CASE (`CASE expression WHEN value THEN result [WHEN ...] [ELSE result] END`) and searched CASE (`CASE WHEN condition THEN result [WHEN ...] [ELSE result] END`) confirmed valid Trino 467 syntax. ELSE clause optional, returns NULL if no branch matches and no ELSE. The dbt `is_incremental()` guard pattern (`{% if is_incremental() %} WHERE updated_at > (SELECT MAX(updated_at) FROM {{ this }}) {% endif %}`) is correct per docs.getdbt.com/docs/build/incremental-models.
+- **Q3 Iceberg RENAME COLUMN "old name still queryable" fab.** This is the new load-bearing error. The responder correctly explained field-ID-not-name tracking for OLD DATA FILES but then OVER-EXTENDED that to mean the OLD NAME remains queryable in SQL — which is false. The analyzer resolves identifiers against the current schema; only the NEW name is exposed. The user's own observation (their dbt models referencing the old name BROKE) directly contradicts the responder's claim, so the responder failed to reconcile their answer with the question premise.
 
-No NULL-discriminant claims made (the responder did not assert anything misleading about simple CASE with NULL — non-issue here since status codes are non-null literals).
+## Other fabrication scan
 
-Minor -0.25 Completeness: no explicit call-out of the simple-CASE-with-NULL trap (`CASE NULL WHEN NULL THEN ...` never matches because `NULL = NULL` is NULL, not TRUE) — not load-bearing for this question but worth a future canonical note.
+- Q1: clean (last_day_of_month real, no end_of_month).
+- Q2: clean (FILTER + SUM(CASE) both real).
+- Q3: load-bearing claim (above); rest of mechanics accurate.
+- Q4: internal inconsistency (DATE vs same-as-input return type) — minor nit; not a fab per se, but reconcile.
 
----
+## iter508 teacher recommendations
 
-## Critical fixes status
+**HIGH PRIORITY — Q3 reconcile-in-place at Iceberg RENAME COLUMN canonical (r13 / r03 / wherever Iceberg schema evolution lives).**
 
-| Fix | Iter | Where | Status | Probe outcome |
-|---|---|---|---|---|
-| **A. SQL clause-order rule (CROSS JOIN UNNEST in FROM, BEFORE WHERE)** | iter506 r07 §1a.1 | resources/07-analytical-query-patterns.md | **LANDED CLEANLY** | Q1 4.9375 STRONG — query parses, rule stated, subquery-wrap pushdown form shown |
-| **B. split_to_map family reference** | iter506 r23 §3.1A | resources/23-sql-best-practices-olap.md | **LANDED CLEANLY** | Q2 4.9375 STRONG — split_to_map + element_at used directly with correct signature, "no split_to_map" fab gone |
+The fix is conceptual reconciliation, not a new canonical. Find the existing Iceberg RENAME COLUMN section and add (or strengthen if already present):
 
-Both fixes are confirmed landed on first-paste re-probe. That is two clean leading-canonical bulletproofing instances in iter506.
+1. **DO-NOT-WRITE row**: "After RENAME COLUMN, the OLD NAME is NOT queryable. Trino's analyzer resolves identifiers against the CURRENT SCHEMA, which exposes only the NEW name. `SELECT old_name FROM tbl` after a rename fails with `Column 'old_name' cannot be resolved`. Do NOT claim both names work — only the new name works."
+2. **Mechanics callout** (disambiguate two distinct concepts):
+   - **Old DATA FILES** keep their field IDs and are read transparently under the new column name (no Parquet rewrite needed). This is what "metadata-only / lossless" means.
+   - **Old NAME** is dropped from the SQL-facing schema at the moment of rename. Only the new name is exposed.
+3. **Safe-rename playbook for dbt downstream consumers**:
+   - Bump dbt model SQL to the new name in the SAME PR / commit as the `ALTER TABLE ... RENAME COLUMN`.
+   - Or: keep a transitional VIEW that aliases new name back to old name for a deprecation window (`CREATE VIEW v AS SELECT new_name AS old_name FROM t`), then drop the view after consumers migrate.
+   - Or: skip the rename entirely — add new column, dual-write or backfill, then sunset old column (preferred for tables with many downstream consumers).
+4. **Keyword anchors**: "iceberg rename column old name not found, alter table rename column dbt broke, iceberg rename column safe, rename column field id, iceberg schema evolution column not found, iceberg rename column old name still works (NO — only new name is queryable)."
 
----
+**MEDIUM PRIORITY — Q4 `date_trunc` return type reconcile-in-place.**
 
-## New fabrication / gaps from iter506
+Find the `date_trunc` canonical (likely r07 or r05) and ensure the return-type framing is unambiguous: "ALWAYS returns the SAME TYPE as the input — timestamp → timestamp, date → date. Does NOT downcast to date." Strike any "returns a DATE" framing.
 
-| Issue | Severity | Question | Where | Iter507 teacher action |
-|---|---|---|---|---|
-| `end_of_month(date)` fabricated — correct Trino 467 name is `last_day_of_month(date)` | LOAD-BEARING (copy-paste runtime error) | Q3 | r27 Oracle→Trino month-arithmetic canonical (likely the ADD_MONTHS/MONTHS_BETWEEN row in §4.x) | RECONCILE-IN-PLACE: add `last_day_of_month(x) -> date` as canonical with the EXACT-semantics ADD_MONTHS wrapper worked example using last_day_of_month in BOTH positions; add DO-NOT-WRITE row banning `end_of_month(...)` with the exact error message `Function 'end_of_month' not registered`; cross-ref r07 and r23. Keep wrapper <=20 lines. |
+## iter508 judge probe targets
 
----
+1. **HIGH — Iceberg RENAME COLUMN re-probe** (different angle): "I renamed `customer_email` to `email`, my Trino query `SELECT customer_email FROM customers` now fails with column-not-found, but the docs said rename is metadata-only — what's the fix?" Verify the iter507 Q3 fix lands: responder must say only the NEW name is queryable + bump SQL / view alias / dual-column playbook.
+2. **HIGH — Iceberg RENAME COLUMN 3rd angle**: "Is there a way to keep the old column name working as an alias after RENAME COLUMN?" Verify response routes to view-aliasing or add-new-then-sunset patterns, NOT to "both names work."
+3. **MEDIUM — date_trunc return type re-probe**: "I did `date_trunc('month', event_timestamp)` and compared to a DATE column — type mismatch. Why?" Verify responder says return type is `timestamp` (same as input), NOT date.
+4. **MEDIUM — ADD_MONTHS 3rd angle re-probe**: Jan 30 input to ADD_MONTHS(_, 1). Verify wrapper still uses `last_day_of_month` in both positions and explains the Jan 30 → Feb 28 case (Oracle clamps to Feb-end because target month has no day 30; Trino `date_add` also lands on Feb 28 — but for a different reason: month-end overflow, NOT month-end snap).
+5. **LOW — conditional aggregation 3rd angle**: paid sum and unpaid count in one pass (mixed aggregates with FILTER).
+6. **Federation stays UNPROBED** per directive (4.49944/310 row UNCHANGED).
 
-## Topic average updates
+## Topic averages updated
 
-### Common analytical query patterns: aggregations, funnels, cohort, time-series
-Q1 (split-and-count CROSS JOIN UNNEST canonical) maps here.
-- Prior: 4.6450 / 10
-- Update: (4.6450 * 10 + 4.9375) / 11 = 51.3875 / 11 = **4.6716 / 11** (+0.0266)
+- **Common analytical query patterns**: Q4 date_trunc maps here. 4.6716/11 → (4.6716*11 + 4.875)/12 = 56.2626/12 = **4.6886/12** (+0.0170).
+- **Oracle PL/SQL→dbt/Trino migration**: Q1 ADD_MONTHS maps here. 4.5232/72 → (4.5232*72 + 4.875)/73 = 330.5454/73 = **4.5280/73** (+0.0048 — clean recovery; iter506 Q3 fab drag fully unwound).
+- **SQL query best practices for OLAP**: Q2 conditional aggregation maps here. 4.5425/57 → (4.5425*57 + 4.9375)/58 = 263.8600/58 = **4.5493/58** (+0.0068).
+- **Iceberg table maintenance**: Q3 RENAME / DROP COLUMN maps here (closest match — schema evolution is a maintenance op). 4.4957/149 → (4.4957*149 + 3.0625)/150 = 672.8218/150 = **4.4855/150** (-0.0102 — Q3 FAIL drags but stays above 4.0 floor and above 3.5 pass).
+- **Federation**: UNCHANGED at 4.49944/310 per directive.
 
-### Oracle PL/SQL → dbt + Trino SQL migration
-Q3 (ADD_MONTHS / MONTHS_BETWEEN) maps here.
-- Prior: 4.5350 / 71
-- Update: (4.5350 * 71 + 3.6875) / 72 = 325.6725 / 72 = **4.5232 / 72** (-0.0118 — Q3 fab drags slightly, but stays above 3.5 floor)
+## Headline
 
-### SQL query best practices for OLAP
-Q2 (SPLIT_TO_MAP element_at extraction) and Q4 (CASE / dbt value-mapping) both map here as SQL-best-practices canonical.
-- Prior: 4.5288 / 55
-- Update: (4.5288 * 55 + 4.9375 + 4.9375) / 57 = 258.9215 / 57 = **4.5425 / 57** (+0.0137)
-
-### Trino federation / cross-source connectors
-- **NOT probed**. Row stays **4.49944 / 310 UNCHANGED** per directive.
-
----
-
-## Iter507 probe targets
-
-| Priority | Probe | Why |
-|---|---|---|
-| **HIGH** | Oracle ADD_MONTHS month-end re-probe ("Oracle ADD_MONTHS(DATE '2026-01-31', 1) returns 2026-02-28 — how do I match that in Trino?") | Confirms the `end_of_month` → `last_day_of_month` reconcile fix lands on first-paste; this is the load-bearing fix from iter506 |
-| **HIGH** | MONTHS_BETWEEN with fractional output (Oracle returns fractional days/31; Trino date_diff('month', ...) returns integer) — 2nd angle | Verifies the integer-vs-fractional Trino docs caveat is firmly canonical; confirm the day-divided-by-31 approximation row stays accurate |
-| **MEDIUM** | Pipe-delimited split-and-count WITH partition filter (test that the subquery-wrap form is the routed answer when partition pushdown is needed) — 3rd angle on §1a.1 | Verifies the secondary "subquery-wrap to push partition-pruning BEFORE explode" form holds under partition-pruning question phrasing |
-| **MEDIUM** | split_to_map duplicate keys (`a=1;b=2;a=3`) — test that split_to_multimap is recommended, NOT split_to_map (which throws on dup keys) | Verifies §3.1A duplicate-key DO-NOT-WRITE row routes correctly |
-| **LOW** | Searched CASE with NULL discriminant (engineer asks "why does `CASE my_col WHEN NULL THEN 'missing' END` never return 'missing'?") | Tests whether a future canonical NULL-equality CASE note is needed |
-| **OFF** | Federation — DO NOT PROBE. §13.x guardrails + 4.49944/310 row stay frozen. |
-
----
-
-## Summary
-
-- **Iter506 PASS — 4.625 overall, +1.125 above floor**.
-- **BOTH iter505 fixes landed cleanly on first re-probe** (clause-order rule + split_to_map family reference). 15th and 16th leading-canonical bulletproofing instances.
-- **ONE new load-bearing fabrication on Q3**: `end_of_month` → must be `last_day_of_month`. Reconcile in r27 Oracle→Trino canonical for iter507.
-- Federation untouched per directive. state.json unchanged (iteration 506).
+- **PASS overall (4.4375)** — 106th consecutive extended-phase PASS, margin +0.9375 above floor.
+- **iter506 `end_of_month` fab FIX LANDED** (Q1 — `last_day_of_month` used in both wrapper positions, no `end_of_month` regression). 17th leading-canonical bulletproofing instance + 10th findability/canonical-addition fix to land cleanly on first re-probe.
+- **NEW load-bearing Q3 accuracy error**: "old column name still queryable after RENAME COLUMN" claim is factually wrong AND internally inconsistent with the question's own premise. Needs iter508 reconcile-in-place at the Iceberg RENAME COLUMN canonical.
+- **NEW minor Q4 nit**: `date_trunc` return-type internal inconsistency (DATE vs same-as-input). Reconcile-in-place.
+- Federation guardrails / rubric row UNTOUCHED per directive.
