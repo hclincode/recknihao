@@ -2137,7 +2137,8 @@ WITH base AS (
 | `LAST_VALUE(col) OVER (PARTITION BY p ORDER BY o ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)` | Same — identical (but the unbounded-following clause IS required in both, easy footgun) | Portable. |
 | `SUM(amount) OVER (PARTITION BY customer_id ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)` | Same — identical (rolling 7-row sum) | Portable. |
 | `NTILE(4) OVER (ORDER BY revenue)` | Same — identical | Portable. |
-| `LISTAGG(col, ',') WITHIN GROUP (ORDER BY col)` | `array_join(array_agg(col ORDER BY col), ',')` or `listagg(col, ',') WITHIN GROUP (ORDER BY col)` (Trino 396+) | LISTAGG was added to Trino in PR #6418 (release 396). For older Trino, use `array_join(array_agg(...))`. See the ON OVERFLOW mapping callout immediately below — Trino supports `ON OVERFLOW ERROR | TRUNCATE` natively and direct 1:1 to Oracle. |
+| `LISTAGG(col, ',') WITHIN GROUP (ORDER BY col)` (aggregate, one row per group) | `listagg(col, ',') WITHIN GROUP (ORDER BY col)` (Trino 396+; **AGGREGATE-ONLY** — requires `GROUP BY`) **OR** `array_join(array_agg(col ORDER BY col), ',')` | LISTAGG was added to Trino in PR #6418 (release 396). Trino `listagg` is an **aggregate function only — it has NO window form** (see §7A.2A immediately below). For older Trino, use `array_join(array_agg(...))`. See the ON OVERFLOW mapping callout below — Trino supports `ON OVERFLOW ERROR \| TRUNCATE` natively and direct 1:1 to Oracle. |
+| `LISTAGG(col, ',') WITHIN GROUP (ORDER BY col) OVER (PARTITION BY k)` (Oracle's **WINDOWED** form — value repeated on every row of the partition) | **NO direct Trino equivalent.** Use `array_join(array_agg(col) OVER (PARTITION BY k), ',')` with a pre-sorted CTE — see **§7A.2A LEADING CANONICAL** immediately below for the full canonical card + DO-NOT-WRITE. | Oracle's windowed LISTAGG has NO direct rewrite. **`listagg(...) OVER (...)` is FABRICATED** — Trino docs verbatim: "The current implementation of listagg function does not support window frames" ([trino.io/docs/current/functions/aggregate.html#listagg](https://trino.io/docs/current/functions/aggregate.html#listagg)). See §7A.2A. |
 | `KEEP (DENSE_RANK FIRST/LAST ORDER BY ...)` clause | NO direct equivalent — rewrite as window function + filter | Oracle-specific. |
 
 #### LISTAGG `ON OVERFLOW` — direct 1:1 Oracle-to-Trino mapping (NOT a gap)
@@ -2204,6 +2205,117 @@ WHERE rn = 1;
 ```
 
 **Open feature request:** [trinodb/trino #20687](https://github.com/trinodb/trino/issues/20687) — `QUALIFY` not yet implemented as of Trino 467.
+
+---
+
+### 7A.2A LEADING CANONICAL — Oracle WINDOWED `LISTAGG ... OVER (PARTITION BY ...)` → Trino (NO direct equivalent; listagg has NO window form)
+
+> **Keyword anchors so the responder lands here:** windowed listagg, listagg OVER, listagg PARTITION BY, listagg analytic, listagg every row, listagg repeated on every row, listagg WITHIN GROUP OVER, Oracle LISTAGG to Trino, LISTAGG keep value on every row, listagg as window function, listagg window frame.
+
+**The one rule.** Trino's `listagg(expr, sep) WITHIN GROUP (ORDER BY ...)` is an **AGGREGATE function ONLY**. It **requires `GROUP BY`** in the outer query and produces **ONE row per group**. It **does NOT support `OVER (...)` window frames**. Per [trino.io/docs/current/functions/aggregate.html#listagg](https://trino.io/docs/current/functions/aggregate.html#listagg) **verbatim**:
+
+> "The current implementation of `listagg` function does not support window frames."
+
+`listagg` also does NOT appear on Trino's window-function list ([trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html) lists only `cume_dist`, `dense_rank`, `ntile`, `percent_rank`, `rank`, `row_number`, `first_value`, `last_value`, `nth_value`, `lead`, `lag` — plus generic aggregate-as-window — `listagg` is **explicitly excluded**).
+
+**The Oracle source you're migrating:**
+
+```sql
+-- Oracle: windowed LISTAGG (value repeated on EVERY row of the partition)
+SELECT order_id,
+       product_name,
+       LISTAGG(product_name, ', ') WITHIN GROUP (ORDER BY product_name)
+           OVER (PARTITION BY order_id) AS products_in_order
+FROM   order_items;
+```
+
+There is **NO keyword-for-keyword Trino rewrite** of this Oracle windowed form. You must choose between **two canonical rewrites** depending on whether you actually need the repeated-on-every-row shape.
+
+---
+
+#### Case A — AGGREGATE form (ONE row per group): the typical case
+
+Most analytical workloads that use Oracle's windowed LISTAGG don't actually need the value on every row — they just want the concatenated list, one row per group. **Always prefer this form when possible** — it's simpler, deterministic, and uses only the documented `listagg` surface.
+
+```sql
+-- Trino: aggregate listagg with GROUP BY (one row per order_id, concatenated products)
+SELECT order_id,
+       listagg(product_name, ', ') WITHIN GROUP (ORDER BY product_name) AS products_in_order
+FROM   order_items
+GROUP BY order_id;
+```
+
+Why this is the preferred rewrite:
+- Native `listagg` aggregate — documented surface, no caveats.
+- `WITHIN GROUP (ORDER BY product_name)` gives deterministic ordering of the concatenated values.
+- One row per group — the result shape almost everyone actually wants.
+- Supports `ON OVERFLOW ERROR | TRUNCATE` natively (see §7A.2 immediately above).
+
+---
+
+#### Case B — WINDOWED form (value REPEATED on every row): only if you actually need denormalized output
+
+If the downstream consumer truly needs the concatenated list **repeated on every row** of the partition (denormalized output, often used in BI tools that can't pivot), you must rewrite to `array_join(array_agg(...) OVER (...))`.
+
+**The naive rewrite (UNSAFE — order is undefined):**
+
+```sql
+-- WORKS but the array contents are in UNDEFINED ORDER (per trinodb/trino #16984)
+SELECT order_id,
+       product_name,
+       array_join(array_agg(product_name) OVER (PARTITION BY order_id), ', ') AS products_in_order
+FROM   order_items;
+```
+
+**The CAVEAT.** Trino does **NOT support `array_agg(expr ORDER BY y) OVER (...)`** — combining the aggregate's inline `ORDER BY` with a window `OVER (...)` clause raises `"must be an aggregate expression or appear in GROUP BY clause"` (per [trinodb/trino #16984](https://github.com/trinodb/trino/issues/16984)). So you cannot write `array_agg(product_name ORDER BY product_name) OVER (PARTITION BY order_id)` to get deterministic ordering inside the windowed array.
+
+**The deterministic-ordering rewrite (PRE-SORT in a CTE):**
+
+```sql
+-- For deterministic ordering inside the windowed array, pre-sort in a CTE first
+WITH sorted_items AS (
+    SELECT order_id, product_name
+    FROM   order_items
+    ORDER BY order_id, product_name           -- pre-sort source rows
+)
+SELECT order_id,
+       product_name,
+       array_join(array_agg(product_name) OVER (PARTITION BY order_id), ', ') AS products_in_order
+FROM   sorted_items;
+```
+
+**Caveat on the caveat.** Even pre-sorting in a CTE is not strictly guaranteed across optimizer passes — Trino's optimizer may reorder rows between the CTE and the window. The **truly safe** pattern is **Case A** (aggregate form + `GROUP BY`); accept the one-row-per-key shape and pivot/join later if you need the denormalized shape downstream.
+
+---
+
+#### DO-NOT-WRITE — banned listagg-OVER patterns
+
+> Every row below has produced a confirmed FAIL in past migrations or a documented Trino parse / analysis error. Memorize and never copy-paste.
+
+| Banned pattern (DO NOT WRITE) | Why it fails | What to write instead |
+|---|---|---|
+| `listagg(col, sep) WITHIN GROUP (ORDER BY col) OVER (PARTITION BY k)` | **FABRICATED.** `listagg` has NO window form on Trino. Trino docs verbatim: "The current implementation of listagg function does not support window frames." Fails at analysis. | **Case A** (aggregate + `GROUP BY`) for the typical one-row-per-group result, **or Case B** (`array_join(array_agg(col) OVER (PARTITION BY k), sep)`) if you truly need the value repeated on every row. |
+| `listagg(col, sep) OVER (PARTITION BY k)` (without `WITHIN GROUP`) | **FABRICATED.** Same root cause — listagg has no window form, with or without `WITHIN GROUP`. | Same as above. |
+| Diagnosis: "the listagg-OVER error is a `NULLS`-default / quoting issue — add `NULLS FIRST` or change quote style and it'll work" | **WRONG DIAGNOSIS.** The error is fundamental — `listagg` simply has NO window form on Trino. No NULL-handling change, no quote-style change, no separator change, no `WITHIN GROUP` reordering will make `listagg ... OVER (...)` work. The function does not accept `OVER` at all. | Stop debugging quoting/NULLS. Switch to Case A or Case B. |
+| `array_agg(col ORDER BY y) OVER (PARTITION BY k)` (inline `ORDER BY` + `OVER`) | **FABRICATED COMBINATION.** Trino's `array_agg` supports either `ORDER BY` inside the aggregate (without `OVER`) OR `OVER (...)` as a window (without inline `ORDER BY`), but **NOT BOTH AT ONCE** — per [trinodb/trino #16984](https://github.com/trinodb/trino/issues/16984), the parser raises "must be an aggregate expression or appear in GROUP BY clause." | Pre-sort source rows in a CTE/subquery, then `array_agg(col) OVER (PARTITION BY k)` on the pre-sorted source. Or prefer Case A (`listagg` aggregate + `GROUP BY`) and pivot downstream. |
+| "Trino added `listagg` as a window function in release 467 (or any other release)" | **FABRICATED.** `listagg` was added to Trino as an **aggregate function** in release 396 (PR #6418) and has remained aggregate-only through Trino 467 / current 481. No release ever made it a window function. | Cite §7A.2 — `listagg` (Trino 396+, **aggregate only**). |
+| "`listagg` supports `OVER (...)` if you use the SQL:2016 ordered-set form" | **FABRICATED.** SQL:2016 specifies `LISTAGG` only as an ordered-set aggregate (the `WITHIN GROUP (ORDER BY ...)` form). Adding `OVER (...)` is NOT in SQL:2016 — Oracle's windowed-LISTAGG is an Oracle vendor extension. Trino implements the standard aggregate form only. | Case A or Case B per the choice rule below. |
+
+---
+
+#### The choice rule — which case do I pick?
+
+1. **Do you actually need the value on every row?** If you can pivot/join downstream, **always pick Case A** (aggregate + `GROUP BY`). Simpler, deterministic, native `listagg` with full `ON OVERFLOW` support.
+2. **If you genuinely need denormalized output** (value repeated on every row of the partition — e.g., the BI tool can't pivot), use **Case B** with a pre-sort CTE. Accept that the deterministic-ordering guarantee is weaker than `listagg`'s `WITHIN GROUP`.
+3. **Never write `listagg(...) OVER (...)`** in any form. It is not implemented on Trino.
+
+#### Cross-references
+
+- §7A.2 immediately above — the aggregate (one-row-per-group) form, plus the `ON OVERFLOW ERROR | TRUNCATE` mapping.
+- [resource 23 § anti-patterns row — `STRING_AGG(col, sep ORDER BY ...)`](23-sql-best-practices-olap.md) — the PostgreSQL→Trino `STRING_AGG` mapping (same `listagg` aggregate, same aggregate-only restriction).
+- [trino.io/docs/current/functions/aggregate.html#listagg](https://trino.io/docs/current/functions/aggregate.html#listagg) — the verbatim "does not support window frames" sentence.
+- [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html) — the canonical Trino window-function list (`listagg` is NOT in it).
+- [trinodb/trino #16984](https://github.com/trinodb/trino/issues/16984) — the open issue documenting that `array_agg(x ORDER BY y) OVER (...)` is not supported.
 
 ---
 
