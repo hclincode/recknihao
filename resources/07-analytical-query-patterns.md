@@ -38,6 +38,37 @@ ORDER BY signups DESC;
 
 ---
 
+## 1a. Exploding an array column to one row per element (UNNEST / array to rows / LEFT JOIN UNNEST)
+
+**The SaaS question:** "I have a `users` table with a `tags ARRAY(VARCHAR)` column — give me one row per (user, tag) so I can `GROUP BY tag`." Same shape: "one row per element", "explode array", "array to rows", "flatten array column".
+
+**Keyword anchor:** UNNEST array column, explode array Trino, array to rows, one row per element, one row per tag, flatten array, LEFT JOIN UNNEST, CROSS JOIN UNNEST, keep empty array rows, preserve NULL array rows.
+
+**Two forms — they have DIFFERENT row semantics:**
+
+```sql
+-- FORM 1 — CROSS JOIN UNNEST: DROPS parent rows whose array is NULL or empty.
+-- Semantically an INNER join: zero array elements -> zero output rows for that parent.
+SELECT u.user_id, t.tag
+FROM iceberg.analytics.users u
+CROSS JOIN UNNEST(u.tags) AS t(tag);
+
+-- FORM 2 — LEFT JOIN UNNEST(...) ON TRUE: KEEPS parent rows whose array is NULL or empty,
+-- emitting one row with NULL in the unnested column. ON TRUE is the only join condition the
+-- LEFT JOIN UNNEST form supports.
+SELECT u.user_id, t.tag
+FROM iceberg.analytics.users u
+LEFT JOIN UNNEST(u.tags) AS t(tag) ON TRUE;
+```
+
+**Rule of thumb:** if dropping the user when their `tags` array is NULL or `ARRAY[]` is WRONG for your metric (e.g., "users per tag, but also count untagged users"), use FORM 2 (`LEFT JOIN UNNEST ... ON TRUE`). If you genuinely want to skip empty/NULL arrays (e.g., "tag popularity — untagged users don't count"), FORM 1 is correct and slightly cheaper.
+
+Verified at [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) (UNNEST section: "LEFT JOIN is preferable in order to avoid losing the row containing the array/map field in question when referenced columns from relations on the left side of the join can be empty or have NULL values").
+
+> **Note:** the `UNNEST(sequence(...))` patterns in §4 (time-series gap-fill) and §5 Pattern B2 (YoY gap-fill spine) never drop rows because `sequence(start, stop, step)` always returns a non-NULL, non-empty array — the NULL/empty-array gotcha only applies to UNNEST over a real ARRAY column whose values can be NULL or `ARRAY[]`.
+
+---
+
 ## 2. Funnels (drop-off across a sequence of events)
 
 **The SaaS question:** "Of users who signed up last week, how many completed onboarding, and of those, how many activated a paid feature within 7 days?"
