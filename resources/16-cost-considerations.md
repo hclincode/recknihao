@@ -496,6 +496,135 @@ These are the absolutes most often stated incorrectly when an engineer asks "wha
 
 ---
 
+## LEADING CANONICAL — "How do I tier hot vs cold storage on Trino + Iceberg + MinIO? Can I move old partitions to cheaper / archive storage?" (read this FIRST for hot/cold/tiering/archive/storage-class/lifecycle questions)
+
+> **This is the findable canonical answer for storage-tiering questions on the on-prem Trino 467 + Iceberg 1.5.2 + MinIO stack. Every capability claim below is verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (table-property list + EXECUTE registry) and [docs.min.io/enterprise/aistor-object-store/administration/object-lifecycle-management/](https://docs.min.io/enterprise/aistor-object-store/administration/object-lifecycle-management/) (object tiering). Keywords this block answers: "tier", "tiering", "hot", "cold", "warm", "archive", "storage class", "storage tier", "lifecycle", "move old partitions", "cheaper storage", "S3 Glacier equivalent". Read this BEFORE inventing DDL — there is no `SET STORAGE TIER` statement on Trino 467.**
+>
+> ### The honest capability bound — there is NO per-partition storage-tier DDL on Trino 467 + Iceberg 1.5.2
+>
+> **State this upfront so the engineer does not waste a sprint hunting for a SQL knob that does not exist.** Trino 467 with the Iceberg connector has **no SQL way to put a specific partition (or specific data files) on a different MinIO bucket / storage class / tier through Trino DDL or Iceberg table properties.** Specifically:
+>
+> | What engineers often expect to exist | Does it exist on Trino 467 + Iceberg 1.5.2? | Verified against |
+> |---|---|---|
+> | `ALTER TABLE x SET STORAGE TIER = 'cold' WHERE event_date < ...` SQL statement | **NO. Does not exist.** Trino has no `SET STORAGE TIER` clause in any form. | trino.io/docs/current/connector/iceberg.html (no such ALTER TABLE form documented) |
+> | Iceberg table property `storage_tier` / `storage_class` / `tier` in `CREATE TABLE x WITH (...)` | **NO. Not in the Iceberg table-property list.** The complete supported list is exactly: `format`, `compression_codec`, `partitioning`, `sorted_by`, `location`, `format_version`, `max_commit_retry`, `delete_after_commit_enabled`, `max_previous_versions`, `orc_bloom_filter_columns`, `orc_bloom_filter_fpp`, `parquet_bloom_filter_columns`, `object_store_layout_enabled`, `data_location`, `extra_properties`. | trino.io/docs/current/connector/iceberg.html § "Table properties" |
+> | Per-partition storage-tier selector visible in EXPLAIN (`TableScan(storage_tier=cold)`) | **NO. No such annotation.** EXPLAIN does not surface storage-tier choices because Trino does not pick a tier per scan. | trino.io/docs/current/sql/explain.html |
+> | Iceberg automatically moves cold partitions to a cheaper backend | **NO. Iceberg has no built-in tiering.** Iceberg writes every data file to the catalog-configured warehouse location; movement (if any) is the *object store's* job, not Iceberg's. | iceberg.apache.org/docs/latest/ |
+> | A Trino catalog property like `iceberg.storage-tier.*` to declare hot/cold zones | **NO. No such catalog property family.** The Trino Iceberg connector exposes file-system and metastore properties, not storage-tier-routing properties. | trino.io/docs/current/connector/iceberg.html § "Configuration" |
+>
+> **The deeper truth:** Iceberg's design point is that the *object store* owns the physical-placement decisions. Iceberg's job is "this snapshot references these data file paths"; whether the MinIO object behind `s3a://lakehouse/warehouse/events/data/event_date=2024-01-01/x.parquet` lives on fast NVMe or a slower spinning-rust pool is a property of the **MinIO storage backend**, not a property the Iceberg table or Trino plan negotiates.
+>
+> ### The three real mechanisms (state honestly, with engine/layer labels)
+>
+> Tiering on this stack is real but lives at one of three layers — and **none of them is a Trino-side per-partition DDL**. Pick the one that matches what you actually need.
+>
+> #### Mechanism A — MinIO object-lifecycle tiering (the canonical prod-side mechanism for "cold storage class for old objects")
+>
+> **Layer:** MinIO ops. **Visibility to Trino:** transparent — Trino reads the same `s3a://...` path; cold-tier reads simply pay higher latency. **Granularity:** prefix-scoped or age-scoped at the MinIO bucket level (not Iceberg-partition aware, but Iceberg lays data files under partition-named prefixes like `event_date=2024-01-01/...`, so prefix scoping effectively gives partition-age control if your table is partitioned by date).
+>
+> **The mechanism in one sentence:** the MinIO operator registers a remote/cheaper storage location as a "tier" with `mc ilm tier add`, then attaches a lifecycle transition rule (`mc ilm rule add --transition-days N --transition-tier <TIER_NAME>`) to the warehouse bucket; MinIO migrates qualifying objects from the hot pool to the registered tier on the configured schedule.
+>
+> **The two-step MinIO setup (run by the MinIO operator, NOT in Trino SQL):**
+>
+> 1. **Register the remote tier** with `mc ilm tier add`. Exact subcommand shape: `mc ilm tier add <TIER_TYPE> <TARGET_ALIAS> <TIER_NAME> [flags]`. `TIER_TYPE` is one of `minio`, `s3`, `gcs`, `azure`; `TARGET_ALIAS` is the local MinIO alias hosting the rule; `TIER_NAME` is an all-caps label (e.g., `COLD_POOL`) that the rule will reference. Common flags include `--endpoint`, `--access-key`, `--secret-key`, `--bucket`, `--prefix`, `--storage-class`. **For the precise flag set on your MinIO version (some flag names and defaults vary across MinIO releases), consult [docs.min.io/enterprise/aistor-object-store/reference/cli/mc-ilm-tier/mc-ilm-tier-add/](https://docs.min.io/enterprise/aistor-object-store/reference/cli/mc-ilm-tier/mc-ilm-tier-add/) before running — do NOT guess flag names.**
+>
+> 2. **Attach the lifecycle transition rule** with `mc ilm rule add`. Per [docs.min.io/enterprise/aistor-object-store/reference/cli/mc-ilm-rule/mc-ilm-rule-add/](https://docs.min.io/enterprise/aistor-object-store/reference/cli/mc-ilm-rule/mc-ilm-rule-add/), the transition flags are `--transition-days <N>` (days since object creation before transition eligibility) and `--transition-tier <TIER_NAME>` (the tier registered in step 1). For object versions that have become non-current (versioning enabled), use `--noncurrent-transition-days` and `--noncurrent-transition-tier`. Scope the rule to a path prefix with the rule's prefix argument so you only tier the data subtree, not Iceberg's metadata subtree (see below).
+>
+> **CRITICAL — keep Iceberg metadata on the HOT tier.** Iceberg's `metadata/` subtree (the `v*.metadata.json`, `snap-*.avro`, and `*.metadata.json` manifests) is touched on *every* query for snapshot resolution and partition pruning. If you let the lifecycle rule sweep `metadata/` to a cold tier, every Trino query pays cold-tier latency before it even starts reading data — that's a planning-time regression you do not want. **Scope the lifecycle prefix to the `data/` subtree only** (Iceberg's default layout puts data files under `<table>/data/...` and metadata under `<table>/metadata/...`). The standard rule shape is to set the prefix to the `data/` path or to specific partition subprefixes like `data/event_date=2023-*`.
+>
+> **What Trino sees:** nothing changes in Trino. The Trino Iceberg connector continues to ask MinIO for `s3a://lakehouse/warehouse/events/data/event_date=2024-01-01/part-00001.parquet`; if that object has been transitioned to the cold tier, MinIO transparently rehydrates or proxies the read at higher latency. **No Trino config change, no Iceberg table-property change, no Trino restart.** This is why "tiering on this stack" is fundamentally a MinIO-ops conversation, not a Trino-SQL conversation.
+>
+> **Tradeoffs to surface:** (a) cold-tier reads are slower — queries that hit cold data run longer (factor of 2x–10x is typical depending on the cold backend); (b) the lifecycle policy is bucket-/prefix-scoped, not Iceberg-snapshot-aware, so if `expire_snapshots` later prunes the snapshot that referenced a cold-tier file, MinIO's separate orphan-cleanup still has to remove it from the cold tier (cold-tier deletes may bill differently if the cold backend is external); (c) cold-tier compatibility with MinIO's erasure-coding and replication settings depends on the cold target — verify on the specific MinIO version per the docs link above.
+>
+> #### Mechanism B — Per-table compression choice (zstd for archive vs snappy for hot) via Trino `WITH (compression_codec = 'ZSTD')`
+>
+> **Layer:** Iceberg table property (Trino SQL). **Visibility to Trino:** Trino chooses the codec on write per table. **Granularity:** WHOLE-TABLE only — Iceberg's `compression_codec` is a table-level property, NOT per-partition. **This is NOT tiering** in the storage-class sense — it does not move data to cheaper hardware. It just reduces the bytes-on-disk for a given table by trading CPU at write/read for storage.
+>
+> **The mechanism:** when creating the archive-shaped table (lower-write-rate, cold-read-rate), declare a higher-compression codec. Trino + Iceberg 1.5.2 support `compression_codec` values `NONE`, `SNAPPY` (default), `LZ4`, `ZSTD`, `GZIP` per [trino.io/docs/current/connector/iceberg.html § "Table properties"](https://trino.io/docs/current/connector/iceberg.html).
+>
+> ```sql
+> -- Trino 467 — archive-shaped table with zstd compression for cold storage cost reduction
+> CREATE TABLE iceberg.analytics.events_archive (
+>   event_id     BIGINT,
+>   tenant_id    VARCHAR,
+>   occurred_at  TIMESTAMP(6) WITH TIME ZONE,
+>   event_type   VARCHAR,
+>   payload      JSON
+> )
+> WITH (
+>   format            = 'PARQUET',
+>   compression_codec = 'ZSTD',                       -- vs default SNAPPY; ~30-40% smaller files, slower write
+>   partitioning      = ARRAY['month(occurred_at)']
+> );
+> ```
+>
+> **From dbt-trino:**
+>
+> ```python
+> {{ config(
+>     materialized='table',
+>     properties={
+>         'format': "'PARQUET'",
+>         'compression_codec': "'ZSTD'",
+>         'partitioning': "ARRAY['month(occurred_at)']"
+>     }
+> ) }}
+> SELECT * FROM {{ source('events', 'events_raw') }}
+> WHERE occurred_at < CURRENT_DATE - INTERVAL '90' DAY
+> ```
+>
+> **Tradeoffs to surface:** (a) `compression_codec` is WHOLE-TABLE — you cannot say "ZSTD for the 2023 partition, SNAPPY for the 2025 partition" in one Iceberg table; if you want age-split compression, use Mechanism C (separate tables); (b) ZSTD costs measurable CPU on write (often 1.5-3x SNAPPY on the Spark ingestion side); read decompression cost is small but non-zero; (c) changing `compression_codec` on an existing table affects only NEW writes — pre-existing data files stay in their original codec until rewritten by `ALTER TABLE ... EXECUTE optimize(...)` (which may or may not rewrite them depending on file-size threshold).
+>
+> #### Mechanism C — Application-layer recent-vs-archive split (two Iceberg tables behind a dbt UNION ALL view)
+>
+> **Layer:** application/dbt. **Visibility to Trino:** the view is what users query; Trino prunes the union branches by partition predicate. **Granularity:** age-boundary controlled by the SaaS team, can pair with Mechanism A on the archive table only.
+>
+> **The mechanism:** maintain two Iceberg tables — `events_recent` (last 90 days, default SNAPPY, on hot MinIO prefix) and `events_archive` (90+ days, ZSTD, on a prefix subject to a MinIO lifecycle transition rule from Mechanism A). Move rows from recent → archive on a scheduled dbt model. Expose a dbt view that UNIONs both for the analytics caller.
+>
+> ```sql
+> -- Trino 467 — UNION ALL view; partition pruning skips the archive branch when the predicate is recent-only
+> CREATE OR REPLACE VIEW iceberg.analytics.events AS
+>   SELECT event_id, tenant_id, occurred_at, event_type, payload FROM iceberg.analytics.events_recent
+>   UNION ALL
+>   SELECT event_id, tenant_id, occurred_at, event_type, payload FROM iceberg.analytics.events_archive;
+> ```
+>
+> A query `SELECT count(*) FROM iceberg.analytics.events WHERE occurred_at > CURRENT_DATE - INTERVAL '7' DAY` will (a) read only `events_recent`'s partitions matching the date predicate, (b) read zero data from `events_archive` because no archive partition satisfies the predicate — partition pruning skips the entire archive branch. The cold-tier read latency from Mechanism A is therefore paid only by queries that explicitly reach into archive dates.
+>
+> **Tradeoffs to surface:** (a) the boundary is *manual* — a scheduled dbt model has to move rows from recent → archive and DELETE them from recent (use Iceberg `MERGE` or `DELETE FROM ... WHERE`); the move is at the application layer, with its own correctness/idempotency burden; (b) snapshot IDs and time-travel queries are per-table — a "show me row state as of yesterday" query against the view does not cleanly reconcile across two tables; (c) queries that span the boundary pay the union cost; (d) schema changes (ADD COLUMN, DROP COLUMN) must be applied to BOTH tables AND the view in lockstep; (e) but: this is the only mechanism that gives true age-segmented control with each segment configurable independently (compression, partitioning, MinIO prefix, lifecycle rule).
+>
+> ### Picking the mechanism — decision rule
+>
+> | If your need is | The right mechanism is |
+> |---|---|
+> | "Reduce $/TB on the cold pool for objects older than N days, transparently to Trino, no SQL changes" | **A. MinIO lifecycle tiering** — scope the rule to the `data/` prefix; keep `metadata/` on the hot tier. |
+> | "Make a specific *table* (e.g., `events_archive`) consume fewer bytes on MinIO, on the hot tier still" | **B. ZSTD compression** at table create time. WHOLE-TABLE, not per-partition. |
+> | "Old rows should physically live on cheaper hardware AND be compressed harder AND have their own retention/partitioning policy" | **C. Two tables (recent + archive) UNION ALL view**, plus A on the archive table's prefix. The combination pattern. |
+> | "Per-partition storage-tier DDL like Snowflake/Redshift's tiering" | **Does not exist on Trino 467 + Iceberg 1.5.2.** Use A or C; do NOT invent SQL. |
+>
+> ### DO-NOT-WRITE — banned tiering forms (paste into the storage-tiering memo checklist)
+>
+> | Never write on this stack | Why it's wrong | The correct framing |
+> |---|---|---|
+> | `ALTER TABLE iceberg.analytics.events SET STORAGE TIER = 'cold'` | Trino has NO `SET STORAGE TIER` ALTER form. Iceberg has no storage-tier concept in DDL. The clause does not exist. | Use Mechanism A (MinIO lifecycle) for transparent tiering, or Mechanism C (separate archive table) for table-level age split. |
+> | `ALTER TABLE iceberg.analytics.events ... SET STORAGE TIER ... WHERE event_date < DATE '2024-01-01'` | Same as above PLUS Trino ALTER TABLE has no `WHERE` clause. The whole statement is a fabrication. | Use Mechanism A and scope the MinIO lifecycle rule's prefix to `data/event_date=2023-*` (or a similar pattern matching the partition directory layout). |
+> | `CREATE TABLE x (...) WITH (storage_tier = 'cold')` or `WITH (storage_class = 'COLD')` or `WITH (tier = 'archive')` | None of `storage_tier`, `storage_class`, or `tier` is in the Iceberg table-property list. Trino will reject with `Catalog 'iceberg' table property 'storage_tier' does not exist`. | The supported properties are listed above (`format`, `compression_codec`, `partitioning`, `sorted_by`, `location`, `format_version`, `max_commit_retry`, `delete_after_commit_enabled`, `max_previous_versions`, `orc_bloom_filter_columns`, `orc_bloom_filter_fpp`, `parquet_bloom_filter_columns`, `object_store_layout_enabled`, `data_location`, `extra_properties`). |
+> | "Trino automatically moves cold partitions to cheaper storage" | Trino has no storage-tier scheduler. Trino reads what the catalog points to — it does not migrate objects. | "MinIO's object-lifecycle tiering migrates objects per ops-configured rules; Trino sees no change in catalog or SQL." |
+> | "Iceberg has built-in storage tiering / Iceberg natively supports hot/cold partitions" | Iceberg's spec does not include a tier concept on data files. Files live where the warehouse location points; movement is the object store's job. | "Iceberg references file paths; the *object store* (MinIO) decides physical placement. Use MinIO lifecycle rules." |
+> | `SET SESSION iceberg.storage_tier = 'cold'` or any session-level tier knob | No such session property in the Iceberg connector. | Storage placement is not a session-level knob anywhere in Trino 467. |
+> | `EXPLAIN` annotation `TableScan(storage_tier=cold)` showing per-scan tier choice | EXPLAIN does not surface a tier dimension because Trino does not pick one per scan. | EXPLAIN shows operator, source, predicate, columns; tier-of-physical-storage is invisible to the planner. |
+> | A Trino catalog property like `iceberg.storage-tier.hot-prefix` / `iceberg.storage-tier.cold-prefix` to declare zones | No such catalog property family in the Iceberg connector. | Tiering policy lives in MinIO (`mc ilm tier add` + `mc ilm rule add`), not in Trino catalog config. |
+>
+> ### Cross-references
+>
+> - **This resource §"MinIO is NOT free"** — the $15–25/TB-month all-in TCO anchor that motivates wanting cheaper-per-TB cold capacity in the first place.
+> - **This resource §"Cost optimization tactics for your stack"** — the broader optimization menu (compaction, snapshot expiry, rollups, right-sizing). Tiering sits alongside these, not above them.
+> - **Resource 11 §"Cost-saving tactics — Tiered retention"** — the resource-11 short pointer that links here for the canonical mechanism.
+> - **Resource 17 §"the safe scheduling order"** — `expire_snapshots` is the prerequisite for tiering to actually reclaim cold-tier space (a cold-tier data file pinned by a 200-day-old snapshot still costs cold-tier $).
+> - **prod_info.md** — the on-prem mandate that makes MinIO the only object store in scope; AWS S3 storage classes (Standard-IA, Glacier Instant Retrieval, Glacier Flexible Retrieval, Glacier Deep Archive) are NOT applicable to the production stack.
+
+---
+
 ## Three cost layers every SaaS engineer forgets
 
 When engineers think "analytics cost" they usually picture only #1. The big bills hide in #2 and #3.

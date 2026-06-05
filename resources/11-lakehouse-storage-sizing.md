@@ -599,7 +599,7 @@ On a 4-node Trino cluster (16 cores, 64 GB RAM each):
 Even without a per-GB invoice, hardware capacity is finite. These tactics keep you off the next hardware purchase order.
 
 ### 1. Tiered retention
-- Raw `user_events` for 18 months. Older → drop, or copy to a cold archive bucket on MinIO.
+- Raw `user_events` for 18 months. Older → drop, OR tier to cheaper MinIO storage via a MinIO object-lifecycle transition rule (`mc ilm tier add` + `mc ilm rule add --transition-days N --transition-tier <TIER>`). **Note:** Trino 467 + Iceberg 1.5.2 has NO per-partition `SET STORAGE TIER` DDL and no `storage_tier`/`storage_class` table property — tiering is a MinIO-ops mechanism, transparent to Trino. See r16 §"LEADING CANONICAL — How do I tier hot vs cold storage on Trino + Iceberg + MinIO?" for the full mechanism + DO-NOT-WRITE list. Pair tiering with `expire_snapshots` (r17) so cold-tier files aren't pinned forever by stale snapshots.
 - Rollup tables (`daily_user_activity`) kept indefinitely — they're tiny.
 
 ### 2. Drop high-volume noise
