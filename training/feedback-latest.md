@@ -1,113 +1,110 @@
-# Iter 479 Judge Feedback (EXTENDED PHASE — end-of-iteration)
+# Iter 480 Judge Feedback (EXTENDED PHASE — end-of-iteration)
 
 ## Overall verdict
 
-**4.6094 / 4 — STRONG PASS.** 78th consecutive overall PASS in extended phase. Iter478 fabricated-session-property regression (Q3 `task_max_memory` + `memory_revoking_enabled`) **CONFIRMED CLOSED** at iter479 Q1 — `SET SESSION spill_enabled = true` correctly given as the enable-spill lever. The r18 LEADING CANONICAL memory/spill card + DO-NOT-WRITE matrix landed clean. Zero recurrence of the iter478 fab pair. One **minor new fab** surfaced in Q1: `spill_order_by_enabled` listed as a "cluster-config-only" Trino property — this is FABRICATED (the historical sibling `spill-ordering-aggregations-enabled` was REMOVED in Release 366, Dec 2021; no `spill-order-by` or `spill_order_by_enabled` exists in current Trino). One Q1 understatement: `query_max_memory_per_node` IS session-settable downward (per WebSearch confirmation), responder said "cannot be changed per-session, coordinator-level config only" — conservative direction (engineer won't get parse errors copy-pasting), but factually inaccurate.
+**4.6953 / 4 — STRONG PASS.** 79th consecutive overall PASS in extended phase. Matches iter475's 4.6953 high-water mark and represents the second-strongest extended-phase score in the last 10 iters (+0.086 above iter479's 4.6094).
 
-## Spill-fix streak status
+**Streak status:**
+- **fabricated-session-property streak — CLOSED for 2 consecutive iters.** Iter478 (`task_max_memory` + `memory_revoking_enabled`) and iter479 (`spill_order_by_enabled`) fabs are all fully closed. Q1 this iter used `query_max_memory_per_node` correctly as DOWNWARD-only session-settable with the underscore-vs-dot syntax warning. The iter479 r18 LEADING CANONICAL memory/spill card edit was decisive.
+- **citation-hygiene streak — RESTORED.** ZERO load-bearing fabs across Q1–Q4.
+- **cross-dialect-spillover / version-pin / fabricated-capability-restriction streaks — ALL HOLD.**
 
-- **PRIMARY STREAK TARGET MET**: `spill_enabled` used as the enable-spill lever. NO recurrence of `task_max_memory` or `memory_revoking_enabled`. The iter478 fab class is **CLOSED** at iter479.
-- **NEW MINOR FAB SURFACED**: `spill_order_by_enabled` (Q1) — does not exist. The properties-spilling.html page lists only 9 spilling properties (spill-enabled, spiller-spill-path, spiller-max-used-space-threshold, spiller-threads, max-spill-per-node, query-max-spill-per-node, aggregation-operator-unspill-memory-limit, spill-compression-codec, spill-encryption-enabled). The historical `spill-ordering-aggregations-enabled` + `spill-distincting-aggregations-enabled` were removed in Release 366. Sibling-name extrapolation pattern — same fab class as iter474 (`distributed_join_distribution_type`) and iter478 (`task_max_memory`/`memory_revoking_enabled`), but non-load-bearing this time because (a) it was listed as "config-only, can't set per session" so engineer won't paste it into `SET SESSION`, (b) the primary actionable lever `spill_enabled` was given correctly.
+Federation NOT probed; 4.49944/310 near-miss row UNCHANGED per multi-iter judge directive.
 
-## Per-question scores
+## Per-question breakdown
 
-### Q1 — Memory/spill RE-PROBE (trino-memory-spill)
+### Q1 — memory/spill 3rd RE-PROBE (LOWER-per-query angle) — 4.6875 STRONG PASS
 
-| Dim | Score | Justification |
+| Dim | Score | Reasoning |
 |---|---|---|
-| Accuracy | 3.75 | `spill_enabled` correct. NO `task_max_memory`/`memory_revoking_enabled` recurrence (PRIMARY STREAK TARGET MET). BUT `spill_order_by_enabled` is fabricated (non-load-bearing, listed as config-only so engineer can't copy-paste); query_max_memory_per_node session-settability understated (said "cannot change per-session" — actually session-settable downward-only per trino.io/docs/current/admin/spill.html). |
-| Completeness | 4.0 | session-vs-config split given; spill_enabled enable lever; per-node memory caveat. Missed: did not name `query_max_memory_per_node` session form (the downward-only-from-config nuance is exactly what would help engineer running OOM-prone queries). |
-| Clarity | 4.5 | Clear session-vs-config framing, jargon defined inline. |
-| Actionability | 4.5 | `SET SESSION spill_enabled = true` is copy-pasteable and works. Engineer who reads "per-node memory is coordinator-only" loses the ability to lower per-query (minor) but won't hit a parse error. |
-| **Avg** | **4.1875** | THIN PASS — streak fix held; minor new fab + minor understatement. |
+| Accuracy | 4.75 | `query_max_memory_per_node` confirmed REAL Trino session property, session-settable DOWNWARD-only. Verified at trino.io/docs/current/release/release-318.html via WebFetch: "These properties can be used to decrease limits for a query, but not to increase them." Underscore-vs-dot syntax warning correct (`query.max-memory-per-node` config form fails as session-property name). `SHOW SESSION LIKE` recipe correct. `RESET SESSION` correct. |
+| Completeness | 4.75 | Covered BEFORE-the-heavy-query SET SESSION pattern + cluster-default-already-below-4GB caveat (showing downward-only mastery) + verification recipe + clear command. Did not cite Release 318 as introducing release — non-load-bearing nit. |
+| Clarity | 4.5 | Concrete "4GB throttle" example, plain-language downward-only explanation. |
+| Actionability | 4.75 | Engineer can copy-paste the SET SESSION + SHOW SESSION + RESET sequence directly. |
 
-### Q2 — Fact vs dimension / star schema / denormalization (dimensional-modeling)
+**CRITICAL — ZERO fabricated session properties:** no `task_max_memory`, no `memory_revoking_enabled`, no `spill_order_by_enabled`, no `spill_aggregations_enabled`, no `spill_joins_enabled`, no `spill_window_enabled`, no per-operator spill toggles. The iter479 r18 LEADING CANONICAL memory/spill card edit (10 surgical reconciliations + 5 new DO-NOT-WRITE rows + dual-axis CEILING-vs-DOWNWARD-OVERRIDE corrections in 3 task_* rows + bottom-line single-rule statement + 2 new probe rows in verify recipe) LANDED CLEAN. **3rd consecutive memory/spill re-probe with the fab class closed.**
 
-| Dim | Score | Justification |
+### Q2 — split fact/dimension vs flat table — 4.75 STRONG PASS
+
+| Dim | Score | Reasoning |
 |---|---|---|
-| Accuracy | 4.75 | Fact-vs-dim distinction sound (large append-only events vs small slowly-changing lookups). High-cardinality / low-selectivity / frequently-changing-attribute split-criteria all correct. Denormalize-when storage-cheap-vs-JOIN-expensive accurate for Trino/Iceberg. ZERO fabs. |
-| Completeness | 4.75 | Covered when-to-split, when-to-denormalize, attribute-count heuristic (top 5–10), JOIN-cost vs storage-cost tradeoff. |
-| Clarity | 4.75 | No assumed OLAP background. Concrete examples. |
-| Actionability | 4.75 | Engineer can decide split-or-denormalize on next table design. |
-| **Avg** | **4.75** | STRONG PASS. |
+| Accuracy | 4.75 | Split-when-criteria (columns change infrequently + queried separately + small/reusable across fact tables) is standard Kimball dimensional modeling. Denormalize-hot-columns-INTO-fact-table (plan_type, country) accurate for Trino/Iceberg where JOINs are expensive vs scan-and-aggregate. Start-with-2-3-facts-plus-1-2-dims pragmatic. |
+| Completeness | 4.75 | Both branches covered (when to split, when to denormalize); pragmatic starting point given. |
+| Clarity | 4.75 | No unexplained jargon; concrete column-name examples (plan_type, country). |
+| Actionability | 4.75 | Engineer knows how to make the call for their next table design. |
 
-### Q3 — Spark Iceberg writeTo API (spark-ingestion)
+**ZERO fabs.** Standard dimensional-modeling guidance.
 
-| Dim | Score | Justification |
+### Q3 — Iceberg $manifests / $partitions metadata tables — 4.75 STRONG PASS
+
+| Dim | Score | Reasoning |
 |---|---|---|
-| Accuracy | 5.0 | Path-based-save caveat correct (`df.write.format("iceberg").mode("overwrite").save("s3://...")` does route around the Iceberg catalog and is the documented anti-pattern). `writeTo("iceberg.analytics.events")` + `.append()` / `.overwritePartitions()` / `.create()` / `.createOrReplace()` all verified at iceberg.apache.org/docs/latest/spark-writes/ (createOrReplace = CREATE OR REPLACE TABLE AS SELECT; overwritePartitions = INSERT OVERWRITE ... PARTITION dynamic). ZERO fabs. |
-| Completeness | 4.75 | Full DataFrameWriterV2 surface. Did not explicitly name `replace()` (sibling of createOrReplace) which also exists — completeness nit, not a fab. |
-| Clarity | 4.75 | Concrete method names + table-identifier convention `catalog.schema.table`. |
-| Actionability | 5.0 | Engineer copy-pastes and writes land via the catalog correctly. |
-| **Avg** | **4.875** | STRONG PASS. |
+| Accuracy | 4.75 | `$snapshots` / `$manifests` / `$files` / `$partitions` all confirmed REAL per trino.io/docs/current/connector/iceberg.html (WebFetch verified). `$partitions` columns (partition ROW, record_count BIGINT, file_count BIGINT, total_size BIGINT) correct. Metadata-reads-KB-not-GB-of-data performance claim correct. **bucket-transform partition.tenant_id_bucket naming CORRECT** — Iceberg default-names bucket partition fields `<col>_bucket` (int, holding bucket number not original value) unless overridden with `AS <name>` per iceberg.apache.org/docs/latest/spark-ddl/. DESCRIBE-first defensive pattern is the right reflex. |
+| Completeness | 4.75 | All 4 metadata tables named + per-tenant storage report SQL + bucket-transform gotcha + DESCRIBE recipe. Did not mention `$history` or `$properties` — non-load-bearing. |
+| Clarity | 4.75 | Concrete "KB of manifests not GB of data" performance framing; the gotcha is exactly the kind of trap a beginner would hit. |
+| Actionability | 4.75 | Copy-pasteable SELECT + DESCRIBE recipe with explicit double-quoting reminder. |
 
-### Q4 — EXPLAIN ANALYZE metrics (explain-analyze)
+**ZERO fabs.**
 
-| Dim | Score | Justification |
+### Q4 — Oracle BULK COLLECT/FOR loop → dbt/Trino set-based — 4.625 STRONG PASS
+
+| Dim | Score | Reasoning |
 |---|---|---|
-| Accuracy | 4.75 | `physicalInputDataSize` real (verified — physical input metric improvements documented for EXPLAIN ANALYZE output). `dynamicFilterSplitsProcessed` real (PR #3217 added it to OperatorStats; appears in ScanFilterProject statistics). `CorrelatedJoin` real operator (TransformCorrelatedJoinToJoin rule, decorrelation pipeline). `constraint=` in TableScan is the documented pushdown signal. Exchange types `REPLICATE` and `REPARTITION` correct (documented set is GATHER/REPARTITION/REPLICATE/ROUND_ROBIN). Bare `ANALYZE <table>` correctly distinguished from `ANALYZE TABLE` (the latter is the cross-dialect Spark/Snowflake spillover ban from iter453). ZERO fabs. |
-| Completeness | 4.5 | Good operator + metric coverage. Did not name `GATHER` as the third exchange type (only REPLICATE vs REPARTITION) — minor. |
-| Clarity | 4.5 | Operator-name + metric-name jargon used but each tied to a what-to-look-for action. |
-| Actionability | 4.75 | Engineer reads EXPLAIN ANALYZE and knows: high physicalInputDataSize → partition filter missing; CorrelatedJoin present → subquery did not decorrelate, rewrite; constraint= absent → no pushdown, check predicate type. |
-| **Avg** | **4.625** | STRONG PASS. |
+| Accuracy | 4.5 | Procedural→declarative framing correct; cursor-loop→SELECT+JOIN/GROUP BY correct; BULK COLLECT+FORALL→single INSERT...SELECT or MERGE correct; Oracle MERGE→dbt incremental_strategy='merge'+unique_key correct per docs.getdbt.com/reference/resource-configs/trino-configs (verified via WebSearch). `is_incremental()` guard with COALESCE(MAX(event_date), DATE '1970-01-01') watermark canonical. `CAST(occurred_at AS DATE)` valid Trino. no-loop / no-COMMIT framing correct. **Minor non-load-bearing nit**: composite unique_key list `['tenant_id','event_date']` is correct dbt syntax, BUT dbt-trino has a known issue (#465 starburstdata/dbt-trino) where older adapter versions may treat composite keys as separate — not a fab, just a known adapter quirk the answer did not flag. |
+| Completeness | 4.5 | Full worked rewrite (config block + incremental guard + watermark + GROUP BY + composite key). Did not flag the dbt-trino composite-key adapter quirk. |
+| Clarity | 4.75 | Concrete tenant-daily-summary example end-to-end. |
+| Actionability | 4.75 | Engineer has a working template they can adapt to their own table. |
 
-## Overall computation
+**ZERO load-bearing fabs.**
 
-| Q | Topic | Avg |
-|---|---|---|
-| Q1 | trino-memory-spill (re-probe) | 4.1875 |
-| Q2 | dimensional-modeling | 4.75 |
-| Q3 | spark-ingestion / writeTo | 4.875 |
-| Q4 | explain-analyze | 4.625 |
-| **Overall** | — | **(4.1875 + 4.75 + 4.875 + 4.625) / 4 = 18.4375 / 4 = 4.6094** |
+## Fabrications found
 
-## Fabrication / inaccuracy list
+**NONE this iter** across all 4 questions.
 
-1. **Q1 — `spill_order_by_enabled` fabricated** (non-load-bearing). Listed as a "cluster-config-only" Trino property. Verified at trino.io/docs/current/admin/properties-spilling.html — the 9 documented spilling properties are: spill-enabled, spiller-spill-path, spiller-max-used-space-threshold, spiller-threads, max-spill-per-node, query-max-spill-per-node, aggregation-operator-unspill-memory-limit, spill-compression-codec, spill-encryption-enabled. The historical `spill-ordering-aggregations-enabled` and `spill-distincting-aggregations-enabled` were REMOVED in Release 366 (Dec 2021) per trino.io/docs/current/release/release-366.html. Source: https://trino.io/docs/current/admin/properties-spilling.html , https://trino.io/docs/current/release/release-366.html .
-2. **Q1 — `query_max_memory_per_node` session-settability understatement** (minor, conservative direction). Responder said "cannot be changed per-session, coordinator-level config only." Actually it IS session-settable DOWNWARD: per WebSearch + trino.io/docs/current/admin/spill.html, "session properties like query_max_memory_per_node ... If you need to lower the limit for a specific query, you can set it via the session property to a value lower than the default configuration." Conservative direction means engineer won't paste invalid SQL, but loses the lower-per-query lever. Source: https://trino.io/docs/current/admin/spill.html .
+The 3 fab classes from iter474 / iter478 / iter479 (`distributed_join_distribution_type`, `task_max_memory`+`memory_revoking_enabled`, `spill_order_by_enabled`) are ALL CLOSED for 2 consecutive iters. The iter479 r18 LEADING CANONICAL memory/spill card edit was the decisive fix — it banned the entire sibling-name-extrapolation fab class via the DO-NOT-WRITE matrix and corrected the dual-axis CEILING-vs-DOWNWARD-OVERRIDE distinction in the 3 task_* rows.
 
-No other fabrications across Q2 / Q3 / Q4.
+## Topic score updates
 
-## Teacher actions for iter480
+| Topic | Before | After | Delta | Note |
+|---|---|---|---|---|
+| Query performance basics (Q1 memory/spill) | 4.2941 / 17 | **4.3164 / 18** | +0.0223 | Q1 4.6875 above topic avg; recovery continues from iter478's drag |
+| Lakehouse schema design (Q2 split-fact-vs-flat) | 4.5240 / 13 | **4.5401 / 14** | +0.0161 | Q2 4.75 above topic avg |
+| Iceberg table maintenance (Q3 $partitions/$manifests metadata) | 4.4936 / 135 | **4.4954 / 136** | +0.0019 | Q3 4.75 above topic avg |
+| Oracle PL/SQL→dbt/Trino migration (Q4) | 4.5318 / 54 | **4.5349 / 55** | +0.0031 | Q4 4.625 above topic avg |
+| Trino federation (NOT probed) | 4.49944 / 310 | 4.49944 / 310 | 0 | Row held per multi-iter directive |
 
-### Primary
+## Teacher actions for iter481
 
-**Close `spill_order_by_enabled` fab + correct `query_max_memory_per_node` session-settability understatement in r18 (single surgical edit, reconcile in place — don't append).**
+**Phase**: extended (no `final_iterations_remaining` decrement; iter480 at 79 consecutive PASSes).
 
-Update the iter479 r18 LEADING CANONICAL memory/spill card with:
+**Federation guidance**: **NO dedicated federation probe.** Hold 4.49944/310 per the iter472-480 multi-iter directive — let count grow naturally via non-federation breadth probes only.
 
-- **DO-NOT-WRITE matrix new row**: `spill_order_by_enabled` — "No such Trino 467 property. The historical Presto `spill-ordering-aggregations-enabled` was REMOVED in Trino Release 366 (Dec 2021). Spill works for sorting via the single master switch `spill-enabled` (config) / `SET SESSION spill_enabled = true` (session). There is no separate ORDER BY toggle in Trino 467." Also ban siblings `spill-order-by`, `spill_distinct_enabled`, `spill_aggregation_enabled` while at it (defensive against the same sibling-name-extrapolation pattern).
-- **Correct the per-node session-settability fact**: in the REAL session properties for memory + spill table, the `query_max_memory_per_node` row must state "Session-settable DOWNWARD ONLY — you can lower per-query below the config ceiling, but cannot raise above it. Config-equivalent: `query.max-memory-per-node` (lives in etc/config.properties, sets the cluster ceiling)."
-- **Reconcile**: if any existing line in r18 (or elsewhere in resources/) says per-node memory is "config-only / cannot be set per session," REWRITE it in place — don't leave a contradictory line. The responder's iter479 answer suggests it cited that contradictory framing. Grep resources/ for `per-node memory` + `cannot.*session` + `coordinator.*only` and reconcile every hit.
-- **Streak preservation**: keep the iter478 DO-NOT-WRITE entries for `task_max_memory` + `memory_revoking_enabled` exactly as they are — those held.
+**PRIMARY action — breadth design (4-Q non-federation)**:
 
-Sibling-name extrapolation pattern observation: iter474 (`distributed_join_distribution_type`), iter478 (`task_max_memory`, `memory_revoking_enabled`), iter479 (`spill_order_by_enabled`). The DO-NOT-WRITE matrix in r18 + r24 has been effective. Continue the pattern: every session-property name introduced in resources/ must come with explicit "this name only — variants `<list>` do NOT exist" guard.
+Memory/spill topic now has 3 consecutive PASS re-probes (iter478 HARD FAIL → iter479 THIN PASS → iter480 STRONG PASS) and the fab class is closed. Direction options:
 
-### Secondary
+1. **Memory/spill 4th angle (optional hardening)** — different question shape: resource-group-level memory limit (`etc/resource-groups.json` + `softMemoryLimit` / `hardConcurrencyLimit` / `schedulingPolicy`) vs session-level. Would harden the 3-consecutive-PASS lock and probe a non-session-property memory lever.
 
-**Breadth design 4-Q for iter480 — NO dedicated federation probe** (federation 4.49944/310 row remains near-miss; per directive let count grow naturally via non-federation breadth probes).
+2. **Low-count topic breadth probes** — these topics are still at low datapoint counts:
+   - dbt sources / source freshness 4.219 / 3 (loaded_at_field, warn_after / error_after, blocking semantics)
+   - dbt model contracts 4.1146 / 3 (config.contract.enforced, build-time preflight)
+   - Storage tiering 4.25 / 2 (no built-in per-partition tier DDL; MinIO lifecycle workarounds)
+   - dbt snapshots SCD2 4.5625 / 2 (dbt_valid_from/to, NO dbt_is_current, validity-window pattern)
+   Pick 1-2 to add resilience and remove single-/double-point-fragility.
 
-Suggested 4-question shape:
+3. **Iceberg metadata-table 2nd angle** — Q3 this iter probed `$partitions` for per-tenant storage. A 2nd angle could probe `$history` (parent_snapshot_id rollback chain) or `$properties` (table-level write.format.default / write.parquet.compression-codec) to broaden iceberg-metadata-tables surface area.
 
-- Q1: Memory/spill RE-PROBE (3rd consecutive iter) — confirm both iter478 fab fixes AND the iter479 fab fixes (no `task_max_memory`, no `memory_revoking_enabled`, no `spill_order_by_enabled`) all hold AND `query_max_memory_per_node` session-settable-downward fact is correctly stated. Phrase the question so the responder lands on the new r18 canonical card via keyword-matching (e.g., "how do I lower the memory limit for just one query without restarting the cluster?" — hits "lower" + "per-query" + "without restart" exactly).
-- Q2: An angle on dbt-trino that probes a so-far-unused configuration (e.g., `query_tag` session property propagation, dbt-trino threads config, or partial-rebuild via `state:modified+` selector).
-- Q3: An Iceberg-maintenance angle the responder hasn't seen in a few iters — e.g., `EXECUTE remove_orphan_files` retention_threshold floor + safety considerations, OR `$partitions` metadata table column-set under partition evolution.
-- Q4: A wildcard breadth probe from a low-count topic — storage tiering (currently 4.25/2, still thin) OR dbt model contracts (4.1146/3, would benefit from a 4th angle).
+4. **Oracle-migration breadth** — topic at 55 datapoints / 4.5349 avg. Probe a construct not yet tested:
+   - Oracle `CONNECT BY PRIOR` hierarchical → Trino recursive CTE `WITH RECURSIVE`
+   - Oracle PIPELINED table functions → dbt model + UNNEST pattern
+   - Oracle SAVEPOINT / ROLLBACK TO inside PL/SQL → dbt's transactional behavior (no SAVEPOINT in dbt-trino; each materialization is atomic via Iceberg snapshot)
 
-### What NOT to do
+**SECONDARY action — no resource edits required.** ZERO fabs this iter means no DO-NOT-WRITE matrix updates, no reconciliation edits, no canonical-form corrections needed. Resources are in a clean state.
 
-- Do NOT add a federation probe (4.49944/310 near-miss is held per iter472–478 directive).
-- Do NOT add new memory/spill resource content beyond the surgical fab-closure edit above — the iter479 LEADING CANONICAL card is comprehensive; appending dilutes it.
-- Do NOT mark the `spill_order_by_enabled` correction in a separate new file. Reconcile in r18 in place.
+**Suggested iter481 question set**:
+- Q1: dbt sources freshness loaded_at_field + warn_after / error_after blocking semantics (4th-angle re-probe of low-count topic)
+- Q2: Iceberg $history rollback chain or $properties table-level configuration (metadata-table breadth)
+- Q3: Oracle CONNECT BY PRIOR → Trino WITH RECURSIVE (Oracle-migration breadth)
+- Q4: Resource-group memory limits vs session-level (memory/spill 4th angle, optional)
 
-## Sources (verification anchors used this iter)
-
-- https://trino.io/docs/current/admin/properties-spilling.html
-- https://trino.io/docs/current/admin/spill.html
-- https://trino.io/docs/current/sql/explain-analyze.html
-- https://trino.io/docs/current/sql/explain.html
-- https://trino.io/docs/current/release/release-366.html
-- https://trino.io/docs/current/optimizer/pushdown.html
-- https://trino.io/docs/current/admin/dynamic-filtering.html
-- https://github.com/trinodb/trino/pull/3217 (dynamicFilterSplitsProcessed)
-- https://iceberg.apache.org/docs/latest/spark-writes/
+**Do NOT probe federation.** Hold the 4.49944/310 row per directive.
