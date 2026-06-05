@@ -169,6 +169,71 @@ You pay the sketch-building cost once per day (a single GROUP BY on the new part
 
 ---
 
+## 3.1A. Trino string-split family reference — `split` / `split_part` / `split_to_map` / `split_to_multimap`
+
+**Keyword anchor:** split_to_map, split_to_multimap, split_part, SPLIT function Trino, split comma-separated string, key=value string parse, extract value by key from delimited string, parse key-value pairs from string, MAP from delimited string, tags array count per tag (SPLIT then UNNEST).
+
+**Why this section exists.** Trino 467 has a **family of four** string-split functions — and the iter505 responder fab claimed "Trino has NO `split_to_map`", which is **false**. All four are documented at [trino.io/docs/current/functions/string.html](https://trino.io/docs/current/functions/string.html) verbatim. Here are the exact signatures and one-line use cases.
+
+### The four functions (verified at trino.io/docs/current/functions/string.html)
+
+| Function | Signature | Returns | One-line use case |
+|---|---|---|---|
+| **`split`** | `split(string, delimiter)` | `ARRAY(VARCHAR)` | Split `'a,b,c'` into `ARRAY['a','b','c']`. Most common — pair with `CROSS JOIN UNNEST(...)` to explode into rows. |
+| **`split` (3-arg, with limit)** | `split(string, delimiter, limit)` | `ARRAY(VARCHAR)` | Same as 2-arg but stops at `limit` elements; the last element contains the unsplit remainder. `split('a,b,c,d', ',', 2)` → `['a','b,c,d']`. |
+| **`split_part`** | `split_part(string, delimiter, index)` | `VARCHAR` | Return the **N-th** piece (1-indexed). `split_part('acme.ourapp.com', '.', 1)` → `'acme'`. **Returns `NULL` if `index` is out of range** (NOT empty string — see [resource 27 §4.3](27-oracle-plsql-to-dbt-trino.md)). |
+| **`split_to_map`** | `split_to_map(string, entryDelimiter, keyValueDelimiter)` | `MAP(VARCHAR, VARCHAR)` | Parse a string like `'k1=v1;k2=v2'` into a map. `split_to_map('k1=v1;k2=v2', ';', '=')` → `MAP{'k1':'v1','k2':'v2'}`. Access values with `element_at(m, 'k1')`. |
+| **`split_to_multimap`** | `split_to_multimap(string, entryDelimiter, keyValueDelimiter)` | `MAP(VARCHAR, ARRAY(VARCHAR))` | Like `split_to_map` but **groups repeated keys into an array of values** — use when the same key may appear multiple times. `split_to_multimap('a=1;a=2;b=3', ';', '=')` → `MAP{'a':['1','2'],'b':['3']}`. |
+
+### Worked examples
+
+```sql
+-- 1. split + UNNEST: explode a comma-separated VARCHAR column into rows.
+--    "Count occurrences per tag, where tags is stored as 'a,b,c' in a single column."
+SELECT TRIM(tag) AS tag, COUNT(*) AS n
+FROM iceberg.analytics.events
+CROSS JOIN UNNEST(split(tags, ',')) AS t(tag)
+WHERE event_date = DATE '2026-05-26'
+GROUP BY TRIM(tag)
+ORDER BY n DESC;
+-- See resource 07 §1a.1 for the SQL clause-order rule
+-- (CROSS JOIN UNNEST must appear BEFORE the WHERE clause).
+
+-- 2. split_part: extract the N-th delimited piece as a scalar.
+--    "Pull the subdomain from a hostname."
+SELECT split_part(host, '.', 1) AS subdomain
+FROM iceberg.analytics.requests;
+
+-- 3. split_to_map: parse a 'k1=v1;k2=v2' string and read a key.
+--    "Pull the 'utm_source' value out of a semicolon-separated query-string blob."
+SELECT
+  element_at(split_to_map(qs, ';', '='), 'utm_source') AS utm_source,
+  COUNT(*) AS n
+FROM iceberg.analytics.page_views
+WHERE event_date = DATE '2026-05-26'
+GROUP BY element_at(split_to_map(qs, ';', '='), 'utm_source')
+ORDER BY n DESC;
+
+-- 4. split_to_multimap: when the same key can appear multiple times.
+--    "Parse a 'tag=a;tag=b;tag=c' string; tag is a multi-valued attribute."
+SELECT split_to_multimap('tag=a;tag=b;tag=c', ';', '=') AS m;
+-- Result: MAP{'tag': ['a','b','c']}
+```
+
+### DO NOT WRITE
+
+| False claim | Reality |
+|---|---|
+| "Trino has no `split_to_map`." | **FALSE.** `split_to_map(string, entryDelimiter, keyValueDelimiter) -> MAP(VARCHAR, VARCHAR)` is a documented Trino 467 built-in — see [trino.io/docs/current/functions/string.html](https://trino.io/docs/current/functions/string.html). |
+| "Use `regexp_extract` to parse `k=v;k=v` strings — Trino has no map-from-string function." | **FALSE.** Reach for `split_to_map` (or `split_to_multimap` for repeated keys) first; regex is the wrong tool. |
+| "`split_to_map` returns a JSON string." | **FALSE.** It returns a true `MAP(VARCHAR, VARCHAR)` — read keys with `element_at(m, 'key')` or iterate with `map_entries(m)`. |
+| "`split_part` returns empty string when the index is out of range." | **FALSE.** It returns `NULL` (Trino #14460). See [resource 27 §4.3](27-oracle-plsql-to-dbt-trino.md) for the canonical row. |
+| "`split_to_map` works on duplicate keys." | **FALSE.** Duplicate keys raise an error — use `split_to_multimap` instead, which groups duplicates into an array per key. |
+
+**Cross-reference.** For the canonical `CROSS JOIN UNNEST` + WHERE-clause-order rule (the iter505 trap where engineers place `WHERE` BEFORE the JOIN), see [resource 07 §1a.1](07-analytical-query-patterns.md). For Oracle migration mapping `INSTR` / `SUBSTR` / `REGEXP_*` → Trino, see [resource 27 §4.3](27-oracle-plsql-to-dbt-trino.md).
+
+---
+
 ## 4. Verify your plan with EXPLAIN
 
 **Why**: SQL that looks correct can still scan the whole table. `EXPLAIN` shows what Trino will actually do.

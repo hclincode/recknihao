@@ -67,6 +67,71 @@ Verified at [trino.io/docs/current/sql/select.html](https://trino.io/docs/curren
 
 > **Note:** the `UNNEST(sequence(...))` patterns in §4 (time-series gap-fill) and §5 Pattern B2 (YoY gap-fill spine) never drop rows because `sequence(start, stop, step)` always returns a non-NULL, non-empty array — the NULL/empty-array gotcha only applies to UNNEST over a real ARRAY column whose values can be NULL or `ARRAY[]`.
 
+### 1a.1 CLAUSE-ORDER RULE — `CROSS JOIN UNNEST` / `LEFT JOIN UNNEST ... ON TRUE` is part of the FROM clause and MUST appear BEFORE `WHERE`
+
+**Keyword anchor:** UNNEST WHERE order, CROSS JOIN UNNEST WHERE position, mismatched input 'CROSS' parse error, SQL clause order JOIN before WHERE, split comma-separated string and count, split delimited string count per value, tags array count per tag, explode and filter then group, SPLIT then UNNEST then WHERE.
+
+**The rule (memorize this — it is a parse-error trap, not a runtime bug).** SQL written-clause order is:
+
+```
+FROM / JOIN  →  WHERE  →  GROUP BY  →  HAVING  →  SELECT  →  ORDER BY
+```
+
+`CROSS JOIN UNNEST(...)` and `LEFT JOIN UNNEST(...) ON TRUE` are **JOIN syntax — they are part of the FROM clause**. They MUST appear BEFORE the `WHERE` clause. Putting `WHERE` between `FROM` and the `JOIN` is a syntax error, NOT a semantic gotcha — Trino fails to parse with `mismatched input 'CROSS'` (or `mismatched input 'LEFT'`) before the query ever runs.
+
+#### DO NOT WRITE — WHERE placed BEFORE the CROSS JOIN UNNEST (parse error)
+
+```sql
+-- BROKEN — parse error: "mismatched input 'CROSS'. Expecting: '<EOF>', ',', 'GROUP', 'HAVING', ...".
+-- Cause: WHERE appears between FROM and the JOIN. WHERE must come AFTER all FROM/JOIN clauses.
+SELECT TRIM(tag) AS tag, COUNT(*) AS n
+FROM iceberg.analytics.events
+WHERE event_date = DATE '2026-05-26'
+  AND tags IS NOT NULL
+CROSS JOIN UNNEST(SPLIT(tags, ',')) AS t(tag)   -- <-- parser fails HERE
+GROUP BY TRIM(tag)
+ORDER BY n DESC;
+```
+
+The same shape is broken for `LEFT JOIN UNNEST(...) ON TRUE` — moving `WHERE` above the JOIN is a parse error regardless of which UNNEST form you use.
+
+#### CORRECT — split a comma-separated string and count per value (the canonical worked example)
+
+```sql
+-- CORRECT — WHERE comes AFTER the CROSS JOIN UNNEST.
+-- "Split the comma-separated `tags` VARCHAR column into one row per tag, then count per tag."
+SELECT TRIM(tag) AS tag, COUNT(*) AS n
+FROM iceberg.analytics.events
+CROSS JOIN UNNEST(SPLIT(tags, ',')) AS t(tag)   -- JOIN is part of FROM
+WHERE event_date = DATE '2026-05-26'             -- WHERE comes AFTER all JOINs
+GROUP BY TRIM(tag)
+ORDER BY n DESC;
+```
+
+**Why this works.** The CROSS JOIN UNNEST is a relational source (it produces rows the WHERE clause will filter). Filtering happens AFTER the row source is fully built — that is the universal SQL evaluation order, not a Trino-specific quirk.
+
+**`SPLIT(tags, ',')`** returns `ARRAY(VARCHAR)`. The UNNEST then explodes that array into one row per element. `TRIM(tag)` strips leading/trailing whitespace from `'a, b, c'` style inputs. For richer string-split forms (`split_to_map`, `split_part`, `split_to_multimap`) see [resource 23 §3.1A — Trino string-split family reference](23-sql-best-practices-olap.md#31a-trino-string-split-family-reference--split-split_part-split_to_map-split_to_multimap).
+
+**Filter the parent table BEFORE the UNNEST (faster) — use a subquery, NOT a misplaced WHERE.** If you want partition pruning to fire BEFORE the explode (it should, for selectivity), wrap the filter in a subquery — do NOT move WHERE above the JOIN:
+
+```sql
+-- CORRECT — partition-prune in a subquery, then UNNEST the surviving rows.
+SELECT TRIM(tag) AS tag, COUNT(*) AS n
+FROM (
+  SELECT tags
+  FROM iceberg.analytics.events
+  WHERE event_date = DATE '2026-05-26'
+    AND tags IS NOT NULL
+) e
+CROSS JOIN UNNEST(SPLIT(e.tags, ',')) AS t(tag)
+GROUP BY TRIM(tag)
+ORDER BY n DESC;
+```
+
+Functionally equivalent to the one-block form above for an Iceberg partitioned table — Trino's optimizer pushes the `event_date` predicate to the scan in either spelling. The subquery form is purely for readability.
+
+**The minimal mental model.** "JOIN before WHERE" is not optional in standard SQL — it is the grammar. Every JOIN form (INNER, LEFT, RIGHT, CROSS, FULL OUTER, CROSS JOIN UNNEST, LEFT JOIN UNNEST ON TRUE, lateral joins) sits inside the FROM clause and must be written before the WHERE clause. Verified at [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) (Trino SELECT grammar — FROM/relation precedes WHERE).
+
 ---
 
 ## 2. Funnels (drop-off across a sequence of events)

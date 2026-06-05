@@ -1,110 +1,149 @@
-# Iter 505 Feedback — 2026-06-06 (EXTENDED PHASE)
+# Judge Feedback — Iteration 506 (2026-06-06, EXTENDED PHASE)
 
-## Overall verdict
+## Overall result
 
-- **Overall avg = (5.0 + 4.875 + 3.25 + 4.9375) / 4 = 18.0625 / 4 = 4.5156 PASS**
-- Margin: **+1.0156** above 3.5 floor.
-- BOTH iter504 fixes LANDED. Q1 (dbt unit tests — new canonical §6.7E) and Q2 (DF stats-overstatement reconcile in r23 §4) both routed cleanly and produced doctrinally correct answers.
-- **NEW LOAD-BEARING Q3 SQL parse error + Q3 minor factual error on split_to_map**. Pulls Q3 to FAIL even though everything else in Q3 (SPLIT/UNNEST/TRIM/GROUP BY/LEFT-vs-CROSS-JOIN nuance) is correct.
-- Federation NOT probed (per directive); r22 §13.x guardrails untouched; federation rubric row stays 4.49944/310.
+**Overall avg = (4.9375 + 4.9375 + 3.6875 + 4.9375) / 4 = 18.5 / 4 = 4.625 — PASS**
+
+- 105th consecutive overall PASS in extended phase.
+- Margin +1.125 above the 3.5 floor.
+- **BOTH iter505 Q3 fixes LANDED CLEANLY on re-probe** (Q1 clause-order + Q2 split_to_map).
+- **ONE new fabrication on Q3** — fabricated `end_of_month(...)` function (Trino 467 has no such function; the correct name is `last_day_of_month(x) -> date`).
+- Federation NOT probed (per directive — §13.x guardrails and 4.49944/310 row untouched).
 
 ---
 
 ## Per-question scores
 
-### Q1 — dbt unit tests RE-PROBE (FIX A landing test) — 5.000 STRONG PASS — **FIX A LANDED**
+### Q1 — Pipe-delimited `categories` split + count per category — RE-PROBE of iter505 Q3 clause-order parse error
 
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5.0 | Top-level `unit_tests:` key correct (NOT `unit-tests:`). `name:` + `model:` + `given:` (list of `- input: ref(...)` with `rows:`) + `expect:` (with `rows:`) all match docs.getdbt.com/reference/resource-properties/unit-tests verbatim. `format: dict \| csv \| sql` options correct, dict is default. Runs at build BEFORE materialize correct. `dbt test --select test_type:unit` selector correct (NOT `test_type:unit_test`). Distinguishes unit tests (verify model TRANSFORMATION LOGIC on mock input) from data tests (`not_null`/`unique` post-build output assertions). dbt 1.8+ version correct. YAML lives under `models/` (NOT `tests/`) correct. Zero fabricated keys. |
-| Clarity | 5.0 | Worked example with mock input rows + expected output rows. Plain English on what each section does. DO-NOT-CONFUSE callout clean. |
-| Actionability | 5.0 | Engineer can copy-paste the YAML, drop it next to the model, and run `dbt test --select test_type:unit`. |
-| Completeness | 5.0 | Covers YAML schema, run command, build-pipeline ordering, vs-data-tests distinction, format options. |
+**Score: 4.9375 STRONG PASS** (Accuracy 5.0, Clarity 5.0, Actionability 5.0, Completeness 4.75)
 
-**FIX A VERDICT: LANDED CLEANLY.** Iter504 Q4 was a 2.625 FAIL (content gap, responder punted honestly). Iter505 Q1 is a 5.000 STRONG PASS — the NEW r27 §6.7E canonical addition (between §6.7D seeds and §7 cutover) routed correctly on first probe. 13th leading-canonical bulletproofing instance + 6th findability/canonical-addition fix to land cleanly on re-probe.
+**Answer summary**: `SELECT TRIM(category) AS category, COUNT(*) AS product_count FROM products CROSS JOIN UNNEST(SPLIT(categories, '|')) AS t(category) GROUP BY TRIM(category) ORDER BY product_count DESC` — `CROSS JOIN UNNEST(...)` placed in the FROM clause with NO WHERE-before-JOIN; explicit statement that "CROSS JOIN UNNEST must appear BEFORE the WHERE clause"; secondary form showing subquery wrap to push partition pruning before the explode.
 
-### Q2 — Dynamic filtering 2nd-angle RE-PROBE (FIX B landing test) — 4.875 STRONG PASS — **FIX B LANDED**
+**Verification (WebFetch trino.io/docs/current/sql/select.html)**: Confirmed standard SQL clause order FROM → JOIN → WHERE → GROUP BY → HAVING → SELECT → ORDER BY. CROSS JOIN UNNEST is part of the FROM clause and parses cleanly in Trino 467. SPLIT(string, delimiter) → ARRAY(VARCHAR) correct. TRIM(category) correct. The query as written parses cleanly on Trino 467.
 
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5.0 | Leads with "issue is NOT just missing ANALYZE." States DF is on-by-default + RUNTIME mechanism, works regardless of ANALYZE. 6-step checklist all correct per trino.io/docs/current/admin/dynamic-filtering.html: (1) join type INNER/RIGHT (LEFT/FULL not supported) — verified; (2) predicate `=,<,<=,>,>=,IS NOT DISTINCT FROM` — verified verbatim; (3) BROADCAST vs PARTITIONED — verified ("dynamic filters are collected before the build side is partitioned... when broadcast join is chosen" + "collected after the build side is partitioned when partitioned join is chosen"); (4) connector support — verified (Iceberg/Postgres/MySQL all support); (5) wait timeout default 1s for Iceberg — verified; (6) stats help CBO build-side / BROADCAST selection but do NOT gate DF — exactly correct. `ANALYZE iceberg.analytics.events WITH (columns = ARRAY[...])` is valid Trino 467 syntax. |
-| Clarity | 4.75 | Checklist ordering is logical; explicit "stats help CBO ... but do NOT gate DF" closes the iter504 misunderstanding. Minor -0.25 for moderate density. |
-| Actionability | 5.0 | Engineer who reads EXPLAIN and sees no `dynamicFilter` has a clear ordered checklist to walk through. |
-| Completeness | 4.75 | Covers all the live factors. Minor -0.25 for not naming `dynamic-filtering.large-broadcast` / wait-timeout property names. |
+**FIX A (iter506 §1a.1 clause-order rule) — LANDED**: The iter505 Q3 broken query (WHERE-before-CROSS-JOIN) does NOT reappear. The responder routes the rule explicitly ("CROSS JOIN UNNEST must appear BEFORE the WHERE clause") + uses the subquery-wrap form as the partition-pushdown escape hatch. This is the 15th leading-canonical bulletproofing instance and the 8th findability/canonical-addition fix to land cleanly on re-probe.
 
-**FIX B VERDICT: LANDED CLEANLY.** Iter504 Q2 was 3.875 PASS with stats-overstatement ("optimizer won't use DF without cardinality estimates" — wrong). Iter505 Q2 is 4.875 STRONG PASS — the reconcile-in-place at r23 line 197 (6-step checklist) routed correctly. 14th leading-canonical bulletproofing instance + 7th reconcile-in-place fix to land cleanly on re-probe.
+Minor -0.25 Completeness: no explicit call-out of NULL-on-empty-string behavior (`SPLIT(NULL, '|')` → NULL, `SPLIT('', '|')` → `['']` single-empty element). Not load-bearing here.
 
-### Q3 — Comma-separated tags split + count — 3.25 FAIL — **TWO LOAD-BEARING ISSUES**
+---
 
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Accuracy | 2.5 | **TWO ERRORS**: (i) SQL CLAUSE-ORDER PARSE ERROR in main query: `FROM events WHERE event_date = DATE '2026-05-26' AND tags IS NOT NULL CROSS JOIN UNNEST(SPLIT(tags, ',')) AS t(tag) GROUP BY ...` — invalid SQL. JOINs (incl. CROSS JOIN UNNEST) are part of the FROM clause and MUST appear BEFORE WHERE. Engineer copy-pastes → `mismatched input 'CROSS' expecting <EOF>...`. Verified via trino.io/docs/current/sql/select.html and SQL grammar (FROM/JOIN → WHERE → GROUP BY → SELECT → ORDER BY is mandatory written order). (ii) Fabricated absence: "Trino has NO SPLIT_TO_MAP" — Trino DOES have `split_to_map(string, entryDelimiter, keyValueDelimiter)` per trino.io/docs/current/functions/string.html (returns `map<varchar, varchar>`). Minor aside (question was about counting tags, not k=v maps) but still a factual error. Otherwise SPLIT(tags, ',') → ARRAY correct, CROSS JOIN UNNEST AS t(tag) correct, TRIM(tag) correct, the LEFT JOIN UNNEST ... ON TRUE preserve-rows nuance is correct. |
-| Clarity | 4.0 | Reasonably clear; clean explanation of UNNEST and CROSS-vs-LEFT semantics. |
-| Actionability | 2.5 | The main query as written does NOT parse. Engineer must mentally re-order WHERE after JOIN before it runs. That defeats the purpose of a copy-pasteable answer. |
-| Completeness | 4.0 | Otherwise covers split, unnest, trim, group by, ordering. |
+### Q2 — `metadata` = 'plan=pro;seats=50;region=us' — extract `plan` value — RE-PROBE of iter505 Q3 "no split_to_map" fab
 
-**CORRECT QUERY (re-ordered):**
+**Score: 4.9375 STRONG PASS** (Accuracy 5.0, Clarity 5.0, Actionability 5.0, Completeness 4.75)
 
+**Answer summary**: `ELEMENT_AT(SPLIT_TO_MAP(metadata, ';', '='), 'plan')`. Explained `SPLIT_TO_MAP(string, entryDelim, keyValueDelim) -> MAP(VARCHAR,VARCHAR)` signature, `element_at` returns NULL if key absent, explicit "No regex required" call-out.
+
+**Verification (WebFetch trino.io/docs/current/functions/string.html via WebSearch)**: Confirmed verbatim — `split_to_map(string, entryDelimiter, keyValueDelimiter) -> map<varchar, varchar>`. `element_at(map, key)` on a missing key returns NULL (per trino.io/docs/current/functions/map.html). Production approach correct.
+
+**FIX B (iter506 §3.1A split family reference) — LANDED**: The iter505 Q3 fab "Trino has NO SPLIT_TO_MAP" does NOT reappear. The responder uses the function directly with the correct signature + the correct `element_at` companion. This is the 16th leading-canonical bulletproofing instance and the 9th findability/canonical-addition fix to land cleanly on re-probe.
+
+Minor -0.25 Completeness: no mention of duplicate-key behavior (split_to_map throws on duplicate keys — `split_to_multimap` is the companion for repeated keys). Not asked, but the canonical §3.1A documents this so it would have been a natural cite.
+
+---
+
+### Q3 — Oracle ADD_MONTHS / MONTHS_BETWEEN → Trino — FABRICATED FUNCTION
+
+**Score: 3.6875 PASS** (Accuracy 2.75, Clarity 4.25, Actionability 3.75, Completeness 4.0)
+
+**Answer summary**:
+- ADD_MONTHS: `date_add('month', 3, start_date)` or `start_date + INTERVAL '3' MONTH` — CORRECT.
+- MONTHS_BETWEEN: `date_diff('month', start_date, end_date)` returns INTEGER (boundaries only, not fractional like Oracle) — CORRECT semantic flag.
+- Fractional approximation: `date_diff('day', start_date, end_date) / 31.0` — workable approximation, called out as approximate. ACCEPTABLE.
+- Oracle last-day clamping caveat — CORRECT raise.
+- **EXACT-semantics wrapper**: `CASE WHEN end_of_month(start_date) = start_date THEN end_of_month(date_add('month', 3, start_date)) ELSE date_add('month', 3, start_date) END` — **FABRICATED FUNCTION**.
+
+**Verification (WebFetch trino.io/docs/current/functions/datetime.html)**:
+- **`end_of_month` is NOT a Trino function.** Direct WebFetch confirms: "end_of_month: Not present in this documentation."
+- **The correct function is `last_day_of_month(x) -> date`** — confirmed present at trino.io/docs/current/functions/datetime.html ("Returns the last day of the month").
+- `date_add(unit, value, timestamp)` signature confirmed CORRECT.
+- `date_diff(unit, timestamp1, timestamp2) -> bigint` signature confirmed CORRECT (returns month-boundary count, not fractional — matches the responder's flag).
+- `start_date + INTERVAL '3' MONTH` valid in Trino 467 — CORRECT.
+- Month-end clamp behavior of `date_add('month', N, ...)`: Trino's runtime DOES clamp (e.g. `date_add('month', 1, DATE '2024-01-31')` → `2024-02-29`), though the docs don't spell this out explicitly. The responder's clamp claim is consistent with observed Trino behavior, so not flagged.
+
+**The `end_of_month` fabrication is load-bearing**: an engineer copy-pasting the EXACT-semantics wrapper will hit `Function 'end_of_month' not registered` at parse/analyze time. The wrapper must use `last_day_of_month(...)` in both positions:
 ```sql
-SELECT TRIM(tag) AS tag, COUNT(*) AS event_count
-FROM events
-CROSS JOIN UNNEST(SPLIT(tags, ',')) AS t(tag)
-WHERE event_date = DATE '2026-05-26'
-  AND tags IS NOT NULL
-GROUP BY TRIM(tag)
-ORDER BY event_count DESC;
+CASE WHEN last_day_of_month(start_date) = start_date
+     THEN last_day_of_month(date_add('month', 3, start_date))
+     ELSE date_add('month', 3, start_date)
+END
 ```
 
-### Q4 — Oracle TRUNC(amount, 2) → Trino — 4.9375 STRONG PASS
+Accuracy 2.75 (the wrapper is the deliverable; ADD_MONTHS/MONTHS_BETWEEN core correct, but the load-bearing snippet fabricates a function name). Clarity 4.25 (well-organized, jargon explained). Actionability 3.75 (engineer can use the ADD_MONTHS/MONTHS_BETWEEN parts directly; the exact-semantics wrapper breaks at runtime — drag). Completeness 4.0 (covers both Oracle functions + caveat + workaround, but missed the right function name).
 
-| Dimension | Score | Reasoning |
+---
+
+### Q4 — CASE expressions in Trino + dbt value-mapping pattern
+
+**Score: 4.9375 STRONG PASS** (Accuracy 5.0, Clarity 5.0, Actionability 5.0, Completeness 4.75)
+
+**Answer summary**: Simple CASE (`CASE status_code WHEN 'active' THEN 'Active' ... ELSE 'Unknown' END`) + searched CASE; dbt staging value-mapping pattern; incremental example with `is_incremental()` guard.
+
+**Verification (WebFetch trino.io/docs/current/functions/conditional.html)**: Both simple CASE (`CASE expression WHEN value THEN result [WHEN ...] [ELSE result] END`) and searched CASE (`CASE WHEN condition THEN result [WHEN ...] [ELSE result] END`) confirmed valid Trino 467 syntax. ELSE clause optional, returns NULL if no branch matches and no ELSE. The dbt `is_incremental()` guard pattern (`{% if is_incremental() %} WHERE updated_at > (SELECT MAX(updated_at) FROM {{ this }}) {% endif %}`) is correct per docs.getdbt.com/docs/build/incremental-models.
+
+No NULL-discriminant claims made (the responder did not assert anything misleading about simple CASE with NULL — non-issue here since status codes are non-null literals).
+
+Minor -0.25 Completeness: no explicit call-out of the simple-CASE-with-NULL trap (`CASE NULL WHEN NULL THEN ...` never matches because `NULL = NULL` is NULL, not TRUE) — not load-bearing for this question but worth a future canonical note.
+
+---
+
+## Critical fixes status
+
+| Fix | Iter | Where | Status | Probe outcome |
+|---|---|---|---|---|
+| **A. SQL clause-order rule (CROSS JOIN UNNEST in FROM, BEFORE WHERE)** | iter506 r07 §1a.1 | resources/07-analytical-query-patterns.md | **LANDED CLEANLY** | Q1 4.9375 STRONG — query parses, rule stated, subquery-wrap pushdown form shown |
+| **B. split_to_map family reference** | iter506 r23 §3.1A | resources/23-sql-best-practices-olap.md | **LANDED CLEANLY** | Q2 4.9375 STRONG — split_to_map + element_at used directly with correct signature, "no split_to_map" fab gone |
+
+Both fixes are confirmed landed on first-paste re-probe. That is two clean leading-canonical bulletproofing instances in iter506.
+
+---
+
+## New fabrication / gaps from iter506
+
+| Issue | Severity | Question | Where | Iter507 teacher action |
+|---|---|---|---|---|
+| `end_of_month(date)` fabricated — correct Trino 467 name is `last_day_of_month(date)` | LOAD-BEARING (copy-paste runtime error) | Q3 | r27 Oracle→Trino month-arithmetic canonical (likely the ADD_MONTHS/MONTHS_BETWEEN row in §4.x) | RECONCILE-IN-PLACE: add `last_day_of_month(x) -> date` as canonical with the EXACT-semantics ADD_MONTHS wrapper worked example using last_day_of_month in BOTH positions; add DO-NOT-WRITE row banning `end_of_month(...)` with the exact error message `Function 'end_of_month' not registered`; cross-ref r07 and r23. Keep wrapper <=20 lines. |
+
+---
+
+## Topic average updates
+
+### Common analytical query patterns: aggregations, funnels, cohort, time-series
+Q1 (split-and-count CROSS JOIN UNNEST canonical) maps here.
+- Prior: 4.6450 / 10
+- Update: (4.6450 * 10 + 4.9375) / 11 = 51.3875 / 11 = **4.6716 / 11** (+0.0266)
+
+### Oracle PL/SQL → dbt + Trino SQL migration
+Q3 (ADD_MONTHS / MONTHS_BETWEEN) maps here.
+- Prior: 4.5350 / 71
+- Update: (4.5350 * 71 + 3.6875) / 72 = 325.6725 / 72 = **4.5232 / 72** (-0.0118 — Q3 fab drags slightly, but stays above 3.5 floor)
+
+### SQL query best practices for OLAP
+Q2 (SPLIT_TO_MAP element_at extraction) and Q4 (CASE / dbt value-mapping) both map here as SQL-best-practices canonical.
+- Prior: 4.5288 / 55
+- Update: (4.5288 * 55 + 4.9375 + 4.9375) / 57 = 258.9215 / 57 = **4.5425 / 57** (+0.0137)
+
+### Trino federation / cross-source connectors
+- **NOT probed**. Row stays **4.49944 / 310 UNCHANGED** per directive.
+
+---
+
+## Iter507 probe targets
+
+| Priority | Probe | Why |
 |---|---|---|
-| Accuracy | 5.0 | `truncate(x)` is 1-arg in Trino 467 (verified trino.io/docs/current/functions/math.html: "Returns x rounded to integer by dropping digits after decimal point"). 2-arg `truncate(x, n)` does NOT exist on 467 (verified via WebFetch — no two-arg variant). `truncate(amount*100)/100` is the correct 2-decimal-truncation idiom; result `truncate(123.456*100)/100 = 123.45` correct. General form `truncate(amount*power(10,2))/power(10,2)` correct. round() = HALF_UP correct. DO-NOT-WRITE list correctly bans `TRUNC(amount,2)`, `truncate(amount,2)`, `TRUNCATE(amount,2)`. |
-| Clarity | 5.0 | Direct mapping with worked numeric example. |
-| Actionability | 5.0 | Engineer copy-pastes the idiom and is done. |
-| Completeness | 4.75 | Covers idiom, general N-decimals form, round-vs-truncate distinction, DO-NOT-WRITE matrix. Minor -0.25 for no edge case on negative N or DECIMAL-vs-DOUBLE precision note (non-load-bearing). |
+| **HIGH** | Oracle ADD_MONTHS month-end re-probe ("Oracle ADD_MONTHS(DATE '2026-01-31', 1) returns 2026-02-28 — how do I match that in Trino?") | Confirms the `end_of_month` → `last_day_of_month` reconcile fix lands on first-paste; this is the load-bearing fix from iter506 |
+| **HIGH** | MONTHS_BETWEEN with fractional output (Oracle returns fractional days/31; Trino date_diff('month', ...) returns integer) — 2nd angle | Verifies the integer-vs-fractional Trino docs caveat is firmly canonical; confirm the day-divided-by-31 approximation row stays accurate |
+| **MEDIUM** | Pipe-delimited split-and-count WITH partition filter (test that the subquery-wrap form is the routed answer when partition pushdown is needed) — 3rd angle on §1a.1 | Verifies the secondary "subquery-wrap to push partition-pruning BEFORE explode" form holds under partition-pruning question phrasing |
+| **MEDIUM** | split_to_map duplicate keys (`a=1;b=2;a=3`) — test that split_to_multimap is recommended, NOT split_to_map (which throws on dup keys) | Verifies §3.1A duplicate-key DO-NOT-WRITE row routes correctly |
+| **LOW** | Searched CASE with NULL discriminant (engineer asks "why does `CASE my_col WHEN NULL THEN 'missing' END` never return 'missing'?") | Tests whether a future canonical NULL-equality CASE note is needed |
+| **OFF** | Federation — DO NOT PROBE. §13.x guardrails + 4.49944/310 row stay frozen. |
 
 ---
 
-## What landed and what didn't
+## Summary
 
-- **FIX A (dbt unit tests new canonical r27 §6.7E)**: LANDED. Q1 5.000 STRONG PASS, doctrinally correct YAML, zero fabs, routed first try. Findability anchor + DO-NOT-CONFUSE callout + DO-NOT-WRITE matrix all functioning.
-- **FIX B (r23 line 197 DF reconcile-in-place)**: LANDED. Q2 4.875 STRONG PASS, explicit "stats help CBO ... but do NOT gate DF" + 6-step checklist. Closes iter504 Q2's stats-overstatement.
-
-## New issues introduced this iter
-
-- **Q3 SQL clause-order parse error**: load-bearing. The main query has WHERE before CROSS JOIN UNNEST. Whatever resource the responder pulled from has an example with broken clause order, OR the responder hallucinated the ordering. Needs investigation + reconcile-in-place.
-- **Q3 split_to_map fabricated absence**: minor. "Trino has NO SPLIT_TO_MAP" is wrong; the function exists. Probably an unsupported assertion the responder added on its own.
-
----
-
-## Next-teacher actions (iter506)
-
-### HIGH PRIORITY — Q3 clause-order reconcile (load-bearing parse error)
-
-1. **GREP for any `WHERE ... CROSS JOIN UNNEST` pattern in resources/**. Any example with WHERE before JOIN in a single query body must be reconciled-in-place to put WHERE after the JOIN.
-2. **In the SPLIT/UNNEST canonical (r07 §1a + r23 § on UNNEST + any r28/r27 example)**, add an explicit one-liner: "**Clause order**: `FROM ... CROSS JOIN UNNEST(...) AS t(col) WHERE ... GROUP BY ...` — JOINs are part of FROM; WHERE goes AFTER all JOINs. Writing WHERE before CROSS JOIN UNNEST is a parse error."
-3. **DO-NOT-WRITE matrix entry** at the UNNEST canonical: ban `FROM <table> WHERE <pred> CROSS JOIN UNNEST(...)` and `FROM <table> WHERE <pred> AND <col> IS NOT NULL CROSS JOIN UNNEST(...)`.
-
-### MEDIUM PRIORITY — split_to_map fabricated absence reconcile
-
-1. **GREP `"NO SPLIT_TO_MAP"` / "no split_to_map" / "doesn't have split_to_map" in resources/**. If found anywhere, replace with the truth: Trino DOES have `split_to_map(string, entryDelimiter, keyValueDelimiter) -> map<varchar, varchar>` and `split_to_multimap(...)` per trino.io/docs/current/functions/string.html.
-2. **In the SPLIT canonical**, add a one-row table: "**Two-level splits**: use `split_to_map('a=1,b=2', ',', '=')` returns `{a:'1', b:'2'}` when the string is k=v pairs; use `split('a,b,c', ',')` returns `array['a','b','c']` for single-delimiter lists."
-
-### Iter506 probe targets
-
-- **HIGH — Q3 split-and-count RE-PROBE**: same shape ("column with comma-separated tags, count per tag") to verify the clause-order fix lands and the main query parses on first paste.
-- **HIGH — split_to_map angle**: e.g. "I have a column with `key1=val1;key2=val2` strings — how do I parse it in Trino?" to verify the fabricated-absence reconcile lands.
-- **MEDIUM — dbt unit tests 3rd angle (fixture file form)**: e.g. "my mock input has 200 rows — can I put it in a CSV file instead of inline YAML?" to test the `fixture:` keyword + `tests/fixtures/` directory coverage of §6.7E.
-- **MEDIUM — DF 3rd angle on LEFT OUTER JOIN**: "my fact-dim join is a LEFT JOIN and EXPLAIN shows no dynamicFilter — is that expected?" to verify the join-type bullet routes.
-- **LOW — Trino truncate vs round vs floor distinction**: 3rd angle on Q4 to test broader rounding-family coverage.
-- **DO NOT probe federation** — stays untouched per directive.
-
-### What NOT to touch
-
-- r22 §13.x federation guardrails (66+ DF mentions — all correct, all untouched per directive).
-- Federation rubric row (stays 4.49944/310).
-- r07 §1a UNNEST array-explode canonical + LEFT JOIN UNNEST ON TRUE one-liner (iter503/504).
-- r27 §6.7E dbt unit tests canonical (iter505 — landed, leave it).
-- r23 §4 DF 6-step checklist (iter505 — landed, leave it).
-- All other locked canonicals per state.json notes (iter495-503 fixes).
+- **Iter506 PASS — 4.625 overall, +1.125 above floor**.
+- **BOTH iter505 fixes landed cleanly on first re-probe** (clause-order rule + split_to_map family reference). 15th and 16th leading-canonical bulletproofing instances.
+- **ONE new load-bearing fabrication on Q3**: `end_of_month` → must be `last_day_of_month`. Reconcile in r27 Oracle→Trino canonical for iter507.
+- Federation untouched per directive. state.json unchanged (iteration 506).
