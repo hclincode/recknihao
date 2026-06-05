@@ -83,35 +83,121 @@ A common documentation footgun: some older blog posts reference a global `write.
 
 **Set all three to the same value** if you want consistent behavior. A common mistake is setting only `write.merge.isolation-level` to `snapshot` and being surprised when a concurrent `DELETE` still fails.
 
-### How to set them
+### How to set them — read this canonical card BEFORE writing any `SET PROPERTIES` SQL
 
-**Trino 467 (ALTER TABLE):**
-```sql
-ALTER TABLE iceberg.analytics.orders
-SET PROPERTIES "write.delete.isolation-level" = 'snapshot',
-               "write.update.isolation-level" = 'snapshot',
-               "write.merge.isolation-level" = 'snapshot';
-```
+> **CANONICAL — "How do I set an Iceberg table property from Trino?" — the allow-list and the `extra_properties` escape hatch.**
+> *Keyword anchors so this block is findable*: `SET PROPERTIES`, `commit.retry.num-retries`, `commit.retry.min-wait-ms`, `commit.retry.max-wait-ms`, `commit.retry.total-timeout-ms`, `write.merge.isolation-level`, `write.update.isolation-level`, `write.delete.isolation-level`, `max_commit_retry`, `extra_properties`, "Trino Iceberg table property", "Trino does not exist", "Catalog 'iceberg' table property '<name>' does not exist".
+>
+> Trino's Iceberg connector does **NOT** accept bare native-Iceberg dotted property names in `SET PROPERTIES`. Writing `SET PROPERTIES "commit.retry.num-retries" = '8'` or `SET PROPERTIES "write.merge.isolation-level" = 'snapshot'` will fail with `Catalog 'iceberg' table property 'commit.retry.num-retries' does not exist` (or the equivalent for the other dotted names). Trino has a **fixed allow-list of property identifiers** it understands; native Iceberg properties outside that allow-list go through the `extra_properties` map pass-through or are set Spark-side via `SET TBLPROPERTIES`.
+>
+> #### The Trino `ALTER TABLE ... SET PROPERTIES` allow-list (Iceberg connector, Trino 467)
+>
+> The Iceberg connector's `ALTER TABLE ... SET PROPERTIES` allows updating exactly these properties after table creation (verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) — "The following table properties can be updated after a table is created"):
+>
+> 1. `format`
+> 2. `format_version`
+> 3. `partitioning`
+> 4. `sorted_by`
+> 5. `max_commit_retry`
+> 6. `delete_after_commit_enabled`
+> 7. `max_previous_versions`
+> 8. `object_store_layout_enabled`
+> 9. `data_location`
+>
+> Plus `extra_properties` (the pass-through map; ALTER-settable on Trino 465+ per [trinodb/trino PR #24031](https://github.com/trinodb/trino/pull/24031), merged Nov 2024, shipped in 465 — we're on 467, so it's available). The complete `CREATE TABLE` property allow-list is broader (15 items: adds `compression_codec`, `partitioning`, `sorted_by`, `location`, `format_version`, `max_commit_retry`, `delete_after_commit_enabled`, `max_previous_versions`, `orc_bloom_filter_columns`, `orc_bloom_filter_fpp`, `parquet_bloom_filter_columns`, `object_store_layout_enabled`, `data_location`, `extra_properties` to `format`) — but **`ALTER TABLE SET PROPERTIES` only accepts the 9 + `extra_properties` listed above**.
+>
+> #### Trino-native name mapping — `max_commit_retry` is THE Trino name for commit-retry count
+>
+> Iceberg native property → Trino-native ALTER TABLE property:
+>
+> | Native Iceberg property | Trino-native equivalent | Default | Catalog-default knob |
+> |---|---|---|---|
+> | `commit.retry.num-retries` | **`max_commit_retry`** | 4 | `iceberg.max-commit-retry` (catalog property) |
+> | `commit.retry.min-wait-ms` | *(no Trino-native — use `extra_properties` or Spark)* | 100 | — |
+> | `commit.retry.max-wait-ms` | *(no Trino-native — use `extra_properties` or Spark)* | 60000 | — |
+> | `commit.retry.total-timeout-ms` | *(no Trino-native — use `extra_properties` or Spark)* | 1800000 (30 min) | — |
+> | `write.merge.isolation-level` | *(no Trino-native — use `extra_properties` or Spark)* | `serializable` | — |
+> | `write.update.isolation-level` | *(no Trino-native — use `extra_properties` or Spark)* | `serializable` | — |
+> | `write.delete.isolation-level` | *(no Trino-native — use `extra_properties` or Spark)* | `serializable` | — |
+>
+> #### Pattern 1 — raise commit retries from Trino (the ONLY native-supported case)
+>
+> ```sql
+> -- Trino 467: bare identifier on LHS, integer literal on RHS — NOT a quoted dotted string.
+> ALTER TABLE iceberg.analytics.orders SET PROPERTIES max_commit_retry = 8;
+>
+> -- Verify:
+> SELECT key, value FROM iceberg.analytics."orders$properties"
+> WHERE key = 'commit.retry.num-retries';
+> -- The $properties metadata table still shows the underlying native Iceberg key
+> -- (Iceberg's internal storage), but the Trino-facing identifier is max_commit_retry.
+> ```
+>
+> #### Pattern 2 — set native dotted properties via `extra_properties` map (Trino 467, available since 465)
+>
+> ```sql
+> -- For the isolation-level trio and the other commit.retry.* keys, use the extra_properties map
+> -- pass-through. Trino persists the keys/values into Iceberg metadata; downstream readers
+> -- (including Spark Iceberg writers reading the same table) honor them per the native Iceberg spec.
+> ALTER TABLE iceberg.analytics.orders SET PROPERTIES
+>   extra_properties = MAP(
+>     ARRAY['write.delete.isolation-level',
+>           'write.update.isolation-level',
+>           'write.merge.isolation-level',
+>           'commit.retry.min-wait-ms',
+>           'commit.retry.max-wait-ms'],
+>     ARRAY['snapshot', 'snapshot', 'snapshot', '200', '60000']
+>   );
+> ```
+>
+> **Caveat — Trino's OWN MERGE/UPDATE/DELETE runtime may not consult `extra_properties` for isolation-level enforcement.** The [Trino Iceberg docs](https://trino.io/docs/current/connector/iceberg.html) describe `extra_properties` as: *"Additional properties added to an Iceberg table. The properties are not used by Trino, and are available in the `$properties` metadata table."* Read literally, this means Trino persists the values into Iceberg metadata where the Iceberg library and Spark writers see them, but Trino's own MERGE/UPDATE/DELETE planner may not branch on them at runtime. **If you NEED the runtime effect to apply to Trino-issued MERGE, use Pattern 3 (Spark) to set the property — Spark's Iceberg writer is the canonical consumer of `write.merge.isolation-level` and you avoid the ambiguity.** When in doubt, set isolation-level via Spark and verify via `$properties`.
+>
+> #### Pattern 3 — Spark `ALTER TABLE ... SET TBLPROPERTIES` (always works, native key names)
+>
+> ```sql
+> -- Run via Spark SQL session. Spark accepts native Iceberg property names directly.
+> ALTER TABLE iceberg.analytics.orders SET TBLPROPERTIES (
+>   'write.delete.isolation-level' = 'snapshot',
+>   'write.update.isolation-level' = 'snapshot',
+>   'write.merge.isolation-level'  = 'snapshot',
+>   'commit.retry.num-retries'     = '8',
+>   'commit.retry.min-wait-ms'     = '200',
+>   'commit.retry.max-wait-ms'     = '60000'
+> );
+> ```
+>
+> #### DO-NOT-WRITE matrix — bare-dotted Trino `SET PROPERTIES` keys that DON'T WORK
+>
+> | Wrong (Trino errors `Catalog 'iceberg' table property '<name>' does not exist`) | Correct form |
+> |---|---|
+> | `ALTER TABLE ... SET PROPERTIES "commit.retry.num-retries" = '8'` | `ALTER TABLE ... SET PROPERTIES max_commit_retry = 8` (bare identifier, integer literal — NOT a quoted dotted string) |
+> | `ALTER TABLE ... SET PROPERTIES "commit.retry.min-wait-ms" = '200'` | Use `extra_properties = MAP(ARRAY['commit.retry.min-wait-ms'], ARRAY['200'])` OR Spark `SET TBLPROPERTIES ('commit.retry.min-wait-ms' = '200')` |
+> | `ALTER TABLE ... SET PROPERTIES "commit.retry.max-wait-ms" = '60000'` | Same — use `extra_properties` map or Spark |
+> | `ALTER TABLE ... SET PROPERTIES "commit.retry.total-timeout-ms" = '...'` | Same — use `extra_properties` map or Spark |
+> | `ALTER TABLE ... SET PROPERTIES "write.delete.isolation-level" = 'snapshot'` | Use `extra_properties` map OR Spark `SET TBLPROPERTIES` (Spark recommended for runtime effect) |
+> | `ALTER TABLE ... SET PROPERTIES "write.update.isolation-level" = 'snapshot'` | Same — use `extra_properties` map or Spark (Spark recommended) |
+> | `ALTER TABLE ... SET PROPERTIES "write.merge.isolation-level" = 'snapshot'` | Same — use `extra_properties` map or Spark (Spark recommended) |
+>
+> **The general rule**: Trino `SET PROPERTIES` accepts ONLY identifiers from the allow-list above. Any quoted dotted native-Iceberg key (`"write.*"`, `"commit.retry.*"`, etc.) outside `extra_properties` is rejected. Citation: [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (Iceberg connector reference, "Table properties" + "The following table properties can be updated after a table is created" sections).
 
-**Spark (TBLPROPERTIES):**
-```sql
-ALTER TABLE iceberg.analytics.orders
-SET TBLPROPERTIES (
-  'write.delete.isolation-level' = 'snapshot',
-  'write.update.isolation-level' = 'snapshot',
-  'write.merge.isolation-level' = 'snapshot'
-);
-```
+### Verify the effective value with `$properties`
 
-**Verify the effective value** with the Iceberg `$properties` metadata table (Trino 467):
 ```sql
+-- Trino 467 — read the table's persisted property map. Native Iceberg keys appear here
+-- (e.g., commit.retry.num-retries, write.merge.isolation-level) regardless of whether
+-- they were set via max_commit_retry, extra_properties, or Spark's SET TBLPROPERTIES.
 SELECT key, value
 FROM iceberg.analytics."orders$properties"
-WHERE key LIKE 'write.%.isolation-level';
--- Expect three rows: write.delete.isolation-level, write.update.isolation-level, write.merge.isolation-level
+WHERE key LIKE 'write.%.isolation-level'
+   OR key LIKE 'commit.retry.%';
+-- Expect rows like:
+--   write.delete.isolation-level | snapshot
+--   write.update.isolation-level | snapshot
+--   write.merge.isolation-level  | snapshot
+--   commit.retry.num-retries     | 8
 ```
 
-If a row is absent from `$properties`, the table is using the Iceberg default (`serializable`).
+If a row is absent from `$properties`, the table is using the Iceberg default (`serializable` for isolation, 4 for retries).
 
 ---
 
@@ -254,17 +340,33 @@ If you choose `snapshot` for throughput but want to bound the phantom-row exposu
 ## 10. Quick reference cheat sheet
 
 ```sql
--- The three properties to set (Trino 467 or Spark):
-ALTER TABLE iceberg.analytics.orders SET PROPERTIES
-  "write.delete.isolation-level" = 'snapshot',
-  "write.update.isolation-level" = 'snapshot',
-  "write.merge.isolation-level" = 'snapshot';
+-- TRINO 467 — only `max_commit_retry` has a Trino-native identifier; the rest go through
+-- extra_properties (pass-through, may NOT change Trino runtime behavior — see §4 caveat)
+-- or are set Spark-side. See the canonical "How to set them" card in §4 above.
 
--- The three commit-retry properties (rarely change from default):
+-- (a) Raise commit retries from Trino (the ONLY native-supported case):
+ALTER TABLE iceberg.analytics.orders SET PROPERTIES max_commit_retry = 8;  -- default 4
+
+-- (b) Set the three isolation-level properties via extra_properties (Trino 467):
 ALTER TABLE iceberg.analytics.orders SET PROPERTIES
-  "commit.retry.num-retries" = '8',           -- default 4
-  "commit.retry.min-wait-ms" = '200',         -- default 100
-  "commit.retry.max-wait-ms" = '60000';       -- default 60000
+  extra_properties = MAP(
+    ARRAY['write.delete.isolation-level',
+          'write.update.isolation-level',
+          'write.merge.isolation-level'],
+    ARRAY['snapshot', 'snapshot', 'snapshot']
+  );
+-- CAVEAT: Trino docs say "The properties are not used by Trino" about extra_properties.
+-- For guaranteed runtime effect on Trino MERGE/UPDATE/DELETE, prefer Spark form (c).
+
+-- (c) Set isolation-level + retry knobs via Spark (canonical — works on all engines):
+-- Run via Spark SQL:
+--   ALTER TABLE iceberg.analytics.orders SET TBLPROPERTIES (
+--     'write.delete.isolation-level' = 'snapshot',
+--     'write.update.isolation-level' = 'snapshot',
+--     'write.merge.isolation-level'  = 'snapshot',
+--     'commit.retry.num-retries'     = '8',
+--     'commit.retry.min-wait-ms'     = '200'
+--   );
 
 -- Verify in Trino 467:
 SELECT key, value FROM iceberg.analytics."orders$properties"
@@ -275,6 +377,8 @@ SELECT snapshot_id, committed_at, operation, summary['total-records'] AS rows
 FROM iceberg.analytics."orders$snapshots"
 ORDER BY committed_at DESC LIMIT 20;
 ```
+
+> **DO-NOT-WRITE** in Trino: `SET PROPERTIES "commit.retry.num-retries" = ...`, `SET PROPERTIES "commit.retry.min-wait-ms" = ...`, `SET PROPERTIES "write.merge.isolation-level" = ...`, or any other quoted-dotted native Iceberg property name as a top-level `SET PROPERTIES` key. Trino rejects with `Catalog 'iceberg' table property '<name>' does not exist`. See §4's canonical card for the full DO-NOT-WRITE matrix.
 
 | Symptom | Likely cause | First fix |
 |---|---|---|

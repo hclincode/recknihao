@@ -3340,6 +3340,8 @@ Two jobs run at the same time against `iceberg.analytics.orders`:
 
 ### How to set it
 
+> **CANONICAL "How to set isolation-level / commit-retry on Trino 467" → see [`resources/26-iceberg-concurrent-write-conflicts.md`](26-iceberg-concurrent-write-conflicts.md) §4 "How to set them — read this canonical card BEFORE writing any `SET PROPERTIES` SQL".** The short version below shows the working forms; the canonical card in r26 has the full Trino allow-list (9 ALTER-settable identifiers + `extra_properties`), the `max_commit_retry` Trino-native mapping, the `extra_properties` map pass-through pattern, the Spark `SET TBLPROPERTIES` form, and the DO-NOT-WRITE matrix banning bare-dotted native Iceberg names in Trino `SET PROPERTIES`.
+
 ```sql
 -- At table creation (Iceberg 1.5.2, both Trino 467 and Spark accept this):
 CREATE TABLE iceberg.analytics.orders (
@@ -3349,17 +3351,20 @@ CREATE TABLE iceberg.analytics.orders (
   amount DOUBLE
 ) WITH (
   partitioning = ARRAY['order_date'],
-  -- Default is serializable; override to snapshot for higher concurrency tolerance:
-  format_version = 2
+  format_version = 2,
+  -- Set the three isolation-level properties at CREATE TABLE via extra_properties:
+  extra_properties = MAP(
+    ARRAY['write.delete.isolation-level',
+          'write.update.isolation-level',
+          'write.merge.isolation-level'],
+    ARRAY['snapshot', 'snapshot', 'snapshot']
+  )
 );
 
--- Set on an existing table (Trino 467):
-ALTER TABLE iceberg.analytics.orders
-SET PROPERTIES "write.delete.isolation-level" = 'snapshot',
-               "write.update.isolation-level" = 'snapshot',
-               "write.merge.isolation-level" = 'snapshot';
-
--- Set on an existing table (Spark):
+-- Set on an existing table (Trino 467) — Spark form is the canonical for isolation-level
+-- because Trino docs note about extra_properties: "The properties are not used by Trino";
+-- Spark's Iceberg writer is the canonical consumer of write.*.isolation-level at runtime.
+-- Run via Spark SQL:
 ALTER TABLE iceberg.analytics.orders
 SET TBLPROPERTIES (
   'write.delete.isolation-level' = 'snapshot',
@@ -3367,11 +3372,24 @@ SET TBLPROPERTIES (
   'write.merge.isolation-level' = 'snapshot'
 );
 
+-- If you must set them from Trino (instead of Spark), use extra_properties (Trino 465+,
+-- shipped via trinodb/trino PR #24031 merged Nov 2024). Same caveat: Trino itself may
+-- not honor the values at runtime; persisted into Iceberg metadata for downstream readers.
+ALTER TABLE iceberg.analytics.orders SET PROPERTIES
+  extra_properties = MAP(
+    ARRAY['write.delete.isolation-level',
+          'write.update.isolation-level',
+          'write.merge.isolation-level'],
+    ARRAY['snapshot', 'snapshot', 'snapshot']
+  );
+
 -- Verify the effective value with $properties (Trino 467):
 SELECT key, value
 FROM iceberg.analytics."orders$properties"
 WHERE key LIKE 'write.%.isolation-level';
 ```
+
+> **DO-NOT-WRITE on Trino 467**: `ALTER TABLE ... SET PROPERTIES "write.merge.isolation-level" = 'snapshot'` (or any other quoted-dotted native Iceberg key) is rejected by Trino with `Catalog 'iceberg' table property 'write.merge.isolation-level' does not exist`. Trino's `SET PROPERTIES` accepts only the fixed allow-list of identifiers — see [`resources/26-iceberg-concurrent-write-conflicts.md`](26-iceberg-concurrent-write-conflicts.md) §4 for the full list and the DO-NOT-WRITE matrix.
 
 > **There are THREE properties, one per operation type — set all three if you want consistent behavior.** Iceberg exposes the level separately for DELETE, UPDATE, and MERGE INTO. A common mistake is setting only `write.merge.isolation-level` and being surprised when a concurrent DELETE still fails. Set all three to the same value.
 
