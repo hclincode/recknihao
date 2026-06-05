@@ -763,6 +763,7 @@ Sources (verified June 2026): [trino.io/docs/current/functions/datetime.html](ht
 | `SUBSTR(s, start, len)` | `substr(s, start, len)` OR `substring(s FROM start FOR len)` | Both 1-indexed; same as Oracle. |
 | `INSTR(s, sub)` | `strpos(s, sub)` | Returns position (1-indexed); `0` if not found, same as Oracle. |
 | `INSTR(s, sub, start, n)` (find n-th occurrence) | No single-call equivalent; chain `strpos` + `substr` or use `regexp_extract_all`. | The 4-argument INSTR form is Oracle-only. |
+| split a delimited string and grab the N-th piece (e.g. subdomain from `acme.ourapp.com`) | `split_part(s, delimiter, n)` — `split_part(url, '.', 1)` → `'acme'` | 1-indexed; signature `split_part(string, delimiter, index)`. **Verified nuance: if `index` is out of range, Trino returns `NULL` — NOT an empty string** (trino.io string-functions; Trino #14460). Do NOT write "returns empty string if the index is missing" — that's a base-training myth. For full URLs (`https://acme.ourapp.com/x`) use `regexp_extract(url, '([a-z0-9-]+)\.ourapp\.com', 1)` instead. |
 | `LENGTH(s)` | `length(s)` | Identical. |
 | `LPAD(s, n, pad)` / `RPAD(s, n, pad)` | `lpad(s, n, pad)` / `rpad(s, n, pad)` | Identical. |
 | `LTRIM(s)` / `RTRIM(s)` / `TRIM(s)` | `ltrim(s)` / `rtrim(s)` / `trim(s)` | Identical. |

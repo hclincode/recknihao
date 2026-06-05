@@ -624,6 +624,148 @@ WHERE day >= DATE '2026-01-01';
 - `LEAD(col, n)` is the mirror — `n` rows forward.
 - No frame clause needed — `LAG`/`LEAD` operate on a specific row offset, not a frame.
 
+### Pattern B2: LEADING CANONICAL — Period-over-period: YoY vs MoM with window functions (year over year / same month last year / month over month / compare to last year / LAG 12 months / growth vs last year / period over period)
+
+> **Read this BEFORE writing any "year-over-year", "YoY", "same month last year", "month over month", "MoM", "compare to last year", "growth vs last year", or "period over period" SQL on Trino + Iceberg.** `LAG` is the right tool, but the **offset** matters and silently produces the wrong metric if you pick the default.
+
+**Core fact (verified at [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html)):** `lag(x[, offset[, default_value]])` "Returns the value at `offset` rows before the current row in the window partition." **The default offset is `1`** — one row back, NOT one year back, NOT one month back. The offset is **rows**, not calendar periods, so the right number depends on (a) what your bucket granularity is and (b) whether the series is gap-filled per partition key.
+
+#### LAG offset mapping — pick the offset by intent AND bucket grain
+
+| Comparison intent | Bucket grain (one row per ...) | LAG offset | Requirement |
+|---|---|---|---|
+| Previous row (day-over-day, if rows are daily) | one row per `(partition_key, day)` | `LAG(metric, 1)` | Contiguous daily rows per partition key — every day present |
+| **Month-over-month (MoM)** | one row per `(partition_key, month)` | **`LAG(metric, 1)`** | Contiguous monthly rows per partition key — every month present |
+| **Year-over-year (YoY) — same month last year** | one row per `(partition_key, month)` | **`LAG(metric, 12)`** | **13+ months of CONTIGUOUS monthly rows per partition key — every month present** |
+| Quarter-over-quarter (QoQ) — same quarter last year | one row per `(partition_key, quarter)` | `LAG(metric, 4)` | Contiguous quarterly rows per partition key — every quarter present |
+| Same week last year | one row per `(partition_key, iso_week)` | `LAG(metric, 52)` | Contiguous weekly rows — every ISO week present (warning: a few ISO years have 53 weeks; self-join is safer than LAG(52) for weekly YoY) |
+
+**Memorize the load-bearing pair:** `LAG(metric, 1)` over a monthly series = **MoM (previous month)**. `LAG(metric, 12)` over the same monthly series = **YoY (same month last year)**. These are **different metrics** and labeling one as the other is a silent-wrong bug — there is no error message.
+
+#### The GAP-FILL CAVEAT (the crux — this is where most YoY queries break)
+
+`LAG(metric, N)` counts **rows**, not calendar periods. If a customer's monthly series has a missing month, `LAG(metric, 12)` silently points at the **wrong calendar month** — typically 11 months back, not 12. Concrete worst case: customer A has rows for every month except 2025-07. On their 2026-06 row, `LAG(usage, 12) OVER (... ORDER BY month)` returns the **2025-08** value (because there are only 11 rows between 2026-06 and 2025-08 in their partition), not the 2025-06 value the engineer expects. **No error, no warning — just wrong numbers.**
+
+The same trap exists for MoM with `LAG(metric, 1)`: if customer A has rows for 2026-01 and 2026-03 but not 2026-02, then on the 2026-03 row `LAG(usage, 1)` returns the **2026-01** value (a 2-month-back comparison), not the 2026-02 value (which doesn't exist).
+
+**There are exactly two safe forms.** Pick consciously.
+
+#### FORM A (preferred for YoY — gap-safe by construction): SELF-JOIN on calendar arithmetic
+
+The self-join matches `(customer_id, month)` to `(customer_id, month - INTERVAL '12' MONTH)` directly — so an unmatched row produces NULL (not a shifted offset). This form **does not require gap-filling**. It is the recommended pattern for any production YoY metric.
+
+```sql
+-- CANONICAL YoY (year-over-year) — self-join, gap-safe, one row per (customer_id, current_month)
+WITH monthly AS (
+  SELECT
+    customer_id,
+    date_trunc('month', occurred_at) AS month,
+    COUNT(*) AS usage_count
+  FROM iceberg.analytics.events
+  WHERE occurred_at >= date_add('month', -25, date_trunc('month', current_date))
+  GROUP BY customer_id, date_trunc('month', occurred_at)  -- REPEAT the expression; do NOT use the alias (Trino #16533)
+)
+SELECT
+  cur.customer_id,
+  cur.month                          AS current_month,
+  cur.usage_count                    AS current_month_usage,
+  prev.usage_count                   AS same_month_last_year,
+  (cur.usage_count - prev.usage_count) * 1.0
+    / NULLIF(prev.usage_count, 0) * 100  AS yoy_growth_pct
+FROM monthly cur
+LEFT JOIN monthly prev
+  ON  prev.customer_id = cur.customer_id
+  AND prev.month       = date_add('month', -12, cur.month)
+WHERE cur.month = date_trunc('month', current_date)
+ORDER BY cur.customer_id;
+-- prev.usage_count is NULL when there is no row exactly 12 months prior — the LEFT JOIN handles gaps cleanly.
+-- yoy_growth_pct is NULL when prev.usage_count is 0 or NULL (NULLIF guards divide-by-zero AND missing baseline).
+```
+
+Substitute `date_add('month', -1, cur.month)` for MoM. Substitute `date_add('quarter', -1, cur.month)` for same-quarter-last-year against a monthly grain, or use a quarterly grain with `date_add('quarter', -4, ...)` for QoQ over a quarterly series. The pattern is the same; only the unit and the offset change.
+
+> **`date_add` confirmed at [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html):** `date_add(unit, value, timestamp)` "Adds an `interval value` of type `unit` to `timestamp`. Subtraction can be performed by using a negative value." The equivalent `cur.month - INTERVAL '12' MONTH` form is also valid Trino — both compile to the same plan. Prefer `date_add` for readability when the offset is a variable.
+
+#### FORM B (LAG(12) over a GAP-FILLED contiguous monthly series)
+
+Use this form when you need ranks/running totals over the same window as the YoY column — `LAG` keeps you on a single window pass. **You MUST gap-fill first** or LAG will silently shift the offset on sparse customers (see the caveat above). The gap-fill recipe: generate a complete `(customer_id, month)` spine for the lookback window, LEFT JOIN actual counts, COALESCE missing values to 0.
+
+```sql
+-- CANONICAL YoY (year-over-year) — LAG(12) over an EXPLICITLY GAP-FILLED contiguous monthly series
+WITH monthly_actuals AS (
+  SELECT
+    customer_id,
+    date_trunc('month', occurred_at) AS month,
+    COUNT(*) AS usage_count
+  FROM iceberg.analytics.events
+  WHERE occurred_at >= date_add('month', -25, date_trunc('month', current_date))
+  GROUP BY customer_id, date_trunc('month', occurred_at)
+),
+month_spine AS (
+  -- Sequence of all 26 month starts in the window: -25 ... 0
+  SELECT m AS month
+  FROM UNNEST(sequence(
+    date_add('month', -25, date_trunc('month', current_date)),
+    date_trunc('month', current_date),
+    INTERVAL '1' MONTH
+  )) AS t(m)
+),
+customers AS (
+  SELECT DISTINCT customer_id FROM monthly_actuals
+),
+gap_filled AS (
+  -- One row per (customer, month) for every customer that appeared anywhere in the window
+  SELECT
+    c.customer_id,
+    s.month,
+    COALESCE(a.usage_count, 0) AS usage_count
+  FROM customers c
+  CROSS JOIN month_spine s
+  LEFT JOIN monthly_actuals a
+    ON a.customer_id = c.customer_id
+   AND a.month       = s.month
+)
+SELECT
+  customer_id,
+  month                              AS current_month,
+  usage_count                        AS current_month_usage,
+  LAG(usage_count, 12) OVER (PARTITION BY customer_id ORDER BY month)
+                                     AS same_month_last_year,
+  (usage_count - LAG(usage_count, 12) OVER (PARTITION BY customer_id ORDER BY month)) * 1.0
+    / NULLIF(LAG(usage_count, 12) OVER (PARTITION BY customer_id ORDER BY month), 0) * 100
+                                     AS yoy_growth_pct
+FROM gap_filled
+WHERE month = date_trunc('month', current_date)
+ORDER BY customer_id;
+```
+
+**Why this works:** the `gap_filled` CTE guarantees every `(customer_id, month)` combination is present for all 26 months in the window. With contiguous rows, `LAG(usage_count, 12)` reliably returns the value from exactly 12 calendar months prior. Without the gap-fill step, the LAG offset becomes a function of how sparse each customer's series is — silently wrong, per-customer-different.
+
+#### Picking FORM A vs FORM B
+
+| Need | Pick |
+|---|---|
+| Single YoY column, one row per current month per customer | **FORM A (self-join)** — simpler, no spine CTE, gap-safe by construction |
+| YoY AND a running total / ranking over the SAME monthly window in ONE query | FORM B (LAG over gap-filled) — single window pass, no extra join |
+| You're not sure whether your series has gaps | **FORM A (self-join)** — defaults to the safe option |
+| Sparse data is the norm (e.g., per-customer feature usage where most months are zero) | **FORM A (self-join)** — or FORM B with the COALESCE-to-0 gap-fill |
+
+#### DO-NOT-WRITE — banned YoY forms (each will produce the WRONG metric or fail to parse)
+
+| DO NOT WRITE | Why it is wrong | Correct form |
+|---|---|---|
+| `LAG(usage_count) OVER (PARTITION BY customer_id ORDER BY month) AS usage_last_year` (default offset 1, labeled as YoY) | **SILENT-WRONG — this is MoM, not YoY.** `LAG(x)` with no offset = `LAG(x, 1)` = previous row = previous month on a monthly series. Labeling this as "last year" / "YoY" is internally inconsistent and answers a different question than the user asked. | `LAG(usage_count, 12) OVER (... ORDER BY month)` over a **gap-filled** monthly series, OR the self-join form (FORM A). |
+| `LAG(usage_count) OVER (... ORDER BY month) AS usage_last_month` then `(current - usage_last_month) / usage_last_month AS yoy_growth_pct` | **INTERNAL INCONSISTENCY.** The intermediate column name ("last month") and the final metric name ("YoY") describe different metrics. Either rename the metric to `mom_growth_pct` (it is MoM) or fix the LAG offset to 12 and the intermediate column to `same_month_last_year` (it is YoY). One or the other — not both. | Pick ONE: `LAG(metric, 1)` + `mom_growth_pct` + `prev_month_usage`, OR `LAG(metric, 12)` + `yoy_growth_pct` + `same_month_last_year`. |
+| `LAG(usage_count, 12) OVER (... ORDER BY month)` on a sparse monthly series with NO gap-fill | **SILENT-WRONG on customers with missing months** — the offset counts rows, not calendar months, so a missing month silently shifts the comparison to the wrong calendar period (typically 11 months back). | Either (a) gap-fill the series first (FORM B's `gap_filled` CTE) before applying LAG(12), or (b) use the self-join form (FORM A) which is gap-safe by construction. |
+| `LAG(usage_count, 12) OVER (PARTITION BY customer_id ORDER BY event_month)` where `event_month` is a **SELECT alias** | **Analysis error — alias not visible in `OVER`'s ORDER BY.** Window-clause ORDER BY uses pre-projection scope, so the alias `event_month` is not yet defined. Same Trino-grammar rule that bans alias references in GROUP BY (see §5 Pattern A2 GROUP BY rules anchor, rule 5). | Repeat the expression: `ORDER BY date_trunc('month', occurred_at)`. |
+| `JOIN monthly prev ON prev.month = cur.month - 12` (bare integer subtraction on a TIMESTAMP/DATE) | **Type error** — `TIMESTAMP - INTEGER` is not a defined operation in Trino. | `prev.month = date_add('month', -12, cur.month)` OR `prev.month = cur.month - INTERVAL '12' MONTH`. |
+
+#### Keyword anchor (so this canonical lands when you search for the right thing)
+
+The phrases you would type into a search bar for this pattern: **year over year**, **YoY**, **same month last year**, **year-over-year growth**, **compare to last year**, **growth vs last year**, **monthly trend year ago**, **month over month**, **MoM**, **previous month**, **period over period**, **period-over-period growth**, **LAG window function**, **LAG 12 months**, **LAG offset 12**, **same period last year**, **same period prior year**, **prior year comparison**, **prior-year-over-year**.
+
+> **Cross-reference:** for the broader "monthly bucketed running total + GROUP BY rules anchor" pattern (which the YoY queries above also obey), see §5 Pattern A2 — Bucketed running total. The GROUP BY rule "**REPEAT the expression, do NOT use the alias**" applies here too. For YoY in a dbt incremental model (where YoY is computed inside `{% if is_incremental() %}` and the gap-fill spine is generated relative to a watermark), see [resource 27](27-oracle-plsql-to-dbt-trino.md) and [resource 28](28-complex-sql-performance-trino-dbt.md).
+
 ### Pattern C: Rank (top-N per group)
 
 "Top 10 highest-value orders per tenant."
