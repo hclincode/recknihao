@@ -1,119 +1,112 @@
-# Iter 494 Judge Feedback — 2026-06-06 (EXTENDED PHASE)
+# Iter 495 Judge Feedback — 2026-06-06
 
-## Overall: 4.5469 PASS (+1.047 above 3.5 floor)
+**Overall: 4.5156 PASS** (94th consecutive overall PASS in extended phase; +1.016 above 3.5 floor)
 
-DECODE-NULL canonical HELD. iter494 primary teacher fix (r27 §4.1A LEADING CANONICAL block for `DECODE(status,NULL,'Missing','A','Active','Unknown')`) PATTERN-MATCHED VERBATIM by responder — 4th successful instance of the leading-canonical-example bulletproofing pattern.
+**Q1 partition-key fix CONFIRMED LANDED.** Responder now writes `properties={'partitioning': "ARRAY[...]"}` for dbt-trino Iceberg models — the dialect-correct form per trino.io Iceberg connector docs. The iter494→495 reversal-from-stale-canonical (r28 LEADING CANONICAL + r27/r16/r13/r10 stale-block corrections) routed correctly on the re-probe with the new keyword phrasing.
 
-One LOAD-BEARING accuracy slip on Q3: the dbt-trino `properties` dict used `partitioning` instead of `partitioned_by`. Teacher reports the root-cause stale content at r27:2405 and r16:571 was corrected this iteration; re-probe at iter495 will confirm the fix landed.
-
-Federation NOT probed — 4.49944/310 row UNCHANGED per iter472-494 directive.
+**NEW CONFIRMED BUG (Q4):** GROUPING() bitmask mapping is wrong. For `GROUP BY ROLLUP(region, product_category)`: detail=0, region-subtotal=1, grand-total=**3** (NOT 2). The responder's `CASE GROUPING(region, product_category) WHEN 2 THEN 'Grand Total'` will never match — the grand-total row falls through to NULL/ELSE and is mislabeled. There is also NO row with bitmask = 2 in a 2-column ROLLUP. Confirmed via trino.io/docs/current/sql/select.html GROUPING operation: "bits are assigned to the argument columns with the rightmost column being the least significant bit. For a given grouping, a bit is set to 0 if the corresponding column is included in the grouping and to 1 otherwise." Leftmost = MSB; both-rolled-up = binary 11 = 3.
 
 ---
 
-## Per-question scoring
+## Per-question scores
 
-### Q1 — DECODE(status, NULL, 'Missing', 'A', 'Active', 'Unknown') → Trino — 4.9375 STRONG PASS
+### Q1 — NEW dbt Iceberg model: exact config() with partitioning=month+bucket
+**Avg 4.875 STRONG PASS** (RE-PROBE OF ITER494 Q3 — FIX CONFIRMED LANDED)
+- Accuracy 5.0 — `properties={'partitioning': "ARRAY['month(event_date)', 'bucket(customer_id, 16)']"}` is dialect-correct for the Iceberg connector. Confirmed at trino.io/docs/current/connector/iceberg.html: "If a table is partitioned by columns c1 and c2, the partitioning property is `partitioning = ARRAY['c1', 'c2']`." Confirmed at trino.io/docs/current/connector/hive.html that `partitioned_by` is the HIVE connector property (wrong dialect for this Iceberg-backed stack). Responder correctly states the key is `partitioning` and NOT `partitioned_by`; correctly notes dbt-trino passes the dict verbatim into the WITH(...) clause; correctly suggests SHOW CREATE TABLE for verification.
+- Clarity 4.75 — explicit dialect contrast called out; SHOW CREATE TABLE verification path; no unexplained jargon.
+- Actionability 5.0 — copy-pasteable exact block; engineer can drop into a .sql model file and run.
+- Completeness 4.75 — covers materialized, properties dict, key contrast, verification. Could optionally mention `format_version=2` and `format='PARQUET'` for completeness, but the question asked specifically for the partition-key config and the answer nailed that.
+- **Topic mapping**: Improving complex SQL performance on Trino with dbt (dbt-trino subdomain).
 
-| Dim | Score | Notes |
-|---|---|---|
-| Accuracy | 5.0 | Searched CASE with `WHEN status IS NULL THEN 'Missing'` FIRST, then `WHEN status = 'A' THEN 'Active'`, ELSE 'Unknown'. Explicitly states `status = NULL` returns UNKNOWN under 3VL and never matches. States `IS NULL` is the only Trino construct returning TRUE for NULL. Rule that every `DECODE(col, NULL, ...)` becomes searched CASE with `IS NULL` first. Verified at trino.io/docs/current/functions/conditional.html. ZERO fabrications. |
-| Clarity | 4.75 | "Why your current CASE fails" framing explains 3VL with the exact failure mode the engineer hit. |
-| Actionability | 5.0 | Copy-pasteable Trino-467-valid fix; ordering rule callable as a checklist item. |
-| Completeness | 5.0 | WHY (3VL) + HOW (IS NULL first) + GENERAL RULE all covered. |
+### Q2 — Oracle NVL / NVL2 → Trino equivalents
+**Avg 4.75 STRONG PASS**
+- Accuracy 5.0 — NVL→COALESCE is the canonical mapping (COALESCE is ANSI; Trino has no NVL). NVL2→`CASE WHEN c IS NOT NULL THEN a ELSE b END` is correct (Trino has no NVL2). N-ary note on COALESCE is correct.
+- Clarity 4.75 — clean side-by-side mapping; no jargon.
+- Actionability 4.75 — engineer can grep `NVL(`/`NVL2(` and rewrite directly.
+- Completeness 4.5 — covers both target functions. Minor missing-nuance: could note COALESCE evaluates left-to-right and returns the first non-NULL of N args (extending NVL's 2-arg form), or note NVL2 type-promotion semantics. Not load-bearing.
+- **Topic mapping**: Oracle PL/SQL→dbt/Trino migration (Oracle-specific function rewrites for Trino dialect).
 
-**iter494 PRIMARY FIX CONFIRMED LANDED**: r27 §4.1A LEADING CANONICAL block matched verbatim. ZERO recurrence of the 3VL `WHEN status = NULL` trap. ZERO collapse-into-ELSE drift. 4th successful instance of the leading-canonical-example bulletproofing pattern (after r13 Spark writeTo iter420, r07 GROUP-BY-expression iter485, r07 §5 YoY Pattern B2 iter493).
+### Q3 — ADD COLUMN plan_tier VARCHAR to existing Iceberg table: safe?
+**Avg 4.875 STRONG PASS**
+- Accuracy 5.0 — metadata-only commit CORRECT per Iceberg evolution spec (schema updates are metadata-only, no data files rewritten). v2 existing rows read NULL CORRECT (Iceberg column-ID-based reader returns NULL for column IDs not present in older files). NO DEFAULT clause on Trino 467 CORRECT — DEFAULT in ADD COLUMN was added in Trino 477 (release 477, Sep 2025). Read-time default-backfill is Iceberg format-v3 CORRECT — v2 has no read-time defaults. Trino UPDATE or Spark INSERT OVERWRITE for backfill CORRECT paths for this stack.
+- Clarity 4.75 — direct yes/no on "safe" with the v2-specific behavior spelled out.
+- Actionability 5.0 — engineer knows: run the ALTER (safe, instant), existing queries unaffected, new writes carry the value, backfill via UPDATE or INSERT OVERWRITE if needed.
+- Completeness 4.75 — covers safety, performance (metadata-only, instant), read behavior on old rows, write behavior on new rows, backfill options, downstream-query impact.
+- **Topic mapping**: Postgres-to-Iceberg ingestion (Iceberg schema evolution is the ingestion-side concern).
 
-### Q2 — dbt exposures (what / runtime / where) — 4.625 STRONG PASS
-
-| Dim | Score | Notes |
-|---|---|---|
-| Accuracy | 4.75 | Exposures = descriptive metadata only, NO runtime effect, NO DDL/SQL — CONFIRMED at docs.getdbt.com/docs/build/exposures ("purely declarative and don't affect dbt's execution"). YAML fields (name, type, maturity, owner, depends_on via ref()/source()) CORRECT. Shows up in `dbt docs generate`/`serve` DAG lineage CORRECT. Useful for impact analysis CORRECT. |
-| Clarity | 4.75 | "Documentation-only" framing directly answers the runtime sub-question. |
-| Actionability | 4.5 | YAML example useful. Could have shown the `dbt run -s +exposure:my_dashboard` impact-analysis selection syntax explicitly. |
-| Completeness | 4.5 | All three sub-questions answered. Optional fields (`meta`/`tags`/`label`/`url`) not mentioned but not asked. |
-
-ZERO fabrications.
-
-### Q3 — Iceberg event_date + bucket(customer_id) coexistence + setup — 3.75 PASS (DRAGGED)
-
-| Dim | Score | Notes |
-|---|---|---|
-| Accuracy | 3.0 | **LOAD-BEARING ERROR**: dbt config block uses `properties={'partitioning': "ARRAY['month(order_date)', 'bucket(customer_id, 16)']"}` — WRONG KEY for the dbt-trino `properties` dict. Per resources/27 §4 DO-NOT-WRITE and resources/28 LEADING CANONICAL (authoritative for this repo's stack), the dbt-trino `properties` Iceberg partition key is **`partitioned_by`** (snake_case). The `partitioning` key INSIDE the dbt `properties` dict is the iter452-documented known-fab class (silently no-ops or errors at apply time). The bare-Trino DDL `WITH (partitioning = ARRAY[...])` IS correctly using `partitioning` (that IS the right key for raw Trino CREATE TABLE / SET PROPERTIES). The responder mixed up which key belongs on which surface. Bucket+month coexistence CORRECT; bucket(col, N) hash-distribution explanation CORRECT; pruning behavior CORRECT; bucket-count guidance CORRECT. |
-| Clarity | 4.5 | Step-by-step bare-Trino-then-dbt structure is clean; bucket-hashing explanation is good. |
-| Actionability | 3.0 | Engineer copy-pasting the dbt block AS DELIVERED would hit the iter452 silent no-op / apply-time error. The bare-Trino DDL half is copy-pasteable and works. Net actionability is split — half of what was delivered is broken. |
-| Completeness | 4.5 | All three sub-questions answered (is it real, can you have both, how to set up). |
-
-**Root cause was stale content at r27 line 2405 and r16 line 571 — BOTH CORRECTED THIS ITERATION (iter494 teacher fix to `partitioned_by`).** The responder's wrong-key answer in this iteration came from content that has now been fixed; the fix must be re-probed at iter495 to confirm it landed and routes from the partition-design keyword path.
-
-### Q4 — TRY / TRY_CAST for junk strings ("N/A", "") — 4.875 STRONG PASS
-
-| Dim | Score | Notes |
-|---|---|---|
-| Accuracy | 5.0 | TRY_CAST returns NULL on unparseable, CAST throws — CONFIRMED at trino.io/docs/current/functions/conversion.html ("Like cast(), but returns null if the cast fails."). is_junk_data CASE pattern to distinguish parse-failure NULL from genuine-NULL is correct Trino dialect. "No perf penalty" claim defensible (per-row local op, no shuffle/spill change). |
-| Clarity | 4.75 | Comparison table CAST-vs-TRY_CAST makes the difference immediate; NULL-conflation gotcha is exactly what bites in production. |
-| Actionability | 5.0 | Direct copy-paste fix + audit pattern + caveat about losing original junk values for forensic review. |
-| Completeness | 4.75 | Fix + load-bearing gotcha both covered. |
-
-ZERO fabrications.
+### Q4 — Subtotals + grand total in one Trino query (region × product_category)
+**Avg 3.5625 PASS AT FLOOR — CONFIRMED GROUPING-BITMASK BUG**
+- Accuracy 3.5 — ROLLUP(region, product_category) approach CORRECT; SUM(amount) CORRECT; replaces UNION ALL CORRECT; CUBE mention CORRECT. **BUG**: GROUPING bitmask mapping is wrong. For 2-column ROLLUP: detail row = binary 00 = **0** (correct in answer); region-subtotal (product_category rolled up) = binary 01 = **1** (correct in answer); grand-total (both rolled up) = binary 11 = **3** (responder said 2 — WRONG). The CASE `WHEN 2 THEN 'Grand Total'` will never match because no row has bitmask = 2 in a 2-column ROLLUP. The grand-total row falls through to the ELSE/NULL branch and is mislabeled. Confirmed via trino.io/docs/current/sql/select.html GROUPING() definition: "bits are assigned to the argument columns with the rightmost column being the least significant bit. For a given grouping, a bit is set to 0 if the corresponding column is included in the grouping and to 1 otherwise" — leftmost = MSB. So `GROUPING(region, product_category)` = (region_bit << 1) | product_category_bit; grand-total = (1<<1)|1 = 3.
+- Clarity 4.25 — explanation reads cleanly but propagates wrong values to a beginner.
+- Actionability 2.5 — engineer who copy-pastes this gets a query that runs but labels the grand-total row as NULL — silent semantic bug, hours of debugging, exactly the class of error that erodes trust in the responder.
+- Completeness 4.0 — answers ROLLUP vs UNION ALL, mentions CUBE; misses GROUPING_SETS for arbitrary subtotal patterns, and most critically misses the correct bitmask values.
+- **Topic mapping**: Improving complex SQL performance on Trino with dbt (advanced GROUP BY for migrated complex queries), with secondary touch on SQL query best practices for OLAP.
 
 ---
 
-## Overall calculation
-
-(4.9375 + 4.625 + 3.75 + 4.875) / 4 = 18.1875 / 4 = **4.5469 PASS**
-
----
-
-## Topic average updates
+## Topic avg updates
 
 | Topic | Before | After | Delta |
 |---|---|---|---|
-| Oracle PL/SQL→dbt/Trino migration (Q1 DECODE + Q4 TRY_CAST both map here) | 4.5017/64 | **4.5140/66** | +0.0123 |
-| Improving complex SQL performance on Trino with dbt (Q2 exposures = dbt-tooling subdomain in r28) | 4.7781/4 | **4.7475/5** | -0.0306 |
-| Iceberg partition design for SaaS (Q3 bucket+month coexistence maps here) | 4.4947/36 | **4.4746/37** | -0.0201 |
+| Improving complex SQL performance on Trino with dbt (Q1 + Q4 both map here) | 4.7475/5 | (4.7475*5 + 4.875)/6 = 4.7688/6 → (4.7688*6 + 3.5625)/7 = **4.5964/7** | -0.1511 (Q4 GROUPING bug drags) |
+| Oracle PL/SQL→dbt/Trino migration (Q2) | 4.5140/66 | (4.5140*66 + 4.75)/67 = **4.5175/67** | +0.0035 |
+| Postgres-to-Iceberg ingestion (Q3) | 4.4970/165 | (4.4970*165 + 4.875)/166 = **4.4992/166** | +0.0022 |
 
-Federation NOT probed — **4.49944/310 row UNCHANGED** per iter472-494 directive.
-
-Math:
-- Oracle migration: (4.5017×64 + 4.9375) / 65 = 293.0463/65 = 4.5084/65; (4.5084×65 + 4.875) / 66 = 297.921/66 = 4.5140/66
-- Complex SQL on Trino+dbt: (4.7781×4 + 4.625) / 5 = 23.7374/5 = 4.7475/5
-- Iceberg partition design: (4.4947×36 + 3.75) / 37 = 165.5592/37 = 4.4746/37
+Federation NOT probed — **4.49944/310 row UNCHANGED** per the iter472-495 standing directive.
 
 ---
 
-## What landed / what slipped
+## Concrete next-teacher actions for iter496
 
-**LANDED (iter494 teacher fixes confirmed)**:
-1. r27 §4.1A LEADING CANONICAL block for `DECODE(status,NULL,'Missing','A','Active','Unknown')` — pattern-matched VERBATIM by responder. 4th successful instance of the leading-canonical-example bulletproofing strategy.
-2. ZERO recurrence of any DECODE-NULL 3VL trap (`WHEN status = NULL`, `WHEN NULL`, ELSE-collapse).
+**PRIMARY (HIGH PRIORITY) — Q4 GROUPING bitmask hardening:**
+1. Add a LEADING CANONICAL block at the top of the ROLLUP/CUBE/GROUPING_SETS section in `resources/28-complex-sql-performance-trino-dbt.md` (and cross-ref from `resources/07-analytical-query-patterns.md` if it covers subtotals) showing the EXACT bitmask table:
 
-**SLIPPED (caught this iteration; root cause fixed mid-iter)**:
-1. Q3 dbt `properties` partition key — responder routed to stale content using `partitioning` instead of `partitioned_by`. Teacher reports BOTH r27:2405 and r16:571 corrected this iteration. **MUST re-probe at iter495.**
+   ```
+   For GROUP BY ROLLUP(c1, c2):
+     - detail row (both present):           GROUPING(c1, c2) = 0  (binary 00)
+     - subtotal per c1 (c2 rolled up):      GROUPING(c1, c2) = 1  (binary 01)
+     - grand total (both rolled up):        GROUPING(c1, c2) = 3  (binary 11)
+   Note: there is NO row with GROUPING() = 2 in a 2-column ROLLUP.
+   The leftmost argument is the MOST-significant bit; bit=1 means "rolled up", bit=0 means "present in grouping".
+   ```
 
-**No new fabrications outside Q3.**
+2. Include a DO-WRITE / DO-NOT-WRITE contrast:
+   - DO-WRITE: `CASE GROUPING(region, product_category) WHEN 0 THEN 'Detail' WHEN 1 THEN 'Region Total' WHEN 3 THEN 'Grand Total' END`
+   - DO-NOT-WRITE: `WHEN 2 THEN 'Grand Total'` — value 2 cannot occur for ROLLUP of (region, product_category); the grand-total row would silently be NULL.
+
+3. Add a quick reference table for 3-column ROLLUP(c1, c2, c3) bitmask values (0, 1, 3, 7) so engineers understand the pattern.
+
+4. Add canonical example for GROUPING_SETS (arbitrary subtotal selection) with its bitmask interpretation, since the responder didn't mention it.
+
+5. Quote the trino.io/docs/current/sql/select.html "GROUPING operation" section VERBATIM in the resource so the responder can pattern-match it (proven-effective leading-canonical-example bulletproofing pattern).
+
+**SECONDARY (LOW PRIORITY) — Maintenance:**
+- Q1/Q2/Q3 all strong; no resource changes needed for those subdomains.
+- Consider cross-ref from Oracle migration r27 to the new ROLLUP/GROUPING canonical block (PL/SQL procedural subtotal patterns often migrate to ROLLUP + CASE GROUPING).
 
 ---
 
-## Next-teacher actions for iter495
+## Judge probe targets for iter496
 
-1. **CONFIRM the r27:2405 + r16:571 `partitioned_by` correction landed.** Inspect both lines and grep all of `resources/` for any remaining `properties={...'partitioning'...}` Iceberg dbt block (not bare-Trino DDL). If any other resource still shows `properties = {'partitioning': ...}` for an Iceberg model, fix it the same way. Reconcile-don't-append.
+1. **Q4 GROUPING-bitmask re-probe** (HIGH PRIORITY — verify the fix lands): Ask the responder to write a Trino query that produces region subtotals + grand total with explicit row labels. Score on whether `WHEN 3 THEN 'Grand Total'` appears (correct) vs `WHEN 2 THEN 'Grand Total'` (regression). Vary the question phrasing: "include a label column", "differentiate detail rows from subtotal rows", "use GROUPING() to tag the row type".
+2. **3-column ROLLUP/GROUPING_SETS probe**: Ask for a query with `ROLLUP(country, state, city)` and a label CASE on GROUPING — correct values are 0/1/3/7. This stress-tests whether the responder generalizes the bitmask pattern beyond 2 columns.
+3. **dbt-trino partition-key durability re-probe** (vary keyword phrasing): Use phrases like "dbt model materialized as Iceberg table partitioned by tenant_id", "dbt config for Iceberg incremental with partitioning", "what goes in the properties dict for partitioning a dbt-trino Iceberg model" — confirm `'partitioning'` continues to route (not `'partitioned_by'`) across multiple keyword entry points.
+4. **Federation row**: continue NOT-PROBED per standing directive — do not touch the 4.49944/310 federation row this iteration.
 
-2. **Add a side-by-side DO-NOT-WRITE / DO-WRITE contrast block** at the leading canonical anchor (r27 or r28) that explicitly shows:
-   - Bare-Trino DDL: `CREATE TABLE ... WITH (partitioning = ARRAY[...])` — `partitioning` key is correct.
-   - dbt-trino model config: `properties = {'partitioned_by': "ARRAY[...]"}` — `partitioned_by` is correct.
-   - DO-NOT-WRITE: `properties = {'partitioning': "ARRAY[...]"}` inside a dbt-trino Iceberg model — silent no-op / apply-time error (iter452 fab class, iter494 recurrence).
-   Place the contrast inline so the responder lands on it on any "dbt iceberg partition" keyword query.
+---
 
-3. **Cross-reference from r16 (Iceberg partition design) to the r27/r28 canonical block** so that a partition-design-keyword query routes to the same correct example regardless of entry point. Per the findability principle, the Haiku responder needs the correct content near the keywords it will actually search.
+## DO NOT touch this iteration
 
-## Judge probe targets for iter495
+- §13.x federation guardrails in `resources/22-trino-federation.md` — UNTOUCHED.
+- Federation rubric row 4.49944/310 — UNTOUCHED.
+- r07 §5 Pattern B2 YoY/MoM canonical — UNTOUCHED (held in iter493/494).
+- r27 §4.1A DECODE-NULL canonical — UNTOUCHED (held in iter494).
+- r28 LEADING CANONICAL `partitioning` block + r27/r16/r13/r10 stale-block fixes from iter495 — UNTOUCHED (LANDED on this iteration).
 
-1. **Q3 RE-PROBE (load-bearing, REQUIRED)**: ask the responder for a dbt-trino model config for an Iceberg table partitioned by `month(event_date)` plus `bucket(customer_id, 16)`. Score Accuracy strictly on whether the `properties` dict uses `partitioned_by` (correct) or `partitioning` (still-broken). Phrase the question with different keywords from iter494's "add bucket partitioning to existing table" — e.g., "write a new dbt model for an Iceberg table with month+bucket partitioning" — to test that the fix routes from multiple keyword angles.
+---
 
-2. **DECODE-NULL angle re-probe (different shape)**: probe DECODE with NULL in a non-first position, e.g., `DECODE(status, 'A', 'Active', NULL, 'Missing', 'Unknown')`. Confirm `IS NULL` still goes first in the translated searched CASE rather than being placed in source-order. The r27 §4.1A mapping-table covers this case but it has not yet been probed from that angle.
+## Confirmed status
 
-3. **Exposure re-probe**: ask "if I delete an exposure YAML, do my models still build?" — confirm no-runtime-effect claim from a second angle (rubric requires each topic tested from at least two angles before passing; exposures has only one probe so far).
-
-4. **TRY_CAST overflow probe**: ask TRY_CAST on a string that parses as a number but overflows the target type (e.g., `TRY_CAST('999999999999999' AS INTEGER)`). Confirm responder still says NULL (it should — overflow is a cast failure).
-
-DO NOT probe federation. DO NOT touch §13.x federation guardrails in resources/22 or the federation rubric row.
+- **Q1 dbt-trino partition-key fix**: **LANDED**. Responder writes `partitioning` (dialect-correct for the Iceberg connector). The iter494→495 reversal-from-stale-canonical strategy worked.
+- **Q4 GROUPING bitmask bug**: **CONFIRMED**. Grand-total value should be 3, not 2. Teacher must add canonical hardening for iter496.
+- **Overall iter495**: **PASS at 4.5156**, +1.016 above 3.5 floor. 94th consecutive overall PASS in extended phase.

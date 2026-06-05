@@ -317,8 +317,8 @@ dbt-trino supports four incremental strategies. Verified against [docs.getdbt.co
     unique_key='order_id',
     on_schema_change='append_new_columns',
     properties={
-      'format': 'PARQUET',
-      'partitioned_by': "ARRAY['order_date']",
+      'format': "'PARQUET'",
+      'partitioning': "ARRAY['order_date']",
       'sorted_by': "ARRAY['tenant_id']",
       'format_version': 2
     }
@@ -332,7 +332,7 @@ FROM {{ ref('int_orders_enriched') }}
 ```
 
 Notes:
-- `properties` is the dbt-trino-specific block. **Inside this dict the documented partitioning key is `partitioned_by` (snake_case)** — NOT `partitioning`. The bare-Trino raw-DDL form `CREATE TABLE ... WITH (partitioning = ARRAY[...])` DOES use `partitioning` without an underscore, but that's the raw-SQL surface, not the dbt-trino properties dict. See [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs) and [resource 28 § LEADING CANONICAL WORKED EXAMPLE](28-complex-sql-performance-trino-dbt.md) for the canonical block + DO-NOT-WRITE list. **Partition the migrated table by the same column the Oracle table was partitioned on (or whatever the dominant filter is — see [resource 10](10-lakehouse-partitioning.md)).**
+- `properties` is the dbt-trino-specific block. **Inside this dict, the partitioning key for an Iceberg-catalog model is `partitioning`** (matching the bare-Trino DDL key for the Iceberg connector). dbt-trino's `properties()` macro passes dict keys verbatim into the `WITH (...)` clause; the Iceberg connector defines its partition-spec property as `partitioning` per [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html). The Hive connector's analogous property IS `partitioned_by` — but the production stack here uses the Iceberg connector, so `partitioning` is the right key. See [resource 28 § LEADING CANONICAL — dbt-trino partition key for Iceberg vs Hive](28-complex-sql-performance-trino-dbt.md) for the full three-surface DO-WRITE / DO-NOT-WRITE contrast block. **Partition the migrated table by the same column the Oracle table was partitioned on (or whatever the dominant filter is — see [resource 10](10-lakehouse-partitioning.md)).**
 - `{% if is_incremental() %}` is the CANONICAL incremental delta-filter guard. It is True ONLY when (a) the target table already exists, (b) the run is NOT `--full-refresh`, and (c) the model is configured as incremental. On first run it's FALSE (no WHERE filter, full CTAS); on subsequent runs it's TRUE (filter applied, MERGE on the delta). **NOTE: do NOT use `{% if execute %}` here — `execute` is True during both `dbt compile` and `dbt run` and does NOT gate first-build / `--full-refresh` vs incremental.** See [docs.getdbt.com/reference/dbt-jinja-functions/execute](https://docs.getdbt.com/reference/dbt-jinja-functions/execute) and [docs.getdbt.com/docs/build/incremental-models](https://docs.getdbt.com/docs/build/incremental-models).
 - `on_schema_change='append_new_columns'` adds new source columns automatically on incremental runs (the safe default). Other options: `'ignore'` (don't add), `'fail'`, `'sync_all_columns'` (also drops removed columns — dangerous).
 
@@ -1196,8 +1196,8 @@ The `customer_id` here is a 32-character MD5 hex VARCHAR (e.g., `'7d3f...e2a1'`)
     unique_key='order_pk',
     on_schema_change='append_new_columns',
     properties={
-      'format': 'PARQUET',
-      'partitioned_by': "ARRAY['order_date']",
+      'format': "'PARQUET'",
+      'partitioning': "ARRAY['order_date']",
       'sorted_by': "ARRAY['tenant_id']",
       'format_version': 2
     }
@@ -1249,13 +1249,13 @@ FROM {{ ref('stg_orders') }}
 | `WHERE updated_at >= MAX(updated_at) FROM {{ this }}` (bare aggregate in WHERE) | **TRINO PARSE ERROR** — aggregates are not allowed in a bare `WHERE`. Must be wrapped in a SELECT subquery. | `WHERE updated_at >= (SELECT COALESCE(MAX(updated_at), TIMESTAMP '1970-01-01 00:00:00 UTC') FROM {{ this }})`. |
 | `SELECT order_seq.NEXTVAL AS order_pk, ...` (Oracle sequence pasted into Trino) | **TRINO PARSE ERROR** — Trino has no sequences, no `NEXTVAL`. | `{{ dbt_utils.generate_surrogate_key(['tenant_id', 'natural_order_id']) }} AS order_pk`. |
 | `ROW_NUMBER() OVER (ORDER BY natural_order_id) AS order_pk` as a stable cross-run key | **NOT STABLE ACROSS RUNS.** `ROW_NUMBER()` produces a BIGINT that depends on the input row order at the time of the SELECT. A second `dbt run --full-refresh` can produce a DIFFERENT mapping for the same natural keys because the source ordering may shift. Downstream foreign keys break silently. | `{{ dbt_utils.generate_surrogate_key([...]) }}` — MD5 of the natural keys is bit-for-bit identical across every run. Use `ROW_NUMBER()` only for single-run scratch keys (e.g., within one CTAS that never re-runs incrementally). |
-| `properties={'partitioning': "ARRAY['order_date']"}` (wrong key name in the dbt-trino properties dict) | The dbt-trino `properties` dict uses **`partitioned_by`** (snake_case). The raw-Trino DDL form `CREATE TABLE ... WITH (partitioning = ...)` uses `partitioning` without an underscore, but that's the raw-SQL surface — the dbt-trino properties dict uses `partitioned_by`. | `properties={'partitioned_by': "ARRAY['order_date']"}`. See [resource 28 § LEADING CANONICAL WORKED EXAMPLE](28-complex-sql-performance-trino-dbt.md). |
+| `properties={'partitioned_by': "ARRAY['order_date']"}` inside a dbt-trino model whose target catalog is **Iceberg** (the production stack) | The Iceberg connector defines its partition-spec property as **`partitioning`** (not `partitioned_by`) — see [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html). dbt-trino's `properties()` macro passes the dict keys verbatim into the `WITH (...)` clause, so writing `'partitioned_by'` against an Iceberg catalog either errors at apply time or is silently dropped. `partitioned_by` IS the Hive connector's key, but Hive is a different connector — on this stack (Iceberg), use `partitioning`. | `properties={'partitioning': "ARRAY['order_date']"}` for an Iceberg model. See [resource 28 § LEADING CANONICAL — dbt-trino partition key for Iceberg vs Hive](28-complex-sql-performance-trino-dbt.md) for the full three-surface contrast block. |
 
 #### Cross-references
 
 - **Above:** [§ 3.3 minimum-viable dbt config for a migrated MERGE procedure](#33-the-minimum-viable-dbt-config-for-a-migrated-merge-procedure) — the canonical `is_incremental()` recipe in the materialization section, with the same `{% if execute %}` DO-NOT-WRITE callout.
 - **Below:** [§ 4.5B ROWNUM CANONICAL FORMS](#45b-rownum-canonical-forms--oracle-row-limiting-and-pagination-read-this-when-auditing-legacy-oracle-top-n--pagination-code) — the Oracle ROWNUM → Trino LIMIT translations engineers will hit alongside this surrogate-key migration.
-- **Resource 28:** [§ LEADING CANONICAL WORKED EXAMPLE — the canonical dbt-trino + Iceberg incremental block](28-complex-sql-performance-trino-dbt.md) — the single-source-of-truth recipe for the dbt-incremental shape, with the full DO-NOT-WRITE matrix (`{% if execute %}`, `partitioning` vs `partitioned_by`, bare-aggregate-in-WHERE, etc.).
+- **Resource 28:** [§ LEADING CANONICAL WORKED EXAMPLE — the canonical dbt-trino + Iceberg incremental block](28-complex-sql-performance-trino-dbt.md) — the single-source-of-truth recipe for the dbt-incremental shape, with the full DO-NOT-WRITE matrix (`{% if execute %}` guard, `partitioning` vs `partitioned_by` connector-key distinction, bare-aggregate-in-WHERE, etc.).
 
 **Two-engine note.** This guardrail is specifically about the **Iceberg** spec / catalog, NOT about Delta Lake. Delta Lake has had user-facing identity columns since Delta 2.x (`CREATE TABLE ... (id BIGINT GENERATED ALWAYS AS IDENTITY, ...)` works on Delta). If you read a blog post about "lakehouse identity columns" and it shows Delta DDL, that DDL does NOT port to Iceberg. The two table formats have different feature sets here.
 
@@ -1837,8 +1837,8 @@ FROM {{ source('app', 'currency_fx') }}
     unique_key=['tenant_id', 'order_date'],
     on_schema_change='append_new_columns',
     properties={
-      'format': 'PARQUET',
-      'partitioned_by': "ARRAY['order_date']",
+      'format': "'PARQUET'",
+      'partitioning': "ARRAY['order_date']",
       'sorted_by': "ARRAY['tenant_id']",
       'format_version': 2
     }
@@ -2402,12 +2402,15 @@ The matching model SELECT (skeleton):
 {{ config(
     materialized='table',
     properties={
-      'partitioned_by': "ARRAY['month(order_date)', 'bucket(tenant_id, 16)']"
+      'partitioning': "ARRAY['month(order_date)', 'bucket(tenant_id, 16)']"
     }
 ) }}
-{#- dbt-trino properties-dict key is `partitioned_by` (snake_case), NOT `partitioning`.
-    Bare-Trino raw DDL `WITH (partitioning = ARRAY[...])` uses `partitioning`,
-    but the dbt config properties dict uses `partitioned_by`. See resource 28 § LEADING CANONICAL. -#}
+{#- Iceberg connector's table-property name is `partitioning` (per trino.io/docs/current/connector/iceberg.html).
+    dbt-trino's properties() macro passes dict keys verbatim into the WITH (...) clause,
+    so the dbt-config key for an Iceberg-catalog model is also `partitioning`.
+    Do NOT use `partitioned_by` here — that's the HIVE connector's key (a different connector
+    with different property names). The production stack on this repo is Iceberg.
+    See resource 28 § LEADING CANONICAL — dbt-trino partition key for Iceberg vs Hive. -#}
 
 SELECT
   {{ dbt_utils.generate_surrogate_key(['tenant_id', 'natural_order_id']) }} AS order_id,
@@ -2455,7 +2458,7 @@ If a future PR changes the SELECT to project `total_usd` as `double` (instead of
 - For dbt source freshness (the INPUT-side liveness check that pairs with contracts as the OUTPUT-side schema lock): see [§ 6.7B](#67b-leading-canonical--dbt-source-freshness-sourcesyml-loaded_at_field-dbt-source-freshness-command).
 - For dbt tests that supplement contracts (uniqueness, business-rule assertions): see [§ 6.7](#67-dbt-tests-to-add-replacing-oracle-exception-handlers).
 - For the canonical dbt model body shape (SELECT-only, NOT raw DML): see [§ 4.6A.1](#461-the-default-recommended-pattern--two-model-decomposition) and the dbt-framing recipe in [§ 4.6A.4](#464-summary--the-migration-decision-table).
-- For dbt-trino specific config knobs (the `properties` block, `partitioned_by`, `incremental_strategy`): see [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs).
+- For dbt-trino specific config knobs (the `properties` block, the Iceberg-connector key `partitioning` inside it, `incremental_strategy`): see [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs) for the dbt side and [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) for the Iceberg connector's property names. See also [resource 28 § LEADING CANONICAL — dbt-trino partition key for Iceberg vs Hive](28-complex-sql-performance-trino-dbt.md).
 - Official dbt docs source-of-truth: [docs.getdbt.com/reference/resource-configs/contract](https://docs.getdbt.com/reference/resource-configs/contract) and [docs.getdbt.com/docs/collaborate/govern/model-contracts](https://docs.getdbt.com/docs/collaborate/govern/model-contracts).
 
 ---
@@ -2612,7 +2615,7 @@ Once your models compile and run, before you turn off Oracle:
 5. **Surrogate key stability.** If your Oracle pipeline relied on `seq.NEXTVAL` for surrogate keys, downstream foreign keys reference those values. The hash-based replacement (`md5(natural_keys)`) is stable across re-runs but will NOT match the Oracle-generated values. You need either a one-time migration table mapping old-key -> new-key OR a re-keying pass on all dependent tables.
 6. **Row diff against Oracle.** Pick 3-5 representative rollup rows, compute them in Oracle and in Trino on the same source data, and diff. Don't trust column-level aggregate sums alone — they can match even when row-level results differ.
 7. **EXPLAIN the migrated SELECTs.** Look for `CorrelatedJoin` in the EXPLAIN — it's a sign decorrelation failed (your cursor-loop translated naively). See [resource 28 §3](28-complex-sql-performance-trino-dbt.md) for rewrites.
-8. **Partition the migrated table to match the dominant filter.** Oracle table partitioning hints don't carry over — set `partitioned_by=ARRAY['<column>']` inside the dbt `properties` block for an incremental Iceberg model (snake_case, dbt-trino documented key; the bare-Trino raw-DDL form `WITH (partitioning = ARRAY[...])` uses `partitioning` without an underscore, but inside the dbt `properties` dict use `partitioned_by`). See [resource 10](10-lakehouse-partitioning.md) and [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs).
+8. **Partition the migrated table to match the dominant filter.** Oracle table partitioning hints don't carry over — set `'partitioning': "ARRAY['<column>']"` inside the dbt `properties` block for an incremental Iceberg model. The Iceberg connector's table-property name is `partitioning` (per [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html)), and dbt-trino passes the dict key verbatim into Trino's `CREATE TABLE ... WITH (...)` clause. `partitioned_by` is the HIVE connector's key — do NOT use it here, the production stack is Iceberg. See [resource 28 § LEADING CANONICAL — dbt-trino partition key for Iceberg vs Hive](28-complex-sql-performance-trino-dbt.md), [resource 10](10-lakehouse-partitioning.md), and [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs).
 9. **Schedule the dbt run.** Oracle's `DBMS_SCHEDULER.CREATE_JOB` has no dbt equivalent — schedule `dbt run --select fct_orders_daily+` from cron, k8s CronJob, or Airflow.
 10. **Maintenance.** Iceberg tables need `ALTER TABLE ... EXECUTE optimize` and `expire_snapshots` regularly — see [resource 17](17-iceberg-table-maintenance.md). Oracle's auto-segment-management has no direct equivalent; you schedule the maintenance.
 

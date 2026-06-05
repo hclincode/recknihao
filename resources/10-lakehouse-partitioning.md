@@ -14,6 +14,23 @@
 
 ---
 
+## Setting the partition spec — which surface, which key
+
+> **Read this if your question is "how do I declare the partition spec on a dbt model?" / "how do I partition a dbt-trino Iceberg table?" / "what's the dbt partition key for Iceberg on Trino?"**
+>
+> | Surface | Form | Doc |
+> |---|---|---|
+> | Bare-Trino DDL on Iceberg catalog | `CREATE TABLE iceberg.analytics.t (...) WITH (partitioning = ARRAY['day(occurred_at)', 'bucket(tenant_id, 64)'])` | [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) |
+> | dbt-trino model config for an Iceberg model | `{{ config(materialized='table', properties={'partitioning': "ARRAY['day(occurred_at)', 'bucket(tenant_id, 64)']"}) }}` | dbt-trino passes the dict key verbatim into Trino's `WITH (...)`; Iceberg connector reads `partitioning`. |
+> | Bare-Spark DDL on Iceberg catalog | `CREATE TABLE ... USING iceberg PARTITIONED BY (days(occurred_at), bucket(64, tenant_id))` | [iceberg.apache.org/docs/1.5.1/spark-ddl/](https://iceberg.apache.org/docs/1.5.1/spark-ddl/) — note Spark uses `days(col)` plural and `bucket(N, col)` with N FIRST; Trino uses `day(col)` singular and `bucket(col, N)` with N SECOND. |
+> | `ALTER TABLE ... SET PROPERTIES` on Trino (evolve the partition spec) | `ALTER TABLE iceberg.analytics.t SET PROPERTIES partitioning = ARRAY['day(occurred_at)', 'bucket(tenant_id, 64)']` | [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) |
+>
+> **DO NOT use `'partitioned_by'` as the dbt-trino properties-dict key for an Iceberg-catalog model.** `partitioned_by` is the HIVE connector's table-property name (different connector). The Iceberg connector defines its partition-spec property as `partitioning` — and dbt-trino is a pass-through. Writing `'partitioned_by'` against an Iceberg catalog either errors at apply time or is silently dropped. See [resource 28 § LEADING CANONICAL — dbt-trino partition key for Iceberg vs Hive](28-complex-sql-performance-trino-dbt.md) for the full three-surface DO-WRITE / DO-NOT-WRITE contrast block.
+>
+> See also [resource 27 § 3.3](27-oracle-plsql-to-dbt-trino.md) for the migrated-from-Oracle MERGE dbt config that uses the same `properties={'partitioning': ...}` shape.
+
+---
+
 ## Common myths about Iceberg partitioning — read FIRST (the load-bearing wrong claims)
 
 These are the absolutes most often stated incorrectly about Iceberg partitioning on Trino 467 + Iceberg 1.5.2 + Spark. Each TRUTH below has been verified against the [Iceberg partitioning docs](https://iceberg.apache.org/docs/1.5.1/partitioning/), the [Iceberg evolution docs](https://iceberg.apache.org/docs/1.5.1/evolution/), and the [Trino Iceberg connector docs](https://trino.io/docs/current/connector/iceberg.html). **Lead with the TRUTH; state the nuance.**

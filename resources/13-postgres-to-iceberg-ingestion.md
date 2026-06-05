@@ -5465,9 +5465,11 @@ Copy-paste starting point for a mutable orders table:
     unique_key='order_id',
     incremental_strategy='merge',          -- REQUIRED — default is 'append' on dbt-trino
     on_schema_change='append_new_columns', -- REQUIRED — default is 'ignore' (silent data loss)
-    file_format='iceberg',
-    table_type='iceberg',
-    partitioned_by=['day(updated_at)']
+    properties={
+      'format': "'PARQUET'",
+      'partitioning': "ARRAY['day(updated_at)']",  -- Iceberg connector key: 'partitioning' (NOT 'partitioned_by' — that's the Hive connector key)
+      'format_version': 2
+    }
 ) }}
 
 SELECT
@@ -5488,6 +5490,8 @@ FROM {{ source('app', 'orders') }}
   AND occurred_at >= TIMESTAMP '{{ (run_started_at - modules.datetime.timedelta(days=4)).isoformat() }}'
 {% endif %}
 ```
+
+**Note on dbt-trino vs dbt-spark config keys.** The dbt-trino adapter does NOT accept top-level `file_format='iceberg'`, `table_type='iceberg'`, or `partitioned_by=[...]` kwargs on `config()` — those are dbt-spark / dbt-databricks kwargs. dbt-trino routes all Iceberg-specific table properties through the `properties={...}` dict, and the keys inside that dict are the Trino connector's table-property names (for the Iceberg connector: `partitioning`, `format`, `sorted_by`, `format_version`, etc., per [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html)). See [resource 28 § LEADING CANONICAL — dbt-trino partition key for Iceberg vs Hive](28-complex-sql-performance-trino-dbt.md) for the full three-surface contrast block.
 
 **Configuration checklist before deploying any dbt-trino incremental model:**
 

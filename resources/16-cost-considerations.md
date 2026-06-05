@@ -560,7 +560,7 @@ These are the absolutes most often stated incorrectly when an engineer asks "wha
 > );
 > ```
 >
-> **From dbt-trino:**
+> **From dbt-trino (Iceberg-catalog model):**
 >
 > ```python
 > {{ config(
@@ -568,12 +568,14 @@ These are the absolutes most often stated incorrectly when an engineer asks "wha
 >     properties={
 >         'format': "'PARQUET'",
 >         'compression_codec': "'ZSTD'",
->         'partitioned_by': "ARRAY['month(occurred_at)']"
+>         'partitioning': "ARRAY['month(occurred_at)']"
 >     }
 > ) }}
 > SELECT * FROM {{ source('events', 'events_raw') }}
 > WHERE occurred_at < CURRENT_DATE - INTERVAL '90' DAY
 > ```
+>
+> **Note on the partition key name.** The Iceberg connector's table-property name is `partitioning` (per [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html)); dbt-trino passes the dict keys verbatim into `WITH (...)`, so the dbt key is also `'partitioning'`. The Hive connector's analogous property is `partitioned_by` — but Hive is a different connector. The production stack on this repo is Iceberg, so use `'partitioning'`. See [resource 28 § LEADING CANONICAL — dbt-trino partition key for Iceberg vs Hive](28-complex-sql-performance-trino-dbt.md) for the full three-surface contrast block (raw-Trino DDL, dbt-trino Iceberg config, dbt-trino Hive config).
 >
 > **Tradeoffs to surface:** (a) `compression_codec` is WHOLE-TABLE — you cannot say "ZSTD for the 2023 partition, SNAPPY for the 2025 partition" in one Iceberg table; if you want age-split compression, use Mechanism C (separate tables); (b) ZSTD costs measurable CPU on write (often 1.5-3x SNAPPY on the Spark ingestion side); read decompression cost is small but non-zero; (c) changing `compression_codec` on an existing table affects only NEW writes — pre-existing data files stay in their original codec until rewritten by `ALTER TABLE ... EXECUTE optimize(...)` (which may or may not rewrite them depending on file-size threshold).
 >
