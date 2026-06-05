@@ -10,13 +10,29 @@
 
 1. Iceberg never modifies files in place — every write creates new files, every delete creates marker files, every operation creates a new snapshot.
 2. Without maintenance, your table accumulates thousands of tiny files plus old snapshots holding onto data files forever — query speed drops 5–10x and storage grows ~30% per year.
-3. Run **four core** procedures: `rewrite_data_files` (nightly), `expire_snapshots` (weekly), `remove_orphan_files` (weekly), `rewrite_manifests` (weekly). On MoR tables with accumulating position deletes, add a **fifth** procedure: `rewrite_position_delete_files` (Spark only — Trino 467 does NOT support it; see [trinodb/trino #27371](https://github.com/trinodb/trino/issues/27371)).
-4. **Run them in this CANONICAL ORDER (the order matches iceberg.apache.org/docs/latest/spark-procedures/):**
-   - **Step 1: `rewrite_data_files` (compact FIRST)** — merges small files, applies pending deletes, produces the new "clean" data layer that every subsequent step operates against.
-   - **Step 1b (MoR only): `rewrite_position_delete_files`** — if the table has accumulating position delete files (`content = 1` in `$files`), compact them as part of the same window. Spark only.
-   - **Step 2: `expire_snapshots`** — drops the now-superseded older snapshots that compaction left behind, and physically deletes the small data files those snapshots exclusively referenced.
-   - **Step 3: `remove_orphan_files`** — sweeps any unreferenced files left by failed writes (a different class of garbage from Step 2).
-   - **Step 4: `rewrite_manifests`** — consolidates the manifest metadata that now reflects the cleaned data layer.
+3. Run **four core** procedures: compaction (nightly), snapshot expiry (weekly), orphan-file sweep (weekly), manifest rewrite (weekly). On MoR tables with accumulating position deletes, add a **fifth** procedure: position-delete compaction (Spark only — Trino 467 does NOT support it; see [trinodb/trino #27371](https://github.com/trinodb/trino/issues/27371)).
+4. **Each maintenance operation has a DIFFERENT API surface in Trino vs Spark — read the engine split FIRST, then the canonical order below. Do NOT conflate the two.**
+
+   **Trino-EXECUTE-vs-Spark-CALL split (the load-bearing distinction — memorize this BEFORE writing any procedure call):**
+
+   | Operation | Trino 467 form | Spark form |
+   |---|---|---|
+   | Compaction | `ALTER TABLE iceberg.<schema>.<table> EXECUTE optimize(file_size_threshold => '256MB')` | `CALL iceberg.system.rewrite_data_files(table => '<schema>.<table>', options => map('target-file-size-bytes','268435456'))` |
+   | Snapshot expiry | `ALTER TABLE iceberg.<schema>.<table> EXECUTE expire_snapshots(retention_threshold => '7d')` | `CALL iceberg.system.expire_snapshots(table => '<schema>.<table>', older_than => current_timestamp - interval '7' day, retain_last => 10)` |
+   | Orphan-file sweep | `ALTER TABLE iceberg.<schema>.<table> EXECUTE remove_orphan_files(retention_threshold => '7d')` | `CALL iceberg.system.remove_orphan_files(table => '<schema>.<table>', older_than => current_timestamp - interval '3' day, dry_run => true)` |
+   | Drop extended stats | `ALTER TABLE iceberg.<schema>.<table> EXECUTE drop_extended_stats` | `CALL iceberg.system.drop_extended_stats(table => '<schema>.<table>')` |
+   | Manifest rewrite | **NOT AVAILABLE on Trino 467.** `ALTER TABLE ... EXECUTE optimize_manifests` is Trino **470+**, NOT 467. | `CALL iceberg.system.rewrite_manifests(table => '<schema>.<table>')` (Spark only on Trino 467) |
+   | Position-delete compaction (MoR only) | **NOT AVAILABLE on Trino 467 at any release** ([trinodb/trino #27371](https://github.com/trinodb/trino/issues/27371)). | `CALL iceberg.system.rewrite_position_delete_files(table => '<schema>.<table>')` |
+   | Branch fast-forward (WAP publish) | **NOT AVAILABLE on Trino 467** — Trino reads branches via `FOR VERSION AS OF '<branch>'` but cannot write/promote. | `CALL iceberg.system.fast_forward(table => '<schema>.<table>', branch => 'main', to => '<source_branch>')` |
+
+   **Engine-split rules:** Trino's API surface is `ALTER TABLE ... EXECUTE <proc>(...)`; Spark's is `CALL iceberg.system.<proc>(table => ..., ...)`. The procedure NAMES are different across engines for the same underlying Iceberg operation — `EXECUTE optimize` (Trino) commits the same kind of `replace` snapshot as `CALL iceberg.system.rewrite_data_files(...)` (Spark), but the SQL clause and procedure name are engine-specific. **Do NOT write `ALTER TABLE ... EXECUTE rewrite_data_files(...)` on Trino 467 — that's Spark CALL syntax pasted into a Trino EXECUTE form; Trino's procedure registry does NOT include `rewrite_data_files` and the call fails with `Procedure not registered`.** Likewise, do NOT claim "Spark is required for `expire_snapshots`" — `expire_snapshots` IS a Trino 467 EXECUTE procedure (with `retention_threshold` arg); Spark is required only for `rewrite_manifests`, `rewrite_position_delete_files`, `fast_forward`, sub-7-day expiry (Trino's min-retention floor), and Spark-only options like `retain_last` on `expire_snapshots`. See the full [§ Trino EXECUTE procedures vs Spark CALL procedures](#trino-execute-procedures-vs-spark-call-procedures--the-engine-confusion-disambiguation-matrix-read-before-writing-any-procedure-call) disambiguation matrix below.
+
+   **CANONICAL ORDER (the order matches iceberg.apache.org/docs/latest/spark-procedures/):**
+   - **Step 1 — Compaction (Trino `EXECUTE optimize` OR Spark `CALL rewrite_data_files`).** Runs FIRST. Merges small files, applies pending deletes, produces the new "clean" data layer that every subsequent step operates against. **Trino: `ALTER TABLE ... EXECUTE optimize(file_size_threshold => '256MB')`. Spark: `CALL iceberg.system.rewrite_data_files(...)`. Do NOT write `ALTER TABLE ... EXECUTE rewrite_data_files(...)` on Trino — Trino uses `EXECUTE optimize`; `rewrite_data_files` is the Spark CALL procedure name.**
+   - **Step 1b (MoR only) — Position-delete compaction (Spark ONLY).** If the table has accumulating position delete files (`content = 1` in `$files`), compact them as part of the same window. **Spark only on Trino 467** — no Trino 467 equivalent ([trinodb/trino #27371](https://github.com/trinodb/trino/issues/27371)). Use Spark `CALL iceberg.system.rewrite_position_delete_files(...)`.
+   - **Step 2 — Snapshot expiry (Trino `EXECUTE expire_snapshots` OR Spark `CALL expire_snapshots`).** Drops the now-superseded older snapshots that compaction left behind, and physically deletes the small data files those snapshots exclusively referenced. **`expire_snapshots` IS a Trino 467 EXECUTE procedure — Spark is NOT required.** Trino: `ALTER TABLE ... EXECUTE expire_snapshots(retention_threshold => '7d')`. Trino 467 accepts only `retention_threshold`; `retain_last` and `clean_expired_metadata` were added in Trino 479. Trino enforces a 7-day minimum-retention floor (catalog property `iceberg.expire-snapshots.min-retention`, default `7d`) — for sub-7-day urgency (GDPR right-to-erasure), drop to Spark (no floor) or temporarily lower the catalog property and restart the coordinator.
+   - **Step 3 — Orphan-file sweep (Trino `EXECUTE remove_orphan_files` OR Spark `CALL remove_orphan_files`).** Sweeps any unreferenced files left by failed writes (a different class of garbage from Step 2). **`remove_orphan_files` IS a Trino 467 EXECUTE procedure — Spark is NOT required.** Trino: `ALTER TABLE ... EXECUTE remove_orphan_files(retention_threshold => '7d')`. Same 7d catalog-level minimum-retention floor (`iceberg.remove-orphan-files.min-retention`). Trino does NOT support `dry_run` — only Spark's CALL form does; pre-flight from Spark with `dry_run => true` before running the production deletion.
+   - **Step 4 — Manifest rewrite (Spark ONLY on Trino 467).** Consolidates the manifest metadata that now reflects the cleaned data layer. **Spark only on Trino 467** — `ALTER TABLE ... EXECUTE optimize_manifests` is Trino **470+**, NOT 467. Use Spark `CALL iceberg.system.rewrite_manifests(table => '<schema>.<table>')`.
 
    **Why this order (operational efficiency, NOT data safety — Iceberg's atomic commit semantics guarantee `expire_snapshots` will NEVER delete files referenced by any live snapshot, regardless of which order you run things):** (a) compaction creates a NEW snapshot that points at merged big files and leaves the OLD small files referenced only by older snapshots — running compaction FIRST means the same maintenance window's `expire_snapshots` can immediately clean up those now-superseded older snapshots and reclaim the small-file storage in ONE cycle. If you expire first then compact, you'd have to wait for *next* week's expiry to clean up the small files compaction just orphaned, costing you an extra week of storage; (b) `expire_snapshots` before `remove_orphan_files` for the same efficiency reason — expiry frees more files for orphan cleanup in the same window; (c) `rewrite_manifests` last, so it compacts the manifest set that already reflects the cleaned table. There is no data-loss risk in reversing any of these orderings — only an extra-cycle cost for full cleanup.
 5. If a bad ingestion job ever runs, `CALL iceberg.system.rollback_to_snapshot` instantly reverts the table without touching data files — the safest cleanup tool you have.
@@ -39,6 +55,8 @@ These are the absolutes most often stated incorrectly about Iceberg maintenance 
 | "Trino 467 can run `ALTER TABLE ... EXECUTE optimize_manifests`." | **NO — `optimize_manifests` was added in Trino 470 (5 Feb 2025).** Production is Trino 467 (6 Dec 2024); writing `ALTER TABLE iceberg.<schema>.<table> EXECUTE optimize_manifests` on 467 errors with `Procedure 'optimize_manifests' not registered for catalog 'iceberg'`. Trino 470 introduced it per [release-470.html](https://trino.io/docs/current/release/release-470.html): *"Add the optimize_manifests table procedure."* **DO NOT WRITE `EXECUTE optimize_manifests` in any Trino-467 context.** On Trino 467, the only manifest-rewrite path is Spark `CALL iceberg.system.rewrite_manifests(table => 'analytics.events')`. Note also that `optimize_manifests` and `rewrite_manifests` are NOT the same procedure — `optimize_manifests` is a narrower Trino-side rewrite that clusters manifests by partition columns; Spark's `rewrite_manifests` is the full-featured action. They overlap in *purpose* (manifest consolidation) but differ in *scope* — do not conflate the two names. | [§ Trino EXECUTE procedures vs Spark CALL procedures](#trino-execute-procedures-vs-spark-call-procedures--the-engine-confusion-disambiguation-matrix-read-before-writing-any-procedure-call) and [§ VERSION-PIN GUARDRAIL row 277](#version-pin-guardrail--do-not-assume-trino-latest-docs-syntax-or-iceberg-format-v3-semantics-apply-read-this-every-time-you-cite-a-trinoiceberg-feature) |
 | "Trino 467 enforces a 7-day minimum retention on `expire_snapshots`, so I can't run a GDPR right-to-erasure purge." | **The Trino floor IS 7 days, but the workaround is documented.** For sub-7-day urgency, run `expire_snapshots` from **Spark** (no min-retention floor enforced by Spark itself) OR temporarily lower the catalog property `iceberg.expire-snapshots.min-retention` and restart the Trino coordinator. ALSO check `history.expire.min-snapshots-to-keep` and `history.expire.max-snapshot-age-ms` on the table — those table-level properties can silently override `retain_last`/`older_than` arguments. | [§ 2. `expire_snapshots`](#2-expire_snapshots--run-weekly) GOTCHA callout |
 | "`rewrite_position_delete_files` exists in Trino 467 — I'll run it on MoR tables from Trino." | **NO — Spark-only on Trino 467.** See [trinodb/trino #27371](https://github.com/trinodb/trino/issues/27371). On Iceberg 1.5.2 MoR tables with accumulating position deletes, you MUST run this from Spark; there is no Trino 467 form. | TL;DR step 1b, [§ 1b. `rewrite_position_delete_files`](#1b-rewrite_position_delete_files--mor-tables-only-spark-only-runs-after-compact-and-before-expire_snapshots) |
+| "I'll run `ALTER TABLE ... EXECUTE rewrite_data_files(...)` on Trino 467 for compaction." (iter472 Q4-a labeling slip — the Trino EXECUTE form is `optimize`, NOT `rewrite_data_files`) | **NO — `rewrite_data_files` is the SPARK CALL procedure name; the Trino EXECUTE equivalent is `optimize`.** Trino 467's EXECUTE registry is exactly `optimize`, `expire_snapshots`, `remove_orphan_files`, `drop_extended_stats` (and `optimize_manifests` on Trino **470+**, NOT 467) — `rewrite_data_files` is NOT in the registry. Writing `ALTER TABLE iceberg.<schema>.<table> EXECUTE rewrite_data_files(...)` on Trino 467 fails with `Procedure 'rewrite_data_files' not registered for catalog 'iceberg'`. The two API surfaces commit equivalent `replace` snapshots but the procedure NAMES differ across engines. Verified at [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (Trino EXECUTE procedures list) and [iceberg.apache.org/docs/latest/spark-procedures/](https://iceberg.apache.org/docs/latest/spark-procedures/) (Spark CALL procedures list). | **Trino: `ALTER TABLE iceberg.<schema>.<table> EXECUTE optimize(file_size_threshold => '256MB')`** OR **Spark: `CALL iceberg.system.rewrite_data_files(table => '<schema>.<table>', options => map('target-file-size-bytes', '268435456'))`**. Pick one based on which client you're in; do NOT mix the names. See [§ Trino EXECUTE procedures vs Spark CALL procedures](#trino-execute-procedures-vs-spark-call-procedures--the-engine-confusion-disambiguation-matrix-read-before-writing-any-procedure-call) for the full disambiguation. |
+| "Spark is required for `expire_snapshots`" / "`expire_snapshots` is Spark-only" / "Trino can't run `expire_snapshots` — drop to Spark for step 2" (iter472 Q4-b internally-contradicted opening claim) | **FALSE — `expire_snapshots` IS a Trino 467 EXECUTE procedure.** Trino 467 accepts `ALTER TABLE iceberg.<schema>.<table> EXECUTE expire_snapshots(retention_threshold => '7d')` natively — verified at [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html). Spark is required ONLY for: (a) sub-7-day retention (Trino enforces a 7-day minimum-retention floor via `iceberg.expire-snapshots.min-retention`, Spark does not); (b) Spark-only arguments — `retain_last` (added to Trino in **479**, NOT 467) and `clean_expired_metadata` (Trino 479+); (c) Spark-only related operations — `rewrite_manifests`, `rewrite_position_delete_files`, `fast_forward`. For the routine weekly snapshot expiry (retention_threshold >= 7d), Trino 467 handles it natively — no Spark hop needed. The only step in the standard 4-step maintenance sequence that is Spark-only on Trino 467 is **Step 4 (manifest rewrite — `rewrite_manifests`)**, plus the optional Step 1b (position-delete compaction). Steps 1, 2, and 3 all have native Trino EXECUTE forms. | **Trino 467 native: `ALTER TABLE iceberg.<schema>.<table> EXECUTE expire_snapshots(retention_threshold => '7d')`**. For sub-7-day expiry (GDPR), use **Spark: `CALL iceberg.system.expire_snapshots(table => '<schema>.<table>', older_than => current_timestamp - interval '1' day, retain_last => 1)`** OR temporarily lower `iceberg.expire-snapshots.min-retention` in the Trino catalog config and restart the coordinator. See TL;DR Step 2 and [§ 2. `expire_snapshots`](#2-expire_snapshots--run-weekly) for the full version-availability and floor details. |
 
 > **Why these specific myths matter.** Each is a load-bearing topic-specific claim about what Iceberg maintenance "can't / does / doesn't" do. Stated as an absolute, it causes engineers to either build expensive workarounds for non-problems (creating tags to protect snapshots that an existing branch already protects; running `remove_orphan_files` first hoping to clean up compaction's leftover small files) OR to confidently break things (assuming branches don't protect data files and tightening retention "to compensate"; pasting `retain_last` into a Trino 467 `EXECUTE expire_snapshots` call). The correct discipline: when about to say "X can't / does / doesn't" about an Iceberg maintenance behavior, check (a) which Iceberg version, (b) which Trino version, (c) the official iceberg.apache.org/docs/latest/ wording, (d) the team's own resource 17.
 
@@ -1151,13 +1169,13 @@ ORDER BY file_size_in_bytes DESC;
 
 **These are presented in the CANONICAL EXECUTION ORDER per [iceberg.apache.org/docs/latest/spark-procedures/](https://iceberg.apache.org/docs/latest/spark-procedures/):**
 
-1. `rewrite_data_files` (compact) — **runs FIRST**: merges small files, applies pending deletes.
-2. `rewrite_position_delete_files` (MoR tables only — runs after compact when position deletes are accumulating). **Spark only — Trino 467 does NOT support this procedure** ([trinodb/trino #27371](https://github.com/trinodb/trino/issues/27371)).
-3. `expire_snapshots` — drops superseded snapshots and the data files they exclusively referenced.
-4. `remove_orphan_files` — sweeps files left by failed writes (different garbage class from step 3).
-5. `rewrite_manifests` — consolidates manifest metadata last.
+1. **Compaction** — **runs FIRST**: merges small files, applies pending deletes. Trino: `ALTER TABLE ... EXECUTE optimize(file_size_threshold => '256MB')`. Spark: `CALL iceberg.system.rewrite_data_files(...)`. **Do NOT write `EXECUTE rewrite_data_files(...)` on Trino — the Trino EXECUTE name is `optimize`; `rewrite_data_files` is the Spark CALL name.**
+2. **Position-delete compaction (MoR tables only)** — runs after compact when position deletes are accumulating. **Spark ONLY on Trino 467 — Trino 467 does NOT support this procedure** ([trinodb/trino #27371](https://github.com/trinodb/trino/issues/27371)). Spark: `CALL iceberg.system.rewrite_position_delete_files(...)`.
+3. **Snapshot expiry** — drops superseded snapshots and the data files they exclusively referenced. **NOT Spark-only — `expire_snapshots` IS a Trino 467 EXECUTE procedure.** Trino: `ALTER TABLE ... EXECUTE expire_snapshots(retention_threshold => '7d')` (Trino 467 accepts only `retention_threshold`; `retain_last` and `clean_expired_metadata` were added in Trino 479). Spark: `CALL iceberg.system.expire_snapshots(...)`.
+4. **Orphan-file sweep** — sweeps files left by failed writes (different garbage class from step 3). **NOT Spark-only — `remove_orphan_files` IS a Trino 467 EXECUTE procedure.** Trino: `ALTER TABLE ... EXECUTE remove_orphan_files(retention_threshold => '7d')` (no `dry_run` in Trino; pre-flight from Spark). Spark: `CALL iceberg.system.remove_orphan_files(...)`.
+5. **Manifest rewrite** — consolidates manifest metadata last. **Spark ONLY on Trino 467** — `ALTER TABLE ... EXECUTE optimize_manifests` is Trino **470+**, NOT 467. Spark: `CALL iceberg.system.rewrite_manifests(...)`.
 
-If you only have time to set up one, start with `rewrite_data_files` (it has the biggest single impact on query speed).
+If you only have time to set up one, start with **compaction** (Trino `EXECUTE optimize` OR Spark `CALL rewrite_data_files`) — it has the biggest single impact on query speed.
 
 > **Engine matters — read this before copying any command:**
 > - **The procedures themselves are NOT Spark-only.** `rewrite_data_files`, `expire_snapshots`, `remove_orphan_files`, and `rewrite_manifests` are Iceberg-level operations supported by both engines. Only the SQL surface differs.
@@ -1984,23 +2002,37 @@ The maintenance operations have a **canonical execution order** matching the ord
 **Canonical execution order — apply ALL steps in a SINGLE weekly window:**
 
 ```
-Step 1: rewrite_data_files          (compact FIRST — merges small files, applies pending deletes)
+Step 1: Compaction                  (compact FIRST — merges small files, applies pending deletes)
+        Trino: ALTER TABLE ... EXECUTE optimize(file_size_threshold => '256MB')
+        Spark: CALL iceberg.system.rewrite_data_files(table => '<schema>.<table>', ...)
+        (do NOT write EXECUTE rewrite_data_files on Trino — Trino EXECUTE name is "optimize")
    │
    ▼
-Step 1b: rewrite_position_delete_files   (MoR tables only — Spark ONLY; Trino 467 does NOT support)
+Step 1b: Position-delete compaction (MoR tables only — Spark ONLY; Trino 467 does NOT support)
+        Spark: CALL iceberg.system.rewrite_position_delete_files(table => '<schema>.<table>')
    │
    ▼
-Step 2: expire_snapshots            (drops old snapshots + deletes their exclusively-referenced data files)
+Step 2: Snapshot expiry             (drops old snapshots + deletes their exclusively-referenced data files)
+        Trino: ALTER TABLE ... EXECUTE expire_snapshots(retention_threshold => '7d')   <-- NATIVE on 467
+        Spark: CALL iceberg.system.expire_snapshots(table => ..., retain_last => N, ...)
+        (NOT Spark-only — `expire_snapshots` IS a Trino 467 EXECUTE procedure;
+         Spark needed only for sub-7d retention or `retain_last`/`clean_expired_metadata` args)
    │
    ▼
-Step 3: remove_orphan_files         (sweeps unreferenced files from failed writes)
+Step 3: Orphan-file sweep           (sweeps unreferenced files from failed writes)
+        Trino: ALTER TABLE ... EXECUTE remove_orphan_files(retention_threshold => '7d')   <-- NATIVE on 467
+        Spark: CALL iceberg.system.remove_orphan_files(table => ..., dry_run => true)
+        (NOT Spark-only — `remove_orphan_files` IS a Trino 467 EXECUTE procedure;
+         Spark needed for `dry_run` preview and sub-7d retention)
    │
    ▼
-Step 4: rewrite_manifests           (consolidates manifest metadata LAST; Spark ONLY on Trino 467)
+Step 4: Manifest rewrite            (consolidates manifest metadata LAST; SPARK ONLY on Trino 467)
+        Spark: CALL iceberg.system.rewrite_manifests(table => '<schema>.<table>')
+        (no Trino 467 equivalent; EXECUTE optimize_manifests is Trino 470+, NOT 467)
 ```
 
 **Common scheduling pattern:**
-- Step 1 (`rewrite_data_files`) runs **nightly** at ~4 AM after the 2 AM ingestion window.
+- Step 1 (compaction — Trino `EXECUTE optimize` or Spark `CALL rewrite_data_files`) runs **nightly** at ~4 AM after the 2 AM ingestion window.
 - Steps 1b–4 run **weekly** on Sunday 3 AM when ingestion is paused. (Step 1 is also re-run as part of the weekly job, since the canonical sequence starts with compact.)
 
 **Important:** for CoW tables (the Iceberg 1.5.2 default), Step 1b is N/A — skip it entirely. Only MoR tables (where someone explicitly set `write.delete.mode = 'merge-on-read'`) produce the position delete files that Step 1b targets.
@@ -3433,13 +3465,13 @@ If you only have budget for one improvement, **make the RDBMS HA first** — tha
 
 The unmaintained Iceberg table is the most common operational failure mode on this stack. Set up the procedures, get the canonical order right (per iceberg.apache.org/docs/latest/spark-procedures/):
 
-1. **`rewrite_data_files`** (compact FIRST — applies pending deletes, merges small files)
-2. **`rewrite_position_delete_files`** (MoR tables only — Spark ONLY, Trino 467 does NOT support)
-3. **`expire_snapshots`** (drops superseded snapshots and physically deletes their data files)
-4. **`remove_orphan_files`** (sweeps unreferenced files from failed writes)
-5. **`rewrite_manifests`** (consolidates manifest metadata LAST — Spark ONLY on Trino 467)
+1. **Compaction** (compact FIRST — applies pending deletes, merges small files). **Trino: `ALTER TABLE ... EXECUTE optimize(file_size_threshold => '256MB')`** OR **Spark: `CALL iceberg.system.rewrite_data_files(...)`**. The Trino EXECUTE name is `optimize`; `rewrite_data_files` is the Spark CALL name — they commit equivalent `replace` snapshots but the procedure names differ across engines.
+2. **Position-delete compaction (MoR tables only — Spark ONLY, Trino 467 does NOT support).** Spark: `CALL iceberg.system.rewrite_position_delete_files(...)`.
+3. **Snapshot expiry** (drops superseded snapshots and physically deletes their data files). **NOT Spark-only — `expire_snapshots` IS a Trino 467 EXECUTE procedure.** Trino: `ALTER TABLE ... EXECUTE expire_snapshots(retention_threshold => '7d')` OR Spark: `CALL iceberg.system.expire_snapshots(...)` (Spark adds `retain_last`/`older_than` flexibility beyond Trino 467's `retention_threshold`-only).
+4. **Orphan-file sweep** (sweeps unreferenced files from failed writes). **NOT Spark-only — `remove_orphan_files` IS a Trino 467 EXECUTE procedure.** Trino: `ALTER TABLE ... EXECUTE remove_orphan_files(retention_threshold => '7d')` OR Spark: `CALL iceberg.system.remove_orphan_files(... dry_run => true)` (Spark adds `dry_run` preview).
+5. **Manifest rewrite** (consolidates manifest metadata LAST — Spark ONLY on Trino 467; `EXECUTE optimize_manifests` is Trino 470+). Spark: `CALL iceberg.system.rewrite_manifests(...)`.
 
-Common schedule: `rewrite_data_files` nightly; the rest in a single weekly maintenance window. If anything goes wrong with a write, reach for `rollback_to_snapshot` before you touch any data. Build these into your scheduler on day one — retrofitting later is harder than doing it correctly upfront.
+Common schedule: **compaction** (Trino `EXECUTE optimize` or Spark `CALL rewrite_data_files`) runs nightly; the rest in a single weekly maintenance window. If anything goes wrong with a write, reach for `rollback_to_snapshot` before you touch any data. Build these into your scheduler on day one — retrofitting later is harder than doing it correctly upfront.
 
 **Trino-vs-Spark syntax quick reference (Trino 467):**
 

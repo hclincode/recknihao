@@ -1,149 +1,81 @@
-# Judge feedback — Iter 472 (Extended phase, end-of-iteration only)
+# Judge Feedback — Iteration 473 (end-of-iteration, extended phase)
 
 **Date**: 2026-06-05
 **Phase**: Extended (end-of-iteration feedback only)
-**Overall**: **4.4375 STRONG PASS** (71st consecutive extended-phase PASS — comfortable margin, ~0.94 above 3.5 floor)
+**Overall**: **4.5234 STRONG PASS** (72nd consecutive extended-phase PASS — comfortable margin, ~1.02 above 3.5 floor)
 
-**Verdict**: PASS. Three STRONG PASS (Q1/Q2/Q3 all at 4.5625+) + one PASS (Q4 3.875 with two minor labeling slips, no load-bearing fab). All three iter472 teacher fixes landed: (1) dbt model contracts content gap closed, (2) parse_date cross-dialect fab confirmed cleared, (3) SET PARTITION SPEC cross-dialect fab confirmed cleared.
+## Per-question scores
 
-**Federation NOT probed** this iter — 4.49944/310 row UNCHANGED per directive.
+| Q | Topic | Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|---|---|
+| Q1 | Iceberg maintenance — Trino EXECUTE vs Spark CALL (re-probe) | 4.875 | 4.625 | 4.625 | 4.75 | **4.71875** |
+| Q2 | dbt model contracts — constraint enforcement (3rd angle) | 4.875 | 4.625 | 4.625 | 4.75 | **4.71875** |
+| Q3 | Oracle FIRST_VALUE / LAST_VALUE / NTILE → Trino window | 4.75 | 4.375 | 4.5 | 4.5 | **4.53125** |
+| Q4 | Hot/cold storage tiering on Trino+Iceberg+MinIO | 4.0 | 3.75 | 4.25 | 4.0 | **4.0** |
 
----
+**Per-question micro-justifications**:
 
-## Re-probe status checks
+- **Q1 (4.71875 STRONG PASS — iter472 Q4-a/Q4-b label-fix CONFIRMED LANDED)**: Trino EXECUTE = `optimize`, `expire_snapshots`, `remove_orphan_files` correctly identified. Spark-only CALL = `rewrite_manifests`, `rewrite_position_delete_files`. Explicit "do NOT write CALL rewrite_data_files in Trino" warning — exactly the label-conflation fix the teacher patched into r17. Order compact → expire → orphan → manifests correct. 7d Trino floor (`iceberg.expire-snapshots.min-retention` default) correct per trino.io/docs/current/connector/iceberg.html. No EXECUTE-rewrite_data_files-on-Trino fab. No "expire_snapshots is Spark-only" fab. Both iter472 Q4 imprecisions are FIXED. Minor completeness gap: did not mention `optimize_manifests` is 470+ NOT 467.
+- **Q2 (4.71875 STRONG PASS — dbt-model-contracts 3rd datapoint LOCKED)**: `not_null` runtime-enforced via Iceberg column constraint at write time; `primary_key`/`unique` definable in YAML but NOT enforced at write time (Trino allows duplicates); build-time preflight = column names + data_types match SELECT output (schema-shape gate, NOT query-time PK/unique enforcement). VERIFIED at docs.getdbt.com/reference/resource-properties/constraints + /reference/resource-configs/contract. dbt tests pairing is the correct escalation pattern. **Micro-topic dbt model contracts 3.8125/2 → 4.1146/3 after this iter — safely above 3.5 with 3 distinct angles. LOCK AS PASSED.**
+- **Q3 (4.53125 STRONG PASS)**: FIRST_VALUE/LAST_VALUE/NTILE all exist in Trino with identical Oracle syntax — correct. LAST_VALUE default-frame trap (default frame is `RANGE UNBOUNDED PRECEDING AND CURRENT ROW`, so without explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` LAST_VALUE returns current row's peer, not the partition's last value) — correct per trino.io/docs/current/functions/window.html. NULLS-default claim (Trino is NULLS LAST regardless of ASC/DESC direction; Oracle is NULLS LAST for ASC, NULLS FIRST for DESC by default) — correct per trino.io/docs/current/sql/select.html. Minor completeness gap: did not flag that Trino NTILE forbids an explicit window frame (`NTILE` only takes OVER + PARTITION BY + ORDER BY); not load-bearing.
+- **Q4 (4.0 PASS — honest capability-bound answer, NOT a fab)**: Correctly states Trino/Iceberg have NO built-in per-partition storage-tiering DDL (no `ALTER TABLE ... SET STORAGE TIER`, no TableScan storage-tier selector, no `storage_tier` table property). This is a correct honest-not-supported call and earns credit, NOT a fabrication. The three workarounds (per-table zstd compression, separate recent/archive tables UNION ALL via dbt view, MinIO-ops-layer lifecycle tiering transparent to Trino) are all sound and fit prod_info.md (on-prem MinIO + Trino + Iceberg). Completeness gap: did not name MinIO `mc ilm tier add` lifecycle policies as the canonical prod-side mechanism, did not surface that Iceberg metadata stays HOT while data files migrate transparently.
 
-| Re-probe | Status | Evidence |
-|---|---|---|
-| Q1 — dbt model contracts content-gap fix (iter471 Q4 was 2.9375 FAIL) | **PASS — content gap closed** | Responder produced `config: contract: enforced: true` + `columns:` with `name` + `data_type` using Trino types (BIGINT, VARCHAR, DATE, TIMESTAMP(6), DECIMAL(p,s)); build-time preflight semantic correct; dbt-trino `not_null` runtime-enforced via Iceberg column constraint correct; primary_key/unique definable-but-not-enforced correct; schema.yml + matching SELECT shown. NO `@contract` decorator, NO `CONTRACT` SQL keyword, NO query-time-Trino-enforcement claim, NO `--enforce-contract` CLI flag. Q1 score 4.6875. |
-| Q2 — `parse_date` cross-dialect fab fix (iter471 Q3 was 3.5 borderline w/ the fab) | **HELD — fix confirmed durable** | Responder used `CAST(date_parse('2026-05-30','%Y-%m-%d') AS DATE)` (MySQL specifiers) + `CAST(parse_datetime('2026-05-30','yyyy-MM-dd') AS DATE)` (Joda alt) + `from_iso8601_date` (ISO direct DATE return); correctly noted `date_parse` returns `timestamp(3)` so CAST is needed; `%d/%m/%Y` day-first and `%d-%b-%Y` abbreviated-month variants correct. NO `parse_date` fab. Q2 score 4.5625. |
-| Q3 — `SET PARTITION SPEC` cross-dialect fab fix (iter471 Q1 was 3.75 w/ the fab) | **HELD — fix confirmed** | Responder used `ALTER TABLE iceberg.analytics.user_events SET PROPERTIES partitioning = ARRAY['day(occurred_at)', 'bucket(tenant_id, 64)']` (canonical Trino form); explicitly explained Trino `EXECUTE optimize` only bin-packs within existing spec (does NOT repartition) and Spark `CALL iceberg.system.rewrite_data_files(table=>..., options=>map('rewrite-all','true', ...))` is needed to rewrite old files; `EXECUTE expire_snapshots(retention_threshold => '7d')` cleanup correct. NO `SET PARTITION SPEC` / `ADD PARTITION FIELD` / `REPLACE PARTITION FIELD` Spark-isms. Q3 score 4.625. |
+## Re-probe statuses
 
-All three iter472 teacher fixes landed cleanly. Citation-hygiene streak restored after iter470/iter471 fab clusters.
+1. **Q1 — Iceberg-maintenance EXECUTE-vs-CALL label fix (iter472 Q4-a/Q4-b → iter473 Q1)**: **LANDED**. The Trino-EXECUTE-vs-Spark-CALL split is now crisp — `optimize`/`expire_snapshots`/`remove_orphan_files` correctly on the Trino-EXECUTE side; `rewrite_data_files`/`rewrite_manifests`/`rewrite_position_delete_files` correctly on the Spark-CALL side; explicit "do NOT write EXECUTE rewrite_data_files on Trino" warning present. No "expire_snapshots is Spark-only" contradiction. r17 patch + DO-NOT-WRITE matrix rows 1+2 verified effective.
+2. **Q2 — dbt-model-contracts micro-topic 3rd datapoint**: **PASSED — LOCK AS PASSED**. Three independent angles probed (iter471 Q4 content gap → iter472 Q1 YAML structure → iter473 Q2 constraint enforcement timing). Each angle now answered correctly.
 
----
+## Fabrications / inaccuracies this iter
 
-## Per-question scoring
+**ZERO load-bearing fabrications** across Q1–Q4. Citation-hygiene streak holds.
 
-### Q1 — dbt model contracts re-probe (content-gap-fix probe)
+Minor non-load-bearing imprecisions only:
+- Q1 did not surface `optimize_manifests` 470+ version pin (completeness, not fab).
+- Q3 did not flag NTILE's no-explicit-frame restriction (completeness, not fab).
+- Q4 did not name MinIO `mc ilm tier add` as the canonical lifecycle mechanism (completeness, not fab).
 
-| Dim | Score | Justification |
-|---|---|---|
-| Accuracy | 4.75 | `config.contract.enforced: true` + `columns: [{name, data_type}]` matches docs.getdbt.com/reference/resource-configs/contract verbatim. Build-time preflight before materialize, fails on column/type mismatch — exactly the docs.getdbt.com/docs/mesh/govern/model-contracts behavior. dbt-trino `not_null` enforced at the Iceberg column level vs `primary_key`/`unique`/`foreign_key` definable-but-not-enforced is correct per dbt-trino adapter docs. NO `@contract` decorator, NO `CONTRACT` SQL keyword, NO query-time-Trino-enforcement claim. |
-| Completeness | 4.625 | Covered: declaration YAML, what fires at build time, what dbt-trino runtime-enforces vs definable-only, paired-with-tests recommendation, schema.yml + matching SELECT. Missing: did not explicitly surface the "table or incremental materialization only — not view/ephemeral" requirement from the docs. Minor. |
-| Clarity | 4.75 | Clean schema.yml → matching SELECT pairing; Trino-type vocabulary (BIGINT/VARCHAR/DATE/TIMESTAMP(6)/DECIMAL(p,s)) called out explicitly so engineer doesn't reach for generic `string`/`int`. |
-| Actionability | 4.625 | Engineer can copy schema.yml + SELECT and run `dbt build`. Could be sharper with a sample violation output, but the conceptual gap from iter471 is closed. |
-| **Q1 avg** | **4.6875** | STRONG PASS — content-gap fix landed. |
+## Topic score updates this iter
 
-### Q2 — Oracle `TO_DATE` → Trino (parse_date-fix re-probe)
+- **Iceberg table maintenance** 4.4878/132 → (4.4878×132 + 4.71875)/133 = **4.4895/133** (+0.0017 — Q1 well above topic avg).
+- **dbt model contracts** 3.8125/2 → (3.8125×2 + 4.71875)/3 = **4.1146/3** (+0.302 — Q2 well above topic avg; 3 distinct angles now). **LOCK AS PASSED.**
+- **Oracle PL/SQL → dbt/Trino migration** 4.5514/46 → (4.5514×46 + 4.53125)/47 = **4.5510/47** (essentially flat, Q3 at topic avg).
+- **Storage tiering — NEW micro-topic**, first probe **4.0/1** — passes 3.5 threshold with one probe but **NEEDS a 2nd different-angle re-probe to lock as PASSED**. Add to required-topic checklist as NEEDS WORK.
+- **Trino federation** NOT probed — **4.49944/310 row UNCHANGED**.
 
-| Dim | Score | Justification |
-|---|---|---|
-| Accuracy | 4.625 | `CAST(date_parse('2026-05-30','%Y-%m-%d') AS DATE)` (MySQL specifiers, returns timestamp(3) so CAST needed) — verified at trino.io/docs/current/functions/datetime.html. `CAST(parse_datetime('2026-05-30','yyyy-MM-dd') AS DATE)` (Joda specifiers, returns timestamp with time zone) — verified. `from_iso8601_date` returns DATE no cast — verified. `%d/%m/%Y` day-first and `%d-%b-%Y` abbreviated-month variants both valid MySQL specifiers. NO `parse_date` fab. |
-| Completeness | 4.5 | Three canonical variants + day-first + abbreviated-month + ISO shortcut + the type-return note. Missing: did not flag that `parse_datetime` returns `timestamp with time zone` (TZ semantic) while `date_parse` returns naive timestamp — minor type-fidelity nuance that bites when feeding into downstream time-zone-sensitive logic. |
-| Clarity | 4.625 | MySQL-vs-Joda specifier distinction surfaced. |
-| Actionability | 4.5 | Copy-paste ready for the three common Oracle TO_DATE format families. |
-| **Q2 avg** | **4.5625** | STRONG PASS — fix confirmed durable (iter471 borderline → iter472 STRONG PASS). |
+## Teacher actions for iter474
 
-### Q3 — Iceberg partition evolution add column from Trino (SET PARTITION SPEC re-probe)
+### PRIMARY — storage tiering canonical (thin spot surfaced by Q4)
 
-| Dim | Score | Justification |
-|---|---|---|
-| Accuracy | 4.75 | `ALTER TABLE iceberg.analytics.user_events SET PROPERTIES partitioning = ARRAY['day(occurred_at)', 'bucket(tenant_id, 64)']` — exact canonical form per trino.io/docs/current/connector/iceberg.html partition-evolution section. Metadata-only commit, new writes use new spec, old files keep old spec, Trino reads both — VERIFIED per iceberg.apache.org partition-specs-array semantics. `EXECUTE optimize` is bin-pack-within-existing-spec only, NOT repartition — correct call-out. Spark `CALL iceberg.system.rewrite_data_files(table=>..., options=>map('rewrite-all','true','target-file-size-bytes','268435456'))` is the correct Spark procedure to rewrite old files to the new spec. `EXECUTE expire_snapshots(retention_threshold => '7d')` cleanup correct. NO `SET PARTITION SPEC` / `ADD PARTITION FIELD` / `REPLACE PARTITION FIELD` Spark-isms. |
-| Completeness | 4.625 | Full 3-step runbook (set new spec → Spark rewrite → expire snapshots). Implicit: did not call out that the new spec only applies to FUTURE writes by default, but the "old files keep old spec" remark covers it. |
-| Clarity | 4.625 | Trino-vs-Spark responsibility split (Trino sets spec + reads both, Spark rewrites) is clean. |
-| Actionability | 4.5 | Engineer has SQL for all three steps; needs to verify Spark cluster has rewrite_data_files perm but that's an env detail. |
-| **Q3 avg** | **4.625** | STRONG PASS — fix confirmed. |
+Q4 was an honest capability-bound answer (correct: feature does not exist) and scored 4.0 PASS, but the resource base does not yet have a dedicated storage-tiering canonical. Add one targeted resource OR a focused section in an existing resource (r09 lakehouse-schema-design or r17 iceberg-table-maintenance) covering:
 
-### Q4 — Iceberg snapshot-expiry maintenance + scheduling
+1. **Honest capability matrix** — Trino+Iceberg has NO per-partition storage-tier DDL on 467. Confirmed at trino.io/docs/current/connector/iceberg.html: supported Iceberg table properties are `format`, `compression_codec`, `partitioning`, `sorted_by`, `location`, `format_version`, `max_commit_retry`, `delete_after_commit_enabled`, `max_previous_versions`, `orc_bloom_filter_columns`, `orc_bloom_filter_fpp`, `parquet_bloom_filter_columns`, `object_store_layout_enabled`, `data_location`, `extra_properties` — NO storage-tier property.
+2. **Three workaround patterns** with explicit prod-fit framing for the on-prem MinIO+Iceberg+Trino stack:
+   - **A. Per-table compression** — `WITH (compression_codec = 'ZSTD')` on the archive table; whole-table scope, not per-partition.
+   - **B. Separate recent vs archive tables UNION ALL via dbt view** — partition-scoped logical tiering at the SQL layer; archive table can have a lower replication factor or different MinIO bucket storage class. Show concrete dbt view DDL.
+   - **C. MinIO-ops-layer lifecycle tiering** — `mc ilm tier add` / object lifecycle policies; transparent to Trino/Iceberg (Iceberg metadata stays HOT, data files migrate). Cite docs.min.io/enterprise/aistor-object-store/administration/object-lifecycle-management/object-tiering/. Read-time tradeoff: cold-tier reads slower.
+3. **DO-NOT-WRITE rows** banning fabricated tiering DDL: no `ALTER TABLE ... SET STORAGE TIER`, no `WITH (storage_tier = ...)`, no `TableScan(storage_tier = ...)` EXPLAIN selector, no fabricated `iceberg.storage-tier.*` catalog properties.
 
-| Dim | Score | Justification |
-|---|---|---|
-| Accuracy | 3.75 | The SQL forms shown are all correct: `EXECUTE optimize(file_size_threshold => '256MB')` (Trino), `EXECUTE expire_snapshots(retention_threshold => '7d')` (Trino), `EXECUTE remove_orphan_files(retention_threshold => '7d')` (Trino), Spark `CALL iceberg.system.rewrite_manifests`. 4-step order (compact → expire → orphan → rewrite_manifests) is sound and matches Iceberg-maintenance best practice. **TWO MINOR IMPRECISIONS (flagged per directive)**: (a) Step-1 heading "rewrite_data_files (compact) [Trino or Spark]" conflates the Spark CALL procedure (`CALL iceberg.system.rewrite_data_files`) with the Trino EXECUTE form (`EXECUTE optimize`) — `rewrite_data_files` is a Spark-only procedure name; the Trino equivalent compaction form is `EXECUTE optimize`. The example SQL correctly uses `EXECUTE optimize`, so it's a labeling slip rather than a load-bearing fab. (b) Opening line says "Spark required for steps 2 and 4" but later states "Trino can run steps 2–3" — internally contradicted. `expire_snapshots` IS available as a Trino `EXECUTE` procedure per trino.io/docs/current/connector/iceberg.html (verified — supports `retention_threshold`, `retain_last`, `clean_expired_metadata` params). Step 2 does NOT require Spark. Only step 4 (rewrite_manifests) is Spark-only on Trino 467. |
-| Completeness | 4.0 | Full 4-step order, scheduling cadence (nightly optimize + weekly expire/orphan/manifests), parameter values. Missing: did not surface the catalog-level `iceberg.expire-snapshots.min-retention` floor (default 7d) that gates the retention_threshold parameter — running `retention_threshold => '1d'` without overriding the catalog min fails with "Retention specified (1.00d) is shorter than the minimum retention configured in the system (7.00d)". |
-| Clarity | 3.75 | The "Spark required for step 2" opening contradiction is a clarity hit — engineer reading the opening then reading the example is left confused about which procedures need which engine. |
-| Actionability | 4.0 | Despite the labeling slips, the actual SQL forms are copy-paste-correct (the example uses the right Trino EXECUTE forms even though the heading mislabels them). Engineer running `EXECUTE expire_snapshots(retention_threshold => '7d')` on Trino will succeed regardless of the contradicted opening claim. |
-| **Q4 avg** | **3.875** | PASS — two minor accuracy/clarity imprecisions, no load-bearing fab (the SQL works as written), but the labeling/opening claim warrant a teacher patch. |
+### SECONDARY — breadth design for iter474
 
----
+Four-question breadth probe; NO dedicated federation probe (4.49944/310 sits 0.0006 below threshold, let count grow naturally). Suggested angles:
 
-## Overall summary
+1. **Storage tiering 2nd re-probe** (different angle) — e.g., "Can I set TTL on individual Iceberg partitions?" or "How do I move 2024 partitions to slower MinIO tier without breaking Trino queries?" — locks the new micro-topic at 2 probes.
+2. **Iceberg maintenance 3rd angle, different from EXECUTE-vs-CALL** — e.g., position-delete-files growth diagnosis, manifest-count diagnosis via `$manifests`, or snapshot-history archaeology via `$history`/`$snapshots` for rollback troubleshooting. Probes durability of EXECUTE-vs-CALL fix without re-asking the same angle.
+3. **dbt-trino non-contracts angle** — e.g., dbt `on_schema_change`, sources freshness blocking, snapshot strategy choice; contracts now locked at 3 probes, expand the dbt-trino footprint.
+4. **Wildcard low-count breadth probe** — pick from topics with <20 probes (real-time vs batch, popular tools overview, OLTP-to-OLAP mindset, lakehouse-vs-warehouse) to keep distribution healthy.
 
-| Question | Avg |
-|---|---|
-| Q1 dbt model contracts re-probe | **4.6875** STRONG PASS |
-| Q2 TO_DATE → date_parse re-probe | **4.5625** STRONG PASS |
-| Q3 Partition evolution SET PROPERTIES re-probe | **4.625** STRONG PASS |
-| Q4 Snapshot-expiry maintenance | **3.875** PASS (with two minor labeling slips) |
-| **Overall iter472 avg** | **4.4375 STRONG PASS** |
+### Citation-hygiene watchlist for iter474
 
-71st consecutive overall PASS in extended phase. Comfortable margin (well above 3.5 floor; ~0.94 above floor; ~0.73 above iter471's thin 3.703125).
+- **Storage tiering fabs** (priority): no `SET STORAGE TIER` DDL, no `storage_tier` property, no `TableScan(tier=)` EXPLAIN annotation. If responder invents any of these, full hard-fail on accuracy.
+- **Window-function fabs**: no `IGNORE NULLS`/`RESPECT NULLS` claim outside FIRST_VALUE/LAST_VALUE/LEAD/LAG (Trino only supports it on those four per trino.io/docs/current/functions/window.html); no fabricated `NULLS FIRST` default on DESC.
+- **dbt-trino fabs**: no `@contract` decorator, no `--enforce-contract` CLI flag, no `dbt contract validate` command.
+- **Iceberg-maintenance**: keep watching `rewrite_data_files` mislabeled as Trino EXECUTE; keep watching "Spark required for expire_snapshots" claim.
+- **Version pins**: `optimize_manifests` 470+ NOT 467; `retain_last`/`clean_expired_metadata` 479+ NOT 467; standard Trino 467 EXECUTE registry exactly `optimize`, `expire_snapshots`, `remove_orphan_files`, `drop_extended_stats`.
 
----
+## Margin assessment
 
-## Fabrications / Inaccuracies — full enumeration
-
-| # | Type | Where | Correct fact | Source |
-|---|---|---|---|---|
-| Q4-a | Labeling slip (NOT a load-bearing fab — example SQL is correct) | Q4 step-1 heading: "rewrite_data_files (compact) [Trino or Spark]" | `rewrite_data_files` is a **Spark-only** `CALL iceberg.system.rewrite_data_files(...)` procedure. The **Trino** compaction form is `ALTER TABLE t EXECUTE optimize(...)` — distinct API surface. Heading should be split or rephrased to "Compaction: Trino `EXECUTE optimize` OR Spark `CALL iceberg.system.rewrite_data_files`". | trino.io/docs/current/connector/iceberg.html (EXECUTE optimize), iceberg.apache.org/docs/latest/spark-procedures/#rewrite_data_files |
-| Q4-b | Internally contradicted opening claim (minor accuracy/clarity slip) | Q4 opening: "Spark required for steps 2 and 4" | `expire_snapshots` IS available as a Trino `EXECUTE` procedure — `ALTER TABLE t EXECUTE expire_snapshots(retention_threshold => '7d', retain_last => N, clean_expired_metadata => true)`. Only step 4 (`rewrite_manifests`) is Spark-only on Trino 467. The opening contradicts the responder's own later "Trino can run steps 2–3" remark. | trino.io/docs/current/connector/iceberg.html (expire_snapshots procedure spec with retention_threshold, retain_last, clean_expired_metadata params) |
-
-**No load-bearing fabs this iter.** Zero fabricated function names, zero fabricated DDL clauses, zero fabricated capability restrictions, zero version-pin spillover, zero cross-dialect spillover. The three iter471 fab classes (SET PARTITION SPEC, parse_date, dbt model-contracts content gap) were all closed cleanly by iter472 teacher work. Iter472 surfaces only minor labeling/contradiction slips in Q4 — patchable in one resource pass.
-
----
-
-## Teacher actions for iter 473 (extended phase — breadth design, no dedicated federation probe)
-
-### PRIMARY — Fix Q4 imprecisions (single resource patch)
-
-Both imprecisions are wording/labeling slips, not content gaps. The actual SQL forms shown by the responder are correct. Patch is small but worth doing because Iceberg-maintenance topic is heavily probed (130+ questions, 3rd-highest after federation/multi-tenant) and the topic avg sits at 4.4915 with thin headroom.
-
-**Q4-a fix — `rewrite_data_files` vs `EXECUTE optimize` label conflation.**
-Pre-edit grep `resources/17-iceberg-table-maintenance.md` (and any cross-ref in r18/r19) for any line that labels compaction as "rewrite_data_files [Trino or Spark]" or similar conflated heading. Reconcile (don't append) to split the API surfaces explicitly:
-
-- Recommended canonical heading: "**Step 1 — Compaction**: Trino `ALTER TABLE t EXECUTE optimize(file_size_threshold => '256MB')` **OR** Spark `CALL iceberg.system.rewrite_data_files(table => 'iceberg.analytics.t', options => map('rewrite-all','true'))`".
-- 1-line clarifier: "Trino's `EXECUTE optimize` is the Trino API name for Iceberg compaction; `rewrite_data_files` is the Spark CALL procedure name. They commit equivalent `replace` snapshot operations but the SQL clause is engine-specific. Do NOT write `EXECUTE rewrite_data_files(...)` on Trino — there is no such procedure on Trino 467."
-- New DO-NOT-WRITE matrix row in r17 banning `EXECUTE rewrite_data_files(...)` on Trino with citation to trino.io/docs/current/connector/iceberg.html (EXECUTE optimize section).
-
-**Q4-b fix — "Spark required for expire_snapshots" wording.**
-Pre-edit grep `resources/17-iceberg-table-maintenance.md` + r18 + r19 + r20 (if present) for any line claiming Spark is required for `expire_snapshots`. If found, reconcile (don't append) to state plainly:
-
-- "`expire_snapshots` is available as a Trino `EXECUTE` procedure on Trino 467 with the Iceberg connector. Spark is NOT required for step 2 (snapshot expiry). The Trino procedure accepts `retention_threshold`, `retain_last`, and `clean_expired_metadata` parameters. Only `rewrite_manifests` is Spark-only on Trino 467."
-
-If no such line exists in resources/ (i.e., the contradiction was responder-side framing, not stale resource content), add a new DO-NOT-WRITE matrix row in r17 banning the claim "Spark required for expire_snapshots" with citation. Either way, reconcile-don't-append discipline applies (per past judge memory — appending lets the responder cite the wrong line).
-
-Also add the catalog-level `iceberg.expire-snapshots.min-retention` floor note (default 7d) so the engineer knows why a `retention_threshold => '1d'` call will fail without a catalog override.
-
-### SECONDARY — Breadth design for iter 473 (4 questions, no federation probe)
-
-Federation 4.49944/310 stays untouched per directive — let count grow naturally with non-federation probes. Suggested breadth angles for iter473:
-
-1. **dbt model contracts second-angle re-probe** to confirm the iter472 PASS isn't a single-question artifact. Rubric requires "tested from at least 2 different question angles" before a new micro-topic locks. iter471 was content-gap (responder honestly punted), iter472 was the canonical declaration probe — related angles. Suggested truly different second angle: (a) "what does dbt print when a contract fails — show the actual error output?" (forces responder to surface the column_name | definition_type | contract_type | mismatch_reason failure table) OR (b) "can I add a `unique` constraint to my dbt model on dbt-trino + Iceberg — will it be enforced?" (forces the not_null-only vs definable-but-not-enforced distinction the teacher's iter472 DO-NOT-WRITE row pinned) OR (c) "what materializations support model contracts on dbt-trino? Can I use it on a view or materialized view?" (forces the table/incremental-only requirement, view-limited, the docs.getdbt.com/reference/resource-configs/contract platform-specific compatibility section). Recommend (b) — it's the angle most likely to expose a regression on the not_null-only constraint claim.
-
-2. **Iceberg maintenance second-angle re-probe** to confirm the Q4 labeling fix in iter473 lands. Suggested: "how do I schedule Iceberg maintenance — what runs daily vs weekly vs monthly, and which procedures are Trino vs Spark?" (forces a second touch on the rewrite_data_files vs EXECUTE optimize labels AND the expire_snapshots Trino-vs-Spark availability — same factual surface, different framing). Or: "I'm seeing snapshot count explode on a high-write table — what's the Trino procedure to expire old snapshots, what's the default min-retention, and how do I override it?" (forces the catalog-min-retention floor surface).
-
-3. **Oracle PL/SQL → dbt/Trino angle** — pick a non-date-function angle. Q2 (TO_DATE) was the date-parsing angle. Candidates: (a) MERGE WHEN NOT MATCHED BY SOURCE follow-up (re-probe iter470 Q2 from a different phrasing) — "how do I model SCD2 in dbt + Trino when the source can delete rows?"; (b) CONNECT BY → recursive CTE — "translate this Oracle hierarchical query"; (c) Oracle SEQUENCE → Trino dbt-utils.generate_surrogate_key — "how do I generate stable surrogate keys without a database sequence?"; (d) DBMS_OUTPUT.PUT_LINE → dbt log — "how do I print debug info from a dbt model on Trino?".
-
-4. **Wildcard breadth probe** from an under-probed topic. Candidates by lowest question count: complex SQL perf on Trino w/ dbt (4 Qs — light), dbt sources/freshness (3 Qs — light), Storage sizing (10 Qs), OLTP-to-OLAP mindset (4 Qs), OLAP-vs-OLTP (4 Qs). Recommend dbt sources/freshness OR complex-SQL-perf — both sit near the bottom of probe counts and both relate to Oracle migration work. Example Qs: "how do I set up source freshness on a Postgres source that loads hourly?" OR "I have a 6-level nested CTE that's slow — what does EXPLAIN show me and how do I rewrite it for Trino?".
-
-### Watchlist for iter473 (citation-hygiene)
-
-- **dbt-trino constraints** — only `not_null` is runtime-enforced; do NOT let the responder claim `primary_key`/`unique`/`foreign_key`/`check` are enforced. iter472 got this right; second probe must hold.
-- **Iceberg compaction labels** — do NOT let the responder write `EXECUTE rewrite_data_files` on Trino (fab) or `CALL iceberg.system.optimize` on Spark (fab). The API surfaces are split per engine.
-- **`expire_snapshots` availability** — do NOT let the responder claim Spark is required; Trino 467 has the EXECUTE procedure with retention_threshold/retain_last/clean_expired_metadata params.
-- **Catalog-min-retention floor** — `iceberg.expire-snapshots.min-retention` and `iceberg.remove-orphan-files.min-retention` both default to 7d; calling either procedure with a shorter retention fails with a specific error message.
-- **Continuing fab-class guardrails** — cross-dialect spillover (Snowflake `parse_date`, Spark `SET PARTITION SPEC`/`ADD PARTITION FIELD`/`REPLACE PARTITION FIELD`), version-pin spillover (do not claim 469+ features as Trino-467 baseline), Trino-internal-clause conflation (`WITH (SECURITY DEFINER)` vs `SECURITY DEFINER` standalone clause — iter468 fix held but watchlist remains).
-
-### No new resource creation needed
-
-The iter472 SQL responses are functionally correct. The two Q4 imprecisions are wording/labeling fixes inside `resources/17-iceberg-table-maintenance.md` (and possibly r18 cross-refs). No new sections required, no new canonical blocks needed — just reconcile the conflated labels and add the two DO-NOT-WRITE matrix rows.
-
----
-
-## Rubric updates (applied to rubric.md score history)
-
-- `dbt model contracts` micro-topic — iter471 first probe 2.9375/1 (FAIL); iter472 second probe 4.6875/2 — running avg = (2.9375 + 4.6875)/2 = **3.8125/2 — PASSES the 3.5 threshold**. Caveat: only 2 probes; rubric requires "tested from at least 2 different question angles" before locking. iter471 was content-gap (responder declined to fabricate), iter472 was direct content probe. Related angles. Recommend one more re-probe in iter473 from a different angle (failure-output OR materialization-support OR unique-constraint-enforcement) before marking PASSED durably.
-- `Oracle PL/SQL → dbt/Trino migration` — 4.5512/45 + Q2 4.5625 = (4.5512*45 + 4.5625)/46 = (204.804 + 4.5625)/46 = 209.3665/46 = **4.5514/46** (tiny nudge UP).
-- `Iceberg table maintenance` — 4.4915/130 + Q3 4.625 + Q4 3.875 — fold Q3 (partition evolution) and Q4 (maintenance/snapshot-expiry) both under maintenance: (4.4915*130 + 4.625 + 3.875)/132 = (583.895 + 4.625 + 3.875)/132 = 592.395/132 = **4.4878/132** (small nudge DOWN — Q4 labeling slips drag the topic avg by 0.0037 despite the SQL being correct).
-- `Trino federation` — NOT probed, **4.49944/310 UNCHANGED**.
-
-Topic avgs and dbt-model-contracts row updated in rubric.md.
+- **Iter473 4.5234 overall** — comfortable margin (~1.02 above 3.5).
+- **72nd consecutive PASS in extended phase**.
+- **Two re-probe streaks closed cleanly** (Q1 EXECUTE-vs-CALL label fix + Q2 dbt-contracts 3rd-angle lock).
+- **One new thin spot surfaced** (storage tiering canonical missing) — non-critical because responder answered honestly, but worth a dedicated resource patch before this gets probed from a more concrete-syntax angle.
+- **Federation row** sits 0.0006 below 4.5 threshold — do NOT probe directly; let breadth iters grow the count.
