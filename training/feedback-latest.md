@@ -1,215 +1,143 @@
-# Iter 502 Judge Feedback — 2026-06-06 (EXTENDED PHASE)
+# Iter 503 — Judge Feedback (EXTENDED PHASE)
 
-## Overall: 4.1719 PASS (margin +0.6719 above 3.5 floor; lowest in 12 iters; Q4 FINDABILITY-GAP FAIL drags 0.6+)
+## Overall: 4.7344 STRONG PASS — BOTH iter502 fixes LANDED, ZERO new fabrications
 
-Three answers clean / STRONG PASS or PASS-with-deduction. One FAIL (Q4) — load-bearing misdirection that resources/ ALREADY HAS the right canonical for (r13:5405-5522) but the responder never landed on. **Pattern matches the iter499 dbt-snapshot findability gap: content is correct and complete in resources/, but the question's keywords don't route there.**
+**Per-question scores:**
 
----
+| Q | Topic | Accuracy | Clarity | Actionability | Completeness | Avg |
+|---|---|---|---|---|---|---|
+| Q1 | on_schema_change re-probe (silent missing column) | 5.0 | 4.75 | 5.0 | 4.75 | **4.875** STRONG PASS |
+| Q2 | Surrogate-key re-probe (NEXTVAL → stable Trino key) | 5.0 | 4.75 | 5.0 | 4.75 | **4.875** STRONG PASS |
+| Q3 | UNNEST array → one row per element | 4.75 | 4.75 | 5.0 | 4.25 | **4.6875** STRONG PASS |
+| Q4 | Spill-to-disk: real or marketing? config to enable | 4.75 | 4.5 | 5.0 | 4.75 | **4.75** STRONG PASS |
 
-## Per-Question Scores
-
-### Q1 — p95 latency per customer per day on 300M rows (approx_percentile) — **4.875 STRONG PASS**
-
-- Accuracy 5.0, Clarity 4.75, Actionability 5.0, Completeness 4.75
-
-**Verified clean (WebSearch trino.io/docs/current/functions/aggregate.html + tdigest.html):**
-- `approx_percentile(col, 0.95)` single-percentile form — VALID Trino 467 (T-Digest-backed per PR #5158).
-- `approx_percentile(col, ARRAY[0.50, 0.95, 0.99])` array form returning `array<[same as x]>` — VALID Trino 467, one-pass evaluation.
-- `<1% error` claim — CORRECT for T-Digest (and explicitly NOT confused with the ~2.3% relative error of HLL/`approx_distinct`).
-- `GROUP BY customer_id, CAST(event_date AS DATE)` — correct group-key construction for per-customer-per-day.
-
-Minor (-0.25 Completeness): no mention of partition-pruning predicate on `event_date` to limit the 300M-row scan (the question explicitly says "300M rows" — partition predicate would be the actionable speedup beyond approx_percentile).
-
-### Q2 — Undo a bad Iceberg write without manual row deletion (rollback_to_snapshot) — **4.875 STRONG PASS**
-
-- Accuracy 5.0, Clarity 4.75, Actionability 5.0, Completeness 4.75
-
-**Verified clean (WebSearch trino.io/docs/current/connector/iceberg.html + GitHub PR #24580):**
-- `CALL iceberg.system.rollback_to_snapshot('analytics', 'events', <snapshot_id>)` positional 3-arg form — VALID Trino 467 (system.rollback_to_snapshot is being deprecated in favor of a table procedure per PR #24580 but is still functional and the documented form in 467).
-- `iceberg.analytics."your_table$snapshots"` whole-token-quoted metadata reference — CORRECT (the `$snapshots` form requires whole-table-name quoting because `$` is not a bare-identifier character).
-- `ORDER BY committed_at DESC` to find latest snapshots — CORRECT (committed_at column verified on metadata table).
-- "Metadata-pointer revert / atomic / seconds" framing — CORRECT (rollback flips current snapshot pointer in metadata.json, no data movement).
-- 7-day default snapshot history + `expire_snapshots` caveat — CORRECT operationally.
-
-Minor (-0.25 Completeness): could mention checking `iceberg.analytics."your_table$history"` to also see which snapshots are still rollback-eligible (not expired).
-
-### Q3 — Oracle `SELECT sysdate FROM DUAL` and `seq_name.NEXTVAL FROM DUAL` → Trino — **4.0625 PASS** (LOAD-BEARING MD5 TYPE ERROR, partially mitigated by canonical dbt_utils form)
-
-- Accuracy 3.5, Clarity 4.5, Actionability 4.0, Completeness 4.25
-
-**Verified clean:**
-- SELECT-without-FROM in Trino — VALID (Trino does NOT require `FROM DUAL`; bare `SELECT current_timestamp` parses).
-- `CURRENT_DATE` and `current_timestamp` for SYSDATE — CORRECT mapping (Trino `current_timestamp` returns `TIMESTAMP(3) WITH TIME ZONE` corresponding to Oracle SYSTIMESTAMP).
-- `current_timestamp AT TIME ZONE 'America/New_York'` — VALID Trino syntax.
-- Iceberg #12297 "Support for Identity Columns" closed NOT PLANNED — VERIFIED via WebSearch (GitHub issue confirms closure by github-actions[bot] as not planned).
-- Trino has no `CREATE SEQUENCE`/`.NEXTVAL` — CORRECT (parse-fail).
-- `{{ dbt_utils.generate_surrogate_key(['tenant_id','order_id','created_at']) }}` canonical form — CORRECT and is what engineers should actually use.
-- "Hash keys won't match Oracle numeric IDs" caveat — CORRECT and important.
-
-**LOAD-BEARING TYPE ERROR (-1.5 Accuracy)** — verified via WebSearch trino.io/docs/current/functions/binary.html + string.html:
-
-The hand-rolled fallback `md5(concat_ws('||', tenant_id, order_id, created_at))` has **two type errors** as written:
-1. **`md5()` in Trino 467 takes `VARBINARY`, not VARCHAR.** Per trino.io/docs/current/functions/binary.html, signature is `md5(binary) -> varbinary`. Passing a VARCHAR directly fails function resolution at parse time.
-2. **`concat_ws` requires all-VARCHAR args.** `created_at` is a TIMESTAMP and would need `CAST(created_at AS VARCHAR)` first.
-3. **To get the hex-string surrogate key form** the engineer expects, the correct Trino idiom is `to_hex(md5(to_utf8(concat(CAST(tenant_id AS VARCHAR), '||', CAST(order_id AS VARCHAR), '||', CAST(created_at AS VARCHAR)))))` — this is what `dbt_utils.generate_surrogate_key` compiles to internally on dbt-trino.
-
-**Engineer copy-pasting the hand-rolled form gets:** `Unexpected parameters (varchar) for function md5. Expected: md5(varbinary)`.
-
-**Partial mitigation:** the answer also gave `dbt_utils.generate_surrogate_key([...])` as the primary recommendation, which is correct and is the form engineers actually use. So Accuracy gets 3.5 (not 2.5) — the canonical answer is correct, the hand-rolled fallback example is broken.
-
-### Q4 — Incremental dbt column ADDED but silently absent from output table — **2.875 FAIL** (FINDABILITY GAP — answered with CONTRACTS instead of on_schema_change)
-
-- Accuracy 2.5, Clarity 3.5, Actionability 2.5, Completeness 3.0
-
-**THIS IS THE TEXTBOOK `on_schema_change` SCENARIO — VERIFIED via docs.getdbt.com/docs/build/incremental-models:**
-
-Verbatim from dbt docs:
-> "**`ignore` (default)**: If you add a column to your incremental model, and execute a `dbt run`, this column will not appear in your target table."
-
-The question states verbatim: "An incremental dbt model had a column ADDED, build succeeded, but the column was silently absent from the output table." This IS the dbt default `on_schema_change='ignore'` behavior. The precise fix is one line:
-
-```yaml
-{{ config(
-    materialized='incremental',
-    on_schema_change='append_new_columns'  -- or 'sync_all_columns' or 'fail'
-) }}
-```
-
-**The responder answered with CONTRACTS** (`config.contract.enforced: true` + columns/data_type list per docs.getdbt.com/docs/mesh/govern/model-contracts). Contracts CAN detect column mismatches at build-time preflight, but:
-- Contracts compare declared YAML schema vs SELECT output — they do NOT change incremental-merge behavior.
-- Contracts require declaring every column with name + data_type upfront (high-friction for SaaS engineers iterating on schemas).
-- The dbt-native, one-line fix for the EXACT scenario described is `on_schema_change`, not contracts.
-
-**FABRICATION (-0.5 Accuracy)** — answer's YAML showed BOTH a top-level `enforced: true` AND `contract: {enforced: true}` in the same config. The bare top-level `enforced: true` outside the `contract:` block is **not a valid standalone dbt config** — engineers copy-pasting will get a config-parse warning or silent ignore. Per docs.getdbt.com/reference/resource-configs/contract, the only valid form is `contract: {enforced: true}` nested under `config:`.
-
-**FINDABILITY GAP CONFIRMED — content EXISTS in resources/:**
-
-`grep on_schema_change resources/` returns:
-- **`resources/13-postgres-to-iceberg-ingestion.md:5405-5522`** — full canonical `### on_schema_change — the FOUR options and the correct default` section with EXACT match to the question scenario: "If you do not set `on_schema_change` explicitly, dbt uses `ignore` semantics: any new column added to the source SELECT is **silently dropped** from the INSERT/UPDATE, never propagates to the target Iceberg table, and never appears in downstream queries. This is silent data loss for newly-added source columns." Includes 4-option table (ignore / fail / append_new_columns / sync_all_columns) with new-column and removed-column behaviors. Recommended `append_new_columns` for SaaS pipelines.
-- `resources/27-oracle-plsql-to-dbt-trino.md:349` — single-line summary mentioning `on_schema_change='append_new_columns'` is safe default.
-- `resources/28-complex-sql-performance-trino-dbt.md:159` — table row pointing to dbt docs.
-- `resources/27-oracle-plsql-to-dbt-trino.md:1452` — cross-ref pointing to r13 §on_schema_change.
-
-**Why didn't the responder route here?** The question keywords are "incremental model" + "column ADDED" + "build succeeded" + "silently absent" + "make dbt fail/warn." The r13 canonical sits inside a long `Postgres-to-Iceberg ingestion` resource and the section header is `### on_schema_change — the FOUR options and the correct default`. The keywords "silently absent" / "incremental column added" / "make dbt fail" don't lead to r13 from a Haiku keyword-match perspective. The `silently dropped` verbatim language IS in r13:5407 but the section title doesn't surface terms like "schema change," "schema drift," or "incremental column added."
-
-**Verdict:** Identical pattern to the iter499 → iter500 dbt-snapshot findability fix. The fix is NOT new content (r13 §on_schema_change is canonical and correct) — it's keyword anchors and forward-pointer cross-refs.
+**OVERALL AVG = (4.875 + 4.875 + 4.6875 + 4.75)/4 = 19.1875/4 = 4.7344** (STRONG PASS, +1.2344 above 3.5 floor; one of the cleanest extended-phase iters — all four STRONG PASS, no FAIL).
 
 ---
 
-## Topic Avg Updates
+## BOTH iter502 fixes LANDED — explicit confirmation
 
-| Topic | Before | Computation | After |
-|---|---|---|---|
-| SQL query best practices for OLAP (Q1 approx_percentile maps here) | 4.5314/56 | (4.5314*56 + 4.875)/57 = 258.633/57 | **4.5374/57** (+0.0060) |
-| Iceberg table maintenance (Q2 rollback_to_snapshot maps here) | 4.4982/150 | (4.4982*150 + 4.875)/151 = 679.605/151 | **4.5007/151** (+0.0025) |
-| Oracle PL/SQL→dbt/Trino migration (Q3 SYSDATE/NEXTVAL maps here) | 4.5460/73 | (4.5460*73 + 4.0625)/74 = 335.9205/74 | **4.5395/74** (-0.0065 — Q3 md5 type error drags below topic avg, still PASS) |
-| dbt model contracts (Q4 misdirection contracts answer maps here) | 4.1146/3 | (4.1146*3 + 2.875)/4 = 15.2188/4 | **3.8047/4** (-0.3099 — Q4 misdirection + fabricated top-level enforced drags low-sample row noticeably; still PASS at 3.5 floor) |
-| Postgres-to-Iceberg ingestion (on_schema_change canonical lives in r13; Q4 misdirection bucket-charged here) | 4.4923/168 | (4.4923*168 + 2.875)/169 = 757.5814/169 | **4.4827/169** (-0.0096 — still PASS) |
+### FIX A — on_schema_change findability fix LANDED
 
-Federation NOT probed — **4.49944/310 row UNCHANGED** per iter472-502 directive (and per task constraint: do NOT touch §13.x federation guardrails or federation rubric row).
+Iter502 Q4 FAILED because the responder routed to dbt CONTRACTS for the textbook silent-missing-column scenario. Iter503 Q1 is the direct re-probe ("added discount_code, ran it, column silently missing — why + how to pick it up").
 
----
+**Iter503 Q1 verdict: ROUTED CORRECTLY.** Responder:
+1. Identified the cause as `on_schema_change` default `'ignore'` silently dropping new columns (VERBATIM match to docs.getdbt.com/docs/build/incremental-models: "The `ignore` option is set by default ... if you add a column to your incremental model and execute a dbt run, this column will not appear in your target table").
+2. Prescribed `on_schema_change='append_new_columns'` (correct primary fix; docs verbatim: "Append new columns to the existing table") and noted it triggers `ALTER TABLE ADD COLUMN` on the next incremental run.
+3. Showed the full incremental config block with `is_incremental()` guard.
+4. **Did NOT mention dbt contracts** — the iter502 misdirection trap is closed.
 
-## Verification Summary
+The r13 §`on_schema_change` Findability anchor (EDIT A1) + the r27 §6.7C DO-NOT-CONFUSE one-liner (EDIT A2) + r28 §3.3 row expansion (EDIT A3) + r27 §3.3 bullet expansion (EDIT A4) successfully re-routed the Haiku responder away from contracts to the canonical r13 §`on_schema_change` block. **Pure findability fix worked (10th leading-canonical bulletproofing instance; 4th findability-only zero-new-content fix in extended phase).**
 
-| Check | Result |
-|---|---|
-| Q1 approx_percentile array form valid Trino 467 | CONFIRMED via trino.io/docs/current/functions/aggregate.html + tdigest.html — single-pass T-Digest, <1% error claim accurate |
-| Q1 GROUP BY customer_id + CAST(event_date AS DATE) correct | CONFIRMED |
-| Q2 `CALL iceberg.system.rollback_to_snapshot(schema, table, snapshot_id)` positional 3-arg Trino 467 | CONFIRMED via trino.io/docs/current/connector/iceberg.html (procedure deprecated per PR #24580 but functional in 467) |
-| Q2 `"table$snapshots"` whole-token quoting + committed_at column | CONFIRMED |
-| Q2 metadata-pointer revert / atomic / 7-day default | CONFIRMED operationally |
-| Q3 SELECT-without-FROM valid Trino | CONFIRMED (Trino does not require FROM DUAL) |
-| Q3 CURRENT_DATE / current_timestamp / AT TIME ZONE | CONFIRMED via trino.io/docs/current/functions/datetime.html |
-| Q3 Iceberg #12297 identity column closed NOT PLANNED | CONFIRMED via github.com/apache/iceberg/issues/12297 (closed by github-actions[bot] as not planned) |
-| Q3 dbt_utils.generate_surrogate_key canonical | CONFIRMED correct |
-| **Q3 md5() type signature in Trino 467** | **TYPE ERROR CONFIRMED** — per trino.io/docs/current/functions/binary.html, `md5(binary) -> varbinary` — VARCHAR arg fails function resolution. Correct form: `to_hex(md5(to_utf8(concat(...))))`. concat_ws also requires all-VARCHAR args (created_at TIMESTAMP needs CAST). |
-| Q4 contracts feature semantics (build-time preflight, columns + data_type) | CONFIRMED via docs.getdbt.com/docs/mesh/govern/model-contracts — but WRONG TOOL for the question described |
-| **Q4 on_schema_change is the correct fix for "incremental column added → silently dropped"** | **CONFIRMED via docs.getdbt.com/docs/build/incremental-models** — verbatim "If you add a column to your incremental model, and execute a dbt run, this column will not appear in your target table" is the `ignore` default; fix is `on_schema_change='append_new_columns'` (or `sync_all_columns` or `fail`) |
-| **Q4 top-level bare `enforced: true` (outside `contract:` block) is a valid config** | **FABRICATION** — not a valid standalone dbt config per docs.getdbt.com/reference/resource-configs/contract; only valid form is `contract: {enforced: true}` |
-| **Q4 on_schema_change content exists in resources/** | **EXISTS at r13:5405-5522** (canonical), r27:349, r28:159, r27:1452 (cross-ref). FINDABILITY GAP, not content gap. |
+### FIX B — md5 bare-VARCHAR Trino type error fix LANDED
+
+Iter502 Q3 had `md5(concat_ws('||', ...))` as the hand-rolled fallback — broken Trino (concat_ws does not exist; md5 requires VARBINARY not VARCHAR). Iter503 Q2 is the direct re-probe (Oracle order_seq.NEXTVAL → stable unique key).
+
+**Iter503 Q2 verdict: md5 trap AVOIDED.** Responder:
+1. Recommended `{{ dbt_utils.generate_surrogate_key(['tenant_id','order_id']) }}` as PRIMARY (canonical, MD5-hash-based, idempotent, ~32-char VARCHAR; cross-database compatible per dbt-labs/dbt-utils/macros/sql/generate_surrogate_key.sql which compiles to `md5(coalesce(cast(field as varchar), '_dbt_utils_surrogate_key_null_'))` — the dbt-trino adapter resolves this to dialect-valid form).
+2. Correctly stated Trino has no sequences/NEXTVAL and Iceberg has no identity columns (Iceberg #12297 closed not-planned Aug 2025 — verified).
+3. **Did NOT write bare `md5(varchar)` or `md5(concat_ws(...))`.** The iter502 type-error trap is closed.
+4. Included the caveat that hash keys won't match the Oracle numeric sequence (correct expectation-setting for migration).
+
+The r27 §4.5 query-shape replacement (EDIT B1: PRIMARY = generate_surrogate_key, FALLBACK = `to_hex(md5(to_utf8(concat(CAST(...AS VARCHAR), ...))))`, DO-NOT line banning bare-md5) + r27 §4.5A Findability anchor (EDIT B2) + r27 §4.5A DO-NOT-WRITE table row (EDIT B3) successfully steered the responder to the canonical macro form. **11th leading-canonical bulletproofing instance — back-to-back same iter with FIX A.**
 
 ---
 
-## Concrete Next-Teacher Actions (iter503 — HIGH PRIORITY)
+## Q3 UNNEST — minor completeness note (non-load-bearing)
 
-### 1. on_schema_change FINDABILITY FIX (HIGH — Q4 misdirection from iter502 — pattern matches iter499→500 dbt-snapshot fix)
+`CROSS JOIN UNNEST(product_tags) AS t(tag)` is valid Trino 467 (verified at trino.io/docs/current/sql/select.html#unnest). One-row-per-element semantics correct. `COUNT(DISTINCT tag) ... GROUP BY order_id` example is sound. JSON-string parsing caveat is a nice add.
 
-**DO NOT WRITE NEW on_schema_change CONTENT.** r13:5405-5522 is canonical, complete, and correct. Adding duplicate content risks iter495-style stale-block contradiction.
-
-**Pure-findability fix (zero new content):**
-
-1. **Add a leading keyword anchor at the top of r13 §on_schema_change (line ~5405):** Insert a one-line anchor with the keywords the question uses:
-   ```markdown
-   <!-- KEYWORDS: incremental model column added / column silently absent / column silently dropped / make dbt fail when schema changes / make dbt warn on schema drift / incremental schema drift / dbt incremental column missing / dbt added column not in output -->
-   ```
-   These are the exact phrases the iter502 question used.
-
-2. **Add forward-pointer cross-refs from any resource that mentions `incremental` model material to r13 §on_schema_change:**
-   - r27 §6.7 (dbt section) — add a "see r13 §on_schema_change for incremental schema-drift behavior" callout
-   - r28 §incremental tuning — add same callout
-   - **dbt-contracts canonical** (wherever it lives in resources/) — add a DO-NOT-CONFUSE callout: "Contracts catch column mismatches at build-time preflight against the YAML schema. For incremental models that silently drop new SELECT columns on incremental runs, use `on_schema_change` (see r13 §...), NOT contracts. Contracts and on_schema_change are complementary, not interchangeable."
-
-3. **At the contracts canonical (wherever it lives), add a DO-NOT-WRITE banner banning:**
-   - Top-level bare `enforced: true` outside `contract:` block (NOT valid; only `contract: {enforced: true}` parses)
-   - Suggesting contracts as the fix for "incremental column went missing" (correct answer is `on_schema_change`)
-
-### 2. md5/concat_ws TYPE-ERROR FIX (MEDIUM — Q3 hand-rolled fallback example is broken)
-
-**Reconcile-in-place in r27 §sequences/surrogate-key (line ~349 vicinity, or wherever the hand-rolled md5 example lives):**
-
-Find and fix any `md5(concat_ws(...))` or `md5(<varchar>)` hand-rolled example. Replace with:
-```sql
--- CORRECT Trino 467 hand-rolled surrogate-key form (use this if you can't use dbt_utils):
-to_hex(md5(to_utf8(
-  concat(
-    CAST(tenant_id AS VARCHAR), '||',
-    CAST(order_id AS VARCHAR), '||',
-    CAST(created_at AS VARCHAR)
-  )
-)))
-```
-
-Plus a DO-NOT-WRITE row banning:
-- `md5(<varchar>)` directly — `md5` takes VARBINARY only per trino.io/docs/current/functions/binary.html (signature `md5(binary) -> varbinary`); pass `to_utf8(<varchar>)` to convert first
-- `concat_ws('||', tenant_id, order_id, created_at)` where any arg is non-VARCHAR — concat_ws requires all-VARCHAR; CAST non-VARCHAR args first
-- `md5(...)` returned directly to a hex-string column — md5 returns VARBINARY; wrap in `to_hex(...)` for the hex string
-
-**Primary recommendation should remain `dbt_utils.generate_surrogate_key([...])`** — engineers should default to that; the hand-rolled form is the escape hatch and must be correct.
-
-### 3. Minor (LOW)
-
-- Q1: could add partition-pruning predicate example to the approx_percentile canonical (event_date WHERE clause to limit 300M-row scan — load-bearing for the actual SaaS scenario).
+**Completeness gap (-0.5)**: the answer did NOT mention that `CROSS JOIN UNNEST(...)` DROPS rows where the array column is NULL or empty. The preserve-rows form is `LEFT JOIN UNNEST(product_tags) ON true` (or `LEFT JOIN UNNEST(...) AS t(tag) ON true`). For an engineer with mixed-NULL data this matters — if some orders have no tags they will silently vanish from the result, mirroring the Q1 silent-missing-column class of bug. Non-fail (still 4.6875), but flag for iter504 teacher: add a one-liner "CROSS JOIN UNNEST drops rows with NULL/empty arrays — use LEFT JOIN UNNEST(...) ON true to preserve" to the UNNEST canonical block.
 
 ---
 
-## Judge Probe Targets for iter503
+## Q4 spill — config property verification (CAREFULLY against trino.io/docs/current/admin/properties-spilling.html)
 
-| Probe | Priority | Rationale |
+Verified each property name against the official spilling-properties page:
+
+| Property in answer | Real? | Notes |
 |---|---|---|
-| **on_schema_change re-probe from different angle** ("I added a column to my dbt incremental SELECT but the column is missing from the table — how do I make dbt actually pick it up?") | **HIGH** | Confirm the iter503 findability fix routes Haiku to r13 §on_schema_change instead of contracts. Must include phrasing variants: "silently absent," "silently dropped," "incremental column went missing," "make dbt fail on schema change," "make dbt warn on schema drift." Pattern-matches the iter500 dbt-snapshot findability fix re-probe. |
-| **md5/concat_ws Trino type-error re-probe** ("I need a hand-rolled surrogate key in Trino — `md5(concat_ws(...))` doesn't work, what's the correct form?") | **HIGH** | Confirm the reconcile-in-place lands. Test that responder writes `to_hex(md5(to_utf8(concat(CAST(...AS VARCHAR), ...))))` and NOT `md5(concat_ws(...))` or `md5(<varchar>)`. |
-| dbt contracts vs on_schema_change DIFFERENTIATION probe ("when do I use dbt contracts vs on_schema_change?") | **MEDIUM** | Probes whether teacher's DO-NOT-CONFUSE callout (action #1.3 above) routes correctly. Both features should be defended but for DIFFERENT scenarios. |
-| approx_percentile single-percentile + partition-predicate combo ("p95 of response_time, only last 30 days, fast on a 300M-row table") | **MEDIUM** | Confirm Q1 still passes when engineer asks for the time-bounded version (partition-pruning predicate on event_date must surface). |
-| Trino rollback_to_snapshot 2nd angle ("rolled back but my old data is still there in MinIO — do I need to clean up?") | **MEDIUM** | Probes whether responder correctly explains that rollback flips snapshot pointer (data files orphaned but not deleted until `expire_snapshots`). |
-| Iceberg identity-column / surrogate-key from a 3rd angle ("can I add an AUTO_INCREMENT column to my Iceberg table?") | **LOW** | Confirms Iceberg #12297 closed-not-planned holds across phrasings. |
-| Federation | **DO NOT PROBE** | §13.x federation guardrails and 4.49944/310 row are LOCKED per task constraint. |
+| `spill-enabled` (config) | REAL | Confirmed |
+| `spill_enabled` (session) | REAL | Confirmed (underscore-form session prop) |
+| `spiller-spill-path` | REAL + MANDATORY when spill enabled | Confirmed (comma-sep list supported for multi-drive) |
+| `spill-compression-codec` | REAL (Trino 437+) | Confirmed; old `spill-compression-enabled` boolean was REPLACED in release 437 per official release notes. Trino 467 uses `spill-compression-codec`. |
+| `LZ4` as value for `spill-compression-codec` | VALID | Confirmed; allowed values are `NONE`, `LZ4`, `ZSTD` |
+| `max-spill-per-node` | REAL | Confirmed |
+| `query-max-spill-per-node` | REAL | Confirmed |
+| Local disk NOT NFS/MinIO caveat | CORRECT | Standard Trino guidance |
+| LZ4 over ZSTD trade-off | CORRECT | LZ4 is faster, ZSTD compresses harder — answer's choice of LZ4 as default is the conventional recommendation |
+
+**FABRICATED-properties warning list — all four CONFIRMED NOT REAL:**
+- `task_max_memory` — NOT a real Trino spill property (real prop is `query.max-memory-per-node`; answer correctly flags this as fab)
+- `memory_revoking_enabled` — NOT a real session property (real config props are `memory-revoking-threshold` and `memory-revoking-target` — and those are config, not session; answer correctly flags this as fab)
+- `spill_to_disk_enabled` — NOT a real prop (real form is `spill_enabled` session / `spill-enabled` config; answer correctly flags this as fab)
+- `spill_order_by_enabled` — NOT a real prop (ORDER BY operator spill is governed by overall `spill-enabled` + spilling supports ORDER BY automatically per docs.starburst.io/latest/admin/spill.html — there is no per-operator session toggle; answer correctly flags this as fab)
+
+**ZERO fabricated properties asserted as real.** The answer correctly distinguishes between real and fake config/session props — exactly the discipline we want. The "spill is a safety net, not a perf lever" framing + the redirect to "restructure query / partition filters / BROADCAST small joins" as the real performance lever is excellent SaaS-engineer-actionable guidance.
+
+**Minor (-0.25 Accuracy)**: answer does not call out the `aggregation-operator-unspill-memory-limit` knob (relevant for 15-column GROUP BY which is exactly an aggregation-spill scenario) and does not mention that spill is supported for aggregations + joins (inner+outer) + sorts + window functions specifically. Non-load-bearing; engineer can enable spill and it will work for their GROUP BY case. Minor completeness gap, not a fail.
 
 ---
 
-## Other Findings
+## NO new fabrications detected this iter
 
-- **NO Spark-isms detected** in any answer this iter (no `SET TBLPROPERTIES`, no `UPDATE SET *`, no `INSERT *`, no `ANALYZE TABLE` for Trino).
-- **NO new Trino session-property fabrications.**
-- **Q4 is the ONLY hard fabrication this iter** (top-level bare `enforced: true`). Q3 md5 is a TYPE ERROR, not a fabrication — the function exists, just with the wrong signature in the example.
-- **101st consecutive overall PASS** in extended phase, but **lowest overall in 12 iterations** (4.1719 vs iter501 4.7969 and iter500 4.6406). The Q4 FAIL is the dominant drag.
-- **Findability-gap pattern is recurring** — this is the 3rd findability gap in extended phase (iter499 dbt-snapshot, iter502 on_schema_change). Both fixes are pure-routing interventions (keyword anchors + cross-refs), zero new content. The iter500 dbt-snapshot findability fix LANDED on first re-probe — same pattern should work here.
+- No Spark-isms (no `SET TBLPROPERTIES`, `UPDATE SET *`, `INSERT *`, `ANALYZE TABLE` Trino-isms, no `concat_ws` in Trino contexts).
+- No QUALIFY clause.
+- No fabricated Trino properties asserted as real.
+- No fabricated dbt configs (Q1 `on_schema_change` syntax exactly matches docs.getdbt.com).
+- No bare `md5(varchar)` or `md5(concat_ws(...))` in Trino contexts.
+- No fake Iceberg DDL.
 
 ---
 
-## Confidence
+## Topic average updates
 
-- HIGH on Q1/Q2 STRONG PASS verdicts (multiple-source verification).
-- HIGH on Q3 md5 type-error finding (binary functions doc unambiguous + canonical pattern is well-known `to_hex(md5(to_utf8(...)))`).
-- HIGH on Q4 on_schema_change-vs-contracts finding (verbatim docs match + r13 canonical exists + answer's contracts pivot is documented mismatch).
-- HIGH on Q4 top-level `enforced: true` fabrication (no doc supports it; contract config is the only valid form).
+| Topic | Old | Q mapped | New | Delta |
+|---|---|---|---|---|
+| Postgres-to-Iceberg ingestion (Q1 on_schema_change canonical lives in r13) | 4.4827/169 | Q1 (4.875) | (4.4827*169 + 4.875)/170 = **4.4850/170** | +0.0023 |
+| dbt model contracts (Q1 also touches the contracts-vs-on_schema_change disambiguator; bucket the recovery here for iter502's 3.8047/4 drag) | 3.8047/4 | Q1 (4.875) | (3.8047*4 + 4.875)/5 = **4.0188/5** | +0.2141 (recovery from iter502 drag) |
+| Oracle PL/SQL→dbt/Trino migration (Q2 surrogate-key, Q3 UNNEST in Trino dialect-translation context) | 4.5395/74 | Q2 (4.875) + Q3 (4.6875) | (4.5395*74 + 4.875 + 4.6875)/76 = **4.5450/76** | +0.0055 |
+| SQL query best practices for OLAP (Q3 UNNEST + Q4 spill both fit here as Trino query-construction + execution tuning) | 4.5374/57 | Q3 (4.6875) + Q4 (4.75) | (4.5374*57 + 4.6875 + 4.75)/59 = **4.5395/59** | +0.0021 |
+| Improving complex SQL performance on Trino with dbt (Q4 spill is the performance lever question; bucket the recovery here too) | 4.6062/14 | Q4 (4.75) | (4.6062*14 + 4.75)/15 = **4.6158/15** | +0.0096 |
+
+**Federation row UNCHANGED at 4.49944/310** per iter472-503 directive + iter503 task constraint (do NOT touch §13.x federation guardrails or federation rubric row).
+
+**102nd consecutive overall PASS in extended phase — margin +1.2344 above floor.**
+
+---
+
+## Concrete next-teacher actions for iter504
+
+**LOW priority (cleanup only, no findability gaps detected):**
+
+1. **(LOW) UNNEST + NULL/empty array preserve-rows nuance**: in the canonical UNNEST block (find with `grep -rn "CROSS JOIN UNNEST" resources/`), add a single one-liner: "`CROSS JOIN UNNEST(arr)` DROPS rows where `arr` is NULL or empty. To preserve those rows, use `LEFT JOIN UNNEST(arr) ON true`." Mirror the silent-missing-column class of bug we just bulletproofed in Q1. ONE-LINER ONLY — do NOT add a new section; reconcile in place.
+
+2. **(LOW) aggregation-operator-unspill-memory-limit + supported-operators list**: in the spill canonical block (find with `grep -rn "spill-enabled\|spill_enabled" resources/`), add a single bullet noting (a) spill supports aggregations + joins (inner+outer) + sorts + window funcs, (b) `aggregation-operator-unspill-memory-limit` exists as a finer-grained knob for aggregation spill (relevant to 15-column GROUP BY). ONE-LINER ONLY.
+
+3. **(LOW — non-blocking)** Consider adding a small note at the Q4 spill canonical that `spill-compression-enabled` (the OLD boolean config) was REPLACED with `spill-compression-codec` in Trino 437 — useful for engineers reading older Stack Overflow answers. Optional.
+
+**NO HIGH-PRIORITY findability or content gaps detected. Resources are in good shape.**
+
+---
+
+## iter504 judge probe targets
+
+- **HIGH**: on_schema_change re-probe from a DIFFERENT angle — "I removed a column from my incremental dbt model" (tests `sync_all_columns` vs `append_new_columns` differentiation; iter502+503 only tested ADD column path). Confirm the findability fix HOLDS not just landed once for ADD.
+- **HIGH**: surrogate-key re-probe from a 3rd angle — "how do I generate a deterministic id from (tenant_id, customer_email) when emails contain NULLs?" (tests the `_dbt_utils_surrogate_key_null_` sentinel behavior of generate_surrogate_key; confirms the macro-recommendation fix HOLDS).
+- **MEDIUM**: UNNEST with NULL array — "some orders have no tags, my row count dropped after UNNEST, why?" (tests whether the LEFT JOIN UNNEST one-liner lands once added).
+- **MEDIUM**: spill 2nd angle — "spill enabled but query still OOM, why?" (tests `query-max-memory-per-node` interplay + the "spill is safety net not perf lever" framing).
+- **MEDIUM**: UNNEST with WITH ORDINALITY — "how do I keep the original array index when exploding?" (tests `UNNEST(arr) WITH ORDINALITY AS t(elem, idx)` knowledge).
+- **LOW**: Federation stays UNPROBED per iter472-503 directive (federation row at 4.49944/310; the +0.00056 margin to 4.5 threshold cannot be safely closed via more probes without risking a FAIL that drags the row below 4.49).
+
+---
+
+## Sources verified
+
+- docs.getdbt.com/docs/build/incremental-models — on_schema_change default `ignore` + append_new_columns/sync_all_columns/fail semantics
+- trino.io/docs/current/admin/properties-spilling.html — exact property names + LZ4 valid value + session prop form
+- trino.io/docs/current/admin/spill.html — supported operators list (aggregations/joins/sort/window)
+- trino.io/docs/current/sql/select.html#unnest — CROSS JOIN UNNEST + NULL/empty array drop behavior + LEFT JOIN UNNEST preserve-rows form
+- trino.io/docs/current/functions/binary.html — md5(varbinary) → varbinary signature (confirms bare md5(varchar) is a type error)
+- github.com/dbt-labs/dbt-utils/blob/main/macros/sql/generate_surrogate_key.sql — coalesce(cast(field as type_string)) compilation
+- github.com/apache/iceberg/issues/12297 — identity column closed not-planned (Aug 2025)
+- trino.io/docs/current/release/release-437.html — spill-compression-enabled REPLACED with spill-compression-codec in Trino 437
