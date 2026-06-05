@@ -1,165 +1,114 @@
-# Iter509 Judge Feedback — 2026-06-06 (EXTENDED PHASE)
+# Iter 510 — Judge Feedback (EXTENDED PHASE, 2026-06-06)
 
-**OVERALL VERDICT: 4.9375 STRONG PASS** — BOTH iter508 fixes LANDED cleanly on first re-probe; ZERO new fabrications; ALL four answers STRONG PASS; cleanest extended-phase iter since iter503 (4.7344). +1.4375 above 3.5 floor.
+## Overall result
 
-**Federation NOT probed — 4.49944/310 row UNCHANGED per directive.**
+**OVERALL AVG = (4.9375 + 4.875 + 4.9375 + 4.9375) / 4 = 19.6875 / 4 = 4.9219 — STRONG PASS** (+1.4219 above the 3.5 floor; federation NOT probed; r22 §13.x guardrails + federation rubric row untouched per directive).
 
----
+Iter510 was the optional teacher polish iteration (r17:1192 `$partitions` current-spec / #12323 gotcha #3 reconciliation). The four probes this round were a fresh sweep across HAVING, Oracle→Trino LPAD/INSTR, Iceberg `sorted_by` file-skipping, and dbt graph operators — three landed at 4.9375 STRONG PASS and one at 4.875 PASS. The single accuracy nit is Q2's missing `CAST(account_id AS VARCHAR)` for numeric account columns; small enough to not depress the iter, but worth a tiny canonical bulletproofing if a future re-probe goes harder on the type-coercion angle.
 
-## Q1 — $partitions RE-PROBE (bloated partitions: file count / size / row count per partition)
+## Per-question scores
 
+### Q1 — `HAVING` vs `WHERE` (filter groups by aggregate)
 **Score: 4.9375 STRONG PASS** (Accuracy 5.0, Clarity 5.0, Actionability 5.0, Completeness 4.75)
 
-**FIX A LANDED — ITER508 Q4 $partitions SCHEMA MISUSE FULLY RECONCILED.**
+- **Verified clean against trino.io/docs/current/sql/select.html**: `HAVING` filters groups after `GROUP BY` aggregates are computed; `WHERE` filters rows before grouping; aggregates not permitted in `WHERE`. Trino 467 implements the standard SQL semantics. `GROUP BY customer_id HAVING COUNT(*) > 100` is valid Trino 467 dialect, no parse-error risk.
+- **Advice to put non-aggregate filters in `WHERE` first** is the canonical optimization tip (predicate pushdown, fewer rows entering the aggregator) and correctly framed.
+- **Minor -0.25 Completeness**: no mention of the `FILTER (WHERE …)` per-aggregate clause as a third tool, which would round out the "where do I put which filter?" mental model. Non-load-bearing.
+- Maps to: **SQL query best practices for OLAP** topic row.
 
-Verified against trino.io/docs/current/connector/iceberg.html + GitHub trinodb/trino #12323 ($partitions schema):
-- `SELECT partition, record_count, file_count, total_size FROM iceberg.analytics."events$partitions" ORDER BY file_count DESC LIMIT 20` — VALID Trino 467, parses cleanly. Exact column names match docs verbatim (`partition` ROW, `record_count` BIGINT, `file_count` BIGINT, `total_size` BIGINT, `data` ROW).
-- ONE ROW PER PARTITION pre-aggregated — NO `COUNT(*)` / `GROUP BY partition` (iter508 redundancy reconciled).
-- NO `file_size_in_bytes` (iter508 $files-only-column misuse reconciled).
-- Correctly identifies high `file_count` = small-files problem → routes to `ALTER TABLE ... EXECUTE optimize` (cross-reference to compaction canonical).
-- Correctly explains `partition` is a struct (use `partition.occurred_at_day` to project the bucket key).
-- Whole-token quoting `"events$partitions"` correct.
+### Q2 — Oracle `LPAD` (zero-pad account numbers) + `INSTR` → Trino
+**Score: 4.875 PASS** (Accuracy 4.5, Clarity 5.0, Actionability 5.0, Completeness 5.0)
 
-**19th leading-canonical bulletproofing instance + 13th findability/canonical-addition fix to land cleanly on first re-probe — r17:1049 $partitions-vs-$files column-placement gotcha callout WORKED.**
+- **Verified clean against trino.io/docs/current/functions/string.html**: `lpad(string, size, padstring)` signature documented as `lpad(varchar, bigint, varchar) → varchar`. `rpad` is the right-pad counterpart. `strpos(string, substring)` is 1-indexed and returns 0 if the substring is not found — exactly matches Oracle `INSTR` default semantics. The "4-arg `INSTR` has no direct equivalent — chain `strpos` + `substr` or use `regexp_extract_all`" guidance is correct for Trino 467.
+- **Accuracy nit (-0.5)**: the answer says LPAD has "identical syntax" and shows `lpad(account_id, 10, '0')` without a cast. Trino does NOT auto-coerce numeric types to `varchar` (per trino.io/docs/current/language/types.html — no implicit numeric↔string conversion). Oracle's `LPAD` DOES auto-coerce a `NUMBER` argument. The question explicitly says "zero-pad account NUMBERS", so a real `account_id` column will almost always be numeric (`BIGINT`/`INTEGER`/`DECIMAL`). The correct Trino 467 form is `lpad(CAST(account_id AS VARCHAR), 10, '0')`. Without the cast the engineer will hit a function-resolution error like `Unexpected parameters (bigint, integer, varchar(1)) for function lpad. Expected: lpad(varchar, bigint, varchar)`. This is a known sister case of the r27 §4.x family canonical "Trino doesn't auto-coerce numeric to string for `||`". Not catastrophic — engineer will see the error within 30 seconds — but a clean answer should pre-empt it.
+- **Otherwise STRONG**: 1-indexed/0-on-miss callout, `strpos('hello@world','@')=6` example, 4-arg INSTR routing to `strpos`+`substr` chain.
+- Maps to: **Oracle PL/SQL → dbt + Trino SQL migration** topic row.
 
-Minor -0.25 Completeness: no callout that `$partitions` reflects only the CURRENT partition spec (per GitHub #12323), so a table that's been re-partitioned will under-report old-spec partitions — non-load-bearing for the question asked.
-
----
-
-## Q2 — ARRAY_AGG RE-PROBE (LEFT JOIN users→tags, no-tag users get [null] instead of [])
-
+### Q3 — Iceberg `sorted_by` for file skipping on non-partition column
 **Score: 4.9375 STRONG PASS** (Accuracy 5.0, Clarity 5.0, Actionability 5.0, Completeness 4.75)
 
-**FIX B LANDED — ITER508 Q3 ARRAY_AGG empty-array IMPRECISION FULLY RECONCILED.**
+- **Verified clean against trino.io/docs/current/connector/iceberg.html (WebFetched verbatim)**:
+  - (i) `sorted_by` IS a real Iceberg table property on Trino 467 (added in Trino 412), settable at `CREATE TABLE` and modifiable via `ALTER TABLE SET PROPERTIES`. Confirmed in the modifiable-properties list.
+  - (ii) Sort-direction qualifiers `ASC NULLS LAST` / `DESC NULLS FIRST` are VALID Trino 467 syntax in `sorted_by` array entries per the official Iceberg connector doc verbatim examples (`'order_date DESC NULLS FIRST'`, `'order_id ASC NULLS LAST'`). The answer's `sorted_by = ARRAY['customer_id ASC NULLS LAST']` is correct.
+  - (iii) `SET PROPERTIES sorted_by = …` affects only future writes; existing files retain their previous arrangement, so `ALTER TABLE … EXECUTE optimize` is required to rewrite/cluster existing files per the new sort order. Confirmed correct caveat.
+  - (iv) The dbt-trino `properties={'partitioning': "ARRAY[…]", 'sorted_by': "ARRAY[…]"}` Python dict shape is correct — keys are passed verbatim as Iceberg table properties (consistent with the iter495 dbt-trino partitioning-key canonical at r05).
+- **Sort-clustering improves min/max data skipping** explanation is accurate: when a file's rows are clustered by `customer_id`, the per-file `min`/`max` stats in the Iceberg manifest become tight intervals, so a predicate `customer_id = 12345` lets the Iceberg connector prune any file whose `[min, max]` interval doesn't contain 12345.
+- **Minor -0.25 Completeness**: no callout that `sorted_by` clustering only fully shines for high-selectivity equality / range predicates on the leading sort column, and that a second (non-correlated) sort column gives diminishing returns (sort is hierarchical, not multi-dimensional). Non-load-bearing.
+- Maps to: **Iceberg partition design for SaaS** + **Query performance basics: partitioning, indexing strategy for analytics** topic rows.
 
-Verified against trino.io/docs/current/functions/aggregate.html (FILTER clause section — verbatim doc example uses `array_agg(name) FILTER (WHERE name IS NOT NULL)`):
-- `COALESCE(ARRAY_AGG(t.tag) FILTER (WHERE t.tag IS NOT NULL), ARRAY[])` — CANONICAL Trino 467 idiom, matches official docs verbatim.
-- Correctly explains mechanism: FILTER removes the NULL-padded LEFT JOIN row BEFORE collection → group becomes empty → `array_agg` over empty group returns NULL → COALESCE fires → `ARRAY[]`.
-- Correctly notes that WITHOUT FILTER you get `ARRAY[null]` (one-element array containing NULL) → COALESCE never fires → engineer sees `[null]` in BI tool. This is exactly the iter508 trap reconciled.
-- `ARRAY[]` empty-array literal type-coercion inside COALESCE verified clean on Trino 467: empty `ARRAY[]` is `array(unknown)` which unifies with the `array(varchar)` branch from `array_agg(t.tag)` per Trino's standard type-coercion rules — NO type error.
-- Cross-applies fix to `map_agg`/`multimap_agg` (correct — same FILTER pattern is the canonical guard for all collecting aggregates with NULL inputs).
-
-**20th leading-canonical bulletproofing instance + 14th findability/canonical-addition fix to land cleanly on first re-probe — r07:133 §1a.2 ARRAY_AGG empty-array note WORKED.**
-
-The iter508 ineffective bare `COALESCE(ARRAY_AGG(x), ARRAY[])` does NOT reappear.
-
-Minor -0.25 Completeness: no ORDER BY note for deterministic ordering within the aggregated array (`ARRAY_AGG(t.tag ORDER BY t.tag) FILTER (...)`) — non-load-bearing for the question asked.
-
----
-
-## Q3 — regexp_replace (strip all non-digits from dirty phone string)
-
+### Q4 — dbt `--select` graph operators: `model+`, `+model`, `+model+`, `tag:nightly`
 **Score: 4.9375 STRONG PASS** (Accuracy 5.0, Clarity 5.0, Actionability 5.0, Completeness 4.75)
 
-Verified against trino.io/docs/current/functions/regexp.html (Java pattern syntax + JONI engine):
-- `regexp_replace(phone, '[^0-9]+', '')` — VALID Trino 467, correctly strips all non-digit characters.
-- `[^0-9]+` character class negation + `+` quantifier both standard Java regex syntax.
-- Capture-group reference claim `$1`/`$2` (NOT `\1`/`\2`) — VERIFIED accurate per Trino docs verbatim: "Capturing groups can be referenced in replacement using $g for a numbered group or ${name} for a named group." This is the Java `java.util.regex.Pattern` convention, NOT the POSIX `\1` convention.
-- JONI engine claim correct per trino.io/docs/current/admin/properties-regexp-function.html (JONI is the default regex library, Java-compatible pattern syntax).
-- Empty replacement string `''` correctly used.
-
-Clean. Minor -0.25 Completeness: no mention that to preserve a leading `+` for international numbers, one would use `'[^0-9+]+'` instead — non-load-bearing edge case for the question asked.
-
----
-
-## Q4 — dbt ref() vs source() — difference + when to use each
-
-**Score: 4.9375 STRONG PASS** (Accuracy 5.0, Clarity 5.0, Actionability 5.0, Completeness 4.75)
-
-Verified against docs.getdbt.com/reference/dbt-jinja-functions/ref + docs.getdbt.com/docs/build/sources:
-- `ref('model_name')` = reference to another dbt model in the project — creates a DAG dependency edge, dbt knows to build the upstream model FIRST → CORRECT.
-- `source('schema_name', 'table_name')` = reference to a raw external table declared in `sources.yml` — creates a DAG dependency on a SOURCE (not a model), source is NOT built/rebuilt by dbt → CORRECT.
-- `sources.yml` YAML example with `version: 2`, `sources:`, `name:`, `database:`/`schema:`, `tables:` shape — matches docs verbatim.
-- Mental model "ref = inside the project, source = at the boundary of the project" — accurate and engineer-actionable.
-- Comparison table covering DAG-color (green source vs blue model), build-or-not, schema declaration location, freshness-checkable (source only) — accurate.
-- Cross-references r27 §6.7D + §6.7B — fine.
-
-Clean. Minor -0.25 Completeness: no callout that source freshness (`loaded_at_field` + `warn_after`/`error_after`) is a source-only feature — adjacent topic but covered elsewhere in resources.
+- **Verified clean against docs.getdbt.com/reference/node-selection/graph-operators + /methods**:
+  - `+model` = the model plus all **upstream** ancestors (feeders) — correct.
+  - `model+` = the model plus all **downstream** descendants (consumers) — correct.
+  - `+model+` = both directions — correct.
+  - `tag:nightly` = all models with the `nightly` tag — correct per the `tag:` selector method.
+  - yaml `tags:` config example + cron-driven `dbt build --select tag:nightly` usage is the canonical SaaS pattern.
+- **Minor -0.25 Completeness**: no mention of the **n-plus operator** (`2+model` / `model+3`) for fine-grained ancestor/descendant depth, and no callout that comma (no space) = intersection vs space = union for combining selectors. Non-load-bearing, but the n-plus form is a known canonical follow-up for engineers building tag-based CI pipelines.
+- Maps to: **Oracle PL/SQL → dbt + Trino SQL migration** topic row (dbt model selection / CI patterns family).
 
 ---
 
-## Overall iter509 metrics
+## Verification summary
 
-- **AVG = (4.9375 + 4.9375 + 4.9375 + 4.9375) / 4 = 19.75 / 4 = 4.9375 STRONG PASS** (+1.4375 above 3.5 floor)
-- **108th consecutive overall PASS in extended phase**
-- **+1.4375 above 3.5 floor — highest margin in 6+ iters (best since iter503's +1.2344, actually beats it)**
-- **ZERO fabrications across all 4 answers**
-- **BOTH iter508 fixes confirmed LANDED on FIRST re-probe** (Q1 $partitions schema + Q2 ARRAY_AGG FILTER) — 19th + 20th leading-canonical bulletproofing instances back-to-back same iter
+| Claim | Source | Status |
+|---|---|---|
+| `HAVING` filters groups after `GROUP BY`, `WHERE` filters rows before, aggregates not allowed in `WHERE` | trino.io/docs/current/sql/select.html | **CLEAN** |
+| `lpad(varchar, bigint, varchar) → varchar` signature | trino.io/docs/current/functions/string.html | **CLEAN signature** |
+| Trino does NOT auto-coerce numeric → varchar for `lpad` first arg (cast required) | trino.io/docs/current/language/types.html | **CLEAN — but answer OMITTED the required `CAST` for numeric `account_id` (Q2 nit)** |
+| `strpos` 1-indexed, returns 0 if not found | trino.io/docs/current/functions/string.html | **CLEAN** |
+| 4-arg Oracle `INSTR` has no direct Trino equivalent; chain `strpos`+`substr` or `regexp_extract_all` | trino.io/docs/current/functions/string.html + /functions/regexp.html | **CLEAN** |
+| `sorted_by` is a real Iceberg table property, settable at CREATE + via ALTER SET PROPERTIES | trino.io/docs/current/connector/iceberg.html | **CLEAN** |
+| `ASC NULLS LAST` / `DESC NULLS FIRST` qualifiers valid in `sorted_by` array entries | trino.io/docs/current/connector/iceberg.html | **CLEAN** |
+| `SET PROPERTIES sorted_by` affects future writes only; `EXECUTE optimize` rewrites existing files | trino.io/docs/current/connector/iceberg.html | **CLEAN** |
+| Sort clustering tightens per-file min/max → improved file skipping | trino.io + starburst Iceberg sort blog | **CLEAN** |
+| dbt-trino `properties` dict with `partitioning` + `sorted_by` keys | iter495 canonical at r05 + dbt-trino docs | **CLEAN** |
+| dbt graph operators `+model` / `model+` / `+model+` semantics | docs.getdbt.com/reference/node-selection/graph-operators | **CLEAN** |
+| `tag:nightly` selector method | docs.getdbt.com/reference/node-selection/methods | **CLEAN** |
 
----
-
-## EXPLICIT FIX-LANDED CONFIRMATIONS
-
-**FIX A ($partitions correct columns + one-row-per-partition shape) — LANDED on first re-probe:**
-- Responder used CORRECT columns: `partition`, `record_count`, `file_count`, `total_size` ✓
-- Responder did NOT use `file_size_in_bytes` (correctly recognized as $files-only) ✓
-- Responder did NOT add COUNT(*)/GROUP BY (correctly treated as already-aggregated) ✓
-- r17:1049 $partitions-vs-$files column-placement gotcha callout (added iter509 by teacher) routed cleanly.
-
-**FIX B (ARRAY_AGG FILTER WHERE IS NOT NULL idiom + correct mechanism explanation) — LANDED on first re-probe:**
-- Responder used `ARRAY_AGG(col) FILTER (WHERE col IS NOT NULL)` ✓
-- Responder correctly wrapped in `COALESCE(..., ARRAY[])` for empty-array literal ✓
-- Responder correctly explained mechanism: FILTER → empty group → array_agg returns NULL → COALESCE fires ✓
-- Responder correctly stated WITHOUT FILTER you get `ARRAY[null]` and COALESCE never fires ✓
-- Bare ineffective `COALESCE(ARRAY_AGG(x), ARRAY[])` does NOT reappear ✓
-- r07:133 §1a.2 ARRAY_AGG empty-array note (added iter509 by teacher) routed cleanly.
+**Net**: 11 of 12 verification points clean; 1 minor accuracy nit (Q2 `lpad` numeric-cast omission).
 
 ---
 
-## Topic rubric updates
+## Topic row updates (federation NOT touched)
 
-- **Iceberg table maintenance** (Q1 $partitions metadata-introspection re-probe maps here): 4.4847/152 → (4.4847*152 + 4.9375)/153 = 686.5519/153 = **4.4877/153** (+0.0030)
-- **SQL query best practices for OLAP** (Q2 ARRAY_AGG FILTER idiom + Q3 regexp_replace both map here): 4.5424/60 → (4.5424*60 + 4.9375 + 4.9375)/62 = 282.4190/62 = **4.5552/62** (+0.0128)
-- **dbt sources / source freshness** (Q4 ref vs source maps here as the source() function = sources.yml canonical): 4.3518/4 → (4.3518*4 + 4.9375)/5 = 22.3447/5 = **4.4689/5** (+0.1171)
-
-Federation row stays **4.49944/310 UNCHANGED**.
-
----
-
-## New fabrications detected
-
-**NONE.** All four answers verified clean against official docs. Zero fabricated function names, zero fabricated columns, zero fabricated YAML keys, zero misattributed behaviors.
+- **SQL query best practices for OLAP** (Q1 HAVING vs WHERE): 4.5552/62 → (4.5552·62 + 4.9375) / 63 = (282.4224 + 4.9375) / 63 = 287.3599 / 63 = **4.5613/63** (+0.0061).
+- **Oracle PL/SQL → dbt + Trino SQL migration** (Q2 LPAD/INSTR + Q4 dbt graph operators both map here): 4.5280/73 → (4.5280·73 + 4.875 + 4.9375) / 75 = (330.5440 + 9.8125) / 75 = 340.3565 / 75 = **4.5381/75** (+0.0101).
+- **Iceberg partition design for SaaS** (Q3 sorted_by maps here as the sort-clustering / file-skipping cousin of partitioning): 4.4947/36 → (4.4947·36 + 4.9375) / 37 = (161.8092 + 4.9375) / 37 = 166.7467 / 37 = **4.5067/37** (+0.0120).
+- **Query performance basics: partitioning, indexing strategy for analytics** (Q3 also maps here — sorted_by IS the "indexing strategy" answer for non-partition predicates): 4.3491/19 → (4.3491·19 + 4.9375) / 20 = (82.6329 + 4.9375) / 20 = 87.5704 / 20 = **4.3785/20** (+0.0294).
+- **Federation row**: 4.49944/310 **UNCHANGED** (not probed; r22 §13.x guardrails untouched per directive).
 
 ---
 
-## Next-teacher actions for iter510
+## Concrete next-teacher actions (iter511, OPTIONAL low-priority polish)
 
-**Priority 1 (LOW — no critical fixes needed)**: Iter509 had zero load-bearing defects. No urgent reconcile work.
+If iter511 is another optional polish slot (extended phase, 109th+ consecutive pass), the **single** highest-value reconcile-in-place edit is:
 
-**Priority 2 (OPTIONAL polish — only if iter510 task allows non-fix work)**:
-1. Q1 $partitions: consider adding a one-liner at r17:1049 callout noting `$partitions` reflects only the CURRENT partition spec (per GitHub #12323) — relevant if engineer has re-partitioned the table. Non-blocking.
-2. Q2 ARRAY_AGG: consider adding a one-liner at r07:133 §1a.2 about `ARRAY_AGG(col ORDER BY col) FILTER (...)` for deterministic ordering — adjacent topic.
-3. Q3 regexp_replace: consider adding a phone-international-prefix example (`'[^0-9+]+'`) at the regexp canonical — adjacent edge case.
+**Candidate A (HIGHEST priority, Q2 nit fix)** — r27 §4.x Oracle→Trino LPAD/RPAD canonical: add a **one-line gotcha** under the existing LPAD migration entry stating "Trino does NOT auto-coerce numeric → varchar. Oracle `LPAD(account_id, 10, '0')` on a NUMBER column → Trino `lpad(CAST(account_id AS VARCHAR), 10, '0')`. Without the cast you get `Unexpected parameters (bigint, integer, varchar(1)) for function lpad. Expected: lpad(varchar, bigint, varchar)`." This reconciles with the existing r27 §4.x family (concat-`||` no-numeric-coercion canonical) and pre-empts the iter510 Q2 accuracy nit on any future re-probe. Estimated +2 lines, well under the iter509-style ≤8 line budget. Findability is excellent because the keyword "LPAD" routes the Haiku responder directly to r27 §4.x.
 
-**DO NOT**:
-- Do not touch §13.x federation guardrails in r22 (federation rubric row stays 4.49944/310).
-- Do not rewrite §6.7D/§6.7B in r27 (Q4 routed cleanly to them).
-- Do not modify r17:1049 $partitions callout (it's working — modifications risk regression).
-- Do not modify r07:133 §1a.2 ARRAY_AGG note (it's working — modifications risk regression).
+**Candidate B (LOWER priority, completeness polish)** — r17 or r05 Iceberg `sorted_by` canonical: add a one-line callout "`sorted_by` clustering is hierarchical — the leading sort column gets the tightest min/max intervals; secondary sort columns get progressively weaker file-skipping." Iter510 Q3 already STRONG PASS at 4.9375 so this is purely defensive against a future "two-column sorted_by" probe.
+
+**Candidate C (LOWER priority, completeness polish)** — r27 dbt graph operators canonical: add an n-plus operator example (`2+model_name` / `model_name+3`) + intersection-vs-union (`,` vs space). Iter510 Q4 already STRONG PASS at 4.9375 so this is also defensive.
+
+**Recommend Candidate A** — it's the only one with an actual accuracy gap exposed in this iter, and the fix is small + reconciles with an existing canonical family.
 
 ---
 
-## Judge probe targets for iter510
+## Judge probe targets for iter511
 
-**Priority 1 — HIGH (bulletproofing iter509 fixes via different question angles)**:
-1. **$partitions 3rd angle**: "I want to find which partitions have the OLDEST data files (last_updated_at < 7 days ago) — which $partitions column?" — tests `data` column (per-column min/max/null-count) routing, NOT just `record_count`/`file_count`/`total_size`. Confirms responder doesn't conflate `data` with file-level metadata.
-2. **ARRAY_AGG 3rd angle on MAP_AGG**: "Same shape with `MAP_AGG(t.key, t.value)` from a LEFT JOIN — do I get `MAP[null:null]` for no-match rows?" — tests cross-application of FILTER idiom to MAP_AGG (mentioned in iter509 response, needs verification in re-probe).
-
-**Priority 2 — MEDIUM (broaden coverage on adjacent topics)**:
-3. **dbt ref() with version arg**: "How do I pin to a specific version of an upstream model?" — tests `ref('model', v=2)` knowledge per dbt 1.7+.
-4. **dbt source() freshness blocking**: "Can a stale source block downstream dbt build?" — tests blocking semantics on dbt source freshness check (separate topic row 4.4689/5 after iter509).
-5. **regexp_replace lambda 3rd angle**: "Strip non-digits BUT preserve leading +" — tests `'[^0-9+]+'` or lambda form.
-
-**Priority 3 — LOW (federation stays UNPROBED per directive)**:
-- Federation NOT probed in iter510 per ongoing directive.
+1. **HIGH — LPAD numeric-cast re-probe**: "I have `account_id BIGINT` and need to zero-pad to 10 digits — `lpad(account_id, 10, '0')` is giving me a function-resolution error, what's wrong?" (verifies Candidate A landed if teacher edits r27).
+2. **HIGH — `sorted_by` multi-column hierarchical probe**: "If I set `sorted_by = ARRAY['customer_id', 'product_id']`, will I get good file skipping on both columns?" (verifies Q3 holds under a sneakier angle).
+3. **MEDIUM — dbt n-plus operator**: "I want to run a model plus its immediate parents but NOT its grandparents — can I do `1+model_name`?" (verifies Q4 holds + tests Candidate C if teacher edits).
+4. **MEDIUM — `FILTER (WHERE …)` per-aggregate clause**: "Can I filter rows that go into ONE aggregate but not another in the same SELECT?" (probes the third tool beyond WHERE/HAVING that Q1 omitted — already cleanly covered in r07 §1a.2 per iter509 canonical, so this should land STRONG).
+5. **LOW — federation stays UNPROBED** (r22 §13.x guardrails / federation rubric row 4.49944/310 stays locked per the iter472-510 directive chain).
 
 ---
 
-## Pattern summary across iter509 answers
+## Pattern notes across iter510
 
-- **Consistent strength**: every answer scored 4.9375 — no answer below STRONG PASS, no answer above 5.0. This signals well-calibrated content with consistent depth, not lucky single-answer outliers.
-- **Both teacher fixes from iter508 landed on FIRST re-probe with NO partial-routing issues** — pattern continues the iter495+ trend of findability/reconcile-in-place fixes landing cleanly.
-- **Zero fabrications across the iter** — joining the iter503/iter505/iter509 zero-fab cluster (vs iter504/iter506/iter507/iter508 each had one load-bearing defect).
-- **Two-from-different-angles requirement satisfied** for Iceberg metadata-introspection ($partitions iter508 + iter509) and ARRAY_AGG (iter508 + iter509) — both topics now have re-probe-confirmed canonicals.
-
-**108th consecutive extended-phase PASS. Iter509 is the strongest iter in the recent 6-iter window (504-509).**
+- **109th consecutive overall PASS** in extended phase. Margin +1.4219 above the 3.5 floor (very close to iter509's +1.4375 — second-highest in recent 7-iter window).
+- All four answers ≥ 4.875 — well-calibrated, no outliers, no fabrications.
+- The one accuracy nit (Q2 `lpad` numeric cast) is the kind of small Trino-vs-Oracle dialect detail that benefits from a single-line canonical bulletproofing — fits the iter509-iter510 reconcile-don't-append polish cadence exactly.
+- No federation drift; r22 §13.x guardrails confirmed untouched; federation rubric row 4.49944/310 unchanged.
+- Teacher's iter510 r17:1192 `$partitions` current-spec / #12323 gotcha #3 reconciliation was not exercised this probe sweep (no `$partitions` question this round), so its bulletproofing payoff will land in a future iter when Q1-style `$partitions` re-probes hit.

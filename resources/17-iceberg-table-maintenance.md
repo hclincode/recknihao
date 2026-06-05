@@ -1191,6 +1191,8 @@ ORDER BY key;
 
 2. **Stats reflect committed snapshots only.** If a Spark `INSERT INTO` is currently writing and hasn't committed yet, `$partitions` / `$files` show pre-write counts. After `expire_snapshots` runs, `$snapshots` reflects only retained snapshots — `$history` is the right table for "what was current at time T" because it survives expiry. If counts look stale, check `$snapshots` to confirm the latest snapshot committed when you expected.
 
+3. **`$partitions` reflects the table's CURRENT partition spec only — after partition evolution, files written under an OLD spec may show NULL for newly-added partition fields and do NOT regroup under the new transforms.** Per [trinodb/trino #12323](https://github.com/trinodb/trino/issues/12323): if you evolved the spec via `ALTER TABLE ... SET PROPERTIES partitioning = ARRAY[...]` (see § "Evolving the partition spec on Trino 467" above), pre-evolution files keep their `spec_id` and appear in `$partitions` with NULLs in the new fields — per-partition aggregates are NOT a true full-history breakdown until you rewrite old-spec files via Spark `CALL iceberg.system.rewrite_data_files(table => '...', options => map('rewrite-all', 'true'))`. For an accurate full-history count across mixed specs, fall back to `$files` (one row per file regardless of spec) with an explicit `GROUP BY spec_id` or query the data directly with `SELECT <new_partition_col>, COUNT(*) GROUP BY ...`.
+
 **Quick reference — which metadata table answers which question:**
 
 | Question | Use |
