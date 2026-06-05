@@ -414,6 +414,12 @@ There are **three independent pruning layers** in an Iceberg + Parquet read. Mos
 >
 > **CORRECT:** "Iceberg stores `lower_bounds` and `upper_bounds` in the manifest entry for **every** column, not just partition columns. File-level pruning works for any column — but only if the data inside each file is physically clustered or sorted so the column's min/max range within that file is **narrow enough to prove the filter value is absent**."
 
+> ### POINTER — "How do I CREATE INDEX on my Iceberg table?" / "Can I add an index for fast filtering?"
+>
+> **The answer is: Trino + Iceberg has NO user-creatable secondary indexes — no `CREATE INDEX`, no `ADD INDEX`, no implicit indexing from `PRIMARY KEY`.** Filter speed comes from the three pruning layers above (partition pruning + file-level min/max + row-group min/max), PLUS Puffin NDV stats for join planning, PLUS optional Parquet bloom filters for high-cardinality equality lookups.
+>
+> See the LEADING CANONICAL in **[resource 03 § Iceberg mitigations when you DO need point lookups → "Trino + Iceberg has NO user-creatable secondary indexes"](03-columnar-storage.md#iceberg-mitigations-when-you-do-need-point-lookups-on-a-fact-table)** for the full DO-NOT-WRITE matrix (including: `CREATE INDEX` syntax does not exist; `ADD INDEX` does not exist; `PRIMARY KEY` is metadata-only; you cannot index a view; you cannot index a materialized view) and the four-lever filter-speed table (partition transforms → `sorted_by` + `EXECUTE optimize` → `ANALYZE` → Parquet bloom filters).
+
 Verify it yourself — the Iceberg table spec defines manifest entries with `lower_bounds: map<int, binary>` and `upper_bounds: map<int, binary>` keyed by **field ID for every column** (not just partition fields). Spark/Trino populate both maps on every write.
 
 > **LEADING CANONICAL — how to query `$files.lower_bounds` / `upper_bounds` on Trino 467 WITHOUT the column-id subscript landmine.** All claims below verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (Iceberg connector → `$files` metadata table column list, WebFetched 2026-06-05) and [trinodb/trino PR #13026](https://github.com/trinodb/trino/pull/13026) (the "name-keyed map" proposal that was **NOT merged** — auto-closed stale on 2024-09-26). Keywords this block answers: "lower_bounds", "upper_bounds", "$files map key", "lower_bounds by column name", "subscript", "file pruning verify SQL", "readable_metrics".

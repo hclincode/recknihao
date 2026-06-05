@@ -665,14 +665,97 @@ JOIN {{ ref('int_customer_totals') }} AS small
 
 Now the expensive aggregation runs ONCE during `dbt run` (when `int_customer_totals` builds), and the downstream join reads the already-materialized table.
 
-### 3.3 When to use `ephemeral` vs `table` for the intermediate
+### 3.3 When to use `ephemeral` vs `table` vs `view` for the intermediate
 
-| Intermediate referenced... | Choose |
-|---|---|
-| **1 time only**, lightweight | `ephemeral` (it gets inlined as a CTE — same as writing the CTE directly, but reusable) |
-| **2-3 times** within a single downstream model | `table` (materialize once, read N times — the CTE-inlining problem above) |
-| **Reused across multiple downstream models** | `table` or `incremental` (the cost is amortized across all consumers) |
-| **Across multiple dbt runs and the cost is bounded** | `incremental` with `merge` strategy |
+> ### LEADING CANONICAL — the dbt materialization COST MODEL (storage + runtime + DB object)
+>
+> **Question shape this answers**: "does a dbt `view` take up storage / cost storage / get persisted as a table", "what is the storage cost of `view` vs `table` vs `ephemeral`", "how do I speed up a dbt view in Trino — can I add an index?", "what's the difference between `view` and `ephemeral` in dbt", "what database object does each dbt materialization create", "dbt view vs ephemeral at scale".
+>
+> **The four dbt-trino materializations — what each ACTUALLY creates in the warehouse and what it costs.** Verified against [docs.getdbt.com/docs/build/materializations](https://docs.getdbt.com/docs/build/materializations). The single most common beginner misconception is that a dbt `view` "creates a persistent table that takes up storage." It does NOT — read this table once and never write that sentence again.
+>
+> | Materialization | DB object created | Row data stored on disk? | Storage cost | Re-runs on each query? | DDL dbt emits |
+> |---|---|---|---|---|---|
+> | **`view`** | A **VIEW** (a stored SELECT definition — just the query text) | **NO row data — only the SQL** | **Negligible** (~bytes — the text of the SELECT) | **YES — the SELECT is re-executed every time the view is queried** | `CREATE OR REPLACE VIEW ... AS <SELECT>` |
+> | **`table`** | A **TABLE** (materialized Parquet files in MinIO + Iceberg manifests) | **YES — every row** | **Full** (sum of all Parquet files) | No — reads hit the materialized files | `CREATE OR REPLACE TABLE ... AS SELECT ...` (full CTAS each `dbt run`) |
+> | **`incremental`** | A **TABLE**, delta-built (existing rows kept; new rows appended/merged) | **YES — every row** | **Full** (sum of all Parquet files, like `table`) | No — reads hit the materialized files | First run: CTAS. Later runs: `INSERT` / `MERGE` per `incremental_strategy`. |
+> | **`ephemeral`** | **NONE — no warehouse object at all** | N/A | **Zero** (nothing exists in the warehouse) | The SELECT is **inlined as a CTE** into every downstream model that `ref()`s it — at dbt COMPILE time, before any SQL is sent to Trino | No DDL emitted for the ephemeral itself; its SELECT becomes a `WITH <name> AS (...)` block in every downstream's compiled SQL |
+>
+> **The cost model in plain words.**
+> - **`view`** trades **storage** (none) for **CPU at query time** (full re-execution). It is the right choice for cheap pass-through transforms over already-well-partitioned sources, and for `stg_*` models where the value of always-fresh-on-read outweighs the per-read compute. **It is NOT a "small table" — there is no table.**
+> - **`table`** / **`incremental`** trade **storage** and **build-time compute** (once per `dbt run`) for **read latency** (already materialized). Use when downstream consumers hit the result repeatedly and the SELECT is non-trivial.
+> - **`ephemeral`** has **zero warehouse footprint** but does NOT save compute — it's textually inlined into every downstream model's compiled SQL. The trade-off is keeping the warehouse clean vs. inlining the same SQL N times.
+>
+> **DO-NOT-WRITE — banned forms when describing dbt materializations on Trino:**
+>
+> | WRONG (do not write) | WHY it's wrong | RIGHT (write this instead) |
+> |---|---|---|
+> | "A `view` creates a persistent table." | A view is **not** a table. `CREATE VIEW` stores a SELECT definition; `CREATE TABLE` materializes rows. The two `CREATE` forms produce different object types in `information_schema.tables` (`VIEW` vs `BASE TABLE`). | "A `view` creates a database **VIEW** — a stored SELECT definition." |
+> | "A `view` takes up storage." / "A `view` costs storage." | A view stores only the SELECT text. Row data is **not** persisted. Storage is negligible (~kilobytes of query text in catalog metadata). | "A `view` stores **no row data** — only the SELECT text. Storage cost is negligible." |
+> | "A `view` is queryable stored data." | The view's RESULT is queryable, but it is NOT stored data — the SELECT re-executes against the underlying tables on every query. | "A `view` re-executes its SELECT against the underlying tables on every query. There is no stored row data to query." |
+> | "A `view` can be indexed (in Trino)." / "Add an index on the view column to make it faster." | Trino has **NO user-creatable secondary indexes** on any object — view OR table. No `CREATE INDEX` statement exists for the Iceberg connector. See **[resource 03 § Iceberg mitigations when you DO need point lookups](03-columnar-storage.md#iceberg-mitigations-when-you-do-need-point-lookups-on-a-fact-table)** for the LEADING CANONICAL on what to use instead (partition transforms, `sorted_by` + `EXECUTE optimize`, `ANALYZE` → Puffin NDV, Parquet bloom filters). | "To speed up filters on a Trino + Iceberg view, you cannot add an index. Speed comes from (a) the underlying table's partition layout, (b) `sorted_by` clustering + `EXECUTE optimize`, (c) Puffin stats via `ANALYZE` for join planning, (d) Parquet bloom filters on high-cardinality columns." |
+> | "Materialize the view as a table to add an index to it." | Materializing a `view` as a `table` is a valid performance lever for repeat reads — but the reason is **avoiding re-execution**, NOT "adding an index." Even a materialized `table` in Trino has no user-creatable index. | "Materialize the view as a `table` to avoid paying the SELECT's CPU cost on every query. Then add `sorted_by` + run `EXECUTE optimize` to cluster files for skip-by-min/max — Trino's analog of 'index for fast filters.'" |
+>
+> **The decision-table for choosing between the four (the cost-vs-freshness tradeoff).**
+>
+> | Intermediate referenced... | Choose | Why |
+> |---|---|---|
+> | **1 time only**, lightweight, freshness matters | `ephemeral` (inlined as a CTE — no warehouse object, no storage, no `CREATE` emitted) | Compile-time inlining adds nothing to Trino runtime; warehouse stays clean |
+> | **Cheap pass-through transform on a small/well-partitioned source** | `view` (no storage, always fresh on read, ~kilobytes of catalog text) | The SELECT is cheap enough that paying it on every read is fine; freshness is automatic |
+> | **2-3 times within a single downstream model**, or expensive SELECT | `table` (materialize once, read N times — avoids the CTE/view-inlining recompute) | Pays storage once to avoid recomputing the SELECT per read |
+> | **Reused across multiple downstream models** | `table` or `incremental` (storage cost amortized across all consumers) | Same reasoning as above, applied to the DAG |
+> | **Across multiple dbt runs and the cost-delta is bounded** | `incremental` with `merge` strategy | Pays storage once + only processes the delta on each run |
+>
+> **Cross-ref:** the same four-materialization table appears in [resource 27 § 3.1](27-oracle-plsql-to-dbt-trino.md#31-the-four-materializations-supported-by-dbt-trino) framed for Oracle-procedure migration — same cost model, same DO-NOT-WRITE rules, different question keywords.
+
+### 3.3A The REAL `ephemeral`-at-scale failure mode — compile-time SQL bloat
+
+> ### LEADING CANONICAL — what actually breaks when an `ephemeral` model is referenced by many downstreams
+>
+> **Question shape this answers**: "what's the problem with `ephemeral` at scale", "does `ephemeral` slow down dbt", "why is my dbt compile slow", "can ephemeral cause performance issues", "my dbt model compile is slow — could ephemeral models be the cause", "ephemeral vs view at scale".
+>
+> **Lead with the truth.** The textbook description "an ephemeral model is re-evaluated on every query" is technically true but UNDERSTATES the failure mode. On a real dbt DAG, the load-bearing problem with `ephemeral` referenced by N downstream models is **compile-time SQL bloat**, NOT runtime re-evaluation.
+>
+> **What actually happens, step by step.**
+>
+> Suppose you have:
+>
+> ```text
+> int_clean_orders (ephemeral, 80 lines of SQL with 3 joins)
+>   <-- ref'd by mart_orders_by_region
+>   <-- ref'd by mart_orders_by_tier
+>   <-- ref'd by mart_orders_by_channel
+>   <-- ref'd by mart_orders_by_status
+>   <-- ref'd by mart_orders_funnel  (N = 5 downstreams)
+> ```
+>
+> Then on every `dbt run`:
+>
+> 1. **dbt's Jinja compiler reads the ephemeral SELECT** and, at compile time, textually inlines its full 80-line SELECT into a `WITH int_clean_orders AS (...)` block at the TOP of each of the 5 downstream models' compiled SQL.
+> 2. **Each compiled downstream SQL grows by ~80 lines.** Total inlined SQL footprint across the 5 downstreams: **5 × 80 = 400 lines of duplicated SQL** stored in the `target/compiled/` directory and sent to Trino.
+> 3. **Trino's planner parses each downstream's full inlined SQL.** Larger compiled queries mean longer planning time on every dashboard / `dbt run` invocation — the planner re-parses the same 80-line ephemeral block 5 times.
+> 4. **If the ephemeral references ANOTHER ephemeral** (transitive ephemeral chain), the inlining compounds: a chain of 3 ephemeral models referenced by 5 downstreams produces 5 × (sum of inlined SQL) — easily multi-thousand-line compiled queries from short-looking dbt model files.
+> 5. **Debugging gets painful.** Because there is **no warehouse object** for an ephemeral, you cannot:
+>    - `SELECT COUNT(*) FROM int_clean_orders` to sanity-check row counts (no object exists)
+>    - Query the Trino UI for "how long did int_clean_orders take" (it has no query of its own — it's inlined into others)
+>    - GRANT or REVOKE on it (no object to grant on)
+>    - Inspect column statistics via `SHOW STATS` (no table)
+>    - Hook a dbt source freshness check or expectation test to it independently
+>
+> **The "re-evaluated on every query" framing is true but secondary.** Yes, an ephemeral inlined into 5 downstreams means the SELECT logic runs 5 separate times (once per downstream query). But on Trino, the **bigger** practical pain is the COMPILE-time bloat above — slower `dbt compile`, longer Trino planning, no debuggable object. The "5 separate runs" is just the inevitable consequence of inlining.
+>
+> **The threshold rule of thumb.** Use `ephemeral` when downstream-reference count is **1 or 2** AND the SELECT is short (under ~30 lines). The instant you see 3+ downstreams, OR the ephemeral's SQL exceeds ~50 lines, OR the ephemeral itself `ref()`s another ephemeral, **promote it to `view` or `table`** depending on cost:
+>
+> | Symptom | Promote ephemeral to |
+> |---|---|
+> | 3+ downstreams, SELECT is cheap and fast | `view` (no storage, no inlining, debuggable as an object, single Trino plan per read) |
+> | 3+ downstreams, SELECT is expensive (joins, aggregates) | `table` (one materialization, all downstreams read the result, debuggable + grant-able + analyzable) |
+> | Downstream needs delta processing | `incremental` (with the appropriate strategy) |
+>
+> **DO-NOT-WRITE — banned framings for "what's wrong with ephemeral at scale":**
+>
+> - ~~"Ephemeral is slow because it's recomputed on every query."~~ — TECHNICALLY TRUE but understates the real problem (compile-time inlining bloat) and does not point at a useful fix.
+> - ~~"Ephemeral takes up storage when referenced by many downstreams."~~ — WRONG. Ephemeral has **zero** warehouse storage no matter how many downstreams reference it; the bloat is in **compiled SQL text** (on the dbt side), not in MinIO bytes.
+> - ~~"Add an index to the ephemeral to make it faster."~~ — DOUBLY WRONG. Ephemeral has no object to index, AND Trino has no user-creatable indexes anyway (see r03 cross-ref above).
 
 ### 3.4 The "deep CTE chain" anti-pattern
 

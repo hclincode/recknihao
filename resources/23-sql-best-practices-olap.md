@@ -1,6 +1,6 @@
 # SQL Query Best Practices for OLAP (Trino + Iceberg)
 
-If you came from Postgres or MySQL, your SQL habits will work in Trino — but they will be **slow and expensive**. OLTP databases have B-tree indexes that let you find a single row in microseconds. Trino + Iceberg has no row-level indexes; every query reads chunks of Parquet files from MinIO over the network. The cost of a bad query is measured in **bytes scanned**, not milliseconds.
+If you came from Postgres or MySQL, your SQL habits will work in Trino — but they will be **slow and expensive**. OLTP databases have B-tree indexes that let you find a single row in microseconds. Trino + Iceberg has **no user-creatable secondary indexes** of any kind — no `CREATE INDEX`, no `ADD INDEX`, no implicit indexing on `PRIMARY KEY` (the Iceberg connector accepts `PRIMARY KEY` only as documentation metadata; nothing is enforced or indexed). Every query reads chunks of Parquet files from MinIO over the network. The cost of a bad query is measured in **bytes scanned**, not milliseconds. For the canonical "how do I make filters fast in Trino without indexes" answer (partition transforms → `sorted_by` + `EXECUTE optimize` → `ANALYZE` → Parquet bloom filters), see **[resource 03 § Iceberg mitigations when you DO need point lookups](03-columnar-storage.md#iceberg-mitigations-when-you-do-need-point-lookups-on-a-fact-table)** LEADING CANONICAL.
 
 This guide is a practical checklist. Each section is one habit to keep or break.
 
