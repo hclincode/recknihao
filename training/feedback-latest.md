@@ -1,101 +1,94 @@
-# Judge feedback — Iter 474 (END-OF-ITERATION, EXTENDED PHASE)
+# Judge Feedback — Iter 475 (end-of-iteration, extended phase)
 
-## Overall result
-
-**Overall avg: 4.328125 — PASS** (≥3.5 threshold). 73rd consecutive extended-phase PASS.
-
-Margin ~0.83 above 3.5 floor, ~0.19 below iter473's 4.5234.
-
-## Per-question breakdown
+## Verdict: STRONG PASS — 4.6953 overall (74th consecutive extended-phase PASS)
 
 | Q | Topic | Accuracy | Completeness | Clarity | Actionability | Avg | Verdict |
 |---|---|---|---|---|---|---|---|
-| Q1 | Storage tiering re-probe (rejects SET STORAGE TIER trap) | 4.5 | 4.5 | 4.5 | 4.5 | **4.5** | STRONG PASS |
-| Q2 | Oracle GREATEST/LEAST → Trino | 4.75 | 4.5 | 4.75 | 4.75 | **4.6875** | STRONG PASS |
-| Q3 | Broadcast join auto + influence | 3.0 | 4.0 | 4.25 | 3.0 | **3.5625** | THIN PASS (FAB) |
-| Q4 | dbt snapshot SCD2 meta columns + PIT query | 4.75 | 4.25 | 4.75 | 4.5 | **4.5625** | STRONG PASS |
+| Q1 | Query perf basics — `join_distribution_type` re-probe (regression fix confirmation) | 4.875 | 4.5 | 4.625 | 4.75 | **4.6875** | STRONG PASS |
+| Q2 | dbt snapshots SCD2 — timestamp vs check (2nd angle) | 4.75 | 4.25 | 4.625 | 4.625 | **4.5625** | STRONG PASS |
+| Q3 | Oracle PL/SQL→Trino — DECODE NULL → searched CASE | 4.875 | 4.625 | 4.75 | 4.75 | **4.75** | STRONG PASS |
+| Q4 | Iceberg maintenance — `$files` SQL inspection + optimize | 4.875 | 4.75 | 4.625 | 4.875 | **4.78125** | STRONG PASS |
 
-## Per-question justifications
+**Overall avg: 4.6953125** — STRONG PASS. Highest score since iter469 (4.648).
 
-**Q1 — Storage tiering re-probe (4.5 STRONG PASS).** Question literally planted the trap `ALTER TABLE events SET STORAGE TIER 'cold' WHERE partition_date < '2024-01-01'`. Responder REJECTED it cleanly: said no such DDL exists in Trino 467, no Iceberg `storage_tier`/`storage_class` table property, tiering is a MinIO object-storage-layer concern, configure with MinIO lifecycle policies, Trino transparently reads whichever tier MinIO stores files on. Iter474 LEADING CANONICAL block in r16 + reconciled r11 line 602 did exactly the job. Minor (non-load-bearing) accuracy slip: responder said MinIO transitions are based on "access time" — actual mechanism is object age (`--transition-days N`) per docs.min.io. Note as completeness, not fab.
+---
 
-**Q2 — GREATEST/LEAST (4.6875 STRONG PASS).** Both functions verified at trino.io/docs/current/functions/comparison.html: scalar variadic, identical to Oracle. NULL-if-any-arg-null is consistent between Oracle and Trino (responder did not claim otherwise — no flag). Minor completeness: did not surface that PostgreSQL's GREATEST/LEAST IGNORE nulls (returns null only if all args null) — a useful migration warning but not asked.
+## Critical confirmation: `join_distribution_type` regression FIX LANDED
 
-**Q3 — Broadcast join (3.5625 PASS, FAB).** REPLICATE/REPARTITION terms correct, automatic CBO decision correct, `join_max_broadcast_table_size` 100MB default correct (verified at trino.io/docs/current/optimizer/cost-based-optimizations.html), bare `ANALYZE <table>` correctly held (NOT `ANALYZE TABLE`), EXPLAIN-shows-distribution correct, Iceberg-vs-memory-irrelevant correct. **Load-bearing FAB**: `SET SESSION distributed_join_distribution_type = 'partitioned'` does NOT exist. Correct form is `SET SESSION join_distribution_type = 'PARTITIONED'`. Engineer running the SET SESSION line as written gets "Session property distributed_join_distribution_type does not exist". Regression on iter456/457 fix.
+**iter474 fab** = `SET SESSION distributed_join_distribution_type = 'partitioned'` (does not exist on Trino 467; "Session property does not exist" error).
 
-**Q4 — dbt snapshot SCD2 (4.5625 STRONG PASS).** Meta columns dbt_valid_from / dbt_valid_to (NULL=current) / dbt_scd_id / dbt_is_deleted (1.9+) all verified at docs.getdbt.com/reference/resource-configs/snapshot_meta_column_names + /docs/build/snapshots. Correctly said NO dbt_is_current column. Point-in-time query `WHERE dbt_valid_from <= <ts> AND (dbt_valid_to IS NULL OR dbt_valid_to > <ts>)` is the canonical validity-window pattern. Minor completeness: the question specified strategy=timestamp + updated_at config but responder did not echo that config block back in the snapshot example. Non-load-bearing.
+**iter475 Q1 responder output** = `SET SESSION join_distribution_type = 'PARTITIONED'` — **exact canonical form, no `distributed_` prefix, three accepted values `PARTITIONED | BROADCAST | AUTOMATIC` (default AUTOMATIC) correctly listed, dbt pre_hook form correctly stated, no-query-hints fact correctly held**.
 
-## Key status calls
+Verified against:
+- https://trino.io/docs/current/optimizer/cost-based-optimizations.html (session property `join_distribution_type` with values AUTOMATIC/BROADCAST/PARTITIONED)
+- https://trino.io/docs/current/admin/properties-general.html (config property hyphenated form `join-distribution-type`)
 
-### Storage-tiering micro-topic: PROMOTED TO PASSED (4.25/2)
-The 2nd-angle re-probe LANDED CLEAN. Iter474 LEADING CANONICAL block in r16 + reconciled r11 line 602 are doing their job. Topic moves from `NEEDS WORK 4.0/1` → `PASSED 4.25/2`. (Minor MinIO access-time-vs-age slip noted; non-load-bearing.)
+**Iter475 EDIT 1 (new 8-row DO-NOT-WRITE matrix in r24)** = LANDED CLEAN in a single iteration of corrective action. The responder did not synthesize ANY of the 8 banned variants (`distributed_join_distribution_type`, `distributed_joins`, `distributed-joins-enabled`, `distributed_join`, `broadcast_join_distribution_type`, `hash_join_distribution_type`, `join_distribution`, `join_strategy`). The pre-emptive ban-by-keyword strategy worked — when the responder reached for the property name, the canonical token surfaced cleanly without prefix splice.
 
-### ANALYZE bare-form status: HELD
-Q3 responder correctly wrote bare `ANALYZE <table>` (not `ANALYZE TABLE`). Confirmed at trino.io/docs/current/connector/iceberg.html — `ANALYZE table_name [WITH (columns = ARRAY[...])]`. The fix on this remains durable.
+---
 
-### Q3 ruling: `distributed_join_distribution_type` is a FABRICATED session-property name — REGRESSION
-Central finding of iter474.
+## Fabrication audit — ZERO load-bearing fabs across Q1–Q4
 
-Verified at trino.io/docs/current/optimizer/cost-based-optimizations.html + trino.io/docs/current/admin/properties-general.html:
-- Correct session property: **`join_distribution_type`** with values `'AUTOMATIC' | 'BROADCAST' | 'PARTITIONED'`
-- Catalog/config-property form: `join-distribution-type`
-- **There is NO `distributed_join_distribution_type` session property in Trino 467**
-- Historical context: the long-deprecated `distributed_joins` / `distributed-joins-enabled` was replaced by `join_distribution_type`. The fab name appears to combine the dead old prefix with the current property name.
+**Q1**: property name, accepted values, default — all canonical. No prefix splice. No dead-legacy form. Clean.
 
-Engineer running the SET SESSION line gets `Session property distributed_join_distribution_type does not exist`. Load-bearing wrong-by-default. **Regression** on iter456/457.
+**Q2**: strategy names (`timestamp`, `check`), `check_cols` list form, metadata cols (`dbt_valid_from`, `dbt_valid_to`, `dbt_scd_id`, `dbt_is_deleted` 1.9+) — all verified per docs.getdbt.com/docs/build/snapshots + /reference/resource-configs/check_cols. No `dbt_is_current` fab (correctly absent). No fake config-key like `compare_cols`/`monitor_cols`/`watch_cols`.
 
-## All fabrications + correct facts + sources
+**Q3**: Oracle DECODE NULL=NULL semantic (DECODE uses IS-NOT-DISTINCT-FROM internally, treats two NULLs as equal — verified per docs.oracle.com/en/database/oracle/oracle-database/26/sqlrf/Nulls.html + modern-sql.com/feature/is-distinct-from + sqlines DECODE-NULL-issue page). Trino simple `CASE col WHEN NULL` `=`-semantics → UNKNOWN → silent ELSE fallthrough — correct per standard ANSI. Searched-CASE-with-IS-NULL fix — correct. COALESCE sentinel alternative — valid Trino syntax. No `DECODE` keyword claimed on Trino. No over-claim of `IS NOT DISTINCT FROM` operator availability.
 
-| # | Q | Fabrication | Correct fact | Source URL |
-|---|---|---|---|---|
-| 1 | Q3 | `SET SESSION distributed_join_distribution_type = 'partitioned'` | `SET SESSION join_distribution_type = 'PARTITIONED'` (values: AUTOMATIC, BROADCAST, PARTITIONED) | https://trino.io/docs/current/optimizer/cost-based-optimizations.html + https://trino.io/docs/current/admin/properties-general.html |
+**Q4**: `$files` column names (`content`, `file_size_in_bytes`, `file_path`, `file_format`, `partition`) — all in the canonical $files column list per trino.io/docs/current/connector/iceberg.html. Content codes (0=DATA, 1=POSITION_DELETES, 2=EQUALITY_DELETES) — verified per Iceberg spec + Trino GH issue #28910. `EXECUTE optimize(file_size_threshold => '128MB')` — exact named-parameter syntax (`=>`, string-with-unit value), default 100MB threshold per Trino Iceberg connector docs. Sibling metadata tables `$snapshots/$history/$manifests/$partitions` — all real per trino.io Iceberg connector docs. Double-quoting `"fct_events$files"` — correct per Trino identifier rules. No fake `$delete_files` table, no fake `manifest_size_in_bytes`-on-$files column, no fake `file_age_days` column.
 
-Q1, Q2, Q4 had ZERO fabrications. Q1 "MinIO based on access time" is a minor inaccuracy (actual mechanism is age/transition-days), not a fabricated capability or property, non-load-bearing.
+---
 
-## Teacher actions for iter475
+## Minor completeness gaps (not fabs, not load-bearing)
 
-### PRIMARY — re-fix the join_distribution_type session-property name regression
-1. **Grep all of resources/ for the fab**: `distributed_join_distribution_type`. Remove or replace every occurrence with `join_distribution_type`. Reconcile IN-PLACE; do NOT append a correction note while leaving the wrong form somewhere else in the same file (per CLAUDE.md reconcile-don't-append rule).
-2. **Verify canonical block is present** in resources/16-cost-considerations.md OR r28 complex-SQL-perf (wherever broadcast-join is the natural keyword landing zone), cross-referenced from the other file. The block should state:
-   - Property name: **`join_distribution_type`** (session) / **`join-distribution-type`** (catalog/config)
-   - Values: `'AUTOMATIC'` (default, CBO decides), `'BROADCAST'` (force replicate), `'PARTITIONED'` (force repartition)
-   - Companion: `join_max_broadcast_table_size` (default 100MB) controls the AUTOMATIC threshold
-   - Worked example: `SET SESSION join_distribution_type = 'PARTITIONED';` then `SELECT ... FROM large JOIN huge ON ...;` then `EXPLAIN ...` showing REPARTITION
-   - Bare `ANALYZE <table>` (NOT `ANALYZE TABLE`) and CBO-feeds-from-Iceberg-stats clarification
-3. **DO-NOT-WRITE matrix** — add an explicit row for EVERY plausible-fab sibling so the responder keyword-matches the warning when it would otherwise hallucinate:
-   - `distributed_join_distribution_type` (fab — this iter's regression)
-   - `distributed_joins` (deprecated/removed)
-   - `distributed-joins-enabled` (deprecated/removed)
-   - `broadcast_join_distribution_type` (fab)
-   - `hash_join_distribution_type` (fab)
-   - `join_distribution` (fab — missing `_type`)
-   - `join_strategy` (fab — Spark-ism)
-   - `/*+ BROADCAST(t) */` and `/*+ MAPJOIN(t) */` (Hive/Spark hint syntax, NOT Trino — block cross-dialect spillover)
-   - For each: "does NOT exist on Trino 467 — engineer gets 'Session property X does not exist' error".
-4. **Citation**: link to trino.io/docs/current/optimizer/cost-based-optimizations.html AND trino.io/docs/current/admin/properties-general.html in the canonical block.
+| Q | Gap | Impact |
+|---|---|---|
+| Q2 | Did not explicitly show the `updated_at: column_name` config key for the timestamp strategy. Did not call out the `check_cols='all'` shorthand variant. | Engineer still gets correct strategy choice + check_cols list pattern; would need to glance at docs.getdbt.com for the exact `updated_at:` key spelling. Per directive, minor-only. |
+| Q4 | Did not flag that `EXECUTE optimize` only bin-packs within the existing partition spec (does NOT rewrite to a new spec — that requires Spark `rewrite_data_files` with `rewrite-all=true`). | Out-of-scope for this question's "inspect files via SQL" framing — not a deduction. |
 
-### SECONDARY — minor MinIO transition-mechanism correction
-In resources/16-cost-considerations.md storage-tiering canonical, the MinIO mechanism description should explicitly say "transitions are scheduled by object age (`--transition-days N`), not by access time/access pattern". This pre-empts the minor Q1 slip and matches docs.min.io exactly.
+---
 
-### SECONDARY — breadth design for iter475
-- **NO dedicated federation probe** — 4.49944/310 stays UNCHANGED (sits 0.0006 below 4.5 raised threshold, do not perturb).
-- 4-Q breadth design candidates:
-  1. **Re-probe broadcast-join from a DIFFERENT angle** to verify the session-property regression-fix landed. MANDATORY this iter — fixes that aren't re-probed within 1-2 iters tend to silently drift. Phrasing candidates: "How do I force a hash-partitioned join for a 5GB build side?" / "What config knob lets Trino broadcast a 200MB dim table?" / "Show me the EXPLAIN output for a forced PARTITIONED join."
-  2. **dbt snapshots SCD2 2nd-angle re-probe** to lock the new micro-topic (currently 4.5625/1 NEEDS 2ND ANGLE per rubric rule). Candidates: snapshot strategy=check vs timestamp tradeoff, invalidate_hard_deletes semantic, dbt_valid_to_current config (1.9+), snapshot on an Iceberg-backed target.
-  3. **Storage-tiering 3rd-angle re-probe** to strengthen the now-2-deep PASSED row (4.25/2). Candidates: "Can I configure Iceberg to skip cold-tiered partitions during snapshot expiry?" / "If I lifecycle-tier my data/ prefix to MinIO cold, what breaks on Trino?" — tests whether responder still attributes mechanism to MinIO layer when phrased as a downstream consequence.
-  4. **Wildcard low-count breadth probe**. Candidates: dbt sources / source freshness (PASSED 4.219/3, fragile), dbt model contracts (PASSED 4.1146/3, still thin), Lakehouse schema design (PASSED 4.5052/12).
+## Teacher actions for iter476 (breadth design; NO dedicated federation probe)
 
-### Citation-hygiene watchlist for iter475
-- **Session-property fab pattern**: any SET SESSION line that uses an unverified property name. Watchlist: `join_*`, `query_max_*`, `broadcast_*`, `partition_*`, `iceberg_*`. Lesson from iter474: regressions on already-fixed fabs are still possible. Resources should host a CANONICAL "Trino 467 session properties used in this guide" subsection with all properties cited against live docs URL.
-- **Cross-dialect spillover** (Snowflake/Databricks/Hive/Spark): joins SQL forms, MERGE forms, hint syntax (`/*+ BROADCAST(t) */` is Hive/Spark hint, NOT Trino).
-- **Fabricated-capability-restriction**: claims like "Trino cannot X — use Spark" when Trino actually CAN do X (regressed in iter470, currently held — keep watch).
+### PRIMARY — breadth design across 4 angles
 
-### Fab-class status this iter
-- Cross-dialect spillover — none new
-- Version-pin — Trino 467 + Iceberg 1.5.2 anchoring held
-- Trino-internal-clause conflation — none new
-- Fabricated-capability-restriction — none new
-- **Fabricated session-property name — RESURFACED on Q3 (regression)** → PRIMARY teacher action above
+Federation row (4.49944/310) sits 0.0006 below the 4.5 raised threshold. A single thin probe locks or breaks it; per the iter472/473/474/475 pattern, **NO dedicated federation probe** this iter. Let the count grow naturally if federation surfaces incidentally in a multi-topic question.
 
-## Bottom line
-PASS overall at 4.328125. Storage-tiering micro-topic promoted to PASSED (canonical landed cleanly + 2nd probe confirmed it). The single fab is a regression on the iter456/457 `distributed_join_distribution_type` → `join_distribution_type` fix; the resource patch evidently drifted or was incompletely propagated. Fix in iter475 PRIMARY, then re-probe broadcast-join from a different angle to confirm the re-fix holds.
+Suggested 4-question breadth slate for iter476:
+
+1. **dbt snapshots SCD2 — 3rd-angle hardening re-probe**. Topic just promoted to PASSED at 2 datapoints (4.5625 avg). A 3rd angle would harden the lock. Candidate angles: (a) `hard_deletes = invalidate | new_record | ignore` config (1.9+), (b) `target_schema` / `target_database` placement vs `+schema:` in dbt_project.yml, (c) `snapshot_meta_column_names` config to rename `dbt_valid_from` → custom column, (d) `invalidate_hard_deletes: true` legacy flag (pre-1.9) vs new `hard_deletes:`. Pick ONE — phrase it differently from Q2 (don't repeat timestamp-vs-check).
+
+2. **Trino-specific angle with low recent coverage**. Candidates: (a) `SHOW STATS FOR table` output interpretation (NDV / data_size / nulls_fraction columns and how CBO consumes them), (b) `EXPLAIN ANALYZE` runtime stats vs `EXPLAIN` plan-only distinction, (c) catalog-level `iceberg.expire-snapshots.min-retention` floor that gates `EXECUTE expire_snapshots(retention_threshold => 'Xd')`, (d) `system.runtime.queries` table for live-query inspection on cluster.
+
+3. **Oracle PL/SQL → dbt/Trino migration — non-NULL-semantics angle**. Topic at 4.5580/49 with stable PASS history. Candidates: (a) Oracle `CONNECT BY ... PRIOR` recursive query → Trino `WITH RECURSIVE`, (b) Oracle sequences (`SEQ.NEXTVAL`) → Trino UUID/row_number/dbt `dbt_utils.surrogate_key` patterns (Trino has no native sequence object), (c) Oracle `PIVOT (sum(x) FOR col IN (...))` → Trino conditional-aggregation form (Trino does NOT have PIVOT operator on 467), (d) Oracle `LISTAGG(x, ',') WITHIN GROUP (ORDER BY y)` → Trino `array_join(array_agg(x ORDER BY y), ',')`.
+
+4. **Wildcard breadth probe — low-count topic re-probe**. Candidates: (a) `dbt sources / source freshness` (3 probes, 4.219 avg — could use a re-probe), (b) `Storage tiering on Trino+Iceberg+MinIO` (2 probes, 4.25 avg — could use a re-probe specifically testing the MinIO `--transition-days N` age-only mechanism after iter475 EDIT 2's "NOT access time" callout), (c) `Improving complex SQL performance on Trino with dbt` (4 probes, 4.7781 avg — strong topic, low count). The storage-tiering re-probe is especially valuable as a confirmation that the "NOT access time / NOT access pattern" pre-emptive callout in r16 lands when an engineer asks about MinIO tiering specifically.
+
+### SECONDARY — citation-hygiene watchlist for iter476
+
+Items to flag if they appear in any responder output:
+
+- Any `distributed_*` prefix on `join_distribution_type` (regression watchlist — iter474 fab class, iter475 confirmed-fixed; keep on watchlist for at least 3 iters of clean re-probes before retiring).
+- Any `WITH (SECURITY DEFINER)` form on CREATE VIEW (iter468 syntax slip, fixed iter469, kept on watchlist).
+- Any `MinIO tiers based on access time / access pattern / last-read` framing (iter474 minor slip, iter475 teacher pre-empted with explicit "NOT access time" callout in r16 — watch if it resurfaces).
+- Any `column_order` Iceberg table property (iter470 fab — does not exist).
+- Any `parse_date` Trino function (iter471 fab — Trino has `date_parse` / `parse_datetime` / `from_iso8601_date`, NO `parse_date`).
+- Any `SET PARTITION SPEC` Spark-ism on Trino (iter471 fab — correct is `ALTER TABLE t SET PROPERTIES partitioning = ARRAY[...]`).
+- Any `WHEN NOT MATCHED BY SOURCE` MERGE clause claimed on Trino (Snowflake/Spark-only; Trino MERGE supports WHEN MATCHED / WHEN NOT MATCHED only).
+- Any `parquet_bloom_filter_columns` table property claimed as settable on Trino 467 (it is 469+, per PR #24573 merged Dec 25 2024).
+
+### TERTIARY — resource hygiene (no urgent edits required)
+
+Iter475 EDITS 1 (r24 DO-NOT-WRITE matrix for fab session-property names) and 2 (r16 "NOT access time" callout) both landed cleanly. No reconciliation work needed for iter476.
+
+If teacher has capacity for a non-urgent resource patch, candidates:
+- Add a brief Oracle DECODE-NULL-semantic callout to r27 (Oracle PL/SQL → dbt/Trino migration) reinforcing the searched-CASE-with-IS-NULL pattern for DECODE migration near other Oracle→Trino function-mapping content (helps findability).
+- Confirm r17 (Iceberg table maintenance) lists `$files` column inventory with content-code legend (0=DATA / 1=POSITION_DELETES / 2=EQUALITY_DELETES) near the EXECUTE optimize section — Q4 responder produced this correctly suggesting findability is fine, but reinforcing co-location helps future maintenance queries.
+
+---
+
+## Closing summary
+
+Iter475 is a textbook regression-fix iteration: the iter474 `distributed_join_distribution_type` fab closed in one iter via a targeted DO-NOT-WRITE matrix in r24, and the responder produced canonical `join_distribution_type` cleanly on the very next re-probe. Q2–Q4 all STRONG PASS with zero fabs and only minor completeness gaps. dbt-snapshots-SCD2 micro-topic promoted to PASSED at 2 distinct datapoints. Federation row unchanged per directive. Citation-hygiene streak fully restored.
+
+Iter476 priority: breadth design (no federation probe), optional 3rd-angle hardening on dbt-snapshots-SCD2, optional MinIO-tiering 2nd-angle confirmation of the iter475 "NOT access time" callout.
