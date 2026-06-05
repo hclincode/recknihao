@@ -315,6 +315,121 @@ These are the wrong shapes a Haiku responder must NEVER suggest in a dbt-trino +
 
 ---
 
+## LEADING CANONICAL — Trino GROUPING SETS / ROLLUP / CUBE with the GROUPING() bitmask (read FIRST when asked "subtotal", "subtotals", "grand total", "ROLLUP", "CUBE", "GROUPING SETS", "GROUPING function", "GROUPING_ID", "label the subtotal row", "row_type")
+
+> Keyword anchors: subtotal, subtotals, grand total, ROLLUP, CUBE, GROUPING SETS, GROUPING function, GROUPING_ID, row_type, label the subtotal row, multi-level aggregate, hierarchy rollup.
+>
+> **Why this block sits at the top of r28:** when an Oracle/Snowflake/Postgres engineer migrates a report query that uses `GROUP BY ROLLUP(...)` and the `GROUPING()` function to label subtotal vs grand-total rows, the bitmask semantics are easy to get wrong. The specific failure observed in production: writing `CASE GROUPING(region, category) WHEN 2 THEN 'Grand Total'` for a 2-column `ROLLUP(region, category)`. That is **WRONG**. The grand-total value is **3** (binary `11`), not 2. Value 2 (binary `10`) does **not appear at all** in a 2-column ROLLUP. The rest of this block explains exactly why.
+
+### (a) The bitmask rule (verified against [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html))
+
+`GROUPING(c1, c2, ..., cN)` returns an integer whose binary representation has one bit per argument column:
+
+- The **LEFTMOST argument is the MOST-significant bit (MSB)**.
+- The **RIGHTMOST argument is the LEAST-significant bit (LSB)**.
+- **Bit = 0** means the column **IS present** in this row's grouping (it has a real value, not a rollup placeholder).
+- **Bit = 1** means the column has been **rolled up / aggregated away** (its value is NULL in this row because the row represents a subtotal across that column).
+
+Doc-quoted (trino.io/docs/current/sql/select.html, GROUPING operation): *"To compute the resulting bit set for a particular row, bits are assigned to the argument columns with the rightmost column being the least significant bit. For a given grouping, a bit is set to 0 if the corresponding column is included in the grouping and to 1 otherwise."*
+
+### (b) The explicit value table for `ROLLUP(region, category)` — memorize this
+
+`GROUP BY ROLLUP(a, b)` is shorthand for `GROUP BY GROUPING SETS ((a, b), (a), ())`. It emits three grouping levels (and ONLY these three): the full detail, the prefix subtotal, and the grand total. ROLLUP **drops trailing columns only** — it never drops a prefix column while keeping a suffix column.
+
+| Row level | Columns present in GROUP BY | `GROUPING(region, category)` binary | Decimal | What the row means |
+|---|---|---|---|---|
+| Detail | `(region, category)` — both present | `00` | **0** | One row per (region, category) combination |
+| Region subtotal | `(region)` — category rolled up | `01` | **1** | One row per region; category column is NULL |
+| Grand total | `()` — both rolled up | `11` | **3** | A single row; region AND category are both NULL |
+
+**There is NO `GROUPING(region, category)` value of 2 in a 2-column ROLLUP.** Value 2 would be binary `10` — region rolled up but category present — which ROLLUP never emits (it only drops trailing columns). If you see code like `WHEN 2 THEN 'Grand Total'` against a 2-column ROLLUP, **it is wrong** and the grand-total row will be unlabeled / fall through to ELSE.
+
+**For 3-column `ROLLUP(a, b, c)`** the only emitted GROUPING levels are `0`, `1`, `3`, `7`:
+
+| Row level | Columns present | Binary | Decimal |
+|---|---|---|---|
+| Detail | `(a, b, c)` | `000` | **0** |
+| Subtotal at b | `(a, b)` — c rolled up | `001` | **1** |
+| Subtotal at a | `(a)` — b and c rolled up | `011` | **3** |
+| Grand total | `()` — all rolled up | `111` | **7** |
+
+General rule for N-column ROLLUP: the emitted decimal levels are `0, 1, 3, 7, 15, ..., 2^N - 1` (each level is `2^k - 1` for k=0..N, corresponding to "drop the rightmost k columns").
+
+### (c) Copy-pasteable Trino 467 worked example
+
+```sql
+-- ROLLUP with GROUPING() bitmask used to label each row type.
+-- Trino 467 + Iceberg connector. SELECT-list-alias rules apply (see r07 §5).
+SELECT
+  region,
+  category,
+  SUM(amount)                  AS total,
+  CASE GROUPING(region, category)
+    WHEN 0 THEN 'Detail'        -- binary 00 — both columns present
+    WHEN 1 THEN 'Region Total'  -- binary 01 — category rolled up; region present
+    WHEN 3 THEN 'Grand Total'   -- binary 11 — both rolled up
+    -- NOTE: value 2 (binary 10) is NEVER emitted by a 2-column ROLLUP.
+    --       Do NOT write `WHEN 2 THEN 'Grand Total'` here — see DO-NOT-WRITE (d) below.
+  END                          AS row_type
+FROM analytics.fct_orders
+WHERE event_date >= DATE '2026-06-01'
+  AND event_date <  DATE '2026-07-01'
+GROUP BY ROLLUP(region, category)        -- REPEAT the expression (not a SELECT alias); see r07 §5 Pattern A2
+ORDER BY
+  GROUPING(region, category),            -- pushes Detail (0) before subtotals (1) before grand total (3)
+  region   NULLS LAST,
+  category NULLS LAST;
+```
+
+**Notes on the ORDER BY.** Sorting by `GROUPING(region, category)` first guarantees detail rows come before per-region subtotals, which come before the grand total. `NULLS LAST` puts the rolled-up NULL placeholders at the bottom of each tier, so the report reads top-down as `(region, category)` detail rows, then a per-region subtotal row, then the grand-total row.
+
+**GROUP BY uses the expression, NOT a SELECT alias.** `GROUP BY ROLLUP(region, category)` references the **base columns** `region` and `category` directly. If you bucket the column (e.g. `DATE_TRUNC('month', event_date) AS event_month` in the SELECT list), you must repeat the expression inside ROLLUP: `GROUP BY ROLLUP(region, DATE_TRUNC('month', event_date))` — Trino does NOT allow `GROUP BY ROLLUP(region, event_month)` referencing the SELECT alias (see [resource 07 §5 Pattern A2 GROUP BY rules anchor](07-analytical-query-patterns.md), Trino issue [#16533](https://github.com/trinodb/trino/issues/16533)).
+
+### (d) DO-NOT-WRITE — the exact iter495-Q4 fabrication, and three sibling traps
+
+| DO-NOT-WRITE | Why it's wrong | DO-WRITE instead |
+|---|---|---|
+| `CASE GROUPING(region, category) WHEN 2 THEN 'Grand Total' END` (against a 2-column ROLLUP) | **Value 2 is binary `10` = region rolled up but category present. ROLLUP never emits that combination — it only drops trailing columns.** The grand-total row's GROUPING value is **3** (binary `11`), not 2. With `WHEN 2` your grand-total row falls through to ELSE / NULL and the report is mis-labeled. | `WHEN 3 THEN 'Grand Total'` (or use the full table in (b) above). |
+| `CASE GROUPING(region, category) WHEN 1 THEN 'Category Total' END` (against `ROLLUP(region, category)`) | Value 1 = binary `01` = **category rolled up, region present**. That's the **region** subtotal, not the category subtotal. The leftmost column is the MSB — getting the column order wrong inverts the label. | `WHEN 1 THEN 'Region Total'` (because category, the rightmost arg / LSB, is the one rolled up). |
+| `GROUP BY ROLLUP(region, category, ())` — adding an empty `()` "to make sure I get a grand total" | Parse-error noise: `ROLLUP(region, category)` already emits the grand total `()` on its own. `()` is a **GROUPING SETS** element, not a ROLLUP element. | Just `GROUP BY ROLLUP(region, category)` — the grand total is automatic. Or use `GROUP BY GROUPING SETS ((region, category), (region), ())` to spell it out. |
+| `CASE GROUPING(region) WHEN 1 THEN ...` with a single-arg `GROUPING(region)` when you also want to detect "category was rolled up" | Single-arg `GROUPING(region)` returns only one bit; it cannot distinguish detail from category-subtotal. You need both columns in the GROUPING() argument list, in the same order they appear in the ROLLUP/CUBE/GROUPING SETS. | Use `GROUPING(region, category)` — same arg order as the ROLLUP, so the bitmask is interpretable. |
+
+### (e) ROLLUP vs CUBE vs GROUPING SETS — when value 2 DOES appear
+
+`CUBE(a, b)` is shorthand for `GROUP BY GROUPING SETS ((a, b), (a), (b), ())` — it emits **all 2^N combinations**, including the `(b)`-only grouping that ROLLUP skips. So:
+
+| Construct | Emitted GROUPING(a, b) values | Notes |
+|---|---|---|
+| `ROLLUP(a, b)` | `0, 1, 3` | Drops trailing columns only. **Value 2 never appears.** |
+| `CUBE(a, b)` | `0, 1, 2, 3` | All combinations. Value 2 = binary `10` = **a rolled up, b present** (the "category total" you can't get from ROLLUP). |
+| `GROUPING SETS ((a, b), (b), ())` | `0, 2, 3` | Explicit sets; you choose exactly which combinations to emit. Use this when you want b-only subtotals but not a-only subtotals. |
+
+If a migrated Oracle/Snowflake query labels rows for both "region total" AND "category total" (independent margins), the source must be using `CUBE` or an explicit `GROUPING SETS`, not `ROLLUP`. Re-read the source SQL — translating a CUBE-shaped query to ROLLUP silently drops the b-only subtotal rows.
+
+### (f) The `GROUPING_ID()` shortcut (when you want decimal directly)
+
+Trino exposes `GROUPING_ID(a, b, ...)` as an alias for the same bitmask integer that `GROUPING(a, b, ...)` returns. Use whichever reads better; the values are identical:
+
+```sql
+SELECT region, category, SUM(amount),
+       GROUPING_ID(region, category) AS gid,   -- same integer as GROUPING(region, category)
+       GROUPING(region, category)    AS g
+FROM analytics.fct_orders
+GROUP BY ROLLUP(region, category);
+-- g and gid are equal on every row.
+```
+
+(`GROUPING` is the SQL-standard spelling; `GROUPING_ID` is the Oracle-derived spelling. Trino supports both. Pick one and be consistent inside a single dbt project.)
+
+### (g) Cross-references
+
+- **r07 §5 Pattern A2 — GROUP BY rules anchor** — repeat the EXPRESSION in `GROUP BY ROLLUP(...)`, do NOT use a SELECT alias (Trino issue [#16533](https://github.com/trinodb/trino/issues/16533)).
+- **r22 §13.x federation guardrails** — `ROLLUP` / `CUBE` / `GROUPING SETS` shapes do NOT push down to PostgreSQL via the JDBC connector. Trino executes the grouping itself on its workers. (Read that section only for federation-pushdown questions; the canonical GROUPING() semantics live here in r28.)
+- **r27 §6 — Oracle PL/SQL → dbt + Trino worked example** — the dialect translation table; Oracle's `GROUPING(c)` and `GROUPING_ID(c1, c2, ...)` translate one-to-one (same bitmask convention: leftmost arg = MSB, bit=1 = rolled up).
+- **Trino docs**: [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) — GROUPING operation and GROUPING SETS / ROLLUP / CUBE grammar. WebSearch-verified at iter496.
+
+---
+
 ## Common myths about complex SQL performance on Trino + dbt — read FIRST
 
 These are the absolutes most often stated incorrectly when an engineer with Postgres / Oracle / Snowflake muscle memory tries to performance-tune a dbt model on Trino 467. Each TRUTH below has been verified against the [Trino docs](https://trino.io/docs/current/), [dbt-trino docs](https://docs.getdbt.com/reference/resource-configs/trino-configs), and the cited GitHub discussions. **Lead with the TRUTH; state the nuance.**

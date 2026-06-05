@@ -35,7 +35,7 @@ A point lookup (`WHERE id = 123`) is what Postgres lives for. A scan-and-aggrega
 | Schema = many small normalized tables | Schema = a few wide fact tables + small dimension tables (star schema) | Fewer JOINs = faster aggregations |
 | Latency goal: < 10 ms | Latency goal: < 10 s for dashboards, < 60 s for heavy analysis | Workload is "scan a lot," not "fetch one row" |
 | Row-level ACID transactions | Snapshot isolation at the *table* level (Iceberg) | Iceberg gives atomic commits per table, not per row |
-| ORM (ActiveRecord, Sequelize, SQLAlchemy) | Raw SQL via Trino — no ORM | Analytical SQL (windows, CUBE, ROLLUP) is too complex for ORMs |
+| ORM (ActiveRecord, Sequelize, SQLAlchemy) | Raw SQL via Trino — no ORM | Analytical SQL (windows, CUBE, ROLLUP) is too complex for ORMs. **For the canonical Trino `GROUPING SETS` / `ROLLUP` / `CUBE` worked example with the `GROUPING()` bitmask semantics (LEFTMOST arg = MSB; bit=1 = rolled up; 2-col ROLLUP grand total = 3, NOT 2), see [resource 28 § LEADING CANONICAL — Trino GROUPING SETS / ROLLUP / CUBE with the GROUPING() bitmask](28-complex-sql-performance-trino-dbt.md).** |
 | `ALTER TABLE ADD COLUMN` is a scary migration | Iceberg schema evolution is instant and metadata-only | Iceberg tracks column IDs; existing Parquet files aren't rewritten |
 | Production DB = source of truth | Lakehouse = **copy** of truth, sourced from Postgres | Never run analytics directly on prod Postgres |
 | Real-time data, always fresh | Near-real-time at best — minutes to hours of lag | Batch ETL introduces lag; that's the trade-off |
