@@ -1,149 +1,110 @@
-# Iter 504 Judge Feedback — 2026-06-06 (EXTENDED PHASE)
+# Iter 505 Feedback — 2026-06-06 (EXTENDED PHASE)
 
-## Overall: 4.0938 PASS — FEDERATION NOT PROBED
+## Overall verdict
 
-- Q1 UNNEST NULL/empty array re-probe: **5.000 STRONG PASS** — ITER503 §1a FIX LANDED.
-- Q2 Trino dynamic filtering on by default?: **3.875 PASS** — load-bearing nuance overstatement on stats dependency.
-- Q3 Iceberg partition evolution metadata-only: **4.875 STRONG PASS** — Trino-vs-Spark rewrite split nailed.
-- Q4 dbt unit tests (mock input / expected output): **2.625 FAIL** — content gap; responder PUNTED HONESTLY without fabricating, but engineer leaves empty-handed.
-
-**OVERALL AVG = (5.000 + 3.875 + 4.875 + 2.625) / 4 = 16.375 / 4 = 4.0938** (PASS, +0.5938 above 3.5 floor; Q4 FAIL drags ~0.7, but Q1 STRONG PASS + Q3 STRONG PASS keep iter comfortably above floor.) 103rd consecutive overall PASS in extended phase.
-
----
-
-## Q1 — UNNEST keeps users with NULL/empty `tags`: **5.000 STRONG PASS**
-
-**Dimensions**: Accuracy 5.0, Clarity 5.0, Actionability 5.0, Completeness 5.0.
-
-**ITER503 §1a FIX EXPLICITLY LANDED.** The iter504 teacher's NEW canonical Section 1a in `resources/07-analytical-query-patterns.md` (inserted between §1 and §2 with the FORM-1-CROSS / FORM-2-LEFT contrast + "ON TRUE is the only supported condition" note + keyword-anchor coverage on "explode array Trino / LEFT JOIN UNNEST / preserve NULL array rows / keep empty array rows") ROUTED THE RESPONDER CORRECTLY ON FIRST TRY.
-
-Verified against trino.io/docs/current/sql/select.html UNNEST section:
-
-- `CROSS JOIN UNNEST(arr) AS t(elem)` semantically an inner join → drops parent rows whose array is NULL/empty. CONFIRMED.
-- `LEFT JOIN UNNEST(arr) AS t(elem) ON TRUE` preserves parent + emits NULL elem when array is NULL/empty. CONFIRMED verbatim: "LEFT JOIN is preferable in order to avoid losing the row containing the array/map field in question when referenced columns from relations on the left side of the join can be empty or have NULL values."
-- "ON TRUE is the only supported LEFT JOIN UNNEST condition" CONFIRMED verbatim from docs: "When using LEFT JOIN, the only condition supported by the current implementation is ON TRUE."
-
-Responder also gave the correct rule-of-thumb routing: LEFT for "including untagged users," CROSS for "only tagged." Zero fabs, zero ambiguity. **This is the 12th leading-canonical bulletproofing instance in extended phase, and the 5th findability/canonical addition fix to land cleanly on its re-probe.**
+- **Overall avg = (5.0 + 4.875 + 3.25 + 4.9375) / 4 = 18.0625 / 4 = 4.5156 PASS**
+- Margin: **+1.0156** above 3.5 floor.
+- BOTH iter504 fixes LANDED. Q1 (dbt unit tests — new canonical §6.7E) and Q2 (DF stats-overstatement reconcile in r23 §4) both routed cleanly and produced doctrinally correct answers.
+- **NEW LOAD-BEARING Q3 SQL parse error + Q3 minor factual error on split_to_map**. Pulls Q3 to FAIL even though everything else in Q3 (SPLIT/UNNEST/TRIM/GROUP BY/LEFT-vs-CROSS-JOIN nuance) is correct.
+- Federation NOT probed (per directive); r22 §13.x guardrails untouched; federation rubric row stays 4.49944/310.
 
 ---
 
-## Q2 — Trino dynamic filtering automatic or configured?: **3.875 PASS**
+## Per-question scores
 
-**Dimensions**: Accuracy 3.0, Clarity 4.5, Actionability 4.0, Completeness 4.0.
+### Q1 — dbt unit tests RE-PROBE (FIX A landing test) — 5.000 STRONG PASS — **FIX A LANDED**
 
-**Correct parts (verified at trino.io/docs/current/admin/dynamic-filtering.html):**
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5.0 | Top-level `unit_tests:` key correct (NOT `unit-tests:`). `name:` + `model:` + `given:` (list of `- input: ref(...)` with `rows:`) + `expect:` (with `rows:`) all match docs.getdbt.com/reference/resource-properties/unit-tests verbatim. `format: dict \| csv \| sql` options correct, dict is default. Runs at build BEFORE materialize correct. `dbt test --select test_type:unit` selector correct (NOT `test_type:unit_test`). Distinguishes unit tests (verify model TRANSFORMATION LOGIC on mock input) from data tests (`not_null`/`unique` post-build output assertions). dbt 1.8+ version correct. YAML lives under `models/` (NOT `tests/`) correct. Zero fabricated keys. |
+| Clarity | 5.0 | Worked example with mock input rows + expected output rows. Plain English on what each section does. DO-NOT-CONFUSE callout clean. |
+| Actionability | 5.0 | Engineer can copy-paste the YAML, drop it next to the model, and run `dbt test --select test_type:unit`. |
+| Completeness | 5.0 | Covers YAML schema, run command, build-pipeline ordering, vs-data-tests distinction, format options. |
 
-- Dynamic filtering ON by default in Trino 467 (`enable-dynamic-filtering`/`dynamic_filtering` session both default true). CONFIRMED.
-- EXPLAIN shows `dynamicFilter(...)` annotation on the probe-side scan. CONFIRMED.
-- Helps fact–dim joins where the dim is filtered by WHERE; reduces Iceberg files opened (partition pruning + file-skipping via DF predicate). CONFIRMED.
-- Bare `ANALYZE iceberg.db.users` form (no TABLE keyword) is the correct Trino dialect. CONFIRMED (Spark/Hive use `ANALYZE TABLE`; Trino does not).
+**FIX A VERDICT: LANDED CLEANLY.** Iter504 Q4 was a 2.625 FAIL (content gap, responder punted honestly). Iter505 Q1 is a 5.000 STRONG PASS — the NEW r27 §6.7E canonical addition (between §6.7D seeds and §7 cutover) routed correctly on first probe. 13th leading-canonical bulletproofing instance + 6th findability/canonical-addition fix to land cleanly on re-probe.
 
-**LOAD-BEARING NUANCE OVERSTATEMENT (-1.0 Accuracy, -0.5 Completeness):**
+### Q2 — Dynamic filtering 2nd-angle RE-PROBE (FIX B landing test) — 4.875 STRONG PASS — **FIX B LANDED**
 
-> "If it's not showing up in EXPLAIN: ensure the small table has statistics... The optimizer won't use dynamic filtering without cardinality estimates."
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5.0 | Leads with "issue is NOT just missing ANALYZE." States DF is on-by-default + RUNTIME mechanism, works regardless of ANALYZE. 6-step checklist all correct per trino.io/docs/current/admin/dynamic-filtering.html: (1) join type INNER/RIGHT (LEFT/FULL not supported) — verified; (2) predicate `=,<,<=,>,>=,IS NOT DISTINCT FROM` — verified verbatim; (3) BROADCAST vs PARTITIONED — verified ("dynamic filters are collected before the build side is partitioned... when broadcast join is chosen" + "collected after the build side is partitioned when partitioned join is chosen"); (4) connector support — verified (Iceberg/Postgres/MySQL all support); (5) wait timeout default 1s for Iceberg — verified; (6) stats help CBO build-side / BROADCAST selection but do NOT gate DF — exactly correct. `ANALYZE iceberg.analytics.events WITH (columns = ARRAY[...])` is valid Trino 467 syntax. |
+| Clarity | 4.75 | Checklist ordering is logical; explicit "stats help CBO ... but do NOT gate DF" closes the iter504 misunderstanding. Minor -0.25 for moderate density. |
+| Actionability | 5.0 | Engineer who reads EXPLAIN and sees no `dynamicFilter` has a clear ordered checklist to walk through. |
+| Completeness | 4.75 | Covers all the live factors. Minor -0.25 for not naming `dynamic-filtering.large-broadcast` / wait-timeout property names. |
 
-This is **overstated and partially wrong**. Per trino.io/docs/current/admin/dynamic-filtering.html and PR #2793:
+**FIX B VERDICT: LANDED CLEANLY.** Iter504 Q2 was 3.875 PASS with stats-overstatement ("optimizer won't use DF without cardinality estimates" — wrong). Iter505 Q2 is 4.875 STRONG PASS — the reconcile-in-place at r23 line 197 (6-step checklist) routed correctly. 14th leading-canonical bulletproofing instance + 7th reconcile-in-place fix to land cleanly on re-probe.
 
-- Dynamic filtering is **fundamentally a runtime mechanism**: the build side collects join-key values during execution and pushes them as a predicate to the probe-side scan. It works for broadcast joins **regardless of whether ANALYZE has been run**.
-- Statistics influence the COST-BASED OPTIMIZER's join-distribution and join-order decisions (whether the build side is the smaller table at all). Stats can therefore affect HOW EFFECTIVE DF is (a backwards build/probe ordering produces useless filters).
-- But stats are **NOT a precondition for `dynamicFilter(...)` to appear in EXPLAIN** — the planner inserts the DF node based on join shape, not on the presence of NDV/row-count statistics. The Trino docs phrase it as "it is recommended to keep table statistics up to date and rely on the CBO to correctly choose the smaller table on the build side" — RECOMMENDED, not REQUIRED for DF itself.
+### Q3 — Comma-separated tags split + count — 3.25 FAIL — **TWO LOAD-BEARING ISSUES**
 
-**Correct phrasing for the canonical**: "If `dynamicFilter(...)` isn't appearing in EXPLAIN, common causes are: (a) the join distribution is PARTITIONED rather than BROADCAST and DF coverage is narrower; (b) the join type/condition isn't DF-eligible (inner / right / semi with equi-predicates supported; left outer / non-equi much more limited); (c) the connector hasn't pushed DF down. Running ANALYZE helps the CBO put the SMALL table on the build side, which is what makes DF actually selective — but ANALYZE is not a precondition for DF nodes to appear." The responder's phrasing conflates "DF is on but ineffective" with "DF is not on."
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Accuracy | 2.5 | **TWO ERRORS**: (i) SQL CLAUSE-ORDER PARSE ERROR in main query: `FROM events WHERE event_date = DATE '2026-05-26' AND tags IS NOT NULL CROSS JOIN UNNEST(SPLIT(tags, ',')) AS t(tag) GROUP BY ...` — invalid SQL. JOINs (incl. CROSS JOIN UNNEST) are part of the FROM clause and MUST appear BEFORE WHERE. Engineer copy-pastes → `mismatched input 'CROSS' expecting <EOF>...`. Verified via trino.io/docs/current/sql/select.html and SQL grammar (FROM/JOIN → WHERE → GROUP BY → SELECT → ORDER BY is mandatory written order). (ii) Fabricated absence: "Trino has NO SPLIT_TO_MAP" — Trino DOES have `split_to_map(string, entryDelimiter, keyValueDelimiter)` per trino.io/docs/current/functions/string.html (returns `map<varchar, varchar>`). Minor aside (question was about counting tags, not k=v maps) but still a factual error. Otherwise SPLIT(tags, ',') → ARRAY correct, CROSS JOIN UNNEST AS t(tag) correct, TRIM(tag) correct, the LEFT JOIN UNNEST ... ON TRUE preserve-rows nuance is correct. |
+| Clarity | 4.0 | Reasonably clear; clean explanation of UNNEST and CROSS-vs-LEFT semantics. |
+| Actionability | 2.5 | The main query as written does NOT parse. Engineer must mentally re-order WHERE after JOIN before it runs. That defeats the purpose of a copy-pasteable answer. |
+| Completeness | 4.0 | Otherwise covers split, unnest, trim, group by, ordering. |
 
-This is a load-bearing nuance because an engineer following the responder's advice would (a) run ANALYZE (harmless), then (b) be confused when EXPLAIN still shows no `dynamicFilter` annotation despite stats existing (often because of join-distribution / non-eligible-join-shape reasons that ANALYZE doesn't address).
+**CORRECT QUERY (re-ordered):**
 
----
-
-## Q3 — Iceberg partition evolution add account_id (metadata-only): **4.875 STRONG PASS**
-
-**Dimensions**: Accuracy 5.0, Clarity 4.75, Actionability 5.0, Completeness 4.75.
-
-Verified against trino.io/docs/current/connector/iceberg.html + iceberg.apache.org:
-
-- `ALTER TABLE ... SET PROPERTIES partitioning = ARRAY['day(occurred_at)', 'bucket(account_id, 64)']` is the correct Trino 467 syntax and is metadata-only (instant). CONFIRMED.
-- Old files retain their previous spec_id; queries read across both specs transparently. CONFIRMED via Iceberg spec evolution semantics + Trino docs ("can still query data created before the partitioning change").
-- Old files do NOT get new pruning until rewritten under the new spec. CONFIRMED.
-- **Trino 467 has NO `rewrite_data_files` procedure** — only Spark has `CALL system.rewrite_data_files(...)`. CONFIRMED at trino.io/docs/current/connector/iceberg.html — supported procedures are `register_table`, `unregister_table`, `migrate`, `add_files_from_table`, `add_files` (NOT `rewrite_data_files`).
-- **`ALTER TABLE ... EXECUTE optimize` compacts files but does NOT re-stamp the partition spec.** CONFIRMED verbatim from Trino docs: "is used for rewriting the content of the specified table so that it is merged into fewer but larger files... acts separately on each partition." The optimize command does file-level compaction, not partition-spec migration — files compacted by optimize keep their original spec_id. **The responder correctly flagged this as a Trino-vs-Spark capability gap** and routed the engineer to Spark for the rewrite step. This is exactly the kind of dialect/engine boundary the SaaS engineer needs to know about up front.
-- `"events$files"` metadata table exposes `spec_id` for verification GROUP BY. CONFIRMED.
-- `expire_snapshots` cleanup mentioned as appropriate next step. CONFIRMED relevant.
-
-**Minor -0.25 Completeness**: did not mention that Spark and Trino must share the same Hive Metastore + MinIO bucket for the Spark `rewrite_data_files` step to be visible to subsequent Trino queries (a prod-environment gotcha given on-prem k8s + HMS + MinIO stack). Non-load-bearing.
-
----
-
-## Q4 — dbt unit tests with mock input data: **2.625 FAIL**
-
-**Dimensions**: Accuracy 4.0, Clarity 3.0, Actionability 1.5, Completeness 2.0.
-
-**Honest punt; ZERO fabrication.** Responder explicitly said "I don't have enough information in the resources," correctly distinguished dbt data tests (post-materialization assertions like `not_null`/`unique`/`relationships`/`expression_is_true`) from dbt UNIT TESTS (compile-time mock input + expected output verification of model SQL logic), and pointed the engineer at official docs. This honest-not-fabricated behavior is CORRECT — per the iter497-class scoring guidance, an honest punt is far better than a confident fab, and warrants partial Accuracy credit.
-
-**BUT** the engineer asked a real question and walked away empty-handed. Completeness and Actionability legitimately low.
-
-**GREP-CONFIRMED CONTENT GAP** (`grep -rni 'unit_tests\|unit tests' resources/` → ZERO matches). The dbt unit-test mechanic is genuinely absent from resources/.
-
-**Verified ground truth from docs.getdbt.com/docs/build/unit-tests + /reference/resource-properties/unit-tests:**
-
-- Available from dbt 1.8+ (or "Latest" release track).
-- YAML schema lives in a `models/.../schema.yml` (or dedicated `unit_tests.yml`) file with top-level `unit_tests:` key.
-- Per-test fields: `name`, `description` (optional), `model` (the target model under test), `given:` (list of input mock rows per `ref()` or `source()`), `expect:` (expected output rows).
-- Each `given` entry: `input: ref('upstream_model')`, `format: dict | csv | sql` (dict default), `rows:` (list of dict literals) OR `fixture: filename` pointing to `tests/fixtures/*.{csv,sql}`.
-- `expect:` follows the same `format` / `rows` / `fixture` shape.
-- You only specify the COLUMNS RELEVANT TO THE TEST — unspecified columns default to NULL in the mock input.
-- Triggered at build time by `dbt test --select test_type:unit` or `dbt build`; runs against a SAMPLE in the warehouse (CTE-substitution), NOT against real upstream tables.
-- DISTINCT from dbt data tests (which run AFTER materialization and assert properties of the warehouse output).
-
-### Iter505 teacher action — ADD a dbt-unit-tests canonical (HIGH PRIORITY)
-
-Add a new canonical section, likely in `resources/27-oracle-plsql-to-dbt-trino.md` §6.8 or as a new `resources/09-lakehouse-schema-design.md` dbt-testing subsection (whichever has the strongest dbt-test keyword neighborhood — leans toward r27 §6.7-area where existing dbt-test content lives). Content needs:
-
-1. **Findability anchor** at top with keywords: "dbt unit test / unit_tests YAML / given expect mock rows / mock input dbt / dbt 1.8 unit test / verify dbt model logic with sample data / dbt fixture file / dbt test transformation logic / dbt unit_tests vs data tests."
-2. **Worked YAML example** (`unit_tests:` block with `name`, `model`, `given` with two inputs using `format: dict` + inline `rows:`, `expect` with `format: dict` + inline `rows:`) on a realistic SaaS-engineer model (e.g., revenue allocation by tenant).
-3. **DO-NOT-CONFUSE callout** explicitly contrasting:
-   - **Unit tests** (compile-time, mock input + expected output, verify SQL LOGIC, no warehouse data dependency).
-   - **Data tests** (`not_null`/`unique`/`relationships`/custom singular tests + generic tests, post-materialization, assert properties of WAREHOUSE OUTPUT).
-4. **Run command**: `dbt test --select test_type:unit`, `dbt build` (which runs unit tests + data tests), `dbt-trino` adapter compatibility note (unit tests are dbt-core-level, work with dbt-trino as long as >=1.8).
-5. **Fixture file option** for larger mock inputs: `tests/fixtures/upstream_seed.csv` referenced via `fixture: upstream_seed`.
-6. **Cite docs.getdbt.com/docs/build/unit-tests** for primary doc reference.
-
-This is a NEW canonical (not a reconcile-in-place — there's no existing dbt-unit-test block to fix). Risk: keep it tight (<=30 lines) and avoid bleeding into data-test content (which already has multiple canonicals in r09/r13/r27).
-
----
-
-## ITER505 PROBE TARGETS (in priority order)
-
-1. **HIGH — dbt unit tests re-probe**: e.g., "I have a model that joins orders to refunds and computes net_revenue; I want to verify the join logic against three input rows. Does dbt support that, and where do I put the YAML?" — verifies the new canonical lands.
-2. **HIGH — Dynamic filtering 2nd angle**: e.g., "EXPLAIN shows no dynamicFilter on my fact-dim join even though I ran ANALYZE on both tables; why?" — tests whether the Q2 nuance reconcile (stats-recommended-not-required + join-distribution + join-shape eligibility) routes correctly. This catches whether the teacher will fix the Q2 overstatement.
-3. **MEDIUM — Iceberg partition evolution 2nd angle on Spark `rewrite_data_files`**: e.g., "What `rewrite-mode` / `where` filter do I pass to `rewrite_data_files` to only re-stamp partitions touched by today's writes?" — verifies the Spark-vs-Trino gap canonical holds and the responder defers to Spark not Trino.
-4. **MEDIUM — UNNEST + ORDINALITY 3rd angle**: e.g., "I want the position of each tag in the original array preserved alongside the user_id" — tests `WITH ORDINALITY` clause coverage in the new §1a (this may need a teacher one-liner if it's missing).
-5. **LOW — dbt unit tests fixture-file form**: 4th probe after #1 lands; tests `format: csv` + `fixture:` file reference.
-6. **NOT THIS ITER** — federation row stays UNPROBED per iter472-504 directive + the iter504 task explicit constraint. 4.49944/310 row UNCHANGED.
-
----
-
-## NO-OP / GUARDRAILS
-
-- **DO NOT touch r22 §13.x federation guardrails** (66 §13.x refs preserved). Federation rubric row stays 4.49944/310.
-- **DO NOT regress r07 §1a UNNEST canonical** (just landed iter504, do not add duplicate or contradict). Reconcile-in-place rule applies.
-- **DO NOT regress r07 §5 Pattern B2 / §4 Time-series locked canonicals** (the iter504 §1a cross-ref note correctly clarifies they don't need preserve-rows fix because sequence() never returns NULL/empty).
-- **DO NOT regress iter500 r09 dbt-snapshot Findability anchor / iter502 r27 §6.7D dbt-build-runs-seeds / iter503 r13 on_schema_change Findability + r27 §4.5A md5/surrogate-key reconcile.**
-
----
-
-## TOPIC AVG UPDATES
-
-- **Common analytical query patterns** (Q1 UNNEST array-explode canonical maps to r07 §1a → r07 is "Common analytical query patterns" topic): 4.645/10 → (4.645*10 + 5.0)/11 = 51.45/11 = **4.6773/11** (+0.0323).
-- **Improving complex SQL performance on Trino with dbt** (Q2 dynamic filtering = Trino perf lever): 4.6158/15 → (4.6158*15 + 3.875)/16 = 73.112/16 = **4.5695/16** (-0.0463 — Q2 nuance overstatement drags but still PASS).
-- **Iceberg partition design for SaaS: strategies, small-files, compaction** (Q3 partition evolution maps here): 4.4947/36 → (4.4947*36 + 4.875)/37 = 166.6842/37 = **4.5050/37** (+0.0103).
-- **Improving complex SQL performance on Trino with dbt** (Q4 dbt unit tests also maps to dbt-testing perf-validation topic): already-updated row (4.5695/16) → (4.5695*16 + 2.625)/17 = 75.737/17 = **4.4551/17** (-0.1144 — Q4 FAIL drags noticeably but stays above 3.5 floor).
-- **Federation**: NOT PROBED — **4.49944/310 row UNCHANGED.**
-
----
-
-## SCORE LINE (appended to rubric.md score history)
-
-```
-### Iter 504 — 2026-06-06 (EXTENDED PHASE) — 4.0938 PASS overall — FEDERATION NOT PROBED — Q1 UNNEST §1a FIX LANDED + Q4 dbt-unit-tests CONTENT GAP confirmed.
+```sql
+SELECT TRIM(tag) AS tag, COUNT(*) AS event_count
+FROM events
+CROSS JOIN UNNEST(SPLIT(tags, ',')) AS t(tag)
+WHERE event_date = DATE '2026-05-26'
+  AND tags IS NOT NULL
+GROUP BY TRIM(tag)
+ORDER BY event_count DESC;
 ```
 
-Full long-form score line appended to training/rubric.md score history below.
+### Q4 — Oracle TRUNC(amount, 2) → Trino — 4.9375 STRONG PASS
+
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5.0 | `truncate(x)` is 1-arg in Trino 467 (verified trino.io/docs/current/functions/math.html: "Returns x rounded to integer by dropping digits after decimal point"). 2-arg `truncate(x, n)` does NOT exist on 467 (verified via WebFetch — no two-arg variant). `truncate(amount*100)/100` is the correct 2-decimal-truncation idiom; result `truncate(123.456*100)/100 = 123.45` correct. General form `truncate(amount*power(10,2))/power(10,2)` correct. round() = HALF_UP correct. DO-NOT-WRITE list correctly bans `TRUNC(amount,2)`, `truncate(amount,2)`, `TRUNCATE(amount,2)`. |
+| Clarity | 5.0 | Direct mapping with worked numeric example. |
+| Actionability | 5.0 | Engineer copy-pastes the idiom and is done. |
+| Completeness | 4.75 | Covers idiom, general N-decimals form, round-vs-truncate distinction, DO-NOT-WRITE matrix. Minor -0.25 for no edge case on negative N or DECIMAL-vs-DOUBLE precision note (non-load-bearing). |
+
+---
+
+## What landed and what didn't
+
+- **FIX A (dbt unit tests new canonical r27 §6.7E)**: LANDED. Q1 5.000 STRONG PASS, doctrinally correct YAML, zero fabs, routed first try. Findability anchor + DO-NOT-CONFUSE callout + DO-NOT-WRITE matrix all functioning.
+- **FIX B (r23 line 197 DF reconcile-in-place)**: LANDED. Q2 4.875 STRONG PASS, explicit "stats help CBO ... but do NOT gate DF" + 6-step checklist. Closes iter504 Q2's stats-overstatement.
+
+## New issues introduced this iter
+
+- **Q3 SQL clause-order parse error**: load-bearing. The main query has WHERE before CROSS JOIN UNNEST. Whatever resource the responder pulled from has an example with broken clause order, OR the responder hallucinated the ordering. Needs investigation + reconcile-in-place.
+- **Q3 split_to_map fabricated absence**: minor. "Trino has NO SPLIT_TO_MAP" is wrong; the function exists. Probably an unsupported assertion the responder added on its own.
+
+---
+
+## Next-teacher actions (iter506)
+
+### HIGH PRIORITY — Q3 clause-order reconcile (load-bearing parse error)
+
+1. **GREP for any `WHERE ... CROSS JOIN UNNEST` pattern in resources/**. Any example with WHERE before JOIN in a single query body must be reconciled-in-place to put WHERE after the JOIN.
+2. **In the SPLIT/UNNEST canonical (r07 §1a + r23 § on UNNEST + any r28/r27 example)**, add an explicit one-liner: "**Clause order**: `FROM ... CROSS JOIN UNNEST(...) AS t(col) WHERE ... GROUP BY ...` — JOINs are part of FROM; WHERE goes AFTER all JOINs. Writing WHERE before CROSS JOIN UNNEST is a parse error."
+3. **DO-NOT-WRITE matrix entry** at the UNNEST canonical: ban `FROM <table> WHERE <pred> CROSS JOIN UNNEST(...)` and `FROM <table> WHERE <pred> AND <col> IS NOT NULL CROSS JOIN UNNEST(...)`.
+
+### MEDIUM PRIORITY — split_to_map fabricated absence reconcile
+
+1. **GREP `"NO SPLIT_TO_MAP"` / "no split_to_map" / "doesn't have split_to_map" in resources/**. If found anywhere, replace with the truth: Trino DOES have `split_to_map(string, entryDelimiter, keyValueDelimiter) -> map<varchar, varchar>` and `split_to_multimap(...)` per trino.io/docs/current/functions/string.html.
+2. **In the SPLIT canonical**, add a one-row table: "**Two-level splits**: use `split_to_map('a=1,b=2', ',', '=')` returns `{a:'1', b:'2'}` when the string is k=v pairs; use `split('a,b,c', ',')` returns `array['a','b','c']` for single-delimiter lists."
+
+### Iter506 probe targets
+
+- **HIGH — Q3 split-and-count RE-PROBE**: same shape ("column with comma-separated tags, count per tag") to verify the clause-order fix lands and the main query parses on first paste.
+- **HIGH — split_to_map angle**: e.g. "I have a column with `key1=val1;key2=val2` strings — how do I parse it in Trino?" to verify the fabricated-absence reconcile lands.
+- **MEDIUM — dbt unit tests 3rd angle (fixture file form)**: e.g. "my mock input has 200 rows — can I put it in a CSV file instead of inline YAML?" to test the `fixture:` keyword + `tests/fixtures/` directory coverage of §6.7E.
+- **MEDIUM — DF 3rd angle on LEFT OUTER JOIN**: "my fact-dim join is a LEFT JOIN and EXPLAIN shows no dynamicFilter — is that expected?" to verify the join-type bullet routes.
+- **LOW — Trino truncate vs round vs floor distinction**: 3rd angle on Q4 to test broader rounding-family coverage.
+- **DO NOT probe federation** — stays untouched per directive.
+
+### What NOT to touch
+
+- r22 §13.x federation guardrails (66+ DF mentions — all correct, all untouched per directive).
+- Federation rubric row (stays 4.49944/310).
+- r07 §1a UNNEST array-explode canonical + LEFT JOIN UNNEST ON TRUE one-liner (iter503/504).
+- r27 §6.7E dbt unit tests canonical (iter505 — landed, leave it).
+- r23 §4 DF 6-step checklist (iter505 — landed, leave it).
+- All other locked canonicals per state.json notes (iter495-503 fixes).

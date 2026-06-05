@@ -1944,6 +1944,7 @@ These tests run after `dbt run`. A failure breaks the pipeline — same semantic
 | "Where does dbt store failing rows when I use store_failures?" | In a schema named `<your_target_schema>_dbt_test__audit` (e.g. `analytics_dbt_test__audit`). NOT `dbt_internal`. | § store_failures schema location |
 | "How do I test that less than 5% of rows are null in a column?" | Use `dbt_utils.not_null_proportion: at_least: 0.95`. Do NOT use `expression_is_true` with COUNT — that is a SQL error at runtime. | § null-proportion threshold: not_null_proportion |
 | "What can I put in expression_is_true's expression?" | Only a **per-row boolean**: `>= 0`, `!= ''`, `IN ('A','B','C')`, `IS NOT NULL`. Never an aggregate function (COUNT, SUM, AVG) — that generates invalid SQL. | § expression_is_true is row-level only |
+| "How do I test my model's TRANSFORMATION LOGIC on MOCK input rows (given/expect)?" | That's a dbt **UNIT TEST** (different mechanism from data tests). See §6.7E for the `unit_tests:` / `given:` / `expect:` YAML schema. DO-NOT-CONFUSE: data tests (this §6.7A) = assertions on REAL warehouse output; unit tests (§6.7E) = assertions on MOCK input. | See [§6.7E LEADING CANONICAL — dbt UNIT TESTS](#67e-leading-canonical--dbt-unit-tests-18--testing-model-logic-on-mock-input-unit_tests-with-given--expect) |
 
 #### severity: warn vs error
 
@@ -2620,6 +2621,138 @@ Subtract a fixed lookback window (here 3 days) so late-arriving rows still get c
 **Q-pattern matcher.** If the question is "what does my dbt `is_incremental()` WHERE clause look like" — or any equivalent phrasing ("dbt watermark predicate", "scan only new rows in dbt", "is_incremental delta filter") — the answer is `WHERE <watermark_col> >= (SELECT COALESCE(MAX(<watermark_col>), <safe_default>) FROM {{ this }})` with the subquery wrapper. NOT a bare `MAX(...)` in WHERE. NOT an `IN (SELECT ... FROM {{ this }} ...)` against the target.
 
 For the deeper lookback-window discussion (failure modes, partition_by pairing, EXPLAIN ANALYZE validation), see [resource 28 § 8A.3](28-complex-sql-performance-trino-dbt.md#8a3-incremental-model-late-arriving-data-and-lookback-windows).
+
+---
+
+### 6.7E LEADING CANONICAL — dbt UNIT TESTS (1.8+) — testing model logic on MOCK input (`unit_tests:` with `given:` / `expect:`)
+
+> **READ THIS FIRST if your question contains any of these keywords: `dbt unit test`, `dbt unit tests`, `test model logic`, `test transformation logic`, `mock input rows`, `given expect`, `given/expect`, `unit_tests:` YAML, `format: dict`, `format: csv`, `format: sql`, `test_type:unit`, `dbt 1.8 unit tests`, `assert output for specific input`, `fixture`, `unit test fixture`, `does my model transform correctly`, `unit test a dbt model`.** This block is the canonical reference for the dbt 1.8+ `unit_tests:` property. All claims below are verified at [docs.getdbt.com/docs/build/unit-tests](https://docs.getdbt.com/docs/build/unit-tests), [docs.getdbt.com/reference/resource-properties/unit-tests](https://docs.getdbt.com/reference/resource-properties/unit-tests), and [docs.getdbt.com/reference/resource-properties/data-formats](https://docs.getdbt.com/reference/resource-properties/data-formats) (WebFetched 2026-06-06).
+
+**ONE-SENTENCE MENTAL MODEL.** A **unit test** in dbt is a YAML-declared assertion that says "when this model receives THIS exact set of input rows (`given:`), it must produce THIS exact set of output rows (`expect:`)" — it tests the model's **SQL transformation logic on MOCK input data**, NOT the post-build warehouse output. Available **dbt 1.8+** (originally previewed in dbt-labs releases; GA in 1.8).
+
+#### DO-NOT-CONFUSE — unit tests vs data tests (the single most common dbt-1.8 confusion)
+
+| | **dbt UNIT tests** (`unit_tests:`, this section §6.7E) | **dbt DATA tests** (`data_tests:` / column-level `tests:`, §6.7A above) |
+|---|---|---|
+| What it tests | The **TRANSFORMATION LOGIC** of one model | The **OUTPUT DATA** after the model materializes |
+| Input | **MOCK rows** you supply inline in YAML (`given:`) | **REAL warehouse rows** the model produced |
+| When it runs | At `dbt build` (before/alongside materialization, on the mock input — does NOT scan warehouse data) | At `dbt test` (after the model materializes — runs SQL against the warehouse output) |
+| YAML top-level key | `unit_tests:` | `data_tests:` (model/column-level under `models:`) |
+| Examples of test bodies | `given:` rows + `expect:` rows | `not_null`, `unique`, `accepted_values`, `relationships`, `dbt_utils.expression_is_true` |
+| Selector | `dbt test --select test_type:unit` | `dbt test --select test_type:data` |
+| Question shape | "Does my `coalesce(first, last)` logic produce `'Ada Lovelace'`?" | "Are there any NULL `customer_id` rows after the build?" |
+
+> **DO-NOT-CONFUSE callout:** unit-test `given:` / `expect:` rows **DO NOT** go under `data_tests:`. Likewise, `not_null` / `unique` / `accepted_values` **DO NOT** go under `unit_tests:`. They are two different YAML blocks with two different purposes. Putting `not_null` under `unit_tests:` will fail YAML schema validation; putting `given:` / `expect:` under `data_tests:` will be silently ignored as unrecognized config.
+
+#### YAML schema — exact keys (verbatim from docs.getdbt.com)
+
+```yaml
+# Lives under models/<your_subdir>/_unit_tests.yml (or any .yml under model-paths)
+# NOT under tests/ — unit tests MUST live in model-paths, per docs.getdbt.com.
+unit_tests:
+  - name: <test-name>                          # REQUIRED — unique identifier
+    model: <model-name>                        # REQUIRED — the model under test
+    given:                                     # REQUIRED — list of mock inputs
+      - input: ref('<upstream_model>')         # ref(...) OR source('<src>','<tbl>')
+        format: dict                           # OPTIONAL — dict (default) | csv | sql
+        rows:                                  # inline mock rows (or use fixture: <name>)
+          - {col_a: <value>, col_b: <value>}
+          - {col_a: <value>, col_b: <value>}
+      - input: source('app', 'lookup_tbl')     # additional inputs as needed
+        format: csv
+        rows: |                                # CSV-as-string when format: csv
+          col_x,col_y
+          1,foo
+          2,bar
+    expect:                                    # REQUIRED — expected OUTPUT rows
+      format: dict                             # OPTIONAL — dict (default) | csv | sql
+      rows:
+        - {out_col_1: <value>, out_col_2: <value>}
+```
+
+**Three accepted `format:` values** (verified at [docs.getdbt.com/reference/resource-properties/data-formats](https://docs.getdbt.com/reference/resource-properties/data-formats)):
+
+- `dict` (DEFAULT — used when `format:` is omitted) — `rows:` is a YAML list of dictionaries (`- {col: val, ...}`).
+- `csv` — `rows:` is either an inline CSV string (with header row) or `fixture: <name>` pointing to a CSV file under `tests/fixtures/`.
+- `sql` — `rows:` is a SQL `SELECT` statement that returns the mock rows (use sparingly; defeats the point of mock data).
+
+Either `rows:` OR `fixture:` (NOT both) — `fixture: my_csv_name` references a file in `tests/fixtures/my_csv_name.csv` or `.sql`.
+
+#### Concrete worked example — a `full_name` derivation model
+
+Suppose your model `models/marts/dim_customers.sql` derives `full_name` from `first_name` and `last_name`:
+
+```sql
+-- models/marts/dim_customers.sql
+SELECT
+  customer_id,
+  COALESCE(first_name, '') || ' ' || COALESCE(last_name, '') AS full_name,
+  CASE
+    WHEN total_amount >= 1000 THEN 'high'
+    WHEN total_amount >= 100  THEN 'mid'
+    ELSE 'low'
+  END AS amount_tier
+FROM {{ ref('stg_customers') }}
+```
+
+The unit test that asserts the logic:
+
+```yaml
+# models/marts/_unit_tests.yml
+unit_tests:
+  - name: test_dim_customers_full_name_and_tier
+    model: dim_customers
+    given:
+      - input: ref('stg_customers')
+        rows:
+          - {customer_id: 1, first_name: 'Ada',  last_name: 'Lovelace', total_amount: 1500}
+          - {customer_id: 2, first_name: 'Linus', last_name: NULL,      total_amount: 250}
+          - {customer_id: 3, first_name: NULL,  last_name: 'Hopper',    total_amount: 50}
+    expect:
+      rows:
+        - {customer_id: 1, full_name: 'Ada Lovelace', amount_tier: 'high'}
+        - {customer_id: 2, full_name: 'Linus ',       amount_tier: 'mid'}
+        - {customer_id: 3, full_name: ' Hopper',      amount_tier: 'low'}
+```
+
+**What this asserts at build time**: given exactly three mock rows from `stg_customers`, the model's SELECT logic must produce exactly the three `expect` rows. If your COALESCE handles NULLs wrong, the test fails BEFORE the model writes anything to the warehouse — you catch a logic bug at PR-review time, not on next-day ops.
+
+#### Running unit tests — the commands
+
+```bash
+# Run ONLY unit tests (no data tests, no models):
+dbt test --select test_type:unit
+
+# Run unit tests for ONE model:
+dbt test --select dim_customers,test_type:unit
+
+# dbt build runs unit tests as part of the model build pipeline.
+# For each model, the order is: unit tests -> materialization -> data tests -> downstream.
+# A failing unit test FAILS THE BUILD before the model writes to the warehouse.
+dbt build
+```
+
+Per [docs.getdbt.com/docs/build/unit-tests](https://docs.getdbt.com/docs/build/unit-tests): "unit tests are run by both `dbt test` and `dbt build` commands."
+
+#### DO-NOT-WRITE — banned unit-test claims (cite-or-omit)
+
+| DO NOT write | Why it's wrong |
+|---|---|
+| `data_tests:` with `given:` / `expect:` underneath | **WRONG top-level key.** Unit tests live under `unit_tests:` (NOT `data_tests:` and NOT under a column's `tests:` list). Putting `given:` / `expect:` under `data_tests:` is silently treated as unrecognized config and never runs. |
+| `unit_tests:` with `not_null:` or `unique:` underneath | **CATEGORY ERROR.** `not_null` / `unique` / `accepted_values` are **data tests**, not unit tests. They go under `data_tests:` (model/column level), NOT `unit_tests:`. |
+| `given:` with `data:` (instead of `rows:`) | **FABRICATED key.** The mock-rows key is `rows:`, NOT `data:`. |
+| `expect:` with `result:` or `output:` (instead of `rows:`) | **FABRICATED key.** The expected-rows key is `rows:`, NOT `result:` / `output:`. |
+| `format: yaml` or `format: json` | **FABRICATED values.** The three accepted `format:` values are `dict`, `csv`, `sql`. Default is `dict` when omitted. |
+| "Unit tests query the warehouse output" | **WRONG.** Unit tests run on MOCK input rows defined inline; they do NOT scan warehouse data. That's what data tests do (§6.7A). |
+| "Unit tests are dbt 1.6+" or "dbt 1.7+" | **WRONG version.** Unit tests are **dbt 1.8+** (GA in 1.8). Earlier versions do not parse `unit_tests:`. |
+| Putting the `unit_tests:` file under `tests/` | **WRONG directory.** Unit test YAML files MUST live under your `model-paths` (e.g., `models/`), NOT under `tests/`. Per [docs.getdbt.com/reference/resource-properties/unit-tests](https://docs.getdbt.com/reference/resource-properties/unit-tests). |
+| `dbt test --select test_type:unit_test` (with the `_test` suffix) | **WRONG selector value.** The selector is `test_type:unit` (no `_test` suffix). The matching data-test selector is `test_type:data`. |
+
+#### Cross-references
+
+- **§6.7A** (immediately above) — dbt **DATA tests** (severity, store_failures, expression_is_true vs not_null_proportion). DO-NOT-CONFUSE: data tests = assertions on REAL warehouse output; unit tests (this §6.7E) = assertions on MOCK input.
+- **§6.7D** (above) — dbt seeds (small static CSVs as lookup tables). Seeds can be referenced from unit tests via `input: ref('seed_name')` for cases where the mock input is a stable reference table.
+- Official docs: [docs.getdbt.com/docs/build/unit-tests](https://docs.getdbt.com/docs/build/unit-tests), [docs.getdbt.com/reference/resource-properties/unit-tests](https://docs.getdbt.com/reference/resource-properties/unit-tests), [docs.getdbt.com/reference/resource-properties/data-formats](https://docs.getdbt.com/reference/resource-properties/data-formats), [docs.getdbt.com/blog/announcing-unit-testing](https://docs.getdbt.com/blog/announcing-unit-testing).
 
 ---
 
