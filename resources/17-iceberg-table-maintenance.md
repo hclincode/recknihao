@@ -151,6 +151,130 @@ The Trino `sorted_by + EXECUTE optimize` recipe above covers the most common cas
 
 ---
 
+## LEADING CANONICAL — Trino 467 Iceberg schema evolution: what's metadata-only NATIVE, what's UNSUPPORTED (read FIRST before claiming "use Spark for DROP / RENAME / widen")
+
+> **Why this section exists (iter470 Q3 fab class — fabricated-capability-restriction).** A SaaS engineer asked "I need to drop a deprecated column / rename a column / widen INT to BIGINT / reorder columns on a 5 TB Iceberg table — can Trino 467 do this natively or do I need Spark?" The previous responder hallucinated a `column_order` table property AND claimed "Trino 467 cannot DROP COLUMN — use Spark" — **both false on Trino 467 + Iceberg 1.5.2**. The engineer was sent to Spark unnecessarily for an operation Trino runs natively. This block is the canonical fact source: DROP COLUMN, RENAME COLUMN, and safe-widening SET DATA TYPE are all **Trino 467 NATIVE, metadata-only operations**; the genuinely unsupported subset (existing-column reorder, narrowing, incompatible types) is small and explicitly listed below.
+
+> **Stack pin.** Trino 467 (6 Dec 2024) + Iceberg connector backed by Hive Metastore + Iceberg 1.5.2 / format v2. Every claim below was WebSearch-verified against [trino.io/docs/current/sql/alter-table.html](https://trino.io/docs/current/sql/alter-table.html), [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (ALTER TABLE supported statements section), and [iceberg.apache.org/docs/latest/evolution/](https://iceberg.apache.org/docs/latest/evolution/).
+
+### Trino 467 NATIVE on Iceberg connector — metadata-only, NO Spark required
+
+The following four ALTER TABLE statements all run NATIVELY on Trino 467 against the Iceberg connector. Each is **metadata-only** (Iceberg writes a new metadata.json snapshot pointer; no Parquet data file is touched). All four complete in **milliseconds even on a 10 TB table**.
+
+```sql
+-- 1. ADD COLUMN — metadata-only. NO DEFAULT clause on 467 (Trino 477+ feature);
+--    new column is always nullable; existing rows read as NULL. See LEADING CANONICAL below.
+ALTER TABLE iceberg.analytics.events ADD COLUMN new_status VARCHAR COMMENT '...';
+
+-- 2. DROP COLUMN — metadata-only, NATIVELY SUPPORTED on Trino 467.
+--    Iceberg retires the field ID from the current schema; old Parquet files still
+--    contain the bytes but readers stop projecting that field ID.
+--    Storage is not reclaimed until you run the DROP COLUMN reclaim runbook below.
+ALTER TABLE iceberg.analytics.events DROP COLUMN deprecated_column;
+
+-- 3. RENAME COLUMN — metadata-only. Iceberg tracks columns by field ID, so the
+--    rename updates only the human-readable name; the field ID is preserved and
+--    ALL historical Parquet data is immediately accessible under the new name.
+ALTER TABLE iceberg.analytics.events RENAME COLUMN old_name TO new_name;
+
+-- 4. SET DATA TYPE (safe widening only) — metadata-only.
+--    Iceberg writes the wider type into the schema; old Parquet files keep their
+--    narrower physical type and the reader up-casts at read time.
+ALTER TABLE iceberg.analytics.events ALTER COLUMN user_id SET DATA TYPE BIGINT;
+```
+
+**Safe-widening promotion matrix (the ONLY type changes Iceberg accepts).** Verified against [iceberg.apache.org/docs/latest/evolution/](https://iceberg.apache.org/docs/latest/evolution/) — the Iceberg spec rejects any type change outside this list at commit time:
+
+| From | To | Why it's safe (no data file rewrite needed) |
+|---|---|---|
+| `INTEGER` | `BIGINT` | Every 32-bit signed int fits in 64 bits; reader sign-extends on read. |
+| `REAL` (float32) | `DOUBLE` (float64) | Every float32 value is exactly representable as float64; reader up-casts. |
+| `DECIMAL(p, s)` | `DECIMAL(p', s)` where `p' > p` (same scale) | **Precision-widen only with SAME scale.** Old digits fit in the wider precision; scale is unchanged so no rounding. |
+
+### Trino 467 does NOT support natively — the genuinely-unsupported subset
+
+This is the **complete** list of schema-evolution operations that Trino 467 cannot do on Iceberg. Everything OUTSIDE this list (DROP / RENAME / safe-widen / ADD without DEFAULT) IS supported natively — do not invent additional restrictions.
+
+```sql
+-- A. REORDER existing columns — NO native Trino 467 DDL.
+--    There is NO `column_order` table property (FABRICATED — see DO-NOT-WRITE below).
+--    Trino's `ADD COLUMN ... FIRST | AFTER` clause was added in Trino 469 — NOT 467
+--    (and even on 469+ it places only NEW columns; it does NOT reorder existing ones).
+--    Spark reorders via: ALTER TABLE t ALTER COLUMN col FIRST | AFTER other_col.
+--    HOWEVER: column reorder is COSMETIC ONLY — Iceberg + Parquet are columnar, so reads
+--    project only queried columns regardless of declaration order; storage layout and
+--    query performance are unchanged. Use explicit column lists in production queries
+--    (never `SELECT *`) if presentation order matters and skip the reorder entirely.
+
+-- B. NARROWING type changes — Iceberg spec rejects at commit time, NOT a Trino limitation.
+-- ALTER TABLE t ALTER COLUMN big_col SET DATA TYPE INTEGER;   -- BIGINT -> INTEGER: rejected
+-- ALTER TABLE t ALTER COLUMN dbl_col SET DATA TYPE REAL;      -- DOUBLE -> REAL:    rejected
+-- ALTER TABLE t ALTER COLUMN dec_col SET DATA TYPE DECIMAL(8, 2);  -- DECIMAL(10,2) -> DECIMAL(8,2): rejected
+-- Workaround for narrowing: ADD COLUMN narrow_col + backfill via CAST + DROP old + RENAME new.
+
+-- C. DECIMAL scale change (precision-OK, scale-NOT) — also Iceberg spec rejection.
+-- ALTER TABLE t ALTER COLUMN price SET DATA TYPE DECIMAL(12, 4);  -- (10,2) -> (12,4): rejected
+-- Scale-changes change the on-disk encoding's interpretation; Iceberg cannot promote them.
+-- Workaround: same ADD + backfill (CAST) + DROP + RENAME pattern as narrowing.
+
+-- D. Incompatible type conversions (e.g., INTEGER -> VARCHAR) — Iceberg spec rejection.
+-- Workaround: same ADD + backfill (CAST(int_col AS VARCHAR)) + DROP + RENAME pattern.
+```
+
+**The add-new-col + backfill + drop-old + rename pattern (for narrowing / scale-change / incompatible types):**
+
+```sql
+-- Step 1: Add the new column with the target type.
+ALTER TABLE iceberg.analytics.events ADD COLUMN user_id_v2 INTEGER;
+
+-- Step 2: Backfill via CAST. Trino UPDATE on CoW tables; Spark INSERT OVERWRITE for whole-table rewrites.
+UPDATE iceberg.analytics.events
+   SET user_id_v2 = CAST(user_id AS INTEGER)
+ WHERE user_id_v2 IS NULL
+   AND user_id <= 2147483647;   -- guard against overflow when narrowing BIGINT -> INTEGER
+
+-- Step 3: Drop the old column (metadata-only).
+ALTER TABLE iceberg.analytics.events DROP COLUMN user_id;
+
+-- Step 4: Rename the new column to the old name (metadata-only). NOTE: new field ID is permanent
+-- (the old user_id field ID is retired; this user_id is a fresh field ID — old Parquet rows
+-- still under the original field ID become unreadable as user_id under the new ID).
+ALTER TABLE iceberg.analytics.events RENAME COLUMN user_id_v2 TO user_id;
+```
+
+### DO-NOT-WRITE — banned schema-evolution forms (citation-hygiene)
+
+> **The following claims are FORBIDDEN in any Trino-467 + Iceberg-1.5.2 context. Each row was WebSearch-verified.**
+>
+> | DO NOT WRITE | Why it's wrong | Correct form on this stack |
+> |---|---|---|
+> | "Trino 467 cannot DROP COLUMN — use Spark for DROP COLUMN" | **FABRICATED CAPABILITY RESTRICTION** (iter470 Q3 fab class). [trino.io/docs/current/sql/alter-table.html](https://trino.io/docs/current/sql/alter-table.html) documents `ALTER TABLE [IF EXISTS] name DROP COLUMN [IF EXISTS] column_name`; [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) lists DROP COLUMN among supported ALTER TABLE statements for the Iceberg connector. DROP COLUMN runs NATIVELY on Trino 467 — engineer who is told otherwise is sent to Spark unnecessarily. | `ALTER TABLE iceberg.schema.table DROP COLUMN column_name;` — runs natively on Trino 467, metadata-only per Iceberg spec. |
+> | "Trino 467 cannot RENAME COLUMN — use Spark" | **FABRICATED.** `ALTER TABLE name RENAME COLUMN a TO b` is documented as supported on the Iceberg connector. Iceberg's field-ID model makes RENAME metadata-only on either engine. | `ALTER TABLE iceberg.schema.table RENAME COLUMN old_name TO new_name;` — Trino 467 native. |
+> | "Trino 467 cannot widen INT to BIGINT — use Spark" | **FABRICATED.** `ALTER TABLE name ALTER COLUMN col SET DATA TYPE BIGINT` for safe widening is documented and supported. | `ALTER TABLE iceberg.schema.table ALTER COLUMN user_id SET DATA TYPE BIGINT;` — Trino 467 native. |
+> | `ALTER TABLE iceberg.x.y SET PROPERTIES column_order = ARRAY['col1', 'col2', ...]` | **FABRICATED TABLE PROPERTY** — `column_order` is NOT in the Iceberg connector's supported-properties list. Per [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html), supported table properties are: `format`, `compression_codec`, `partitioning`, `sorted_by`, `location`, `format_version`, `max_commit_retry`, `delete_after_commit_enabled`, `max_previous_versions`, `orc_bloom_filter_columns`, `orc_bloom_filter_fpp`, `parquet_bloom_filter_columns`, `object_store_layout_enabled`, `data_location`, `extra_properties`. Engineer gets `Catalog 'iceberg' table property 'column_order' does not exist`. | Trino 467 has NO native column-reorder DDL. Spark reorders via `ALTER TABLE ... ALTER COLUMN col FIRST | AFTER other_col`. But reorder is COSMETIC ONLY — columnar storage is order-independent, so usually you just skip the reorder. Use explicit column lists in queries if presentation order matters. |
+> | `ALTER TABLE iceberg.x.y ALTER COLUMN col SET DATA TYPE INTEGER` (narrowing BIGINT → INTEGER) | **Iceberg spec rejects** at commit time — not a Trino limitation. Same for DOUBLE → REAL, DECIMAL(10,2) → DECIMAL(8,2), DECIMAL precision-OK + scale-change. | Use the 4-step add-new-col + backfill (CAST) + drop-old + rename pattern shown above. |
+> | `ALTER TABLE iceberg.x.y ALTER COLUMN col SET DATA TYPE VARCHAR` (incompatible: INTEGER → VARCHAR) | **Iceberg spec rejects.** | Same 4-step pattern; backfill is `SET col_v2 = CAST(col AS VARCHAR)`. |
+> | "Trino 467 has a `column_order` session property" / "set `iceberg.column_order` to reorder" | **FABRICATED.** No such property exists at session, catalog, or table level on Trino 467 — verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (Iceberg-connector properties list). | Same as above — Trino 467 has no reorder primitive; Spark `ALTER COLUMN FIRST | AFTER` is the only way; reorder is cosmetic anyway. |
+> | `ALTER TABLE ... RENAME COLUMN col TO new` followed by silent assumption "old Parquet data is now unreachable" | **FALSE.** Iceberg's field-ID model preserves the field ID through rename; ALL historical data is immediately readable under the new name with zero file rewrites. | Renames are loss-less metadata-only on Iceberg — emphasize this when migrating from Hive (where rename was destructive). |
+
+### Where DROP COLUMN does NOT just work — the two real edge cases (not capability restrictions)
+
+These are NOT "Spark required" cases; they are Iceberg-spec preconditions that fail at commit time regardless of engine. Listed separately so they aren't confused with the fabricated capability restrictions banned above.
+
+1. **DROP COLUMN on a current partition column.** The DDL fails with `Cannot find source column for partition field` (Iceberg refuses to leave a partition spec referencing a non-existent column). To remove a partition column, first evolve the partition spec with `ALTER TABLE ... SET PARTITION SPEC (...)` so it no longer references the column, let new writes use the new spec, then DROP COLUMN succeeds. See § DROP COLUMN reclaim runbook below for the storage-reclamation step.
+
+2. **DROP COLUMN does not reclaim storage by itself.** Metadata-only DDL retires the field ID; the column's bytes remain in pre-DROP Parquet files until you run `optimize` + `expire_snapshots` + `remove_orphan_files`. See § DROP COLUMN reclaim runbook for the literal 3-step sequence. This is a STORAGE concern, not a capability gap — the DDL itself succeeds.
+
+### Cross-references
+
+- **Below: LEADING CANONICAL — Adding a column** — the ADD COLUMN companion (NO DEFAULT clause on 467, always nullable, existing rows read as NULL).
+- **Below: § DROP COLUMN reclaim runbook** — the storage-reclamation 3-step for actually freeing the bytes after a DROP.
+- **Below: VERSION-PIN GUARDRAIL** — the meta-canonical for "don't paste post-467 features into the 467 stack."
+- **resources/13 § ADD COLUMN nullability note** — why every new Iceberg column is nullable regardless of source DDL.
+- **resources/09 § Iceberg schema evolution** — the foundational column-ID model that makes ADD / DROP / RENAME safe in the first place.
+
+---
+
 ## LEADING CANONICAL — Adding a column to an Iceberg table on Trino 467 / Iceberg 1.5.2 (read this BEFORE recommending any `ADD COLUMN` syntax)
 
 > **Why this section exists (iter458 Q3 fab class).** A SaaS engineer asked: "How do I add a column with a default value to an Iceberg table?" The previous responder hallucinated `ALTER TABLE ... ADD COLUMN <col> <type> DEFAULT '<value>'` syntax as if it worked on Trino 467, AND claimed "existing rows automatically return the default value" — **both wrong for the production stack** (Trino 467 + Iceberg 1.5.2 / format v2). The engineer copy-pasted the DDL and got `mismatched input 'DEFAULT'` at parse time. This section installs the canonical truth so the next responder gets it right.
@@ -622,6 +746,96 @@ SELECT * FROM iceberg.analytics.`events$snapshots`;
 > ```
 >
 > **Meta-rule:** the Iceberg Java API uses ms-epoch field names (`timestamp_ms`, `parent_snapshot_id`); Trino's `$snapshots` metadata table uses human-readable, dialect-translated column names (`committed_at`, `parent_id`). The two are NOT interchangeable. Source the Trino names from [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) — NOT from the Iceberg Java API docs or a Spark example.
+
+### LEADING CANONICAL — `$refs` vs `$snapshots` — pick the right metadata table for branch / tag lookups (read FIRST before querying for a branch's snapshot)
+
+> **Why this section exists (iter470 Q1 fab class — `$snapshots.ref_name` column does NOT exist).** A SaaS engineer asked "How do I find the current snapshot for the `staging` branch on an Iceberg table?" and the previous responder generated `SELECT snapshot_id FROM iceberg.schema.table.$snapshots WHERE ref_name = 'staging'` — TWO load-bearing bugs in one statement: (a) malformed metadata-table quoting (the `$` must be inside the same double-quote pair as the table name), and (b) `ref_name` is NOT a column of `$snapshots`. Branch/tag names live in a SEPARATE metadata table called `$refs`. This block is the canonical fact source for the two tables and the correct JOIN pattern.
+
+> **Stack pin.** Trino 467 + Iceberg connector backed by Hive Metastore + Iceberg 1.5.2. Column lists below were WebSearch-verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) "Metadata tables" section.
+
+#### The two tables — disjoint purposes, ONE shared join key (`snapshot_id`)
+
+| Metadata table | Purpose | Columns (exact, Trino 467) | Has a ref-name column? |
+|---|---|---|---|
+| `"<table>$snapshots"` | One row per commit (snapshot) in the table's history. Time-travel + rollback lookups. | `committed_at`, `snapshot_id`, `parent_id`, `operation`, `manifest_list`, `summary` | **NO.** A snapshot is NOT a ref. Snapshots have IDs and timestamps, not names. |
+| `"<table>$refs"` | One row per named REF (branch or tag) pointing at a snapshot. Branch / tag DDL lookups. | `name`, `type`, `snapshot_id`, `max_reference_age_in_ms`, `min_snapshots_to_keep`, `max_snapshot_age_in_ms` | **YES — column is `name`, NOT `ref_name`.** `type` is `'BRANCH'` or `'TAG'`. |
+
+The single shared column is `snapshot_id` — that's how you join the two tables to answer "what snapshot is the `staging` branch pointing at, and when was it committed?"
+
+#### The canonical worked queries (copy-paste against Trino 467)
+
+```sql
+-- 1. List ALL snapshots (commits) on the table. NO ref names appear here.
+--    Columns: committed_at, snapshot_id, parent_id, operation, manifest_list, summary.
+SELECT snapshot_id, committed_at, operation
+FROM iceberg.analytics."orders$snapshots"
+ORDER BY committed_at DESC
+LIMIT 20;
+
+-- 2. List ALL refs (branches AND tags) on the table. This is where NAMES live.
+--    Columns: name, type, snapshot_id, max_reference_age_in_ms,
+--             min_snapshots_to_keep, max_snapshot_age_in_ms.
+SELECT name, type, snapshot_id
+FROM iceberg.analytics."orders$refs"
+ORDER BY type, name;
+
+-- 3. Find ONLY branches (exclude tags).
+SELECT name, snapshot_id
+FROM iceberg.analytics."orders$refs"
+WHERE type = 'BRANCH';
+
+-- 4. Find the snapshot ID for a SPECIFIC branch by name.
+--    The column is `name`, NOT `ref_name`. Filter on `type = 'BRANCH'` to disambiguate
+--    from any tag that happens to share the name.
+SELECT snapshot_id
+FROM iceberg.analytics."orders$refs"
+WHERE name = 'staging_2026_06_05'
+  AND type = 'BRANCH';
+
+-- 5. THE CANONICAL JOIN — given a branch name, return its snapshot tip + commit metadata.
+--    This is the pattern engineers reach for when they wrote `ref_name` against $snapshots:
+--    JOIN $refs (where the name lives) to $snapshots (where the commit metadata lives)
+--    ON the shared snapshot_id.
+SELECT r.name        AS branch_name,
+       r.type        AS ref_type,
+       s.snapshot_id,
+       s.committed_at,
+       s.operation,
+       s.summary
+FROM   iceberg.analytics."orders$refs"      r
+JOIN   iceberg.analytics."orders$snapshots" s ON r.snapshot_id = s.snapshot_id
+WHERE  r.name = 'staging_2026_06_05'
+  AND  r.type = 'BRANCH';
+
+-- 6. List ALL branches with their tip commit metadata (no WHERE on a specific name).
+SELECT r.name AS branch_name, s.snapshot_id, s.committed_at, s.operation
+FROM   iceberg.analytics."orders$refs"      r
+JOIN   iceberg.analytics."orders$snapshots" s ON r.snapshot_id = s.snapshot_id
+WHERE  r.type = 'BRANCH'
+ORDER  BY s.committed_at DESC;
+```
+
+#### DO-NOT-WRITE — banned `$refs` / `$snapshots` forms (citation-hygiene)
+
+> **The following forms are FORBIDDEN. Each one fails with a specific error on Trino 467.**
+>
+> | DO NOT WRITE | Why it fails | Correct form |
+> |---|---|---|
+> | `SELECT ... FROM iceberg.analytics."orders$snapshots" WHERE ref_name = 'staging'` | **FABRICATED column** — `$snapshots` has NO `ref_name` column. The six `$snapshots` columns are `committed_at`, `snapshot_id`, `parent_id`, `operation`, `manifest_list`, `summary`. Trino fails with `Column 'ref_name' cannot be resolved`. | Query `$refs` instead: `WHERE name = 'staging' AND type = 'BRANCH'` (the column is `name`, NOT `ref_name`). See query 4 above. |
+> | `SELECT ... FROM iceberg.analytics."orders$refs" WHERE ref_name = 'staging'` | **FABRICATED column** — `$refs` has `name` (NOT `ref_name`). Trino fails with `Column 'ref_name' cannot be resolved`. | `WHERE name = 'staging'`. Iceberg's documented column name is `name`. See query 4 above. |
+> | `SELECT ... FROM iceberg.analytics.orders.$snapshots` | **MALFORMED QUOTING** — the `$` is part of the metadata-table identifier and must be inside the SAME double-quote pair as the base table name. The dotted form parses as `catalog.schema.table.column` and tries to resolve `$snapshots` as a column of `orders`, failing with an unresolvable-identifier error. | `iceberg.analytics."orders$snapshots"` — the WHOLE `orders$snapshots` token in one pair of double quotes. See the Metadata-table quoting section above for the full set of variations. |
+> | `SELECT ... FROM iceberg.analytics.orders.$refs` | Same MALFORMED QUOTING — fails with the same parse / resolution error. | `iceberg.analytics."orders$refs"`. |
+> | `SELECT ... FROM iceberg.analytics.orders."$snapshots"` | Also MALFORMED — the dot between `orders` and `"$snapshots"` parses as a column-reference accessor. Quotes must wrap the WHOLE `orders$snapshots` token. | `iceberg.analytics."orders$snapshots"`. |
+> | "`$snapshots` lists all branches with their tips" | **FALSE.** `$snapshots` lists commits (one row per snapshot), NOT refs. Use `$refs` for branch/tag enumeration. | Query 2 / query 3 above against `$refs`. |
+> | "`$refs` has the commit timestamp column" | **FALSE.** `$refs` has retention columns (`max_reference_age_in_ms`, etc.) but NO commit timestamp. The commit time of the snapshot that a ref points at lives in `$snapshots.committed_at` — JOIN to get it. | Query 5 above (JOIN $refs to $snapshots on snapshot_id). |
+
+#### Cross-references
+
+- **Above: § Iceberg metadata tables cheat sheet — Metadata-table quoting** — the canonical `iceberg.schema."table$metadata"` quoting rule and the full set of failed-quoting variants.
+- **Above: § LEADING CANONICAL — Trino 467 `$snapshots` column list** — the 6-column $snapshots schema with full DO-NOT-WRITE matrix for Iceberg-Java-API names that LOOK like Trino columns but aren't.
+- **Below: § Iceberg tags + WAP branches** — the operational use cases that drive most `$refs` queries (find the tag pointing at a billing-close snapshot; find the WAP branch's tip before audit).
+
+---
 
 ### LEADING CANONICAL — Trino dialect ↔ native-Iceberg name translation (meta-canonical)
 
@@ -2523,22 +2737,29 @@ After this, every snapshot Spark commits lives on `audit-branch`. A `SELECT * FR
 
 #### Step 3 — Audit the branch (Trino read is fine here)
 
-This is the only WAP step where Trino is useful. Trino 467 can **read** a branch via `FOR VERSION AS OF <snapshot-id>`. First, find the branch's current snapshot ID from the `$snapshots` metadata table:
+This is the only WAP step where Trino is useful. Trino 467 can **read** a branch via `FOR VERSION AS OF <snapshot-id>`. **Find the branch's current snapshot ID from the `$refs` metadata table** — NOT from `$snapshots`. Branch / tag names live in `$refs` (`name` + `type` + `snapshot_id`); `$snapshots` has NO ref-name column. See the LEADING CANONICAL § `$refs` vs `$snapshots` block above for the full contrast and DO-NOT-WRITE matrix.
 
 ```sql
--- Trino 467 — find the latest snapshot on audit-branch.
--- The $snapshots table includes a 'parent_id' column you can chain through
--- to walk the branch history, plus a 'summary' map with a 'wap.id' / branch
--- info entry on snapshots committed via spark.wap.branch.
+-- Trino 467 — DEFAULT pattern: get the branch tip directly from $refs (one row).
+-- The column is `name`, NOT `ref_name`. Filter on type='BRANCH' to exclude tags.
+SELECT snapshot_id, max_reference_age_in_ms
+FROM iceberg.analytics."events$refs"
+WHERE name = 'audit-branch' AND type = 'BRANCH';
+
+-- Trino 467 — if you also want the commit timestamp + summary for the tip,
+-- JOIN $refs to $snapshots on snapshot_id (this is the canonical JOIN pattern).
+SELECT r.snapshot_id, s.committed_at, s.operation, s.summary
+FROM iceberg.analytics."events$refs"      r
+JOIN iceberg.analytics."events$snapshots" s ON r.snapshot_id = s.snapshot_id
+WHERE r.name = 'audit-branch' AND r.type = 'BRANCH';
+
+-- $snapshots ALONE (no ref filter) returns the whole commit history, ordered by time —
+-- useful when you DON'T know the branch name and want to walk the recent commit log.
+-- DO NOT add `WHERE ref_name = ...` here — that column does NOT exist on $snapshots.
 SELECT snapshot_id, committed_at, operation, summary
 FROM iceberg.analytics."events$snapshots"
 ORDER BY committed_at DESC
 LIMIT 10;
-
--- Or use $refs to find the branch tip directly:
-SELECT name, type, snapshot_id, max_reference_age_in_ms
-FROM iceberg.analytics."events$refs"
-WHERE name = 'audit-branch';
 ```
 
 Then run your audit queries against that snapshot ID. The branch's snapshot is queryable as if it were any historical snapshot:

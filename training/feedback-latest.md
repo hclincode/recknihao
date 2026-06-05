@@ -1,10 +1,16 @@
-# Judge Feedback — Iter 470 (Extended Phase, End-of-Iteration)
+# Judge Feedback — Iter 471 (Extended Phase, End-of-Iteration)
 
 **Date**: 2026-06-05
 **Phase**: Extended (end-of-iteration feedback only)
-**Overall**: **3.71875 THIN PASS** (69th consecutive extended-phase PASS — thinnest margin in months)
+**Overall**: **3.703125 THIN PASS** (70th consecutive extended-phase PASS — second-thinnest margin in months, only 0.015 above iter470)
 
-**Verdict**: PASS, but only because Q4 (4.4375) and Q2 (4.25) carried the iter. Q1 (3.375) and Q3 (2.8125) alone would have failed. Three distinct load-bearing fabrications across Q1 and Q3 — citation-hygiene streak BROKEN.
+**Verdict**: PASS, but only because Q2 (4.625) carried the iter. Two distinct load-bearing fabrications (Q1 `SET PARTITION SPEC`, Q3 `parse_date`) plus a Q4 content gap. Citation-hygiene streak BROKEN again — different fab classes than iter470 but still two confident-but-wrong load-bearing claims in one iter.
+
+**Streak statuses**:
+- **DROP COLUMN capability-fix streak: CONFIRMED HELD** (Q1 correctly says native on Trino 467, no Spark, metadata-only, 3-step reclamation; no `column_order` fab) — iter470 Q3 hard-fail correctly bandaged by the new r17 LEADING schema-evolution canonical.
+- **$refs metadata-table fix streak: CONFIRMED HELD** (Q2 correctly uses `"orders$refs"` quoting, column `name` NOT `ref_name`, type='BRANCH', snapshot_id) — iter470 Q1 fab correctly bandaged by the new r17 LEADING $refs-vs-$snapshots canonical.
+
+Both targeted fixes from iter471 teacher cycle landed cleanly. But two NEW fab classes surfaced.
 
 ---
 
@@ -12,159 +18,167 @@
 
 | Q | Topic | Acc | Compl | Clar | Act | Avg | Verdict |
 |---|---|---|---|---|---|---|---|
-| Q1 | Iceberg WAP staging-branch + fast_forward | 3.0 | 3.75 | 4.0 | 2.75 | **3.375** | THIN PASS |
-| Q2 | Oracle MERGE WHEN NOT MATCHED BY SOURCE → Trino | 4.25 | 4.25 | 4.5 | 4.0 | **4.25** | PASS |
-| Q3 | Iceberg schema evolution (widen/rename/reorder/drop) | 2.0 | 3.5 | 4.0 | 1.75 | **2.8125** | HARD FAIL |
-| Q4 | Why Parquet faster than Postgres | 4.5 | 4.25 | 4.75 | 4.25 | **4.4375** | STRONG PASS |
+| Q1 | Iceberg DROP COLUMN + partition-evolution edge case | 3.5 | 4.0 | 4.25 | 3.25 | **3.75** | PASS |
+| Q2 | $refs branch-snapshot lookup | 4.75 | 4.5 | 4.5 | 4.75 | **4.625** | STRONG PASS |
+| Q3 | Oracle NVL / INSTR / TO_DATE → Trino | 3.0 | 4.0 | 4.25 | 2.75 | **3.5** | BORDERLINE PASS |
+| Q4 | dbt model contracts (content gap) | 4.0 | 2.0 | 3.75 | 2.0 | **2.9375** | FAIL (content gap) |
 
-**Overall avg**: (3.375 + 4.25 + 2.8125 + 4.4375) / 4 = **3.71875** → PASS (≥3.5), but barely.
+**Overall avg**: (3.75 + 4.625 + 3.5 + 2.9375) / 4 = **3.703125** → PASS (≥3.5), barely.
 
 ---
 
 ## Per-question justification (1-2 lines each)
 
-**Q1 — 3.375 THIN PASS**: fast_forward arg order CORRECT (credit — `branch='main'` moved forward to `to='staging'` matches iceberg.apache.org/docs/latest/spark-procedures/), Spark WAP wiring and Trino 467 branch-write limits correctly identified. BUT two load-bearing bugs in the same snapshot-lookup SQL: (a) malformed quoting `iceberg.analytics.orders.$snapshots` (must be `iceberg.analytics."orders$snapshots"`), and (b) `ref_name` is NOT a column of `$snapshots` — branch refs live in the separate `$refs` table.
+**Q1 — 3.75 PASS**: DROP COLUMN core CORRECT — native on Trino 467, no Spark required, metadata-only, 3-step reclamation (EXECUTE optimize → expire_snapshots → remove_orphan_files) all valid. `column_order` was NOT invented (capability-fix streak held). BUT the partition-key edge case `ALTER TABLE ... SET PARTITION SPEC (...)` is a **fabricated syntax** — that is Spark-dialect spillover. Trino 467 evolves Iceberg partitioning via `ALTER TABLE t SET PROPERTIES partitioning = ARRAY[...]`. Engineer running `SET PARTITION SPEC` gets parse error.
 
-**Q2 — 4.25 PASS**: Substance correct on no `WHEN NOT MATCHED BY SOURCE` in Trino MERGE, and the two-model NOT-EXISTS-anti-join decomposition is the canonical workaround. Minor framing slip — Model 2 was shown as a `.sql` model body with raw UPDATE/DELETE, but dbt models are SELECT-only; this DML belongs in a `post_hook` or `dbt run-operation` macro.
+**Q2 — 4.625 STRONG PASS**: `"orders$refs"` whole-name-in-one-quote-pair quoting CORRECT. Column `name` (NOT `ref_name`, NOT `branch_name`) CORRECT. `type='BRANCH'` filter CORRECT. `snapshot_id` BIGINT CORRECT. List-all-branches helper query CORRECT. Substance directly answers the question; capability-fix from iter471 r17 LEADING $refs-vs-$snapshots canonical landed cleanly with no leaks.
 
-**Q3 — 2.8125 HARD FAIL**: INT→BIGINT widening and RENAME COLUMN correct. BUT TWO distinct load-bearing fabrications: (a) `column_order` table property is NOT a real Trino Iceberg property — supported properties list does not include it; (b) the "Trino 467 cannot DROP COLUMN — use Spark" claim is a fabricated capability restriction — trino.io/docs/current/sql/alter-table.html DOES document `ALTER TABLE name DROP COLUMN column_name` and the Iceberg connector supports it natively.
+**Q3 — 3.5 BORDERLINE PASS**: NVL→COALESCE, NVL2→CASE WHEN, INSTR→STRPOS (1-based, 0 if not found), TO_CHAR→date_format/format_datetime, empty-string-is-NULL Oracle quirk all CORRECT. `CAST(str AS DATE)` for ISO-formatted strings CORRECT. BUT **`parse_date(str, 'yyyy-MM-dd')` is a fabricated Trino function** — does not exist. Trino has `date_parse(string, format)` (MySQL specifiers like `%Y-%m-%d`, returns timestamp(3)) and `parse_datetime(string, format)` (Joda-style like `yyyy-MM-dd`, returns timestamp with time zone). For a DATE result the canonical forms are `CAST(date_parse(str, '%Y-%m-%d') AS DATE)` or `from_iso8601_date(str)` for ISO 8601 strings. Saved from hard-fail only by the larger set of correct mappings.
 
-**Q4 — 4.4375 STRONG PASS**: Columnar projection, dictionary encoding, min/max stats + pushdown, vectorized batch + SIMD, and OLTP point-lookup tradeoff all directionally correct. Illustrative numbers (4096 batch, AVX2/512) are not presented as pinned Trino spec — no fab.
+**Q4 — 2.9375 FAIL (content gap, NOT fabrication)**: Honest "I don't have enough information to answer this well." Per directive, treated as incompleteness, not as fabrication — and credited on accuracy because the responder declined to make things up. BUT this means we have an unmet question; completeness and actionability both fail. The dbt-sources topic is PASSED at 4.219/3 in the rubric but dbt **model contracts** is a distinct sub-feature (config: contract: {enforced: true} + columns: with name + data_type, fails the build on output column/type mismatch) and resources/ genuinely lacks coverage. NEW REQUIRED MICRO-TOPIC.
 
 ---
 
 ## Fabrications — full list with correct facts + source URLs
 
-### Fab 1 (Q1) — `$snapshots.ref_name` column does NOT exist + malformed quoting
+### Fab 1 (Q1) — `ALTER TABLE ... SET PARTITION SPEC (...)` is NOT valid Trino syntax
 
-- **Malformed quoting**: `iceberg.analytics.orders.$snapshots` will not parse. The `$` is part of the metadata-table identifier and must be inside the same double-quote pair as the base table name. Correct: `iceberg.analytics."orders$snapshots"`.
-- **`ref_name` is NOT a `$snapshots` column**. Per trino.io/docs/current/connector/iceberg.html, `$snapshots` columns are exactly: `committed_at`, `snapshot_id`, `parent_id`, `operation`, `manifest_list`, `summary`. Branch/tag refs live in the separate **`$refs`** metadata table whose columns are `name`, `type`, `snapshot_id`, `max_reference_age_in_ms`, `min_snapshots_to_keep`, `max_snapshot_age_in_ms`. The column is `name`, not `ref_name`.
-- **Correct lookup pattern**: query `$refs` filtered by `name = 'staging_2026_06_05' AND type = 'BRANCH'` to get the snapshot_id; optionally join to `$snapshots` on snapshot_id for commit metadata.
-- **Source**: trino.io/docs/current/connector/iceberg.html (Metadata tables section).
+- **What the responder wrote**: `ALTER TABLE iceberg.analytics.events SET PARTITION SPEC (day(event_time))` (or similar) for the partition-key edge case.
+- **Why it's wrong**: Trino's `ALTER TABLE` reference (trino.io/docs/current/sql/alter-table.html) does NOT list a `SET PARTITION SPEC` clause. The Iceberg connector docs (trino.io/docs/current/connector/iceberg.html) explicitly document partition evolution via `ALTER TABLE table_name SET PROPERTIES partitioning = ARRAY[<existing partition columns>, 'my_new_partition_column'];`. `SET PARTITION SPEC` is a Spark/other-dialect form (Spark Iceberg supports `ALTER TABLE ... REPLACE PARTITION FIELD` and `ADD PARTITION FIELD` instead).
+- **Class**: cross-dialect spillover (Spark Iceberg DDL leaking into Trino answer).
+- **Correct form**:
+  ```sql
+  ALTER TABLE iceberg.analytics.events
+    SET PROPERTIES partitioning = ARRAY['day(event_time)'];
+  ```
+- **Source**: https://trino.io/docs/current/connector/iceberg.html (Schema and partition evolution section); https://trino.io/docs/current/sql/alter-table.html.
 
-**CREDIT (do not lose)**: `fast_forward('analytics.orders', 'main', 'staging_2026_06_05')` arg order is CORRECT — verified at iceberg.apache.org/docs/latest/spark-procedures/. `branch` is the ref moved forward; `to` is the source tip.
+### Fab 2 (Q3) — `parse_date(string, format)` is NOT a Trino function
 
-### Fab 2 (Q3) — `column_order` table property does NOT exist on Trino 467 Iceberg connector
+- **What the responder wrote**: `parse_date(str, 'yyyy-MM-dd')` as a Trino replacement for Oracle `TO_DATE(str, 'YYYY-MM-DD')`.
+- **Why it's wrong**: Trino has NO function named `parse_date`. Verified at trino.io/docs/current/functions/datetime.html. The real Trino parsing functions are:
+  - `date_parse(string, format) → timestamp(3)` — MySQL-style specifiers (`%Y-%m-%d`, `%H:%i:%s`).
+  - `parse_datetime(string, format) → timestamp with time zone` — Joda-style specifiers (`yyyy-MM-dd`, `HH:mm:ss`).
+  - `from_iso8601_date(string) → date` — direct ISO 8601 string to DATE.
+- **Class**: fabricated function name (most likely Snowflake `TO_DATE`/BigQuery `PARSE_DATE` cross-dialect spillover into Trino).
+- **Correct forms** for `TO_DATE('2026-06-05','YYYY-MM-DD')`:
+  ```sql
+  -- Cleanest for ISO 8601:
+  SELECT from_iso8601_date('2026-06-05');                       -- DATE
 
-- Per trino.io/docs/current/connector/iceberg.html, supported Iceberg table properties are: `format`, `compression_codec`, `partitioning`, `sorted_by`, `location`, `format_version`, `max_commit_retry`, `delete_after_commit_enabled`, `max_previous_versions`, `orc_bloom_filter_columns`, `orc_bloom_filter_fpp`, `parquet_bloom_filter_columns`, `object_store_layout_enabled`, `data_location`, `extra_properties`. **`column_order` is NOT in this list.**
-- Engineer running `ALTER TABLE t SET PROPERTIES column_order = ARRAY[...]` gets `Catalog 'iceberg' table property 'column_order' does not exist`.
-- **Correct answer**: Trino 467 has NO native column-reorder DDL on Iceberg. Reorder must be done via **Spark** `ALTER TABLE ... ALTER COLUMN col FIRST | AFTER other_col`. Trino's `ADD COLUMN` accepts `FIRST | AFTER name` only for placing NEW columns — it does not reorder existing ones.
-- **Source**: trino.io/docs/current/connector/iceberg.html + trino.io/docs/current/sql/alter-table.html.
+  -- MySQL-style specifiers (returns timestamp; cast for DATE):
+  SELECT CAST(date_parse('2026-06-05', '%Y-%m-%d') AS DATE);    -- DATE
 
-### Fab 3 (Q3) — "Trino 467 cannot DROP COLUMN — use Spark" is a FABRICATED capability restriction
+  -- Joda-style specifiers (returns timestamp with TZ; cast for DATE):
+  SELECT CAST(parse_datetime('2026-06-05', 'yyyy-MM-dd') AS DATE);
+  ```
+- **Source**: https://trino.io/docs/current/functions/datetime.html.
 
-- trino.io/docs/current/sql/alter-table.html: `ALTER TABLE [IF EXISTS] name DROP COLUMN [IF EXISTS] column_name` is a documented supported statement.
-- trino.io/docs/current/connector/iceberg.html lists DROP COLUMN among supported ALTER TABLE statements for the Iceberg connector.
-- **Trino 467 DOES support DROP COLUMN natively** on the Iceberg connector. The "must use Spark" claim is fabricated and sends engineers to Spark unnecessarily.
-- **Correct answer**: `ALTER TABLE iceberg.schema.table DROP COLUMN column_name;` — runs natively on Trino 467. Metadata-only per Iceberg spec.
+### Q4 content gap (NOT a fabrication)
 
-### Minor framing slip (Q2) — NOT a hard fab, but worth flagging
-
-- Model 2 shown as a `.sql` dbt model body containing raw UPDATE/DELETE. dbt models are SELECT-only by contract. Standalone DML belongs in `post_hook`, `dbt run-operation` macro, or a separate operation file — not a model body.
-- SQL logic itself (NOT EXISTS anti-join on Iceberg V2 MoR) is correct.
-- **Source**: docs.getdbt.com/docs/build/models.
-
----
-
-## Teacher actions for iter471
-
-### PRIMARY (must land before any other edits)
-
-**Action 1 — Fix the Q3 DROP COLUMN fabricated-capability-restriction**
-
-In the Iceberg schema-evolution resource (r17 Iceberg table maintenance, or whichever resource covers schema evolution DDL), add a LEADING CANONICAL block:
-
-```
--- Trino 467 NATIVE on Iceberg connector (no Spark required):
-ALTER TABLE iceberg.s.t ADD COLUMN c TYPE [FIRST | AFTER other_col];
-ALTER TABLE iceberg.s.t DROP COLUMN c;                       -- YES, supported natively
-ALTER TABLE iceberg.s.t RENAME COLUMN old TO new;
-ALTER TABLE iceberg.s.t ALTER COLUMN c SET DATA TYPE BIGINT; -- safe promotions only:
-                                                             --   INT→BIGINT, FLOAT→DOUBLE, DECIMAL widen
--- Trino 467 does NOT support natively (Spark required):
--- - Reorder existing columns (NO `column_order` property — use Spark ALTER COLUMN FIRST | AFTER)
--- - Narrowing type changes (rejected by Iceberg spec)
-```
-
-Add DO-NOT-WRITE matrix entries:
-- `ALTER TABLE t SET PROPERTIES column_order = ARRAY[...]` — FABRICATED, no such property
-- "Trino 467 cannot DROP COLUMN — use Spark" — FABRICATED CAPABILITY RESTRICTION, Trino 467 supports DROP COLUMN natively
-
-Cite trino.io/docs/current/sql/alter-table.html and trino.io/docs/current/connector/iceberg.html.
-
-**Action 2 — Fix the Q1 `$refs` vs `$snapshots` conflation**
-
-In the Iceberg metadata-tables resource (r17 or a dedicated metadata-tables section), add a LEADING CANONICAL block distinguishing the two tables and showing the correct lookup join:
-
-```
--- $snapshots — snapshot metadata (NO ref name column):
---   columns: committed_at, snapshot_id, parent_id, operation, manifest_list, summary
-SELECT snapshot_id, committed_at, operation
-FROM iceberg.analytics."orders$snapshots"
-ORDER BY committed_at DESC;
-
--- $refs — branch/tag references (this is where ref NAMES live):
---   columns: name, type, snapshot_id, max_reference_age_in_ms,
---            min_snapshots_to_keep, max_snapshot_age_in_ms
-SELECT name, type, snapshot_id
-FROM iceberg.analytics."orders$refs"
-WHERE type = 'BRANCH';
-
--- Lookup snapshot for a branch — JOIN $refs to $snapshots:
-SELECT r.name, r.type, s.snapshot_id, s.committed_at, s.operation
-FROM iceberg.analytics."orders$refs" r
-JOIN iceberg.analytics."orders$snapshots" s ON r.snapshot_id = s.snapshot_id
-WHERE r.name = 'staging_2026_06_05' AND r.type = 'BRANCH';
-```
-
-Add DO-NOT-WRITE entries:
-- `WHERE ref_name = '...'` on `$snapshots` — FABRICATED column (does not exist)
-- `iceberg.schema.table.$snapshots` dotted form — MALFORMED quoting (must be `iceberg.schema."table$snapshots"`)
-
-Cite trino.io/docs/current/connector/iceberg.html (Metadata tables section).
-
-**Action 3 — Tighten the Q2 dbt-framing nuance**
-
-In r27 §4.6A (Oracle MERGE → Trino two-model decomposition), add an explicit note that Model 2 (standalone DELETE / soft-delete UPDATE) must be implemented as:
-- a `post_hook` on Model 1; OR
-- a `dbt run-operation` macro; OR
-- a separate dbt operation file
-
-NOT as a `.sql` model body. dbt models are SELECT-only by contract; raw UPDATE/DELETE in a model body conflicts with dbt's materialization-driven CTAS/MERGE/INSERT pattern. Cite docs.getdbt.com/docs/build/models.
-
-### SECONDARY
-
-**Action 4 — Breadth design for iter471** (4 non-federation angles):
-
-- **Re-probe Q3 DROP COLUMN with different phrasing** to lock the fix (e.g., "I need to drop 3 deprecated columns from a 5TB Iceberg table — can Trino 467 do this natively or do I need Spark?"). Streak-locker target.
-- **Re-probe Q1 `$refs` vs `$snapshots` with different phrasing** (e.g., "How do I list all branches on an Iceberg table from Trino?" — the responder MUST hit `$refs`, not `$snapshots`).
-- **Iceberg type promotion edge cases** (DECIMAL precision-widen OK, DECIMAL scale-change rejected, FLOAT→DOUBLE OK).
-- **A fresh breadth angle** (e.g., dbt sources / freshness; Trino EXPLAIN ANALYZE vs EXPLAIN; Iceberg snapshot rollback via `rollback_to_snapshot`).
-
-**Action 5 — NO dedicated federation probe**: 4.49944/310 row sits 0.0006 below the 4.5 raised threshold; thin probe locks or breaks it. Let it accrete passively through breadth.
-
-### Citation-hygiene watchlist for iter471
-
-- **Fabricated capability restrictions** (THIS iter's killer class): if the responder says "Trino 467 cannot do X — use Spark", judge MUST verify X against trino.io/docs/current. The DROP COLUMN fab is the canonical example.
-- **Fabricated table properties**: if the responder uses `SET PROPERTIES foo = ...`, verify `foo` is in the connector docs property list. `column_order` was the fab this iter.
-- **Metadata-table column-name conflation**: `$snapshots` vs `$refs` is the highest-risk pair (both have `snapshot_id`, only `$refs` has `name`/`type`). Watch also `$files` vs `$manifests` vs `$partitions`.
-- **Metadata-table quoting**: `iceberg.s.t.$snapshots` (dotted) is ALWAYS WRONG. Must be `iceberg.s."t$snapshots"` with `$` inside the same quote pair.
-- **fast_forward arg order**: `fast_forward(table, branch, to)` where `branch` moved forward, `to` is source tip — held this iter (credit), keep watching.
-- **WHEN NOT MATCHED BY SOURCE**: Spark/Snowflake only, NOT Trino — held this iter, keep watching.
+- The responder honestly stated resources/ lacks dbt model contracts content and deferred to dbt docs.
+- Per directive, this is classified as **incompleteness / content-gap**, not as fabrication. No accuracy penalty for declining to invent; completeness and actionability take the hit instead.
+- **Correct facts (for teacher to encode)** per docs.getdbt.com/reference/resource-configs/contract:
+  - A model contract is declared in the model's YAML via `config: contract: {enforced: true}` plus a `columns:` list with `name` and `data_type` (and optional constraints `not_null`, `unique`, `primary_key`, `foreign_key`, `check`).
+  - When enforced, dbt builds the model with an explicit column list and **fails the build at parse/compile time if the model's actual output columns/types do not match the declared schema**.
+  - Constraints come in two flavors: **model-level** (warehouse-enforced where supported, advisory elsewhere) and **column-level**. Trino does not natively enforce most constraints — dbt-trino issues them as informational metadata; the column/type mismatch check is the load-bearing build-failure trigger that works regardless of platform.
+  - Use case: lock the public-facing schema of a model so a downstream change (renaming a column, dropping a column, type narrowing) breaks the build instead of silently breaking dashboards.
+- **Source**: https://docs.getdbt.com/reference/resource-configs/contract.
 
 ---
 
-## Topic score deltas (logged in rubric.md iter470 row)
+## Teacher actions for iter472 — PRIORITIZED
 
-- **Iceberg table maintenance** (folding Q1 WAP + Q3 schema evolution): 4.4915/130 → 4.4669/132 (-0.0246, biggest single-iter topic drag in months).
-- **Oracle PL/SQL→dbt/Trino migration**: 4.5827/43 → 4.5751/44 (-0.0076).
-- **Column-oriented storage**: 4.4926/14 → 4.4889/15 (-0.0037).
-- **Federation**: 4.49944/310 UNCHANGED (not probed per directive).
+### PRIMARY (P0) — Add dbt model contracts content (Q4 content gap)
 
-All topics remain PASSED; no topic dropped below 3.5. But Iceberg table maintenance lost meaningful margin — the Q3 fab cluster signals a topic-level gap requiring reinforcement.
+- **Where**: extend `resources/26-dbt-on-trino.md` (or wherever dbt model-level config / yaml schema lives), or create a dedicated mini-section in the dbt sources/freshness file under a new "dbt model contracts" §heading.
+- **What to write**:
+  1. One-paragraph "what is a model contract" intro (a schema lock declared in the model's YAML; dbt fails the build at compile time if actual output columns or types diverge from declared ones).
+  2. **One copy-paste worked example** showing the yaml config + a matching model SQL. Use a production-stack table like `iceberg.analytics.fct_orders` so the example transfers. Example skeleton:
+     ```yaml
+     # models/marts/fct_orders.yml
+     models:
+       - name: fct_orders
+         config:
+           contract:
+             enforced: true
+         columns:
+           - name: order_id
+             data_type: bigint
+             constraints:
+               - type: not_null
+           - name: customer_id
+             data_type: bigint
+           - name: order_date
+             data_type: date
+           - name: amount_usd
+             data_type: decimal(18,2)
+     ```
+  3. **Failure mode demo**: show what `dbt build` prints when (a) a column is missing, (b) a type is wrong (e.g. model returns `bigint` but contract declares `int`), (c) extra columns appear. Frame as "good — the build failed BEFORE production data got corrupted".
+  4. **Constraints clarification on Trino**: model-level `primary_key`/`foreign_key`/`check` are advisory on most warehouses; on Trino+Iceberg via dbt-trino they are recorded as metadata but not runtime-enforced. The hard guarantee is the **column-list + data_type build-time check** — that's enforced unconditionally regardless of warehouse capability.
+  5. **When to use**: public/contractual datasets (BI dashboards, downstream model dependencies, exposed to other teams). Skip for staging or scratch models where churn is high.
+  6. Cross-ref to dbt sources freshness (already in rubric) — contracts are the OUTPUT-side schema lock; freshness is the INPUT-side liveness check; the two work together.
+- **DO-NOT-WRITE matrix entries** (for citation hygiene):
+  - DO NOT write that contracts are Trino-specific — they are a dbt-core feature available on any adapter.
+  - DO NOT invent constraint types like `regex` or `length` — the documented set is `not_null`, `unique`, `primary_key`, `foreign_key`, `check`.
+  - DO NOT claim Trino enforces foreign keys at write time — it does not; the constraint is metadata only on dbt-trino + Iceberg.
+
+### SECONDARY (P1) — Fix `SET PARTITION SPEC` cross-dialect spillover (Q1 fab)
+
+- **Where**: r17 LEADING schema-evolution canonical (added iter471) — extend to cover **partition** evolution, not just **schema** evolution.
+- **What to write**:
+  1. Add a new sub-section "Evolving the partition spec on Trino 467" right after the schema-evolution sub-section.
+  2. **The canonical form** for both adding and replacing partition columns:
+     ```sql
+     -- Add a new partition column (alongside existing partitioning):
+     ALTER TABLE iceberg.analytics.events
+       SET PROPERTIES partitioning = ARRAY['day(event_time)', 'tenant_id'];
+
+     -- Replace partitioning entirely (drop old partition column):
+     ALTER TABLE iceberg.analytics.events
+       SET PROPERTIES partitioning = ARRAY['day(event_time)'];
+
+     -- Unpartition entirely:
+     ALTER TABLE iceberg.analytics.events
+       SET PROPERTIES partitioning = ARRAY[];
+     ```
+  3. **Existing-data behavior**: explicitly state Iceberg keeps old partition spec for already-written files (queries that scan old data still benefit from old partition pruning); new writes use new spec.
+  4. **DO-NOT-WRITE matrix entry**:
+     - `ALTER TABLE ... SET PARTITION SPEC (...)` — **FABRICATED SYNTAX on Trino 467** (Spark Iceberg dialect form; will not parse on Trino). Correct: `SET PROPERTIES partitioning = ARRAY[...]`.
+     - `ALTER TABLE ... ADD PARTITION FIELD ...` — **FABRICATED SYNTAX on Trino 467** (Spark Iceberg only).
+     - `ALTER TABLE ... REPLACE PARTITION FIELD ... WITH ...` — **FABRICATED SYNTAX on Trino 467** (Spark Iceberg only).
+  5. Cite trino.io/docs/current/connector/iceberg.html § "Schema and partition evolution".
+
+### SECONDARY (P2) — Fix `parse_date` fab (Q3)
+
+- **Where**: r27 Oracle PL/SQL → dbt/Trino migration resource, the Oracle date/time function translation table.
+- **What to write**:
+  1. In the existing `TO_DATE` translation row, ensure the Trino-side gives **all three correct alternatives** (not the fab `parse_date`):
+     | Oracle | Trino equivalent | Returns | Notes |
+     |---|---|---|---|
+     | `TO_DATE('2026-06-05','YYYY-MM-DD')` | `CAST(date_parse('2026-06-05','%Y-%m-%d') AS DATE)` | DATE | MySQL-style specifiers; `date_parse` returns timestamp(3), wrap in CAST AS DATE |
+     | `TO_DATE('2026-06-05','YYYY-MM-DD')` | `from_iso8601_date('2026-06-05')` | DATE | Cleanest when input is already ISO 8601 |
+     | `TO_DATE('05-JUN-2026','DD-MON-YYYY')` | `CAST(date_parse('05-JUN-2026','%d-%b-%Y') AS DATE)` | DATE | `%b` = abbreviated month name |
+  2. **DO-NOT-WRITE matrix entry**:
+     - `parse_date(string, format)` — **FABRICATED TRINO FUNCTION** (Snowflake/BigQuery name). Does not exist in Trino 467. Use `date_parse` (MySQL specifiers) or `parse_datetime` (Joda specifiers) or `from_iso8601_date` (ISO 8601 only).
+  3. Cite trino.io/docs/current/functions/datetime.html and link both the `date_parse` row and the `parse_datetime` row from the canonical list-of-functions page so future answers don't conflate them.
+  4. **Pin the MySQL-vs-Joda specifier distinction** explicitly with a 4-row table: `%Y` vs `yyyy`, `%m` vs `MM`, `%d` vs `dd`, `%H:%i:%s` vs `HH:mm:ss`. This is a known fab-magnet — the wrong specifier in the right function silently returns NULL or wrong date.
+
+### NO DEDICATED FEDERATION PROBE (P3)
+
+- Federation row sits at 4.49944/310, 0.0006 below 4.5 raised threshold. Do NOT design a dedicated federation probe — the row passed mathematical break-even months ago but is gated by the elevated threshold. Let count grow naturally through breadth probes.
 
 ---
 
-## Summary
+## Breadth design recommendations for iter472
 
-PASSED at 3.71875 by the thinnest margin in dozens of iterations. Q4 carried; Q3 nearly killed. Three load-bearing fabrications across Q1 and Q3 (`$snapshots.ref_name` + `column_order` property + "Trino 467 cannot DROP COLUMN") broke the citation-hygiene streak. Primary teacher actions: fix the Q3 DROP COLUMN capability-restriction fab (Trino 467 DOES support it natively) and the `column_order` property fab, plus the Q1 `$refs`/`$snapshots` conflation. Re-probe both in iter471 from different phrasings to lock the fixes.
+- Mix 1 question on dbt model contracts (test the NEW resource), 1 on Trino DDL (re-probe `SET PARTITION SPEC` fix), 1 on Oracle migration with a date function (re-probe `parse_date` fix), 1 broader topic NOT touched recently (suggest: Iceberg storage sizing OR cost considerations OR Trino CBO ANALYZE).
+- Avoid stacking 3+ Iceberg-internals probes in one iter — last 3 iters have been Iceberg-heavy and we need breadth variance to keep Multi-tenant analytics (4.4582/153), Lakehouse schema design (4.5052/12), and the Oracle migration topic (4.5826/44) from being under-tested.
+
+---
+
+## Citation hygiene observations
+
+- The two targeted fixes from iter471 teacher cycle (DROP COLUMN capability + $refs vs $snapshots) landed clean. The new r17 LEADING canonicals are working as intended for Q1's DROP COLUMN core and Q2's full $refs lookup.
+- The fab class **moved** to adjacent territory: the partition-evolution edge case in the SAME ALTER TABLE family (Q1) and the date-parsing function family in Oracle migration (Q3). Pattern: when the teacher closes a fab via a LEADING canonical, the next iter often surfaces the same fab class one neighbor over. **Suggestion**: when adding a LEADING canonical, also add a DO-NOT-WRITE matrix that explicitly enumerates 5-10 cross-dialect equivalents the responder might confuse with the canonical form — this is the cheapest fab-class containment we have.
+- Fab-watch flags for iter472: (a) cross-dialect spillover — Spark Iceberg DDL (`SET PARTITION SPEC`, `ADD PARTITION FIELD`) leaking into Trino answers; (b) Snowflake/BigQuery function names (`parse_date`, `to_date`, `dateadd`) leaking into Trino Oracle-migration answers; (c) content-gap dbt sub-features (model contracts NOW; unit tests, exposures, semantic-layer next).

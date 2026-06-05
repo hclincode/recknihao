@@ -1076,6 +1076,7 @@ Notes on Model 2:
 - **`WHERE t.deleted_at IS NULL`** — only soft-delete rows that are not already soft-deleted; this makes the model idempotent (re-running it does not bump `deleted_at` forward for already-soft-deleted rows).
 - **Reads from `{{ this }}`** — Model 2 explicitly reads the current state of the target fact table. dbt allows `{{ this }}` references in incremental models.
 - **DAG ordering:** Model 2 must run **after** Model 1. Use `{{ ref('fct_customers__upsert') }}` somewhere in Model 2 (e.g., as a no-op `WHERE EXISTS` against the upsert model) to express the dependency, OR rely on dbt's `tags` + a `+` selector in the production schedule.
+- **Model 2's body is a SELECT — that is the only dbt model body shape that exists.** Per [docs.getdbt.com/docs/build/models](https://docs.getdbt.com/docs/build/models), every dbt model body is a SELECT statement; dbt's `materialized='incremental'` + `incremental_strategy='merge'` config wraps it as a Trino `MERGE INTO target USING (<this SELECT>) ON ... WHEN MATCHED THEN UPDATE`. **You DO NOT write a raw `UPDATE` or `DELETE` statement as a model body** — that violates dbt's contract and the compile step fails. If you genuinely need a raw `UPDATE ...` or `DELETE FROM ...` (not wrappable as a MERGE — e.g., the hard-delete row in §4.6A.4 below), put the DML in a **`post_hook`** on Model 1, a **`dbt run-operation`** macro, or a dedicated **operation file** in `macros/` — NOT in a model body. See §4.6A.4 row 4 + the dbt-framing note immediately below it for the canonical hard-delete recipe.
 
 **Why this is the default:**
 - **Two distinct MERGEs compile to two distinct Trino statements** — each owns exactly one of Oracle's three branches (MATCHED, NOT MATCHED, NOT MATCHED BY SOURCE), making the migration auditable branch-by-branch.
@@ -1185,7 +1186,44 @@ Both `NOT EXISTS` and `LEFT JOIN ... WHERE rhs IS NULL` are the recommended Trin
 | `MERGE ... USING src ON t.id = s.id WHEN MATCHED THEN UPDATE ... WHEN NOT MATCHED THEN INSERT ...` (no soft-delete branch) | **Single dbt incremental model**, `incremental_strategy='merge'`, `unique_key='id'`. | Vanilla MERGE — covered in §4.6 row 1. |
 | `MERGE ... WHEN MATCHED THEN UPDATE ... WHEN NOT MATCHED THEN INSERT ... WHEN NOT MATCHED BY SOURCE THEN UPDATE SET deleted_at = SYSDATE` | **TWO dbt models** (§4.6A.1, DEFAULT). Model 1 = the upsert MERGE. Model 2 = the soft-delete MERGE using `NOT EXISTS` against the live source set. | Trino has NO `WHEN NOT MATCHED BY SOURCE` — verified [trino.io/docs/current/sql/merge.html](https://trino.io/docs/current/sql/merge.html). |
 | Same Oracle source, but DAG-node-count or audit-framework constraints preclude two models | **Single-model UNION ALL** (§4.6A.2, FALLBACK). MUST use `NOT EXISTS`. MUST EXPLAIN-check for `CorrelatedJoin`. | Caveats are not optional — see §4.6A.2 list of 5 caveats. |
-| `MERGE ... WHEN NOT MATCHED BY SOURCE THEN DELETE` (hard delete instead of soft) | **TWO models**: Model 1 = upsert as above. Model 2 = standalone `DELETE FROM fct_customers WHERE NOT EXISTS (SELECT 1 FROM stg_customers s WHERE s.customer_id = fct_customers.customer_id)` (Trino DELETE on Iceberg). | Hard-delete via DELETE is simpler than soft-delete via MERGE because there's no `deleted_at` column to fill. |
+| `MERGE ... WHEN NOT MATCHED BY SOURCE THEN DELETE` (hard delete instead of soft) | **Model 1 = upsert (incremental MERGE dbt model, as above). Model 2 = the raw `DELETE FROM fct_customers WHERE NOT EXISTS (SELECT 1 FROM stg_customers s WHERE s.customer_id = fct_customers.customer_id)` runs as a `post_hook` on Model 1, or as a `dbt run-operation` macro, or as a dedicated operation file — NOT as a dbt model body.** See the dbt-framing note below this table for the literal recipe. | Hard-delete via DELETE has no `deleted_at` to fill, but it CANNOT be a dbt model body because dbt model bodies are SELECT-only — DML belongs in a hook / operation. |
+
+> **dbt-framing note for raw UPDATE / DELETE DML (read this before writing any soft-delete or hard-delete Model 2).** Per [docs.getdbt.com/docs/build/models](https://docs.getdbt.com/docs/build/models), **every dbt model body is a SELECT statement** — dbt's materialization config wraps that SELECT as a `CREATE TABLE AS`, `CREATE OR REPLACE TABLE`, `INSERT INTO`, or `MERGE INTO` (depending on `materialized` + `incremental_strategy`). You do NOT write a literal `UPDATE` or `DELETE` as a model body — dbt's compile step does not produce raw DML. The three correct places for raw `UPDATE` / `DELETE` DML in dbt:
+>
+> 1. **`post_hook` on a model** — runs AFTER the model's MERGE/CTAS commits. Best when the DML is logically coupled to the model's success.
+>    ```sql
+>    -- models/marts/fct_customers__upsert.sql (Model 1 with hard-delete post_hook)
+>    {{ config(
+>        materialized = 'incremental',
+>        incremental_strategy = 'merge',
+>        unique_key = 'customer_id',
+>        post_hook = [
+>          "DELETE FROM {{ this }} WHERE NOT EXISTS (SELECT 1 FROM {{ ref('stg_customers') }} s WHERE s.customer_id = {{ this }}.customer_id)"
+>        ]
+>    ) }}
+>    SELECT customer_id, email, plan, updated_at FROM {{ ref('stg_customers') }}
+>    {% if is_incremental() %} WHERE updated_at > (SELECT COALESCE(MAX(updated_at), TIMESTAMP '1970-01-01') FROM {{ this }}) {% endif %}
+>    ```
+>
+> 2. **`dbt run-operation` macro** — runs ad-hoc or on-schedule independent of the DAG. Best when the DML is a periodic maintenance step (e.g., nightly purge) decoupled from any specific model.
+>    ```jinja
+>    -- macros/hard_delete_missing_customers.sql
+>    {% macro hard_delete_missing_customers() %}
+>      {% set sql %}
+>        DELETE FROM {{ ref('fct_customers__upsert') }} t
+>        WHERE NOT EXISTS (
+>          SELECT 1 FROM {{ ref('stg_customers') }} s
+>          WHERE s.customer_id = t.customer_id
+>        )
+>      {% endset %}
+>      {% do run_query(sql) %}
+>    {% endmacro %}
+>    ```
+>    Invoke from the schedule with `dbt run-operation hard_delete_missing_customers`.
+>
+> 3. **Dedicated operation file** referenced via `on-run-end` in `dbt_project.yml` — runs at the end of every `dbt run`. Same shape as the macro above; the difference is invocation cadence.
+>
+> **What you DO NOT do.** A file named `models/fct_customers__hard_delete.sql` containing only `DELETE FROM fct_customers WHERE NOT EXISTS (...)` will fail at dbt compile time with a parser error (dbt expects a SELECT, finds DELETE). This is the load-bearing framing slip the responder must avoid when migrating an Oracle hard-delete-via-MERGE pattern. The soft-delete pattern in §4.6A.1 Model 2 is NOT affected because soft-delete is an UPDATE-on-MERGE that dbt's `incremental_strategy='merge'` produces correctly from a SELECT body — only the **hard-delete via raw DELETE** needs the hook / operation framing.
 
 **Cross-references.**
 - §4.4A — typed NULL syntax (`CAST(NULL AS TIMESTAMP)`, NOT `NULL::TIMESTAMP`) — used in every soft-delete model above.
