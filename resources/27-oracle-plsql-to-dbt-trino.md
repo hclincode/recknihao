@@ -741,6 +741,11 @@ Both should produce ZERO matches on a clean migration.
 | `DATE` (Oracle: date + time) | `timestamp` (date + time without TZ) OR `date` (just date). | **CRITICAL: Oracle DATE includes time-of-day; Trino DATE does not.** If your Oracle column has hours/minutes/seconds, migrate it as `timestamp`, NOT `date`. |
 | `TIMESTAMP WITH TIME ZONE` | `timestamp(p) with time zone` | Trino's TZ-aware timestamp is fine; Iceberg connector has some precision caveats — verify your model output. |
 | `WHERE int_col = '42'` (implicit coerce) | `WHERE int_col = 42` (explicit) OR `WHERE int_col = CAST('42' AS bigint)` | Trino is strict; no implicit varchar<->bigint coercion. |
+| `TRUNC(n, d)` (numeric truncation to `d` decimal places — Oracle) | `truncate(n * power(10, d)) / power(10, d)` — **lowercase 1-arg** `truncate`. For 2 decimals: `truncate(n*100)/100`. **If HALF_UP rounding is acceptable, `round(n, d)` is simpler** (but `round` is rounding, NOT truncation — they differ at the half-way mark and for negative numbers). | See §4.4C immediately below for the full numeric-TRUNC guardrail + DO-NOT-WRITE matrix. Verified at [trino.io/docs/current/functions/math.html](https://trino.io/docs/current/functions/math.html) — Trino's `truncate(x)` is **1-arg only**; **no 2-arg `truncate(x, d)`** exists; `TRUNC` (uppercase Oracle name) is **not registered** in Trino. |
+| `TRUNC(n)` (1-arg integer truncation toward zero — Oracle) | `truncate(n)` — **lowercase, 1-arg**. Returns same type as input with digits after the decimal point dropped. | `TRUNC(-3.7)` Oracle returns `-3`; Trino `truncate(-3.7)` returns `-3.0` (same toward-zero semantic; trailing `.0` from same-as-input type). |
+| `ROUND(n, d)` (Oracle, HALF_UP rounding to d places) | `round(n, d)` — same name, same signature, same HALF_UP semantics. | Direct 1:1. |
+| `MOD(a, b)` | `mod(a, b)` or `a % b` | Identical. |
+| `ABS(n)` / `CEIL(n)` / `FLOOR(n)` / `SIGN(n)` | `abs(n)` / `ceil(n)` (or `ceiling(n)`) / `floor(n)` / `sign(n)` | All lowercase in Trino; identical semantics. |
 
 ### 4.4A TRINO-CAST-SYNTAX GUARDRAIL — Trino has NO `expr::type` cast operator; ALWAYS write `CAST(expr AS type)`
 
@@ -828,6 +833,55 @@ FROM {{ ref('stg_users') }}
 - Resource 13 §"Postgres → Trino translation table" lists `ts::DATE` → `CAST(ts AS DATE)`. Inside the Postgres-side ingestion examples in resource 13 (Spark JDBC `dbtable` subqueries, pg_attribute lookups, gen_random_uuid()), the `::` cast IS valid because that SQL runs in Postgres, not Trino.
 - Resource 22 §3.2 (Postgres connector pushdown table) — the UUID typed-literal example `WHERE tenant_id = UUID 'a1b2c3d4-...'` is the Trino-compatible form for the equivalent Postgres `tenant_id = 'a1b2c3d4-...'::uuid` filter.
 
+### 4.4C ORACLE `TRUNC` ↔ TRINO `truncate` GUARDRAIL — three distinct mappings, one lowercase 1-arg function, NO `TRUNC` keyword in Trino
+
+**Why this section exists (iter476 cross-dialect-spillover fix).** Oracle's `TRUNC` is one function name overloaded across **three distinct semantics** (numeric truncation, integer truncation, date truncation). Trino splits these across **three different function names**, none of which is spelled `TRUNC`. The iter476 responder wrote `CAST(TRUNC(12.3456 * 100) / 100 AS DECIMAL(10,2))` in a Trino rewrite — that produces `Function 'trunc' not registered` at runtime. This subsection installs the authoritative mapping + DO-NOT-WRITE.
+
+**The canonical mapping — memorize this 3-row table.** Verified against [trino.io/docs/current/functions/math.html](https://trino.io/docs/current/functions/math.html) and [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html) on 2026-06-05.
+
+| Oracle source | What Oracle does | Trino canonical form | Notes |
+|---|---|---|---|
+| `TRUNC(n, d)` where `n` is numeric, `d` is decimal places | Truncates `n` to `d` decimal places (drops digits beyond position `d`, toward zero) | `truncate(n * power(10, d)) / power(10, d)` — **lowercase, 1-arg `truncate`**. Literal form for 2 dp: `truncate(n * 100) / 100`. | Trino's `truncate` is **1-arg only**; the 2-arg `truncate(n, d)` form **does NOT exist** in Trino 467. |
+| `TRUNC(n)` 1-arg numeric (integer truncation toward zero) | Drops the fractional portion, returning integer-valued number | `truncate(n)` — lowercase, 1-arg. Return type is `same as input` (per Trino math-functions docs). | `TRUNC(-3.7)` Oracle = `-3`; Trino `truncate(-3.7)` = `-3.0`. Both truncate toward zero. |
+| `TRUNC(d, 'fmt')` where `d` is a date and `'fmt'` is `'MM'` / `'YY'` / `'DD'` etc. | Truncates `d` to the start of the named unit (month, year, day, ...) | `date_trunc('month', d)` / `date_trunc('year', d)` / `date_trunc('day', d)` — **different function name** (`date_trunc`, not `truncate`). | The `fmt` codes: Oracle `'MM'` / `'MON'` → Trino `'month'`; Oracle `'YY'` / `'YEAR'` → Trino `'year'`; Oracle `'DD'` → Trino `'day'`; Oracle `'IW'` → Trino `'week'`. |
+
+**Canonical worked example — Oracle numeric `TRUNC(n, d)` to Trino, the three forms an engineer reaches for:**
+
+```sql
+-- Oracle source:
+SELECT TRUNC(price * 1.0875, 2) AS price_with_tax FROM orders;
+-- TRUNC truncates to 2 decimal places (drops anything beyond the hundredths).
+
+-- Trino — CANONICAL form (exact truncate semantics, lowercase 1-arg truncate):
+SELECT truncate(price * 1.0875 * 100) / 100 AS price_with_tax FROM orders;
+-- Or the general form for arbitrary d decimal places:
+SELECT truncate(price * 1.0875 * power(10, 2)) / power(10, 2) AS price_with_tax FROM orders;
+
+-- Trino — SIMPLER form IF HALF_UP rounding is acceptable (NOT the same as truncation):
+SELECT round(price * 1.0875, 2) AS price_with_tax FROM orders;
+-- round() is HALF_UP rounding semantics. For most billing/accounting, truncation
+-- is the legally specified behavior — verify with the downstream consumer before
+-- substituting round() for truncate(x*100)/100.
+```
+
+**DO-NOT-WRITE callout (load-bearing — copy this into your code-review checklist):**
+
+> **Never write any of the following in Trino SQL or in any dbt model targeting Trino:**
+>
+> 1. **`TRUNC(...)` used as a function name in a Trino rewrite** — `TRUNC` (uppercase or any case) is the **Oracle** name. Trino's math function is **lowercase `truncate(x)`** only. Writing `TRUNC(12.34, 2)` in Trino produces `Function 'trunc' not registered` (`trunc` is not in Trino's function registry — only `truncate` is, and only the 1-arg form). The lowercase form `trunc(...)` also fails for the same reason — the function is spelled `truncate`, not `trunc`.
+>
+> 2. **`truncate(n, d)` — the 2-arg numeric truncation form** — **does NOT exist on Trino.** Trino's `truncate` is **1-arg ONLY**, returning the integer part toward zero. Writing `truncate(12.3456, 2)` produces a function-resolution error. To truncate to `d` decimals, use `truncate(n * power(10, d)) / power(10, d)`, or the literal `truncate(n * 100) / 100` for 2 dp. Verified at [trino.io/docs/current/functions/math.html](https://trino.io/docs/current/functions/math.html) — the documented signature is `truncate(x) → [same as input]`; no 2-arg overload is documented.
+>
+> 3. **`TRUNCATE(...)` used as a math function** — Trino has `truncate(x)` (lowercase math function, 1-arg). **Uppercase `TRUNCATE` collides with the `TRUNCATE TABLE` DDL statement in other dialects** — but `TRUNCATE TABLE` is **also NOT a Trino-side statement for Iceberg tables** (see §4.6 row "TRUNCATE TABLE t" — Trino uses `DELETE FROM t WHERE TRUE` or `materialized='table'` instead). Never write `TRUNCATE(x)` thinking it's the math function; it isn't. Write lowercase `truncate(x)`.
+>
+> 4. **`TRUNC(dt)` / `TRUNC(dt, 'MM')` used in a Trino rewrite** — these are Oracle date forms. The Trino equivalent is a **different function**: `date_trunc('day', dt)` / `date_trunc('month', dt)`. Never write `TRUNC(dt)` or `truncate(dt)` for date truncation in Trino — `truncate` is a math function and does not accept a date argument; calling it on a `date` or `timestamp` produces a function-resolution error.
+>
+> 5. **`round(n, d)` substituted for `TRUNC(n, d)` without verifying rounding-vs-truncation is acceptable** — `round` is HALF_UP rounding, `truncate` drops digits toward zero. They differ at the halfway mark (`round(1.235, 2)` = `1.24`; `truncate(1.235 * 100) / 100` = `1.23`) and for negative numbers (`round(-1.235, 2)` = `-1.24`; `truncate(-1.235 * 100) / 100` = `-1.23`). For billing, accounting, and tax computations, truncation may be the legally specified behavior — do not silently swap.
+
+**Keyword-trap phrase (memorize):** *"Anyone who writes `TRUNC(x, 2)` for Trino is using Oracle syntax — Trino has lowercase `truncate(x)` 1-arg only; to truncate to 2 decimals use `truncate(x*100)/100` or (if HALF_UP is OK) `round(x, 2)`."*
+
+**Cross-reference.** The date-side mapping `TRUNC(dt) → date_trunc('day', dt)` is also documented in the §4.2 Date/time functions table (row 596). The §4.4B cross-dialect-spillover table includes a consolidated row for `TRUNC` (see immediately below). The two-arg-truncate non-existence in Trino is a specific instance of the broader cross-dialect-spillover fab class — Oracle's overloaded `TRUNC` keyword being silently transcribed into Trino syntax without translation.
+
 ### 4.4B CROSS-DIALECT-SPILLOVER GUARDRAIL — syntax that looks valid but is NOT Trino 467
 
 **Why this section exists (consolidated meta-canonical).** Across iter402–iter456 the most-repeated failure mode in Trino-context answers has been **cross-dialect syntax spillover** — recommending Oracle / PostgreSQL / Snowflake / Spark / native-Iceberg syntax as if it were Trino's. The forms look idiomatic (because they ARE idiomatic in those other engines) but they either parse-error or, worse, **silently no-op** in Trino 467. This table consolidates every recurring spillover so a single grep on this section catches all of them.
@@ -854,6 +908,9 @@ FROM {{ ref('stg_users') }}
 > | Spark TBLPROPERTIES | `ALTER TABLE t SET TBLPROPERTIES ('k' = 'v')` | Spark SQL | Parse error | `ALTER TABLE t SET PROPERTIES key = 'v'` — bare identifier LHS, string-literal RHS |
 > | Iceberg snapshot timestamp | `WHERE timestamp_ms = ...` on `$snapshots` | Iceberg Java API field name | Column does not exist | `WHERE committed_at = TIMESTAMP '...'` — the Trino metadata-table column |
 > | NULLS-default ordering in `ORDER BY ... DESC` | Assuming `ORDER BY ts DESC` puts NULLs at the top (Oracle's default) | Oracle's documented default | **SILENT-WRONG row ordering** — Trino puts NULLs at the BOTTOM on `DESC` (default `NULLS LAST` regardless of direction); no error, just different row order than Oracle | Always write `ORDER BY ts DESC NULLS FIRST` (preserve Oracle behavior) or `ORDER BY ts DESC NULLS LAST` (explicit Trino default). See **§ LEADING CANONICAL — Oracle vs Trino NULLS-default semantics in ORDER BY** at the top of this resource. |
+> | Numeric truncation 2-arg | `TRUNC(n, d)` (also `TRUNC(n)`) | Oracle | `Function 'trunc' not registered` — `TRUNC` (uppercase Oracle name) does NOT exist in Trino's function registry; the lowercase math function is `truncate(x)` and is **1-arg only** (no 2-arg `truncate(x, d)` overload) | `truncate(n * power(10, d)) / power(10, d)` (exact truncation to `d` decimals) OR `round(n, d)` (if HALF_UP rounding is acceptable, NOT the same as truncation). See §4.4C for the full 3-row mapping + DO-NOT-WRITE matrix. |
+> | Date truncation function name | `TRUNC(dt, 'MM')` / `TRUNC(dt)` | Oracle | `Function 'trunc' not registered` — Trino has no `TRUNC` keyword; the date-truncation function is **`date_trunc('month', dt)`** (different function name) | `date_trunc('month', dt)` / `date_trunc('day', dt)` / `date_trunc('year', dt)` / etc. **DIFFERENT function from the math `truncate(x)`** — `date_trunc` for dates/timestamps, `truncate` for numbers. Never mix the two. |
+> | MERGE star shorthand | `WHEN MATCHED THEN UPDATE SET *` / `WHEN NOT MATCHED THEN INSERT *` | Spark / Delta Lake / Databricks (also Snowflake's `UPDATE * WHEN NOT MATCHED THEN INSERT *`) | Parse error: `mismatched input '*'` — Trino MERGE grammar requires **explicit column lists** on both UPDATE SET and INSERT VALUES. There is no `*` shorthand on either branch in Trino 467. | `WHEN MATCHED THEN UPDATE SET col1 = s.col1, col2 = s.col2, ...` and `WHEN NOT MATCHED THEN INSERT (col1, col2, ...) VALUES (s.col1, s.col2, ...)`. See §4.6B for the full MERGE-star-shorthand guardrail. Verified at [trino.io/docs/current/sql/merge.html](https://trino.io/docs/current/sql/merge.html). |
 >
 > **Meta-rule (memorize)**: when unsure, **prefer ANSI / standard SQL forms (`CAST(... AS ...)`, `COALESCE`, `CASE WHEN`) and SESSION properties (`SET SESSION ...`)**; do **not** paste PostgreSQL / Oracle / Snowflake / Spark / native-Iceberg idioms into Trino. If the form parses-and-runs without error but the optimizer behavior didn't change, suspect a silent-no-op hint or wrong session property — Trino has no hint mechanism, so the answer is always a SESSION property.
 >
@@ -1004,6 +1061,127 @@ The `customer_id` here is a 32-character MD5 hex VARCHAR (e.g., `'7d3f...e2a1'`)
 | `TRUNCATE TABLE t` | `DELETE FROM t WHERE TRUE` — but for full-refresh, `materialized='table'` is cleaner (atomic replace via Iceberg snapshot). | Trino does NOT have `TRUNCATE` for Iceberg tables. |
 | `BEGIN ... END` / `LOOP` / `IF` / `EXCEPTION` / `RAISE` / `COMMIT` | N/A — restructure as a dbt DAG. See section 2 decomposition recipe. | See myths and section 1.2 mapping. |
 | `EXECUTE IMMEDIATE 'dynamic sql'` | dbt Jinja templating composes the SQL at compile time; no runtime EXECUTE IMMEDIATE in Trino. | Move dynamic logic to Jinja. |
+
+### 4.6B TRINO MERGE STAR-SHORTHAND GUARDRAIL — Trino MERGE requires EXPLICIT column lists, NO `UPDATE SET *` / `INSERT *`
+
+**Why this section exists (iter476 cross-dialect-spillover fix).** Spark, Delta Lake, Databricks, and Snowflake MERGE all support a star-shorthand form — `WHEN MATCHED THEN UPDATE SET *` and `WHEN NOT MATCHED THEN INSERT *` — which auto-expands to "every column matched by name". **Trino MERGE does NOT.** Trino's grammar requires **explicit column lists** on both branches: every UPDATE SET assignment must be written `col = expression`, and every INSERT VALUES must list both the target columns and the source expressions. The iter476 responder copy-pasted `WHEN MATCHED THEN UPDATE SET *` / `WHEN NOT MATCHED THEN INSERT *` into a Trino-context "production CDC" example — that produces a parse error `mismatched input '*'`.
+
+**The canonical Trino MERGE grammar — verified at [trino.io/docs/current/sql/merge.html](https://trino.io/docs/current/sql/merge.html) on 2026-06-05:**
+
+```
+MERGE INTO target_table [ [ AS ] target_alias ]
+USING { source_table | query } [ [ AS ] source_alias ]
+ON search_condition
+when_clause [...]
+
+where when_clause is one of:
+
+  WHEN MATCHED [ AND condition ]
+      THEN DELETE
+
+  WHEN MATCHED [ AND condition ]
+      THEN UPDATE SET ( column = expression [, ...] )
+
+  WHEN NOT MATCHED [ AND condition ]
+      THEN INSERT [ column_list ] VALUES (expression, ...)
+```
+
+There is **no `*` shorthand** on either UPDATE SET or INSERT. The column list and the expression list must both be explicit and (for INSERT) length-matched.
+
+**Canonical CDC MERGE example — explicit columns, three-branch (DELETE / UPDATE / INSERT) pattern, Trino-correct:**
+
+```sql
+-- Trino 467 + Iceberg 1.5.2 — verified syntax
+MERGE INTO iceberg.analytics.fct_orders t
+USING (
+    SELECT id, op, customer_id, amount, status, updated_at
+    FROM {{ ref('stg_orders_cdc_delta') }}
+) s
+ON t.id = s.id
+-- Branch 1: hard-delete rows whose op='d'. MUST come first when DELETE and UPDATE
+-- conditions could both match (first-match-wins). See §4.6A.1 first-match-wins note.
+WHEN MATCHED AND s.op = 'd' THEN DELETE
+-- Branch 2: update existing rows for inserts / updates / re-snapshot reads. EXPLICIT
+-- column-by-column assignment — no `UPDATE SET *` shorthand on Trino.
+WHEN MATCHED AND s.op IN ('u', 'c', 'r') THEN UPDATE SET
+    customer_id = s.customer_id,
+    amount      = s.amount,
+    status      = s.status,
+    updated_at  = s.updated_at
+-- Branch 3: insert rows that don't yet exist in target. EXPLICIT (col_list) VALUES (expr_list).
+-- Defensively include 'u' to handle initial-snapshot races.
+WHEN NOT MATCHED AND s.op IN ('c', 'r', 'u') THEN INSERT (id, customer_id, amount, status, updated_at)
+    VALUES (s.id, s.customer_id, s.amount, s.status, s.updated_at);
+```
+
+**Correct claims preserved (do NOT regress these — they are all Trino-valid):**
+
+1. **Multiple `WHEN MATCHED [AND condition]` branches are supported.** Per the Trino MERGE docs: *"MERGE supports an arbitrary number of WHEN clauses."* You can have two `WHEN MATCHED AND ...` branches with different conditions, plus a `WHEN NOT MATCHED AND ...` branch, in the same MERGE.
+2. **First-match-wins ordering.** Per the Trino MERGE docs: *"For each source row, the WHEN clauses are processed in order. Only the first matching WHEN clause is executed."* The branch order in the SQL text determines precedence.
+3. **`THEN DELETE` is a valid `WHEN MATCHED` action.** A WHEN MATCHED branch can resolve to `DELETE` (no SET clause) instead of `UPDATE SET`.
+4. **Put DELETE first when DELETE and UPDATE conditions could both match.** This is a logical consequence of first-match-wins — if the `WHEN MATCHED AND s.op = 'd' THEN DELETE` branch appears AFTER `WHEN MATCHED AND s.op IN ('u','d') THEN UPDATE SET ...`, the UPDATE branch wins, the DELETE never fires, and the deleted row gets its columns silently overwritten (the classic "null-out the deleted row" CDC bug — see also r13 §2886 CRITICAL BUG callout).
+5. **Boolean conditions in `AND` clauses can use any expression** — `s.op = 'd'`, `s.op IN ('u', 'c', 'r')`, `s.source_lsn > t.source_lsn`, etc. The `AND condition` is full SQL.
+
+**DO-NOT-WRITE callout (load-bearing — copy this into your code-review checklist):**
+
+> **Never write any of the following in Trino MERGE statements or in any dbt model targeting Trino:**
+>
+> 1. **`WHEN MATCHED THEN UPDATE SET *`** — Spark / Delta Lake / Databricks / Snowflake star shorthand. Trino parse error: `mismatched input '*'`. **Use explicit `UPDATE SET col1 = s.col1, col2 = s.col2, ...`.**
+>
+> 2. **`WHEN NOT MATCHED THEN INSERT *`** — Spark / Delta Lake / Databricks / Snowflake star shorthand. Trino parse error: `mismatched input '*'`. **Use explicit `INSERT (col1, col2, ...) VALUES (s.col1, s.col2, ...)`.**
+>
+> 3. **`WHEN NOT MATCHED THEN INSERT VALUES *`** / **`WHEN NOT MATCHED THEN INSERT VALUES (*)`** — Spark-ism. Trino does not accept `*` anywhere in the INSERT VALUES expression list.
+>
+> 4. **`WHEN NOT MATCHED THEN INSERT VALUES s.*`** / **`INSERT VALUES (s.*)`** — Spark / Snowflake style for "expand all source columns". Trino does not support `<alias>.*` in expression position inside MERGE VALUES (or in any expression position outside `SELECT *`).
+>
+> 5. **`WHEN MATCHED THEN UPDATE`** with no `SET` clause — the `SET` clause is **required** if the action is UPDATE. (`WHEN MATCHED THEN DELETE` has no SET clause; that one is fine.)
+>
+> 6. **`WHEN NOT MATCHED BY SOURCE`** — Oracle 12c+ and SQL Server syntax for "rows in target missing from source". **Trino does NOT support `WHEN NOT MATCHED BY SOURCE`** (only `WHEN MATCHED` and `WHEN NOT MATCHED`). See §4.6A for the two-model decomposition pattern that replaces this Oracle MERGE shape.
+>
+> 7. **Asymmetric column lists** in INSERT — the number of columns in the `INSERT (col1, col2, ...)` clause must exactly match the number of expressions in the `VALUES (expr1, expr2, ...)` clause. Mismatched counts produce a parse error.
+
+**Keyword-trap phrase (memorize):** *"Anyone who writes `UPDATE SET *` or `INSERT *` in a Trino MERGE is using Spark / Delta Lake / Databricks / Snowflake syntax — Trino MERGE requires explicit column lists for every UPDATE SET assignment AND every INSERT VALUES clause. There is NO `*` shorthand on either branch."*
+
+**For wide tables — auto-generate the column list, do NOT reach for star shorthand.** If you have 50+ columns and don't want to maintain the list by hand, generate it with a dbt macro that queries `INFORMATION_SCHEMA.COLUMNS`:
+
+```jinja
+{%- set cols = adapter.get_columns_in_relation(ref('stg_wide_table')) -%}
+{%- set col_names = cols | map(attribute='name') | list -%}
+
+MERGE INTO {{ this }} t
+USING {{ ref('stg_wide_table') }} s
+ON t.id = s.id
+WHEN MATCHED THEN UPDATE SET
+    {% for c in col_names if c != 'id' -%}
+    {{ c }} = s.{{ c }}{% if not loop.last %},{% endif %}
+    {% endfor %}
+WHEN NOT MATCHED THEN INSERT ({{ col_names | join(', ') }})
+    VALUES ({% for c in col_names %}s.{{ c }}{% if not loop.last %}, {% endif %}{% endfor %})
+```
+
+This compiles to a fully-expanded MERGE with every column listed — same correctness as a hand-written column list, no Spark-style shorthand needed. The macro adds a few lines of Jinja but the compiled SQL is Trino-valid.
+
+**dbt-trino's `incremental_strategy='merge'` compiled output uses explicit columns automatically.** When you set `incremental_strategy='merge'` on a dbt-trino incremental model, the adapter compiles a MERGE statement with **explicit column lists** on both UPDATE SET and INSERT VALUES — it does **NOT** emit `UPDATE SET *` / `INSERT *`. The compiled output looks like:
+
+```sql
+-- dbt-trino compiles incremental_strategy='merge' to:
+MERGE INTO {{ this }} AS DBT_INTERNAL_DEST
+USING (...) AS DBT_INTERNAL_SOURCE
+ON DBT_INTERNAL_SOURCE.<unique_key> = DBT_INTERNAL_DEST.<unique_key>
+WHEN MATCHED THEN UPDATE SET
+    col1 = DBT_INTERNAL_SOURCE.col1,
+    col2 = DBT_INTERNAL_SOURCE.col2,
+    ...
+WHEN NOT MATCHED THEN INSERT (col1, col2, ...)
+VALUES (DBT_INTERNAL_SOURCE.col1, DBT_INTERNAL_SOURCE.col2, ...);
+```
+
+The columns are pulled from your model's SELECT projection — that's why getting the SELECT right is load-bearing. If you write `SELECT *` in your dbt model and the source columns change, the next compile picks up the new column automatically (subject to `on_schema_change` settings — see [resource 13 § `on_schema_change`](13-postgres-to-iceberg-ingestion.md)).
+
+**Cross-references.**
+- §4.6A — Oracle `WHEN NOT MATCHED BY SOURCE` two-model decomposition (Trino has no `BY SOURCE` clause; see DO-NOT-WRITE #6 above).
+- §4.4B cross-dialect-spillover guardrail row "MERGE star shorthand" — consolidated entry for the star-shorthand ban.
+- Resource 13 §2886 — Spark/Iceberg MERGE star-shorthand IS valid in `spark.sql("...")` blocks (Spark/Delta-Lake/Iceberg accept it); the Trino ban is specific to Trino-context MERGE statements (in dbt-trino models, in Trino CLI / JDBC). The same SQL works in one engine and parse-errors in the other.
 
 ### 4.6A Oracle `MERGE ... WHEN NOT MATCHED BY SOURCE` soft-delete migration — TWO-MODEL DECOMPOSITION IS THE DEFAULT
 
