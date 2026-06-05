@@ -1,144 +1,159 @@
-# Iter 500 Judge Feedback — 2026-06-06 (EXTENDED PHASE)
+# Judge Feedback — Iteration 501
 
-## Headline
-
-**OVERALL = 4.6406 STRONG PASS** (+1.1406 above 3.5 floor). **DBT-SNAPSHOT FINDABILITY FIX LANDED.** Q1 jumped from iter499's 3.125 punt to 4.9375 STRONG — responder now routes to r09 §1a/1b on the first 3rd-angle re-probe, writes dialect-correct `strategy='check'` + `check_cols=['plan_tier','account_status']` LIST form + bans `['all']` list-wrap anti-pattern + all four metadata cols + `WHERE dbt_valid_to IS NULL` current-rows pattern. This is the 9th leading-canonical bulletproofing instance AND the first findability-only (zero-new-content) fix in the extended phase. Q2/Q3 fully clean. Q4 dbt not_null severity STRONG PASS with ONE minor non-load-bearing nit (compiled-SQL pattern misstatement). Federation NOT probed (per directive).
-
-## Per-question scores
-
-| Question | Accuracy | Clarity | Actionability | Completeness | Avg | Verdict |
-|---|---|---|---|---|---|---|
-| Q1 dbt snapshot SCD2 RE-PROBE | 5.00 | 4.75 | 5.00 | 5.00 | **4.9375** | STRONG PASS — FINDABILITY FIX LANDED |
-| Q2 JSON parse + WHERE filter | 5.00 | 4.75 | 5.00 | 4.75 | **4.875** | STRONG PASS |
-| Q3 Oracle ROWNUM → Trino top-N | 5.00 | 4.75 | 5.00 | 5.00 | **4.9375** | STRONG PASS |
-| Q4 dbt not_null severity | 4.50 | 4.75 | 4.75 | 4.75 | **4.6875** | PASS (minor non-load-bearing nit) |
-
-**Overall = (4.9375 + 4.875 + 4.9375 + 4.6875) / 4 = 19.4375 / 4 = 4.6406** (STRONG PASS)
+**Date**: 2026-06-06
+**Phase**: extended
+**Overall**: 4.7969 STRONG PASS (+1.2969 above 3.5 floor)
 
 ---
 
-## Q1 — dbt snapshot SCD2 RE-PROBE — **FINDABILITY FIX LANDED**
+## Per-Question Scores
 
-The iter500 findability fix landed cleanly on the first 3rd-angle re-probe. The responder now routes to r09 §1a/1b and writes a fully dialect-correct dbt snapshot answer.
+### Q1 — Trino date arithmetic (days between two dates; +30 days for trial expiration)
 
-Confirmed correct, load-bearing facts:
-- `strategy='check'` (correct strategy name; no fabricated `hash` / `merge` / `changes`).
-- `check_cols=['plan_tier', 'account_status']` in LIST form (correct; not list-wrapped `['all']`).
-- Explicitly stated `check_cols=['all']` (list-wrapped) is WRONG and treated as a column literally named `all` — this is the iter499 banned anti-pattern, now correctly flagged as banned.
-- Explained the LIST vs bare-string `'all'` shorthand distinction.
-- Metadata columns `dbt_valid_from` / `dbt_valid_to` / `dbt_scd_id` / `dbt_is_deleted` (1.9+) all present and correct.
-- Did NOT fabricate `dbt_is_current`.
-- Current-rows query `WHERE dbt_valid_to IS NULL` correct.
-- Mechanic: old row closed (`dbt_valid_to` stamped) + new row inserted on changed-col detection — correct.
-- Non-listed cols ignored — correct.
-- Cited r09 lines 378-426 (direct landing on canonical).
+**Score: 4.875 STRONG PASS** — Accuracy 4.75, Clarity 5.0, Actionability 5.0, Completeness 4.75
 
-Verified against docs.getdbt.com/docs/build/snapshots and docs.getdbt.com/reference/resource-configs/check_cols — every claim is verbatim correct.
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 4.75 | `date_diff('day', d1, d2)` argument order `(unit, from, to)` returning later-minus-earlier verified at trino.io/docs/current/functions/datetime.html. `date_add('day', N, d)` verified. `signup_date + INTERVAL '30' DAY` verified valid. `date_add('day', -7, current_date)` verified. **Minor mislabel (-0.25)**: answer says bare-integer `current_date - 30` produces a "PARSE ERROR" — strictly speaking this is a **type-resolution error** ("`'-'` cannot be applied to date, integer"), not a parse error. The query parses fine; the analyzer rejects it. Engineer impact is identical (statement fails), so non-load-bearing. |
+| Clarity | 5.0 | Two distinct patterns (operator-form and function-form) shown side-by-side; negative-value subtraction explicit. |
+| Actionability | 5.0 | Copy-pasteable forms for both the diff and the +30-day expiration case. |
+| Completeness | 4.75 | Covers diff, add, subtract, and the bare-integer anti-pattern. Could note `current_date + INTERVAL '30' DAY` returns DATE preserved, but non-blocking. |
 
-**The iter500 teacher's pure-routing intervention worked.** No new content, no duplication, only an r09 keyword anchor + 4 identical forward-pointer cross-refs from r10/r23/r27/r28. Single-source-of-truth preserved, zero stale-contradiction risk, zero new content drift. 9th successful leading-canonical bulletproofing instance and the first findability-only fix in the extended phase.
-
-Minor (−0.25 Clarity only): didn't gloss "re-hashes" for an absolute beginner reader.
-
-## Q2 — JSON parse + WHERE filter
-
-Verified against trino.io/docs/current/functions/json.html (release 467 lineage):
-- `json_extract_scalar(config, '$.plan') = 'enterprise'` — valid Trino 467, usable directly in WHERE. CORRECT.
-- Returns NULL for missing path AND for malformed JSON — CORRECT.
-- `JSON_VALUE(config, '$.plan' RETURNING varchar NULL ON EMPTY NULL ON ERROR)` — valid SQL/JSON syntax. CORRECT.
-- json_extract_scalar vs JSON_VALUE NULL-control contrast — CORRECT.
-- Perf note (JSON has no per-key stats so full scan; promote hot keys to top-level columns) — correct and SaaS-actionable.
-
-No fabrications. Trino-dialect-clean.
-
-Scores: 5.0 / 4.75 / 5.0 / 4.75.
-
-## Q3 — Oracle ROWNUM → Trino top-N
-
-Verified against trino.io/docs/current/sql/select.html and trino.io/docs/current/functions/window.html:
-- "No ROWNUM in Trino" — correct.
-- `ORDER BY created_at DESC LIMIT 100` — valid Trino top-N (optimizer uses TopN, not full sort). Correct.
-- `ROW_NUMBER() OVER (ORDER BY ...) AS row_number ... WHERE row_number <= 100` via subquery — correct standard pattern. NO QUALIFY (Trino 467 doesn't support QUALIFY — good).
-- Oracle ROWNUM-before-ORDER-BY inline-view trap explanation — correct. Oracle assigns ROWNUM before ORDER BY in the same SELECT; wrap-then-filter required.
-
-No fabrications. Trino-dialect-clean.
-
-Scores: 5.0 / 4.75 / 5.0 / 5.0.
-
-## Q4 — dbt not_null severity (build fail vs warn)
-
-Verified against docs.getdbt.com/reference/resource-configs/severity and /store_failures:
-
-CORRECT load-bearing claims:
-- `not_null` generic test exists — correct.
-- Default severity is `error` — correct.
-- `error` makes `dbt build` / `dbt test` exit non-zero — correct.
-- `severity: warn` continues without failing the build — correct.
-- `store_failures: true` writes failing rows to `<schema>_dbt_test__audit.<test_name>` — correct.
-- YAML under `data_tests:` block — correct (modern key; legacy was `tests:`).
-- Build halts AFTER materialization (so the bad table is already written) — correct, important nuance.
-
-MINOR ACCURACY NIT (flagged, NOT load-bearing):
-- Answer says dbt compiles the not_null test to `SELECT 1 FROM fct_orders WHERE customer_id IS NULL LIMIT 1`. This is WRONG. Real compile pattern is:
-  ```
-  SELECT COUNT(*) AS failures, COUNT(*) != 0 AS should_warn, COUNT(*) != 0 AS should_error
-  FROM (SELECT * FROM <model> WHERE <col> IS NULL) dbt_internal_test
-  ```
-- Verified at docs.getdbt.com/docs/build/data-tests and dbt-core test macro source.
-- Matters because the compiled test reports the ACTUAL failure count, which is what `error_if`/`warn_if` thresholds compare against. `LIMIT 1` would be incompatible with threshold-conditional severity (`error_if: ">10"`).
-- SEVERITY / BUILD-HALT / store_failures behavior the engineer actually needs is all correct, so does NOT drop the answer below PASS. Accuracy −0.5 only.
-
-Scores: 4.5 / 4.75 / 4.75 / 4.75.
+**Verified clean**: `date_diff(unit, from, to)` order, `date_add(unit, N, ts)` order, INTERVAL syntax, negative-N for subtraction.
 
 ---
 
-## FINDABILITY-FIX-LANDED OUTCOME
+### Q2 — Oracle TO_CHAR / TO_DATE → Trino equivalents (copy-paste error fix)
 
-**CONFIRMED LANDED.** The iter500 teacher's strategy (no new content; only r09 keyword anchor + 4 identical forward-pointer cross-refs from r10/r23/r27/r28) successfully routed the responder to r09 §1a/1b on the FIRST 3rd-angle probe. Q1 jumped from 3.125 FAIL (iter499 punt) to 4.9375 STRONG PASS.
+**Score: 4.9375 STRONG PASS** — Accuracy 5.0, Clarity 4.75, Actionability 5.0, Completeness 5.0
 
-Key wins:
-- Single-source-of-truth preserved (no duplicate snapshot mechanics anywhere).
-- Zero stale-contradiction risk (iter495-style trap avoided).
-- Zero new content drift.
-- 9th leading-canonical bulletproofing instance.
-- **First findability-only zero-new-content fix to land in the extended phase** — strong signal that pure routing interventions work when the canonical content is already correct.
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5.0 | Confirmed Trino has NO `to_char`/`to_date` (function-not-registered). `date_format(ts, '%Y-%m-%d')` MySQL-style verified. `format_datetime(ts, 'yyyy-MM-dd')` Joda-style verified. `date_parse('2024-01-01', '%Y-%m-%d')` MySQL-style verified. `parse_datetime('2024-01-01', 'yyyy-MM-dd')` Joda-style verified. `from_iso8601_date(...)` exists. Both `date_parse` and `parse_datetime` return TIMESTAMP/TIMESTAMP WITH TIME ZONE, so CAST AS DATE is the correct shape for getting a DATE. Format-mask mapping rows accurate (`YYYY`→`%Y`/`yyyy`, `MM`→`%m`/`MM`, `DD`→`%d`/`dd`, `HH24`→`%H`/`HH`, `MI`→`%i`/`mm`, `SS`→`%s`/`ss`). |
+| Clarity | 4.75 | Side-by-side MySQL-vs-Joda specifier table is exactly what an Oracle dev migrating to Trino needs. |
+| Actionability | 5.0 | Engineer can copy any of the three TO_DATE replacements (date_parse+CAST, parse_datetime+CAST, from_iso8601_date) and pick by format. |
+| Completeness | 5.0 | Covers no-such-function symptom, two formatter families with format-string differences, parse-return-type → CAST necessity, ISO 8601 shortcut. |
 
-## NEW FABRICATIONS THIS ITER
-
-ONE minor non-load-bearing nit only:
-- **Q4 compiled-SQL pattern**: `SELECT 1 ... LIMIT 1` is wrong; actual is `SELECT COUNT(*) ... FROM (... WHERE col IS NULL) dbt_internal_test`. Not load-bearing (severity/build-halt behavior all correct). LOW priority.
-
-No load-bearing fabrications. Zero recurrences of any prior-iter fab.
+**Verified clean**: All four functions and the MySQL-vs-Joda specifier split.
 
 ---
 
-## Next-teacher actions (iter501)
+### Q3 — dbt seeds for small static country-code CSV lookup
 
-LOW PRIORITY (single nit, not load-bearing):
-1. **dbt tests resource — clarify compiled `not_null` test SQL.** Add one line near the existing dbt-tests / severity content: "dbt compiles `not_null` generic tests to `SELECT COUNT(*) AS failures, COUNT(*) != 0 AS should_warn, COUNT(*) != 0 AS should_error FROM (SELECT * FROM <model> WHERE <col> IS NULL) dbt_internal_test` — NOT `SELECT 1 ... LIMIT 1` (which would break threshold-conditional `error_if` / `warn_if`)." Keep tight, one line, single-source-of-truth. Do NOT duplicate severity content elsewhere.
+**Score: 4.6875 STRONG PASS** — Accuracy 4.75, Clarity 4.75, Actionability 4.75, Completeness 4.5
 
-DO NOT TOUCH (per directive):
-- r22 §13.x federation guardrails (9 subsections 13.1–13.8 + 13.5A at lines 8050–9170). Federation rubric row stays 4.49944/310.
-- r09 §1a/1b snapshot canonical — content is verified correct AND the findability fix landed; do not modify.
-- Iter500's r09 anchor + r10/r23/r27/r28 cross-refs — they worked; leave as-is.
-- r28 §3.3/§3.3A materialization canonical; r28 GROUPING-bitmask canonical; r27 §3.3 partitioning-key canonical; r27 §4.1A DECODE-NULL; r27 §4.6B MERGE star-shorthand guardrail; r13 §Pattern C MERGE engine-note; r03 no-index canonical; r17 view-storage canonical.
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 4.75 | `seeds/` is the correct default directory (verified docs.getdbt.com/reference/project-configs/seed-paths — "By default, dbt expects your seed files to be located in the seeds subdirectory"). `data/` was the pre-1.0 default — correct historical note. `dbt seed` / `dbt seed --select country_codes` verified. `+column_types` in dbt_project.yml verified (docs.getdbt.com/reference/resource-configs/column_types). `ref('country_codes')` standard. **Important nuance partially wrong**: answer says seeds NOT auto-run by `dbt run`/`dbt build`. `dbt run` is correct — runs models only. **`dbt build` DOES include seeds** per docs.getdbt.com/reference/commands/build — "builds and tests your selected resources such as models, seeds, snapshots, and tests." So claim is half-wrong on `dbt build`. -0.25. |
+| Clarity | 4.75 | Clear directory → command → ref usage chain; <1MB sizing rule of thumb is correct. |
+| Actionability | 4.75 | Engineer can drop the CSV and run the seed command immediately. |
+| Completeness | 4.5 | Misses the `dbt build` includes-seeds nuance (above). Could note seeds are version-controlled and meant for STATIC reference data (country codes ARE the canonical example — engineer should be told this is the right tool for their use case). Otherwise complete. |
 
-## Judge probe targets for iter501
-
-- **dbt snapshot SCD2 from a 4th angle** (HIGH — confirm the findability fix HOLDS, not just landed once). Suggested phrasing: "I deleted a customer in source — does my dbt snapshot mark the row deleted or keep the old row open forever?" (probes `dbt_is_deleted` + `hard_deletes='new_record'` 1.9+ semantics).
-- **dbt not_null severity 2nd angle** (MEDIUM — would lock in the compiled-SQL one-liner if teacher writes it). Suggested: "How do I let my not_null test tolerate up to 5 nulls before failing the build?" (probes `error_if: ">5"` threshold semantics — where the SELECT-1-LIMIT-1 fab would actively mislead).
-- **Trino JSON_VALUE ON ERROR variants** (MEDIUM — 2nd angle on SQL/JSON RETURNING clause). Suggested: "JSON column has bad rows that break my query — how do I make malformed JSON return NULL instead of erroring?"
-- **Top-N per group with ROW_NUMBER PARTITION BY** (MEDIUM — Q3 4th angle to lock in no-QUALIFY pattern). Suggested: "Top 3 events per user — how do I do per-group top-N in Trino?"
-- **Federation row 4.49944/310 — stays UNPROBED** per long-standing directive.
+**Verified clean**: seeds/ default, column_types config, dbt seed command isolation from dbt run.
+**Verified WRONG**: `dbt build` claim — `dbt build` DOES execute seeds by default.
 
 ---
 
-## Sources verified
+### Q4 — 2B-row × 50K-row join broadcast vs partitioned distribution
 
-- [check_cols | dbt Developer Hub](https://docs.getdbt.com/reference/resource-configs/check_cols)
-- [Add snapshots to your DAG | dbt Developer Hub](https://docs.getdbt.com/docs/build/snapshots)
-- [snapshot_meta_column_names | dbt Developer Hub](https://docs.getdbt.com/reference/resource-configs/snapshot_meta_column_names)
-- [JSON functions and operators | Trino Documentation](https://trino.io/docs/current/functions/json.html)
-- [Window functions | Trino Documentation](https://trino.io/docs/current/functions/window.html)
-- [severity, error_if, and warn_if | dbt Developer Hub](https://docs.getdbt.com/reference/resource-configs/severity)
-- [store_failures | dbt Developer Hub](https://docs.getdbt.com/reference/resource-configs/store_failures)
-- [About data tests property | dbt Developer Hub](https://docs.getdbt.com/reference/resource-properties/data-tests)
+**Score: 4.6875 STRONG PASS** — Accuracy 4.75, Clarity 4.5, Actionability 5.0, Completeness 4.75
+
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 4.75 | BROADCAST=replicate small table to all workers vs PARTITIONED=hash-repartition both sides — correct. **`join_distribution_type` session property VERIFIED CORRECT** (NOT a fabricated `distributed_join_distribution_type`); values BROADCAST/PARTITIONED/AUTOMATIC verified at trino.io/docs/current/optimizer/cost-based-optimizations.html. **`join_max_broadcast_table_size` session property NAME VERIFIED CORRECT** at trino.io/docs/current/optimizer/cost-based-optimizations.html. **Default 100 MB VERIFIED CORRECT** ("By default, the replicated table size is capped to 100MB"). EXPLAIN RemoteExchange[REPLICATE]=broadcast vs [REPARTITION]=partitioned verified. Trino-has-no-`/*+ hint */` syntax correct (comments are silently dropped). Missing/stale ANALYZE causing AUTOMATIC to mis-pick correct. **Minor concern (-0.25)**: answer's example `SET SESSION join_max_broadcast_table_size = '50MB'` — value should be unquoted DataSize literal or `'50MB'` string-style depending on form; the string form generally works but the property type is DataSize. Both forms are accepted in Trino, so non-load-bearing. Did NOT use the Spark-ism `ANALYZE TABLE` — used bare `ANALYZE <table>` which is the correct Trino form (verified trino.io/docs/current/sql/analyze.html). |
+| Clarity | 4.5 | Two distribution types are clearly contrasted; EXPLAIN signal interpretation is concrete. The session-property + ANALYZE + size-cap troubleshooting flow is well-ordered. |
+| Actionability | 5.0 | Engineer gets: (1) session SET to force, (2) dbt pre_hook form for dbt context, (3) ANALYZE remediation if CBO is starved, (4) size-cap bump knob, (5) EXPLAIN verification step. End-to-end. |
+| Completeness | 4.75 | Covers the symptom, the two distribution modes, two control knobs (type + size cap), the CBO-stats reason, EXPLAIN verification, and the no-hint caveat. Could mention `join-distribution-type` system-level config-property counterpart but engineer-level session control is the immediate ask. |
+
+**Q4 session-property verification — explicit outcomes for this iter's critical check**:
+
+- `join_distribution_type` — **VERIFIED CORRECT**. Values `BROADCAST` / `PARTITIONED` / `AUTOMATIC` verified at trino.io/docs/current/optimizer/cost-based-optimizations.html. **NOT a recurrence of the prior `distributed_join_distribution_type` fab.**
+- `join_max_broadcast_table_size` — **VERIFIED CORRECT** (exact name). Confirmed at trino.io/docs/current/optimizer/cost-based-optimizations.html.
+- Default 100 MB — **VERIFIED CORRECT**. Doc: "By default, the replicated table size is capped to 100MB."
+- EXPLAIN RemoteExchange `REPLICATE` (broadcast) vs `REPARTITION` (partitioned) — **VERIFIED CORRECT**.
+- No `/*+ hint */` syntax in Trino — **VERIFIED CORRECT** (hints are parsed as comments and ignored).
+- `ANALYZE <table>` (bare, NO `TABLE` keyword) — **VERIFIED CORRECT** at trino.io/docs/current/sql/analyze.html. Answer did NOT write Spark-ism `ANALYZE TABLE`. Clean.
+
+---
+
+## Overall Iter501 Verdict
+
+**OVERALL AVG = (4.875 + 4.9375 + 4.6875 + 4.6875) / 4 = 19.1875 / 4 = 4.7969 STRONG PASS**
+
+(+1.2969 above 3.5 floor; 100th consecutive PASS in extended phase.)
+
+### Verified Clean
+- Trino `date_diff`/`date_add` argument orders and unit-string literal
+- Trino INTERVAL operator-form date arithmetic
+- Trino has NO `to_char`/`to_date`
+- `date_format`/`date_parse` use MySQL specifiers; `format_datetime`/`parse_datetime` use Joda
+- `date_parse`/`parse_datetime` return TIMESTAMP → CAST AS DATE
+- `from_iso8601_date` exists
+- dbt seeds default directory is `seeds/`; `data/` was pre-1.0
+- `+column_types` config in `dbt_project.yml`
+- `dbt seed` is independent of `dbt run`
+- BROADCAST vs PARTITIONED join distribution semantics
+- **`join_distribution_type` session property name + values (BROADCAST/PARTITIONED/AUTOMATIC)**
+- **`join_max_broadcast_table_size` session property name + 100 MB default**
+- EXPLAIN `REPLICATE`/`REPARTITION` interpretation
+- Trino has no `/*+ BROADCAST */` query hints
+- Bare `ANALYZE <table>` Trino form (NOT Spark `ANALYZE TABLE`)
+
+### New Issues Found
+
+**Q3 — `dbt build` claim is half-wrong (load-bearing minor).** Answer says "seeds NOT auto-run by `dbt run`/`dbt build`." Correct for `dbt run`; WRONG for `dbt build`. Per docs.getdbt.com/reference/commands/build, `dbt build` runs seeds, models, snapshots, and tests together in DAG order. Engineer impact: if they switch from `dbt run` to `dbt build` thinking they still need to call `dbt seed` separately, they will double-load seeds (idempotent but wasted work) or — more likely — be confused why behavior differs from the doc. **This is a small but reproducible factual error**; teacher should reconcile-in-place where seeds-vs-build appears in resources.
+
+**Q1 — "PARSE ERROR" mislabel (non-load-bearing minor).** `current_date - 30` is a **type-resolution error**, not a parse error. Engineer impact identical (query fails), but if they search the error message for "parse error" they will find nothing — they will find a "Cannot apply operator: date - integer"-style type message. Optional polish.
+
+**NO new fabrications**. **NO session-property fabs** (Q4 was the high-risk question — both critical property names and the 100 MB default verified clean). **NO Spark-isms** (Q4 ANALYZE form is correct bare-Trino, not `ANALYZE TABLE`).
+
+---
+
+## Topic Average Updates
+
+- **SQL query best practices for OLAP** (Q1 date arithmetic maps here): 4.5288 / 55 → (4.5288×55 + 4.875) / 56 = 253.7590 / 56 = **4.5314 / 56** (+0.0026)
+- **Oracle PL/SQL → dbt/Trino migration** (Q2 TO_CHAR/TO_DATE → Trino maps here): 4.5406 / 72 → (4.5406×72 + 4.9375) / 73 = 331.8607 / 73 = **4.5460 / 73** (+0.0054)
+- **Improving complex SQL performance on Trino with dbt** (Q3 dbt seeds + Q4 broadcast control both map here): 4.5926 / 12 → (4.5926×12 + 4.6875 + 4.6875) / 14 = 64.4862 / 14 = **4.6062 / 14** (+0.0136 — two STRONG PASS data points)
+- **Trino federation** — UNCHANGED at **4.49944 / 310** per directive (not probed).
+
+---
+
+## Next-Teacher Actions for Iter502
+
+**LOW priority** (Q3 minor reconcile):
+- Grep `resources/` for any line claiming seeds are NOT executed by `dbt build`. Reconcile in place to: "`dbt build` runs seeds AND models AND snapshots AND tests in DAG order; `dbt run` runs models only; `dbt seed` runs seeds only." Cite docs.getdbt.com/reference/commands/build verbatim quote: "builds and tests your selected resources such as models, seeds, snapshots, and tests."
+- Do NOT add new sections; this is reconcile-in-place per the standing directive.
+
+**OPTIONAL polish** (Q1 mislabel):
+- If a resource currently writes "parse error" for the bare-integer `current_date - 30` case, change to "type error: cannot apply operator '-' to date and integer". Non-load-bearing; only fix if grep finds an existing wrong label.
+
+**LEAVE UNTOUCHED**:
+- All §13.x federation guardrails in `resources/22*` (federation row stays 4.49944 / 310).
+- r27 §6.7A dbt test mechanics (iter501 teacher fix is verified intact via this iter's STRONG PASSes).
+- r09 §1a/1b dbt snapshot SCD2 canonical (verified intact iter500).
+- r17 dbt view/ephemeral canonical (verified intact iter498-499).
+- r13 MERGE engine-note (verified intact iter498).
+- r28 §3.3/§3.3A materialization canonicals.
+- iter495 dbt-trino `partitioning`-key canonical.
+
+---
+
+## Judge Probe Targets for Iter502
+
+| Priority | Probe | Why |
+|---|---|---|
+| HIGH | `dbt build` vs `dbt run` vs `dbt seed` — does dbt build include seeds? | Iter501 Q3 showed a half-wrong claim. Need to verify the reconcile-in-place lands. |
+| HIGH | Trino broadcast join — 2nd angle: "I bumped join_max_broadcast_table_size but EXPLAIN still shows REPARTITION — why?" | Q4 was solid; 2nd-angle probe should confirm CBO-stats / AUTOMATIC-mode interaction stays clean and that the 100 MB default knowledge transfers to a debugging scenario. |
+| MEDIUM | Trino TO_DATE for an Oracle format mask with TZ (`'YYYY-MM-DD HH24:MI:SS TZH:TZM'`) | Q2 was strong on simple masks; probes the timezone-formatter edge of MySQL-vs-Joda. |
+| MEDIUM | dbt seeds + Iceberg specifics: does dbt-trino write the seed as an Iceberg table? What partition spec / properties? | Probes the seed→Trino-target adapter behavior, which Q3 did not cover. |
+| LOW | `date_diff` with `'hour'`/`'minute'` units and `current_timestamp` | Generalizes Q1 to non-day units. |
+| LOW (do not probe) | Federation — UNPROBED per standing directive. |
+
+---
+
+## Confirmation
+
+- Score line for iter501 appended to `training/rubric.md` history.
+- `training/state.json` left at `iteration: 501` (NOT bumped per task instructions; teacher set it).
+- §13.x federation guardrails in `resources/22-*` UNTOUCHED.
+- Federation rubric row UNCHANGED at 4.49944 / 310.

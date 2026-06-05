@@ -1971,6 +1971,8 @@ data_tests:
   +severity: warn
 ```
 
+**How dbt evaluates test result mechanics — read this BEFORE writing `warn_if` / `error_if`.** A dbt generic/data test compiles to a SELECT that returns the **failing rows** (e.g. `not_null` compiles to `SELECT * FROM <model> WHERE <col> IS NULL`; `unique` to a `GROUP BY <col> HAVING COUNT(*) > 1` shape). **The test PASSES if zero failing rows are returned; it FAILS if any row comes back.** dbt then takes the **count of failing rows** in that result set and compares it against the `warn_if` / `error_if` thresholds. Verbatim from [docs.getdbt.com/docs/build/data-tests](https://docs.getdbt.com/docs/build/data-tests): *"If the data test returns zero failing rows, it passes, and your assertion has been validated."* Verbatim from [docs.getdbt.com/reference/resource-configs/severity](https://docs.getdbt.com/reference/resource-configs/severity): *"Tests return a number of failures—most often, this is the count of rows returned by the test query."* This is **NOT** a `SELECT 1 ... LIMIT 1` existence check — if it were, thresholds like `error_if: ">100"` would be meaningless. The threshold expression is an integer comparison against the failing-row count, which is why `error_if: ">100"` / `warn_if: ">0"` works.
+
 Fine-grained `warn_if` + `error_if` (warn on 1-99 bad rows, error on 100+):
 
 ```yaml
@@ -1981,7 +1983,7 @@ Fine-grained `warn_if` + `error_if` (warn on 1-99 bad rows, error on 100+):
       warn_if: ">0"
 ```
 
-The condition uses standard comparison operators (`>N`, `>=N`, `=N`, `!=N`). Default for both `warn_if` and `error_if` is `!=0`.
+The condition uses standard comparison operators (`>N`, `>=N`, `=N`, `!=N`, `between N and M`) — any SQL-supported integer-comparison form against the failing-row count. Default for both `warn_if` and `error_if` is `!=0` (which means: warn or error if ANY failing row is returned). With `severity: error`, dbt checks `error_if` first; if it matches → ERROR. If it doesn't match, dbt checks `warn_if`; if it matches → WARN. If neither matches → PASS. With `severity: warn`, dbt skips `error_if` entirely.
 
 #### store_failures schema location
 
