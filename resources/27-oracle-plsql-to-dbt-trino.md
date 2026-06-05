@@ -594,7 +594,9 @@ These are the per-expression rewrites you'll do on almost every migrated SELECT.
 | `SYSDATE` (current date + time, server time zone) | `current_timestamp` (timestamp with time zone, session TZ) OR `localtimestamp` (no TZ) | Beware: `SYSDATE` returns DATE-with-time in Oracle; `CURRENT_DATE` in Trino is just DATE (no time). Use `current_timestamp` for "now()" semantics. **NOTE: `current_date` drops the time component — do NOT use it as a SYSDATE replacement when you need hours/minutes/seconds.** See §4.2A for how to change the session time zone (it is NOT a `SET SESSION` property — it is a dedicated `SET TIME ZONE` command). |
 | `SYSTIMESTAMP` | `current_timestamp` | Identical semantics (both TZ-aware). Oracle `SYSTIMESTAMP` is `TIMESTAMP WITH TIME ZONE`; Trino `current_timestamp` is `timestamp with time zone` keyed on the session time zone. |
 | `TRUNC(dt)` (truncate to day) | `date_trunc('day', dt)` | Also `'week'`, `'month'`, `'quarter'`, `'year'`, `'hour'`, `'minute'`, `'second'`. |
-| `TO_DATE('2026-05-30', 'YYYY-MM-DD')` | `date_parse('2026-05-30', '%Y-%m-%d')` returning timestamp, OR `CAST('2026-05-30' AS DATE)` for ISO-8601 dates. | Trino's format strings use `%Y %m %d %H %i %s` (MySQL-style), NOT Oracle's `YYYY MM DD HH24 MI SS`. |
+| `TO_DATE('2026-05-30', 'YYYY-MM-DD')` (ISO) | THREE canonical Trino-correct forms (pick by input shape): (1) `from_iso8601_date('2026-05-30')` returning DATE — CLEANEST for ISO 8601 input; (2) `CAST(date_parse('2026-05-30', '%Y-%m-%d') AS DATE)` returning DATE — MySQL-style specifiers; `date_parse` returns `timestamp(3)`, wrap in `CAST AS DATE`; (3) `CAST('2026-05-30' AS DATE)` for raw ISO-8601 string only. **`parse_date(str, fmt)` is NOT a Trino function** — that is Snowflake/BigQuery. | Trino's `date_parse` uses MySQL specifiers (`%Y %m %d %H %i %s`); `parse_datetime` uses Joda (`yyyy MM dd HH mm ss`). NEITHER is named `parse_date`. See §4.4B cross-dialect guardrail row for the explicit `parse_date` ban. |
+| `TO_DATE('30/05/2026', 'DD/MM/YYYY')` (slash, day-first) | `CAST(date_parse('30/05/2026', '%d/%m/%Y') AS DATE)` returning DATE. | `%d` = day, `%m` = month, `%Y` = 4-digit year. MySQL specifiers throughout. |
+| `TO_DATE('05-JUN-2026', 'DD-MON-YYYY')` (abbreviated month name) | `CAST(date_parse('05-JUN-2026', '%d-%b-%Y') AS DATE)` returning DATE. | `%b` = abbreviated month name (`Jan`, `Feb`, ...). Case sensitivity: `date_parse` is case-insensitive on month names in 467; verify locale-sensitive months separately. |
 | `TO_CHAR(dt, 'YYYY-MM-DD')` | `date_format(dt, '%Y-%m-%d')` (MySQL-style, FIRST-CHOICE) OR `format_datetime(dt, 'yyyy-MM-dd')` (Joda) OR `CAST(dt AS VARCHAR)` for ISO of a DATE column only. | See the LEADING CANONICAL block at the top of this section for the full Oracle TO_CHAR ↔ Trino format-string mapping table and DO-NOT-WRITE matrix. `TO_CHAR` itself is NOT a Trino function. |
 | `TO_NUMBER('123')` | `CAST('123' AS bigint)` or `CAST('1.5' AS double)` | Trino has no `TO_NUMBER`; use `CAST`. |
 | `EXTRACT(YEAR FROM dt)` | `EXTRACT(YEAR FROM dt)` OR `year(dt)` | Identical syntax + convenience functions. |
@@ -839,7 +841,10 @@ FROM {{ ref('stg_users') }}
 > | Top-N-per-group / dedup | `QUALIFY ROW_NUMBER() OVER (...) = 1` | Snowflake, BigQuery, Databricks, Teradata | Parse error | `ROW_NUMBER()` subquery + outer `WHERE rn = 1` (see [resource 23](23-sql-best-practices-olap.md)) |
 > | Stats DDL | `ANALYZE TABLE schema.table` | Spark, Hive, MySQL | Parse error | `ANALYZE schema.table` — bare, no `TABLE` keyword |
 > | Date → string | `TO_CHAR(dt, 'YYYY-MM-DD')` | Oracle | `Function 'to_char' not registered` | `date_format(dt, '%Y-%m-%d')` (MySQL) or `format_datetime(dt, 'yyyy-MM-dd')` (Joda) |
-> | String → date | `STR_TO_DATE('2026-05-30', '%Y-%m-%d')` | MySQL | `Function 'str_to_date' not registered` | `date_parse('2026-05-30', '%Y-%m-%d')` (MySQL-style) or `parse_datetime('2026-05-30', 'yyyy-MM-dd')` (Joda) |
+> | String → date | `STR_TO_DATE('2026-05-30', '%Y-%m-%d')` | MySQL | `Function 'str_to_date' not registered` | `CAST(date_parse('2026-05-30', '%Y-%m-%d') AS DATE)` (MySQL specifiers; `date_parse` returns timestamp(3), wrap in CAST AS DATE) or `from_iso8601_date('2026-05-30')` (ISO 8601 only, returns DATE directly) |
+> | String → date | `parse_date('2026-05-30', 'yyyy-MM-dd')` | Snowflake / BigQuery | `Function 'parse_date' not registered` — **NOT a Trino function** | Same Trino-correct triple as the row above: `CAST(date_parse(s, '%Y-%m-%d') AS DATE)`, OR `from_iso8601_date(s)` for ISO 8601, OR `CAST(parse_datetime(s, 'yyyy-MM-dd') AS DATE)` for Joda specifiers (returns `timestamp with time zone` — CAST drops TZ to land on DATE). **Verified at [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html): the documented date/timestamp parsing functions are `date_parse`, `parse_datetime`, and `from_iso8601_date` — there is NO `parse_date`.** |
+> | String → date | `to_date('2026-05-30', 'YYYY-MM-DD')` (Oracle lowercase) or `TO_DATE(...)` | Oracle / Snowflake | `Function 'to_date' not registered` — **NOT a Trino function** | Same Trino-correct triple as above. `to_date` exists in Oracle, Snowflake, Spark SQL — NOT in Trino 467. |
+> | MySQL-vs-Joda format specifier confusion | `date_parse('2026-05-30', 'yyyy-MM-dd')` (Joda spec in MySQL function) or `parse_datetime('2026-05-30', '%Y-%m-%d')` (MySQL spec in Joda function) | Cross-dialect muscle memory | Silently returns NULL or wrong date (no parse error — the function accepts the format string verbatim, but the specifier characters do not match) | **Pin the distinction:** `date_parse` ALWAYS uses MySQL specifiers (`%Y` `%m` `%d` `%H` `%i` `%s`); `parse_datetime` ALWAYS uses Joda (`yyyy` `MM` `dd` `HH` `mm` `ss`). Mnemonic: percent-sign → MySQL → `date_parse`; no percent sign → Joda → `parse_datetime`. |
 > | Conditional null | `NVL(a, b)` | Oracle | Parse / resolution error | `COALESCE(a, b)` |
 > | Conditional zero | `NVL2(a, b, c)` | Oracle | `Function 'nvl2' not registered` | `CASE WHEN a IS NOT NULL THEN b ELSE c END` |
 > | Decode-with-NULL semantics | `DECODE(col, NULL, 'x', ...)` | Oracle | Parse / resolution error | Searched `CASE WHEN col IS NULL THEN 'x' WHEN col = ... END` (see §4.1A) |
@@ -1590,6 +1595,233 @@ A `pass`/`warn`/`error` line per source is written; the full state lands in `tar
 - For the dbt `source()` / `ref()` macros and where `sources.yml` files live: see [§ 6.3-6.4](#63-stg_orderssql) — the worked example uses `{{ source('app', 'orders') }}`, which resolves to the `app.orders` source declared above.
 - For the dbt model dependency graph (what `dbt run` and `dbt build` actually traverse): see [docs.getdbt.com/docs/build/sources](https://docs.getdbt.com/docs/build/sources).
 - For the broader CI-pipeline picture (how `dbt source freshness` slots in alongside `dbt build`): see [§ 7. Cutover checklist](#7-cutover-checklist-the-non-obvious-gotchas) item 9 (schedule the dbt run).
+
+---
+
+### 6.7C LEADING CANONICAL — dbt model contracts (`config: contract: enforced: true`, `columns:` with `name` + `data_type`)
+
+> **READ THIS FIRST if your question contains any of these keywords: `model contract`, `contract enforced`, `dbt contract`, `enforced: true`, `data_type:`, `dbt column contract`, `schema lock`, `dbt build fails on column mismatch`, `dbt schema enforcement`, `dbt model contract example`, `dbt-trino contract`, `contract constraints`.** This block is the canonical reference for declaring model contracts in dbt on this stack. All claims below are verified at [docs.getdbt.com/reference/resource-configs/contract](https://docs.getdbt.com/reference/resource-configs/contract) and [docs.getdbt.com/docs/collaborate/govern/model-contracts](https://docs.getdbt.com/docs/collaborate/govern/model-contracts) (WebFetched 2026-06-05), with dbt-trino constraint enforcement verified via the dbt-trino adapter docs.
+
+**Q-PATTERN MATCHER.** Use this table to route to the right answer paragraph below.
+
+| If the question is... | Answer in one line | Detail in this section |
+|---|---|---|
+| "What is a dbt model contract?" | A schema lock declared in the model's YAML; dbt fails the BUILD if the model's actual output columns or types diverge from the declared ones. | § What a contract is and when it fires |
+| "How do I declare a contract?" | Add `config: contract: {enforced: true}` to the model's YAML entry, PLUS a `columns:` list where every column has `name` + `data_type` (the warehouse-specific type — on dbt-trino use Trino types: VARCHAR, BIGINT, TIMESTAMP(6), DATE, DECIMAL(p,s)). | § Worked example — dbt-trino + Iceberg |
+| "Does it fail at build time or query time?" | **Build time** (during `dbt run` / `dbt build`'s preflight check), NOT query time. The Trino engine itself does NOT enforce the contract — dbt does, before materialization. | § What a contract is and when it fires |
+| "Do constraints (not_null, primary_key, etc.) get enforced on dbt-trino?" | **Only `not_null` is enforced** on dbt-trino + Iceberg (Trino translates it to an Iceberg NOT NULL column constraint). `primary_key`, `foreign_key`, `unique`, `check` are **definable in YAML but NOT runtime-enforced** by Trino — they are recorded as metadata only. The HARD guarantee is the column-name + data_type build-time check, which fires regardless of platform. | § Constraints on dbt-trino — what's enforced vs definable |
+| "What does the build print when the model violates the contract?" | A `Compilation Error` / preflight error showing column-name / data_type mismatch BEFORE the model is materialized. Production data is never corrupted because the build halts first. | § Failure mode — what `dbt build` prints |
+
+#### What a contract is and when it fires
+
+A model contract is a **schema lock** declared in the model's YAML (the `.yml` file next to the model `.sql` file under `models/`). When `contract.enforced: true`, dbt's compilation step runs a **"preflight" check** before materializing the model:
+
+1. It compiles the model's SELECT body.
+2. It compares the SELECT's output column names + data types against the YAML-declared `columns:` list.
+3. If ANY column is missing, extra, or has the wrong type, **dbt errors and refuses to build the model** — the SQL is never executed against Trino.
+
+This is a **build-time check** (during `dbt run` / `dbt build`), NOT a query-time check. The Trino engine does not enforce model contracts — dbt does, via the dbt-trino adapter. The contract is a dbt-core feature available on every adapter (Snowflake, BigQuery, Postgres, Spark, Databricks, dbt-trino, etc.), not a Trino-specific mechanism.
+
+**Why it matters on this stack.** A downstream BI dashboard or another dbt model depends on the schema of `fct_orders` (column names + types). Without a contract, a rename of `customer_id` to `cust_id` in the model body would silently propagate, breaking the dashboard at the next refresh. With a contract, the rename is caught at `dbt build` BEFORE the model gets re-materialized — the dashboard is never broken because the broken build never lands.
+
+#### Required YAML keys (the canonical schema)
+
+```yaml
+# models/marts/fct_orders.yml
+version: 2
+
+models:
+  - name: fct_orders
+    config:
+      contract:
+        enforced: true                  # turns the contract on; without this it's purely documentation
+    columns:
+      - name: order_id                  # required: every column the model outputs must be listed
+        data_type: bigint               # required: warehouse type — on dbt-trino use Trino types
+        constraints:
+          - type: not_null              # ENFORCED on dbt-trino (translates to Iceberg NOT NULL)
+      - name: customer_id
+        data_type: bigint
+        constraints:
+          - type: not_null
+      - name: order_date
+        data_type: date
+      - name: amount_usd
+        data_type: decimal(18,2)        # decimal precision + scale in standard Trino form
+      - name: status
+        data_type: varchar              # VARCHAR (no length) is the production-default Trino type
+      - name: created_at
+        data_type: timestamp(6)         # Trino timestamp precision-6; matches Iceberg's default precision
+```
+
+**Key rules verified at [docs.getdbt.com/reference/resource-configs/contract](https://docs.getdbt.com/reference/resource-configs/contract):**
+
+- The `config:` block holds `contract: {enforced: true}` — the canonical 1.9+ placement (pre-1.9 the top-level `contract:` placement still parses but emits a deprecation warning).
+- `enforced: true` is the trigger; `enforced: false` (or omitting the contract block entirely) means there is no schema lock.
+- Every column the model outputs MUST appear in the `columns:` list when `enforced: true`. Missing a column → build error. Listing a column the model doesn't output → build error. Wrong order → NOT an error (column order is positional in the contract check, not declarative).
+- `data_type:` is the **warehouse-specific type** — for dbt-trino, use Trino types (`VARCHAR`, `BIGINT`, `INTEGER`, `DATE`, `TIMESTAMP(6)`, `TIMESTAMP(6) WITH TIME ZONE`, `DECIMAL(p, s)`, `DOUBLE`, `BOOLEAN`, `VARBINARY`, etc.). Do NOT write generic types like `string`, `int`, `numeric` — dbt-trino will not normalize them.
+- Optional `constraints:` list under each column; constraint enforcement is adapter-dependent (see next sub-section).
+
+#### Constraints on dbt-trino — what's enforced vs definable
+
+Per the dbt-core constraints reference (verified via [docs.getdbt.com/reference/resource-properties/constraints](https://docs.getdbt.com/reference/resource-properties/constraints)) and the dbt-trino adapter docs, constraint behavior on dbt-trino + Iceberg is:
+
+| Constraint type | dbt-trino + Iceberg behavior | Notes |
+|---|---|---|
+| `not_null` | **DEFINABLE and ENFORCED** at write time | dbt-trino issues `NOT NULL` on the Iceberg column definition; Iceberg rejects NULL inserts on that column at commit time. |
+| `primary_key` | **DEFINABLE but NOT ENFORCED** at write time | Recorded as YAML/metadata, but Trino + Iceberg do NOT enforce uniqueness at insert/merge time. Use a dbt test (`unique`) for the runtime check. |
+| `foreign_key` | **DEFINABLE but NOT ENFORCED** at write time | Same as primary_key — metadata only on dbt-trino + Iceberg. |
+| `unique` | **DEFINABLE but NOT ENFORCED** at write time | Metadata only. Pair with dbt's built-in `unique` test for an actual runtime check. |
+| `check` | **DEFINABLE but NOT ENFORCED** at write time | Metadata only. Pair with `dbt_utils.expression_is_true` for an actual runtime check. |
+
+**The load-bearing guarantee is the column-list + data_type build-time check.** That check is enforced unconditionally on every adapter that supports contracts (which includes dbt-trino). Only the constraint enforcement is adapter-dependent. If you are migrating from Oracle where `NOT NULL` was strictly enforced and `PRIMARY KEY` was uniqueness-enforced at write time, you keep `not_null` semantics under dbt-trino + Iceberg, but you must replace `primary_key` enforcement with the dbt `unique` test (which runs as a post-build assertion via `dbt test`).
+
+> **Defer to dbt-trino docs for any constraint specifics beyond `not_null`.** The verified statement is: dbt-trino enforces `not_null` at the Iceberg-column level; other constraints (`primary_key`, `foreign_key`, `unique`, `check`) are definable in YAML but not runtime-enforced. For the exact list of constraint types accepted by dbt-trino, the precise message dbt-trino emits when a constraint is rejected, and any version-pin caveats, consult [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs) — do NOT fabricate additional constraint-enforcement claims beyond the `not_null` enforcement explicitly verified above.
+
+#### Failure mode — what `dbt build` prints
+
+When the model SELECT body and the contract diverge, `dbt build` prints a structured preflight error and refuses to materialize the model. Example: the contract declares `customer_id` as `bigint` but the model's actual SELECT projects `customer_id` as `varchar`:
+
+```text
+$ dbt build --select fct_orders
+
+Compilation Error in model fct_orders (models/marts/fct_orders.sql)
+  This model has an enforced contract that failed.
+  Please ensure the name, data_type, and number of columns in your contract match the columns in your model's definition.
+
+  | column_name  | definition_type | contract_type | mismatch_reason    |
+  | ------------ | --------------- | ------------- | ------------------ |
+  | customer_id  | varchar         | bigint        | data type mismatch |
+
+  Error encountered before the model could be built. No changes were applied to the warehouse.
+```
+
+**Three flavors of failure** the preflight check catches:
+
+| What changed in the model | What `dbt build` prints | Why this is the desired behavior |
+|---|---|---|
+| (a) A column was dropped from the SELECT (e.g., `status` removed) | `missing in definition: status` (or similar) — build fails | Downstream dashboards depending on `status` would silently start returning NULLs; the contract fails the build BEFORE that happens. |
+| (b) A column's type changed (e.g., `customer_id` returns VARCHAR instead of BIGINT) | `data type mismatch` row in the table above — build fails | Downstream models JOINing on `customer_id = customers.id` (BIGINT) would silently fail their JOIN; build halts before that ships. |
+| (c) An extra column was added to the SELECT not in the contract | `extra in definition: <col_name>` — build fails | The contract is a forward-compatibility lock: when you ADD a column on purpose, you update both the SELECT and the contract in the same PR. |
+
+**Crucially: no production data is written when the contract fails.** The preflight runs BEFORE Trino executes the model SQL. The contract is a build-time gate, not a runtime gate, and the gate fires before any `INSERT INTO ...` or `MERGE INTO ...` reaches Trino. This is the load-bearing operational guarantee.
+
+#### Worked example — dbt-trino + Iceberg model with a contract
+
+Putting it all together: a contract-protected fact table for orders.
+
+```yaml
+# models/marts/fct_orders.yml
+version: 2
+
+models:
+  - name: fct_orders
+    description: "Order grain fact (one row per order). Public contract for downstream BI."
+    config:
+      materialized: table
+      contract:
+        enforced: true
+    columns:
+      - name: order_id
+        description: "Surrogate key — `dbt_utils.generate_surrogate_key`."
+        data_type: varchar
+        constraints:
+          - type: not_null
+      - name: tenant_id
+        description: "Tenant scope for multi-tenant isolation."
+        data_type: bigint
+        constraints:
+          - type: not_null
+      - name: customer_id
+        data_type: bigint
+        constraints:
+          - type: not_null
+      - name: order_date
+        data_type: date
+        constraints:
+          - type: not_null
+      - name: status
+        data_type: varchar
+      - name: total_usd
+        data_type: decimal(18,2)
+        constraints:
+          - type: not_null
+      - name: created_at
+        data_type: timestamp(6)
+        constraints:
+          - type: not_null
+    tests:
+      # Constraints above are definable in YAML; only `not_null` is ENFORCED on
+      # dbt-trino + Iceberg at write time. Pair with these dbt tests for the
+      # runtime uniqueness check that Trino does NOT do natively:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [tenant_id, order_id]
+    columns:
+      - name: total_usd
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+```
+
+The matching model SELECT (skeleton):
+
+```sql
+-- models/marts/fct_orders.sql
+{{ config(
+    materialized='table',
+    properties={
+      'partitioning': "ARRAY['month(order_date)', 'bucket(tenant_id, 16)']"
+    }
+) }}
+
+SELECT
+  {{ dbt_utils.generate_surrogate_key(['tenant_id', 'natural_order_id']) }} AS order_id,
+  tenant_id,
+  customer_id,
+  order_date,
+  status,
+  total_usd,
+  created_at
+FROM {{ ref('stg_orders') }}
+```
+
+If a future PR changes the SELECT to project `total_usd` as `double` (instead of `decimal(18,2)`), `dbt build` will error at the preflight check — the build fails BEFORE the table is rewritten, the existing `fct_orders` table is untouched, and the dashboard built on top of it keeps working until the contract is updated explicitly.
+
+#### When to use contracts (and when to skip them)
+
+| Use a contract | Skip a contract |
+|---|---|
+| Public-facing fact / dim tables exposed to downstream BI dashboards | Staging models (`stg_*`) where columns churn rapidly during development |
+| Models exposed as dbt **exposures** to other teams | Scratch / intermediate models that nothing outside the immediate model graph references |
+| Models depended on by another dbt model's `{{ ref(...) }}` in a multi-team monorepo | One-off ad-hoc analyses or `models/scratch/` work |
+| Models with `materialized='table'` or `materialized='incremental'` (contracts ARE supported here) | Views (limited contract support — no constraints), Python models, ephemeral models, materialized views (NOT supported per dbt docs) |
+
+**Pair contracts with source freshness (§6.7B).** Contracts lock the OUTPUT-side schema of your models; source freshness checks the INPUT-side liveness of your raw sources. Together they form a complete dbt-side data-quality boundary: stale input is caught by `dbt source freshness`; broken output schema is caught by `dbt build` with `contract.enforced: true`.
+
+#### DO-NOT-WRITE — banned model-contract claims (cite-or-omit)
+
+> **The following claims are FORBIDDEN in any dbt-trino model-contract context. Each row was WebSearch-verified.**
+
+| DO NOT write | Why it's wrong |
+|---|---|
+| `@contract` (Python-style decorator on the model) | **FABRICATED.** dbt has no `@contract` decorator — contracts are declared exclusively in YAML via `config: contract: {enforced: true}` + `columns:`. |
+| `CONTRACT` as a SQL keyword (e.g., `CREATE TABLE ... WITH CONTRACT (...)`) | **FABRICATED.** There is no `CONTRACT` SQL keyword in Trino or in dbt's compiled SQL. The contract check is done by dbt during compilation, BEFORE any SQL is sent to Trino. |
+| "The contract is enforced at query time by Trino" | **WRONG.** The contract is enforced at dbt BUILD time during compilation, not at Trino query time. Trino does not know the contract exists. The check fires inside dbt-core's preflight step before the model SQL is submitted to the Trino engine. |
+| "Contracts are a Trino-specific feature" | **WRONG.** Contracts are a dbt-CORE feature available on every adapter that supports them (Snowflake, BigQuery, Postgres, Spark, Databricks, dbt-trino, ...). Constraint enforcement varies by adapter; the column-name + data_type check is universal. |
+| "On dbt-trino, `primary_key` is enforced at write time" | **WRONG.** Only `not_null` is enforced at write time on dbt-trino + Iceberg. `primary_key`, `foreign_key`, `unique`, `check` are definable in YAML but NOT runtime-enforced — use the corresponding dbt tests (`unique`, `dbt_utils.expression_is_true`) for actual runtime checks. |
+| "Set the contract via a `dbt run --enforce-contract` CLI flag" | **FABRICATED FLAG.** No such CLI flag exists. The contract is YAML-declared via `config: contract: {enforced: true}`. The CLI flags `dbt run` and `dbt build` accept do NOT include any contract toggle — contracts are always enforced when `enforced: true` is set in YAML, regardless of CLI invocation. |
+| `data_type: string` / `data_type: int` / `data_type: numeric` on dbt-trino | **WRONG WAREHOUSE TYPE.** dbt-trino requires Trino types in `data_type`: `VARCHAR` (not `string`), `BIGINT` or `INTEGER` (not `int`), `DECIMAL(p, s)` (not `numeric`), `DATE`, `TIMESTAMP(6)`, `TIMESTAMP(6) WITH TIME ZONE`, `DOUBLE`, `BOOLEAN`, `VARBINARY`. Generic types do not normalize and the contract will fail to validate. |
+| Invented config keys like `contract.strict: true`, `contract.mode: 'strict'`, `contract.check_types: true`, `contract.allow_extra_columns: true` | **FABRICATED.** The ONLY documented sub-keys under `contract:` are `enforced: true|false` and `alias_types: true|false`. Do NOT invent other keys. |
+| "Contracts work on materialized views" | **WRONG per [docs.getdbt.com/reference/resource-configs/contract](https://docs.getdbt.com/reference/resource-configs/contract).** Contracts are supported on `table`, `view` (limited — no constraints), and `incremental` (requires `on_schema_change: append_new_columns` or `fail`). NOT supported on materialized views, Python models, ephemeral models, or custom materializations. |
+| Constraint types like `regex`, `length`, `min`, `max`, `range`, `enum` under a column's `constraints:` list | **FABRICATED.** The documented constraint types are `not_null`, `primary_key`, `foreign_key`, `unique`, `check`. Do NOT invent regex / length / range / enum constraints. For business-rule validation, use a dbt test (`dbt_utils.expression_is_true`) — NOT an invented constraint type. |
+
+#### Cross-references
+
+- For dbt source freshness (the INPUT-side liveness check that pairs with contracts as the OUTPUT-side schema lock): see [§ 6.7B](#67b-leading-canonical--dbt-source-freshness-sourcesyml-loaded_at_field-dbt-source-freshness-command).
+- For dbt tests that supplement contracts (uniqueness, business-rule assertions): see [§ 6.7](#67-dbt-tests-to-add-replacing-oracle-exception-handlers).
+- For the canonical dbt model body shape (SELECT-only, NOT raw DML): see [§ 4.6A.1](#461-the-default-recommended-pattern--two-model-decomposition) and the dbt-framing recipe in [§ 4.6A.4](#464-summary--the-migration-decision-table).
+- For dbt-trino specific config knobs (the `properties` block, `partitioned_by`, `incremental_strategy`): see [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs).
+- Official dbt docs source-of-truth: [docs.getdbt.com/reference/resource-configs/contract](https://docs.getdbt.com/reference/resource-configs/contract) and [docs.getdbt.com/docs/collaborate/govern/model-contracts](https://docs.getdbt.com/docs/collaborate/govern/model-contracts).
 
 ---
 
