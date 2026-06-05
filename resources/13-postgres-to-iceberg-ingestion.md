@@ -444,6 +444,8 @@ Late-arriving events are the most common silent data-loss scenario in incrementa
    """)
    ```
 
+   > **Spark star-shorthand — Trino needs explicit columns.** The `UPDATE SET *` / `INSERT *` form above is Spark SQL. From a Trino client (Trino CLI / JDBC / dbt-trino), the same MERGE must be written with explicit column lists on both branches — see the **ENGINE NOTE** in Pattern C below and the full canonical at [`resources/27-oracle-plsql-to-dbt-trino.md` §4.6B](27-oracle-plsql-to-dbt-trino.md).
+
 2. **If you must use `overwritePartitions()`, re-read ALL rows for any affected day partition.** Before writing, expand the DataFrame to cover the full partition — not just the watermark delta. The write must contain every row that should exist in the partition, because `overwritePartitions()` interprets the DataFrame as the new authoritative content of that partition.
 
    ```python
@@ -1354,6 +1356,26 @@ df.writeTo("iceberg.analytics.events").append()
 **Future state — CDC via Debezium.** The clean long-term solution for high-mutation tables is CDC: Debezium captures every `UPDATE ... SET deleted_at` event from the Postgres WAL as a row-change message and pushes it to Kafka. A Spark Structured Streaming job consumes the stream and drives a **hard DELETE** in Iceberg as soon as the Postgres soft-delete commits. This eliminates the zombie-row problem entirely (the soft-delete UPDATE is captured the moment it commits, regardless of incremental watermark windows) and gives you sub-minute delete propagation. Cost: ~3x more moving parts (Debezium connector, Kafka, streaming consumer, exactly-once semantics). Worth it for tables where soft-deletes are frequent (e.g., a `messages` table where users delete sent messages all day); overkill for an `accounts` table where churn is monthly. See Pattern C below for the broader CDC setup.
 
 ### Pattern C — CDC (Change Data Capture) — advanced
+
+> **ENGINE NOTE — these MERGE examples are SPARK SQL (this resource is the Spark ingestion guide).** The `WHEN MATCHED THEN UPDATE SET *` / `WHEN NOT MATCHED THEN INSERT *` star-shorthand used throughout Pattern C (and Pattern B's MERGE fix at line ~442) is **valid in Spark / Delta Lake / Databricks / Snowflake** but is a **PARSE ERROR in Trino 467**: `mismatched input '*'`. **If you run "CDC upsert" / "keep Iceberg in sync" / "MERGE in Trino" from a TRINO client (Trino CLI, JDBC, dbt-trino, the Trino UI, or any tool speaking the Trino dialect), Trino MERGE requires EXPLICIT column lists on BOTH branches**:
+>
+> ```sql
+> -- Trino 467 MERGE — explicit columns, no star shorthand
+> MERGE INTO iceberg.analytics.events AS t
+> USING events_delta AS s
+>   ON t.event_id = s.event_id
+> WHEN MATCHED THEN UPDATE SET
+>   col1 = s.col1,
+>   col2 = s.col2,
+>   col3 = s.col3
+>   -- ... every target column you want to update, by name
+> WHEN NOT MATCHED THEN INSERT (col1, col2, col3, ...)
+>   VALUES (s.col1, s.col2, s.col3, ...);
+> ```
+>
+> Also: changing the Iceberg format version from a Trino client uses **`ALTER TABLE ... SET PROPERTIES format_version = 2`** (integer, underscored property name) — NOT Spark's `ALTER TABLE ... SET TBLPROPERTIES ('format-version'='2')` (string-quoted, hyphenated). And you usually don't need this ALTER at all when the table was created from Trino: **Trino-created Iceberg tables default to `format_version = 2` already** (the ALTER form is only needed when upgrading a Hive-migrated v1 table to v2).
+>
+> **Full Trino MERGE canonical (do CDC upserts the Trino way):** see [`resources/27-oracle-plsql-to-dbt-trino.md` §4.6B "TRINO MERGE STAR-SHORTHAND GUARDRAIL"](27-oracle-plsql-to-dbt-trino.md) — keyword-anchored for "CDC upsert", "MERGE in Trino", "keep Iceberg in sync", "Trino MERGE", "Trino merge into", "Trino MERGE explicit columns". Verified at [trino.io/docs/current/sql/merge.html](https://trino.io/docs/current/sql/merge.html) (no `*` shorthand in the grammar) and [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (`SET PROPERTIES format_version = 2` integer; default for new Trino tables is `2`).
 
 Debezium reads the Postgres write-ahead log (WAL), publishes row-change events to Kafka, Spark Structured Streaming consumes from Kafka and merges into Iceberg.
 
