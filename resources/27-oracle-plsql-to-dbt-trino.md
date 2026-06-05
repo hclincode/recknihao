@@ -672,9 +672,58 @@ SELECT date_trunc('day', current_timestamp AT TIME ZONE 'America/New_York') AS t
 | ``a || b`` (concatenation) | `a \|\| b` OR `concat(a, b)` | Same operator. **BUT two big differences**: (1) Oracle treats `NULL \|\| 'x'` as `'x'` (quirk); Trino returns `NULL` (standard) — wrap in `COALESCE`. (2) **Oracle implicitly coerces numbers/dates to strings inside `\|\|`; Trino does NOT** — `CONCAT` and `\|\|` both require all-VARCHAR args, so `CAST(year_int AS VARCHAR)` or use `format('FQ-%d', year_int)`. See §7A.3.1 for the canonical fix. |
 | `UPPER(s)` / `LOWER(s)` / `INITCAP(s)` | `upper(s)` / `lower(s)` / no direct INITCAP — use `regexp_replace` or `array_join(transform(...))`. | INITCAP needs a workaround. |
 | `REPLACE(s, from, to)` | `replace(s, from, to)` | Identical. |
-| `REGEXP_LIKE(s, pattern)` | `regexp_like(s, pattern)` | Identical. |
-| `REGEXP_SUBSTR(s, pattern)` | `regexp_extract(s, pattern)` | Slightly renamed; same idea. |
-| `REGEXP_REPLACE(s, pattern, repl)` | `regexp_replace(s, pattern, repl)` | Identical. |
+| `REGEXP_LIKE(s, pattern)` | `regexp_like(s, pattern)` | Lowercase. **NOT identical semantics** — Trino is CONTAINS-match; Oracle is full-match-unless-anchored. See §4.3A. |
+| `REGEXP_SUBSTR(s, pattern)` | `regexp_extract(s, pattern)` | Renamed. Both 1-indexed group access via 3rd arg. See §4.3A for flavor diffs. |
+| `REGEXP_REPLACE(s, pattern, repl)` | `regexp_replace(s, pattern, repl)` | Same signature. **BUT capture-group reference syntax differs** — Oracle `\1`, Trino `$1`. See §4.3A. |
+
+### 4.3A REGEX-FLAVOR GUARDRAIL — Trino regex is Java/JONI, Oracle regex is POSIX-extended (the four migration nuances that bite)
+
+**Why this section exists.** The §4.3 string-function table's "Identical" gloss for `REGEXP_LIKE` / `REGEXP_SUBSTR` / `REGEXP_REPLACE` is **misleading on three counts** that produce *silently-wrong* (not parse-error) results — the function name maps cleanly, but the semantics of the same pattern differ. Engineers migrating Oracle regexes literally (s/REGEXP_LIKE/regexp_like/) get correct results on ~80% of patterns and silent wrong-row counts on the remaining ~20%. The four nuances below are the verified differences.
+
+**The four migration nuances (read all four before lifting any Oracle regex to Trino).**
+
+| # | Nuance | Oracle behavior | Trino 467 behavior | Migration recipe |
+|---|---|---|---|---|
+| **1** | **CONTAINS vs FULL-MATCH semantics for `LIKE`-style match** | `REGEXP_LIKE(s, '[0-9]+')` returns true if the string CONTAINS any digit run (and Oracle is also contains-by-default for `REGEXP_LIKE` — anchors required for full-match). | `regexp_like(s, '[0-9]+')` returns true if the string CONTAINS any digit run. **Per [trino.io/docs/current/functions/regexp.html](https://trino.io/docs/current/functions/regexp.html): "the pattern only needs to be contained within string, rather than needing to match all of it." Anchor with `^...$` to require full-string match in either dialect.** | The semantics are aligned here, but the misconception that "Oracle anchors implicitly" trips migrators. If your Oracle pattern lacked anchors and produced contains-style matches, the Trino translation behaves the same. Both dialects need `^...$` for full-match. |
+| **2** | **Regex engine flavor — POSIX extended (Oracle) vs Java/JONI (Trino)** | POSIX Extended Regular Expressions (ERE) + Oracle's added backreference `\1`...`\9`. Documented at [docs.oracle.com/...REGEXP_LIKE](https://docs.oracle.com/cd/B12037_01/server.101/b10759/conditions018.htm). | Java pattern syntax via the JONI engine by default (RE2J optionally enabled via the `regex-library` catalog property — see [trino.io/docs/current/admin/properties-regexp-function.html](https://trino.io/docs/current/admin/properties-regexp-function.html)). Per [trino.io/docs/current/functions/regexp.html](https://trino.io/docs/current/functions/regexp.html): "Trino uses Java pattern syntax, with a few notable exceptions." | Differences that bite in practice: (a) **lookaround** (`(?=...)`, `(?<=...)`, `(?!...)`) is fully supported in Java/JONI; Oracle POSIX ERE does NOT support lookaround. Patterns lifted to Trino with lookaround work; the reverse does not. (b) **`\d`, `\w`, `\s` shorthand** works in Trino (Java) but is NOT in POSIX ERE — Oracle requires `[[:digit:]]` / `[[:alpha:]]` / `[[:space:]]` POSIX bracket-classes. When you see `[[:digit:]]` in Oracle source, **rewrite as `\d` for Trino** (Java syntax) or leave the POSIX bracket form — Java pattern actually accepts both. (c) **POSIX `[[:alpha:]]` works in BOTH** (Java pattern includes POSIX class aliases) — verify before rewriting. |
+| **3** | **Capture-group reference syntax in `regexp_replace` replacement** | `\1`, `\2`, ... `\9` (backslash + digit) in the replacement string. Example: `REGEXP_REPLACE(phone, '(\d{3})(\d{4})', '\1-\2')` produces `555-1234`. | **`$1`, `$2`, ...** (dollar + digit) in the replacement string. Example: `regexp_replace(phone, '(\d{3})(\d{4})', '$1-$2')` produces `555-1234`. Verified at [trino.io/docs/current/functions/regexp.html](https://trino.io/docs/current/functions/regexp.html). | **This is the most common silent-wrong slip.** Lifted `\1` to Trino emits a LITERAL backslash-1 in the output, not the captured group. ALWAYS rewrite `\<digit>` → `$<digit>` in every `regexp_replace` replacement string during migration. Audit checklist: `grep -E 'regexp_replace.*\\\\[0-9]'` on the Trino-side dbt SQL — any hit is a migration bug. |
+| **4** | **Group access in `regexp_extract` — Trino has a 3rd `group` arg; Oracle uses a separate function/arg position** | Oracle `REGEXP_SUBSTR(s, pattern, position, occurrence, match_param, subexpression)` — the 6th argument selects the capture group. Underused; most migration sources just have `REGEXP_SUBSTR(s, pattern)`. | `regexp_extract(string, pattern)` returns the full match. `regexp_extract(string, pattern, group)` returns the N-th capture group (1-indexed; `0` returns full match). | When the Oracle source uses the 6th-arg form, port to Trino's 3rd-arg form: `REGEXP_SUBSTR(phone, '(\d{3})(\d{4})', 1, 1, NULL, 2)` → `regexp_extract(phone, '(\d{3})(\d{4})', 2)`. |
+
+**A bonus Trino-only capability — lambda replacement in `regexp_replace`.** Trino's `regexp_replace(string, pattern, function)` accepts a lambda for the third argument, giving per-match transformation logic that Oracle has no single-statement equivalent for:
+
+```sql
+-- Trino-only: lowercase every captured word, prefix with '<' '>'
+SELECT regexp_replace('Foo BAR baz', '(\w+)', x -> '<' || lower(x[1]) || '>');
+-- result: '<foo> <bar> <baz>'
+```
+
+The `x[1]` is the 1st capture group of the current match. This is *not* a portable construct; it's a Trino-only convenience worth knowing when re-implementing complex string transforms that Oracle did with PL/SQL loops.
+
+**DO-NOT-WRITE matrix — banned regex forms when porting Oracle → Trino (each row has produced a confirmed silent-wrong result in past migrations).**
+
+| Banned form (post-migration Trino SQL) | Why wrong | Correct form |
+|---|---|---|
+| `regexp_replace(s, '(\d+)', '\1')` | `\1` is literal "backslash-1" in Trino's Java/JONI replacement — emits two characters, NOT the captured group. | `regexp_replace(s, '(\d+)', '$1')` — `$1` is the capture-group reference in Java syntax. |
+| `regexp_substr(s, pattern)` | **NO `regexp_substr` function exists on Trino 467** — parse error `Function 'regexp_substr' not registered`. | `regexp_extract(s, pattern)` — the rename. |
+| `regexp_like(s, pattern, 'i')` (3-arg form with match-param flag) | Trino's `regexp_like` takes only 2 args. The flag-arg form is Oracle-only. | Embed the flag inline in the pattern with Java embedded flags: `regexp_like(s, '(?i)pattern')` for case-insensitive. Verified at [trino.io/docs/current/functions/regexp.html](https://trino.io/docs/current/functions/regexp.html). |
+| `regexp_replace(s, pattern, repl, 1, 1, 'i')` (Oracle's 6-arg form) | Trino's `regexp_replace` takes 3 args (or 3 args with a lambda for the 3rd). Position / occurrence / match-param flags are Oracle-only. | Use `(?i)` inline flag for case-insensitive. For position/occurrence, combine with `substr` or `regexp_extract_all`. |
+| `regexp_like(s, '[[:digit:]]+')` (assumed Oracle-only POSIX class) | **Actually works on Trino** — Java pattern supports POSIX character class aliases. Not banned, but the bias to rewrite all POSIX classes as `\d` is wasted effort. | Leave POSIX classes as-is if porting verbatim; rewrite only if you want shorter / more idiomatic Java syntax. |
+
+**Audit script (drop-in shell command).** Run this against your migrated dbt models to catch the most common silent-wrong porting bug:
+
+```bash
+# Find any backslash-digit capture-group reference in Trino-targeted regexp_replace
+# calls — these are silent-wrong porting bugs that emit literal text instead of
+# the captured group.
+grep -RnE "regexp_replace[^)]*'[^']*\\\\[0-9]" models/
+
+# Find any regexp_substr call (Oracle-only; will parse-error on Trino).
+grep -RnE "regexp_substr\(" models/
+```
+
+Both should produce ZERO matches on a clean migration.
+
+**Cross-reference.** §4.4B (cross-dialect-spillover guardrail) covers the broader class of "Oracle/Postgres/Snowflake syntax that LOOKS valid on Trino but is not"; this §4.3A focuses on the regex sub-class because the function names ARE valid Trino but the semantics differ.
 
 ### 4.4 Numeric, type, and casting
 

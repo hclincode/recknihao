@@ -1537,6 +1537,23 @@ After setting these, if someone accidentally schedules `expire_snapshots(retenti
 
 ### 3. `remove_orphan_files` — run weekly
 
+> **LEADING — `remove_orphan_files` is the SECOND of TWO complementary cleanup procedures; run `expire_snapshots` FIRST in the same weekly window.** `expire_snapshots` and `remove_orphan_files` clean **different garbage classes** and the canonical ordering is **`expire_snapshots` THEN `remove_orphan_files`** (see [§ Safe scheduling order](#safe-scheduling-order--get-this-right-or-risk-data-loss) and the expanded reasoning at [§ Why this order matters](#why-this-order-matters)):
+>
+> | Procedure | What it cleans | Why it must run first |
+> |---|---|---|
+> | `expire_snapshots` | Old snapshots + the data files those snapshots **exclusively** referenced (i.e., compaction's leftover small files become eligible for deletion once the prior snapshot that referenced them is expired). | Without this step, `remove_orphan_files` sees the small files as "still referenced by a live snapshot" and skips them. |
+> | `remove_orphan_files` | Files in MinIO that NO snapshot in the table references — typically uncommitted Parquet from crashed writers. | Cleans a different class of garbage that `expire_snapshots` does not touch. |
+>
+> If you run `remove_orphan_files` ALONE (without running `expire_snapshots` first in the same window), the storage savings will be much smaller than expected — because the bulk of "stale" storage on a well-maintained table is compaction's superseded small files, which are released by `expire_snapshots`, not by `remove_orphan_files`. Running orphan-cleanup alone catches only the failed-write debris. **Always pair the two procedures, in that order.**
+>
+> Verification recipe to confirm the pairing landed (run from Trino — `events$files` and `events$snapshots` require double-quoting):
+> ```sql
+> -- Snapshot count should drop after expire_snapshots; total file size in MinIO
+> -- should drop after the full pair (expire + orphan_files) completes.
+> SELECT COUNT(*) AS snapshot_count FROM "iceberg"."analytics"."events$snapshots";
+> SELECT SUM(file_size_in_bytes) / 1024 / 1024 AS total_mb FROM "iceberg"."analytics"."events$files";
+> ```
+
 **What it does:** scans the table's MinIO directory for any Parquet file that no current snapshot references and deletes it. These "orphans" usually come from Spark or Trino jobs that crashed mid-write — the file got uploaded to MinIO but the commit failed, so no snapshot points to it.
 
 **Important safety guarantee:** a file referenced by *any* live snapshot — including snapshots you are about to expire — is **by definition not an orphan**. `remove_orphan_files` will never delete a file that any current snapshot points to. So the danger is *not* "I might delete data a snapshot still needs." The real danger is the race condition with in-flight writes described below.

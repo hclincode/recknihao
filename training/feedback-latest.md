@@ -1,136 +1,170 @@
-# Judge Feedback — Iter 469 (Extended Phase, End-of-Iteration)
+# Judge Feedback — Iter 470 (Extended Phase, End-of-Iteration)
 
 **Date**: 2026-06-05
 **Phase**: Extended (end-of-iteration feedback only)
-**Overall**: **4.648 STRONG PASS** (68th consecutive overall PASS in extended phase)
+**Overall**: **3.71875 THIN PASS** (69th consecutive extended-phase PASS — thinnest margin in months)
 
-## Verdict summary
+**Verdict**: PASS, but only because Q4 (4.4375) and Q2 (4.25) carried the iter. Q1 (3.375) and Q3 (2.8125) alone would have failed. Three distinct load-bearing fabrications across Q1 and Q3 — citation-hygiene streak BROKEN.
 
-| Question | Avg | Verdict | Topic |
-|---|---|---|---|
-| Q1 — per-tenant CREATE VIEW SECURITY DEFINER (re-probe of iter468 syntax slip) | **4.78** | STRONG PASS | Multi-tenant analytics / view-security syntax |
-| Q2 — Oracle REGEXP_LIKE / REGEXP_REPLACE → Trino | **4.5625** | PASS | Oracle PL/SQL→dbt/Trino migration / regex mapping |
-| Q3 — Iceberg compaction verify + metadata inspect | **4.59** | STRONG PASS | Iceberg table maintenance / metadata inspection |
-| Q4 — EXPLAIN partition pruning | **4.66** | STRONG PASS | Query performance basics / EXPLAIN reading |
+---
 
 ## Per-question scores
 
-### Q1 — 4.78 STRONG PASS — view-security fix CONFIRMED (streak 1/1)
+| Q | Topic | Acc | Compl | Clar | Act | Avg | Verdict |
+|---|---|---|---|---|---|---|---|
+| Q1 | Iceberg WAP staging-branch + fast_forward | 3.0 | 3.75 | 4.0 | 2.75 | **3.375** | THIN PASS |
+| Q2 | Oracle MERGE WHEN NOT MATCHED BY SOURCE → Trino | 4.25 | 4.25 | 4.5 | 4.0 | **4.25** | PASS |
+| Q3 | Iceberg schema evolution (widen/rename/reorder/drop) | 2.0 | 3.5 | 4.0 | 1.75 | **2.8125** | HARD FAIL |
+| Q4 | Why Parquet faster than Postgres | 4.5 | 4.25 | 4.75 | 4.25 | **4.4375** | STRONG PASS |
 
-| Dim | Score | Justification |
-|---|---|---|
-| Accuracy | 4.875 | `CREATE VIEW iceberg.tenant_acme.events SECURITY DEFINER AS SELECT ... WHERE tenant_id = 'acme'` matches the canonical Trino 467 grammar `CREATE [OR REPLACE] VIEW name [COMMENT '...'] [SECURITY {DEFINER \| INVOKER}] AS query` verified at trino.io/docs/current/sql/create-view.html. REVOKE/GRANT ON ... TO ROLE syntax matches trino.io/docs/current/sql/grant.html + /sql/revoke.html. |
-| Completeness | 4.625 | DEFINER rationale (owner's perms, tenant has no base-table grant), OPA-also-denies-base layered defense, subset projection (dropping tenant_id) all covered. Could have mentioned `current_user` returns CALLER under DEFINER nuance but not load-bearing. |
-| Clarity | 4.75 | Explicitly stated "SECURITY DEFINER goes BETWEEN view name and AS, NOT after query, NOT in WITH(...)" — directly addresses the iter468 slip. |
-| Actionability | 4.875 | Copy-paste DDL parses on Trino 467; REVOKE/GRANT pair is sufficient to enforce isolation on top of OPA. |
+**Overall avg**: (3.375 + 4.25 + 2.8125 + 4.4375) / 4 = **3.71875** → PASS (≥3.5), but barely.
 
-**ZERO fabrications.** Did NOT use `WITH (SECURITY DEFINER)`, `WITH (security = 'DEFINER')`, `SECURITY = DEFINER`, `ALTER VIEW SET SECURITY ...`, or any post-AS placement. **Iter468 syntax slip is FIXED. Streak start 1/1.**
+---
 
-### Q2 — 4.5625 PASS — regex function mapping
+## Per-question justification (1-2 lines each)
 
-| Dim | Score | Justification |
-|---|---|---|
-| Accuracy | 4.75 | `regexp_like(string, pattern)` returns boolean, `regexp_replace(string, pattern, replacement)`, `regexp_extract` as REGEXP_SUBSTR replacement — all verified at trino.io/docs/current/functions/regexp.html. Lowercase naming convention correct. |
-| Completeness | 4.25 | Missed: (a) Trino `regexp_like` is CONTAINS-semantic vs Oracle's full-match-with-anchors split that bites migrators; (b) Trino uses Java/Joni regex flavor vs Oracle POSIX extended (backreferences, lookaround support differ); (c) `$N` capture-group reference syntax in Trino regexp_replace. |
-| Clarity | 4.625 | Side-by-side framing, lowercase note, REGEXP_SUBSTR→regexp_extract rename callout. |
-| Actionability | 4.625 | Engineer can do a literal s/REGEXP_LIKE/regexp_like/ on most cases; the missing regex-flavor nuance means edge cases may break silently. |
+**Q1 — 3.375 THIN PASS**: fast_forward arg order CORRECT (credit — `branch='main'` moved forward to `to='staging'` matches iceberg.apache.org/docs/latest/spark-procedures/), Spark WAP wiring and Trino 467 branch-write limits correctly identified. BUT two load-bearing bugs in the same snapshot-lookup SQL: (a) malformed quoting `iceberg.analytics.orders.$snapshots` (must be `iceberg.analytics."orders$snapshots"`), and (b) `ref_name` is NOT a column of `$snapshots` — branch refs live in the separate `$refs` table.
 
-**ZERO fabrications.** No invented `regexp_substr` on Trino, no fake signatures.
+**Q2 — 4.25 PASS**: Substance correct on no `WHEN NOT MATCHED BY SOURCE` in Trino MERGE, and the two-model NOT-EXISTS-anti-join decomposition is the canonical workaround. Minor framing slip — Model 2 was shown as a `.sql` model body with raw UPDATE/DELETE, but dbt models are SELECT-only; this DML belongs in a `post_hook` or `dbt run-operation` macro.
 
-### Q3 — 4.59 STRONG PASS — Iceberg compaction + metadata
+**Q3 — 2.8125 HARD FAIL**: INT→BIGINT widening and RENAME COLUMN correct. BUT TWO distinct load-bearing fabrications: (a) `column_order` table property is NOT a real Trino Iceberg property — supported properties list does not include it; (b) the "Trino 467 cannot DROP COLUMN — use Spark" claim is a fabricated capability restriction — trino.io/docs/current/sql/alter-table.html DOES document `ALTER TABLE name DROP COLUMN column_name` and the Iceberg connector supports it natively.
 
-| Dim | Score | Justification |
-|---|---|---|
-| Accuracy | 4.75 | `$files` content codes 0=DATA / 1=POSITION_DELETES / 2=EQUALITY_DELETES per Iceberg spec; `$snapshots` columns (snapshot_id, committed_at, operation, summary) per trino.io/docs/current/connector/iceberg.html; `operation='replace'` for MERGE/compaction (Iceberg RewriteFiles commits as `replace`) confirmed; `EXECUTE remove_orphan_files(retention_threshold => '7d')` syntax verified. Double-quoted `"events$files"` and `"events$snapshots"` correctly applied. |
-| Completeness | 4.375 | Missed: `expire_snapshots` as complementary procedure (remove_orphan_files cleans non-referenced files, but expired snapshot data files require expire_snapshots first); didn't surface that compaction-induced `replace` produces new files even when row count is unchanged. |
-| Clarity | 4.625 | Three concrete query patterns, content-code legend, operation-code legend. |
-| Actionability | 4.625 | Three runnable queries + procedure call; engineer can verify compaction landed by checking before/after file count + content distribution. |
+**Q4 — 4.4375 STRONG PASS**: Columnar projection, dictionary encoding, min/max stats + pushdown, vectorized batch + SIMD, and OLTP point-lookup tradeoff all directionally correct. Illustrative numbers (4096 batch, AVX2/512) are not presented as pinned Trino spec — no fab.
 
-**ZERO fabrications.** No fake `$files` columns (no `deletion_count` or `compaction_run_id`), no fake `$snapshots` operations, no fake procedure params.
+---
 
-### Q4 — 4.66 STRONG PASS — EXPLAIN partition pruning
+## Fabrications — full list with correct facts + source URLs
 
-| Dim | Score | Justification |
-|---|---|---|
-| Accuracy | 4.625 | `TableScan[... constraint on [...]]` annotation is real per trino.io/blog/2023/04/11/date-predicates.html. Filter-residual-above-TableScan = pruning defeated is the correct interpretation. Function-wrap (date_trunc(event_ts)) and type-mismatch (string vs DATE) pruning-defeat patterns are the canonical examples from that blog. Naked-range form is the canonical safest recipe. |
-| Completeness | 4.5 | Slight oversimplification: predicate may still partially push down with `predicate=` even when a residual Filter is present; the Filter residual is the negative signal but not 100% binary. Didn't mention EXPLAIN ANALYZE for actual row-count verification of pruning. |
-| Clarity | 4.75 | Two-state heuristic (constraint-in-TableScan = good, separate Filter = bad), concrete naked-range example with TIMESTAMP literals, "verify both forms with EXPLAIN" actionable. |
-| Actionability | 4.75 | Engineer has a recipe: rewrite to naked range, run EXPLAIN, look for constraint annotation, fix function-wrap or cast on partition col. |
+### Fab 1 (Q1) — `$snapshots.ref_name` column does NOT exist + malformed quoting
 
-**ZERO fabrications.** No fake EXPLAIN node names, no fake `constraint_satisfied=true` flag, no fake EXPLAIN format options.
+- **Malformed quoting**: `iceberg.analytics.orders.$snapshots` will not parse. The `$` is part of the metadata-table identifier and must be inside the same double-quote pair as the base table name. Correct: `iceberg.analytics."orders$snapshots"`.
+- **`ref_name` is NOT a `$snapshots` column**. Per trino.io/docs/current/connector/iceberg.html, `$snapshots` columns are exactly: `committed_at`, `snapshot_id`, `parent_id`, `operation`, `manifest_list`, `summary`. Branch/tag refs live in the separate **`$refs`** metadata table whose columns are `name`, `type`, `snapshot_id`, `max_reference_age_in_ms`, `min_snapshots_to_keep`, `max_snapshot_age_in_ms`. The column is `name`, not `ref_name`.
+- **Correct lookup pattern**: query `$refs` filtered by `name = 'staging_2026_06_05' AND type = 'BRANCH'` to get the snapshot_id; optionally join to `$snapshots` on snapshot_id for commit metadata.
+- **Source**: trino.io/docs/current/connector/iceberg.html (Metadata tables section).
 
-## View-security streak status
+**CREDIT (do not lose)**: `fast_forward('analytics.orders', 'main', 'staging_2026_06_05')` arg order is CORRECT — verified at iceberg.apache.org/docs/latest/spark-procedures/. `branch` is the ref moved forward; `to` is the source tip.
 
-**1/1 PASS** — Iter468 Q2 `WITH (SECURITY DEFINER)` syntax slip is FIXED at iter469 Q1. The r05 canonical block + r12 inline pattern update + 7-form DO-NOT-WRITE matrix landed cleanly. **Needs at least one more re-probe in a different phrasing to lock the fix at 2/2.** Candidates for iter470 re-probe: SHOW CREATE VIEW round-trip, DEFINER-vs-INVOKER tradeoff matrix, `CREATE OR REPLACE VIEW ... SECURITY INVOKER` (test the INVOKER branch), view-on-view security inheritance.
+### Fab 2 (Q3) — `column_order` table property does NOT exist on Trino 467 Iceberg connector
 
-## Fabrications
+- Per trino.io/docs/current/connector/iceberg.html, supported Iceberg table properties are: `format`, `compression_codec`, `partitioning`, `sorted_by`, `location`, `format_version`, `max_commit_retry`, `delete_after_commit_enabled`, `max_previous_versions`, `orc_bloom_filter_columns`, `orc_bloom_filter_fpp`, `parquet_bloom_filter_columns`, `object_store_layout_enabled`, `data_location`, `extra_properties`. **`column_order` is NOT in this list.**
+- Engineer running `ALTER TABLE t SET PROPERTIES column_order = ARRAY[...]` gets `Catalog 'iceberg' table property 'column_order' does not exist`.
+- **Correct answer**: Trino 467 has NO native column-reorder DDL on Iceberg. Reorder must be done via **Spark** `ALTER TABLE ... ALTER COLUMN col FIRST | AFTER other_col`. Trino's `ADD COLUMN` accepts `FIRST | AFTER name` only for placing NEW columns — it does not reorder existing ones.
+- **Source**: trino.io/docs/current/connector/iceberg.html + trino.io/docs/current/sql/alter-table.html.
 
-**ZERO across all four answers.** Specifically NOT present:
-- No `WITH (SECURITY DEFINER)` (the iter468 fab pattern — fixed)
-- No fake Trino function names (no `regexp_substr` on Trino, no fake signature)
-- No fake `$files` / `$snapshots` column names
-- No fake `remove_orphan_files` parameters (the real `retention_threshold => '7d'` was used correctly)
-- No fake EXPLAIN node names (no `PartitionScan`, no `constraint_satisfied=true`)
-- No invented version-gated features
+### Fab 3 (Q3) — "Trino 467 cannot DROP COLUMN — use Spark" is a FABRICATED capability restriction
 
-## Topic average updates
+- trino.io/docs/current/sql/alter-table.html: `ALTER TABLE [IF EXISTS] name DROP COLUMN [IF EXISTS] column_name` is a documented supported statement.
+- trino.io/docs/current/connector/iceberg.html lists DROP COLUMN among supported ALTER TABLE statements for the Iceberg connector.
+- **Trino 467 DOES support DROP COLUMN natively** on the Iceberg connector. The "must use Spark" claim is fabricated and sends engineers to Spark unnecessarily.
+- **Correct answer**: `ALTER TABLE iceberg.schema.table DROP COLUMN column_name;` — runs natively on Trino 467. Metadata-only per Iceberg spec.
 
-| Topic | Before | After | Delta |
-|---|---|---|---|
-| Multi-tenant analytics | 4.4561 / 152 | **4.4582 / 153** | +0.0021 (Q1 4.78 above topic avg) |
-| Oracle PL/SQL→dbt/Trino migration | 4.5832 / 42 | **4.5827 / 43** | -0.0005 (Q2 4.5625 essentially at topic avg) |
-| Iceberg table maintenance | 4.4907 / 129 | **4.4915 / 130** | +0.0008 (Q3 4.59 just above topic avg) |
-| Query performance basics | 4.4314 / 11 | **4.4501 / 12** | +0.0187 (Q4 4.66 above topic avg) |
-| **Federation NOT probed** | 4.49944 / 310 | **4.49944 / 310** | UNCHANGED per directive (0.0006 below 4.5 raised threshold) |
+### Minor framing slip (Q2) — NOT a hard fab, but worth flagging
 
-## Teacher actions for iter470
+- Model 2 shown as a `.sql` dbt model body containing raw UPDATE/DELETE. dbt models are SELECT-only by contract. Standalone DML belongs in `post_hook`, `dbt run-operation` macro, or a separate operation file — not a model body.
+- SQL logic itself (NOT EXISTS anti-join on Iceberg V2 MoR) is correct.
+- **Source**: docs.getdbt.com/docs/build/models.
 
-**Breadth design — 4 non-federation angles. NO dedicated federation probe (the 4.49944/310 row sits 0.0006 below the 4.5 raised threshold — thin probe locks or breaks it; let the count grow naturally).**
+---
 
-### Required (1) — Lock view-security streak at 2/2
+## Teacher actions for iter471
 
-Pick ONE of these phrasings to re-probe CREATE VIEW SECURITY mode from a DIFFERENT angle than iter469 Q1 (which was DEFINER + REVOKE/GRANT):
+### PRIMARY (must land before any other edits)
 
-- **SHOW CREATE VIEW round-trip**: ask how to inspect an existing view's SECURITY mode without re-running the DDL. Correct answer is `SHOW CREATE VIEW iceberg.tenant_acme.events` — the output preserves the SECURITY clause. Tests whether the responder can READ the DDL not just write it.
-- **DEFINER-vs-INVOKER decision matrix**: "We have a view that joins customer data with a finance-team-owned reference table. Should the view use SECURITY DEFINER or INVOKER?" Tests whether the responder understands DEFINER = owner's grants used (good for tenant isolation), INVOKER = caller's grants used (caller must have base-table SELECT — defeats isolation but is correct for shared dimension tables where the caller already has access).
-- **CREATE OR REPLACE VIEW with INVOKER**: tests the INVOKER branch + the `OR REPLACE` keyword.
-- **View-on-view security inheritance**: does a view built on top of a SECURITY DEFINER view inherit the upstream view's owner grants? Tests deeper Trino semantics.
+**Action 1 — Fix the Q3 DROP COLUMN fabricated-capability-restriction**
 
-### Recommended (2) — 3 additional breadth probes
+In the Iceberg schema-evolution resource (r17 Iceberg table maintenance, or whichever resource covers schema evolution DDL), add a LEADING CANONICAL block:
 
-Candidate pool for the remaining three probes:
+```
+-- Trino 467 NATIVE on Iceberg connector (no Spark required):
+ALTER TABLE iceberg.s.t ADD COLUMN c TYPE [FIRST | AFTER other_col];
+ALTER TABLE iceberg.s.t DROP COLUMN c;                       -- YES, supported natively
+ALTER TABLE iceberg.s.t RENAME COLUMN old TO new;
+ALTER TABLE iceberg.s.t ALTER COLUMN c SET DATA TYPE BIGINT; -- safe promotions only:
+                                                             --   INT→BIGINT, FLOAT→DOUBLE, DECIMAL widen
+-- Trino 467 does NOT support natively (Spark required):
+-- - Reorder existing columns (NO `column_order` property — use Spark ALTER COLUMN FIRST | AFTER)
+-- - Narrowing type changes (rejected by Iceberg spec)
+```
 
-- **Trino MERGE INTO clause set** — `WHEN MATCHED [AND condition] THEN UPDATE/DELETE/INSERT` vs `WHEN NOT MATCHED [AND condition] THEN INSERT`. Watchlist: ban `WHEN NOT MATCHED BY SOURCE` (Spark/Snowflake-only; NOT in Trino 467).
-- **dbt snapshots SCD2 config** — `strategy=timestamp|check`, `updated_at`, `unique_key`, `check_cols`, `target_schema`, `target_database`, `hard_deletes`. Watchlist: ban any non-listed snapshot config key.
-- **Trino query timeout properties** — session vs config split. Real: `query.max-run-time`, `query.max-execution-time`, `query.max-cpu-time`. Watchlist: ban fabricated `query.timeout` config key.
-- **Iceberg `expire_snapshots` vs `remove_orphan_files` ordering** — complementary to Q3 from iter469. expire_snapshots first (drops snapshot references), then remove_orphan_files (cleans unreferenced files).
-- **Trino EXPLAIN ANALYZE vs EXPLAIN** — extends Q4 from iter469. EXPLAIN ANALYZE actually runs the query and reports row counts at each node, EXPLAIN is plan-only.
+Add DO-NOT-WRITE matrix entries:
+- `ALTER TABLE t SET PROPERTIES column_order = ARRAY[...]` — FABRICATED, no such property
+- "Trino 467 cannot DROP COLUMN — use Spark" — FABRICATED CAPABILITY RESTRICTION, Trino 467 supports DROP COLUMN natively
 
-### Resource-side patches recommended
+Cite trino.io/docs/current/sql/alter-table.html and trino.io/docs/current/connector/iceberg.html.
 
-- **r27 (oracle-plsql-to-dbt-trino)**: add a one-paragraph Oracle-vs-Trino-regex-flavor callout — POSIX-extended (Oracle) vs Joni/Java (Trino); regexp_like CONTAINS-vs-FULL-MATCH semantic split; `$N` vs `\N` capture-group reference syntax differences; regexp_replace lambda variant available in Trino but not Oracle. Q2 completeness gap was here; easy patch.
-- **r17 (iceberg-table-maintenance)** or wherever metadata inspection is canonicalized: add an explicit note that `expire_snapshots` and `remove_orphan_files` are complementary and have a required ordering (expire snapshots first to drop references, then orphan_files to clean unreferenced files). Q3 completeness gap was here.
-- **r05 (multi-tenant-analytics) — DEFENSIVE**: DO NOT modify the new canonical CREATE VIEW SECURITY block until the streak reaches 3/3. Reconcile-don't-append: if a third re-probe still passes, the block is durable.
+**Action 2 — Fix the Q1 `$refs` vs `$snapshots` conflation**
 
-### Citation-hygiene watchlist for iter470
+In the Iceberg metadata-tables resource (r17 or a dedicated metadata-tables section), add a LEADING CANONICAL block distinguishing the two tables and showing the correct lookup join:
 
-- **fabricated `ALTER VIEW ... SET SECURITY ...` DDL** — does NOT exist on Trino 467. To change a view's SECURITY mode, must use `CREATE OR REPLACE VIEW ... SECURITY {DEFINER | INVOKER} AS query`.
-- **fabricated `WITH (SECURITY ...)` property-bag form** — keep on watchlist until 3-probe streak achieved (iter468 root-cause class).
-- **fabricated `current_user` returns CREATOR/OWNER under DEFINER** — it returns the CALLER even under DEFINER mode. Only the row-access permission check uses the owner's grants; `current_user` in the view body still resolves to the caller.
-- **fabricated Iceberg `$snapshots` columns** beyond the spec list (snapshot_id, parent_id, committed_at, operation, manifest_list, summary). No invented `deletion_count` or `compaction_id`.
-- **fabricated Trino MERGE `WHEN NOT MATCHED BY SOURCE` clause** — Spark/Snowflake only; Trino 467 has `WHEN MATCHED` and `WHEN NOT MATCHED` only.
-- **fabricated dbt snapshot config keys** beyond `strategy / unique_key / check_cols / updated_at / target_schema / target_database / hard_deletes`.
-- **fabricated `query.timeout` config key** — real keys are `query.max-run-time`, `query.max-execution-time`, `query.max-cpu-time`.
+```
+-- $snapshots — snapshot metadata (NO ref name column):
+--   columns: committed_at, snapshot_id, parent_id, operation, manifest_list, summary
+SELECT snapshot_id, committed_at, operation
+FROM iceberg.analytics."orders$snapshots"
+ORDER BY committed_at DESC;
 
-## Sources
+-- $refs — branch/tag references (this is where ref NAMES live):
+--   columns: name, type, snapshot_id, max_reference_age_in_ms,
+--            min_snapshots_to_keep, max_snapshot_age_in_ms
+SELECT name, type, snapshot_id
+FROM iceberg.analytics."orders$refs"
+WHERE type = 'BRANCH';
 
-- [Trino CREATE VIEW — trino.io/docs/current/sql/create-view.html](https://trino.io/docs/current/sql/create-view.html)
-- [Trino GRANT — trino.io/docs/current/sql/grant.html](https://trino.io/docs/current/sql/grant.html)
-- [Trino REVOKE — trino.io/docs/current/sql/revoke.html](https://trino.io/docs/current/sql/revoke.html)
-- [Trino Regular expression functions — trino.io/docs/current/functions/regexp.html](https://trino.io/docs/current/functions/regexp.html)
-- [Trino Iceberg connector — trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html)
-- [Iceberg spec — iceberg.apache.org/spec/](https://iceberg.apache.org/spec/)
-- [Trino blog — Just the right time date predicates with Iceberg](https://trino.io/blog/2023/04/11/date-predicates.html)
-- [Trino PR #621 — Use enforced constraint in EffectivePredicateExtractor](https://github.com/trinodb/trino/pull/621)
-- [Trino PR #10810 — Expire Snapshot and Remove Orphan files](https://github.com/trinodb/trino/pull/10810)
-- [Trino Issue #16473 — Metadata $files table on iceberg connector throws an error (double-quoting context)](https://github.com/trinodb/trino/issues/16473)
+-- Lookup snapshot for a branch — JOIN $refs to $snapshots:
+SELECT r.name, r.type, s.snapshot_id, s.committed_at, s.operation
+FROM iceberg.analytics."orders$refs" r
+JOIN iceberg.analytics."orders$snapshots" s ON r.snapshot_id = s.snapshot_id
+WHERE r.name = 'staging_2026_06_05' AND r.type = 'BRANCH';
+```
+
+Add DO-NOT-WRITE entries:
+- `WHERE ref_name = '...'` on `$snapshots` — FABRICATED column (does not exist)
+- `iceberg.schema.table.$snapshots` dotted form — MALFORMED quoting (must be `iceberg.schema."table$snapshots"`)
+
+Cite trino.io/docs/current/connector/iceberg.html (Metadata tables section).
+
+**Action 3 — Tighten the Q2 dbt-framing nuance**
+
+In r27 §4.6A (Oracle MERGE → Trino two-model decomposition), add an explicit note that Model 2 (standalone DELETE / soft-delete UPDATE) must be implemented as:
+- a `post_hook` on Model 1; OR
+- a `dbt run-operation` macro; OR
+- a separate dbt operation file
+
+NOT as a `.sql` model body. dbt models are SELECT-only by contract; raw UPDATE/DELETE in a model body conflicts with dbt's materialization-driven CTAS/MERGE/INSERT pattern. Cite docs.getdbt.com/docs/build/models.
+
+### SECONDARY
+
+**Action 4 — Breadth design for iter471** (4 non-federation angles):
+
+- **Re-probe Q3 DROP COLUMN with different phrasing** to lock the fix (e.g., "I need to drop 3 deprecated columns from a 5TB Iceberg table — can Trino 467 do this natively or do I need Spark?"). Streak-locker target.
+- **Re-probe Q1 `$refs` vs `$snapshots` with different phrasing** (e.g., "How do I list all branches on an Iceberg table from Trino?" — the responder MUST hit `$refs`, not `$snapshots`).
+- **Iceberg type promotion edge cases** (DECIMAL precision-widen OK, DECIMAL scale-change rejected, FLOAT→DOUBLE OK).
+- **A fresh breadth angle** (e.g., dbt sources / freshness; Trino EXPLAIN ANALYZE vs EXPLAIN; Iceberg snapshot rollback via `rollback_to_snapshot`).
+
+**Action 5 — NO dedicated federation probe**: 4.49944/310 row sits 0.0006 below the 4.5 raised threshold; thin probe locks or breaks it. Let it accrete passively through breadth.
+
+### Citation-hygiene watchlist for iter471
+
+- **Fabricated capability restrictions** (THIS iter's killer class): if the responder says "Trino 467 cannot do X — use Spark", judge MUST verify X against trino.io/docs/current. The DROP COLUMN fab is the canonical example.
+- **Fabricated table properties**: if the responder uses `SET PROPERTIES foo = ...`, verify `foo` is in the connector docs property list. `column_order` was the fab this iter.
+- **Metadata-table column-name conflation**: `$snapshots` vs `$refs` is the highest-risk pair (both have `snapshot_id`, only `$refs` has `name`/`type`). Watch also `$files` vs `$manifests` vs `$partitions`.
+- **Metadata-table quoting**: `iceberg.s.t.$snapshots` (dotted) is ALWAYS WRONG. Must be `iceberg.s."t$snapshots"` with `$` inside the same quote pair.
+- **fast_forward arg order**: `fast_forward(table, branch, to)` where `branch` moved forward, `to` is source tip — held this iter (credit), keep watching.
+- **WHEN NOT MATCHED BY SOURCE**: Spark/Snowflake only, NOT Trino — held this iter, keep watching.
+
+---
+
+## Topic score deltas (logged in rubric.md iter470 row)
+
+- **Iceberg table maintenance** (folding Q1 WAP + Q3 schema evolution): 4.4915/130 → 4.4669/132 (-0.0246, biggest single-iter topic drag in months).
+- **Oracle PL/SQL→dbt/Trino migration**: 4.5827/43 → 4.5751/44 (-0.0076).
+- **Column-oriented storage**: 4.4926/14 → 4.4889/15 (-0.0037).
+- **Federation**: 4.49944/310 UNCHANGED (not probed per directive).
+
+All topics remain PASSED; no topic dropped below 3.5. But Iceberg table maintenance lost meaningful margin — the Q3 fab cluster signals a topic-level gap requiring reinforcement.
+
+---
+
+## Summary
+
+PASSED at 3.71875 by the thinnest margin in dozens of iterations. Q4 carried; Q3 nearly killed. Three load-bearing fabrications across Q1 and Q3 (`$snapshots.ref_name` + `column_order` property + "Trino 467 cannot DROP COLUMN") broke the citation-hygiene streak. Primary teacher actions: fix the Q3 DROP COLUMN capability-restriction fab (Trino 467 DOES support it natively) and the `column_order` property fab, plus the Q1 `$refs`/`$snapshots` conflation. Re-probe both in iter471 from different phrasings to lock the fixes.
