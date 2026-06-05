@@ -1,114 +1,123 @@
-# Iter 510 — Judge Feedback (EXTENDED PHASE, 2026-06-06)
+# Iter 511 Judge Feedback — 2026-06-06 (EXTENDED PHASE)
 
-## Overall result
+## Overall: 4.7969 STRONG PASS — Q1 LPAD-cast fix LANDED CLEAN; Q2 has a TERMINOLOGY error (anti-join should be semi-join)
 
-**OVERALL AVG = (4.9375 + 4.875 + 4.9375 + 4.9375) / 4 = 19.6875 / 4 = 4.9219 — STRONG PASS** (+1.4219 above the 3.5 floor; federation NOT probed; r22 §13.x guardrails + federation rubric row untouched per directive).
+**Federation NOT probed** this iter (per directive). Federation rubric row stays **4.49944/310** UNTOUCHED.
 
-Iter510 was the optional teacher polish iteration (r17:1192 `$partitions` current-spec / #12323 gotcha #3 reconciliation). The four probes this round were a fresh sweep across HAVING, Oracle→Trino LPAD/INSTR, Iceberg `sorted_by` file-skipping, and dbt graph operators — three landed at 4.9375 STRONG PASS and one at 4.875 PASS. The single accuracy nit is Q2's missing `CAST(account_id AS VARCHAR)` for numeric account columns; small enough to not depress the iter, but worth a tiny canonical bulletproofing if a future re-probe goes harder on the type-coercion angle.
+OVERALL AVG = (4.9375 + 4.4375 + 4.9375 + 4.875) / 4 = 19.1875 / 4 = **4.7969 STRONG PASS** (margin +1.2969 above 3.5 floor). 110th consecutive overall PASS in extended phase. Margin slightly below iter510's +1.4219 due to the Q2 anti-join-vs-semi-join terminology nit (-1.25 Accuracy on Q2 dominated the drop).
+
+---
 
 ## Per-question scores
 
-### Q1 — `HAVING` vs `WHERE` (filter groups by aggregate)
-**Score: 4.9375 STRONG PASS** (Accuracy 5.0, Clarity 5.0, Actionability 5.0, Completeness 4.75)
+### Q1 — LPAD on numeric (iter510 Q2 LPAD-cast re-probe) — **4.9375 STRONG PASS clean**
 
-- **Verified clean against trino.io/docs/current/sql/select.html**: `HAVING` filters groups after `GROUP BY` aggregates are computed; `WHERE` filters rows before grouping; aggregates not permitted in `WHERE`. Trino 467 implements the standard SQL semantics. `GROUP BY customer_id HAVING COUNT(*) > 100` is valid Trino 467 dialect, no parse-error risk.
-- **Advice to put non-aggregate filters in `WHERE` first** is the canonical optimization tip (predicate pushdown, fewer rows entering the aggregator) and correctly framed.
-- **Minor -0.25 Completeness**: no mention of the `FILTER (WHERE …)` per-aggregate clause as a third tool, which would round out the "where do I put which filter?" mental model. Non-load-bearing.
-- Maps to: **SQL query best practices for OLAP** topic row.
-
-### Q2 — Oracle `LPAD` (zero-pad account numbers) + `INSTR` → Trino
-**Score: 4.875 PASS** (Accuracy 4.5, Clarity 5.0, Actionability 5.0, Completeness 5.0)
-
-- **Verified clean against trino.io/docs/current/functions/string.html**: `lpad(string, size, padstring)` signature documented as `lpad(varchar, bigint, varchar) → varchar`. `rpad` is the right-pad counterpart. `strpos(string, substring)` is 1-indexed and returns 0 if the substring is not found — exactly matches Oracle `INSTR` default semantics. The "4-arg `INSTR` has no direct equivalent — chain `strpos` + `substr` or use `regexp_extract_all`" guidance is correct for Trino 467.
-- **Accuracy nit (-0.5)**: the answer says LPAD has "identical syntax" and shows `lpad(account_id, 10, '0')` without a cast. Trino does NOT auto-coerce numeric types to `varchar` (per trino.io/docs/current/language/types.html — no implicit numeric↔string conversion). Oracle's `LPAD` DOES auto-coerce a `NUMBER` argument. The question explicitly says "zero-pad account NUMBERS", so a real `account_id` column will almost always be numeric (`BIGINT`/`INTEGER`/`DECIMAL`). The correct Trino 467 form is `lpad(CAST(account_id AS VARCHAR), 10, '0')`. Without the cast the engineer will hit a function-resolution error like `Unexpected parameters (bigint, integer, varchar(1)) for function lpad. Expected: lpad(varchar, bigint, varchar)`. This is a known sister case of the r27 §4.x family canonical "Trino doesn't auto-coerce numeric to string for `||`". Not catastrophic — engineer will see the error within 30 seconds — but a clean answer should pre-empt it.
-- **Otherwise STRONG**: 1-indexed/0-on-miss callout, `strpos('hello@world','@')=6` example, 4-arg INSTR routing to `strpos`+`substr` chain.
-- Maps to: **Oracle PL/SQL → dbt + Trino SQL migration** topic row.
-
-### Q3 — Iceberg `sorted_by` for file skipping on non-partition column
-**Score: 4.9375 STRONG PASS** (Accuracy 5.0, Clarity 5.0, Actionability 5.0, Completeness 4.75)
-
-- **Verified clean against trino.io/docs/current/connector/iceberg.html (WebFetched verbatim)**:
-  - (i) `sorted_by` IS a real Iceberg table property on Trino 467 (added in Trino 412), settable at `CREATE TABLE` and modifiable via `ALTER TABLE SET PROPERTIES`. Confirmed in the modifiable-properties list.
-  - (ii) Sort-direction qualifiers `ASC NULLS LAST` / `DESC NULLS FIRST` are VALID Trino 467 syntax in `sorted_by` array entries per the official Iceberg connector doc verbatim examples (`'order_date DESC NULLS FIRST'`, `'order_id ASC NULLS LAST'`). The answer's `sorted_by = ARRAY['customer_id ASC NULLS LAST']` is correct.
-  - (iii) `SET PROPERTIES sorted_by = …` affects only future writes; existing files retain their previous arrangement, so `ALTER TABLE … EXECUTE optimize` is required to rewrite/cluster existing files per the new sort order. Confirmed correct caveat.
-  - (iv) The dbt-trino `properties={'partitioning': "ARRAY[…]", 'sorted_by': "ARRAY[…]"}` Python dict shape is correct — keys are passed verbatim as Iceberg table properties (consistent with the iter495 dbt-trino partitioning-key canonical at r05).
-- **Sort-clustering improves min/max data skipping** explanation is accurate: when a file's rows are clustered by `customer_id`, the per-file `min`/`max` stats in the Iceberg manifest become tight intervals, so a predicate `customer_id = 12345` lets the Iceberg connector prune any file whose `[min, max]` interval doesn't contain 12345.
-- **Minor -0.25 Completeness**: no callout that `sorted_by` clustering only fully shines for high-selectivity equality / range predicates on the leading sort column, and that a second (non-correlated) sort column gives diminishing returns (sort is hierarchical, not multi-dimensional). Non-load-bearing.
-- Maps to: **Iceberg partition design for SaaS** + **Query performance basics: partitioning, indexing strategy for analytics** topic rows.
-
-### Q4 — dbt `--select` graph operators: `model+`, `+model`, `+model+`, `tag:nightly`
-**Score: 4.9375 STRONG PASS** (Accuracy 5.0, Clarity 5.0, Actionability 5.0, Completeness 4.75)
-
-- **Verified clean against docs.getdbt.com/reference/node-selection/graph-operators + /methods**:
-  - `+model` = the model plus all **upstream** ancestors (feeders) — correct.
-  - `model+` = the model plus all **downstream** descendants (consumers) — correct.
-  - `+model+` = both directions — correct.
-  - `tag:nightly` = all models with the `nightly` tag — correct per the `tag:` selector method.
-  - yaml `tags:` config example + cron-driven `dbt build --select tag:nightly` usage is the canonical SaaS pattern.
-- **Minor -0.25 Completeness**: no mention of the **n-plus operator** (`2+model` / `model+3`) for fine-grained ancestor/descendant depth, and no callout that comma (no space) = intersection vs space = union for combining selectors. Non-load-bearing, but the n-plus form is a known canonical follow-up for engineers building tag-based CI pipelines.
-- Maps to: **Oracle PL/SQL → dbt + Trino SQL migration** topic row (dbt model selection / CI patterns family).
-
----
-
-## Verification summary
-
-| Claim | Source | Status |
+| Dim | Score | Reasoning |
 |---|---|---|
-| `HAVING` filters groups after `GROUP BY`, `WHERE` filters rows before, aggregates not allowed in `WHERE` | trino.io/docs/current/sql/select.html | **CLEAN** |
-| `lpad(varchar, bigint, varchar) → varchar` signature | trino.io/docs/current/functions/string.html | **CLEAN signature** |
-| Trino does NOT auto-coerce numeric → varchar for `lpad` first arg (cast required) | trino.io/docs/current/language/types.html | **CLEAN — but answer OMITTED the required `CAST` for numeric `account_id` (Q2 nit)** |
-| `strpos` 1-indexed, returns 0 if not found | trino.io/docs/current/functions/string.html | **CLEAN** |
-| 4-arg Oracle `INSTR` has no direct Trino equivalent; chain `strpos`+`substr` or `regexp_extract_all` | trino.io/docs/current/functions/string.html + /functions/regexp.html | **CLEAN** |
-| `sorted_by` is a real Iceberg table property, settable at CREATE + via ALTER SET PROPERTIES | trino.io/docs/current/connector/iceberg.html | **CLEAN** |
-| `ASC NULLS LAST` / `DESC NULLS FIRST` qualifiers valid in `sorted_by` array entries | trino.io/docs/current/connector/iceberg.html | **CLEAN** |
-| `SET PROPERTIES sorted_by` affects future writes only; `EXECUTE optimize` rewrites existing files | trino.io/docs/current/connector/iceberg.html | **CLEAN** |
-| Sort clustering tightens per-file min/max → improved file skipping | trino.io + starburst Iceberg sort blog | **CLEAN** |
-| dbt-trino `properties` dict with `partitioning` + `sorted_by` keys | iter495 canonical at r05 + dbt-trino docs | **CLEAN** |
-| dbt graph operators `+model` / `model+` / `+model+` semantics | docs.getdbt.com/reference/node-selection/graph-operators | **CLEAN** |
-| `tag:nightly` selector method | docs.getdbt.com/reference/node-selection/methods | **CLEAN** |
+| Accuracy | 5.0 | `lpad(varchar, bigint, varchar) → varchar` signature CORRECT (verified verbatim against trino.io/docs/current/functions/string.html). Trino-no-implicit-numeric→string-coercion rule CORRECT. Oracle LPAD auto-coercion contrast CORRECT. Fix `LPAD(CAST(invoice_number AS VARCHAR), 8, '0')` parses cleanly Trino 467. Result `'00000042'` CORRECT (8-char zero-padded). |
+| Clarity | 5.0 | Direct CAST-first pattern + Oracle-vs-Trino implicit-coercion explanation lands in <5 sentences. No unexplained jargon. |
+| Practical | 5.0 | One-line drop-in fix. Engineer can paste verbatim. "Always CAST(col AS VARCHAR) first / NO bare lpad on numeric" is the right takeaway. |
+| Completeness | 4.75 | Covers the fix, the root cause (no implicit coercion), the Oracle-vs-Trino contrast, the always-CAST rule. -0.25 for no explicit error-message quote ("Unexpected parameters (bigint, integer, varchar(1)) for function lpad. Expected: lpad(varchar, bigint, varchar)") that would have nailed the symptom→fix mapping; non-load-bearing. |
 
-**Net**: 11 of 12 verification points clean; 1 minor accuracy nit (Q2 `lpad` numeric-cast omission).
+**LPAD-cast fix LANDED**: The responder NOW writes `LPAD(CAST(invoice_number AS VARCHAR), 8, '0')` (cast applied) and correctly attributes the Trino-strict / no-implicit-coercion-vs-Oracle root cause. **This is THE key check for iter511** — iter510 Q2 wrote bare `lpad(account_id, 10, '0')` AND called Oracle→Trino LPAD "identical syntax"; iter511 responder fixed BOTH defects. Teacher's iter511 r27 line 868 reconcile-in-place edit (replaced "Identical." with `lpad(varchar, bigint, varchar)` signature + "MUST `CAST` first" + DO-NOT-WRITE example + cross-ref to §7A.3.1) is **EXERCISED AND CONFIRMED LANDED**. Bulletproofing payoff achieved.
 
----
+### Q2 — INTERSECT vs INNER JOIN — **4.4375 PASS with ONE TERMINOLOGY ERROR**
 
-## Topic row updates (federation NOT touched)
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 3.75 | INTERSECT supported in Trino CORRECT (trino.io/docs/current/sql/select.html confirms set ops). Set-semantics dedup CORRECT. INTERSECT ALL preserves duplicates CORRECT. INNER JOIN better when you need columns from both sides CORRECT. **TERMINOLOGY ERROR**: claim "INTERSECT is implemented as a hash-based ANTI-JOIN internally" is WRONG. INTERSECT returns rows present in BOTH inputs — that's **SEMI-JOIN** semantics. An **ANTI-JOIN** returns rows in the LEFT NOT in the right (that's EXCEPT / NOT EXISTS / NOT IN). Trino's actual planner uses a SemiJoin operator (or aggregate/mark-distinct in some plans) for INTERSECT — confirmed by trinodb/trino PR #5981 "Set operators EXCEPT and INTERSECT may use the same Semi Join physical operators" + O'Reilly Trino Definitive Guide. The mislabel could mislead an engineer reading EXPLAIN ("why isn't there an AntiJoin node?"). -1.25 Accuracy. |
+| Clarity | 4.75 | Clean explanation of set-semantics + ALL variant + when-to-use-JOIN-instead. -0.25 for not defining "anti-join" / "semi-join" terms inline (which made the mislabel hit harder). |
+| Practical | 4.75 | Engineer gets a working pattern (INTERSECT for both-lists, INTERSECT ALL for dup-preserving, JOIN for column-projecting). -0.25 because the wrong perf-note framing ("comparable to inner join because anti-join") could lead to wrong EXPLAIN expectations. |
+| Completeness | 4.5 | Covers supported, dedup vs ALL, JOIN-when-columns-needed. -0.5 for no NULL-handling callout (INTERSECT treats NULLs as equal for matching, unlike `=`) — non-load-bearing for the question as asked but a useful nuance. |
 
-- **SQL query best practices for OLAP** (Q1 HAVING vs WHERE): 4.5552/62 → (4.5552·62 + 4.9375) / 63 = (282.4224 + 4.9375) / 63 = 287.3599 / 63 = **4.5613/63** (+0.0061).
-- **Oracle PL/SQL → dbt + Trino SQL migration** (Q2 LPAD/INSTR + Q4 dbt graph operators both map here): 4.5280/73 → (4.5280·73 + 4.875 + 4.9375) / 75 = (330.5440 + 9.8125) / 75 = 340.3565 / 75 = **4.5381/75** (+0.0101).
-- **Iceberg partition design for SaaS** (Q3 sorted_by maps here as the sort-clustering / file-skipping cousin of partitioning): 4.4947/36 → (4.4947·36 + 4.9375) / 37 = (161.8092 + 4.9375) / 37 = 166.7467 / 37 = **4.5067/37** (+0.0120).
-- **Query performance basics: partitioning, indexing strategy for analytics** (Q3 also maps here — sorted_by IS the "indexing strategy" answer for non-partition predicates): 4.3491/19 → (4.3491·19 + 4.9375) / 20 = (82.6329 + 4.9375) / 20 = 87.5704 / 20 = **4.3785/20** (+0.0294).
-- **Federation row**: 4.49944/310 **UNCHANGED** (not probed; r22 §13.x guardrails untouched per directive).
+**CORRECTION TO DELIVER TO TEACHER**: INTERSECT plans as a **SEMI-JOIN** (rows in both inputs), **NOT** an anti-join. ANTI-JOIN is the physical form for EXCEPT / NOT EXISTS / NOT IN (rows in left not in right). The two are opposite-direction filters and confusing them is a meaningful technical error.
 
----
+### Q3 — CTE re-execution + break into dbt models — **4.9375 STRONG PASS clean**
 
-## Concrete next-teacher actions (iter511, OPTIONAL low-priority polish)
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5.0 | Trino INLINES CTEs (no result caching / materialization) — CORRECT per techjogging.com Trino CTE writeup + trinodb/trino issue #19115 + #28085 confirming Trino 467 still has no `WITH ... AS MATERIALIZED` hint (that's PostgreSQL). Referenced N times = evaluated N times — CORRECT. "Materialize as a dbt model + ref() it" — the canonical workaround, CORRECT and matches the production stack (dbt-trino supported). Single-use CTE fine — CORRECT (one reference = one execution either way; just a readability win). |
+| Clarity | 5.0 | "Inlined not materialized" + the N-references = N-executions framing nails the mental model in two sentences. |
+| Practical | 5.0 | Decision rule is concrete: expensive + multi-ref → break into dbt model + `{{ ref() }}`; single-ref → leave as CTE. Engineer can apply immediately. |
+| Completeness | 4.75 | -0.25 for no explicit "Trino 467 has no `WITH ... AS MATERIALIZED` hint (that's PostgreSQL); don't expect an inline materialization knob to exist" callout — useful for an engineer migrating from Postgres habits. Non-load-bearing. |
 
-If iter511 is another optional polish slot (extended phase, 109th+ consecutive pass), the **single** highest-value reconcile-in-place edit is:
+### Q4 — late-arriving data in hourly incremental dbt model — **4.875 STRONG PASS**
 
-**Candidate A (HIGHEST priority, Q2 nit fix)** — r27 §4.x Oracle→Trino LPAD/RPAD canonical: add a **one-line gotcha** under the existing LPAD migration entry stating "Trino does NOT auto-coerce numeric → varchar. Oracle `LPAD(account_id, 10, '0')` on a NUMBER column → Trino `lpad(CAST(account_id AS VARCHAR), 10, '0')`. Without the cast you get `Unexpected parameters (bigint, integer, varchar(1)) for function lpad. Expected: lpad(varchar, bigint, varchar)`." This reconciles with the existing r27 §4.x family (concat-`||` no-numeric-coercion canonical) and pre-empts the iter510 Q2 accuracy nit on any future re-probe. Estimated +2 lines, well under the iter509-style ≤8 line budget. Findability is excellent because the keyword "LPAD" routes the Haiku responder directly to r27 §4.x.
-
-**Candidate B (LOWER priority, completeness polish)** — r17 or r05 Iceberg `sorted_by` canonical: add a one-line callout "`sorted_by` clustering is hierarchical — the leading sort column gets the tightest min/max intervals; secondary sort columns get progressively weaker file-skipping." Iter510 Q3 already STRONG PASS at 4.9375 so this is purely defensive against a future "two-column sorted_by" probe.
-
-**Candidate C (LOWER priority, completeness polish)** — r27 dbt graph operators canonical: add an n-plus operator example (`2+model_name` / `model_name+3`) + intersection-vs-union (`,` vs space). Iter510 Q4 already STRONG PASS at 4.9375 so this is also defensive.
-
-**Recommend Candidate A** — it's the only one with an actual accuracy gap exposed in this iter, and the fix is small + reconciles with an existing canonical family.
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5.0 | `incremental_strategy='merge'` + `unique_key='event_id'` + `is_incremental()` guard + `date_add('day', -3, COALESCE(MAX(created_at), TIMESTAMP '1970-01-01'))` lookback subquery — ALL valid Trino 467 / dbt-trino. `date_add('day', -3, ts)` signature CORRECT (verified `date_add(varchar, bigint, timestamp(p)) → timestamp(p)` per trino.io/docs/current/functions/datetime.html). COALESCE-with-epoch-fallback watermark CORRECT (handles empty-target-on-first-incremental-run). Merge-makes-reprocessing-idempotent CORRECT. Pattern matches docs.getdbt.com lookback-window canonical for late-arriving data verbatim. |
+| Clarity | 4.75 | -0.25 for not explicitly walking through WHY the subquery wrapping `{{ this }}` works on incremental runs only (the `is_incremental()` guard is mentioned but the new-engineer might still wonder how it short-circuits on first run). |
+| Practical | 5.0 | Drop-in config + WHERE clause. Engineer can paste verbatim. Tune-lookback-to-lateness + full-refresh-fallback gives the operational escape hatch. |
+| Completeness | 4.75 | Covers lookback, merge, unique_key, watermark fallback, tuning, full-refresh escape. -0.25 for no microbatch-strategy callout (dbt 1.9+ microbatch is an alternative to manual lookback) — not load-bearing for this specific question but a useful "modern alternative" nudge. |
 
 ---
 
-## Judge probe targets for iter511
+## Topic average updates
 
-1. **HIGH — LPAD numeric-cast re-probe**: "I have `account_id BIGINT` and need to zero-pad to 10 digits — `lpad(account_id, 10, '0')` is giving me a function-resolution error, what's wrong?" (verifies Candidate A landed if teacher edits r27).
-2. **HIGH — `sorted_by` multi-column hierarchical probe**: "If I set `sorted_by = ARRAY['customer_id', 'product_id']`, will I get good file skipping on both columns?" (verifies Q3 holds under a sneakier angle).
-3. **MEDIUM — dbt n-plus operator**: "I want to run a model plus its immediate parents but NOT its grandparents — can I do `1+model_name`?" (verifies Q4 holds + tests Candidate C if teacher edits).
-4. **MEDIUM — `FILTER (WHERE …)` per-aggregate clause**: "Can I filter rows that go into ONE aggregate but not another in the same SELECT?" (probes the third tool beyond WHERE/HAVING that Q1 omitted — already cleanly covered in r07 §1a.2 per iter509 canonical, so this should land STRONG).
-5. **LOW — federation stays UNPROBED** (r22 §13.x guardrails / federation rubric row 4.49944/310 stays locked per the iter472-510 directive chain).
+| Topic | Before | After | Delta |
+|---|---|---|---|
+| SQL query best practices for OLAP (Q1 LPAD-cast re-probe + Q2 INTERSECT + Q3 CTE-inlining map here) | 4.5613/63 | (4.5613·63 + 4.9375 + 4.4375 + 4.9375)/66 = 301.6694/66 = **4.5707/66** | +0.0094 |
+| Oracle PL/SQL → dbt + Trino SQL migration (Q1 LPAD reads as Oracle→Trino migration; Q4 dbt incremental migration pattern map here) | 4.5381/75 | (4.5381·75 + 4.9375 + 4.875)/77 = 350.1700/77 = **4.5476/77** | +0.0095 |
+| Improving complex SQL performance on Trino with dbt (Q3 CTE-break-into-models is the canonical perf rewrite; Q4 incremental tuning is materialization tuning) | 4.5840/11 | (4.5840·11 + 4.9375 + 4.875)/13 = 60.2365/13 = **4.6336/13** | +0.0496 |
+
+Federation rubric row UNTOUCHED at **4.49944/310** per directive.
 
 ---
 
-## Pattern notes across iter510
+## Iter512 probe targets
 
-- **109th consecutive overall PASS** in extended phase. Margin +1.4219 above the 3.5 floor (very close to iter509's +1.4375 — second-highest in recent 7-iter window).
-- All four answers ≥ 4.875 — well-calibrated, no outliers, no fabrications.
-- The one accuracy nit (Q2 `lpad` numeric cast) is the kind of small Trino-vs-Oracle dialect detail that benefits from a single-line canonical bulletproofing — fits the iter509-iter510 reconcile-don't-append polish cadence exactly.
-- No federation drift; r22 §13.x guardrails confirmed untouched; federation rubric row 4.49944/310 unchanged.
-- Teacher's iter510 r17:1192 `$partitions` current-spec / #12323 gotcha #3 reconciliation was not exercised this probe sweep (no `$partitions` question this round), so its bulletproofing payoff will land in a future iter when Q1-style `$partitions` re-probes hit.
+1. **INTERSECT semi-join 2nd-angle re-probe (HIGH)** — verifies teacher lands a fix for the anti-join→semi-join terminology error. Ask something like: "I read in EXPLAIN that my INTERSECT query has a SemiJoin node — is that expected? Some sources say INTERSECT uses anti-joins. Which is right?" Verifies whether the responder now correctly says SEMI-JOIN (rows in both) vs ANTI-JOIN (rows in left not right) and attributes the physical plan to SemiJoin.
+2. **LPAD numeric-cast 3rd-angle (LOW)** — iter511 just landed Q1, but one more probe at a slightly different angle (e.g., `RPAD` on a `DECIMAL(18,2)` column, or chain `CAST` + `LPAD` inside a CONCAT) would confirm bulletproofing extends past INTEGER. Optional.
+3. **CTE inlining + Trino-has-no-WITH-AS-MATERIALIZED (MEDIUM)** — re-probe to verify responder still gets "no MATERIALIZED hint in Trino 467 (that's PostgreSQL)" right and the dbt-model + ref() workaround.
+4. **Late-arriving microbatch alternative (MEDIUM)** — probe whether responder can also recommend dbt 1.9+ microbatch strategy as an alternative to manual lookback windows, since iter511 only covered the manual lookback pattern.
+5. **Federation STAYS UNPROBED (LOW)** — per locked directive, federation rubric row at 4.49944/310 stays untouched.
+
+---
+
+## Concrete next-teacher actions
+
+### 1. (PRIMARY, LOAD-BEARING) Fix the INTERSECT anti-join → semi-join terminology error in resources
+
+**Where**: Find the resource that documents INTERSECT/EXCEPT set operations on Trino (likely r07 analytical query patterns or r23 dialect/translation matrix). Grep for "anti-join" + "INTERSECT" to locate the source of the confusion if it exists in resources/.
+
+**What to write**: A clear callout that:
+- INTERSECT returns rows in BOTH inputs → **semi-join** semantics (matches `WHERE EXISTS (SELECT 1 FROM B WHERE B.x = A.x)`).
+- EXCEPT returns rows in LEFT NOT in RIGHT → **anti-join** semantics (matches `WHERE NOT EXISTS (...)` / `NOT IN`).
+- Trino's physical planner for INTERSECT uses a SemiJoin operator (or aggregate/mark-distinct in some plans) — confirmed by trinodb/trino PR #5981: "Set operators EXCEPT and INTERSECT may use the same Semi Join physical operators".
+- DO-NOT-WRITE example: "INTERSECT is implemented as an anti-join" (this is the bug — it's a semi-join).
+- Keyword anchors for findability: "INTERSECT semi-join", "EXCEPT anti-join", "INTERSECT plan", "INTERSECT EXPLAIN SemiJoin node", "set operation join type Trino".
+
+**Why load-bearing**: An engineer reading the responder's wrong answer and running EXPLAIN will see a SemiJoin node (not AntiJoin) and get confused, OR they'll incorrectly reason that "INTERSECT = anti-join = expensive" and avoid it. The mislabel could distort optimization decisions.
+
+### 2. (SECONDARY, OPTIONAL) Cross-reference the dbt 1.9+ microbatch strategy at the late-arriving lookback canonical
+
+Q4 answer was strong but only covered the manual lookback pattern. dbt 1.9+ introduced `incremental_strategy='microbatch'` which natively handles the lookback + per-batch boundary problem. Adding a 2-3 line cross-ref ("see also: microbatch strategy for natively-managed lookback windows") at the lookback canonical would future-proof the answer.
+
+### 3. (TERTIARY, OPTIONAL) Add a one-line "no WITH ... AS MATERIALIZED in Trino 467 (that's PostgreSQL)" callout
+
+Q3 answer was clean but didn't pre-empt the engineer who knows Postgres CTE materialization hints and wonders if Trino has one. A 1-line callout at the CTE canonical would prevent a future probe from hitting this gap.
+
+---
+
+## Federation guardrails
+
+§13.x federation guardrails in resources/22 NOT TOUCHED. Federation rubric row stays **4.49944/310**. Federation not probed in iter511.
+
+---
+
+## Score history append
+
+Iter511 score line appended to `training/rubric.md` score history below the iter510 entry.
+
+---
+
+## Sources (WebSearch verification)
+
+- [String functions and operators — Trino Documentation](https://trino.io/docs/current/functions/string.html) — verified `lpad(varchar, bigint, varchar) → varchar` signature, first arg MUST be varchar.
+- [SELECT — Trino Documentation](https://trino.io/docs/current/sql/select.html) — verified INTERSECT, INTERSECT ALL, EXCEPT supported set operations + WITH clause inlining behavior.
+- [Optimize execution for output duplicates insensitive joins — trinodb/trino PR #5981](https://github.com/trinodb/trino/pull/5981) — confirms "Set operators EXCEPT and INTERSECT may use the same Semi Join physical operators" (not anti-join).
+- [Common Table Expressions in Trino — techjogging](https://techjogging.com/common-table-expressions-in-trino.html) — verified CTEs are inlined, referenced N times = executed N times.
+- [Does trino support CTE Materialization? — trinodb/trino issue #28085](https://github.com/trinodb/trino/issues/28085) — confirms Trino 467 still has NO `WITH ... AS MATERIALIZED` hint.
+- [Date and time functions and operators — Trino Documentation](https://trino.io/docs/current/functions/datetime.html) — verified `date_add(varchar, bigint, timestamp(p)) → timestamp(p)` signature.
+- [Incremental patterns for near real-time data — dbt Developer Hub](https://docs.getdbt.com/best-practices/how-we-handle-real-time-data/2-incremental-patterns) — verified lookback-window pattern with `is_incremental()` + `dateadd(..., -N, max(...))` for late-arriving data.
+- [About incremental strategy — dbt Developer Hub](https://docs.getdbt.com/docs/build/incremental-strategy) — verified `merge` strategy + `unique_key` semantics in dbt-trino.
