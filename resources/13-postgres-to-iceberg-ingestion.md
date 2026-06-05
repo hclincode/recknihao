@@ -4450,7 +4450,7 @@ The pre-flight schema-diff above shows pulling `data_type` from `information_sch
 | `float4`, `real` | `FLOAT` | 32-bit IEEE-754 |
 | `float8`, `double precision` | `DOUBLE` | 64-bit IEEE-754 |
 | `numeric(p,s)`, `decimal(p,s)` | `DECIMAL(p,s)` | Preserve exact `p` and `s`; do NOT widen to DOUBLE (loses precision) |
-| `timestamptz`, `timestamp with time zone` | `TIMESTAMP(6) WITH TIME ZONE` | Microsecond precision; preserves UTC offset |
+| `timestamptz`, `timestamp with time zone` | `TIMESTAMP(6) WITH TIME ZONE` | Microsecond precision; preserves UTC offset. **For Trino filtering on this column by local-date range, see resource 27 §4.2B (canonical zone-aware boundary-literal form + DO-NOT-WRITE for BETWEEN with bare VARCHAR strings and for `AT TIME ZONE >= DATE`).** Once landed in Iceberg, the right WHERE clause is `created_at >= TIMESTAMP '2026-06-01 00:00:00 America/New_York' AND created_at < TIMESTAMP '2026-07-01 00:00:00 America/New_York'` — sargable, partition-prunes, half-open. |
 | `timestamp`, `timestamp without time zone` | `TIMESTAMP(6)` | Microsecond precision, no timezone |
 | `date` | `DATE` | Day-precision, no time component |
 | `time` | `TIME(6)` | Microsecond precision |

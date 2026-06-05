@@ -661,6 +661,101 @@ SELECT date_trunc('day', current_timestamp AT TIME ZONE 'America/New_York') AS t
 
 **Cross-reference.** The on-prem-vs-cloud server-TZ audit discipline (Oracle SYSDATE returns OS server local time with no TZ attached; Trino is session-TZ-aware) is covered alongside this guardrail because the two reflexes — "set my session timezone" and "trust the server's clock" — co-occur in SYSDATE-heavy procedures.
 
+### 4.2B FILTERING `TIMESTAMP WITH TIME ZONE` BY A LOCAL-DATE RANGE — the canonical Trino 467 form, with DO-NOT-WRITE for the two off-by-hours traps
+
+> **Keyword anchors (read these so the responder lands here):** filter by date · filter by date range · filter by last N days · filter by timezone · filter by local date · TIMESTAMP WITH TIME ZONE filtering · timestamptz filtering · `AT TIME ZONE` predicate · off by hours · off by one day · wrong rows by timezone · timezone-aware WHERE clause · daily report local time · America/New_York filter · ET filter · UTC filter · BETWEEN on timestamptz · BETWEEN '2026-...' · `WHERE created_at BETWEEN`.
+
+**Why this section exists.** When a column is `TIMESTAMP WITH TIME ZONE` (Postgres `timestamptz`, Iceberg `TIMESTAMP(6) WITH TIME ZONE` — see resource 13 type-mapping table) and you want to filter "rows whose **local** wall-clock date falls in a given range in `America/New_York`," the obvious reflexes from PostgreSQL or MySQL produce one of three failures in Trino 467: (i) a type error at analysis time, (ii) silently-wrong rows offset by the local UTC offset (4 or 5 hours for ET), or (iii) zero rows. The two correct forms are below; the three wrong forms (verified against [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html) and [trino.io/docs/current/language/types.html](https://trino.io/docs/current/language/types.html)) follow as DO-NOT-WRITE.
+
+**Core semantic to memorize.** `expr AT TIME ZONE 'zone'` **does NOT change the underlying instant** — it re-renders the same UTC moment with a different zone label attached. The Trino docs example: `timestamp '2012-10-31 01:00 UTC' AT TIME ZONE 'America/Los_Angeles'` → `2012-10-30 18:00:00.000 America/Los_Angeles`. Same instant in time, different wall-clock label. Therefore comparing `current_timestamp AT TIME ZONE 'X'` to `current_timestamp` is comparing **the same value**.
+
+#### PREFERRED — zone-aware boundary-literal half-open range (sargable, partition-prunes)
+
+```sql
+-- "Rows whose local NYC wall clock falls on/after 2026-06-01 and before 2026-07-01."
+SELECT *
+FROM iceberg.analytics.events
+WHERE created_at >= TIMESTAMP '2026-06-01 00:00:00 America/New_York'
+  AND created_at <  TIMESTAMP '2026-07-01 00:00:00 America/New_York';
+```
+
+Why this is the recommended form:
+
+- **Sargable.** The column `created_at` appears un-wrapped on the left of the predicate. Trino's predicate pushdown can convert these literal bounds into manifest-level partition filters when the Iceberg table is partitioned by `day(created_at)` or `month(created_at)` — only the matching data files are read. (See resource 10 for Iceberg partition pruning.)
+- **Half-open `>= ... AND < ...`** is the standard idiom for date ranges. It avoids the classic BETWEEN-with-`23:59:59.999999`-fencepost mistake (BETWEEN is inclusive on both ends, which collides with sub-second resolution).
+- **The literal `TIMESTAMP 'YYYY-MM-DD HH:MM:SS America/New_York'`** is a valid `TIMESTAMP WITH TIME ZONE` literal in Trino — IANA zone names are accepted, as are numeric offsets like `-04:00` and UTC aliases (`UTC`, `Z`, `GMT`). Verified at [trino.io/docs/current/language/types.html](https://trino.io/docs/current/language/types.html).
+
+#### ALSO CORRECT — `CAST(... AT TIME ZONE 'zone' AS date)` for ad-hoc / non-pruning scans
+
+```sql
+-- Wrap the column for the comparison; OK for small scans, NOT for production partition-pruned queries.
+SELECT *
+FROM iceberg.analytics.events
+WHERE CAST(created_at AT TIME ZONE 'America/New_York' AS date) >= DATE '2026-06-01'
+  AND CAST(created_at AT TIME ZONE 'America/New_York' AS date) <  DATE '2026-07-01';
+```
+
+When to use this form: ad-hoc exploration, small lookup tables, or when you genuinely need the **local date** as a derived value (e.g., to `GROUP BY` it). `AT TIME ZONE 'America/New_York'` re-renders each timestamp in NYC time, then `CAST(... AS date)` truncates to the NYC local date — this **is** the correct way to derive the local date for comparison.
+
+**Caveat — wrapping the column defeats partition pruning.** The Trino CBO cannot push down a predicate on `CAST(col AT TIME ZONE ... AS date)` into Iceberg's partition filter the same way it pushes down `col >= TIMESTAMP '...'`. For large partitioned tables, prefer the PREFERRED form above. There is an open optimizer issue ([github.com/trinodb/trino/issues/12729](https://github.com/trinodb/trino/issues/12729)) to "unwrap cast of timestamp with normalized zone to date in comparison" — until that lands, the boundary-literal form is what you write for production.
+
+#### DO NOT WRITE (i) — BETWEEN with bare VARCHAR strings against a TIMESTAMP WITH TIME ZONE column
+
+```sql
+-- TYPE ERROR at analysis time. Trino rejects the query.
+WHERE created_at BETWEEN '2026-06-01' AND '2026-06-30';
+
+-- Same trap even with AT TIME ZONE wrapping:
+WHERE created_at AT TIME ZONE 'America/New_York' BETWEEN '2026-06-01' AND '2026-06-30';
+```
+
+**Why it fails.** Bare-quoted `'2026-06-01'` is a `VARCHAR` literal. **Trino has NO implicit `VARCHAR` → `TIMESTAMP WITH TIME ZONE` coercion.** The query fails at analysis time with a type-mismatch error like `Cannot apply operator: timestamp(6) with time zone >= varchar(10)`. The fix is to write explicit `TIMESTAMP '...'` literals (or `DATE '...'` literals where appropriate) — never rely on string→timestamp inference. Verified at [trino.io/docs/current/language/types.html](https://trino.io/docs/current/language/types.html).
+
+#### DO NOT WRITE (ii) — `AT TIME ZONE 'X' >= DATE '...'` for "filter by local date >= X"
+
+```sql
+-- SEMANTICALLY MISLEADING — returns wrong rows (off by hours).
+WHERE created_at AT TIME ZONE 'America/New_York' >= DATE '2026-06-02';
+```
+
+**Why it produces wrong rows.** `created_at AT TIME ZONE 'America/New_York'` returns `timestamp(p) with time zone` (a TZ-bearing timestamp, NOT a date). Comparing a TZ-bearing timestamp to a `DATE` literal triggers implicit coercion of the `DATE` to a timestamp at midnight — and the engineer's mental model "midnight on 2026-06-02 in NYC time" is **not** what the coercion produces. The result does **not** filter by "local NYC date on/after June 2" as intended; it filters by an instant that is offset by hours from what you want. Engineers seeing this in production typically report "my report is off by 4 hours" or "I'm missing the first 4-5 hours of June 2." See [github.com/trinodb/trino/issues/12729](https://github.com/trinodb/trino/issues/12729) for the related round-trip optimization gap.
+
+**Correct fix:** use either the PREFERRED form (boundary-literal zone-aware `TIMESTAMP`) or the ALSO-CORRECT form with the explicit `CAST(... AT TIME ZONE 'zone' AS date)` on the LEFT — both make the local-date intent unambiguous.
+
+#### DO NOT WRITE (iii) — `current_timestamp AT TIME ZONE 'X'` as a historical lower bound
+
+```sql
+-- ZERO ROWS — current_timestamp AT TIME ZONE 'X' is the SAME instant as current_timestamp.
+WHERE created_at >= current_timestamp AT TIME ZONE 'America/New_York';
+```
+
+**Why it returns zero rows.** As stated in the core semantic above, `AT TIME ZONE` does **not** subtract or add hours from the value; it just re-labels the same instant in a different zone. So `current_timestamp AT TIME ZONE 'America/New_York'` is exactly **now**, not "midnight NYC today" or "today's start in NYC." Using it as a lower bound on a historical column returns rows whose `created_at` is in the future — i.e., none, for backward-looking data.
+
+**Correct forms for "last N days in NYC local time":**
+
+```sql
+-- Last 7 days, anchored to NYC midnight, half-open.
+WHERE created_at >= date_trunc('day', current_timestamp AT TIME ZONE 'America/New_York') - INTERVAL '7' DAY;
+
+-- Equivalent: rolling 7 * 24-hour window ending now (NOT tied to local midnight).
+WHERE created_at >= current_timestamp - INTERVAL '7' DAY;
+```
+
+The first form anchors to **midnight NYC today** then subtracts 7 days — what most "daily report covering the last 7 NYC days" intents actually want. The second form is a rolling instant-based window; pick consciously based on what your report needs.
+
+#### Summary cheat-sheet (post this in the dbt model PR review checklist)
+
+| Intent | CORRECT (use this) | WRONG (do NOT write) |
+|---|---|---|
+| Rows in a given local-date range (NYC, June 2026) | `created_at >= TIMESTAMP '2026-06-01 00:00:00 America/New_York' AND created_at < TIMESTAMP '2026-07-01 00:00:00 America/New_York'` | `created_at BETWEEN '2026-06-01' AND '2026-06-30'` (type error); `created_at AT TIME ZONE 'America/New_York' BETWEEN '2026-06-01' AND '2026-06-30'` (type error) |
+| Rows on/after a given local NYC date | `created_at >= TIMESTAMP '2026-06-02 00:00:00 America/New_York'` | `created_at AT TIME ZONE 'America/New_York' >= DATE '2026-06-02'` (off-by-hours, wrong rows) |
+| Rows in last 7 NYC local days | `created_at >= date_trunc('day', current_timestamp AT TIME ZONE 'America/New_York') - INTERVAL '7' DAY` | `created_at >= current_timestamp AT TIME ZONE 'America/New_York'` (returns zero rows — same instant as `current_timestamp`) |
+| Derive local NYC date for GROUP BY | `CAST(created_at AT TIME ZONE 'America/New_York' AS date)` (correct local-date extraction) | `CAST(created_at AS date)` (gives UTC date, not NYC date) |
+
+**One more reflex to unlearn.** Tweaking the Trino worker's JVM `-Duser.timezone` is NOT the lever for this problem. The JVM TZ flag affects how naive timestamps are interpreted at the JVM layer and can vary between workers; the **reliable** levers are SQL-level (`SET TIME ZONE`, `sql.forced-session-time-zone`, or `AT TIME ZONE` per expression). Resource 22 §13.x guardrail covers the SQL-vs-JVM rule in more depth for the federation case.
+
+Sources (verified June 2026): [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html) (AT TIME ZONE worked example, at_timezone function signature); [trino.io/docs/current/language/types.html](https://trino.io/docs/current/language/types.html) (TIMESTAMP WITH TIME ZONE literal forms — IANA zone names, numeric offsets, UTC aliases); [trino.io/docs/current/sql/set-time-zone.html](https://trino.io/docs/current/sql/set-time-zone.html) (session-TZ command).
+
 ### 4.3 String functions
 
 | Oracle | Trino | Notes |
