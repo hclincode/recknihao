@@ -754,6 +754,42 @@ ORDER BY c.day;
 
 > **`sequence()` — the canonical Trino date-spine / generate-series / row-spine generator (signature pin).** Per [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html): `sequence(start, stop) -> array` (integer or date — step defaults to `+1` if `start <= stop`, else `-1`); `sequence(start, stop, step) -> array` (integer step for ints; `INTERVAL DAY TO SECOND` or `INTERVAL YEAR TO MONTH` step for dates and timestamps). Both bounds are **INCLUSIVE**. There is **NO `generate_series` function in Trino** — `generate_series` is the Postgres name; on Trino you write `sequence(...)` and `UNNEST` it to rows. Keyword anchors: `Trino generate_series`, `Trino date spine`, `Trino generate range of dates`, `Trino row spine`, `Trino generate calendar`, `Trino sequence function signature`, `Trino integer range`, `Trino date range UNNEST`.
 
+### LEADING CANONICAL — forward-fill / carry the last non-null value forward (`LAST_VALUE ... IGNORE NULLS`, look-BACK frame)
+
+> **Keyword anchors (read this section FIRST if your question contains any of these):** forward fill Trino, fill forward, carry forward last non-null, fill NULL gaps with previous value, LAST_VALUE IGNORE NULLS, gap fill values, last observation carried forward, LOCF Trino, fill down, previous non-null per partition, value gap-fill (vs date gap-fill).
+
+**The fact in one sentence.** To **carry the last non-null value forward** per partition (LOCF / fill-down), use `LAST_VALUE(col) IGNORE NULLS OVER (PARTITION BY id ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` — the `IGNORE NULLS` skips gap rows, and the look-BACK frame ends at the current row so you see the most recent non-null **at or before** the current row.
+
+**Trino docs verbatim** (verified at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html)): *"By default, null values are respected. If `IGNORE NULLS` is specified, all rows where `x` is null are excluded from the calculation."* `IGNORE NULLS` is valid on `first_value` / `last_value` / `nth_value` / `lag` / `lead`. (Default behavior is RESPECT NULLS; there is no separate `RESPECT NULLS` keyword in Trino — omit `IGNORE NULLS` to get the default.)
+
+**Canonical recipe (copy-paste this).** Pair with the §4 date gap-fill above: the calendar `LEFT JOIN` first creates the dense `(id, day)` rows (many with NULL metric), then `LAST_VALUE ... IGNORE NULLS` fills the NULL gaps with the previous non-null value:
+
+```sql
+-- After the date gap-fill LEFT JOIN above produces dense (id, day, metric) rows with NULLs in the gaps:
+SELECT
+  id,
+  day,
+  COALESCE(
+    metric,
+    LAST_VALUE(metric) IGNORE NULLS OVER (
+      PARTITION BY id ORDER BY day
+      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    )
+  ) AS metric_filled
+FROM dense_series;
+```
+
+The outer `COALESCE` is optional but makes intent explicit when `metric` is non-NULL on the current row. `LAST_VALUE(metric) IGNORE NULLS` over the look-BACK frame already returns the current row's value when `metric` is non-NULL on that row.
+
+**DO-NOT-WRITE (load-bearing — these are the iter565 forward-fill fab class):**
+
+- *`LAST_VALUE(metric) IGNORE NULLS OVER (... ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)`* for forward-fill — **FALSE: that is FUTURE-fill, not forward-fill.** The `UNBOUNDED FOLLOWING` upper bound makes every row see the partition's **globally-last** non-null value — including rows that come **BEFORE** the first non-null observation, which a true LOCF would leave NULL. Forward-fill needs the **look-BACK** frame `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` so the upper bound is the current row.
+- *`PARTITION BY id, CASE WHEN x IS NOT NULL THEN 1 ELSE 0 END`* as a forward-fill trick — **BROKEN.** This splits non-null and NULL rows into **two separate partitions**, so the NULL-rows partition has no non-null values to carry forward and stays NULL. Do not use.
+- Using a CASE-WHEN-inside-`LAST_VALUE` workaround (e.g., `LAST_VALUE(CASE WHEN x IS NOT NULL THEN x END) OVER (...)`) as **THE canonical** form — the workaround happens to work in some engines without `IGNORE NULLS`, but **Trino HAS native `IGNORE NULLS`**, which is cleaner and unambiguous. Reach for the native form first.
+- *`LAG(x) IGNORE NULLS`* invoked **without an explicit `ORDER BY`** — `LAG`/`LEAD`/`LAST_VALUE` all require ORDER BY in the window spec for forward-fill to be deterministic.
+
+**Complement / cross-reference.** This is the **value** forward-fill. The **row** densification (creating one row per `(id, day)` so there's something to fill) is the §4 date gap-fill recipe above (calendar `UNNEST(sequence(...))` LEFT JOIN'd to the sparse fact). Use them together: gap-fill the dates first, then forward-fill the values. For lookback comparisons that also need IGNORE NULLS, `LAG(x) IGNORE NULLS OVER (... ORDER BY day)` returns the **previous non-null** value (vs `LAG(x)` which returns the previous **row's** value even if NULL). See §5 Pattern B3 for the related `LAST_VALUE` **default-frame** footgun (when the frame is omitted, `LAST_VALUE` returns the current row's value — that section is about a different fab; this section is about correctly-framed forward-fill with `IGNORE NULLS`).
+
 `date_trunc('day' | 'week' | 'month', col)` is the Trino function you'll use constantly. It rounds a timestamp down to the start of a bucket. **Return type — same as input** (per [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html): `date_trunc(unit, x) -> [same as input]`): `timestamp -> timestamp`, `timestamp(p) with time zone -> timestamp(p) with time zone`, `date -> date`, `time -> time`. It does **NOT** convert to DATE — `date_trunc('day', some_timestamp)` returns a `timestamp` at midnight, not a `date`. If you need the result as a DATE, wrap in `CAST(... AS DATE)` explicitly.
 
 #### `date_trunc('week', ts)` ALWAYS starts the week on MONDAY (ISO-8601) — Trino canonical (iter536 PIN)
