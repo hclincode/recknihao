@@ -2941,6 +2941,60 @@ models:
 
 ---
 
+### 6.7I LEADING CANONICAL — dbt GRANTS: native `grants:` config vs `post_hook` GRANT (+ the dbt-trino roles bug #12862)
+
+> **Keyword anchors:** dbt grants config, dbt auto grant select on build, dbt grants vs post_hook, GRANT TO ROLE Trino, dbt-trino grants role bug 12862, idempotent grants dbt, dbt +grants merge, dbt grants replace, dbt-trino TO ROLE workaround, dbt post_hook GRANT SELECT.
+
+**Two ways to ship GRANTs from dbt.** Native [`grants:` config](https://docs.getdbt.com/reference/resource-configs/grants) (the canonical, idempotent way — dbt re-applies after every run so the live object's grants EXACTLY match the config, fixing drift), and `post_hook` (a raw SQL escape hatch). Three native forms:
+
+```jinja
+-- In-model Jinja
+{{ config(materialized='table', grants={'select': ['analyst_role']}) }}
+```
+```yaml
+# Schema YAML (models/schema.yml)
+models:
+  - name: my_model
+    config:
+      grants:
+        select: ['analyst_role']
+```
+```yaml
+# Project-level (dbt_project.yml)
+models:
+  +grants:
+    select: ['analyst_role']
+```
+
+**REPLACE vs MERGE.** By DEFAULT `grants:` REPLACES existing grants on the object (clobbers anything not in the config). To ADD to (merge with) the less-specific / inherited grants instead of clobbering, prefix the privilege with `+`: `{'+select': ['analyst_role']}`. Each privilege controls its own merge/replace independently — verified at [docs.getdbt.com/reference/resource-configs/grants](https://docs.getdbt.com/reference/resource-configs/grants).
+
+**LOAD-BEARING CAVEAT — dbt-trino's `grants:` config + Trino roles (this stack):** dbt-trino currently emits `GRANT <priv> ON <obj> TO <name>` (bare-name / USER form), NOT `TO ROLE <name>` — tracked at [dbt-labs/dbt-core #12862](https://github.com/dbt-labs/dbt-core/issues/12862) (open). On a Trino + OPA + ROLE-based principal model (this stack), a bare name is interpreted as a USER, not a ROLE — so the `grants:` config grants to the wrong principal type. **Robust workaround for ROLE grantees: use `post_hook` with the explicit `TO ROLE` keyword:**
+
+```jinja
+{{ config(
+    materialized='table',
+    post_hook="GRANT SELECT ON {{ this }} TO ROLE analyst_role"
+) }}
+```
+
+Trino's GRANT syntax is `GRANT <priv> ON <obj> TO ( user | USER user | ROLE role )` ([trino.io/docs/current/sql/grant.html](https://trino.io/docs/current/sql/grant.html)) — **omit the `ROLE` keyword and the bare name resolves to a USER**, so for a role grantee write `TO ROLE <role>` explicitly. (`post_hook` is not idempotent the way `grants:` is — re-running won't REVOKE stale grants — but it is the correct shape for ROLE grantees today, until #12862 lands.)
+
+**OPA caveat (this stack).** Production authorization is **Open Policy Agent**. The engine-level GRANT is issued and persisted, but **enforcement depends on the OPA policy bundle** — engine GRANTs and OPA policy are separate authorization layers. Coordinate role names + privilege effects with the external governance policy (see `prod_info.md`).
+
+**DO-NOT-WRITE — banned patterns:**
+
+| DO NOT write | Why it's wrong |
+|---|---|
+| Assume the dbt-trino `grants:` config emits `GRANT ... TO ROLE <name>` for role grantees | **WRONG.** Per [#12862](https://github.com/dbt-labs/dbt-core/issues/12862), dbt-trino emits the bare-name / USER form `GRANT ... TO <name>` — which Trino resolves as a USER, not a ROLE. For ROLE grantees today, use `post_hook` with explicit `TO ROLE`. |
+| `post_hook="GRANT SELECT ON {{ this }} TO analyst_role"` (bare name, no `ROLE` keyword) when the grantee IS a Trino role | Trino interprets the bare name as a **USER**. The grant succeeds syntactically but binds to the wrong principal type — analysts in `analyst_role` won't get access. Write `TO ROLE analyst_role` explicitly. |
+| Issue grants from an Oracle-style ad-hoc DBA session (`GRANT SELECT ON sch.tbl TO analyst_role;` in a one-off Trino client) | **Not idempotent + not version-controlled.** Drift returns on the next rebuild (`CREATE OR REPLACE TABLE` re-creates the object without the grant). Put it in `grants:` (or `post_hook` for ROLE) so it's reapplied on every build. |
+| Use `pre_hook` to GRANT (instead of `post_hook`) | **WRONG ORDER.** `pre_hook` runs BEFORE the model materializes. If the model uses `materialized='table'`, the prior table is DROPPED and re-CREATED — your pre-hook GRANT either errors (object doesn't exist yet on first build) or grants on the about-to-be-dropped object. GRANT belongs in `post_hook` (after the new object exists) or in native `grants:`. |
+| Expect `grants:` to revoke privileges that pre-existed before dbt managed the object (without re-running) | dbt only reconciles at run time. If you add `grants:` to a model that already has external grants, dbt syncs on the NEXT build of that model. Force it via `dbt build --select my_model` (see §6.7F). |
+
+**Cross-references (dbt-CLI / config cluster):** §6.7F (`--select` graph-operators), §6.7H (dbt docs site). For the broader dbt-trino model + Trino RBAC concepts, see also §6.7A (tests / severity) and the OPA authorization layer in [resource 22 §2.8.1](22-trino-federation-postgresql.md).
+
+---
+
 ## 7. Cutover checklist (the non-obvious gotchas)
 
 Once your models compile and run, before you turn off Oracle:
