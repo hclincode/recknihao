@@ -891,6 +891,84 @@ ORDER BY device_id, ts;
 - **DO NOT compute ANY `LAST_VALUE` / forward-fill window in a PRE-JOIN CTE over the raw facts — and ESPECIALLY NOT with `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` (iter571 PIN).** A full-frame `LAST_VALUE(metric) OVER (PARTITION BY entity_id ORDER BY ts ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)` collapses to the **PARTITION-GLOBAL-LAST value** (a single constant per entity) — verified at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html): `LAST_VALUE` returns the last value of the window frame, and `UNBOUNDED FOLLOWING` extends the frame to the partition's final row, so every row in the partition sees the SAME last value. If you compute that constant in a pre-join CTE and THEN LEFT JOIN the dense spine, EVERY gap row inherits the entity's globally-latest reading — NOT the as-of-bucket value the question actually asks for. **WRONG (pre-join CTE with full-frame `LAST_VALUE`, then LEFT JOIN):** `WITH sparse_logs AS (SELECT server_id, logged_at, cpu_percent, LAST_VALUE(cpu_percent) OVER (PARTITION BY server_id ORDER BY logged_at ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS latest_cpu FROM raw_facts) SELECT g.server_id, g.bucket, COALESCE(s.cpu_percent, s.latest_cpu) AS cpu FROM grid g LEFT JOIN sparse_logs s ON s.server_id = g.server_id AND date_trunc('hour', s.logged_at) = g.bucket` — produces the partition-global-last value for every gap, and ALSO fans out if `sparse_logs` has multiple rows per `(server_id, hour)`. **RIGHT (no pre-join window — collapse to one-row-per-bucket via `max_by`, LEFT JOIN, then forward-fill in the FINAL select over the post-join dense rows):** Steps 2a → 2b → 3 in the recipe above (`max_by(cpu_percent, logged_at) GROUP BY server_id, date_trunc('hour', logged_at)` first → LEFT JOIN onto the spine → final `LAST_VALUE(...) IGNORE NULLS OVER (... ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` in the outer SELECT). The forward-fill window belongs **ONLY** in the final SELECT over the POST-JOIN dense rows — never in a pre-join CTE. The standalone forward-fill canonical above also bans `UNBOUNDED FOLLOWING` for forward-fill (it would be **future-fill**, not forward-fill); the recipe here additionally bans **any** window over raw sparse facts before the spine join, full-frame or otherwise.
 - **DO NOT GROUP BY an aggregate when building the spine — it's a parse error (iter573 PIN).** *Keyword anchors:* GROUP BY cannot contain aggregations, GROUP BY an aggregate, spine from MIN date, generate weeks from min date, sequence from min to max date, cannot GROUP BY MIN, weeks_spine GROUP BY date_trunc MIN. **WRONG ❌ PARSE ERROR:** `SELECT date_add('day', n*7, date_trunc('week', MIN(posted_date))) AS week_start FROM ledger, UNNEST(sequence(0,52)) AS t(n) GROUP BY date_trunc('week', MIN(posted_date))` — Trino raises **"GROUP BY clause cannot contain aggregations, window functions or grouping operations"** (the analyzer's `verifyNoAggregateWindowOrGroupingFunctions` rule). Two distinct bugs in that snippet: (i) you cannot `GROUP BY` an expression that **contains** an aggregate (`MIN(posted_date)`); (ii) the derived value `n` (from the UNNEST) appears in `SELECT` but is neither grouped nor aggregated, which is its own GROUP BY violation. **RIGHT ✅ (two clean forms — pick one):** **Form A — scalar-subquery the MIN/MAX bound and drive the rows from the UNNEST** (no GROUP BY at all): `SELECT date_add('day', n*7, (SELECT date_trunc('week', MIN(posted_date)) FROM ledger)) AS week_start FROM UNNEST(sequence(0, 52)) AS t(n)`. **Form B — bounds CTE + sequence over the interval** (preferred — mirrors the device-heartbeat query above): `WITH bounds AS (SELECT MIN(posted_date) AS lo, MAX(posted_date) AS hi FROM ledger), weeks_spine AS (SELECT w AS week_start FROM bounds CROSS JOIN UNNEST(sequence(date_trunc('week', lo), date_trunc('week', hi), INTERVAL '7' DAY)) AS u(w)) SELECT * FROM weeks_spine`. Both forms put the aggregate **inside its own scalar subquery / CTE** where it is the SELECT-list expression — never inside a `GROUP BY`. Trino docs: SELECT grammar at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) — the `GROUP BY` clause accepts column references and grouping-set lists; aggregate functions belong in the SELECT list, not the GROUP BY list. See also [Trino Issue #25984](https://github.com/trinodb/trino/issues/25984) for the literal error string.
 
+### LEADING CANONICAL — count active/open intervals on each day (interval-overlap range join — NOT forward-fill, NOT a CURRENT_DATE snapshot)
+
+> **Keyword anchors (read this section FIRST if your question contains any of these):** active subscribers per day, open tickets per day, concurrent sessions per day, count active intervals as of each day, how many were active on each date, range join calendar to intervals, point-in-time count per day, subscriptions active on day, headcount per day, occupancy per day, active members each day, open positions per day, count overlapping intervals, intervals covering each day, as-of count per day, daily snapshot count of in-progress entities.
+
+**The fact in one sentence.** To count, for **EACH day `d`** in a date range, the entities whose active interval (`[start, end)`) **covers** `d`, range-**JOIN** the dense day spine to the interval table on `s.start <= d AND (s.end IS NULL OR s.end > d)` and `GROUP BY d` (plus any dimension column). Use the **half-open `[start, end)` convention** so that an interval ending on day `X` is **NOT** counted on day `X` (this avoids the boundary double-count where an interval ending on X and another starting on X would both be counted on X).
+
+**Why this is its own pattern (NOT forward-fill, NOT a snapshot).** Forward-fill carries the last known VALUE into gap rows on a sparse `(entity, day, value)` table. A point-in-time snapshot (`WHERE start <= CURRENT_DATE AND (end IS NULL OR end > CURRENT_DATE)`) gives you ONE row: the count of active intervals **as of today**. Neither of those answers the question "how many were active on **EACH** historical day d?" The interval-overlap range join is the correct pattern: every calendar day `c.day` enters the JOIN predicate, so the count is re-evaluated **per day** — historical days get their historical active counts, today gets today's count, all in one result set.
+
+**Canonical worked end-to-end query (the "active subscribers per day per plan over full history" scenario — reuses the dynamic-bounds spine from the COMBINED CANONICAL above):**
+
+```sql
+-- Active subscribers per day per plan_type, over the FULL history of the subscriptions table.
+-- bounds: dynamic — start at the earliest subscription_start_date, end at today.
+-- calendar: dense day spine from bounds via sequence() + CROSS JOIN UNNEST (TRUE dense calendar).
+-- range JOIN: a subscription s is active on calendar day c.day iff s.subscription_start_date <= c.day
+--             AND (s.subscription_end_date IS NULL OR s.subscription_end_date > c.day) — half-open [start, end).
+-- INNER JOIN: only emit (c.day, plan_type) pairs that have >=1 active subscription on that day.
+-- (Switch to LEFT JOIN + COALESCE(active_count, 0) if you need a row for every (day, plan_type) even when zero.)
+
+WITH bounds AS (
+  SELECT MIN(subscription_start_date) AS lo,
+         CURRENT_DATE                  AS hi
+  FROM iceberg.analytics.subscriptions
+),
+calendar AS (
+  SELECT d AS day
+  FROM bounds
+  CROSS JOIN UNNEST(sequence(lo, hi, INTERVAL '1' DAY)) AS t(d)
+)
+SELECT
+  c.day,
+  s.plan_type,
+  COUNT(*) AS active_count
+FROM calendar c
+JOIN iceberg.analytics.subscriptions s
+  ON s.subscription_start_date <= c.day                                    -- interval STARTED on or before c.day
+ AND (s.subscription_end_date IS NULL OR s.subscription_end_date > c.day)  -- AND has not ENDED by c.day (half-open)
+GROUP BY c.day, s.plan_type
+ORDER BY c.day, s.plan_type;
+```
+
+**Why this works.** For each calendar day `c.day`, the JOIN predicate evaluates against EVERY subscription: subscriptions whose `[start, end)` window covers `c.day` survive the join. `COUNT(*) GROUP BY c.day, s.plan_type` then tallies the survivors per `(day, plan)`. The dense `calendar` CTE guarantees every day in `[min_start, today]` gets evaluated — there are no gaps in the output day axis even if no subscription started or ended that day. The dynamic bounds (`MIN(subscription_start_date)` from a bounds CTE; see the iter573 GROUP-BY-aggregate-ban canonical above — put the `MIN` in a CTE, **not** in a `GROUP BY`) make the spine cover the full history without hardcoded dates.
+
+**DO-NOT-WRITE (load-bearing — the iter574 Q1 fab class):**
+
+- **DO NOT compute the active count as a `CURRENT_DATE` point-in-time snapshot CTE and then LEFT JOIN the calendar — every historical day will be 0 / 'No Activity', only TODAY's row will populate (iter574 PIN).** **WRONG ❌:**
+  ```sql
+  -- WRONG: this is a snapshot pinned to TODAY, NOT a per-day active count.
+  WITH calendar AS (...),
+  daily_active AS (
+    SELECT CURRENT_DATE AS day, plan_type, COUNT(*) AS active_count
+    FROM iceberg.analytics.subscriptions
+    WHERE subscription_start_date <= CURRENT_DATE
+      AND (subscription_end_date IS NULL OR subscription_end_date > CURRENT_DATE)
+    GROUP BY plan_type
+  )
+  SELECT c.day, d.plan_type, COALESCE(d.active_count, 0) AS active_count
+  FROM calendar c
+  LEFT JOIN daily_active d ON c.day = d.day  -- joins ONLY on today's row → all other days are 0
+  ORDER BY c.day;
+  ```
+  Only the row where `c.day = CURRENT_DATE` matches `d.day = CURRENT_DATE`; every other calendar day is LEFT-JOIN-padded to NULL → `COALESCE(NULL, 0) = 0`. The "active count" must be evaluated **PER calendar day** — the calendar day `c.day` must appear inside the JOIN predicate (`s.start <= c.day AND (s.end IS NULL OR s.end > c.day)`), **not** be hardcoded to `CURRENT_DATE`. **RIGHT ✅:** the range-join query above — `c.day` participates in the join predicate so the active count is recomputed for every historical day.
+- **DO NOT use `BETWEEN s.start AND s.end` (closed interval) when you mean half-open `[start, end)` — closed BETWEEN double-counts the boundary day.** **WRONG ❌:** `JOIN subscriptions s ON c.day BETWEEN s.subscription_start_date AND s.subscription_end_date` — `BETWEEN x AND y` is `x <= c.day AND c.day <= y` (both inclusive). If subscription A ends on `2026-05-10` AND subscription B starts on `2026-05-10`, **BOTH** count on `2026-05-10` (A: `start <= 5/10 AND 5/10 <= end=5/10` true; B: `start=5/10 <= 5/10 AND 5/10 <= end` true) — you've double-counted the handoff day. **RIGHT ✅:** half-open `s.subscription_start_date <= c.day AND (s.subscription_end_date IS NULL OR s.subscription_end_date > c.day)` — only B counts on `2026-05-10` (A's `end > c.day` is `5/10 > 5/10` = false). Also: BETWEEN does NOT handle `s.end IS NULL` for still-active intervals — you'd need an extra `OR s.end IS NULL` branch and the result is messier. Stick with the explicit `<=` / `>` form.
+
+**CONTRAST card — the THREE time-series patterns side-by-side (read this if you're not sure which one your question wants):**
+
+| Pattern | One-line shape | Use when |
+|---|---|---|
+| **Forward-fill (LOCF)** | `LAST_VALUE(x) IGNORE NULLS OVER (PARTITION BY id ORDER BY d ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` | Carry the **last known VALUE** into gap rows on a `(entity, day, value)` series — e.g., last reported temperature into minutes with no reading. See the LEADING CANONICAL forward-fill H3 above. |
+| **Running total (cumulative sum)** | `SUM(x) OVER (PARTITION BY id ORDER BY d ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` | Accumulate a numeric column from the start of the partition through each row — e.g., month-to-date revenue, lifetime signups. See §5 Pattern A / A2 Bucketed running total below. |
+| **Interval-overlap (this H3)** | `calendar c JOIN intervals s ON s.start <= c.day AND (s.end IS NULL OR s.end > c.day) GROUP BY c.day [, dim]` then `COUNT(*)` | Count how many **interval rows** (subscriptions / tickets / sessions / employment) **cover** each calendar day — e.g., active subscribers per day, open tickets per day, concurrent sessions per day. |
+
+If your question reads "what was X **as of** each day d?" think first: is X a VALUE I'm carrying forward (forward-fill), an ACCUMULATION (running total), or a COUNT of intervals covering d (interval-overlap)? The three are not interchangeable.
+
+**Perf note (alternative for very large interval tables — boundary-event cumulative form).** When the intervals table is enormous and the calendar × intervals cross-product is too big, switch to the boundary-event form: emit `+1` at each `start` and `-1` at each `end` as separate rows on the EVENT day, then a running `SUM(delta) OVER (ORDER BY event_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` over the event-day union gives the concurrently-active count without ever materializing a (day × interval) join. This scales linearly in (# intervals) rather than (# days × # intervals). Use it as a perf alternative; the range-join form above is correct and clear for typical SaaS sizes — don't over-engineer.
+
+**Cross-references.** Reuse the bounds-CTE + `sequence()` + `CROSS JOIN UNNEST` spine from the COMBINED CANONICAL composition card above (same dynamic-bounds spine, different downstream operation: instead of LEFT JOIN + forward-fill, do INNER JOIN with interval-overlap predicate). The "WHEN to use INNER vs LEFT" rule comes from § 1a.5 — INNER drops days/plans with zero active intervals; LEFT JOIN + `COALESCE(active_count, 0)` keeps a row for every `(day, plan)` even when zero. The range-join + inequality predicate uses no special Trino syntax — it is a plain INNER JOIN with inequality predicates in the ON clause, fully supported in Trino 467 (the planner recognizes range/inequality joins and applies sort-merge or nested-loop strategies; see the Trino window-functions / select docs for the underlying join grammar).
+
 `date_trunc('day' | 'week' | 'month', col)` is the Trino function you'll use constantly. It rounds a timestamp down to the start of a bucket. **Return type — same as input** (per [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html): `date_trunc(unit, x) -> [same as input]`): `timestamp -> timestamp`, `timestamp(p) with time zone -> timestamp(p) with time zone`, `date -> date`, `time -> time`. It does **NOT** convert to DATE — `date_trunc('day', some_timestamp)` returns a `timestamp` at midnight, not a `date`. If you need the result as a DATE, wrap in `CAST(... AS DATE)` explicitly.
 
 #### `date_trunc('week', ts)` ALWAYS starts the week on MONDAY (ISO-8601) — Trino canonical (iter536 PIN)
