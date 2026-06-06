@@ -611,6 +611,8 @@ LEFT JOIN signups s ON s.day = c.day
 ORDER BY c.day;
 ```
 
+> **`sequence()` — the canonical Trino date-spine / generate-series / row-spine generator (signature pin).** Per [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html): `sequence(start, stop) -> array` (integer or date — step defaults to `+1` if `start <= stop`, else `-1`); `sequence(start, stop, step) -> array` (integer step for ints; `INTERVAL DAY TO SECOND` or `INTERVAL YEAR TO MONTH` step for dates and timestamps). Both bounds are **INCLUSIVE**. There is **NO `generate_series` function in Trino** — `generate_series` is the Postgres name; on Trino you write `sequence(...)` and `UNNEST` it to rows. Keyword anchors: `Trino generate_series`, `Trino date spine`, `Trino generate range of dates`, `Trino row spine`, `Trino generate calendar`, `Trino sequence function signature`, `Trino integer range`, `Trino date range UNNEST`.
+
 `date_trunc('day' | 'week' | 'month', col)` is the Trino function you'll use constantly. It rounds a timestamp down to the start of a bucket. **Return type — same as input** (per [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html): `date_trunc(unit, x) -> [same as input]`): `timestamp -> timestamp`, `timestamp(p) with time zone -> timestamp(p) with time zone`, `date -> date`, `time -> time`. It does **NOT** convert to DATE — `date_trunc('day', some_timestamp)` returns a `timestamp` at midnight, not a `date`. If you need the result as a DATE, wrap in `CAST(... AS DATE)` explicitly.
 
 #### `date_trunc('week', ts)` ALWAYS starts the week on MONDAY (ISO-8601) — Trino canonical (iter536 PIN)
