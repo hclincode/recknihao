@@ -2853,6 +2853,40 @@ Per [docs.getdbt.com/docs/build/unit-tests](https://docs.getdbt.com/docs/build/u
 
 ---
 
+### 6.7H LEADING CANONICAL — dbt documentation (`description:` in schema YAML, `{% docs %}` blocks, `dbt docs generate` + `serve`)
+
+> **Keyword anchors:** dbt docs generate serve, dbt model description, dbt column description, where to write dbt descriptions, dbt doc blocks {% docs %}, dbt documentation site, catalog.json manifest.json, reuse dbt description across models. Verified at [docs.getdbt.com/docs/build/documentation](https://docs.getdbt.com/docs/build/documentation) and [docs.getdbt.com/reference/commands/cmd-docs](https://docs.getdbt.com/reference/commands/cmd-docs).
+
+**Where descriptions live:** in a **schema YAML file** (e.g. `models/_models.yml` or `models/marts/_schema.yml`) — a `description:` key on each model AND on each column under `columns:`. Same `description:` key also works on `sources:`, `seeds:`, `snapshots:`, `macros:`. **Descriptions do NOT go inline in the model `.sql` file** — only in the YAML.
+
+**Long-form / reusable doc blocks:** define `{% docs my_block %} ... markdown ... {% enddocs %}` in any `.md` file under a configured model path, then reference it from the YAML with `description: "{{ doc('my_block') }}"`. Lets you reuse one description across many models/columns and write richer markdown (headers, links, lists) than a YAML one-liner.
+
+**Generate + serve:** `dbt docs generate` builds two artifacts under `target/` — `manifest.json` (full project graph + node metadata) and `catalog.json` (column types and stats, populated by querying the warehouse `information_schema`). Then `dbt docs serve` serves a browsable HTML site locally (default port 8080). On a k8s/on-prem setup you can instead host the generated static files behind nginx.
+
+**Worked example — `models/marts/_schema.yml`:**
+```yaml
+version: 2
+models:
+  - name: fct_orders
+    description: "One row per order. Public contract for downstream BI."
+    columns:
+      - name: order_id
+        description: "Surrogate key. Stable across re-runs via md5(natural_keys)."
+      - name: order_total_cents
+        description: "{{ doc('order_total_cents') }}"   # pulls from a {% docs %} block
+```
+
+**DO-NOT-WRITE — banned patterns:**
+
+| DO NOT write | Why it's wrong |
+|---|---|
+| Put `-- description: ...` comments INLINE in the model `.sql` file expecting them to appear in the docs site | **WRONG LOCATION.** dbt scrapes descriptions ONLY from schema YAML (`description:` keys) and `{% docs %}` blocks. SQL comments are never harvested into `manifest.json` or the docs site. |
+| "`dbt docs generate` runs / materializes the models" | **WRONG.** `dbt docs generate` only compiles metadata into `manifest.json` and queries the warehouse `information_schema` to populate `catalog.json`. It does NOT execute model SQL or materialize tables — that's `dbt run` / `dbt build`. |
+| Confuse `dbt docs` with `dbt source freshness` (§6.7B) or model contracts (§6.7C) | Different mechanisms. Docs = human-readable descriptions + lineage site. Source freshness = staleness check on raw inputs (`target/sources.json`). Contracts = build-time declared-vs-actual schema enforcement on outputs. |
+| `{% docs %}` block placed in a `.sql` file | **WRONG FILE TYPE.** Docs blocks must live in `.md` files under a configured resource path. dbt only scans `.md` files for `{% docs %}` blocks. |
+
+---
+
 ## 7. Cutover checklist (the non-obvious gotchas)
 
 Once your models compile and run, before you turn off Oracle:

@@ -1,152 +1,193 @@
-# Iter 516 Feedback — 2026-06-06 (EXTENDED PHASE)
+# Iter 517 — Judge Feedback (EXTENDED PHASE, federation NOT probed)
 
-## Overall: 4.4063 PASS (+0.9063 above 3.5 floor) — 115th consecutive extended-phase PASS
+## Overall: 4.1719 PASS (+0.6719 margin above 3.5 floor)
 
-**Per-question summary**:
-- Q1 LAST_VALUE default-frame RE-PROBE — **4.9375 STRONG PASS** — iter516 r07 §5 Pattern B3 first_value/last_value canonical CONFIRMED LANDED (28th leading-canonical bulletproofing instance)
-- Q2 dbt var() configurable lookback RE-PROBE — **4.9375 STRONG PASS** — iter516 r27 §6.7G dbt var()/vars:/--vars canonical CONFIRMED LANDED (29th leading-canonical bulletproofing instance)
-- Q3 NULL placement on ORDER BY DESC — **4.5625 STRONG PASS** — technically correct per official Trino docs; minor reconciliation-with-user-symptom weakness
-- Q4 dbt documentation feature — **3.1875 CONTENT-GAP UNDER-ANSWER** — honest punt (no fabrication); iter517 fix target
+Per-question scores: **Q1=4.9375 STRONG PASS**, **Q2=3.6875 PASS (Accuracy DOWN for fabricated-absence)**, **Q3=3.5625 PASS (Accuracy DOWN for fabricated session-config + missing real table-property)**, **Q4=4.5 PASS**.
 
-Overall avg = (4.9375 + 4.9375 + 4.5625 + 3.1875)/4 = 17.625/4 = **4.4063 PASS**. Margin +0.9063 above floor — restored to typical band after iter515's tight +0.547; both iter515 content-gap canonicals landed cleanly on first re-probe; one new content gap (dbt docs) surfaced.
+Avg = (4.9375 + 3.6875 + 3.5625 + 4.5) / 4 = **16.6875 / 4 = 4.1719 PASS**, +0.6719 above 3.5 floor.
 
----
-
-## Q1 — LAST_VALUE default-frame RE-PROBE — 4.9375 STRONG PASS
-
-**Dimensions**: Accuracy 5.0, Clarity 5.0, Applicability 5.0, Completeness 4.75
-
-**What was correct (verified against [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html))**:
-- Identifies the default frame as `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` — matches Trino docs verbatim ("When no frame is specified, the default frame is RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW")
-- Correctly explains that frame ends at current row's PEER GROUP, so `last_value(event_type) OVER (PARTITION BY session_id ORDER BY event_time)` returns the current row's value (when ORDER BY is unique-per-row) NOT the partition's true last value
-- Prescribes the canonical fix: `last_value(event_type) OVER (PARTITION BY session_id ORDER BY event_time ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)`
-- Surfaces the LOAD-BEARING nuance that `nth_value(x, n)` has the same default-frame footgun (silently NULL for n > 1 when default frame ends before nth row)
-- Cites r07 Pattern B3 as source (where iter516 teacher just landed the canonical)
-- Mentions ROW_NUMBER()=1 subquery as cleaner alternative when projecting multiple columns from the last row
-
-**ITER515 CONTENT GAP A CONFIRMED FILLED**: iter515 Q3 punt ("resources don't document FIRST_VALUE/LAST_VALUE specifically") is GONE. The iter516 teacher's r07 §5 Pattern B3 canonical (first_value-safe-with-default / last_value-needs-explicit-ROWS / nth_value-silently-NULL three-function comparison + worked first/last-event-per-session example + DO-NOT-WRITE bans) LANDED on first re-probe. **28th consecutive leading-canonical bulletproofing landing instance.**
-
-**Deductions**: -0.25 Completeness for no explicit callout of the PEER-GROUP edge case (when ORDER BY has ties, `last_value` returns the last value in the current row's peer group, not strictly the current row's value) — non-load-bearing; the unique-ORDER-BY case is the common one.
+**HEADLINE OUTCOMES**:
+- **Q1: Iter517 r27 §6.7H dbt-documentation canonical LANDED on first re-probe — 30th consecutive leading-canonical bulletproofing instance.** Iter516 Q4 content-gap punt ("resources don't include a guide to dbt's documentation feature") is GONE.
+- **Q2: NEW FABRICATED ABSENCE — responder claims "Trino has no single CONTAINS function for arrays", but Trino 467 HAS `contains(array(T), T) -> boolean` per official docs.** The UNNEST+EXISTS form responder gave works, so partial credit on Accuracy — but the clean canonical `WHERE contains(event_tags, 'upload')` was wrongly said to not exist. Same fabricated-absence failure-class as iter505 "Trino has no split_to_map".
+- **Q3: NEW FABRICATED CONFIG NAME — responder cites `spark.sql.iceberg.write.target-file-size-bytes` as a "Spark side... table property or write configuration". This config name does NOT EXIST.** The real table property is `write.target-file-size-bytes` (no `spark.sql.iceberg.` prefix) set via `ALTER TABLE ... SET TBLPROPERTIES('write.target-file-size-bytes'='268435456')` or as a DataFrameWriter option `target-file-size-bytes`. The Trino `EXECUTE optimize(file_size_threshold => '256MB')` form and Spark `rewrite_data_files` form are correct — credit those.
+- **Q4: Clean PASS** — Trino doesn't auto-coerce numeric → varchar for `||`/CONCAT; CAST AS VARCHAR + `format('%s-%d', ...)` both valid Trino 467.
 
 ---
 
-## Q2 — dbt var() configurable lookback RE-PROBE — 4.9375 STRONG PASS
+## Per-question breakdown
 
-**Dimensions**: Accuracy 5.0, Clarity 5.0, Applicability 5.0, Completeness 4.75
+### Q1 — dbt docs (RE-PROBE, content-gap fill from iter516)
+**Score: 4.9375 STRONG PASS** (Accuracy 5.0, Clarity 5.0, Applicability 5.0, Completeness 4.75)
 
-**What was correct (verified against [docs.getdbt.com/reference/dbt-jinja-functions/var](https://docs.getdbt.com/reference/dbt-jinja-functions/var) + [docs.getdbt.com/docs/build/project-variables](https://docs.getdbt.com/docs/build/project-variables))**:
-- THREE-PIECE PATTERN delivered cleanly:
-  1. Model SQL: `{{ var('lookback_days', 30) }}` with default arg
-  2. `dbt_project.yml` top-level `vars:` block with defaults
-  3. CLI override: `dbt run --vars '{lookback_days: 7}'` (plural `--vars`, YAML dict)
-- Precedence rule correct: CLI `--vars` > `dbt_project.yml` `vars:` > inline default in `var()` call
-- Explicit guidance that `{% set %}` is the WRONG mechanism for tunable knobs (use it for compile-time constants only)
-- Cites r27 §6.7G as source (where iter516 teacher just landed the canonical)
-- Multi-var CLI form mentioned: `dbt run --vars '{lookback_days: 7, region: us}'`
+**ITER516 Q4 CONTENT GAP FILLED — iter517 r27 §6.7H canonical LANDED on first re-probe** (30th consecutive leading-canonical bulletproofing landing instance). All 4 mechanisms specified in the gap-fill directive are present in the answer:
 
-**ITER515 CONTENT GAP B CONFIRMED FILLED**: iter515 Q4 partial punt (gave `{% set lookback_days = 30 %}` Jinja compile-time-literal workaround instead of `var()`, hedged "for CLI-time look for `dbt run --vars`") is GONE. The iter516 teacher's r27 §6.7G canonical (three-piece pattern + var-vs-set contrast table + DO-NOT-WRITE bans on `{% set %}` for tunables, `--var` singular, `--vars key=value` non-YAML, nested-under-models scope, no-default-no-env runtime error) LANDED on first re-probe. **29th consecutive leading-canonical bulletproofing landing instance.**
+(1) WHERE descriptions live — schema YAML (`models/_models.yml`) with `description:` key on model + columns, **explicitly NOT in `.sql` files**. CORRECT — verified at docs.getdbt.com/docs/build/documentation verbatim ("Descriptions for models and columns live in schema YAML files (typically models/<filename>.yml), not in .sql files").
 
-**Deductions**: -0.25 Completeness for no explicit mention of var-scoping (top-level `vars:` is global; package-scoped vars use a nested key under the package name) — non-load-bearing for the question asked.
+(2) Long-form / reusable doc blocks — `{% docs my_block %} ... markdown ... {% enddocs %}` in `.md` files, referenced from YAML via `description: "{{ doc('my_block') }}"`. CORRECT — verified verbatim ("Docs blocks are declared in Markdown files using Jinja syntax and referenced via the doc() function").
+
+(3) Generate + serve — `dbt docs generate` builds `manifest.json` + `catalog.json` (catalog.json populated by querying warehouse `information_schema`); `dbt docs serve` runs local HTML site on default port 8080. CORRECT — verified at docs.getdbt.com/reference/commands/cmd-docs + dbt-labs/dbt-core#955 ("dbt docs serve starts a webserver on port 8080 to serve your documentation locally").
+
+(4) On-prem k8s framing — host generated static files behind nginx. CORRECT, fits prod_info.md (on-prem k8s, no public cloud).
+
+Citation `r27 §6.7H` matches what teacher wrote per iter517 state.json notes. -0.25 Completeness for no explicit `--port` flag override mention (default 8080 stated correctly; `--port 8081` override pattern not surfaced), non-load-bearing.
+
+### Q2 — array `contains` + count distinct tags
+**Score: 3.6875 PASS** (Accuracy 2.75, Clarity 4.5, Applicability 3.5, Completeness 4.0)
+
+**NEW FABRICATED ABSENCE — Accuracy DOWN**. Responder claims:
+
+> "Trino has no single CONTAINS function for arrays. The canonical pattern is to unnest and filter."
+
+This is FACTUALLY WRONG per trino.io/docs/current/functions/array.html (Trino 467) verified verbatim:
+
+> **contains(x, element) → boolean** — "Returns true if the array `x` contains the `element`."
+
+The canonical clean idiom for "find rows where event_tags contains 'upload'" is:
+```sql
+WHERE contains(event_tags, 'upload')
+```
+**NOT** the responder's `WHERE EXISTS (SELECT 1 FROM UNNEST(event_tags) AS t(tag) WHERE tag='upload')` (which works but is 4x more code and obscures intent).
+
+**Partial credit** because the UNNEST+EXISTS / CROSS JOIN UNNEST forms the responder gave DO produce correct results — engineer ships a working query, just not the idiomatic one. This is **not a query-breaks-in-prod fail** (unlike iter513 Q4 dbt comma-vs-space inversion which shipped a 0-model run). But it's the **same fabricated-absence failure-class as iter505 "Trino has no split_to_map"** — confident assertion that a function doesn't exist when it does.
+
+**Also missing for the count-distinct-tags half**: responder says `COUNT(DISTINCT tag) FROM ... CROSS JOIN UNNEST(event_tags)` which works, but didn't surface two relevant Trino array helpers that simplify the surrounding workflow:
+- **`cardinality(array)` → bigint** — array length (per-row tag count without UNNEST)
+- **`array_distinct(array)` → array** — dedup within a single row's array (useful before unnesting if input has dup tags per row)
+
+Both verified at trino.io/docs/current/functions/array.html.
+
+`approx_distinct` recommendation for large arrays is correct. Clause-order rule (WHERE before HAVING) correct.
+
+-2.25 Accuracy (fabricated absence of `contains()` is the load-bearing miss), -0.5 Clarity (long UNNEST template harder to read than `contains()` one-liner), -1.5 Applicability (engineer ships UNNEST+EXISTS where a single function call works), -1.0 Completeness (no `cardinality` + no `array_distinct` surfaced).
+
+### Q3 — Iceberg small-files: tune table to encourage larger files vs more compaction
+**Score: 3.5625 PASS** (Accuracy 2.75, Clarity 4.0, Applicability 4.0, Completeness 3.5)
+
+**NEW FABRICATED CONFIG NAME — Accuracy DOWN**. Responder claims:
+
+> "Spark side: `spark.sql.iceberg.write.target-file-size-bytes=268435456` (256MB) or higher" as a "table property or write configuration"
+
+This config name **does not exist**. Verified against iceberg.apache.org/docs/latest/configuration/ + iceberg.apache.org/docs/latest/spark-writes/ + iceberg.apache.org/docs/nightly/spark-configuration/ via WebSearch:
+
+The real **table property** name is **`write.target-file-size-bytes`** (NO `spark.sql.iceberg.` prefix) with default `536870912` (512 MB). Three correct ways to set it:
+
+1. **Table property (recommended, persists)**:
+   ```sql
+   ALTER TABLE events SET TBLPROPERTIES ('write.target-file-size-bytes'='268435456');
+   ```
+2. **DataFrameWriter option (per-write override)**:
+   ```python
+   df.write.option('target-file-size-bytes', '268435456').format('iceberg').save(...)
+   ```
+3. **Trino Iceberg connector catalog property** `iceberg.target-max-file-size` (default `1GB`) — verified at trino.io/docs/current/connector/iceberg.html. (No corresponding Trino session property — confirmed by Trino docs verbatim: "There is no corresponding session property for this setting".)
+
+The form `spark.sql.iceberg.write.target-file-size-bytes` is **fabricated** — that namespace doesn't exist in Iceberg's Spark integration. Iceberg's Spark-session configs use `spark.sql.catalog.<name>.*` for catalog wiring, NOT `spark.sql.iceberg.write.*` for write tuning.
+
+**What's CORRECT (credit)**:
+- Two-pronged framing (set target file size to prevent future small files AND compact existing ones) is sound advice.
+- Trino `ALTER TABLE ... EXECUTE optimize(file_size_threshold => '256MB')` — VERIFIED at trino.io/docs/current/connector/iceberg.html: `file_size_threshold` defaults to `100MB`, files smaller than threshold are candidates for consolidation. Responder's "below which files are rewritten" gloss is accurate.
+- Spark `CALL iceberg.system.rewrite_data_files(table=>'...', options=>map('target-file-size-bytes','268435456'))` — VERIFIED at iceberg.apache.org/docs/latest/spark-procedures/. The `target-file-size-bytes` option (no prefix) is the correct argument name for `rewrite_data_files`.
+- Nightly compaction + weekly `expire_snapshots`/`remove_orphan_files` cadence is sound.
+
+Net: 50% of Q3 is correct (Trino EXECUTE optimize + Spark rewrite_data_files) and 50% is fabricated (the `spark.sql.iceberg.write.target-file-size-bytes` session config). Engineer copy-pasting that config name into Spark conf will silently no-op (Spark ignores unknown `spark.sql.iceberg.*` keys); they'll think they've tuned the writer but tiny files will keep accumulating until they discover the typo by reading Iceberg docs.
+
+-2.25 Accuracy (fabricated config name is load-bearing — engineer's "fix" doesn't fix anything), -1.0 Clarity (mixed real + fab muddles the canonical), -1.0 Applicability (one of two recommended setters is a no-op), -1.5 Completeness (no mention of the real table-property `write.target-file-size-bytes` + no Trino catalog property `iceberg.target-max-file-size`).
+
+### Q4 — concat with numeric column (`order_id || '-' || status` Oracle → Trino)
+**Score: 4.5 PASS** (Accuracy 4.75, Clarity 4.5, Applicability 4.5, Completeness 4.25)
+
+CORRECT. Verified against trino.io/docs/current/functions/string.html: `concat()` signature is `concat(string1, ..., stringN) → varchar` — argument names are all `string*`, no numeric overload. `||` operator provides same functionality as `concat()`. Trino is strictly typed; numeric arguments to `||`/`concat()` produce the well-known Oracle migration error `Unexpected parameters (varchar, integer) for function concat`.
+
+Both fixes responder gives are valid Trino 467:
+- `order_id || '-' || CAST(status AS VARCHAR)` — explicit cast, idiomatic.
+- `format('%s-%d', order_id, status_code)` — `format(format, args...)` per Trino docs, `%s` for string, `%d` for integer; produces `varchar`.
+
+Cites `§4.3 + §7A.3.1` — matches r27 Oracle-migration canonicals.
+
+-0.25 Accuracy / -0.5 Clarity / -0.5 Applicability / -0.75 Completeness for: no mention of `CAST(status AS VARCHAR)` working for any numeric type (DECIMAL, BIGINT, INTEGER all coerce cleanly), no callout that `||` operator chains left-to-right and you can also write `CONCAT(order_id, '-', CAST(status AS VARCHAR))` if preferred, no explicit pre-emption of the common follow-up "what about NULL?" (Trino `||` propagates NULL — `'abc' || NULL → NULL`; `concat` same; `format` will print 'null' literal for NULL args, which is its own gotcha). All non-load-bearing, but a tighter answer would surface the NULL-propagation question.
 
 ---
 
-## Q3 — ORDER BY DESC NULL placement — 4.5625 STRONG PASS
+## Cross-cutting patterns
 
-**Dimensions**: Accuracy 4.75, Clarity 4.75, Applicability 4.75, Completeness 4.0
+1. **30th consecutive leading-canonical bulletproofing landing** — iter517 r27 §6.7H dbt-documentation canonical landed on first re-probe. Iter516 Q4 content-gap punt GONE. This is now a robust pattern: teacher fills gap → responder lands clean canonical on next iter's re-probe. 30/30 hit rate is exceptional.
 
-**WebSearch verification — IMPORTANT CORRECTION OF JUDGE BRIEF**: I verified the Trino default NULL ordering against [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) three independent times. The official documentation states verbatim: **"The default null ordering is `NULLS LAST`, regardless of the ordering direction."** The judge brief's claim ("Trino treats NULL as LARGER than all non-null values, so DESC -> NULLS FIRST by default") is **INCORRECT per official Trino docs**. The responder's claim ("Trino's default is NULLS LAST for DESC — NULLs appear at the bottom") is **TECHNICALLY CORRECT**.
+2. **Two NEW fabricated-absence/fabricated-config errors emerged this iter (Q2 + Q3)** — both load-bearing for the actionability dimension:
+   - Q2: claimed `contains()` doesn't exist when it does (clean canonical wrongly hidden)
+   - Q3: cited `spark.sql.iceberg.write.target-file-size-bytes` Spark session config when only `write.target-file-size-bytes` table property exists (fabricated config name)
+   
+   Both follow the same failure-class — confident assertion about absence/existence of a knob/function. Iter505 `split_to_map` and now Q2 `contains()` are the fabricated-absence twins; iter504 `WIDESCAN` plan annotation and now Q3 `spark.sql.iceberg.write.*` are the fabricated-knob twins.
 
-**What was correct**:
-- Trino default NULL ordering claim verified verbatim against trino.io docs: NULLS LAST for both ASC and DESC, regardless of direction
-- Oracle comparison verified against multiple Oracle SQL references: Oracle DESC default IS `NULLS FIRST` (NULLs at top), Oracle ASC default IS `NULLS LAST`. The responder's framing of this as "a critical difference from Oracle" IS CORRECT — Trino (always NULLS LAST) and Oracle (DESC=NULLS FIRST) genuinely diverge on DESC default
-- Fix syntax correct: `ORDER BY last_active_at DESC NULLS LAST` (bottom — though redundant per Trino default it documents intent) / `DESC NULLS FIRST` (top)
-- Explicit recommendation to ALWAYS write `NULLS LAST` / `NULLS FIRST` in production-critical queries (documents intent, survives engine swap) is sound engineering practice
+3. **Margin tighter than recent norm (+0.6719 vs typical +0.9 to +1.0)** — two simultaneous Accuracy-DOWN errors. Q1+Q4 = 9.4375/10 absorb Q2+Q3 = 7.25/10 to iter-wide PASS. **116th consecutive overall PASS in extended phase**.
 
-**Deductions**:
-- -0.25 Accuracy: the symptom reconciliation is incomplete. User reports NULLs at TOP under bare `ORDER BY last_active_at DESC` on Trino. Given Trino default is NULLS LAST, the bare ORDER BY cannot be producing the observed symptom. The responder hand-waves to "you may have migrated Oracle code that relied on Oracle's DESC NULLS FIRST default" but doesn't make the most likely concrete diagnosis explicit: **the SQL almost certainly contains an explicit `NULLS FIRST` (likely ported verbatim from Oracle where it was redundant but harmless)** — the engineer should grep the SQL/view definitions for `NULLS FIRST` and remove it
-- -0.25 Clarity: the migrated-Oracle-code speculation is plausible but not laid out as a concrete debugging step
-- -0.25 Applicability: no explicit "grep your SQL/view chain for `NULLS FIRST`" actionable next step
-- -1.0 Completeness: misses the alternative possibilities (a downstream view forces NULLS FIRST; a tool/UI sorts client-side; the data has a sentinel value like '9999-12-31' that's not actually NULL but parsed as one)
-
-**Net**: technically airtight on the Trino + Oracle defaults; soft on closing the loop with the user's observed symptom. STRONG PASS at 4.5625.
+4. **Federation NOT probed** — r22 §13.x guardrails untouched, federation rubric row stays **4.49944/310** per the iter472-517 directive.
 
 ---
 
-## Q4 — dbt documentation feature — 3.1875 CONTENT-GAP UNDER-ANSWER (HONEST PUNT)
+## Concrete next-teacher actions for iter518
 
-**Dimensions**: Accuracy 4.0, Clarity 3.5, Applicability 2.5, Completeness 2.75
+**PRIMARY FIX A — Trino array `contains()` canonical, reconcile-in-place at r07 / r23 array-function block (NEW or extend existing UNNEST canonical)**:
+- ONE-LINE RULE: "For 'does this array contain element X?' use `contains(array, X)` — it's a first-class Trino function, NOT a missing feature requiring UNNEST."
+- Signature table:
+  - `contains(x, element) → boolean` — true if array x contains element (per-row, no UNNEST)
+  - `cardinality(x) → bigint` — array length (per-row, no UNNEST)
+  - `array_distinct(x) → array` — dedup values within a single row's array
+  - `array_intersect(x, y) → array` — common elements (per-row set intersection)
+- WHEN-TO-USE-WHICH:
+  - "Row contains tag X" → `WHERE contains(event_tags, 'upload')` (single function, fast)
+  - "Count distinct tags across all rows" → `SELECT count(DISTINCT tag) FROM events CROSS JOIN UNNEST(event_tags) AS t(tag)` (UNNEST required because aggregating across rows)
+  - "Per-row count of distinct tags" → `SELECT cardinality(array_distinct(event_tags)) FROM events` (no UNNEST)
+- DO-NOT-WRITE bans (4):
+  - "Trino has no single CONTAINS function for arrays" (FALSE — `contains()` exists)
+  - "You must UNNEST to check if an array contains a value" (FALSE — UNNEST is for cross-row aggregation, NOT per-row membership)
+  - "`contains()` only works for strings" (FALSE — works for any element type matching array element type)
+  - "Use `IN UNNEST(array)` for membership" (Trino doesn't support this Oracle-style syntax — use `contains()`)
+- Verified sources: trino.io/docs/current/functions/array.html (quote: `contains(x, element) → boolean` "Returns true if the array x contains the element.").
+- Keyword anchors: "Trino array contains / does array contain element / Trino array membership / Trino contains function array / event_tags contains tag / Trino IN array / array element check / cardinality array length Trino / array_distinct dedup".
 
-**What was correct**:
-- Honest punt: "I don't have enough information... resources don't include a guide to dbt's documentation feature (dbt docs generate, schema YAML, descriptions)"
-- Did NOT fabricate any commands, file paths, or YAML structure
-- Pointed engineer to authoritative external source: [docs.getdbt.com/docs/build/documentation](https://docs.getdbt.com/docs/build/documentation)
-- Mentions the relevant keywords (dbt docs generate, schema YAML, descriptions) so the engineer can self-serve
-
-**What was missing (verified at [docs.getdbt.com/docs/build/documentation](https://docs.getdbt.com/docs/build/documentation))**:
-- dbt HAS a first-class docs feature; descriptions go in YAML schema files (typically `models/schema.yml` or `_models.yml`) via a `description:` key on `models:` / `columns:` / `sources:` / `seeds:` / `snapshots:` entries
-- Workflow: `dbt docs generate` (builds catalog.json + manifest.json) then `dbt docs serve` (launches browsable site at localhost:8080) — these are the canonical two commands
-- Long-form descriptions use **docs blocks**: `{% docs my_block %}...{% enddocs %}` in a `.md` file under `models/`, then reference as `description: '{{ doc("my_block") }}'` in schema YAML
-- Markdown supported in description values (multi-line via YAML `|` or `>`)
-- The generated site shows DAG, column-level lineage (in newer dbt versions), data types introspected from warehouse, descriptions, tests
-- For the production on-prem stack (Trino+Iceberg+k8s), the docs site can be served via `dbt docs serve --port N` or the static files (`target/index.html` + `manifest.json` + `catalog.json`) can be packed into a container image and served by any static-file server inside the k8s cluster — no SaaS/cloud dependency
-
-**Deductions**: -1.0 Accuracy (no fab penalty for honest punt; lost for not knowing the feature exists in resources), -1.5 Clarity (punt doesn't show schema YAML structure or commands), -2.5 Applicability (engineer left without one concrete file to edit + one command to run), -2.25 Completeness (no description: key + no dbt docs generate/serve + no doc blocks + no schema.yml file location).
-
-**No fabrication penalty** — this is correct safety posture for a content gap. iter517 fix target (see below).
+**PRIMARY FIX B — Iceberg target-file-size canonical, reconcile-in-place at r17 small-files / r03 Iceberg writer-tuning section**:
+- ONE-LINE RULE: "Iceberg target file size is set via the table property `write.target-file-size-bytes` (default 512MB) — NOT via any `spark.sql.iceberg.*` Spark session config (that namespace does not exist for write tuning)."
+- THREE valid setters (with explicit "NOT" fourth):
+  - **(1) Iceberg table property (recommended, persists on table)**:
+    ```sql
+    ALTER TABLE events SET TBLPROPERTIES ('write.target-file-size-bytes'='268435456');
+    ```
+  - **(2) DataFrameWriter option (per-write override)**:
+    ```python
+    df.write.option('target-file-size-bytes', '268435456').format('iceberg')...
+    ```
+  - **(3) Trino Iceberg connector catalog property (catalog-wide default)**: `iceberg.target-max-file-size` in catalog config (default 1GB; no session-property override).
+  - **(NOT)** `spark.sql.iceberg.write.target-file-size-bytes` — **this Spark session-config name does not exist**; Spark silently ignores unknown `spark.sql.iceberg.*` keys.
+- Compaction (existing canonical, CONFIRM correct in responder's iter517 answer):
+  - Trino: `ALTER TABLE events EXECUTE optimize(file_size_threshold => '256MB')` — `file_size_threshold` default 100MB; files BELOW threshold rewritten.
+  - Spark: `CALL iceberg.system.rewrite_data_files(table=>'db.events', options=>map('target-file-size-bytes','268435456'))` — option name `target-file-size-bytes` (no prefix).
+- DO-NOT-WRITE bans (4):
+  - "`spark.sql.iceberg.write.target-file-size-bytes` is a Spark session config" (FALSE — fabricated, doesn't exist)
+  - "Setting `write.target-file-size-bytes` in spark.conf works without table property" (FALSE — that path requires DataFrameWriter `.option()`, not spark.conf.set())
+  - "Compaction alone fixes small-files without tuning future writes" (PARTIAL — compaction backfills, but if write-side never tuned, tiny files re-accumulate; need BOTH)
+  - "Trino has a session property to override Iceberg target file size per query" (FALSE — verified at trino.io/docs/current/connector/iceberg.html: "There is no corresponding session property for this setting")
+- Verified sources: iceberg.apache.org/docs/latest/configuration/ + iceberg.apache.org/docs/latest/spark-writes/ + iceberg.apache.org/docs/nightly/spark-configuration/ + trino.io/docs/current/connector/iceberg.html.
+- Keyword anchors: "Iceberg target file size / Iceberg small files tuning / write.target-file-size-bytes / Iceberg writer config / target file size Spark Iceberg / Iceberg ALTER TABLE TBLPROPERTIES / Trino iceberg.target-max-file-size / Iceberg compaction file_size_threshold / rewrite_data_files target size".
 
 ---
 
-## Iter516 PRIMARY DELIVERABLES
+## Iter518 judge probe targets
 
-**BOTH ITER515 CONTENT GAPS CONFIRMED FILLED ON FIRST RE-PROBE**:
+- **(HIGH) Array `contains()` RE-PROBE** — "rows where event_tags array contains 'upload' — clean Trino way?" verifies FIX A canonical lands with `contains(event_tags, 'upload')` not UNNEST.
+- **(HIGH) Iceberg target-file-size RE-PROBE** — "how do I set Iceberg writer to target 256MB files? table property or Spark conf?" verifies FIX B `write.target-file-size-bytes` table property lands and the fabricated `spark.sql.iceberg.write.*` config name does NOT reappear.
+- **(HIGH) Array `cardinality` / `array_distinct` 2nd angle** — "per-row count of distinct tags in event_tags array — UNNEST or built-in?" verifies FIX A surfaces `cardinality(array_distinct(event_tags))` (no UNNEST) vs cross-row `count(DISTINCT tag)` with UNNEST.
+- **(HIGH) Iceberg target-file-size 2nd angle (Trino-side)** — "is there a Trino session property for Iceberg target file size?" verifies FIX B answer is NO + catalog property `iceberg.target-max-file-size` is the catalog-wide knob.
+- **(MEDIUM) dbt docs 2nd angle (re-probe iter517 §6.7H canonical from a different angle)** — "where do I write long markdown descriptions for dbt? can I share one across columns?" verifies `{% docs %}` block + `doc()` reference frame lands.
+- **(MEDIUM) dbt docs `--port` override** — "can I run dbt docs serve on a different port than 8080?" verifies `--port 8081` flag surfaces (current canonical states default 8080 but doesn't surface override).
+- **(MEDIUM) `format()` NULL gotcha 3rd angle** — "format('%s-%d', order_id, NULL) — what does this print?" verifies NULL→'null' literal-print gotcha gets surfaced.
+- **(LOW) UNNEST WITH ORDINALITY 3rd angle** — "tag with its position in the array?" verifies UNNEST canonical extends to ordinality.
+- **(LOW) `expire_snapshots` retention 3rd angle** — "weekly expire_snapshots after compaction — what retention period?" verifies maintenance-cadence canonical extends past iter517's "weekly" gloss.
+- **federation stays UNPROBED** — row stays 4.49944/310.
 
-1. **GAP A FILLED — r07 §5 Pattern B3 first_value/last_value/nth_value canonical**: Q1 (last_value default-frame) re-probe scored 4.9375 STRONG PASS with all load-bearing elements present (default-frame rule, peer-group caveat, explicit ROWS UNBOUNDED PRECEDING/FOLLOWING fix, nth_value sister-gotcha, ROW_NUMBER alternative for multi-column projection). iter516 r07 §5 Pattern B3 canonical landed cleanly. **28th consecutive leading-canonical bulletproofing landing instance.**
+---
 
-2. **GAP B FILLED — r27 §6.7G dbt var()/vars:/--vars three-piece canonical**: Q2 (dbt var configurable lookback) re-probe scored 4.9375 STRONG PASS with all load-bearing elements present (var() with default arg, vars: block at top level of dbt_project.yml, --vars plural YAML dict CLI override, precedence CLI > project > default, var-vs-set guidance). iter516 r27 §6.7G canonical landed cleanly. **29th consecutive leading-canonical bulletproofing landing instance.**
+## State changes
 
-## Iter516 NEW CONTENT GAP (iter517 PRIMARY FIX TARGET)
-
-**GAP — dbt documentation feature canonical**: Q4 punted honestly because no resource covers dbt docs. iter517 teacher should add a dbt-docs canonical (likely r25 or r27 dbt-config cluster, possibly new §6.7H sitting after §6.7G):
-
-- **Where to write descriptions**: schema YAML files (`models/_models.yml` or per-folder `schema.yml`) using the `description:` key on `models:` / `columns:` / `sources:` / `seeds:` / `snapshots:` entries
-- **Long-form**: doc blocks in `.md` files under `models/` — `{% docs block_name %}...{% enddocs %}` referenced as `description: "{{ doc('block_name') }}"`
-- **Generate site**: `dbt docs generate` (produces `target/catalog.json` + `target/manifest.json` + static site assets) then `dbt docs serve` (defaults to port 8080)
-- **On-prem k8s framing**: docs site is static HTML/JSON — pack `target/` into a container image, serve via nginx/Caddy as a k8s Deployment + Service; no SaaS/cloud dependency (fits production environment per prod_info.md)
-- **Worked example**: minimal `_models.yml` with model + column descriptions + tests; corresponding `_models.md` with one doc block
-- **Verified sources**: docs.getdbt.com/docs/build/documentation + docs.getdbt.com/reference/commands/cmd-docs
-- **DO-NOT-WRITE bans** to add: "descriptions go in the model .sql file as comments" (wrong location); "dbt docs generate serves the site" (wrong — it builds; serve serves); "doc() references must be inside .sql files" (wrong — they go in YAML description values); "dbt docs requires dbt Cloud" (wrong — Core can generate + serve locally)
-- **Keyword anchors**: "dbt docs site / dbt model description / dbt column description / dbt docs generate / dbt docs serve / dbt schema yml description / dbt doc blocks / dbt browsable documentation / dbt catalog / dbt manifest"
-
-## Iter517 PROBE TARGETS
-
-- **dbt docs RE-PROBE (HIGH)** — "how do I add a description to my dbt model + column and view it as a website?" — verifies new dbt-docs canonical lands with schema YAML + `dbt docs generate` + `dbt docs serve`
-- **dbt docs 2nd angle (HIGH)** — "where do I write long descriptions with markdown for dbt? can I share a single description across multiple columns?" — verifies doc-blocks (`{% docs %}` + `{{ doc() }}`) framing lands
-- **last_value/first_value 3rd angle (MEDIUM)** — "I want the FIRST 3 events per session ordered by time — first_value, nth_value, or ROW_NUMBER()<=3?" — verifies r07 §5 Pattern B3 when-to-use-which table extends to top-N case
-- **nth_value 3rd angle (MEDIUM)** — "nth_value(event_type, 2) returns NULL for every row — why?" — verifies r07 §5 Pattern B3 nth_value-silently-NULL gotcha lands as standalone
-- **dbt var() vs set 2nd angle (MEDIUM)** — "when should I use `{% set %}` vs `{{ var() }}` in dbt?" — verifies r27 §6.7G var-vs-set contrast table extends to direct-comparison probe
-- **dbt var() no-default error (MEDIUM)** — "what happens if I write `{{ var('lookback_days') }}` without a default and forget to define lookback_days?" — verifies r27 §6.7G DO-NOT-WRITE "no default + no env-definition = runtime error" ban lands
-- **NULLS-ordering 3rd angle (LOW)** — "is `ORDER BY x ASC NULLS LAST` redundant in Trino?" — verifies Trino default-NULLS-LAST framing holds under direct probe
-- **Federation stays UNPROBED (LOW)** — row stays 4.49944/310 per directive (do NOT touch §13.x federation guardrails in resources/22 or the federation rubric row)
-
-## Topic average updates
-
-**Analytical query patterns on Iceberg+Trino** (r07 §5 Pattern B3 first_value/last_value canonical — Q1 maps here): 4.4018/19 → (4.4018·19 + 4.9375)/20 = 88.5717/20 = **4.4286/20** (+0.0268 — Q1 STRONG lifts)
-
-**Oracle PL/SQL → dbt + Trino SQL migration** (Q2 dbt var() at r27 §6.7G + Q4 dbt docs both map here per dbt-CLI/dbt-config cluster precedent): 4.5087/84 → (4.5087·84 + 4.9375 + 3.1875)/86 = 386.855/86 = **4.4983/86** (-0.0104 — Q4 sub-threshold drags but Q2 STRONG lifts; topic still PASSED)
-
-**SQL query best practices for OLAP** (Q3 NULLS-ordering ORDER BY hygiene maps here): 4.5393/74 → (4.5393·74 + 4.5625)/75 = 340.4707/75 = **4.5396/75** (+0.0003 — Q3 STRONG roughly at topic avg)
-
-**Federation row UNCHANGED**: 4.49944/310 per iter472-516 directive + iter516 task constraint (do NOT touch §13.x federation guardrails in resources/22).
-
-## Pattern observations
-
-- **NO FABRICATIONS this iter** across all 4 answers — Q4 was an honest content-gap punt (correct safety posture). 115th consecutive overall PASS in extended phase. Margin +0.9063 — restored to healthy band after iter515's tight +0.547.
-- **iter516 teacher batch-fix continues to land cleanly**: 28th + 29th consecutive leading-canonical bulletproofing landing instances. Pattern (since iter489) of teacher canonicals landing on first re-probe holds.
-- **Q3 (NULLS-ordering)**: judge brief contained a factual error about Trino's NULL default; verified against [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) three times that Trino default is `NULLS LAST` regardless of direction. Responder's claim is correct; brief's claim ("DESC -> NULLS FIRST by default in Trino") is wrong. The Oracle side of the responder's framing ("different from Oracle DESC NULLS FIRST default") is also CORRECT — Oracle and Trino genuinely differ on DESC default. The only weakness in Q3 is the soft reconciliation with the user's observed symptom (didn't say "grep your SQL for explicit `NULLS FIRST`").
-
-**Sources verified**:
-- [Trino window functions](https://trino.io/docs/current/functions/window.html) — Q1 default frame and last_value/first_value/nth_value behavior
-- [Trino SELECT / ORDER BY](https://trino.io/docs/current/sql/select.html) — Q3 default NULLS LAST regardless of direction
-- [dbt var() function](https://docs.getdbt.com/reference/dbt-jinja-functions/var) — Q2 signature, default arg, --vars CLI
-- [dbt project variables](https://docs.getdbt.com/docs/build/project-variables) — Q2 vars: block in dbt_project.yml
-- [dbt documentation](https://docs.getdbt.com/docs/build/documentation) — Q4 schema YAML descriptions, doc blocks, dbt docs generate/serve
+- **DO NOT bump** `training/state.json` — teacher set it to 517; left at 517.
+- **DO NOT touch** §13.x federation guardrails in resources/22 or the federation rubric row (stays 4.49944/310).
+- Iter517 score line appended to `training/rubric.md` score history (Iter 517 entry above the existing Iter 516 entry).
