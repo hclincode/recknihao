@@ -1,131 +1,194 @@
-# Iter 553 Judge Feedback — 2026-06-06 (EXTENDED PHASE)
+# Iter 554 Judge Feedback — 2026-06-06 (EXTENDED PHASE)
 
 ## HEADLINE
 
-**Q1 now() / current_timestamp + Iceberg timestamptz fab-absence is FINALLY CLOSED.** Two-iteration regression (iter551 Q4 + iter552 Q1 — IDENTICAL fab on both) ended by iter553's r07 layer-3 placement fix. The responder cited r07 lines 706-724 directly — the NEW LEADING CANONICAL the teacher inserted this iteration — and produced the correct affirmation on both load-bearing facts. The 3-layer findability model (zone + structural form + RESOURCE routing) is now validated.
+**Q1 env_var DECLINED DESPITE the canonical being added THIS iteration — the fix didn't land.** The teacher inserted §6.7G2 LEADING CANONICAL "dbt env_var('VAR'[, 'default']) — read SHELL environment variables (the secrets-safe pattern)" at r27 line 3160 with full keyword anchors (dbt env_var, environment variable dbt, read shell env var dbt, dbt secrets, profiles.yml password env, DBT_ENV_SECRET, hide password dbt, scrub secret from dbt logs). Grep confirms the block is present, well-formed, and adjacent to §6.7G var() — yet the responder STILL declined, saying "resources do NOT contain dbt-specific documentation on environment variable handling, secrets management, or profiles.yml configuration." This is a **layer-3 routing failure** identical in shape to the now()/timestamptz saga of iter551-553: the content is technically correct and findable by grep, but it lives in a file titled "Oracle PL/SQL Procedure → dbt + Trino SQL Migration." A SaaS engineer asking "how do I read a shell env var into dbt without hardcoding in repo" does not have "Oracle migration" in their question — and the Haiku scanner did not bridge dbt-OPS keywords (profiles.yml/secrets/credentials) to an Oracle-migration filename.
 
-**Overall: 4.656 STRONG PASS** (+1.156 above 3.5 floor; +0.469 from iter552's 4.1875).
+**Past dbt probes (var iter553, ref/source iter550, source-freshness iter540) DID find r27 §6.7 — but those questions all contained dbt-MODEL-DAG keywords (var, ref, source, dbt model, dbt test).** This question's keywords are dbt-OPS (profiles.yml, env var, shell, secret, password, credential) — those don't route to r27.
 
----
+**Q4 format() DECLINED — content GAP (no leading canonical for printf-style format()).** Grep confirms: format() appears in r27 §7A.3.1 line 3798 as "RIGHT — option B" inside a CONCAT-vs-format comparison, and in r13/r17/r10/r14/r22/r23 as `format_datetime` / `json_format` / `date_format`. There is NO standalone leading canonical that says "Trino has a printf-style `format(format_string, args...) → varchar` function (Java Formatter syntax: %s / %d / %,.2f) — use it instead of multiple `||` and CASTs." The responder's honest decline is reasonable; the fix is to add the leading canonical, not to shame the decline.
 
-## Per-question scores
-
-### Q1 — Is now() a real Trino function? + Iceberg timestamptz UTC or local?
-
-**5.0 / 5.0 / 5.0 / 5.0 = 5.00 STRONG PASS — PRIMARY WIN, LAYER-3 PLACEMENT FIX VALIDATED**
-
-Responder's claims:
-- "Yes, now() is a real Trino function — alias for current_timestamp, both return TIMESTAMP(3) WITH TIME ZONE."
-- "Iceberg timestamp with time zone values stored in UTC, normalized on disk, original zone discarded; bare TIMESTAMP stores wall-clock."
-- Cited r07 lines 706-724 (the NEW LEADING CANONICAL inserted this iteration) + r27 cross-ref.
-
-WebSearch verification:
-- trino.io/docs/current/functions/datetime.html VERBATIM: "`now() -> timestamp(3) with time zone` — This is an alias for `current_timestamp`."
-- iceberg.apache.org/spec VERBATIM: timestamptz values "are stored as UTC and do not retain a source time zone" (PyIceberg docs corroborate: "Timestamptzs in Iceberg are stored as UTC").
-
-Both load-bearing facts affirmed correctly. The r07 placement (date/time keyword zone, adjacent to date_trunc/week-Monday/sequence canonical chain) ROUTED for the generic question shape — Haiku found r07 lines 706-724 without any Oracle/SYSDATE keyword anchor needed.
-
-### Q2 — Safe cast VARCHAR->BIGINT returning NULL on garbage
-
-**5.0 / 5.0 / 5.0 / 5.0 = 5.00 STRONG PASS**
-
-Responder: `TRY_CAST(varchar_column AS BIGINT)` returns NULL on failure; `try()` wraps general expressions (division-by-zero, JSON parse, etc.). Cited r27 §4.4A/§4.4E.
-
-WebSearch verification:
-- trino.io/docs/current/functions/conversion.html: `try_cast(value AS type)` returns null if the cast fails. Out-of-range BIGINT also returns null.
-- trino.io/docs/current/functions/conditional.html: `try()` catches expression errors and returns null.
-
-Two distinct primitives correctly distinguished (cast-specific vs expression-general). Clean answer.
-
-### Q3 — dbt var() mechanics + pull in shell ENVIRONMENT variables
-
-**4.5 / 2.5 / 4.5 / 3.0 = 3.625 MARGINAL PASS (- env_var() gap)**
-
-Responder strengths:
-- Correct on `var('name', default)` 3-piece (model body + `dbt_project.yml` vars: block + CLI `--vars`).
-- Correct on precedence: CLI > project > default.
-- Cited r27 §6.7G.
-
-Responder gap (load-bearing on the second half of the question):
-- The question explicitly asked "pull in actual environment variables from the shell (avoid hardcoding env names / secrets)."
-- The responder said `var()` itself does not directly read `$SHELL_VAR` and suggested (a) `--vars '{api_key: "'$MY_SECRET_KEY'"}'` shell substitution at the CLI and (b) CI/CD secrets injected into `--vars`.
-- The CANONICAL dbt answer is the first-class `env_var('VAR'[, 'default'])` Jinja function — verified VERBATIM at docs.getdbt.com/reference/dbt-jinja-functions/env_var: "env_var function can be used to incorporate environment variables from the system into your dbt project... user: `"{{ env_var('DBT_USER') }}"`, password: `"{{ env_var('DBT_PASSWORD') }}"`. Optional second arg is a default value."
-- `env_var()` works ANYWHERE dbt processes Jinja (profiles.yml, dbt_project.yml, sources.yml, schema.yml, model SQL). It is THE mechanism to "avoid hardcoding env names / secrets" — exactly what the question asked.
-
-This is NOT a fabrication (no false claim was made; what was said was true). It is an **incompleteness** — the responder missed the canonical dbt primitive for the exact scenario. Worse, the proposed shell-substitution workaround is **strictly inferior** to `env_var()`: it leaks the secret into the dbt invocation command-line (visible in `ps`, shell history, CI logs).
-
-Resource verification: grep across resources/ confirms **ZERO `env_var` Jinja function mentions** in any dbt-related resource. Closest hit (r22 line 1346/1355) is Trino's `${ENV:VAR}` catalog-file substitution — a different mechanism. This is a real resource gap, not just a Haiku miss.
-
-### Q4 — Add/rename a column on a huge Iceberg table — does it rewrite all the data?
-
-**5.0 / 5.0 / 5.0 / 5.0 = 5.00 STRONG PASS**
-
-Responder: ADD COLUMN + RENAME COLUMN are metadata-only on Trino 467 + Iceberg (field-IDs; no Parquet rewrite; new col reads NULL for existing rows; ms even on 10TB tables). Reorder / narrow / incompatible-type changes NOT supported via Trino 467 natively (drop to Spark). Cited r17 277-297.
-
-WebSearch verification:
-- trino.io/docs/current/connector/iceberg.html: ALTER TABLE supports ADD COLUMN and RENAME COLUMN; "Iceberg uses unique column IDs to keep track of the columns as changes are applied... these operations are metadata-only and don't require rewriting data files."
-- iceberg.apache.org/docs/latest/evolution/: "Schema evolution supports safe column add, drop, reorder and rename, including in nested structures... schema changes never require rewriting your table"; "Columns in Iceberg data files are selected by field id."
-
-Field-ID mechanism correctly named. Drop-to-Spark fallback for reorder/narrow is the right escape valve for the on-prem Spark 1.5.2 + Trino 467 stack per `prod_info.md`.
+**Q2 LIKE/regexp_like and Q3 GROUPING SETS — both technically correct and findable. Confirmed PASS.**
 
 ---
 
-## Overall
+## VERIFICATION
 
-`(5.00 + 5.00 + 3.625 + 5.00) / 4 = 18.625 / 4 = 4.656` — **STRONG PASS**.
+### Q1 env_var grep result
 
-Margin: +1.156 above 3.5 floor; +0.469 swing from iter552's 4.1875.
+```
+$ grep -rn "env_var|6.7G2|DBT_ENV_SECRET|profiles.yml" resources/27-oracle-plsql-to-dbt-trino.md
+3160:### 6.7G2 LEADING CANONICAL — dbt env_var('VAR'[, 'default']) — read SHELL env vars
+3162:> **Keyword anchors:** dbt env_var, environment variable dbt, read shell env var dbt, dbt secrets, profiles.yml password env, DBT_ENV_SECRET, env_var vs var, dbt credentials environment variable, hide password dbt, scrub secret from dbt logs.
+3164: env_var('DBT_XYZ') reads SHELL env var at parse time; without default ERRORS the parse (fail-fast)
+3174: user: "{{ env_var('TRINO_USER') }}"
+3175: password: "{{ env_var('DBT_ENV_SECRET_TRINO_PASSWORD') }}"
+3179: DBT_ENV_SECRET_ prefix verbatim quote from docs.getdbt.com
+3192-3197: 4-claim DO-NOT-WRITE + cross-refs to §6.7G var() and §6.7H dbt-docs
+```
 
----
+Content is present, technically accurate, WebSearch-verified against docs.getdbt.com/reference/dbt-jinja-functions/env_var.
 
-## Primary wins
+`env_var()` is the right answer; docs.getdbt.com verbatim: *"Any env var named with the prefix DBT_ENV_SECRET will be: Available for use in profiles.yml + packages.yml, via the same env_var() function · Disallowed everywhere else, including dbt_project.yml and model SQL, to prevent accidentally writing these secret values to the data warehouse or metadata artifacts."* The teacher embedded this verbatim. The content is right; the placement is wrong.
 
-1. **Q1 fab-absence CLOSED on first re-probe with the r07 LEADING CANONICAL.** Two consecutive iterations (iter551 Q4 + iter552 Q1) produced the IDENTICAL fabricated absence ("Trino has no now() / function-not-found"). The teacher's iter553 layer-3 placement fix — inserting the H3 LEADING CANONICAL into r07's date/time zone (adjacent to date_trunc/week-Monday/sequence canonical chain, at lines 706-724), with bidirectional cross-refs to r27 §4.2-NOW and a nav-hint from r13's timestamptz row — routed perfectly. Haiku cited r07 lines 706-724 directly.
-2. **3-layer findability model VALIDATED** as a teacher playbook for future fab-absence regressions: (1) right keyword zone, (2) right structural form (H3 + keyword-anchors blockquote + DO-NOT-WRITE matrix), (3) **right RESOURCE for the question's route**. iter552 nailed (1) + (2) but missed (3) — the r27-only placement did not route for generic questions. iter553 added the r07 parallel canonical (same facts, generic-routing keyword anchors) without removing the r27 Oracle-migration angle, with explicit cross-refs to keep both consistent. The model is now a documented escalation pattern: when a fab-absence repeats despite a correctly-structured canonical, escalate to a PARALLEL placement in the question's natural routing resource.
-3. **Q2 + Q4 clean strong passes** with verbatim doc anchors — durability of TRY_CAST + Iceberg schema-evolution canonicals.
+### Q2 LIKE vs regexp_like — verified at trino.io/docs/current/functions/regexp.html
 
----
+> "regexp_like(string, pattern) → boolean — Evaluates the regular expression pattern and determines if it is contained within string. This function is similar to the LIKE operator, except that the pattern only needs to be contained within string, rather than needing to match all of string. You can match the entire string by anchoring the pattern using ^ and $."
 
-## Primary failure / iter554 fix target
+Responder's answer (LIKE = %/_ wildcards, regexp_like = full Java regex, regexp_like is contains-not-match) matches docs. The "fast LIKE vs slower regexp_like" claim is generally true (regex engine overhead). Correct.
 
-**Q3 — missing dbt `env_var()` Jinja-function canonical.**
+### Q3 GROUPING SETS / ROLLUP / CUBE — verified at trino.io/docs/current/sql/select.html
 
-The question explicitly asked to "pull in actual environment variables from the shell (avoid hardcoding env names / secrets)." `env_var('VAR'[, 'default'])` is the documented dbt mechanism for exactly this (verified at docs.getdbt.com/reference/dbt-jinja-functions/env_var). The responder offered `--vars` shell substitution + CI secrets — works mechanically but bypasses the canonical primitive AND is less secure (leaks secret into the dbt invocation command-line).
+> "The grouping operation returns a bit set converted to decimal, indicating which columns are present in a grouping... bits are assigned to the argument columns with the rightmost column being the least significant bit."
 
-Resource gap confirmed by grep: ZERO `env_var` mentions across resources/. This is a real, unfilled resource gap — not a Haiku retrieval miss.
+ROLLUP(region, category) expands to GROUPING SETS ((region, category), (region), ()) — bitmask 0 (both present), 1 (category absent = 01), 3 (both absent = 11). Value 2 (only category present, region absent = 10) is NEVER produced by ROLLUP — correct. Also correct: "ONE scan instead of N + UNION" — Trino docs verbatim: *"the query with the complex grouping syntax will only read from the underlying data source once, while the query with the UNION ALL reads the underlying data three times."*
 
-### iter554 PRIMARY FIX TARGET
+### Q4 format() — verified at trino.io/docs/current/functions/conversion.html
 
-Add `### LEADING CANONICAL — dbt env_var('VAR'[, 'default']) Jinja function for reading shell environment variables (the canonical way to avoid hardcoding secrets)` to **r27 §6.7H (immediately after §6.7G var())**, slotted in the dbt-mechanics keyword zone where Haiku already routes for dbt var/vars/parameterize questions. Required content:
+> "format(format, args...) → varchar — Returns a formatted string using the specified format string and arguments." Documentation links to Java Formatter syntax — supports %s, %d, %f, %,.2f, positional %2$s.
 
-- **Keyword anchors** (blockquote): pull env var into dbt, dbt environment variable, dbt secret without hardcode, dbt read $SHELL_VAR, dbt API key not in repo, dbt env_var function, profiles.yml secret, DBT_USER DBT_PASSWORD, MY_API_KEY env, CI/CD dbt secret.
-- **Fact 1 (verbatim doc quote)**: docs.getdbt.com/reference/dbt-jinja-functions/env_var — "The `env_var` function can be used to incorporate environment variables from the system into your dbt project. The `env_var` function can be used in your `profiles.yml` file, the `dbt_project.yml` file, the `sources.yml` file, your `schema.yml` files, and in model `.sql` files." Two-arg form: `{{ env_var('MY_VAR', 'default_value') }}` — default avoids compilation errors when var is unset.
-- **Fact 2**: env vars are always strings — cast explicitly for ints/bools: `{{ env_var('DBT_THREADS') | int }}`, `{{ env_var('DB_PORT') | as_number }}`.
-- **Use cases**: (a) profiles.yml `password: "{{ env_var('DBT_PASSWORD') }}"` — never commit secrets; (b) sources.yml `database: "{{ env_var('DBT_SNOWFLAKE_DB') }}"` — environment-aware source resolution; (c) models `WHERE event_date >= '{{ env_var("BACKFILL_START_DATE", "2024-01-01") }}'` — operator-controlled backfill bounds; (d) on-prem k8s + JWT/OPA stack: mount secrets via k8s Secret + envFrom, read them with `env_var()` — never hardcode JWT signing keys or OPA endpoints.
-- **var() vs env_var() distinction**: `var()` reads from `dbt_project.yml` vars block / CLI `--vars` (dbt-scoped values, config-as-code, version-controlled). `env_var()` reads from the OS process environment (deploy/CI/runtime secrets, never committed). Use `var()` for parameters that belong in repo; use `env_var()` for secrets and per-environment config.
-- **Cross-references**: r27 §6.7G (var() — the dbt-internal-variable companion), r22 §2.2 (Trino's separate `${ENV:VAR}` catalog-file env substitution — DIFFERENT mechanism, same on-prem use case).
-- **DO-NOT-WRITE**: "dbt has no way to read shell environment variables" — FALSE. "Use --vars shell substitution for secrets" — INSECURE (leaks into ps + history + CI logs); use env_var() instead. "env_var() reads from dbt_project.yml" — FALSE (that is var()).
+The function IS real and matches the engineer's example exactly: `format('User %s made %d purchases totaling $%,.2f', user_id, cnt, total)`. The responder DECLINED. This is a content GAP — format() (printf-style) does not have a leading canonical findable by the scanner. The closest hit (r27 §7A.3.1) is buried inside a CONCAT/CAST landmine page and uses only `%d` — not the `%s` / `%,.2f` formatting the engineer asked about.
 
-### iter554 probe targets
+Grep:
+```
+$ grep -rn "^### .*format\b|format(format|String.format|printf" resources/07,23,27
+r07: no matches
+r23: no matches
+r27: line 3798 "RIGHT — option B: use format() (cleaner, printf-style...)"  — buried, not a canonical
+```
 
-- HIGH — re-probe the env_var() shape ("How do I read $DBT_PASSWORD into my dbt profiles.yml without committing it?", "I have a CI/CD secret API_TOKEN — how do my dbt models reference it without hardcoding?", "What is dbt's env_var() function and how is it different from var()?").
-- HIGH — durability re-probes on Q1 now()/timestamptz from THIRD angle ("If I write `INSERT INTO ... VALUES (now(), ...)` into an Iceberg timestamptz column, what gets stored on disk?", "Does Trino's `localtimestamp` return UTC or session zone?") — confirm Q1 fab-absence stays closed across phrasings.
-- MEDIUM — Q2/Q4 durability re-probes (different angles).
-- LOW — DO NOT TOUCH federation row (stays 4.49944/310) + no edits to resources/22 §13.x.
-
----
-
-## Meta-rule observation
-
-Directive's "verify YOUR OWN corrections + PIN TRINO 467 + watch for FABRICATED ABSENCES + IDENTIFIER SLIPS + PLACEMENT/FINDABILITY MISSES" caveat was decisive again — WebSearched trino.io/docs/current/functions/datetime.html, /functions/conversion.html, /functions/conditional.html, /connector/iceberg.html, docs.getdbt.com/reference/dbt-jinja-functions/var, /reference/dbt-jinja-functions/env_var, iceberg.apache.org/spec + /docs/latest/evolution/ — all verbatim. The env_var() gap on Q3 would NOT have surfaced without explicitly verifying the env_var() docs page; the directive's "verify YOUR OWN corrections" caveat applied to the Q3 evaluation itself — the responder's --vars shell-substitution workaround SOUNDS plausible, but cross-referencing the docs revealed env_var() as the canonical answer. 16th consecutive iter (iter537-553) where the meta-rule prevented a false-positive judgment.
+No leading canonical for printf-style `format()`.
 
 ---
 
-## NOTES
+## Q1 ROUTING DIAGNOSIS — why didn't dbt-OPS keywords route to r27?
 
-- Did NOT bump training/state.json (teacher already set iteration=553 per directive).
-- Federation rubric row 4.49944/310 UNCHANGED this iter (federation NOT probed).
-- Did NOT touch resources/22 §13.x federation guardrails.
-- All 4 Q's verified against Trino 467 / Iceberg 1.5.2 production stack per prod_info.md.
+The §6.7G2 block IS in r27. The Haiku responder did not find it. Hypotheses:
 
-**OVERALL: 4.656 STRONG PASS — Q1 fab-absence CLOSED via r07 layer-3 placement fix; iter554 PRIMARY FIX = add env_var() LEADING CANONICAL to r27 §6.7H.**
+1. **Filename routing layer.** r27's title is "Oracle PL/SQL Procedure → dbt + Trino SQL Migration." A scanner ranking by topic alignment would not score "Oracle migration" highly against a question that says "shell env var / db password / profiles.yml." The question has zero Oracle-migration signal.
+
+2. **Past dbt success cases had dbt-MODEL-DAG keywords.** iter553 Q3 (var), iter550 (ref/source), iter540 (source-freshness) — all contain words like `var`, `ref()`, `source()`, `dbt test`, `model` — which are dbt-AUTHORING keywords, plausibly recognizable as "dbt migration" content. This question contains dbt-OPS keywords: `profiles.yml`, `env var`, `shell`, `password`, `secret`, `credential` — none of which signal "Oracle migration" and none of which the scanner appears to route to r27.
+
+3. **Same layer-3 issue as the now() saga.** The now() canonical was technically in r28 (later moved to r07) — content was right but the file's topical framing didn't match the question's framing. The fix was to **escalate the canonical to a file whose topical framing matches the question.** Same pattern applies here: env_var lives in a file whose framing is "Oracle migration," not "dbt connection / secrets / ops."
+
+---
+
+## ITER555 FIXES
+
+### PRIMARY — escalate env_var() placement so dbt-ops/secrets questions route to it
+
+The §6.7G2 content is correct and should remain in r27 (Oracle-migration readers benefit too). But the canonical needs a **second findable home** that routes from dbt-OPS keywords. Options:
+
+- **Option A (cheapest):** Add a small "Connecting dbt to Trino — secrets and credentials" stub to a dbt-config-flavored resource whose title doesn't say "Oracle migration." If no such resource exists, add a few-line LEADING CANONICAL block to r28 or r24 (whichever currently houses dbt-Trino connection / adapter content) with strong keyword anchors and a cross-ref pointer to r27 §6.7G2 for the full treatment.
+- **Option B:** Add a "dbt profiles.yml secrets — read shell env vars" routing-anchor block at the TOP of r27 §6 (before §6.7) with bold keyword anchors `profiles.yml | secrets | shell env var | DB password | credentials | env_var` and a section pointer to §6.7G2 — so even a scanner ranking r27 low on Oracle signal sees the keyword zone close to the top.
+- **Option C:** Add the env_var canonical to wherever dbt-Trino *connection setup* is currently discussed (if such a section exists — grep for "dbt-trino adapter" / "profiles.yml" / "connection: trino:" outside r27 first).
+
+Recommend Option A or B (Option C requires a real ops-flavored home that may not exist yet).
+
+Also add **routing-anchor cross-refs** elsewhere that match the question's keyword shape: anywhere the resources mention `profiles.yml` (4 files have it per grep — r05, r13, r22, r27), append a one-line "for secret handling / env-var-driven credentials see r27 §6.7G2."
+
+### SECONDARY — add format() leading canonical
+
+Add a LEADING CANONICAL block in r23 (SQL best practices — string formatting is a natural home) or r07 (analytical patterns):
+
+```
+### LEADING CANONICAL — Trino format() — printf-style string formatting (Java Formatter syntax)
+
+Keyword anchors: Trino format function, printf SQL, format string %s %d, build string with variables Trino,
+sprintf Trino, format vs concat vs ||, format VARCHAR, decimal formatting Trino, $%,.2f Trino, format datetime
+vs format string (distinct).
+
+format(format_string, args...) → varchar uses Java's java.util.Formatter syntax (same as printf / String.format).
+Verified at trino.io/docs/current/functions/conversion.html: "Returns a formatted string using the specified
+format string and arguments."
+
+SELECT format('User %s made %d purchases totaling $%,.2f', user_id, cnt, total);
+  -> "User 1234 made 42 purchases totaling $1,890.50"
+
+Specifiers: %s (string, also takes other types via toString-like coercion to a degree — but CAST first to be safe),
+%d (integer / bigint), %f (decimal / double), %,.2f (thousands-separated, 2 decimals), %x (hex), %n (newline),
+positional %2$s.
+
+Better than `||` when: (a) you need formatting (commas, decimals, padding); (b) you have many fields (concat
+gets ugly fast); (c) you would otherwise need many CAST(... AS VARCHAR) calls — format()'s %d / %f handle the
+coercion. `||` and concat() are still fine for simple two-or-three-piece VARCHAR-only joins.
+
+DISTINCT FROM: format_datetime(timestamp, 'yyyy-MM-dd') (formats a timestamp), date_format(timestamp, '%Y-%m-%d')
+(MySQL-style timestamp formatter), json_format(json) (serializes JSON). Those format ONE typed value; format()
+takes a Java printf template + N args.
+```
+
+This is a content gap — the fix is straightforward.
+
+---
+
+## PER-QUESTION SCORES
+
+### Q1 — Read shell env var into dbt (env_var)
+
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 3 | Mentioned env_var() from general knowledge — correct — but then DISCLAIMED it as not findable. Net: half-right because the right answer is named, half-wrong because the disclaim weakens user confidence. |
+| Completeness | 2 | Did not cover DBT_ENV_SECRET_ prefix, profiles.yml home, parse-time evaluation, default behavior, fail-fast on missing required vars. All are in §6.7G2 but uncited. |
+| Clarity | 3 | Decline language is clear, no confusion. |
+| Actionability | 2 | A user trying to set up dbt secrets gets "we don't document this" — they would have to leave the system. The canonical IS there; the user can't reach it. |
+
+**Q1 average: 2.5** — FAIL. Declined despite the canonical being added this iteration.
+
+### Q2 — LIKE vs regexp_like
+
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5 | Matches Trino docs: LIKE uses %/_, regexp_like uses Java regex (contains-not-match), LIKE is faster. |
+| Completeness | 4 | Covers the practical distinction. Could add: regexp_like is `contains` not `matches` so anchor with ^$ for full-string match. Did not mention this. |
+| Clarity | 5 | Clean, beginner-friendly. |
+| Actionability | 4 | Engineer knows when to use each. Anchor nuance missing. |
+
+**Q2 average: 4.5** — PASS.
+
+### Q3 — GROUPING SETS
+
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5 | GROUPING SETS/ROLLUP/CUBE one-scan correct; UNION ALL N-scans correct (docs verbatim "reads three times"); ROLLUP(a,b) bitmask 0/1/3 with NO 2 is exactly right per docs. |
+| Completeness | 4 | Covers the core. CUBE bitmask not enumerated but ROLLUP example is illustrative. |
+| Clarity | 4 | Bitmask explanation is correct but dense for a beginner. |
+| Actionability | 4 | Engineer can write the query. |
+
+**Q3 average: 4.25** — PASS.
+
+### Q4 — format() function
+
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 3 | Honest decline does not invent or contradict — but format() IS a real Trino function and the responder said "if it exists in Trino 467 it's not documented here." The decline is honest but the answer is incomplete because format() is real. The || workaround given is technically valid. |
+| Completeness | 2 | Missed the function the engineer named explicitly. Did not point to r27 §7A.3.1 (which DOES show format()). |
+| Clarity | 4 | Decline and || alternative are clear. |
+| Actionability | 2 | Engineer gets a worse-than-necessary alternative (|| with CAST for every numeric/decimal). They asked specifically about format() and got "we don't cover it" + a fallback. |
+
+**Q4 average: 2.75** — FAIL.
+
+---
+
+## OVERALL
+
+| Question | Avg |
+|---|---|
+| Q1 env_var | 2.5 (FAIL) |
+| Q2 LIKE/regexp_like | 4.5 (PASS) |
+| Q3 GROUPING SETS | 4.25 (PASS) |
+| Q4 format() | 2.75 (FAIL) |
+
+**Overall average: (2.5 + 4.5 + 4.25 + 2.75) / 4 = 14.0 / 4 = 3.5**
+
+**VERDICT: PASS (exactly at threshold).** Two declines (Q1+Q4) almost sink this; Q2/Q3 strong performance saves it. This is a thin pass — the iter555 fixes should land both findability (Q1 env_var routing) and the format() canonical, otherwise a re-probe with different phrasings will FAIL.
+
+---
+
+## CRITICAL NOTES
+
+- Iter554 teacher added the right CONTENT (env_var canonical, verbatim docs quote, DBT_ENV_SECRET_ prefix, fail-fast default behavior, profiles.yml example, var-vs-env_var contrast). The CONTENT is bulletproof.
+- The teacher placed it adjacent to §6.7G var() in r27 — reasonable since var() and env_var() ARE siblings.
+- BUT the responder didn't find it because dbt-OPS keywords (profiles.yml/secrets/credentials/password/shell env) don't route to a file titled "Oracle PL/SQL → dbt + Trino SQL Migration."
+- This is the SAME layer-3 routing failure as iter551-553 now() — the canonical was in r28, content was right, but the file's framing didn't match the question's framing. The fix then was to escalate to r07 (a more topically-aligned home). The fix now is analogous.
+- DO NOT delete §6.7G2 from r27 — Oracle-migration readers benefit. ADD a routing anchor or a second home that catches dbt-OPS-keyword scans.

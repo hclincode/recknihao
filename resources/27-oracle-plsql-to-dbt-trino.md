@@ -3157,6 +3157,47 @@ Per [docs.getdbt.com/docs/build/unit-tests](https://docs.getdbt.com/docs/build/u
 
 ---
 
+### 6.7G2 LEADING CANONICAL — dbt `env_var('VAR'[, 'default'])` — read SHELL environment variables (the secrets-safe pattern)
+
+> **Keyword anchors:** dbt env_var, environment variable dbt, read shell env var dbt, dbt secrets, profiles.yml password env, DBT_ENV_SECRET, env_var vs var, dbt credentials environment variable, hide password dbt, scrub secret from dbt logs. Verified at [docs.getdbt.com/reference/dbt-jinja-functions/env_var](https://docs.getdbt.com/reference/dbt-jinja-functions/env_var) and [docs.getdbt.com/docs/build/environment-variables](https://docs.getdbt.com/docs/build/environment-variables).
+
+**The one-fact summary.** `env_var('DBT_XYZ')` reads SHELL env var `DBT_XYZ` at **parse time**; `env_var('DBT_XYZ', 'default')` returns the fallback if unset. **Without a default, an unset var ERRORS the parse — fail-fast** (good for required credentials). Works in `dbt_project.yml`, **`profiles.yml`** (canonical home for warehouse credentials), `sources.yml`, `schema.yml`, and model SQL.
+
+**Secrets pattern.** Keep secrets in shell env vars (or CI/CD secret store) and read via `env_var()` — NEVER hardcode in the repo. Canonical `profiles.yml` (Trino target):
+```yaml
+my_project:
+  target: prod
+  outputs:
+    prod:
+      type: trino
+      host: trino.internal
+      user: "{{ env_var('TRINO_USER') }}"
+      password: "{{ env_var('DBT_ENV_SECRET_TRINO_PASSWORD') }}"
+      catalog: iceberg
+      schema: analytics
+```
+**`DBT_ENV_SECRET_` prefix convention** (verbatim from docs): *"If you want a particular environment variable to be scrubbed from all logs and error messages, in addition to obfuscating the value in dbt, you can prefix the key with `DBT_ENV_SECRET_`."* Such vars are usable ONLY in `profiles.yml` and `packages.yml` and are disallowed in `dbt_project.yml` / model SQL (so secrets cannot leak into compiled SQL or warehouse metadata).
+
+**`env_var()` vs `var()` — read this carefully (cross-ref §6.7G):**
+
+| Function | Source | Use it for |
+|---|---|---|
+| **`var('name', default)`** | dbt's **per-run** config (CLI `--vars` + `dbt_project.yml` `vars:`) | Per-run tunable knobs (lookback days, mode flags, backfill window). |
+| **`env_var('NAME', 'default')`** | **SHELL environment** (process env, CI/CD secret store, k8s Secret mounted as env) | Secrets (passwords, tokens) AND env-specific connection params (host, catalog, schema per dev/staging/prod). |
+
+**DO-NOT-WRITE — banned patterns:**
+
+| DO NOT write | Why it's wrong |
+|---|---|
+| `dbt run --vars '{api_key: "'$SECRET'"}'` (shell substitution to inject a secret) | **LEAKS the secret** — the expanded value appears in `ps`, shell history, and CI logs. Use `env_var('DBT_ENV_SECRET_API_KEY')` in the model/profile instead so the literal never reaches `argv`. |
+| `password: "supers3cret"` hardcoded in `profiles.yml` or `dbt_project.yml` | Committed-secret antipattern. Use `password: "{{ env_var('DBT_ENV_SECRET_TRINO_PASSWORD') }}"`. |
+| `password: "{{ env_var('PASSWORD') }}"` inside a **model `.sql` file** to read a `DBT_ENV_SECRET_*` var | dbt **disallows** `DBT_ENV_SECRET_*` outside `profiles.yml` / `packages.yml`. Secrets cannot be referenced from `dbt_project.yml` or model SQL — that's by design (prevents leakage into compiled artifacts). |
+| `env_var('TRINO_PASSWORD')` with no default for a REQUIRED credential, then catching the error | This is actually the **right** behavior — fail-fast on missing required creds. The DO-NOT here is supplying a fake default like `env_var('TRINO_PASSWORD', 'changeme')` which silently lets dbt run with a wrong cred. |
+
+**Cross-references.** §6.7G (`var()` for per-run knobs — the sibling mechanism). §6.7H (dbt-docs site — note: `env_var()` values are read at parse time, so the *expanded* host/schema show up in docs unless they are `DBT_ENV_SECRET_*`).
+
+---
+
 ### 6.7H LEADING CANONICAL — dbt documentation (`description:` in schema YAML, `{% docs %}` blocks, `dbt docs generate` + `serve`)
 
 > **Keyword anchors:** dbt docs generate serve, dbt model description, dbt column description, where to write dbt descriptions, dbt doc blocks {% docs %}, dbt documentation site, catalog.json manifest.json, reuse dbt description across models. Verified at [docs.getdbt.com/docs/build/documentation](https://docs.getdbt.com/docs/build/documentation) and [docs.getdbt.com/reference/commands/cmd-docs](https://docs.getdbt.com/reference/commands/cmd-docs).
