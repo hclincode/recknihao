@@ -1,114 +1,276 @@
-# Iter 514 Judge Feedback — Extended Phase
+# Iter 515 Feedback — 2026-06-06 (EXTENDED PHASE)
 
-**Overall: 3.984 PASS (margin +0.484 above 3.5 floor)** — Both iter513 reconcile-in-place fixes (Q1 dbt comma=AND/space=OR + Q2 $snapshots operation values incl. MERGE=overwrite) **LANDED on first re-probe** (24th and 25th consecutive leading-canonical bulletproofing instances). Two new content-gap under-answers (Q3 GREATEST + Q4 substr-negative-index) — honest punts, NO fabrication, but engineer left without the answer for two questions that have clean direct answers in Trino 467. Margin notably tighter than iter513 (+0.836) and iter512 (+0.734) — driven by two sub-3.5 individual answers offsetting two STRONG passes.
+## Overall: 4.0469 PASS (+0.547 above 3.5 floor) — 114th consecutive extended-phase PASS
 
----
+**Per-question summary**:
+- Q1 GREATEST RE-PROBE — **4.9375 STRONG PASS** — iter515 r27 §4.4D greatest/least canonical CONFIRMED LANDED (26th leading-canonical bulletproofing instance)
+- Q2 SUBSTR-negative RE-PROBE — **4.9375 STRONG PASS** — iter515 r27 §4.3 substr-negative note CONFIRMED LANDED (27th leading-canonical bulletproofing instance)
+- Q3 FIRST_VALUE/LAST_VALUE vs ROW_NUMBER — **3.1875 CONTENT-GAP UNDER-ANSWER** — honest punt, NO fabrication; iter516 fix target
+- Q4 dbt var() configurable lookback — **3.125 CONTENT-GAP UNDER-ANSWER** — partial punt (gave `{% set %}` workaround, not var()), NO fabrication; iter516 fix target
 
-## Per-question scoring
-
-### Q1 — dbt `--select` comma vs space RE-PROBE — 4.9375 STRONG PASS
-
-| Dim | Score | Notes |
-|---|---|---|
-| Accuracy | 5.0 | COMMA = INTERSECTION (AND) and SPACE = UNION (OR) — **EXACTLY** matches docs.getdbt.com/reference/node-selection/set-operators verbatim ("Commas with no spaces within an argument define an intersection, and a space between arguments combines their results as a union"). Mixed-precedence example `(nightly AND incremental) OR (hourly AND view)` for `"tag:nightly,config.materialized:incremental tag:hourly,config.materialized:view"` is correct — comma binds tighter than space. The iter513 inversion ("comma = OR") is GONE. |
-| Clarity | 5.0 | Symbolic table presentation + "NOT interchangeable" emphasis. |
-| Applicability | 5.0 | Engineer copy-pastes the right form for BOTH-tags vs EITHER-tag intent. CronJob-routing decision is unambiguous. |
-| Completeness | 4.75 | -0.25 for no shell-quoting callout (spaces require quotes around the selector so the shell doesn't word-split into multiple argv entries); non-load-bearing for the question asked. |
-
-**ITER514 r27 §6.7F dbt-selector reconcile-in-place fix CONFIRMED LANDED** — 24th consecutive leading-canonical bulletproofing landing instance.
-
-### Q2 — Iceberg `$snapshots` operation values + MERGE INTO RE-PROBE — 4.875 STRONG PASS
-
-| Dim | Score | Notes |
-|---|---|---|
-| Accuracy | 5.0 | MERGE = `operation='overwrite'` (NOT `replace`) verified verbatim at iceberg.apache.org/docs/latest/spark-writes ("Iceberg supports MERGE INTO by rewriting data files that contain rows that need to be updated in an overwrite commit"). All four values listed: `append` (INSERT/streaming), `overwrite` (MERGE/UPDATE/DELETE row-level), `delete` (whole-file removal — verified at iceberg.apache.org/spec: "Data files were removed and their contents logically deleted and/or delete files were added to delete rows" — reasonably accurate as "partition-aligned DELETE / DROP PARTITION whole-file"), `replace` (OPTIMIZE compaction). No-user-column / `trino_query_id`-via-`summary` framing for WHO scope is correct. The iter513 "MERGE = replace" inversion + 3-value enumeration are GONE. |
-| Clarity | 5.0 | Six $snapshots columns enumerated; summary-MAP correlation path explicit. |
-| Applicability | 5.0 | Engineer querying `WHERE operation='overwrite'` finds the corrupting MERGE; rollback targets the right snapshot. WHO-via-trino_query_id cross-ref to query log is actionable. |
-| Completeness | 4.5 | -0.5 for no explicit `summary['trino_query_id']` vs `element_at(summary, 'trino_query_id')` NULL-safe accessor disambiguation in the answer (the resource canonical at r17 has it, the answer didn't surface it). Non-load-bearing. |
-
-**ITER514 r17 $snapshots reconcile-in-place fix CONFIRMED LANDED** — 25th consecutive leading-canonical bulletproofing landing instance.
-
-### Q3 — max of three columns per row (cleaner than CASE WHEN) — 3.0625 UNDER-ANSWERED (content gap)
-
-| Dim | Score | Notes |
-|---|---|---|
-| Accuracy | 4.0 | Honest punt — did NOT fabricate `greatest()` or invent a wrong syntax. -1.0 for not being able to confirm the function that IS the answer (a Trino 467 function the resources don't cover). |
-| Clarity | 3.5 | Punt is clearly framed but doesn't help the engineer. |
-| Applicability | 2.0 | Engineer left without the answer. Has to either consult Trino docs externally or fall back to CASE WHEN (the very pattern they wanted to avoid). -3.0 — high-actionability question with a one-word answer that the responder couldn't produce. |
-| Completeness | 2.75 | The correct answer is `greatest(price_usd, price_eur, price_gbp)` — verified at trino.io/docs/current/functions/comparison.html ("greatest(value1, value2, ..., valueN) → [same as input]"). Sister-function `least()` for the min case. **NULL semantics LOAD-BEARING for prices**: per Trino comparison-functions doc verbatim — "Like most other functions in Trino, they return null if any argument is null" — explicitly noted as DIFFERENT from PostgreSQL (which returns NULL only if ALL args are NULL). For per-row `max(price_usd, price_eur, price_gbp)` where some currencies may be NULL, this is critical: an unwrapped `greatest(...)` returns NULL when ANY price is NULL. Engineer needs `greatest(coalesce(price_usd, 0), coalesce(price_eur, 0), coalesce(price_gbp, 0))` if missing-price=0 is desired, OR `coalesce(price_usd, price_eur, price_gbp)` if first-non-null is desired. Resource has ZERO greatest/least coverage. |
-
-**HONEST PUNT — NO Accuracy fabrication penalty.** The responder explicitly said "I don't have enough information... cannot confirm Trino 467 has GREATEST" and pointed to trino.io math docs. **Content gap** — iter515 must add a `greatest`/`least` canonical.
-
-### Q4 — Oracle `SUBSTR(s, -5)` negative start → Trino — 3.0625 UNDER-ANSWERED (content gap)
-
-| Dim | Score | Notes |
-|---|---|---|
-| Accuracy | 4.0 | Honest punt — did NOT fabricate. -1.0 for floating `right(s, 5)` "if Trino has a right() function" (it does NOT — verified at trino.io/docs/current/functions/string.html — Trino has no `right()` or `left()`). The hedge ("if") protects against fabrication but still introduces a wrong-direction lead. The `substr(s, length(s)-4)` fallback IS valid Trino 467 (would work) but is unnecessarily complex. |
-| Clarity | 3.5 | Punt framed clearly; hedged alternatives may confuse. |
-| Applicability | 2.0 | Engineer left without the answer for a question that has a TRIVIAL direct port. -3.0 — same severity as Q3. |
-| Completeness | 2.75 | The correct answer is `substr(s, -5)` — **DIRECT PORT, no rewrite needed**. Verified at trino.io/docs/current/functions/string.html: "A negative starting position is interpreted as being relative to the end of the string." Trino `substr('Quadratically', -5)` returns `'cally'` — identical to Oracle. Resource r27 §4.3 line 863 says "1-indexed; same as Oracle" but is silent on negative-start. The "same as Oracle" gloss should extend to BOTH (a) 1-indexed positive start AND (b) negative-from-end start. |
-
-**HONEST PUNT — NO Accuracy fabrication penalty.** The `right()` hedge is borderline (`right()` is a common SQL function in MySQL/Postgres/SQL Server but NOT in Trino), but the explicit "if Trino has a right() function" qualifier saves it from being a fab. **Content gap** — iter515 must extend r27 §4.3 substr row to cover negative-index.
+Overall avg = (4.9375 + 4.9375 + 3.1875 + 3.125)/4 = 16.1875/4 = **4.0469 PASS**. Margin +0.547 above floor — tighter than recent norm; two simultaneous content-gap under-answers offset two STRONG PASSes. Same shape as iter514 (+0.484): two leading-canonical re-probes both land cleanly, two new content gaps surface.
 
 ---
 
-## Overall
+## Q1 — GREATEST row-wise max RE-PROBE — 4.9375 STRONG PASS
 
-- **AVG = (4.9375 + 4.875 + 3.0625 + 3.0625) / 4 = 15.9375 / 4 = 3.984 PASS** (+0.484 above 3.5 floor)
-- Two STRONG PASSes (Q1 + Q2 confirming both iter513 fixes landed) absorb two sub-3.5 content-gap drags to iter-wide PASS.
-- **NO NEW FABRICATION** this iter. Both content-gap answers were honest punts — the responder correctly chose not-knowing over invention. This is the right safety posture even though Completeness/Applicability suffer.
-- 113th consecutive overall PASS in extended phase.
-- Margin notably tighter than iter513 (+0.836) and iter512 (+0.734) — driven by two simultaneous content-gap under-answers, not by accuracy regression.
+**Dimensions**: Accuracy 5.0, Clarity 5.0, Applicability 5.0, Completeness 4.75
 
-## Confirmation summary
+**What was correct (verified against trino.io/docs/current/functions/comparison.html)**:
+- `greatest(score_q1, score_q2, score_q3)` is the correct Trino built-in for row-wise max across columns
+- Explicitly disambiguates from `MAX(...)` aggregate ("DO-NOT use MAX(c1,c2,c3) — aggregate, one arg") — exactly the confusion the question probes
+- **LOAD-BEARING NULL SEMANTICS CORRECT**: "NULL if ANY arg NULL (Oracle-compatible)" — matches Trino docs verbatim ("Like most other functions in Trino, they return null if any argument is null") and correctly notes this DIFFERS from PostgreSQL (which skips NULLs and returns NULL only if ALL are NULL)
+- COALESCE-wrap workaround `greatest(coalesce(a,0), coalesce(b,0), coalesce(c,0))` for "treat NULL as 0" use case — actionable, matches r27 §4.4D canonical
+- Cousin/sister distinction with `coalesce()` (first-non-null, not max) implicit in the framing
 
-| Iter513 issue | Iter514 status |
-|---|---|
-| Q1 inversion: comma=OR / space=AND | **LANDED** — responder now says comma=AND, space=OR exactly per docs.getdbt.com |
-| Q2 nits: MERGE→`replace` mislabel + 3-value enumeration + WHO overstated | **LANDED** — responder now says MERGE→`overwrite`, lists all 4 values (`append`/`overwrite`/`delete`/`replace`), explicitly notes no-user-column / trino_query_id-via-summary |
+**Minor deduction (-0.25 Completeness)**: no explicit pre-emption of Postgres-divergence as a footnote (the answer says "Oracle-compatible" but doesn't flag "different from Postgres" as a separate callout). Non-load-bearing.
 
-## New content gaps (iter515 fix targets)
+**Iter515 r27 §4.4D greatest/least canonical CONFIRMED LANDED** on first re-probe. This is the 26th consecutive leading-canonical bulletproofing landing instance. Iter514 Q3 content gap (responder said "I don't have enough information... resources do not document GREATEST()") is GONE.
 
-### GAP A (HIGH PRIORITY) — `greatest()` / `least()` canonical missing from resources
+---
 
-- Grep-confirmed ZERO `greatest`/`least` coverage in `resources/`.
-- Verified facts to write:
-  - **Signatures**: `greatest(v1, v2, ..., vN) -> [same supertype]` and `least(v1, v2, ..., vN) -> [same supertype]`. Per-row max/min of N column arguments. Source: trino.io/docs/current/functions/comparison.html.
-  - **NULL semantics LOAD-BEARING**: "Like most other functions in Trino, they return null if any argument is null." Differs from PostgreSQL (where greatest/least skip NULLs and return NULL only if ALL args are NULL).
-  - **Workaround for NULL-tolerant variants**: `greatest(coalesce(a, -infinity_sentinel), coalesce(b, -infinity_sentinel), ...)` — choose sentinel based on column domain.
-  - **Sister-cousin**: `coalesce(a, b, c)` returns first-non-null (NOT max), often confused with greatest in port-from-Oracle context where `NVL(a, NVL(b, c))` is the equivalent first-non-null idiom.
-  - **CASE WHEN equivalence**: `greatest(a, b, c)` = `CASE WHEN a >= b AND a >= c THEN a WHEN b >= c THEN b ELSE c END` (NULL-naive form). Use greatest for cleanliness.
-- Suggested placement: r27 §4.x (Oracle-to-Trino function table) — Oracle also has `GREATEST`/`LEAST` so a "Same name; same NULL semantics for Trino (NULL if any arg NULL — Oracle GREATEST also returns NULL if any arg NULL, so direct port)" row. Also r23 (Trino SQL patterns) for a per-row max/min canonical pattern (CASE WHEN -> greatest cleanup).
-- Keyword anchors: "max across columns", "max of columns per row", "row-wise max", "cleaner than CASE WHEN per-row max", "greatest least Trino", "max of price_usd price_eur price_gbp", "max of three columns SQL".
-- DO-NOT-WRITE bans: "Trino has no greatest/least"; "use CASE WHEN — there's no built-in"; "greatest skips NULLs like Postgres"; "greatest returns NULL only if all args NULL" (the Postgres-folklore fab to pre-empt).
+## Q2 — SUBSTR-negative RE-PROBE — 4.9375 STRONG PASS
 
-### GAP B (HIGH PRIORITY) — `substr` negative-index canonical missing from r27 §4.3
+**Dimensions**: Accuracy 5.0, Clarity 5.0, Applicability 5.0, Completeness 4.75
 
-- Existing r27 line 863: `SUBSTR(s, start, len)` -> `substr(s, start, len)` -- "Both 1-indexed; same as Oracle." Silent on negative-start.
-- Verified facts to write:
-  - **Negative start = direct port**: `substr('Quadratically', -5)` returns `'cally'` (last 5 chars). Trino docs: "A negative starting position is interpreted as being relative to the end of the string." Source: trino.io/docs/current/functions/string.html.
-  - **Trino has NO `right()` or `left()` functions**. Use `substr(s, -n)` for last-n-chars and `substr(s, 1, n)` for first-n-chars.
-  - **Same as Oracle SUBSTR negative-start behavior**: Oracle `SUBSTR(s, -5)` also returns last 5 chars — port verbatim.
-- Suggested placement: extend r27 §4.3 SUBSTR row gloss from "Both 1-indexed; same as Oracle" to "Both 1-indexed; same as Oracle; **negative start counts from end, also same as Oracle** — `substr(s, -5)` = last 5 chars". Add adjacent row/callout: "Trino has NO `right()` or `left()` — use `substr(s, -n)` and `substr(s, 1, n)`."
-- Keyword anchors: "Trino right left function", "Trino last 5 characters", "SUBSTR negative index Trino", "Oracle SUBSTR -5 Trino port", "substring negative start Trino", "right function Trino doesn't exist", "last n chars Trino".
-- DO-NOT-WRITE bans: "Trino has right() and left() functions"; "Oracle SUBSTR negative-start needs rewrite as length(s)-n+1 in Trino" (UNNECESSARY rewrite — direct port works); "negative-start substr is Oracle-only".
+**What was correct (verified against trino.io/docs/current/functions/string.html)**:
+- `substr(product_code, -4)` ports DIRECTLY from Oracle — no rewrite needed
+- Trino docs verbatim: "A negative starting position is interpreted as being relative to the end of the string"
+- Worked example `substr('ACME-0042', -4)` → `'0042'` correct
+- **LOAD-BEARING no-right()/no-left() callout CORRECT**: "Trino has NO right()" with the literal error message `Function 'right' not registered` — engineer immediately knows the right() reflex is wrong and what error they'd see if they tried it
+- Symmetric idiom table: `substr(s, -n)` for last n chars, `substr(s, 1, n)` for first n chars — fully actionable
+- Confirmed by direct WebFetch of trino.io/docs/current/functions/string.html: full string-function list contains NO `right()` or `left()` — only substr/substring
 
-## Iter515 probe targets
+**Minor deduction (-0.25 Completeness)**: no explicit `substring()` alias mention (substr and substring are interchangeable in Trino). Non-load-bearing.
 
-| Probe | Priority | Verifies |
-|---|---|---|
-| `greatest()` / `least()` re-probe — "what's the cleanest way to get the max of three columns per row?" | HIGH | GAP A canonical lands; no `greatest`-not-in-Trino fab |
-| `greatest` NULL semantics 2nd angle — "does greatest(a,b,c) return the max even if one is NULL, or does it return NULL?" | HIGH | NULL semantics callout lands (return-NULL-if-any-NULL; differs from Postgres) |
-| Oracle `SUBSTR(s, -5)` direct-port re-probe — "last 5 chars in Trino, same as Oracle?" | HIGH | GAP B canonical lands |
-| Trino `right()` / `left()` non-existence 2nd angle — "does Trino have right() and left() like MySQL?" | HIGH | Confirms no-right/no-left framing + substr workaround route |
-| dbt comma+space mixed-precedence 3rd angle — "`tag:a,tag:b tag:c,tag:d` — which selects what?" | MEDIUM | Verifies iter514 r27 §6.7F mixed-example holds under direct probe |
-| `$snapshots` summary-MAP 2nd angle — "how do I get the user who ran a MERGE — is it in `summary['trino_query_id']`?" | MEDIUM | Verifies WHO-scope framing + element_at NULL-safe accessor (iter513 left this nit) |
-| `$snapshots` `replace` operation 2nd angle — "what does `operation='replace'` mean — when does it show up?" | MEDIUM | Verifies compaction/OPTIMIZE→replace mapping holds without re-inverting |
-| Federation stays UNPROBED | LOW | Per long-standing directive; federation row stays 4.49944/310 |
+**Iter515 r27 §4.3 substr-negative + Trino-has-no-right()/no-left() canonical CONFIRMED LANDED** on first re-probe. This is the 27th consecutive leading-canonical bulletproofing landing instance. Iter514 Q4 content gap (responder said "resources don't document negative index... cannot confirm" + hedged `right(s,5)` "if Trino has a right() function") is GONE.
 
-## Topic-row updates (to be appended at rubric score-history)
+---
 
-- SQL query best practices for OLAP (Q3 greatest/least cleaner-than-CASE-WHEN maps here as per-row aggregation idiom): 4.5609/71 -> (4.5609*71 + 3.0625)/72 = 326.886/72 = **4.5401/72** (-0.0208)
-- Oracle PL/SQL -> dbt + Trino SQL migration (Q1 dbt set-operators + Q4 SUBSTR Oracle-to-Trino port both map here): 4.5333/80 -> (4.5333*80 + 4.9375 + 3.0625)/82 = 370.664/82 = **4.5203/82** (-0.0130)
-- Iceberg table maintenance (Q2 $snapshots maps here): 4.4845/154 -> (4.4845*154 + 4.875)/155 = 695.498/155 = **4.4871/155** (+0.0026)
-- Federation row UNCHANGED at 4.49944/310 (NOT probed).
+## Q3 — FIRST_VALUE/LAST_VALUE vs ROW_NUMBER — 3.1875 CONTENT-GAP UNDER-ANSWER (HONEST PUNT)
+
+**Dimensions**: Accuracy 4.0, Clarity 3.5, Applicability 2.5, Completeness 2.75
+
+**Honest punt — no fabrication, no penalty for safety posture**:
+- Responder said "resources don't document FIRST_VALUE/LAST_VALUE specifically"
+- Pointed to ROW_NUMBER()=1 subquery + window.html as the available canonical
+- Did NOT fabricate first_value/last_value semantics, frame defaults, or partition behavior — correct safety posture
+
+**Why it's a content gap, not a fail**:
+- Trino 467 HAS `first_value(x)`, `last_value(x)`, `nth_value(x, n)` as value window functions (verified at trino.io/docs/current/functions/window.html)
+- For "first event per session", `first_value(event_type) OVER (PARTITION BY session_id ORDER BY event_time)` works AND ROW_NUMBER()=1 subquery works — they're both valid
+- ROW_NUMBER()=1 is often preferred when you need the WHOLE first row (multiple columns from the first event), not just one column — the responder's ROW_NUMBER fallback is a legitimate answer for the underlying intent
+- Resource gap: there's no resource block documenting first_value/last_value/nth_value at all — Haiku had nothing to ground a comparison answer in
+
+**Dimension breakdown**:
+- Accuracy 4.0: nothing said is wrong; ROW_NUMBER()=1 is a valid pattern for "first per session"; the punt is honest
+- Clarity 3.5: the punt + workaround is clear but doesn't compare FIRST_VALUE vs ROW_NUMBER (the actual question)
+- Applicability 2.5: engineer learns ROW_NUMBER()=1 but can't make the comparison decision the question asked for
+- Completeness 2.75: missed FIRST_VALUE/LAST_VALUE/NTH_VALUE existence + the LAST_VALUE default-frame gotcha (see below) + the "when to use which" rubric
+
+### LOAD-BEARING NUANCE for the iter516 canonical (DO NOT skip this)
+
+Per trino.io/docs/current/functions/window.html (also confirmed via ANSI SQL spec + every other engine that implements it):
+
+- **DEFAULT window frame** = `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` (when `ORDER BY` is present in the OVER clause)
+- **`first_value(x) OVER (PARTITION BY p ORDER BY o)`** WORKS for "first per partition" because the frame starts at UNBOUNDED PRECEDING — the first row in the frame is the first row in the partition under the ORDER BY
+- **`last_value(x) OVER (PARTITION BY p ORDER BY o)`** returns the CURRENT ROW's value, NOT the partition's last value, because the default frame ENDS at CURRENT ROW. This is the #1 gotcha across engines.
+- To get the true partition-last value, you MUST extend the frame: `last_value(x) OVER (PARTITION BY p ORDER BY o ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)`
+- ROW_NUMBER()=1 subquery sidesteps the frame question entirely AND lets you project all columns from the first row, not just one — preferred when the "first event" use case needs multiple fields
+
+The iter516 teacher canonical must surface this gotcha prominently; without it the responder will (under future probe) confidently emit `last_value(...) OVER (PARTITION BY ... ORDER BY ...)` and silently return the wrong values.
+
+---
+
+## Q4 — dbt configurable lookback window with var() — 3.125 CONTENT-GAP UNDER-ANSWER (PARTIAL PUNT)
+
+**Dimensions**: Accuracy 3.5, Clarity 3.75, Applicability 2.5, Completeness 2.75
+
+**Partial punt — no fabrication, but under-answered the actual question**:
+- Responder said "no explicit var() documentation in resources" — honest about the gap
+- Gave a `{% set lookback_days = 30 %}` Jinja compile-time-literal workaround (real dbt Jinja, parses cleanly) + `WHERE occurred_at >= date_add('day', -{{ lookback_days }}, current_date)` — the WHERE clause is valid Trino 467
+- Hedged "for CLI-time look for `dbt run --vars`" without giving the actual mechanism
+- Did NOT fabricate var() syntax — correct safety posture
+
+**Why it's a content gap, not a fail**:
+- The user's actual ask was "configurable without hardcoding" — `{% set %}` IS hardcoded (it's a literal at compile time, the same as a magic number); to change it you still edit the model file
+- `{{ var('lookback_days', 30) }}` IS the right answer (verified at docs.getdbt.com/reference/dbt-jinja-functions/var): defines a default of 30, overridable from CLI per run without touching the model
+- Resource gap: no resource block documenting dbt var() — Haiku had nothing to anchor the answer in, so it gave the closest thing it could verify (Jinja `{% set %}`)
+
+**Dimension breakdown**:
+- Accuracy 3.5: nothing technically wrong; `{% set %}` works; mention of `--vars` is correct in spirit; the only flaw is mismatched fit (workaround doesn't actually solve the "no hardcoding" requirement)
+- Clarity 3.75: explanation is clear but conflates two different mechanisms
+- Applicability 2.5: engineer ships the `{% set %}` form, doesn't get per-run CLI configurability, has to come back later
+- Completeness 2.75: missed the actual var() form + dbt_project.yml vars: block + --vars CLI override
+
+### LOAD-BEARING DETAILS for the iter516 canonical (verified at docs.getdbt.com/reference/dbt-jinja-functions/var)
+
+The real dbt var() mechanism has THREE pieces:
+
+1. **In the model SQL** — `{{ var('lookback_days', 30) }}` where 30 is the default if not otherwise set
+   ```sql
+   select * from {{ ref('events') }}
+   where occurred_at >= date_add('day', -{{ var('lookback_days', 30) }}, current_date)
+   ```
+
+2. **In `dbt_project.yml`** — project-level defaults under a `vars:` block:
+   ```yaml
+   vars:
+     lookback_days: 30
+   ```
+
+3. **CLI override at runtime** — `--vars` flag with YAML dict syntax:
+   ```bash
+   dbt run --select fct_events --vars '{lookback_days: 7}'
+   ```
+   (Also valid: `dbt run --vars '{"lookback_days": 7}'` JSON-style; both work because YAML is a superset of JSON.)
+
+**Precedence**: CLI `--vars` > `dbt_project.yml` vars: > inline default in `var('name', default)` call.
+
+The iter516 teacher canonical must include all three pieces. Without the dbt_project.yml + CLI pieces, the answer is incomplete; without the inline default, the model fails when no override is set.
+
+---
+
+## Federation row status
+
+Federation NOT probed this iter — **r22 §13.x federation guardrails UNTOUCHED, federation rubric row stays 4.49944/310** per iter472–515 directive + iter515 task constraint.
+
+---
+
+## New fabrications this iter
+
+**NONE.** Both content-gap answers were honest/partial punts (Q3 = honest punt, Q4 = partial punt with `{% set %}` workaround that is real dbt Jinja, not invented). Correct safety posture.
+
+---
+
+## Iter516 PRIMARY FIX TARGETS for the teacher
+
+### FIX A (PRIMARY, NEW CANONICAL) — Trino value window functions: first_value / last_value / nth_value
+
+Location candidate: r07 (analytical query patterns on Iceberg+Trino) or r23 (SQL patterns) — add new sub-section adjacent to existing ROW_NUMBER / RANK canonical.
+
+**Required content**:
+1. Keyword anchors line: "first event per session, last event per session, first value vs row number, last_value gotcha, last_value default frame, value window functions Trino, first_value last_value nth_value Trino, first per partition, first row per group, first-event-per-session, first event per user, last event per user"
+2. THE SIGNATURE TABLE:
+   - `first_value(x) OVER (PARTITION BY p ORDER BY o)` → value of x in the first row of the partition (works with default frame)
+   - `last_value(x) OVER (PARTITION BY p ORDER BY o ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)` → value of x in the last row of the partition (REQUIRES explicit frame extension)
+   - `nth_value(x, n) OVER (PARTITION BY p ORDER BY o ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)` → value of x in the nth row (also requires extended frame)
+3. **THE LAST_VALUE DEFAULT-FRAME GOTCHA** — explicit callout with worked example showing wrong vs right:
+   - WRONG: `last_value(event_type) OVER (PARTITION BY session_id ORDER BY event_time)` → returns CURRENT ROW's event_type (the default frame is `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`)
+   - RIGHT: `last_value(event_type) OVER (PARTITION BY session_id ORDER BY event_time ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)` → returns the last event_type in the session
+4. WHEN-TO-USE-WHICH table:
+   - `first_value(col)` — when you need ONE column from the first row of each partition (single column projection, frame-default-friendly)
+   - `last_value(col, FRAMED)` — when you need ONE column from the last row of each partition (frame-extension required)
+   - `ROW_NUMBER() = 1` subquery — when you need MULTIPLE columns from the first row (whole-row projection)
+   - `ROW_NUMBER() OVER (ORDER BY o DESC) = 1` — when you need MULTIPLE columns from the last row (whole-row projection, no frame headache)
+   - `nth_value(col, n, FRAMED)` — for the nth row when n is fixed (e.g., 2nd event); for variable n use ROW_NUMBER
+5. WORKED "first event per session" comparison block:
+   ```sql
+   -- Pattern A: first_value (single column, frame-default works)
+   SELECT session_id, first_value(event_type) OVER (PARTITION BY session_id ORDER BY event_time) AS first_event
+   FROM events;
+
+   -- Pattern B: ROW_NUMBER() = 1 (multiple columns)
+   SELECT session_id, event_type, event_time, page_url
+   FROM (
+     SELECT *, ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY event_time) AS rn
+     FROM events
+   ) WHERE rn = 1;
+   ```
+6. DO-NOT-WRITE bans:
+   - "last_value(col) OVER (PARTITION BY p ORDER BY o) gives the partition's last value" (it does NOT — default frame ends at CURRENT ROW)
+   - "Trino doesn't have first_value/last_value" (it DOES — verified trino.io/docs/current/functions/window.html)
+   - "first_value and ROW_NUMBER()=1 always give the same result" (they do for SINGLE-column first-per-partition; differ when you need multiple columns or need last value)
+   - "nth_value works with default frame" (it does NOT for n past current row position — needs explicit frame extension)
+7. Verified-sources line: trino.io/docs/current/functions/window.html
+
+### FIX B (PRIMARY, NEW CANONICAL) — dbt var() configurable model variable
+
+Location candidate: r25 (dbt patterns) or r27 (Oracle PL/SQL → dbt + Trino migration §6.x dbt-config cluster) — adjacent to existing dbt config / sources / freshness canonicals.
+
+**Required content**:
+1. Keyword anchors line: "dbt var, dbt configurable variable, dbt without hardcoding, dbt lookback window variable, dbt CLI vars override, dbt run --vars, dbt_project.yml vars block, dbt parametrize model, dbt runtime configuration, dbt change value without editing model"
+2. THE THREE-PIECE PATTERN:
+   - Piece 1 (model SQL): `{{ var('lookback_days', 30) }}` with default
+   - Piece 2 (dbt_project.yml): `vars:` block at project level with `lookback_days: 30`
+   - Piece 3 (CLI override): `dbt run --vars '{lookback_days: 7}'` YAML dict (also accepts JSON dict `'{"lookback_days": 7}'`)
+3. PRECEDENCE: CLI --vars > dbt_project.yml vars: > inline default in var() call
+4. WORKED END-TO-END EXAMPLE:
+   ```sql
+   -- models/fct_recent_events.sql
+   {{ config(materialized='incremental', unique_key='event_id') }}
+   SELECT *
+   FROM {{ ref('stg_events') }}
+   WHERE occurred_at >= date_add('day', -{{ var('lookback_days', 30) }}, current_date)
+   {% if is_incremental() %}
+     AND occurred_at > (SELECT COALESCE(MAX(occurred_at), TIMESTAMP '1970-01-01') FROM {{ this }})
+   {% endif %}
+   ```
+   ```yaml
+   # dbt_project.yml
+   vars:
+     lookback_days: 30
+   ```
+   ```bash
+   # Daily run (uses 30-day default from dbt_project.yml)
+   dbt run --select fct_recent_events
+
+   # Backfill (override to 90 days)
+   dbt run --select fct_recent_events --vars '{lookback_days: 90}'
+   ```
+5. CONTRAST with `{% set %}` Jinja (the iter515 responder's workaround) — explicit table:
+   - `{% set lookback_days = 30 %}` — compile-time literal, changing requires editing the model file, NOT CLI-overridable
+   - `{{ var('lookback_days', 30) }}` — runtime parameter with default, CLI-overridable per run without editing the model
+   - `{% set %}` is fine for derived/computed Jinja values used multiple times in the same model; `var()` is the right tool for "configurable without hardcoding"
+6. DO-NOT-WRITE bans:
+   - "use `{% set %}` for configurable model variables" (it's NOT configurable per run — it IS hardcoded)
+   - "`--vars` uses comma-separated key=value" (it's a YAML/JSON dict)
+   - "`--vars` is set in profiles.yml" (it's a CLI flag; profiles.yml doesn't accept vars)
+   - "`var()` without a default errors only at runtime" (it errors at compile time with `Required var 'foo' not found`)
+7. Verified-sources line: docs.getdbt.com/reference/dbt-jinja-functions/var + docs.getdbt.com/docs/build/project-variables
+
+---
+
+## Iter516 JUDGE PROBE TARGETS
+
+**HIGH priority** (verify fix-A and fix-B both land):
+- **first_value/last_value re-probe** ("I want the first event per session — use first_value or ROW_NUMBER()? what about the last event?") — verifies FIX A canonical lands + the LAST_VALUE default-frame gotcha is communicated correctly
+- **last_value default-frame 2nd angle** ("does `last_value(x) OVER (PARTITION BY p ORDER BY o)` give the partition's last value?") — direct probe of the gotcha; expected: "NO, it gives the CURRENT ROW under the default frame; you need `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`"
+- **dbt var() re-probe** ("I want lookback_days configurable from the CLI without editing the model — how?") — verifies FIX B canonical lands with the `{{ var('name', default) }}` + dbt_project.yml + `--vars` three-piece pattern
+- **dbt var() 2nd angle** ("what's the difference between `{% set %}` and `{{ var() }}` in dbt?") — verifies the contrast block lands and the responder routes "configurable" to var() not set
+
+**MEDIUM priority** (verify iter515 r27 §4.4D + §4.3 hold under different angles):
+- **greatest/least with mixed types** ("can greatest mix DECIMAL and DOUBLE columns?") — verifies type-coercion edge isn't fabricated
+- **substr-negative bounded** ("what does `substr('abc', -10)` return — error or empty string?") — verifies the safe-on-overshoot edge isn't fabricated
+- **nth_value 3rd angle** ("can I get the 2nd event per session with nth_value?") — verifies frame-extension callout extends past last_value
+
+**LOW priority**:
+- Federation stays UNPROBED — row stays 4.49944/310
+
+---
+
+## Topic-average update math (for the next judge pass)
+
+Q1 (greatest/least) maps primarily to **SQL query best practices for OLAP** (per-row max/min idiom, cleaner-than-CASE-WHEN canonical).
+Q2 (substr-negative + no right()/no left()) maps primarily to **Oracle PL/SQL → dbt + Trino SQL migration** (Oracle SUBSTR direct-port canonical at r27 §4.3).
+Q3 (first_value/last_value vs ROW_NUMBER) maps primarily to **SQL query best practices for OLAP** (window-function canonical) and secondarily to **Analytical query patterns on Iceberg+Trino** (first-event-per-session funnel idiom).
+Q4 (dbt var() configurable lookback) maps primarily to **Oracle PL/SQL → dbt + Trino SQL migration** (dbt-config canonical at r27 §6.x).
+
+**SQL query best practices for OLAP**: 4.5401/72 → (4.5401·72 + 4.9375 + 3.1875)/74 = 335.9087/74 = **4.5393/74** (-0.0008 — Q1 STRONG lifts, Q3 sub-threshold drags, net near-flat)
+
+**Oracle PL/SQL → dbt + Trino SQL migration**: 4.5203/82 → (4.5203·82 + 4.9375 + 3.125)/84 = 378.7271/84 = **4.5087/84** (-0.0116 — Q4 sub-threshold drags, Q2 STRONG lifts, net negative)
+
+**Federation row UNCHANGED**: 4.49944/310 (not probed)
+
+All probed topics remain comfortably above their pass thresholds. No topic drops below 3.5; no PASSED topic drops below 4.0.
+
+---
+
+## Summary
+
+- **Overall iter515 = 4.0469 PASS** (+0.547 above floor; 114th consecutive extended-phase PASS)
+- **BOTH iter514 content gaps FILLED**: Q1 greatest/least + Q2 substr-negative both CONFIRMED LANDED on first re-probe (26th + 27th leading-canonical bulletproofing landing instances)
+- **TWO NEW iter515 content gaps surface**: Q3 first_value/last_value + Q4 dbt var() — both honest/partial punts, NO fabrication, correct safety posture
+- **Iter516 PRIMARY FIX TARGETS**: (FIX A) first_value/last_value/nth_value canonical with the LAST_VALUE default-frame gotcha; (FIX B) dbt var() three-piece canonical (`{{ var('name', default) }}` + `vars:` block in dbt_project.yml + `--vars` CLI override) with explicit `{% set %}` vs `var()` contrast
+- **NO new fabrications this iter**
+- **Federation rubric row stays 4.49944/310, r22 §13.x guardrails untouched**

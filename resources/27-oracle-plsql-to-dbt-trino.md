@@ -860,7 +860,7 @@ Sources (verified June 2026): [trino.io/docs/current/functions/datetime.html](ht
 
 | Oracle | Trino | Notes |
 |---|---|---|
-| `SUBSTR(s, start, len)` | `substr(s, start, len)` OR `substring(s FROM start FOR len)` | Both 1-indexed; same as Oracle. |
+| `SUBSTR(s, start, len)` | `substr(s, start, len)` OR `substring(s FROM start FOR len)` | Both 1-indexed; same as Oracle. **NEGATIVE START SUPPORTED.** Per [trino.io/docs/current/functions/string.html](https://trino.io/docs/current/functions/string.html), Trino `substr(string, start[, length])` supports a NEGATIVE `start` that counts from the END: `substr('Quadratically', -5)` -> `'cally'` (last 5 chars). Oracle `SUBSTR(s, -n)` ports DIRECTLY to Trino `substr(s, -n)` — no rewrite needed. **NO `right()` / `left()` IN TRINO.** Trino has NO `right(s, n)` or `left(s, n)` function — calling either produces `Function 'right' not registered`. Use `substr(s, -n)` for the LAST n chars; `substr(s, 1, n)` for the FIRST n chars. Keyword anchors: substr negative index Trino, last N characters Trino, right left function Trino does not exist, SUBSTR from end. |
 | `INSTR(s, sub)` | `strpos(s, sub)` | Returns position (1-indexed); `0` if not found, same as Oracle. |
 | `INSTR(s, sub, start, n)` (find n-th occurrence) | No single-call equivalent; chain `strpos` + `substr` or use `regexp_extract_all`. | The 4-argument INSTR form is Oracle-only. |
 | split a delimited string and grab the N-th piece (e.g. subdomain from `acme.ourapp.com`) | `split_part(s, delimiter, n)` — `split_part(url, '.', 1)` → `'acme'` | 1-indexed; signature `split_part(string, delimiter, index)`. **Verified nuance: if `index` is out of range, Trino returns `NULL` — NOT an empty string** (trino.io string-functions; Trino #14460). Do NOT write "returns empty string if the index is missing" — that's a base-training myth. For full URLs (`https://acme.ourapp.com/x`) use `regexp_extract(url, '([a-z0-9-]+)\.ourapp\.com', 1)` instead. |
@@ -1116,6 +1116,26 @@ SELECT round(price * 1.0875, 2) AS price_with_tax FROM orders;
 > - Resource 11 § Trino dialect ↔ native-Iceberg name translation — the canonical replacement for any `write.*-codec` / `TBLPROPERTIES` / `properties = map(...)` form.
 > - Resource 17 § LEADING CANONICAL — `$snapshots` column list — the canonical column names (`committed_at`, NOT `timestamp_ms`).
 > - **§ LEADING CANONICAL — Oracle vs Trino NULLS-default semantics in ORDER BY (top of this resource) — the canonical Oracle-to-Trino NULLS-default migration pattern.**
+
+### 4.4D LEADING CANONICAL — `greatest(v1, ..., vN)` / `least(v1, ..., vN)` row-wise max/min across columns + NULL-propagation differs from PostgreSQL/Oracle
+
+**Keyword anchors:** greatest least Trino, max of several columns, highest value across columns in a row, row-wise max vs MAX aggregate, greatest null behavior Trino, least null behavior Trino, max across columns Trino, greatest ignores nulls.
+
+**The rule (verified at [trino.io/docs/current/functions/comparison.html](https://trino.io/docs/current/functions/comparison.html)).** `greatest(v1, v2, ..., vN)` returns the LARGEST and `least(v1, v2, ..., vN)` returns the SMALLEST of the listed VALUES/COLUMNS — **ROW-WISE** (across columns in one row), **NOT** an aggregate. Contrast: `max(col)` / `min(col)` are AGGREGATES down rows (one value per group); `greatest` / `least` are scalar across columns in the same row. Args must be mutually comparable / coercible to a common type (supported: DOUBLE, BIGINT, VARCHAR, TIMESTAMP, TIMESTAMP WITH TIME ZONE, DATE).
+
+**LOAD-BEARING NULL behavior — Trino DIFFERS from PostgreSQL and Oracle.** Trino's `greatest` / `least` return **NULL if ANY argument is NULL**. Per trino.io: *"Like most other functions in Trino, they return null if any argument is null. Note that in some other databases, such as PostgreSQL, they only return null if all arguments are null."* Oracle's `GREATEST` / `LEAST` also return NULL if any arg is NULL (Oracle matches Trino here, but engineers coming from Postgres muscle memory get bitten). To ignore NULLs in Trino, `COALESCE` each arg first:
+
+```sql
+-- Row-wise max across three currency price columns, NULL-safe.
+SELECT greatest(coalesce(price_usd, 0), coalesce(price_eur, 0), coalesce(price_gbp, 0)) AS highest_price FROM products;
+
+-- Plain form (returns NULL if ANY of the three columns is NULL — usually NOT what you want).
+SELECT greatest(price_usd, price_eur, price_gbp) AS highest_price FROM products;
+```
+
+**DO-NOT-WRITE:**
+1. **Using `MAX(col)` to get the row-wise max across columns.** `MAX(col)` is an aggregate down rows (one value per group); for row-wise max across columns in the SAME row use `greatest(c1, c2, c3)`. Writing `SELECT MAX(price_usd, price_eur, price_gbp)` is a parse error — `MAX` is unary.
+2. **Assuming `greatest()` / `least()` skip NULLs.** Trino returns NULL if any arg is NULL (matches Oracle; differs from PostgreSQL). Always `COALESCE` each arg if you want to ignore NULLs.
 
 ### 4.5 Query-shape and pseudo-column constructs
 
