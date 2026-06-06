@@ -193,6 +193,25 @@ GROUP BY u.user_id;
 
 > **Note on MAPs.** `contains` does NOT work on MAPs — for "does this map have key K?" use `element_at(map, key) IS NOT NULL` (see [resource 09 § MAP existence check](09-lakehouse-schema-design.md#critical--use-element_at-not--for-map-access-in-trino)) or `contains(map_keys(map), key)` (note `map_keys` returns an `ARRAY`, then `contains` on that array works).
 
+### 1a.4 Trino ARRAY higher-order functions — `transform` / `filter` / `reduce` / `any_match` / `array_sort` apply a lambda IN-ARRAY (no UNNEST)
+
+**Keyword anchor:** Trino array transform filter reduce, apply function to each array element, lambda array Trino, higher-order array function, map over array without unnest, transform array Trino, filter array by condition, reduce array to scalar, any_match all_match none_match array, array_sort comparator, zip_with two arrays, array HOF.
+
+**The rule.** When you want to APPLY a function PER ELEMENT but keep the result AS AN ARRAY (one row in, one row out — a transformed/filtered ARRAY), use a Trino ARRAY higher-order function (HOF). HOFs take a lambda written with `->`. You only need to UNNEST when you actually want ROWS (one row per element, e.g. for GROUP BY / JOIN across elements). Verified at [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html) and [trino.io/docs/current/functions/lambda.html](https://trino.io/docs/current/functions/lambda.html).
+
+| Function | Signature | What it does — worked example |
+|---|---|---|
+| `transform` | `transform(array(T), T -> U) -> array(U)` | Map each element through the lambda. `transform(prices, p -> p * 1.1)` -> ARRAY with each price scaled by 1.1. |
+| `filter` | `filter(array(T), T -> boolean) -> array(T)` | Keep only matching elements. `filter(scores, s -> s >= 80)` -> ARRAY of scores >= 80. |
+| `reduce` | `reduce(array(T), S initial, (S, T) -> S, S -> R) -> R` (4-arg) | Fold to a scalar. `reduce(amounts, 0, (s, x) -> s + x, s -> s)` -> sum of `amounts`. |
+| `any_match` / `all_match` / `none_match` | `any_match(array(T), T -> boolean) -> boolean` | Did any / all / no elements satisfy the lambda? |
+| `array_sort` | `array_sort(array(T))` or `array_sort(array(T), (a, b) -> int)` | Sort ascending; the 2-arg form takes a comparator returning -1/0/1. |
+| `zip` / `zip_with` | `zip(a, b) -> array(row)` / `zip_with(a, b, (x, y) -> R) -> array(R)` | Element-wise pair / merge of two equal-length arrays. |
+
+**When to UNNEST vs use an HOF.** UNNEST explodes an array to ROWS (one row per element) — use it when the next step needs `GROUP BY element`, `JOIN ... ON element = ...`, or `WHERE element IN (subquery)`. HOFs keep the result IN THE ARRAY (one row, transformed/filtered/reduced ARRAY) — use them when the downstream consumer wants the array shape preserved (e.g. you're rebuilding a column, projecting a per-row aggregate without losing other columns, or feeding the array to another function). See §1a / §1a.1 for UNNEST.
+
+**DO NOT WRITE.** "Trino has no `transform` / `filter` / `reduce` over arrays — you must UNNEST and then re-aggregate to apply a function per element" — **FALSE**. These HOFs operate in-array and are documented at [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html) + [trino.io/docs/current/functions/lambda.html](https://trino.io/docs/current/functions/lambda.html). Reaching for UNNEST + ARRAY_AGG just to map/filter a single column is the wrong shape — it shuffles rows you didn't need to shuffle.
+
 ---
 
 ## 2. Funnels (drop-off across a sequence of events)
@@ -373,7 +392,7 @@ Run this on 5–10 different partitions covering your typical query shapes (per-
 
 For DAU/WAU/MAU dashboards that need to refresh every minute against a 500M-row events table, even `approx_distinct` is wasteful if it re-scans raw events on every refresh. The production pattern is to **build a daily HyperLogLog sketch table once**, then merge sketches at query time for any window size you want.
 
-> **`approx_set` precision is FIXED — there is NO `approx_set(x, e)` overload** (verified at [trino.io/docs/current/functions/hyperloglog.html](https://trino.io/docs/current/functions/hyperloglog.html) — the only signature is `approx_set(x) -> HyperLogLog`). **Keyword anchors:** approx_set precision, tune HLL sketch error, approx_set no second argument, approx_distinct vs approx_set precision, tighter than 2.3% distinct sketch, control HLL standard error stored sketch. The stored sketch is fixed at the canonical **~2.3% standard error**, and every sketch you later `merge()` shares that one fixed precision — you cannot store a "tighter sketch" by passing a precision argument to `approx_set`. To get tighter than 2.3%, you have only two options: (1) use the **scalar `approx_distinct(x, e)`** form directly (e.g. `approx_distinct(user_id, 0.01)` for ~1% standard error — see the `approx_distinct(x, e)` canonical above), which computes the count in one query but is **NOT a stored / mergeable sketch**, OR (2) fall back to exact `COUNT(DISTINCT)`. **DO NOT WRITE:** `approx_set(x, e)` with a 2nd precision arg (does NOT exist — only `approx_distinct` takes `e`); claiming you can tune a stored HLL sketch's error after the fact.
+> **`approx_set` precision is FIXED at ~2.3% — there is NO `approx_set(x, e)` overload** (verified at [trino.io/docs/current/functions/hyperloglog.html](https://trino.io/docs/current/functions/hyperloglog.html) — the only signature is `approx_set(x) -> HyperLogLog`). **Keyword anchors:** approx_set precision, tune HLL sketch error, approx_set no second argument, approx_distinct vs approx_set precision, tighter than 2.3% distinct sketch, control HLL standard error stored sketch. The stored sketch is fixed at ~2.3% and every sketch you later `merge()` shares that one fixed precision; for a tighter one-off (non-mergeable) count, use the SCALAR `approx_distinct(visitor_id, 0.01)` — see the `approx_distinct(x, e)` canonical above — or fall back to exact `COUNT(DISTINCT)`. **DO NOT WRITE:** `approx_set(x, e)` with a 2nd precision arg (does NOT exist — only `approx_distinct` takes `e`); claiming you can tune a stored HLL sketch's error after the fact.
 
 ```sql
 -- Step 1: nightly job — one row per day, one sketch column.

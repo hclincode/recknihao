@@ -594,6 +594,35 @@ WHERE contains(map_keys(properties), 'debug_mode');
 
 **Mnemonic:** `element_at` on a MAP returns the **value** (a scalar). `cardinality` wants a **collection** (array or map). You can't wrap one in the other. The correct existence check is always `element_at(map_col, key) IS NOT NULL`.
 
+### LEADING CANONICAL — Trino MAP higher-order functions (`map_filter` / `map_keys` / `map_values` / `transform_keys` / `transform_values`): filter and reshape a MAP IN-PLACE (no UNNEST)
+
+> **Keyword anchors so the responder lands here:** Trino map_filter, filter map by value, filter map by key, map_keys map_values, keys where value true, transform map without unnest, map higher-order function, map HOF Trino, lambda map Trino, rebuild map with transformed values, get keys whose value is true, keep only entries matching condition map, map_filter no second argument needed, map_entries map_from_entries.
+
+**The rule.** When you want to FILTER or RESHAPE a MAP and KEEP THE RESULT AS A MAP (one row in, one row out), use Trino's MAP higher-order functions (HOFs). UNNEST + WHERE + MAP_AGG is the WRONG shape for this — UNNEST explodes the MAP to rows. Verified at [trino.io/docs/current/functions/map.html](https://trino.io/docs/current/functions/map.html) and [trino.io/docs/current/functions/lambda.html](https://trino.io/docs/current/functions/lambda.html).
+
+| Function | Signature | What it does |
+|---|---|---|
+| `map_filter` | `map_filter(map(K,V), (k, v) -> boolean) -> map(K,V)` | Returns a MAP keeping only entries for which the lambda is true. Example: `map_filter(flags, (k, v) -> v = true)` -> only true-valued entries. |
+| `map_keys` | `map_keys(map(K,V)) -> array(K)` | Extracts all keys as an ARRAY. |
+| `map_values` | `map_values(map(K,V)) -> array(V)` | Extracts all values as an ARRAY. |
+| `transform_keys` | `transform_keys(map(K,V), (k, v) -> K2) -> map(K2,V)` | Rebuilds a MAP with each key transformed by the lambda. |
+| `transform_values` | `transform_values(map(K,V), (k, v) -> V2) -> map(K,V2)` | Rebuilds a MAP with each value transformed by the lambda. |
+| `cardinality` | `cardinality(map(K,V)) -> bigint` | Number of entries in the MAP. |
+| `element_at` | `element_at(map(K,V), key) -> V` | NULL-safe lookup — see the canonical above. |
+
+**Worked example — get the keys of a `feature_flags MAP(VARCHAR, BOOLEAN)` whose value is `true`, WITHOUT UNNESTing:**
+
+```sql
+-- CORRECT — combine map_filter + map_keys. One row in, one ARRAY(VARCHAR) out.
+SELECT user_id,
+       map_keys(map_filter(feature_flags, (k, v) -> v)) AS enabled_flags
+FROM iceberg.analytics.users;
+-- For a MAP(VARCHAR, BOOLEAN), v is already boolean — use `(k, v) -> v` directly.
+-- For a MAP(VARCHAR, VARCHAR) holding 'true'/'false', use `(k, v) -> v = 'true'`.
+```
+
+**DO NOT WRITE.** (1) "Trino has no `map_filter` / no way to filter a MAP without UNNEST" — **FALSE**, `map_filter` is documented at [trino.io/docs/current/functions/map.html](https://trino.io/docs/current/functions/map.html). (2) `UNNEST(map_entries(m)) ... WHERE ... GROUP BY ... MAP_AGG(...)` JUST to filter a MAP — that explode/regroup pattern is only correct when you genuinely need ROWS (e.g. to JOIN per-entry against another table or GROUP BY across rows). For pure filter/transform of a MAP, use `map_filter` / `transform_values` directly.
+
 ### LEADING CANONICAL — `CAST(map / array / row AS JSON)` is the right way to export a MAP column as JSON in Trino 467
 
 > **Keyword anchors so the responder lands here:** Trino map to json, cast map as json, struct row to json, array to json, json_format, export map column as json string, map to json string API, send MAP to JSON API, Trino map JSON cast, ROW to JSON, ARRAY to JSON, MAP to JSON cast Trino 467, serialize MAP to JSON, MAP to VARCHAR JSON, json_parse map round trip.
