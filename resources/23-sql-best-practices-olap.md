@@ -419,6 +419,33 @@ FROM   iceberg.billing.invoices;
 
 ---
 
+### DO NOT WRITE — the PostgreSQL `::` cast shorthand is **NOT** supported in Trino 467 (parse error) — iter571 PIN
+
+> **Keyword anchors (route here on any of these):** double colon cast Trino, `::` cast operator, Postgres cast syntax Trino, `::timestamp` `::bigint` `::int` `::date`, `'1900-01-01'::timestamp`, `col::bigint`, `created_at::date`, `expr::type`, `mismatched input '::'`, Trino does not support `::` cast.
+
+**The one-line rule.** The PostgreSQL `expression::type` cast shorthand (`'1900-01-01'::timestamp`, `col::bigint`, `created_at::date`, `id::int`, `payload::json`) is **NOT** supported in Trino 467 — it is a **parse error**. The cast operator was requested in [trinodb/trino issue #23795](https://github.com/trinodb/trino/issues/23795) (opened 2024-10-15: *"Add support for `x::type` cast operator as an alternative syntax for `CAST(x AS type)`"*) and [PR #25259](https://github.com/trinodb/trino/pull/25259) was opened to implement it, but as of Trino 467 **both the issue and the PR are OPEN — NOT merged**. The `::` token simply does not exist in Trino's grammar; the parser fails with `mismatched input '::'`. Use **`CAST(x AS type)`** (or **`TRY_CAST(x AS type)`** for NULL-on-failure semantics), or a **typed literal** like `TIMESTAMP '1900-01-01 00:00:00'` / `DATE '2026-03-01'` / `UUID 'a1b2c3d4-...'` instead.
+
+**Worked translation table — the most common `::` patterns and the Trino-compatible rewrite:**
+
+| WRONG (Postgres `::` — Trino parse error) | RIGHT (Trino 467) |
+|---|---|
+| `'1900-01-01'::timestamp` | `CAST('1900-01-01' AS TIMESTAMP)` — or, preferred, the typed literal `TIMESTAMP '1900-01-01 00:00:00'` |
+| `col::bigint` | `CAST(col AS BIGINT)` — or `TRY_CAST(col AS BIGINT)` if a bad row should become NULL instead of erroring |
+| `col::int` / `col::integer` | `CAST(col AS INTEGER)` |
+| `created_at::date` | `CAST(created_at AS DATE)` — or alias `date(created_at)` |
+| `'2026-03-01'::date` | `DATE '2026-03-01'` (typed literal, preferred) |
+| `payload::json` | `CAST(payload AS JSON)` |
+| `id::varchar` / `id::text` | `CAST(id AS VARCHAR)` (Trino has no `TEXT` type) |
+| `col::decimal(18,2)` | `CAST(col AS DECIMAL(18, 2))` |
+| `NULL::timestamp` (typed NULL in UNION / MERGE branch) | `CAST(NULL AS TIMESTAMP)` |
+| `col::uuid` | `CAST(col AS UUID)` — or typed literal `UUID 'a1b2c3d4-...'` |
+
+**Why this section lives in the cast zone (above §3.1D).** Engineers carrying Postgres / Snowflake / DuckDB / Redshift muscle memory reflexively type `::type` when building a CAST expression in Trino SQL or in a dbt model targeting Trino. The compile / parse failure surfaces as `mismatched input '::'` — which is **NOT** an obvious clue that the token is unsupported (the engineer often assumes a stray quote or paren). Routing every `::`-shaped question here gives the immediate fix.
+
+**Cross-references.** [Resource 27 §4.4A — TRINO-CAST-SYNTAX GUARDRAIL](27-oracle-plsql-to-dbt-trino.md) for the Oracle/Postgres migration-specific version (typed NULLs in MERGE soft-delete models, etc.). [Resource 13 § Postgres → Trino translation table](13-postgres-to-iceberg-ingestion.md) for `ts::DATE` → `CAST(ts AS DATE)`. The one place `::` IS legitimate in this stack: inside the query string passed to `system.query('...')` Postgres-passthrough on the Postgres connector — that string is forwarded verbatim to Postgres and runs in **Postgres's** parser, not Trino's. Outside passthrough (and outside Spark JDBC `dbtable` subqueries that run on the Postgres side), treat `::` as a **banned token** in Trino 467.
+
+---
+
 ## 3.1D. `arbitrary` / `any_value` (pick ONE value per group) and `max_by` / `min_by` (deterministic representative-value pick)
 
 **Keyword anchors:** arbitrary Trino, any_value aggregate, pick one value per group, representative value group by, functionally dependent column, "column is not part of GROUP BY", max_by min_by latest value, latest status per user, value associated with max date, one representative row per group, status as of latest update.

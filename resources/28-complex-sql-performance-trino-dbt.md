@@ -1346,6 +1346,8 @@ FROM   {{ ref('stg_events') }}
 
 Re-running over the same 2-day window is a no-op for already-seen events; late-arriving events get UPSERTed correctly.
 
+> **Watermark-default cast syntax (iter571 PIN — Trino has NO `::` cast operator).** The watermark default in the `COALESCE(MAX(...), <safe_default>)` wrapper MUST use a typed literal — `COALESCE(MAX(updated_at), TIMESTAMP '1900-01-01 00:00:00')` or `COALESCE(MAX(updated_at), CAST('1900-01-01 00:00:00' AS TIMESTAMP))`. **NEVER write `'1900-01-01'::timestamp`** — the PostgreSQL `::` cast shorthand is **not supported in Trino 467** (parse error `mismatched input '::'`; tracked at [trinodb/trino #23795](https://github.com/trinodb/trino/issues/23795) and [PR #25259](https://github.com/trinodb/trino/pull/25259) — both still OPEN). The dbt-trino model compiles the Jinja into Trino SQL, so the `::` ends up in the compiled SQL and the run fails at parse time. See [resource 23 §3.1C → DO NOT WRITE — PostgreSQL `::` cast shorthand is NOT supported in Trino 467](23-sql-best-practices-olap.md) for the full translation table.
+
 **The four lookback-window failure modes to avoid.**
 
 1. **`incremental_strategy='append'` with a lookback.** This INSERTS duplicate rows for already-seen events. Always use `merge` (or `delete+insert` / `insert_overwrite` for partition-replace patterns) when using lookback. The `append` strategy is correct only when the upstream guarantees no late arrivals AND you use a strict `event_ts > MAX` filter (no lookback).

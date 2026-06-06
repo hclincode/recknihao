@@ -1,171 +1,124 @@
-# Iter570 Judge Feedback
+# Iter571 Judge Feedback
 
-**Phase**: extended. **State.json**: NOT bumped (teacher already set iteration=570).
+PIN: Trino 467. All verifications run against trino.io/docs/467 (or stable doc text identical across 467-481 where the cited statement has not changed).
 
----
+## Q1 — Forward-fill composition (MULTI-row-per-bucket re-probe; iter571 FIX A check)
 
-## Q1 — forward-fill + date-spine COMPOSITION re-probe (PRIMARY iter570 fix verification)
+The responder built: `date_spine` (DISTINCT products × DISTINCT event-days) → `latest_per_day` (ROW_NUMBER() OVER (PARTITION BY product_id, date_trunc('day', occurred_at) ORDER BY occurred_at DESC), WHERE rn = 1) → `filled` (LEFT JOIN spine to deduped, then `LAST_VALUE(deduped.stock_count IGNORE NULLS) OVER (PARTITION BY spine.product_id ORDER BY spine.calendar_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`).
 
-**Question**: Row for EVERY hour for EVERY server incl. hours with no log, each showing last-known CPU state. Build end to end in Trino.
+Point-by-point (verify each):
 
-**Answer summary**: CTE chain `bounds → hour_spine (sequence+UNNEST) → servers (DISTINCT) → dense_grid (CROSS JOIN) → sparse_logs → final SELECT`. `sparse_logs` precomputes `LAST_VALUE(cpu_percent) OVER (PARTITION BY server_id ORDER BY logged_at ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS latest_cpu`. Final SELECT uses `COALESCE(l.latest_cpu, LAST_VALUE(l.latest_cpu) IGNORE NULLS OVER (PARTITION BY g.server_id ORDER BY g.ts ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW))`.
+**(i) GOOD — fanout-safe pre-aggregation.** The deduped CTE collapses many-per-(product,day) events to exactly one row per (product, day) via `ROW_NUMBER() ... ORDER BY occurred_at DESC) = 1` BEFORE the LEFT JOIN. This is functionally equivalent to the canonical `max_by(stock_count, occurred_at) GROUP BY product_id, date_trunc('day', occurred_at)` and PREVENTS the iter570 LEFT-JOIN-fanout defect. CONFIRMED — the iter571 FIX A composition order (dedup-then-join-then-window) landed.
 
-### Verification
+**(ii) GOOD — no pre-join window; look-BACK frame.** No LAST_VALUE / forward-fill window appears in any pre-join CTE. The forward-fill runs ONLY in the final `filled` CTE, AFTER the LEFT JOIN, with frame `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` (look-BACK), NOT `UNBOUNDED FOLLOWING`. The iter570 anti-pattern (full-frame LAST_VALUE in a pre-join CTE collapsing to a per-entity constant) did NOT recur. CONFIRMED.
 
-**Point (i) — IGNORE NULLS placement (iter569 syntax fix)**: CONFIRMED FIXED.
-- The grammar rule from PR #1244 (`SqlBase.g4`): `functionCall: name '(' args ... ')' nullTreatment? filter? over?`. The clause sits AFTER `')'` and BEFORE `OVER`. The answer's form `LAST_VALUE(l.latest_cpu) IGNORE NULLS OVER (...)` matches this. Iter569's `LAST_VALUE(... IGNORE NULLS)` parse error is GONE.
-- Source: Trino PR #1244 grammar + Trino 467 window-functions doc ("If IGNORE NULLS is specified, all rows where x is null are excluded from the calculation").
+**(iii) BAD — REGRESSION — IGNORE NULLS placement parse error.** The responder wrote `LAST_VALUE(deduped.stock_count IGNORE NULLS) OVER (...)`. Per Trino 467 grammar, the null-treatment clause is OUTSIDE the function-args paren and BEFORE `OVER`. Web search verification (trino.io window functions doc): "the IGNORE NULLS clause is placed after the closing parenthesis of the function arguments for LAST_VALUE ... syntax is `LAST_VALUE(column) IGNORE NULLS`." SQL grammar form: `<first or last value function> ::= <first or last value> <left paren> <value expression> <right paren> [ <null treatment> ]`. The responder's form places `IGNORE NULLS` INSIDE the args paren — that produces `mismatched input 'IGNORE'` at parse time. THE QUERY DOES NOT RUN AS WRITTEN. This is the same parse-error bug from iter569 — direct regression even though the iter569 H3 fix is still in r07 §1a / r23.
 
-**Point (ii) — final forward-fill frame**: CONFIRMED CORRECT.
-- The outer window `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` is a strict look-BACK frame. Applied AFTER the LEFT JOIN, the window sees the post-join NULL gaps in `l.latest_cpu` and IGNORE NULLS skips them, taking the last non-null value at-or-before the current hour. This matches the iter570 COMBINED CANONICAL Step 3 recipe.
+**(iv) PARTIAL — non-dense spine.** The `date_spine` CTE materializes products × `DISTINCT date_trunc('day', occurred_at)` over the EXISTING stock_changes rows. Days on which NO product had any change are entirely absent from the spine. The question explicitly stated "lots of days with no update" — those zero-event days will be missing from the output. The canonical builds a TRUE dense calendar via `sequence(DATE '2026-01-01', DATE '2026-05-31', INTERVAL '1' DAY)` + `CROSS JOIN UNNEST`. The responder's spine is only as dense as the union of distinct event-days — fine when every day has SOMETHING, broken when whole days have zero events.
 
-**Point (iii) — pre-join `sparse_logs` UNBOUNDED FOLLOWING window (NEW DEFECT)**: CONFIRMED SEMANTICALLY WRONG.
-- The frame `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` with PARTITION BY `server_id` ORDER BY `logged_at` covers the ENTIRE partition. By LAST_VALUE semantics over a fully unbounded frame, `LAST_VALUE(cpu_percent)` returns the cpu_percent of the chronologically LAST row in the partition — the SAME global-latest value for every row in `sparse_logs` for that server.
-- Trino 467 window-functions doc: "`last_value(x)` Returns the last value of the window." The "window" here is the active frame; for `ROWS UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` the frame is the whole partition. (Frame-defaults aside: Trino's default frame is `RANGE UNBOUNDED PRECEDING` = `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` — not relevant here because the frame is explicit, but reinforces that frame choice drives the result.)
-- Consequence: `latest_cpu` is a CONSTANT (the global-last cpu) on every matched grid row. The final SELECT then "forward-fills" a constant — every hour (data row or gap) shows the global-latest CPU, not the last-known cpu as-of-that-hour. Semantically WRONG result on every row. This is exactly the "future-fill anti-pattern" the iter570 COMBINED CANONICAL "DO-NOT-WRITE" block warns against — re-introduced in a different place (a pre-join CTE instead of the outer SELECT).
-
-**Point (iv) — fanout**: CONFIRMED. `sparse_logs` is NOT aggregated to one row per (server_id, hour). If a server logs N times in an hour, the LEFT JOIN on `l.hour = g.ts` produces N duplicate rows for that (server, hour). The teacher's canonical Step 1/2 implicitly assumes one-row-per-(entity, bucket) but does not say so explicitly.
-
-### Corrected minimal composition
+### Corrected query (copy/paste)
 
 ```sql
-WITH bounds AS (
-  SELECT min(date_trunc('hour', logged_at)) AS lo,
-         max(date_trunc('hour', logged_at)) AS hi
-  FROM server_metrics
-  WHERE logged_at >= current_timestamp - INTERVAL '7' DAY
+WITH date_spine AS (
+  SELECT p.product_id, d.day AS calendar_date
+  FROM products p
+  CROSS JOIN UNNEST(sequence(DATE '2026-01-01', DATE '2026-05-31', INTERVAL '1' DAY)) AS d(day)
 ),
-hour_spine AS (
-  SELECT t AS hour
-  FROM bounds, UNNEST(sequence(lo, hi, INTERVAL '1' HOUR)) AS u(t)
-),
-servers AS (
-  SELECT DISTINCT server_id FROM server_metrics
-  WHERE logged_at >= current_timestamp - INTERVAL '7' DAY
-),
-dense_grid AS (
-  SELECT s.server_id, h.hour
-  FROM servers s CROSS JOIN hour_spine h
-),
--- Step 2 prep: ONE row per (server, hour) from the raw facts
-hourly_obs AS (
-  SELECT server_id,
-         date_trunc('hour', logged_at) AS hour,
-         max_by(cpu_percent, logged_at) AS cpu_at_hour   -- last reading inside the hour
-  FROM server_metrics
-  WHERE logged_at >= current_timestamp - INTERVAL '7' DAY
-  GROUP BY server_id, date_trunc('hour', logged_at)
+latest_per_day AS (
+  SELECT
+    product_id,
+    date_trunc('day', occurred_at) AS event_day,
+    max_by(stock_count, occurred_at) AS stock_count   -- one row per (product, day)
+  FROM stock_changes
+  WHERE occurred_at >= DATE '2026-01-01' AND occurred_at < DATE '2026-06-01'
+  GROUP BY product_id, date_trunc('day', occurred_at)
 )
-SELECT g.server_id,
-       g.hour,
-       COALESCE(
-         o.cpu_at_hour,
-         LAST_VALUE(o.cpu_at_hour) IGNORE NULLS OVER (
-           PARTITION BY g.server_id
-           ORDER BY g.hour
-           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-         )
-       ) AS cpu_state
-FROM dense_grid g
-LEFT JOIN hourly_obs o
-  ON o.server_id = g.server_id AND o.hour = g.hour
-ORDER BY g.server_id, g.hour;
+SELECT
+  s.product_id,
+  s.calendar_date,
+  LAST_VALUE(l.stock_count) IGNORE NULLS OVER (        -- IGNORE NULLS OUTSIDE paren
+    PARTITION BY s.product_id
+    ORDER BY s.calendar_date
+    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW   -- look-BACK only
+  ) AS last_known_stock
+FROM date_spine s
+LEFT JOIN latest_per_day l
+  ON l.product_id = s.product_id AND l.event_day = s.calendar_date;
 ```
 
-Key differences vs the responder:
-- NO pre-join LAST_VALUE window — the join column `cpu_at_hour` is a real per-hour reading that is NULL on gap rows.
-- Aggregation `GROUP BY server_id, date_trunc('hour', logged_at)` with `max_by(cpu_percent, logged_at)` collapses multiple logs in one hour to one row (no fanout).
-- The look-back IGNORE NULLS window runs ONLY in the final SELECT over post-join rows — exactly what the iter570 COMBINED CANONICAL says.
+Scores: Accuracy 2 (query does not run — IGNORE NULLS parse error; spine non-dense), Completeness 3 (composition order correct; spine completeness gap), Clarity 4 (CTE chain readable, clear naming), Actionability 2 (engineer who copy-pastes hits a parse error). **Avg 2.75.**
 
-**Scores**: Accuracy 2 / Completeness 3 / Clarity 3 / Actionability 2. **Avg 2.50**.
-*Reasoning*: syntax/final-frame correct (partial credit), but the pre-join UNBOUNDED FOLLOWING window makes the result semantically wrong on EVERY row, and the LEFT JOIN can fanout. An engineer running this verbatim gets a wrong dashboard.
+## Q2 — `::` cast re-probe (iter571 FIX C check)
 
----
+Responder correctly identified that the `::` shorthand is NOT supported in Trino 467 (parse error `mismatched input ':'`), and gave three valid alternatives: `CAST(created_at AS DATE)`, `date(created_at)`, typed literal `DATE '2026-06-01'`. Also added the UnwrapCastInComparison nuance: `CAST(event_ts AS DATE) = DATE '...'` still prunes partitions.
 
-## Q2 — no-unique-column tiebreaker re-probe (FIX B findability)
+Verifications:
+- GitHub issue [#23795](https://github.com/trinodb/trino/issues/23795) "Cast operator `::`" is OPEN — feature request to add `x::type` as alternative syntax for `CAST(x AS type)`. Not merged. CONFIRMED — `::` is NOT in the Trino 467 grammar.
+- Trino 467 conversion functions confirm `CAST(x AS type)` and `date(x)` are valid; the typed-literal form `DATE 'YYYY-MM-DD'` is documented under language/types.
+- UnwrapCastInComparison rule confirmed via Trino blog (2023/04/11/date-predicates.html) and PR #11170: "rewrites CAST(ts_column AS DATE) OP date_literal to a range expression on ts_column, with dropping the cast to allow for further optimizations such as pushdown into connectors."
 
-**Question**: Two rows tie on the sort timestamp picking latest per account; nothing unique to break the tie. Options?
+All three statements are accurate. FIX C VALIDATED.
 
-**Answer summary**: (A) `max_by(status, (updated_at, event_id))` composite-tuple tiebreaker; (B) `arbitrary(status)` for "any tied row is fine"; (C) `ROW_NUMBER ... ORDER BY updated_at DESC, event_id DESC`; mention adding sequence_id / insertion_timestamp at ingest. No nested window in ORDER BY.
+Scores: Accuracy 5, Completeness 5, Clarity 5, Actionability 5. **Avg 5.0.**
 
-### Verification
-- Tuple `(updated_at, event_id)` as `max_by` second arg: Trino ROW types are comparable when all fields are comparable, and Trino compares ROWs lexicographically (field-by-field). `max_by(x, y)` requires `y` to be orderable; an anonymous ROW of two orderable timestamp/bigint fields qualifies. VALID Trino 467.
-- `arbitrary(status)`: VALID, documented Trino aggregate (returns an arbitrary non-null value).
-- `ROW_NUMBER() OVER (PARTITION BY account_id ORDER BY updated_at DESC, event_id DESC)`: standard, deterministic when (updated_at, event_id) is unique.
-- "Add a sequence_id / insertion_timestamp at ingest" is the canonical structural fix and is honest.
-- Iter570 FIX B keyword anchor on r23 §3.1G is doing its job — the responder surfaced the right paragraph and didn't nest a window inside ORDER BY (iter568 ban respected).
+## Q3 — NOT IN trap / anti-join
 
-**Scores**: Accuracy 5 / Completeness 5 / Clarity 4 / Actionability 5. **Avg 4.75**.
+Responder explained SQL three-valued logic (NULL comparisons → UNKNOWN), warned that NOT IN with any NULL in the IN-list returns zero rows silently. Recommended `NOT EXISTS (...)` and `LEFT JOIN ... WHERE o.customer_id IS NULL` as safe alternatives. Said NOT EXISTS converts to a SemiJoin in Trino.
 
----
+Verifications:
+- NULL + NOT IN three-valued-logic gotcha: standard SQL behavior, applies to Trino 467 (Trino follows standard 3VL).
+- NOT EXISTS and LEFT-JOIN-IS-NULL anti-join: both standard, both correct.
+- Minor nit: NOT EXISTS in Trino typically compiles to an ANTI-join (or anti-SemiJoin) node, not a plain SemiJoin (a SemiJoin is the IN/EXISTS positive form; NOT EXISTS is the anti variant). EXPLAIN typically shows `SemiJoinNode` with type `SOURCE` and `filter` for the anti case, or in newer planners just labels it `ANTI`. The responder's "SemiJoin" framing is close but imprecise — engineer reading EXPLAIN may see `LEFT` join + filter or `Anti` rather than `SemiJoin`. Small docking on accuracy.
 
-## Q3 — month-over-month self-join
+Scores: Accuracy 4 (SemiJoin label slightly off vs anti-join), Completeness 5, Clarity 5, Actionability 5. **Avg 4.75.**
 
-**Question**: MoM revenue change per customer in one query; one table, one row per transaction.
+## Q4 — CASE tier bucketing
 
-**Answer summary**: `monthly_revenue` CTE `GROUP BY customer_id, date_trunc('month', tx_date)`, self LEFT-JOINed on `prev.month = date_add('month', -1, cur.month)`, `cur.revenue - COALESCE(prev.revenue,0)` for delta, `ROUND(100.0*(...)/NULLIF(COALESCE(prev.revenue,1),0),1)` pct, `WHERE cur.month >= date_add('month',-12,current_date)`.
+Responder: pre-aggregated `SUM(amount) GROUP BY customer_id` subquery, then outer query `CASE WHEN total_spent < 100 THEN 'low' WHEN total_spent < 1000 THEN 'medium' ELSE 'high' END AS spending_tier`, `GROUP BY spending_tier`, `ORDER BY CASE spending_tier WHEN 'low' THEN 1 ...`. Also offered `width_bucket(total_spent, 0, 10000, 3)` for equal-width buckets.
 
-### Verification
-- `date_add(unit, value, timestamp)` signature: confirmed at trino.io/docs/current/functions/datetime.html — "Adds an interval value of type unit to timestamp." `date_add('month', -1, cur.month)` is valid Trino 467.
-- Self-join MoM pattern is a standard, correct alternative to LAG (window LAG would be more idiomatic but the self-join is correct).
-- NULLIF divide-by-zero guard: correctly placed. (Minor: `COALESCE(prev.revenue, 1)` then `NULLIF(..., 0)` — if prev.revenue is NULL the divisor becomes 1, sidestepping the 0; if 0 then NULLIF returns NULL. The "new customer with no prev" row produces a pct of `100.0 * cur.revenue / 1` which is a misleading "percent" — minor analytic-semantics nit, not a Trino dialect bug.)
-- Type nuance: `date_trunc('month', tx_date)` returns the same type as input (date → date, timestamp → timestamp); comparing to `current_date` is type-compatible only if tx_date is DATE. If tx_date is TIMESTAMP, coercion handles it — minor nit.
+Verifications:
+- CASE bucketing + GROUP BY by output alias is valid Trino 467 (Trino accepts GROUP BY by alias in many cases; if engine quibbles, re-stating the CASE is a robust fallback — responder did not call this out, minor completeness gap).
+- `width_bucket(x, bound1, bound2, n)` is real Trino 467 math function. Confirmed: "function width_bucket(double, double, double, bigint) returns bigint" — "Returns the bin number of x in an equi-width histogram with the specified bound1 and bound2 bounds and n number of buckets."
+- Ordering by an explicit CASE in ORDER BY is standard SQL and works in Trino 467.
 
-**Scores**: Accuracy 4 / Completeness 4 / Clarity 4 / Actionability 4. **Avg 4.00**.
-
----
-
-## Q4 — dbt incremental late-arriving data
-
-**Question**: Hourly incremental model misses events that arrive late (occurred 2pm, landed 5pm). Handle without full reprocess.
-
-**Answer summary**: Watermark on `updated_at` (landing time) NOT occurred_at; backfill/lookback `updated_at >= (SELECT COALESCE(MAX(updated_at),'1900-01-01'::timestamp) FROM {{ this }}) - INTERVAL '24' HOUR`; idempotent `unique_key='event_id'` with MERGE. Also a Spark snippet.
-
-### Verification — CROSS-ENGINE DIALECT SLIP CONFIRMED
-- `'1900-01-01'::timestamp` uses the PostgreSQL `::` cast operator. **Trino 467 does NOT support this syntax.**
-- Verified at GitHub issue #23795 ("Cast operator `::`") and PR #25259: the PR to add `x::type` is OPEN, not merged. Opened March 2025, marked "stale-ignore", awaiting final review. **Not in Trino 467.** Trino cast syntax remains `CAST(x AS type)` / `TRY_CAST(x AS type)` — see trino.io/docs/current/language/types.html.
-- Running this in a dbt-trino model compiles to a Trino query and **raises a parse error** on `::timestamp`. Cross-engine slip — PostgreSQL syntax leaked into a Trino-compiled model.
-- The correct form is `CAST('1900-01-01' AS TIMESTAMP)` (or `TIMESTAMP '1900-01-01 00:00:00'` literal).
-- The rest of the pattern (landing-time watermark, 24h lookback, `unique_key='event_id'` for MERGE idempotence) is correct and matches r28 incremental canonical.
-- The Spark snippet is off-topic given the production stack is Trino+dbt for transformation (Spark is ingestion-only per prod_info.md), but it doesn't actively harm the answer.
-
-**Scores**: Accuracy 3 / Completeness 4 / Clarity 4 / Actionability 3. **Avg 3.50**.
-*Reasoning*: pattern is right, but the literal `'1900-01-01'::timestamp` is a parse error in Trino and the engineer would hit it on first dbt run.
-
----
+Scores: Accuracy 5, Completeness 4 (could have noted the alias-vs-restate nuance for portability), Clarity 5, Actionability 5. **Avg 4.75.**
 
 ## Overall
 
 | Q | Acc | Comp | Clar | Act | Avg |
 |---|---|---|---|---|---|
-| Q1 forward-fill+spine | 2 | 3 | 3 | 2 | 2.50 |
-| Q2 tie-break no-unique | 5 | 5 | 4 | 5 | 4.75 |
-| Q3 MoM self-join | 4 | 4 | 4 | 4 | 4.00 |
-| Q4 dbt late-arriving | 3 | 4 | 4 | 3 | 3.50 |
+| Q1 forward-fill | 2 | 3 | 4 | 2 | 2.75 |
+| Q2 `::` cast | 5 | 5 | 5 | 5 | 5.00 |
+| Q3 NOT IN / anti-join | 4 | 5 | 5 | 5 | 4.75 |
+| Q4 CASE tier | 5 | 4 | 5 | 5 | 4.75 |
 
-**Overall avg = (2.50 + 4.75 + 4.00 + 3.50) / 4 = 14.75 / 4 = 3.6875**
+**Overall avg = (2.75 + 5.00 + 4.75 + 4.75) / 4 = 4.3125 → PASS** (overall avg >= 3.5).
 
-**Verdict: PASS** (≥3.5), but THIN. Q1 is failing — the iter570 PRIMARY fix is HALF-LANDED: the syntax bug is gone but the responder migrated the UNBOUNDED FOLLOWING anti-pattern from the outer SELECT into a pre-join CTE, which produces semantically wrong rows. Q4 has a clean cross-engine `::` slip.
+But the PASS is materially weakened by Q1's parse-error regression: a query that the responder confidently presents and which DOES NOT RUN is the worst kind of failure mode in production — engineer copy-pastes and hits an opaque `mismatched input 'IGNORE'` error.
 
----
+## Iter572 directive — STOP the recurring `LAST_VALUE(x IGNORE NULLS)` regression
 
-## Iter571 directive (next teacher actions)
+This is the SECOND occurrence of the IGNORE-NULLS-inside-paren bug (iter569 also). The iter566 H3 + iter569 reinforcement clearly didn't make the WRONG token salient enough. Three teacher actions for iter572:
 
-**FIX A (HIGH, PRIMARY — tighten r07 §4 COMBINED CANONICAL "DO-NOT-WRITE" so the spurious pre-join window is explicitly banned)**:
-- In `resources/07-analytical-query-patterns.md` §4 COMBINED CANONICAL "DO-NOT-WRITE" block, ADD a new bullet alongside the existing "IGNORE NULLS inside paren" and "pre-join LAST_VALUE leaves gaps NULL" bullets:
-  - "**Do NOT compute a LAST_VALUE window inside a pre-join CTE — even one with `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`. The forward-fill window MUST run AFTER the LEFT JOIN onto the dense grid, because the gap rows you need to fill don't exist until the join manufactures them. Special case: a pre-join `LAST_VALUE(metric) OVER (PARTITION BY entity ORDER BY ts ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)` is doubly wrong — over a fully unbounded frame it collapses to the partition-global LAST value (a constant per partition), so every matched grid row shows the entity's globally-latest metric, not the as-of-that-bucket reading.**"
-- Include a paste-ready WRONG / RIGHT block exactly mirroring the responder's iter570 defect: WRONG `sparse_logs` CTE with the unbounded-following window then LEFT JOIN, vs RIGHT `hourly_obs` CTE with `GROUP BY entity, bucket` + `max_by(metric, ts)` to get one row per (entity, bucket) with NO pre-join window.
+1. **HIGH — make the copy-paste canonical the most-salient artifact in r07 §4 COMBINED CANONICAL.** Currently the H3 explains the rule THEN shows a query. Invert: put the COMPLETE copy-paste query (using `sequence()`+UNNEST for the spine + `max_by` for the dedup + `LAST_VALUE(col) IGNORE NULLS OVER (... ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` in a single fenced block) FIRST, immediately under the topic header, with a one-line note "copy this; do not retype the IGNORE NULLS clause." The responder is grabbing structure from the most-prominent code block in scope — give it a correct one to grab.
 
-**FIX B (HIGH — Step 2 one-row-per-(entity, bucket) explicit aggregation)**:
-- Same H3, Step 2 of the 3-step recipe currently says "LEFT JOIN sparse facts onto the dense grid" — clarify: "**Step 2a: first collapse the sparse facts to ONE row per (entity_id, bucket) via `GROUP BY entity_id, bucket` + `max_by(metric, ts)` (or your preferred per-bucket pick). Step 2b: LEFT JOIN that collapsed source onto the dense grid on (entity_id, bucket).**" This prevents the LEFT-JOIN fanout the responder produced. Add a one-line keyword anchor: "fanout from multiple events per bucket, dedupe per hour before forward-fill, one row per device per minute before LOCF".
+2. **HIGH — tighter DO-NOT-WRITE with the EXACT WRONG token.** Add a new DO-NOT-WRITE bullet in r07 §1a (the existing IGNORE NULLS placement H3) and ALSO in r23 §3.1 of the form:
+   - DO NOT WRITE: `LAST_VALUE(col IGNORE NULLS) OVER (...)` <- parse error `mismatched input 'IGNORE'`
+   - DO NOT WRITE: `FIRST_VALUE(col IGNORE NULLS) OVER (...)` <- same
+   - DO NOT WRITE: `LAG(col IGNORE NULLS) OVER (...)` <- same
+   - WRITE: `LAST_VALUE(col) IGNORE NULLS OVER (...)` — null-treatment is OUTSIDE the args paren, BEFORE `OVER`.
+   - Quote the Trino 467 grammar verbatim: `<first or last value function> ::= <first or last value> <left paren> <value expression> <right paren> [ <null treatment> ]`.
+   Use the literal WRONG tokens above so keyword-grep from the responder lands on them.
 
-**FIX C (HIGH — Trino `::` cast ban explicit, place in BOTH r23 §3.1 and r28 incremental canonical)**:
-- In `resources/23-sql-best-practices-olap.md` §3.1 add a DO-NOT-WRITE entry: "**Do NOT use the PostgreSQL `x::type` cast shorthand in any Trino-compiled SQL (queries, dbt models, etc.). Trino 467 does NOT implement `::`; the feature request (issue #23795, PR #25259) is OPEN and unmerged as of mid-2025. Use `CAST(x AS type)` or `TRY_CAST(x AS type)`. WRONG: `'1900-01-01'::timestamp`. RIGHT: `CAST('1900-01-01' AS TIMESTAMP)` or `TIMESTAMP '1900-01-01 00:00:00'`. This is a common Postgres→Trino dialect slip in dbt incremental models.**" Include a keyword anchor: "Postgres double-colon cast Trino, ::timestamp Trino, dbt incremental cast literal, watermark default timestamp dbt-trino".
-- In `resources/28-improving-complex-sql-trino-dbt.md` incremental canonical, audit any `::` literals and convert to CAST/typed-literal form; add a one-line warning in the incremental section: "**Watermark default: `COALESCE(MAX(updated_at), TIMESTAMP '1900-01-01 00:00:00')` — never `'1900-01-01'::timestamp` (Postgres syntax; not valid Trino 467).**"
+3. **MEDIUM — true-dense-spine reminder.** In the same r07 §4 canonical, add a one-line callout under the spine CTE: "DO NOT build the spine from `SELECT DISTINCT date_trunc('day', event_ts) FROM facts` — days with zero events will be missing. Use `sequence(start, end, INTERVAL '1' DAY)` + `CROSS JOIN UNNEST` for a truly dense calendar." Verified per Trino datetime docs: `sequence(start, stop, step)` with INTERVAL DAY TO SECOND is the canonical dense-date generator.
 
-**FIX D (LOW — Q3 MoM polish, optional)**:
-- Add a `LAG`-based one-pass MoM variant alongside the self-join pattern in r07 (or wherever MoM lives) as the "idiomatic Trino" alternative; keep self-join as the explanatory baseline. Optional, non-blocking.
+No federation, no r22, no churn elsewhere. Pure r07 §4 + r23 §3.1 surgical reinforcement.
 
-**LOCKS to preserve next iter** (do not regress): all iter534-570 locks per state.json notes; especially iter566 standalone forward-fill H3, iter569 IGNORE-NULLS-paren grammar DO-NOT-WRITE, iter568 tie-break-determinism + nested-window-ban, r07 §1a-§1a.5, r28 incremental + unique_key, r09 SCD2 4-default-cols + dbt-snapshot-as-of single-instant point-in-time, r22 §13.x federation guardrails (ZERO edits).
-
-**Do not bump state.json this iter** — teacher already set iteration=570.
+Sources verified:
+- [Trino window functions doc (IGNORE NULLS grammar)](https://trino.io/docs/current/functions/window.html)
+- [Trino PR #1244 — IGNORE/RESPECT NULLS clause](https://github.com/trinodb/trino/pull/1244)
+- [Trino issue #23795 — Cast operator `::` (OPEN)](https://github.com/trinodb/trino/issues/23795)
+- [Trino blog — date predicates / UnwrapCastInComparison](https://trino.io/blog/2023/04/11/date-predicates.html)
+- [Trino PR #11170 — unwrap TIMESTAMP→DATE cast](https://github.com/trinodb/trino/pull/11170)
+- [Trino math functions — width_bucket](https://trino.io/docs/current/functions/math.html)
+- [Trino datetime functions — sequence](https://trino.io/docs/current/functions/datetime.html)
