@@ -890,6 +890,62 @@ The phrases you would type into a search bar for this pattern: **year over year*
 
 > **Cross-reference:** for the broader "monthly bucketed running total + GROUP BY rules anchor" pattern (which the YoY queries above also obey), see §5 Pattern A2 — Bucketed running total. The GROUP BY rule "**REPEAT the expression, do NOT use the alias**" applies here too. For YoY in a dbt incremental model (where YoY is computed inside `{% if is_incremental() %}` and the gap-fill spine is generated relative to a watermark), see [resource 27](27-oracle-plsql-to-dbt-trino.md) and [resource 28](28-complex-sql-performance-trino-dbt.md).
 
+### Pattern B3: LEADING CANONICAL — `first_value` / `last_value` / `nth_value` (the default-frame footgun)
+
+> **Keyword anchors so the responder lands here:** first_value last_value Trino, last value per group, last value per session, last value per partition, nth_value window function, last_value returns current row not last, window frame default RANGE UNBOUNDED PRECEDING CURRENT ROW, first event per session, first row per group window function, unbounded following frame, value window function. Verified at [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html) (Value functions + Window frames sections).
+
+`first_value(x)`, `last_value(x)`, and `nth_value(x, n)` are **value window functions** — they return a value of `x` from a specific row inside the window **FRAME** (not the full partition). The frame default is the load-bearing footgun.
+
+**The default frame when `ORDER BY` is present and no frame is specified is `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`** (same default that catches running totals — see Pattern A above). The frame **ends at the current row's peer group**, NOT at the end of the partition.
+
+| Function | Default-frame behavior | Get the "obvious" answer with |
+|---|---|---|
+| `first_value(x) OVER (PARTITION BY p ORDER BY o)` | Returns the first row's value in the partition. **Safe with the default frame** — the frame starts at `UNBOUNDED PRECEDING`, so the first row is always in-frame. | (use default frame — works) |
+| `last_value(x) OVER (PARTITION BY p ORDER BY o)` | **Returns the CURRENT row's value** (or the last peer when ORDER BY has ties) — NOT the partition's last value. The frame ENDS at current row, so the "last in frame" is the current row. | **You MUST set the frame explicitly:** `last_value(x) OVER (PARTITION BY p ORDER BY o ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)`. |
+| `nth_value(x, n) OVER (PARTITION BY p ORDER BY o)` | Returns NULL once `n` exceeds the current frame size (which only spans up through the current row by default) — typically silently NULL for `n > 1` on early rows. | For "nth across the whole partition", same explicit fix: `... ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`. |
+
+**Worked example — first event and last event per session:**
+
+```sql
+-- first_value with the default frame is SAFE (frame starts at UNBOUNDED PRECEDING).
+-- last_value REQUIRES the explicit UNBOUNDED-FOLLOWING frame.
+SELECT
+  session_id,
+  event_time,
+  event_type,
+  first_value(event_type) OVER (
+    PARTITION BY session_id ORDER BY event_time
+  ) AS first_event,                              -- default frame is fine
+  last_value(event_type) OVER (
+    PARTITION BY session_id ORDER BY event_time
+    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+  ) AS last_event                                -- explicit frame REQUIRED
+FROM iceberg.analytics.events;
+```
+
+**Cleaner alternative when you need the WHOLE first/last row (not just one column):** a `ROW_NUMBER()` filter is usually clearer than chaining a `first_value` / `last_value` per column:
+
+```sql
+-- First row per session — all columns, no per-column window calls.
+SELECT * FROM (
+  SELECT *,
+    ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY event_time ASC) AS rn
+  FROM iceberg.analytics.events
+) WHERE rn = 1;
+-- For "last row per session": ORDER BY event_time DESC, same rn = 1 filter.
+```
+
+**DO-NOT-WRITE — banned patterns (these silently return the wrong value, NO error message):**
+
+| DO NOT write | Why it's wrong / silently-wrong |
+|---|---|
+| `last_value(x) OVER (PARTITION BY p ORDER BY o)` expecting the partition's LAST value | **SILENT-WRONG.** Default frame is `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` — frame ENDS at the current row's peer group, so `last_value` returns the current row's value (or the last peer on ties), NOT the partition's true last value. **Fix:** add `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`. |
+| Omitting the explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` frame on `last_value` / `nth_value` when you want the true partition-wide answer | Same as above — without the explicit frame, every row sees a different (current-row-bounded) frame, and `last_value` / `nth_value(.., n > 1)` produce per-row values that are NOT the partition's last / nth. |
+| `last_value(x) OVER (PARTITION BY p ORDER BY o RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)` (with `RANGE`, not `ROWS`) | Syntactically valid but verbose / atypical; the canonical idiom in Trino docs and the rest of the OLAP world is the `ROWS` form. Stick with `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`. |
+| Reaching for `last_value` when the goal is "the row with MAX(timestamp) per group" with all columns | Use the `ROW_NUMBER() OVER (... ORDER BY timestamp DESC) = 1` subquery pattern shown above — far cleaner than a separate `last_value(col, ROWS ... UNBOUNDED FOLLOWING)` per column. |
+
+**Cross-reference to the same frame default.** This is the SAME default-frame rule that affects running totals — see Pattern A's RANGE-vs-ROWS callout (around the `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` discussion) and Pattern D's rolling-average frame discussion. The frame default is one concept; it lands as a footgun in three places: running totals (default RANGE groups peers), rolling averages (default doesn't slide), and `last_value` / `nth_value` (default ends at current row, not partition end).
+
 ### Pattern C: Rank (top-N per group)
 
 "Top 10 highest-value orders per tenant."

@@ -2806,6 +2806,53 @@ Per [docs.getdbt.com/docs/build/unit-tests](https://docs.getdbt.com/docs/build/u
 
 ---
 
+### 6.7G LEADING CANONICAL — dbt `var()` for per-run configurable values (NOT `{% set %}`)
+
+> **Keyword anchors:** dbt var configurable, dbt vars block dbt_project.yml, dbt run --vars override, parameterize dbt model lookback days, var vs set dbt, var default value, dbt variable from CLI, change dbt model parameter without code change. Verified at [docs.getdbt.com/reference/dbt-jinja-functions/var](https://docs.getdbt.com/reference/dbt-jinja-functions/var) and [docs.getdbt.com/docs/build/project-variables](https://docs.getdbt.com/docs/build/project-variables).
+
+**The three-piece pattern — use ALL three together for a tunable knob:**
+
+1. **In the model** — read the variable with a fallback default:
+   ```sql
+   SELECT *
+   FROM {{ ref('stg_events') }}
+   WHERE occurred_at >= date_add('day', -{{ var('lookback_days', 30) }}, current_date)
+   ```
+   `var('name', default)` reads a project variable; the `default` fires ONLY if the var isn't defined anywhere (project file or CLI).
+
+2. **In `dbt_project.yml`** — define defaults under a TOP-LEVEL `vars:` block (a sibling of `models:`, NOT nested inside it):
+   ```yaml
+   vars:
+     lookback_days: 30
+     event_type: signup
+   ```
+
+3. **At run time** — override without changing committed code, using the **`--vars` flag (plural, taking a YAML dict)**:
+   ```bash
+   dbt run --select stg_events --vars '{lookback_days: 7}'
+   # Multiple vars: dbt run --vars '{lookback_days: 7, event_type: purchase}'
+   ```
+   Precedence: CLI `--vars` > `dbt_project.yml` `vars:` > the `default` second-arg to `var(...)`.
+
+**Contrast — when to pick `var()` vs `{% set %}`:**
+
+| Need | Use | Why |
+|---|---|---|
+| A value you want **configurable per dbt run** (tunable knob, environment-specific, backfill override) | **`var('name', default)`** + `vars:` block + `--vars` CLI | The only mechanism dbt exposes at run time without a code change. |
+| A true compile-time constant inside one model file (e.g., a list of statuses Jinja-loops over to build SQL) | `{% set statuses = ['paid', 'refunded'] %}` | Jinja LOCAL variable — hardcoded at compile time, scoped to the file, NOT overridable. Fine for genuine constants. |
+
+**DO-NOT-WRITE — banned patterns:**
+
+| DO NOT write | Why it's wrong |
+|---|---|
+| `{% set lookback_days = 30 %}` for a value you want to tweak per run | **WRONG TOOL.** `{% set %}` is a Jinja LOCAL — hardcoded at compile time, not configurable via CLI. Use `var('lookback_days', 30)` + a `vars:` block + `--vars` instead. |
+| `dbt run --var 'lookback_days: 7'` (singular `--var`) | **FLAG NAME WRONG.** The flag is **`--vars`** (plural), and it takes a YAML dict: `--vars '{lookback_days: 7}'`. Singular `--var` is not a dbt CLI flag and will error. |
+| `dbt run --vars lookback_days=7` (key=value, no YAML) | **WRONG FORMAT.** `--vars` expects a YAML dict as a string: `--vars '{lookback_days: 7}'`. The `key=value` form is from other tools. |
+| Placing `vars:` nested INSIDE the `models:` block in `dbt_project.yml` | **WRONG SCOPE.** Project-level `vars:` is a TOP-LEVEL key in `dbt_project.yml` (a sibling of `models:`). Nesting it inside `models:` makes it a model-config that dbt ignores as a variable. |
+| `var('lookback_days')` with NO default, when the var might not be set in any environment | **Runtime error** — `var()` without a default raises if the variable isn't defined anywhere. Always provide a sensible default for non-critical knobs: `var('lookback_days', 30)`. |
+
+---
+
 ## 7. Cutover checklist (the non-obvious gotchas)
 
 Once your models compile and run, before you turn off Oracle:
