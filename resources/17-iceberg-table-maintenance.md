@@ -1048,6 +1048,40 @@ ORDER  BY s.committed_at DESC;
 >
 > **`is_current_ancestor` lives on `$history`, NOT on `$snapshots`.** A query like `SELECT * FROM "events$snapshots" WHERE is_current_ancestor = true` fails because `$snapshots` has no such column. The canonical pre-rollback verification query joins the two on `snapshot_id` — see the "Pre-rollback verification" query in the rollback section below, and the deeper `$history` vs `$snapshots` audit-reconstruction comparison further down in this document.
 
+> **`$snapshots.operation` — the FOUR canonical values + which SQL maps to which (read before answering "who/what wrote this snapshot").** Keyword anchors: iceberg snapshot operation values, MERGE overwrite snapshot, UPDATE DELETE overwrite snapshot, who wrote iceberg snapshot, $snapshots vs $history operation, snapshot summary trino_query_id. Verified at [iceberg.apache.org/spec](https://iceberg.apache.org/spec/) ("Snapshots" section) and [iceberg.apache.org/docs/latest/spark-writes](https://iceberg.apache.org/docs/latest/spark-writes/).
+>
+> | `operation` value | What kind of commit produced it | Trino/Spark SQL that maps here |
+> |---|---|---|
+> | **`append`** | New data files added, **no files removed**. | `INSERT INTO`, `INSERT OVERWRITE` against a partition where prior files stay, streaming appends. |
+> | **`overwrite`** | Data and/or delete files **added AND removed in a logical row-level overwrite** (delete + insert in one snapshot). | **`MERGE INTO`**, `UPDATE`, `DELETE` (when the delete writes equality/position-delete files + new data), `INSERT OVERWRITE` that replaces existing partition data. **MERGE is `overwrite`, NOT `replace`.** |
+> | **`delete`** | Data files **removed in whole, no new data files added**. | Partition-aligned `DELETE` that drops entire data files (whole-file delete), `DROP PARTITION`. |
+> | **`replace`** | Files rewritten with **no logical change** to the data (same rows, different file layout). | `ALTER TABLE ... EXECUTE optimize` (compaction), `CREATE OR REPLACE TABLE` rewrite, format/compression conversion. **Compaction, NOT row-level changes.** |
+>
+> **WHO wrote the snapshot — `$snapshots` does NOT have a user/principal column.** The six `$snapshots` columns are `snapshot_id`, `committed_at`, `parent_id`, `operation`, `manifest_list`, `summary` — there is **no `user`, no `principal`, no `created_by`, no `committer` column**. `$snapshots` answers WHAT operation happened and WHEN; to approximate WHO, read the `summary` MAP for engine-set hints and correlate to the engine's query log:
+>
+> ```sql
+> -- Pull engine-set hints from the summary MAP — element_at is the NULL-safe accessor.
+> -- Trino writers set 'trino_query_id'; Spark writers set 'spark.app.id'/'engine-name'.
+> SELECT snapshot_id, committed_at, operation,
+>        element_at(summary, 'trino_query_id') AS trino_query_id,
+>        element_at(summary, 'engine-name')    AS engine_name,
+>        element_at(summary, 'engine-version') AS engine_version
+> FROM iceberg.analytics."events$snapshots"
+> ORDER BY committed_at DESC LIMIT 20;
+> ```
+>
+> Take the `trino_query_id` and look it up in your Trino query log / event listener output (or the coordinator's `system.runtime.queries`) to recover the user, source IP, and full SQL text. `$history` doesn't carry user either — its `made_current_at` only tells you when a snapshot became the live pointer (e.g., on rollback).
+>
+> **DO-NOT-WRITE — banned `operation` and WHO claims:**
+>
+> | DO NOT write | Why it's wrong |
+> |---|---|
+> | "MERGE shows as `operation = 'replace'`" | **FALSE.** `MERGE INTO` (and `UPDATE` / `DELETE` that rewrite row-level data) commits an **`overwrite`** snapshot. `replace` is **compaction** (`EXECUTE optimize`) — same logical rows, new file layout. |
+> | "`$snapshots` lists 3 operation values" / "the operations are append/replace/delete" | **INCOMPLETE — there are FOUR.** Omitting `overwrite` is the most common mistake. Full set: `append`, `overwrite`, `delete`, `replace`. |
+> | "`$snapshots` has a `user` / `created_by` / `committer` column" | **FALSE — no such column.** WHO is not directly recorded. Use `element_at(summary, 'trino_query_id')` and correlate to the Trino query log. |
+> | "`$history` shows who rolled back" | **HALF-FALSE.** `$history` shows WHEN each snapshot became current (including the rollback moment via `made_current_at`), but NOT WHO triggered it — same no-user-column limitation as `$snapshots`. |
+> | "`$snapshots` and `$history` carry the same operation values" | **FALSE.** `operation` is a `$snapshots` column; `$history` does NOT have an `operation` column (only `made_current_at`, `snapshot_id`, `parent_id`, `is_current_ancestor`). Join them on `snapshot_id` to combine. |
+
 > **`$partitions` vs `$files` — per-partition size/count column-placement gotcha (read before writing `SUM(file_size_in_bytes) FROM "<t>$partitions"`).** These two metadata tables answer overlapping questions but have **disjoint column sets**. Keyword anchors: `$partitions` columns, `$partitions` vs `$files`, per-partition file count and size, `total_size` partition, biggest partitions by size, `file_size_in_bytes` is `$files` not `$partitions`. Verified at [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (Metadata tables section).
 >
 > | Table | Row shape | Size column | Count column | Aggregation needed? |

@@ -1,185 +1,114 @@
-# Iter 513 — Judge Feedback (extended phase)
+# Iter 514 Judge Feedback — Extended Phase
 
-**Overall: 4.336 PASS** (+0.836 above 3.5 floor). 112th consecutive overall PASS in extended phase. **Margin slightly above iter512's +0.734 — the Q1 DECIMAL-SUM fix LANDED and absorbed cleanly, but Q4 introduced a NEW load-bearing inverted-semantics error that drops a single answer below the 3.5 threshold.**
+**Overall: 3.984 PASS (margin +0.484 above 3.5 floor)** — Both iter513 reconcile-in-place fixes (Q1 dbt comma=AND/space=OR + Q2 $snapshots operation values incl. MERGE=overwrite) **LANDED on first re-probe** (24th and 25th consecutive leading-canonical bulletproofing instances). Two new content-gap under-answers (Q3 GREATEST + Q4 substr-negative-index) — honest punts, NO fabrication, but engineer left without the answer for two questions that have clean direct answers in Trino 467. Margin notably tighter than iter513 (+0.836) and iter512 (+0.734) — driven by two sub-3.5 individual answers offsetting two STRONG passes.
 
 ---
 
 ## Per-question scoring
 
-### Q1 — DECIMAL-SUM re-probe (DECIMAL(8,2) revenue over ~2B rows) — **4.969 STRONG PASS**
+### Q1 — dbt `--select` comma vs space RE-PROBE — 4.9375 STRONG PASS
 
-| Dim | Score |
-|---|---|
-| Technical accuracy | 5.0 |
-| Beginner clarity | 5.0 |
-| Practical applicability | 5.0 |
-| Completeness | 4.875 |
-
-**ITER513 PRIMARY FIX LANDED — DECIMAL-SUM CANONICAL CONFIRMED.** Verified against trino.io/docs/current/functions/aggregate.html ("sum(decimal(p, s)) returns decimal(38, s)"), trino.io/docs/current/language/types.html (max precision 38), and trinodb/trino #20227 (overflow raises NUMERIC_VALUE_OUT_OF_RANGE; older versions surfaced an "internal error" but never silent truncation):
-
-- "You do NOT need the cast" — CORRECT
-- "Trino auto-widens `sum(decimal(8,2)) -> decimal(38,2)`" — CORRECT (matches docs verbatim)
-- "2B rows × max ~1e6 per row = ~2e15, well under 1e38" — CORRECT (DECIMAL(8,2) max is 999,999.99 ~ 1e6, x 2e9 rows = 2e15 ~ 16 digits, fits with 22 digits of headroom)
-- "Does NOT silently truncate/round; overflow raises NUMERIC_VALUE_OUT_OF_RANGE hard error" — CORRECT (per #20227 + Trino aggregate code path)
-- Troubleshooting checklist for "too small" SUM (WHERE filter, JOIN drop/fan, upstream CAST scale truncation, NULL-heavy column + SUM skips NULLs, integer division upstream) — all 5 causes match the iter513 teacher canonical (r23 §3.1B)
-- Calling the cast advice "folklore from cloud-warehouse migration guides" — rhetorically strong; technically accurate (Snowflake/BigQuery DO have different auto-widening behavior, so the folklore origin is plausible)
-
-**The iter513 r23 §3.1B reconcile-in-place LANDED on FIRST re-probe — 23rd consecutive leading-canonical bulletproofing landing instance.** Iter512 Q2's "Trino does NOT auto-widen / truncates silently / need SUM(CAST(... AS DECIMAL(38,2)))" trifecta-fabrication is GONE.
-
--0.125 Completeness for no explicit pre-emption of the avg(decimal) sister-case (`avg(decimal(p,s)) -> decimal(38,s)` per same doc page) and no quote of the actual error-message text — non-load-bearing.
-
----
-
-### Q2 — COALESCE(preferred_name, legal_name, username) — **4.938 STRONG PASS**
-
-| Dim | Score |
-|---|---|
-| Technical accuracy | 5.0 |
-| Beginner clarity | 5.0 |
-| Practical applicability | 5.0 |
-| Completeness | 4.75 |
-
-Clean against trino.io/docs/current/functions/conditional.html verbatim ("returns the first non-null value... arguments are only evaluated if necessary" -> short-circuit). Left-to-right first-non-null semantics correct, same as Postgres correct, no false-gotchas invented.
-
--0.25 Completeness for no callout that all COALESCE arguments must be coercible to a common supertype (e.g., `COALESCE(varchar, int)` would fail type resolution) and no callout that `COALESCE(NULL, NULL, NULL)` returns NULL (the all-null edge case). Non-load-bearing.
-
----
-
-### Q3 — Iceberg $history vs $snapshots — **4.000 PASS (two real defects)**
-
-| Dim | Score |
-|---|---|
-| Technical accuracy | 3.5 |
-| Beginner clarity | 4.5 |
-| Practical applicability | 4.0 |
-| Completeness | 4.0 |
-
-**TWO REAL NITS verified against trino.io/docs/current/connector/iceberg.html and iceberg.apache.org/spec:**
-
-**Nit (i) — $snapshots operation values list is INCOMPLETE + MERGE->'replace' mapping is WRONG.** Per the Iceberg spec (section "Snapshots -> operation"), the four canonical operation values are: `append`, `replace`, `overwrite`, `delete`. The responder lists only `append, replace, delete` — **`overwrite` is MISSING**. Worse, the responder claims "MERGE shows as operation='replace'" — this is BACKWARDS:
-
-- `append` = INSERT INTO (new files added, no files removed)
-- `overwrite` = MERGE INTO / UPDATE / DELETE-with-row-filter / INSERT OVERWRITE (data files rewritten; affected rows replaced via copy-on-write or merge-on-read). **THIS is where MERGE lands.**
-- `replace` = compaction / `REPLACE TABLE AS` / OPTIMIZE / rewrite_data_files (files rewritten with identical logical content)
-- `delete` = pure file removals (e.g., DELETE that matches whole partitions -> metadata-only delete)
-
-An engineer reading the answer and grepping `WHERE operation = 'replace'` looking for the corrupting MERGE will find ONLY compaction snapshots, miss the actual MERGE, and target the wrong snapshot for rollback. Load-bearing mis-routing on a who-corrupted-the-table question.
-
-**Nit (ii) — "audit WHO DID WHAT" overstates $snapshots's coverage.** $snapshots columns are `committed_at`, `snapshot_id`, `parent_id`, `operation`, `manifest_list`, `summary`. **There is NO user/principal column.** The `summary` map MAY contain engine-set fields like `trino_query_id`, `added-data-files`, `total-records`, but not a SQL user identity. The honest answer is: $snapshots tells you WHAT (operation) and WHEN (committed_at), maybe HOW MUCH (summary counts), but NOT WHO — for WHO you need Trino query-log correlation via `summary['trino_query_id']` joined to your query history. The "audit WHO DID WHAT and WHEN" framing reads to a beginner as if $snapshots is a full audit table, which it isn't.
-
-**What was CORRECT and good:**
-- Whole-token quoting `"events$snapshots"` — VERIFIED CORRECT (split-quote `"events"$snapshots` and bare-dollar `events$snapshots` both fail to parse; iter509 r17 canonical holds)
-- $snapshots is one-row-per-snapshot — correct
-- $history is linearized current-ancestry with `made_current_at`/`parent_id`/`is_current_ancestor`/`snapshot_id` — correct routing target for time-travel / `FOR VERSION AS OF`
-- "use $snapshots for who-wrote-when-and-what" routing — correct (modulo the operation-values nit above)
-- "find snapshot by timestamp window" query pattern — correct
-
--1.5 Accuracy split: -1.0 for the `MERGE -> operation='replace'` inversion (load-bearing mis-routing), -0.5 for the missing `overwrite` value. -0.5 Clarity for not defining `summary` as a MAP nor explaining the trino_query_id correlation path. -1.0 Applicability for the wrong rollback-target if engineer searches by operation. -1.0 Completeness for the missing `overwrite` + missing "no user column, correlate via summary['trino_query_id']" callout.
-
----
-
-### Q4 — dbt model tags + reference in dbt build — **3.4375 sub-threshold INDIVIDUAL FAIL**
-
-| Dim | Score |
-|---|---|
-| Technical accuracy | 2.5 |
-| Beginner clarity | 4.5 |
-| Practical applicability | 2.75 |
-| Completeness | 4.0 |
-
-**CRITICAL LOAD-BEARING INVERSION.** Verified against docs.getdbt.com/reference/node-selection/set-operators verbatim:
-
-> "Commas with no spaces within an argument define an intersection, and a space between arguments combines their results as a union."
->
-> Example: `dbt run --select "tag:a,tag:b"` selects resources with BOTH tag:a AND tag:b (intersection / AND).
-> Example: `dbt run --select "tag:a tag:b"` selects resources with EITHER tag:a OR tag:b (union / OR).
-
-**The responder's answer is BACKWARDS:**
-- Claims `dbt build --select tag:nightly_heavy,tag:realtime_light` = "OR logic" -> **FALSE**, that comma is AND (intersection), and will return ONLY models tagged with BOTH `nightly_heavy` AND `realtime_light`. For real production models that's typically the **empty set** — engineer's nightly CronJob runs 0 models, on-call gets paged the next morning when the BI dashboard is stale.
-- For OR (the "give me everything tagged nightly_heavy OR realtime_light" intent the responder describes), the correct syntax is **space-separated**: `dbt build --select "tag:nightly_heavy tag:realtime_light"` (quoted because shells split on spaces).
-
-**Correct rule the teacher must canonicalize:**
-
-| Operator | Meaning | Example | Result |
-|---|---|---|---|
-| `,` (comma, no space) | **INTERSECTION (AND)** | `tag:a,tag:b` | models with BOTH tag:a AND tag:b |
-| ` ` (space-separated args) | **UNION (OR)** | `"tag:a tag:b"` | models with EITHER tag:a OR tag:b |
-| Combined | comma-within-arg AND, space-between-args OR | `"tag:a,tag:b tag:c"` | (tag:a AND tag:b) OR tag:c |
-
-**What was CORRECT and good:**
-- `config(tags=['nightly_heavy'])` in-model config block — correct per docs.getdbt.com/reference/resource-configs/tags
-- Multiple tags as list `tags=['a', 'b']` — correct
-- `dbt build --select tag:nightly_heavy` single-tag selector — correct
-- Folder-level / path-level tags via `dbt_project.yml` `models:` block — correct
-- k8s CronJob example shape — correct (separate CronJobs per tag is one valid way to avoid the comma-vs-space pitfall by accident)
-
-**Severity:** Inverted-semantics error on the EXACT command the question asked about. An engineer copy-pasting the comma form into their CronJob ships a broken pipeline. Same failure-class as past Trino-syntax inversions (Spark-only-form-as-Trino-syntax, INTERSECT=anti-join mislabel). -2.5 Accuracy. -2.25 Applicability (the actionable command is wrong). -0.5 Clarity (no symbolic table makes the inversion harder to catch). -1.0 Completeness (no callout that shells split on spaces so quoting is required for the OR form; no callout that combined `comma+space` evaluates intersection-first-then-union).
-
-**Q4 is sub-threshold individually (3.4375 < 3.5) but absorbed at the iter-wide level by Q1/Q2/Q3.**
-
----
-
-## EXPLICIT confirmations the user asked for
-
-- **Q1 DECIMAL-SUM canonical (iter513 r23 §3.1B): LANDED.** Responder now correctly says NO cast needed, `sum(decimal(p,s))` auto-widens to `decimal(38, s)`, overflow ERRORS as NUMERIC_VALUE_OUT_OF_RANGE not silent truncation, and gives the real "too small" causes (WHERE filter, JOIN drop/fan, upstream CAST scale, NULL-heavy column, integer division upstream). 23rd consecutive leading-canonical bulletproofing landing. The iter512 Q2 "does not widen / truncates silently / need CAST to DECIMAL(38,2)" trifecta-fabrication is GONE.
-- **Q1 SemiJoin FilterMode=ANTI fabrication (iter512 Q1): NOT RE-PROBED THIS ITER.** Iter513 Q1 was DECIMAL-SUM not INTERSECT/EXCEPT plan-node, so the iter512 r23 §10 SemiJoin reconcile-in-place edits (lines 458, 459, 535, 571, 583, 584, 780) and r27 §4.5 EXPLAIN-rendering sub-note remain UNEXERCISED. The fabricated annotation could still resurface on the next plan-node probe — recommend keeping it on the iter514 probe-target list at MEDIUM.
-- **Q4 dbt --select comma-vs-space inversion: NEW ITER513 LOAD-BEARING ERROR.** Correct rule (re-stated for the teacher): COMMA `,` = INTERSECTION (AND, both tags); SPACE ` ` between quoted args = UNION (OR, either tag). Responder said comma = OR — backwards.
-- **Q3 $snapshots: TWO nits.** Operation-values set is incomplete (missing `overwrite`); MERGE-to-operation mapping is wrong (MERGE -> `overwrite`, NOT `replace`; `replace` is compaction); "audit WHO" overstates because $snapshots has no user/principal column (summary map may carry engine query_id, not a SQL user).
-- **Federation row 4.49944/310 UNCHANGED.** Federation NOT probed this iter (per iter472-513 directive). No edits to resources/22 §13.x.
-
----
-
-## Other fabrications / risks
-
-- Q3 "operation values" enumeration is the only enumeration risk this iter. The responder confidently listed three values when the spec defines four — this is a sibling failure-class to the iter512 `FilterMode = ANTI` fabrication: confident-but-incomplete enumeration of an externally-defined value set. Recommend teacher add an explicit DO-NOT-WRITE row banning the 3-value list and the MERGE->replace mapping in the same canonical block.
-- Q4 inversion is the same failure-class as iter408 `rewrite_data_files(sort_order =>)` Spark-as-Trino-syntax slip and iter511 INTERSECT=anti-join mislabel: confident-but-inverted directional semantics on a 2-element set. Teacher canonical must include a symbolic table (comma vs space) AND a concrete "engineer-pastes-this-CronJob" worked example to anchor the routing.
-
----
-
-## Concrete next-teacher actions for iter514
-
-**PRIMARY (HIGH) — dbt --select set-operator canonical reconcile-in-place.** Land a tight canonical in r27 (likely §6.7C or new §6.7F, near existing dbt-build / tag-selector content). Required contents:
-1. ONE-LINE RULE: `tag:a,tag:b` = INTERSECTION (AND); `"tag:a tag:b"` = UNION (OR). Comma binds tighter than space.
-2. SYMBOLIC TABLE with 4 rows: single tag / comma-separated / space-separated / mixed-precedence.
-3. WORKED EXAMPLE: nightly CronJob — `dbt build --select "tag:nightly_heavy tag:realtime_light"` (note the quotes — shell splits on space otherwise) produces "models tagged with EITHER nightly_heavy OR realtime_light"; `dbt build --select tag:nightly_heavy,tag:realtime_light` produces "models tagged with BOTH" (almost always empty set in real projects).
-4. DO-NOT-WRITE: "comma = OR"; "tag:a,tag:b = either tag"; "space = AND". (Bans the iter513 Q4 trifecta-inversion verbatim.)
-5. Verified source: docs.getdbt.com/reference/node-selection/set-operators + /reference/node-selection/syntax.
-6. Keyword anchors: dbt select multiple tags, dbt tag OR, dbt tag AND, dbt comma vs space, dbt build multiple tags, dbt CronJob multiple tags.
-
-**SECONDARY (HIGH) — Iceberg $snapshots operation canonical reconcile-in-place.** In r17 (Iceberg metadata) at the existing $snapshots section. Required contents:
-1. The FOUR canonical values: `append` / `replace` / `overwrite` / `delete`. Spell out which SQL op maps to which:
-   - `append` = INSERT INTO, CTAS into existing table
-   - `overwrite` = MERGE INTO, UPDATE, DELETE-with-row-filter, INSERT OVERWRITE (copy-on-write rewrites of affected files)
-   - `replace` = OPTIMIZE / compaction / rewrite_data_files / REPLACE TABLE (logical content unchanged, files rewritten)
-   - `delete` = whole-partition DELETE (metadata-only file removals)
-2. Explicit "MERGE shows as operation='overwrite', NOT 'replace'" routing rule.
-3. WHO/WHAT/WHEN scope statement: $snapshots tells you WHAT + WHEN + HOW MUCH (summary counts), NOT WHO. For WHO, join `summary['trino_query_id']` to Trino's query-log/event-listener output.
-4. DO-NOT-WRITE: "operations are append, replace, delete" (3-value enumeration); "MERGE shows as operation='replace'"; "$snapshots tells you who ran the query".
-5. Verified sources: iceberg.apache.org/spec/#snapshots, trino.io/docs/current/connector/iceberg.html ($snapshots metadata table section).
-
-**TERTIARY (MEDIUM) — keep iter512 SemiJoin EXPLAIN-rendering reconcile-in-place edits unexercised-but-armed.** No additional action; just ensure iter514 probe targets include a plan-node re-probe so the bulletproofing gets exercised.
-
----
-
-## Iter514 judge probe targets
-
-| Priority | Probe | Verifies |
+| Dim | Score | Notes |
 |---|---|---|
-| **HIGH** | dbt comma-vs-space RE-PROBE: "I want my CronJob to run models tagged `nightly_heavy` OR `realtime_light` — is `dbt build --select tag:nightly_heavy,tag:realtime_light` right?" | Whether iter514 teacher r27 set-operator canonical LANDS — verifies the comma=AND, space=OR fix. **MUST RE-PROBE — this is the iter513 primary fix target for iter514.** |
-| **HIGH** | $snapshots operation values RE-PROBE: "what does `operation` look like for a MERGE INTO statement? I want to find the snapshot from a corrupting MERGE." | Whether iter514 teacher r17 four-value operation canonical LANDS — verifies MERGE->overwrite mapping fix. |
-| **MEDIUM** | $snapshots WHO 2nd angle: "I want to know which user/team ran the corrupting MERGE — does $snapshots have a user column?" | Verifies "no user column, correlate via summary['trino_query_id']" framing lands. |
-| **MEDIUM** | DECIMAL-SUM 3rd angle: "we have DECIMAL(18,6) prices summed across 10B rows — same auto-widen story?" | Confirms the r23 §3.1B canonical holds at a different (p,s) and row-count combination — verifies it didn't bulletproof only at DECIMAL(8,2)/2B. |
-| **MEDIUM** | INTERSECT/EXCEPT plan-node 3rd angle: "EXPLAIN on `a EXCEPT b` shows SemiJoin but no `FilterMode = ANTI` token — is that node being optimized away?" | Verifies the iter512 r23 §10 + r27 §4.5 EXPLAIN-rendering reconcile-in-place edits hold under direct probe; the iter513 sweep did NOT exercise them. |
-| **MEDIUM** | dbt tag mixed-precedence 3rd angle: "`dbt build --select tag:a,tag:b tag:c` — what does this select?" | Confirms the (tag:a AND tag:b) OR tag:c precedence is canonicalized, not just the 2-element case. |
-| **LOW** | COALESCE type-coercion: "`COALESCE(int_col, varchar_col)` — does this work?" | Verifies the all-args-must-be-common-supertype edge case (iter513 Q2 Completeness nit). |
-| **LOW** | federation | UNPROBED per iter472-514 directive — federation row stays 4.49944/310. |
+| Accuracy | 5.0 | COMMA = INTERSECTION (AND) and SPACE = UNION (OR) — **EXACTLY** matches docs.getdbt.com/reference/node-selection/set-operators verbatim ("Commas with no spaces within an argument define an intersection, and a space between arguments combines their results as a union"). Mixed-precedence example `(nightly AND incremental) OR (hourly AND view)` for `"tag:nightly,config.materialized:incremental tag:hourly,config.materialized:view"` is correct — comma binds tighter than space. The iter513 inversion ("comma = OR") is GONE. |
+| Clarity | 5.0 | Symbolic table presentation + "NOT interchangeable" emphasis. |
+| Applicability | 5.0 | Engineer copy-pastes the right form for BOTH-tags vs EITHER-tag intent. CronJob-routing decision is unambiguous. |
+| Completeness | 4.75 | -0.25 for no shell-quoting callout (spaces require quotes around the selector so the shell doesn't word-split into multiple argv entries); non-load-bearing for the question asked. |
+
+**ITER514 r27 §6.7F dbt-selector reconcile-in-place fix CONFIRMED LANDED** — 24th consecutive leading-canonical bulletproofing landing instance.
+
+### Q2 — Iceberg `$snapshots` operation values + MERGE INTO RE-PROBE — 4.875 STRONG PASS
+
+| Dim | Score | Notes |
+|---|---|---|
+| Accuracy | 5.0 | MERGE = `operation='overwrite'` (NOT `replace`) verified verbatim at iceberg.apache.org/docs/latest/spark-writes ("Iceberg supports MERGE INTO by rewriting data files that contain rows that need to be updated in an overwrite commit"). All four values listed: `append` (INSERT/streaming), `overwrite` (MERGE/UPDATE/DELETE row-level), `delete` (whole-file removal — verified at iceberg.apache.org/spec: "Data files were removed and their contents logically deleted and/or delete files were added to delete rows" — reasonably accurate as "partition-aligned DELETE / DROP PARTITION whole-file"), `replace` (OPTIMIZE compaction). No-user-column / `trino_query_id`-via-`summary` framing for WHO scope is correct. The iter513 "MERGE = replace" inversion + 3-value enumeration are GONE. |
+| Clarity | 5.0 | Six $snapshots columns enumerated; summary-MAP correlation path explicit. |
+| Applicability | 5.0 | Engineer querying `WHERE operation='overwrite'` finds the corrupting MERGE; rollback targets the right snapshot. WHO-via-trino_query_id cross-ref to query log is actionable. |
+| Completeness | 4.5 | -0.5 for no explicit `summary['trino_query_id']` vs `element_at(summary, 'trino_query_id')` NULL-safe accessor disambiguation in the answer (the resource canonical at r17 has it, the answer didn't surface it). Non-load-bearing. |
+
+**ITER514 r17 $snapshots reconcile-in-place fix CONFIRMED LANDED** — 25th consecutive leading-canonical bulletproofing landing instance.
+
+### Q3 — max of three columns per row (cleaner than CASE WHEN) — 3.0625 UNDER-ANSWERED (content gap)
+
+| Dim | Score | Notes |
+|---|---|---|
+| Accuracy | 4.0 | Honest punt — did NOT fabricate `greatest()` or invent a wrong syntax. -1.0 for not being able to confirm the function that IS the answer (a Trino 467 function the resources don't cover). |
+| Clarity | 3.5 | Punt is clearly framed but doesn't help the engineer. |
+| Applicability | 2.0 | Engineer left without the answer. Has to either consult Trino docs externally or fall back to CASE WHEN (the very pattern they wanted to avoid). -3.0 — high-actionability question with a one-word answer that the responder couldn't produce. |
+| Completeness | 2.75 | The correct answer is `greatest(price_usd, price_eur, price_gbp)` — verified at trino.io/docs/current/functions/comparison.html ("greatest(value1, value2, ..., valueN) → [same as input]"). Sister-function `least()` for the min case. **NULL semantics LOAD-BEARING for prices**: per Trino comparison-functions doc verbatim — "Like most other functions in Trino, they return null if any argument is null" — explicitly noted as DIFFERENT from PostgreSQL (which returns NULL only if ALL args are NULL). For per-row `max(price_usd, price_eur, price_gbp)` where some currencies may be NULL, this is critical: an unwrapped `greatest(...)` returns NULL when ANY price is NULL. Engineer needs `greatest(coalesce(price_usd, 0), coalesce(price_eur, 0), coalesce(price_gbp, 0))` if missing-price=0 is desired, OR `coalesce(price_usd, price_eur, price_gbp)` if first-non-null is desired. Resource has ZERO greatest/least coverage. |
+
+**HONEST PUNT — NO Accuracy fabrication penalty.** The responder explicitly said "I don't have enough information... cannot confirm Trino 467 has GREATEST" and pointed to trino.io math docs. **Content gap** — iter515 must add a `greatest`/`least` canonical.
+
+### Q4 — Oracle `SUBSTR(s, -5)` negative start → Trino — 3.0625 UNDER-ANSWERED (content gap)
+
+| Dim | Score | Notes |
+|---|---|---|
+| Accuracy | 4.0 | Honest punt — did NOT fabricate. -1.0 for floating `right(s, 5)` "if Trino has a right() function" (it does NOT — verified at trino.io/docs/current/functions/string.html — Trino has no `right()` or `left()`). The hedge ("if") protects against fabrication but still introduces a wrong-direction lead. The `substr(s, length(s)-4)` fallback IS valid Trino 467 (would work) but is unnecessarily complex. |
+| Clarity | 3.5 | Punt framed clearly; hedged alternatives may confuse. |
+| Applicability | 2.0 | Engineer left without the answer for a question that has a TRIVIAL direct port. -3.0 — same severity as Q3. |
+| Completeness | 2.75 | The correct answer is `substr(s, -5)` — **DIRECT PORT, no rewrite needed**. Verified at trino.io/docs/current/functions/string.html: "A negative starting position is interpreted as being relative to the end of the string." Trino `substr('Quadratically', -5)` returns `'cally'` — identical to Oracle. Resource r27 §4.3 line 863 says "1-indexed; same as Oracle" but is silent on negative-start. The "same as Oracle" gloss should extend to BOTH (a) 1-indexed positive start AND (b) negative-from-end start. |
+
+**HONEST PUNT — NO Accuracy fabrication penalty.** The `right()` hedge is borderline (`right()` is a common SQL function in MySQL/Postgres/SQL Server but NOT in Trino), but the explicit "if Trino has a right() function" qualifier saves it from being a fab. **Content gap** — iter515 must extend r27 §4.3 substr row to cover negative-index.
 
 ---
 
-## Summary
+## Overall
 
-iter513 = **4.336 PASS** (+0.836 above floor, slightly above iter512's +0.734). One STRONG-PASS fix-landing (Q1, the primary iter513 fix target — DECIMAL-SUM canonical LANDED on first re-probe, 23rd leading-canonical bulletproofing instance). One clean STRONG-PASS (Q2, COALESCE). One PASS-with-two-real-defects (Q3, $snapshots operation enumeration incomplete + MERGE->replace mis-mapping + WHO overstatement). One NEW sub-threshold individual FAIL (Q4, dbt comma-vs-space inverted semantics). Iter-wide PASS held because Q1+Q2 = 9.907/10 absorbed the Q4 drag.
+- **AVG = (4.9375 + 4.875 + 3.0625 + 3.0625) / 4 = 15.9375 / 4 = 3.984 PASS** (+0.484 above 3.5 floor)
+- Two STRONG PASSes (Q1 + Q2 confirming both iter513 fixes landed) absorb two sub-3.5 content-gap drags to iter-wide PASS.
+- **NO NEW FABRICATION** this iter. Both content-gap answers were honest punts — the responder correctly chose not-knowing over invention. This is the right safety posture even though Completeness/Applicability suffer.
+- 113th consecutive overall PASS in extended phase.
+- Margin notably tighter than iter513 (+0.836) and iter512 (+0.734) — driven by two simultaneous content-gap under-answers, not by accuracy regression.
 
-**The iter513 teacher win (DECIMAL-SUM canonical landing) is the headline; the iter513 cost is a NEW load-bearing inversion (dbt comma=OR) that is the iter514 primary fix target.** The Q3 $snapshots nits are real but lower priority since the question wasn't directly about operation enumeration — the responder volunteered the bad list.
+## Confirmation summary
 
-112th consecutive overall PASS in extended phase.
+| Iter513 issue | Iter514 status |
+|---|---|
+| Q1 inversion: comma=OR / space=AND | **LANDED** — responder now says comma=AND, space=OR exactly per docs.getdbt.com |
+| Q2 nits: MERGE→`replace` mislabel + 3-value enumeration + WHO overstated | **LANDED** — responder now says MERGE→`overwrite`, lists all 4 values (`append`/`overwrite`/`delete`/`replace`), explicitly notes no-user-column / trino_query_id-via-summary |
+
+## New content gaps (iter515 fix targets)
+
+### GAP A (HIGH PRIORITY) — `greatest()` / `least()` canonical missing from resources
+
+- Grep-confirmed ZERO `greatest`/`least` coverage in `resources/`.
+- Verified facts to write:
+  - **Signatures**: `greatest(v1, v2, ..., vN) -> [same supertype]` and `least(v1, v2, ..., vN) -> [same supertype]`. Per-row max/min of N column arguments. Source: trino.io/docs/current/functions/comparison.html.
+  - **NULL semantics LOAD-BEARING**: "Like most other functions in Trino, they return null if any argument is null." Differs from PostgreSQL (where greatest/least skip NULLs and return NULL only if ALL args are NULL).
+  - **Workaround for NULL-tolerant variants**: `greatest(coalesce(a, -infinity_sentinel), coalesce(b, -infinity_sentinel), ...)` — choose sentinel based on column domain.
+  - **Sister-cousin**: `coalesce(a, b, c)` returns first-non-null (NOT max), often confused with greatest in port-from-Oracle context where `NVL(a, NVL(b, c))` is the equivalent first-non-null idiom.
+  - **CASE WHEN equivalence**: `greatest(a, b, c)` = `CASE WHEN a >= b AND a >= c THEN a WHEN b >= c THEN b ELSE c END` (NULL-naive form). Use greatest for cleanliness.
+- Suggested placement: r27 §4.x (Oracle-to-Trino function table) — Oracle also has `GREATEST`/`LEAST` so a "Same name; same NULL semantics for Trino (NULL if any arg NULL — Oracle GREATEST also returns NULL if any arg NULL, so direct port)" row. Also r23 (Trino SQL patterns) for a per-row max/min canonical pattern (CASE WHEN -> greatest cleanup).
+- Keyword anchors: "max across columns", "max of columns per row", "row-wise max", "cleaner than CASE WHEN per-row max", "greatest least Trino", "max of price_usd price_eur price_gbp", "max of three columns SQL".
+- DO-NOT-WRITE bans: "Trino has no greatest/least"; "use CASE WHEN — there's no built-in"; "greatest skips NULLs like Postgres"; "greatest returns NULL only if all args NULL" (the Postgres-folklore fab to pre-empt).
+
+### GAP B (HIGH PRIORITY) — `substr` negative-index canonical missing from r27 §4.3
+
+- Existing r27 line 863: `SUBSTR(s, start, len)` -> `substr(s, start, len)` -- "Both 1-indexed; same as Oracle." Silent on negative-start.
+- Verified facts to write:
+  - **Negative start = direct port**: `substr('Quadratically', -5)` returns `'cally'` (last 5 chars). Trino docs: "A negative starting position is interpreted as being relative to the end of the string." Source: trino.io/docs/current/functions/string.html.
+  - **Trino has NO `right()` or `left()` functions**. Use `substr(s, -n)` for last-n-chars and `substr(s, 1, n)` for first-n-chars.
+  - **Same as Oracle SUBSTR negative-start behavior**: Oracle `SUBSTR(s, -5)` also returns last 5 chars — port verbatim.
+- Suggested placement: extend r27 §4.3 SUBSTR row gloss from "Both 1-indexed; same as Oracle" to "Both 1-indexed; same as Oracle; **negative start counts from end, also same as Oracle** — `substr(s, -5)` = last 5 chars". Add adjacent row/callout: "Trino has NO `right()` or `left()` — use `substr(s, -n)` and `substr(s, 1, n)`."
+- Keyword anchors: "Trino right left function", "Trino last 5 characters", "SUBSTR negative index Trino", "Oracle SUBSTR -5 Trino port", "substring negative start Trino", "right function Trino doesn't exist", "last n chars Trino".
+- DO-NOT-WRITE bans: "Trino has right() and left() functions"; "Oracle SUBSTR negative-start needs rewrite as length(s)-n+1 in Trino" (UNNECESSARY rewrite — direct port works); "negative-start substr is Oracle-only".
+
+## Iter515 probe targets
+
+| Probe | Priority | Verifies |
+|---|---|---|
+| `greatest()` / `least()` re-probe — "what's the cleanest way to get the max of three columns per row?" | HIGH | GAP A canonical lands; no `greatest`-not-in-Trino fab |
+| `greatest` NULL semantics 2nd angle — "does greatest(a,b,c) return the max even if one is NULL, or does it return NULL?" | HIGH | NULL semantics callout lands (return-NULL-if-any-NULL; differs from Postgres) |
+| Oracle `SUBSTR(s, -5)` direct-port re-probe — "last 5 chars in Trino, same as Oracle?" | HIGH | GAP B canonical lands |
+| Trino `right()` / `left()` non-existence 2nd angle — "does Trino have right() and left() like MySQL?" | HIGH | Confirms no-right/no-left framing + substr workaround route |
+| dbt comma+space mixed-precedence 3rd angle — "`tag:a,tag:b tag:c,tag:d` — which selects what?" | MEDIUM | Verifies iter514 r27 §6.7F mixed-example holds under direct probe |
+| `$snapshots` summary-MAP 2nd angle — "how do I get the user who ran a MERGE — is it in `summary['trino_query_id']`?" | MEDIUM | Verifies WHO-scope framing + element_at NULL-safe accessor (iter513 left this nit) |
+| `$snapshots` `replace` operation 2nd angle — "what does `operation='replace'` mean — when does it show up?" | MEDIUM | Verifies compaction/OPTIMIZE→replace mapping holds without re-inverting |
+| Federation stays UNPROBED | LOW | Per long-standing directive; federation row stays 4.49944/310 |
+
+## Topic-row updates (to be appended at rubric score-history)
+
+- SQL query best practices for OLAP (Q3 greatest/least cleaner-than-CASE-WHEN maps here as per-row aggregation idiom): 4.5609/71 -> (4.5609*71 + 3.0625)/72 = 326.886/72 = **4.5401/72** (-0.0208)
+- Oracle PL/SQL -> dbt + Trino SQL migration (Q1 dbt set-operators + Q4 SUBSTR Oracle-to-Trino port both map here): 4.5333/80 -> (4.5333*80 + 4.9375 + 3.0625)/82 = 370.664/82 = **4.5203/82** (-0.0130)
+- Iceberg table maintenance (Q2 $snapshots maps here): 4.4845/154 -> (4.4845*154 + 4.875)/155 = 695.498/155 = **4.4871/155** (+0.0026)
+- Federation row UNCHANGED at 4.49944/310 (NOT probed).

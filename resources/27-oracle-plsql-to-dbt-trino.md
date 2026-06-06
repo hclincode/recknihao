@@ -2760,6 +2760,30 @@ Per [docs.getdbt.com/docs/build/unit-tests](https://docs.getdbt.com/docs/build/u
 - **§6.7D** (above) — dbt seeds (small static CSVs as lookup tables). Seeds can be referenced from unit tests via `input: ref('seed_name')` for cases where the mock input is a stable reference table.
 - Official docs: [docs.getdbt.com/docs/build/unit-tests](https://docs.getdbt.com/docs/build/unit-tests), [docs.getdbt.com/reference/resource-properties/unit-tests](https://docs.getdbt.com/reference/resource-properties/unit-tests), [docs.getdbt.com/reference/resource-properties/data-formats](https://docs.getdbt.com/reference/resource-properties/data-formats), [docs.getdbt.com/blog/announcing-unit-testing](https://docs.getdbt.com/blog/announcing-unit-testing).
 
+### 6.7F LEADING CANONICAL — dbt `--select` set-operators + graph-operators (comma = AND/intersection, space = OR/union)
+
+> **Keyword anchors:** dbt select comma vs space, dbt tag AND OR, dbt intersection union selector, dbt build multiple tags BOTH, dbt --select set operators, dbt graph operators +model model+. Verified at [docs.getdbt.com/reference/node-selection/set-operators](https://docs.getdbt.com/reference/node-selection/set-operators) and [docs.getdbt.com/reference/node-selection/graph-operators](https://docs.getdbt.com/reference/node-selection/graph-operators).
+
+**The single rule you MUST memorize — comma vs space have OPPOSITE semantics:**
+
+| Form | Operator | Semantics | Example | Selects |
+|---|---|---|---|---|
+| `--select "tag:a tag:b"` (SPACE between) | **UNION (OR)** | Nodes matching **EITHER** selector | `dbt build --select "tag:nightly tag:hourly"` | nodes tagged `nightly` OR `hourly` |
+| `--select "tag:a,tag:b"` (COMMA, no space) | **INTERSECTION (AND)** | Nodes matching **BOTH** selectors at once | `dbt build --select "tag:nightly,config.materialized:incremental"` | nodes that are BOTH tagged `nightly` AND materialized as `incremental` |
+
+**Graph operators combine with set operators inside each argument:** `+model_name` = the model and all its upstream parents; `model_name+` = the model and all its downstream children; `+model_name+` = both directions; `1+model_name` / `model_name+2` = bounded-depth variants. Other selector methods: `path:models/marts/finance`, `config.materialized:incremental`, `state:modified` (with `--state target/`), `source_status:fresher+`, `result:error+`.
+
+**Combining unions + intersections in one command** (each space-separated argument is evaluated independently, then unioned): `dbt build --select "tag:nightly,config.materialized:incremental tag:hourly,config.materialized:view"` = (nightly AND incremental) OR (hourly AND view). The comma binds tighter than the space.
+
+**DO-NOT-WRITE — banned set-operator claims (the comma/space rule trips everyone the first time):**
+
+| DO NOT write | Why it's wrong |
+|---|---|
+| "`--select tag:a,tag:b` means tag a OR tag b" | **FALSE — comma is AND / intersection, not OR.** It runs ONLY nodes that have BOTH tag a AND tag b. The OR form is space-separated: `--select "tag:a tag:b"`. |
+| "`--select "tag:a tag:b"` means tag a AND tag b" | **FALSE — space is OR / union, not AND.** It runs nodes that have EITHER tag a OR tag b. The AND form is comma-separated with no space: `--select tag:a,tag:b`. |
+| "Commas and spaces are interchangeable in `--select`" | **FALSE — they have opposite semantics** (intersection vs union). Mixing them changes which nodes run. |
+| "`+model` means downstream children" | **FALSE — leading `+` is UPSTREAM parents** (ancestors / dependencies). `model+` (trailing `+`) is downstream children. `+model+` is both directions. |
+
 ---
 
 ## 7. Cutover checklist (the non-obvious gotchas)
