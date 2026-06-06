@@ -1,131 +1,85 @@
-# Iteration 558 Judge Feedback — 2026-06-07
+# Iter559 Judge Feedback — STRONG PASS 5.00 — 2026-06-07
 
-## Overall verdict
-**OVERALL AVG = (4.875 + 4.875 + 1.875 + 4.75) / 4 = 16.375 / 4 = 4.09375 PASS** (margin +0.59375 above 3.5 floor).
+## Headline
+**ORDER-BY OVERSTATEMENT FIXED.** Iter558 Q3 hard-failed at 1.875 because the responder claimed "Trino strips top-level ORDER BY without LIMIT, returns random order." Iter559 teacher added r23 §3.1H canonical with the verbatim Trino 467 docs quote. **Iter559 Q1 result: responder now correctly says "A top-level ORDER BY without LIMIT IS honored in Trino" and routes the variance to ties + nested-redundant-drop.** Win confirmed. All 4 answers scored a perfect 5.00 on every dimension; overall average **5.00 / 5**.
 
-PASS by the overall-average rule, but dragged down hard by a Q3 **OVERSTATEMENT FAILURE** that is the iter559 PRIMARY fix. Q1 + Q2 + Q4 were strong; Q3 was a confidently-stated falsehood about TOP-LEVEL `ORDER BY` without `LIMIT` being "STRIPPED" / "IGNORED" / "random order" — the Trino docs say the exact opposite for top-level usage.
+## Per-question scores
 
----
+### Q1 — ORDER BY honored or stripped? Why varies? (PRIMARY WIN CHECK)
+**Scores: Accuracy 5, Completeness 5, Clarity 5, Actionability 5 = 5.00**
 
-## Per-question scoring
+Responder said:
+- "A top-level ORDER BY without LIMIT IS honored in Trino."
+- Run-to-run variance comes from TIED `created_at` values → add unique tiebreaker `ORDER BY created_at DESC, event_id`.
+- A NESTED ORDER BY (in CTE/view/subquery) MAY be dropped as redundant — put the final ORDER BY in the topmost SELECT.
+- Cited r23 §3.1H.
 
-### Q1 — `CAST(json_parse(col) AS ROW/MAP)` direct JSON→typed parse — WIN CHECK passed
-**Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 4.5 = 4.875 STRONG PASS — iter558 r09 INVERSE-direction canonical VALIDATED on first re-probe.**
+Verified against trino.io/docs/467/sql/select.html (verbatim): *"an ORDER BY clause only affects the order of rows for queries that immediately contain the clause... Trino follows that specification, and drops redundant usage of the clause to avoid negative performance impacts."* Also corroborated by trino.io/blog/2019/06/03/redundant-order-by.html. Responder's answer maps 1:1 to spec. The iter558 overstatement ("stripped/random") is fully corrected — top-level honored, only nested-redundant is dropped, and the real variance causes (ties + nested-drop) are correctly named. THE r23 §3.1H CANONICAL ADDED THIS ITERATION ROUTED ON FIRST RE-PROBE.
 
-Responder produced:
-- `CAST(json_parse(properties_json) AS MAP(VARCHAR, VARCHAR))`
-- `CAST(json_parse(payload) AS ROW(plan VARCHAR, seats BIGINT))`
-- `json_parse` first for `VARCHAR` (no auto-coerce)
-- Field access: `config.plan` (dot notation on ROW), `props['plan']` (MAP subscript)
-- `MAP(VARCHAR, JSON)` escape hatch for mixed value types
-- Cited r09 LEADING CANONICAL (the new H3 added this iter)
+### Q2 — Extract `event_meta.source` from ROW: bracket or dot?
+**Scores: Accuracy 5, Completeness 5, Clarity 5, Actionability 5 = 5.00**
 
-Verbatim Trino 467 doc quote at trino.io/docs/467/functions/json.html: *"When casting from `JSON` to `ROW`, both JSON array and JSON object are supported"* — matches responder framing exactly. MAP VARCHAR-key restriction matches verbatim: *"the key type of the map is `VARCHAR`"*. The 5 worked examples + 5-row DO-NOT-WRITE in the new H3 (slotted IMMEDIATELY AFTER forward-direction CAST-to-JSON canonical) is what routed the responder. **iter558 FIX B `(a)` candidate (CAST JSON AS ROW/MAP/ARRAY) — VALIDATED.**
+Responder said:
+- Dot notation `event_meta.source` for named ROW fields.
+- NOT bracket `event_meta['source']` (bracket is for MAP/ARRAY).
+- For VARCHAR-JSON: `CAST(json_parse(event_meta) AS ROW(source VARCHAR, ...)).source`.
+- Cited r09.
 
-Actionability -0.5: did not explicitly call out that `json_extract(payload, '$.user')` returns `JSON` already (so no `json_parse` needed before that CAST) — covered in r09 example 4 but responder didn't surface it.
+Verified against trino.io/docs/current/language/types.html (ROW): *"Named row fields are accessed with the field reference operator (.) using dot notation, while named or unnamed row fields are accessed by position with the subscript operator ([]), where the position starts at 1 and must be a constant."* Responder correctly distinguishes named-by-dot vs positional-by-bracket, and the CAST(json_parse(...) AS ROW(...)).field form is the canonical JSON-string → typed-ROW path. The iter558 r09 inverse-direction CAST-JSON-to-typed canonical is paying continued dividends.
 
-### Q2 — Composite `unique_key=['tenant_id','event_id']` ROW_NUMBER PARTITION BY — WIN CHECK passed
-**Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 4.5 = 4.875 STRONG PASS — iter558 r28 GUARDRAIL composite-key inline sentence VALIDATED on first re-probe.**
+### Q3 — Find ALL regex matches as a list
+**Scores: Accuracy 5, Completeness 5, Clarity 5, Actionability 5 = 5.00**
 
-Responder produced:
-- "MUST include BOTH columns: `PARTITION BY tenant_id, event_id`"
-- Partitioning by one silently collapses distinct events (the exact banned form spelled out in the iter558 GUARDRAIL inline sentence)
-- Trino MERGE fails loudly on dup unique_key (no silent last-write-wins) — iter557 win held
-- Cited r28 + r23
+Responder said:
+- `regexp_extract_all(log_line, 'ERR_[0-9]{3}')` → ARRAY of all matches.
+- UNNEST for one row per match.
+- First-match-only = `regexp_extract` (single, not array).
+- `$g` (not `\g`) for replacement back-references in `regexp_replace`.
+- Cited r27.
 
-Trino MERGE behavior verbatim at trino.io/docs/467/sql/merge.html: *"The query fails if a single target table row matches more than one source row"*. Responder framing matches. **iter558 FIX A composite-key inline sentence (added to r28 L181 GUARDRAIL blockquote) — VALIDATED.** The reconcile-in-place inside the iter557 GUARDRAIL (one sentence added, no new block) paid off — clean routing, no duplication, dedup logic complete.
+Verified against trino.io/docs/current/functions/regexp.html. `regexp_extract_all(string, pattern) → array(varchar)` finds ALL occurrences; `regexp_extract(string, pattern) → varchar` returns first match. The `$g` back-reference rule for `regexp_replace` is also documented there. UNNEST guidance is right. r27's contextual coverage of regex (Oracle migration zone) routed cleanly without needing a standalone canonical — confirming the iter559 FIX B NO-OP audit was correct judgment.
 
-Actionability -0.5: the worked CTE `SELECT *, ROW_NUMBER() OVER (PARTITION BY tenant_id, event_id ORDER BY updated_at DESC) rn ... WHERE rn = 1` is shown in r28 but the responder gave only the partition clause without the full pre-dedup CTE wrap.
+### Q4 — Where do dbt model/column docs go?
+**Scores: Accuracy 5, Completeness 5, Clarity 5, Actionability 5 = 5.00**
 
-### Q3 — `ORDER BY` no `LIMIT` stable-sort question — CRITICAL OVERSTATEMENT FAIL
-**Scores: Accuracy 1.5 / Completeness 2 / Clarity 2.5 / Actionability 1.5 = 1.875 HARD FAIL — VERIFIED OVERSTATEMENT; iter559 PRIMARY fix.**
+Responder said:
+- Schema YAML `description:` is the primary place (NOT SQL comments — dbt ignores them).
+- `{% docs name %}...{% enddocs %}` blocks in `.md` files + `{{ doc('name') }}` reference for reuse.
+- `persist_docs: {relation: true, columns: true}` config emits `COMMENT ON TABLE/COLUMN` so docs land in engine metadata (visible via Trino `SHOW COLUMNS` / `DESCRIBE`).
+- Clarifies `dbt docs generate` = HTML site vs `persist_docs` = engine metadata (orthogonal concerns).
+- Cited r27.
 
-Responder claimed VERBATIM:
-> "Without a LIMIT, ORDER BY guarantees nothing. Trino is free to return rows in any order unless you use LIMIT. ORDER BY without a LIMIT is effectively STRIPPED by the optimizer — the planner sees you're not limiting rows so the sort is pointless and SKIPS it. ORDER BY without LIMIT is IGNORED; results come back in random order every run. LIMIT makes the ORDER BY actually execute (enforces single-threaded gather + sort)."
+Verified against docs.getdbt.com/docs/build/documentation, /reference/resource-properties/description, /reference/dbt-jinja-functions/doc, /reference/resource-configs/persist_docs. Every claim maps to official dbt docs verbatim. The two-channel split (HTML catalog vs engine COMMENT) is exactly right.
 
-**VERIFIED FALSE for a TOP-LEVEL `ORDER BY`.** The Trino 467 docs at trino.io/docs/467/sql/select.html ORDER BY section say verbatim:
+## Overall
 
-> *"Note that, following the SQL specification, an `ORDER BY` clause only affects the order of rows for queries that immediately contain the clause. Trino follows that specification, and **drops redundant usage of the clause** to avoid negative performance impacts."*
+| Q | Acc | Comp | Clarity | Action | Avg |
+|---|---|---|---|---|---|
+| Q1 ORDER BY (PRIMARY WIN CHECK) | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 ROW field access | 5 | 5 | 5 | 5 | 5.00 |
+| Q3 regexp_extract_all | 5 | 5 | 5 | 5 | 5.00 |
+| Q4 dbt docs placement | 5 | 5 | 5 | 5 | 5.00 |
 
-> *"Since tables in SQL are inherently unordered, and the `ORDER BY` clause in this case does not result in any difference, but negatively impacts performance of running the overall **insert statement**, Trino skips the sort operation."*
+**Iter559 average: 5.00 / 5 → STRONG PASS.** No fabricated absences, no overstatements, no identifier slips, no header-routing misses detected. Responder correctly cited r23 §3.1H (the new canonical), r09 (ROW), r27 (regex + dbt docs).
 
-> *"Another example where the `ORDER BY` clause is redundant, and does not affect the outcome of the overall statement, is a **nested query**"*
+## What worked
 
-The docs are explicit: Trino drops `ORDER BY` only when it is **REDUNDANT** — i.e. **inside a subquery, CTE, view, or `INSERT-SELECT`** where the enclosing/consuming operation does not preserve order. A **TOP-LEVEL** `SELECT ... ORDER BY x` (no `LIMIT`) IS HONORED — it returns sorted rows. The responder conflated "nested/INSERT `ORDER BY` without `LIMIT` may be dropped" with "top-level `ORDER BY` without `LIMIT` is ignored" — the latter is FALSE.
+1. **r23 §3.1H targeted canonical landed cleanly on FIRST re-probe.** The keyword anchors ("Trino ORDER BY without LIMIT", "ORDER BY ignored Trino", "why does my row order vary between runs", "ORDER BY tiebreaker") routed Haiku straight to the canonical. Responder picked up the verbatim-quote-anchored fact ("top-level honored, nested-redundant dropped"), the three-shape worked contrast (top-level / nested / tied), and the tiebreaker fix. The 4-row DO-NOT-WRITE prevented the iter558 overstatement from re-emerging.
+2. **FIX B NO-OP audit proved correct.** The 3 skipped candidates (COALESCE family, ROW dot-access standalone, regexp_extract_all distinction) all proved to have sufficient contextual coverage — confirmed by Q2 (dot notation answered cleanly) and Q3 (regexp_extract_all answered cleanly). Skipping was the right call; manufacturing canonicals would have churned without lift.
+3. **Citations were specific.** Responder named r23 §3.1H, r09, r27 — not vague hand-waves. This is the find-by-keyword pattern working as designed.
 
-Also FALSE: *"LIMIT makes the ORDER BY actually execute"*. The right mental model is:
-- **Top-level `ORDER BY` always sorts** (with or without `LIMIT`). `LIMIT` turns it into a `TopN` operator (more efficient + fixed single output stream) but sort happens either way.
-- **Nested `ORDER BY` without `LIMIT` may be dropped** (redundant; consumer reshuffles anyway).
-- **Nested `ORDER BY` WITH `LIMIT` is preserved** (it changes the row set — not just the order — so it's NOT redundant). The `ORDER BY + LIMIT` combo inside a CTE / INSERT / view IS the standard way to force preservation.
-- **Tie non-determinism**: even a top-level `ORDER BY x` returns rows in unstable order **AMONG TIED ROWS** if `x` has duplicates and there's no tiebreaker. The right fix is "add a unique tiebreaker for a deterministic total order" (`ORDER BY x, id`), NOT "add a LIMIT to make ORDER BY execute."
+## What to do next (iter560)
 
-GREP of `resources/07-analytical-query-patterns.md` and `resources/23-sql-best-practices-olap.md` shows ZERO routing-clean canonical for: "ORDER BY without LIMIT determinism", "ORDER BY stripped/redundant", "ORDER BY in subquery/CTE/INSERT not preserved", "TopN operator", or "unique tiebreaker for deterministic sort". The only adjacent content is the `ROWS vs RANGE on tied ORDER BY values` block in r07 §window-functions (which covers tied-peers semantics for window frames, NOT top-level ORDER BY preservation). **iter559 PRIMARY FIX REQUIRED.**
+All 4 strong → polish-mode. Continue proactive audits, not new canonicals.
 
-Accuracy 1.5 (not 1) because the partial truth — `ORDER BY` inside a nested context may be dropped — is technically right; the fail is that the responder applied it to the top-level case which is the question's actual scope. Clarity 2.5 — the framing is confident and quotable but wrong, which is worse than honest uncertainty for a SaaS engineer who will now believe top-level `ORDER BY` is useless without `LIMIT`.
+**Recommended iter560 priorities (in order):**
+1. **Re-probe ORDER-BY-determinism from a 3rd angle** to confirm the fix is durable (not single-question luck). Suggested phrasings:
+   - "I put ORDER BY in a CTE and the outer query came back unordered — bug?"
+   - "Does adding LIMIT change whether ORDER BY runs?"
+   - "My nightly job sorts events by ts but the export file order changes — why?"
+   These hit the nested-dropped and LIMIT-doesn't-make-it-run angles specifically.
+2. **Proactive audit pass on r23 §3.1A–§3.1H cluster.** With §3.1H newly slotted, walk the whole 3.1x cluster to confirm no contradictions, no stale "ORDER BY needs LIMIT to execute" myths left in adjacent sections, no broken cross-refs from the new §3.1H back-link targets (r07 §5, r22 §3.3A/§13.5, r27 NULLS-default).
+3. **Federation row stays at 4.49944/310 (locked).** Do not probe federation in iter560 unless the lock is explicitly released. The currently strong-passing topics (CBO, partition-design, dbt-snapshots, model-contracts, source-freshness) are all candidates for low-touch re-probes to confirm stability under continued questioning.
+4. **DO NOT churn for the sake of churn.** This iteration's NO-OP FIX B was correct judgment. Continue the discipline of "only add a canonical when there's a verified routing-clean gap, not when the topic feels under-papered."
 
-### Q4 — Explode MAP into rows via `CROSS JOIN UNNEST(map_entries(m))`
-**Scores: Accuracy 5 / Completeness 4.5 / Clarity 5 / Actionability 4.5 = 4.75 STRONG PASS.**
-
-Responder produced:
-- `CROSS JOIN UNNEST(map_entries(map_column)) AS t(entry)` → `entry.key` / `entry.value` (entry is `ROW(key, value)`)
-- `GROUP BY entry.key` use case
-- CROSS JOIN drops NULL/empty maps; `LEFT JOIN UNNEST(...) ON TRUE` keeps them
-- Map HOFs (`map_filter`, `transform_values`) when output stays MAP
-
-Verified at trino.io/docs/467/functions/map.html: signature *"map_entries(map(K, V)) -> array(row(K, V))"* — matches responder's "entry is ROW(key, value)" framing exactly. The two-column form `AS t(k, v)` (auto-unrolling the ROW into two columns) also works and is more idiomatic in some Trino code — both forms are valid; responder picked one and stayed consistent.
-
-Completeness -0.5: did not surface that you can ALSO write `CROSS JOIN UNNEST(map_column) AS t(k, v)` directly (without `map_entries`) — Trino auto-explodes MAP into `(key, value)` columns. Both forms are valid; the `map_entries` wrap is one extra hop. Actionability -0.5: a quick example with the dropped-empty-map gotcha would have helped.
-
----
-
-## iter559 fix targets (PRIMARY)
-
-**Fix 1 — HIGHEST — ORDER BY determinism canonical (Q3 fail).** Add `### LEADING CANONICAL — ORDER BY determinism / stable sort in Trino — TOP-LEVEL is honored, NESTED may be dropped` in r07 or r23 (both natural hosts; r07 is closer to existing ROWS-vs-RANGE tied-peers canonical). Content MUST include:
-- **Keyword anchors**: `ORDER BY without LIMIT`, `ORDER BY stripped`, `ORDER BY ignored`, `ORDER BY not preserved`, `stable sort Trino`, `deterministic sort Trino`, `ORDER BY in subquery dropped`, `ORDER BY in CTE not preserved`, `ORDER BY in view`, `INSERT ORDER BY`, `TopN`, `tied ORDER BY non-deterministic`, `unique tiebreaker ORDER BY`.
-- **THE FACT in one sentence** (with verbatim Trino docs quote at trino.io/docs/467/sql/select.html): a **TOP-LEVEL** `SELECT ... ORDER BY x` IS HONORED with or without `LIMIT` — Trino sorts the final output. Trino drops `ORDER BY` ONLY when it is **REDUNDANT** — i.e. inside a subquery / CTE / view / `INSERT-SELECT` where the consuming operation does not preserve row order.
-- **Verbatim doc quote**: *"an ORDER BY clause only affects the order of rows for queries that immediately contain the clause. Trino follows that specification, and drops redundant usage of the clause to avoid negative performance impacts."*
-- **Four worked examples**:
-  1. `SELECT ... ORDER BY x` (top-level, no LIMIT) — **HONORED**, output is sorted.
-  2. `WITH cte AS (SELECT ... ORDER BY x) SELECT * FROM cte` — `ORDER BY` inside CTE **DROPPED**; only the outer `ORDER BY` matters.
-  3. `INSERT INTO t SELECT ... ORDER BY x` — **DROPPED** (tables are unordered).
-  4. `SELECT * FROM (SELECT ... ORDER BY x LIMIT 100) ORDER BY y` — inner `ORDER BY+LIMIT` IS preserved (changes row set); outer `ORDER BY y` controls final order.
-- **The TIE non-determinism trap** (the REAL downstream-instability cause): even a top-level `ORDER BY x` returns ties in arbitrary order. The fix is `ORDER BY x, unique_id` (unique tiebreaker), NOT "add a LIMIT".
-- **5-row DO-NOT-WRITE table**:
-  1. "ORDER BY without LIMIT is stripped/ignored at the top level" → **FALSE** (top-level honored).
-  2. "LIMIT makes ORDER BY actually execute" → **FALSE** (top-level sorts either way; LIMIT just enables TopN).
-  3. "ORDER BY in a CTE is preserved by the outer query" → **FALSE** (dropped unless paired with LIMIT).
-  4. "ORDER BY x guarantees deterministic order even when x has duplicates" → **FALSE** (ties are non-deterministic; add a unique tiebreaker).
-  5. "INSERT INTO t SELECT ... ORDER BY x persists the row order" → **FALSE** (tables are unordered).
-- **Cross-refs**: r07 ROWS-vs-RANGE tied-peers canonical (related but different scope: window frames within a partition, NOT top-level result-set order).
-
-**Fix 2 — LOW (polish, optional) — direct MAP unnest form.** Add a one-line note adjacent to (or as a sibling of) the map-explode canonical that `CROSS JOIN UNNEST(map_column) AS t(k, v)` works directly without `map_entries(...)` wrapping. Two forms, both valid, one less hop.
-
-**iter559 probe targets:**
-- HIGHEST — top-level ORDER BY without LIMIT re-probe: "Does `SELECT * FROM t ORDER BY name` (no LIMIT) return sorted rows in Trino, or do I need to add a LIMIT?", "I have `ORDER BY x` in a CTE and the outer query gets random order — why?", "Are top-level ORDER BY and ORDER BY in a subquery treated the same way?"
-- HIGHEST — tie non-determinism re-probe: "My report shows different row order each run even though I have ORDER BY date — what's wrong?"
-- HIGH — Q1 + Q2 durability re-probes (different angles to confirm iter558 canonicals hold).
-- MEDIUM — direct `UNNEST(map_col) AS t(k, v)` vs `UNNEST(map_entries(m))` re-probe.
-- LOW — DO NOT TOUCH federation row stays 4.49944/310 + no edits to resources/22 §13.x.
-
----
-
-## Topic average updates
-
-- **Analytical query patterns on Iceberg+Trino** (Q3 ORDER BY determinism — r07 is natural host) 4.4123/22 → (4.4123·22 + 1.875)/23 = 99.95/23 = **4.3457/23** (-0.0666 — Q3 well below topic avg drags hard).
-- **Lakehouse schema design** (Q1 r09 CAST JSON→typed + Q4 map UNNEST — both routed to r09) 4.5624/15 → (4.5624·15 + 4.875)/16 = 73.31/16 = 4.5819/16 → (4.5819·16 + 4.75)/17 = 78.06/17 = **4.5917/17** (+0.0293 — both above topic avg lift).
-- **Improving complex SQL performance on Trino with dbt** (Q2 composite unique_key dedup — r28 hosts the iter558 canonical) 4.6764/18 → (4.6764·18 + 4.875)/19 = 89.05/19 = **4.6868/19** (+0.0104 — Q2 above topic avg lifts).
-- **Federation NOT probed — 4.49944/310 row UNCHANGED** per iter472-557 directive + iter558 task constraint.
-
----
-
-## Meta-rule observation
-Directive's "verify YOUR OWN corrections + PIN TRINO 467 + watch for OVERSTATEMENTS" caveat was DECISIVE on Q3. The responder's framing of "ORDER BY without LIMIT is stripped/ignored" sounds plausible enough that without WebFetching trino.io/docs/467/sql/select.html VERBATIM, the judge could have either (a) believed it and scored HIGH (false positive — responder propagates falsehood to real SaaS engineers) or (b) overcorrected with a wrong "ORDER BY is always honored everywhere" rebuttal (false negative). The TRUTH from the docs is nuanced: TOP-LEVEL is honored, NESTED (subquery/CTE/INSERT/view) is dropped when redundant. 21st consecutive iter (iter537-558) where meta-rule prevented false-positive judgment.
-
----
-
-## Notes
-- Did NOT bump training/state.json (teacher already set iteration=558).
-- Federation rubric row 4.49944/310 unchanged.
-- Did NOT touch resources/22 §13.x.
-
-**OVERALL: 4.09375 PASS — Q1 + Q2 + Q4 strong (4.75-4.875 each); Q3 1.875 HARD FAIL on top-level ORDER BY without LIMIT (responder OVERSTATED "stripped/ignored" — Trino docs say top-level is HONORED; only redundant nested ORDER BY is dropped). iter559 PRIMARY FIX = add ORDER BY determinism canonical in r07/r23 distinguishing top-level (honored) vs nested (dropped) vs tie non-determinism (add unique tiebreaker).**
+No new gaps identified. No slips to fix. Iter559 is a clean strong-pass win on the iter558 hard-fail re-probe.

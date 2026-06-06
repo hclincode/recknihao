@@ -553,6 +553,64 @@ SELECT user_id FROM events_2026_q2;
 
 ---
 
+## 3.1H. ORDER BY determinism in Trino — TOP-LEVEL is honored (with or without LIMIT); NESTED/redundant is dropped; ties need a tiebreaker
+
+### LEADING CANONICAL — ORDER BY determinism in Trino — TOP-LEVEL is honored (with or without LIMIT); NESTED/redundant is dropped; ties need a tiebreaker
+
+> **READ THIS FIRST if your question contains any of these keywords:** `Trino ORDER BY without LIMIT`, `ORDER BY ignored Trino`, `does Trino strip ORDER BY`, `stable sort Trino`, `deterministic order`, `ORDER BY in subquery not preserved`, `ORDER BY in CTE not preserved`, `ORDER BY in view dropped`, `ORDER BY tiebreaker`, `random order each run`, `TopN operator`, `why does my row order vary between runs`, `is my ORDER BY honored`. Verified at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) on 2026-06-07.
+
+**The one-fact summary.** A **TOP-LEVEL** `SELECT ... ORDER BY x` (the OUTERMOST query — the one whose rows the client receives) **IS honored — Trino returns sorted output WITH OR WITHOUT a `LIMIT`**. `LIMIT` does **NOT** "make ORDER BY execute"; the top-level sort runs either way. `LIMIT` only lets the planner use the cheaper **TopN** operator (single-pass heap of size N) instead of a full sort. Per the [Trino SELECT docs](https://trino.io/docs/467/sql/select.html) verbatim: *"an ORDER BY clause only affects the order of rows for queries that immediately contain the clause... Trino follows that specification, and drops redundant usage of the clause to avoid negative performance impacts."* The drop applies to a **REDUNDANT** ORDER BY — one whose ordered output the enclosing operation does not preserve: ORDER BY in a SUBQUERY/CTE/VIEW, or in `INSERT ... SELECT ... ORDER BY`. To get ordered rows from an inner query: put the ORDER BY in the **OUTERMOST** query, OR use `ORDER BY ... LIMIT N` in the inner query (LIMIT forces a TopN whose bounded output survives — though the consumer may still reshuffle, so re-`ORDER BY` outside if you need ordered final output).
+
+**TIES are a separate issue.** `ORDER BY x` with duplicate `x` values is non-deterministic **among the ties** (run-to-run variance within the peer group). For a deterministic TOTAL order, add a unique tiebreaker column: `ORDER BY x, id`.
+
+**Worked contrast — three shapes, three behaviors:**
+
+```sql
+-- (1) TOP-LEVEL ORDER BY — HONORED, with or without LIMIT.
+--     Trino returns rows in ts DESC order. No LIMIT needed for the sort to happen.
+SELECT user_id, ts, event_name
+FROM iceberg.analytics.events
+WHERE event_date = DATE '2026-06-07'
+ORDER BY ts DESC;                                  -- top-level sort: HONORED.
+
+-- (2) NESTED ORDER BY in a subquery — may be DROPPED as redundant.
+--     The outer SELECT does NOT preserve the inner ordering.
+--     Wrong:
+SELECT * FROM (
+  SELECT user_id, ts, event_name
+  FROM iceberg.analytics.events
+  ORDER BY ts DESC                                 -- redundant: outer doesn't preserve.
+) t;
+--     Right: move ORDER BY to the OUTERMOST query.
+SELECT user_id, ts, event_name
+FROM (
+  SELECT user_id, ts, event_name
+  FROM iceberg.analytics.events
+) t
+ORDER BY ts DESC;                                  -- top-level: HONORED.
+
+-- (3) TIES — non-deterministic ordering among rows that share the ORDER BY value.
+--     Two rows with identical `ts` can appear in either order.
+SELECT user_id, ts, event_id
+FROM iceberg.analytics.events
+ORDER BY ts DESC, event_id;                        -- unique tiebreaker → deterministic.
+```
+
+> **DO NOT WRITE.**
+> 1. **"Trino strips/ignores a top-level `ORDER BY` without `LIMIT` / returns rows in random order"** — **FALSE.** A top-level ORDER BY is honored with or without LIMIT. Only a REDUNDANT (nested) ORDER BY is dropped.
+> 2. **"You must add `LIMIT` to make `ORDER BY` execute"** — **FALSE.** The top-level sort runs either way. `LIMIT` only enables the cheaper TopN operator (heap of size N vs full sort).
+> 3. **"An `ORDER BY` in a CTE / view / subquery / `INSERT ... SELECT` guarantees ordered output downstream"** — **FALSE.** Nested ORDER BY is redundant and may be dropped by the planner. Put the ORDER BY in the OUTERMOST query (or use `ORDER BY ... LIMIT N` inside to force a TopN, then re-`ORDER BY` outside).
+> 4. **"`ORDER BY ts DESC` is deterministic when multiple rows share `ts`"** — **FALSE among the ties.** Add a unique tiebreaker: `ORDER BY ts DESC, event_id`.
+
+**Why your row order varies between runs (decision rule):**
+- **Inner ORDER BY only** → the planner dropped it. Move ORDER BY to the OUTERMOST query.
+- **Top-level ORDER BY on a non-unique column** → ties are non-deterministic. Add a unique tiebreaker (`event_id`, a UUID, a serial).
+- **Top-level ORDER BY on a unique column** → output IS deterministic. If you observe variance, you are looking at a different SQL shape than you think (e.g., the ORDER BY is in a CTE wrapped by an outer query). Run `EXPLAIN` to confirm.
+
+**Cross-references.** [§5 Window-function tied-ORDER-BY peer semantics in resource 07](07-analytical-query-patterns.md#rows-vs-range-on-tied-order-by-values--pick-the-right-tool-avoid-interval-0-day) for the ROWS-vs-RANGE-on-tied-keys peer semantics inside `OVER (...)`. [Resource 22 §3.3A / §13.5](22-trino-federation-postgresql.md) for TopN-pushdown EXPLAIN signatures on federated tables (the absence of a separate `TopN[...]` operator above the TableScan IS the pushdown success signature; ORDER BY without LIMIT is a known TopN-pushdown failure shape because there is no `LIMIT` to push). [Resource 27 § LEADING CANONICAL — Oracle vs Trino NULLS-default semantics](27-oracle-plsql-to-dbt-trino.md) for the `NULLS FIRST` / `NULLS LAST` default that affects sort order on a column with NULLs.
+
+---
+
 ## 4. Verify your plan with EXPLAIN
 
 **Why**: SQL that looks correct can still scan the whole table. `EXPLAIN` shows what Trino will actually do.
