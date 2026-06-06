@@ -716,6 +716,46 @@ EXECUTE optimize(file_size_threshold => '128MB')
 WHERE tenant_id = 'acme';
 ```
 
+#### LEADING CANONICAL — Iceberg target file size: THREE valid setters + how to apply to existing data
+
+**Keyword anchor:** iceberg target file size, encourage larger files, write.target-file-size-bytes, small files tuning, target-file-size-bytes spark option, iceberg.target-max-file-size Trino, where to set iceberg file size, change iceberg file size, file size for new writes, apply new target file size to existing files, set spark session iceberg file size, spark.sql.iceberg target file size, spark conf iceberg file size.
+
+There are **THREE valid mechanisms** to control the target file size for NEW Iceberg writes. They live in different namespaces — pick by who is writing and how persistent the setting needs to be. Verified at [iceberg.apache.org/docs/latest/configuration/#write-properties](https://iceberg.apache.org/docs/latest/configuration/#write-properties), [iceberg.apache.org/docs/latest/spark-configuration/](https://iceberg.apache.org/docs/latest/spark-configuration/) (Write options), and [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html).
+
+| Setter | Scope | Form |
+|---|---|---|
+| **(1) TABLE PROPERTY `write.target-file-size-bytes`** (default **512 MB**) | Persists on the table; honored by Spark writers (Trino 467 has a writer-side gap — see r13 §3-tier callout). | Spark: `ALTER TABLE iceberg.analytics.events SET TBLPROPERTIES ('write.target-file-size-bytes' = '268435456');` (256 MB). Also settable at create time via `CREATE TABLE ... TBLPROPERTIES (...)` or `writeTo(...).tableProperty('write.target-file-size-bytes','268435456')`. Trino: also settable as an Iceberg table property via `WITH (extra_properties = MAP(ARRAY['write.target-file-size-bytes'], ARRAY['268435456']))` at create time. |
+| **(2) DataFrameWriter OPTION `target-file-size-bytes`** (NO `write.` prefix) | Per-write override; reverts next write. | Spark: `df.writeTo("iceberg.analytics.events").option("target-file-size-bytes", "268435456").append()`. **Note the prefix drop** — the writer option strips the `write.` namespace; see r13 §"DO-NOT-WRITE — option-key-prefix-confusion" for the trap. |
+| **(3) Trino CATALOG config `iceberg.target-max-file-size`** (default **1 GB**) | Cluster-wide default for Trino-side writes; lives in the catalog `.properties` file. | `etc/catalog/iceberg.properties`: `iceberg.target-max-file-size=256MB`. **Session-property form** uses underscores: `SET SESSION iceberg.target_max_file_size = '256MB';` (Trino converts hyphens to underscores for session properties). |
+
+**To APPLY a new target size to EXISTING files (the size only affects FUTURE writes; existing files keep their old size until you rewrite them):**
+
+```sql
+-- Trino: compact existing files into target-sized files. file_size_threshold tells
+-- optimize which files count as "small enough to merge"; raise it above your largest
+-- existing file to force a full rewrite.
+ALTER TABLE iceberg.analytics.events
+  EXECUTE optimize(file_size_threshold => '256MB');
+
+-- Spark equivalent: pass target-file-size-bytes in the options map.
+CALL iceberg.system.rewrite_data_files(
+  table   => 'analytics.events',
+  options => map('target-file-size-bytes', '268435456')
+);
+```
+
+**DO NOT WRITE:**
+
+| Wrong shape | Why it's wrong |
+|---|---|
+| `spark.conf.set("spark.sql.iceberg.write.target-file-size-bytes", "268435456")` | **FABRICATED Spark session-conf key.** No `spark.sql.iceberg.*` session config controls Iceberg target file size. Spark stores any string conf key without error, but Iceberg never reads it; file size stays at the table-property default (512 MB) or whatever the table property says. Use the TABLE PROPERTY (`write.target-file-size-bytes` — WITH `write.` prefix) or the DataFrameWriter OPTION (`target-file-size-bytes` — NO `write.` prefix) instead. |
+| `spark.conf.set("spark.sql.iceberg.target_file_size_bytes", "268435456")` | **Same fabrication, underscore variant.** Also silently ignored. |
+| Any `spark.sql.iceberg.*` SESSION CONFIG for target file size | **The `spark.sql.iceberg.*` namespace IS real for other keys** (`spark.sql.iceberg.handle-timestamp-without-timezone`, `spark.sql.iceberg.vectorization.enabled`, `spark.sql.iceberg.check-nullability`, `spark.wap.id`, `spark.wap.branch`) **but NOT for target file size.** File size setters are the THREE above only. |
+| `df.writeTo("iceberg.x.y").option("write.target-file-size-bytes", "268435456").append()` | **Wrong namespace — silently ignored.** The DataFrameWriter OPTION drops the `write.` prefix (bare `target-file-size-bytes`); the `write.` prefix belongs ONLY to the TABLE-PROPERTY namespace (`TBLPROPERTIES`, `tableProperty(...)`). Same setting, different key in each namespace. Per [iceberg.apache.org/docs/latest/spark-configuration/](https://iceberg.apache.org/docs/latest/spark-configuration/) "Write options". |
+| `ALTER TABLE ... EXECUTE optimize(target_file_size_bytes => '256MB')` on Trino | **Wrong parameter name for Trino.** Trino's `EXECUTE optimize` takes `file_size_threshold` (size string, e.g. `'256MB'`) — NOT `target_file_size_bytes`. `target-file-size-bytes` is the Spark `rewrite_data_files` options-map key; Trino's optimize procedure has a single parameter and it is `file_size_threshold`. |
+
+**Cross-references.** Full 3-tier Spark write-side detail (with the option-key-prefix-confusion trap and the Trino 467 writer-side gap, [trinodb/trino #28250](https://github.com/trinodb/trino/issues/28250)) lives in [resource 13 §"Spark Iceberg write file size — 3-tier canonical"](13-postgres-to-iceberg-ingestion.md). For the Trino-vs-Spark compaction-procedure split (`EXECUTE optimize` vs `CALL rewrite_data_files`), see the §"Side-by-side syntax reference" table below.
+
 **When to choose Spark CALL over Trino ALTER TABLE EXECUTE:**
 
 | Need | Use Spark CALL |

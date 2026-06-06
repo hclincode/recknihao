@@ -1,193 +1,130 @@
-# Iter 517 — Judge Feedback (EXTENDED PHASE, federation NOT probed)
+# Iter 518 Judge Feedback — 2026-06-06 (EXTENDED PHASE)
 
-## Overall: 4.1719 PASS (+0.6719 margin above 3.5 floor)
+## Overall: 4.5469 PASS — but with a NEW fabrication on Q2
 
-Per-question scores: **Q1=4.9375 STRONG PASS**, **Q2=3.6875 PASS (Accuracy DOWN for fabricated-absence)**, **Q3=3.5625 PASS (Accuracy DOWN for fabricated session-config + missing real table-property)**, **Q4=4.5 PASS**.
+**Score**: (Q1 4.9375 + Q2 3.8125 + Q3 4.625 + Q4 4.8125)/4 = **18.1875 / 4 = 4.5469 PASS** (+1.0469 above 3.5 floor; weakest margin in recent 9-iter window, dragged by Q2 new-fab nit).
 
-Avg = (4.9375 + 3.6875 + 3.5625 + 4.5) / 4 = **16.6875 / 4 = 4.1719 PASS**, +0.6719 above 3.5 floor.
-
-**HEADLINE OUTCOMES**:
-- **Q1: Iter517 r27 §6.7H dbt-documentation canonical LANDED on first re-probe — 30th consecutive leading-canonical bulletproofing instance.** Iter516 Q4 content-gap punt ("resources don't include a guide to dbt's documentation feature") is GONE.
-- **Q2: NEW FABRICATED ABSENCE — responder claims "Trino has no single CONTAINS function for arrays", but Trino 467 HAS `contains(array(T), T) -> boolean` per official docs.** The UNNEST+EXISTS form responder gave works, so partial credit on Accuracy — but the clean canonical `WHERE contains(event_tags, 'upload')` was wrongly said to not exist. Same fabricated-absence failure-class as iter505 "Trino has no split_to_map".
-- **Q3: NEW FABRICATED CONFIG NAME — responder cites `spark.sql.iceberg.write.target-file-size-bytes` as a "Spark side... table property or write configuration". This config name does NOT EXIST.** The real table property is `write.target-file-size-bytes` (no `spark.sql.iceberg.` prefix) set via `ALTER TABLE ... SET TBLPROPERTIES('write.target-file-size-bytes'='268435456')` or as a DataFrameWriter option `target-file-size-bytes`. The Trino `EXECUTE optimize(file_size_threshold => '256MB')` form and Spark `rewrite_data_files` form are correct — credit those.
-- **Q4: Clean PASS** — Trino doesn't auto-coerce numeric → varchar for `||`/CONCAT; CAST AS VARCHAR + `format('%s-%d', ...)` both valid Trino 467.
+**Iter517 fix landing status**:
+- **FIX A (r07 §1a.3 array `contains` canonical) — FULLY LANDED on Q1.** Responder uses `contains(roles, 'admin')` boolean, cardinality, array_distinct — the iter517 Q2 "Trino has no contains" fabrication is GONE.
+- **FIX B (r17 leading canonical — THREE setters for Iceberg target file size) — PARTIALLY LANDED on Q2.** The `spark.sql.iceberg.write.target-file-size-bytes` session-config fab from iter517 Q3 is GONE (responder explicitly debunks it). BUT a NEW related fabrication appeared: `write_target_file_size_bytes` as a Trino DDL `WITH (...)` table-property name — see Section B below.
 
 ---
 
-## Per-question breakdown
+## Per-question scores
 
-### Q1 — dbt docs (RE-PROBE, content-gap fill from iter516)
-**Score: 4.9375 STRONG PASS** (Accuracy 5.0, Clarity 5.0, Applicability 5.0, Completeness 4.75)
+### Q1 — array roles membership / count / dedup — **4.9375 STRONG PASS**
 
-**ITER516 Q4 CONTENT GAP FILLED — iter517 r27 §6.7H canonical LANDED on first re-probe** (30th consecutive leading-canonical bulletproofing landing instance). All 4 mechanisms specified in the gap-fill directive are present in the answer:
+| Dim | Score | Reason |
+|---|---|---|
+| Accuracy | 5.0 | `contains(roles, 'admin')` boolean, `cardinality(roles)`, `array_distinct(roles)`, `cardinality(array_distinct(roles))` ALL verified verbatim at trino.io/docs/current/functions/array.html. No UNNEST-for-membership, no fabrication. |
+| Clarity | 5.0 | Clean boolean-vs-UNNEST routing; explicit "no UNNEST needed for membership". |
+| Actionability | 5.0 | Engineer can paste `WHERE contains(roles, 'admin')` directly. |
+| Completeness | 4.75 | -0.25 for no callout that `contains` does NOT work on MAPs (for MAP key existence use `element_at(map, key) IS NOT NULL`) — minor cross-ref gap. |
 
-(1) WHERE descriptions live — schema YAML (`models/_models.yml`) with `description:` key on model + columns, **explicitly NOT in `.sql` files**. CORRECT — verified at docs.getdbt.com/docs/build/documentation verbatim ("Descriptions for models and columns live in schema YAML files (typically models/<filename>.yml), not in .sql files").
+**Verification (doc quote)**: trino.io/docs/current/functions/array.html — `contains(x, element) → boolean`: "Returns true if the array `x` contains the `element`." `cardinality(x) → bigint`: "Returns the cardinality (size) of the array." `array_distinct(x) → array`: "Remove duplicate values."
 
-(2) Long-form / reusable doc blocks — `{% docs my_block %} ... markdown ... {% enddocs %}` in `.md` files, referenced from YAML via `description: "{{ doc('my_block') }}"`. CORRECT — verified verbatim ("Docs blocks are declared in Markdown files using Jinja syntax and referenced via the doc() function").
+**ITER518 r07 §1a.3 ARRAY CANONICAL LANDED.** The iter517 responder fab "Trino has no single CONTAINS function" is fully reconciled. 21st leading-canonical-bulletproofing instance to land cleanly on first re-probe.
 
-(3) Generate + serve — `dbt docs generate` builds `manifest.json` + `catalog.json` (catalog.json populated by querying warehouse `information_schema`); `dbt docs serve` runs local HTML site on default port 8080. CORRECT — verified at docs.getdbt.com/reference/commands/cmd-docs + dbt-labs/dbt-core#955 ("dbt docs serve starts a webserver on port 8080 to serve your documentation locally").
+---
 
-(4) On-prem k8s framing — host generated static files behind nginx. CORRECT, fits prod_info.md (on-prem k8s, no public cloud).
+### Q2 — Iceberg target file size table property / session config — **3.8125 BARELY PASS** (NEW FAB)
 
-Citation `r27 §6.7H` matches what teacher wrote per iter517 state.json notes. -0.25 Completeness for no explicit `--port` flag override mention (default 8080 stated correctly; `--port 8081` override pattern not surfaced), non-load-bearing.
+| Dim | Score | Reason |
+|---|---|---|
+| Accuracy | 3.0 | **Iter517 session-config fab GONE** (good — `spark.sql.iceberg.target-file-size` correctly debunked as "not the canonical approach"). **BUT NEW FAB**: the DDL `CREATE TABLE ... WITH (write_target_file_size_bytes = 268435456)` invents an underscore-flattened Trino table property that does NOT exist on Trino 467. The Trino Iceberg connector's documented `WITH (...)` table-properties list does NOT include `write_target_file_size_bytes` — verified by WebFetch of trino.io/docs/current/connector/iceberg.html. Per Trino GitHub issue #28250 (opened 2026-02-11, PR #28057), this is a **"Proposed Enhancement"** still pending merge: "convert the session properties to Iceberg's native table properties for write configuration" — NOT available on Trino 467. -2.0 for inventing a non-existent flat WITH-clause property. |
+| Clarity | 4.5 | Clean prose; correctly explains "table property, not session config" routing. -0.5 because the user is given a property name they will get a parse error on. |
+| Actionability | 3.5 | The compaction half (Spark `rewrite_data_files` + Trino `EXECUTE optimize(file_size_threshold => '256MB')`) is correct and usable. But the headline DDL `WITH (write_target_file_size_bytes = ...)` will fail at parse/validation time — engineer cannot paste it. -1.5 for the broken-on-paste DDL. |
+| Completeness | 4.25 | Discusses compaction + session-vs-table-property framing well. -0.75 for not listing the three ACTUAL valid setters on Trino 467: (1) `extra_properties = map(ARRAY['write.target-file-size-bytes'], ARRAY['268435456'])` at CREATE TABLE — the ONLY way to set the native Iceberg property from Trino DDL today; (2) Spark `ALTER TABLE … SET TBLPROPERTIES('write.target-file-size-bytes' = '268435456')`; (3) cluster-wide Trino catalog config `iceberg.target-max-file-size` in `etc/catalog/iceberg.properties` (default 1 GB) + session-form `SET SESSION iceberg.target_max_file_size = '256MB'`. |
 
-### Q2 — array `contains` + count distinct tags
-**Score: 3.6875 PASS** (Accuracy 2.75, Clarity 4.5, Applicability 3.5, Completeness 4.0)
+**Verification (doc quotes + sources)**:
+- **trino.io/docs/current/connector/iceberg.html table-properties list (WebFetched)**: confirmed properties include `format`, `compression_codec`, `partitioning`, `sorted_by`, `location`, `format_version`, `max_commit_retry`, `delete_after_commit_enabled`, `max_previous_versions`, `orc_bloom_filter_columns`, `orc_bloom_filter_fpp`, `parquet_bloom_filter_columns`, `object_store_layout_enabled`, `data_location`, `extra_properties`. **`write_target_file_size_bytes` is NOT in the list.**
+- **GitHub trinodb/trino #28250 (WebFetched)**: "Proposed Enhancement" + PR #28057 pending — `write.target-file-size-bytes` as a directly settable Trino table property is NOT yet merged into Trino 467. Quote: "the implementation is pending in PR #28057... Currently, Trino only supports session-level configuration through properties like `target_max_file_size` rather than persisted table properties."
+- **trino.io extra_properties doc**: "Additional properties added to an Iceberg table" — this IS the documented mechanism for setting native Iceberg properties from Trino DDL.
 
-**NEW FABRICATED ABSENCE — Accuracy DOWN**. Responder claims:
+**ITER518 r17 FIX B PARTIALLY LANDED.** The exact iter517 fab `spark.sql.iceberg.write.target-file-size-bytes` Spark session config is GONE (responder explicitly debunks the `spark.sql.iceberg.*` family — that part of FIX B reached the responder). But the responder substituted a NEW underscore-flattened Trino-property fab in its place. The r17 LEADING CANONICAL block needs a tighter DO-NOT-WRITE call-out specifically against the underscore-flat Trino DDL form `write_target_file_size_bytes` AND a verbatim **`extra_properties = map(ARRAY['write.target-file-size-bytes'], ARRAY['268435456'])`** Trino-DDL example as the leading-canonical Trino-side answer (currently the r17 block routes Trino users only to the catalog config + session property, missing the per-table extra_properties form).
 
-> "Trino has no single CONTAINS function for arrays. The canonical pattern is to unnest and filter."
+---
 
-This is FACTUALLY WRONG per trino.io/docs/current/functions/array.html (Trino 467) verified verbatim:
+### Q3 — Oracle ROWID dedup → Trino — **4.625 PASS** (messy first query)
 
-> **contains(x, element) → boolean** — "Returns true if the array `x` contains the `element`."
+| Dim | Score | Reason |
+|---|---|---|
+| Accuracy | 4.5 | Second query is the canonical Trino 467 dedup idiom: `ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY created_at) AS rn` → outer `WHERE rn = 1` — verified correct (Trino 467 has NO QUALIFY, window functions cannot be used in WHERE, so subquery/CTE form is mandatory). Correctly states "Trino has no ROWID". -0.5 for the FIRST query which references undefined columns (`id_within_group`, `row_id`, `min_id` alias mismatch) — the inner SELECT aliases `FIRST_VALUE(row_id) ... AS min_id` but the outer NOT IN matches on `(customer_id, id_within_group)` against `(customer_id, min_id)` — column names don't align with the input table, query is non-runnable. |
+| Clarity | 4.5 | Second/idiomatic query is clear. -0.5 because the messy first query confuses readers (does it work? what's `id_within_group`?). |
+| Actionability | 4.5 | Engineer can paste the second query. -0.5 for not addressing the IN-PLACE DELETE form the user asked about — Oracle's `DELETE WHERE ROWID NOT IN (...)` mutates in place. The canonical Iceberg-via-Trino rowid-free replacement is **CTAS + RENAME** (`CREATE TABLE t_new AS SELECT * FROM (SELECT *, ROW_NUMBER() OVER (...) rn FROM t) WHERE rn=1; ALTER TABLE t RENAME TO t_old; ALTER TABLE t_new RENAME TO t;`) OR a `MERGE` (delete branch for rn>1) — neither is shown. A bare DELETE keep-min-per-group has no clean rowid-free shape; that fact should be stated. |
+| Completeness | 5.0 | Covers the keep-first-per-group semantics + PARTITION BY customer_id + ORDER BY created_at — the core question. |
 
-The canonical clean idiom for "find rows where event_tags contains 'upload'" is:
-```sql
-WHERE contains(event_tags, 'upload')
+**Verification**:
+- trino.io/docs/current/sql/select.html — no QUALIFY clause in Trino 467 grammar; window function in WHERE causes parse error → subquery/CTE form is mandatory.
+- GitHub trinodb/trino discussion #15481 "For Iceberg, delete duplication rows within the table" — confirms canonical Iceberg dedup pattern in Trino is recreate-via-CTAS or MERGE (not bare DELETE).
+
+---
+
+### Q4 — dbt incremental composite unique_key — **4.8125 STRONG PASS** (minor nit)
+
+| Dim | Score | Reason |
+|---|---|---|
+| Accuracy | 4.75 | `unique_key=['customer_id', 'event_date']` list form is the canonical dbt composite-key syntax (introduced dbt-core 1.1.0+) — verified at docs.getdbt.com/reference/resource-configs/unique_key. dbt-trino generates `MERGE ... ON (t.customer_id = s.customer_id AND t.event_date = s.event_date)` is correct. First-run CTAS / subsequent MERGE upsert lifecycle correct. -0.25 NIT: the example config shows `format_version = 2` as a bare top-level `config()` kwarg. For dbt-trino, Iceberg table properties (including `format_version`, `partitioning`, `sorted_by`) belong inside the `properties={...}` dict, not as top-level `config()` kwargs — per docs.getdbt.com/reference/resource-configs/trino-configs and the iter495 dbt-trino partitioning-key canonical at r05. Correct form: `config(materialized='incremental', unique_key=['customer_id', 'event_date'], properties={'format_version': "'2'", 'partitioning': "ARRAY['day(event_date)']"})`. |
+| Clarity | 5.0 | Clean MERGE-ON explanation; well-routed first-run vs subsequent-run semantics. |
+| Actionability | 4.5 | Engineer can paste the unique_key list directly. -0.5 because if they copy the `format_version=2` top-level kwarg form, dbt-trino will silently ignore it (or warn) — they won't get format_version=2 on their table. |
+| Completeness | 5.0 | Covers list shape + generated MERGE + first-run CTAS routing — the core question. |
+
+**Verification (doc quote)**: docs.getdbt.com/reference/resource-configs/unique_key — "supplied as a string representing a single column or a list of single-quoted column names like `['col1', 'col2', …]`"; dbt-core issue #3431 confirms composite-key list form merged for dbt-core 1.1.0+. dbt-trino issue #465 confirms composite MERGE ON generated correctly when list passed.
+
+---
+
+## Topic rubric updates (iter518)
+
+(Federation row UNTOUCHED per directive — 4.49944/310 stays.)
+
+- **SQL query best practices for OLAP** (Q1 array contains + Q3 ROW_NUMBER dedup map here):
+  prior 4.5715/64 → (4.5715·64 + 4.9375 + 4.625)/66 = (292.576 + 9.5625)/66 = **4.5779/66** (+0.0064).
+- **Iceberg table maintenance** (Q2 target file size maps here):
+  prior 4.4920/155 → (4.4920·155 + 3.8125)/156 = (696.260 + 3.8125)/156 = **4.4877/156** (−0.0043).
+- **Oracle PL/SQL → dbt + Trino SQL migration** (Q3 ROWID dedup + Q4 dbt composite unique_key map here):
+  prior 4.5448/77 → (4.5448·77 + 4.625 + 4.8125)/79 = (349.949 + 9.4375)/79 = **4.5491/79** (+0.0043).
+
+Topic rubric line to append:
 ```
-**NOT** the responder's `WHERE EXISTS (SELECT 1 FROM UNNEST(event_tags) AS t(tag) WHERE tag='upload')` (which works but is 4x more code and obscures intent).
+Iter518 — 2026-06-06 — overall 4.5469 PASS — Q1 array contains 4.9375 STRONG PASS (iter518 r07 §1a.3 canonical LANDED), Q2 Iceberg target file size 3.8125 BARELY PASS (iter517 session-config fab GONE but NEW write_target_file_size_bytes WITH-clause fab — r17 LEADING CANONICAL block needs underscore-flat DO-NOT-WRITE row + verbatim extra_properties Trino-DDL example), Q3 ROWID dedup 4.625 PASS (canonical ROW_NUMBER subquery correct; messy first query w/ undefined columns + in-place DELETE form not addressed), Q4 dbt composite unique_key 4.8125 STRONG PASS (list form correct; minor nit on format_version-as-top-level-kwarg vs properties={} dict). Federation NOT probed (4.49944/310 stays).
+```
 
-**Partial credit** because the UNNEST+EXISTS / CROSS JOIN UNNEST forms the responder gave DO produce correct results — engineer ships a working query, just not the idiomatic one. This is **not a query-breaks-in-prod fail** (unlike iter513 Q4 dbt comma-vs-space inversion which shipped a 0-model run). But it's the **same fabricated-absence failure-class as iter505 "Trino has no split_to_map"** — confident assertion that a function doesn't exist when it does.
+---
 
-**Also missing for the count-distinct-tags half**: responder says `COUNT(DISTINCT tag) FROM ... CROSS JOIN UNNEST(event_tags)` which works, but didn't surface two relevant Trino array helpers that simplify the surrounding workflow:
-- **`cardinality(array)` → bigint** — array length (per-row tag count without UNNEST)
-- **`array_distinct(array)` → array** — dedup within a single row's array (useful before unnesting if input has dup tags per row)
+## Next-teacher actions for iter519 (HIGH-priority first)
 
-Both verified at trino.io/docs/current/functions/array.html.
-
-`approx_distinct` recommendation for large arrays is correct. Clause-order rule (WHERE before HAVING) correct.
-
--2.25 Accuracy (fabricated absence of `contains()` is the load-bearing miss), -0.5 Clarity (long UNNEST template harder to read than `contains()` one-liner), -1.5 Applicability (engineer ships UNNEST+EXISTS where a single function call works), -1.0 Completeness (no `cardinality` + no `array_distinct` surfaced).
-
-### Q3 — Iceberg small-files: tune table to encourage larger files vs more compaction
-**Score: 3.5625 PASS** (Accuracy 2.75, Clarity 4.0, Applicability 4.0, Completeness 3.5)
-
-**NEW FABRICATED CONFIG NAME — Accuracy DOWN**. Responder claims:
-
-> "Spark side: `spark.sql.iceberg.write.target-file-size-bytes=268435456` (256MB) or higher" as a "table property or write configuration"
-
-This config name **does not exist**. Verified against iceberg.apache.org/docs/latest/configuration/ + iceberg.apache.org/docs/latest/spark-writes/ + iceberg.apache.org/docs/nightly/spark-configuration/ via WebSearch:
-
-The real **table property** name is **`write.target-file-size-bytes`** (NO `spark.sql.iceberg.` prefix) with default `536870912` (512 MB). Three correct ways to set it:
-
-1. **Table property (recommended, persists)**:
+1. **HIGH — r17 LEADING CANONICAL block (iter518 FIX B target-file-size canonical) — add Trino-DDL `extra_properties` verbatim example + tighten DO-NOT-WRITE.** Current block lists THREE setters: TBL PROPERTY (Spark form), DataFrameWriter OPTION (Spark form), Trino CATALOG config / session property. **MISSING**: an explicit Trino-DDL example showing how to set the native `write.target-file-size-bytes` property AT CREATE/ALTER TABLE time from Trino. The canonical form is:
    ```sql
-   ALTER TABLE events SET TBLPROPERTIES ('write.target-file-size-bytes'='268435456');
+   CREATE TABLE iceberg.analytics.events (...)
+   WITH (
+     format_version = 2,
+     partitioning = ARRAY['day(occurred_at)'],
+     extra_properties = map(ARRAY['write.target-file-size-bytes'], ARRAY['268435456'])
+   )
    ```
-2. **DataFrameWriter option (per-write override)**:
-   ```python
-   df.write.option('target-file-size-bytes', '268435456').format('iceberg').save(...)
-   ```
-3. **Trino Iceberg connector catalog property** `iceberg.target-max-file-size` (default `1GB`) — verified at trino.io/docs/current/connector/iceberg.html. (No corresponding Trino session property — confirmed by Trino docs verbatim: "There is no corresponding session property for this setting".)
+   AND extend the DO-NOT-WRITE table with a new banned shape: `write_target_file_size_bytes = 268435456` as a bare WITH-clause kwarg — call out "underscore-flattening of the native dotted `write.target-file-size-bytes` does NOT make it a valid Trino table-property name on Trino 467; the connector's allow-list does NOT include it (verified trino.io/docs/current/connector/iceberg.html); use `extra_properties = map(...)` form" + cite GitHub trinodb/trino #28250 / PR #28057 as the pending feature that would change this in a future Trino release.
 
-The form `spark.sql.iceberg.write.target-file-size-bytes` is **fabricated** — that namespace doesn't exist in Iceberg's Spark integration. Iceberg's Spark-session configs use `spark.sql.catalog.<name>.*` for catalog wiring, NOT `spark.sql.iceberg.write.*` for write tuning.
+2. **HIGH — r27 (Oracle migration) or r17 — ROWID-dedup IN-PLACE DELETE canonical.** Existing §4.5/§7A.2 covers the ROW_NUMBER subquery form correctly, but the Oracle `DELETE WHERE ROWID NOT IN (SELECT MIN(ROWID)…GROUP BY key)` mutation-shape has no clean Trino translation. Add a §"Oracle ROWID-DELETE keep-min-per-group → Trino" callout with TWO canonical replacements: (A) **CTAS + RENAME**: `CREATE TABLE t_dedup AS SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY created_at) rn FROM t) WHERE rn = 1; ALTER TABLE t RENAME TO t_old; ALTER TABLE t_dedup RENAME TO t;` (B) **MERGE delete branch**: `MERGE INTO t USING (SELECT id_pk FROM (SELECT id_pk, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY created_at) rn FROM t) WHERE rn > 1) d ON t.id_pk = d.id_pk WHEN MATCHED THEN DELETE;` (requires a stable PK column — call this out). Explicitly state: "a bare DELETE keep-first-per-group has no clean rowid-free Trino form; you MUST recreate or MERGE."
 
-**What's CORRECT (credit)**:
-- Two-pronged framing (set target file size to prevent future small files AND compact existing ones) is sound advice.
-- Trino `ALTER TABLE ... EXECUTE optimize(file_size_threshold => '256MB')` — VERIFIED at trino.io/docs/current/connector/iceberg.html: `file_size_threshold` defaults to `100MB`, files smaller than threshold are candidates for consolidation. Responder's "below which files are rewritten" gloss is accurate.
-- Spark `CALL iceberg.system.rewrite_data_files(table=>'...', options=>map('target-file-size-bytes','268435456'))` — VERIFIED at iceberg.apache.org/docs/latest/spark-procedures/. The `target-file-size-bytes` option (no prefix) is the correct argument name for `rewrite_data_files`.
-- Nightly compaction + weekly `expire_snapshots`/`remove_orphan_files` cadence is sound.
+3. **MEDIUM — r27/r28 — dbt-trino `format_version` belongs in `properties={...}` dict, not as top-level config() kwarg.** Add a small reconcile-in-place callout near the dbt-trino model-config canonical: "Iceberg table properties (`format_version`, `partitioning`, `sorted_by`, `write.target-file-size-bytes` via extra_properties) go INSIDE the `properties={...}` dict — NOT as bare `config()` top-level kwargs. dbt-trino routes `properties` through to the underlying Trino `CREATE TABLE … WITH (...)` clause; top-level config() kwargs are dbt-core materialization kwargs only." Show wrong vs right side-by-side.
 
-Net: 50% of Q3 is correct (Trino EXECUTE optimize + Spark rewrite_data_files) and 50% is fabricated (the `spark.sql.iceberg.write.target-file-size-bytes` session config). Engineer copy-pasting that config name into Spark conf will silently no-op (Spark ignores unknown `spark.sql.iceberg.*` keys); they'll think they've tuned the writer but tiny files will keep accumulating until they discover the typo by reading Iceberg docs.
-
--2.25 Accuracy (fabricated config name is load-bearing — engineer's "fix" doesn't fix anything), -1.0 Clarity (mixed real + fab muddles the canonical), -1.0 Applicability (one of two recommended setters is a no-op), -1.5 Completeness (no mention of the real table-property `write.target-file-size-bytes` + no Trino catalog property `iceberg.target-max-file-size`).
-
-### Q4 — concat with numeric column (`order_id || '-' || status` Oracle → Trino)
-**Score: 4.5 PASS** (Accuracy 4.75, Clarity 4.5, Applicability 4.5, Completeness 4.25)
-
-CORRECT. Verified against trino.io/docs/current/functions/string.html: `concat()` signature is `concat(string1, ..., stringN) → varchar` — argument names are all `string*`, no numeric overload. `||` operator provides same functionality as `concat()`. Trino is strictly typed; numeric arguments to `||`/`concat()` produce the well-known Oracle migration error `Unexpected parameters (varchar, integer) for function concat`.
-
-Both fixes responder gives are valid Trino 467:
-- `order_id || '-' || CAST(status AS VARCHAR)` — explicit cast, idiomatic.
-- `format('%s-%d', order_id, status_code)` — `format(format, args...)` per Trino docs, `%s` for string, `%d` for integer; produces `varchar`.
-
-Cites `§4.3 + §7A.3.1` — matches r27 Oracle-migration canonicals.
-
--0.25 Accuracy / -0.5 Clarity / -0.5 Applicability / -0.75 Completeness for: no mention of `CAST(status AS VARCHAR)` working for any numeric type (DECIMAL, BIGINT, INTEGER all coerce cleanly), no callout that `||` operator chains left-to-right and you can also write `CONCAT(order_id, '-', CAST(status AS VARCHAR))` if preferred, no explicit pre-emption of the common follow-up "what about NULL?" (Trino `||` propagates NULL — `'abc' || NULL → NULL`; `concat` same; `format` will print 'null' literal for NULL args, which is its own gotcha). All non-load-bearing, but a tighter answer would surface the NULL-propagation question.
+4. **LOW — r07 §1a.3 — add MAP cross-ref nit.** Add one line: "`contains()` works on ARRAY only — for MAP key existence use `element_at(map, key) IS NOT NULL` (cross-ref r09 §MAP)." Picks up the Q1 -0.25 Completeness gap.
 
 ---
 
-## Cross-cutting patterns
+## Iter519 probe targets
 
-1. **30th consecutive leading-canonical bulletproofing landing** — iter517 r27 §6.7H dbt-documentation canonical landed on first re-probe. Iter516 Q4 content-gap punt GONE. This is now a robust pattern: teacher fills gap → responder lands clean canonical on next iter's re-probe. 30/30 hit rate is exceptional.
-
-2. **Two NEW fabricated-absence/fabricated-config errors emerged this iter (Q2 + Q3)** — both load-bearing for the actionability dimension:
-   - Q2: claimed `contains()` doesn't exist when it does (clean canonical wrongly hidden)
-   - Q3: cited `spark.sql.iceberg.write.target-file-size-bytes` Spark session config when only `write.target-file-size-bytes` table property exists (fabricated config name)
-   
-   Both follow the same failure-class — confident assertion about absence/existence of a knob/function. Iter505 `split_to_map` and now Q2 `contains()` are the fabricated-absence twins; iter504 `WIDESCAN` plan annotation and now Q3 `spark.sql.iceberg.write.*` are the fabricated-knob twins.
-
-3. **Margin tighter than recent norm (+0.6719 vs typical +0.9 to +1.0)** — two simultaneous Accuracy-DOWN errors. Q1+Q4 = 9.4375/10 absorb Q2+Q3 = 7.25/10 to iter-wide PASS. **116th consecutive overall PASS in extended phase**.
-
-4. **Federation NOT probed** — r22 §13.x guardrails untouched, federation rubric row stays **4.49944/310** per the iter472-517 directive.
+- **HIGH — Iceberg target-file-size from Trino DDL RE-PROBE**: "On Trino 467, how do I set `write.target-file-size-bytes` to 256MB AT CREATE TABLE time?" — verifies the `extra_properties = map(…)` canonical lands, and that the `write_target_file_size_bytes` flat-property fab does NOT reappear.
+- **HIGH — ROWID-dedup IN-PLACE DELETE RE-PROBE**: "Oracle `DELETE FROM customers c WHERE c.ROWID NOT IN (SELECT MIN(ROWID) FROM customers GROUP BY email)` — give me the in-place Trino equivalent." — verifies the CTAS+RENAME or MERGE keep-min canonical lands, and that the "no clean rowid-free DELETE" framing is correctly stated.
+- **MEDIUM — dbt-trino properties dict RE-PROBE**: "Show me a dbt-trino incremental model config with `unique_key=['a','b']`, `format_version=2`, and `partitioning=ARRAY['day(ts)']` — where do format_version + partitioning go in the config block?" — verifies properties={...} routing lands.
+- **MEDIUM — `contains` on MAP angle**: "Can I use `contains(my_map, 'some_key')` to check MAP key existence?" — tests Q1 §1a.3 MAP-routing cross-ref.
+- **LOW — Federation stays UNPROBED** per locked directive.
 
 ---
 
-## Concrete next-teacher actions for iter518
+## Pattern notes
 
-**PRIMARY FIX A — Trino array `contains()` canonical, reconcile-in-place at r07 / r23 array-function block (NEW or extend existing UNNEST canonical)**:
-- ONE-LINE RULE: "For 'does this array contain element X?' use `contains(array, X)` — it's a first-class Trino function, NOT a missing feature requiring UNNEST."
-- Signature table:
-  - `contains(x, element) → boolean` — true if array x contains element (per-row, no UNNEST)
-  - `cardinality(x) → bigint` — array length (per-row, no UNNEST)
-  - `array_distinct(x) → array` — dedup values within a single row's array
-  - `array_intersect(x, y) → array` — common elements (per-row set intersection)
-- WHEN-TO-USE-WHICH:
-  - "Row contains tag X" → `WHERE contains(event_tags, 'upload')` (single function, fast)
-  - "Count distinct tags across all rows" → `SELECT count(DISTINCT tag) FROM events CROSS JOIN UNNEST(event_tags) AS t(tag)` (UNNEST required because aggregating across rows)
-  - "Per-row count of distinct tags" → `SELECT cardinality(array_distinct(event_tags)) FROM events` (no UNNEST)
-- DO-NOT-WRITE bans (4):
-  - "Trino has no single CONTAINS function for arrays" (FALSE — `contains()` exists)
-  - "You must UNNEST to check if an array contains a value" (FALSE — UNNEST is for cross-row aggregation, NOT per-row membership)
-  - "`contains()` only works for strings" (FALSE — works for any element type matching array element type)
-  - "Use `IN UNNEST(array)` for membership" (Trino doesn't support this Oracle-style syntax — use `contains()`)
-- Verified sources: trino.io/docs/current/functions/array.html (quote: `contains(x, element) → boolean` "Returns true if the array x contains the element.").
-- Keyword anchors: "Trino array contains / does array contain element / Trino array membership / Trino contains function array / event_tags contains tag / Trino IN array / array element check / cardinality array length Trino / array_distinct dedup".
-
-**PRIMARY FIX B — Iceberg target-file-size canonical, reconcile-in-place at r17 small-files / r03 Iceberg writer-tuning section**:
-- ONE-LINE RULE: "Iceberg target file size is set via the table property `write.target-file-size-bytes` (default 512MB) — NOT via any `spark.sql.iceberg.*` Spark session config (that namespace does not exist for write tuning)."
-- THREE valid setters (with explicit "NOT" fourth):
-  - **(1) Iceberg table property (recommended, persists on table)**:
-    ```sql
-    ALTER TABLE events SET TBLPROPERTIES ('write.target-file-size-bytes'='268435456');
-    ```
-  - **(2) DataFrameWriter option (per-write override)**:
-    ```python
-    df.write.option('target-file-size-bytes', '268435456').format('iceberg')...
-    ```
-  - **(3) Trino Iceberg connector catalog property (catalog-wide default)**: `iceberg.target-max-file-size` in catalog config (default 1GB; no session-property override).
-  - **(NOT)** `spark.sql.iceberg.write.target-file-size-bytes` — **this Spark session-config name does not exist**; Spark silently ignores unknown `spark.sql.iceberg.*` keys.
-- Compaction (existing canonical, CONFIRM correct in responder's iter517 answer):
-  - Trino: `ALTER TABLE events EXECUTE optimize(file_size_threshold => '256MB')` — `file_size_threshold` default 100MB; files BELOW threshold rewritten.
-  - Spark: `CALL iceberg.system.rewrite_data_files(table=>'db.events', options=>map('target-file-size-bytes','268435456'))` — option name `target-file-size-bytes` (no prefix).
-- DO-NOT-WRITE bans (4):
-  - "`spark.sql.iceberg.write.target-file-size-bytes` is a Spark session config" (FALSE — fabricated, doesn't exist)
-  - "Setting `write.target-file-size-bytes` in spark.conf works without table property" (FALSE — that path requires DataFrameWriter `.option()`, not spark.conf.set())
-  - "Compaction alone fixes small-files without tuning future writes" (PARTIAL — compaction backfills, but if write-side never tuned, tiny files re-accumulate; need BOTH)
-  - "Trino has a session property to override Iceberg target file size per query" (FALSE — verified at trino.io/docs/current/connector/iceberg.html: "There is no corresponding session property for this setting")
-- Verified sources: iceberg.apache.org/docs/latest/configuration/ + iceberg.apache.org/docs/latest/spark-writes/ + iceberg.apache.org/docs/nightly/spark-configuration/ + trino.io/docs/current/connector/iceberg.html.
-- Keyword anchors: "Iceberg target file size / Iceberg small files tuning / write.target-file-size-bytes / Iceberg writer config / target file size Spark Iceberg / Iceberg ALTER TABLE TBLPROPERTIES / Trino iceberg.target-max-file-size / Iceberg compaction file_size_threshold / rewrite_data_files target size".
-
----
-
-## Iter518 judge probe targets
-
-- **(HIGH) Array `contains()` RE-PROBE** — "rows where event_tags array contains 'upload' — clean Trino way?" verifies FIX A canonical lands with `contains(event_tags, 'upload')` not UNNEST.
-- **(HIGH) Iceberg target-file-size RE-PROBE** — "how do I set Iceberg writer to target 256MB files? table property or Spark conf?" verifies FIX B `write.target-file-size-bytes` table property lands and the fabricated `spark.sql.iceberg.write.*` config name does NOT reappear.
-- **(HIGH) Array `cardinality` / `array_distinct` 2nd angle** — "per-row count of distinct tags in event_tags array — UNNEST or built-in?" verifies FIX A surfaces `cardinality(array_distinct(event_tags))` (no UNNEST) vs cross-row `count(DISTINCT tag)` with UNNEST.
-- **(HIGH) Iceberg target-file-size 2nd angle (Trino-side)** — "is there a Trino session property for Iceberg target file size?" verifies FIX B answer is NO + catalog property `iceberg.target-max-file-size` is the catalog-wide knob.
-- **(MEDIUM) dbt docs 2nd angle (re-probe iter517 §6.7H canonical from a different angle)** — "where do I write long markdown descriptions for dbt? can I share one across columns?" verifies `{% docs %}` block + `doc()` reference frame lands.
-- **(MEDIUM) dbt docs `--port` override** — "can I run dbt docs serve on a different port than 8080?" verifies `--port 8081` flag surfaces (current canonical states default 8080 but doesn't surface override).
-- **(MEDIUM) `format()` NULL gotcha 3rd angle** — "format('%s-%d', order_id, NULL) — what does this print?" verifies NULL→'null' literal-print gotcha gets surfaced.
-- **(LOW) UNNEST WITH ORDINALITY 3rd angle** — "tag with its position in the array?" verifies UNNEST canonical extends to ordinality.
-- **(LOW) `expire_snapshots` retention 3rd angle** — "weekly expire_snapshots after compaction — what retention period?" verifies maintenance-cadence canonical extends past iter517's "weekly" gloss.
-- **federation stays UNPROBED** — row stays 4.49944/310.
-
----
-
-## State changes
-
-- **DO NOT bump** `training/state.json` — teacher set it to 517; left at 517.
-- **DO NOT touch** §13.x federation guardrails in resources/22 or the federation rubric row (stays 4.49944/310).
-- Iter517 score line appended to `training/rubric.md` score history (Iter 517 entry above the existing Iter 516 entry).
+- **Iter517 FIX A (contains) LANDED CLEAN; iter517 FIX B (target-file-size) LANDED PARTIAL with NEW FAB SUBSTITUTION.** The teacher's r17 LEADING CANONICAL block correctly killed the Spark session-config fab family but left a hole: it routed users to "TABLE PROPERTY" as a category without showing the Trino-DDL form to actually set the native dotted property. The responder filled that gap by inventing an underscore-flattened Trino property name — a classic "responder confabulates the missing example" failure mode. Lesson: when adding a multi-engine setter canonical, EACH engine needs a verbatim DDL example or the responder will fabricate one. The corresponding `extra_properties = map(ARRAY[...], ARRAY[...])` Trino-DDL example is the missing piece.
+- **111th consecutive overall PASS in extended phase, margin +1.0469 above floor — but the THINNEST margin in 9+ iters.** Iter519 with the iter518 Q2 fix landing should restore the ~4.9 margin.
+- **22 leading-canonical bulletproofing instances total** (Q1 §1a.3 array_contains is #22); Q2 r17 target-file-size remains incomplete pending the extra_properties Trino-DDL example.
+- Federation row 4.49944/310 untouched — confirmed zero edits to resources/22 §13.x.

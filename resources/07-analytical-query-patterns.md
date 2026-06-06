@@ -160,6 +160,37 @@ GROUP BY u.user_id;
 
 **Mental model.** `ARRAY_AGG` is the reverse of `UNNEST` — it collects rows into an array. LEFT JOIN's NULL-padding is an actual row, not an absence of a row, so it gets collected too. `FILTER (WHERE x IS NOT NULL)` removes that NULL row BEFORE collection, restoring "no matching tags = empty array" semantics. Same fix applies to `MAP_AGG`, `MULTIMAP_AGG`, and any other collection aggregate over a LEFT-JOIN unmatched side.
 
+### 1a.3 Trino array-function quick reference — `contains` / `cardinality` / `array_distinct` / `element_at` (DO NOT claim Trino lacks a `contains`)
+
+**Keyword anchor:** Trino array contains, does array contain element, does array contain value, array membership test Trino, cardinality array length Trino, array_distinct dedup, array_intersect array_union array_except set operations on arrays, element_at array negative index, check if array has value, array has element, array membership without UNNEST.
+
+**These are companions to `UNNEST` (§1a / §1a.1) and `array_agg` (§1a.2): UNNEST explodes an array to rows; the functions below operate on the array AS A WHOLE — no UNNEST needed for membership / length / dedup / set ops.** Verified at [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html).
+
+| Function | Signature | What it does |
+|---|---|---|
+| `contains` | `contains(array, element) -> boolean` | **Membership test.** Use THIS, NOT `UNNEST + EXISTS / WHERE`, to ask "does this array hold value X?". Example: `WHERE contains(event_tags, 'upload')`. |
+| `cardinality` | `cardinality(array) -> bigint` | **Element count (array length).** Also accepts MAP — returns key count. |
+| `array_distinct` | `array_distinct(array) -> array` | Dedup array elements; preserves first-occurrence order. Per-row distinct count = `cardinality(array_distinct(x))`. |
+| `array_intersect` / `array_union` / `array_except` | `array_intersect(a, b)`, `array_union(a, b)`, `array_except(a, b)` | Set operations on two arrays; result is deduped. |
+| `element_at` | `element_at(array, n) -> E` | **NULL-safe positional access — 1-based.** Returns NULL if `n` is out of range (unlike the `array[n]` subscript, which RAISES an error). **Negative `n` counts from the end** (`element_at(arr, -1)` = last element). |
+
+**WHEN TO USE WHICH:**
+- Membership ("does the array hold X?"): `contains(arr, X)`.
+- Per-row distinct count ("how many distinct tags on THIS row?"): `cardinality(array_distinct(arr))`.
+- Cross-row distinct count over EXPLODED elements ("how many distinct tags across the whole table?"): UNNEST first, then `COUNT(DISTINCT tag)` — see §1a.1 worked example.
+- "Get the last element of the array": `element_at(arr, -1)` — NULL-safe; `arr[cardinality(arr)]` is verbose and errors on empty arrays.
+
+**DO NOT WRITE:**
+
+| Wrong shape | Why it's wrong |
+|---|---|
+| "Trino has no `contains` function for arrays" / "Trino has no single-call array-membership function" | **FALSE.** `contains(array, element)` exists and is the documented array-membership test per [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html). |
+| `WHERE EXISTS (SELECT 1 FROM UNNEST(arr) AS t(x) WHERE x = 'value')` purely to test membership | Works, but verbose. Use `WHERE contains(arr, 'value')` — simpler, the planner handles it, and it does not require the parent table to be UNNESTed. |
+| `WHERE arr[1] = 'value'` to test "does the first element equal X" on a possibly-empty array | The `[]` subscript ERRORS on out-of-range indices. Use `element_at(arr, 1) = 'value'` (NULL-safe — falls out of `WHERE` cleanly). |
+| `COUNT(DISTINCT arr)` to count distinct ELEMENTS inside the array | Counts distinct ARRAY VALUES (i.e., distinct rows) — not elements. For element-level distinct, UNNEST first OR use `cardinality(array_distinct(arr))` per row. |
+
+> **Note on MAPs.** `contains` does NOT work on MAPs — for "does this map have key K?" use `element_at(map, key) IS NOT NULL` (see [resource 09 § MAP existence check](09-lakehouse-schema-design.md#critical--use-element_at-not--for-map-access-in-trino)) or `contains(map_keys(map), key)` (note `map_keys` returns an `ARRAY`, then `contains` on that array works).
+
 ---
 
 ## 2. Funnels (drop-off across a sequence of events)
