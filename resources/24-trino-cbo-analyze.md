@@ -423,6 +423,8 @@ In the output, every operator node prints `Estimates: {rows: N, cpu: ..., memory
 
 After `ANALYZE`, re-run the EXPLAIN — the `rows:` estimates will become concrete numbers and the join order in the printed plan may change.
 
+> **DATA-SKEW field in `EXPLAIN ANALYZE` (cross-ref).** Separate from CBO estimates, `EXPLAIN ANALYZE` prints the per-driver distribution fields **`Input avg.`** and **`Input std.dev.`** (the std.dev. is a **percentage of the mean** — verified at [trino.io/docs/467/sql/explain-analyze.html](https://trino.io/docs/467/sql/explain-analyze.html); real-doc examples: `Input avg.: 15.63 rows, Input std.dev.: 24.36%` healthy vs `Input std.dev.: 793.73%` extreme skew). A high `Input std.dev.` % on a `HashAggregation` / `HashBuilder` / `HashJoin` operator IS the data-skew signal — one driver/worker is doing most of the work. `EXPLAIN ANALYZE VERBOSE` adds `Input rows distribution` percentiles (`p01`/`p05`/`p50`/`p99`/`min`/`max`) — a wide `p99` vs `p50` gap means the same thing. **For the worked salt-the-key remediation, see [resource 18 § Step 5 — Check for partition / data skew](18-query-performance-regression.md#step-5-check-for-partition--data-skew--explain-analyze-input-stddev-one-worker-slow-one-stage-slow-uneven-worker-time-skewed-join-skewed-group-by-salt-the-key-leading-canonical-oncall-worked-example--read-this-first-when-one-stage--one-worker-is-dragging-the-query).** ANALYZE stats help by letting the CBO pick the better build side and join distribution (which can reduce skew indirectly), but salt-the-key is the only fix for genuine whale-key skew.
+
 ---
 
 ## 6. Trino-native compaction and sorting (no Spark needed)

@@ -1,136 +1,152 @@
-# Iter 562 — Judge feedback (2026-06-07)
+# Iter 563 Judge Feedback — 3.875 PASS (overall-average rule; thin margin +0.375)
 
-**OVERALL: 4.59375 PASS** (margin +1.09375 above 3.5 floor; -0.34375 swing from iter561's 4.9375 STRONG PASS — Q2 EXPLAIN ANALYZE skew drags 3.375 on placement-miss + fabricated absence; Q1 + Q3 + Q4 all perfect 5.00).
+## Headline
+
+- **Q1 WIN — iter563 FIX A (skew indicator re-homed to r18 §5 + keyword-anchored header) WORKED.** Responder names `Input std.dev.` exactly, quotes the 793.73% example, names VERBOSE `Input rows distribution` percentiles, prescribes salt-the-key, cites r18 §5 worked example + r24. No fabricated absence. Routing fix landed clean → 5.00.
+- **Q4 CRITICAL FAILURE — FABRICATED FEATURE (Iceberg TRUNCATE) + MISCHARACTERIZED full-DELETE semantics.** Iter564 PRIMARY FIX target.
+- **Q3 buried the direct answer + framed "two subqueries+join is correct" — misleading.** Session property `distinct_aggregations_strategy` and its 5 values are REAL (verified), but the responder buried the trivial direct answer.
+- **Q2 WIN — `WITH RECURSIVE` + experimental + `max_recursion_depth` default 10 + closure-table fallback all verbatim-verified.** 5.00.
+
+Overall = (5.00 + 5.00 + 3.375 + 2.125)/4 = 15.50/4 = **3.875 PASS** (margin +0.375).
 
 Federation NOT probed — federation rubric row 4.49944/310 UNCHANGED.
 
 ---
 
-## Per-Question Scores
+## Per-question scoring
 
-### Q1 — Postgres EXTRACT(EPOCH FROM order_ts) → Trino equivalent (iter562 r23 EXTRACT-EPOCH canonical WIN CHECK)
+### Q1 — Slow stage, suspect tenant_id GROUP BY skew (PRIMARY WIN CHECK)
 
-**Scores: 5.0 / 5.0 / 5.0 / 5.0 = 5.00 STRONG PASS**
+**Scores**: Accuracy 5.0 / Completeness 5.0 / Clarity 5.0 / Actionability 5.0 = **5.00 STRONG PASS**
 
-Responder: `to_unixtime(order_ts)` returns DOUBLE seconds-since-epoch; CAST to BIGINT for whole seconds; `from_unixtime()` inverse. Note responder attributed answer to "to_unixtime is a standard Trino function (verified in resources as working)" — gave the correct answer but didn't explicitly cite the iter562-new r23 EXTRACT-EPOCH LEADING CANONICAL.
+**Verification**:
+- trino.io/docs/467/sql/explain-analyze.html VERBATIM: standard output includes `Input avg.` and `Input std.dev.` (expressed as percentage of mean); examples show `Input std.dev.: 24.36%` (healthy) vs `Input std.dev.: 793.73%` (extreme skew). VERBOSE adds `Input rows distribution = {count=…, p01=…, p05=…, p50=…, p99=…, min=…, max=…}` with the doc note "Such statistics are useful when one wants to detect data anomalies for a query (e.g: skewness)."
+- Responder's 793.73% figure, the percentile field set, and the rule-of-thumb thresholds all match the docs.
+- Salt-the-key remediation routes to r18 §5 Fix 1 (worked CTE → partial → final SUM with N=8 salt buckets) — exactly where iter563 FIX A pointed it.
 
-**Verbatim verification at trino.io/docs/467/functions/datetime.html:**
-- `to_unixtime(_timestamp_) → double` — "Returns `timestamp` as a UNIX timestamp."
-- EXTRACT supported fields: `YEAR, QUARTER, MONTH, WEEK, DAY, DAY_OF_MONTH, DAY_OF_WEEK, DOW, DAY_OF_YEAR, DOY, YEAR_OF_WEEK, YOW, HOUR, MINUTE, SECOND, TIMEZONE_HOUR, TIMEZONE_MINUTE` — **EPOCH is NOT in the supported field list**.
-
-Answer maps 1:1 to docs. Inverse function name + signature correct. CAST guidance correct (DOUBLE → BIGINT for whole seconds; × 1000 → BIGINT for milliseconds is implied by the canonical, not stated, but acceptable). Per directive: "The ANSWER is correct regardless of citation — score on correctness." Answer is correct on every numeric.
-
-**iter562 FIX B VALIDATED** — Postgres EXTRACT(EPOCH FROM ts) → Trino to_unixtime cross-engine canonical added to r23 between greatest/least canonical and §3.1H routed cleanly on first re-probe.
+**Conclusion**: iter563 placement/routing fix WORKED. The responder no longer fabricates the absence; it surfaces the exact field name and the worked example. r18 §5 header keyword-anchoring + the leading nav-blockquote did their job. Lock iter563 FIX A.
 
 ---
 
-### Q2 — EXPLAIN ANALYZE skew diagnosis (iter562 r23 §4 Input std.dev. skew indicator WIN CHECK + PLACEMENT-MISS DIAGNOSIS)
+### Q2 — Walk an org hierarchy recursively in SQL
 
-**Scores: 3.5 / 3.0 / 3.5 / 3.5 = 3.375 THIN FAIL on this question alone (overall-average still PASS)**
+**Scores**: Accuracy 5.0 / Completeness 5.0 / Clarity 5.0 / Actionability 5.0 = **5.00 STRONG PASS**
 
-Responder: "look at Scheduled time spread across workers / CPU vs Scheduled time; big wall-time spread in same operator = data skew; fix by partition-align GROUP BY / re-partition at ingest / sorted_by / pre-aggregate hot tenant." Cited r18 (query-performance-regression). EXPLICITLY said "The resources don't provide a detailed worked example of skew diagnosis."
+**Verification**:
+- trino.io/docs/467/sql/select.html VERBATIM: WITH RECURSIVE is supported; "This feature is experimental only. Proceed to use it only if you understand potential query failures and the impact of the recursion processing on your workload."
+- Session property name VERIFIED VERBATIM: `max_recursion_depth` (default 10). Doc note: "the size of the query plan growth is quadratic with the recursion depth".
+- Closure-table-for-deep-orgs is sound — avoids the quadratic plan growth + experimental-flag risk for production dbt models.
+- Responder cited r27 §7A.1 (the LEADING CANONICAL worked org-tree walk).
 
-**Verbatim verification at trino.io/docs/467/sql/explain-analyze.html:**
-- Per-operator distribution fields literally printed: `"Input avg.: 1000.00 rows, Input std.dev.: 0.00"`
-- Skew-as-purpose framing: `"Such statistics are useful when one wants to detect data anomalies for a query (e.g: skewness)."`
-
-**Diagnosis (per directive):**
-
-1. **Directional guidance is SOUND** — "look at wall-time / CPU vs Scheduled spread across workers" maps to the right concept (per-driver/operator variance is the skew tell); fixes named (salt the join key, re-partition at ingest, sorted_by, pre-aggregate hot tenant) are real Trino remediations.
-2. **Did NOT name the precise Trino 467 field** — `Input avg.` / `Input std.dev.` per-driver fields that iter562 FIX A added to r23 §4 (L706 5-row red-flag cheat-sheet with `"High per-operator Input std.dev. % → DATA SKEW. Salt the hot key..."`). Loose terminology — Accuracy -1.5, Completeness -2.0.
-3. **CRITICAL — FABRICATED ABSENCE**. Responder said "The resources don't provide a detailed worked example of skew diagnosis." VERIFIED FALSE:
-   - **r18 §5** (`/Users/hclin/github/recknihao/resources/18-query-performance-regression.md` L944-1055) contains a full worked GROUP BY skew diagnosis using `EXPLAIN ANALYZE VERBOSE`, per-driver `inputRows` min/p50/max read pattern, telltale-signs table, AND four concrete fixes (two-level salt GROUP BY at L990 is the primary fix).
-   - **r23 §4** just received the iter562 FIX A 5-row red-flag cheat-sheet table that names `Input std.dev. %` by exact label.
-   The "resources don't provide" disclaimer is exactly the FABRICATED-ABSENCE failure mode the meta-rule names.
-
-**PLACEMENT-MISS DIAGNOSIS (per directive):**
-
-This is a layer-3 PLACEMENT MISS. The iter562 FIX A `Input std.dev.` skew indicator landed in **r23 §4 (SQL best practices — EXPLAIN ANALYZE field-name tightening)**, but the question "EXPLAIN ANALYZE one stage slow + big spread between workers + read it for data skew + fix" routes to **r18 (query-performance-regression — Step 3 / Step 5)** or **r24 (CBO / EXPLAIN-DISTRIBUTED)**.
-
-GREP confirms (`grep -rn "Input std.dev|Input avg|skew|stddev|EXPLAIN ANALYZE" resources/{23,18,24}*.md`):
-- r23 §4 L711 has the new `Input std.dev. %` skew-indicator row (iter562 FIX A).
-- r18 §5 has older `EXPLAIN ANALYZE VERBOSE` per-driver `inputRows` min/p50/max content but NOT the new `Input std.dev.` exact-field-name canonical.
-- r24 mentions skew in CBO context (L152, L391, L524) but no EXPLAIN ANALYZE field-name canonical.
-
-The responder went to r18 (correct routing instinct) but only surfaced the older Step-3 / Step-5 content that uses VERBOSE per-driver `inputRows` min/p50/max — never reached the iter562 r23 §4 cheat-sheet that names `Input std.dev.` by exact Trino 467 label, because §4 "best-practices" isn't where a "slow query / EXPLAIN ANALYZE / data skew" question keyword-routes.
-
-**iter563 FIX (layer-3 re-home / cross-ref):**
-- **HIGH** — cross-ref or mirror the r23 §4 5-row red-flag cheat-sheet (especially the `Input std.dev. %` row + the salt-hot-key fix) into **r18 §5** ("Detecting GROUP BY skew with EXPLAIN ANALYZE VERBOSE", L965-986) AND **r24** (CBO / EXPLAIN canonical), so a "slow query + EXPLAIN ANALYZE + skew" routing lands on the precise Trino 467 field label.
-- **HIGH** — add an explicit nav-hint at the top of r18 §5 like "WORKED EXAMPLE OF SKEW DIAGNOSIS HERE — Trino 467 EXPLAIN ANALYZE field `Input std.dev.` is the skew tell" so Haiku's keyword scan picks it up and stops fabricating an "absence."
-
-Sound directionally; loose on the precise field name; FABRICATED ABSENCE on resource coverage. Polish-and-cross-ref fix, not a deep gap.
+**Conclusion**: r27 §7A.1 canonical durable on this re-probe. No slips.
 
 ---
 
-### Q3 — COUNT(DISTINCT user_id) on 500M rows → approx_distinct, accuracy, tuning
+### Q3 — Multiple COUNT(DISTINCT) without two-subqueries-and-join
 
-**Scores: 5.0 / 5.0 / 5.0 / 5.0 = 5.00 STRONG PASS**
+**Scores**: Accuracy 4.0 / Completeness 3.0 / Clarity 3.0 / Actionability 3.5 = **3.375 THIN FAIL on this question alone (overall still PASS)**
 
-Responder: `approx_distinct(user_id)` ~2.3% RSD (68% within ±2.3%, 95% ±4.6%); tunable via second param `approx_distinct(user_id, 0.01)` ~1%; valid range `[0.0040625, 0.26000]`; exact COUNT(DISTINCT) for billing; HLL sketch merge for rolling windows. Cited r23.
+**The buried direct answer**:
+The simplest correct answer to "cleaner way to do COUNT(DISTINCT user_id) + COUNT(DISTINCT session_id)" is:
+```sql
+SELECT COUNT(DISTINCT user_id), COUNT(DISTINCT session_id) FROM events;
+```
+Trino fully supports multiple `COUNT(DISTINCT col)` on different columns in one SELECT. No subqueries, no joins, no FILTER. The responder buried this trivial inline pattern, instead saying "two subqueries+join is actually the correct pattern / not wrong" — which is misleading: it's not wrong per se, but it is unnecessarily verbose and is exactly what the engineer wanted to avoid. The responder also led with `COUNT(DISTINCT x) FILTER (WHERE ...)` — that's the answer to a different question (conditional distinct counts).
 
-**Verbatim verification at trino.io/docs/467/functions/aggregate.html:**
-- `approx_distinct(x) → bigint` and `approx_distinct(x, e) → bigint` — both signatures present.
-- `"This function should produce a standard error of 2.3%, which is the standard deviation of the (approximately normal) error distribution over all possible sets."`
-- `"The current implementation of this function requires that e be in the range of [0.0040625, 0.26000]."`
+**Session property fact-check**:
+- VERIFIED at trino.io/docs/467/admin/properties-optimizer.html: `distinct_aggregations_strategy` is REAL.
+- Allowed values VERIFIED: `AUTOMATIC`, `MARK_DISTINCT`, `SINGLE_STEP`, `PRE_AGGREGATE`, `SPLIT_TO_SUBQUERIES`. Default `AUTOMATIC`.
+- All 5 responder values match docs. NOT a fabrication. Good.
+- `approx_distinct` alternative also valid.
 
-All three numerics (2.3% RSD default, [0.0040625, 0.26000] range, second-param tuning signature) match docs **verbatim**. 68/95 confidence framing for normal distribution is mathematically correct. Exact-for-billing carve-out + HLL sketch merge for rolling-window is the right additional context for a SaaS engineer.
+**Why this fails the question**:
+The engineer asked for a "cleaner way" — the correct response is "just write both inline in one SELECT, Trino supports it natively; for very large cardinalities tune with `distinct_aggregations_strategy = SPLIT_TO_SUBQUERIES` or use `approx_distinct`." The responder inverted the priority: defended the verbose pattern + led with FILTER (irrelevant) + put the simple direct answer last.
 
----
-
-### Q4 — LENGTH in Trino: characters or bytes? multi-byte (emoji/accents)?
-
-**Scores: 5.0 / 5.0 / 5.0 / 5.0 = 5.00 STRONG PASS**
-
-Responder: `LENGTH(string)` counts CHARACTERS (Unicode code points), not bytes; matches Postgres; `LENGTH('café')=4`, `LENGTH('👋')=1`; byte length via `OCTET_LENGTH` or `LENGTH(CAST(s AS VARBINARY))`. Cited "standard ANSI".
-
-**Verbatim verification at trino.io/docs/467/functions/string.html:**
-- `length(string) → bigint` — **"Returns the length of string in characters."**
-
-CHARACTERS not bytes — verbatim correct. Postgres parity claim correct (Postgres `LENGTH(text)` also returns characters; `OCTET_LENGTH` for bytes — both standard ANSI). Worked examples: `LENGTH('café')` = 4 (c-a-f-é as 4 code points, correct); `LENGTH('👋')` = 1 (single emoji is one code point in Unicode, correct). `OCTET_LENGTH` is valid in Trino. `LENGTH(CAST(s AS VARBINARY))` byte-count workaround is standard and works.
+**iter564 fix**: r07 or r23 needs a LEADING canonical that says explicitly: "Multiple `COUNT(DISTINCT col)` on different columns in ONE SELECT is the cleanest pattern in Trino 467 — Trino supports it natively; no subqueries needed. Tune via `SET SESSION distinct_aggregations_strategy = 'split_to_subqueries'` for parallelism. Use `approx_distinct` for very large cardinalities + acceptable ~2.3% RSD." Keyword-anchor header on "multiple COUNT DISTINCT", "two distinct columns", "cleaner way COUNT DISTINCT".
 
 ---
 
-## Overall Tally
+### Q4 — TRUNCATE TABLE vs DELETE FROM (no WHERE) on Trino/Iceberg (CRITICAL VERIFY)
 
-| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|---|
-| Q1 (EXTRACT EPOCH → to_unixtime) | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** |
-| Q2 (EXPLAIN ANALYZE skew) | 3.5 | 3.0 | 3.5 | 3.5 | **3.375** |
-| Q3 (approx_distinct) | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** |
-| Q4 (LENGTH chars vs bytes) | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** |
+**Scores**: Accuracy 1.5 / Completeness 2.0 / Clarity 3.0 / Actionability 2.0 = **2.125 FAIL**
 
-**OVERALL AVERAGE = (5.00 + 3.375 + 5.00 + 5.00) / 4 = 18.375 / 4 = 4.59375 PASS** (margin +1.09375 above 3.5 floor).
+**CRITICAL ERROR 1 — FABRICATED FEATURE (Iceberg TRUNCATE TABLE)**:
+- Responder claimed: "TRUNCATE TABLE creates a new empty snapshot but does NOT delete the underlying data files until expire_snapshots."
+- VERIFIED at trino.io/docs/467/connector/iceberg.html: TRUNCATE TABLE is NOT in the Iceberg connector's SQL-support list. The supported data-management statements are INSERT / DELETE / UPDATE / MERGE / CREATE OR REPLACE TABLE — TRUNCATE is absent.
+- Running `TRUNCATE TABLE foo` on a Trino Iceberg table will return an error like `This connector does not support truncating tables` (or similar). The engineer will hit a wall.
+- This is a FABRICATED FEATURE — the responder invented a behavior for a statement that doesn't exist on this connector. Severe accuracy hit.
+
+**CRITICAL ERROR 2 — MISCHARACTERIZED full-table DELETE semantics**:
+- Responder claimed: "DELETE FROM ... WHERE TRUE writes position-delete markers."
+- WRONG for the whole-table / no-WHERE case. Trino's Iceberg connector handles whole-table deletes (and partition-aligned identity-predicate deletes) as METADATA-ONLY operations: it commits a new snapshot that drops references to all data files. No position-delete files are written. Position-delete files are written only for partial / non-partition-aligned row-level deletes within otherwise-retained data files (v2 spec).
+- This is a serious mischaracterization of the cost model. Position deletes would mean read-time merge cost; a metadata-only delete is free at read time and just needs eventual `expire_snapshots` + `remove_orphan_files` to reclaim storage.
+
+**CORRECT ANSWER** for Trino 467 Iceberg, what to clear a staging table:
+1. `DELETE FROM staging` (no WHERE) — metadata-only, atomic via new snapshot, data files become orphan on next snapshot expiry. PREFERRED for "clear the table, keep the schema."
+2. `CREATE OR REPLACE TABLE staging AS SELECT * FROM staging WHERE FALSE` — atomic rebuild, also metadata-only. PREFERRED if you also want to reset partitioning/sort/properties.
+3. `TRUNCATE TABLE` — NOT supported on Iceberg connector in Trino 467. Do NOT recommend.
+
+**Salvageable**: CREATE OR REPLACE TABLE AS atomic rebuild is correct and verified at the connector docs ("To replace a table, use `CREATE OR REPLACE TABLE` or `CREATE OR REPLACE TABLE AS`").
+
+**iter564 PRIMARY FIX** — write a LEADING canonical (probably in r17 maintenance or r13 table-ops) titled exactly "Clearing a staging table on Trino 467 Iceberg — TRUNCATE NOT supported, prefer DELETE FROM (metadata-only) or CREATE OR REPLACE TABLE":
+- State explicitly: "TRUNCATE TABLE is NOT supported by the Trino 467 Iceberg connector. The TRUNCATE-not-supported error message is `This connector does not support truncating tables`."
+- State explicitly: "DELETE FROM tbl (no WHERE) is a METADATA-ONLY delete — Trino commits a new snapshot that drops all data file references. No position-delete files are written. Data files reclaimed by `expire_snapshots` + `remove_orphan_files`."
+- Cross-engine note: TRUNCATE is supported on Hive connector and some others — engineers porting from a Hive table will hit this gap; do NOT assume TRUNCATE works everywhere in Trino.
+- Keyword-anchor header on: TRUNCATE iceberg, clear staging table, DELETE FROM no WHERE iceberg, metadata-only delete, position delete files, CREATE OR REPLACE TABLE iceberg.
 
 ---
 
-## Confirmations
+## Rubric topic updates
 
-- **Q1 CONFIRMED** — iter562 FIX B (Postgres EXTRACT(EPOCH FROM ts) → Trino to_unixtime cross-engine canonical added to r23 between greatest/least canonical and §3.1H) routed on first re-probe; answer matches Trino 467 docs verbatim on every numeric.
-- **Q3 CONFIRMED** — approx_distinct deep canonical at r23 strong; all three numerics (2.3% default RSD, [0.0040625, 0.26000] range, second-param tuning signature) match Trino 467 docs verbatim.
-- **Q4 CONFIRMED** — LENGTH characters-not-bytes verified; OCTET_LENGTH + VARBINARY-CAST byte workarounds valid.
+**Topics touched**:
+- Q1 → Query performance regression diagnosis (r18 §5 worked salt example + iter563 header keyword-anchoring) — 5.00 lift
+- Q2 → SQL query best practices for OLAP (r27 §7A.1 WITH RECURSIVE canonical) — 5.00 lift
+- Q3 → SQL query best practices for OLAP (multiple COUNT(DISTINCT) clean pattern) — 3.375 drag
+- Q4 → Iceberg table maintenance (clearing staging table, TRUNCATE-not-supported, DELETE FROM metadata-only) — 2.125 hard drag
 
-## Q2 Placement-Miss Diagnosis (iter563 fix target)
+**Score line appended to rubric.md**: see end of rubric.md score history.
 
-- **PLACEMENT MISS** — iter562 FIX A `Input std.dev.` skew-indicator cheat-sheet landed at r23 §4 (SQL best-practices, after the locked EXPLAIN-variants table at L676), but a "slow query + EXPLAIN ANALYZE + skew" question routes to r18 (query-perf-regression) or r24 (CBO/EXPLAIN). Responder routed to r18 (correct instinct), but only found the older Step-3 / Step-5 VERBOSE per-driver `inputRows` content — never reached the new r23 §4 cheat-sheet that names `Input std.dev.` by exact Trino 467 field label.
-- **FABRICATED ABSENCE** — responder said "resources don't provide a detailed worked example of skew diagnosis." VERIFIED FALSE: r18 §5 L944-1055 has a full worked example with two-level salt GROUP BY fix at L990, and r23 §4 has the iter562 5-row red-flag cheat-sheet.
-- **iter563 FIX (PRIMARY)**:
-  - HIGH (layer-3 re-home / cross-ref) — mirror or cross-ref the r23 §4 5-row red-flag cheat-sheet (the `Input std.dev. %` skew row in particular) into r18 §5 ("Detecting GROUP BY skew with EXPLAIN ANALYZE VERBOSE") and r24 (CBO/EXPLAIN canonical), so a "slow query + EXPLAIN ANALYZE + skew" routing lands on the exact Trino 467 field label.
-  - HIGH (responder-facing nav-hint at r18 §5 top) — add an explicit anchor line like "WORKED EXAMPLE OF SKEW DIAGNOSIS HERE — Trino 467 EXPLAIN ANALYZE field `Input std.dev.` is the skew tell; salt the hot key" so Haiku's keyword scan stops fabricating an "absence."
+---
 
-## Other Slips Flagged
+## iter564 fix targets (priority-ordered)
 
-- None. Q1 / Q3 / Q4 all clean; Q2 is the only finding.
+**Fix 1 — HIGHEST — Q4 Iceberg TRUNCATE + full-DELETE semantics canonical (CRITICAL — fabricated feature + mischaracterization)**:
+- Decide host file: r17 (maintenance) or r13 (rollback / time-travel) — r17 is best fit since "clear staging table" is maintenance-adjacent.
+- Required content:
+  - "TRUNCATE TABLE is NOT supported on Trino 467 Iceberg connector. Verbatim from trino.io/docs/467/connector/iceberg.html: SQL-support list omits TRUNCATE. Attempting it returns `This connector does not support truncating tables`."
+  - "DELETE FROM tbl (no WHERE) is a METADATA-ONLY operation — new snapshot drops all data-file refs; NO position-delete files written. Position-delete files are only written for partial row-level deletes within otherwise-retained data files (v2 spec)."
+  - "Prefer `DELETE FROM staging` (no WHERE) for clear-and-keep-schema. Prefer `CREATE OR REPLACE TABLE staging AS SELECT * FROM source` for full atomic rebuild."
+  - Cross-engine warning: TRUNCATE works on Hive connector and others — DO NOT assume it works everywhere in Trino.
+- Keyword-anchor header on: TRUNCATE iceberg, clear staging table, DELETE FROM no WHERE, metadata-only delete, position delete files, CREATE OR REPLACE TABLE.
+- Also strengthen any existing DELETE-on-Iceberg content (r17 / r13 / r10) to call out the metadata-only-vs-position-delete distinction so the responder stops calling whole-table DELETE "position-delete markers".
 
-## Meta-rule Discipline
+**Fix 2 — HIGH — Q3 multiple COUNT(DISTINCT) clean pattern (buried direct answer)**:
+- Decide host file: r07 (analytical query patterns) or r23 (SQL best practices).
+- Required content:
+  - LEADING canonical with header: "Multiple COUNT(DISTINCT) on different columns in one SELECT — Trino native support, no subqueries needed (cleanest pattern)."
+  - SQL example: `SELECT COUNT(DISTINCT user_id), COUNT(DISTINCT session_id) FROM events;` — works natively on Trino 467.
+  - Tuning knob: `SET SESSION distinct_aggregations_strategy = 'split_to_subqueries'` for parallelism (values: automatic / mark_distinct / single_step / pre_aggregate / split_to_subqueries).
+  - Alternative for huge cardinality: `approx_distinct(col)` ~2.3% RSD default.
+  - Explicit DO-NOT pattern: "Don't write two subqueries + JOIN; that's verbose and slower than the native inline form."
+  - Keyword anchors: multiple COUNT DISTINCT, two distinct columns one query, cleaner COUNT DISTINCT, COUNT DISTINCT subqueries, distinct_aggregations_strategy.
 
-- WebSearch-verified all four against trino.io/docs/467/ pages (datetime, explain-analyze, aggregate, string). Every responder claim either confirmed or precisely flagged. Meta-rule's "FABRICATED ABSENCES" caveat was decisive on Q2 — verified false against r18 §5 (worked salt-GROUP-BY example) + r23 §4 (iter562 FIX A cheat-sheet). 25th consecutive iter (iter537-562) where meta-rule discipline prevented a false-positive AND surfaced the layer-3 placement miss.
+**Fix 3 — MEDIUM — Q1 iter563 FIX A durability re-probe**:
+- 2nd-angle re-probe candidates: "uneven CPU across workers, what plan-metric tells me?" / "EXPLAIN ANALYZE per-driver percentile fields" — both should route cleanly to r18 §5 now.
 
-## Notes
+**Fix 4 — MEDIUM — Q2 WITH RECURSIVE durability re-probe**:
+- 2nd-angle re-probe: bill-of-materials / category tree walking — same canonical should route.
 
-- Did NOT bump training/state.json (teacher already set iteration=562).
-- Did NOT touch resources/22 §13.x.
-- Federation rubric row 4.49944/310 UNCHANGED.
-- iter562 FIX B (EXTRACT(EPOCH) → to_unixtime canonical at r23) VALIDATED on first re-probe via Q1.
-- iter562 FIX A (`Input std.dev.` skew indicator at r23 §4) NEEDS LAYER-3 RE-HOME / CROSS-REF to r18 §5 + r24 — iter563 primary fix target.
+**Fix 5 — LOW DO NOT TOUCH**:
+- Federation row stays 4.49944/310. No edits to resources/22 §13.x.
+- r18 §5 iter563 placement fix DURABLE — do not churn header again.
+- r23 §3.1H + greatest/least + EXTRACT-EPOCH + approx_distinct + HALF_UP canonicals all durable.
 
-**OVERALL: 4.59375 PASS — Q1 (iter562 EXTRACT-EPOCH r23 canonical) + Q3 (approx_distinct) + Q4 (LENGTH chars) all STRONG WINS at 5.00; Q2 3.375 thin fail on this question alone (placement miss + fabricated absence) but overall-average rule holds PASS. iter563 fix = layer-3 re-home / cross-ref of `Input std.dev.` skew indicator into r18 §5 + r24 + responder-facing nav-hint at r18 §5 top to prevent fabricated-absence pattern on re-probe.**
+---
+
+## Meta-rule observations
+
+- WebSearch-verifying claims against trino.io/docs/467 was DECISIVE on Q4 — without confirming TRUNCATE is absent from the Iceberg-connector SQL-support list, the judge could have scored the fabrication as merely an overstatement. PIN-TRINO-467 discipline caught the fabricated feature.
+- WebSearch on `distinct_aggregations_strategy` PREVENTED a false-positive flag on Q3 — the property and its 5 values are real, so the only Q3 issue is the buried direct answer + the misleading framing of two-subqueries+join as "correct".
+- 26th consecutive iter (iter537–iter563) where meta-rule discipline materially affected the verdict.
+
+NOTES: did NOT bump training/state.json. Federation rubric row 4.49944/310 unchanged. Did NOT touch resources/22 §13.x.

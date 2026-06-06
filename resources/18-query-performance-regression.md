@@ -941,9 +941,13 @@ partitioning = ARRAY['day(event_date)', 'tenant_id']
 
 ---
 
-## Step 5: Check for partition skew
+## Step 5: Check for partition / data skew — EXPLAIN ANALYZE `Input std.dev.`, one worker slow, one stage slow, uneven worker time, skewed join, skewed GROUP BY, salt the key (LEADING CANONICAL ONCALL WORKED EXAMPLE — read this FIRST when one stage / one worker is dragging the query)
 
-Partition skew means one partition has far more data than others. Even with pruning working, a single oversized partition causes one Trino worker to do 100x the work of others.
+> **Keyword anchors** (so this section is findable by the routing words): data skew, EXPLAIN ANALYZE skew, one worker slow, one stage slow, uneven worker/stage time, `Input std.dev.`, `Input avg.`, `Input rows distribution`, skewed join, skewed GROUP BY, whale tenant, salt the key, two-level GROUP BY, hot key, stragglers, p99 vs p50 gap, EXPLAIN ANALYZE VERBOSE skew.
+
+> **The single tell — Trino 467 `EXPLAIN ANALYZE` data-skew indicator (verified at [trino.io/docs/467/sql/explain-analyze.html](https://trino.io/docs/467/sql/explain-analyze.html)).** The per-operator field **`Input std.dev.`** — printed alongside **`Input avg.`** and expressed as a **percentage of the mean** across drivers/workers — IS the data-skew signal. Real outputs look like `Input avg.: 15.63 rows, Input std.dev.: 24.36%` (mild/healthy) vs `Input avg.: 15.63 rows, Input std.dev.: 793.73%` (extreme skew — one driver doing nearly all the work, the rest idle). **Rule of thumb:** `Input std.dev.` <30% is healthy; 30-80% is uneven worth investigating; >80% is genuine skew that's bottlenecking the stage. For deeper per-driver detail, **`EXPLAIN ANALYZE VERBOSE`** additionally prints the per-driver distributions (`Input rows distribution`, `CPU time distribution (s)`, `Scheduled time distribution (s)`) with percentile fields `count`, `p01`, `p05`, `p50`, `p99`, `min`, `max` — **a wide gap between `p99` and `p50` in `Input rows distribution` means the same thing: a few drivers are doing far more work than the median**. When you see a high `Input std.dev.` % on a `HashAggregation` or `HashBuilder`/`HashJoin` operator, the fix is below: **salt the hot key** (two-level GROUP BY for aggregation skew; `ON a.key=b.key AND a.salt=b.salt` for join skew). The worked salt-the-key example is in the **Fix 1** subsection below — read it.
+
+Partition skew means one partition has far more data than others. Even with pruning working, a single oversized partition causes one Trino worker to do 100x the work of others. The same indicator (`Input std.dev.` on the relevant operator) catches GROUP BY skew and join skew too — see Fix 1 worked example below for the canonical salt-the-key remediation.
 
 ### How to detect skew
 
