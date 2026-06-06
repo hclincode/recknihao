@@ -955,6 +955,61 @@ ORDER BY c.day, s.plan_type;
   Only the row where `c.day = CURRENT_DATE` matches `d.day = CURRENT_DATE`; every other calendar day is LEFT-JOIN-padded to NULL → `COALESCE(NULL, 0) = 0`. The "active count" must be evaluated **PER calendar day** — the calendar day `c.day` must appear inside the JOIN predicate (`s.start <= c.day AND (s.end IS NULL OR s.end > c.day)`), **not** be hardcoded to `CURRENT_DATE`. **RIGHT ✅:** the range-join query above — `c.day` participates in the join predicate so the active count is recomputed for every historical day.
 - **DO NOT use `BETWEEN s.start AND s.end` (closed interval) when you mean half-open `[start, end)` — closed BETWEEN double-counts the boundary day.** **WRONG ❌:** `JOIN subscriptions s ON c.day BETWEEN s.subscription_start_date AND s.subscription_end_date` — `BETWEEN x AND y` is `x <= c.day AND c.day <= y` (both inclusive). If subscription A ends on `2026-05-10` AND subscription B starts on `2026-05-10`, **BOTH** count on `2026-05-10` (A: `start <= 5/10 AND 5/10 <= end=5/10` true; B: `start=5/10 <= 5/10 AND 5/10 <= end` true) — you've double-counted the handoff day. **RIGHT ✅:** half-open `s.subscription_start_date <= c.day AND (s.subscription_end_date IS NULL OR s.subscription_end_date > c.day)` — only B counts on `2026-05-10` (A's `end > c.day` is `5/10 > 5/10` = false). Also: BETWEEN does NOT handle `s.end IS NULL` for still-active intervals — you'd need an extra `OR s.end IS NULL` branch and the result is messier. Stick with the explicit `<=` / `>` form.
 
+**LOAD-BEARING TRAP — `COUNT(*)` vs `COUNT(s.session_id)` AFTER a LEFT JOIN on the interval-overlap predicate — zero-active buckets WRONGLY show 1 not 0 (iter577 PIN).**
+
+> **Keyword anchors:** COUNT(*) LEFT JOIN counts padded row, zero-active bucket shows 1 not 0, COUNT(col) after LEFT JOIN, empty bucket count, overnight zero hours, count non-null right column, COUNT star left join trap, COALESCE(COUNT(*),0) vacuous, LEFT JOIN interval overlap zero shows 1, active per hour LEFT JOIN COUNT.
+
+When you switch the interval-overlap join from `INNER JOIN` to `LEFT JOIN` to **guarantee a row for zero-active buckets** (every `(day, plan)` or `(hour, plan)` appears even when no interval is active), you MUST count a **non-NULL right-table column** — `COUNT(s.session_id)` / `COUNT(s.id)` / `COUNT(s.subscription_id)` — NOT `COUNT(*)`. With a `LEFT JOIN`, an empty bucket still produces **ONE row** (the calendar bucket + all-NULL right columns). `COUNT(*)` counts that NULL-padded row as **1**, so every zero-active bucket WRONGLY shows **1** instead of **0** (e.g., every overnight zero-active hour shows `active_count = 1`). An outer `COALESCE(active_count, 0)` is **vacuous** here because `COUNT(*)` **never** returns NULL — it already returned 1, so `COALESCE(1, 0) = 1`. The fix is to count a non-NULL right-table column, NOT to add a COALESCE.
+
+**WRONG ❌** (every zero-active bucket shows 1):
+```sql
+SELECT c.bucket, COUNT(*) AS active_count                       -- counts the NULL-padded row → 1, not 0
+FROM calendar c
+LEFT JOIN iceberg.analytics.subscriptions s
+  ON s.subscription_start_date <= c.bucket
+ AND (s.subscription_end_date IS NULL OR s.subscription_end_date > c.bucket)
+GROUP BY c.bucket;
+```
+
+**RIGHT ✅** (zero-active bucket = 0; no COALESCE needed):
+```sql
+SELECT c.bucket, COUNT(s.subscription_id) AS active_count        -- count any non-NULL right column → 0 for empty buckets
+FROM calendar c
+LEFT JOIN iceberg.analytics.subscriptions s
+  ON s.subscription_start_date <= c.bucket
+ AND (s.subscription_end_date IS NULL OR s.subscription_end_date > c.bucket)
+GROUP BY c.bucket;
+```
+
+**Why `count(x)` gives 0 (not NULL) for empty groups.** Verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html): `count(*)` *"Returns the number of input rows"* and `count(x)` *"Returns the number of non-null input values"*. The Trino aggregate-page rule also states: *"Except for `count()`, `count_if()`, `max_by()`, `min_by()` and `approx_distinct()`, all of these aggregate functions ignore null values and return null for no input rows or when all values are null."* — `count()` is in the **exception list**: it returns **0** (not NULL) for zero non-null values, so the outer `COALESCE(active_count, 0)` is unnecessary on the RIGHT form. (For the generic LEFT-JOIN COUNT pitfall outside the interval-overlap composite, see the LEADING CANONICAL in § 1a.5 above — same root cause; this card is the interval-overlap-specific application.)
+
+**Important — the INNER-JOIN form is unaffected.** The trap is **specifically** the `LEFT JOIN`-for-zero-rows + `COUNT(*)` pairing. The canonical INNER JOIN query at the top of this H3 uses `COUNT(*)` safely because INNER JOIN drops the zero-match bucket entirely — there is no NULL-padded row to over-count. The pattern: keep `COUNT(*)` with `INNER JOIN`; switch to `COUNT(<right_col>)` the moment you switch to `LEFT JOIN`.
+
+**Bounded-window spine (just yesterday / this week — relative bounds, NOT `MIN(...)` full history).** When the question scopes the spine to a bounded window (e.g., "active sessions per hour **yesterday**", "open tickets per day **this week**"), set explicit relative bounds in the calendar CTE instead of deriving `lo` from `MIN(...)` — that gives you only the rows the question asks for, no full-history scan:
+
+```sql
+-- Yesterday only, HOUR grain (24 hourly buckets covering 00:00..23:00 of yesterday):
+WITH calendar AS (
+  SELECT t AS bucket
+  FROM UNNEST(
+    sequence(
+      CAST(current_date - INTERVAL '1' DAY AS TIMESTAMP),                          -- lo: yesterday 00:00
+      CAST(current_date AS TIMESTAMP) - INTERVAL '1' HOUR,                          -- hi: yesterday 23:00 (exclusive of today 00:00)
+      INTERVAL '1' HOUR
+    )
+  ) AS t(t)
+)
+SELECT c.bucket, COUNT(s.session_id) AS active_count                                -- LEFT JOIN → COUNT(non-null right col), see trap card above
+FROM calendar c
+LEFT JOIN iceberg.analytics.sessions s
+  ON s.session_start <= c.bucket
+ AND (s.session_end IS NULL OR s.session_end > c.bucket)
+GROUP BY c.bucket
+ORDER BY c.bucket;
+```
+
+For a HOUR-grain spine over a bounded window, the spine size is tiny (24 rows for yesterday, 168 for last 7 days) — far cheaper than a `MIN(...)`-derived full-history spine. Use `MIN(...)` only when the question explicitly asks for full history.
+
 **CONTRAST card — the THREE time-series patterns side-by-side (read this if you're not sure which one your question wants):**
 
 | Pattern | One-line shape | Use when |
