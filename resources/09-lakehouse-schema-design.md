@@ -656,7 +656,24 @@ Behavior per key:
 
 **Cross-references.** For single-key reads with a default (one key at a time, not a whole-map merge), see the `COALESCE(element_at(...), <default>)` callout immediately below. For per-entry FILTER or TRANSFORM (e.g., keep only entries where the value is `true`, or rewrite every value with a lambda), see the MAP higher-order function family canonical below (`map_filter`, `transform_values`, `transform_keys`, `map_keys`, `map_values`).
 
-> **MAP lookup with a default value — `COALESCE(element_at(...), <default>)` (iter532, adjacent to the element_at canonical above).** Keyword anchors: map lookup with default, fall back when key missing, default value for missing map key, element_at default, COALESCE element_at, map key default Trino. `element_at(map_col, key)` returns NULL when the key is absent — wrap in `COALESCE` to substitute a default. Example: `SELECT user_id, COALESCE(element_at(settings, 'theme'), 'default_theme') AS theme FROM iceberg.analytics.users;`. Verified at [trino.io/docs/current/functions/map.html](https://trino.io/docs/current/functions/map.html) (`element_at(map(K,V), key) -> V`, NULL on missing key) and [trino.io/docs/current/functions/conditional.html](https://trino.io/docs/current/functions/conditional.html) (`COALESCE(v1, v2, ...)` returns the first non-NULL). For merging two whole maps (defaults + overrides), see the `map_concat` H3 immediately above.
+#### `COALESCE(element_at(map_col, key), <default>)` — MAP lookup with a fallback value when the key is missing
+
+**Keyword anchors so the responder lands here:** map lookup with default, fall back when key missing, default value for missing map key, element_at default, COALESCE element_at, map key default Trino, supply default for MAP key, MAP read with fallback, MAP key not present default, NULL when MAP key missing, return default when key not in map.
+
+**The rule.** `element_at(map_col, key)` returns NULL when the key is absent — wrap in `COALESCE` to substitute a default value. This is the canonical "MAP get-with-default" idiom on Trino 467 (there is no `element_at(map, key, default)` 3-arg overload — you compose with `COALESCE`).
+
+**Worked example:**
+
+```sql
+SELECT user_id,
+       COALESCE(element_at(settings, 'theme'), 'default_theme') AS theme
+FROM   iceberg.analytics.users;
+-- If 'theme' is absent OR mapped to NULL, returns 'default_theme'. Otherwise returns the stored value.
+```
+
+Verified at [trino.io/docs/current/functions/map.html](https://trino.io/docs/current/functions/map.html) (`element_at(map(K, V), key) -> V`, NULL on missing key) and [trino.io/docs/current/functions/conditional.html](https://trino.io/docs/current/functions/conditional.html) (`COALESCE(v1, v2, ...)` returns the first non-NULL).
+
+**Cross-refs.** For merging two whole maps (defaults + overrides), see the `map_concat` H3 immediately above. For per-entry filter/transform without UNNEST, see the MAP higher-order function H3 immediately below.
 
 ### LEADING CANONICAL — Trino MAP higher-order functions (`map_filter` / `map_keys` / `map_values` / `transform_keys` / `transform_values`): filter and reshape a MAP IN-PLACE (no UNNEST)
 

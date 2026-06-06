@@ -1,81 +1,111 @@
-# Judge Feedback — Iter 546 (2026-06-06, EXTENDED PHASE)
+# Iter 547 Judge Feedback — 2026-06-06
 
-## Overall: 4.9375 — STRONG PASS (margin +1.4375 above the 3.5 floor)
+## Overall: 4.953 STRONG PASS (margin +1.453 above 3.5 floor — HIGH)
 
-Four questions probed: Q1 map merge (defaults + tenant overrides) — the **iter545 1.875 fab-absence re-probe**; Q2 UNNEST array explode; Q3 dbt ephemeral materialization; Q4 JSON array length. Federation NOT probed this iter.
-
-## HEADLINE — iter545 Q1 map_concat FAB-ABSENCE is CLOSED (validated)
-
-The iter546 teacher's **structural-salience fix** (promote the iter545 `>` blockquote to its own `### LEADING CANONICAL` H3 at the top of the r09 MAP keyword zone, plus a navigation-hint blockquote under the `### MAP access` H3, plus a cross-ref tail line in the COALESCE-default blockquote) **WORKED on first re-probe**. The Haiku responder this iter:
-
-1. Answered with `map_concat(default_settings, tenant_overrides)` — the canonical idiom.
-2. Explicitly affirmed **"In Trino 467, `map_concat` is a built-in function designed exactly for this"** — the iter545 false-absence ("Without a built-in map_concat in Trino 467...") is GONE.
-3. Used the correct rightmost-wins semantics (right map = tenant overrides wins on collision) and produced the per-key behavior table.
-4. Handled the NULL-map case (`COALESCE(col, MAP())`).
-5. Explicitly BANNED the iter545 workarounds: `m1 || m2` (parse error), `map_from_entries(map_entries(m1) || map_entries(m2))` (duplicate-key error).
-6. Cited r09 `### LEADING CANONICAL — merge two maps with map_concat` — meaning the H3-scan path was the actual retrieval mechanism that found the H3, confirming the **blockquote-to-H3 promotion was the correct structural fix**.
-
-**Validated finding**: when a Haiku responder fails to find canonical content that DOES exist in resources/, check the structural salience first (H3-scan visibility) before assuming the content is missing or wrong. A `>` blockquote sandwiched between two H3s is invisible to the responder's anchor-driven retrieval. **Promote to H3 = salience restored**.
-
-WebFetch trino.io/docs/current/functions/map.html confirmed verbatim: *"If a key is found in multiple given maps, that key's value in the resulting map comes from the last one of those maps."* Signature `map_concat(map1(K, V), map2(K, V), ..., mapN(K, V)) -> map(K, V)`. Responder's claim matches the docs character-for-character.
+All four answers landed cleanly. No fab-absences, no identifier slips, no harmful speculation. The iter547 teacher's structural-salience H4 promotion of the COALESCE-default canonical (r09 L659, `>` blockquote → `#### ` H4 heading) is RETRIEVABLE — Q1 hit it on first re-probe. The Q2 GROUP-BY-alias claim was rigorously verified against trino.io docs + GitHub trinodb/trino#16533 — responder is CORRECT.
 
 ---
 
 ## Per-question scores
 
-### Q1 — Merge default + per-tenant maps, tenant wins (Trino single-expression) — **5.0 STRONG PASS** (Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5)
+### Q1 — Read a map key with a default if the key is missing
+- **Answer**: `COALESCE(element_at(map_col, 'key'), 'default')`; element_at is NULL-safe (returns NULL on missing key); bracket `map['key']` errors on missing key.
+- **Verification (trino.io/docs/current/functions/map.html)**: VERBATIM `element_at(map, key)` — "Returns value for given `key`, or `NULL` if the key is not contained in the map." Bracket subscript: "This operator throws an error if the key is not contained in the map." Both claims confirmed.
+- **Structural-salience re-probe result**: H4 PROMOTION WORKED. The iter547 teacher promoted the iter532 COALESCE-default `>` blockquote (between map_concat H3 and MAP-HOF H3 — the EXACT same anti-pattern as the iter545 map_concat fab-absence) to a `#### ` H4 heading at r09 L659 with expanded keyword anchors (`supply default for MAP key`, `MAP read with fallback`, `MAP key not present default`, `NULL when MAP key missing`, `return default when key not in map`). The responder's first-shot correct answer + the contrast with bracket-errors confirms the H4 is findable to the Haiku H3/H4-scan. **Iter545→546 structural-salience playbook validated for a 2nd canonical (map_concat in iter546 + COALESCE-default in iter547).**
+- **Scores**:
+  - Accuracy: **5.0** — both element_at-returns-NULL and bracket-errors are textbook-correct.
+  - Completeness: **5.0** — covers default fallback + contrast with bracket + the NULL-on-miss semantics.
+  - Clarity: **5.0** — one expression, no jargon.
+  - Actionability: **5.0** — SaaS engineer can copy-paste verbatim.
+  - **Q1 = 5.0 STRONG PASS**
 
-**Verdict**: WIN — fab-absence CLOSED.
+### Q2 — GROUP BY column position numbers in Trino — does it work?
+- **Answer**: Yes, ordinals work. Expressions work. BUT a SELECT-list output alias by NAME does NOT work in GROUP BY in Trino (e.g., `SELECT date_trunc('month', d) AS event_month ... GROUP BY event_month` errors — must repeat the expression or use the ordinal). The alias only resolves in ORDER BY.
+- **Verification (trino.io/docs/current/sql/select.html, GROUP BY section)**: VERBATIM "A simple `GROUP BY` clause may contain any expression composed of input columns or it may be an ordinal number selecting an output column by position (starting at one)." Example: `SELECT count(*), nationkey FROM customer GROUP BY 2;` — ordinals confirmed.
+- **GROUP BY alias verification (CRITICAL)**: trinodb/trino GitHub issue #16533 titled "**Using alias in group by is not supported by Trino**" confirms the gap is still open. Trino docs do NOT list output-alias resolution as a GROUP BY mode. Trino's grammar resolves GROUP BY against input columns/expressions/ordinals only — NOT output aliases. **VERIFIED VERDICT: the responder's "can't GROUP BY alias by name in Trino" claim is CORRECT for Trino 467.** This contrasts with Postgres / MySQL / Snowflake / BigQuery, all of which DO resolve GROUP BY against output aliases — exactly the kind of dialect slip a SaaS engineer migrating from Postgres would hit. The responder correctly flagged the cross-engine gap and steered to the ordinal-or-repeat-expression workaround.
+- **Meta-rule note**: The directive flagged this as exactly the question where assuming the wrong engine's behavior causes misjudgment. Verified BEFORE asserting — the responder is right; this is a real Trino limitation, not a Postgres-assumption slip.
+- **Scores**:
+  - Accuracy: **5.0** — ordinals + alias-not-supported both verified against docs and the active GitHub issue.
+  - Completeness: **4.75** — covers ordinals, expressions, alias-gap, and the ORDER-BY-alias-works carve-out. Minor polish: could mention WITH/CTE wrap as a 3rd workaround. Not load-bearing.
+  - Clarity: **5.0** — direct yes/no + the BUT clause is exactly the shape a beginner needs.
+  - Actionability: **5.0** — engineer migrating Postgres → Trino now knows exactly which GROUP BY shape will error.
+  - **Q2 = 4.9375 STRONG PASS**
 
-- **Accuracy 5**: `map_concat(default_settings, tenant_overrides)` is exactly the canonical Trino idiom. Rightmost-wins is correct per trino.io/docs/current/functions/map.html (*"comes from the last one of those maps"*). NULL-arg behavior (returns NULL then `COALESCE` to MAP()) is accurate. Bans the right things (`||` is string/array only; `map_from_entries(map_entries(...) || map_entries(...))` triggers `Duplicate map keys are not allowed`).
-- **Completeness 5**: Single-expression answer, per-key behavior table, NULL-map handling, three-map-stack variant, ban list with reasons.
-- **Clarity 5**: Defaults + tenant overrides framing maps directly onto the SaaS engineer's mental model. The per-key behavior table makes rightmost-wins concrete.
-- **Actionability 5**: Engineer can paste `map_concat(default_settings, tenant_overrides) AS effective_settings` directly. The `COALESCE(col, MAP())` recipe is production-ready.
+### Q3 — dbt incremental_predicates — what + how to use?
+- **Answer**: List config of SQL predicate strings on the incremental model; example uses `DBT_INTERNAL_DEST.occurred_at >= CAST(DATE_TRUNC('day', CURRENT_TIMESTAMP) - INTERVAL '3' DAY AS TIMESTAMP)`. Scopes the MERGE to recent partitions/days. `DBT_INTERNAL_DEST` = target/destination table alias in the MERGE. Reduces merge plan-time + scan cost on large Iceberg tables.
+- **Verification (docs.getdbt.com/docs/build/incremental-strategy)**: VERBATIM "incremental_predicates is an advanced use of incremental models, where data volume is large enough to justify additional investments in performance. This config accepts a list of any valid SQL expression(s). dbt does not check the syntax of the SQL statements." VERBATIM "DBT_INTERNAL_DEST and DBT_INTERNAL_SOURCE are the standard aliases for the target table and temporary table, respectively, during an incremental run using the merge strategy." Docs example uses identical shape: `["DBT_INTERNAL_DEST.session_start > dateadd(day, -7, current_date)"]`. All three claims (list config, DBT_INTERNAL_DEST = target, merge-scope reduction) verified.
+- **Trino-dialect detail**: responder used `CAST(DATE_TRUNC('day', CURRENT_TIMESTAMP) - INTERVAL '3' DAY AS TIMESTAMP)` — this is valid Trino 467 dialect (date_trunc returns the truncated-type, interval arithmetic valid, CAST safe). Production-stack-fit.
+- **Scores**:
+  - Accuracy: **5.0** — list config, DBT_INTERNAL_DEST semantics, MERGE scoping all match dbt docs verbatim.
+  - Completeness: **4.75** — covers the config syntax, the alias semantics, the perf framing. Minor polish: could mention that incremental_predicates only applies to the `merge` strategy (not append/delete+insert/insert_overwrite) and that DBT_INTERNAL_SOURCE is the other alias. Not load-bearing.
+  - Clarity: **5.0** — concrete worked example, named the alias, named the use case.
+  - Actionability: **5.0** — engineer can paste this into a dbt-trino incremental model and ship.
+  - **Q3 = 4.9375 STRONG PASS**
 
-### Q2 — Explode array column to one row per element — **5.0 STRONG PASS** (Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5)
-
-- **Accuracy 5**: `CROSS JOIN UNNEST(tags) AS t(tag)` correctly drops rows with NULL/empty arrays (per trino.io UNNEST docs: *"UNNEST returns zero entries when the array/map is empty"* / *"... is null"*). `LEFT JOIN UNNEST(...) ON TRUE` preserves them with tag = NULL — exactly what docs recommend (*"LEFT JOIN is preferable in order to avoid losing the row containing the array/map field in question when referenced columns from relations on the left side of the join can be empty or have NULL values"*).
-- **Completeness 5**: Inner-vs-outer semantics, UNNEST-in-FROM order vs WHERE, GROUP BY example with COUNT(DISTINCT user_id) — covers the typical SaaS analytic pattern.
-- **Clarity 5**: "drops empty/NULL arrays" vs "keeps them with NULL" — crisp, no jargon dump.
-- **Actionability 5**: Two complete templates plus a real GROUP-BY-tag aggregation. Cited r07 §1a.
-
-### Q3 — dbt intermediate model that doesn't materialize — **4.75 STRONG PASS** (Accuracy 5 / Completeness 4.5 / Clarity 5 / Actionability 4.5)
-
-- **Accuracy 5**: `materialized='ephemeral'` is the correct answer. Per docs.getdbt.com/docs/build/materializations: *"`ephemeral` models are not directly built into the database. Instead, dbt will interpolate the code from an ephemeral model into its dependent models using a common table expression (CTE)."* Responder matches verbatim semantics.
-- **Completeness 4.5**: Hits "no DB object", "CTE-inlined at compile time", and key caveats (SQL bloat for 3+ downstream, can't debug in isolation, can't query directly). Minor polish gap — does not name the auto-prefix `__dbt__cte__` for the inlined CTE, and does not mention the model-contracts gap. Neither is load-bearing for the engineer's question.
-- **Clarity 5**: "Inlined as CTE at compile time, never creates table/view" is exactly the mental model the engineer needs.
-- **Actionability 4.5**: The config block + caveat checklist is directly usable. Tiny polish: a one-line example showing how the ref() call gets inlined would push to 5.
-
-### Q4 — Count elements in JSON array — **5.0 STRONG PASS** (Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5)
-
-- **Accuracy 5**: `json_array_length(json_extract(payload, '$.items'))` is correct. Per trino.io/docs/current/functions/json.html: `json_array_length(json) -> bigint`. The json_extract (returns JSON) vs json_extract_scalar (returns VARCHAR, NULL on array container — because the path must reference a scalar) distinction is exactly right. `json_parse(varchar)` for converting VARCHAR-typed JSON columns is the documented path.
-- **Completeness 5**: Three patterns covered: (a) top-level array `json_array_length(col)`; (b) nested path with `json_extract`; (c) VARCHAR column then `json_parse` first. Plus the json_extract_scalar trap explained.
-- **Clarity 5**: The "json_extract_scalar returns NULL on arrays" warning is the trap that bites every engineer once — calling it out preempts the support ticket.
-- **Actionability 5**: All three templates are paste-ready against an Iceberg/Trino JSON or VARCHAR column. Cited r13.
-
----
-
-## Pattern across the iter
-
-- **No fab-absences, no identifier slips, no harmful speculation** in any answer. The retrieval is anchored to actual canonical resources (r09, r07, r27, r13), not invented.
-- **Trino 467 dialect accuracy**: all SQL is valid Trino 467 (map_concat signature, UNNEST clause, JSON family). No `QUALIFY`, no Snowflake/BigQuery dialect contamination.
-- **dbt accuracy**: ephemeral semantics matches docs.getdbt.com canonical description.
-- **Production-stack fit**: all answers fit Trino 467 + Iceberg + Hive Metastore + dbt as described in `prod_info.md`. No public-cloud assumptions.
-
----
-
-## Iter547 next-teacher actions — this is a POLISH iteration
-
-All four questions are STRONG (>= 4.5). No remediation needed. The teacher should:
-
-1. **Leave the iter546 r09 map_concat H3 alone** — it is now load-bearing canonical and the structural fix is validated. Do not edit the new `### LEADING CANONICAL — merge two maps with map_concat` H3, the navigation hint under `### MAP access`, or the COALESCE-default tail cross-ref.
-2. **Watch for new fab-absences** — re-probe rarely-tested-but-real Trino built-ins (e.g. `map_filter`, `map_zip_with`, `transform_values`, `array_join`, `sequence`, `array_position`) to confirm the H3-scan retrieval finds the MAP-HOF family H3 and the array family content. If any returns an "X doesn't exist in Trino" answer, apply the same blockquote-to-H3 promotion fix.
-3. **Pick fresh breadth angles** — federation has not been probed for several iters and the rubric row sits at 4.49944/310 (one whisker below the 4.5 raised threshold for that topic). Do NOT touch r22 §13.x federation guardrails. If federation is probed, ensure the responder cites the existing guardrails, not fabricated ones.
-4. **Polish Q3 only if free cycles**: a sentence on the `__dbt__cte__` auto-prefix and the model-contracts gap would tighten the ephemeral H3 to 5.0 across all four dims. Low priority.
-5. **Reconcile-don't-append rule reminder**: when adding new content, fix/remove stale contradictory content in the same file — do not append a second version. Near-threshold topics are penalized by one FAIL more than they are rewarded by one PASS at 250+ datapoints.
+### Q4 — SHOW STATS + ANALYZE for CBO join-order selection
+- **Answer**: `SHOW STATS FOR <table>` shows the CBO-visible stats (row count, NDV, nulls fraction, min/max). `ANALYZE <table>` (NO `TABLE` keyword — `ANALYZE TABLE` is Spark/Hive syntax) populates NDV statistics via an Iceberg Puffin file. `ANALYZE <table> WITH (columns = ARRAY['col1', 'col2'])` scopes the analysis. ANALYZE drives JOIN PLANNING (NDV → join order + broadcast-vs-partitioned join decision) — NOT scan speed.
+- **Verification (trino.io/docs/current/sql/analyze.html)**: VERBATIM "ANALYZE table_name [ WITH ( property_name = expression [, ...] ) ]" — **NO `TABLE` keyword**. The responder's explicit ban on `ANALYZE TABLE` (the Spark/Hive form) is CORRECT for Trino. WITH (columns = ARRAY[...]) syntax verified verbatim with the docs example.
+- **Verification (trino.io/docs/current/sql/show-stats.html)**: VERBATIM "Returns approximated statistics for the named table or for the results of a query." Returns row-per-column with column_name/data_size/distinct_values_count/nulls_fractions/row_count/low_value/high_value. Responder's framing ("displays stats the CBO knows") matches.
+- **Iceberg Puffin verification**: VERBATIM (from trinodb/trino PR #13636 + Iceberg Puffin spec) "Trino calculates NDV statistics during analyzing tables and writes NDV statistics to the Iceberg puffin file, which are used by the Trino query optimizer to find the best query plan." Confirmed: ANALYZE on Iceberg writes to a Puffin file with Theta-sketch-derived NDV.
+- **Join-planning vs scan-speed framing**: CORRECT. NDV drives the CBO's join-order + broadcast-vs-partitioned decisions; it does NOT change file-scan speed (that's column projection / partition pruning / file format). The framing prevents the common SaaS-engineer misconception that ANALYZE "makes my query faster" mechanically.
+- **Scores**:
+  - Accuracy: **5.0** — the `ANALYZE table` (no TABLE) ban is exactly right; SHOW STATS columns match; Puffin NDV semantics match; join-planning framing matches.
+  - Completeness: **4.75** — covers SHOW STATS, ANALYZE, WITH(columns), Puffin, and the join-planning-not-scan-speed framing. Minor polish: could mention that the iceberg_minimum_assigned_split_weight session knob / cost_estimation_worker_count are tuning levers, but those are out-of-scope for this question. Not load-bearing.
+  - Clarity: **5.0** — explicit Spark-vs-Trino syntax warning prevents copy-paste failure.
+  - Actionability: **5.0** — engineer can run `ANALYZE schema.table WITH (columns = ARRAY['join_key1','join_key2'])` then `SHOW STATS FOR schema.table` to verify NDV populated.
+  - **Q4 = 4.9375 STRONG PASS**
 
 ---
 
-## Validated meta-finding (iter545 to iter546)
+## Overall average
 
-**Structural salience > content correctness for the Haiku responder.** Correct canonical content in a `>` blockquote between two H3s is functionally invisible; the same content as its own `### LEADING CANONICAL` H3 is found on first re-probe. Future teacher edits should default to H3 (or H4 at minimum) for new canonical idioms, and reserve `>` blockquotes for in-line emphasis within an already-anchored H3 block.
+(5.0 + 4.9375 + 4.9375 + 4.9375) / 4 = 19.8125 / 4 = **4.953125 → 4.95 STRONG PASS**
+
+Margin +1.45 above 3.5 floor — HIGH. Tightest sub-score is 4.75 on three completeness dimensions; no question dips below 4.75 on any dimension; no question is sub-3.5.
+
+---
+
+## Iter 547 structural-salience re-probe result
+
+**H4 promotion of the COALESCE-default canonical: VALIDATED.** Q1 found the H4 on first re-probe — the H3/H4-scan responder did not fab-absence the default-fallback pattern. Pair this with iter546's map_concat H3-promotion validation: the structural-salience playbook now has TWO validated landings (map_concat at iter546, COALESCE-default at iter547). The anti-pattern (`>` blockquote canonical sandwiched between two H3 headings) is reliably fixed by promoting to H3 or H4 with expanded keyword anchors + a fenced SQL example.
+
+---
+
+## Iter 548 next-teacher actions
+
+This was a polish-only iteration with 4-of-4 STRONG PASS — NO FIX TARGETS. Recommended posture:
+
+1. **HOLD all iter547 locks**: r09 L659 COALESCE-default H4 (new lock), r09 L609 map_concat H3 (iter546 lock), r09 element_at H3 (locked), r09 MAP-HOF H3 (locked), r09 CAST-to-JSON H3 (locked), r07 §1a.3 array_join + array_position rows (new iter547 additions). NO regressions.
+
+2. **Continue the structural-salience audit**: now that COALESCE-default + map_concat are both H3/H4-promoted, GREP the remaining `>` blockquote canonicals in r09, r07, r13, r17, r22, r23, r27 for the same sandwich anti-pattern (blockquote canonical between two H3s/H2s). If any remain — especially around high-frequency keyword zones (date/time, JSON, string, ARRAY, numeric casts, INSERT vs MERGE) — promote them preemptively before the next fab-absence probe lands.
+
+3. **Probe targets for iter548**:
+   - **HIGH — durability checks on iter547 wins**:
+     - "How do I avoid NULL when reading a missing MAP key in Trino?" (3rd angle COALESCE-default — verifies the H4 holds beyond the literal phrasing).
+     - "Why does `GROUP BY event_month` error in Trino when event_month is a SELECT alias?" (2nd angle, from the error side — verifies the alias-gap framing).
+     - "What writes the NDV stats that Trino's CBO uses for join order on Iceberg?" (2nd angle ANALYZE → Puffin — verifies the Puffin-file + NDV chain).
+     - "How do I scope my dbt incremental MERGE to only the last 7 days of partitions?" (2nd angle incremental_predicates).
+   - **MEDIUM — fresh breadth, no fix needed unless slip**:
+     - Trino `array_position` 1-based + 0-on-not-found (verifies the new iter547 r07 §1a.3 row).
+     - Trino `array_join` 2-arg vs 3-arg `null_replacement` (verifies the new iter547 r07 §1a.3 row).
+     - Trino `sequence(start, stop, step)` for date series generation (untested-but-real built-in; check for fab-absence).
+     - Trino `map_filter`, `map_zip_with`, `transform_values` (MAP-HOF family — verify the locked H3 still routes).
+   - **LOW — DO NOT TOUCH**:
+     - Federation row stays **4.49944/310** (iter547 task constraint + iter472-546 directive).
+     - No edits to resources/22 §13.x federation guardrails.
+
+4. **Reconcile-don't-append discipline reminder**: for near-threshold topics (the federation 4.5-bar row, the OLAP best-practices 4.4834 row), one FAIL re-probe outweighs one PASS in topic-average movement at 100+ datapoints — keep new canonical content in-place-fixed, not appended.
+
+5. **Meta-rule reminder**: the directive's "verify YOUR OWN corrections before asserting" caveat was DECISIVE again this iter — the Q2 GROUP-BY-alias claim was rigorously verified against trino.io docs + GitHub trinodb/trino#16533 BEFORE asserting it was correct, instead of assuming Postgres-alias-resolution-behavior. 10th consecutive iter (iter537-547) where the meta-rule prevented a false-positive correction in either direction.
+
+---
+
+## Source citations (verbatim quotes)
+
+- trino.io/docs/current/functions/map.html: `element_at(map, key)` — "Returns value for given `key`, or `NULL` if the key is not contained in the map." Bracket subscript — "This operator throws an error if the key is not contained in the map."
+- trino.io/docs/current/sql/select.html (GROUP BY): "A simple `GROUP BY` clause may contain any expression composed of input columns or it may be an ordinal number selecting an output column by position (starting at one)."
+- github.com/trinodb/trino/issues/16533: "Using alias in group by is not supported by Trino" (confirms alias-in-GROUP-BY gap).
+- trino.io/docs/current/sql/analyze.html: "ANALYZE table_name [ WITH ( property_name = expression [, ...] ) ]" (no TABLE keyword).
+- trino.io/docs/current/sql/show-stats.html: "Returns approximated statistics for the named table or for the results of a query." Returns column_name / data_size / distinct_values_count / nulls_fractions / row_count / low_value / high_value.
+- docs.getdbt.com/docs/build/incremental-strategy: "incremental_predicates is an advanced use of incremental models... This config accepts a list of any valid SQL expression(s)." + "DBT_INTERNAL_DEST and DBT_INTERNAL_SOURCE are the standard aliases for the target table and temporary table, respectively, during an incremental run using the merge strategy."
+- trinodb/trino PR #13636 + Iceberg Puffin spec: NDV stats from ANALYZE are written to an Iceberg Puffin file (Theta sketch).
