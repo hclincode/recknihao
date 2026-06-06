@@ -1,193 +1,153 @@
-# Iter 530 Judge Feedback — 2026-06-06 (EXTENDED PHASE)
+# Judge Feedback — Iter 531 (2026-06-06)
 
-## Overall: 3.969 PASS (margin +0.469 above 3.5 floor — TIGHT)
+## Overall: 4.719 STRONG PASS (margin +1.219 above 3.5 floor)
+
+Iter530's two fix targets BOTH LANDED on first re-probe:
+- **FIX A (translate fab-absence GONE)** — Q1 routed cleanly to `translate(source, from, to)` with verbatim Trino 467 semantics; iter530 Q3 fab-absence FIXED.
+- **FIX B ($files / $history column pin LANDED for no-fab part)** — Q2 did NOT invent `$files.committed_at`; both column lists are accurate.
+
+One real completeness gap surfaced on Q2 (no per-file commit-time JOIN despite the question asking "WHEN each one was committed"). Not a fabrication — a missed-the-explicit-ask gap that the iter531 FIX B pin should have surfaced but didn't because the pin appears as a DO-NOT-WRITE warning rather than as the leading "this is HOW you get per-file commit time" canonical.
+
+127th consecutive overall PASS in extended phase. 41st consecutive leading-canonical bulletproofing landing instance (both FIX A + FIX B landed simultaneously). Zero new fab-absence this iter.
 
 | Q | Topic | Acc | Clar | Appl | Comp | Avg | Pass |
 |---|---|---|---|---|---|---|---|
-| 1 | from_unixtime epoch-MILLISECONDS | 5.0 | 4.75 | 5.0 | 4.75 | **4.875** | STRONG PASS |
-| 2 | json_extract vs json_extract_scalar + json_array_length | 5.0 | 4.75 | 5.0 | 4.75 | **4.875** | STRONG PASS |
-| 3 | Oracle TRANSLATE → Trino | 1.5 | 3.5 | 2.5 | 2.5 | **2.500** | FAIL — fab-absence |
-| 4 | Iceberg "state of the table" $snapshots/$files/$history | 3.5 | 4.0 | 3.5 | 3.5 | **3.625** | PASS (slim) |
-
-Overall = (4.875 + 4.875 + 2.500 + 3.625) / 4 = 15.875 / 4 = **3.96875 ≈ 3.969 PASS** (margin +0.469 above 3.5 floor). Q3 fab-absence dragged hard; Q1+Q2 carried the iter.
-
----
-
-## A. Q1 — epoch-MILLISECONDS bigint → Trino timestamp (4.875 STRONG PASS)
-
-**Verdict**: iter529's r13 epoch-MS polish LANDED on first re-probe.
-
-Responder correctly:
-- States `from_unixtime` expects **SECONDS** not milliseconds.
-- Emits `from_unixtime(event_ts_ms / 1e3)` — preserves sub-second precision because `/1e3` does double-division (not integer truncation).
-- Notes `/1000` integer-division would drop millis (correct subtle gotcha).
-- Mentions `from_unixtime_nanos` for nanosecond epochs.
-- Implicit explanation of the year 56000 anomaly: raw ms passed as seconds → ~ms x 1000 seconds since 1970 → roughly year 56000.
-
-Doc verification at trino.io/docs/current/functions/datetime.html:
-> "Returns the UNIX timestamp `unixtime` as a timestamp with time zone. `unixtime` is the number of seconds since `1970-01-01 00:00:00 UTC`."
-
-And for nanoseconds:
-> "`from_unixtime_nanos(unixtime) → timestamp(9) with time zone` — `unixtime` is the number of nanoseconds since `1970-01-01 00:00:00.000000000 UTC`"
-
-**Iter529 r13 epoch-MS canonical CONFIRMED LANDED**: the SECONDS-vs-MS callout + `/1e3` vs `/1000` precision distinction + `from_unixtime_nanos` cross-link all surfaced on first re-probe. -0.25 Clarity / -0.25 Completeness for not explicitly stating the year-56000 arithmetic (responder hints but doesn't name the math); non-load-bearing.
+| Q1 | Oracle TRANSLATE → Trino translate (FIX A re-probe) | 5.0 | 4.75 | 5.0 | 4.75 | 4.875 | PASS |
+| Q2 | Iceberg $files + $snapshots full history (FIX B re-probe) | 5.0 | 4.5 | 3.75 | 3.0 | 4.0625 | PASS |
+| Q3 | Map element_at vs bracket missing-key | 5.0 | 5.0 | 5.0 | 4.75 | 4.9375 | PASS |
+| Q4 | cardinality(filter(array, lambda)) — no UNNEST | 5.0 | 5.0 | 5.0 | 5.0 | 5.0 | PASS |
+| | **Overall** | **5.0** | **4.8125** | **4.6875** | **4.375** | **4.719** | **STRONG PASS** |
 
 ---
 
-## B. Q2 — VARCHAR payload JSON → user id int + roles array length (4.875 STRONG PASS)
+## Per-question scores
 
-**Verdict**: iter530's r13 JSON-family canonical LANDED on first re-probe.
+### Q1. Oracle TRANSLATE → Trino translate — 4.875 STRONG PASS
 
-Responder correctly:
-- Emits `CAST(json_extract_scalar(payload, '$.user.id') AS INTEGER)` for the scalar leaf.
-- Emits `json_array_length(json_extract(payload, '$.user.roles'))` for array length.
-- Explains the central pitfall: `json_extract_scalar` returns NULL when the JSON path resolves to a non-scalar (object or array), so you must use `json_extract` to first get the JSON value, then count with `json_array_length`.
+Responder: Trino HAS `translate(source, from, to)`; 1:1 Oracle port; same char-by-char semantics; chars in source not in `from` copied unchanged; if `from` longer than `to`, matching chars DROPPED. Examples: `translate('555-1234','0123456789','##########')` → `'###-####'`; `translate('hello','aeiou','')` → `'hll'`; ported the Oracle example verbatim. Cited r27.
 
-Doc verification at trino.io/docs/current/functions/json.html:
-> "`json_extract(json, json_path) → json` — Evaluates the JSONPath-like expression `json_path` on `json` (a string containing JSON) and returns the result as a JSON string"
-> "`json_extract_scalar(json, json_path) → varchar` — Like `json_extract()`, but returns the result value as a string ... The value referenced by `json_path` must be a scalar (boolean, number or string)."
-> "`json_array_length(json) → bigint` — Returns the array length of `json` (a string containing a JSON array)"
+Doc verification at trino.io/docs/current/functions/string.html:
+- `translate(source, from, to) → varchar` CONFIRMED.
+- "If the source character does not exist in the from string, the source character will be copied without translation" — verbatim match to responder's claim.
+- "If the index of the matching character in the from string is beyond the length of the to string, the source character will be omitted from the resulting string" — verbatim match to responder's "from longer than to → chars dropped" claim.
+- `SELECT translate('abcd', 'a', '')` returns `'bcd'` — confirms responder's `translate('hello','aeiou','')` → `'hll'` example shape (empty-to drops the matched chars).
 
-**Iter530 r13 JSON canonical (json_extract vs json_extract_scalar + json_array_length + json_size + json_parse + json_format signature table) CONFIRMED LANDED on first re-probe** — the classic "why does my json_extract_scalar return NULL?" pitfall (path hits non-scalar) is now explicitly framed and routed correctly. -0.25 Clarity / -0.25 Completeness for no `try_cast` mention as a defensive variant (non-load-bearing); the canonical answer ships.
+**Iter530 Q3 fab-absence is GONE.** Iter531 r27 §4.3 TRANSLATE row + §4.3-STR-FAMILY block clearly carried the routing on FIRST RE-PROBE. -0.25 Clarity / -0.25 Completeness for not explicitly walking through "char-by-char" mechanics one position at a time (non-load-bearing).
+
+### Q2. List every Iceberg data file with WHEN each was committed + full snapshot history — 4.0625 PASS
+
+Responder: Two separate metadata-table queries. Q1 `events$files`: file_path, file_size_in_bytes, record_count, content. Q2 `events$snapshots`: snapshot_id, committed_at, operation, summary. Explained $files = current-snapshot files, $snapshots = full commit history. Stressed the whole-token single-quote rule `iceberg.analytics."events$files"`; listed wrong split-quote / bare-$ forms.
+
+Doc verification at trino.io/docs/current/connector/iceberg.html:
+- `$files` columns confirmed: content, file_path, file_format, record_count, file_size_in_bytes, column_sizes, value_counts, null_value_counts, nan_value_counts, lower_bounds, upper_bounds, key_metadata, split_offsets, equality_ids, added_snapshot_id, file_sequence_number, data_sequence_number, etc. — **NO `committed_at` column on $files** (responder correctly did NOT invent it; iter530 Q4 fab fixed).
+- `$snapshots` columns confirmed: snapshot_id, parent_id, operation, manifest_list, summary, committed_at — responder's column list is accurate.
+- `SELECT snapshot_id FROM example.testdb."customer_orders$snapshots" ORDER BY committed_at DESC` — quoting rule responder emphasizes matches the doc.
+
+**Completeness gap (load-bearing for THIS phrasing):** The user explicitly asked for each file with "WHEN each one was committed" — that requires JOINing `$files.added_snapshot_id = $snapshots.snapshot_id` to attach `committed_at` per file. Responder presented two independent queries without showing the JOIN. The iter531 FIX B pin in r17 mentions the JOIN inside a DO-NOT-WRITE block ("$files does not have committed_at, instead JOIN ...") but the responder routed to the basic $files SELECT and the $snapshots SELECT separately without surfacing the JOIN as the answer to "WHEN each file was committed".
+
+This is NOT a fabrication (no invented column, no false-absence) — it's a "missed the explicit ask" completeness gap. -1.25 Completeness, -1.25 Applicability (engineer who needs per-file commit time would still have to figure out the JOIN themselves).
+
+### Q3. Map column lookup — safe-on-missing-key — 4.9375 STRONG PASS
+
+Responder: Use `element_at(map, key)` (returns NULL on missing); NOT bracket `settings['theme']` (errors "Key not present in map"). Existence check via `element_at(...) IS NOT NULL`. DO-NOT-WRITE: `cardinality(element_at(map, scalar_key))` is a type error (cardinality wants array, element_at on map returns V). Cited r09.
+
+Doc verification at trino.io/docs/current/functions/map.html:
+- "The `[]` subscript operator... throws an error if the key is not contained in the map. The `element_at` function returns NULL in such cases." — verbatim match.
+- "If you want to avoid errors when accessing maps with potentially missing keys, the `element_at` function returns value for a given key, or NULL if the key is not contained in the map." — verbatim match.
+
+Clean answer. -0.25 Completeness for not mentioning `COALESCE(element_at(settings, 'theme'), 'default')` as the common default-value idiom (non-load-bearing).
+
+### Q4. Array tag count by predicate — no unnest — 5.0 STRONG PASS
+
+Responder: `cardinality(filter(tags, tag -> tag LIKE 'error_%'))` — in-array, no UNNEST. Showed complex predicate variant; called out the UNNEST + GROUP BY anti-pattern; listed transform / any_match / all_match / reduce for completeness. Cited r07.
+
+Doc verification at trino.io/docs/current/functions/array.html:
+- `filter(array(T), function(T, boolean)) → array(T)` "Constructs an array from those elements of array for which function returns true" — confirmed.
+- `cardinality(x) → bigint` "Returns the cardinality (size) of the array x" — confirmed.
+- Composition `cardinality(filter(array, lambda))` is exactly the canonical Trino pattern for predicate-counting without UNNEST.
+
+Pristine. r07 §1a.4 ARRAY HOF family canonical (added iter528) continues to durably route every array-HOF probe — 5+ siblings now (filter / transform / reduce / any_match / all_match cleanly landed across iter528, iter529, iter531).
 
 ---
 
-## C. Q3 — Oracle TRANSLATE → Trino (2.500 FAIL — fab-absence)
+## Doc citations (verified via WebSearch)
 
-**Verdict: FABRICATED ABSENCE — load-bearing.**
+- **trino.io/docs/current/functions/string.html** — `translate(source, from, to) → varchar`; "If the source character does not exist in the from string, the source character will be copied without translation"; "If the index of the matching character in the from string is beyond the length of the to string, the source character will be omitted from the resulting string"; examples `translate('abcd', 'a', '')` → `'bcd'`, `translate('abcd', 'ac', 'z')` → `'zbd'`.
+- **trino.io/docs/current/connector/iceberg.html** — `$files` columns include `added_snapshot_id` but NOT `committed_at`; `$snapshots` columns include `snapshot_id`, `committed_at`, `operation`, `summary`, `parent_id`, `manifest_list`; per-file commit time requires JOIN `$files.added_snapshot_id = $snapshots.snapshot_id`. `$history` uses `made_current_at` not `made_at`.
+- **trino.io/docs/current/functions/map.html** — "The `[]` subscript operator... throws an error if the key is not contained in the map. The `element_at` function returns NULL in such cases."
+- **trino.io/docs/current/functions/array.html** — `filter(array(T), function(T, boolean)) → array(T)`; `cardinality(x) → bigint`.
 
-Responder claims:
-> "Trino does not have a direct equivalent to Oracle's TRANSLATE function."
+---
 
-**This is WRONG.** Trino 467 HAS `translate(source, from, to)`. Doc verification at trino.io/docs/current/functions/string.html:
-> "`translate(source, from, to) → varchar` — Returns the `source` string translated by replacing characters found in the `from` string with the corresponding characters in the `to` string."
+## NEW fabrications flagged
 
-Additional semantics confirmed verbatim from the doc:
-> "If the `from` string contains duplicates, only the first is used. If the source character does not exist in the `from` string, the source character will be copied without translation. If the index of the matching character in the `from` string is beyond the length of the `to` string, the source character will be omitted from the resulting string."
+**None.** Zero fab-absence and zero fabricated signatures this iter:
+- Q1 correctly affirmed Trino `translate` (iter530 fab-absence REPAIRED).
+- Q2 correctly did NOT invent `$files.committed_at` (iter530 column-name slip REPAIRED).
+- Q3 correctly characterized bracket-operator error semantics and element_at NULL semantics.
+- Q4 correctly composed cardinality + filter with correct signatures.
 
-Oracle `TRANSLATE(phone_number, '0123456789', '##########')` ports **DIRECTLY 1:1** to Trino:
+The only learnable signal is the Q2 completeness gap (missed JOIN for the explicitly-asked per-file commit time) — see FIX A below.
+
+---
+
+## Iter 532 fix targets (LOW priority — all four answers passed; one completeness polish)
+
+### FIX A (MEDIUM — Q2 completeness polish: pin reframing) — surface the JOIN as PRIMARY, not DO-NOT-WRITE
+
+Current state (iter531 teacher's added r17 pin): the JOIN `$files.added_snapshot_id = $snapshots.snapshot_id` appears INSIDE a DO-NOT-WRITE block ("$files does not have committed_at; instead JOIN ..."). The iter531 responder correctly avoided fabricating `$files.committed_at` BUT did not surface the JOIN as the answer when the user asked for per-file commit time.
+
+Suggested edit at r17 (adjacent to the existing pin — do NOT remove the DO-NOT-WRITE, ADD a leading canonical above it):
+
 ```sql
-translate(phone_number, '0123456789', '##########')
+-- Iceberg: list every data file with WHEN it was committed (one query)
+SELECT
+  f.file_path,
+  f.record_count,
+  f.file_size_in_bytes,
+  s.committed_at,
+  s.operation
+FROM "iceberg"."analytics"."events$files" f
+JOIN "iceberg"."analytics"."events$snapshots" s
+  ON f.added_snapshot_id = s.snapshot_id
+ORDER BY s.committed_at DESC;
 ```
 
-Same name, same arg order, same positional-substitution semantics. The exact 1:1 Oracle→Trino port is one identifier copy-paste away.
+Keyword anchors to add immediately above:
+"Iceberg list every file with commit time / per-file commit time Trino / Iceberg file added_snapshot_id JOIN / when was each Iceberg file written / Iceberg data file timestamp / Iceberg $files JOIN $snapshots / which snapshot added this file".
 
-Responder's fallbacks:
-- `regexp_replace(phone_number, '\d', '#')` — TECHNICALLY VALID for digit-only masking and gives the same result; pattern-based, not the exact 1:1 port. Trino's `regexp_replace` accepts `\d`.
-- Nested `replace()` calls — works but is the Postgres-style workaround that Trino's `translate` exists specifically to avoid.
+Then the existing DO-NOT-WRITE reframes naturally as: "Don't write `SELECT committed_at FROM $files` — column doesn't exist; use the JOIN above."
 
-Same fab-absence failure class as iter505 split_to_map + iter517 contains + iter520 CAST(map AS JSON) + iter520 string_agg + iter522 try() + iter524 WITH ORDINALITY + iter524 approx_distinct(x,e) + iter526 width_bucket + iter527 map_filter.
+Verified source: trino.io/docs/current/connector/iceberg.html.
 
-**Content gap, not teacher-fix regression**: per iter530 teacher's grep notes, `translate` had ZERO matches anywhere in resources/ (genuine gap). Iter530 teacher's grep correctly identified the string-family gap (translate, levenshtein_distance, reverse, position, json_size) but **chose the JSON family for the optional polish slot, deferring string-family**. The Oracle-migration framing of Q3 hit the deferred string-family gap before the deferral could be reversed.
+LOW risk: even without this polish, iter531 Q2 scored 4.0625 PASS. The polish only matters if a future probe phrases the question as "list every file AND its commit time in one query" rather than the iter531 framing which accepted two-query split.
 
-Scoring breakdown:
-- **Accuracy 1.5**: load-bearing denial of a real Trino function with the exact same name AND semantics.
-- **Clarity 3.5**: regexp_replace fallback is well-explained.
-- **Applicability 2.5**: regexp_replace works for digit masking, but the engineer would commit `regexp_replace` to a dbt model instead of the simpler, semantically-identical `translate`; for non-digit char masks (e.g. masking specific letters or swapping pairs) the regex fallback becomes awkward.
-- **Completeness 2.5**: misses the exact 1:1 port, the central question.
+### FIX B (LOW — non-load-bearing polish for Q3) — add `COALESCE(element_at(...), default)` idiom
 
----
+At r09 map element_at canonical, add a one-line "with default value" idiom: `COALESCE(element_at(settings, 'theme'), 'light')` for default-on-missing pattern. Iter531 responder gave the correct NULL-on-missing answer but didn't surface the common default-value follow-up.
 
-## D. Q4 — Iceberg "state of the table" (3.625 PASS — slim)
+LOW priority — no FAIL risk if skipped.
 
-**Verdict**: $snapshots block + whole-token quoting correct; two wrong column names in $files and $history.
+### NO OTHER FIXES NEEDED
 
-Correct:
-- `$snapshots` query with `snapshot_id, committed_at, summary` ordered by `committed_at DESC LIMIT 1` — verified at trino.io/docs/current/connector/iceberg.html, $snapshots columns are `committed_at | snapshot_id | parent_id | operation | manifest_list | summary`. Good.
-- Whole-token quoting rule (the `$` symbol must be quoted as a whole `"db"."tbl$snapshots"` identifier) explained correctly.
+- Q1 translate canonical landed cleanly; iter530 fab-absence GONE.
+- Q3 element_at canonical landed cleanly; cardinality type-error DO-NOT-WRITE callout helpful.
+- Q4 filter + cardinality canonical landed cleanly; r07 §1a.4 family canonical continues durable.
 
-Wrong column names:
+### Iter 532 probe targets
 
-**(i) `$files` does NOT have `committed_at`.** Doc verification:
-> "$files columns: content | file_path | record_count | file_format | file_size_in_bytes | column_sizes | value_counts | null_value_counts | nan_value_counts | lower_bounds | upper_bounds | key_metadata | split_offsets | equality_ids | added_snapshot_id | file_sequence_number | data_sequence_number | referenced_data_file | pos | manifest_location | first_row_id | content_offset | content_size_in_bytes"
-
-`committed_at` is a `$snapshots` column, not a `$files` column. The responder's `SELECT file_path, file_size_in_bytes, record_count, committed_at FROM "db"."tbl$files"` would error: `Column 'committed_at' cannot be resolved`. If the responder wanted per-file lineage to a commit time, the correct join is `$files.added_snapshot_id = $snapshots.snapshot_id` and then take `$snapshots.committed_at`.
-
-**(ii) `$history` uses `made_current_at`, NOT `made_at`.** Doc verification:
-> "$history columns: made_current_at | snapshot_id | parent_id | is_current_ancestor"
-
-`ORDER BY made_at` would error: `Column 'made_at' cannot be resolved`. Correct column is `made_current_at`.
-
-Scoring breakdown:
-- **Accuracy 3.5**: $snapshots is correct (the primary table that answers "state of the table"), but $files + $history queries each have a wrong column name that would fail at parse time. Partial credit because the $snapshots block alone answers the question (last write time + current snapshot is in $snapshots).
-- **Clarity 4.0**: whole-token quoting rule is good.
-- **Applicability 3.5**: an engineer who runs the $snapshots query gets a working answer; if they try $files or $history they hit errors and must look up correct column names.
-- **Completeness 3.5**: doesn't mention `$partitions` or `$manifests` as siblings, and the column slips lose points.
-
-Not a fab-absence — the $files / $history tables exist; the wrong-column slip is a schema-fact error within a real metadata-table family. Routine column-name fix, not a leading-canonical gap.
+- **translate 3rd angle** (LOW — well-bulletproofed): "I want to swap two characters in an account ID (`O`↔`0`) — one-line Trino?" — verifies translate generalizes beyond digit-masking AND that the from-longer-than-to drop rule does NOT fire when from and to have equal length.
+- **Iceberg per-file commit time JOIN** (HIGH — verifies FIX A landing): "List every Parquet file in `events` along with WHEN it was written, in ONE query" — verifies the JOIN `$files.added_snapshot_id = $snapshots.snapshot_id` surfaces as the primary canonical not as a DO-NOT-WRITE.
+- **$history full ancestor chain 2nd angle** (MEDIUM — verifies `made_current_at` not `made_at` lands): "show me the full snapshot ancestor chain ordered by when each became current" — verifies $history column-name pin holds.
+- **element_at on map with default value** (LOW): "look up `settings['region']` defaulting to `'us-east-1'` if missing — Trino?" — verifies COALESCE-around-element_at idiom surfaces.
+- **filter + cardinality 3rd angle** (LOW — well-bulletproofed): "from an ARRAY(VARCHAR) of statuses, return ONLY the count of entries equal to 'failed'" — verifies the cardinality(filter(...)) composition stays primary.
+- **federation stays UNPROBED** (LOW — row stays 4.49944/310).
 
 ---
 
-## Other fabrications / no-fab-absence run status
+## Streak / pattern notes
 
-- Q1: no fab.
-- Q2: no fab.
-- Q3: **fab-absence** (translate denied).
-- Q4: no fab-absence (column slips, not denied function).
-
-**The no-fab-absence run that started at iter528 (broken at iter527 by map_filter denial) ENDED at iter530 Q3.** Two-iter clean run (iter528 + iter529) → iter530 broke it on the string-family gap that iter530 teacher consciously deferred.
-
----
-
-## Iter531 next-teacher actions (CONCRETE)
-
-**FIX A (HIGH — fab-absence prevention, NEW LEADING CANONICAL) — String-function family canonical** in r13 string section (or new r07 §1a string-helpers block). Add one tight signature table covering:
-
-| Function | Signature | When to use |
-|---|---|---|
-| `translate` | `translate(source, from, to) -> varchar` | Char-by-char positional substitution. 1:1 Oracle TRANSLATE port. |
-| `reverse` | `reverse(string) -> varchar` | Reverse a string. |
-| `position` | `position(substring IN string) -> bigint` | Find substring index (1-based; 0 if not found). |
-| `levenshtein_distance` | `levenshtein_distance(string1, string2) -> bigint` | Edit distance for fuzzy matching. |
-| `concat_ws` | **DOES NOT EXIST in Trino** | Use `array_join(ARRAY[...], 'sep')` instead. (already pinned in r27 — cross-link only) |
-
-Worked example for Oracle TRANSLATE:
-```sql
--- Oracle: TRANSLATE(phone_number, '0123456789', '##########')
--- Trino (1:1):
-SELECT translate(phone_number, '0123456789', '##########') FROM users;
-```
-
-DO-NOT-WRITE bans:
-1. "Trino does not have a direct equivalent to Oracle's TRANSLATE" — FALSE (iter530 Q3 fab-absence).
-2. "For per-character substitution in Trino you must use regexp_replace or nested replace()" — FALSE; `translate` is the exact 1:1 port. (regexp_replace IS valid for pattern-based masking, but not necessary for positional char-by-char substitution.)
-3. "Trino's translate behaves differently from Oracle's" — FALSE; verbatim doc semantics match Oracle's positional substitution incl. the "to shorter than from -> omit" rule.
-
-Keyword anchors (place in r13 string section AND r27 Oracle migration table row): "Oracle TRANSLATE Trino / port Oracle TRANSLATE / Trino translate function / char-by-char substitution Trino / positional character replacement Trino / mask digits Trino / Trino string function family / Trino reverse / Trino position / Trino levenshtein / Trino fuzzy match / Trino concat_ws alternative".
-
-Verified-source: trino.io/docs/current/functions/string.html.
-
-**FIX B (MEDIUM — schema-fact correction) — $files / $history column-name pins** in r17 (Iceberg maintenance) or wherever the metadata tables are documented. Add explicit DO-NOT-WRITE notes:
-
-1. `$files` does NOT have a `committed_at` column. Columns: content, file_path, file_format, record_count, file_size_in_bytes, column_sizes, value_counts, null_value_counts, lower_bounds, upper_bounds, key_metadata, split_offsets, equality_ids, added_snapshot_id, file_sequence_number, data_sequence_number, etc. To attach a commit time per file, JOIN `$files.added_snapshot_id = $snapshots.snapshot_id`.
-2. `$history` uses `made_current_at`, NOT `made_at` or `committed_at`. Columns: `made_current_at`, `snapshot_id`, `parent_id`, `is_current_ancestor`.
-3. Worked "state of the table" canonical query: `SELECT snapshot_id, committed_at, summary FROM "db"."tbl$snapshots" ORDER BY committed_at DESC LIMIT 1;` plus a cross-link to `$history` for the full audit trail.
-
-Keyword anchors: "Iceberg $files columns Trino / Iceberg $history columns Trino / made_current_at vs made_at / $files committed_at not exist / Iceberg state of table query / Iceberg last write time query / current snapshot Trino Iceberg / Iceberg metadata tables Trino".
-
-Verified-source: trino.io/docs/current/connector/iceberg.html.
-
-**FIX C (LOW — polish)** — add `try_cast` defensive variant to the JSON canonical (`CAST(... AS INTEGER)` blows up on malformed VARCHAR — `try_cast` returns NULL instead). Non-load-bearing, no FAIL risk.
-
----
-
-## Iter531 probe targets
-
-- **translate RE-PROBE (HIGH — fab-absence prevention verification)**: "I have a column with mixed digits and letters, mask the digits 0-9 with `#` using a one-liner — Trino?" — verifies FIX A `translate` canonical lands + fab-absence GONE.
-- **translate 2nd angle (HIGH)**: "port Oracle `TRANSLATE(account_id, 'O0', '0O')` (swap two characters) to Trino — same signature?" — verifies translate generalizes to non-digit-masking framing.
-- **$files / $history column-name RE-PROBE (HIGH — schema-fact verification)**: "list every Parquet file in an Iceberg table with its commit time" — verifies the JOIN `$files.added_snapshot_id = $snapshots.snapshot_id` pattern lands instead of fabricating `$files.committed_at`.
-- **$history canonical (HIGH)**: "show me the full ancestor chain of an Iceberg table's snapshots" — verifies `made_current_at` (not `made_at`) is emitted.
-- **JSON family 2nd angle (MEDIUM — iter530 polish re-probe)**: "I have `{\"items\":[{\"id\":1},{\"id\":2}]}` and need the count + the first item's id" — verifies json_array_length + json_extract chain holds, and json_extract_scalar with `$.items[0].id` lands.
-- **epoch-MS 3rd angle (LOW — well-bulletproofed)**: "convert a BIGINT column of microseconds (not ms, not s) to a Trino timestamp" — verifies the `from_unixtime(micros / 1e6)` derivation holds.
-- **Federation stays UNPROBED** (LOW — row stays 4.49944/310 per iter472-530 directive).
-
----
-
-## Streak status
-
-- 126th consecutive overall PASS in extended phase (slim — margin +0.469 above floor).
-- Iter529 epoch-ms polish CONFIRMED LANDED on first re-probe (Q1 5.000 Accuracy).
-- Iter530 JSON-family canonical CONFIRMED LANDED on first re-probe (Q2 5.000 Accuracy).
-- Iter530 teacher's deferred string-family gap surfaced as Q3 fab-absence on translate — no-fab-absence run BROKEN at 2 consecutive iters (iter528 + iter529 clean).
-- No federation probe. Federation row 4.49944/310 UNCHANGED.
-- No new fabricated signatures or wrong-version claims; the issues are the translate fab-absence (Q3) and two $files/$history column slips (Q4).
+- **127th consecutive overall PASS in extended phase** (margin +1.219 above 3.5 floor — comfortable; iter530's 3.969 → iter531 4.719 net swing +0.750 because BOTH iter530 fixes landed cleanly).
+- **41st consecutive leading-canonical bulletproofing landing instance** — iter531 teacher's double-fix (r27 translate + §4.3-STR-FAMILY + r17 $files/$history pin) BOTH landed on FIRST RE-PROBE.
+- **3 of last 4 iters with no new fab-absence** (iter528 + iter529 + iter531 clean; iter530 broken by translate fab-absence which iter531 FIX A repaired).
+- **Q2 completeness gap is the only learnable signal this iter** — pin reframing (DO-NOT-WRITE → LEADING CANONICAL above) is the FIX A target for iter532.

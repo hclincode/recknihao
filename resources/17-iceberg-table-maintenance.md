@@ -1166,6 +1166,13 @@ ORDER  BY s.committed_at DESC;
 > | `SELECT partition, SUM(file_size_in_bytes) FROM "<t>$partitions" GROUP BY partition` | **`Column 'file_size_in_bytes' cannot be resolved`** — that column is **`$files`-only**. `$partitions` exposes the per-partition byte total under the column name **`total_size`** (BIGINT). | `SELECT partition, total_size FROM iceberg.analytics."events$partitions" ORDER BY total_size DESC;` |
 > | `SELECT partition, COUNT(*) AS file_count FROM "<t>$partitions" GROUP BY partition` | **Redundant** — `$partitions` is **already one row per partition**, so `COUNT(*) GROUP BY partition` returns `1` for every partition. The actual per-partition file count is already exposed as the **`file_count`** column. | `SELECT partition, file_count FROM iceberg.analytics."events$partitions" ORDER BY file_count DESC;` |
 
+> **`$files` column-presence pin and `$history` column-name pin (iter531 — read before answering "when was this file committed?" or "what column on `$history` shows the timestamp?").** Verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html). Keyword anchors: $files committed_at, $files commit time per file, $history made_current_at vs made_at, $files added_snapshot_id join, per-file commit timestamp Iceberg.
+>
+> | Pin | Wrong claim (DO NOT WRITE) | Correct shape |
+> |---|---|---|
+> | **`$files` has NO `committed_at` column.** | `SELECT file_path, committed_at FROM "<t>$files"` — fails with `Column 'committed_at' cannot be resolved`. There is no per-file commit-time column on `$files`. | The per-file commit timestamp is reconstructed by JOINING `$files.added_snapshot_id` to `$snapshots.snapshot_id` and reading `$snapshots.committed_at`: `SELECT f.file_path, s.committed_at FROM iceberg.analytics."events$files" f JOIN iceberg.analytics."events$snapshots" s ON f.added_snapshot_id = s.snapshot_id ORDER BY s.committed_at DESC;` |
+> | **`$history` column is `made_current_at`, NOT `made_at`.** | `SELECT made_at FROM "<t>$history"` — fails with `Column 'made_at' cannot be resolved`. `made_at` is a base-training mis-name; the actual Trino column is `made_current_at` (with `_current_` in the middle). The full `$history` column set is `made_current_at`, `snapshot_id`, `parent_id`, `is_current_ancestor` — no other timestamp columns exist. | `SELECT made_current_at, snapshot_id, parent_id, is_current_ancestor FROM iceberg.analytics."events$history" ORDER BY made_current_at DESC;` |
+
 **Common diagnostic queries (copy-pasteable):**
 
 ```sql
