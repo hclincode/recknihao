@@ -240,6 +240,91 @@ GROUP BY user_id;
 
 ---
 
+## 1a.5 LEADING CANONICAL — JOIN types and NULL-fill on unmatched rows (INNER vs LEFT vs RIGHT vs FULL OUTER + the COUNT(right_col) vs COUNT(*) pitfall)
+
+### LEADING CANONICAL — INNER vs LEFT OUTER vs RIGHT OUTER vs FULL OUTER — which side keeps rows, what NULL-fill means, and how COUNT(right_col) vs COUNT(*) silently disagree
+
+> **READ THIS FIRST if your question contains any of these keywords:** `LEFT JOIN Trino`, `LEFT OUTER JOIN`, `RIGHT JOIN`, `FULL OUTER JOIN`, `INNER vs LEFT JOIN`, `outer join null fill`, `null-fill unmatched rows`, `which side keeps rows`, `JOIN drops rows`, `JOIN missing rows`, `users with no orders`, `customers without purchases`, `keep parent rows when child missing`, `JOIN row count wrong`, `LEFT JOIN count zero rows missing`, `COUNT after LEFT JOIN`, `COUNT(col) vs COUNT(*)`, `COUNT inflated by JOIN`, `LEFT JOIN aggregate wrong`. Verified at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) on 2026-06-07; Trino follows standard ANSI SQL JOIN semantics.
+
+**The one-fact summary.** A JOIN combines two relations on a predicate. The **JOIN TYPE** decides what happens to rows on each side that have **NO match** on the other side. Four types — pick by asking "which side's rows must I keep even when the other side has nothing?":
+
+| JOIN type | Keeps unmatched LEFT rows? | Keeps unmatched RIGHT rows? | Unmatched-side columns filled with | SaaS phrasing |
+|---|---|---|---|---|
+| **`INNER JOIN`** (or just `JOIN`) | NO — dropped | NO — dropped | (no unmatched rows in result) | "users who have **at least one** order" |
+| **`LEFT [OUTER] JOIN`** | **YES — kept** | NO — dropped | RIGHT columns = `NULL` for unmatched left rows | "**all** users; orders if any" |
+| **`RIGHT [OUTER] JOIN`** | NO — dropped | **YES — kept** | LEFT columns = `NULL` for unmatched right rows | "all orders; user if any" (rare — usually flip the join to LEFT) |
+| **`FULL [OUTER] JOIN`** | **YES — kept** | **YES — kept** | Whichever side is unmatched → that side's columns = `NULL` | "everything from both sides; matched where possible" |
+
+The keyword `OUTER` is optional — `LEFT JOIN` and `LEFT OUTER JOIN` mean the same thing in Trino (and in ANSI SQL). **`INNER JOIN` and `JOIN` (with no qualifier) are identical** — the default is INNER.
+
+**NULL-fill — what it means concretely.** When an `OUTER` JOIN keeps a row whose other-side match is missing, Trino fills the OTHER side's columns with `NULL` for that row. The row IS in the result; you can `SELECT` its left columns; the right columns are just `NULL`. This is the "padded with NULL" / "NULL-padded row" wording in the rest of these resources — same concept.
+
+```sql
+-- Setup. 3 users; user_3 has zero orders.
+-- users:        (user_id=1, name='Alice'), (2, 'Bob'),  (3, 'Carol')
+-- orders:       (order_id=10, user_id=1, amount=50), (11, 1, 30), (12, 2, 100)
+--               (note: NO order rows for user_id=3)
+
+-- (1) INNER JOIN — drops user_3 entirely (no matching order row).
+SELECT u.user_id, u.name, o.order_id, o.amount
+FROM iceberg.app.users u
+JOIN iceberg.app.orders o ON o.user_id = u.user_id;
+-- 3 rows: (1, Alice, 10, 50), (1, Alice, 11, 30), (2, Bob, 12, 100)
+-- user_3 is GONE — INNER drops it because there's no match.
+
+-- (2) LEFT JOIN — keeps user_3; right-side columns NULL-filled.
+SELECT u.user_id, u.name, o.order_id, o.amount
+FROM iceberg.app.users u
+LEFT JOIN iceberg.app.orders o ON o.user_id = u.user_id;
+-- 4 rows: (1, Alice, 10, 50), (1, Alice, 11, 30), (2, Bob, 12, 100),
+--         (3, Carol, NULL, NULL)            <- user_3 kept; order_id/amount = NULL.
+
+-- (3) FULL OUTER JOIN — keeps everything from both sides; NULL-fills the missing side.
+--     (Useful when neither side is "the parent" — e.g., reconciling two ledgers.)
+SELECT u.user_id, u.name, o.order_id, o.amount
+FROM iceberg.app.users u
+FULL OUTER JOIN iceberg.app.orders o ON o.user_id = u.user_id;
+-- Includes the LEFT-JOIN result PLUS any orphan orders whose user_id is not in users
+-- (would appear as (NULL, NULL, 99, 7) for an orphan order_id=99).
+```
+
+**THE COUNT(right_col) vs COUNT(*) PITFALL on a LEFT JOIN — the canonical silent-wrong-number trap.** After a `LEFT JOIN`, you frequently want a count "per user". Three plausible-looking phrasings give **three different answers**:
+
+```sql
+SELECT u.user_id,
+       COUNT(*)         AS cnt_star,       -- counts ROWS in the group (incl. the NULL-padded row)
+       COUNT(o.order_id) AS cnt_orderid,   -- counts NON-NULL order_id values
+       SUM(CASE WHEN o.order_id IS NOT NULL THEN 1 ELSE 0 END) AS cnt_explicit
+FROM iceberg.app.users u
+LEFT JOIN iceberg.app.orders o ON o.user_id = u.user_id
+GROUP BY u.user_id
+ORDER BY u.user_id;
+
+-- For user_3 (NO matching orders, ONE NULL-padded row in the result):
+--   cnt_star     = 1   <- WRONG for "how many orders did user_3 place" (it's the row count, not the order count).
+--   cnt_orderid  = 0   <- CORRECT — counts non-NULL order_ids; user_3's NULL-padded order_id is excluded.
+--   cnt_explicit = 0   <- CORRECT (same as cnt_orderid, written long-hand).
+```
+
+The rule: **`COUNT(*)` counts ROWS in the group (it never skips NULL — there are no NULL rows, only NULL columns); `COUNT(col)` skips NULL values of `col`.** After a LEFT JOIN, the unmatched parent row IS a row (NULL-padded), so `COUNT(*)` inflates by 1 per zero-match parent. Use `COUNT(<right_side_key>)` (or `SUM(CASE WHEN right.key IS NOT NULL THEN 1 ELSE 0 END)`) to count actual matches. The same trap hits `SUM(o.amount)` — it correctly skips the NULL row (SUM ignores NULLs), so `SUM` is "self-healing" here, but `AVG(o.amount)` divides by the non-NULL count, which is correct — confirm with explicit `SUM/COUNT` if in doubt.
+
+> **DO NOT WRITE.**
+> 1. **"`LEFT JOIN` and `INNER JOIN` return the same rows; LEFT is just slower"** — **FALSE.** LEFT keeps unmatched left-side rows (NULL-fills the right); INNER drops them. The row counts differ on any predicate that has unmatched left rows.
+> 2. **"After a LEFT JOIN, `COUNT(*)` per group gives the count of right-side matches"** — **FALSE.** `COUNT(*)` counts ROWS (incl. the NULL-padded row for a zero-match parent → returns 1, not 0). Use `COUNT(right.key)` or `SUM(CASE WHEN right.key IS NOT NULL THEN 1 ELSE 0 END)`.
+> 3. **"`COALESCE(COUNT(*), 0)` on a LEFT JOIN converts the no-match row to zero"** — **FALSE.** `COUNT(*)` never returns NULL — it returns the row count (1 for the NULL-padded row). The fix is `COUNT(right.key)`, not COALESCE.
+> 4. **"`WHERE right.col IS NULL` after a LEFT JOIN is the same as `WHERE right.col IS NOT NULL`'s complement"** — TECHNICALLY true (complement) but **load-bearing**: `WHERE right.col IS NULL` after a `LEFT JOIN` is the **anti-join** pattern (left rows with NO right match — see [resource 23 § correlated-subquery anti-join](23-sql-best-practices-olap.md)). Don't confuse it with `INNER JOIN` (which drops those rows entirely).
+> 5. **"Moving a LEFT JOIN's filter from `ON` to `WHERE` is equivalent"** — **FALSE** and a classic silent-wrong-number trap. A predicate on the right-side column in the `WHERE` clause filters AFTER the join — and NULL-padded rows (where `right.col IS NULL`) fail the predicate, effectively turning the LEFT JOIN into an INNER JOIN. Predicates on the right table that should NOT eliminate unmatched left rows belong in the `ON` clause: `LEFT JOIN orders o ON o.user_id = u.user_id AND o.status = 'paid'`. If you need a predicate AFTER the join, write it explicitly as `WHERE o.status = 'paid' OR o.order_id IS NULL`.
+
+**The 4-step decision rule for "which JOIN do I want":**
+1. **Identify the "parent" / "must-keep" side.** "All users, even those with no orders" → users is the must-keep side. "All orders, even those with no user (orphan)" → orders is the must-keep side.
+2. **Put the must-keep side on the LEFT** (convention; flip if needed). `FROM users LEFT JOIN orders ...` keeps all users.
+3. **Use `LEFT JOIN`** (or `FULL OUTER JOIN` if BOTH sides are must-keep).
+4. **For COUNT of matches per parent: use `COUNT(<right_side_key>)`, NOT `COUNT(*)`.** For SUM: `SUM(<right_amount>)` correctly skips NULL — you can leave it bare, but if downstream consumers need 0 instead of NULL for zero-match parents, wrap with `COALESCE(SUM(o.amount), 0)`.
+
+**Cross-references.** [§ 1a.2 — `ARRAY_AGG` over LEFT-JOIN unmatched groups returns `ARRAY[null]` not `[]`](#1a2-array_agg-over-left-join-unmatched-groups-returns-arraynull-not-null-and-not--use-filter-where-col-is-not-null) for the array_agg analog of this same NULL-padded-row trap (use `FILTER (WHERE col IS NOT NULL)`). [§ 4 — gap-filling time series with calendar `LEFT JOIN`](#4-time-series-rollups-with-gap-filling) for the calendar densification pattern (LEFT JOIN a calendar dim onto sparse activity to surface zero-activity days). [Resource 23 § 10 — anti-join (`LEFT JOIN ... WHERE right IS NULL`) for "rows with no match" + the NULL-safety vs `NOT IN` discussion](23-sql-best-practices-olap.md). [Resource 23 § 9 — JOIN ordering and `ANALYZE` for the CBO](23-sql-best-practices-olap.md) for how Trino decides build vs probe side and BROADCAST vs PARTITIONED.
+
+---
+
 ## 1b. LEADING CANONICAL — `WITH` / CTE semantics in Trino (readability tool; NOT a materialization barrier — referenced-N-times = inlined N times)
 
 > **READ THIS FIRST if your question contains any of these keywords:** `WITH clause Trino`, `CTE materialized`, `CTE computed once or many`, `common table expression performance`, `WITH RECURSIVE Trino`, `CTE vs temp table`, `is a CTE cached`, `does Trino cache CTE results`, `CTE optimization fence`, `WITH AS MATERIALIZED Trino`, `should I rewrite repeated subqueries as a CTE`. Verified at [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) on 2026-06-06.

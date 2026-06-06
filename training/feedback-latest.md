@@ -1,85 +1,155 @@
-# Iter559 Judge Feedback — STRONG PASS 5.00 — 2026-06-07
+# Iter 560 — Judge feedback (2026-06-07)
 
-## Headline
-**ORDER-BY OVERSTATEMENT FIXED.** Iter558 Q3 hard-failed at 1.875 because the responder claimed "Trino strips top-level ORDER BY without LIMIT, returns random order." Iter559 teacher added r23 §3.1H canonical with the verbatim Trino 467 docs quote. **Iter559 Q1 result: responder now correctly says "A top-level ORDER BY without LIMIT IS honored in Trino" and routes the variance to ties + nested-redundant-drop.** Win confirmed. All 4 answers scored a perfect 5.00 on every dimension; overall average **5.00 / 5**.
+**OVERALL: 4.59375 PASS** (margin +1.09375 above 3.5 floor; -0.40625 swing from iter559's 5.00 — Q3 cross-engine slip drags 1.25 below ceiling). Q1 + Q2 + Q4 all STRONG WINS (4.625–5.00). Q3 CRITICAL CROSS-ENGINE SLIP on greatest/least NULL behavior — responder OVERGENERALIZED "Postgres works the same way" which is VERIFIED FALSE against postgresql.org docs and CONTRADICTS the locked r27 §4.4D canonical.
 
-## Per-question scores
+---
 
-### Q1 — ORDER BY honored or stripped? Why varies? (PRIMARY WIN CHECK)
-**Scores: Accuracy 5, Completeness 5, Clarity 5, Actionability 5 = 5.00**
+## Q1 — ORDER BY inside CTE not sticking (3rd-angle ORDER-BY-determinism re-probe — nested/CTE framing) — 5.0/5.0/5.0/5.0 = **5.00 STRONG PASS**
 
-Responder said:
-- "A top-level ORDER BY without LIMIT IS honored in Trino."
-- Run-to-run variance comes from TIED `created_at` values → add unique tiebreaker `ORDER BY created_at DESC, event_id`.
-- A NESTED ORDER BY (in CTE/view/subquery) MAY be dropped as redundant — put the final ORDER BY in the topmost SELECT.
-- Cited r23 §3.1H.
+**WIN CHECK — iter559 r23 §3.1H VALIDATED ON 3RD-ANGLE RE-PROBE — DURABLE.**
 
-Verified against trino.io/docs/467/sql/select.html (verbatim): *"an ORDER BY clause only affects the order of rows for queries that immediately contain the clause... Trino follows that specification, and drops redundant usage of the clause to avoid negative performance impacts."* Also corroborated by trino.io/blog/2019/06/03/redundant-order-by.html. Responder's answer maps 1:1 to spec. The iter558 overstatement ("stripped/random") is fully corrected — top-level honored, only nested-redundant is dropped, and the real variance causes (ties + nested-drop) are correctly named. THE r23 §3.1H CANONICAL ADDED THIS ITERATION ROUTED ON FIRST RE-PROBE.
+Responder cited r23 §3.1H, answered: ORDER BY inside a CTE does NOT guarantee sorted output downstream; Trino treats nested ORDER BY as redundant and drops it; move ORDER BY to the OUTERMOST query; add a unique tiebreaker (e.g. `ORDER BY date, event_id`) for determinism among ties. Quoted Trino docs "drops redundant usage."
 
-### Q2 — Extract `event_meta.source` from ROW: bracket or dot?
-**Scores: Accuracy 5, Completeness 5, Clarity 5, Actionability 5 = 5.00**
+**Verification (trino.io/docs/467/sql/select.html + blog 2019-06-03 + release 423):**
+> "Note that, following the SQL specification, an ORDER BY clause only affects the order of rows for queries that immediately contain the clause. Trino follows that specification, and drops redundant usage of the clause to avoid negative performance impacts."
 
-Responder said:
-- Dot notation `event_meta.source` for named ROW fields.
-- NOT bracket `event_meta['source']` (bracket is for MAP/ARRAY).
-- For VARCHAR-JSON: `CAST(json_parse(event_meta) AS ROW(source VARCHAR, ...)).source`.
-- Cited r09.
+Release 423 explicitly improves redundant-ORDER-BY-elimination in views/WITH (CTE); `skip_redundant_sort` session property can restore old behavior. Responder's framing maps 1:1 to spec. The §3.1H LEADING CANONICAL has now PASSED on 3 distinct angles (iter559 top-level-without-LIMIT, iter560 nested-CTE, plus the implicit tiebreaker probe). DURABLE.
 
-Verified against trino.io/docs/current/language/types.html (ROW): *"Named row fields are accessed with the field reference operator (.) using dot notation, while named or unnamed row fields are accessed by position with the subscript operator ([]), where the position starts at 1 and must be a constant."* Responder correctly distinguishes named-by-dot vs positional-by-bracket, and the CAST(json_parse(...) AS ROW(...)).field form is the canonical JSON-string → typed-ROW path. The iter558 r09 inverse-direction CAST-JSON-to-typed canonical is paying continued dividends.
+| Dimension | Score | Note |
+|---|---|---|
+| Technical accuracy | 5.0 | Verbatim docs match; nested-dropped + top-level-honored + tiebreaker all correct |
+| Beginner clarity | 5.0 | CTE framing explained as "nested context"; outermost rule unambiguous |
+| Practical applicability | 5.0 | Concrete fix: move ORDER BY to outermost SELECT + add unique tiebreaker column |
+| Completeness | 5.0 | All three root causes covered (nested drop, tie non-determinism, tiebreaker) |
 
-### Q3 — Find ALL regex matches as a list
-**Scores: Accuracy 5, Completeness 5, Clarity 5, Actionability 5 = 5.00**
+---
 
-Responder said:
-- `regexp_extract_all(log_line, 'ERR_[0-9]{3}')` → ARRAY of all matches.
-- UNNEST for one row per match.
-- First-match-only = `regexp_extract` (single, not array).
-- `$g` (not `\g`) for replacement back-references in `regexp_replace`.
-- Cited r27.
+## Q2 — LEFT JOIN COUNT shows 1 instead of 0 for zero-order customers — 5.0/5.0/5.0/5.0 = **5.00 STRONG PASS**
 
-Verified against trino.io/docs/current/functions/regexp.html. `regexp_extract_all(string, pattern) → array(varchar)` finds ALL occurrences; `regexp_extract(string, pattern) → varchar` returns first match. The `$g` back-reference rule for `regexp_replace` is also documented there. UNNEST guidance is right. r27's contextual coverage of regex (Oracle migration zone) routed cleanly without needing a standalone canonical — confirming the iter559 FIX B NO-OP audit was correct judgment.
+**WIN CHECK — iter560 r07 §1a.5 OUTER-JOIN canonical ROUTED ON FIRST RE-PROBE.**
 
-### Q4 — Where do dbt model/column docs go?
-**Scores: Accuracy 5, Completeness 5, Clarity 5, Actionability 5 = 5.00**
+Responder answered: COUNT(*) counts the NULL-padded LEFT-JOIN row as 1 (it's a row in the result, just with NULLs from the right side); use COUNT(o.order_id) — COUNT of a right-side key SKIPS NULLs → returns 0 for unmatched customers. Cited r07 §1a.5 (the iter560 NEW LEADING CANONICAL at L243).
 
-Responder said:
-- Schema YAML `description:` is the primary place (NOT SQL comments — dbt ignores them).
-- `{% docs name %}...{% enddocs %}` blocks in `.md` files + `{{ doc('name') }}` reference for reuse.
-- `persist_docs: {relation: true, columns: true}` config emits `COMMENT ON TABLE/COLUMN` so docs land in engine metadata (visible via Trino `SHOW COLUMNS` / `DESCRIBE`).
-- Clarifies `dbt docs generate` = HTML site vs `persist_docs` = engine metadata (orthogonal concerns).
-- Cited r27.
+**Verification (trino.io/docs/467/sql/select.html — JOIN grammar + standard ANSI SQL semantics):**
+Trino's SELECT page lists `[INNER] JOIN / LEFT [OUTER] JOIN / RIGHT [OUTER] JOIN / FULL [OUTER] JOIN / CROSS JOIN` following standard ANSI semantics. COUNT(*) counts ALL rows including NULL-padded ones; COUNT(col) skips NULLs (SQL standard). Responder's fix matches the canonical's worked 3-user/3-order example perfectly. Routing-clean H3, layer-4-semantic-match (the §1a.5 enclosing header literally names the topic).
 
-Verified against docs.getdbt.com/docs/build/documentation, /reference/resource-properties/description, /reference/dbt-jinja-functions/doc, /reference/resource-configs/persist_docs. Every claim maps to official dbt docs verbatim. The two-channel split (HTML catalog vs engine COMMENT) is exactly right.
+| Dimension | Score | Note |
+|---|---|---|
+| Technical accuracy | 5.0 | COUNT(*) vs COUNT(col) on NULL-padded row both correct |
+| Beginner clarity | 5.0 | "NULL-padded row" explanation is the mental model the engineer needs |
+| Practical applicability | 5.0 | Drop-in fix: change COUNT(*) to COUNT(o.order_id) |
+| Completeness | 5.0 | Names the silent-wrong-number pitfall + the fix |
 
-## Overall
+---
 
-| Q | Acc | Comp | Clarity | Action | Avg |
+## Q3 — greatest(a,b)/least(a,b) return NULL when one arg is NULL — 2.5/4.0/4.5/4.0 = **3.75 PASS (THIN)**
+
+**CRITICAL VERIFIED CROSS-ENGINE SLIP — TRINO PART CORRECT, "all engines same" CLAIM IS FALSE AND CONTRADICTS r27 §4.4D LOCKED CANONICAL.**
+
+Responder's Trino part is CORRECT: greatest/least return NULL if ANY arg is NULL; use COALESCE(c1, sentinel) per arg or CASE to ignore. BUT the responder ALSO claimed (VERBATIM): "This is standard ANSI SQL behavior — Postgres, MySQL, BigQuery, and Snowflake all work the same way. It's not a Trino quirk."
+
+**This generalization is VERIFIED FALSE for PostgreSQL.**
+
+**PostgreSQL docs (postgresql.org/docs/current/functions-conditional.html §9.18.4 GREATEST and LEAST):**
+> "NULL values in the argument list are ignored. The result will be NULL only if all the expressions evaluate to NULL."
+
+So `GREATEST(1, NULL, 5)` returns **5** in Postgres, but returns **NULL** in Trino. Postgres IGNORES NULL inputs; Trino propagates them.
+
+**Trino docs (trino.io/docs/current/functions/comparison.html — verified against Trino 467 family):**
+> "Like most other functions in Trino, they return null if any argument is null. Note that in some other databases, such as PostgreSQL, they only return null if all arguments are null."
+
+Trino's own docs EXPLICITLY call out the disagreement with Postgres — that's exactly what the responder's "all engines same" claim contradicts.
+
+**r27 §4.4D LEADING CANONICAL L1259 (locked iter515):**
+> "Assuming `greatest()` / `least()` skip NULLs. Trino returns NULL if any arg is NULL (matches Oracle; differs from PostgreSQL). Always `COALESCE` each arg if you want to ignore NULLs."
+
+The responder's "Postgres works the same way" CONTRADICTS the locked canonical's verbatim "differs from PostgreSQL." Snowflake also has a separate `GREATEST_IGNORE_NULLS` function precisely because the IGNORE-NULL form is non-default — but the Postgres slip alone is sufficient to flag this.
+
+This is a CROSS-ENGINE SLIP — exactly the slip the meta-rule explicitly warns against. The Trino-side advice is fine; the over-generalized "all engines same" sentence is wrong AND undoes a locked canonical that exists specifically to teach engineers the Postgres/Trino split (load-bearing for Oracle PL/SQL → Trino migrations that pass through Postgres-shaped assumptions).
+
+| Dimension | Score | Note |
+|---|---|---|
+| Technical accuracy | 2.5 | Trino part correct; "Postgres works the same way" VERIFIED FALSE; contradicts r27 §4.4D |
+| Beginner clarity | 4.0 | Clear explanation of Trino behavior + COALESCE/CASE workaround |
+| Practical applicability | 4.5 | COALESCE-per-arg fix is the right move; engineer can act |
+| Completeness | 4.0 | Trino side complete; cross-engine generalization wrongly closes the case as "non-issue" |
+
+---
+
+## Q4 — TABLESAMPLE BERNOULLI vs SYSTEM on huge Iceberg table — 5.0/4.5/4.5/4.5 = **4.625 STRONG PASS**
+
+Responder answered: TABLESAMPLE BERNOULLI(pct) = per-row independent random probability, reads all files (drops rows during filtering); TABLESAMPLE SYSTEM(pct) = split/block-level skip, reduces file I/O but biased; neither has a tunable error bound like approx_distinct's stderr parameter. Cited r23 §7.
+
+**Verification (trino.io/docs/current/sql/select.html — TABLESAMPLE):**
+> "When a table is sampled using the Bernoulli method, all physical blocks of the table are scanned and certain rows are skipped (based on a comparison between the sample percentage and a random value calculated at runtime). The probability of a row being included in the result is independent from any other row."
+
+> "This sampling method [SYSTEM] divides the table into logical segments of data and samples the table at this granularity. This sampling method either selects all the rows from a particular segment of data or skips it (based on a comparison between the sample percentage and a random value calculated at runtime)."
+
+Responder's description matches verbatim. The "no tunable error bound" caveat is correct — TABLESAMPLE is an approximate sampler without statistical-confidence parameters (unlike `approx_distinct(col, e)` where `e` is the stderr argument). Practical scale-up step (`SELECT count(*)*100/5 FROM t TABLESAMPLE BERNOULLI(5)`) implied but could be more explicit.
+
+| Dimension | Score | Note |
+|---|---|---|
+| Technical accuracy | 5.0 | BERNOULLI vs SYSTEM semantics verbatim-match Trino docs |
+| Beginner clarity | 4.5 | "Per-row vs block-level" mental model clear |
+| Practical applicability | 4.5 | Could spell out the scale-up arithmetic (count × 100/pct) more concretely |
+| Completeness | 4.5 | No-tunable-error-bound caveat included; could note REPEATABLE seed for stability |
+
+---
+
+## Overall score
+
+| Q | Acc | Clarity | Practical | Complete | Avg |
 |---|---|---|---|---|---|
-| Q1 ORDER BY (PRIMARY WIN CHECK) | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 ROW field access | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 regexp_extract_all | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 dbt docs placement | 5 | 5 | 5 | 5 | 5.00 |
+| Q1 ORDER BY in CTE (3rd-angle) | 5.0 | 5.0 | 5.0 | 5.0 | 5.00 |
+| Q2 LEFT JOIN COUNT (§1a.5) | 5.0 | 5.0 | 5.0 | 5.0 | 5.00 |
+| Q3 greatest/least NULL (cross-engine slip) | 2.5 | 4.0 | 4.5 | 4.0 | 3.75 |
+| Q4 TABLESAMPLE BERNOULLI vs SYSTEM | 5.0 | 4.5 | 4.5 | 4.5 | 4.625 |
 
-**Iter559 average: 5.00 / 5 → STRONG PASS.** No fabricated absences, no overstatements, no identifier slips, no header-routing misses detected. Responder correctly cited r23 §3.1H (the new canonical), r09 (ROW), r27 (regex + dbt docs).
+Sum of per-question averages = 5.00 + 5.00 + 3.75 + 4.625 = 18.375
+Overall avg = 18.375 / 4 = **4.59375 PASS** (margin +1.09375 above 3.5 floor; -0.40625 swing from iter559's 5.00).
 
-## What worked
+**PASS by overall-average rule.**
 
-1. **r23 §3.1H targeted canonical landed cleanly on FIRST re-probe.** The keyword anchors ("Trino ORDER BY without LIMIT", "ORDER BY ignored Trino", "why does my row order vary between runs", "ORDER BY tiebreaker") routed Haiku straight to the canonical. Responder picked up the verbatim-quote-anchored fact ("top-level honored, nested-redundant dropped"), the three-shape worked contrast (top-level / nested / tied), and the tiebreaker fix. The 4-row DO-NOT-WRITE prevented the iter558 overstatement from re-emerging.
-2. **FIX B NO-OP audit proved correct.** The 3 skipped candidates (COALESCE family, ROW dot-access standalone, regexp_extract_all distinction) all proved to have sufficient contextual coverage — confirmed by Q2 (dot notation answered cleanly) and Q3 (regexp_extract_all answered cleanly). Skipping was the right call; manufacturing canonicals would have churned without lift.
-3. **Citations were specific.** Responder named r23 §3.1H, r09, r27 — not vague hand-waves. This is the find-by-keyword pattern working as designed.
+---
 
-## What to do next (iter560)
+## Primary findings
 
-All 4 strong → polish-mode. Continue proactive audits, not new canonicals.
+**WINS:**
+1. **Q1 — iter559 r23 §3.1H LEADING CANONICAL validated on 3rd-angle re-probe (nested/CTE framing).** Top-level-honored + nested-redundant-dropped + tiebreaker — all 4 dimensions at 5.0. Canonical is now DURABLE across 3 distinct probe angles (iter559 top-level-without-LIMIT, iter560 nested-CTE). The §3.1H text was load-bearing on this question; "drops redundant usage" quote and "outermost" rule routed cleanly.
+2. **Q2 — iter560 r07 §1a.5 OUTER-JOIN LEADING CANONICAL routed on first re-probe.** The COUNT(*) vs COUNT(right_key) pitfall surfaced verbatim from the canonical's 3-phrasing/3-result worked example. The H3 enclosing header literally names the topic; layer-4 semantic-match validated again.
+3. **Q4 — TABLESAMPLE BERNOULLI vs SYSTEM canonical durable.** Verbatim-match Trino 467 docs; no fabricated tunable-error-bound claim.
 
-**Recommended iter560 priorities (in order):**
-1. **Re-probe ORDER-BY-determinism from a 3rd angle** to confirm the fix is durable (not single-question luck). Suggested phrasings:
-   - "I put ORDER BY in a CTE and the outer query came back unordered — bug?"
-   - "Does adding LIMIT change whether ORDER BY runs?"
-   - "My nightly job sorts events by ts but the export file order changes — why?"
-   These hit the nested-dropped and LIMIT-doesn't-make-it-run angles specifically.
-2. **Proactive audit pass on r23 §3.1A–§3.1H cluster.** With §3.1H newly slotted, walk the whole 3.1x cluster to confirm no contradictions, no stale "ORDER BY needs LIMIT to execute" myths left in adjacent sections, no broken cross-refs from the new §3.1H back-link targets (r07 §5, r22 §3.3A/§13.5, r27 NULLS-default).
-3. **Federation row stays at 4.49944/310 (locked).** Do not probe federation in iter560 unless the lock is explicitly released. The currently strong-passing topics (CBO, partition-design, dbt-snapshots, model-contracts, source-freshness) are all candidates for low-touch re-probes to confirm stability under continued questioning.
-4. **DO NOT churn for the sake of churn.** This iteration's NO-OP FIX B was correct judgment. Continue the discipline of "only add a canonical when there's a verified routing-clean gap, not when the topic feels under-papered."
+**FAILURES / SLIPS:**
+1. **Q3 — CROSS-ENGINE SLIP on greatest/least NULL behavior — VERIFIED FALSE for Postgres.**
+   - Responder said: "Postgres, MySQL, BigQuery, Snowflake all work the same way. It's not a Trino quirk."
+   - Postgres ACTUALLY ignores NULL inputs (`GREATEST(1, NULL, 5)` = 5).
+   - Trino RETURNS NULL on any NULL arg.
+   - Trino's OWN docs explicitly call out the Postgres disagreement.
+   - This contradicts r27 §4.4D L1259 LEADING CANONICAL (locked iter515): "Trino returns NULL if any arg is NULL (matches Oracle; differs from PostgreSQL)."
+   - Snowflake also has a separate `GREATEST_IGNORE_NULLS` variant — the existence of that separate function indicates Snowflake's base GREATEST is NOT the IGNORE-NULL form.
+   - The Trino-side advice is correct; the OVER-GENERALIZATION undoes a locked canonical's whole point.
 
-No new gaps identified. No slips to fix. Iter559 is a clean strong-pass win on the iter558 hard-fail re-probe.
+---
+
+## iter561 fix targets
+
+**Fix 1 (HIGH — Q3 CROSS-ENGINE SLIP correction):** r27 §4.4D L1259 ALREADY says "differs from PostgreSQL." The slip is a FINDABILITY problem — the responder did not consult r27 §4.4D because this was framed as a Trino-only question (no Oracle migration framing). Two options:
+- (a) Add a CROSS-REF / mirror canonical in r23 (SQL best practices) so the question routes to the Postgres-vs-Trino split even when phrased without Oracle migration framing. Keyword anchors: "greatest least all engines," "greatest null behavior databases," "is this standard SQL," "cross-engine greatest least," "all databases same greatest least."
+- (b) Add to the r27 §4.4D keyword anchors block the phrases "all databases same? NO — Postgres ignores NULLs" + "is this ANSI standard? NO — Postgres differs" so the canonical surfaces on cross-engine-comparison phrasings.
+- **Recommend (a)** — mirror the cross-engine disagreement to r23 (general SQL best practices) since the question phrasing was Trino-only without Oracle context. r27 §4.4D stays the deep canonical; r23 mirror adds a routing-clean H3 for "is this standard? does every engine do this?" style probes. Include the verbatim Postgres docs quote and the Trino docs quote naming Postgres as the contrast. 5-row DO-NOT-WRITE: (1) "all engines same" FALSE — Postgres ignores NULLs, (2) "ANSI standard greatest" FALSE — SQL standard doesn't mandate either behavior, (3) "Snowflake matches Trino without exception" PARTIAL — base GREATEST returns NULL on any null but GREATEST_IGNORE_NULLS exists; (4) MySQL matches Trino (any-null → NULL); (5) BigQuery matches Trino (any-null → NULL). Cross-ref to r27 §4.4D.
+
+**Fix 2 (LOW — Q4 polish):** Add explicit scale-up arithmetic line to r23 §7 TABLESAMPLE canonical: `SELECT count(*) * 100.0 / 5 AS est_total FROM t TABLESAMPLE BERNOULLI(5)`. And a one-line note on `TABLESAMPLE BERNOULLI(pct) REPEATABLE(seed)` for stable repeated sampling.
+
+**Fix 3 (DURABILITY — Q1/Q2 NO-OP):** §3.1H + §1a.5 both routed cleanly; do NOT churn. Continue iter559 NO-OP-when-no-routing-clean-gap discipline.
+
+**Fix 4 (FEDERATION LOCK):** DO NOT touch federation row (4.49944/310). DO NOT edit resources/22 §13.x. Federation NOT probed iter560.
+
+---
+
+## Meta-rule observation
+
+Directive's "verify YOUR OWN corrections + PIN TRINO 467 + watch for OVERSTATEMENTS + FABRICATED ABSENCES + CROSS-ENGINE SLIPS" caveat was DECISIVE on Q3. Without WebSearching postgresql.org/docs/current/functions-conditional.html VERBATIM, the judge could have rubber-stamped the responder's confident "all engines same" framing (responder framing was assertive, not hedged). The Postgres docs quote "NULL values in the argument list are ignored. The result will be NULL only if all the expressions evaluate to NULL" is the smoking gun. Trino's own comparison.html docs page directly cites Postgres as the contrasting example, confirming the canonical's framing. 23rd consecutive iter (iter537-560) where the meta-rule prevented false-positive judgment.
+
+NOTES: did NOT bump training/state.json (teacher already set iteration=560). Federation rubric row 4.49944/310 UNCHANGED. resources/22 §13.x UNTOUCHED.
+
+**OVERALL: 4.59375 PASS — Q1 (3rd-angle ORDER-BY-determinism nested/CTE) + Q2 (§1a.5 OUTER-JOIN COUNT pitfall) + Q4 (TABLESAMPLE BERNOULLI vs SYSTEM) all STRONG WINS (4.625–5.00); Q3 3.75 thin pass on CROSS-ENGINE SLIP (Trino part correct but "all engines work the same" generalization VERIFIED FALSE against postgresql.org docs and contradicts locked r27 §4.4D); iter561 fix = add cross-engine mirror canonical to r23 for greatest/least so cross-engine probes route to the Postgres-vs-Trino split without Oracle migration framing; continue NO-OP discipline on §3.1H + §1a.5.**
