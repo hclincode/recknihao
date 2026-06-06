@@ -753,8 +753,34 @@ CALL iceberg.system.rewrite_data_files(
 | Any `spark.sql.iceberg.*` SESSION CONFIG for target file size | **The `spark.sql.iceberg.*` namespace IS real for other keys** (`spark.sql.iceberg.handle-timestamp-without-timezone`, `spark.sql.iceberg.vectorization.enabled`, `spark.sql.iceberg.check-nullability`, `spark.wap.id`, `spark.wap.branch`) **but NOT for target file size.** File size setters are the THREE above only. |
 | `df.writeTo("iceberg.x.y").option("write.target-file-size-bytes", "268435456").append()` | **Wrong namespace — silently ignored.** The DataFrameWriter OPTION drops the `write.` prefix (bare `target-file-size-bytes`); the `write.` prefix belongs ONLY to the TABLE-PROPERTY namespace (`TBLPROPERTIES`, `tableProperty(...)`). Same setting, different key in each namespace. Per [iceberg.apache.org/docs/latest/spark-configuration/](https://iceberg.apache.org/docs/latest/spark-configuration/) "Write options". |
 | `ALTER TABLE ... EXECUTE optimize(target_file_size_bytes => '256MB')` on Trino | **Wrong parameter name for Trino.** Trino's `EXECUTE optimize` takes `file_size_threshold` (size string, e.g. `'256MB'`) — NOT `target_file_size_bytes`. `target-file-size-bytes` is the Spark `rewrite_data_files` options-map key; Trino's optimize procedure has a single parameter and it is `file_size_threshold`. |
+| `CREATE TABLE iceberg.x.y (...) WITH (write_target_file_size_bytes = 268435456)` on Trino | **FABRICATED — flat underscore property does NOT exist in Trino 467's Iceberg `WITH` allow-list.** Trino's `WITH (...)` clause accepts only the connector's registered identifiers (`format`, `compression_codec`, `partitioning`, `sorted_by`, `format_version`, `extra_properties`, etc. — see r26 §4). To set the native dotted `write.target-file-size-bytes` from Trino, route it through the `extra_properties` MAP (Pattern A below). Writer-side honoring is the open enhancement [trinodb/trino #28250](https://github.com/trinodb/trino/issues/28250); even when the property IS persisted via `extra_properties`, Trino's own writer does NOT yet read it — Spark writers do. |
+| `SET SESSION iceberg.write_target_file_size_bytes = '256MB'` on Trino | **Same fabrication, session form.** No such session property. The real Trino session form is `iceberg.target_max_file_size` (underscore form of catalog `iceberg.target-max-file-size`). |
 
-**Cross-references.** Full 3-tier Spark write-side detail (with the option-key-prefix-confusion trap and the Trino 467 writer-side gap, [trinodb/trino #28250](https://github.com/trinodb/trino/issues/28250)) lives in [resource 13 §"Spark Iceberg write file size — 3-tier canonical"](13-postgres-to-iceberg-ingestion.md). For the Trino-vs-Spark compaction-procedure split (`EXECUTE optimize` vs `CALL rewrite_data_files`), see the §"Side-by-side syntax reference" table below.
+**VERBATIM per-engine DDL — copy these forms; do NOT invent flat-underscore variants.**
+
+```sql
+-- Trino — CREATE TABLE with native dotted Iceberg property via extra_properties MAP:
+CREATE TABLE iceberg.analytics.events (event_id BIGINT, occurred_at TIMESTAMP(6))
+WITH (extra_properties = map(ARRAY['write.target-file-size-bytes'], ARRAY['268435456']));
+
+-- Trino — ALTER existing table (Trino 465+ extra_properties is ALTER-settable, PR #24031):
+ALTER TABLE iceberg.analytics.events
+  SET PROPERTIES extra_properties = map(ARRAY['write.target-file-size-bytes'], ARRAY['268435456']);
+
+-- Spark — native TBLPROPERTIES (the canonical Spark-side setter; Spark writer DOES honor it):
+ALTER TABLE iceberg.analytics.events SET TBLPROPERTIES ('write.target-file-size-bytes'='268435456');
+
+-- Trino — cluster default (catalog config) and per-session form:
+-- in etc/catalog/iceberg.properties:  iceberg.target-max-file-size=256MB
+SET SESSION iceberg.target_max_file_size = '256MB';
+
+-- Spark — DataFrameWriter per-write option (NO write. prefix in the OPTION namespace):
+-- df.writeTo("iceberg.analytics.events").option("target-file-size-bytes", "268435456").append()
+```
+
+> **Why the `extra_properties` MAP form.** Trino's `WITH (...)` and `SET PROPERTIES` only accept identifiers from the Iceberg connector's fixed allow-list ([trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html)); native dotted Iceberg properties like `write.target-file-size-bytes` are not on that allow-list, so the `extra_properties` MAP is the **only** Trino-side path to persist them into Iceberg metadata. The escape-hatch canonical with the full allow-list and the Spark `SET TBLPROPERTIES` alternative lives in **[resource 26 §4 "SET PROPERTIES allow-list + `extra_properties` escape hatch"](26-iceberg-concurrent-write-conflicts.md)** — don't duplicate; cross-ref.
+
+**Cross-references.** Full 3-tier Spark write-side detail (with the option-key-prefix-confusion trap and the Trino 467 writer-side gap, [trinodb/trino #28250](https://github.com/trinodb/trino/issues/28250)) lives in [resource 13 §"Spark Iceberg write file size — 3-tier canonical"](13-postgres-to-iceberg-ingestion.md). For the Trino `SET PROPERTIES` allow-list + the `extra_properties` MAP escape hatch (how to set ANY native dotted Iceberg property from Trino), see [resource 26 §4](26-iceberg-concurrent-write-conflicts.md). For the Trino-vs-Spark compaction-procedure split (`EXECUTE optimize` vs `CALL rewrite_data_files`), see the §"Side-by-side syntax reference" table below.
 
 **When to choose Spark CALL over Trino ALTER TABLE EXECUTE:**
 

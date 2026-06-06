@@ -1351,6 +1351,60 @@ FROM {{ ref('stg_orders') }}
 - Resource 23 §"Trino 467 SQL-dialect anti-patterns" — `QUALIFY` is NOT in Trino 467; use the outer-`WHERE rn <= N` pattern for top-N-per-group.
 - Resource 28 §"Pagination patterns" — keyset pagination on big Iceberg tables, plus the row_number-vs-LIMIT distinction in dbt incremental models.
 
+### 4.5C LEADING CANONICAL — Oracle `ROWID`-based dedup → Trino (no ROWID; READ-dedup vs IN-PLACE-dedup are different patterns)
+
+> **Keyword anchors:** Trino ROWID dedup, ROWID Trino, $row_id Trino, deduplicate rows no unique key, keep first row per group, delete duplicate rows Iceberg, Oracle ROWID delete migration, row_number rn = 1, QUALIFY dedup Trino. **The fix is in two distinct shapes — pick by whether you're reading or rewriting the table.**
+
+**The one fact.** Trino has **NO `ROWID` pseudocolumn** and no user-visible stable physical row id — verified at [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) (no ROWID in the column-reference grammar) and Trino doesn't expose Iceberg's internal `_pos`/`_file` either. So the Oracle `DELETE FROM t WHERE ROWID NOT IN (SELECT MIN(ROWID) FROM t GROUP BY k)` dedup idiom has **no direct rewrite** on Trino 467.
+
+**(A) READ-dedup (most common — "keep first per group" inside a SELECT or dbt model):** subquery form, NOT `QUALIFY` (Trino 467 has no `QUALIFY` — see §7A.2 and resource 23):
+
+```sql
+SELECT * FROM (
+  SELECT *, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY created_at) AS rn
+  FROM   t
+) WHERE rn = 1;     -- =1 for dedup; <=N for top-N-per-group
+```
+
+**(B) IN-PLACE dedup of an existing Iceberg table — REBUILD pattern (no clean rowid-free DELETE).** Without ROWID, you cannot write a single DELETE that keeps one row per group. The two canonical patterns are CTAS + swap, or MERGE-with-DELETE:
+
+```sql
+-- Pattern B1 — CTAS + atomic rename (preferred for full-table dedup):
+CREATE TABLE iceberg.analytics.t_dedup AS
+SELECT customer_id, created_at, amount  -- EXPLICIT column list — Iceberg has no SELECT * rename safety
+FROM (
+  SELECT customer_id, created_at, amount,
+         ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY created_at) AS rn
+  FROM   iceberg.analytics.t
+) WHERE rn = 1;
+DROP TABLE iceberg.analytics.t;
+ALTER TABLE iceberg.analytics.t_dedup RENAME TO iceberg.analytics.t;
+-- (Or: INSERT OVERWRITE the original from the dedupped projection; preserves table identity / grants.)
+
+-- Pattern B2 — MERGE whose MATCHED branch DELETEs the dupes (when partial dedup, not full rebuild):
+MERGE INTO iceberg.analytics.t AS tgt
+USING (
+  SELECT customer_id, created_at FROM (
+    SELECT customer_id, created_at,
+           ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY created_at) AS rn
+    FROM iceberg.analytics.t
+  ) WHERE rn > 1                                -- the rows to delete
+) AS dup ON tgt.customer_id = dup.customer_id AND tgt.created_at = dup.created_at
+WHEN MATCHED THEN DELETE;
+```
+
+**DO NOT WRITE:**
+
+| Wrong shape | Why it's wrong |
+|---|---|
+| `DELETE FROM t WHERE ROWID NOT IN (SELECT MIN(ROWID) FROM t GROUP BY k)` on Trino | **No `ROWID` pseudocolumn on Trino 467.** Parse error: `Column 'rowid' cannot be resolved`. This is the Oracle dedup idiom — there is no in-place rewrite; use Pattern B1 (CTAS + rename) or B2 (MERGE + DELETE) above. |
+| `DELETE FROM t WHERE row_id NOT IN (...)` / `$row_id` / `_pos` | **None exists as a user-visible column in Trino 467's Iceberg connector.** Iceberg's internal position/file refs are connector-internal and not exposed in user SELECTs. |
+| `DELETE FROM t WHERE ROW_NUMBER() OVER (PARTITION BY k ORDER BY ts) > 1` | **Window functions are NOT allowed in `WHERE` in ANY SQL dialect, including Trino.** Wrap in a subquery (Pattern A) or push to a MERGE-USING subquery (Pattern B2). |
+| `SELECT ... FROM t QUALIFY ROW_NUMBER() OVER (PARTITION BY k ORDER BY ts) = 1` | **`QUALIFY` is NOT supported in Trino 467** — Snowflake/BigQuery/Databricks/Teradata only. Parse error. Use the subquery form in Pattern A. See §7A.2 QUALIFY landmine + resource 23 §dialect anti-patterns. |
+| `DELETE FROM t a WHERE EXISTS (SELECT 1 FROM t b WHERE b.k = a.k AND b.created_at < a.created_at)` "to keep the earliest per group" | Works conceptually but is a **correlated NOT-EXISTS pattern that Trino plans poorly** (LeftJoin + Aggregation, no SemiJoin short-circuit — see resource 23 §10 and trinodb/trino #21859). On a wide table with many duplicates the plan explodes. Prefer the explicit `ROW_NUMBER` rewrite (Pattern A/B1/B2) — it's both faster and clearer. |
+
+**Cross-references.** Pattern A's `ROW_NUMBER` subquery form is the same canonical "top-N-per-group" template from §7A.2 (Oracle analytic → Trino) and resource 23 §"`QUALIFY` rewrite". Pattern B1's CTAS-then-RENAME swap relies on Iceberg's atomic `ALTER TABLE ... RENAME TO` (see resource 17 §"Iceberg RENAME / DROP / table-identity" coverage). For Pattern B2 MERGE syntax constraints (no `UPDATE SET *`, explicit column lists required), see §4.6B Trino MERGE star-shorthand guardrail.
+
 ### 4.6 DML and procedural constructs
 
 | Oracle | Trino + dbt | Notes |

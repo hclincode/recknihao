@@ -1,130 +1,127 @@
-# Iter 518 Judge Feedback — 2026-06-06 (EXTENDED PHASE)
+# Iter 519 Judge Feedback — 2026-06-06 (EXTENDED PHASE)
 
-## Overall: 4.5469 PASS — but with a NEW fabrication on Q2
+## Overall: 4.6875 STRONG PASS — BOTH iter518 fixes LANDED clean; one Q3 completeness gap surfaced
 
-**Score**: (Q1 4.9375 + Q2 3.8125 + Q3 4.625 + Q4 4.8125)/4 = **18.1875 / 4 = 4.5469 PASS** (+1.0469 above 3.5 floor; weakest margin in recent 9-iter window, dragged by Q2 new-fab nit).
-
-**Iter517 fix landing status**:
-- **FIX A (r07 §1a.3 array `contains` canonical) — FULLY LANDED on Q1.** Responder uses `contains(roles, 'admin')` boolean, cardinality, array_distinct — the iter517 Q2 "Trino has no contains" fabrication is GONE.
-- **FIX B (r17 leading canonical — THREE setters for Iceberg target file size) — PARTIALLY LANDED on Q2.** The `spark.sql.iceberg.write.target-file-size-bytes` session-config fab from iter517 Q3 is GONE (responder explicitly debunks it). BUT a NEW related fabrication appeared: `write_target_file_size_bytes` as a Trino DDL `WITH (...)` table-property name — see Section B below.
+**Score**: (Q1 4.8125 + Q2 4.6875 + Q3 4.375 + Q4 4.875) / 4 = **18.75 / 4 = 4.6875 STRONG PASS** (+1.1875 above 3.5 floor; back to a healthy band after iter518's tighter +1.0469). **117th consecutive PASS in extended phase.** **NO NEW FABRICATIONS** this iter. Federation NOT probed — row stays **4.49944/310** unchanged (per iter472-519 directive).
 
 ---
 
-## Per-question scores
+## Iter518 fix landing — BOTH LANDED CLEAN
 
-### Q1 — array roles membership / count / dedup — **4.9375 STRONG PASS**
+### FIX A (r17 strengthened LEADING CANONICAL) — Iceberg target-file-size flat-WITH `write_target_file_size_bytes` Q1 fab → **LANDED** (31st consecutive leading-canonical bulletproofing instance)
+- Iter518 Q2 fab: responder invented `CREATE TABLE ... WITH (write_target_file_size_bytes = 268435456)` — a Trino DDL property that does NOT exist.
+- Iter519 r17 strengthen-in-place at lines 727-771 added: (1) explicit DO-NOT-WRITE row banning the flat-underscore form, (2) explicit DO-NOT-WRITE row banning the `SET SESSION iceberg.write_target_file_size_bytes` session fab twin, (3) verbatim per-engine DDL block showing `extra_properties = map(ARRAY['write.target-file-size-bytes'], ARRAY['268435456'])` as the Trino route, (4) explicit Spark TBLPROPERTIES alternative, (5) Trino catalog `iceberg.target-max-file-size` + session `iceberg.target_max_file_size` underscore form.
+- Iter519 Q1 response: **DID NOT** reproduce the flat-WITH fab. Correctly states "Trino 467 does NOT expose write.target-file-size-bytes as a WITH/SET PROPERTIES table property"; cites #28250; routes to `SET SESSION iceberg.target_max_file_size = 134217728` as the Trino knob; correctly frames "two separate knobs — session for Trino, table property for Spark"; advises setting both if both engines write. **The Q2 iter518 fab DID NOT REAPPEAR.**
 
-| Dim | Score | Reason |
+### FIX B (r27 §4.5C NEW LEADING CANONICAL — ROWID dedup) — Iter518 Q3 messy mid-query alias mismatch + missing IN-PLACE forms → **LANDED**
+- Iter518 Q3: responder gave a non-runnable inner query (`FIRST_VALUE(row_id) AS min_id` then outer `NOT IN` matched on undefined `id_within_group`); also did not address the IN-PLACE DELETE form the user asked about.
+- Iter519 r27 §4.5C inserted at line 1354+ with: keyword anchors (9 phrases); "the one fact" Trino-has-no-ROWID; Pattern A READ-dedup `ROW_NUMBER()=1` subquery; Pattern B1 CTAS+DROP+RENAME; Pattern B2 MERGE+DELETE-on-rn>1; DO-NOT-WRITE table banning ROWID literal, `$row_id`, window-in-WHERE, QUALIFY, slow correlated EXISTS.
+- Iter519 Q2 response: correctly states "Trino has NO ROWID (no _pos/_file either)"; READ-dedup uses ROW_NUMBER subquery (NO QUALIFY); REBUILD pattern B1 CTAS+DROP+RENAME; in-place pattern B2 MERGE matched-then-DELETE. **All three canonical patterns surfaced. No fake ROWID. No QUALIFY. No window-in-WHERE.**
+
+---
+
+## Per-question scoring
+
+### Q1 — Iceberg target-file-size FROM Trino (no Spark) — 4.8125 STRONG PASS
+
+| Dim | Score | Reasoning |
 |---|---|---|
-| Accuracy | 5.0 | `contains(roles, 'admin')` boolean, `cardinality(roles)`, `array_distinct(roles)`, `cardinality(array_distinct(roles))` ALL verified verbatim at trino.io/docs/current/functions/array.html. No UNNEST-for-membership, no fabrication. |
-| Clarity | 5.0 | Clean boolean-vs-UNNEST routing; explicit "no UNNEST needed for membership". |
-| Actionability | 5.0 | Engineer can paste `WHERE contains(roles, 'admin')` directly. |
-| Completeness | 4.75 | -0.25 for no callout that `contains` does NOT work on MAPs (for MAP key existence use `element_at(map, key) IS NOT NULL`) — minor cross-ref gap. |
+| Accuracy | 4.75 | Correctly says Trino 467 does NOT expose `write.target-file-size-bytes` as a WITH/SET PROPERTIES allow-listed property; cites #28250; the Trino knob is the session `iceberg.target_max_file_size` / catalog `iceberg.target-max-file-size`; correctly frames Spark vs Trino as two knobs. **Minor accuracy gap (-0.25)**: omits that Trino CAN persist the dotted name via `extra_properties = map(...)` (Trino just doesn't honor it for Trino writes). Verified at [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) Configuration table: "`iceberg.target-max-file-size` — Target maximum size of written files; the actual size may be larger. — `1GB`". Also verified at [trinodb/trino #28250](https://github.com/trinodb/trino/issues/28250) — proposed-enhancement, pending. Session-property form `iceberg.target_max_file_size` confirmed as universal Trino hyphens-to-underscores convention. |
+| Clarity | 5.0 | Clean Spark-vs-Trino split; "two knobs" framing; explicit byte values. |
+| Applicability | 4.75 | Engineer ships a working SET SESSION call. Loses 0.25 for not surfacing the `extra_properties = map(...)` persistence path for shops who need the property recorded on the table itself for Spark downstream. |
+| Completeness | 4.75 | Covers both engines, both forms, the gap; loses 0.25 for omitting `extra_properties` route. |
 
-**Verification (doc quote)**: trino.io/docs/current/functions/array.html — `contains(x, element) → boolean`: "Returns true if the array `x` contains the `element`." `cardinality(x) → bigint`: "Returns the cardinality (size) of the array." `array_distinct(x) → array`: "Remove duplicate values."
+**Iter518 r17 flat-WITH fab DID NOT REAPPEAR** — 31st consecutive leading-canonical bulletproofing landing instance.
 
-**ITER518 r07 §1a.3 ARRAY CANONICAL LANDED.** The iter517 responder fab "Trino has no single CONTAINS function" is fully reconciled. 21st leading-canonical-bulletproofing instance to land cleanly on first re-probe.
+### Q2 — Oracle ROWID dedup DELETE → Trino — 4.6875 STRONG PASS
 
----
-
-### Q2 — Iceberg target file size table property / session config — **3.8125 BARELY PASS** (NEW FAB)
-
-| Dim | Score | Reason |
+| Dim | Score | Reasoning |
 |---|---|---|
-| Accuracy | 3.0 | **Iter517 session-config fab GONE** (good — `spark.sql.iceberg.target-file-size` correctly debunked as "not the canonical approach"). **BUT NEW FAB**: the DDL `CREATE TABLE ... WITH (write_target_file_size_bytes = 268435456)` invents an underscore-flattened Trino table property that does NOT exist on Trino 467. The Trino Iceberg connector's documented `WITH (...)` table-properties list does NOT include `write_target_file_size_bytes` — verified by WebFetch of trino.io/docs/current/connector/iceberg.html. Per Trino GitHub issue #28250 (opened 2026-02-11, PR #28057), this is a **"Proposed Enhancement"** still pending merge: "convert the session properties to Iceberg's native table properties for write configuration" — NOT available on Trino 467. -2.0 for inventing a non-existent flat WITH-clause property. |
-| Clarity | 4.5 | Clean prose; correctly explains "table property, not session config" routing. -0.5 because the user is given a property name they will get a parse error on. |
-| Actionability | 3.5 | The compaction half (Spark `rewrite_data_files` + Trino `EXECUTE optimize(file_size_threshold => '256MB')`) is correct and usable. But the headline DDL `WITH (write_target_file_size_bytes = ...)` will fail at parse/validation time — engineer cannot paste it. -1.5 for the broken-on-paste DDL. |
-| Completeness | 4.25 | Discusses compaction + session-vs-table-property framing well. -0.75 for not listing the three ACTUAL valid setters on Trino 467: (1) `extra_properties = map(ARRAY['write.target-file-size-bytes'], ARRAY['268435456'])` at CREATE TABLE — the ONLY way to set the native Iceberg property from Trino DDL today; (2) Spark `ALTER TABLE … SET TBLPROPERTIES('write.target-file-size-bytes' = '268435456')`; (3) cluster-wide Trino catalog config `iceberg.target-max-file-size` in `etc/catalog/iceberg.properties` (default 1 GB) + session-form `SET SESSION iceberg.target_max_file_size = '256MB'`. |
+| Accuracy | 4.75 | "Trino has NO ROWID" correct (verified at [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) — SELECT grammar: "WITH ... SELECT ... FROM ... WHERE ... GROUP BY ... HAVING ... WINDOW ... ORDER BY ... OFFSET ... LIMIT" — no ROWID pseudocolumn, no QUALIFY). Pattern A ROW_NUMBER subquery valid Trino 467. Pattern B1 CTAS+DROP+RENAME valid (Iceberg metadata-only rename). Pattern B2 MERGE matched-then-DELETE valid. -0.25 for the B2 MERGE example using placeholder `<key_cols>` — the MERGE-dedup ON-clause is fiddly without a real unique tiebreak (B1 CTAS is the cleaner recommended path); responder should have flagged B1 as the safer default. |
+| Clarity | 4.5 | Two-shape split (READ vs IN-PLACE) is clean; placeholder `<stable>` / `<key_cols>` slightly muddies the runnable-ness. |
+| Applicability | 4.75 | Engineer ships Pattern A immediately; Pattern B1 is copy-pasteable. Pattern B2 needs the user to fill in placeholders. |
+| Completeness | 4.5 | All three canonical patterns surfaced. Loses 0.5 for no explicit "B1 is cleaner / B2 needs a unique tiebreak" recommendation. |
 
-**Verification (doc quotes + sources)**:
-- **trino.io/docs/current/connector/iceberg.html table-properties list (WebFetched)**: confirmed properties include `format`, `compression_codec`, `partitioning`, `sorted_by`, `location`, `format_version`, `max_commit_retry`, `delete_after_commit_enabled`, `max_previous_versions`, `orc_bloom_filter_columns`, `orc_bloom_filter_fpp`, `parquet_bloom_filter_columns`, `object_store_layout_enabled`, `data_location`, `extra_properties`. **`write_target_file_size_bytes` is NOT in the list.**
-- **GitHub trinodb/trino #28250 (WebFetched)**: "Proposed Enhancement" + PR #28057 pending — `write.target-file-size-bytes` as a directly settable Trino table property is NOT yet merged into Trino 467. Quote: "the implementation is pending in PR #28057... Currently, Trino only supports session-level configuration through properties like `target_max_file_size` rather than persisted table properties."
-- **trino.io extra_properties doc**: "Additional properties added to an Iceberg table" — this IS the documented mechanism for setting native Iceberg properties from Trino DDL.
+**Iter519 r27 §4.5C canonical CONFIRMED LANDED** — 32nd consecutive leading-canonical bulletproofing landing instance. iter518 Q3 alias-mismatch confusion + missing IN-PLACE forms BOTH GONE.
 
-**ITER518 r17 FIX B PARTIALLY LANDED.** The exact iter517 fab `spark.sql.iceberg.write.target-file-size-bytes` Spark session config is GONE (responder explicitly debunks the `spark.sql.iceberg.*` family — that part of FIX B reached the responder). But the responder substituted a NEW underscore-flattened Trino-property fab in its place. The r17 LEADING CANONICAL block needs a tighter DO-NOT-WRITE call-out specifically against the underscore-flat Trino DDL form `write_target_file_size_bytes` AND a verbatim **`extra_properties = map(ARRAY['write.target-file-size-bytes'], ARRAY['268435456'])`** Trino-DDL example as the leading-canonical Trino-side answer (currently the r17 block routes Trino users only to the catalog config + session property, missing the per-table extra_properties form).
+### Q3 — dbt model auto GRANT SELECT on build — 4.375 PASS WITH COMPLETENESS GAP
 
----
-
-### Q3 — Oracle ROWID dedup → Trino — **4.625 PASS** (messy first query)
-
-| Dim | Score | Reason |
+| Dim | Score | Reasoning |
 |---|---|---|
-| Accuracy | 4.5 | Second query is the canonical Trino 467 dedup idiom: `ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY created_at) AS rn` → outer `WHERE rn = 1` — verified correct (Trino 467 has NO QUALIFY, window functions cannot be used in WHERE, so subquery/CTE form is mandatory). Correctly states "Trino has no ROWID". -0.5 for the FIRST query which references undefined columns (`id_within_group`, `row_id`, `min_id` alias mismatch) — the inner SELECT aliases `FIRST_VALUE(row_id) ... AS min_id` but the outer NOT IN matches on `(customer_id, id_within_group)` against `(customer_id, min_id)` — column names don't align with the input table, query is non-runnable. |
-| Clarity | 4.5 | Second/idiomatic query is clear. -0.5 because the messy first query confuses readers (does it work? what's `id_within_group`?). |
-| Actionability | 4.5 | Engineer can paste the second query. -0.5 for not addressing the IN-PLACE DELETE form the user asked about — Oracle's `DELETE WHERE ROWID NOT IN (...)` mutates in place. The canonical Iceberg-via-Trino rowid-free replacement is **CTAS + RENAME** (`CREATE TABLE t_new AS SELECT * FROM (SELECT *, ROW_NUMBER() OVER (...) rn FROM t) WHERE rn=1; ALTER TABLE t RENAME TO t_old; ALTER TABLE t_new RENAME TO t;`) OR a `MERGE` (delete branch for rn>1) — neither is shown. A bare DELETE keep-min-per-group has no clean rowid-free shape; that fact should be stated. |
-| Completeness | 5.0 | Covers the keep-first-per-group semantics + PARTITION BY customer_id + ORDER BY created_at — the core question. |
+| Accuracy | 4.5 | `post_hook` with `GRANT SELECT ON {{ this }} TO ROLE analyst_role` is a valid mechanism — runs after CTAS/MERGE commits, `{{ this }}` resolves to fully qualified name. OPA caveat is environment-correct (prod uses OPA for authz). -0.5 for OMITTING dbt's NATIVE canonical `grants` config — `{{ config(grants = {'select': ['analyst_role']}) }}` (Jinja) or YAML `config: grants: select: ['analyst_role']` (verified verbatim at [docs.getdbt.com/reference/resource-configs/grants](https://docs.getdbt.com/reference/resource-configs/grants): "When your model, seed, or snapshot finishes building, dbt ensures that the grants on its view or table match exactly the grants you have configured" — dbt applies grants idempotently). **Caveat — partial mitigation**: dbt-trino's grants config has a KNOWN BUG ([dbt-labs/dbt-core #12862](https://github.com/dbt-labs/dbt-core/issues/12862)) — it grants to USERS not ROLES — so for prod's Trino+ROLE case `post_hook` is actually MORE ROBUST than the canonical `grants:` config. Responder lucked into the right answer for the wrong reason. |
+| Clarity | 4.5 | post_hook syntax + OPA caveat are clear. |
+| Applicability | 4.25 | Engineer ships a working pattern. -0.75 for not mentioning the canonical `grants:` config exists (engineer who later reads the dbt docs will wonder why this codebase doesn't use it). |
+| Completeness | 4.25 | Misses the native `grants:` config + the idempotency advantage of dbt's grants over post_hook (post_hook re-runs GRANT every build whether or not the grant is already there). |
 
-**Verification**:
-- trino.io/docs/current/sql/select.html — no QUALIFY clause in Trino 467 grammar; window function in WHERE causes parse error → subquery/CTE form is mandatory.
-- GitHub trinodb/trino discussion #15481 "For Iceberg, delete duplication rows within the table" — confirms canonical Iceberg dedup pattern in Trino is recreate-via-CTAS or MERGE (not bare DELETE).
+### Q4 — LIKE vs REGEXP_LIKE — 4.875 STRONG PASS
 
----
-
-### Q4 — dbt incremental composite unique_key — **4.8125 STRONG PASS** (minor nit)
-
-| Dim | Score | Reason |
+| Dim | Score | Reasoning |
 |---|---|---|
-| Accuracy | 4.75 | `unique_key=['customer_id', 'event_date']` list form is the canonical dbt composite-key syntax (introduced dbt-core 1.1.0+) — verified at docs.getdbt.com/reference/resource-configs/unique_key. dbt-trino generates `MERGE ... ON (t.customer_id = s.customer_id AND t.event_date = s.event_date)` is correct. First-run CTAS / subsequent MERGE upsert lifecycle correct. -0.25 NIT: the example config shows `format_version = 2` as a bare top-level `config()` kwarg. For dbt-trino, Iceberg table properties (including `format_version`, `partitioning`, `sorted_by`) belong inside the `properties={...}` dict, not as top-level `config()` kwargs — per docs.getdbt.com/reference/resource-configs/trino-configs and the iter495 dbt-trino partitioning-key canonical at r05. Correct form: `config(materialized='incremental', unique_key=['customer_id', 'event_date'], properties={'format_version': "'2'", 'partitioning': "ARRAY['day(event_date)']"})`. |
-| Clarity | 5.0 | Clean MERGE-ON explanation; well-routed first-run vs subsequent-run semantics. |
-| Actionability | 4.5 | Engineer can paste the unique_key list directly. -0.5 because if they copy the `format_version=2` top-level kwarg form, dbt-trino will silently ignore it (or warn) — they won't get format_version=2 on their table. |
-| Completeness | 5.0 | Covers list shape + generated MERGE + first-run CTAS routing — the core question. |
-
-**Verification (doc quote)**: docs.getdbt.com/reference/resource-configs/unique_key — "supplied as a string representing a single column or a list of single-quoted column names like `['col1', 'col2', …]`"; dbt-core issue #3431 confirms composite-key list form merged for dbt-core 1.1.0+. dbt-trino issue #465 confirms composite MERGE ON generated correctly when list passed.
+| Accuracy | 5.0 | LIKE (prefix-pushdown) vs REGEXP_LIKE (Java/JONI, contains-match) accurate. **Case-insensitive 3-arg fab pre-emption is the standout — verified at [trino.io/docs/current/functions/regexp.html](https://trino.io/docs/current/functions/regexp.html): only `regexp_like(string, pattern) → boolean` is documented; NO 3-arg flags form.** Responder correctly says "DO NOT use 3-arg `regexp_like(s, pattern, 'i')` (Oracle form, not supported in Trino), use `(?i)` inline" — matches Trino docs verbatim ((?i) is supported, (?d)/(?u) are not). `\1` vs `$1` capture-group distinction correct (Java replacement syntax, not POSIX). |
+| Clarity | 5.0 | Clean when-to-switch rule; explicit migration warning. |
+| Applicability | 4.75 | Engineer ships correct Trino regex; -0.25 for no explicit prefix-pushdown verification path (EXPLAIN look-up). |
+| Completeness | 4.75 | Covers when-to-switch, performance, Oracle migration gotcha, JONI dialect. -0.25 for no explicit "non-prefix LIKE (`'%foo%'`) doesn't push down either" callout. |
 
 ---
 
-## Topic rubric updates (iter518)
+## Topic average updates
 
-(Federation row UNTOUCHED per directive — 4.49944/310 stays.)
-
-- **SQL query best practices for OLAP** (Q1 array contains + Q3 ROW_NUMBER dedup map here):
-  prior 4.5715/64 → (4.5715·64 + 4.9375 + 4.625)/66 = (292.576 + 9.5625)/66 = **4.5779/66** (+0.0064).
-- **Iceberg table maintenance** (Q2 target file size maps here):
-  prior 4.4920/155 → (4.4920·155 + 3.8125)/156 = (696.260 + 3.8125)/156 = **4.4877/156** (−0.0043).
-- **Oracle PL/SQL → dbt + Trino SQL migration** (Q3 ROWID dedup + Q4 dbt composite unique_key map here):
-  prior 4.5448/77 → (4.5448·77 + 4.625 + 4.8125)/79 = (349.949 + 9.4375)/79 = **4.5491/79** (+0.0043).
-
-Topic rubric line to append:
-```
-Iter518 — 2026-06-06 — overall 4.5469 PASS — Q1 array contains 4.9375 STRONG PASS (iter518 r07 §1a.3 canonical LANDED), Q2 Iceberg target file size 3.8125 BARELY PASS (iter517 session-config fab GONE but NEW write_target_file_size_bytes WITH-clause fab — r17 LEADING CANONICAL block needs underscore-flat DO-NOT-WRITE row + verbatim extra_properties Trino-DDL example), Q3 ROWID dedup 4.625 PASS (canonical ROW_NUMBER subquery correct; messy first query w/ undefined columns + in-place DELETE form not addressed), Q4 dbt composite unique_key 4.8125 STRONG PASS (list form correct; minor nit on format_version-as-top-level-kwarg vs properties={} dict). Federation NOT probed (4.49944/310 stays).
-```
+- **SQL query best practices for OLAP** (Q2 ROWID dedup ROW_NUMBER + Q4 LIKE/REGEXP both map here): 4.5779/66 → (4.5779·66 + 4.6875 + 4.875)/68 = 311.7164/68 = **4.5840/68** (+0.0061 — both above topic avg).
+- **Oracle PL/SQL → dbt + Trino SQL migration** (Q2 Oracle ROWID-DELETE port + Q3 dbt grants both map here): 4.5491/79 → (4.5491·79 + 4.6875 + 4.375)/81 = 368.4404/81 = **4.5487/81** (-0.0004 — Q3 slightly below topic avg drags but Q2 lifts).
+- **Iceberg table maintenance** (Q1 target-file-size maps here): 4.4877/156 → (4.4877·156 + 4.8125)/157 = 704.8937/157 = **4.4898/157** (+0.0021 — Q1 above topic avg lifts).
+- **Trino federation / cross-source connectors**: UNCHANGED at **4.49944/310** (federation NOT probed; per directive do NOT touch §13.x federation guardrails in resources/22 or the federation rubric row).
 
 ---
 
-## Next-teacher actions for iter519 (HIGH-priority first)
+## Pattern observations
 
-1. **HIGH — r17 LEADING CANONICAL block (iter518 FIX B target-file-size canonical) — add Trino-DDL `extra_properties` verbatim example + tighten DO-NOT-WRITE.** Current block lists THREE setters: TBL PROPERTY (Spark form), DataFrameWriter OPTION (Spark form), Trino CATALOG config / session property. **MISSING**: an explicit Trino-DDL example showing how to set the native `write.target-file-size-bytes` property AT CREATE/ALTER TABLE time from Trino. The canonical form is:
-   ```sql
-   CREATE TABLE iceberg.analytics.events (...)
-   WITH (
-     format_version = 2,
-     partitioning = ARRAY['day(occurred_at)'],
-     extra_properties = map(ARRAY['write.target-file-size-bytes'], ARRAY['268435456'])
-   )
-   ```
-   AND extend the DO-NOT-WRITE table with a new banned shape: `write_target_file_size_bytes = 268435456` as a bare WITH-clause kwarg — call out "underscore-flattening of the native dotted `write.target-file-size-bytes` does NOT make it a valid Trino table-property name on Trino 467; the connector's allow-list does NOT include it (verified trino.io/docs/current/connector/iceberg.html); use `extra_properties = map(...)` form" + cite GitHub trinodb/trino #28250 / PR #28057 as the pending feature that would change this in a future Trino release.
-
-2. **HIGH — r27 (Oracle migration) or r17 — ROWID-dedup IN-PLACE DELETE canonical.** Existing §4.5/§7A.2 covers the ROW_NUMBER subquery form correctly, but the Oracle `DELETE WHERE ROWID NOT IN (SELECT MIN(ROWID)…GROUP BY key)` mutation-shape has no clean Trino translation. Add a §"Oracle ROWID-DELETE keep-min-per-group → Trino" callout with TWO canonical replacements: (A) **CTAS + RENAME**: `CREATE TABLE t_dedup AS SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY created_at) rn FROM t) WHERE rn = 1; ALTER TABLE t RENAME TO t_old; ALTER TABLE t_dedup RENAME TO t;` (B) **MERGE delete branch**: `MERGE INTO t USING (SELECT id_pk FROM (SELECT id_pk, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY created_at) rn FROM t) WHERE rn > 1) d ON t.id_pk = d.id_pk WHEN MATCHED THEN DELETE;` (requires a stable PK column — call this out). Explicitly state: "a bare DELETE keep-first-per-group has no clean rowid-free Trino form; you MUST recreate or MERGE."
-
-3. **MEDIUM — r27/r28 — dbt-trino `format_version` belongs in `properties={...}` dict, not as top-level config() kwarg.** Add a small reconcile-in-place callout near the dbt-trino model-config canonical: "Iceberg table properties (`format_version`, `partitioning`, `sorted_by`, `write.target-file-size-bytes` via extra_properties) go INSIDE the `properties={...}` dict — NOT as bare `config()` top-level kwargs. dbt-trino routes `properties` through to the underlying Trino `CREATE TABLE … WITH (...)` clause; top-level config() kwargs are dbt-core materialization kwargs only." Show wrong vs right side-by-side.
-
-4. **LOW — r07 §1a.3 — add MAP cross-ref nit.** Add one line: "`contains()` works on ARRAY only — for MAP key existence use `element_at(map, key) IS NOT NULL` (cross-ref r09 §MAP)." Picks up the Q1 -0.25 Completeness gap.
+- **Bulletproofing streak holds — 31st + 32nd consecutive leading-canonical landing instances**: Both iter518 fixes (r17 strengthened target-file-size + r27 §4.5C new ROWID-dedup) landed clean on first re-probe.
+- **No new fabrications this iter**: For the first time in 3 iters, no fab-class error introduced (iter516 was clean, iter517 had 2 fabs, iter518 had 1 fab, iter519 clean).
+- **One real completeness gap**: Q3 dbt grants — responder used `post_hook` (which works) but omitted the native dbt `grants:` config (which is the canonical/preferred mechanism). The completeness gap is real but partially mitigated by the dbt-trino #12862 ROLE-vs-USER bug (post_hook is more robust for the Trino+ROLE case in prod's OPA setup).
+- **Tightest margin band**: +1.1875 healthy after +1.0469 (iter518).
 
 ---
 
-## Iter519 probe targets
+## NEW iter520 PRIMARY FIX TARGETS
 
-- **HIGH — Iceberg target-file-size from Trino DDL RE-PROBE**: "On Trino 467, how do I set `write.target-file-size-bytes` to 256MB AT CREATE TABLE time?" — verifies the `extra_properties = map(…)` canonical lands, and that the `write_target_file_size_bytes` flat-property fab does NOT reappear.
-- **HIGH — ROWID-dedup IN-PLACE DELETE RE-PROBE**: "Oracle `DELETE FROM customers c WHERE c.ROWID NOT IN (SELECT MIN(ROWID) FROM customers GROUP BY email)` — give me the in-place Trino equivalent." — verifies the CTAS+RENAME or MERGE keep-min canonical lands, and that the "no clean rowid-free DELETE" framing is correctly stated.
-- **MEDIUM — dbt-trino properties dict RE-PROBE**: "Show me a dbt-trino incremental model config with `unique_key=['a','b']`, `format_version=2`, and `partitioning=ARRAY['day(ts)']` — where do format_version + partitioning go in the config block?" — verifies properties={...} routing lands.
-- **MEDIUM — `contains` on MAP angle**: "Can I use `contains(my_map, 'some_key')` to check MAP key existence?" — tests Q1 §1a.3 MAP-routing cross-ref.
-- **LOW — Federation stays UNPROBED** per locked directive.
+### FIX C — dbt `grants:` config NEW CANONICAL (HIGH priority — completeness gap from iter519 Q3)
+
+**WHERE**: r27 §6.x dbt-config cluster, new §6.7I (after iter517's §6.7H dbt-docs canonical). Likely placement: between §6.7H (dbt-docs) and the next existing sub-section.
+
+**WHAT** (new canonical block):
+- **The-one-fact**: "dbt has a NATIVE `grants` config that is the canonical/preferred mechanism — applies grants idempotently after each model run. `post_hook` with GRANT statements still works and is sometimes preferred for Trino+ROLE due to dbt-trino bug #12862."
+- **Three forms**:
+  1. Jinja in-model: `{{ config(grants = {'select': ['analyst_role']}) }}`
+  2. YAML schema: `models: - name: my_model\n    config:\n      grants:\n        select: ['analyst_role']`
+  3. Project-level default in `dbt_project.yml`: `models:\n  my_project:\n    +grants:\n      select: ['analyst_role']`
+- **Precedence + merge behavior**: in-model > YAML > project-level; "merge and clobber" replaces less-specific with more-specific (per docs.getdbt.com/reference/resource-configs/grants verbatim "dbt's default behavior replaces the less-specific set of grantees with the more-specific set of grantees").
+- **dbt-trino caveat (LOAD-BEARING for prod env)**: dbt-trino `grants` config has KNOWN BUG [dbt-labs/dbt-core #12862](https://github.com/dbt-labs/dbt-core/issues/12862) — emits `GRANT SELECT ON t TO analyst_role` (USER form) instead of `GRANT SELECT ON t TO ROLE analyst_role` (ROLE form). Workaround: use `post_hook` with explicit `GRANT SELECT ON {{ this }} TO ROLE <role>`. **Recommend `post_hook` for prod's Trino+OPA+ROLE setup until #12862 is fixed.**
+- **Idempotency contrast**: dbt's `grants` config is idempotent (dbt shows existing grants, computes diff, only revokes/grants the difference); `post_hook` GRANT runs every build (Trino's GRANT is idempotent on the engine side so the net result matches, but emits more statements).
+- **OPA caveat**: GRANT statements issue cleanly but OPA decides whether honored — prod uses OPA for authz, the dbt grants/post_hook is data-plane bookkeeping.
+- **DO-NOT-WRITE bans**: "dbt-trino's grants config works perfectly for roles" (FALSE, bug #12862); "`post_hook` with GRANT is the only way to grant in dbt" (FALSE, native config is canonical for other adapters); "dbt's grants config emits ROLE not USER for Trino" (FALSE per #12862).
+- **Verified sources**: docs.getdbt.com/reference/resource-configs/grants + docs.getdbt.com/blog/configuring-grants + dbt-labs/dbt-core #12862.
+- **Keyword anchors**: "dbt grant select after model build / dbt model auto grant / dbt grants config / dbt post_hook GRANT / dbt-trino role grant bug / dbt analyst select access / dbt config grants select / dbt project-level grants / +grants dbt_project.yml / dbt idempotent grant".
+
+### Iter520 probe targets
+
+- **dbt grants RE-PROBE (HIGH)** — "Auto-grant SELECT to analyst_role after every dbt build — what's the canonical config?" verifies FIX C lands with native `grants:` config AS PRIMARY + `post_hook` workaround AS SECONDARY (due to #12862).
+- **dbt-trino grants role-vs-user 2nd angle (HIGH)** — "My dbt grants config has `select: ['analyst_role']` but Trino isn't honoring it — analysts still get permission denied" verifies #12862 caveat surfaces + post_hook fallback recommendation.
+- **Iceberg target-file-size extra_properties 3rd angle (MEDIUM)** — "How do I record `write.target-file-size-bytes` on the Iceberg table itself from Trino so Spark sees it later?" verifies the `extra_properties = map(...)` path (the only Q1 gap this iter).
+- **ROWID dedup B1-vs-B2 recommendation 2nd angle (MEDIUM)** — "MERGE-dedup or CTAS-rebuild for dedup?" verifies §4.5C surfaces "B1 CTAS+RENAME is the cleaner recommended path; B2 MERGE needs a real unique tiebreak in the ON".
+- **regexp_like flags 2nd angle (MEDIUM)** — "Can I do `regexp_like(name, '^abc', 'i')` for case-insensitive prefix?" verifies 3-arg fab does NOT slip back + `(?i)` inline canonical holds.
+- **Federation stays UNPROBED (LOW)** — row stays 4.49944/310 per iter472-519 directive.
 
 ---
 
-## Pattern notes
+## Quoted verifications (load-bearing for this judgment)
 
-- **Iter517 FIX A (contains) LANDED CLEAN; iter517 FIX B (target-file-size) LANDED PARTIAL with NEW FAB SUBSTITUTION.** The teacher's r17 LEADING CANONICAL block correctly killed the Spark session-config fab family but left a hole: it routed users to "TABLE PROPERTY" as a category without showing the Trino-DDL form to actually set the native dotted property. The responder filled that gap by inventing an underscore-flattened Trino property name — a classic "responder confabulates the missing example" failure mode. Lesson: when adding a multi-engine setter canonical, EACH engine needs a verbatim DDL example or the responder will fabricate one. The corresponding `extra_properties = map(ARRAY[...], ARRAY[...])` Trino-DDL example is the missing piece.
-- **111th consecutive overall PASS in extended phase, margin +1.0469 above floor — but the THINNEST margin in 9+ iters.** Iter519 with the iter518 Q2 fix landing should restore the ~4.9 margin.
-- **22 leading-canonical bulletproofing instances total** (Q1 §1a.3 array_contains is #22); Q2 r17 target-file-size remains incomplete pending the extra_properties Trino-DDL example.
-- Federation row 4.49944/310 untouched — confirmed zero edits to resources/22 §13.x.
+- **Trino SELECT grammar — no QUALIFY** (verified [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html)): "SELECT [ ALL | DISTINCT ] select_expression [, ...] [ FROM from_item [, ...] ] [ WHERE condition ] [ GROUP BY ... ] [ HAVING condition] [ WINDOW window_definition_list] [ { UNION | INTERSECT | EXCEPT } ... ] [ ORDER BY ... ] [ OFFSET ... ] [ LIMIT ... ]" — NO QUALIFY clause; NO ROWID pseudocolumn.
+- **Trino regexp_like signature — only 2-arg** (verified [trino.io/docs/current/functions/regexp.html](https://trino.io/docs/current/functions/regexp.html)): "`regexp_like(string, pattern) → boolean`". Only the (?i) inline flag is supported for case-insensitive matching; (?d) and (?u) not supported.
+- **Trino Iceberg connector `iceberg.target-max-file-size`** (verified [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) Configuration): "Target maximum size of written files; the actual size may be larger." Default `1GB`. Session-property `iceberg.target_max_file_size` works via Trino's universal hyphens→underscores convention (operationally — official docs page does not list it in a dedicated session-properties table for this property, but it is supported per Trino's IcebergSessionProperties pattern).
+- **Trino Iceberg `write.target-file-size-bytes` writer-side honoring**: per [trinodb/trino #28250](https://github.com/trinodb/trino/issues/28250) — "Proposed Enhancement: Support Iceberg table properties for write configuration (target-file-size-bytes and parquet.row-group-size-bytes)". Pending — Trino's own writer does NOT yet read the native dotted property even when persisted via `extra_properties`.
+- **dbt grants config canonical** (verified [docs.getdbt.com/reference/resource-configs/grants](https://docs.getdbt.com/reference/resource-configs/grants)): "When your model, seed, or snapshot finishes building, dbt ensures that the grants on its view or table match exactly the grants you have configured" — applies grants idempotently. YAML form: `config: grants: select: ['analyst_role']`. Jinja form: `{{ config(grants = {'select': ['analyst_role']}) }}`. Project-level: `+grants: select: ['analyst_role']` in `dbt_project.yml`.
+- **dbt-trino role-vs-user grants bug** (verified [dbt-labs/dbt-core #12862](https://github.com/dbt-labs/dbt-core/issues/12862)): grants config on dbt-trino emits USER grant not ROLE grant — open issue, post_hook with `GRANT ... TO ROLE` is the workaround. This is the load-bearing caveat for prod's Trino+OPA+ROLE environment.
+
+---
+
+**Iter519 summary**: Both iter518 fixes landed clean. No new fabrications. Q3 dbt-grants completeness gap surfaced — engineer ships working code via `post_hook` (which is actually MORE ROBUST for prod's Trino+ROLE due to dbt-trino #12862 bug), but the canonical `grants:` config is missing from resources. Iter520 PRIMARY FIX: add r27 §6.7I dbt-grants-config canonical with the #12862 caveat.
