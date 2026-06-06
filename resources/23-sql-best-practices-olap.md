@@ -326,6 +326,84 @@ FROM   iceberg.billing.invoices;
 
 ---
 
+## 3.1D. `arbitrary` / `any_value` (pick ONE value per group) and `max_by` / `min_by` (deterministic representative-value pick)
+
+**Keyword anchors:** arbitrary Trino, any_value aggregate, pick one value per group, representative value group by, functionally dependent column, "column is not part of GROUP BY", max_by min_by latest value, latest status per user, value associated with max date, one representative row per group, status as of latest update.
+
+**Why this section exists.** When you `GROUP BY` a key (e.g. `user_id`) and the SELECT also references a column that is **constant per key** (e.g. `user_name` — every row for the same `user_id` has the same name), Trino will refuse the query unless you either (a) add the column to `GROUP BY`, or (b) wrap it in an aggregate. The right aggregate here is **`arbitrary(x)`** (or the SQL-standard alias **`any_value(x)`**) — it tells the engine "this column is constant per group; just give me one value." For a **deterministic** pick by an ordering column (e.g. "the status as of the latest update"), use **`max_by(x, y)` / `min_by(x, y)`**.
+
+### `arbitrary(x)` and `any_value(x)` — pick ANY non-null value per group (NON-deterministic)
+
+**Signature** (verified at [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html)):
+- `arbitrary(x) -> [same as input]` — *"Returns an arbitrary non-null value of `x`, if one exists. Identical to `any_value()`."* (Trino docs verbatim.)
+- `any_value(x) -> [same as input]` — SQL-standard **alias** for `arbitrary`. Identical behavior. Use whichever your team's style guide prefers; the engine treats them as the same function.
+
+**Behavior:**
+- **Ignores NULLs** — returns a non-null value if any exists in the group; returns NULL only when every row in the group is NULL (or the group is empty).
+- **NON-deterministic** — Trino is free to return ANY non-null value from the group. If you re-run the same query the next day, after compaction, or on a different cluster size, you may get a different non-null value. **Only use `arbitrary` / `any_value` when the column is CONSTANT (functionally dependent on the GROUP BY key) — i.e., it does not matter which value you pick because they're all the same.**
+
+**Worked example — one representative `user_name` per `user_id`:**
+
+```sql
+-- CORRECT — user_name is constant per user_id, so arbitrary() is safe.
+SELECT user_id,
+       arbitrary(user_name) AS user_name,    -- or: any_value(user_name)
+       COUNT(*)             AS event_count
+FROM iceberg.analytics.events
+WHERE event_date = DATE '2026-06-01'
+GROUP BY user_id;
+```
+
+**Why prefer `arbitrary` over `MAX` / `MIN` for this case:** when the column is constant per group, `MAX(user_name)` and `MIN(user_name)` both work but they (a) signal the WRONG intent (a reader thinks "we want the lexically largest name — why?"), and (b) cost more — they must compare every value. `arbitrary` signals "this column is constant per group" and lets the engine pick the first non-null value it sees.
+
+### `max_by(x, y)` / `min_by(x, y)` — DETERMINISTIC pick of `x` by the ordering column `y`
+
+When the column is **NOT** constant per group and you want a specific representative value (e.g., "the `status` as of the latest `updated_at`"), reach for `max_by` / `min_by`. **Do NOT use `arbitrary`** for this — `arbitrary` picks ANY non-null value and will return inconsistent results.
+
+**Signature** (verified at [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html)):
+- `max_by(x, y) -> [same as x]` — *"Returns the value of `x` associated with the maximum value of `y` over all input values."* (Trino docs verbatim.)
+- `min_by(x, y) -> [same as x]` — symmetric: value of `x` paired with the MIN of `y`.
+- 3-arg variants `max_by(x, y, n) -> array<[same as x]>` and `min_by(x, y, n) -> array<[same as x]>` return the top/bottom `n` values of `x` ranked by `y`.
+
+**Worked example — latest status per order (deterministic by `updated_at`):**
+
+```sql
+-- CORRECT — pick the status from the row with the MAX updated_at per order.
+SELECT order_id,
+       max_by(status, updated_at) AS latest_status,
+       min_by(status, updated_at) AS first_status,
+       MAX(updated_at)            AS last_updated_at
+FROM iceberg.analytics.order_status_history
+GROUP BY order_id;
+```
+
+This is the canonical "value as of latest event" idiom — much shorter than a window-function + `QUALIFY ROW_NUMBER() = 1` pattern (and `QUALIFY` does **not** exist in Trino 467 anyway). For ties in the ordering column `y`, Trino does not guarantee which tied row's `x` is returned — if `updated_at` could tie, add a tiebreaker via `max_by(status, (updated_at, event_id))` over a ROW or use a window function with an explicit deterministic ORDER BY.
+
+### Picking between `arbitrary` / `any_value` and `max_by` / `min_by`
+
+| Situation | Use |
+|---|---|
+| Column is **constant per group** (functionally dependent on the GROUP BY key — e.g. `user_name` per `user_id`, `product_name` per `product_id`). | `arbitrary(x)` or `any_value(x)`. Cheapest, signals intent. |
+| You want the value of `x` associated with the **largest / smallest** value of a sortable column `y` (e.g. latest status by `updated_at`, top-revenue product per category). | `max_by(x, y)` / `min_by(x, y)`. Deterministic by `y`. |
+| You want **all** values of `x` per group (de-duped or not). | `array_agg(x)` (+ optional `array_distinct(...)`); see resource 07 §1a.3. |
+| You want the **most common** value per group. | `approx_most_frequent(buckets, x, capacity)` — see [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html). Not `arbitrary`. |
+
+### DO NOT WRITE
+
+| False claim | Reality |
+|---|---|
+| "`arbitrary(x)` returns the FIRST row's `x` (e.g. by scan order)." | **FALSE.** `arbitrary` is explicitly NON-deterministic — Trino is free to return any non-null value. Two runs of the same query can return different values when the column is not constant per group. |
+| "`any_value` is a different function from `arbitrary` (different behavior)." | **FALSE.** Trino docs verbatim: *"`any_value(x)` ... Identical to `arbitrary()`."* They are aliases — identical behavior. |
+| "`arbitrary` returns NULL if ANY row in the group is NULL." | **FALSE.** `arbitrary` IGNORES NULLs — it returns a non-null value if one exists in the group, and only returns NULL when every row in the group is NULL. |
+| "Use `arbitrary(status)` for the latest status per `user_id`." | **WRONG TOOL.** `status` is not constant per `user_id` (it changes over time). `arbitrary` picks any value non-deterministically. Use `max_by(status, updated_at)` for the deterministic "latest by `updated_at`" pick. |
+| "Trino has no SQL-standard `any_value` — use `MAX` instead." | **FALSE.** `any_value(x)` IS a Trino aggregate (alias of `arbitrary`). `MAX(x)` is the wrong tool for "this column is constant per group" — it signals "lexically largest" intent and costs more. |
+| "`max_by(x, y)` returns `y` from the max-`x` row." | **BACKWARDS.** `max_by(x, y)` returns `x` (the first arg) from the row with the maximum `y` (the second arg). Mnemonic: "the value of x, by max y." |
+| "Use `QUALIFY ROW_NUMBER() OVER (PARTITION BY k ORDER BY y DESC) = 1` to get the latest row per group in Trino." | **PARSE ERROR.** Trino 467 does **NOT** support `QUALIFY`. Either nest the window function in a subquery and filter `WHERE rn = 1`, or use `max_by(x, y)` directly when you only need a few columns from the latest row. |
+
+**Cross-references.** For the rest of the Trino aggregate family (`approx_distinct`, `approx_percentile`, `listagg`, `array_agg` with `FILTER (WHERE ...)`), see [§3 above](#3-use-approximate-functions-when-exactness-isnt-required) and [resource 07 §1a.2 + §5](07-analytical-query-patterns.md). For the GROUP BY rules that force you to wrap the column in an aggregate in the first place, see [resource 07 §"Trino GROUP BY rules"](07-analytical-query-patterns.md#trino-group-by-rules-anchor--apply-to-every-group-by-query).
+
+---
+
 ## 4. Verify your plan with EXPLAIN
 
 **Why**: SQL that looks correct can still scan the whole table. `EXPLAIN` shows what Trino will actually do.
