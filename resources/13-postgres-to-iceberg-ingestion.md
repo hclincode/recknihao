@@ -24,6 +24,8 @@
 - Spark reads Postgres via JDBC, writes Iceberg to MinIO, registers the table in Hive Metastore.
 - Schedule with Airflow or a Kubernetes CronJob, then always run compaction and snapshot expiration.
 
+> **NAV-HINT — dbt OPS / CONNECTION / SECRETS questions belong to a DIFFERENT resource.** This file is about Spark-based **ingestion** from Postgres into Iceberg — NOT about dbt setup. If your question is *"how do I store my dbt database password safely?"* / *"how do I read a shell environment variable into dbt?"* / *"where do I put credentials in `profiles.yml`?"* / *"what is `env_var()` in dbt?"* / *"what is `DBT_ENV_SECRET_`?"* — jump to **[resources/27-oracle-plsql-to-dbt-trino.md §6.7G2 — dbt `env_var('VAR'[, 'default'])` LEADING CANONICAL](27-oracle-plsql-to-dbt-trino.md)**. That section is the canonical home for ALL dbt-trino connection/secrets/`profiles.yml` configuration on this stack (not migration-only — applies to every dbt-trino setup).
+
 ---
 
 ## TOP-OF-DOC CALLOUT #1 — Spark write API: the API-CONFUSION GUARDRAIL (read BEFORE writing any Spark-to-Iceberg recipe)

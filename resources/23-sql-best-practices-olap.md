@@ -246,6 +246,57 @@ SELECT split_to_multimap('tag=a;tag=b;tag=c', ';', '=') AS m;
 
 ---
 
+### LEADING CANONICAL — Trino `format(format_string, args...)` — printf / Java-Formatter-style string building
+
+> **Keyword anchors:** Trino format function, printf Trino, build display string, format string Trino, String.format Trino, format number with commas, format vs concat, format thousands separator, format percent, zero-pad integer Trino, formatted display string Trino. Verified at [trino.io/docs/467/functions/string.html](https://trino.io/docs/current/functions/string.html).
+
+**Signature.** `format(format_string, args...) -> varchar` — Java `String.format` / `printf`-style. Per the Trino docs: *"Returns a formatted string using the specified format string and arguments"* — the format string follows Java's `java.util.Formatter` syntax. Common specifiers:
+
+| Specifier | Meaning | Example | Output |
+|---|---|---|---|
+| `%s` | String (any type — formats whatever's there) | `format('hi %s', name)` | `hi alice` |
+| `%d` | Integer / bigint | `format('%d orders', cnt)` | `42 orders` |
+| `%,d` | Integer with thousands grouping | `format('%,d', 1234567)` | `1,234,567` |
+| `%05d` | Zero-padded integer (width 5) | `format('%05d', 42)` | `00042` |
+| `%.2f` | Float with 2 decimal places | `format('%.2f', 3.14159)` | `3.14` |
+| `%,.2f` | Float with thousands grouping + 2 decimals | `format('%,.2f', 1234567.89)` | `1,234,567.89` |
+| `%.1f%%` | Float with 1 decimal + literal `%` (escape `%` as `%%`) | `format('%.1f%%', 87.5)` | `87.5%` |
+
+**Worked example — multi-field display string:**
+```sql
+SELECT format('User %s made %d purchases totaling $%,.2f',
+              user_id, purchase_count, total_amount) AS summary
+FROM customer_summary;
+-- => 'User U-1234 made 17 purchases totaling $1,234.56'
+```
+
+**Why prefer `format()` over long `||` chains.** `format()` handles the type conversion automatically — `%d` takes a BIGINT directly, `%.2f` takes a DOUBLE/DECIMAL directly. The `||` / `concat()` operator in Trino REQUIRES all-VARCHAR arguments (does NOT auto-coerce numerics), so building the same string via `||` requires `CAST(...)` on every numeric piece: `'User ' || user_id || ' made ' || CAST(purchase_count AS VARCHAR) || ' purchases totaling $' || CAST(total_amount AS VARCHAR)` — uglier AND loses the comma-grouping / decimal-precision formatting.
+
+**Distinguish from related "format" functions — DIFFERENT functions, different uses:**
+
+| Function | Use it for | Format string style |
+|---|---|---|
+| **`format(fmt, args...)`** | **General printf-style string building** (numbers, strings, dates via `%t` specifiers) | Java `Formatter` / `printf` |
+| `format_datetime(ts, pattern)` | Format a timestamp/date using **Joda-Time** patterns | Joda (`yyyy-MM-dd HH:mm:ss`) |
+| `date_format(ts, pattern)` | Format a timestamp/date using **MySQL-style** specifiers | MySQL (`%Y-%m-%d %H:%i:%s`) |
+| `json_format(json_value)` | Serialize a JSON value to its string representation | N/A — takes a JSON, returns VARCHAR |
+
+For ordinary date-to-string formatting, prefer `date_format` or `format_datetime` (they take a single timestamp and a single pattern — cleaner than `format('%1$tY-%1$tm-%1$td', ts)`). For general-purpose printf-style **multi-arg** string building (a number + a string + a percent + a currency amount in ONE call), `format()` is the right answer.
+
+### DO NOT WRITE
+
+| False claim | Reality |
+|---|---|
+| "Trino has no `format()` function — you have to use `||` / `concat()` for string building." | **FALSE.** `format(format_string, args...) -> varchar` is a documented Trino 467 built-in string function — see [trino.io/docs/current/functions/string.html](https://trino.io/docs/current/functions/string.html). |
+| "Trino has no printf-style formatter." | **FALSE.** `format()` IS Trino's printf. It uses Java `Formatter` syntax: `%s`, `%d`, `%.2f`, `%,d`, `%05d`, `%%`. |
+| "Use `format_datetime` to build a multi-field display string with numbers and a percent sign." | **WRONG FUNCTION.** `format_datetime(ts, pattern)` formats ONE timestamp using a Joda pattern. For a multi-arg `'User %s made %d purchases totaling $%,.2f'`-style string, use `format(fmt, args...)`. |
+| "Use `date_format` to build a numeric display string with a thousands separator." | **WRONG FUNCTION.** `date_format(ts, pattern)` is for date/time formatting (MySQL-style). For numeric formatting (`%,.2f`, `%,d`), use `format(fmt, n)`. |
+| "Use `json_format` to print a number with 2 decimal places." | **WRONG FUNCTION.** `json_format(json)` serializes a JSON value to its text form. For printf-style numeric formatting, use `format('%.2f', n)`. |
+
+**Cross-reference.** For the Oracle `||` implicit-coerce trap that drives engineers to look for a printf-style alternative, see [resource 27 §7A.3.1](27-oracle-plsql-to-dbt-trino.md) — that section's "option B: use `format()`" worked example is migration-specific; THIS section is the generic Trino SQL canonical for any printf-style string building.
+
+---
+
 ## 3.1B. `SUM(DECIMAL)` auto-widens to `decimal(38, s)` — you do NOT need to CAST, and Trino does NOT silently truncate
 
 **Keyword anchors:** SUM decimal precision Trino, sum looks too small, decimal overflow Trino, decimal 38 auto widen, NUMERIC_VALUE_OUT_OF_RANGE, money sum precision, DECIMAL(10,2) overflow SUM, CAST DECIMAL 38 sum aggregate.

@@ -2179,6 +2179,26 @@ GROUP BY tenant_id, order_date
 
 ### 6.7 dbt tests to add (replacing Oracle EXCEPTION handlers)
 
+> **ROUTING ANCHOR — dbt OPS / CONFIG / CONNECTION / SECRETS questions land in this §6.7 cluster (even though this file is titled "Oracle PL/SQL → dbt+Trino migration"). If your question contains ANY of these phrases, jump to the listed sub-canonical:**
+>
+> | Question keywords | Canonical |
+> |---|---|
+> | `dbt profiles.yml`, `profiles.yml password`, `dbt connection`, `dbt connection credentials`, `dbt database password`, `store dbt password safely`, `hide dbt password`, `read shell env var into dbt`, `dbt environment variable`, `env_var`, `DBT_ENV_SECRET`, `dbt secrets`, `scrub secret from dbt logs`, `dbt credentials` | **§6.7G2** (`env_var()` + `DBT_ENV_SECRET_` + canonical `profiles.yml` Trino target) |
+> | `dbt var`, `dbt --vars`, `dbt run --vars`, `parameterize dbt model`, `dbt variable`, `var vs set dbt`, `tunable knob dbt`, `dbt_project.yml vars:` | **§6.7G** (`var()` per-run configurable values) |
+> | `dbt test severity`, `severity: warn`, `store_failures`, `_dbt_test__audit`, `expression_is_true`, `not_null_proportion` | **§6.7A** (dbt test severity + store_failures) |
+> | `dbt ref()`, `dbt source()`, `ref vs source`, `DAG edge`, `compile to fully-qualified name`, `manifest.json` | **§6.7A2** (`ref()` vs `source()`) |
+> | `dbt source freshness`, `sources.yml loaded_at_field`, `dbt source freshness command` | **§6.7B** + **§6.7K** (source freshness + freshness commands) |
+> | `dbt model contract`, `contract: enforced`, `dbt column data_type` | **§6.7C** (model contracts) |
+> | `dbt seed`, `seeds/ CSV`, `dbt seed command` | **§6.7D** (seeds) |
+> | `dbt unit test`, `dbt unit_tests:`, `given:` `expect:` | **§6.7E** (unit tests 1.8+) |
+> | `dbt --select`, `dbt graph operators`, `+` `@` `:` selectors | **§6.7F** (select set-operators + graph-operators) |
+> | `dbt docs generate`, `dbt docs serve`, `description: schema YAML`, `{% docs %}` blocks | **§6.7H** (dbt documentation site) |
+> | `dbt grants:`, `dbt post_hook GRANT`, `dbt-trino roles bug` | **§6.7I** (dbt grants) |
+> | `dbt persist_docs`, `COMMENT ON TABLE from dbt` | **§6.7J** (persist_docs) |
+> | `dbt materialization`, `incremental`, `unique_key`, `is_incremental()` | **§6.8** (`is_incremental()` WHERE-clause pattern) + **§3.1** (materializations) |
+>
+> A "how do I configure dbt to connect to Trino?" or "where do I put my dbt password safely?" question is a **dbt OPS** question — answered in **§6.7G2** below. The fact that this resource file is titled "Oracle migration" does NOT mean the dbt-ops canonicals here are migration-only; they apply to ALL dbt-trino setups on this stack.
+
 ```yaml
 # models/marts/fct_orders_daily.yml
 version: 2
