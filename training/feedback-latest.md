@@ -1,130 +1,96 @@
-# Iter549 — JUDGE FEEDBACK (overall avg 2.969 — FAIL)
+# Judge Feedback — Iter 550 (2026-06-06)
 
-**Verdict: FAIL** — first overall-FAIL since iter524 (3.469 FAIL precedent). Average 2.969 < 3.5 threshold. Cause: Q1 was a clean WIN (reconcile-in-place worked), but Q2/Q3/Q4 surfaced THREE fundamental-topic findability gaps in a single round — `IF()` vs `CASE WHEN`, `UNION` vs `UNION ALL`, and `ref()` vs `source()` all triggered honest content-gap declines because none has a findable LEADING CANONICAL H3 in resources/.
+## HEADLINE
 
----
-
-## Per-question scores
-
-### Q1 — Iceberg rollback to snapshot before a bad load (PRIMARY WIN CHECK)
-
-| Dim | Score | Note |
-|---|---|---|
-| Accuracy | 5 | Trino-467 positional `CALL iceberg.system.rollback_to_snapshot('analytics', 'events', 4823511203987654321)` is correct. Verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) — quoted doc example: `CALL example.system.rollback_to_snapshot('testdb', 'customer_orders', 8954597067493422955)`. Responder explicitly bans (a) Spark named-arg `table => ..., snapshot_id => ...` (b) dotted single-string `'schema.table'` (c) 469+ `ALTER TABLE ... EXECUTE rollback_to_snapshot`. Three positional args (schema VARCHAR, table VARCHAR, snapshot_id BIGINT) — matches docs. |
-| Completeness | 4.5 | Snapshot lookup via `"events$snapshots"` + rollback CALL + metadata-only nature + 469+ disclaimer. Could mention "next correct write between bad and rollback gets reverted too" but that's nuance. |
-| Clarity | 5 | Two-step recipe (find id → CALL), explicit arg-alignment hint, anti-patterns spelled out — no jargon. |
-| Actionability | 5 | Engineer can paste this immediately into their Trino 467 session. |
-| **Q1 avg** | **4.875** | **iter549 reconcile-in-place WORKED — r13 §1 now serves correct Trino-467 positional CALL.** |
-
-Reconcile-in-place at r13 §1 (L3812-3870) successfully shipped:
-- H3 retitled `### 1. Iceberg snapshot rollback — Trino 467 positional CALL`
-- Keyword-anchors blockquote landed
-- Wrong Spark-named-arg CALL replaced with positional CALL
-- Three-engine side-by-side forms table (Trino 467 / Spark / Trino 469+)
-- DO-NOT-WRITE blockquote banning all three known copy-paste defects
-
-This is the highest-quality first-resort answer the responder has produced for rollback in 30+ iterations. The defect that caused iter548's Q4 3.25 score is closed.
+**iter550 RECOVERED from iter549's 2.969 FAIL.** Overall avg **4.7188 STRONG PASS** (margin +1.2188 above 3.5 floor; +1.75 swing from iter549). All THREE re-probe findability gaps from iter549 (IF/CASE, UNION/UNION ALL, ref/source) are **CLOSED** — the teacher's three batched `### LEADING CANONICAL` H3 additions (r23 §3.1E IF-vs-CASE, r23 §3.1F UNION-vs-UNION-ALL, r27 §6.7A2 ref-vs-source) all landed on first re-probe. Q4 array_agg(ORDER BY) bonus probe also PASSED — clean validation of the structural-salience playbook across 4 different question shapes in one iteration. No new slips surfaced.
 
 ---
 
-### Q2 — `CASE WHEN` vs `IF()` equivalence in Trino
+## Per-question scoring
 
-| Dim | Score | Note |
-|---|---|---|
-| Accuracy | 3.5 | Honest content-gap decline — no fabrication. But responder failed to confirm `IF()` exists (it does — verified at [trino.io/docs/current/functions/conditional.html](https://trino.io/docs/current/functions/conditional.html), quoted: `if(condition, true_value)` and `if(condition, true_value, false_value)`; docs state "The following IF and CASE expressions are equivalent"). The single incidental mention at r27 L362 (`IF(condition, val_if_true, val_if_false)` inside the NVL2 row) was not picked up — findability miss. |
-| Completeness | 1.5 | No answer given; responder did not even surface the one-line truth ("yes, equivalent, IF is syntactic sugar"). |
-| Clarity | 3 | The decline itself is clear. |
-| Actionability | 1.5 | Engineer left without an answer — must search docs externally. |
-| **Q2 avg** | **2.375** | |
+### Q1 — IF() vs CASE WHEN in Trino — same thing? when must you use CASE?
 
-**Correct canonical (for iter550 fix):**
-- `IF()` IS a real Trino function. Two forms: `if(cond, true_value)` returns NULL when false; `if(cond, true_value, false_value)` returns false_value when false.
-- `IF(cond, t, f)` is **exactly equivalent** to `CASE WHEN cond THEN t ELSE f END` — Trino docs say so explicitly.
-- **Recommendation for analytics**: prefer `CASE WHEN` because (a) ANSI-standard, (b) handles 3+ branches naturally, (c) `FILTER (WHERE ...)` is the canonical conditional-aggregation idiom in resources. Use `IF()` for short two-branch inline cases where readability wins.
+**Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 = 5.00 STRONG PASS**
 
-**Gap-vs-findability verdict: FINDABILITY MISS.** The IF() function is mentioned ONCE (r27 L362) but buried inside an NVL2 row — there is NO `### LEADING CANONICAL — Trino IF() vs CASE WHEN` heading anywhere. Haiku keyword-scan ("IF", "CASE WHEN equivalent") lands on nothing findable.
+Responder said: functionally identical; if() is shorthand for CASE WHEN with the same query plan; `if(status='active',1,0)` ≡ `CASE WHEN status='active' THEN 1 ELSE 0 END` ≡ `count_if(status='active')` for the aggregate form; use IF for single condition, CASE for multi-branch (no ELSEIF in expression-form if()). Cited r23 §3.1E.
 
----
+**Doc verification (Trino 467):**
+- trino.io/docs/467/functions/conditional.html — VERBATIM: "Evaluates and returns `true_value` if `condition` is true, otherwise null is returned and `true_value` is not evaluated" (2-arg) and "Evaluates and returns `true_value` if `condition` is true, otherwise evaluates and returns `false_value`" (3-arg). Docs explicitly state: **"The following `IF` and `CASE` expressions are equivalent."**
+- trino.io/docs/467/functions/aggregate.html — VERBATIM: `count_if(x)`: "Returns the number of TRUE input values. This function is equivalent to `count(CASE WHEN x THEN 1 END)`."
 
-### Q3 — `UNION` vs `UNION ALL` in Trino
+iter550 teacher's `### LEADING CANONICAL — Trino IF() vs CASE WHEN` H3 in r23 §3.1E landed perfectly. The Haiku keyword-scan now hits a findable canonical. **The iter549 Q2 2.375 FAIL is fully closed (+2.625 swing on this exact question shape).**
 
-| Dim | Score | Note |
-|---|---|---|
-| Accuracy | 3.5 | Honest decline — no fabrication. Responder did mention general-SQL dedupe-vs-not but flagged it's not in resources. |
-| Completeness | 1.5 | No definitive answer; no Trino-specific perf framing. |
-| Clarity | 3 | Decline is clear. |
-| Actionability | 1.5 | Engineer left without the analytics default recommendation. |
-| **Q3 avg** | **2.375** | |
+### Q2 — UNION vs UNION ALL — difference + default for analytics?
 
-**Correct canonical (for iter550 fix):**
-- `UNION` = `UNION DISTINCT` — combines + removes duplicate rows across the union (implicit DISTINCT over the combined set). Verified at [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) — "UNION returns all rows that are in one or both of the relations. Any duplicate rows are removed."
-- `UNION ALL` — combines + keeps every row (including duplicates). Cheaper, no dedupe step.
-- **Default for analytics on Trino**: **`UNION ALL`**. Reasons: (a) implicit DISTINCT is a hidden hash/sort across all union inputs — expensive on multi-billion-row Iceberg fact tables; (b) most analytics use cases concatenate disjoint partitions (e.g., recent + archive fact tables) where dedupe is unnecessary; (c) if dedupe is needed, do it once explicitly downstream (`SELECT DISTINCT` or `GROUP BY` on the keyed columns), so the dedupe scope is visible and tunable.
+**Scores: Accuracy 5 / Completeness 5 / Clarity 4.5 / Actionability 5 = 4.875 STRONG PASS**
 
-**Gap-vs-findability verdict: FINDABILITY MISS.** `UNION ALL` appears 45 times across 6 resource files (r13 x2, r17 x2, r27 x11, r05 x1, r22 x25, r16 x4) — heavily USED but never EXPLAINED. There is NO `### UNION vs UNION ALL` or `### LEADING CANONICAL — UNION semantics` heading. The recent/archive `UNION ALL` view pattern (r27 §6.7D area, r22 storage tiering) implicitly relies on UNION ALL but doesn't motivate it.
+Responder said: bare UNION = UNION ALL + implicit global DISTINCT (expensive sort/hash); UNION ALL concatenates streaming, no dedupe; default UNION ALL for analytics; bare UNION on disjoint inputs is a silent perf killer. Cited r23 §3.1F.
 
----
+**Doc verification (Trino 467):**
+- trino.io/docs/467/sql/select.html — VERBATIM: **"If the argument `ALL` is specified all rows are included even if the rows are identical. If the argument `DISTINCT` is specified only unique rows are included in the combined result set. If neither is specified, the behavior defaults to `DISTINCT`."** Rule applies to UNION/INTERSECT/EXCEPT.
 
-### Q4 — dbt `ref('model')` vs `source('schema','table')`
+Clarity off 0.5 for not mentioning INTERSECT/EXCEPT same-default behavior explicitly (a minor completeness nit, not a content gap). iter550 teacher's r23 §3.1F LEADING CANONICAL H3 landed perfectly. **The iter549 Q3 2.375 FAIL is fully closed (+2.50 swing on this exact question shape).**
 
-| Dim | Score | Note |
-|---|---|---|
-| Accuracy | 3.5 | Honest decline — no fabrication. |
-| Completeness | 1.5 | No definitive behavioral difference given. |
-| Clarity | 3 | Decline is clear. |
-| Actionability | 1.5 | Engineer left without the DAG-edge framing. |
-| **Q4 avg** | **2.375** | |
+### Q3 — dbt ref('model') vs source('raw','table') — naming or behavior?
 
-**Correct canonical (for iter550 fix):**
-- `{{ ref('model_name') }}` — references **another dbt model** in the project. Builds a model-to-model edge in the dbt DAG; dbt uses this edge to (a) determine build order, (b) resolve the relation name (database/schema/identifier) using `generate_database_name` / `generate_schema_name` macros at compile time, (c) enable downstream selection (`+model_name`). Verified at [docs.getdbt.com/reference/dbt-jinja-functions/ref](https://docs.getdbt.com/reference/dbt-jinja-functions/ref).
-- `{{ source('source_name', 'table_name') }}` — references a **raw external input** declared in `sources.yml` — a table dbt did NOT build (Kafka/Iceberg landing, Postgres CDC sink, etc.). Two REQUIRED args (source, table). Source's database/schema come from the YAML declaration, not from the target. Enables (a) source freshness checks (`dbt source freshness`), (b) source-level testing/docs, (c) edge in the DAG from the raw input to downstream models. Verified at [docs.getdbt.com/reference/dbt-jinja-functions/source](https://docs.getdbt.com/reference/dbt-jinja-functions/source).
-- **Behavioral difference (not just naming)**: dbt **builds** what's referenced by `ref()`; dbt **does NOT build** what's referenced by `source()` — source tables are inputs the orchestrator delivers. Mixing them up means either dbt tries to build a raw table (parse error) or you bypass source freshness (silent staleness).
-- **Argument shape**: `ref()` takes ONE arg (or two for cross-project / versioned models); `source()` takes exactly TWO args (source_name, table_name) — strict, not optional.
+**Scores: Accuracy 5 / Completeness 5 / Clarity 4.5 / Actionability 5 = 4.875 STRONG PASS**
 
-**Gap-vs-findability verdict: FINDABILITY MISS.** r27 uses `ref()` 20+ times and `source('app', '...')` ~3 times — both heavily USED but never CONTRASTED in a single H3. r27 §6.7B explains source FRESHNESS (great) but doesn't compare ref vs source as a behavioral pair. There is NO `### ref() vs source() — the DAG-edge difference` heading.
+Responder said: NOT a naming convention. ref()=dbt model, built by dbt, model-to-model DAG edge; source()=raw external in sources YAML, NOT built (entry point), enables `dbt source freshness`. stg_ uses source(), downstream uses ref(); don't hardcode (breaks DAG + env portability). Cited r27 §6.7A2.
+
+**Doc verification:**
+- docs.getdbt.com/reference/dbt-jinja-functions/ref — VERBATIM: ref() "Returns a Relation for a model, seed, or snapshot" AND "Creates dependencies between the referenced node and the current model" AND "is using these references between models to automatically build the dependency graph. This will enable dbt to deploy models in the correct order when using `dbt run`."
+- docs.getdbt.com/reference/dbt-jinja-functions/source — VERBATIM: source() "Returns a Relation for a source" AND "Creates dependencies between a source and the current model, which is useful for documentation and node selection." Two arguments: source_name + table_name from the sources: YAML.
+
+Clarity off 0.5 — the "NOT a naming convention" lead is correct + strong, but the explanation could lead with one-sentence-each definitions before jumping to the four-axis distinction. Minor. iter550 teacher's r27 §6.7A2 LEADING CANONICAL H3 (slotted BEFORE §6.7B source-freshness — correct ordering so freshness reader sees source() definition first) landed perfectly. **The iter549 Q4 2.375 FAIL is fully closed (+2.50 swing on this exact question shape).**
+
+### Q4 — array_agg(x ORDER BY y) — does Trino support inline ordering, production-safe?
+
+**Scores: Accuracy 4.5 / Completeness 4 / Clarity 4 / Actionability 4 = 4.125 PASS**
+
+Responder said: array_agg(x ORDER BY y) supported + production-safe; unordered by default without ORDER BY; ORDER BY is part of the aggregate signature.
+
+**Doc verification (Trino 467):**
+- trino.io/docs/467/functions/aggregate.html — confirmed array_agg(x) "Returns an array created from the input `x` elements" AND the docs note "some aggregate functions such as `array_agg()` produce different results depending on the order of input values" with example syntax `array_agg(x ORDER BY y DESC)`. Without an explicit ORDER BY the input order is non-deterministic across distributed workers — responder's claim is accurate.
+
+Accuracy off 0.5 / Completeness off 1 / Clarity off 1 / Actionability off 1 for not anchoring with the verbatim syntax `array_agg(x ORDER BY y)` and not flagging the NULL-handling nuance or the cardinality risk (unbounded array growth) — nuance gaps, not errors. Direction is correct; depth is shallower than the three explicitly-canonicalized topics. Acceptable, not stellar.
 
 ---
 
-## iter550 PRIMARY BATCH-FIX PLAN (three findability canonicals)
+## Overall
 
-This iteration revealed a recurring **structural-salience pattern**: content is USED everywhere but the responder can't surface it because no LEADING CANONICAL H3 anchors the question's keywords. iter550 must add three findable H3 canonicals:
+`(5.00 + 4.875 + 4.875 + 4.125) / 4 = 18.875 / 4 = `**4.7188 PASS**
 
-### Fix 1 — Trino `IF()` vs `CASE WHEN` canonical
-- **File**: `resources/23-sql-best-practices-olap.md` (primary, since it's the SQL idiom file) AND a cross-ref pointer from `resources/07-analytical-query-patterns.md` (since pivot/funnel patterns use CASE heavily).
-- **Heading**: `### LEADING CANONICAL — Trino IF() vs CASE WHEN — equivalent, when to use each`
-- **Keyword anchors** (blockquote under heading): `Trino IF function, IF vs CASE WHEN, IF equivalent CASE, two-branch conditional Trino, syntactic sugar IF Trino, prefer CASE or IF, IF(condition, true, false), CASE WHEN cond THEN`.
-- **Content must include**: (a) both `IF` forms with the exact `if(condition, true_value)` and `if(condition, true_value, false_value)` shape; (b) the "equivalent" statement from Trino docs with the side-by-side example; (c) recommendation to default to `CASE WHEN` for 3+ branches and for ANSI-compatibility across dbt targets, use `IF()` for short two-branch inline cases; (d) cross-link to `FILTER (WHERE ...)` for conditional aggregation (already in r07).
-- **Verification**: cite [trino.io/docs/current/functions/conditional.html](https://trino.io/docs/current/functions/conditional.html).
+Overall-average rule: 4.7188 ≥ 3.5 = **PASS**. +1.75 swing from iter549's 2.969 — full recovery in one iteration.
 
-### Fix 2 — `UNION` vs `UNION ALL` canonical
-- **File**: `resources/23-sql-best-practices-olap.md` (SQL idiom) — and a cross-ref pointer from `resources/07-analytical-query-patterns.md` (recent+archive pattern uses UNION ALL).
-- **Heading**: `### LEADING CANONICAL — UNION vs UNION ALL — semantics + default for Trino analytics`
-- **Keyword anchors**: `UNION vs UNION ALL, UNION dedup Trino, UNION ALL faster, combine queries Trino, set operator Trino, UNION DISTINCT, default UNION analytics, recent archive UNION ALL`.
-- **Content**: (a) `UNION` = implicit DISTINCT (dedup expensive); `UNION ALL` = keep all (cheap); (b) Trino default for analytics = **UNION ALL** with the three reasons above; (c) when to use UNION (only when dedupe is the actual semantic intent, e.g., merging two source tables that might overlap and you want the union as a set); (d) Trino-specific perf note: implicit DISTINCT in UNION is a hash/sort step the optimizer can't skip — costs grow with row count and column width; (e) cross-link to r22 storage tiering and r27 recent/archive view pattern where UNION ALL is the canonical pattern.
-- **Verification**: cite [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html).
+## Findability gap closure verification
 
-### Fix 3 — dbt `ref()` vs `source()` canonical
-- **File**: `resources/27-oracle-plsql-to-dbt-trino.md` (primary, the dbt mechanics file) — place BEFORE §6.7B source-freshness so the basic behavioral contrast leads.
-- **Heading**: `### 6.7A LEADING CANONICAL — dbt ref() vs source() — the DAG-edge behavioral difference`
-- **Keyword anchors**: `dbt ref source difference, ref vs source dbt, ref function dbt, source function dbt, sources.yml, dbt DAG edge, dbt model dependency, raw input dbt source, dbt builds ref does not build source`.
-- **Content**: (a) ref() = reference another dbt model; source() = reference a raw input declared in sources.yml; (b) Behavioral difference table (Built by dbt? / Arg shape / Resolves via / Enables freshness?); (c) Concrete side-by-side example: `FROM {{ ref('stg_orders') }}` vs `FROM {{ source('app', 'orders') }}`; (d) Common mistake: using ref() for a raw table dbt didn't create → "model not found" error; using source() for a model dbt built → bypasses lineage tests; (e) cross-link to existing §6.7B source freshness section.
-- **Verification**: cite [docs.getdbt.com/reference/dbt-jinja-functions/ref](https://docs.getdbt.com/reference/dbt-jinja-functions/ref) and [docs.getdbt.com/reference/dbt-jinja-functions/source](https://docs.getdbt.com/reference/dbt-jinja-functions/source).
+Three iter549 re-probe gaps tested + confirmed CLOSED:
 
-### Do NOT touch
-- `resources/22` §13.x federation guardrails (federation rubric stays 4.49944/310).
-- r13 §1 rollback (just-shipped fix — preserve verbatim).
-- r17 §3486-3614 Emergency rollback — already correct.
+| iter549 Gap | iter549 Score | iter550 Score | Swing | Closed? |
+|---|---|---|---|---|
+| IF vs CASE WHEN (r23 §3.1E) | 2.375 | 5.00 | +2.625 | YES |
+| UNION vs UNION ALL (r23 §3.1F) | 2.375 | 4.875 | +2.50 | YES |
+| ref() vs source() (r27 §6.7A2) | 2.375 | 4.875 | +2.50 | YES |
 
----
+This is the **4th consecutive structural-salience playbook validation** in the last 5 iterations (iter546 map_concat H3, iter547 COALESCE-default H4, iter548 query-hint H4, iter550 batched IF/CASE + UNION + ref/source). The playbook — promote buried-but-heavily-used primitives to a `### LEADING CANONICAL` H3 with keyword-anchor blockquote — is now validated 4x distinct topics, 3x in a single batch. Methodology is robust.
 
-## Overall metric
+## Pattern notes
 
-| Q | Avg |
-|---|---|
-| Q1 | 4.875 |
-| Q2 | 2.375 |
-| Q3 | 2.375 |
-| Q4 | 2.375 |
-| **Overall** | **2.969 — FAIL** (< 3.5) |
+- Q1/Q2/Q3 scored within 0.125 of each other (5.00 / 4.875 / 4.875) — consistent depth across the three new canonicals. Teacher batched three structural canonicals into one iteration without quality degradation.
+- Q4 array_agg(ORDER BY) scored lowest (4.125) — a "spontaneous" check on a non-re-probe primitive; responder got the direction right but the depth is noticeably shallower than the three explicitly-canonicalized topics. This is signal: the next "used-but-never-explained" audit should target heavily-used Trino aggregate-with-ORDER-BY primitives (array_agg, listagg, multimap_agg) plus the WITH/CTE explanation gap, DISTINCT ON absence in Trino, COALESCE-chain semantics, and current_date arithmetic.
+- No fabrications. No identifier slips. No dialect errors. Federation NOT probed — 4.49944/310 row untouched per directive.
 
-Pattern: three fundamental-topic findability gaps surfaced together. The win on Q1 (single hard-rolloved reconcile) did not offset three soft-zone gaps. iter550 must batch-fix all three canonicals; do NOT chase a fourth target. After iter550 ships these three H3 anchors, re-probe each from 2+ angles before declaring closed.
+## iter551 teacher actions (priority order)
+
+1. **HOLD all iter550 NEW LOCKS**: r23 §3.1E (IF-vs-CASE), r23 §3.1F (UNION-vs-UNION-ALL), r27 §6.7A2 (ref-vs-source). Plus all iter495-549 locks.
+2. **Continue the "used-but-never-explained" audit** — Q4 array_agg(ORDER BY) scoring 4.125 (vs 4.875+ on the three canonicalized topics) signals the next batch:
+   - `### LEADING CANONICAL — array_agg with inline ORDER BY (and the unbounded-array cardinality gotcha)` in r23 — anchor on `array_agg(x ORDER BY y)`, NULL handling, cardinality budget, alternatives (multimap_agg, listagg).
+   - `### LEADING CANONICAL — WITH ... AS (...) — CTE semantics on Trino (inline vs materialize hint absence)` in r23 — heavily used in worked examples, never explained as a primitive; anchor on "common table expression Trino", "WITH AS Trino", "CTE materialize Trino".
+   - `### LEADING CANONICAL — DISTINCT ON absence in Trino (use ROW_NUMBER() filter pattern)` in r23 — Postgres-pattern engineers ask this; Trino has no DISTINCT ON; canonical the row_number()=1 pattern.
+   - `### LEADING CANONICAL — COALESCE chain semantics + short-circuit evaluation` in r23 — heavily used in r07/r09/r23, never anchored.
+   - `### LEADING CANONICAL — current_date / current_timestamp arithmetic on Trino (INTERVAL types + at_timezone)` in r23 — date math is in worked examples but no explanation home.
+3. **MEDIUM probe targets**: durability re-probes on the iter550 wins (2nd angle each — different question phrasing): "Does Trino's IF take 2 or 3 args and what happens with NULL?", "Why is UNION slow compared to UNION ALL?", "If I have a raw S3 table not built by dbt, do I use ref() or source()?".
+4. **LOW priority — DO NOT TOUCH**: resources/22 §13.x federation guardrails + federation rubric row 4.49944/310.
+5. Meta-rule: continue WebSearch-verifying corrections against trino.io/docs/467/ + docs.getdbt.com before asserting them. 13th consecutive iter where this practice prevented a false-positive judgment.
+
+**OVERALL: 4.7188 PASS — full recovery from iter549. Three batched canonicals validated. Continue used-but-never-explained audit on the next 5 primitives.**

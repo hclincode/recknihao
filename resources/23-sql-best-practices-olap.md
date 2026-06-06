@@ -404,6 +404,75 @@ This is the canonical "value as of latest event" idiom — much shorter than a w
 
 ---
 
+## 3.1E. Trino `if()` vs `CASE WHEN` and `count_if` — the conditional-expression family
+
+### LEADING CANONICAL — Trino IF() vs CASE WHEN (equivalent; IF is the 2-3 arg shorthand)
+
+> **READ THIS FIRST if your question contains any of these keywords: `Trino IF function`, `IF vs CASE`, `CASE WHEN equivalent`, `conditional expression Trino`, `count_if`, `ternary Trino`, `IIF Trino`, `DECODE Trino`, `Trino if() else`.** Verified at [trino.io/docs/current/functions/conditional.html](https://trino.io/docs/current/functions/conditional.html) on 2026-06-06.
+
+**The one-fact summary.** Trino's `if(...)` is a **single-condition shorthand** for `CASE WHEN`; the two are **equivalent** at the planner level. Use `if(...)` for 1 condition + 1 ELSE; use `CASE WHEN` when you need multiple `WHEN ... THEN` branches.
+
+- `if(condition, true_value)` — Trino docs verbatim: *"Evaluates and returns `true_value` if `condition` is true, otherwise null is returned and `true_value` is not evaluated."* Equivalent to `CASE WHEN condition THEN true_value END` (no `ELSE` → returns `NULL`).
+- `if(condition, true_value, false_value)` — Trino docs verbatim: *"Evaluates and returns `true_value` if `condition` is true, otherwise evaluates and returns `false_value`."* Equivalent to `CASE WHEN condition THEN true_value ELSE false_value END`.
+- `count_if(predicate)` — the idiomatic count-of-matching-rows aggregate. Trino docs: *"Returns the number of `TRUE` input values. This function is equivalent to `count(CASE WHEN x THEN 1 END)`."* Also equivalent to `sum(if(predicate, 1, 0))`. Prefer `count_if` — shortest + clearest intent.
+
+**Worked equivalence pair (all three lines produce identical results + identical query plans):**
+
+```sql
+-- Trino 467 — three equivalent forms, pick the one that reads best in context:
+SELECT if(status = 'active', 1, 0)                              AS active_flag FROM users;
+SELECT CASE WHEN status = 'active' THEN 1 ELSE 0 END            AS active_flag FROM users;
+SELECT count_if(status = 'active')                              AS active_count FROM users;  -- aggregate form
+```
+
+**When to reach for which.** Use `if()` for the 1-condition ternary. Use `CASE WHEN ... WHEN ... ELSE ... END` for **multi-branch** logic (`if()` does NOT chain — there is no `elseif` in the expression form; `CASE` is the only path). Use `count_if(p)` over `count(CASE WHEN p THEN 1 END)` for COUNT-of-matching.
+
+> **DO NOT WRITE.**
+> 1. **`DECODE(col, 'A', 1, 'B', 2, 0)`** — Oracle-only. Trino has no `DECODE`. Translate to `CASE WHEN col = 'A' THEN 1 WHEN col = 'B' THEN 2 ELSE 0 END`, OR to a chain of `if()` if it's a single condition. **CRITICAL NULL-MATCHING NUANCE on the `DECODE` → CASE translation: see [resource 27 §4.1A LEADING CANONICAL — Oracle DECODE → Trino CASE](27-oracle-plsql-to-dbt-trino.md) — DECODE treats NULL=NULL as a match, simple CASE does NOT.**
+> 2. **`IIF(condition, true_value, false_value)`** — SQL-Server-only. Trino is **`if(condition, true_value, false_value)`** (lowercase `if`, NOT `IIF`). Pasting `IIF(...)` into Trino produces `Function 'iif' not registered`.
+> 3. **`if(condition, true_value, ELSEIF other_condition, other_value, ...)`** — there is **no `ELSEIF` in the `if()` expression**. For multi-branch, use `CASE WHEN ... WHEN ... ELSE ... END`. (The `IF / ELSEIF / END IF` keyword form exists ONLY inside Trino **SQL routines / UDFs**, NOT in regular SELECTs — see [trino.io/docs/current/routines/if.html](https://trino.io/docs/current/routines/if.html); that's a different surface.)
+> 4. **`SUM(CASE WHEN p THEN 1 ELSE 0 END)` as the default "count matching rows" idiom.** Works, but verbose; **`count_if(p)` is the canonical Trino-native form** and reads as the intent. Both produce the same plan.
+
+**Cross-references.** Resource 07 §"Wide-pivot variant" uses both the `CASE WHEN` and the `FILTER (WHERE ...)` forms for conditional aggregation (the multi-column manual-pivot pattern). Resource 27 §4.1A is the canonical for the Oracle `DECODE` → searched-`CASE WHEN` NULL-matching nuance.
+
+---
+
+## 3.1F. `UNION` vs `UNION ALL` — the dedupe-vs-concatenate canonical (default to `UNION ALL` for analytics)
+
+### LEADING CANONICAL — UNION vs UNION ALL (UNION dedupes = expensive; default to UNION ALL for analytics)
+
+> **READ THIS FIRST if your question contains any of these keywords: `UNION vs UNION ALL`, `combine result sets Trino`, `UNION dedupe`, `UNION ALL performance`, `default union analytics`, `INTERSECT`, `EXCEPT`, `merge two SELECTs`, `stack queries`.** Verified at [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) on 2026-06-06.
+
+**The one-fact summary.** Trino's bare `UNION` is `UNION DISTINCT` — it removes duplicates via an **implicit global DISTINCT** over the combined result (a sort or hash-aggregate over every output row). `UNION ALL` concatenates the two inputs **streaming, no dedupe** — orders of magnitude cheaper on large analytical sets. Trino docs verbatim: *"If the argument `ALL` is specified all rows are included even if the rows are identical. If the argument `DISTINCT` is specified only unique rows are included in the combined result set. If neither is specified, the behavior defaults to `DISTINCT`."*
+
+**Worked example + perf note:**
+
+```sql
+-- BARE UNION — full-result DISTINCT, equivalent to UNION ALL + DISTINCT (EXPENSIVE):
+SELECT user_id FROM events_2026_q1
+UNION                              -- = UNION DISTINCT (default) → silent global DISTINCT over all rows
+SELECT user_id FROM events_2026_q2;
+
+-- UNION ALL — streaming concatenation, cheap (DEFAULT for analytics):
+SELECT user_id FROM events_2026_q1
+UNION ALL
+SELECT user_id FROM events_2026_q2;
+```
+
+**Default to `UNION ALL`.** Only use bare `UNION` when (a) you specifically need dedupe across the combined result AND (b) the inputs can produce overlapping rows. If the inputs are already disjoint (e.g., partitioned by date), bare `UNION` does a full-result sort/hash-aggregate for **zero benefit** — it's a silent perf killer.
+
+**`INTERSECT` / `EXCEPT` always dedupe** by default (same rule: `DISTINCT` is the default when neither `ALL` nor `DISTINCT` is specified). Semantically: `INTERSECT` = semi-join (rows in both); `EXCEPT` = anti-join (rows in left but not right). See [§10 SemiJoin / NOT IN gotcha](#10-in-subqueries-vs-joins--let-trinos-optimizer-decide) for the join-form rewrites and the `NOT IN` + NULL trap — do not rewrite that section.
+
+> **DO NOT WRITE.**
+> 1. **Bare `UNION` "just to combine" two tables** when you don't need dedupe. The implicit global DISTINCT is a silent full-result sort/hash-aggregate — accidental perf killer on multi-billion-row analytics. Default to `UNION ALL`.
+> 2. **"`UNION` preserves the order of the input queries"** — **FALSE.** Neither `UNION` nor `UNION ALL` guarantees row order. If you need order, wrap the union in an outer `ORDER BY`.
+> 3. **"`UNION ALL` and then `DISTINCT` is slower than bare `UNION`"** — **FALSE.** They are equivalent operations; bare `UNION` IS `UNION ALL` + an implicit global DISTINCT. The planner produces the same shape.
+> 4. **`UNION` to dedupe rows from a SINGLE table** — wrong tool. Use `SELECT DISTINCT` (single scan) instead of `SELECT ... UNION SELECT ...` (two scans + DISTINCT).
+
+**Cross-references.** [§10](#10-in-subqueries-vs-joins--let-trinos-optimizer-decide) for the `INTERSECT` = semi-join and `EXCEPT` = anti-join rewrites, the `NOT IN` + NULL gotcha, and the SemiJoin canonical. [Trino 467 release notes — UNION ALL parallel write optimization](https://trino.io/docs/current/admin/properties-optimizer.html) note that the optimizer has special parallelization paths for `UNION ALL` writes that bare `UNION` does not get.
+
+---
+
 ## 4. Verify your plan with EXPLAIN
 
 **Why**: SQL that looks correct can still scan the whole table. `EXPLAIN` shows what Trino will actually do.

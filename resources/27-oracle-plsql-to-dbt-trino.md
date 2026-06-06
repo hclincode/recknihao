@@ -2383,6 +2383,52 @@ For aggregate-level thresholds, use `dbt_utils.not_null_proportion` (see above).
 
 ---
 
+### 6.7A2 LEADING CANONICAL — dbt `ref()` vs `source()` — the DAG-edge behavioral difference (NOT just a naming convention)
+
+> **READ THIS FIRST if your question contains any of these keywords: `dbt ref vs source`, `ref source difference`, `dbt DAG edge`, `source freshness entry point`, `when to use ref source`, `dbt dependency graph`, `dbt model vs source`, `stg_ FROM source`, `raw table dbt`, `hardcode table name dbt`.** Verified at [docs.getdbt.com/reference/dbt-jinja-functions/ref](https://docs.getdbt.com/reference/dbt-jinja-functions/ref) and [docs.getdbt.com/reference/dbt-jinja-functions/source](https://docs.getdbt.com/reference/dbt-jinja-functions/source) on 2026-06-06.
+
+**The one-fact summary.** `ref()` references **another dbt MODEL** (a `.sql` file dbt builds) — it creates a DAG edge so dbt builds the upstream model first AND resolves the deployed relation name per target/schema. `source()` references a **RAW EXTERNAL input** declared in a `sources:` YAML — dbt does NOT build it (it's the graph's entry point), and `source()` unlocks `dbt source freshness` checks (see §6.7B / §6.7K) plus lineage. **This is a behavioral difference, NOT a naming convention.**
+
+| Jinja call | Refers to | Built by dbt? | Creates DAG edge? | Enables `dbt source freshness`? |
+|---|---|---|---|---|
+| `{{ ref('model_name') }}` | Another dbt **MODEL** (a `.sql` file in `models/`) | **Yes** — dbt builds upstream model first | **Yes** — model-to-model dependency | No |
+| `{{ source('source_name', 'table_name') }}` | A raw external **TABLE** declared in a `sources:` YAML | **No** — source is the graph's entry point | **Yes** — source-to-model dependency | **Yes** — required for the `freshness:` block |
+
+**The standard project rule.** Staging models (`models/staging/stg_*.sql`) select `FROM {{ source('app', 'orders') }}` — they are the ONLY layer that touches raw landing tables. Everything downstream (intermediate, marts) uses `{{ ref('stg_orders') }}` / `{{ ref('int_*') }}` / `{{ ref('dim_*') }}` / `{{ ref('fct_*') }}` — never another raw table name. This keeps the DAG accurate and gives you a single chokepoint (the `stg_` layer) where the raw-input shape is named.
+
+**Worked example.** Given `models/_sources.yml`:
+
+```yaml
+sources:
+  - name: app
+    database: postgresql           # the Trino catalog name on this stack
+    schema:   public
+    tables:
+      - name: orders
+        loaded_at_field: ingested_at
+```
+
+```sql
+-- models/staging/stg_orders.sql -- raw layer reads from source()
+SELECT order_id, customer_id, amount, ingested_at
+FROM {{ source('app', 'orders') }}                   -- DAG entry-point; freshness-checkable
+
+-- models/marts/fct_orders.sql -- downstream reads from ref()
+SELECT * FROM {{ ref('stg_orders') }}                -- DAG edge: fct_orders depends on stg_orders
+```
+
+**The Jinja docs verbatim.** `ref()` *"creates dependencies between the referenced node and the current model"* AND *"is using these references between models to automatically build the dependency graph. This will enable dbt to deploy models in the correct order when using `dbt run`."* `source()` *"creates dependencies between a source and the current model, which is useful for documentation and node selection"* (and is the only way to unlock `dbt source freshness`).
+
+> **DO NOT WRITE.**
+> 1. **`{{ ref('raw_orders_landing_table') }}`** when the target is a RAW external table (not a dbt model) — `ref()` requires the argument to resolve to a dbt-managed `.sql` model file. Use `{{ source('app', 'orders') }}` for raw inputs.
+> 2. **`{{ source('jaffle_shop', 'stg_orders') }}`** for a dbt MODEL — sources are by definition NOT built by dbt; pointing `source()` at a dbt model breaks lineage and disables freshness checks. Use `{{ ref('stg_orders') }}`.
+> 3. **Hardcode `FROM iceberg.analytics.stg_orders` or `FROM postgresql.public.orders`** anywhere in a dbt model — breaks the DAG (dbt can't see the dependency, won't build upstream first, won't reorder on schema changes) AND breaks env portability (`iceberg.analytics` vs `iceberg.analytics_dev` differs per target). ALWAYS use `{{ ref(...) }}` for models and `{{ source(...) }}` for raw inputs.
+> 4. **`FROM "stg_orders"`** (bare relation name with no Jinja) — same defect as #3; no DAG edge, no per-target schema interpolation. Wrap in `{{ ref('stg_orders') }}`.
+
+**Cross-references.** §6.7B (full `sources.yml` / `loaded_at_field` / `warn_after` / `error_after` canonical — requires `source()` to function). §6.7K (the `dbt source freshness` + `dbt build --select source_status:fresher+` CLI canonical — also requires `source()`). §6.7D (`dbt seeds` referenced via `{{ ref('seed_name') }}` — seeds use `ref()`, NOT `source()`, because dbt does build the seed via `dbt seed`). §6.7E (unit tests' `input: ref(...)` / `input: source(...)` — same distinction applies). For the full `stg_` / `int_` / `dim_` / `fct_` layered model pattern see [docs.getdbt.com/best-practices/how-we-structure/1-guide-overview](https://docs.getdbt.com/best-practices/how-we-structure/1-guide-overview).
+
+---
+
 ### 6.7B LEADING CANONICAL — dbt source freshness (`sources.yml`, `loaded_at_field`, `dbt source freshness` command)
 
 > **READ THIS FIRST if your question contains any of these keywords: `source freshness`, `freshness`, `loaded_at_field`, `loaded_at`, `warn_after`, `error_after`, `dbt source freshness` command, `sources.yml`, `stale source`, `does freshness block downstream`, `freshness CI`.** This block is the canonical reference for declaring and checking source staleness in dbt-trino on this stack. All claims below are verified at [docs.getdbt.com/reference/resource-properties/freshness](https://docs.getdbt.com/reference/resource-properties/freshness), [docs.getdbt.com/reference/commands/source](https://docs.getdbt.com/reference/commands/source), and [docs.getdbt.com/docs/deploy/source-freshness](https://docs.getdbt.com/docs/deploy/source-freshness) (WebFetched 2026-06-05).
