@@ -282,6 +282,7 @@ SELECT split_to_multimap('tag=a;tag=b;tag=c', ';', '=') AS m;
 | "`split_to_map` returns a JSON string." | **FALSE.** It returns a true `MAP(VARCHAR, VARCHAR)` — read keys with `element_at(m, 'key')` or iterate with `map_entries(m)`. |
 | "`split_part` returns empty string when the index is out of range." | **FALSE.** It returns `NULL` (Trino #14460). See [resource 27 §4.3](27-oracle-plsql-to-dbt-trino.md) for the canonical row. |
 | "`split_to_map` works on duplicate keys." | **FALSE.** Duplicate keys raise an error — use `split_to_multimap` instead, which groups duplicates into an array per key. |
+| "`contains(split(col, ','), 'web')` is whitespace-safe for tag-membership tests." | **FALSE — exact array-element match.** `split('mobile, web, api', ',')` returns `ARRAY['mobile', ' web', ' api']` (note the leading spaces), so `contains(..., 'web')` returns **`FALSE`** because `' web'` != `'web'`. Fix by either splitting on the literal `', '` (`split(col, ', ')`) when the delimiter is consistent, or by trimming each element after the split: `contains(transform(split(col, ','), x -> trim(x)), 'web')`. The `UNNEST` worked example above already calls `TRIM(tag)` for the same reason. |
 
 **Cross-reference.** For the canonical `CROSS JOIN UNNEST` + WHERE-clause-order rule (the iter505 trap where engineers place `WHERE` BEFORE the JOIN), see [resource 07 §1a.1](07-analytical-query-patterns.md). For Oracle migration mapping `INSTR` / `SUBSTR` / `REGEXP_*` → Trino, see [resource 27 §4.3](27-oracle-plsql-to-dbt-trino.md).
 
