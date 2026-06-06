@@ -594,6 +594,8 @@ WHERE contains(map_keys(properties), 'debug_mode');
 
 **Mnemonic:** `element_at` on a MAP returns the **value** (a scalar). `cardinality` wants a **collection** (array or map). You can't wrap one in the other. The correct existence check is always `element_at(map_col, key) IS NOT NULL`.
 
+> **MAP lookup with a default value — `COALESCE(element_at(...), <default>)` (iter532, adjacent to the element_at canonical above).** Keyword anchors: map lookup with default, fall back when key missing, default value for missing map key, element_at default, COALESCE element_at, map key default Trino. `element_at(map_col, key)` returns NULL when the key is absent — wrap in `COALESCE` to substitute a default. Example: `SELECT user_id, COALESCE(element_at(settings, 'theme'), 'default_theme') AS theme FROM iceberg.analytics.users;`. Verified at [trino.io/docs/current/functions/map.html](https://trino.io/docs/current/functions/map.html) (`element_at(map(K,V), key) -> V`, NULL on missing key) and [trino.io/docs/current/functions/conditional.html](https://trino.io/docs/current/functions/conditional.html) (`COALESCE(v1, v2, ...)` returns the first non-NULL).
+
 ### LEADING CANONICAL — Trino MAP higher-order functions (`map_filter` / `map_keys` / `map_values` / `transform_keys` / `transform_values`): filter and reshape a MAP IN-PLACE (no UNNEST)
 
 > **Keyword anchors so the responder lands here:** Trino map_filter, filter map by value, filter map by key, map_keys map_values, keys where value true, transform map without unnest, map higher-order function, map HOF Trino, lambda map Trino, rebuild map with transformed values, get keys whose value is true, keep only entries matching condition map, map_filter no second argument needed, map_entries map_from_entries.

@@ -1166,6 +1166,23 @@ ORDER  BY s.committed_at DESC;
 > | `SELECT partition, SUM(file_size_in_bytes) FROM "<t>$partitions" GROUP BY partition` | **`Column 'file_size_in_bytes' cannot be resolved`** — that column is **`$files`-only**. `$partitions` exposes the per-partition byte total under the column name **`total_size`** (BIGINT). | `SELECT partition, total_size FROM iceberg.analytics."events$partitions" ORDER BY total_size DESC;` |
 > | `SELECT partition, COUNT(*) AS file_count FROM "<t>$partitions" GROUP BY partition` | **Redundant** — `$partitions` is **already one row per partition**, so `COUNT(*) GROUP BY partition` returns `1` for every partition. The actual per-partition file count is already exposed as the **`file_count`** column. | `SELECT partition, file_count FROM iceberg.analytics."events$partitions" ORDER BY file_count DESC;` |
 
+> **LEADING CANONICAL — "list each data file WITH when it was committed" (iter532, single-query worked example, copy-pasteable).** Keyword anchors: list each data file with WHEN it was committed, per-file commit time, which snapshot added this file, $files commit time, files and commit timestamp in one query, $files added_snapshot_id join $snapshots, per-file commit timestamp Iceberg one query. **The JOIN `$files.added_snapshot_id = $snapshots.snapshot_id` IS the answer** — `$files` carries no per-file timestamp; the commit time lives on `$snapshots.committed_at`, reached through `$files.added_snapshot_id`. Verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (Iceberg connector — Metadata tables: `$files.added_snapshot_id` and `$snapshots` with columns `snapshot_id`, `committed_at`, `operation`).
+>
+> ```sql
+> -- One query: every data file + the snapshot that added it + when that snapshot was committed.
+> SELECT f.file_path,
+>        f.file_size_in_bytes,
+>        f.record_count,
+>        s.committed_at,
+>        s.operation
+> FROM   iceberg.analytics."events$files"     f
+> JOIN   iceberg.analytics."events$snapshots" s
+>   ON   f.added_snapshot_id = s.snapshot_id
+> ORDER  BY s.committed_at DESC;
+> ```
+>
+> Quote the WHOLE `<table>$files` / `<table>$snapshots` token in ONE pair of double quotes (`"events$files"`, NOT `"events"$files`). Add `WHERE f.content = 0` to exclude position/equality-delete files. Two separate queries (one against `$files`, one against `$snapshots`) is **NOT** the answer to the per-file-commit-time question — the JOIN above is.
+
 > **`$files` column-presence pin and `$history` column-name pin (iter531 — read before answering "when was this file committed?" or "what column on `$history` shows the timestamp?").** Verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html). Keyword anchors: $files committed_at, $files commit time per file, $history made_current_at vs made_at, $files added_snapshot_id join, per-file commit timestamp Iceberg.
 >
 > | Pin | Wrong claim (DO NOT WRITE) | Correct shape |
