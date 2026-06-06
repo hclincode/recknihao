@@ -33,6 +33,47 @@
 
 ---
 
+## LEADING CANONICAL — bucket(tenant_id, N) vs identity(tenant_id): which partition transform for a multi-tenant Iceberg table (iter541 PIN; arg-order corrected iter542)
+
+> **READ THIS FIRST if your question contains: `partition by tenant`, `partition by tenant_id`, `tenant_id partitioning`, `multi-tenant Iceberg partitioning`, `bucket vs identity partition`, `which partition transform for tenant_id`, `high-cardinality partition column`, `bucket(tenant_id, 32)`, `bucket(tenant_id, 64)`, `tiny file explosion`, `partition explosion`, `too many partitions tenant_id`, `identity transform tenant_id`.** This is the topmost canonical for the tenant-ID partition-transform decision; the deeper write-clustering / order / Spark footguns are in the "Choosing partition columns" and "Bucket partitioning — the two production footguns" sections below. **Trino `bucket()` is COLUMN-FIRST: `bucket(tenant_id, N)` — NOT `bucket(N, tenant_id)` (that is the Spark order and parse-fails on Trino; see the "WATCH OUT — bucket() argument order differs between engines" callout below).**
+
+**DECISION RULE — identity vs bucket on a multi-tenant column.** Use `identity(col)` ONLY when the column's distinct count is LOW (≲ a few hundred — e.g., `status`, `region`, `plan_tier`, `country_code`). For a HIGH-CARDINALITY column like `tenant_id` (thousands+ of tenants), use `bucket(tenant_id, N)` (N typically 16 / 32 / 64; choose so partitions stay in the 1K–100K range as in the TL;DR). **Trino's bucket transform is column-first — `bucket(x, nbuckets)`** — documented at [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) as: *"The data is hashed into the specified number of buckets. The partition value is an integer hash of `x`, with a value between 0 and `nbuckets - 1` inclusive."* (Spark uses the reversed `bucket(N, x)` — see the engine-difference callout below.) The hash distributes tenants across N balanced buckets, so partition count stays bounded at `days × N` instead of `days × distinct(tenant_id)`. **Why this matters: 10,000 tenants × 365 days = 3.65M partitions/year under identity — each holding a handful of KB. That is the canonical tiny-file / partition-explosion anti-pattern and is the single biggest day-1 wrong call on a multi-tenant Iceberg fact table.**
+
+**IN-LINE SIGNAL (corrective ON the line — copy with the comment).** Every multi-tenant DDL snippet on this stack carries the in-line note:
+
+```sql
+-- Trino 467 — multi-tenant SaaS fact table; tenant_id has 10k+ distinct values (high cardinality).
+CREATE TABLE iceberg.analytics.user_events (
+  event_id    UUID,
+  tenant_id   VARCHAR,
+  occurred_at TIMESTAMP(6) WITH TIME ZONE,
+  event_type  VARCHAR,
+  payload     JSON
+) WITH (
+  partitioning   = ARRAY['day(occurred_at)', 'bucket(tenant_id, 32)'],  -- Trino column-first bucket(col, N); for high-cardinality tenant_id, NOT identity(tenant_id) (10k tenants -> partition/tiny-file explosion)
+  format         = 'PARQUET',
+  format_version = 2
+);
+```
+
+**Pruning still works under bucket — a common worry.** `WHERE tenant_id = 'acme'` does prune with `bucket(tenant_id, 32)` — Iceberg hashes the literal `'acme'` to its bucket number and reads only that one bucket's files. This is exactly how hidden partitioning works for `day(occurred_at)`: the engine applies the transform to the predicate and prunes on the result. (Verified at trino.io/docs Iceberg connector — `system.bucket('trino', 16)` returns the bucket number a value falls into; the planner uses the same transform for predicate evaluation.) The trade-off vs identity is **NOT** lost pruning on the equality filter; it is that per-tenant `COUNT(*)` is no longer metadata-only and an `IN ('a','b','c')` filter must open one bucket per distinct value in the IN list (still much less than scanning the whole table).
+
+**When identity IS the right call.** Identity-partition is correct for LOW-cardinality stable columns: `status` (≲ 10), `region` (≲ 30), `plan_tier` (≲ 5), `country_code` (≲ 250). These keep partition counts manageable (days × small N), give metadata-only `GROUP BY status COUNT(*)`, and let the partition value be human-readable in `$partitions`. Identity on `tenant_id` is correct ONLY if you have permanently ≲ a few hundred tenants AND tenant growth is bounded (e.g., a closed B2B portfolio); past ~10K tenants it always degenerates.
+
+**DO-NOT-WRITE — banned claims about identity / bucket on tenant_id (cite-or-omit).**
+
+| Wrong claim | Why it's wrong |
+|---|---|
+| "`identity(tenant_id)` is the default best-practice for multi-tenant SaaS Iceberg tables" | **FALSE for high-cardinality tenant_id.** With thousands of tenants × day partitions, this is the canonical partition-count explosion / tiny-file anti-pattern. Identity is correct only when distinct count stays ≲ a few hundred. |
+| "`bucket(tenant_id, N)` defeats pruning on `WHERE tenant_id = 'acme'` because the partition value is a hash, not the tenant" | **FALSE.** Iceberg hashes the literal `'acme'` to its bucket number and reads only that bucket's files — same hidden-partitioning mechanism as `day(occurred_at)` pruning a timestamp predicate. The equality filter prunes to **1 of N buckets**. |
+| "Trino bucket syntax is `bucket(N, tenant_id)` (count first)" | **WRONG — that is the Spark order.** Trino's Iceberg connector is **column-first: `bucket(tenant_id, N)`**. `bucket(32, tenant_id)` parse-fails on Trino (32 is not a column). Every `bucket()` example in this document is Trino column-first; swap the order only when copying into a Spark SQL session. |
+| "Iceberg adds partition directories when new tenants appear, like Hive's `ADD PARTITION`" | **WRONG VOCABULARY for Iceberg.** Iceberg tracks files via **manifests**, not directory-listed partition entries; there is no `ADD PARTITION` DDL. New partition values appear automatically when a file with that value is committed. Do not import the Hive "partition directory" mental model. |
+| "Bigger N is safer — pick `bucket(tenant_id, 1024)` to spread load" | **WRONG — bucket count IS partition count.** Larger N multiplies partitions per day (days × N) and produces tinier files per bucket. Stay in 16–256 unless you have very large facts; see the bucket-sizing callout in "Bucket partitioning — the two production footguns" below. |
+
+**Cross-references:** [§ Choosing partition columns](#choosing-partition-columns) (deeper trade-off table including tenant-first vs day-first order); [§ Bucket partitioning — the two production footguns](#bucket-partitioning--the-two-production-footguns) (the `write.distribution-mode = 'hash'` table property — REQUIRED to avoid the N-files-per-task small-file explosion when writing into a bucket-partitioned table); [resource 17 § small-files / compaction](17-iceberg-table-maintenance.md) (how to detect and fix the tiny-file accumulation if it has already happened); the iter537 PIN above ("PARTITION EVOLUTION") for in-place migration from `identity(tenant_id)` to `bucket(N, tenant_id)` if you already have the wrong spec live.
+
+---
+
 ## Common myths about Iceberg partitioning — read FIRST (the load-bearing wrong claims)
 
 These are the absolutes most often stated incorrectly about Iceberg partitioning on Trino 467 + Iceberg 1.5.2 + Spark. Each TRUTH below has been verified against the [Iceberg partitioning docs](https://iceberg.apache.org/docs/1.5.1/partitioning/), the [Iceberg evolution docs](https://iceberg.apache.org/docs/1.5.1/evolution/), and the [Trino Iceberg connector docs](https://trino.io/docs/current/connector/iceberg.html). **Lead with the TRUTH; state the nuance.**
