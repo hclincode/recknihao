@@ -3809,9 +3809,11 @@ Snapshot-range reads give you append-only deltas efficiently. If you need delete
 | `DELETE FROM ... WHERE ...` | Row-level (any predicate) | Medium (writes Iceberg delete files) | Slowest (extra read cost until compaction) | Surgical cleanup when partition scope doesn't fit |
 | `createOrReplace()` | **Entire table dropped and recreated** | **Highest — destroys all partitions** | Fast | Only when you genuinely want to rebuild the whole table |
 
-### 1. Iceberg snapshot rollback (your first-resort cleanup)
+### 1. Iceberg snapshot rollback — Trino 467 positional CALL (your first-resort cleanup)
 
-Every write to an Iceberg table creates a new immutable snapshot. The previous snapshots still exist (until `expire_snapshots` runs). If a bad batch just landed, **roll the table back to the snapshot that existed before it.**
+> **Keyword anchors:** roll Iceberg table back, rollback_to_snapshot Trino, undo bad load Iceberg, revert to snapshot Trino, Trino rollback positional CALL, Iceberg rollback Trino vs Spark syntax, Trino 467 rollback procedure, named args rollback Trino, ALTER TABLE EXECUTE rollback_to_snapshot.
+
+Every write to an Iceberg table creates a new immutable snapshot. The previous snapshots still exist (until `expire_snapshots` runs). If a bad batch just landed, **roll the table back to the snapshot that existed before it.** **The Trino 467 syntax differs from Spark — do not cross them.** The canonical reference is resource 17 "Emergency rollback" (`§ Emergency rollback (the safest cleanup tool)`).
 
 ```sql
 -- Step 1: find the snapshot that existed BEFORE the bad write.
@@ -3820,12 +3822,47 @@ FROM iceberg.analytics."events$snapshots"
 ORDER BY committed_at DESC
 LIMIT 10;
 
--- Step 2: roll back to the one just before the bad batch.
-CALL iceberg.system.rollback_to_snapshot(
-  table       => 'analytics.events',
-  snapshot_id => 4823511203987654321
-);
+-- Step 2 — Trino 467: roll back via CALL with POSITIONAL args
+-- (schema VARCHAR, table VARCHAR, snapshot_id BIGINT). NOT named args.
+CALL iceberg.system.rollback_to_snapshot('analytics', 'events', 4823511203987654321);
+--   ^^^^^^^^^^^  ^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^
+--   schema       table     snapshot_id (BIGINT)
+-- Trino 467: POSITIONAL (schema, table, id); NOT named args, NOT a dotted 'schema.table'.
 ```
+
+**Both engine forms, side-by-side — pick the one matching your client session:**
+
+| Engine | Canonical rollback syntax | Argument style |
+|---|---|---|
+| **Trino 467** (production query engine) | `CALL iceberg.system.rollback_to_snapshot('analytics', 'events', 4823511203987654321)` | **Positional, three args**: schema (VARCHAR), table (VARCHAR), snapshot_id (BIGINT). Verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) — docs example: `CALL example.system.rollback_to_snapshot('testdb', 'customer_orders', 8954597067493422955)`. |
+| **Spark** (Iceberg 1.5.2 ingestion) | `CALL iceberg.system.rollback_to_snapshot('analytics.events', 4823511203987654321)` (positional, two-arg) **OR** `CALL iceberg.system.rollback_to_snapshot(table => 'analytics.events', snapshot_id => 4823511203987654321)` (named — recommended in Spark) | **Two args**: `table` as a SINGLE qualified `'schema.table'` string, then `snapshot_id` (long). Verified at [iceberg.apache.org/docs/1.5.1/spark-procedures/#rollback_to_snapshot](https://iceberg.apache.org/docs/1.5.1/spark-procedures/) — docs example: `CALL catalog_name.system.rollback_to_snapshot('db.sample', 1)`. |
+| **Trino 469+** (NOT on our 467) | `ALTER TABLE iceberg.analytics.events EXECUTE rollback_to_snapshot(4823511203987654321)` | Added in Trino 469 (Jan 2025) — **NOT available on Trino 467**. Mention only as future-proofing; do not use until cluster upgrade. |
+
+> **DO-NOT-WRITE on Trino 467 — these patterns parse-fail or hit the wrong engine:**
+>
+> ```sql
+> -- WRONG (a) — Spark named-arg form pasted into Trino's CALL.
+> -- Trino's CALL framework requires POSITIONAL args; the `=>` named-arg
+> -- syntax fails with "unexpected '=>'" or "named arguments are not supported".
+> CALL iceberg.system.rollback_to_snapshot(
+>   table       => 'analytics.events',
+>   snapshot_id => 4823511203987654321);              -- WRONG: Spark named args
+>
+> -- WRONG (b) — single dotted 'schema.table' arg on Trino.
+> -- Trino's procedure exposes schema and table as TWO separate VARCHAR
+> -- positional args; passing one qualified 'analytics.events' string fails
+> -- with "argument count mismatch" or "no schema named 'analytics.events'".
+> CALL iceberg.system.rollback_to_snapshot('analytics.events', 4823511203987654321);  -- WRONG: Spark form
+>
+> -- WRONG (c) — Trino 469+ ALTER TABLE EXECUTE form on Trino 467.
+> -- The table-procedure form was added in Trino 469 (Jan 2025) via
+> -- trinodb/trino #24580. On Trino 467 it fails with a procedure /
+> -- syntax error. Use the CALL positional form on 467.
+> ALTER TABLE iceberg.analytics.events
+>   EXECUTE rollback_to_snapshot(4823511203987654321);                          -- WRONG: 469+ only
+> ```
+>
+> The single most common copy-paste defect on this stack is pasting the Spark `(table => '...', snapshot_id => ...)` named-arg form into a Trino session — it parses as a syntax error. Trino 467 is **positional only**.
 
 Why this is the right first move:
 - **Zero data rewrite.** Only the table's "current snapshot" pointer moves. The bad files are still there, but no query sees them.
