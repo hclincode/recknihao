@@ -407,11 +407,19 @@ FROM {{ source('postgres', 'users') }}
 
 `check_cols` accepts **either a list of column names OR the literal string `'all'`** — no other shorthand exists. Per [docs.getdbt.com/reference/resource-configs/check_cols](https://docs.getdbt.com/reference/resource-configs/check_cols): *"A list of columns within the results of your snapshot query to check for changes. Alternatively, use all columns using the `all` value (however this may be less performant)."* Prefer the explicit list — `'all'` re-hashes columns like `email`, `display_name`, etc. that you may not care about for SCD2 purposes and makes every run slower.
 
-**Either strategy adds the same metadata columns automatically:**
-- `dbt_valid_from` — when this version became true
-- `dbt_valid_to` — when it stopped (NULL = still active)
-- `dbt_is_deleted` — whether the source row was deleted (dbt 1.9+)
-- `dbt_scd_id` — unique ID per version row
+**Either strategy adds the SAME FOUR ALWAYS-PRESENT metadata columns automatically** (verified at [docs.getdbt.com/reference/resource-configs/snapshot_meta_column_names](https://docs.getdbt.com/reference/resource-configs/snapshot_meta_column_names)):
+
+- `dbt_scd_id` — unique surrogate ID per version row (md5 hash of `unique_key` + the change-detection value)
+- `dbt_updated_at` — when dbt observed/recorded this version (for `strategy='timestamp'` this mirrors the source `updated_at` value; for `strategy='check'` this is the snapshot run time)
+- `dbt_valid_from` — when this version became the current row
+- `dbt_valid_to` — when this version stopped being current (`NULL` = still active / currently-active version)
+
+```sql
+-- Query the CURRENTLY-ACTIVE version per unique_key — the canonical pattern
+SELECT * FROM analytics.users_snapshot WHERE dbt_valid_to IS NULL;  -- 4 default cols: dbt_scd_id, dbt_updated_at, dbt_valid_from, dbt_valid_to
+```
+
+**DEFAULT vs CONDITIONAL — the one column that is NOT a default.** `dbt_is_deleted` is **NOT** one of the four always-present defaults. It is **added only when** the snapshot config sets **`hard_deletes='new_record'`** (dbt 1.9+, replaces the legacy `invalidate_hard_deletes=true`). Direct doc quote ([docs.getdbt.com/reference/resource-configs/snapshot_meta_column_names](https://docs.getdbt.com/reference/resource-configs/snapshot_meta_column_names)): *"A string value indicating if the record has been deleted. (True if deleted, False if not deleted). Added when hard_deletes='new_record' is configured."* On a default snapshot (no `hard_deletes` config or `hard_deletes='ignore'` / `'invalidate'`), the `dbt_is_deleted` column does **NOT** exist — referencing it in a downstream query errors with `Column 'dbt_is_deleted' cannot be resolved`.
 
 **There is no `dbt_is_current` column.** To query current records: `WHERE dbt_valid_to IS NULL`.
 
@@ -423,6 +431,8 @@ FROM {{ source('postgres', 'users') }}
 > - `updated_at_field`, `last_modified_column` — none exist; the key is exactly `updated_at`.
 > - `strategy='hash'` / `strategy='merge'` / `strategy='changes'` — none exist; the only built-in strategies are `timestamp` and `check`.
 > - `dbt_is_current` column — does NOT exist; query current rows via `WHERE dbt_valid_to IS NULL`.
+> - "`dbt_is_deleted` is one of the four default snapshot meta columns" — **FALSE.** The four ALWAYS-PRESENT defaults are `dbt_scd_id`, `dbt_updated_at`, `dbt_valid_from`, `dbt_valid_to`. `dbt_is_deleted` is **conditional** — added only when `hard_deletes='new_record'` is configured. Listing it in place of `dbt_updated_at` (a common slip) is wrong on both ends: `dbt_updated_at` IS a default; `dbt_is_deleted` is NOT.
+> - Omitting `dbt_updated_at` from the default-column list — `dbt_updated_at` IS one of the four always-present defaults. Any "the four defaults are X, Y, Z, dbt_is_deleted" formulation is wrong.
 
 **Option 2 — Spark MERGE INTO (for teams maintaining SCD2 inside their Spark ingestion job):**
 
