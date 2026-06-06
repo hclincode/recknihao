@@ -3198,6 +3198,43 @@ If your schema.yml `description:` doesn't show up under `SHOW COLUMNS` or in the
 
 ---
 
+### 6.7K LEADING CANONICAL — dbt source freshness COMMANDS quick-card (`dbt source freshness`, `dbt build --select source_status:fresher+`) — DO NOT use `state:new`
+
+> **READ THIS FIRST if your question contains `dbt source freshness` command, `source_status:fresher+`, `fail build on stale source`, `stale ingestion`, `gate downstream on freshness`, `which dbt command checks freshness`, or `state:new` and freshness in the same sentence.** This is the **command-level companion** to §6.7B (which is the YAML/`loaded_at_field`/threshold canonical). Verified at [docs.getdbt.com/docs/build/sources](https://docs.getdbt.com/docs/build/sources), [docs.getdbt.com/reference/commands/source](https://docs.getdbt.com/reference/commands/source), and [docs.getdbt.com/reference/node-selection/methods](https://docs.getdbt.com/reference/node-selection/methods) (WebFetched 2026-06-06).
+
+**The two commands — and only these two — concern freshness:**
+
+| Command | What it does |
+|---|---|
+| `dbt source freshness` | Runs `SELECT MAX({{ loaded_at_field }}) FROM ...` per source, compares to `now()` against `warn_after` / `error_after` thresholds, writes per-source state (`pass` / `warn` / `error` / `runtime error`) to `target/sources.json`. An `error_after` breach returns a **non-zero exit code** — that is how CI fails loudly on stale ingestion. |
+| `dbt build --select source_status:fresher+` | Only builds models DOWNSTREAM of sources that became fresher since the previous `target/sources.json` (the `source_status:fresher+` graph-state selector — quoted verbatim from docs.getdbt.com/docs/build/sources: *"Use the `dbt build --select source_status:fresher+` command to build and test models downstream of fresher sources."*). Skips rebuilds of sub-graphs whose inputs haven't moved. |
+
+**The CI two-stage pattern that actually fails downstream builds on stale sources:**
+```bash
+dbt source freshness                              # stage 1 — exits non-zero on error_after breach (with `set -e`, halts CI)
+dbt build --select source_status:fresher+         # stage 2 — only rebuild what got fresher
+```
+
+**IN-LINE SIGNAL (corrective comment for any responder copying these lines):**
+```bash
+# CORRECT: dbt source freshness validates loaded_at_field thresholds (warn_after / error_after).
+# CORRECT: dbt build --select source_status:fresher+   # fail/limit downstream builds based on freshness state.
+# WRONG  : dbt test --select state:new                 # state:new is a slim-CI NODE selector, NOT freshness.
+```
+
+> **DO-NOT-WRITE — banned freshness-command claims:**
+> | Wrong claim | Why it's wrong |
+> |---|---|
+> | "`dbt test --select state:new` checks source freshness." | **FALSE.** `state:new` is the dbt **slim-CI node selector** that picks nodes whose definition is NEW vs a `--state target/` manifest — it is GRAPH-state, not freshness-state. Freshness is `dbt source freshness` and `source_status:fresher+`. They are different mechanisms, different artifacts (`manifest.json` for `state:*` vs `target/sources.json` for `source_status:*`). |
+> | "`dbt run --check-freshness`" or "`dbt build --check-freshness`" | **FABRICATED FLAG** (also banned in §6.7B). No such CLI flag exists; gate freshness with the two-stage CI pattern above. |
+> | "`dbt source freshness` blocks `dbt run` automatically." | **FALSE.** It is a separate command; the CI runner's exit-code handling (e.g., `set -e`) is what halts the next stage. |
+
+**dbt-trino note (one line):** `loaded_at_field` must be a Trino-queryable timestamp column on the source (e.g. an Iceberg `ingested_at` / `_loaded_at` / `updated_at`) — the warehouse-metadata fallback is NOT supported on dbt-trino (see §6.7B for the supported-adapter list); setting `freshness: null` opts a table out.
+
+> **Cross-references:** **§6.7B** is the full YAML / `loaded_at_field` / `warn_after` / `error_after` canonical — read that first for declaring freshness. §6.7F (the `--select` selector grammar). For ingestion-side `_loaded_at` / watermark-column patterns see [resource 13 § watermark column patterns](13-postgres-to-iceberg-ingestion.md).
+
+---
+
 ## 7. Cutover checklist (the non-obvious gotchas)
 
 Once your models compile and run, before you turn off Oracle:

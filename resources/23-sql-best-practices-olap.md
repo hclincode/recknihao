@@ -355,7 +355,16 @@ GROUP BY user_id;
 
 **For deeper inspection** use `EXPLAIN (TYPE DISTRIBUTED)` or `EXPLAIN ANALYZE` (runs the query and reports actual rows/time per stage).
 
-**`EXPLAIN ANALYZE` is the right tool for verifying optimizations actually worked.** Plain `EXPLAIN` shows the planner's *estimated* costs; `EXPLAIN ANALYZE` runs the query and reports **actual bytes read, actual row counts per stage, and real wall time**. When you rewrite `COUNT(DISTINCT)` to `approx_distinct`, or swap a raw scan for a rollup/sketch table, run both versions with `EXPLAIN ANALYZE` and compare the "Input" bytes — that's the ground-truth proof that you reduced I/O. Estimates can be wrong; actuals from `EXPLAIN ANALYZE` cannot.
+**EXPLAIN variants — which one surfaces which signal (Trino 467, verified at [trino.io/docs/current/sql/explain.html](https://trino.io/docs/current/sql/explain.html) and [trino.io/docs/current/sql/explain-analyze.html](https://trino.io/docs/current/sql/explain-analyze.html)):**
+
+| Variant | Runs the query? | What to read |
+|---|---|---|
+| `EXPLAIN` (default `TYPE DISTRIBUTED`) | NO | Logical/distributed plan: `TableScan` with `constraint on [...]` (predicate pushed) vs `ScanFilterProject` with `filterPredicate = ...` (filter in Trino memory). Estimates only. |
+| `EXPLAIN (TYPE IO)` | NO | **JSON** with `inputTableColumnInfos` — the `constraints` and `estimate` (row count / size) the scan **will** read, per input table. Best for "did partition pruning happen at the scan boundary". |
+| `EXPLAIN ANALYZE` | **YES** | **Actual** per-operator runtime stats. The line to read for "did the scan filter early / push the predicate down" is the `ScanFilterProject` operator's `Physical input: <X> rows (<Y> bytes)` + `Filtered: <Z>%`. Bigger `Filtered:` = more rows dropped at the scan. |
+| `EXPLAIN ANALYZE VERBOSE` | YES | Same as above + low-level per-driver distributions (CPU, scheduled time, p50/p99). Trino-internals oriented. |
+
+**`EXPLAIN ANALYZE` is the right tool for verifying optimizations actually worked.** Plain `EXPLAIN` shows the planner's *estimated* costs; `EXPLAIN ANALYZE` runs the query and reports **actual bytes read, actual row counts per stage, and real wall time**. When you rewrite `COUNT(DISTINCT)` to `approx_distinct`, or swap a raw scan for a rollup/sketch table, run both versions with `EXPLAIN ANALYZE` and compare the `Physical input` bytes — that's the ground-truth proof that you reduced I/O. Estimates can be wrong; actuals from `EXPLAIN ANALYZE` cannot.
 
 ---
 
