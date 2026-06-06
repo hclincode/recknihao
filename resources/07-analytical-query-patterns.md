@@ -703,6 +703,26 @@ ORDER BY c.day;
 > ```
 > If the spec says "weekly report" without specifying day, **default to MONDAY** (ISO-8601 / Trino native) — that is what the bare `date_trunc('week', ts)` gives you, and matches Trino's `day_of_week` numbering and the `week(ts)` ISO-week function.
 
+### LEADING CANONICAL — `now()` / `current_timestamp` / `current_date` in Trino (+ Iceberg `timestamptz` is UTC-normalized on storage)
+
+> **Keyword anchors (read this section FIRST if your question contains any of these — GENERIC, NOT Oracle-specific):** is `now()` a Trino function · does Trino have `now` · Trino `now()` · `now()` vs `current_timestamp` · Trino current timestamp function · Trino time functions · `current_date` Trino · `current_time` Trino · `localtimestamp` Trino · session time zone Trino · what time zone does Trino store · Iceberg timestamp storage · `timestamp with time zone` UTC Iceberg · UTC-normalized · stored as UTC · wall-clock timestamp · `AT TIME ZONE` Trino · `timestamp` vs `timestamptz` · timezone aware vs naive Iceberg.
+
+**Fact 1 — Trino HAS `now()`; it is an ALIAS for `current_timestamp`.** Verified verbatim at [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html): *"`now() → timestamp(3) with time zone` — This is an alias for `current_timestamp`."* Both return **`TIMESTAMP(3) WITH TIME ZONE`** as of the **start of the query** (every reference inside one query yields the identical value), tied to the **session time zone**. Pick whichever reads better. Companion forms (all session-TZ-aware):
+- `current_date` → `DATE` (no time component).
+- `current_time` → `TIME WITH TIME ZONE`.
+- `localtimestamp` → `TIMESTAMP` (no TZ; session-local wall clock).
+- **Syntax pin:** `current_timestamp` / `current_date` / `current_time` / `localtimestamp` take **NO parentheses** (SQL-standard special-form syntax); `now()` takes empty parens. Writing `current_timestamp()` is a parse error.
+
+**Fact 2 — Iceberg STORAGE: `timestamp with time zone` (timestamptz) is UTC-NORMALIZED on disk; bare `timestamp` is wall-clock with NO normalization.** Per the [Iceberg spec](https://iceberg.apache.org/spec/) — verbatim: *"values are stored as UTC and do not retain a source time zone (2017-11-16 17:10:34 PST is stored/retrieved as 2017-11-17 01:10:34 UTC and these values are considered identical)."* A `timestamp(6) with time zone` column stores **microseconds from epoch UTC** — the original session/source zone is **NOT preserved per value**; the value is an INSTANT. A `timestamp(6)` column (WITHOUT time zone) stores wall-clock microseconds with **no UTC normalization** — what you wrote is what comes back. `AT TIME ZONE 'UTC'` / `AT TIME ZONE 'America/New_York'` on a `timestamptz` value **re-labels** the same UTC instant in the target zone — it does NOT change the stored bytes (display re-render only).
+
+**DO-NOT-WRITE (the load-bearing fab claims to ban):**
+- *"Trino has no `now()` function / `now()` is a parse error / function-not-found in Trino."* **FALSE.** `now()` is a documented Trino alias for `current_timestamp`; both work; both return the same value and type.
+- *"Iceberg / Trino never normalizes timestamps to UTC on storage — you get back exactly what you stored."* **FALSE for `timestamp with time zone` (timestamptz)** — those values ARE UTC-normalized on disk per the Iceberg spec. The "no normalization" rule applies ONLY to bare `timestamp` (without time zone).
+- *"`current_timestamp` and `now()` return different types / different values."* **FALSE.** Identical type (`TIMESTAMP(3) WITH TIME ZONE`), identical value (both pinned to query-start time, session TZ).
+- *"`current_date` returns a timestamp."* **FALSE.** It returns `DATE` — no time component. Use `current_timestamp` (or `now()`) when you need hours/minutes/seconds.
+
+**Cross-references:** Resource 27 §4.2-NOW (the Oracle-migration angle — same two facts, SYSDATE-replacement framing — keep both consistent). Resource 27 §4.2A (the dedicated `SET TIME ZONE` command + `sql.forced-session-time-zone` server property — how to change what zone `current_timestamp` / `now()` use). Resource 27 §4.2B (filtering a `timestamp with time zone` column by a local-date range — boundary-literal form). Resource 13 §timestamp-type-mapping (Postgres `timestamptz` → Iceberg `TIMESTAMP(6) WITH TIME ZONE`). Resource 13 §`from_unixtime` (epoch-seconds-to-timestamp; returns `timestamp(3) with time zone`).
+
 ---
 
 ## 5. Window functions (running totals, ranks, lag/lead)
