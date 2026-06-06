@@ -609,6 +609,38 @@ ORDER BY c.day;
 
 `date_trunc('day' | 'week' | 'month', col)` is the Trino function you'll use constantly. It rounds a timestamp down to the start of a bucket. **Return type — same as input** (per [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html): `date_trunc(unit, x) -> [same as input]`): `timestamp -> timestamp`, `timestamp(p) with time zone -> timestamp(p) with time zone`, `date -> date`, `time -> time`. It does **NOT** convert to DATE — `date_trunc('day', some_timestamp)` returns a `timestamp` at midnight, not a `date`. If you need the result as a DATE, wrap in `CAST(... AS DATE)` explicitly.
 
+#### `date_trunc('week', ts)` ALWAYS starts the week on MONDAY (ISO-8601) — Trino canonical (iter536 PIN)
+
+> **Keyword anchors for this block**: date_trunc week Monday, Trino week start day, weekly report week start, ISO week Trino, day_of_week Monday, Sunday vs Monday week, first day of week Trino, beginning of week Trino, European Monday week start, US Sunday week start.
+
+> **TRUTH (verified against [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html)):** Trino's `date_trunc('week', ts)` **always** starts the week on **MONDAY** (ISO-8601). There is **NO Sunday-start option**, **NO locale setting**, and **NO `first_day_of_week` configuration** in Trino. The companion function `day_of_week(ts)` returns **`1` = Monday .. `7` = Sunday** (also ISO-8601). A European Monday-start weekly-report requirement is therefore met by the **bare** `date_trunc('week', ts)` function with **NO workaround at all**.
+
+> **Worked example.** `DATE '2020-01-01'` is a **Wednesday**. `date_trunc('week', DATE '2020-01-01')` returns `2019-12-30`, which is the **Monday** of that week. `day_of_week(DATE '2019-12-30')` returns `1` (Monday). `day_of_week(DATE '2020-01-01')` returns `3` (Wednesday). `day_of_week(DATE '2020-01-05')` returns `7` (Sunday — end of the ISO week).
+
+> **Canonical Monday-start weekly bucket (copy-paste this — in-line signal on the line you copy):**
+> ```sql
+> SELECT date_trunc('week', event_ts) AS week_start,  -- Trino weeks ALWAYS start MONDAY (ISO-8601); no Sunday-start option, no workaround needed
+>        COUNT(*) AS weekly_events
+> FROM iceberg.analytics.user_events
+> WHERE event_ts >= date_add('week', -12, current_date)
+> GROUP BY date_trunc('week', event_ts)
+> ORDER BY week_start;
+> ```
+
+> **DO NOT WRITE (CRITICAL — the iter535 harmful workaround, banned):** `date_trunc('week', event_date + INTERVAL '1' DAY) - INTERVAL '1' DAY` to "force Monday." The bare `date_trunc('week', event_date)` is **already** Monday-start; that interval-shift would **wrongly push the result to SUNDAY-start** (shifting the input forward 1 day means a Sunday input rounds to the NEXT Monday, then -1 day = the previous Sunday — you've built a Sunday-start bucket and labeled it "Monday fix"). Never write this expression as a Monday recipe.
+
+> **The only legitimate use of the +1/-1 INTERVAL shift is to produce SUNDAY-START weeks** (e.g., a US-style report). Frame it that way explicitly:
+> ```sql
+> -- US Sunday-start week (rare — only when the report spec explicitly demands Sunday).
+> -- Trino has NO native Sunday-start option, so shift the input forward 1 day, truncate to Monday, then shift back.
+> SELECT date_trunc('week', event_ts + INTERVAL '1' DAY) - INTERVAL '1' DAY AS week_start_sunday,
+>        COUNT(*) AS weekly_events
+> FROM iceberg.analytics.user_events
+> GROUP BY date_trunc('week', event_ts + INTERVAL '1' DAY) - INTERVAL '1' DAY
+> ORDER BY week_start_sunday;
+> ```
+> If the spec says "weekly report" without specifying day, **default to MONDAY** (ISO-8601 / Trino native) — that is what the bare `date_trunc('week', ts)` gives you, and matches Trino's `day_of_week` numbering and the `week(ts)` ISO-week function.
+
 ---
 
 ## 5. Window functions (running totals, ranks, lag/lead)

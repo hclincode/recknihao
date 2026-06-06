@@ -1,110 +1,182 @@
-# Iter 535 — Judge Feedback (EXTENDED PHASE)
+# Iter 536 Judge Feedback — 2026-06-06 (EXTENDED PHASE)
 
-**Overall avg: 4.375 PASS** (margin +0.875 above 3.5 floor). 130th consecutive overall PASS in extended phase. Federation NOT probed.
+## Overall verdict: 4.500 PASS (margin +1.000 above 3.5 floor) — 131st consecutive overall PASS
 
-## Headline
-- **Q1 PRIMARY WIN — persist_docs gap from iter534 fully CLOSED.** Responder gave both config shapes, COMMENT ON statements, SHOW COLUMNS verification, AND the docs-site-vs-engine-metadata distinction. **5.000 STRONG PASS** on first re-probe.
-- **Q4 NEW HARMFUL SPECULATION.** Responder honestly declined (good) BUT then offered a speculative "Monday workaround" SQL that is WRONG because Trino's `date_trunc('week', ...)` is ALREADY Monday-start. The workaround shifts the week to SUNDAY — the OPPOSITE of what the European customer needs. **2.750 per-question FAIL.** This is the iter536 PRIMARY fix target.
-- Q2 (levenshtein_distance) + Q3 (Iceberg time travel) — both strong. Q3 has one MINOR factual error (snapshot retention "default 7-day" — actual default is **5 days** per Iceberg `history.expire.max-snapshot-age-ms` = 432000000 ms).
+| Q | Topic | Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|---|---|
+| Q1 | Trino date_trunc('week') Monday/ISO | 5.0 | 5.0 | 5.0 | 5.0 | **5.000** STRONG PASS WIN |
+| Q2 | Trino timestamp formatting ("June 06, 2026") | 5.0 | 5.0 | 5.0 | 5.0 | **5.000** STRONG PASS |
+| Q3 | dbt snapshot: check vs timestamp strategy | 3.0 | 4.5 | 4.5 | 4.0 | **4.000** PASS w/ COLUMN SLIP |
+| Q4 | Iceberg partition month → day (evolution) | 3.5 | 4.0 | 4.5 | 4.0 | **4.000** PASS w/ OVERSTATED SPARK CLAIM |
+| **Overall** | | | | | | **4.500 PASS** |
 
-## Per-question scoring
+Iter535's 4.375 → iter536's 4.500 net swing **+0.125** (Q1 LIFTED +2.250 from 2.750 FAIL to 5.000 STRONG PASS because iter536 teacher's r07 Monday/ISO canonical landed perfectly; Q2 perfect 5.000 strong-pass new probe; Q3 dropped to 4.000 due to dbt_is_deleted-vs-dbt_updated_at column slip; Q4 dropped to 4.000 due to overstated "MUST use Spark" claim).
 
-### Q1 — dbt schema.yml descriptions to Trino SHOW COLUMNS Comment (persist_docs)
-**WIN CHECK — gap CLOSED.** Iter534 Q2 was a content gap; iter535 teacher added §6.7J to r27. Responder now writes the canonical answer.
+---
 
-- Accuracy 5.0 — `{{ config(persist_docs={"relation": true, "columns": true}) }}` matches docs.getdbt.com/reference/resource-configs/persist_docs exact shape ("Optionally persist [resource descriptions] as column and relation comments in the database"). YAML project form `+persist_docs: relation: true / columns: true` correct. dbt emits `COMMENT ON TABLE` / `COMMENT ON COLUMN` — verified against trino.io/docs/current/sql/comment.html (`COMMENT ON TABLE name IS 'comments'`, `COMMENT ON COLUMN users.name IS 'full name'`). `SHOW COLUMNS` exposes the `Comment` column — verified against trino.io/docs/current/sql/show-columns.html (header: `Column | Type | Extra | Comment`).
-- Completeness 5.0 — gave both config forms, COMMENT ON, SHOW COLUMNS verification, information_schema.columns query, AND the distinct mechanism contrast with `dbt docs generate` (docs site for humans, NOT engine metadata for BI tools).
-- Clarity 5.0 — engineer-grade explanation; the docs-site-vs-engine-metadata distinction is the exact mental model a SaaS engineer needs.
-- Actionability 5.0 — engineer can copy either config shape, run dbt build, and verify with SHOW COLUMNS.
+## PRIMARY WIN: Q1 date_trunc('week') Monday/ISO — gap CLOSED on first re-probe (5.000)
 
-**Score: 5.000 STRONG PASS.** Iter535 teacher §6.7J landed cleanly.
+**The defect**: Iter535 Q4 was a 2.750 FAIL — responder honestly declined on Monday-vs-Sunday, THEN invented a WRONG `date_trunc('week', d + INTERVAL '1' DAY) - INTERVAL '1' DAY` "workaround" to force Monday, which actually produces SUNDAY-start.
 
-### Q2 — Fuzzy-match company names (Trino string-similarity)
-- Accuracy 5.0 — `levenshtein_distance(string1, string2)` verified exact at trino.io/docs/current/functions/string.html: "Returns the Levenshtein edit distance of `string1` and `string2`, i.e. the minimum number of single-character edits (insertions, deletions or substitutions) needed to change `string1` into `string2`."
-- Completeness 5.0 — gave the WHERE filter pattern + JOIN-on-distance example; lowercased both sides; explained the integer-edit-count semantics.
-- Clarity 5.0 — "Acme Corp" vs "Acme Corporation" example matches the user's exact scenario.
-- Actionability 5.0 — engineer can paste the WHERE clause directly.
+**Iter536 teacher's FIX A** added the Monday/ISO canonical to r07 directly adjacent to the locked date_trunc return-type note at L610, including (a) keyword anchors line, (b) TRUTH paragraph with Monday/ISO + day_of_week 1=Monday..7=Sunday, (c) worked example `date_trunc('week', DATE '2020-01-01') = 2019-12-30`, (d) in-line signal in canonical SQL block with EOL comment, (e) DO-NOT-WRITE ban on the harmful INTERVAL-shift workaround, (f) Sunday-start framed only as US-style.
 
-**Score: 5.000 STRONG PASS.**
+**Iter536 responder Q1 outcome**:
+- Stated unambiguously "Trino does it by default, no offset needed. `date_trunc('week', order_ts)` ALWAYS starts weeks on Monday, ISO-8601."
+- Worked example: Wednesday 2026-01-15 → Monday 2026-01-12.
+- Explicitly said do NOT need an offset/CASE/adjustment.
+- Said Sunday-start only if business wants US-style (rare).
+- **Did NOT emit the harmful `date_trunc('week', d + INTERVAL '1' DAY) - INTERVAL '1' DAY` shift.**
 
-### Q3 — Iceberg time travel (yesterday's data)
-- Accuracy 4.0 — `FOR TIMESTAMP AS OF TIMESTAMP '...'` and `FOR VERSION AS OF <snapshot_id>` both verified at trino.io/docs/current/connector/iceberg.html. Doc quote: "The latest snapshot of the table taken before or at the specified timestamp in the query is internally used for providing the previous state of the table." Semantics correct. `"events$snapshots"` whole-token quoting correct. **MINOR FAB**: said "only works within expire_snapshots retention (default 7-day)" — actual Iceberg default is **5 days** (`history.expire.max-snapshot-age-ms` = 432000000 ms = 5 x 24 x 60 x 60 x 1000). Not load-bearing for "yesterday" (within both 5d and 7d window) but a numeric fact error.
-- Completeness 5.0 — covered both syntaxes, $snapshots discovery, snapshot-id-for-audits reasoning, retention caveat (even if the number is off).
-- Clarity 5.0 — clear timestamp example with TZ; explicit prefer-snapshot-id-for-audit guidance.
-- Actionability 5.0 — engineer can run the query immediately.
+**Doc verification (trino.io/docs/current/functions/datetime.html)**:
+- `day_of_week()` doc quote: "Returns the ISO day of the week from `x`. The value ranges from `1` (Monday) to `7` (Sunday)."
+- date_trunc('week', x) worked example in docs: timestamp `2001-08-22 03:04:05.321` truncates to week `2001-08-20 00:00:00.000` — 2001-08-20 was a Monday. Confirms ISO Monday-start.
 
-**Score: 4.750 PASS.** Minor numeric error; flag as LOW-priority iter536 fix.
+**Win pattern**: Same as iter400 (dbt config), iter402 ($partitions metadata), iter535 (persist_docs) — single in-place canonical adjacent to locked content + explicit DO-NOT-WRITE banner closes the gap on first re-probe. The signal-INSIDE-the-SQL-line strategy (iter534 onward) continues to work as the primary closure mechanism for harmful-speculation defects.
 
-### Q4 — date_trunc('week') — Monday or Sunday? (European customer)
-**Honest decline is GOOD, but the speculative workaround is HARMFUL.**
+---
 
-The responder said "I don't have enough information to answer this conclusively" — correct, the resources didn't have a canonical for this. Suggested testing with a known Monday (DATE '2026-06-09'). All good.
+## Q2 — Trino timestamp formatting ("June 06, 2026") — 5.000 STRONG PASS
 
-THEN offered a Monday-start "workaround":
+**Verbatim claim**:
+- `format_datetime(ts, 'MMMM dd, yyyy')` (Joda) → "June 06, 2026" ✓
+- `date_format(ts, '%M %d, %Y')` (MySQL-style) → "June 06, 2026" ✓
+- Trino has NO strftime ✓
+- Gotcha table: Joda MM=month / mm=minute; MySQL %m=month / %i=minute ✓
+
+**Doc verification (trino.io/docs/current/functions/datetime.html)**:
+- `format_datetime(timestamp, format) → varchar`: Formats `timestamp` using Joda-Time pattern (`MMMM` full-month name, `dd` zero-padded day, `yyyy` 4-digit year). Output for 2026-06-06 = "June 06, 2026" — correct.
+- `date_format(timestamp, format) → varchar`: Formats `timestamp` using MySQL-style specifiers (`%M` full-month name, `%d` zero-padded day, `%Y` 4-digit year). Output for 2026-06-06 = "June 06, 2026" — correct.
+- No `strftime` function in Trino — confirmed (only `format_datetime` and `date_format`).
+- Joda MM-vs-mm and MySQL %m-vs-%i are the canonical pitfalls — gotcha table is accurate.
+
+---
+
+## Q3 — dbt snapshot check vs timestamp — 4.000 PASS w/ COLUMN SLIP
+
+**What was correct**:
+- timestamp strategy: needs `updated_at` column, faster, per-row timestamp compare ✓
+- check strategy: `check_cols` list, hashes columns, slower, no updated_at needed ✓
+- Query current with `WHERE dbt_valid_to IS NULL` ✓
+- "When to use which" guidance is reasonable.
+
+**SLIP CONFIRMED — dbt_is_deleted SWAPPED for dbt_updated_at**:
+
+The responder claimed both strategies produce four metadata columns: `dbt_scd_id, dbt_valid_from, dbt_valid_to, dbt_is_deleted`.
+
+**The correct DEFAULT four** (verified at docs.getdbt.com/reference/resource-configs/snapshot_meta_column_names):
+1. `dbt_scd_id` — unique key generated for each snapshot row
+2. `dbt_updated_at` — the `updated_at` timestamp of the source record when the snapshot row was inserted
+3. `dbt_valid_from` — timestamp when the snapshot row was first inserted and became valid
+4. `dbt_valid_to` — timestamp when the row is no longer valid
+
+**`dbt_is_deleted` is NOT a default meta-column** — doc verbatim: "`dbt_is_deleted` is **only added when the `hard_deletes='new_record'` config is set**. It is not added by default."
+
+The responder swapped `dbt_updated_at` (always present) for `dbt_is_deleted` (only present with hard_deletes='new_record'). This is a factual error a beginner will copy-paste and then be confused when their snapshot table doesn't have a `dbt_is_deleted` column (the default) OR doesn't have `dbt_updated_at` (which the responder did NOT mention).
+
+**Note**: The rubric row for "dbt snapshots SCD2" already lists all five columns correctly: "dbt_valid_from/dbt_valid_to/dbt_scd_id/dbt_updated_at/dbt_is_deleted in 1.9+" — so the rubric anchor is correct; the responder slipped at runtime, suggesting the resource (r09 dbt-snapshot section) may not have a clear "DEFAULT vs CONDITIONAL" separation.
+
+**Accuracy 3.0**: strategy semantics fully correct, but the column-list slip is non-trivial because it's the exact thing a SaaS engineer needs to JOIN/SELECT against. Half-credit Accuracy reflects "right intent, wrong column".
+
+---
+
+## Q4 — Iceberg partition month → day — 4.000 PASS w/ OVERSTATED SPARK CLAIM
+
+**What was correct**:
+- Step 1: `ALTER TABLE iceberg.analytics.events SET PROPERTIES partitioning = ARRAY['day(occurred_at)']` — VALID Trino 467 syntax. Verified at trino.io/docs/current/connector/iceberg.html: `ALTER TABLE table_name SET PROPERTIES partitioning = ARRAY[<existing partition columns>, 'my_new_partition_column']` is documented for partition evolution. Doc quote: "Partitioning can also be changed and the connector can still query data created before the partitioning change."
+- Step 1 framing as metadata-only with old files staying on month spec and Trino reading across both specs is correct (Iceberg partition evolution semantics).
+- Step 3: `ALTER TABLE ... EXECUTE expire_snapshots(retention_threshold => '7d')` — valid Trino 467 syntax, explicit param is fine.
+
+**OVERSTATED CLAIM — Step 2 "MUST use Spark"**:
+
+Responder said: "Trino's `EXECUTE optimize` does NOT repartition files to a new spec — it only compacts file sizes. You MUST use Spark" + gave `CALL iceberg.system.rewrite_data_files(...)`.
+
+**Verification verdict (with explicit uncertainty)**:
+- Trino docs for `optimize` (trino.io/docs/current/connector/iceberg.html) state: "is used for rewriting the content of the specified table so that it is merged into fewer but larger files. If the table is partitioned, the data compaction acts separately on each partition selected for optimization." — does NOT explicitly state whether `optimize` rewrites files INTO the CURRENT (new) partition spec after partition evolution.
+- Starburst blog (starburst.io/blog/iceberg-partitioning-and-performance-optimizations-in-trino-partitioning/) verbatim: "The existing data will remain partitioned by day unless the table is recreated." — supports the responder's "old data stays on old spec" framing for default behavior.
+- Trino GitHub issue #25279 ("Add support to optimize iceberg table on newly added partition predicate"): "Newly added partition column can not be used as part of the predicate during optimize" — confirms KNOWN GAPS in Trino's optimize-after-partition-evolution support.
+- Trino GitHub issue #12983: open feature request to "allow specifying specific partition spec ids" for optimize — strong signal that optimize-across-multiple-partition-specs is NOT fully supported as of Trino 467.
+- Trino GitHub issue #12362 ("Ability to OPTIMIZE a single time-based partition in Iceberg"): "if a table is partitioned using the hidden partition column feature (e.g. day(timestamp)), there does not seem to be a way to target a single day for optimization."
+
+**Judge verdict**: The responder's "MUST use Spark `rewrite_data_files`" claim is **overstated but defensible** — the documented Trino limitations DO suggest Spark is the more reliable path for rewriting historical data into a new partition spec, but the claim that Trino `optimize` "only compacts file sizes" (i.e. never repartitions) is too categorical given the docs are silent on the explicit behavior. The Starburst article supports "existing data remains partitioned by day unless the table is recreated" — which is consistent with the responder's framing.
+
+**Accuracy 3.5**: Step 1 + Step 3 fully correct; Step 2 is more confident than the docs warrant but is NOT clearly wrong and gives the SaaS engineer a working path (Spark rewrite_data_files). The user is NOT harmed by following the advice — they'll get the correct result. The defect is "overstated certainty," not "wrong answer."
+
+**iter537 verification probe recommended**: empirically test whether Trino 467 `ALTER TABLE ... EXECUTE optimize` after `ALTER TABLE ... SET PROPERTIES partitioning = ARRAY['day(...)']` rewrites historical files into the new day-spec or leaves them on the old month-spec. If optimize DOES rewrite into the current spec, the responder's "MUST use Spark" is a fabrication and r17 needs a corrective canonical. If optimize does NOT rewrite into the current spec, the responder is correct and r17 should add a pin documenting this.
+
+---
+
+## iter537 NEXT-TEACHER ACTIONS
+
+### FIX A (HIGH — Q3 dbt snapshot column slip)
+
+**Location**: resources/09 dbt-snapshot canonical (the iter532 COALESCE-default block area, or wherever the meta-columns list lives).
+
+**The fix**: Add a clear DEFAULT-vs-CONDITIONAL separation to the dbt snapshot meta-columns list:
+
 ```
-date_trunc('week', event_date + INTERVAL '1' DAY) - INTERVAL '1' DAY
+DEFAULT four meta-columns (always added by dbt snapshots):
+  1. dbt_scd_id       — unique key per snapshot row (MD5 hash internally)
+  2. dbt_updated_at   — the updated_at timestamp of the source record at insert time
+  3. dbt_valid_from   — when this row version became valid (Type-2 SCD start)
+  4. dbt_valid_to     — when this row version stopped being valid (NULL = current)
+
+CONDITIONAL fifth meta-column:
+  5. dbt_is_deleted   — only added when config sets hard_deletes='new_record'
+                        (NOT a default — beginners will be confused if they expect it)
 ```
-**This is WRONG.** Trino's `date_trunc('week', ...)` is ALREADY Monday-start (ISO 8601). Verified at trino.io/docs/current/functions/datetime.html (`day_of_week()` returns "1 (Monday) to 7 (Sunday)" — ISO convention), and confirmed via WebSearch: "`date_trunc('week', DATE '2020-01-01')` returns 2019-12-30 (the Monday of that week)." So the user's actual problem ("European customers expect Monday") is already solved by the bare `date_trunc('week', col)` — no workaround needed.
 
-The responder's "workaround" SHIFTS the week start +1 day to Tuesday, then -1 day from the truncated result, which lands on **Sunday** — the OPPOSITE of what the European customer wants. If a SaaS engineer copy-pasted this into a dashboard, weekly aggregations would suddenly group Sunday-to-Saturday instead of Monday-to-Sunday. Real product harm.
+**Doc quote anchor** (from docs.getdbt.com/reference/resource-configs/snapshot_meta_column_names):
+> "`dbt_is_deleted` is only added when the `hard_deletes='new_record'` config is set."
 
-- Accuracy 2.0 — the honest decline is fine; the wrong SQL drags accuracy hard. The truth (Trino week-starts-Monday) was directly knowable from the very doc the responder hedged on; the speculative addition introduced an active error.
-- Completeness 3.0 — answered the test-it-yourself path but missed the direct answer.
-- Clarity 4.0 — clearly labeled as a workaround and acknowledged uncertainty.
-- Actionability 2.0 — if engineer trusts the workaround, they get Sunday-start (wrong direction). If they trust the "test it" guidance, they figure it out. Mixed.
+**Keyword anchors**: "dbt snapshot columns / dbt_is_deleted default / dbt snapshot default columns / dbt_updated_at vs dbt_is_deleted / dbt snapshot meta-fields / SCD2 dbt columns".
 
-**Score: 2.750 per-question FAIL.**
+**Signal-INSIDE-the-line corrective** (per iter534 strategy): in any sample `SELECT *` from a dbt snapshot, add EOL comment on the dbt_is_deleted column: `-- only present if hard_deletes='new_record'; NOT a default column`.
 
-## Topic-average updates
+**DO-NOT-WRITE banner**: "Do NOT claim the four default snapshot columns are `dbt_scd_id, dbt_valid_from, dbt_valid_to, dbt_is_deleted` — that swaps `dbt_updated_at` (default) for `dbt_is_deleted` (conditional). The correct four defaults are `dbt_scd_id, dbt_updated_at, dbt_valid_from, dbt_valid_to`."
 
-- **Oracle PL/SQL to dbt + Trino SQL migration** (Q1 persist_docs dbt-config cluster + Q4 date_trunc Oracle-date-function-migration cluster): prior 4.4825/94 -> (4.4825*94 + 5.000 + 2.750)/96 = 421.3550/96 = **4.3891/96** (-0.0934 — Q4's FAIL drags despite Q1's perfect 5.000; this is what a FAIL on date-function-migration looks like).
-- **SQL query best practices for OLAP** (Q2 string-similarity / fuzzy-match cluster): prior 4.5273/98 -> (4.5273*98 + 5.000)/99 = 448.6754/99 = **4.5321/99** (+0.0048).
-- **Iceberg table maintenance** (Q3 time-travel + snapshot retention cluster): prior 4.4623/164 -> (4.4623*164 + 4.750)/165 = 736.5872/165 = **4.4642/165** (+0.0019).
-- Federation row UNCHANGED at **4.49944/310** per directive.
+### FIX B (MEDIUM — Q4 Trino optimize after partition evolution: verify-then-pin)
 
-## PRIMARY iter536 FIX TARGET — Q4 date_trunc('week') canonical
+**Recommended approach**: empirical verification first.
 
-**Add to r07 (analytical-query-patterns) near existing date_trunc content OR to r27 §4.6 (Oracle date-function migration table):**
+**Probe step**: have a teacher (or operator with Trino access) run:
+1. CREATE Iceberg table partitioned by `month(ts)`.
+2. INSERT several months of data.
+3. `ALTER TABLE ... SET PROPERTIES partitioning = ARRAY['day(ts)']`.
+4. `ALTER TABLE ... EXECUTE optimize` (no WHERE clause).
+5. Check `"events$files"` — what partition spec do the rewritten files reference?
 
-**THE FACT (verified at trino.io/docs/current/functions/datetime.html via WebFetch + WebSearch):** Trino's `date_trunc('week', col)` returns the **Monday** of the week (ISO 8601). `day_of_week()` doc quote: "The ISO day of the week from `x`. The value ranges from `1` (Monday) to `7` (Sunday)." Empirical: `date_trunc('week', DATE '2020-01-01')` (a Wednesday) returns `2019-12-30` (Monday).
+**If optimize DOES rewrite into the new day spec**: the responder's "MUST use Spark" is a fabrication. r17 needs a corrective canonical: "Trino `EXECUTE optimize` rewrites files into the CURRENT partition spec — after partition evolution, optimize completes the repartitioning of historical data. Spark `rewrite_data_files` is NOT required." Add DO-NOT-WRITE banner against the responder's overstated claim.
 
-**Implication:** European customers who expect Monday-start weeks already get them from the bare `date_trunc('week', col)` — no workaround needed.
+**If optimize does NOT rewrite into the new day spec**: the responder is correct. r17 needs a pin: "After ALTER TABLE SET PROPERTIES partitioning, Trino `EXECUTE optimize` does NOT repartition existing data files to the new spec — only compacts within the old spec. To rewrite historical data into the new day spec, use Spark `CALL iceberg.system.rewrite_data_files(...)`." Cite Trino GitHub issues #25279 / #12983 / #12362.
 
-**DO-NOT-WRITE banned patterns (CRITICAL — the responder generated exactly the harmful pattern):**
+**Until verified**: do NOT add a contradicting canonical to r17 — the current responder answer is at minimum harmless (Spark rewrite_data_files works in all cases) and consistent with the Starburst article framing.
 
-| DO NOT write | Why it's wrong |
-|---|---|
-| `date_trunc('week', col + INTERVAL '1' DAY) - INTERVAL '1' DAY` to "get Monday-start" | **WRONG / HARMFUL.** Trino is ALREADY Monday-start. Adding +1 day shifts the week boundary forward, so the truncated value lands on Tuesday (the Monday of the shifted week), then -1 day = **SUNDAY**. This converts a correct Monday-start aggregation into a wrong Sunday-start aggregation. Customer-facing weekly dashboards silently re-group. |
-| Assume Trino follows the US/Postgres convention of Sunday-start weeks | **WRONG.** Trino is ISO 8601 (Monday-start). Postgres `date_trunc('week', ...)` is also Monday-start; the Sunday-start mental model comes from BigQuery (`WEEK` default Sunday, `ISOWEEK` Monday) and Snowflake (`WEEK_START` parameter, default 0 = legacy Sunday). |
-| Use `date_trunc('week', col, 'Sunday')` (no third arg in Trino) | **WRONG.** Trino's `date_trunc` takes only `(unit, x)` — no week-start parameter. Postgres / Snowflake have engine-specific syntaxes; do not import them. |
+### NO FIXES NEEDED — Q1, Q2
 
-**Sunday-start (US convention) workaround — only if you ACTUALLY need Sunday-start:**
-```sql
-date_trunc('week', col + INTERVAL '1' DAY) - INTERVAL '1' DAY
-```
-That is the responder's SQL — correct for Sunday-start, wrong for the question that was asked.
+Q1 closure is PERFECT — iter536 teacher's r07 Monday/ISO canonical at L611 landed on first re-probe. No regression risk for 1-2 iterations.
 
-**Keyword anchors:** `date_trunc week Monday Trino`, `date_trunc week Sunday`, `Trino week starts on`, `ISO week Trino`, `European week Monday Trino`, `date_trunc week start day`, `Trino week boundary`, `Postgres vs Trino week start`, `Sunday-start workaround Trino`.
+Q2 strong-pass — format_datetime + date_format + Joda/MySQL gotcha table all bulletproofed.
 
-**Placement:** r07 has existing date_trunc('week', ...) cohort SQL at L322/L443/L524 — add the canonical IMMEDIATELY ADJACENT (a leading-canonical block before the first use). r27 §4.6 Oracle date-function migration table at L706 already has a row for Oracle `TRUNC(dt)` -> Trino `date_trunc('day', dt)` with `'week'` mentioned in the side-notes — promote the week-specific Monday-start fact into a one-liner with the DO-NOT-WRITE banner.
+---
 
-## SECONDARY iter536 FIX TARGET (LOW) — Iceberg snapshot retention default
+## TOPIC AVG UPDATES
 
-Responder said "default 7-day" for `expire_snapshots` retention. Actual default per Apache Iceberg is **5 days** (`history.expire.max-snapshot-age-ms` = 432000000 ms = 5 x 24 x 60 x 60 x 1000). Verified via WebSearch on the Iceberg source constant `MAX_SNAPSHOT_AGE_MS_DEFAULT = 5 * 24 * 60 * 60 * 1000`. Minor numeric error; r17 likely has the correct number elsewhere — confirm and add a pin if not.
+- **Common analytical query patterns** (Q1 date_trunc week-start cluster) 4.6886/12 → (4.6886·12 + 5.000)/13 = (56.2632 + 5.000)/13 = 61.2632/13 = **4.7126/13** (+0.0240 — Q1 above topic avg lift)
+- **SQL query best practices for OLAP** (Q2 datetime-formatting / format_datetime cluster) 4.5321/99 → (4.5321·99 + 5.000)/100 = (448.6779 + 5.000)/100 = 453.6779/100 = **4.5368/100** (+0.0047 — Q2 above topic avg lift)
+- **dbt snapshots SCD2** (Q3 check-vs-timestamp + meta-columns cluster) 4.2969/4 → (4.2969·4 + 4.000)/5 = (17.1876 + 4.000)/5 = 21.1876/5 = **4.2375/5** (-0.0594 — Q3 below topic avg drags slightly; column slip is real but PASS overall)
+- **Iceberg partition design for SaaS** (Q4 partition evolution + optimize cluster) 4.4947/36 → (4.4947·36 + 4.000)/37 = (161.8092 + 4.000)/37 = 165.8092/37 = **4.4813/37** (-0.0134 — Q4 below topic avg drags slightly)
 
-## Iter536 probe targets
+**Federation row UNCHANGED**: stays 4.49944/310 per iter472-536 directive (no federation probe this iter).
 
-- **Q4 date_trunc('week') re-probe (HIGH — verifies the Monday-start canonical lands AND the DO-NOT-WRITE banner prevents the INTERVAL-shift workaround from being regenerated)**: "I aggregate weekly with `date_trunc('week', event_date)` in Trino — my US customers see weeks starting Sunday. How do I switch?" OR re-ask the same European-customer question.
-- **persist_docs 2nd angle (LOW — already strong-passed but topic is fresh, verify durability)**: "I set persist_docs but SHOW COLUMNS still shows blank Comment — what step did I miss?"
-- **Iceberg snapshot retention default re-probe (LOW)**: "What's the default age before expire_snapshots starts deleting old snapshots?"
-- **levenshtein_distance 2nd angle (LOW — well-bulletproofed)**: "I need similarity score not edit count — what's the Trino equivalent?"
-- **Iceberg time travel 2nd angle (LOW — well-bulletproofed)**: "Can I time-travel to a snapshot from 6 months ago?"
-- **$files/$snapshots JOIN durability (MEDIUM — verifies iter534 FIX 1/2/3/4 still holds — was DURABLE through iter535, due for next iter)**
-- Federation stays UNPROBED (LOW — row stays 4.49944/310).
+---
 
-## Notes for teacher
+## Iter537 probe targets
 
-- **DO NOT** rewrite r27 §6.7J — it landed correctly and won this iteration.
-- **DO NOT** touch resources/22 §13.x or the federation row.
-- The Q4 fix must include both (a) the positive canonical fact (`date_trunc('week')` = Monday) AND (b) the DO-NOT-WRITE banner BANNING the exact harmful workaround the responder generated. Without (b), responder regeneration risk is real.
-- Place the corrective signal INSIDE the SQL block (an EOL comment on the `date_trunc('week', col)` line: `-- Monday-start, ISO; NOT Sunday`) per iter534's signal-inside-the-line strategy that broke the 3-iter $files prefix-elision recurrence.
+1. **dbt snapshot meta-columns 2nd angle (HIGH — verifies FIX A landing)**: "I queried `dbt_is_deleted` on my snapshot and got 'Column cannot be resolved' — what's the default snapshot column set?" OR "What snapshot meta-columns does dbt give me out of the box for SCD2?"
+2. **Iceberg partition evolution + optimize 2nd angle (MEDIUM — verifies FIX B landing IF verified)**: "I changed my Iceberg partitioning from month to day, then ran EXECUTE optimize — did it rewrite the old files into day partitions?" OR "Do I need Spark to repartition historical data after Iceberg partition evolution?"
+3. **date_trunc('week') 2nd re-probe (MEDIUM — durability check)**: "My US customer wants weeks to start on Sunday — how do I switch from Trino's default?" — verifies Monday/ISO canonical stays sticky AND the Sunday-as-US-recipe survives a flip in question framing.
+4. **format_datetime 2nd angle (LOW — well-bulletproofed)**: "I need to format dates as `Mon Jun 06 2026` (RFC-2822-ish) — Joda or date_format?"
+5. **dbt snapshot timestamp-vs-check 2nd angle (LOW)**: "My source table has no updated_at column — what's my snapshot strategy?"
+6. **Federation stays UNPROBED (LOW)** — row stays 4.49944/310 per directive.
+
+**131st consecutive overall PASS in extended phase — margin +1.000 above floor.** **PRIMARY WIN: iter536 teacher's r07 Monday/ISO canonical closed the iter535 Q4 harmful-speculation gap on first re-probe.** Two new fix targets identified: Q3 dbt_is_deleted-vs-dbt_updated_at column slip (HIGH, fab) and Q4 overstated "MUST use Spark" claim (MEDIUM, needs empirical verification before adding contradicting canonical).

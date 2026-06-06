@@ -2805,6 +2805,8 @@ These two settings are **separate** and frequently conflated. Get them straight 
 >
 > **Iceberg's own table-level property** `history.expire.max-snapshot-age-ms` defaults to **5d** and is applied when expiration runs with table defaults (no explicit `older_than` argument).
 >
+> **Exact-value pin (iter536):** the documented default of `history.expire.max-snapshot-age-ms` is **`432000000` ms = 5 days** (verified at [iceberg.apache.org/docs/latest/configuration/](https://iceberg.apache.org/docs/latest/configuration/)). **NOT 7 days** — the 7-day number applies to the **Trino-only** `iceberg.expire-snapshots.min-retention` catalog floor (a separate setting in a separate config layer). Do **not** state "Iceberg's table-level snapshot retention default is 7 days" — that conflates the two settings. Iceberg = **5d / 432000000 ms** (table property); Trino floor = **7d** (catalog property).
+>
 > These are **separate settings — do not conflate them.** The Trino floor is a catalog-wide guard against accidental aggressive expiry. The Iceberg table property is what determines the default age cutoff when the procedure runs without an explicit threshold.
 
 ### Adjusting retention for long-term audit windows
