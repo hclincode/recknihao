@@ -1,202 +1,123 @@
-# Iter 538 Feedback — 2026-06-06 (EXTENDED PHASE)
+# Judge Feedback — Iter 539 (2026-06-06, EXTENDED PHASE)
 
-## Verdict
+**Overall avg = (5.000 + 4.625 + 4.625 + 3.875) / 4 = 18.125 / 4 = 4.531 — PASS (margin +1.031 above 3.5 floor).**
 
-**Overall avg = 4.531 → PASS** (margin +1.031 above 3.5 floor). 133rd consecutive overall PASS in extended phase.
-
-Per-question: Q1 = 4.625, Q2 = 5.000, Q3 = **3.500 (CRITICAL ROUNDING-MODE FAB — see below)**, Q4 = 5.000.
-
-Federation NOT probed — rubric row 4.49944/310 untouched.
+**HEADLINE Q1 WIN — HALF_UP ROUNDING-MODE GAP CLOSED ON FIRST RE-PROBE.** Iter538 Q3 fabricated "banker's rounding (round-half-to-even)" for Trino DOUBLE→DECIMAL casts. Iter539 teacher inserted r23 §3.1C with the HALF_UP canonical + tie-case examples + DO-NOT-WRITE banner. The responder on iter539 now answers `CAST(DOUBLE '0.005' AS DECIMAL(3,2)) = 0.01` and explicitly identifies the rounding mode as **HALF_UP (NOT banker's, NOT HALF_EVEN)**, citing `DecimalConversions.java` + `DecimalCasts.java`. Source-code verified at github.com/trinodb/trino/blob/master/core/trino-spi/src/main/java/io/trino/spi/type/DecimalConversions.java line 28 `import static java.math.RoundingMode.HALF_UP;` + line 189 `BigDecimal.valueOf(value).setScale(intScale(scale), HALF_UP)` + line 215 `new BigDecimal(String.valueOf(floatValue)).setScale(intScale(scale), HALF_UP)`. Tie-cases 0.5→1, 0.005→0.01, 0.025→0.03 all HALF_UP-consistent. **Perfect closure pattern — same as iter400/402/535/536/537.**
 
 ---
 
-## Q1 — Dedupe with ROW_NUMBER over (user_id, event_type, event_timestamp) — 4.625 STRONG PASS
+## Per-question scores
 
-**Per-dimension**: Accuracy 4.5, Completeness 4.5, Clarity 4.5, Actionability 5.0.
+### Q1. CAST(DOUBLE '0.005' AS DECIMAL(3,2)) for billing — 0.00 or 0.01? banker's or half-up? — 5.000 STRONG PASS
 
-- ROW_NUMBER() OVER (PARTITION BY ... ORDER BY inserted_at DESC) in a subquery + WHERE rn = 1 is the canonical Trino 467 idiom — verified at trino.io/docs/current/functions/window.html (window functions including ROW_NUMBER are supported) + trino.io/docs/current/sql/select.html (no QUALIFY clause exists in Trino, so the subquery form is exactly what's needed). Correct.
-- rn <= N for top-N per group — correct, useful extension.
-- CTAS-rebuild + rename for in-place Iceberg dedup — sound advice. Trino on Iceberg v2 *does* support row-level DELETE by predicate (`DELETE FROM ... WHERE …`), but for "delete duplicates keeping only the most recent per combo" you cannot express that as a single-predicate DELETE — you need either MERGE or CTAS-rebuild because the deletion criterion is per-group, not per-row. Responder's "no stable row id" framing is slightly imprecise but lands on the right workflow.
+| Dim | Score | Notes |
+|---|---|---|
+| Accuracy | 5.0 | 0.01 + HALF_UP both correct; cites DecimalConversions.java + DecimalCasts.java; tie-cases match Trino source. Verified at github.com/trinodb/trino/blob/master/core/trino-spi/src/main/java/io/trino/spi/type/DecimalConversions.java line 28 `import static java.math.RoundingMode.HALF_UP;` + line 189 + line 215. Overflow → NUMERIC_VALUE_OUT_OF_RANGE correct (preserves iter538 fact). |
+| Completeness | 5.0 | Direct answer (0.01) + rule name (HALF_UP) + explicit "NOT banker's / NOT HALF_EVEN" disclaimer + tie-case list + DECIMAL(18,2) billing default + overflow behavior — covers every angle the SaaS engineer needs. |
+| Clarity | 5.0 | Zero ambiguity; uses worked tie-case examples (0.5→1, 0.005→0.01, 0.025→0.03); contrasts banker's-would-give explicitly so the user can sanity-check against any other engine. |
+| Actionability | 5.0 | User has exact value (0.01), exact rule name, and a billing-stack default (DECIMAL(18,2)) — copy-paste ready. |
 
-**Minor slip**: "no stable row id for a simple DELETE" is imprecise but lands on the correct answer. Score not penalized aggressively.
+**HEADLINE WIN — gap closure confirmed on first re-probe. Iter538 banker's-rounding fab → iter539 correct HALF_UP. r23 §3.1C canonical landed cleanly.**
 
----
+### Q2. EXPLAIN output is huge — what to look at to see why a query scans too much / doesn't filter early? — 4.625 STRONG PASS
 
-## Q2 — ROLLUP / GROUPING bitmask — 5.000 STRONG PASS
+| Dim | Score | Notes |
+|---|---|---|
+| Accuracy | 4.5 | Partition pruning shows as a constraint pushed down vs a post-scan filter in `ScanFilterProject` — directionally correct. trino.io/docs/current/sql/explain-analyze.html confirms `ScanFilterProject` node displays `Physical Input: ...MB` + `Filtered: NN.NN%` percentage; EXPLAIN ANALYZE shows actual physical input bytes (responder's "Input bytes (not rows) = true scan cost" is doc-accurate). Function-wrapping the partition column (`CAST(event_date AS VARCHAR)`) defeats pruning — correct. Type-mismatch defeats pruning — correct. Minor imprecision: doc examples show `Filtered: 45.46%` and `Physical Input: 4.51MB` at the ScanFilterProject level rather than a literal "constraint" badge on TableScan — the diagnostic intent (look at ScanFilterProject input bytes + filter %) is right but the exact label "constraint pushed down" is the IO-plan terminology, not the standard EXPLAIN distributed/logical plan terminology. Not harmful. |
+| Completeness | 4.5 | Covers the three big EXPLAIN ANALYZE diagnostics: (a) input bytes vs rows, (b) function-wrapping/type-mismatch breaks pushdown, (c) explicit range predicates beat function calls. Missing: EXPLAIN (TYPE IO) which shows the literal `estimate.constraints` with column min/max bounds — that would be the cleanest "did pushdown happen?" signal but the responder's `ScanFilterProject` + Physical Input approach is the production-realistic answer. |
+| Clarity | 4.5 | Concrete signals to look at; concrete anti-patterns (CAST around partition column) named; physicalInputDataSize from MinIO ties the metric back to the on-prem stack. |
+| Actionability | 5.0 | Engineer knows: (1) run EXPLAIN ANALYZE, (2) read physical input bytes on the ScanFilterProject, (3) check for CAST/function wrapping on partition column, (4) use explicit range predicates. Production-stack tied (MinIO bytes). |
 
-**Per-dimension**: Accuracy 5.0, Completeness 5.0, Clarity 5.0, Actionability 5.0.
+### Q3. Physically sort an Iceberg table on disk by a column (e.g. customer_id) to speed up filters — possible? helps scan? — 4.625 STRONG PASS
 
-**CRITICAL VERIFY (per directive): bitmask values for GROUPING(plan, region) with ROLLUP(plan, region)**:
+| Dim | Score | Notes |
+|---|---|---|
+| Accuracy | 4.5 | `ALTER TABLE ... SET PROPERTIES sorted_by = ARRAY['customer_id ASC NULLS LAST']` — VERIFIED VALID at trino.io/docs/current/connector/iceberg.html which lists `sorted_by` among properties that "can be updated after a table is created" (quote: "format, format_version, partitioning, sorted_by, max_commit_retry, ..."). `EXECUTE optimize(file_size_threshold => '512MB')` — VALID procedure. Default 100MB — VERIFIED correct (doc quote: "All files with a size below the optional `file_size_threshold` parameter (default value for the threshold is `100MB`) are merged"). Responder's "default 100MB skips large files, override to 512MB to force rewrite of already-large files" is the canonical motivation. "Only affects new writes until optimize" + "not a partitioning strategy" both correct. Within-file sort → narrowed per-file min/max → file-level pruning via Iceberg manifest statistics — correct. |
+| Completeness | 4.5 | Covers (a) how to set the property post-creation, (b) how to rewrite existing files (optimize), (c) the file_size_threshold knob and why to override, (d) what changes (per-file min/max), (e) only-affects-new-writes nuance. Missing minor: did not mention that the underlying Iceberg sort-order metadata is per-file (not global) — i.e. files are still independently sorted, not globally sorted — but the "sorts rows WITHIN each file" phrasing already implies this. |
+| Clarity | 4.5 | Explicit syntax for both SET PROPERTIES and EXECUTE optimize; explains the mechanism (per-file min/max → manifest pruning); distinguishes sort vs partition. |
+| Actionability | 5.0 | Two-command runbook (`ALTER TABLE SET PROPERTIES` then `EXECUTE optimize(file_size_threshold => '512MB')`); user knows exactly what to type and what to expect. |
 
-Verified at trino.io/docs/current/sql/select.html via WebFetch verbatim: "Trino also supports complex aggregations using the `GROUPING SETS`, `CUBE` and `ROLLUP` syntax" + "`grouping(col1, ..., colN) -> bigint` The grouping operation returns a bit set converted to decimal, indicating which columns are present in a grouping" + **"To compute the resulting bit set for a particular row, bits are assigned to the argument columns with the rightmost column being the least significant bit. For a given grouping, a bit is set to 0 if the corresponding column is included in the grouping and to 1 otherwise."**
+### Q4. dbt feature to fail builds when a SOURCE table is stale (freshness threshold)? — 3.875 PASS WITH MINOR SPECULATION SLIP
 
-So for `GROUPING(plan, region)` (leftmost = plan = high bit; rightmost = region = low bit):
-- detail row (both columns present): binary 00 = **0** correct
-- plan subtotal (region rolled up, plan present): binary 01 = **1** correct
-- grand total (both rolled up): binary 11 = **3** correct
-- region-only (plan rolled up, region present) under CUBE: binary 10 = **2** correct (responder noted CUBE adds this fourth combination)
+| Dim | Score | Notes |
+|---|---|---|
+| Accuracy | 3.5 | Honest decline + hedged general-knowledge framing. The general-knowledge portion is **mostly correct**: `freshness:` config block with `warn_after`/`error_after` (each `{count, period}`) + `loaded_at_field` — VERIFIED correct at docs.getdbt.com/docs/build/sources (doc quote: `warn_after: {count: 12, period: hour}` + `error_after: {count: 24, period: hour}` + `loaded_at_field: _etl_loaded_at`). **BUT** the claim that "Running `dbt test --select state:new` or `dbt source freshness` validates the thresholds" is **PARTIALLY WRONG** — `dbt source freshness` IS the correct command (verified at docs.getdbt.com), but `dbt test --select state:new` is a **slim-CI node selector** (selects newly-added nodes for testing), NOT a source freshness check. The two are unrelated; bundling them with "or" implies they're interchangeable for freshness checking, which is wrong. The correct alternative is `dbt build --select source_status:fresher+` (doc-verified at docs.getdbt.com/docs/build/sources: "Use the `dbt build --select source_status:fresher+` command to build and test models downstream of fresher sources"). |
+| Completeness | 4.0 | Despite the decline, the hedged answer hits the core mechanism: freshness config block, warn_after/error_after, loaded_at_field, validation command. Missing: the `dbt build --select source_status:fresher+` pattern that ACTUALLY fails the build on stale sources; missing per-table override pattern; missing v1.9+ `config:` wrapper change. |
+| Clarity | 4.0 | Decline framing is honest; the engineer knows they should look elsewhere for canonical detail. Hedged content is readable, but the `dbt test --select state:new` / `dbt source freshness` "or" disjunction is confusing and could mislead. |
+| Actionability | 4.0 | Decline signals the engineer to look up dbt docs directly; hedged answer gives them search terms (`freshness:`, `warn_after`, `loaded_at_field`). But the wrong `dbt test --select state:new` command would mislead a beginner who tries it expecting it to check freshness. |
 
-Responder's 0/1/3 mapping for ROLLUP is **EXACT**. ROLLUP correctly skips 2 because it only rolls up right-to-left (region rolls up first, then plan — never plan-without-region). CUBE adds 2. CASE GROUPING(...) labeling pattern is clean. ORDER BY GROUPING(...), plan NULLS LAST, region NULLS LAST is correct (Trino default is NULLS LAST regardless of direction — verified at trino.io iter537).
-
-No fabrication. Bulletproof answer.
-
----
-
-## Q3 — CAST FLOAT → DECIMAL rounding for billing — 3.500 PASS w/ CRITICAL ROUNDING-MODE FAB
-
-**Per-dimension**: Accuracy 2.0, Completeness 4.0, Clarity 4.5, Actionability 3.5.
-
-### CRITICAL VERIFICATION RESULT: BANKER'S ROUNDING CLAIM IS A FABRICATION
-
-The responder asserted: "Trino uses BANKER'S ROUNDING (round-half-to-even). So 123.456 becomes 123.46 and 123.454 becomes 123.45."
-
-**Verification (Trino source code, DecimalConversions.java at github.com/trinodb/trino)**:
-
-```java
-import static java.math.RoundingMode.HALF_UP;
-
-// internalDoubleToLongDecimal:
-BigDecimal bigDecimal = BigDecimal.valueOf(value).setScale(intScale(scale), HALF_UP);
-
-// realToLongDecimal:
-BigDecimal bigDecimal = new BigDecimal(String.valueOf(floatValue)).setScale(intScale(scale), HALF_UP);
-```
-
-Trino uses **`RoundingMode.HALF_UP`** (round-half-away-from-zero for positive values) for ALL four DOUBLE/REAL → DECIMAL cast paths. This is the **opposite** of banker's rounding (HALF_EVEN).
-
-VARCHAR-to-DECIMAL (separate cast path) also uses HALF_UP — confirmed at DecimalCasts.java verbatim: `result = new BigDecimal(stringValue).setScale(DecimalConversions.intScale(scale), HALF_UP)`.
-
-Note: the official trino.io docs (decimal.html, types.html, conversion.html) do NOT explicitly document the rounding mode — multiple WebFetches confirmed this gap. The source code is the authoritative reference.
-
-### Why the responder's examples don't disprove either rule
-
-The two examples (123.456 → 123.46, 123.454 → 123.45) are NOT tie-break cases at the rounding digit:
-- 123.456 at scale=2: the digit-after is 6, which rounds up under both HALF_UP and HALF_EVEN.
-- 123.454 at scale=2: the digit-after is 4, which rounds down under both HALF_UP and HALF_EVEN.
-
-The clean tie cases that distinguish the two are `0.5 → ?` (HALF_UP: 1; HALF_EVEN: 0) and `2.5 → ?` (HALF_UP: 3; HALF_EVEN: 2). The responder's examples happen to be consistent with BOTH rules — so the worked numbers do not prove the responder's named rule.
-
-### Billing-context impact (this is why Accuracy is hit hard)
-
-For a billing pipeline rounding to DECIMAL(18,2):
-- $0.005 under HALF_UP (Trino's actual behavior) → $0.01 (always rounds up at exact .5)
-- $0.005 under HALF_EVEN (what the responder claimed) → $0.00 (rounds to even)
-
-A SaaS engineer reading "Trino uses banker's rounding" will reconcile against the wrong rule and either:
-1. Build incorrect mental tests that pass spuriously (the responder's own non-tie examples), or
-2. Be confused when their actual Trino output doesn't match the banker's-rounding mental model on tie values.
-
-The "round half away from zero" rule is the simple, well-known billing rule and matches Postgres `numeric(p, s)` cast behavior — calling it "banker's" inverts the meaning.
-
-### What IS correct in the answer
-
-- "Trino does NOT silently wrap on overflow; overflow raises NUMERIC_VALUE_OUT_OF_RANGE" — CORRECT. Verified at trino.io/docs/current/functions/decimal.html and trinodb/trino#20227 ("the expected user-facing error for decimal overflow conditions").
-- DECIMAL(18,2) being a sensible billing default — CORRECT.
-
-### Score rationale
-
-- Accuracy 2.0: rounding-mode mode-name FAB is billing-load-bearing. Other claims (overflow, scale, hard-error) are correct.
-- Completeness 4.0: covered overflow, scale choice, default precision — missing the "verify with `SELECT CAST(...)` empirical probe" recommendation that would have caught the FAB itself.
-- Clarity 4.5: explanation flows well; the (wrong) examples are clearly stated.
-- Actionability 3.5: dropped because following the recipe gives a wrong mental model for tie cases.
+**Honest decline on a real resources gap is acceptable behavior — Accuracy not tanked. But the speculation in the hedged portion (wrong `dbt test` command) is a minor harm vector — flag this for iter540 teacher to close.**
 
 ---
 
-## Q4 — dbt exposures — 5.000 STRONG PASS
+## Topic-row updates
 
-**Per-dimension**: Accuracy 5.0, Completeness 5.0, Clarity 5.0, Actionability 5.0.
-
-Verified at docs.getdbt.com/docs/build/exposures via WebFetch verbatim:
-- "Exposures make it possible to define and describe a downstream use of your dbt project, such as in a dashboard, application, or data science pipeline."
-- Required fields: `name` (snake_case), `type` (one of `dashboard`, `notebook`, `analysis`, `ml`, `application`), `owner` (must include `name` or `email`). Expected: `depends_on` (list of `ref`, `source`, `metric`). Optional: `url`, `description`, `maturity`, `label`.
-- `dbt run -s +exposure:weekly_jaffle_report` / `dbt test -s +exposure:weekly_jaffle_report` selector syntax confirmed verbatim.
-- Exposures are metadata constructs (not enforced contracts); they surface in the dbt docs site DAG with an 'EXP' indicator and enable impact analysis.
-
-Responder's distinction from `contracts` (contract = schema enforcement at build time / not_null can be runtime-enforced via Iceberg column constraint; exposure = non-enforcing downstream-consumer metadata) is correct and pedagogically useful. The YAML example shape (name/type/depends_on with ref()/owner with name+email/url/description) matches the doc canonical exactly. The `dbt ls -s +exposure:name` selector is correct.
-
-No fabrication. Bulletproof.
+- **SQL query best practices for OLAP** (Q1 DECIMAL HALF_UP rounding + Q2 EXPLAIN diagnostic cluster): 4.5293/104 → (4.5293·104 + 5.000 + 4.625)/106 = 480.6272/106 = **4.5342/106** (+0.0049 — Q1 perfect lifts strongly; Q2 strong-pass also above topic avg)
+- **Query performance regression diagnosis** (Q2 EXPLAIN scan-too-much also touches this row): 4.3338/16 → (4.3338·16 + 4.625)/17 = 73.966/17 = **4.3510/17** (+0.0172 — Q2 above topic avg lift)
+- **Iceberg partition design for SaaS** (Q3 sorted_by + optimize cluster): 4.4813/37 → (4.4813·37 + 4.625)/38 = 170.4331/38 = **4.4851/38** (+0.0038 — Q3 marginally above topic avg)
+- **dbt sources / source freshness** (Q4 cluster): 4.4689/5 → (4.4689·5 + 3.875)/6 = 26.2195/6 = **4.3699/6** (-0.0990 — Q4 below topic avg drags; speculation slip is real)
+- **Federation row UNCHANGED**: 4.49944/310 (federation not probed this iter per directive).
 
 ---
 
-## Topic average updates
+## Iter540 teacher targets
 
-- **SQL query best practices for OLAP** (Q1 ROW_NUMBER dedup + Q3 CAST DECIMAL rounding cluster): 4.5385/102 → (4.5385·102 + 4.625 + 3.500)/104 = 471.052/104 = **4.5293/104** (-0.0092 — Q3 FAB drags below topic average; Q1 above lifts partially).
-- **Common analytical query patterns** (Q2 ROLLUP/GROUPING multi-level subtotals cluster): 4.7331/14 → (4.7331·14 + 5.000)/15 = 71.2634/15 = **4.7509/15** (+0.0178 — Q2 perfect above topic avg).
-- **dbt model contracts** (Q4 exposures cluster — closest semantic match is the dbt-build-metadata family but the contracts row covers ENFORCEMENT semantics specifically; exposures are NON-enforcing). **No topic row update for Q4** to avoid mis-attribution — exposures are out-of-scope for the contracts row's enforcement semantics. Small rubric-coverage gap noted for future iters (no dbt-exposures-specific row exists yet).
+### PRIMARY (HIGH) — Q4 dbt source freshness canonical (real resources gap + wrong-command-speculation correction)
 
-Federation row UNCHANGED at 4.49944/310 per iter472-538 directive.
+**Resource**: r09 or wherever dbt source/freshness keyword path lands first. Search for existing "source freshness" content; if absent, ADD canonical section.
 
----
+**Canonical content**:
+- **Config (v1.9+)**:
+  ```yaml
+  sources:
+    - name: jaffle_shop
+      database: raw
+      config:
+        freshness:
+          warn_after: {count: 12, period: hour}
+          error_after: {count: 24, period: hour}
+        loaded_at_field: _etl_loaded_at  # v1.10+ under config:
+      tables:
+        - name: orders
+          config:
+            freshness:
+              warn_after: {count: 6, period: hour}
+              error_after: {count: 12, period: hour}
+        - name: product_skus
+          config:
+            freshness: null  # disable for this table
+  ```
+- **Period values**: `minute`, `hour`, `day`.
+- **Required field**: `loaded_at_field` is the column dbt queries with `MAX()` to compute lag.
+- **Validation commands** (doc-verified):
+  - `dbt source freshness` — runs the freshness check; **error_after** breach exits non-zero.
+  - `dbt build --select source_status:fresher+` — rebuilds only models downstream of fresh sources (the actual "fail builds when stale" pattern).
+- **DO-NOT-WRITE banner**: do **NOT** describe `dbt test --select state:new` as a freshness-validation command. `state:new` is a slim-CI node selector that selects nodes added since a previous manifest, unrelated to source freshness. The correct commands are `dbt source freshness` and `dbt build --select source_status:fresher+`.
 
-## PRIMARY ITER539 FIX TARGET (HIGH — billing-critical)
+**Doc-quote anchor** (docs.getdbt.com/docs/build/sources): "To build models based on source freshness in dbt: 1. Run `dbt source freshness` to check the freshness of your sources. 2. Use the `dbt build --select source_status:fresher+` command to build and test models downstream of fresher sources."
 
-### FIX A — Trino DECIMAL-cast rounding-mode canonical + DO-NOT-WRITE banner against "banker's rounding"
+**Keyword anchors** to embed in canonical: "dbt source freshness / dbt freshness threshold / dbt warn_after error_after / loaded_at_field / dbt fail build on stale source / dbt source_status:fresher+ / dbt source freshness command".
 
-**Where**: resources/23-sql-best-practices-olap.md (DECIMAL section) OR resources/07-analytical-query-patterns.md DECIMAL/billing block, whichever the responder's keyword path hits first. Use the iter534 signal-INSIDE-the-line strategy.
+### SECONDARY (LOW) — Q2 EXPLAIN/EXPLAIN ANALYZE terminology nuance
 
-**Canonical to add (verbatim — recommended text)**:
+Optional polish: in the EXPLAIN diagnostic canonical (r22/r23/r24 — wherever the responder's keyword path lands), tighten the "constraint pushed down" terminology. The literal `constraints` output appears in `EXPLAIN (TYPE IO)`, not the default distributed/logical EXPLAIN. The default EXPLAIN ANALYZE signal is the `Physical Input: X.YMB` line + `Filtered: NN.NN%` on the `ScanFilterProject` node. Responder's gist is right but precise vocabulary (`EXPLAIN (TYPE IO)` for constraint visibility) would tighten this. Low priority — does not currently harm answers.
 
-> **Trino DECIMAL-cast rounding mode**
-> Trino uses **`HALF_UP`** (round-half-away-from-zero for positive values) when casting `DOUBLE`/`REAL`/`FLOAT`/`VARCHAR` → `DECIMAL(p, s)`. This is **NOT banker's rounding** (`HALF_EVEN`).
->
-> Source: `DecimalConversions.java` (`internalDoubleToLongDecimal`, `realToLongDecimal`) and `DecimalCasts.java` (VARCHAR path) all `import static java.math.RoundingMode.HALF_UP;` and call `.setScale(intScale(scale), HALF_UP)`. The trino.io docs do not explicitly document the rounding mode — the source code is the authoritative reference.
->
-> **Tie-case examples (HALF_UP, what Trino actually does)**:
-> ```sql
-> SELECT CAST(DOUBLE '0.5'   AS DECIMAL(1, 0));  -- 1     (NOT 0)
-> SELECT CAST(DOUBLE '2.5'   AS DECIMAL(2, 0));  -- 3     (NOT 2 — banker's would give 2)
-> SELECT CAST(DOUBLE '0.005' AS DECIMAL(3, 2));  -- 0.01  (NOT 0.00 — billing-load-bearing)
-> SELECT CAST(DOUBLE '0.015' AS DECIMAL(3, 2));  -- 0.02  (NOT 0.01 — billing-load-bearing)
-> ```
->
-> **DO-NOT-WRITE**: do not describe Trino's cast rounding as "banker's rounding" or "round-half-to-even" or "HALF_EVEN". Trino's cast uses HALF_UP. (Postgres `numeric` cast also uses HALF_UP; only some accounting/financial libraries default to HALF_EVEN.)
->
-> **Overflow** (separately, also non-silent): `CAST(DOUBLE '1e20' AS DECIMAL(10,2))` raises `NUMERIC_VALUE_OUT_OF_RANGE` — hard error, not silent wrap.
->
-> **Verification probe (always advise)**: when in doubt about how a specific value rounds, run a 1-line `SELECT CAST(...)` empirically before trusting any mental rule.
-
-**Keyword anchors** (inline in the canonical for the Haiku responder's keyword-match path): "Trino DECIMAL cast rounding / Trino CAST DOUBLE to DECIMAL / banker's rounding Trino / round half to even Trino / round half up Trino / Trino billing decimal / DECIMAL(18,2) billing / HALF_UP HALF_EVEN Trino".
-
-**Signal-INSIDE-the-line strategy** (per iter534 precedent that broke a 3-iter recurrence): in any SQL block showing `CAST(... AS DECIMAL(...))` for billing context, add an EOL comment: `-- HALF_UP (NOT banker's; 0.5 -> 1)`.
-
----
-
-## SECONDARY ITER539 FIX TARGETS (LOW)
-
-### FIX B (LOW — Q1 minor framing) — "Iceberg DELETE for dedup" clarification
-
-In the Iceberg-on-Trino DML resource (r17 or wherever DELETE on Iceberg v2 is discussed), add a short note:
-
-> For "dedup keeping only the most recent per group", a single-predicate `DELETE` is not expressible — the criterion is per-group, not per-row. Use either MERGE-style logic (`MERGE INTO target USING (SELECT … ROW_NUMBER() OVER … WHERE rn = 1) AS src ON …`) or CTAS-rebuild + RENAME. Trino does support `DELETE FROM iceberg_table WHERE <predicate>` on Iceberg v2 — it just cannot express "delete duplicates" in one predicate.
-
-Not load-bearing; the responder's CTAS-rebuild advice is correct, just slightly imprecisely framed.
+### NO Q1/Q3 fixes needed — both strong-pass.
 
 ---
 
-## NO FIXES NEEDED
+## Iter540 probe targets
 
-- Q2 ROLLUP/GROUPING bitmask — bulletproof (5.000).
-- Q4 dbt exposures — bulletproof (5.000).
-
----
-
-## Iter539 probe targets
-
-1. **HIGH — DECIMAL cast rounding 2nd angle (verifies FIX A landing)**: "I cast a DOUBLE column with value 0.005 to DECIMAL(3,2) for billing — what value do I get? Is it banker's rounding?" (direct tie-case probe — must answer 0.01 + must NOT say banker's). Alternative angle: "is Trino's CAST consistent with Postgres for monetary rounding?"
-2. **MEDIUM — DECIMAL cast overflow 2nd angle (durability of correct claim)**: "what happens if my DOUBLE is 1e20 and I cast to DECIMAL(10,2) — does Trino silently wrap?"
-3. **LOW — ROW_NUMBER dedup 2nd angle (well-bulletproofed)**: "I have a Kafka events table where the same primary_key was reprocessed multiple times — give me the SQL to get the latest version per key in Trino."
-4. **LOW — dbt exposures 2nd angle (well-bulletproofed)**: "what's the difference between a dbt exposure and a dbt source?" OR "can I run `dbt build` only on models that feed a specific exposure?"
-5. **LOW — GROUPING bitmask 3-arg angle**: "if I have `GROUP BY CUBE(plan, region, channel)` how do I label the row that is plan+channel total (region rolled up)?" (tests 3-arg bitmask understanding — bit pattern 010 = 2).
-6. **UNPROBED — Federation row stays 4.49944/310** (per iter472-538 directive).
+- **HIGH — dbt source freshness 2nd angle (verifies FIX A landing)**: "how do I check the freshness of my dbt sources?" OR "how do I structure freshness: in dbt v1.9+ — under `config:` or top-level?" (must NOT mention `dbt test --select state:new` as the validation command; MUST mention `dbt source freshness` + `dbt build --select source_status:fresher+`).
+- **MEDIUM — DECIMAL HALF_UP rounding 3rd angle (durability check on iter539 win)**: "CAST(DOUBLE '0.0049' AS DECIMAL(3,2)) — what value?" (answer: 0.00 because not at tie) OR "is `ROUND(0.005, 2)` also HALF_UP?" (answer: yes — see r23 §3.1C DO-NOT-WRITE row).
+- **MEDIUM — Iceberg sorted_by 2nd angle**: "I set sorted_by but my old files still aren't sorted — why?" (answer: only new writes are sorted; old files need EXECUTE optimize with file_size_threshold high enough to include them) OR "does sorted_by replace partitioning?" (answer: no — sort is within-file; partitioning is across-file).
+- **LOW — EXPLAIN ANALYZE 2nd angle (well-bulletproofed)**: "where in EXPLAIN ANALYZE do I see how many bytes my query actually read?" (answer: Physical Input on ScanFilterProject).
+- **Federation stays UNPROBED** — row stays 4.49944/310.
 
 ---
 
 ## Meta-rule observation
 
-The directive's "verify YOUR OWN corrections before asserting" caveat was DECISIVE this iteration. Without source-code verification, a judge could plausibly have either:
-- (a) accepted the responder's "banker's rounding" claim because it sounds technically authoritative and the non-tie examples don't contradict it, OR
-- (b) overcorrected with an unverified counter-claim.
+The "verify YOUR OWN corrections" caveat was DECISIVE again — this iter I verified `sorted_by` ALTER-TABLE-eligibility (doc confirms it IS in the post-creation-editable list, so the responder's claim is not a fab). Also verified the `dbt source freshness` command name + the `dbt build --select source_status:fresher+` pattern directly against docs.getdbt.com so the iter540 PRIMARY canonical is doc-quoted. **3rd consecutive iter (iter537 NULLS-LAST + iter538 banker's-vs-HALF_UP + iter539 sorted_by-ALTER-eligibility + Q4 dbt-command-correction) where meta-rule prevented false-positive correction.**
 
-Both would be wrong. The correct answer — `HALF_UP`, sourced from DecimalConversions.java — required direct repo verification because trino.io docs (decimal.html, types.html, conversion.html) do NOT explicitly document the rounding mode (multiple WebFetches confirmed this gap). The Trino docs gap itself is worth noting in the teacher canonical: cite the source code, not just a doc URL.
-
-This is the second consecutive iter (after iter537 NULLS-LAST direct-verification) where the meta-rule prevented a false-positive correction in either direction. Continue applying.
+**134th consecutive overall PASS in extended phase — margin +1.031 above floor.**

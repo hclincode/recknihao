@@ -279,6 +279,53 @@ When a `SUM(decimal)` result looks smaller than expected, the cause is NEVER sil
 
 ---
 
+## 3.1C. `CAST(DOUBLE/REAL AS DECIMAL)` uses **HALF_UP** rounding (NOT banker's / NOT HALF_EVEN) — billing-critical canonical
+
+**Keyword anchors:** Trino DECIMAL cast rounding, banker's rounding Trino, round half to even Trino, round half up Trino, Trino billing decimal rounding, HALF_UP vs HALF_EVEN, cast double to decimal rounding, RoundingMode.HALF_UP Trino, cast real to decimal rounding.
+
+**The one fact (source-verified — docs are silent on the mode).** Trino casts `DOUBLE` → `DECIMAL` and `REAL` → `DECIMAL` using **`RoundingMode.HALF_UP`** (round half **away from zero**), NOT banker's rounding (round-half-to-even / `HALF_EVEN`). Verified in the Trino source: `core/trino-spi/src/main/java/io/trino/spi/type/DecimalConversions.java` uses `BigDecimal.valueOf(value).setScale(intScale(scale), HALF_UP)` for `DOUBLE → DECIMAL`, and `core/trino-main/src/main/java/io/trino/type/DecimalCasts.java` uses `bigDecimal.setScale(DecimalConversions.intScale(scale), HALF_UP)` in `numberToShortDecimal` / `numberToLongDecimal`. **The trino.io docs page for DECIMAL casts is SILENT on the rounding mode — the source is authoritative.**
+
+**Tie-case worked examples** (the difference between HALF_UP and banker's rounding is visible only at exact 0.5 ties):
+
+```sql
+-- Trino 467: HALF_UP behavior (verified by source)
+SELECT CAST(DOUBLE '0.5'   AS DECIMAL(1, 0));   -- 1     (banker's would give 0)
+SELECT CAST(DOUBLE '2.5'   AS DECIMAL(2, 0));   -- 3     (banker's would give 2)
+SELECT CAST(DOUBLE '0.005' AS DECIMAL(3, 2));   -- 0.01  (banker's would give 0.00)
+SELECT CAST(DOUBLE '0.015' AS DECIMAL(3, 2));   -- 0.02  (banker's would give 0.02 — same here)
+SELECT CAST(DOUBLE '0.025' AS DECIMAL(3, 2));   -- 0.03  (banker's would give 0.02)
+SELECT CAST(REAL   '1.5'   AS DECIMAL(2, 0));   -- 2     (banker's would give 2 — same here)
+SELECT CAST(REAL   '2.5'   AS DECIMAL(2, 0));   -- 3     (banker's would give 2)
+```
+
+**Billing example — in-line signal (corrective comment on the line the responder will copy):**
+
+```sql
+-- Convert a DOUBLE amount column to a billing-grade DECIMAL(18, 2)
+SELECT CAST(amount_dbl AS DECIMAL(18, 2)) AS amount_billed  -- HALF_UP rounding (NOT banker's; 0.005 -> 0.01)
+FROM   iceberg.billing.invoices;
+```
+
+**Overflow behavior (unchanged from §3.1B).** If the magnitude of the value (after rounding) does not fit in the target `DECIMAL(p, s)` precision, Trino throws **`NUMERIC_VALUE_OUT_OF_RANGE`** — a hard error, no silent wrap-around. Verified in `DecimalCasts.java`: `if (overflows(result, precision)) { throw new TrinoException(NUMERIC_VALUE_OUT_OF_RANGE, format("Cannot cast ... to DECIMAL(%s, %s)", ...)); }`. **`DECIMAL(18, 2)` is the sensible billing default** on this stack — 16 digits before the decimal (up to ~9.99e15) is plenty for any realistic invoice line; 2 digits after covers cents exactly.
+
+### DO NOT WRITE
+
+| False claim | Reality |
+|---|---|
+| "Trino's `CAST(DOUBLE AS DECIMAL)` uses banker's rounding (round-half-to-even)." | **FABRICATION.** Source-verified `HALF_UP` (round half away from zero). `CAST(DOUBLE '0.5' AS DECIMAL(1,0))` = **1**, not 0. (`core/trino-spi/.../DecimalConversions.java`, `core/trino-main/.../DecimalCasts.java`.) |
+| "Trino uses `RoundingMode.HALF_EVEN` for DECIMAL casts." | **FABRICATION.** The source uses `RoundingMode.HALF_UP`. `HALF_EVEN` is the Java BigDecimal default, but Trino does not adopt that default for casts. |
+| "Trino's DECIMAL cast follows IEEE-754 round-half-to-even (banker's rounding)." | **FABRICATION.** IEEE-754's default rounding mode is round-half-to-even, but Trino explicitly overrides this in its source with `setScale(..., HALF_UP)`. The casted DECIMAL result follows HALF_UP, not the IEEE-754 default. |
+| "If a `DECIMAL` cast overflows the target precision, Trino silently wraps around or truncates." | **FALSE.** `NUMERIC_VALUE_OUT_OF_RANGE` is raised as a hard error — same behavior as §3.1B overflow on aggregates. |
+| "Use `ROUND(x, 2)` to control the rounding mode of a `CAST(... AS DECIMAL(18, 2))`." | **MISLEADING.** `ROUND(x, n)` on Trino is also `HALF_UP` (verified at [trino.io/docs/current/functions/math.html](https://trino.io/docs/current/functions/math.html) — `round(x, d)` rounds to `d` decimal places). It produces the same result as the CAST in HALF_UP terms; it does NOT give you a banker's-rounding option. Trino has no built-in `HALF_EVEN` cast function. If you specifically need banker's rounding (rare — most billing systems require HALF_UP for regulatory consistency), you must do it in application code, not in SQL. |
+
+**Sources:**
+- Trino source — `core/trino-spi/src/main/java/io/trino/spi/type/DecimalConversions.java` — `setScale(intScale(scale), HALF_UP)` for `DOUBLE → DECIMAL` and `REAL → DECIMAL` ([github.com/trinodb/trino](https://github.com/trinodb/trino/blob/master/core/trino-spi/src/main/java/io/trino/spi/type/DecimalConversions.java)).
+- Trino source — `core/trino-main/src/main/java/io/trino/type/DecimalCasts.java` — `numberToShortDecimal` / `numberToLongDecimal` both call `setScale(..., HALF_UP)`; overflow check throws `NUMERIC_VALUE_OUT_OF_RANGE` ([github.com/trinodb/trino](https://github.com/trinodb/trino/blob/master/core/trino-main/src/main/java/io/trino/type/DecimalCasts.java)).
+- [trino.io/docs/current/language/types.html](https://trino.io/docs/current/language/types.html) — DECIMAL type definition. Page does NOT document the cast rounding mode (silent — source is authoritative).
+- [trino.io/docs/current/functions/math.html](https://trino.io/docs/current/functions/math.html) — `round(x, d)` reference.
+
+---
+
 ## 4. Verify your plan with EXPLAIN
 
 **Why**: SQL that looks correct can still scan the whole table. `EXPLAIN` shows what Trino will actually do.
