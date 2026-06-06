@@ -1029,6 +1029,63 @@ FROM {{ ref('stg_users') }}
 - Resource 13 §"Postgres → Trino translation table" lists `ts::DATE` → `CAST(ts AS DATE)`. Inside the Postgres-side ingestion examples in resource 13 (Spark JDBC `dbtable` subqueries, pg_attribute lookups, gen_random_uuid()), the `::` cast IS valid because that SQL runs in Postgres, not Trino.
 - Resource 22 §3.2 (Postgres connector pushdown table) — the UUID typed-literal example `WHERE tenant_id = UUID 'a1b2c3d4-...'` is the Trino-compatible form for the equivalent Postgres `tenant_id = 'a1b2c3d4-...'::uuid` filter.
 
+### 4.4E TRINO `try(expression)` CANONICAL — wrap an arbitrary expression and return NULL on error (the general-purpose error-suppressor; `TRY_CAST` is the cast-only sibling)
+
+**Keyword anchors (for findability — keep all of these in this section verbatim):** Trino `try` function, wrap expression return null on error, `try` vs `try_cast`, catch divide by zero invalid cast Trino, `try` + `COALESCE` default value, error handling Trino expression, suppress error return null Trino, general-purpose error-wrapping Trino, "Trino has no try function" is FALSE.
+
+**The one-sentence definition.** `try(expression)` evaluates `expression` and returns `NULL` if evaluation hits one of a **specific** set of runtime errors instead of failing the whole query. Verified at [trino.io/docs/current/functions/conditional.html](https://trino.io/docs/current/functions/conditional.html) on 2026-06-06.
+
+**Worked example — divide-by-zero suppression.**
+
+```sql
+-- Without try() — the query FAILS the moment any row has commission_rate = 0:
+SELECT amount / commission_rate FROM orders;
+-- ERROR: Division by zero
+
+-- With try() — the offending row evaluates to NULL; the query SUCCEEDS:
+SELECT try(amount / commission_rate) FROM orders;
+
+-- For a DEFAULT value (e.g., 0) instead of NULL, wrap with COALESCE:
+SELECT COALESCE(try(amount / commission_rate), 0) AS rate_per_dollar FROM orders;
+```
+
+**ERRORS `try()` CATCHES** (per the official Trino conditional-expressions doc):
+
+1. **Division by zero.**
+2. **Invalid cast or invalid function argument** (e.g., `CAST('abc' AS INTEGER)` buried inside a larger expression).
+3. **Numeric value out of range** (e.g., overflow in `BIGINT` arithmetic).
+4. **Invalid JSON literal.**
+5. **JSON input or output conversion errors.**
+6. **JSON path evaluation errors.**
+7. **JSON value function result errors.**
+
+**ERRORS `try()` does NOT catch** (load-bearing — do not promise blanket exception handling):
+- User-raised errors via `fail('...')`.
+- Query timeouts, memory-limit exceeded (OOM), worker crashes.
+- Syntax errors, analysis-time errors, unresolved column names, permission denials.
+- Connector / catalog errors at plan time (e.g., table not found).
+
+**`try()` vs `try_cast(expr AS type)` — pick by scope.**
+
+| Form | Scope | Use when |
+|---|---|---|
+| `try_cast(x AS type)` | **Cast only.** Returns `NULL` if the type conversion fails; throws on any other error. | You just need a soft-cast — bad input becomes `NULL`. |
+| `try(<arbitrary expression>)` | **Any expression** — an arithmetic op, a function call, a `CAST` nested inside a bigger expression, a JSON path lookup, etc. | You need to wrap something **other** than a bare cast (e.g., `amount / denom`, `json_extract_scalar(payload, '$.user.id')`, `from_iso8601_timestamp(raw_ts)`). |
+
+**For divide-by-zero specifically**, both `NULLIF(denom, 0)` and `try(numer / denom)` work — `NULLIF` is the older pattern, `try()` is the direct general tool. For an **invalid cast buried inside a larger expression** (e.g., `try(CAST(SUBSTR(raw_id, 5, 8) AS INTEGER) + 1)`), `try_cast` would only wrap the cast itself, while `try()` covers the whole sub-expression.
+
+**DO-NOT-WRITE callout (load-bearing — copy this into your code-review checklist):**
+
+> 1. **NEVER write "Trino has no general-purpose error-wrapping function" or "Trino has no `try()` function" or "to return NULL on error in Trino, use `NULLIF` / `CASE WHEN` only".** All three statements are **FALSE.** Trino HAS `try(expression)` — it is the general-purpose error-suppressor and lives in the `conditional` function family alongside `COALESCE` and `NULLIF`.
+> 2. **NEVER reach only for `NULLIF` / `CASE WHEN` for "wrap an arbitrary expression and return NULL on error".** Those work for the specific divide-by-zero / specific-value-to-NULL cases, but the direct general tool is `try(expression)`. `try()` covers divide-by-zero AND invalid-cast AND numeric-overflow AND JSON errors in a single wrapper.
+> 3. **NEVER assume `try()` catches `fail(...)`, OOM, timeouts, or syntax errors.** The catch list is exactly the 7 classes above (division by zero, invalid cast / invalid function argument, numeric out of range, plus 4 JSON error classes). For user-thrown `fail('...')`, the error propagates regardless of `try()`.
+> 4. **NEVER assume `try()` and `try_cast()` are interchangeable.** `try_cast(x AS type)` is **cast-only**; `try(<expr>)` is **any expression**. If you need to wrap a non-cast computation (e.g., division, arithmetic overflow, JSON path lookup), `try()` is correct and `try_cast` will not compile against a non-cast expression.
+
+**Cross-references.**
+- §4.4A above — `TRY_CAST(expr AS type)` is documented in the cast forms table (line 959). `try()` is the **general-purpose** sibling for **non-cast** expressions; `try_cast` remains the right tool when the failure mode is specifically a bad cast.
+- Resource 7 (`07-analytical-query-patterns.md`) §YoY-growth — uses `NULLIF(prev.usage_count, 0)` as the divide-by-zero guard inline. `try(...)` is an equivalent alternative when the numerator/denominator structure is more complex than a single ratio.
+- Resource 23 §"SQL best practices" — when the expression that might fail is buried inside a larger computation (`SUM(try(amount / commission_rate))`), `try()` is the right wrapper because `NULLIF` only handles the equal-to-zero case at the leaf, while `try()` catches all 7 error classes including invalid casts inside the nested expression.
+
 ### 4.4C ORACLE `TRUNC` ↔ TRINO `truncate` GUARDRAIL — three distinct mappings, one lowercase 1-arg function, NO `TRUNC` keyword in Trino
 
 **Why this section exists (iter476 cross-dialect-spillover fix).** Oracle's `TRUNC` is one function name overloaded across **three distinct semantics** (numeric truncation, integer truncation, date truncation). Trino splits these across **three different function names**, none of which is spelled `TRUNC`. The iter476 responder wrote `CAST(TRUNC(12.3456 * 100) / 100 AS DECIMAL(10,2))` in a Trino rewrite — that produces `Function 'trunc' not registered` at runtime. This subsection installs the authoritative mapping + DO-NOT-WRITE.

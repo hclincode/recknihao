@@ -1,189 +1,127 @@
-# Iter 522 Judge Feedback — 2026-06-06 (EXTENDED PHASE)
+# Iter523 Judge Feedback
 
-## Overall: 4.219 PASS (margin +0.719 above 3.5 floor)
+**Overall: PASS — avg 4.78125 / 5**
 
-Four-question summary:
-- Q1 uuid() / dbt incremental — **4.9375 STRONG PASS** (iter521 content gap CONFIRMED FILLED)
-- Q2 SIGN/MOD/CEIL/FLOOR/ROUND — **4.8125 STRONG PASS**
-- Q3 current_date / current_timestamp / localtimestamp / now() — **4.875 STRONG PASS**
-- Q4 try() general error wrapper — **2.25 FAIL** (NEW FABRICATED ABSENCE — claims `try()` doesn't exist when it does)
-
-**OVERALL AVG = (4.9375 + 4.8125 + 4.875 + 2.25) / 4 = 16.875 / 4 = 4.219 PASS** (Q1+Q2+Q3 strong absorb Q4's hard FAIL — 120th consecutive overall PASS in extended phase; tighter margin than iter521's +0.828; Q4 fabricated-absence cost iter the strong-pass band).
-
----
-
-## Q1 — Trino uuid() / Postgres gen_random_uuid() / safe as dbt incremental unique_key?
-
-**Score 4.9375 STRONG PASS** — Accuracy 5.0, Clarity 5.0, Applicability 5.0, Completeness 4.75
-
-**ITER521 Q4 UUID CONTENT GAP CONFIRMED FILLED — iter522 r27 §4.5D LEADING CANONICAL LANDED ON FIRST RE-PROBE.**
-
-Responder emits:
-- Trino `uuid()` = Postgres `gen_random_uuid()` one-to-one port
-- `CAST(uuid() AS VARCHAR)` for 36-char string form
-- **Critical random/non-deterministic warning**: re-running model regenerates → MERGE never matches → duplicate inserts → DO NOT use as `unique_key`
-- `{{ dbt_utils.generate_surrogate_key(['tenant_id','natural_order_id']) }}` as stable replacement
-- Iceberg PK/UNIQUE advisory-only / back with `dbt test --select unique`
-- Cites r27 §4.5D + §4.5A
-
-**WebSearch verification:**
-- trino.io/docs/current/functions/uuid.html (Trino 481, behavior unchanged from 467): `uuid() → uuid` — verbatim "Returns a pseudo randomly generated UUID (type 4)." Return type `uuid`. Confirms responder's signature + RFC-4122 v4 framing.
-- trino.io/docs/current/connector/iceberg.html: no PRIMARY KEY / UNIQUE enforcement (NOT NULL only). Confirms advisory-only claim.
-
-**ITER522 §4.5D LANDED — 33rd consecutive leading-canonical bulletproofing landing instance.** Iter521 Q4 honest-punt GONE. Random-vs-deterministic dichotomy landed in full. Cross-ref to §4.5A `generate_surrogate_key` clean.
-
--0.25 Completeness for no `dbt test --select unique` example syntax shown inline (mentioned but no code block).
+| Q | Topic | Acc | Compl | Clarity | Action | Avg |
+|---|---|---|---|---|---|---|
+| Q1 | Trino `try(expression)` general error-wrapper | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 | `width_bucket` histogram bucketing | 5 | 5 | 5 | 5 | 5.00 |
+| Q3 | Iceberg WAP branches (Spark write + Trino audit + fast_forward) | 4 | 5 | 5 | 5 | 4.75 |
+| Q4 | dbt `on_schema_change` 4 values + removals | 5 | 4 | 5 | 4 | 4.50 |
 
 ---
 
-## Q2 — Oracle SIGN/MOD/CEIL/FLOOR/ROUND → Trino; MOD negatives quirk?
+## Q1 — try() fabricated-absence FIXED
 
-**Score 4.8125 STRONG PASS** — Accuracy 5.0, Clarity 4.75, Applicability 5.0, Completeness 4.5
+**Confirmed**: the iter522 Q4 fabricated-absence is FIXED. Responder now correctly identifies `try(expression)` as the general-purpose error-wrapper (not "no such function — use NULLIF or CASE"). All four LOAD-BEARING facts present:
 
-Responder gives translation table:
-- `sign(n)` identical
-- `mod(a,b)` OR `a % b` identical
-- `ceil(n)` / `ceiling(n)` identical (alias)
-- `floor(n)` identical
-- `round(n,d)` HALF_UP identical
-- **MOD negatives: "identical, no quirks, migrate directly"**
+1. Function name + behavior: `try(expression)` returns NULL on a specific set of runtime errors.
+2. Catches list: divide-by-zero, invalid cast/function arg, numeric out of range, JSON errors — matches doc 1:1.
+3. `COALESCE(try(expr), default)` for default value — matches doc's canonical worked example `COALESCE(TRY(total_cost / packages), 0) AS per_package FROM shipping;`.
+4. try vs try_cast scope distinction (any expr vs cast-only) — correct and useful.
 
-**META-RULE applied — WebSearch-verified the responder's claim BEFORE flagging.** Verified:
-- trino.io/docs/current/functions/math.html: `sign(x) → [same as input]`, `ceil(x)`/`ceiling(x)`/`floor(x)`/`round(x, d)` all confirmed, `mod(n, m)` "Returns the modulo (remainder) of n divided by m." `%` operator confirmed verbatim as "Modulo (remainder)."
-- Trino `mod()` uses Java `%` semantics = truncated division → **sign-of-dividend**: `MOD(-17, 5) = -2`.
-- Oracle MOD uses **truncated division** too → sign-of-dividend: `MOD(-17, 5) = -2`. Confirmed via Oracle docs / DatabaseStar reference: "the sign of the result matches the sign of the dividend."
+Doc quote (trino.io/docs/current/functions/conditional.html): *"try(expression) — Evaluate an expression and handle certain types of errors by returning NULL."* Error classes from same doc: division by zero; invalid cast or function argument; numeric value out of range; invalid JSON literal; JSON input/output conversion errors; JSON path evaluation errors; JSON value function result errors. ALL SEVEN appear in r27 §4.4E and the responder repeats them.
 
-**Responder's "identical, no quirks" claim is CORRECT.** Both engines produce `-2` for `MOD(-17, 5)`. The migration-direct guidance is sound — no rewrite required for sign convention.
+The iter523 r27 §4.4E try() canonical LANDED. The "FALSE absence" anti-pattern is now explicit in the resource, which is exactly the surface the responder needed to break out of the iter522 hallucination loop.
 
-(Note: Oracle ALSO has `REMAINDER(n, m)` which uses ROUND-half-even and CAN produce different sign — but the question asked about MOD specifically, not REMAINDER. Responder correctly scoped to MOD.)
+Score: 5/5/5/5 = **5.00**.
 
--0.5 Completeness for not mentioning Oracle's separate `REMAINDER` function exists with different semantics (not load-bearing for the asked port, but a curious engineer might encounter it). -0.25 Clarity for not showing the worked `MOD(-17,5)` example (would prove the "no quirks" claim crisply).
+## Q2 — width_bucket clean
 
----
+Verified at trino.io/docs/current/functions/math.html: `width_bucket(x, bound1, bound2, n) -> bigint` "returns the bin number of x in an equi-width histogram with the specified bound1 and bound2 bounds and n number of buckets." The responder's characterization (returns 1..N for in-range, 0 for below low, N+1 for above high, evenly spaced (high-low)/n boundaries) is consistent with doc semantics and Postgres-lineage behavior. The worked example (0..1000 → 10 buckets + CASE label + COUNT/GROUP BY) is exactly the actionable pattern the SaaS engineer asked for, with no big CASE ladder.
 
-## Q3 — current_date vs current_timestamp vs localtimestamp vs now() — aliases or different?
+Score: 5/5/5/5 = **5.00**.
 
-**Score 4.875 STRONG PASS** — Accuracy 5.0, Clarity 5.0, Applicability 4.75, Completeness 4.75
+## Q3 — Iceberg WAP branches: Trino-side syntax VERIFIED CORRECT
 
-Responder gives crisp framing:
-- `current_date` → date (no parens)
-- `current_timestamp` → timestamp(3) WITH time zone (no parens) = `now()`
-- `now()` → timestamp(3) with tz (parens) = `current_timestamp` (alias)
-- `localtimestamp` → timestamp(3) WITHOUT time zone
-- **Only now() ≡ current_timestamp are aliases; the rest are distinct types**
-- Worked example at 15:30:45 UTC / session America/New_York showing conversions
+**META-RULE applied**: I independently verified the Trino-branch-read syntax against trino.io/docs/current/connector/iceberg.html BEFORE flagging the responder.
 
-**WebSearch verification — trino.io/docs/current/functions/datetime.html:**
-- `current_date` → date (no time zone): CONFIRMED
-- `current_timestamp` → "timestamp with time zone" (no parens): CONFIRMED verbatim
-- `current_timestamp(p)` → timestamp(p) with time zone: CONFIRMED
-- `localtimestamp` → timestamp without time zone, 3 digits subsecond precision: CONFIRMED
-- `now()` → "timestamp(3) with time zone" — quoted verbatim **"This is an alias for current_timestamp"**: CONFIRMED
+**Doc quote (verbatim from current Iceberg connector docs)**:
 
-Responder's with-tz / without-tz distinction and the now()-as-alias framing are 100% accurate per Trino 467 docs (datetime behavior unchanged across 467–481).
+```sql
+SELECT *
+FROM example.testdb.customer_orders FOR VERSION AS OF 'historical-tag';
 
--0.25 Applicability / -0.25 Completeness for no `AT TIME ZONE` operator callout (the natural follow-up — engineer who reads "with tz" wonders how to convert to a specific zone for display). Non-load-bearing; the core distinction lands.
+SELECT *
+FROM example.testdb.customer_orders FOR VERSION AS OF 'test-branch';
+```
 
----
+Trino DOES support reading a named branch via `FOR VERSION AS OF '<branch-name>'` as a string literal. The responder's syntax — `FROM iceberg.analytics.my_table FOR VERSION AS OF 'staging_batch_2026_06_06'` — is **valid Trino 467**. The brief's hypothesis that this might be (b) `table@branch_<name>` identifier syntax or (c) `$refs`→snapshot_id lookup is NOT required — string-name `FOR VERSION AS OF` is the documented, primary path. No correction needed.
 
-## Q4 — Wrap an arbitrary expression to return NULL on error — does Trino have this?
+Other Q3 claims verified:
+- `ALTER TABLE ... CREATE BRANCH ... RETAIN N DAYS` — correct Spark Iceberg DDL.
+- `SET spark.wap.branch=<branch>` — correct WAP session config in Spark.
+- `CALL iceberg.system.fast_forward(table=>..., branch=>'main', to=>'<staging>')` — real Spark Iceberg stored procedure (NOT available in Trino; Spark-side only, which the responder correctly scopes).
+- "Trino read-only on branches" — accurate for the production environment (Spark for writes, Trino for reads).
+- "Readers see main until step4" — correct WAP semantics.
+- "No table duplication" — correct (branches share data files via the same metadata tree).
 
-**Score 2.25 FAIL** — Accuracy 1.5, Clarity 3.0, Applicability 2.0, Completeness 2.5
+Minor (-1 accuracy): the response could have called out the `$refs` metadata table as the discovery path for active branches/tags (the doc exposes it specifically for this), which would round out the "before fast_forward, check which branches exist" workflow. Not a fabrication, just a small omission.
 
-**FABRICATED ABSENCE — same failure class as iter505 split_to_map, iter517 contains/spark.sql.iceberg.write.*, iter520 CAST(map AS JSON) + string_agg.**
+No fabricated absence, no wrong syntax. Score: 4/5/5/5 = **4.75**.
 
-Responder claims:
-- "Trino doesn't have a general-purpose error-wrapping function like Oracle's DECODE with error suppression"
-- "There is NO general-purpose 'wrap any expression and return NULL on error' syntax in Trino 467"
+## Q4 — on_schema_change accurate
 
-**Both statements are WRONG.** Trino has exactly such a function — `try(expression)`.
+Verified at docs.getdbt.com/docs/build/incremental-models: four values are `ignore` (default), `append_new_columns`, `sync_all_columns`, `fail`. Responder correctly states:
+- Default is `ignore` (NOT `fail`) — critical fix vs common misconception.
+- `append_new_columns` runs `ALTER ADD COLUMN`, never drops.
+- `sync_all_columns` does both ADD and DROP — correctly handles removals.
+- `fail` raises on any schema mismatch.
 
-**WebSearch verification — trino.io/docs/current/functions/conditional.html (verbatim):**
-> "**try(expression)** — Evaluate an expression and handle certain types of errors by returning NULL."
-> "In cases where it is preferable that queries produce NULL or default values instead of failing when corrupt or invalid data is encountered, the TRY function may be useful. To specify default values, the TRY function can be used in conjunction with the COALESCE function."
+Doc quote: *"sync_all_columns: Adds any new columns to the existing table, and removes any columns that are now missing. This is inclusive of data type changes."* — exactly the responder's framing.
 
-**Errors `try()` catches (per official doc):**
-- Division by zero
-- Invalid cast or function argument
-- Numeric value out of range
-- Invalid JSON literal
-- JSON input or output conversion errors
-- JSON path evaluation errors
-- JSON value function result errors
+Minor (-1 completeness, -1 actionability): the responder could mention dbt's documented gotcha that `on_schema_change` does NOT backfill values for newly added columns in old rows — the engineer who plans to "sync columns" needs to know historical rows stay NULL for the new column until they rebuild. Not a fabrication, just incomplete operational guidance.
 
-**Direct answer to the user's question:** `try(amount / commission_rate)` returns NULL on divide-by-zero — exactly the "wrap an arbitrary expression and return NULL on error" pattern they asked for. Pair with `COALESCE(try(expr), default)` for a default value instead of NULL.
-
-**Nuance** (iter523 canonical must include): `try()` is NOT a universal try/catch — it catches a SPECIFIC enumerated set of runtime errors. It does NOT catch user-thrown errors, OOM, timeouts, etc. So the responder's "general-purpose" qualifier has a kernel of truth (try() ≠ Java try/catch for arbitrary exceptions), but the load-bearing answer — "yes, `try(expr)` is the wrap-and-null-on-error idiom for the common error classes the user is hitting" — is what the engineer needed and was DENIED.
-
-Salvage credit: the NULLIF (divide-by-zero) + CASE short-circuit + TRY_CAST workarounds the responder offered ARE valid defensive-coding patterns. So Clarity/Completeness aren't 1.0. But Accuracy 1.5 because the headline claim is fabricated-absence and engineer reading this builds bespoke CASE wrappers when one `try(...)` call would do.
-
-**Same recoverable pattern as iter505/517/520:** one resources/ leading canonical adds `try()` and the gap closes.
+Score: 5/4/5/4 = **4.50**.
 
 ---
 
-## Other fabrications surfaced this iter
+## Cross-cutting observations
 
-None besides Q4 `try()`. Q1/Q2/Q3 all factually clean.
+1. **No fabricated absences this iteration.** Q1 was the explicit re-probe of the iter522 hallucination; responder correctly identifies `try()` and grounds in the new §4.4E. The negative-anchor in §4.4E (`Trino has no try function is FALSE`) appears to have worked as a hallucination suppressor.
 
----
+2. **No dialect errors.** Q3's `FOR VERSION AS OF '<branch-name>'` is valid Trino 467 (independently verified). Q2's `width_bucket` signature is correct.
 
-## Concrete next-teacher actions for iter523
+3. **Production-environment fit is solid.** Q3 correctly splits the workflow into Spark (writes, fast_forward) and Trino (read-only audit), which matches prod_info.md (Spark+Iceberg 1.5.2 ingestion, Trino 467 query). Q4 stays within dbt config (no environment-incompatible suggestions).
 
-### FIX A — `try()` LEADING CANONICAL (HIGH priority)
-
-**Home options** (pick one, cross-ref the others):
-- r07 §1a (analytical-patterns conditional-expressions block) — natural neighbor to TRY_CAST
-- r27 §4.x conversion/error-handling block — natural neighbor to Oracle DECODE/EXCEPTION translation
-
-**Content requirements:**
-- **ONE-LINE RULE**: "Trino has `try(expression)` — evaluates the expression and returns NULL on a specific set of runtime errors (divide-by-zero, invalid cast, numeric out-of-range, JSON parse/conversion errors). Pair with `COALESCE(try(expr), default)` for a default."
-- **Signature**: `try(expression) → same type as expression` (returns NULL on caught error)
-- **Errors caught** (verbatim from trino.io/docs/current/functions/conditional.html):
-  - Division by zero
-  - Invalid cast or function argument
-  - Numeric value out of range
-  - Invalid JSON literal
-  - JSON input/output conversion errors
-  - JSON path evaluation errors
-  - JSON value function result errors
-- **Errors NOT caught** (the qualifier): user-thrown errors, query timeouts, OOM, syntax/parse errors, missing function/column resolution
-- **try vs try_cast distinction**:
-  - `try_cast(x AS type)` — narrow: ONLY casts; same behavior as `try(CAST(x AS type))`
-  - `try(any_expression)` — broad: WRAPS arbitrary expression for the caught error classes
-  - Engineer guidance: when only casting use try_cast (intent-revealing); when calculation contains division/JSON/numeric overflow use try()
-- **Worked examples**:
-  - `try(amount / commission_rate)` → NULL on divide-by-zero (the user's exact case)
-  - `COALESCE(try(amount / commission_rate), 0)` → 0 instead of NULL
-  - `try(CAST(json_extract_scalar(payload, '$.price') AS DECIMAL(10,2)))` → NULL on bad cast inside JSON path
-  - `try(json_parse(maybe_bad_json))` → NULL on invalid JSON
-- **DO-NOT-WRITE bans**:
-  - "Trino has no general-purpose error wrapper"
-  - "TRY_CAST is the only error-handling primitive in Trino"
-  - "Wrap arbitrary expressions in CASE WHEN to suppress errors" (when try() would do — defensive CASE is fine when error-class is NOT in try()'s caught set)
-  - "try() catches all runtime errors"
-- **Verified source**: trino.io/docs/current/functions/conditional.html
-- **Keyword anchors**: "Trino try function / wrap expression NULL on error / try vs try_cast / Trino error handling / divide by zero Trino NULL / try expression / Trino exception NULL / suppress error Trino / catch divide by zero Trino / try COALESCE"
-
-### Iter523 probe targets
-
-- **`try()` RE-PROBE (HIGH)**: "I have `(amount - fee) / quantity` and quantity is sometimes 0 — is there a one-call way to make the whole thing NULL on error?" — verifies FIX A `try()` canonical lands + fabricated-absence does NOT reappear
-- **try vs try_cast 2nd angle (HIGH)**: "What's the difference between `try()` and `try_cast()` in Trino?" — verifies FIX A's narrow-vs-broad framing surfaces
-- **try() error-class boundary 2nd angle (MEDIUM)**: "Will `try()` catch a query timeout or an OOM?" — verifies the "specific enumerated set, NOT universal try/catch" qualifier lands
-- **uuid() 2nd angle (MEDIUM)**: "I want a random event_id at INSERT time — can I just use `uuid()` directly in the column default?" — verifies r27 §4.5D one-shot canonical extends to INSERT/default context (current canonical landed on the dbt-incremental angle; second probe verifies non-dbt context)
-- **datetime AT TIME ZONE 2nd angle (LOW)**: "I have a `current_timestamp` with America/New_York session — how do I convert to UTC for the JSON API?" — verifies AT TIME ZONE operator surfaces from r07/r17 datetime block
-- **Oracle MOD vs REMAINDER 3rd angle (LOW)**: "what about Oracle's REMAINDER function — does that translate too?" — verifies translation table extends or correctly flags REMAINDER as different semantics
-- **Federation stays UNPROBED** (LOW — row stays 4.49944/310 per long-standing directive)
+4. **Score variance is tight (4.50–5.00).** No question dragged below the 3.5 pass threshold; the weak point is operational nuance (refs table, backfill semantics) not technical correctness.
 
 ---
 
-## Topic-avg updates
+## Next-teacher actions (iter524 candidates)
 
-- **Oracle PL/SQL → dbt + Trino SQL migration** (Q1 uuid()/dbt-incremental + Q2 SIGN/MOD/CEIL/FLOOR/ROUND + Q4 try() all map here per migration-cluster precedent): 4.5025/92 → (4.5025·92 + 4.9375 + 4.8125 + 2.25) / 95 = 426.230 / 95 = **4.4866/95** (-0.0159 — Q1+Q2 strong above topic avg, Q4 FAIL drags net negative)
-- **SQL query best practices for OLAP** (Q3 datetime aliases map here per datetime-functions cluster precedent): 4.5093/77 → (4.5093·77 + 4.875) / 78 = 352.092 / 78 = **4.5140/78** (+0.0047 — Q3 above topic avg lift)
-- **Federation**: NOT probed — **4.49944/310 row UNCHANGED** per iter472-522 directive + iter522 task constraint (do NOT touch §13.x federation guardrails in resources/22)
+**Low priority** (NOT required to pass — these are polish, not gaps):
+
+1. **r17 Iceberg-maintenance — add a one-line cross-ref to `$refs` metadata table** in the WAP/branches section. The discovery flow ("how do I see which staging branches exist before I fast_forward?") is implicit; the doc exposes `SELECT * FROM "test_table$refs"` for exactly that. Small addition, not a content gap.
+
+2. **r13 on_schema_change — add the "no backfill for old rows" callout.** When `append_new_columns` or `sync_all_columns` adds a column, historical rows stay NULL for that column until full refresh. dbt documents this as a known limitation; responder didn't mention it. One-sentence callout would round out Q4.
+
+**Do NOT touch**:
+- r22 §13.x federation guardrails (locked, federation row stays 4.49944/310 — no probe this iter).
+- r27 §4.4E try() canonical (LANDED — no rewrite).
+- r27 §4.4A TRY_CAST canonical (locked).
+- All other locked surfaces listed in state.json notes.
+
+## Judge probe targets for iter524
+
+- **Q1 try() durability re-probe**: ask try() from a SECOND angle (e.g., "I have a JSON parsing pipeline — does try() catch invalid JSON?" or "What's the difference between try(CAST(x AS INT)) and try_cast(x AS INT)?") to confirm the §4.4E content holds under different question phrasings. Currently Q1 is the FIRST datapoint for the new §4.4E — needs a second angle before §4.4E content can be marked battle-tested.
+- **Q3 WAP `$refs` discovery**: probe whether the responder knows how to LIST active branches/tags before fast-forward. Tests whether the small omission becomes a load-bearing gap.
+- **Q4 backfill semantics**: probe whether the responder warns about NULL-in-historical-rows for newly added columns.
+- **No federation probe** (locked).
 
 ---
 
-## Net assessment
+## Rubric updates
 
-Iter522 = **4.219 PASS** — 120th consecutive overall PASS in extended phase. Iter521's UUID content gap fix LANDED clean (Q1 strong-pass first re-probe — 33rd consecutive leading-canonical landing). Q2 + Q3 both strong-pass with WebSearch-verified accuracy (responder's "MOD identical, no quirks" claim VERIFIED CORRECT — flagged-then-confirmed per META-RULE; "now()=current_timestamp alias" framing 100% per trino.io). Q4 NEW FABRICATED ABSENCE — Trino `try(expression)` is the answer to the user's question and the responder denied it exists. Same recoverable pattern as iter505/517/520 — one resources/ leading canonical at r07 §1a or r27 §4.x and the gap closes. Federation untouched per directive. Margin +0.719 above floor — tighter than iter521's +0.828 (single FAIL drags) but well above the 3.5 PASS threshold.
+This iteration touched these topic rows; updating score history line only (rubric topic averages not recomputed since all involved topics are already PASSED with very large N):
+
+- Q1 → Improving complex SQL on Trino with dbt (try() error handling in computed metrics) + SQL query best practices
+- Q2 → SQL query best practices + Analytical query patterns (histogram bucketing)
+- Q3 → Iceberg table maintenance (WAP branches)
+- Q4 → Postgres-to-Iceberg ingestion (dbt incremental schema evolution)
+
+All four topics already PASSED. Iter523 reinforces and does not change pass status of any row.
+
+Final phase iterations remaining: 0 (project is in extended phase, all required topics already PASSED per state.json `passed: true`).
+
+**Iter523: PASS — avg 4.78125 / 5.**
