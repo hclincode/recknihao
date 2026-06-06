@@ -1405,6 +1405,73 @@ WHEN MATCHED THEN DELETE;
 
 **Cross-references.** Pattern A's `ROW_NUMBER` subquery form is the same canonical "top-N-per-group" template from §7A.2 (Oracle analytic → Trino) and resource 23 §"`QUALIFY` rewrite". Pattern B1's CTAS-then-RENAME swap relies on Iceberg's atomic `ALTER TABLE ... RENAME TO` (see resource 17 §"Iceberg RENAME / DROP / table-identity" coverage). For Pattern B2 MERGE syntax constraints (no `UPDATE SET *`, explicit column lists required), see §4.6B Trino MERGE star-shorthand guardrail.
 
+### 4.5D LEADING CANONICAL — Trino `uuid()` is RANDOM (RFC-4122 v4); SAFE for one-shot random ids, UNSAFE as a dbt incremental surrogate / `unique_key`
+
+> **Keyword anchors (read this block FIRST if your question contains any of these):** Trino uuid function, Trino uuid(), generate unique id Trino, Trino random uuid, RFC-4122 v4 Trino, gen_random_uuid Trino, gen_random_uuid Trino equivalent, Postgres gen_random_uuid translate, uuid vs generate_surrogate_key, random vs deterministic key, dbt incremental surrogate uuid, unique_key uuid dbt, idempotent dbt key, Iceberg primary key not enforced, Iceberg unique constraint not enforced, unique id per row Trino, event_id request_id mint.
+
+**The two facts (load-bearing — verified [trino.io/docs/current/functions/uuid.html](https://trino.io/docs/current/functions/uuid.html) and the Iceberg connector docs at [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html)):**
+
+1. **Trino HAS `uuid()`** — returns a **pseudo-randomly generated RFC-4122 type-4 (v4) UUID**, return type `UUID` (16-byte type). For a 36-char string form, write `CAST(uuid() AS VARCHAR)`. Postgres `gen_random_uuid()` → Trino `uuid()` (there is **NO `gen_random_uuid` function in Trino** — that name is Postgres-only; writing it in Trino is a parse error `Function 'gen_random_uuid' not registered`).
+2. **`uuid()` is NON-deterministic** — every invocation returns a different value. A `dbt run` that materializes `uuid()` as a column produces DIFFERENT values for the SAME logical row on each re-run, which **breaks idempotency**. If you use `uuid()` as a dbt incremental model's `unique_key`/surrogate, the MERGE never matches an existing row (the source key is fresh each run) → the model writes duplicates instead of upserting, and `dbt test --select unique:my_key` will silently pass on each run while the table grows linearly with re-runs.
+
+**The discipline (the one rule).** `uuid()` is appropriate **ONLY for a truly-new-each-insert random id** that is minted once at first insert and never re-derived from upstream columns — e.g., an `event_id` / `request_id` / `correlation_id` for a brand-new row a streaming or append-only pipeline is writing for the first time. For a **STABLE, reproducible surrogate key** that survives `dbt run --full-refresh` and incremental re-runs, use **`{{ dbt_utils.generate_surrogate_key(['col1', 'col2']) }}`** (deterministic MD5 hash of the inputs — same inputs always produce the same key; see [§4.5A](#45a-iceberg-identity-column-negation-guardrail--iceberg-has-no-user-facing-identity--auto-increment-columns-use-dbt_utilsgenerate_surrogate_key-instead) for the canonical block). The choice is sharp: **deterministic → `generate_surrogate_key`**, **random one-shot → `uuid()`**.
+
+**Iceberg constraints — the second load-bearing fact.** Iceberg does **NOT enforce PRIMARY KEY or UNIQUE** at write time. A declared PK/unique is **advisory / declarative metadata only** — the Iceberg spec and the Trino Iceberg connector neither check nor reject duplicate inserts against such a constraint. Uniqueness, dedup, and idempotency are **your pipeline's responsibility**, enforced via the dbt MERGE `unique_key` config (`incremental_strategy='merge'`), via `generate_surrogate_key` for stable keys, or via a post-write `dbt test --select unique` assertion that FAILs the build if duplicates land. This rule holds REGARDLESS of how you generate the id — using `uuid()` does not magically make your table unique, because Iceberg won't reject the duplicate. Cross-ref the iter402 Iceberg-PK-not-enforced rule.
+
+```sql
+-- CORRECT use 1 — one-shot random id minted at insert, never re-derived:
+INSERT INTO iceberg.analytics.events (event_id, occurred_at, payload)
+SELECT uuid(),                                  -- RANDOM v4 UUID per row, minted ONCE here
+       occurred_at,
+       payload
+FROM   staging.raw_events;
+
+-- CORRECT use 2 — 36-char VARCHAR for systems that expect string UUIDs:
+SELECT CAST(uuid() AS VARCHAR) AS request_id    -- '550e8400-e29b-41d4-a716-446655440000'-shape
+FROM   ...;
+
+-- CORRECT use 3 — Postgres gen_random_uuid() in a query you're porting to Trino:
+-- Postgres: SELECT gen_random_uuid();
+-- Trino   : SELECT uuid();                     -- exact replacement
+```
+
+```sql
+-- WRONG — uuid() as a dbt incremental surrogate / unique_key (NON-DETERMINISTIC):
+{{ config(materialized='incremental', incremental_strategy='merge', unique_key='order_pk') }}
+SELECT uuid()         AS order_pk,              -- BUG — fresh value EVERY RUN for the same logical order
+       tenant_id,
+       natural_order_id,
+       ...
+FROM   {{ ref('stg_orders') }}
+-- Outcome: MERGE never matches because s.order_pk is always new → row is INSERTed every run → duplicates.
+
+-- CORRECT — deterministic surrogate via generate_surrogate_key:
+{{ config(materialized='incremental', incremental_strategy='merge', unique_key='order_pk') }}
+SELECT {{ dbt_utils.generate_surrogate_key(['tenant_id', 'natural_order_id']) }} AS order_pk,
+       tenant_id,
+       natural_order_id,
+       ...
+FROM   {{ ref('stg_orders') }}
+-- Outcome: same (tenant_id, natural_order_id) → same MD5 hex → MERGE matches → upsert works.
+```
+
+#### DO-NOT-WRITE — `uuid()` and Iceberg-PK fabrications
+
+| Wrong shape | Why it's wrong | What to write instead |
+|---|---|---|
+| `unique_key = 'id', SELECT uuid() AS id, ...` inside a dbt `materialized='incremental', incremental_strategy='merge'` model | **NON-DETERMINISTIC.** `uuid()` returns a different value every call — the MERGE ON clause never matches an existing row, so every incremental run INSERTs duplicates instead of upserting. `dbt test --select unique:id` will PASS each individual run (each run's batch is internally unique) while the table accumulates a fresh copy of every logical row on every re-run. | `unique_key = 'id', SELECT {{ dbt_utils.generate_surrogate_key(['col1', 'col2']) }} AS id, ...` — deterministic MD5 hash of the natural keys; same inputs always produce the same id, so the MERGE matches and upserts correctly. See §4.5A. |
+| `SELECT gen_random_uuid() FROM ...` in Trino SQL or a dbt-trino model | **`gen_random_uuid` is a Postgres function, NOT a Trino function** — Trino parse error `Function 'gen_random_uuid' not registered`. | `SELECT uuid() FROM ...` — Trino's RFC-4122 v4 generator. For a 36-char string: `CAST(uuid() AS VARCHAR)`. |
+| `CREATE TABLE iceberg.analytics.orders (order_id UUID PRIMARY KEY, ...)` and assuming Iceberg will REJECT duplicate inserts on `order_id` | **Iceberg does NOT enforce PRIMARY KEY / UNIQUE at write time** — the constraint is advisory/declarative metadata only. Duplicate inserts land silently; no error. Uniqueness is YOUR pipeline's responsibility — via the dbt MERGE `unique_key` config, via `generate_surrogate_key` for stable keys, or via a post-write `dbt test --select unique` assertion. | Enforce uniqueness in the pipeline: `{{ config(materialized='incremental', incremental_strategy='merge', unique_key='order_id') }}` PLUS a schema YAML `tests: [unique, not_null]` on `order_id` so the build FAILs if duplicates land. |
+| `uuid()` used as the Iceberg partition/sort key (`partitioning = ARRAY['uuid_col']` or sorted by uuid) | **Random UUIDs defeat min/max pruning and bucket locality** — every file's UUID range covers the full UUID space; no file-skipping is possible on a UUID filter. See resource 09 §"Don't use UUIDs as your only sort key" for the schema-design version of this rule. | Sort/partition by `day(occurred_at)` or low-cardinality tenant/category columns; keep `uuid()` as the row-key column only. |
+| `CAST(uuid() AS BIGINT)` to get a "numeric surrogate key" | **Type error** — UUID is 128-bit, BIGINT is 64-bit signed; the cast fails. UUIDs are not numeric and cannot be coerced to BIGINT in Trino. | If you need a BIGINT surrogate, use `ROW_NUMBER() OVER (ORDER BY ...)` (only stable within a single run — see §4.5A FALLBACK) or pre-allocate the BIGINT in the source system. For stable string surrogates, use `generate_surrogate_key`. |
+
+#### Cross-references
+
+- **Above:** [§ 4.5A ICEBERG-IDENTITY-COLUMN-NEGATION GUARDRAIL](#45a-iceberg-identity-column-negation-guardrail--iceberg-has-no-user-facing-identity--auto-increment-columns-use-dbt_utilsgenerate_surrogate_key-instead) — the canonical `dbt_utils.generate_surrogate_key` (PRIMARY) / `ROW_NUMBER()` (FALLBACK) shape for **stable, deterministic** surrogate keys. This §4.5D is the sibling rule for the **random one-shot** case — pick by determinism requirement, not by syntax preference.
+- **Resource 09:** §"Don't use UUIDs as your only sort key" + the UUID-PK-bucket-key myth row — the schema-design implications of UUID as a row key (fine) vs sort/partition key (defeats pruning).
+- **Resource 13:** the `gen_random_uuid()` references at lines 1029, 2490, 3846 are all **Postgres-side** SQL (inside Spark JDBC `dbtable` subqueries that execute IN Postgres, not Trino) — that is the correct usage. Inside Trino-side SQL or dbt-trino models, the function is `uuid()`.
+- **iter402 Iceberg-PK-not-enforced rule:** the Iceberg connector and Iceberg spec do not enforce PRIMARY KEY / UNIQUE at write time. Enforce in the pipeline (dbt MERGE `unique_key` + `dbt test --select unique`), never assume the table format will reject duplicates.
+
 ### 4.6 DML and procedural constructs
 
 | Oracle | Trino + dbt | Notes |
