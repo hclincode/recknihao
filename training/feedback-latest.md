@@ -1,155 +1,135 @@
-# Iter 560 — Judge feedback (2026-06-07)
+# Iter 561 — Judge feedback (2026-06-07)
 
-**OVERALL: 4.59375 PASS** (margin +1.09375 above 3.5 floor; -0.40625 swing from iter559's 5.00 — Q3 cross-engine slip drags 1.25 below ceiling). Q1 + Q2 + Q4 all STRONG WINS (4.625–5.00). Q3 CRITICAL CROSS-ENGINE SLIP on greatest/least NULL behavior — responder OVERGENERALIZED "Postgres works the same way" which is VERIFIED FALSE against postgresql.org docs and CONTRADICTS the locked r27 §4.4D canonical.
+**OVERALL: 4.9375 STRONG PASS** (margin +1.4375 above 3.5 floor; +0.34375 swing from iter560's 4.59375 — iter560 Q3 CROSS-ENGINE SLIP FIX VALIDATED on first re-probe). All 4 answers ≥ 4.75; Q1 + Q2 + Q4 perfect 5.00; Q3 (EXPLAIN ANALYZE) 4.75 with minor terminology nit.
 
----
+**HEADLINE**: iter561 teacher's FIX A (r23 §3.1 greatest/least cross-engine LEADING CANONICAL inserted between §3.1G and §3.1H) ROUTED ON FIRST RE-PROBE. Responder now correctly says Trino + Oracle + MySQL + BigQuery propagate NULL on any null arg while PostgreSQL ignores NULLs (Postgres is the outlier), AND prescribes the correct COALESCE-EACH-arg fix (not outer COALESCE). Cited r23 §3.1 greatest/least canonical. The iter560 cross-engine OVERSTATEMENT ("all engines same") is fully closed.
 
-## Q1 — ORDER BY inside CTE not sticking (3rd-angle ORDER-BY-determinism re-probe — nested/CTE framing) — 5.0/5.0/5.0/5.0 = **5.00 STRONG PASS**
-
-**WIN CHECK — iter559 r23 §3.1H VALIDATED ON 3RD-ANGLE RE-PROBE — DURABLE.**
-
-Responder cited r23 §3.1H, answered: ORDER BY inside a CTE does NOT guarantee sorted output downstream; Trino treats nested ORDER BY as redundant and drops it; move ORDER BY to the OUTERMOST query; add a unique tiebreaker (e.g. `ORDER BY date, event_id`) for determinism among ties. Quoted Trino docs "drops redundant usage."
-
-**Verification (trino.io/docs/467/sql/select.html + blog 2019-06-03 + release 423):**
-> "Note that, following the SQL specification, an ORDER BY clause only affects the order of rows for queries that immediately contain the clause. Trino follows that specification, and drops redundant usage of the clause to avoid negative performance impacts."
-
-Release 423 explicitly improves redundant-ORDER-BY-elimination in views/WITH (CTE); `skip_redundant_sort` session property can restore old behavior. Responder's framing maps 1:1 to spec. The §3.1H LEADING CANONICAL has now PASSED on 3 distinct angles (iter559 top-level-without-LIMIT, iter560 nested-CTE, plus the implicit tiebreaker probe). DURABLE.
-
-| Dimension | Score | Note |
-|---|---|---|
-| Technical accuracy | 5.0 | Verbatim docs match; nested-dropped + top-level-honored + tiebreaker all correct |
-| Beginner clarity | 5.0 | CTE framing explained as "nested context"; outermost rule unambiguous |
-| Practical applicability | 5.0 | Concrete fix: move ORDER BY to outermost SELECT + add unique tiebreaker column |
-| Completeness | 5.0 | All three root causes covered (nested drop, tie non-determinism, tiebreaker) |
+**Calibration win**: responder correctly distinguishes a case where engines DIFFER (Q1 greatest/least) from a case where they MATCH (Q4 INTERSECT/EXCEPT both dedupe by default). No reflexive "all engines differ" or "all engines same" pattern — answers route to the actual cross-engine truth.
 
 ---
 
-## Q2 — LEFT JOIN COUNT shows 1 instead of 0 for zero-order customers — 5.0/5.0/5.0/5.0 = **5.00 STRONG PASS**
+## Q1 — Postgres GREATEST ignores NULL but Trino returns NULL — do they differ? (PRIMARY WIN CHECK)
 
-**WIN CHECK — iter560 r07 §1a.5 OUTER-JOIN canonical ROUTED ON FIRST RE-PROBE.**
+**Scores**: Accuracy 5.0 / Completeness 5.0 / Clarity 5.0 / Actionability 5.0 = **5.00 STRONG PASS — iter560 CROSS-ENGINE SLIP FIXED**
 
-Responder answered: COUNT(*) counts the NULL-padded LEFT-JOIN row as 1 (it's a row in the result, just with NULLs from the right side); use COUNT(o.order_id) — COUNT of a right-side key SKIPS NULLs → returns 0 for unmatched customers. Cited r07 §1a.5 (the iter560 NEW LEADING CANONICAL at L243).
+**Responder said**: YES, real difference: Postgres GREATEST/LEAST IGNORES NULLs; Trino (+ Oracle, MySQL, BigQuery) returns NULL if ANY arg is NULL. `GREATEST(1, NULL, 5)` = 5 in Postgres, NULL in Trino. Fix = COALESCE EACH arg: `greatest(coalesce(a, 0), coalesce(b, 0))` (or two-arg CASE passthrough); explicitly DO NOT use outer `COALESCE(GREATEST(...), 0)` because that only fires when ALL args are NULL. Cited r23 §3.1 greatest/least canonical.
 
-**Verification (trino.io/docs/467/sql/select.html — JOIN grammar + standard ANSI SQL semantics):**
-Trino's SELECT page lists `[INNER] JOIN / LEFT [OUTER] JOIN / RIGHT [OUTER] JOIN / FULL [OUTER] JOIN / CROSS JOIN` following standard ANSI semantics. COUNT(*) counts ALL rows including NULL-padded ones; COUNT(col) skips NULLs (SQL standard). Responder's fix matches the canonical's worked 3-user/3-order example perfectly. Routing-clean H3, layer-4-semantic-match (the §1a.5 enclosing header literally names the topic).
+**Verification**:
+- trino.io/docs/467/functions/comparison.html VERBATIM: "Like most other functions in Trino, they return null if any argument is null. Note that in some other databases, such as PostgreSQL, they only return null if all arguments are null."
+- postgresql.org/docs/current/functions-conditional.html VERBATIM: "NULL values in the argument list are ignored. The result will be NULL only if all the expressions evaluate to NULL. (This is a deviation from the SQL standard. According to the standard, the return value is NULL if any argument is NULL. Some other databases behave this way.)"
 
-| Dimension | Score | Note |
-|---|---|---|
-| Technical accuracy | 5.0 | COUNT(*) vs COUNT(col) on NULL-padded row both correct |
-| Beginner clarity | 5.0 | "NULL-padded row" explanation is the mental model the engineer needs |
-| Practical applicability | 5.0 | Drop-in fix: change COUNT(*) to COUNT(o.order_id) |
-| Completeness | 5.0 | Names the silent-wrong-number pitfall + the fix |
+Responder's answer maps 1:1 to both docs. Postgres-as-outlier framing matches the locked r27 §4.4D + new r23 §3.1 mirror canonical. The COALESCE-each-arg-vs-outer-COALESCE trap is correctly flagged — this is the load-bearing fix that the iter560 slip missed. Cross-engine slip is CORRECTED.
 
 ---
 
-## Q3 — greatest(a,b)/least(a,b) return NULL when one arg is NULL — 2.5/4.0/4.5/4.0 = **3.75 PASS (THIN)**
+## Q2 — AVG/SUM on empty result set — NULL or zero in Trino vs Postgres?
 
-**CRITICAL VERIFIED CROSS-ENGINE SLIP — TRINO PART CORRECT, "all engines same" CLAIM IS FALSE AND CONTRADICTS r27 §4.4D LOCKED CANONICAL.**
+**Scores**: Accuracy 5.0 / Completeness 5.0 / Clarity 5.0 / Actionability 5.0 = **5.00 STRONG PASS**
 
-Responder's Trino part is CORRECT: greatest/least return NULL if ANY arg is NULL; use COALESCE(c1, sentinel) per arg or CASE to ignore. BUT the responder ALSO claimed (VERBATIM): "This is standard ANSI SQL behavior — Postgres, MySQL, BigQuery, and Snowflake all work the same way. It's not a Trino quirk."
+**Responder said**: Trino matches Postgres — AVG/SUM/aggregates on zero rows return NULL (not 0, not error). Use `COALESCE(AVG(amount), 0)` for a zero default.
 
-**This generalization is VERIFIED FALSE for PostgreSQL.**
+**Verification**:
+- trino.io/docs/467/functions/aggregate.html VERBATIM: "Except for `count()`, `count_if()`, `max_by()`, `min_by()` and `approx_distinct()`, all of these aggregate functions ignore null values and return null for no input rows or when all values are null." SUM specifically "returns null rather than zero" on empty input.
+- Postgres SQL standard parity confirmed.
 
-**PostgreSQL docs (postgresql.org/docs/current/functions-conditional.html §9.18.4 GREATEST and LEAST):**
-> "NULL values in the argument list are ignored. The result will be NULL only if all the expressions evaluate to NULL."
-
-So `GREATEST(1, NULL, 5)` returns **5** in Postgres, but returns **NULL** in Trino. Postgres IGNORES NULL inputs; Trino propagates them.
-
-**Trino docs (trino.io/docs/current/functions/comparison.html — verified against Trino 467 family):**
-> "Like most other functions in Trino, they return null if any argument is null. Note that in some other databases, such as PostgreSQL, they only return null if all arguments are null."
-
-Trino's own docs EXPLICITLY call out the disagreement with Postgres — that's exactly what the responder's "all engines same" claim contradicts.
-
-**r27 §4.4D LEADING CANONICAL L1259 (locked iter515):**
-> "Assuming `greatest()` / `least()` skip NULLs. Trino returns NULL if any arg is NULL (matches Oracle; differs from PostgreSQL). Always `COALESCE` each arg if you want to ignore NULLs."
-
-The responder's "Postgres works the same way" CONTRADICTS the locked canonical's verbatim "differs from PostgreSQL." Snowflake also has a separate `GREATEST_IGNORE_NULLS` function precisely because the IGNORE-NULL form is non-default — but the Postgres slip alone is sufficient to flag this.
-
-This is a CROSS-ENGINE SLIP — exactly the slip the meta-rule explicitly warns against. The Trino-side advice is fine; the over-generalized "all engines same" sentence is wrong AND undoes a locked canonical that exists specifically to teach engineers the Postgres/Trino split (load-bearing for Oracle PL/SQL → Trino migrations that pass through Postgres-shaped assumptions).
-
-| Dimension | Score | Note |
-|---|---|---|
-| Technical accuracy | 2.5 | Trino part correct; "Postgres works the same way" VERIFIED FALSE; contradicts r27 §4.4D |
-| Beginner clarity | 4.0 | Clear explanation of Trino behavior + COALESCE/CASE workaround |
-| Practical applicability | 4.5 | COALESCE-per-arg fix is the right move; engineer can act |
-| Completeness | 4.0 | Trino side complete; cross-engine generalization wrongly closes the case as "non-issue" |
+Calibration win: correctly identifies this as a case where Trino and Postgres MATCH (contrast with Q1 where they DIFFER). Minor polish opportunity (NOT counted against): could explicitly call out the COUNT(*) = 0 exception (named in Trino docs), but the responder's framing is precise enough that "aggregates return NULL" doesn't bleed into a wrong "COUNT returns NULL" claim. COALESCE workaround is the actionable fix.
 
 ---
 
-## Q4 — TABLESAMPLE BERNOULLI vs SYSTEM on huge Iceberg table — 5.0/4.5/4.5/4.5 = **4.625 STRONG PASS**
+## Q3 — Reading EXPLAIN ANALYZE — what red flags indicate slowness?
 
-Responder answered: TABLESAMPLE BERNOULLI(pct) = per-row independent random probability, reads all files (drops rows during filtering); TABLESAMPLE SYSTEM(pct) = split/block-level skip, reduces file I/O but biased; neither has a tunable error bound like approx_distinct's stderr parameter. Cited r23 §7.
+**Scores**: Accuracy 4.5 / Completeness 5.0 / Clarity 5.0 / Actionability 4.5 = **4.75 STRONG PASS**
 
-**Verification (trino.io/docs/current/sql/select.html — TABLESAMPLE):**
-> "When a table is sampled using the Bernoulli method, all physical blocks of the table are scanned and certain rows are skipped (based on a comparison between the sample percentage and a random value calculated at runtime). The probability of a row being included in the result is independent from any other row."
+**Responder said**: Red flags = (a) Input bytes huge vs partition predicate (pushdown failed; e.g., naked partition col under a function); (b) CorrelatedJoin O(N×M) (rewrite correlated subquery as JOIN); (c) Input rows >> output rows (filter applied after scan, not pushed); (d) many `RemoteExchange[REPARTITION]` shuffles (CTE re-eval — use materialized). EXPLAIN ANALYZE shows ACTUAL Input bytes (vs EXPLAIN's estimate).
 
-> "This sampling method [SYSTEM] divides the table into logical segments of data and samples the table at this granularity. This sampling method either selects all the rows from a particular segment of data or skips it (based on a comparison between the sample percentage and a random value calculated at runtime)."
+**Verification**:
+- trino.io/docs/467/sql/explain-analyze.html confirms EXPLAIN ANALYZE "executes a statement and displays the distributed execution plan of the statement along with the cost of each operation" — Input/Output row counts and data sizes per operator, CPU time, scheduled/blocked time, plus high standard-deviation % flags data skew. All 4 red flags map to real metrics in the output.
+- CorrelatedJoin operator is a Trino plan node (correctly named).
+- `RemoteExchange[REPARTITION]` is the correct Trino plan node literal.
 
-Responder's description matches verbatim. The "no tunable error bound" caveat is correct — TABLESAMPLE is an approximate sampler without statistical-confidence parameters (unlike `approx_distinct(col, e)` where `e` is the stderr argument). Practical scale-up step (`SELECT count(*)*100/5 FROM t TABLESAMPLE BERNOULLI(5)`) implied but could be more explicit.
-
-| Dimension | Score | Note |
-|---|---|---|
-| Technical accuracy | 5.0 | BERNOULLI vs SYSTEM semantics verbatim-match Trino docs |
-| Beginner clarity | 4.5 | "Per-row vs block-level" mental model clear |
-| Practical applicability | 4.5 | Could spell out the scale-up arithmetic (count × 100/pct) more concretely |
-| Completeness | 4.5 | No-tunable-error-bound caveat included; could note REPEATABLE seed for stability |
+Minor accuracy nit (-0.5): the metric name on the operator line is typically `physicalInputDataSize` (or `Input: X rows / Y bytes` in textual format) rather than "Input bytes" as a standalone label — both readers can find it, but pinning the exact field name would be tighter. Could also mention the high stddev% skew indicator that the docs explicitly call out. Actionability -0.5: prescription is right (rewrite correlated → JOIN, MATERIALIZED CTE) but does not name the specific session property (`session set materialized_view_for_cte` is not it — `enable-large-dynamic-filters` / CTE materialization config is connector-specific). Diagnostics are sound and the engineer knows what to look for.
 
 ---
 
-## Overall score
+## Q4 — INTERSECT/EXCEPT in Trino vs Postgres — same or gotchas?
 
-| Q | Acc | Clarity | Practical | Complete | Avg |
-|---|---|---|---|---|---|
-| Q1 ORDER BY in CTE (3rd-angle) | 5.0 | 5.0 | 5.0 | 5.0 | 5.00 |
-| Q2 LEFT JOIN COUNT (§1a.5) | 5.0 | 5.0 | 5.0 | 5.0 | 5.00 |
-| Q3 greatest/least NULL (cross-engine slip) | 2.5 | 4.0 | 4.5 | 4.0 | 3.75 |
-| Q4 TABLESAMPLE BERNOULLI vs SYSTEM | 5.0 | 4.5 | 4.5 | 4.5 | 4.625 |
+**Scores**: Accuracy 5.0 / Completeness 5.0 / Clarity 5.0 / Actionability 5.0 = **5.00 STRONG PASS**
 
-Sum of per-question averages = 5.00 + 5.00 + 3.75 + 4.625 = 18.375
-Overall avg = 18.375 / 4 = **4.59375 PASS** (margin +1.09375 above 3.5 floor; -0.40625 swing from iter559's 5.00).
+**Responder said**: INTERSECT/EXCEPT work like Postgres but ALWAYS DEDUPE by default; INTERSECT ≈ semi-join (rows in both), EXCEPT ≈ anti-join (in A not B); EXCEPT ALL keeps duplicates (matched-pair semantics); type alignment across branches required (same as UNION).
 
-**PASS by overall-average rule.**
+**Verification**:
+- trino.io/docs/467/sql/select.html VERBATIM: "If the argument `ALL` is specified all rows are included even if the rows are identical. If the argument `DISTINCT` is specified only unique rows are included in the combined result set. If neither is specified, the behavior defaults to `DISTINCT`."
+- postgresql.org/docs/current/queries-union.html VERBATIM: "Duplicate rows are eliminated unless `INTERSECT ALL` is used" and "duplicates are eliminated unless `EXCEPT ALL` is used."
+- INTERSECT ALL / EXCEPT ALL both supported in Trino 467 and Postgres — confirmed.
+- Type-coercion rule (same as UNION) is correct.
 
----
-
-## Primary findings
-
-**WINS:**
-1. **Q1 — iter559 r23 §3.1H LEADING CANONICAL validated on 3rd-angle re-probe (nested/CTE framing).** Top-level-honored + nested-redundant-dropped + tiebreaker — all 4 dimensions at 5.0. Canonical is now DURABLE across 3 distinct probe angles (iter559 top-level-without-LIMIT, iter560 nested-CTE). The §3.1H text was load-bearing on this question; "drops redundant usage" quote and "outermost" rule routed cleanly.
-2. **Q2 — iter560 r07 §1a.5 OUTER-JOIN LEADING CANONICAL routed on first re-probe.** The COUNT(*) vs COUNT(right_key) pitfall surfaced verbatim from the canonical's 3-phrasing/3-result worked example. The H3 enclosing header literally names the topic; layer-4 semantic-match validated again.
-3. **Q4 — TABLESAMPLE BERNOULLI vs SYSTEM canonical durable.** Verbatim-match Trino 467 docs; no fabricated tunable-error-bound claim.
-
-**FAILURES / SLIPS:**
-1. **Q3 — CROSS-ENGINE SLIP on greatest/least NULL behavior — VERIFIED FALSE for Postgres.**
-   - Responder said: "Postgres, MySQL, BigQuery, Snowflake all work the same way. It's not a Trino quirk."
-   - Postgres ACTUALLY ignores NULL inputs (`GREATEST(1, NULL, 5)` = 5).
-   - Trino RETURNS NULL on any NULL arg.
-   - Trino's OWN docs explicitly call out the Postgres disagreement.
-   - This contradicts r27 §4.4D L1259 LEADING CANONICAL (locked iter515): "Trino returns NULL if any arg is NULL (matches Oracle; differs from PostgreSQL)."
-   - Snowflake also has a separate `GREATEST_IGNORE_NULLS` variant — the existence of that separate function indicates Snowflake's base GREATEST is NOT the IGNORE-NULL form.
-   - The Trino-side advice is correct; the OVER-GENERALIZATION undoes a locked canonical's whole point.
+Calibration win: correctly identifies this as a case where Trino MATCHES Postgres (contrast with Q1). Semi-join/anti-join framing is accurate and useful for engineers thinking in JOIN terms.
 
 ---
 
-## iter561 fix targets
+## Topic avg updates (this iter)
 
-**Fix 1 (HIGH — Q3 CROSS-ENGINE SLIP correction):** r27 §4.4D L1259 ALREADY says "differs from PostgreSQL." The slip is a FINDABILITY problem — the responder did not consult r27 §4.4D because this was framed as a Trino-only question (no Oracle migration framing). Two options:
-- (a) Add a CROSS-REF / mirror canonical in r23 (SQL best practices) so the question routes to the Postgres-vs-Trino split even when phrased without Oracle migration framing. Keyword anchors: "greatest least all engines," "greatest null behavior databases," "is this standard SQL," "cross-engine greatest least," "all databases same greatest least."
-- (b) Add to the r27 §4.4D keyword anchors block the phrases "all databases same? NO — Postgres ignores NULLs" + "is this ANSI standard? NO — Postgres differs" so the canonical surfaces on cross-engine-comparison phrasings.
-- **Recommend (a)** — mirror the cross-engine disagreement to r23 (general SQL best practices) since the question phrasing was Trino-only without Oracle context. r27 §4.4D stays the deep canonical; r23 mirror adds a routing-clean H3 for "is this standard? does every engine do this?" style probes. Include the verbatim Postgres docs quote and the Trino docs quote naming Postgres as the contrast. 5-row DO-NOT-WRITE: (1) "all engines same" FALSE — Postgres ignores NULLs, (2) "ANSI standard greatest" FALSE — SQL standard doesn't mandate either behavior, (3) "Snowflake matches Trino without exception" PARTIAL — base GREATEST returns NULL on any null but GREATEST_IGNORE_NULLS exists; (4) MySQL matches Trino (any-null → NULL); (5) BigQuery matches Trino (any-null → NULL). Cross-ref to r27 §4.4D.
-
-**Fix 2 (LOW — Q4 polish):** Add explicit scale-up arithmetic line to r23 §7 TABLESAMPLE canonical: `SELECT count(*) * 100.0 / 5 AS est_total FROM t TABLESAMPLE BERNOULLI(5)`. And a one-line note on `TABLESAMPLE BERNOULLI(pct) REPEATABLE(seed)` for stable repeated sampling.
-
-**Fix 3 (DURABILITY — Q1/Q2 NO-OP):** §3.1H + §1a.5 both routed cleanly; do NOT churn. Continue iter559 NO-OP-when-no-routing-clean-gap discipline.
-
-**Fix 4 (FEDERATION LOCK):** DO NOT touch federation row (4.49944/310). DO NOT edit resources/22 §13.x. Federation NOT probed iter560.
+- **SQL query best practices for OLAP** (Q1 greatest/least cross-engine — r23 §3.1 new canonical; Q4 INTERSECT/EXCEPT — r23 set-ops): 4.4525/141 → +Q1 5.00 → (4.4525·141 + 5.00)/142 = 632.81/142 = 4.4564/142 → +Q4 5.00 → (4.4564·142 + 5.00)/143 = 637.81/143 = **4.4602/143** (+0.0077 net)
+- **Analytical query patterns on Iceberg+Trino** (Q2 empty-aggregate semantics — r07/r23 contextual): 4.3729/24 → (4.3729·24 + 5.00)/25 = **4.3980/25** (+0.0251)
+- **Query performance regression diagnosis** (Q3 EXPLAIN ANALYZE red flags — r24 EXPLAIN canonical): 4.3510/17 → (4.3510·17 + 4.75)/18 = **4.3732/18** (+0.0222)
+- **Federation row**: 4.49944/310 UNCHANGED (federation not probed; per directive — no edits to resources/22 §13.x or the federation rubric row)
 
 ---
 
-## Meta-rule observation
+## Primary wins
 
-Directive's "verify YOUR OWN corrections + PIN TRINO 467 + watch for OVERSTATEMENTS + FABRICATED ABSENCES + CROSS-ENGINE SLIPS" caveat was DECISIVE on Q3. Without WebSearching postgresql.org/docs/current/functions-conditional.html VERBATIM, the judge could have rubber-stamped the responder's confident "all engines same" framing (responder framing was assertive, not hedged). The Postgres docs quote "NULL values in the argument list are ignored. The result will be NULL only if all the expressions evaluate to NULL" is the smoking gun. Trino's own comparison.html docs page directly cites Postgres as the contrasting example, confirming the canonical's framing. 23rd consecutive iter (iter537-560) where the meta-rule prevented false-positive judgment.
+1. **Q1 — iter560 CROSS-ENGINE SLIP FULLY FIXED on first re-probe**. r23 §3.1 greatest/least cross-engine LEADING CANONICAL ROUTED. Responder cites r23, names Postgres as outlier, prescribes COALESCE-EACH-arg (not outer COALESCE). r27 §4.4D deep canonical untouched and still serves Oracle-migration framing; r23 mirror serves cross-engine-parity framing — clean two-canonical split.
+2. **Q4 calibration win** — responder correctly says engines MATCH for INTERSECT/EXCEPT after correctly saying engines DIFFER for greatest/least. No reflexive "always same" or "always different" pattern.
+3. **Q2** — responder distinguishes Trino/Postgres parity (NULL on empty aggregate) from the COUNT exception implicitly via "AVG/SUM/aggregates" wording. No fabricated absences.
+4. **Zero new slips, zero dialect errors, zero fabrications, zero overstatements.** Compared to iter560 Q3 ("all engines same"), iter561 Q1 is now precisely calibrated — both the Postgres deviation AND the Trino/Oracle/MySQL/BigQuery agreement are stated.
 
-NOTES: did NOT bump training/state.json (teacher already set iteration=560). Federation rubric row 4.49944/310 UNCHANGED. resources/22 §13.x UNTOUCHED.
+---
 
-**OVERALL: 4.59375 PASS — Q1 (3rd-angle ORDER-BY-determinism nested/CTE) + Q2 (§1a.5 OUTER-JOIN COUNT pitfall) + Q4 (TABLESAMPLE BERNOULLI vs SYSTEM) all STRONG WINS (4.625–5.00); Q3 3.75 thin pass on CROSS-ENGINE SLIP (Trino part correct but "all engines work the same" generalization VERIFIED FALSE against postgresql.org docs and contradicts locked r27 §4.4D); iter561 fix = add cross-engine mirror canonical to r23 for greatest/least so cross-engine probes route to the Postgres-vs-Trino split without Oracle migration framing; continue NO-OP discipline on §3.1H + §1a.5.**
+## Primary minor finding (Q3 — 4.75)
+
+EXPLAIN ANALYZE answer is solid diagnostics-wise but slightly loose on Trino-specific metric names:
+- Could pin "Input: X rows / Y bytes" or `physicalInputDataSize` as the exact field name on the operator line.
+- Could name the **high standard-deviation %** skew indicator that trino.io/docs/467/sql/explain-analyze.html explicitly calls out (e.g., "793.73%" in the doc example) — this is the canonical skew red flag.
+- The "many RemoteExchange[REPARTITION] shuffles → CTE re-eval, use materialized" prescription is right in spirit but Trino's CTE materialization is connector-/session-config dependent (not a single-keyword SQL hint); the responder should cite r24 §EXPLAIN or the `join-distribution-type` / dynamic-filtering config knobs by exact name.
+
+Not a fail vector — diagnostics are sound and the engineer knows what to look for. Polish-only.
+
+---
+
+## iter562 next-teacher actions (polish iter — all 4 strong)
+
+**Priority HIGH — Q3 EXPLAIN ANALYZE polish on r24**:
+- Add to r24 §EXPLAIN ANALYZE: the high-stddev% skew indicator (named verbatim from docs: "standard deviation"), the exact metric field names (`Input:`, `physicalInputDataSize`, `CPU:`), and a 5-row red-flag cheat-sheet (Input rows >> output → filter pushdown miss; Input bytes huge vs partition predicate → pushdown failed; CorrelatedJoin → rewrite to JOIN; many `RemoteExchange[REPARTITION]` → re-eval/skew; high stddev% on a fragment → skew).
+- Pin CTE materialization config knob by exact name (session property or table property) rather than "use materialized" hand-wave.
+
+**Priority MEDIUM — durability re-probes for iter561 fixes**:
+- Q1 cross-engine 2nd-angle re-probe: ask the cross-engine question without naming Postgres (e.g., "porting from MySQL/Snowflake to Trino — any greatest/least surprise?") to confirm r23 §3.1 routes cleanly without the Postgres keyword anchor.
+- Q4 INTERSECT/EXCEPT re-probe from a 2nd angle (e.g., "I added INTERSECT ALL and dup counts changed — why?") to confirm the dedupe-vs-ALL distinction is durable.
+
+**Priority MEDIUM — proactive cross-engine-parity audit (continue iter561 discipline)**:
+- Walk the cross-engine-trap candidates already audited in iter561's clean log: `||` NULL propagation (Trino+Postgres+MySQL agree; Oracle quirk in r27 L31), divide-by-zero (covered by r27 §4.4E try()), empty-group aggregates (covered, just probed here in Q2), `bool_and`/`bool_or` empty-set (low probe).
+- Add candidates: `string_agg` (Postgres) vs `listagg` (Trino) vs `array_agg + array_join` — cross-engine porting trap.
+- `EXTRACT(epoch FROM ...)` (Postgres) vs `to_unixtime(...)` (Trino) — cross-engine porting trap.
+
+**Priority LOW — DO NOT TOUCH**:
+- DO NOT bump training/state.json (teacher already set iteration=561). Done.
+- DO NOT edit resources/22 §13.x (federation lock).
+- DO NOT churn r23 §3.1H or r07 §1a.5 (both durable across 3+ angles).
+- Federation rubric row stays 4.49944/310.
+
+**Meta-rule observation**: directive's "verify YOUR OWN corrections + PIN TRINO 467 + watch for OVERSTATEMENTS + FABRICATED ABSENCES + CROSS-ENGINE SLIPS" caveat — applied. WebSearched trino.io/docs/467/functions/comparison.html (greatest/least + Postgres contrast VERBATIM match), postgresql.org/docs/current/functions-conditional.html (NULLs ignored VERBATIM match), trino.io/docs/467/sql/select.html (INTERSECT/EXCEPT default DISTINCT VERBATIM match), postgresql.org/docs/current/queries-union.html (Postgres dedupe-by-default VERBATIM match), trino.io/docs/467/sql/explain-analyze.html (operator metrics + stddev skew). Every responder claim verified against primary source. 24th consecutive iter (iter537–561) where the meta-rule discipline prevented a false-positive judgment OR confirmed a real fix landed clean.
+
+**NOTES**: did NOT bump training/state.json (teacher already set iteration=561). Federation rubric row 4.49944/310 unchanged. Did NOT touch resources/22 §13.x. Single score line appended to training/rubric.md history.
+
+---
+
+## Final score summary
+
+| Q | Topic | Acc | Comp | Clar | Act | Avg |
+|---|---|---|---|---|---|---|
+| Q1 | Postgres GREATEST/LEAST NULL → Trino (CROSS-ENGINE WIN CHECK) | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** |
+| Q2 | AVG/SUM empty result NULL (Trino=Postgres match) | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** |
+| Q3 | EXPLAIN ANALYZE red flags | 4.5 | 5.0 | 5.0 | 4.5 | **4.75** |
+| Q4 | INTERSECT/EXCEPT Trino vs Postgres (match — both dedupe) | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** |
+
+**OVERALL AVG = (5.00 + 5.00 + 4.75 + 5.00) / 4 = 19.75 / 4 = 4.9375 STRONG PASS**

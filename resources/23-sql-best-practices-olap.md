@@ -553,6 +553,30 @@ SELECT user_id FROM events_2026_q2;
 
 ---
 
+### LEADING CANONICAL — `greatest()` / `least()` return NULL if ANY arg is NULL in Trino (Oracle + MySQL + BigQuery match; **PostgreSQL DIFFERS** — it ignores NULLs)
+
+> **READ THIS FIRST if your question contains any of these keywords:** `greatest least NULL Trino`, `greatest returns NULL`, `least NULL argument`, `greatest vs Postgres`, `do all engines greatest least behave the same`, `ignore NULL greatest`, `COALESCE greatest`, `porting Postgres greatest to Trino`, `greatest cross-engine`, `least cross-engine`. Verified at [trino.io/docs/467/functions/comparison.html](https://trino.io/docs/467/functions/comparison.html) + [postgresql.org/docs/current/functions-conditional.html](https://www.postgresql.org/docs/current/functions-conditional.html) on 2026-06-07.
+
+**The one-fact summary — engines DISAGREE on NULL handling in `greatest`/`least`.** **Trino** (and **Oracle, MySQL, BigQuery**) — `greatest(...)` / `least(...)` return **NULL if ANY argument is NULL**. **PostgreSQL** — IGNORES NULL args, returning NULL **only if ALL args are NULL**. So `GREATEST(1, NULL, 5)` returns `5` in Postgres but **`NULL`** in Trino (and Oracle/MySQL/BigQuery). Trino's docs explicitly call out this contrast verbatim: *"Like most other functions in Trino, they return null if any argument is null. Note that in some other databases, such as PostgreSQL, they only return null if all arguments are null."* Postgres's docs say verbatim: *"NULL values in the argument list are ignored. The result will be NULL only if all the expressions evaluate to NULL."* So **"all SQL engines behave the same on greatest/least + NULL"** is **FALSE** — Postgres is the outlier.
+
+**To get Postgres-like ignore-NULLs behavior in Trino** — wrap each arg in `COALESCE` with a sentinel floor (for `greatest`) or ceiling (for `least`):
+
+```sql
+-- Trino — Postgres-like "ignore NULLs" via COALESCE per arg:
+SELECT greatest(coalesce(a, 0),     coalesce(b, 0),     coalesce(c, 0))     AS max_nonnull,   -- floor=0 for greatest
+       least(   coalesce(a, 9e18),  coalesce(b, 9e18),  coalesce(c, 9e18))  AS min_nonnull    -- ceiling sentinel for least
+FROM t;
+
+-- Two-arg null-passthrough variant (use one side when the other is NULL):
+SELECT CASE WHEN a IS NULL THEN b WHEN b IS NULL THEN a ELSE greatest(a, b) END AS max_either FROM t;
+```
+
+> **DO NOT WRITE.** (1) **"`greatest`/`least` ignore NULLs in Trino"** — FALSE; Trino returns NULL if ANY arg is NULL. (2) **"Postgres and Trino `greatest`/`least` behave identically on NULL"** — FALSE; Postgres ignores NULLs (returns NULL only if ALL args NULL); Trino returns NULL if ANY arg NULL. (3) **"All SQL engines treat `greatest`/`least` NULLs the same way"** — FALSE; engine-specific. **Trino, Oracle, MySQL, BigQuery** all return NULL if ANY arg is NULL; **PostgreSQL** is the outlier (ignores NULLs). (4) **"`COALESCE(greatest(a, b, c), 0)` reproduces Postgres semantics"** — FALSE; the outer `COALESCE` only fires when the WHOLE expression is NULL (all-NULL case), not when SOME args are NULL — `greatest(1, NULL, 5)` returns NULL in Trino regardless of outer COALESCE. You MUST wrap **each arg** in `COALESCE` (as shown above) to replicate Postgres ignore-NULLs behavior.
+
+**Cross-references.** Full deep canonical with worked migration examples (Oracle vs Trino vs Postgres + the COALESCE-each-arg workaround + `MAX(col)`-aggregate vs `greatest(c1,c2,c3)`-scalar distinction): [resource 27 § 4.4D — `greatest`/`least` row-wise max/min + NULL-propagation differs from PostgreSQL/Oracle](27-oracle-plsql-to-dbt-trino.md). Related row-wise scalar-vs-aggregate cluster: `MAX(col)` is an aggregate DOWN ROWS (one value per group); `greatest(c1, c2, c3)` is scalar ACROSS COLUMNS in the same row — `SELECT MAX(a, b, c)` is a parse error.
+
+---
+
 ## 3.1H. ORDER BY determinism in Trino — TOP-LEVEL is honored (with or without LIMIT); NESTED/redundant is dropped; ties need a tiebreaker
 
 ### LEADING CANONICAL — ORDER BY determinism in Trino — TOP-LEVEL is honored (with or without LIMIT); NESTED/redundant is dropped; ties need a tiebreaker
