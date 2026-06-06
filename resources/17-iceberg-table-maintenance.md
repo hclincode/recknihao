@@ -3004,6 +3004,17 @@ The WAP pattern lets you write data, **audit it**, and only then make it visible
 >
 > #### Step 3 — AUDIT the branch (Trino read-only, no execution side-effects on main)
 >
+> **DISCOVER available branches/tags + their tip snapshot_id BEFORE the `FOR VERSION AS OF` read** — query the `$refs` metadata table from Trino (columns: `name`, `type` = `BRANCH` | `TAG`, `snapshot_id`, `max_reference_age_in_ms`, `min_snapshots_to_keep`, `max_snapshot_age_in_ms` — verified at [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html)):
+>
+> ```sql
+> -- Trino 467 — list ALL refs (branches AND tags) on the table; copy the branch name into Step 3's audit SELECT.
+> SELECT name, type, snapshot_id, max_reference_age_in_ms
+> FROM iceberg.analytics."orders$refs"
+> WHERE type = 'BRANCH';   -- drop the WHERE to also see TAGs
+> ```
+>
+> See [§ LEADING CANONICAL — `$refs` vs `$snapshots`](#leading-canonical----refs-vs--snapshots--pick-the-right-metadata-table-for-branch--tag-lookups-read-first-before-querying-for-a-branchs-snapshot) for the full column list, the `$refs` ↔ `$snapshots` JOIN pattern, and the banned `ref_name`-on-`$snapshots` form.
+>
 > ```sql
 > -- Trino 467. Trino CANNOT create / write / publish / drop branches — only read.
 > -- FOR VERSION AS OF '<branch-name>' resolves the branch ref to its current tip snapshot.
