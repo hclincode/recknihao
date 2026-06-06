@@ -3382,6 +3382,47 @@ Prefer `JSON_VALUE` when you care about distinguishing "key absent" from "JSON c
 
 > **Gotcha — `json_extract_scalar` always returns VARCHAR.** Comparisons against numbers or booleans need an explicit `CAST` — e.g., `CAST(json_extract_scalar(properties, '$.price') AS DECIMAL) > 100` or `CAST(json_extract_scalar(properties, '$.is_premium') AS BOOLEAN) = true`. Without the cast, the comparison is a string comparison: `'100' > '99'` evaluates to **false** (lexicographic ordering), and `'true' = true` is a type-mismatch error. `JSON_VALUE` accepts a `RETURNING` clause for the same purpose — `JSON_VALUE(properties, '$.price' RETURNING DECIMAL)` typecasts in one step.
 
+> **LEADING CANONICAL — Trino JSON extraction family: `json_extract` vs `json_extract_scalar` + `json_array_length` / `json_size` / `json_parse` / `json_format`.** Keyword anchors: Trino json_extract vs json_extract_scalar, extract nested json object vs leaf, get value from json column, json path, json_array_length, json_size, parse json string Trino, jsonpath returns null. Per [trino.io/docs/current/functions/json.html](https://trino.io/docs/current/functions/json.html):
+>
+> | Function | Signature | Returns | When to use |
+> |---|---|---|---|
+> | `json_extract` | `json_extract(json, jsonpath) -> json` | A **JSON value** (object, array, OR scalar-as-JSON) | You need a nested **object or array** at the path, or you want to **chain further extraction** on the result. |
+> | `json_extract_scalar` | `json_extract_scalar(json, jsonpath) -> varchar` | The **LEAF SCALAR** as VARCHAR (boolean / number / string). **Returns NULL if the path resolves to an object or an array.** | You need a single string / number / bool leaf. Always `CAST` to the target type (it returns VARCHAR — see the gotcha above). |
+> | `json_array_length` | `json_array_length(json) -> bigint` | Length of a JSON **array** | Count elements in a JSON array at any path. |
+> | `json_size` | `json_size(json, jsonpath) -> bigint` | Number of members of the object/array at the path (scalars return 0) | Generic "how big is this thing" at a JSONPath — works on objects too. |
+> | `json_parse` | `json_parse(varchar) -> json` | Parsed JSON value | Promote a VARCHAR JSON string to the `JSON` type for further extraction or `CAST(... AS MAP/ARRAY/ROW)`. |
+> | `json_format` | `json_format(json) -> varchar` | VARCHAR serialization of a JSON value | Serialize back to a JSON string (e.g. to send to an API). See resource 09 § "CAST map/array/row AS JSON" for the round trip. |
+>
+> JSONPath syntax: `$` root, `$.key`, `$.a.b.c` nested, `$.arr[0]` index, `$.arr[*]` wildcard.
+>
+> **Worked example** — given `payload VARCHAR` = `'{"user":{"id":42,"tags":["a","b"]},"active":true}'`:
+>
+> ```sql
+> -- LEAF SCALAR -> use json_extract_scalar + CAST (it returns VARCHAR).
+> SELECT CAST(json_extract_scalar(payload, '$.user.id') AS INTEGER) AS user_id;            -- 42
+> SELECT CAST(json_extract_scalar(payload, '$.active') AS BOOLEAN) AS active;              -- true
+>
+> -- NESTED OBJECT / ARRAY -> use json_extract (json_extract_scalar would return NULL here).
+> SELECT json_extract(payload, '$.user.tags') AS tags;                                     -- JSON ["a","b"]
+> SELECT json_extract(payload, '$.user')      AS user_obj;                                 -- JSON {"id":42,"tags":["a","b"]}
+>
+> -- ARRAY LENGTH -> json_array_length (the argument must be the array; chain with json_extract).
+> SELECT json_array_length(json_extract(payload, '$.user.tags')) AS n_tags;                -- 2
+>
+> -- Parse a VARCHAR JSON string first if the column is plain VARCHAR and you want to chain typed extraction.
+> SELECT json_extract(json_parse(payload), '$.user.tags') AS tags;
+> ```
+>
+> **DO-NOT-WRITE:**
+>
+> | Anti-pattern | Why wrong | Fix |
+> |---|---|---|
+> | `json_extract_scalar(payload, '$.user')` to pull a nested object | The path resolves to an OBJECT (not a scalar). `json_extract_scalar` returns **NULL** silently — looks like a missing key. | Use `json_extract(payload, '$.user')` for the object; or extract leaves one at a time with `json_extract_scalar(payload, '$.user.id')`. |
+> | `json_extract_scalar(payload, '$.user.tags')` to pull an array | The path resolves to an ARRAY. Returns NULL. | `json_extract(payload, '$.user.tags')` returns the JSON array; wrap in `json_array_length(...)` for size. |
+> | `json_extract(payload, '$.user.id') = '42'` to compare to a string | The left side is a `JSON` value, the right is `VARCHAR` — type mismatch, AND the JSON value `42` is NOT the string `'42'`. | Use `json_extract_scalar(payload, '$.user.id') = '42'` (VARCHAR = VARCHAR), or better cast: `CAST(json_extract_scalar(...) AS INTEGER) = 42`. Alternatively `json_format(json_extract(...))` to get a VARCHAR JSON serialization. |
+> | "Trino has no JSONPath extraction — you have to write a Spark UDF." | **FALSE.** Trino 467 ships the full `json_extract` / `json_extract_scalar` / `JSON_VALUE` / `JSON_QUERY` / `JSON_EXISTS` family. Use them directly. | `json_extract_scalar(col, '$.key')` for leaves, `json_extract(col, '$.path')` for nested. |
+> | `json_array_length(payload)` when `payload` is a VARCHAR column holding a JSON array string | Trino auto-coerces VARCHAR to JSON for `json_array_length` in practice, but if the column is the `JSON` type or you want to be explicit, wrap in `json_parse(...)`. Better: be explicit so the intent is unambiguous. | `json_array_length(json_parse(payload))` when `payload` is VARCHAR; `json_array_length(payload)` when it's already JSON. |
+
 - **Pro:** simplest, lossless, schema-flexible.
 - **Con:** slow — Trino re-parses the JSON string on every query.
 
