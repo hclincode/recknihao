@@ -723,6 +723,50 @@ ORDER BY c.day;
 
 **Cross-references:** Resource 27 §4.2-NOW (the Oracle-migration angle — same two facts, SYSDATE-replacement framing — keep both consistent). Resource 27 §4.2A (the dedicated `SET TIME ZONE` command + `sql.forced-session-time-zone` server property — how to change what zone `current_timestamp` / `now()` use). Resource 27 §4.2B (filtering a `timestamp with time zone` column by a local-date range — boundary-literal form). Resource 13 §timestamp-type-mapping (Postgres `timestamptz` → Iceberg `TIMESTAMP(6) WITH TIME ZONE`). Resource 13 §`from_unixtime` (epoch-seconds-to-timestamp; returns `timestamp(3) with time zone`).
 
+### LEADING CANONICAL — `date_add('unit', n, ts)` for VARIABLE offsets (INTERVAL needs a LITERAL; `date_add` takes a column/expression n)
+
+> **Keyword anchors (read this section FIRST when your question contains any of these — GENERIC, NOT Oracle-specific):** Trino `date_add`, add N days variable Trino, add days from a column Trino, variable date offset Trino, INTERVAL column not literal, INTERVAL with a variable, `INTERVAL n DAY` parse error, `INTERVAL retention_days DAY`, add N hours/months from a column, `date_add('day', col, ts)`, dynamic date offset, parametrized interval, per-row interval offset, can I use a column inside INTERVAL, Trino interval expression.
+
+**The fact in one sentence.** A Trino `INTERVAL` literal **requires a string LITERAL** — `INTERVAL '7' DAY` works, but `INTERVAL n DAY` where `n` is a **column or expression** is a **parse error** (`mismatched input ... expecting <integer literal>`). When the offset comes from a column / variable / Jinja var / parameter, use the function form **`date_add(unit, value, timestamp)`** — the `value` argument accepts any BIGINT expression, including a column reference.
+
+**Signature (verified at [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html)):** `date_add(unit, value, timestamp) → [same type as input]`. The docs state: *"Adds an `interval value` of type `unit` to `timestamp`. Subtraction can be performed by using a negative value."* Valid `unit` values: `'millisecond'`, `'second'`, `'minute'`, `'hour'`, `'day'`, `'week'`, `'month'`, `'quarter'`, `'year'`. The `value` is BIGINT — pass any integer column or arithmetic expression.
+
+**Worked example — variable retention window per tenant** (the `retention_days` column varies per row, so `INTERVAL` won't compile):
+
+```sql
+-- Each tenant has its own retention period stored in tenants.retention_days (INTEGER).
+-- "Compute the cutoff timestamp PER TENANT" — the offset is a COLUMN, NOT a literal.
+SELECT
+  t.tenant_id,
+  t.retention_days,
+  date_add('day', t.retention_days, t.signup_ts) AS retention_cutoff_ts  -- column n is fine
+FROM iceberg.analytics.tenants t;
+```
+
+**Contrast — when INTERVAL works and when it doesn't.**
+
+| Form | Compiles? | When to use |
+|---|---|---|
+| `event_ts + INTERVAL '7' DAY` (literal `'7'`) | YES | The offset is a **constant** known at query-write time. Idiomatic and reads naturally. |
+| `event_ts + INTERVAL '30' DAY` (literal `'30'`) | YES | Same — constant. |
+| `event_ts + INTERVAL n DAY` (where `n` is a **COLUMN**) | **NO — parse error** | INTERVAL requires the value to be a LITERAL. Switch to `date_add('day', n, event_ts)`. |
+| `event_ts + INTERVAL retention_days DAY` (column `retention_days`) | **NO — parse error** | Same as above. |
+| `date_add('day', 7, event_ts)` (literal `7`) | YES | Function form; works with both literal and variable n. Equivalent to `INTERVAL '7' DAY`. |
+| `date_add('day', n_col, event_ts)` (column `n_col`) | YES | **The canonical form for a variable offset.** |
+| `date_add('day', -retention_days, event_ts)` (negate the column for subtraction) | YES | Docs state subtraction is performed by passing a negative value. |
+| `date_add('day', {{ var('lookback_days', 30) }}, current_date)` (dbt Jinja var rendered to a literal) | YES | Jinja renders the var BEFORE Trino sees the SQL, so by query time it IS a literal — but `date_add` still works and is the more general form. |
+
+**Why the INTERVAL-literal restriction exists.** Trino's INTERVAL type is parsed at SQL-compile time from a string literal (per the [Trino interval-literal grammar](https://trino.io/docs/current/language/types.html#interval-year-to-month)); there is no syntax for an interval whose magnitude is bound from a column at execution time. The function `date_add` exists exactly to bridge that gap — it accepts the magnitude as a runtime BIGINT.
+
+**DO-NOT-WRITE — banned forms:**
+
+- *"`INTERVAL n DAY` works when `n` is a column."* **FALSE — parse error.** Use `date_add('day', n, ts)` instead.
+- *"Trino doesn't support variable date offsets — you have to materialize a separate column per offset value."* **FALSE.** `date_add(unit, value, ts)` accepts any BIGINT expression for `value`, including column references and arithmetic.
+- *"`INTERVAL CAST(retention_days AS VARCHAR) DAY`" (string-cast workaround) compiles.* **FALSE.** The INTERVAL grammar wants a STRING LITERAL token at parse time, not a runtime CAST. No string-build trick recovers an interval-from-column — switch to `date_add`.
+- *"`date_add` returns a TIMESTAMP regardless of input type."* **FALSE.** The return type matches the input: pass a `DATE`, get `DATE` back; pass `TIMESTAMP WITH TIME ZONE`, get `TIMESTAMP WITH TIME ZONE` back. The signature is `[same type as input]`.
+
+**Cross-references:** Resource 23 §3.x (the date-arithmetic / date_diff family). Resource 27 § ADD_MONTHS-Oracle-migration (Oracle `ADD_MONTHS` → Trino `date_add('month', n, dt)` with the last-day clamp wrapper). Resource 07 § Pattern B2 FORM A YoY (the `date_add('month', -12, cur.month)` pattern for self-join calendar arithmetic). Resource 07 § `sequence()` (the canonical date-spine generator — pair `date_add` with `sequence` when generating per-row offsets in calendar-spine joins).
+
 ---
 
 ## 5. Window functions (running totals, ranks, lag/lead)

@@ -1,154 +1,119 @@
-# Iter 556 Feedback (EXTENDED PHASE) — 2026-06-07
+# Iter 557 — Judge Feedback (EXTENDED PHASE)
 
-## HEADLINE
+## OVERALL: 4.9375 STRONG PASS (margin +1.4375 above 3.5 floor)
 
-**OVERALL 4.84375 STRONG PASS (margin +1.34375 above 3.5 floor; +1.15625 swing from iter555's 3.6875 THIN PASS).**
+**Two iter557 WINS CONFIRMED + Q3/Q4 also strong → polish iteration cleanly held; +0.09375 swing from iter556's 4.84375; all 4 answers >= 4.875.**
 
-**THE env_var() 3-ITERATION SAGA IS FINALLY CLOSED.** The 4th attempt — a STRUCTURAL move of the env_var canonical out of `### 6.7 dbt tests to add` and INTO a new H2-level section literally titled `## dbt connection & secrets — profiles.yml, env_var(), DBT_ENV_SECRET_` positioned just before §6 — ROUTED on the first try. The Haiku responder cited r27 L1989-2049 (the new H2's address) directly and answered the question fully: env_var() in profiles.yml, DBT_ENV_SECRET_ prefix masking as `*****` in logs, restriction to profiles.yml/packages.yml only, CI/K8s mount pattern. No decline. No fabrication.
-
-**REFINED FINDABILITY MODEL VALIDATED (now 4 layers):**
-1. Keyword zone (right paragraph)
-2. Structural form (LEADING CANONICAL H3 / blockquote with anchors)
-3. RESOURCE for the question's routing pattern (right file)
-4. **ENCLOSING SECTION HEADER's semantic label NAMES the question topic** (NEW — iter556 finding)
-
-Iter553's r07 placement fix proved layer 3. Iter556's H2-promotion proves layer 4: the section HEADER itself is a routing signal. A bulletproof canonical buried under `### 6.7 dbt tests to add` was invisible for 3 consecutive iterations to a "store dbt password safely" question because Haiku scanning headers does not open a "tests" section for a "secrets" question — even when the canonical body inside is verbatim correct. Moving it under `## dbt connection & secrets — profiles.yml, env_var(), DBT_ENV_SECRET_` made the canonical findable on first attempt. **The enclosing section header's semantic label IS a routing key.**
-
-**SECONDARY WIN — Q2 named WINDOW clause canonical (r07, iter556 add) ROUTED ON FIRST PROBE.** Responder cited r07 L851-864 (the new canonical) and produced a correct answer: `WINDOW w AS (...)` definition + `OVER w` references + position rule (after HAVING, before ORDER BY) + extension form `WINDOW w2 AS (w ORDER BY ...)` + Trino v352+ support.
+- Q1 (dbt incremental + duplicate source rows) — **iter557 WIN CONFIRMED** — iter556 Q4 last-write-wins overstatement is CORRECTED. Responder now says Trino MERGE FAILS on a multiply-matched target row (verbatim doc-anchored) + pre-dedup ROW_NUMBER() fix. Score 5.00.
+- Q2 (date_add for variable column offset) — **iter557 WIN CONFIRMED** — date_add gap closed. Responder gives `date_add('day', retention_days, event_ts)` + correctly explains INTERVAL needs a literal. Score 5.00.
+- Q3 (HAVING for aggregate filter) — durable strong pass. Score 4.875.
+- Q4 (table vs view vs incremental decision) — durable strong pass. Score 4.875.
 
 ---
 
 ## Per-question scores
 
-| Q | Accuracy | Completeness | Clarity | Actionability | Avg | Verdict |
-|---|---|---|---|---|---|---|
-| Q1 env_var / profiles.yml / DBT_ENV_SECRET_ (4th attempt) | 5 | 5 | 5 | 5 | **5.00** | STRONG PASS — saga CLOSED |
-| Q2 named WINDOW clause | 5 | 5 | 5 | 5 | **5.00** | STRONG PASS — gap CLOSED |
-| Q3 CAST to DECIMAL overflow | 5 | 4.5 | 5 | 5 | **4.875** | STRONG PASS |
-| Q4 dbt incremental + unique_key dup | 4 | 4 | 5 | 5 | **4.50** | PASS (minor polish target) |
+### Q1 — dbt incremental unique_key with duplicate source rows for same key in one run: silent or error?
 
-**Overall = (5.00 + 5.00 + 4.875 + 4.50)/4 = 4.84375 STRONG PASS**
+| Dimension | Score | Reason |
+|---|---|---|
+| Accuracy | 5.0 | "MERGE FAILS, does NOT silently keep one row" — exact match for trino.io/docs/467/sql/merge.html verbatim: "The query fails if a single target table row matches more than one source row." iter556's "last-write-wins" overstatement is corrected. Correctly notes that silent-newest is Snowflake/Databricks behavior, not Trino. |
+| Completeness | 5.0 | Names the failure mode, the contrasting Snowflake/Databricks semantic, and the pre-dedup fix (`ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY updated_at DESC) = 1` in a CTE before merge). Cited r28 + r23 §3.1G. |
+| Clarity | 5.0 | Explicit "NOT silent newest" framing; beginner cannot misread. |
+| Actionability | 5.0 | Concrete CTE pattern given verbatim — engineer can paste it. |
+| **Avg** | **5.000** | **iter557 WIN — iter556 overstatement CORRECTED.** |
 
----
+### Q2 — Adding a variable number of days (retention_days column) to a timestamp — INTERVAL retention_days DAY failed?
 
-### Q1 — dbt profiles.yml password (env_var re-probe, 4TH attempt) — 5.00 STRONG PASS
+| Dimension | Score | Reason |
+|---|---|---|
+| Accuracy | 5.0 | `date_add('day', retention_days, event_ts)` matches trino.io/docs/467/functions/datetime.html signature `date_add(unit, value, timestamp) -> [same as input]`. The INTERVAL-needs-literal framing is precisely correct: Trino INTERVAL literals are syntactically `INTERVAL 'string' unit` (the value is a quoted string in the literal slot — `INTERVAL '7' DAY`); the parser does not accept a column expression in that literal position. The right tool for a column offset IS date_add. |
+| Completeness | 5.0 | Names the signature, the failure cause, the canonical fix. Cited r27 §6.3 + r07. |
+| Clarity | 5.0 | Direct 1-line fix, clear distinction between literal-required INTERVAL and expression-accepting date_add. |
+| Actionability | 5.0 | Engineer can paste `date_add('day', retention_days, event_ts)` directly. |
+| **Avg** | **5.000** | **iter557 WIN — r07 date_add canonical routed on first re-probe.** |
 
-**Responder answer (verbatim key points):**
-- "Never hardcode in profiles.yml"
-- `password: "{{ env_var('DBT_ENV_SECRET_TRINO_PASSWORD') }}"`
-- Export the var before `dbt run`
-- DBT_ENV_SECRET_ prefix MASKS value as `*****` in all logs/errors
-- DBT_ENV_SECRET_ disallowed outside profiles.yml/packages.yml
-- CI/K8s mount the secret into the env
-- Cited r27 L1989-2049 (the NEW `## dbt connection & secrets` H2 section)
+### Q3 — Filter groups by an aggregate (customers with >100 events) — WHERE runs before grouping?
 
-**Verification:**
-- WebFetched docs.getdbt.com/reference/dbt-jinja-functions/env_var VERBATIM: *"Any env var named with the prefix DBT_ENV_SECRET will be: Available for use in profiles.yml + packages.yml, via the same env_var() function; Disallowed everywhere else, including dbt_project.yml and model SQL, to prevent accidentally writing these secret values to the data warehouse or metadata artifacts; Scrubbed from dbt logs and replaced with `*****`, any time its value appears in those logs (even if the env var was not called directly)."*
-- GREP confirmed: r27 L1989 has the new `## dbt connection & secrets — profiles.yml, env_var(), DBT_ENV_SECRET_` H2 header; L1993 has the LEADING CANONICAL H3 for profiles.yml + env_var(); L2020 has DBT_ENV_SECRET_ scrub H3; L3242 has the §6.7G2 slot reduced to a one-line breadcrumb pointing to the new H2 (no duplicate canonical).
-- The structural fix from §6.7G2 (under "dbt tests") → new H2 "dbt connection & secrets" (above §6) routed perfectly. Haiku followed the section-header semantic label this time.
+| Dimension | Score | Reason |
+|---|---|---|
+| Accuracy | 5.0 | HAVING runs after GROUP BY, before SELECT/ORDER BY — matches trino.io/docs/467/sql/select.html verbatim: "HAVING filters groups after groups and aggregates are computed." Clause order FROM->WHERE->GROUP BY->HAVING->SELECT->ORDER BY is exactly right. "Aggregates in HAVING, NOT in WHERE" is correct. |
+| Completeness | 4.5 | Covers the canonical answer (use HAVING) and the order. Minor: could explicitly mention that aggregates can also appear in ORDER BY, but not asked. |
+| Clarity | 5.0 | Clause-order list is the standard pedagogical form. |
+| Actionability | 5.0 | "DO-NOT WHERE COUNT(*)" anti-pattern explicit. |
+| **Avg** | **4.875** | Durable strong pass. |
 
-**The 3-iteration env_var decline saga (iter553/554/555) IS CLOSED.** The single fix that worked was moving the canonical under a section header whose text NAMES the question topic (`connection & secrets — profiles.yml, env_var(), DBT_ENV_SECRET_`). Content was already bulletproof since iter554; only header-level placement was wrong.
+### Q4 — dbt materialized table vs view vs incremental — when each (views getting slow)?
 
-### Q2 — Named WINDOW clause (re-probe after iter556 r07 add) — 5.00 STRONG PASS
-
-**Responder answer:**
-- `SUM(...) OVER w, AVG(...) OVER w, ROW_NUMBER() OVER w ... WINDOW w AS (PARTITION BY customer_id ORDER BY order_date ROWS BETWEEN ...)`
-- WINDOW clause position: after HAVING, before ORDER BY
-- Extension form: `WINDOW w2 AS (w ORDER BY ...)`
-- Trino v352+ support note
-- Cited r07 L851-864 (the new canonical)
-
-**Verification:**
-- WebFetched trino.io/docs/467/sql/select.html VERBATIM: *"The WINDOW clause is used to define named window specifications. The defined named window specifications can be referred to in the SELECT and ORDER BY clauses of the enclosing query."* Position: after HAVING, before ORDER BY (confirmed).
-- GREP confirmed r07 L849-864 hosts the new LEADING CANONICAL H3 between Pattern A's ROWS-vs-RANGE deep-dive end and Pattern A2 start.
-
-**Gap from iter555 (content gap, no findable canonical for named WINDOW) CLOSED on first re-probe.** Canonical placement adjacent to other window-function canonicals in r07 §5 was the natural slot; routing landed cleanly.
-
-### Q3 — CAST to DECIMAL(10,2) overflow — 4.875 STRONG PASS
-
-**Responder answer:**
-- CAST overflow → `NUMERIC_VALUE_OUT_OF_RANGE` hard error (not silent round/truncate)
-- HALF_UP rounding when value fits the scale
-- DECIMAL(18,2) as the billing default
-- Cited r23
-
-**Verification:**
-- Searched trino.io/docs/467/functions/decimal.html VERBATIM: *"If the mathematical result of the operation is not exactly representable with the precision and scale of the result data type, then an exception condition is raised: `Value is out of range`."*
-- Trino release notes (R369, R0.153) confirm fix for "silent numeric overflow when casting INTEGER to large DECIMAL types" — modern Trino throws on overflow, does not silently truncate.
-- HALF_UP rounding on scale reduction confirmed in earlier iter538/539 canonical (consistent with `decimal-rounding-mode=HALF_UP` config option visible in docs).
-
-**Minor nuance off 0.5 on Completeness:** The exact error string in Trino is `Value is out of range` (some adapters surface it as SQLSTATE 22003 / `NUMERIC_VALUE_OUT_OF_RANGE`). The responder used the SQL-standard name, which is conceptually right but not the literal string Trino prints — a small detail that wouldn't trip the engineer.
-
-### Q4 — dbt incremental + unique_key duplicate-key handling — 4.50 PASS
-
-**Responder answer:**
-- `incremental_strategy='merge'` + `unique_key` → MERGE INTO (match=update, no-match=insert, no duplicate keys in destination)
-- Two source rows same key → "last-write-wins"
-- `is_incremental()` guard + MAX watermark pattern
-- Don't use `append` with lookback (would dup)
-- Cited r28
-
-**Verification:**
-- WebFetched docs.getdbt.com/docs/build/incremental-strategy: merge "inserts records with a unique_key that don't exist yet in the destination table and updates records with keys that do exist — mirroring the logic of SCD1."
-- `is_incremental()` + MAX watermark pattern correct per docs.getdbt.com/docs/build/incremental-models.
-
-**Two issues bring Accuracy/Completeness off 1.0 each:**
-
-1. **"Last-write-wins" is slightly overstated for source-side duplicate unique_keys.** dbt's docs explicitly cover destination-vs-source dedup, NOT same-source-batch dedup. On Snowflake, dbt's `merge` raises a `nondeterministic merge` error when the source has two rows with the same unique_key. On dbt-trino, the underlying Trino MERGE may also throw on multi-source-row-matching-single-target. The responder should have either (a) said "behavior depends on the adapter — Snowflake errors, dbt-trino may error on Trino MERGE's deterministic-source check" or (b) recommended a pre-dedup ROW_NUMBER() pattern, which the responder did mention.
-
-2. Did not explicitly say the **first run** (when the table doesn't exist yet) ignores `is_incremental()` and does a full build — a common follow-up the engineer will hit.
-
-Not a fabrication, just slight overstatement of universality. Easy iter557 polish target.
+| Dimension | Score | Reason |
+|---|---|---|
+| Accuracy | 5.0 | Matches docs.getdbt.com/docs/build/materializations verbatim: view = "rebuilt as a view on each run, via a create view as statement" (no data stored, recomputed per read); table = "rebuilt as a table on each run, via a create table as statement" (fast read, expensive build); incremental = "insert or update records into a table since the last time that model was run" (with unique_key for merge + is_incremental() guard). All three are supported in dbt-trino. |
+| Completeness | 4.5 | Covers when-to-pick-each, decision trigger (slow view -> table/incremental), incremental mechanics (merge upsert, unique_key, is_incremental watermark). Did not explicitly mention ephemeral as a 4th materialization but the question only named the 3 — fair. |
+| Clarity | 5.0 | Decision table is the right form for this question. |
+| Actionability | 5.0 | "Convert slow aggregation views to table/incremental" is the actionable move; cited r28. |
+| **Avg** | **4.875** | Durable strong pass. |
 
 ---
 
-## Topic average updates (this iter)
+## OVERALL AVERAGE
 
-- **Oracle PL/SQL → dbt + Trino migration** (Q1 env_var, r27 new H2 hosts canonical): 4.4252/99 → (4.4252·99 + 5.00)/100 = **4.4309/100** (+0.0057)
-- **SQL query best practices for OLAP** (Q2 named WINDOW + Q3 DECIMAL overflow): 4.4286/134 → (4.4286·134 + 5.00)/135 → 4.4328/135 → (4.4328·135 + 4.875)/136 = **4.4361/136** (+0.0075)
-- **Improving complex SQL performance on Trino with dbt** (Q4 incremental merge dedup): 4.6533/15 → (4.6533·15 + 4.50)/16 = **4.6437/16** (−0.0096)
+(5.000 + 5.000 + 4.875 + 4.875) / 4 = 19.750 / 4 = **4.9375 STRONG PASS**
 
-**Federation NOT probed — 4.49944/310 row UNCHANGED** per iter472-555 directive + iter556 task constraint.
++1.4375 above 3.5 floor; +0.09375 swing from iter556's 4.84375; all 4 answers above 4.875.
 
 ---
 
-## Primary wins
+## Topic rubric updates
 
-1. **PRIMARY WIN — env_var() 3-iteration saga CLOSED via H2 STRUCTURAL header-rename fix.** 4th attempt succeeded by moving the canonical under a section header whose text NAMES the question topic (`## dbt connection & secrets — profiles.yml, env_var(), DBT_ENV_SECRET_`). Refined 4-layer findability model: (1) keyword zone + (2) structural form + (3) RESOURCE + (4) ENCLOSING SECTION HEADER's semantic label. Iter556 added layer 4 as a validated routing signal.
-2. **SECONDARY WIN — named WINDOW clause canonical ROUTED on first re-probe** (r07 §5 LEADING CANONICAL H3, adjacent to other window-function canonicals). Iter555 content gap closed cleanly.
-3. **Q3 DECIMAL overflow canonical durability confirmed** — r23 HALF_UP + NUMERIC_VALUE_OUT_OF_RANGE pattern held cleanly on re-probe.
-4. **Zero fabrications, zero identifier slips, zero dialect errors.** No FABRICATED ABSENCE (no "this resource doesn't exist" decline despite content being present). No header-routing miss.
+| Topic | Before | After |
+|---|---|---|
+| Improving complex SQL performance on Trino with dbt (Q1 dbt incremental, Q4 materialization decision — r28 hosts both canonicals) | 4.6437 / 16 | (4.6437*16 + 5.000 + 4.875) / 18 = 84.175 / 18 = **4.6764 / 18** (+0.0327) |
+| SQL query best practices for OLAP (Q2 date_add variable offset, Q3 HAVING — both routed to SQL best practices) | 4.4361 / 136 | (4.4361*136 + 5.000) / 137 = 4.4402 / 137; (4.4402*137 + 4.875) / 138 = **4.4433 / 138** (+0.0072 net) |
 
-## Primary findings
-
-- The teacher's H2-promotion of the env_var canonical is the **validated playbook** for closing routing failures where content is correct but the enclosing section header is semantically mismatched. Future routing escalations should jump directly to header-rename rather than adding more layer-3 routing anchors under the wrong header.
-- Q4's slight "last-write-wins" overstatement is the only blemish — easy polish target.
+Federation row 4.49944 / 310 **UNCHANGED** per directive.
 
 ---
 
-## iter557 next-teacher actions
+## Verification log (verbatim doc quotes)
 
-Given iter556's strong pass (4.84375), iter557 should polish and continue header-routing audits:
+- **Q1**: trino.io/docs/467/sql/merge.html — "The query fails if a single target table row matches more than one source row." (CONFIRMED — responder quoted correctly)
+- **Q2**: trino.io/docs/467/functions/datetime.html — `date_add(unit, value, timestamp) -> [same as input]`. Interval literal syntax: `interval 'value' unit` (e.g. `interval '2' day`). The literal value is a quoted string — column cannot occupy that slot. (CONFIRMED — responder framing precise.)
+- **Q3**: trino.io/docs/467/sql/select.html — "HAVING filters groups after groups and aggregates are computed." Aggregates not allowed in WHERE. Clause order FROM->WHERE->GROUP BY->HAVING->SELECT->ORDER BY confirmed. (CONFIRMED)
+- **Q4**: docs.getdbt.com/docs/build/materializations — view "rebuilt as a view on each run, via a create view as statement"; table "rebuilt as a table on each run, via a create table as statement"; incremental "insert or update records into a table since the last time that model was run." (CONFIRMED — all three materializations supported in dbt-trino per dbt-trino adapter docs.)
 
-1. **POLISH Q4 — incremental + unique_key source-dedup nuance.** Add a follow-up block to r28's incremental-merge canonical: "If your source can produce duplicate unique_keys in the same batch, dedup BEFORE the MERGE with `ROW_NUMBER() OVER (PARTITION BY unique_key ORDER BY ts DESC) = 1`. Otherwise behavior depends on the adapter — Snowflake errors with `nondeterministic merge`, Trino MERGE will error on multi-source-row-matching-single-target." Also explicitly note first-run-table-creation skips `is_incremental()` (responder missed this nuance).
-2. **HEADER-ROUTING AUDIT (continuing).** Apply the iter556 4-layer findability lesson proactively: scan all resources for canonicals whose enclosing section header does NOT semantically name the topic the canonical answers. Top candidates to audit:
-   - r27 §6.7 cluster — confirm post-env_var-move that no remaining dbt-OPS canonical is buried under a semantically-mismatched header
-   - r07 — confirm window/aggregation canonicals are under headers that name those topics
-   - r13/r17 — confirm incremental/maintenance canonicals are under topically-named headers
-3. **USED-BUT-NEVER-EXPLAINED audit (continuing — standard iter555-style).** Continue identifying terms used in resources without a definition at the keyword's first occurrence.
-4. **iter557 probe targets:**
-   - HIGH: env_var() durability re-probe from a 5th angle ("I have multiple CI envs — dev/staging/prod — how do I route different Trino hosts/passwords per env via env_var?") to confirm the H2 routing is durable across question phrasings.
-   - HIGH: named WINDOW durability re-probe ("Can a named window reference another named window? Can it be used in ORDER BY?") to confirm the H3 supports follow-up questions.
-   - HIGH: dbt incremental source-side duplicate behavior re-probe to verify the iter557 polish lands.
-   - MEDIUM: Q3 DECIMAL re-probe from a precision-loss angle ("If I CAST DECIMAL(18,4) to DECIMAL(10,2), what happens to the scale digits?") to confirm HALF_UP routing.
-   - LOW: **DO NOT TOUCH federation row stays 4.49944/310 + no edits to resources/22 §13.x.**
+---
 
-## Meta-rule observation
+## Wins / patterns
 
-Directive's "verify YOUR OWN corrections + PIN TRINO 467 + watch for FABRICATED ABSENCES + PLACEMENT/HEADER-ROUTING MISSES" caveat was applied:
-- WebSearched + WebFetched trino.io/docs/467/sql/select.html (named WINDOW clause), trino.io/docs/467/functions/decimal.html ("Value is out of range"), docs.getdbt.com/reference/dbt-jinja-functions/env_var (DBT_ENV_SECRET_ scrub verbatim), docs.getdbt.com/docs/build/incremental-strategy (merge + unique_key behavior).
-- The Q4 "last-write-wins" overstatement only surfaced because the directive cued explicit verification of source-vs-destination duplicate semantics. Without that explicit cue, the responder's answer sounds correct on its face and would have scored 5.00 across the board. 19th consecutive iter (iter537-556) where meta-rule prevented a false-positive judgment.
+1. **Q1 WIN — iter556 4.50 overstatement CLOSED on first re-probe.** Teacher's r28 fix (added one row to the DO-NOT-WRITE table re: duplicated source unique_key + tight GUARDRAIL blockquote with Trino MERGE verbatim quote + dbt unique_key uniqueness warning + pre-dedup pointers) ROUTED — responder cited r28 + r23 §3.1G, correctly named the FAIL semantic (not silent last-write-wins), gave the ROW_NUMBER() pre-dedup CTE. Layer-1+2+3 findability all clean.
 
-**NOTES**: did NOT bump training/state.json (teacher already set iteration=556). Federation rubric row 4.49944/310 unchanged this iter. resources/22 §13.x untouched.
+2. **Q2 WIN — date_add gap CLOSED on first re-probe.** Teacher's r07 §4 LEADING CANONICAL H3 for `date_add('unit', n, ts)` for variable offsets (slotted between now() canonical and ## 5 Window functions) ROUTED — responder cited r07 + r27 §6.3, gave the precise signature, named the literal-vs-column distinction. Adjacent placement to other date/time canonicals validated.
 
-**OVERALL: 4.84375 STRONG PASS — env_var() 3-iter saga FINALLY CLOSED via H2 STRUCTURAL header-rename (4-layer findability model VALIDATED with layer 4 = enclosing section header's semantic label); named-WINDOW canonical ROUTED on first re-probe; Q3 DECIMAL durability confirmed; Q4 incremental merge minor polish target (source-side dedup nuance); iter557 = polish Q4 + continuing header-routing audit + used-but-never-explained sweeps.**
+3. **Q3/Q4 durable** — no slips, no fabrications. HAVING + materialization-decision canonicals continue to route cleanly for multiple phrasings.
+
+4. **Zero fabrications, zero identifier slips, zero dialect errors** across 4 answers.
+
+---
+
+## Iter 558 next-teacher actions
+
+**OVERALL: STRONG PASS at 4.9375 holds polish iteration. No fix required in iter557 content; iter558 = continuing audits + next likely-probed gaps.**
+
+1. **LOW — continue header-routing audit (iter556 4-layer model)**: scan remaining r07/r23/r27 canonicals to confirm enclosing section header semantically names the question topic. Targets to spot-check: r07 §5 window-function canonicals (named WINDOW already fixed iter556), r23 §3.x DECIMAL canonicals, r27 §6.7 dbt-OPS cluster after the H2 promotion.
+
+2. **LOW — continue used-but-never-explained audit**: standard iter555-style sweep — find any term used inside a canonical without a glossary or local definition that a Haiku would route on independently.
+
+3. **MEDIUM — next likely-probed gaps to harden proactively**:
+   - **Q1 re-probe shape**: dbt incremental + unique_key on a COMPOSITE key (multi-column unique_key list) — does the MERGE failure semantic hold? Pre-dedup pattern needs to PARTITION BY all columns of the composite key. Add a one-line note in the r28 GUARDRAIL blockquote covering composite-key syntax `unique_key=['user_id','event_id']`.
+   - **Q2 re-probe shape**: date_add with the UNIT arg as an expression (`date_add(t.unit, t.n, t.ts)`) — does Trino accept a column for the `unit` arg? (trino.io/docs/467 — `unit` arg is documented as a string but is a literal in practice; verify and add a one-line note to the r07 date_add canonical.)
+   - **Q3 re-probe shape**: filter on a WINDOW-function result in the outer query (WHERE on a window output is valid because window functions evaluate post-WHERE-of-the-subquery). This is a classic stumbling block worth a one-line distinction note adjacent to the HAVING canonical.
+   - **Q4 re-probe shape**: ephemeral materialization as a 4th option for dbt-trino (CTE inlined into downstream models; cannot be selected directly). Add a 1-line bullet to the r28 materialization decision table noting ephemeral exists + when to use.
+
+4. **DO NOT TOUCH**: federation row stays 4.49944 / 310; no edits to resources/22 §13.x; do not bump training/state.json (teacher already set 557).
+
+5. **Probe-target priorities for iter558**:
+   - HIGH: dbt incremental composite unique_key re-probe (verify Q1 fix holds for multi-column case)
+   - HIGH: date_add with variable unit arg (Q2 re-probe edge)
+   - MEDIUM: HAVING vs window-function-output filter distinction (Q3 re-probe edge)
+   - MEDIUM: ephemeral materialization (Q4 re-probe edge)
+   - LOW: federation probes — DO NOT TRIGGER (lock).
