@@ -747,6 +747,57 @@ FROM iceberg.analytics.user_events;
 
 **Cross-reference.** This is the same data-type family as the MAP/`element_at` content above (use `element_at(map_col, key)` to read individual MAP values; use `CAST(map_col AS JSON)` to export the whole MAP as JSON). For string-aggregation in Trino (which is NOT `string_agg`/`group_concat`), see [resource 27 § 7A.2A — Oracle WINDOWED LISTAGG → Trino](27-oracle-plsql-to-dbt-trino.md) and the inline note immediately below.
 
+### LEADING CANONICAL — `CAST(json_col AS ROW(...) / MAP(VARCHAR, T) / ARRAY(T))` parses a JSON column INTO a TYPED structure (the JSON → typed direction)
+
+> **Keyword anchors (read this section FIRST when your question contains any of these):** Trino parse JSON into ROW, JSON to struct Trino, cast JSON as ROW Trino, cast JSON as MAP Trino, cast JSON as ARRAY Trino, json_parse then cast, extract typed struct from json column, deserialize JSON to typed columns Trino, JSON → ROW round trip, parse JSON column to record, materialize JSON into typed fields, `CAST(json_col AS ROW(a INT, b VARCHAR))`, `CAST(json_parse(s) AS MAP(VARCHAR, VARCHAR))`, JSON column to dbt model typed fields, JSON inbound to typed structure Trino.
+
+**The fact in one sentence.** The INVERSE of `CAST(map/array/row AS JSON)` is `CAST(<JSON value> AS ROW(...) | MAP(VARCHAR, T) | ARRAY(T))` — Trino 467 parses a JSON value directly into a typed structure with a single CAST, no UDFs required. When the source is a `VARCHAR` column holding a JSON string (the common case), wrap in `json_parse(...)` first to promote it to the `JSON` type, then CAST.
+
+**The signature (verified at [trino.io/docs/current/functions/json.html](https://trino.io/docs/current/functions/json.html)):**
+- **JSON → ROW**: *"When casting from `JSON` to `ROW`, both JSON array and JSON object are supported"*. A JSON object's keys are matched to ROW field names (case-insensitive); a JSON array's positions are matched to ROW fields in declaration order.
+- **JSON → MAP**: same key restriction as the forward direction — the MAP's key type **must be `VARCHAR`**, and value types must be supported scalars (or `JSON` for mixed values).
+- **JSON → ARRAY**: element type must be one of the supported scalars, or `JSON` for arrays with mixed element types.
+
+**Worked examples (all valid Trino 467):**
+
+```sql
+-- 1. VARCHAR JSON string -> typed ROW (the most common dbt promotion pattern).
+SELECT CAST(json_parse(payload) AS ROW(user_id BIGINT, email VARCHAR, active BOOLEAN)) AS user_record
+FROM iceberg.analytics.events;
+-- For payload = '{"user_id":42,"email":"a@b.com","active":true}',
+-- user_record is the typed ROW; access via dot notation: user_record.user_id, user_record.email.
+
+-- 2. VARCHAR JSON string -> MAP(VARCHAR, VARCHAR) (every value coerced to VARCHAR — the safe default when value types vary).
+SELECT CAST(json_parse(properties_raw) AS MAP(VARCHAR, VARCHAR)) AS properties_map
+FROM iceberg.analytics.events;
+
+-- 3. VARCHAR JSON string -> ARRAY(VARCHAR).
+SELECT CAST(json_parse(tags_raw) AS ARRAY(VARCHAR)) AS tags
+FROM iceberg.analytics.events;
+
+-- 4. NESTED — extract a JSON sub-path, then cast that subtree into a typed ROW.
+SELECT CAST(json_extract(payload, '$.user') AS ROW(id BIGINT, email VARCHAR)) AS user_obj
+FROM iceberg.analytics.events;
+-- json_extract returns JSON (not VARCHAR), so no json_parse wrapper is needed here.
+
+-- 5. MIXED value types -> cast values as JSON (the partial-cast escape hatch).
+SELECT CAST(json_parse(payload) AS MAP(VARCHAR, JSON)) AS mixed_map
+FROM iceberg.analytics.events;
+-- Use when the JSON object's values are heterogeneous (some strings, some numbers, some objects).
+```
+
+**DO-NOT-WRITE — banned forms for the JSON → typed direction:**
+
+| Anti-pattern | Why wrong | Fix |
+|---|---|---|
+| `CAST(payload AS ROW(...))` when `payload` is `VARCHAR` | Trino does NOT auto-coerce VARCHAR → JSON for the CAST-to-ROW path. Parse error or unexpected behavior. | `CAST(json_parse(payload) AS ROW(...))` — explicit `json_parse` first. |
+| `CAST(json_col AS MAP(BIGINT, VARCHAR))` (non-VARCHAR keys) | Per docs, JSON → MAP **requires `VARCHAR` keys** (same restriction as the forward direction). | Use `MAP(VARCHAR, T)`. If you genuinely need typed keys, cast keys after extraction: `transform_keys(m, (k, v) -> CAST(k AS BIGINT))`. |
+| Extracting field-by-field with `json_extract_scalar(payload, '$.user_id')` + `... '$.email'` + `... '$.active'` when the WHOLE struct shape is stable | Verbose, slow (re-parses the JSON N times for N fields), error-prone (one missed CAST and you get string-comparison bugs). | `CAST(json_parse(payload) AS ROW(user_id BIGINT, email VARCHAR, active BOOLEAN))` — one parse, one CAST, all fields typed in one pass. |
+| Writing a Trino UDF or a Spark UDF to deserialize JSON because "Trino has no JSON → struct cast" | **FALSE.** `CAST(JSON AS ROW(...))` is documented and ships in Trino 467. UDFs are unnecessary. | The CAST examples above. |
+| `CAST(json_parse(s) AS ARRAY(BIGINT))` when the JSON array contains mixed types (some numbers, some objects) | The cast errors if any element fails the target type. | `CAST(json_parse(s) AS ARRAY(JSON))` first (partial-cast escape hatch); then handle per-element CAST inside `transform(...)`. |
+
+**Cross-references.** The forward direction (`CAST(map/array/row AS JSON)`) is the LEADING CANONICAL immediately above. The Trino JSON extraction family (`json_extract` / `json_extract_scalar` / `json_array_length` / `json_parse` / `json_format`) is at [resource 13 § Trino JSON extraction family LEADING CANONICAL](13-postgres-to-iceberg-ingestion.md) — use those when you only need ONE leaf value; reach for `CAST(... AS ROW)` when you want the WHOLE struct shape typed in one CAST. For accessing fields on the resulting ROW value, use dot notation: `user_record.user_id`, `user_record.email`. For the Spark-side equivalent (`from_json` + `schema_of_json` for full struct promotion), see [resource 13 § Spark JSONB shortcut](13-postgres-to-iceberg-ingestion.md).
+
 #### Trino string aggregation — NO `string_agg`, NO `group_concat`
 
 > **Keyword anchors:** Trino string_agg does not exist, string_agg not registered, group_concat Trino, concatenate rows into one string, listagg vs array_join, Trino string concatenation aggregate.
