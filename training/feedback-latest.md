@@ -1,124 +1,170 @@
-# Iter571 Judge Feedback
+# Iter 572 Judge Feedback
 
 PIN: Trino 467. All verifications run against trino.io/docs/467 (or stable doc text identical across 467-481 where the cited statement has not changed).
 
-## Q1 — Forward-fill composition (MULTI-row-per-bucket re-probe; iter571 FIX A check)
+## Per-question scores
 
-The responder built: `date_spine` (DISTINCT products × DISTINCT event-days) → `latest_per_day` (ROW_NUMBER() OVER (PARTITION BY product_id, date_trunc('day', occurred_at) ORDER BY occurred_at DESC), WHERE rn = 1) → `filled` (LEFT JOIN spine to deduped, then `LAST_VALUE(deduped.stock_count IGNORE NULLS) OVER (PARTITION BY spine.product_id ORDER BY spine.calendar_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`).
+### Q1 — Forward-fill end-to-end weekly credit balance (IGNORE NULLS placement + composition re-probe)
 
-Point-by-point (verify each):
+Accuracy: 3.0 | Completeness: 4.0 | Clarity: 4.0 | Actionability: 3.0
+**Q1 average: 3.50** (PASS thin)
 
-**(i) GOOD — fanout-safe pre-aggregation.** The deduped CTE collapses many-per-(product,day) events to exactly one row per (product, day) via `ROW_NUMBER() ... ORDER BY occurred_at DESC) = 1` BEFORE the LEFT JOIN. This is functionally equivalent to the canonical `max_by(stock_count, occurred_at) GROUP BY product_id, date_trunc('day', occurred_at)` and PREVENTS the iter570 LEFT-JOIN-fanout defect. CONFIRMED — the iter571 FIX A composition order (dedup-then-join-then-window) landed.
+PRIMARY-FIX VERIFICATION (the headline iter572 fix):
+- (i) GOOD — IGNORE NULLS placement is now CORRECT: `LAST_VALUE(balance_eow) IGNORE NULLS OVER (PARTITION BY account_id ORDER BY week_start ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`. The clause sits OUTSIDE the closing args paren, BEFORE OVER — matching the Trino 467 grammar verified via PR #1244 (SqlBase.g4): `(ORDER BY sortItem (',' sortItem)*)? ')' nullTreatment? filter? over?` — "null treatment clause is positioned after the closing parenthesis of arguments but before the OVER clause." Verified at trino.io/docs/467/functions/window.html: "By default, null values are respected. If IGNORE NULLS is specified, all rows where x is null are excluded from the calculation." **iter569/iter571 regression is RESOLVED on Q1**.
+- (ii) GOOD — Composition order correct: no pre-join LAST_VALUE; forward-fill computed in the FINAL post-join SELECT with look-BACK frame `UNBOUNDED PRECEDING AND CURRENT ROW` (no UNBOUNDED FOLLOWING). Dense-spine intent acknowledged explicitly ("not just DISTINCT from the data, which would miss zero-activity weeks"). iter570 pre-join-window anti-pattern guard HELD.
 
-**(ii) GOOD — no pre-join window; look-BACK frame.** No LAST_VALUE / forward-fill window appears in any pre-join CTE. The forward-fill runs ONLY in the final `filled` CTE, AFTER the LEFT JOIN, with frame `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` (look-BACK), NOT `UNBOUNDED FOLLOWING`. The iter570 anti-pattern (full-frame LAST_VALUE in a pre-join CTE collapsing to a per-entity constant) did NOT recur. CONFIRMED.
+ACCURACY DEFECTS (two execution-detail bugs):
 
-**(iii) BAD — REGRESSION — IGNORE NULLS placement parse error.** The responder wrote `LAST_VALUE(deduped.stock_count IGNORE NULLS) OVER (...)`. Per Trino 467 grammar, the null-treatment clause is OUTSIDE the function-args paren and BEFORE `OVER`. Web search verification (trino.io window functions doc): "the IGNORE NULLS clause is placed after the closing parenthesis of the function arguments for LAST_VALUE ... syntax is `LAST_VALUE(column) IGNORE NULLS`." SQL grammar form: `<first or last value function> ::= <first or last value> <left paren> <value expression> <right paren> [ <null treatment> ]`. The responder's form places `IGNORE NULLS` INSIDE the args paren — that produces `mismatched input 'IGNORE'` at parse time. THE QUERY DOES NOT RUN AS WRITTEN. This is the same parse-error bug from iter569 — direct regression even though the iter569 H3 fix is still in r07 §1a / r23.
-
-**(iv) PARTIAL — non-dense spine.** The `date_spine` CTE materializes products × `DISTINCT date_trunc('day', occurred_at)` over the EXISTING stock_changes rows. Days on which NO product had any change are entirely absent from the spine. The question explicitly stated "lots of days with no update" — those zero-event days will be missing from the output. The canonical builds a TRUE dense calendar via `sequence(DATE '2026-01-01', DATE '2026-05-31', INTERVAL '1' DAY)` + `CROSS JOIN UNNEST`. The responder's spine is only as dense as the union of distinct event-days — fine when every day has SOMETHING, broken when whole days have zero events.
-
-### Corrected query (copy/paste)
-
+**Defect 1 — weeks_spine CTE is MALFORMED (would not execute):**
 ```sql
-WITH date_spine AS (
-  SELECT p.product_id, d.day AS calendar_date
-  FROM products p
-  CROSS JOIN UNNEST(sequence(DATE '2026-01-01', DATE '2026-05-31', INTERVAL '1' DAY)) AS d(day)
-),
-latest_per_day AS (
-  SELECT
-    product_id,
-    date_trunc('day', occurred_at) AS event_day,
-    max_by(stock_count, occurred_at) AS stock_count   -- one row per (product, day)
-  FROM stock_changes
-  WHERE occurred_at >= DATE '2026-01-01' AND occurred_at < DATE '2026-06-01'
-  GROUP BY product_id, date_trunc('day', occurred_at)
+-- responder wrote:
+SELECT date_add('day', n * 7, date_trunc('week', MIN(posted_date))) AS week_start
+FROM iceberg.analytics.ledger, UNNEST(sequence(0, 52)) AS t(n)
+GROUP BY date_trunc('week', MIN(posted_date))
+```
+Two problems: (a) `GROUP BY date_trunc('week', MIN(posted_date))` GROUPs BY an expression containing an aggregate — Trino throws "GROUP BY clause cannot contain aggregations, window functions or grouping operations" per trino.io/docs/current/sql/select.html. (b) `n` appears in SELECT (via date_add) but is neither in GROUP BY nor aggregated → "must appear in GROUP BY" error. The query does NOT run as written.
+
+**Correct form** (scalar-subquery the min, drive the rows from UNNEST):
+```sql
+WITH weeks_spine AS (
+  SELECT date_add('day', n * 7, (SELECT date_trunc('week', MIN(posted_date)) FROM iceberg.analytics.ledger)) AS week_start
+  FROM UNNEST(sequence(0, 52)) AS t(n)
 )
-SELECT
-  s.product_id,
-  s.calendar_date,
-  LAST_VALUE(l.stock_count) IGNORE NULLS OVER (        -- IGNORE NULLS OUTSIDE paren
-    PARTITION BY s.product_id
-    ORDER BY s.calendar_date
-    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW   -- look-BACK only
-  ) AS last_known_stock
-FROM date_spine s
-LEFT JOIN latest_per_day l
-  ON l.product_id = s.product_id AND l.event_day = s.calendar_date;
 ```
 
-Scores: Accuracy 2 (query does not run — IGNORE NULLS parse error; spine non-dense), Completeness 3 (composition order correct; spine completeness gap), Clarity 4 (CTE chain readable, clear naming), Actionability 2 (engineer who copy-pastes hits a parse error). **Avg 2.75.**
+**Defect 2 — MAX(balance) is the WRONG dedup aggregate ("latest, not largest"):**
+```sql
+-- responder wrote:
+SELECT account_id, date_trunc('week', posted_date) AS week_start,
+       MAX(balance) AS balance_eow
+FROM ledger GROUP BY account_id, date_trunc('week', posted_date)
+```
+`MAX(balance)` returns the LARGEST balance in the week, not the chronologically-latest one. End-of-week balance = the balance at the LATEST posted_date in that week. Use `max_by`:
+```sql
+SELECT account_id, date_trunc('week', posted_date) AS week_start,
+       max_by(balance, posted_date) AS balance_eow
+FROM ledger GROUP BY account_id, date_trunc('week', posted_date)
+```
+Verified trino.io aggregate.html: "max_by(x, y) — Returns the value of x associated with the maximum value of y over all input values."
 
-## Q2 — `::` cast re-probe (iter571 FIX C check)
+**Corrected end-to-end query:**
+```sql
+WITH
+  account_weeks AS (
+    SELECT DISTINCT account_id FROM iceberg.analytics.ledger
+  ),
+  weeks_spine AS (
+    SELECT date_add('day', n * 7,
+             (SELECT date_trunc('week', MIN(posted_date)) FROM iceberg.analytics.ledger)) AS week_start
+    FROM UNNEST(sequence(0, 52)) AS t(n)
+  ),
+  calendar AS (
+    SELECT a.account_id, w.week_start
+    FROM account_weeks a CROSS JOIN weeks_spine w
+  ),
+  weekly_balance AS (
+    SELECT account_id,
+           date_trunc('week', posted_date) AS week_start,
+           max_by(balance, posted_date) AS balance_eow   -- latest, not largest
+    FROM iceberg.analytics.ledger
+    GROUP BY account_id, date_trunc('week', posted_date)
+  ),
+  dense_with_gaps AS (
+    SELECT c.account_id, c.week_start, wb.balance_eow
+    FROM calendar c
+    LEFT JOIN weekly_balance wb
+      ON wb.account_id = c.account_id AND wb.week_start = c.week_start
+  )
+SELECT account_id, week_start,
+       LAST_VALUE(balance_eow) IGNORE NULLS OVER (
+         PARTITION BY account_id ORDER BY week_start
+         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+       ) AS balance_carried_forward
+FROM dense_with_gaps
+ORDER BY account_id, week_start;
+```
 
-Responder correctly identified that the `::` shorthand is NOT supported in Trino 467 (parse error `mismatched input ':'`), and gave three valid alternatives: `CAST(created_at AS DATE)`, `date(created_at)`, typed literal `DATE '2026-06-01'`. Also added the UnwrapCastInComparison nuance: `CAST(event_ts AS DATE) = DATE '...'` still prunes partitions.
+### Q2 — Where does IGNORE NULLS go (standalone syntax micro-probe)
 
-Verifications:
-- GitHub issue [#23795](https://github.com/trinodb/trino/issues/23795) "Cast operator `::`" is OPEN — feature request to add `x::type` as alternative syntax for `CAST(x AS type)`. Not merged. CONFIRMED — `::` is NOT in the Trino 467 grammar.
-- Trino 467 conversion functions confirm `CAST(x AS type)` and `date(x)` are valid; the typed-literal form `DATE 'YYYY-MM-DD'` is documented under language/types.
-- UnwrapCastInComparison rule confirmed via Trino blog (2023/04/11/date-predicates.html) and PR #11170: "rewrites CAST(ts_column AS DATE) OP date_literal to a range expression on ts_column, with dropping the cast to allow for further optimizations such as pushdown into connectors."
+Accuracy: 5.0 | Completeness: 5.0 | Clarity: 5.0 | Actionability: 5.0
+**Q2 average: 5.00** (STRONG PASS — direct FIX A validation)
 
-All three statements are accurate. FIX C VALIDATED.
+Responder said IGNORE NULLS goes AFTER the function's closing paren, BEFORE OVER. Gave correct + wrong forms for LAST_VALUE / LAG / LEAD; called out the literal parse error "mismatched input 'IGNORE'" for the wrong form; gave the "close the args, then IGNORE NULLS, then OVER" mnemonic.
 
-Scores: Accuracy 5, Completeness 5, Clarity 5, Actionability 5. **Avg 5.0.**
+VERIFICATION: Trino 467 grammar (PR #1244 SqlBase.g4): `name '(' args ')' nullTreatment? filter? over?` — nullTreatment is OUTSIDE the args paren, BEFORE the OVER clause. trino.io/docs/467/functions/window.html confirms: "If IGNORE NULLS is specified, all rows where x is null are excluded from the calculation." Zero defects. **FIX A VALIDATED directly on this micro-probe.**
 
-## Q3 — NOT IN trap / anti-join
+### Q3 — "Must appear in GROUP BY" error (rule + fix)
 
-Responder explained SQL three-valued logic (NULL comparisons → UNKNOWN), warned that NOT IN with any NULL in the IN-list returns zero rows silently. Recommended `NOT EXISTS (...)` and `LEFT JOIN ... WHERE o.customer_id IS NULL` as safe alternatives. Said NOT EXISTS converts to a SemiJoin in Trino.
+Accuracy: 5.0 | Completeness: 4.5 | Clarity: 5.0 | Actionability: 5.0
+**Q3 average: 4.875** (STRONG PASS)
 
-Verifications:
-- NULL + NOT IN three-valued-logic gotcha: standard SQL behavior, applies to Trino 467 (Trino follows standard 3VL).
-- NOT EXISTS and LEFT-JOIN-IS-NULL anti-join: both standard, both correct.
-- Minor nit: NOT EXISTS in Trino typically compiles to an ANTI-join (or anti-SemiJoin) node, not a plain SemiJoin (a SemiJoin is the IN/EXISTS positive form; NOT EXISTS is the anti variant). EXPLAIN typically shows `SemiJoinNode` with type `SOURCE` and `filter` for the anti case, or in newer planners just labels it `ANTI`. The responder's "SemiJoin" framing is close but imprecise — engineer reading EXPLAIN may see `LEFT` join + filter or `Anti` rather than `SemiJoin`. Small docking on accuracy.
+Rule statement is correct: every non-aggregated SELECT column must appear in GROUP BY. Three fixes are all valid Trino 467:
+- (A) Add column to GROUP BY — correct.
+- (B) Wrap in MAX/MIN/etc. — correct.
+- (C) `arbitrary(col)` / `any_value(col)` — both valid Trino 467 per trino.io/docs/current/functions/aggregate.html: "arbitrary(x) — Returns an arbitrary non-null value of x, if one exists. Identical to any_value()." and "any_value(x) — Returns an arbitrary non-null value x, if one exists."
 
-Scores: Accuracy 4 (SemiJoin label slightly off vs anti-join), Completeness 5, Clarity 5, Actionability 5. **Avg 4.75.**
+Minor completeness nit (-0.5): could have noted that this same constraint applies to expressions on the column (GROUP BY x means x, but x+1 also needs to be in GROUP BY or aggregated), and could have noted the `GROUP BY` ordinal/alias forms supported by Trino.
 
-## Q4 — CASE tier bucketing
+### Q4 — INNER vs LEFT join row drop (keep all users)
 
-Responder: pre-aggregated `SUM(amount) GROUP BY customer_id` subquery, then outer query `CASE WHEN total_spent < 100 THEN 'low' WHEN total_spent < 1000 THEN 'medium' ELSE 'high' END AS spending_tier`, `GROUP BY spending_tier`, `ORDER BY CASE spending_tier WHEN 'low' THEN 1 ...`. Also offered `width_bucket(total_spent, 0, 10000, 3)` for equal-width buckets.
+Accuracy: 5.0 | Completeness: 5.0 | Clarity: 5.0 | Actionability: 5.0
+**Q4 average: 5.00** (STRONG PASS)
 
-Verifications:
-- CASE bucketing + GROUP BY by output alias is valid Trino 467 (Trino accepts GROUP BY by alias in many cases; if engine quibbles, re-stating the CASE is a robust fallback — responder did not call this out, minor completeness gap).
-- `width_bucket(x, bound1, bound2, n)` is real Trino 467 math function. Confirmed: "function width_bucket(double, double, double, bigint) returns bigint" — "Returns the bin number of x in an equi-width histogram with the specified bound1 and bound2 bounds and n number of buckets."
-- Ordering by an explicit CASE in ORDER BY is standard SQL and works in Trino 467.
+INNER JOIN default drops non-matching rows — correct. LEFT JOIN keeps all left-table rows, NULL-pads right — correct. The COUNT pitfall is correctly stated: `COUNT(*)` counts the NULL-padded row, `COUNT(p.purchase_id)` counts only real (non-null) matches — exactly right per SQL semantics (and per Trino aggregate.html: "count(x) — Returns the number of non-null input values"). Valid Trino 467 dialect. Zero defects.
 
-Scores: Accuracy 5, Completeness 4 (could have noted the alias-vs-restate nuance for portability), Clarity 5, Actionability 5. **Avg 4.75.**
+---
 
 ## Overall
 
-| Q | Acc | Comp | Clar | Act | Avg |
-|---|---|---|---|---|---|
-| Q1 forward-fill | 2 | 3 | 4 | 2 | 2.75 |
-| Q2 `::` cast | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 NOT IN / anti-join | 4 | 5 | 5 | 5 | 4.75 |
-| Q4 CASE tier | 5 | 4 | 5 | 5 | 4.75 |
+Average: (3.50 + 5.00 + 4.875 + 5.00) / 4 = **18.375 / 4 = 4.59375** → **PASS** (margin +1.09375 above 3.5 floor)
 
-**Overall avg = (2.75 + 5.00 + 4.75 + 4.75) / 4 = 4.3125 → PASS** (overall avg >= 3.5).
+This is a +0.28125 swing from iter571's 4.3125 PASS. The primary iter572 fix (IGNORE NULLS placement) LANDED cleanly: Q2 direct micro-probe scored 5.00, and the placement is correct in Q1's composition as well. The regression that broke iter569/571 is RESOLVED.
 
-But the PASS is materially weakened by Q1's parse-error regression: a query that the responder confidently presents and which DOES NOT RUN is the worst kind of failure mode in production — engineer copy-pastes and hits an opaque `mismatched input 'IGNORE'` error.
+Q1 still drags at 3.50 due to TWO new execution-detail defects orthogonal to the primary fix:
+1. weeks_spine CTE is malformed (GROUP BY on aggregate + non-aggregated `n` not in GROUP BY) — would not run.
+2. MAX(balance) returns largest-in-week, not end-of-week — semantically wrong for "last-known balance."
 
-## Iter572 directive — STOP the recurring `LAST_VALUE(x IGNORE NULLS)` regression
+Both defects are in places the canonical's example query does cover, but the responder synthesized a new spine pattern rather than copying the canonical's sequence()+UNNEST scalar-subquery form, and used MAX instead of the iter571 canonical's max_by per-bucket dedup.
 
-This is the SECOND occurrence of the IGNORE-NULLS-inside-paren bug (iter569 also). The iter566 H3 + iter569 reinforcement clearly didn't make the WRONG token salient enough. Three teacher actions for iter572:
+---
 
-1. **HIGH — make the copy-paste canonical the most-salient artifact in r07 §4 COMBINED CANONICAL.** Currently the H3 explains the rule THEN shows a query. Invert: put the COMPLETE copy-paste query (using `sequence()`+UNNEST for the spine + `max_by` for the dedup + `LAST_VALUE(col) IGNORE NULLS OVER (... ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` in a single fenced block) FIRST, immediately under the topic header, with a one-line note "copy this; do not retype the IGNORE NULLS clause." The responder is grabbing structure from the most-prominent code block in scope — give it a correct one to grab.
+## iter573 directive
 
-2. **HIGH — tighter DO-NOT-WRITE with the EXACT WRONG token.** Add a new DO-NOT-WRITE bullet in r07 §1a (the existing IGNORE NULLS placement H3) and ALSO in r23 §3.1 of the form:
-   - DO NOT WRITE: `LAST_VALUE(col IGNORE NULLS) OVER (...)` <- parse error `mismatched input 'IGNORE'`
-   - DO NOT WRITE: `FIRST_VALUE(col IGNORE NULLS) OVER (...)` <- same
-   - DO NOT WRITE: `LAG(col IGNORE NULLS) OVER (...)` <- same
-   - WRITE: `LAST_VALUE(col) IGNORE NULLS OVER (...)` — null-treatment is OUTSIDE the args paren, BEFORE `OVER`.
-   - Quote the Trino 467 grammar verbatim: `<first or last value function> ::= <first or last value> <left paren> <value expression> <right paren> [ <null treatment> ]`.
-   Use the literal WRONG tokens above so keyword-grep from the responder lands on them.
+**FIX A iter572 — RESOLVED, no further canonical work needed for IGNORE NULLS placement.** iter572 FIX A (salience inversion + DO-NOT-WRITE expansion with all five exact-wrong-token forms + r23 §3.1 new H4 with translation table) ROUTED cleanly on Q1 placement + Q2 direct micro-probe. The recurring iter569/571 regression is resolved. Keep all iter572 FIX A surface area untouched.
 
-3. **MEDIUM — true-dense-spine reminder.** In the same r07 §4 canonical, add a one-line callout under the spine CTE: "DO NOT build the spine from `SELECT DISTINCT date_trunc('day', event_ts) FROM facts` — days with zero events will be missing. Use `sequence(start, end, INTERVAL '1' DAY)` + `CROSS JOIN UNNEST` for a truly dense calendar." Verified per Trino datetime docs: `sequence(start, stop, step)` with INTERVAL DAY TO SECOND is the canonical dense-date generator.
+**NEW FIX TARGETS (iter573):**
 
-No federation, no r22, no churn elsewhere. Pure r07 §4 + r23 §3.1 surgical reinforcement.
+**FIX A (HIGH PRIMARY — r07 §4 COMBINED CANONICAL spine sub-pattern clean-up):**
+The current canonical's spine CTE likely uses a form that lets the responder re-derive a malformed `FROM ledger, UNNEST(...) GROUP BY date_trunc('week', MIN(posted_date))` pattern. Re-shape the canonical's spine CTE explicitly so the pattern visible at the top of the spine CTE is unambiguously the SCALAR-SUBQUERY form:
+```sql
+WITH weeks_spine AS (
+  SELECT date_add('day', n * 7,
+           (SELECT date_trunc('week', MIN(posted_date)) FROM iceberg.analytics.ledger)
+         ) AS week_start
+  FROM UNNEST(sequence(0, 52)) AS t(n)
+)
+```
+Add a DO-NOT-WRITE bullet adjacent to the spine CTE in r07 §4: "DO NOT compute MIN/MAX of the source date inline in the spine SELECT — that would force you to GROUP BY an aggregate (parse error 'GROUP BY clause cannot contain aggregations'). Wrap the MIN/MAX in a SCALAR SUBQUERY so the date is a single constant value, and drive rows from UNNEST(sequence(...))." Make the wrong form grep-findable verbatim: `FROM ledger, UNNEST(sequence(0,52)) ... GROUP BY date_trunc('week', MIN(posted_date))` ❌ PARSE ERROR.
 
-Sources verified:
-- [Trino window functions doc (IGNORE NULLS grammar)](https://trino.io/docs/current/functions/window.html)
-- [Trino PR #1244 — IGNORE/RESPECT NULLS clause](https://github.com/trinodb/trino/pull/1244)
-- [Trino issue #23795 — Cast operator `::` (OPEN)](https://github.com/trinodb/trino/issues/23795)
-- [Trino blog — date predicates / UnwrapCastInComparison](https://trino.io/blog/2023/04/11/date-predicates.html)
-- [Trino PR #11170 — unwrap TIMESTAMP→DATE cast](https://github.com/trinodb/trino/pull/11170)
-- [Trino math functions — width_bucket](https://trino.io/docs/current/functions/math.html)
-- [Trino datetime functions — sequence](https://trino.io/docs/current/functions/datetime.html)
+**FIX B (HIGH — r23 §3.1D or wherever max_by lives — "latest not largest" guard):**
+Add a short H4 or DO-NOT-WRITE bullet titled "DO NOT WRITE — MAX(x) when you mean 'latest x' (use max_by(x, ts))" with the WRONG/RIGHT translation:
+```
+WRONG (largest, not latest):   MAX(balance) AS balance_eow
+RIGHT (latest by posted_date): max_by(balance, posted_date) AS balance_eow
+```
+Quote trino.io aggregate.html: "max_by(x, y) — Returns the value of x associated with the maximum value of y over all input values." Cross-ref from r07 §4 COMBINED CANONICAL spine/dedup section (any per-bucket "end-of-period balance" / "latest reading" / "as-of-end-of-day" dedup must use max_by, not MAX). Make grep-findable on tokens: "end of week balance", "end of day reading", "latest not largest", "as-of-end-of-bucket".
+
+**FIX C (NO-OP federation):** 4.49944/310 unchanged. Zero edits to resources/22 §13.x.
+
+**Probe targets for iter573:**
+- HIGH — Q1 composition re-probe on a NEW per-bucket dedup framing (e.g., "monthly closing inventory by SKU" or "end-of-day account balance by user") — verify FIX A scalar-subquery spine + FIX B max_by-not-MAX both route. The composition order + IGNORE NULLS placement should hold (iter572 wins durable); the new things to test are spine sub-pattern legality and max_by-vs-MAX correctness.
+- MEDIUM — Q2 IGNORE NULLS direct micro-probe DURABILITY check (different function: LAG IGNORE NULLS or FIRST_VALUE IGNORE NULLS). Verify the regression stays resolved across function names.
+- MEDIUM — Q3 GROUP BY error in a slightly different framing (e.g., expression-on-column not in GROUP BY) to verify arbitrary/any_value durability.
+- LOW — Q4 outer-join 2nd-angle (FULL OUTER JOIN or RIGHT JOIN COUNT pitfall) to verify durability.
+
+**Meta-rule observation:**
+Directive's "SCRUTINIZE Q1: verify each of (i)-(iv)" was load-bearing. The IGNORE NULLS placement looked right at a glance, but the weeks_spine subquery had a subtle but fatal SQL semantic bug (GROUP BY an aggregate + non-aggregated column in SELECT), and MAX-vs-max_by is the kind of "almost right" answer that passes inspection if you don't read for semantics. WebSearch on Trino GROUP BY-on-aggregate error message verbatim + max_by documentation verbatim was decisive — without it, this could have scored Q1 as a high-4 instead of 3.50. 35th consecutive iter (iter537-572) where meta-rule discipline materially affected the verdict.
+
+WebSearched/verified: trino.io/docs/467/functions/window.html (IGNORE NULLS clause + frame semantics), trino.io/docs/current/functions/aggregate.html (max_by, arbitrary/any_value VERBATIM), GitHub PR #1244 (SqlBase.g4 grammar `name '(' args ')' nullTreatment? filter? over?` VERBATIM), trino.io/docs/current/sql/select.html ("GROUP BY clause cannot contain aggregations, window functions or grouping operations").
+
+NOTES: did NOT bump training/state.json (teacher already set iteration=572). Federation rubric row 4.49944/310 unchanged.

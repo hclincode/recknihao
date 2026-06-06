@@ -626,6 +626,56 @@ SELECT user_id FROM events_2026_q2;
 
 ---
 
+### DO NOT WRITE — `IGNORE NULLS` placement on window functions: AFTER the closing args paren, BEFORE `OVER` (iter572 PIN)
+
+> **Keyword anchors (route here on any of these):** IGNORE NULLS placement, IGNORE NULLS inside parentheses parse error, where does IGNORE NULLS go, IGNORE NULLS after closing paren before OVER, LAST_VALUE IGNORE NULLS syntax, FIRST_VALUE IGNORE NULLS syntax, LAG IGNORE NULLS syntax, LEAD IGNORE NULLS syntax, null treatment clause Trino, RESPECT NULLS Trino, mismatched input 'IGNORE', mismatched input IGNORE Trino, null treatment outside args.
+
+**The one-line rule.** On every Trino 467 window function that supports null-treatment (`LAST_VALUE`, `FIRST_VALUE`, `NTH_VALUE`, `LAG`, `LEAD`), the `IGNORE NULLS` / `RESPECT NULLS` keyword pair lives **AFTER the closing parenthesis of the function arguments and BEFORE the `OVER` clause** — *never* inside the function-args paren. The Trino 467 grammar (verified at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html) + the `SqlBase.g4` grammar referenced in [trinodb/trino PR #1244](https://github.com/trinodb/trino/pull/1244)) literally reads `functionCall: name '(' args ')' nullTreatment? filter? over?` — the `nullTreatment` clause is an **optional clause OUTSIDE the args paren**, in the third position between `)` and the optional `OVER`. The Trino window-functions doc says verbatim: *"By default, null values are respected. If `IGNORE NULLS` is specified, all rows where `x` is null are excluded from the calculation."* and the syntax examples show `IGNORE NULLS` **after** the closing args paren.
+
+**Grep-findable exact-wrong tokens — every one of these forms is a Trino 467 parse error (`mismatched input 'IGNORE'`):**
+
+| WRONG (parse error — `IGNORE NULLS` inside args paren) | RIGHT (Trino 467 — `IGNORE NULLS` after `)`, before `OVER`) |
+|---|---|
+| `LAST_VALUE(col IGNORE NULLS) OVER (...)` &nbsp;❌ | `LAST_VALUE(col) IGNORE NULLS OVER (...)` &nbsp;✅ |
+| `FIRST_VALUE(col IGNORE NULLS) OVER (...)` &nbsp;❌ | `FIRST_VALUE(col) IGNORE NULLS OVER (...)` &nbsp;✅ |
+| `LAG(col IGNORE NULLS) OVER (...)` &nbsp;❌ | `LAG(col) IGNORE NULLS OVER (...)` &nbsp;✅ |
+| `LAG(col, 1 IGNORE NULLS) OVER (...)` &nbsp;❌ | `LAG(col, 1) IGNORE NULLS OVER (...)` &nbsp;✅ |
+| `LEAD(col IGNORE NULLS) OVER (...)` &nbsp;❌ | `LEAD(col) IGNORE NULLS OVER (...)` &nbsp;✅ |
+| `NTH_VALUE(col, 2 IGNORE NULLS) OVER (...)` &nbsp;❌ | `NTH_VALUE(col, 2) IGNORE NULLS OVER (...)` &nbsp;✅ |
+
+**Mnemonic.** Close the args paren, then `IGNORE NULLS`, then `OVER` — three tokens in that order, whitespace between each:
+
+```
+function_name(args)   IGNORE NULLS   OVER (PARTITION BY ... ORDER BY ... ROWS BETWEEN ...)
+   ^^^^^^^^^^^^^^^^   ^^^^^^^^^^^^   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   close the args     null clause    window spec
+```
+
+**Worked correct end-to-end forward-fill (canonical — copy this):**
+
+```sql
+-- LAST_VALUE forward-fill (LOCF) — IGNORE NULLS placed OUTSIDE the closing args paren, BEFORE OVER:
+SELECT device_id,
+       ts,
+       LAST_VALUE(status) IGNORE NULLS OVER (
+         PARTITION BY device_id ORDER BY ts
+         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+       ) AS last_known_status
+FROM dense_grid;
+
+-- LAG(col) IGNORE NULLS — previous NON-NULL value (skips NULL rows):
+SELECT device_id,
+       ts,
+       LAG(status) IGNORE NULLS OVER (PARTITION BY device_id ORDER BY ts) AS prev_nonnull_status
+FROM facts;
+```
+
+**Why this lives in the §3.1 dialect zone (between §3.1G window-function tie-break and §3.1H ORDER BY determinism).** Engineers carrying muscle memory from other engines (or just re-deriving the syntax from English — *"ignore nulls inside the function"*) reflexively type `LAST_VALUE(col IGNORE NULLS) OVER (...)`. The Trino 467 parse error is `mismatched input 'IGNORE'. Expecting: ')', ','` — opaque, easy to misdiagnose as a missing comma. Routing every `IGNORE NULLS`-shaped question here gives the immediate fix. **The full forward-fill recipe (date spine + LOCF + post-join window placement) lives at [resource 07 § COMBINED CANONICAL — composing the date-spine + forward-fill correctly](07-analytical-query-patterns.md) — same `IGNORE NULLS` placement rule applies there.**
+
+**Cross-references.** [Resource 07 § LEADING CANONICAL — forward-fill / `LAST_VALUE ... IGNORE NULLS`](07-analytical-query-patterns.md) for the standalone LOCF recipe (look-BACK frame `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`, `PARTITION BY entity_id` for multi-series fill, `COALESCE` wrapper is optional). [Resource 07 § COMBINED CANONICAL — date-spine + forward-fill composition](07-analytical-query-patterns.md) for the four-step recipe (spine via `sequence()` + UNNEST, per-bucket dedup via `max_by`, LEFT JOIN, then `LAST_VALUE(...) IGNORE NULLS` in the FINAL SELECT). [Trino 467 window functions doc](https://trino.io/docs/467/functions/window.html) for the official grammar.
+
+---
+
 ### LEADING CANONICAL — `greatest()` / `least()` return NULL if ANY arg is NULL in Trino (Oracle + MySQL + BigQuery match; **PostgreSQL DIFFERS** — it ignores NULLs)
 
 > **READ THIS FIRST if your question contains any of these keywords:** `greatest least NULL Trino`, `greatest returns NULL`, `least NULL argument`, `greatest vs Postgres`, `do all engines greatest least behave the same`, `ignore NULL greatest`, `COALESCE greatest`, `porting Postgres greatest to Trino`, `greatest cross-engine`, `least cross-engine`. Verified at [trino.io/docs/467/functions/comparison.html](https://trino.io/docs/467/functions/comparison.html) + [postgresql.org/docs/current/functions-conditional.html](https://www.postgresql.org/docs/current/functions-conditional.html) on 2026-06-07.

@@ -793,20 +793,13 @@ The outer `COALESCE` is optional but makes intent explicit when `metric` is non-
 
 **Complement / cross-reference.** This is the **value** forward-fill. The **row** densification (creating one row per `(id, day)` so there's something to fill) is the §4 date gap-fill recipe above (calendar `UNNEST(sequence(...))` LEFT JOIN'd to the sparse fact). Use them together: gap-fill the dates first, then forward-fill the values. For lookback comparisons that also need IGNORE NULLS, `LAG(x) IGNORE NULLS OVER (... ORDER BY day)` returns the **previous non-null** value (vs `LAG(x)` which returns the previous **row's** value even if NULL). See §5 Pattern B3 for the related `LAST_VALUE` **default-frame** footgun (when the frame is omitted, `LAST_VALUE` returns the current row's value — that section is about a different fab; this section is about correctly-framed forward-fill with `IGNORE NULLS`).
 
-### COMBINED CANONICAL — composing the date-spine + forward-fill correctly (ORDERING MATTERS — iter570 PIN)
+### COMBINED CANONICAL — composing the date-spine + forward-fill correctly (ORDERING MATTERS — iter570 PIN, iter572 REORDERED)
 
-> **Keyword anchors (read this section FIRST if your question contains any of these):** forward-fill plus date spine, gap-fill dates AND forward-fill values, dense minute grid + LOCF, device heartbeat forward-fill, IoT minute-bucket forward-fill, sensor status carry-forward minute spine, fill missing minutes with last reported status, every minute per device last known status, combine sequence and LAST_VALUE IGNORE NULLS, date-spine forward-fill order of operations.
+> **Keyword anchors (read this section FIRST if your question contains any of these):** forward-fill plus date spine, gap-fill dates AND forward-fill values, dense minute grid + LOCF, device heartbeat forward-fill, IoT minute-bucket forward-fill, sensor status carry-forward minute spine, fill missing minutes with last reported status, every minute per device last known status, combine sequence and LAST_VALUE IGNORE NULLS, date-spine forward-fill order of operations, IGNORE NULLS placement, IGNORE NULLS inside parentheses parse error, where does IGNORE NULLS go, IGNORE NULLS after closing paren before OVER, LAST_VALUE IGNORE NULLS syntax.
 
-**The fact in one sentence.** When you need BOTH the dense `(entity, time)` grid AND the carry-forward fill, the window MUST be applied **AFTER** the LEFT JOIN to the spine — over the **post-join dense rows** where gap minutes are NULL. If you compute `LAST_VALUE(...) IGNORE NULLS` in a CTE over the **raw sparse facts FIRST** and then LEFT JOIN the spine, gap rows the join creates were never seen by that earlier window → they stay NULL → `COALESCE` over two NULLs returns NULL → **gaps NOT filled**.
+> **Copy this query as-is. Do NOT retype the `IGNORE NULLS` clause — it goes OUTSIDE the function's closing parenthesis, before `OVER`.** The correct form is `LAST_VALUE(status) IGNORE NULLS OVER (...)` — **NOT** `LAST_VALUE(status IGNORE NULLS) OVER (...)` (that is a parse error — see the DO-NOT-WRITE block below). Also: build the spine with **`sequence()` + `CROSS JOIN UNNEST`** (TRUE dense calendar) — **never** from `SELECT DISTINCT date_trunc('day', event_ts) FROM facts`, which silently drops days with zero events across all entities.
 
-**Ordering recipe — four numbered steps (copy this mental order):**
-
-1. **Build the dense grid.** `CROSS JOIN UNNEST(sequence(min_ts, max_ts, INTERVAL '1' MINUTE))` × distinct entities (devices / users / tenants / products). The grid CTE contains every `(entity, ts)` pair you want in the output, with NO measure column yet.
-2. **Step 2a — collapse the sparse facts to ONE row per `(entity, bucket)` FIRST (fanout-safe).** If the raw fact table can have MULTIPLE events per `(entity, bucket)` (multiple heartbeats per minute, many status updates per hour, several writes per day per row), the LEFT JOIN in Step 2b will FAN OUT — the grid row matches every fact row, multiplying the output. Pre-aggregate to **one row per `(entity, bucket)`** first using `max_by` to keep the LATEST reading within the bucket: `SELECT entity_id, date_trunc('hour', ts) AS bucket, max_by(metric, ts) AS metric FROM facts GROUP BY entity_id, date_trunc('hour', ts)`. **Keyword anchor:** fanout from multiple events per bucket, dedupe/aggregate per hour before forward-fill, one row per entity per time bucket, many updates per day collapse to last per day, multiple heartbeats per minute, `max_by` per bucket.
-3. **Step 2b — LEFT JOIN that one-row-per-bucket result to the dense grid.** Gap-row entries (entity/bucket pairs with no real fact) now have NULL metric. This is where the NULLs you want to fill actually appear in the row stream — and there is NO row-multiplication risk because Step 2a guarantees at most one fact row per `(entity, bucket)`.
-4. **Step 3 — THEN apply the window AFTER the join, over the post-join dense rows.** `COALESCE(metric, LAST_VALUE(metric) IGNORE NULLS OVER (PARTITION BY entity_id ORDER BY ts ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW))` — the window now sees the NULL-padded dense rows, so `IGNORE NULLS` skips the gap rows and the look-BACK frame returns the most recent non-null value at or before each gap.
-
-**Compact correct end-to-end query (device-heartbeat / minute-spine forward-fill — copy-paste this):**
+**Compact correct end-to-end query (device-heartbeat / minute-spine forward-fill — copy-paste this — the FIRST artifact in this section so you copy it rather than re-derive it):**
 
 ```sql
 -- Step 1: dense (device_id, ts) grid — one row per device per minute in the lookback window.
@@ -815,7 +808,7 @@ WITH bounds AS (
   FROM iceberg.iot.device_heartbeats
   WHERE reported_at >= current_timestamp - INTERVAL '1' DAY
 ),
-minute_spine AS (
+minute_spine AS (                                  -- TRUE dense calendar via sequence()+UNNEST (NOT DISTINCT-event-days)
   SELECT t AS ts
   FROM bounds
   CROSS JOIN UNNEST(sequence(date_trunc('minute', lo),
@@ -832,17 +825,28 @@ grid AS (                                          -- dense (device_id, ts) — 
   FROM devices d
   CROSS JOIN minute_spine s
 ),
--- Step 2: LEFT JOIN sparse facts to the dense grid. Gap minutes => status IS NULL.
+-- Step 2a: collapse the sparse facts to ONE row per (device_id, minute) FIRST via max_by — fanout-safe.
+--          Multiple heartbeats in the same minute? max_by keeps the LATEST reading within the bucket.
+per_bucket AS (
+  SELECT device_id,
+         date_trunc('minute', reported_at) AS ts,
+         max_by(status, reported_at)       AS status     -- ONE row per (device, minute) — no fanout
+  FROM iceberg.iot.device_heartbeats
+  WHERE reported_at >= current_timestamp - INTERVAL '1' DAY
+  GROUP BY device_id, date_trunc('minute', reported_at)
+),
+-- Step 2b: LEFT JOIN the one-row-per-bucket result to the dense grid. Gap minutes => status IS NULL.
 joined AS (
   SELECT g.device_id,
          g.ts,
-         h.status                                  -- NULL on gap minutes (post-join)
+         p.status                                  -- NULL on gap minutes (post-join)
   FROM grid g
-  LEFT JOIN iceberg.iot.device_heartbeats h
-    ON h.device_id = g.device_id
-   AND date_trunc('minute', h.reported_at) = g.ts
+  LEFT JOIN per_bucket p
+    ON p.device_id = g.device_id
+   AND p.ts        = g.ts
 )
 -- Step 3: apply the window AFTER the join, over the dense rows. NULLs are now visible to IGNORE NULLS.
+--         IGNORE NULLS goes OUTSIDE the function's closing paren, BEFORE OVER — NOT inside the args.
 SELECT device_id,
        ts,
        COALESCE(
@@ -856,11 +860,32 @@ FROM joined
 ORDER BY device_id, ts;
 ```
 
-**Why this works.** Step 2's LEFT JOIN is what **manufactures the NULL rows that need filling**. Step 3's `LAST_VALUE(status) IGNORE NULLS` runs over the `joined` CTE — which contains both the non-NULL "real" reports and the NULL gap minutes. `IGNORE NULLS` skips the gap rows and the look-BACK frame `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` returns the most recent non-NULL `status` at or before each gap minute, per device.
+**The fact in one sentence.** When you need BOTH the dense `(entity, time)` grid AND the carry-forward fill, the window MUST be applied **AFTER** the LEFT JOIN to the spine — over the **post-join dense rows** where gap minutes are NULL. If you compute `LAST_VALUE(...) IGNORE NULLS` in a CTE over the **raw sparse facts FIRST** and then LEFT JOIN the spine, gap rows the join creates were never seen by that earlier window → they stay NULL → `COALESCE` over two NULLs returns NULL → **gaps NOT filled**.
 
-**DO-NOT-WRITE (load-bearing — iter570 forward-fill + spine composition fab class):**
+**Ordering recipe — four numbered steps (copy this mental order):**
 
-- **`LAST_VALUE(status IGNORE NULLS) OVER (...)` — `IGNORE NULLS` placed INSIDE the function-args paren is a PARSE ERROR.** The Trino 467 grammar (verified at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html) + [SqlBase.g4 grammar referenced in PR #1244](https://github.com/trinodb/trino/pull/1244)) places the **null-treatment clause AFTER the closing paren of the function arguments and BEFORE `OVER`**: `functionCall: name '(' args ... ')' nullTreatment? filter? over?`. **CORRECT:** `LAST_VALUE(status) IGNORE NULLS OVER (PARTITION BY device_id ORDER BY ts ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`. **WRONG (parse error):** `LAST_VALUE(status IGNORE NULLS) OVER (...)`. Same rule for `FIRST_VALUE`, `NTH_VALUE`, `LAG`, `LEAD`: the `IGNORE NULLS` / `RESPECT NULLS` keyword pair sits BETWEEN `)` and `OVER`, never inside the function-args paren.
+1. **Build the dense grid.** `CROSS JOIN UNNEST(sequence(min_ts, max_ts, INTERVAL '1' MINUTE))` × distinct entities (devices / users / tenants / products). The grid CTE contains every `(entity, ts)` pair you want in the output, with NO measure column yet. **DO NOT** build the spine from `SELECT DISTINCT date_trunc('day', event_ts) FROM facts` — days with **zero events across ALL entities** will be MISSING (you only get days that appear at least once in the raw facts). Use `sequence(start, end, INTERVAL '1' DAY)` + `CROSS JOIN UNNEST` for a TRUE dense calendar, then `CROSS JOIN` the distinct entity list to get a `(entity, day)` cross product.
+2. **Step 2a — collapse the sparse facts to ONE row per `(entity, bucket)` FIRST (fanout-safe).** If the raw fact table can have MULTIPLE events per `(entity, bucket)` (multiple heartbeats per minute, many status updates per hour, several writes per day per row), the LEFT JOIN in Step 2b will FAN OUT — the grid row matches every fact row, multiplying the output. Pre-aggregate to **one row per `(entity, bucket)`** first using `max_by` to keep the LATEST reading within the bucket: `SELECT entity_id, date_trunc('hour', ts) AS bucket, max_by(metric, ts) AS metric FROM facts GROUP BY entity_id, date_trunc('hour', ts)`. **Keyword anchor:** fanout from multiple events per bucket, dedupe/aggregate per hour before forward-fill, one row per entity per time bucket, many updates per day collapse to last per day, multiple heartbeats per minute, `max_by` per bucket.
+3. **Step 2b — LEFT JOIN that one-row-per-bucket result to the dense grid.** Gap-row entries (entity/bucket pairs with no real fact) now have NULL metric. This is where the NULLs you want to fill actually appear in the row stream — and there is NO row-multiplication risk because Step 2a guarantees at most one fact row per `(entity, bucket)`.
+4. **Step 3 — THEN apply the window AFTER the join, over the post-join dense rows.** `COALESCE(metric, LAST_VALUE(metric) IGNORE NULLS OVER (PARTITION BY entity_id ORDER BY ts ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW))` — the window now sees the NULL-padded dense rows, so `IGNORE NULLS` skips the gap rows and the look-BACK frame returns the most recent non-null value at or before each gap. **The `IGNORE NULLS` keyword goes OUTSIDE the function's closing paren, BEFORE `OVER`** — see DO-NOT-WRITE bullet (1) below.
+
+**Why this works.** Step 2b's LEFT JOIN is what **manufactures the NULL rows that need filling**. Step 3's `LAST_VALUE(status) IGNORE NULLS` runs over the `joined` CTE — which contains both the non-NULL "real" reports and the NULL gap minutes. `IGNORE NULLS` skips the gap rows and the look-BACK frame `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` returns the most recent non-NULL `status` at or before each gap minute, per device.
+
+**DO-NOT-WRITE (load-bearing — iter570 forward-fill + spine composition fab class; iter572 PIN for IGNORE-NULLS placement regression):**
+
+- **`IGNORE NULLS` placed INSIDE the function-args paren is a PARSE ERROR — every form below fails to parse on Trino 467.** The Trino 467 grammar (verified at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html) + [SqlBase.g4 grammar referenced in PR #1244](https://github.com/trinodb/trino/pull/1244)) places the **null-treatment clause AFTER the closing paren of the function arguments and BEFORE `OVER`**: the grammar literally reads `functionCall: name '(' args ')' nullTreatment? filter? over?` — `nullTreatment` is a clause that sits OUTSIDE the args paren, between `)` and `OVER`. The Trino window-functions doc says verbatim: *"By default, null values are respected. If `IGNORE NULLS` is specified, all rows where `x` is null are excluded from the calculation."* — and shows the keyword **after** the closing paren of the args. **Grep-findable exact-wrong tokens (every one of these is a parse error — `mismatched input 'IGNORE'`):**
+    - `LAST_VALUE(col IGNORE NULLS) OVER (...)` &nbsp;&nbsp;❌ PARSE ERROR
+    - `FIRST_VALUE(col IGNORE NULLS) OVER (...)` &nbsp;&nbsp;❌ PARSE ERROR
+    - `LAG(col IGNORE NULLS) OVER (...)` &nbsp;&nbsp;❌ PARSE ERROR
+    - `LEAD(col IGNORE NULLS) OVER (...)` &nbsp;&nbsp;❌ PARSE ERROR
+    - `NTH_VALUE(col, 2 IGNORE NULLS) OVER (...)` &nbsp;&nbsp;❌ PARSE ERROR
+  **CORRECT** — the null-treatment clause goes **AFTER the closing args paren and BEFORE `OVER`**:
+    - `LAST_VALUE(col) IGNORE NULLS OVER (...)` &nbsp;&nbsp;✅
+    - `FIRST_VALUE(col) IGNORE NULLS OVER (...)` &nbsp;&nbsp;✅
+    - `LAG(col) IGNORE NULLS OVER (...)` &nbsp;&nbsp;✅
+    - `LEAD(col) IGNORE NULLS OVER (...)` &nbsp;&nbsp;✅
+    - `NTH_VALUE(col, 2) IGNORE NULLS OVER (...)` &nbsp;&nbsp;✅
+  The same rule covers `RESPECT NULLS` (the default — usually omitted). Mnemonic: **close the args, then `IGNORE NULLS`, then `OVER`** — three tokens, in that order, with whitespace between each.
 - **Computing `LAST_VALUE(...) IGNORE NULLS` in a CTE over the RAW sparse facts FIRST and THEN LEFT JOIN-ing the spine — gaps NOT filled.** Every raw sparse-fact row already has a non-NULL `status` (the table only stores actual reports), so `IGNORE NULLS` skips nothing — the window is a no-op. The LEFT JOIN that comes AFTER then introduces gap rows with `h.status = NULL` AND `h.last_known_status = NULL` (the no-op output is also NULL on the gap side), so `COALESCE(NULL, NULL) = NULL` and the gaps stay empty. **The window MUST run on the POST-JOIN dense rows.** Build the spine, LEFT JOIN, THEN window — the three-step order above is the only correct composition.
 - **Equivalent variant — replacing `COALESCE(status, LAST_VALUE(status) IGNORE NULLS OVER ...)` with bare `LAST_VALUE(status) IGNORE NULLS OVER (...)`** is also correct (the look-BACK frame already returns the current row's value when `status` is non-NULL on that row, per the standalone canonical above). Either form is fine; the `COALESCE` wrapper just makes intent explicit. **DO NOT** wrap with `COALESCE(status, last_known_status)` referencing a CTE column from a pre-join LAST_VALUE attempt — see the previous bullet.
 - **DO NOT compute ANY `LAST_VALUE` / forward-fill window in a PRE-JOIN CTE over the raw facts — and ESPECIALLY NOT with `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` (iter571 PIN).** A full-frame `LAST_VALUE(metric) OVER (PARTITION BY entity_id ORDER BY ts ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)` collapses to the **PARTITION-GLOBAL-LAST value** (a single constant per entity) — verified at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html): `LAST_VALUE` returns the last value of the window frame, and `UNBOUNDED FOLLOWING` extends the frame to the partition's final row, so every row in the partition sees the SAME last value. If you compute that constant in a pre-join CTE and THEN LEFT JOIN the dense spine, EVERY gap row inherits the entity's globally-latest reading — NOT the as-of-bucket value the question actually asks for. **WRONG (pre-join CTE with full-frame `LAST_VALUE`, then LEFT JOIN):** `WITH sparse_logs AS (SELECT server_id, logged_at, cpu_percent, LAST_VALUE(cpu_percent) OVER (PARTITION BY server_id ORDER BY logged_at ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS latest_cpu FROM raw_facts) SELECT g.server_id, g.bucket, COALESCE(s.cpu_percent, s.latest_cpu) AS cpu FROM grid g LEFT JOIN sparse_logs s ON s.server_id = g.server_id AND date_trunc('hour', s.logged_at) = g.bucket` — produces the partition-global-last value for every gap, and ALSO fans out if `sparse_logs` has multiple rows per `(server_id, hour)`. **RIGHT (no pre-join window — collapse to one-row-per-bucket via `max_by`, LEFT JOIN, then forward-fill in the FINAL select over the post-join dense rows):** Steps 2a → 2b → 3 in the recipe above (`max_by(cpu_percent, logged_at) GROUP BY server_id, date_trunc('hour', logged_at)` first → LEFT JOIN onto the spine → final `LAST_VALUE(...) IGNORE NULLS OVER (... ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` in the outer SELECT). The forward-fill window belongs **ONLY** in the final SELECT over the POST-JOIN dense rows — never in a pre-join CTE. The standalone forward-fill canonical above also bans `UNBOUNDED FOLLOWING` for forward-fill (it would be **future-fill**, not forward-fill); the recipe here additionally bans **any** window over raw sparse facts before the spine join, full-frame or otherwise.
