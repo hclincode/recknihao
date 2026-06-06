@@ -758,7 +758,7 @@ ORDER BY c.day;
 
 ### LEADING CANONICAL — forward-fill / carry the last non-null value forward (`LAST_VALUE ... IGNORE NULLS`, look-BACK frame)
 
-> **Keyword anchors (read this section FIRST if your question contains any of these):** forward fill Trino, fill forward, carry forward last non-null, fill NULL gaps with previous value, LAST_VALUE IGNORE NULLS, gap fill values, last observation carried forward, LOCF Trino, fill down, previous non-null per partition, value gap-fill (vs date gap-fill).
+> **Keyword anchors (read this section FIRST if your question contains any of these):** forward fill Trino, fill forward, carry forward last non-null, fill NULL gaps with previous value, LAST_VALUE IGNORE NULLS, gap fill values, last observation carried forward, LOCF Trino, fill down, previous non-null per partition, value gap-fill (vs date gap-fill), sensor reading gap, IoT telemetry NULL between readings, last reported reading per device.
 
 **The fact in one sentence.** To **carry the last non-null value forward** per partition (LOCF / fill-down), use `LAST_VALUE(col) IGNORE NULLS OVER (PARTITION BY id ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` — the `IGNORE NULLS` skips gap rows, and the look-BACK frame ends at the current row so you see the most recent non-null **at or before** the current row.
 
