@@ -577,6 +577,30 @@ SELECT CASE WHEN a IS NULL THEN b WHEN b IS NULL THEN a ELSE greatest(a, b) END 
 
 ---
 
+### LEADING CANONICAL — Postgres `EXTRACT(EPOCH FROM ts)` → Trino `to_unixtime(ts)` (Trino's `EXTRACT` has **NO `EPOCH` field**)
+
+> **READ THIS FIRST if your question contains any of these keywords:** `EXTRACT EPOCH Trino`, `timestamp to epoch seconds Trino`, `to_unixtime`, `Postgres EXTRACT EPOCH equivalent`, `convert timestamp to unix seconds`, `epoch from timestamp Trino`, `seconds since epoch Trino`, `porting Postgres EXTRACT(EPOCH) to Trino`. Verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html) on 2026-06-07.
+
+**The one-fact summary — Postgres's `EXTRACT(EPOCH FROM ts)` does NOT work in Trino; use `to_unixtime(ts)` instead.** PostgreSQL's `EXTRACT(EPOCH FROM ts)` returns seconds-since-epoch (a `double precision` including fractional seconds). **Trino's `EXTRACT` does NOT support an `EPOCH` field** — the only documented fields are `YEAR, QUARTER, MONTH, WEEK, DAY, DAY_OF_MONTH, DAY_OF_WEEK, DOW, DAY_OF_YEAR, DOY, YEAR_OF_WEEK, YOW, HOUR, MINUTE, SECOND, TIMEZONE_HOUR, TIMEZONE_MINUTE`. Writing `EXTRACT(EPOCH FROM ts)` against Trino raises a semantic/parse error. So **"`EXTRACT` works the same across Postgres and Trino"** is **FALSE** — the EPOCH field is a Postgres extension. The Trino-correct form is **`to_unixtime(timestamp) → double`** (verbatim docs signature) — returns epoch SECONDS as a DOUBLE (the fractional part preserves sub-second precision). Inverse: **`from_unixtime(seconds)`** returns `timestamp(3) with time zone`.
+
+```sql
+-- PostgreSQL (works in Postgres; FAILS in Trino):
+SELECT EXTRACT(EPOCH FROM occurred_at) AS epoch_seconds FROM events;
+
+-- Trino-correct equivalent:
+SELECT to_unixtime(occurred_at)              AS epoch_seconds  FROM events;  -- DOUBLE seconds (with fractional)
+SELECT CAST(to_unixtime(occurred_at) AS BIGINT) AS epoch_seconds_bigint FROM events;  -- whole seconds as BIGINT
+SELECT CAST(to_unixtime(occurred_at) * 1000 AS BIGINT) AS epoch_millis FROM events;   -- epoch MILLISECONDS (cross-ref r13)
+```
+
+**"How long ago" / elapsed-time question — prefer `date_diff(unit, a, b)` over subtracting `to_unixtime`.** `date_diff('second', a, b)` returns a `BIGINT` integer directly and is more readable than `to_unixtime(b) - to_unixtime(a)` (which is DOUBLE seconds and forces you to divide for other units). Both are correct.
+
+> **DO NOT WRITE.** (1) **"Trino supports `EXTRACT(EPOCH FROM ts)`"** — FALSE; Trino's `EXTRACT` has NO `EPOCH` field (only YEAR/QUARTER/MONTH/WEEK/DAY/DOW/DOY/HOUR/MINUTE/SECOND/TIMEZONE_*). The statement fails. (2) **"`to_unixtime` returns milliseconds"** — FALSE; `to_unixtime(timestamp) → double` returns **SECONDS** as a DOUBLE per docs. For milliseconds, **multiply by 1000** (`to_unixtime(ts) * 1000`). (3) **"`EXTRACT` works the same on Trino and Postgres"** — FALSE; the `EPOCH` field is a Postgres extension; Trino's standard `EXTRACT` field list omits it. (4) **"`unix_timestamp(ts)` is the Trino function"** — FALSE; `unix_timestamp` is the **Spark/Hive** name. Trino's function is literally **`to_unixtime`**.
+
+**Cross-references.** Inverse direction (epoch → timestamp): [resource 13 §`from_unixtime` SECONDS vs MILLISECONDS — the year-52000 pitfall](13-postgres-to-iceberg-ingestion.md) (epoch-ms canonical with the year-56378 trap if you pass raw ms into `from_unixtime`). Now/current_timestamp + Iceberg timestamptz UTC normalization: [resource 07 §`now()` LEADING CANONICAL](07-analytical-query-patterns.md) and [resource 27 §4.2-NOW](27-oracle-plsql-to-dbt-trino.md). Full Postgres→Trino date/time porting table (covers `EPOCH`, `MICROSECOND`, `EXTRACT(epoch FROM ts)` patterns in CDC ingestion context): [resource 13 §Postgres date-function porting table](13-postgres-to-iceberg-ingestion.md).
+
+---
+
 ## 3.1H. ORDER BY determinism in Trino — TOP-LEVEL is honored (with or without LIMIT); NESTED/redundant is dropped; ties need a tiebreaker
 
 ### LEADING CANONICAL — ORDER BY determinism in Trino — TOP-LEVEL is honored (with or without LIMIT); NESTED/redundant is dropped; ties need a tiebreaker
@@ -674,6 +698,18 @@ GROUP BY user_id;
 | `EXPLAIN ANALYZE VERBOSE` | YES | Same as above + low-level per-driver distributions (CPU, scheduled time, p50/p99). Trino-internals oriented. |
 
 **`EXPLAIN ANALYZE` is the right tool for verifying optimizations actually worked.** Plain `EXPLAIN` shows the planner's *estimated* costs; `EXPLAIN ANALYZE` runs the query and reports **actual bytes read, actual row counts per stage, and real wall time**. When you rewrite `COUNT(DISTINCT)` to `approx_distinct`, or swap a raw scan for a rollup/sketch table, run both versions with `EXPLAIN ANALYZE` and compare the `Physical input` bytes — that's the ground-truth proof that you reduced I/O. Estimates can be wrong; actuals from `EXPLAIN ANALYZE` cannot.
+
+**The EXACT per-operator field labels Trino 467 prints (memorize these — these are the strings you grep for in the output, verified at [trino.io/docs/467/sql/explain-analyze.html](https://trino.io/docs/467/sql/explain-analyze.html)):** **`CPU`** (operator CPU time), **`Scheduled`** (wall-clock scheduled time), **`Blocked`** (time blocked on input/output), **`Input`** (rows + data size received — printed as `Input: <N> rows (<X>B)`), **`Output`** (rows + data size produced), **`Estimates`** (planner-predicted rows/CPU/memory/network — compare these to the actuals!), plus the per-driver distribution fields **`Input avg.`** (mean input per driver) and **`Input std.dev.`** (standard deviation **as a percentage of mean — this is the DATA-SKEW indicator**: a high `std.dev.` % across drivers/workers means ONE worker is doing most of the work while the others sit idle). `EXPLAIN ANALYZE VERBOSE` additionally prints `CPU time distribution (s)`, `Input rows distribution`, `Scheduled time distribution (s)` with percentile fields `count`, `p01`, `p05`, `p50`, `p99`, `min`, `max`.
+
+**5-row red-flag cheat-sheet — what to look for in `EXPLAIN ANALYZE` output:**
+
+| Red flag in EXPLAIN ANALYZE | What it means | Fix |
+|---|---|---|
+| **`Input` physical bytes >> what your partition predicate should allow** | Predicate pushdown FAILED — you wrapped the partition column in a function (`date(event_date) = ...`) OR you have a type mismatch. Trino scanned everything and filtered in memory. | Use the bare partition column: `event_date = DATE '2026-06-01'`. See §6 below. |
+| **`CorrelatedJoin` node in the plan** | Trino's `Decorrelate Subqueries` rule bailed out — the correlated subquery runs **once per outer row** (O(N×M)). | ANALYZE the inner table; if `CorrelatedJoin` persists, manually rewrite the correlated subquery as a JOIN or `SemiJoin`-friendly `IN`. See §10 below. |
+| **`Input` rows >> `Output` rows** (e.g., `ScanFilterProject` reads 1B rows and emits 5M) | Filter-after-scan — the predicate did not push into the connector; Trino read everything and dropped 99.5% post-scan. | Same fix as row 1 (drop function wrappers, fix type, use partition column). Also check `filterPredicate = ...` vs `constraint on [...]` in plain EXPLAIN. |
+| **High per-operator `Input std.dev.` % (e.g., 80%, 200%, "stddev across drivers" big)** | **DATA SKEW.** One driver/worker is processing far more rows than the others — typical with a hot join key (e.g., one giant tenant). The skewed stage is the bottleneck. | **Salt** the hot key on the join (`ON a.key = b.key AND a.salt = b.salt` with random salt buckets), or rebalance the partition column. Also check if the build side was inverted (run `ANALYZE` on both join sides). |
+| **Many `RemoteExchange[REPARTITION]` nodes for the same CTE** | Trino **INLINES** CTEs at planning time — a CTE referenced N times runs N times (and shuffles N times). | **Materialize** the CTE to a real Iceberg table, dbt model, or use `INSERT INTO <temp_table>` once. See §1b `WITH` / CTE semantics in resource 07. |
 
 ---
 

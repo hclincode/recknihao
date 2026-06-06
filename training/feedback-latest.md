@@ -1,135 +1,136 @@
-# Iter 561 — Judge feedback (2026-06-07)
+# Iter 562 — Judge feedback (2026-06-07)
 
-**OVERALL: 4.9375 STRONG PASS** (margin +1.4375 above 3.5 floor; +0.34375 swing from iter560's 4.59375 — iter560 Q3 CROSS-ENGINE SLIP FIX VALIDATED on first re-probe). All 4 answers ≥ 4.75; Q1 + Q2 + Q4 perfect 5.00; Q3 (EXPLAIN ANALYZE) 4.75 with minor terminology nit.
+**OVERALL: 4.59375 PASS** (margin +1.09375 above 3.5 floor; -0.34375 swing from iter561's 4.9375 STRONG PASS — Q2 EXPLAIN ANALYZE skew drags 3.375 on placement-miss + fabricated absence; Q1 + Q3 + Q4 all perfect 5.00).
 
-**HEADLINE**: iter561 teacher's FIX A (r23 §3.1 greatest/least cross-engine LEADING CANONICAL inserted between §3.1G and §3.1H) ROUTED ON FIRST RE-PROBE. Responder now correctly says Trino + Oracle + MySQL + BigQuery propagate NULL on any null arg while PostgreSQL ignores NULLs (Postgres is the outlier), AND prescribes the correct COALESCE-EACH-arg fix (not outer COALESCE). Cited r23 §3.1 greatest/least canonical. The iter560 cross-engine OVERSTATEMENT ("all engines same") is fully closed.
-
-**Calibration win**: responder correctly distinguishes a case where engines DIFFER (Q1 greatest/least) from a case where they MATCH (Q4 INTERSECT/EXCEPT both dedupe by default). No reflexive "all engines differ" or "all engines same" pattern — answers route to the actual cross-engine truth.
+Federation NOT probed — federation rubric row 4.49944/310 UNCHANGED.
 
 ---
 
-## Q1 — Postgres GREATEST ignores NULL but Trino returns NULL — do they differ? (PRIMARY WIN CHECK)
+## Per-Question Scores
 
-**Scores**: Accuracy 5.0 / Completeness 5.0 / Clarity 5.0 / Actionability 5.0 = **5.00 STRONG PASS — iter560 CROSS-ENGINE SLIP FIXED**
+### Q1 — Postgres EXTRACT(EPOCH FROM order_ts) → Trino equivalent (iter562 r23 EXTRACT-EPOCH canonical WIN CHECK)
 
-**Responder said**: YES, real difference: Postgres GREATEST/LEAST IGNORES NULLs; Trino (+ Oracle, MySQL, BigQuery) returns NULL if ANY arg is NULL. `GREATEST(1, NULL, 5)` = 5 in Postgres, NULL in Trino. Fix = COALESCE EACH arg: `greatest(coalesce(a, 0), coalesce(b, 0))` (or two-arg CASE passthrough); explicitly DO NOT use outer `COALESCE(GREATEST(...), 0)` because that only fires when ALL args are NULL. Cited r23 §3.1 greatest/least canonical.
+**Scores: 5.0 / 5.0 / 5.0 / 5.0 = 5.00 STRONG PASS**
 
-**Verification**:
-- trino.io/docs/467/functions/comparison.html VERBATIM: "Like most other functions in Trino, they return null if any argument is null. Note that in some other databases, such as PostgreSQL, they only return null if all arguments are null."
-- postgresql.org/docs/current/functions-conditional.html VERBATIM: "NULL values in the argument list are ignored. The result will be NULL only if all the expressions evaluate to NULL. (This is a deviation from the SQL standard. According to the standard, the return value is NULL if any argument is NULL. Some other databases behave this way.)"
+Responder: `to_unixtime(order_ts)` returns DOUBLE seconds-since-epoch; CAST to BIGINT for whole seconds; `from_unixtime()` inverse. Note responder attributed answer to "to_unixtime is a standard Trino function (verified in resources as working)" — gave the correct answer but didn't explicitly cite the iter562-new r23 EXTRACT-EPOCH LEADING CANONICAL.
 
-Responder's answer maps 1:1 to both docs. Postgres-as-outlier framing matches the locked r27 §4.4D + new r23 §3.1 mirror canonical. The COALESCE-each-arg-vs-outer-COALESCE trap is correctly flagged — this is the load-bearing fix that the iter560 slip missed. Cross-engine slip is CORRECTED.
+**Verbatim verification at trino.io/docs/467/functions/datetime.html:**
+- `to_unixtime(_timestamp_) → double` — "Returns `timestamp` as a UNIX timestamp."
+- EXTRACT supported fields: `YEAR, QUARTER, MONTH, WEEK, DAY, DAY_OF_MONTH, DAY_OF_WEEK, DOW, DAY_OF_YEAR, DOY, YEAR_OF_WEEK, YOW, HOUR, MINUTE, SECOND, TIMEZONE_HOUR, TIMEZONE_MINUTE` — **EPOCH is NOT in the supported field list**.
 
----
+Answer maps 1:1 to docs. Inverse function name + signature correct. CAST guidance correct (DOUBLE → BIGINT for whole seconds; × 1000 → BIGINT for milliseconds is implied by the canonical, not stated, but acceptable). Per directive: "The ANSWER is correct regardless of citation — score on correctness." Answer is correct on every numeric.
 
-## Q2 — AVG/SUM on empty result set — NULL or zero in Trino vs Postgres?
-
-**Scores**: Accuracy 5.0 / Completeness 5.0 / Clarity 5.0 / Actionability 5.0 = **5.00 STRONG PASS**
-
-**Responder said**: Trino matches Postgres — AVG/SUM/aggregates on zero rows return NULL (not 0, not error). Use `COALESCE(AVG(amount), 0)` for a zero default.
-
-**Verification**:
-- trino.io/docs/467/functions/aggregate.html VERBATIM: "Except for `count()`, `count_if()`, `max_by()`, `min_by()` and `approx_distinct()`, all of these aggregate functions ignore null values and return null for no input rows or when all values are null." SUM specifically "returns null rather than zero" on empty input.
-- Postgres SQL standard parity confirmed.
-
-Calibration win: correctly identifies this as a case where Trino and Postgres MATCH (contrast with Q1 where they DIFFER). Minor polish opportunity (NOT counted against): could explicitly call out the COUNT(*) = 0 exception (named in Trino docs), but the responder's framing is precise enough that "aggregates return NULL" doesn't bleed into a wrong "COUNT returns NULL" claim. COALESCE workaround is the actionable fix.
+**iter562 FIX B VALIDATED** — Postgres EXTRACT(EPOCH FROM ts) → Trino to_unixtime cross-engine canonical added to r23 between greatest/least canonical and §3.1H routed cleanly on first re-probe.
 
 ---
 
-## Q3 — Reading EXPLAIN ANALYZE — what red flags indicate slowness?
+### Q2 — EXPLAIN ANALYZE skew diagnosis (iter562 r23 §4 Input std.dev. skew indicator WIN CHECK + PLACEMENT-MISS DIAGNOSIS)
 
-**Scores**: Accuracy 4.5 / Completeness 5.0 / Clarity 5.0 / Actionability 4.5 = **4.75 STRONG PASS**
+**Scores: 3.5 / 3.0 / 3.5 / 3.5 = 3.375 THIN FAIL on this question alone (overall-average still PASS)**
 
-**Responder said**: Red flags = (a) Input bytes huge vs partition predicate (pushdown failed; e.g., naked partition col under a function); (b) CorrelatedJoin O(N×M) (rewrite correlated subquery as JOIN); (c) Input rows >> output rows (filter applied after scan, not pushed); (d) many `RemoteExchange[REPARTITION]` shuffles (CTE re-eval — use materialized). EXPLAIN ANALYZE shows ACTUAL Input bytes (vs EXPLAIN's estimate).
+Responder: "look at Scheduled time spread across workers / CPU vs Scheduled time; big wall-time spread in same operator = data skew; fix by partition-align GROUP BY / re-partition at ingest / sorted_by / pre-aggregate hot tenant." Cited r18 (query-performance-regression). EXPLICITLY said "The resources don't provide a detailed worked example of skew diagnosis."
 
-**Verification**:
-- trino.io/docs/467/sql/explain-analyze.html confirms EXPLAIN ANALYZE "executes a statement and displays the distributed execution plan of the statement along with the cost of each operation" — Input/Output row counts and data sizes per operator, CPU time, scheduled/blocked time, plus high standard-deviation % flags data skew. All 4 red flags map to real metrics in the output.
-- CorrelatedJoin operator is a Trino plan node (correctly named).
-- `RemoteExchange[REPARTITION]` is the correct Trino plan node literal.
+**Verbatim verification at trino.io/docs/467/sql/explain-analyze.html:**
+- Per-operator distribution fields literally printed: `"Input avg.: 1000.00 rows, Input std.dev.: 0.00"`
+- Skew-as-purpose framing: `"Such statistics are useful when one wants to detect data anomalies for a query (e.g: skewness)."`
 
-Minor accuracy nit (-0.5): the metric name on the operator line is typically `physicalInputDataSize` (or `Input: X rows / Y bytes` in textual format) rather than "Input bytes" as a standalone label — both readers can find it, but pinning the exact field name would be tighter. Could also mention the high stddev% skew indicator that the docs explicitly call out. Actionability -0.5: prescription is right (rewrite correlated → JOIN, MATERIALIZED CTE) but does not name the specific session property (`session set materialized_view_for_cte` is not it — `enable-large-dynamic-filters` / CTE materialization config is connector-specific). Diagnostics are sound and the engineer knows what to look for.
+**Diagnosis (per directive):**
 
----
+1. **Directional guidance is SOUND** — "look at wall-time / CPU vs Scheduled spread across workers" maps to the right concept (per-driver/operator variance is the skew tell); fixes named (salt the join key, re-partition at ingest, sorted_by, pre-aggregate hot tenant) are real Trino remediations.
+2. **Did NOT name the precise Trino 467 field** — `Input avg.` / `Input std.dev.` per-driver fields that iter562 FIX A added to r23 §4 (L706 5-row red-flag cheat-sheet with `"High per-operator Input std.dev. % → DATA SKEW. Salt the hot key..."`). Loose terminology — Accuracy -1.5, Completeness -2.0.
+3. **CRITICAL — FABRICATED ABSENCE**. Responder said "The resources don't provide a detailed worked example of skew diagnosis." VERIFIED FALSE:
+   - **r18 §5** (`/Users/hclin/github/recknihao/resources/18-query-performance-regression.md` L944-1055) contains a full worked GROUP BY skew diagnosis using `EXPLAIN ANALYZE VERBOSE`, per-driver `inputRows` min/p50/max read pattern, telltale-signs table, AND four concrete fixes (two-level salt GROUP BY at L990 is the primary fix).
+   - **r23 §4** just received the iter562 FIX A 5-row red-flag cheat-sheet table that names `Input std.dev. %` by exact label.
+   The "resources don't provide" disclaimer is exactly the FABRICATED-ABSENCE failure mode the meta-rule names.
 
-## Q4 — INTERSECT/EXCEPT in Trino vs Postgres — same or gotchas?
+**PLACEMENT-MISS DIAGNOSIS (per directive):**
 
-**Scores**: Accuracy 5.0 / Completeness 5.0 / Clarity 5.0 / Actionability 5.0 = **5.00 STRONG PASS**
+This is a layer-3 PLACEMENT MISS. The iter562 FIX A `Input std.dev.` skew indicator landed in **r23 §4 (SQL best practices — EXPLAIN ANALYZE field-name tightening)**, but the question "EXPLAIN ANALYZE one stage slow + big spread between workers + read it for data skew + fix" routes to **r18 (query-performance-regression — Step 3 / Step 5)** or **r24 (CBO / EXPLAIN-DISTRIBUTED)**.
 
-**Responder said**: INTERSECT/EXCEPT work like Postgres but ALWAYS DEDUPE by default; INTERSECT ≈ semi-join (rows in both), EXCEPT ≈ anti-join (in A not B); EXCEPT ALL keeps duplicates (matched-pair semantics); type alignment across branches required (same as UNION).
+GREP confirms (`grep -rn "Input std.dev|Input avg|skew|stddev|EXPLAIN ANALYZE" resources/{23,18,24}*.md`):
+- r23 §4 L711 has the new `Input std.dev. %` skew-indicator row (iter562 FIX A).
+- r18 §5 has older `EXPLAIN ANALYZE VERBOSE` per-driver `inputRows` min/p50/max content but NOT the new `Input std.dev.` exact-field-name canonical.
+- r24 mentions skew in CBO context (L152, L391, L524) but no EXPLAIN ANALYZE field-name canonical.
 
-**Verification**:
-- trino.io/docs/467/sql/select.html VERBATIM: "If the argument `ALL` is specified all rows are included even if the rows are identical. If the argument `DISTINCT` is specified only unique rows are included in the combined result set. If neither is specified, the behavior defaults to `DISTINCT`."
-- postgresql.org/docs/current/queries-union.html VERBATIM: "Duplicate rows are eliminated unless `INTERSECT ALL` is used" and "duplicates are eliminated unless `EXCEPT ALL` is used."
-- INTERSECT ALL / EXCEPT ALL both supported in Trino 467 and Postgres — confirmed.
-- Type-coercion rule (same as UNION) is correct.
+The responder went to r18 (correct routing instinct) but only surfaced the older Step-3 / Step-5 content that uses VERBOSE per-driver `inputRows` min/p50/max — never reached the iter562 r23 §4 cheat-sheet that names `Input std.dev.` by exact Trino 467 label, because §4 "best-practices" isn't where a "slow query / EXPLAIN ANALYZE / data skew" question keyword-routes.
 
-Calibration win: correctly identifies this as a case where Trino MATCHES Postgres (contrast with Q1). Semi-join/anti-join framing is accurate and useful for engineers thinking in JOIN terms.
+**iter563 FIX (layer-3 re-home / cross-ref):**
+- **HIGH** — cross-ref or mirror the r23 §4 5-row red-flag cheat-sheet (especially the `Input std.dev. %` row + the salt-hot-key fix) into **r18 §5** ("Detecting GROUP BY skew with EXPLAIN ANALYZE VERBOSE", L965-986) AND **r24** (CBO / EXPLAIN canonical), so a "slow query + EXPLAIN ANALYZE + skew" routing lands on the precise Trino 467 field label.
+- **HIGH** — add an explicit nav-hint at the top of r18 §5 like "WORKED EXAMPLE OF SKEW DIAGNOSIS HERE — Trino 467 EXPLAIN ANALYZE field `Input std.dev.` is the skew tell" so Haiku's keyword scan picks it up and stops fabricating an "absence."
 
----
-
-## Topic avg updates (this iter)
-
-- **SQL query best practices for OLAP** (Q1 greatest/least cross-engine — r23 §3.1 new canonical; Q4 INTERSECT/EXCEPT — r23 set-ops): 4.4525/141 → +Q1 5.00 → (4.4525·141 + 5.00)/142 = 632.81/142 = 4.4564/142 → +Q4 5.00 → (4.4564·142 + 5.00)/143 = 637.81/143 = **4.4602/143** (+0.0077 net)
-- **Analytical query patterns on Iceberg+Trino** (Q2 empty-aggregate semantics — r07/r23 contextual): 4.3729/24 → (4.3729·24 + 5.00)/25 = **4.3980/25** (+0.0251)
-- **Query performance regression diagnosis** (Q3 EXPLAIN ANALYZE red flags — r24 EXPLAIN canonical): 4.3510/17 → (4.3510·17 + 4.75)/18 = **4.3732/18** (+0.0222)
-- **Federation row**: 4.49944/310 UNCHANGED (federation not probed; per directive — no edits to resources/22 §13.x or the federation rubric row)
+Sound directionally; loose on the precise field name; FABRICATED ABSENCE on resource coverage. Polish-and-cross-ref fix, not a deep gap.
 
 ---
 
-## Primary wins
+### Q3 — COUNT(DISTINCT user_id) on 500M rows → approx_distinct, accuracy, tuning
 
-1. **Q1 — iter560 CROSS-ENGINE SLIP FULLY FIXED on first re-probe**. r23 §3.1 greatest/least cross-engine LEADING CANONICAL ROUTED. Responder cites r23, names Postgres as outlier, prescribes COALESCE-EACH-arg (not outer COALESCE). r27 §4.4D deep canonical untouched and still serves Oracle-migration framing; r23 mirror serves cross-engine-parity framing — clean two-canonical split.
-2. **Q4 calibration win** — responder correctly says engines MATCH for INTERSECT/EXCEPT after correctly saying engines DIFFER for greatest/least. No reflexive "always same" or "always different" pattern.
-3. **Q2** — responder distinguishes Trino/Postgres parity (NULL on empty aggregate) from the COUNT exception implicitly via "AVG/SUM/aggregates" wording. No fabricated absences.
-4. **Zero new slips, zero dialect errors, zero fabrications, zero overstatements.** Compared to iter560 Q3 ("all engines same"), iter561 Q1 is now precisely calibrated — both the Postgres deviation AND the Trino/Oracle/MySQL/BigQuery agreement are stated.
+**Scores: 5.0 / 5.0 / 5.0 / 5.0 = 5.00 STRONG PASS**
 
----
+Responder: `approx_distinct(user_id)` ~2.3% RSD (68% within ±2.3%, 95% ±4.6%); tunable via second param `approx_distinct(user_id, 0.01)` ~1%; valid range `[0.0040625, 0.26000]`; exact COUNT(DISTINCT) for billing; HLL sketch merge for rolling windows. Cited r23.
 
-## Primary minor finding (Q3 — 4.75)
+**Verbatim verification at trino.io/docs/467/functions/aggregate.html:**
+- `approx_distinct(x) → bigint` and `approx_distinct(x, e) → bigint` — both signatures present.
+- `"This function should produce a standard error of 2.3%, which is the standard deviation of the (approximately normal) error distribution over all possible sets."`
+- `"The current implementation of this function requires that e be in the range of [0.0040625, 0.26000]."`
 
-EXPLAIN ANALYZE answer is solid diagnostics-wise but slightly loose on Trino-specific metric names:
-- Could pin "Input: X rows / Y bytes" or `physicalInputDataSize` as the exact field name on the operator line.
-- Could name the **high standard-deviation %** skew indicator that trino.io/docs/467/sql/explain-analyze.html explicitly calls out (e.g., "793.73%" in the doc example) — this is the canonical skew red flag.
-- The "many RemoteExchange[REPARTITION] shuffles → CTE re-eval, use materialized" prescription is right in spirit but Trino's CTE materialization is connector-/session-config dependent (not a single-keyword SQL hint); the responder should cite r24 §EXPLAIN or the `join-distribution-type` / dynamic-filtering config knobs by exact name.
-
-Not a fail vector — diagnostics are sound and the engineer knows what to look for. Polish-only.
+All three numerics (2.3% RSD default, [0.0040625, 0.26000] range, second-param tuning signature) match docs **verbatim**. 68/95 confidence framing for normal distribution is mathematically correct. Exact-for-billing carve-out + HLL sketch merge for rolling-window is the right additional context for a SaaS engineer.
 
 ---
 
-## iter562 next-teacher actions (polish iter — all 4 strong)
+### Q4 — LENGTH in Trino: characters or bytes? multi-byte (emoji/accents)?
 
-**Priority HIGH — Q3 EXPLAIN ANALYZE polish on r24**:
-- Add to r24 §EXPLAIN ANALYZE: the high-stddev% skew indicator (named verbatim from docs: "standard deviation"), the exact metric field names (`Input:`, `physicalInputDataSize`, `CPU:`), and a 5-row red-flag cheat-sheet (Input rows >> output → filter pushdown miss; Input bytes huge vs partition predicate → pushdown failed; CorrelatedJoin → rewrite to JOIN; many `RemoteExchange[REPARTITION]` → re-eval/skew; high stddev% on a fragment → skew).
-- Pin CTE materialization config knob by exact name (session property or table property) rather than "use materialized" hand-wave.
+**Scores: 5.0 / 5.0 / 5.0 / 5.0 = 5.00 STRONG PASS**
 
-**Priority MEDIUM — durability re-probes for iter561 fixes**:
-- Q1 cross-engine 2nd-angle re-probe: ask the cross-engine question without naming Postgres (e.g., "porting from MySQL/Snowflake to Trino — any greatest/least surprise?") to confirm r23 §3.1 routes cleanly without the Postgres keyword anchor.
-- Q4 INTERSECT/EXCEPT re-probe from a 2nd angle (e.g., "I added INTERSECT ALL and dup counts changed — why?") to confirm the dedupe-vs-ALL distinction is durable.
+Responder: `LENGTH(string)` counts CHARACTERS (Unicode code points), not bytes; matches Postgres; `LENGTH('café')=4`, `LENGTH('👋')=1`; byte length via `OCTET_LENGTH` or `LENGTH(CAST(s AS VARBINARY))`. Cited "standard ANSI".
 
-**Priority MEDIUM — proactive cross-engine-parity audit (continue iter561 discipline)**:
-- Walk the cross-engine-trap candidates already audited in iter561's clean log: `||` NULL propagation (Trino+Postgres+MySQL agree; Oracle quirk in r27 L31), divide-by-zero (covered by r27 §4.4E try()), empty-group aggregates (covered, just probed here in Q2), `bool_and`/`bool_or` empty-set (low probe).
-- Add candidates: `string_agg` (Postgres) vs `listagg` (Trino) vs `array_agg + array_join` — cross-engine porting trap.
-- `EXTRACT(epoch FROM ...)` (Postgres) vs `to_unixtime(...)` (Trino) — cross-engine porting trap.
+**Verbatim verification at trino.io/docs/467/functions/string.html:**
+- `length(string) → bigint` — **"Returns the length of string in characters."**
 
-**Priority LOW — DO NOT TOUCH**:
-- DO NOT bump training/state.json (teacher already set iteration=561). Done.
-- DO NOT edit resources/22 §13.x (federation lock).
-- DO NOT churn r23 §3.1H or r07 §1a.5 (both durable across 3+ angles).
-- Federation rubric row stays 4.49944/310.
-
-**Meta-rule observation**: directive's "verify YOUR OWN corrections + PIN TRINO 467 + watch for OVERSTATEMENTS + FABRICATED ABSENCES + CROSS-ENGINE SLIPS" caveat — applied. WebSearched trino.io/docs/467/functions/comparison.html (greatest/least + Postgres contrast VERBATIM match), postgresql.org/docs/current/functions-conditional.html (NULLs ignored VERBATIM match), trino.io/docs/467/sql/select.html (INTERSECT/EXCEPT default DISTINCT VERBATIM match), postgresql.org/docs/current/queries-union.html (Postgres dedupe-by-default VERBATIM match), trino.io/docs/467/sql/explain-analyze.html (operator metrics + stddev skew). Every responder claim verified against primary source. 24th consecutive iter (iter537–561) where the meta-rule discipline prevented a false-positive judgment OR confirmed a real fix landed clean.
-
-**NOTES**: did NOT bump training/state.json (teacher already set iteration=561). Federation rubric row 4.49944/310 unchanged. Did NOT touch resources/22 §13.x. Single score line appended to training/rubric.md history.
+CHARACTERS not bytes — verbatim correct. Postgres parity claim correct (Postgres `LENGTH(text)` also returns characters; `OCTET_LENGTH` for bytes — both standard ANSI). Worked examples: `LENGTH('café')` = 4 (c-a-f-é as 4 code points, correct); `LENGTH('👋')` = 1 (single emoji is one code point in Unicode, correct). `OCTET_LENGTH` is valid in Trino. `LENGTH(CAST(s AS VARBINARY))` byte-count workaround is standard and works.
 
 ---
 
-## Final score summary
+## Overall Tally
 
-| Q | Topic | Acc | Comp | Clar | Act | Avg |
-|---|---|---|---|---|---|---|
-| Q1 | Postgres GREATEST/LEAST NULL → Trino (CROSS-ENGINE WIN CHECK) | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** |
-| Q2 | AVG/SUM empty result NULL (Trino=Postgres match) | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** |
-| Q3 | EXPLAIN ANALYZE red flags | 4.5 | 5.0 | 5.0 | 4.5 | **4.75** |
-| Q4 | INTERSECT/EXCEPT Trino vs Postgres (match — both dedupe) | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** |
+| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|---|
+| Q1 (EXTRACT EPOCH → to_unixtime) | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** |
+| Q2 (EXPLAIN ANALYZE skew) | 3.5 | 3.0 | 3.5 | 3.5 | **3.375** |
+| Q3 (approx_distinct) | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** |
+| Q4 (LENGTH chars vs bytes) | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** |
 
-**OVERALL AVG = (5.00 + 5.00 + 4.75 + 5.00) / 4 = 19.75 / 4 = 4.9375 STRONG PASS**
+**OVERALL AVERAGE = (5.00 + 3.375 + 5.00 + 5.00) / 4 = 18.375 / 4 = 4.59375 PASS** (margin +1.09375 above 3.5 floor).
+
+---
+
+## Confirmations
+
+- **Q1 CONFIRMED** — iter562 FIX B (Postgres EXTRACT(EPOCH FROM ts) → Trino to_unixtime cross-engine canonical added to r23 between greatest/least canonical and §3.1H) routed on first re-probe; answer matches Trino 467 docs verbatim on every numeric.
+- **Q3 CONFIRMED** — approx_distinct deep canonical at r23 strong; all three numerics (2.3% default RSD, [0.0040625, 0.26000] range, second-param tuning signature) match Trino 467 docs verbatim.
+- **Q4 CONFIRMED** — LENGTH characters-not-bytes verified; OCTET_LENGTH + VARBINARY-CAST byte workarounds valid.
+
+## Q2 Placement-Miss Diagnosis (iter563 fix target)
+
+- **PLACEMENT MISS** — iter562 FIX A `Input std.dev.` skew-indicator cheat-sheet landed at r23 §4 (SQL best-practices, after the locked EXPLAIN-variants table at L676), but a "slow query + EXPLAIN ANALYZE + skew" question routes to r18 (query-perf-regression) or r24 (CBO/EXPLAIN). Responder routed to r18 (correct instinct), but only found the older Step-3 / Step-5 VERBOSE per-driver `inputRows` content — never reached the new r23 §4 cheat-sheet that names `Input std.dev.` by exact Trino 467 field label.
+- **FABRICATED ABSENCE** — responder said "resources don't provide a detailed worked example of skew diagnosis." VERIFIED FALSE: r18 §5 L944-1055 has a full worked example with two-level salt GROUP BY fix at L990, and r23 §4 has the iter562 5-row red-flag cheat-sheet.
+- **iter563 FIX (PRIMARY)**:
+  - HIGH (layer-3 re-home / cross-ref) — mirror or cross-ref the r23 §4 5-row red-flag cheat-sheet (the `Input std.dev. %` skew row in particular) into r18 §5 ("Detecting GROUP BY skew with EXPLAIN ANALYZE VERBOSE") and r24 (CBO/EXPLAIN canonical), so a "slow query + EXPLAIN ANALYZE + skew" routing lands on the exact Trino 467 field label.
+  - HIGH (responder-facing nav-hint at r18 §5 top) — add an explicit anchor line like "WORKED EXAMPLE OF SKEW DIAGNOSIS HERE — Trino 467 EXPLAIN ANALYZE field `Input std.dev.` is the skew tell; salt the hot key" so Haiku's keyword scan stops fabricating an "absence."
+
+## Other Slips Flagged
+
+- None. Q1 / Q3 / Q4 all clean; Q2 is the only finding.
+
+## Meta-rule Discipline
+
+- WebSearch-verified all four against trino.io/docs/467/ pages (datetime, explain-analyze, aggregate, string). Every responder claim either confirmed or precisely flagged. Meta-rule's "FABRICATED ABSENCES" caveat was decisive on Q2 — verified false against r18 §5 (worked salt-GROUP-BY example) + r23 §4 (iter562 FIX A cheat-sheet). 25th consecutive iter (iter537-562) where meta-rule discipline prevented a false-positive AND surfaced the layer-3 placement miss.
+
+## Notes
+
+- Did NOT bump training/state.json (teacher already set iteration=562).
+- Did NOT touch resources/22 §13.x.
+- Federation rubric row 4.49944/310 UNCHANGED.
+- iter562 FIX B (EXTRACT(EPOCH) → to_unixtime canonical at r23) VALIDATED on first re-probe via Q1.
+- iter562 FIX A (`Input std.dev.` skew indicator at r23 §4) NEEDS LAYER-3 RE-HOME / CROSS-REF to r18 §5 + r24 — iter563 primary fix target.
+
+**OVERALL: 4.59375 PASS — Q1 (iter562 EXTRACT-EPOCH r23 canonical) + Q3 (approx_distinct) + Q4 (LENGTH chars) all STRONG WINS at 5.00; Q2 3.375 thin fail on this question alone (placement miss + fabricated absence) but overall-average rule holds PASS. iter563 fix = layer-3 re-home / cross-ref of `Input std.dev.` skew indicator into r18 §5 + r24 + responder-facing nav-hint at r18 §5 top to prevent fabricated-absence pattern on re-probe.**
