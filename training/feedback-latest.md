@@ -1,229 +1,138 @@
-# Iter 578 Judge Feedback — 2026-06-07 (EXTENDED PHASE)
+# Iter 579 Judge Feedback — 2026-06-07 (EXTENDED PHASE)
 
-## Verdict: 3.9375 PASS overall (margin +0.4375 above 3.5 floor)
+## Verdict: 5.00 STRONG PASS overall (margin +1.50 above 3.5 floor; +1.0625 swing from iter578's 3.9375)
 
-Q1 1.25 hard FAIL (recurring interval-overlap miss); Q2 5.00 STRONG PASS (FIX B routed); Q3 5.00 STRONG PASS; Q4 4.50 STRONG PASS. Overall avg = (1.25 + 5.00 + 5.00 + 4.50)/4 = 15.75/4 = **3.9375 PASS**.
+Q1 5.00 STRONG PASS (interval-overlap THIRD attempt RESOLVED — landing-point signpost ROUTED); Q2 5.00 STRONG PASS (point-event discrimination CLEAN, no over-correction); Q3 5.00 STRONG PASS (AVG OVER () empty window docs-verbatim correct); Q4 5.00 STRONG PASS (TRY_CAST + try() docs-verbatim correct). Overall avg = (5.00 + 5.00 + 5.00 + 5.00)/4 = 20.00/4 = **5.00 STRONG PASS**.
 
-**HEADLINE**: FIX A (r07 §4 interval-overlap H3 anchor expansion + reservations worked variant + DO-NOT-WRITE buried in the existing H3) FAILED to route — Q1 recurred the EXACT iter577 semantic defect (start-day GROUP BY instead of interval-overlap range join). FIX B (NEW LEADING CANONICAL H2 in r28 for dbt generic data tests) WORKED — Q2 routed cleanly with correct schema.yml, default severity:error, dbt build skip-downstream, and accurate compiled-SQL shape. The lesson: **placement matters more than content**. A correct anchor BURIED inside an H3 the responder doesn't open is invisible; a NEW H2 at the level where fresh questions LAND is visible. iter579 PRIMARY FIX = move the interval-overlap steering to where the responder ACTUALLY LANDS for "every day shown" / "zero-fill" / "calendar" / "date spine" questions — that means a ROUTING SIGNPOST at the date-spine / gap-fill entry point (NOT inside the interval-overlap H3).
+**Headline**: iter579 FIX A — relocating the interval-overlap routing signpost from inside r07 §4 H3 to the TOP of the gap-fill H2 landing point in r07 §1a area — **WORKED**. The 2-iteration recurring FAIL on the start-day-GROUP-BY interval-overlap miss (iter577 reservations FAIL + iter578 desks FAIL) is **RESOLVED ON THE THIRD ATTEMPT**. The meta-rule about findability-fix placement at the responder's landing-point H2 (NOT buried inside topical H3 the responder doesn't open) is now empirically validated on a second controlled test (after iter578's dbt-generic-tests landing-point H2 win).
 
 ---
 
-## Q1 — Co-working desks occupied per day, end_date NULL, include zero-days (PRIMARY iter578 FIX A re-probe) — 1.0/1.0/2.0/1.0 = **1.25 hard FAIL**
+## Per-question scoring
 
-### The recurring semantic defect
+### Q1 (interval-overlap THIRD attempt — the headline durability probe)
+**Score: 5.0 / 5.0 / 5.0 / 5.0 = 5.00 STRONG PASS**
 
-The responder wrote:
+Question: subscriptions active per day last 30 days, NULL cancel_date = still active, zero-fill empty days.
+
+Responder's SQL:
 ```sql
-bookings_by_day AS (
-  SELECT CAST(start_date AS DATE) AS day, COUNT(DISTINCT desk_id) AS occupied_desks
-  FROM your_bookings_table
-  WHERE start_date <= current_date AND (end_date IS NULL OR end_date >= DATE_TRUNC('month', current_date) - INTERVAL '1' MONTH)
-  GROUP BY CAST(start_date AS DATE)
-)
-```
-
-This **GROUP BY `CAST(start_date AS DATE)`** credits each booking ONLY on its `start_date`. A desk booked May 1 → May 20 contributes ONLY to May 1; May 2–19 show 0 (or whatever other bookings started those days). This is the **exact same** interval-overlap miss as iter577 Q1 — wrong question answered: "desks that STARTED a booking on day d" not "desks that were ACTIVE on day d."
-
-The WHERE-clause overlap filter (`start_date <= current_date AND (end_date IS NULL OR end_date >= last-month-start)`) is correctly written for the bookings overlapping the window — proving the responder PARTIALLY grasped overlap at the row-filter level — but then mis-attributed each overlapping booking to its start day only.
-
-### The correct query
-
-```sql
-WITH calendar AS (
-  SELECT day
-  FROM UNNEST(sequence(
-    DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1' MONTH),
-    DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '1' DAY,
-    INTERVAL '1' DAY
-  )) AS t(day)
-)
-SELECT
-  c.day,
-  COUNT(DISTINCT b.desk_id) AS desks_occupied
+WITH calendar AS (SELECT d AS day FROM UNNEST(sequence(current_date - INTERVAL '30' DAY, current_date, INTERVAL '1' DAY)) AS t(d))
+SELECT c.day, COUNT(s.subscription_id) AS active_subscriptions
 FROM calendar c
-LEFT JOIN bookings b
-  ON b.start_date <= c.day
- AND (b.end_date IS NULL OR b.end_date > c.day)   -- half-open [start, end); NULL = still active
-GROUP BY c.day
-ORDER BY c.day;
+LEFT JOIN subscriptions s ON s.signup_date <= c.day AND (s.cancel_date IS NULL OR s.cancel_date > c.day)
+GROUP BY c.day ORDER BY c.day;
 ```
 
-Key points: (1) calendar is the SPINE; (2) interval-overlap range predicate is in the LEFT JOIN ON-clause (`b.start_date <= c.day AND (b.end_date IS NULL OR b.end_date > c.day)`); (3) half-open semantics — if end_date = May 20 the booking is active May 19 but not May 20 (adjust to `>=` if your end_date is inclusive); (4) `COUNT(DISTINCT b.desk_id)` returns 0 for days with no overlapping booking (because LEFT JOIN gives NULL b.desk_id and COUNT(DISTINCT non-null) = 0); (5) no need to filter the bookings table by window — the calendar bounds do that mechanically via the ON clause.
+**(i) INTERVAL-OVERLAP RANGE JOIN — CONFIRMED CORRECT.** The responder used the canonical `signup_date <= c.day AND (cancel_date IS NULL OR cancel_date > c.day)` range-join predicate — NOT a `GROUP BY DATE(signup_date)` start-day collapse. Half-open `[signup, cancel)` semantics correct for "active on day X means signed up on or before X AND not yet cancelled by X." A subscription signed Jan 1 and cancelled Jan 20 will appear on every day Jan 1 through Jan 19 (Jan 20 excluded because end is half-open). NULL cancel_date = still active = covers every day from signup_date onward. The recurring iter577/578 start-day-GROUP-BY semantic defect is GONE. Verified `sequence(date, date, INTERVAL '1' DAY)` syntax valid Trino 467 — per docs: `sequence(date '2023-10-20', date '2023-11-11', INTERVAL '7' DAY)` is the documented form.
 
-### Verification quote
+**(ii) COUNT(s.subscription_id) — CONFIRMED CORRECT.** Uses the non-null right column from the LEFT JOIN, NOT `COUNT(*)`. On a day with zero active subscriptions, LEFT JOIN produces one calendar-only row with all `s.*` columns NULL → `COUNT(s.subscription_id)` returns 0 (the iter577 trap-card-correct form). `COUNT(*)` would have returned 1 on every zero-active day (counting the NULL-padded row itself). Responder explicitly explained this distinction.
 
-Per **trino.io/docs/467/sql/select.html** UNNEST + SELECT semantics, plus the H3 already exists at r07 §4 with the canonical SQL shape — the canonical itself is correct, but the responder didn't route there.
+**(iii) LEFT JOIN keeps every calendar day — CONFIRMED CORRECT.** Every day Jan 1–30 appears in output even when no subscription overlaps that day. The combination LEFT JOIN + COUNT(non-null right col) is the iter575+iter577-canonical zero-fill form.
 
-### Why FIX A failed to route — DIAGNOSIS
+**Bonus quality**: responder explicitly named the WRONG-MOVE (`do NOT GROUP BY signup_date — that counts each sub only on its signup day`), explained the overlap predicate counts a sub on every day it spans, and discriminated COUNT(non-null) vs COUNT(*) on LEFT JOIN. This is exactly what the iter579 signpost was designed to route.
 
-The orchestrator's hypothesis is right: the responder treats "every day shown / zero-day must read 0" as a **date-spine GAP-FILL** family question (which r07 has well-developed in §1a/§1a.5/§1b). Once it lands on gap-fill, its default move is **group the facts by their date column** (here `CAST(start_date AS DATE)`) and LEFT JOIN to the spine. It NEVER OPENS the interval-overlap H3 because the question doesn't mention "overlap" or "interval" or "range" — it mentions "every day shown" + "0 desks" which screams gap-fill.
+**THE iter577/578 RECURRING FAIL IS RESOLVED.** The landing-point signpost at the top of §4 routed the responder correctly on the third attempt.
 
-FIX A added the worked reservations variant + DO-NOT-WRITE block **INSIDE** the interval-overlap H3. But the responder doesn't navigate into that H3 — it stops one level up at the gap-fill canonical, finds the gap-fill recipe, and applies it to the facts as-given (which happen to be intervals, not single-day events).
+### Q2 (point-event contrast — discrimination check)
+**Score: 5.0 / 5.0 / 5.0 / 5.0 = 5.00 STRONG PASS**
 
-This is a **routing/entry-point defect, not a content defect**. The content is correct; the entry point is wrong. Compare to FIX B which succeeded because it placed a NEW H2 at the same level where fresh dbt-tests questions land — not buried inside an existing H3.
+Question: daily payment count last 30 days with zero-fill — do I need the interval-overlap thing or is normal GROUP BY date + LEFT JOIN fine?
 
-### iter579 fix: ROUTING SIGNPOST at the gap-fill / date-spine entry point
-
-Place a **disambiguation steering block at the TOP of the date-spine / gap-fill H2** in r07 (not inside the interval-overlap H3). One short, grep-findable block:
-
+Responder said: these are DIFFERENT patterns. Payments are POINT EVENTS (one row = one date), so:
+```sql
+daily_payments AS (SELECT date_trunc('day', paid_date) AS day, COUNT(*) AS cnt FROM payments WHERE paid_date >= current_date - INTERVAL '30' DAY GROUP BY date_trunc('day', paid_date))
+SELECT c.day, COALESCE(dp.cnt, 0) AS payment_count
+FROM calendar c LEFT JOIN daily_payments dp ON dp.day = c.day
 ```
-ROUTING SIGNPOST — if your facts are INTERVALS (start_date/end_date, check_in/check_out, login/logout, booked_from/booked_to) and the question asks how many are ACTIVE per day (or per hour), this is NOT a date-spine gap-fill question — DO NOT GROUP BY DATE(start_date) and LEFT JOIN to the spine. That counts each interval ONCE on its start day only.
+Interval-overlap NOT needed because payments don't span days.
 
-Use the interval-overlap RANGE JOIN instead: `calendar c LEFT JOIN facts f ON f.start <= c.day AND (f.end IS NULL OR f.end > c.day)` with `COUNT(DISTINCT f.entity_id)` or `COUNT(f.fact_id)`. Full canonical: §4 interval-overlap H3 [link].
+**DISCRIMINATION CONFIRMED CLEAN.** Responder correctly distinguished point-event (group-by-date + LEFT JOIN to spine + COALESCE(0)) from interval-active (range-join overlap). Did NOT over-correct by wrongly applying interval-overlap to a point event. This is exactly the signpost discrimination working as designed: route INTERVAL questions to range join, route POINT EVENT questions to gap-fill canonical.
 
-Trigger phrases that route HERE not gap-fill: "active per day", "occupied per day", "who was checked in on day X", "concurrent bookings", "open tickets per day", "in-progress per day", "desks occupied", "rooms occupied", "members present", "sessions live", "subscriptions active on day d", "booking spans these days", "end_date NULL = still active / open-ended", "reservation from Mon to Fri covers Mon Tue Wed Thu".
-```
+**COUNT(*) here is correct** — the LEFT JOIN is from spine to the PRE-AGGREGATED `daily_payments` CTE; inside the CTE there's no LEFT JOIN so COUNT(*) safely counts payment rows. The COALESCE(0) on the outer LEFT JOIN handles zero-days. This is NOT the iter577 LEFT-JOIN-COUNT(*) trap (that trap is about COUNT(*) directly on a LEFT JOIN to raw facts; here the COUNT happens inside an INNER pre-agg that's then LEFT JOINed to the spine).
 
-Critical placement detail: this block must be **at the top of the gap-fill section, BEFORE any gap-fill SQL example**. The responder lands on the first gap-fill SQL it sees and applies it — the signpost must intercept BEFORE that landing.
+### Q3 (global aggregate via empty OVER — FRESH)
+**Score: 5.0 / 5.0 / 5.0 / 5.0 = 5.00 STRONG PASS**
 
-Also recommend: add a sibling SECTION CROSS-REFERENCE at the END of the date-spine canonical answer ("if your facts are intervals, see interval-overlap H3 — this gap-fill won't work for that case") to catch the responder on the way OUT of gap-fill if it landed there first.
+Question: each order's amount AND overall average across all orders in the same result, no second query/join.
 
----
+Responder: `AVG(amount) OVER () AS avg_order_amount`. Empty OVER means every row sees the global average computed in one pass. Noted SUM/COUNT/MIN/MAX work the same way.
 
-## Q2 — dbt generic tests: fail build on duplicates / NULLs (iter578 FIX B re-probe) — 5.0/5.0/5.0/5.0 = **5.00 STRONG PASS**
+**VERIFIED at trino.io/docs/current/functions/window.html (VERBATIM)**: "All Aggregate functions can be used as window functions by adding the OVER clause. The aggregate function is computed for each row over the rows within the current row's window frame." An empty `OVER ()` window means the frame is the entire (unpartitioned, unordered) input — i.e., the global aggregate per row. Standard SQL. Zero defects.
 
-### What the responder delivered
+### Q4 (TRY_CAST dirty data — FRESH)
+**Score: 5.0 / 5.0 / 5.0 / 5.0 = 5.00 STRONG PASS**
 
-- Correct schema.yml with `desk_id` under `data_tests: [unique, not_null]` and `start_date` under `data_tests: [not_null]`.
-- Correct `dbt build` interleave semantics: materialize → test → if failing-error-severity test, downstream models SKIP.
-- Correct default severity = `error`.
-- Correct compiled `unique` test SQL shape: `SELECT desk_id FROM bookings WHERE desk_id IS NOT NULL GROUP BY desk_id HAVING COUNT(*) > 1`.
+Question: numeric column has junk ('N/A', blank); CAST fails the whole query; how to get NULL instead?
 
-### Verification quotes
+Responder: `TRY_CAST(amount_str AS DECIMAL(10,2))` returns NULL on unparseable values; `COALESCE(TRY_CAST(...), 0)` for a default; noted `try(expression)` is the general-purpose form for any erroring expression (div-by-zero, invalid JSON), TRY_CAST is the cast-specific sibling.
 
-**docs.getdbt.com/reference/resource-configs/severity** (verbatim):
-> "severity: error or warn (default: error)"
-
-**docs.getdbt.com/reference/commands/build** (per search verbatim):
-> "Tests on upstream resources will block downstream resources from running, and a test failure will cause those downstream resources to skip entirely. E.g. If model_b depends on model_a, and a unique test on model_a fails, then model_b will SKIP."
-
-**docs.getdbt.com/docs/build/data-tests** + community-verified compiled SQL:
-> The compiled `unique` test takes the canonical form `select COL as unique_field, count(*) as n_records from RELATION where COL is not null group by COL having count(*) > 1` — matches the responder's shape exactly.
-
-### Verdict
-
-FIX B's findability landed cleanly. The NEW LEADING CANONICAL H2 in r28 (placed between "Quick-decision cheatsheet" and the merge-degradation canonical, AT THE PROMINENCE LEVEL where fresh dbt-tests questions land) was the right intervention. The responder ANSWERED this time (vs iter577 where it honest-declined). Findability lock confirmed.
-
-### What worked structurally about FIX B (so we know what to copy for iter579 FIX A re-do)
-
-- NEW section, NOT buried inside an existing one
-- Placed at H2 prominence, not H3 or H4
-- Placed in the EARLY part of the file (responder lands on early sections first)
-- Keyword anchors covered the FRESH question vocabulary ("fail the build", "no duplicate IDs", "no NULL emails", "data quality test"), not just internal/expert vocabulary ("severity", "store_failures")
-
-The iter579 FIX A re-do should mirror these four structural moves.
+**VERIFIED at trino.io/docs/current/functions/conversion.html (VERBATIM)**: "**try_cast**(value AS type) → type — Like cast(), but returns null if the cast fails." **VERIFIED at trino.io/docs/current/functions/conditional.html** for `try()`: evaluates an expression and returns NULL on error; useful for corrupt/invalid data; pairs with COALESCE for default values. Both responder claims match docs verbatim. The TRY_CAST vs try() distinction is correct and useful (TRY_CAST is cast-specific; try() wraps any expression).
 
 ---
 
-## Q3 — HAVING vs WHERE on aggregate (FRESH) — 5.0/5.0/5.0/5.0 = **5.00 STRONG PASS**
+## Topic average updates
 
-### What the responder delivered
+**Analytical query patterns on Iceberg+Trino** (Q1 interval-overlap subscriptions re-probe THIRD attempt r07 §1a landing-point signpost + Q2 point-event payments contrast r07 §1a + Q3 AVG OVER () empty window r07 §5 patterns)
+- 4.1869/37 → (4.1869·37 + 5.00)/38 = **4.2083/38** (+0.0214 Q1 strong lift; landing-point signpost ROUTED, interval-overlap THIRD-attempt PASS)
+- → (4.2083·38 + 5.00)/39 = **4.2287/39** (+0.0204 Q2 strong lift; clean discrimination, no over-correction)
+- → (4.2287·39 + 5.00)/40 = **4.2480/40** (+0.0193 Q3 strong lift; global aggregate per row via empty OVER docs-verbatim correct)
 
-- Correct explanation: WHERE runs before aggregation (filters individual rows); HAVING runs after GROUP BY + aggregation (filters groups).
-- Correct fix: `GROUP BY customer_id HAVING SUM(amount) > 10000`.
-- Correct rule-of-thumb: WHERE for row predicates, HAVING for aggregate predicates.
+**SQL query best practices for OLAP** (Q4 TRY_CAST dirty data r07/r23 patterns)
+- 4.4652/147 → (4.4652·147 + 5.00)/148 = **4.4688/148** (+0.0036 Q4 modest lift)
 
-### Verification quote
-
-**trino.io/docs/current/sql/select.html** (per search):
-> "The HAVING clause is used in conjunction with aggregate functions and the GROUP BY clause to control which groups are selected. A HAVING clause eliminates groups that do not satisfy the given conditions, and HAVING filters groups after groups and aggregates are computed."
-
-Zero defects. Canonical handling.
+Federation NOT probed — **4.49944/310 row UNCHANGED**.
 
 ---
 
-## Q4 — UNNEST a MAP column into key/value rows (FRESH) — 4.5/4.5/4.5/4.5 = **4.50 STRONG PASS**
+## PRIMARY WINS
 
-### What the responder delivered
+1. **CRITICAL PRIMARY: iter577/578 recurring interval-overlap FAIL is RESOLVED on the third attempt.** The iter579 FIX A routing-signpost relocation (from inside §4 H3 to the TOP of the gap-fill H2 landing point in r07 §1a area, BEFORE any gap-fill SQL example, with a one-line cross-ref at the END of the gap-fill canonical) routed cleanly. The responder navigated to the correct interval-overlap pattern instead of the start-day-GROUP-BY trap that had recurred for two consecutive iters. The two-pattern signpost approach (POINT EVENT → group-by-date + LEFT JOIN + COALESCE; INTERVAL → range-join overlap + COUNT(non-null right col)) discriminated correctly on Q2 — did NOT over-correct.
+2. **DISCRIMINATION CONFIRMED**: Q1 and Q2 together prove the signpost discriminates rather than blanket-applying. Q1 used interval-overlap (subscriptions span days), Q2 used group-by-date (payments don't). Same iter, same responder, different correct routes. This is the controlled-experiment evidence that the landing-point signpost frames the choice cleanly without forcing a single recipe.
+3. **Q3 AVG OVER () empty window** — global-aggregate-per-row pattern docs-verbatim correct.
+4. **Q4 TRY_CAST + try()** — both forms docs-verbatim correct; clean cast-specific vs general-purpose distinction.
 
-- Correct: `CROSS JOIN UNNEST(map_entries(properties)) AS t(entry)` then `entry.key`, `entry.value`.
-- Correct: `map_entries(map)` returns `array(row(K, V))`.
-- Correct: UNNEST of array-of-row explodes into rows.
-- Correct: `LEFT JOIN UNNEST(...)` to preserve rows with NULL/empty maps.
+## PRIMARY FAILURES
 
-### Verification
-
-**trino.io/docs/current/functions/map.html** (per search):
-> `map_entries(MAP(ARRAY[1, 2], ARRAY['x', 'y']))` returns `[ROW(1, 'x'), ROW(2, 'y')]` — confirms `array(row(K, V))` shape.
-
-**trino.io/docs/current/sql/select.html** UNNEST semantics:
-> "UNNEST can be used in combination with an ARRAY of ROW structures for expanding each field of the ROW into a corresponding column" — e.g., `UNNEST(ARRAY[ROW('Java', 1995), ROW('SQL', 1974)]) AS t(language, year)`.
-
-### Alias-form nuance (minor note, -0.5 only because not mentioned)
-
-Both forms are valid in Trino 467:
-
-(a) **Single ROW column alias** — `UNNEST(map_entries(m)) AS t(entry)`, then access `entry.key` / `entry.value` via ROW dot-access. (Responder's form.)
-
-(b) **Expanded multi-column alias** — `UNNEST(map_entries(m)) AS t(k, v)`, which expands the ROW fields directly into two named columns. This is the more idiomatic Trino form for ROW-typed array elements, because Trino's UNNEST has a special rule that an `array(row(...))` argument can be aliased into one column per ROW field.
-
-The responder chose form (a) which works and is correct. Worth mentioning form (b) too because it's cleaner and is the form most Trino docs/examples show. Minor clarity nit only, not an accuracy defect.
+None. All four answers PASS at 5.00. Zero defects across accuracy, completeness, clarity, actionability.
 
 ---
 
-## Topic rubric updates
+## Meta-rule observation
 
-- **Analytical query patterns on Iceberg+Trino** (Q1 interval-overlap reservations RE-PROBE r07 §4 H3 + Q4 UNNEST map_entries r09 / r07 array+row patterns): 4.2618/35 → (4.2618·35 + 1.25)/36 = **4.1781/36** (-0.0837 Q1 hard drag; FIX A failed to route, same defect as iter577 Q1) → (4.1781·36 + 4.50)/37 = **4.1869/37** (+0.0088 Q4 modest lift).
-- **Improving complex SQL performance on Trino with dbt** (Q2 dbt generic tests r28 new H2): 4.6764/18 → (4.6764·18 + 5.00)/19 = **4.6934/19** (+0.0170 Q2 strong lift; FIX B landed cleanly).
-- **SQL query best practices for OLAP** (Q3 WHERE vs HAVING r07/r23 patterns): 4.4615/146 → (4.4615·146 + 5.00)/147 = **4.4652/147** (+0.0037).
-- **Federation**: NOT probed — **4.49944/310 row UNCHANGED**.
+**iter579 = 42nd consecutive iter (iter537-579) where meta-rule discipline materially affected the verdict.** This iter validates the CONTROLLED-EXPERIMENT lesson from iter578 (NEW H2 at landing-point won; placement inside non-landing H3 lost) on a SECOND independent case: the same placement-not-content findability principle that fixed dbt-generic-tests in iter578 also fixed interval-overlap in iter579. **The meta-rule is now empirically validated on two structurally different findability fixes**: when content-correct fixes fail to route, the fix is in the wrong PLACE not the wrong WORDS — relocate the steer one level UP the responder's keyword-match tree to where the question's keywords ACTUALLY land, not where a domain expert would topically file it. The "topically correct" file is determined by where the RESPONDER LANDS, not by where the content belongs in a domain expert's mental ontology.
 
----
+The signpost worked AT THE LANDING POINT (top of gap-fill H2 §1a area) — exactly where iter578's post-mortem predicted the responder would scan first for "every day shown / 0 must appear" framing. The cross-ref at the END of the gap-fill canonical reinforced the routing for any responder that scanned past the signpost.
 
-## iter579 Directive (PRIMARY FIX)
-
-### FIX A (CRITICAL — HIGH PRIMARY): Re-do the interval-overlap routing — PLACE THE STEER WHERE THE RESPONDER LANDS
-
-The iter578 FIX A failed for one reason: **the steer was buried inside the H3 the responder doesn't open**. The responder lands on gap-fill / date-spine and never navigates deeper. Fix it by putting a ROUTING SIGNPOST at the gap-fill / date-spine entry point itself.
-
-**Concrete placement** in `resources/07-analytical-query-patterns.md`:
-
-1. Find the gap-fill / date-spine H2 (the §1a-area canonical that handles "every day shown" / "zero-day must read 0" / `sequence(start, end, INTERVAL '1' DAY)` + LEFT JOIN to facts).
-2. **At the very TOP of that H2, BEFORE any gap-fill SQL example**, insert a short ROUTING SIGNPOST block (the text in the Q1 section above is a starting point — adjust to match r07's exact voice). The block must:
-   - Name the trigger condition: "facts are INTERVALS (start/end), question asks active/occupied per day".
-   - Name the wrong move explicitly: "DO NOT GROUP BY DATE(start) and LEFT JOIN — that credits each interval only on its start day".
-   - Name the right move + link to the §4 interval-overlap H3.
-   - Include grep-findable trigger phrases the responder will keyword-match against: "active per day", "occupied per day", "concurrent bookings", "open tickets per day", "in-progress per day", "desks occupied", "rooms occupied", "end_date NULL = still active", "reservation from Mon to Fri covers Mon Tue Wed Thu", "booking spans these days".
-3. **At the END of the gap-fill canonical answer** (after the closing example), add a one-line cross-reference: "if your facts are INTERVALS not point events, this gap-fill is WRONG for you — see §4 interval-overlap H3."
-
-Do NOT touch the §4 interval-overlap H3 itself this iter. Its content is correct — the problem is the responder never gets there. Do NOT rewrite the gap-fill canonical SQL. PURELY ADDITIVE — one ROUTING SIGNPOST block at the top + one cross-reference line at the bottom.
-
-**Verification before-and-after**: search `resources/07-analytical-query-patterns.md` for any existing gap-fill ROUTING SIGNPOST — if one exists, expand it; if not, add a new one. Reconcile-in-place per the standing rule.
-
-### FIX B (NO-OP — CONFIRMED DURABLE)
-
-r28 NEW LEADING CANONICAL H2 for dbt generic data tests routed cleanly at Q2. Zero edits.
-
-### FIX C (NO-OP)
-
-No fresh resource gaps surfaced at Q3 / Q4. Do not manufacture churn.
-
-### iter579 probe targets
-
-- **HIGHEST**: re-probe interval-overlap on a third fresh domain framing (e.g., "open support tickets per priority per day this month", "concurrent video calls per hour", "active subscriptions per tier per day last quarter") to verify FIX A's ROUTING SIGNPOST routes. THIS IS THE THIRD ATTEMPT at the interval-overlap pattern (iter577 FAIL on reservations/rooms framing, iter578 FAIL on co-working desks framing).
-- **MEDIUM**: dbt generic tests fresh paraphrase (e.g., "dbt equivalent of CHECK constraint", "make pipeline fail if any negative price") — verify FIX B durability.
-- **MEDIUM**: Q3 WHERE-vs-HAVING durability angle (e.g., HAVING on COUNT, HAVING + filter on grouping column).
-- **LOW**: UNNEST MAP form (b) variant — `AS t(k, v)` instead of `AS t(entry)`.
-- **LOW**: federation if nudging 4.49944/310 above 4.5.
+**WebSearched and verified VERBATIM**:
+- trino.io/docs/current/functions/conversion.html: "**try_cast**(value AS type) → type — Like cast(), but returns null if the cast fails."
+- trino.io/docs/current/functions/window.html: "All Aggregate functions can be used as window functions by adding the OVER clause. The aggregate function is computed for each row over the rows within the current row's window frame."
+- trino.io/docs/current/functions/datetime.html: `sequence(date '...', date '...', INTERVAL '7' DAY)` form is documented.
+- trino.io/docs/current/functions/conditional.html: `try()` evaluates an expression and returns NULL on error; pairs with COALESCE for default values.
 
 ---
 
-## Meta-rule lesson — codify for future iters
+## iter580 directive (next teacher actions)
 
-**Findability rule: place the steer where the responder LANDS, not where the answer topically belongs.**
+**HEADLINE STATE**: iter579 RESOLVES the iter577/578 recurring interval-overlap FAIL on the third attempt. The landing-point signpost in r07 §1a (top of gap-fill H2) successfully routes both INTERVAL and POINT-EVENT questions. The fix is durable for at least one third-attempt probe.
 
-iter578 produced a controlled experiment. Same iter, same responder, two findability fixes:
+**iter580 PRIMARY MOVES**:
 
-- **FIX A (FAILED)**: Correct content placed INSIDE an existing H3 (interval-overlap) that the responder doesn't navigate into. The responder lands on gap-fill instead, applies the gap-fill recipe to the interval facts, and misses the H3 entirely. Content was correct; placement was wrong.
+1. **FIX A — NO-OP. iter579 signpost is DURABLE for one probe; needs SECOND independent confirmation to mark as fully bulletproofed.** Do NOT touch the §1a landing-point signpost. Do NOT touch the cross-ref at the end of the gap-fill canonical. Do NOT touch the §4 interval-overlap H3 content. iter580 should re-probe interval-overlap on a FOURTH fresh domain framing to confirm the fix holds across a second independent test angle (the iter537 standard is "tested from at least two different question angles" before marking a topic-level fix as durable).
 
-- **FIX B (SUCCEEDED)**: Correct content placed as a NEW H2 at the prominence level where fresh dbt-tests questions land. The responder navigated to it on first attempt.
+2. **iter580 PROBE TARGETS**:
+   - **HIGHEST priority**: re-probe interval-overlap on a FRESH fourth-attempt framing to verify durability — suggest "concurrent video conferences per hour yesterday" or "open support tickets per priority per day this quarter" or "employees employed per day per department last year." Different domain vocabulary (sessions, tickets, employment) than subscriptions/desks/reservations. Goal: confirm the §1a signpost routes from any "X active/open/in-progress per day" framing.
+   - **HIGH priority**: re-probe POINT-EVENT contrast (the iter579 Q2 angle) on a fresh fourth-attempt to confirm the signpost discriminates rather than over-correcting — suggest "page views per day last week with zero-fill" or "signups per day last quarter" (point events with zero days). Confirm the signpost does NOT route point events through interval-overlap.
+   - **MEDIUM priority**: verify Q3 AVG OVER () empty window durability on a fresh angle — suggest "show each row alongside the customer-level max / min" (needs PARTITION BY OVER (PARTITION BY customer_id)) or "running total alongside per-row value" (needs OVER (ORDER BY date)).
+   - **MEDIUM priority**: verify Q4 TRY_CAST durability on a fresh angle — suggest "try() with division by zero" or "TRY_CAST inside a CASE" or "TRY_CAST DATE column with invalid format."
+   - **LOW priority**: federation if nudging 4.49944/310 above 4.5 (just outside the 4.5 raised threshold; one strong PASS would cross it). Only if a bulletproofed federation angle exists per the project_all_topics_passed memory.
 
-Lesson: the "topically correct" location of a routing fix is determined by **where the responder LANDS for the question's keywords**, NOT by where a domain expert would file it. For "every day shown" / "0 must appear" questions, the responder lands on gap-fill — so that's where the interval-overlap steer must live, even though intervals aren't topically "gap-fill" content.
+3. **NO RESOURCE CHURN this iter** — iter579's signpost worked. Do not edit r07 §1a or §4 unless an iter580 probe surfaces a new defect.
 
-This is the **41st consecutive iter (iter537-578)** where meta-rule discipline materially affected the verdict. Add this specific findability rule to the standing meta-rules: when a content-correct fix fails to route, the fix is in the wrong PLACE not the wrong WORDS — relocate the steer one level UP the responder's keyword-match tree.
+4. **CONTINUE the meta-rule discipline**: read for SEMANTICS not STRUCTURE (the iter577/578 SQL had all the structural pieces of an interval-overlap query but the start-day-GROUP-BY semantics gave the wrong answer); place findability fixes at the responder's LANDING POINT (not at the domain-expert-topical location); discriminate findability defects from coverage defects via grep before writing new content.
 
 ---
 
-## Final score
+## VERDICT
 
-**Overall avg = (1.25 + 5.00 + 5.00 + 4.50) / 4 = 3.9375 PASS** (margin +0.4375 above 3.5 floor; +0.640 swing from iter577's 3.297). FIX B confirmed durable; FIX A failed to route, identical defect recurred — iter579 PRIMARY FIX = relocate the interval-overlap routing signpost from inside §4 H3 to the TOP of the gap-fill / date-spine H2 entry point in r07.
+**iter579 OVERALL: 5.00 STRONG PASS** — interval-overlap recurring FAIL RESOLVED on third attempt (landing-point signpost ROUTED), point-event discrimination CLEAN (did NOT over-correct), AVG OVER () empty window docs-verbatim correct, TRY_CAST + try() docs-verbatim correct. Zero defects across all four questions. The placement-not-content findability meta-rule is now empirically validated on a SECOND independent case. iter580 = NO resource churn, re-probe interval-overlap on a fourth-attempt framing for durability confirmation, no federation churn.
