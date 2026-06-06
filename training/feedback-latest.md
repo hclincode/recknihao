@@ -1,240 +1,229 @@
-# Iter 577 — Judge Feedback (2026-06-07, EXTENDED PHASE)
+# Iter 578 Judge Feedback — 2026-06-07 (EXTENDED PHASE)
 
-## Verdict
+## Verdict: 3.9375 PASS overall (margin +0.4375 above 3.5 floor)
 
-**Overall avg = (1.75 + 3.00 + 4.9375 + 3.50) / 4 = 13.1875 / 4 = 3.297 — FAIL**
+Q1 1.25 hard FAIL (recurring interval-overlap miss); Q2 5.00 STRONG PASS (FIX B routed); Q3 5.00 STRONG PASS; Q4 4.50 STRONG PASS. Overall avg = (1.25 + 5.00 + 5.00 + 4.50)/4 = 15.75/4 = **3.9375 PASS**.
 
-Margin: -0.203 below the 3.5 floor. Soft FAIL driven by Q1 + Q4. Q1 is the load-bearing miss: the responder did NOT apply the iter575 r07 §4 interval-overlap H3 to the reservations/rooms domain framing and instead reached for a START-DAY GROUP BY (counts each reservation once on its check-in day, NOT on every day it covers). The iter577 trap card (LEFT-JOIN + COUNT(*) → padded row counts as 1) was NOT exercised (the pre-aggregation form sidestepped it), so this iteration's NEW lock is unverified; the failure is the deeper interval-overlap APPLICATION miss carrying over from iter574/575. Q4 was honest (no fabrication) but missed retrievable content that exists in r27 §6.7 / §6.7A.
+**HEADLINE**: FIX A (r07 §4 interval-overlap H3 anchor expansion + reservations worked variant + DO-NOT-WRITE buried in the existing H3) FAILED to route — Q1 recurred the EXACT iter577 semantic defect (start-day GROUP BY instead of interval-overlap range join). FIX B (NEW LEADING CANONICAL H2 in r28 for dbt generic data tests) WORKED — Q2 routed cleanly with correct schema.yml, default severity:error, dbt build skip-downstream, and accurate compiled-SQL shape. The lesson: **placement matters more than content**. A correct anchor BURIED inside an H3 the responder doesn't open is invisible; a NEW H2 at the level where fresh questions LAND is visible. iter579 PRIMARY FIX = move the interval-overlap steering to where the responder ACTUALLY LANDS for "every day shown" / "zero-fill" / "calendar" / "date spine" questions — that means a ROUTING SIGNPOST at the date-spine / gap-fill entry point (NOT inside the interval-overlap H3).
 
 ---
 
-## Per-question scores
+## Q1 — Co-working desks occupied per day, end_date NULL, include zero-days (PRIMARY iter578 FIX A re-probe) — 1.0/1.0/2.0/1.0 = **1.25 hard FAIL**
 
-### Q1 — Reservations active per (room, day) this week, with zero-rows (interval-overlap re-probe)
+### The recurring semantic defect
 
-**1.75 = avg(Accuracy 1, Completeness 2, Clarity 3, Actionability 1) — FAIL**
+The responder wrote:
+```sql
+bookings_by_day AS (
+  SELECT CAST(start_date AS DATE) AS day, COUNT(DISTINCT desk_id) AS occupied_desks
+  FROM your_bookings_table
+  WHERE start_date <= current_date AND (end_date IS NULL OR end_date >= DATE_TRUNC('month', current_date) - INTERVAL '1' MONTH)
+  GROUP BY CAST(start_date AS DATE)
+)
+```
 
-**Verdict: WRONG QUESTION ANSWERED.** The responder computed *reservations STARTING* per (room, day), not *reservations ACTIVE* per (room, day). A reservation that checks in Monday and checks out Friday is active on Mon/Tue/Wed/Thu (half-open `[check_in, check_out)`); the responder's `reservation_counts` CTE groups by `DATE(r.check_in)` and so credits the reservation only on Monday. Every subsequent day (Tue/Wed/Thu) gets 0 instead of 1.
+This **GROUP BY `CAST(start_date AS DATE)`** credits each booking ONLY on its `start_date`. A desk booked May 1 → May 20 contributes ONLY to May 1; May 2–19 show 0 (or whatever other bookings started those days). This is the **exact same** interval-overlap miss as iter577 Q1 — wrong question answered: "desks that STARTED a booking on day d" not "desks that were ACTIVE on day d."
 
-Additional accuracy defects in the same CTE:
-- `WHERE r.check_in >= CURRENT_DATE - INTERVAL '6' DAY` ALSO filters out the very reservations that should be counted as "active this week" — any reservation that checked in BEFORE this week but is still ongoing this week is silently dropped. The overlap predicate must use the calendar day `c.day` inside the join, not a static `CURRENT_DATE - INTERVAL '6' DAY` floor on `check_in`.
-- `all_rooms AS (SELECT DISTINCT room_id FROM reservations)` will miss any meeting room that has had ZERO reservations ever — they will be absent from the grid. If "every (room, day)" includes never-reserved rooms, the source-of-truth for rooms must be the `rooms` (or `meeting_rooms`) table, NOT `DISTINCT room_id FROM reservations`.
+The WHERE-clause overlap filter (`start_date <= current_date AND (end_date IS NULL OR end_date >= last-month-start)`) is correctly written for the bookings overlapping the window — proving the responder PARTIALLY grasped overlap at the row-filter level — but then mis-attributed each overlapping booking to its start day only.
 
-**Irony / iter577 trap card not exercised.** Because the responder PRE-AGGREGATED `reservation_counts` first and then LEFT JOIN'd those pre-counted rows to the `calendar × all_rooms` grid with `COALESCE(rc.active_reservations, 0)`, the COUNT(*) is INSIDE the pre-agg (not across the LEFT JOIN), so the iter577 LEFT-JOIN-+COUNT(*) padded-row trap was incidentally avoided. The trap card from iter577 (r07 §4 line 958-986) is unverified by this answer — Q1's failure is the deeper iter574/575 interval-overlap APPLICATION miss on a NEW domain framing (reservations/rooms), not the iter577 LEFT-JOIN trap.
+### The correct query
 
-**Corrected query (range-join form per r07 §4 line 904-933):**
 ```sql
 WITH calendar AS (
-  SELECT d AS day
-  FROM UNNEST(sequence(date_trunc('week', current_date),
-                       date_trunc('week', current_date) + INTERVAL '6' DAY,
-                       INTERVAL '1' DAY)) AS t(d)
+  SELECT day
+  FROM UNNEST(sequence(
+    DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1' MONTH),
+    DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '1' DAY,
+    INTERVAL '1' DAY
+  )) AS t(day)
 )
-SELECT c.day, ar.room_id, COUNT(r.reservation_id) AS active_reservations
+SELECT
+  c.day,
+  COUNT(DISTINCT b.desk_id) AS desks_occupied
 FROM calendar c
-CROSS JOIN meeting_rooms ar                                   -- source rooms from the rooms table, not from reservations
-LEFT JOIN reservations r
-  ON r.room_id = ar.room_id
- AND r.check_in <= c.day                                      -- interval started on or before c.day
- AND (r.check_out IS NULL OR r.check_out > c.day)             -- AND has not ended by c.day (half-open [check_in, check_out))
-GROUP BY c.day, ar.room_id
-ORDER BY c.day, ar.room_id;
+LEFT JOIN bookings b
+  ON b.start_date <= c.day
+ AND (b.end_date IS NULL OR b.end_date > c.day)   -- half-open [start, end); NULL = still active
+GROUP BY c.day
+ORDER BY c.day;
 ```
-This is the LEFT-JOIN-for-zero-rows variant explicitly called out at r07 line 911 ("Switch to LEFT JOIN + COALESCE(active_count, 0) if you need a row for every (day, plan_type) even when zero.") AND uses `COUNT(r.reservation_id)` (non-null right-table column) per the iter577 trap card at r07 lines 958-986, so empty (room, day) buckets return 0 (per trino.io/docs/467/functions/aggregate.html: `count(x)` *"Returns the number of non-null input values"* AND `count()` is in the exception list returning 0 not NULL for zero non-null values).
 
-**Verifications.**
-- Trino 467 aggregate page (cited by r07 §4 trap card already verbatim): `count(*)` *"Returns the number of input rows"* AND `count(x)` *"Returns the number of non-null input values"*, with the exception-list rule that `count()` returns 0 for zero non-null values.
-- Interval-overlap range-join shape verified against the canonical at /Users/hclin/github/recknihao/resources/07-analytical-query-patterns.md lines 894-986.
+Key points: (1) calendar is the SPINE; (2) interval-overlap range predicate is in the LEFT JOIN ON-clause (`b.start_date <= c.day AND (b.end_date IS NULL OR b.end_date > c.day)`); (3) half-open semantics — if end_date = May 20 the booking is active May 19 but not May 20 (adjust to `>=` if your end_date is inclusive); (4) `COUNT(DISTINCT b.desk_id)` returns 0 for days with no overlapping booking (because LEFT JOIN gives NULL b.desk_id and COUNT(DISTINCT non-null) = 0); (5) no need to filter the bookings table by window — the calendar bounds do that mechanically via the ON clause.
 
-**Root cause.** The r07 §4 keyword anchor list (line 896) reads: *"active subscribers per day, open tickets per day, concurrent sessions per day, count active intervals as of each day, how many were active on each date, range join calendar to intervals, point-in-time count per day, subscriptions active on day, headcount per day, occupancy per day, active members each day, open positions per day, count overlapping intervals, intervals covering each day, as-of count per day, daily snapshot count of in-progress entities."* It includes "occupancy per day" but does NOT include "reservations", "check_in", "check_out", "rooms", "meeting rooms", "bookings", "active reservations per day per room", "room occupancy". The Haiku responder finds answers by keyword→resource matching (per CLAUDE.md project memory `feedback_responder_findability.md`); the reservations/rooms domain framing fell THROUGH the keyword net even though the underlying pattern is identical.
+### Verification quote
+
+Per **trino.io/docs/467/sql/select.html** UNNEST + SELECT semantics, plus the H3 already exists at r07 §4 with the canonical SQL shape — the canonical itself is correct, but the responder didn't route there.
+
+### Why FIX A failed to route — DIAGNOSIS
+
+The orchestrator's hypothesis is right: the responder treats "every day shown / zero-day must read 0" as a **date-spine GAP-FILL** family question (which r07 has well-developed in §1a/§1a.5/§1b). Once it lands on gap-fill, its default move is **group the facts by their date column** (here `CAST(start_date AS DATE)`) and LEFT JOIN to the spine. It NEVER OPENS the interval-overlap H3 because the question doesn't mention "overlap" or "interval" or "range" — it mentions "every day shown" + "0 desks" which screams gap-fill.
+
+FIX A added the worked reservations variant + DO-NOT-WRITE block **INSIDE** the interval-overlap H3. But the responder doesn't navigate into that H3 — it stops one level up at the gap-fill canonical, finds the gap-fill recipe, and applies it to the facts as-given (which happen to be intervals, not single-day events).
+
+This is a **routing/entry-point defect, not a content defect**. The content is correct; the entry point is wrong. Compare to FIX B which succeeded because it placed a NEW H2 at the same level where fresh dbt-tests questions land — not buried inside an existing H3.
+
+### iter579 fix: ROUTING SIGNPOST at the gap-fill / date-spine entry point
+
+Place a **disambiguation steering block at the TOP of the date-spine / gap-fill H2** in r07 (not inside the interval-overlap H3). One short, grep-findable block:
+
+```
+ROUTING SIGNPOST — if your facts are INTERVALS (start_date/end_date, check_in/check_out, login/logout, booked_from/booked_to) and the question asks how many are ACTIVE per day (or per hour), this is NOT a date-spine gap-fill question — DO NOT GROUP BY DATE(start_date) and LEFT JOIN to the spine. That counts each interval ONCE on its start day only.
+
+Use the interval-overlap RANGE JOIN instead: `calendar c LEFT JOIN facts f ON f.start <= c.day AND (f.end IS NULL OR f.end > c.day)` with `COUNT(DISTINCT f.entity_id)` or `COUNT(f.fact_id)`. Full canonical: §4 interval-overlap H3 [link].
+
+Trigger phrases that route HERE not gap-fill: "active per day", "occupied per day", "who was checked in on day X", "concurrent bookings", "open tickets per day", "in-progress per day", "desks occupied", "rooms occupied", "members present", "sessions live", "subscriptions active on day d", "booking spans these days", "end_date NULL = still active / open-ended", "reservation from Mon to Fri covers Mon Tue Wed Thu".
+```
+
+Critical placement detail: this block must be **at the top of the gap-fill section, BEFORE any gap-fill SQL example**. The responder lands on the first gap-fill SQL it sees and applies it — the signpost must intercept BEFORE that landing.
+
+Also recommend: add a sibling SECTION CROSS-REFERENCE at the END of the date-spine canonical answer ("if your facts are intervals, see interval-overlap H3 — this gap-fill won't work for that case") to catch the responder on the way OUT of gap-fill if it landed there first.
 
 ---
 
-### Q2 — Positive/contrast: INNER + COUNT(*) when zero-rows not needed
+## Q2 — dbt generic tests: fail build on duplicates / NULLs (iter578 FIX B re-probe) — 5.0/5.0/5.0/5.0 = **5.00 STRONG PASS**
 
-**3.00 = avg(Accuracy 3, Completeness 3, Clarity 3, Actionability 3) — partial credit**
+### What the responder delivered
 
-**Conceptual answer (COUNT(*) is safe without a LEFT JOIN) is correct.** Verified against r07 §4 line 986: *"The trap is specifically the LEFT JOIN-for-zero-rows + COUNT(*) pairing. The canonical INNER JOIN query at the top of this H3 uses COUNT(*) safely because INNER JOIN drops the zero-match bucket entirely."* That is exactly the principle Q2 asked about and the responder got the principle right.
+- Correct schema.yml with `desk_id` under `data_tests: [unique, not_null]` and `start_date` under `data_tests: [not_null]`.
+- Correct `dbt build` interleave semantics: materialize → test → if failing-error-severity test, downstream models SKIP.
+- Correct default severity = `error`.
+- Correct compiled `unique` test SQL shape: `SELECT desk_id FROM bookings WHERE desk_id IS NOT NULL GROUP BY desk_id HAVING COUNT(*) > 1`.
 
-**BUT the worked SQL repeats Q1's semantic miss.** `SELECT room_id, DATE(check_in) AS day, COUNT(*) ... GROUP BY room_id, DATE(check_in)` is a START-DAY group-by, NOT an interval-overlap count. The (room, day) pairs it returns are "pairs where AT LEAST ONE reservation STARTED" — not "pairs where AT LEAST ONE reservation was ACTIVE." A room that was occupied Mon-Fri by a single reservation that started on Mon would yield only one (room, day=Mon) row, even though Tue/Wed/Thu also "had at least one reservation active." That contradicts what Q2 literally asks for.
+### Verification quotes
 
-**Correct INNER form (interval-overlap, no zero-row padding):**
-```sql
-SELECT c.day, ar.room_id, COUNT(*) AS active_reservations
-FROM calendar c
-CROSS JOIN meeting_rooms ar
-JOIN reservations r                                            -- INNER JOIN drops zero-match (room, day) buckets
-  ON r.room_id = ar.room_id
- AND r.check_in <= c.day
- AND (r.check_out IS NULL OR r.check_out > c.day)
-GROUP BY c.day, ar.room_id
-ORDER BY c.day, ar.room_id;
-```
+**docs.getdbt.com/reference/resource-configs/severity** (verbatim):
+> "severity: error or warn (default: error)"
 
-Partial credit because the conceptual point (COUNT(*) safe without LEFT JOIN, per r07 §4 line 986) was stated correctly even though the example SQL still answers the wrong question.
+**docs.getdbt.com/reference/commands/build** (per search verbatim):
+> "Tests on upstream resources will block downstream resources from running, and a test failure will cause those downstream resources to skip entirely. E.g. If model_b depends on model_a, and a unique test on model_a fails, then model_b will SKIP."
 
----
+**docs.getdbt.com/docs/build/data-tests** + community-verified compiled SQL:
+> The compiled `unique` test takes the canonical form `select COL as unique_field, count(*) as n_records from RELATION where COL is not null group by COL having count(*) > 1` — matches the responder's shape exactly.
 
-### Q3 — Conditional-aggregation pivot (CASE WHEN inside COUNT and FILTER form)
+### Verdict
 
-**4.9375 = avg(Accuracy 5, Completeness 5, Clarity 4.75, Actionability 5) — STRONG PASS**
+FIX B's findability landed cleanly. The NEW LEADING CANONICAL H2 in r28 (placed between "Quick-decision cheatsheet" and the merge-degradation canonical, AT THE PROMINENCE LEVEL where fresh dbt-tests questions land) was the right intervention. The responder ANSWERED this time (vs iter577 where it honest-declined). Findability lock confirmed.
 
-Both forms are valid Trino 467:
+### What worked structurally about FIX B (so we know what to copy for iter579 FIX A re-do)
 
-- `COUNT(CASE WHEN status='paid' THEN 1 END) AS paid_orders` — standard single-pass conditional COUNT. `COUNT` ignores NULLs (per trino.io/docs/467/functions/aggregate.html: *"count(x) — Returns the number of non-null input values"*), so the CASE-without-ELSE returns NULL for non-paid rows and they are not counted. Correct.
-- `COUNT(*) FILTER (WHERE status='paid') AS paid_orders` — also correct. Verified at trino.io/docs/467/functions/aggregate.html: *"The FILTER keyword can be used to remove rows from aggregation processing with a condition expressed using a WHERE clause. This is evaluated for each row before it is used in the aggregation and is supported for all aggregate functions."* Per the SELECT/aggregate FILTER reference, the syntax `aggregate_function(expression) FILTER (WHERE condition)` applies the WHERE before aggregation.
+- NEW section, NOT buried inside an existing one
+- Placed at H2 prominence, not H3 or H4
+- Placed in the EARLY part of the file (responder lands on early sections first)
+- Keyword anchors covered the FRESH question vocabulary ("fail the build", "no duplicate IDs", "no NULL emails", "data quality test"), not just internal/expert vocabulary ("severity", "store_failures")
 
-Both forms collapse to a single GROUP BY customer_id with three output columns — no three-way self-join required, no subquery joins. The responder correctly noted both are single-pass.
-
-Minor -0.25 clarity nit for not explicitly noting that the CASE form would also work with `THEN 1 ELSE 0 END` + `SUM(...)` as an equivalent rewrite (some engines/users prefer the SUM-of-1-or-0 form), but neither approach is wrong and the responder's chosen forms are the cleaner Trino-idiomatic shapes.
+The iter579 FIX A re-do should mirror these four structural moves.
 
 ---
 
-### Q4 — dbt generic tests (unique / not_null, schema.yml, fail-build-on-violation)
+## Q3 — HAVING vs WHERE on aggregate (FRESH) — 5.0/5.0/5.0/5.0 = **5.00 STRONG PASS**
 
-**3.50 = avg(Accuracy 5, Completeness 1, Clarity 4, Actionability 4) — borderline FAIL on findability**
+### What the responder delivered
 
-**Honesty credit.** The responder did NOT fabricate. Pointing to docs.getdbt.com is materially better than inventing wrong syntax. The honesty discipline (iter400+ no-fabrication lock) HELD. Accuracy 5.
+- Correct explanation: WHERE runs before aggregation (filters individual rows); HAVING runs after GROUP BY + aggregation (filters groups).
+- Correct fix: `GROUP BY customer_id HAVING SUM(amount) > 10000`.
+- Correct rule-of-thumb: WHERE for row predicates, HAVING for aggregate predicates.
 
-**BUT this is a FINDABILITY MISS, NOT a coverage gap.** r27 §6.7 / §6.7A contains a substantial dbt generic-tests canonical with all the elements the question asked for:
+### Verification quote
 
-- /Users/hclin/github/recknihao/resources/27-oracle-plsql-to-dbt-trino.md lines 2264-2283 has the exact schema.yml form the user wanted:
-  ```yaml
-  models:
-    - name: fct_orders_daily
-      tests:
-        - dbt_utils.unique_combination_of_columns:
-            combination_of_columns: [tenant_id, order_date]
-      columns:
-        - name: tenant_id
-          tests: [not_null]
-        - name: order_date
-          tests: [not_null]
-  ```
-  And the immediately-following sentence (line 2283): *"These tests run after `dbt run`. A failure breaks the pipeline — same semantic role as `EXCEPTION WHEN ...` in the Oracle procedure"* — directly answers "fail the build on violation."
+**trino.io/docs/current/sql/select.html** (per search):
+> "The HAVING clause is used in conjunction with aggregate functions and the GROUP BY clause to control which groups are selected. A HAVING clause eliminates groups that do not satisfy the given conditions, and HAVING filters groups after groups and aggregates are computed."
 
-- §6.7A (lines 2287-2340+) covers severity: error vs warn explicitly:
-  - *"`severity: error` (default) — test failure exits `dbt test` / `dbt build` non-zero; the pipeline halts. Use for hard data-quality guarantees."* (line 2305)
-  - *"`severity: warn` — test failure emits a WARNING and the pipeline continues."* (line 2306)
-  - Per-test YAML example at lines 2310-2320 + project-wide default at lines 2324-2328.
-
-- r13 line 4180 also references the dbt `not_null` test as a recommended pattern.
-
-**Verified at docs.getdbt.com.** Per [docs.getdbt.com/docs/build/data-tests](https://docs.getdbt.com/docs/build/data-tests): *"If the data test returns zero failing rows, it passes, and your assertion has been validated."* Per [docs.getdbt.com/reference/resource-configs/severity](https://docs.getdbt.com/reference/resource-configs/severity): tests with `severity: error` (the default) fail the build on violation. Per [docs.getdbt.com/reference/commands/build](https://docs.getdbt.com/reference/commands/build): *"dbt build orchestrates models, seeds, snapshots, and tests in DAG order, with unit tests before model materialization and data tests after"* — `dbt build` is the command that runs models + tests as one pipeline and fails on test error. dbt ships with `not_null`, `unique`, `relationships`, and `accepted_values` as built-in generic tests; declaring them in `schema.yml` is the canonical way to enforce data contracts at build time.
-
-So the CORRECT one-paragraph answer was retrievable from r27 §6.7:
-
-> "Yes — declare them as dbt generic tests in `schema.yml` (or `<model>.yml`). dbt ships `unique`, `not_null`, `relationships`, and `accepted_values` out of the box. Example for a `dim_users` model with `user_id` and `email`:
-> ```yaml
-> # models/marts/dim_users.yml
-> version: 2
-> models:
->   - name: dim_users
->     columns:
->       - name: user_id
->         tests: [unique, not_null]
->       - name: email
->         tests: [not_null]
-> ```
-> Run `dbt build` (NOT `dbt run`) — `dbt build` runs models then tests in DAG order; a failing test with the default `severity: error` exits non-zero and blocks downstream models. See resource 27 §6.7 / §6.7A for severity: warn vs error, `store_failures`, and the `dbt_utils.unique_combination_of_columns` composite-key form."
-
-The responder's decline-and-point-to-docs is honest but leaves the engineer to re-discover content that's already in the repo and verbatim-correct.
-
-**Why this matters per project memory** (`feedback_responder_findability.md`): the Haiku responder finds answers by keyword→resource matching. The question contained `dbt`, `unique`, `not_null`, `schema.yml`, `fail the build`, `data quality` — the §6.7A routing anchor (line 2244-2262) is keyworded for `dbt test severity`, `severity: warn`, `store_failures`, `_dbt_test__audit`, `expression_is_true`, `not_null_proportion` BUT NOT for the simpler/more-frequent phrases this question used: "no duplicate user IDs", "no NULL emails", "catch at build time", "fail the build on violation", "declare those rules in dbt", "data quality rules", "data contract." The §6.7 sub-cluster ALSO sits under a file titled "Oracle PL/SQL → dbt+Trino migration" — a fresh question with no Oracle context is unlikely to route there even when the dbt-ops H2 disclaimer (line 2262) explicitly says the dbt-ops canonicals apply to ALL dbt-trino setups. The H2-disclaimer footer note is too deep to trigger keyword-first retrieval.
+Zero defects. Canonical handling.
 
 ---
 
-## Iter578 directive
+## Q4 — UNNEST a MAP column into key/value rows (FRESH) — 4.5/4.5/4.5/4.5 = **4.50 STRONG PASS**
 
-### Fix A — HIGH (PRIMARY) — r07 §4 interval-overlap H3 keyword-anchor EXPANSION for reservations/bookings/rooms domain
+### What the responder delivered
 
-**Goal.** Make the reservations/rooms domain framing route to the iter575 interval-overlap canonical instead of triggering a start-day GROUP BY synthesis.
+- Correct: `CROSS JOIN UNNEST(map_entries(properties)) AS t(entry)` then `entry.key`, `entry.value`.
+- Correct: `map_entries(map)` returns `array(row(K, V))`.
+- Correct: UNNEST of array-of-row explodes into rows.
+- Correct: `LEFT JOIN UNNEST(...)` to preserve rows with NULL/empty maps.
 
-**Action.** Edit /Users/hclin/github/recknihao/resources/07-analytical-query-patterns.md line 896 (the keyword-anchors block at the top of the LEADING CANONICAL "count active/open intervals on each day" H3). ADD reservations/bookings/rooms vocabulary to the existing anchor list — do NOT rewrite the canonical SQL, do NOT touch the existing 3-pattern CONTRAST card at line 1019, do NOT touch the iter577 trap card at lines 958-986. Add these anchors after "occupancy per day" or as a separate clause at the end of the list:
+### Verification
 
-```
-reservations active per day per room, active reservations per day, room occupancy per day, bookings active each day, how many reservations were active in each room on each day, meeting room occupancy, check-in / check-out interval, [check_in, check_out) half-open, reservations covering each day per room, hotel/room/conference booking range, room-day occupancy grid, who was checked in on day X, count reservations spanning day d, reservations per room per day (active not started), bookings overlapping each calendar day.
-```
+**trino.io/docs/current/functions/map.html** (per search):
+> `map_entries(MAP(ARRAY[1, 2], ARRAY['x', 'y']))` returns `[ROW(1, 'x'), ROW(2, 'y')]` — confirms `array(row(K, V))` shape.
 
-**Also add a 1-paragraph "reservations/rooms domain example" worked variant** immediately after the canonical worked SQL at lines 904-933 (BEFORE the existing DO-NOT-WRITE cards). The variant should:
-- Frame: "How many reservations were ACTIVE in each meeting room on each day this week."
-- Use a bounded `calendar` CTE (`sequence(date_trunc('week', current_date), date_trunc('week', current_date) + INTERVAL '6' DAY, INTERVAL '1' DAY)`) — reuses the iter577 bounded-window spine card.
-- Use `CROSS JOIN meeting_rooms ar` (source rooms from the rooms table, NOT `DISTINCT room_id FROM reservations` — that misses never-reserved rooms).
-- Use `LEFT JOIN reservations r ON r.room_id = ar.room_id AND r.check_in <= c.day AND (r.check_out IS NULL OR r.check_out > c.day)` — half-open, calendar day in predicate.
-- Use `COUNT(r.reservation_id)` (NOT `COUNT(*)`) — this exercises BOTH the iter575 interval-overlap pattern AND the iter577 LEFT-JOIN-COUNT trap card in one example.
-- Add an explicit DO-NOT-WRITE bullet adjacent to the existing iter574 + BETWEEN pair:
-  > *"DO NOT GROUP BY `DATE(check_in)` or `DATE(start_ts)` when the question asks 'how many were ACTIVE on each day' — that counts each interval ONCE on its check-in day only, NOT on the days it covers. A reservation Mon-Fri active 4 days must contribute to 4 (room, day) rows, not just to (room, Monday). The calendar day must enter the JOIN predicate via `start <= c.day AND (end IS NULL OR end > c.day)`."*
-- Add the WRONG-FORM verbatim so it's grep-findable: `WHERE r.check_in >= CURRENT_DATE - INTERVAL '6' DAY ... GROUP BY r.room_id, DATE(r.check_in)` ❌
+**trino.io/docs/current/sql/select.html** UNNEST semantics:
+> "UNNEST can be used in combination with an ARRAY of ROW structures for expanding each field of the ROW into a corresponding column" — e.g., `UNNEST(ARRAY[ROW('Java', 1995), ROW('SQL', 1974)]) AS t(language, year)`.
 
-**Why this is the right fix.** The pattern canonical is correct and verbatim-verified at trino.io — the problem is purely findability. The Haiku responder DID find the H3 (or at least its surrounding content) on iter575 with subscription framing but did NOT route to it for reservations framing despite identical mathematical shape. Domain-vocabulary anchors close that retrieval gap. The reservations/rooms variant ALSO doubles as the iter577 LEFT-JOIN-COUNT trap card's first realistic worked example (the current trap card is abstract `(c.bucket, COUNT(s.subscription_id))` — a reservations grid makes the trap concrete).
+### Alias-form nuance (minor note, -0.5 only because not mentioned)
 
-### Fix B — HIGH — Surface dbt generic-tests canonical OUT of the Oracle-migration file OR add a top-level findability anchor
+Both forms are valid in Trino 467:
 
-**Goal.** Make `dbt unique`, `dbt not_null`, `schema.yml`, `fail the build`, `data quality tests`, `no duplicates`, `no NULLs` route to r27 §6.7 — OR mirror a short canonical somewhere file-name-discoverable for fresh (non-Oracle-migration) questions.
+(a) **Single ROW column alias** — `UNNEST(map_entries(m)) AS t(entry)`, then access `entry.key` / `entry.value` via ROW dot-access. (Responder's form.)
 
-**Recommended action (LOW-RISK, NO RECONCILE NEEDED).** Add a top-of-file "Universal dbt-Trino routing block" in r28 (complex-sql-performance-trino-dbt.md) — a SHORT H2/H3 with keyword anchors that point readers to r27 §6.7 / §6.7A. Something like:
+(b) **Expanded multi-column alias** — `UNNEST(map_entries(m)) AS t(k, v)`, which expands the ROW fields directly into two named columns. This is the more idiomatic Trino form for ROW-typed array elements, because Trino's UNNEST has a special rule that an `array(row(...))` argument can be aliased into one column per ROW field.
 
-```
-## dbt generic data tests (unique / not_null / accepted_values / relationships) — fail the build on violation
-
-> Keyword anchors: dbt unique test, dbt not_null test, dbt accepted_values, dbt relationships test, schema.yml tests block, dbt fail build on test failure, dbt build vs dbt test, data quality test in dbt, no duplicate IDs dbt, no NULL emails dbt, declare data contract dbt, severity error vs warn, dbt test data contract, dbt generic tests catalog, dbt built-in tests, fail pipeline on data quality violation, prevent bad data downstream, post-build data validation, dbt test framework.
-
-dbt ships four built-in generic data tests: `unique`, `not_null`, `accepted_values`, and `relationships`. Declare them in `schema.yml` under `columns: ... tests: [...]`. Run with `dbt build` (preferred — runs models + tests in DAG order) or `dbt test` standalone. A failing test with default `severity: error` exits non-zero, blocks downstream models, and fails the pipeline.
-
-> **For the FULL canonical** — severity: error vs warn, store_failures, expression_is_true, not_null_proportion, dbt_utils.unique_combination_of_columns composite keys, and the warn_if / error_if threshold mechanics — see [resources/27-oracle-plsql-to-dbt-trino.md §6.7 and §6.7A](27-oracle-plsql-to-dbt-trino.md). That canonical applies to ALL dbt-Trino setups (the file title is "Oracle migration" but §6.7 is dbt-ops, not migration-specific).
-
-Minimal example (schema.yml):
-```yaml
-version: 2
-models:
-  - name: dim_users
-    columns:
-      - name: user_id
-        tests: [unique, not_null]
-      - name: email
-        tests: [not_null]
-```
-Run `dbt build`. If `user_id` has any duplicate or `email` has any NULL, the test FAILS the build (exit non-zero) and downstream models are SKIPPED.
-```
-
-This is purely additive — does NOT reconcile or duplicate the §6.7 canonical, just makes it routable from a question that has no Oracle context. The cross-link preserves the §6.7A as the single source of truth.
-
-Alternative (heavier — only if Fix B-light doesn't take): rename the r27 file or split §6.7 into a dedicated `resources/29-dbt-ops-and-tests.md`. NOT recommended for iter578 — too churny; the lightweight cross-anchor in r28 should suffice.
-
-### Fix C — NO-OP — federation
-
-4.49944/310 row unchanged. Q1-Q4 did not probe federation. Zero edits to /Users/hclin/github/recknihao/resources/22-trino-federation-postgresql.md §13.x.
-
-### Fix D — NO-OP — iter577 trap card itself
-
-The iter577 LEFT-JOIN-COUNT trap card at r07 lines 958-986 is correct and well-anchored. It was NOT exercised by Q1 (because Q1's pre-aggregation form sidestepped the LEFT JOIN entirely) but that's a domain-framing issue, not a card defect. Fix A's reservations/rooms variant will exercise it on iter578 if it surfaces.
-
-### Iter578 probe targets
-
-- **HIGHEST — verify Fix A routes.** Re-probe interval-overlap on a fresh domain — e.g., "How many open support tickets per priority per day this month" OR "How many concurrent video calls per region per hour yesterday" — AND ALSO re-probe the reservations/rooms exact framing (with `meeting_rooms` table available) to verify the new keyword anchors catch it.
-- **HIGH — verify Fix B routes dbt generic tests.** Re-probe with paraphrases that have NO Oracle context: "I want my dbt model to reject rows with NULL in `email`", "Can dbt fail the build if my `customer_id` is duplicated?", "What's the dbt equivalent of a CHECK constraint?".
-- **MEDIUM — Q3 FILTER clause durability re-probe.** Verify the `COUNT(...) FILTER (WHERE ...)` form holds on a fresh angle (e.g., "show me 7-day, 30-day, and 90-day active user counts in one row per cohort").
-- **LOW — iter577 trap card direct probe.** Q1 sidestepped it; a direct micro-probe ("I switched from INNER JOIN to LEFT JOIN to get zero-rows and now every empty bucket shows 1, why?") would lock in the iter577 card's first direct verification.
+The responder chose form (a) which works and is correct. Worth mentioning form (b) too because it's cleaner and is the form most Trino docs/examples show. Minor clarity nit only, not an accuracy defect.
 
 ---
 
-## Meta-rule observation
+## Topic rubric updates
 
-Directive's *"SCRUTINIZE Q1 — I the orchestrator believe the responder MISSED the interval-overlap pattern"* + *"is this a findability/application miss"* was LOAD-BEARING. Without the explicit data-flow trace (`DATE(r.check_in)` collapse → reservation credited once on check-in day → Tue/Wed/Thu rows for the same reservation = 0 → wrong question answered), the COALESCE(0) + grid-CROSS-JOIN structure could have looked superficially correct. Reading for SEMANTICS (what does this query actually compute per row?) vs reading for STRUCTURE (does it have a grid + LEFT JOIN + COALESCE?) was the discriminator.
-
-Same meta-rule on Q4: directive's *"is this a RESOURCE GAP or a FINDABILITY miss?"* + *"Search the resources yourself conceptually"* was load-bearing. A surface read would have credited the honesty (it IS honest) without checking that the content actually exists. Grep on `not_null|unique|severity|schema.yml` in /Users/hclin/github/recknihao/resources turned up r27 §6.7 / §6.7A immediately — confirming this is a findability gap, not coverage. 38th consecutive iter (iter537-577) where meta-rule discipline materially changed the verdict — this time turning a borderline-pass into a clear FAIL on Q1 and downgrading Q4 from "honest pass" to "findability fail."
-
-WebSearched: trino.io/docs/467/functions/aggregate.html (FILTER clause + count(x) semantics VERBATIM), docs.getdbt.com/docs/build/data-tests + docs.getdbt.com/reference/resource-configs/severity + docs.getdbt.com/reference/commands/build (dbt generic tests + severity:error fails build + dbt build runs tests after models VERBATIM).
+- **Analytical query patterns on Iceberg+Trino** (Q1 interval-overlap reservations RE-PROBE r07 §4 H3 + Q4 UNNEST map_entries r09 / r07 array+row patterns): 4.2618/35 → (4.2618·35 + 1.25)/36 = **4.1781/36** (-0.0837 Q1 hard drag; FIX A failed to route, same defect as iter577 Q1) → (4.1781·36 + 4.50)/37 = **4.1869/37** (+0.0088 Q4 modest lift).
+- **Improving complex SQL performance on Trino with dbt** (Q2 dbt generic tests r28 new H2): 4.6764/18 → (4.6764·18 + 5.00)/19 = **4.6934/19** (+0.0170 Q2 strong lift; FIX B landed cleanly).
+- **SQL query best practices for OLAP** (Q3 WHERE vs HAVING r07/r23 patterns): 4.4615/146 → (4.4615·146 + 5.00)/147 = **4.4652/147** (+0.0037).
+- **Federation**: NOT probed — **4.49944/310 row UNCHANGED**.
 
 ---
 
-## Summary
+## iter579 Directive (PRIMARY FIX)
 
-- **Q1 — 1.75 FAIL** — semantic miss; START-DAY GROUP BY instead of interval-overlap range join; iter577 LEFT-JOIN-COUNT trap NOT exercised (sidestepped by pre-agg); also drops never-reserved rooms via `DISTINCT room_id FROM reservations`.
-- **Q2 — 3.00 partial** — COUNT(*)-without-LEFT-JOIN principle correct; SQL example repeats Q1's start-day group-by semantic miss.
-- **Q3 — 4.9375 STRONG PASS** — both CASE-inside-COUNT and COUNT(*) FILTER (WHERE ...) forms valid Trino 467; single-pass; no fabrication.
-- **Q4 — 3.50 borderline FAIL** — honest no-fabrication decline; content EXISTS in r27 §6.7 / §6.7A but did not route (findability gap, not coverage gap).
-- **OVERALL 3.297 — FAIL** by overall-average rule (-0.203 below 3.5 floor).
-- **PRIMARY iter578 FIX (HIGH)** — r07 §4 keyword anchors + reservations/rooms worked variant.
-- **SECONDARY iter578 FIX (HIGH)** — r28 dbt generic-tests cross-anchor block pointing to r27 §6.7.
-- **NO federation churn.** **NO reconciliation of locked iter575/577 content** — additive findability fixes only.
+### FIX A (CRITICAL — HIGH PRIMARY): Re-do the interval-overlap routing — PLACE THE STEER WHERE THE RESPONDER LANDS
+
+The iter578 FIX A failed for one reason: **the steer was buried inside the H3 the responder doesn't open**. The responder lands on gap-fill / date-spine and never navigates deeper. Fix it by putting a ROUTING SIGNPOST at the gap-fill / date-spine entry point itself.
+
+**Concrete placement** in `resources/07-analytical-query-patterns.md`:
+
+1. Find the gap-fill / date-spine H2 (the §1a-area canonical that handles "every day shown" / "zero-day must read 0" / `sequence(start, end, INTERVAL '1' DAY)` + LEFT JOIN to facts).
+2. **At the very TOP of that H2, BEFORE any gap-fill SQL example**, insert a short ROUTING SIGNPOST block (the text in the Q1 section above is a starting point — adjust to match r07's exact voice). The block must:
+   - Name the trigger condition: "facts are INTERVALS (start/end), question asks active/occupied per day".
+   - Name the wrong move explicitly: "DO NOT GROUP BY DATE(start) and LEFT JOIN — that credits each interval only on its start day".
+   - Name the right move + link to the §4 interval-overlap H3.
+   - Include grep-findable trigger phrases the responder will keyword-match against: "active per day", "occupied per day", "concurrent bookings", "open tickets per day", "in-progress per day", "desks occupied", "rooms occupied", "end_date NULL = still active", "reservation from Mon to Fri covers Mon Tue Wed Thu", "booking spans these days".
+3. **At the END of the gap-fill canonical answer** (after the closing example), add a one-line cross-reference: "if your facts are INTERVALS not point events, this gap-fill is WRONG for you — see §4 interval-overlap H3."
+
+Do NOT touch the §4 interval-overlap H3 itself this iter. Its content is correct — the problem is the responder never gets there. Do NOT rewrite the gap-fill canonical SQL. PURELY ADDITIVE — one ROUTING SIGNPOST block at the top + one cross-reference line at the bottom.
+
+**Verification before-and-after**: search `resources/07-analytical-query-patterns.md` for any existing gap-fill ROUTING SIGNPOST — if one exists, expand it; if not, add a new one. Reconcile-in-place per the standing rule.
+
+### FIX B (NO-OP — CONFIRMED DURABLE)
+
+r28 NEW LEADING CANONICAL H2 for dbt generic data tests routed cleanly at Q2. Zero edits.
+
+### FIX C (NO-OP)
+
+No fresh resource gaps surfaced at Q3 / Q4. Do not manufacture churn.
+
+### iter579 probe targets
+
+- **HIGHEST**: re-probe interval-overlap on a third fresh domain framing (e.g., "open support tickets per priority per day this month", "concurrent video calls per hour", "active subscriptions per tier per day last quarter") to verify FIX A's ROUTING SIGNPOST routes. THIS IS THE THIRD ATTEMPT at the interval-overlap pattern (iter577 FAIL on reservations/rooms framing, iter578 FAIL on co-working desks framing).
+- **MEDIUM**: dbt generic tests fresh paraphrase (e.g., "dbt equivalent of CHECK constraint", "make pipeline fail if any negative price") — verify FIX B durability.
+- **MEDIUM**: Q3 WHERE-vs-HAVING durability angle (e.g., HAVING on COUNT, HAVING + filter on grouping column).
+- **LOW**: UNNEST MAP form (b) variant — `AS t(k, v)` instead of `AS t(entry)`.
+- **LOW**: federation if nudging 4.49944/310 above 4.5.
+
+---
+
+## Meta-rule lesson — codify for future iters
+
+**Findability rule: place the steer where the responder LANDS, not where the answer topically belongs.**
+
+iter578 produced a controlled experiment. Same iter, same responder, two findability fixes:
+
+- **FIX A (FAILED)**: Correct content placed INSIDE an existing H3 (interval-overlap) that the responder doesn't navigate into. The responder lands on gap-fill instead, applies the gap-fill recipe to the interval facts, and misses the H3 entirely. Content was correct; placement was wrong.
+
+- **FIX B (SUCCEEDED)**: Correct content placed as a NEW H2 at the prominence level where fresh dbt-tests questions land. The responder navigated to it on first attempt.
+
+Lesson: the "topically correct" location of a routing fix is determined by **where the responder LANDS for the question's keywords**, NOT by where a domain expert would file it. For "every day shown" / "0 must appear" questions, the responder lands on gap-fill — so that's where the interval-overlap steer must live, even though intervals aren't topically "gap-fill" content.
+
+This is the **41st consecutive iter (iter537-578)** where meta-rule discipline materially affected the verdict. Add this specific findability rule to the standing meta-rules: when a content-correct fix fails to route, the fix is in the wrong PLACE not the wrong WORDS — relocate the steer one level UP the responder's keyword-match tree.
+
+---
+
+## Final score
+
+**Overall avg = (1.25 + 5.00 + 5.00 + 4.50) / 4 = 3.9375 PASS** (margin +0.4375 above 3.5 floor; +0.640 swing from iter577's 3.297). FIX B confirmed durable; FIX A failed to route, identical defect recurred — iter579 PRIMARY FIX = relocate the interval-overlap routing signpost from inside §4 H3 to the TOP of the gap-fill / date-spine H2 entry point in r07.

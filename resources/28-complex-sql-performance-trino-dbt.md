@@ -194,6 +194,95 @@ These are the wrong shapes a Haiku responder must NEVER suggest in a dbt-trino +
 
 ---
 
+## LEADING CANONICAL — dbt generic data tests on dbt-trino: `unique` / `not_null` / `accepted_values` / `relationships` (fail the build on bad data — schema.yml + `dbt test` / `dbt build` interleave) (iter578 PIN)
+
+> **READ THIS FIRST if your question contains any of these keywords (fresh-question phrasing — iter578 findability fix):** no duplicate IDs, no NULL emails, fail the build on bad data, data quality test in dbt, enforce uniqueness, catch bad data before it lands, dbt test, dbt build, schema.yml tests, `not_null`, `unique`, `accepted_values`, `relationships`, primary key test, foreign key test, dbt generic test, dbt data test, dbt quality check, how do I test my dbt model, "the build should fail if the source has duplicate IDs", "fail the build if any email is NULL", dbt-trino tests, schema yaml dbt-trino, data_tests vs tests key.
+
+**The one-fact summary.** dbt ships **four built-in generic data tests** — `unique`, `not_null`, `accepted_values`, `relationships` — declared in `schema.yml` next to each model's column list. After the model materializes, `dbt test` (or `dbt build`, which runs models + tests interleaved) compiles each test to a `SELECT` that returns the **failing rows**; **zero failing rows = PASS, ≥1 failing row = FAIL**. With default `severity: error`, a failed test on an upstream model **SKIPS** all downstream models in `dbt build`. This is how you "fail the build on bad data" without writing any Trino SQL by hand.
+
+### The minimal worked schema.yml — copy-pasteable on dbt-trino
+
+```yaml
+version: 2
+
+models:
+  - name: fct_users
+    description: "User dimension — one row per user_id."
+    columns:
+      - name: user_id
+        description: "Primary key. Must be unique and non-NULL."
+        data_tests:                              # dbt 1.8+ key — `tests:` is still accepted as an alias (see below)
+          - unique                               # fails the build if ANY user_id appears more than once
+          - not_null                             # fails the build if ANY user_id is NULL
+
+      - name: email
+        description: "User email — must be non-NULL."
+        data_tests:
+          - not_null
+
+      - name: status
+        description: "Lifecycle status — must be one of the allowed values."
+        data_tests:
+          - accepted_values:
+              values: ['active', 'churned', 'trial']    # any other value (incl. typos, new statuses) fails the test
+
+      - name: tenant_id
+        description: "Foreign key into dim_tenants — must reference an existing tenant."
+        data_tests:
+          - relationships:
+              to: ref('dim_tenants')                    # cross-model FK check
+              field: tenant_id                          # the column in dim_tenants to match against
+```
+
+That's it — four columns, four kinds of generic test, one YAML file. dbt compiles each test entry to a `SELECT`:
+- `unique` → `SELECT user_id FROM fct_users WHERE user_id IS NOT NULL GROUP BY user_id HAVING COUNT(*) > 1` (returns duplicated IDs; zero rows = PASS).
+- `not_null` → `SELECT * FROM fct_users WHERE email IS NULL` (returns the bad rows; zero rows = PASS).
+- `accepted_values` → `SELECT status FROM fct_users WHERE status NOT IN ('active','churned','trial')` (returns rows whose value is outside the allowed set; zero rows = PASS).
+- `relationships` → `SELECT * FROM fct_users f WHERE f.tenant_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {{ ref('dim_tenants') }} t WHERE t.tenant_id = f.tenant_id)` (returns rows with orphan FKs; zero rows = PASS).
+
+### The build-gating fact — what `dbt test` and `dbt build` actually do
+
+- **`dbt test`** runs the tests against materialized models (it does NOT re-build the models). Use this in CI for a data-quality-only gate.
+- **`dbt build`** runs models AND tests INTERLEAVED in the DAG: it builds `model_a`, runs `model_a`'s data tests, then proceeds to `model_b`. **Verbatim from [docs.getdbt.com/reference/commands/build](https://docs.getdbt.com/reference/commands/build):** *"Tests on upstream resources will block downstream resources from running, and a test failure will cause those downstream resources to skip entirely. E.g. If `model_b` depends on `model_a`, and a `unique` test on `model_a` fails, then `model_b` will `SKIP`."* This is the load-bearing build-gating behavior: a `severity: error` test failure on upstream = downstream SKIP, the bad data never lands.
+- **Default severity is `error`.** Verbatim from [docs.getdbt.com/reference/resource-configs/severity](https://docs.getdbt.com/reference/resource-configs/severity): *"`severity`: `error` or `warn` (default: `error`)"* and *"If `severity: error`, dbt will check the `error_if` condition first. If the error condition is met, the test returns an error."* A test with `severity: error` that fails causes `dbt test` / `dbt build` to **exit non-zero** (the run fails — CI halts the pipeline).
+- **`severity: warn`** demotes the failure to a warning that does NOT fail the run and does NOT skip downstream models. Verbatim: *"If `severity: warn`, dbt will skip the `error_if` condition entirely and jump straight to the `warn_if` condition. If the warn condition is met, the test warns; if it's not met, the test passes."*
+
+So to "fail the build if the source has duplicate user_ids or any NULL emails", you write:
+```yaml
+- name: user_id
+  data_tests:
+    - unique                         # default severity: error → fails the build on duplicates
+    - not_null                       # default severity: error → fails the build on NULLs
+- name: email
+  data_tests:
+    - not_null                       # default severity: error → fails the build on NULL emails
+```
+and run `dbt build`. If the source feeds in a duplicate `user_id`, `dbt build` materializes `fct_users`, runs the `unique` test, the test compiles to a `SELECT ... HAVING COUNT(*) > 1` that returns ≥1 row, the test FAILs with `severity: error`, the run exits non-zero, and every downstream model that depends on `fct_users` is `SKIP`ped. The bad data is caught at build time before any downstream consumer reads it.
+
+### `data_tests:` vs `tests:` — the dbt 1.8 key rename (both work)
+
+dbt 1.8 renamed the YAML key from `tests:` to `data_tests:` to disambiguate from unit tests (a different feature — see r27 § 6.7E). **Verbatim from [docs.getdbt.com/docs/build/data-tests](https://docs.getdbt.com/docs/build/data-tests):** *"Tests are now called data tests to disambiguate from unit tests. The YAML key `tests:` is still supported as an alias for `data_tests:`."* So **both keys are valid on current dbt-trino** — prefer the new `data_tests:` going forward, but `tests:` in older schema.yml files keeps working. **Constraint:** you can't have BOTH keys on the same resource at once — pick one per model.
+
+### DO-NOT-WRITE — common dbt generic test mistakes
+
+| WRONG | RIGHT | Why |
+|---|---|---|
+| `data_tests: [unique, not_null]` on a column that is **frequently `NULL` but should be unique when non-null** (e.g., optional `external_ref_id`) | Use `unique` alone (the `unique` test ignores NULLs in its `WHERE col IS NOT NULL GROUP BY col HAVING COUNT(*) > 1` shape — multiple NULLs do NOT fail `unique`). For mandatory + unique cols, keep both. | `unique` is already NULL-tolerant; `not_null` is the orthogonal "must not be NULL" assertion. Don't add `not_null` to a column that's allowed to be NULL — it will fail every run. |
+| `severity: 'warn'` or `severity: 'fail'` (wrong strings) | `severity: warn` or `severity: error` (no quotes, exact strings). | Verified at [docs.getdbt.com/reference/resource-configs/severity](https://docs.getdbt.com/reference/resource-configs/severity) — only `warn` and `error` are valid. |
+| `relationships: {to: ref('dim_tenants'), field: tenant_id}` when `dim_tenants` is NOT a dbt model (it's a raw source) | `relationships: {to: source('raw', 'dim_tenants'), field: tenant_id}` — use `source()` not `ref()` when the parent is a raw table declared in `sources.yml`. | `ref()` = another dbt model; `source()` = a raw external input. See r27 § 6.7H for the full `ref()` vs `source()` distinction. |
+| Putting `tests:` AND `data_tests:` on the same column | Pick one key per resource (`data_tests:` preferred on dbt 1.8+). | dbt errors out: *"you can't have a `tests` and a `data_tests` key associated with the same resource."* |
+| Expecting Trino to enforce `unique` / `primary_key` at write time | dbt-trino + Iceberg enforce ONLY `not_null` at the Iceberg-column level. `unique` / `primary_key` are NOT runtime-enforced by Trino — that's exactly why you write a dbt `unique` test (a post-build assertion) instead of relying on the engine. See r27 § 6.7C model contracts for the full constraint-enforcement matrix. | The dbt test is the runtime check; the contract / Iceberg column constraint is the structural check. |
+
+### Cross-references
+
+- **r27 § 6.7** — the original dbt-tests primer in the Oracle-migration file (which Oracle `EXCEPTION` clauses map to which dbt tests).
+- **r27 § 6.7A** — `severity` / `store_failures` / `expression_is_true` / `not_null_proportion` deep-dive (warn vs error config, `_dbt_test__audit` failures table, aggregate-threshold testing via `dbt_utils.not_null_proportion`). This r28 H3 is the **canonical entry-point for the generic-tests question**; r27 § 6.7A is the **canonical deep-dive on severity and failure storage**. They are consistent — this H3 cites the build-gating behavior; § 6.7A cites the failures-table mechanism.
+- **r27 § 6.7C** — dbt model contracts (the column-name + `data_type:` build-time STRUCTURAL preflight). Different mechanism from generic data tests: contracts check schema/type at compile time; generic tests check data values at materialize time. Both can fail `dbt build`.
+- **r27 § 6.7E** — dbt **UNIT TESTS** (`unit_tests:` / `given:` / `expect:`). Different feature from data tests: unit tests assert TRANSFORMATION LOGIC on MOCK input; generic data tests assert column-value properties on REAL warehouse output.
+- **Official dbt docs:** [docs.getdbt.com/docs/build/data-tests](https://docs.getdbt.com/docs/build/data-tests) (generic tests + `data_tests:` key alias); [docs.getdbt.com/reference/resource-configs/severity](https://docs.getdbt.com/reference/resource-configs/severity) (severity values + defaults); [docs.getdbt.com/reference/commands/build](https://docs.getdbt.com/reference/commands/build) (build-gating / skip-downstream behavior verbatim).
+
+---
+
 ## LEADING CANONICAL WORKED EXAMPLE — "My dbt incremental model with `incremental_strategy='merge'` used to run in 5 min, now runs in 40 min — same SQL, same row volume. What changed?" (read this FIRST for "merge model getting slower" questions)
 
 > **This is the findable canonical answer for the merge-model-degradation question. Every claim has been verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (`$files` / `$snapshots` metadata tables, `EXECUTE optimize` parameters), [iceberg.apache.org/docs/latest/spark-procedures/](https://iceberg.apache.org/docs/latest/spark-procedures/) (`rewrite_position_delete_files` is Spark-only), and Iceberg spec (`content` column codes: 0 = DATA, 1 = POSITION_DELETES, 2 = EQUALITY_DELETES). Do NOT invent Trino procedures or parameter names — paste verbatim.**

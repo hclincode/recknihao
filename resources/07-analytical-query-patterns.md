@@ -893,7 +893,7 @@ ORDER BY device_id, ts;
 
 ### LEADING CANONICAL — count active/open intervals on each day (interval-overlap range join — NOT forward-fill, NOT a CURRENT_DATE snapshot)
 
-> **Keyword anchors (read this section FIRST if your question contains any of these):** active subscribers per day, open tickets per day, concurrent sessions per day, count active intervals as of each day, how many were active on each date, range join calendar to intervals, point-in-time count per day, subscriptions active on day, headcount per day, occupancy per day, active members each day, open positions per day, count overlapping intervals, intervals covering each day, as-of count per day, daily snapshot count of in-progress entities.
+> **Keyword anchors (read this section FIRST if your question contains any of these):** active subscribers per day, open tickets per day, concurrent sessions per day, count active intervals as of each day, how many were active on each date, range join calendar to intervals, point-in-time count per day, subscriptions active on day, headcount per day, occupancy per day, active members each day, open positions per day, count overlapping intervals, intervals covering each day, as-of count per day, daily snapshot count of in-progress entities. **Also (iter578 — reservations / rooms / bookings / hotel-desk-meeting-room domain):** reservations active per room per day, bookings per day, rooms occupied per day, desks occupied per day, check-in check-out overlap, how many bookings span each day, occupancy by room by day, concurrent bookings, hotel / meeting-room / desk occupancy, room utilization per day, "a reservation from Mon to Fri covers Mon Tue Wed Thu" (NOT just Mon), per-room per-day active reservation count.
 
 **The fact in one sentence.** To count, for **EACH day `d`** in a date range, the entities whose active interval (`[start, end)`) **covers** `d`, range-**JOIN** the dense day spine to the interval table on `s.start <= d AND (s.end IS NULL OR s.end > d)` and `GROUP BY d` (plus any dimension column). Use the **half-open `[start, end)` convention** so that an interval ending on day `X` is **NOT** counted on day `X` (this avoids the boundary double-count where an interval ending on X and another starting on X would both be counted on X).
 
@@ -933,6 +933,45 @@ ORDER BY c.day, s.plan_type;
 ```
 
 **Why this works.** For each calendar day `c.day`, the JOIN predicate evaluates against EVERY subscription: subscriptions whose `[start, end)` window covers `c.day` survive the join. `COUNT(*) GROUP BY c.day, s.plan_type` then tallies the survivors per `(day, plan)`. The dense `calendar` CTE guarantees every day in `[min_start, today]` gets evaluated — there are no gaps in the output day axis even if no subscription started or ended that day. The dynamic bounds (`MIN(subscription_start_date)` from a bounds CTE; see the iter573 GROUP-BY-aggregate-ban canonical above — put the `MIN` in a CTE, **not** in a `GROUP BY`) make the spine cover the full history without hardcoded dates.
+
+**WORKED VARIANT — reservations active per room per day (hotel / meeting-room / desk-booking domain — iter578 PIN).** Same interval-overlap pattern, different domain vocabulary. The question reads "how many reservations are active per room per day?" — a Mon-Fri reservation must count on Mon AND Tue AND Wed AND Thu (the four days it covers, because `check_out` is half-open and excludes the checkout day, OR all five if your domain treats `check_out` as inclusive — adjust the predicate accordingly). Every `(room, day)` must appear in the output, including empty room-days (no reservations) where the count is `0`. This variant deliberately exercises BOTH the interval-overlap range join AND the iter577 COUNT-non-null-right-col-after-LEFT-JOIN trap:
+
+```sql
+-- Reservations active per room per day (every (room, day) kept; empty room-days = 0):
+WITH calendar AS (
+  SELECT d AS day FROM UNNEST(sequence(DATE '2026-05-01', DATE '2026-05-31', INTERVAL '1' DAY)) AS t(d)
+)
+SELECT c.day, ar.room_id, COUNT(r.reservation_id) AS active_count
+FROM calendar c
+CROSS JOIN meeting_rooms ar                              -- the ROOM DIMENSION (every room, even never-reserved)
+LEFT JOIN reservations r
+  ON r.room_id = ar.room_id
+ AND r.check_in <= c.day                                  -- overlap: started on/before this day
+ AND (r.check_out IS NULL OR r.check_out > c.day)         -- AND not yet ended (half-open [check_in, check_out))
+GROUP BY c.day, ar.room_id
+ORDER BY c.day, ar.room_id;
+```
+
+Two load-bearing details: (1) **Use a rooms DIMENSION table** (`meeting_rooms` / `rooms` / `desks` — whichever table is the authoritative room universe) for the room axis — `calendar c CROSS JOIN meeting_rooms ar` enumerates EVERY `(day, room)` pair so a never-reserved room still appears with `active_count = 0`. Do NOT derive the room universe with `(SELECT DISTINCT room_id FROM reservations)` — that drops rooms with zero reservations in the whole window. (2) **`COUNT(r.reservation_id)` — not `COUNT(*)`** — because the LEFT JOIN pads empty `(day, room)` buckets with NULL right-table columns; `COUNT(*)` would count that NULL-padded row as 1 and every empty room-day would WRONGLY show `1` (see the iter577 trap card below). Counting a non-NULL right-table column (`r.reservation_id` / `r.id` / `r.booking_id`) yields `0` for empty buckets.
+
+**DO-NOT-WRITE (reservations-per-room-per-day specific — iter578 PIN — the exact iter577 Q1 responder miss):**
+
+- **DO NOT pre-aggregate reservations by `DATE(check_in)` (or `GROUP BY check_in`) and join that to the calendar — a multi-day reservation will be credited ONLY on its start day, and shows 0 on every other day it is actually active.** **WRONG ❌:**
+  ```sql
+  -- WRONG: counts reservations by their CHECK-IN day only.
+  WITH reservation_counts AS (
+    SELECT room_id, DATE(check_in) AS day, COUNT(*) AS reservations_starting
+    FROM reservations
+    GROUP BY room_id, DATE(check_in)
+  )
+  SELECT c.day, ar.room_id, COALESCE(rc.reservations_starting, 0) AS active_count
+  FROM calendar c
+  CROSS JOIN meeting_rooms ar
+  LEFT JOIN reservation_counts rc ON rc.room_id = ar.room_id AND rc.day = c.day
+  ORDER BY c.day, ar.room_id;
+  ```
+  A Mon-Fri reservation `(check_in=Mon, check_out=Fri)` is counted ONLY on Mon (the start-day row in `reservation_counts`); Tue / Wed / Thu show `active_count = 0` for that room even though the reservation IS active on those days. **"Active on each day" REQUIRES the overlap RANGE JOIN** (`r.check_in <= c.day AND (r.check_out IS NULL OR r.check_out > c.day)`) — every calendar day must enter the JOIN predicate so each multi-day reservation is re-counted on every day it covers. **NOT a `GROUP BY DATE(check_in)`-then-join.** This is the exact iter577 Q1 responder miss; it is a wrong pattern. **RIGHT ✅:** the range-join query in the WORKED VARIANT above.
+- **DO NOT `WHERE r.check_in >= <window_start>` to bound the reservations table to the window — that drops reservations that STARTED BEFORE the window but are still ACTIVE in it.** **WRONG ❌:** adding `WHERE r.check_in >= DATE '2026-05-01'` (or the equivalent inside the `ON` clause as `AND r.check_in >= DATE '2026-05-01'`) when the question asks "reservations active per room per day in May 2026" — a reservation `(check_in=2026-04-28, check_out=2026-05-05)` is ACTIVE on May 1-4 but is excluded by `check_in >= 2026-05-01`. **Bound the SPINE (the calendar CTE), NOT the fact's start date.** The overlap predicate evaluated against each calendar day automatically restricts the result to reservations active in the window, AND it correctly includes reservations that started before the window but are still active in it. **RIGHT ✅:** bound `sequence(DATE '2026-05-01', DATE '2026-05-31', INTERVAL '1' DAY)` (or relative `current_date - INTERVAL '30' DAY` etc.) in the `calendar` CTE; leave the reservations table unfiltered on `check_in`, and let the overlap predicate do the windowing.
 
 **DO-NOT-WRITE (load-bearing — the iter574 Q1 fab class):**
 
