@@ -515,6 +515,8 @@ The SUM form counts *event rows*, not users. If a user fires 5 events in the 7-d
 > ```
 >
 > Both forms run on Trino 467/481 with the Iceberg connector. Use whichever reads more naturally to your team — the `FILTER` form is slightly more compact and signals "conditional aggregation" intent without the CASE noise. Note: when you want `COUNT(*)` for matching rows (not summing a metric), the FILTER form `COUNT(*) FILTER (WHERE event_type='purchase')` is the canonical idiom — the CASE-WHEN form `SUM(CASE WHEN event_type='purchase' THEN 1 ELSE 0 END)` is also valid but more verbose.
+>
+> **Alias-must-match-function rule.** Each output column's alias must reflect the function actually used. `SUM(revenue) FILTER (...) AS q1_revenue` is correct (SUM produces a total). If you instead want the per-quarter **average** order value, switch the function — `AVG(revenue) FILTER (WHERE quarter = 'Q1') AS q1_avg_order_value` — do NOT keep `SUM(...)` and rename the alias to `avg_*` (that ships a wrong-by-a-factor-of-row-count number under an average label). The FILTER (WHERE ...) clause is supported on every Trino aggregate function: `SUM`, `AVG`, `COUNT`, `MIN`, `MAX`, `array_agg`, `approx_distinct`, `approx_percentile`, etc. — pick the function that matches the metric, then use the alias that matches the function.
 
 The query above returns the cohort grid in **long format** (one row per cohort_week × week_offset). That's fine for some BI tools, but stakeholders usually want the **wide format** with one column per week, showing percentage retention (week_N / week_0 × 100). Pivot it with `CASE WHEN` (conditional aggregation) and divide by the cohort size:
 
