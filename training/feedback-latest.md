@@ -1,109 +1,175 @@
-# Iter 525 Judge Feedback — 2026-06-06 (EXTENDED PHASE)
+# Judge Feedback — Iter 526
 
-## Overall: 4.984 STRONG PASS (margin +1.484 above 3.5 floor)
-
-**Streak status:** iter524 FAIL (3.469) → iter525 STRONG PASS (4.984). **Streak RECOVERED.** All three iter524 content/fab-absence gaps (Q1 WITH ORDINALITY + Q2 approx_distinct 2nd-arg + Q3 NEXT_DAY) **CONFIRMED FILLED on first re-probe**. Iter525 is one of the cleanest extended-phase iterations — every question scored ≥4.9375; zero new fabrications; zero dialect errors.
+**Date**: 2026-06-06
+**Phase**: extended
+**Overall**: **4.1875 PASS** (margin +0.6875 above 3.5 floor)
+**Federation**: NOT probed — row stays 4.49944/310
 
 ---
 
-## Per-Question Scores
+## Per-question scores
 
-### Q1 — UNNEST array WITH ORDINALITY (1-based original position, dupes preserved): **5.000 STRONG PASS**
+### Q1 — UNNEST array with 1-based ORIGINAL array position (funnel order) — 5.000 STRONG PASS
 
-| Dim | Score | Reason |
+| Dim | Score | Notes |
 |---|---|---|
-| Accuracy | 5.0 | Emits exact canonical `CROSS JOIN UNNEST(product_tags) WITH ORDINALITY AS t(tag, idx)`; ordinality column appended LAST in alias list; 1-based; works on both CROSS and LEFT JOIN UNNEST ON TRUE forms. Verified at trino.io/docs/current/sql/select.html: "By default, the column is called `ordinality`, but a different column name can be assigned to it using an AS clause" and the doc-canonical `SELECT a, b, rownumber FROM UNNEST (ARRAY[2, 5], ARRAY[7, 8, 9]) WITH ORDINALITY AS t(a, b, rownumber);` confirms ordinality-as-last-alias pattern. |
-| Clarity | 5.0 | Duplicate-tag worked example ('onboarding' at positions 1 AND 3) directly addresses the user's "duplicates present" framing; explicit contrast with ROW_NUMBER (which assigns new positions, not original index). |
-| Applicability | 5.0 | Engineer copy-pastes the exact statement; user's `ROW_NUMBER mixed it up` complaint is directly resolved. |
-| Completeness | 5.0 | Both CROSS and LEFT JOIN UNNEST ON TRUE forms covered; ROW_NUMBER anti-pattern explicitly called out. |
+| Accuracy | 5.0 | `CROSS JOIN UNNEST(step_names) WITH ORDINALITY AS t(step_name, step_position)` correct; ordinality appended LAST; 1-based; LEFT JOIN form also shown; explicit warning NOT to use ROW_NUMBER. |
+| Clarity | 5.0 | Crisp framing; worked example with funnel step names. |
+| Applicability | 5.0 | Engineer can copy-paste directly. |
+| Completeness | 5.0 | Both CROSS and LEFT forms covered; ROW_NUMBER footgun called out. |
 
-**iter524 Q1 FAB-ABSENCE FIX LANDED: CONFIRMED.** iter524's hedge ("WITH ORDINALITY is a PostgreSQL feature, I don't have enough information to tell you if Trino supports it") is GONE. r07 §1a WITH ORDINALITY sub-note (inserted by iter525 teacher per state.json) caught the keyword search and surfaced the canonical correctly on first re-probe.
+**Verification**: trino.io/docs/current/sql/select.html — verbatim "an additional ordinality column is added to the end" and canonical example `SELECT a, b, rownumber FROM UNNEST (ARRAY[2, 5], ARRAY[7, 8, 9]) WITH ORDINALITY AS t(a, b, rownumber);` confirmed.
 
-### Q2 — `approx_distinct(user_id)` ~2.3% off, want <1% (fixed error or controllable?): **5.000 STRONG PASS**
+**ITER525 CANONICAL CONFIRMED GENERALIZED**: r07 §1a WITH ORDINALITY sub-note landed cleanly on second angle (funnel ordering vs original iter525 tag-position framing). Iter524 fab-absence "WITH ORDINALITY is a PostgreSQL feature" is GONE and stays GONE.
 
-| Dim | Score | Reason |
+---
+
+### Q2 — approx_set precision tighter than 2.3% + merge-must-match — 4.000 PASS
+
+| Dim | Score | Notes |
 |---|---|---|
-| Accuracy | 5.0 | Correctly states 2.3% is the standard error of the default (not a hard ceiling); emits optional 2nd-arg `approx_distinct(user_id, 0.01)` targeting ~1% SE; valid range `[0.0040625, 0.26]`; smaller `e` → more memory; correctly notes only `COUNT(DISTINCT)` is exact. Verified at trino.io/docs/current/functions/aggregate.html: "`approx_distinct(x, e)` — ... This function should produce a standard error of no more than `e`, ... The current implementation of this function requires that `e` be in the range of `[0.0040625, 0.26000]`." |
-| Clarity | 5.0 | Crisp framing: 2.3% is the standard error of the default, not a fixed ceiling — answers the user's literal "fixed error or controllable" question head-on. |
-| Applicability | 5.0 | Includes a sample-validation query (compare `approx_distinct(user_id, 0.01)` vs `COUNT(DISTINCT user_id)` on a small slice) so engineer can validate the chosen `e` empirically before shipping the dashboard. |
-| Completeness | 5.0 | Covers default value, range, memory trade-off, validation recipe, and the exact-only-via-COUNT(DISTINCT) escape hatch. |
+| Accuracy | 4.0 | "No tuning knob in `approx_set` itself" is CORRECT per official Trino docs (only `approx_set(x) → HyperLogLog` exists — no `approx_set(x, e)` overload). However, responder did not mention that `approx_distinct(x, e)` accepts a tunable `e` for one-shot (non-pre-aggregated) queries. Merge-must-match claim ("does NOT need to match") is loose — the official Trino docs do not document a constraint, but well-known HLL semantics + Trino's bucket-count serialization mean mismatched-precision merges are not safe in general. Since no `e` overload exists for `approx_set`, the question is somewhat academic in Trino, so not load-bearing wrong. |
+| Clarity | 4.5 | Sketch pattern (`approx_set` + `CAST AS varbinary` + `cardinality(merge(...))`) explained well. |
+| Applicability | 3.5 | Engineer learns the sketch route is locked at 2.3% but is not told about `approx_distinct(x, 0.01)` as a precision-tunable alternative for non-pre-aggregated daily-distinct queries. For a billing-reconciliation use case, `approx_distinct(user_id, 0.01)` per day (no pre-agg) targets ~1% SE — a usable middle path that the answer skipped. |
+| Completeness | 4.0 | Captured the headline ("sketch precision not tunable") and the exact-COUNT(DISTINCT) fallback. Missed `approx_distinct(x, e)` as the third option. |
 
-**iter524 Q4 FAB-ABSENCE FIX LANDED: CONFIRMED.** iter524's "You cannot control the error bound directly — Trino's approx_distinct is a fixed HyperLogLog implementation with ~2.3% error" denial is GONE. r07 approx_distinct 2nd-arg sub-note (inserted by iter525 teacher per state.json) surfaced the optional `e` argument on first re-probe.
+**Verification (META-RULE — independent doc check before flagging)**:
 
-### Q3 — Oracle `NEXT_DAY(invoice_date, 'MONDAY')` → Trino: **5.000 STRONG PASS**
+- **trino.io/docs/current/functions/hyperloglog.html**: only `approx_set(x) → HyperLogLog` documented. NO second-argument overload.
+- **trino.io/docs/current/functions/aggregate.html**: `approx_set(x) → HyperLogLog` only. By contrast, `approx_distinct` HAS two overloads — `approx_distinct(x)` AND `approx_distinct(x, e)` with `e ∈ [0.0040625, 0.26000]`.
+- **trinodb/trino GitHub source** (`ApproximateSetAggregation.java`): only `@AggregationFunction("approx_set")` with three @InputFunction overloads (bigint/double/Slice). No `maxStandardError` parameter.
+- **trinodb/trino docs source** (`aggregate.md`): only `approx_set(x) -> HyperLogLog` documented.
 
-| Dim | Score | Reason |
+**REVISION TO BRIEF**: The iter526 task brief asserted "`approx_set(x, e)` accepts an optional 2nd-arg max standard error". This is **NOT supported by current Trino docs or source code**. Per the META-RULE ("verify YOUR OWN corrections before asserting a responder claim is wrong"), I did NOT mark the responder DOWN for the "no tuning knob in approx_set" claim — it is CORRECT. The asymmetry (`approx_distinct(x, e)` exists; `approx_set(x, e)` does NOT) is the actual nuance the responder missed.
+
+**Merge-must-match nuance**: docs do not document an explicit constraint; common HLL implementations require matching bucket count; Trino's HLL stores the bucket count in the serialized form. In practice merging incompatible sketches may downgrade precision. Responder's "does NOT need to match" framing is loose but not load-bearing wrong, since with only `approx_set(x)` available there is no `e` to vary anyway.
+
+**FINDABILITY GAP**: iter525 fixed `approx_distinct(x, e)` 2nd-arg canonical in r07. That sub-note is not finding its way to questions phrased around `approx_set` / sketches / merge. The leading canonical needs a parallel sentence at the `approx_set` keyword anchor explicitly stating: "(a) `approx_set` has NO `e` overload; (b) for tunable precision in non-pre-aggregated queries use `approx_distinct(x, e)` directly; (c) sketches are stuck at ~2.3% default."
+
+---
+
+### Q3 — Oracle NEXT_DAY → Trino, generalized to any weekday — 5.000 STRONG PASS
+
+| Dim | Score | Notes |
 |---|---|---|
-| Accuracy | 5.0 | Correctly states Trino has NO `next_day` built-in (genuine content gap, not fab-absence); emits formula `date_add('day', ((target_dow - day_of_week(invoice_date) + 6) % 7) + 1, invoice_date)`; ISO day_of_week numbering (1=Mon..7=Sun) verified at trino.io/docs/current/functions/datetime.html: "`day_of_week(x) → bigint` — Returns the ISO day of the week of `x`. The value ranges from `1` (Monday) to `7` (Sunday)". `date_add('day', value, ts)` verified. **Independent re-derivation of arithmetic:** Wed 2026-06-03 (dow=3), target Mon (1): `((1-3+6) % 7) + 1 = (4 % 7) + 1 = 5` → `2026-06-08`. June 3 2026 IS Wednesday (verified via calendar lookup); June 8 2026 IS Monday. Same-weekday edge Mon→Mon: `((1-1+6) % 7) + 1 = 6+1 = 7` → +7 days (strictly after, matches Oracle). Sun→Mon: `((1-7+6) % 7) + 1 = 0+1 = 1` → +1 day. **All three boundary cases verified strictly after.** |
-| Clarity | 5.0 | Worked example with explicit day_of_week=3 → +5 days arithmetic; ISO convention spelled out (1=Mon..7=Sun) so engineer doesn't confuse with Postgres EXTRACT(DOW) 0=Sun..6=Sat. |
-| Applicability | 5.0 | Drop-in replacement for Oracle NEXT_DAY; parameterized by target_dow so engineer can swap 'FRIDAY' → 5, etc. |
-| Completeness | 5.0 | "Always strictly after" semantic explicitly stated (matches Oracle NEXT_DAY behavior even when dt is itself the target weekday). |
+| Accuracy | 5.0 | `date_add('day', ((5 - day_of_week(contract_start) + 6) % 7) + 1, contract_start)` correct for Friday target_dow=5; ISO numbering 1=Mon..7=Sun verified; strictly-after semantic preserved; generalizes by changing target_dow. |
+| Clarity | 5.0 | Worked examples for several weekdays. |
+| Applicability | 5.0 | Engineer can plug in any target_dow value. |
+| Completeness | 5.0 | Strictly-after edge case covered; ISO convention stated explicitly. |
 
-**iter524 Q2 CONTENT GAP FIX LANDED: CONFIRMED.** iter524's honest-but-incomplete punt ("check the Trino docs for NEXT_DAY") is GONE. r27 §4.x NEXT_DAY block + Oracle↔Trino mapping table row (inserted by iter525 teacher per state.json) surfaced the canonical formula on first re-probe.
+**Verification**: trino.io/docs/current/functions/datetime.html — `day_of_week(x) → bigint` returns "value ranges from 1 (Monday) to 7 (Sunday)". `date_add(unit, value, ts)` confirmed.
 
-### Q4 — Iceberg snapshot cleanup (auto vs manual; keep last N): **4.9375 STRONG PASS**
+**Re-derivation**: Wed (dow=3) → Fri (target=5): `((5-3+6)%7)+1 = (8%7)+1 = 1+1 = 2` → Wed + 2 = Fri. Fri→Fri same-day edge: `((5-5+6)%7)+1 = (6%7)+1 = 6+1 = 7` → +7 days = next Fri (strictly after).
 
-| Dim | Score | Reason |
+**ITER525 CANONICAL CONFIRMED GENERALIZED**: r27 §4.x NEXT_DAY block landed on second angle (Friday vs iter525 Monday). Formula generalizes cleanly by `target_dow` substitution.
+
+---
+
+### Q4 — bucket continuous metric into uneven ranges — 2.75 FAIL
+
+| Dim | Score | Notes |
 |---|---|---|
-| Accuracy | 5.0 | Snapshots do NOT auto-expire — CORRECT. `ALTER TABLE ... EXECUTE expire_snapshots(retention_threshold => '7d')` — CORRECT per trino.io/docs/current/connector/iceberg.html. 7-day min-retention floor (`iceberg.expire-snapshots.min-retention`) — CORRECT (Starburst forum + Trino docs both confirm the floor and the "Retention specified (1.00d) is shorter than the minimum retention configured in the system (7.00d)" error pattern). **Critical version-awareness:** correctly states `retain_last` + `clean_expired_metadata` are Trino 479+ and NOT available in Trino 467. **Verified via release notes: `retain_last` was added in Trino Release 479 (14 Dec 2025); the prod stack runs Trino 467 (6 Dec 2024) so it is genuinely unavailable.** Spark CALL fallback `CALL iceberg.system.expire_snapshots(table=>'...', older_than=>current_timestamp - interval '7' day, retain_last=>10)` — CORRECT signature per iceberg.apache.org/docs/latest/spark-procedures. Matches the established repo facts. |
-| Clarity | 5.0 | Clean auto-vs-manual framing; explicit "Trino 479+" version gate so engineer doesn't waste time trying retain_last on the prod 467 cluster. |
-| Applicability | 5.0 | Engineer gets exact Trino 467 EXECUTE statement for time-based cleanup + Spark CALL for keep-last-N, with version note explaining the bifurcation. Fits prod_info.md (Trino 467 + Spark+Iceberg ingestion stack — both engines available). |
-| Completeness | 4.75 | -0.25 for no mention of `remove_orphan_files` as the complementary procedure (engineers who run expire_snapshots often need orphan cleanup next). Non-load-bearing. |
+| Accuracy | 2.0 | **FABRICATED ABSENCE — load-bearing**: responder claims "resources don't document whether Trino 467 supports a width_bucket() histogram function". WRONG. Trino 467 HAS BOTH overloads: `width_bucket(x, bound1, bound2, n)` (equal-width) AND `width_bucket(x, bins)` (array-bins, uneven). The array-bins form is the EXACT direct answer for the user's uneven ranges (0-30, 30-60, 60-120, 120+). |
+| Clarity | 4.0 | CASE WHEN fallback is correctly written. |
+| Applicability | 2.5 | Engineer ends up with an 8-line CASE WHEN when `width_bucket(session_duration_seconds, ARRAY[30, 60, 120])` is a one-liner. |
+| Completeness | 2.5 | Missed both width_bucket overloads, particularly the array-bins form that maps 1:1 to the user's question. |
+
+**Verification**: trino.io/docs/current/functions/math.html — both signatures documented verbatim:
+- `width_bucket(x, bound1, bound2, n) → bigint` — "Returns the bin number of `x` in an equi-width histogram with the specified `bound1` and `bound2` bounds and `n` number of buckets."
+- `width_bucket(x, bins) → bigint` — "Returns the bin number of `x` according to the bins specified by the array `bins`. The `bins` parameter must be an array of doubles and is assumed to be in sorted ascending order."
+
+**Correct answer for user's uneven 0-30 / 30-60 / 60-120 / 120+ bins**:
+```sql
+SELECT width_bucket(session_duration_seconds, ARRAY[30, 60, 120]) AS bucket, COUNT(*)
+FROM sessions
+GROUP BY 1
+ORDER BY 1;
+-- bucket 0 = <30, 1 = [30,60), 2 = [60,120), 3 = >=120
+```
+
+**INCONSISTENCY ANCHOR**: Responder used `width_bucket` CORRECTLY in iter523 Q2 (equal-width form). The function is not yet a leading canonical in resources/, so findability is fragile to question phrasing. Iter523's success was probably opportunistic.
 
 ---
 
-## All Three iter524 Gaps — Explicit Fill Confirmation
+## Overall iter526 PASS/FAIL
 
-| iter524 Gap | iter525 Re-Probe | Fix Landed? | Doc Verification |
-|---|---|---|---|
-| Q1 UNNEST WITH ORDINALITY (fab-absence: "Postgres-only") | Q1 (this iter) | **YES** — r07 §1a sub-note surfaced canonical with ordinality-last-in-alias, 1-based, duplicate-tag example, ROW_NUMBER anti-pattern warning | trino.io/docs/current/sql/select.html — "additional ordinality column is added to the end of the result" |
-| Q4 approx_distinct 2nd-arg `e` (fab-absence: "cannot control, fixed 2.3%") | Q2 (this iter) | **YES** — r07 approx_distinct sub-note surfaced 2nd-arg, range `[0.0040625, 0.26]`, default 0.023, memory trade-off, validation recipe | trino.io/docs/current/functions/aggregate.html — "`approx_distinct(x, e)` ... `e` ... range of `[0.0040625, 0.26000]`" |
-| Q2 NEXT_DAY (content gap: under-answered punt) | Q3 (this iter) | **YES** — r27 §4.x NEXT_DAY block + table row surfaced `date_add('day', ((target_dow - day_of_week(dt) + 6) % 7) + 1, dt)` with worked Wed→Mon example | trino.io/docs/current/functions/datetime.html — day_of_week ISO 1=Mon..7=Sun confirmed; arithmetic re-derived strictly-after |
+**OVERALL AVG** = (5.000 + 4.000 + 5.000 + 2.75) / 4 = 16.75 / 4 = **4.1875 PASS**
 
----
-
-## New Fabrications: **NONE**
-
-Zero new fabrications surfaced this iter. Q4's Trino-479-vs-467 version gate is correctly handled (responder defers `retain_last` to Spark CALL rather than fabricating that it works in 467 EXECUTE).
+- Margin: +0.6875 above 3.5 floor
+- Q1 + Q3 second-angle re-probes: both 5.000 — iter525 canonicals (WITH ORDINALITY at r07 §1a, NEXT_DAY at r27 §4.x) confirmed durable.
+- Q2 mid-PASS (4.000): mostly accurate but missed the `approx_distinct(x, e)` cross-link from the `approx_set` keyword anchor.
+- Q4 FAIL (2.75): fab-absence on `width_bucket` despite responder having used it correctly in iter523 — pure findability gap.
 
 ---
 
-## Topic Avg Updates
+## Topic average updates
 
-- **SQL query best practices for OLAP** (Q1 UNNEST array-position + Q2 approx_distinct precision both map here per analytical-patterns + aggregate-functions cluster precedent): 4.4661/82 → (4.4661·82 + 5.0 + 5.0)/84 = **4.4774/84** (+0.0113 — both Q1+Q2 well above topic avg).
-- **Oracle PL/SQL → dbt + Trino SQL migration** (Q3 NEXT_DAY Oracle-datetime port maps here per migration-cluster precedent): 4.6139/18 → (4.6139·18 + 5.0)/19 = **4.6342/19** (+0.0203 — Q3 above topic avg).
-- **Iceberg table maintenance** (Q4 expire_snapshots maintenance-cluster): 4.4834/157 → (4.4834·157 + 4.9375)/158 = **4.4862/158** (+0.0028 — Q4 above topic avg).
-- **Federation row UNCHANGED — 4.49944/310** per directive (no probe attempted; §13.x guardrails untouched).
+**SQL query best practices for OLAP** (current 4.5045/76 — Q1 UNNEST WITH ORDINALITY + Q2 approx_set + Q4 width_bucket all map here per analytical-pattern/aggregate-functions/math-functions cluster precedent):
+- New: (4.5045 × 76 + 5.000 + 4.000 + 2.75) / 79 = (342.342 + 11.75) / 79 = 354.092 / 79 = **4.4822/79** (-0.0223 — Q4 fab-absence drags net negative)
 
----
+**Oracle PL/SQL → dbt + Trino SQL migration** (current 4.5123/90 — Q3 NEXT_DAY generalization maps here):
+- New: (4.5123 × 90 + 5.000) / 91 = (406.107 + 5.000) / 91 = 411.107 / 91 = **4.5176/91** (+0.0053 — Q3 above topic-avg lift)
 
-## Next Teacher Actions for iter526
-
-**No FIX directives — iter525 cleared all three iter524 carry-over gaps cleanly with zero new fabrications.** Iter526 teacher should HOLD pattern (no new resource edits required unless judge surfaces a new gap):
-
-1. **HOLD** — preserve r07 §1a WITH ORDINALITY sub-note (do NOT remove or trim — landed on first re-probe and is now a battle-tested canonical).
-2. **HOLD** — preserve r07 approx_distinct 2nd-arg sub-note (landed on first re-probe).
-3. **HOLD** — preserve r27 §4.x NEXT_DAY block + table row (landed on first re-probe).
-4. **HOLD** — preserve r07 §1a date_trunc/HLL pre-agg pattern, r17 maintenance canonicals, r27 §4.4E try() canonical, all other iter500-524 LEADING CANONICALS.
-5. **OPTIONAL POLISH (non-load-bearing)** — r17 expire_snapshots block could add a one-line cross-ref to `remove_orphan_files` as complementary procedure (engineers running expire_snapshots usually need orphan cleanup next). LOW priority, no FAIL risk if skipped.
-6. **DO NOT** touch §13.x federation guardrails in r22; the federation row STAYS 4.49944/310 per established multi-iter directive.
+**Federation row**: 4.49944/310 UNCHANGED per directive.
 
 ---
 
-## Iter526 Judge Probe Targets
+## Concrete next-teacher actions for iter527
 
-**Each iter525 fix needs a 2nd-angle datapoint to be battle-tested (currently 1 datapoint each):**
+### FIX A (HIGH — findability) — r07 approx_set/HLL block reconcile-in-place
+**Location**: At the existing r07 approx_distinct canonical (the iter525 sub-note that added `approx_distinct(x, e)`). RECONCILE — do not append duplicate.
 
-1. **HIGH — WITH ORDINALITY 2nd angle** ("I have a JSON array column and need to UNNEST while preserving original element index — same WITH ORDINALITY syntax?") — verifies r07 §1a sub-note extends to JSON-array variant and the keyword anchors catch this phrasing.
-2. **HIGH — approx_distinct 2nd angle** ("approx_set with custom precision — can I pre-aggregate daily HLL sketches with `approx_set(user_id, 0.01)` and merge them later?") — verifies whether the 2nd-arg canonical extends to approx_set + the sketch-mergeability-requires-same-e nuance lands.
-3. **HIGH — NEXT_DAY 2nd angle** ("port Oracle `NEXT_DAY(order_date, 'FRIDAY')` to Trino — same formula with target_dow=5?") — verifies r27 §4.x NEXT_DAY canonical extends beyond Monday + same-weekday-edge guarantees strictly-after.
-4. **MEDIUM — expire_snapshots 2nd angle** ("how do I find orphan files after expire_snapshots? — `remove_orphan_files` procedure?") — verifies whether the optional-polish gap stays minor or becomes load-bearing under second phrasing.
-5. **MEDIUM — UNNEST + WITH ORDINALITY edge** ("when I UNNEST two arrays together with ORDINALITY, do shorter arrays NULL-pad and does ordinality still count rows?") — verifies multi-array UNNEST + ordinality interaction.
-6. **MEDIUM — approx_distinct out-of-range** ("if I pass `e = 0.001` does it error or clamp?") — verifies the hard-error-out-of-range boundary lands.
-7. **LOW — Federation STAYS UNPROBED** — row 4.49944/310 unchanged per multi-iter directive.
+**Add a parallel `approx_set` sub-note** with these load-bearing rules:
+1. **`approx_set` has NO `e` overload** — only `approx_set(x) → HyperLogLog`. Source: trino.io/docs/current/functions/hyperloglog.html (single signature) + aggregate.html (same).
+2. **Sketches stored as varbinary are stuck at the default ~2.3% standard error**. There is NO `approx_set(x, e)` overload to tighten precision at sketch-creation time.
+3. **For tunable precision without pre-aggregation**: use `approx_distinct(x, e)` directly on the slice (e.g. `approx_distinct(user_id, 0.01)` per day) — this gives ~1% SE without sketches/merge.
+4. **Merge semantics**: `merge()` aggregates HyperLogLog structures. Trino does not document a constraint that all input sketches must share the same parameters, but well-known HLL semantics require matching bucket count; since only one `approx_set` precision exists in Trino, this is academic in practice — but engineers should NOT assume cross-Trino-version or cross-implementation sketch portability with mismatched bucket counts.
+5. **If 2.3% is too loose AND you need pre-aggregation**: there is no way in Trino 467 — fall back to exact `COUNT(DISTINCT)` or use `approx_distinct(x, e)` on the daily slice without storing sketches.
+
+**Keyword anchors**: "approx_set precision Trino / HLL sketch tighter than 2.3 / approx_set max standard error / approx_set e parameter / sketch precision Trino HyperLogLog / merge sketches different precision Trino / tighter than default HLL Trino / sketch billing reconciliation Trino / approx_set tuning knob".
+
+**DO-NOT-WRITE bans**:
+- "`approx_set(x, e)` accepts a maxStandardError second argument" — FALSE (the iter526 brief erroneously asserted this; no such overload exists).
+- "`approx_set` precision is fully tunable in Trino 467" — FALSE.
+- "Sketches with different precision can always be merged safely regardless of how they were built" — too strong; common HLL implementations require matching bucket count.
+
+### FIX B (HIGH — fab-absence prevention) — r07 NEW LEADING CANONICAL for `width_bucket` (both overloads)
+**Location**: r07 §1a analytical patterns / aggregate-helpers block. NEW canonical (not yet a leading canonical — responder's iter526 fab-absence + iter523 opportunistic correctness shows findability is fragile).
+
+**Add a `width_bucket` block** with these load-bearing rules:
+1. **`width_bucket(x, bound1, bound2, n) → bigint`** — equal-width histogram. Returns 1..n for in-range; 0 below bound1; n+1 above bound2.
+2. **`width_bucket(x, bins) → bigint`** — explicit bins (uneven widths!). `bins` is an ascending-sorted ARRAY of doubles. Returns 0 for x < bins[1]; i for x in [bins[i], bins[i+1]); cardinality(bins) for x >= bins[last].
+3. **For UNEVEN buckets like 0-30 / 30-60 / 60-120 / 120+, use the array-bins overload** — NOT a CASE WHEN ladder, NOT the equal-width form:
+   ```sql
+   SELECT width_bucket(session_duration_seconds, ARRAY[30, 60, 120]) AS bucket, COUNT(*)
+   FROM sessions GROUP BY 1 ORDER BY 1;
+   ```
+4. CAST array element type if needed (`ARRAY[30.0, 60.0, 120.0]` or `CAST(ARRAY[30, 60, 120] AS ARRAY<DOUBLE>)`).
+5. Worked examples for BOTH overloads: equal-width (0-1000 in 10 buckets) + uneven (session-duration 30/60/120 boundaries).
+
+**Keyword anchors**: "Trino bucket continuous metric / Trino histogram function / Trino width_bucket / Trino uneven buckets / Trino range bucketize / Trino group by range buckets / alternative to CASE WHEN bucket Trino / Trino bin numbers histogram / bucket session duration Trino / width_bucket array bins Trino".
+
+**DO-NOT-WRITE bans**:
+- "Trino 467 doesn't have a width_bucket function" — FALSE.
+- "width_bucket only supports equal-width buckets" — FALSE (array-bins overload exists).
+- "For uneven buckets you must use CASE WHEN in Trino" — FALSE (array-bins overload is the canonical path).
+
+### POLISH (LOW) — r17 expire_snapshots → remove_orphan_files cross-ref
+Iter525's polish suggestion stands but is LOW priority; r17 already covers `remove_orphan_files` thoroughly per the iter526 state.json grep. No action needed unless a future re-probe shows the cross-ref is load-bearing.
+
+### Iter527 probe targets
+- **width_bucket array-bins RE-PROBE** (HIGH — "histogram of latencies into custom buckets [50, 100, 500, 1000] ms — Trino function?" verifies FIX B array-bins canonical lands + fab-absence does not reappear).
+- **width_bucket equal-width 2nd angle** (HIGH — "bucket scores 0-100 into 10 equal-width buckets and count — Trino?" verifies FIX B equal-width form holds).
+- **approx_set + approx_distinct(x, e) cross-link 2nd angle** (HIGH — "do I use approx_set or approx_distinct if I want 1% standard error?" verifies FIX A's sketch-no-tuning / approx_distinct-yes-tuning asymmetry lands).
+- **approx_set merge cross-version safety 2nd angle** (MEDIUM — "can I merge HLL sketches built with different Trino versions?" verifies FIX A's bucket-count caveat lands).
+- **UNNEST WITH ORDINALITY 3rd angle** (LOW — well-bulletproofed; only re-probe if findability slips).
+- **NEXT_DAY 3rd angle** (LOW — well-bulletproofed; only re-probe if a non-Mon/Fri target raises an edge case).
+- **Federation stays UNPROBED** (LOW — row stays 4.49944/310).
 
 ---
 
-## Summary
+## Streak / momentum note
 
-Iter525 is a clean recovery iteration. All three iter524 gaps (two fab-absences + one content gap) landed on first re-probe with crisp canonicals + worked examples + DO-NOT-WRITE bans against the prior fabrications. Q4 expire_snapshots correctly version-gates `retain_last` to Trino 479+ vs prod's 467 (defers to Spark CALL). Streak restored. Iter526 should focus on 2nd-angle datapoints to battle-test the three new sub-notes before they're considered locked.
+- Iter525 (4.984 STRONG PASS) → Iter526 (4.1875 PASS) — streak preserved at 122nd consecutive overall PASS in extended phase, but margin tightened from +1.484 to +0.6875 because of the Q4 width_bucket fab-absence.
+- Q1 + Q3 second-angle re-probes both 5.000 — iter525 canonicals durable.
+- Q2 + Q4 reveal the same META-PATTERN: **leading canonicals at one keyword (e.g. `approx_distinct`) do NOT auto-extend to adjacent keywords (`approx_set`, `width_bucket`)** unless the teacher places parallel anchor text. This is the iter527 priority.
