@@ -373,6 +373,8 @@ Run this on 5–10 different partitions covering your typical query shapes (per-
 
 For DAU/WAU/MAU dashboards that need to refresh every minute against a 500M-row events table, even `approx_distinct` is wasteful if it re-scans raw events on every refresh. The production pattern is to **build a daily HyperLogLog sketch table once**, then merge sketches at query time for any window size you want.
 
+> **`approx_set` precision is FIXED — there is NO `approx_set(x, e)` overload** (verified at [trino.io/docs/current/functions/hyperloglog.html](https://trino.io/docs/current/functions/hyperloglog.html) — the only signature is `approx_set(x) -> HyperLogLog`). **Keyword anchors:** approx_set precision, tune HLL sketch error, approx_set no second argument, approx_distinct vs approx_set precision, tighter than 2.3% distinct sketch, control HLL standard error stored sketch. The stored sketch is fixed at the canonical **~2.3% standard error**, and every sketch you later `merge()` shares that one fixed precision — you cannot store a "tighter sketch" by passing a precision argument to `approx_set`. To get tighter than 2.3%, you have only two options: (1) use the **scalar `approx_distinct(x, e)`** form directly (e.g. `approx_distinct(user_id, 0.01)` for ~1% standard error — see the `approx_distinct(x, e)` canonical above), which computes the count in one query but is **NOT a stored / mergeable sketch**, OR (2) fall back to exact `COUNT(DISTINCT)`. **DO NOT WRITE:** `approx_set(x, e)` with a 2nd precision arg (does NOT exist — only `approx_distinct` takes `e`); claiming you can tune a stored HLL sketch's error after the fact.
+
 ```sql
 -- Step 1: nightly job — one row per day, one sketch column.
 -- approx_set(col) builds an HLL sketch (a few KB binary blob) for a column.
@@ -1115,6 +1117,32 @@ WHERE monthly_revenue IS NOT NULL;          -- explicit NULL filter
 ```
 
 If you can't drop the NULL rows (e.g., the result set needs all tenants present), bucket only the non-NULL rows via a subquery and `LEFT JOIN` the NULL rows back with `revenue_decile = NULL`. Do not rely on `NULLS FIRST` to "hide" them in bucket 1 — that just moves the bug.
+
+### Pattern C4: `width_bucket` — bucket a numeric value into a histogram (equal-width OR custom/uneven bins) WITHOUT a long CASE WHEN ladder
+
+**Keyword anchors:** Trino width_bucket, bucket numeric range, histogram bins Trino, uneven/custom buckets, session duration buckets, bin a continuous value, histogram without CASE WHEN, score buckets, latency buckets, price tier buckets. Verified at [trino.io/docs/current/functions/math.html](https://trino.io/docs/current/functions/math.html).
+
+Trino has `width_bucket` (BOTH overloads) — use it instead of a long `CASE WHEN x < 30 THEN 0 WHEN x < 60 THEN 1 ...` ladder when bucketing a continuous value:
+
+- **Equal-width overload — `width_bucket(x, bound1, bound2, n) -> bigint`**: divides the range `[bound1, bound2]` into `n` equal-width buckets. Returns **`1..n`** for an in-range `x` (1-based), **`0`** if `x < bound1`, **`n+1`** if `x >= bound2`.
+  ```sql
+  -- 10 equal-width score buckets over [0, 1000] (each bucket width = 100).
+  -- score=0->1, 99->1, 100->2, 999->10, 1000->11 (overflow), -5->0 (underflow).
+  SELECT width_bucket(score, 0, 1000, 10) AS score_bucket, COUNT(*)
+  FROM iceberg.analytics.lead_scores GROUP BY 1 ORDER BY 1;
+  ```
+- **Custom-bins (uneven) overload — `width_bucket(x, bins) -> bigint`** where `bins` is an **ASCENDING `ARRAY` of DOUBLE bounds**: returns the **0-based** number of bounds that `x` is `>=` (equivalently, the bin index). Returns `0` if `x < bins[0]`, `cardinality(bins)` if `x >= bins[last]`.
+  ```sql
+  -- Uneven session-duration buckets: 0-30 / 30-60 / 60-120 / 120+ seconds.
+  -- session_duration_seconds=10->0, 45->1, 90->2, 300->3.
+  SELECT width_bucket(session_duration_seconds, ARRAY[30.0, 60.0, 120.0]) AS dur_bucket,
+         COUNT(*) AS sessions
+  FROM iceberg.analytics.sessions
+  GROUP BY 1 ORDER BY 1;
+  ```
+  Wrap the integer bucket index in a `CASE` ONLY if you want pretty labels (`'0-30s'`, `'30-60s'`, ...); the bucketing itself is one function call.
+
+**DO NOT WRITE** *"Trino has no `width_bucket` — it is Postgres-only"* (FALSE — Trino 467 has BOTH overloads, documented at `functions/math.html`); **DO NOT WRITE** a long `CASE WHEN ... THEN ... WHEN ... THEN ... END` ladder for numeric histogram bucketing when `width_bucket(x, ARRAY[...])` does uneven bins directly in one call. Update the Pattern C3 comparison table mental model: "Custom (non-equal-size) buckets" → `width_bucket(x, ARRAY[...])` is the **preferred Trino-native one-liner**; the CASE WHEN ladder is the fallback only when you need non-numeric bucketing (e.g., string-key bucketing) or per-bucket pretty labels mid-aggregation.
 
 ### Pattern D: Sliding window (last 7 days rolling)
 

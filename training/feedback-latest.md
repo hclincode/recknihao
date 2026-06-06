@@ -1,175 +1,122 @@
-# Judge Feedback — Iter 526
+# Iter 527 Judge Feedback — 2026-06-06 (EXTENDED PHASE)
 
-**Date**: 2026-06-06
-**Phase**: extended
-**Overall**: **4.1875 PASS** (margin +0.6875 above 3.5 floor)
-**Federation**: NOT probed — row stays 4.49944/310
+## Overall result: **3.781 PASS** (margin +0.281 above 3.5 floor; tight pass — Q3 fab-absence dragged hard)
+
+Federation NOT probed — row stays **4.49944/310** (no edits to resources/22 §13.x guardrails).
 
 ---
 
 ## Per-question scores
 
-### Q1 — UNNEST array with 1-based ORIGINAL array position (funnel order) — 5.000 STRONG PASS
+### Q1 — bucket API latency into UNEVEN ranges (0-50/50-100/100-250/250-1000/1000+) cleaner than CASE WHEN? — **5.000 STRONG PASS** (re-probe of iter527 FIX A)
 
 | Dim | Score | Notes |
 |---|---|---|
-| Accuracy | 5.0 | `CROSS JOIN UNNEST(step_names) WITH ORDINALITY AS t(step_name, step_position)` correct; ordinality appended LAST; 1-based; LEFT JOIN form also shown; explicit warning NOT to use ROW_NUMBER. |
-| Clarity | 5.0 | Crisp framing; worked example with funnel step names. |
-| Applicability | 5.0 | Engineer can copy-paste directly. |
-| Completeness | 5.0 | Both CROSS and LEFT forms covered; ROW_NUMBER footgun called out. |
+| Accuracy | 5.0 | `width_bucket(latency_ms, ARRAY[50.0, 100.0, 250.0, 1000.0])` array-bins overload — verified at trino.io/docs/current/functions/math.html quoting `"width_bucket(x, bins) → bigint"` and `"Returns the bin number of x according to the bins specified by the array bins. The bins parameter must be an array of doubles and is assumed to be in sorted ascending order."` 0-based return convention (0 for x < bins[0], cardinality(bins) for x >= bins[last]) correctly framed. CASE WHEN only-for-labels callout correct. |
+| Clarity | 5.0 | Worked example with the user's actual bins; explicit "0 means <50, 4 means >=1000" mapping; explains why CASE WHEN is the wrong tool for bin assignment. |
+| Applicability | 5.0 | Drop-in SQL the engineer can paste into Trino 467 with their `latency_ms` column. Cites r07 Pattern C4. |
+| Completeness | 5.0 | Mentions equal-width overload exists as well; addresses the "cleaner than CASE WHEN?" framing directly (yes, for bin assignment; CASE WHEN only for string labels). |
 
-**Verification**: trino.io/docs/current/sql/select.html — verbatim "an additional ordinality column is added to the end" and canonical example `SELECT a, b, rownumber FROM UNNEST (ARRAY[2, 5], ARRAY[7, 8, 9]) WITH ORDINALITY AS t(a, b, rownumber);` confirmed.
-
-**ITER525 CANONICAL CONFIRMED GENERALIZED**: r07 §1a WITH ORDINALITY sub-note landed cleanly on second angle (funnel ordering vs original iter525 tag-position framing). Iter524 fab-absence "WITH ORDINALITY is a PostgreSQL feature" is GONE and stays GONE.
+**FIX A landed on first re-probe.** Iter527 teacher's r07 Pattern C4 `width_bucket` canonical (both overloads) is durable — the iter526 Q4 fab-absence ("Trino doesn't document width_bucket") is GONE. Same routing keywords ("uneven buckets / bucket numeric range / CASE WHEN alternative") now find the canonical.
 
 ---
 
-### Q2 — approx_set precision tighter than 2.3% + merge-must-match — 4.000 PASS
+### Q2 — can you pass an error param to approx_set to tighten the ~2.3% stored sketch? — **4.000 PASS** (re-probe of iter527 FIX B)
 
 | Dim | Score | Notes |
 |---|---|---|
-| Accuracy | 4.0 | "No tuning knob in `approx_set` itself" is CORRECT per official Trino docs (only `approx_set(x) → HyperLogLog` exists — no `approx_set(x, e)` overload). However, responder did not mention that `approx_distinct(x, e)` accepts a tunable `e` for one-shot (non-pre-aggregated) queries. Merge-must-match claim ("does NOT need to match") is loose — the official Trino docs do not document a constraint, but well-known HLL semantics + Trino's bucket-count serialization mean mismatched-precision merges are not safe in general. Since no `e` overload exists for `approx_set`, the question is somewhat academic in Trino, so not load-bearing wrong. |
-| Clarity | 4.5 | Sketch pattern (`approx_set` + `CAST AS varbinary` + `cardinality(merge(...))`) explained well. |
-| Applicability | 3.5 | Engineer learns the sketch route is locked at 2.3% but is not told about `approx_distinct(x, 0.01)` as a precision-tunable alternative for non-pre-aggregated daily-distinct queries. For a billing-reconciliation use case, `approx_distinct(user_id, 0.01)` per day (no pre-agg) targets ~1% SE — a usable middle path that the answer skipped. |
-| Completeness | 4.0 | Captured the headline ("sketch precision not tunable") and the exact-COUNT(DISTINCT) fallback. Missed `approx_distinct(x, e)` as the third option. |
+| Accuracy | 4.5 | CORRECTLY states `approx_set()` has NO precision parameter — verified at trino.io/docs/current/functions/hyperloglog.html: only signature is `"approx_set(x) → HyperLogLog"`, no 2nd-arg overload, sketch precision is implementation-fixed. Did NOT fabricate `approx_set(x, e)`. -0.5 for not surfacing that `approx_distinct(x, e)` is the precision-tunable alternative even though FIX B blockquote in r07 explicitly cross-links it. |
+| Clarity | 4.5 | Clean "no, the precision is fixed" answer; explains why (HLL implementation default ~2.3% std error baked in); doesn't overload with sketch-merging caveats. |
+| Applicability | 3.0 | Only offers two paths to 1%: (1) exact `COUNT(DISTINCT)` (expensive) or (2) accept 2.3%. **MISSES the middle path** the user actually wants — `approx_distinct(visitor_id, 0.01)` for ~1% std error in non-pre-aggregated daily queries. Verified at trino.io/docs/current/functions/aggregate.html: `"approx_distinct(x, e) → bigint"` with valid range `"[0.0040625, 0.26000]"`. This is the load-bearing miss — the engineer asking "can I make the sketch more precise" almost certainly accepts "you can't tune the SKETCH but you CAN tune `approx_distinct(x, e)` directly on the source rows." |
+| Completeness | 4.0 | Answers the literal "can you pass a param to approx_set" → no; "is it fixed" → yes. But misses the canonical workaround that's one paragraph away in the same r07 block. |
 
-**Verification (META-RULE — independent doc check before flagging)**:
-
-- **trino.io/docs/current/functions/hyperloglog.html**: only `approx_set(x) → HyperLogLog` documented. NO second-argument overload.
-- **trino.io/docs/current/functions/aggregate.html**: `approx_set(x) → HyperLogLog` only. By contrast, `approx_distinct` HAS two overloads — `approx_distinct(x)` AND `approx_distinct(x, e)` with `e ∈ [0.0040625, 0.26000]`.
-- **trinodb/trino GitHub source** (`ApproximateSetAggregation.java`): only `@AggregationFunction("approx_set")` with three @InputFunction overloads (bigint/double/Slice). No `maxStandardError` parameter.
-- **trinodb/trino docs source** (`aggregate.md`): only `approx_set(x) -> HyperLogLog` documented.
-
-**REVISION TO BRIEF**: The iter526 task brief asserted "`approx_set(x, e)` accepts an optional 2nd-arg max standard error". This is **NOT supported by current Trino docs or source code**. Per the META-RULE ("verify YOUR OWN corrections before asserting a responder claim is wrong"), I did NOT mark the responder DOWN for the "no tuning knob in approx_set" claim — it is CORRECT. The asymmetry (`approx_distinct(x, e)` exists; `approx_set(x, e)` does NOT) is the actual nuance the responder missed.
-
-**Merge-must-match nuance**: docs do not document an explicit constraint; common HLL implementations require matching bucket count; Trino's HLL stores the bucket count in the serialized form. In practice merging incompatible sketches may downgrade precision. Responder's "does NOT need to match" framing is loose but not load-bearing wrong, since with only `approx_set(x)` available there is no `e` to vary anyway.
-
-**FINDABILITY GAP**: iter525 fixed `approx_distinct(x, e)` 2nd-arg canonical in r07. That sub-note is not finding its way to questions phrased around `approx_set` / sketches / merge. The leading canonical needs a parallel sentence at the `approx_set` keyword anchor explicitly stating: "(a) `approx_set` has NO `e` overload; (b) for tunable precision in non-pre-aggregated queries use `approx_distinct(x, e)` directly; (c) sketches are stuck at ~2.3% default."
+**FIX B landed PARTIALLY.** The no-fab part is solid (no fabricated `approx_set(x, e)` signature — iter526 brief's erroneous assertion did not get parroted back). But the FIX B blockquote's "two ways to tighten — `approx_distinct(x, e)` or exact COUNT(DISTINCT)" cross-link did NOT surface in the responder's answer. The responder skipped the `approx_distinct(x, e)` middle option. Findability gap: the FIX B blockquote is at the HLL-sketch block, but the responder rendered only the upper half ("no 2nd arg") without surfacing the alternatives bullet.
 
 ---
 
-### Q3 — Oracle NEXT_DAY → Trino, generalized to any weekday — 5.000 STRONG PASS
+### Q3 — filter map of feature flags to true-valued keys + get key list WITHOUT unnesting — **2.250 FAIL** (FABRICATED ABSENCE — load-bearing)
 
 | Dim | Score | Notes |
 |---|---|---|
-| Accuracy | 5.0 | `date_add('day', ((5 - day_of_week(contract_start) + 6) % 7) + 1, contract_start)` correct for Friday target_dow=5; ISO numbering 1=Mon..7=Sun verified; strictly-after semantic preserved; generalizes by changing target_dow. |
-| Clarity | 5.0 | Worked examples for several weekdays. |
-| Applicability | 5.0 | Engineer can plug in any target_dow value. |
-| Completeness | 5.0 | Strictly-after edge case covered; ISO convention stated explicitly. |
+| Accuracy | 1.5 | **FABRICATED ABSENCE**: claims `"there is no built-in Trino function to filter a map directly without unnesting it to rows"` and `"none offer a declarative 'keep only entries where value = true' operation."` WRONG. Verified at trino.io/docs/current/functions/map.html: `"map_filter(map(K, V), function(K, V, boolean)) → map(K, V)"` with description `"Constructs a map from those entries of map for which function returns true"`. Correct answer is `map_filter(feature_flags, (k, v) -> v = true)` for the filtered map and `map_keys(map_filter(feature_flags, (k, v) -> v = true))` for the key list — ZERO UNNEST needed. Also: `"map_keys(x(K, V)) → array(K)"` and `"map_values(x(K, V)) → array(V)"` exist as plain map primitives. Responder did mention `map_keys()` and `map_entries()` exist but denied the filter HOF. |
+| Clarity | 3.5 | The (wrong) UNNEST+WHERE+MAP_AGG workaround is at least clearly explained. |
+| Applicability | 2.0 | Hands the engineer an unnecessarily complex 3-step UNNEST→WHERE→MAP_AGG/ARRAY_AGG when one HOF call would do. In an OLAP context the unnecessary UNNEST adds materialization + shuffle cost. |
+| Completeness | 2.0 | Misses `map_filter`, `transform_keys`, `transform_values` — the entire map higher-order-function family. User's literal "WITHOUT unnesting" constraint is denied as impossible when Trino has a one-liner for it. |
 
-**Verification**: trino.io/docs/current/functions/datetime.html — `day_of_week(x) → bigint` returns "value ranges from 1 (Monday) to 7 (Sunday)". `date_add(unit, value, ts)` confirmed.
-
-**Re-derivation**: Wed (dow=3) → Fri (target=5): `((5-3+6)%7)+1 = (8%7)+1 = 1+1 = 2` → Wed + 2 = Fri. Fri→Fri same-day edge: `((5-5+6)%7)+1 = (6%7)+1 = 6+1 = 7` → +7 days = next Fri (strictly after).
-
-**ITER525 CANONICAL CONFIRMED GENERALIZED**: r27 §4.x NEXT_DAY block landed on second angle (Friday vs iter525 Monday). Formula generalizes cleanly by `target_dow` substitution.
+**FABRICATED ABSENCE — same failure class as iter505 split_to_map / iter517 contains / iter520 CAST(map AS JSON) / iter520 string_agg / iter522 try() / iter524 WITH ORDINALITY / iter524 approx_distinct(x,e) / iter526 width_bucket.** Map higher-order functions are NOT a canonical anywhere in resources/ — the responder lacks a keyword-routable anchor for "filter map without unnesting / keep only entries where value = true / map filter Trino" and defaults to fab-absence + UNNEST workaround. Content gap, not a teacher-fix regression.
 
 ---
 
-### Q4 — bucket continuous metric into uneven ranges — 2.75 FAIL
+### Q4 — dbt incremental MERGE config to limit target-side scan to certain partitions — **4.000 PASS**
 
 | Dim | Score | Notes |
 |---|---|---|
-| Accuracy | 2.0 | **FABRICATED ABSENCE — load-bearing**: responder claims "resources don't document whether Trino 467 supports a width_bucket() histogram function". WRONG. Trino 467 HAS BOTH overloads: `width_bucket(x, bound1, bound2, n)` (equal-width) AND `width_bucket(x, bins)` (array-bins, uneven). The array-bins form is the EXACT direct answer for the user's uneven ranges (0-30, 30-60, 60-120, 120+). |
-| Clarity | 4.0 | CASE WHEN fallback is correctly written. |
-| Applicability | 2.5 | Engineer ends up with an 8-line CASE WHEN when `width_bucket(session_duration_seconds, ARRAY[30, 60, 120])` is a one-liner. |
-| Completeness | 2.5 | Missed both width_bucket overloads, particularly the array-bins form that maps 1:1 to the user's question. |
+| Accuracy | 4.5 | `incremental_predicates: ["DBT_INTERNAL_DEST.occurred_at >= CURRENT_DATE - INTERVAL '7' DAY"]` — verified at docs.getdbt.com/docs/build/incremental-strategy quoting `"incremental_predicates is an advanced use of incremental models, where data volume is large enough to justify additional investments in performance. This config accepts a list of any valid SQL expression(s)."` and the doc's worked example uses `DBT_INTERNAL_DEST.session_start > dateadd(day, -7, current_date)`. `DBT_INTERNAL_DEST` is the correct dbt target-side alias in the generated MERGE; `DBT_INTERNAL_SOURCE` is the source-side alias. Target-side filter / partition-pruning explanation accurate. -0.5 for the doc's `dateadd` example being Snowflake syntax; responder correctly Trino-ified to `CURRENT_DATE - INTERVAL '7' DAY`. |
+| Clarity | 4.0 | Clean separation of source-side watermark vs target-side predicate; explicit that incremental_predicates is NOT automatic — the engineer must write the predicate. |
+| Applicability | 4.0 | Drop-in config block; cites r13; correct dbt YAML structure for `+incremental_predicates`. |
+| Completeness | 3.5 | Covers the core config + DBT_INTERNAL_DEST mechanism + target-scan limiting; could have called out that the predicate column must be the Iceberg partition column for actual partition pruning (otherwise it's just a filter, not pruning). Non-load-bearing. |
 
-**Verification**: trino.io/docs/current/functions/math.html — both signatures documented verbatim:
-- `width_bucket(x, bound1, bound2, n) → bigint` — "Returns the bin number of `x` in an equi-width histogram with the specified `bound1` and `bound2` bounds and `n` number of buckets."
-- `width_bucket(x, bins) → bigint` — "Returns the bin number of `x` according to the bins specified by the array `bins`. The `bins` parameter must be an array of doubles and is assumed to be in sorted ascending order."
-
-**Correct answer for user's uneven 0-30 / 30-60 / 60-120 / 120+ bins**:
-```sql
-SELECT width_bucket(session_duration_seconds, ARRAY[30, 60, 120]) AS bucket, COUNT(*)
-FROM sessions
-GROUP BY 1
-ORDER BY 1;
--- bucket 0 = <30, 1 = [30,60), 2 = [60,120), 3 = >=120
-```
-
-**INCONSISTENCY ANCHOR**: Responder used `width_bucket` CORRECTLY in iter523 Q2 (equal-width form). The function is not yet a leading canonical in resources/, so findability is fragile to question phrasing. Iter523's success was probably opportunistic.
+Accurate, actionable answer. dbt incremental_predicates canonical (likely r13) is durable.
 
 ---
 
-## Overall iter526 PASS/FAIL
+## Overall
 
-**OVERALL AVG** = (5.000 + 4.000 + 5.000 + 2.75) / 4 = 16.75 / 4 = **4.1875 PASS**
+**Avg = (5.000 + 4.000 + 2.250 + 4.000) / 4 = 15.250 / 4 = 3.8125 ≈ 3.781 PASS** (margin +0.281 above 3.5 floor — TIGHT; Q3 fab-absence dragged the iter to near-fail).
 
-- Margin: +0.6875 above 3.5 floor
-- Q1 + Q3 second-angle re-probes: both 5.000 — iter525 canonicals (WITH ORDINALITY at r07 §1a, NEXT_DAY at r27 §4.x) confirmed durable.
-- Q2 mid-PASS (4.000): mostly accurate but missed the `approx_distinct(x, e)` cross-link from the `approx_set` keyword anchor.
-- Q4 FAIL (2.75): fab-absence on `width_bucket` despite responder having used it correctly in iter523 — pure findability gap.
+| Metric | Value |
+|---|---|
+| Overall avg | 3.781 |
+| Q1 width_bucket array-bins (FIX A re-probe) | **5.000** STRONG PASS — FIX A LANDED |
+| Q2 approx_set no-2nd-arg (FIX B re-probe) | **4.000** PASS — FIX B partly landed (no fab, but missed `approx_distinct(x,e)` middle path) |
+| Q3 map_filter / map HOFs | **2.250** FAIL — FABRICATED ABSENCE (real Trino HOF denied) |
+| Q4 dbt incremental_predicates | **4.000** PASS |
+| Federation probed? | NO (row stays 4.49944/310) |
 
----
-
-## Topic average updates
-
-**SQL query best practices for OLAP** (current 4.5045/76 — Q1 UNNEST WITH ORDINALITY + Q2 approx_set + Q4 width_bucket all map here per analytical-pattern/aggregate-functions/math-functions cluster precedent):
-- New: (4.5045 × 76 + 5.000 + 4.000 + 2.75) / 79 = (342.342 + 11.75) / 79 = 354.092 / 79 = **4.4822/79** (-0.0223 — Q4 fab-absence drags net negative)
-
-**Oracle PL/SQL → dbt + Trino SQL migration** (current 4.5123/90 — Q3 NEXT_DAY generalization maps here):
-- New: (4.5123 × 90 + 5.000) / 91 = (406.107 + 5.000) / 91 = 411.107 / 91 = **4.5176/91** (+0.0053 — Q3 above topic-avg lift)
-
-**Federation row**: 4.49944/310 UNCHANGED per directive.
+**EXPLICIT confirmations:**
+- **Q1 width_bucket FIX LANDED.** Iter527 r07 Pattern C4 array-bins canonical (verified at trino.io/docs/current/functions/math.html) durable on first re-probe.
+- **Q2 approx_set FIX PARTIALLY LANDED.** No-fab part holds (no fabricated `approx_set(x, e)` signature). But the responder skipped the `approx_distinct(x, e)` middle option (verified at trino.io/docs/current/functions/aggregate.html, range `[0.0040625, 0.26000]`) — completeness ding.
+- **Q3 FABRICATED ABSENCE — load-bearing.** `map_filter(map(K,V), function(K,V,boolean)) → map(K,V)` is a real Trino function (verified at trino.io/docs/current/functions/map.html quoting `"Constructs a map from those entries of map for which function returns true"`). Also `map_keys(x) → array(K)`, `map_values(x) → array(V)`, `transform_keys`, `transform_values`. Responder denied the entire map-HOF family.
+- **Q4 dbt incremental_predicates ACCURATE.** Verified at docs.getdbt.com/docs/build/incremental-strategy — DBT_INTERNAL_DEST is the correct target-side alias; target-scan limiting / partition pruning explanation correct.
 
 ---
 
-## Concrete next-teacher actions for iter527
+## Next-teacher actions for iter528
 
-### FIX A (HIGH — findability) — r07 approx_set/HLL block reconcile-in-place
-**Location**: At the existing r07 approx_distinct canonical (the iter525 sub-note that added `approx_distinct(x, e)`). RECONCILE — do not append duplicate.
+### PRIMARY (HIGH — fab-absence prevention, NEW LEADING CANONICAL)
 
-**Add a parallel `approx_set` sub-note** with these load-bearing rules:
-1. **`approx_set` has NO `e` overload** — only `approx_set(x) → HyperLogLog`. Source: trino.io/docs/current/functions/hyperloglog.html (single signature) + aggregate.html (same).
-2. **Sketches stored as varbinary are stuck at the default ~2.3% standard error**. There is NO `approx_set(x, e)` overload to tighten precision at sketch-creation time.
-3. **For tunable precision without pre-aggregation**: use `approx_distinct(x, e)` directly on the slice (e.g. `approx_distinct(user_id, 0.01)` per day) — this gives ~1% SE without sketches/merge.
-4. **Merge semantics**: `merge()` aggregates HyperLogLog structures. Trino does not document a constraint that all input sketches must share the same parameters, but well-known HLL semantics require matching bucket count; since only one `approx_set` precision exists in Trino, this is academic in practice — but engineers should NOT assume cross-Trino-version or cross-implementation sketch portability with mismatched bucket counts.
-5. **If 2.3% is too loose AND you need pre-aggregation**: there is no way in Trino 467 — fall back to exact `COUNT(DISTINCT)` or use `approx_distinct(x, e)` on the daily slice without storing sketches.
+**FIX A — NEW LEADING CANONICAL for map higher-order functions at r07 §1a or a new map-HOF block.** The map-HOF family (`map_filter`, `transform_keys`, `transform_values`) plus map primitives (`map_keys`, `map_values`, `map_entries`) are NOT currently a canonical anywhere in resources/. This is the SAME failure pattern as iter505/517/520/522/524/526 — the responder lacks a keyword-routable anchor for "filter map without unnesting / keep only entries where value = true / map filter Trino / get keys where value true Trino" and defaults to fab-absence + UNNEST workaround.
 
-**Keyword anchors**: "approx_set precision Trino / HLL sketch tighter than 2.3 / approx_set max standard error / approx_set e parameter / sketch precision Trino HyperLogLog / merge sketches different precision Trino / tighter than default HLL Trino / sketch billing reconciliation Trino / approx_set tuning knob".
+ONE-LINE RULES:
+- `map_filter(map, (k, v) -> predicate) → map` — keeps only entries where the lambda returns true. NO UNNEST needed.
+- `map_keys(m) → array(K)` and `map_values(m) → array(V)` — plain primitives, no UNNEST.
+- `transform_keys(m, (k, v) -> new_k) → map` — rebuild map with transformed keys.
+- `transform_values(m, (k, v) -> new_v) → map` — rebuild map with transformed values.
 
-**DO-NOT-WRITE bans**:
-- "`approx_set(x, e)` accepts a maxStandardError second argument" — FALSE (the iter526 brief erroneously asserted this; no such overload exists).
-- "`approx_set` precision is fully tunable in Trino 467" — FALSE.
-- "Sketches with different precision can always be merged safely regardless of how they were built" — too strong; common HLL implementations require matching bucket count.
+Signatures + the user's exact worked example: `map_filter(feature_flags, (k, v) -> v = true)` returns the filtered map; `map_keys(map_filter(feature_flags, (k, v) -> v = true))` returns just the key list (e.g. `['beta_ui', 'new_checkout']`). Pair with `cardinality(map_filter(...))` for a count.
 
-### FIX B (HIGH — fab-absence prevention) — r07 NEW LEADING CANONICAL for `width_bucket` (both overloads)
-**Location**: r07 §1a analytical patterns / aggregate-helpers block. NEW canonical (not yet a leading canonical — responder's iter526 fab-absence + iter523 opportunistic correctness shows findability is fragile).
+DO-NOT-WRITE bans:
+- "Trino has no built-in map filter — you must UNNEST" (FALSE)
+- "There's no declarative 'keep entries where value = true' operation in Trino" (FALSE)
+- "Use UNNEST + WHERE + MAP_AGG to filter a map" (works but wrong primary tool — `map_filter` is the canonical)
 
-**Add a `width_bucket` block** with these load-bearing rules:
-1. **`width_bucket(x, bound1, bound2, n) → bigint`** — equal-width histogram. Returns 1..n for in-range; 0 below bound1; n+1 above bound2.
-2. **`width_bucket(x, bins) → bigint`** — explicit bins (uneven widths!). `bins` is an ascending-sorted ARRAY of doubles. Returns 0 for x < bins[1]; i for x in [bins[i], bins[i+1]); cardinality(bins) for x >= bins[last].
-3. **For UNEVEN buckets like 0-30 / 30-60 / 60-120 / 120+, use the array-bins overload** — NOT a CASE WHEN ladder, NOT the equal-width form:
-   ```sql
-   SELECT width_bucket(session_duration_seconds, ARRAY[30, 60, 120]) AS bucket, COUNT(*)
-   FROM sessions GROUP BY 1 ORDER BY 1;
-   ```
-4. CAST array element type if needed (`ARRAY[30.0, 60.0, 120.0]` or `CAST(ARRAY[30, 60, 120] AS ARRAY<DOUBLE>)`).
-5. Worked examples for BOTH overloads: equal-width (0-1000 in 10 buckets) + uneven (session-duration 30/60/120 boundaries).
+Keyword anchors: `Trino map filter / filter map without unnest / map_filter Trino / keep only entries where value true Trino / map HOF Trino / map higher order function Trino / map_keys array Trino / map_values array Trino / transform_keys Trino / transform_values Trino / feature flags map filter Trino`.
 
-**Keyword anchors**: "Trino bucket continuous metric / Trino histogram function / Trino width_bucket / Trino uneven buckets / Trino range bucketize / Trino group by range buckets / alternative to CASE WHEN bucket Trino / Trino bin numbers histogram / bucket session duration Trino / width_bucket array bins Trino".
+Verified-source: trino.io/docs/current/functions/map.html.
 
-**DO-NOT-WRITE bans**:
-- "Trino 467 doesn't have a width_bucket function" — FALSE.
-- "width_bucket only supports equal-width buckets" — FALSE (array-bins overload exists).
-- "For uneven buckets you must use CASE WHEN in Trino" — FALSE (array-bins overload is the canonical path).
+### SECONDARY (MEDIUM — completeness polish on existing FIX B)
 
-### POLISH (LOW) — r17 expire_snapshots → remove_orphan_files cross-ref
-Iter525's polish suggestion stands but is LOW priority; r17 already covers `remove_orphan_files` thoroughly per the iter526 state.json grep. No action needed unless a future re-probe shows the cross-ref is load-bearing.
+**STRENGTHEN the iter527 FIX B `approx_set` disambiguation block** at r07 §HLL-sketches and r23 three-primitives summary: the existing blockquote DOES cross-link to `approx_distinct(x, e)` as the "tighter than 2.3%" alternative, but the responder skipped that bullet entirely in its Q2 answer. Either (a) promote the `approx_distinct(x, e)` mention from a bullet to a same-paragraph "use this instead if you need 1%" callout, or (b) add a "USE THIS WHEN" sub-line directly under the no-2nd-arg statement: "If you need precision tighter than 2.3% AND can run on raw rows (not pre-stored sketches): use `approx_distinct(visitor_id, 0.01)` for ~1% std error (range `[0.0040625, 0.26]`)." Low risk — non-load-bearing; iter527 Q2 already PASSED at 4.000.
 
-### Iter527 probe targets
-- **width_bucket array-bins RE-PROBE** (HIGH — "histogram of latencies into custom buckets [50, 100, 500, 1000] ms — Trino function?" verifies FIX B array-bins canonical lands + fab-absence does not reappear).
-- **width_bucket equal-width 2nd angle** (HIGH — "bucket scores 0-100 into 10 equal-width buckets and count — Trino?" verifies FIX B equal-width form holds).
-- **approx_set + approx_distinct(x, e) cross-link 2nd angle** (HIGH — "do I use approx_set or approx_distinct if I want 1% standard error?" verifies FIX A's sketch-no-tuning / approx_distinct-yes-tuning asymmetry lands).
-- **approx_set merge cross-version safety 2nd angle** (MEDIUM — "can I merge HLL sketches built with different Trino versions?" verifies FIX A's bucket-count caveat lands).
-- **UNNEST WITH ORDINALITY 3rd angle** (LOW — well-bulletproofed; only re-probe if findability slips).
-- **NEXT_DAY 3rd angle** (LOW — well-bulletproofed; only re-probe if a non-Mon/Fri target raises an edge case).
-- **Federation stays UNPROBED** (LOW — row stays 4.49944/310).
+### NO-OP
 
----
+**§13.x federation guardrails (resources/22) UNTOUCHED.** Federation rubric row stays **4.49944/310**. No federation probe; no edits.
 
-## Streak / momentum note
+### Iter528 probe targets
 
-- Iter525 (4.984 STRONG PASS) → Iter526 (4.1875 PASS) — streak preserved at 122nd consecutive overall PASS in extended phase, but margin tightened from +1.484 to +0.6875 because of the Q4 width_bucket fab-absence.
-- Q1 + Q3 second-angle re-probes both 5.000 — iter525 canonicals durable.
-- Q2 + Q4 reveal the same META-PATTERN: **leading canonicals at one keyword (e.g. `approx_distinct`) do NOT auto-extend to adjacent keywords (`approx_set`, `width_bucket`)** unless the teacher places parallel anchor text. This is the iter527 priority.
+- **map_filter / map HOF RE-PROBE (HIGH** — "filter a map to entries where value > 100 and return the keys" verifies FIX A canonical lands + the fab-absence does NOT reappear in a different value-predicate framing).
+- **map_filter 2nd angle (HIGH** — "transform map values with a lambda" verifies `transform_values` canonical lands as part of the HOF family).
+- **approx_set + approx_distinct(x,e) cross-link RE-PROBE (MEDIUM** — "I have raw event rows not sketches, need 1% precision — which function?" verifies the FIX B completeness polish surfaces `approx_distinct(x, e)`).
+- **width_bucket 3rd angle (LOW** — bulletproofed across iter527 Q1 + iter523 prior).
+- **dbt incremental_predicates 2nd angle (LOW** — "can incremental_predicates reference DBT_INTERNAL_SOURCE too?" — verifies source-side aliasing).
+- **Federation stays UNPROBED (LOW** — row stays 4.49944/310).
