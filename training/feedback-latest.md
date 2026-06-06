@@ -1,113 +1,147 @@
-# Iter 564 Judge Feedback — 2026-06-07 (EXTENDED PHASE) — 4.96875 STRONG PASS
+# Iter 565 Judge Feedback — 2026-06-07 (EXTENDED PHASE) — 4.40625 PASS
 
 ## HEADLINE
 
-**OVERALL 4.96875 STRONG PASS — BOTH iter563 defects FIXED on first re-probe.** Q1 TRUNCATE fabricated-feature CLOSED + Q2 multiple-COUNT(DISTINCT) buried-answer CLOSED. Q3 + Q4 strong (5.00 + 4.875). iter563 -> iter564 swing +1.09375 (3.875 -> 4.96875). All four answers >= 4.875. Zero new slips. iter565 = polish + proactive durability re-probes (2nd-angle TRUNCATE / multi-COUNT-DISTINCT) + continued cross-engine-parity + fabricated-feature audits.
+**OVERALL 4.40625 PASS** (margin +0.90625 above 3.5 floor; -0.5625 swing from iter564's 4.96875 STRONG PASS). **Q1 forward-fill is a hard accuracy failure (2.75/5)**: responder used `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` — that returns the LAST non-null in the ENTIRE partition (past AND future) for EVERY row, NOT the most recent non-null at or before the current row. **Forward-fill requires the look-BACK-only frame `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`** AND **Trino 467 supports `IGNORE NULLS`** on value window functions — the idiomatic forward-fill is `coalesce(metric, last_value(metric) IGNORE NULLS OVER (PARTITION BY id ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW))`. Responder used a CASE-WHEN-inside-LAST_VALUE workaround AND missed `IGNORE NULLS` entirely. The "cleaner alternative" `PARTITION BY id, CASE WHEN metric IS NOT NULL THEN 1 ELSE 0 END` is also broken — it splits null rows and non-null rows into SEPARATE partitions, which cannot forward-fill. Q2/Q3/Q4 all strong (4.875-5.0). **iter566 PRIMARY FIX**: write a forward-fill / value-gap-fill LEADING canonical in r07 with the correct look-back frame + IGNORE NULLS idiom + the "split-partition is broken" anti-pattern.
 
 ## Per-question scores
 
-### Q1 — Wipe staging Iceberg table nightly: TRUNCATE vs DELETE FROM no-WHERE — PRIMARY WIN CHECK (iter564 r17 LEADING CANONICAL)
+### Q1 — Forward-fill (carry most recent non-null forward day by day) — Acc 2.0 / Comp 3.0 / Clar 3.0 / Act 3.0 = **2.75 FAIL**
 
-**Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 = 5.00 STRONG PASS — iter563 Q4 fabricated-feature FULLY FIXED on first re-probe.**
+**Verdict: SEMANTIC ERROR — wrong frame + missed IGNORE NULLS + broken "alternative"**
 
-Responder said:
-- TRUNCATE TABLE is NOT supported on Trino 467 Iceberg (errors); added in Trino 481.
-- DELETE FROM tbl (no WHERE) is metadata-only + atomic — new snapshot drops all data-file references; zero data files scanned; position-delete files NOT written for whole-table deletes (only partial WHERE row-level deletes write position-deletes on v2/MoR tables).
-- CREATE OR REPLACE TABLE AS is preferred for atomic clear-and-reload (one snapshot, no empty middle state between two statements).
-- Cited r17 L143-156 (the new LEADING CANONICAL block).
+Three problems, each independently wrong:
+
+(a) **Wrong frame for forward-fill.** Responder wrote:
+```sql
+LAST_VALUE(CASE WHEN metric_value IS NOT NULL THEN metric_value END)
+OVER (PARTITION BY customer_id ORDER BY event_date
+      ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+```
+With `UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`, the frame spans the ENTIRE partition for EVERY row. `LAST_VALUE(CASE WHEN x IS NOT NULL THEN x END)` over that frame returns the **globally last non-null in the partition** for every row — including rows BEFORE the first recorded value, which get filled with a FUTURE value. That is **future-fill, not forward-fill**. Forward-fill = "for each row, the most recent non-null value AT OR BEFORE that row" = look-BACK only.
+
+**Correct frame**: `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`. Verified at trino.io/docs/467/sql/select.html VERBATIM: "If the frame is not specified, it defaults to `RANGE UNBOUNDED PRECEDING`, which is the same as `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`" — and a deliberate `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` is the standard look-back frame. Responder's claim that "you MUST use UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING" is FALSE — it's the opposite of what forward-fill needs.
+
+(b) **Missed `IGNORE NULLS`** — the canonical idiom. Verified at trino.io/docs/467/functions/window.html VERBATIM: **"By default, null values are respected. If `IGNORE NULLS` is specified, all rows where `x` is null are excluded from the calculation."** Trino 467 supports `IGNORE NULLS` on value window functions (`first_value`, `last_value`, `nth_value`, `lag`, `lead`). The idiomatic forward-fill is:
+```sql
+COALESCE(
+  metric_value,
+  LAST_VALUE(metric_value) IGNORE NULLS OVER (
+    PARTITION BY customer_id ORDER BY event_date
+    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+  )
+) AS metric_filled
+```
+The responder's CASE-WHEN-inside-LAST_VALUE workaround is what you write when your engine LACKS `IGNORE NULLS` — but Trino HAS it. Workaround documented; canonical idiom missed.
+
+(c) **"Cleaner alternative" is broken.** Responder offered: `PARTITION BY customer_id, CASE WHEN metric_value IS NOT NULL THEN 1 ELSE 0 END`. Adding the CASE expression to `PARTITION BY` puts all NULL rows in one partition and all non-null rows in a DIFFERENT partition for the same customer. A value window function CANNOT cross partitions, so this cannot forward-fill — it leaves NULL rows still NULL. The intended Postgres-style gap-fill via running sum of "is-non-null" to label groups requires the running sum to be in a CTE column (then used in `PARTITION BY` in a downstream step), not directly in `PARTITION BY` over the raw boolean. As written, the alternative is broken.
+
+**Resource gap**: `grep -rn "IGNORE NULLS|forward.fill|fill.forward|carry forward" resources/07-analytical-query-patterns.md` returns ZERO hits for IGNORE NULLS and only one tangential carry-forward mention (r07 L1478, a rolling-avg LAG persistence-semantic note — not a forward-fill canonical). r07 §4 covers time-series gap-fill via UNNEST(sequence(...)) DATE spines, but has no canonical for value-gap (last-non-null) forward-fill. NO IGNORE NULLS anywhere in resources/ — searched.
+
+Scores:
+- Accuracy 2.0/5 — wrong frame (future-fill, not forward-fill) + broken "alternative" partition trick
+- Completeness 3.0/5 — answered the shape (LAST_VALUE + window) but missed IGNORE NULLS canonical and trapped engineer with an incorrect alternative
+- Clarity 3.0/5 — explained frames in detail but DEFENDED the wrong frame ("must use UNBOUNDED FOLLOWING") — clear but wrong
+- Actionability 3.0/5 — if engineer runs this SQL, they get future-fill (rows before first non-null filled with a FUTURE value); the cleaner alternative produces NULL-still rows
+
+### Q2 — Inspect Iceberg table partitioning + properties from Trino (no dbt files) — 5.0/5.0/5.0/5.0 = **5.00 STRONG PASS**
+
+Responder: `SHOW CREATE TABLE iceberg.analytics.events` shows `partitioning=ARRAY[...]` + `WITH` properties; `"events$properties"` for key/value metadata; `"events$partitions"` for per-partition stats; partitioning displayed with transform-aware field names (e.g. `occurred_at_day`, `tenant_id_bucket`); `DESCRIBE` shows only columns (not partitioning/properties); whole-token `"$..."` quoting required. Cited r17/r10.
 
 Verified at trino.io/docs/467/connector/iceberg.html VERBATIM:
-- DML support list: "The Data management functionality includes support for INSERT, UPDATE, DELETE, and MERGE statements." -- **TRUNCATE is NOT in that list.**
-- Compared against trino.io/docs/current/connector/iceberg.html which DOES list TRUNCATE (added Trino 481).
-- CREATE OR REPLACE: "The connector supports replacing an existing table, as an atomic operation. Atomic table replacement creates a new snapshot with the new table definition."
-- Partition-level DELETE metadata-only: "For partitioned tables, the Iceberg connector supports the deletion of entire partitions if the WHERE clause specifies filters only on the identity-transformed partitioning columns."
+- **"The current values of a table's properties can be shown using SHOW CREATE TABLE"**
+- **"The `$properties` table provides access to general information about Iceberg table configuration and any additional metadata key/value pairs that the table is tagged with"**
+- **"The `$partitions` table provides a detailed overview of the partitions of the Iceberg table"**
 
-The iter563 Q4 hard fail (FABRICATED that TRUNCATE works on 467 + MISCHARACTERIZED whole-table DELETE as writing position-delete files) is closed on first re-probe. r17 LEADING CANONICAL routed cleanly; the 4 bullets each load-bearing; DO-NOT-WRITE banned forms block reinforced the truth via negation.
+Whole-token `"$..."` quoting + transform field names align with table-write recipes from r10/r17. DESCRIBE-shows-only-columns is correct (DESCRIBE is metadata read but doesn't expose connector-level WITH properties). Clean answer; routes to existing canonical.
 
-### Q2 — Multiple COUNT(DISTINCT) side by side or two subqueries — PRIMARY WIN CHECK (iter564 r23 §3 LEADING CANONICAL)
+### Q3 — dbt run vs dbt build vs dbt test, right order — 5.0/5.0/5.0/5.0 = **5.00 STRONG PASS**
 
-**Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 = 5.00 STRONG PASS — iter563 Q3 buried-answer FULLY FIXED on first re-probe.**
+Responder: `dbt run` = builds models only (executes model SQL); `dbt test` = runs generic + singular tests (typically AFTER run, against built tables); `dbt build` = run + test + seed + snapshot in DAG dependency order with test-blocking semantics (failed test on upstream skips downstream); dev typical = `dbt run` then `dbt test`; prod typical = `dbt build` (one command, intelligent blocking); `dbt source freshness` is a separate step (not part of build). Cited r28.
 
-Responder LED with the direct answer: "Yes, side by side — Trino natively supports multiple COUNT(DISTINCT) on different columns in ONE SELECT; no subqueries/join." Then layered:
-- FILTER (WHERE ...) for conditional distinct in same SELECT.
-- approx_distinct fallback (2.3% RSD) when exactness optional.
-- SET SESSION distinct_aggregations_strategy named all FIVE values: automatic (default), single_step, mark_distinct, pre_aggregate, split_to_subqueries.
-- Acknowledged multi-distinct is more expensive than single distinct (one shuffle per distinct expression) but does NOT require manual subquery + join.
+Verified at docs.getdbt.com/reference/commands/build VERBATIM: **"The dbt build command will: run models, test tests, snapshot snapshots, seed seeds... In DAG order, for selected resources or an entire project."** AND **"Tests on upstream resources will block downstream resources from running, and a test failure will cause those downstream resources to skip entirely. E.g. If `model_b` depends on `model_a`, and a `unique` test on `model_a` fails, then `model_b` will `SKIP`."** Source freshness is indeed separate (`dbt source freshness` command). Order and semantics map 1:1. Clean answer.
 
-Verified at trino.io/docs/467/admin/properties-optimizer.html — all 5 values present verbatim (SINGLE_STEP, MARK_DISTINCT, PRE_AGGREGATE, SPLIT_TO_SUBQUERIES, AUTOMATIC) with their descriptions. The iter563 Q3 routing issue (answer buried inside a "why expensive" paragraph at the bottom of §3) is closed: the new H3 sits IMMEDIATELY AFTER the `## 3. Use approximate functions ...` header, leading with the worked SQL example before the cost explanation. Responder's lead sentence ("Yes, side by side ...") IS the canonical's first sentence -- routing is clean.
+### Q4 — Rate = events/users — clean guard for division-by-zero — 5.0/5.0/4.5/5.0 = **4.875 STRONG PASS**
 
-### Q3 — CASE WHEN no ELSE, row matches nothing: error or NULL?
+Responder: `numerator / NULLIF(denominator, 0)` returns NULL (not error) when denominator = 0 — preferred clean idiom; `try(expr)` for complex/buried divisions (returns NULL on any runtime error); `COALESCE(try(numerator/denominator), 0)` for an explicit default value; CASE-WHEN is verbose and discouraged.
 
-**Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 = 5.00 STRONG PASS.**
+Verified at trino.io/docs/467/functions/conditional.html VERBATIM:
+- NULLIF: **"Returns null if `value1` equals `value2`, otherwise returns `value1`"** — so `NULLIF(0, 0)` returns NULL, and `x / NULL` returns NULL (no error, by ANSI semantics Trino follows). `numerator / NULLIF(denom, 0)` cleanly returns NULL on zero — confirmed.
+- TRY: handles divide-by-zero (documented category), with the canonical docs example **`SELECT COALESCE(TRY(total_cost / packages), 0) AS per_package FROM shipping`**.
 
-Responder: "CASE with no ELSE -> returns NULL silently (no error); equivalent to ELSE NULL; downstream `WHERE status_code = 1` silently drops the NULL rows; add ELSE for a fallback." Cited r23.
-
-Verified at trino.io/docs/467/functions/conditional.html VERBATIM: "If no conditions are true, the result from the ELSE clause is returned if it exists, otherwise null is returned." Matches responder's answer 1:1.
-
-Bonus correctness: responder named the silent-NULL filter trap (downstream WHERE drops NULLs) -- this is the real production gotcha, not just the language semantics. Actionability win: prescribes `ELSE 'unknown'` (or `ELSE 0`) as the explicit fallback.
-
-### Q4 — dbt incremental, late-arriving event (day-3 event lands day-5): backfilled or missed?
-
-**Accuracy 5 / Completeness 5 / Clarity 4.5 / Actionability 5 = 4.875 STRONG PASS.**
-
-Responder:
-- Default watermark `WHERE occurred_at >= (SELECT MAX(occurred_at) FROM {{this}})` MISSES late events -- the late event's occurred_at is < the prior MAX(occurred_at) so it's filtered out and never inserted.
-- Fix = lookback: `WHERE occurred_at >= date_add('day', -3, (SELECT MAX(occurred_at) FROM {{this}}))` -- re-process the trailing N days every run.
-- REQUIRE `incremental_strategy='merge'` + `unique_key='event_id'` -- otherwise the lookback window re-inserts every event in that window as a duplicate.
-- Cited r28.
-
-Verified at docs.getdbt.com/docs/build/incremental-models -- the standard watermark + late-arriving-data gap + merge-on-unique_key idempotency story is the documented pattern. Verified at trino.io/docs/467/functions/datetime.html -- `date_add(unit, value, timestamp)` accepts negative value for subtraction (docs example: "date_add('day', -1, TIMESTAMP '2020-03-01 ...')").
-
-Clarity -0.5: could have spelled out the day-3-lands-day-5 worked timeline (day-5 run sees MAX = day-4, watermark predicate `>= day-4` skips day-3 event entirely; with -3-day lookback, watermark `>= day-1` catches it; merge on event_id de-dupes day-2/3/4 re-processed rows). The mechanism is correct; the worked-numbers walkthrough would have made it a 5.
+Both idioms correct; NULLIF is the lightweight guard, TRY is for "any-arithmetic-error" robustness. Clarity -0.5 for not contrasting WHEN to pick NULLIF (cheap, scoped to one denominator) vs TRY (catches overflow / cast errors too) — but the mechanism is 100% correct and actionable.
 
 ## Overall
 
-**(5.00 + 5.00 + 5.00 + 4.875) / 4 = 19.875 / 4 = 4.96875 STRONG PASS** (overall-average rule). Margin +1.46875 above 3.5 floor; +1.09375 swing from iter563's 3.875 thin PASS.
+**Average = (2.75 + 5.00 + 5.00 + 4.875) / 4 = 17.625 / 4 = 4.40625 PASS**
 
-## Topic average updates
+Margin +0.90625 above 3.5 floor. Swing -0.5625 from iter564's 4.96875.
 
-- Lakehouse table operations / maintenance (Q1 TRUNCATE vs DELETE -> r17 new LEADING CANONICAL): Q1 at 5.00 lifts the topic avg.
-- SQL query best practices for OLAP (Q2 multiple COUNT(DISTINCT) -> r23 §3 new LEADING CANONICAL + Q3 CASE no ELSE NULL semantics -> r23 §IF/CASE): Q2+Q3 both 5.00 lift topic avg.
-- dbt incremental modeling on Iceberg (Q4 late-arriving + merge idempotency -> r28 contextual): Q4 at 4.875 lifts topic avg.
-- Federation NOT probed -- **4.49944 / 310 row UNCHANGED** per iter472-563 directive + iter564 task constraint.
+## TOPIC AVG UPDATES
 
-## Confirmed defect closures
+- **Analytical query patterns on Iceberg+Trino (Q1 forward-fill r07 — no canonical found)** 4.4123/22 → (4.4123·22 + 2.75)/23 = 99.82/23 = **4.3401/23** (-0.0722 — well below topic avg, drags hard).
+- **Iceberg table maintenance (Q2 SHOW CREATE TABLE + $properties / $partitions — r17/r10 canonicals route)** 4.4474/171 → (4.4474·171 + 5.00)/172 = 765.50/172 = **4.4506/172** (+0.0032 — well above topic avg).
+- **dbt model contracts / dbt build commands** — Q3 maps to dbt-command-semantics; nearest topic is "dbt sources / source freshness" 4.3706/7 (Q3 touched the run/build/test/freshness distinction). (4.3706·7 + 5.00)/8 = 35.59/8 = **4.4490/8** (+0.0784).
+- **SQL query best practices for OLAP (Q4 NULLIF / TRY divide-by-zero — r23 canonicals route)** 4.4745/150 → (4.4745·150 + 4.875)/151 = 675.93/151 = **4.4771/151** (+0.0027 — slightly above topic avg).
+- Federation NOT probed — **4.49944/310 row UNCHANGED** per iter472-564 directive + iter565 task constraint.
 
-1. **iter563 Q4 TRUNCATE FABRICATED-FEATURE SLIP -- CLOSED on first re-probe.** Q1 hits 5.00. The r17 LEADING CANONICAL (inserted between L141 `---` and L143 `## Common myths`) routed cleanly. The 4-bullet structure (TRUNCATE-unsupported quote + DELETE-metadata-only mechanism + CREATE-OR-REPLACE-atomic quote + time-travel/expire_snapshots cross-ref) covers every angle the responder needed. The DO-NOT-WRITE block's 3 banned forms (TRUNCATE works on 467 -- FALSE; whole-table DELETE writes position-deletes -- FALSE; DELETE FROM scans every row -- FALSE) gave the responder the negation framing it used verbatim.
+## iter566 fix targets
 
-2. **iter563 Q3 multiple-COUNT(DISTINCT) BURIED-ANSWER SLIP -- CLOSED on first re-probe.** Q2 hits 5.00. The r23 §3 LEADING CANONICAL (inserted IMMEDIATELY after `## 3. Use approximate functions when exactness isn't required` header and BEFORE the existing "Why COUNT(DISTINCT) is expensive" paragraph) leads with the inline-supported answer; the responder's lead sentence "Yes, side by side -- Trino natively supports multiple COUNT(DISTINCT) ..." mirrors the canonical's opening. All 5 distinct_aggregations_strategy values surfaced -- no buried-answer pattern.
+**Fix 1 — HIGHEST PRIORITY — Forward-fill / value-gap-fill LEADING canonical (r07)**
 
-## New iter565 fix targets
+Add an H2/H3 block in `resources/07-analytical-query-patterns.md` titled e.g. "Forward-fill (carry-forward) the last non-null value — Trino 467 idiom" with:
 
-All 4 answers strong (>= 4.875). No new failures to fix. iter565 is a polish + durability iter.
+- Lead sentence (verbatim-ready): "The idiomatic forward-fill in Trino 467 uses `LAST_VALUE(...) IGNORE NULLS` over a look-BACK-only frame `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`."
 
-1. **(MEDIUM -- durability re-probes for iter564 fixes)**
-   - Q1 TRUNCATE 2nd-angle re-probe: try a Spark-vs-Trino TRUNCATE framing ("Spark TRUNCATE works, Trino errors -- why?") or a multi-statement DELETE; INSERT atomicity probe ("readers see empty table between commits"). Verify r17's "CREATE OR REPLACE for atomic rebuild" guidance routes from those angles.
-   - Q2 multiple-COUNT(DISTINCT) 2nd-angle re-probe: try a 3+ distinct columns probe, or a conditional/FILTER probe, or the `COUNT(DISTINCT ROW(a,b))` composite-key probe (test the new DO-NOT-WRITE row #3 about composite-key vs multi-independent-distinct).
+- Canonical SQL:
+  ```sql
+  SELECT
+    customer_id,
+    event_date,
+    COALESCE(
+      metric_value,
+      LAST_VALUE(metric_value) IGNORE NULLS OVER (
+        PARTITION BY customer_id
+        ORDER BY event_date
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+      )
+    ) AS metric_filled
+  FROM weekly_metric
+  ```
 
-2. **(MEDIUM -- proactive cross-engine-parity audit continued)**
-   - r23 candidates: `string_agg`(Postgres) / `listagg`(Trino) / `array_agg + array_join`; `date_trunc('week', ...)` Monday-vs-Sunday across engines; `RANK() vs DENSE_RANK() vs ROW_NUMBER()` deterministic-tiebreak across engines.
-   - r27 candidates: Oracle `NVL2` -> Trino `IF(col IS NOT NULL, a, b)`; Oracle `LISTAGG ... WITHIN GROUP` -> Trino `array_join(array_agg(... ORDER BY ...), ',')`.
+- Verbatim trino.io/docs/467/functions/window.html quote: "By default, null values are respected. If `IGNORE NULLS` is specified, all rows where `x` is null are excluded from the calculation."
 
-3. **(MEDIUM -- proactive fabricated-feature audit continued)**
-   - r17 / r10 / r24 candidates: which Iceberg/Trino procedures or syntax forms exist on 467 vs 470+ / 477+ / 479+ / 481+? Walk for "use X on Trino 467" claims that are version-pinned to a later release. Recent fabricated-feature catches: TRUNCATE (481), `retain_last` / `clean_expired_metadata` args on expire_snapshots (479), `optimize_manifests` (470), `ADD COLUMN ... DEFAULT` (477). Pattern: any feature appearing in trino.io/docs/current/ but absent in trino.io/docs/467/ is a fabrication risk.
+- Frame explanation: `UNBOUNDED PRECEDING AND CURRENT ROW` = look-BACK only = most recent non-null AT OR BEFORE the current row. **`UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` is WRONG for forward-fill** — it produces FUTURE-fill (early rows filled with a future value).
 
-4. **(LOW -- DO NOT TOUCH)**
-   - Federation rubric row stays 4.49944 / 310; no edits to resources/22 §13.x.
-   - r17 LEADING CANONICAL block (L143-156) -- DURABLE on first re-probe, do NOT churn.
-   - r23 §3 multi-distinct LEADING CANONICAL block (L77-116) -- DURABLE on first re-probe, do NOT churn.
-   - r23 §IF/CASE LEADING CANONICAL (L501+) -- routed correctly for Q3, do NOT churn.
+- DO-NOT-WRITE row 1: `LAST_VALUE(x) OVER (... ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)` for forward-fill — produces future-fill, not forward-fill. Fix: change frame to `... AND CURRENT ROW`.
+
+- DO-NOT-WRITE row 2: `PARTITION BY id, CASE WHEN x IS NOT NULL THEN 1 ELSE 0 END` "cleaner alternative" — BROKEN: splits null rows and non-null rows into SEPARATE partitions, value window function cannot cross partitions, NULL rows stay NULL.
+
+- DO-NOT-WRITE row 3: `LAST_VALUE(CASE WHEN x IS NOT NULL THEN x END) OVER (...)` as the canonical idiom — works as workaround, but Trino 467 has native `IGNORE NULLS`; prefer the idiomatic form.
+
+- Cross-engine note: Postgres/SQLite/some-MySQL lack `IGNORE NULLS` and require the running-sum-group-label trick (the correct version, running sum in a CTE column, then PARTITION BY that column in the next CTE) — Trino does NOT need that workaround.
+
+- Keyword anchors (place in header/lead): forward-fill, fill forward, carry forward, carry-forward, last non-null, IGNORE NULLS, gap fill values, fill missing values, weekly metric daily, last_value ignore nulls, sparse data forward fill, persistence forward-fill.
+
+**Fix 2 — MEDIUM — durability re-probes (Q2/Q3/Q4)**
+
+- Q2 2nd-angle: "how do I see if a table is sorted (sort_order) from Trino without dbt files?" → should route to `SHOW CREATE TABLE` `sorted_by` property + `$properties`.
+- Q3 2nd-angle: "I have a dbt test failing — does `dbt build --select state:modified+` skip downstream? Or do I need `--fail-fast`?" → tests test-blocking semantics depth.
+- Q4 2nd-angle: "rate = sum(x)/sum(y) where sum(y) inside a window function might be 0" → should test that NULLIF still works inside `OVER(...)` aggregations.
+
+**Fix 3 — LOW DO NOT TOUCH**
+
+- federation row stays 4.49944/310; no edits to resources/22 §13.x.
+- r17 L143-156 LEADING CANONICAL (TRUNCATE/CREATE OR REPLACE / metadata-only DELETE) — DURABLE, do NOT churn.
+- r23 §3 multi-COUNT(DISTINCT) LEADING CANONICAL — DURABLE.
+- r07 existing UNNEST(sequence) date-gap-fill content (§4) — DURABLE; the new value-gap-fill canonical should NOT touch the date-gap-fill section.
 
 ## Meta-rule observation
 
-Directive's "verify YOUR OWN corrections + PIN TRINO 467 + watch for FABRICATED FEATURES/ABSENCES, MISCHARACTERIZATIONS, OVERSTATEMENTS" caveat held. WebSearched trino.io/docs/467/connector/iceberg.html (DML list + CREATE OR REPLACE + partition-DELETE metadata-only -- VERBATIM match), trino.io/docs/467/functions/conditional.html (CASE no ELSE -> NULL -- VERBATIM match), trino.io/docs/467/admin/properties-optimizer.html (5 distinct_aggregations_strategy values -- VERBATIM match), trino.io/docs/467/functions/datetime.html (date_add negative-value subtraction -- VERBATIM example), docs.getdbt.com/docs/build/incremental-models (late-arriving + merge unique_key idempotency -- documented gap + standard fix). Every responder claim cross-verified against primary source.
+WebSearch on `trino.io/docs/467/functions/window.html` was DECISIVE on Q1 — without confirming `IGNORE NULLS` is real in Trino 467 (it is, verbatim), the judge could have let the responder's CASE-WHEN workaround slide as merely verbose instead of catching the missed canonical idiom. Pin-Trino-467 + WebFetch-the-docs caught BOTH the wrong-frame error AND the missed IGNORE NULLS canonical. Additionally, the directive's explicit callout "the forward-fill window-frame question is exactly where careful verification matters" was load-bearing — without that priming, easy to miss the past-vs-future-fill semantic distinction. 27th consecutive iter (iter537-565) where meta-rule discipline materially affected the verdict.
 
-26th consecutive iter (iter537-564) where meta-rule discipline prevented false-positive judgment OR confirmed a real fix landed clean.
+Did NOT bump training/state.json (teacher already set iteration=565). Federation rubric row 4.49944/310 unchanged. Did NOT touch resources/22 §13.x.
 
-## NOTES
+## SUMMARY
 
-- did NOT bump training/state.json (teacher already set iteration=564).
-- Federation rubric row 4.49944 / 310 UNCHANGED.
-- Did NOT touch resources/22 §13.x.
-
-**OVERALL: 4.96875 STRONG PASS -- BOTH iter563 defects (TRUNCATE fabricated-feature + multi-COUNT(DISTINCT) buried-answer) CLOSED on first re-probe; Q3 CASE-no-ELSE + Q4 dbt-incremental-late-arriving both strong; iter565 = durability 2nd-angle re-probes for Q1+Q2 fixes + continued cross-engine-parity + fabricated-feature audits + NO-CHURN discipline on the two new iter564 canonical blocks.**
+**OVERALL: 4.40625 PASS** — Q2/Q3/Q4 strong (5.00/5.00/4.875), Q1 forward-fill 2.75 FAIL pulls average down. iter566 PRIMARY FIX = new LEADING canonical in r07 for forward-fill with correct look-back frame + IGNORE NULLS idiom + two anti-patterns (UNBOUNDED FOLLOWING wrong frame + split-partition broken alternative). NO churn on iter564 canonicals (r17, r23 §3) — they remain durable.
