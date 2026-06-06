@@ -74,6 +74,47 @@ Even for ad-hoc exploration, prefer `SELECT col1, col2, col3` over `SELECT *`. I
 
 ## 3. Use approximate functions when exactness isn't required
 
+### LEADING CANONICAL — multiple `COUNT(DISTINCT col)` in ONE `SELECT` (Trino native — NO subqueries / NO self-join needed)
+
+> **Keyword anchors:** multiple COUNT DISTINCT Trino, COUNT DISTINCT two columns one query, COUNT DISTINCT multiple columns same SELECT, count distinct users and sessions same query, distinct count without subquery, COUNT DISTINCT three columns Trino, multi-column distinct count, conditional COUNT DISTINCT FILTER, distinct_aggregations_strategy.
+
+- **Trino natively supports multiple `COUNT(DISTINCT ...)` aggregates on DIFFERENT columns in ONE `SELECT` (with or without `GROUP BY`). You do NOT need to write two subqueries and JOIN them.** Just list them as separate select-list expressions:
+
+  ```sql
+  -- One SELECT, multiple distinct counts on different columns — fully supported:
+  SELECT
+    COUNT(DISTINCT user_id)    AS unique_users,
+    COUNT(DISTINCT session_id) AS unique_sessions,
+    COUNT(DISTINCT page_url)   AS unique_pages
+  FROM iceberg.analytics.events
+  WHERE event_date = DATE '2026-05-26';
+
+  -- With GROUP BY — also fully supported:
+  SELECT
+    event_date,
+    COUNT(DISTINCT user_id)    AS dau,
+    COUNT(DISTINCT session_id) AS sessions
+  FROM iceberg.analytics.events
+  GROUP BY event_date
+  ORDER BY event_date;
+
+  -- Conditional distinct counts in the same SELECT — use the standard FILTER clause
+  -- (NOT a subquery; not a CASE WHEN inside DISTINCT):
+  SELECT
+    event_date,
+    COUNT(DISTINCT user_id) FILTER (WHERE event_name = 'login')    AS distinct_loggers,
+    COUNT(DISTINCT user_id) FILTER (WHERE event_name = 'purchase') AS distinct_buyers
+  FROM iceberg.analytics.events
+  GROUP BY event_date;
+  ```
+
+- **Performance note:** multiple `COUNT(DISTINCT)` calls in one query ARE more expensive than a single one — each distinct column typically forces an extra shuffle pass (Trino's `MarkDistinct` strategy). When the query is slow, **first** try the `distinct_aggregations_strategy` session knob (real values: `automatic` (default), `mark_distinct`, `single_step`, `pre_aggregate`, `split_to_subqueries` — verified at [trino.io/docs/current/admin/properties-optimizer.html](https://trino.io/docs/current/admin/properties-optimizer.html); `pre_aggregate` and `split_to_subqueries` often win for multi-distinct queries — see the strategy section below). **Then** if exactness is optional, replace each `COUNT(DISTINCT col)` with `approx_distinct(col)` (HLL, ~2.3% standard error, one cheap merge shuffle regardless of how many distinct columns you ask for).
+
+**DO-NOT-WRITE (banned framings — each is FALSE on Trino):**
+- "You must write a separate subquery for each `COUNT(DISTINCT col)` and JOIN them together" — **FALSE.** Trino supports multiple distinct aggregates in one SELECT natively. The `split_to_subqueries` strategy implements that JOIN internally as a planner choice — you don't write it by hand.
+- "Trino can only do one `COUNT(DISTINCT)` per query" / "multiple distinct aggregations aren't supported in a single SELECT" — **FALSE.**
+- "Use `COUNT(DISTINCT (col1, col2))` to count distinct pairs" — Trino requires a function-style call; the supported form for distinct PAIRS is `COUNT(DISTINCT ROW(col1, col2))` (or pre-concat to a single key). The multi-column-distinct discussion above is about MULTIPLE INDEPENDENT distinct aggregates on different columns, not about composite-key DISTINCT.
+
 **Why `COUNT(DISTINCT)` is expensive — the real mechanism**
 
 A common misconception is that `COUNT(DISTINCT)` is slow because "all values are shipped to a single node." That is **not** how Trino implements it. Trino distributes distinct aggregation across workers. The real cost has three sources:
