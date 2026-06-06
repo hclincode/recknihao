@@ -417,6 +417,13 @@ FROM {{ source('postgres', 'users') }}
 ```sql
 -- Query the CURRENTLY-ACTIVE version per unique_key — the canonical pattern
 SELECT * FROM analytics.users_snapshot WHERE dbt_valid_to IS NULL;  -- 4 default cols: dbt_scd_id, dbt_updated_at, dbt_valid_from, dbt_valid_to
+
+-- Query the version that was active at a SINGLE point-in-time instant — use the SAME :ts on BOTH bounds
+-- (DO NOT compare end-of-day on one side and start-of-day on the other — asymmetric bounds can miss
+--  versions that opened and closed on the same calendar day, or double-count edge versions).
+SELECT * FROM analytics.users_snapshot
+WHERE dbt_valid_from <= TIMESTAMP '2025-08-10 12:00:00'
+  AND (dbt_valid_to IS NULL OR dbt_valid_to > TIMESTAMP '2025-08-10 12:00:00');
 ```
 
 **DEFAULT vs CONDITIONAL — the one column that is NOT a default.** `dbt_is_deleted` is **NOT** one of the four always-present defaults. It is **added only when** the snapshot config sets **`hard_deletes='new_record'`** (dbt 1.9+, replaces the legacy `invalidate_hard_deletes=true`). Direct doc quote ([docs.getdbt.com/reference/resource-configs/snapshot_meta_column_names](https://docs.getdbt.com/reference/resource-configs/snapshot_meta_column_names)): *"A string value indicating if the record has been deleted. (True if deleted, False if not deleted). Added when hard_deletes='new_record' is configured."* On a default snapshot (no `hard_deletes` config or `hard_deletes='ignore'` / `'invalidate'`), the `dbt_is_deleted` column does **NOT** exist — referencing it in a downstream query errors with `Column 'dbt_is_deleted' cannot be resolved`.

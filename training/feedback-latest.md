@@ -1,258 +1,171 @@
-# Iter 569 — Judge Feedback
+# Iter570 Judge Feedback
 
-**Overall: 3.84375 PASS (thin) by overall-average rule (>=3.5 floor).** Margin +0.34375 above the 3.5 floor; -0.90625 swing from iter568's 4.75 PASS. Per-question: Q1 4.00 / **Q2 2.25 FAIL** / Q3 4.875 / Q4 4.25. Q2 is a two-defect disaster (syntax PARSE ERROR + semantically broken gap-fill); Q3 perfect; Q4 has an asymmetric-bounds correctness nit; Q1 surfaced an unprobed completeness gap — the iter569 FIX A "honest no-unique-column fallbacks" paragraph did NOT route on a question that explicitly posed "NO column guaranteed unique per row".
-
-Federation NOT probed this iter — row stays 4.49944/310.
+**Phase**: extended. **State.json**: NOT bumped (teacher already set iteration=570).
 
 ---
 
-## Q1 — No-unique-column tiebreaker (iter569 FIX A re-probe) — 4.0 PASS
+## Q1 — forward-fill + date-spine COMPOSITION re-probe (PRIMARY iter570 fix verification)
 
-Question: latest row per user by timestamp; ties on timestamp give different row each run; table has **NO column guaranteed unique per row**. What to do?
+**Question**: Row for EVERY hour for EVERY server incl. hours with no log, each showing last-known CPU state. Build end to end in Trino.
 
-Responder answer: "add a deterministic secondary sort column after `timestamp DESC` — could be `event_id`, `created_at DESC`, or any column that breaks ties deterministically." Showed `ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY occurred_at DESC, event_id DESC)` subquery + `WHERE rn=1`. Added DO-NOT-WRITE on QUALIFY (not supported in 467).
+**Answer summary**: CTE chain `bounds → hour_spine (sequence+UNNEST) → servers (DISTINCT) → dense_grid (CROSS JOIN) → sparse_logs → final SELECT`. `sparse_logs` precomputes `LAST_VALUE(cpu_percent) OVER (PARTITION BY server_id ORDER BY logged_at ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS latest_cpu`. Final SELECT uses `COALESCE(l.latest_cpu, LAST_VALUE(l.latest_cpu) IGNORE NULLS OVER (PARTITION BY g.server_id ORDER BY g.ts ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW))`.
 
-**What was right:**
-- Correct subquery + `WHERE rn=1` pattern (no QUALIFY fab — held the iter548 lock).
-- Correct identification that a secondary ORDER BY key is the fix when ties exist.
-- Correctly avoided the iter568 nested-window-function-in-ORDER-BY fab — did NOT suggest `ROW_NUMBER() OVER (... ORDER BY ts DESC, ROW_NUMBER() OVER (...))`. The iter569 FIX A meta-rule guard against the fab held.
+### Verification
 
-**What was missing — the iter569 FIX A content did NOT route:**
-The question explicitly said "**NO column guaranteed unique**". Responder assumed `event_id` exists ("could be event_id, created_at DESC, or any column..."). The iter569 FIX A paragraph in r23 §3.1G that you added — "**Honest fallbacks when there is NO unique column.**" — was written precisely for this question framing, and offers three real alternatives:
-- (a) Add EVERY remaining column to ORDER BY as a deterministic-given-values tiebreaker — `ORDER BY ts DESC, col_a, col_b, col_c` (deterministic across runs unless rows are byte-identical duplicates).
-- (b) Add a SURROGATE sequence column at INGEST time — monotonic `_ingest_seq BIGINT` or generated id assigned by Spark ingest job.
-- (c) When you genuinely don't care WHICH tied row wins, drop `ROW_NUMBER()=1` entirely and use `max_by(payload, ts)` or `arbitrary(payload)`.
+**Point (i) — IGNORE NULLS placement (iter569 syntax fix)**: CONFIRMED FIXED.
+- The grammar rule from PR #1244 (`SqlBase.g4`): `functionCall: name '(' args ... ')' nullTreatment? filter? over?`. The clause sits AFTER `')'` and BEFORE `OVER`. The answer's form `LAST_VALUE(l.latest_cpu) IGNORE NULLS OVER (...)` matches this. Iter569's `LAST_VALUE(... IGNORE NULLS)` parse error is GONE.
+- Source: Trino PR #1244 grammar + Trino 467 window-functions doc ("If IGNORE NULLS is specified, all rows where x is null are excluded from the calculation").
 
-None of those routed. Responder defaulted to "use event_id" as if a unique column exists — exactly the case the question said does NOT exist.
+**Point (ii) — final forward-fill frame**: CONFIRMED CORRECT.
+- The outer window `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` is a strict look-BACK frame. Applied AFTER the LEFT JOIN, the window sees the post-join NULL gaps in `l.latest_cpu` and IGNORE NULLS skips them, taking the last non-null value at-or-before the current hour. This matches the iter570 COMBINED CANONICAL Step 3 recipe.
 
-**Findability gap diagnosis:** The iter569 FIX A paragraph lives at r23 §3.1G after the iter568 "Tie-break determinism." paragraph. Question keywords are "NO column guaranteed unique", "ties on timestamp give different row each run". The responder appears to have routed to the iter568 paragraph (which assumes a unique-column tiebreaker exists) instead of the iter569 paragraph immediately below it (which handles the no-unique-column case). The iter569 paragraph either needs a stronger keyword anchor at its lead sentence (e.g., "**No second-column unique key? Honest fallbacks:**") OR a more aggressive forward cross-reference from the iter568 paragraph ("If no column is unique, see the **Honest fallbacks** paragraph below.").
+**Point (iii) — pre-join `sparse_logs` UNBOUNDED FOLLOWING window (NEW DEFECT)**: CONFIRMED SEMANTICALLY WRONG.
+- The frame `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` with PARTITION BY `server_id` ORDER BY `logged_at` covers the ENTIRE partition. By LAST_VALUE semantics over a fully unbounded frame, `LAST_VALUE(cpu_percent)` returns the cpu_percent of the chronologically LAST row in the partition — the SAME global-latest value for every row in `sparse_logs` for that server.
+- Trino 467 window-functions doc: "`last_value(x)` Returns the last value of the window." The "window" here is the active frame; for `ROWS UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` the frame is the whole partition. (Frame-defaults aside: Trino's default frame is `RANGE UNBOUNDED PRECEDING` = `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` — not relevant here because the frame is explicit, but reinforces that frame choice drives the result.)
+- Consequence: `latest_cpu` is a CONSTANT (the global-last cpu) on every matched grid row. The final SELECT then "forward-fills" a constant — every hour (data row or gap) shows the global-latest CPU, not the last-known cpu as-of-that-hour. Semantically WRONG result on every row. This is exactly the "future-fill anti-pattern" the iter570 COMBINED CANONICAL "DO-NOT-WRITE" block warns against — re-introduced in a different place (a pre-join CTE instead of the outer SELECT).
 
-**Scores: Accuracy 4.5 / Completeness 3.0 / Clarity 4.5 / Actionability 4.0 = 4.0** — Completeness drags because the iter569 FIX A canonical was written precisely for this question and did not route. Actionability also dinged because telling the user "use event_id" when they said no unique column exists is unactionable.
+**Point (iv) — fanout**: CONFIRMED. `sparse_logs` is NOT aggregated to one row per (server_id, hour). If a server logs N times in an hour, the LEFT JOIN on `l.hour = g.ts` produces N duplicate rows for that (server, hour). The teacher's canonical Step 1/2 implicitly assumes one-row-per-(entity, bucket) but does not say so explicitly.
 
----
+### Corrected minimal composition
 
-## Q2 — Forward-fill 4th-angle device heartbeat — 2.25 FAIL (drags overall)
-
-Question: devices send heartbeat status only on change; most minute-buckets blank; need each minute to show last-known status.
-
-Responder answer (paraphrased):
 ```sql
-WITH heartbeats AS (
-  SELECT device_id, occurred_at, status,
-    LAST_VALUE(status IGNORE NULLS) OVER (PARTITION BY device_id ORDER BY occurred_at
-      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS last_known_status
-  FROM device_heartbeats
+WITH bounds AS (
+  SELECT min(date_trunc('hour', logged_at)) AS lo,
+         max(date_trunc('hour', logged_at)) AS hi
+  FROM server_metrics
+  WHERE logged_at >= current_timestamp - INTERVAL '7' DAY
 ),
-minutes_spine AS (
-  SELECT device_id, minute_ts
-  FROM (SELECT DISTINCT device_id FROM heartbeats) devices
-  CROSS JOIN UNNEST(sequence(
-    date_trunc('minute', (SELECT MIN(occurred_at) FROM heartbeats)),
-    date_trunc('minute', (SELECT MAX(occurred_at) FROM heartbeats)),
-    INTERVAL '1' MINUTE)) AS t(minute_ts)
-)
-SELECT s.device_id, s.minute_ts, COALESCE(h.status, h.last_known_status) AS current_status
-FROM minutes_spine s
-LEFT JOIN heartbeats h
-  ON h.device_id = s.device_id
- AND date_trunc('minute', h.occurred_at) = s.minute_ts
-ORDER BY s.device_id, s.minute_ts;
-```
-
-**Defect (a) — SYNTAX PARSE ERROR. `LAST_VALUE(status IGNORE NULLS)` is INVALID Trino 467.**
-
-Verified at trino.io/docs/current/functions/window.html via WebSearch (SQL standard syntax that Trino implements per Issue #813):
-> `<first or last value function> ::= <first or last value> <left paren> <value expression> <right paren> [ <null treatment> ]`
-> where `<null treatment> ::= RESPECT NULLS | IGNORE NULLS`
-
-The `IGNORE NULLS` clause is a **null-treatment clause that appears AFTER the closing paren of the function args and BEFORE `OVER`**. Correct Trino 467 syntax:
-```sql
-LAST_VALUE(status) IGNORE NULLS OVER (PARTITION BY device_id ORDER BY occurred_at
-  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
-```
-
-The responder wrote `LAST_VALUE(status IGNORE NULLS)` — placing `IGNORE NULLS` INSIDE the function-argument parentheses as if it were a function argument. That is a **parse error** in Trino 467 — `IGNORE NULLS` is not a value-expression keyword and cannot appear inside argument parens.
-
-Cross-check at trino.io/docs/current/functions/window.html VERBATIM: "By default, null values are respected. If `IGNORE NULLS` is specified, all rows where `x` is null are excluded from the calculation." The docs uniformly show `IGNORE NULLS` as a separate clause after the function call's parens. The form used by iter566/iter567 canonicals (e.g., `LAST_VALUE(price) IGNORE NULLS OVER (...)`) is the correct form.
-
-Every other iter566+ canonical r07 H3 forward-fill answer used the **correct** outside-the-parens syntax. iter569 responder regressed to a form that won't parse. Net: query fails at parse time before any data flows.
-
-**Defect (b) — SEMANTIC: forward-fill computed in the WRONG CTE; gaps are NOT filled.**
-
-Even if the syntax were fixed, the **logic is inverted**. The forward-fill must be applied to the DENSE (spine-padded) rows where gap minutes have NULL status, NOT to the raw sparse rows.
-
-In the responder's query, `LAST_VALUE(status) IGNORE NULLS` is computed inside the `heartbeats` CTE over the **raw sparse heartbeat rows**. But every raw row already HAS a non-null status (the question states "devices send heartbeat status ONLY on change" — every emitted row has a real status). At this stage there are NO NULL rows for `IGNORE NULLS` to skip, so `last_known_status` is just `status` itself — the LAST_VALUE is a no-op equal to the current row's status.
-
-Then the outer query LEFT JOINs `minutes_spine` (the dense per-minute rows) to `heartbeats` on exact-minute match. On a **gap minute** (no heartbeat row), the LEFT JOIN produces NULL for ALL `h.*` columns — `h.status IS NULL` AND `h.last_known_status IS NULL`. So:
-```
-COALESCE(h.status, h.last_known_status) = COALESCE(NULL, NULL) = NULL
-```
-**Gap minutes return NULL** — the forward-fill is completely broken. The answer is the OPPOSITE of what the user asked for.
-
-**Correct ordering** (the r07 §4 / r07 H3 canonical pattern): build the spine FIRST → LEFT JOIN to the sparse heartbeats so gaps appear as NULL rows → THEN apply `LAST_VALUE(...) IGNORE NULLS` over the spine-padded dense rows so the IGNORE NULLS has actual NULL gaps to skip.
-
-Corrected query:
-```sql
-WITH minutes_spine AS (
-  SELECT d.device_id, t.minute_ts
-  FROM (SELECT DISTINCT device_id FROM device_heartbeats) d
-  CROSS JOIN UNNEST(sequence(
-    date_trunc('minute', (SELECT MIN(occurred_at) FROM device_heartbeats)),
-    date_trunc('minute', (SELECT MAX(occurred_at) FROM device_heartbeats)),
-    INTERVAL '1' MINUTE)) AS t(minute_ts)
+hour_spine AS (
+  SELECT t AS hour
+  FROM bounds, UNNEST(sequence(lo, hi, INTERVAL '1' HOUR)) AS u(t)
 ),
-joined AS (
-  SELECT s.device_id, s.minute_ts, h.status
-  FROM minutes_spine s
-  LEFT JOIN device_heartbeats h
-    ON h.device_id = s.device_id
-   AND date_trunc('minute', h.occurred_at) = s.minute_ts
+servers AS (
+  SELECT DISTINCT server_id FROM server_metrics
+  WHERE logged_at >= current_timestamp - INTERVAL '7' DAY
+),
+dense_grid AS (
+  SELECT s.server_id, h.hour
+  FROM servers s CROSS JOIN hour_spine h
+),
+-- Step 2 prep: ONE row per (server, hour) from the raw facts
+hourly_obs AS (
+  SELECT server_id,
+         date_trunc('hour', logged_at) AS hour,
+         max_by(cpu_percent, logged_at) AS cpu_at_hour   -- last reading inside the hour
+  FROM server_metrics
+  WHERE logged_at >= current_timestamp - INTERVAL '7' DAY
+  GROUP BY server_id, date_trunc('hour', logged_at)
 )
-SELECT device_id, minute_ts,
-  LAST_VALUE(status) IGNORE NULLS OVER (
-    PARTITION BY device_id ORDER BY minute_ts
-    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-  ) AS current_status
-FROM joined
-ORDER BY device_id, minute_ts;
+SELECT g.server_id,
+       g.hour,
+       COALESCE(
+         o.cpu_at_hour,
+         LAST_VALUE(o.cpu_at_hour) IGNORE NULLS OVER (
+           PARTITION BY g.server_id
+           ORDER BY g.hour
+           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+         )
+       ) AS cpu_state
+FROM dense_grid g
+LEFT JOIN hourly_obs o
+  ON o.server_id = g.server_id AND o.hour = g.hour
+ORDER BY g.server_id, g.hour;
 ```
 
-Two defects compound: syntax-error means it doesn't parse at all; even if you patched the syntax, the gap-fill semantics are inverted (compute window AFTER the LEFT JOIN, not BEFORE).
+Key differences vs the responder:
+- NO pre-join LAST_VALUE window — the join column `cpu_at_hour` is a real per-hour reading that is NULL on gap rows.
+- Aggregation `GROUP BY server_id, date_trunc('hour', logged_at)` with `max_by(cpu_percent, logged_at)` collapses multiple logs in one hour to one row (no fanout).
+- The look-back IGNORE NULLS window runs ONLY in the final SELECT over post-join rows — exactly what the iter570 COMBINED CANONICAL says.
 
-**Scores: Accuracy 1.5 / Completeness 2.5 / Clarity 3.5 / Actionability 1.5 = 2.25** — drags overall average. Note this is on the r07 §4 forward-fill LEADING CANONICAL — the canonical itself shows the correct ordering (spine → LEFT JOIN → window function); responder failed to apply it on the device/heartbeat framing.
+**Scores**: Accuracy 2 / Completeness 3 / Clarity 3 / Actionability 2. **Avg 2.50**.
+*Reasoning*: syntax/final-frame correct (partial credit), but the pre-join UNBOUNDED FOLLOWING window makes the result semantically wrong on EVERY row, and the LEFT JOIN can fanout. An engineer running this verbatim gets a wrong dashboard.
 
 ---
 
-## Q3 — ROLLUP / CUBE subtotals + GROUPING() bitmask — 4.875 STRONG PASS
+## Q2 — no-unique-column tiebreaker re-probe (FIX B findability)
 
-Question: counts by tier AND region, plus subtotals per tier, per region, and grand total, in one query.
+**Question**: Two rows tie on the sort timestamp picking latest per account; nothing unique to break the tie. Options?
 
-Responder answer: `GROUP BY ROLLUP(region, category)` + `GROUPING(region, category)` bitmask. Claimed:
-- leftmost arg = most-significant bit (correct framing)
-- For 2-col ROLLUP only values 0 (detail), 1 (region subtotal / category rolled up), 3 (grand total) are emitted
-- NO value 2 (i.e., `(category, ())` is NOT emitted by ROLLUP)
-- Offered CUBE for all 2^N combinations
+**Answer summary**: (A) `max_by(status, (updated_at, event_id))` composite-tuple tiebreaker; (B) `arbitrary(status)` for "any tied row is fine"; (C) `ROW_NUMBER ... ORDER BY updated_at DESC, event_id DESC`; mention adding sequence_id / insertion_timestamp at ingest. No nested window in ORDER BY.
 
-**Verifications (WebSearch on trino.io/docs/current/sql/select.html):**
+### Verification
+- Tuple `(updated_at, event_id)` as `max_by` second arg: Trino ROW types are comparable when all fields are comparable, and Trino compares ROWs lexicographically (field-by-field). `max_by(x, y)` requires `y` to be orderable; an anonymous ROW of two orderable timestamp/bigint fields qualifies. VALID Trino 467.
+- `arbitrary(status)`: VALID, documented Trino aggregate (returns an arbitrary non-null value).
+- `ROW_NUMBER() OVER (PARTITION BY account_id ORDER BY updated_at DESC, event_id DESC)`: standard, deterministic when (updated_at, event_id) is unique.
+- "Add a sequence_id / insertion_timestamp at ingest" is the canonical structural fix and is honest.
+- Iter570 FIX B keyword anchor on r23 §3.1G is doing its job — the responder surfaced the right paragraph and didn't nest a window inside ORDER BY (iter568 ban respected).
 
-For `ROLLUP(a, b)` the grouping sets emitted are:
-> `(a, b), (a), ()`
-
-So three groupings: detail, a-only subtotal, grand total. NO `(b)` set — confirms responder's "no value 2" claim.
-
-`GROUPING(a, b)` bitmask convention per docs:
-> "bits are assigned to the argument columns with the rightmost column being the least significant bit"
-> "a bit is set to 0 if the corresponding column is included in the grouping and to 1 otherwise"
-
-Bitmask mapping for `GROUPING(a, b)`:
-| Grouping Set | a bit | b bit | Decimal |
-|---|---|---|---|
-| (a, b) detail | 0 | 0 | **0** |
-| (a) — b rolled up | 0 | 1 | **1** |
-| () grand total | 1 | 1 | **3** |
-
-Confirmed: 0/1/3, no 2. Responder's "leftmost = most-significant" wording is equivalent to docs' "rightmost = least significant" — both describe the same big-endian convention.
-
-`CUBE(a, b)` emits all 2^N = 4 groupings: `(a,b), (a), (b), ()` → values 0, 1, 2, 3. Responder correctly distinguished ROLLUP (hierarchical, n+1 sets) vs CUBE (all combinations, 2^n sets).
-
-**Scores: Accuracy 5.0 / Completeness 4.75 / Clarity 4.75 / Actionability 5.0 = 4.875 STRONG PASS** — primary doc-verified canonical, no fabrications.
+**Scores**: Accuracy 5 / Completeness 5 / Clarity 4 / Actionability 5. **Avg 4.75**.
 
 ---
 
-## Q4 — dbt snapshot point-in-time as-of query — 4.25 PASS
+## Q3 — month-over-month self-join
 
-Question: snapshot history of customers; find who was on Pro plan on March 1st.
+**Question**: MoM revenue change per customer in one query; one table, one row per transaction.
 
-Responder answer:
-```sql
-SELECT customer_id, plan
-FROM customers_snapshot
-WHERE plan = 'Pro'
-  AND dbt_valid_from <= TIMESTAMP '2026-03-01 23:59:59'
-  AND (dbt_valid_to IS NULL OR dbt_valid_to > TIMESTAMP '2026-03-01 00:00:00');
-```
-Listed 4 dbt snapshot meta cols (`dbt_valid_from`, `dbt_valid_to`, `dbt_scd_id`, `dbt_updated_at`), said `dbt_valid_to IS NULL` = current, noted `dbt_is_current` does NOT exist, mentioned timestamp vs check strategies.
+**Answer summary**: `monthly_revenue` CTE `GROUP BY customer_id, date_trunc('month', tx_date)`, self LEFT-JOINed on `prev.month = date_add('month', -1, cur.month)`, `cur.revenue - COALESCE(prev.revenue,0)` for delta, `ROUND(100.0*(...)/NULLIF(COALESCE(prev.revenue,1),0),1)` pct, `WHERE cur.month >= date_add('month',-12,current_date)`.
 
-**Verifications (WebSearch on docs.getdbt.com):**
+### Verification
+- `date_add(unit, value, timestamp)` signature: confirmed at trino.io/docs/current/functions/datetime.html — "Adds an interval value of type unit to timestamp." `date_add('month', -1, cur.month)` is valid Trino 467.
+- Self-join MoM pattern is a standard, correct alternative to LAG (window LAG would be more idiomatic but the self-join is correct).
+- NULLIF divide-by-zero guard: correctly placed. (Minor: `COALESCE(prev.revenue, 1)` then `NULLIF(..., 0)` — if prev.revenue is NULL the divisor becomes 1, sidestepping the 0; if 0 then NULLIF returns NULL. The "new customer with no prev" row produces a pct of `100.0 * cur.revenue / 1` which is a misleading "percent" — minor analytic-semantics nit, not a Trino dialect bug.)
+- Type nuance: `date_trunc('month', tx_date)` returns the same type as input (date → date, timestamp → timestamp); comparing to `current_date` is type-compatible only if tx_date is DATE. If tx_date is TIMESTAMP, coercion handles it — minor nit.
 
-4 meta cols confirmed (docs.getdbt.com/docs/build/snapshots):
-- `dbt_valid_from` — start of the validity range
-- `dbt_valid_to` — end of the validity range (NULL = current row)
-- `dbt_scd_id` — unique identifier per snapshot version (used internally)
-- `dbt_updated_at` — when the row was last updated
+**Scores**: Accuracy 4 / Completeness 4 / Clarity 4 / Actionability 4. **Avg 4.00**.
 
-`dbt_is_deleted` is added as a 5th meta col in dbt 1.9+ when `invalidate_hard_deletes` / `hard_deletes` configured — responder didn't mention but that's a minor gap not central to the question. `dbt_is_current` confirmed absent (not a default meta col) — responder correct.
+---
 
-**Correctness nit — the asymmetric bounds:** Responder used `dbt_valid_from <= 2026-03-01 23:59:59` AND `dbt_valid_to > 2026-03-01 00:00:00`. That's a "any-time-during-March-1st" window, NOT a point-in-time as-of query. If a customer's plan changed AT 2026-03-01 12:00:00 (e.g., row valid 2026-02-15 -> 2026-03-01 12:00:00 was 'Pro', successor row 2026-03-01 12:00:00 -> NULL is 'Enterprise'), this query returns BOTH rows for the same customer — duplicating the customer with two plans. That's a real correctness defect on the user's stated goal ("find who was on Pro plan on March 1st") — typically there's exactly one valid row per customer per instant in an SCD2 table, and the asymmetric bounds break that invariant.
+## Q4 — dbt incremental late-arriving data
 
-**Canonical "as-of" pattern** is a single point-in-time instant:
-```sql
-WITH as_of AS (SELECT TIMESTAMP '2026-03-01 00:00:00' AS asof)
-SELECT customer_id, plan
-FROM customers_snapshot, as_of
-WHERE plan = 'Pro'
-  AND dbt_valid_from <= as_of.asof
-  AND (dbt_valid_to IS NULL OR dbt_valid_to > as_of.asof);
-```
-This guarantees exactly one row per customer (the version valid at that instant).
+**Question**: Hourly incremental model misses events that arrive late (occurred 2pm, landed 5pm). Handle without full reprocess.
 
-Responder's asymmetric bounds work IF the user really meant "anyone who was Pro at any point during March 1st" — but they didn't say that, and the asymmetry produces a duplicate-rows surprise the user didn't ask for. Real correctness nit, not just a clarity nit.
+**Answer summary**: Watermark on `updated_at` (landing time) NOT occurred_at; backfill/lookback `updated_at >= (SELECT COALESCE(MAX(updated_at),'1900-01-01'::timestamp) FROM {{ this }}) - INTERVAL '24' HOUR`; idempotent `unique_key='event_id'` with MERGE. Also a Spark snippet.
 
-**Scores: Accuracy 4.0 / Completeness 4.5 / Clarity 4.0 / Actionability 4.5 = 4.25 PASS** — meta-cols correct, `dbt_is_current` absence correct, SCD2 pattern recognized, but asymmetric bounds is a real defect for the stated "point-in-time" goal.
+### Verification — CROSS-ENGINE DIALECT SLIP CONFIRMED
+- `'1900-01-01'::timestamp` uses the PostgreSQL `::` cast operator. **Trino 467 does NOT support this syntax.**
+- Verified at GitHub issue #23795 ("Cast operator `::`") and PR #25259: the PR to add `x::type` is OPEN, not merged. Opened March 2025, marked "stale-ignore", awaiting final review. **Not in Trino 467.** Trino cast syntax remains `CAST(x AS type)` / `TRY_CAST(x AS type)` — see trino.io/docs/current/language/types.html.
+- Running this in a dbt-trino model compiles to a Trino query and **raises a parse error** on `::timestamp`. Cross-engine slip — PostgreSQL syntax leaked into a Trino-compiled model.
+- The correct form is `CAST('1900-01-01' AS TIMESTAMP)` (or `TIMESTAMP '1900-01-01 00:00:00'` literal).
+- The rest of the pattern (landing-time watermark, 24h lookback, `unique_key='event_id'` for MERGE idempotence) is correct and matches r28 incremental canonical.
+- The Spark snippet is off-topic given the production stack is Trino+dbt for transformation (Spark is ingestion-only per prod_info.md), but it doesn't actively harm the answer.
+
+**Scores**: Accuracy 3 / Completeness 4 / Clarity 4 / Actionability 3. **Avg 3.50**.
+*Reasoning*: pattern is right, but the literal `'1900-01-01'::timestamp` is a parse error in Trino and the engineer would hit it on first dbt run.
 
 ---
 
 ## Overall
 
-**Overall avg = (4.0 + 2.25 + 4.875 + 4.25) / 4 = 15.375 / 4 = 3.84375 PASS (thin)**
+| Q | Acc | Comp | Clar | Act | Avg |
+|---|---|---|---|---|---|
+| Q1 forward-fill+spine | 2 | 3 | 3 | 2 | 2.50 |
+| Q2 tie-break no-unique | 5 | 5 | 4 | 5 | 4.75 |
+| Q3 MoM self-join | 4 | 4 | 4 | 4 | 4.00 |
+| Q4 dbt late-arriving | 3 | 4 | 4 | 3 | 3.50 |
 
-Margin +0.34375 above 3.5 floor. -0.90625 swing from iter568's 4.75. Q2 wipeout drags hard. Without Q2 the other three average 4.375 (clean PASS).
+**Overall avg = (2.50 + 4.75 + 4.00 + 3.50) / 4 = 14.75 / 4 = 3.6875**
 
-### Topic average updates
+**Verdict: PASS** (≥3.5), but THIN. Q1 is failing — the iter570 PRIMARY fix is HALF-LANDED: the syntax bug is gone but the responder migrated the UNBOUNDED FOLLOWING anti-pattern from the outer SELECT into a pre-join CTE, which produces semantically wrong rows. Q4 has a clean cross-engine `::` slip.
 
-- **SQL query best practices for OLAP** (Q1 r23 §3.1G tie-break re-probe — iter569 FIX A NOT routed): 4.4433/138 → adding Q1 4.0 → (4.4433·138 + 4.0)/139 = **4.4401/139** (-0.0032, below topic avg, drags).
-- **Analytical query patterns on Iceberg+Trino** (Q2 r07 §4 forward-fill 4th-angle device-heartbeat + Q3 GROUPING/ROLLUP — Q3 may also map to SQL best practices): Q2 → (4.4123·22 + 2.25)/23 = **4.3179/23** (-0.0944, well below topic avg, hard drag). Q3 if mapped here → (4.3179·23 + 4.875)/24 = **4.3411/24** (+0.0232).
-- **dbt snapshots SCD2** (Q4 dbt_valid_from/to point-in-time as-of): 4.4555/7 → (4.4555·7 + 4.25)/8 = **4.4299/8** (-0.0256, below topic avg).
+---
 
-Federation **4.49944/310 row UNCHANGED** — not probed this iter.
+## Iter571 directive (next teacher actions)
 
-### iter570 directives
+**FIX A (HIGH, PRIMARY — tighten r07 §4 COMBINED CANONICAL "DO-NOT-WRITE" so the spurious pre-join window is explicitly banned)**:
+- In `resources/07-analytical-query-patterns.md` §4 COMBINED CANONICAL "DO-NOT-WRITE" block, ADD a new bullet alongside the existing "IGNORE NULLS inside paren" and "pre-join LAST_VALUE leaves gaps NULL" bullets:
+  - "**Do NOT compute a LAST_VALUE window inside a pre-join CTE — even one with `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`. The forward-fill window MUST run AFTER the LEFT JOIN onto the dense grid, because the gap rows you need to fill don't exist until the join manufactures them. Special case: a pre-join `LAST_VALUE(metric) OVER (PARTITION BY entity ORDER BY ts ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)` is doubly wrong — over a fully unbounded frame it collapses to the partition-global LAST value (a constant per partition), so every matched grid row shows the entity's globally-latest metric, not the as-of-that-bucket reading.**"
+- Include a paste-ready WRONG / RIGHT block exactly mirroring the responder's iter570 defect: WRONG `sparse_logs` CTE with the unbounded-following window then LEFT JOIN, vs RIGHT `hourly_obs` CTE with `GROUP BY entity, bucket` + `max_by(metric, ts)` to get one row per (entity, bucket) with NO pre-join window.
 
-**FIX 1 (HIGH — Q2 device/spine forward-fill ORDERING canonical).** The r07 §4 forward-fill canonical needs an EXPLICIT recipe block making the ordering bulletproof:
+**FIX B (HIGH — Step 2 one-row-per-(entity, bucket) explicit aggregation)**:
+- Same H3, Step 2 of the 3-step recipe currently says "LEFT JOIN sparse facts onto the dense grid" — clarify: "**Step 2a: first collapse the sparse facts to ONE row per (entity_id, bucket) via `GROUP BY entity_id, bucket` + `max_by(metric, ts)` (or your preferred per-bucket pick). Step 2b: LEFT JOIN that collapsed source onto the dense grid on (entity_id, bucket).**" This prevents the LEFT-JOIN fanout the responder produced. Add a one-line keyword anchor: "fanout from multiple events per bucket, dedupe per hour before forward-fill, one row per device per minute before LOCF".
 
-> **The correct ordering for forward-fill with a date/time spine:**
-> 1. Build the dense time-spine first (`UNNEST(sequence(...))` CROSS JOIN entity-list).
-> 2. LEFT JOIN the sparse source data onto the spine — gap minutes/days/hours now appear as NULL rows.
-> 3. THEN apply `LAST_VALUE(col) IGNORE NULLS OVER (PARTITION BY entity ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` over the spine-padded dense rows so `IGNORE NULLS` has actual NULL gaps to skip.
->
-> **DO NOT** apply `LAST_VALUE(... IGNORE NULLS)` inside a CTE over the RAW sparse source rows BEFORE the spine LEFT JOIN — raw rows have non-NULL values (that's why the source was sparse), so `IGNORE NULLS` skips nothing and the inner LAST_VALUE just equals the current row. After the LEFT JOIN, gap rows have NULL for ALL joined columns, so the carried-forward value is also NULL — `COALESCE(joined_col, carried_col) = COALESCE(NULL, NULL) = NULL` and gaps DON'T fill.
+**FIX C (HIGH — Trino `::` cast ban explicit, place in BOTH r23 §3.1 and r28 incremental canonical)**:
+- In `resources/23-sql-best-practices-olap.md` §3.1 add a DO-NOT-WRITE entry: "**Do NOT use the PostgreSQL `x::type` cast shorthand in any Trino-compiled SQL (queries, dbt models, etc.). Trino 467 does NOT implement `::`; the feature request (issue #23795, PR #25259) is OPEN and unmerged as of mid-2025. Use `CAST(x AS type)` or `TRY_CAST(x AS type)`. WRONG: `'1900-01-01'::timestamp`. RIGHT: `CAST('1900-01-01' AS TIMESTAMP)` or `TIMESTAMP '1900-01-01 00:00:00'`. This is a common Postgres→Trino dialect slip in dbt incremental models.**" Include a keyword anchor: "Postgres double-colon cast Trino, ::timestamp Trino, dbt incremental cast literal, watermark default timestamp dbt-trino".
+- In `resources/28-improving-complex-sql-trino-dbt.md` incremental canonical, audit any `::` literals and convert to CAST/typed-literal form; add a one-line warning in the incremental section: "**Watermark default: `COALESCE(MAX(updated_at), TIMESTAMP '1900-01-01 00:00:00')` — never `'1900-01-01'::timestamp` (Postgres syntax; not valid Trino 467).**"
 
-This is the device-heartbeat angle exactly — additive numbered recipe block in r07 §4 to make the spine-then-window ordering explicit.
+**FIX D (LOW — Q3 MoM polish, optional)**:
+- Add a `LAG`-based one-pass MoM variant alongside the self-join pattern in r07 (or wherever MoM lives) as the "idiomatic Trino" alternative; keep self-join as the explanatory baseline. Optional, non-blocking.
 
-**FIX 2 (HIGH — Q2 IGNORE NULLS SYNTAX bulletproofing).** Add a one-line bullet anywhere `IGNORE NULLS` appears in r07 §4 / r07 H3 LEADING CANONICAL — and to r23 if applicable:
+**LOCKS to preserve next iter** (do not regress): all iter534-570 locks per state.json notes; especially iter566 standalone forward-fill H3, iter569 IGNORE-NULLS-paren grammar DO-NOT-WRITE, iter568 tie-break-determinism + nested-window-ban, r07 §1a-§1a.5, r28 incremental + unique_key, r09 SCD2 4-default-cols + dbt-snapshot-as-of single-instant point-in-time, r22 §13.x federation guardrails (ZERO edits).
 
-> **Syntax of `IGNORE NULLS`:** the null-treatment clause goes AFTER the closing paren of the function args and BEFORE `OVER`. Correct: `LAST_VALUE(col) IGNORE NULLS OVER (...)`. **DO NOT** write `LAST_VALUE(col IGNORE NULLS) OVER (...)` — that's a Trino 467 PARSE ERROR (`IGNORE NULLS` is a null-treatment clause per SQL standard `<null treatment> ::= RESPECT NULLS | IGNORE NULLS`, not a function argument). Verified trino.io/docs/current/functions/window.html.
-
-This closes the "inside the parens vs outside the parens" failure mode that iter569 Q2 just hit on a SPECIFIC framing (device/heartbeat) when the canonical iter566/567 forward-fill answers had been getting it right.
-
-**FIX 3 (MEDIUM — Q1 findability of iter569 FIX A no-unique-column fallbacks).** The iter569 FIX A paragraph in r23 §3.1G is in the right resource but didn't route. Two options (pick one, don't churn):
-- **(3a)** Add stronger keyword anchors to the iter569 paragraph's lead sentence: "**No second-column unique key? Honest fallbacks for the no-unique-column case:**" — picks up the question phrasing "NO column guaranteed unique".
-- **(3b)** Add ONE forward cross-ref at the end of the iter568 "Tie-break determinism." paragraph: "If your table has NO column guaranteed unique to use as a tiebreaker, see the **Honest fallbacks** paragraph immediately below."
-
-Both are single-line additive — don't rewrite the iter568 or iter569 paragraphs.
-
-**FIX 4 (LOW — Q4 as-of point-in-time bounds clarity).** In the resource hosting dbt snapshot as-of pattern (r28 or wherever): add a one-line note that the canonical as-of pattern uses a SINGLE point-in-time instant, not asymmetric end-of-day/start-of-day bounds, to avoid duplicate-rows-per-customer when a change happened mid-day. Canonical form: `dbt_valid_from <= AS_OF AND (dbt_valid_to IS NULL OR dbt_valid_to > AS_OF)` with ONE timestamp value reused. Polish only.
-
-**FIX 5 (NO-OP federation).** Federation row stays 4.49944/310; ZERO edits to resources/22 §13.x.
-
-**iter570 probe targets:**
-- HIGHEST — Q2 re-probe device/spine forward-fill ordering to verify FIX 1 routes (same 4th-angle framing).
-- HIGH — Q2 re-probe IGNORE NULLS syntax in a simple LAST_VALUE/LAG/LEAD context to verify FIX 2 closes the inside-parens fab.
-- MEDIUM — Q1 re-probe no-unique-column to verify iter569 FIX A + FIX 3 anchor route ("table has NO column guaranteed unique per row" exact phrasing).
-- MEDIUM — Q4 2nd-angle as-of with mid-day plan change to verify FIX 4 single-instant bounds.
-- LOW — Q3 2nd-angle CUBE bitmask values 0/1/2/3 to verify bitmask convention durable.
-- DO NOT TOUCH federation.
-
-**Meta-rule observation:** Directive's "SCRUTINIZE Q2 CAREFULLY — TWO defects" + the verbatim trino.io/docs/467 verification requirement was load-bearing. Without WebSearching window.html for `<null treatment>` syntax position, and without tracing the LEFT-JOIN-then-window data flow on a gap minute, the responder's confidently-stated `LAST_VALUE(status IGNORE NULLS)` plus the wrong-CTE forward-fill could have been let slide as "different from canonical" rather than verified as a parse-error-plus-broken-logic compound defect. 32nd consecutive iter (iter537-569) where meta-rule discipline materially affected the verdict. PIN TRINO 467 + verify own corrections + watch for FABRICATED FEATURES/ABSENCES + CROSS-ENGINE SLIPS + WRONG-FRAME/SEMANTIC errors caveat WAS the difference.
-
-NOTES: did NOT bump training/state.json (teacher already set iteration=569). Federation rubric row 4.49944/310 unchanged. Did NOT touch resources files.
+**Do not bump state.json this iter** — teacher already set iteration=570.
