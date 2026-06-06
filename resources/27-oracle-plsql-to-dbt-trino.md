@@ -3158,6 +3158,44 @@ Trino's GRANT syntax is `GRANT <priv> ON <obj> TO ( user | USER user | ROLE role
 
 ---
 
+### 6.7J LEADING CANONICAL — dbt `persist_docs` (push schema.yml `description:` into ENGINE comments via `COMMENT ON TABLE` / `COMMENT ON COLUMN`)
+
+> **Keyword anchors:** dbt persist_docs, schema.yml description not showing, push column descriptions to table, COMMENT ON COLUMN dbt, Iceberg column comments, SHOW COLUMNS comment, dbt docs vs table metadata, persist_docs relation columns, my dbt descriptions are not in Trino.
+
+**The fact (verified at [docs.getdbt.com/reference/resource-configs/persist_docs](https://docs.getdbt.com/reference/resource-configs/persist_docs)):** `persist_docs` "Optionally persist [resource descriptions] as column and relation comments in the database." When enabled, dbt emits `COMMENT ON TABLE ... IS '...'` and per-column `COMMENT ON COLUMN ... IS '...'` against the engine — so your schema.yml `description:` lands as actual table/column comments stored in Trino's Iceberg metadata. Supported by dbt-trino.
+
+**The two config shapes — both valid:**
+```jinja
+-- A. Model-level inline (overrides project default for this model only)
+{{ config(persist_docs={"relation": true, "columns": true}) }}
+```
+```yaml
+# B. Project-level default in dbt_project.yml (applies to every model under the path)
+models:
+  my_project:
+    +persist_docs:
+      relation: true
+      columns: true
+```
+Two boolean keys: `relation` (table comment) and `columns` (per-column comments) — flip either independently.
+
+**How to SEE the comments in Trino after `dbt build`:** `SHOW COLUMNS FROM iceberg.analytics.fct_orders;` — output has columns `Column | Type | Extra | Comment` ([trino.io/docs/current/sql/show-columns.html](https://trino.io/docs/current/sql/show-columns.html)); the `Comment` column shows the persisted description. Manual / non-dbt equivalents: `COMMENT ON TABLE iceberg.analytics.fct_orders IS '...'` and `COMMENT ON COLUMN iceberg.analytics.fct_orders.order_id IS '...'` ([trino.io/docs/current/sql/comment.html](https://trino.io/docs/current/sql/comment.html)).
+
+**Explicit DISTINCTION from §6.7H — two DIFFERENT mechanisms, you usually want BOTH:**
+
+| | §6.7H `dbt docs generate / serve` | §6.7J `persist_docs` (this section) |
+|---|---|---|
+| Where descriptions LAND | dbt DOCS SITE (`target/catalog.json` + HTML) | ENGINE metadata (`COMMENT ON TABLE` / `COMMENT ON COLUMN` issued against Trino) |
+| Who sees them | Anyone browsing the dbt docs site | Anyone running `SHOW COLUMNS` in Trino, or any BI tool reading column comments via JDBC |
+| Triggered by | `dbt docs generate` | `dbt run` / `dbt build` (on each model materialization) |
+| Required for BI tool catalogs (Tableau, Superset, dbeaver) to see column descriptions | No | **Yes** — they read comments from the engine, not from dbt's site |
+
+If your schema.yml `description:` doesn't show up under `SHOW COLUMNS` or in the BI tool's column hover, the cause is almost always: `persist_docs` is not set. `dbt docs generate` does NOT push to engine metadata.
+
+> **Cross-references:** §6.7H (dbt docs site / `{% docs %}` blocks — the YAML `description:` keys feed BOTH §6.7H and §6.7J). §6.7C (model contracts — separate mechanism, enforces declared-vs-actual schema, not comments).
+
+---
+
 ## 7. Cutover checklist (the non-obvious gotchas)
 
 Once your models compile and run, before you turn off Oracle:

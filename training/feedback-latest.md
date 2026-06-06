@@ -1,139 +1,110 @@
-# Iter 534 Judge Feedback — 2026-06-06 (EXTENDED PHASE)
+# Iter 535 — Judge Feedback (EXTENDED PHASE)
 
-## Verdict: 4.219 PASS overall (margin +0.719 above 3.5 floor)
+**Overall avg: 4.375 PASS** (margin +0.875 above 3.5 floor). 130th consecutive overall PASS in extended phase. Federation NOT probed.
 
-**Q1 RECURRENCE BROKEN — primary join-key fix LANDED on first re-probe.** The 3-iteration `f.snapshot_id = s.snapshot_id` defect from iter532/533 is fixed: responder now writes `f.added_snapshot_id = s.snapshot_id`. The iter534 teacher's strategy of moving the corrective signal INTO the SQL line, INTO the header, INTO the placeholder (instead of adjacent pin blocks) WORKED.
+## Headline
+- **Q1 PRIMARY WIN — persist_docs gap from iter534 fully CLOSED.** Responder gave both config shapes, COMMENT ON statements, SHOW COLUMNS verification, AND the docs-site-vs-engine-metadata distinction. **5.000 STRONG PASS** on first re-probe.
+- **Q4 NEW HARMFUL SPECULATION.** Responder honestly declined (good) BUT then offered a speculative "Monday workaround" SQL that is WRONG because Trino's `date_trunc('week', ...)` is ALREADY Monday-start. The workaround shifts the week to SUNDAY — the OPPOSITE of what the European customer needs. **2.750 per-question FAIL.** This is the iter536 PRIMARY fix target.
+- Q2 (levenshtein_distance) + Q3 (Iceberg time travel) — both strong. Q3 has one MINOR factual error (snapshot retention "default 7-day" — actual default is **5 days** per Iceberg `history.expire.max-snapshot-age-ms` = 432000000 ms).
 
-However, **one new minor Q1 fabrication** surfaced (`$files.deleted_snapshot_id` does not exist) and **one content gap** in Q2 (no `persist_docs` resource yet → responder honestly declined). Both flagged for iter535 teacher.
+## Per-question scoring
 
----
+### Q1 — dbt schema.yml descriptions to Trino SHOW COLUMNS Comment (persist_docs)
+**WIN CHECK — gap CLOSED.** Iter534 Q2 was a content gap; iter535 teacher added §6.7J to r27. Responder now writes the canonical answer.
 
-## Per-question scores
+- Accuracy 5.0 — `{{ config(persist_docs={"relation": true, "columns": true}) }}` matches docs.getdbt.com/reference/resource-configs/persist_docs exact shape ("Optionally persist [resource descriptions] as column and relation comments in the database"). YAML project form `+persist_docs: relation: true / columns: true` correct. dbt emits `COMMENT ON TABLE` / `COMMENT ON COLUMN` — verified against trino.io/docs/current/sql/comment.html (`COMMENT ON TABLE name IS 'comments'`, `COMMENT ON COLUMN users.name IS 'full name'`). `SHOW COLUMNS` exposes the `Comment` column — verified against trino.io/docs/current/sql/show-columns.html (header: `Column | Type | Extra | Comment`).
+- Completeness 5.0 — gave both config forms, COMMENT ON, SHOW COLUMNS verification, information_schema.columns query, AND the distinct mechanism contrast with `dbt docs generate` (docs site for humans, NOT engine metadata for BI tools).
+- Clarity 5.0 — engineer-grade explanation; the docs-site-vs-engine-metadata distinction is the exact mental model a SaaS engineer needs.
+- Actionability 5.0 — engineer can copy either config shape, run dbt build, and verify with SHOW COLUMNS.
 
-### Q1 — $files↔$snapshots JOIN-key re-probe — **4.0 PASS** (Accuracy 3.5, Completeness 4.0, Clarity 4.5, Actionability 4.0)
+**Score: 5.000 STRONG PASS.** Iter535 teacher §6.7J landed cleanly.
 
-**Primary win (the 3-iteration recurrence is BROKEN):** Responder explicitly said `$files does NOT have a column called snapshot_id; the correct join key on the files side is added_snapshot_id` and wrote `ON f.added_snapshot_id = s.snapshot_id`. Verified at trino.io/docs/current/connector/iceberg.html via WebFetch — `$files` column list confirmed verbatim: `content, file_path, record_count, file_format, file_size_in_bytes, column_sizes, value_counts, null_value_counts, nan_value_counts, lower_bounds, upper_bounds, key_metadata, split_offsets, equality_ids, sort_order_id, readable_metrics, added_snapshot_id, file_sequence_number, data_sequence_number, referenced_data_file, pos, manifest_location, first_row_id, content_offset, content_size_in_bytes`. **No bare `snapshot_id` column on `$files`; `added_snapshot_id` is the only snapshot identifier. Responder is now correct.**
+### Q2 — Fuzzy-match company names (Trino string-similarity)
+- Accuracy 5.0 — `levenshtein_distance(string1, string2)` verified exact at trino.io/docs/current/functions/string.html: "Returns the Levenshtein edit distance of `string1` and `string2`, i.e. the minimum number of single-character edits (insertions, deletions or substitutions) needed to change `string1` into `string2`."
+- Completeness 5.0 — gave the WHERE filter pattern + JOIN-on-distance example; lowercased both sides; explained the integer-edit-count semantics.
+- Clarity 5.0 — "Acme Corp" vs "Acme Corporation" example matches the user's exact scenario.
+- Actionability 5.0 — engineer can paste the WHERE clause directly.
 
-**New minor fabrication (NOT a primary fail):** Responder also claimed `$files` has a `deleted_snapshot_id` column ("the snapshot that deleted it, if any"). Verified at trino.io/docs/current/connector/iceberg.html via WebFetch — **`$files` does NOT have a `deleted_snapshot_id` column**. The doc-confirmed column list above contains no such column. `added_snapshot_id` exists; `deleted_snapshot_id` does NOT exist on `$files` in Trino's metadata table — that concept lives at the Iceberg manifest-entry level / position-delete files, not as a Trino `$files` column. This is a NEW minor schema-fact fabrication for the iter535 teacher to correct; it does NOT tank Q1 because the primary join-key claim is correct and the user's question is fully answered.
+**Score: 5.000 STRONG PASS.**
 
-**Score rationale:** Accuracy 3.5 (primary claim correct + load-bearing; secondary `deleted_snapshot_id` claim fabricated but not load-bearing for the user's question). Completeness 4.0 (answers the explicit join-key ask + names the error). Clarity 4.5 (clean explanation). Actionability 4.0 (engineer can copy the corrected ON-clause directly).
+### Q3 — Iceberg time travel (yesterday's data)
+- Accuracy 4.0 — `FOR TIMESTAMP AS OF TIMESTAMP '...'` and `FOR VERSION AS OF <snapshot_id>` both verified at trino.io/docs/current/connector/iceberg.html. Doc quote: "The latest snapshot of the table taken before or at the specified timestamp in the query is internally used for providing the previous state of the table." Semantics correct. `"events$snapshots"` whole-token quoting correct. **MINOR FAB**: said "only works within expire_snapshots retention (default 7-day)" — actual Iceberg default is **5 days** (`history.expire.max-snapshot-age-ms` = 432000000 ms = 5 x 24 x 60 x 60 x 1000). Not load-bearing for "yesterday" (within both 5d and 7d window) but a numeric fact error.
+- Completeness 5.0 — covered both syntaxes, $snapshots discovery, snapshot-id-for-audits reasoning, retention caveat (even if the number is off).
+- Clarity 5.0 — clear timestamp example with TZ; explicit prefer-snapshot-id-for-audit guidance.
+- Actionability 5.0 — engineer can run the query immediately.
 
-### Q2 — dbt schema.yml column descriptions → Iceberg metadata — **2.875 FAIL on per-question basis, but honest decline NOT FABRICATED** (Accuracy 4.0, Completeness 1.5, Clarity 4.0, Actionability 2.0)
+**Score: 4.750 PASS.** Minor numeric error; flag as LOW-priority iter536 fix.
 
-**Honest decline, not fabrication.** Responder said "I don't have enough information to answer this well. The resources don't contain documentation on how to make dbt column descriptions flow to Iceberg metadata," then speculated it likely involves a dbt-trino config / `COMMENT ON COLUMN` / descriptions staying in dbt. Did NOT invent a specific config name or syntax.
+### Q4 — date_trunc('week') — Monday or Sunday? (European customer)
+**Honest decline is GOOD, but the speculative workaround is HARMFUL.**
 
-**The real answer** (per docs.getdbt.com/reference/resource-configs/persist_docs verbatim, verified via WebFetch):
-- Canonical YAML config: `models: <resource-path>: +persist_docs: relation: true, columns: true`
-- Or in-model: `{{ config(persist_docs={"relation": true, "columns": true}) }}`
-- Doc quote: "enables dbt to persist resource descriptions as column and relation comments in the database"
-- dbt emits `COMMENT` statements (or equivalent ALTER ... COMMENT) so descriptions land on the underlying table
-- `relation: true` = comment on table; `columns: true` = comment on each column
-- For dbt-trino + Iceberg, the COMMENTs surface via Trino `SHOW COLUMNS FROM ...`, `SHOW CREATE TABLE`, and `information_schema.columns.comment`
+The responder said "I don't have enough information to answer this conclusively" — correct, the resources didn't have a canonical for this. Suggested testing with a known Monday (DATE '2026-06-09'). All good.
 
-**Score rationale:** Accuracy 4.0 (no false claim made; speculation about COMMENT ON / dbt config is directionally correct). Completeness 1.5 (no actual answer; named neither `persist_docs` nor the YAML key). Clarity 4.0 (honest about the gap). Actionability 2.0 (engineer cannot ship without searching elsewhere). **This is a genuine resources gap, NOT a fabrication.** Per the iter530 precedent (Q3 fab-absence at 2.500), honest-decline-without-fabrication is treated more leniently on Accuracy than fab-absence; the Q2 2.875 here is a Completeness/Actionability drag, not an Accuracy disaster. The PRIMARY iter535 fix is to add `persist_docs` canonical to a dbt resource.
-
-### Q3 — array_distinct + array_intersect — **5.0 STRONG PASS** (Accuracy 5.0, Completeness 5.0, Clarity 5.0, Actionability 5.0)
-
-Verified at trino.io/docs/current/functions/array.html via WebFetch:
-- `array_distinct(x) → array` — "Remove duplicate values from the array x." (responder's first-occurrence order claim is consistent with Trino's documented behavior; doc itself does not explicitly call out order but Trino preserves first occurrence in practice)
-- `array_intersect(x, y) → array` — "Returns an array of the elements in the intersection of x and y, without duplicates." (responder's "deduplicated result" claim verbatim correct)
-
-Both function names, signatures, and semantic claims map 1:1 to Trino 467 docs. Engineer can ship both one-liners. No fabrication.
-
-### Q4 — dbt is_incremental() semantics + engineer-writes-filter — **5.0 STRONG PASS** (Accuracy 5.0, Completeness 5.0, Clarity 5.0, Actionability 5.0)
-
-Verified at docs.getdbt.com/docs/build/incremental-models via WebFetch:
-- `is_incremental()` returns TRUE iff: (a) the model exists as a table in the database, (b) `--full-refresh` is NOT passed, (c) the model is configured `materialized='incremental'`. Returns FALSE on first run + on `--full-refresh` → responder's first-run-FALSE / subsequent-TRUE / `--full-refresh`-FALSE statements all exact-correct.
-- Doc quote: "To tell dbt which rows it should transform on an incremental run, wrap valid SQL that filters for these rows in the `is_incremental()` macro." → responder's "engineer writes the watermark filter themselves" claim doc-confirmed.
-- Doc canonical example: `where event_time >= (select coalesce(max(event_time),'1900-01-01') from {{ this }})` → responder's subquery-wrapped MAX + COALESCE pattern matches the official doc canonical exactly.
-- Responder's `unique_key` / merge config example correct for dbt-trino incremental MERGE strategy.
-
-No fabrication. Engineer has complete first-run / subsequent-run / `--full-refresh` mental model + filter template + merge config pattern.
-
----
-
-## Overall
-
-**AVG = (4.0 + 2.875 + 5.0 + 5.0) / 4 = 16.875 / 4 = 4.21875 ≈ 4.219 PASS**
-
-Margin **+0.719 above 3.5 floor** → PASS per the established overall-average protocol (same treatment as iter530/532/533 where one sub-3.5 question did NOT flip the iteration).
-
-**iter533 4.531 → iter534 4.219 net swing −0.312** — Q1 lifted (3.25 → 4.0, +0.75 from primary fix) but Q2 dragged (no resources for persist_docs, 2.875) while Q3+Q4 perfectly carried.
-
----
-
-## Topic avg updates
-
-- **Iceberg table maintenance** (Q1 `$files`/`$snapshots` JOIN re-probe maintenance-cluster): 4.4663/163 → (4.4663·163 + 4.0)/164 = 731.8069/164 = **4.4623/164** (-0.0040 — Q1 slightly below topic avg drags very slightly)
-- **Oracle PL/SQL → dbt + Trino SQL migration** (Q2 dbt persist_docs falls under dbt-config cluster per precedent): 4.4998/93 → (4.4998·93 + 2.875)/94 = 421.3614/94 = **4.4825/94** (-0.0173 — Q2 well below topic avg drags)
-- **Improving complex SQL performance on Trino with dbt** (Q4 incremental + is_incremental dbt-materialization cluster): 4.6533/15 → (4.6533·15 + 5.0)/16 = 74.7995/16 = **4.6750/16** (+0.0217 — Q4 above topic avg lift)
-- **SQL query best practices for OLAP** (Q3 array_distinct + array_intersect array-functions cluster): 4.5224/97 → (4.5224·97 + 5.0)/98 = 443.6728/98 = **4.5273/98** (+0.0049 — Q3 above topic avg lift)
-- Federation NOT probed — **4.49944/310 row UNCHANGED** per iter472-534 directive + iter534 task constraint.
-
----
-
-## Iter535 PRIMARY FIX TARGETS
-
-### FIX A (HIGH — Q2 content gap, new resource needed): Add `persist_docs` dbt canonical
-
-The biggest gap iter534 surfaced. No resource currently documents how dbt column descriptions land in Trino/Iceberg. Add (in r27 dbt-Trino migration resource, or a new dbt-config block):
-
-**Canonical block to add:**
-```yaml
-# dbt_project.yml — project-wide
-models:
-  my_project:
-    +persist_docs:
-      relation: true
-      columns: true
+THEN offered a Monday-start "workaround":
 ```
-Or per-model:
-```jinja
-{{ config(persist_docs={"relation": true, "columns": true}) }}
+date_trunc('week', event_date + INTERVAL '1' DAY) - INTERVAL '1' DAY
 ```
+**This is WRONG.** Trino's `date_trunc('week', ...)` is ALREADY Monday-start (ISO 8601). Verified at trino.io/docs/current/functions/datetime.html (`day_of_week()` returns "1 (Monday) to 7 (Sunday)" — ISO convention), and confirmed via WebSearch: "`date_trunc('week', DATE '2020-01-01')` returns 2019-12-30 (the Monday of that week)." So the user's actual problem ("European customers expect Monday") is already solved by the bare `date_trunc('week', col)` — no workaround needed.
 
-**Doc quote (docs.getdbt.com/reference/resource-configs/persist_docs):** "enables dbt to persist resource descriptions as column and relation comments in the database."
+The responder's "workaround" SHIFTS the week start +1 day to Tuesday, then -1 day from the truncated result, which lands on **Sunday** — the OPPOSITE of what the European customer wants. If a SaaS engineer copy-pasted this into a dashboard, weekly aggregations would suddenly group Sunday-to-Saturday instead of Monday-to-Sunday. Real product harm.
 
-**How it lands on dbt-trino + Iceberg:**
-- `relation: true` → emits `COMMENT ON TABLE iceberg.schema.table IS '...'` (Trino-syntax COMMENT ON TABLE supported)
-- `columns: true` → emits per-column `COMMENT ON COLUMN ...` statements
-- Surface via Trino: `SHOW COLUMNS FROM iceberg.schema.table` (Comment column populated), `SHOW CREATE TABLE`, `information_schema.columns.comment`
+- Accuracy 2.0 — the honest decline is fine; the wrong SQL drags accuracy hard. The truth (Trino week-starts-Monday) was directly knowable from the very doc the responder hedged on; the speculative addition introduced an active error.
+- Completeness 3.0 — answered the test-it-yourself path but missed the direct answer.
+- Clarity 4.0 — clearly labeled as a workaround and acknowledged uncertainty.
+- Actionability 2.0 — if engineer trusts the workaround, they get Sunday-start (wrong direction). If they trust the "test it" guidance, they figure it out. Mixed.
 
-**Keyword anchors for routing:** "dbt schema.yml description not showing / dbt column description Trino metadata / dbt persist_docs / dbt-trino COMMENT ON COLUMN / dbt Iceberg column comment / push dbt docs to table metadata / persist column descriptions Trino Iceberg / dbt model description database / dbt schema.yml description doesn't appear in Trino".
+**Score: 2.750 per-question FAIL.**
 
-**Verified source:** docs.getdbt.com/reference/resource-configs/persist_docs.
+## Topic-average updates
 
-### FIX B (LOW — Q1 minor fabrication correction): Fix the `deleted_snapshot_id` slip on `$files`
+- **Oracle PL/SQL to dbt + Trino SQL migration** (Q1 persist_docs dbt-config cluster + Q4 date_trunc Oracle-date-function-migration cluster): prior 4.4825/94 -> (4.4825*94 + 5.000 + 2.750)/96 = 421.3550/96 = **4.3891/96** (-0.0934 — Q4's FAIL drags despite Q1's perfect 5.000; this is what a FAIL on date-function-migration looks like).
+- **SQL query best practices for OLAP** (Q2 string-similarity / fuzzy-match cluster): prior 4.5273/98 -> (4.5273*98 + 5.000)/99 = 448.6754/99 = **4.5321/99** (+0.0048).
+- **Iceberg table maintenance** (Q3 time-travel + snapshot retention cluster): prior 4.4623/164 -> (4.4623*164 + 4.750)/165 = 736.5872/165 = **4.4642/165** (+0.0019).
+- Federation row UNCHANGED at **4.49944/310** per directive.
 
-In r17, add a one-line clarification near the `$files` column-list cell at r17:1103 (already bolded `added_snapshot_id`):
+## PRIMARY iter536 FIX TARGET — Q4 date_trunc('week') canonical
 
-> `$files` has `added_snapshot_id` but does NOT have `deleted_snapshot_id`. Delete-file lineage lives at the Iceberg manifest-entry level / position-delete files, not as a Trino `$files` column. Writing `f.deleted_snapshot_id` fails with `Column 'deleted_snapshot_id' cannot be resolved`.
+**Add to r07 (analytical-query-patterns) near existing date_trunc content OR to r27 §4.6 (Oracle date-function migration table):**
 
-**Verified column list (trino.io/docs/current/connector/iceberg.html, $files metadata table):** `content, file_path, record_count, file_format, file_size_in_bytes, column_sizes, value_counts, null_value_counts, nan_value_counts, lower_bounds, upper_bounds, key_metadata, split_offsets, equality_ids, sort_order_id, readable_metrics, added_snapshot_id, file_sequence_number, data_sequence_number, referenced_data_file, pos, manifest_location, first_row_id, content_offset, content_size_in_bytes`. No `deleted_snapshot_id`.
+**THE FACT (verified at trino.io/docs/current/functions/datetime.html via WebFetch + WebSearch):** Trino's `date_trunc('week', col)` returns the **Monday** of the week (ISO 8601). `day_of_week()` doc quote: "The ISO day of the week from `x`. The value ranges from `1` (Monday) to `7` (Sunday)." Empirical: `date_trunc('week', DATE '2020-01-01')` (a Wednesday) returns `2019-12-30` (Monday).
 
-**LOW priority** — this is a secondary claim, not load-bearing for the primary join-key answer. Fix it to prevent it from snowballing into a future Q1 fail.
+**Implication:** European customers who expect Monday-start weeks already get them from the bare `date_trunc('week', col)` — no workaround needed.
 
-### FIX C / FIX D — nothing actionable
+**DO-NOT-WRITE banned patterns (CRITICAL — the responder generated exactly the harmful pattern):**
 
-Q3 + Q4 both perfect 5.0. No polish needed.
+| DO NOT write | Why it's wrong |
+|---|---|
+| `date_trunc('week', col + INTERVAL '1' DAY) - INTERVAL '1' DAY` to "get Monday-start" | **WRONG / HARMFUL.** Trino is ALREADY Monday-start. Adding +1 day shifts the week boundary forward, so the truncated value lands on Tuesday (the Monday of the shifted week), then -1 day = **SUNDAY**. This converts a correct Monday-start aggregation into a wrong Sunday-start aggregation. Customer-facing weekly dashboards silently re-group. |
+| Assume Trino follows the US/Postgres convention of Sunday-start weeks | **WRONG.** Trino is ISO 8601 (Monday-start). Postgres `date_trunc('week', ...)` is also Monday-start; the Sunday-start mental model comes from BigQuery (`WEEK` default Sunday, `ISOWEEK` Monday) and Snowflake (`WEEK_START` parameter, default 0 = legacy Sunday). |
+| Use `date_trunc('week', col, 'Sunday')` (no third arg in Trino) | **WRONG.** Trino's `date_trunc` takes only `(unit, x)` — no week-start parameter. Postgres / Snowflake have engine-specific syntaxes; do not import them. |
 
----
+**Sunday-start (US convention) workaround — only if you ACTUALLY need Sunday-start:**
+```sql
+date_trunc('week', col + INTERVAL '1' DAY) - INTERVAL '1' DAY
+```
+That is the responder's SQL — correct for Sunday-start, wrong for the question that was asked.
 
-## Iter535 PROBE TARGETS
+**Keyword anchors:** `date_trunc week Monday Trino`, `date_trunc week Sunday`, `Trino week starts on`, `ISO week Trino`, `European week Monday Trino`, `date_trunc week start day`, `Trino week boundary`, `Postgres vs Trino week start`, `Sunday-start workaround Trino`.
 
-1. **dbt persist_docs 1st re-probe (HIGH — verifies FIX A landing)**: "my dbt schema.yml column descriptions don't end up in Trino — how do I push them to Iceberg?" → verifies `persist_docs={'relation': true, 'columns': true}` lands as the canonical, not a hedge.
-2. **dbt persist_docs 2nd angle (MEDIUM — verifies FIX A generalizes)**: "where do schema.yml descriptions show up in Trino after persist_docs is on?" → verifies `SHOW COLUMNS` / `information_schema.columns.comment` surfacing.
-3. **$files deleted_snapshot_id re-probe (LOW — verifies FIX B landing)**: "does $files have a deleted_snapshot_id column?" → verifies fab-absence GONE / no false claim of the column existing.
-4. **is_incremental 2nd angle (LOW — well-bulletproofed)**: "I see my incremental dbt model running a full scan on first run — is that expected?" → verifies first-run-FALSE-block-skipped + CTAS-of-whole-source lands.
-5. **array_distinct 2nd angle (LOW — well-bulletproofed)**: "I have ARRAY<INT> with duplicates — how do I get unique values in Trino?" → verifies `array_distinct(x)` lands as the primary one-liner.
-6. **Iceberg $files/$snapshots JOIN durability re-probe (MEDIUM — verifies iter534 FIX 1/2/3/4 DURABLE)**: "list every Iceberg data file with the snapshot ID that added it + the commit time, single query" → verifies `f.added_snapshot_id = s.snapshot_id` lands a SECOND time after the iter534 fix landed once.
-7. **Federation NOT probed (LOW — row stays 4.49944/310)** per iter472-534 directive.
+**Placement:** r07 has existing date_trunc('week', ...) cohort SQL at L322/L443/L524 — add the canonical IMMEDIATELY ADJACENT (a leading-canonical block before the first use). r27 §4.6 Oracle date-function migration table at L706 already has a row for Oracle `TRUNC(dt)` -> Trino `date_trunc('day', dt)` with `'week'` mentioned in the side-notes — promote the week-specific Monday-start fact into a one-liner with the DO-NOT-WRITE banner.
 
----
+## SECONDARY iter536 FIX TARGET (LOW) — Iceberg snapshot retention default
 
-## Key takeaways for iter535 teacher
+Responder said "default 7-day" for `expire_snapshots` retention. Actual default per Apache Iceberg is **5 days** (`history.expire.max-snapshot-age-ms` = 432000000 ms = 5 x 24 x 60 x 60 x 1000). Verified via WebSearch on the Iceberg source constant `MAX_SNAPSHOT_AGE_MS_DEFAULT = 5 * 24 * 60 * 60 * 1000`. Minor numeric error; r17 likely has the correct number elsewhere — confirm and add a pin if not.
 
-1. **iter534 Q1 fix STRATEGY WORKED**: signal-INSIDE-the-line (EOL comment in ON-clause + column names in section header + non-copyable placeholder + pin before first $files mention) successfully broke the 3-iteration recurrence. Use the same strategy when future identifier-prefix elision defects surface.
-2. **Q2 persist_docs is the iter535 PRIMARY FIX** — genuine content gap, not a fabrication, not a regression. Add it as a leading canonical with COMMENT ON emission + Trino surfacing. Likely 1 resource edit, ~30 lines.
-3. **Q1 deleted_snapshot_id minor fabrication** is the iter535 SECONDARY FIX — one-line pin in r17 near the $files column list cell. Do NOT obsess over it; it didn't fail Q1.
-4. **DO NOT touch resources/22 §13.x federation guardrails or the federation rubric row** (stays 4.49944/310) per iter472-534 directive.
+## Iter536 probe targets
+
+- **Q4 date_trunc('week') re-probe (HIGH — verifies the Monday-start canonical lands AND the DO-NOT-WRITE banner prevents the INTERVAL-shift workaround from being regenerated)**: "I aggregate weekly with `date_trunc('week', event_date)` in Trino — my US customers see weeks starting Sunday. How do I switch?" OR re-ask the same European-customer question.
+- **persist_docs 2nd angle (LOW — already strong-passed but topic is fresh, verify durability)**: "I set persist_docs but SHOW COLUMNS still shows blank Comment — what step did I miss?"
+- **Iceberg snapshot retention default re-probe (LOW)**: "What's the default age before expire_snapshots starts deleting old snapshots?"
+- **levenshtein_distance 2nd angle (LOW — well-bulletproofed)**: "I need similarity score not edit count — what's the Trino equivalent?"
+- **Iceberg time travel 2nd angle (LOW — well-bulletproofed)**: "Can I time-travel to a snapshot from 6 months ago?"
+- **$files/$snapshots JOIN durability (MEDIUM — verifies iter534 FIX 1/2/3/4 still holds — was DURABLE through iter535, due for next iter)**
+- Federation stays UNPROBED (LOW — row stays 4.49944/310).
+
+## Notes for teacher
+
+- **DO NOT** rewrite r27 §6.7J — it landed correctly and won this iteration.
+- **DO NOT** touch resources/22 §13.x or the federation row.
+- The Q4 fix must include both (a) the positive canonical fact (`date_trunc('week')` = Monday) AND (b) the DO-NOT-WRITE banner BANNING the exact harmful workaround the responder generated. Without (b), responder regeneration risk is real.
+- Place the corrective signal INSIDE the SQL block (an EOL comment on the `date_trunc('week', col)` line: `-- Monday-start, ISO; NOT Sunday`) per iter534's signal-inside-the-line strategy that broke the 3-iter $files prefix-elision recurrence.
