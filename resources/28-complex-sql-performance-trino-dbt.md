@@ -287,6 +287,8 @@ These are the wrong shapes a Haiku responder must NEVER suggest in a dbt-trino +
 >
 > **Important caveat on copy-on-write switch**: it dramatically increases write amplification per MERGE — each MERGE rewrites every data file touched. And on this stack (Trino as the primary query+DML engine), the switch is doubly limited: (a) you can only set the properties from Spark, (b) only DML run from Spark honors CoW — DML run from Trino remains MoR regardless. Only flip if (a) delete-file accumulation has become unmanageable AND (b) your MERGE volume per run is small relative to the table AND (c) you can move the MERGE itself to a scheduled Spark job. If those three don't all hold, stay on MoR + scheduled Spark `rewrite_position_delete_files` compaction (Trino 467 has no EXECUTE procedure for position-delete compaction — see DO-NOT-WRITE below).
 >
+> **The Trino-writer-stays-MoR nuance (state this in your answer when CoW comes up):** even after Spark sets `write.delete.mode = 'copy-on-write'` (and `write.update.mode`, `write.merge.mode`) on the table, MERGE / DELETE / UPDATE statements run FROM TRINO STILL produce MoR position-delete files — CoW write behavior only takes effect when the DML runs FROM SPARK, because Trino 467's Iceberg writer is MoR-only regardless of the table property ([trinodb/trino#17272](https://github.com/trinodb/trino/issues/17272)).
+>
 > ### DO-NOT-WRITE — banned forms in the merge-model-degradation diagnosis
 >
 > | DO NOT write this | What is wrong | The right answer |
