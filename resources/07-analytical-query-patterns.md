@@ -749,6 +749,23 @@ ORDER BY day, event_id;
 
 This is distinct from Pattern D below (`RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW`) — there the non-zero `INTERVAL '6' DAY` actually does work (it defines a calendar-aware sliding window). The redundancy only applies to the **zero-width** `INTERVAL '0' DAY` case, which collapses to the default RANGE frame.
 
+#### ROWS vs RANGE — worked numeric example (transcribe this table)
+
+Same query shape: `SUM(amt) OVER (ORDER BY order_date <FRAME>)`. Four rows with a deliberate **gap on Jan-03** and **tied peers on Jan-01** so both axes show. Verified at [trino.io/blog/2021/03/10/introducing-new-window-features.html](https://trino.io/blog/2021/03/10/introducing-new-window-features.html): *"When using CURRENT ROW in a RANGE frame, it includes all rows where values of the sort key are the same as in the current row, which are called a peer group."*
+
+| # | order_date | amt | `ROWS BETWEEN 1 PRECEDING AND CURRENT ROW` | `RANGE BETWEEN INTERVAL '1' DAY PRECEDING AND CURRENT ROW` |
+|---|---|---|---|---|
+| 1 | 2024-01-01 | 100 | **100** (only row1) | **200** (row1+row2 — Jan-01 peers) |
+| 2 | 2024-01-01 | 100 | **200** (row1+row2 physical) | **200** (same peer group as row1) |
+| 3 | 2024-01-02 | 50  | **150** (row2+row3 physical) | **250** (row1+row2+row3 — Jan-01 within 1 day of Jan-02) |
+| 4 | 2024-01-04 | 70  | **120** (row3+row4 physical) | **70** (Jan-03 absent; window [Jan-03, Jan-04] catches only row4) |
+
+**The teaching contrast — row3: ROWS=150 vs RANGE=250.** RANGE pulls in BOTH Jan-01 rows because their dates are within 1 day of Jan-02; ROWS only reaches **one physical row back** (row2), no matter how many rows share that physical-neighbor's date. The row4 case shows the **gap effect**: RANGE is calendar-aware and doesn't care that Jan-03 has zero rows, while ROWS just walks the physical predecessor (which happens to be row3 on Jan-02).
+
+> **Guard caption (if your ROWS and RANGE columns are equal on row3, you've miscounted):** RANGE includes ALL rows whose value is within the window, not a fixed count of rows. Row3's RANGE window spans dates `[Jan-01, Jan-02]` and **all three rows** (the two Jan-01 peers plus row3) fall in it → 100+100+50 = 250. The ROWS=150 answer ignores row1 entirely because the physical-1-back frame can only reach row2.
+
+> **Bonus default-frame surprise.** `SUM(amt) OVER (ORDER BY order_date)` with **NO explicit frame** defaults to `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` (per Trino's window-functions docs). On the data above the cumulative values would be 200, 200, 250, 320 — both Jan-01 peers see 200 (the peer-group end), Jan-02 sees 250, Jan-04 sees the full running total. If you expected a per-row running total of 100, 200, 250, 320, you'd be surprised: the default frame treats peers as a group. Use Pattern 2 (unique tiebreaker + explicit ROWS) when you want per-row accumulation.
+
 ### Pattern A2: Bucketed running total — `GROUP BY` + window-over-aggregate (CANONICAL CARD)
 
 **The SaaS question family:** "Per tenant, show monthly event counts AND a running cumulative total of events through the end of each month." Same family: weekly active users with running totals, daily revenue with month-to-date, signups per week with cumulative YTD.

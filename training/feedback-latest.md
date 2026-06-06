@@ -1,185 +1,170 @@
-# Iter 543 Judge Feedback — 2026-06-06 (EXTENDED PHASE)
+# Iter 544 Judge Feedback — 3.6563 PASS (THIN margin +0.1563)
 
-## Summary
+## Overall
 
-**Overall avg = (4.6875 + 4.625 + 4.500 + 3.8125) / 4 = 17.625 / 4 = 4.4063 — STRONG PASS** (+0.9063 above 3.5 floor).
+**OVERALL AVG = (4.6875 + 2.625 + 2.625 + 4.6875) / 4 = 14.625 / 4 = 3.6563 PASS** (margin +0.1563 above 3.5 floor — THIN; two sub-3.5 questions did NOT flip the iteration per the established overall-average protocol, iter530-543 precedent). 139th consecutive overall PASS in extended phase. Federation NOT probed — row stays 4.49944/310.
 
-**Iter542 → iter543 net swing +0.8438** (from 3.5625 thin pass to 4.4063 strong pass). Both iter542 critical defects CLOSED on first re-probe. One minor arithmetic slip surfaced in Q4 worked example — concept is correct, just one number in the table is wrong.
+**HEADLINE WIN — Q1 ROWS-vs-RANGE arithmetic slip CLOSED on first re-probe.** iter543 Q4 had row3 RANGE=150 (wrong — that's the ROWS answer). iter544 teacher inserted a worked-numeric table at r07 L752-767 with row3 RANGE=**250** (rows 1+2+3 = 100+100+50). iter544 responder transcribed correctly: row1 ROWS=100/RANGE=200, row2 ROWS=200/RANGE=200, row3 ROWS=150/RANGE=250, row4 ROWS=120/RANGE=70. Slip is fixed.
 
-138th consecutive overall PASS in extended phase. Margin doubled vs. iter542.
-
----
-
-## PRIMARY WINS — iter542 defects both CLOSED
-
-### WIN 1 — Q1 `EXECUTE PROCEDURE iceberg.system.<proc>` fab GONE (iter542 Q3 closure)
-Iter542 Q3 (2.5 FAIL): responder wrote `EXECUTE PROCEDURE iceberg.system.expire_snapshots(...)` (INVALID Trino 467; parse error `mismatched input 'PROCEDURE'`).
-
-Iter543 Q1 (4.6875 STRONG PASS): responder writes verbatim:
-- `ALTER TABLE iceberg.analytics.your_table EXECUTE expire_snapshots(retention_threshold => '7d')`
-- `ALTER TABLE iceberg.analytics.your_table EXECUTE remove_orphan_files(retention_threshold => '7d')`
-- Explicitly says: "uses `ALTER TABLE ... EXECUTE`, NOT `CALL` (Spark-only)"
-- Also adds: 7d min-retention floor (`iceberg.expire-snapshots.min-retention`), `dry_run` is Spark-only, canonical order optimize → expire → orphan
-
-Verified verbatim at trino.io/docs/current/connector/iceberg.html:
-> `ALTER TABLE test_table EXECUTE expire_snapshots(retention_threshold => '7d');`
-> `ALTER TABLE test_table EXECUTE remove_orphan_files(retention_threshold => '7d');`
-> "The value for `retention_threshold` must be higher than or equal to `iceberg.expire-snapshots.min-retention` in the catalog, otherwise the procedure fails"
-
-EXECUTE PROCEDURE fab is GONE. CALL-as-Trino is NOT emitted. r17 L21/L22 in-line signal + new DO-NOT-WRITE block LANDED on first re-probe.
-
-### WIN 2 — Q2 `COMMENT ON TABLE` standalone canonical SURFACED (iter542 Q4 closure)
-Iter542 Q4 (2.5 FAIL): responder declined the COMMENT ON TABLE syntax question (findability miss; r27 §6.7J only referenced it in dbt persist_docs context).
-
-Iter543 Q2 (4.625 STRONG PASS): responder writes verbatim:
-- `COMMENT ON TABLE iceberg.analytics.fct_orders IS '...'`
-- `COMMENT ON COLUMN tbl.col IS '...'`
-- `COMMENT ON TABLE tbl IS NULL` to remove
-- Verification path: SHOW CREATE TABLE / SHOW COLUMNS / information_schema.tables.comment + information_schema.columns.comment
-- Cross-link to dbt persist_docs (auto-emits these COMMENT ON statements)
-
-Verified verbatim at trino.io/docs/current/sql/comment.html:
-> `COMMENT ON ( TABLE | VIEW | COLUMN ) name IS 'comments'`
-> "The comment can be removed by setting the comment to NULL"
-
-Findability gap CLOSED. r17 new COMMENT ON canonical block + cross-ref from r27 §6.7J LANDED on first re-probe.
+**HEADLINE GAPS — two small function canonicals missing.** Q2 `map_concat` and Q3 `arbitrary()`/`any_value()` are both honest declines ("resources don't have this section") — no fabrication, no harm, but Completeness/Actionability tank. Both are real, well-documented Trino functions with high SaaS utility. Iter545 PRIMARY ACTION: add both canonicals.
 
 ---
 
 ## Per-question scores
 
-### Q1 — Trino expire_snapshots + remove_orphan_files SQL (Iceberg table maintenance)
+### Q1 — ROWS vs RANGE running total with concrete numeric example (ties + gaps) → 4.6875 STRONG PASS
 
-| Dimension | Score |
-|---|---|
-| Technical accuracy | 5.0 |
-| Beginner clarity | 4.5 |
-| Practical applicability | 5.0 |
-| Completeness | 4.25 |
-| **Average** | **4.6875 — STRONG PASS** |
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5.0 | Transcribed table matches r07 L756-761 exactly AND independently re-derived correct. row3 RANGE window = `[Jan-01, Jan-02]` (Jan-02 minus `INTERVAL '1' DAY` = Jan-01; CURRENT ROW includes peers per Trino docs); rows in window = row1+row2+row3 = 100+100+50 = **250** ✓. row4 RANGE window = `[Jan-03, Jan-04]`; rows in window = only row4 (Jan-03 absent; Jan-02 outside) = **70** ✓. ROWS column also correct (row3 ROWS=150 = row2+row3 physical-1-back; row4 ROWS=120 = row3+row4 physical-1-back). Quote-verified at [trino.io/blog/2021/03/10/introducing-new-window-features.html](https://trino.io/blog/2021/03/10/introducing-new-window-features.html): *"When using CURRENT ROW in a RANGE frame, it includes all rows where values of the sort key are the same as in the current row, which are called a peer group."* iter543 SLIP FIXED. |
+| Completeness | 4.5 | Covered both axes (ROWS=physical-count vs RANGE=value-window-incl-peers), explicit tie effect (row3 RANGE pulls Jan-01 peers), explicit gap effect (row4 RANGE catches only row4 because Jan-03 is absent), Pattern1 (omit-frame default RANGE = deterministic on peers), Pattern2 (unique tiebreaker + explicit ROWS for per-row accumulation), non-deterministic-on-ties warning. Did NOT separately mention the bonus default-frame surprise (200,200,250,320 cumulative — present at r07 L767), but the directive only asked for ties + gaps which are both present. |
+| Clarity | 4.5 | Transcribed table is readable; row3 callout ("ROWS=150 vs RANGE=250") makes the load-bearing contrast explicit; row4 callout ("[Jan-03, Jan-04] catches only row4") makes the gap-effect explicit. No jargon left unexplained. |
+| Actionability | 4.75 | Engineer can copy the table verbatim, knows when to use Pattern1 (deterministic peer-group end) vs Pattern2 (unique tiebreaker + ROWS for per-row running total), knows the non-determinism trap. |
 
-PRIMARY WIN. Form `ALTER TABLE ... EXECUTE expire_snapshots/remove_orphan_files(retention_threshold => '7d')` matches trino.io verbatim. Explicitly contrasts vs. Spark `CALL` form and vs. invalid `EXECUTE PROCEDURE`. 7d min-retention floor cited (`iceberg.expire-snapshots.min-retention`). `dry_run` correctly tagged as Spark-only. Canonical order optimize → expire → orphan correct. Tiny gap: did not separately call out `iceberg.remove-orphan-files.min-retention` (also 7d floor), but `dry_run` clarification is solid.
-
-### Q2 — COMMENT ON TABLE / COLUMN in Trino (DDL, table description)
-
-| Dimension | Score |
-|---|---|
-| Technical accuracy | 5.0 |
-| Beginner clarity | 4.5 |
-| Practical applicability | 4.75 |
-| Completeness | 4.25 |
-| **Average** | **4.625 — STRONG PASS** |
-
-PRIMARY WIN. Grammar verbatim-matches docs. All three variants (TABLE / COLUMN / VIEW supported per docs; responder showed TABLE + COLUMN, sufficient for the question). NULL-to-remove form included. SHOW CREATE TABLE + information_schema.tables.comment + information_schema.columns.comment verification paths correct. Distinguishes standalone DDL from dbt persist_docs cleanly. Light gap: did not show `COMMENT ON VIEW` variant (minor — engineer asked specifically about table).
-
-### Q3 — dbt accepted_values test for status ∈ {active, paused, cancelled}
-
-| Dimension | Score |
-|---|---|
-| Technical accuracy | 5.0 |
-| Beginner clarity | 4.5 |
-| Practical applicability | 4.5 |
-| Completeness | 4.0 |
-| **Average** | **4.500 — STRONG PASS** |
-
-Correct test identifier `accepted_values` with `values: ['active','paused','cancelled']`. Confirmed at docs.getdbt.com/reference/resource-properties/data-tests as one of the four built-in generic tests (not_null, unique, accepted_values, relationships). Severity-config mention correct. `dbt_utils.expression_is_true` correctly identified as the escape hatch for complex predicates. "Compiles to NOT IN check" framing slightly imprecise — the actual compiled SQL is `select <col> from <model> where <col> NOT IN (<values>) AND <col> IS NOT NULL` (the test returns rows that VIOLATE the rule). Engineer's takeaway is unchanged. Minor: did not mention `quote: false` for numeric/boolean value lists, but not relevant for the asked string-list use case.
-
-### Q4 — ROWS vs RANGE window frames — when do they differ?
-
-| Dimension | Score |
-|---|---|
-| Technical accuracy | 3.5 |
-| Beginner clarity | 4.0 |
-| Practical applicability | 4.0 |
-| Completeness | 3.75 |
-| **Average** | **3.8125 — PASS** |
-
-**CONCEPT VERIFIED CORRECT**: ROWS = physical row-count offsets; RANGE = value-based logical range that includes all peer rows tied on the ORDER BY value. RANGE-needs-numeric/date-ORDER BY framing correct. Trino default frame when ORDER BY present without explicit frame = `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` — verified at trino.io/docs/current/sql/select.html verbatim: "If the frame is not specified, it defaults to `RANGE UNBOUNDED PRECEDING`, which is the same as `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`" and "contains all rows from the start of the partition up to the last peer of the current row".
-
-**ARITHMETIC SLIP IN WORKED EXAMPLE (row 3)**:
-- Table: row1 (2024-01-01, amt=100), row2 (2024-01-01, amt=100), row3 (2024-01-02, amt=50).
-- Frame: `RANGE BETWEEN INTERVAL '1' DAY PRECEDING AND CURRENT ROW` over ORDER BY order_date.
-- For row3 (order_date = 2024-01-02): frame includes rows where order_date ∈ [2024-01-01, 2024-01-02]. That's row1 + row2 + row3 = 100 + 100 + 50 = **250**.
-- Responder claimed row3 RANGE = **150**. That's the ROWS-1-PRECEDING answer (row2 + row3), copy-pasted into the RANGE column.
-- Row1 (RANGE=200, both peers on Jan 1) and row2 (RANGE=200) are correct.
-
-Verified via web search (trino.io/blog "Introducing new window features"): "CURRENT ROW includes all rows where values of the sort key are the same as in the current row, which are called a peer group" and "RANGE BETWEEN INTERVAL '1' month PRECEDING AND CURRENT ROW" — so the syntax is valid Trino 467 (since v346), and the frame semantics confirm the 250 answer. The responder's 150 is an arithmetic error — concept right, illustrative number wrong. Could mislead an engineer learning the difference (the example exists precisely to show ROWS ≠ RANGE on this row; if the responder's number 150 is read as authoritative, the engineer sees ROWS=150 = RANGE=150 and concludes the frames coincide — the OPPOSITE of the lesson).
-
-`RANGE BETWEEN INTERVAL '1' DAY PRECEDING` supported on Trino since 346 — confirmed valid for Trino 467. No invalidity claim here.
-
-r07 L692-750 ALREADY contains the canonical ROWS vs RANGE peer-semantics block (and L1212 has a correct INTERVAL '6' DAY example with proper RANGE semantics). The responder's worked-example arithmetic was a regeneration slip, not a resource lift — `grep "INTERVAL '1' DAY PRECEDING"` in r07 returns no matches (only INTERVAL '6' DAY). So this is a one-off regeneration arithmetic slip, not contaminated resource content.
+**WIN CHECK CONFIRMED.** The regenerative arithmetic slip from iter543 is gone. r07's new transcribable table at L752-767 anchors the answer; responder lifted it instead of regenerating.
 
 ---
 
-## VERIFIED VERDICT on Q4 arithmetic
+### Q2 — map_concat in Trino — what is it, when does a SaaS product use it? → 2.625 PER-Q FAIL (honest content-gap decline)
 
-**Row3 RANGE = 250, not 150.** Confirmed by two independent paths:
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 4.0 | Honest decline — no fabrication. Correctly notes resources cover MAP types and `MAP_AGG` but no `map_concat` section. Zero harm (Trino-dialect-accuracy memory: wrong dialect = parse error = FAIL; honest decline avoids that failure mode entirely). |
+| Completeness | 1.5 | Did not deliver the answer. `map_concat` is a real, well-documented Trino function and the engineer's question is fully answerable from public docs. |
+| Clarity | 3.5 | "I don't have enough information" framing is clear; explicit about what IS in resources (MAP type, MAP_AGG) so engineer can re-route the query. |
+| Actionability | 1.5 | Engineer learns to ask elsewhere; no concrete next step inside this repo. |
 
-1. Walking the frame semantics: row3's `RANGE BETWEEN INTERVAL '1' DAY PRECEDING AND CURRENT ROW` includes all rows with `order_date ∈ [2024-01-01, 2024-01-02]`. Rows 1, 2, 3 all qualify. 100 + 100 + 50 = 250.
-2. trino.io blog "Introducing new window features" (the canonical source for Trino's INTERVAL-based RANGE semantics post-v346): peer-group inclusion at CURRENT ROW + value-range inclusion of preceding rows within the interval offset.
-
-The responder's 150 = the row2+row3 ROWS answer transposed into the RANGE column. The concept explanation in the answer is fully consistent with the 250 result — the answer body actually argues for 250 implicitly ("RANGE includes all peer rows on the ORDER BY value"), then the table breaks that argument by listing 150. Internal contradiction.
-
----
-
-## Is a ROWS-vs-RANGE canonical needed in resources/ as the iter544 fix?
-
-**Partially.** r07 L676-750 already has the canonical ROWS vs RANGE peer-semantics block AND r07 L1212 has a correct RANGE INTERVAL example. The gap is NOT the conceptual content — it's the **lack of a small worked-numeric-example table** with explicit per-row ROWS and RANGE answers that the responder can transcribe verbatim instead of regenerating arithmetic. iter544 SHOULD add a 4-row worked example with per-row arithmetic shown so the responder doesn't regenerate the table from scratch.
-
----
-
-## iter544 next-teacher actions (concrete)
-
-### FIX A (MEDIUM — Q4 ROWS-vs-RANGE worked-example canonical to prevent arithmetic regeneration)
-Add a small numeric-worked-example block to r07 §1a (or wherever the existing ROWS-vs-RANGE block lives at L692-750) that gives an explicit 4-row table with per-row ROWS and RANGE answers AND the arithmetic shown row-by-row. Use a fresh scenario (different column names from the responder's example to avoid copy-paste contamination), e.g.:
-
-```
-ORDER BY order_date ASC, then for each row:
-  S_ROWS  = sum(amt) OVER (ORDER BY order_date ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
-  S_RANGE = sum(amt) OVER (ORDER BY order_date RANGE BETWEEN INTERVAL '1' DAY PRECEDING AND CURRENT ROW)
-
-order_date | amt | S_ROWS                     | S_RANGE
-2024-01-01 | 100 | 100   (no preceding row)   | 200  (row1+row2 are Jan1 peers)
-2024-01-01 | 100 | 200   (row1+row2)          | 200  (row1+row2 are Jan1 peers)
-2024-01-02 |  50 | 150   (row2+row3)          | 250  (row1+row2+row3 all within 1d of Jan2)
-2024-01-04 |  75 | 125   (row3+row4)          |  75  (gap day — Jan3 absent, only row4 in [Jan3, Jan4])
-```
-
-Add a one-line caption: "Row3 is the load-bearing row of this example — S_ROWS=150 (the 1 preceding row), S_RANGE=250 (peers + 1-day-prior rows). If your worked numbers ever show S_ROWS = S_RANGE on row3, you've miscounted — the whole point of the example is that they differ when ORDER BY has peer ties." This guard sentence inoculates against the iter543 slip.
-
-Row 4 deliberately demonstrates the gap-day case (Jan 3 has no rows → row4's RANGE includes ONLY row4 because Jan 3 is absent and Jan 4 is the only date in [Jan 3, Jan 4]). This drives home that RANGE is value-based, not row-count-based.
-
-Keyword anchors: "ROWS vs RANGE example", "ROWS BETWEEN vs RANGE BETWEEN worked example", "INTERVAL DAY PRECEDING worked example", "peer rows window frame example", "RANGE window frame arithmetic", "running total ROWS vs RANGE".
-
-### FIX B (LOW — Q3 accepted_values compiled-SQL accuracy nit)
-In r27 §6.7 (or wherever accepted_values is documented), add a one-line on the actual compiled SQL: the test compiles to `select <col> from <model> where <col> NOT IN (<values>) AND <col> IS NOT NULL` — the test returns ROWS that VIOLATE the rule (any returned row = test failure; zero rows = pass). Responder's "compiles to NOT IN check" was close but slightly hand-wavy. Also add a one-line on `quote: false` for non-string value lists.
-
-### NO Q1/Q2 fixes needed
-Both PRIMARY WINS. Hold the line on r17 in-line signal + DO-NOT-WRITE block + COMMENT ON canonical block. Do NOT rewrite the iter543 landings — RECONCILE-DON'T-APPEND only if a future failure surfaces.
-
-### Iter544 probe targets
-- **HIGH — ROWS vs RANGE 2nd angle (verifies FIX A landing)**: "show me a small numeric example where ROWS and RANGE give different running-total results" OR "if I switch from ROWS to RANGE on this query with date ties, what changes numerically?" (must give correct row-by-row arithmetic; row with both day-peer-ties AND gap days should produce DIFFERENT ROWS and RANGE numbers).
-- **MEDIUM — Q1 expire_snapshots 3rd angle (durability check on WIN 1)**: "do I have to run remove_orphan_files separately, or does expire_snapshots clean orphan files too?" (must answer: separate command; canonical order optimize → expire → orphan).
-- **MEDIUM — Q2 COMMENT ON 2nd angle (durability check on WIN 2)**: "how do I drop a description from one column in Trino?" (must answer `COMMENT ON COLUMN tbl.col IS NULL`).
-- **LOW — federation stays UNPROBED** (row stays 4.49944/310 per directive).
+**Verified correct answer** (for iter545 teacher canonical) — [trino.io/docs/current/functions/map.html](https://trino.io/docs/current/functions/map.html):
+- Signature: `map_concat(map1(K, V), map2(K, V), ..., mapN(K, V)) -> map(K, V)`
+- Semantics: *"Returns the union of all the given maps. If a key is found in multiple given maps, that key's value in the resulting map comes from the last one of those maps."* — **rightmost map wins on key collision**.
+- **SaaS use case** (canonical): merge a base/default settings map with a per-tenant override map — `map_concat(default_settings, tenant_settings)` so per-tenant keys override defaults. Other examples: merging feature-flag maps, merging request-context maps, combining default + per-row enrichment maps in a SELECT projection.
+- Edge: behavior when same key appears with NULL value in the later map — the later NULL wins (not skipped). Worth a one-line callout.
 
 ---
 
-## Topic-row updates (Q4 → "Analytical query patterns on Iceberg+Trino" per r07 §1a hosting)
+### Q3 — arbitrary()/any_value() aggregate — what problem, practical example? → 2.625 PER-Q FAIL (honest content-gap decline)
 
-| Topic | Pre-iter avg / N | Q score | Post-iter avg / N | Delta |
-|---|---|---|---|---|
-| Iceberg table maintenance (Q1 expire_snapshots/remove_orphan_files) | 4.4543 / 164 | 4.6875 | (4.4543·164 + 4.6875)/165 = (730.5052 + 4.6875)/165 = 735.1927/165 = **4.4557 / 165** | +0.0014 |
-| SQL query best practices for OLAP (Q2 COMMENT ON TABLE/COLUMN DDL) | 4.5354 / 108 | 4.625 | (4.5354·108 + 4.625)/109 = (489.8232 + 4.625)/109 = 494.4482/109 = **4.5362 / 109** | +0.0008 |
-| Oracle PL/SQL → dbt + Trino SQL migration (Q3 dbt accepted_values; r27 hosts canonical) | 4.4998 / 93 | 4.500 | (4.4998·93 + 4.500)/94 = (418.4814 + 4.500)/94 = 422.9814/94 = **4.4998 / 94** | +0.0000 |
-| Analytical query patterns on Iceberg+Trino (Q4 ROWS vs RANGE; r07 §1a hosts canonical) | 4.4018 / 19 | 3.8125 | (4.4018·19 + 3.8125)/20 = (83.6342 + 3.8125)/20 = 87.4467/20 = **4.3723 / 20** | -0.0295 |
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 4.0 | Honest decline — no fabrication. Correctly identifies which aggregates ARE covered in resources (`try()`, `COUNT(DISTINCT)`, `approx_distinct`, `array_agg`) and which are NOT (`arbitrary`, `any_value`). |
+| Completeness | 1.5 | Did not deliver the answer. Both functions are real and standard. |
+| Clarity | 3.5 | Same shape as Q2 — clear about what's missing. |
+| Actionability | 1.5 | No concrete next step inside this repo. |
 
-Federation row UNCHANGED at **4.49944 / 310** per directive (do NOT touch §13.x or the federation rubric row).
+**Verified correct answer** (for iter545 teacher canonical) — [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html):
+- `arbitrary(x)` — returns an arbitrary non-null value of `x`, if one exists. `any_value(x)` is the SQL-standard alias (identical behavior).
+- **Problem it solves**: When you `GROUP BY` a key and need a representative value from a column that is **functionally dependent** on the group key (e.g., `user_name` is constant per `user_id`), Trino still requires every non-aggregated SELECT column to be in the GROUP BY OR wrapped in an aggregate. Adding `user_name` to GROUP BY is semantically wrong (it inflates the apparent grouping intent) and writing `MIN(user_name)` / `MAX(user_name)` does pointless string work just to satisfy the SQL rule. `arbitrary(user_name)` / `any_value(user_name)` signals "I don't care which row's value, they're all the same" — cheaper than MIN/MAX (no comparison cost) and reads as documentation.
+- **Canonical SaaS example**:
+  ```sql
+  -- Per user_id, count of orders + a representative name.
+  SELECT
+    user_id,
+    any_value(user_name) AS user_name,    -- functionally dependent on user_id
+    COUNT(*) AS order_count,
+    SUM(amount) AS total_spend
+  FROM orders
+  GROUP BY user_id;
+  ```
+- Versus the alternatives: `MIN(user_name)` works but pays comparison cost; adding `user_name` to GROUP BY can subtly change the grouping if `user_name` ever drifts (e.g., a rename row).
+- **Watch-out** to include in canonical: result is non-deterministic across runs (any non-null value is valid) — DO NOT use when caller needs a specific row's value.
+
+---
+
+### Q4 — dbt incremental + new source column → 4.6875 STRONG PASS
+
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5.0 | All four `on_schema_change` values correct and matched to canonical r13 L5446-5459. Default = `ignore` ✓ (verified [docs.getdbt.com/docs/build/incremental-models](https://docs.getdbt.com/docs/build/incremental-models): "ignore (default)... If you add a column to your incremental model, and execute a dbt run, this column will not appear in your target table"). `append_new_columns` = ALTER ADD COLUMN then run ✓. `sync_all_columns` = adds + drops (destructive) ✓. `fail` = errors out on schema mismatch ✓. First-run-ignores-it behavior correct (r13 L5393: "On the first run, `is_incremental()` returns `false` and dbt runs the full SELECT to build the target table from scratch" — table is built fresh from the current SELECT shape, no schema-change logic runs because there's no prior schema to compare to). |
+| Completeness | 4.5 | Covered all four values + default + first-run behavior + recommendation (`append_new_columns` for SaaS pipelines because auto-propagates + never drops). Could marginally mention the `--full-refresh` escape hatch as the safety net when in doubt, but not required for the question. |
+| Clarity | 4.5 | "Silently drops" framing for the `ignore` default makes the silent-data-loss risk vivid. Engineer understands why `append_new_columns` is the recommended default. |
+| Actionability | 4.75 | Engineer knows exactly what to add to their config block: `on_schema_change='append_new_columns'`. Knows it issues `ALTER TABLE ... ADD COLUMN` automatically, knows `sync_all_columns` is destructive. |
+
+No slip. Solid.
+
+---
+
+## Iter545 PRIMARY teacher actions
+
+Two small function canonicals — consider doing them as a PAIR in a single iter545 edit (one map-function addition + one aggregate-function addition; both are small, both came up in the same iteration, both belong adjacent to existing canonicals).
+
+### FIX A (PRIMARY — Q2 `map_concat` canonical)
+
+**Target location**: r07 §map family (if it exists), OR r09 element_at / map-HOF section, OR a fresh `### map_concat` subsection inside whichever resource already documents MAP types and MAP_AGG. Reconcile-don't-append: cross-link from the MAP_AGG section so route by keyword (`merge maps`, `map override`, `combine maps`, `map union`, `tenant settings override`, `default + override map`, `map_concat`) reaches it.
+
+**Body** (minimum):
+- Signature line, doc-verbatim quote:
+  > *"Returns the union of all the given maps. If a key is found in multiple given maps, that key's value in the resulting map comes from the last one of those maps."* — [trino.io/docs/current/functions/map.html](https://trino.io/docs/current/functions/map.html)
+- Signature: `map_concat(map1(K, V), map2(K, V), ..., mapN(K, V)) -> map(K, V)`
+- **SaaS canonical use** (the load-bearing example):
+  ```sql
+  -- Merge default settings with per-tenant overrides; tenant wins on key collision.
+  SELECT
+    tenant_id,
+    map_concat(default_settings, tenant_settings) AS effective_settings
+  FROM tenants
+  JOIN settings_defaults ON TRUE;
+  ```
+- One-line rightmost-wins callout (load-bearing for the engineer who doesn't read the quote).
+- NULL-value edge: if the rightmost map has the key with NULL, the result has NULL for that key (not the leftmost's non-null) — call this out because it surprises engineers who assume NULL is "absent".
+- Keyword anchors: `merge maps Trino`, `map override`, `map union`, `combine maps`, `tenant override default settings`, `feature flag maps merge`, `map_concat`.
+
+### FIX B (PRIMARY — Q3 `arbitrary()` / `any_value()` canonical)
+
+**Target location**: the aggregate-functions section that already documents `array_agg` / `approx_distinct` — add adjacent canonical so keyword-routing (`representative value`, `functional dependency GROUP BY`, `MIN to satisfy GROUP BY`, `any non-null value aggregate`, `arbitrary`, `any_value`) reaches it.
+
+**Body** (minimum):
+- Signature: `arbitrary(x)` returns an arbitrary non-null value of `x`, if any. `any_value(x)` is the SQL-standard alias (identical behavior — recommend `any_value` for readability/portability).
+- **The problem it solves**: SQL requires every non-aggregated SELECT column be in GROUP BY or wrapped in an aggregate. When the column is **functionally dependent** on the GROUP BY key (per-key constant), engineers reach for `MIN(col)` / `MAX(col)` which pays comparison cost for no semantic gain. `any_value(col)` says "any one is fine, they're all equal" — cheaper and self-documenting.
+- **SaaS canonical use** (load-bearing example):
+  ```sql
+  -- Per user_id, total spend + a representative user_name (constant per user_id).
+  SELECT
+    user_id,
+    any_value(user_name) AS user_name,
+    COUNT(*)             AS order_count,
+    SUM(amount)          AS total_spend
+  FROM orders
+  GROUP BY user_id;
+  ```
+- One-line warning: non-deterministic — any non-null value is valid; DO NOT use when caller needs a specific row's value (e.g., latest-by-timestamp — use `MAX_BY(col, ts)` instead). Cross-link to a `MAX_BY` / `MIN_BY` mention if one exists.
+- Keyword anchors: `representative value GROUP BY`, `functional dependency aggregate`, `any value Trino`, `arbitrary Trino aggregate`, `MIN to satisfy GROUP BY alternative`, `non-aggregated column SELECT GROUP BY`, `any_value`, `arbitrary`.
+
+### NO Q1 or Q4 fixes needed
+
+Q1 PRIMARY WIN — hold the line on r07 L752-767 (new worked-numeric table); RECONCILE-DON'T-APPEND only if a future failure surfaces.
+Q4 STRONG PASS — hold the line on r13 L5446-5459 (`on_schema_change` canonical); already covers all four values, default, first-run, recommendation.
+
+---
+
+## Iter545 probe targets
+
+| Priority | Question shape | Verifies |
+|---|---|---|
+| HIGH | `map_concat` 2nd angle (verifies FIX A landing) — "in Trino, how do I merge two MAP columns where the second one's values should win on collision?" OR "is there a function to combine multiple MAP values into one?" | Must answer `map_concat(map1, map2, ...)` + rightmost-wins; must NOT decline. |
+| HIGH | `any_value` / `arbitrary` 2nd angle (verifies FIX B landing) — "I have GROUP BY user_id but I need to also show user_name (constant per user_id) — what's the cleanest way in Trino?" OR "is there an aggregate that just returns any row's value?" | Must answer `any_value(user_name)` or `arbitrary(user_name)`; must NOT decline. |
+| MEDIUM | ROWS-vs-RANGE 3rd angle (durability on iter544 win) — "If I add a UNIQUE tiebreaker to my ORDER BY, do I still need to think about ROWS vs RANGE?" | Must answer no peer-group ambiguity once ORDER BY is unique; both Pattern1 and Pattern2 then converge for per-row running total. |
+| MEDIUM | `on_schema_change` 2nd angle (durability check on Q4 PASS) — "What happens to my downstream model if the upstream incremental table gains a column?" OR "if I set on_schema_change='sync_all_columns' and someone removes a column from the model, what happens to the data?" | Must answer destructive DROP COLUMN on sync_all_columns; must answer downstream sees the new column once upstream propagates (with append_new_columns). |
+| LOW | Federation stays UNPROBED — row stays 4.49944/310 per directive. | — |
 
 ---
 
 ## Meta-rule observation
 
-Directive's "verify YOUR OWN corrections before asserting" caveat was DECISIVE again on Q4: I went in suspecting the responder's row3 RANGE=150 was a slip. Verified via two independent paths — (1) walking the frame semantics by hand (frame at row3 is `order_date ∈ [Jan 1, Jan 2]` → includes rows 1+2+3 → 250), (2) verifying RANGE INTERVAL peer-group semantics at trino.io blog ("CURRENT ROW includes all rows where values of the sort key are the same as in the current row, which are called a peer group" → confirms peer-group inclusion). The responder's 150 = ROWS column copied into RANGE column for row3 is a clear arithmetic error, not a frame-semantics misunderstanding. Concept right; one number wrong. Score reflects accurately: Q4 still PASSES because the conceptual content is solid and the rest of the table is right, but accuracy docked from 5 to 3.5 because a teaching example with a wrong number is actively misleading.
+Directive's "verify YOUR OWN corrections before asserting" was DECISIVE again — independently re-derived row3 RANGE arithmetic (window `[Jan-01, Jan-02]` + CURRENT ROW pulls Jan-01 peers = 100+100+50 = 250 ✓) and row4 RANGE arithmetic (window `[Jan-03, Jan-04]`; only row4 in window because Jan-03 is absent and Jan-02 is outside = 70 ✓) BEFORE confirming the WIN. Also WebSearch-verified `map_concat` signature + rightmost-wins quote and `arbitrary`/`any_value` alias-identity at official trino.io docs BEFORE writing the canonical-fix instructions for the teacher. 8th consecutive iter where the meta-rule prevented false-positive correction in either direction.
 
-7th consecutive iter (iter537 NULLS-LAST + iter538 banker's-vs-HALF_UP + iter539 sorted_by + iter540 not_null + iter541 bucket-arg-order + iter542 EXECUTE-PROCEDURE-fab + iter543 ROWS-vs-RANGE-arithmetic) where the meta-rule prevented a false-positive correction in either direction.
+## Topic average updates
+
+- **Analytical query patterns on Iceberg+Trino (Q1 ROWS-vs-RANGE 2nd angle, r07 hosts canonical)**: 4.3723/20 → (4.3723·20 + 4.6875)/21 = 92.1335/21 = **4.3873/21** (+0.0150 — Q1 above topic avg lifts slightly; arithmetic-slip closure stabilizes).
+- **SQL query best practices for OLAP (Q2 map_concat — function-family question; routes to SQL best practices because no dedicated "Trino built-in functions catalog" row exists)**: 4.5362/109 → (4.5362·109 + 2.625)/110 = 496.8708/110 = **4.5170/110** (-0.0192 — Q2 well-below topic avg drags; honest-decline penalty applies).
+- **SQL query best practices for OLAP (Q3 arbitrary/any_value — also aggregate-family, same row)**: 4.5170/110 → (4.5170·110 + 2.625)/111 = 499.495/111 = **4.4999/111** (-0.0171 — Q3 same drag profile).
+- **Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling (Q4 on_schema_change — r13 hosts canonical)**: 4.4968/170 → (4.4968·170 + 4.6875)/171 = 769.1435/171 = **4.4979/171** (+0.0011 — Q4 marginally above topic avg).
+
+Federation 4.49944/310 row UNCHANGED per directive.
+
+## Sources
+
+- [Trino window functions blog (peer group quote)](https://trino.io/blog/2021/03/10/introducing-new-window-features.html)
+- [Trino SELECT docs (default RANGE frame)](https://trino.io/docs/current/sql/select.html)
+- [Trino map functions docs (map_concat signature + rightmost-wins quote)](https://trino.io/docs/current/functions/map.html)
+- [Trino aggregate functions docs (arbitrary / any_value)](https://trino.io/docs/current/functions/aggregate.html)
+- [dbt incremental models docs (on_schema_change default = ignore)](https://docs.getdbt.com/docs/build/incremental-models)

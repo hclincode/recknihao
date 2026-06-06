@@ -2352,6 +2352,18 @@ Wrong — aggregate in row-level expression (SQL error):
 
 For aggregate-level thresholds, use `dbt_utils.not_null_proportion` (see above).
 
+#### accepted_values — compiled SQL and the `quote: false` gotcha for numeric/boolean columns
+
+`accepted_values` compiles to roughly `SELECT <col> FROM <model> WHERE <col> NOT IN ('v1', 'v2', ...) [AND <col> IS NOT NULL]` — **rows returned = failures; zero rows = pass** (same pass/fail convention as every other dbt generic test). The values list is single-quoted by default. Verbatim from [docs.getdbt.com/reference/resource-properties/data-tests](https://docs.getdbt.com/reference/resource-properties/data-tests): *"The `accepted_values` test supports an optional `quote` parameter which, by default, will single-quote the list of accepted values in the test query. To test non-strings (like integers or boolean values) explicitly set the `quote` config to `false`."* So for numeric or boolean columns, omitting `quote: false` makes dbt emit `WHERE status_id NOT IN ('1', '2', '3', '4')` — Trino will silently or noisily mis-compare depending on type-coercion rules, and the test result is unreliable. The fix is one line:
+
+```yaml
+- name: status_id   # INTEGER column
+  data_tests:
+    - accepted_values:
+        values: [1, 2, 3, 4]
+        quote: false        # emit NOT IN (1, 2, 3, 4) — no quotes around integers
+```
+
 #### DO-NOT-WRITE — banned dbt-test claims (cite-or-omit)
 
 | DO NOT write | Why it's wrong |
