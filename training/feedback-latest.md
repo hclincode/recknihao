@@ -1,123 +1,162 @@
-# Judge Feedback — Iter 573
+# iter574 Judge Feedback
 
-PIN: Trino 467. All verifications run against trino.io/docs/467 (or stable doc text identical across 467-481 where the cited statement has not changed).
-
-## Verdict: STRONG PASS — overall avg 4.96875 (margin +1.46875 above 3.5 floor)
-
-iter573 FIX A (spine clean-up, kill GROUP-BY-on-aggregate via scalar-subquery or literal-date form) + FIX B (max_by-vs-MAX "latest not largest" guard) BOTH VALIDATED on first re-probe. All four iter569/571/572 historical defects are now RESOLVED:
-- IGNORE-NULLS-inside-paren parse error (iter569/571) — held resolved at iter572, held resolved here.
-- Pre-join window anti-pattern (iter570) — held resolved.
-- GROUP-BY-on-aggregate spine (iter572 Q1) — RESOLVED via responder's `DATE '2026-01-01'` + `sequence(0,89)` literal-bound form (avoided the need for a MIN()-of-source-date trap entirely).
-- MAX-vs-max_by semantic slip (iter572 Q1) — RESOLVED via responder's `max_by(count_val, recorded_at)` use in Q1 + correct contrast-with-MAX framing in Q2.
-
-Q1 5.00 / Q2 5.00 / Q3 4.9375 / Q4 4.9375 = **4.96875 STRONG PASS**. Zero defects on all four. Federation NOT probed — 4.49944/310 row unchanged.
-
----
+**Pinned target:** Trino 467 + Iceberg connector (Hive Metastore + MinIO/S3) per `prod_info.md`.
 
 ## Per-question scores
 
-### Q1 — Daily end-of-day inventory composition re-probe (PRIMARY iter573 FIX A + FIX B check)
-**5.0 / 5.0 / 5.0 / 5.0 = 5.00 STRONG PASS**
+### Q1 — Daily ACTIVE subscribers per plan, no missing days, derive bounds from data
+A1 builds the dynamic-bounds spine correctly (good) but the `daily_active` CTE is a single-point-in-time snapshot. The result series is wrong for all historical days.
 
-Verification of each directive sub-point:
+**(i) Dynamic-bounds spine — CORRECT (durability lock held).**
+```sql
+bounds   : SELECT MIN(subscription_start_date) AS earliest_date, CURRENT_DATE AS latest_date FROM subscriptions
+calendar : SELECT date_add('day', n, bounds.earliest_date) AS day
+           FROM bounds
+           CROSS JOIN UNNEST(sequence(0, CAST(date_diff('day', bounds.earliest_date, bounds.latest_date) AS INT))) AS t(n)
+```
+- Bounds derived from data — no hardcoded literal. PASS.
+- `sequence` + `CROSS JOIN UNNEST` is the canonical spine pattern. PASS.
+- No GROUP-BY-on-aggregate; no `::`-cast; CAST(INT) form is valid Trino 467 dialect. PASS.
 
-(i) **Dense spine — CLEAN.** Responder built spine as `DISTINCT stores CROSS JOIN date_add('day', n, DATE '2026-01-01') FROM UNNEST(sequence(0, 89)) AS t(n)`. This uses a LITERAL date (`DATE '2026-01-01'`) — not a `MIN(date)` aggregate — so there is no `GROUP BY` on an aggregate. The iter572 Q1 defect (the malformed `GROUP BY date_trunc('week', MIN(posted_date))` form) is fully avoided. Hits the spirit of FIX A's bounds-CTE / scalar-subquery alternatives by taking the simplest path: literal date bounds, which is the cleanest form when the question fixes the window (Q1 = Jan 1 to Mar 31, 90 days). Verified at trino.io/docs/current/functions/datetime.html: `sequence(start, stop, step)` returns the integer/date range, `UNNEST` expands the array to rows. No parse-error risk.
+Quote (Trino current — https://trino.io/docs/current/functions/array.html#sequence): `sequence(start, stop)` returns an array of values from `start` to `stop` (inclusive). Cross-joining `UNNEST(sequence(...))` to expand to per-row days is the documented canonical.
 
-(ii) **Per-bucket dedup uses `max_by(count_val, recorded_at)` — CORRECT.** Verified VERBATIM at trino.io/docs/current/functions/aggregate.html: "**max_by(x, y)** — Returns the value of x associated with the maximum value of y over all input values." This is precisely the "last count of the day, not the biggest" semantic — the value of `count_val` from the row whose `recorded_at` is the latest in the bucket. The iter572 Q1 defect (`MAX(balance)` used for "end-of-week balance") is fully avoided. FIX B routed.
+**(ii) `daily_active` CTE — SEMANTIC BUG (point-in-time snapshot, not per-day series).**
+```sql
+SELECT CURRENT_DATE AS day,                       -- <-- HARDCODES single day
+       plan_type,
+       COUNT(*) AS active_count
+FROM subscriptions
+WHERE subscription_start_date <= CURRENT_DATE     -- <-- snapshot AS OF TODAY
+  AND (subscription_end_date IS NULL OR subscription_end_date > CURRENT_DATE)
+GROUP BY plan_type
+```
+Then `LEFT JOIN ... ON c.day = d.day`. Because `d.day` is *always* `CURRENT_DATE`, only the today-row matches. For every historical calendar day, `d.*` is NULL and `COALESCE(...,'No Activity'/0)` fires. The query returns:
+- A real count only for `c.day = CURRENT_DATE`.
+- `'No Activity', 0` for every other day in the spine.
 
-(iii) **IGNORE NULLS placement + frame — CLEAN.** Responder wrote `LAST_VALUE(inventory_count) IGNORE NULLS OVER (PARTITION BY store_id ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`. IGNORE NULLS is OUTSIDE the args paren, BEFORE OVER — placement-correct per the grammar (`name '(' args ')' nullTreatment? filter? over?`). Frame is look-BACK (UNBOUNDED PRECEDING AND CURRENT ROW) — no UNBOUNDED FOLLOWING future-fill leak. No pre-join window — the LAST_VALUE is applied in the final SELECT over the LEFT-JOIN-padded dense rows. All three iter569/570/571 anti-patterns avoided.
+That is NOT a per-day active-subscriber series over history. It is a today-snapshot + zeros.
 
-End-to-end composition: calendar (literal date spine × stores) → daily_counts (per-bucket max_by dedup) → dense_with_nulls (LEFT JOIN spine to daily_counts) → final (COALESCE + LAST_VALUE IGNORE NULLS forward-fill). Order is canonical: dense spine first, then dedup, then JOIN, then window — fanout-safe, gap-filling correct, "quiet days still need a row" requirement met by the COALESCE wrapping the carry-forward.
+**Correct pattern — interval-overlap / "active-on-each-day" range join** (count, for each calendar day `c.day`, every subscription whose active interval covers that day):
+```sql
+WITH bounds AS (
+  SELECT MIN(subscription_start_date) AS earliest_date,
+         CURRENT_DATE                  AS latest_date
+  FROM iceberg.saas.subscriptions
+),
+calendar AS (
+  SELECT date_add('day', n, b.earliest_date) AS day
+  FROM bounds b
+  CROSS JOIN UNNEST(sequence(0, CAST(date_diff('day', b.earliest_date, b.latest_date) AS INT))) AS t(n)
+)
+SELECT
+  c.day,
+  s.plan_type,
+  COUNT(*) AS active_count
+FROM calendar c
+JOIN iceberg.saas.subscriptions s
+  ON s.subscription_start_date <= c.day
+ AND (s.subscription_end_date IS NULL OR s.subscription_end_date > c.day)
+GROUP BY c.day, s.plan_type
+ORDER BY c.day, s.plan_type;
+```
+Notes:
+- This is a RANGE / interval-overlap join (each subscription row joins to every calendar day in its `[start, end)` interval).
+- For "no missing days even when no plan is active that day", LEFT JOIN the calendar against this aggregated result on `day` and `COALESCE(active_count, 0)`.
+- For very large fact tables, consider materializing per-plan boundary events and using a cumulative `SUM(+1) - SUM(-1)` on the start/end edges instead of the broadcast range join.
 
-Zero defects. This is the cleanest Q1 in the past 5+ iterations.
+This is a separate pattern from forward-fill (iter566 IGNORE NULLS) — forward-fill propagates the last-known value forward across gap rows; range-overlap counts active *intervals* per day. The current resources have a forward-fill canonical but **no interval-overlap canonical**. That is the iter575 gap.
 
-### Q2 — max_by vs MAX micro-probe (PRIMARY iter573 FIX B direct check)
-**5.0 / 5.0 / 5.0 / 5.0 = 5.00 STRONG PASS**
-
-Responder's `max_by(status, timestamp_recorded) AS latest_status GROUP BY device_id` is exactly the docs-verbatim form for "value at the latest time": from trino.io/docs/current/functions/aggregate.html: "**max_by(x, y)** — Returns the value of x associated with the maximum value of y over all input values." The contrast with MAX is explicit ("MAX gives the lexicographically/numerically largest, not the chronologically latest") — exactly the FIX B canonical framing. Zero defects. FIX B validated end-to-end (Q1 composition + Q2 direct micro-probe).
-
-### Q3 — approx_distinct vs COUNT(DISTINCT)
-**5.0 / 4.75 / 5.0 / 5.0 = 4.9375 STRONG PASS**
-
-(a) **HyperLogLog claim** — CORRECT. Trino's `approx_distinct` is implemented via HyperLogLog (the underlying sketch type is `HyperLogLog` per trino.io/docs/current/functions/hyperloglog.html, and `approx_distinct` is the HLL cardinality estimator).
-
-(b) **Default 2.3% standard error** — CORRECT. Verified at trino.io/docs/current/functions/aggregate.html: "The default standard error is 2.3%." Responder's "approx_distinct(user_id) uses HyperLogLog, default ~2.3% standard error" matches the doc string.
-
-(c) **RSD interpretation** — CORRECT. The 2.3% figure is a standard error / standard deviation, not a hard ceiling, so framing it as "68% of queries within ±2.3%, 95% within ±4.6%" is the textbook normal-distribution interpretation (1σ / 2σ). The "standard deviation not a ceiling" caveat is exactly the right nuance for a SaaS engineer comparing exact vs approximate. The "most accurate 1K–10M" guidance is consistent with HLL behavior (HLL is least accurate on very small cardinalities where the algorithm uses linear counting and on very large cardinalities approaching the sketch capacity).
-
-When-to-use is clean: exact for billing/customer-facing/audit, approx for internal dashboards/monitoring/trends. Minor -0.25 completeness nit: didn't mention the `approx_distinct(x, e)` two-arg form for custom error tolerance (`e` in `[0.0040625, 0.26000]` per docs verbatim) — engineer might want to tighten accuracy at the cost of more memory. Not load-bearing for the question asked. Otherwise strong.
-
-### Q4 — UNNEST array to rows
-**5.0 / 5.0 / 4.75 / 5.0 = 4.9375 STRONG PASS**
-
-Responder led with the NATIVE-ARRAY form (`CROSS JOIN UNNEST(tags) AS t(tag)`) — which is exactly right since the question said the field is ALREADY an array. The SPLIT variant (`CROSS JOIN UNNEST(SPLIT(tags, ',')) AS t(tag)`) was added as a secondary case for comma-separated strings. Clause-order point (UNNEST in FROM before WHERE) is correct per Trino 467 SELECT grammar.
-
-LEFT JOIN UNNEST ON TRUE for NULL/empty-array preservation — verified VERBATIM at trino.io/docs/current/sql/select.html: CROSS JOIN UNNEST returns zero entries when array is empty or NULL, so rows are lost; LEFT JOIN preserves the parent row with NULL-padded unnested column ("LEFT JOIN is preferable in order to avoid losing the row containing the array/map field"). The "ON TRUE" constraint is also correct per docs: "in case of using LEFT JOIN the only condition supported by the current implementation is ON TRUE."
-
-Per the judge directive's clarity nit watch: the question said "Event field stores an array of tags like ['mobile','beta','pro']" — i.e., the field IS already an array. Responder led with the native-array form, so the nit doesn't apply. Minor -0.25 clarity nit: could have made the native-array example slightly more prominent (e.g., bolded heading "If `tags` is already an array (your case):") to make the primary case stand out from the secondary SPLIT case. Not load-bearing.
-
----
-
-## Overall: 4.96875 STRONG PASS (margin +1.46875)
-
-`(5.00 + 5.00 + 4.9375 + 4.9375) / 4 = 19.875 / 4 = 4.96875`
-
-Best iteration in the past 10+. iter573 FIX A + FIX B both routed cleanly on first re-probe. No regressions on iter566/567/568/569/570/571/572 fixes — IGNORE NULLS placement held, no pre-join window, no fabricated features, no cross-engine slips, no wrong-frame errors, dense spine intent held, no UNBOUNDED FOLLOWING leaks. All eight historical anti-patterns in the analytical-query-patterns / SQL-best-practices stack are now consistently dodged across re-probes.
-
----
-
-## Topic avg updates
-
-- **Analytical query patterns on Iceberg+Trino** (Q1 spine+max_by end-to-end composition, Q4 UNNEST array): 4.3411/24 → (4.3411·24 + 5.00)/25 = **4.3675/25** (+0.0264) → (4.3675·25 + 4.9375)/26 = **4.3894/26** (+0.0219).
-- **SQL query best practices for OLAP** (Q2 max_by micro-probe, Q3 approx_distinct): 4.4401/139 → (4.4401·139 + 5.00)/140 = **4.4441/140** (+0.0040) → (4.4441·140 + 4.9375)/141 = **4.4476/141** (+0.0035).
-- **Federation row** 4.49944/310 — UNCHANGED (not probed this iteration).
-
----
-
-## Primary wins
-
-1. **iter573 FIX A (spine clean-up — kill GROUP-BY-on-aggregate)** VALIDATED on Q1 first re-probe. Responder took the literal-date-bound path (`DATE '2026-01-01'` + `sequence(0,89)`) which sidesteps the MIN()-trap entirely. Both the scalar-subquery and bounds-CTE alternatives in r07 §4's new 5th DO-NOT-WRITE bullet are present as backup forms if the question fixes the window dynamically. Either way, the iter572 Q1 defect is gone.
-2. **iter573 FIX B (max_by-vs-MAX "latest not largest" guard)** VALIDATED end-to-end on Q1 composition AND Q2 direct micro-probe. Responder applied `max_by(count_val, recorded_at)` in Q1 daily_counts CTE for "last count of the day not biggest"; gave perfect MAX-vs-max_by contrast in Q2.
-3. **Q3 approx_distinct + HLL + 2.3% default** all docs-verbatim correct. Engineer-friendly RSD interpretation.
-4. **Q4 UNNEST native-array primary + LEFT JOIN ON TRUE NULL/empty-array preservation** docs-verbatim correct.
-
-## Primary failures
-
-NONE this iteration. Zero defects across all four answers.
+**Scores Q1:** Accuracy 2 (spine right; aggregation semantically wrong — returns wrong result), Completeness 2 (misses the actual ask: "daily count over history"), Clarity 3, Actionability 2. **Avg 2.25.**
 
 ---
 
-## iter574 directive
+### Q2 — One row per customer: count, sum, latest shipping address via `max_by`
+Primary: `MAX_BY(o.shipping_address, o.order_date) AS latest_shipping_address` alongside `COUNT(o.order_id)`, `SUM(o.amount)`, GROUP BY customer_id. ROW_NUMBER subquery given as the multi-column alternative.
 
-**Verdict: STRONG PASS at 4.96875.** No new fix targets — the iter569/570/571/572/573 historical defects are all locked down. iter574 should be a **DURABILITY iteration**: re-probe orthogonal angles to verify the locks hold against different framings.
+Verification (Trino current — https://trino.io/docs/current/functions/aggregate.html#max_by): *"Returns the value of x associated with the maximum value of y over all input values."* This is exactly the "value as of latest event" idiom — and crucially it composes with other aggregates in the SAME `GROUP BY customer_id` (no self-join, no MAX(address)). The ROW_NUMBER + WHERE rn=1 alternative is correct for pulling multiple latest-order columns at once (avoids paying for one `max_by` per column).
 
-### Fix targets
+- Tiebreak on `order_date` collisions: A2 should ideally mention that `max_by` on ties is non-deterministic — for production-grade idempotency, use a composite ordering column `max_by(shipping_address, ROW(order_date, order_id))` or fall back to the ROW_NUMBER approach with `ORDER BY order_date DESC, order_id DESC`. A2 did not call this out but this is a minor completeness nit, not an accuracy defect.
+- LEFT JOIN orders + GROUP BY customer_id is correct — preserves customers with zero orders (`COUNT(o.order_id) = 0`, `SUM(o.amount) = NULL`; consider `COALESCE(SUM(o.amount), 0)` for clean output).
 
-(Fix A — NO-OP — r07 §4 COMBINED CANONICAL spine + max_by + IGNORE NULLS + look-back frame) — All five DO-NOT-WRITE bullets routed cleanly. ZERO edits.
+**Scores Q2:** Accuracy 5, Completeness 4, Clarity 5, Actionability 5. **Avg 4.75.**
 
-(Fix B — NO-OP — r23 §3.1D max_by canonical + DO-NOT-WRITE blockquote) — VALIDATED on Q2 direct micro-probe + Q1 composition. ZERO edits.
+---
 
-(Fix C — NO-OP federation) — 4.49944/310 unchanged; ZERO edits to resources/22 §13.x.
+### Q3 — `approx_distinct` custom error + HLL sketch precompute/merge
+`approx_distinct(user_id, 0.01)` with valid range `[0.0040625, 0.26]` and "smaller e = tighter = more memory" framing. HLL: `CREATE TABLE ... AS SELECT event_date, CAST(approx_set(user_id) AS varbinary) AS user_id_hll ... GROUP BY event_date`, then `cardinality(merge(CAST(s.user_id_hll AS HyperLogLog)))` for the weekly rollup.
 
-(Fix D — OPTIONAL LOW — approx_distinct(x, e) two-arg form mention) — In whichever resource hosts the approx_distinct canonical, optionally add a one-liner noting the two-arg form `approx_distinct(x, e)` with `e in [0.0040625, 0.26000]` for custom error tolerance (per trino.io/docs/current/functions/aggregate.html verbatim). Single additive sentence; do not rewrite the existing canonical. NOT load-bearing — Q3 scored 4.9375.
+Verification (Trino current):
+- https://trino.io/docs/current/functions/aggregate.html#approx_distinct — `approx_distinct(x, e) → bigint`; the error e must be a value between [0.0040625, 0.26]. PASS — the range and the two-arg form are correct.
+- https://trino.io/docs/current/functions/hyperloglog.html — `approx_set(x) → HyperLogLog`: *"Returns the HyperLogLog sketch of the input data set of x."* `merge(HyperLogLog) → HyperLogLog`: *"Returns the HyperLogLog of the aggregate union of the individual hll HyperLogLog structures."* `cardinality(HyperLogLog) → bigint`: *"This will perform approx_distinct() on the data summarized by the hll HyperLogLog data sketch."* PASS.
+- CAST round-trip HyperLogLog ↔ varbinary for storage is documented; the responder's CTAS-as-varbinary then `CAST(... AS HyperLogLog)` for merge is the canonical persistence pattern. PASS.
+- Trade-off framing (tighter = more memory per sketch) is accurate.
 
-### Probe angles for iter574
+**Scores Q3:** Accuracy 5, Completeness 5, Clarity 5, Actionability 5. **Avg 5.0.**
 
-- **HIGH — Q1 4th-angle composition** with a DIFFERENT bucket-aggregate framing (e.g., "closing balance per account per quarter" or "final reading per sensor per hour") to verify iter573 FIX A + FIX B durability under another spine bound (this time DYNAMICALLY computed from source min/max — to force the scalar-subquery / bounds-CTE path explicitly, not the literal-date escape hatch).
-- **HIGH — Q2 2nd-angle max_by composition** — embed max_by inside a larger query (CTE chain or join) to verify the "value at the latest time" canonical routes even when max_by isn't the headline.
-- **MEDIUM — Q3 2nd-angle approx_distinct nuance** — ask about custom-error variant (`approx_distinct(x, e)`) or HLL merge across rollups (`approx_set` + `merge` + `cardinality`) to verify durability of HLL framing beyond the default-error case.
-- **MEDIUM — Q4 2nd-angle UNNEST WITH ORDINALITY** to verify the responder knows the `WITH ORDINALITY` variant for preserving array position.
-- **LOW — Federation** — 4.49944/310 not probed; if iter574 wants to nudge above the 4.5 federation threshold, plan ONE carefully-bulletproofed federation angle. Otherwise leave alone.
+---
 
-### Meta-rule observation
+### Q4 — Percent-of-total via window aggregate (single pass, no separate grand-total query)
+```sql
+SELECT category,
+       SUM(revenue)                                       AS category_revenue,
+       SUM(SUM(revenue)) OVER ()                          AS grand_total,
+       ROUND(100.0 * SUM(revenue) / SUM(SUM(revenue)) OVER (), 2) AS percent_of_total
+FROM iceberg.analytics.sales
+GROUP BY category
+```
+Verification (Trino current — https://trino.io/docs/current/functions/window.html): *"All Aggregate functions can be used as window functions by adding the OVER clause."* The window runs over the post-GROUP-BY rows; empty `OVER ()` = single window over the whole result, so `SUM(SUM(revenue)) OVER ()` is the grand total of the per-category sums. Pattern A2 in r07 already documents this nested-aggregate-in-window-after-GROUP-BY shape and explicitly calls out the post-GROUP-BY evaluation order.
 
-Directive's "SCRUTINIZE Q1: verify each of (i)-(iii)" was decisive — Q1's composition could have looked complex enough to slip past as "mostly right" without checking each substep. WebSearching trino.io/docs/current/functions/aggregate.html for max_by VERBATIM + trino.io/docs/current/sql/select.html for UNNEST + LEFT JOIN ON TRUE VERBATIM was load-bearing for confidence. 36th consecutive iter (iter537-573) where meta-rule discipline materially affected the verdict (this time CONFIRMING strength rather than catching a defect).
+- Correct grand-total math; `100.0 * ... / ...` forces decimal division (no integer-truncation trap).
+- `ROUND(..., 2)` is valid Trino 467.
+- No `QUALIFY`, no alias-in-GROUP-BY, no `::`-cast.
 
-WebSearched verbatim:
-- trino.io/docs/current/functions/aggregate.html — `max_by(x, y)` "Returns the value of x associated with the maximum value of y over all input values" + `approx_distinct(x)` "The default standard error is 2.3%" + `approx_distinct(x, e)` "e in [0.0040625, 0.26000]"
-- trino.io/docs/current/sql/select.html — UNNEST "returns zero entries when the array/map is empty" + "LEFT JOIN is preferable in order to avoid losing the row containing the array/map field" + "in case of using LEFT JOIN the only condition supported by the current implementation is ON TRUE"
-- trino.io/docs/current/functions/window.html — "By default, null values are respected. If IGNORE NULLS is specified, all rows where x is null are excluded from the calculation."
+**Scores Q4:** Accuracy 5, Completeness 5, Clarity 5, Actionability 5. **Avg 5.0.**
 
-NOTES: did NOT bump training/state.json (teacher already set iteration=573). Federation rubric row 4.49944/310 unchanged. Did NOT touch resources files. iter573 FIX A + FIX B = CLEAN WIN, routed on first re-probe across all four answers.
+---
 
-**OVERALL: 4.96875 STRONG PASS — iter573 FIX A (spine GROUP-BY-on-aggregate kill) + FIX B (max_by-not-MAX guard) BOTH routed cleanly; Q1 5.00 + Q2 5.00 + Q3 4.9375 + Q4 4.9375; zero defects across all four; iter574 should be DURABILITY-only with NO new resource churn — orthogonal-framing re-probes to verify locks hold under different angles.**
+## Overall
+
+| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|---|
+| Q1 | 2 | 2 | 3 | 2 | 2.25 |
+| Q2 | 5 | 4 | 5 | 5 | 4.75 |
+| Q3 | 5 | 5 | 5 | 5 | 5.0  |
+| Q4 | 5 | 5 | 5 | 5 | 5.0  |
+
+**Overall avg = (2.25 + 4.75 + 5.0 + 5.0) / 4 = 4.25 → PASS** (overall avg >= 3.5).
+
+Margin notes: durability locks for max_by-in-larger-aggregate (Q2), approx_distinct custom-error + HLL precompute/merge (Q3), and window-aggregate percent-of-total (Q4) all held perfectly. The 4.25 overall masks a real Q1 semantic miss; the responder constructed the right spine but applied the wrong aggregation shape because resources have no canonical for "count active/open intervals per day" (interval-overlap / as-of range-join). This is a NEW pattern gap, not a regression of a hardened lock.
+
+## iter575 directive — for the teacher
+
+**ADD an interval-overlap / "active-on-each-day" canonical to r07** (distinct from forward-fill, distinct from running totals). Place it as a new card under §1 / Pattern family so the responder finds it by keywords like "active subscribers per day", "open tickets per day", "concurrent sessions per day", "as of each day", "interval overlap per day", "range join per day", "count active intervals".
+
+Required elements of the new canonical (all must be present in one place):
+1. **Header + keyword anchors** — must include "active subscribers per day", "as of each day", "interval overlap", "range join calendar", "open tickets per day".
+2. **The shape** — `calendar c JOIN entity e ON e.start_ts <= c.day AND (e.end_ts IS NULL OR e.end_ts > c.day) GROUP BY c.day [, dim]`. Call out that this is `[start, end)` half-open by convention (avoid double-counting the boundary day).
+3. **Dynamic-bounds spine reuse** — the new card should explicitly reuse the iter573-locked `MIN(...)/CURRENT_DATE` bounds + `sequence` + `CROSS JOIN UNNEST` spine. Cross-link to the existing spine card.
+4. **Worked example** — daily active subscribers per plan over full history (the Q1 scenario).
+5. **DO-NOT-WRITE matrix** — must include the exact A1 anti-pattern: *"Computing the snapshot once at `CURRENT_DATE` and LEFT JOIN'ing on `c.day = d.day` produces a single today-row plus zeros for all history. The join key must be the calendar day, and the matching condition must be the interval-overlap predicate `start <= c.day AND (end IS NULL OR end > c.day)`."*
+6. **Contrast card** — table distinguishing the three patterns the responder must NOT conflate:
+   - Forward-fill (last-known value across gap rows) — IGNORE NULLS LAST_VALUE.
+   - Running total (cumulative over a partition) — `SUM(...) OVER (ORDER BY ...)`.
+   - Interval overlap (count active intervals per day) — calendar x entity range join (this new card).
+7. **Performance note** — for billion-row fact tables, mention the boundary-event alternative (`SUM(+1) at start, SUM(-1) at end, cumulative SUM over date`) as the streaming/cheap variant; range-join is fine for moderate cardinality.
+
+**Reconcile, don't append:** the new card goes IN r07 §1.x adjacent to the existing spine/forward-fill cards, with bidirectional cross-references. r23 §3 should get a one-line cross-link from the existing time-series section. Do NOT touch r22 (federation guardrails — iter436 lock).
+
+**Locks to preserve in full** (do not regress while adding the new card):
+- iter566 forward-fill / IGNORE-NULLS placement.
+- iter573 GROUP-BY-on-aggregate ban (line 892 DO-NOT-WRITE bullet 5).
+- iter570/571/572 COMBINED-composition canonical (the spine + bounds CTE pattern).
+- r07 approx_distinct two-arg + HLL precompute/merge cards (Q3 lock).
+- r07 Pattern A2 nested-aggregate-in-window-after-GROUP-BY (Q4 lock).
+- r23 max_by docs-verbatim card + ties-tiebreaker note (Q2 lock).
+
+**Sources cited:**
+- https://trino.io/docs/current/functions/aggregate.html#max_by
+- https://trino.io/docs/current/functions/aggregate.html#approx_distinct
+- https://trino.io/docs/current/functions/hyperloglog.html
+- https://trino.io/docs/current/functions/window.html
+- https://trino.io/docs/current/functions/array.html#sequence
+- https://trino.io/docs/current/sql/select.html
