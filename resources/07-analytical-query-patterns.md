@@ -846,6 +846,23 @@ Same query shape: `SUM(amt) OVER (ORDER BY order_date <FRAME>)`. Four rows with 
 
 > **Bonus default-frame surprise.** `SUM(amt) OVER (ORDER BY order_date)` with **NO explicit frame** defaults to `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` (per Trino's window-functions docs). On the data above the cumulative values would be 200, 200, 250, 320 — both Jan-01 peers see 200 (the peer-group end), Jan-02 sees 250, Jan-04 sees the full running total. If you expected a per-row running total of 100, 200, 250, 320, you'd be surprised: the default frame treats peers as a group. Use Pattern 2 (unique tiebreaker + explicit ROWS) when you want per-row accumulation.
 
+### LEADING CANONICAL — Trino named WINDOW clause (define a window once, reference by name)
+
+> **Keyword anchors:** Trino named window, WINDOW clause, define window once, reuse OVER clause, `WINDOW w AS`, named window specification, avoid repeating PARTITION BY. Verified at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html): *"The `WINDOW` clause is used to define named window specifications. The defined named window specifications can be referred to in the `SELECT` and `ORDER BY` clauses of the enclosing query."* Supported in Trino since v352.
+
+```sql
+SELECT
+  tenant_id, day, amount,
+  SUM(amount) OVER w AS running_total,
+  AVG(amount) OVER w AS running_avg,
+  MAX(amount) OVER w AS running_max
+FROM iceberg.analytics.daily_revenue
+WINDOW w AS (PARTITION BY tenant_id ORDER BY day
+             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW);
+```
+
+Define the window spec ONCE in a trailing `WINDOW name AS (...)` clause (positioned **after `HAVING`**, **before `ORDER BY`**), then reference it via `OVER w` in any number of window functions in the same SELECT. You can also **extend** a named window: `WINDOW w2 AS (w ORDER BY ts)` inherits `w`'s `PARTITION BY` and adds an `ORDER BY`. **DO-NOT-WRITE:** don't claim "Trino has no named WINDOW clause" — it is supported (v352+). Don't place the `WINDOW` clause at the very end after `ORDER BY` — the correct slot is between `HAVING` and `ORDER BY`.
+
 ### Pattern A2: Bucketed running total — `GROUP BY` + window-over-aggregate (CANONICAL CARD)
 
 **The SaaS question family:** "Per tenant, show monthly event counts AND a running cumulative total of events through the end of each month." Same family: weekly active users with running totals, daily revenue with month-to-date, signups per week with cumulative YTD.

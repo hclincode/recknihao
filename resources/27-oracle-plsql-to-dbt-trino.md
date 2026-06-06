@@ -1986,6 +1986,68 @@ Is the model a small reusable intermediate referenced 1-2 times?
 
 ---
 
+## dbt connection & secrets — profiles.yml, env_var(), DBT_ENV_SECRET_ (store the Trino password as a shell env var, NOT plaintext)
+
+> **READ THIS FIRST if your question contains ANY of these phrases:** `dbt profiles.yml`, `profiles.yml password`, `dbt password`, `dbt database password`, `dbt connection`, `dbt connection credentials`, `dbt credentials`, `store dbt password safely`, `hide dbt password`, `keep dbt password out of logs`, `dbt secrets`, `dbt secret`, `dbt environment variable`, `read shell env var into dbt`, `dbt env var`, `env_var profiles.yml`, `env_var Trino`, `DBT_ENV_SECRET`, `DBT_ENV_SECRET_ prefix`, `scrub secret from dbt logs`, `mask password in dbt logs`. This is a **dbt OPS** topic and the canonical lives in this file even though the file title says "Oracle migration" — the dbt-trino connection setup is the same for ALL dbt-trino projects on this stack, migration or not.
+
+### LEADING CANONICAL — dbt profiles.yml + env_var() — read the Trino password from a shell env var (not plaintext)
+
+> **Keyword anchors:** dbt env_var, env_var profiles.yml, dbt password profiles.yml, store dbt password safely, dbt connection credentials, dbt database password, read shell env var dbt, dbt environment variable, dbt secrets, hide dbt password, keep dbt password out of logs, profiles.yml Trino target, dbt connect to Trino. Verified at [docs.getdbt.com/reference/dbt-jinja-functions/env_var](https://docs.getdbt.com/reference/dbt-jinja-functions/env_var) and [docs.getdbt.com/docs/build/environment-variables](https://docs.getdbt.com/docs/build/environment-variables).
+
+**The one-fact summary.** `env_var('DBT_XYZ')` reads SHELL env var `DBT_XYZ` at **parse time**; `env_var('DBT_XYZ', 'default')` returns the fallback if unset. **Without a default, an unset var ERRORS the parse — fail-fast** (good for required credentials). Works in `dbt_project.yml`, **`profiles.yml`** (the canonical home for warehouse credentials), `sources.yml`, `schema.yml`, and model SQL.
+
+**Secrets pattern.** Keep secrets in shell env vars (or a CI/CD secret store, or a k8s Secret mounted as env) and read via `env_var()` — **NEVER hardcode the password in the repo**. Canonical `profiles.yml` (Trino target):
+
+```yaml
+my_project:
+  target: prod
+  outputs:
+    prod:
+      type: trino
+      host: trino.internal
+      user: "{{ env_var('TRINO_USER') }}"
+      password: "{{ env_var('DBT_ENV_SECRET_TRINO_PASSWORD') }}"
+      catalog: iceberg
+      schema: analytics
+```
+
+Then in the shell / CI runner / k8s pod, export the secret BEFORE running dbt:
+```bash
+export DBT_ENV_SECRET_TRINO_PASSWORD='real-password-here'
+dbt run --profiles-dir ~/.dbt
+```
+
+### DBT_ENV_SECRET_ — auto-scrub secrets from dbt logs
+
+**`DBT_ENV_SECRET_` prefix convention** (verbatim from docs): *"Any env var named with the prefix `DBT_ENV_SECRET` will be: Available for use in `profiles.yml` + `packages.yml`, via the same `env_var()` function; Disallowed everywhere else, including `dbt_project.yml` and model SQL, to prevent accidentally writing these secret values to the data warehouse or metadata artifacts; **Scrubbed from dbt logs and replaced with `*****`, any time its value appears in those logs** (even if the env var was not called directly)."*
+
+What this means in practice:
+- A var named `DBT_ENV_SECRET_TRINO_PASSWORD` can be read in `profiles.yml` and `packages.yml` ONLY.
+- The literal password value is **automatically masked as `*****`** anywhere it appears in dbt logs / error messages — even if a downstream library accidentally prints it.
+- Trying to read a `DBT_ENV_SECRET_*` var from `dbt_project.yml` or a model `.sql` file raises a dbt error — by design, to prevent leaking the value into compiled SQL artifacts (`target/compiled/**`) or warehouse metadata (object comments, query history).
+- **You cannot compose secrets**: dbt allows only one `DBT_ENV_SECRET_*` per configuration value, and you cannot pass a secret through Jinja filters (`as_number`, `as_bool`, etc.) or as a macro argument.
+
+**`env_var()` vs `var()` — read this carefully (cross-ref §6.7G):**
+
+| Function | Source | Use it for |
+|---|---|---|
+| **`var('name', default)`** | dbt's **per-run** config (CLI `--vars` + `dbt_project.yml` `vars:`) | Per-run tunable knobs (lookback days, mode flags, backfill window). |
+| **`env_var('NAME', 'default')`** | **SHELL environment** (process env, CI/CD secret store, k8s Secret mounted as env) | Secrets (passwords, tokens) AND env-specific connection params (host, catalog, schema per dev/staging/prod). |
+
+**DO-NOT-WRITE — banned patterns:**
+
+| DO NOT write | Why it's wrong |
+|---|---|
+| `dbt run --vars '{api_key: "'$SECRET'"}'` (shell substitution to inject a secret) | **LEAKS the secret** — the expanded value appears in `ps`, shell history, and CI logs. Use `env_var('DBT_ENV_SECRET_API_KEY')` in the model/profile instead so the literal never reaches `argv`. |
+| `password: "supers3cret"` hardcoded in `profiles.yml` or `dbt_project.yml` | Committed-secret antipattern. Use `password: "{{ env_var('DBT_ENV_SECRET_TRINO_PASSWORD') }}"`. |
+| `password: "{{ env_var('PASSWORD') }}"` inside a **model `.sql` file** to read a `DBT_ENV_SECRET_*` var | dbt **disallows** `DBT_ENV_SECRET_*` outside `profiles.yml` / `packages.yml` — that's by design (prevents leakage into compiled artifacts). |
+| `env_var('TRINO_PASSWORD', 'changeme')` — supplying a fake default for a REQUIRED credential | Silently lets dbt run with a wrong cred. **For required secrets, OMIT the default** so dbt parse-errors fast on a missing env var. |
+| Reading a `DBT_ENV_SECRET_*` var and passing it through `\| as_number` / `\| as_bool` / a macro arg | dbt disallows transforming or composing secrets. Use the secret directly in a single configuration value. |
+
+**Cross-references.** §6.7G (`var()` for per-run knobs — the sibling mechanism). §6.7H (dbt-docs site — note: `env_var()` values are read at parse time, so the *expanded* host/schema show up in docs unless they are `DBT_ENV_SECRET_*`). §6.7 routing anchor (full Q-keyword → canonical map for dbt-OPS questions).
+
+---
+
 ## 6. Worked end-to-end example: a nightly rollup procedure
 
 This is the canonical migration: an Oracle procedure that uses a cursor loop, a temp table, and a final MERGE — the most common shape in legacy Oracle warehouses.
@@ -2183,7 +2245,7 @@ GROUP BY tenant_id, order_date
 >
 > | Question keywords | Canonical |
 > |---|---|
-> | `dbt profiles.yml`, `profiles.yml password`, `dbt connection`, `dbt connection credentials`, `dbt database password`, `store dbt password safely`, `hide dbt password`, `read shell env var into dbt`, `dbt environment variable`, `env_var`, `DBT_ENV_SECRET`, `dbt secrets`, `scrub secret from dbt logs`, `dbt credentials` | **§6.7G2** (`env_var()` + `DBT_ENV_SECRET_` + canonical `profiles.yml` Trino target) |
+> | `dbt profiles.yml`, `profiles.yml password`, `dbt password`, `dbt connection`, `dbt connection credentials`, `dbt database password`, `store dbt password safely`, `hide dbt password`, `keep dbt password out of logs`, `read shell env var into dbt`, `dbt environment variable`, `env_var`, `DBT_ENV_SECRET`, `dbt secrets`, `scrub secret from dbt logs`, `dbt credentials` | **"dbt connection & secrets" section ABOVE §6** (a dedicated H2, just before §6 "Worked end-to-end example") — `env_var()` + `DBT_ENV_SECRET_` + canonical `profiles.yml` Trino target |
 > | `dbt var`, `dbt --vars`, `dbt run --vars`, `parameterize dbt model`, `dbt variable`, `var vs set dbt`, `tunable knob dbt`, `dbt_project.yml vars:` | **§6.7G** (`var()` per-run configurable values) |
 > | `dbt test severity`, `severity: warn`, `store_failures`, `_dbt_test__audit`, `expression_is_true`, `not_null_proportion` | **§6.7A** (dbt test severity + store_failures) |
 > | `dbt ref()`, `dbt source()`, `ref vs source`, `DAG edge`, `compile to fully-qualified name`, `manifest.json` | **§6.7A2** (`ref()` vs `source()`) |
@@ -2197,7 +2259,7 @@ GROUP BY tenant_id, order_date
 > | `dbt persist_docs`, `COMMENT ON TABLE from dbt` | **§6.7J** (persist_docs) |
 > | `dbt materialization`, `incremental`, `unique_key`, `is_incremental()` | **§6.8** (`is_incremental()` WHERE-clause pattern) + **§3.1** (materializations) |
 >
-> A "how do I configure dbt to connect to Trino?" or "where do I put my dbt password safely?" question is a **dbt OPS** question — answered in **§6.7G2** below. The fact that this resource file is titled "Oracle migration" does NOT mean the dbt-ops canonicals here are migration-only; they apply to ALL dbt-trino setups on this stack.
+> A "how do I configure dbt to connect to Trino?" or "where do I put my dbt password safely?" question is a **dbt OPS** question — answered in the **"dbt connection & secrets — profiles.yml, env_var(), DBT_ENV_SECRET_"** section that sits ABOVE §6 in this file (search for the H2 header `dbt connection & secrets`). The fact that this resource file is titled "Oracle migration" does NOT mean the dbt-ops canonicals here are migration-only; they apply to ALL dbt-trino setups on this stack.
 
 ```yaml
 # models/marts/fct_orders_daily.yml
@@ -3177,44 +3239,9 @@ Per [docs.getdbt.com/docs/build/unit-tests](https://docs.getdbt.com/docs/build/u
 
 ---
 
-### 6.7G2 LEADING CANONICAL — dbt `env_var('VAR'[, 'default'])` — read SHELL environment variables (the secrets-safe pattern)
+### 6.7G2 — dbt `env_var()` / profiles.yml secrets — MOVED to the dedicated top-level "dbt connection & secrets" section (above §6)
 
-> **Keyword anchors:** dbt env_var, environment variable dbt, read shell env var dbt, dbt secrets, profiles.yml password env, DBT_ENV_SECRET, env_var vs var, dbt credentials environment variable, hide password dbt, scrub secret from dbt logs. Verified at [docs.getdbt.com/reference/dbt-jinja-functions/env_var](https://docs.getdbt.com/reference/dbt-jinja-functions/env_var) and [docs.getdbt.com/docs/build/environment-variables](https://docs.getdbt.com/docs/build/environment-variables).
-
-**The one-fact summary.** `env_var('DBT_XYZ')` reads SHELL env var `DBT_XYZ` at **parse time**; `env_var('DBT_XYZ', 'default')` returns the fallback if unset. **Without a default, an unset var ERRORS the parse — fail-fast** (good for required credentials). Works in `dbt_project.yml`, **`profiles.yml`** (canonical home for warehouse credentials), `sources.yml`, `schema.yml`, and model SQL.
-
-**Secrets pattern.** Keep secrets in shell env vars (or CI/CD secret store) and read via `env_var()` — NEVER hardcode in the repo. Canonical `profiles.yml` (Trino target):
-```yaml
-my_project:
-  target: prod
-  outputs:
-    prod:
-      type: trino
-      host: trino.internal
-      user: "{{ env_var('TRINO_USER') }}"
-      password: "{{ env_var('DBT_ENV_SECRET_TRINO_PASSWORD') }}"
-      catalog: iceberg
-      schema: analytics
-```
-**`DBT_ENV_SECRET_` prefix convention** (verbatim from docs): *"If you want a particular environment variable to be scrubbed from all logs and error messages, in addition to obfuscating the value in dbt, you can prefix the key with `DBT_ENV_SECRET_`."* Such vars are usable ONLY in `profiles.yml` and `packages.yml` and are disallowed in `dbt_project.yml` / model SQL (so secrets cannot leak into compiled SQL or warehouse metadata).
-
-**`env_var()` vs `var()` — read this carefully (cross-ref §6.7G):**
-
-| Function | Source | Use it for |
-|---|---|---|
-| **`var('name', default)`** | dbt's **per-run** config (CLI `--vars` + `dbt_project.yml` `vars:`) | Per-run tunable knobs (lookback days, mode flags, backfill window). |
-| **`env_var('NAME', 'default')`** | **SHELL environment** (process env, CI/CD secret store, k8s Secret mounted as env) | Secrets (passwords, tokens) AND env-specific connection params (host, catalog, schema per dev/staging/prod). |
-
-**DO-NOT-WRITE — banned patterns:**
-
-| DO NOT write | Why it's wrong |
-|---|---|
-| `dbt run --vars '{api_key: "'$SECRET'"}'` (shell substitution to inject a secret) | **LEAKS the secret** — the expanded value appears in `ps`, shell history, and CI logs. Use `env_var('DBT_ENV_SECRET_API_KEY')` in the model/profile instead so the literal never reaches `argv`. |
-| `password: "supers3cret"` hardcoded in `profiles.yml` or `dbt_project.yml` | Committed-secret antipattern. Use `password: "{{ env_var('DBT_ENV_SECRET_TRINO_PASSWORD') }}"`. |
-| `password: "{{ env_var('PASSWORD') }}"` inside a **model `.sql` file** to read a `DBT_ENV_SECRET_*` var | dbt **disallows** `DBT_ENV_SECRET_*` outside `profiles.yml` / `packages.yml`. Secrets cannot be referenced from `dbt_project.yml` or model SQL — that's by design (prevents leakage into compiled artifacts). |
-| `env_var('TRINO_PASSWORD')` with no default for a REQUIRED credential, then catching the error | This is actually the **right** behavior — fail-fast on missing required creds. The DO-NOT here is supplying a fake default like `env_var('TRINO_PASSWORD', 'changeme')` which silently lets dbt run with a wrong cred. |
-
-**Cross-references.** §6.7G (`var()` for per-run knobs — the sibling mechanism). §6.7H (dbt-docs site — note: `env_var()` values are read at parse time, so the *expanded* host/schema show up in docs unless they are `DBT_ENV_SECRET_*`).
+> **The canonical for `env_var()`, `DBT_ENV_SECRET_`, and the profiles.yml Trino-password pattern is now in the standalone section titled "dbt connection & secrets — profiles.yml, env_var(), DBT_ENV_SECRET_" placed just BEFORE §6 "Worked end-to-end example."** It was promoted out of the "dbt tests to add" cluster because connection/secrets is a separate dbt-OPS concern from tests. The full content (one-fact summary, profiles.yml Trino target template, DBT_ENV_SECRET_ scrub behavior, env_var() vs var() comparison, DO-NOT-WRITE table) lives there. The §6.7 routing anchor at the top of this section still points reliably to it.
 
 ---
 
