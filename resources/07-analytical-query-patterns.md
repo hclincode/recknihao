@@ -208,6 +208,8 @@ GROUP BY user_id;
 - Cross-row distinct count over EXPLODED elements ("how many distinct tags across the whole table?"): UNNEST first, then `COUNT(DISTINCT tag)` — see §1a.1 worked example.
 - "Get the last element of the array": `element_at(arr, -1)` — NULL-safe; `arr[cardinality(arr)]` is verbose and errors on empty arrays.
 
+> **`contains` is an EXACT, case-SENSITIVE match** (`'Web'` != `'web'`, `'WEB'` != `'web'`); for case-insensitive matching, normalize BOTH sides via `lower()`: `contains(transform(categories, x -> lower(x)), lower('web'))`. The `transform` lambda lowercases each array element in place; `lower('web')` keeps the comparison symmetric so a hardcoded literal like `'Web'` still matches. Same rule for `array_position` (exact equality) and `array_intersect` / `array_union` / `array_except` (exact element identity). For the COMPLEMENTARY whitespace-safety gotcha on the `contains(split(col, ','), 'web')` shape (split returns elements with leading spaces), see [resource 23 § 3.1A DO NOT WRITE table](23-sql-best-practices-olap.md#31a-trino-string-vs-array--split-vs-array_join-vs-contains-vs-position-vs-strpos--what-to-use-when).
+
 **DO NOT WRITE:**
 
 | Wrong shape | Why it's wrong |
