@@ -532,6 +532,8 @@ Pick **MAP** if downstream queries hit lots of different fallback keys and you w
 
 ### MAP access — Parquet-native, NOT JSON parsing (important!)
 
+> **Navigation — map functions covered in this section (so you can jump straight to the right idiom):** read a single key with default → `element_at` + `COALESCE(element_at(...), <default>)`; **merge / combine / overlay two maps (e.g. defaults + tenant overrides) → `map_concat` (RIGHTMOST map wins)**; filter / transform / inspect entries without UNNEST → MAP higher-order functions (`map_filter`, `transform_values`, `transform_keys`, `map_keys`, `map_values`); export a MAP column as JSON → `CAST(map_col AS JSON)`.
+
 > **`MAP(VARCHAR, VARCHAR)` in Iceberg/Parquet is a NATIVE NESTED TYPE — not a JSON string.** When Trino reads a MAP column it reads the binary Parquet MAP encoding (a pair of repeated key/value child columns) — there is no JSON parser involved per row. The correct mental model is: **"Trino reads the full MAP column and applies a key lookup per row — no JSON parsing, but also no file-level pruning for MAP keys."** (Trino spells the type with parentheses: `MAP(K, V)`. The angle-bracket form `MAP<K, V>` is Hive/Spark syntax and parse-errors in Trino 467 — see [trino.io/docs/current/language/types.html](https://trino.io/docs/current/language/types.html).)
 
 This matters because the distinction drives the right optimization advice:
@@ -604,9 +606,57 @@ WHERE contains(map_keys(properties), 'debug_mode');
 
 **Mnemonic:** `element_at` on a MAP returns the **value** (a scalar). `cardinality` wants a **collection** (array or map). You can't wrap one in the other. The correct existence check is always `element_at(map_col, key) IS NOT NULL`.
 
-> **MAP lookup with a default value — `COALESCE(element_at(...), <default>)` (iter532, adjacent to the element_at canonical above).** Keyword anchors: map lookup with default, fall back when key missing, default value for missing map key, element_at default, COALESCE element_at, map key default Trino. `element_at(map_col, key)` returns NULL when the key is absent — wrap in `COALESCE` to substitute a default. Example: `SELECT user_id, COALESCE(element_at(settings, 'theme'), 'default_theme') AS theme FROM iceberg.analytics.users;`. Verified at [trino.io/docs/current/functions/map.html](https://trino.io/docs/current/functions/map.html) (`element_at(map(K,V), key) -> V`, NULL on missing key) and [trino.io/docs/current/functions/conditional.html](https://trino.io/docs/current/functions/conditional.html) (`COALESCE(v1, v2, ...)` returns the first non-NULL).
+### LEADING CANONICAL — merge two maps with `map_concat` (RIGHTMOST map wins on key collision; the right idiom for defaults + overrides)
 
-> **Merge two (or more) maps with `map_concat` — RIGHTMOST map's value wins on key collision (iter545, adjacent to the element_at canonical above + the MAP-HOF family canonical below).** Keyword anchors: map_concat Trino, merge two maps, combine maps with override, default settings override map, rightmost map wins, map union, union of maps Trino, merge MAP columns, overlay tenant overrides onto defaults. **Signature** (verified verbatim at [trino.io/docs/current/functions/map.html](https://trino.io/docs/current/functions/map.html)): `map_concat(map1(K, V), map2(K, V), ..., mapN(K, V)) -> map(K, V)`. **Duplicate-key rule** (verbatim from the Trino docs): *"If a key is found in multiple given maps, that key's value in the resulting map comes from the last one of those maps."* The **RIGHTMOST** map wins per key — so put the OVERRIDE map LAST. Worked SaaS example — overlay tenant-specific settings on top of the default settings map: `SELECT tenant_id, map_concat(default_settings, tenant_overrides) AS effective_settings FROM iceberg.analytics.tenant_config;` — keys present in `tenant_overrides` replace the corresponding keys in `default_settings`; keys present only in `default_settings` survive unchanged. **DO NOT WRITE:** (1) `map_concat` is NOT the same as `||` — Trino's `||` operator concatenates STRINGS and ARRAYS, it does **NOT** work on MAPs. (2) "LEFT map wins on key collision" — **FALSE**, it's the RIGHTMOST (last) map. (3) "Use a CASE WHEN ladder over keys to merge maps" — verbose and wrong shape; `map_concat` is the one-call idiom. For per-entry FILTER / TRANSFORM, see the MAP higher-order function family canonical immediately below (`map_filter`, `transform_values`, `transform_keys`, `map_keys`, `map_values`); for single-key reads with a default, see the `COALESCE(element_at(...), <default>)` callout above.
+**Keyword anchors so the responder lands here:** merge two maps Trino, combine maps override, default settings override map, tenant overrides map, map_concat, rightmost map wins, merge maps tenant wins, overlay maps, merge map with override, union of maps Trino, merge MAP columns, combine MAP columns Trino, overlay tenant overrides onto defaults, how to merge maps in Trino, Trino merge two map columns into one, combine default map with override map.
+
+**The rule.** When you need to combine two (or more) MAP values into one MAP — for example, overlay tenant-specific overrides on top of a default-settings map — use `map_concat`. It is **built into Trino 467** (see [trino.io/docs/current/functions/map.html](https://trino.io/docs/current/functions/map.html)). On key collision, the **RIGHTMOST** (last) map wins — so **put the OVERRIDE map LAST**.
+
+**Signature** (verbatim from the Trino docs):
+
+```
+map_concat(map1(K, V), map2(K, V), ..., mapN(K, V)) -> map(K, V)
+```
+
+**Duplicate-key rule** (verbatim from [trino.io/docs/current/functions/map.html](https://trino.io/docs/current/functions/map.html)):
+
+> *"If a key is found in multiple given maps, that key's value in the resulting map comes from the last one of those maps."*
+
+So `map_concat(default_settings, tenant_overrides)` keeps any tenant override over the corresponding default, and `map_concat(tenant_overrides, default_settings)` does the opposite (defaults win — usually wrong).
+
+**Worked SaaS example — overlay tenant overrides on top of default settings, per tenant.**
+
+```sql
+-- Effective settings per tenant: take the defaults, then overlay tenant overrides.
+-- tenant_overrides goes LAST so its values WIN on any key both maps contain.
+SELECT
+  tenant_id,
+  map_concat(default_settings, tenant_overrides) AS effective_settings
+FROM iceberg.analytics.tenant_config;
+```
+
+Behavior per key:
+
+- Key present in `default_settings` only -> value from `default_settings` (survives unchanged).
+- Key present in `tenant_overrides` only -> value from `tenant_overrides` (added to the result).
+- Key present in BOTH -> value from `tenant_overrides` (RIGHTMOST map wins — the tenant override replaces the default).
+
+`NULL`-MAP inputs: if any argument is `NULL`, `map_concat` returns `NULL`. Wrap with `COALESCE(map_arg, MAP())` if you want to treat a NULL MAP column as an empty MAP rather than poisoning the result.
+
+**DO NOT WRITE** (the exact wrong forms to avoid):
+
+| Wrong form | Why it's wrong | Correct form |
+|---|---|---|
+| "Trino 467 has no built-in `map_concat`" / "without a built-in `map_concat`" | **FALSE** — `map_concat` is built-in and documented at [trino.io/docs/current/functions/map.html](https://trino.io/docs/current/functions/map.html). Do not claim it is missing. | `map_concat(m1, m2)`. |
+| "LEFT map wins on key collision" | **FALSE** — the RIGHTMOST (last) map wins per the verbatim docs quote above. | Put the OVERRIDE map LAST. |
+| `m1 || m2` (using `||` as map-merge) | Trino's `||` is the string/array concatenation operator — it does NOT work on MAPs. Parse/type error. | `map_concat(m1, m2)`. |
+| `map_from_entries(map_entries(m1) || map_entries(m2))` | Unnecessary (use `map_concat` directly) AND broken on key collision: `||` on two `array(row(K,V))` produces an array with DUPLICATE-key rows when both maps share a key. `map_from_entries` then **errors** on the duplicate key (Trino/Presto enforces "Duplicate map keys are not allowed" — see [duckdb/duckdb#3640](https://github.com/duckdb/duckdb/issues/3640) describing the PrestoDB behavior). | `map_concat(m1, m2)`. |
+| `transform_values(m1, (k, v) -> COALESCE(element_at(m2, k), v))` as the override idiom | **Silent data bug.** This only iterates the keys of `m1` — any key present **only** in `m2` (a tenant-specific key not in defaults) is silently dropped from the result. The override surface is wrong. | `map_concat(m1, m2)` — keeps the union of keys, RIGHTMOST wins on collision. |
+| `CASE WHEN ... END` ladder over keys to merge maps | Verbose, only works for a known fixed key set, and wrong shape — `map_concat` is the one-call idiom for arbitrary key sets. | `map_concat(m1, m2)`. |
+
+**Cross-references.** For single-key reads with a default (one key at a time, not a whole-map merge), see the `COALESCE(element_at(...), <default>)` callout immediately below. For per-entry FILTER or TRANSFORM (e.g., keep only entries where the value is `true`, or rewrite every value with a lambda), see the MAP higher-order function family canonical below (`map_filter`, `transform_values`, `transform_keys`, `map_keys`, `map_values`).
+
+> **MAP lookup with a default value — `COALESCE(element_at(...), <default>)` (iter532, adjacent to the element_at canonical above).** Keyword anchors: map lookup with default, fall back when key missing, default value for missing map key, element_at default, COALESCE element_at, map key default Trino. `element_at(map_col, key)` returns NULL when the key is absent — wrap in `COALESCE` to substitute a default. Example: `SELECT user_id, COALESCE(element_at(settings, 'theme'), 'default_theme') AS theme FROM iceberg.analytics.users;`. Verified at [trino.io/docs/current/functions/map.html](https://trino.io/docs/current/functions/map.html) (`element_at(map(K,V), key) -> V`, NULL on missing key) and [trino.io/docs/current/functions/conditional.html](https://trino.io/docs/current/functions/conditional.html) (`COALESCE(v1, v2, ...)` returns the first non-NULL). For merging two whole maps (defaults + overrides), see the `map_concat` H3 immediately above.
 
 ### LEADING CANONICAL — Trino MAP higher-order functions (`map_filter` / `map_keys` / `map_values` / `transform_keys` / `transform_values`): filter and reshape a MAP IN-PLACE (no UNNEST)
 
