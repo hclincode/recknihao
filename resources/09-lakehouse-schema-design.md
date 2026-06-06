@@ -594,6 +594,76 @@ WHERE contains(map_keys(properties), 'debug_mode');
 
 **Mnemonic:** `element_at` on a MAP returns the **value** (a scalar). `cardinality` wants a **collection** (array or map). You can't wrap one in the other. The correct existence check is always `element_at(map_col, key) IS NOT NULL`.
 
+### LEADING CANONICAL — `CAST(map / array / row AS JSON)` is the right way to export a MAP column as JSON in Trino 467
+
+> **Keyword anchors so the responder lands here:** Trino map to json, cast map as json, struct row to json, array to json, json_format, export map column as json string, map to json string API, send MAP to JSON API, Trino map JSON cast, ROW to JSON, ARRAY to JSON, MAP to JSON cast Trino 467, serialize MAP to JSON, MAP to VARCHAR JSON, json_parse map round trip.
+
+**The one rule.** Trino's `CAST(... AS JSON)` is the direct, documented way to convert a MAP, ARRAY, or ROW into a `JSON` value. Per [trino.io/docs/current/functions/json.html](https://trino.io/docs/current/functions/json.html) verbatim: MAP can be cast when "the key type of the map is `VARCHAR` and the value type of the map is a supported type"; ARRAY when "the element type of the array is one of the supported types"; ROW when "every field type of the row is a supported type". **Do NOT believe the claim that Trino has no MAP/ARRAY/ROW → JSON cast — `CAST(... AS JSON)` works directly on all three.**
+
+```sql
+-- 1. MAP -> JSON object (requires VARCHAR keys + supported value types).
+SELECT CAST(MAP(ARRAY['k1','k2'], ARRAY[1, 23]) AS JSON);
+-- Result: JSON '{"k1":1,"k2":23}'
+
+-- 2. ARRAY -> JSON array.
+SELECT CAST(ARRAY[1, 2, 3] AS JSON);
+-- Result: JSON '[1,2,3]'
+
+-- 3. ROW -> JSON object (named fields become JSON keys; anonymous ROW -> JSON array).
+SELECT CAST(CAST(ROW(123, 'abc', true) AS ROW(v1 BIGINT, v2 VARCHAR, v3 BOOLEAN)) AS JSON);
+-- Result: JSON '{"v1":123,"v2":"abc","v3":true}'
+
+-- 4. Get a VARCHAR JSON STRING (e.g. to send to an external API) — wrap in json_format.
+SELECT json_format(CAST(properties AS JSON)) AS properties_json_text
+FROM iceberg.analytics.user_events;
+-- Equivalent: CAST(CAST(properties AS JSON) AS VARCHAR)
+
+-- 5. REVERSE direction — VARCHAR JSON string -> MAP. Use json_parse first, then CAST.
+SELECT CAST(json_parse(properties_raw) AS MAP(VARCHAR, VARCHAR))
+FROM iceberg.analytics.user_events;
+```
+
+**THE TRAP — `CAST(map_col AS VARCHAR)` is NOT JSON.** Casting a MAP directly to VARCHAR produces Trino's internal debug rendering like `{k1=v1, k2=v2}` (equals signs, no quotes around keys, no quotes around string values). **That string is NOT valid JSON** — sending it to a downstream JSON API will cause the consumer to fail with a parse error. **Always go through `JSON` first: `json_format(CAST(map_col AS JSON))` or equivalently `CAST(CAST(map_col AS JSON) AS VARCHAR)`.** Same trap applies to ARRAY and ROW — `CAST(ARRAY[1,2] AS VARCHAR)` returns `'[1, 2]'`-style debug output, not guaranteed-canonical JSON.
+
+#### DO-NOT-WRITE — banned MAP/ARRAY/ROW → JSON patterns
+
+| Banned writing | Why it's wrong | Correct form |
+|---|---|---|
+| "Trino has no direct MAP/ARRAY/ROW → JSON cast — you have to hand-roll JSON with string concatenation." | **FALSE.** `CAST(... AS JSON)` works directly on all three per [trino.io/docs/current/functions/json.html](https://trino.io/docs/current/functions/json.html). | `CAST(my_map_col AS JSON)` — direct. Wrap in `json_format(...)` for a VARCHAR result. |
+| `CAST(my_map_col AS VARCHAR)` expecting a JSON string | Returns Trino's debug form `{k1=v1, k2=v2}` — NOT valid JSON. Will fail parsers on the receiving side. | `json_format(CAST(my_map_col AS JSON))` or `CAST(CAST(my_map_col AS JSON) AS VARCHAR)`. |
+| Hand-rolling JSON via string concatenation (`'{' \|\| key \|\| ':' \|\| value \|\| '}'`) | Brittle — breaks on values containing `"`, `\`, control characters, multi-byte characters; you re-implement JSON escaping wrong. | `json_format(CAST(my_map_col AS JSON))`. The engine handles all escaping. |
+| Hand-rolling JSON via `string_agg(key \|\| ':' \|\| value, ',')` to assemble a JSON object | **DOUBLY WRONG.** (1) `string_agg` is PostgreSQL — **NOT a Trino function** (see §"Trino string aggregation" cross-ref below). (2) Even if it existed, string concatenation does not produce safe JSON escaping. | `json_format(CAST(my_map_col AS JSON))`. |
+| `CAST(MAP(ARRAY[1, 2], ARRAY['a','b']) AS JSON)` (INTEGER keys) | Per docs, MAP → JSON cast requires `VARCHAR` keys. INTEGER keys raise a type error. | Cast keys to VARCHAR first: `CAST(MAP(ARRAY[CAST(1 AS VARCHAR), CAST(2 AS VARCHAR)], ARRAY['a','b']) AS JSON)`. |
+
+**Cross-reference.** This is the same data-type family as the MAP/`element_at` content above (use `element_at(map_col, key)` to read individual MAP values; use `CAST(map_col AS JSON)` to export the whole MAP as JSON). For string-aggregation in Trino (which is NOT `string_agg`/`group_concat`), see [resource 27 § 7A.2A — Oracle WINDOWED LISTAGG → Trino](27-oracle-plsql-to-dbt-trino.md) and the inline note immediately below.
+
+#### Trino string aggregation — NO `string_agg`, NO `group_concat`
+
+> **Keyword anchors:** Trino string_agg does not exist, string_agg not registered, group_concat Trino, concatenate rows into one string, listagg vs array_join, Trino string concatenation aggregate.
+
+If you're about to write `string_agg(...)` (PostgreSQL / SQL Server) or `group_concat(...)` (MySQL) to assemble a JSON-shaped string or concatenate row values into a delimited list, **STOP** — neither function exists in Trino 467. Per [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html), Trino's string-aggregation surface is exactly:
+
+- **`listagg(expr, sep) WITHIN GROUP (ORDER BY ...)`** — ANSI ordered-set aggregate. **AGGREGATE-ONLY** (no `OVER (...)` window form per the locked [resource 27 § 7A.2A canonical](27-oracle-plsql-to-dbt-trino.md)). Requires `GROUP BY` in the outer query; produces ONE row per group.
+- **`array_join(array_agg(expr [ORDER BY ...]), sep)`** — the array-based equivalent; works when you need a window form via `array_agg(...) OVER (...)` over a pre-sorted CTE.
+
+```sql
+-- CORRECT — concatenate product names per order_id (one row per order).
+SELECT order_id,
+       listagg(product_name, ', ') WITHIN GROUP (ORDER BY product_name) AS products
+FROM iceberg.analytics.order_lines
+GROUP BY order_id;
+
+-- DO NOT WRITE — string_agg is PostgreSQL, not Trino:
+--   SELECT order_id, string_agg(product_name, ', ') FROM ...
+-- Fails with: "Function 'string_agg' not registered".
+
+-- DO NOT WRITE — group_concat is MySQL, not Trino:
+--   SELECT order_id, group_concat(product_name SEPARATOR ', ') FROM ...
+-- Fails with: "Function 'group_concat' not registered" (and the MySQL `SEPARATOR` keyword is also not parsed).
+```
+
+For the full Oracle WINDOWED `LISTAGG(...) OVER (PARTITION BY ...)` migration story (the `array_join(array_agg(...) OVER (PARTITION BY k), sep)` rewrite with the pre-sort CTE), see [resource 27 § 7A.2A — LEADING CANONICAL — Oracle WINDOWED LISTAGG → Trino](27-oracle-plsql-to-dbt-trino.md). For the cross-dialect anti-pattern row, see [resource 23 § anti-patterns table — `STRING_AGG`](23-sql-best-practices-olap.md).
+
 ### Working PySpark migration: JSON column → promoted columns + raw JSON fallback
 
 Use this when you're flattening an incoming JSON column from Postgres CDC (`events.properties` JSONB) into an Iceberg table with promoted hot columns plus a raw-JSON fallback for the long tail. **Use explicit `StructType` — not a JSON-string schema** (the string form is invalid PySpark API):

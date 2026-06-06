@@ -3271,6 +3271,67 @@ FROM   sorted_items;
 
 ---
 
+### 7A.2B Trino string aggregation — `string_agg` and `group_concat` do NOT exist; use `listagg` or `array_join(array_agg(...))`
+
+> **Keyword anchors so the responder lands here:** Trino string_agg does not exist, string_agg not registered, Function 'string_agg' not registered, group_concat Trino, MySQL group_concat in Trino, PostgreSQL string_agg in Trino, concatenate rows into one string, concatenate values across rows Trino, listagg vs array_join, Trino string concatenation aggregate, comma-separated list from column, build JSON from rows fab, what is Trino's STRING_AGG, replace string_agg with listagg.
+
+**The one rule.** Trino 467 has **NO `string_agg` (PostgreSQL/SQL Server) and NO `group_concat` (MySQL).** Either one fails at analysis with `Function 'string_agg' not registered` (or the same shape for `group_concat`). Per [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html), Trino's string-aggregation surface is exactly two forms:
+
+1. **`listagg(expr, sep) WITHIN GROUP (ORDER BY ...)`** — ANSI ordered-set aggregate. **AGGREGATE-ONLY** (no `OVER (...)` window form — per the locked §7A.2A canonical above). Requires `GROUP BY` in the outer query; produces ONE row per group. Supports `ON OVERFLOW ERROR | TRUNCATE '<filler>' WITH | WITHOUT COUNT` (see §7A.2).
+2. **`array_join(array_agg(expr [ORDER BY ...] [FILTER (WHERE ...)]), sep)`** — array-based equivalent. Use when you need the window form (`array_agg(expr) OVER (PARTITION BY k)` over a pre-sorted CTE — see §7A.2A Case B). Note: `array_agg` does NOT skip NULLs by default — add `FILTER (WHERE expr IS NOT NULL)` if you want `listagg`-style NULL-skipping.
+
+```sql
+-- CORRECT — aggregate one row per group with listagg.
+SELECT customer_id,
+       listagg(invoice_id, ', ') WITHIN GROUP (ORDER BY invoice_id) AS invoices
+FROM iceberg.fin.invoices
+GROUP BY customer_id;
+
+-- CORRECT — array_join + array_agg alternative (same shape; no ON OVERFLOW support).
+SELECT customer_id,
+       array_join(array_agg(invoice_id ORDER BY invoice_id), ', ') AS invoices
+FROM iceberg.fin.invoices
+GROUP BY customer_id;
+
+-- DO NOT WRITE — string_agg is PostgreSQL/SQL Server, NOT a Trino function:
+--   SELECT customer_id, string_agg(invoice_id, ', ' ORDER BY invoice_id) FROM ...
+-- Fails with: Function 'string_agg' not registered.
+
+-- DO NOT WRITE — group_concat is MySQL, NOT a Trino function:
+--   SELECT customer_id, group_concat(invoice_id ORDER BY invoice_id SEPARATOR ', ') FROM ...
+-- Fails with: Function 'group_concat' not registered (and MySQL's SEPARATOR keyword is also not parsed).
+```
+
+**One-shot translation table.**
+
+| Source dialect | Source syntax | Trino 467 equivalent |
+|---|---|---|
+| PostgreSQL / SQL Server | `string_agg(col, ', ' ORDER BY col)` | `listagg(col, ', ') WITHIN GROUP (ORDER BY col)` (aggregate-only) OR `array_join(array_agg(col ORDER BY col), ', ')` |
+| MySQL | `group_concat(col ORDER BY col SEPARATOR ', ')` | `listagg(col, ', ') WITHIN GROUP (ORDER BY col)` (aggregate-only) OR `array_join(array_agg(col ORDER BY col), ', ')` |
+| Oracle (aggregate) | `LISTAGG(col, ', ') WITHIN GROUP (ORDER BY col)` | Same — `listagg(col, ', ') WITHIN GROUP (ORDER BY col)` (direct 1:1, see §7A.2). |
+| Oracle (windowed) | `LISTAGG(col, ', ') WITHIN GROUP (ORDER BY col) OVER (PARTITION BY k)` | NO direct equivalent. Use Case B: `array_join(array_agg(col) OVER (PARTITION BY k), ', ')` over a pre-sorted CTE — see §7A.2A. |
+
+**DO-NOT-WRITE — banned string-aggregation fabrications.**
+
+| Banned writing | Why it's wrong | Correct form |
+|---|---|---|
+| `string_agg(col, sep)` or `STRING_AGG(col, sep ORDER BY col)` | **FABRICATED.** PostgreSQL/SQL Server function — NOT in Trino's aggregate function list. Fails at analysis: `Function 'string_agg' not registered`. | `listagg(col, sep) WITHIN GROUP (ORDER BY col)` OR `array_join(array_agg(col ORDER BY col), sep)`. |
+| `group_concat(col SEPARATOR sep)` | **FABRICATED.** MySQL function — NOT in Trino. Also `SEPARATOR` is a MySQL keyword Trino does not parse. | Same as above. |
+| "Use `string_agg` and add it to the pushdown allow-list to make Trino call PostgreSQL's `string_agg`" | **WRONG.** Pushdown ≠ vocabulary. You can use PostgreSQL's `string_agg` via `system.query(...)` on the federated catalog (see [resource 22 § passthrough](22-trino-federation-postgresql.md)) — but you cannot make `string_agg` appear in the Trino dialect itself. The function name resolution happens before any pushdown decision. | If you genuinely need Postgres-side `string_agg`, wrap it in `SELECT ... FROM TABLE(postgresql.system.query(query => 'SELECT string_agg(...) FROM ...'))`. Otherwise use `listagg` or `array_join(array_agg(...))`. |
+| `listagg(col, sep) OVER (PARTITION BY k)` (assuming listagg has a window form) | **FABRICATED.** Same root cause as the `string_agg` claim — Trino's listagg has NO window form (per §7A.2A). | Case A (`listagg` aggregate + `GROUP BY`) OR Case B (`array_join(array_agg(col) OVER (PARTITION BY k), sep)` with a pre-sort CTE). See §7A.2A. |
+| Hand-rolling JSON via `string_agg(key \|\| ':' \|\| value, ',')` to build a JSON object | **DOUBLY WRONG.** (1) `string_agg` does not exist in Trino. (2) String concatenation does not safely escape JSON — use `CAST(MAP(...) AS JSON)` or `CAST(ROW(...) AS JSON)` then `json_format(...)` instead. See [resource 09 § LEADING CANONICAL — `CAST(map / array / row AS JSON)`](09-lakehouse-schema-design.md). | `json_format(CAST(MAP(key_array, value_array) AS JSON))`. |
+
+**Cross-references.**
+
+- §7A.2A immediately above — the locked LEADING CANONICAL for Oracle WINDOWED LISTAGG → Trino (Case A vs Case B choice rule + the `array_agg(col ORDER BY y) OVER (...)` ban).
+- §7A.2 — the aggregate `listagg` ON OVERFLOW mapping.
+- [resource 23 § anti-patterns table — `STRING_AGG`](23-sql-best-practices-olap.md) — the cross-dialect row that already covers `STRING_AGG`.
+- [resource 09 § LEADING CANONICAL — `CAST(map / array / row AS JSON)`](09-lakehouse-schema-design.md) — the right way to build JSON from MAP/ARRAY/ROW (do NOT hand-roll via `string_agg`-style concatenation).
+- [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html) — full Trino aggregate-function list; `string_agg` and `group_concat` are absent.
+- [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html) — `array_join(x, delimiter) -> varchar`.
+
+---
+
 ### 7A.3 Oracle PL/SQL packages and stored functions → dbt macros + Jinja
 
 **Oracle PL/SQL packages bundle related procedures and functions.** A typical package looks like:
