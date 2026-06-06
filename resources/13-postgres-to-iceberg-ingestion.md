@@ -5568,7 +5568,10 @@ Engineers migrating validation queries from Postgres to Trino frequently hit par
 | Current timestamp | `NOW()` or `CURRENT_TIMESTAMP` | `current_timestamp` or `now()` | Both work in Trino; no parens for `current_timestamp`, parens for `now()` |
 | Last 30 days | `NOW() - INTERVAL '30 days'` | `current_timestamp - INTERVAL '30' DAY` | Unit outside the quotes, singular, uppercase |
 | Last 7 days | `NOW() - INTERVAL '7 days'` | `current_timestamp - INTERVAL '7' DAY` | Same pattern — `days` plural fails in Trino |
-| Unix epoch seconds | `EXTRACT(epoch FROM ts)` | `to_unixtime(ts)` | `EPOCH` is not a valid Trino EXTRACT field — parse error |
+| Unix epoch seconds | `EXTRACT(epoch FROM ts)` | `to_unixtime(ts)` | `EPOCH` is not a valid Trino EXTRACT field — parse error. `to_unixtime` returns DOUBLE seconds (multiply by 1000 for millis) |
+| Epoch SECONDS → timestamp | `to_timestamp(epoch_sec)` | `from_unixtime(epoch_sec)` | Returns `timestamp(3) with time zone`. Expects **SECONDS**, not millis — see callout below |
+| Epoch MILLISECONDS → timestamp | `to_timestamp(epoch_ms / 1000.0)` | `from_unixtime(epoch_ms / 1e3)` | `/ 1e3` keeps sub-second precision; `/ 1000` (integer division) loses millis. **NEVER pass raw millis to `from_unixtime`** — see callout below |
+| Epoch NANOSECONDS → timestamp | (no direct equivalent) | `from_unixtime_nanos(epoch_ns)` | Returns `timestamp(9) with time zone`. Accepts `BIGINT` or `DECIMAL` nanoseconds since 1970-01-01 UTC |
 | Sub-millisecond precision check | `EXTRACT(MICROSECOND FROM ts) % 1000 != 0` | `date_diff('microsecond', date_trunc('millisecond', ts), ts) != 0` | `MICROSECOND` is not a valid Trino EXTRACT field — parse error; use `date_diff` |
 | Interval arithmetic | `ts + INTERVAL '1 hour'` | `ts + INTERVAL '1' HOUR` | Same unit-outside-quotes rule |
 | Date diff in days | `date_part('day', ts2 - ts1)` | `date_diff('day', ts1, ts2)` | Trino's `date_diff(unit, ts1, ts2)` returns `ts2 - ts1` in the specified unit |
@@ -5580,6 +5583,8 @@ Engineers migrating validation queries from Postgres to Trino frequently hit par
 **Trino EXTRACT supported fields**: `YEAR`, `QUARTER`, `MONTH`, `WEEK`, `DAY`, `DAY_OF_MONTH`, `DAY_OF_WEEK` (alias `DOW`), `DAY_OF_YEAR` (alias `DOY`), `YEAR_OF_WEEK` (alias `YOW`), `HOUR`, `MINUTE`, `SECOND`, `TIMEZONE_HOUR`, `TIMEZONE_MINUTE`.
 
 **NOT supported in Trino EXTRACT**: `EPOCH`, `MICROSECOND`, `MILLISECOND`. Pasting these into Trino produces a parse error — use `to_unixtime()` for epoch and `date_diff('microsecond', ...)` for sub-second precision.
+
+> **`from_unixtime` SECONDS vs MILLISECONDS — the year-52000 pitfall.** `from_unixtime(unixtime) -> timestamp(3) with time zone` expects epoch **SECONDS**. If your column is epoch **MILLISECONDS** (the default for Kafka Connect logical-Timestamp, JavaScript `Date.now()`, Java `System.currentTimeMillis()`, Debezium `source.ts_ms`), divide first: `from_unixtime(epoch_ms / 1e3)` keeps sub-second precision; `from_unixtime(epoch_ms / 1000)` is integer division and drops the millis (the result is rounded to the whole second). For epoch **NANOSECONDS**, use `from_unixtime_nanos(epoch_ns)` which returns `timestamp(9) with time zone`. **DO NOT** pass raw epoch-ms straight into `from_unixtime` — `from_unixtime(1716545537482)` reads 1.7 trillion as 1.7 trillion *seconds* and yields the year ~56378 (about 54,000 years in the future). If your result timestamps are in the far future, you forgot to divide by 1000. Going the other way: `to_unixtime(ts) -> DOUBLE` returns seconds; multiply by 1000 (or use `CAST(to_unixtime(ts) * 1000 AS BIGINT)`) to emit epoch millis.
 
 ### Worked before/after examples
 
