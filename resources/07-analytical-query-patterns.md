@@ -162,6 +162,30 @@ GROUP BY u.user_id;
 
 **Mental model.** `ARRAY_AGG` is the reverse of `UNNEST` — it collects rows into an array. LEFT JOIN's NULL-padding is an actual row, not an absence of a row, so it gets collected too. `FILTER (WHERE x IS NOT NULL)` removes that NULL row BEFORE collection, restoring "no matching tags = empty array" semantics. Same fix applies to `MAP_AGG`, `MULTIMAP_AGG`, and any other collection aggregate over a LEFT-JOIN unmatched side.
 
+### 1a.2A LEADING CANONICAL — `array_agg(x ORDER BY y)` ordered aggregation (+ DISTINCT; cross-ref `listagg` / `array_join(array_agg(...), ',')`)
+
+> **READ THIS FIRST if your question contains any of these keywords:** `array_agg order`, `array_agg ORDER BY`, `ordered aggregation Trino`, `array_agg DISTINCT`, `collect ordered list`, `array_agg ORDER BY production`, `is array_agg ordered`, `does array_agg preserve order`, `collect rows into array in order`, `event sequence array`. Verified at [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html) on 2026-06-06.
+
+**The one-fact summary.** Without an inline `ORDER BY` inside the aggregate call, the element order in the resulting array is **non-deterministic** — Trino is free to collect rows in whatever order partitions return them, and that order can change between runs. To get a deterministic element sequence, write the `ORDER BY` **INSIDE the aggregate call**: `array_agg(event_name ORDER BY occurred_at)`. Trino docs verbatim under "Ordering during aggregation": *"array_agg(x ORDER BY y DESC)"* and *"array_agg(x ORDER BY x, y, z)"*. Do NOT rely on an outer `ORDER BY` on the SELECT — that orders rows AFTER aggregation, not elements WITHIN each array.
+
+```sql
+-- CORRECT — deterministic ordered event sequence per user (oldest event first):
+SELECT user_id,
+       array_agg(event_name ORDER BY occurred_at) AS event_sequence
+FROM iceberg.analytics.user_events
+GROUP BY user_id;
+
+-- WITH DISTINCT (dedup elements) — `array_agg(DISTINCT x)` dedupes before collection:
+SELECT user_id,
+       array_agg(DISTINCT event_name ORDER BY event_name) AS unique_events
+FROM iceberg.analytics.user_events
+GROUP BY user_id;
+```
+
+> **DO NOT WRITE.** (1) `array_agg(x)` without `ORDER BY` and expect chronological / insertion / file order — **non-deterministic**; will silently break the next time partitioning changes. (2) Outer `SELECT ... ORDER BY occurred_at` to "order the array" — that orders the OUTER ROWS, not the array's elements. ORDER BY must be **inside** the aggregate. (3) `array_agg(x ORDER BY y) OVER (PARTITION BY k)` — Trino does NOT support inline `ORDER BY` combined with `OVER (...)` in the same `array_agg`; see [resource 27 § 7A.2A](27-oracle-plsql-to-dbt-trino.md) for the pre-sorted CTE workaround. (4) `array_agg` for string-joining when you really want a delimited STRING — use `listagg(col, ',') WITHIN GROUP (ORDER BY col)` (one row per group) OR `array_join(array_agg(col ORDER BY col), ',')` (when you need windowed/array form); see [resource 27 § 7A.2A / § 7A.2B](27-oracle-plsql-to-dbt-trino.md) — do not rewrite that family here.
+
+**Cross-references.** [§1a.2](#1a2-array_agg-over-left-join-unmatched-groups-returns-arraynull-not-null-and-not--use-filter-where-col-is-not-null) for the LEFT-JOIN `FILTER (WHERE col IS NOT NULL)` trap (same `array_agg`). [Resource 23 § 3 / § 3.1D](23-sql-best-practices-olap.md) for the rest of the Trino aggregate family (`approx_percentile`, `arbitrary`, `max_by`) and the FILTER clause. [Resource 27 § 7A.2A — Oracle WINDOWED LISTAGG → Trino](27-oracle-plsql-to-dbt-trino.md) for string-aggregation choice between aggregate `listagg` and `array_join(array_agg(...))`.
+
 ### 1a.3 Trino array-function quick reference — `contains` / `cardinality` / `array_distinct` / `element_at` / `array_join` / `array_position` (DO NOT claim Trino lacks a `contains`)
 
 **Keyword anchor:** Trino array contains, does array contain element, does array contain value, array membership test Trino, cardinality array length Trino, array_distinct dedup, array_intersect array_union array_except set operations on arrays, element_at array negative index, check if array has value, array has element, array membership without UNNEST, join array to string Trino, concat array elements Trino, array_join delimiter, array_position find element index, position of element in array Trino, where in array is value.
@@ -216,11 +240,43 @@ GROUP BY u.user_id;
 
 ---
 
+## 1b. LEADING CANONICAL — `WITH` / CTE semantics in Trino (readability tool; NOT a materialization barrier — referenced-N-times = inlined N times)
+
+> **READ THIS FIRST if your question contains any of these keywords:** `WITH clause Trino`, `CTE materialized`, `CTE computed once or many`, `common table expression performance`, `WITH RECURSIVE Trino`, `CTE vs temp table`, `is a CTE cached`, `does Trino cache CTE results`, `CTE optimization fence`, `WITH AS MATERIALIZED Trino`, `should I rewrite repeated subqueries as a CTE`. Verified at [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) on 2026-06-06.
+
+**The one-fact summary.** A `WITH name AS (SELECT ...)` block — called a **CTE** (Common Table Expression) — is a **named inline subquery** that exists ONLY for the duration of the outer statement. In Trino 467 a CTE is a **readability/reuse-in-text tool, NOT a materialization barrier and NOT a cache**. Trino docs verbatim: *"Currently, the SQL for the `WITH` clause will be inlined anywhere the named relation is used. This means that if the relation is used more than once and the query is non-deterministic, the results may be different each time."* Referencing the same CTE N times = the optimizer **inlines the CTE's SELECT N times** = re-executes it N times. There is **no `WITH ... AS MATERIALIZED` syntax** (Postgres 12+) and **no session flag** that forces materialization.
+
+```sql
+-- CTE = readability. Cheap to reference once, NOT cheap to reference twice.
+WITH heavy AS (
+  SELECT user_id, SUM(amount) AS total_spend
+  FROM iceberg.analytics.orders
+  WHERE order_date >= DATE '2026-01-01'
+  GROUP BY user_id    -- 100 GB shuffle
+)
+SELECT big.user_id, big.total_spend, small.total_spend AS small_total
+FROM heavy big
+JOIN heavy small ON big.total_spend > small.total_spend * 10;
+-- The 100 GB shuffle in `heavy` runs TWICE — once per textual reference.
+```
+
+**When to materialize instead of CTE.** If an expensive sub-result is referenced 2+ times in one query (or across many queries), materialize it ONCE and reference the materialized object:
+- **In a dbt pipeline (default choice on this stack):** promote `heavy` to its own dbt model with `{{ config(materialized='table') }}` and `ref()` it from downstream — see [resource 28 § 3.2](28-complex-sql-performance-trino-dbt.md).
+- **For a one-shot ad-hoc query:** `CREATE TABLE iceberg.tmp.heavy AS SELECT ...` first, then query the small table N times. Drop when done (the "ad-hoc extract" pattern in the prod environment).
+
+**`WITH RECURSIVE` IS supported** for bounded hierarchy walks (org tree, parts explosion) — see [resource 27 § 7A.1](27-oracle-plsql-to-dbt-trino.md) for the Oracle `CONNECT BY` → `WITH RECURSIVE` migration with the depth-cap caveat (`max_recursion_depth` session property; only single-element recursive cycles supported).
+
+> **DO NOT WRITE.** (1) "Defining a CTE makes Trino compute it once and reuse the result" — **FALSE on Trino 467**; the CTE is inlined per reference. (2) `WITH heavy AS MATERIALIZED (...)` — **parse error**; Trino has no `MATERIALIZED` modifier (open feature request: [trinodb/trino #10](https://github.com/prestosql/presto/issues/10)). (3) "More CTEs = faster — breaking a query into 10 CTEs lets the optimizer plan each one separately" — **FALSE**; CTE count is performance-neutral once inlined; materialization is the only lever (see [resource 28 § 3](28-complex-sql-performance-trino-dbt.md)). (4) Using a CTE as a "temp table" expecting cross-query persistence — a CTE's lifetime is **one statement only**; use `CREATE TABLE iceberg.tmp.X AS SELECT ...` for cross-statement reuse.
+
+**Cross-references.** [Resource 28 § 3 — CTEs are inlined, materialize once with dbt](28-complex-sql-performance-trino-dbt.md) for the deep perf-tuning angle (worked example + `ephemeral` vs `table` vs `view` materialization cost model). [Resource 23 § 11 — Use CTEs or subqueries — don't re-run the same expensive query twice](23-sql-best-practices-olap.md) for the duplicate-subquery collapsing pattern + `aggregate(...) FILTER (WHERE ...)` alternative for single-scan multi-metric. [Resource 27 § 7A.1](27-oracle-plsql-to-dbt-trino.md) for `WITH RECURSIVE`.
+
+---
+
 ## 2. Funnels (drop-off across a sequence of events)
 
 **The SaaS question:** "Of users who signed up last week, how many completed onboarding, and of those, how many activated a paid feature within 7 days?"
 
-A note on the `WITH ... AS (...)` blocks below: these are **CTEs** (Common Table Expressions — named, inline temporary result sets that you can reference later in the same query, similar to declaring a variable). They make multi-step queries readable without creating real tables.
+A note on the `WITH ... AS (...)` blocks below: these are **CTEs** (Common Table Expressions — named, inline temporary result sets that you can reference later in the same query, similar to declaring a variable). They make multi-step queries readable without creating real tables. **See §1b above for the full CTE semantics canonical (CTEs are INLINED in Trino, NOT materialized — referencing a CTE twice runs it twice).**
 
 ```sql
 WITH signups AS (

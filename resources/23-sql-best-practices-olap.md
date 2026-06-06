@@ -473,6 +473,35 @@ SELECT user_id FROM events_2026_q2;
 
 ---
 
+## 3.1G. Trino has NO `DISTINCT ON` — use `ROW_NUMBER() = 1` (or `max_by`) for one-row-per-group
+
+### LEADING CANONICAL — Trino has NO `DISTINCT ON` — use `ROW_NUMBER() = 1` (or `max_by`) for one-row-per-group
+
+> **READ THIS FIRST if your question contains any of these keywords:** `DISTINCT ON Trino`, `one row per group`, `latest row per key`, `Postgres DISTINCT ON equivalent`, `ROW_NUMBER 1 dedup`, `top-1 per partition`, `pick the most recent row per user`, `keep the newest row per group`, `latest order per customer`, `first event per session`, `dedup keeping the latest`. Verified at [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) on 2026-06-06 (DISTINCT ON is NOT in the Trino SELECT grammar).
+
+**The one-fact summary.** Postgres' `SELECT DISTINCT ON (k) ... FROM t ORDER BY k, ts DESC` (keep one row per `k`, picked by `ORDER BY`) is **NOT in Trino 467** — it raises a parse error: `mismatched input 'ON'`. Trino also has **NO `QUALIFY`** clause (see [§dialect anti-patterns table](#trino-467-sql-dialect-anti-patterns--do-not-carry-these-over-from-other-warehouses) above), so the Snowflake/BigQuery shortcut also fails. The canonical Trino rewrite is the **`ROW_NUMBER()` subquery** with an outer `WHERE rn = 1`.
+
+```sql
+-- Postgres:                                              -- Trino 467 (canonical):
+-- SELECT DISTINCT ON (customer_id)                       SELECT customer_id, order_id, order_date, amount
+--   customer_id, order_id, order_date, amount            FROM (
+-- FROM orders                                              SELECT customer_id, order_id, order_date, amount,
+-- ORDER BY customer_id, order_date DESC;                          ROW_NUMBER() OVER (
+--                                                                   PARTITION BY customer_id
+--                                                                   ORDER BY order_date DESC NULLS LAST
+--                                                                 ) AS rn
+--                                                          FROM iceberg.analytics.orders
+--                                                        ) WHERE rn = 1;
+```
+
+**Top-N-per-group (not just top-1)?** Same pattern with `WHERE rn <= N`. **Single-column "latest value" pick?** Skip the subquery entirely and use `max_by(val, ts)` (cross-ref [§3.1D](#31d-arbitrary--any_value-pick-one-value-per-group-and-max_by--min_by-deterministic-representative-value-pick) — do not rewrite). The `max_by` form is cheaper when you only need ONE column from the picked row; the `ROW_NUMBER()` form is the right choice when you need ALL columns from the picked row.
+
+> **DO NOT WRITE.** (1) **`SELECT DISTINCT ON (k) ...`** in Trino — parse error. Always rewrite to the `ROW_NUMBER()` subquery (or `max_by` for a single-column pick). (2) **`SELECT * FROM t QUALIFY ROW_NUMBER() OVER (PARTITION BY k ORDER BY ts DESC) = 1`** — Trino has NO `QUALIFY`; you MUST nest the window function in a subquery and filter `WHERE rn = 1` in the outer query (window functions are illegal in `WHERE` in every SQL dialect, including Trino). (3) **`SELECT * FROM t WHERE ROW_NUMBER() OVER (...) = 1`** — parse error (window functions are illegal in `WHERE` in every SQL dialect). (4) **`SELECT customer_id, MAX(order_date), ANY(amount), ANY(order_id) FROM orders GROUP BY customer_id`** as a shortcut — `ANY` is not Trino syntax (`arbitrary`/`any_value` exist but are NON-deterministic — you'd get `amount` and `order_id` from random rows, NOT from the max-date row). The deterministic forms are `max_by(amount, order_date)` and `max_by(order_id, order_date)`. (5) **The `NULLS-default` landmine on `ORDER BY ... DESC`** — always write explicit `NULLS FIRST` / `NULLS LAST` inside the window's `OVER (... ORDER BY ts DESC NULLS LAST)` (or `NULLS FIRST` to preserve Oracle behavior) — see [resource 27 § LEADING CANONICAL — Oracle vs Trino NULLS-default semantics](27-oracle-plsql-to-dbt-trino.md).
+
+**Cross-references.** [§3.1D — `arbitrary` / `any_value` / `max_by` / `min_by`](#31d-arbitrary--any_value-pick-one-value-per-group-and-max_by--min_by-deterministic-representative-value-pick) for the single-column representative-value pick. [§dialect anti-patterns table below](#trino-467-sql-dialect-anti-patterns--do-not-carry-these-over-from-other-warehouses) for the full cross-dialect `QUALIFY` / `LIMIT N BY` / `TOP N` / `DISTINCT ON` ban + the most-common rewrite pattern. [Resource 27 § 4.5C ROWID dedup](27-oracle-plsql-to-dbt-trino.md) for the in-place dedup pattern (CTAS+swap vs MERGE).
+
+---
+
 ## 4. Verify your plan with EXPLAIN
 
 **Why**: SQL that looks correct can still scan the whole table. `EXPLAIN` shows what Trino will actually do.
