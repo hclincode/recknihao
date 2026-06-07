@@ -703,6 +703,41 @@ GROUP BY order_id;
 
 **Optional: window-function form.** Both `bool_or` and `bool_and` also work as **window functions** with `OVER(...)` — e.g., `bool_or(is_late) OVER (PARTITION BY order_id)` returns the per-order any-late flag attached to every shipment row (without collapsing the group). Useful when you want to filter or annotate rows by "is this order's group flagged" rather than collapse to one row per group.
 
+#### histogram() — "count of each distinct value in ONE row" (a value-count summary / frequency map, no GROUP BY)
+
+> **READ THIS FIRST if your question contains any of these keywords: `value-count summary`, `frequency map`, `counts per value without a GROUP BY`, `how many of each value`, `count of each distinct value in one row`, `{COMPLETED:1200, PENDING:340} summary`, `one-shot value counts`, `count of each status in a single row`, `frequency of each value`, `tally of each value`, `histogram`, `count occurrences of each value`, `map of value to count`, `value frequencies in one aggregate`.** Verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) on 2026-06-07.
+
+**The one-fact summary.** `histogram(x)` returns a **single `map<value, bigint>`** mapping each distinct input value to its occurrence count — computed in **ONE aggregate with NO explicit `GROUP BY`**. It is the purpose-built one-shot "how many of each value" frequency map: one row out, one map column, every distinct value → its count.
+
+- `histogram(x) -> map<K, bigint>` — Trino docs verbatim: *"Returns a map containing the count of the number of times each input value occurs."*
+
+**Worked example (the canonical "count of each value in one row" shape):**
+
+```sql
+-- Trino 467 — "give me the count of each order status as a single value-count summary"
+-- One row out: a map<varchar, bigint> mapping each distinct status to its count.
+SELECT histogram(status) AS status_counts
+FROM orders;
+-- → status_counts = {COMPLETED=1200, PENDING=340, CANCELLED=55}
+
+-- Read one value's count out of the map with element_at (returns NULL if the key is absent):
+SELECT element_at(histogram(status), 'COMPLETED') AS completed_count
+FROM orders;
+-- → completed_count = 1200
+```
+
+`histogram(status)` collapses the whole table to **one row** whose single map column holds `{COMPLETED=1200, PENDING=340, CANCELLED=55}` — no `GROUP BY status`, no subquery. Pull an individual count with `element_at(status_counts, 'COMPLETED')` (cross-ref [§3.1 map-access / resource 09 `element_at`](#) — `element_at(map, key)` returns the value for the key, or `NULL` if absent).
+
+**`histogram()` vs the neighbors — when to reach for the one-shot map vs a GROUP BY.**
+
+| Question shape | Reach for | Why |
+|---|---|---|
+| **"Count of each distinct value as ONE summary map (LOW/MODERATE cardinality)"** | **`histogram(x)`** | Docs-canonical one-shot. One row, one `map<value,bigint>`, no `GROUP BY`, no subquery. |
+| "Count per value as ROWS (one row per value), or HIGH-cardinality keys" | `GROUP BY x` + `COUNT(*)` | Returns a row per value (better for huge distinct-key counts, joins, downstream filtering). A map with millions of keys is unwieldy. |
+| "Build the same map manually from a GROUP BY" | `map_agg(x, COUNT(*))` over a `GROUP BY x` subquery | This IS the manual equivalent of `histogram`, but it needs an explicit `GROUP BY` + a subquery. `histogram(x)` is the **direct one-shot** — prefer it. |
+
+**Net rule.** For a **value-count summary in one row** (a `{value:count}` frequency map over LOW/MODERATE-cardinality values) → `histogram(x)` is the direct, docs-canonical idiom — no `GROUP BY`, no subquery. Use `GROUP BY x COUNT(*)` when you want the counts as ROWS or when the keys are HIGH-cardinality. `map_agg(k, COUNT(*))` over a `GROUP BY` is the manual map-building equivalent, but `histogram` does it in one shot.
+
 ---
 
 ## 3.1F. `UNION` vs `UNION ALL` — the dedupe-vs-concatenate canonical (default to `UNION ALL` for analytics)
@@ -769,6 +804,27 @@ SELECT user_id FROM events_2026_q2;
 **Honest fallbacks when there is NO unique column.** *(Keyword anchor — route here on: "I have NO unique column", "no unique column", "no column that's unique per row", "nothing unique to break ties", "table has no primary key", "no monotonic id", "no event_id / order_id / session_id", "tie-break without a unique key", "ROW_NUMBER tiebreaker without unique column".)* Sometimes the table genuinely has no second-column unique key to break ties on. **DO NOT** try `ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY ts DESC, ROW_NUMBER() OVER (...))` — a nested window function inside another window function's `ORDER BY` is **REJECTED by the Trino 467 analyzer** (`StatementAnalyzer.analyzeWindowFunctions` raises an error; see [trinodb/trino PR #23929](https://github.com/trinodb/trino/pull/23929) and [Issue #24163](https://github.com/trinodb/trino/issues/24163)) AND it's semantically circular — the inner `ROW_NUMBER` adds no real distinguishing key, it just renumbers the same tied rows. Use one of these instead: **(a) Add EVERY remaining column to the ORDER BY as a deterministic-given-values tiebreaker** — `ORDER BY ts DESC, col_a, col_b, col_c` — deterministic across runs as long as no two rows are byte-identical (if they are, the rows are duplicates and no tiebreaker can distinguish them — they belong dedup'd). **(b) Add a SURROGATE sequence column at INGEST time** — a monotonic `_ingest_seq BIGINT` / generated id assigned by the Spark ingest job (e.g. via `monotonically_increasing_id()` or a UUID column written into the Iceberg table). This is the robust real-world fix: solve the missing-unique-key problem at the source. **(c) When you genuinely don't care WHICH tied row wins**, drop `ROW_NUMBER() = 1` entirely and use the deterministic-by-`ts` representative-value form from [§3.1D](#31d-arbitrary--any_value-pick-one-value-per-group-and-max_by--min_by-deterministic-representative-value-pick): `max_by(payload, ts)` (or `arbitrary(payload)` if you don't even care about latest-by-ts). `max_by` returns the `x` associated with the maximum `y`; `arbitrary` returns any non-null value.
 
 > **DO NOT WRITE.** (1) **`SELECT DISTINCT ON (k) ...`** in Trino — parse error. Always rewrite to the `ROW_NUMBER()` subquery (or `max_by` for a single-column pick). (2) **`SELECT * FROM t QUALIFY ROW_NUMBER() OVER (PARTITION BY k ORDER BY ts DESC) = 1`** — Trino has NO `QUALIFY`; you MUST nest the window function in a subquery and filter `WHERE rn = 1` in the outer query (window functions are illegal in `WHERE` in every SQL dialect, including Trino). (3) **`SELECT * FROM t WHERE ROW_NUMBER() OVER (...) = 1`** — parse error (window functions are illegal in `WHERE` in every SQL dialect). (4) **`SELECT customer_id, MAX(order_date), ANY(amount), ANY(order_id) FROM orders GROUP BY customer_id`** as a shortcut — `ANY` is not Trino syntax (`arbitrary`/`any_value` exist but are NON-deterministic — you'd get `amount` and `order_id` from random rows, NOT from the max-date row). The deterministic forms are `max_by(amount, order_date)` and `max_by(order_id, order_date)`. (5) **The `NULLS-default` landmine on `ORDER BY ... DESC`** — always write explicit `NULLS FIRST` / `NULLS LAST` inside the window's `OVER (... ORDER BY ts DESC NULLS LAST)` (or `NULLS FIRST` to preserve Oracle behavior) — see [resource 27 § LEADING CANONICAL — Oracle vs Trino NULLS-default semantics](27-oracle-plsql-to-dbt-trino.md). (6) **Nested window function inside another window function's `ORDER BY`** as a "tiebreaker" — `ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY ts DESC, ROW_NUMBER() OVER (...))` is **REJECTED by Trino 467's `StatementAnalyzer`** (see PR #23929 / Issue #24163) AND it's semantically circular. See the **Honest fallbacks** paragraph immediately above for the three correct alternatives (all-remaining-columns, ingest-time surrogate sequence, or `max_by(payload, ts)` / `arbitrary(payload)`).
+
+#### EXACT whole-row dedup (every column identical) → `SELECT DISTINCT *` — NOT `ROW_NUMBER`, NEVER `PARTITION BY *`
+
+> **READ THIS FIRST if your question contains any of these keywords:** `drop exact duplicate rows`, `remove duplicate rows where every column is identical`, `whole-row dedup`, `dedup entire row`, `delete fully duplicated rows`, `rows that are byte-identical`, `SELECT DISTINCT *`, `DISTINCT star`, `dedup all columns`, `remove exact duplicates`, `de-duplicate identical rows`, `PARTITION BY *`, `ROW_NUMBER over all columns`, `dedup without a key`. Verified at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) + [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html) on 2026-06-07.
+
+**The one-fact summary.** To drop **EXACT duplicate rows** — rows where **every column is identical** — the simplest and correct Trino tool is **`SELECT DISTINCT *`**. The Trino `SELECT` docs say verbatim: *"If the argument `DISTINCT` is specified, only unique rows are included in the result set."* `DISTINCT *` applies that uniqueness across **all columns** of the row, so byte-identical rows collapse to one. This is a different problem from "one row per KEY" (the `ROW_NUMBER()` canonical above) — for exact whole-row dedup you do **not** need a window function at all.
+
+```sql
+-- Trino 467 — drop EXACT duplicate rows (every column identical):
+SELECT DISTINCT * FROM events;
+
+-- Write the deduplicated result back to a new table (CTAS):
+CREATE TABLE iceberg.analytics.events_deduped AS
+SELECT DISTINCT * FROM iceberg.analytics.events;
+```
+
+> **DO NOT WRITE — `PARTITION BY *` / `ORDER BY (SELECT 1)` for whole-row dedup (parse errors).**
+> 1. **`ROW_NUMBER() OVER (PARTITION BY * ORDER BY (SELECT 1))`** — INVALID. **`*` is NOT a valid expression in a `PARTITION BY` clause in Trino** (it's a parse error). `PARTITION BY` takes a list of **column/scalar expressions** (e.g. `PARTITION BY customer_id, region`), exactly like the Trino window-function docs' own example `PARTITION BY clerk` — the `*` wildcard is a SELECT-list-only construct, not a grouping expression. `ORDER BY (SELECT 1)` is **also not a valid window sort key** in Trino. For EXACT whole-row dedup, do NOT reach for `ROW_NUMBER` at all — use **`SELECT DISTINCT *`**.
+> 2. **Using `ROW_NUMBER() OVER (PARTITION BY <enumerated key columns> ...)` for EXACT-duplicate removal** — that pattern (the §3.1G LEADING CANONICAL above) is for **one row per KEY** (keeping a CHOSEN row among NEAR-duplicates that share a key but differ in other columns). It is the right tool ONLY when you want to keep one representative row per key, NOT for removing rows that are identical in every column. Use `ROW_NUMBER() OVER (PARTITION BY <enumerated key columns> ORDER BY <tiebreaker>)` for "one row per key"; use `SELECT DISTINCT *` for "drop exact whole-row duplicates."
+
+**The distinction in one line.** *Exact whole-row duplicates* (every column identical) → `SELECT DISTINCT *`. *One row per KEY* (rows share a key but differ elsewhere, keep the chosen one) → `ROW_NUMBER() OVER (PARTITION BY <enumerated key cols> ORDER BY <tiebreaker>)` + outer `WHERE rn = 1` (the LEADING CANONICAL above). They are different problems; do not use `ROW_NUMBER` for the first, and never write `PARTITION BY *`.
 
 **Cross-references.** [§3.1D — `arbitrary` / `any_value` / `max_by` / `min_by`](#31d-arbitrary--any_value-pick-one-value-per-group-and-max_by--min_by-deterministic-representative-value-pick) for the single-column representative-value pick. [§dialect anti-patterns table below](#trino-467-sql-dialect-anti-patterns--do-not-carry-these-over-from-other-warehouses) for the full cross-dialect `QUALIFY` / `LIMIT N BY` / `TOP N` / `DISTINCT ON` ban + the most-common rewrite pattern. [Resource 27 § 4.5C ROWID dedup](27-oracle-plsql-to-dbt-trino.md) for the in-place dedup pattern (CTAS+swap vs MERGE).
 
