@@ -445,9 +445,13 @@ GROUP BY CUBE(region, product_category)
 GROUP BY GROUPING SETS ((region), (product_category), ())
 ```
 
+> **CRITICAL EQUIVALENCE — `GROUPING SETS ((a,b),(a),(b),())` IS EXACTLY `CUBE(a,b)`.** Listing ALL FOUR tuples — *including the `(a,b)` detail tuple* — is the full power set, so it STILL emits the per-`(a,b)` detail row. Writing the four-tuple form when you were told NOT to want the detail does NOT fix the problem — it is the same query as `CUBE(a,b)` and emits the exact detail row you were told to exclude. **For hand-picked subtotals-only, you MUST OMIT the `(a,b)` detail tuple from the list:** write `((a),(b),())` — THREE tuples, NO `(a,b)`.
+>
+> **DO NOT WRITE** `GROUP BY GROUPING SETS ((a,b),(a),(b),())` when you do NOT want the detail → that IS `CUBE(a,b)` and emits the `(a,b)` detail row. **OMIT the `(a,b)` tuple** → `GROUP BY GROUPING SETS ((a),(b),())`.
+
 **The 3-way rule in one line:** hand-picked SPECIFIC subtotals (NOT the full cross-tab) → `GROUPING SETS ((a), (b), ())`; EVERY combination / full power set (incl. the `a`×`b` detail) → `CUBE(a, b)`; hierarchical / prefix drill-down → `ROLLUP(a, b)`.
 
-Verified against [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html): *"The `ROLLUP` operator generates all possible subtotals for a given set of columns"* (hierarchical / prefix subtotals — each level rolls up the rightmost remaining column) vs *"The `CUBE` operator generates all possible grouping sets (i.e. a power set) for a given set of columns"* (all 2^N combinations). ROLLUP = hierarchical prefix subtotals; CUBE = the full power set. By contrast, *"Grouping sets allow users to specify multiple lists of columns to group on"* — `GROUPING SETS` computes **exactly** the listed groups and nothing more (each listed set is computed like its own simple `GROUP BY`, equivalent to a `UNION ALL` of those `GROUP BY`s), so it is the only construct that gives you by-`a` + by-`b` + grand-total **without** the `(a, b)` detail row that `CUBE`'s power set always includes. The (b) value table and (c) worked example just below show ROLLUP; section (e) below has the full CUBE comparison.
+Verified against [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html): *"The `ROLLUP` operator generates all possible subtotals for a given set of columns"* (hierarchical / prefix subtotals — each level rolls up the rightmost remaining column) vs *"The `CUBE` operator generates all possible grouping sets (i.e. a power set) for a given set of columns"* (all 2^N combinations). ROLLUP = hierarchical prefix subtotals; CUBE = the full power set. By contrast, *"Grouping sets allow users to specify multiple lists of columns to group on"* — `GROUPING SETS` computes **exactly** the listed groups and nothing more (each listed set is computed like its own simple `GROUP BY`, equivalent to a `UNION ALL` of those `GROUP BY`s), so it is the only construct that gives you by-`a` + by-`b` + grand-total **without** the `(a, b)` detail row that `CUBE`'s power set always includes. The docs state the CUBE equivalence verbatim: `GROUP BY CUBE (a, b)` *"is equivalent to"* `GROUP BY GROUPING SETS ((a, b), (a), (b), ())` — so the four-tuple `GROUPING SETS ((a,b),(a),(b),())` IS literally `CUBE(a,b)` and emits the `(a,b)` detail; OMIT the `(a,b)` tuple to drop the detail. The (b) value table and (c) worked example just below show ROLLUP; section (e) below has the full CUBE comparison.
 
 > **Why this block sits at the top of r28:** when an Oracle/Snowflake/Postgres engineer migrates a report query that uses `GROUP BY ROLLUP(...)` and the `GROUPING()` function to label subtotal vs grand-total rows, the bitmask semantics are easy to get wrong. The specific failure observed in production: writing `CASE GROUPING(region, category) WHEN 2 THEN 'Grand Total'` for a 2-column `ROLLUP(region, category)`. That is **WRONG**. The grand-total value is **3** (binary `11`), not 2. Value 2 (binary `10`) does **not appear at all** in a 2-column ROLLUP. The rest of this block explains exactly why.
 
@@ -583,6 +587,29 @@ ORDER BY GROUPING(store, payment_method), store NULLS LAST, payment_method NULLS
 ```
 
 Note carefully: **`WHEN 1 THEN 'Store Total'`** (because `payment_method`, the rightmost arg, is the one rolled up — so the surviving dimension is `store`), and **`WHEN 2 THEN 'Payment Method Total'`** (because `store`, the leftmost arg, is rolled up — so the surviving dimension is `payment_method`). The common slip is to write `WHEN 1 THEN 'Payment Method Total'` / `WHEN 2 THEN 'Store Total'` — that is the transposed (WRONG) labeling. The row that survives is named after the column that is STILL PRESENT (bit = 0), not the one rolled up.
+
+**Fully-labeled worked CASE for the hand-picked OMIT-the-detail form `GROUPING SETS ((salesperson), (month), ())`** — copy verbatim when the user wants by-salesperson + by-month + grand total but EXPLICITLY NOT the per-`(salesperson, month)` detail. Because the `(salesperson, month)` tuple is OMITTED, **GROUPING value 0 is NEVER emitted — so there is NO `WHEN 0 THEN 'Detail'` arm** (that is the whole point: no detail rows):
+
+```sql
+-- Hand-picked subtotals ONLY: by-salesperson + by-month + grand total. NO per-(salesperson,month) detail.
+-- The (salesperson, month) tuple is OMITTED, so bitmask 0 (detail) is never produced.
+SELECT
+  salesperson,
+  month,
+  SUM(amount)                              AS total,
+  CASE GROUPING(salesperson, month)
+    WHEN 1 THEN 'Salesperson Total'        -- 01 — month (rightmost) rolled up; salesperson present => per-SALESPERSON subtotal
+    WHEN 2 THEN 'Month Total'              -- 10 — salesperson (leftmost) rolled up; month present => per-MONTH subtotal
+    WHEN 3 THEN 'Grand Total'              -- 11 — both rolled up
+  END                                      AS row_type
+FROM analytics.fct_orders
+WHERE event_date >= DATE '2026-06-01'
+  AND event_date <  DATE '2026-07-01'
+GROUP BY GROUPING SETS ((salesperson), (month), ())   -- THREE tuples, NO (salesperson, month) detail tuple
+ORDER BY GROUPING(salesperson, month), salesperson NULLS LAST, month NULLS LAST;
+```
+
+Note the bit order is **identical** to the CUBE example above (LEFTMOST arg = high bit): `WHEN 1 THEN 'Salesperson Total'` (month rolled up, salesperson survives), `WHEN 2 THEN 'Month Total'` (salesperson rolled up, month survives). If you had instead written the four-tuple `GROUPING SETS ((salesperson, month), (salesperson), (month), ())`, that IS `CUBE(salesperson, month)` — it would re-introduce bitmask 0 and emit the per-`(salesperson, month)` detail row you were told to exclude. **Omitting the `(salesperson, month)` tuple is what removes the detail.**
 
 ### (f) The `GROUPING_ID()` shortcut (when you want decimal directly)
 
