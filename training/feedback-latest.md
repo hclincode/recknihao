@@ -1,153 +1,94 @@
-# iter665 Judge Feedback — FIX-A Re-Probe
+# Iter666 Judge Feedback
 
-**Iteration**: 665
+**Iteration**: 666
 **Phase**: extended
-**Mode**: FIX-A re-probe of iter664-Q3 (busiest-weekday-per-user BY NAME) + 3 control questions
+**Mode**: DURABILITY-BREADTH re-probe of iter666 r12 Spark-CALL→Trino-EXECUTE fix + 3 adjacent control questions
+
+## Per-question scoring (Accuracy / Completeness / Clarity / Actionability, 1-5)
+
+### Q1 — Cumulative running total
+- Accuracy: **3.5** — Core SQL is valid Trino 467 and runs. BUT the explanatory note that "same-day rows show the same running value as a peer group" under a `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` frame is **technically wrong**. Peer-group semantics belong to RANGE, not ROWS. With a ROWS frame, every physical row gets its own incrementing cumulative value regardless of date ties. A SaaS engineer relying on this note will be confused when their output shows distinct running values per same-date row. (Verified against trino.io/docs/467: default frame is `RANGE UNBOUNDED PRECEDING` which includes "the last peer of the current row" — i.e., RANGE peers; ROWS does not.)
+- Completeness: **4** — Answers core question; mentions frame choice but mis-explains tie semantics.
+- Clarity: **4.5** — Clear shape, easy to read.
+- Actionability: **4** — Paste-and-run works; the misleading note risks downstream confusion when verifying with same-date rows.
+- **Q1 average: 4.0**
+
+### Q2 — Percent of column total (empty-window grand total)
+- Accuracy: **2** — **PARSE ERROR**. As written: `ROUND(100.0 * SUM(amount) / SUM(amount) OVER () AS pct_of_grand_total` — ROUND's opening paren is never closed before `AS`. Trino will reject this with a syntax error. The TECHNIQUE (empty `OVER ()` for grand total, `100.0` decimal cast) is correct and explained well, but the literal SQL does not compile.
+- Completeness: **4** — Hits the empty-window concept, integer-division guard, no separate subquery — all the right ideas.
+- Clarity: **4** — Good explanation prose.
+- Actionability: **1.5** — A SaaS engineer pasting this gets an immediate parse error. They have to debug parens before they can even run it. Defeats the purpose of "copy this."
+- **Q2 average: 2.875**
+
+### Q3 — Per-tenant DAU last 30 days
+- Accuracy: **3.5** — Shape and intent correct: `WHERE tenant_id = 42`, `COUNT(DISTINCT user_id)`, 30-day filter via `CURRENT_DATE - INTERVAL '30' DAY`. BUT the question gave the column as `event_time` (a timestamp), not `event_date`. The responder silently assumed an `event_date` column exists. A correct answer needs `date_trunc('day', event_time) AS event_date` or `CAST(event_time AS DATE)` in both SELECT and GROUP BY, and the predicate becomes `event_time >= CURRENT_TIMESTAMP - INTERVAL '30' DAY` (or similar). As written, this does not match the given schema.
+- Completeness: **4** — Tenant scoping, distinct user count, day rollup, 30-day window all present; includes isolation warning.
+- Clarity: **4.5** — Easy to read, intent clear.
+- Actionability: **3.5** — Engineer will hit "column event_date does not exist" and have to adapt. Salvageable but not paste-and-run.
+- **Q3 average: 3.875**
+
+### Q4 — Iceberg maintenance: compact + expire snapshots
+- Accuracy: **3.5** — The Trino-EXECUTE form is **correct** and aligns with trino.io/docs/467 (iter666 r12 Spark-CALL→Trino-EXECUTE fix landed correctly). All three procedures (`optimize`, `expire_snapshots`, `remove_orphan_files`) use the right `ALTER TABLE ... EXECUTE proc(param => value)` shape. The "not Spark CALL procedures" clarification is correct and useful. **BUT** the `file_size_threshold => '134217728'` value is **a raw byte string with no unit suffix**, and Trino's DataSize parser requires units (B/kB/MB/GB). Per docs and verified examples, valid values are `'128MB'`, `'100MB'`, etc. Bare numeric strings like `'134217728'` fail to parse. The correct form is `'128MB'` (which is what 134217728 bytes equals). Also `retention_threshold => '7d'` for both expire/remove is correct and matches the default `iceberg.expire_snapshots.min-retention=7d` floor.
+- Completeness: **4.5** — Three procedures covered, retention floor noted, dialect disambiguation explicit.
+- Clarity: **4.5** — Structured into steps, calls out the Spark-vs-Trino trap.
+- Actionability: **3** — Step 2 and Step 3 paste-and-run. Step 1 fails to parse as written; engineer must change `'134217728'` to `'128MB'` (or any unit-suffixed value). The iter666 fix landed the EXECUTE form correctly but introduced a DataSize unit defect.
+- **Q4 average: 3.875**
 
 ---
 
-## Docs-truth verification (Trino 467, verified 2026-06-08)
+## OVERALL AVERAGE
 
-Verified against `trino.io/docs/467/functions/datetime.html`:
+(4.0 + 2.875 + 3.875 + 3.875) / 4 = **3.656**
 
-- `day_of_week(x) -> bigint` — "Returns the ISO day of the week from x. The value ranges from 1 (Monday) to 7 (Sunday)." **Confirmed ISO 1=Mon..7=Sun, NOT 0=Sunday.**
-- `format_datetime(timestamp, format) -> varchar` — uses JodaTime's DateTimeFormat pattern. `'EEEE'` = full English weekday name ('Monday'..'Sunday'). First arg typed TIMESTAMP — DATE must be CAST first.
-- `dayname()` — **does NOT exist** in Trino 467. Calling it raises Function not registered.
-- `EXTRACT(DAY_OF_WEEK FROM x)` and `EXTRACT(DOW FROM x)` — both supported, both return ISO 1..7 (DOW is the documented alias; does NOT flip to Postgres 0=Sun).
-- `ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...)` with outer `WHERE rn=1` — canonical top-1-per-group, valid.
-- `LEFT JOIN ... WHERE right.key IS NULL` — canonical multi-key anti-join, NULL-safe (unlike NOT IN with nullable right side).
-- Integer-division trap: `int/int` truncates in Trino; prefixing with `100.0` decimal literal coerces to non-integer division. Valid.
+**Verdict: PASS** (overall >= 3.5 threshold)
 
 ---
 
-## Per-Question Scores
+## Flagged weak answers (prose only — does NOT change PASS label per directive)
 
-### Q1 — busiest-weekday-per-user BY NAME (FIX-A RE-PROBE)
-
-**Answer structure**: CTE `per_user_weekday` GROUPs by `user_id`, `day_of_week(order_date)`, `format_datetime(CAST(order_date AS timestamp),'EEEE')`; CTE `ranked` applies `ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY order_count DESC, dow ASC)`; outer `WHERE rn=1`.
-
-Dialect verifications:
-- `day_of_week(order_date)` returns ISO 1..7 — correct, no 0=Sunday leak.
-- `format_datetime(CAST(order_date AS timestamp), 'EEEE')` — correct, yields 'Monday'..'Sunday'. CAST DATE -> TIMESTAMP required, present.
-- GROUP BY both non-aggregated SELECT exprs (dow + weekday_name) — valid.
-- ROW_NUMBER top-1 structure — avoids the `MAX(COUNT(*))` nested-aggregate parse error (explicitly called out).
-- Tiebreaker `ORDER BY order_count DESC, dow ASC` — deterministic.
-- **No** `dayname()` floated. **No** `CAST(day_of_week(...) AS VARCHAR)`-as-name claim — responder explicitly warns it yields '1'..'7' not names. **No** 0=Sunday Postgres carryover.
-
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5 | All four iter664-Q3 dialect leaks closed; every function signature verified against docs. |
-| Completeness | 5 | CTE + ROW_NUMBER + tiebreaker + nested-aggregate warning + name-vs-number warning all present. |
-| Clarity | 5 | Explains MAX(COUNT(*)) trap, integer-vs-name distinction explicitly. |
-| Actionability | 5 | Drop-in SQL works on Trino 467 against the schema as given. |
-
-**Q1 avg: 5.00**
-
-**FIX-A VERDICT: CLOSED.** Every one of the four iter664-Q3 leak vectors is gone:
-1. No `0=Sunday` Postgres carryover — uses ISO 1..7.
-2. No non-existent `dayname()` floated.
-3. No `CAST(day_of_week(...) AS VARCHAR)` falsely treated as the name — explicit warning that it yields '1'..'7'.
-4. No `MAX(COUNT(*))` nested-aggregate parse error — ROW_NUMBER CTE structure used.
+1. **Q2 missing close paren** — confirmed genuine syntax error. Pasted as-is, Trino returns a parse error. The technique is right; the literal SQL is broken. This is the most serious defect of the four.
+2. **Q1 same-day-peer claim under ROWS frame** — technically wrong (peer semantics are RANGE-only, not ROWS). Misleading explanatory note attached to otherwise-correct SQL.
+3. **Q3 event_date vs event_time** — schema mismatch with the question; engineer must adapt the column to `date_trunc('day', event_time)`. Minor but material since the question explicitly gave `event_time`.
+4. **Q4 `'134217728'` byte literal** — Trino DataSize requires a unit suffix; bare numeric string fails to parse. Replace with `'128MB'`.
 
 ---
 
-### Q2 — two-level macro-AVG-of-daily-counts
+## Q4 Iceberg-maintenance verdict (iter666 re-probe of r12 Spark-CALL→Trino-EXECUTE fix)
 
-**Answer structure**: CTE `daily_totals` per-day `COUNT(*)`; outer `AVG(orders_that_day)`.
-
-- Two-level pattern correctly factored into CTE — no `AVG(COUNT(*))` nested-aggregate parse error.
-- "Only active days" semantic explicitly noted (days absent from GROUP BY are excluded from the average).
-- Drop-in valid against the schema.
-
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5 | Correct two-level structure, valid Trino syntax. |
-| Completeness | 5 | Active-days semantic called out. |
-| Clarity | 5 | CTE name `daily_totals` self-documenting. |
-| Actionability | 5 | Drop-in. |
-
-**Q2 avg: 5.00**
+**LANDED PARTIALLY CORRECT.** The Trino-native `ALTER TABLE ... EXECUTE` form is now used (Spark CALL form no longer appears as the primary maintenance directive), the "not Spark CALL procedures" disambiguation is delivered, and `retention_threshold => '7d'` matches the default min-retention floor. The fix did its job on the engine-dialect axis. However, the **value format for `file_size_threshold` regressed** — `'134217728'` (raw bytes, no unit) is not a valid Trino DataSize literal; the canonical examples in r17/r11 use `'128MB'` / `'256MB'`. Responder appears to have computed 128*1024*1024 and emitted the integer instead of the string `'128MB'`.
 
 ---
 
-### Q3 — multi-key anti-join (catalog \ orders on product_id+region_id)
+## Teacher feedback (concise, actionable)
 
-**Answer structure**: `LEFT JOIN ... ON o.product_id=c.product_id AND o.region_id=c.region_id WHERE o.product_id IS NULL`.
+### Priority for iter667
 
-- Multi-key composite join condition correctly expressed.
-- LEFT-JOIN-IS-NULL pattern is the NULL-safe form (NOT IN with nullable right side has the three-valued-logic trap).
-- "Either right col works for the NULL check" note is correct — after LEFT JOIN, the entire right row is NULL when no match, so any non-nullable right-side column suffices.
+**FIX-A (recommended)**: Add a tightly-scoped worked example showing the CORRECT `file_size_threshold` literal format. The defect is not in r12 / r17 (which use `'128MB'` / `'256MB'` correctly) — it appears to be a value-format transcription gap where the responder synthesized a raw byte value. Add an explicit inoculation card / one-liner near the optimize template:
 
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5 | Canonical Trino-valid multi-key anti-join. |
-| Completeness | 5 | NULL-check column flexibility noted. |
-| Clarity | 5 | Pattern is well-known and clearly written. |
-| Actionability | 5 | Drop-in. |
+> `file_size_threshold` must be a DataSize string with a unit suffix: `'128MB'`, `'256MB'`, `'1GB'`. Bare numeric strings like `'134217728'` are NOT valid and will fail with a DataSize parse error. If you have a byte target, convert it: 134217728 bytes = `'128MB'`.
 
-**Q3 avg: 5.00**
+Place this anchor BOTH in r17 (canonical Iceberg maintenance page) and near the r11 / r12 optimize examples so keyword lookup of "file_size_threshold" always lands on the unit-suffix rule.
 
----
+**FIX-B (recommended, lighter touch)**: Add a one-line "verify your SQL parses" note to the percent-of-grand-total card in r07:1170-1192. Specifically: a "copy-paste correctness" inoculation that flags the common transcription trap of unbalanced ROUND parens. Suggested wording:
 
-### Q4 — conditional-share per user with cast-to-avoid-integer-division
+> When wrapping `100.0 * x / SUM(x) OVER ()` in `ROUND(...)`, the close-paren goes BEFORE `AS`, not after. Pattern: `ROUND(100.0 * x / SUM(x) OVER (), 2) AS pct`. Count the parens — `ROUND(` opens 1, must close 1.
 
-**Answer structure**: `ROUND(100.0 * SUM(CASE WHEN status='returned' THEN 1 ELSE 0 END) / COUNT(*), 2)` GROUP BY user_id.
+The Q2 defect is more transcription-slip than resource gap, but a balanced-parens worked example with explicit paren-count callout reduces recurrence.
 
-- `100.0` decimal literal forces non-integer arithmetic — verified Trino behavior (int/int truncates).
-- `SUM(CASE...)` is the canonical Trino-portable conditional count; `COUNT(*) FILTER (WHERE ...)` is the equivalent alternative.
-- ROUND 2dp produces a clean percentage.
-- Integer-division trap explicitly explained.
+**FIX-C (lower priority)**: Reconcile the ROWS-vs-RANGE peer-group semantics in r07:1630-1716. Verify the language explicitly states: "ROWS counts physical rows; tied ORDER BY values still get distinct running totals. RANGE peers; tied ORDER BY values share the same value." The responder produced a hybrid claim ("ROWS frame, peer group, same running value") that does not exist in either semantic. If r07 already says this clearly, no edit — this is a responder synthesis error, not a resource gap.
 
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5 | Decimal-promotion semantics correct; CASE form valid. |
-| Completeness | 5 | Mentions integer-division trap and 100.0 literal mechanism. |
-| Clarity | 5 | Trap explanation is the textbook framing. |
-| Actionability | 5 | Drop-in. |
+**FIX-D (lowest priority)**: For per-tenant DAU questions where `event_time` (timestamp) is the given column, add a recipe-card pattern explicitly using `date_trunc('day', event_time) AS event_date` to bridge timestamp→date. The r23:131 canonical uses `event_date` directly, which trains the responder to assume that column shape; a complement using `event_time` would close the schema-adaptation gap.
 
-**Q4 avg: 5.00**
+### Single-pick recommendation
+If only one of the above is acted on: **FIX-A is the highest-value pick** — it is a verified docs-grounded defect (DataSize unit requirement) on the high-traffic Iceberg-maintenance axis, and the fix is a 2-line inoculation card. FIX-B is a useful defensive add but the Q2 defect alone is small-volume / arguably a transcription slip. FIX-C and FIX-D are quality polish; defer unless the same defects recur.
+
+### NO-OP alternative
+A defensible NO-OP if FIX-A would risk churn: Q2 + Q4 defects are each transcription-level (paren miscount, byte-value computed instead of unit-suffix-string copied) rather than fundamental gaps in r07/r17. If the next 1-2 iterations show recurrence, escalate to FIX-A immediately.
 
 ---
 
-## Overall
+## Topic-rubric updates (no changes this iter)
 
-| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|---|
-| Q1 | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 | 5 | 5 | 5 | 5 | 5.00 |
-
-**Overall average: 5.00 / 5**
-**Threshold**: 3.5
-**Verdict**: **PASS (STRONG)** — margin +1.50 above floor
-
----
-
-## FIX-A verdict (Q1 re-probe)
-
-**CLOSED.** The iter664-Q3 dialect leak is fully sealed. Q1 is clean across all four leak vectors (0=Sunday convention, dayname() non-existence, CAST-VARCHAR-as-name confusion, MAX(COUNT(*)) nested-aggregate). The iter665 EDIT plan in `state.json` (broadened r07:~1343 canonical with TRUTH 1/2/3 + DO-NOT-WRITE table + worked busiest-weekday-per-user pattern, plus r23:906 dual-destination cross-ref and r07:999 keyword broadening) achieved its intended effect: the responder lands cleanly on the right pattern regardless of which keyword route it hits.
-
-No regressions in Q2-Q4 controls (two-level macro-AVG, multi-key anti-join, conditional-share with cast). All canonical iter534-iter664 locks held — preserved-in-place reconcile pattern worked.
-
-## Flagged weak answers
-
-None. All four answers are drop-in valid Trino 467 SQL against the stated schemas.
-
-## Teacher feedback for iter666
-
-**Recommendation: revert iter666 to DEFAULT NO-OP / durability-breadth.**
-
-Rationale:
-- FIX-A re-probe CLOSED; no follow-up FIX needed on Q1 family.
-- All three control patterns (two-level macro-AVG, multi-key anti-join, conditional-share) held perfectly with no new dialect leaks.
-- The lock inventory (r07:1347 broadened, r23:906 dual-destination, r07:999 PIN preserved + broadened) is internally consistent. Federation HARD LOCK (r22) untouched as required.
-- Margin is comfortable (5.00 vs 3.5 threshold), but margin alone does not justify new edits — the right move is durability probes across already-passing topics to keep surface broad, not new content.
-
-Suggested iter666 probe surface (NO RESOURCE EDITS, pure NO-OP probing):
-- Federation (r22, threshold 4.5) — any safe angle that does NOT risk the HARD LOCK; e.g., when-to-federate-vs-ingest decision criteria, predicate pushdown verification with EXPLAIN.
-- Iceberg maintenance breadth (compaction trigger heuristics, snapshot expiry windows, orphan-file cleanup ordering) — passed but only durable on a few angles.
-- Multi-tenant analytics row-filter pattern variants — passed at scale but worth a freshness probe.
-- One adversarial dialect re-probe pulled from the iter5xx-iter664 leak history (rotating; not a new fix).
-
-If iter666 must edit, the only justified target would be a NEW failure surface not yet probed — none is visible from iter665 evidence.
+- **Iceberg table maintenance** (current 4.4575 PASSED): Q4 3.875 reinforces PASSED status; iter666 r12 fix verified on engine-dialect axis. DataSize unit-suffix defect is a value-format polish item, not a topic regression.
+- **Analytical query patterns on Iceberg+Trino** (current 4.3567 PASSED): Q1 4.0 + Q2 2.875 + Q3 3.875 mixed. Q2 parse error and Q1 ROWS-frame mis-explanation are noted but topic remains PASSED. No re-probe required unless recurrent.
+- **Multi-tenant analytics** (current 4.4593 PASSED): Q3 3.875 — schema-adaptation gap is minor; topic remains PASSED.
