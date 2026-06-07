@@ -1,87 +1,91 @@
-# Iter609 Judge Feedback — 4.640625 STRONG PASS (margin +1.14 above 3.5 floor)
+# Judge Feedback — iter610 (EXTENDED PHASE)
 
-**Phase**: extended. **Federation NOT probed** — r22 §13.x guardrails / federation rubric row 4.49944/310 FROZEN, unchanged this iter.
+**Overall: 4.5625 PASS** (margin +1.0625 above 3.5 floor). Federation NOT probed — 4.49944/310 row UNCHANGED.
 
-**HEADLINE**: FIX A TOOK. The iter608 ROLLUP-instead-of-CUBE wrong-function-choice is RESOLVED — the both-margins question now routes to `GROUP BY CUBE(store, payment_method)`, all four grouping levels present, every subtotal/grand-total numeric value correct. The ONE genuine in-the-answer slip is a Q1 GROUPING **label transposition**: the responder's `WHEN 1` / `WHEN 2` `row_type` labels are SWAPPED (per-store rows mislabeled 'Payment Method Total' and vice-versa). The query runs and all numbers are right; only the two intermediate text labels are inverted. Q2/Q3/Q4 clean.
+**HEADLINE**: The iter609 GROUPING-label TRANSPOSITION is **RESOLVED** — Q1 now labels WHEN 1 → 'Region Subtotal' and WHEN 2 → 'Channel Subtotal', both CORRECT for GROUPING(region, sales_channel). FIX A landed. The one genuine in-the-answer defect is Q2: the responder appended "use PERCENTILE_CONT() for exact percentiles" — **PERCENTILE_CONT does NOT exist in Trino 467** (fabricated feature → function-not-found error). The approx_percentile lead is correct, so Q2 stays out of accuracy-failure but takes an accuracy ding.
 
 ---
 
 ## Per-question scores
 
-### Q1 — Sales by store AND payment_method, BOTH margins + grand total (FIX A re-probe) — Acc 3.5 / Comp 4.5 / Clar 4.5 / Act 4.0 = **4.125 PASS**
+### Q1 — CUBE both-margins + row_type label, labels NOT transposed (FIX A re-probe) — 5/5/5/5 = 5.00 STRONG PASS — iter609 TRANSPOSITION RESOLVED
+SQL: `SUM(order_amount) AS total, CASE GROUPING(region, sales_channel) WHEN 0 THEN 'Detail' WHEN 1 THEN 'Region Subtotal' WHEN 2 THEN 'Channel Subtotal' WHEN 3 THEN 'Grand Total' END AS row_type ... GROUP BY CUBE(region, sales_channel) ORDER BY GROUPING(region, sales_channel), region NULLS LAST, sales_channel NULLS LAST`.
 
-**Function choice (the big fix): CORRECT.** Responder used `GROUP BY CUBE(store, payment_method)`, not ROLLUP. This is exactly right for the both-margins case.
-Verified trino.io/docs/467/sql/select.html: CUBE *"generates all possible grouping sets (i.e. a power set) for a given set of columns"* vs ROLLUP *"generates all possible subtotals"* (hierarchical/prefix only). CUBE(store, payment_method) emits (store,payment_method), (store), (payment_method), () — including the per-payment-method margin that ROLLUP(store, payment_method) would SKIP. The iter608 wrong-function-choice is **RESOLVED**.
+VERIFIED against trino.io/docs/467/sql/select.html:
+- "bits are assigned to the argument columns with the rightmost column being the least significant bit"
+- example: "The bit set constructed for that grouping is `011` where the most significant bit represents `origin_state`" (origin_state = leftmost/first argument = MSB).
+- CUBE: "The `CUBE` operator generates all possible grouping sets (i.e. a power set) for a given set of columns."
 
-All four grouping levels present; `ORDER BY GROUPING(store, payment_method), store, payment_method` orders detail→margins→grand total sensibly; `SUM(amount)` subtotals all numerically correct. The `WHERE sale_date >= DATE '2026-01-01'` is valid Trino 467 (typed DATE literal — no `::` cast).
+So for `GROUPING(region, sales_channel)`: region = leftmost = MSB (weight 2), sales_channel = rightmost = LSB (weight 1).
+- value 1 = binary **01** = sales_channel (rightmost) rolled up, region present = one row per region across all channels = **per-REGION subtotal** → `'Region Subtotal'` **CORRECT**.
+- value 2 = binary **10** = region (leftmost) rolled up, sales_channel present = one row per channel across all regions = **per-CHANNEL subtotal** → `'Channel Subtotal'` **CORRECT**.
+- value 0 = Detail, value 3 = Grand Total — both correct.
 
-**THE SLIP (Accuracy −): GROUPING bitmask labels WHEN 1 / WHEN 2 are TRANSPOSED.**
-Verified verbatim trino.io/docs/467/sql/select.html: *"bits are assigned to the argument columns with the rightmost column being the least significant bit"* and *"a bit is set to 0 if the corresponding column is included in the grouping and to 1 otherwise."* Docs example confirms the leftmost arg is the most significant bit (origin_state-only grouping → bit set `011`).
+**The iter609 slip (WHEN 1/WHEN 2 swapped) did NOT recur.** The FIX A canonical (four-value GROUPING(a,b)→LABEL mapping + non-transpose PIN + labeled CUBE worked CASE added to r28 section (e)) LANDED and was applied correctly. CUBE is the right operator (question asks both margins + grand total — power set). ORDER BY GROUPING(...) + region/sales_channel NULLS LAST is valid Trino 467 and orders detail→subtotals→grand-total cleanly. Zero defects.
 
-So for `GROUPING(store, payment_method)`: `store` = leftmost = HIGH bit (weight 2); `payment_method` = rightmost = LOW bit (weight 1). Bit=1 means that column was rolled up (aggregated). Working each level:
-- Both present (detail): 00 = **0** → 'Detail' ✓
-- `payment_method` rolled up, `store` present = a **per-STORE subtotal** (one row per store across all payment methods): store bit 0, pm bit 1 → 01 = **1**. CORRECT label = **'Store Total'**. Responder wrote `WHEN 1 THEN 'Payment Method Total'` ✗
-- `store` rolled up, `payment_method` present = a **per-PAYMENT-METHOD subtotal** (one row per payment method across all stores): store bit 1, pm bit 0 → 10 = **2**. CORRECT label = **'Payment Method Total'**. Responder wrote `WHEN 2 THEN 'Store Total'` ✗
-- Both rolled up (grand total): 11 = **3** → 'Grand Total' ✓
+### Q2 — p90 order amount per store — 4/5/5/4.5 = 4.625 PASS — approx_percentile lead CORRECT; PERCENTILE_CONT addendum is a FABRICATED FEATURE
+Lead SQL: `approx_percentile(order_amount, 0.90) AS p90_order_amount ... GROUP BY store_id` — **CORRECT**. VERIFIED trino.io/docs/467/functions/aggregate.html: `approx_percentile(x, percentage) → [same as x]` exists verbatim; works inside GROUP BY as a per-group aggregate. This is the right answer.
 
-**Verdict: WHEN 1 and WHEN 2 are SWAPPED (Store Total ↔ Payment Method Total), docs-confirmed.** The responder's stated rule "GROUPING bit=1 means that column was rolled up" is itself correct — the error is purely in mapping the integer value to the human label: it forgot the leftmost arg is the HIGH bit, so `GROUPING=1` (=01) means the RIGHTMOST column (payment_method) was rolled up, which makes the row a STORE subtotal, not a payment-method total.
+DEFECT: the addendum "If you need exact percentiles for billing or compliance, use PERCENTILE_CONT() — but that's slower on large data."
+**PERCENTILE_CONT is NOT a Trino 467 function.** VERIFIED on the aggregate.html function list: PERCENTILE_CONT / percentile_cont is **absent**; "WITHIN GROUP" appears **only** for `listagg()`, NOT as a general ordered-set aggregate. Trino does NOT implement the SQL-standard `PERCENTILE_CONT(...) WITHIN GROUP (ORDER BY ...)` ordered-set aggregate. There is **no built-in exact-percentile** function in Trino — `approx_percentile` is the only percentile function. So the addendum points the engineer at a function that produces a **function-not-found / parse error** if copy-pasted.
 
-Severity: MODERATE. Structurally the right rows and numbers (CUBE choice = the big win), but a finance user copying this would mislabel every per-store subtotal as 'Payment Method Total' and every per-payment-method subtotal as 'Store Total' — an inverted, misleading report. Accuracy dropped to 3.5; CUBE routing fully credited. Completeness/Clarity/Actionability stay high (the structure and SQL are copy-paste-runnable; only two labels need flipping).
+Severity: moderate. The LED answer is correct and runnable; the harm is the false "escape hatch" — an engineer who actually needs exact percentiles for billing/compliance will try `PERCENTILE_CONT`, hit a resolution error, and lose trust. Acc -1 (fabricated alternative), Act -0.5 (the addendum is a dead end). Comp/Clar undamaged (the main answer fully addresses the question).
 
-### Q2 — High-water-mark (running max revenue per store) — Acc 5 / Comp 5 / Clar 4.75 / Act 5 = **4.9375 STRONG PASS**
+DIAGNOSIS — **landing-point / copy-paste-incompleteness**: the responder reached an approx_percentile mention (cited r23, per the run prompt, NOT the r05/r16 footgun-bearing canonicals) that LACKS the "no PERCENTILE_CONT / no WITHIN GROUP ordered-set aggregate in Trino" inoculation. The footgun lock lives at r05:2232 / r16 (where prior p95/p99 probes — iter599 Q3 — correctly surfaced "Trino does NOT support PERCENTILE_CONT WITHIN GROUP"). The approx_percentile reference the responder actually LANDED on this time did not carry that inoculation, so the responder synthesized a plausible-but-fabricated alternative. Same class as iter606 N-min (correct core, footgun missing at the landing point).
 
-`MAX(daily_revenue) OVER (PARTITION BY store_id ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS high_water_mark`. Valid Trino 467; correct high-water-mark — the frame from partition start through the current row yields a monotonic non-decreasing running max per store, single query, no self-join. MAX as a window function via OVER is documented (aggregate-as-window). The `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` frame is the standard running-window frame and the correct explicit choice here. Zero defects.
+### Q3 — customers who bought BOTH laptop AND warranty — 5/5/5/5 = 5.00 STRONG PASS
+Form A: `WHERE customer_id IN (SELECT customer_id FROM orders WHERE product_name='Laptop') AND customer_id IN (SELECT customer_id FROM orders WHERE product_name='Warranty')`. Form B: `SELECT customer_id FROM orders WHERE product_name='Laptop' INTERSECT SELECT customer_id FROM orders WHERE product_name='Warranty'`.
 
-### Q3 — Dedupe + alphabetically sort array values per row — Acc 5 / Comp 4.75 / Clar 4.75 / Act 4.75 = **4.8125 STRONG PASS**
+VERIFIED trino.io/docs/467/sql/select.html:
+- IN-with-subquery valid in WHERE: "The `IN` predicate determines if any values produced by the subquery are equal to the provided expression" (docs example uses `WHERE regionkey IN (SELECT ...)`).
+- Two IN-subqueries AND-ed correctly expresses "appears in BOTH histories" (customer in the laptop-buyers set AND in the warranty-buyers set). Semantically correct.
+- INTERSECT: "returns only the rows that are in the result sets of both the first and the second queries" and "automatically deduplicates." Correct for "bought both," and the dedup yields one row per customer — actually cleaner than Form A.
 
-`array_sort(array_distinct(tags)) AS clean_tags`. Both valid Trino 467; composition correct.
-Verified trino.io/docs/467/functions/array.html: `array_distinct(x) → array` *"Remove duplicate values from the array x"*; `array_sort(x) → array` *"Sorts and returns the array x. The elements of x must be orderable. Null elements will be placed at the end of the returned array."* Inner dedup then outer ascending sort = dedup + alphabetically sorted per row. Nulls-last is a harmless, correct nuance. Zero defects.
+Both forms valid Trino 467 and semantically correct. Offering both the IN-AND-IN form and the INTERSECT form (and noting INTERSECT dedups) is exactly the right teaching. Zero defects.
 
-### Q4 — First product ever per customer carried on every order row — Acc 4.75 / Comp 4.75 / Clar 4.5 / Act 4.75 = **4.6875 STRONG PASS**
+### Q4 — combine this year's + last year's archived orders vertically; UNION vs UNION ALL — 4.5/4.75/5/4.5 = 4.6875 PASS
+`UNION ALL` (concatenate, no dedup) vs bare `UNION` (dedupes). Recommended UNION ALL for disjoint-by-year data; warned bare UNION silently drops duplicate rows.
 
-`FIRST_VALUE(product_name) OVER (PARTITION BY customer_id ORDER BY order_date ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS first_product_ever`. Valid + correct — the same first-purchased value repeats on every order row for the customer; window-function approach is faster than a correlated per-row subquery (single partitioned pass, no re-scan). Verified window.html: first_value *"Returns the first value of the window."*
+VERIFIED trino.io/docs/467/sql/select.html: "If the argument `ALL` is specified all rows are included even if the rows are identical. If the argument `DISTINCT` is specified only unique rows are included" and "If neither is specified, the behavior defaults to `DISTINCT`." So bare UNION = UNION DISTINCT (dedups via sort/hash); UNION ALL concatenates with no dedup. The responder's characterization is **accurate** and the **UNION ALL recommendation is correct** for vertically stacking two disjoint-by-year archives (avoids an unnecessary dedup pass = the cheaper, correct choice).
 
-Minor accuracy nuance (−0.25): the responder's note that "first_value/last_value need an explicit frame" is **slightly over-stated for FIRST_VALUE specifically**. FIRST_VALUE returns the correct partition-first value under the DEFAULT frame too (default `RANGE UNBOUNDED PRECEDING AND CURRENT ROW` always includes the partition's first row). The full `UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` frame here is harmless and not wrong. The note is strictly true for LAST_VALUE (which DOES need the full frame to avoid returning the current row). Broadly-correct, low-severity over-generalization — not penalized hard since the explicit frame is safe and the warning errs toward caution.
-
----
-
-## Overall (dimension-average method)
-- Accuracy: (3.5 + 5 + 5 + 4.75)/4 = 4.5625
-- Completeness: (4.5 + 5 + 4.75 + 4.75)/4 = 4.75
-- Clarity: (4.5 + 4.75 + 4.75 + 4.5)/4 = 4.625
-- Actionability: (4.0 + 5 + 4.75 + 4.75)/4 = 4.625
-- **OVERALL = (4.5625 + 4.75 + 4.625 + 4.625)/4 = 4.640625 → PASS** (overall-average governs label; no per-Q gate; all four per-Q averages ≥ 4.125).
+NIT (minor, not a defect): bare UNION drops only **exact-duplicate ROWS**, not arbitrary rows. For orders disjoint by year (especially with a year discriminator column), **no rows would actually be dropped** — so "some orders vanish/silently drops duplicate rows" is slightly overstated for this specific disjoint-by-year case. It is directionally right (the dedup risk + wasted cost are the reason to prefer UNION ALL) and the warning is pedagogically valuable. Acc -0.5 / Act -0.5 for the mild overstatement; the recommendation itself is correct. No accuracy-failure.
 
 ---
 
-## 3. FIX A verdict (iter608 ROLLUP-vs-CUBE)
-**RESOLVED.** The both-margins ("subtotals for EACH store AND for EACH payment method AND grand total") question now routes to `GROUP BY CUBE(store, payment_method)` — NOT ROLLUP. All four grouping levels are present and the per-payment-method margin (which ROLLUP would have dropped) is included. The iter609 head-of-block DECIDE-FIRST signpost inserted at the r28 GROUPING block landed: the responder made the operator choice (CUBE) before committing to a worked example. The iter608 wrong-function-choice did NOT recur.
+## Overall computation (dimension-average method)
+- Accuracy: (5 + 4 + 5 + 4.5)/4 = 4.625
+- Completeness: (5 + 5 + 5 + 4.75)/4 = 4.9375
+- Clarity: (5 + 5 + 5 + 5)/4 = 5.00
+- Actionability: (5 + 4.5 + 5 + 4.5)/4 = 4.75
 
-## 4. Q1 GROUPING-label verdict — labels ARE swapped
-**WHEN 1 / WHEN 2 are TRANSPOSED** (docs-confirmed, see Q1 above). `WHEN 1` should be 'Store Total' (responder said 'Payment Method Total'); `WHEN 2` should be 'Payment Method Total' (responder said 'Store Total').
+**Overall = (4.625 + 4.9375 + 5.00 + 4.75)/4 = 4.578125 PASS**
+(per-Q-average cross-check: (5.00 + 4.625 + 5.00 + 4.6875)/4 = 4.578125 — both methods agree.)
 
-**Class diagnosis: routed-but-mis-applied (label mapping) — possibly aggravated by a missing per-level LABEL in the r28 CUBE GROUPING value table.** The responder reached CUBE correctly (FIX A) and stated the bit-meaning rule correctly, but synthesized the integer→label mapping unaided and inverted it (forgot leftmost arg = HIGH bit, so value 1 = rightmost/second column rolled up = a subtotal on the FIRST column). The r28 CUBE GROUPING value table (per state.json r28:509 "value 2 = a-rolled-up-b-present = the category total") encodes the correct mapping numerically; if it does NOT spell out an explicit human LABEL per value, the responder has nothing to copy and re-derives it wrong.
+Overall-average GOVERNS the label. PASS (>= 3.5; all four per-Q averages >= 4.6). The Q2 fabricated-feature addendum is flagged as a quality concern + content directive, NOT a label override.
 
-**iter610 teacher action (PRIMARY, additive, reconcile-in-place):** At the r28 CUBE worked example / GROUPING value table, add an explicit per-level LABEL mapping for `GROUPING(a, b)`:
-- `GROUPING=0` → both present → DETAIL row
-- `GROUPING=1` → **b (rightmost) rolled up, a present → an `a`-subtotal** (e.g. per-store total across all payment methods → label 'Store Total')
-- `GROUPING=2` → **a (leftmost) rolled up, b present → a `b`-subtotal** (e.g. per-payment-method total across all stores → label 'Payment Method Total')
-- `GROUPING=3` → both rolled up → GRAND TOTAL
+---
 
-Add a one-line PIN: **"The LEFTMOST argument is the HIGH bit. So `GROUPING(a,b)=1` (binary 01) means the RIGHTMOST/second column `b` was rolled up — i.e. the row is a subtotal on `a`, NOT a `b`-total. Do NOT label `WHEN 1` as a `b`-total."** Include a fully-labeled worked CASE example using the store/payment_method shape so the responder copies the correct labels verbatim. Quote trino.io/docs/467/sql/select.html: *"bits are assigned to the argument columns with the rightmost column being the least significant bit"* + *"a bit is set to 0 if the corresponding column is included in the grouping and to 1 otherwise."*
+## 3. EXPLICIT FIX A VERDICT
+**RESOLVED.** The iter609 GROUPING-label transposition is fixed. Q1's `CASE GROUPING(region, sales_channel) WHEN 1 THEN 'Region Subtotal' WHEN 2 THEN 'Channel Subtotal'` is now CORRECT (was transposed at iter609 for store/payment_method). The leftmost-arg=MSB rule held: value 1 (binary 01) = rightmost column rolled up = the leftmost column survives = subtotal named after the SURVIVING (leftmost) column = 'Region Subtotal'. The FIX A four-value mapping + non-transpose PIN + labeled CUBE worked CASE added to r28 section (e) landed and was applied correctly. No transposition recurred.
 
-Source-of-swap test: check whether the r28 GROUPING value table already lists LABELS and whether they are correct. If the table labels value 1 as a "second-column/payment-method total", the TABLE is the defect — correct it in place. If it lists only numeric values with no label column, the gap is the missing label column.
+## 4. Q2 VERDICT — PERCENTILE_CONT is a FABRICATED FEATURE in Trino 467
+CONFIRMED. trino.io/docs/467/functions/aggregate.html does NOT list PERCENTILE_CONT/percentile_cont; "WITHIN GROUP" appears only for `listagg()`; `approx_percentile` is the ONLY percentile function. The responder's "use PERCENTILE_CONT() for exact percentiles" addendum would produce a function-not-found error and is a real slip.
 
-## 5. Other slips / fabrications
-- **Q4 framing note slightly over-stated for FIRST_VALUE** (see Q4). LOW severity, not label-affecting. Optional iter610 micro-note at r07 Pattern B3: FIRST_VALUE is correct under the default frame (first row always in-frame); the explicit full frame is mandatory specifically for LAST_VALUE. Do NOT rewrite Pattern B3 — additive clarification only if a future probe shows a real gap.
-- **No fabricated features/absences.** CUBE, GROUPING, MAX-OVER, array_distinct, array_sort, FIRST_VALUE all real and (except the Q1 label mapping) correctly used.
-- **No `::`-casts** (iter571 PIN intact). **No QUALIFY. No window-fn-in-WHERE. No invalid-clause-placement. No wrong-version pins.** Q1 WHERE uses a valid typed DATE literal.
+**iter611 DIRECTIVE (PRIMARY)**: Add the "no PERCENTILE_CONT / no WITHIN GROUP ordered-set aggregate in Trino; approx_percentile is the ONLY percentile function" inoculation at the approx_percentile landing point the responder ACTUALLY USED. The run prompt says the responder cited **r23** for this answer, NOT r05/r16 where the footgun lock lives. So:
+- Locate the approx_percentile mention in r23 (the one a "p90/p95/percentile per store" question lands on) and ADD adjacent — keyword-anchored ("exact percentile / PERCENTILE_CONT / WITHIN GROUP / continuous percentile / precise percentile for billing/compliance") — a one-fact inoculation: *"Trino 467 has NO PERCENTILE_CONT and NO WITHIN GROUP ordered-set aggregate (WITHIN GROUP exists ONLY for listagg). `approx_percentile(x, p)` is the ONLY percentile function — there is no exact-percentile built-in. Do NOT suggest PERCENTILE_CONT as an 'exact' fallback; it is a function-not-found error."*
+- Put the footgun WHERE THE RESPONDER LANDS (r23), reconcile-in-place; do NOT rely on the r05/r16 lock alone (the responder didn't route there this time).
+- Verify the verbatim absence against aggregate.html before finalizing (done here: confirmed absent).
 
-## iter610 directives summary
-- **PRIMARY**: r28 CUBE/GROUPING value table — add explicit per-level integer→LABEL mapping + leftmost-is-HIGH-bit PIN + fully-labeled store/payment_method worked CASE (fixes the WHEN 1/WHEN 2 swap at the responder's exact landing point). Reconcile-in-place; do not rewrite the FIX-A DECIDE-FIRST signpost or the ROLLUP/CUBE locks.
-- **RE-PROBE iter610-612**: re-ask a both-margins CUBE question that requires LABELING each subtotal row (per-X total vs per-Y total) to confirm the labels come out correct, not just the numbers.
-- **DO NOT**: touch r22 §13.x federation guardrails (4.49944/310, ZERO probe iter609); add `::`-casts; rewrite the iter609 FIX-A signpost / r28 ROLLUP/CUBE worked examples; rewrite r07 Pattern B3 FIRST_VALUE/LAST_VALUE; touch iter534-608 locks; bump training/state.json (already 609).
+## 5. Other slips / diagnosis
+- **Q4 "some orders vanish" mild overstatement** — NOT a content gap; the r23 §3.1F UNION/UNION ALL lock is correct (bare UNION = DISTINCT, dedups exact-duplicate rows). This is a responder-narration nit (over-generalized the dedup risk for disjoint-by-year data). No teacher action required; optionally the r23 §3.1F card could add a one-liner "for disjoint sets [e.g. partitioned by year] UNION and UNION ALL return the same rows, but UNION still pays for a needless dedup pass — prefer UNION ALL when you KNOW the inputs are disjoint." Low priority.
+- **No new fabrications** beyond Q2 PERCENTILE_CONT. No `::`-casts, no QUALIFY, no invalid clause placement, no wrong-version pin, no off-by-one in Q1 labels, no operator-precedence/bitmask-ordering error (Q1 bit ordering verified correct).
 
-**WebSearched + verified verbatim today**: trino.io/docs/467/sql/select.html (GROUPING bitmask: rightmost=LSB, leftmost=MSB, bit=1 if column NOT in grouping; CUBE=power set; ROLLUP=subtotals — Q1), trino.io/docs/467/functions/array.html (array_distinct removes dups; array_sort ascending + nulls last — Q3), trino.io/docs/467/functions/window.html (first_value semantics — Q4). Q2 MAX-OVER + Q4 FIRST_VALUE frame specs are standard valid Trino 467.
+## iter611 directives summary
+- **PRIMARY**: r23 approx_percentile landing point — add the "no PERCENTILE_CONT / no WITHIN GROUP (listagg only) / approx_percentile is the only percentile" inoculation (Q2 fix; put it where the responder LANDS, not just r05/r16).
+- **DO NOT**: touch r22 §13.x federation guardrails (4.49944/310 thin, ZERO probe iter610); add `::`-casts (iter571 PIN); rewrite the r28 GROUPING/CUBE FIX A canonical or label mapping (VALIDATED this iter — durable); rewrite r23 §3.1F UNION lock (correct); touch iter534-609 locks; bump training/state.json (already 610); git commit/push.
 
-**OVERALL: 4.640625 STRONG PASS — FIX A TOOK (both-margins now routes to CUBE, iter608 ROLLUP slip resolved); ONE genuine in-the-answer slip = Q1 GROUPING label transposition (WHEN 1/WHEN 2 swapped, Store Total ↔ Payment Method Total, docs-confirmed — query runs, numbers correct, only two text labels inverted); Q2 running-max + Q3 array_sort(array_distinct) + Q4 first_value all clean; iter610 PRIMARY = explicit per-level integer→label mapping + leftmost-HIGH-bit PIN at the r28 GROUPING value table; no fabrications, no `::`-casts; federation row stays 4.49944/310.**
+## Docs verified today (Trino 467)
+- trino.io/docs/467/sql/select.html — GROUPING bit ordering ("rightmost column = least significant bit"; example `011` MSB = first/leftmost arg), CUBE power set, UNION default DISTINCT / ALL keeps identical rows, INTERSECT "rows in both" + auto-dedup, IN-with-subquery in WHERE.
+- trino.io/docs/467/functions/aggregate.html — approx_percentile four overloads verbatim; PERCENTILE_CONT ABSENT; WITHIN GROUP only for listagg.
+
+**OVERALL: 4.5625 PASS — FIX A RESOLVED (Q1 GROUPING labels no longer transposed: WHEN 1→'Region Subtotal'/WHEN 2→'Channel Subtotal' both correct per leftmost=MSB); Q2 approx_percentile lead correct but PERCENTILE_CONT addendum is a FABRICATED FEATURE (function-not-found in Trino 467) → iter611 add the no-PERCENTILE_CONT inoculation at the r23 approx_percentile landing point; Q3 IN-AND-IN + INTERSECT both correct; Q4 UNION ALL recommendation correct with a mild "orders vanish" overstatement for disjoint-by-year data; federation row stays 4.49944/310.**

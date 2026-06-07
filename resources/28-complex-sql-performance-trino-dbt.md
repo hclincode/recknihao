@@ -535,6 +535,42 @@ For 4 columns: `ROLLUP` emits **5** groupings (0, 1, 3, 7, 15); `CUBE` emits **1
 
 If a migrated Oracle/Snowflake query labels rows for both "region total" AND "category total" (independent margins), the source must be using `CUBE` or an explicit `GROUPING SETS`, not `ROLLUP`. Re-read the source SQL — translating a CUBE-shaped query to ROLLUP silently drops the b-only subtotal rows.
 
+#### CANONICAL — the four-value `GROUPING(a, b)` integer→LABEL mapping (use this for CUBE; copy the labels EXACTLY)
+
+When you label a CUBE (or full two-dimension GROUPING SETS) result, you must handle **all four** values 0/1/2/3. The ROLLUP worked example in (c) above only shows `WHEN 0`/`WHEN 1`/`WHEN 3` because ROLLUP never emits 2 — so do NOT copy it for a CUBE. Use this mapping instead:
+
+| `GROUPING(a, b)` | Binary | Which column rolled up | What the row is |
+|---|---|---|---|
+| **0** | `00` | neither (both present) | **DETAIL** row — one per (a, b) |
+| **1** | `01` | **b** rolled up (rightmost / LSB), **a** present | **per-A SUBTOTAL** — one row per `a`, across all `b` |
+| **2** | `10` | **a** rolled up (leftmost / MSB), **b** present | **per-B SUBTOTAL** — one row per `b`, across all `a` |
+| **3** | `11` | both rolled up | **GRAND TOTAL** — single row |
+
+> **PIN (do not transpose these labels).** The **LEFTMOST argument to `GROUPING()` is the HIGH (most-significant) bit.** So `GROUPING(a, b) = 1` means the **RIGHTMOST** column (`b`) was rolled up → the row is a **per-A subtotal**, NOT a per-B subtotal. Conversely `GROUPING(a, b) = 2` means the LEFTMOST column (`a`) was rolled up → a **per-B subtotal**. Do NOT transpose the labels. (Mnemonic: value `1` keeps the column with the **higher** bit-weight present, i.e. the leftmost / `a`; value `2` keeps the lower-weight rightmost / `b` present.)
+
+**Fully-labeled worked CASE for `CUBE(store, payment_method)`** — copy these labels verbatim:
+
+```sql
+-- CUBE over two dimensions; all four GROUPING values 0/1/2/3 are emitted.
+SELECT
+  store,
+  payment_method,
+  SUM(amount)                                AS total,
+  CASE GROUPING(store, payment_method)
+    WHEN 0 THEN 'Detail'              -- 00 — both present
+    WHEN 1 THEN 'Store Total'         -- 01 — payment_method (rightmost) rolled up; store present => per-STORE subtotal
+    WHEN 2 THEN 'Payment Method Total'-- 10 — store (leftmost) rolled up; payment_method present => per-PAYMENT-METHOD subtotal
+    WHEN 3 THEN 'Grand Total'         -- 11 — both rolled up
+  END                                        AS row_type
+FROM analytics.fct_orders
+WHERE event_date >= DATE '2026-06-01'
+  AND event_date <  DATE '2026-07-01'
+GROUP BY CUBE(store, payment_method)         -- emits (store,payment_method),(store),(payment_method),()
+ORDER BY GROUPING(store, payment_method), store NULLS LAST, payment_method NULLS LAST;
+```
+
+Note carefully: **`WHEN 1 THEN 'Store Total'`** (because `payment_method`, the rightmost arg, is the one rolled up — so the surviving dimension is `store`), and **`WHEN 2 THEN 'Payment Method Total'`** (because `store`, the leftmost arg, is rolled up — so the surviving dimension is `payment_method`). The common slip is to write `WHEN 1 THEN 'Payment Method Total'` / `WHEN 2 THEN 'Store Total'` — that is the transposed (WRONG) labeling. The row that survives is named after the column that is STILL PRESENT (bit = 0), not the one rolled up.
+
 ### (f) The `GROUPING_ID()` shortcut (when you want decimal directly)
 
 Trino exposes `GROUPING_ID(a, b, ...)` as an alias for the same bitmask integer that `GROUPING(a, b, ...)` returns. Use whichever reads better; the values are identical:
