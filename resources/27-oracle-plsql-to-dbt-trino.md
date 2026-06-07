@@ -932,13 +932,41 @@ Sources (verified June 2026): [trino.io/docs/current/functions/datetime.html](ht
 | split a delimited string and grab the N-th piece (e.g. subdomain from `acme.ourapp.com`) | `split_part(s, delimiter, n)` — `split_part(url, '.', 1)` → `'acme'` | 1-indexed; signature `split_part(string, delimiter, index)`. **Verified nuance: if `index` is out of range, Trino returns `NULL` — NOT an empty string** (trino.io string-functions; Trino #14460). Do NOT write "returns empty string if the index is missing" — that's a base-training myth. For full URLs (`https://acme.ourapp.com/x`) use `regexp_extract(url, '([a-z0-9-]+)\.ourapp\.com', 1)` instead. |
 | `LENGTH(s)` | `length(s)` | Identical. |
 | `LPAD(s, n, pad)` / `RPAD(s, n, pad)` | `lpad(s, n, pad)` / `rpad(s, n, pad)` | **Trino signature is `lpad(varchar, bigint, varchar) -> varchar`** (verbatim per [trino.io/docs/current/functions/string.html](https://trino.io/docs/current/functions/string.html)) — the first argument MUST be a VARCHAR. **UNLIKE Oracle `LPAD`, Trino does NOT implicitly coerce a NUMBER to a string.** For a numeric column (BIGINT / INTEGER / DECIMAL), you MUST `CAST` first: `lpad(CAST(account_id AS VARCHAR), 10, '0')` — same root cause as the `\|\|` / `CONCAT` no-numeric-coercion rule one row below (see also §7A.3.1). **DO-NOT-WRITE:** `lpad(<numeric_col>, n, '0')` directly on a BIGINT/INTEGER/DECIMAL column raises `Unexpected parameters (bigint, integer, varchar(1)) for function lpad. Expected: lpad(varchar, bigint, varchar)`. Keyword anchors: zero-pad number Trino, lpad numeric column, pad account number, lpad cast varchar, rpad numeric. |
-| `LTRIM(s)` / `RTRIM(s)` / `TRIM(s)` | `ltrim(s)` / `rtrim(s)` / `trim(s)` | Identical. |
+| `LTRIM(s)` / `RTRIM(s)` / `TRIM(s)` | `ltrim(s)` / `rtrim(s)` / `trim(s)` | Identical for the **whitespace** form. **Trino `trim` ALSO has a char-set form** — `trim([LEADING\|TRAILING\|BOTH] [chars] FROM source)` — for stripping a SPECIFIC character (e.g. leading zeros `'00042'`->`'42'`), not just whitespace. See the **§4.3-STRIP-ZEROS — strip leading/trailing characters (not whitespace)** block immediately below the table. |
 | ``a || b`` (concatenation) | `a \|\| b` OR `concat(a, b)` | Same operator. **BUT two big differences**: (1) Oracle treats `NULL \|\| 'x'` as `'x'` (quirk); Trino returns `NULL` (standard) — wrap in `COALESCE`. (2) **Oracle implicitly coerces numbers/dates to strings inside `\|\|`; Trino does NOT** — `CONCAT` and `\|\|` both require all-VARCHAR args, so `CAST(year_int AS VARCHAR)` or use `format('FQ-%d', year_int)`. See §7A.3.1 for the canonical fix. |
 | `UPPER(s)` / `LOWER(s)` / `INITCAP(s)` | `upper(s)` / `lower(s)` / **NO `initcap` in Trino 467** — use the `regexp_replace` lambda idiom below. | `upper`/`lower` port 1:1. **Trino has NO `initcap` / title-case / proper-case built-in** (unlike Oracle/Postgres). See the **§4.3-STR-FAMILY INITCAP / title-case** block immediately below for the verified one-call idiom. |
 | `REPLACE(s, from, to)` | `replace(s, from, to)` | Identical. |
 | `TRANSLATE(s, from, to)` (Oracle: positional char-by-char substitution — replace each char in `from` with the char at the same index in `to`; chars not in `from` are copied unchanged; if `from` is longer than `to`, chars whose match index exceeds `to`'s length are DROPPED) | `translate(source, from, to) -> varchar` — **EXACT 1:1 PORT.** Same name (lowercase), same arg order, same positional-char-substitution semantics. Per [trino.io/docs/current/functions/string.html](https://trino.io/docs/current/functions/string.html): "Replaces characters found in the `from` string with corresponding characters in the `to` string." Oracle `TRANSLATE(phone, '0123456789', '##########')` → Trino `translate(phone, '0123456789', '##########')` — verbatim, no rewrite. See §4.3-STR-FAMILY immediately below for the full string-family canonical (translate / reverse / position / levenshtein_distance / concat_ws). |
 | `REGEXP_SUBSTR(s, pattern)` | `regexp_extract(s, pattern)` | Renamed. Both 1-indexed group access via 3rd arg. See §4.3A for flavor diffs. |
 | `REGEXP_REPLACE(s, pattern, repl)` | `regexp_replace(s, pattern, repl)` | Same signature. **BUT capture-group reference syntax differs** — Oracle `\1`, Trino `$1`. See §4.3A. |
+
+### 4.3-STRIP-ZEROS — LEADING CANONICAL: strip leading zeros / remove a padding character (the `trim([LEADING|TRAILING|BOTH] chars FROM s)` char-set form)
+
+**Keyword anchors (READ THIS FIRST if your question contains any of these):** strip leading zeros, remove leading zeros, trim a specific character, remove padding zeros, strip leading/trailing characters (not whitespace), remove a padding char from a code, trim a character that is not whitespace, unpad a zero-padded code, drop leading zeros from a product code / SKU / account number.
+
+**The one fact.** `trim(LEADING '0' FROM code)` removes leading `'0'` characters and **PRESERVES the string** — it is **alphanumeric-safe** (does NOT reinterpret the identifier as a number). Trino 467's `trim` is NOT whitespace-only: it supports `trim([LEADING | TRAILING | BOTH] [chars] FROM source)`, so you can strip ANY specific character, not just spaces. Verified at [trino.io/docs/467/functions/string.html](https://trino.io/docs/current/functions/string.html) on 2026-06-07.
+
+**Docs quote (verbatim).** The Trino string-functions doc lists two forms of `trim`:
+- `trim(string) → varchar` — "Removes leading and trailing whitespace from `string`."
+- `trim([ [ specification ] [ string ] FROM ] source) → varchar` — "Removes any leading and/or trailing characters as specified up to and including `string` from `source`." (`specification` = `LEADING` / `TRAILING` / `BOTH`.) Docs examples: `trim('!' FROM '!foo!')` → `'foo'`; `trim(BOTH '$' FROM '$var$')` → `'var'`.
+
+**Worked examples.**
+
+```sql
+SELECT trim(LEADING '0' FROM '00042');    -- '42'   (strip leading zeros)
+SELECT trim(LEADING '0' FROM '00042A');   -- '42A'  (alphanumeric-safe: trailing 'A' kept, NOT reinterpreted as a number)
+SELECT trim(TRAILING '#' FROM 'ABC###');  -- 'ABC'  (strip a trailing padding char)
+SELECT trim(BOTH '0' FROM '00420');       -- '42'   (strip both ends)
+```
+
+**Fragility note — do NOT use the integer-cast trick on a STRING identifier.** `CAST(CAST(code AS integer) AS varchar)` strips leading zeros for **purely-numeric** codes (`'00042'` -> `'42'`) BUT is FRAGILE: it **errors** on alphanumeric codes (`'00042A'`, `'SKU-042'` → cast error `Cannot cast '00042A' to integer`) and it **reinterprets the identifier as a number** (`'00000'` -> `'0'`, not the empty string `''`). For a string identifier — product code, SKU, account number — prefer `trim(LEADING '0' FROM code)`, which never errors and never re-types your identifier.
+
+**DO-NOT-WRITE.**
+
+| DO NOT write | Why it's wrong | Correct |
+|---|---|---|
+| `CAST(CAST(product_code AS integer) AS varchar)` to strip leading zeros from a string identifier that may contain non-numeric chars | **Cast error** on alphanumeric codes (`'00042A'` → `Cannot cast '00042A' to integer`); also reinterprets the value as a number (`'00000'` collapses to `'0'`, not `''`). | `trim(LEADING '0' FROM product_code)` — string-preserving, alphanumeric-safe, never errors. |
+| "Trino `trim` only removes whitespace; there's no way to strip a specific char without `regexp_replace`" | **FALSE.** `trim([LEADING\|TRAILING\|BOTH] '0' FROM s)` strips a specific character set directly. Reach for `regexp_replace(s, '^0+', '')` only if you need a multi-char pattern or anchoring beyond a fixed char set. | `trim(LEADING '0' FROM s)`. |
 
 ### 4.3-STR-FAMILY — LEADING CANONICAL: Trino string-function family that gets fabricated as "missing" (translate / reverse / position / levenshtein_distance / concat_ws)
 
