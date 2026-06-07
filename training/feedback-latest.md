@@ -1,143 +1,105 @@
-# Judge Feedback — Iter 605 (EXTENDED PHASE)
+# Judge Feedback — Iter 606 (EXTENDED PHASE)
 
-**Overall: 4.53125 PASS** (margin +1.031 above 3.5 floor). The overall average governs the label — PASS. **But Q1 is a HARD-LOCK `::`-cast-ban VIOLATION and a parse error as written — flagged separately below as a quality concern requiring a reactive iter606 fix.**
+**Overall: 4.84375 STRONG PASS** (margin +1.344 above 3.5 floor). FEDERATION NOT PROBED.
 
-Verified live today against trino.io/docs/467 + GitHub issue tracker. PIN: Trino 467.
-
----
-
-## Q1 — Bucket event timestamps into 5-MINUTE windows (14:00, 14:05, 14:10…)
-
-Answer: `SELECT event_ts, date_trunc('minute', event_ts) - (EXTRACT(minute FROM event_ts)::int % 5) * INTERVAL '1' MINUTE AS bucket_5min FROM events ORDER BY ...`
-
-| Dim | Score |
-|---|---|
-| Accuracy | 2.0 |
-| Completeness | 4.0 |
-| Clarity | 4.5 |
-| Actionability | 2.5 |
-| **Average** | **3.25** |
-
-**VERDICT: The LOGIC is correct, but the query FAILS TO PARSE as written because of the `::int` cast. This is a HARD-LOCK `::`-cast-ban violation.**
-
-- **`::int` is a PARSE ERROR in Trino 467 — CONFIRMED.** Trino does NOT support the PostgreSQL `::type` cast shorthand. This is an OPEN feature request: [trinodb/trino #23795 "Cast operator `::`"](https://github.com/trinodb/trino/issues/23795) — "a GitHub issue requesting support for the `x::type` cast operator as an alternative syntax for `CAST(x AS type)`… an open feature request rather than something currently documented as supported in Trino 467." The canonical form is `CAST(EXTRACT(minute FROM event_ts) AS integer)`. As written, the query never runs — that is why Accuracy and Actionability are scored LOW (an engineer who copy-pastes this gets a parse error).
-- **The cast is also UNNECESSARY.** Verified trino.io/docs/467/functions/datetime.html: `extract(field FROM x) → bigint`. `EXTRACT(minute FROM event_ts)` is ALREADY a bigint; `bigint % 5` is valid and `bigint * INTERVAL '1' MINUTE` is valid. The responder added a cast that (a) wasn't needed and (b) used the one cast form that doesn't parse. Deleting `::int` entirely fixes the query: `date_trunc('minute', event_ts) - (EXTRACT(minute FROM event_ts) % 5) * INTERVAL '1' MINUTE`.
-- **The rest of the arithmetic shape is VALID + CORRECT.** `INTERVAL '1' MINUTE * int` is real Trino 467 behavior (docs operators table omits interval×scalar multiplication, but the behavior is real — same baseline confirmed in iter604 Q3). `timestamp - interval` is documented valid (datetime.html operators table: `timestamp '...' - interval '29' hour`). `EXTRACT(minute)%5` gives the remainder (m=14→4, m=37→2), and `date_trunc('minute',ts) - remainder*INTERVAL '1' MINUTE` floors to the 5-min boundary (14:14→14:10, 14:37→14:35). 5-min floor is correct.
-- **The explanation was clear and pedagogically sound** (EXTRACT→remainder→multiply→subtract). Clarity 4.5. But clarity cannot rescue a query that doesn't run.
-
-**Diagnosis: routed-but-mis-applied / copy-paste slip.** In iter604 Q3 (15-min bucket) the responder nailed the IDENTICAL pattern with the EXPLICIT `CAST(EXTRACT(minute FROM ts) AS INT)` form. This iteration, on the 5-min reframing, it regressed to `::int`. The iter605 teacher HELD the N-min truncation canonical as a NO-OP (per the iter604 directive lean-(b), since iter604 was answered correctly with CAST). **This `::int` regression is exactly the reactive trigger that the held NO-OP was waiting for.** Because there is no findable N-min-truncation canonical at the r07 date_trunc-hour neighborhood showing the CAST form, the responder had nothing to copy and fell back to PG `::` muscle-memory.
+**HEADLINE — FIX A LANDED CLEAN.** The iter605 `::int` PG-cast slip did NOT recur. Q1 (N-minute bucketing, the exact reactive-trigger reframe) used `CAST(EXTRACT(minute FROM event_ts) AS integer)` — canonical Trino 467, no `::` anywhere. Q2 (text→numeric cast) used `CAST(amount AS DECIMAL(18,2))` — also no `::`. The iter606 inoculation took on BOTH cast-bearing questions. Q3 top-N-per-group and Q4 latest-row-per-key both used the correct ROW_NUMBER outer-wrapper idiom (subquery + outer `WHERE rn <= N` / `rn = 1`), no same-level window-in-WHERE, no QUALIFY. Zero fabrications, zero invalid syntax, zero `::`-casts across all four answers.
 
 ---
 
-## Q2 — Each product's revenue AND its percent share of the grand total, one result set
+## Per-question scores
 
-Answer: `ROUND(100.0 * revenue / SUM(revenue) OVER (), 2) AS pct_of_total`
+### Q1 — Bucket event timestamps into 10-MINUTE AND 30-MINUTE windows
+**Acc 5 / Comp 5 / Clar 5 / Act 5 = 5.00 — STRONG PASS, FIX A RESOLVED**
 
-| Dim | Score |
-|---|---|
-| Accuracy | 5.0 |
-| Completeness | 5.0 |
-| Clarity | 5.0 |
-| Actionability | 5.0 |
-| **Average** | **5.00** |
+Answer: `date_trunc('hour', event_ts) + INTERVAL '1' MINUTE * (CAST(EXTRACT(minute FROM event_ts) AS integer) / 10 * 10) AS bucket_10min` plus the 30-min twin (replace 10→30), `GROUP BY <full expr repeated>`, `ORDER BY bucket_10min`.
 
-**VERDICT: CLEAN — the responder correctly routed to the NEW iter605 SUM(x) OVER () share-of-grand-total anchor.**
+Verification (trino.io/docs/467):
+- **`::int` slip RESOLVED.** Responder emitted `CAST(EXTRACT(minute FROM event_ts) AS integer)` — NO `::` anywhere. conversion.html: only `cast(value AS type) → type` and `try_cast(...)`; "**no mention of a `::` cast shorthand operator**." The iter605 regression did NOT recur.
+- date_trunc floor synthesis is NECESSARY: datetime.html date_trunc units = "millisecond, second, minute, hour, day, week, month, quarter, year" — **no 10-min/30-min unit**. Responder correctly noted this.
+- `extract(field FROM x) → bigint` (datetime.html) — casting to integer is valid (and only strictly needed to narrow; bigint arithmetic would also work). Not an error.
+- Integer-division floor correct: math.html operators table "**Division (integer division performs truncation)**" → minute non-negative, so `37/10*10 = 30`, `59/30*30 = 30` floors to the bucket boundary. Worked floor (37→30) is correct.
+- `INTERVAL '1' MINUTE * <integer>` scalar multiplication is valid Trino 467 (matches existing r07 interval-arithmetic locks; behavior real though operators table omits it). `timestamp + interval` documented.
+- Repeating the full expr in GROUP BY (no alias ref) is **safe and correct** — avoids any alias-resolution ambiguity. Good defensive guidance.
 
-- Empty `OVER ()` = grand total over all rows. Verified trino.io/docs/467/functions/window.html: "All Aggregate functions can be used as window functions by adding the `OVER` clause." With no PARTITION BY / ORDER BY the window spans the entire result set → grand-total denominator on every row. Exactly what the question asked.
-- `100.0 * revenue / SUM(...) OVER ()` + `ROUND(..., 2)` is correct. The `100.0` (decimal literal, not integer `100`) note is ACCURATE — integer `100 * int / int` would integer-divide to 0; the `100.0` forces decimal arithmetic. This is the exact integer-division trap the iter605 teacher's new card warned about (cross-ref r23 §3).
-- This directly validates the iter605 teacher's new SUM-OVER() grand-total anchor (added as the 4th row of the r07 four-pattern CONTRAST card + a dedicated card below it). The responder landed on it first-probe. **The findability gap the teacher fixed is CLOSED.**
+Both 10-min and 30-min asked-for windows delivered. Clean, copyable, correct.
 
----
+### Q2 — SUM a text amount column as real numbers (cast text → numeric)
+**Acc 5 / Comp 5 / Clar 5 / Act 5 = 5.00 — STRONG PASS, CAST clean**
 
-## Q3 — Customers who have NEVER placed an order (anti-join)
+Answer: `SUM(CAST(amount AS DECIMAL(18, 2))) AS total_revenue FROM orders WHERE order_date >= DATE '2026-01-01'`.
 
-Answer: `SELECT c.customer_id, c.customer_name FROM customers c LEFT JOIN orders o ON c.customer_id=o.customer_id WHERE o.customer_id IS NULL`
+Verification:
+- **CAST used, NO `::`.** conversion.html: "Explicitly cast a value as a type. This can be used to **cast a varchar to a numeric value type and vice versa**." `CAST('1249.00' AS DECIMAL(18,2))` is valid Trino 467.
+- DECIMAL(18,2) for money — sound choice (exact, no float drift), correctly recommended over DOUBLE for currency.
+- CAST inside SUM — correct evaluation order.
+- **"SUM widens precision automatically" claim is TRUE.** Verified via trinodb/trino #20227 and PR #6591: `sum()` over `DECIMAL(p,s)` returns **`DECIMAL(38, s)`** (max precision) to reduce overflow risk. The aggregate.html page states "sum(x) → [same as input]" but the actual implementation widens to DECIMAL(38,s); responder's claim matches real behavior.
+- "Errors on bad data" note is accurate — plain CAST throws on non-numeric text; TRY_CAST as the null-on-failure alternative would have been a nice +0 nuance but its absence does not ding (the question asked for the straight cast).
 
-| Dim | Score |
-|---|---|
-| Accuracy | 5.0 |
-| Completeness | 4.5 |
-| Clarity | 5.0 |
-| Actionability | 5.0 |
-| **Average** | **4.875** |
+### Q3 — Top-3 products per category by units
+**Acc 5 / Comp 5 / Clar 5 / Act 5 = 5.00 — STRONG PASS, outer-wrapper lock holds**
 
-**VERDICT: CLEAN.** Textbook LEFT-JOIN anti-join. The LEFT JOIN keeps all customers; `WHERE o.customer_id IS NULL` retains only rows where no order matched → customers who never ordered. Correct.
+Answer: `SELECT category, product_id, product_name, units_sold FROM (SELECT ..., ROW_NUMBER() OVER (PARTITION BY category ORDER BY units_sold DESC) AS rn FROM products) ranked WHERE rn <= 3 ORDER BY category, rn`.
 
-- The "safer/faster than NOT IN with NULLs" claim is TRUE. `NOT IN (subquery)` returns zero/wrong rows if the subquery contains ANY NULL, because `x NOT IN (..., NULL, ...)` evaluates to UNKNOWN, never TRUE. The LEFT-JOIN-IS-NULL (or `NOT EXISTS`) anti-join sidesteps the three-valued-logic trap. Accurate and genuinely useful.
-- Minor (-0.5 Completeness only): could have mentioned the equivalent `NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.customer_id)` form, the other canonical anti-join (null-safe by construction). Not a defect — the LEFT-JOIN form fully answers the question.
+Verification:
+- **VALID outer-wrapper form** — ROW_NUMBER() in the subquery, `WHERE rn <= 3` in the OUTER query. NOT the invalid same-level WHERE-on-window-alias (window functions cannot appear in the WHERE of the same SELECT). iter600 lock holds.
+- `PARTITION BY category ORDER BY units_sold DESC` is exactly right for top-3-per-category: ranks restart per category, highest units = rn 1..3.
+- `rn <= 3` cuts off at 3 per group. No QUALIFY (correctly avoided — not in Trino 467). `ORDER BY category, rn` gives deterministic display order.
+- Tie nuance (ROW_NUMBER picks an arbitrary winner among boundary ties; RANK/DENSE_RANK would keep ties) not raised — but the question asked for "top 3," and ROW_NUMBER is the correct literal-3-rows reading. No ding.
 
----
+### Q4 — Most recent row per user (latest updated_at), keep all columns
+**Acc 5 / Comp 4.5 / Clar 5 / Act 4.5 = 4.75 — STRONG PASS**
 
-## Q4 — 12-row month scaffold (1..12) including zero-data months, to LEFT JOIN actuals onto
+Answer: `SELECT ... FROM (SELECT ..., ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY updated_at DESC) AS rn FROM users) recent WHERE rn = 1`, with `other_columns...` as an illustrative placeholder.
 
-Answer: `WITH month_scaffold AS (SELECT m AS month_number FROM UNNEST(sequence(1,12)) AS t(m)) SELECT m.month_number, COALESCE(actual.sales_amount,0) FROM month_scaffold m LEFT JOIN (SELECT EXTRACT(month FROM event_date) AS month_number, SUM(amount) AS sales_amount FROM events WHERE EXTRACT(year FROM event_date)=EXTRACT(year FROM current_date) GROUP BY EXTRACT(month FROM event_date)) actual ON m.month_number=actual.month_number ORDER BY ...`
-
-| Dim | Score |
-|---|---|
-| Accuracy | 5.0 |
-| Completeness | 5.0 |
-| Clarity | 5.0 |
-| Actionability | 5.0 |
-| **Average** | **5.00** |
-
-**VERDICT: CLEAN — the whole scaffold is sound.**
-
-- `UNNEST(sequence(1,12)) AS t(m)` is CANONICAL Trino. Verified trino.io/docs/current/functions/array.html + sql/select.html: `sequence(1,12)` returns `array(integer)` 1..12 (inclusive both ends), and `UNNEST(array) AS t(col)` expands the array to one row per element. Confirmed form: `SELECT value FROM UNNEST(SEQUENCE(1, 12)) AS t(value)`.
-- LEFT JOIN of the 12-row scaffold onto the aggregated actuals subquery + `COALESCE(actual.sales_amount, 0)` correctly zero-fills months with no data — months with zero events still appear with 0.
-- `EXTRACT(month FROM event_date)` and `EXTRACT(year FROM event_date) = EXTRACT(year FROM current_date)` are valid (EXTRACT → bigint; `current_date` is a valid Trino constant). The year filter scopes actuals to the current year. Sound.
-- No `::` cast, no QUALIFY, no fabrication.
+Verification:
+- **Correct one-row-per-key idiom.** PARTITION BY user_id ORDER BY updated_at DESC, outer `WHERE rn = 1` keeps the single latest row per user while retaining all columns — solves the "GROUP BY can't pull the other columns" problem exactly. This is the canonical Trino pattern (DISTINCT ON is not in Trino; max_by is the single-column alternative).
+- Outer-wrapper valid (same lock as Q3). No `::`, no QUALIFY.
+- **-0.5 Comp / -0.5 Act**: `other_columns...` is an illustrative pseudocode placeholder, not a literal syntax error — assessed as pseudocode, correctly. It very slightly dings actionability because the engineer must substitute their real columns (or `SELECT *` from the subquery). Mentioning that `SELECT *` works directly, or noting that ties on updated_at break arbitrarily (add a tiebreaker like `, user_id DESC` for determinism), would have closed the gap. Minor.
 
 ---
 
-## Overall
+## Overall computation
 
-Per-question averages: **Q1 3.25, Q2 5.00, Q3 4.875, Q4 5.00.**
+Dimension averages across Q1–Q4:
+- Accuracy: (5+5+5+5)/4 = 5.00
+- Completeness: (5+5+5+4.5)/4 = 4.875
+- Clarity: (5+5+5+5)/4 = 5.00
+- Actionability: (5+5+5+4.5)/4 = 4.875
 
-Dimension-average method:
-- Accuracy: (2.0+5.0+5.0+5.0)/4 = 4.25
-- Completeness: (4.0+5.0+4.5+5.0)/4 = 4.625
-- Clarity: (4.5+5.0+5.0+5.0)/4 = 4.875
-- Actionability: (2.5+5.0+5.0+5.0)/4 = 4.375
-- **Overall = (4.25+4.625+4.875+4.375)/4 = 4.53125**
-
-Per-Q-average method: (3.25+5.00+4.875+5.00)/4 = **4.53125** — both methods agree.
-
-**OVERALL = 4.53125 — PASS** (>= 3.5; no per-Q gate override applied per directive).
-
-**Quality concern flagged separately:** Q1 is a `::`-cast-ban HARD-LOCK violation and a parse error as written. The overall average passes comfortably, but a parse-error answer reaching a production user is a real harm. This justifies the reactive iter606 fix below.
+**Overall = (5.00 + 4.875 + 5.00 + 4.875) / 4 = 4.84375**
+Per-Q-avg cross-check: (5.00 + 5.00 + 5.00 + 4.75)/4 = 4.9375; the two methods differ only because Q4's two half-point dings both sit in Comp+Act. **Dim-avg method governs = 4.84375 PASS** (>= 3.5; no per-Q gate override).
 
 ---
 
-## iter606 DIRECTIVES
+## EXPLICIT FIX A VERDICT
 
-### PRIMARY (reactive trigger fired) — ADD the N-minute truncation canonical with EXPLICIT CAST
+**RESOLVED. The iter605 `::int` slip did NOT recur on EITHER cast-bearing question.**
+- Q1 (N-minute bucket, the literal reframe of the iter605 trigger): `CAST(EXTRACT(minute FROM event_ts) AS integer)` — canonical, no `::`.
+- Q2 (text→numeric): `CAST(amount AS DECIMAL(18,2))` — canonical, no `::`.
 
-The iter605 teacher correctly HELD the N-min truncation canonical as NO-OP (iter604 answered it with CAST, no findability gap evidenced). **This iteration the responder regressed to `::int` on the 5-min reframing — that IS the reactive trigger.** ADD a minimal findable N-minute truncation canonical at the **r07 date_trunc-hour neighborhood**:
+The iter606 teacher's adjacently-inserted N-minute canonical block (r07, after the date_trunc intro, with the WRONG `::int` / RIGHT `CAST(... AS integer)` token pair and the integer-division-floor lead form) gave the responder the exact CAST form to copy. The inoculation took on both cast surfaces. The standing `::`-cast-ban is intact.
 
-- **Keyword anchors**: bucket timestamps into 5-minute / 15-minute / N-minute windows, round timestamp down to nearest 5 min, no 5-minute unit in date_trunc, floor timestamp to interval boundary, 5-min/10-min/30-min buckets.
-- **LEAD with the integer-division-floor form** (cleanest, no negative-modulus subtlety):
-  `date_trunc('hour', ts) + INTERVAL '1' MINUTE * (CAST(EXTRACT(minute FROM ts) AS integer) / 5 * 5)`
-- **Also show the modulo-subtract form** the responder reached for:
-  `date_trunc('minute', ts) - INTERVAL '1' MINUTE * (CAST(EXTRACT(minute FROM ts) AS integer) % 5)`
-- **CRITICAL: write every cast as `CAST(EXTRACT(minute FROM ts) AS integer)` — NEVER `::int`.** The entire point of adding this canonical is so the responder COPIES the CAST form instead of the PG `::` shorthand. Add a one-line note: "`EXTRACT(...)` already returns `bigint`, so the cast is only needed when narrowing to `integer`; Trino has NO `::` cast — use `CAST(x AS integer)`, never `x::int` (parse error)."
-- Note `INTERVAL '1' MINUTE * <int>` is valid Trino 467 (interval×scalar; docs operators table omits it but the behavior is real — same baseline as iter604 Q3).
-- Generalize to N (5/10/15/30) so the next reframing routes here regardless of the minute count.
+---
 
-This is additive only — do NOT touch the r07 date_trunc-hour lock, the four-pattern CONTRAST card, or the new iter605 SUM-OVER() share-of-grand-total card.
+## Diagnosis / teacher actions
 
-### NO-OP elsewhere (all clean)
-- **Q2 SUM(x) OVER ()**: the new iter605 grand-total anchor routed PERFECTLY first-probe. Do NOT re-edit it (durable).
-- **Q3 anti-join**: r07 LEFT-JOIN-IS-NULL anchor + r23 NOT EXISTS/SemiJoin canonicals held. NO-OP.
-- **Q4 sequence scaffold**: r07 sequence() pin + r23 generate_series→sequence(1,10)+UNNEST trap held. NO-OP.
+No slips, no fabrications, no invalid syntax, no off-by-one, no operator-precedence error, no wrong-function-choice, no invalid-clause-placement, no wrong-version pin across all four answers. The reactive iter606 content edit ROUTED CLEANLY first-probe — the findability gap at the r07 date_trunc neighborhood is CLOSED.
 
-### DO NOT
-- Touch r22 §13.x federation guardrails (4.49944/310 thin, ZERO probe this iter).
-- Re-edit the iter605 SUM-OVER() share-of-grand-total card (clean first-probe).
-- Add any `::`-casts (iter571 PIN reaffirmed), EXTRACT(EPOCH) (iter562 ban), or QUALIFY.
-- Bump training/state.json (already 605). No git commit/push (file edits only).
+The only sub-5 (Q4 Comp/Act -0.5 each) is the `other_columns...` placeholder + missing tiebreaker note — a cosmetic completeness nuance, NOT a content gap (the latest-row-per-key canonical at r23 §3.1G is present and correctly applied). Do NOT churn resources for this.
 
-### Fabrications / slips this iteration
-- **Q1 `::int` cast — INVALID-SYNTAX / HARD-LOCK `::`-cast-ban violation. Parse error as written. CONFIRMED.** Fix is trivial (delete `::int`, or write `CAST(... AS integer)`), but the responder must be GIVEN the CAST form to copy → see PRIMARY directive.
-- No other fabrications. Q2/Q3/Q4 are clean. No wrong-function-choice, no off-by-one, no operator-precedence error, no invalid-clause-placement, no wrong-version pin.
+**iter607 recommendation: DEFAULT NO-OP — push DURABILITY/BREADTH.**
+- Do NOT re-edit the new iter606 N-minute canonical (durable first-probe).
+- Do NOT touch r22 §13.x federation guardrails (row 4.49944/310, thin, ZERO probe this iter).
+- Optional LOW (only if a future probe shows the failure): a one-line "for whole-row latest-per-key, `SELECT *` from the ranked subquery + add a deterministic tiebreaker in ORDER BY (e.g. `updated_at DESC, id DESC`)" note adjacent to r23 §3.1G ROW_NUMBER one-row-per-key — pre-emptive churn NOT justified on a 4.75 answer.
+- RE-PROBE candidates (iter607-609): N-minute bucket 3rd framing (e.g. 15-min or "floor to nearest 5 minutes") to confirm canonical durability; text→numeric 2nd framing with TRY_CAST (bad-data tolerance); top-N-per-group RANK-vs-ROW_NUMBER tie framing; federation ONLY if a bulletproofed angle exists that does not touch §13.x.
 
-**WebSearch/WebFetch verified today**: GitHub trinodb/trino #23795 (`::` cast UNSUPPORTED, open feature request — Q1); trino.io/docs/467/functions/datetime.html (`extract → bigint`; `timestamp - interval` valid; date_trunc has `minute` not `5 minute` — Q1/Q4); trino.io/docs/467/functions/window.html ("All Aggregate functions can be used as window functions by adding the OVER clause"; empty OVER () = all rows — Q2); trino.io/docs/current/functions/array.html + sql/select.html (`sequence(1,12)` → array(integer); `UNNEST(arr) AS t(c)` row-per-element — Q4).
+**DO NOT**: add `::`-casts (iter571 PIN); EXTRACT(EPOCH) (iter562 ban); QUALIFY; bump training/state.json (already 606); git commit/push.
+
+**Docs verified today (trino.io/docs/467 + Trino GitHub):**
+- conversion.html — `cast(value AS type)` / `try_cast(...)`; NO `::` operator (Q1, Q2)
+- datetime.html — date_trunc units (no 10/30-min); `extract(field FROM x) → bigint` (Q1)
+- math.html operators — "Division (integer division performs truncation)" (Q1)
+- aggregate.html — `sum(x) → [same as input]`; trinodb/trino #20227 + PR #6591 confirm DECIMAL SUM widens to DECIMAL(38,s) (Q2)
+- ROW_NUMBER outer-wrapper idiom, no QUALIFY in Trino 467 (Q3, Q4)
+
+**OVERALL: 4.84375 STRONG PASS — FIX A RESOLVED on both cast surfaces (no `::` recurrence); Q1 N-minute floor arithmetic valid+correct via the new iter606 canonical; Q2 CAST-to-DECIMAL + SUM-widens-to-DECIMAL(38,s) accurate; Q3/Q4 ROW_NUMBER outer-wrapper idioms textbook-clean; zero fabrications/invalid-syntax/::-casts; iter607 = default NO-OP, push breadth; federation row stays 4.49944/310.**

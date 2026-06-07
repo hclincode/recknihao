@@ -1100,6 +1100,40 @@ FROM iceberg.analytics.product_sales;
 
 `date_trunc('day' | 'week' | 'month', col)` is the Trino function you'll use constantly. It rounds a timestamp down to the start of a bucket. **Return type — same as input** (per [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html): `date_trunc(unit, x) -> [same as input]`): `timestamp -> timestamp`, `timestamp(p) with time zone -> timestamp(p) with time zone`, `date -> date`, `time -> time`. It does **NOT** convert to DATE — `date_trunc('day', some_timestamp)` returns a `timestamp` at midnight, not a `date`. If you need the result as a DATE, wrap in `CAST(... AS DATE)` explicitly.
 
+#### LEADING CANONICAL — N-minute (5 / 10 / 15 / 30-minute) timestamp buckets — `date_trunc` has NO sub-hour custom unit, use arithmetic (iter606 PIN)
+
+> **Keyword anchors (READ THIS FIRST if your question contains any of these):** 5-minute buckets · 10-minute buckets · 15-minute windows · 30-minute buckets · N-minute buckets · bucket timestamps into X-minute windows · group events every 5 minutes · finer than hourly · sub-hour time buckets · truncate timestamp to 15 minutes · floor timestamp to nearest 5 minutes.
+
+> **One fact.** `date_trunc(unit, ts)` supports only **FIXED units** — verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html): the units are `millisecond`, `second`, `minute`, `hour`, `day`, `week`, `month`, `quarter`, `year`. There is **NO `'5 minute'` / `'15 minute'` unit** — Trino raises an error if you pass one. So a custom sub-hour bucket (every 5 / 10 / 15 / 30 minutes) needs a little **arithmetic**: floor to the start of the hour, then add back the whole number of N-minute steps that have elapsed in that hour.
+
+> **THE CANONICAL — 5-minute buckets shown EXACTLY (copy this; replace `5` with `10` / `15` / `30` for other bucket sizes):**
+> ```sql
+> date_trunc('hour', event_ts)
+>   + INTERVAL '1' MINUTE * (CAST(EXTRACT(minute FROM event_ts) AS integer) / 5 * 5)
+> ```
+> Integer division **floors to the bucket boundary**: e.g. minute `37` → `37 / 5 * 5 = 35`, so `12:37:48` buckets to `12:35:00`. (Integer division truncates toward zero — verified at [trino.io/docs/467/functions/math.html](https://trino.io/docs/467/functions/math.html): *"Division (integer division performs truncation)"* — and minutes are always non-negative, so truncation = floor here.) Replace `5` with `10`, `15`, or `30` for those bucket sizes; the `/ N * N` integer-division idiom floors to the nearest lower N-minute boundary.
+
+> **CRITICAL inoculation — NO `::` cast in Trino.** Trino 467 has **NO `::` cast shorthand** — that is **PostgreSQL**. `EXTRACT(minute FROM ts)::int` is a **PARSE ERROR** in Trino. Always write `CAST(EXTRACT(minute FROM ts) AS integer)`. The cast form is verified at [trino.io/docs/467/functions/conversion.html](https://trino.io/docs/467/functions/conversion.html) (`cast(value AS type) → type`; the `::` operator is **not** in Trino at all). Note `EXTRACT(minute FROM ts)` already returns **BIGINT** (verified same datetime page: *"extract(field FROM x) → bigint"*), so the explicit cast is only needed if you specifically want INTEGER — and `EXTRACT(minute FROM ts) % 5` (the modulo form) works **directly without any cast**.
+>
+> | | |
+> |---|---|
+> | **WRONG ❌ (PostgreSQL `::` — parse error in Trino)** | `EXTRACT(minute FROM ts)::int` |
+> | **RIGHT ✅ (Trino CAST form)** | `CAST(EXTRACT(minute FROM ts) AS integer)` |
+
+> **Equivalent documented form (if you prefer `date_add` over `INTERVAL '1' MINUTE * n`):** `date_add('minute', CAST(EXTRACT(minute FROM event_ts) AS integer) / 5 * 5, date_trunc('hour', event_ts))` — `date_add(unit, value, timestamp)` is the explicitly-documented add-an-interval function ([trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html): *"Adds an interval `value` of type `unit` to `timestamp`"*). Both forms produce the same 5-minute floor; pick whichever reads cleaner.
+
+> **Worked GROUP BY (5-minute event counts — repeat the full expression in GROUP BY, no alias per Trino #16533):**
+> ```sql
+> SELECT date_trunc('hour', event_ts)
+>          + INTERVAL '1' MINUTE * (CAST(EXTRACT(minute FROM event_ts) AS integer) / 5 * 5) AS bucket_5min,
+>        COUNT(*) AS events
+> FROM iceberg.analytics.user_events
+> WHERE event_ts >= current_timestamp - INTERVAL '1' DAY
+> GROUP BY date_trunc('hour', event_ts)
+>          + INTERVAL '1' MINUTE * (CAST(EXTRACT(minute FROM event_ts) AS integer) / 5 * 5)
+> ORDER BY bucket_5min;
+> ```
+
 #### `date_trunc('week', ts)` ALWAYS starts the week on MONDAY (ISO-8601) — Trino canonical (iter536 PIN)
 
 > **Keyword anchors for this block**: date_trunc week Monday, Trino week start day, weekly report week start, ISO week Trino, day_of_week Monday, Sunday vs Monday week, first day of week Trino, beginning of week Trino, European Monday week start, US Sunday week start.
