@@ -1717,6 +1717,25 @@ FROM (
 -- Bucket 1 = lowest MAU tenants, Bucket 10 = highest MAU tenants.
 ```
 
+> **ANTI-PATTERN — DO NOT filter a window-function result (`NTILE` / `ROW_NUMBER` / `RANK` / `DENSE_RANK` / `PERCENT_RANK` / etc.) in the SAME-level `WHERE`.** `WHERE` runs BEFORE the window function is computed (per the [Trino window docs](https://trino.io/docs/current/functions/window.html), window functions run *after* `HAVING` but *before* `ORDER BY`; they are only allowed in the `SELECT` and `ORDER BY` clauses), so the window result is NOT referenceable in `WHERE` and the query fails to plan. Wrap the windowed query in an OUTER `SELECT` and filter there. **Trino 467 has NO `QUALIFY` keyword** — use the outer-wrapper subquery filter.
+>
+> ```sql
+> -- WRONG — `tier` is a window-function output; WHERE cannot see it (and runs before it is computed).
+> SELECT tenant_id, NTILE(4) OVER (ORDER BY revenue) AS tier
+> FROM t
+> WHERE tier = 1;          -- ERROR: column 'tier' cannot be resolved / window result not allowed in WHERE
+>
+> -- RIGHT — compute the window in an inner query, filter the alias in the OUTER SELECT.
+> SELECT *
+> FROM (
+>   SELECT tenant_id, NTILE(4) OVER (ORDER BY revenue) AS tier
+>   FROM t
+> )
+> WHERE tier = 1;          -- top-quartile-only: filter lives one query level out
+> ```
+>
+> Note the difference from the `WHERE monthly_revenue IS NOT NULL` filter shown later in this pattern: that filters a **base column** (`monthly_revenue`), which is fine and is evaluated normally before the window runs. The ban is specifically on filtering a window-function *output alias* (`tier`, `rn`, `decile`, …) at the same level.
+
 **The remainder rule (this trips up engineers — read carefully).** `NTILE(n)` divides `rows_in_partition` by `n` and distributes the remainder `r` to the **first `r` buckets**, each of which gets one extra row.
 
 | Rows in partition | `NTILE(4)` bucket sizes |

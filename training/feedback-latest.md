@@ -1,124 +1,114 @@
-# Judge Feedback — iter599 (EXTENDED PHASE)
+# Judge Feedback — iter600 (FIX A VALIDATION re-probe)
 
-**Overall: 4.50 PASS** (margin +1.00 above 3.5 floor). Overall-average governs the label (PASS = overall avg ≥ 3.5; no per-question quality-gate override). **Federation NOT probed — 4.49944/310 row UNCHANGED.**
+**Date:** 2026-06-07 · **Phase:** extended · Trino 467 pinned · Docs verified against trino.io/docs/467 + Trino source.
 
-Per-directive: PIN Trino 467. All four technical surfaces independently WebSearch/WebFetch-verified against trino.io/docs today (2026-06-07). One genuine in-the-answer defect found in Q4 (invalid WHERE-on-window-alias clause placement) — flagged as a quality concern, NOT a label override.
-
----
-
-## Q1 — `@` position + slice domain (strpos / split_part) — 5/5/5/5 = 5.00 STRONG PASS — FRESH
-
-Responder: `strpos(email, '@')` 1-indexed, returns 0 if not found; `substr(email, strpos(email,'@')+1)` to slice everything after; ALSO recommended `split_part(email, '@', 2)` as the cleaner direct idiom.
-
-**VERIFICATION (CONFIRMED):**
-- trino.io/docs/current/functions/string.html — `strpos(string, substring) → bigint`: *"Returns the starting position of the first instance of substring in string. Positions start with 1. If not found, 0 is returned."* — responder's 1-indexed + 0-if-not-found claim VERBATIM correct.
-- string.html — `split_part(string, delimiter, index) → varchar`: *"Splits string on delimiter and returns the field index. Field indexes start with 1."* — `split_part(email, '@', 2)` returns the domain (everything after the single `@`). Correct.
-
-Both forms are valid Trino 467. The strpos+substr composition correctly slices after the delimiter (start = position+1, no length arg = to end of string, valid per substr docs). Recommending split_part as the cleaner idiom is exactly the right teaching move. Zero `::`-casts, zero fabrication. Zero defects.
+Four everyday-engineer SQL shaping questions: NTILE top-decile FILTER (Q1, the FIX A validation), width_bucket histogram (Q2), date_trunc hour bucket (Q3), format_datetime 'yyyy-MM' label (Q4).
 
 ---
 
-## Q2 — zero-pad order ID to 8 chars (`format('%08d', n)`) — 5/5/5/5 = 5.00 STRONG PASS — FRESH
+## Q1 — NTILE deciles, FILTER to top decile only (FIX A VALIDATION) — **4.875**
 
-Responder: `format('%08d', order_id)` = 8-wide zero-padded decimal; extra examples `format('%05d',42)='00042'`, `format('%,d', ...)` thousands separators.
+Responder: NTILE(10) OVER (ORDER BY order_value) computed inside a CTE `ranked_orders`, then `SELECT ... FROM ranked_orders WHERE value_decile = 10 ORDER BY order_value DESC` in the OUTER query. Explained bucket 10 = highest.
 
-**VERIFICATION (CONFIRMED):**
-- trino.io/docs/current/functions/string.html — `format(format, args...)` is Java `String.format`/printf-style. Docs show the exact zero-pad example `format('%08d', 8)` producing a zero-padded decimal. `%0Nd` printf zero-pad is valid.
-- `%d` accepts an integral argument — `order_id` is numeric (BIGINT/INTEGER), so it is passed directly with NO CAST needed. Correct that no CAST is required here.
-- `%,d` thousands-separator grouping is valid Java format syntax — correct bonus example.
+**Verification:**
+- trino.io/docs/467/functions/window.html — NTILE: *"Divides the rows for each window partition into `n` buckets ranging from `1` to at most `n`. Bucket values will differ by at most `1`."* Window functions *"execute after the HAVING clause but before the ORDER BY clause"* — i.e. AFTER WHERE. So a window output alias is NOT referenceable in a same-level WHERE.
+- **This answer is VALID Trino 467.** The NTILE is computed at the CTE level; the `WHERE value_decile = 10` is in the OUTER query referencing a CTE-projected column. That is exactly the correct outer-wrapper pattern (CTE is one query level out from the window) — NOT a window-fn-in-WHERE-at-same-level error.
+- With `ORDER BY order_value` ASCENDING, the highest values land in the last/largest bucket. NTILE(10) → bucket 10 = highest decile. CORRECT. The final `ORDER BY order_value DESC` is presentation-only and fine.
 
-The `'00004217'` target shape is produced exactly by `format('%08d', 4217)`. Beginner-clear (showed the 5-wide variant to make the width-digit explicit). Zero defects.
+**iter599 SLIP STATUS: RESOLVED.** iter599's Q4 produced an invalid `WHERE spending_tier IS NOT NULL` filtering an NTILE output alias at the SAME SELECT level. This re-probe shows the responder now uses the valid CTE + outer-query-filter wrapper. The FIX A inoculation callout added at r07 Pattern C3 (the WHERE-on-window-alias ban + RIGHT/WRONG outer-wrapper token pair) LANDED. No window-fn-in-WHERE slip recurred.
 
----
-
-## Q3 — p95 latency at scale (approx_percentile) — 5/5/5/5 = 5.00 STRONG PASS — FRESH
-
-Responder: `approx_percentile(latency_ms, 0.95)` for p95; array form `approx_percentile(latency_ms, ARRAY[0.5,0.95,0.99])` for multiple percentiles; noted Trino does NOT support `PERCENTILE_CONT(...) WITHIN GROUP (ORDER BY ...)`; T-Digest internally, fast at scale.
-
-**VERIFICATION (CONFIRMED — including the absence claim is TRUE, not fabricated):**
-- trino.io/docs/current/functions/aggregate.html — `approx_percentile(x, percentage) → [same as x]`: *"Returns the approximate percentile for all input values of x at the given percentage."* Single-arg form VERIFIED.
-- aggregate.html — `approx_percentile(x, percentages) → array<[same as x]>`: *"Returns the approximate percentile ... at each of the specified percentages."* Array-of-percentages overload VERIFIED.
-- **FABRICATED-ABSENCE CHECK — the "no PERCENTILE_CONT WITHIN GROUP" claim is TRUE.** The aggregate-functions page contains NO `PERCENTILE_CONT` and NO `WITHIN GROUP (ORDER BY ...)` for percentiles; `WITHIN GROUP` exists in Trino ONLY for `listagg()`. So the responder correctly stated an ABSENCE that is real — this is NOT a fabricated absence.
-- T-Digest: aggregate.html references `tdigest_agg` / `merge(tdigest)` and the T-Digest functions page — approx_percentile is T-Digest-backed and single-pass / scales well. Claim correct.
-
-This is the exact production-correct answer (matches the r05:2232 CRITICAL FOOTGUN lock). Zero defects.
+Scores — Accuracy 5 / Completeness 4.75 / Clarity 5 / Actionability 4.75 → **4.875**
 
 ---
 
-## Q4 — 4 equal spending tiers (NTILE) — 2/4/4/2 = 3.00 FAIL (per-Q below 3.5) — IN-THE-ANSWER CLAUSE-PLACEMENT SLIP
+## Q2 — width_bucket fixed-width histogram — **4.25** (off-by-one PROSE slip; SQL correct)
 
-Responder: `NTILE(4) OVER (ORDER BY total_spend DESC)` over a GROUP BY subquery; noted remainder rows go to the FIRST buckets; the outer query wrote `WHERE spending_tier IS NOT NULL` referencing the NTILE output alias; ALSO offered a `PERCENT_RANK() OVER (...) < 0.25 ... CASE` alternative.
+Responder: `width_bucket(invoice_amount, ARRAY[50.0,100.0,...,500.0]) AS bucket_id ... GROUP BY bucket_id`. Prose: "0 = below $50, 1 = $50-100, 2 = $100-150, ... up to 9 = $450-$500 and above".
 
-**What is CORRECT (verified):**
-- NTILE is a valid Trino 467 window function. trino.io/docs/current/functions/window.html documents `ntile(n)` — divides rows into `n` buckets.
-- **Remainder semantics VERIFIED correct.** window.html verbatim: *"If the number of rows in the partition does not divide evenly into the number of buckets, then the remainder values are distributed one per bucket, starting with the first bucket."* The responder's "remainder rows go to the FIRST buckets" is exactly right (earlier buckets are the larger ones). Good detail.
-- The `PERCENT_RANK() OVER (...) < 0.25` + CASE alternative is a valid second idiom.
+**Verification:**
+- trino.io/docs/467/functions/math.html — `width_bucket(x, bins) → bigint`: *"Returns the bin number of `x` according to the bins specified by the array `bins`."* Two overloads documented (equi-width `(x,bound1,bound2,n)` and custom `(x,bins)`). Function EXISTS in Trino 467; not Postgres-only. The chosen overload and SQL are CORRECT and runnable.
+- **Bin-numbering (Trino source, MathFunctions.widthBucket Block overload):** binary search returns `lower`, which is 0 when value < bins[0] and `numberOfBins` (= N, the array length) when value >= the last bin. So for a bins array of **N = 10** elements `[50,...,500]`, the result ranges **0..10**: bucket 0 = below 50, bucket k = bins[k-1]..bins[k], and **bucket 10 = >= 500 ($500+)**.
+- **OFF-BY-ONE in the PROSE:** The responder said "9 = $450-$500 and above," collapsing two distinct buckets. Correct labeling: **bucket 9 = $450–$500**, **bucket 10 = $500 and above**. The responder's prose loses the $500+ top bucket — which is exactly the bucket the question's "$500+" range names.
 
-**The DEFECT — `WHERE spending_tier IS NOT NULL` on the SAME SELECT level as the NTILE output is INVALID Trino 467.** The LED example is shaped:
-```
-SELECT ..., NTILE(4) OVER (ORDER BY total_spend DESC) AS spending_tier
-FROM (...grouped subquery...)
-WHERE spending_tier IS NOT NULL
-```
-This errors at plan time for **two independent reasons**, both verified:
-1. **WHERE cannot reference a SELECT output alias.** trino.io/docs/current/sql/select.html — logical clause order is FROM → WHERE → GROUP BY → HAVING → SELECT → window → ORDER BY → LIMIT. WHERE is evaluated *before* the SELECT list (and its aliases) are computed, so `spending_tier` does not exist yet in WHERE. → `Column 'spending_tier' cannot be resolved` / column-not-found.
-2. **Window-function results cannot be referenced in WHERE at all.** Window functions run after HAVING and before ORDER BY (window.html: window functions "run after the HAVING clause but before the ORDER BY clause"), so a window result is never available to a same-level WHERE. github.com/trinodb/trino issue #6447 documents the engine rejecting a window function used as a scalar in WHERE. To filter on a window output you MUST wrap it in a subquery/CTE and filter in the *outer* query.
+**Severity: moderate.** The SQL is fully correct and runnable — the histogram will compute all 11 buckets (0..10) correctly. Only the explanatory mapping is wrong, and it's wrong precisely at the bucket the engineer cares about ($500+). An engineer trusting the prose would mislabel their chart's top bin or write `WHERE bucket_id = 9` thinking it captures $500+ when it actually captures only $450–$500. Accuracy docked.
 
-**Superfluous-predicate note (secondary):** even if it parsed, `WHERE spending_tier IS NOT NULL` is dead weight — `ntile(n)` never returns NULL for any row of a non-empty partition (every row gets a bucket 1..n). The filter removes nothing.
-
-**Net effect:** the responder's primary worked example does not run on Trino 467 as written — a beginner SaaS engineer would paste it and hit a planner error. The NTILE concept, the OVER clause, the remainder rule, and the PERCENT_RANK alternative are all correct, which is why this scores 3.00 (a real but bounded slip) rather than lower: drop the WHERE line entirely and the answer is fully correct.
-
-**Scoring rationale:** Accuracy 2 (LED example errors at plan time — two-reason invalid clause placement); Completeness 4 (concept, remainder rule, and alternative all present and correct); Clarity 4 (well explained, but the broken example would confuse on execution); Actionability 2 (engineer's copy-paste fails). = 3.00.
+Scores — Accuracy 3.5 / Completeness 4.5 / Clarity 4.5 / Actionability 4.5 → **4.25**
 
 ---
 
-## Overall
+## Q3 — date_trunc('hour', ts) hourly counts — **4.6875**
 
-| Q | Topic | Acc | Comp | Clar | Act | Avg |
-|---|---|---|---|---|---|---|
-| Q1 | strpos/split_part domain extraction | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | format('%08d') zero-pad | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 | approx_percentile p95 | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 | NTILE quartiles | 2 | 4 | 4 | 2 | 3.00 |
+Responder: `date_trunc('hour', login_timestamp) AS hour_bucket ... GROUP BY date_trunc('hour', login_timestamp)`; noted that for hour-of-day 0–23 use `EXTRACT(HOUR FROM hour_bucket)` or an outer subquery.
 
-**OVERALL = (5.00 + 5.00 + 5.00 + 3.00) / 4 = 18.00 / 4 = 4.50 PASS.** Overall-average governs the label. Q4 per-Q below 3.5 flagged as a quality concern + content-fix directive, NOT a label override.
+**Verification:**
+- trino.io/docs/467/functions/datetime.html — `date_trunc(unit, x) → [same as input]`, *"Returns `x` truncated to `unit`"*. `'hour'` is a valid unit. CORRECT and runnable.
+- The question mixed two readings: "round timestamp down to its hour" (truncate-to-hour, keeps the date — distinct timestamp per day) vs "per hour-of-day" (0–23 collapsed across all days). The responder LED with truncate-to-hour (matching "round down to its hour") and explicitly offered the `EXTRACT(HOUR FROM ...)` path for the 0–23 reading. Handling the ambiguity by surfacing both is the right call — full marks for disambiguation.
+- `EXTRACT(HOUR FROM ...)` is valid Trino 467. CORRECT.
+
+Scores — Accuracy 5 / Completeness 4.75 / Clarity 4.5 / Actionability 4.5 → **4.6875**
 
 ---
 
-## Diagnosis + iter600 teacher directive
+## Q4 — format_datetime(date, 'yyyy-MM') month label — **3.875** (DATE-type cast gap)
 
-**Q4 WHERE-on-window-alias = ROUTED-BUT-MIS-APPLIED (resource-defect candidate at the NTILE landing point), NOT a content gap.** The NTILE canonical exists and routes correctly — r07 Pattern C3 (`resources/07-analytical-query-patterns.md` ~line 1701) is the NTILE LEADING CANONICAL (quartiles/deciles, remainder-to-earliest-buckets, no-frame restriction, worked tenant example). The responder reached it and got the concept + remainder rule right. The slip is in the example's clause placement: a window-function output alias filtered in a same-level WHERE.
+Responder: `format_datetime(subscription_start_date, 'yyyy-MM') AS month_label ... GROUP BY format_datetime(...)`; noted Joda 'yyyy' = 4-digit year, 'MM' = month, lowercase 'mm' = minutes.
 
-This is the same class as the iter586/587 "un-confusable-in-the-example signal" interventions and the r07/r23 nested-window-ban lock — the canonical needs the example to be drop-in-valid, with an explicit WHERE-on-window-result anti-pattern callout right at the NTILE worked example.
+**Verification:**
+- trino.io/docs/467/functions/datetime.html — `format_datetime(timestamp, format) → varchar`, *"Formats `timestamp` as a string using `format`."* Uses *"a format string that is compatible with JodaTime's DateTimeFormat pattern format."* So `'yyyy-MM'` is the correct Joda pattern → 4-digit year + zero-padded month. The Joda token guidance (yyyy=year, MM=month, lowercase mm=minutes) is CORRECT and a genuinely useful footgun warning. `date_format(timestamp, format)` is the documented MySQL-style alternative — responder mentioned date_format as the alternative.
+- **GAP — DATE input type:** The signature is `format_datetime(timestamp, ...)`, NOT date. The question explicitly says "a **date** column." Trino does NOT auto-coerce DATE→TIMESTAMP for this function; passing a true DATE column raises a function-resolution error ("Unexpected parameters / function not registered for (date, varchar)"). The DATE-safe forms are `format_datetime(CAST(subscription_start_date AS timestamp), 'yyyy-MM')`, or the simpler `substr(CAST(subscription_start_date AS varchar), 1, 7)` (a DATE casts to 'YYYY-MM-DD'). The responder did NOT note the cast, so the literal copy-paste FAILS if the column is genuinely typed DATE. Note: many "date" columns in lakehouse tables are actually TIMESTAMP, in which case it runs as-written — but the question said DATE, so the cast caveat is required for correctness.
 
-**PRIMARY iter600 action — inspect the NTILE example at r07 Pattern C3 (~line 1701) and verify it does NOT show `WHERE <ntile_alias> ...` (or any window-output alias) at the same SELECT level.**
-- If the resource's NTILE example contains a same-level `WHERE spending_tier ...`: **REPLACE in-place (reconcile-don't-append).** Either (a) remove the WHERE entirely (NTILE buckets every row — no filter needed to "divide into 4 tiers"), or (b) if a filter on the bucket is genuinely wanted, push it to an OUTER wrapper:
-  ```sql
-  SELECT customer_id, total_spend, spending_tier
-  FROM (
-    SELECT customer_id, SUM(amount) AS total_spend,
-           NTILE(4) OVER (ORDER BY SUM(amount) DESC) AS spending_tier
-    FROM orders
-    GROUP BY customer_id
-  ) t
-  WHERE spending_tier = 1   -- top quartile only, IF filtering is wanted
-  ```
-- **ADD a one-line anti-pattern callout at the NTILE example** (mirrors the existing nested-window-ban / window-not-in-WHERE locks): *"Do NOT write `WHERE spending_tier IS NOT NULL` (or any filter on the NTILE output) at the same query level — window-function results and SELECT aliases are not visible to WHERE; wrap in a subquery and filter in the outer query. Also: `ntile(n)` never returns NULL for a non-empty partition, so an IS NOT NULL filter is dead weight."* Cite trino.io/docs/467/sql/select.html (clause order FROM→WHERE→…→SELECT→window) + the existing window-functions evaluation-order note.
-- **VERIFY before writing** that the resource currently lacks this callout (grep the r07 NTILE block for `WHERE` near the example). If r07's example is already clean and valid, this was a responder composition slip under window-output-filter pressure rather than a resource defect — in that case ADD the anti-pattern callout to the NTILE example anyway (it's the un-confusable-signal inoculation that lands the fix on re-probe), and DO NOT rewrite the rest of Pattern C3.
+**Severity: moderate.** Correct function, correct format pattern, excellent Joda token note — but the literal SQL can fail on a true DATE column, and the question named DATE explicitly. The simplest robust answer for a DATE column is the `substr(CAST(d AS varchar),1,7)` idiom (which the resources already document at r10:1439) — that would have been the cleanest, cast-free 'YYYY-MM' answer.
 
-**RE-PROBE (iter600-602):** re-ask quartiles/tiers with a filter-the-bucket framing (e.g., "give me only the top-spending quartile of customers") to confirm the responder produces the outer-wrapper form, not a same-level WHERE on the NTILE alias.
+Scores — Accuracy 3.5 / Completeness 3.75 / Clarity 4.5 / Actionability 3.75 → **3.875**
 
-**DO NOT:** touch r22 §13.x federation guardrails without a fresh failure probe (4.49944/310 stays); add `::`-casts (iter571 PIN); rewrite the r07 NTILE Pattern C3 body, the remainder-to-earliest-buckets rule, or the no-frame note (all correct — additive callout only); touch the iter534-599 locks (r23 §3.1A starts_with/ends_with + format zero-pad + count_if + bool_or/bool_and; r05 approx_percentile-vs-PERCENTILE_CONT footgun [Q3 confirmed durable]; r27 strpos/position/split_part [Q1 confirmed durable]).
+---
 
-**No new fabrication.** Zero `::`-casts, zero wrong-version pins, zero fabricated functions across all four answers. The Q3 PERCENTILE_CONT absence claim is a TRUE absence (verified), not a fabrication. The single defect is a clause-placement slip in the Q4 LED example.
+## OVERALL
 
-**WebSearch/WebFetch verified verbatim today (2026-06-07):**
-- trino.io/docs/current/functions/string.html — strpos 1-indexed, 0-if-not-found (Q1); split_part field index starts at 1 (Q1); format('%08d', 8) zero-pad printf example (Q2).
-- trino.io/docs/current/functions/aggregate.html — approx_percentile(x, percentage) + approx_percentile(x, percentages array) overloads (Q3); NO PERCENTILE_CONT / WITHIN GROUP except listagg (Q3 absence TRUE); T-Digest references (Q3).
-- trino.io/docs/current/functions/window.html — ntile(n) remainder "distributed one per bucket, starting with the first bucket" (Q4 remainder correct); window functions run after HAVING before ORDER BY → not available in WHERE (Q4 defect).
-- trino.io/docs/current/sql/select.html — clause order FROM→WHERE→GROUP BY→HAVING→SELECT→window→ORDER BY→LIMIT; WHERE cannot reference SELECT-list aliases (Q4 defect, reason 1).
-- github.com/trinodb/trino issue #6447 — window function used as scalar in WHERE is rejected (Q4 defect, reason 2).
+| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|---|
+| Q1 | 5.0 | 4.75 | 5.0 | 4.75 | 4.875 |
+| Q2 | 3.5 | 4.5 | 4.5 | 4.5 | 4.25 |
+| Q3 | 5.0 | 4.75 | 4.5 | 4.5 | 4.6875 |
+| Q4 | 3.5 | 3.75 | 4.5 | 3.75 | 3.875 |
+| **Dim avg** | **4.25** | **4.4375** | **4.625** | **4.375** | |
 
-**Meta:** iter599 = NO resource edits (full NO-OP per state.json). iter600 = single targeted in-place fix/inoculation at the r07 NTILE Pattern C3 example (WHERE-on-window-output anti-pattern callout + ensure example is drop-in valid), reconcile-don't-append; federation row stays 4.49944/310; all locks held.
+**Overall = (4.25 + 4.4375 + 4.625 + 4.375) / 4 = 4.421875 → PASS** (>= 3.5).
 
-**OVERALL: 4.50 PASS — Q1 strpos/split_part + Q2 format zero-pad + Q3 approx_percentile all docs-verbatim correct and zero-defect; Q4 NTILE concept/remainder/PERCENT_RANK correct but LED example filters a window-output alias in a same-level WHERE (invalid Trino 467 for two independent reasons) — flagged as quality concern + iter600 in-place inoculation at r07 Pattern C3; no fabrication; Q3 PERCENTILE_CONT absence is a TRUE absence.**
+No per-question quality-gate override applied; the overall average governs the label. Quality concerns (Q2 off-by-one prose, Q4 DATE-cast gap) flagged separately below.
+
+---
+
+## EXPLICIT: iter599 NTILE WHERE-on-window-alias slip — **RESOLVED**
+
+Q1 of this re-probe shows the valid CTE/outer-wrapper form: NTILE in the CTE, decile-alias filter in the OUTER query. There is NO same-level `WHERE <window-alias>` error. The iter600 FIX A inoculation callout at r07 Pattern C3 LANDED. The iter599 slip is resolved and did not recur.
+
+---
+
+## DIAGNOSIS + iter601 TEACHER ACTIONS
+
+### Q2 off-by-one prose (PRIMARY) — diagnosis: **resource-defect / content-incompleteness at the landing point**
+The responder routed correctly to width_bucket (r07 Pattern C4, ~line 1798) and wrote correct SQL, but its bucket-numbering NARRATION is off by one at the top bin. This is a resource-content clarity gap: the C4 content evidently does not nail the **0..N** numbering crisply enough for the responder to narrate it. Precise fix for iter601:
+
+- **Where:** resources/07-analytical-query-patterns.md, Pattern C4 width_bucket canonical (~line 1798).
+- **What to add (reconcile-in-place, do NOT rewrite C4):** an explicit worked numbering line for the array overload. For an N-element bins array, results span **0..N**:
+  - `width_bucket(x, ARRAY[50,100,...,500])` with **10** bounds → buckets **0..10**.
+  - bucket **0** = `x < 50`; bucket **k** = `bins[k-1] <= x < bins[k]`; bucket **N (=10)** = `x >= 500` (the open-ended top "$500+" bin).
+  - One-line trap callout: "the top bucket is **N**, NOT N-1 — the last array element opens a new bucket above it; do NOT fold '$500 and above' into bucket 9." Verified against Trino source MathFunctions.widthBucket (Block overload returns `numberOfBins` when value >= last bin) since trino.io/docs/467/functions/math.html does not spell out the edge cases.
+
+### Q4 DATE-input cast gap (SECONDARY) — diagnosis: **routed-but-mis-applied + landing-point-miss**
+The responder found format_datetime/date_format (r23 §dual-table, ~line 382-395) but did not surface the **DATE-type requires CAST** caveat, even though the cleaner cast-free idiom `substr(CAST(d AS varchar),1,7)` already exists at r10:1439. The format_datetime/date_format landing point does not warn that both require a TIMESTAMP and that a DATE column needs `CAST(d AS timestamp)`. Precise fix for iter601:
+
+- **Where:** resources/23-sql-best-practices-olap.md, the date_format/format_datetime dual-function table (~line 382-395).
+- **What to add (reconcile-in-place):** a short type-note row: "Both `format_datetime(timestamp, fmt)` and `date_format(timestamp, fmt)` require a **TIMESTAMP** input. A **DATE** column does NOT auto-coerce — wrap it: `format_datetime(CAST(d AS timestamp), 'yyyy-MM')`. For a plain 'YYYY-MM' label, the cast-free shortcut is `substr(CAST(d AS varchar), 1, 7)` (a DATE renders as 'YYYY-MM-DD'); cross-ref r10:1439." Verified: signature is `format_datetime(timestamp, format)` per trino.io/docs/467/functions/datetime.html; DATE input raises a function-resolution error (date != timestamp distinctness, multiple Trino issue threads).
+
+### Q1, Q3 — no action needed
+Q1 FIX A validated. Q3 disambiguation handled cleanly.
+
+---
+
+## NEW FABRICATION / SLIP FLAGS
+
+- **No fabricated functions or absences.** width_bucket, date_trunc, format_datetime, date_format, EXTRACT all real and correctly used in Trino 467.
+- **No `::`-cast, no QUALIFY, no window-fn-in-WHERE.** The Q1 outer-wrapper is the correct no-QUALIFY pattern.
+- **Two prose/completeness slips (NOT fabrications):** Q2 width_bucket top-bucket off-by-one in narration (SQL correct); Q4 missing DATE→timestamp cast caveat (SQL fails on a true DATE column). Both are landing-point clarity gaps for iter601, addressed above. Neither sank the overall PASS but both should be closed — these are exactly the confident-but-wrong micro-details that erode trust at 250+ datapoints.
