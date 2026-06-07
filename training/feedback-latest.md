@@ -1,77 +1,114 @@
-# Iter631 — Judge Feedback
+# Iter632 Judge Feedback
 
-**Overall average: 4.6875 PASS** (margin +1.1875 above 3.5 floor; +0.28125 swing from iter630's 4.40625)
+**Overall average: 4.46875 — PASS**
 
-**HEADLINE**: iter631 FIX-A canonical LANDED CLEAN. The responder used `date_trunc('hour', event_ts + INTERVAL '30' MINUTE)` — the +30min-then-floor idiom — NOT the iter630 CEILING CASE expression that mis-rounded 2:15->3:00. Worked examples confirm: 4:12 PM -> 4:00 (correct nearest, NOT the naive ceiling's 5:00), 4:48 PM -> 5:00 (correct), 2:30 half-hour tie -> 3:00 (rounds up, explicitly noted). Q2/Q3/Q4 all clean Trino 467 dialect; one minor Q3 polish opportunity (positional GROUP BY 1,2 not mentioned as an alternative to the "repeat the expression" rule).
+Four answers scored against Trino 467 docs (WebFetch-verified at trino.io/docs/current). One single-snippet accuracy bug found in Q3 (concat on BIGINT args is a type error in Trino 467). Overall average safely above the 3.5 threshold; one per-Q below threshold (Q3 = 3.375) is flagged separately as FIX-A candidate per directive (the AVERAGE governs PASS/FAIL).
 
 ---
 
 ## Per-question scores
 
-### Q1 — Snap timestamp to NEAREST whole hour
-**Accuracy 5 | Completeness 5 | Clarity 5 | Actionability 5 | Avg 5.0**
+### Q1 — New vs returning customers per day (MIN(order_date) OVER (PARTITION BY customer_id))
 
-- Used `date_trunc('hour', event_ts + INTERVAL '30' MINUTE)` — the iter631 canonical landed exactly. WebFetch-verified vs trino.io/docs/467/functions/datetime.html: (a) date_trunc('hour', x) floors (docs example `2001-08-22 03:04:05.321` -> `2001-08-22 03:00:00.000`); (b) timestamp + INTERVAL arithmetic valid (docs example `time '01:00' + interval '3' hour` -> `04:00:00.000`); (c) interval-literal `INTERVAL '<n-quoted>' UNIT` is canonical Trino form.
-- Worked examples correct: 4:12+0:30=4:42 floor 4:00 (matches the asker's required 4:00), 4:48+0:30=5:18 floor 5:00 (matches required 5:00), 2:30 tie -> 3:00 (half-up tie explicitly noted as a behavior caveat).
-- Distinguished from plain FLOOR `date_trunc('hour', event_ts)` and flagged Postgres `INTERVAL '30 minutes'` form as wrong for Trino.
-- **FIX-A from iter630 LANDED**: responder did NOT regress to the CEILING CASE pattern that mis-rounded 2:15.
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Accuracy | 4 | `MIN(order_date) OVER (PARTITION BY customer_id) = order_date` is valid Trino 467 (aggregate-as-window confirmed in trino.io/docs/current/functions/window.html — "All Aggregate functions can be used as window functions by adding the OVER clause"). Boolean from equality is standard SQL. Minor accuracy gap below. |
+| Completeness | 4 | Core idiom + LEFT-JOIN alternative covered. MISSING: the "two orders same first day" edge case. If a customer places 2 orders on their first-ever day, BOTH rows have `MIN(order_date) = order_date` so BOTH count as "new" — that inflates the new-customer count vs counting DISTINCT new customers per day. For "new CUSTOMERS per day" the safer aggregation is `COUNT(DISTINCT CASE WHEN is_new_customer THEN customer_id END)` rather than `SUM(CASE WHEN is_new_customer THEN 1 ELSE 0 END)` (the latter is "new ORDERS by first-time customers"). Answer did not flag the orders-vs-customers distinction. |
+| Clarity | 5 | Clear, two-step structure (subquery flags rows, outer groups), well-explained. |
+| Actionability | 5 | Engineer can drop the SQL straight in. |
+| **Q1 avg** | **4.5** | |
 
-### Q2 — Month-over-month signups + percent change
-**Accuracy 5 | Completeness 5 | Clarity 4 | Actionability 5 | Avg 4.75**
+### Q2 — Median order value per category (approx_percentile)
 
-- `date_trunc('month', created_at)` + COUNT(*) GROUP BY repeating the expression — correct per Trino 467 GROUP BY rules (verified: output aliases NOT allowed in GROUP BY; must repeat expression or use positional ordinal).
-- Self-LEFT-JOIN on `prev.month = date_add('month', -1, cur.month)` — date_add signature verified `date_add(unit, value, timestamp)` and accepts negative values per docs example `date_add('day', -1, TIMESTAMP '2020-03-01 00:00:00 UTC')`.
-- `(cur - prev)*1.0 / NULLIF(prev, 0) * 100` — both the decimal-promotion (*1.0) and zero-guard (NULLIF) are textbook-correct.
-- Gap-safe self-join chosen over LAG — defensible for sparse months where LAG would compare to the previous non-empty month, not the prior calendar month. Worth a one-line note that LAG is fine when every month has at least one signup.
-- Clarity -1: a one-liner contrasting `LAG(signups) OVER (ORDER BY month)` vs the self-join with the gap-safety rationale would have made the trade-off explicit.
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5 | `approx_percentile(order_amount, 0.5) GROUP BY product_category` is the canonical Trino 467 idiom (confirmed at trino.io/docs/current/functions/aggregate.html — `approx_percentile(x, percentage) → [same as x]` and the ARRAY form `approx_percentile(x, percentages) → array<[same as x]>`). T-Digest reference is correct. PERCENTILE_CONT/MEDIAN inoculation is correct — neither exists in Trino 467 (verified absent from the aggregate-functions docs page). Approximate-vs-exact: `approx_percentile` IS the standard Trino idiom for median; no exact equivalent exists short of PERCENT_RANK + window scan, so "approximate" is the right answer here. |
+| Completeness | 5 | Single-percentile form + ARRAY form for IQR + PERCENTILE_CONT inoculation = full coverage of likely follow-ups. |
+| Clarity | 5 | Explains T-Digest at the right level (mentions sketch without going deep). |
+| Actionability | 5 | Drop-in SQL + the multi-percentile form for quartile dashboards. |
+| **Q2 avg** | **5.0** | |
 
-### Q3 — Signups by month AND channel
-**Accuracy 5 | Completeness 4 | Clarity 5 | Actionability 5 | Avg 4.75**
+### Q3 — Response time per ticket in hours and minutes (date_diff + concat)
 
-- Two-column GROUP BY `date_trunc('month', created_at), acquisition_channel` with COUNT(*) — correct.
-- "Alias-not-allowed-in-GROUP-BY" claim VERIFIED accurate for Trino 467 per trino.io/docs/467/sql/select.html: "A simple GROUP BY clause may contain any expression composed of input columns or it may be an ordinal number selecting an output column by position (starting at one)." Output aliases are not in that list — the docs explicitly say "input column names" or positional. So repeat-the-expression is correct guidance.
-- Mentioned conditional aggregation CASE pivot as alternative — good.
-- Completeness -1: did NOT mention `GROUP BY 1, 2` positional ordinal as the lighter-weight workaround to repeating the date_trunc expression. Trino 467 supports positional GROUP BY and it's a common idiom in production SQL. Adding "or use `GROUP BY 1, 2` for brevity" would have been complete.
+**CRITICAL ACCURACY ISSUE: the second snippet is invalid Trino 467.**
 
-### Q4 — Cohort comparison (Q1 vs Q2 avg actions in first 30 days)
-**Accuracy 4 | Completeness 4 | Clarity 5 | Actionability 5 | Avg 4.5**
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Accuracy | 2.5 | First snippet (two integer columns: `date_diff('hour', a, b) AS response_hours`, `date_diff('minute', a, b) % 60 AS response_minutes`) is fully correct. `date_diff(unit, ts1, ts2) → bigint` is confirmed at trino.io/docs/current/functions/datetime.html. BUT the formatted-string snippet `concat(date_diff('hour', a, b), 'h ', date_diff('minute', a, b) % 60, 'm')` is a TYPE ERROR in Trino 467. The string-functions docs (trino.io/docs/current/functions/string.html) define `concat(string1, ..., stringN) → varchar` — it requires varchar arguments. `date_diff(...)` returns BIGINT and Trino does NOT implicitly coerce BIGINT to VARCHAR (Trino's type system is strict — confirmed via web search showing the exact "Trino will not convert between character and numeric types" behavior). Engineer running this snippet will get a function-resolution error like `Unexpected parameters (bigint, varchar(2), bigint, varchar(2)) for function concat`. The fix is either `CAST(... AS varchar)` on each BIGINT or `format('%dh %dm', hour_val, minute_val)`. Half-credit because the integer-column form works perfectly; the formatted snippet would fail on first run. |
+| Completeness | 4 | Covers hour and minute separation + the %60 modulo pattern (which is correct). Missing the alternative `format()` idiom (which is the cleanest Trino way to combine BIGINT into a display string). |
+| Clarity | 4 | Two snippets clearly labeled, modulo logic explained. Lost a point because the formatted version misleads beginners into thinking it works. |
+| Actionability | 3 | The hours/minutes column pair is actionable; the formatted-string snippet is NOT actionable because it errors at parse/analysis time. Engineer has to fix it before it runs. |
+| **Q3 avg** | **3.375** | |
 
-- `date_trunc('quarter', created_at)` for cohort labels — verified (Trino 467 docs explicitly list `quarter` as a truncation unit with example output `2001-07-01 00:00:00.000`).
-- `action_time >= signup_date AND action_time < signup_date + INTERVAL '30' DAY` — verified (timestamp + INTERVAL DAY arithmetic valid per docs example `timestamp '2012-08-08 01:00' + interval '29' hour` = `2012-08-09 06:00:00.000`).
-- Two-level aggregation (count per user, then avg per cohort) correctly answers "average actions per user in first 30 days" — methodologically sound.
-- **Accuracy -1 / Completeness -1 caveat**: INNER JOIN to `user_actions` silently drops users with ZERO actions in the first 30 days. For "average actions per cohort", excluding zero-action users biases the average UP. The correct construction is either (a) LEFT JOIN with COALESCE(count, 0), or (b) per-user count via `(SELECT COUNT(*) FROM user_actions ua WHERE ua.user_id = c.user_id AND ua.action_time BETWEEN c.signup_date AND c.signup_date + INTERVAL '30' DAY)` with a LEFT context so zero-action users contribute 0 to the average. The responder did not flag this denominator/zero-user trap. For cohort analytics this is a real semantic bug, not just a stylistic note.
+### Q4 — Most common product pairs (self-join inequality dedup)
+
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5 | Self-join `o1 JOIN o2 ON o1.order_id = o2.order_id AND o1.product_id < o2.product_id` is the textbook combinatorial-pairs dedup pattern in standard SQL — `<` (strict less-than) simultaneously excludes self-pairs (`o1.product_id = o2.product_id` would be a degenerate same-line-item join) AND duplicate ordered pairs (it picks only the canonical `(a,b)` with a<b, not both `(a,b)` and `(b,a)`). COUNT + GROUP BY two product columns + ORDER BY DESC LIMIT 20 is correct. `SUM(count) OVER ()` empty-window for share-of-grand-total is valid Trino 467 (verified above — aggregate-as-window with empty OVER produces grand total broadcast to every row). |
+| Completeness | 5 | Pair-dedup + ranking + share-of-total = full coverage of typical follow-ups. |
+| Clarity | 5 | Clear explanation of WHY `<` (not `<=` or `!=`). |
+| Actionability | 5 | Drop-in. |
+| **Q4 avg** | **5.0** | |
 
 ---
 
-## Verification summary (WebFetch trino.io/docs/467, 2026-06-07)
+## Overall
 
-| Claim | Verified |
+| Question | Avg |
 |---|---|
-| `date_trunc('hour', ts)` floors | YES (docs example 03:04:05.321 -> 03:00:00.000) |
-| `ts + INTERVAL '30' MINUTE` valid Trino | YES (operators table: `time '01:00' + interval '3' hour`) |
-| Nearest-hour idiom `date_trunc('hour', ts + INTERVAL '30' MINUTE)` | YES (algebraically correct + dialect valid) |
-| `date_add('month', -1, ts)` signature | YES (docs: `date_add(unit, value, timestamp)`, negatives OK) |
-| `date_trunc('quarter', ts)` supported | YES (docs truncation units table lists `quarter`) |
-| `ts + INTERVAL '30' DAY` valid | YES (operators + `interval '29' hour` example) |
-| Trino 467 disallows output alias in GROUP BY | YES (docs: only "input column" or "ordinal number" allowed) |
-| Trino 467 allows positional `GROUP BY 1, 2` | YES (docs: "ordinal number selecting an output column by position") |
+| Q1 | 4.5 |
+| Q2 | 5.0 |
+| Q3 | 3.375 |
+| Q4 | 5.0 |
+| **Overall** | **4.46875** |
+
+**Verdict: PASS** (4.46875 >= 3.5). Per directive, the OVERALL AVERAGE governs PASS/FAIL — no per-Q quality-gate override. Q3 (3.375) is below the per-Q threshold and is named as the iter633 FIX-A candidate.
 
 ---
 
-## FIX-A recommendation for iter632
+## iter633 FIX-A recommendation: concat()/format() type-coercion guardrail
 
-**DEFAULT NO-OP / durability-breadth.** No per-question average < 3.5. Lowest per-Q avg is Q4 at 4.5 (zero-action-users INNER-JOIN bias caveat). No required topic is below threshold this iter.
+The Q3 failure is a concrete, reproducible Trino 467 accuracy gap: the responder produced `concat(bigint, varchar, bigint, varchar)` which is a function-resolution error. This is fixable with one tight CANONICAL card.
 
-If a probe slot is available, two SMALL, ADDITIVE, ANCHOR-ONLY enhancements are worth considering (NOT rewrites of any locked canonical):
+**Recommended FIX-A location**: r23 (the SQL/dialect guardrails resource), inoculation card near the existing string-function neighborhood.
 
-1. **r07 cohort/first-30-days block — add a one-line LEFT-JOIN-vs-INNER-JOIN zero-user caveat**: "Use LEFT JOIN + COALESCE(count, 0) to include zero-action users in the cohort average; INNER JOIN excludes them and biases the average upward." Worked example with two users: one with 5 actions, one with 0; INNER-JOIN avg = 5.0, LEFT-JOIN avg = 2.5. Verify a locked cohort canonical doesn't already cover this before adding.
+**Recommended canonical content** (teacher to write — judge does not author resources):
 
-2. **r07 or r28 GROUP BY rule block — add a one-line positional ordinal alternative anchor**: "Trino 467 does NOT allow output-column aliases in GROUP BY; either repeat the expression OR use `GROUP BY 1, 2` positional ordinals." This is purely additive and complements the existing "repeat the expression" guidance.
+1. **Rule**: `concat()` in Trino 467 accepts varchar/array/varbinary ONLY. BIGINT / INTEGER / DOUBLE / DATE / TIMESTAMP are NOT implicitly coerced and produce a function-resolution error. Same is true of the `||` operator.
+2. **Two correct idioms for "combine number + label" display strings**:
+   - **CAST form**: `concat(CAST(hours AS varchar), 'h ', CAST(minutes AS varchar), 'm')`
+   - **format() form (preferred for readability)**: `format('%dh %dm', hours, minutes)` — `format()` is the printf-style function and DOES accept BIGINT/INTEGER args natively.
+3. **DO-NOT-WRITE rows**:
+   - `concat(date_diff('hour', a, b), 'h')` — type error (BIGINT not coercible)
+   - `concat(123, 'rows')` — type error
+   - `'count: ' || 42` — type error (`||` is also varchar-only)
+4. **Worked example** for the response-time scenario:
+   ```sql
+   SELECT
+     ticket_id,
+     date_diff('hour', created_at, first_reply_at) AS response_hours,
+     date_diff('minute', created_at, first_reply_at) % 60 AS response_minutes,
+     format('%dh %dm',
+            date_diff('hour', created_at, first_reply_at),
+            date_diff('minute', created_at, first_reply_at) % 60) AS response_display
+   FROM tickets
+   WHERE first_reply_at IS NOT NULL
+   ```
 
-Both are pure additions; neither touches any locked canonical. Both should be docs-verified via WebFetch before being added. If the iter632 directive prefers strict durability-breadth (no FIX-A), the NO-OP is also defensible — Q4 at 4.5 is comfortably above 3.5, and the overall 4.6875 has +1.1875 margin.
+**Findability cross-refs**:
+- Cross-ref from any existing `date_diff` example that builds a display string.
+- Cross-ref from any "user-facing string" / "format" / "concat" neighborhood in r07/r13/r18.
+
+**Secondary suggestion (Q1 nuance, not FIX-A)**: When the teacher next touches the "new vs returning customers per day" neighborhood, add a one-line WATCH-ITEM about COUNT(DISTINCT customer_id) vs SUM(CASE WHEN ...) — call out that the SUM form counts ORDERS by first-time customers (which double-counts when one customer places two orders on their first day), and that COUNT(DISTINCT customer_id) with the same is_new_customer filter counts CUSTOMERS. This is a 2-line WATCH, not a full FIX-A.
 
 ---
 
-## Score history entry
+## What worked well this iteration
 
-iter631 - 4.6875 PASS - nearest-hour FIX-A LANDED clean (+30min-then-floor), Q4 zero-user INNER-JOIN bias minor caveat
+- Q2 (approx_percentile + PERCENTILE_CONT inoculation) executed flawlessly — the existing canonical at r05 + r23 is producing crisp, complete answers from very different phrasings. Continue holding that lock.
+- Q4 (self-join inequality pair-dedup + SUM() OVER ()) showed the responder synthesizing a non-trivial combinatorial pattern correctly from primitive JOIN + window idioms in resources. No worked "product pairs" example was needed — the synthesis worked.
+- Q1 MIN() OVER (PARTITION BY) first-event flagging was synthesized correctly from the established first_event_at / signed_up_at neighborhood patterns. Findability working as designed.
+
+## Patterns to watch
+
+- The concat()/format() type-coercion gap is the second time in recent iterations a string-display formatting question has surfaced a Trino-strict-typing miss. After FIX-A lands, probe with another display-string question (e.g., "format currency", "build a status label from numeric tier") to verify the canonical sticks.
