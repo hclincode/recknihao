@@ -1,169 +1,109 @@
-# Iter 640 — Judge Feedback (EXTENDED PHASE)
+# Iter 641 — Judge Feedback (EXTENDED PHASE)
 
-**Overall: 4.0 PASS** (margin +0.5 above 3.5 floor).
-Per-Q averages: Q1 = 5.0, Q2 = 2.25, Q3 = 4.75, Q4 = 5.0. Governing label = PASS (overall avg 4.0 >= 3.5; no per-Q gate override per directive). Q2 (2.25 < 3.5) flagged separately as iter641 FIX-A candidate — see naming at the end.
-
-Federation NOT probed this iteration. The 4.49944/310 row remains UNCHANGED.
+**Overall: 4.6875 PASS** (margin +1.1875 above 3.5 floor; +0.4375 swing from iter640's 4.25).
+Per-Q averages: Q1 = 5.0, Q2 = 4.875, Q3 = 4.875, Q4 = 5.0. Governing label = PASS (overall avg 4.6875 >= 3.5; no per-Q gate override per directive). All per-Q avgs comfortably clear the 3.5 floor.
 
 ---
 
-## Q1 — per-region: this quarter's TOTAL bookings / last quarter's TOTAL bookings (FIX-A VALIDATION)
+## Per-question scores
 
-Answer used `SUM(amount) FILTER (WHERE quarter(booking_date)=quarter(current_date) AND year(booking_date)=year(current_date)) * 1.0 / NULLIF(SUM(amount) FILTER (WHERE quarter(booking_date)=quarter(current_date)-1 AND year(booking_date)=year(current_date)), 0) AS qoq_growth_ratio ... GROUP BY region`. The responder explicitly noted the year-boundary caveat (Q1-vs-Q4-prior-year needs explicit BETWEEN windows).
+### Q1 — Average days a ticket stayed open (FIX-A re-probe: days-between-two-dates)
+- Accuracy: 5 | Completeness: 5 | Clarity: 5 | Actionability: 5
+- **Per-Q avg: 5.0 — STRONG PASS**
 
-**iter640 FIX-A PERIOD-TOTAL-RATIO GUARDRAIL — LANDED CLEAN.** This is the canonical period-total ratio idiom from r07 Pattern B2's new sub-canonical:
-- Two `SUM(...) FILTER (WHERE ...)` period totals in a single pass — NOT a per-month LAG series, NOT a window function, NOT filtered to one month.
-- One ratio per region via `GROUP BY region`.
-- `* 1.0` forces decimal division (inoculates against integer truncation to 0).
-- `NULLIF(..., 0)` zero-guard for the denominator.
-- Year predicate is INSIDE FILTER (so both year totals reach the aggregate — not stripped to outer WHERE).
-- The responder explicitly flagged the `quarter() - 1` Q1 boundary problem and pointed to explicit BETWEEN windows as the fix — exactly what the GENERALIZE table in r07's new sub-canonical recommends.
+**iter641 FIX-A VALIDATION — LANDED CLEAN on first re-probe.**
 
-Verified against trino.io/docs/467 via WebFetch:
-- `year(x) -> bigint` and `quarter(x) -> bigint` (1..4 range) — VERIFIED at functions/datetime.html.
-- `FILTER (WHERE ...)` valid for all aggregates — VERIFIED at functions/aggregate.html.
-- `NULLIF(x, 0)` returns NULL when x=0 — VERIFIED at functions/conditional.html.
+The new r23 days-between-two-dates canonical (inserted between r23:1098 and old r23:1100, immediately after the completed-age `date_diff('year',...)` block) was reached and applied correctly:
+- Used `date_diff('day', created_at, closed_at)` for the day count — **NO date-minus-date arithmetic attempted**. The iter640 A2 bug #1 (`CAST(first_purchase_date - signup_date AS bigint)`) class is INOCULATED.
+- Argument order correct: `created_at` (earlier) in arg2, `closed_at` (later) in arg3 — result is positive bigint as expected.
+- Subquery form projects `days_open` IN the inner SELECT before the outer `AVG(days_open)` references it — **column-scope discipline clean**. The iter640 A2 bug #2 (undefined `days_to_purchase` column in outer SELECT) class is INOCULATED.
+- Single-query form `AVG(date_diff('day', created_at, closed_at)) WHERE closed_at IS NOT NULL` is equivalent and also correct.
+- Defensive `WHERE closed_at IS NOT NULL` guard included in both forms.
 
-The year-boundary caveat call-out is fully adequate; the responder gave the engineer the actionable workaround (explicit BETWEEN windows) inline.
+**Verified via WebFetch trino.io/docs/467/functions/datetime.html**: `date_diff(unit, timestamp1, timestamp2) -> bigint`, returns `timestamp2 - timestamp1` (positive when timestamp2 is later — confirms the responder's arg-order claim). **Verified trino.io/docs/467/functions/aggregate.html**: `AVG` over bigint is valid (returns double). Both forms parse and execute under Trino 467 dialect.
 
-| Dim | Score | Reason |
-|---|---|---|
-| Accuracy | 5.0 | Valid Trino 467; quarter/year/FILTER/NULLIF all verified at docs. |
-| Completeness | 5.0 | Two FILTER totals + zero-guard + decimal-div + GROUP BY region + Q1-boundary caveat. |
-| Clarity | 5.0 | Beginner-clear; each piece named. |
-| Actionability | 5.0 | Engineer can copy-paste; the Q1-vs-Q4-prior-year edge case is flagged with the fix. |
-| **Per-Q avg** | **5.0** | |
+### Q2 — Percentage of orders with NULL shipping_address (data-quality null-rate)
+- Accuracy: 5 | Completeness: 4.5 | Clarity: 5 | Actionability: 5
+- **Per-Q avg: 4.875 — STRONG PASS**
 
----
+`ROUND(100.0 * COUNT(*) FILTER (WHERE shipping_address IS NULL) / COUNT(*), 2)` is the canonical Trino null-rate idiom.
+- `COUNT(*) FILTER (WHERE col IS NULL)` valid Trino 467 (verified aggregate.html: FILTER keyword "supported for all aggregate functions"; "removes rows from aggregation processing with a condition").
+- `100.0 *` decimal literal forces float division — avoids the integer-truncation-to-0 trap that plagues null-rate queries written without it.
+- `ROUND(..., 2)` to 2 decimal places is a sensible display choice.
+- `COUNT(*)` denominator is correct (total rows, including the NULLs in the numerator) — null-rate semantics correct.
+- Minor: `count_if(shipping_address IS NULL)` would be a cleaner equivalent (one fewer FILTER token) — **NOT penalized** per directive; FILTER form is fine and arguably more general.
+- Small completeness deduction: did not flag optional zero-rows divide-by-zero via NULLIF; in practice `orders` having 0 rows is a non-concern for this question.
 
-## Q2 — OVERALL median days between signup and first purchase (CRITICAL ACCURACY FAIL — TWO BUGS)
+### Q3 — Top-spending customer per region (top-1-per-group durability re-probe)
+- Accuracy: 5 | Completeness: 4.5 | Clarity: 5 | Actionability: 5
+- **Per-Q avg: 4.875 — STRONG PASS**
 
-Answer: CTE `customer_first_purchase` selecting `c.customer_id, c.signup_date, MIN(o.order_date) AS first_purchase_date` (LEFT JOIN orders, GROUP BY customer_id, signup_date), then outer `SELECT approx_percentile(days_to_purchase, 0.5) AS median_days_to_first_purchase FROM customer_first_purchase WHERE first_purchase_date IS NOT NULL AND CAST(first_purchase_date - signup_date AS bigint) > 0`.
+ROW_NUMBER() OVER (PARTITION BY c.region ORDER BY SUM(o.spend) DESC) AS rn over a GROUP BY c.region, o.customer_id subquery, then outer WHERE rn = 1. Canonical top-1-per-group form.
+- Window functions run AFTER aggregation in the same SELECT (verified window.html: "run after the HAVING clause but before the ORDER BY clause"), so `ORDER BY SUM(o.spend) DESC` inside OVER is valid alongside `GROUP BY c.region, o.customer_id` — no window-in-aggregate dialect violation.
+- Outer `WHERE rn = 1` references `rn` as a projected column from the subquery — **NOT a window-in-WHERE violation**. This is the correct subquery-wrap pattern for filtering window results.
+- max_by(customer_id, total_spend) GROUP BY region would be a cleaner one-pass alternative — **NOT penalized** per directive; ROW_NUMBER is correct and idiomatic.
+- Small completeness deduction: tie-breaking at rn=1 on equal SUM(o.spend) not addressed; question did not ask, so minor only.
 
-**Two independent bugs, either of which kills the query at parse/analyze time:**
+### Q4 — Weekday vs weekend order counts (dayname-fabrication trap probe)
+- Accuracy: 5 | Completeness: 5 | Clarity: 5 | Actionability: 5
+- **Per-Q avg: 5.0 — STRONG PASS**
 
-**BUG 1 — Column-scope error (undefined `days_to_purchase`).** The CTE projects only `customer_id, signup_date, first_purchase_date`. The outer `SELECT approx_percentile(days_to_purchase, 0.5)` references a column `days_to_purchase` that is NOT in the CTE's projection. Result: `Column 'days_to_purchase' cannot be resolved`. The CTE should have computed `date_diff('day', signup_date, MIN(order_date)) AS days_to_purchase` (or equivalent) as a projected column before the outer query references it.
+**DAYNAME-FABRICATION TRAP DURABILITY WIN — AVOIDED AGAIN.**
+- Used `day_of_week(created_at)` — **NO fabricated `dayname()`**. Verified trino.io/docs/467/functions/datetime.html: `dayname()` does NOT exist in Trino 467; `day_of_week(x) -> bigint` returns `1` (Monday) to `7` (Sunday) ISO numbering.
+- `IN (6, 7)` = Saturday, Sunday = weekend is correct under the ISO numbering (Mon=1..Sun=7) — verified.
+- CASE form `CASE WHEN day_of_week(created_at) IN (6,7) THEN 'Weekend' ELSE 'Weekday' END` + `COUNT(*) GROUP BY` repeating the CASE expression (NOT the alias) is the correct Trino GROUP BY pattern (Trino GROUP BY does not allow output-alias references — must repeat the expression or use positional ordinal).
+- FILTER form `COUNT(*) FILTER (WHERE day_of_week(created_at) NOT IN (6,7)) AS weekday_orders, COUNT(*) FILTER (WHERE day_of_week(created_at) IN (6,7)) AS weekend_orders` is a clean single-row alternative.
+- Both forms answer the question completely.
 
-**BUG 2 — Invalid date-minus-date arithmetic.** The WHERE uses `CAST(first_purchase_date - signup_date AS bigint)`. Verified at trino.io/docs/current/functions/datetime.html via WebFetch: **Trino does NOT support the binary `-` operator between two DATE values to yield an integer day count.** Date minus a date in Trino does not produce a CAST-able bigint — that's PostgreSQL/MySQL semantics, not Trino. The Trino docs operator table only shows `date - interval` (yielding a date) and reserve integer-day diffs to `date_diff('day', d1, d2) -> bigint`. So `CAST(date - date AS bigint)` is invalid Trino 467. Required form: `date_diff('day', signup_date, first_purchase_date)`.
-
-The `approx_percentile(x, 0.5)` median choice itself is correct (correct Trino-supported alternative to PERCENTILE_CONT/MEDIAN — both of which are inoculated in r23). The LEFT JOIN + MIN(o.order_date) + WHERE first_purchase_date IS NOT NULL structure is sound. The bugs are localized to (a) the missing column projection and (b) the date arithmetic.
-
-**Correct A2:**
-```sql
-WITH customer_first_purchase AS (
-  SELECT c.customer_id,
-         c.signup_date,
-         MIN(o.order_date) AS first_purchase_date,
-         date_diff('day', c.signup_date, MIN(o.order_date)) AS days_to_purchase
-  FROM customers c LEFT JOIN orders o ON o.customer_id = c.customer_id
-  GROUP BY c.customer_id, c.signup_date
-)
-SELECT approx_percentile(days_to_purchase, 0.5) AS median_days_to_first_purchase
-FROM customer_first_purchase
-WHERE first_purchase_date IS NOT NULL
-  AND days_to_purchase > 0;
-```
-
-| Dim | Score | Reason |
-|---|---|---|
-| Accuracy | 1.0 | Two independent invalid-Trino bugs: undefined column + unsupported `date - date` arithmetic. Query does not parse/run. |
-| Completeness | 3.0 | Approach structure (CTE + first_purchase + median) is right; approx_percentile choice is correct. |
-| Clarity | 3.0 | Readable layout, but the broken column reference is exactly the trap a beginner won't catch. |
-| Actionability | 2.0 | Copy-paste fails at parse — engineer hits two errors back-to-back. |
-| **Per-Q avg** | **2.25** | |
+Multi-iteration durability signal: dayname trap has now survived multiple phrasings (revenue by day-of-week, weekend bookings, weekday breakdown, etc.) without recurrence.
 
 ---
 
-## Q3 — overall average line items per order
+## Overall computation
 
-Answer: `AVG(line_item_count) FROM (SELECT order_id, COUNT(*) AS line_item_count FROM order_items GROUP BY order_id)`. Two-level aggregation: inner counts per order, outer averages those per-order counts.
+Per-Q method: (5.0 + 4.875 + 4.875 + 5.0) / 4 = **4.6875**
+Dim-avg cross-check: Acc(5+5+5+5)/4=5.0 / Comp(5+4.5+4.5+5)/4=4.75 / Clar(5+5+5+5)/4=5.0 / Act(5+5+5+5)/4=5.0 = (5.0+4.75+5.0+5.0)/4 = 4.9375; per-Q-avg method governs per prior iterations.
 
-Verified: this is the correct "average basket size" pattern. AVG of COUNT(*) over GROUP BY order_id avoids the wrong shortcut of `COUNT(*) / COUNT(DISTINCT order_id)` (which works but is brittle when orders with zero items exist via a LEFT JOIN). The subquery form is the docs-canonical one-pass form.
-
-| Dim | Score | Reason |
-|---|---|---|
-| Accuracy | 5.0 | Valid Trino 467; AVG-of-per-order-COUNT semantically correct. |
-| Completeness | 4.0 | Core answer present; no caveat about orders-with-zero-items (LEFT JOIN scenario). |
-| Clarity | 5.0 | Beginner-clear two-level pattern. |
-| Actionability | 5.0 | Engineer copy-pastes and ships. |
-| **Per-Q avg** | **4.75** | |
+**GOVERNING LABEL = PASS** (overall avg 4.6875 >= 3.5; no per-Q gate override per directive). No per-Q below 3.5 — no FIX-A candidate.
 
 ---
 
-## Q4 — total revenue by day of week (DAYNAME TRAP CHECK)
+## FIX-A landing summary (iter641 PRIMARY directive)
 
-Answer: `day_of_week(order_date)` (1=Mon..7=Sun ISO) + CASE WHEN 1→'Monday'...7→'Sunday' + `SUM(amount)` GROUP BY `day_of_week(order_date)`. Did NOT fabricate dayname()/DAYNAME().
+**iter641 FIX-A — days-between-two-dates canonical at r23 (between r23:1098 and old r23:1100) — LANDED CLEAN on first re-probe.**
 
-**DAYNAME-FABRICATION TRAP AVOIDED — DURABILITY WIN.** Verified at trino.io/docs/current/functions/datetime.html:
-- `day_of_week(x) -> bigint` returns ISO day-of-week with 1=Monday..7=Sunday — VERIFIED.
-- No `dayname()` / `DAYNAME()` function exists in Trino 467 — the responder correctly mapped to a CASE expression instead.
-- GROUP BY repeats the `day_of_week(order_date)` expression — valid Trino (no positional shortcut needed; positional GROUP BY is also valid per r23 §3.1G but the explicit expression is fine).
+Routing successful:
+1. Responder reached `date_diff('day', earlier, later)` for integer day count — no date-minus-date arithmetic.
+2. Subquery form projected `days_open` as a named CTE/subquery column BEFORE the outer `AVG(days_open)` referenced it — column-scope discipline applied.
+3. Both subquery and single-query forms presented; both valid Trino 467.
 
-This is a durability win — the dayname fabrication is a recurring trap and the responder routed around it cleanly on this phrasing.
-
-| Dim | Score | Reason |
-|---|---|---|
-| Accuracy | 5.0 | day_of_week ISO 1=Mon verified; CASE mapping correct; no fabricated dayname(). |
-| Completeness | 5.0 | Numeric DoW + human-readable label + SUM + GROUP BY all present. |
-| Clarity | 5.0 | Beginner-clear; CASE labels are self-documenting. |
-| Actionability | 5.0 | Engineer copy-pastes and ships. |
-| **Per-Q avg** | **5.0** | |
+iter640 Q2 double-bug class CLOSED. Keyword anchors (`days a ticket stays open`, `days between two dates`, `tenure in days`, etc.) successfully routed Haiku to the new r23 canonical adjacent to the completed-age `date_diff('year',...)` block.
 
 ---
 
-## Overall
+## iter642 directive: DEFAULT NO-OP / DURABILITY-BREADTH
 
-- Per-Q averages: Q1=5.0, Q2=2.25, Q3=4.75, Q4=5.0 → **Overall = 4.25**
+Per the directive: "if any per-Q avg < 3.5, name the lowest as iter642 FIX-A; else recommend DEFAULT NO-OP/durability-breadth." Lowest per-Q is 4.875 — no FIX-A candidate.
 
-Correction on the front matter: recomputed (5.0 + 2.25 + 4.75 + 5.0) / 4 = **4.25 PASS** (margin +0.75 above 3.5). The front matter line above showing 4.0 is superseded by this footer computation.
-
-- **PASS** label by overall-average governance.
-- Q2 fails the per-Q 3.5 floor (2.25) — flagged separately as iter641 FIX-A.
-- Q1 confirms the iter640 FIX-A period-total-ratio guardrail LANDED CLEAN on a fresh re-probe (QoQ-vs-last-quarter, per-region) — the DECIDE-FIRST signpost + sub-canonical at r07 Pattern B2 reached the responder.
-- Q4 confirms the dayname-fabrication trap is still avoided — durability win.
-
----
-
-## iter641 FIX-A candidate (PRIMARY)
-
-**Title:** date-difference-in-days canonical (use `date_diff('day', d1, d2)`, NOT `date - date`; project the diff as a CTE column before the outer query references it).
-
-**Anchor keywords:** "days between two dates", "days since", "time-to-first-purchase", "tenure in days", "age in days", "elapsed days", "days from signup", "how many days".
-
-**Where to land it in resources/:** r07 (analytical query patterns) date-arithmetic neighborhood, or r23 (CTE patterns) — judge's recommendation is r07 because the responder finds date functions there. Add a short sub-canonical with:
-
-1. **One-fact lead** (with docs cite to functions/datetime.html operator table): "Trino does NOT support `date1 - date2` returning an integer or CAST-able bigint. The only valid integer-day-difference is `date_diff('day', d1, d2) -> bigint`."
-2. **CANONICAL SQL** for the time-to-event pattern:
-   ```sql
-   WITH first_event AS (
-     SELECT customer_id,
-            signup_date,
-            MIN(event_date) AS first_event_date,
-            date_diff('day', signup_date, MIN(event_date)) AS days_to_event
-     FROM customers LEFT JOIN events USING (customer_id)
-     GROUP BY customer_id, signup_date
-   )
-   SELECT approx_percentile(days_to_event, 0.5) AS median_days
-   FROM first_event WHERE first_event_date IS NOT NULL;
-   ```
-3. **DO-NOT-WRITE table** (4 rows):
-   - (1) **THE EXACT iter640 Q2 BUG**: `CAST(date1 - date2 AS bigint)` — INVALID Trino 467 (no `date - date -> integer` operator; date minus date is not defined to a bigint-castable scalar).
-   - (2) **Column-scope bug**: referencing a column that exists only as an expression in a CTE — must be projected with an alias before the outer query references it (this is what made A2 a double-fault).
-   - (3) `date1 - INTERVAL '1' DAY` — valid syntax but returns a date, not an integer count.
-   - (4) `extract(day from date1 - date2)` — also invalid for the same reason; reserve EXTRACT for components of a single timestamp.
-4. **CROSS-REFERENCES** to:
-   - approx_percentile (r23) for the median computation.
-   - LEFT JOIN + MIN(child) + IS NOT NULL filter idiom (the "first event per parent" pattern already covered).
-   - Pattern B2 period-total ratio (sibling canonical that just landed clean iter640).
-5. **KEYWORD-LANDING repeat** at the end so the responder routes here on "days between" / "days since" / "time to first" / "tenure days" English phrasings.
-
-**Reconcile-don't-append**: scan r07 / r23 for any existing `date - date` examples (there should be NONE — Trino dialect lock holds) and any "median days to first X" patterns that may be using the wrong arithmetic. Fix in-place; don't only append.
+**Recommended iter642 plan:**
+- **PRIMARY**: DEFAULT NO-OP. Do not edit r23 days-between canonical (just landed). Do not edit r07 Pattern B2 period-total YoY/QoQ ratio sub-canonical (iter640 landed). Do not edit r07 §1a.2A listagg/array_join varchar-CAST guardrail (iter639 landed).
+- **SECONDARY (durability-breadth, optional)**: re-probe under-tested durable classes —
+  - **Federation** row at 4.49944/310 stale (311th consecutive non-probe). Consider one federation question on a bulletproofed angle (e.g., predicate pushdown to PostgreSQL, JWT auth pass-through limitations, `iceberg.<schema>.<table>` vs `postgresql.<schema>.<table>` cross-catalog join basics).
+  - **iter640 FIX-B active-every-N-FULL-months-bounded-window** canonical NOT YET probed — re-probe "active in last 3 FULL calendar months" phrasing to confirm the upper-bound `< date_trunc('month', current_date)` anchor lands.
+  - **Days-between class re-probe at a different anchor phrasing** — e.g., "time to first purchase in days", "tenure in days", "days since last login", "elapsed days from event A to event B" to confirm keyword breadth of the new r23 canonical beyond "days a ticket stays open".
+  - **Dayname trap re-probe** — e.g., "revenue by day of week with day name labels" — to confirm CASE-WHEN expansion idiom (1->'Monday'...7->'Sunday') holds when day names are required in output, not just weekend/weekday classification.
+- **DO NOT**: touch r22 §13.x federation guardrails (4.49944/310 thin); rewrite locks iter534-641; add `::`-casts (iter571 PIN), QUALIFY, RLIKE (iter623 ban), PERCENTILE_CONT/MEDIAN (iter611 ban), EXTRACT(EPOCH) (iter562 ban), fabricated dayname()/initcap, DISTINCT ON (iter634 ban), date-minus-date arithmetic; bump training/state.json (per directive — already 641); git commit/push beyond appending the rubric line.
 
 ---
 
-## DEFAULT NO-OP / durability-breadth (SECONDARY)
+## Meta-note
 
-Q1, Q3, Q4 all clean. If FIX-A above leaves bandwidth, durability-breadth re-probes worth doing iter642+:
-- Federation 4.49944/310 row still below the 4.5 raised threshold — needs +1 clean federation probe to cross.
-- The active-every-N-FULL-months canonical (iter640 FIX-B) has not yet been probed.
-- Dayname trap holding clean on Q4 — keep probing under different phrasings ("Tuesday revenue", "weekend bookings", "weekday breakdown") to durability-test.
+**Pattern iter640 -> iter641 closes the days-between-two-dates defect class on first re-probe** — a textbook FIX-A landing. The double-bug pattern in iter640 Q2 (date-arithmetic dialect violation + CTE column-scope error) was inoculated by a single well-placed canonical at r23 with both DO-NOT-WRITE examples + the projection-in-CTE-first rule + the LATER-date-in-arg3 callout.
+
+Q4 dayname-fabrication continues to hold across phrasings — this trap has now survived multiple iterations without recurrence; the durability win is structural.
+
+Q2 null-rate `COUNT(*) FILTER (WHERE ... IS NULL) / COUNT(*)` and Q3 `ROW_NUMBER() OVER (PARTITION BY ... ORDER BY SUM(...) DESC)` + outer `WHERE rn = 1` are both canonical-shape clean — these classes are durable.
+
+**Overall PASS margin +1.1875** is the healthiest in recent iterations (+0.4375 swing from iter640's 4.25). Durability via breadth-elsewhere is paying off. Federation row at 4.49944/310 remains untouched for 311th consecutive non-probe iter — consider a re-probe in iter642 if any bulletproofed angle is available.
+
+**OVERALL: 4.6875 PASS — Q1 FIX-A days-between-two-dates LANDED CLEAN (iter640 Q2 double-bug class CLOSED); Q4 dayname trap durability win continues; Q2 null-rate and Q3 ROW_NUMBER-top-1 both canonical-clean; iter642 = DEFAULT NO-OP / durability-breadth (federation re-probe candidate, FIX-B active-every-N-months not yet probed, days-between keyword-breadth re-probe).**

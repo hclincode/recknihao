@@ -1097,6 +1097,86 @@ SELECT CAST(to_unixtime(occurred_at) * 1000 AS BIGINT) AS epoch_millis FROM even
 >
 > **DO NOT WRITE:** `date_diff('year', date_of_birth, current_date) AS age` — over-counts by 1 for every subscriber whose birthday this year has not yet passed (it returns the year-field difference, not completed-years age). Use the CASE-adjusted form above.
 
+> **LEADING CANONICAL — DAYS BETWEEN TWO DATES (and the column-scope discipline that goes with it)** *(iter641 PIN — FIX-A: median days signup→first-purchase, two bugs fixed; reconcile-in-place with the completed-age date_diff canonical above)*.
+>
+> *Keyword anchors (READ THIS FIRST if your question contains any of these):* **days between two dates, days since signup, time to first purchase in days, tenure in days, account age in days, elapsed days, how many days from X to Y, days a ticket stays open, days from signup to first purchase, days to convert, days until first event, days between event A and event B, lag in days, gap in days.** Verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html) on 2026-06-07 (operator table + `date_diff` signature).
+>
+> **THE ONE FACT — Trino has NO `date − date` integer-subtraction operator.** The Trino 467 operator table lists only `date - interval -> date`, `time - interval -> time`, `timestamp - interval -> timestamp`, and `interval - interval -> interval`. There is **no `date - date -> integer`** (and no `date - date -> bigint`) operator. The integer day count between two dates is computed exclusively with **`date_diff('day', earlier, later) -> bigint`**. Per the docs verbatim: `date_diff(unit, timestamp1, timestamp2)` *"Returns `timestamp2 - timestamp1` expressed in terms of `unit`"* — so the result is **POSITIVE when `timestamp2` is later than `timestamp1`** (i.e. the **later** date goes in the **third** argument).
+>
+> **THE PREFERRED CANONICAL — median days from signup to first purchase** (the exact iter640 Q2 shape, FIXED — both the column-scope bug AND the bogus `date - date` cast are eliminated):
+>
+> ```sql
+> -- Trino 467 — median number of days each customer takes to make their first purchase.
+> -- date_diff('day', signup_date, first_order_date) is COMPUTED and PROJECTED inside the CTE,
+> -- THEN referenced by name in the outer approx_percentile().
+> WITH customer_first_purchase AS (
+>   SELECT c.customer_id,
+>          date_diff('day', c.signup_date, MIN(o.order_date)) AS days_to_purchase
+>   FROM   iceberg.analytics.customers c
+>   JOIN   iceberg.analytics.orders    o ON o.customer_id = c.customer_id
+>   GROUP BY c.customer_id, c.signup_date
+> )
+> SELECT approx_percentile(days_to_purchase, 0.5) AS median_days_to_first_purchase
+> FROM   customer_first_purchase
+> WHERE  days_to_purchase IS NOT NULL;
+> ```
+>
+> **Why each piece is what it is.**
+> - **`date_diff('day', c.signup_date, MIN(o.order_date))`** — `signup_date` is the **earlier** argument, `MIN(order_date)` is the **later** argument; result is a non-negative `bigint` count of days. The signature is `date_diff(unit, timestamp1, timestamp2) -> bigint` and returns `timestamp2 - timestamp1`, so putting `signup_date` second would silently negate the answer (you'd get **negative** days, which then makes a "median days" reading nonsensical).
+> - **The expression is computed AND projected inside the CTE** as the alias `days_to_purchase`. The outer query then references `days_to_purchase` by name. This is **non-optional** — see the COLUMN-SCOPE-DISCIPLINE note below for why.
+> - **`approx_percentile(days_to_purchase, 0.5)`** — Trino's docs-supported median primitive. **`PERCENTILE_CONT(0.5) WITHIN GROUP (...)` is NOT supported in Trino 467**, and **there is no `MEDIAN` function** — see the [approx_percentile/PERCENTILE_CONT inoculation §3.1D](#31d-arbitrary--any_value-pick-one-value-per-group-and-max_by--min_by-deterministic-representative-value-pick) for the full guardrail.
+> - **`WHERE days_to_purchase IS NOT NULL`** — the INNER JOIN above only emits rows for customers who *have* placed an order, so this filter is defensive (and is what you'd need if you switched to LEFT JOIN — see the LEFT-JOIN variant below).
+>
+> **COLUMN-SCOPE DISCIPLINE (the iter640 Q2 bug, same class as the iter635/iter636 share-of-subset scope rule).** A column that appears in the outer query — including inside `approx_percentile(...)`, inside `WHERE`, inside `ORDER BY`, inside another aggregate — **MUST already be in the SELECT list of the CTE or subquery that the outer query reads from**. You **cannot** reference a *conceptual expression* (like "the number of days from signup to first purchase") that the CTE never projected; the outer query sees only the CTE's projected columns by their projected names. The iter640 Q2 responder wrote `approx_percentile(days_to_purchase, 0.5)` against a CTE whose `SELECT` list was `customer_id, signup_date, first_purchase_date` — `days_to_purchase` was never in that list. Result: **`Column 'days_to_purchase' cannot be resolved`** at analyze time. The fix is exactly what the canonical does — compute `date_diff('day', signup, MIN(order_date)) AS days_to_purchase` **inside** the CTE's `SELECT` list, then refer to it above. This is the same universal-SQL scope rule that the [iter635/iter636 share-of-subset final-assembly canonical](07-analytical-query-patterns.md#leading-canonical--share-of-a-subset-over-the-grand-total-final-assembly-form--single-pass-conditional-sum--filter-no-cte-cross-join-iter636-pin--fix-a-subset-share-final-assembly-column-scope-bug) covers for `SUM(total_spend)`-against-a-base-column-the-CTE-didnt-project; same class of bug, different units. **Compute it in the CTE, project it with an alias, then use the alias above.**
+>
+> **LEFT JOIN VARIANT — count converters AND non-converters separately.** The INNER JOIN above silently drops customers who never purchased (and therefore have no `MIN(order_date)`). If the question explicitly says "include customers who never converted" or "what fraction never bought anything", switch to LEFT JOIN and either (a) filter `WHERE first_order_date IS NOT NULL` to compute the **median of converters only**, or (b) keep the NULLs out of `approx_percentile` (it ignores NULLs per docs) and report a separate `COUNT(*) FILTER (WHERE first_order_date IS NULL)` non-converter count alongside the median.
+>
+> ```sql
+> -- Variant: include non-converters in the population count, but median only over converters.
+> WITH customer_first_purchase AS (
+>   SELECT c.customer_id,
+>          c.signup_date,
+>          MIN(o.order_date) AS first_order_date  -- NULL when the customer never ordered
+>   FROM   iceberg.analytics.customers c
+>   LEFT JOIN iceberg.analytics.orders o ON o.customer_id = c.customer_id
+>   GROUP BY c.customer_id, c.signup_date
+> )
+> SELECT
+>   approx_percentile(date_diff('day', signup_date, first_order_date), 0.5)
+>     AS median_days_to_first_purchase_converters,
+>   COUNT(*) FILTER (WHERE first_order_date IS NULL) AS never_converted,
+>   COUNT(*) FILTER (WHERE first_order_date IS NOT NULL) AS converted
+> FROM customer_first_purchase;
+> ```
+>
+> Both `signup_date` and `first_order_date` are projected by the CTE; `date_diff` is evaluated at the outer level where both columns are in scope — this also satisfies the column-scope discipline.
+>
+> **GENERALIZE — same pattern, different "earlier/later" pairs.**
+>
+> | Question | Earlier (arg 2 of date_diff) | Later (arg 3 of date_diff) | Expression |
+> |---|---|---|---|
+> | Days from signup to first purchase | `signup_date` | `MIN(order_date)` | `date_diff('day', signup_date, MIN(order_date))` |
+> | Days a ticket stayed open | `created_at` | `closed_at` | `date_diff('day', created_at, closed_at)` |
+> | Days since last login (per user) | `MAX(login_at)` | `current_date` | `date_diff('day', MAX(login_at), current_date)` |
+> | Account age in days | `signup_date` | `current_date` | `date_diff('day', signup_date, current_date)` |
+> | Days between two events of the same kind | `lag_event_at` | `event_at` | `date_diff('day', lag_event_at, event_at)` (pair with `LAG(event_at) OVER (...)`) |
+>
+> All of these return a non-negative `bigint` when the "later" argument is genuinely later — and a negative `bigint` if you swap them, which is the easiest way to spot an argument-order mistake.
+>
+> **DO NOT WRITE — the exact iter640 Q2 bugs, plus the close cousins.**
+>
+> | Wrong | Why it fails / is wrong | Use instead |
+> |---|---|---|
+> | `CAST(first_purchase_date - signup_date AS bigint) AS days_to_purchase` | **INVALID Trino 467** — there is no `date - date -> integer` operator. The Trino 467 operator table only documents `date - interval -> date` (and `timestamp - timestamp -> interval`, which is an **interval**, not a `bigint`). The `CAST` does not rescue the expression because the inner subtraction never parses to an integer-typed value. | `date_diff('day', signup_date, first_purchase_date) AS days_to_purchase` |
+> | `approx_percentile(days_to_purchase, 0.5)` where the CTE's `SELECT` list did NOT project `days_to_purchase` | **Column-scope error** — `days_to_purchase` was never in the CTE's projected output, so the outer query cannot resolve the name. The query fails at analyze time with `Column 'days_to_purchase' cannot be resolved`. | Compute `date_diff('day', signup_date, MIN(order_date)) AS days_to_purchase` **inside** the CTE's `SELECT` list, then reference the alias in the outer `approx_percentile(...)`. |
+> | `date_diff('day', later, earlier)` (arguments swapped) | Returns a **negative** `bigint` per the docs (`timestamp2 - timestamp1`); silently wrong if you `approx_percentile` it — you'll get a negative median that looks like a parse-time success. | Always put the **earlier** date as arg 2 and the **later** date as arg 3: `date_diff('day', signup_date, first_order_date)`. |
+> | `EXTRACT(DAY FROM (first_order_date - signup_date))` | Same root problem — `first_order_date - signup_date` does not produce a Trino value you can EXTRACT a `DAY` field from (no `date - date` operator). Even for `timestamp - timestamp`, the result is an **interval day to second**, and `EXTRACT(DAY FROM interval)` returns the day-field of that interval, **not** the total-day count (interval day-to-second has a hours-minutes-seconds remainder; EXTRACT(DAY) gives the integer days but adopting this idiom invites the timestamp-vs-date confusion). | `date_diff('day', earlier, later)` — single function, returns total whole days as `bigint`, no interval-field surprises. |
+> | `DATEDIFF(day, signup_date, first_order_date)` | **NOT a Trino function** — `DATEDIFF` is SQL Server / Spark dialect; Trino uses `date_diff` (snake_case) with a quoted `unit` string. Raises *"Function 'datediff' not registered"*. | `date_diff('day', signup_date, first_order_date)` (lowercase, underscore, quoted unit). |
+>
+> **One-line rule.** *Any* "days between X and Y" / "tenure in days" / "elapsed days" / "time to event in days" question is **`date_diff('day', earlier, later)`** — never `date - date`, never `CAST(date - date AS bigint)`, never `EXTRACT(DAY FROM date - date)`, never `DATEDIFF`. And whatever expression you reference in the outer query (whether inside `approx_percentile`, `WHERE`, or `ORDER BY`) **must already be in the CTE's `SELECT` list under that name**.
+>
+> **Cross-references.** Completed-age (`date_diff('year', ...)` with the un-passed-birthday CASE adjust) is the sibling canonical for the **years**-unit form — see the [LEADING CANONICAL — AGE IN COMPLETED WHOLE YEARS](#) block immediately above. The `date_diff` signature is cited verbatim throughout this section and in [resource 07 §retention cohorts](07-analytical-query-patterns.md) where `date_diff('day', first_event_at, event_time)` and `date_diff('week', cohort_week, event_time)` appear in the cohort and 7/30/90-day retention canonicals. The column-scope discipline applies identically to the [iter636 share-of-subset final-assembly canonical](07-analytical-query-patterns.md) (where the responder tried to `SUM(total_spend)` against a base column the CTE never projected).
+
 > **DO NOT WRITE.** (1) **"Trino supports `EXTRACT(EPOCH FROM ts)`"** — FALSE; Trino's `EXTRACT` has NO `EPOCH` field (only YEAR/QUARTER/MONTH/WEEK/DAY/DOW/DOY/HOUR/MINUTE/SECOND/TIMEZONE_*). The statement fails. (2) **"`to_unixtime` returns milliseconds"** — FALSE; `to_unixtime(timestamp) → double` returns **SECONDS** as a DOUBLE per docs. For milliseconds, **multiply by 1000** (`to_unixtime(ts) * 1000`). (3) **"`EXTRACT` works the same on Trino and Postgres"** — FALSE; the `EPOCH` field is a Postgres extension; Trino's standard `EXTRACT` field list omits it. (4) **"`unix_timestamp(ts)` is the Trino function"** — FALSE; `unix_timestamp` is the **Spark/Hive** name. Trino's function is literally **`to_unixtime`**.
 
 **Cross-references.** Inverse direction (epoch → timestamp): [resource 13 §`from_unixtime` SECONDS vs MILLISECONDS — the year-52000 pitfall](13-postgres-to-iceberg-ingestion.md) (epoch-ms canonical with the year-56378 trap if you pass raw ms into `from_unixtime`). Now/current_timestamp + Iceberg timestamptz UTC normalization: [resource 07 §`now()` LEADING CANONICAL](07-analytical-query-patterns.md) and [resource 27 §4.2-NOW](27-oracle-plsql-to-dbt-trino.md). Full Postgres→Trino date/time porting table (covers `EPOCH`, `MICROSECOND`, `EXTRACT(epoch FROM ts)` patterns in CDC ingestion context): [resource 13 §Postgres date-function porting table](13-postgres-to-iceberg-ingestion.md).
