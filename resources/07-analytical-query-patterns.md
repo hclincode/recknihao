@@ -2020,6 +2020,49 @@ SELECT * FROM (
 
 **Cross-reference to the same frame default.** This is the SAME default-frame rule that affects running totals — see Pattern A's RANGE-vs-ROWS callout (around the `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` discussion) and Pattern D's rolling-average frame discussion. The frame default is one concept; it lands as a footgun in three places: running totals (default RANGE groups peers), rolling averages (default doesn't slide), and `last_value` / `nth_value` (default ends at current row, not partition end).
 
+> **DECISION INOCULATION — "ONE ROW per group showing the FIRST and LAST value of a column" → use the AGGREGATE form `min_by` / `max_by` with `GROUP BY`, NOT `first_value` / `last_value` window functions mixed with `GROUP BY` (iter658 PIN — landing-point lock).** *Keyword anchors so the responder lands here on every shape:* first and last value per group, first and latest status per user, earliest and most recent status per entity, first_value last_value with GROUP BY, one row per entity first and last, first and current value per id, first and last STATE per ID, opening and closing value per entity, status of first login and status of last login per user, first and current plan tier per subscriber, first and latest reading per sensor, opening and closing reading per device, earliest and latest STATE per group in one row, first and last status per ticket, earliest and most recent value per group, first AND latest login status per user. When the question is *"give me the **FIRST** and **LAST** value of a column (e.g. `status`) per entity (e.g. `user_id`), in **ONE ROW per entity**"* — reach **DIRECTLY** for the AGGREGATE form documented at [resource 23 §3.1D — `max_by` / `min_by`](23-sql-best-practices-olap.md#max_byx-y--min_byx-y--deterministic-pick-of-x-by-the-ordering-column-y) **(see the iter656 DECISION block at r23:636 / line 652)**: `min_by(status, ts) AS first_status, max_by(status, ts) AS last_status ... GROUP BY entity_id`. **`min_by` / `max_by` are aggregate functions** (verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) — *"Returns the value of `x` associated with the maximum value of `y` over all input values."*) — they collapse to **ONE row per GROUP BY group**, which is exactly the shape the question asks for. **`first_value` / `last_value` are WINDOW functions** (verified at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html) — Value functions section, above) — they return one value **per input row**, not per group, and **cannot be mixed with `GROUP BY` on a column that is not in the GROUP BY and not wrapped in an aggregate**.
+>
+> **DO NOT WRITE — `first_value` / `last_value` window functions mixed with `GROUP BY entity_id`:**
+>
+> ```sql
+> -- ❌ INVALID Trino 467 — window functions reference `status` and `ts`,
+> --    neither of which is in `GROUP BY id` nor wrapped in an aggregate.
+> --    Analyzer rejects: "must be an aggregate expression or appear in GROUP BY clause".
+> SELECT id,
+>        first_value(status) OVER (PARTITION BY id ORDER BY ts) AS first_status,
+>        last_value(status)  OVER (PARTITION BY id ORDER BY ts
+>                                  ROWS BETWEEN UNBOUNDED PRECEDING
+>                                           AND UNBOUNDED FOLLOWING) AS last_status
+> FROM iceberg.analytics.events
+> GROUP BY id;   -- ❌ window funcs reference status/ts — neither in GROUP BY id nor aggregated
+> ```
+>
+> **Two correct fixes:**
+>
+> 1. **PREFERRED ✅ — `min_by` + `max_by` AGGREGATES with `GROUP BY` (one pass, one row per id, no DISTINCT cost):**
+>    ```sql
+>    SELECT id,
+>           min_by(status, ts) AS first_status,
+>           max_by(status, ts) AS last_status
+>    FROM iceberg.analytics.events
+>    GROUP BY id;
+>    ```
+>    This is the canonical idiom for "one row per entity, first and last value of a column" — see [resource 23 §3.1D DECISION block at line 652](23-sql-best-practices-olap.md#31d-arbitrary--any_value-pick-one-value-per-group-and-max_by--min_by-deterministic-representative-value-pick) for the full DECISION lock with worked example.
+>
+> 2. **Window form WITHOUT `GROUP BY` + `SELECT DISTINCT` to collapse to one row per entity** (strictly worse — extra `DISTINCT` cost, but valid):
+>    ```sql
+>    SELECT DISTINCT id,
+>           first_value(status) OVER (PARTITION BY id ORDER BY ts) AS first_status,
+>           last_value(status)  OVER (PARTITION BY id ORDER BY ts
+>                                     ROWS BETWEEN UNBOUNDED PRECEDING
+>                                              AND UNBOUNDED FOLLOWING) AS last_status
+>    FROM iceberg.analytics.events;
+>    -- The window form yields one row per INPUT ROW (per event); SELECT DISTINCT
+>    -- collapses to one-per-id. Cheaper to just use min_by/max_by aggregates above.
+>    ```
+>
+> **Mnemonic:** **"one row per entity, FIRST and LAST value of a column" = TWO aggregates (`min_by` + `max_by`) with ONE `GROUP BY entity_id`.** Reserve `first_value` / `last_value` window functions for the case where you want to KEEP every detail row and annotate each with its partition's first/last value (no `GROUP BY` collapse) — that is the shape Pattern B3 above is built for (default-frame footgun lock). If the answer must collapse to one-row-per-entity, the aggregate form is the right tool. Cross-link: [resource 23 §3.1D iter656 DECISION block at line 652](23-sql-best-practices-olap.md#31d-arbitrary--any_value-pick-one-value-per-group-and-max_by--min_by-deterministic-representative-value-pick) + the [Trino GROUP BY rules anchor in §3.1G / r23 line ~1521](23-sql-best-practices-olap.md#trino-group-by-rules-anchor--apply-to-every-group-by-query).
+
 ### Pattern C: Rank (top-N per group)
 
 "Top 10 highest-value orders per tenant."

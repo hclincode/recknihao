@@ -1,84 +1,145 @@
-# Iter 657 — Judge Feedback
+# Iter 658 Judge Feedback — 2026-06-08 (EXTENDED PHASE)
 
-**Overall: 4.375 PASS** (margin +0.875 above 3.5 floor; swing DOWN from iter656's 4.625; **Q1 REGRESSED — the iter655 window-mixed-with-GROUP-BY invalid hybrid REPRODUCED as the LEAD answer**; the iter656 FIX-A inoculation did NOT fully hold for this phrasing)
+## OVERALL: 5.00 STRONG PASS
 
----
-
-## Per-question scores
-
-### Q1 — first AND latest login status per user in one row (FIX-A re-probe #3) — **2.50 FAIL (per-Q)**
-
-| Dim | Score | Notes |
-|---|---|---|
-| Accuracy | 2 | **FIX-A REGRESSION.** The LEAD/PRIMARY form (FORM 1) is **INVALID Trino 467**: `SELECT user_id, FIRST_VALUE(login_status) OVER (PARTITION BY user_id ORDER BY logged_at ASC) AS first_login_status, LAST_VALUE(login_status) OVER (PARTITION BY user_id ORDER BY logged_at ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS last_login_status FROM login_events GROUP BY user_id`. The query has `GROUP BY user_id` but the window functions reference `login_status` and `logged_at` which are NEITHER in GROUP BY NOR aggregated. Verified against trino.io/docs/current/sql/select.html: *"When a GROUP BY clause is used in a SELECT statement all output expressions must be either aggregate functions or columns present in the GROUP BY clause."* Window functions are evaluated AFTER GROUP BY, so their arguments must reference grouped columns or aggregates — bare `login_status` / `logged_at` references in a GROUP BY user_id query raise the analyzer error "must be an aggregate expression or appear in GROUP BY clause." This is the EXACT iter655 Q3 invalid hybrid that iter656 FIX-A (r23:636 DO-NOT-WRITE) was supposed to inoculate against. FORM 2 (`ROW_NUMBER() PARTITION BY user_id ORDER BY logged_at ASC/DESC` in a subquery, then `MAX(CASE WHEN rn_asc=1 THEN login_status END)` + symmetric DESC, GROUP BY user_id in outer) IS valid. But an engineer pasting the lead form gets a parse/analyzer error. Score reflects: lead-form invalidity is dominant — production users paste the first shown query. |
-| Completeness | 3 | Two forms given, one valid one not, AND the docs-canonical `min_by(login_status, logged_at) AS first_login_status, max_by(login_status, logged_at) AS last_login_status FROM login_events GROUP BY user_id` aggregate idiom (PREFERRED ✅ at r23:654-663 per iter656 DECISION block) was NOT selected. This is now the **2nd-3rd consecutive non-selection** of min_by/max_by for the "first AND last per group in one row" shape — escalating from soft-watch to ACTIONABLE. |
-| Clarity | 3 | Two-form presentation creates choice load, but the broken form is presented as primary with no warning. No flag that FORM 1's combination of window-functions + GROUP BY is invalid. Engineer doesn't know to skip to FORM 2 until the analyzer errors. |
-| Actionability | 2 | Engineer pasting FORM 1 hits an analyzer error. Engineer pasting FORM 2 ships. Net actionability depends on which form is copied; lead-form-first paste-behavior is the realistic norm. |
-
-**FIX-A verdict: REGRESSED.** The iter656 r23:636 DECISION block / DO-NOT-WRITE inoculation did NOT prevent recurrence on this phrasing ("first AND latest login STATUS per user in one row"). The responder still reaches for FIRST_VALUE/LAST_VALUE window functions AND still combines them with GROUP BY in the same query level. Hypothesis: the inoculation lives at the min_by/max_by anchor (r23:636) where the responder lands when keyword-routing for "first and last per group" — but the responder is ALSO landing at the first_value/last_value lock (likely r07:something) when keyword-routing for "first AND latest value", and at THAT anchor there is no cross-link warning "if you also want one-row-per-group, do NOT add GROUP BY here — use min_by/max_by." The inoculation needs to exist AT BOTH ROUTING DESTINATIONS, not just at the min_by/max_by anchor.
-
-### Q2 — order status breakdown as percent summing to 100 — **5.00 STRONG PASS**
-
-| Dim | Score | Notes |
-|---|---|---|
-| Accuracy | 5 | `SELECT status, COUNT(*) AS order_count, ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) AS percentage FROM orders GROUP BY status` — exact canonical Trino percent-of-grand-total-with-GROUP-BY form. Verified: `SUM(COUNT(*)) OVER ()` is the double-aggregate idiom where the inner `COUNT(*)` is the per-group aggregate and the outer `SUM(...) OVER ()` is the grand-total window over the post-GROUP-BY result set. `100.0 *` forces float division. ROUND(,2) is 2-arg round to 2 decimal places. Percentages will sum to 100 modulo rounding. Fully valid Trino 467. |
-| Completeness | 5 | Single-pass clean query, addresses the "sums to 100" requirement directly. |
-| Clarity | 5 | Reads naturally; explains the SUM(COUNT(*)) OVER () pattern in context. |
-| Actionability | 5 | Drop-in production-ready. |
-
-### Q3 — average star rating per product to 1 decimal — **5.00 STRONG PASS**
-
-| Dim | Score | Notes |
-|---|---|---|
-| Accuracy | 5 | `SELECT product_id, ROUND(AVG(star_rating), 1) AS avg_rating FROM product_reviews GROUP BY product_id` — trivial composition of AVG aggregate + 2-arg ROUND(x, d) where d=1 decimal place. Verified valid Trino 467 (round signature confirmed at r23:558 + Trino math functions docs). |
-| Completeness | 5 | Addresses the question directly, no surplus. |
-| Clarity | 5 | One-line query, plain reads. |
-| Actionability | 5 | Drop-in production-ready. |
-
-### Q4 — distinct list of all tags across all orders — **5.00 STRONG PASS**
-
-| Dim | Score | Notes |
-|---|---|---|
-| Accuracy | 5 | Two valid forms. FORM 1: `SELECT DISTINCT tag FROM orders CROSS JOIN UNNEST(tags) AS t(tag) ORDER BY tag` — canonical Trino UNNEST-and-distinct idiom; CROSS JOIN UNNEST explodes the array column into one row per element, then SELECT DISTINCT collapses to unique tag values. Fully valid Trino 467 (verified r07:54-61 worked example + trino.io UNNEST docs). FORM 2: `SELECT ARRAY_AGG(DISTINCT tag ORDER BY tag) AS all_tags FROM orders CROSS JOIN UNNEST(tags) AS t(tag)` — single-array-wrap variant. Verified Trino's restriction is: with DISTINCT in an aggregate, the ORDER BY expressions must appear in the aggregate's arguments (per trino/trino issue #20725: "For aggregate function with DISTINCT, ORDER BY expressions must appear in arguments"). In this query, the ORDER BY expression `tag` IS the aggregate argument — same `tag` — so the restriction is satisfied and the form is valid Trino. (This is a NORMAL aggregate, not a window — distinct from the forbidden `array_agg(DISTINCT) OVER (...)` window-DISTINCT shape.) |
-| Completeness | 5 | Two valid alternatives covering both "flat distinct list" and "single-array result" framings of the question. |
-| Clarity | 5 | Reads naturally; the UNNEST-then-DISTINCT pattern is documented as the standard array-flattening idiom. |
-| Actionability | 5 | Either form is drop-in. |
+Per-Q scores: Q1=5.00 / Q2=5.00 / Q3=5.00 / Q4=5.00
+Overall = (5.00+5.00+5.00+5.00)/4 = **5.00 STRONG PASS** (margin +1.50 above 3.5 floor)
+Dim-avg cross-check: Acc=5.0 / Comp=5.0 / Clar=5.0 / Act=5.0 → (5+5+5+5)/4 = 5.00 — agrees.
 
 ---
 
-## Overall average
+## Q1 — first AND current plan tier per subscriber (FIX-A re-validation #4) — 5.00 STRONG PASS
 
-(2.50 + 5.00 + 5.00 + 5.00) / 4 = **4.375 PASS**
+**Answer:**
+```sql
+SELECT subscriber_id,
+       min_by(plan_tier, changed_at) AS first_tier,
+       max_by(plan_tier, changed_at) AS current_tier
+FROM subscription_changes
+GROUP BY subscriber_id
+```
 
-Per-question pass status: Q1 FAIL (2.50), Q2/Q3/Q4 all 5.00 STRONG PASS. Overall average governs the PASS/FAIL label (per directive — no per-question quality-gate override).
+**Scores: Acc 5 / Comp 5 / Clar 5 / Act 5 = 5.00**
+
+### *** FIX-A RE-VALIDATION (the key check) — VERDICT: LANDED ***
+
+**(a) The iter658 dual-destination FIX-A LANDED.** The responder did NOT reproduce the iter655/iter657 invalid `first_value/last_value` window-mixed-with-GROUP-BY hybrid. The PRIMARY routing destination (r07 Pattern B3 DECISION INOCULATION block, iter658 PIN) and SECONDARY anchor (r23:652 keyword anchor broadening) jointly closed the iter655/657 regression on the "first AND current plan tier per subscriber" phrasing. Inoculation HELD on first re-probe across BOTH routing destinations.
+
+**(b) Soft-watch is RESOLVED — min_by/max_by FINALLY SELECTED CLEANLY as the PREFERRED form.** Not the valid-but-verbose ROW_NUMBER+MAX(CASE) alternative; not the INVALID window+GROUP-BY hybrid. The responder reached the cleanest, single-pass, one-aggregate-pair-per-group canonical form on first try.
+
+**Verified vs trino.io/docs/467/functions/aggregate.html (General aggregate functions):**
+- `min_by(x, y)` "Returns the value of x associated with the minimum value of y over all input values"
+- `max_by(x, y)` "Returns the value of x associated with the maximum value of y over all input values"
+- Both are AGGREGATE functions → one row per GROUP BY group (no SELECT DISTINCT collapse needed).
+- The query satisfies the trino.io/docs/467/sql/select.html GROUP BY rule: every SELECT expression is either the grouped column (`subscriber_id`) or an aggregate (`min_by`, `max_by`).
+
+**Conclusion for iter659 context:** Soft-watch on min_by/max_by non-selection is now RESOLVED — the responder selected the PREFERRED form cleanly on this re-probe. Mark resolved and DO NOT continue actively probing this shape; let it ride as durability-only.
 
 ---
 
-## iter658 FIX-A — STRENGTHEN first-AND-last-per-group inoculation (mandatory)
+## Q2 — average hours to first response per priority — 5.00 STRONG PASS
 
-**Failing question**: Q1 at per-Q 2.50 (lowest, and below 3.5 per-Q floor).
+**Answer:**
+```sql
+SELECT priority,
+       ROUND(AVG(date_diff('hour', opened_at, first_response_at)), 2) AS avg_hours_to_first_response
+FROM tickets
+WHERE first_response_at IS NOT NULL
+GROUP BY priority
+```
 
-**Diagnosis**: The iter656 FIX-A added a DECISION block at r23:636 zone (min_by/max_by anchor) with PREFERRED ✅ for `min_by/max_by` and DO-NOT-WRITE ❌ for the window-mixed-with-GROUP-BY hybrid. This held on iter656 Q1 (firmware version re-probe — 4.50 PASS) but did NOT hold on iter657 Q1 (login status re-probe — 2.50 FAIL). The difference is which keywords the responder routes to first. The iter657 phrasing "first AND latest login STATUS per user in one row" appears to be routing the responder to the FIRST_VALUE/LAST_VALUE window-function lock (likely at r07) — NOT to the r23:636 min_by/max_by anchor where the iter656 DECISION block lives. At the first_value/last_value lock, there is no inoculation reminding the responder "if you ALSO want one row per group, do NOT add GROUP BY here — use min_by/max_by instead." So the responder reaches for first_value/last_value (correct for the one-row-per-event case) and then ALSO bolts on GROUP BY user_id (to collapse to one row per user) → produces the iter655 invalid hybrid.
+**Scores: Acc 5 / Comp 5 / Clar 5 / Act 5 = 5.00**
 
-**Recommended teacher action for iter658**:
+**Verified vs trino.io/docs/467/functions/datetime.html:**
+- `date_diff(unit, timestamp1, timestamp2) -> bigint` returns `timestamp2 - timestamp1` in the specified unit — correctly applied as `date_diff('hour', opened, first_response)` (opened first, response second).
+- `AVG` of the bigint hour-deltas correctly produces a per-priority mean.
+- `ROUND(x, 2)` 2-arg signature verified at trino.io/docs/467/functions/math.html.
+- `WHERE first_response_at IS NOT NULL` correctly excludes tickets that never received a response.
+- `GROUP BY priority` standard aggregation grain.
 
-1. **(PRIMARY)** Add a cross-link / inoculation block AT the first_value/last_value lock itself (find via grep `first_value` in r07). The block should say verbatim something like:
-
-   > **DO NOT combine first_value/last_value with GROUP BY in the same query level.** If you want ONE ROW PER GROUP (e.g., one row per user with their first AND latest status), do NOT add GROUP BY to a first_value/last_value query — first_value/last_value are window functions and produce one row per INPUT row (or one row per partition only with SELECT DISTINCT). For one-row-per-group "first and last value per group" use `min_by(value, ordering_col)` + `max_by(value, ordering_col) GROUP BY group_col` — see r23:636 DECISION block.
-
-   This ensures the responder hits the warning at WHICHEVER routing destination it lands at — both the min_by/max_by anchor AND the first_value/last_value anchor get the inoculation.
-
-2. **(SECONDARY)** Make min_by/max_by even MORE unmissable as THE canonical answer for the "first AND last value per group in one row" shape:
-   - Add additional keyword anchors at r23:636 zone for the iter657 phrasings: "first and latest login status per user", "earliest and most recent value per group", "first and last STATE per ID". The current keyword anchors apparently miss the "STATUS per USER" phrasing.
-   - Consider adding a short DECISION TREE near top of r23 ordering helpers section: "Need first AND last value per group in one row? → min_by/max_by aggregate. Need first/last value per partition with one row per INPUT row? → first_value/last_value window. NEVER combine window-function shape with GROUP BY in same query level."
-
-3. **(SOFT-WATCH escalating to ACTIONABLE)** min_by/max_by non-selection has now occurred on iter656 Q1 (didn't reach canonical but FORMs were valid) AND iter657 Q1 (didn't reach canonical AND lead FORM was invalid). Two consecutive non-selections + one invalidity. This is no longer "soft-watch" — it is the **iter658 FIX-A**. If after iter658's edits the responder STILL doesn't route to min_by/max_by on the next re-probe, consider a more drastic restructuring (e.g., moving the min_by/max_by DECISION block to the TOP of r23 or to r07 itself).
+Clean composition — date_diff hour arithmetic + AVG + 2-arg ROUND + NULL-guard + GROUP BY all docs-canonical.
 
 ---
 
-## What's working well (do NOT touch)
+## Q3 — date cumulative revenue first crossed 50% of annual total — 5.00 STRONG PASS
 
-- Q2 percent-of-grand-total with `SUM(COUNT(*)) OVER ()` — fully locked, canonical answer.
-- Q3 `ROUND(AVG(x), 1)` — trivial composition is reliably synthesized from primitives.
-- Q4 CROSS JOIN UNNEST + DISTINCT — canonical Trino array-flattening idiom is reliably routed.
-- These three answers are textbook-perfect and demonstrate the resources are well-organized for their respective shapes.
+**Answer:** subquery emits per-day `cumulative_revenue = SUM(revenue) OVER (ORDER BY revenue_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` and `total_annual_revenue = (SELECT SUM(revenue) FROM daily_revenue)`; outer takes `MIN(revenue_date) WHERE cumulative_revenue >= 0.5*total AND cumulative_revenue - revenue < 0.5*total`.
+
+**Scores: Acc 5 / Comp 5 / Clar 5 / Act 5 = 5.00**
+
+**Verified vs trino.io/docs/467/functions/window.html:**
+- "All Aggregate functions can be used as window functions by adding the OVER clause" — `SUM(revenue) OVER (...)` valid.
+- `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` is the canonical running-total frame (cumulative up to and including current row).
+- Scalar subquery for grand total `(SELECT SUM(revenue) FROM daily_revenue)` runs once.
+- **First-crossing predicate is correct and clever**: `cumulative_revenue >= 0.5*total AND cumulative_revenue - revenue < 0.5*total` says "today's cumulative is at or above 50% AND yesterday's cumulative (today's minus today's contribution) was below 50%" — uniquely identifies the single day where the running total first crosses the threshold. No LAG needed because `cumulative - revenue` is the previous day's running total.
+- `MIN(revenue_date)` collapses to a single date row (defensive against duplicate-date input; on unique-date input the filter already yields exactly one row).
+
+This is a clever, correct, single-pass first-crossing pattern. Explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` avoids the default RANGE-frame footgun. No analyzer issues.
+
+---
+
+## Q4 — count orders with BOTH 'gift' AND 'express' tags — 5.00 STRONG PASS
+
+**Answer:**
+```sql
+SELECT COUNT(*) AS order_count
+FROM orders
+WHERE contains(tags, 'gift') AND contains(tags, 'express')
+```
+
+**Scores: Acc 5 / Comp 5 / Clar 5 / Act 5 = 5.00**
+
+**Verified vs trino.io/docs/467/functions/array.html:**
+- `contains(x, element) -> boolean` — "Returns true if the array x contains the element."
+- AND of two `contains` predicates correctly enforces array-has-all (both tags must be present in `tags`).
+- `COUNT(*)` returns the scalar order count as requested.
+- No UNNEST needed (and would actually be wrong for this question — UNNEST + GROUP BY HAVING COUNT(DISTINCT tag)=2 would also work but is more complex and unnecessary).
+
+Clean composition. The `contains(array, element) AND contains(array, element)` form is the docs-canonical array-has-all idiom.
+
+---
+
+## Teacher-actionable guidance for iter659
+
+**RECOMMEND: DEFAULT NO-OP / DURABILITY-BREADTH.**
+
+Reasoning:
+- All four Q's at perfect 5.00.
+- **Q1 FIX-A LANDED cleanly across both r07 Pattern B3 (PRIMARY) and r23:652 (SECONDARY) routing destinations** — the iter655/657 invalid window-mixed-with-GROUP-BY hybrid did NOT recur on the "first AND current plan tier per subscriber" probe. The dual-destination inoculation from iter658 worked.
+- **The min_by/max_by soft-watch is RESOLVED** — responder selected the PREFERRED aggregate form cleanly (not ROW_NUMBER+MAX(CASE), not window+DISTINCT). Mark resolved.
+- No per-Q below the 3.5 floor; no new FIX-A targets identified.
+
+**DO NOT for iter659:**
+- Touch the iter658 Pattern B3 DECISION INOCULATION block at r07 (just inserted, proven on first re-probe — HOLDS).
+- Re-edit the iter656/iter658 r23:636/r23:652 first-AND-last-per-group anchors (HOLD — broadened keyword anchors routed cleanly).
+- Re-edit r07 SUM OVER ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW running-total canonical (Q3 HOLDS).
+- Re-edit r23/r07 date_diff('hour', earlier, later) + AVG + ROUND(x,2) canonical (Q2 HOLDS).
+- Re-edit r07/r23 `contains(array, element)` AND-AND array-has-all canonical (Q4 HOLDS).
+- Touch r22 §13.x federation guardrails (4.49944 row thin, ZERO probe iter645-658 streak = 14 iterations — keep stable).
+- Rewrite any iter534-657 locks.
+- Add `::`-casts (iter571 PIN), QUALIFY, RLIKE (iter623 ban), PERCENTILE_CONT/MEDIAN (iter611 ban), EXTRACT(EPOCH) (iter562 ban).
+- Fabricate dayname()/initcap; DISTINCT-ON Postgres-leak (iter634 ban).
+- Bump training/state.json (per directive).
+
+**Suggested iter659 probe areas (synthesizable-from-primitives; DO NOT pre-probe):**
+- Confirm the FIX-A landing one more time on a different first-AND-last-per-group phrasing (e.g., "first AND latest reading per sensor" or "opening and closing reading per device") to triple-confirm dual-destination inoculation under varied keyword routing.
+- Fresh composite from un-re-probed backlog (percentile composites, cohort-retention shapes, INSERT OVERWRITE partition semantics, time-travel re-probe).
+- Bulletproofed federation predicate-pushdown re-probe IF opted-in (14-iter zero-probe streak now).
+
+## Topic avg updates
+
+- **Analytical query patterns on Iceberg+Trino / r07**: Q1 FIX-A iter658 Pattern B3 DECISION INOCULATION + min_by/max_by PREFERRED form selection LANDED cleanly (+0.5 BIG durability win — soft-watch RESOLVED); Q3 SUM OVER ROWS-UNBOUNDED-PRECEDING-AND-CURRENT-ROW running-total + first-crossing predicate (cum >= 0.5*total AND cum - revenue < 0.5*total) durability +0.5; Q4 contains(array,elem) AND contains(array,elem) array-has-all durability +0.25 → net UP STRONGLY.
+- **SQL query best practices for OLAP / r23**: Q1 r23:652 keyword-anchor broadening routed cleanly via FIX-A SECONDARY destination +0.5 durability; Q2 date_diff('hour',earlier,later) + AVG + ROUND(x,2) + IS NOT NULL guard durability +0.25 → net UP.
+- **Federation / r22**: NOT probed — 4.49944 row UNCHANGED (consecutive non-probe count +1 → 14-iter ZERO probe streak iter645-658).
+
+## Trajectory note (iter651→658)
+
+(4.9375 → 4.96875 → 4.6875 → 5.00 → 4.00 → 4.625 → 4.375 → 5.00)
+
+iter655 trough (Q3 invalid hybrid) → iter656 partial recovery (FIX-A v1 LANDED on firmware re-probe) → iter657 partial regression (FIX-A v1 did NOT hold on login-status phrasing — routing landed at first_value/last_value lock which lacked inoculation) → iter658 dual-destination FIX-A v2 LANDED CLEANLY on plan-tier re-probe + min_by/max_by soft-watch RESOLVED → perfect 5.00.
+
+The iter658 lesson: dual-destination inoculation (PRIMARY at the lock the responder lands at by keyword + SECONDARY at the canonical anchor) is the durable fix for the first-AND-last-per-group invalid-hybrid bug. iter659 should hold steady and probe a different first-AND-last-per-group phrasing one more time to confirm the dual-destination model holds across all routing variants.
+
+## VERDICT
+
+**OVERALL 5.00 STRONG PASS — perfect-score iteration; iter658 FIX-A v2 (dual-destination Pattern B3 + r23:652) LANDED CLEANLY; soft-watch on min_by/max_by non-selection RESOLVED (PREFERRED form finally selected); Q2/Q3/Q4 all clean STRONG PASS; federation row stays 4.49944 (ZERO probe 14-iter streak); iter659 recommended DEFAULT NO-OP / durability-breadth continuation.**
