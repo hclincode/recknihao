@@ -1,84 +1,129 @@
-# Iter 663 Judge Feedback — 2026-06-08 (EXTENDED PHASE)
+# Iter 664 — Judge Feedback
 
-## Overall
+**Overall: 4.5625 PASS** (margin +1.0625 above 3.5 floor)
 
-**Score: 5.000 STRONG PASS** (margin +1.500 above 3.5 floor; flat vs iter662's 5.000 — second consecutive perfect-score iteration)
-**Dim avg**: Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0 = 5.000 (agrees)
-**Per-Q**: 5.00 + 5.00 + 5.00 + 5.00 = 20.00 / 4 = 5.000
-**Flagged weak answers**: NONE (zero per-Q below 3.5 floor)
-
-All four answers are technically valid Trino 467 dialect; all dialect facts cross-verified against trino.io/docs/467 via WebFetch (date_diff signature, date_trunc signature, HAVING-on-aggregate-expression validity, nested-aggregate restriction).
+Per-Q averages: Q1 4.75 / Q2 5.00 / **Q3 3.50 (flagged weak — Trino-dialect defects on day-of-week semantics)** / Q4 5.00.
 
 ---
 
 ## Per-question scores
 
-### Q1 — distinct sessions per user per day — 5.00 STRONG PASS
-- **Acc 5 / Comp 5 / Clar 5 / Act 5**
-- `SELECT user_id, date_trunc('day', event_time) AS day, COUNT(DISTINCT session_id) AS session_count FROM events GROUP BY user_id, date_trunc('day', event_time) ORDER BY user_id, day;`
-- VERIFIED trino.io/docs/467/functions/datetime.html: `date_trunc(unit, x) -> same as input` — `date_trunc('day', timestamp)` returns timestamp at midnight, valid 1-row-per-calendar-day bucket; equivalent to `date(event_time)` for grouping purposes (per directive: do not penalize either form).
-- VERIFIED trino.io/docs/467/functions/aggregate.html: `COUNT(DISTINCT col)` per-group is native and supported; multiple COUNT(DISTINCT) in one SELECT also supported.
-- VERIFIED sql/select.html: 2-key `GROUP BY user_id, date_trunc('day', event_time)` is valid; ORDER BY references the output alias `day` (Trino 467 permits output-alias in ORDER BY).
-- Self-contained explanation of bucketing + grouping + DISTINCT semantics; runnable as-is.
+### Q1 — Two-level macro-median (median per customer, then overall median of those medians) — 4.75 PASS
 
-### Q2 — revenue converted to USD via rates JOIN — 5.00 STRONG PASS
-- **Acc 5 / Comp 5 / Clar 5 / Act 5**
-- `SELECT SUM(o.amount * r.usd_rate) AS total_revenue_usd FROM orders o LEFT JOIN currency_rates r ON r.currency_code = o.currency_code;`
-- Canonical star-schema fact x dim conversion: per-row multiply `amount * usd_rate` then SUM; mechanical application of r08:12/52-67/111 star-schema primitive.
-- LEFT JOIN correctly chosen for "keep all orders": SUM skips NULL summands, so missing rates produce a NULL contribution (silently dropped). The volunteered `COALESCE(r.usd_rate, 1)` safety belt is a thoughtful application-level callout (acknowledges the silent-drop risk).
-- Concise + complete + actionable.
+Responder answer:
+```sql
+SELECT approx_percentile(customer_median, 0.5) AS typical_order_value
+FROM (
+  SELECT customer_id, approx_percentile(amount, 0.5) AS customer_median
+  FROM orders GROUP BY customer_id
+) per_customer_stats;
+```
 
-### Q3 — customers whose order span > 365 days — 5.00 STRONG PASS
-- **Acc 5 / Comp 5 / Clar 5 / Act 5**
-- CTE `MIN(order_date) AS first_order, MAX(order_date) AS last_order GROUP BY customer_id` then outer `WHERE date_diff('day', first_order, last_order) > 365`.
-- VERIFIED trino.io/docs/467/functions/datetime.html: `date_diff(unit, timestamp1, timestamp2) -> bigint` returns `timestamp2 - timestamp1` (earlier first → positive bigint). Argument order is correct.
-- Per directive: CTE-with-outer-WHERE on pre-aggregated MIN/MAX is equally valid as the alternate `HAVING date_diff('day', MIN(order_date), MAX(order_date)) > 365` on the raw table; no penalty for the CTE form.
-- Explicitly calls out "pass earlier first for positive result" — important learner-facing hint.
-- Bonus columns (`first_order`, `last_order`, `days_span`) help verification.
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5 | Verified trino.io/docs/467/functions/aggregate.html — `approx_percentile(x, p)` is the canonical Trino median idiom; no `MEDIAN`/`PERCENTILE_CONT` exists in Trino 467. Inner per-customer aggregate sits in a subquery so it is NOT a nested aggregate — the outer `approx_percentile` operates on a scalar column projected from the subquery. Two-level subquery shape valid Trino. |
+| Completeness | 4 | Question asked for BOTH "overall median AND avg of the per-customer medians" — responder only delivered the median (`approx_percentile`) layer, omitted `AVG(customer_median)`. Minor scope miss. |
+| Clarity | 5 | Clean two-level construction; `per_customer_stats` alias is self-documenting; inline notes explain no-nested-aggregate rule and no-PERCENTILE_CONT/MEDIAN inoculation. |
+| Actionability | 5 | Drop-in valid Trino 467 SQL; engineer can paste into a Trino client and run unchanged. |
 
-### Q4 — avg distinct products per order (two-level) — 5.00 STRONG PASS
-- **Acc 5 / Comp 5 / Clar 5 / Act 5**
-- Inner CTE: `SELECT order_id, COUNT(DISTINCT product_id) AS distinct_products FROM order_items GROUP BY order_id`; outer: `SELECT AVG(distinct_products) AS avg_products_per_order FROM order_product_counts`.
-- VERIFIED: Trino does NOT allow `AVG(COUNT(DISTINCT product_id))` directly — nested aggregates produce a parse-time error (same restriction as Postgres / Snowflake / Calcite-family engines). The required rewrite is exactly the inner-CTE-then-outer-aggregate pattern shown.
-- The responder **proactively explained the nested-aggregate error** AND gave the canonical two-step rewrite — exactly the teaching moment this class of question is designed to surface.
-- Cleanest possible answer for this pattern.
+### Q2 — Multi-key dim-JOIN + filter + SUM (orders × product_region on product_id+region_id, WHERE list_price > 100) — 5.00 STRONG PASS
+
+```sql
+SELECT SUM(o.amount) AS total_revenue
+FROM orders o
+JOIN product_region pr ON o.product_id = pr.product_id AND o.region_id = pr.region_id
+WHERE pr.list_price > 100;
+```
+
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5 | ANSI-SQL ON clause accepts conjunctions; multi-key JOIN with `ON a.k1=b.k1 AND a.k2=b.k2` is standard composite-key JOIN form. WHERE on dim column after INNER JOIN is semantically equivalent to ON-clause filter for the SUM result. Verified via trino.io/docs/467/sql/select.html JOIN semantics. |
+| Completeness | 5 | All three asks met: JOIN both keys, filter list_price > 100, SUM(amount). |
+| Clarity | 5 | Short, table aliases, ON-AND structure obvious. |
+| Actionability | 5 | Drop-in valid Trino 467. |
+
+### Q3 — Busiest weekday per user (avoid MAX(COUNT(*)) nested aggregate) — 3.50 PASS (FLAGGED WEAK)
+
+```sql
+SELECT user_id, day_of_week, order_count
+FROM (
+  SELECT user_id, EXTRACT(dow FROM order_date) AS day_of_week, COUNT(*) AS order_count,
+         ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY COUNT(*) DESC) AS rank
+  FROM orders GROUP BY user_id, EXTRACT(dow FROM order_date)
+) ranked
+WHERE rank = 1;
+```
+
+Responder's closing note: *"EXTRACT(dow FROM order_date) gives day-of-week (0=Sunday...); if you want the actual day name use CAST(EXTRACT(dow ...) AS VARCHAR) or dayname(order_date) if available."*
+
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 3 | Core SQL structure correct: `EXTRACT(DOW FROM order_date)` IS valid Trino 467 — verified via trino.io/docs/current/functions/datetime.html, EXTRACT accepts fields YEAR/QUARTER/MONTH/WEEK/DAY/DAY_OF_MONTH/DAY_OF_WEEK/**DOW**/DAY_OF_YEAR/DOY/YEAR_OF_WEEK/YOW/HOUR/MINUTE/SECOND/TIMEZONE_HOUR/TIMEZONE_MINUTE (SQL keywords case-insensitive so lowercase `dow` parses). ROW_NUMBER OVER (PARTITION BY ... ORDER BY COUNT(*) DESC) + WHERE rn=1 top-1-per-group is the canonical Trino idiom. **HOWEVER three real factual defects:** (a) **wrong day-numbering** — responder wrote "0=Sunday..." but Trino's `day_of_week()` / `EXTRACT(DOW ...)` returns **ISO 1=Monday..7=Sunday** (verified trino.io/docs/current/functions/datetime.html: "Returns the ISO day of the week from x. The value ranges from 1 (Monday) to 7 (Sunday)"). The "0=Sunday" claim is Postgres semantics, not Trino. (b) **floated non-existent `dayname(order_date)`** — Trino 467 has NO `dayname()` function; the "if available" hedge does not save it because the engineer will try it and get a "Function dayname not registered" error. (c) `CAST(EXTRACT(dow ...) AS VARCHAR)` for "actual day name" is misleading — that yields the string `"1"`/`"2"`, not `"Monday"`/`"Tuesday"`. |
+| Completeness | 4 | Question fully answered (user + busiest-weekday + count); nested-aggregate framing explained well. Lost a point because day-name advice is broken and the dialect inoculation around `dayname()` should be assertive ("does NOT exist in Trino"), not hedged. |
+| Clarity | 4 | Subquery shape clear; ROW_NUMBER explained; rank=1 picks single busiest weekday per user. The closing-note hedge is the clarity hit. |
+| Actionability | 3 | The SQL itself runs and returns correct rows. But an engineer who tries `dayname(order_date)` gets a parse error; one who follows the "0=Sunday" comment misreads the output by 1 day and flips Sun/Mon; one who runs `CAST(EXTRACT(dow ...) AS VARCHAR)` gets a numeric string instead of a name. Three downstream foot-guns. |
+
+### Q4 — Two-threshold HAVING (COUNT(*)>50 AND SUM(amount)>10000) — 5.00 STRONG PASS
+
+```sql
+SELECT customer_id FROM orders GROUP BY customer_id
+HAVING COUNT(*) > 50 AND SUM(amount) > 10000;
+```
+
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5 | Verified trino.io/docs/467/sql/select.html — HAVING clause accepts any boolean expression composed of aggregates + grouping columns. Conjunction of two aggregate-threshold expressions in one HAVING is the canonical form (no need to split into CTE-layered HAVING). |
+| Completeness | 5 | Both thresholds in one HAVING — exactly what the question asked. |
+| Clarity | 5 | Minimal; aggregate-after-GROUP-BY scope explained. |
+| Actionability | 5 | Drop-in valid Trino 467. |
 
 ---
 
-## Teacher feedback
+## Overall
 
-**No corrective action required for iter663.** Second consecutive perfect-score iteration (5.000 after iter662's 5.000). All four answers:
-1. Use valid Trino 467 dialect (verified against trino.io/docs/467).
-2. Compose mechanically from documented primitives (r23:77 multi-COUNT-DISTINCT, r23:636 first-AND-last MIN/MAX, r23:1187 date_diff canonical, r23:1643 HAVING-aggregate rule, r08:12/52-67/111 star-schema dim-JOIN, r07:999 two-level CTE-then-outer-aggregate).
-3. Volunteer relevant safety-belt callouts unprompted (LEFT JOIN NULL-skip + COALESCE in Q2; pass-earlier-first in Q3; nested-aggregate error explanation in Q4).
+(4.75 + 5.00 + 3.50 + 5.00) / 4 = **4.5625 PASS** (margin +1.0625).
 
-### Recommended iter664 directive: DEFAULT NO-OP / DURABILITY-BREADTH
+Dim-avg cross-check: Acc (5+5+3+5)/4 = 4.50 / Comp (4+5+4+5)/4 = 4.50 / Clar (5+5+4+5)/4 = 4.75 / Act (5+5+3+5)/4 = 4.50 → grand avg 4.5625. Agrees.
 
-- ZERO per-Q below floor; perfect 5.000.
-- The iter663 6-fresh-area pre-probe analysis (state.json notes) accurately predicted all four routes as FINDABLE — confirmed correct on probe.
-- Suggested fresh-area probes for iter664 (synthesizable from primitives, DO NOT pre-probe):
-  - (a) Two-level macro-average sibling: median per-group then average across groups (forces `approx_percentile` per-group in CTE, AVG outer; tests two-level CTE pattern recall with different inner aggregate).
-  - (b) Multi-key dim-JOIN with conversion + filter: `WHERE order_date >= ...` pushed down through the JOIN (tests JOIN + filter + SUM composition).
-  - (c) HAVING-on-aggregate-expression direct form for Q3-class question (re-probe whether responder picks HAVING vs CTE based on phrasing — both correct, but tests dialect-flexibility).
-  - (d) Nested-aggregate error re-probe with `MAX(COUNT(*))` framing (different outer aggregate to confirm pattern recognition, not just `AVG(COUNT(DISTINCT))` memorization).
-  - (e) Bulletproofed federation predicate-pushdown re-probe IF opted-in (ZERO probe streak now 19 iterations — 4.49944/310 federation row at thin margin).
+GOVERNING LABEL = **PASS** (overall 4.5625 >= 3.5; Q3 sits exactly at 3.50 floor — flagged in prose for teacher; per-Q flag does NOT override the overall PASS per directive).
 
-### DO NOT (per existing locks):
-- Touch r22 §13.x federation guardrails (4.49944/310 thin, ZERO probe 19-iter streak).
-- Re-edit r07:1351 ORDER-BY-in-grouped-output FIX-A block (proven durable on 3 entity framings iter661-662).
-- Rewrite iter534-662 locks.
-- Add `::`-casts (iter571 PIN), QUALIFY, RLIKE (iter623 ban), PERCENTILE_CONT/MEDIAN (iter611 ban), EXTRACT(EPOCH) (iter562 ban).
-- Fabricate `dayname()` / `initcap()` (iter659 inoculation HELD).
-- DISTINCT-ON Postgres-leak (iter634 ban).
-- Bump training/state.json (per directive — teacher already set to 663).
+---
 
-### Topic average updates (iter663):
-- **Analytical query patterns on Iceberg+Trino / r07** — Q1 (date_trunc + 2-key GROUP BY + COUNT(DISTINCT) per-group) durability +0.25; Q3 (first-AND-last CTE + date_diff outer WHERE) durability +0.25; Q4 (two-level CTE-then-outer-AVG + nested-aggregate explanation) durability +0.5 BIG win — net UP.
-- **SQL query best practices for OLAP / r23** — Q2 (fact x dim JOIN SUM(amount*rate) + LEFT JOIN NULL-skip + COALESCE safety belt) durability +0.25; Q4 nested-aggregate error proactive callout durability +0.25 — net UP.
-- **Schema design — Lakehouse fact/dim (r08)** — Q2 confirms star-schema dim-JOIN primitive at r08:12/52-67/111 routes correctly for currency-rate conversion variant — durability +0.25.
-- **Federation NOT probed** — 4.49944/310 row UNCHANGED (consecutive non-probe count +1 → 313; ZERO probe iter645-663 streak = 19 iterations).
+## Flagged weak answer
 
-### Trajectory iter651→663
-4.9375 → 4.96875 → 4.6875 → 5.00 → 4.00 → 4.625 → 4.375 → 5.00 → 4.875 → 4.21875 → 4.875 → 5.000 → **5.000** — second consecutive perfect score; bedrock SQL-pattern coverage (multi-COUNT-DISTINCT-per-group, star-schema-dim-JOIN, MIN/MAX-per-group + date_diff, two-level CTE-then-outer-aggregate with nested-aggregate explanation) all durably locked.
+**Q3** (3.50, at floor) — Trino-dialect defects on day-of-week semantics and a floated non-existent function. The SQL backbone is correct; the surrounding advice is wrong.
 
-## OVERALL: 5.000 STRONG PASS — second consecutive perfect-score iteration; ALL FOUR Q's perfect 5.0; iter664 recommended DEFAULT NO-OP / durability-breadth continuation.
+---
+
+## Teacher feedback (actionable)
+
+The bedrock SQL coverage (two-level macro-median, multi-key dim-JOIN, ROW_NUMBER top-1-per-user, two-threshold HAVING) is **structurally durably locked**. The single defect this iter is the **weekday-naming advice in Q3**. Recommended targeted inoculations:
+
+1. **Anchor a "Trino day-of-week semantics" callout at the busiest-weekday phrasing** (the same place the responder reached). Verbatim canonical to add:
+   - "`day_of_week(x)` and `EXTRACT(DOW FROM x)` BOTH return ISO weekday number **1=Monday..7=Sunday** (NOT 0=Sunday)."
+   - "Trino 467 has **NO `dayname()` function**. Do not write `dayname(...)` — it is a parse-time `Function dayname not registered` error."
+   - "To get the weekday **name** (`'Monday'`, `'Tuesday'`, ...) use: `format_datetime(CAST(order_date AS timestamp), 'EEEE')`."
+   - "`CAST(EXTRACT(DOW FROM order_date) AS VARCHAR)` returns `'1'..'7'`, NOT `'Monday'..'Sunday'` — use it only when a numeric string is what you want."
+
+2. **Place the inoculation where the responder's keyword path leads** — search anchors should include "busiest weekday", "day name", "dayname", "weekday name", "EXTRACT dow", "day_of_week". Per the responder-findability memory, the canonical must sit on the same keyword route the responder traverses for this question class, not just on the topical r07/r23 page.
+
+3. **Reconcile, don't append** — if any existing r07 or r23 day-of-week block hedges "if available" or says "0=Sunday", overwrite those phrases in place. Responder will cite the stale variant otherwise.
+
+4. **Do NOT** edit the four structurally-correct primitives (approx_percentile two-level, multi-key JOIN, ROW_NUMBER top-1-per-user, two-threshold HAVING) — those are all perfect this iter.
+
+5. **Do NOT** bump training/state.json (teacher already set to 664 per directive).
+
+6. **Do NOT** add MEDIAN/PERCENTILE_CONT (iter611 ban), QUALIFY, RLIKE (iter623 ban), `::`-casts (iter571 PIN), EXTRACT(EPOCH) (iter562 ban), DISTINCT-ON (iter634 ban), initcap (iter659 inoculation).
+
+7. **Q1 minor**: when the question asks for "median AND avg of per-customer X" both, the responder delivered only the median. A small canonical at the macro-median anchor that explicitly shows BOTH outputs in one SELECT (`approx_percentile(per_customer_median, 0.5) AS median_of_medians, AVG(per_customer_median) AS avg_of_medians`) would close the completeness gap with no risk to the durably-correct structure.
+
+---
+
+## Topic score updates
+
+- **Analytical query patterns on Iceberg+Trino / r07** — Q1 two-level approx_percentile composes correctly (durability +0.25); Q3 ROW_NUMBER top-1-per-user STRUCTURE correct but day-of-week advice defective (durability **-0.25** on dialect facts). Net flat/slightly down.
+- **SQL query best practices for OLAP / r23** — Q2 multi-key dim-JOIN clean (+0.25); Q4 two-threshold HAVING clean (+0.25); Q3 dayname() floated and 0=Sunday wrong (**-0.50**). Net down.
+- **Lakehouse schema design fact/dim / r08** — Q2 confirms star-schema dim-JOIN routes (+0.25).
+- **Federation / r22** — NOT probed; row unchanged (consecutive non-probe count +1).
+
+Continue durability-breadth runs but **fix Q3 day-of-week canonical next iter** to prevent the 3.50-floor result from recurring.
