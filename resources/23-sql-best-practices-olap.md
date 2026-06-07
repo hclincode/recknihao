@@ -424,6 +424,63 @@ In the Joda pattern `'yyyy-MM'`: lowercase `yyyy` = 4-digit year, **uppercase** 
 | "Use `date_format` to build a numeric display string with a thousands separator." | **WRONG FUNCTION.** `date_format(ts, pattern)` is for date/time formatting (MySQL-style). For numeric formatting (`%,.2f`, `%,d`), use `format(fmt, n)`. |
 | "Use `json_format` to print a number with 2 decimal places." | **WRONG FUNCTION.** `json_format(json)` serializes a JSON value to its text form. For printf-style numeric formatting, use `format('%.2f', n)`. |
 
+#### Sub-canonical — building a formatted duration string like `'2h 15m'` (concat/`||` need explicit `CAST(...AS varchar)` on every number — or just use `format()`)
+
+> **Keyword anchors:** build a formatted string like '2h 15m', concat a number with text, concatenate an integer and a string Trino, put a count into a message string, format a duration as Hh Mm, combine a number column with a label, "3 orders / $450 total", concat date_diff result, date_diff bigint concat, Unexpected parameters (bigint, varchar, bigint, varchar) for function concat, concat hour minute label, format response time, time-to-first-response display string. Verified at [trino.io/docs/467/functions/string.html](https://trino.io/docs/current/functions/string.html) (concat / `||` are VARCHAR-only) and [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html) (`date_diff(unit, ts1, ts2) -> bigint`).
+
+**The one-fact lead.** `concat(s1, s2, ..., sN) -> varchar` and the `||` operator are **VARCHAR-only** — they require every argument to already be a character type. Trino does **NOT** auto-coerce `bigint` / `double` / `decimal` to `varchar` inside `concat()` or `||`. `date_diff(unit, ts1, ts2)` returns **`bigint`**. So `concat(date_diff('hour', a, b), 'h ', date_diff('minute', a, b) % 60, 'm')` **errors at runtime** with `Unexpected parameters (bigint, varchar, bigint, varchar) for function concat. Expected: concat(varchar, varchar, ...)` — the BIGINT result of `date_diff` is rejected by the all-VARCHAR signature. Two correct idioms below; **PREFERRED is `format()`** (no per-piece CAST, no `||` chain, accepts typed args directly).
+
+**RIGHT idiom 1 — PREFERRED: `format()` (printf-style, accepts BIGINT/DOUBLE directly via `%d` / `%.2f` / `%,d`).**
+```sql
+-- Time-to-first-response per ticket as a 'Hh Mm' label, e.g. '2h 15m'.
+SELECT
+  ticket_id,
+  format('%dh %dm',
+         date_diff('hour',   created_at, first_reply_at),
+         date_diff('minute', created_at, first_reply_at) % 60) AS response_time_label
+FROM tickets
+WHERE first_reply_at IS NOT NULL;
+-- => '2h 15m' (created_at=10:00, first_reply_at=12:15)
+```
+`%d` takes the `BIGINT` from `date_diff` directly — no CAST needed. For "`3 orders / $450.00 total`" style: `format('%,d orders / $%,.2f total', order_cnt, total_amt)`. Same printf-style spec as the parent §3.1A `format()` canonical above (`%d` BIGINT, `%,d` thousands, `%.2f` two decimals, `%,.2f` thousands+decimals, `%%` literal percent).
+
+**RIGHT idiom 2 — CAST every numeric piece BEFORE `||` or `concat()`.** If you really want the `||` form (e.g., a single dynamic value embedded mid-string), wrap **every** non-VARCHAR argument with `CAST(... AS varchar)`:
+```sql
+-- Same '2h 15m' label, hand-built with || and explicit CASTs.
+SELECT
+  ticket_id,
+  CAST(date_diff('hour',   created_at, first_reply_at)         AS varchar) || 'h '
+  || CAST(date_diff('minute', created_at, first_reply_at) % 60 AS varchar) || 'm'
+    AS response_time_label
+FROM tickets;
+
+-- Equivalent with concat() (concat is varchar-only too — every BIGINT still needs CAST):
+SELECT
+  ticket_id,
+  concat(
+    CAST(date_diff('hour',   created_at, first_reply_at) AS varchar), 'h ',
+    CAST(date_diff('minute', created_at, first_reply_at) % 60 AS varchar), 'm'
+  ) AS response_time_label
+FROM tickets;
+```
+**Use `CAST(expr AS varchar)`** — NOT the Postgres `expr::varchar` shorthand. Trino does NOT accept `::` for casts; it raises `mismatched input ':'. Expecting: <expression>` (see resource 07's `::`-cast inoculation in the date-truncation canonical and resource 27's Oracle/Postgres dialect-landmine table).
+
+**Companion idiom — return the two pieces as SEPARATE INTEGER columns (often cleaner than building a label).** If the downstream consumer is a dashboard cell or a BI tool, return `response_hours` and `response_minutes` as two `bigint` columns and let the rendering layer concatenate. No string-building, no CAST, no `format()` — just `date_diff('hour', a, b) AS response_hours, date_diff('minute', a, b) % 60 AS response_minutes`. (This is the shape the iter632 responder's first snippet used; it was fully correct. The error appeared only when collapsing the two integers into a formatted display string via `concat()`.)
+
+##### DO NOT WRITE — the exact runtime errors
+
+| WRONG | Why it errors | RIGHT |
+|---|---|---|
+| `concat(date_diff('hour', a, b), 'h ', date_diff('minute', a, b) % 60, 'm')` | `concat()` is **VARCHAR-only**; `date_diff` returns `bigint`. Trino raises: *"Unexpected parameters (bigint, varchar, bigint, varchar) for function concat. Expected: concat(varchar, varchar, ...)"*. **No implicit `bigint -> varchar` coercion** per [trino.io/docs/current/functions/conversion.html](https://trino.io/docs/current/functions/conversion.html) verbatim: *"Trino will not convert between character and numeric types."* | `format('%dh %dm', date_diff('hour', a, b), date_diff('minute', a, b) % 60)` OR wrap every BIGINT in `CAST(... AS varchar)` before `concat`. |
+| `date_diff('hour', a, b) || 'h ' || date_diff('minute', a, b) % 60 || 'm'` | `||` is sugar for `concat()` per the Trino string-functions docs — **same VARCHAR-only rule, same `bigint`-rejection error**. | `format('%dh %dm', date_diff('hour', a, b), date_diff('minute', a, b) % 60)` OR `CAST(date_diff('hour',a,b) AS varchar) || 'h ' || CAST(date_diff('minute',a,b)%60 AS varchar) || 'm'`. |
+| `concat('You have ', order_count, ' orders')` (BIGINT `order_count`) | Same — BIGINT argument rejected by varchar-only `concat`. | `format('You have %d orders', order_count)` OR `'You have ' || CAST(order_count AS varchar) || ' orders'`. |
+| `'$' || total_amount` (DECIMAL/DOUBLE `total_amount`) | Same — DECIMAL/DOUBLE argument rejected by varchar-only `||`. | `format('$%,.2f', total_amount)` OR `'$' || CAST(total_amount AS varchar)` (loses the comma-grouping — prefer `format`). |
+| `concat(date_diff('hour', a, b)::varchar, 'h')` (Postgres-style `::` cast as a workaround) | Trino does NOT parse `::` as a cast — raises `mismatched input ':'` at parse time. Use ANSI `CAST(... AS varchar)`. | `concat(CAST(date_diff('hour', a, b) AS varchar), 'h')` OR `format('%dh', date_diff('hour', a, b))`. |
+
+**One-line rule.** Building a `'2h 15m'` / `'3 orders'` / `'$450.00 total'` style display string from a number column or a `date_diff` result? **First choice: `format(fmt, args...)`** — it takes typed args (`%d` for `bigint`, `%.2f` / `%,.2f` for decimals, `%s` for strings) and is the printf-style canonical above. **Second choice: explicit `CAST(... AS varchar)` on every numeric piece before `||` or `concat()`.** **Never** rely on implicit coercion — Trino has none for number-to-string.
+
+---
+
 **Cross-reference.** For the Oracle `||` implicit-coerce trap that drives engineers to look for a printf-style alternative, see [resource 27 §7A.3.1](27-oracle-plsql-to-dbt-trino.md) — that section's "option B: use `format()`" worked example is migration-specific; THIS section is the generic Trino SQL canonical for any printf-style string building.
 
 ---

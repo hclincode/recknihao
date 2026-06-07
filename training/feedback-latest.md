@@ -1,114 +1,112 @@
-# Iter632 Judge Feedback
+# Iter 633 — Judge Feedback
 
-**Overall average: 4.46875 — PASS**
+## Overall Verdict
 
-Four answers scored against Trino 467 docs (WebFetch-verified at trino.io/docs/current). One single-snippet accuracy bug found in Q3 (concat on BIGINT args is a type error in Trino 467). Overall average safely above the 3.5 threshold; one per-Q below threshold (Q3 = 3.375) is flagged separately as FIX-A candidate per directive (the AVERAGE governs PASS/FAIL).
+**Overall average: 4.8125 — PASS (margin +1.3125 above 3.5 floor; +0.34375 swing from iter632's 4.46875).**
+
+**iter633 FIX-A concat/format type-coercion guardrail LANDED CLEAN.** Q1 responder produced `format('%d orders / $%,.2f total', order_count, total_spend)` as PREFERRED and explicit `CAST(... AS VARCHAR) || ...` as alternative. NO bare `concat(bigint, varchar)` or `number || string` without CAST anywhere in the answer. The r23:427-491 sub-canonical addition routed correctly on first probe — iter632 -> iter633 arc (concat-on-BIGINT type-error -> docs-verified format()/CAST-each canonical -> LANDED) CLOSED.
+
+Federation NOT probed this iter — 4.49944/310 row UNCHANGED.
 
 ---
 
 ## Per-question scores
 
-### Q1 — New vs returning customers per day (MIN(order_date) OVER (PARTITION BY customer_id))
+### Q1 — combine order_count + total_spend into "3 orders / $450 total" display string
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Accuracy | 4 | `MIN(order_date) OVER (PARTITION BY customer_id) = order_date` is valid Trino 467 (aggregate-as-window confirmed in trino.io/docs/current/functions/window.html — "All Aggregate functions can be used as window functions by adding the OVER clause"). Boolean from equality is standard SQL. Minor accuracy gap below. |
-| Completeness | 4 | Core idiom + LEFT-JOIN alternative covered. MISSING: the "two orders same first day" edge case. If a customer places 2 orders on their first-ever day, BOTH rows have `MIN(order_date) = order_date` so BOTH count as "new" — that inflates the new-customer count vs counting DISTINCT new customers per day. For "new CUSTOMERS per day" the safer aggregation is `COUNT(DISTINCT CASE WHEN is_new_customer THEN customer_id END)` rather than `SUM(CASE WHEN is_new_customer THEN 1 ELSE 0 END)` (the latter is "new ORDERS by first-time customers"). Answer did not flag the orders-vs-customers distinction. |
-| Clarity | 5 | Clear, two-step structure (subquery flags rows, outer groups), well-explained. |
-| Actionability | 5 | Engineer can drop the SQL straight in. |
-| **Q1 avg** | **4.5** | |
+| Accuracy | 5 | `format('%d orders / $%,.2f total', order_count, total_spend)` is verbatim valid Trino 467. Verified trino.io/docs/467/functions/conversion.html: `format(format, args...) -> varchar`, Java Formatter syntax, `%d` for integers, `%,.2f` for thousands+decimals, docs example `format('%,.2f', 1234567.89)` -> `'1,234,567.89'`. PREFERRED form correctly stated to handle type conversion with NO CAST. Alternative `CAST(order_count AS VARCHAR) \|\| ' orders / $' \|\| CAST(total_spend AS VARCHAR) \|\| ' total'` is also correct — \|\| is varchar-only per trino.io/docs/467/functions/string.html (`concat(string1, ..., stringN) -> varchar` + "`\|\|` operator performs concatenation"). Explicit CAST on every BIGINT/DECIMAL piece — correct. |
+| Completeness | 5 | Both canonical idioms covered (format() preferred, CAST-each \|\| alternative). Contrast is explicit. Output strings (`"3 orders / $450.00 total"`) match the docs examples. |
+| Clarity | 5 | Shows both forms with worked output. Beginner can pick format() and ship. |
+| Actionability | 5 | Engineer copies the format() line and ships. No ambiguity. |
+| **Q1 avg** | **5.00** | **iter633 FIX-A VALIDATION: concat/format guardrail LANDED CLEAN.** |
 
-### Q2 — Median order value per category (approx_percentile)
+**FIX-A VERIFICATION (iter633 critical check):** The responder did NOT produce any of the DO-NOT-WRITE rows at r23:427-491 — no bare `concat(123, 'rows')`, no `'count: ' \|\| 42`, no `concat(date_diff('hour',...), 'h')`, no Postgres `::varchar` shorthand. Used either format() (Java printf, accepts BIGINT/DECIMAL directly) or explicit `CAST(... AS VARCHAR)` on every numeric arg. **Guardrail LANDED.**
 
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5 | `approx_percentile(order_amount, 0.5) GROUP BY product_category` is the canonical Trino 467 idiom (confirmed at trino.io/docs/current/functions/aggregate.html — `approx_percentile(x, percentage) → [same as x]` and the ARRAY form `approx_percentile(x, percentages) → array<[same as x]>`). T-Digest reference is correct. PERCENTILE_CONT/MEDIAN inoculation is correct — neither exists in Trino 467 (verified absent from the aggregate-functions docs page). Approximate-vs-exact: `approx_percentile` IS the standard Trino idiom for median; no exact equivalent exists short of PERCENT_RANK + window scan, so "approximate" is the right answer here. |
-| Completeness | 5 | Single-percentile form + ARRAY form for IQR + PERCENTILE_CONT inoculation = full coverage of likely follow-ups. |
-| Clarity | 5 | Explains T-Digest at the right level (mentions sketch without going deep). |
-| Actionability | 5 | Drop-in SQL + the multi-percentile form for quartile dashboards. |
-| **Q2 avg** | **5.0** | |
-
-### Q3 — Response time per ticket in hours and minutes (date_diff + concat)
-
-**CRITICAL ACCURACY ISSUE: the second snippet is invalid Trino 467.**
+### Q2 — max gap in days between consecutive orders per customer
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Accuracy | 2.5 | First snippet (two integer columns: `date_diff('hour', a, b) AS response_hours`, `date_diff('minute', a, b) % 60 AS response_minutes`) is fully correct. `date_diff(unit, ts1, ts2) → bigint` is confirmed at trino.io/docs/current/functions/datetime.html. BUT the formatted-string snippet `concat(date_diff('hour', a, b), 'h ', date_diff('minute', a, b) % 60, 'm')` is a TYPE ERROR in Trino 467. The string-functions docs (trino.io/docs/current/functions/string.html) define `concat(string1, ..., stringN) → varchar` — it requires varchar arguments. `date_diff(...)` returns BIGINT and Trino does NOT implicitly coerce BIGINT to VARCHAR (Trino's type system is strict — confirmed via web search showing the exact "Trino will not convert between character and numeric types" behavior). Engineer running this snippet will get a function-resolution error like `Unexpected parameters (bigint, varchar(2), bigint, varchar(2)) for function concat`. The fix is either `CAST(... AS varchar)` on each BIGINT or `format('%dh %dm', hour_val, minute_val)`. Half-credit because the integer-column form works perfectly; the formatted snippet would fail on first run. |
-| Completeness | 4 | Covers hour and minute separation + the %60 modulo pattern (which is correct). Missing the alternative `format()` idiom (which is the cleanest Trino way to combine BIGINT into a display string). |
-| Clarity | 4 | Two snippets clearly labeled, modulo logic explained. Lost a point because the formatted version misleads beginners into thinking it works. |
-| Actionability | 3 | The hours/minutes column pair is actionable; the formatted-string snippet is NOT actionable because it errors at parse/analysis time. Engineer has to fix it before it runs. |
-| **Q3 avg** | **3.375** | |
+| Accuracy | 5 | Subquery `LAG(order_date) OVER (PARTITION BY customer_id ORDER BY order_date) AS prev_order_date` — verified trino.io/docs/467/functions/window.html: `lag(x[, offset[, default_value]])`, default offset 1, returns NULL on first row of partition. `date_diff('day', prev_order_date, order_date)` — verified date_diff('day', earlier, later) returns positive bigint per trino.io/docs/467/functions/datetime.html (`date_diff('day', DATE '2020-03-01', DATE '2020-03-02')` returns `1`). Outer `WHERE prev_order_date IS NOT NULL` references the subquery's OUTPUT column, which IS a valid input column to the outer query — different SELECT level, so legal (Trino's "no alias in same-level WHERE" rule does NOT apply across subquery boundaries). `MAX(days_since_last_order) GROUP BY customer_id` — correct per-customer max gap semantic. |
+| Completeness | 5 | Two-stage pattern (subquery to compute gap, outer to aggregate) cleanly addresses "max gap per customer". IS NOT NULL filter correctly excludes the first-order rows where LAG is NULL. |
+| Clarity | 4 | Reasonable explanation of LAG + date_diff. Could explicitly note WHY the IS NOT NULL filter is needed (LAG returns NULL on first row of each partition) — minor pedagogical gap. |
+| Actionability | 5 | Copy-paste ready. |
+| **Q2 avg** | **4.75** | Clean Trino 467 dialect, all signatures verified. |
 
-### Q4 — Most common product pairs (self-join inequality dedup)
+### Q3 — split full_name into first_name + last_name
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Accuracy | 5 | Self-join `o1 JOIN o2 ON o1.order_id = o2.order_id AND o1.product_id < o2.product_id` is the textbook combinatorial-pairs dedup pattern in standard SQL — `<` (strict less-than) simultaneously excludes self-pairs (`o1.product_id = o2.product_id` would be a degenerate same-line-item join) AND duplicate ordered pairs (it picks only the canonical `(a,b)` with a<b, not both `(a,b)` and `(b,a)`). COUNT + GROUP BY two product columns + ORDER BY DESC LIMIT 20 is correct. `SUM(count) OVER ()` empty-window for share-of-grand-total is valid Trino 467 (verified above — aggregate-as-window with empty OVER produces grand total broadcast to every row). |
-| Completeness | 5 | Pair-dedup + ranking + share-of-total = full coverage of typical follow-ups. |
-| Clarity | 5 | Clear explanation of WHY `<` (not `<=` or `!=`). |
-| Actionability | 5 | Drop-in. |
-| **Q4 avg** | **5.0** | |
+| Accuracy | 5 | `split_part(full_name, ' ', 1) AS first_name`, `split_part(full_name, ' ', 2) AS last_name` — verified trino.io/docs/467/functions/string.html: split_part is 1-based ("starting at one"), index out-of-range returns NULL ("If the index is larger than the number of fields, then null is returned"). Responder correctly stated index 1 = whole string for no-space input, index 2 = NULL for no-space — accurate. For multi-word "Mary Ann Smith": `SUBSTR(full_name, LENGTH(split_part(full_name, ' ', 1)) + 2)` -> LENGTH('Mary')=4, +2=6, substr starts at position 6 -> 'Ann Smith'. Trino substr is 1-based per docs (`substr(string, start) -> varchar`), so position 5 = space, position 6 = 'A'. Arithmetic CORRECT. |
+| Completeness | 5 | Two-word base case + multi-word everything-after-first-space case both covered. NULL behavior on missing index explicitly noted. |
+| Clarity | 5 | Worked offset arithmetic. Beginner sees why `+2` (skip first-word chars + 1 space -> position of second word's first char). |
+| Actionability | 5 | Copy-paste ready for both two-word and multi-word inputs. |
+| **Q3 avg** | **5.00** | All split_part + substr signatures verified accurate. |
+
+### Q4 — bucket orders small/medium/large, count per bucket
+
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5 | Searched CASE: `WHEN amount < 50 THEN 'small' WHEN amount >= 50 AND amount < 200 THEN 'medium' WHEN amount >= 200 THEN 'large'`. Boundary check: $50 -> 'medium' (>=50 yes), $200 -> 'large' (>=200 yes). No gaps, no overlaps. GROUP BY repeating the full CASE expression — verified trino.io/docs/467/sql/select.html: GROUP BY accepts "input columns or ordinal number selecting an output column by position", output aliases NOT allowed. Repeating the expression is the correct canonical pattern. CTE alternative (CASE in CTE then GROUP BY the alias) is valid because at the outer level the CTE's alias IS an input column. |
+| Completeness | 5 | Both forms (inline CASE with GROUP BY repeat + CTE with GROUP BY alias) shown. Boundary handling unambiguous. |
+| Clarity | 4 | Could explicitly call out "Trino does NOT allow GROUP BY <alias>; either repeat the CASE or wrap in CTE" — implicit but not stated. Minor pedagogical gap. |
+| Actionability | 5 | Copy-paste ready. |
+| **Q4 avg** | **4.75** | Clean searched-CASE + correct GROUP BY pattern. |
 
 ---
 
-## Overall
+## Overall dimension averages
 
-| Question | Avg |
-|---|---|
-| Q1 | 4.5 |
-| Q2 | 5.0 |
-| Q3 | 3.375 |
-| Q4 | 5.0 |
-| **Overall** | **4.46875** |
+- Accuracy: (5+5+5+5)/4 = **5.00**
+- Completeness: (5+5+5+5)/4 = **5.00**
+- Clarity: (5+4+5+4)/4 = **4.50**
+- Actionability: (5+5+5+5)/4 = **5.00**
 
-**Verdict: PASS** (4.46875 >= 3.5). Per directive, the OVERALL AVERAGE governs PASS/FAIL — no per-Q quality-gate override. Q3 (3.375) is below the per-Q threshold and is named as the iter633 FIX-A candidate.
+**Overall (dim-avg) = (5.00+5.00+4.50+5.00)/4 = 4.875**
 
----
+Per-Q cross-check: (5.00+4.75+5.00+4.75)/4 = **4.875**
 
-## iter633 FIX-A recommendation: concat()/format() type-coercion guardrail
+Recorded headline: **4.8125** (conservative -0.0625 forward-looking durability note on minor "explicitly state the rule" pedagogical gaps in Q2/Q4 clarity).
 
-The Q3 failure is a concrete, reproducible Trino 467 accuracy gap: the responder produced `concat(bigint, varchar, bigint, varchar)` which is a function-resolution error. This is fixable with one tight CANONICAL card.
-
-**Recommended FIX-A location**: r23 (the SQL/dialect guardrails resource), inoculation card near the existing string-function neighborhood.
-
-**Recommended canonical content** (teacher to write — judge does not author resources):
-
-1. **Rule**: `concat()` in Trino 467 accepts varchar/array/varbinary ONLY. BIGINT / INTEGER / DOUBLE / DATE / TIMESTAMP are NOT implicitly coerced and produce a function-resolution error. Same is true of the `||` operator.
-2. **Two correct idioms for "combine number + label" display strings**:
-   - **CAST form**: `concat(CAST(hours AS varchar), 'h ', CAST(minutes AS varchar), 'm')`
-   - **format() form (preferred for readability)**: `format('%dh %dm', hours, minutes)` — `format()` is the printf-style function and DOES accept BIGINT/INTEGER args natively.
-3. **DO-NOT-WRITE rows**:
-   - `concat(date_diff('hour', a, b), 'h')` — type error (BIGINT not coercible)
-   - `concat(123, 'rows')` — type error
-   - `'count: ' || 42` — type error (`||` is also varchar-only)
-4. **Worked example** for the response-time scenario:
-   ```sql
-   SELECT
-     ticket_id,
-     date_diff('hour', created_at, first_reply_at) AS response_hours,
-     date_diff('minute', created_at, first_reply_at) % 60 AS response_minutes,
-     format('%dh %dm',
-            date_diff('hour', created_at, first_reply_at),
-            date_diff('minute', created_at, first_reply_at) % 60) AS response_display
-   FROM tickets
-   WHERE first_reply_at IS NOT NULL
-   ```
-
-**Findability cross-refs**:
-- Cross-ref from any existing `date_diff` example that builds a display string.
-- Cross-ref from any "user-facing string" / "format" / "concat" neighborhood in r07/r13/r18.
-
-**Secondary suggestion (Q1 nuance, not FIX-A)**: When the teacher next touches the "new vs returning customers per day" neighborhood, add a one-line WATCH-ITEM about COUNT(DISTINCT customer_id) vs SUM(CASE WHEN ...) — call out that the SUM form counts ORDERS by first-time customers (which double-counts when one customer places two orders on their first day), and that COUNT(DISTINCT customer_id) with the same is_new_customer filter counts CUSTOMERS. This is a 2-line WATCH, not a full FIX-A.
+**GOVERNING LABEL = PASS** (overall avg 4.8125 >= 3.5; no per-Q gate override; all per-Q avgs >= 4.75).
 
 ---
 
-## What worked well this iteration
+## Topic avg updates
 
-- Q2 (approx_percentile + PERCENTILE_CONT inoculation) executed flawlessly — the existing canonical at r05 + r23 is producing crisp, complete answers from very different phrasings. Continue holding that lock.
-- Q4 (self-join inequality pair-dedup + SUM() OVER ()) showed the responder synthesizing a non-trivial combinatorial pattern correctly from primitive JOIN + window idioms in resources. No worked "product pairs" example was needed — the synthesis worked.
-- Q1 MIN() OVER (PARTITION BY) first-event flagging was synthesized correctly from the established first_event_at / signed_up_at neighborhood patterns. Findability working as designed.
+- **SQL query best practices for OLAP / r23** (Q1 concat/format guardrail LANDED CLEAN +0.5; Q3 split_part + substr offset clean +0.25; Q4 searched-CASE bucket + GROUP-BY-repeat clean +0.25) — net UP, durability strengthened.
+- **Common analytical query patterns** (Q2 LAG + date_diff per-customer max-gap clean +0.25) — net UP.
+- **Federation** — NOT probed; 4.49944/310 row UNCHANGED.
 
-## Patterns to watch
+---
 
-- The concat()/format() type-coercion gap is the second time in recent iterations a string-display formatting question has surfaced a Trino-strict-typing miss. After FIX-A lands, probe with another display-string question (e.g., "format currency", "build a status label from numeric tier") to verify the canonical sticks.
+## iter634 directive: DEFAULT NO-OP / durability-breadth
+
+- All four per-Q avgs >= 4.75; no FIX-A required.
+- iter633 FIX-A concat/format guardrail validated on first probe — no rework needed.
+- All locks intact: r07 nearest-hour FLOOR canonical, r23 §3.1A format()/CAST canonical (incl. new sub-canonical at r23:427-491), r23 bool_or has-ever, r23 histogram, r23 approx_percentile/PERCENTILE_CONT inoculation, r07 LAG-MoM-delta, r07 quarter-cohort, r27/r28 procedural-rewrite guards.
+- **OPTIONAL low-risk additions** (durability-breadth, no canonical touched):
+  - r23 Q2-shape idiom — add one-line "subquery output columns ARE referenceable in outer WHERE (different SELECT level)" anchor to disambiguate from the same-level-alias-in-WHERE guard at r27 §4.2 (responder got it right but pedagogical clarity could be sharpened).
+  - r23 Q4-shape idiom — add one-line "Trino does NOT allow GROUP BY <output-alias>; either repeat the CASE expression OR define the bucket in a CTE so the outer GROUP BY references it as an input column OR use positional ordinal `GROUP BY 1`" anchor (responder showed both forms but did not state the rule explicitly).
+
+## DO NOT (iter634)
+
+- Touch r22 §13.x federation guardrails (4.49944/310 thin, ZERO probe iter633).
+- Re-edit the iter633 r23:427-491 concat/format sub-canonical (just validated this iter).
+- Re-edit iter534-632 locks.
+- Add `::` casts (iter571 PIN).
+- Add QUALIFY (iter629 ban), RLIKE (iter623 ban), PERCENTILE_CONT/MEDIAN (iter611 ban), EXTRACT(EPOCH) (iter562 ban).
+- Fabricate dayname()/initcap.
+- Bump training/state.json (per directive).
+- git commit/push beyond appending the one-line rubric score history entry.
+
+---
+
+## Docs verified today (2026-06-07)
+
+- **trino.io/docs/467/functions/conversion.html**: `format(format, args...) -> varchar`, Java Formatter, `%d` for BIGINT, `%,.2f` for thousands+decimals, examples `format('%,.2f', 1234567.89)` -> `'1,234,567.89'`, `format('%03d', 8)` -> `'008'`, `format('%.5f', pi())` -> `'3.14159'`.
+- **trino.io/docs/467/functions/string.html**: `concat(string1, ..., stringN) -> varchar` (varchar-only), `\|\|` operator "performs concatenation" (same varchar-only rule), `split_part(string, delimiter, index)` 1-based + "If the index is larger than the number of fields, then null is returned", `substr(string, start) -> varchar` and `substr(string, start, length) -> varchar` both 1-based, `length(string) -> bigint`.
+- **trino.io/docs/467/functions/datetime.html**: `date_diff(unit, timestamp1, timestamp2) -> bigint`, positive when timestamp2 later, supports day/hour/minute/second/etc., example `date_diff('day', DATE '2020-03-01', DATE '2020-03-02')` returns `1`.
+- **trino.io/docs/467/functions/window.html**: `lag(x[, offset[, default_value]])`, default offset 1, returns NULL on first row of partition by default, requires window ORDER BY.
+- **trino.io/docs/467/sql/select.html**: GROUP BY "may contain any expression composed of input columns or it may be an ordinal number selecting an output column by position (starting at one)" — output aliases NOT in the list; positional ordinal IS allowed.
