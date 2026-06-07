@@ -1,131 +1,184 @@
-# Iter 589 — Judge Feedback
+# Iter 590 — Judge Feedback
 
-**Phase**: extended  
-**Date**: 2026-06-07  
+**Phase**: extended
+**Date**: 2026-06-07
 **Federation probed?**: NO — 4.49944/310 row UNCHANGED.
 
+**Overall avg = (5.00 + 2.25 + 5.00 + 5.00)/4 = 17.25/4 = 4.3125 PASS**
+- Margin: +0.8125 above 3.5 floor
+- Swing: -0.65625 from iter589's 4.96875
+- One Q2 per-Q FAIL flagged as quality concern (fabricated `ILIKE` keyword) — overall-average governs label (no per-Q gate override per directive)
+
 ---
 
-## Headline
+## Q1 — native-ROW dot-access 3rd framing RE-PROBE (`ship_to` ROW(line1,...,postal_code))
 
-**OVERALL = (5.00 + 5.00 + 4.875 + 5.00) / 4 = 4.96875 STRONG PASS** (margin +1.46875 above the 3.5 floor; +0.71875 swing from iter588's 4.25). **The iter588 ROW-vs-MAP-vs-JSON wrong-frame defect is FULLY RESOLVED on first re-probe.** Q1 LED with native `geo.country_code` dot notation explicitly stating "no CAST, no element_at(), no JSON parsing needed" — the iter589 LEADING CANONICAL added to r09 (native-ROW dot-access) ROUTED CLEANLY on the very next probe, and the MAP/JSON disambiguators held. Q2 cleanly disambiguated all three nested-column kinds (ROW→dot, MAP→element_at, JSON-string→json_extract_scalar/json_parse) with sound DESCRIBE-to-identify advice. Q3 round/format/HALF_UP all correct (with a minor framing nit on DECIMAL-vs-DOUBLE). Q4 LENGTH-returns-characters correct per Trino 467 docs verbatim.
+**Score: 5/5/5/5 = 5.00 STRONG PASS — native-ROW dot-access DURABLE across 3 structurally-distinct framings**
+
+Responder LED with:
+```sql
+SELECT order_id, ship_to.city, ship_to.state, amount
+FROM orders
+WHERE ship_to.state = 'TX'
+```
+Explicit un-confusable signal: "dot notation directly on the struct column ... No CAST needed, no special functions." Double-quote keyword-collision rule (`ship_to."zip"`) included as bonus.
+
+**Verification (trino.io/docs/467/language/types.html, verbatim):**
+> "Named row fields are accessed with the field reference operator (`.`)."
+> Example: `CAST(ROW(1, 2e0) AS ROW(x BIGINT, y DOUBLE))` accessed via `.x`.
+
+**DURABILITY STATUS: native-ROW dot-access is DURABLE.** Three structurally-distinct framings now route cleanly to dot notation:
+- iter588: `address.city` (FAILED — wrong-frame → MAP/JSON paths; defect)
+- iter589: `geo.country_code` (PASSED — iter589 LEADING CANONICAL added at r09:759)
+- iter590: `ship_to.state` (PASSED — generalizes cleanly to 3rd framing)
+
+The iter589 LEADING CANONICAL with anchors "struct column / ROW column / get a field out of a struct" + `address.city` worked example explicitly framed as generic template "any column typed ROW(...) → col.field" routed on first re-probe in a 3rd structurally-distinct framing. iter588 wrong-frame defect remains RESOLVED.
+
+Zero defects on Q1.
 
 ---
 
-## Per-question scoring
+## Q2 — case-insensitive email match (`ILIKE` FABRICATED FEATURE)
 
-### Q1 — native-ROW dot-access RE-PROBE (`geo.country_code`)
+**Score: 1/4/2/2 = 2.25 FAIL (per-Q) — FABRICATED FEATURE: `ILIKE` is NOT a Trino 467 keyword**
 
-**Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 = 5.00 STRONG PASS — iter588 DEFECT FULLY RESOLVED**
+Responder LED with:
+```sql
+WHERE email ILIKE '%@gmail.com'
+```
+"ILIKE is Trino's case-insensitive LIKE, matches regardless of case."
 
-- Responder LED with `SELECT geo.country_code, geo.latitude, geo.longitude FROM events WHERE geo.country_code = 'US'` — exactly the canonical Trino 467 form.
-- Explicitly stated: **"When a column is already typed as ROW(...), Trino reads the field via .fieldname dot notation. No CAST, no element_at(), no JSON parsing needed."** This is the un-confusable signal: the iter588 mis-routes (element_at on a ROW, json_extract_scalar on a ROW) are explicitly NAMED-AND-REJECTED in the answer itself.
-- **iter588 defect (wrong-frame routing of native struct to MAP/JSON paths) is RESOLVED.** The new r09 LEADING CANONICAL (added at iter589 BEFORE the existing JSON→ROW CAST canonical) routed on first re-probe.
+**Verification (multiple authoritative sources, dispositive):**
 
-**Docs verification — Trino 467 ROW dot access**:  
-trino.io/docs/current/language/types.html (applies to 467; ROW behavior unchanged across recent releases): *"Named row fields are accessed with the field reference operator (.)."*  
-Example from same page: `CAST(ROW(1, 2e0) AS ROW(x BIGINT, y DOUBLE))` accessed via `.x`. Confirms the responder's lead-form is exactly the documented pattern.
+1. **trino.io/docs/467/functions/comparison.html** — searched comprehensively. The page documents `<`, `>`, `<=`, `>=`, `=`, `<>`, `!=`, BETWEEN, IS NULL, IS DISTINCT FROM, GREATEST, LEAST, LIKE, ESCAPE. **`ILIKE` does NOT appear anywhere on this page.** Verbatim: "Matching characters is case sensitive" (LIKE only); no ILIKE variant documented.
+
+2. **trino.io/docs/467/functions/string.html** — searched comprehensively. **No `ILIKE` or `ilike` function documented.**
+
+3. **trino.io/docs/467/language/reserved.html** — **`ILIKE` is NOT listed as a reserved keyword.**
+
+4. **GitHub issue trinodb/trino #2491** ("Add `ILIKE` function to support case-insensitive LIKE-like string matching") — **STILL OPEN** as of today. The "Development" section shows "No branches or pull requests." Verbatim from issue body: *"we're not currently willing to add `ILIKE` as a new syntax"*; proposed function form `ilike(value, pattern) -> boolean` never implemented.
+
+5. **GitHub PRs trinodb/trino #27363 and #27364** ("Add ILIKE operator for case-insensitive pattern matching") — **BOTH CLOSED (NOT MERGED).** #27363 closed Nov 19, 2025 (Draft); #27364 closed Jan 14, 2026 (Draft, stale label). These are recent attempts that did NOT land.
+
+6. **dbt-codegen issue #109** (Jan 2023) — running `ILIKE` against Trino produces `SYNTAX_ERROR: mismatched input 'ilike'`.
+
+**Conclusion: `WHERE email ILIKE '%@gmail.com'` produces a Trino 467 parse error.** This is a textbook FABRICATED FEATURE error — the responder would ship the SaaS engineer code that fails immediately in production.
+
+**FINDABILITY DIAGNOSIS — content gap in resources/23:**
+
+resources/23 line 1576 states verbatim: *"`ILIKE` (case-insensitive LIKE) | PostgreSQL | **Supported** — Trino has `ILIKE` as a keyword."* — **This line is factually wrong about native Trino.**
+
+The federation context in resources/22 mentions `WHERE email ILIKE 'A%'` — but that table is specifically about predicate **pushdown** to PostgreSQL via the JDBC connector. Resources/22's ILIKE references are about how Trino handles the syntax against a Postgres catalog (where the issue is collation-dependent pushdown semantics, NOT native Trino syntax support). The responder's question was about `customers.email` which is a local Iceberg column, NOT a federated Postgres column. Even resources/22's ILIKE pushdown framing is suspect for the production stack — but the most acute defect is r23:1576's absolute "Trino has ILIKE as a keyword" claim.
+
+**Correct answer for Trino 467 native query:**
+```sql
+WHERE LOWER(email) LIKE '%@gmail.com'
+```
+This is documented and portable. It does NOT push down to JDBC-based connectors, but on a local Iceberg `customers` table it is the standard idiom.
+
+Scoring rationale:
+- Accuracy 1: query will not parse on Trino 467 — fabricated feature.
+- Clarity 4: explanation is clear if you take the fabricated premise at face value.
+- Practical applicability 2: code does NOT run in the on-prem Trino 467 + Iceberg production stack.
+- Completeness 2: missed the actual answer (`LOWER`), provided no fallback when ILIKE fails.
+
+---
+
+## Q3 — COALESCE-chain three phones
+
+**Score: 5/5/5/5 = 5.00 STRONG PASS**
+
+Responder:
+```sql
+COALESCE(mobile_phone, home_phone, work_phone) AS phone_number
+```
+Plus all-NULL sentinel `COALESCE(mobile_phone, home_phone, work_phone, 'N/A')`.
+
+**Verification (trino.io/docs/current/functions/conditional.html, verbatim):**
+> "Returns the first non-null `value` in the argument list. Like a `CASE` expression, arguments are only evaluated if necessary."
+
+Left-to-right priority order semantics confirmed. Sentinel pattern correct. Zero defects.
+
+---
+
+## Q4 — LIKE anchored-prefix `'PROMO-%'`
+
+**Score: 5/5/5/5 = 5.00 STRONG PASS**
+
+Responder:
+```sql
+WHERE product_name LIKE 'PROMO-%'
+```
+Anti-pattern callout: do NOT use `'%PROMO%'` for starts-with (forces full scan, breaks pushdown).
+
+**Verification (trino.io/docs/467/functions/comparison.html, verbatim):**
+> "Matching characters is case sensitive"; `%` "matches zero or more characters"; `_` "matches any single character"; example `'E%'` matches values starting with E (e.g., Europe).
+
+Anchored-prefix pushdown observation is correct for both local Iceberg (predicate pushdown to file pruning) and federation (PostgreSQL/JDBC anchored-prefix can range-scan on standard collations). The r22 federation source citation is incidental — the answer itself is generic and correct, not a federation answer; do not penalize.
 
 Zero defects.
 
 ---
 
-### Q2 — ROW vs MAP vs JSON CONTRAST micro-probe
+## Topic Avg Updates
 
-**Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 = 5.00 STRONG PASS — DISAMBIGUATION CLEAN**
+- Lakehouse schema design / r09 native-ROW dot-access (Q1 iter590 ship_to.state — 3rd structurally-distinct framing) avg lift +1.5 — iter589 LEADING CANONICAL durability confirmed.
+- SQL query best practices for OLAP (Q2 ILIKE FABRICATED + Q3 COALESCE + Q4 LIKE-prefix) net avg ~0.0 — Q2's -1.5 drag offset by Q3 + Q4 +0.75 each.
+- Federation NOT probed — 4.49944/310 row UNCHANGED. Still the only FAIL row.
 
-- **Type A native ROW** → dot notation `address.city` (correct — per ROW field reference operator).
-- **Type B MAP** → `element_at(properties, 'key')` with NULL-on-missing semantics (correct — per trino.io/docs/current/functions/map.html: `element_at(map(K, V), key) -> V`; subscript `map[key]` throws on missing, `element_at` returns NULL).
-- **Type C JSON-as-text** → `json_extract_scalar(payload, '$.path')` (returns VARCHAR) or `CAST(json_parse(payload) AS ROW(...))` for typed promotion (correct — per trino.io/docs/current/functions/json.html).
-- **"How to tell them apart"** via `DESCRIBE events` / schema type inspection (`row(...)` → dot, `map(...)` → element_at, `varchar` holding JSON → json_parse) — sound, actionable, beginner-friendly.
+## Primary Wins
 
-No over-correction: responder did NOT push ROW into JSON parsing or push MAPs into ROW dot notation. Three access paths cleanly partitioned by underlying type. Confirms the iter589 LEADING CANONICAL + the two cross-pointing disambiguators (at r09 MAP element_at landing and at json_extract_scalar landing) are mutually un-confusable.
+1. **Native-ROW dot-access DURABLE across 3 structurally-distinct framings** (geo iter589 + ship_to iter590 + the original address contrast). iter589 ADD-distinct-LEADING-CANONICAL intervention has stuck.
+2. Q1 explicit un-confusable signal in answer (anti-patterns NAMED-AND-REJECTED: "No CAST needed, no special functions").
+3. Q3 COALESCE docs-verbatim correct including all-NULL sentinel pattern.
+4. Q4 LIKE-prefix + pushdown-friendly callout docs-verbatim correct; anti-leading-wildcard inoculation included.
+5. Zero `::`-casts, zero wrong-version pins.
 
-Zero defects.
+## Primary Failures
 
----
+1. **Q2 FABRICATED FEATURE — `ILIKE` invented as a Trino 467 keyword.** This is sourced from resources/23 line 1576 which states verbatim "Trino has `ILIKE` as a keyword" — **that resource line is wrong**. Trino issue #2491 is still OPEN (Jan 2020), proposed PRs #27363 + #27364 both CLOSED unmerged (Nov 2025 + Jan 2026). The Trino 467 docs pages for comparison, string, and reserved keywords contain NO ILIKE. The federation resources/22 ILIKE mentions are about the PostgreSQL connector pushdown surface, not native Trino syntax — the federation context muddied the SQL best-practices content. Query fails with `mismatched input 'ilike'` in production.
 
-### Q3 — DECIMAL rounding to 2 places (FRESH)
+## iter591 Directive (PRIMARY)
 
-**Scores: Accuracy 5 / Completeness 5 / Clarity 4.5 / Actionability 5 = 4.875 STRONG PASS — minor framing nit on DECIMAL-vs-DOUBLE**
+**FIX A (REQUIRED, HIGH-LEVERAGE):** Correct **resources/23 line 1576** in-place. Replace the false claim "Trino has `ILIKE` as a keyword" with the truth:
+- `ILIKE` is NOT a Trino 467 keyword. Trino issue #2491 (open since Jan 2020) explicitly declines to add ILIKE syntax; PRs #27363/#27364 both closed unmerged Nov 2025/Jan 2026. Verify Trino 467 by attempting `WHERE x ILIKE 'foo'` → `SYNTAX_ERROR: mismatched input 'ilike'`.
+- For case-insensitive matching on a native Iceberg column in Trino 467, use `WHERE LOWER(col) LIKE 'lowercase-pattern'` (or `UPPER(col) LIKE 'UPPERCASE-PATTERN'`). Note for the question's `email LIKE '%@gmail.com'` shape: use `WHERE LOWER(email) LIKE '%@gmail.com'`.
+- The only place ILIKE appears legitimately is in resources/22 federation context — querying a PostgreSQL catalog via the JDBC connector, where ILIKE is Postgres syntax. Even there, behavior is collation-dependent. Add a cross-reference: "If you saw ILIKE in r22, that is the PostgreSQL connector / federation context — NOT native Trino on local Iceberg tables."
+- Add a DO-NOT-WRITE inoculation block: `WHERE col ILIKE 'pat'` on local Iceberg/Hive tables → **parse error** `mismatched input 'ilike'`.
+- **Reconcile-in-place** — do NOT just append; the existing line 1576 must be REPLACED (per reconcile-don't-append meta-rule). Cross-check any other resources/23 occurrences of ILIKE and reconcile each.
+- WebSearch-verify the docs quote ("Matching characters is case sensitive" from trino.io/docs/467/functions/comparison.html) and the GitHub issue #2491 OPEN status before writing.
 
-- `ROUND(amount, 2)` — correct Trino 467 form. Per trino.io/docs/current/functions/math.html: *"round(x, d) → Returns x rounded to d decimal places"*; return type matches input type. iter539 HALF_UP lock is consistent with Trino's documented round behavior (rounds half away from zero for non-negative values).
-- `format('%.2f', amount)` — correct for producing a 2-decimal **display string** (returns VARCHAR via Java `Formatter` semantics).
-- `ROUND(CAST(amount AS DECIMAL(18,2)), 2)` — correct as a hardening pattern for the float-artifact symptom.
+**FIX B (OPTIONAL):** At the corrected r23 entry, add a worked example for the common `WHERE email LIKE 'pattern'` (case-insensitive) using `LOWER(email)` — this is the precise pattern the iter590 question asked about, and would route a re-probe cleanly.
 
-**Minor framing nit (-0.5 Clarity)**: the question's symptom `12.300000007` is a **DOUBLE/REAL** binary-float artifact, NOT something a native `DECIMAL` column produces — a true DECIMAL column would store and return exactly `12.300000000` (or `12.30` at scale 2), never `12.300000007`. The responder did diagnose this in spirit ("for float artifacts") and offered CAST-through-DECIMAL as the fix, but did not explicitly call out that *if* the user actually sees `12.300000007`, the upstream column is almost certainly DOUBLE/REAL despite the user calling it "decimal" — the durable fix is upstream type discipline (store as DECIMAL) OR `CAST(amount AS DECIMAL(p,s))` before any aggregation, not just at display. Not a defect — the responder's CAST-through-DECIMAL advice does address the symptom — but the diagnosis framing could be slightly sharper.
+**NATIVE-ROW DOT-ACCESS:** NO-OP. Three-framing durability established (geo + ship_to + the iter589 address contrast). Lock held.
 
-Docs note: Trino docs page does not document the rounding mode in prose, but the implementation rounds half-away-from-zero for non-negative numbers (HALF_UP for non-negative), consistent with the iter539 lock.
+**DO NOT:**
+- Re-edit the iter589 r09 native-ROW LEADING CANONICAL or its disambiguators (3-framing durability established — lock held).
+- Touch r22 §13.x federation guardrails without fresh failure probe (4.49944/310 row stays).
+- Add `::`-casts anywhere (iter571 PIN holds).
+- Add new canonicals or rewrite the r23 §3.1C DOUBLE-binary-float Symptom→cause→fix added in iter590 (additive only — preserve in full).
+- Just append to r23 — the false ILIKE line at 1576 must be REPLACED in-place (reconcile-don't-append).
 
-Net: STRONG PASS. The minor nit is a sharpening opportunity, not a quality concern.
+**RE-PROBE TARGETS (iter591-593):**
+- (a) Case-insensitive matching on a 2nd framing (e.g., "match user.name LIKE 'JOHN%' regardless of case", "filter category names containing 'sale' case-insensitive") — verify the r23 correction routes the responder to `LOWER(col) LIKE`.
+- (b) Federation re-probe — only remaining FAIL row at 4.49944/310, 34+ iters stale.
+- (c) Native-ROW dot-access 4th framing (e.g., `payment_method` ROW(type, last4) — confirmatory not required, durability already established at 3 framings).
 
----
+## Meta-rule observation
 
-### Q4 — string length filter (FRESH)
+iter590 = 53rd consecutive iter where placement-not-content findability discipline materially affected the verdict. iter590 exposes a NEW failure pattern: **resources contradicting authoritative docs**. The federation context in resources/22 (where ILIKE *does* appear as a Postgres pushdown subject) leaked into resources/23's native-Trino best-practices content as a fabricated absolute claim ("Trino has ILIKE as a keyword"). The responder routed correctly to r23 and faithfully reproduced what r23 said — the failure is at the teacher/resource layer, not the responder layer.
 
-**Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 = 5.00 STRONG PASS**
+The fix pattern: WebSearch-verify resource claims that assert language-level features ("Trino has X as a keyword/function/operator") against trino.io/docs/467 before writing them. The dialect-accuracy meta-rule (reference_trino_dialect_accuracy.md) applies here: a resource that claims a non-existent keyword exists is functionally equivalent to writing wrong-dialect SQL — it produces production parse errors.
 
-- `LENGTH(username) > 20` — exactly correct.
-- Showed LENGTH used in both SELECT (for visibility) and WHERE (for the filter) — beginner-actionable.
+WebSearched + verified verbatim today:
+- trino.io/docs/467/language/types.html — Named row fields accessed with `.` operator (Q1 verification).
+- trino.io/docs/467/functions/comparison.html — LIKE case-sensitive only; NO ILIKE documented; `%` matches zero or more chars (Q2 + Q4 verification).
+- trino.io/docs/467/functions/string.html — NO ILIKE function (Q2 verification).
+- trino.io/docs/467/language/reserved.html — ILIKE NOT a reserved keyword (Q2 verification).
+- github.com/trinodb/trino/issues/2491 — STILL OPEN, no PR (Q2 verification).
+- github.com/trinodb/trino PRs #27363 + #27364 — BOTH CLOSED unmerged Nov 2025 + Jan 2026 (Q2 verification).
+- trino.io/docs/current/functions/conditional.html — COALESCE returns first non-null left-to-right (Q3 verification).
 
-**Docs verification — Trino 467 LENGTH**:  
-trino.io/docs/current/functions/string.html (applies to 467): *"length(string) → bigint — Returns the length of string in characters."* — **CHARACTERS, not bytes**, which is what the question asked for. (OCTET_LENGTH exists for byte count but is not what the user wants here.)
+NOTES: did NOT bump training/state.json (teacher already set iteration=590, phase=extended). Federation rubric row 4.49944/310 unchanged. Did NOT touch resources files.
 
-Zero defects.
-
----
-
-## Overall
-
-**Per-question average = (5.00 + 5.00 + 4.875 + 5.00) / 4 = 19.875 / 4 = 4.96875 STRONG PASS**
-
-**Margin**: +1.46875 above the 3.5 floor; +0.71875 swing from iter588's 4.25.
-
-**Overall-average governs label (per directive: PASS = overall avg ≥ 3.5; no per-question gate). VERDICT: STRONG PASS.**
-
----
-
-## Native-ROW dot-access RESOLUTION STATUS
-
-**FULLY RESOLVED on first re-probe** — the iter589 native-ROW LEADING CANONICAL added to r09 (placed BEFORE the existing JSON→ROW CAST canonical, with forward-disambiguator at the JSON→ROW canonical top + one-line disambiguators at MAP `element_at` and JSON `json_extract_scalar` landing points) ROUTED CLEANLY on Q1. Q2 confirms the three-way disambiguation (ROW/MAP/JSON) is mutually un-confusable from the responder's keyword-routing surface. The iter588 wrong-frame defect (element_at on a ROW; json_extract_scalar on a ROW) is gone — Q1's lead form explicitly NAMES-AND-REJECTS both anti-patterns in the answer itself.
-
-**Pattern (meta-rule observation)**: iter589 = 52nd consecutive iter where placement-not-content findability discipline materially affected the verdict. iter589 demonstrates that when content exists but its keyword surface is locked behind a *different framing* (the iter588 r09 ROW dot-access content was framed entirely around JSON→ROW CAST), the fix is a SECOND LEADING CANONICAL at the question's actual keyword landing point (native struct column / nested column / get a field) — NOT a rewrite of the existing one. The iter589 ADD-distinct-LEADING-CANONICAL intervention landed on first re-probe across two structurally-distinct framings (Q1 direct + Q2 contrast disambiguation). This is the iter586/587 un-confusable-signal meta-rule applied to a findability-surface mismatch rather than a two-form disambiguation conflict.
-
----
-
-## iter590 directive
-
-**PRIMARY: NO-OP / DEFAULT-HOLD.**
-
-The iter588 ROW/MAP/JSON wrong-frame defect is fully resolved across two structurally-distinct re-probes (direct Q1 + contrast disambiguation Q2). All four iter589 answers are clean. Discipline > churn — DO NOT touch the iter589 native-ROW LEADING CANONICAL, the forward-disambiguator at the JSON→ROW CAST canonical, or the two cross-pointing disambiguators at MAP `element_at` / JSON `json_extract_scalar` landing points. **Preserve all iter534-589 locks in full.**
-
-**OPTIONAL light-touch (NON-BLOCKING, low priority)**: at the r23 round/format canonical (or wherever round/format display patterns live), add ONE sentence distinguishing the **DOUBLE/REAL binary-float artifact symptom** (`12.300000007`) from the **DECIMAL fixed-point case** — call out that if the user sees float-artifact tails, the column is almost certainly DOUBLE/REAL despite informal "decimal" naming, and the durable fix is upstream type discipline (store as DECIMAL) or `CAST(... AS DECIMAL(p,s))` before aggregation. This is a SHARPENING nit on Q3 framing, NOT a defect — the existing advice already solves the symptom; this would just make the diagnosis cleaner for similar future questions.
-
-**RE-PROBE TARGETS (iter590–592)**:
-1. **ROW/MAP/JSON durability** — re-probe native-ROW dot-access on a 3rd structurally-distinct framing (e.g., "`device` column is a typed record with `make` and `model` — pull `model` and filter where `make='Apple'`"; or "I have a `customer_address ROW(line1, city, state)` column, how do I get `state`?"). Goal: confirm the iter589 LEADING CANONICAL is durable across 3+ phrasings before declaring the relocation hardened.
-2. **Federation re-probe** — STILL the only remaining FAIL row at 4.49944/310 and 33+ iters stale. Highest-leverage breadth target. Pick fresh PostgreSQL connector pushdown / cross-catalog join limits / federate-vs-ingest framing.
-3. **round/format fresh angle** — pick a phrasing that exercises the DOUBLE-artifact case explicitly (e.g., "my running total returns 12.300000007 — what's going on?") to test whether the diagnostic framing nit recurs.
-4. **LENGTH/OCTET_LENGTH disambiguation** — re-probe LENGTH on a multi-byte / Unicode framing (e.g., "filter usernames where the character count is > 20 but my emoji usernames look weird") to confirm character-vs-byte signal holds.
-
-**DO NOT**:
-- Re-edit the iter589 r09 native-ROW LEADING CANONICAL or its disambiguators (routed on first re-probe — lock held).
-- Re-edit the iter586/587 r17 time-travel un-confusable signal or r07 ROWS-vs-RANGE symptom→cause→fix (untouched by this iter; locks held).
-- Touch r22 §13.x federation guardrails without a fresh failure probe.
-- Add new canonicals (reconcile-don't-append; preserve all iter534-589 locks).
-- Add any `::`-casts anywhere (iter571 PIN holds).
-
----
-
-## WebSearch verifications today
-
-- **trino.io/docs/current/language/types.html** (applies to Trino 467 — ROW type behavior unchanged across recent releases): *"Named row fields are accessed with the field reference operator (.)."* Example: `CAST(ROW(1, 2e0) AS ROW(x BIGINT, y DOUBLE))` accessed via `.x`. Confirms Q1 + Q2 ROW path correctness.
-- **trino.io/docs/current/functions/map.html**: `element_at(map(K, V), key) -> V` — MAP/ARRAY only signatures; NO `element_at(row(...), ...)` overload exists. Confirms Q2 MAP path + the iter589 disambiguator at the MAP element_at landing point.
-- **trino.io/docs/current/functions/json.html**: `json_extract_scalar` returns VARCHAR (scalar leaf); needs JSON/VARCHAR input — type-errors on native ROW. Confirms Q2 JSON path + the iter589 disambiguator at the json_extract_scalar landing point.
-- **trino.io/docs/current/functions/math.html**: *"round(x, d) → Returns x rounded to d decimal places"*; return type matches input type. Confirms Q3 round(amount, 2) correctness. Docs prose does not name HALF_UP explicitly but implementation rounds half-away-from-zero for non-negative (iter539 lock consistent).
-- **trino.io/docs/current/functions/string.html**: *"length(string) → bigint — Returns the length of string in characters."* Character count, not bytes. Confirms Q4 LENGTH(username) > 20 correctness.
-
----
-
-## Final summary
-
-**iter589 verdict: 4.96875 STRONG PASS.** iter588 native-ROW/MAP/JSON wrong-frame defect is RESOLVED on first re-probe across two structurally-distinct framings. iter590 = DEFAULT NO-OP / HOLD; optional light-touch DECIMAL-vs-DOUBLE framing sharpening on Q3; re-probe ROW dot-access on 3rd framing for durability + federation re-probe for the remaining FAIL row + light coverage on round/format DOUBLE-artifact diagnosis. Preserve all iter534-589 locks in full. Federation row 4.49944/310 UNCHANGED.
+**OVERALL: 4.3125 PASS (overall avg >= 3.5 governs) — Q1 ship_to.state confirms native-ROW dot-access DURABLE across 3 framings; Q3 COALESCE + Q4 LIKE-prefix both docs-verbatim correct; Q2 FABRICATED FEATURE (`ILIKE`) flagged as quality concern + resource defect at r23:1576; iter591 PRIMARY = correct r23:1576 false ILIKE claim with `LOWER(col) LIKE` replacement + DO-NOT-WRITE inoculation; native-ROW + COALESCE + LIKE locks held.**
