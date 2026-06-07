@@ -1,68 +1,98 @@
-# iter661 Judge Feedback — 2026-06-08 (EXTENDED PHASE)
+# Iter662 Judge Feedback — 2026-06-08 (EXTENDED PHASE)
 
-**OVERALL: 4.875 PASS** (margin +1.375 above 3.5 floor; +0.65625 swing UP from iter660's 4.21875 — FIX-A landed cleanly on the month-name re-probe, no per-question avg below 3.5).
+**OVERALL: 5.000 STRONG PASS** (margin +1.500 above 3.5 floor; +0.125 swing UP from iter661's 4.875 — FIX-A generalization to quarter landed perfectly, all four answers textbook-clean).
 
-Per-Q: Q1=5.00 / Q2=4.75 / Q3=5.00 / Q4=4.75.
-
----
-
-## Per-question scoring
-
-### Q1 — Revenue by calendar MONTH NAME sorted Jan..Dec (FIX-A re-probe)
-- **Responder query**: `SELECT CASE MONTH(order_date) WHEN 1 THEN 'January' ... WHEN 12 THEN 'December' END AS month_name, SUM(amount) AS total_revenue FROM orders GROUP BY MONTH(order_date) ORDER BY MONTH(order_date)`
-- **Verification (Trino 467 docs trino.io/docs/467/sql/select.html, trino.io/docs/467/functions/datetime.html)**:
-  - `month(x) -> bigint` confirmed in Trino 467 — returns month-of-year 1..12 from date/timestamp.
-  - Docs rule: "When a GROUP BY clause is used in a SELECT statement all output expressions must be either aggregate functions or columns present in the GROUP BY clause." ORDER BY operates AFTER GROUP BY, so its expressions must resolve to GROUPING expressions, AGGREGATES, or output-column aliases/ordinals.
-  - The responder's form: GROUP BY `MONTH(order_date)` (the sortable BIGINT number), CASE maps number->name in the SELECT projection, ORDER BY `MONTH(order_date)` which IS the grouping expression. **VALID Trino 467.**
-- **FIX-A LANDED — EXPLICITLY CONFIRMED**. The iter660 Q2 bug was ORDER BY a raw ungrouped column wrapped in a function (`day_of_week(order_date)`) in a query grouped by the NAME expression — the analyzer looks through the wrapping and rejects the raw `order_date`. The responder's iter661 answer is **OPTION A** (the cleanest of the three valid options documented at r07:1350): GROUP BY the sortable number itself, project the name via CASE, ORDER BY the grouping expression. NO repeat of the iter660 ungrouped-column bug. The FIX-A note in resources/07-analytical-query-patterns.md ROUTED CORRECTLY for the month-name variant (keyword anchor "sort month name in calendar order" landed).
-- **Scores**: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — avg **5.00**
-
-### Q2 — Count NULLs in each of email/phone/billing_address in one query
-- **Responder query**: `SUM(CASE WHEN email IS NULL THEN 1 ELSE 0 END) AS nulls_in_email, ... phone, ... billing_address FROM customers`
-- **Verification**: Standard conditional aggregation. SUM-CASE per column in one pass returns each column's null count. `count_if(col IS NULL)` would be the cleaner Trino-native idiom (per Trino docs: `count_if(x)` equivalent to `count(CASE WHEN x THEN 1 END)`), and `count(*) FILTER (WHERE col IS NULL)` is another clean form — but SUM-CASE is fully valid and produces the correct result. Not penalized per the question instructions.
-- **Scores**: Accuracy 5 / Completeness 4 / Clarity 5 / Actionability 5 — avg **4.75**
-  - Completeness 4 (not 5): mentioning `count_if` would have been the bonus idiom callout, but answer is fully correct as-is.
-
-### Q3 — Customer IDs in BOTH trial_signups AND paid_customers
-- **Responder query**: `SELECT customer_id FROM trial_signups INTERSECT SELECT customer_id FROM paid_customers`
-- **Verification (Trino 467 SELECT docs)**: INTERSECT returns rows in both result sets and deduplicates by default (INTERSECT ALL retains duplicates). Exactly the right operator for set-intersection of two columns. Valid Trino 467.
-- **Scores**: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — avg **5.00**
-
-### Q4 — Quantity-weighted average price
-- **Responder query**: `SUM(unit_price * quantity) / SUM(quantity) AS weighted_avg_price FROM order_items`
-- **Verification**: Mathematically correct weighted-average formula. NOT a flat AVG(unit_price) (which would be the wrong, unweighted answer). If both columns are DECIMAL or DOUBLE the division returns a decimal/double result; if both were INTEGER there would be integer division concerns, but unit_price is virtually always DECIMAL/DOUBLE in a real schema. A `* 1.0` or `CAST(... AS DOUBLE)` would bulletproof against an all-integer schema but is not required for typical price/quantity types. Acceptable as written.
-- **Scores**: Accuracy 5 / Completeness 4 / Clarity 5 / Actionability 5 — avg **4.75**
-  - Completeness 4 (not 5): a one-line caveat about integer division for all-integer schemas would have been the safety belt; correct enough for typical decimal prices.
+Per-Q: Q1=5.00 / Q2=5.00 / Q3=5.00 / Q4=5.00.
 
 ---
 
-## Overall
+## Per-question scores
 
-| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|----------|--------------|---------|---------------|-----|
-| Q1 (month-name calendar order, FIX-A re-probe) | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 (NULL count per column) | 5 | 4 | 5 | 5 | 4.75 |
-| Q3 (INTERSECT) | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 (weighted avg price) | 5 | 4 | 5 | 5 | 4.75 |
+### Q1 — Revenue by quarter labeled Q1..Q4 in calendar order (FIX-A generalization re-probe)
 
-**Overall average: 4.875 / 5 — PASS** (threshold 3.5). No per-question avg below 3.5.
+**Answer**: `SELECT quarter(order_date) AS q, CASE quarter(order_date) WHEN 1 THEN 'Q1' WHEN 2 THEN 'Q2' WHEN 3 THEN 'Q3' WHEN 4 THEN 'Q4' END AS quarter_label, SUM(amount) AS total_revenue FROM orders GROUP BY quarter(order_date) ORDER BY quarter(order_date)`
+
+| Dimension | Score | Notes |
+|---|---|---|
+| Accuracy | 5 | Verified vs trino.io/docs/467/functions/datetime.html: `quarter(x)` returns bigint 1..4. Verified vs trino.io/docs/467/sql/select.html: ORDER BY a grouping expression is valid. `quarter(order_date)` IS in the GROUP BY → using it in ORDER BY is the OPTION-A form documented at r07:1351. CASE maps number→label cleanly. Calendar order preserved (1<2<3<4 maps to Q1<Q2<Q3<Q4). |
+| Completeness | 5 | All three required pieces present: numeric quarter, label, revenue. Sort-by-calendar-order requirement satisfied. |
+| Clarity | 5 | Single clean statement, alias names are intuitive. |
+| Actionability | 5 | Engineer can paste-and-run. |
+| **Avg** | **5.00** | |
+
+**FIX-A GENERALIZATION CHECK — CONFIRMED PASS (KEY CHECK).** The iter661 FIX-A (ORDER-BY-in-grouped output for label-mapped categories) has now generalized cleanly across THREE entity framings:
+1. weekday-name (iter660 FAIL → iter661 fixed via OPTION-A at r07:1351)
+2. month-name (iter661)
+3. quarter (iter662 — this answer)
+
+The responder picked OPTION-A (group-by-the-number, CASE in SELECT, ORDER BY the grouping expression) without prompting. This is the **3rd successful generalization** of the FIX-A primitive and confirms the iter661 lock is durable across the calendar-label class. Crucially this is NOT the iter660 ORDER-BY-ungrouped bug — `quarter(order_date)` appears in BOTH the GROUP BY and the ORDER BY, satisfying the Trino 467 SELECT-clause rule.
+
+### Q2 — Customers in trial_signups but NOT in paid_customers
+
+**Answer**: PRIMARY = `NOT EXISTS` anti-join; ALT = `LEFT JOIN ... WHERE pc.customer_id IS NULL` with SELECT DISTINCT; noted NOT EXISTS is safer than NOT IN with NULLs.
+
+| Dimension | Score | Notes |
+|---|---|---|
+| Accuracy | 5 | Both anti-join forms are correct in Trino 467. NOT EXISTS correlated subquery is the canonical anti-join and handles NULLs cleanly. LEFT JOIN ... IS NULL is the equivalent join-form. The NULL warning on NOT IN is the correct and important caveat. |
+| Completeness | 5 | Primary + alternative + NULL safety note. The run anticipated EXCEPT, but anti-join is equally valid (EXCEPT auto-dedups both sides; anti-join is more flexible when only one side should dedup) — no penalty per directive. |
+| Clarity | 5 | Clean, names two idiomatic patterns. |
+| Actionability | 5 | Drop-in for either pattern preference. |
+| **Avg** | **5.00** | |
+
+### Q3 — Single busiest hour-of-day by event count
+
+**Answer**: `SELECT EXTRACT(HOUR FROM created_at) AS hour_of_day, COUNT(*) AS event_count FROM events GROUP BY EXTRACT(HOUR FROM created_at) ORDER BY event_count DESC LIMIT 1`
+
+| Dimension | Score | Notes |
+|---|---|---|
+| Accuracy | 5 | Verified vs trino.io/docs/467/functions/datetime.html: EXTRACT(HOUR FROM ts) is valid and returns 0..23. ORDER BY on an output alias (`event_count`) is valid in Trino 467 (distinct from ORDER BY an ungrouped column — output aliases are explicitly permitted). LIMIT 1 returns the single top row. |
+| Completeness | 5 | Hour bucket + count + sort + cap = full answer. |
+| Clarity | 5 | One statement, idiomatic. |
+| Actionability | 5 | Direct paste. |
+| **Avg** | **5.00** | |
+
+### Q4 — Customers with > 3 failed payments
+
+**Answer**: `SELECT customer_id FROM payments WHERE status = 'failed' GROUP BY customer_id HAVING COUNT(*) > 3`
+
+| Dimension | Score | Notes |
+|---|---|---|
+| Accuracy | 5 | WHERE pre-filters to failed rows before grouping (efficient), GROUP BY customer, HAVING COUNT(*) > 3 keeps customers with strictly more than 3 failures. `>` is strict (4+), which matches "more than 3". An equivalent form `HAVING count_if(status='failed') > 3` without the WHERE is also valid but unnecessary here. |
+| Completeness | 5 | Fully addresses the question. |
+| Clarity | 5 | Textbook clean. |
+| Actionability | 5 | Direct paste. |
+| **Avg** | **5.00** | |
 
 ---
 
-## FIX-A landed verdict — EXPLICIT
+## Overall scorecard
 
-The iter661 FIX-A (ORDER-BY-validity-in-a-GROUP-BY-query block inserted at r07:1350) **LANDED CLEANLY** for the month-name re-probe. The responder chose **OPTION A** (group by the sortable number `MONTH(order_date)`, project the name via CASE in SELECT, ORDER BY the same `MONTH(order_date)` grouping expression). This is the DOCS-CORRECT form per trino.io/docs/467/sql/select.html — the ORDER BY expression IS a grouping expression, NOT a raw ungrouped column. The iter660 Q2 silent-wrong bug (ORDER BY `day_of_week(order_date)` while grouping by `format_datetime(...,'EEEE')` — function-wrapping does NOT save the bare `order_date`) was NOT repeated. The keyword anchors "sort month name in calendar order" and "ORDER BY in a GROUP BY query" routed the responder to the right canonical.
+| | Accuracy | Completeness | Clarity | Actionability |
+|---|---|---|---|---|
+| Q1 | 5 | 5 | 5 | 5 |
+| Q2 | 5 | 5 | 5 | 5 |
+| Q3 | 5 | 5 | 5 | 5 |
+| Q4 | 5 | 5 | 5 | 5 |
 
----
+**Overall average: 5.000 / 5 — STRONG PASS**
 
-## iter662 recommendation
+No per-Q average below 3.5 → no iter663 FIX-A required.
 
-**DEFAULT NO-OP / durability-breadth.** All four answers pass cleanly; no per-question average below 3.5; no FIX needed. FIX-A is now demonstrated to land for BOTH the weekday-name variant (iter660 Q2 was the bug, canonical inserted, would now pass) AND the month-name variant (iter661 Q1 PASSED at 5.0). The FIX-A canonical at r07:1350 is durable and routes correctly for both date-name-vs-chronological-sort variants.
+## Iter663 recommendation
 
-For iter662, probe **adjacent / orthogonal angles** that have not been re-tested recently:
-- Q1 candidate: revenue by **quarter name** ('Q1','Q2','Q3','Q4') sorted Q1..Q4 — exercises the same OPTION-A pattern with `quarter(order_date)` as the sort key. Confirms the FIX-A block generalizes beyond month/weekday.
-- Q2 candidate: a `count_if(col IS NULL)` re-probe — confirms the responder also finds the Trino-native cleaner idiom, not only SUM-CASE.
-- Q3 candidate: EXCEPT (rows in A but NOT in B) — sibling of INTERSECT, exercises the same set-operator routing.
-- Q4 candidate: weighted average with an INTEGER-only schema callout — exercises the integer-division safety-belt the responder did not mention.
+**DEFAULT NO-OP / DURABILITY-BREADTH.** All four answers are textbook-clean. The key finding of iter662 is positive durability evidence:
 
-Recommend prioritizing the **quarter-name FIX-A generalization re-probe** to confirm the canonical's keyword anchors cover the broader date-bucket-name-chronological-sort family, not just month/weekday.
+- **FIX-A (iter661 r07:1351 ORDER-BY-in-grouped-output) has now generalized to THREE entity framings without regression**: weekday-name (iter661), month-name (iter661), quarter (iter662). The OPTION-A primitive (group-by-the-number + CASE-in-SELECT + ORDER-BY-the-grouping-expression) is being recalled and composed correctly across calendar-bucket variants.
+- Anti-join (NOT EXISTS / LEFT JOIN IS NULL) recall is clean — the responder volunteered both forms AND the NULL safety note unprompted.
+- EXTRACT + ORDER-BY-alias + LIMIT 1 composition is clean.
+- WHERE + GROUP BY + HAVING COUNT(*) > N is textbook.
+
+Teacher should make **zero edits** for iter663. Continue probing durability-breadth on adjacent calendar-label angles to harden the FIX-A generalization further (e.g. month-name fiscal-year offset, day-of-week with custom Mon-first ordering, year-quarter combined label like '2025-Q1') — these are stress tests, not gaps.
+
+## Locks to preserve
+
+- iter661 FIX-A at r07:1351 (ORDER-BY-validity-in-GROUP-BY with OPTIONs A/B/C) — confirmed generalizing cleanly to quarter.
+- r23:732 LEADING CANONICAL count_if (not needed this iter but available).
+- r23:853 EXCEPT / r23:873 EXCEPT-dedup-semantic + cross-link to anti-join.
+- r23:1179 EXTRACT field list including HOUR.
+- resources/22 federation HARD LOCK (last touched iter448 c2627a8) — UNTOUCHED.
