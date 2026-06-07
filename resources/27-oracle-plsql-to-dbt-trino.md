@@ -962,6 +962,35 @@ SELECT regexp_replace('Foo BAR baz', '(\w+)', x -> '<' || lower(x[1]) || '>');
 
 The `x[1]` is the 1st capture group of the current match. This is *not* a portable construct; it's a Trino-only convenience worth knowing when re-implementing complex string transforms that Oracle did with PL/SQL loops.
 
+#### LEADING CANONICAL — strip / remove characters matching a pattern (remove all non-digits, keep only digits, delete a pattern)
+
+> **READ THIS FIRST if your question contains any of these keywords:** `remove all non-digits`, `strip non-numeric characters`, `keep only digits Trino`, `clean a phone number`, `remove punctuation / dashes / spaces`, `strip a pattern`, `delete matches Trino`, `regexp_replace remove`, `regexp_replace empty string`, `2-argument regexp_replace`, `regexp_replace no replacement`, `remove everything except letters`, `sanitize string Trino`. Verified at [trino.io/docs/467/functions/regexp.html](https://trino.io/docs/467/functions/regexp.html) on 2026-06-07.
+
+**The one-fact summary.** To DELETE every match of a pattern (rather than replace it with capture groups), you have two equivalent forms in Trino 467:
+
+1. **The 2-argument form** `regexp_replace(string, pattern) -> varchar` — Trino docs verbatim: *"Removes every instance of the substring matched by the regular expression `pattern` from `string`."* No replacement argument at all.
+2. **The 3-argument form with an EMPTY-STRING replacement** `regexp_replace(string, pattern, '')` — same result, the replacement is the empty literal `''`.
+
+Both are valid; the 2-arg form is the most concise. **Remove all non-digits (the canonical phone-number cleanup):**
+
+```sql
+-- Keep ONLY the digits — strip dashes, spaces, parentheses, '+' etc.
+-- '[^0-9]' = "any character that is NOT a digit"; \D is the Java shorthand and also works.
+SELECT regexp_replace('+1 (555) 123-4567', '[^0-9]')       AS digits_2arg;   -- '15551234567'
+SELECT regexp_replace('+1 (555) 123-4567', '[^0-9]', '')   AS digits_3arg;   -- '15551234567'  (identical)
+SELECT regexp_replace('+1 (555) 123-4567', '\D')           AS digits_shorthand; -- '15551234567'
+```
+
+**Other common strip idioms (same 2-arg form, just swap the character class):**
+
+```sql
+SELECT regexp_replace('a1b2 c3!', '[^a-zA-Z]')   AS letters_only;   -- 'abc'      (remove everything except letters)
+SELECT regexp_replace('  hello   world  ', '\s+', ' ') AS collapsed; -- ' hello world ' (collapse runs of whitespace to one space)
+SELECT regexp_replace('PRICE: $1,234.56', '[^0-9.]') AS numeric_only; -- '1234.56'  (keep digits + decimal point)
+```
+
+> **DO NOT WRITE.** (1) **Do NOT reach for `translate(...)` or nested `replace(replace(replace(...)))` to strip "all non-digits"** — `translate`/`replace` can only remove a FIXED, enumerated set of characters you list explicitly; they cannot express "any character that is not a digit." For an open-ended character CLASS (non-digit, non-letter, non-alphanumeric), `regexp_replace(s, '[^0-9]')` is the correct, single-call idiom. Use `translate`/`replace` only when the set of characters to drop is small and known (e.g. strip exactly `-` and ` `: `replace(replace(s, '-', ''), ' ', '')`). (2) **Do NOT confuse the strip form with the capture-group reform form** — `regexp_replace(s, '(\d{3})(\d{4})', '$1-$2')` REFORMATS (keeps groups, inserts `-`); `regexp_replace(s, '[^0-9]')` DELETES. Different tasks. The `$1`/`$2` capture-group rules in nuance #3 above apply only to the reform form. (3) **`\D` and `\d`, not `[[:^digit:]]` muscle-memory from Postgres** — Trino uses Java pattern syntax; `\D` (non-digit) and `\d` (digit) both work directly.
+
 **DO-NOT-WRITE matrix — banned regex forms when porting Oracle → Trino (each row has produced a confirmed silent-wrong result in past migrations).**
 
 | Banned form (post-migration Trino SQL) | Why wrong | Correct form |
