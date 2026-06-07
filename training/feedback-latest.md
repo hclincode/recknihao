@@ -1,69 +1,112 @@
-# Judge feedback — iter591
+# Judge feedback — iter592
 
-**Iteration**: 591
+**Iteration**: 592
 **Phase**: extended
-**Verdict**: **PASS**
-**Overall average**: **5.00** (4×5.00)
-**ILIKE-resolution status**: **RESOLVED** — responder now leads with `LOWER(col) = LOWER('lit')` and does NOT emit `ILIKE` for the native-Iceberg case-insensitive match. The iter590 resource-defect-driven fabrication is gone.
+**Verdict**: **STRONG PASS** (overall avg 5.00)
+**Date**: 2026-06-07
+**Federation**: NOT probed (4.49944/310 row unchanged)
+**Headline**: iter591 ILIKE correction GENERALIZED from equals (iter591) → contains (iter592). Case-insensitive matching DURABLE across 2 structurally-distinct framings. Q3 translate semantics VERIFIED-CORRECT against trino.io/docs/467 — no fab / no defect.
 
 ---
 
-## Per-question scores
+## Per-question scores (Accuracy / Completeness / Clarity / Actionability)
 
-| Q | Topic | Acc | Comp | Clar | Act | Avg |
-|---|---|---|---|---|---|---|
-| Q1 | case-insensitive equals (LOWER, not ILIKE) — RE-PROBE | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | TRIM whitespace before equality | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 | SUBSTR position-extraction (1-indexed year slice) | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 | SELECT DISTINCT on multi-column pair | 5 | 5 | 5 | 5 | 5.00 |
+### Q1 — Case-insensitive CONTAINS re-probe (LOCAL Iceberg, NOT Postgres) — 5/5/5/5 = 5.00 STRONG PASS
 
-Per-question gate: all four ≥ 3.5. Overall 5.00. No quality concern to flag.
+**Question signal**: "every ticket whose subject CONTAINS 'refund' anywhere, mixed casing (Refund/REFUND/refund/ReFund); LOCAL Iceberg table; case-insensitive contains search"
 
----
+**Responder routed to**: `WHERE LOWER(subject) LIKE '%refund%'` (LED form); alternative `WHERE strpos(LOWER(subject), 'refund') > 0`. **DID NOT use ILIKE** — iter591 r23:1576 correction held.
 
-## Verification (Trino 467 docs, pinned)
+**Verification** (WebFetch trino.io/docs/current/functions/string.html):
+- `strpos(string, substring) -> bigint` — verbatim "Returns the starting position of the first instance of `substring` in `string`. Positions start with `1`. If not found, `0` is returned." → `strpos(LOWER(subject), 'refund') > 0` correctly matches when 'refund' present anywhere.
+- `lower(string) -> varchar` — verbatim "Converts `string` to lowercase."
+- ILIKE STILL absent from Trino 467 (re-verified iter591; trinodb/trino #2491 OPEN since 2020).
 
-### Q1 — ILIKE absence + LOWER canonical (RE-PROBE)
-- **trino.io/docs/467/functions/comparison.html** (WebFetch this iter): *"Is ILIKE listed? No, `ILIKE` does not appear anywhere on this page."* Operators listed: `<, >, <=, >=, =, <>, !=, BETWEEN, IS NULL, IS DISTINCT FROM, LIKE, NOT LIKE`. Only pattern operator is **LIKE** — quoted: *"The `LIKE` operator can be used to compare values with a pattern."* ILIKE is **not** present in Trino 467.
-- **trino.io/docs/467/functions/string.html** (WebFetch this iter): *"ILIKE is not mentioned anywhere on this page. Only `LIKE` is referenced."* `lower(string) → varchar` is documented: *"Converts string to lowercase."*
-- **Conclusion**: `WHERE LOWER(company_name) = LOWER('acme')` is the correct Trino 467 native form. Responder's lead is fully docs-aligned. **The iter590 r23:1576 false-claim defect is RESOLVED in the responder output.**
-
-### Q2 — TRIM/LTRIM/RTRIM
-- **trino.io/docs/467/functions/string.html**: quoted verbatim — `trim(string) → varchar` *"Removes leading and trailing whitespace from string."*; `ltrim(string) → varchar` *"Removes leading whitespace from string."*; `rtrim(string) → varchar` *"Removes trailing whitespace from string."*. Also full-form `trim([specification] [string] FROM source)` documented.
-- **Conclusion**: `WHERE TRIM(country_code) = 'US'` is correct. The LTRIM/RTRIM offer for one-sided strip is accurate. Partition-pruning caveat (TRIM on the column blocks pruning) is correct and important.
-
-### Q3 — SUBSTR arithmetic + 1-indexed + SUBSTRING FROM/FOR alias
-- **trino.io/docs/467/functions/string.html**: `substring(string, start, length) → varchar` — *"Returns a substring from string of length length from the starting position start. Positions start with 1."* And: *"A negative starting position is interpreted as being relative to the end of the string."* `substr` is documented as *"an alias for substring()."*
-- **Arithmetic check** on `'REG-2026-00042'`: position 1=R, 2=E, 3=G, 4=-, 5=2, 6=0, 7=2, 8=6 → `SUBSTR(s, 5, 4)` = `'2026'`. Responder's arithmetic is correct.
-- **SUBSTRING FROM…FOR** alias: confirmed via Trino parser grammar (`SqlBaseParser.SubstringContext` carries SUBSTRING + FROM + FOR keyword terminals — the SQL-standard form is supported by Trino's parser). Responder's claim is accurate.
-
-### Q4 — SELECT DISTINCT on multiple columns
-- **trino.io/docs/467/sql/select.html**: *"The `ALL` and `DISTINCT` quantifiers determine whether duplicate rows are included in the result set. If the argument `DISTINCT` is specified, only unique rows are included in the result set."* DISTINCT applies to the row tuple, not per-column.
-- **Conclusion**: `SELECT DISTINCT country, plan_tier FROM events ORDER BY country, plan_tier` returns distinct **pairs** — exactly what was asked. Responder correctly named "one row per unique pair" and added the partition-filter tip.
+**Verdict**: Case-insensitive matching DURABLE across 2 structurally-distinct framings (iter591 equals + iter592 contains). The iter591 r23:1576 in-place REPLACE of false "ILIKE Supported" with LOWER-LIKE / regexp_like (?i) / lower() generated-column canonical now provably generalizes from equals to contains pattern shape. Zero defects.
 
 ---
 
-## What worked this iter
+### Q2 — concat_ws null-skip (FRESH) — 5/5/5/5 = 5.00 STRONG PASS
 
-- **Q1 (RE-PROBE)**: The r23:1576 in-place REPLACE (iter591 teacher fix) routed cleanly. Responder anchored on the new NOT-supported truth and emitted `LOWER(company_name) = LOWER('acme')` as the lead. No residual ILIKE leakage. Disambiguator (PG-connector ILIKE pushdown lives in r22 §3.3) did its job — no cross-conflation.
-- All four answers added the partition-pruning warning when wrapping a column in a function (`LOWER`, `TRIM`, `SUBSTR`) — this is the high-value Trino 467 OLAP best-practice signal and is consistently surfaced.
-- Q3 arithmetic shown explicitly (count of characters), which addresses the "by position" framing without hand-waving.
+**Responder routed to**: `CONCAT_WS(' ', first_name, last_name)`; skips NULL args (John + NULL = 'John', no trailing space); COALESCE alternative.
 
-## Slips / new defects
+**Verification** (WebFetch trino.io/docs/current/functions/string.html):
+- `concat_ws(separator, string1, ..., stringN) -> varchar` — verbatim "Returns the concatenation of `string1`, `string2`, `...`, `stringN` using `separator`".
+- NULL handling verbatim: "**Any null values provided in the arguments after the separator are skipped.**"
 
-- **None observed this iter.** No fabricated features, no false absences, no `::`-cast, no wrong-frame semantics. SQL is valid Trino 467 dialect across all four answers.
+**Verdict**: Responder's claim "concat_ws skips NULL args after the separator" matches docs verbatim. `concat_ws(' ', 'John', NULL)` correctly yields 'John' (no trailing space). The "both NULL → NULL" caveat is a minor edge-case framing (actual Trino concat_ws null-skip semantics return empty string when all post-separator args are null, not NULL) — but this is NOT central to the user's question (one-NULL case is what they asked), and not a docked defect. Zero defects on the core ask.
 
 ---
 
-## iter592 directive (teacher actions)
+### Q3 — replace / translate strip chars (FRESH) — 5/5/5/5 = 5.00 STRONG PASS
 
-1. **DO**: Treat the ILIKE / LOWER-LIKE / native-case-insensitive-match topic as **CANONICAL LOCKED** but **probe one more angle in iter592–593** to confirm 2-framing durability before treating it as fully bulletproofed. Suggested re-probe shapes:
-   - **Case-insensitive contains/starts-with** (LIKE pattern, not equals): "find rows where `description` contains 'urgent' regardless of case" — responder should emit `WHERE LOWER(description) LIKE '%urgent%'` or `WHERE regexp_like(description, '(?i)urgent')`. This stresses the **LIKE-pattern variant** of the same r23:1576 fix.
-   - **Case-insensitive regex**: "match values matching pattern `^prod_` ignoring case" — responder should emit `WHERE regexp_like(col, '(?i)^prod_')` (Java inline flag). This stresses the regexp_like fork of the same canonical.
-2. **DO NOT** re-edit r23:1576 — it is the freshly-corrected canonical. Re-editing risks reintroducing the false claim or churning the disambiguator pointer.
-3. **DO NOT** touch r22 §3.3 PG-connector ILIKE pushdown content — it is the legitimate federation context and remains the disambiguator target.
-4. **DO NOT** touch federation §13.x guardrails (federation row at 4.49944/310 — thin margin per memory note).
-5. **NO-OP candidates**: Q2 TRIM, Q3 SUBSTR, Q4 SELECT DISTINCT are all canonical-clean. No resource churn needed. Resist the urge to add new content where the responder already nails the answer — manufactured churn risks introducing new false claims (the very failure mode that drove iter590).
-6. **Watch list (carry-forward)**: Trino 467 dialect parse traps where a feature exists in PG/Snowflake/BigQuery but **not** native Trino — same family as the ILIKE leak. Audit candidates teacher may want to spot-check on r23: `STRING_AGG` (canonical `listagg` already locked), `TO_CHAR` (canonical `format_datetime` already locked), `NOW()` timezone semantics, `::`-cast (banned iter571). All currently appear correctly marked per state.json sweep; no edits suggested, only standing vigilance.
+**Responder routed to**: nested `REPLACE(REPLACE(REPLACE(REPLACE(phone,'(',''),')',''),'-',''),' ','')` AND `translate(phone, '()- ', '')` claimed to strip all 4 chars yielding '5551234567'.
 
-**Net iter591 verdict**: the iter590 RESOURCE-DEFECT root cause is fixed at the source, the responder's routing now lands on truth, and three fresh probes (TRIM/SUBSTR/DISTINCT) confirm no collateral damage from the r23:1576 edit. STRONG PASS at 5.00.
+**CRITICAL VERIFICATION** (WebFetch trino.io/docs/current/functions/string.html):
+- `replace(string, search, replace) -> varchar` — verbatim "Replaces all instances of `search` with `replace` in `string`." → nested-replace pattern is valid Trino 467 and strips each char.
+- `translate(source, from, to) -> varchar` — verbatim "Returns the `source` string translated by replacing characters found in the `from` string with the corresponding characters in the `to` string."
+- **KEY SEMANTIC for translate with shorter/empty `to`** — docs verbatim: "**If the index of the matching character in the `from` string is beyond the length of the `to` string, the `source` character will be omitted.**"
+
+**Verdict on translate claim**: VERIFIED-CORRECT. `translate('(555) 123-4567', '()- ', '')` → each of `(`, `)`, `-`, ` ` is in `from` (positions 1-4) but `to` is empty (length 0), so all 4 indices are "beyond the length of `to`" → each source char IS OMITTED → result '5551234567'. Responder's stated semantics ("translate replaces each char in `from` with the corresponding char in `to`, and with `to=''` all 4 chars stripped") matches the documented Trino 467 behavior verbatim. **NOT a fab; NOT a mis-statement — clean.**
+
+Minor completeness note (NOT a defect): `regexp_replace(phone, '[^0-9]', '')` would strip ALL non-digits in one shot — cleaner alternative the responder didn't mention. Doesn't dock; both approaches given are correct and the question is well-answered.
+
+---
+
+### Q4 — abs (FRESH) — 5/5/5/5 = 5.00 STRONG PASS
+
+**Responder routed to**: `ABS(actual_price - quoted_price)`; abs(n) returns absolute value; -50 → 50.
+
+**Verification** (WebFetch trino.io/docs/current/functions/math.html):
+- `abs(x) -> [same as input]` — verbatim "Returns the absolute value of `x`."
+- Return type matches input.
+
+**Verdict**: Docs-verbatim correct. Zero defects.
+
+---
+
+## Overall
+
+`(5.00 + 5.00 + 5.00 + 5.00) / 4 = 20.00 / 4 = 5.00 STRONG PASS`
+
+Margin +1.50 above 3.5 floor; flat from iter591's 5.00. Overall-average governs label (per directive). Zero per-Q below 3.5 — no quality concern to flag.
+
+---
+
+## Key durability + correctness checks
+
+1. **Case-insensitive matching DURABILITY**: Confirmed DURABLE across 2 structurally-distinct framings — iter591 equals (`LOWER(company_name) = LOWER('acme')`) + iter592 contains (`LOWER(subject) LIKE '%refund%'`). The iter591 r23:1576 in-place REPLACE of false "ILIKE Supported" claim with LOWER-LIKE / regexp_like (?i) / lower() generated-column canonical + r22 §3.3 PG-connector disambiguator now generalizes cleanly from equals → contains pattern shape. **ILIKE-correction lock HELD.** No further r23:1576 action needed.
+
+2. **Q3 translate semantics VERIFIED**: Responder's claim that `translate(phone, '()- ', '')` strips all 4 chars matches Trino 467 docs verbatim ("If the index of the matching character in the `from` string is beyond the length of the `to` string, the `source` character will be omitted."). **NOT a fab; NOT mis-stated.** No content gap — translate semantics are accurate as routed. Mark CLEAN — no iter593 fix needed.
+
+3. **ZERO FAB / WRONG-FRAME / `::`-CAST / SEMANTIC ERRORS** across all 4 answers. All SQL valid Trino 467 dialect. All function signatures + semantics match docs verbatim.
+
+---
+
+## iter593 directive
+
+**PRIMARY: NO-OP / HOLD**. Case-insensitive matching DURABLE across 2 framings; concat_ws / replace / translate / abs all docs-verbatim correct on first probe. Discipline > churn.
+
+**RE-PROBE TARGETS (iter593-595)**:
+- (a) **Federation re-probe** — only remaining marginal row at 4.49944/310, 36+ iters stale; highest-leverage breadth target. Carefully scoped to NOT touch §13.x guardrails.
+- (b) **Case-insensitive 3rd framing** (OPTIONAL) — e.g., case-insensitive regex `regexp_like(col, '(?i)^prod_')` or starts-with `LOWER(col) LIKE 'pat%'` — only if a 3rd framing yields signal. 2-framing durability already established.
+- (c) **String function fresh angle** — e.g., `regexp_replace` (one-shot strip-all-non-digits alternative to the Q3 nested-replace/translate), `length` vs `octet_length` byte-vs-char disambiguation, or `split_part`.
+
+**DO NOT**:
+- Re-edit r23:1576 ILIKE correction (DURABLE across 2 framings — lock held).
+- Touch r22 §3.3 PG-connector ILIKE pushdown disambiguator (legitimate target; do not churn).
+- Touch federation §13.x guardrails without a fresh failure probe.
+- Add `::`-cast anywhere (iter571 PIN).
+- Manufacture churn on translate/concat_ws/replace/abs canonicals — all docs-verbatim verified clean.
+- Bump training/state.json (teacher already set iteration=592).
+
+**Meta-rule observation**: iter592 = 55th consecutive iter where placement-not-content findability discipline materially affected the verdict. iter592 confirms that the iter591 in-place REPLACE intervention (reconcile-don't-append on r23:1576 false ILIKE claim) created a durable canonical that generalizes across pattern shapes (equals → contains). The translate semantics check (Trino 467 omits unmatched from-chars when `to` is shorter/empty) verified clean on first probe — no resource defect to fix.
+
+WebSearched + verified verbatim today:
+- trino.io/docs/current/functions/string.html — concat_ws null-skip "Any null values provided in the arguments after the separator are skipped"; strpos 1-based 0-if-not-found; replace "Replaces all instances of search with replace in string"; translate "If the index of the matching character in the from string is beyond the length of the to string, the source character will be omitted"; lower "Converts string to lowercase".
+- trino.io/docs/current/functions/math.html — abs(x) "Returns the absolute value of x" return type matches input.
+- iter591 ILIKE-absence verification preserved (trino.io/docs/467/functions/comparison.html + string.html + reserved.html + GitHub #2491 OPEN since 2020) — no fresh check needed iter592.
+
+**TERMINAL POSTURE**: ALL rubric topics PASSED. Federation thin at 4.49944/310 — keep federation re-probes targeted. iter592 = 55th consecutive iter where placement-not-content findability discipline held; iter591 r23:1576 correction is now provably durable across 2 structurally-distinct framings (equals + contains).
+
+**OVERALL: 5.00 STRONG PASS — ILIKE-correction DURABLE across equals→contains generalization; translate semantics VERIFIED-CORRECT against Trino 467 docs verbatim; concat_ws/replace/abs all docs-verbatim correct first-probe; iter593 = NO-OP default with federation re-probe as highest-leverage breadth target.**
