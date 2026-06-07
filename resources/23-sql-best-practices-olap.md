@@ -1455,7 +1455,53 @@ FROM events
 WHERE event_date = DATE '2026-05-26';
 ```
 
-> **Cross-ref — "count where boolean = true per group" → `count_if` LEADS.** When the conditional is just "is this boolean true?" (e.g., `count_if(shipped_late)` per customer, or `count_if(is_paid)` per order_date), prefer **`count_if(bool)`** — it is the **idiomatic Trino-native form** for "count of TRUE values." See [§ 3.1E LEADING CANONICAL](#31e-trino-if-vs-case-when-and-count_if--the-conditional-expression-family) for the three-form rank: (1) `count_if(bool)` idiomatic, (2) `COUNT(*) FILTER (WHERE bool)` ANSI-standard, (3) `SUM(CASE WHEN bool THEN 1 ELSE 0 END)` portable fallback — all three are equivalent in plan and result.
+> **LEADING CO-CANONICAL — "count rows where a boolean / condition is true PER GROUP" → `count_if` LEADS (iter585 landing-point relocation).** *Keyword anchors AT § 11: count of X where boolean is true per group, how many flagged per region/customer/group, count true rows per group, per-region count of fraud/late/failed/damaged, count_if per group, conditional count by group, count where flag = true grouped, every group including zero-match.*
+>
+> When the question is "**how many orders are flagged as fraud per region**" / "**how many shipments were late per carrier**" / "**count of `is_X` true per group**", you have **THREE equivalent forms — prefer them in this rank order**:
+>
+> 1. **`count_if(bool)` — IDIOMATIC TRINO** (the lead). Verbatim from [Trino 467 aggregate-functions docs](https://trino.io/docs/467/functions/aggregate.html): *"`count_if(x) -> bigint` — Returns the number of `TRUE` input values. This function is equivalent to `count(CASE WHEN x THEN 1 END)`."* Pass a boolean column or any boolean expression directly. **Zero-group-safe**: with `GROUP BY region`, every region appears in the output — clean regions emit `0`, not "missing row."
+> 2. **`COUNT(*) FILTER (WHERE bool)` — ANSI-STANDARD equivalent** (the `FILTER` form §11 already leads with above for the duplicate-subquery-collapse pattern). Verbatim from the same docs: *"The `FILTER` keyword can be used to remove rows from aggregation processing with a condition expressed using a `WHERE` clause. This is evaluated for each row before it is used in the aggregation and is supported for all aggregate functions."* **Zero-group-safe** — `FILTER` filters rows *within the aggregate*, not the rows that reach `GROUP BY`, so every group still appears with `0` when no rows match.
+> 3. **`SUM(CASE WHEN bool THEN 1 ELSE 0 END)` — PORTABLE FALLBACK** (ANSI, works on every engine). Verbose but produces the same result and the same plan on Trino 467. **Zero-group-safe** — `CASE` returns `0` for non-matches, so every grouped row contributes (zero-match groups land at `SUM = 0`, not vanish).
+>
+> **ZERO-GROUP-SAFE — DO NOT WRITE for "per group count of flag = true":** do **NOT** push the boolean into the outer `WHERE` clause when the question asks "for **each** region / customer / carrier, how many were flagged true." That is:
+>
+> ```sql
+> -- WRONG for "how many fraudulent orders per region" — DROPS zero-fraud regions
+> SELECT region, COUNT(*) AS fraud_orders
+> FROM orders
+> WHERE is_fraud = true                 -- pre-aggregation filter throws away ALL clean rows
+> GROUP BY region;                      -- a region with 0 fraud has no surviving rows → it
+>                                       -- VANISHES from the result instead of showing fraud_orders = 0
+> ```
+>
+> The pre-aggregation `WHERE is_fraud = true` filter eliminates every row that does **not** satisfy the boolean *before* `GROUP BY` sees it. A region with zero fraudulent orders therefore has zero surviving rows for the grouper to bucket — that region **silently disappears** from the result set instead of appearing with `fraud_orders = 0`. This is the single most common "for EACH group" reporting bug; it ships a partial result that looks right until someone notices a known-clean region missing.
+>
+> **Correct — count the boolean over the FULL table grouped by region**, so every region survives the grouper and zero-match groups emit `0`:
+>
+> ```sql
+> -- RIGHT — count_if LEAD (idiomatic Trino), every region appears, clean regions show fraud_orders = 0
+> SELECT region,
+>        COUNT(*)             AS total_orders,
+>        count_if(is_fraud)   AS fraud_orders          -- boolean column passed directly
+> FROM orders
+> GROUP BY region;
+>
+> -- RIGHT — COUNT(*) FILTER (WHERE ...) form (ANSI-standard equivalent), identical result + plan
+> SELECT region,
+>        COUNT(*)                          AS total_orders,
+>        COUNT(*) FILTER (WHERE is_fraud)  AS fraud_orders
+> FROM orders
+> GROUP BY region;
+>
+> -- RIGHT — SUM(CASE WHEN ...) portable fallback, identical result + plan, verbose
+> SELECT region,
+>        COUNT(*)                                          AS total_orders,
+>        SUM(CASE WHEN is_fraud THEN 1 ELSE 0 END)         AS fraud_orders
+> FROM orders
+> GROUP BY region;
+> ```
+>
+> All three forms produce **identical row counts, identical column values, and identical query plans** on Trino 467. The `count_if(is_fraud)` form is the idiomatic Trino-native lead — reach for it first for any "count rows where condition is true per group / per region / per customer" question. Predicate form is also valid: `count_if(status = 'shipped' AND shipped_at > due_at)` — any boolean *expression* works, not just a stored boolean column. See [§ 3.1E LEADING CANONICAL](#31e-trino-if-vs-case-when-and-count_if--the-conditional-expression-family) for the single-row (non-grouped) form + the `if()` vs `CASE WHEN` family.
 
 > **Terminology note — call this pattern by its right name.** The `aggregate(...) FILTER (WHERE <cond>)` form above and the equivalent `SUM(CASE WHEN <cond> THEN <metric> END)` form are both **conditional aggregation** — also called **manual pivot** or **crosstab** when you build a multi-column pivot (e.g., quarterly revenue as `q1_revenue, q2_revenue, q3_revenue, q4_revenue` columns). Trino has **no `PIVOT` keyword** — you write the conditional aggregation explicitly. The `FILTER (WHERE ...)` clause is supported on every Trino aggregate per [Trino aggregate functions docs](https://trino.io/docs/current/functions/aggregate.html).
 >

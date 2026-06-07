@@ -1,112 +1,162 @@
-# Iter584 Judge Feedback — 2026-06-07 (EXTENDED PHASE)
+# Iter585 Judge Feedback — 2026-06-07 (EXTENDED PHASE)
 
-## Verdict: **PASS** — overall avg **4.5625** (margin +1.0625 above 3.5 floor)
+## Verdict: **PASS** — overall avg **4.875** (margin +1.375 above 3.5 floor)
 
-**Overall-average governs the label** (per directive). Quality concern flagged separately: Q1 per-question score 3.25 is below the per-question 3.5 floor — the iter584 §3.1E intent-anchor extension was a landing-point miss for the exact question phrasing it was designed to intercept. This is a routing defect, not a content defect.
+**Overall-average governs the label**. No per-question quality concern: every question scored ≥ 4.75. The iter584 zero-group-drop defect is RESOLVED — the responder routed Q1 to a strictly-more-robust dimension-LEFT-JOIN framing.
 
 ---
 
 ## Per-question scores (Accuracy / Completeness / Clarity / Actionability)
 
-### Q1 — count_if RE-PROBE (per-region fraud count) — 3.5 / 2.5 / 4.0 / 3.0 = **3.25 (quality concern)**
+### Q1 — count_if PER-GROUP zero-group RE-PROBE (warehouses + damaged shipments) — 5 / 4 / 5 / 5 = **4.75**
 
-**Responder LED with `WHERE is_fraud = true ... COUNT(*) GROUP BY region`**, then offered `SUM(CASE WHEN is_fraud THEN 1 ELSE 0 END)` as the "equivalent." The responder **did NOT surface `count_if(is_fraud)`** and **did NOT surface `COUNT(*) FILTER (WHERE is_fraud)`** at all.
+Responder LED with a dimension-table LEFT JOIN + COALESCE:
 
-**Verifications (Trino 467 docs, WebFetched today):**
-- `count_if(x) -> bigint`: *"Returns the number of `TRUE` input values. This function is equivalent to `count(CASE WHEN x THEN 1 END)`."* — trino.io/docs/467/functions/aggregate.html
-- `FILTER`: *"The `FILTER` keyword can be used to remove rows from aggregation processing with a condition expressed using a `WHERE` clause."* — same page; supported for all aggregates
+```sql
+SELECT w.warehouse_id, w.warehouse_name, COALESCE(d.damaged_count, 0) AS damaged_shipments
+FROM iceberg.analytics.warehouses w
+LEFT JOIN (
+  SELECT warehouse_id, COUNT(*) AS damaged_count
+  FROM iceberg.analytics.shipments
+  WHERE is_damaged = TRUE
+  GROUP BY warehouse_id
+) d ON d.warehouse_id = w.warehouse_id
+ORDER BY w.warehouse_id;
+```
 
-**Two defects:**
-1. **count_if omission (FINDABILITY MISS — iter584 §3.1E intent-anchor did NOT route).** The iter584 fix EXTENDED the §3.1E LEADING CANONICAL keyword-anchor line with SaaS intent-phrasings (`count where boolean is true`, `count of trues per group`, `conditional count`, `per-customer count of X where Y is true`, etc.) and ADDED a per-group worked example with the three-form rank (`count_if` → `FILTER (WHERE)` → `SUM(CASE)`). The Q1 question hit the exact intent-phrasing target ("count of the true ones, per region; cleanest Trino way to count rows where a boolean is true per group") and STILL did not surface count_if. The §3.1E anchor extension is a landing-point miss for THIS question — the responder routed elsewhere (likely a `count` / `WHERE filter` / `SUM(CASE)` canonical that sits at a different section).
-2. **Zero-group-drop fragility in the PRIMARY/headline form.** `WHERE is_fraud = true ... GROUP BY region` filters BEFORE grouping; a region with zero fraudulent orders disappears entirely from the result set (no row showing 0). The question said "for **each** region" — implying every region, including clean ones with zero. The robust idiomatic form `count_if(is_fraud) GROUP BY region` (no WHERE) keeps every region and emits 0 for clean ones. `COUNT(*) FILTER (WHERE is_fraud)` and `SUM(CASE WHEN is_fraud THEN 1 ELSE 0 END)` over the full unfiltered table also preserve zero-groups. The responder's SUM(CASE) alternative is correct (full-table scan, preserves zero-groups), but the PRIMARY/headline WHERE-form is semantically fragile for the "per each region" requirement.
+**Verifications (Trino 467):**
+- Standard `LEFT JOIN` + `COALESCE(col, 0)` over an Iceberg table is valid Trino 467 SQL.
+- Zero-group-safe: the dimension table (`warehouses`) preserves EVERY warehouse including ones with zero shipments AND zero damaged-shipments. This is STRICTLY MORE ROBUST than `count_if(is_damaged) GROUP BY warehouse_id` over the shipments table alone, which would omit warehouses with no shipment rows.
 
-Partial credit: SUM(CASE WHEN is_fraud THEN 1 ELSE 0 END) over the full table IS a correct equivalent (the §3.1E "form 3 portable fallback"); the responder reached form 3 but not forms 1 or 2.
+**Correctness verdict**: fully correct + zero-group-safe. The iter584 defect (`WHERE bool + COUNT(*) GROUP BY` with NO dimension table → drops zero-match groups) DID NOT recur — the responder picked a framing that handles the "EVERY warehouse including zero" requirement at the table-shape level.
 
-### Q2 — listagg-DISTINCT 2nd-angle durability (per-region unique product names) — 5.0 / 5.0 / 5.0 / 5.0 = **5.00 STRONG PASS**
+**count_if NOT surfaced**: the responder did NOT use `count_if(is_damaged)` or `COUNT(*) FILTER (WHERE is_damaged)`. The iter585 §11 relocation intended count_if to lead at the per-group landing point, but the responder routed to the dimension-LEFT-JOIN pattern instead. Assessment: this is a STYLE/IDIOM choice, NOT a correctness defect. The dimension-LEFT-JOIN form is arguably MORE robust for the strict "EVERY warehouse including zero-shipment ones" requirement than count_if (which only sees the shipments table). Minor completeness ding for not also mentioning `count_if(is_damaged)` as an alternative simpler form when the shipments table is acceptable as the row source.
 
-Responder led with `array_join(array_agg(DISTINCT product_name ORDER BY product_name), ', ')` and explicitly stated *"Do NOT use listagg(DISTINCT product_name, ', ') — Trino's listagg has no DISTINCT keyword."*
+| Dim | Score | Rationale |
+|---|---|---|
+| Accuracy | 5 | Fully correct; valid Trino 467; zero-group-safe |
+| Completeness | 4 | Missing count_if / FILTER alternative for shipments-only common case |
+| Clarity | 5 | LEFT JOIN + COALESCE clearly demonstrated |
+| Actionability | 5 | Engineer can copy-paste-and-run |
 
-**Verification:** Trino 467 `LISTAGG` signature: `LISTAGG( expression [, separator] [ON OVERFLOW overflow_behaviour]) WITHIN GROUP (ORDER BY sort_item, [...]) [FILTER (WHERE condition)]` — NO DISTINCT slot anywhere in the signature. `array_agg(DISTINCT x ORDER BY x)` + `array_join(array, ', ')` are both valid Trino 467 aggregate forms.
+### Q2 — listagg-DISTINCT 3rd-angle durability (authors → distinct genres) — 5 / 5 / 4 / 5 = **4.75**
 
-**iter583 relocation (listagg-no-DISTINCT moved from r07 §1a.2A → r27 §7A.2B) is DURABLE across a 2nd framing** (iter583 page-names + iter584 product-names). Function-named-keyword landing-point routing meta-rule validated on a 5th independent case.
+Responder LED with `array_join(array_agg(DISTINCT genre ORDER BY genre), ', ')` and explicitly stated "LISTAGG(DISTINCT ...) does NOT exist in Trino — use the array_agg(DISTINCT ...) + array_join(...) form."
 
-### Q3 — CASE in ORDER BY (custom priority sort) — 5.0 / 5.0 / 5.0 / 5.0 = **5.00 STRONG PASS**
+**Verifications (Trino 467):**
+- trino.io/docs/current/functions/aggregate.html: `array_agg` supports DISTINCT and ORDER BY — *"ORDER BY can be specified within the array_agg aggregate function: `array_agg(x ORDER BY y DESC)`"*
+- LISTAGG documented as `LISTAGG(expression [, separator] [ON OVERFLOW ...]) WITHIN GROUP (ORDER BY ...)` — the DISTINCT slot is NOT in the LISTAGG grammar.
+- `array_join(array, delimiter)` is documented at trino.io/docs/current/functions/array.html
 
-`ORDER BY CASE WHEN status='urgent' THEN 1 WHEN status='high' THEN 2 ELSE 3 END, status` — correct Trino 467. CASE expressions are valid in ORDER BY (Trino accepts any SQL expression in ORDER BY per trino.io/docs/467/sql/select.html "Each expression may be composed of output columns, or it may be an ordinal number selecting an output column by position..."). Tie-break by `status` is a thoughtful determinism nudge.
+**Phrasing nit**: "LISTAGG(DISTINCT...) does NOT exist in Trino" is shorthand. LISTAGG exists as a function; only its DISTINCT slot does not. Practical impact on the SaaS engineer is zero (they'll correctly avoid the wrong form). Minor clarity ding.
 
-### Q4 — Integer-division gotcha — 5.0 / 5.0 / 5.0 / 5.0 = **5.00 STRONG PASS**
+**Durability**: 3rd consecutive framing (iter583 page-names → iter584 product-names → iter585 genres) where the responder leads with the correct distinct-roll-up form and does NOT fabricate `LISTAGG(DISTINCT ...)`. DURABLE.
 
-Diagnosed BIGINT/BIGINT integer-division truncation (5/100 = 0); fix = `CAST(... AS DOUBLE) / COUNT(*)`; also offered `DECIMAL(18,4)` variant for monetary precision. Correct Trino 467 semantics.
+| Dim | Score | Rationale |
+|---|---|---|
+| Accuracy | 5 | Form correct; the LISTAGG shorthand is functionally accurate |
+| Completeness | 5 | DISTINCT + ORDER BY + separator + the fab warning |
+| Clarity | 4 | "LISTAGG does NOT exist" phrasing could be sharper as "the DISTINCT FORM of LISTAGG does not exist" |
+| Actionability | 5 | Copy-paste-ready |
 
-**Interesting cross-question signal:** Q4 correctly used `COUNT(*) FILTER (WHERE converted = true)` while Q1 did NOT use the same construct for the structurally equivalent "count rows where boolean is true per group" question. This confirms the §3.1E intent-anchor MISS at Q1 is real and routing-driven, not knowledge-gap-driven — the responder knows the FILTER form but only surfaces it under a non-§3.1E framing (the division-gotcha framing). The §3.1E intent-anchors did not intercept the "count where boolean true per group" framing at Q1.
+### Q3 — IS DISTINCT FROM null-safe equality (FRESH) — 5 / 5 / 5 / 5 = **5.0**
 
----
+Responder LED with `previous_status IS DISTINCT FROM current_status` (TRUE = changed), spelled out the NULL semantics, and called out the `<>` three-valued-logic pitfall (returns UNKNOWN with NULL).
 
-## OVERALL AVERAGE = (3.25 + 5.00 + 5.00 + 5.00) / 4 = 18.25 / 4 = **4.5625 PASS**
+**Verifications (Trino 467) — verbatim quotes from trino.io/docs/current/functions/comparison.html:**
+- *"The IS DISTINCT FROM and IS NOT DISTINCT FROM operators treat NULL as a known value and both operators guarantee either a true or false outcome even in the presence of NULL input."*
+- *"`SELECT NULL IS DISTINCT FROM NULL;` returns `false`"*
+- *"`SELECT NULL IS NOT DISTINCT FROM NULL;` returns `true`"*
 
-Overall-avg governs label. Quality concern: Q1 = 3.25 < 3.5 per-question floor (routing defect, not content defect; no overall-label override per directive).
+Responder's semantics line up exactly:
+- `NULL IS DISTINCT FROM NULL` → FALSE (treated as same) — matches docs
+- `NULL IS DISTINCT FROM 'active'` → TRUE (treated as different) — matches docs
+- `<>` returning UNKNOWN with NULL inputs — standard three-valued-logic, accurate
 
----
+Fully correct. No CASE expression needed — exactly what the engineer asked for.
 
-## count_if-routing diagnosis (CRITICAL for iter585)
+| Dim | Score | Rationale |
+|---|---|---|
+| Accuracy | 5 | Perfect match to Trino 467 docs |
+| Completeness | 5 | Both NULL cases + `<>` pitfall + the fix-without-CASE answer |
+| Clarity | 5 | Each case spelled out |
+| Actionability | 5 | Drop-in expression |
 
-The iter584 fix added correct content at r23 §3.1E:
-- Extended keyword-anchor line with SaaS intent-phrasings
-- Added per-group worked example with three-form rank
-- Added §11 cross-ref pointer
+### Q4 — LIMIT-without-ORDER-BY nondeterminism (FRESH) — 5 / 5 / 5 / 5 = **5.0**
 
-But Q1 — which used the exact intent-phrasing the anchor was designed for ("count of the true ones, per region; cleanest Trino way to count rows where a boolean is true per group") — STILL did not route to §3.1E. The responder produced `WHERE is_fraud = true + COUNT(*)` as the primary and `SUM(CASE WHEN is_fraud THEN 1 ELSE 0 END)` as the equivalent — neither form is at §3.1E's lead. The responder routed somewhere ELSE.
+Responder explained: LIMIT without ORDER BY is non-deterministic (no guaranteed row order — partition/file order, scheduling); fix = add ORDER BY on a unique/deterministic column; tiebreaker note for ties (`ORDER BY event_date, event_id`).
 
-**Where did it route?** Most likely:
-1. A generic "filter rows + COUNT(*)" pattern at a basic-aggregation section (the primary form), OR
-2. The §11 conditional-aggregation block's SUM(CASE) example (the alternative form), OR
-3. r07 §5's existing "the CASE-WHEN form `SUM(CASE WHEN event_type='purchase' THEN 1 ELSE 0 END)` is also valid but more verbose" line — which surfaces SUM(CASE) but does NOT have count_if as the lead at that landing point.
+**Verifications (Trino 467) — quote from trino.io/docs/current/sql/select.html:**
+- *"When a query lacks an ORDER BY clause, exactly which rows are returned with a LIMIT clause is arbitrary."*
 
-The §3.1E intent-anchor extension was correctly authored but the responder's keyword search routed to a section that does NOT cross-ref §3.1E for "count where boolean is true per group." The iter584 §11 cross-ref pointer was added but it sits AFTER the existing §11 `COUNT(*) FILTER (WHERE event_type='purchase')` lead, so even if §11 routes, the cross-ref to §3.1E is the SECOND thing the responder sees — not the first; and a basic "WHERE + COUNT" landing point is even further from §3.1E.
+Responder's explanation lines up exactly. The ORDER-BY-on-unique-column fix and the composite tiebreaker (`event_date, event_id`) are the standard production patterns. Production-concern callout (different rows each run → broken pagination, broken tests, broken dashboards) is correctly framed.
 
-**Why r07 §5 likely intercepted instead.** The Q1 phrasing "count of the true ones, per region" maps to a "per-group count" framing more strongly than a "conditional expression family" framing. The responder's keyword router probably sees "per region" + "count" + "true" + "boolean" and lands at a per-group-count section in r07, not the conditional-expression-family section at r23 §3.1E. The §3.1E intent-anchors cover the SEMANTIC intent but the responder's router is keyword-positional, not semantic.
-
----
-
-## iter585 directive — PRIMARY landing-point fix
-
-**Goal:** Make `count_if(bool)` LEAD for the actual section the "per-group count where boolean is true" question opens, AND add a zero-group-safe note.
-
-**Action 1 (PRIMARY — find the actual landing point).** Grep r07 + r23 for the section the responder ACTUALLY opens for "count where boolean true per group" / "count of flagged rows per group" / "fraudulent orders per region count." Candidates:
-- r07 §5 conditional aggregation / wide-pivot
-- r07 GROUP BY rules anchor
-- r23 §11 conditional-aggregation-FILTER LEAD canonical (already has `COUNT(*) FILTER (WHERE event_type='purchase')` as the lead — extend to add count_if as the PRIMARY lead-form variant for the single-boolean case so the responder finds count_if at the FIRST thing read, not as the second-thing cross-ref)
-
-At the section that actually intercepts, ADD count_if as the LEAD form (not just as a cross-ref). The §3.1E anchor extension stays as-is (it was correct), but the FIRST landing point the question opens must ALSO surface count_if at the top, not as a cross-ref.
-
-**Action 2 (zero-group-safe note — CRITICAL).** At the same landing point, ADD an explicit warning:
-> When the question says "per each X" or "for each X," the form `count_if(bool) GROUP BY x` (no WHERE filter) keeps ALL groups including those with zero matches. The `WHERE bool = true ... GROUP BY x` form DROPS groups with zero matches — a region with zero fraud disappears entirely from the result set. Same for `COUNT(*) FILTER (WHERE bool) GROUP BY x` (preserves zero-groups) and `SUM(CASE WHEN bool THEN 1 ELSE 0 END) GROUP BY x` (preserves zero-groups). Reach for `count_if(bool) GROUP BY x` first; only use `WHERE bool ... GROUP BY x` if you explicitly want zero-match groups suppressed.
-
-**Action 3 (meta-rule).** The iter584 intent-anchor extension at §3.1E was correct CONTENT placed at the WRONG landing point (the responder's keyword router did not route there for the per-group framing). Mirror the iter583 listagg-no-DISTINCT relocation lesson: when a content-correct fix fails to route, RELOCATE / DUPLICATE the lead to the section the responder's keyword router ACTUALLY opens. For "count where boolean true per group" the landing point is the per-group / conditional-aggregation section, NOT the conditional-expression-family section.
-
-**Re-probes for iter585:**
-- Q1 re-probe (3rd framing): "per warehouse, how many shipments arrived damaged (boolean `damaged = true`)" — should surface `count_if(damaged) GROUP BY warehouse` as the LEAD with a zero-group-safe note.
-- Q2 listagg-DISTINCT 3rd framing for durability (e.g., "per customer, comma-separated UNIQUE coupon codes").
-- Federation re-probe slot (4.49944/310 row still below 4.5 raised threshold, 33+ iter stale).
-
-**Preserve all iter534-584 locks.** No churn on:
-- iter583 listagg-no-DISTINCT relocation at r27 §7A.2B
-- iter584 §3.1E count_if intent-anchor extension (correct content, just add ANOTHER copy/lead at the actual routing landing point)
-- r22 §13.x federation guardrails
-
----
-
-## Topic rubric updates
-
-- **SQL query best practices for OLAP** (Q1 count_if r23 §3.1E + Q2 listagg-DISTINCT r27 §7A.2B + Q3 CASE-in-ORDER-BY r23 §3.1G area + Q4 integer-division r23): current 4.4664/156
-  - Q1: (4.4664·156 + 3.25)/157 = **4.4587/157** (−0.0077 Q1 drag, count_if intent-anchor landing-point miss + zero-group-drop fragility)
-  - Q2: (4.4587·157 + 5.00)/158 = **4.4621/158** (+0.0034 Q2 lift, listagg-DISTINCT durable on 2nd framing)
-  - Q3: (4.4621·158 + 5.00)/159 = **4.4655/159** (+0.0034 Q3 lift, CASE-in-ORDER-BY clean)
-  - Q4: (4.4655·159 + 5.00)/160 = **4.4688/160** (+0.0033 Q4 lift, integer-division gotcha clean)
-- **Federation NOT probed** — 4.49944/310 row UNCHANGED.
+| Dim | Score | Rationale |
+|---|---|---|
+| Accuracy | 5 | Matches docs verbatim |
+| Completeness | 5 | Why + fix + production concern + tiebreaker |
+| Clarity | 5 | Plainly stated |
+| Actionability | 5 | Copy-paste pattern |
 
 ---
 
-## HEADLINE
+## Overall
 
-**iter584 OVERALL: 4.5625 PASS** (overall-avg governs the label). Q1 per-question 3.25 is BELOW the per-question 3.5 floor (flagged as a quality concern but does NOT change the overall label per directive). **Two strong wins**: Q2 listagg-DISTINCT relocation DURABLE on 2nd framing (iter583 fix holds), Q4 integer-division gotcha clean with `COUNT(*) FILTER (WHERE)` correctly surfaced + CAST-to-DOUBLE / DECIMAL fix correct. **One critical landing-point miss**: iter584 §3.1E count_if intent-anchor extension was correctly authored content but DID NOT route for the Q1 per-group framing the anchor was designed to intercept. The responder still used `WHERE bool = true + COUNT(*)` as the primary (with zero-group-drop fragility) and `SUM(CASE)` as the equivalent — never reaching `count_if` or `COUNT(*) FILTER (WHERE)`. **iter585 PRIMARY**: find the actual section the per-group "count where boolean true" question opens (likely r23 §11 or r07 §5, NOT r23 §3.1E) and put count_if as the LEAD there + add zero-group-safe note (`count_if(bool) GROUP BY x` preserves all groups, `WHERE bool ... GROUP BY x` drops zero-groups).
+| Q | Avg | Notes |
+|---|---|---|
+| Q1 | 4.75 | Correct + zero-safe via dimension-LEFT-JOIN; count_if omission is style only |
+| Q2 | 4.75 | listagg-DISTINCT durable 3rd angle; minor phrasing ding |
+| Q3 | 5.0 | Fully correct, matches docs verbatim |
+| Q4 | 5.0 | Fully correct, matches docs verbatim |
+| **Overall avg** | **4.875** | **PASS** (margin +1.375) |
+
+No quality concerns to flag separately. No fabricated features, no wrong-frame errors, no count_if-omission DEFECT (count_if omission here is style not correctness because the LEFT-JOIN form is strictly more robust for the zero-warehouse case), no zero-group-DROP, no listagg-DISTINCT fab, no `::`-cast.
+
+---
+
+## count_if-routing assessment (CORE iter585 question)
+
+**iter585 directive intent**: relocate the count_if-leads steer from r23 §3.1E (function-name landing point) to r23 §11 (per-group landing point) to surface `count_if` / `COUNT(*) FILTER (WHERE ...)` / `SUM(CASE WHEN ... THEN 1 ELSE 0 END)` at the actual landing point for "count how many X where boolean is true PER group" questions, AND surface the zero-group-safe DO-NOT-WRITE block to prevent the iter584 `WHERE bool + COUNT(*) GROUP BY` zero-drop bug from recurring.
+
+**Outcome on the iter585 Q1 re-probe**:
+- The responder DID NOT use `count_if` — it routed to dimension-LEFT-JOIN + COALESCE.
+- HOWEVER, the iter584 zero-group-DROP bug DID NOT recur. The responder picked a framing that handles the "EVERY warehouse including zero" requirement at the table-shape level.
+- The answer is CORRECT and ZERO-GROUP-SAFE.
+
+**Two ways to read this:**
+
+1. **Resolved-via-alternative-routes (RECOMMENDED)**: the responder is producing correct, zero-group-safe answers via a different (and arguably better-suited for the strict "EVERY warehouse including zero-SHIPMENT ones" requirement) framing. The "conditional count per group" topic is effectively resolved. Continued churn on §11 to force count_if-as-LEAD is low-yield.
+
+2. **Still-worth-chasing**: if the production goal is for the responder to reach the most-idiomatic Trino form (count_if), the routing gap remains. But this is style, not correctness.
+
+**Judge recommendation: option 1 — mark conditional-count per-group as RESOLVED VIA CORRECT ALTERNATIVE ROUTES.** The responder is robust on the underlying intent. Move probing to fresh breadth.
+
+---
+
+## listagg-DISTINCT durability
+
+DURABLE across 3 distinct framings (iter583 page-names, iter584 product-names, iter585 genres). Lock holds. No further re-probe needed unless a 4th-angle stress test surfaces a phrasing the responder has not seen.
+
+---
+
+## iter586 directive
+
+**PRIMARY**: Mark conditional-count per-group as "resolved via correct alternative routes" and shift probing to **FRESH BREADTH**. Specifically:
+
+1. **State.json note**: "iter585 count_if re-probe scored 4.75 — responder produced correct zero-group-safe answer via dimension-LEFT-JOIN + COALESCE framing. iter584 zero-group-DROP bug RESOLVED. count_if-as-LEAD findability is a style/idiom concern not a correctness concern. No further §11 / §3.1E churn unless a downstream probe surfaces a NEW defect."
+
+2. **Probe FRESH topics in iter586** — 4 questions split as follows:
+   - **One federation re-probe** (rubric still FAIL at 4.49944/310; this is the ONLY remaining FAIL row and the highest-leverage target). Pick a fresh phrasing on PostgreSQL connector pushdown, cross-catalog join limits, or when-to-federate-vs-ingest. Goal: push federation past the 4.5 threshold.
+   - **One Iceberg time-travel / snapshot semantics probe** at a fresh angle (FOR VERSION AS OF vs FOR TIMESTAMP AS OF; or snapshot rollback semantics).
+   - **One dbt + late-arriving data probe** — a specific real-SaaS-scenario question (incremental lookback windows, or backfilling a partition for data that arrived late).
+   - **One window function frame edge case** — ROWS vs RANGE with ties; or a default-frame question (the unbounded RANGE default trap).
+
+3. **NO resource edits** unless one of the FRESH probes fails. iter585 file edits to r23 §11 and r07 §5 remain in place as defense-in-depth even if not exercised this round.
+
+4. **Federation probe is the single highest-leverage probe** — it's the only rubric row still FAIL and has been at 4.49944 for 310 questions. A single high-quality probe + targeted teacher fix could move it across.
+
+**DO NOT**:
+- Add more count_if anchors to r23 or r07. Current placement is sufficient.
+- Re-probe listagg-DISTINCT a 4th time — durability is established.
+- Touch the iter584 §3.1E content — defense-in-depth holds.
+- Touch r22 federation guardrails without a fresh failure probe first.
