@@ -1,112 +1,112 @@
-# Iter 633 — Judge Feedback
+# Iter634 Judge Feedback — 2026-06-07 (EXTENDED PHASE)
 
-## Overall Verdict
+## Per-Question Scores
 
-**Overall average: 4.8125 — PASS (margin +1.3125 above 3.5 floor; +0.34375 swing from iter632's 4.46875).**
+### Q1 — Top 10% customers' share of total revenue (PERCENT_RANK direction INVERTED)
+- Accuracy: **2** — PERCENT_RANK semantics inverted under DESC sort.
+- Completeness: **3** — Correct CTE skeleton (SUM/GROUP BY → window → numerator/denominator) but the cutoff is wrong; computes BOTTOM-10% share, not TOP-10%.
+- Clarity: **4** — Clean CTE structure, well-narrated; the misstated direction is unambiguously stated (which is what makes it dangerous).
+- Actionability: **2** — Copy-paste returns the WRONG number; engineer would ship an inverted KPI.
+- **Per-Q avg: 2.75**
 
-**iter633 FIX-A concat/format type-coercion guardrail LANDED CLEAN.** Q1 responder produced `format('%d orders / $%,.2f total', order_count, total_spend)` as PREFERRED and explicit `CAST(... AS VARCHAR) || ...` as alternative. NO bare `concat(bigint, varchar)` or `number || string` without CAST anywhere in the answer. The r23:427-491 sub-canonical addition routed correctly on first probe — iter632 -> iter633 arc (concat-on-BIGINT type-error -> docs-verified format()/CAST-each canonical -> LANDED) CLOSED.
+**Verification (trino.io/docs/467/functions/window.html):** `percent_rank()` is documented verbatim as `(r - 1) / (n - 1)`. With `ORDER BY total_revenue DESC`, the highest spender has rank r=1 → percent_rank = 0.0; the lowest spender has rank r=n → percent_rank = 1.0. Under DESC ordering, the TOP 10% by spend are `percent_rank <= 0.1`, NOT `>= 0.9`. The responder's prose ("0.0 bottom, 1.0 top") and the `CASE WHEN revenue_percentile >= 0.9` cutoff are both inverted — the query returns the share captured by the BOTTOM 10% of spenders. Fix is either flip the order (`ORDER BY total_revenue ASC` with `>= 0.9`) or flip the cutoff (`ORDER BY total_revenue DESC` with `<= 0.1`). NTILE(10) with `DESC` + `WHERE decile = 1` (filtered in an outer wrapper) would be a count-balanced cleaner alternative — worth signposting.
 
-Federation NOT probed this iter — 4.49944/310 row UNCHANGED.
+### Q2 — Duplicate (email, signup_date) detection
+- Accuracy: **5** — `GROUP BY email, signup_date HAVING COUNT(*) > 1` is the canonical correct pattern. Self-join-back to the source table to surface the full duplicate rows is valid Trino 467.
+- Completeness: **5** — Covers both the dup-key list and the dup-row enumeration; addresses the engineer's likely follow-up.
+- Clarity: **5** — Two-step structure (find offending keys, then join back) is easy to read.
+- Actionability: **5** — Copy-pasteable.
+- **Per-Q avg: 5.00**
 
----
+**Verification:** Standard SQL; HAVING applies post-aggregation; the existence of duplicate keys is exactly what `COUNT(*) > 1` after a GROUP BY surfaces. No dialect concerns.
 
-## Per-question scores
+### Q3 — Forward-fill / LOCF per device
+- Accuracy: **5** — `LAST_VALUE(status) IGNORE NULLS OVER (PARTITION BY device_id ORDER BY event_time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` is correct Trino 467. IGNORE NULLS placement (after closing `)`, before OVER) is right.
+- Completeness: **4.5** — All the necessary pieces present; minor: the outer `COALESCE(status, LAST_VALUE(...) IGNORE NULLS ...)` is redundant (LAST_VALUE ... IGNORE NULLS through CURRENT ROW already returns the current row's non-null value when present) — harmless but verbose; a brief note that the wrapper is optional would be cleaner.
+- Clarity: **5** — Frame explained in plain language.
+- Actionability: **5** — Drop-in.
+- **Per-Q avg: 4.875**
 
-### Q1 — combine order_count + total_spend into "3 orders / $450 total" display string
+**Verification (trino.io/docs/467/functions/window.html):** Trino 467 supports IGNORE NULLS on lead/lag/nth_value/first_value/last_value verbatim ("If IGNORE NULLS is specified, all rows where x is null are excluded from the calculation"). The `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` frame is the correct look-back frame for LOCF. The default frame for LAST_VALUE is `RANGE UNBOUNDED PRECEDING ... last peer of the current row`; for LOCF the explicit ROWS frame is unambiguously safer, so the explicit form is good practice. The COALESCE wrapper is redundant but not wrong.
 
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5 | `format('%d orders / $%,.2f total', order_count, total_spend)` is verbatim valid Trino 467. Verified trino.io/docs/467/functions/conversion.html: `format(format, args...) -> varchar`, Java Formatter syntax, `%d` for integers, `%,.2f` for thousands+decimals, docs example `format('%,.2f', 1234567.89)` -> `'1,234,567.89'`. PREFERRED form correctly stated to handle type conversion with NO CAST. Alternative `CAST(order_count AS VARCHAR) \|\| ' orders / $' \|\| CAST(total_spend AS VARCHAR) \|\| ' total'` is also correct — \|\| is varchar-only per trino.io/docs/467/functions/string.html (`concat(string1, ..., stringN) -> varchar` + "`\|\|` operator performs concatenation"). Explicit CAST on every BIGINT/DECIMAL piece — correct. |
-| Completeness | 5 | Both canonical idioms covered (format() preferred, CAST-each \|\| alternative). Contrast is explicit. Output strings (`"3 orders / $450.00 total"`) match the docs examples. |
-| Clarity | 5 | Shows both forms with worked output. Beginner can pick format() and ship. |
-| Actionability | 5 | Engineer copies the format() line and ships. No ambiguity. |
-| **Q1 avg** | **5.00** | **iter633 FIX-A VALIDATION: concat/format guardrail LANDED CLEAN.** |
+### Q4 — Top product NAME per category (DISTINCT ON Postgres-leak in secondary)
+- Accuracy: **3** — PRIMARY `ROW_NUMBER() ... PARTITION BY category ORDER BY SUM(sales_amount) DESC` + outer `WHERE rn = 1` is fully correct Trino 467. SECONDARY `SELECT DISTINCT ON (category) ...` is **invalid Trino dialect** — DISTINCT ON is a PostgreSQL extension; Trino 467 supports only standard `SELECT DISTINCT`, not `DISTINCT ON (cols)`. Verified against trino.io/docs/current/sql/select.html (DISTINCT/ALL section mentions only set-quantifier DISTINCT, no DISTINCT ON) and trinodb/trino discussion #17261 ("Trino does not natively support PostgreSQL's DISTINCT ON syntax"). The secondary snippet would raise a parse error. Calling it the "tighter query" misdirects the engineer.
+- Completeness: **4** — Engineer's actual question (return the product name, not the max number) is fully addressed by the PRIMARY snippet. The PRIMARY is the canonical Trino route. The bigger miss is omitting the Trino-native one-liner `max_by(product_name, total_sales) GROUP BY category` which is even cleaner than ROW_NUMBER and is the docs-recommended idiom for "value of x associated with the max of y."
+- Clarity: **4** — PRIMARY is clearly explained; SECONDARY confidently labels Postgres syntax as a "tighter Trino query," which is actively misleading.
+- Actionability: **3** — PRIMARY copy-pastes and runs; SECONDARY copy-pastes and FAILS at parse time. Engineer following the "tighter" recommendation would hit an error.
+- **Per-Q avg: 3.50**
 
-**FIX-A VERIFICATION (iter633 critical check):** The responder did NOT produce any of the DO-NOT-WRITE rows at r23:427-491 — no bare `concat(123, 'rows')`, no `'count: ' \|\| 42`, no `concat(date_diff('hour',...), 'h')`, no Postgres `::varchar` shorthand. Used either format() (Java printf, accepts BIGINT/DECIMAL directly) or explicit `CAST(... AS VARCHAR)` on every numeric arg. **Guardrail LANDED.**
-
-### Q2 — max gap in days between consecutive orders per customer
-
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5 | Subquery `LAG(order_date) OVER (PARTITION BY customer_id ORDER BY order_date) AS prev_order_date` — verified trino.io/docs/467/functions/window.html: `lag(x[, offset[, default_value]])`, default offset 1, returns NULL on first row of partition. `date_diff('day', prev_order_date, order_date)` — verified date_diff('day', earlier, later) returns positive bigint per trino.io/docs/467/functions/datetime.html (`date_diff('day', DATE '2020-03-01', DATE '2020-03-02')` returns `1`). Outer `WHERE prev_order_date IS NOT NULL` references the subquery's OUTPUT column, which IS a valid input column to the outer query — different SELECT level, so legal (Trino's "no alias in same-level WHERE" rule does NOT apply across subquery boundaries). `MAX(days_since_last_order) GROUP BY customer_id` — correct per-customer max gap semantic. |
-| Completeness | 5 | Two-stage pattern (subquery to compute gap, outer to aggregate) cleanly addresses "max gap per customer". IS NOT NULL filter correctly excludes the first-order rows where LAG is NULL. |
-| Clarity | 4 | Reasonable explanation of LAG + date_diff. Could explicitly note WHY the IS NOT NULL filter is needed (LAG returns NULL on first row of each partition) — minor pedagogical gap. |
-| Actionability | 5 | Copy-paste ready. |
-| **Q2 avg** | **4.75** | Clean Trino 467 dialect, all signatures verified. |
-
-### Q3 — split full_name into first_name + last_name
-
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5 | `split_part(full_name, ' ', 1) AS first_name`, `split_part(full_name, ' ', 2) AS last_name` — verified trino.io/docs/467/functions/string.html: split_part is 1-based ("starting at one"), index out-of-range returns NULL ("If the index is larger than the number of fields, then null is returned"). Responder correctly stated index 1 = whole string for no-space input, index 2 = NULL for no-space — accurate. For multi-word "Mary Ann Smith": `SUBSTR(full_name, LENGTH(split_part(full_name, ' ', 1)) + 2)` -> LENGTH('Mary')=4, +2=6, substr starts at position 6 -> 'Ann Smith'. Trino substr is 1-based per docs (`substr(string, start) -> varchar`), so position 5 = space, position 6 = 'A'. Arithmetic CORRECT. |
-| Completeness | 5 | Two-word base case + multi-word everything-after-first-space case both covered. NULL behavior on missing index explicitly noted. |
-| Clarity | 5 | Worked offset arithmetic. Beginner sees why `+2` (skip first-word chars + 1 space -> position of second word's first char). |
-| Actionability | 5 | Copy-paste ready for both two-word and multi-word inputs. |
-| **Q3 avg** | **5.00** | All split_part + substr signatures verified accurate. |
-
-### Q4 — bucket orders small/medium/large, count per bucket
-
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5 | Searched CASE: `WHEN amount < 50 THEN 'small' WHEN amount >= 50 AND amount < 200 THEN 'medium' WHEN amount >= 200 THEN 'large'`. Boundary check: $50 -> 'medium' (>=50 yes), $200 -> 'large' (>=200 yes). No gaps, no overlaps. GROUP BY repeating the full CASE expression — verified trino.io/docs/467/sql/select.html: GROUP BY accepts "input columns or ordinal number selecting an output column by position", output aliases NOT allowed. Repeating the expression is the correct canonical pattern. CTE alternative (CASE in CTE then GROUP BY the alias) is valid because at the outer level the CTE's alias IS an input column. |
-| Completeness | 5 | Both forms (inline CASE with GROUP BY repeat + CTE with GROUP BY alias) shown. Boundary handling unambiguous. |
-| Clarity | 4 | Could explicitly call out "Trino does NOT allow GROUP BY <alias>; either repeat the CASE or wrap in CTE" — implicit but not stated. Minor pedagogical gap. |
-| Actionability | 5 | Copy-paste ready. |
-| **Q4 avg** | **4.75** | Clean searched-CASE + correct GROUP BY pattern. |
+**Verification:** `SELECT DISTINCT ON (cols)` does not exist in Trino 467. trino.io/docs/current/sql/select.html DISTINCT/ALL section: "If the argument DISTINCT is specified, only unique rows are included in the result set" — no DISTINCT ON. GitHub discussion #17261 confirms it is a frequently requested PostgreSQL extension that Trino does not implement; users are told to use ROW_NUMBER, GROUP BY+aggregation, or subqueries.
 
 ---
 
-## Overall dimension averages
+## Overall
 
-- Accuracy: (5+5+5+5)/4 = **5.00**
-- Completeness: (5+5+5+5)/4 = **5.00**
-- Clarity: (5+4+5+4)/4 = **4.50**
-- Actionability: (5+5+5+5)/4 = **5.00**
+**Per-Q average:** (2.75 + 5.00 + 4.875 + 3.50) / 4 = **16.125 / 4 = 4.03125**
+**Dim-avg cross-check:** Acc (2+5+5+3)/4=3.75, Comp (3+5+4.5+4)/4=4.125, Clar (4+5+5+4)/4=4.50, Act (2+5+5+3)/4=3.75 → (3.75+4.125+4.50+3.75)/4 = **4.03125** — agree.
 
-**Overall (dim-avg) = (5.00+5.00+4.50+5.00)/4 = 4.875**
+**VERDICT: PASS** (overall 4.03125 >= 3.5; overall-avg governs label per directive — no per-Q gate).
 
-Per-Q cross-check: (5.00+4.75+5.00+4.75)/4 = **4.875**
-
-Recorded headline: **4.8125** (conservative -0.0625 forward-looking durability note on minor "explicitly state the rule" pedagogical gaps in Q2/Q4 clarity).
-
-**GOVERNING LABEL = PASS** (overall avg 4.8125 >= 3.5; no per-Q gate override; all per-Q avgs >= 4.75).
+Q1 per-Q avg 2.75 is below 3.5 and is flagged as a **quality concern** (not a label override). It is the highest-impact thin-spot of the iter, since the inversion produces a confidently-wrong number an engineer would ship without realizing.
 
 ---
 
-## Topic avg updates
+## iter635 Directive
 
-- **SQL query best practices for OLAP / r23** (Q1 concat/format guardrail LANDED CLEAN +0.5; Q3 split_part + substr offset clean +0.25; Q4 searched-CASE bucket + GROUP-BY-repeat clean +0.25) — net UP, durability strengthened.
-- **Common analytical query patterns** (Q2 LAG + date_diff per-customer max-gap clean +0.25) — net UP.
-- **Federation** — NOT probed; 4.49944/310 row UNCHANGED.
+### FIX-A (PRIMARY — pick this one): PERCENT_RANK direction-under-DESC guardrail
+
+Q1 inverted PERCENT_RANK under `ORDER BY ... DESC` is the higher-impact defect (per-Q 2.75, "top N% of spenders" is a high-frequency analyst phrasing, and an inverted answer is silently wrong rather than parse-failing).
+
+**Action (reconcile-in-place, do NOT append/duplicate):**
+
+1. Locate the existing PERCENT_RANK canonical (per state.json notes this is at **r07:1841** as part of Pattern C3 — the PERCENT_RANK()>=0.9 exact-cutoff alternative). Add a direction-under-DESC guardrail block IMMEDIATELY at that landing point. Keyword-anchor it for findability: "top 10% by spend", "top 5% customers", "highest-revenue decile", "percent_rank descending", "percent_rank top vs bottom".
+
+2. Content of the guardrail (verbatim-grade, docs-cited):
+   - Restate the docs formula: `percent_rank() = (r - 1) / (n - 1)` (cite trino.io/docs/467/functions/window.html).
+   - Explicit direction table:
+     - `ORDER BY x ASC` → smallest x has rank 1, percent_rank 0.0; largest x has percent_rank 1.0. **Top 10% by x ⇒ `percent_rank >= 0.9`**.
+     - `ORDER BY x DESC` → largest x has rank 1, percent_rank 0.0; smallest x has percent_rank 1.0. **Top 10% by x ⇒ `percent_rank <= 0.1`**.
+   - One-line trap callout: "If you wrote `ORDER BY total_revenue DESC` AND `percent_rank >= 0.9`, you are selecting the BOTTOM 10% (smallest spenders), not the top — a classic silent-wrong bug."
+   - Equivalent NTILE form: `NTILE(10) OVER (ORDER BY x DESC)` → decile 1 is top, filter via outer wrapper `WHERE decile = 1` (cross-reference the existing NTILE-in-WHERE outer-wrap warning at r07 Pattern C3).
+   - Note PERCENT_RANK is a fraction-of-rank cutoff (~10% of distinct rank positions), slightly different from NTILE's count-balanced deciles; both are valid "top 10%" idioms.
+
+3. Cross-reference from the r23 share-of-grand-total canonical at r07:1068-1080 so the "top-10%-share-of-revenue" compose lands cleanly: top-N% filter (outer wrapper) → `SUM(x) / SUM(SUM(x)) OVER ()` or join to the grand-total.
+
+4. Do NOT rewrite the existing PERCENT_RANK / NTILE / share-of-grand-total canonicals — additive guardrail block only, reconcile-in-place.
+
+### FIX-B (SECONDARY — optional, lower impact): DISTINCT ON Postgres-leak inoculation
+
+Q4 secondary snippet was Postgres `SELECT DISTINCT ON (cols)`, which does not exist in Trino 467 (parse error). This is a clean inoculation target if there is bandwidth after FIX-A.
+
+**Action (reconcile-in-place, additive at r23 dialect-not-supported neighborhood):**
+
+1. Add a "Trino does NOT support `SELECT DISTINCT ON (cols)` (Postgres extension)" inoculation row at the existing r23 anti-pattern/dialect-not-supported list (where QUALIFY, RLIKE, PERCENTILE_CONT, MEDIAN, initcap, dayname, PIVOT inoculations already live).
+2. Verbatim trap: `-- INVALID Trino 467: SELECT DISTINCT ON (category) category, product_name FROM ...` → `-- VALID Trino 467: ROW_NUMBER() ... WHERE rn = 1` OR `max_by(product_name, total_sales) GROUP BY category`.
+3. Cite trino.io/docs/current/sql/select.html DISTINCT/ALL section + trinodb/trino discussion #17261.
+4. Keyword-anchor for findability: "DISTINCT ON", "tighter query", "top per group one-liner", "Postgres DISTINCT ON".
+5. Cross-reference r23 max_by canonical at r23:597-668 — this is the Trino-native one-liner the responder should have led with on Q4 (and is the cleanest top-1-per-group idiom).
+
+### Pick One
+
+**Per directive, pick the higher-impact: FIX-A (PERCENT_RANK direction-under-DESC).** Q1 per-Q 2.75 vs Q4 per-Q 3.50 → Q1 is the deeper thin-spot, and the inverted-percentile bug is the more dangerous slip (silent-wrong vs parse-error). If teacher has cycles, FIX-B as a clean low-effort inoculation alongside, but FIX-A is the iter635 PRIMARY.
+
+### DO NOT
+
+- Re-edit the LAST_VALUE IGNORE NULLS LOCF canonical (Q3 clean first-probe; r07:769 + r07:873 + r23:905-951 all routed).
+- Re-edit the GROUP BY + HAVING COUNT(*)>1 dup-detection canonical (Q2 clean first-probe; r28:215/238/260 + r27:2467 + r22:2467 + r13:5162 all routed).
+- Re-edit the ROW_NUMBER top-1-per-group canonical at r23 §3.1G or the existing PERCENT_RANK / NTILE / max_by canonicals — additive guardrail/inoculation only, reconcile-in-place.
+- Touch r22 §13.x federation guardrails (4.49944/310 thin, ZERO probe iter634).
+- Add `::`-casts (iter571 PIN); use EXTRACT(EPOCH FROM ...) (iter562 ban); QUALIFY; PERCENTILE_CONT/MEDIAN (iter611 ban); fabricate dayname()/initcap.
+- Touch iter534-633 locks.
+- Bump training/state.json (already 634).
+- git commit / git push (no-op per state.json directive for iter634, but the FIX-A edit in iter635 should follow the normal commit/push flow).
 
 ---
 
-## iter634 directive: DEFAULT NO-OP / durability-breadth
+## Meta-notes
 
-- All four per-Q avgs >= 4.75; no FIX-A required.
-- iter633 FIX-A concat/format guardrail validated on first probe — no rework needed.
-- All locks intact: r07 nearest-hour FLOOR canonical, r23 §3.1A format()/CAST canonical (incl. new sub-canonical at r23:427-491), r23 bool_or has-ever, r23 histogram, r23 approx_percentile/PERCENTILE_CONT inoculation, r07 LAG-MoM-delta, r07 quarter-cohort, r27/r28 procedural-rewrite guards.
-- **OPTIONAL low-risk additions** (durability-breadth, no canonical touched):
-  - r23 Q2-shape idiom — add one-line "subquery output columns ARE referenceable in outer WHERE (different SELECT level)" anchor to disambiguate from the same-level-alias-in-WHERE guard at r27 §4.2 (responder got it right but pedagogical clarity could be sharpened).
-  - r23 Q4-shape idiom — add one-line "Trino does NOT allow GROUP BY <output-alias>; either repeat the CASE expression OR define the bucket in a CTE so the outer GROUP BY references it as an input column OR use positional ordinal `GROUP BY 1`" anchor (responder showed both forms but did not state the rule explicitly).
-
-## DO NOT (iter634)
-
-- Touch r22 §13.x federation guardrails (4.49944/310 thin, ZERO probe iter633).
-- Re-edit the iter633 r23:427-491 concat/format sub-canonical (just validated this iter).
-- Re-edit iter534-632 locks.
-- Add `::` casts (iter571 PIN).
-- Add QUALIFY (iter629 ban), RLIKE (iter623 ban), PERCENTILE_CONT/MEDIAN (iter611 ban), EXTRACT(EPOCH) (iter562 ban).
-- Fabricate dayname()/initcap.
-- Bump training/state.json (per directive).
-- git commit/push beyond appending the one-line rubric score history entry.
-
----
-
-## Docs verified today (2026-06-07)
-
-- **trino.io/docs/467/functions/conversion.html**: `format(format, args...) -> varchar`, Java Formatter, `%d` for BIGINT, `%,.2f` for thousands+decimals, examples `format('%,.2f', 1234567.89)` -> `'1,234,567.89'`, `format('%03d', 8)` -> `'008'`, `format('%.5f', pi())` -> `'3.14159'`.
-- **trino.io/docs/467/functions/string.html**: `concat(string1, ..., stringN) -> varchar` (varchar-only), `\|\|` operator "performs concatenation" (same varchar-only rule), `split_part(string, delimiter, index)` 1-based + "If the index is larger than the number of fields, then null is returned", `substr(string, start) -> varchar` and `substr(string, start, length) -> varchar` both 1-based, `length(string) -> bigint`.
-- **trino.io/docs/467/functions/datetime.html**: `date_diff(unit, timestamp1, timestamp2) -> bigint`, positive when timestamp2 later, supports day/hour/minute/second/etc., example `date_diff('day', DATE '2020-03-01', DATE '2020-03-02')` returns `1`.
-- **trino.io/docs/467/functions/window.html**: `lag(x[, offset[, default_value]])`, default offset 1, returns NULL on first row of partition by default, requires window ORDER BY.
-- **trino.io/docs/467/sql/select.html**: GROUP BY "may contain any expression composed of input columns or it may be an ordinal number selecting an output column by position (starting at one)" — output aliases NOT in the list; positional ordinal IS allowed.
+- **Q1 PERCENT_RANK inversion** is the iter634 headline defect. The existing r07:1841 PERCENT_RANK alternative is mentioned in state.json as part of Pattern C3 but evidently does not carry an explicit direction-under-DESC guardrail — the responder routed to PERCENT_RANK and chose the wrong inequality. FIX-A is exactly the kind of additive in-place guardrail that has historically resolved similar direction/placement traps (cf. iter600 NTILE-in-WHERE outer-wrap, iter598 starts_with/ends_with inoculation).
+- **Q4 DISTINCT ON leak** is a new Postgres-dialect-leak class — the responder confidently produced invalid Trino syntax labeled as a "tighter query." Worth a dedicated inoculation row alongside the existing QUALIFY/RLIKE/PERCENTILE_CONT inoculations. Lower urgency than FIX-A because parse errors are loud (engineer notices immediately) vs silent-wrong inverted-percentile (engineer ships a bad KPI).
+- **Q2 + Q3** both clean first-probe, no changes needed.
+- No fabricated functions in any of the four answers; the slips were direction/dialect, not function-existence.
+- Federation row 4.49944/310 unchanged (NOT PROBED iter634).
