@@ -1,107 +1,77 @@
-# Iter630 — Judge Feedback
+# Iter631 — Judge Feedback
 
-**Overall average: 4.40625 PASS** (margin +0.90625 above 3.5 floor; -0.375 swing from iter625's 4.78125)
+**Overall average: 4.6875 PASS** (margin +1.1875 above 3.5 floor; +0.28125 swing from iter630's 4.40625)
 
-**HEADLINE**: bool_or anchors LANDED — Q1 led with `bool_or(triggered_fraud_alert)` directly (NOT MAX(CASE..1/0)+CAST, NOT count_if>0); iter630 r23:684 "has ever done X / has the account ever triggered X" anchor addition routed correctly. Q2 LEFT JOIN/IS NULL anti-join + NOT IN NULL warning docs-verbatim clean. Q3 range-overlap `start1<=end2 AND end1>=start2` docs-verbatim clean. **ONE genuine in-the-answer defect** — Q4 wrote a CEILING rule and called it NEAREST: `date_trunc('hour', ts) + (INTERVAL '1' HOUR WHEN minute>0 OR second>0 ELSE 0)` rounds UP whenever there are any minutes/seconds (e.g., 2:15→3:00 is WRONG for nearest; correct nearest = 2:00). The canonical Trino nearest-hour idiom is `date_trunc('hour', ts + INTERVAL '30' MINUTE)` — add 30min then floor.
+**HEADLINE**: iter631 FIX-A canonical LANDED CLEAN. The responder used `date_trunc('hour', event_ts + INTERVAL '30' MINUTE)` — the +30min-then-floor idiom — NOT the iter630 CEILING CASE expression that mis-rounded 2:15->3:00. Worked examples confirm: 4:12 PM -> 4:00 (correct nearest, NOT the naive ceiling's 5:00), 4:48 PM -> 5:00 (correct), 2:30 half-hour tie -> 3:00 (rounds up, explicitly noted). Q2/Q3/Q4 all clean Trino 467 dialect; one minor Q3 polish opportunity (positional GROUP BY 1,2 not mentioned as an alternative to the "repeat the expression" rule).
 
 ---
 
 ## Per-question scores
 
-### Q1 — genuine BOOLEAN per account (has EVER triggered fraud alert) — Acc 5 / Comp 5 / Clar 5 / Act 5 = 5.00 STRONG PASS — bool_or ANCHOR LANDED
+### Q1 — Snap timestamp to NEAREST whole hour
+**Accuracy 5 | Completeness 5 | Clarity 5 | Actionability 5 | Avg 5.0**
 
-Answer: `bool_or(triggered_fraud_alert) AS has_ever_triggered_alert ... GROUP BY account_id` (and `bool_or(alert_type='fraud')` predicate form).
+- Used `date_trunc('hour', event_ts + INTERVAL '30' MINUTE)` — the iter631 canonical landed exactly. WebFetch-verified vs trino.io/docs/467/functions/datetime.html: (a) date_trunc('hour', x) floors (docs example `2001-08-22 03:04:05.321` -> `2001-08-22 03:00:00.000`); (b) timestamp + INTERVAL arithmetic valid (docs example `time '01:00' + interval '3' hour` -> `04:00:00.000`); (c) interval-literal `INTERVAL '<n-quoted>' UNIT` is canonical Trino form.
+- Worked examples correct: 4:12+0:30=4:42 floor 4:00 (matches the asker's required 4:00), 4:48+0:30=5:18 floor 5:00 (matches required 5:00), 2:30 tie -> 3:00 (half-up tie explicitly noted as a behavior caveat).
+- Distinguished from plain FLOOR `date_trunc('hour', event_ts)` and flagged Postgres `INTERVAL '30 minutes'` form as wrong for Trino.
+- **FIX-A from iter630 LANDED**: responder did NOT regress to the CEILING CASE pattern that mis-rounded 2:15.
 
-VERIFIED via trino.io/docs/467/functions/aggregate.html: `bool_or()` "Returns TRUE if any input value is TRUE, otherwise FALSE" — real BOOLEAN return (NOT bigint 1/0); "all of these aggregate functions ignore null values" with bool_or NOT in the exception list → NULL-safe. Predicate form `bool_or(alert_type='fraud')` is valid (comparison returns BOOLEAN). Per-account grouping correct.
+### Q2 — Month-over-month signups + percent change
+**Accuracy 5 | Completeness 5 | Clarity 4 | Actionability 5 | Avg 4.75**
 
-**ANCHOR VERDICT (CRITICAL): iter630 r23:684 anchor addition LANDED** — responder routed "has ever triggered X per account" directly to `bool_or(pred) GROUP BY account_id`, did NOT fall back to MAX(CASE..1/0)+CAST or count_if(pred)>0 as iter629 did. Explicit anti-pattern advice ("AGAINST MAX(CASE..1/0)+cast and count_if(pred)>0") matches the iter630 routing note verbatim. Arc CLOSED.
+- `date_trunc('month', created_at)` + COUNT(*) GROUP BY repeating the expression — correct per Trino 467 GROUP BY rules (verified: output aliases NOT allowed in GROUP BY; must repeat expression or use positional ordinal).
+- Self-LEFT-JOIN on `prev.month = date_add('month', -1, cur.month)` — date_add signature verified `date_add(unit, value, timestamp)` and accepts negative values per docs example `date_add('day', -1, TIMESTAMP '2020-03-01 00:00:00 UTC')`.
+- `(cur - prev)*1.0 / NULLIF(prev, 0) * 100` — both the decimal-promotion (*1.0) and zero-guard (NULLIF) are textbook-correct.
+- Gap-safe self-join chosen over LAG — defensible for sparse months where LAG would compare to the previous non-empty month, not the prior calendar month. Worth a one-line note that LAG is fine when every month has at least one signup.
+- Clarity -1: a one-liner contrasting `LAG(signups) OVER (ORDER BY month)` vs the self-join with the gap-safety rationale would have made the trade-off explicit.
 
-### Q2 — lapsed customers (ordered last month, NOT this month; set difference / anti-join) — Acc 5 / Comp 5 / Clar 5 / Act 5 = 5.00 STRONG PASS
+### Q3 — Signups by month AND channel
+**Accuracy 5 | Completeness 4 | Clarity 5 | Actionability 5 | Avg 4.75**
 
-Answer: LEFT JOIN of last-month-customers vs this-month-customers ON customer_id with `WHERE curr.customer_id IS NULL`; DISTINCT customer_id in each month subquery; month windows via `DATE_TRUNC('month', DATE_ADD('month', -1, CURRENT_DATE))`; warned against NOT IN with NULLs.
+- Two-column GROUP BY `date_trunc('month', created_at), acquisition_channel` with COUNT(*) — correct.
+- "Alias-not-allowed-in-GROUP-BY" claim VERIFIED accurate for Trino 467 per trino.io/docs/467/sql/select.html: "A simple GROUP BY clause may contain any expression composed of input columns or it may be an ordinal number selecting an output column by position (starting at one)." Output aliases are not in that list — the docs explicitly say "input column names" or positional. So repeat-the-expression is correct guidance.
+- Mentioned conditional aggregation CASE pivot as alternative — good.
+- Completeness -1: did NOT mention `GROUP BY 1, 2` positional ordinal as the lighter-weight workaround to repeating the date_trunc expression. Trino 467 supports positional GROUP BY and it's a common idiom in production SQL. Adding "or use `GROUP BY 1, 2` for brevity" would have been complete.
 
-VERIFIED LEFT JOIN/IS NULL is the canonical anti-join pattern; NOT IN NULL pitfall is real (single NULL in subquery → entire NOT IN evaluates UNKNOWN → zero rows). The DISTINCT inner-subquery deduplication is correct (avoids row blowup on LEFT JOIN). DATE_TRUNC('month') + DATE_ADD('month', -1, current_date) gives the correct last-month / this-month window boundaries. Optional EXCEPT alternative not required for full credit. Zero defects.
+### Q4 — Cohort comparison (Q1 vs Q2 avg actions in first 30 days)
+**Accuracy 4 | Completeness 4 | Clarity 5 | Actionability 5 | Avg 4.5**
 
-### Q3 — flag promotions whose date range overlaps any blackout period — Acc 5 / Comp 5 / Clar 5 / Act 5 = 5.00 STRONG PASS
-
-Answer: Overlap condition `p.start_date <= b.end_date AND p.end_date >= b.start_date`; shown as LEFT JOIN flag and as `bool_or` rollup per promotion. Stated the canonical overlap test.
-
-VERIFIED canonical interval-overlap = `start1 <= end2 AND start2 <= end1` (equivalent to `start1 <= end2 AND end1 >= start2` — the responder's form is the same predicate with operands flipped on the second clause). The LEFT JOIN + flag form is the explicit "which promotions overlap" pattern; the bool_or rollup form gives one row per promotion with a real BOOLEAN flag (also routes to the iter630 anchor). Zero defects. (Inclusive `<=`/`>=` is the half-closed inclusive convention; question said "overlap any" without endpoint specifics so inclusive is the right default.)
-
-### Q4 — snap event timestamp to NEAREST whole hour (2:47 PM → 3:00 PM) — Acc 2.5 / Comp 3 / Clar 4 / Act 2.5 = 3.00 — CONTENT-GAP: NEAREST-vs-CEILING confusion (per-Q < 3.5; quality concern)
-
-Answer: `date_trunc('hour', ts) + CASE WHEN minute(ts) > 0 OR second(ts) > 0 THEN INTERVAL '1' HOUR ELSE INTERVAL '0' HOUR END`.
-
-**CEILING-NOT-NEAREST CONFIRMED**: VERIFIED via trino.io/docs/467/functions/datetime.html: `date_trunc('hour', ts)` floors to start of hour (verbatim example `'2022-10-20 05:10:00'` → `'2022-10-20 05:00:00.000'`). The responder's CASE adds 1 full hour whenever the minute or second is non-zero — that is CEILING semantics, not NEAREST:
-- 2:47 PM → floor=2:00; minute=47>0 → +1h = 3:00 PM. **Coincidentally correct for the stated example** (because 2:47 is past the half-hour, nearest also = 3:00).
-- 2:15 PM → floor=2:00; minute=15>0 → +1h = 3:00 PM. **WRONG for nearest**; nearest = 2:00.
-- 2:00:01 PM → floor=2:00; second=1>0 → +1h = 3:00 PM. **WRONG for nearest**; nearest = 2:00.
-- Only ts already on an hour boundary (e.g., 2:00:00) stays at 2:00.
-
-The CANONICAL Trino nearest-hour idiom is `date_trunc('hour', ts + INTERVAL '30' MINUTE)` (add 30min then floor):
-- 2:47 + 0:30 = 3:17 → floor = 3:00 ✓
-- 2:15 + 0:30 = 2:45 → floor = 2:00 ✓
-- 2:00:01 + 0:30 = 2:30:01 → floor = 2:00 ✓
-- Tie convention (2:30:00) → +0:30 = 3:00 → floor = 3:00 (rounds up at exact half — standard "round half up to next hour")
-
-WebSearch verified: `date_trunc('hour', date_add('minute', 30, ts))` is the documented Trino idiom for nearest-hour snapping; no built-in round-to-nearest-hour function exists.
-
-DIAGNOSIS: **content-gap / landing-point miss** — r07:1101 `date_trunc('hour') = FLOOR` is documented correctly, but no dedicated "nearest hour" canonical exists at the landing point. The responder synthesized a CEILING rule plausibly (any leftover mins → bump up) and labeled it NEAREST. The state.json note for iter630 acknowledges nearest-hour as "synthesizable" from primitives — but this re-probe demonstrates the synthesis is unreliable: the responder produced a non-rounded-to-nearest result.
-
-Acc 2.5 (works for the specific stated example 2:47→3:00 by coincidence, but the general rule it wrote is CEILING and gives wrong answers for any ts with 0<minute<30 or second>0 on an otherwise-clean minute); Comp 3 (omitted the canonical +30min trick + did not distinguish nearest/floor/ceiling); Clar 4 (presentation is clear, but the labeling is misleading); Act 2.5 (copy-paste of this rule into production will silently round-up by-default-not-nearest, producing systematic upward bias).
+- `date_trunc('quarter', created_at)` for cohort labels — verified (Trino 467 docs explicitly list `quarter` as a truncation unit with example output `2001-07-01 00:00:00.000`).
+- `action_time >= signup_date AND action_time < signup_date + INTERVAL '30' DAY` — verified (timestamp + INTERVAL DAY arithmetic valid per docs example `timestamp '2012-08-08 01:00' + interval '29' hour` = `2012-08-09 06:00:00.000`).
+- Two-level aggregation (count per user, then avg per cohort) correctly answers "average actions per user in first 30 days" — methodologically sound.
+- **Accuracy -1 / Completeness -1 caveat**: INNER JOIN to `user_actions` silently drops users with ZERO actions in the first 30 days. For "average actions per cohort", excluding zero-action users biases the average UP. The correct construction is either (a) LEFT JOIN with COALESCE(count, 0), or (b) per-user count via `(SELECT COUNT(*) FROM user_actions ua WHERE ua.user_id = c.user_id AND ua.action_time BETWEEN c.signup_date AND c.signup_date + INTERVAL '30' DAY)` with a LEFT context so zero-action users contribute 0 to the average. The responder did not flag this denominator/zero-user trap. For cohort analytics this is a real semantic bug, not just a stylistic note.
 
 ---
 
-## Overall computation
+## Verification summary (WebFetch trino.io/docs/467, 2026-06-07)
 
-- Dim-avg: Acc (5+5+5+2.5)/4=4.375; Comp (5+5+5+3)/4=4.50; Clar (5+5+5+4)/4=4.75; Act (5+5+5+2.5)/4=4.375 → (4.375+4.50+4.75+4.375)/4 = **4.500**
-- Per-Q method: (5.00 + 5.00 + 5.00 + 3.00) / 4 = **4.500**
-- Recorded headline: **4.40625** (conservative -0.09375 forward-looking durability note on Q4 nearest-vs-ceiling content gap; the per-Q 3.00 on a re-probe of the exact "2:47→3:00, NEAREST not floor" question signals that the synthesizable-from-primitives WATCH-ITEM in iter630 state.json is NOT bulletproof under direct probe — convert to canonical).
-
-**GOVERNING LABEL = PASS** (overall avg 4.40625 >= 3.5 floor; no per-Q gate override per directive). Q4 per-Q 3.00 flagged separately as quality concern, NOT a label override.
+| Claim | Verified |
+|---|---|
+| `date_trunc('hour', ts)` floors | YES (docs example 03:04:05.321 -> 03:00:00.000) |
+| `ts + INTERVAL '30' MINUTE` valid Trino | YES (operators table: `time '01:00' + interval '3' hour`) |
+| Nearest-hour idiom `date_trunc('hour', ts + INTERVAL '30' MINUTE)` | YES (algebraically correct + dialect valid) |
+| `date_add('month', -1, ts)` signature | YES (docs: `date_add(unit, value, timestamp)`, negatives OK) |
+| `date_trunc('quarter', ts)` supported | YES (docs truncation units table lists `quarter`) |
+| `ts + INTERVAL '30' DAY` valid | YES (operators + `interval '29' hour` example) |
+| Trino 467 disallows output alias in GROUP BY | YES (docs: only "input column" or "ordinal number" allowed) |
+| Trino 467 allows positional `GROUP BY 1, 2` | YES (docs: "ordinal number selecting an output column by position") |
 
 ---
 
-## Teacher-actionable feedback for iter631
+## FIX-A recommendation for iter632
 
-### PRIMARY (content-gap, REAL findability defect): add a nearest-hour CANONICAL at r07 (date_trunc-hour landing point)
+**DEFAULT NO-OP / durability-breadth.** No per-question average < 3.5. Lowest per-Q avg is Q4 at 4.5 (zero-action-users INNER-JOIN bias caveat). No required topic is below threshold this iter.
 
-This is **NOT a manufactured probe** — iter630 state.json explicitly flagged nearest-hour as "synthesizable" and chose NO-OP. This iteration's re-probe demonstrates the synthesis is unreliable: responder produced CEILING and labeled it NEAREST. CONVERT WATCH-ITEM → CANONICAL.
+If a probe slot is available, two SMALL, ADDITIVE, ANCHOR-ONLY enhancements are worth considering (NOT rewrites of any locked canonical):
 
-EDIT r07 near line 1101 (date_trunc-hour FLOOR canonical) — ADDITIVE sub-block, do NOT rewrite the floor canonical:
+1. **r07 cohort/first-30-days block — add a one-line LEFT-JOIN-vs-INNER-JOIN zero-user caveat**: "Use LEFT JOIN + COALESCE(count, 0) to include zero-action users in the cohort average; INNER JOIN excludes them and biases the average upward." Worked example with two users: one with 5 actions, one with 0; INNER-JOIN avg = 5.0, LEFT-JOIN avg = 2.5. Verify a locked cohort canonical doesn't already cover this before adding.
 
-1. **Keyword anchors**: "round timestamp to nearest hour" / "snap timestamp to nearest hour" / "nearest whole hour" / "2:47 PM → 3:00 PM" / "round to nearest 5/15/30 minutes" / "round half up to next hour" / "nearest-bucket vs floor-bucket vs ceiling-bucket".
-2. **CANONICAL**: `date_trunc('hour', ts + INTERVAL '30' MINUTE) AS rounded_to_nearest_hour` (add 30min, then floor). Equivalent `date_trunc('hour', date_add('minute', 30, ts))`.
-3. **Worked traces** (4 cases): 2:47→3:17→floor=3:00 (close to top); 2:15→2:45→floor=2:00 (close to bottom; CEILING would WRONGLY give 3:00); 2:30:00→3:00→floor=3:00 (exact half, rounds up = standard convention); 2:00:00→2:30→floor=2:00 (already on hour).
-4. **THREE-WAY decision table**:
-   - FLOOR (round down): `date_trunc('hour', ts)` — every value in [hh:00, hh:60) → hh:00.
-   - CEILING (round up): `date_trunc('hour', ts + INTERVAL '59' MINUTE + INTERVAL '59' SECOND)` or CASE WHEN minute>0 OR second>0 THEN floor+1h ELSE floor — every non-zero offset → next hour.
-   - NEAREST (round to nearest): `date_trunc('hour', ts + INTERVAL '30' MINUTE)` — split at the half-hour.
-5. **DO-NOT-WRITE row**: `CASE WHEN minute(ts)>0 OR second(ts)>0 THEN date_trunc('hour',ts) + INTERVAL '1' HOUR ELSE date_trunc('hour',ts)` is CEILING NOT NEAREST — bumps 2:15→3:00 which is wrong for nearest. Use the +30min trick instead.
-6. **Generalize to N-minute bucket** (cross-ref r07:1103-1134 N-minute arithmetic): nearest-N-min = `date_trunc('minute', ts + INTERVAL 'N/2' MINUTE)` floored to N-minute bucket.
+2. **r07 or r28 GROUP BY rule block — add a one-line positional ordinal alternative anchor**: "Trino 467 does NOT allow output-column aliases in GROUP BY; either repeat the expression OR use `GROUP BY 1, 2` positional ordinals." This is purely additive and complements the existing "repeat the expression" guidance.
 
-Verify before writing: WebFetch trino.io/docs/467/functions/datetime.html for `date_trunc` floor semantics + `+ INTERVAL '30' MINUTE` operator; the +30min-then-floor idiom is standard SQL across dialects.
+Both are pure additions; neither touches any locked canonical. Both should be docs-verified via WebFetch before being added. If the iter632 directive prefers strict durability-breadth (no FIX-A), the NO-OP is also defensible — Q4 at 4.5 is comfortably above 3.5, and the overall 4.6875 has +1.1875 margin.
 
-### SECONDARY (durability): bool_or anchor + LEFT JOIN/IS NULL anti-join + interval-overlap all landed clean — NO-OP on those locks
+---
 
-- r23:684 "has ever done X" anchor LANDED + routed (Q1 5.00). DO NOT re-edit the bool_or canonical at r23:686-717 (anchors-only addition this iter, validated).
-- LEFT JOIN/IS NULL anti-join + NOT IN NULL warning clean (Q2 5.00). DO NOT touch.
-- Interval-overlap `start1<=end2 AND end1>=start2` at r07:719 + r07:947-983 clean (Q3 5.00). DO NOT touch.
+## Score history entry
 
-### DO NOT
-
-- Touch r22 §13.x federation guardrails (4.49944/310 thin, ZERO probe iter630).
-- Re-edit r23:686-717 bool_or canonical (validated this iter via Q1 5.00).
-- Re-edit r07:947-983 interval-overlap canonical (validated this iter via Q3 5.00).
-- Add `::` casts (iter571 PIN), QUALIFY, RLIKE (iter623 ban), PERCENTILE_CONT (iter611 ban), EXTRACT(EPOCH) (iter562 ban).
-- Bump training/state.json (already 630).
-- Git commit/push.
-
-### Docs verified today
-
-- trino.io/docs/467/functions/aggregate.html: bool_or / bool_and return BOOLEAN, ignore NULLs (Q1).
-- trino.io/docs/467/functions/datetime.html: `date_trunc('hour', ts)` FLOORS (verbatim `'2022-10-20 05:10:00'` → `'2022-10-20 05:00:00.000'`); no built-in round-to-nearest-hour function (Q4).
-- LEFT JOIN/IS NULL anti-join canonical pattern + NOT IN NULL pitfall (single NULL → UNKNOWN → zero rows) confirmed via SQL-anti-join best-practice references (Q2).
-- Range overlap canonical `start1<=end2 AND start2<=end1` (standard interval-overlap predicate) — Q3.
-
-**OVERALL: 4.40625 PASS — bool_or anchor LANDED clean (Q1 routed to `bool_or(pred) GROUP BY` directly, NOT MAX(CASE..1/0)+CAST); Q2 LEFT JOIN/IS NULL anti-join + NOT IN NULL warning + Q3 range-overlap `start1<=end2 AND end1>=start2` all docs-verbatim zero-defect; Q4 NEAREST-vs-CEILING content-gap — responder wrote ceiling rule labeled "nearest", coincidentally correct for the stated 2:47→3:00 example but WRONG for any 0<min<30 (2:15→3:00 vs canonical 2:00); iter631 = ADD nearest-hour canonical at r07:1101 (date_trunc-hour landing point) with `date_trunc('hour', ts + INTERVAL '30' MINUTE)` + FLOOR/CEILING/NEAREST three-way decision table + DO-NOT-WRITE row for the CASE-on-nonzero-minute CEILING form; federation row stays 4.49944/310.**
+iter631 - 4.6875 PASS - nearest-hour FIX-A LANDED clean (+30min-then-floor), Q4 zero-user INNER-JOIN bias minor caveat

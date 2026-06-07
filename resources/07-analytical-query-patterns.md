@@ -1100,6 +1100,40 @@ FROM iceberg.analytics.product_sales;
 
 `date_trunc('day' | 'week' | 'month', col)` is the Trino function you'll use constantly. It rounds a timestamp down to the start of a bucket. **Return type — same as input** (per [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html): `date_trunc(unit, x) -> [same as input]`): `timestamp -> timestamp`, `timestamp(p) with time zone -> timestamp(p) with time zone`, `date -> date`, `time -> time`. It does **NOT** convert to DATE — `date_trunc('day', some_timestamp)` returns a `timestamp` at midnight, not a `date`. If you need the result as a DATE, wrap in `CAST(... AS DATE)` explicitly.
 
+#### LEADING CANONICAL — round / snap a timestamp to the NEAREST hour (FLOOR vs NEAREST vs CEILING — three distinct idioms, do NOT confuse) (iter631 PIN)
+
+> **Keyword anchors (READ THIS FIRST if your question contains any of these):** round a timestamp to the nearest hour · snap a timestamp to the nearest hour · nearest whole hour · closest hour boundary · round to the nearest hour not just cut off the minutes · snap event time to the closest whole hour for an hourly chart · 4:12 -> 4:00 · 4:48 -> 5:00 · round to nearest hour Trino · which hour is closer · nearest-hour rounding · half-up to nearest hour · round timestamp to closest hour bucket.
+
+> **The pitfall in one sentence.** "Round to the nearest hour" is **NOT** the same as `date_trunc('hour', ts)` (which FLOORS — always drops the minutes), and it is **NOT** the same as "round UP to the next hour" (which CEILINGS — always pushes forward when not on the hour). NEAREST chooses whichever hour boundary (previous or next) is closer to `ts`: `4:12 -> 4:00`, `4:48 -> 5:00`, `2:30:00 -> 3:00` (the half-hour tie rounds UP because `add-30-min then floor` lands on the next hour). Picking the wrong one silently corrupts hourly charts: a 2:15 event lands on 3:00 instead of 2:00.
+
+> **The three idioms — pick the one that matches the question:**
+>
+> | Idiom | Trino 467 expression | Behavior — examples |
+> |---|---|---|
+> | **FLOOR** (drop the minutes; round DOWN to start of hour) | `date_trunc('hour', ts)` — see the existing FLOOR canonical immediately above. | `2:47 -> 2:00`; `2:15 -> 2:00`; `2:00 -> 2:00`. |
+> | **NEAREST** (snap to the closer hour boundary — what people usually mean by "round to the nearest hour") | `date_trunc('hour', ts + INTERVAL '30' MINUTE)` | `2:47 -> 3:00` (`2:47 + 0:30 = 3:17`, floors to `3:00`); `2:15 -> 2:00` (`2:15 + 0:30 = 2:45`, floors to `2:00`); `4:12 -> 4:00`; `4:48 -> 5:00`; `3:00:00 -> 3:00` (on-the-hour input is unchanged); `2:30:00 -> 3:00` (half-hour tie rounds UP). |
+> | **CEILING** (round UP to the next hour — use ONLY when the question explicitly says "round up") | `date_trunc('hour', ts - INTERVAL '1' SECOND) + INTERVAL '1' HOUR` | `2:47 -> 3:00`; `2:15 -> 3:00`; `2:00:00 -> 2:00` (exact-on-the-hour stays on the hour — `ts - 1s = 1:59:59`, floors to `1:00`, plus 1 hour = `2:00`). Sub-second precision: if `ts` can carry milliseconds (e.g. `2:00:00.500`), you may need `INTERVAL '1' MILLISECOND` instead of `INTERVAL '1' SECOND` to keep exact-on-the-hour values pinned. |
+
+> **NEAREST — one fact + worked SQL.** Add 30 minutes, then floor to the hour: an event that is **MORE THAN** 30 minutes past the previous hour gets pushed into the next hour by the `+30` shift; an event that is **LESS THAN** 30 minutes past the previous hour does NOT cross the next hour boundary even after the shift, so it stays floored at the previous hour.
+>
+> ```sql
+> SELECT date_trunc('hour', event_ts + INTERVAL '30' MINUTE) AS nearest_hour_bucket,
+>        COUNT(*) AS events
+> FROM iceberg.analytics.user_events
+> WHERE event_ts >= current_timestamp - INTERVAL '1' DAY
+> GROUP BY date_trunc('hour', event_ts + INTERVAL '30' MINUTE)
+> ORDER BY nearest_hour_bucket;
+> ```
+> **Why this works (verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html)):** (a) `date_trunc('hour', x)` floors to the start of the hour (docs example: `2001-08-22 03:04:05.321` truncates to `2001-08-22 03:00:00.000`); (b) `timestamp + INTERVAL '30' MINUTE` is valid timestamp + interval arithmetic — the docs operator examples confirm this pattern (`timestamp '2012-08-08 01:00' + interval '29' hour` returns `2012-08-09 06:00:00.000`); (c) Trino interval-literal syntax is **`INTERVAL '<number-as-string-literal>' <UNIT-keyword>`** — the number is SINGLE-QUOTED, the unit is an unquoted keyword. **DO NOT** write Postgres-style `INTERVAL '30 minutes'` (number AND unit inside one string) — that is a parse error in Trino 467.
+
+> **CRITICAL — DO NOT WRITE (the iter630 ceiling trap, banned for NEAREST):**
+>
+> | Form | Why it's wrong for NEAREST |
+> |---|---|
+> | `date_trunc('hour', ts) + CASE WHEN minute(ts) > 0 OR second(ts) > 0 THEN INTERVAL '1' HOUR ELSE INTERVAL '0' HOUR END` | **WRONG for NEAREST — this is CEILING / round-UP.** It pushes EVERY off-the-hour timestamp into the NEXT hour regardless of whether the previous hour is closer. **Mis-rounds `2:15 -> 3:00` (NEAREST is `2:00`, because 2:15 is only 15 min past 2:00 and 45 min before 3:00).** Mis-rounds `4:12 -> 5:00` (NEAREST is `4:00`). The CASE form only happens to be correct when the input is already past the half-hour mark (e.g. `2:47 -> 3:00`); for any input in the first half of an hour it gives the wrong bucket. If you really want round-UP, label it CEILING (third row of the table above) and use the documented `+ INTERVAL '1' HOUR` form; for NEAREST, **always** use the `date_trunc('hour', ts + INTERVAL '30' MINUTE)` add-30-then-floor form. |
+
+> **Cross-references.** FLOOR canonical = the `date_trunc('hour', col)` paragraph immediately above this block (returns same type as input — drops minutes/seconds, does not round). N-minute (5 / 10 / 15 / 30) sub-hour bucketing — see the LEADING CANONICAL immediately BELOW (`date_trunc` has no sub-hour custom unit; floor-to-hour + add-integer-N-minute-steps arithmetic). The interval-literal syntax pin (`INTERVAL '30' MINUTE` not `INTERVAL '30 minutes'`) is the same form used everywhere in this file's date arithmetic; the `date_add('minute', n, ts)` function form (see the `date_add` block further down) accepts a column/variable n where INTERVAL needs a literal — but for the fixed-30 NEAREST recipe, the `+ INTERVAL '30' MINUTE` literal form is the most readable.
+
 #### LEADING CANONICAL — N-minute (5 / 10 / 15 / 30-minute) timestamp buckets — `date_trunc` has NO sub-hour custom unit, use arithmetic (iter606 PIN)
 
 > **Keyword anchors (READ THIS FIRST if your question contains any of these):** 5-minute buckets · 10-minute buckets · 15-minute windows · 30-minute buckets · N-minute buckets · bucket timestamps into X-minute windows · group events every 5 minutes · finer than hourly · sub-hour time buckets · truncate timestamp to 15 minutes · floor timestamp to nearest 5 minutes.
