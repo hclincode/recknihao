@@ -1094,6 +1094,81 @@ FROM iceberg.analytics.product_sales;
 - **Guard against divide-by-zero:** if the total can be 0 (all rows zero / filtered to nothing), wrap the denominator in `NULLIF(SUM(x) OVER (), 0)` so the result is `NULL` instead of an error.
 - **Do NOT collapse with `GROUP BY` to get the denominator** and then re-join — the empty-`OVER ()` window computes the grand total inline while keeping every detail row, no self-join needed. (For the grand-total/subtotal ROLLUP report shape — one explicit total ROW, not a per-row percent — see [resource 28 § GROUPING SETS / ROLLUP / CUBE](28-complex-sql-performance-trino-dbt.md) instead.)
 
+##### LEADING CANONICAL — share of a SUBSET over the GRAND TOTAL (final-assembly form — single-pass conditional-SUM / FILTER, no CTE cross-join) (iter636 PIN — FIX-A: subset-share final-assembly column-scope bug)
+
+> **Keyword anchors (READ THIS FIRST if your question contains any of these):** what share of revenue comes from the top quintile · what percent of total revenue comes from the top decile · top 20% revenue as a fraction of all revenue · subset sum over grand total · ratio of a filtered sum to the overall sum · what fraction of total X are Y · percent of total from a subset · share of revenue from the top X% / top N customers / top quintile / top decile / top quartile · how much of total revenue do the top spenders account for · subset/total revenue ratio · share of total contributed by a flagged subset · final assembly of share-from-subset · top_20_revenue / total_revenue.
+
+> **The one-fact summary.** When the question is "**what percent of the TOTAL `X` comes from a SUBSET of the rows** (e.g. top quintile, top decile, churned users, flagged accounts)?", the answer is a single ratio: `SUM(x) over the subset` ÷ `SUM(x) over ALL rows`. The cleanest Trino 467 form is a **single-pass aggregation with TWO aggregates over the SAME row set** — one conditional, one unconditional — in ONE `SELECT`. No CTE, no cross-join, no scope-bug risk.
+
+> **THE CANONICAL — single-pass conditional-SUM (preferred, one query, one scan):**
+> ```sql
+> -- "What percent of total revenue comes from the top spend quintile?"
+> -- ranked_customers has columns: customer_id, total_spend, spend_quintile  (1 = top, 5 = bottom)
+> SELECT
+>   SUM(CASE WHEN spend_quintile = 1 THEN total_spend ELSE 0 END) * 100.0 / SUM(total_spend) AS pct_from_top_20
+> FROM ranked_customers;
+> ```
+> **Why this is correct (verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html)):** Trino supports multiple aggregate functions in a single `SELECT` over the same row set — the conditional `SUM(CASE WHEN ...)` computes the subset sum (numerator) while the bare `SUM(total_spend)` computes the grand total (denominator), both in one pass over `ranked_customers`. No outer CTE, no scope confusion: `total_spend` is in scope here because it is a base column of the **only** table in the FROM list. The `100.0` (DECIMAL literal) forces decimal division, dodging the integer-division-truncates-to-0 trap.
+
+> **EQUIVALENT — FILTER form (Trino 467 aggregate FILTER clause, same semantics, often more readable):**
+> ```sql
+> SELECT
+>   SUM(total_spend) FILTER (WHERE spend_quintile = 1) * 100.0 / SUM(total_spend) AS pct_from_top_20
+> FROM ranked_customers;
+> ```
+> Verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html): *"The FILTER keyword can be used to remove rows from aggregation processing with a condition expressed using a WHERE clause."* `SUM(x) FILTER (WHERE cond)` aggregates only rows where `cond` is true; the parallel bare `SUM(x)` still aggregates ALL rows. Pick whichever reads cleaner — conditional `CASE` shows the bucket logic inline; `FILTER` reads more like the English question.
+
+> **WORKED FULL-PIPELINE (with NTILE direction guardrail — see the PERCENT_RANK / NTILE direction guardrail card at line 1794 of this file).** This is the typical "share of revenue from the top quintile" pipeline end-to-end:
+> ```sql
+> WITH ranked_customers AS (
+>   SELECT
+>     customer_id,
+>     total_spend,
+>     NTILE(5) OVER (ORDER BY total_spend DESC) AS spend_quintile  -- DESC → bucket 1 = TOP spenders
+>   FROM iceberg.analytics.customer_revenue
+> )
+> SELECT
+>   SUM(total_spend) FILTER (WHERE spend_quintile = 1) * 100.0 / SUM(total_spend) AS pct_from_top_20
+> FROM ranked_customers;
+> ```
+> One CTE, one final SELECT, two aggregates over the same rows — no cross-join, no aliasing trap.
+
+> **CRITICAL — DO NOT WRITE (the iter635 column-scope bug — re-aggregating a base column that the CTE/subquery did not project):**
+>
+> | Form | Why it's wrong |
+> |---|---|
+> | `WITH top_quintile AS (SELECT SUM(total_spend) AS top_20_revenue FROM ranked_customers WHERE spend_quintile = 1) SELECT ROUND(100.0 * top_20_revenue / SUM(total_spend), 2) FROM top_quintile, (SELECT SUM(total_spend) AS total FROM ranked_customers)` | **WRONG — column-resolution error in Trino.** The outer SELECT references `SUM(total_spend)`, but at the outer level **only the projected ALIASES are in scope**: `top_20_revenue` (from the `top_quintile` CTE) and `total` (from the inline subquery). The base column `total_spend` is **NOT visible** at the outer level — neither the CTE nor the inline subquery projects it; both projected only the aggregated alias. Trino raises a column-not-found error at planning time. **The fix is one of two forms:** (a) reference the projected aliases — `100.0 * top_20_revenue / total` (NOT `100.0 * top_20_revenue / SUM(total_spend)`); or (b) **better**, collapse the whole assembly into the single-pass conditional-SUM / FILTER form above — one aggregation, no CTE/cross-join, no scope to get wrong. |
+>
+> **The general scope rule (universal SQL semantics):** a CTE or subquery in the FROM list exposes to the outer query **only the columns it projects** (the `SELECT` list). Base columns of the underlying tables are NOT carried through — once you aggregate to a single alias, only that alias is visible above. So `SUM(total_spend)` written at the outer level only works if `total_spend` is a column of a table or subquery in the **outer** FROM list — not just a base column buried inside a subquery's source.
+
+> **If you DO split into CTEs (CTE-style assembly — correct form):**
+> ```sql
+> WITH ranked_customers AS (
+>   SELECT customer_id, total_spend, NTILE(5) OVER (ORDER BY total_spend DESC) AS spend_quintile
+>   FROM iceberg.analytics.customer_revenue
+> ),
+> totals AS (
+>   SELECT
+>     SUM(CASE WHEN spend_quintile = 1 THEN total_spend ELSE 0 END) AS top_20_revenue,
+>     SUM(total_spend) AS grand_total
+>   FROM ranked_customers
+> )
+> SELECT ROUND(100.0 * top_20_revenue / grand_total, 2) AS pct_from_top_20
+> FROM totals;
+> ```
+> **Both** the numerator and the denominator are projected by the `totals` CTE — the outer SELECT references the projected aliases `top_20_revenue` and `grand_total`. No re-aggregation of base columns at the outer level, no scope error. (And note: the single-pass form earlier is shorter still; prefer it.)
+
+> **SELECTION CHEAT-SHEET — which subset-share form to write:**
+>
+> | Shape of the question | Preferred Trino 467 form |
+> |---|---|
+> | "What percent of total X comes from a single subset (top quintile / flagged / churned)?" — **one scalar answer** | Single-pass: `SUM(x) FILTER (WHERE subset_pred) * 100.0 / SUM(x)` (or the `CASE` equivalent) — ONE row out, ONE scan. |
+> | "What percent of total X does EACH bucket contribute?" — **one row per bucket** | `SELECT bucket, SUM(x) * 100.0 / SUM(SUM(x)) OVER () FROM t GROUP BY bucket` — see the per-group share card just above. |
+> | "Show every customer with their % of total" — **rows preserved** | `SUM(x) OVER ()` window form (see the share-of-grand-total card just above — empty `OVER ()` keeps detail rows). |
+> | "Both the per-bucket totals AND a grand-total row in one report" | `GROUPING SETS / ROLLUP / CUBE` — see [resource 28 § GROUPING SETS / ROLLUP / CUBE](28-complex-sql-performance-trino-dbt.md). |
+
+> **Cross-references.** Direction-of-NTILE guardrail (which bucket is "top"?) — see the PERCENT_RANK / NTILE direction guardrail at r07 line 1794 (bucket 1 under DESC = top, bucket 1 under ASC = bottom). Integer-division trap (`100 *` vs `100.0 *`) — see [resource 23 §3 integer-division trap](23-sql-best-practices-olap.md) and the bullet just above on this card. Divide-by-zero guard — wrap the denominator in `NULLIF(SUM(x), 0)` if the table can be empty. Per-row share (every detail row tagged with its % of total) — use the `SUM(x) OVER ()` empty-window form on the card just above, NOT this final-assembly form (which collapses to a single scalar).
+
 **Perf note (alternative for very large interval tables — boundary-event cumulative form).** When the intervals table is enormous and the calendar × intervals cross-product is too big, switch to the boundary-event form: emit `+1` at each `start` and `-1` at each `end` as separate rows on the EVENT day, then a running `SUM(delta) OVER (ORDER BY event_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` over the event-day union gives the concurrently-active count without ever materializing a (day × interval) join. This scales linearly in (# intervals) rather than (# days × # intervals). Use it as a perf alternative; the range-join form above is correct and clear for typical SaaS sizes — don't over-engineer.
 
 **Cross-references.** Reuse the bounds-CTE + `sequence()` + `CROSS JOIN UNNEST` spine from the COMBINED CANONICAL composition card above (same dynamic-bounds spine, different downstream operation: instead of LEFT JOIN + forward-fill, do INNER JOIN with interval-overlap predicate). The "WHEN to use INNER vs LEFT" rule comes from § 1a.5 — INNER drops days/plans with zero active intervals; LEFT JOIN + `COALESCE(active_count, 0)` keeps a row for every `(day, plan)` even when zero. The range-join + inequality predicate uses no special Trino syntax — it is a plain INNER JOIN with inequality predicates in the ON clause, fully supported in Trino 467 (the planner recognizes range/inequality joins and applies sort-merge or nested-loop strategies; see the Trino window-functions / select docs for the underlying join grammar).
