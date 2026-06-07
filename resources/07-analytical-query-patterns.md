@@ -1712,6 +1712,15 @@ WHERE day >= DATE '2026-01-01';
 
 > **Read this BEFORE writing any "year-over-year", "YoY", "same month last year", "month over month", "MoM", "compare to last year", "growth vs last year", or "period over period" SQL on Trino + Iceberg.** `LAG` is the right tool, but the **offset** matters and silently produces the wrong metric if you pick the default.
 
+> **DECIDE-FIRST SIGNPOST (iter640 FIX-A — pick the right shape BEFORE writing).** Two questions look similar in English but want different SQL:
+>
+> | The question is really asking... | Shape | Where to land |
+> |---|---|---|
+> | Compare **EACH month** to the **same month a year earlier** — produce a per-month series (`one row per (entity, month)` with `same_month_last_year` next to `current_month`). E.g. "monthly trend with YoY column." | LAG(12) over a gap-filled monthly series, OR self-join `cur.month = prev.month + INTERVAL '12' MONTH` | **FORM A / FORM B below** (this canonical, lines 1737-1850). |
+> | Compare **this period's TOTAL vs last period's TOTAL** as ONE ratio per entity (one row per entity — e.g. "this YEAR's total revenue / last YEAR's total revenue per product", "this QUARTER's total vs last QUARTER's total per region"). The output is **one row per entity, NOT a per-month time series**. | **Conditional-SUM-by-period in ONE `GROUP BY` pass** — `SUM(amount) FILTER (WHERE year(d) = year(current_date)) / NULLIF(SUM(amount) FILTER (WHERE year(d) = year(current_date) - 1), 0)` | **Period-total ratio canonical** immediately below Pattern B2 (added iter640 — see "Sub-canonical: PERIOD-TOTAL YoY / this-period-vs-last-period ratio"). |
+>
+> If you write a per-month LAG(12) series and then filter to the current month, you are answering a DIFFERENT question (a single month's value vs same month last year — not the full year's total vs last year's total). Use the period-total form below for "TOTAL ÷ TOTAL" ratio questions.
+
 **Core fact (verified at [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html)):** `lag(x[, offset[, default_value]])` "Returns the value at `offset` rows before the current row in the window partition." **The default offset is `1`** — one row back, NOT one year back, NOT one month back. The offset is **rows**, not calendar periods, so the right number depends on (a) what your bucket granularity is and (b) whether the series is gap-filled per partition key.
 
 #### LAG offset mapping — pick the offset by intent AND bucket grain
@@ -1849,6 +1858,111 @@ ORDER BY customer_id;
 The phrases you would type into a search bar for this pattern: **year over year**, **YoY**, **same month last year**, **year-over-year growth**, **compare to last year**, **growth vs last year**, **monthly trend year ago**, **month over month**, **MoM**, **previous month**, **period over period**, **period-over-period growth**, **LAG window function**, **LAG 12 months**, **LAG offset 12**, **same period last year**, **same period prior year**, **prior year comparison**, **prior-year-over-year**.
 
 > **Cross-reference:** for the broader "monthly bucketed running total + GROUP BY rules anchor" pattern (which the YoY queries above also obey), see §5 Pattern A2 — Bucketed running total. The GROUP BY rule "**REPEAT the expression, do NOT use the alias**" applies here too. For YoY in a dbt incremental model (where YoY is computed inside `{% if is_incremental() %}` and the gap-fill spine is generated relative to a watermark), see [resource 27](27-oracle-plsql-to-dbt-trino.md) and [resource 28](28-complex-sql-performance-trino-dbt.md).
+
+#### Sub-canonical — PERIOD-TOTAL YoY / this-period-vs-last-period RATIO (one ratio per entity from two period totals — NOT a per-month series) (iter640 FIX-A)
+
+> **Keyword anchors (READ THIS FIRST if your question contains any of these):** this year's total revenue divided by last year's, year-over-year ratio per product, annual total vs last year total, this period vs last period total, this quarter's total divided by last quarter's, YoY growth ratio of totals, compare two years' totals side by side, ratio of this year's total to last year's total, total revenue this year over last year per product, full-year total YoY, period-total ratio per entity, two-period total ratio in one pass.
+
+> **The fact in one sentence.** When the question is "**this YEAR's TOTAL `X` / last YEAR's TOTAL `X` per `entity`**" (or this-quarter-vs-last-quarter total, or any two explicit period **totals** compared) — i.e. ONE row per `entity` with ONE ratio, NOT a per-month time series — write it as a **single-pass conditional-aggregation with `FILTER (WHERE ...)`** in ONE `GROUP BY entity`. Compute the **two period totals as parallel aggregates** in the same `SELECT`, then divide. No LAG, no self-join, no gap-fill needed — the period boundaries are explicit predicates inside the `FILTER` clauses. Verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html) (`year(x) -> bigint`, `quarter(x) -> bigint` ranges 1..4) + [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) (`FILTER (WHERE ...)` supported on every aggregate) + [trino.io/docs/467/functions/conditional.html](https://trino.io/docs/467/functions/conditional.html) (`NULLIF(a, b)` returns NULL when `a = b`).
+
+> **PREFERRED CANONICAL — annual total ÷ total per product (single-pass conditional SUM with `FILTER`, zero-guarded):**
+>
+> ```sql
+> -- "What is this year's total revenue divided by last year's total revenue, per product?"
+> -- ONE row per product. ONE ratio. No per-month series, no LAG, no self-join.
+> SELECT
+>   product_id,
+>   SUM(amount) FILTER (WHERE year(order_date) = year(current_date))     AS revenue_this_year,
+>   SUM(amount) FILTER (WHERE year(order_date) = year(current_date) - 1) AS revenue_last_year,
+>   SUM(amount) FILTER (WHERE year(order_date) = year(current_date)) * 1.0
+>     / NULLIF(SUM(amount) FILTER (WHERE year(order_date) = year(current_date) - 1), 0)
+>     AS yoy_ratio
+> FROM iceberg.analytics.orders
+> GROUP BY product_id;
+> ```
+>
+> **Why each piece is load-bearing:**
+> - **`year(order_date) = year(current_date)`** picks rows whose `order_date` falls in the current calendar year; `year(current_date) - 1` picks last year. `year(date)` returns `bigint` per the Trino datetime docs — integer arithmetic on `year(current_date) - 1` is well-defined. The two `FILTER` predicates are **mutually exclusive** (a row cannot be in both years), so each row contributes to AT MOST one of the two sums — no double-counting risk.
+> - **`SUM(...) FILTER (WHERE ...)`** computes the period total in ONE pass over the same row set as the bare `SUM` — both totals share the scan, share the `GROUP BY product_id`. Multiple `FILTER`-ed aggregates over the same row set is the docs-canonical conditional-aggregation pattern (see [Trino aggregate-functions FILTER docs](https://trino.io/docs/467/functions/aggregate.html) verbatim: *"The `FILTER` keyword can be used to remove rows from aggregation processing with a condition expressed using a `WHERE` clause."*).
+> - **`* 1.0`** forces decimal division. Without it, `SUM(amount) / NULLIF(SUM(amount), 0)` on two integer/bigint values does **integer division** and the ratio truncates to 0 unless this year's total happens to exceed last year's. Multiply the numerator by the DECIMAL literal `1.0` (or `CAST(... AS double)`) so the division is floating-point.
+> - **`NULLIF(SUM(...) FILTER (WHERE ...), 0)`** is the divide-by-zero guard. If a product had NO revenue last year, the denominator is `0`; dividing by `0` raises a Trino runtime error. `NULLIF(x, 0)` returns `NULL` when `x = 0`, and any number divided by `NULL` is `NULL` — so products with no last-year revenue emit `yoy_ratio = NULL` instead of erroring out. (Note: `FILTER` already returns `NULL` for an empty group on its own, but a product that **had** last-year rows summing to `0` would still trigger divide-by-zero without `NULLIF` — keep the guard for both cases.)
+>
+> **Equivalent `CASE WHEN` form (works on every dialect, slightly more verbose):**
+>
+> ```sql
+> SELECT
+>   product_id,
+>   SUM(CASE WHEN year(order_date) = year(current_date)     THEN amount ELSE 0 END) AS revenue_this_year,
+>   SUM(CASE WHEN year(order_date) = year(current_date) - 1 THEN amount ELSE 0 END) AS revenue_last_year,
+>   SUM(CASE WHEN year(order_date) = year(current_date)     THEN amount ELSE 0 END) * 1.0
+>     / NULLIF(SUM(CASE WHEN year(order_date) = year(current_date) - 1 THEN amount ELSE 0 END), 0)
+>     AS yoy_ratio
+> FROM iceberg.analytics.orders
+> GROUP BY product_id;
+> ```
+>
+> **`FILTER` vs `CASE WHEN ... ELSE 0 END` — subtle but important denominator difference.** Both forms produce identical numeric answers on the canonical above (`NULLIF(..., 0)` covers both cases), but they reach `0` via different paths. `SUM(CASE WHEN cond THEN amount ELSE 0 END)` on a group with NO matching rows returns `0` (the `ELSE 0` branch contributes `0` per row); `SUM(amount) FILTER (WHERE cond)` on a group with NO matching rows returns `NULL` (the aggregate sees zero input rows, and per the Trino docs aggregate-functions general rule, `SUM`/`AVG`/etc. return `NULL` for no input rows). For the **denominator**, the `FILTER` form's `NULL` propagates naturally to the ratio without `NULLIF` — but a group that DID have last-year rows summing to actual `0` still needs the `NULLIF` guard. **Bottom line:** always wrap the denominator in `NULLIF(..., 0)` regardless of which form you pick — it covers both no-rows AND rows-summing-to-zero.
+
+> **GENERALIZE — same shape, different period unit:**
+>
+> | Comparison | Numerator predicate | Denominator predicate |
+> |---|---|---|
+> | **Year vs prior year (YoY total)** | `year(order_date) = year(current_date)` | `year(order_date) = year(current_date) - 1` |
+> | **Quarter vs prior quarter (QoQ total)** *(within the same year)* | `year(order_date) = year(current_date) AND quarter(order_date) = quarter(current_date)` | `year(order_date) = year(current_date) AND quarter(order_date) = quarter(current_date) - 1` |
+> | **This year's Q1 vs last year's Q1 (same-quarter YoY)** | `year(order_date) = year(current_date) AND quarter(order_date) = quarter(current_date)` | `year(order_date) = year(current_date) - 1 AND quarter(order_date) = quarter(current_date)` |
+> | **Two explicit date windows** (e.g. "May 2026 total vs May 2025 total") | `order_date BETWEEN DATE '2026-05-01' AND DATE '2026-05-31'` | `order_date BETWEEN DATE '2025-05-01' AND DATE '2025-05-31'` |
+>
+> Same shape every time: two `SUM(amount) FILTER (WHERE <period-predicate>)` aggregates in ONE `SELECT`, divide with `* 1.0 / NULLIF(..., 0)`. The period unit changes; the recipe doesn't.
+>
+> Note: for a **quarter-vs-prior-quarter** comparison that crosses a year boundary (Q1 2026 vs Q4 2025), the simple `quarter(...) - 1` won't work (Q1 of 2026 has `quarter=1`, and `1 - 1 = 0` which is not a valid quarter). For that case, either subtract a quarter from `current_date` using `date_add('quarter', -1, current_date)` and read `year(...)` + `quarter(...)` of that, or scope by explicit date windows (the BETWEEN row above).
+
+> **DO-NOT-WRITE — period-total ratio specific (iter640 FIX-A — the iter639 Q2 responder miss):**
+>
+> | DO NOT write | Why it's wrong / silently-wrong | Correct form |
+> |---|---|---|
+> | **A per-month `LAG(12)` series (FORM A or FORM B above) filtered to just the current month, labeled as "this year's total vs last year's total."** | **WRONG — answers a DIFFERENT question.** A LAG(12) over a monthly series compares **ONE MONTH** (the current month) to the **same month last year** — that is a single-month YoY, NOT a full-period total YoY. The user asked for **this YEAR's TOTAL / last YEAR's TOTAL** (12 months on top of 12 months) per product; the LAG(12) answer is one month's value on top of one month's value. Numerically different, semantically a different metric. This is the exact iter639 Q2 miss. | The single-pass `SUM(amount) FILTER (WHERE year(order_date) = year(current_date)) / NULLIF(SUM(amount) FILTER (WHERE year(order_date) = year(current_date) - 1), 0)` canonical above — one row per product, two period **TOTALS** compared in ONE pass. |
+> | Omitting the `* 1.0` (or a CAST) on integer/bigint amounts | **SILENT-WRONG — integer division truncates to 0** unless this year's total ≥ last year's total. A product with `revenue_this_year = 500`, `revenue_last_year = 1000` would emit `yoy_ratio = 0` (not `0.5`). | Multiply the numerator by `1.0` (decimal) or `CAST(SUM(...) AS double)` to force floating-point division. |
+> | Omitting `NULLIF(SUM(...), 0)` on the denominator | **Runtime error: `Division by zero`** the first time a product has no last-year rows summing to a non-zero amount. The CASE-WHEN `ELSE 0` form makes this even more likely (every no-row group becomes literal 0). | Always wrap the denominator: `... / NULLIF(SUM(...) FILTER (WHERE ...), 0)` — emits `NULL` for divide-by-zero instead of erroring. |
+> | `WHERE year(order_date) = year(current_date)` in the OUTER `WHERE` clause (filtering the table to one year, then trying to compute YoY) | **WRONG — only this year's rows reach the aggregate.** The `WHERE` clause runs BEFORE aggregation, so it filters last year's rows out entirely. The denominator becomes 0/NULL for every product. The period predicates **belong inside `FILTER`**, NOT in the outer `WHERE`. | Leave the outer `WHERE` open to BOTH years (`WHERE order_date >= DATE '2025-01-01'` to scope the scan, OR no `WHERE` at all if the partition pruning is acceptable), and put the year selection inside each `FILTER (WHERE ...)` predicate. |
+> | `... / SUM(amount) FILTER (WHERE year(order_date) = year(current_date) - 1)` as the divisor with NO `* 1.0` numerator (relying on Trino's "if either operand is decimal/double, the result is decimal/double") when `amount` is `bigint` | If `amount` is stored as `bigint` (the typical case for cents), both operands are `bigint` and the division truncates. The `* 1.0` is what introduces the decimal type. | Explicit `* 1.0` (or `CAST(numerator AS double)`) so the division promotes to floating-point. |
+> | Using `EXTRACT(YEAR FROM order_date)` instead of `year(order_date)` | Both are valid Trino — `EXTRACT(YEAR FROM x)` and `year(x)` return the same value (`bigint`). Either works. This row is here only to confirm `EXTRACT` is NOT a parse error; pick whichever your team reads better. | No fix needed — both are valid. |
+
+> **KEYWORD-LANDING repeat (so the responder routes here on the right English phrasing):** *this year's total revenue divided by last year's, year-over-year ratio per product, annual total vs last year total, this period vs last period total, this quarter's total divided by last quarter's, YoY growth ratio of totals, compare two years' totals side by side, full-year total YoY, period-total ratio per entity, total ÷ total ratio in one pass.*
+
+> **Cross-references.** [FORM A / FORM B above](#pattern-b2-leading-canonical--period-over-period-yoy-vs-mom-with-window-functions-year-over-year--same-month-last-year--month-over-month--compare-to-last-year--lag-12-months--growth-vs-last-year--period-over-period) — when the question is a per-month series (not a one-ratio-per-entity period total). [Share of grand total — § share-of-grand-total card](#) earlier in this file for the related "subset SUM ÷ grand-total SUM in ONE pass" final-assembly pattern (same conditional-aggregation idiom, different ratio). [Resource 23 § 11 — duplicate-subquery collapse + `FILTER (WHERE ...)`](23-sql-best-practices-olap.md#11-use-ctes-or-subqueries--dont-re-run-the-same-expensive-query-twice) for the broader "compute multiple metrics in one scan via `FILTER`" pattern.
+
+#### Sub-canonical — ACTIVE in EVERY one of the last N FULL calendar months (BOTH-BOUNDS window + `HAVING COUNT(DISTINCT date_trunc('month', d)) = N`) (iter640 FIX-B)
+
+> **Keyword anchors (READ THIS FIRST if your question contains any of these):** customers active in every one of the last N months, ordered every month for N months straight, bought every month for the last 3 months, present in all N periods, active all N consecutive months, customers who placed an order in each of the last 3 months, users active every single month for 6 months, retained every month, no-skip retention, full-period active, every-month customers.
+
+> **The fact in one sentence.** To find entities that were **active in every one of the last N FULL calendar months** — NOT today's partial month, NOT some-month-in-the-window — `GROUP BY` the entity and require `COUNT(DISTINCT date_trunc('month', activity_date)) = N` over a window that has **BOTH a lower AND an upper bound**: lower bound = `date_add('month', -N, date_trunc('month', current_date))`, upper bound = `date_trunc('month', current_date)` (the start of the CURRENT month, exclusive). The upper bound is the load-bearing piece — without it, the **current partial month** leaks in and can count as a fully-active month after just one order today, inflating retention.
+
+> **CANONICAL — customers who placed an order in EVERY one of the last 3 FULL calendar months:**
+>
+> ```sql
+> -- N = 3 (the last 3 FULL calendar months — excludes the current, in-progress month)
+> SELECT customer_id
+> FROM iceberg.analytics.orders
+> WHERE order_date >= date_add('month', -3, date_trunc('month', current_date))   -- lower bound: 3 months ago, 1st of the month
+>   AND order_date <  date_trunc('month', current_date)                          -- upper bound: 1st of CURRENT month (EXCLUSIVE — drops the partial month)
+> GROUP BY customer_id
+> HAVING COUNT(DISTINCT date_trunc('month', order_date)) = 3;                    -- distinct calendar months touched == N
+> ```
+>
+> **Why each piece is load-bearing:**
+> - **`date_trunc('month', current_date)`** as the **upper bound** is what excludes the current in-progress month. If today is `2026-06-07`, `date_trunc('month', current_date)` = `DATE '2026-06-01'`. With `order_date < DATE '2026-06-01'`, every June-2026 row is dropped — only the three full months `2026-03`, `2026-04`, `2026-05` enter the aggregate. WITHOUT this upper bound, a customer who ordered once in March, once in April, and once in early June (and skipped May) would silently satisfy `COUNT(DISTINCT date_trunc('month', order_date)) = 3` even though they SKIPPED a month — that is a wrong answer.
+> - **`date_add('month', -3, date_trunc('month', current_date))`** as the **lower bound** is the start of the Nth-most-recent FULL month. If today is `2026-06-07`, this evaluates to `DATE '2026-03-01'` — March 1, three months back from the start of the current month. Combined with the upper bound, the window is `[2026-03-01, 2026-06-01)` — exactly the last 3 full months, no off-by-one.
+> - **`COUNT(DISTINCT date_trunc('month', order_date)) = N`** counts how many DISTINCT calendar months the customer was active in. A customer who placed 10 orders in March and zero in April + May has `COUNT(DISTINCT date_trunc('month', order_date)) = 1`, not 3 — so they are correctly excluded. A customer with one order in each of March, April, May has `= 3` and passes.
+
+> **DO-NOT-WRITE — period-coverage specific:**
+>
+> | DO NOT write | Why it's wrong / silently-wrong | Correct form |
+> |---|---|---|
+> | **Lower bound ONLY** (`WHERE order_date >= date_add('month', -3, current_date)`) — no upper bound, AND using bare `current_date` not `date_trunc('month', current_date)` as the lower anchor | The current in-progress month leaks in. A customer who ordered in March, April, and then placed any order in early June (skipping May entirely) would emit `COUNT(DISTINCT date_trunc('month', order_date)) = 3` and pass — **but they SKIPPED May**, so they were not active every month. Silent-wrong retention number. | Add the upper bound `AND order_date < date_trunc('month', current_date)` AND anchor the lower bound to `date_trunc('month', current_date)` (not bare `current_date`). |
+> | `WHERE order_date >= current_date - INTERVAL '3' MONTH` then `HAVING COUNT(DISTINCT date_trunc('month', order_date)) >= 3` (no upper bound, `>=` not `=`) | Same leak as above + the `>=` allows N+1 months (4 months of activity passes when you asked for "every one of the last 3"). The `=` is what enforces "every one — not more, not fewer." | Both bounds + `HAVING COUNT(DISTINCT date_trunc('month', order_date)) = N`. |
+> | `HAVING COUNT(*) = N` instead of `HAVING COUNT(DISTINCT date_trunc('month', order_date)) = N` | `COUNT(*) = N` requires exactly N **rows** (one per month). A customer who placed 2 orders in March and 1 each in April + May has 4 rows, not 3 — they would FAIL the filter even though they were active every month. | `COUNT(DISTINCT date_trunc('month', order_date)) = N` — counts distinct **months touched**, not row count. |
+
+> **Cross-references.** Same DISTINCT-over-period idiom but counting DISTINCT user_ids in [§3 cohort retention](#3-cohort-analysis-retention-over-time) above. The half-open window pattern `[lo, hi)` is the same `[start, end)` half-open convention used for [interval-overlap range joins](#leading-canonical--count-activeopen-intervals-on-each-day-interval-overlap-range-join--not-forward-fill-not-a-current_date-snapshot) — both rely on the upper bound being EXCLUSIVE to avoid boundary double-count / partial-month leak.
 
 ### Pattern B3: LEADING CANONICAL — `first_value` / `last_value` / `nth_value` (the default-frame footgun)
 

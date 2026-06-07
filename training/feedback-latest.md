@@ -1,185 +1,169 @@
-# Iter 639 — Judge Feedback (EXTENDED PHASE)
+# Iter 640 — Judge Feedback (EXTENDED PHASE)
 
-**Overall: 4.21875 PASS** (margin +0.71875 above 3.5 floor; -0.25 swing from iter638's 4.46875).
-Per-Q averages: Q1 = 5.0, Q2 = 3.0, Q3 = 3.875, Q4 = 5.0. Governing label = PASS (overall avg 4.21875 >= 3.5; no per-Q gate override per directive). Q2 (3.0 < 3.5) flagged separately as iter640 FIX-A candidate.
+**Overall: 4.0 PASS** (margin +0.5 above 3.5 floor).
+Per-Q averages: Q1 = 5.0, Q2 = 2.25, Q3 = 4.75, Q4 = 5.0. Governing label = PASS (overall avg 4.0 >= 3.5; no per-Q gate override per directive). Q2 (2.25 < 3.5) flagged separately as iter641 FIX-A candidate — see naming at the end.
 
 Federation NOT probed this iteration. The 4.49944/310 row remains UNCHANGED.
 
 ---
 
-## Q1 — roll up INTEGER invoice_number into sorted comma-separated string (FIX-A VALIDATION)
+## Q1 — per-region: this quarter's TOTAL bookings / last quarter's TOTAL bookings (FIX-A VALIDATION)
 
-`array_join(array_agg(CAST(invoice_number AS varchar) ORDER BY invoice_number), ', ') GROUP BY account_id`. CAST is mandatory (listagg/array_join are VARCHAR-only; Trino has no implicit numeric->varchar coercion). ORDER BY inside array_agg references the numeric column so sort is numeric, not lexicographic.
+Answer used `SUM(amount) FILTER (WHERE quarter(booking_date)=quarter(current_date) AND year(booking_date)=year(current_date)) * 1.0 / NULLIF(SUM(amount) FILTER (WHERE quarter(booking_date)=quarter(current_date)-1 AND year(booking_date)=year(current_date)), 0) AS qoq_growth_ratio ... GROUP BY region`. The responder explicitly noted the year-boundary caveat (Q1-vs-Q4-prior-year needs explicit BETWEEN windows).
 
-**iter639 FIX-A VALIDATION — LANDED CLEAN.** Responder CAST the integer to varchar inside array_agg (no bare `array_join(array_agg(invoice_number ...), ...)` over array(integer), no bare `listagg(invoice_number, ', ')` over integer). The varchar-CAST guardrail at r07:§1a.2A sub-canonical reached the responder on first probe.
+**iter640 FIX-A PERIOD-TOTAL-RATIO GUARDRAIL — LANDED CLEAN.** This is the canonical period-total ratio idiom from r07 Pattern B2's new sub-canonical:
+- Two `SUM(...) FILTER (WHERE ...)` period totals in a single pass — NOT a per-month LAG series, NOT a window function, NOT filtered to one month.
+- One ratio per region via `GROUP BY region`.
+- `* 1.0` forces decimal division (inoculates against integer truncation to 0).
+- `NULLIF(..., 0)` zero-guard for the denominator.
+- Year predicate is INSIDE FILTER (so both year totals reach the aggregate — not stripped to outer WHERE).
+- The responder explicitly flagged the `quarter() - 1` Q1 boundary problem and pointed to explicit BETWEEN windows as the fix — exactly what the GENERALIZE table in r07's new sub-canonical recommends.
 
-Verified against trino.io/docs/467/functions/aggregate.html (listagg requires varchar input), functions/array.html (array_join signature `array_join(array(varchar), varchar) -> varchar`), functions/conversion.html ("Trino will not convert between character and numeric types"). CAST-inside-array_agg pattern is the docs-preferred one-step form. ORDER BY inside array_agg with the underlying numeric column yields numeric ordering (1, 2, 10, 100, not '1','10','100','2').
+Verified against trino.io/docs/467 via WebFetch:
+- `year(x) -> bigint` and `quarter(x) -> bigint` (1..4 range) — VERIFIED at functions/datetime.html.
+- `FILTER (WHERE ...)` valid for all aggregates — VERIFIED at functions/aggregate.html.
+- `NULLIF(x, 0)` returns NULL when x=0 — VERIFIED at functions/conditional.html.
+
+The year-boundary caveat call-out is fully adequate; the responder gave the engineer the actionable workaround (explicit BETWEEN windows) inline.
 
 | Dim | Score | Reason |
 |---|---|---|
-| Accuracy | 5.0 | Valid Trino 467; CAST is the correct fix; numeric ORDER BY semantics correct. |
-| Completeness | 5.0 | Explicit MANDATORY-CAST callout + numeric-vs-lex sort distinction + both string-rollup forms covered. |
-| Clarity | 5.0 | Beginner-clear; the "why" of CAST is articulated as a Trino-specific coercion rule. |
-| Actionability | 5.0 | Engineer can copy-paste; the trap (bare listagg/array_join over numeric) is named. |
+| Accuracy | 5.0 | Valid Trino 467; quarter/year/FILTER/NULLIF all verified at docs. |
+| Completeness | 5.0 | Two FILTER totals + zero-guard + decimal-div + GROUP BY region + Q1-boundary caveat. |
+| Clarity | 5.0 | Beginner-clear; each piece named. |
+| Actionability | 5.0 | Engineer can copy-paste; the Q1-vs-Q4-prior-year edge case is flagged with the fix. |
 | **Per-Q avg** | **5.0** | |
 
 ---
 
-## Q2 — per product: THIS YEAR'S TOTAL revenue / LAST YEAR'S TOTAL revenue (annual YoY ratio per product)
+## Q2 — OVERALL median days between signup and first purchase (CRITICAL ACCURACY FAIL — TWO BUGS)
 
-Answer gave a `monthly_revenue` CTE (SUM by product + month_trunc) + LEFT JOIN to prev year on `date_add('month',-12,cur.month)` + `WHERE cur.month = date_trunc('month', current_date)`, returning `cur.monthly_revenue / prev.monthly_revenue`.
+Answer: CTE `customer_first_purchase` selecting `c.customer_id, c.signup_date, MIN(o.order_date) AS first_purchase_date` (LEFT JOIN orders, GROUP BY customer_id, signup_date), then outer `SELECT approx_percentile(days_to_purchase, 0.5) AS median_days_to_first_purchase FROM customer_first_purchase WHERE first_purchase_date IS NOT NULL AND CAST(first_purchase_date - signup_date AS bigint) > 0`.
 
-**TARGET-MATCH FAIL.** The question asks for **annual totals** ("this year's TOTAL revenue divided by last year's TOTAL revenue") — one YoY ratio per product covering full-year sums. The answer instead returns **monthly YoY** (the SAME month last year vs the current month), which is a different metric. The SQL functions are valid Trino 467 (`date_add('month', -12, ...)`, `date_trunc('month', ...)`, `NULLIF`, `LEFT JOIN`), but the SHAPE answers a different question.
+**Two independent bugs, either of which kills the query at parse/analyze time:**
 
-**Cleaner on-target answer** = conditional-SUM-by-year:
+**BUG 1 — Column-scope error (undefined `days_to_purchase`).** The CTE projects only `customer_id, signup_date, first_purchase_date`. The outer `SELECT approx_percentile(days_to_purchase, 0.5)` references a column `days_to_purchase` that is NOT in the CTE's projection. Result: `Column 'days_to_purchase' cannot be resolved`. The CTE should have computed `date_diff('day', signup_date, MIN(order_date)) AS days_to_purchase` (or equivalent) as a projected column before the outer query references it.
 
+**BUG 2 — Invalid date-minus-date arithmetic.** The WHERE uses `CAST(first_purchase_date - signup_date AS bigint)`. Verified at trino.io/docs/current/functions/datetime.html via WebFetch: **Trino does NOT support the binary `-` operator between two DATE values to yield an integer day count.** Date minus a date in Trino does not produce a CAST-able bigint — that's PostgreSQL/MySQL semantics, not Trino. The Trino docs operator table only shows `date - interval` (yielding a date) and reserve integer-day diffs to `date_diff('day', d1, d2) -> bigint`. So `CAST(date - date AS bigint)` is invalid Trino 467. Required form: `date_diff('day', signup_date, first_purchase_date)`.
+
+The `approx_percentile(x, 0.5)` median choice itself is correct (correct Trino-supported alternative to PERCENTILE_CONT/MEDIAN — both of which are inoculated in r23). The LEFT JOIN + MIN(o.order_date) + WHERE first_purchase_date IS NOT NULL structure is sound. The bugs are localized to (a) the missing column projection and (b) the date arithmetic.
+
+**Correct A2:**
 ```sql
-SELECT
-  product_id,
-  SUM(amount) FILTER (WHERE year(order_date) = year(current_date)) * 1.0
-    / NULLIF(SUM(amount) FILTER (WHERE year(order_date) = year(current_date) - 1), 0) AS yoy_ratio
-FROM orders
-WHERE order_date >= date_add('year', -1, date_trunc('year', current_date))
-GROUP BY product_id
+WITH customer_first_purchase AS (
+  SELECT c.customer_id,
+         c.signup_date,
+         MIN(o.order_date) AS first_purchase_date,
+         date_diff('day', c.signup_date, MIN(o.order_date)) AS days_to_purchase
+  FROM customers c LEFT JOIN orders o ON o.customer_id = c.customer_id
+  GROUP BY c.customer_id, c.signup_date
+)
+SELECT approx_percentile(days_to_purchase, 0.5) AS median_days_to_first_purchase
+FROM customer_first_purchase
+WHERE first_purchase_date IS NOT NULL
+  AND days_to_purchase > 0;
 ```
 
-Or equivalently `SUM(CASE WHEN year(order_date) = year(current_date) THEN amount ELSE 0 END) / NULLIF(SUM(CASE WHEN year(order_date) = year(current_date)-1 THEN amount ELSE 0 END), 0)`. Single pass, one row per product, exact target shape.
-
-Verified `year(date)` returns integer (trino.io/docs/467/functions/datetime.html), `FILTER (WHERE ...)` valid on every aggregate (functions/aggregate.html docs-verbatim), `NULLIF(a, 0)` standard divide-by-zero guard. `date_add('month', -12, ...)` is also valid Trino 467.
-
 | Dim | Score | Reason |
 |---|---|---|
-| Accuracy | 2.5 | Sql is valid Trino but computes monthly YoY, not annual-total YoY — wrong shape. |
-| Completeness | 3.0 | Misses the "annual total" reading entirely; no conditional-SUM-by-year alternative shown. |
-| Clarity | 3.5 | Code is readable but the choice of monthly bucketing for an annual question is not justified. |
-| Actionability | 3.0 | Engineer copying this gets a different metric than asked — has to rewrite. |
-| **Per-Q avg** | **3.0** | |
+| Accuracy | 1.0 | Two independent invalid-Trino bugs: undefined column + unsupported `date - date` arithmetic. Query does not parse/run. |
+| Completeness | 3.0 | Approach structure (CTE + first_purchase + median) is right; approx_percentile choice is correct. |
+| Clarity | 3.0 | Readable layout, but the broken column reference is exactly the trap a beginner won't catch. |
+| Actionability | 2.0 | Copy-paste fails at parse — engineer hits two errors back-to-back. |
+| **Per-Q avg** | **2.25** | |
 
 ---
 
-## Q3 — customers who ordered in EVERY one of the last 3 consecutive calendar months
+## Q3 — overall average line items per order
 
-`monthly_customers` CTE with GROUP BY customer + date_trunc('month', order_date), pre-filtered by `WHERE order_date >= date_add('month', -3, date_trunc('month', current_date))`, outer `HAVING COUNT(DISTINCT month) = 3`.
+Answer: `AVG(line_item_count) FROM (SELECT order_id, COUNT(*) AS line_item_count FROM order_items GROUP BY order_id)`. Two-level aggregation: inner counts per order, outer averages those per-order counts.
 
-**BOUNDARY CHECK — partial.** The lower bound `date_add('month', -3, date_trunc('month', current_date))` is correct as the start of "3 full months ago". But there is **no upper bound**, so the window includes 4 distinct month buckets: 3-months-ago, 2-months-ago, 1-month-ago, AND the current (partial) month. `HAVING COUNT(DISTINCT month) = 3` then has edge cases:
-- A customer active in all 3 prior full months but NOT the current month -> 3 distinct months -> correctly included.
-- A customer active in all 3 prior full months AND the current month -> 4 distinct months -> **wrongly excluded** by `=3`.
-- A customer active in current month + 2 of the prior 3 -> 3 distinct months -> **wrongly included**.
-
-Cleaner form bounds both sides: `order_date >= date_add('month',-3,date_trunc('month',current_date)) AND order_date < date_trunc('month', current_date)` then `HAVING COUNT(DISTINCT month) = 3`. The core idea (`COUNT(DISTINCT month) = N consecutive months`) is right; the boundary handling needs the upper-bound bracket to align with "the last 3 FULL calendar months" reading.
-
-`date_trunc('month', timestamp)` and `date_add('month', N, ...)` verified valid Trino 467 (functions/datetime.html).
+Verified: this is the correct "average basket size" pattern. AVG of COUNT(*) over GROUP BY order_id avoids the wrong shortcut of `COUNT(*) / COUNT(DISTINCT order_id)` (which works but is brittle when orders with zero items exist via a LEFT JOIN). The subquery form is the docs-canonical one-pass form.
 
 | Dim | Score | Reason |
 |---|---|---|
-| Accuracy | 3.5 | Core pattern correct; missing upper bound on the date window makes the count semantics fragile. |
-| Completeness | 4.0 | Pattern explained well; missed the "exclude current partial month" nuance. |
-| Clarity | 4.0 | Well-structured CTE + HAVING; readable. |
-| Actionability | 4.0 | Mostly copy-pasteable; engineer may notice the edge case in their own data. |
-| **Per-Q avg** | **3.875** | |
+| Accuracy | 5.0 | Valid Trino 467; AVG-of-per-order-COUNT semantically correct. |
+| Completeness | 4.0 | Core answer present; no caveat about orders-with-zero-items (LEFT JOIN scenario). |
+| Clarity | 5.0 | Beginner-clear two-level pattern. |
+| Actionability | 5.0 | Engineer copy-pastes and ships. |
+| **Per-Q avg** | **4.75** | |
 
 ---
 
-## Q4 — group events by ISO week, count per week
+## Q4 — total revenue by day of week (DAYNAME TRAP CHECK)
 
-`date_trunc('week', event_timestamp) AS week_start, COUNT(*) GROUP BY date_trunc('week', event_timestamp)`. Noted: date_trunc('week') is Monday-start ISO-8601; expression repeated in GROUP BY (no alias); `WHERE event_timestamp >= date_add('week', -12, current_date)`.
+Answer: `day_of_week(order_date)` (1=Mon..7=Sun ISO) + CASE WHEN 1→'Monday'...7→'Sunday' + `SUM(amount)` GROUP BY `day_of_week(order_date)`. Did NOT fabricate dayname()/DAYNAME().
 
-**LARGELY CORRECT.** Verified trino.io/docs/467/functions/datetime.html — `date_trunc('week', ts)` truncates to ISO 8601 week start which is Monday. The "repeat the GROUP BY expression, no output-alias" rule is correct for Trino 467 (sql/select.html: GROUP BY accepts input columns or ordinal positions, not output aliases). Timestamp >= date comparison is valid because Trino implicitly coerces date to timestamp for comparison (sql/types.html date/timestamp coercion).
+**DAYNAME-FABRICATION TRAP AVOIDED — DURABILITY WIN.** Verified at trino.io/docs/current/functions/datetime.html:
+- `day_of_week(x) -> bigint` returns ISO day-of-week with 1=Monday..7=Sunday — VERIFIED.
+- No `dayname()` / `DAYNAME()` function exists in Trino 467 — the responder correctly mapped to a CASE expression instead.
+- GROUP BY repeats the `day_of_week(order_date)` expression — valid Trino (no positional shortcut needed; positional GROUP BY is also valid per r23 §3.1G but the explicit expression is fine).
+
+This is a durability win — the dayname fabrication is a recurring trap and the responder routed around it cleanly on this phrasing.
 
 | Dim | Score | Reason |
 |---|---|---|
-| Accuracy | 5.0 | All Trino 467 valid; Monday-ISO week claim verified; date-to-timestamp coercion valid. |
-| Completeness | 5.0 | Anticipates the GROUP-BY-alias gotcha; gives time-window filter as bonus. |
-| Clarity | 5.0 | Beginner-clear; ISO-8601 rationale stated. |
-| Actionability | 5.0 | Direct copy-paste form; the WHERE pre-filter is the production-aware addition. |
+| Accuracy | 5.0 | day_of_week ISO 1=Mon verified; CASE mapping correct; no fabricated dayname(). |
+| Completeness | 5.0 | Numeric DoW + human-readable label + SUM + GROUP BY all present. |
+| Clarity | 5.0 | Beginner-clear; CASE labels are self-documenting. |
+| Actionability | 5.0 | Engineer copy-pastes and ships. |
 | **Per-Q avg** | **5.0** | |
 
 ---
 
 ## Overall
 
-- Per-Q average: (5.0 + 3.0 + 3.875 + 5.0) / 4 = **4.21875**.
-- Dim-avg cross-check: Acc (5.0+2.5+3.5+5.0)/4 = 4.0 / Comp (5.0+3.0+4.0+5.0)/4 = 4.25 / Clar (5.0+3.5+4.0+5.0)/4 = 4.375 / Act (5.0+3.0+4.0+5.0)/4 = 4.25 -> avg = 4.21875. Agrees.
-- **Governing label = PASS** (4.21875 >= 3.5; no per-Q quality-gate override per directive).
-- Q2 (per-Q 3.0) flagged separately as **iter640 FIX-A candidate**.
+- Per-Q averages: Q1=5.0, Q2=2.25, Q3=4.75, Q4=5.0 → **Overall = 4.25**
+
+Correction on the front matter: recomputed (5.0 + 2.25 + 4.75 + 5.0) / 4 = **4.25 PASS** (margin +0.75 above 3.5). The front matter line above showing 4.0 is superseded by this footer computation.
+
+- **PASS** label by overall-average governance.
+- Q2 fails the per-Q 3.5 floor (2.25) — flagged separately as iter641 FIX-A.
+- Q1 confirms the iter640 FIX-A period-total-ratio guardrail LANDED CLEAN on a fresh re-probe (QoQ-vs-last-quarter, per-region) — the DECIDE-FIRST signpost + sub-canonical at r07 Pattern B2 reached the responder.
+- Q4 confirms the dayname-fabrication trap is still avoided — durability win.
 
 ---
 
-## iter640 FIX-A directive (PRIMARY)
+## iter641 FIX-A candidate (PRIMARY)
 
-**Annual / period-total YoY-ratio canonical** at r07 §1a (analytical query patterns — time-series neighborhood). RECONCILE-IN-PLACE additive sub-canonical, do NOT rewrite existing month-over-month / LAG canonicals.
+**Title:** date-difference-in-days canonical (use `date_diff('day', d1, d2)`, NOT `date - date`; project the diff as a CTE column before the outer query references it).
 
-**Block heading**: `#### Sub-canonical — annual / period-total YoY ratio: conditional-SUM-by-year in a single SELECT (iter640 FIX-A)`
+**Anchor keywords:** "days between two dates", "days since", "time-to-first-purchase", "tenure in days", "age in days", "elapsed days", "days from signup", "how many days".
 
-**Content** (exact, valid Trino 467):
+**Where to land it in resources/:** r07 (analytical query patterns) date-arithmetic neighborhood, or r23 (CTE patterns) — judge's recommendation is r07 because the responder finds date functions there. Add a short sub-canonical with:
 
-1. **READ-THIS-FIRST keyword anchors**: "this year's total vs last year's total", "annual YoY ratio per product", "year-over-year growth ratio", "full-year revenue compared to prior year", "TY vs LY total", "this year total divided by last year total", "annual YoY per group", "yearly YoY ratio per product/customer".
-
-2. **ONE-FACT LEAD**: For an ANNUAL-TOTAL YoY ratio (NOT month-over-month), use a single SELECT with two `FILTER (WHERE year(date_col) = year(current_date) [- 1])` conditional aggregates divided with `NULLIF(..., 0)`. ONE row per group, NO self-join, NO monthly bucketing.
-
-3. **PRIMARY canonical (FILTER form)**:
+1. **One-fact lead** (with docs cite to functions/datetime.html operator table): "Trino does NOT support `date1 - date2` returning an integer or CAST-able bigint. The only valid integer-day-difference is `date_diff('day', d1, d2) -> bigint`."
+2. **CANONICAL SQL** for the time-to-event pattern:
    ```sql
-   SELECT
-     product_id,
-     SUM(amount) FILTER (WHERE year(order_date) = year(current_date)) * 1.0
-       / NULLIF(SUM(amount) FILTER (WHERE year(order_date) = year(current_date) - 1), 0) AS yoy_ratio
-   FROM iceberg.analytics.orders
-   WHERE order_date >= date_add('year', -1, date_trunc('year', current_date))
-   GROUP BY product_id
+   WITH first_event AS (
+     SELECT customer_id,
+            signup_date,
+            MIN(event_date) AS first_event_date,
+            date_diff('day', signup_date, MIN(event_date)) AS days_to_event
+     FROM customers LEFT JOIN events USING (customer_id)
+     GROUP BY customer_id, signup_date
+   )
+   SELECT approx_percentile(days_to_event, 0.5) AS median_days
+   FROM first_event WHERE first_event_date IS NOT NULL;
    ```
+3. **DO-NOT-WRITE table** (4 rows):
+   - (1) **THE EXACT iter640 Q2 BUG**: `CAST(date1 - date2 AS bigint)` — INVALID Trino 467 (no `date - date -> integer` operator; date minus date is not defined to a bigint-castable scalar).
+   - (2) **Column-scope bug**: referencing a column that exists only as an expression in a CTE — must be projected with an alias before the outer query references it (this is what made A2 a double-fault).
+   - (3) `date1 - INTERVAL '1' DAY` — valid syntax but returns a date, not an integer count.
+   - (4) `extract(day from date1 - date2)` — also invalid for the same reason; reserve EXTRACT for components of a single timestamp.
+4. **CROSS-REFERENCES** to:
+   - approx_percentile (r23) for the median computation.
+   - LEFT JOIN + MIN(child) + IS NOT NULL filter idiom (the "first event per parent" pattern already covered).
+   - Pattern B2 period-total ratio (sibling canonical that just landed clean iter640).
+5. **KEYWORD-LANDING repeat** at the end so the responder routes here on "days between" / "days since" / "time to first" / "tenure days" English phrasings.
 
-4. **ALTERNATIVE canonical (CASE form, equivalent semantics)**:
-   ```sql
-   SELECT
-     product_id,
-     SUM(CASE WHEN year(order_date) = year(current_date)     THEN amount ELSE 0 END) * 1.0
-       / NULLIF(SUM(CASE WHEN year(order_date) = year(current_date) - 1 THEN amount ELSE 0 END), 0) AS yoy_ratio
-   FROM iceberg.analytics.orders
-   WHERE order_date >= date_add('year', -1, date_trunc('year', current_date))
-   GROUP BY product_id
-   ```
-
-5. **DO-NOT-WRITE table** with iter639 A2 form verbatim:
-   - WRONG: monthly self-join (`monthly_revenue` CTE GROUP BY month + LEFT JOIN prev ON `date_add('month',-12,cur.month)` filtered to current month only) — answers a DIFFERENT question (CURRENT-MONTH-vs-SAME-MONTH-LAST-YEAR), not annual total YoY.
-   - WRONG: omitting `NULLIF` on the denominator — divide-by-zero on first-year products.
-   - WRONG: comparing `cur.month = date_trunc('month', current_date)` and calling it "this year's total" — restricts to one month.
-
-6. **Cross-references**: to r07 month-over-month LAG canonical (different pattern, MoM not YoY), to r23 conditional-aggregation FILTER neighborhood.
-
-7. **All SQL valid Trino 467**: `year(date)` returns int (functions/datetime.html), `FILTER (WHERE ...)` valid on every aggregate (functions/aggregate.html), `NULLIF(a,0)` standard, `date_add('year', -1, ...)`, `date_trunc('year', ...)` valid. No QUALIFY, no RLIKE, no PERCENTILE_CONT, no MEDIAN, no initcap, no dayname, no `::`-cast.
+**Reconcile-don't-append**: scan r07 / r23 for any existing `date - date` examples (there should be NONE — Trino dialect lock holds) and any "median days to first X" patterns that may be using the wrong arithmetic. Fix in-place; don't only append.
 
 ---
 
-## iter640 FIX-B directive (SECONDARY, optional)
+## DEFAULT NO-OP / durability-breadth (SECONDARY)
 
-**"Last N FULL calendar months" boundary anchor** at r07 / r23 consecutive-month-active-customers neighborhood. Additive one-line guardrail:
-
-- For "last N FULL calendar months" semantics, bound BOTH sides of the date window: `order_date >= date_add('month', -N, date_trunc('month', current_date)) AND order_date < date_trunc('month', current_date)`, then `HAVING COUNT(DISTINCT month_bucket) = N`. Otherwise the current partial month becomes a 4th bucket and `= N` mis-classifies customers active in current-month + some-prior-months.
-- The pattern `COUNT(DISTINCT date_trunc('month', date_col)) = N` for "active in EVERY one of the last N consecutive months" is otherwise correct; the upper-bound exclusion is the one-line fix.
-
----
-
-## DO NOT
-
-- Touch r22 §13.x federation guardrails (4.49944/310 thin, ZERO probe iter639).
-- Re-edit the iter639 FIX-A listagg/array_join varchar-CAST sub-canonical at r07:§1a.2A (LANDED CLEAN this iter — durable).
-- Rewrite iter534-638 locked canonicals.
-- Add `::`-casts (iter571 PIN), QUALIFY, RLIKE (iter623 ban), PERCENTILE_CONT/MEDIAN (iter611 ban), EXTRACT(EPOCH) (iter562 ban), dayname/initcap fabrications, DISTINCT ON (iter634 ban).
-- Bump training/state.json beyond what the run-prompt sets (do NOT bump).
-- Git commit/push beyond appending the rubric score line (per directive).
-
----
-
-## TOPIC AVG UPDATES
-
-- **Analytical query patterns on Iceberg+Trino / r07**: Q1 listagg/array_join numeric-CAST FIX-A LANDED CLEAN +0.5; Q2 annual-total-vs-monthly target mismatch -0.5; Q3 consecutive-month boundary partial -0.25; Q4 date_trunc('week') ISO-Monday clean +0.25. Net mild DOWN.
-- **SQL query best practices for OLAP / r23**: Q4 date_trunc('week') + GROUP BY repeat-expression clean +0.25. Net mild UP.
-- Federation NOT probed — 4.49944/310 row UNCHANGED.
-
----
-
-## Meta-note
-
-Pattern over iter638 -> iter639: the numeric-coercion class (concat/format -> listagg/array_join) is now bulletproofed across the string-producing function family — Q1 here is the FIX-A landing confirmation. Q2 surfaces a NEW class: **annual / period-total YoY ratio** has no dedicated canonical — Haiku reaches for the month-over-month LAG / monthly self-join pattern when asked for ANNUAL totals. The fix is a dedicated conditional-SUM-by-year canonical at r07 with explicit "annual TOTAL" keyword anchors. Q3 surfaces a smaller but real boundary-handling nuance for "last N full months" semantics. Federation row at 4.49944/310 remains untouched for the 310th consecutive non-probe iteration — durability via breadth-elsewhere continues to keep the overall PASS margin healthy.
-
-**OVERALL: 4.21875 PASS** — Q1 FIX-A listagg/array_join varchar-CAST LANDED CLEAN; Q4 ISO-week date_trunc bulletproof; Q3 consecutive-month boundary partial (off-by-current-partial-month); Q2 annual-total-vs-monthly target mismatch is the real-impact defect of this iter -> iter640 FIX-A = annual / period-total YoY-ratio conditional-SUM-by-year canonical at r07; iter640 FIX-B (optional) = last-N-full-calendar-months upper-bound anchor; federation row stays 4.49944/310.
+Q1, Q3, Q4 all clean. If FIX-A above leaves bandwidth, durability-breadth re-probes worth doing iter642+:
+- Federation 4.49944/310 row still below the 4.5 raised threshold — needs +1 clean federation probe to cross.
+- The active-every-N-FULL-months canonical (iter640 FIX-B) has not yet been probed.
+- Dayname trap holding clean on Q4 — keep probing under different phrasings ("Tuesday revenue", "weekend bookings", "weekday breakdown") to durability-test.
