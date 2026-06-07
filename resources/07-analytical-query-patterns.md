@@ -1858,6 +1858,87 @@ WHERE day >= DATE '2026-01-01';
 - `LEAD(col, n)` is the mirror — `n` rows forward.
 - No frame clause needed — `LAG`/`LEAD` operate on a specific row offset, not a frame.
 
+### Pattern B-Session: LEADING CANONICAL — Sessionization / 30-minute-gap / gaps-and-islands / "new session when gap exceeds threshold" (iter671 PIN — FIX-A: ts-minus-ts gap test invalid in Trino 467)
+
+<a id="leading-canonical--sessionization--30-minute-gap--gaps-and-islands--new-session-when-gap-exceeds-threshold-iter671-pin"></a>
+
+> **Keyword anchors (READ THIS FIRST if your question contains any of these):** sessionize events, sessionization, **30 minute gap**, **gap between consecutive events**, **time between events**, **new session when gap exceeds 30 minutes**, gaps and islands, session gap test, count sessions per user, COUNT DISTINCT session_id per user, session_id from event timestamps, time-gap sessionization, **session gap > 30 minutes**, **how many sessions did each user have**, derive session boundaries from inter-event gaps, minutes between events filter, dwell time per session, time-to-first-response, duration between consecutive events. Verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html) and [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html) on 2026-06-08.
+
+**THE ONE FACT — Trino 467 has NO `timestamp - timestamp -> interval` operator.** A "gap test" like `event_time - LAG(event_time) OVER (...) > INTERVAL '30' MINUTE` is the natural first guess from Postgres / Spark / SQL Server muscle memory — and it is **INVALID Trino 467**, because the left side `event_time - LAG(event_time)` is a subtraction of two timestamp values that does not parse. Trino's `-` on a timestamp accepts ONLY an INTERVAL on the right (`ts - INTERVAL '30' MINUTE` is valid — that's interval-on-the-right arithmetic). There is no operator that subtracts two timestamps to yield an interval. **Use `date_diff('minute', earlier, later) -> bigint` and compare against a plain number `> 30`, not against an `INTERVAL` literal.** See the [r23 §timestamp-minus-timestamp banner](23-sql-best-practices-olap.md#leading-canonical--days--minutes--seconds-between-two-dates-or-timestamps-and-the-column-scope-discipline-that-goes-with-it) for the full operator-table citation and the date-cousin form.
+
+**THE PREFERRED CANONICAL — number of sessions per user, where a session ends after 30 minutes of inactivity** (the gaps-and-islands shape — LAG + running-SUM `session_id` + `COUNT(DISTINCT session_id)`):
+
+```sql
+-- Trino 467 — sessionize events with a 30-minute inactivity gap, then count sessions per user.
+-- Step 1: for each event, compare its time to the previous event's time IN THE SAME PARTITION.
+--         If the gap exceeds 30 minutes (or there is no previous event), it's the START of a new session.
+-- Step 2: a RUNNING SUM of the "is_new_session" flag assigns a monotonically increasing session_id per user.
+-- Step 3: COUNT(DISTINCT session_id) per user gives the per-user session count.
+
+WITH events_with_gap AS (
+  SELECT
+    user_id,
+    event_time,
+    -- date_diff returns BIGINT minutes between the PREVIOUS event and the CURRENT event.
+    -- LAG(event_time) IS NULL on the user's first event → treat as a new session boundary.
+    CASE
+      WHEN LAG(event_time) OVER (PARTITION BY user_id ORDER BY event_time) IS NULL THEN 1
+      WHEN date_diff(
+             'minute',
+             LAG(event_time) OVER (PARTITION BY user_id ORDER BY event_time),
+             event_time
+           ) > 30 THEN 1
+      ELSE 0
+    END AS is_new_session
+  FROM iceberg.analytics.events
+  WHERE event_time >= DATE '2026-01-01'  -- prune to the window the question asks for
+),
+sessions AS (
+  SELECT
+    user_id,
+    event_time,
+    -- Running sum of is_new_session within each user's ordered events produces a monotonically
+    -- increasing session_id. Default frame on SUM() OVER (ORDER BY ...) is fine here — it includes
+    -- every row from the start of the partition through the current row, which is exactly what we want.
+    SUM(is_new_session) OVER (PARTITION BY user_id ORDER BY event_time) AS session_id
+  FROM events_with_gap
+)
+SELECT
+  user_id,
+  COUNT(DISTINCT session_id) AS session_count
+FROM sessions
+GROUP BY user_id;
+```
+
+**Why each piece is what it is.**
+
+1. **`date_diff('minute', LAG(event_time) OVER (...), event_time) > 30`** — `LAG(event_time)` returns the prior event's timestamp (NULL for the first event); `date_diff('minute', earlier, later)` returns a `bigint` minute count (positive when `later > earlier`). Compare to **`30`** (a plain number), NEVER to **`INTERVAL '30' MINUTE`** — `date_diff` returns `bigint`, and `bigint > INTERVAL` is a type mismatch.
+2. **The CASE for `LAG(...) IS NULL THEN 1`** — without this, the very first event for each user would get `is_new_session = 0` (because `date_diff('minute', NULL, event_time)` returns NULL, and `NULL > 30` evaluates to UNKNOWN → falls through to ELSE), and that user's first session_id would never increment off 0. The explicit NULL-check pins it to 1 so every user's first event starts session 1, not session 0.
+3. **`SUM(is_new_session) OVER (PARTITION BY user_id ORDER BY event_time)` for the session_id** — a running sum of 0/1 flags is the classic gaps-and-islands "give each island a unique id" trick. Events 1–5 with gaps that don't exceed 30 min get `session_id = 1`; the first event after a >30-min gap gets `is_new_session = 1` → running sum becomes 2 → that event and the next contiguous run get `session_id = 2`; and so on.
+4. **`COUNT(DISTINCT session_id) GROUP BY user_id`** — once each event has its `session_id`, the per-user session count is just a distinct count over that column. (`MAX(session_id) GROUP BY user_id` would also work and is slightly cheaper since session_ids are dense per user starting at 1 — either is correct.)
+
+**DO NOT WRITE — the iter670 Q3 bug + close cousins.**
+
+| DO NOT write | Why it fails (or is silently wrong) | Use instead |
+|---|---|---|
+| `event_time - LAG(event_time) OVER (PARTITION BY user_id ORDER BY event_time) > INTERVAL '30' MINUTE` (the **exact iter670 Q3 fab**) | **INVALID Trino 467.** Trino has NO `timestamp - timestamp -> interval` operator. The left side `event_time - LAG(event_time)` is a subtraction of two timestamp values; it does not parse at all, regardless of what the right side compares to. Postgres and Spark accept this form; Trino does not. | `date_diff('minute', LAG(event_time) OVER (PARTITION BY user_id ORDER BY event_time), event_time) > 30` (LAG on the EARLIER side, current event on the LATER side; compare against the plain integer `30`, NOT an INTERVAL literal). |
+| `date_diff('minute', LAG(event_time) OVER (...), event_time) > INTERVAL '30' MINUTE` | **Type mismatch.** `date_diff` returns `bigint`, and Trino does not compare `bigint > INTERVAL`. | Drop the `INTERVAL`: `... > 30`. The unit ("minute") is already in the `date_diff` call. |
+| `event_time - LAG(event_time) OVER (...) > 30 * INTERVAL '1' MINUTE` | Same root problem as row 1 — the LEFT side is still `timestamp - timestamp`, which does not parse. The right side being arithmetic on an interval doesn't help. | `date_diff('minute', LAG(...), event_time) > 30`. |
+| `EXTRACT(MINUTE FROM (event_time - LAG(event_time) OVER (...)))` (Postgres-style "extract the minute field from the interval") | Same root problem — `event_time - LAG(event_time)` does not produce an interval value in Trino, so `EXTRACT(MINUTE FROM ...)` never gets to run. | `date_diff('minute', LAG(...), event_time)` — returns the integer minute count directly. |
+| `TIMESTAMPDIFF(MINUTE, LAG(event_time) OVER (...), event_time)` | **NOT a Trino function** — `TIMESTAMPDIFF` is MySQL / SQL Server dialect. Trino uses `date_diff` (snake_case) with a quoted unit string. | `date_diff('minute', earlier, later)`. |
+| `WHERE date_diff('minute', LAG(event_time) OVER (...), event_time) > 30` (the gap test in the **outer WHERE**, not as a CASE inside a CTE) | **Window-function-in-WHERE is REJECTED by the Trino 467 analyzer** — window functions are only allowed in the `SELECT` and `ORDER BY` clauses. The error is *"WHERE clause cannot contain window functions"*. | Compute the boolean inside a CTE's `SELECT` (as the CASE-with-`is_new_session` form above does), then filter on the CTE column in the outer `WHERE` if needed. |
+| `LAG(event_time, INTERVAL '30' MINUTE) OVER (...)` (treating the LAG offset as a time interval) | **WRONG — LAG's offset is a row count, not a time interval.** `LAG(event_time, 1)` returns the value from **one row back**, not "the value from 30 minutes back." For "value as of 30 minutes ago", you need a different pattern (an as-of self-join, or a windowed `MAX(... ) OVER (... RANGE BETWEEN INTERVAL '30' MINUTE PRECEDING AND CURRENT ROW)` if your Trino build supports RANGE with INTERVAL bounds — Trino 467 does for numeric/temporal ORDER BY columns per [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html)). | For the gap-test use case, the LAG-then-`date_diff` form above is the correct shape — you want the gap between **consecutive events**, not between "now and 30 minutes ago." |
+
+**Variants.**
+
+- **Different gap threshold.** Replace `> 30` with `> 60` (1-hour idle = new session), `> 1800` if you switched the unit to `'second'`, etc. Always keep the unit string in `date_diff` in sync with the integer compared.
+- **Different unit (seconds, hours).** `date_diff('second', LAG(ts), ts) > 1800` (30 min in seconds) or `date_diff('hour', LAG(ts), ts) > 1` (1 hour as integer hours — note this fires only on whole-hour boundaries, so prefer `'minute' > 60` for "more than 1 hour"). The unit is a quoted string; valid values are `'second'`, `'minute'`, `'hour'`, `'day'`, `'week'`, `'month'`, `'quarter'`, `'year'`.
+- **Per-session aggregates (dwell time / event count per session).** After the `sessions` CTE assigns `session_id`, group by `(user_id, session_id)` to get per-session stats: `SELECT user_id, session_id, COUNT(*) AS events_in_session, MIN(event_time) AS session_start, MAX(event_time) AS session_end, date_diff('minute', MIN(event_time), MAX(event_time)) AS dwell_minutes FROM sessions GROUP BY user_id, session_id`.
+- **Session boundary based on a different signal (not time-gap, but event_type = 'logout').** Replace the `is_new_session` CASE with `CASE WHEN LAG(event_type) OVER (...) = 'logout' OR LAG(event_type) OVER (...) IS NULL THEN 1 ELSE 0 END` — same running-SUM `session_id` trick, different boundary rule.
+- **Time-to-first-response per ticket.** Same pattern, no sessionization: `SELECT ticket_id, date_diff('minute', created_at, first_reply_at) AS response_minutes FROM tickets`. Pair with `format('%dh %dm', d / 60, d % 60)` if you want a `'2h 15m'` display string (see [r23 §3.1A `format` vs `concat` with `date_diff`](23-sql-best-practices-olap.md)).
+
+**Cross-references.** The [r23 §temporal-minus-temporal banner](23-sql-best-practices-olap.md#leading-canonical--days--minutes--seconds-between-two-dates-or-timestamps-and-the-column-scope-discipline-that-goes-with-it) cites the Trino 467 operator table verbatim and lists every `date - date` / `timestamp - timestamp` DO-NOT-WRITE form with the `date_diff` fix. The [r07 §Pattern B (LAG/LEAD)](#pattern-b-lag--lead-compare-to-previous-or-next-row) above is the parent LAG canonical. The [r07 §Pattern B2 (YoY/MoM with LAG)](#pattern-b2-leading-canonical--period-over-period-yoy-vs-mom-with-window-functions-year-over-year--same-month-last-year--month-over-month--compare-to-last-year--lag-12-months--growth-vs-last-year--period-over-period) below uses LAG over calendar buckets (rows-vs-periods nuance is different — there, gaps in the series silently shift the comparison; here, gaps in event_time are exactly what we want to detect). The [r23 §completed-age date_diff canonical](23-sql-best-practices-olap.md#leading-canonical--days-between-two-dates-and-the-column-scope-discipline-that-goes-with-it) covers the date-units side of the same family (years for age, days for tenure).
+
 ### Pattern B2: LEADING CANONICAL — Period-over-period: YoY vs MoM with window functions (year over year / same month last year / month over month / compare to last year / LAG 12 months / growth vs last year / period over period)
 
 > **Read this BEFORE writing any "year-over-year", "YoY", "same month last year", "month over month", "MoM", "compare to last year", "growth vs last year", or "period over period" SQL on Trino + Iceberg.** `LAG` is the right tool, but the **offset** matters and silently produces the wrong metric if you pick the default.
