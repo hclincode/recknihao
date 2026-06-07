@@ -404,7 +404,11 @@ If symptoms are "the Spark job reprocessed a day of Kafka messages but Postgres 
 
 ### Copy-on-Write vs Merge-on-Read for high-frequency CDC
 
-Iceberg supports two strategies for row-level updates and deletes — **Copy-on-Write (CoW)** and **Merge-on-Read (MoR)** — and the choice has a large impact on CDC pipeline cost. On Iceberg 1.5.2, **CoW is the default for all three operations** (UPDATE, DELETE, MERGE). It is the right default for low-frequency updates, and the wrong default for high-frequency CDC into large tables.
+Iceberg supports two strategies for row-level updates and deletes — **Copy-on-Write (CoW)** and **Merge-on-Read (MoR)** — and the choice has a large impact on CDC pipeline cost. On Iceberg 1.5.2, **CoW is the default for all three operations** (UPDATE, DELETE, MERGE) **at the library-property level** (verified from `TableProperties.java`). This default is honored by the **Spark writer** — Spark Structured Streaming + MERGE INTO will rewrite whole files unless you explicitly flip the table to MoR.
+
+> **Important Trino-execution caveat (separate from the Spark-CDC discussion below).** Trino 467's Iceberg writer is **merge-on-read only regardless of the table's `write.delete.mode`/`write.update.mode`/`write.merge.mode` property** — see [trinodb/trino#17272](https://github.com/trinodb/trino/issues/17272). So row-level UPDATE/DELETE/MERGE run **from Trino** always produces position-delete files; the Spark-CDC CoW-vs-MoR discussion below applies to **Spark-executed** writes. Full CoW support in Trino is a roadmap item, NOT the Trino 467 default. **DO-NOT-WRITE:** "Trino Iceberg UPDATE/DELETE uses CoW by default" — FALSE on Trino 467.
+
+For Spark-executed CDC writes (the focus of this section), CoW is the right library default for low-frequency updates and the wrong default for high-frequency CDC into large tables.
 
 **How they differ:**
 

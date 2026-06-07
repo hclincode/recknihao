@@ -1,112 +1,117 @@
-# Iter669 Judge Feedback
+# Iter670 — Judge Feedback
 
-**Iteration:** 669
+**Iteration:** 670
 **Phase:** extended
-**Overall avg:** 4.375 / 5 → **PASS**
-
----
+**Overall avg:** 4.125 / 5 → **PASS** (≥ 3.5)
 
 ## Per-question scores
 
-### Q1 — Iceberg row-level UPDATE (one customer's email across all rows)
+### Q1 — MoR vs CoW re-probe (Iceberg UPDATE/DELETE storage behavior + maintenance)
+- **Accuracy: 4** — Correctly frames Trino 467 Iceberg UPDATE/DELETE as **Merge-on-Read by default** (position-delete files; original data files untouched for DELETE). Maintenance recipe (`ALTER TABLE ... EXECUTE optimize(file_size_threshold => '256MB')` then `EXECUTE expire_snapshots(retention_threshold => '7d')`) is valid Trino 467 syntax — DataSize unit-suffixed and retention_threshold confirmed against trino.io/docs/467/connector/iceberg. Does NOT claim "CoW default" (the iter669 regression). One overstatement: blanket "Iceberg never rewrites data files" is slightly too strong — Trino-executed UPDATE writes NEW data files for changed rows alongside position-delete files for the old rows, and `optimize` itself rewrites. Minor framing issue; doesn't materially mislead but loses one point.
+- **Completeness: 4** — Covers storage-file behavior, perf-degradation mechanism (many small delete files), and the two key maintenance procedures. Could have mentioned the #24086 nuance (Trino EXECUTE optimize compacts position deletes only with whole-partition predicates) or the Spark-only rewrite_position_delete_files path — nice-to-haves, not required.
+- **Clarity: 4** — Clear flow: what happens on storage → why perf degrades → what to run. Position-delete-file concept introduced cleanly.
+- **Actionability: 4** — Engineer can copy the two ALTER TABLE EXECUTE statements directly. Concrete thresholds given.
+- **Q1 avg: 4.00**
 
-**Answer:** `UPDATE iceberg.analytics.orders SET email = ... WHERE customer_id = 42;` + commentary ("CoW default", expire_snapshots releases old files, no special syntax).
-
-| Dim | Score | Note |
-|---|---|---|
-| Accuracy | 3.5 | Core UPDATE SQL is exactly correct for Trino 467 / Iceberg v2 (verified at trino.io/docs/467/sql/update.html + connector/iceberg.html). **HOWEVER the "CoW default" claim is materially wrong.** Trino 467 Iceberg writes are **merge-on-read (MoR) by default** — UPDATE produces position delete files + new data files, not whole-file rewrites. CoW is a Spark-side option, not Trino's default. Verified via Starburst blog ("Trino write operations on Iceberg tables follow the merge-on-read design") and trino.io issue #17272 (CoW mode is an open feature request, not the default). |
-| Completeness | 3.5 | Covers core UPDATE + snapshot lifecycle + expire_snapshots reclaim. Missing: any mention that the UPDATE will produce position-delete + new data files (relevant to maintenance/file count). |
-| Clarity | 4 | Plain SQL + one-sentence narrative. Easy to follow. |
-| Actionability | 4 | Engineer can copy/paste and run. The CoW misframing won't break the query but will confuse them when they inspect the resulting file layout. |
-| **Q1 avg** | **3.75** | |
-
-**FLAG:** "CoW default" is the kind of tangential-but-wrong storage-mode note that erodes trust. If an engineer reads this and then runs `SELECT * FROM "orders$files"` expecting whole-file rewrites, they will see position delete files instead and be confused.
+**MoR-vs-CoW FIX-A (Q1) verdict: CLOSED.** The responder no longer says "CoW default" for Trino 467 Iceberg. Framing now correctly identifies MoR-default + position-delete files, which was the exact iter669 regression that FIX-A targeted. The "never rewrites data files" overstatement is a separate (smaller) framing nit, not a CoW-default regression. **FIX-A held.**
 
 ---
 
-### Q2 — Iceberg DELETE for GDPR (permanently remove all rows for one user_id)
-
-**Answer:** `DELETE FROM iceberg.analytics.events WHERE user_id = '...';` + MoR position-delete explanation + `ALTER TABLE ... EXECUTE expire_snapshots(retention_threshold => '7d')` + Spark `CALL iceberg.system.rewrite_position_delete_files(...)` + 7d min-retention + `iceberg.expire-snapshots.min-retention` config lever for faster GDPR erasure.
-
-| Dim | Score | Note |
-|---|---|---|
-| Accuracy | 4.5 | Core DELETE SQL exact. MoR + position-delete framing correct (trino.io/docs/467/connector/iceberg.html: "Tables using v2 of the Iceberg specification support deletion of individual rows by writing position delete files"). `expire_snapshots` ALTER TABLE EXECUTE form correct. 7d min-retention default + `iceberg.expire-snapshots.min-retention` lever correct. `rewrite_position_delete_files` Spark-only claim **verified correct** — Trino roadmap issue #27371 lists adding this procedure as future work; it is not in Trino 467. Minor nuance: Trino's OPTIMIZE *does* have partial position-delete cleanup when whole partitions are selected via enforced predicates (per trino issue #24086), but the dedicated dense-pack procedure remains Spark-only. The responder's framing is essentially correct, just slightly less nuanced. |
-| Completeness | 4.5 | Hits all four GDPR layers: logical delete, position-delete physical state, snapshot retention reclaim, compaction. Missing: optional note that for GDPR-grade erasure you also need to run `remove_orphan_files` after expire_snapshots. |
-| Clarity | 4 | Three-stage mental model (logical delete → MoR markers → physical cleanup) is well-sequenced. Slight jargon density ("position-delete marker files", "min-retention") could trip a beginner. |
-| Actionability | 4.5 | Engineer has both the immediate query and the cleanup path with concrete tunables. |
-| **Q2 avg** | **4.375** | |
+### Q2 — INSERT INTO ... SELECT nightly append
+- **Accuracy: 5** — `INSERT INTO iceberg.analytics.orders SELECT * FROM iceberg.analytics.staging_orders` is the canonical Trino 467 Iceberg atomic-snapshot append. `CREATE OR REPLACE TABLE AS` confirmed as a valid Trino 467 alternative for full clear-and-load (verified via trino.io/docs/467/connector/iceberg).
+- **Completeness: 5** — Core append + DELETE staging cleanup + alternative pattern covered.
+- **Clarity: 5** — Direct, copy-paste-ready.
+- **Actionability: 5** — Engineer runs it as-is.
+- **Q2 avg: 5.00**
 
 ---
 
-### Q3 — MERGE upsert (nightly batch insert + update on customer_id)
+### Q3 — Sessionization 30-min gap (gaps-and-islands on timestamps)
+- **Accuracy: 1** — **CRITICAL DIALECT BUG.** The gap test uses direct timestamp subtraction: `event_time - LAG(event_time) OVER (...) > INTERVAL '30' MINUTE`. **Trino 467 does NOT support `timestamp - timestamp`.** Verified against trino.io/docs/current/functions/datetime: the `-` operator on timestamps only accepts an interval on the right side (e.g., `timestamp - interval`), never timestamp-minus-timestamp. Correct Trino 467 idiom:
+  ```sql
+  date_diff('minute', LAG(event_time) OVER (PARTITION BY user_id ORDER BY event_time), event_time) > 30
+  ```
+  Submitted query fails with a type/parse error at planning time. The gaps-and-islands STRUCTURE (LAG + CASE → is_new_session → running SUM = session_id → COUNT DISTINCT session_id per user) is conceptually correct and the right pattern, but the gap-comparison expression does not parse on Trino 467. Engineer cannot run as-is.
+- **Completeness: 4** — Both halves answered (assign session_id per event + count sessions per user); two CTEs as expected. Pattern correct.
+- **Clarity: 4** — CTE structure readable; logic explained.
+- **Actionability: 1** — Will fail at runtime. Engineer has to debug and rewrite the gap expression.
+- **Q3 avg: 2.50**
 
-**Answer:** Canonical `MERGE INTO ... USING ... ON ... WHEN MATCHED THEN UPDATE SET ... WHEN NOT MATCHED THEN INSERT (...) VALUES (...)` with explicit column lists on both branches + `current_timestamp` + caveat that Trino 467 requires explicit columns (no INSERT * / UPDATE SET * Spark shorthand).
-
-| Dim | Score | Note |
-|---|---|---|
-| Accuracy | 5 | Exact canonical Trino 467 MERGE syntax (verified trino.io/docs/467/sql/merge.html). Both branches use explicit column lists as required. `current_timestamp` is a valid Trino scalar. Atomic single-statement framing correct. Spark-shorthand-not-supported caveat correct (and saves the engineer from a parse error). |
-| Completeness | 5 | All three required clauses, dedup-via-source contract is implicit, atomic semantics noted. Could optionally mention the "one source row per target key" requirement (MERGE fails if a target row matches multiple source rows) but this is a nice-to-have, not a gap. |
-| Clarity | 4.5 | Standard MERGE template; column lists make the data flow self-documenting. |
-| Actionability | 5 | Drop-in dbt-friendly statement. |
-| **Q3 avg** | **4.875** | |
+**Q3 timestamp-subtraction verdict: INVALID on Trino 467.** Correct form: `date_diff('minute', LAG(event_time) OVER (PARTITION BY user_id ORDER BY event_time), event_time) > 30`.
 
 ---
 
-### Q4 — Month-over-month revenue growth %
-
-**Answer:** CTE `monthly_revenue` with `DATE_TRUNC('month', order_date) + SUM(amount) GROUP BY`; outer SELECT uses `LAG(total_revenue, 1) OVER (ORDER BY month)` four times for prev/diff/divide; `CASE WHEN LAG IS NULL THEN NULL` for first-month guard; `NULLIF` for divide-by-zero guard; `* 1.0` for decimal coercion; date-spine caveat for gap months.
-
-| Dim | Score | Note |
-|---|---|---|
-| Accuracy | 5 | All Trino 467 dialect-valid. LAG in SELECT/CASE (not WHERE) — valid. NULLIF divide-by-zero idiom correct. `* 1.0` decimal coercion correct (Trino integer division would truncate without it). Date-spine caveat for gap months accurate — LAG returns the previous *row*, not the previous *calendar month*, so a gap month produces a misleading "month-over-month" against an older month. |
-| Completeness | 4.5 | Hits all five expected layers (monthly agg, LAG, first-row NULL guard, div-by-zero guard, decimal coercion) + the date-spine subtlety. |
-| Clarity | 4 | Slightly verbose: 4x repetition of `LAG(total_revenue,1) OVER (ORDER BY month)` instead of one more CTE adding `prev_month_revenue` once. Valid but harder to read. |
-| Actionability | 4.5 | Engineer can paste this into the BI tool and it works. The verbosity is a maintenance smell but not a defect. |
-| **Q4 avg** | **4.5** | |
+### Q4 — Status pivot (one row per day, side-by-side counts)
+- **Accuracy: 5** — `COUNT(CASE WHEN status='completed' THEN 1 END)` is correct (CASE returns 1 or NULL; COUNT ignores NULL). `COUNT(*) FILTER (WHERE status='completed')` confirmed as Trino 467 standard-SQL conditional aggregation. Both forms valid.
+- **Completeness: 5** — All three statuses pivoted; alternative idiom offered; GROUP BY + ORDER BY correct.
+- **Clarity: 5** — Pivot pattern clearly demonstrated.
+- **Actionability: 5** — Copy-paste-ready.
+- **Q4 avg: 5.00**
 
 ---
 
 ## Overall
 
-| Q | Avg |
-|---|---|
-| Q1 UPDATE | 3.75 |
-| Q2 DELETE/GDPR | 4.375 |
-| Q3 MERGE | 4.875 |
-| Q4 MoM growth | 4.5 |
-| **Overall** | **4.375** |
+| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|----------|--------------|---------|---------------|-----|
+| Q1 (MoR/CoW re-probe) | 4 | 4 | 4 | 4 | 4.00 |
+| Q2 (INSERT SELECT) | 5 | 5 | 5 | 5 | 5.00 |
+| Q3 (sessionization) | 1 | 4 | 4 | 1 | 2.50 |
+| Q4 (status pivot) | 5 | 5 | 5 | 5 | 5.00 |
+| **Overall** | | | | | **4.125** |
 
-**Verdict: PASS** (4.375 ≥ 3.5).
+**PASS/FAIL: PASS (4.125 ≥ 3.5).**
 
-**Flagged weak answer:** Q1 — the "CoW default" claim is materially wrong for Trino 467 (Trino writes MoR by default; CoW is a Spark/upstream-Iceberg option not the Trino default). Core UPDATE SQL is correct, so the answer is still net-passing, but this is a recurring kind of error: tangential storage-mode notes drift from Trino-specific truth into generic-Iceberg lore.
+**Flagged weak answer:** Q3 contains an invalid Trino 467 expression that will fail at parse/plan time. Overall PASS driven by Q2/Q4 perfect scores and a closed iter669 FIX-A on Q1. Per the run-prompt instruction, no per-question quality-gate override applied — overall average governs.
+
+---
+
+## Critical findings
+
+1. **iter669 MoR-vs-CoW FIX-A (Q1): CLOSED.** Responder correctly frames Trino 467 Iceberg writes as MoR-default-with-position-delete-files. No "CoW default" claim. The 16-edit teacher patch across r17/r05/r11/r13/r14/r16 successfully inoculated the keyword routes. Hold the line — do not let this regress.
+
+2. **NEW gap on Q3 (sessionization):** Direct `timestamp - timestamp` subtraction is invalid Trino 467 dialect. Trino docs only allow `-` between timestamp and interval (not timestamp and timestamp). Engineer-impact is high — the query won't run. Likely the resource that backed this answer has the stale form embedded in a sessionization / gaps-and-islands snippet.
+
+3. **Trino 467 dialect facts verified:** `optimize(file_size_threshold => '256MB')` confirmed; `expire_snapshots(retention_threshold => '7d')` confirmed; `INSERT INTO ... SELECT` atomic append confirmed; `CREATE OR REPLACE TABLE AS` confirmed; `COUNT(CASE WHEN ... THEN 1 END)` and `COUNT(*) FILTER (WHERE ...)` confirmed.
 
 ---
 
-## Teacher feedback (recommendation for iter670)
+## Recommended iter671 — FIX-A: timestamp-difference-needs-date_diff inoculation
 
-**Recommend iter670 = FIX-A: Clarify Trino-Iceberg default delete/update mode is MoR (not CoW).**
+**Target:** sessionization, gaps-and-islands, time-bucketing, "events more than N minutes apart" routes across `resources/`.
 
-The Q1 CoW-default error is the only verified-false claim in this iteration and it is a recurring confusion vector (Iceberg-spec default vs Trino-write-mode default). Recommended targeted edit:
+**The inoculation rule to add at every relevant keyword anchor:**
 
-1. **r05 / r16 / r17 row-level DML sections** — surface near the canonical UPDATE / DELETE / MERGE examples the explicit statement: **"Trino 467's Iceberg connector writes in merge-on-read (MoR) mode by default. UPDATE / DELETE / MERGE on Iceberg v2 tables produce position delete files, not full-file rewrites. CoW mode is a Spark-side option and is tracked as a Trino roadmap item (trinodb/trino#17272); it is not the Trino default."**
+> **Trino 467 does NOT support `timestamp - timestamp`.** The `-` operator on timestamps works only with an interval on the right (`timestamp - INTERVAL '30' MINUTE` returns a timestamp). To compute the duration between two timestamps, use `date_diff(unit, ts1, ts2)`, which returns `ts2 - ts1` in the requested unit.
+>
+> **DO-NOT-WRITE:** `event_time - LAG(event_time) OVER (...) > INTERVAL '30' MINUTE` — parse/type error on Trino 467.
+>
+> **CORRECT IDIOM:** `date_diff('minute', LAG(event_time) OVER (PARTITION BY user_id ORDER BY event_time), event_time) > 30`
 
-2. **r16 (maintenance) cross-reference** — add a one-line cross-ref next to the `rewrite_position_delete_files` Spark-only note: **"Trino's `ALTER TABLE ... EXECUTE optimize` can compact position-delete files only when an enforced whole-partition predicate is supplied (trinodb/trino#24086); for general position-delete compaction, the dedicated procedure remains Spark-only (Trino roadmap #27371)."**
+**Keyword anchors to update / add:**
+- Sessionization / "30-minute gap" / "session window" patterns
+- Gaps-and-islands timestamp patterns (LAG-based gap detection)
+- Time-difference SQL idioms ("time between events", "duration", "elapsed", "minutes between")
+- Existing "date-minus-date is invalid" DO-NOT-WRITE banners — extend to "timestamp-minus-timestamp ALSO invalid", same fix (`date_diff`)
 
-This is a single small, surgical clarification — no broad rewrite. All other answers (Q2, Q3, Q4) are clean and need no edits.
+**Search-then-fix sweep:** grep `resources/` for `event_time -`, `ts -`, `timestamp - LAG`, and any LAG-based gap snippets. Replace any direct subtraction with `date_diff('minute', ..., ...)`. Reconcile-don't-append: fix in place; don't leave the stale form anywhere — responder may cite the wrong one.
 
-**Do NOT bump training/state.json** (already at 669 per teacher).
-
-**Reconcile-don't-append discipline:** if any existing r-file currently says "Trino Iceberg defaults to CoW" or implies CoW-default, FIX-A must also remove/correct that line in the same pass.
+**Why this is the right FIX-A for iter671:** Q3 is a near-canonical SaaS analytical question (sessionization), and the gap-comparison error is a single-line fix the responder will absorb cleanly if the inoculation lands at the right keyword route. Without this fix, the next sessionization probe will fail again.
 
 ---
+
+## Resources to audit
+- `resources/04-common-analytical-query-patterns.md` and `resources/06-analytical-query-patterns-iceberg-trino.md` (likely homes for sessionization / gaps-and-islands snippets) — audit for `timestamp - timestamp` patterns.
+- Any "time-series SQL" or "funnel" sections that compute event-to-event durations.
+- The "date-minus-date is invalid" banners (already established) — extend them to cover the timestamp case explicitly.
+
+## What's holding (preserve)
+- iter669 MoR-vs-CoW FIX-A (16-edit teacher patch) — CONFIRMED HELD via Q1.
+- iter668 r27 rollback-CALL form fix.
+- iter667 DataSize-unit-suffix anchors (r17/r12/r11) — verified intact via Q1 maintenance recipe.
+- iter666 Spark-CALL→Trino-ALTER-TABLE-EXECUTE engine-dialect fix.
+- Federation HARD LOCK on r22.
 
 ## Sources verified
-
-- [Trino 467 UPDATE](https://trino.io/docs/467/sql/update.html)
-- [Trino 467 DELETE](https://trino.io/docs/467/sql/delete.html)
-- [Trino 467 MERGE](https://trino.io/docs/467/sql/merge.html)
-- [Trino 467 Iceberg connector](https://trino.io/docs/467/connector/iceberg.html)
-- [Starburst: Apache Iceberg DML & Maintenance in Trino](https://www.starburst.io/blog/apache-iceberg-dml-update-delete-merge-maintenance-in-trino/) — confirms Trino writes MoR by default
-- [trinodb/trino#17272 — Support copy-on-write mode for Iceberg write](https://github.com/trinodb/trino/issues/17272) — confirms CoW is not the Trino default
-- [trinodb/trino#24086 — Delete files not removed after Iceberg maintenance ops](https://github.com/trinodb/trino/issues/24086) — confirms partial Trino OPTIMIZE position-delete cleanup
-- [trinodb/trino#27371 — Iceberg roadmap incl. RewritePositionDeleteFiles for Trino](https://github.com/trinodb/trino/issues/27371) — confirms `rewrite_position_delete_files` is Spark-only at Trino 467
+- [Trino datetime functions and operators (current docs)](https://trino.io/docs/current/functions/datetime.html) — confirms no timestamp-minus-timestamp operator; `date_diff(unit, ts1, ts2)` is the required idiom.
+- [Trino 467 Iceberg connector](https://trino.io/docs/467/connector/iceberg.html) — confirms INSERT, CREATE OR REPLACE TABLE AS, optimize/expire_snapshots procedure syntax with DataSize unit suffixes and retention_threshold duration format.

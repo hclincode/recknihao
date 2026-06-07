@@ -366,7 +366,10 @@ This is the **complete** list of schema-evolution operations that Trino 467 cann
 -- Step 1: Add the new column with the target type.
 ALTER TABLE iceberg.analytics.events ADD COLUMN user_id_v2 INTEGER;
 
--- Step 2: Backfill via CAST. Trino UPDATE on CoW tables; Spark INSERT OVERWRITE for whole-table rewrites.
+-- Step 2: Backfill via CAST. Trino UPDATE (note: Trino 467's Iceberg writer is MoR-only
+-- regardless of the table's write.update.mode — UPDATEs from Trino always produce
+-- position-delete files per trinodb/trino#17272). For larger tables where you do not want
+-- position-delete file accumulation, use Spark INSERT OVERWRITE for a whole-table rewrite.
 UPDATE iceberg.analytics.events
    SET user_id_v2 = CAST(user_id AS INTEGER)
  WHERE user_id_v2 IS NULL
@@ -514,17 +517,24 @@ ALTER TABLE iceberg.analytics.events
 
 If you want existing rows to have a non-NULL value for `new_status`, you must **explicitly backfill** — the DDL alone will not do it on Iceberg 1.5.2. There are two patterns:
 
-**Pattern A — Trino `UPDATE` (simpler, but creates MoR delete files if the table is MoR-configured).**
+**Pattern A — Trino `UPDATE` (simpler; on Trino 467 this ALWAYS produces position-delete files — the writer is MoR-only regardless of the table's `write.update.mode` property).**
 
 ```sql
--- Trino 467 UPDATE. Works on Iceberg 1.5.2.
+-- Trino 467 UPDATE. Works on Iceberg 1.5.2 (format-version 2 required for row-level deletes).
 UPDATE iceberg.analytics.events
    SET new_status = 'pending'
  WHERE new_status IS NULL;
 ```
 
-- **On CoW tables (the Iceberg 1.5.2 default for `write.update.mode`):** Trino rewrites every affected data file with the new column populated. Storage temporarily grows by ~table size during the rewrite; old files are released by the next `expire_snapshots` window.
-- **On MoR tables (only if you explicitly set `write.update.mode = 'merge-on-read'` via Spark):** Trino writes **equality delete files** that mask the old (NULL) rows, plus new data files for the new (`'pending'`) rows. Equality delete files have the known [apache/iceberg #12838](https://github.com/apache/iceberg/issues/12838) dangling-delete bug on Iceberg 1.5.2 (no clean workaround until you upgrade to Iceberg 1.8+). See [§ 1c. Equality delete files from CDC pipelines](#1c-equality-delete-files-from-cdc-pipelines-debezium--no-standalone-procedure-exists-in-iceberg-152) for the full incident playbook. **On MoR, prefer Pattern B (Spark INSERT OVERWRITE) for backfill instead.**
+- **What Trino 467 actually writes (the only behavior that matters on this stack for Trino-issued DML).** Trino 467's Iceberg connector performs row-level UPDATE/DELETE/MERGE in **merge-on-read (MoR) mode by DEFAULT** — it writes **position-delete files** (plus new data files for changed rows), NOT a full copy-on-write file rewrite. This is true **regardless of whether the table's `write.update.mode` property is `copy-on-write` or `merge-on-read`** — Trino 467's writer is MoR-only per [trinodb/trino#17272](https://github.com/trinodb/trino/issues/17272) ("Today Iceberg writes only support merge-on-read mode"). Full copy-on-write support in Trino is a roadmap item, NOT the Trino 467 default. So when this Pattern A UPDATE runs from Trino, you get position-delete files on disk even if `SHOW CREATE TABLE` reports `write.update.mode = 'copy-on-write'`.
+- **Implication for ops.** Many small UPDATE/DELETE operations from Trino accumulate position-delete files → read amplification grows over time → schedule `rewrite_position_delete_files` (Spark-only — see § 1b below) plus periodic `EXECUTE optimize` to fold them back into data files.
+- **Why an UPDATE on a "supposedly-CoW" table can also produce equality delete files in some configurations.** Some Iceberg writer paths (notably certain Spark CDC pipelines on tables explicitly set to MoR) emit equality delete files for UPDATEs to mask the old rows. Equality delete files (`content = 2` in `$files`) have the known [apache/iceberg #12838](https://github.com/apache/iceberg/issues/12838) dangling-delete bug on Iceberg 1.5.2 (no clean workaround until you upgrade to Iceberg 1.8+). Trino 467 itself writes **position** deletes (not equality deletes) for UPDATE/DELETE/MERGE; equality deletes typically arrive from Spark CDC writers — see [§ 1c. Equality delete files from CDC pipelines](#1c-equality-delete-files-from-cdc-pipelines-debezium--no-standalone-procedure-exists-in-iceberg-152) for the incident playbook.
+- **When to prefer Pattern B over Pattern A.** If the table is large and you do NOT want any delete files (position OR equality) to accumulate, run Pattern B (Spark `INSERT OVERWRITE`) instead — it rewrites whole files in one commit and leaves zero delete files behind. For small-to-mid tables where occasional position-delete accumulation is fine, Pattern A is simpler.
+
+> **DO-NOT-WRITE (this is the iter669 Q1 defect — keep yourself out of it):**
+> - "Trino Iceberg UPDATE/DELETE uses copy-on-write by default" — **FALSE on Trino 467.** Trino's writer is MoR-only per #17272.
+> - "CoW is the default" — true for the **Iceberg 1.5.2 library property `write.update.mode`** (per `TableProperties.java`); FALSE for **what Trino 467 actually executes** — that is always MoR.
+> - The CORRECT framing when answering an UPDATE/DELETE/MERGE question in a Trino-execution context: "Trino 467 writes position-delete files (MoR) for row-level UPDATE/DELETE/MERGE regardless of the table property; copy-on-write is a Spark-side write-mode option and is a Trino roadmap item, not the 467 default."
 
 **Pattern B — Spark `INSERT OVERWRITE` (rewrites the whole table; no delete files).**
 
@@ -645,12 +655,19 @@ Here's what happens during normal use:
 |---|---|
 | `INSERT` (10K rows) | One new Parquet data file + one new manifest file + one new snapshot |
 | `INSERT` from a 5-minute streaming job | One new Parquet file per micro-batch — **288 new files per day per partition** (streaming pipeline example: 12 micro-batches/hour × 24 hours = 288. For a daily batch ETL, expect ~1–5 files per partition per day instead — the file-count problem only gets dramatic with frequent micro-batches or many concurrent writers.) |
-| `UPDATE` / `DELETE` (format-version 2, **MoR explicitly enabled**) | A **delete file** marking which rows in existing files to ignore + new snapshot |
-| `UPDATE` / `DELETE` (format-version 2, **CoW = Iceberg 1.5.2 default**) | Full Parquet data files rewritten without the affected rows; no delete files produced; new snapshot |
-| `MERGE INTO` (dimension upsert, **CoW = Iceberg 1.5.2 default**) | Full Parquet data files rewritten with merged content; no delete files; new snapshot |
-| `MERGE INTO` (dimension upsert, **MoR explicitly enabled**) | New data files for the changed rows + delete files for the old rows + new snapshot |
+| `UPDATE` / `DELETE` from **Trino 467** (format-version 2, ANY `write.update.mode`/`write.delete.mode` setting) | **Position-delete files** marking which rows in existing files to ignore + new data files for changed rows + new snapshot. Trino 467's Iceberg writer is MoR-only regardless of the table property — see callout below. |
+| `UPDATE` / `DELETE` from **Spark** (format-version 2, **MoR explicitly enabled**) | A **delete file** marking which rows in existing files to ignore + new snapshot |
+| `UPDATE` / `DELETE` from **Spark** (format-version 2, **CoW = Iceberg 1.5.2 library default**) | Full Parquet data files rewritten without the affected rows; no delete files produced; new snapshot |
+| `MERGE INTO` from **Trino 467** (ANY `write.merge.mode` setting) | **Position-delete files** + new data files for changed rows + new snapshot. Trino writer is MoR-only regardless of the table property. |
+| `MERGE INTO` from **Spark** (**CoW = Iceberg 1.5.2 library default**) | Full Parquet data files rewritten with merged content; no delete files; new snapshot |
+| `MERGE INTO` from **Spark** (**MoR explicitly enabled**) | New data files for the changed rows + delete files for the old rows + new snapshot |
 
-> **Quick fact on Iceberg 1.5.2 defaults (do not get this backwards).** The library defaults are `write.delete.mode = copy-on-write`, `write.update.mode = copy-on-write`, and `write.merge.mode = copy-on-write` — verified from `TableProperties.java` in the Iceberg 1.5.2 source. **Merge-on-Read is NOT the default**; it must be explicitly set in TBLPROPERTIES. If your table has position delete files (`content = 1` in the `$files` metadata table) it is because someone explicitly set `write.delete.mode = 'merge-on-read'` (or `write.update.mode` / `write.merge.mode`). See the MoR vs CoW section in resource 13 for the full property reference, the three-properties-are-separate gotcha, and CDC-pipeline guidance.
+> **Quick fact on Iceberg 1.5.2 defaults vs Trino 467 execution — both are true; the distinction matters.**
+> - **The Iceberg 1.5.2 library defaults** (per `TableProperties.java`) are `write.delete.mode = copy-on-write`, `write.update.mode = copy-on-write`, `write.merge.mode = copy-on-write`. These are **table-level properties** that the **Spark writer** honors at write time. Spark UPDATE/DELETE/MERGE against a table that hasn't explicitly opted into MoR will rewrite whole Parquet files (CoW behavior).
+> - **Trino 467's Iceberg connector writes in merge-on-read (MoR) mode BY DEFAULT** for row-level UPDATE/DELETE/MERGE — it writes position-delete files (plus new data files for changed rows), NOT a full copy-on-write file rewrite. **This is true regardless of the table's `write.delete.mode` / `write.update.mode` / `write.merge.mode` property** — Trino's writer is MoR-only per [trinodb/trino#17272](https://github.com/trinodb/trino/issues/17272) ("Today Iceberg writes only support merge-on-read mode"). Full copy-on-write support in Trino is an open roadmap item, NOT the Trino 467 default. So a table whose properties report `copy-on-write` will still see position-delete files appear if any UPDATE/DELETE/MERGE is run from Trino.
+> - **Practical implication.** On this stack (Trino is the primary query+DML engine), expect position-delete files to accumulate on any Iceberg table that gets row-level UPDATE/DELETE/MERGE — regardless of how the table properties are set. Schedule periodic `EXECUTE optimize` (Trino) and `rewrite_position_delete_files` (Spark-only) to fold them back into data files. If your table has position delete files (`content = 1` in the `$files` metadata table) it is **either** (a) someone explicitly set MoR via TBLPROPERTIES from Spark, **or** (more commonly on this stack) (b) Trino executed an UPDATE/DELETE/MERGE against the table — the Trino writer produces position deletes regardless of property.
+> - **DO-NOT-WRITE:** "Trino Iceberg UPDATE/DELETE uses copy-on-write by default" — FALSE. "CoW is the Trino default" — FALSE. The correct statement is "Trino 467 writes MoR position-delete files for row-level UPDATE/DELETE/MERGE regardless of the table property."
+> - See the MoR vs CoW section in resource 13 for the full property reference, the three-properties-are-separate gotcha, and CDC-pipeline guidance (which is Spark-write-centric and where the CoW library default matters).
 
 > **ENGINE CALLOUT — `write.delete.mode`, `write.update.mode`, `write.merge.mode` must be set from Spark SQL, NOT Trino.** These three write-mode properties are NOT exposed through Trino 467's `ALTER TABLE ... SET PROPERTIES` syntax. Trino's `SET PROPERTIES` only handles Iceberg connector-specific properties like `partitioning`, `format`, `sorted_by`, `format_version`, etc. — it does not pass through the underlying Iceberg write-mode table properties. To configure CoW vs MoR, use **Spark SQL**:
 >
@@ -672,6 +689,8 @@ Here's what happens during normal use:
 > ```
 >
 > If you need to flip CoW/MoR on this stack, run the `ALTER TABLE ... SET TBLPROPERTIES` from a Spark SQL session (`spark-sql` CLI or `spark.sql(...)` in a job). Verify the property took effect from either engine with `SHOW TBLPROPERTIES iceberg.analytics.events` (Spark) or `SELECT * FROM iceberg.analytics."events$properties"` (Trino metadata table).
+>
+> **And remember: even after Spark sets `write.delete.mode = 'copy-on-write'`, MERGE/DELETE/UPDATE run from Trino 467 STILL produce position-delete files** ([trinodb/trino#17272](https://github.com/trinodb/trino/issues/17272) — "Today Iceberg writes only support merge-on-read mode"). Full copy-on-write support in Trino is a roadmap item, NOT the 467 default. CoW write behavior only takes effect when the DML runs **from Spark**. So the property flip changes Spark's writer behavior, not Trino's. If you need CoW behavior on this stack, you must also route the DML through Spark (e.g., via a scheduled Spark MERGE job instead of a Trino dbt MERGE). **DO-NOT-WRITE:** "Setting `write.delete.mode = 'copy-on-write'` makes Trino use CoW" — FALSE.
 
 **A manifest file** is an Iceberg metadata file listing which Parquet data files belong to a snapshot and their per-column min/max statistics. **A snapshot** is a point-in-time version of the table — a pointer to the set of manifest files that constitute the table at a particular moment.
 
@@ -1500,12 +1519,18 @@ If you only have time to set up one, start with **compaction** (Trino `EXECUTE o
 
 **Why it matters most:** every Parquet file has fixed overhead in Trino — roughly 10–50 ms to open the file, read its footer, and check column statistics. A query that touches 10,000 small files spends minutes just opening files, before reading any data. The same query on 100 compacted files reads the same data in seconds.
 
-> **CoW vs MoR and the GDPR / right-to-erasure 4-step sequence — what changes between the two modes.** The standard 4-step physical-deletion runbook on this stack is: (1) `DELETE FROM iceberg.analytics.events WHERE user_id = 'gdpr-subject-42'`, (2) `rewrite_data_files(..., where => 'partition_predicate')` to compact the affected partition, (3) `expire_snapshots(...)` to drop the snapshots that still pointed at the pre-DELETE files, (4) `remove_orphan_files(...)` to sweep any stragglers. **This 4-step sequence is correct for BOTH CoW and MoR — but what Step 1 actually does to the data files is different in each mode**, and that affects what Step 2 has to do:
+> **CoW vs MoR and the GDPR / right-to-erasure 4-step sequence — what changes by EXECUTION ENGINE, not just by table property.** The standard 4-step physical-deletion runbook on this stack is: (1) `DELETE FROM iceberg.analytics.events WHERE user_id = 'gdpr-subject-42'`, (2) `rewrite_data_files(..., where => 'partition_predicate')` to compact the affected partition, (3) `expire_snapshots(...)` to drop the snapshots that still pointed at the pre-DELETE files, (4) `remove_orphan_files(...)` to sweep any stragglers. **This 4-step sequence is correct for both Trino-executed and Spark-executed DELETEs — but what Step 1 actually does to the data files depends on BOTH the engine and the table property**, and that changes what Step 2 has to do:
 >
-> - **Copy-on-Write (CoW) — the Iceberg 1.5.2 default for DELETE, UPDATE, and MERGE.** Step 1 already **rewrites the affected data files immediately**: every Parquet file that contained at least one matching row is read, the matching rows are dropped, and a brand-new Parquet file is written containing only the surviving rows. The original Parquet files are unreferenced by the new (current) snapshot — but they ARE still referenced by the prior snapshot (the one Step 1 superseded). No delete marker files are produced. Step 2 (`rewrite_data_files`) then has very little to do for the rows you just deleted (they're already gone from current-snapshot files); its real job in this sequence is residual small-file cleanup on the partition you touched. Steps 3 and 4 then remove the prior snapshots and physically delete the now-unreferenced original Parquet files from MinIO.
-> - **Merge-on-Read (MoR) — requires explicit TBLPROPERTIES (`write.delete.mode = 'merge-on-read'`, plus `write.update.mode` and `write.merge.mode` separately if you also need those).** Step 1 writes a small **delete file** (Iceberg metadata listing which rows in which existing data files to ignore) and leaves the original Parquet data files completely intact. The matching rows are still physically present on MinIO — readers just filter them out at query time by consulting the delete file. Step 2 (`rewrite_data_files`) is now doing the actual rewriting: it reads the data files plus delete files, applies the deletes, writes new data files without the deleted rows, and clears the delete files. Steps 3 and 4 then expire prior snapshots and remove the now-unreferenced originals — same as CoW.
+> - **Trino 467 DELETE (the most common case on this stack).** Trino 467's Iceberg writer is **merge-on-read only regardless of `write.delete.mode`** — see [trinodb/trino#17272](https://github.com/trinodb/trino/issues/17272). Step 1 writes a small **position-delete file** (Iceberg metadata listing which rows in which existing data files to ignore) and leaves the original Parquet data files completely intact. The matching rows are still physically present on MinIO — readers just filter them out at query time by consulting the delete file. **This happens even if the table's `write.delete.mode` is set to `copy-on-write`** — Trino's writer ignores the property and writes position deletes. Step 2 (`rewrite_data_files`) does the actual rewriting: reads data files + delete files, applies the deletes, writes clean new data files, retires the delete files. Steps 3 and 4 then expire prior snapshots and remove the now-unreferenced originals.
+> - **Spark DELETE on a Copy-on-Write table (Iceberg 1.5.2 library default for `write.delete.mode`).** Step 1 already **rewrites the affected data files immediately**: every Parquet file that contained at least one matching row is read, the matching rows are dropped, and a brand-new Parquet file is written containing only the surviving rows. No delete marker files are produced. The original Parquet files are unreferenced by the new (current) snapshot — but they ARE still referenced by the prior snapshot. Step 2 (`rewrite_data_files`) then has very little to do for the rows you just deleted; its real job is residual small-file cleanup on the partition you touched. Steps 3 and 4 then remove the prior snapshots and physically delete the now-unreferenced original Parquet files from MinIO.
+> - **Spark DELETE on a Merge-on-Read table (`write.delete.mode = 'merge-on-read'` explicitly set via Spark TBLPROPERTIES).** Same as the Trino case above — Step 1 writes a position-delete file, original Parquet data files untouched, Step 2 does the heavy rewrite.
 >
-> **Bottom line for a right-to-erasure operator:** on the Iceberg 1.5.2 default stack (CoW), the rows are out of the current-snapshot files immediately after Step 1, so a query against `current` snapshot already misses the subject — but the bytes are still on MinIO until Steps 3 and 4 finish. On MoR, the rows are still in the current-snapshot data files until Step 2 completes the compaction. **Both modes require the full 4-step sequence to physically remove bytes from MinIO** — never skip Steps 3 and 4. If you are not sure which mode your table uses, run `SHOW TBLPROPERTIES iceberg.analytics.events` and look for `write.delete.mode`; absence of the property means CoW (the Iceberg 1.5.2 default).
+> **Bottom line for a right-to-erasure operator on this stack:**
+> - **If you ran the DELETE from Trino 467** (the typical case): the deleted rows are masked by position-delete files but **physically present** in the original Parquet data files on MinIO until Step 2 (`rewrite_data_files`) completes. Step 2 is **mandatory** to physically rewrite the data files without the deleted rows; then Steps 3 and 4 remove the now-unreferenced originals.
+> - **If you ran the DELETE from Spark on a CoW-property table**: Step 1 has already rewritten the data files; the deleted rows are gone from the current-snapshot files but still in pre-DELETE files referenced by prior snapshots. Step 2 is mostly small-file cleanup; Steps 3 and 4 remove the prior-snapshot-referenced originals.
+> - **Either way, all 4 steps are required to physically remove bytes from MinIO** — never skip Steps 3 and 4.
+> - **Inspecting your table:** `SHOW TBLPROPERTIES iceberg.analytics.events` shows the `write.delete.mode` property (CoW or MoR). But remember the property only governs **Spark-executed** DELETE behavior — Trino-executed DELETEs always produce position-delete files regardless. The property absence means CoW for Spark; for Trino it means MoR-only just like every other Trino-executed DELETE on this stack.
+> - **DO-NOT-WRITE:** "Trino DELETE uses CoW by default" — FALSE. "The Iceberg default of CoW means a Trino DELETE rewrites the data files" — FALSE; that is true only for Spark.
 
 ```sql
 -- ============================================================================
@@ -1732,13 +1757,19 @@ CALL iceberg.system.rewrite_data_files(
 
 ### 1b. `rewrite_position_delete_files` — MoR tables only, Spark only, runs AFTER compact and BEFORE expire_snapshots
 
-> **When does this apply?** Only if your table is using **Merge-on-Read (MoR)** for DELETE / UPDATE / MERGE — i.e., someone explicitly set `write.delete.mode = 'merge-on-read'` (and/or `write.update.mode`, `write.merge.mode`). The Iceberg 1.5.2 default is CoW, which does NOT produce position delete files. If you don't know which mode your table uses, run `SHOW TBLPROPERTIES iceberg.analytics.events` from Spark — absence of `write.delete.mode` means CoW and you can skip this step entirely.
+> **When does this apply?** Two cases on this stack:
+> 1. **Any table where DELETE / UPDATE / MERGE has been run from Trino 467** — even on tables whose `write.delete.mode` property is `copy-on-write`. Trino 467's Iceberg writer is **merge-on-read only regardless of the table property** ([trinodb/trino#17272](https://github.com/trinodb/trino/issues/17272)), so any Trino-executed row-level DML produces position-delete files. On this stack (Trino is the primary query+DML engine), expect position-delete files to accumulate on **most** Iceberg tables that see row-level DML — this is the common case, not the edge case.
+> 2. **Any table where Spark explicitly opted into MoR** via `ALTER TABLE ... SET TBLPROPERTIES ('write.delete.mode' = 'merge-on-read', ...)` (and Spark then ran the row-level DML).
+>
+> The Iceberg 1.5.2 library default for `write.delete.mode` is `copy-on-write`, but **that property only governs Spark-executed DML behavior** — it does not stop Trino from writing position deletes. If you don't know whether your table has accumulated position-delete files, query the `$files` metadata table and look for `content = 1` rows (see Diagnostic SQL below) — that is more reliable than guessing from the table property.
 
 **What it does:** Iceberg MoR tables produce **position delete files** (small Iceberg metadata files listing "in data file X, ignore rows at positions [3, 7, 42, ...]"). Over time, a busy MoR table accumulates hundreds or thousands of these tiny position delete files. Every read query must consult them to filter rows out — and like data files, lots of small position delete files cause planning slowdown. The `rewrite_position_delete_files` procedure compacts many small position delete files into fewer larger ones, mirroring what `rewrite_data_files` does for data files.
 
 **Why it's a separate step from `rewrite_data_files`:** `rewrite_data_files` will, as part of compacting data, *apply* position deletes (merge the surviving rows into new files and discard the position delete files for that partition) — but only for the data files it actually rewrites. Position delete files for partitions that aren't being recompacted are left alone. On tables where the data layer is stable but the delete layer keeps growing (e.g., a slowly-changing dim table that gets occasional row deletes via CDC), `rewrite_position_delete_files` is the procedure that actually targets the delete-file layer directly.
 
 > **ENGINE CALLOUT — `rewrite_position_delete_files` is Spark-only.** Trino 467 does **NOT** support this procedure. There is no `ALTER TABLE ... EXECUTE rewrite_position_delete_files` form, and no `CALL iceberg.system.rewrite_position_delete_files(...)` form either — attempting either returns `Procedure not registered`. The procedure has been requested for Trino but is not implemented as of this writing ([trinodb/trino #27371](https://github.com/trinodb/trino/issues/27371)). **On the production stack (Trino 467 + Spark + Iceberg 1.5.2), you MUST run this procedure from Spark.** Submit via `spark-sql`, `spark-submit`, or `spark.sql("...")` in a Spark job.
+
+> **Why Trino's `EXECUTE optimize` is NOT a complete replacement for `rewrite_position_delete_files` — the #24086 nuance.** Trino's `ALTER TABLE ... EXECUTE optimize` **does** clean up MoR position-delete files **only when it is processing whole partitions and only without `file_modified_time` or path predicates** (per [trinodb/trino#24086](https://github.com/trinodb/trino/issues/24086)). The Trino issue quotes the constraint directly: "Position deletes are local to a partition. OPTIMIZE supports only enforced predicates which select whole partitions. Therefore, we can clean up position deletes in OPTIMIZE when there are no path or file_modified_time predicates." So a `EXECUTE optimize WHERE event_date = DATE '2026-06-08'` (whole-partition predicate on the partitioning column) will fold position deletes for that partition; but a `EXECUTE optimize WHERE tenant_id = 'acme'` on a date-partitioned table (partial-partition / non-enforced predicate) will NOT reliably retire the position-delete files for those rows. **General/dense position-delete compaction across many partitions remains a Spark-only operation** via `rewrite_position_delete_files` ([trinodb/trino #27371](https://github.com/trinodb/trino/issues/27371) tracks adding it to Trino but it is NOT in 467). For per-tenant GDPR sweeps where the predicate is non-partition-aligned, run step 2 from Spark, not Trino.
 
 ```sql
 -- Spark SQL ONLY — no Trino 467 equivalent exists.
@@ -1890,7 +1921,7 @@ weekly maintenance window (MoR table):
    5. rewrite_manifests         (SPARK ONLY on Trino 467; Trino 470+ has EXECUTE optimize_manifests)
 ```
 
-For CoW tables (the Iceberg 1.5.2 default), skip step 2 — there are no position delete files to compact.
+For tables where row-level DML has only ever been run from Spark on the CoW library default, skip step 2 — there are no position delete files to compact in that path. **But on this stack, where Trino is the primary DML engine, step 2 is the common case, not the exception**: Trino 467's writer is MoR-only regardless of the table's `write.delete.mode` property ([trinodb/trino#17272](https://github.com/trinodb/trino/issues/17272)), so any Trino-issued UPDATE/DELETE/MERGE produces position-delete files. Check `$files` for `content = 1` rows to confirm whether step 2 is needed — that is more reliable than reading the table property.
 
 ### 1c. Equality delete files from CDC pipelines (Debezium) — no standalone procedure exists in Iceberg 1.5.2
 
@@ -2332,8 +2363,11 @@ Step 1: Compaction                  (compact FIRST — merges small files, appli
         (do NOT write EXECUTE rewrite_data_files on Trino — Trino EXECUTE name is "optimize")
    │
    ▼
-Step 1b: Position-delete compaction (MoR tables only — Spark ONLY; Trino 467 does NOT support)
+Step 1b: Position-delete compaction (Spark ONLY — Trino 467 does NOT support, trinodb/trino #27371)
         Spark: CALL iceberg.system.rewrite_position_delete_files(table => '<schema>.<table>')
+        (Needed when content=1 files have accumulated. On this stack, that includes BOTH
+         MoR-configured tables AND any table where Trino executed UPDATE/DELETE/MERGE —
+         Trino's writer is MoR-only regardless of property per trinodb/trino #17272.)
    │
    ▼
 Step 2: Snapshot expiry             (drops old snapshots + deletes their exclusively-referenced data files)
@@ -2458,11 +2492,17 @@ CALL iceberg.system.rewrite_data_files(
   )
 );
 
--- Step 1b: MoR TABLES ONLY — compact accumulating position delete files.
--- SKIP THIS STEP entirely if the table uses CoW (the Iceberg 1.5.2 default).
+-- Step 1b: Compact accumulating position delete files.
+-- NEEDED if (a) the table is MoR-configured AND Spark wrote DML against it, OR
+--          (b) ANY UPDATE/DELETE/MERGE was run from Trino 467 against the table —
+--              Trino's Iceberg writer is MoR-only regardless of the table property
+--              per trinodb/trino#17272. On this stack (Trino is the primary DML
+--              engine), case (b) is the COMMON case, not the exception.
+-- Skip ONLY if NO Trino DML has ever run AND the table is on the CoW library default.
+-- The reliable check is the $files content query (NOT the table property):
+--   SELECT content, COUNT(*) FROM iceberg.analytics."events$files" GROUP BY content;
+-- If content=1 (position deletes) row count is 50+, this step is needed.
 -- This procedure is Spark ONLY — Trino 467 does NOT support it (trinodb/trino #27371).
--- Check with: SELECT content, COUNT(*) FROM iceberg.analytics."events$files" GROUP BY content;
--- If content=1 (position deletes) row count is 50+, enable this step.
 CALL iceberg.system.rewrite_position_delete_files(
   table   => 'analytics.events',
   options => map(
