@@ -3390,7 +3390,7 @@ Prefer `JSON_VALUE` when you care about distinguishing "key absent" from "JSON c
 > |---|---|---|---|
 > | `json_extract` | `json_extract(json, jsonpath) -> json` | A **JSON value** (object, array, OR scalar-as-JSON) | You need a nested **object or array** at the path, or you want to **chain further extraction** on the result. |
 > | `json_extract_scalar` | `json_extract_scalar(json, jsonpath) -> varchar` | The **LEAF SCALAR** as VARCHAR (boolean / number / string). **Returns NULL if the path resolves to an object or an array.** | You need a single string / number / bool leaf. Always `CAST` to the target type (it returns VARCHAR — see the gotcha above). |
-> | `json_array_length` | `json_array_length(json) -> bigint` | Length of a JSON **array** | Count elements in a JSON array at any path. |
+> | `json_array_length` | `json_array_length(json) -> bigint` | Length of a JSON **array** | Count elements in a JSON array. Per docs: *"Returns the array length of `json` (a string containing a JSON array)"* — it takes the **array itself** (a VARCHAR/JSON value), **NOT a path**. If the COLUMN already IS the array, call `json_array_length(col)` directly (NO path). Only chain `json_extract(col,'$.key')` first when the array is **nested under a key**. See the **bare-array-vs-nested disambiguator** below. |
 > | `json_size` | `json_size(json, jsonpath) -> bigint` | Number of members of the object/array at the path (scalars return 0) | Generic "how big is this thing" at a JSONPath — works on objects too. |
 > | `json_parse` | `json_parse(varchar) -> json` | Parsed JSON value | Promote a VARCHAR JSON string to the `JSON` type for further extraction or `CAST(... AS MAP/ARRAY/ROW)`. |
 > | `json_format` | `json_format(json) -> varchar` | VARCHAR serialization of a JSON value | Serialize back to a JSON string (e.g. to send to an API). See resource 09 § "CAST map/array/row AS JSON" for the round trip. |
@@ -3408,8 +3408,21 @@ Prefer `JSON_VALUE` when you care about distinguishing "key absent" from "JSON c
 > SELECT json_extract(payload, '$.user.tags') AS tags;                                     -- JSON ["a","b"]
 > SELECT json_extract(payload, '$.user')      AS user_obj;                                 -- JSON {"id":42,"tags":["a","b"]}
 >
-> -- ARRAY LENGTH -> json_array_length (the argument must be the array; chain with json_extract).
-> SELECT json_array_length(json_extract(payload, '$.user.tags')) AS n_tags;                -- 2
+> -- ARRAY LENGTH (count items in a JSON array column).
+> --
+> -- DISAMBIGUATOR — pick the form by what the COLUMN VALUE looks like:
+> --   * Is the column ITSELF the JSON array (value looks like  ["a","b","c"] )?
+> --       -> json_array_length(col) directly. NO path.
+> --   * Is the array nested under a key (value looks like  {"items":[...]} )?
+> --       -> json_array_length(json_extract(col,'$.items')) — extract the array first.
+> -- Using a $.key path on a BARE array returns NULL — json_array_length(NULL) = NULL,
+> -- a SILENT wrong answer (NULL count), NOT an error.
+> --
+> -- LEAD / COMMON CASE — the column metadata IS the array, value = '["item_a","item_b","item_c"]':
+> SELECT json_array_length(metadata) AS n_items;                                           -- 3   (NO path)
+> --
+> -- NESTED-UNDER-A-KEY case — value = '{"user":{"tags":["a","b"]}}', the array is at $.user.tags:
+> SELECT json_array_length(json_extract(payload, '$.user.tags')) AS n_tags;                -- 2   (extract the array first)
 >
 > -- Parse a VARCHAR JSON string first if the column is plain VARCHAR and you want to chain typed extraction.
 > SELECT json_extract(json_parse(payload), '$.user.tags') AS tags;
@@ -3423,7 +3436,8 @@ Prefer `JSON_VALUE` when you care about distinguishing "key absent" from "JSON c
 > | `json_extract_scalar(payload, '$.user.tags')` to pull an array | The path resolves to an ARRAY. Returns NULL. | `json_extract(payload, '$.user.tags')` returns the JSON array; wrap in `json_array_length(...)` for size. |
 > | `json_extract(payload, '$.user.id') = '42'` to compare to a string | The left side is a `JSON` value, the right is `VARCHAR` — type mismatch, AND the JSON value `42` is NOT the string `'42'`. | Use `json_extract_scalar(payload, '$.user.id') = '42'` (VARCHAR = VARCHAR), or better cast: `CAST(json_extract_scalar(...) AS INTEGER) = 42`. Alternatively `json_format(json_extract(...))` to get a VARCHAR JSON serialization. |
 > | "Trino has no JSONPath extraction — you have to write a Spark UDF." | **FALSE.** Trino 467 ships the full `json_extract` / `json_extract_scalar` / `JSON_VALUE` / `JSON_QUERY` / `JSON_EXISTS` family. Use them directly. | `json_extract_scalar(col, '$.key')` for leaves, `json_extract(col, '$.path')` for nested. |
-> | `json_array_length(payload)` when `payload` is a VARCHAR column holding a JSON array string | Trino auto-coerces VARCHAR to JSON for `json_array_length` in practice, but if the column is the `JSON` type or you want to be explicit, wrap in `json_parse(...)`. Better: be explicit so the intent is unambiguous. | `json_array_length(json_parse(payload))` when `payload` is VARCHAR; `json_array_length(payload)` when it's already JSON. |
+> | `json_array_length(json_extract(metadata, '$.items'))` when `metadata` IS the bare array (value = `["a","b","c"]`) | The `$.items` path assumes a WRAPPING object `{"items":[...]}`. Applied to a bare array there is no `items` member, so `json_extract` returns **NULL**, and `json_array_length(NULL)` = **NULL** — a SILENT wrong answer (NULL count), not an error. | `json_array_length(metadata)` directly — NO path — when the column value IS the array. Only use the `$.key` path form when the array is nested under a key inside a wrapping object. |
+> | `json_array_length(payload)` when `payload` is a VARCHAR column holding a JSON array string | Trino auto-coerces VARCHAR to JSON for `json_array_length` in practice (the signature is `json_array_length(json)` where *json* is "a string containing a JSON array"), so the bare call already works. If the column is the `JSON` type or you want to be explicit, wrap in `json_parse(...)`. | `json_array_length(payload)` works when `payload` is a VARCHAR JSON array string; `json_array_length(json_parse(payload))` if you want to be explicit. |
 
 - **Pro:** simplest, lossless, schema-flexible.
 - **Con:** slow — Trino re-parses the JSON string on every query.
