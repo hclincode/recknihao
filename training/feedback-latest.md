@@ -1,77 +1,87 @@
-# Judge Feedback — iter628 (EXTENDED PHASE)
+# Judge Feedback — Iter 629 (EXTENDED PHASE)
 
-**Trino pinned: 467.** Docs verified live today (2026-06-07) at trino.io/docs/467 and quoted below. Federation NOT probed this iteration — the 4.49944/310 row is UNCHANGED.
+**Overall: 4.875 STRONG PASS** (margin +1.375 above 3.5 floor) — Trino pinned 467, docs verified live today (2026-06-07) — FEDERATION NOT PROBED (4.49944/310 row UNCHANGED).
 
-**OVERALL: 5.00 STRONG PASS** (margin +1.50 above the 3.5 floor). All four answers are docs-verbatim correct with zero defects. The Q4 ROWS-vs-RANGE default-frame lock applied cleanly. Recommend iter629 = **durability NO-OP**.
-
----
-
-## Q1 — Absolute difference (always-positive miss)
-
-**Answer**: `ABS(forecasted_units - actual_units) AS forecast_miss`.
-
-**Scores — Acc 5 / Comp 5 / Clar 5 / Act 5 = 5.00 STRONG PASS**
-
-- VERIFIED trino.io/docs/467/functions/math.html: `abs(x)` "Returns the absolute value of `x`." Accepts any numeric type, returns the same type. So `ABS(forecasted_units - actual_units)` yields the magnitude of the gap regardless of sign — exactly the "always positive miss" requirement. CORRECT.
-- The subtraction inside ABS is evaluated first (standard precedence), so the sign of `forecast - actual` is discarded. No off-by-one, no type issue (both columns numeric → numeric result).
-
-No defects.
-
-## Q2 — Add 48 hours to a timestamp for an SLA deadline
-
-**Answer**: `date_add('hour', 48, created_at) AS sla_deadline`. Noted the unit is a quoted string and the value sits OUTSIDE the quotes; flagged that this is NOT the Postgres `INTERVAL '48 hours'` form.
-
-**Scores — Acc 5 / Comp 5 / Clar 5 / Act 5 = 5.00 STRONG PASS**
-
-- VERIFIED trino.io/docs/467/functions/datetime.html: `date_add(unit, value, timestamp)` "Adds an interval `value` of type `unit` to `timestamp`. Subtraction can be performed by using a negative value." So `date_add('hour', 48, created_at)` advances `created_at` by 48 hours (two days). Signature order (unit, value, ts) CORRECT; `'hour'` is a valid unit string; `48` is the integer value in the correct slot. CORRECT.
-- The note about the interval form is ACCURATE: Trino's literal form is `INTERVAL '48' HOUR` — the numeric magnitude is inside the string and the **unit is a trailing keyword**, NOT the Postgres `INTERVAL '48 hours'` (unit-inside-the-string, plural). Docs confirm the operator example `time '01:00' + interval '3' hour` → `04:00:00.000` (value-in-quotes, unit-as-keyword). So `created_at + INTERVAL '48' HOUR` would also be correct; the responder's `date_add` form is the cleaner, equally-valid choice and the dialect caveat is right.
-
-No defects.
-
-## Q3 — Percentile rank by lifetime spend (top 5% / 90th percentile)
-
-**Answer**: `PERCENT_RANK() OVER (ORDER BY total_lifetime_spend)` over a `GROUP BY customer_id` subquery that computes `SUM(amount) AS total_lifetime_spend`. Noted 0.0 = lowest, 1.0 = highest, multiply by 100 for a percentile number.
-
-**Scores — Acc 5 / Comp 5 / Clar 5 / Act 5 = 5.00 STRONG PASS**
-
-- VERIFIED trino.io/docs/467/functions/window.html: `percent_rank()` "Returns the percentage ranking of a value in group of values. The result is `(r - 1) / (n - 1)`" where r is the rank. So the lowest-spend customer (r=1) → 0.0 and the highest (r=n) → 1.0. The responder's 0.0=lowest / 1.0=highest mapping is CORRECT.
-- The **ascending** `ORDER BY total_lifetime_spend` means the top spender lands near 1.0, so "top 5%" = `percent_rank() >= 0.95` and "90th percentile" = `>= 0.90` — consistent with the responder's framing ("top" = near 1.0). The `*100` to read it as a 0–100 percentile is sensible presentation. Framing is adequate and internally consistent.
-- The `GROUP BY customer_id` → `SUM(amount)` subquery correctly produces one lifetime-spend row per customer BEFORE the window ranks them, so each customer is ranked once (not once per order). Structure CORRECT.
-- `cume_dist()` (docs: "number of rows preceding or peer with the row ... divided by total rows") is a defensible alternative for "percentile," but `percent_rank()` is a valid and standard reading of "percentile rank." No defect for the choice.
-
-No defects.
-
-## Q4 — Running per-customer order counter (1,2,3 in date order) — CRITICAL window-frame check
-
-**Answer**: `COUNT(*) OVER (PARTITION BY customer_id ORDER BY order_date, order_id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS order_number`. Explained that the explicit ROWS frame is critical (the default differs) and that `order_id` is a tiebreaker for determinism.
-
-**Scores — Acc 5 / Comp 5 / Clar 5 / Act 5 = 5.00 STRONG PASS**
-
-**Q4 VERDICT (CRITICAL): FULLY CORRECT — ROWS-vs-RANGE default-frame lock applied.**
-
-- VERIFIED trino.io/docs/467/functions/window.html: "All Aggregate functions can be used as window functions by adding the `OVER` clause." So `COUNT(*) OVER (...)` is valid. With the explicit frame `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`, the frame for each row contains itself plus every preceding row in the partition's `order_date, order_id` order → COUNT(*) returns 1, 2, 3, ... row by row. CORRECT running counter.
-- VERIFIED trino.io/docs/467/sql/select.html (window frames): "If the frame is not specified, it defaults to `RANGE UNBOUNDED PRECEDING`, which is the same as `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`" and "This frame contains all rows from the start of the partition up to **the last peer of the current row**." This is the lock: under the DEFAULT RANGE frame, two orders sharing the same ORDER BY key (e.g., same `order_date` with no tiebreaker) are PEERS, so both rows' frames extend to the last peer and they receive the SAME count (the max for that key) — giving e.g. 2, 2 instead of 1, 2. The responder's explanation that "the default frame differs" and that the explicit ROWS frame is critical is ACCURATE and matches the docs verbatim.
-- The `order_id` tiebreaker makes the ordering total (no two rows are peers), so even under a RANGE frame the result would be deterministic; combined with the explicit ROWS frame, the 1,2,3 row-by-row counter is fully correct and deterministic. Tiebreaker reasoning CORRECT.
-- ALTERNATIVE noted for completeness: `ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date, order_id)` always returns 1,2,3 unique regardless of frame (frame is ignored for row_number). The responder's `COUNT(*) OVER ... ROWS` is equivalent here given the total ordering — a correct and valid choice, not a defect.
-
-No defects.
+**HEADLINE:** Two inoculations held cleanly under fresh phrasing. Q2 QUALIFY trap CORRECTLY retracted (responder recognized Trino has no QUALIFY and replaced with MIN/MAX). Q4 PERCENTILE_CONT/MEDIAN inoculation HELD (used approx_percentile). All four final answers valid Trino 467 and correct. The only soft spot is Q1: the MAX(CASE..1/0) form is correct and the BOOLEAN cast is offered, but the cleaner Trino-native `bool_or()` (which the question's "true/false" phrasing points at, and which exists as a canonical at r23:682) was not led with — a minor landing-point nuance, NOT a defect.
 
 ---
 
-## Overall
+## Per-question scores
 
-Per-dimension averages: Acc (5+5+5+5)/4 = 5.00, Comp 5.00, Clar 5.00, Act 5.00 → (5.00+5.00+5.00+5.00)/4 = **5.00**. Per-question cross-check: (5.00+5.00+5.00+5.00)/4 = 5.00 — agree. Overall-average GOVERNS the label = **STRONG PASS**; no per-Q gate triggered.
+### Q1 — true/false per user for "has EVER upgraded to a paid plan" (has-ever-done-X)
+**Accuracy 5 / Completeness 4 / Clarity 5 / Actionability 5 = 4.75 PASS**
 
-## Slip diagnosis
+Answer: `MAX(CASE WHEN event_name = 'plan_upgraded' THEN 1 ELSE 0 END) AS has_ever_upgraded ... GROUP BY user_id`; noted returns 1 if any row matches, CAST AS BOOLEAN optional.
 
-**No slips, no fabrications.** No `::`-cast, no QUALIFY, no fabricated function/absence, no invalid-clause-placement, no off-by-one (Q4 counter starts at 1, frame inclusive of current row), no type-mismatch, no wrong-function-choice (Q3 percent_rank valid; Q4 COUNT(*) OVER ROWS valid), no WINDOW-FRAME-MISUSE (Q4 explicit ROWS frame + tiebreaker is exactly right and the default-RANGE-difference explanation is accurate).
+- VERIFIED trino.io/docs/467/functions/aggregate.html: `max(x)` "Returns the maximum value of all input values." Over a per-user group, `MAX(CASE WHEN cond THEN 1 ELSE 0 END)` returns 1 iff at least one row satisfies the predicate, else 0 — correct has-ever-done-X semantics. Valid Trino 467 (CASE expression inside an aggregate is standard).
+- The CAST AS BOOLEAN note is accurate: `CAST(1 AS BOOLEAN)` → true, `CAST(0 AS BOOLEAN)` → false in Trino, so the offered cast does produce a real boolean.
+- **Completeness ding (-1):** the question asks for a "true/false column." MAX(CASE..1/0) returns 1/0 (boolean only via the optional cast). The cleaner, more direct Trino-native idiom is `bool_or(event_name = 'plan_upgraded') AS has_ever_upgraded`, returning a real boolean directly. VERIFIED aggregate.html: `bool_or(boolean)` "Returns TRUE if any input value is TRUE, otherwise FALSE." This canonical exists in resources at r23:682. Responder reached a correct equivalent but did not lead with the more natural boolean-typed form.
+- DIAGNOSIS: **landing-point-nuance** (MAX(CASE) reached instead of bool_or). MAX(CASE) is correct + the boolean cast is acknowledged → watch-item, not a real ding to accuracy.
 
-## iter629 directive: DURABILITY NO-OP
+### Q2 — each device's first AND last check-in timestamp side by side in one row (no self-join)
+**Accuracy 5 / Completeness 5 / Clarity 4.5 / Actionability 5 = 4.875 STRONG PASS**
 
-All four canonicals routed clean first-probe: `abs()` difference, `date_add('hour', n, ts)` + INTERVAL '48' HOUR dialect caveat, `percent_rank()` ascending-percentile, and the `COUNT(*) OVER ... ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` running counter with ROWS-vs-RANGE default-frame explanation. Push fresh breadth next iter.
+Answer trajectory: first sketched a `QUALIFY` + FIRST_VALUE/LAST_VALUE form, then explicitly RETRACTED it ("Wait — Trino does NOT support QUALIFY") and gave the final form: `MIN(timestamp) AS first_checkin, MAX(timestamp) AS last_checkin ... GROUP BY device_id`.
 
-**DO NOT**: touch r22 §13.x federation guardrails (4.49944/310 thin, ZERO probe iter628); re-edit the abs / date_add / percent_rank / Pattern-A-cumulative ROWS-frame landing points (all clean); add `::`-casts (iter571 PIN); EXTRACT(EPOCH) (iter562 ban); QUALIFY; PERCENTILE_CONT (iter611 ban); fabricate dayname()/initcap; touch iter534-627 locks; bump training/state.json (already 628); git commit/push.
+- **QUALIFY CHECK — CONFIRMED ABSENT:** VERIFIED trino.io/docs/467/sql/select.html — the SELECT grammar clause list is WITH / SELECT / FROM / WHERE / GROUP BY / HAVING / WINDOW / set-ops / ORDER BY / OFFSET / LIMIT-FETCH. There is NO QUALIFY clause. QUALIFY is a Snowflake/Teradata/BigQuery extension, not Trino — a QUALIFY query would be a PARSE ERROR. The responder's retraction is factually correct.
+- **Final answer CORRECT:** VERIFIED aggregate.html: `min(x)` "Returns the minimum value of all input values" + `max(x)` "Returns the maximum value of all input values." Over `GROUP BY device_id`, MIN(timestamp)/MAX(timestamp) yield earliest and latest check-in side by side in one row, no self-join. Exactly on target.
+- **Clarity ding (-0.5):** showing the invalid QUALIFY form first before retracting is a messy presentation. The self-correction demonstrates real "QUALIFY-not-in-Trino" knowledge (a GOOD signal — it did NOT leave an invalid query as the answer, it explicitly replaced it), but the engineer reads a wrong-then-right sequence. Minor.
 
-WebFetched/verified today: functions/math.html (`abs(x)` "Returns the absolute value of x" — Q1), functions/datetime.html (`date_add(unit, value, timestamp)` "Adds an interval value of type unit" + `interval '3' hour` operator form — Q2), functions/window.html (`percent_rank()` "(r - 1) / (n - 1)" + "All Aggregate functions can be used as window functions by adding the OVER clause" — Q3/Q4), sql/select.html (default frame "RANGE UNBOUNDED PRECEDING ... up to the last peer of the current row" — Q4 ROWS-vs-RANGE lock).
+### Q3 — count of DISTINCT sessions per user per calendar day
+**Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 = 5.00 STRONG PASS**
 
-**OVERALL: 5.00 STRONG PASS — Q1 ABS difference, Q2 date_add('hour',48,ts) + INTERVAL '48' HOUR dialect caveat, Q3 percent_rank ascending-percentile, Q4 COUNT(*) OVER ROWS running counter (ROWS-vs-RANGE default-frame lock applied, order_id tiebreaker correct) all docs-verbatim zero-defect; iter629 = durability NO-OP; federation row stays 4.49944/310.**
+Answer: `COUNT(DISTINCT session_id) AS num_sessions ... GROUP BY user_id, session_date`.
+
+- VERIFIED valid Trino 467: COUNT(DISTINCT x) is standard aggregate-with-DISTINCT; GROUP BY user_id, session_date produces one row per (user, day) with the distinct-session count. Correct for "distinct sessions per user per calendar day."
+- Assumes a pre-derived `session_date` (e.g., `date_trunc('day', event_ts)` or a date column) — reasonable given the "per calendar day" phrasing; not a ding.
+- Zero defects.
+
+### Q4 — median time-to-resolution in hours per ticket priority
+**Accuracy 5 / Completeness 4.5 / Clarity 5 / Actionability 5 = 4.875 STRONG PASS**
+
+Answer: `approx_percentile(resolution_hours, 0.5) AS median_hours ... GROUP BY priority`; explicitly stated Trino has NO PERCENTILE_CONT or MEDIAN(); noted the ARRAY form for multiple percentiles.
+
+- **PERCENTILE_CONT INOCULATION — HELD:** VERIFIED aggregate.html — neither `PERCENTILE_CONT` nor `MEDIAN` appears in the Trino 467 aggregate function list. The responder did NOT fabricate either; it correctly said they do not exist and used approx_percentile. The iter611 PERCENTILE_CONT ban held under this fresh "median per group" phrasing.
+- **approx_percentile CORRECT:** VERIFIED aggregate.html: single-percentage form "Returns the approximate percentile for all input values of x at the given percentage"; array form "Returns the approximate percentile for all input values of x at each of the specified percentages." `approx_percentile(resolution_hours, 0.5)` = the median (50th percentile); GROUP BY priority gives median per priority. The ARRAY-form note for multiple percentiles is accurate.
+- **Minor completeness note (-0.5):** the question says "time-to-resolution in hours," implying `resolution_hours` must be computed, e.g. `date_diff('hour', opened_at, resolved_at)`. The responder assumed `resolution_hours` pre-exists and focused on the median mechanic. Showing `approx_percentile(date_diff('hour', opened_at, resolved_at), 0.5)` would fully close the question. Minor — the median mechanic (the hard part) is correct and date_diff arg-order is documented (r07:602), so a small completeness nick, not a defect.
+
+---
+
+## Overall computation
+
+Dim-avg method:
+- Accuracy: (5+5+5+5)/4 = 5.00
+- Completeness: (4+5+5+4.5)/4 = 4.625
+- Clarity: (5+4.5+5+5)/4 = 4.875
+- Actionability: (5+5+5+5)/4 = 5.00
+- Overall = (5.00 + 4.625 + 4.875 + 5.00)/4 = **4.875**
+
+Per-Q-avg cross-check: (4.75 + 4.875 + 5.00 + 4.875)/4 = **4.875** — agree.
+
+**Recorded overall: 4.875 STRONG PASS** (overall-avg GOVERNS the label; no per-Q gate applied).
+
+---
+
+## Q2 verdict
+**QUALIFY correctly retracted + MIN/MAX final answer correct — YES.** The responder recognized QUALIFY is not in Trino (verified: no QUALIFY in the 467 SELECT grammar), explicitly replaced it, and landed on `MIN(timestamp)/MAX(timestamp) GROUP BY device_id` — the correct no-self-join first/last-per-device form. Only cost: a minor clarity ding for showing the wrong form first.
+
+## Q4 verdict
+**PERCENTILE_CONT inoculation HELD — YES.** Responder explicitly stated PERCENTILE_CONT/MEDIAN do not exist in Trino (verified) and used `approx_percentile(x, 0.5)` for the median per priority (verified). No fabrication.
+
+---
+
+## Slip diagnosis + iter630 fix
+
+- **Q1 (bool_or vs MAX(CASE)):** landing-point-nuance, NOT a defect. MAX(CASE..1/0) is correct and the BOOLEAN cast is acknowledged; bool_or (r23:682) would be the more direct boolean-typed answer for a "true/false column." **WATCH-ITEM**, not worth a forced edit. OPTIONAL low-priority directive only: at the bool_or canonical (r23:682) or the MAX(CASE) conditional-aggregation block, add a keyword anchor pairing "true/false flag per user / boolean column / has ever / did this user ever do X" → bool_or as the lead, with MAX(CASE..1/0)+CAST as the equivalent. Since MAX(CASE) is correct, this is purely a findability/landing nicety — defer unless probing this exact angle again.
+- **Q4 (date_diff omission):** scope nuance, not a defect — the median mechanic (the question's core) is correct. No edit warranted.
+- No content-gap, no routed-but-mis-applied, no resource-defect this iter.
+
+## Fabrication / slip flags
+**NONE.** No fabricated feature or absence (PERCENTILE_CONT/MEDIAN correctly absent; QUALIFY correctly absent), no `::`-cast, no QUALIFY left in a final answer, no invalid-clause-placement, no off-by-one, no type-mismatch, no wrong-function-choice. bool_or, max, min, approx_percentile, COUNT(DISTINCT) all real Trino 467 functions correctly used.
+
+## iter630 recommendation
+**DURABILITY NO-OP.** Both inoculations (QUALIFY-not-in-Trino, PERCENTILE_CONT/MEDIAN-not-in-Trino) held first-probe; Q3 COUNT(DISTINCT) and Q2 MIN/MAX clean. Push fresh breadth. **DO NOT**: touch r22 §13.x federation guardrails (4.49944/310 thin, ZERO probe iter629); re-edit the bool_or / MAX(CASE) / MIN-MAX / COUNT(DISTINCT) / approx_percentile landing points (all clean/correct); add `::`-casts (iter571 PIN); EXTRACT(EPOCH) (iter562 ban); QUALIFY; PERCENTILE_CONT (iter611 ban); fabricate dayname()/initcap; touch iter534-628 locks; bump training/state.json (already 629); git commit/push. Optional only: re-probe Q1 with explicit "boolean column" phrasing to confirm responder SWITCHES to bool_or.
+
+WebFetched/verified today (2026-06-07): trino.io/docs/467/functions/aggregate.html (bool_or "TRUE if any input value is TRUE"; bool_and; max/min "maximum/minimum value of all input values"; approx_percentile single + array; PERCENTILE_CONT/MEDIAN ABSENT), trino.io/docs/467/sql/select.html (SELECT grammar clause list — NO QUALIFY; WHERE/GROUP BY/HAVING/WINDOW only).
+
+**OVERALL: 4.875 STRONG PASS — Q2 QUALIFY correctly retracted (MIN/MAX final), Q4 PERCENTILE_CONT inoculation held (approx_percentile), Q3 COUNT(DISTINCT) clean; Q1 MAX(CASE..1/0)+CAST correct but bool_or would be the more direct boolean form (landing-point watch-item, not a defect); iter630 = durability NO-OP; federation row stays 4.49944/310.**
