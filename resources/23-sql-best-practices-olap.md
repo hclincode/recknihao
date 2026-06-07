@@ -143,7 +143,20 @@ The **2.3%** is a relative *standard deviation*, not a hard ceiling: ~68% of est
 -- Multi-percentile in one pass — no separate queries needed:
 SELECT approx_percentile(latency_ms, 0.99) AS p99 FROM api_logs;
 SELECT approx_percentile(latency_ms, ARRAY[0.5, 0.95, 0.99]) AS percentiles FROM api_logs;
+
+-- Percentile PER GROUP (e.g. p90 order amount per store) — just add GROUP BY:
+SELECT store_id, approx_percentile(order_amount, 0.90) AS p90_order_amount
+FROM orders
+GROUP BY store_id;
+
+-- p50/p90/p99 per store in ONE pass with the ARRAY form (returns an array per row):
+SELECT store_id,
+       approx_percentile(order_amount, ARRAY[0.5, 0.9, 0.99]) AS p50_p90_p99
+FROM orders
+GROUP BY store_id;
 ```
+
+> **DO NOT append a "for exact percentiles use `PERCENTILE_CONT()`" alternative — `PERCENTILE_CONT` / `PERCENTILE_DISC` do NOT exist in Trino 467 (function-not-found / parse error).** `approx_percentile(x, p)` is the **only** percentile function Trino has — there is **no separate "exact percentile" function** to fall back to. Trino also has **no `... WITHIN GROUP (ORDER BY ...)` ordered-set aggregate** mechanism: `WITHIN GROUP` works **only** with `listagg`, never with any percentile function (verified verbatim at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) — `PERCENTILE_CONT`/`PERCENTILE_DISC` appear nowhere on the page; `WITHIN GROUP` is documented only for `listagg`). If a question asks for percentiles, answer with `approx_percentile` and STOP — do not offer a fabricated exact alternative. For **tighter accuracy** (near-exact), do NOT reach for a nonexistent exact function or a 3-arg `approx_percentile(x, p, accuracy)` (that accuracy overload also does **not** exist on current Trino) — build a `qdigest` explicitly: `value_at_quantile(qdigest_agg(x, 1, accuracy), p)` (higher `accuracy` = more memory). For an exact-ish *per-row* percentile use the window function `PERCENT_RANK() OVER (ORDER BY x)` (resource 07 Pattern C2). See the full signature family + DO-NOT-WRITE block just below, and the r05 §"CRITICAL SQL FOOTGUN" / r16 worked example for the same lock.
 
 > **`approx_percentile` signature family — the FOUR official Trino 467/481 overloads** (verified verbatim at [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html)). **Keyword anchors:** approx_percentile signature, approx_percentile weight parameter, approx_percentile array of percentages, multiple percentiles one pass, p50 p95 p99 Trino, exact percentile Trino, PERCENTILE_CONT Trino, approx_percentile accuracy parameter.
 > 1. `approx_percentile(x, percentage) -> [same as x]` — single percentile of `x`.
