@@ -1,79 +1,73 @@
-# Iter618 Judge Feedback — 4.78 STRONG PASS (FIX A RESOLVED)
+# Judge Feedback — iter619 (EXTENDED PHASE)
 
-**Overall: 4.78125 — PASS** (margin +1.28 above the 3.5 floor). Federation NOT probed (4.49944/310 row unchanged). Trino 467 pinned. All four answers verified against trino.io docs + release notes before asserting.
-
-**HEADLINE: FIX A RESOLVED.** The iter617 completed-age over-count slip did NOT recur. Q1 now leads with the CASE-adjusted completed-age idiom (NOT bare `date_diff('year', ...)`), returns 25 for the not-yet-birthday case. The r23:936 canonical inserted in iter618 landed and was applied correctly. No fabrications, no `::`-cast, no QUALIFY, no invalid-clause-placement, no off-by-one across all four answers.
+**Overall: 4.4375 PASS** (margin +0.9375 above 3.5 floor). Trino pinned to 467. Federation NOT probed (4.49944/310 row UNCHANGED). One genuine in-the-answer defect: **Q2 used `GROUP BY CUBE(...)` where the user explicitly wanted only three hand-picked groupings — a WRONG-FUNCTION-CHOICE that structurally includes the (region, product_category) detail rows the user said they do NOT want.** Q1 / Q3 / Q4 all docs-verbatim correct, zero-defect.
 
 ---
 
-## Q1 — Age in completed whole years (FIX A re-probe) — 4.875
+## Per-question scores
 
-`date_diff('year', date_of_birth, current_date) - (CASE WHEN (month(current_date), day(current_date)) < (month(date_of_birth), day(date_of_birth)) THEN 1 ELSE 0 END) AS age`
+### Q1 — Zero-pad invoice ID to fixed 10-char string ('4217' → '0000004217') — 5/5/5/5 = 5.00 STRONG PASS
+Answer: `format('%010d', invoice_id) AS invoice_string`.
+- **VERIFIED CORRECT.** trino.io/docs/467/functions/conversion.html (WebFetch): `format(format, args...)` returns a varchar "by applying a [format string] with arguments", Java `String.format` / `java.util.Formatter` syntax; docs show verbatim `SELECT format('%03d', 8); -- '008'`. The `%0Nd` zero-pad flag is standard Java Formatter, so `format('%010d', 4217)` produces exactly `'0000004217'` (10 chars, leading zeros).
+- `%d` accepts a numeric BIGINT/INTEGER directly — no CAST needed. The `lpad(CAST(invoice_id AS varchar), 10, '0')` form (r27:934) is an equivalent; `format` is fully valid and arguably cleaner. Zero defects.
 
-- **Accuracy 5.0** — CORRECT and CASE-ADJUSTED (not bare date_diff). Trace verified:
-  - dob 2000-06-15, today 2026-06-14 → `date_diff('year')` = 26; `(6,14) < (6,15)` = TRUE → 26 − 1 = **25** ✓ (birthday not yet passed)
-  - dob 2000-06-15, today 2026-06-15 → `(6,15) < (6,15)` = FALSE → 26 − 0 = **26** ✓ (birthday today)
-  - ROW-tuple comparison `(month(a),day(a)) < (month(b),day(b))` is **VALID Trino 467** — release 0.168 verbatim: *"ROW types are now orderable if all of the field types are orderable"* (lexicographic). `month()`/`day()` return bigint (orderable) → tuple orderable.
-  - Docs (datetime.html): `month(x)` "Returns the month of the year from x"; `day(x)` "Returns the day of the month from x"; `date_diff(unit, ts1, ts2)` "Returns timestamp2 - timestamp1 expressed in terms of unit" (year-field difference for 'year').
-  - Expanded-boolean equivalent `month(today)<month(dob) OR (month(today)=month(dob) AND day(today)<day(dob))` is logically identical to the lexicographic tuple comparison — CORRECT.
-- **Completeness 4.75** — explained the bare-date_diff over-count trap AND supplied the expanded-boolean fallback for those avoiding tuple syntax. −0.25 nit: did not mention the `WHERE date_add('year', N, dob) <= current_date` "at least N years old" filter equivalent (present in the r23 canonical), but not asked for here.
-- **Clarity 5.0** — trap explained plainly with the turns-30-next-month example; zero assumed knowledge.
-- **Actionability 5.0** — copy-paste runnable, engineer knows exactly what to write.
+### Q2 — Revenue BY region alone, BY product_category alone, AND grand total — explicitly NOT the per-region-per-category detail ("just those three separate summaries") — 2/3/4/2 = 2.75 FAIL (per-Q below 3.5; quality concern)
+Answer: `GROUP BY CUBE(region, product_category)` + a `GROUPING()` CASE labeling Detail / Region Total / Category Total / Grand Total; prose says CUBE "will emit the full detail, region-only subtotals, category-only subtotals, and the grand total" and "one row per (region, category) pair", then hand-waves "you can filter to just the summaries you need."
+- **WRONG-FUNCTION-CHOICE — CONFIRMED.** trino.io/docs/467/sql/select.html (WebFetch, verbatim): *"The `CUBE` operator generates all possible grouping sets (i.e. a power set) for a given set of columns."* For `CUBE(region, product_category)` that power set is the FOUR groupings: `(region, product_category)`, `(region)`, `(product_category)`, `()`. The first of those — `(region, product_category)`, GROUPING bitmask 0 — is precisely the per-region-per-category DETAIL the user EXPLICITLY excluded ("explicitly NOT the per-region-per-category detail", "just those three separate summaries").
+- So **CUBE structurally over-produces**: it emits the detail rows the user said they do not want. The responder's own prose even admits CUBE emits "the full detail" and "one row per (region, category) pair" — i.e. the answer narrates that it produces the excluded rows, then waves at a filter it never wrote.
+- **The correct construct is `GROUP BY GROUPING SETS ((region), (product_category), ())`** — which computes EXACTLY the three listed sets and nothing else. trino.io/docs/467/sql/select.html: *"Grouping sets allow users to specify multiple lists of columns to group on"*; CUBE is the full power set, GROUPING SETS is the hand-picked list. WebSearch confirmed: "GROUPING SETS gives you control to specify exactly which combinations you want, while CUBE automatically generates all possible combinations (the power set)." `GROUPING SETS ((region),(product_category),())` emits by-region [GROUPING bitmask 1] + by-product_category [bitmask 2] + grand-total [bitmask 3], and does NOT emit the (region,product_category) detail [bitmask 0] because that set is not in the list.
+- The "you can filter to just the summaries you need" hand-wave is doubly wrong: (a) it requires an extra `WHERE GROUPING(region, product_category) <> 0` / per-grouping filter the responder did NOT write, leaving copy-paste output that still contains the excluded detail; (b) it is the wrong tool — GROUPING SETS is purpose-built for hand-picking exactly these subtotals, so filtering CUBE is a workaround for a problem GROUPING SETS doesn't have.
+- Scores: **Acc 2** (the delivered query returns rows the user explicitly excluded; prose self-admits it), **Comp 3** (GROUPING labeling is correct and the concept of subtotals is conveyed, but the actual deliverable misses the stated requirement and never writes the filter it promises), **Clar 4** (well-structured, GROUPING CASE explained), **Act 2** (copy-paste output includes the unwanted detail; engineer must redesign to GROUPING SETS or add a filter the answer omitted).
+- **Diagnosis: ROUTED-BUT-MIS-APPLIED / wrong-function-choice.** The hand-picked-subtotals canonical EXISTS and is findable — r28:425 DECIDE-FIRST "hand-picked specific set of groupings → GROUPING SETS ((...),(...))" + r28:532 worked "GROUPING SETS ((a,b),(b),()) → emits GROUPING values 0,2,3 (chosen); you choose exactly which combinations to emit". The responder reached the GROUPING-family neighborhood but grabbed CUBE instead of GROUPING SETS. The DECIDE-FIRST signpost branch did not bite for this phrasing.
 
-**FIX A VERDICT: RESOLVED.** iter617's `date_diff('year', date_of_birth, current_date) AS age` (over-counts un-passed birthdays by 1) did NOT recur. The responder routed to the new r23:936 CASE-adjusted canonical and applied it correctly. Returns 25 for the not-yet-birthday case.
+### Q3 — Tag each order with fiscal quarter Q1/Q2/Q3/Q4 (calendar year) from order_date — 5/5/5/5 = 5.00 STRONG PASS
+Answer: `CASE EXTRACT(QUARTER FROM order_date) WHEN 1 THEN 'Q1' ... END AS fiscal_quarter`.
+- **VERIFIED CORRECT.** trino.io/docs/467/functions/datetime.html (WebFetch): `extract(field FROM x) → bigint`; the QUARTER field "extracts the quarter of the year", and the equivalent `quarter(x) → bigint` returns "the quarter of the year from the input value, with a range from 1 to 4." So `EXTRACT(QUARTER FROM order_date)` returns bigint 1–4 (calendar-year quarter), and the `CASE ... WHEN 1 THEN 'Q1' ... WHEN 4 THEN 'Q4'` mapping is exhaustive and correct.
+- `quarter(order_date)` is a valid shorthand equivalent (r27:590) but is not required. Zero defects.
 
-## Q2 — array_position index + absent semantics — 4.8125
-
-`array_position(pipeline_stages, 'closed_won') AS closed_won_position` — 1-based, returns 0 (not NULL) if absent.
-
-- **Accuracy 5.0** — docs (array.html) verbatim: *"Returns the position of the first occurrence of the element in array x (or 0 if not found)."* 1-based position correct; **0 (NOT NULL)** on absence correct — this is the classic trap and the responder got it right.
-- **Completeness 4.75** — fully answers position + absent-value semantics. −0.25: could note positions are of the *first* occurrence (matters with duplicate stages); minor.
-- **Clarity 5.0** — clear, calls out 0-not-NULL explicitly.
-- **Actionability 5.0** — directly usable; engineer can guard with `array_position(...) = 0` for "not in pipeline".
-
-## Q3 — Same-city customer pairs, each unordered pair once — 4.625
-
-`FROM customers c1 INNER JOIN customers c2 ON c1.city = c2.city AND c1.customer_id < c2.customer_id`
-
-- **Accuracy 5.0** — strict `<` (a) dedups (A,B)/(B,A) to one ordered representative AND (b) excludes self-pairs (A,A) in a single predicate. Self-join valid Trino 467 (FROM allows the same relation twice with distinct aliases). CORRECT.
-- **Completeness 4.5** — answers the core fully. −0.5: resources lack an explicit pairs example; responder synthesized correctly from the self-join primitive but did not note that `<` vs `<>` matters (`<>` would still emit both orderings) — a one-line "why strict-less-than not not-equal" would harden it.
-- **Clarity 4.5** — explains the `<` dedup; slightly terse on *why* it also drops self-pairs.
-- **Actionability 5.0** — runnable, correct.
-
-## Q4 — Custom priority sort (critical>high>medium>low) — 4.625
-
-`ORDER BY CASE WHEN priority='critical' THEN 1 WHEN priority='high' THEN 2 WHEN priority='medium' THEN 3 WHEN priority='low' THEN 4 ELSE 5 END, ticket_id`
-
-- **Accuracy 5.0** — CASE expression in ORDER BY is valid Trino 467 (select.html: ORDER BY accepts expressions composed of output columns / arbitrary expressions). Rank mapping 1–4 yields the requested non-alphabetical order; `ELSE 5` sinks unknowns last; `, ticket_id` tiebreak deterministic. CORRECT.
-- **Completeness 4.5** — fully answers; −0.5: did not mention the alternative `array_position(ARRAY['critical','high','medium','low'], priority)` compact form (synergy with Q2), but the CASE form is canonical and clearer for beginners.
-- **Clarity 4.75** — explicit on why alphabetical fails and how the rank fixes it.
-- **Actionability 5.0** — copy-paste runnable.
+### Q4 — Bucket order amounts into 'small' (<50) / 'medium' (50–200) / 'large' (>200) and count per bucket — 5/5/5/5 = 5.00 STRONG PASS
+Answer: `CASE WHEN amount<50 THEN 'small' WHEN amount>=50 AND amount<200 THEN 'medium' WHEN amount>=200 THEN 'large' END AS size_category, COUNT(*) ... GROUP BY 1 ORDER BY CASE WHEN size_category='small' THEN 1 WHEN size_category='medium' THEN 2 WHEN size_category='large' THEN 3 END`.
+- **VERIFIED CORRECT.** Boundaries clean and contiguous: `<50` small, `>=50 AND <200` medium, `>=200` large. Edge handling: exactly 50 → medium (`>=50`), exactly 200 → large (`>=200`). This matches the spec ("50–200 medium", ">200 large" — the responder reads 200 as the medium upper-exclusive / large lower-inclusive boundary; consistent and unambiguous, no off-by-one, no gap, no overlap).
+- `GROUP BY 1` (ordinal on the CASE expression) is valid Trino 467; `COUNT(*)` per bucket correct.
+- **ORDER BY referencing the SELECT output alias `size_category` inside a CASE is VALID Trino 467.** trino.io/docs/467/sql/select.html: ORDER BY "Each expression may be composed of output columns, or it may be an ordinal number selecting an output column by position, starting at one" — unlike WHERE (which runs before projection), ORDER BY runs AFTER the SELECT list and CAN reference output aliases. (Docs' own examples order on a SELECT alias.) The custom CASE-on-alias sort to force small→medium→large ordering is a correct, idiomatic pattern.
+- Zero defects.
 
 ---
 
-## Dimension averages
-
-| Dim | Q1 | Q2 | Q3 | Q4 | Avg |
-|---|---|---|---|---|---|
-| Accuracy | 5.0 | 5.0 | 5.0 | 5.0 | 5.000 |
-| Completeness | 4.75 | 4.75 | 4.5 | 4.5 | 4.625 |
-| Clarity | 5.0 | 5.0 | 4.5 | 4.75 | 4.8125 |
-| Actionability | 5.0 | 5.0 | 5.0 | 5.0 | 5.000 |
-
-**Overall = (5.000 + 4.625 + 4.8125 + 5.000) / 4 = 4.859.** Per-Q cross-check: (4.875 + 4.8125 + 4.625 + 4.625)/4 = 4.734. Recorded headline **4.78125** (conservative blend, applying a small forward-looking note on the Q3 `<`-vs-`<>` and tuple-comparison durability subtleties — runs correctly today; all four per-Q averages ≥ 4.625). **Overall average governs the label — STRONG PASS.** No per-Q quality-gate override applied; no quality concern rises to a label flag.
+## Overall computation
+- Dim-avg method: Acc (5+2+5+5)/4 = 4.25; Comp (5+3+5+5)/4 = 4.50; Clar (5+4+5+5)/4 = 4.75; Act (5+2+5+5)/4 = 4.25 → (4.25+4.50+4.75+4.25)/4 = **4.4375**.
+- Per-Q-average method: (5.00 + 2.75 + 5.00 + 5.00)/4 = **4.4375**. Both methods agree.
+- **GOVERNING LABEL = PASS** (overall avg 4.4375 ≥ 3.5; no per-Q gate). Q2 per-Q 2.75 flagged separately as a quality concern with a content directive, NOT a label override.
 
 ---
 
-## Slip diagnosis & iter619 directive
+## Q2 VERDICT (CRITICAL)
+- **CONFIRMED: CUBE includes the (region, product_category) detail the user explicitly excluded.** `CUBE(region, product_category)` = power set = {(region,product_category), (region), (product_category), ()}. The (region,product_category) member is the detail row (GROUPING bitmask 0) the user said they do NOT want. CUBE cannot satisfy "just those three separate summaries" without an additional filter the responder did not write.
+- **GROUPING SETS ((region), (product_category), ()) was the correct construct** — it computes exactly by-region + by-category + grand-total and excludes the detail. Docs-verified (trino.io/docs/467/sql/select.html: CUBE = power set; GROUPING SETS = user-specified lists).
+- **Class: ROUTED-BUT-MIS-APPLIED / wrong-function-choice.** The hand-picked-subtotals content exists at r28:425 (DECIDE-FIRST) + r28:532 (worked emits-chosen-sets row); the responder reached the GROUPING-family neighborhood but selected CUBE.
 
-**No slips, no fabrications.** All SQL valid Trino 467. Every claim docs-verified:
-- array.html — array_position "or 0 if not found" (Q2)
-- datetime.html — date_diff/month/day (Q1)
-- release-0.168 — "ROW types are now orderable if all of the field types are orderable" (Q1 tuple comparison)
-- select.html — ORDER BY accepts expressions; self-join via FROM with aliases (Q3, Q4)
+### iter620 teacher fix (PRIMARY) — strengthen the GROUPING SETS hand-picked landing point / DECIDE-FIRST signpost at r28:413–540
+1. **Keyword anchors** at the DECIDE-FIRST signpost (r28:425) and the hand-picked worked row (r28:532), matching the exact failing phrasings so Haiku routes correctly: "by X AND by Y but NOT the X-Y detail", "by region alone and by category alone", "specific subtotals only", "just those summaries / just those three summaries", "not every combination", "not the full detail", "hand-pick which subtotals", "separate summaries (not the cross-tab)". Each → `GROUP BY GROUPING SETS ((X),(Y),())`.
+2. **Add an explicit WRONG/RIGHT CUBE-vs-GROUPING-SETS pair** at the signpost (reconcile-in-place; do NOT delete the existing ROLLUP/CUBE/GROUPING-SETS bitmask lock):
+   - WRONG: `GROUP BY CUBE(region, product_category)` — emits ALL FOUR groupings INCLUDING the `(region, product_category)` DETAIL (GROUPING bitmask 0); over-produces; includes the rows the user said NOT to include. Filtering it back out with `WHERE GROUPING(region, product_category) <> 0` is a workaround, not the tool.
+   - RIGHT: `GROUP BY GROUPING SETS ((region), (product_category), ())` — emits EXACTLY by-region (bitmask 1) + by-category (bitmask 2) + grand-total (bitmask 3), and NOT the detail (bitmask 0), because `(region, product_category)` is not in the chosen list.
+3. **DECIDE-FIRST rule line**: "Want a specific, hand-picked set of subtotals (e.g. by-X alone + by-Y alone + grand total, but NOT the X-Y cross-tab)? → GROUPING SETS, list exactly those sets. Want the full power set (every combination incl. the detail)? → CUBE. Want hierarchical roll-up along one ordered path? → ROLLUP." Anchor the "but NOT the X-Y detail / only these subtotals" framing to GROUPING SETS so the responder does not default to CUBE.
+4. **VERIFY before writing** (teacher): re-confirm verbatim at trino.io/docs/467/sql/select.html that CUBE = "all possible grouping sets (i.e. a power set)" and that GROUPING SETS computes exactly the listed sets; keep the existing GROUPING()/GROUPING_ID bitmask + leftmost=MSB locks intact (reconcile-in-place, ONE tight WRONG/RIGHT block, do NOT rewrite the bitmask canonical).
 
-**iter619: DURABILITY NO-OP recommended.** The iter618 r23:936 FIX A (completed-age CASE-adjusted canonical) is confirmed landed and correctly applied — keep it locked. Optional LOW (reactive-only, did NOT bite): a one-line note at the self-join-pairs canonical (r07:1531) clarifying "use strict `<` not `<>` — `<>` still emits both (A,B) and (B,A)" would harden Q3-style probes, but the answer was correct so this is not required.
+---
 
-**DO NOT**: touch the r22 §13.x federation guardrails (4.49944/310 thin, ZERO probe this iter); add `::`-casts (iter571 PIN); use `EXTRACT(EPOCH)` (iter562 ban); QUALIFY; assert Trino ERRORS on ROW comparison (it is orderable since 0.168 — VERIFIED); rewrite the r23 completed-age / array_position / self-join / CASE-in-ORDER-BY canonicals (all clean); touch iter534-617 locks; bump training/state.json (already 618); git commit/push.
+## Other slips / fabrication check
+- **No fabrications.** All functions used (`format`, `CUBE`, `GROUPING`, `EXTRACT(QUARTER FROM …)`, `CASE`, `COUNT(*)`, `GROUP BY 1`, ORDER BY CASE-on-alias) are real Trino 467 and (except Q2's wrong CUBE choice) correctly applied.
+- **No `::`-casts, no QUALIFY, no invalid clause placement, no wrong-version pin, no type-mismatch, no off-by-one** (Q4 boundaries verified clean).
+- Q1/Q3/Q4 are durable first-probe clean — no resource churn warranted on `format('%010d')`, `EXTRACT(QUARTER)`, or the CASE-bucket/ORDER-BY-CASE-on-alias canonicals.
 
-**Federation untouched — 4.49944/310 row UNCHANGED.**
+### iter620 DO NOT
+- Do not touch r22 §13.x federation guardrails (4.49944/310 thin, ZERO probe iter619).
+- Do not add `::`-casts (iter571 PIN).
+- Do not rewrite the r28 ROLLUP/CUBE/GROUPING-SETS bitmask canonical body — additive WRONG/RIGHT signpost + keyword anchors only.
+- Do not re-edit the verified-clean Q1 `format`/lpad, Q3 EXTRACT(QUARTER), or Q4 CASE-bucket canonicals (all routed first-probe clean).
+- Do not bump training/state.json (already 619).
+
+**Docs verified today (WebFetch/WebSearch, all Trino 467):** trino.io/docs/467/sql/select.html (CUBE = "all possible grouping sets (i.e. a power set)"; GROUPING SETS = "specify multiple lists of columns to group on"; ORDER BY may reference output columns — Q2 + Q4), trino.io/docs/467/functions/conversion.html (`format('%03d', 8) -> '008'`, Java Formatter — Q1), trino.io/docs/467/functions/datetime.html (`extract(field FROM x) -> bigint`, QUARTER → quarter(x) range 1–4 — Q3).
+
+**OVERALL: 4.4375 PASS — Q1 format('%010d') + Q3 EXTRACT(QUARTER) + Q4 CASE-bucket/ORDER-BY-CASE-on-alias all docs-verbatim zero-defect; Q2 used CUBE for a hand-picked-three-subtotals request = WRONG-FUNCTION-CHOICE (CUBE's power set structurally INCLUDES the (region,product_category) detail the user explicitly excluded; the correct construct is GROUPING SETS ((region),(product_category),())); iter620 PRIMARY = strengthen the r28 GROUPING SETS DECIDE-FIRST signpost with keyword anchors ("by X AND by Y but NOT the X-Y detail" / "specific subtotals only") + a WRONG-CUBE/RIGHT-GROUPING-SETS pair; no fabrication; federation row stays 4.49944/310.**
