@@ -981,6 +981,38 @@ Sources (verified June 2026): [trino.io/docs/current/functions/datetime.html](ht
 | **3** | **Capture-group reference syntax in `regexp_replace` replacement** | `\1`, `\2`, ... `\9` (backslash + digit) in the replacement string. Example: `REGEXP_REPLACE(phone, '(\d{3})(\d{4})', '\1-\2')` produces `555-1234`. | **`$1`, `$2`, ...** (dollar + digit) in the replacement string. Example: `regexp_replace(phone, '(\d{3})(\d{4})', '$1-$2')` produces `555-1234`. Verified at [trino.io/docs/current/functions/regexp.html](https://trino.io/docs/current/functions/regexp.html). | **This is the most common silent-wrong slip.** Lifted `\1` to Trino emits a LITERAL backslash-1 in the output, not the captured group. ALWAYS rewrite `\<digit>` → `$<digit>` in every `regexp_replace` replacement string during migration. Audit checklist: `grep -E 'regexp_replace.*\\\\[0-9]'` on the Trino-side dbt SQL — any hit is a migration bug. |
 | **4** | **Group access in `regexp_extract` — Trino has a 3rd `group` arg; Oracle uses a separate function/arg position** | Oracle `REGEXP_SUBSTR(s, pattern, position, occurrence, match_param, subexpression)` — the 6th argument selects the capture group. Underused; most migration sources just have `REGEXP_SUBSTR(s, pattern)`. | `regexp_extract(string, pattern)` returns the full match. `regexp_extract(string, pattern, group)` returns the N-th capture group (1-indexed; `0` returns full match). | When the Oracle source uses the 6th-arg form, port to Trino's 3rd-arg form: `REGEXP_SUBSTR(phone, '(\d{3})(\d{4})', 1, 1, NULL, 2)` → `regexp_extract(phone, '(\d{3})(\d{4})', 2)`. |
 
+#### LEADING CANONICAL — flag rows whose text contains ANY of several keywords (multi-keyword text search with `regexp_like(col, 'a|b|c')`)
+
+> **READ THIS FIRST if your question contains any of these keywords:** `contains any of several keywords`, `multi-keyword text search`, `mentions any of`, `matches any of these words`, `body contains one of`, `flag rows containing any of a list of terms`, `text contains any keyword`, `column contains one of several words`, `search for multiple terms`, `match any of these strings`. Verified at [trino.io/docs/467/functions/regexp.html](https://trino.io/docs/467/functions/regexp.html) on 2026-06-07.
+
+**The one-fact summary.** `regexp_like(col, 'a|b|c')` returns **TRUE if `col` CONTAINS any of the alternatives `a`, `b`, or `c`** — `regexp_like` is a **CONTAINS operation** (no `^...$` anchors needed; per the docs *"the pattern only needs to be contained within `string`, rather than needing to match all of it"* — it *"performs a `contains` operation rather than a `match` operation"*). The `|` is **regex alternation** ("or"). Use this single call **instead of chaining many `OR LIKE` conditions**.
+
+```sql
+-- Flag any ticket whose body contains ANY of the three words (case-sensitive)
+SELECT * FROM tickets
+WHERE regexp_like(body, 'refund|cancel|chargeback');
+
+-- Case-insensitive variant — inline (?i) flag applies to the whole alternation
+SELECT * FROM tickets
+WHERE regexp_like(body, '(?i)refund|cancel|chargeback');
+```
+
+**Equivalent multiple-`LIKE`-`OR` form** (valid Trino, but verbose — gets unwieldy past 2–3 terms):
+
+```sql
+SELECT * FROM tickets
+WHERE body LIKE '%refund%' OR body LIKE '%cancel%' OR body LIKE '%chargeback%';
+```
+
+The `regexp_like(body, 'refund|cancel|chargeback')` form is the concise idiom; add terms by extending the `|`-list. (For case-insensitive multi-LIKE you would need `LOWER(body) LIKE '%refund%' OR ...` on every branch — another reason the `(?i)` regex form is cleaner.)
+
+> **INOCULATION — there is NO `RLIKE` in Trino 467.** Trino 467 has **no `RLIKE` function or operator** — `RLIKE` is **Hive / Spark / MySQL**, NOT Trino. Writing `RLIKE(col, pattern)` (or `col RLIKE pattern`) is a **function-not-registered / parse error** on Trino. The Trino regex-match function is **`regexp_like(col, pattern)`** (returns `boolean`). The complete Trino 467 regex function set is exactly: `regexp_count`, `regexp_extract_all`, `regexp_extract`, `regexp_like`, `regexp_position`, `regexp_replace`, `regexp_split` — **`RLIKE` is ABSENT** from this list ([trino.io/docs/467/functions/regexp.html](https://trino.io/docs/467/functions/regexp.html), verified 2026-06-07). **Do NOT write `RLIKE`.**
+
+| Banned form | Why wrong | Correct Trino 467 form |
+|---|---|---|
+| `RLIKE(body, 'refund\|cancel\|chargeback')` | `RLIKE` is **not a Trino function** (it is Hive/Spark/MySQL) — `Function 'rlike' not registered`. | `regexp_like(body, 'refund\|cancel\|chargeback')` — the Trino regex-match function, returns `boolean`. |
+| `body RLIKE 'refund\|cancel\|chargeback'` (infix operator) | Trino has no `RLIKE` infix operator — parse error. | `regexp_like(body, 'refund\|cancel\|chargeback')`. |
+
 **A bonus Trino-only capability — lambda replacement in `regexp_replace`.** Trino's `regexp_replace(string, pattern, function)` accepts a lambda for the third argument, giving per-match transformation logic that Oracle has no single-statement equivalent for:
 
 ```sql
