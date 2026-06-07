@@ -1756,7 +1756,7 @@ Rank function variants:
 - `ROW_NUMBER()` — assigns a strictly increasing integer (1, 2, 3, 4) within the partition. Ties break arbitrarily.
 - `RANK()` — ties get the same rank, then the next rank skips (1, 2, 2, 4).
 - `DENSE_RANK()` — ties get the same rank, no gap (1, 2, 2, 3).
-- `PERCENT_RANK()` — relative position as a fraction in `[0.0, 1.0]`. Formula: `(rank - 1) / (n - 1)` where `n` is partition row count. The top row gets `0.0`, the bottom row gets `1.0`. **Returns NULL when the partition has only one row** (divide-by-zero). Useful for "what percentile is this tenant in?" without computing a histogram.
+- `PERCENT_RANK()` — relative position as a fraction in `[0.0, 1.0]`. Formula: `(rank - 1) / (n - 1)` where `n` is partition row count. **The FIRST row in the `ORDER BY` gets `0.0`; the LAST row gets `1.0`** — so "top" and "bottom" depend on sort direction (see the **PERCENT_RANK / NTILE direction guardrail** sub-section below — the iter634 silent-wrong bug was inverting the threshold for `ORDER BY metric DESC`). **Returns NULL when the partition has only one row** (divide-by-zero). Useful for "what percentile is this tenant in?" without computing a histogram.
 - `NTILE(n)` — divides the partition into `n` roughly-equal buckets (quartiles=4, deciles=10, percentiles=100), returning the bucket number `1..n` for each row. **Remainder rows go to the EARLIEST buckets**: e.g., 10 rows with `NTILE(3)` → buckets are size 4/3/3, not 3/3/4. **The frame clause MUST be omitted** (Trino errors if you specify `ROWS BETWEEN ...` with `NTILE`).
 
 Pick `ROW_NUMBER()` if you literally need "exactly 10 rows per tenant"; pick `RANK()`/`DENSE_RANK()` if you want to include all ties at rank 10.
@@ -1789,7 +1789,80 @@ FROM (
 
 **Edge case — single-row partition.** `PERCENT_RANK` returns NULL (the formula divides by `n - 1` which is 0). Guard with `COALESCE(PERCENT_RANK() OVER (...), 0.0)` if your downstream consumer can't handle NULLs.
 
-**Sibling: `CUME_DIST` (cumulative distribution).** Trino also supports `CUME_DIST()` which returns `count_of_peers_or_lower / n` — slightly different math (the top row is `1.0`, not `(n-1)/n`). Use `PERCENT_RANK` for "fraction of rows STRICTLY below this one" and `CUME_DIST` for "fraction of rows AT OR BELOW this one."
+**Sibling: `CUME_DIST` (cumulative distribution).** Trino also supports `CUME_DIST()` which returns `count_of_peers_or_lower / n` — slightly different math (the top row is `1.0`, not `(n-1)/n`). Use `PERCENT_RANK` for "fraction of rows STRICTLY below this one" and `CUME_DIST` for "fraction of rows AT OR BELOW this one." Like `PERCENT_RANK`, `CUME_DIST` is **sort-direction dependent**: under `ORDER BY x DESC`, the row with the LARGEST `x` is the first row and gets `cume_dist = 1/n` (small), the row with the smallest `x` gets `1.0` — see the guardrail immediately below.
+
+#### LEADING CANONICAL — PERCENT_RANK / NTILE direction guardrail (iter635 — "top X% by metric" inversion trap)
+
+> **READ THIS FIRST if your question contains:** `top 10% of customers by spend`, `share of revenue from the top decile`, `highest-spending 10%`, `top N percent by a metric`, `what percent of revenue comes from the top X%`, `bottom decile by revenue`, `customers in the top quartile by ARR`, `PERCENT_RANK >= 0.9 vs <= 0.1`, `which side of percent_rank is the top`, `NTILE bucket 1 vs bucket 10`. Verified at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html) on 2026-06-07.
+
+**The one fact you must keep straight.** `PERCENT_RANK()` assigns **`0.0` to the FIRST row in the `ORDER BY`** and `1.0` to the LAST row. What "the top of your metric" means therefore depends on the sort direction. The iter634 silent-wrong bug was writing `PERCENT_RANK() OVER (ORDER BY total_revenue DESC) >= 0.9` for "top 10% by spend" — which selects the **BOTTOM 10%** (lowest spenders), because under `DESC` the highest spender is the FIRST row and gets `percent_rank = 0.0`, while the lowest spender is the LAST row and gets `percent_rank = 1.0`. The threshold `>= 0.9` therefore catches the bottom decile, not the top.
+
+**Decision table — use this verbatim. Each row gives the exact direction + threshold pair that picks the TOP 10% (or BOTTOM 10%) of a metric.**
+
+| Question | `ORDER BY` direction | Threshold | Which rows it returns | Why |
+|---|---|---|---|---|
+| Top 10% of customers by `spend` | `ORDER BY spend DESC` | `PERCENT_RANK() <= 0.10` | Highest-spend 10% | Highest spender = first row = `percent_rank = 0.0`; top decile clusters near `0.0`. |
+| Top 10% of customers by `spend` (sorted ASC) | `ORDER BY spend ASC` | `PERCENT_RANK() >= 0.90` | Highest-spend 10% | Highest spender = last row = `percent_rank = 1.0`; top decile clusters near `1.0`. |
+| Bottom 10% by `spend` (sorted DESC) | `ORDER BY spend DESC` | `PERCENT_RANK() >= 0.90` | Lowest-spend 10% | Lowest spender = last row = `1.0`. |
+| Bottom 10% by `spend` (sorted ASC) | `ORDER BY spend ASC` | `PERCENT_RANK() <= 0.10` | Lowest-spend 10% | Lowest spender = first row = `0.0`. |
+| Top decile by spend, **count-based, exact bucket** | `ORDER BY spend DESC` | `NTILE(10) = 1` | Top decile (highest 10%) | `NTILE` numbers buckets `1..n` in `ORDER BY` order; under `DESC`, bucket `1` is the highest-spend group. |
+| Top decile by spend, **count-based**, sorted ASC | `ORDER BY spend ASC` | `NTILE(10) = 10` | Top decile (highest 10%) | Under `ASC`, bucket `10` is the last bucket = highest values. |
+
+**Mnemonic.** `percent_rank = 0.0` = **FIRST row in the sort**. Pick the threshold for the side of the sort where your target rows land — never assume `>= 0.9` means "the top."
+
+> **DO NOT WRITE — the exact iter634 silent-wrong inversion.**
+>
+> ```sql
+> -- WRONG: this selects the BOTTOM 10% (lowest spenders), not the top.
+> -- Under ORDER BY ... DESC, the highest spender is the FIRST row and gets percent_rank 0.0,
+> -- so the top decile is percent_rank <= 0.1, NOT >= 0.9.
+> SELECT customer_id, total_revenue
+> FROM (
+>   SELECT customer_id, total_revenue,
+>          PERCENT_RANK() OVER (ORDER BY total_revenue DESC) AS pr
+>   FROM customer_revenue
+> )
+> WHERE pr >= 0.9;             -- ❌ bottom decile, not top
+>
+> -- RIGHT (option 1 — keep DESC sort, flip the threshold):
+> SELECT customer_id, total_revenue
+> FROM (
+>   SELECT customer_id, total_revenue,
+>          PERCENT_RANK() OVER (ORDER BY total_revenue DESC) AS pr
+>   FROM customer_revenue
+> )
+> WHERE pr <= 0.10;            -- ✅ top decile under DESC
+>
+> -- RIGHT (option 2 — keep the >= 0.9 threshold, flip the sort):
+> SELECT customer_id, total_revenue
+> FROM (
+>   SELECT customer_id, total_revenue,
+>          PERCENT_RANK() OVER (ORDER BY total_revenue ASC) AS pr
+>   FROM customer_revenue
+> )
+> WHERE pr >= 0.90;            -- ✅ top decile under ASC
+>
+> -- RIGHT (option 3 — count-based exact decile, sort-direction-friendly):
+> SELECT customer_id, total_revenue
+> FROM (
+>   SELECT customer_id, total_revenue,
+>          NTILE(10) OVER (ORDER BY total_revenue DESC) AS decile
+>   FROM customer_revenue
+> )
+> WHERE decile = 1;            -- ✅ bucket 1 under DESC = highest-spend decile
+> ```
+>
+> **DO NOT WRITE — the inverted prose explanation.** "`PERCENT_RANK = 0.0` means the bottom, `1.0` means the top" is **WRONG in general** — it is true only under `ORDER BY metric ASC`. Under `ORDER BY metric DESC`, `0.0` is the TOP (highest value) and `1.0` is the BOTTOM. Always pair the percent_rank threshold with the sort direction you actually wrote.
+
+**PERCENT_RANK vs NTILE for "top X%" — pick the right tool.**
+
+| Need | Use |
+|---|---|
+| "Top X% by metric" where X is a fraction (e.g. top 5%, top 1%) AND you want a fractional cutoff (some rows may tie at the boundary and all get included) | `PERCENT_RANK()` with the threshold from the decision table above. |
+| "Top decile / top quartile / top percentile by metric" as **exact equal-size count-based buckets** (e.g. exactly 10 deciles labeled 1..10) | `NTILE(N)` with `= 1` under `DESC` (or `= N` under `ASC`). Count-based: each bucket has roughly `total_rows / N` rows; ties between two rows on the metric may land on opposite sides of a bucket boundary. |
+| "Share of revenue from the top 10% of customers" (compose top-decile filter + share-of-grand-total) | `NTILE(10)` (or `PERCENT_RANK <=/>= 0.10/0.90`) in an inner query, then `SUM(revenue) FILTER (WHERE decile = 1) / SUM(revenue) OVER ()` in the outer — see the share-of-grand-total canonical earlier in this resource (`100.0 * x / SUM(x) OVER ()`). |
+
+**Cross-references.** [§ Pattern C2 `PERCENT_RANK`](#pattern-c2-percent_rank--what-percentile-is-this-tenant-in) above for the per-row percentile use case. [§ Pattern C3 `NTILE`](#pattern-c3-ntile--bucket-rows-into-equal-size-groups-quartiles-deciles-percentile-buckets) below for the count-based equal-size-bucket recipe and the remainder rule. [§ share-of-grand-total `SUM(x) OVER ()`](#) earlier in this file for composing top-decile + share-of-revenue. [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html) for the verbatim `percent_rank` and `ntile` definitions.
 
 ### Pattern C3: `NTILE` — bucket rows into equal-size groups (quartiles, deciles, percentile buckets)
 
@@ -1838,7 +1911,7 @@ FROM (
 | 14 (14 ÷ 4 = 3 remainder 2) | `4, 4, 3, 3` — buckets 1 and 2 each get an extra |
 | 15 (15 ÷ 4 = 3 remainder 3) | `4, 4, 4, 3` — buckets 1, 2, 3 each get an extra |
 
-**This matters for SaaS metrics.** If you have 9,997 tenants and you compute `NTILE(10)` for "decile of revenue", the deciles are NOT all 999.7 rows each — they are `1000, 1000, 1000, 1000, 1000, 1000, 1000, 999, 999, 999` (first 7 buckets get the rounding-up). If a dashboard says "top decile = top 1000 tenants" and the real answer is "top decile = 999 tenants on this distribution", an audit may flag the off-by-one. State the rule explicitly in dashboard documentation, or use `PERCENT_RANK() >= 0.9` instead for an exact-cutoff threshold.
+**This matters for SaaS metrics.** If you have 9,997 tenants and you compute `NTILE(10)` for "decile of revenue", the deciles are NOT all 999.7 rows each — they are `1000, 1000, 1000, 1000, 1000, 1000, 1000, 999, 999, 999` (first 7 buckets get the rounding-up). If a dashboard says "top decile = top 1000 tenants" and the real answer is "top decile = 999 tenants on this distribution", an audit may flag the off-by-one. State the rule explicitly in dashboard documentation, or use the `PERCENT_RANK` exact-cutoff form **with the direction-correct threshold from the [PERCENT_RANK / NTILE direction guardrail](#leading-canonical--percent_rank--ntile-direction-guardrail-iter635--top-x-by-metric-inversion-trap) above** — `PERCENT_RANK() OVER (ORDER BY revenue DESC) <= 0.10` for the top decile under `DESC`, or `PERCENT_RANK() OVER (ORDER BY revenue ASC) >= 0.90` under `ASC`. Do NOT write the direction-naive `PERCENT_RANK() >= 0.9` without checking the sort direction (under `DESC`, `>= 0.9` selects the BOTTOM decile).
 
 **The no-frame restriction.** Per the [Trino window functions docs](https://trino.io/docs/current/functions/window.html), `NTILE` **must not** be invoked with a window frame:
 
@@ -1862,7 +1935,7 @@ This restriction applies to all the **ranking functions** in Trino (`ROW_NUMBER`
 | Bucket every row into one of `N` named groups (deciles, quartiles, percentile bands) | `NTILE(N)` — concise, single window pass |
 | Continuous percentile score per row (`0.0–1.0`) | `PERCENT_RANK()` — gives you the fraction, you decide the bucket boundaries |
 | Custom (non-equal-size) buckets like "0-1k MAU", "1k-10k MAU", "10k+ MAU" | `CASE WHEN ... THEN ... END` over the column directly — `NTILE` only does equal-size bucketing |
-| Exact "top 10% of tenants" — guaranteed cutoff regardless of count | `PERCENT_RANK() >= 0.9` filter — avoids the `NTILE` remainder-row off-by-one |
+| Exact "top 10% of tenants" — guaranteed cutoff regardless of count | `PERCENT_RANK()` filter **with the direction-correct threshold** (see [direction guardrail](#leading-canonical--percent_rank--ntile-direction-guardrail-iter635--top-x-by-metric-inversion-trap) above): `<= 0.10` under `ORDER BY metric DESC` or `>= 0.90` under `ORDER BY metric ASC` — avoids the `NTILE` remainder-row off-by-one |
 
 **NULL handling — filter NULLs out BEFORE the NTILE.** When the column you're bucketing on contains NULL values, NTILE doesn't skip them — it sorts them and assigns them to a bucket like any other value. Trino's **default NULL ordering is `NULLS LAST`** (regardless of `ASC` or `DESC`), per the [Trino SELECT docs](https://trino.io/docs/current/sql/select.html). So in `NTILE(10) OVER (ORDER BY revenue)` with some NULL revenues, the NULL rows land in the **highest deciles** (buckets 9 and 10) — which is almost certainly wrong for a "top decile = highest revenue" interpretation. Always filter NULLs explicitly:
 

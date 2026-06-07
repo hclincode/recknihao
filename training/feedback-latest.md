@@ -1,112 +1,122 @@
-# Iter634 Judge Feedback — 2026-06-07 (EXTENDED PHASE)
+# iter635 — JUDGE FEEDBACK
 
-## Per-Question Scores
+## Per-question scores (Accuracy / Completeness / Clarity / Actionability, each 1-5)
 
-### Q1 — Top 10% customers' share of total revenue (PERCENT_RANK direction INVERTED)
-- Accuracy: **2** — PERCENT_RANK semantics inverted under DESC sort.
-- Completeness: **3** — Correct CTE skeleton (SUM/GROUP BY → window → numerator/denominator) but the cutoff is wrong; computes BOTTOM-10% share, not TOP-10%.
-- Clarity: **4** — Clean CTE structure, well-narrated; the misstated direction is unambiguously stated (which is what makes it dangerous).
-- Actionability: **2** — Copy-paste returns the WRONG number; engineer would ship an inverted KPI.
-- **Per-Q avg: 2.75**
+### Q1 — Share of total revenue from TOP 20% highest-spending customers
+- Accuracy: **3** — DIRECTION is correct (FIX-A guardrail LANDED), but the final query has a column-scope bug that will fail in Trino 467.
+- Completeness: **4** — All the structural pieces (per-customer SUM, quintile, top-quintile total, grand total, ratio*100) are present.
+- Clarity: **4** — CTE-by-CTE structure is easy to follow; explanation of NTILE DESC bucket-1 = top is clean.
+- Actionability: **3** — The engineer cannot copy-paste-run the final SELECT as written; needs the column-scope fix.
+- **Avg: 3.5**
 
-**Verification (trino.io/docs/467/functions/window.html):** `percent_rank()` is documented verbatim as `(r - 1) / (n - 1)`. With `ORDER BY total_revenue DESC`, the highest spender has rank r=1 → percent_rank = 0.0; the lowest spender has rank r=n → percent_rank = 1.0. Under DESC ordering, the TOP 10% by spend are `percent_rank <= 0.1`, NOT `>= 0.9`. The responder's prose ("0.0 bottom, 1.0 top") and the `CASE WHEN revenue_percentile >= 0.9` cutoff are both inverted — the query returns the share captured by the BOTTOM 10% of spenders. Fix is either flip the order (`ORDER BY total_revenue ASC` with `>= 0.9`) or flip the cutoff (`ORDER BY total_revenue DESC` with `<= 0.1`). NTILE(10) with `DESC` + `WHERE decile = 1` (filtered in an outer wrapper) would be a count-balanced cleaner alternative — worth signposting.
+**(a) FIX-A direction guardrail — LANDED.**
+`NTILE(5) OVER (ORDER BY total_spend DESC) AS spend_quintile` followed by `WHERE spend_quintile = 1` correctly selects the TOP quintile under DESC. Verified against trino.io/docs/467/functions/window.html: ntile(n) assigns bucket 1 to the FIRST rows in ORDER BY order, so under `ORDER BY ... DESC` bucket 1 = highest. The responder did NOT invert (no iter634-style `percent_rank >= 0.9 under DESC` bottom-decile bug). The leading canonical sub-section at r07:1794 is doing its job.
 
-### Q2 — Duplicate (email, signup_date) detection
-- Accuracy: **5** — `GROUP BY email, signup_date HAVING COUNT(*) > 1` is the canonical correct pattern. Self-join-back to the source table to surface the full duplicate rows is valid Trino 467.
-- Completeness: **5** — Covers both the dup-key list and the dup-row enumeration; addresses the engineer's likely follow-up.
-- Clarity: **5** — Two-step structure (find offending keys, then join back) is easy to read.
-- Actionability: **5** — Copy-pasteable.
-- **Per-Q avg: 5.00**
+**(b) Final-query scope bug — REAL.**
+The final SELECT reads:
+```sql
+SELECT ROUND(100.0 * top_20_revenue / SUM(total_spend), 2) AS pct_revenue_from_top_20
+FROM top_quintile, (SELECT SUM(total_spend) AS total FROM ranked_customers)
+```
+The cross-joined FROM clause exposes exactly two columns: `top_20_revenue` (from the `top_quintile` CTE) and `total` (from the subquery's aliased SUM). `total_spend` is NOT a column in scope at the outer SELECT — it lives inside `ranked_customers`, which is wrapped behind the subquery. Trino 467 will fail with a column-resolution error (`Column 'total_spend' cannot be resolved` or similar), and even if it did resolve, applying `SUM()` to a single-row cross-joined context is meaningless. The correct outer SELECT is:
+```sql
+SELECT ROUND(100.0 * top_20_revenue / total, 2) AS pct_revenue_from_top_20
+FROM top_quintile, (SELECT SUM(total_spend) AS total FROM ranked_customers)
+```
+The bug is a final-assembly mistake (the SUM was correctly moved into the inner subquery but the outer reference was not updated to use the alias `total`). Approach correct, execution buggy.
 
-**Verification:** Standard SQL; HAVING applies post-aggregation; the existence of duplicate keys is exactly what `COUNT(*) > 1` after a GROUP BY surfaces. No dialect concerns.
+### Q2 — Split customers into 5 equal-sized tiers by spend
+- Accuracy: **5** — `NTILE(5) OVER (ORDER BY SUM(amount) DESC) AS spend_tier ... GROUP BY customer_id` is valid Trino 467 syntax. Window functions are computed AFTER aggregation, so the window can sort on `SUM(amount)` directly without a CTE. Tier 1 = highest under DESC: verified correct. Remainder distributed to first buckets: verified verbatim from trino.io/docs/467/functions/window.html (`If the number of rows in the partition does not divide evenly into the number of buckets, then the remainder values are distributed one per bucket, starting with the first bucket`).
+- Completeness: **5** — Direction noted, remainder rule noted (101 customers → tier 1 gets 21), GROUP BY at customer grain noted.
+- Clarity: **5** — Concise, on-point, the example with 101 rows makes the remainder rule click.
+- Actionability: **5** — Copy-paste-runnable. Engineer knows exactly what to do.
+- **Avg: 5.0**
 
-### Q3 — Forward-fill / LOCF per device
-- Accuracy: **5** — `LAST_VALUE(status) IGNORE NULLS OVER (PARTITION BY device_id ORDER BY event_time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` is correct Trino 467. IGNORE NULLS placement (after closing `)`, before OVER) is right.
-- Completeness: **4.5** — All the necessary pieces present; minor: the outer `COALESCE(status, LAST_VALUE(...) IGNORE NULLS ...)` is redundant (LAST_VALUE ... IGNORE NULLS through CURRENT ROW already returns the current row's non-null value when present) — harmless but verbose; a brief note that the wrapper is optional would be cleaner.
-- Clarity: **5** — Frame explained in plain language.
-- Actionability: **5** — Drop-in.
-- **Per-Q avg: 4.875**
+### Q3 — Avg days between 1st and 2nd order for repeat customers
+- Accuracy: **5** — ROW_NUMBER() OVER (PARTITION BY customer ORDER BY order_date) + MAX(CASE WHEN order_num=N THEN order_date END) pivot pattern is a canonical Trino 467 idiom. HAVING the order_num=2 date IS NOT NULL correctly filters single-order customers (repeat-customer guard). date_diff('day', first, second) returns BIGINT, and CAST to DOUBLE is valid and defensive for AVG (though AVG over BIGINT already produces a numeric without overflow risk at SaaS scale, the CAST is harmless and arguably clearer about the result type).
+- Completeness: **5** — Both the pivot pattern AND the repeat-customer filter AND the per-customer-then-average aggregation are present.
+- Clarity: **4** — The CASE-pivot pattern is slightly subtle for beginners but the explanation around HAVING IS NOT NULL makes the repeat-customer filter clear.
+- Actionability: **5** — Copy-paste-runnable.
+- **Avg: 4.75**
 
-**Verification (trino.io/docs/467/functions/window.html):** Trino 467 supports IGNORE NULLS on lead/lag/nth_value/first_value/last_value verbatim ("If IGNORE NULLS is specified, all rows where x is null are excluded from the calculation"). The `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` frame is the correct look-back frame for LOCF. The default frame for LAST_VALUE is `RANGE UNBOUNDED PRECEDING ... last peer of the current row`; for LOCF the explicit ROWS frame is unambiguously safer, so the explicit form is good practice. The COALESCE wrapper is redundant but not wrong.
-
-### Q4 — Top product NAME per category (DISTINCT ON Postgres-leak in secondary)
-- Accuracy: **3** — PRIMARY `ROW_NUMBER() ... PARTITION BY category ORDER BY SUM(sales_amount) DESC` + outer `WHERE rn = 1` is fully correct Trino 467. SECONDARY `SELECT DISTINCT ON (category) ...` is **invalid Trino dialect** — DISTINCT ON is a PostgreSQL extension; Trino 467 supports only standard `SELECT DISTINCT`, not `DISTINCT ON (cols)`. Verified against trino.io/docs/current/sql/select.html (DISTINCT/ALL section mentions only set-quantifier DISTINCT, no DISTINCT ON) and trinodb/trino discussion #17261 ("Trino does not natively support PostgreSQL's DISTINCT ON syntax"). The secondary snippet would raise a parse error. Calling it the "tighter query" misdirects the engineer.
-- Completeness: **4** — Engineer's actual question (return the product name, not the max number) is fully addressed by the PRIMARY snippet. The PRIMARY is the canonical Trino route. The bigger miss is omitting the Trino-native one-liner `max_by(product_name, total_sales) GROUP BY category` which is even cleaner than ROW_NUMBER and is the docs-recommended idiom for "value of x associated with the max of y."
-- Clarity: **4** — PRIMARY is clearly explained; SECONDARY confidently labels Postgres syntax as a "tighter Trino query," which is actively misleading.
-- Actionability: **3** — PRIMARY copy-pastes and runs; SECONDARY copy-pastes and FAILS at parse time. Engineer following the "tighter" recommendation would hit an error.
-- **Per-Q avg: 3.50**
-
-**Verification:** `SELECT DISTINCT ON (cols)` does not exist in Trino 467. trino.io/docs/current/sql/select.html DISTINCT/ALL section: "If the argument DISTINCT is specified, only unique rows are included in the result set" — no DISTINCT ON. GitHub discussion #17261 confirms it is a frequently requested PostgreSQL extension that Trino does not implement; users are told to use ROW_NUMBER, GROUP BY+aggregation, or subqueries.
+### Q4 — Overall % of sessions with converted = true
+- Accuracy: **5** — `ROUND(100.0 * SUM(CASE WHEN converted THEN 1 ELSE 0 END) / COUNT(*), 2)` is the canonical conversion-rate idiom in Trino 467. The `100.0` (DOUBLE) on the left correctly forces float division, avoiding integer-division truncation. The alternative `SUM(CAST(converted AS INTEGER))` is valid in Trino 467 — boolean → integer CAST produces TRUE=1, FALSE=0, NULL=NULL (verified semantics — Trino supports CAST between BOOLEAN, TINYINT, SMALLINT, INTEGER, BIGINT, REAL, DOUBLE, VARCHAR).
+- Completeness: **5** — Primary form, alternative form, and the NULL-handling note are all present. Could mention `count_if(converted)` as the most idiomatic Trino form (cleanest `100.0 * count_if(converted) / count(*)`), and `avg(CAST(converted AS DOUBLE)) * 100` as another clean form, but neither omission is a penalty — the given forms are correct and complete.
+- Clarity: **5** — Plain language, idiomatic SQL, NULL behavior explicitly called out.
+- Actionability: **5** — Copy-paste-runnable.
+- **Avg: 5.0**
 
 ---
 
 ## Overall
 
-**Per-Q average:** (2.75 + 5.00 + 4.875 + 3.50) / 4 = **16.125 / 4 = 4.03125**
-**Dim-avg cross-check:** Acc (2+5+5+3)/4=3.75, Comp (3+5+4.5+4)/4=4.125, Clar (4+5+5+4)/4=4.50, Act (2+5+5+3)/4=3.75 → (3.75+4.125+4.50+3.75)/4 = **4.03125** — agree.
+| Q | Avg |
+|---|---|
+| Q1 | 3.5 |
+| Q2 | 5.0 |
+| Q3 | 4.75 |
+| Q4 | 5.0 |
+| **OVERALL** | **(3.5 + 5.0 + 4.75 + 5.0) / 4 = 4.5625** |
 
-**VERDICT: PASS** (overall 4.03125 >= 3.5; overall-avg governs label per directive — no per-Q gate).
+### **VERDICT: PASS (4.5625 >= 3.5)**
 
-Q1 per-Q avg 2.75 is below 3.5 and is flagged as a **quality concern** (not a label override). It is the highest-impact thin-spot of the iter, since the inversion produces a confidently-wrong number an engineer would ship without realizing.
-
----
-
-## iter635 Directive
-
-### FIX-A (PRIMARY — pick this one): PERCENT_RANK direction-under-DESC guardrail
-
-Q1 inverted PERCENT_RANK under `ORDER BY ... DESC` is the higher-impact defect (per-Q 2.75, "top N% of spenders" is a high-frequency analyst phrasing, and an inverted answer is silently wrong rather than parse-failing).
-
-**Action (reconcile-in-place, do NOT append/duplicate):**
-
-1. Locate the existing PERCENT_RANK canonical (per state.json notes this is at **r07:1841** as part of Pattern C3 — the PERCENT_RANK()>=0.9 exact-cutoff alternative). Add a direction-under-DESC guardrail block IMMEDIATELY at that landing point. Keyword-anchor it for findability: "top 10% by spend", "top 5% customers", "highest-revenue decile", "percent_rank descending", "percent_rank top vs bottom".
-
-2. Content of the guardrail (verbatim-grade, docs-cited):
-   - Restate the docs formula: `percent_rank() = (r - 1) / (n - 1)` (cite trino.io/docs/467/functions/window.html).
-   - Explicit direction table:
-     - `ORDER BY x ASC` → smallest x has rank 1, percent_rank 0.0; largest x has percent_rank 1.0. **Top 10% by x ⇒ `percent_rank >= 0.9`**.
-     - `ORDER BY x DESC` → largest x has rank 1, percent_rank 0.0; smallest x has percent_rank 1.0. **Top 10% by x ⇒ `percent_rank <= 0.1`**.
-   - One-line trap callout: "If you wrote `ORDER BY total_revenue DESC` AND `percent_rank >= 0.9`, you are selecting the BOTTOM 10% (smallest spenders), not the top — a classic silent-wrong bug."
-   - Equivalent NTILE form: `NTILE(10) OVER (ORDER BY x DESC)` → decile 1 is top, filter via outer wrapper `WHERE decile = 1` (cross-reference the existing NTILE-in-WHERE outer-wrap warning at r07 Pattern C3).
-   - Note PERCENT_RANK is a fraction-of-rank cutoff (~10% of distinct rank positions), slightly different from NTILE's count-balanced deciles; both are valid "top 10%" idioms.
-
-3. Cross-reference from the r23 share-of-grand-total canonical at r07:1068-1080 so the "top-10%-share-of-revenue" compose lands cleanly: top-N% filter (outer wrapper) → `SUM(x) / SUM(SUM(x)) OVER ()` or join to the grand-total.
-
-4. Do NOT rewrite the existing PERCENT_RANK / NTILE / share-of-grand-total canonicals — additive guardrail block only, reconcile-in-place.
-
-### FIX-B (SECONDARY — optional, lower impact): DISTINCT ON Postgres-leak inoculation
-
-Q4 secondary snippet was Postgres `SELECT DISTINCT ON (cols)`, which does not exist in Trino 467 (parse error). This is a clean inoculation target if there is bandwidth after FIX-A.
-
-**Action (reconcile-in-place, additive at r23 dialect-not-supported neighborhood):**
-
-1. Add a "Trino does NOT support `SELECT DISTINCT ON (cols)` (Postgres extension)" inoculation row at the existing r23 anti-pattern/dialect-not-supported list (where QUALIFY, RLIKE, PERCENTILE_CONT, MEDIAN, initcap, dayname, PIVOT inoculations already live).
-2. Verbatim trap: `-- INVALID Trino 467: SELECT DISTINCT ON (category) category, product_name FROM ...` → `-- VALID Trino 467: ROW_NUMBER() ... WHERE rn = 1` OR `max_by(product_name, total_sales) GROUP BY category`.
-3. Cite trino.io/docs/current/sql/select.html DISTINCT/ALL section + trinodb/trino discussion #17261.
-4. Keyword-anchor for findability: "DISTINCT ON", "tighter query", "top per group one-liner", "Postgres DISTINCT ON".
-5. Cross-reference r23 max_by canonical at r23:597-668 — this is the Trino-native one-liner the responder should have led with on Q4 (and is the cleanest top-1-per-group idiom).
-
-### Pick One
-
-**Per directive, pick the higher-impact: FIX-A (PERCENT_RANK direction-under-DESC).** Q1 per-Q 2.75 vs Q4 per-Q 3.50 → Q1 is the deeper thin-spot, and the inverted-percentile bug is the more dangerous slip (silent-wrong vs parse-error). If teacher has cycles, FIX-B as a clean low-effort inoculation alongside, but FIX-A is the iter635 PRIMARY.
-
-### DO NOT
-
-- Re-edit the LAST_VALUE IGNORE NULLS LOCF canonical (Q3 clean first-probe; r07:769 + r07:873 + r23:905-951 all routed).
-- Re-edit the GROUP BY + HAVING COUNT(*)>1 dup-detection canonical (Q2 clean first-probe; r28:215/238/260 + r27:2467 + r22:2467 + r13:5162 all routed).
-- Re-edit the ROW_NUMBER top-1-per-group canonical at r23 §3.1G or the existing PERCENT_RANK / NTILE / max_by canonicals — additive guardrail/inoculation only, reconcile-in-place.
-- Touch r22 §13.x federation guardrails (4.49944/310 thin, ZERO probe iter634).
-- Add `::`-casts (iter571 PIN); use EXTRACT(EPOCH FROM ...) (iter562 ban); QUALIFY; PERCENTILE_CONT/MEDIAN (iter611 ban); fabricate dayname()/initcap.
-- Touch iter534-633 locks.
-- Bump training/state.json (already 634).
-- git commit / git push (no-op per state.json directive for iter634, but the FIX-A edit in iter635 should follow the normal commit/push flow).
+Per the run prompt's instruction, the overall average governs the PASS/FAIL label. Q1's 3.5 is exactly at threshold but is flagged separately for iter636 FIX-A attention.
 
 ---
 
-## Meta-notes
+## iter636 directive
 
-- **Q1 PERCENT_RANK inversion** is the iter634 headline defect. The existing r07:1841 PERCENT_RANK alternative is mentioned in state.json as part of Pattern C3 but evidently does not carry an explicit direction-under-DESC guardrail — the responder routed to PERCENT_RANK and chose the wrong inequality. FIX-A is exactly the kind of additive in-place guardrail that has historically resolved similar direction/placement traps (cf. iter600 NTILE-in-WHERE outer-wrap, iter598 starts_with/ends_with inoculation).
-- **Q4 DISTINCT ON leak** is a new Postgres-dialect-leak class — the responder confidently produced invalid Trino syntax labeled as a "tighter query." Worth a dedicated inoculation row alongside the existing QUALIFY/RLIKE/PERCENTILE_CONT inoculations. Lower urgency than FIX-A because parse errors are loud (engineer notices immediately) vs silent-wrong inverted-percentile (engineer ships a bad KPI).
-- **Q2 + Q3** both clean first-probe, no changes needed.
-- No fabricated functions in any of the four answers; the slips were direction/dialect, not function-existence.
-- Federation row 4.49944/310 unchanged (NOT PROBED iter634).
+### FIX-A (PRIMARY) — Final-query column-scope inoculation for share-of-grand-total composition
+
+**Problem found.** Q1 weakness is NOT a direction bug (FIX-A from iter635 LANDED cleanly) — it is a final-assembly column-scope error. The responder correctly moved SUM into an inner subquery (`SELECT SUM(total_spend) AS total FROM ranked_customers`) but then in the outer SELECT referenced `SUM(total_spend)` instead of the alias `total`. This is a subtle but consistent class of bug: when the share-of-grand-total template is composed as `top_subset CROSS JOIN (SELECT SUM(x) AS total FROM all)`, the outer SELECT must reference the ALIAS, not re-apply SUM to a column that is no longer in scope.
+
+**Per-Q quality-gate note (do NOT label as overall FAIL).** Q1 average is 3.5 (at threshold). Overall average 4.5625 passes. Per the run prompt's instruction, do not apply a per-question gate override — the overall avg governs.
+
+**Teacher action for iter636 (FIX-A):**
+
+1. **Locate** the share-of-grand-total pattern block at r07:1068-1095 (verified-anchored). Verify whether it already shows the CROSS-JOIN composition with an aliased subquery total, and whether the outer SELECT correctly references the ALIAS (not a re-aggregated column).
+
+2. **Insert / tighten** a leading canonical sub-section at r07 (immediately adjacent to the existing share-of-grand-total anchor, or inside it) titled something like:
+   `LEADING CANONICAL — share-of-grand-total final assembly (iter635 — outer SELECT must reference the alias, not the underlying column)`
+   - Keyword anchors: `share of total revenue from top X%`, `pct of grand total from top tier`, `top quintile share of revenue`, `top 20% revenue share`, `top decile revenue contribution`.
+   - ONE-FACT lead: `When you compose top-subset / grand-total with CTE-cross-join-subquery, the outer SELECT must reference the subquery's ALIAS (e.g. AS total), not re-apply SUM() to a column that lives inside the inner CTE.`
+   - DO NOT WRITE block (the exact bug shape):
+     ```sql
+     -- WRONG: total_spend is not in scope at the outer SELECT
+     SELECT 100.0 * top_20_revenue / SUM(total_spend)
+     FROM top_quintile, (SELECT SUM(total_spend) AS total FROM ranked_customers)
+     ```
+   - RIGHT form:
+     ```sql
+     SELECT 100.0 * top_20_revenue / total
+     FROM top_quintile, (SELECT SUM(total_spend) AS total FROM ranked_customers)
+     ```
+   - Cleaner alternative (single FILTER form, no cross-join):
+     ```sql
+     SELECT 100.0 * SUM(total_spend) FILTER (WHERE spend_quintile = 1) / SUM(total_spend) AS pct
+     FROM ranked_customers
+     ```
+   - Even cleaner end-to-end (no cross-join, single CTE):
+     ```sql
+     WITH ranked AS (
+       SELECT customer_id, SUM(amount) AS total_spend,
+              NTILE(5) OVER (ORDER BY SUM(amount) DESC) AS q
+       FROM orders GROUP BY customer_id
+     )
+     SELECT 100.0 * SUM(total_spend) FILTER (WHERE q = 1) / SUM(total_spend) AS pct_from_top_20
+     FROM ranked;
+     ```
+
+3. **Cross-link** the new guardrail from the FIX-A iter635 PERCENT_RANK/NTILE direction guardrail at r07:1794 — these two are paired (direction + final-assembly) in any "top X% share of revenue" question.
+
+4. **Reconcile in place** — search r07 / r23 for any existing share-of-grand-total examples that show the `SUM(col) / SUM(col)` outer pattern with a CTE composition; tighten or replace the buggy ones (do NOT just append). Per the `feedback_reconcile_dont_append` rule.
+
+### FIX-B — DEFAULT NO-OP / durability breadth
+
+No other resource gap detected this iteration. Q2/Q3/Q4 are all bulletproof (5.0 / 4.75 / 5.0). Recommend FIX-B = NO-OP and use the budget for additional probe-angle durability on the share-of-grand-total composition pattern (different question phrasings: "top quartile share", "bottom decile share", "top N customers contribution") to confirm FIX-A holds across phrasings before final-phase declaration.
+
+### Process / dialect-pin notes
+
+- FIX-A (PERCENT_RANK / NTILE direction guardrail) from iter635 confirmed LANDED — the responder did NOT invert this iteration. Keep the r07:1794 leading canonical sub-section locked.
+- The iter636 FIX-A (share-of-grand-total final-assembly) is a DIFFERENT defect class from the iter635 direction defect — both must be inoculated.
+- DIALECT PIN HELD: no QUALIFY / RLIKE / PERCENTILE_CONT / MEDIAN / initcap / DISTINCT ON / `::cast` appeared in any answer. All four answers use valid Trino 467 dialect (NTILE, ROW_NUMBER + MAX(CASE) pivot, date_diff('day',...), CAST(boolean AS INTEGER), 100.0 float-division guard, window-over-aggregate in GROUP BY SELECT).
