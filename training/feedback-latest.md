@@ -1,98 +1,84 @@
-# Iter662 Judge Feedback — 2026-06-08 (EXTENDED PHASE)
+# Iter 663 Judge Feedback — 2026-06-08 (EXTENDED PHASE)
 
-**OVERALL: 5.000 STRONG PASS** (margin +1.500 above 3.5 floor; +0.125 swing UP from iter661's 4.875 — FIX-A generalization to quarter landed perfectly, all four answers textbook-clean).
+## Overall
 
-Per-Q: Q1=5.00 / Q2=5.00 / Q3=5.00 / Q4=5.00.
+**Score: 5.000 STRONG PASS** (margin +1.500 above 3.5 floor; flat vs iter662's 5.000 — second consecutive perfect-score iteration)
+**Dim avg**: Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0 = 5.000 (agrees)
+**Per-Q**: 5.00 + 5.00 + 5.00 + 5.00 = 20.00 / 4 = 5.000
+**Flagged weak answers**: NONE (zero per-Q below 3.5 floor)
+
+All four answers are technically valid Trino 467 dialect; all dialect facts cross-verified against trino.io/docs/467 via WebFetch (date_diff signature, date_trunc signature, HAVING-on-aggregate-expression validity, nested-aggregate restriction).
 
 ---
 
 ## Per-question scores
 
-### Q1 — Revenue by quarter labeled Q1..Q4 in calendar order (FIX-A generalization re-probe)
+### Q1 — distinct sessions per user per day — 5.00 STRONG PASS
+- **Acc 5 / Comp 5 / Clar 5 / Act 5**
+- `SELECT user_id, date_trunc('day', event_time) AS day, COUNT(DISTINCT session_id) AS session_count FROM events GROUP BY user_id, date_trunc('day', event_time) ORDER BY user_id, day;`
+- VERIFIED trino.io/docs/467/functions/datetime.html: `date_trunc(unit, x) -> same as input` — `date_trunc('day', timestamp)` returns timestamp at midnight, valid 1-row-per-calendar-day bucket; equivalent to `date(event_time)` for grouping purposes (per directive: do not penalize either form).
+- VERIFIED trino.io/docs/467/functions/aggregate.html: `COUNT(DISTINCT col)` per-group is native and supported; multiple COUNT(DISTINCT) in one SELECT also supported.
+- VERIFIED sql/select.html: 2-key `GROUP BY user_id, date_trunc('day', event_time)` is valid; ORDER BY references the output alias `day` (Trino 467 permits output-alias in ORDER BY).
+- Self-contained explanation of bucketing + grouping + DISTINCT semantics; runnable as-is.
 
-**Answer**: `SELECT quarter(order_date) AS q, CASE quarter(order_date) WHEN 1 THEN 'Q1' WHEN 2 THEN 'Q2' WHEN 3 THEN 'Q3' WHEN 4 THEN 'Q4' END AS quarter_label, SUM(amount) AS total_revenue FROM orders GROUP BY quarter(order_date) ORDER BY quarter(order_date)`
+### Q2 — revenue converted to USD via rates JOIN — 5.00 STRONG PASS
+- **Acc 5 / Comp 5 / Clar 5 / Act 5**
+- `SELECT SUM(o.amount * r.usd_rate) AS total_revenue_usd FROM orders o LEFT JOIN currency_rates r ON r.currency_code = o.currency_code;`
+- Canonical star-schema fact x dim conversion: per-row multiply `amount * usd_rate` then SUM; mechanical application of r08:12/52-67/111 star-schema primitive.
+- LEFT JOIN correctly chosen for "keep all orders": SUM skips NULL summands, so missing rates produce a NULL contribution (silently dropped). The volunteered `COALESCE(r.usd_rate, 1)` safety belt is a thoughtful application-level callout (acknowledges the silent-drop risk).
+- Concise + complete + actionable.
 
-| Dimension | Score | Notes |
-|---|---|---|
-| Accuracy | 5 | Verified vs trino.io/docs/467/functions/datetime.html: `quarter(x)` returns bigint 1..4. Verified vs trino.io/docs/467/sql/select.html: ORDER BY a grouping expression is valid. `quarter(order_date)` IS in the GROUP BY → using it in ORDER BY is the OPTION-A form documented at r07:1351. CASE maps number→label cleanly. Calendar order preserved (1<2<3<4 maps to Q1<Q2<Q3<Q4). |
-| Completeness | 5 | All three required pieces present: numeric quarter, label, revenue. Sort-by-calendar-order requirement satisfied. |
-| Clarity | 5 | Single clean statement, alias names are intuitive. |
-| Actionability | 5 | Engineer can paste-and-run. |
-| **Avg** | **5.00** | |
+### Q3 — customers whose order span > 365 days — 5.00 STRONG PASS
+- **Acc 5 / Comp 5 / Clar 5 / Act 5**
+- CTE `MIN(order_date) AS first_order, MAX(order_date) AS last_order GROUP BY customer_id` then outer `WHERE date_diff('day', first_order, last_order) > 365`.
+- VERIFIED trino.io/docs/467/functions/datetime.html: `date_diff(unit, timestamp1, timestamp2) -> bigint` returns `timestamp2 - timestamp1` (earlier first → positive bigint). Argument order is correct.
+- Per directive: CTE-with-outer-WHERE on pre-aggregated MIN/MAX is equally valid as the alternate `HAVING date_diff('day', MIN(order_date), MAX(order_date)) > 365` on the raw table; no penalty for the CTE form.
+- Explicitly calls out "pass earlier first for positive result" — important learner-facing hint.
+- Bonus columns (`first_order`, `last_order`, `days_span`) help verification.
 
-**FIX-A GENERALIZATION CHECK — CONFIRMED PASS (KEY CHECK).** The iter661 FIX-A (ORDER-BY-in-grouped output for label-mapped categories) has now generalized cleanly across THREE entity framings:
-1. weekday-name (iter660 FAIL → iter661 fixed via OPTION-A at r07:1351)
-2. month-name (iter661)
-3. quarter (iter662 — this answer)
-
-The responder picked OPTION-A (group-by-the-number, CASE in SELECT, ORDER BY the grouping expression) without prompting. This is the **3rd successful generalization** of the FIX-A primitive and confirms the iter661 lock is durable across the calendar-label class. Crucially this is NOT the iter660 ORDER-BY-ungrouped bug — `quarter(order_date)` appears in BOTH the GROUP BY and the ORDER BY, satisfying the Trino 467 SELECT-clause rule.
-
-### Q2 — Customers in trial_signups but NOT in paid_customers
-
-**Answer**: PRIMARY = `NOT EXISTS` anti-join; ALT = `LEFT JOIN ... WHERE pc.customer_id IS NULL` with SELECT DISTINCT; noted NOT EXISTS is safer than NOT IN with NULLs.
-
-| Dimension | Score | Notes |
-|---|---|---|
-| Accuracy | 5 | Both anti-join forms are correct in Trino 467. NOT EXISTS correlated subquery is the canonical anti-join and handles NULLs cleanly. LEFT JOIN ... IS NULL is the equivalent join-form. The NULL warning on NOT IN is the correct and important caveat. |
-| Completeness | 5 | Primary + alternative + NULL safety note. The run anticipated EXCEPT, but anti-join is equally valid (EXCEPT auto-dedups both sides; anti-join is more flexible when only one side should dedup) — no penalty per directive. |
-| Clarity | 5 | Clean, names two idiomatic patterns. |
-| Actionability | 5 | Drop-in for either pattern preference. |
-| **Avg** | **5.00** | |
-
-### Q3 — Single busiest hour-of-day by event count
-
-**Answer**: `SELECT EXTRACT(HOUR FROM created_at) AS hour_of_day, COUNT(*) AS event_count FROM events GROUP BY EXTRACT(HOUR FROM created_at) ORDER BY event_count DESC LIMIT 1`
-
-| Dimension | Score | Notes |
-|---|---|---|
-| Accuracy | 5 | Verified vs trino.io/docs/467/functions/datetime.html: EXTRACT(HOUR FROM ts) is valid and returns 0..23. ORDER BY on an output alias (`event_count`) is valid in Trino 467 (distinct from ORDER BY an ungrouped column — output aliases are explicitly permitted). LIMIT 1 returns the single top row. |
-| Completeness | 5 | Hour bucket + count + sort + cap = full answer. |
-| Clarity | 5 | One statement, idiomatic. |
-| Actionability | 5 | Direct paste. |
-| **Avg** | **5.00** | |
-
-### Q4 — Customers with > 3 failed payments
-
-**Answer**: `SELECT customer_id FROM payments WHERE status = 'failed' GROUP BY customer_id HAVING COUNT(*) > 3`
-
-| Dimension | Score | Notes |
-|---|---|---|
-| Accuracy | 5 | WHERE pre-filters to failed rows before grouping (efficient), GROUP BY customer, HAVING COUNT(*) > 3 keeps customers with strictly more than 3 failures. `>` is strict (4+), which matches "more than 3". An equivalent form `HAVING count_if(status='failed') > 3` without the WHERE is also valid but unnecessary here. |
-| Completeness | 5 | Fully addresses the question. |
-| Clarity | 5 | Textbook clean. |
-| Actionability | 5 | Direct paste. |
-| **Avg** | **5.00** | |
+### Q4 — avg distinct products per order (two-level) — 5.00 STRONG PASS
+- **Acc 5 / Comp 5 / Clar 5 / Act 5**
+- Inner CTE: `SELECT order_id, COUNT(DISTINCT product_id) AS distinct_products FROM order_items GROUP BY order_id`; outer: `SELECT AVG(distinct_products) AS avg_products_per_order FROM order_product_counts`.
+- VERIFIED: Trino does NOT allow `AVG(COUNT(DISTINCT product_id))` directly — nested aggregates produce a parse-time error (same restriction as Postgres / Snowflake / Calcite-family engines). The required rewrite is exactly the inner-CTE-then-outer-aggregate pattern shown.
+- The responder **proactively explained the nested-aggregate error** AND gave the canonical two-step rewrite — exactly the teaching moment this class of question is designed to surface.
+- Cleanest possible answer for this pattern.
 
 ---
 
-## Overall scorecard
+## Teacher feedback
 
-| | Accuracy | Completeness | Clarity | Actionability |
-|---|---|---|---|---|
-| Q1 | 5 | 5 | 5 | 5 |
-| Q2 | 5 | 5 | 5 | 5 |
-| Q3 | 5 | 5 | 5 | 5 |
-| Q4 | 5 | 5 | 5 | 5 |
+**No corrective action required for iter663.** Second consecutive perfect-score iteration (5.000 after iter662's 5.000). All four answers:
+1. Use valid Trino 467 dialect (verified against trino.io/docs/467).
+2. Compose mechanically from documented primitives (r23:77 multi-COUNT-DISTINCT, r23:636 first-AND-last MIN/MAX, r23:1187 date_diff canonical, r23:1643 HAVING-aggregate rule, r08:12/52-67/111 star-schema dim-JOIN, r07:999 two-level CTE-then-outer-aggregate).
+3. Volunteer relevant safety-belt callouts unprompted (LEFT JOIN NULL-skip + COALESCE in Q2; pass-earlier-first in Q3; nested-aggregate error explanation in Q4).
 
-**Overall average: 5.000 / 5 — STRONG PASS**
+### Recommended iter664 directive: DEFAULT NO-OP / DURABILITY-BREADTH
 
-No per-Q average below 3.5 → no iter663 FIX-A required.
+- ZERO per-Q below floor; perfect 5.000.
+- The iter663 6-fresh-area pre-probe analysis (state.json notes) accurately predicted all four routes as FINDABLE — confirmed correct on probe.
+- Suggested fresh-area probes for iter664 (synthesizable from primitives, DO NOT pre-probe):
+  - (a) Two-level macro-average sibling: median per-group then average across groups (forces `approx_percentile` per-group in CTE, AVG outer; tests two-level CTE pattern recall with different inner aggregate).
+  - (b) Multi-key dim-JOIN with conversion + filter: `WHERE order_date >= ...` pushed down through the JOIN (tests JOIN + filter + SUM composition).
+  - (c) HAVING-on-aggregate-expression direct form for Q3-class question (re-probe whether responder picks HAVING vs CTE based on phrasing — both correct, but tests dialect-flexibility).
+  - (d) Nested-aggregate error re-probe with `MAX(COUNT(*))` framing (different outer aggregate to confirm pattern recognition, not just `AVG(COUNT(DISTINCT))` memorization).
+  - (e) Bulletproofed federation predicate-pushdown re-probe IF opted-in (ZERO probe streak now 19 iterations — 4.49944/310 federation row at thin margin).
 
-## Iter663 recommendation
+### DO NOT (per existing locks):
+- Touch r22 §13.x federation guardrails (4.49944/310 thin, ZERO probe 19-iter streak).
+- Re-edit r07:1351 ORDER-BY-in-grouped-output FIX-A block (proven durable on 3 entity framings iter661-662).
+- Rewrite iter534-662 locks.
+- Add `::`-casts (iter571 PIN), QUALIFY, RLIKE (iter623 ban), PERCENTILE_CONT/MEDIAN (iter611 ban), EXTRACT(EPOCH) (iter562 ban).
+- Fabricate `dayname()` / `initcap()` (iter659 inoculation HELD).
+- DISTINCT-ON Postgres-leak (iter634 ban).
+- Bump training/state.json (per directive — teacher already set to 663).
 
-**DEFAULT NO-OP / DURABILITY-BREADTH.** All four answers are textbook-clean. The key finding of iter662 is positive durability evidence:
+### Topic average updates (iter663):
+- **Analytical query patterns on Iceberg+Trino / r07** — Q1 (date_trunc + 2-key GROUP BY + COUNT(DISTINCT) per-group) durability +0.25; Q3 (first-AND-last CTE + date_diff outer WHERE) durability +0.25; Q4 (two-level CTE-then-outer-AVG + nested-aggregate explanation) durability +0.5 BIG win — net UP.
+- **SQL query best practices for OLAP / r23** — Q2 (fact x dim JOIN SUM(amount*rate) + LEFT JOIN NULL-skip + COALESCE safety belt) durability +0.25; Q4 nested-aggregate error proactive callout durability +0.25 — net UP.
+- **Schema design — Lakehouse fact/dim (r08)** — Q2 confirms star-schema dim-JOIN primitive at r08:12/52-67/111 routes correctly for currency-rate conversion variant — durability +0.25.
+- **Federation NOT probed** — 4.49944/310 row UNCHANGED (consecutive non-probe count +1 → 313; ZERO probe iter645-663 streak = 19 iterations).
 
-- **FIX-A (iter661 r07:1351 ORDER-BY-in-grouped-output) has now generalized to THREE entity framings without regression**: weekday-name (iter661), month-name (iter661), quarter (iter662). The OPTION-A primitive (group-by-the-number + CASE-in-SELECT + ORDER-BY-the-grouping-expression) is being recalled and composed correctly across calendar-bucket variants.
-- Anti-join (NOT EXISTS / LEFT JOIN IS NULL) recall is clean — the responder volunteered both forms AND the NULL safety note unprompted.
-- EXTRACT + ORDER-BY-alias + LIMIT 1 composition is clean.
-- WHERE + GROUP BY + HAVING COUNT(*) > N is textbook.
+### Trajectory iter651→663
+4.9375 → 4.96875 → 4.6875 → 5.00 → 4.00 → 4.625 → 4.375 → 5.00 → 4.875 → 4.21875 → 4.875 → 5.000 → **5.000** — second consecutive perfect score; bedrock SQL-pattern coverage (multi-COUNT-DISTINCT-per-group, star-schema-dim-JOIN, MIN/MAX-per-group + date_diff, two-level CTE-then-outer-aggregate with nested-aggregate explanation) all durably locked.
 
-Teacher should make **zero edits** for iter663. Continue probing durability-breadth on adjacent calendar-label angles to harden the FIX-A generalization further (e.g. month-name fiscal-year offset, day-of-week with custom Mon-first ordering, year-quarter combined label like '2025-Q1') — these are stress tests, not gaps.
-
-## Locks to preserve
-
-- iter661 FIX-A at r07:1351 (ORDER-BY-validity-in-GROUP-BY with OPTIONs A/B/C) — confirmed generalizing cleanly to quarter.
-- r23:732 LEADING CANONICAL count_if (not needed this iter but available).
-- r23:853 EXCEPT / r23:873 EXCEPT-dedup-semantic + cross-link to anti-join.
-- r23:1179 EXTRACT field list including HOUR.
-- resources/22 federation HARD LOCK (last touched iter448 c2627a8) — UNTOUCHED.
+## OVERALL: 5.000 STRONG PASS — second consecutive perfect-score iteration; ALL FOUR Q's perfect 5.0; iter664 recommended DEFAULT NO-OP / durability-breadth continuation.
