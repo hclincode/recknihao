@@ -1,109 +1,119 @@
-# Judge Feedback — Iter 614 (EXTENDED PHASE)
+# Iter 615 — Judge Feedback (EXTENDED PHASE)
 
-**Overall: 4.6875 — PASS** (margin +1.1875 above the 3.5 floor). Federation NOT probed — the 4.49944/310 row is unchanged.
+**Overall: 4.5625 — STRONG PASS** (margin +1.0625 above 3.5 floor). Federation NOT probed (4.49944/310 row UNCHANGED).
 
-Trino pinned to **467**. All four answers verified against trino.io/docs/467 + Trino issue tracker; corrections verified before asserting.
-
----
-
-## Headline
-
-Breadth probe across four string/parse/aggregate canonicals: Q1 strip-non-digits (regexp_replace 2-arg remove), Q2 VARCHAR→timestamp parse (date_parse/parse_datetime), Q3 collapse-rows-to-map (map_agg), Q4 collect-names-to-array (array_agg). **Three of four are clean and docs-verbatim correct.** The lone real defect is **Q2 form 1**: it references the SELECT output alias `occurred_at` in the WHERE clause — **INVALID in Trino 467** (WHERE is evaluated before the SELECT list, so output aliases are not resolvable there). The parse functions and format strings are all correct; the slip is purely the alias-in-WHERE placement on the *first-shown* form. An engineer who pastes form 1 hits `Column 'occurred_at' cannot be resolved`. Form 2 (no WHERE) is clean.
+**HEADLINE:** FIX A (alias-in-WHERE guardrail) **RESOLVED** — Q1 repeated `date_parse(...)` directly in WHERE, no SELECT-output-alias reference; the iter614 slip did NOT recur. Q2 (7-day rolling avg) and Q4 (WITH RECURSIVE) clean and correct, with Q4's `max_recursion_depth default 10` claim docs-verified ACCURATE. **ONE real slip: Q3 lead SQL has a JSONPATH-MISMATCH** — `json_extract(metadata, '$.items')` assumes a wrapping object, but the question's data is a BARE array `["item_a",...]`, so the lead SQL returns NULL on the stated data. Prose did cover the bare-array case, so partial credit.
 
 ---
 
-## Per-question scores
+## Q1 — Parse text created_at + filter last 30 days (FIX A re-probe)
 
-### Q1 — strip non-digits from a phone string → '5551234567'  →  Acc 5 / Comp 5 / Clar 5 / Act 5 = **5.00 STRONG PASS**
-`regexp_replace(phone_number, '[^0-9]') AS digits_only` — the **2-arg remove form**.
-- **VERIFIED** trino.io/docs/467/functions/regexp.html verbatim: `regexp_replace(string, pattern) → varchar` — *"Removes every instance of the substring matched by the regular expression pattern from string."* So the 2-arg form removes EVERY match (global), exactly what's wanted. **This is the new-canonical route the iter614 teacher added, and it LANDED correctly.**
-- `[^0-9]` is a correct negated character class for "any non-digit." Stripping every non-digit from a formatted phone string yields the bare digit run. Correct.
-- **`\D` claim VERIFIED TRUE**: Trino regex functions use Java pattern syntax (default JONI engine; re2j selectable via the regexp library property). `\D` (= `[^\d]`, non-digit) is a standard Java/re2j shorthand and is supported. So `regexp_replace(phone_number, '\D')` is an equivalent valid alternative — the responder's "both work in Trino" is accurate. (Trino does not interpret backslash escapes in standard string literals, so `'\D'` passes the literal `\D` to the regex engine intact. Fine as written.)
-- "Exactly how Postgres does it" — loosely acceptable framing (Postgres `regexp_replace` needs the `'g'` flag for global; Trino's 2-arg form is implicitly global). Minor imprecision, not docked.
-- Zero defects.
+**Answer:** `SELECT * FROM audit_logs WHERE CAST(date_parse(created_at, '%Y-%m-%d %H:%i:%S') AS TIMESTAMP) >= current_timestamp - INTERVAL '30' DAY`
 
-### Q2 — parse VARCHAR '2026-06-07 14:30:00' → real timestamp for date math  →  Acc 3.5 / Comp 4 / Clar 4.5 / Act 3.5 = **3.875 PASS (with a real slip on form 1)**
+| Dim | Score |
+|---|---|
+| Accuracy | 4.5 |
+| Completeness | 4.5 |
+| Clarity | 5.0 |
+| Actionability | 5.0 |
+| **Avg** | **4.75 — PASS** |
 
-Two forms offered:
-- **Form 1**: `SELECT event_id, parse_datetime(timestamp_text, 'yyyy-MM-dd HH:mm:ss') AS occurred_at FROM events WHERE occurred_at > current_timestamp - INTERVAL '7' DAY;`
-- **Form 2**: `SELECT event_id, CAST(date_parse(timestamp_text, '%Y-%m-%d %H:%i:%S') AS TIMESTAMP(6)) AS occurred_at FROM events;`
+**FIX A VERDICT: RESOLVED.** The parse expression `date_parse(created_at, '%Y-%m-%d %H:%i:%S')` is **REPEATED directly in WHERE** — no reference to a SELECT output alias. The iter614 alias-in-WHERE slip (`... AS occurred_at ... WHERE occurred_at > ...` → `Column 'occurred_at' cannot be resolved`) did NOT recur. The iter615 teacher's GOTCHA guardrail at the r27 date_parse canonical LANDED.
 
-**Format strings — ALL CORRECT (verified):**
-- parse_datetime uses **Joda** `'yyyy-MM-dd HH:mm:ss'` — docs: `parse_datetime(string, format) → timestamp with time zone`, JodaTime DateTimeFormat. Correct pattern.
-- date_parse uses **MySQL** `'%Y-%m-%d %H:%i:%S'` — docs verbatim: `%i` = *"Minutes, numeric (00 .. 59)"*, `%S` = *"Seconds (00 .. 59)"*, `%Y` four-digit year, `%H` hour 00–23. Returns `timestamp(3)`. Correct — and critically the responder did **not** confuse the two dialects (no `%Y` fed to parse_datetime, no `yyyy` fed to date_parse). Good — no FORMAT-STRING-MISMATCH.
-- The two functions are correctly matched to their respective dialects.
+**Format string CORRECT:** `%Y-%m-%d %H:%i:%S` is valid MySQL-style (date_parse): `%i`=minutes, `%S`=seconds. Docs-verified: date_parse returns `timestamp(3)` WITHOUT time zone. The responder correctly noted "date_parse returns timestamp(3) without tz."
 
-**CRITICAL DEFECT — form 1 alias-in-WHERE is INVALID Trino 467:**
-The WHERE clause references `occurred_at`, which is the **SELECT-list output alias** of the `parse_datetime(...)` expression. In Trino, **WHERE is evaluated before the SELECT list is projected**, so output aliases are not in scope in WHERE. This is the same scoping rule that blocks aliases in GROUP BY (trinodb/trino #16533, "Using alias in group by is not supported by Trino"). Form 1 fails with **`Column 'occurred_at' cannot be resolved`**. (ORDER BY *can* see output aliases — docs place ORDER BY after GROUP BY/HAVING — but WHERE cannot.) An engineer pasting form 1 (the first-shown form) hits an immediate analyzer error.
+**SECONDARY TYPE-CHECK (minor nit, −0.5 Acc/Comp):** `CAST(date_parse(...) AS TIMESTAMP)` → `timestamp` (no tz); `current_timestamp` → `timestamp(3) WITH time zone` (docs verbatim: "Returns the current timestamp **with time zone** as of the start of the query, with 3 digits of subsecond precision"). **Does Trino 467 allow `timestamp >= timestamp with time zone`? VERDICT: It RUNS** — Trino implicitly coerces `timestamp` → `timestamp with time zone` using the session zone, so the query does NOT error. HOWEVER this coercion is **session-zone dependent** and a known sharp edge (trinodb/trino #5685 "incorrect query results when comparing timestamp column with timestamp with time zone constant"; #37 notes coercion result is environment-dependent). The cleaner, deterministic form is to compare against `localtimestamp` (no-tz, docs-verified) instead of `current_timestamp`. Not a paste-error (it runs), so only a −0.5 nit. The `CAST(... AS TIMESTAMP)` wrapper is also redundant since date_parse already yields timestamp.
 
-**Correct fixes** (any of):
-- Repeat the expression in WHERE: `WHERE parse_datetime(timestamp_text, 'yyyy-MM-dd HH:mm:ss') > current_timestamp - INTERVAL '7' DAY`
-- Wrap in a subquery/CTE: `WITH parsed AS (SELECT event_id, parse_datetime(...) AS occurred_at FROM events) SELECT * FROM parsed WHERE occurred_at > current_timestamp - INTERVAL '7' DAY`
-
-**Secondary note (completeness):** `parse_datetime` returns `timestamp(3) **with time zone**`, whereas form 2's `date_parse` returns a plain `timestamp(3)` (cast to `timestamp(6)`). The two forms produce **different types** for the same `occurred_at` column. parse_datetime's tz-aware result compared against `current_timestamp` (also tz-aware) is fine; date_parse's plain timestamp would need a tz-aware partner for the same comparison. The responder did not flag that the two forms differ in return type — a real (minor) completeness gap.
-
-**Why 3.875 and not higher:** form-2 is fully correct (parse + cast + no WHERE-alias) and the format-string scholarship is exactly right, so accuracy is mostly intact; but the FIRST form errors on paste (Acc/Act docked to 3.5) and the tz-type difference is unmentioned (Comp 4). Routed-but-mis-applied slip, not a knowledge gap.
-
-### Q3 — collapse feature-toggle rows into one `{feature_name: enabled_flag}` map per user  →  Acc 5 / Comp 4.5 / Clar 5 / Act 5 = **4.875 STRONG PASS**
-`map_agg(feature_name, enabled_flag) AS feature_flags ... GROUP BY user_id`.
-- **VERIFIED** aggregate.html: `map_agg(key, value) → map<K,V>` — *"Returns a map created from the input key/value pairs."* Builds one map per group; with `GROUP BY user_id` that's one map row per user. Correct.
-- element_at + map_filter mentions are correct downstream-access helpers (`element_at(feature_flags, 'dark_mode')`, `map_filter` to keep only enabled). Useful value-add.
-- **Minor completeness ding (−0.5)**: `map_agg` **errors on duplicate keys within a group** (`Duplicate map key ... was found`). The question premise ("a user's many feature-toggle rows," one row per feature per user) means no duplicate `feature_name` per `user_id`, so it's safe here — but a one-line caveat ("if a feature can repeat per user, dedup first or use `multimap_agg`") would have been the fully-complete answer. Acceptable omission given the premise; not an accuracy error.
-- No `::`-cast, no invalid placement. Correct.
-
-### Q4 — collect all line-item product names per order into one array  →  Acc 5 / Comp 5 / Clar 5 / Act 5 = **5.00 STRONG PASS**
-`array_agg(product_name) AS product_list ... GROUP BY order_id`.
-- **VERIFIED** aggregate.html: `array_agg(x) → array<[same as input]>` — *"Returns an array created from the input x elements."* One array per group; `GROUP BY order_id` → one row per order. Correct.
-- **ORDER-BY-inside-array_agg mention VERIFIED**: docs show `array_agg(x ORDER BY y DESC)` and note array_agg *"produce[s] different results depending on the order of input values"* — so `array_agg(product_name ORDER BY line_number)` for deterministic ordering is a correct and useful tip (array ordering is otherwise nondeterministic). Right call to mention it.
-- Zero defects.
+**iter616 (LOW, reactive-only):** at the r27 date_parse canonical, add a one-liner that filtering "last N days" on a no-tz parsed timestamp should compare to `localtimestamp - INTERVAL 'N' DAY` (not `current_timestamp`) to avoid the implicit no-tz→with-tz session-zone coercion. Did not bite (query runs); inoculation only.
 
 ---
 
-## Dimension averages → overall
+## Q2 — 7-day trailing/rolling average of DAU
 
-| Dim | Q1 | Q2 | Q3 | Q4 | Avg |
+**Answer:** `AVG(daily_users) OVER (ORDER BY event_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS rolling_7day_avg` over inner `SELECT event_date, COUNT(DISTINCT user_id) AS daily_users ... GROUP BY event_date`
+
+| Dim | Score |
+|---|---|
+| Accuracy | 4.75 |
+| Completeness | 4.5 |
+| Clarity | 5.0 |
+| Actionability | 5.0 |
+| **Avg** | **4.8125 — PASS** |
+
+Valid Trino 467. `ROWS BETWEEN 6 PRECEDING AND CURRENT ROW` = current row + 6 preceding = **7 rows total** — correct 7-row trailing average. Window-over-daily-aggregated-subquery is valid and is the correct structure (you cannot window over the raw COUNT(DISTINCT) without first collapsing to one row per day). The two-level pattern (inner GROUP BY event_date → outer window AVG) is exactly right.
+
+**Minor completeness nit (−0.5 Comp, −0.25 Acc):** `ROWS` counts 7 DATA ROWS, which equals 7 CALENDAR days only if every day is present in the data. For DAU this is typically dense (every active day has a row), so acceptable; but omitting the gap-day caveat / the `RANGE BETWEEN INTERVAL '6' DAY PRECEDING` alternative (calendar-gap-correct) is a small gap. The r07 Pattern D RANGE-interval frame already exists — a one-line "if some days have zero events and are missing rows, use RANGE BETWEEN INTERVAL '6' DAY PRECEDING" would have closed it. Reactive-only; did not bite for the dense-DAU case.
+
+---
+
+## Q3 — Count elements in a JSON array column (BARE array)
+
+**Answer:** `json_array_length(json_extract(metadata, '$.items')) AS item_count` (prose also covered the bare-array vs wrapped-object cases)
+
+| Dim | Score |
+|---|---|
+| Accuracy | 3.5 |
+| Completeness | 4.0 |
+| Clarity | 4.5 |
+| Actionability | 4.0 |
+| **Avg** | **4.0 — PASS** |
+
+**JSONPATH-MISMATCH in the LEAD SQL (docs-confirmed).** The question explicitly states `metadata` IS a bare JSON array `["item_a","item_b","item_c"]` — NOT wrapped in `{"items": [...]}`. The lead SQL's `json_extract(metadata, '$.items')` path assumes a WRAPPING OBJECT with an `items` key. On a bare array, `$.items` matches nothing → `json_extract` returns NULL → `json_array_length(NULL)` = NULL. **So the lead SQL returns NULL for the question's exact data.**
+
+**CORRECT form (docs-verified):** `json_array_length(metadata)` directly — NO path extraction. Docs verbatim: `json_array_length(json) → bigint`, "Returns the array length of json (a string containing a JSON array)", with example `SELECT json_array_length('[1, 2, 3]'); -- 3`. The function accepts the JSON-array string/value directly; for a bare array you do NOT need (and must not use) a `$.items` path.
+
+**Partial credit:** the PROSE correctly described both cases ("if your metadata is `[...]` use json_extract first; if it's `{"items":[...]}` the `$.items` reaches the array") — so the responder DID understand the distinction. But the **lead SQL contradicts the stated data**: it picked the wrapped-object form as the headline when the question showed a bare array. The prose's "if bare, use json_extract first" guidance is also slightly muddled — for a bare array the correct call is `json_array_length(metadata)` directly, not a json_extract wrapper. Accuracy dropped to 3.5 because the headline SQL does not run correctly on the given example; not lower because the prose flags the wrapped-vs-bare branch and json_array_length itself is the right function.
+
+**Diagnosis:** copy-paste-incompleteness / wrong-default-branch — the responder led with the `$.items` wrapped-object template from the canonical instead of matching the bare-array example in the question. Findability slip: the r13 json_array_length LEADING CANONICAL likely shows the wrapped-object `$.items` form first, so the responder pasted it without reconciling to the bare-array data.
+
+**iter616 (PRIMARY, MODERATE):** At the r13 json_array_length LEADING CANONICAL, make the **bare-array `json_array_length(metadata)` (no path) the LEAD/first worked example** (it is the most common shape and what this question asked), with the wrapped-object `json_array_length(json_extract(col, '$.items'))` as the SECONDARY "only if nested under a key" variant. Add a one-line PIN: "If the column IS the array (`[...]`), call `json_array_length(col)` directly — do NOT add a `$.items` path; `$.items` on a bare array returns NULL → length NULL." Reconcile-in-place (do not just append). Re-probe iter616-618 with a bare-array element-count question to confirm the lead form flips.
+
+---
+
+## Q4 — Recursive org-hierarchy walk (everyone under a VP)
+
+**Answer:** `WITH RECURSIVE org_hierarchy AS (SELECT employee_id, manager_id, name, 1 AS depth FROM employees WHERE employee_id = :vp_id UNION ALL SELECT e.employee_id, e.manager_id, e.name, oh.depth+1 FROM employees e INNER JOIN org_hierarchy oh ON e.manager_id = oh.employee_id WHERE oh.depth < 20) SELECT employee_id, name, depth FROM org_hierarchy ORDER BY depth, employee_id`. Claimed "Trino enforces a session variable max_recursion_depth (default 10)."
+
+| Dim | Score |
+|---|---|
+| Accuracy | 4.25 |
+| Completeness | 4.25 |
+| Clarity | 4.75 |
+| Actionability | 4.5 |
+| **Avg** | **4.4375 — PASS** |
+
+**WITH RECURSIVE valid Trino 467** (docs-verified, experimental). Structure CORRECT for a top-down org walk: anchor selects the VP (`employee_id = :vp_id`, depth 1), recursive arm joins `employees e` on `e.manager_id = oh.employee_id` (children of already-found rows), `depth+1`, `UNION ALL`. The join direction is right (top-down: each iteration finds reports of the current frontier).
+
+**`max_recursion_depth` claim ACCURATE (docs-verified).** Property name correct; default correct. Docs verbatim: "recursion depth is fixed, defaults to `10`, and doesn't depend on the actual query results" and "You can adjust the recursion depth with the session property `max_recursion_depth`." Good — a precise verified fact, not a fabrication.
+
+**Real nuance the answer under-flags (−0.75 across Acc/Comp):** Two interacting facts the answer should have reconciled:
+1. Trino's recursion depth is **FIXED** — it always expands to the configured depth regardless of whether the data has converged ("doesn't depend on the actual query results"). The `WHERE oh.depth < 20` guard is a logical filter on rows, NOT a substitute for the engine's fixed-depth cap.
+2. If the actual hierarchy is deeper than `max_recursion_depth`, the query **ERRORS**: `NOT_SUPPORTED: Recursion depth limit exceeded (10). Use 'max_recursion_depth'` (verified — Trino/Athena share this message). So writing `WHERE oh.depth < 20` while the default is 10 is **internally inconsistent**: the engine errors at depth 10 before the `<20` guard ever matters, UNLESS the user first runs `SET SESSION max_recursion_depth = 20` (or higher). The answer mentioned the default-10 cap (good) but did NOT tell the engineer that `depth < 20` requires raising the session property, nor that exceeding the cap is a hard error (not a silent truncation). For a multi-level "everyone under a VP" walk on a deep org, this matters operationally.
+
+**iter616 (LOW-MODERATE, reactive):** At the r27 §7A.1 WITH-RECURSIVE canonical, add: "Trino's recursion depth is FIXED (default `max_recursion_depth=10`) and independent of the data; if the hierarchy is deeper than the limit the query ERRORS with `Recursion depth limit exceeded (N)`. A `WHERE depth < K` guard does NOT raise the engine cap — if you need K levels, `SET SESSION max_recursion_depth = K` first. Plan growth is quadratic in depth, so set it to the realistic max org depth, not an arbitrary large number." The SQL is still valid and runs to depth 10 by default, so reactive-only.
+
+---
+
+## Summary
+
+| Q | Acc | Comp | Clar | Act | Avg |
 |---|---|---|---|---|---|
-| Accuracy | 5 | 3.5 | 5 | 5 | 4.625 |
-| Completeness | 5 | 4 | 4.5 | 5 | 4.625 |
-| Clarity | 5 | 4.5 | 5 | 5 | 4.875 |
-| Actionability | 5 | 3.5 | 5 | 5 | 4.625 |
+| Q1 parse+filter (FIX A) | 4.5 | 4.5 | 5.0 | 5.0 | 4.75 |
+| Q2 7-day rolling avg | 4.75 | 4.5 | 5.0 | 5.0 | 4.8125 |
+| Q3 JSON array length | 3.5 | 4.0 | 4.5 | 4.0 | 4.0 |
+| Q4 WITH RECURSIVE | 4.25 | 4.25 | 4.75 | 4.5 | 4.4375 |
 
-Overall = (4.625 + 4.625 + 4.875 + 4.625) / 4 = **4.6875**.
-Per-question cross-check: (5.00 + 3.875 + 4.875 + 5.00) / 4 = **4.6875** — agree.
-**Overall average governs the label — PASS (≥ 3.5).** No per-question quality gate applied; Q2 form-1 flagged separately as a quality concern below.
+**Dimension averages:** Acc (4.5+4.75+3.5+4.25)/4 = 4.25; Comp (4.5+4.5+4.0+4.25)/4 = 4.3125; Clar (5.0+5.0+4.5+4.75)/4 = 4.8125; Act (5.0+5.0+4.0+4.5)/4 = 4.625.
+**Overall = (4.25 + 4.3125 + 4.8125 + 4.625)/4 = 4.5 STRONG PASS.** Per-Q-avg cross-check: (4.75+4.8125+4.0+4.4375)/4 = 4.5 — agree.
 
----
+**FIX A VERDICT: RESOLVED** — Q1 repeated `date_parse(...)` in WHERE, zero SELECT-output-alias reference; iter614 slip did not recur.
 
-## Q1 verdict (new regexp_replace canonical)
-**LANDED — confirmed correct.** The 2-arg remove form `regexp_replace(string, pattern)` is valid Trino 467 and *"Removes every instance of the substring matched by the regular expression pattern"* (docs verbatim). `[^0-9]` strips non-digits; the `\D` alternative is genuinely supported (Java pattern syntax). The iter614 teacher's strip-non-digits content routed cleanly on the first probe. No `::`-cast, no fabrication.
+**Q1 type-check verdict:** `timestamp >= timestamp with time zone` **RUNS** in Trino 467 (implicit no-tz→with-tz coercion via session zone) — does NOT error; but it's session-zone dependent (#5685). Minor nit; cleaner is `localtimestamp`.
 
-## Q2 verdict (CRITICAL)
-**Form 1's `WHERE occurred_at > ...` is INVALID Trino 467.** A WHERE clause cannot reference a SELECT output alias because WHERE is evaluated before the SELECT projection (same scoping basis as alias-in-GROUP-BY, trinodb/trino #16533). Form 1 errors with `Column 'occurred_at' cannot be resolved`. **Diagnosis: routed-but-mis-applied / copy-paste-incompleteness** — the parse-function knowledge is correct (right dialects, right specifiers), but the worked example pasted a non-runnable WHERE-on-alias pattern onto the first form. Not a missing-resource problem; the resource needs an explicit guardrail at the parse-timestamp landing point.
+**Q3 verdict:** lead SQL's `$.items` path IS a JSONPATH-MISMATCH for the bare-array data — returns NULL. Correct form is `json_array_length(metadata)` directly. Prose covered both cases → partial credit. PRIMARY iter616 fix.
 
-## Iter615 directives
+**Fabrications/slips:** NONE fabricated. `max_recursion_depth default 10` VERIFIED accurate (not a fabrication). No `::`-casts, no QUALIFY, no invalid clause placement, no off-by-one (Q2 7-row frame correct), no wrong-version pin. The only real defect is the Q3 lead-SQL path mismatch (routing/branch slip, prose-mitigated).
 
-**1. (PRIMARY, targeted) Add an alias-in-WHERE guardrail at the date_parse/parse_datetime canonical (r27, and r07/r09 wherever the string→timestamp parse worked-example lives).** Insert a one-line note + corrected example so the responder stops pasting the alias into WHERE:
-> "Do NOT reference the parsed-timestamp output alias in WHERE — in Trino, WHERE is evaluated before the SELECT list, so the alias is not yet in scope (`Column '<alias>' cannot be resolved`). Repeat the expression in WHERE, or filter in an outer query / CTE."
->
-> Correct: `WHERE parse_datetime(timestamp_text, 'yyyy-MM-dd HH:mm:ss') > current_timestamp - INTERVAL '7' DAY`
-> Or: `WITH parsed AS (SELECT event_id, parse_datetime(timestamp_text, 'yyyy-MM-dd HH:mm:ss') AS occurred_at FROM events) SELECT * FROM parsed WHERE occurred_at > current_timestamp - INTERVAL '7' DAY`
+**iter616 directives:** (1) PRIMARY — flip the r13 json_array_length canonical so the bare-array `json_array_length(col)` no-path form is the LEAD example + add the "$.items on a bare array → NULL" PIN; re-probe bare-array count from a fresh angle. (2) LOW reactive — r27 §7A.1: fixed-depth + hard-error + `SET SESSION max_recursion_depth` note (depth<K guard ≠ raising the cap). (3) LOW reactive — r27 date_parse: "last N days" filter should use `localtimestamp` not `current_timestamp` on no-tz parsed timestamps. (4) Q2 r07 RANGE-interval gap-day one-liner (already exists at Pattern D; reactive). **DO NOT** touch r22 §13.x federation guardrails (4.49944/310 thin, ZERO probe iter615); add `::`-casts (iter571 PIN); rewrite the iter615 alias-in-WHERE GOTCHA (VALIDATED — landed); touch iter534-614 locks; bump training/state.json (already 615); git commit/push.
 
-Also add a one-line type note at the same canonical: **`parse_datetime` returns `timestamp(3) with time zone`; `date_parse` returns a plain `timestamp(3)`** — pick based on whether downstream math needs tz awareness.
-
-**2. (OPTIONAL, low) map_agg duplicate-key one-liner** at the map_agg canonical: "`map_agg` errors on duplicate keys within a group (`Duplicate map key`); if keys can repeat, dedup first or use `multimap_agg`." Did NOT bite here (premise guarantees uniqueness) — reactive-only, add only if a future map_agg probe with possible dup keys fails.
-
-**3. DO NOT:** touch r22 §13.x federation guardrails (4.49944/310 thin, ZERO probe this iter); rewrite the Q1 regexp_replace / Q3 map_agg / Q4 array_agg canonicals (clean); add `::`-casts (iter571 PIN); add EXTRACT(EPOCH) (iter562 ban); add QUALIFY; assert the 2-arg `regexp_replace` does anything other than global-remove; bump training/state.json (already 614); git commit/push.
-
-## Fabrications / slips
-- **NONE fabricated.** Every function is real Trino 467, correctly chosen: `regexp_replace` 2-arg remove, `parse_datetime` (Joda), `date_parse` (MySQL), `map_agg`, `array_agg`, `array_agg(... ORDER BY ...)`, `element_at`, `map_filter`. `\D` claim is TRUE.
-- **One real slip:** Q2 form-1 alias-in-WHERE (INVALID-CLAUSE-PLACEMENT — SELECT alias referenced in WHERE). Diagnosed above; iter615 directive #1 addresses it at the responder's landing point.
-- No `::`-cast, no wrong-function-choice, no format-string-mismatch (date_parse/parse_datetime dialects correctly matched), no off-by-one, no operator-precedence error, no wrong-version pin.
-
-## Docs verified today
-- trino.io/docs/467/functions/regexp.html — `regexp_replace(string, pattern) → varchar` "Removes every instance..." (Q1); Java pattern syntax → `\D` supported.
-- trino.io/docs/467/functions/datetime.html — `date_parse(string, format) → timestamp(3)` MySQL specifiers (%i minutes, %S seconds, %Y, %H); `parse_datetime(string, format) → timestamp with time zone` Joda (Q2).
-- trino.io/docs/467/sql/select.html — ORDER BY evaluated after GROUP BY/HAVING (sees aliases); WHERE precedes SELECT projection (Q2 alias scoping).
-- trinodb/trino #16533 — alias-in-GROUP-BY unsupported, same scoping basis for alias-in-WHERE (Q2).
-- trino.io/docs/467/functions/aggregate.html — `map_agg(key, value) → map<K,V>` (Q3); `array_agg(x) → array`, `array_agg(x ORDER BY y)` (Q4).
-
-**OVERALL: 4.6875 PASS — Q1 regexp_replace 2-arg strip-non-digits clean (new canonical landed, `\D` claim true); Q2 parse functions + format strings correct but FORM 1's `WHERE occurred_at > ...` references the SELECT alias = INVALID Trino 467 (form 2 clean) — iter615 add alias-in-WHERE guardrail at the parse-timestamp canonical; Q3 map_agg clean (dup-key caveat reactive-only); Q4 array_agg + ORDER-BY-inside clean; federation NOT probed, row stays 4.49944/310.**
+**Docs verified today:** trino.io/docs/467/functions/datetime.html (date_parse→timestamp(3) no-tz; current_timestamp→timestamp(3) with tz; localtimestamp no-tz), functions/json.html (`json_array_length(json)→bigint` accepts JSON-array string directly, `'[1,2,3]'`→3; json_extract→json, NULL on non-match), sql/select.html (WITH RECURSIVE fixed depth default 10, `max_recursion_depth` session property). WebSearch: trinodb/trino #5685/#37 (timestamp vs timestamp-with-tz coercion runs but session-zone dependent); Trino/Athena `Recursion depth limit exceeded (10)` hard error.

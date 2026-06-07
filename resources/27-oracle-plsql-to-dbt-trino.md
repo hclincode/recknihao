@@ -717,6 +717,35 @@ These are the per-expression rewrites you'll do on almost every migrated SELECT.
 | `LAST_DAY(dt)` | `last_day_of_month(dt)` | Same purpose, different function name. Bare `LAST_DAY(dt)` produces `Function 'last_day' not registered` in Trino 467. |
 | `NEXT_DAY(dt, 'MONDAY')` (next occurrence of `weekday` STRICTLY AFTER `dt`) | `date_add('day', ((<target_dow> - day_of_week(dt) + 6) % 7) + 1, dt)` where `target_dow` is `1=Mon..7=Sun` (ISO). | **Trino has NO `next_day` function** — `next_day(dt, 'MONDAY')` produces `Function 'next_day' not registered`. The `((... + 6) % 7) + 1` arithmetic returns `1..7` so the result is ALWAYS strictly after `dt`, matching Oracle's "never returns `dt` itself" semantic. See the LEADING CANONICAL block above for the worked example and the day_of_week ISO numbering check. |
 
+**GOTCHA — filtering on a parsed timestamp (do NOT reference the SELECT output alias in WHERE).** `WHERE` is evaluated **BEFORE** the `SELECT` projection (verified at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) — the SELECT output is computed after WHERE; output column aliases do not exist yet when WHERE runs), so this **FAILS** with `Column 'occurred_at' cannot be resolved`:
+
+```sql
+-- WRONG — references the SELECT output alias `occurred_at` in WHERE:
+SELECT event_id, parse_datetime(ts_text, 'yyyy-MM-dd HH:mm:ss') AS occurred_at
+FROM events
+WHERE occurred_at > current_timestamp - INTERVAL '7' DAY;   -- ERROR: cannot be resolved
+```
+
+Either **wrap the parse in a CTE/subquery and filter the OUTER query** (clearest), or **repeat the parse expression in WHERE**:
+
+```sql
+-- CORRECT (CTE form — preferred):
+WITH parsed AS (
+  SELECT event_id, date_parse(ts_text, '%Y-%m-%d %H:%i:%S') AS occurred_at
+  FROM events
+)
+SELECT * FROM parsed WHERE occurred_at > TIMESTAMP '2026-06-01 00:00:00';
+
+-- CORRECT (repeat-expression form):
+SELECT event_id, date_parse(ts_text, '%Y-%m-%d %H:%i:%S') AS occurred_at
+FROM events
+WHERE date_parse(ts_text, '%Y-%m-%d %H:%i:%S') > TIMESTAMP '2026-06-01 00:00:00';
+```
+
+This is the **general SELECT-clause-evaluation-order rule**, not a parsing-specific quirk: you cannot reference ANY `SELECT` output alias — nor a window-function result — in `WHERE`. (Window functions are also computed after WHERE; filter them in an outer query / CTE too.)
+
+**Return-type note (pick the function whose return type matches your comparison literal).** Verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html): `parse_datetime(str, fmt)` (Joda format `yyyy-MM-dd HH:mm:ss`) returns **`timestamp with time zone`**; `date_parse(str, fmt)` (MySQL format `%Y-%m-%d %H:%i:%S`) returns **`timestamp(3)` WITHOUT zone**. Don't compare a with-tz value to a without-tz literal without aligning types — `date_parse(...)` pairs naturally with a `TIMESTAMP '...'` literal (no zone); `parse_datetime(...)` pairs with a `current_timestamp` / `timestamp with time zone` comparand. Align the two sides (e.g. wrap one in `CAST(... AS timestamp)` or `AT TIME ZONE`) before comparing.
+
 ### 4.2-NOW LEADING CANONICAL — `now()` / `current_timestamp` / `current_date` + Iceberg `timestamptz` is UTC-NORMALIZED on storage
 
 > **Keyword anchors (read this section FIRST if your question contains any of these):** Trino `now()` · `now() Trino` · does Trino have `now` · `now()` vs `current_timestamp` · `current_timestamp` Trino · `current_date` Trino · `current_time` Trino · `localtimestamp` Trino · session time zone Trino · what time zone does Trino store · Iceberg timestamp storage · Iceberg `timestamptz` storage · `timestamp with time zone` UTC · `TIMESTAMP WITH TIME ZONE` Iceberg · UTC-normalized · stored as UTC · wall-clock timestamp · `AT TIME ZONE` Trino · timezone aware vs naive Iceberg · `timestamp` vs `timestamptz`.
