@@ -623,6 +623,43 @@ All three produce **identical row counts and identical query plans** on Trino 46
 
 **Cross-references.** Resource 07 §"Wide-pivot variant" uses both the `CASE WHEN` and the `FILTER (WHERE ...)` forms for conditional aggregation (the multi-column manual-pivot pattern). Resource 27 §4.1A is the canonical for the Oracle `DECODE` → searched-`CASE WHEN` NULL-matching nuance.
 
+#### bool_or / bool_and — "did ANY (or did ALL) rows in the group satisfy X?" (roll up a boolean per group)
+
+> **READ THIS FIRST if your question contains any of these keywords: `did any shipment arrive late`, `did any row in the group satisfy X`, `did all rows satisfy X`, `any true in a group`, `all true in a group`, `roll up a yes/no flag per group`, `bool_or`, `bool_and`, `group boolean any/all`, `at least one row is true`, `every row is true`, `aggregate a boolean per group`, `single true/false per group`, `did any order have a late shipment`, `did every shipment arrive on time`, `boolean aggregation`, `roll up bool`, `collapse boolean per group`.** Verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) on 2026-06-07.
+
+**The one-fact summary.** `bool_or(predicate)` returns **`TRUE` if ANY input value is `TRUE`, otherwise `FALSE`** (the purpose-built Trino aggregate for "did **any** row in this group satisfy X"). `bool_and(predicate)` returns **`TRUE` if EVERY input value is `TRUE`, otherwise `FALSE`** (the purpose-built aggregate for "did **all** rows in this group satisfy X"). Both **ignore NULLs** (per the Trino aggregate-page general rule, since they are NOT in the `count()`/`count_if()`/`max_by()`/`min_by()`/`approx_distinct()` exception list). Both return a **single boolean per group** — not a count, not a string.
+
+- `bool_or(boolean) -> boolean` — Trino docs verbatim: *"Returns `TRUE` if any input value is `TRUE`, otherwise `FALSE`."*
+- `bool_and(boolean) -> boolean` — Trino docs verbatim: *"Returns `TRUE` if every input value is `TRUE`, otherwise `FALSE`."*
+
+**Worked example (the canonical "did any / did all" shape per group):**
+
+```sql
+-- Trino 467 — "did at least one shipment arrive late per order?" + "did EVERY shipment arrive late?"
+-- bool_or = ANY true; bool_and = ALL true. Both return a single TRUE/FALSE per order.
+SELECT order_id,
+       bool_or(is_late)  AS any_late,    -- TRUE if at least one shipment was late, else FALSE
+       bool_and(is_late) AS all_late     -- TRUE only if every shipment was late, else FALSE
+FROM shipments
+GROUP BY order_id;
+```
+
+`any_late` is `TRUE` for an order if **at least one** of its shipments has `is_late = TRUE`; otherwise `FALSE`. `all_late` is `TRUE` only if **every** shipment has `is_late = TRUE`; otherwise `FALSE`. Predicate form also works: `bool_or(shipped_at > due_at)`, `bool_and(status = 'delivered')` — any boolean expression, not just a stored boolean column.
+
+**`bool_or` / `bool_and` vs the neighbors — which to pick for "did ANY / did ALL satisfy X per group".** The question shape matters: if you want a **single TRUE/FALSE per group** (not a count, not a string), reach for `bool_or` / `bool_and` directly. They are the docs-canonical aggregates whose signatures explicitly return `boolean`.
+
+| Question shape | Reach for | Why |
+|---|---|---|
+| **"Did ANY row in the group satisfy X? (single TRUE/FALSE)"** | **`bool_or(pred)`** | Docs-canonical, signature is `boolean -> boolean`, returns exactly the asked shape. |
+| **"Did ALL rows in the group satisfy X? (single TRUE/FALSE)"** | **`bool_and(pred)`** | Same — purpose-built for the "every row" question. |
+| "How many rows satisfied X per group? (a count)" | `count_if(pred)` — see § 3.1E LEADING CANONICAL above | Returns a **count** (`bigint`), NOT a boolean. Different question. |
+| "Is the count > 0 per group?" (count-then-compare) | `count_if(pred) > 0` (workaround) — but prefer `bool_or(pred)` | Works, but **indirect**: counts every match then compares. `bool_or` short-circuits-conceptually and reads as intent. |
+| "Use MAX on a boolean column?" | `MAX(bool_col)` — **avoid; use `bool_or` instead** | Works empirically because boolean is orderable (`TRUE > FALSE`), BUT the `max(x)` signature in the Trino aggregate docs **does NOT enumerate boolean** — only orderable numeric / date / string types are explicitly listed. `bool_or` is the docs-canonical boolean aggregate; prefer it. |
+
+**Net rule.** For "**a single TRUE/FALSE per group: did ANY satisfy X**" → `bool_or(pred)` is the direct, docs-canonical idiom. For "**did ALL satisfy X**" → `bool_and(pred)`. For "**how many satisfied X**" (a count, not a boolean) → `count_if(pred)` per § 3.1E above. Do not write `count_if(pred) > 0` when you want a boolean — write `bool_or(pred)`. Do not write `MAX(bool_col)` when you want a boolean — write `bool_or(bool_col)`.
+
+**Optional: window-function form.** Both `bool_or` and `bool_and` also work as **window functions** with `OVER(...)` — e.g., `bool_or(is_late) OVER (PARTITION BY order_id)` returns the per-order any-late flag attached to every shipment row (without collapsing the group). Useful when you want to filter or annotate rows by "is this order's group flagged" rather than collapse to one row per group.
+
 ---
 
 ## 3.1F. `UNION` vs `UNION ALL` — the dedupe-vs-concatenate canonical (default to `UNION ALL` for analytics)
