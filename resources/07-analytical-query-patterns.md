@@ -1348,6 +1348,79 @@ FROM iceberg.analytics.product_sales;
 
 > **Worked example.** `DATE '2020-01-01'` is a **Wednesday**. `date_trunc('week', DATE '2020-01-01')` returns `2019-12-30`, which is the **Monday** of that week. `day_of_week(DATE '2019-12-30')` returns `1` (Monday). `day_of_week(DATE '2020-01-01')` returns `3` (Wednesday). `day_of_week(DATE '2020-01-05')` returns `7` (Sunday — end of the ISO week).
 
+> #### ORDER-BY validity in a GROUP BY query — sorting grouped WEEKDAY-NAME (or MONTH-NAME) rows into CHRONOLOGICAL (non-alphabetic) order — three valid options + the iter660 Q2 silent-wrong bug (iter661 PIN — FIX-A)
+>
+> **Keyword anchors for this block (route here on any of these):** `order by weekday number to sort Mon to Sun`, `ORDER BY in a GROUP BY query`, `sort grouped weekday name chronologically`, `sort weekday name Monday to Sunday not alphabetical`, `sort weekday name in calendar order`, `sort month name in calendar order`, `sort month name January to December not alphabetical`, `order by ungrouped column error in ORDER BY`, `must be an aggregate expression or appear in GROUP BY in ORDER BY`, `ORDER BY day_of_week with GROUP BY weekday name`, `revenue by weekday name in calendar order`, `weekday revenue Mon to Sun order`, `format_datetime EEEE chronological sort`, `month name chronological sort GROUP BY`, `ORDER BY raw column not in GROUP BY`.
+>
+> **The one-fact lead — docs-verified at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html).** When a query has a `GROUP BY` clause, **every `ORDER BY` expression must also be a GROUPING column/expression, an AGGREGATE function, or a SELECT-list output alias / ordinal number** — the same docs rule that constrains the SELECT list (*"When a `GROUP BY` clause is used in a `SELECT` statement all output expressions must be either aggregate functions or columns present in the `GROUP BY` clause"*) extends to `ORDER BY` because `ORDER BY` operates on the rows produced AFTER `GROUP BY`. **You canNOT `ORDER BY` a raw ungrouped column — even when it is wrapped in a function** (e.g. `ORDER BY day_of_week(order_date)` when only `format_datetime(order_date, 'EEEE')` is in the `GROUP BY`). Trino raises: *"`order_date` must be an aggregate expression or appear in `GROUP BY` clause"*. The wrapping function does NOT make the column legal — the analyzer looks through the function and sees the bare ungrouped column underneath.
+>
+> **Why this hits the weekday/month-NAME report.** The natural output column is the **name** (`'Monday'`, `'Tuesday'`, ..., `'Sunday'` — or `'January'`...`'December'`) because that is what the report reads cleanly. But sorting alphabetically gives `Friday, Monday, Saturday, Sunday, Thursday, Tuesday, Wednesday` — chaotic. The fix is to either GROUP BY the **sortable number** alongside the name, or aggregate-wrap the sort key. Three valid options follow.
+>
+> **OPTION A — GROUP BY the sortable NUMBER (and map number→name via `CASE`).** Group by `day_of_week(order_date)` (returns ISO 1=Mon..7=Sun); project the name with a `CASE`; `ORDER BY` the same `day_of_week(order_date)` expression — now legal because it IS a grouping expression. This is the cleanest shape for the weekday-name report.
+>
+> ```sql
+> -- Trino 467 — revenue per weekday name, sorted Mon..Sun (calendar order, not alphabetic).
+> -- GROUP BY day_of_week(order_date) -> the sort key IS a grouping expression -> ORDER BY it is legal.
+> SELECT day_of_week(order_date) AS dow,                       -- 1..7 (Mon..Sun) — the sortable key
+>        CASE day_of_week(order_date)
+>             WHEN 1 THEN 'Monday'    WHEN 2 THEN 'Tuesday'
+>             WHEN 3 THEN 'Wednesday' WHEN 4 THEN 'Thursday'
+>             WHEN 5 THEN 'Friday'    WHEN 6 THEN 'Saturday'
+>             WHEN 7 THEN 'Sunday'  END                AS day_name,
+>        SUM(amount)                                   AS revenue
+> FROM iceberg.analytics.orders
+> GROUP BY day_of_week(order_date)
+> ORDER BY day_of_week(order_date);                            -- legal: grouping expression
+> ```
+>
+> Drop the `dow` column from the SELECT if the report should display only the name + revenue — `ORDER BY day_of_week(order_date)` stays valid either way (the ORDER BY references the grouping expression, not the output alias). For **month name in calendar order**, the same shape works with `month(order_date)` (returns 1..12) as the grouping/sort key and a 12-branch `CASE` mapping to `'January'`..`'December'`.
+>
+> **OPTION B — Aggregate-wrap the sort key with `min(...)`.** Keep `GROUP BY format_datetime(CAST(order_date AS timestamp), 'EEEE')` (the Joda full-day-name pattern) and `ORDER BY min(day_of_week(order_date))` — `min(...)` is an aggregate, which IS valid in `ORDER BY` of a GROUP BY query. Every row inside a given weekday-name group shares the same `day_of_week(order_date)` value (every Monday row has `day_of_week=1`), so `min(day_of_week(order_date))` returns that number — exactly the right sort key.
+>
+> ```sql
+> -- Trino 467 — same report via Joda weekday-name pattern; aggregate-wrap the sort key with min().
+> SELECT format_datetime(CAST(order_date AS timestamp), 'EEEE') AS day_name,
+>        SUM(amount)                                            AS revenue
+> FROM iceberg.analytics.orders
+> GROUP BY format_datetime(CAST(order_date AS timestamp), 'EEEE')
+> ORDER BY min(day_of_week(order_date));                        -- legal: aggregate over the partition
+> ```
+>
+> `max(day_of_week(order_date))` works identically here (every row in a weekday group ties, so min and max return the same value); `min(...)` is the conventional pick.
+>
+> **OPTION C — ORDINAL `ORDER BY 1`.** GROUP BY the day_of_week number, project the number first (column 1), then map to the name (column 2). `ORDER BY 1` references the first SELECT-list output column by position — always valid (positional refs are documented in [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html): *"each expression may be composed of output columns, or it may be an ordinal number selecting an output column by position, starting at one"*).
+>
+> ```sql
+> -- Trino 467 — ordinal ORDER BY (position 1 = dow column).
+> SELECT day_of_week(order_date)                                AS dow,
+>        CASE day_of_week(order_date) WHEN 1 THEN 'Monday' WHEN 2 THEN 'Tuesday'
+>             WHEN 3 THEN 'Wednesday' WHEN 4 THEN 'Thursday'
+>             WHEN 5 THEN 'Friday'    WHEN 6 THEN 'Saturday'
+>             WHEN 7 THEN 'Sunday'  END                         AS day_name,
+>        SUM(amount)                                            AS revenue
+> FROM iceberg.analytics.orders
+> GROUP BY day_of_week(order_date)
+> ORDER BY 1;                                                   -- legal: ordinal -> output column 1 (dow)
+> ```
+>
+> > **DO NOT WRITE — the EXACT iter660 Q2 bug (silent-wrong / parse-rejected by Trino's analyzer):**
+> >
+> > ```sql
+> > -- WRONG ❌ — order_date is NOT in GROUP BY (only format_datetime(order_date,...) is) and NOT aggregated.
+> > -- Trino rejects: "order_date must be an aggregate expression or appear in GROUP BY clause".
+> > SELECT format_datetime(CAST(order_date AS timestamp), 'EEEE') AS day_name,
+> >        SUM(amount)                                            AS revenue
+> > FROM iceberg.analytics.orders
+> > GROUP BY format_datetime(CAST(order_date AS timestamp), 'EEEE')
+> > ORDER BY day_of_week(order_date);                             -- ❌ raw order_date is ungrouped + unaggregated
+> > ```
+> >
+> > **Why it fails.** The `GROUP BY` contains `format_datetime(order_date, ...)` — only that exact expression. `day_of_week(order_date)` in the `ORDER BY` is a DIFFERENT expression over the same raw `order_date` column; the analyzer looks through `day_of_week(...)` and sees the bare ungrouped `order_date` underneath, which is neither in the GROUP BY nor wrapped in an aggregate. **Fix:** either also `GROUP BY day_of_week(order_date)` (OPTION A — most explicit) OR `ORDER BY min(day_of_week(order_date))` (OPTION B — aggregate-wrap the sort key) OR `GROUP BY 1` + `ORDER BY 1` (OPTION C — ordinal).
+>
+> **Why this rule is the GROUP-BY-rules-anchor extended to ORDER BY.** See the GROUP-BY-rules anchor at [resource 23 §8 (the "Trino GROUP BY rules" block)](23-sql-best-practices-olap.md#8-filter-with-where-before-group-by-not-having) — Rule 4 in that anchor says *"A SELECT alias may be used in the outer `ORDER BY` (after projection) but NOT in `GROUP BY` / `WHERE` / `HAVING`"*. The flip-side rule (this block) is: **`ORDER BY` may use an output alias / ordinal / aggregate / GROUPING expression, but NOT a raw ungrouped column** — even one wrapped in a function. This is the same query-level invariant (`ORDER BY` references must resolve to either a per-group value or an output column), applied to the weekday/month-name sort-key bug.
+>
+> **Cross-link:** [Resource 23 §8 GROUP-BY-rules anchor (Trino #16533 SELECT-alias-not-in-GROUP-BY)](23-sql-best-practices-olap.md#8-filter-with-where-before-group-by-not-having); [Resource 23 §LEADING CANONICAL extract-then-count](23-sql-best-practices-olap.md#leading-canonical--extract-then-count-count-per-derived-expression--every-select-column-must-be-either-grouped-or-aggregated--drop--wrap--regroup-the-stray-raw-column-iter647-pin--fix-a-for-the-count-users-per-email-domain-group-by-rule-violation) (the SELECT-side mirror of this ORDER-BY rule — every SELECT column must be GROUPED or AGGREGATED; this block extends it to ORDER BY).
+
 > **Canonical Monday-start weekly bucket (copy-paste this — in-line signal on the line you copy):**
 > ```sql
 > SELECT date_trunc('week', event_ts) AS week_start,  -- Trino weeks ALWAYS start MONDAY (ISO-8601); no Sunday-start option, no workaround needed
