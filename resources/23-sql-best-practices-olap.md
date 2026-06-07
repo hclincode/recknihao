@@ -257,6 +257,22 @@ ORDER BY n DESC;
 SELECT split_part(host, '.', 1) AS subdomain
 FROM iceberg.analytics.requests;
 
+-- 2a. split_part for "the part AFTER (or BEFORE) a single delimiter" — the clean idiom.
+--     "Pull the domain (everything after the '@') from an email address."
+--     "Pull the local-part (everything before the '@') from an email address."
+SELECT
+  split_part(email, '@', 2) AS domain,      -- 'jane@acme.com' -> 'acme.com'  (field index 2 = part AFTER the '@')
+  split_part(email, '@', 1) AS local_part   -- 'jane@acme.com' -> 'jane'      (field index 1 = part BEFORE the '@')
+FROM iceberg.analytics.users;
+-- Trino's split_part is 1-indexed: index 1 = the piece BEFORE the (first) delimiter,
+-- index 2 = the piece AFTER it. Same idiom works for any single-delimiter split:
+--   split_part(code,  '-',  2)   -- 'US-CA-94107'  -> 'CA'       (middle piece)
+--   split_part(ts,    ':',  1)   -- '14:32:09'     -> '14'       (hour, part before first ':')
+--   split_part(url,   ':',  2)   -- 'https://acme' -> '//acme'   (part after first ':')
+-- For "the LAST piece" of a multi-delimiter string (split_part does NOT accept
+-- negative indexes), use element_at(split(...), -1) instead:
+--   element_at(split(path, '/'), -1)   -- '/var/log/app.log' -> 'app.log'
+
 -- 3. split_to_map: parse a 'k1=v1;k2=v2' string and read a key.
 --    "Pull the 'utm_source' value out of a semicolon-separated query-string blob."
 SELECT
@@ -272,6 +288,23 @@ ORDER BY n DESC;
 SELECT split_to_multimap('tag=a;tag=b;tag=c', ';', '=') AS m;
 -- Result: MAP{'tag': ['a','b','c']}
 ```
+
+### `split_part` for "the part AFTER (or BEFORE) a single delimiter" — the clean Trino-native idiom
+
+**Keyword anchors:** domain from email, everything after the @, the part after a character/delimiter, the part before a character, pull the local-part / domain, split on a single delimiter and take a field, cleaner than strpos+substr, part after the colon/dash/slash, extract substring after a character Trino, clean way to get part of a string Trino.
+
+**The clean idiom.** For "give me everything AFTER (or BEFORE) a single-character delimiter", prefer **`split_part(s, delim, n)`** over `substr(s, strpos(s, delim) + 1)`. It's the direct, readable form — one function call, no offset arithmetic, no off-by-one risk.
+
+| Goal | Clean idiom (PREFER) | Messy equivalent (avoid) |
+|---|---|---|
+| Part AFTER the `@` (the domain) | `split_part(email, '@', 2)` → `'acme.com'` | `substr(email, strpos(email, '@') + 1)` |
+| Part BEFORE the `@` (the local-part) | `split_part(email, '@', 1)` → `'jane'` | `substr(email, 1, strpos(email, '@') - 1)` |
+| Part AFTER the `:` (e.g. minutes from `'HH:MM'`) | `split_part(ts, ':', 2)` | `substr(ts, strpos(ts, ':') + 1)` |
+| Part BEFORE the first `/` of a path | `split_part(path, '/', 1)` | `substr(path, 1, strpos(path, '/') - 1)` |
+
+**Why `split_part` is the lead.** Per [trino.io/docs/467/functions/string.html](https://trino.io/docs/current/functions/string.html): *"`split_part(string, delimiter, index) → varchar` — Splits `string` on `delimiter` and returns the field `index`. Field indexes start with 1."* and *"If the index is larger than the number of fields, then null is returned."* That is — index `1` is the piece **before** the (first) delimiter; index `2` is the piece **after** it; an out-of-range index returns `NULL` (NOT empty string — see `DO NOT WRITE` table below). The `strpos` + `substr` form is correct but unnecessarily verbose, fragile (off-by-one on the `+1` / `-1`), and silently produces a garbage long string if the delimiter is missing (whereas `split_part` returns the original string when there's no match at index 1, or `NULL` for higher indexes).
+
+**Note on multi-delimiter strings.** `split_part` always takes the **N-th** piece. For "the LAST piece" (e.g., filename from a path with an unknown number of `/`), `split_part` does **NOT** accept a negative index — use `element_at(split(path, '/'), -1)` instead (`element_at` on an array supports negative indexing from the tail; verified at [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html)).
 
 ### DO NOT WRITE
 
@@ -1522,7 +1555,48 @@ WHERE event_type = 'purchase'
 GROUP BY user_id;
 ```
 
-**If you need to reuse a result across multiple queries**, materialize it once with `CREATE TABLE temp.my_extract AS SELECT ...` (the team's "ad-hoc extract" pattern documented for this environment), then query the small table multiple times. Drop it when done.
+**If you need to reuse a result across multiple queries — save a query result as a new table / create a table from a SELECT / materialize a query into a table / persist a query output as a table (CREATE TABLE AS SELECT — CTAS).** Use Trino's `CREATE TABLE <target> AS SELECT ...` (CTAS) form — the team's "ad-hoc extract" pattern documented for this environment. The COMPLETE statement LEADS with the `CREATE TABLE ... AS` prefix; a bare `SELECT ... GROUP BY ...` is **not** CTAS — it only returns rows to the client. Copy the full form below:
+
+```sql
+-- Save the query result as a new Iceberg table (CTAS — CREATE TABLE AS SELECT).
+-- The CREATE TABLE <fully.qualified.target> AS prefix is REQUIRED — without it,
+-- the SELECT just returns rows and nothing is persisted.
+CREATE TABLE iceberg.analytics.daily_revenue_summary AS
+SELECT
+    event_date,
+    region,
+    SUM(amount)        AS revenue,
+    COUNT(*)           AS order_count,
+    COUNT(DISTINCT user_id) AS unique_buyers
+FROM iceberg.analytics.orders
+WHERE event_date BETWEEN DATE '2026-05-01' AND DATE '2026-05-31'
+GROUP BY event_date, region;
+
+-- Now query the small materialized table multiple times — cheaper than re-running the SELECT.
+SELECT region, SUM(revenue) FROM iceberg.analytics.daily_revenue_summary GROUP BY region;
+SELECT event_date, SUM(unique_buyers) FROM iceberg.analytics.daily_revenue_summary GROUP BY event_date;
+
+-- Drop when done with the ad-hoc workflow.
+DROP TABLE iceberg.analytics.daily_revenue_summary;
+```
+
+**Keyword anchors:** save query result as a table, create a table from a SELECT, CREATE TABLE AS SELECT, CTAS, materialize a query into a table, persist a query output as a table, save the output of a query, store query results.
+
+**What CTAS carries — and what it does NOT.** CTAS carries the column **TYPES** inferred from the SELECT's result columns. It does **NOT** carry NOT NULL constraints, primary keys, partitioning of the source, or other constraints — the new table's columns are nullable unless you switch to the explicit `CREATE TABLE <name> (col TYPE NOT NULL, ...)` + separate `INSERT INTO ... SELECT` 2-step form. See [resource 09 CTAS-NOT-NULL-INFERENCE GUARDRAIL](09-lakehouse-schema-design.md) for the full worked guardrail and the verbatim trino.io citations — that GUARDRAIL is the authority; do **not** rewrite it inline here.
+
+**Partitioning the CTAS target.** Add a `WITH (partitioning = ARRAY['day(event_date)'])` clause between the target name and `AS` to partition the materialized result — common for date-bucketed extracts:
+
+```sql
+CREATE TABLE iceberg.analytics.daily_revenue_summary
+WITH (partitioning = ARRAY['day(event_date)'], format = 'PARQUET')
+AS
+SELECT event_date, region, SUM(amount) AS revenue
+FROM iceberg.analytics.orders
+WHERE event_date BETWEEN DATE '2026-05-01' AND DATE '2026-05-31'
+GROUP BY event_date, region;
+```
+
+**On-prem `temp` schema convention.** The team's prod environment (see `prod_info.md`) documents `INSERT INTO <temp_table> AS SELECT ...` for ad-hoc result export — you can equally use `CREATE TABLE temp.my_extract AS SELECT ...` (CTAS into a `temp` schema) when the target doesn't yet exist, then `DROP TABLE temp.my_extract` when finished. Both forms produce Iceberg tables on MinIO that the engineer can download via the S3 protocol.
 
 ---
 

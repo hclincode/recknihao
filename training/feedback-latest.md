@@ -1,172 +1,158 @@
-# Iter 593 Judge Feedback — 2026-06-07 (EXTENDED PHASE)
+# iter594 Judge Feedback
 
-## Summary
-
-- **Overall average: 4.125 / 5 → PASS** (margin +0.625 above 3.5 floor; -0.875 swing from iter592's 5.00)
-- Per-Q: Q1 = 5.00 STRONG PASS; Q2 = 3.25 (per-Q below 3.5 — quality concern, intent-miss); Q3 = 3.25 (per-Q below 3.5 — copy-paste incompleteness + wrong-target citation); Q4 = 5.00 STRONG PASS.
-- Federation NOT probed — 4.49944/310 row UNCHANGED.
-
-PASS/FAIL is governed by overall average (per directive: PASS = overall avg >= 3.5; no per-Q gate). Q2 and Q3 per-Q below-threshold scores are flagged as **quality concerns**, not label overrides.
+**Date**: 2026-06-07
+**Phase**: extended
+**Overall**: 4.8125 STRONG PASS — BOTH iter593 partials FULLY RESOLVED + 2 fresh first-probe wins
 
 ---
 
-## Per-question scoring + verifications
+## Per-question scores
 
-### Q1 — MODULO bucketing (`user_id % 10`) — **5.00 STRONG PASS** (Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5)
+### Q1 — split_part "part AFTER delimiter" RE-PROBE (iter594 FIX A landing-point verification)
+**Question**: sku like 'WAREHOUSE-A:PROD-12345'; want product code AFTER colon; clean direct function NOT position+substring math.
+**Answer summary**: Led with `split_part(sku, ':', 2)` → 'PROD-12345'; explained 1-indexed (position 1 = before colon, 2 = after); also `split_part(sku, ':', 1)` for before; explicit "cleaner and safer than substr()+strpos()".
 
-Responder gave both forms: `user_id % 10 AS bucket` and `mod(user_id, 10)` as identical aliases; plus the filter-one-bucket worked example `WHERE user_id % 10 = 0`.
+- Accuracy: 5
+- Completeness: 5
+- Clarity: 5
+- Actionability: 5
+- **Avg: 5.00 STRONG PASS — iter593 intent-miss RESOLVED**
 
-**Trino 467 docs verification — trino.io/docs/current/functions/math.html (WebFetch):**
-- `mod(n, m)`: *"Returns the modulo (remainder) of `n` divided by `m`."*
-- `%` operator: *"Modulo (remainder)"* — confirmed valid Trino operator.
-- `ceil(x)`: *"Returns `x` rounded up to the nearest integer."*
-- `ceiling(x)`: *"Returns `x` rounded up to the nearest integer."* (alias confirmed)
-- `floor(x)`: *"Returns `x` rounded down to the nearest integer."*
+**Verification (Trino 467, trino.io/docs/467/functions/string.html — WebFetch verbatim)**:
+- Signature: `split_part(string, delimiter, index) → varchar`
+- Behavior: "Splits `string` on `delimiter` and returns the field `index`."
+- Indexing: "Field indexes start with `1`" (1-indexed confirmed)
+- Out-of-range: "If the index is larger than the number of fields, then null is returned."
+- Worked: `split_part('WAREHOUSE-A:PROD-12345', ':', 2)` → `'PROD-12345'` (CORRECT)
+- Worked: `split_part('WAREHOUSE-A:PROD-12345', ':', 1)` → `'WAREHOUSE-A'` (CORRECT)
 
-Both `%` and `mod()` are valid Trino 467 syntax. Zero defects. iter592 grep-summary anchor at r27:1007 routed cleanly.
+**Landing-point assessment**: iter594 FIX A (r23 §3.1A `split_part for the part AFTER (or BEFORE) a single delimiter` adjacent sub-note + 4-row clean-vs-messy idiom table + inline `-- 2a.` worked example block) routed CLEANLY. Responder NO LONGER reaches for `substr(email, strpos(email, '@') + 1)` style — leads with the clean Trino-native idiom as the canonical answer. iter593 INTENT MISS (Q2 3.25) FULLY RESOLVED. Zero `::`-casts, zero fabricated semantics. The keyword anchor "cleaner and safer than substr()+strpos()" wording in the answer suggests the keyword anchors added at r23 §3.1A ("cleaner than strpos+substr", "part after the colon/dash/slash") are doing exactly the routing work intended.
 
-### Q2 — extract domain after '@' (CLEAN way; user explicitly said position+substring "seems messy") — **3.25 per-Q quality concern — INTENT MISS** (Accuracy 4 / Completeness 2 / Clarity 4 / Actionability 3)
+---
 
-Responder LED with `substr(email, strpos(email, '@') + 1)` and `position('@' IN email)` — i.e. **EXACTLY the position-finding + substring approach the user said "seems messy."** Did NOT surface `split_part(email, '@', 2)` — the clean, direct Trino idiom for "the part after the delimiter."
+### Q2 — CTAS RE-PROBE (iter594 FIX B complete-example verification)
+**Question**: save aggregation as new permanent Iceberg table from a SELECT; EXACT complete SQL statement, whole thing to copy.
+**Answer summary**: `CREATE TABLE iceberg.catalog_name.schema_name.new_table_name AS SELECT column1, column2, COUNT(*) AS order_count FROM iceberg.catalog_name.schema_name.source_table GROUP BY column1, column2;` + explained CTAS creates schema from SELECT types, atomic, writes to Iceberg. Prose said "Replace ... with your actual 3-part name (catalog, schema, table)".
 
-**Trino 467 docs verification — trino.io/docs/current/functions/string.html (WebFetch):**
-- `split_part(string, delimiter, index)`: *"Splits `string` on `delimiter` and returns the field `index`. Field indexes start with `1`. If the index is larger than the number of fields, then null is returned."*
-- Confirmed `split_part('jane@acme.com', '@', 2)` → `'acme.com'` (1-indexed; field 2 = the part AFTER the '@').
-- `strpos(string, substring)`: *"Returns the starting position of the first instance of `substring` in `string`. Positions start with `1`. If not found, `0` is returned."* (responder's strpos+substr form IS technically correct).
-- `substr()` is an alias for `substring()`; 1-indexed.
+- Accuracy: 4
+- Completeness: 5
+- Clarity: 4
+- Actionability: 4
+- **Avg: 4.25 PASS — iter593 copy-paste-incompleteness RESOLVED with one MINOR placeholder-naming nit**
 
-**Diagnosis:** Both forms work and return the same result. But the user EXPLICITLY framed position+substring as "seems messy" and asked for "a cleaner way." The clean, documented Trino idiom for "give me the part AFTER a delimiter" is `split_part(s, delim, 2)`. Resources HAVE this content:
-- r23 §3.1A (lines 225-285) full split-family reference table with `split_part(string, delimiter, index)` 1-indexed + NULL-on-out-of-range nuance + worked `split_part('acme.ourapp.com', '.', 1)` → `'acme'` example.
-- r27:902 Oracle→Trino canonical with same subdomain-extraction example.
+**Verification (Trino 467, trino.io/docs/467/sql/create-table-as.html — WebFetch verbatim)**:
+- Full syntax: `CREATE [ OR REPLACE ] TABLE [ IF NOT EXISTS ] table_name [ ( column_alias, ... ) ] [ COMMENT table_comment ] [ WITH ( property_name = expression [, ...] ) ] AS query [ WITH [ NO ] DATA ]`
+- Trino table references are 3-part: `catalog.schema.table` (standard Trino across all SQL surfaces). Docs example: `CREATE TABLE orders_column_aliased (order_date, total_price) AS SELECT orderdate, totalprice FROM orders` (2-part shorthand allowed when session catalog/schema is set).
 
-**Findability diagnosis — LANDING-POINT MISS:** The split_part content in r23 is framed around subdomain extraction (`split_part(domain, '.', 1)`) and split-on-dot examples. There is no explicit anchor for "part after the @" / "domain from email" / "everything after a character" / "part after a delimiter." The responder's keyword route for "extract X after a character" landed on strpos/position+substring instead of split_part because the split_part canonical's keyword surface is framed around dot-split (subdomain), not around "part after a delimiter generic."
+**Landing-point assessment**: iter594 FIX B (r23:1525 prose-only → COMPLETE COPYABLE `CREATE TABLE iceberg.analytics.daily_revenue_summary AS SELECT ...` form LEADING + downstream-reuse + DROP TABLE + partitioned-CTAS variant + r09 NOT-NULL guardrail cross-ref) routed CLEANLY. Responder's answer NOW shows the COMPLETE `CREATE TABLE ... AS SELECT` statement (not a bare SELECT). The iter593 COPY-PASTE INCOMPLETENESS (Q3 3.25) FULLY RESOLVED. The CTAS structure is exactly canonical Trino 467 syntax. CTAS creates schema from SELECT types (atomic; Iceberg-backed) — all correct. No wrong-target r25 citation this answer.
 
-**Docking:** Completeness -3 (missed the documented cleaner form the user explicitly requested); Actionability -2 (gave the "messy" form the user said they wanted to avoid; engineer would now go re-search). Accuracy NOT docked (strpos+substr DOES extract the domain correctly).
+**MINOR NIT (the deduction — not a wrong-frame error)**: the literal placeholder `iceberg.catalog_name.schema_name.new_table_name` has FOUR dotted segments (`iceberg` + `catalog_name` + `schema_name` + `new_table_name`). Trino is strictly 3-part: `catalog.schema.table`. The responder's prose self-corrects ("Replace with your actual 3-part name (catalog, schema, table)"), labeling it a placeholder — so a careful reader replaces it correctly. But a literal copy-paste of `iceberg.catalog_name.schema_name.new_table_name` would be an invalid 4-part reference (4 dots = 4 identifiers = parser error). This is a CLARITY/PLACEHOLDER nit, NOT a wrong-frame semantic error — the core fix (complete CREATE TABLE AS SELECT, not bare SELECT) landed.
 
-### Q3 — CTAS (save SELECT result as new Iceberg table) — **3.25 per-Q quality concern — COPY-PASTE INCOMPLETENESS + WRONG-TARGET CITATION** (Accuracy 4 / Completeness 3 / Clarity 3 / Actionability 3)
+Root cause: the placeholder uses `iceberg` (which IS the production catalog name per prod_info.md) AND `catalog_name` (which is itself a placeholder meant to BE the catalog name) — those two redundant catalog segments are the source of the 4-vs-3 confusion. The teacher's iter594 canonical at r23:1525 uses the clean form `iceberg.analytics.daily_revenue_summary` (3 segments: catalog=iceberg, schema=analytics, table=daily_revenue_summary) — but the responder regenerated a different placeholder convention rather than literally copying the canonical literal.
 
-Responder named `CREATE TABLE ... AS SELECT (CTAS)` in prose and correctly noted the NOT-NULL-not-preserved gotcha (consistent with the r09 §1037-1133 CTAS-NOT-NULL-INFERENCE guardrail). BUT two slips:
+Accuracy -1 (the 4-segment placeholder is technically invalid as written, though prose self-corrects); Clarity -1 (engineer must mentally collapse "iceberg + catalog_name" into one catalog name); Actionability -1 (a literal copy fails to parse before the engineer substitutes).
 
-**(i) COPY-PASTE INCOMPLETENESS — the worked SQL CODE BLOCK is missing the `CREATE TABLE ... AS` prefix.** The example shown is essentially a bare `SELECT event_date, user_id, ... FROM raw_events ... GROUP BY 1,2,3` — without the leading `CREATE TABLE schema.new_table AS`. The user asked "how do I create a new table directly from a SELECT" — copy-pasting the code block in the responder's answer would execute a SELECT that returns rows to the client, NOT create a table. Naming the pattern in prose does not rescue an incomplete worked example.
+---
 
-**Trino 467 docs verification — trino.io/docs/current/sql/create-table-as.html (WebFetch):**
-- *Full syntax:* `CREATE [ OR REPLACE ] TABLE [ IF NOT EXISTS ] table_name [ ( column_alias, ... ) ] [ COMMENT table_comment ] [ WITH ( property_name = expression [, ...] ) ] AS query [ WITH [ NO ] DATA ]`
-- The `AS query` clause is the load-bearing part the responder's example omitted.
-- Correct copy-paste form: `CREATE TABLE iceberg.analytics.summary AS SELECT event_date, user_id, ... FROM raw_events ... GROUP BY 1,2,3` (optionally with `WITH (format = 'PARQUET', partitioning = ARRAY['event_date'])` per Iceberg connector).
-- The NOT-NULL caveat the responder mentioned is real and consistent with r09's guardrail (CTAS carries column types only; NOT NULL not inferred).
+### Q3 — CAST string-to-int (FRESH)
+**Question**: quantity stored as text ('10','250'); SUM errors; convert text to integer for math?
+**Answer summary**: `SUM(CAST(quantity AS INTEGER))`; `BIGINT` for bigger; INTEGER ~±2 billion; `SUM(TRY_CAST(quantity AS INTEGER))` for bad rows → NULL instead of error.
 
-**(ii) WRONG-TARGET CITATION — cited `/resources/25-trino-materialized-views-iceberg.md` as source for CTAS.** The file r25 DOES exist in the repo (Glob confirmed: `resources/25-trino-materialized-views-iceberg.md`), so this is **not a strictly-fabricated citation** (the file is real). HOWEVER, r25 is about **materialized views** (CREATE MATERIALIZED VIEW / REFRESH MATERIALIZED VIEW), NOT about CREATE TABLE AS SELECT. The actual CTAS canonicals live in r23:1525 (ad-hoc extract pattern `CREATE TABLE temp.my_extract AS SELECT ...`), r09 §1037-1133 (CTAS-NOT-NULL guardrail with the trino.io quote), and r13:4179-4185 (cross-ref). r25 line 356 mentions a CTAS in passing (`CREATE TABLE ... archive AS SELECT * FROM ...` as a one-liner inside the "drop MV but keep data" workaround) but is not a CTAS reference. **Diagnosis:** WRONG-TARGET citation (right-shape filename, wrong-topic content) — symptom of keyword "Iceberg + table create" routing to the MV file instead of the CTAS canonicals at r23/r09/r13. Not a clean fab, but it would mislead an engineer who clicks through expecting CTAS guidance and finds MV content.
+- Accuracy: 5
+- Completeness: 5
+- Clarity: 5
+- Actionability: 5
+- **Avg: 5.00 STRONG PASS — fresh first-probe clean**
 
-**Docking:** Completeness -2 (worked example missing the load-bearing `CREATE TABLE ... AS` prefix); Clarity -2 (engineer copy-pasting the code block gets a SELECT, not a table — directly contradicts the question); Actionability -2 (would re-search after the SELECT runs without creating a table). Accuracy -1 (NOT-NULL prose is correct; wrong-target citation noted but file does exist).
+**Verification (Trino 467, trino.io/docs/467/functions/conversion.html + trino.io/docs/467/language/types.html — WebFetch verbatim)**:
+- `cast()`: "Explicitly cast a value as a type. This can be used to cast a varchar to a numeric value type and vice versa." (CORRECT — CAST(varchar AS INTEGER/BIGINT) works)
+- `try_cast()`: "Like cast(), but returns null if the cast fails." (CORRECT — null-on-failure semantics confirmed)
+- INTEGER: "A 32-bit signed two's complement integer with a minimum value of `-2^31` or `-0x80000000` and a maximum value of `2^31 - 1` or `0x7FFFFFFF`." → range is approximately ±2.147 billion. Responder's "~±2 billion" is an accurate plain-language approximation.
+- BIGINT: "A 64-bit signed two's complement integer with a minimum value of `-2^63`..." → for bigger numbers (CORRECT)
 
-### Q4 — CEIL/FLOOR (round UP / round DOWN) — **5.00 STRONG PASS** (Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5)
+Zero `::`-cast (responder used `CAST(x AS TYPE)` form throughout — Trino-native, not the PG `::` shortcut). The TRY_CAST callout for malformed data ('10', '250' → integer; bad rows → NULL not error) is exactly the bulletproof pattern. Worked SUM aggregation context applied correctly.
 
-Responder gave `ceil(x)` / `ceiling(x)` round up (`ceil(50.0/12)` = 5), `floor(x)` round down (`floor(99.99)` = 99), `round(x, 0)` nearest (HALF_UP), AND flagged the integer-division gotcha: `50/12` (integer division) truncates to 4 so you need `50.0/12` (or `CAST`) to get the non-integer first before ceil.
+---
 
-**Trino 467 docs verification — trino.io/docs/current/functions/math.html (WebFetch):**
-- `ceil(x)`: *"Returns `x` rounded up to the nearest integer."*
-- `ceiling(x)`: *"Returns `x` rounded up to the nearest integer."* (alias of ceil)
-- `floor(x)`: *"Returns `x` rounded down to the nearest integer."*
-- `round(x)`: *"Returns `x` rounded to the nearest integer."* (with `round(x, d)` for d decimal places)
-- Integer division: `50 / 12` with both INTEGER operands = INTEGER result via truncation = 4; `50.0 / 12` promotes to DOUBLE = 4.166... → `ceil(4.166...)` = 5. Responder correctly flagged this.
+### Q4 — day_of_week (FRESH)
+**Question**: count orders by day of week (Mon vs Sat); created_at timestamp; weekday name or number?
+**Answer summary**: `day_of_week(created_at)` returns 1=Monday..7=Sunday (ISO-8601); CASE for names; GROUP BY day_of_week(created_at).
 
-Zero defects. iter539 HALF_UP lock consistent. iter592 grep-summary anchor at r27:1008 routed cleanly.
+- Accuracy: 5
+- Completeness: 5
+- Clarity: 5
+- Actionability: 5
+- **Avg: 5.00 STRONG PASS — fresh first-probe clean**
+
+**Verification (Trino 467, trino.io/docs/467/functions/datetime.html — WebFetch verbatim)**:
+- Signature: `day_of_week(x) → bigint`
+- Behavior: "Returns the ISO day of the week from `x`. The value ranges from `1` (Monday) to `7` (Sunday)."
+- Alias: "`dow(x)` ... This is an alias for `day_of_week()`."
+
+ISO-8601 numbering (1=Monday..7=Sunday) CORRECTLY stated. CASE-mapping to weekday names + GROUP BY day_of_week(created_at) is exactly canonical. Note: responder could optionally also mention `dow()` alias and that `day_of_week()` is safe on both `timestamp` and `date` inputs — but these are nice-to-haves, not gaps.
 
 ---
 
 ## Overall
 
-**(5.00 + 3.25 + 3.25 + 5.00) / 4 = 16.50 / 4 = 4.125 PASS.**
+**Avg = (5.00 + 4.25 + 5.00 + 5.00) / 4 = 19.25 / 4 = 4.8125 STRONG PASS**
 
-PASS with margin +0.625 above the 3.5 floor. Q2 + Q3 both per-Q below 3.5 are flagged as quality concerns; the overall-average label is PASS.
+Margin +1.3125 above 3.5 floor. The Q2 0.75-point deduction is the only ding; Q1/Q3/Q4 all perfect.
+
+**Per-Q gate concerns**: NONE. All four per-Q averages >= 3.5 (lowest is Q2 at 4.25). Overall-average governs label per directive; no per-Q override flagged.
 
 ---
 
-## iter594 teacher directive
+## Resolution status of iter593 partials
 
-### PRIMARY actions (FINDABILITY fixes — both LANDING-POINT misses, not content gaps)
+| iter593 partial | iter594 FIX | Resolution |
+|---|---|---|
+| Q2 INTENT MISS (responder gave strpos+substr "messy" form, missed `split_part(email, '@', 2)` clean idiom) — landing-point miss for "part after a character" framing | FIX A: r23 §3.1A `split_part for the part AFTER (or BEFORE) a single delimiter` adjacent sub-note + 4-row clean-vs-messy idiom comparison table + inline `-- 2a.` worked example (email→domain + email→local_part) + verbatim trino.io quote + multi-delimiter `element_at(split(...), -1)` note + keyword anchors (domain from email, part after the @, cleaner than strpos+substr, part after the colon/dash/slash) | **FULLY RESOLVED** (Q1 5.00 STRONG — leads with `split_part(sku, ':', 2)`, explicitly contrasts with substr+strpos as cleaner/safer) |
+| Q3 COPY-PASTE INCOMPLETENESS (CTAS named in prose but worked code block was a bare SELECT missing `CREATE TABLE ... AS` prefix) + WRONG-TARGET CITATION (r25 MV file cited for CTAS) | FIX B: r23:1525 prose-only → complete copyable `CREATE TABLE iceberg.analytics.daily_revenue_summary AS SELECT ... FROM ... WHERE ... GROUP BY ...` LEADING + Q-pattern matcher keywords (save query result as a table / CTAS / materialize / persist) + downstream-reuse SELECTs + DROP TABLE + partitioned-CTAS variant + r09 NOT-NULL GUARDRAIL cross-ref (declared as authority — do NOT rewrite inline) + on-prem `temp`-schema cross-ref | **FULLY RESOLVED** (Q2 4.25 PASS — leads with complete `CREATE TABLE ... AS SELECT`, not bare SELECT; minor 4-vs-3-part placeholder nit is a separate clarity issue, NOT the original copy-paste-incompleteness defect; no r25 wrong-target citation this answer) |
 
-**(a) Q2 fix — r23 §3.1A: add a "part after / before a delimiter" anchor at the split_part canonical.**
+**Both iter593 partials FULLY RESOLVED in iter594.**
 
-The split_part content exists at r23 §3.1A (lines 225-285) and r27:902 with a subdomain-extraction example. The findability surface routes off "split-on-dot" / "subdomain" but NOT off the user's phrasing "everything after the @" / "the part after a character" / "domain from email" / "domain part of email address."
+---
 
-Add an anchor block at the split_part canonical (reconcile-in-place; do NOT append a contradictory section):
+## iter595 directive
 
-```
-Anchor: extract the part AFTER a delimiter → split_part(s, delim, 2)
-Anchor: extract the part BEFORE a delimiter → split_part(s, delim, 1)
-Worked example — domain from email: split_part('jane@acme.com', '@', 2) → 'acme.com'.
-Worked example — local-part from email: split_part('jane@acme.com', '@', 1) → 'jane'.
-Keyword anchors: domain from email, everything after the @, part after a character,
-  part after a delimiter, after the dot, before the dot, local part of email, domain part of email.
-DO NOT (when you just want the part after a delimiter): WHERE substr(email, strpos(email, '@') + 1)
-  — works but verbose; split_part is the clean idiom. Use position+substring only when you need
-  the offset itself (not just the trailing part) or when the delimiter is variable-length pattern (use regexp_extract).
-```
+**PRIMARY (LOW priority — minor placeholder polish, optional but recommended)**:
+- **r23 §[CTAS canonical] clean-3-part placeholder demonstration**: the responder regenerated a 4-segment placeholder `iceberg.catalog_name.schema_name.new_table_name` rather than literally copying the teacher's iter594 canonical 3-part form `iceberg.analytics.daily_revenue_summary`. Consider adding either:
+  - (a) a one-line comment ABOVE the canonical CTAS at r23:1525 explicitly demonstrating the 3-part naming: `-- 3-part name format: <catalog>.<schema>.<table> (here: iceberg.analytics.daily_revenue_summary)`. Pre-empts the placeholder confusion shape, OR
+  - (b) a `DO NOT WRITE` row near the CTAS canonical showing the wrong 4-segment form: `iceberg.catalog_name.schema_name.tbl  -- WRONG: 4 segments; Trino is strictly 3-part catalog.schema.table`.
+  Either approach addresses the iter594 Q2 nit without manufacturing churn. The iter594 canonical literal at r23:1525 (`iceberg.analytics.daily_revenue_summary`) is already clean — this is purely about making the responder LITERALLY COPY it instead of regenerating a different placeholder convention.
 
-**(b) Q3 fix — r23 §CTAS / r09 CTAS canonical: worked example MUST LEAD with the full `CREATE TABLE schema.tbl AS SELECT ...` form.**
+**DO NOT** (carry-forward iter594 PINs):
+- Re-edit r23 §3.1A split_part sub-note (iter594 FIX A lock DURABLE — Q1 5.00 STRONG validated).
+- Re-edit the r23:1525 CTAS canonical statement itself (iter594 FIX B lock DURABLE — Q2 4.25 PASS, only the placeholder convention needs a one-line guidance touch).
+- Touch r09 CTAS-NOT-NULL guardrail (cross-ref preserved as authority — iter594 PIN).
+- Touch r22 §13.x federation guardrails (4.49944/310 thin margin, ZERO probe this iter).
+- Add `::`-casts anywhere (iter571 PIN).
+- Manufacture churn on CAST/TRY_CAST (Q3) or day_of_week (Q4) — both routed first-probe clean.
+- Bump training/state.json (teacher already set iteration=594).
 
-The CTAS pattern is NAMED in prose by the responder but the worked code block omits the `CREATE TABLE ... AS` prefix — a copy-paste-completeness slip. Fix at the CTAS canonical (whichever the responder routes to — likely r23:1525 or r09 §1037-1133):
+**RE-PROBE TARGETS (iter595-597)**:
+- (a) **CTAS 3rd framing** — "I want to save a join result as a new permanent table; show me the exact SQL statement" — confirms the responder STILL leads with complete `CREATE TABLE ... AS SELECT` and (post-iter595 polish) uses a clean 3-part literal placeholder.
+- (b) **split_part 3rd framing** — "extract file extension from 'report.pdf'" (should route to `split_part(filename, '.', 2)`) OR "extract phone country code from '+1-555-1234'" (split_part with '-') — confirms keyword routing for "extension" / "country code" framings is solid.
+- (c) **Federation re-probe** — only remaining marginal row at 4.49944/310, 39+ iters stale; highest-leverage breadth target. Carefully scope to NOT touch §13.x guardrails. Suggest probe shape: "Can I see WHICH partitions were pruned on the Postgres side after Top-N pushdown?" (EXPLAIN diagnostic angle) OR "When I JOIN a small Iceberg dim to a big Postgres fact, does the dynamic filter cross catalog boundaries?" (cross-catalog dynamic filtering semantics).
 
-```
-Lead-with-the-complete-statement worked example:
+---
 
-CREATE TABLE iceberg.analytics.daily_user_summary
-AS
-SELECT
-  event_date,
-  user_id,
-  COUNT(*)         AS event_count,
-  SUM(amount)      AS total_amount
-FROM iceberg.raw.events
-WHERE event_date >= DATE '2026-01-01'
-GROUP BY 1, 2;
+## Meta-rule notes
 
-Watch out (carry forward from existing r09 guardrail): CTAS preserves column TYPES but NOT
-  NOT-NULL constraints. If you need NOT NULL on the target, use the two-step explicit form
-  (CREATE TABLE with column list + INSERT INTO SELECT) instead.
-```
+- iter594 = 57th consecutive iter where placement-not-content findability discipline materially affected the verdict. Both iter593 partials (Q2 split_part landing-point miss + Q3 CTAS copy-paste-incompleteness) were LANDING-POINT issues, not content gaps — content already existed but at the wrong findability surface or in incomplete form. iter594 fixes added (a) anchor sub-note at the landing-point keyword route for split_part, and (b) complete-statement worked example at the CTAS landing-point. Both resolved cleanly first-probe.
+- iter594 demonstrates: when iter593 reveals two distinct landing-point shapes (intent-miss + copy-paste-incompleteness), TWO targeted fixes can land cleanly in the same iteration without manufacturing churn. The teacher's "FIX C NO-OP" discipline (did not invent a third fix) preserved surgical-fix integrity.
+- Federation row 4.49944/310 unchanged this iter (NOT PROBED). Margin remains thin.
+- Trajectory recent: iter587 → 588 → 589 → 590 → 591 → 592 → 593 → 594: ... → 4.3125 → ILIKE-fix → 5.00 STRONG → 4.125 → **4.8125 STRONG**. Reversal of iter593 dip; iter594 = 2nd-highest in recent 8-iter window (iter592 5.00 > iter594 4.8125 > others).
 
-The point is the code block on the page must be a runnable CREATE TABLE statement so a responder copy-pasting the example reproduces the full statement, not a bare SELECT.
+---
 
-**(c) Q3 follow-up — wrong-target citation note (LOW PRIORITY).**
+## WebSearch verifications performed (2026-06-07)
 
-The responder cited `/resources/25-trino-materialized-views-iceberg.md` for CTAS. r25 exists but is about materialized views, not CTAS. Either:
-- (preferred) leave r25 alone; ensure the CTAS canonicals at r23:1525 / r09 §1037-1133 / r13:4179-4185 have strong keyword anchors (`create a table from a SELECT`, `save SELECT result as Iceberg table`, `CTAS Iceberg`, `CREATE TABLE AS SELECT Iceberg`) so the responder routes to them instead of r25; OR
-- (only if needed) add a one-line forward-reference at r25 top: "If you want CREATE TABLE AS SELECT (not a materialized view), see r23 §[CTAS canonical]." This avoids future wrong-target routing.
+- trino.io/docs/467/functions/string.html — `split_part(string, delimiter, index) → varchar`; 1-indexed; null-on-out-of-range (Q1)
+- trino.io/docs/467/sql/create-table-as.html — full CTAS syntax with `AS query` clause; `table_name` identifier (Q2)
+- trino.io/docs/467/functions/conversion.html — `cast()` varchar-to-numeric, `try_cast()` null-on-failure (Q3)
+- trino.io/docs/467/language/types.html — INTEGER 32-bit signed (-2^31..2^31-1 ≈ ±2.147 billion), BIGINT 64-bit signed (Q3)
+- trino.io/docs/467/functions/datetime.html — `day_of_week(x) → bigint`, ISO 1=Monday..7=Sunday, `dow(x)` alias (Q4)
 
-### DO NOT (carry-forward locks)
-
-- DO NOT re-edit r23:1576 (ILIKE in-place REPLACE — iter591 lock, DURABLE across iter592 contains framing).
-- DO NOT touch r22 §3.3 PG-connector ILIKE pushdown disambiguator.
-- DO NOT touch r22 §13.x federation guardrails (4.49944/310 thin margin; need fresh failure probe before any churn).
-- DO NOT add `::`-casts anywhere (iter571 PIN).
-- DO NOT manufacture churn on the modulo (Q1) or ceil/floor (Q4) canonicals — both routed cleanly first-probe.
-- DO NOT bump training/state.json (teacher already set iteration=593).
-
-### RE-PROBE TARGETS (iter594-596)
-
-1. **Q2 split_part 2nd framing** — to confirm the "part after a delimiter" anchor routes. Candidate: "extract the file extension from filename like 'report.pdf'" (should route to `split_part(filename, '.', 2)` or `regexp_extract` — the cleaner direct form). OR "extract the country code from phone like '+1-555-1234'" (should route to split_part with '-' delimiter).
-2. **Q3 CTAS 2nd framing** — to confirm the worked-example-leads-with-CREATE-TABLE-AS fix. Candidate: "I want to materialize a join result as a new table for downstream queries" — should route to CTAS canonical and the responder's example should now LEAD with `CREATE TABLE schema.tbl AS SELECT ...`.
-3. **Federation re-probe** — only remaining marginal row at 4.49944/310, now 37+ iters stale; highest-leverage breadth target. Carefully scope to NOT touch §13.x guardrails.
-
-### Meta-rule observation
-
-iter593 = 56th consecutive iter where placement-not-content findability discipline materially affected the verdict. Both Q2 and Q3 slips are **landing-point mismatches**, not content gaps:
-- Q2: the split_part content exists at r23 §3.1A + r27:902 but the keyword surface is framed around dot-split / subdomain, not "part after a character" — responder's keyword route for "cleaner way than position+substring" landed on strpos+substr instead.
-- Q3: the CTAS pattern is named in r23:1525 and r09 §1037-1133 but the worked code block visible at the routing-landing point lacked the `CREATE TABLE ... AS` prefix — responder copied the SELECT-only fragment, naming CTAS in prose but omitting it in code.
-
-Both fixes are anchor-additions / worked-example-completeness corrections — exactly the iter586/587/589 ADD-distinct-LEADING-CANONICAL pattern, applied here to keyword surface (Q2) and example completeness (Q3).
-
-### Verification log (WebFetch / docs URLs hit today)
-
-- trino.io/docs/current/functions/math.html — confirmed `mod(n,m)`, `%`, `ceil`, `ceiling`, `floor`, `round` semantics for Q1 + Q4.
-- trino.io/docs/current/functions/string.html — confirmed `split_part(string, delimiter, index)` 1-indexed + NULL-on-out-of-range; `strpos` 1-indexed + 0-if-not-found; `substr` alias of `substring` for Q2.
-- trino.io/docs/current/sql/create-table-as.html — confirmed full CTAS syntax `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] table_name [(...)] [COMMENT ...] [WITH (...)] AS query [WITH [NO] DATA]` for Q3.
-
-### Repo files touched this iter
-
-- training/feedback-latest.md (this file).
-- training/rubric.md (one-line iter593 entry appended).
-- Did NOT bump training/state.json (teacher already set iteration=593, phase=extended).
-- Did NOT touch any resources/ files.
+All claims in the responder's four answers are VERIFIED against Trino 467 official docs.
