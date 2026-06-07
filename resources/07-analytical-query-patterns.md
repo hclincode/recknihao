@@ -2302,6 +2302,159 @@ Trino has `width_bucket` (BOTH overloads) — use it instead of a long `CASE WHE
 
 **DO NOT WRITE** *"Trino has no `width_bucket` — it is Postgres-only"* (FALSE — Trino 467 has BOTH overloads, documented at `functions/math.html`); **DO NOT WRITE** a long `CASE WHEN ... THEN ... WHEN ... THEN ... END` ladder for numeric histogram bucketing when `width_bucket(x, ARRAY[...])` does uneven bins directly in one call. Update the Pattern C3 comparison table mental model: "Custom (non-equal-size) buckets" → `width_bucket(x, ARRAY[...])` is the **preferred Trino-native one-liner**; the CASE WHEN ladder is the fallback only when you need non-numeric bucketing (e.g., string-key bucketing) or per-bucket pretty labels mid-aggregation.
 
+### Pattern C4a: Fixed-width $N histogram (every bucket the same width, open-ended top) — integer-division floor (iter650 FIX-A — the EXACT iter649 Q4 assembly bug fix)
+
+> **READ THIS FIRST if your question contains any of these keywords:** `fixed-width $50 buckets`, `histogram of order amounts`, `bucket into 50-dollar bins`, `count orders per amount range`, `bin a numeric column into equal-width ranges`, `histogram without hardcoding buckets`, `session-duration buckets`, `age buckets 10 years wide`, `5-dollar bands`, `bin sales by dollar range`, `bucket into N-dollar groups`, `floor to nearest 50`, `round down to nearest bucket width`, `equal-width bins no fixed upper bound`. Verified at [trino.io/docs/current/functions/math.html](https://trino.io/docs/current/functions/math.html) + [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) on 2026-06-08.
+
+**DECIDE-FIRST — fixed-width $N bins vs explicit/custom bin edges.** Two shapes, two different idioms — pick by the question:
+
+| Your bins are... | Use | Why |
+|---|---|---|
+| **Every bucket the same `$N` wide, open-ended top** ("$50 bins", "10-year age buckets", "5-minute session buckets", no upper bound spelled out) | **`floor(x/N)*N`** (or `CAST(x/N AS integer)*N` for non-negative values) as the `bucket_floor` — group by the floor expression | Simplest. No bounds array to maintain. The bucket label is the bucket's lower edge, and the top bin is automatically open-ended — bucket `1000` holds `[$1000, $1050)`, `1050` holds `[$1050, $1100)`, etc., for as far as the data goes. |
+| **Explicit / non-uniform bin EDGES** (`[0, 50, 100, 200, 500]`, custom tiers, a fixed `$500+` catch-all top tier) | **`width_bucket(x, ARRAY[...])`** computed in a SUBQUERY/CTE, label and count in the outer query (Pattern C4 above) | Custom bin edges are exactly what `width_bucket(x, ARRAY[...])` is for. The Pattern C4 lock above covers the off-by-one rules. |
+
+**The one-fact lead.** For **fixed-width $N bins** the simplest, docs-correct Trino idiom is **integer-division floor** — `floor(amount/N)*N` — used **both** in the `SELECT` (as the output bucket label) **and** repeated **verbatim** in the `GROUP BY`. There is no bounds array to maintain, no off-by-one to mishandle, and the top bin is automatically open-ended (whatever the data's max happens to be becomes the highest bucket on its own).
+
+#### LEADING CANONICAL — count orders per fixed $50 amount range (the iter649 Q4 shape, FIXED)
+
+```sql
+-- CORRECT — fixed-width $50 histogram of order amounts.
+-- floor(amount/50)*50 gives the bucket's LOWER edge ($0, $50, $100, $150, ...).
+-- The GROUP BY REPEATS the expression verbatim (you cannot reference the SELECT-list
+-- alias `bucket_floor` inside GROUP BY or inside another SELECT expression — see the
+-- alias-visibility rule below). Trino's `floor(x)` returns the largest integer <= x;
+-- multiplying by 50 maps each row to its $50 bucket's lower edge.
+SELECT floor(order_amount / 50) * 50           AS bucket_floor,        -- $0, $50, $100, $150, ...
+       COUNT(*)                                AS order_count
+FROM iceberg.sales.orders
+GROUP BY floor(order_amount / 50) * 50         -- REPEAT the expression — do NOT use `GROUP BY bucket_floor`
+ORDER BY bucket_floor;
+```
+
+**Equivalent `CAST(... AS integer)` form** (works identically for non-negative `order_amount`; for negative values prefer `floor()` because `CAST(x AS integer)` truncates **toward zero**, not toward negative infinity, per [Trino math docs](https://trino.io/docs/current/functions/math.html)):
+
+```sql
+SELECT CAST(order_amount / 50 AS integer) * 50 AS bucket_floor,
+       COUNT(*)                                AS order_count
+FROM iceberg.sales.orders
+GROUP BY CAST(order_amount / 50 AS integer) * 50
+ORDER BY bucket_floor;
+```
+
+#### Adding a human-readable label — compute the bucket floor in an INNER CTE FIRST, then format() in the OUTER SELECT
+
+You **cannot** use the `bucket_floor` alias inside another expression in the **same** SELECT list (`format('$%d-$%d', bucket_floor, bucket_floor + 50)` next to `floor(order_amount/50)*50 AS bucket_floor` is **invalid** — SELECT-list aliases are NOT visible to sibling SELECT-list expressions). Push the floor down into a CTE so `bucket_floor` becomes a **real column** in the outer query:
+
+```sql
+-- CORRECT — bucket_floor computed in the CTE; the outer SELECT formats a label from it.
+WITH bucketed AS (
+  SELECT floor(order_amount / 50) * 50 AS bucket_floor
+  FROM iceberg.sales.orders
+)
+SELECT format('$%d-$%d', CAST(bucket_floor AS integer), CAST(bucket_floor + 50 AS integer)) AS amount_range,
+       COUNT(*) AS order_count
+FROM bucketed
+GROUP BY bucket_floor                          -- real column from CTE; alias-by-name works here too via column ref
+ORDER BY bucket_floor;
+```
+
+(See **resource 23 §3.1A concat/format coercion guardrail** for why `format('%d', x)` needs `CAST(x AS integer)` when `x` is `double` — `floor` returns the input's numeric type, often `double`.)
+
+#### Secondary canonical — `width_bucket` with EXPLICIT/CUSTOM bin edges: compute bucket in a CTE, label and count in the OUTER query
+
+When the bin edges are **explicit / non-uniform** (e.g. `[50, 100, 150, 200]`, a fixed `$200+` catch-all), use `width_bucket` — but compute the bucket number in an INNER CTE first, then label/count over the outer query (NEVER reference the `width_bucket` result alias inside a sibling SELECT expression — see the DO-NOT-WRITE rows below):
+
+```sql
+-- CORRECT — custom bin edges via width_bucket, computed in a CTE first.
+-- 4-element bounds array -> buckets 0..4 (5 buckets total): bucket 0 = below $50,
+-- bucket 4 = >= $200 (the open-ended top tier).
+WITH bucketed AS (
+  SELECT width_bucket(order_amount, ARRAY[50.0, 100.0, 150.0, 200.0]) AS bucket_num
+  FROM iceberg.sales.orders
+)
+SELECT bucket_num,
+       COUNT(*) AS order_count
+FROM bucketed
+GROUP BY bucket_num
+ORDER BY bucket_num;
+```
+
+To attach a label, wrap once more — `bucket_num` is a real column in the outer query and can be referenced by name inside a `CASE` expression there:
+
+```sql
+WITH bucketed AS (
+  SELECT width_bucket(order_amount, ARRAY[50.0, 100.0, 150.0, 200.0]) AS bucket_num
+  FROM iceberg.sales.orders
+)
+SELECT CASE bucket_num
+         WHEN 0 THEN '$0-$50'
+         WHEN 1 THEN '$50-$100'
+         WHEN 2 THEN '$100-$150'
+         WHEN 3 THEN '$150-$200'
+         WHEN 4 THEN '$200+'
+       END AS amount_range,
+       COUNT(*) AS order_count
+FROM bucketed
+GROUP BY bucket_num
+ORDER BY bucket_num;
+```
+
+#### DO NOT WRITE — the EXACT iter649 Q4 assembly bugs
+
+**(1) Referencing a SELECT-list alias inside a SIBLING SELECT-list expression — INVALID in Trino.**
+
+```sql
+-- WRONG ❌ — `bucket_num` is a SELECT-list alias; Trino does NOT resolve a SELECT
+-- alias inside a sibling SELECT expression (output column aliases are visible ONLY
+-- in ORDER BY, NOT inside other SELECT expressions, NOT in WHERE, NOT in GROUP BY,
+-- NOT in HAVING — see resource 27 §4.2 alias-in-WHERE guard + resource 23 §8 line
+-- 1521-1528 Trino GROUP BY rules anchor; the same scoping rule that bans
+-- referencing a SELECT alias in WHERE also bans referencing it in a sibling SELECT
+-- expression — both are evaluated in pre-projection scope).
+SELECT width_bucket(order_amount, ARRAY[50, 100, 150, 200]) AS bucket_num,
+       CASE WHEN bucket_num = 0 THEN '$0-$50'                     -- ❌ bucket_num is an alias, not a column here
+            WHEN bucket_num = 4 THEN '$200+'
+            ELSE 'mid'
+       END AS amount_range,
+       COUNT(*) AS order_count
+FROM iceberg.sales.orders
+GROUP BY width_bucket(order_amount, ARRAY[50, 100, 150, 200])      -- (the GROUP BY repeat is fine; the CASE reference is the bug)
+ORDER BY bucket_num;
+```
+
+**Fix:** either **repeat the `width_bucket(...)` expression** inside the CASE (verbose but works), **or** push `width_bucket(...)` down into a CTE so `bucket_num` becomes a real column in the outer query (the **preferred** form — see the canonical above). The same rule covers any "label a bucket I just computed" shape: the bucket expression must either be **repeated** in every sibling reference, or **promoted to a column** via a CTE / subquery.
+
+**(2) `ARRAY_AGG(DISTINCT ...) OVER (...)` — DISTINCT is NOT supported in window aggregates.**
+
+```sql
+-- WRONG ❌ — Trino does NOT support DISTINCT inside a window aggregate. The query
+-- errors with "DISTINCT in window function parameters not yet supported"
+-- (trinodb/trino #7885, still open as of 2026-06).
+SELECT ARRAY_AGG(DISTINCT order_status) OVER () AS all_statuses    -- ❌ DISTINCT + OVER is unsupported
+FROM iceberg.sales.orders;
+```
+
+**Fix:** if you need the distinct set, compute it in a SUBQUERY / CTE with a plain `GROUP BY` or `array_agg(DISTINCT ...)` **without** `OVER`, then cross-join the single-row result back. For a histogram, you do **not** need a window at all — `GROUP BY bucket_floor` (or `GROUP BY bucket_num` over a width_bucket CTE) produces one row per bucket directly.
+
+**(3) `element_at(arr, 0)` — Trino arrays are 1-based; index 0 is invalid.**
+
+```sql
+-- WRONG ❌ — Trino arrays are 1-based ([trino.io/docs/current/functions/array.html]
+-- verbatim: "The [] operator is used to access an element of an array and is indexed
+-- starting from one"). Index 0 is invalid; depending on the access form it returns
+-- NULL or raises "SQL array indices start at 1". `width_bucket` CAN return 0 (the
+-- underflow bin), so if you are building a labelled array indexed by bucket number,
+-- DO NOT index it by the raw width_bucket result — guard the 0-bucket case
+-- separately or use width_bucket(x, ARRAY[...]) + 1 only after a +1 adjustment.
+SELECT element_at(ARRAY['$0-$50','$50-$100','$100-$150','$150+'],
+                  width_bucket(order_amount, ARRAY[50,100,150])) AS amount_range  -- ❌ width_bucket can return 0
+FROM iceberg.sales.orders;
+```
+
+**Fix:** index with `width_bucket(...) + 1` (so the underflow bucket 0 maps to array position 1) — OR use a `CASE` expression keyed on the bucket number (cleaner; see the labelled secondary canonical above) — OR use the integer-division floor form which has no underflow bin to worry about.
+
+**Cross-links.** The alias-visibility rule that powers bug (1) is the same rule pinned at **[resource 27 §4.2 alias-in-WHERE guard (line 720)](27-oracle-plsql-to-dbt-trino.md)** ("`WHERE` is evaluated BEFORE the `SELECT` projection ... output column aliases do not exist yet when WHERE runs") and at **[resource 23 §8 Trino GROUP BY rules anchor (lines 1521-1528)](23-sql-best-practices-olap.md)** ("Trino does NOT support referencing a SELECT-list alias by name in GROUP BY ... A SELECT alias may be used in the outer ORDER BY ... but NOT in GROUP BY / WHERE / HAVING"). The same pre-projection scoping rule **also covers sibling SELECT-list expressions** — a SELECT alias is visible **ONLY** in the outer `ORDER BY`, not in any other clause and not in any other SELECT-list expression. The **width_bucket bin numbering + off-by-one trap** is locked at **Pattern C4 above (lines 2250-2303)**; the **CASE-WHEN searched-bucket ladder** alternative (when you want pretty string labels per band, no width_bucket) is the **CASE-vs-width_bucket decision table at line 2256-2263**.
+
 ### Pattern D: Sliding window (last 7 days rolling)
 
 > **DECIDE-FIRST — SOURCE GRAIN: is your input one-row-per-day, or one-row-per-event? (iter649 FIX-A PIN — the EXACT iter648 Q2 grain bug.)** "N-day moving average of DAILY `<metric>`" means **one rolling value per CALENDAR DAY computed over the last N daily totals** — so the window MUST run over rows that are **ALREADY one-row-per-day**. The most common bug is windowing the **raw per-event / per-order table directly**, which produces a 7-ROW average of individual event amounts, NOT a 7-DAY average of daily totals. Verified at [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html) + [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) on 2026-06-08: `ROWS BETWEEN N PRECEDING AND CURRENT ROW` is a **physical-row positional offset** — it counts ROWS, not calendar days. If a day has 50 orders, `ROWS BETWEEN 6 PRECEDING` over the raw `orders` table covers **6 ORDERS back**, which is typically a few hours of the same day — not 7 days.
