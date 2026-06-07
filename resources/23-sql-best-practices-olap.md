@@ -979,6 +979,93 @@ This is the **wrap-the-window-then-compare** fix in its purest form — outer `W
 
 ---
 
+#### LEADING CANONICAL — SECOND-LARGEST / Nth-LARGEST per group: choose `DENSE_RANK` vs `ROW_NUMBER` (do NOT use `RANK` — it leaves GAPS after ties and silently returns nothing) (iter643 PIN — FIX-A)
+
+> **READ THIS FIRST if your question contains any of these keywords:** `second-largest order per customer`, `second-highest amount per customer`, `runner-up amount per group`, `2nd-largest per group`, `third-highest per group`, `Nth-largest per group`, `Nth-highest per group`, `the next-biggest after the max`, `2nd-ranked by amount per group`, `second-best per customer`, `second-most per group`, `second-place per partition`, `who is in second place per group`, `the runner-up`, `Nth from the top per group`, `second-distinct-highest amount`, `second-distinct value per group`, `RANK vs DENSE_RANK vs ROW_NUMBER`, `which ranking function for Nth-per-group`, `WHERE rank = 2`, `WHERE dense_rank = 2`, `WHERE rn = 2 amount`. Verified at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html) on 2026-06-07.
+
+**DECIDE-FIRST.** "The Nth per group" in English is **two different SQL questions** that need different functions. Pick before you write:
+
+| Your question is really... | Reach for | Why |
+|---|---|---|
+| **The Nth-largest DISTINCT VALUE** per group (e.g. "second-highest amount" — ties at the top should NOT consume the slot; if two orders tie for the per-customer max, the SECOND-distinct amount is still the next lower value) | **`DENSE_RANK() OVER (PARTITION BY g ORDER BY x DESC) = N`** | `DENSE_RANK` = 1, 1, 2, 3 with ties — **no gap**, so `= 2` always lands on the second-distinct value. If two rows share that second-distinct amount you get BOTH rows (note this). |
+| **The literal Nth row / Nth-ranked record** per group (a specific runner-up row — pick exactly one row at position N, ties broken arbitrarily or by a deterministic tiebreaker) | **`ROW_NUMBER() OVER (PARTITION BY g ORDER BY x DESC, <tiebreaker>) = N`** | `ROW_NUMBER` = unique 1, 2, 3, 4 — every row gets a different number, so `= N` ALWAYS returns exactly one row per group (assuming the partition has N+ rows). Add a tiebreaker column (e.g. `order_id`) to the `ORDER BY` to make the pick deterministic across runs. |
+| **"The Nth" using `RANK()` = N** | **DO NOT — see DO NOT WRITE below** | `RANK` = 1, 1, 3 with ties (**GAP after ties**); if the top is tied, `WHERE rank = 2` matches **NOTHING** (the sequence skips past 2 to 3) and the query silently returns zero rows for those customers — no error, just wrong. |
+
+**Docs-verified tie/gap behavior** (verbatim from [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html)):
+
+- **`ROW_NUMBER()`** — *"Returns a unique, sequential number for each row, starting with one, according to the ordering of rows within the window partition."* Sequence with three rows where the top two tie on `amount` = (100, 100, 80) DESC: **`1, 2, 3`** (unique — arbitrary tie-break among the two 100s).
+- **`RANK()`** — *"The rank is one plus the number of rows preceding the row that are not peer with the row. Thus, tie values in the ordering will produce gaps in the sequence."* Same input: **`1, 1, 3`** — the value `2` is **never assigned** (gap).
+- **`DENSE_RANK()`** — *"This is similar to `rank()`, except that tie values do not produce gaps in the sequence."* Same input: **`1, 1, 2`** — no gap.
+
+**Why this matters for "second-largest per customer."** If customer A has two orders tied at $100 (their personal max) and one order at $80, the three ranking functions give:
+
+| Order amount | ROW_NUMBER | RANK | DENSE_RANK | "Is this the second-largest?" |
+|---|---|---|---|---|
+| 100 (tied top) | 1 | 1 | 1 | No (= max) |
+| 100 (tied top) | 2 | 1 | 1 | **ROW_NUMBER says "yes" (literal runner-up row); DENSE_RANK says "no" — both are at distinct-rank 1; RANK says "no" — both are at rank 1** |
+| 80 | 3 | 3 | 2 | **DENSE_RANK says "yes" (second-distinct amount); RANK says "no" (rank=3, not 2) — RANK silently returns NOTHING here**; ROW_NUMBER says "no" |
+
+`WHERE rank = 2` returns **zero rows** for customer A — the sequence jumped from 1 to 3 and never produced a `2`. That is the silent-wrong bug.
+
+**PREFERRED CANONICAL — second-largest order amount per customer (the docs-correct shape; iter642 Q2 FIXED).**
+
+```sql
+-- Trino 467 — "second-largest order amount per customer (second-DISTINCT-highest amount)."
+-- DENSE_RANK = 2 → the second-distinct amount. If two orders tie at that amount you get BOTH rows.
+WITH ranked AS (
+  SELECT customer_id,
+         order_id,
+         amount,
+         DENSE_RANK() OVER (PARTITION BY customer_id ORDER BY amount DESC) AS amt_rank
+  FROM iceberg.analytics.orders
+)
+SELECT customer_id,
+       order_id,
+       amount AS second_largest_amount
+FROM ranked
+WHERE amt_rank = 2;
+```
+
+For "the **Nth-largest** distinct amount per group" just change `= 2` to `= N`. With `DENSE_RANK` the sequence is dense (no gaps), so `= N` always lands on the Nth-distinct value as long as the partition has at least N distinct values; partitions with fewer distinct values simply produce no row for that customer (which is the right answer — they don't HAVE an Nth-distinct amount).
+
+**ROW_NUMBER variant — "the literal runner-up row" (exactly one row per customer at position 2).**
+
+```sql
+-- Trino 467 — "the literal second-ranked order per customer (one row, deterministic tiebreaker)."
+-- ROW_NUMBER = unique 1,2,3,4 → = 2 always returns exactly one row per customer (if 2+ orders exist).
+-- Add a tiebreaker (order_id) to the ORDER BY so ties on `amount` resolve deterministically across runs.
+WITH ranked AS (
+  SELECT customer_id,
+         order_id,
+         amount,
+         ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY amount DESC, order_id) AS rn
+  FROM iceberg.analytics.orders
+)
+SELECT customer_id, order_id, amount
+FROM ranked
+WHERE rn = 2;
+```
+
+This returns **exactly one row per customer** (the specific runner-up row), with the tied-top case resolved by `order_id`. Use this shape when the question wants a SPECIFIC RECORD at position N (e.g. "the runner-up order", "the second order in rank-order"). Use the `DENSE_RANK = N` shape above when the question wants the Nth-DISTINCT VALUE (e.g. "the second-highest price", "the third-distinct revenue tier").
+
+> **DO NOT WRITE — `RANK() = N` for "the Nth per group" (silent-wrong on tied tops).**
+>
+> | WRONG (Trino 467 parses fine — but silently returns NOTHING for tied-top customers) | WHY it fails | RIGHT — pick by intent |
+> |---|---|---|
+> | `WITH ranked AS (SELECT customer_id, order_id, amount, RANK() OVER (PARTITION BY customer_id ORDER BY amount DESC) AS amt_rank FROM orders) SELECT customer_id, amount FROM ranked WHERE amt_rank = 2`  &nbsp;❌ | **`RANK` leaves a GAP after ties.** If a customer's top amount is tied (two orders at $100), `RANK` assigns 1, 1, **3** — never `2`. `WHERE rank = 2` silently returns **zero rows** for that customer. No error, no warning — just wrong totals. The claim that "RANK is safer than ROW_NUMBER" for the Nth-per-group is **BACKWARDS**: RANK's gap behavior is exactly what makes it unsafe here. | For **second-DISTINCT amount** → `DENSE_RANK() OVER (...) = N` (no gaps; ties at the top still let the next-distinct value land at = 2). For **literal Nth row** → `ROW_NUMBER() OVER (... ORDER BY amount DESC, order_id) = N` (unique sequence; one row per group). |
+> | `WITH ranked AS (... RANK() OVER (PARTITION BY customer_id ORDER BY amount DESC) AS r FROM orders) SELECT customer_id, MIN(amount) FROM ranked WHERE r > 1 GROUP BY customer_id`  &nbsp;❌ | "Min amount where rank > 1" is **NOT** "second-largest" — it returns the smallest non-max amount, which equals the smallest amount in the partition, not the second-largest. The intent and the math don't match. | Use `DENSE_RANK() = 2` (second-distinct-highest amount) — exact intent match. |
+> | `WHERE RANK() OVER (PARTITION BY customer_id ORDER BY amount DESC) = 2`  &nbsp;❌ (window in `WHERE`) | **Window function NOT allowed in `WHERE`.** Trino parses this with `mismatched input 'OVER'` / analyzer rejection — `WHERE` runs BEFORE windows are computed. Same rule as the §3.1G LEADING CANONICAL above. | Wrap the ranking function in a CTE / subquery, project as a plain column, then filter at the outer level on `WHERE amt_rank = 2`. |
+
+**Anti-pattern callout — "RANK is safer than ROW_NUMBER for the second-largest."** This claim is **WRONG** and is the iter642 Q2 silent-wrong bug. The real safety story:
+
+- `ROW_NUMBER()` is "safer" against **missing rows** — it always assigns a unique 1, 2, 3, ..., so `= N` always returns exactly one row per group (if the group has N+ rows). The downside: it picks ARBITRARILY among ties at the top, so add a tiebreaker.
+- `DENSE_RANK()` is "safer" against **ties consuming slots** — `= N` lands on the Nth-distinct value regardless of how many rows tie at each rank above.
+- `RANK()` is the WORST choice for `WHERE rank = N` because of its gap-after-ties behavior — `= N` can silently match zero rows. `RANK()` is appropriate when you want **"every row at rank ≤ N including all ties at the boundary"** (e.g. `WHERE rank <= 10` for "top 10 plus all ties at rank 10"), NOT for `= N`.
+
+**Cross-references.** [Resource 07 § Pattern C1 ranking semantics table](07-analytical-query-patterns.md) — the 1,2,2,4 (RANK) vs 1,2,2,3 (DENSE_RANK) vs unique (ROW_NUMBER) reference table on the canonical "top-N tenants per region" worked example. [§3.1G ROW_NUMBER top-1-per-group LEADING CANONICAL above](#31g-trino-has-no-distinct-on--use-row_number--1-or-max_by-for-one-row-per-group) for the "one row per group (max by some order)" pattern — same CTE+filter shape, just `WHERE rn = 1`. [§3.1G max-per-group-compare wrap-the-window-then-compare canonical above](#leading-canonical--max-per-group-compare-rows-equal-to-each-groups-max--compare-to-a-partition-aggregate--wrap-the-window-in-a-cte-then-compare-at-the-outer-level-iter637-pin--fix-a-window-in-where--nested-window--window-in-filter-regression) for the related "rows equal to the per-group max" pattern (uses `MAX(...) OVER (...)` + outer compare; for ALL rows tied at max use `DENSE_RANK() = 1` per Alternative #1 there). [Resource 27 §4.2 alias-in-WHERE / window-in-WHERE guard](27-oracle-plsql-to-dbt-trino.md) for the general clause-evaluation rule that forbids window functions in `WHERE`.
+
+---
+
 ### DO NOT WRITE — `IGNORE NULLS` placement on window functions: AFTER the closing args paren, BEFORE `OVER` (iter572 PIN)
 
 > **Keyword anchors (route here on any of these):** IGNORE NULLS placement, IGNORE NULLS inside parentheses parse error, where does IGNORE NULLS go, IGNORE NULLS after closing paren before OVER, LAST_VALUE IGNORE NULLS syntax, FIRST_VALUE IGNORE NULLS syntax, LAG IGNORE NULLS syntax, LEAD IGNORE NULLS syntax, null treatment clause Trino, RESPECT NULLS Trino, mismatched input 'IGNORE', mismatched input IGNORE Trino, null treatment outside args.

@@ -1,162 +1,120 @@
-# iter642 Judge Feedback — 2026-06-07 (EXTENDED PHASE)
+# iter643 Judge Feedback — 2026-06-07 (EXTENDED PHASE)
 
-**Overall: 4.21875 PASS** (margin +0.71875 above 3.5 floor; -0.46875 swing from iter641's 4.6875).
-Per-Q averages: Q1 = 4.875, Q2 = **2.125 FAIL per-Q**, Q3 = 5.0, Q4 = 4.875. Governing label = PASS (overall avg 4.21875 >= 3.5; per directive, per-Q quality-gate override is NOT applied — average governs). Q2 flagged separately as iter643 FIX-A primary candidate.
+**Overall: 4.6875 PASS** (margin +1.1875 above 3.5 floor; +0.46875 swing back up from iter642's 4.21875). Per-Q averages: Q1 = 5.00, Q2 = 4.50, Q3 = 5.00, Q4 = 5.00. No per-Q FAIL. iter643 FIX-A (Nth-largest-per-group DENSE_RANK=N decision canonical) LANDED CLEAN.
 
-## Per-Question Scores
+---
 
-### Q1 — Count orders with NO matching shipments row (orphan / anti-join)
+## Per-question scores
 
-Responder: `SELECT COUNT(*) FROM orders o LEFT JOIN shipments s ON s.order_id = o.order_id WHERE s.order_id IS NULL`; also mentioned `NOT EXISTS` as an alternative.
+### Q1 — Third-most-expensive product per category (Nth-DISTINCT-value, FIX-A validation)
 
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5.0 | Canonical LEFT JOIN ... WHERE right IS NULL anti-join. Predicate filters on `s.order_id` (the join key, never NULL when matched). `NOT EXISTS` named as alternative. Anti-join shape verified against trino.io docs + standard SQL anti-join references. |
-| Completeness | 4.5 | Both safe forms named (LEFT JOIN ... IS NULL + NOT EXISTS). Mild ding for not explicitly calling out the NOT IN + NULL silent-zero-rows pitfall — that's the load-bearing reason these two forms are preferred. |
-| Clarity | 5.0 | Direct, no jargon, exactly the shape an engineer needs. |
-| Actionability | 5.0 | Engineer can paste this and run it. |
-| **Per-Q avg** | **4.875** | STRONG PASS |
+**Accuracy: 5** — `DENSE_RANK() OVER (PARTITION BY category ORDER BY price DESC) AS price_rank ... WHERE price_rank = 3` is the CORRECT tool for "Nth-DISTINCT-value" semantics. The walked-through math is exactly right:
+- $200, $200, $150, $100, $100, $80 → DENSE_RANK = 1, 1, 2, 3, 3, 4 → rank=3 returns the two $100 rows. CORRECT.
+- Verified against trino.io/docs/467/functions/window.html: DENSE_RANK "tie values do not produce gaps in the sequence" (1,1,2,3); RANK would give 1,1,3 with the tied top (GAP at 2 — rank=3 would land on the FIRST $150, not the $100 — the exact trap FIX-A targets).
+- Responder explicitly contrasted ROW_NUMBER=3 (literal 3rd row = $150, wrong) — perfect.
+- The nested-ROW_NUMBER one-row-per-category variant uses a CTE-then-outer-WHERE composition (the dialect-safe pattern in Trino 467, which disallows window-in-WHERE). Valid Trino 467.
 
-### Q2 — Second-largest order amount per customer — **CRITICAL ACCURACY DEFECT**
+**Completeness: 5** — Covered the three-way DENSE_RANK / RANK / ROW_NUMBER decision, the worked tie example with explicit math, AND a one-row-per-category collapse variant.
 
-Responder: `RANK() OVER (PARTITION BY customer_id ORDER BY amount DESC) AS order_rank ... WHERE order_rank = 2`. Responder claimed: "RANK() is safer than ROW_NUMBER() here because if the largest orders have ties, RANK() will correctly skip to rank 3 for the next distinct amount (so you won't accidentally show a tied top order as the second)."
+**Clarity: 5** — Step-by-step math trace removes all ambiguity. "$200,$200,$150,$100,$100,$80 → 1,1,2,3,3,4" is the kind of trace a beginner needs.
 
-**THE CLAIM IS BACKWARDS.** Verified against trino.io/docs/467/functions/window.html:
-- RANK() with ties at the top: two rows tied for largest BOTH get rank 1; the next distinct amount gets rank **3** (gap-with-skip behavior — docs verbatim "tie values in the ordering will produce gaps in the sequence").
-- So `WHERE order_rank = 2` returns **NOTHING** for any customer whose top amount is tied. The query SILENTLY DROPS those customers — exactly the "fragile" behavior the responder claimed it AVOIDS.
-- Robust forms:
-  - For "second-largest DISTINCT amount" -> **DENSE_RANK() = 2** (no gaps: 1,1,2 — always finds the next distinct amount).
-  - For "literal 2nd row / runner-up regardless of ties" -> **ROW_NUMBER() = 2**.
-- The responder's choice is both wrong AND justified with inverted reasoning. Worse than picking the wrong function by luck — the explanation reinforces a wrong mental model that will repeat.
+**Actionability: 5** — Drop-in Trino 467 SQL.
 
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 1.5 | RANK()=2 returns empty for tied-top customers (the exact failure mode the responder claimed it prevents). Inverted reasoning. SQL parses + runs but produces silently-wrong dataset. |
-| Completeness | 2.0 | Did not name DENSE_RANK or ROW_NUMBER as alternatives; the entire Nth-per-group decision triangle is absent. |
-| Clarity | 3.0 | Sentence-level clarity is fine; but the wrong mental model it teaches is harmful. |
-| Actionability | 2.0 | Engineer who copies this gets silently-wrong results when any customer has tied largest orders. |
-| **Per-Q avg** | **2.125** | **FAIL — primary iter643 FIX-A candidate** |
+**FIX-A LANDED: CONFIRMED.** The iter643 directive's Nth-largest-per-group canonical (DENSE_RANK=N for distinct level, ROW_NUMBER=N for literal row, RANK=N is the trap) is reflected accurately. Math is correct, contrast with ROW_NUMBER is explicit, CTE composition is dialect-safe. The iter642 silent-wrong RANK=N bug is fully inoculated.
 
-### Q3 — Format order amount as currency string '$1,234.56'
+Q1 avg: **5.00**
 
-Responder: `format('$%,.2f', amount) AS formatted_currency`.
+---
 
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5.0 | Verified against trino.io/docs/467/functions/conversion.html: `format()` uses Java printf-style format specifiers; `%,.2f` produces thousands-grouping + 2 decimals; literal `$` embedded in the format string is correct. `format()` accepts the numeric directly — NO CAST required, NO concat-of-string-with-number coercion issue. |
-| Completeness | 5.0 | One-line clean canonical exactly matching the question. |
-| Clarity | 5.0 | Self-explanatory; specifier semantics implicit in the example output. |
-| Actionability | 5.0 | Paste-ready. |
-| **Per-Q avg** | **5.0** | STRONG PASS — format/coercion durability HOLDS |
+### Q2 — Count customers who never placed an order (anti-join)
 
-### Q4 — Percentage of total revenue from REPEAT customers (>=2 orders) — conditional-SUM share-of-subset
+**Accuracy: 5** — `LEFT JOIN orders o ON c.customer_id = o.customer_id WHERE o.customer_id IS NULL` is the canonical anti-join shape. NOT IN pitfall on nullable right-side keys correctly flagged (three-valued logic returns UNKNOWN → row dropped — standard SQL trap, valid in Trino 467).
 
-Responder: CTE `customer_order_counts` (`COUNT(*) AS order_count, SUM(amount) AS customer_total_revenue GROUP BY customer_id`), then outer `ROUND(100.0 * SUM(CASE WHEN order_count >= 2 THEN customer_total_revenue ELSE 0 END) / SUM(customer_total_revenue), 2)`.
+**Completeness: 4** — Core anti-join correct + NOT IN caveat. Minor framing ding: question asked for the COUNT; responder returned the customer rows rather than wrapping in `SELECT COUNT(*)`. Trivial one-line wrap but a beginner reading the answer may not realize they need to add COUNT.
 
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5.0 | CTE projects both `order_count` and `customer_total_revenue` explicitly — outer SELECT references projected columns (NO out-of-scope column-name bug like iter640 Q2). Conditional-SUM share-of-subset: numerator = sum of repeat-customer per-customer revenue, denominator = grand total. 100.0 forces decimal division (no integer-truncation-to-zero). ROUND 2dp display. All valid Trino 467. |
-| Completeness | 4.5 | Solid canonical shape. Mild ding for no NULLIF guard on the denominator (would matter only if zero customers — edge-case) and no FILTER-clause one-pass alternative mention. |
-| Clarity | 5.0 | CTE name + column names self-documenting; final formula readable. |
-| Actionability | 5.0 | Paste-ready. |
-| **Per-Q avg** | **4.875** | STRONG PASS — share-of-subset final-assembly durability HOLDS |
+**Clarity: 5** — Anti-join structure clearly explained; NOT IN trap concrete.
 
-## Overall
+**Actionability: 4** — Engineer must add COUNT themselves. One-line gap.
 
-| Q | Per-Q avg |
-|---|---|
-| Q1 (anti-join) | 4.875 |
-| Q2 (second-largest RANK=2 fragile) | **2.125** |
-| Q3 (currency format) | 5.0 |
-| Q4 (repeat-customer revenue share) | 4.875 |
+Q2 avg: **4.50**
 
-**Overall average = (4.875 + 2.125 + 5.0 + 4.875) / 4 = 16.875 / 4 = 4.21875**
+---
 
-**Dim-avg cross-check**:
-- Accuracy: (5 + 1.5 + 5 + 5)/4 = 4.125
-- Completeness: (4.5 + 2.0 + 5 + 4.5)/4 = 4.0
-- Clarity: (5 + 3.0 + 5 + 5)/4 = 4.5
-- Actionability: (5 + 2.0 + 5 + 5)/4 = 4.25
-- Cross-check overall = (4.125 + 4.0 + 4.5 + 4.25)/4 = **4.21875** — agrees.
+### Q3 — Customers with total spend > $1000 (HAVING on aggregate)
 
-**GOVERNING LABEL = PASS** (overall avg 4.21875 >= 3.5; per directive, per-Q quality-gate override is NOT applied — average governs). Q2 (2.125) flagged separately.
+**Accuracy: 5** — `GROUP BY c.customer_id, c.customer_name HAVING SUM(o.amount) > 1000`. Verified against trino.io/docs/467/sql/select.html: "HAVING filters groups after groups and aggregates are computed." The alias-not-allowed-in-HAVING claim is accurate: HAVING references aggregate functions and grouped columns, NOT SELECT output aliases — responder correctly says you must repeat `SUM(o.amount)` in HAVING.
 
-## iter643 directive
+**Completeness: 5** — WHERE vs HAVING distinction, GROUP BY column list (customer_id AND customer_name both needed), alias-not-in-HAVING warning.
 
-### PRIMARY (FIX-A): Second-largest / Nth-largest per group — RANK vs DENSE_RANK vs ROW_NUMBER decision canonical
+**Clarity: 5** — Execution-order explanation (WHERE → GROUP BY → HAVING) explains WHY HAVING exists.
 
-Place at r23 §3.1 (window-Nth-per-group neighborhood) or extend the existing r23:813 "2nd-most-recent ROW_NUMBER" lock. Anchor on the explicit phrasing the responder failed on.
+**Actionability: 5** — Drop-in Trino-valid SQL.
 
-**Lead-with-canonical structure:**
+Q3 avg: **5.00**
 
-1. **READ-THIS-FIRST keyword anchors** (Haiku findability — these phrasings must physically precede the DO-NOT-WRITE block in the file):
-   "second-largest order per customer", "second-highest amount per group", "runner-up per partition", "Nth-largest per group", "second-best per group", "2nd-largest by amount", "next-to-top per customer", "Nth-highest distinct value per group".
+---
 
-2. **DECISION TABLE — the load-bearing fact**:
+### Q4 — Most recent status per device (latest-row-per-key)
 
-   | Intent | Use | Why |
-   |---|---|---|
-   | Literal 2nd row by ordering (ties broken arbitrarily) | `ROW_NUMBER() = 2` | Always assigns sequential 1,2,3 — guaranteed exactly-one-row-per-rank-per-partition. |
-   | 2nd-DISTINCT-largest value (skip duplicate top) | `DENSE_RANK() = 2` | No gaps: 1,1,2 — the next distinct amount always becomes 2. |
-   | `RANK() = 2` for "second-largest" | **AVOID** | RANK has GAPS: ties at top -> 1,1,3 (never produces a 2). Customers with tied top amounts are SILENTLY DROPPED. |
+**Accuracy: 5** — `ROW_NUMBER() OVER (PARTITION BY device_id ORDER BY event_timestamp DESC) WHERE rn = 1` (CTE+outer-WHERE, dialect-safe since Trino 467 disallows window-in-WHERE). The `max_by(status, event_timestamp) GROUP BY device_id` alternative is verified against trino.io/docs/467/functions/aggregate.html: "Returns the value of x associated with the maximum value of y." `ORDER BY ... DESC NULLS LAST` verified against trino.io/docs/467/sql/select.html: `ORDER BY expression [ASC|DESC] [NULLS {FIRST|LAST}]`.
 
-3. **DO-NOT-WRITE block** (verbatim iter642 Q2 form labeled fragile):
-   ```sql
-   -- WRONG for "second-largest per customer":
-   RANK() OVER (PARTITION BY customer_id ORDER BY amount DESC) = 2
-   -- If two orders tie for largest, both get rank 1, next distinct amount gets rank 3.
-   -- WHERE order_rank = 2 returns NOTHING for tied-top customers — silent data loss.
-   ```
-   Include the INVERTED-REASONING callout: "Do NOT justify RANK()=2 as 'safer than ROW_NUMBER' — for second-largest it's the OPPOSITE. ROW_NUMBER and DENSE_RANK always produce a row 2; RANK can be missing row 2 entirely."
+**Completeness: 5** — Two canonical shapes (ROW_NUMBER and max_by) PLUS the NULLS LAST nuance for nullable timestamps.
 
-4. **CANONICAL CORRECT FORMS**:
-   ```sql
-   -- "Second-largest DISTINCT amount per customer" (standard business interpretation):
-   SELECT customer_id, amount
-   FROM (
-     SELECT customer_id, amount,
-            DENSE_RANK() OVER (PARTITION BY customer_id ORDER BY amount DESC) AS dr
-     FROM orders
-   )
-   WHERE dr = 2;
+**Clarity: 5** — Both alternatives clearly distinguished; NULLS LAST footnote shows real-world data awareness.
 
-   -- "Literal runner-up row by ordering" (ROW_NUMBER tie-breaks arbitrarily):
-   SELECT customer_id, amount
-   FROM (
-     SELECT customer_id, amount,
-            ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY amount DESC) AS rn
-     FROM orders
-   )
-   WHERE rn = 2;
-   ```
+**Actionability: 5** — Both Trino 467 valid; pick whichever fits.
 
-5. **CROSS-REFERENCES**:
-   - r23:813 2nd-most-recent ROW_NUMBER lock (same Nth-per-group family, time-ordered).
-   - r23:964 DENSE_RANK = 1 for all rows tied at the top (Nth-distinct family already locked — extend to Nth=2).
-   - Existing RANK-gap-vs-DENSE_RANK-no-gap explainer (1,2,2,4 vs 1,2,2,3) — re-anchor on the SECOND-LARGEST phrasing specifically; existing lock is on Nth-highest-DISTINCT semantics, but the responder did not route to it from "second-largest order amount per customer".
+Q4 avg: **5.00**
 
-6. **RECONCILE-DON'T-APPEND**: scan r07, r23, r27, r28 for any existing examples that use `RANK() = N` to mean "Nth row" — fix in-place. The iter642 defect proves the existing Nth-distinct -> DENSE_RANK lock did NOT route from "second-largest order amount per customer" — the canonical needs the EXACT phrasing as an anchor at the leading position.
+---
 
-### SECONDARY (durability):
+## Overall average
 
-- Q1 anti-join: consider one-line NOT-IN-NULL-pitfall callout near the LEFT-JOIN-IS-NULL anchor so the responder names the reason both safe forms are preferred. Anti-join lock is structurally solid; this is keyword breadth only.
-- Q3 format/currency: durability CONFIRMED — `format('$%,.2f', x)` clean first-probe; no edit.
-- Q4 share-of-subset: durability CONFIRMED — CTE column-scope discipline holds; no edit.
-- Federation row 4.49944/311: NOT probed iter642 — non-probe count continues.
+Q1=5.00, Q2=4.50, Q3=5.00, Q4=5.00 → (5.00 + 4.50 + 5.00 + 5.00) / 4 = **4.6875**
 
-### DO NOT
+Per-dimension:
+- Accuracy: (5+5+5+5)/4 = 5.00
+- Completeness: (5+4+5+5)/4 = 4.75
+- Clarity: (5+5+5+5)/4 = 5.00
+- Actionability: (5+4+5+5)/4 = 4.75
 
-- Touch r22 §13.x federation guardrails (4.49944/311 thin, ZERO probe iter642).
-- Re-edit Q1 anti-join lock (r07:355 / r23:1572-1612) — landed clean this iter.
-- Re-edit Q3 r23:364 `format()` canonical with the `%,.2f` thousands-grouping table — landed clean this iter.
-- Re-edit Q4 r07:1194 share-of-subset canonical — landed clean this iter.
-- Add `::` casts (iter571 PIN), QUALIFY, RLIKE (iter623 ban), PERCENTILE_CONT/MEDIAN (iter611 ban), EXTRACT(EPOCH) (iter562 ban), dayname/initcap fabrications, DISTINCT-ON Postgres-leak (iter634 ban).
-- Bump training/state.json (per directive — already 642).
+Grand mean across all 16 cells: 4.6875
 
-## Meta
+**PASS** (≥ 3.5 cleared by margin +1.1875).
 
-Pattern iter641 -> iter642: opens a NEW class — RANK-vs-DENSE_RANK-vs-ROW_NUMBER routing failure for the "second-largest per group" phrasing. Existing locks at r23 cover the Nth-DISTINCT-highest -> DENSE_RANK semantics (gap vs no-gap) and the 2nd-most-recent -> ROW_NUMBER=2 idiom, but the responder did NOT route from the SECOND-LARGEST-PER-CUSTOMER question to either. Worse, the responder MANUFACTURED inverted reasoning ("RANK is safer because it skips to 3") that is precisely the failure mode RANK exhibits. A single FIX-A canonical at r23 §3.1 with the second-largest phrasing leading the keyword anchors + the decision table + the DO-NOT-WRITE block calling out the inverted-reasoning pattern should close the class.
+---
 
-Durability wins this iter: Q1 anti-join (LEFT JOIN ... IS NULL canonical clean), Q3 format/currency (`%,.2f` thousands-grouping clean — multi-iter durability), Q4 share-of-subset (CTE column-scope discipline holds — iter640 Q2 inoculation continues to hold for a different question shape).
+## FIX-A LANDED confirmation (iter643)
 
-**OVERALL: 4.21875 PASS — Q1/Q3/Q4 all strong-pass canonicals (anti-join, format/currency, share-of-subset durability HOLDS); Q2 RANK()=2 fragile-with-inverted-reasoning is the iter643 FIX-A target — RANK vs DENSE_RANK vs ROW_NUMBER second-largest-per-group decision canonical at r23 §3.1; federation row stays 4.49944/311.**
+The Nth-largest-per-group decision canonical landed in r23 §3.1G (per state.json: inserted between r23:978 max-per-group-compare canonical's Cross-references and the IGNORE-NULLS-placement lock at r23:982). The Q1 answer demonstrates clean adoption:
+- DENSE_RANK = 3 used (not fragile RANK = 3, not ROW_NUMBER = 3).
+- The DENSE_RANK 1,1,2,3,3,4 math trace matches the docs-verified behavior verbatim.
+- The $100 answer (third-distinct-level) is correct.
+- The ROW_NUMBER contrast is explicit (would return $150 — wrong for "third-distinct").
+- The CTE-then-outer-WHERE composition is dialect-safe for Trino 467.
+
+The iter642 silent-wrong RANK=N bug pattern is fully inoculated. The iter641→642→643 trajectory (4.6875 → 4.21875 → 4.6875) shows the FIX-A insertion fully repaired the regression without disturbing any other canonical.
+
+---
+
+## Q2 framing ding (minor, does not threaten PASS)
+
+The question asked for a COUNT of customers; the responder returned rows. The wrap is trivial (`SELECT COUNT(*) FROM (... WHERE o.customer_id IS NULL)` or `SELECT COUNT(*) FROM customers c LEFT JOIN ... WHERE o.customer_id IS NULL`), but a beginner may not connect the dots. Cost: -1 each on Completeness and Actionability for Q2. Does not threaten PASS.
+
+---
+
+## Recommendation for iter644: DEFAULT NO-OP / DURABILITY-BREADTH
+
+All four answers passed individually (lowest per-question avg = Q2 at 4.50, well above 3.5). The iter643 FIX-A canonical landed cleanly; iter642's RANK=N bug is closed. Recommend iter644 be a DURABILITY-BREADTH probe — re-probe a different durability-critical canonical from a fresh angle (anti-join "find customers WHO did X but NOT Y" form, or HAVING with COUNT(DISTINCT) instead of SUM, or max_by vs ROW_NUMBER tiebreaker semantics with NULL timestamps, or the Nth-largest canonical at N=4/5 to stress beyond N=2,3), rather than a targeted FIX. No teacher edits required for iter644 unless a regression surfaces.
+
+Optional tiny polish target (if teacher wants to make any edit): a one-line cross-reference in the anti-join canonical reminding the responder that "count of X never doing Y" should be wrapped in `SELECT COUNT(*)` — the only gap surfaced this iteration. Pure additive, no rewrite.
+
+---
+
+## Per-fact docs verifications performed (2026-06-07)
+
+- trino.io/docs/467/functions/window.html — verbatim quotes: ROW_NUMBER "unique, sequential number"; RANK "tie values in the ordering will produce gaps"; DENSE_RANK "tie values do not produce gaps". Q1 DENSE_RANK 1,1,2,3,3,4 math matches.
+- trino.io/docs/467/functions/aggregate.html — verbatim: `max_by(x, y)` "Returns the value of x associated with the maximum value of y over all input values." Q4 alternative valid.
+- trino.io/docs/467/sql/select.html — verbatim: "HAVING filters groups after groups and aggregates are computed"; `ORDER BY expression [ASC|DESC] [NULLS {FIRST|LAST}]`. Q3 timing explanation and Q4 NULLS LAST valid.
+- LEFT JOIN ... IS NULL anti-join + NOT IN NULL three-valued-logic pitfall: SQL-standard, valid in Trino 467 (cross-checked via Trino issue tracker and SELECT docs — LEFT JOIN + IS NULL is the canonical anti-join pattern).
+- Nested window in WHERE / window-in-WHERE: Trino 467 disallows; responder uses the dialect-safe CTE+outer-WHERE composition in Q1 nested variant and Q4. Valid.
