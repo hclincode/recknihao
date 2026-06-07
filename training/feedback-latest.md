@@ -1,109 +1,162 @@
-# Iter 641 — Judge Feedback (EXTENDED PHASE)
+# iter642 Judge Feedback — 2026-06-07 (EXTENDED PHASE)
 
-**Overall: 4.6875 PASS** (margin +1.1875 above 3.5 floor; +0.4375 swing from iter640's 4.25).
-Per-Q averages: Q1 = 5.0, Q2 = 4.875, Q3 = 4.875, Q4 = 5.0. Governing label = PASS (overall avg 4.6875 >= 3.5; no per-Q gate override per directive). All per-Q avgs comfortably clear the 3.5 floor.
+**Overall: 4.21875 PASS** (margin +0.71875 above 3.5 floor; -0.46875 swing from iter641's 4.6875).
+Per-Q averages: Q1 = 4.875, Q2 = **2.125 FAIL per-Q**, Q3 = 5.0, Q4 = 4.875. Governing label = PASS (overall avg 4.21875 >= 3.5; per directive, per-Q quality-gate override is NOT applied — average governs). Q2 flagged separately as iter643 FIX-A primary candidate.
 
----
+## Per-Question Scores
 
-## Per-question scores
+### Q1 — Count orders with NO matching shipments row (orphan / anti-join)
 
-### Q1 — Average days a ticket stayed open (FIX-A re-probe: days-between-two-dates)
-- Accuracy: 5 | Completeness: 5 | Clarity: 5 | Actionability: 5
-- **Per-Q avg: 5.0 — STRONG PASS**
+Responder: `SELECT COUNT(*) FROM orders o LEFT JOIN shipments s ON s.order_id = o.order_id WHERE s.order_id IS NULL`; also mentioned `NOT EXISTS` as an alternative.
 
-**iter641 FIX-A VALIDATION — LANDED CLEAN on first re-probe.**
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5.0 | Canonical LEFT JOIN ... WHERE right IS NULL anti-join. Predicate filters on `s.order_id` (the join key, never NULL when matched). `NOT EXISTS` named as alternative. Anti-join shape verified against trino.io docs + standard SQL anti-join references. |
+| Completeness | 4.5 | Both safe forms named (LEFT JOIN ... IS NULL + NOT EXISTS). Mild ding for not explicitly calling out the NOT IN + NULL silent-zero-rows pitfall — that's the load-bearing reason these two forms are preferred. |
+| Clarity | 5.0 | Direct, no jargon, exactly the shape an engineer needs. |
+| Actionability | 5.0 | Engineer can paste this and run it. |
+| **Per-Q avg** | **4.875** | STRONG PASS |
 
-The new r23 days-between-two-dates canonical (inserted between r23:1098 and old r23:1100, immediately after the completed-age `date_diff('year',...)` block) was reached and applied correctly:
-- Used `date_diff('day', created_at, closed_at)` for the day count — **NO date-minus-date arithmetic attempted**. The iter640 A2 bug #1 (`CAST(first_purchase_date - signup_date AS bigint)`) class is INOCULATED.
-- Argument order correct: `created_at` (earlier) in arg2, `closed_at` (later) in arg3 — result is positive bigint as expected.
-- Subquery form projects `days_open` IN the inner SELECT before the outer `AVG(days_open)` references it — **column-scope discipline clean**. The iter640 A2 bug #2 (undefined `days_to_purchase` column in outer SELECT) class is INOCULATED.
-- Single-query form `AVG(date_diff('day', created_at, closed_at)) WHERE closed_at IS NOT NULL` is equivalent and also correct.
-- Defensive `WHERE closed_at IS NOT NULL` guard included in both forms.
+### Q2 — Second-largest order amount per customer — **CRITICAL ACCURACY DEFECT**
 
-**Verified via WebFetch trino.io/docs/467/functions/datetime.html**: `date_diff(unit, timestamp1, timestamp2) -> bigint`, returns `timestamp2 - timestamp1` (positive when timestamp2 is later — confirms the responder's arg-order claim). **Verified trino.io/docs/467/functions/aggregate.html**: `AVG` over bigint is valid (returns double). Both forms parse and execute under Trino 467 dialect.
+Responder: `RANK() OVER (PARTITION BY customer_id ORDER BY amount DESC) AS order_rank ... WHERE order_rank = 2`. Responder claimed: "RANK() is safer than ROW_NUMBER() here because if the largest orders have ties, RANK() will correctly skip to rank 3 for the next distinct amount (so you won't accidentally show a tied top order as the second)."
 
-### Q2 — Percentage of orders with NULL shipping_address (data-quality null-rate)
-- Accuracy: 5 | Completeness: 4.5 | Clarity: 5 | Actionability: 5
-- **Per-Q avg: 4.875 — STRONG PASS**
+**THE CLAIM IS BACKWARDS.** Verified against trino.io/docs/467/functions/window.html:
+- RANK() with ties at the top: two rows tied for largest BOTH get rank 1; the next distinct amount gets rank **3** (gap-with-skip behavior — docs verbatim "tie values in the ordering will produce gaps in the sequence").
+- So `WHERE order_rank = 2` returns **NOTHING** for any customer whose top amount is tied. The query SILENTLY DROPS those customers — exactly the "fragile" behavior the responder claimed it AVOIDS.
+- Robust forms:
+  - For "second-largest DISTINCT amount" -> **DENSE_RANK() = 2** (no gaps: 1,1,2 — always finds the next distinct amount).
+  - For "literal 2nd row / runner-up regardless of ties" -> **ROW_NUMBER() = 2**.
+- The responder's choice is both wrong AND justified with inverted reasoning. Worse than picking the wrong function by luck — the explanation reinforces a wrong mental model that will repeat.
 
-`ROUND(100.0 * COUNT(*) FILTER (WHERE shipping_address IS NULL) / COUNT(*), 2)` is the canonical Trino null-rate idiom.
-- `COUNT(*) FILTER (WHERE col IS NULL)` valid Trino 467 (verified aggregate.html: FILTER keyword "supported for all aggregate functions"; "removes rows from aggregation processing with a condition").
-- `100.0 *` decimal literal forces float division — avoids the integer-truncation-to-0 trap that plagues null-rate queries written without it.
-- `ROUND(..., 2)` to 2 decimal places is a sensible display choice.
-- `COUNT(*)` denominator is correct (total rows, including the NULLs in the numerator) — null-rate semantics correct.
-- Minor: `count_if(shipping_address IS NULL)` would be a cleaner equivalent (one fewer FILTER token) — **NOT penalized** per directive; FILTER form is fine and arguably more general.
-- Small completeness deduction: did not flag optional zero-rows divide-by-zero via NULLIF; in practice `orders` having 0 rows is a non-concern for this question.
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 1.5 | RANK()=2 returns empty for tied-top customers (the exact failure mode the responder claimed it prevents). Inverted reasoning. SQL parses + runs but produces silently-wrong dataset. |
+| Completeness | 2.0 | Did not name DENSE_RANK or ROW_NUMBER as alternatives; the entire Nth-per-group decision triangle is absent. |
+| Clarity | 3.0 | Sentence-level clarity is fine; but the wrong mental model it teaches is harmful. |
+| Actionability | 2.0 | Engineer who copies this gets silently-wrong results when any customer has tied largest orders. |
+| **Per-Q avg** | **2.125** | **FAIL — primary iter643 FIX-A candidate** |
 
-### Q3 — Top-spending customer per region (top-1-per-group durability re-probe)
-- Accuracy: 5 | Completeness: 4.5 | Clarity: 5 | Actionability: 5
-- **Per-Q avg: 4.875 — STRONG PASS**
+### Q3 — Format order amount as currency string '$1,234.56'
 
-ROW_NUMBER() OVER (PARTITION BY c.region ORDER BY SUM(o.spend) DESC) AS rn over a GROUP BY c.region, o.customer_id subquery, then outer WHERE rn = 1. Canonical top-1-per-group form.
-- Window functions run AFTER aggregation in the same SELECT (verified window.html: "run after the HAVING clause but before the ORDER BY clause"), so `ORDER BY SUM(o.spend) DESC` inside OVER is valid alongside `GROUP BY c.region, o.customer_id` — no window-in-aggregate dialect violation.
-- Outer `WHERE rn = 1` references `rn` as a projected column from the subquery — **NOT a window-in-WHERE violation**. This is the correct subquery-wrap pattern for filtering window results.
-- max_by(customer_id, total_spend) GROUP BY region would be a cleaner one-pass alternative — **NOT penalized** per directive; ROW_NUMBER is correct and idiomatic.
-- Small completeness deduction: tie-breaking at rn=1 on equal SUM(o.spend) not addressed; question did not ask, so minor only.
+Responder: `format('$%,.2f', amount) AS formatted_currency`.
 
-### Q4 — Weekday vs weekend order counts (dayname-fabrication trap probe)
-- Accuracy: 5 | Completeness: 5 | Clarity: 5 | Actionability: 5
-- **Per-Q avg: 5.0 — STRONG PASS**
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5.0 | Verified against trino.io/docs/467/functions/conversion.html: `format()` uses Java printf-style format specifiers; `%,.2f` produces thousands-grouping + 2 decimals; literal `$` embedded in the format string is correct. `format()` accepts the numeric directly — NO CAST required, NO concat-of-string-with-number coercion issue. |
+| Completeness | 5.0 | One-line clean canonical exactly matching the question. |
+| Clarity | 5.0 | Self-explanatory; specifier semantics implicit in the example output. |
+| Actionability | 5.0 | Paste-ready. |
+| **Per-Q avg** | **5.0** | STRONG PASS — format/coercion durability HOLDS |
 
-**DAYNAME-FABRICATION TRAP DURABILITY WIN — AVOIDED AGAIN.**
-- Used `day_of_week(created_at)` — **NO fabricated `dayname()`**. Verified trino.io/docs/467/functions/datetime.html: `dayname()` does NOT exist in Trino 467; `day_of_week(x) -> bigint` returns `1` (Monday) to `7` (Sunday) ISO numbering.
-- `IN (6, 7)` = Saturday, Sunday = weekend is correct under the ISO numbering (Mon=1..Sun=7) — verified.
-- CASE form `CASE WHEN day_of_week(created_at) IN (6,7) THEN 'Weekend' ELSE 'Weekday' END` + `COUNT(*) GROUP BY` repeating the CASE expression (NOT the alias) is the correct Trino GROUP BY pattern (Trino GROUP BY does not allow output-alias references — must repeat the expression or use positional ordinal).
-- FILTER form `COUNT(*) FILTER (WHERE day_of_week(created_at) NOT IN (6,7)) AS weekday_orders, COUNT(*) FILTER (WHERE day_of_week(created_at) IN (6,7)) AS weekend_orders` is a clean single-row alternative.
-- Both forms answer the question completely.
+### Q4 — Percentage of total revenue from REPEAT customers (>=2 orders) — conditional-SUM share-of-subset
 
-Multi-iteration durability signal: dayname trap has now survived multiple phrasings (revenue by day-of-week, weekend bookings, weekday breakdown, etc.) without recurrence.
+Responder: CTE `customer_order_counts` (`COUNT(*) AS order_count, SUM(amount) AS customer_total_revenue GROUP BY customer_id`), then outer `ROUND(100.0 * SUM(CASE WHEN order_count >= 2 THEN customer_total_revenue ELSE 0 END) / SUM(customer_total_revenue), 2)`.
 
----
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5.0 | CTE projects both `order_count` and `customer_total_revenue` explicitly — outer SELECT references projected columns (NO out-of-scope column-name bug like iter640 Q2). Conditional-SUM share-of-subset: numerator = sum of repeat-customer per-customer revenue, denominator = grand total. 100.0 forces decimal division (no integer-truncation-to-zero). ROUND 2dp display. All valid Trino 467. |
+| Completeness | 4.5 | Solid canonical shape. Mild ding for no NULLIF guard on the denominator (would matter only if zero customers — edge-case) and no FILTER-clause one-pass alternative mention. |
+| Clarity | 5.0 | CTE name + column names self-documenting; final formula readable. |
+| Actionability | 5.0 | Paste-ready. |
+| **Per-Q avg** | **4.875** | STRONG PASS — share-of-subset final-assembly durability HOLDS |
 
-## Overall computation
+## Overall
 
-Per-Q method: (5.0 + 4.875 + 4.875 + 5.0) / 4 = **4.6875**
-Dim-avg cross-check: Acc(5+5+5+5)/4=5.0 / Comp(5+4.5+4.5+5)/4=4.75 / Clar(5+5+5+5)/4=5.0 / Act(5+5+5+5)/4=5.0 = (5.0+4.75+5.0+5.0)/4 = 4.9375; per-Q-avg method governs per prior iterations.
+| Q | Per-Q avg |
+|---|---|
+| Q1 (anti-join) | 4.875 |
+| Q2 (second-largest RANK=2 fragile) | **2.125** |
+| Q3 (currency format) | 5.0 |
+| Q4 (repeat-customer revenue share) | 4.875 |
 
-**GOVERNING LABEL = PASS** (overall avg 4.6875 >= 3.5; no per-Q gate override per directive). No per-Q below 3.5 — no FIX-A candidate.
+**Overall average = (4.875 + 2.125 + 5.0 + 4.875) / 4 = 16.875 / 4 = 4.21875**
 
----
+**Dim-avg cross-check**:
+- Accuracy: (5 + 1.5 + 5 + 5)/4 = 4.125
+- Completeness: (4.5 + 2.0 + 5 + 4.5)/4 = 4.0
+- Clarity: (5 + 3.0 + 5 + 5)/4 = 4.5
+- Actionability: (5 + 2.0 + 5 + 5)/4 = 4.25
+- Cross-check overall = (4.125 + 4.0 + 4.5 + 4.25)/4 = **4.21875** — agrees.
 
-## FIX-A landing summary (iter641 PRIMARY directive)
+**GOVERNING LABEL = PASS** (overall avg 4.21875 >= 3.5; per directive, per-Q quality-gate override is NOT applied — average governs). Q2 (2.125) flagged separately.
 
-**iter641 FIX-A — days-between-two-dates canonical at r23 (between r23:1098 and old r23:1100) — LANDED CLEAN on first re-probe.**
+## iter643 directive
 
-Routing successful:
-1. Responder reached `date_diff('day', earlier, later)` for integer day count — no date-minus-date arithmetic.
-2. Subquery form projected `days_open` as a named CTE/subquery column BEFORE the outer `AVG(days_open)` referenced it — column-scope discipline applied.
-3. Both subquery and single-query forms presented; both valid Trino 467.
+### PRIMARY (FIX-A): Second-largest / Nth-largest per group — RANK vs DENSE_RANK vs ROW_NUMBER decision canonical
 
-iter640 Q2 double-bug class CLOSED. Keyword anchors (`days a ticket stays open`, `days between two dates`, `tenure in days`, etc.) successfully routed Haiku to the new r23 canonical adjacent to the completed-age `date_diff('year',...)` block.
+Place at r23 §3.1 (window-Nth-per-group neighborhood) or extend the existing r23:813 "2nd-most-recent ROW_NUMBER" lock. Anchor on the explicit phrasing the responder failed on.
 
----
+**Lead-with-canonical structure:**
 
-## iter642 directive: DEFAULT NO-OP / DURABILITY-BREADTH
+1. **READ-THIS-FIRST keyword anchors** (Haiku findability — these phrasings must physically precede the DO-NOT-WRITE block in the file):
+   "second-largest order per customer", "second-highest amount per group", "runner-up per partition", "Nth-largest per group", "second-best per group", "2nd-largest by amount", "next-to-top per customer", "Nth-highest distinct value per group".
 
-Per the directive: "if any per-Q avg < 3.5, name the lowest as iter642 FIX-A; else recommend DEFAULT NO-OP/durability-breadth." Lowest per-Q is 4.875 — no FIX-A candidate.
+2. **DECISION TABLE — the load-bearing fact**:
 
-**Recommended iter642 plan:**
-- **PRIMARY**: DEFAULT NO-OP. Do not edit r23 days-between canonical (just landed). Do not edit r07 Pattern B2 period-total YoY/QoQ ratio sub-canonical (iter640 landed). Do not edit r07 §1a.2A listagg/array_join varchar-CAST guardrail (iter639 landed).
-- **SECONDARY (durability-breadth, optional)**: re-probe under-tested durable classes —
-  - **Federation** row at 4.49944/310 stale (311th consecutive non-probe). Consider one federation question on a bulletproofed angle (e.g., predicate pushdown to PostgreSQL, JWT auth pass-through limitations, `iceberg.<schema>.<table>` vs `postgresql.<schema>.<table>` cross-catalog join basics).
-  - **iter640 FIX-B active-every-N-FULL-months-bounded-window** canonical NOT YET probed — re-probe "active in last 3 FULL calendar months" phrasing to confirm the upper-bound `< date_trunc('month', current_date)` anchor lands.
-  - **Days-between class re-probe at a different anchor phrasing** — e.g., "time to first purchase in days", "tenure in days", "days since last login", "elapsed days from event A to event B" to confirm keyword breadth of the new r23 canonical beyond "days a ticket stays open".
-  - **Dayname trap re-probe** — e.g., "revenue by day of week with day name labels" — to confirm CASE-WHEN expansion idiom (1->'Monday'...7->'Sunday') holds when day names are required in output, not just weekend/weekday classification.
-- **DO NOT**: touch r22 §13.x federation guardrails (4.49944/310 thin); rewrite locks iter534-641; add `::`-casts (iter571 PIN), QUALIFY, RLIKE (iter623 ban), PERCENTILE_CONT/MEDIAN (iter611 ban), EXTRACT(EPOCH) (iter562 ban), fabricated dayname()/initcap, DISTINCT ON (iter634 ban), date-minus-date arithmetic; bump training/state.json (per directive — already 641); git commit/push beyond appending the rubric line.
+   | Intent | Use | Why |
+   |---|---|---|
+   | Literal 2nd row by ordering (ties broken arbitrarily) | `ROW_NUMBER() = 2` | Always assigns sequential 1,2,3 — guaranteed exactly-one-row-per-rank-per-partition. |
+   | 2nd-DISTINCT-largest value (skip duplicate top) | `DENSE_RANK() = 2` | No gaps: 1,1,2 — the next distinct amount always becomes 2. |
+   | `RANK() = 2` for "second-largest" | **AVOID** | RANK has GAPS: ties at top -> 1,1,3 (never produces a 2). Customers with tied top amounts are SILENTLY DROPPED. |
 
----
+3. **DO-NOT-WRITE block** (verbatim iter642 Q2 form labeled fragile):
+   ```sql
+   -- WRONG for "second-largest per customer":
+   RANK() OVER (PARTITION BY customer_id ORDER BY amount DESC) = 2
+   -- If two orders tie for largest, both get rank 1, next distinct amount gets rank 3.
+   -- WHERE order_rank = 2 returns NOTHING for tied-top customers — silent data loss.
+   ```
+   Include the INVERTED-REASONING callout: "Do NOT justify RANK()=2 as 'safer than ROW_NUMBER' — for second-largest it's the OPPOSITE. ROW_NUMBER and DENSE_RANK always produce a row 2; RANK can be missing row 2 entirely."
 
-## Meta-note
+4. **CANONICAL CORRECT FORMS**:
+   ```sql
+   -- "Second-largest DISTINCT amount per customer" (standard business interpretation):
+   SELECT customer_id, amount
+   FROM (
+     SELECT customer_id, amount,
+            DENSE_RANK() OVER (PARTITION BY customer_id ORDER BY amount DESC) AS dr
+     FROM orders
+   )
+   WHERE dr = 2;
 
-**Pattern iter640 -> iter641 closes the days-between-two-dates defect class on first re-probe** — a textbook FIX-A landing. The double-bug pattern in iter640 Q2 (date-arithmetic dialect violation + CTE column-scope error) was inoculated by a single well-placed canonical at r23 with both DO-NOT-WRITE examples + the projection-in-CTE-first rule + the LATER-date-in-arg3 callout.
+   -- "Literal runner-up row by ordering" (ROW_NUMBER tie-breaks arbitrarily):
+   SELECT customer_id, amount
+   FROM (
+     SELECT customer_id, amount,
+            ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY amount DESC) AS rn
+     FROM orders
+   )
+   WHERE rn = 2;
+   ```
 
-Q4 dayname-fabrication continues to hold across phrasings — this trap has now survived multiple iterations without recurrence; the durability win is structural.
+5. **CROSS-REFERENCES**:
+   - r23:813 2nd-most-recent ROW_NUMBER lock (same Nth-per-group family, time-ordered).
+   - r23:964 DENSE_RANK = 1 for all rows tied at the top (Nth-distinct family already locked — extend to Nth=2).
+   - Existing RANK-gap-vs-DENSE_RANK-no-gap explainer (1,2,2,4 vs 1,2,2,3) — re-anchor on the SECOND-LARGEST phrasing specifically; existing lock is on Nth-highest-DISTINCT semantics, but the responder did not route to it from "second-largest order amount per customer".
 
-Q2 null-rate `COUNT(*) FILTER (WHERE ... IS NULL) / COUNT(*)` and Q3 `ROW_NUMBER() OVER (PARTITION BY ... ORDER BY SUM(...) DESC)` + outer `WHERE rn = 1` are both canonical-shape clean — these classes are durable.
+6. **RECONCILE-DON'T-APPEND**: scan r07, r23, r27, r28 for any existing examples that use `RANK() = N` to mean "Nth row" — fix in-place. The iter642 defect proves the existing Nth-distinct -> DENSE_RANK lock did NOT route from "second-largest order amount per customer" — the canonical needs the EXACT phrasing as an anchor at the leading position.
 
-**Overall PASS margin +1.1875** is the healthiest in recent iterations (+0.4375 swing from iter640's 4.25). Durability via breadth-elsewhere is paying off. Federation row at 4.49944/310 remains untouched for 311th consecutive non-probe iter — consider a re-probe in iter642 if any bulletproofed angle is available.
+### SECONDARY (durability):
 
-**OVERALL: 4.6875 PASS — Q1 FIX-A days-between-two-dates LANDED CLEAN (iter640 Q2 double-bug class CLOSED); Q4 dayname trap durability win continues; Q2 null-rate and Q3 ROW_NUMBER-top-1 both canonical-clean; iter642 = DEFAULT NO-OP / durability-breadth (federation re-probe candidate, FIX-B active-every-N-months not yet probed, days-between keyword-breadth re-probe).**
+- Q1 anti-join: consider one-line NOT-IN-NULL-pitfall callout near the LEFT-JOIN-IS-NULL anchor so the responder names the reason both safe forms are preferred. Anti-join lock is structurally solid; this is keyword breadth only.
+- Q3 format/currency: durability CONFIRMED — `format('$%,.2f', x)` clean first-probe; no edit.
+- Q4 share-of-subset: durability CONFIRMED — CTE column-scope discipline holds; no edit.
+- Federation row 4.49944/311: NOT probed iter642 — non-probe count continues.
+
+### DO NOT
+
+- Touch r22 §13.x federation guardrails (4.49944/311 thin, ZERO probe iter642).
+- Re-edit Q1 anti-join lock (r07:355 / r23:1572-1612) — landed clean this iter.
+- Re-edit Q3 r23:364 `format()` canonical with the `%,.2f` thousands-grouping table — landed clean this iter.
+- Re-edit Q4 r07:1194 share-of-subset canonical — landed clean this iter.
+- Add `::` casts (iter571 PIN), QUALIFY, RLIKE (iter623 ban), PERCENTILE_CONT/MEDIAN (iter611 ban), EXTRACT(EPOCH) (iter562 ban), dayname/initcap fabrications, DISTINCT-ON Postgres-leak (iter634 ban).
+- Bump training/state.json (per directive — already 642).
+
+## Meta
+
+Pattern iter641 -> iter642: opens a NEW class — RANK-vs-DENSE_RANK-vs-ROW_NUMBER routing failure for the "second-largest per group" phrasing. Existing locks at r23 cover the Nth-DISTINCT-highest -> DENSE_RANK semantics (gap vs no-gap) and the 2nd-most-recent -> ROW_NUMBER=2 idiom, but the responder did NOT route from the SECOND-LARGEST-PER-CUSTOMER question to either. Worse, the responder MANUFACTURED inverted reasoning ("RANK is safer because it skips to 3") that is precisely the failure mode RANK exhibits. A single FIX-A canonical at r23 §3.1 with the second-largest phrasing leading the keyword anchors + the decision table + the DO-NOT-WRITE block calling out the inverted-reasoning pattern should close the class.
+
+Durability wins this iter: Q1 anti-join (LEFT JOIN ... IS NULL canonical clean), Q3 format/currency (`%,.2f` thousands-grouping clean — multi-iter durability), Q4 share-of-subset (CTE column-scope discipline holds — iter640 Q2 inoculation continues to hold for a different question shape).
+
+**OVERALL: 4.21875 PASS — Q1/Q3/Q4 all strong-pass canonicals (anti-join, format/currency, share-of-subset durability HOLDS); Q2 RANK()=2 fragile-with-inverted-reasoning is the iter643 FIX-A target — RANK vs DENSE_RANK vs ROW_NUMBER second-largest-per-group decision canonical at r23 §3.1; federation row stays 4.49944/311.**
