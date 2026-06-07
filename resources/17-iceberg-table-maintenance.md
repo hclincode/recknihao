@@ -1630,6 +1630,21 @@ EXECUTE optimize(file_size_threshold => '128MB');
 
 The `file_size_threshold` parameter tells Trino: any data file **smaller** than this threshold is a compaction candidate; files at or above it are left alone. The default is `100MB`. Setting it to `128MB` (or higher) is a common tweak when you want to be more aggressive about pulling small files into bigger ones.
 
+> **CRITICAL — `file_size_threshold` is a DataSize STRING WITH a unit suffix, NOT bare bytes (iter667 PIN — compact small files / DataSize inoculation).**
+>
+> **Keyword anchors (READ FIRST if your question contains ANY of these):** *optimize file_size_threshold, compact small files Trino, DataSize, 128MB, 100MB, 256MB, 512MB, 1GB, file_size_threshold value, file_size_threshold format, file_size_threshold bytes, bare bytes file_size_threshold, 134217728, 268435456.*
+>
+> **The one fact.** Trino's `EXECUTE optimize(file_size_threshold => '<value>')` argument is a **DataSize-typed VARCHAR with a UNIT SUFFIX** (`kB`, `MB`, `GB`). Verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) — the docs example is verbatim `ALTER TABLE test_table EXECUTE optimize(file_size_threshold => '128MB')`. The default is `'100MB'`. A **BARE numeric string** like `'134217728'` (no unit) — or a **bare integer literal** like `134217728` (no quotes, no unit) — **FAILS at parse time** with a Trino `DataSize` parse error such as `Invalid data size: '134217728'`. 134217728 bytes = `'128MB'`; 268435456 bytes = `'256MB'`; 536870912 bytes = `'512MB'`; 1073741824 bytes = `'1GB'`. Always write the value WITH the unit suffix.
+>
+> | Wrong shape | Why it's wrong | Correct shape |
+> |---|---|---|
+> | `EXECUTE optimize(file_size_threshold => '134217728')` | **Bare-bytes string fails DataSize parsing.** Trino's DataSize parser requires a recognized unit suffix (`kB` / `MB` / `GB`); a string of pure digits is not a valid DataSize literal even though 134217728 IS the correct byte count for 128 MB. | `EXECUTE optimize(file_size_threshold => '128MB')` |
+> | `EXECUTE optimize(file_size_threshold => 134217728)` | **Bare integer literal — wrong TYPE.** The argument is VARCHAR/DataSize, not BIGINT. Passing an unquoted integer also fails at parse time. | `EXECUTE optimize(file_size_threshold => '128MB')` |
+> | `EXECUTE optimize(file_size_threshold => '256000000')` | Same bare-bytes class — no unit suffix → DataSize parse error. | `EXECUTE optimize(file_size_threshold => '256MB')` (the closest documented round value) |
+> | `EXECUTE optimize(file_size_threshold => '128M')` / `'128 MB'` / `'128megabytes'` | Wrong unit token. DataSize accepts `kB`, `MB`, `GB` only — no `M` shorthand, no whitespace, no spelled-out unit. | `EXECUTE optimize(file_size_threshold => '128MB')` (no space; exact two-letter unit). |
+>
+> **NOTE — this rule is Trino-only.** The Spark `rewrite_data_files` options-map key `target-file-size-bytes` IS a **bare-bytes string** by Iceberg spec — `options => map('target-file-size-bytes', '268435456')` is correct for Spark. The two are different namespaces with different types; do NOT cross-port the bare-bytes form into Trino's `file_size_threshold`. See the EXECUTE-vs-CALL disambiguation matrix at the top of this file.
+
 **When to reach for Trino `OPTIMIZE` vs Spark `rewrite_data_files`:**
 
 | Situation | Use |

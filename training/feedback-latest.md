@@ -1,94 +1,131 @@
-# Iter666 Judge Feedback
+# Iter667 Judge Feedback
 
-**Iteration**: 666
-**Phase**: extended
-**Mode**: DURABILITY-BREADTH re-probe of iter666 r12 Spark-CALL→Trino-EXECUTE fix + 3 adjacent control questions
+## Verdict: PASS — overall avg 4.5625
 
-## Per-question scoring (Accuracy / Completeness / Clarity / Actionability, 1-5)
+| Question | Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|---|
+| Q1 (Iceberg optimize + DataSize)   | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 (per-DAY running total)         | 4 | 4 | 4 | 5 | 4.25 |
+| Q3 (time-travel + rollback)        | 5 | 5 | 5 | 5 | 5.00 |
+| Q4 (partition evolution)           | 4 | 4 | 4 | 4 | 4.00 |
+| **OVERALL**                        | **4.50** | **4.50** | **4.50** | **4.75** | **4.5625** |
 
-### Q1 — Cumulative running total
-- Accuracy: **3.5** — Core SQL is valid Trino 467 and runs. BUT the explanatory note that "same-day rows show the same running value as a peer group" under a `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` frame is **technically wrong**. Peer-group semantics belong to RANGE, not ROWS. With a ROWS frame, every physical row gets its own incrementing cumulative value regardless of date ties. A SaaS engineer relying on this note will be confused when their output shows distinct running values per same-date row. (Verified against trino.io/docs/467: default frame is `RANGE UNBOUNDED PRECEDING` which includes "the last peer of the current row" — i.e., RANGE peers; ROWS does not.)
-- Completeness: **4** — Answers core question; mentions frame choice but mis-explains tie semantics.
-- Clarity: **4.5** — Clear shape, easy to read.
-- Actionability: **4** — Paste-and-run works; the misleading note risks downstream confusion when verifying with same-date rows.
-- **Q1 average: 4.0**
-
-### Q2 — Percent of column total (empty-window grand total)
-- Accuracy: **2** — **PARSE ERROR**. As written: `ROUND(100.0 * SUM(amount) / SUM(amount) OVER () AS pct_of_grand_total` — ROUND's opening paren is never closed before `AS`. Trino will reject this with a syntax error. The TECHNIQUE (empty `OVER ()` for grand total, `100.0` decimal cast) is correct and explained well, but the literal SQL does not compile.
-- Completeness: **4** — Hits the empty-window concept, integer-division guard, no separate subquery — all the right ideas.
-- Clarity: **4** — Good explanation prose.
-- Actionability: **1.5** — A SaaS engineer pasting this gets an immediate parse error. They have to debug parens before they can even run it. Defeats the purpose of "copy this."
-- **Q2 average: 2.875**
-
-### Q3 — Per-tenant DAU last 30 days
-- Accuracy: **3.5** — Shape and intent correct: `WHERE tenant_id = 42`, `COUNT(DISTINCT user_id)`, 30-day filter via `CURRENT_DATE - INTERVAL '30' DAY`. BUT the question gave the column as `event_time` (a timestamp), not `event_date`. The responder silently assumed an `event_date` column exists. A correct answer needs `date_trunc('day', event_time) AS event_date` or `CAST(event_time AS DATE)` in both SELECT and GROUP BY, and the predicate becomes `event_time >= CURRENT_TIMESTAMP - INTERVAL '30' DAY` (or similar). As written, this does not match the given schema.
-- Completeness: **4** — Tenant scoping, distinct user count, day rollup, 30-day window all present; includes isolation warning.
-- Clarity: **4.5** — Easy to read, intent clear.
-- Actionability: **3.5** — Engineer will hit "column event_date does not exist" and have to adapt. Salvageable but not paste-and-run.
-- **Q3 average: 3.875**
-
-### Q4 — Iceberg maintenance: compact + expire snapshots
-- Accuracy: **3.5** — The Trino-EXECUTE form is **correct** and aligns with trino.io/docs/467 (iter666 r12 Spark-CALL→Trino-EXECUTE fix landed correctly). All three procedures (`optimize`, `expire_snapshots`, `remove_orphan_files`) use the right `ALTER TABLE ... EXECUTE proc(param => value)` shape. The "not Spark CALL procedures" clarification is correct and useful. **BUT** the `file_size_threshold => '134217728'` value is **a raw byte string with no unit suffix**, and Trino's DataSize parser requires units (B/kB/MB/GB). Per docs and verified examples, valid values are `'128MB'`, `'100MB'`, etc. Bare numeric strings like `'134217728'` fail to parse. The correct form is `'128MB'` (which is what 134217728 bytes equals). Also `retention_threshold => '7d'` for both expire/remove is correct and matches the default `iceberg.expire_snapshots.min-retention=7d` floor.
-- Completeness: **4.5** — Three procedures covered, retention floor noted, dialect disambiguation explicit.
-- Clarity: **4.5** — Structured into steps, calls out the Spark-vs-Trino trap.
-- Actionability: **3** — Step 2 and Step 3 paste-and-run. Step 1 fails to parse as written; engineer must change `'134217728'` to `'128MB'` (or any unit-suffixed value). The iter666 fix landed the EXECUTE form correctly but introduced a DataSize unit defect.
-- **Q4 average: 3.875**
+PASS THRESHOLD (3.5) cleared with healthy margin.
 
 ---
 
-## OVERALL AVERAGE
+## Per-question detail
 
-(4.0 + 2.875 + 3.875 + 3.875) / 4 = **3.656**
+### Q1 — Iceberg compact to ~256MB files (DataSize FIX-A1 re-probe) — 5.00
 
-**Verdict: PASS** (overall >= 3.5 threshold)
+Responder gave verbatim:
+```
+ALTER TABLE iceberg.analytics.events EXECUTE optimize(file_size_threshold => '256MB');
+ALTER TABLE iceberg.analytics.events EXECUTE expire_snapshots(retention_threshold => '7d');
+```
+
+**Docs verification (trino.io/docs/467/connector/iceberg.html):**
+- `ALTER TABLE test_table EXECUTE optimize(file_size_threshold => '128MB')` — verbatim docs example. DataSize-typed unit-suffixed string. Default `100MB`.
+- `ALTER TABLE test_table EXECUTE expire_snapshots(retention_threshold => '7d')` — verbatim docs example.
+
+Responder used `'256MB'` (unit-suffixed DataSize string), explained `file_size_threshold` semantics, and mentioned `'128MB'` / `'512MB'` alternatives. NO bare-bytes form (`'134217728'` or bare integer) anywhere.
+
+**DataSize FIX-A1 verdict: CLOSED.** Iter666 surface defect (bare-bytes risk) does not regress. Responder is on-target with unit-suffixed shape, explains the parameter, and adds correct expire_snapshots cleanup.
+
+### Q2 — Per-DAY running total with many orders/day (ROWS-vs-RANGE FIX-A2 re-probe) — 4.25
+
+Responder gave:
+```sql
+SELECT day, SUM(daily_revenue) OVER (ORDER BY day RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_revenue_through_day
+FROM (SELECT DATE(occurred_at) AS day, SUM(revenue) AS daily_revenue
+      FROM orders WHERE occurred_at >= DATE '2026-01-01'
+      GROUP BY DATE(occurred_at)) daily_aggregates
+ORDER BY day;
+```
+
+**Docs verification (trino.io/docs/467/sql/select.html):**
+- Default frame IS `RANGE UNBOUNDED PRECEDING` = `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`. Responder is correct that this is the default.
+- RANGE lumps peers (tied ORDER BY values share one cumulative value). After `GROUP BY DATE(occurred_at)` each day is unique, so peer-group of size 1 = no lumping = ROWS-vs-RANGE produce identical results here.
+
+**Structural FIX-A2 verdict: CLOSED.** The KEY FIX is present — pre-aggregate to one-row-per-day in a subquery FIRST, THEN run the window. That's exactly the iter666-flagged surface ("weird duplicate-looking numbers" caused by running the window directly over row-grain orders).
+
+**Muddled-note flag:** the responder's explanatory aside — *"if multiple orders somehow tied on the same day, they all see the same cumulative value — deterministic semantics"* — is slightly confused, because the GROUP BY already collapsed every same-day group to a single row. There can be no same-day ties after the subquery. This does NOT break the result (SQL is correct, output is one row per day with cumulative through-day revenue) but it weakens the teaching: a junior reader could misread it as "RANGE is needed for safety" when in fact ROWS gives exactly the same answer here. The canonical shape (per r07:1164 iter667 broaden) is `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` after a one-row-per-day pre-aggregate — more intent-revealing because once each day is unique the positional vs peer-group distinction is moot, but ROWS makes the absence of peer-lumping explicit.
+
+Per the run-prompt instruction: do not over-penalize since the SQL is correct. Knocked 1 point off Accuracy/Completeness/Clarity (still 4 each); Actionability stays 5 (engineer can paste and run).
+
+### Q3 — Time-travel + rollback — 5.00
+
+Responder gave:
+- Step A: `SELECT snapshot_id, committed_at, operation FROM orders$snapshots WHERE committed_at >= current_timestamp - INTERVAL '3' DAY ORDER BY committed_at DESC LIMIT 20;`
+- Step B: `SELECT * FROM orders FOR VERSION AS OF <snapshot_id> LIMIT 100;`
+- Step C: `CALL iceberg.system.rollback_to_snapshot('analytics', 'orders', <snapshot_id>);`
+
+**Docs verification (trino.io/docs/467/connector/iceberg.html — verified verbatim 2026-06-08):**
+- `$snapshots` metadata table is documented and valid Trino syntax for inspecting snapshot history.
+- `FOR VERSION AS OF` is the documented Trino 467 time-travel form. Verbatim docs example: `SELECT * FROM example.testdb.customer_orders FOR VERSION AS OF 8954597067493422955`. `FOR TIMESTAMP AS OF TIMESTAMP '...'` is also valid as an alternative.
+- **Critical check on rollback syntax:** the run-prompt asserts Trino 467 rollback is `ALTER TABLE orders EXECUTE rollback_to_snapshot(...)` and that the CALL form is Spark. **The run-prompt premise is incorrect for Trino 467.** The docs example at trino.io/docs/467/connector/iceberg.html verbatim is `CALL example.system.rollback_to_snapshot('testdb', 'customer_orders', 8954597067493422955)`. The deprecation of the CALL form and the introduction of the `ALTER TABLE EXECUTE rollback_to_snapshot` table-procedure form is PR #24580, which merged for Trino **469** (per the PR release-notes). In Trino 467 the CALL form is the official and only documented form.
+
+**Q3 rollback CALL-vs-EXECUTE verdict: NOT a Spark leak.** The responder's `CALL iceberg.system.rollback_to_snapshot('analytics', 'orders', <snapshot_id>)` is the correct, official Trino 467 syntax. The schema/table-as-two-separate-strings shape and the three-arg signature match the docs verbatim. (Spark's form is `CALL catalog.system.rollback_to_snapshot('db.table', snapshot_id)` — Spark uses ONE combined `'db.table'` string, while Trino uses TWO separate strings for schema and table. The responder used TWO strings = Trino-correct.)
+
+Three-step recipe (inspect `$snapshots`, peek with `FOR VERSION AS OF`, then rollback via CALL) is exactly the canonical workflow. Clean answer.
+
+### Q4 — Partition evolution on existing table — 4.00
+
+Responder gave:
+- Step 1: `ALTER TABLE iceberg.analytics.orders SET PROPERTIES partitioning = ARRAY['month(occurred_at)'];` — metadata-only, applies to NEW writes only, old data stays in old spec.
+- Step 2 (EXPLICITLY labeled Spark, not Trino): `CALL iceberg.system.rewrite_data_files(table => 'analytics.orders', options => map('target-file-size-bytes', '268435456'));`
+- Warning: do NOT use `SET PARTITIONING=...`; must be `SET PROPERTIES partitioning = ARRAY[...]`.
+
+**Docs verification (trino.io/docs/467/connector/iceberg.html):**
+- Verbatim docs: `ALTER TABLE table_name SET PROPERTIES partitioning = ARRAY['<existing partition columns>', 'my_new_partition_column']`. Responder shape matches.
+- `month()` transform is a documented Iceberg partition transform supported by the Trino connector.
+- Docs: "the connector queries data created before the change" — confirms old data retains the old spec, new writes use the new spec, mixed-spec reads work transparently. Responder's framing is accurate.
+- Step 2 is correctly labeled as Spark. The Spark option key `target-file-size-bytes` IS bare-bytes by Iceberg spec — that is NOT a DataSize defect (different namespace, different type). The cross-spec attribution is correct.
+
+**Minor completeness flag:** the answer could have noted that in Trino 467, if the engineer wants Trino-native compaction of historical partitions to match the new spec, the documented Trino route is `ALTER TABLE ... EXECUTE optimize` (which rewrites data files using the current partition spec). Pointing them to Spark for the historical rewrite is fine and correctly labeled, but a single sentence on "you can ALSO run optimize on existing date ranges from Trino to rewrite into the new spec" would have made this 5/5. Minor docking 1 point on Completeness/Clarity/Actionability.
+
+The `SET PARTITIONING=` DO-NOT-WRITE warning is a good inoculation, useful for the engineer who might guess at the syntax.
 
 ---
 
-## Flagged weak answers (prose only — does NOT change PASS label per directive)
+## FIX-A1 and FIX-A2 verdicts (explicit per run-prompt requirement)
 
-1. **Q2 missing close paren** — confirmed genuine syntax error. Pasted as-is, Trino returns a parse error. The technique is right; the literal SQL is broken. This is the most serious defect of the four.
-2. **Q1 same-day-peer claim under ROWS frame** — technically wrong (peer semantics are RANGE-only, not ROWS). Misleading explanatory note attached to otherwise-correct SQL.
-3. **Q3 event_date vs event_time** — schema mismatch with the question; engineer must adapt the column to `date_trunc('day', event_time)`. Minor but material since the question explicitly gave `event_time`.
-4. **Q4 `'134217728'` byte literal** — Trino DataSize requires a unit suffix; bare numeric string fails to parse. Replace with `'128MB'`.
+- **FIX-A1 (Q1 DataSize unit-suffix) — CLOSED.** Responder used `'256MB'` unit-suffixed DataSize string, mentioned `'128MB'`/`'512MB'` alternatives, zero bare-bytes leakage. Iter667's three-anchor inoculation (r17 post-1631 block, r12:82 inline sentence, r11:513 top-of-caveat-list) held under probe.
+- **FIX-A2 (Q2 per-DAY running total) — CLOSED structurally.** Pre-aggregate-to-one-row-per-day-then-window pattern is present and correctly used. The iter667 broaden at r07:1164 (CONTRAST card recommend ROWS-frame for running totals on row-grain inputs after pre-aggregation) and the new sub-block at r07:1732+ (per-DAY pre-aggregate recipe with the canonical CTE shape) anchored this fix. Slight muddle in the explanatory note about "same-day ties after GROUP BY" — material enough to flag, not material enough to drop below threshold.
 
 ---
 
-## Q4 Iceberg-maintenance verdict (iter666 re-probe of r12 Spark-CALL→Trino-EXECUTE fix)
+## Q3 rollback verdict (explicit per run-prompt requirement)
 
-**LANDED PARTIALLY CORRECT.** The Trino-native `ALTER TABLE ... EXECUTE` form is now used (Spark CALL form no longer appears as the primary maintenance directive), the "not Spark CALL procedures" disambiguation is delivered, and `retention_threshold => '7d'` matches the default min-retention floor. The fix did its job on the engine-dialect axis. However, the **value format for `file_size_threshold` regressed** — `'134217728'` (raw bytes, no unit) is not a valid Trino DataSize literal; the canonical examples in r17/r11 use `'128MB'` / `'256MB'`. Responder appears to have computed 128*1024*1024 and emitted the integer instead of the string `'128MB'`.
+**Q3 rollback is NOT a Spark-CALL-vs-Trino-EXECUTE leak.** The run-prompt's premise is incorrect for Trino 467. The CALL form `CALL <catalog>.system.rollback_to_snapshot('schema', 'table', snapshot_id)` is the official documented Trino 467 syntax (verified verbatim at trino.io/docs/467/connector/iceberg.html). The `ALTER TABLE EXECUTE rollback_to_snapshot` form is a Trino 469+ addition (per PR #24580 deprecation/table-procedure-introduction, which targeted 469). Spark uses a different shape — ONE combined `'db.table'` string — which the responder did NOT use. Responder used the TWO-string Trino-correct shape: CALL form, two-string signature, three args — exactly Trino 467 spec.
 
----
-
-## Teacher feedback (concise, actionable)
-
-### Priority for iter667
-
-**FIX-A (recommended)**: Add a tightly-scoped worked example showing the CORRECT `file_size_threshold` literal format. The defect is not in r12 / r17 (which use `'128MB'` / `'256MB'` correctly) — it appears to be a value-format transcription gap where the responder synthesized a raw byte value. Add an explicit inoculation card / one-liner near the optimize template:
-
-> `file_size_threshold` must be a DataSize string with a unit suffix: `'128MB'`, `'256MB'`, `'1GB'`. Bare numeric strings like `'134217728'` are NOT valid and will fail with a DataSize parse error. If you have a byte target, convert it: 134217728 bytes = `'128MB'`.
-
-Place this anchor BOTH in r17 (canonical Iceberg maintenance page) and near the r11 / r12 optimize examples so keyword lookup of "file_size_threshold" always lands on the unit-suffix rule.
-
-**FIX-B (recommended, lighter touch)**: Add a one-line "verify your SQL parses" note to the percent-of-grand-total card in r07:1170-1192. Specifically: a "copy-paste correctness" inoculation that flags the common transcription trap of unbalanced ROUND parens. Suggested wording:
-
-> When wrapping `100.0 * x / SUM(x) OVER ()` in `ROUND(...)`, the close-paren goes BEFORE `AS`, not after. Pattern: `ROUND(100.0 * x / SUM(x) OVER (), 2) AS pct`. Count the parens — `ROUND(` opens 1, must close 1.
-
-The Q2 defect is more transcription-slip than resource gap, but a balanced-parens worked example with explicit paren-count callout reduces recurrence.
-
-**FIX-C (lower priority)**: Reconcile the ROWS-vs-RANGE peer-group semantics in r07:1630-1716. Verify the language explicitly states: "ROWS counts physical rows; tied ORDER BY values still get distinct running totals. RANGE peers; tied ORDER BY values share the same value." The responder produced a hybrid claim ("ROWS frame, peer group, same running value") that does not exist in either semantic. If r07 already says this clearly, no edit — this is a responder synthesis error, not a resource gap.
-
-**FIX-D (lowest priority)**: For per-tenant DAU questions where `event_time` (timestamp) is the given column, add a recipe-card pattern explicitly using `date_trunc('day', event_time) AS event_date` to bridge timestamp→date. The r23:131 canonical uses `event_date` directly, which trains the responder to assume that column shape; a complement using `event_time` would close the schema-adaptation gap.
-
-### Single-pick recommendation
-If only one of the above is acted on: **FIX-A is the highest-value pick** — it is a verified docs-grounded defect (DataSize unit requirement) on the high-traffic Iceberg-maintenance axis, and the fix is a 2-line inoculation card. FIX-B is a useful defensive add but the Q2 defect alone is small-volume / arguably a transcription slip. FIX-C and FIX-D are quality polish; defer unless the same defects recur.
-
-### NO-OP alternative
-A defensible NO-OP if FIX-A would risk churn: Q2 + Q4 defects are each transcription-level (paren miscount, byte-value computed instead of unit-suffix-string copied) rather than fundamental gaps in r07/r17. If the next 1-2 iterations show recurrence, escalate to FIX-A immediately.
+**Note to teacher / future judges:** If a future iter standardizes on a newer Trino version (469+), the `ALTER TABLE EXECUTE rollback_to_snapshot(snapshot_id)` form becomes preferred. For Trino 467 (current prod_info.md target), the CALL form is correct and the deprecated-in-469 warning need NOT be applied.
 
 ---
 
-## Topic-rubric updates (no changes this iter)
+## Flagged weak answers
 
-- **Iceberg table maintenance** (current 4.4575 PASSED): Q4 3.875 reinforces PASSED status; iter666 r12 fix verified on engine-dialect axis. DataSize unit-suffix defect is a value-format polish item, not a topic regression.
-- **Analytical query patterns on Iceberg+Trino** (current 4.3567 PASSED): Q1 4.0 + Q2 2.875 + Q3 3.875 mixed. Q2 parse error and Q1 ROWS-frame mis-explanation are noted but topic remains PASSED. No re-probe required unless recurrent.
-- **Multi-tenant analytics** (current 4.4593 PASSED): Q3 3.875 — schema-adaptation gap is minor; topic remains PASSED.
+- **Q2 explanatory note** is muddled but does NOT break correctness; the SQL produces the right result. Flagged for teacher awareness, not a regression.
+- **Q4** could mention Trino-native `optimize` as a same-engine alternative to the Spark `rewrite_data_files` route; minor completeness gap, not a regression.
+
+---
+
+## Recommended iter668 directive: **DEFAULT NO-OP / durability-breadth**
+
+Rationale: PASS at 4.5625 overall with FIX-A1 CLOSED and FIX-A2 CLOSED. Q3 is NOT a Spark leak — the responder's CALL form is the official Trino 467 syntax (run-prompt premise was incorrect). No fix-A is warranted.
+
+Suggested iter668 plays (any of, in priority order):
+1. **Durability-breadth probe.** Re-probe a known-strong topic (predicate pushdown, CTAS-with-partition-spec, MERGE INTO, ANALYZE TABLE for CBO/NDV, federation cross-source pushdown) from a fresh angle to confirm hold-the-line. Federation is the rubric's higher-bar topic (≥4.5) and is most worth re-probing on a never-asked sub-angle.
+2. **Q2 muddled-note micro-tighten (optional).** A very small clarification at r07:1732+ explicitly stating "after GROUP BY day, each day is UNIQUE — there are no ties to lump, so ROWS and RANGE give identical results here; we recommend ROWS for intent clarity." This is a polish, not a fix-A.
+3. **Trino-native optimize-after-partition-evolution micro-note (optional).** At the partition-evolution route (likely r17 or r24), add a one-sentence cross-reference: "for historical rewrite into the new spec FROM TRINO, run `ALTER TABLE ... EXECUTE optimize` on the target date ranges; the Spark `rewrite_data_files` path is an alternative if you prefer that engine."
+
+Either of (2)/(3) is fine as a micro-polish. Neither is required to maintain PASS; the topics are well within margin.
+
+**No new fix-A inoculations required.** No Spark/Trino dialect leak detected. Resources are durable on this iteration's probe surface.
+
+---
+
+Sources verified (WebSearch + WebFetch on 2026-06-08):
+- [Trino 467 Iceberg connector docs](https://trino.io/docs/467/connector/iceberg.html) — rollback_to_snapshot CALL form, file_size_threshold DataSize unit-suffixed, expire_snapshots retention_threshold, FOR VERSION AS OF, SET PROPERTIES partitioning
+- [Trino 467 SELECT docs](https://trino.io/docs/467/sql/select.html) — window frame default = RANGE UNBOUNDED PRECEDING; peers definition
+- [Trino PR #24580 — Deprecate CALL rollback_to_snapshot, add ALTER TABLE EXECUTE](https://github.com/trinodb/trino/pull/24580) — merged for Trino 469, confirming CALL form is the only documented form in 467

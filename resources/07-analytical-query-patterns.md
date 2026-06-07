@@ -1161,7 +1161,7 @@ For a HOUR-grain spine over a bounded window, the spine size is tiny (24 rows fo
 | Pattern | One-line shape | Use when |
 |---|---|---|
 | **Forward-fill (LOCF)** | `LAST_VALUE(x) IGNORE NULLS OVER (PARTITION BY id ORDER BY d ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` | Carry the **last known VALUE** into gap rows on a `(entity, day, value)` series — e.g., last reported temperature into minutes with no reading. See the LEADING CANONICAL forward-fill H3 above. |
-| **Running total (cumulative sum)** | `SUM(x) OVER (PARTITION BY id ORDER BY d ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` | Accumulate a numeric column from the start of the partition through each row — e.g., month-to-date revenue, lifetime signups. See §5 Pattern A / A2 Bucketed running total below. |
+| **Running total (cumulative sum)** | `SUM(x) OVER (PARTITION BY id ORDER BY d ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` | Accumulate a numeric column from the start of the partition through each row — e.g., month-to-date revenue, lifetime signups. **Under `ROWS` each PHYSICAL row gets its OWN cumulative value (rows incrementing one at a time); same-`ORDER BY`-value rows do NOT collapse to a single peer-group total.** Only `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` peer-groups tied ORDER BY values into one shared cumulative value. For a per-DAY running total on a table that has MULTIPLE rows per day, **pre-aggregate to one-row-per-day FIRST** (a CTE: `SUM(amount) GROUP BY order_date`), then run `SUM(daily_total) OVER (ORDER BY order_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` over the one-row-per-day result. See §5 Pattern A / A2 Bucketed running total below for the full ROWS-vs-RANGE worked example + the symptom/cause/fix inoculation. |
 | **Share of grand total (percent of total)** | `100.0 * x / SUM(x) OVER ()` (whole-table denominator) or `100.0 * x / SUM(x) OVER (PARTITION BY g)` (per-group denominator) | Express each row as a **percent / fraction of a total** without collapsing rows — e.g., each region's % of company revenue, each product's share of category sales. The **empty `OVER ()`** is the grand total over ALL rows; add `PARTITION BY g` to make the denominator the per-group total. See the dedicated card just below. |
 | **Interval-overlap (this H3)** | `calendar c JOIN intervals s ON s.start <= c.day AND (s.end IS NULL OR s.end > c.day) GROUP BY c.day [, dim]` then `COUNT(*)` | Count how many **interval rows** (subscriptions / tickets / sessions / employment) **cover** each calendar day — e.g., active subscribers per day, open tickets per day, concurrent sessions per day. |
 
@@ -1704,9 +1704,9 @@ Same query shape: `SUM(amt) OVER (ORDER BY order_date <FRAME>)`. Four rows with 
 
 > **Guard caption (if your ROWS and RANGE columns are equal on row3, you've miscounted):** RANGE includes ALL rows whose value is within the window, not a fixed count of rows. Row3's RANGE window spans dates `[Jan-01, Jan-02]` and **all three rows** (the two Jan-01 peers plus row3) fall in it → 100+100+50 = 250. The ROWS=150 answer ignores row1 entirely because the physical-1-back frame can only reach row2.
 
-> **Bonus default-frame surprise — SYMPTOM → CAUSE → FIX (iter587 PIN, read FIRST).**
+> **Bonus default-frame surprise — SYMPTOM → CAUSE → FIX (iter587 PIN + iter667 broaden, read FIRST).**
 >
-> **Keyword anchors (so questions about this bug route HERE):** *running total wrong on tied dates, same-date rows show same running total, running total not accumulating one at a time, default frame RANGE lumps peers, ROWS vs RANGE running total, why are my cumulative values all the same on the same day, two events same day same cumulative value, running total stuck at end-of-day value.*
+> **Keyword anchors (so questions about this bug route HERE):** *running total wrong on tied dates, same-date rows show same running total, running total not accumulating one at a time, default frame RANGE lumps peers, ROWS vs RANGE running total, why are my cumulative values all the same on the same day, two events same day same cumulative value, running total stuck at end-of-day value, ROWS frame physical row vs RANGE frame peer group, per-day running total multiple orders per day, daily running total from row-grain orders, pre-aggregate before window, cumulative revenue per day with many orders per day, ROWS BETWEEN UNBOUNDED PRECEDING physical row, RANGE BETWEEN UNBOUNDED PRECEDING peer.*
 >
 > **SYMPTOM.** A running total where rows sharing the same `ORDER BY` value (e.g. the same date) **ALL show the SAME total** (the end-of-that-date cumulative), instead of accumulating one at a time. On the four-row sample above, the user expected 100, 200, 250, 320 — but got **200, 200, 250, 320** (both Jan-01 rows show 200, the peer-group end).
 >
@@ -1729,6 +1729,28 @@ Same query shape: `SUM(amt) OVER (ORDER BY order_date <FRAME>)`. Four rows with 
 > **When the default RANGE is actually what you want.** If two events on the same day SHOULD report the **same** cumulative value (peer semantics — e.g. end-of-day cumulative reporting), then the default RANGE is correct and Pattern 1 above (omit the frame clause) is the right recommendation. The default-RANGE-as-fix recommendation is ONLY correct when the question's INTENT is "tied peers should share a value". The symptom above describes the OPPOSITE intent — the user wants per-row accumulation — so the explicit-ROWS + tiebreaker is the only correct fix.
 >
 > **Worked numbers on the sample data.** `SUM(amt) OVER (ORDER BY order_date)` with NO explicit frame gives 200, 200, 250, 320 — both Jan-01 peers see 200 (the peer-group end), Jan-02 sees 250, Jan-04 sees the full running total. Switching to `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` with `ORDER BY order_date, id` gives 100, 200, 250, 320 — per-row accumulation, deterministic. That is the difference the user is reporting; the fix is **always** Pattern 2 (explicit ROWS + unique tiebreaker).
+>
+> **iter667 BROADEN — per-DAY running total when the SOURCE table has MULTIPLE rows per day (the "daily cumulative revenue from row-grain orders" SaaS shape).** When the question is *"give me the cumulative revenue **per day** through each day"* and the source table (`orders`) has many rows per day, you do NOT want either Pattern 1 (peer semantics — gives every order on the same day the same end-of-day value but keeps every order row) or Pattern 2 (positional per-row — gives each order its own incrementing value within the day, but you wanted ONE row per day). You want **one row per day** with the day's cumulative-through-end-of-day. The clean recipe is **pre-aggregate to one-row-per-day FIRST in a CTE, then run the window over THAT result**:
+>
+> ```sql
+> WITH daily AS (
+>   SELECT order_date,
+>          SUM(amount) AS daily_total           -- collapse to ONE row per day
+>   FROM iceberg.analytics.orders
+>   WHERE order_date >= DATE '2026-01-01'
+>   GROUP BY order_date
+> )
+> SELECT order_date,
+>        daily_total,
+>        SUM(daily_total) OVER (
+>          ORDER BY order_date
+>          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+>        ) AS cumulative_total
+> FROM daily
+> ORDER BY order_date;
+> ```
+>
+> Why this is the right shape: after the CTE collapses to one row per day, `order_date` is **unique** in the input to the window — so `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` is unambiguous (each row IS a single day; no peer ties to resolve) and `RANGE` would give the identical answer too (peer groups are singletons). Pre-aggregating eliminates the ROWS-vs-RANGE question altogether and is the simplest correct form for the per-day-from-row-grain shape. Add `PARTITION BY tenant_id` if multi-tenant; add `GROUP BY tenant_id, order_date` in the CTE for the same reason. **Do NOT** try to fix this by writing `SUM(amount) OVER (ORDER BY order_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` directly on the row-grain `orders` table — you'd either get one row per order with per-order accumulation (not per-day), or, with the default RANGE, one row per order all showing the end-of-day total (still not the per-day shape you wanted). Pre-aggregate, then window — that is the canonical pattern.
 
 ### LEADING CANONICAL — Trino named WINDOW clause (define a window once, reference by name)
 
