@@ -414,6 +414,28 @@ dbt 1.8 renamed the YAML key from `tests:` to `data_tests:` to disambiguate from
 
 > Keyword anchors: subtotal, subtotals, grand total, ROLLUP, CUBE, GROUPING SETS, GROUPING function, GROUPING_ID, row_type, label the subtotal row, multi-level aggregate, hierarchy rollup.
 >
+> Decision keyword anchors (pick the operator FIRST, before copying any example below): "all products within each region AND all regions for each product category", "subtotals on both dimensions", "region totals AND category totals", "independent margins", "every combination of subtotals", "breakdown by both X and Y with subtotals for each".
+
+### DECIDE FIRST — ROLLUP vs CUBE vs GROUPING SETS (read this before copying any worked example below)
+
+**Make this choice before you pick an example.** The ROLLUP worked example appears first in this block, but ROLLUP is the WRONG operator for many "subtotals" questions. Decide here:
+
+- **Need EVERY combination of subtotals — independent margins on EACH dimension** ("all X for each Y" AND "all Y for each X") **+ grand total → `CUBE(a, b)`.** This is the one to use when the question asks for subtotals on *both* dimensions (e.g. "all products within each region" AND "all regions for each product category").
+- **Need ONLY hierarchical / prefix subtotals** — a drill-down where each level rolls up the **RIGHTMOST** column (country → state → city totals, never city-across-all-countries) **→ `ROLLUP(a, b)`.**
+- **Need a hand-picked specific set of groupings → `GROUPING SETS ((...), (...))`.**
+
+**KEY:** `ROLLUP(a, b)` emits `(a,b), (a), ()` and **SKIPS the `(b)`-only grouping**. `CUBE(a, b)` emits **ALL** of `(a,b), (a), (b), ()`. If you want both per-`a` **AND** per-`b` subtotals, **ROLLUP is WRONG — use CUBE.**
+
+```sql
+-- Question: subtotals on BOTH region and category (per-region AND per-category margins) + grand total.
+-- WRONG — ROLLUP(region, category) drops the (category)-only grouping, so the per-category subtotal is MISSING:
+GROUP BY ROLLUP(region, category)
+-- RIGHT — CUBE emits (region,category), (region), (category), () — both independent margins plus the grand total:
+GROUP BY CUBE(region, category)
+```
+
+Verified against [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html): *"The `ROLLUP` operator generates all possible subtotals for a given set of columns"* (hierarchical / prefix subtotals — each level rolls up the rightmost remaining column) vs *"The `CUBE` operator generates all possible grouping sets (i.e. a power set) for a given set of columns"* (all 2^N combinations). ROLLUP = hierarchical prefix subtotals; CUBE = the full power set. The (b) value table and (c) worked example just below show ROLLUP; section (e) below has the full CUBE comparison.
+
 > **Why this block sits at the top of r28:** when an Oracle/Snowflake/Postgres engineer migrates a report query that uses `GROUP BY ROLLUP(...)` and the `GROUPING()` function to label subtotal vs grand-total rows, the bitmask semantics are easy to get wrong. The specific failure observed in production: writing `CASE GROUPING(region, category) WHEN 2 THEN 'Grand Total'` for a 2-column `ROLLUP(region, category)`. That is **WRONG**. The grand-total value is **3** (binary `11`), not 2. Value 2 (binary `10`) does **not appear at all** in a 2-column ROLLUP. The rest of this block explains exactly why.
 
 ### (a) The bitmask rule (verified against [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html))

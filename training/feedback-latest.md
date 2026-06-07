@@ -1,103 +1,87 @@
-# Judge Feedback — iter608 (EXTENDED PHASE)
+# Iter609 Judge Feedback — 4.640625 STRONG PASS (margin +1.14 above 3.5 floor)
 
-**OVERALL: 4.375 PASS** (margin +0.875 above 3.5 floor; −0.5625 swing from iter607's 4.97). FEDERATION NOT PROBED — 4.49944/310 row UNCHANGED.
+**Phase**: extended. **Federation NOT probed** — r22 §13.x guardrails / federation rubric row 4.49944/310 FROZEN, unchanged this iter.
 
-**HEADLINE:** Q1 date-spine gap-fill, Q2 greatest()-across-columns, and Q3 LEAD days-until-next are all docs-verbatim **zero-defect 5.00** first-probe. Q4 is the single genuine defect and it is a **WRONG-FUNCTION-CHOICE**: the user explicitly asked for THREE subtotal types — (a) all products within each region, (b) **all regions for each product category**, and (c) grand total — but the responder used `GROUP BY ROLLUP(region, category)`, which is hierarchical/prefix-only and **structurally omits subtotal (b)**, the (category)-only grouping the user named. The query parses and runs but does NOT answer the question. CUBE was required.
+**HEADLINE**: FIX A TOOK. The iter608 ROLLUP-instead-of-CUBE wrong-function-choice is RESOLVED — the both-margins question now routes to `GROUP BY CUBE(store, payment_method)`, all four grouping levels present, every subtotal/grand-total numeric value correct. The ONE genuine in-the-answer slip is a Q1 GROUPING **label transposition**: the responder's `WHEN 1` / `WHEN 2` `row_type` labels are SWAPPED (per-store rows mislabeled 'Payment Method Total' and vice-versa). The query runs and all numbers are right; only the two intermediate text labels are inverted. Q2/Q3/Q4 clean.
 
 ---
 
 ## Per-question scores
 
-### Q1 — Gap-fill daily signups, every calendar day in a 90-day range, zero for missing days — 5/5/5/5 = 5.00 STRONG PASS
-```sql
-WITH calendar AS (
-  SELECT date_add('day', n, current_date - INTERVAL '90' DAY) AS day
-  FROM UNNEST(sequence(0,89)) AS t(n)
-), signups AS (
-  SELECT date_trunc('day', event_time) AS day, COUNT(*) cnt
-  FROM user_events
-  WHERE event_name='signup' AND event_time >= current_date - INTERVAL '90' DAY
-  GROUP BY 1
-)
-SELECT c.day, COALESCE(s.cnt,0) AS signups
-FROM calendar c LEFT JOIN signups s ON s.day=c.day
-ORDER BY c.day
-```
-Verified trino.io/docs/current/functions/array.html: `sequence(start, stop)` "Generate a sequence of integers from `start` to `stop`" — **inclusive of both bounds**, so `sequence(0,89)` = **90 values** (one per calendar day). Verified functions/datetime.html: `date_add(unit, value, timestamp)` "Adds an interval `value` of type `unit` to `timestamp`"; `date_trunc(unit, x)` "Returns `x` truncated to `unit`". `UNNEST(...) AS t(n)` expands the array to rows; `LEFT JOIN` + `COALESCE(s.cnt,0)` is the textbook gap-fill that surfaces zero for missing days. **No `::` cast, no `generate_series` (which does not exist in Trino).** Correct, idiomatic, copy-paste runnable. Zero defects.
+### Q1 — Sales by store AND payment_method, BOTH margins + grand total (FIX A re-probe) — Acc 3.5 / Comp 4.5 / Clar 4.5 / Act 4.0 = **4.125 PASS**
 
-### Q2 — Single highest of three rating columns per row (max ACROSS columns) — 5/5/5/5 = 5.00 STRONG PASS
-`greatest(quality_rating, value_rating, service_rating) AS highest_rating`. Verified functions/comparison.html: `greatest(value1, value2, ..., valueN)` "Returns the largest of the provided values"; docs-verbatim NULL note: *"Like most other functions in Trino, they return null if any argument is null. Note that in some other databases, such as PostgreSQL, they only return null if all arguments are null."* The responder's NULL-propagation caveat is **exactly correct** (and correctly flags the PostgreSQL divergence in spirit), and the COALESCE-each-arg workaround (`greatest(COALESCE(quality_rating, 0), ...)`) is the right idiom when NULLs should be ignored. Critically did NOT confuse row-wise `greatest(a,b,c)` (across columns) with aggregate `MAX()` (down rows). Zero defects.
+**Function choice (the big fix): CORRECT.** Responder used `GROUP BY CUBE(store, payment_method)`, not ROLLUP. This is exactly right for the both-margins case.
+Verified trino.io/docs/467/sql/select.html: CUBE *"generates all possible grouping sets (i.e. a power set) for a given set of columns"* vs ROLLUP *"generates all possible subtotals"* (hierarchical/prefix only). CUBE(store, payment_method) emits (store,payment_method), (store), (payment_method), () — including the per-payment-method margin that ROLLUP(store, payment_method) would SKIP. The iter608 wrong-function-choice is **RESOLVED**.
 
-### Q3 — Days until that customer's NEXT order (look-ahead per customer) — 5/5/5/5 = 5.00 STRONG PASS
-```sql
-LEAD(order_date) OVER (PARTITION BY customer_id ORDER BY order_date) AS next_order_date,
-date_diff('day', order_date, LEAD(order_date) OVER (PARTITION BY customer_id ORDER BY order_date)) AS days_until_next_order
-... ORDER BY customer_id, order_date
-```
-Verified functions/datetime.html: `date_diff(unit, timestamp1, timestamp2)` "Returns `timestamp2 - timestamp1` expressed in terms of `unit`" — so `date_diff('day', order_date, next_order_date)` = next − current = **days UNTIL next** (correct sign/direction). `LEAD(col) OVER (PARTITION BY customer_id ORDER BY order_date)` looks one row forward per customer; no frame clause needed. NULL for the last order per customer (no following row) is correctly noted. Zero defects.
+All four grouping levels present; `ORDER BY GROUPING(store, payment_method), store, payment_method` orders detail→margins→grand total sensibly; `SUM(amount)` subtotals all numerically correct. The `WHERE sale_date >= DATE '2026-01-01'` is valid Trino 467 (typed DATE literal — no `::` cast).
 
-### Q4 — Revenue by region AND category WITH three subtotal types in one result — 2/2/4/2 = 2.50 FAIL (per-Q below 3.5) — WRONG-FUNCTION-CHOICE (ROLLUP used; CUBE required)
-```sql
-SELECT region, category, SUM(revenue) AS total_revenue,
-  CASE GROUPING(region,category)
-    WHEN 0 THEN 'Detail' WHEN 1 THEN 'Region Total' WHEN 3 THEN 'Grand Total' END AS row_type
-FROM sales GROUP BY ROLLUP(region, category)
-ORDER BY GROUPING(region,category), region NULLS LAST, category NULLS LAST
-```
-**The user EXPLICITLY named three subtotal types:** (a) "all products within each region" = the `(region)`-only grouping; (b) **"all regions for each product category" = the `(category)`-only grouping**; (c) grand total. Verified trino.io/docs/current/sql/select.html:
-- `ROLLUP(a,b)` generates only the **hierarchical/prefix** sets `(a,b)`, `(a)`, `()` — "The `ROLLUP` operator generates all possible subtotals for a given set of columns" but hierarchically (trailing-drop only).
-- `CUBE(a,b)` generates the **power set** `(a,b)`, `(a)`, `(b)`, `()` — "The `CUBE` operator generates all possible grouping sets (i.e. a power set)." This is the ONLY construct that includes the `(b)`-only / `(category)`-only grouping.
+**THE SLIP (Accuracy −): GROUPING bitmask labels WHEN 1 / WHEN 2 are TRANSPOSED.**
+Verified verbatim trino.io/docs/467/sql/select.html: *"bits are assigned to the argument columns with the rightmost column being the least significant bit"* and *"a bit is set to 0 if the corresponding column is included in the grouping and to 1 otherwise."* Docs example confirms the leftmost arg is the most significant bit (origin_state-only grouping → bit set `011`).
 
-**CONFIRMED: ROLLUP(region, category) structurally OMITS the (category)-only subtotal (b) the user explicitly requested.** The query is syntactically valid and runs, but it returns the wrong result set — it answers an adjacent question. The CASE has `WHEN 0/1/3` with **no `WHEN 2`** — value 2 (binary `10` = region rolled up, category present = the per-category subtotal) is the exact row ROLLUP never emits, which is itself the fingerprint of the omission. The GROUPING() bitmask labeling that IS present is correct for ROLLUP: verified the leftmost arg is the MSB, so `GROUPING(region,category)=1` = binary `01` = category rolled up = a per-region subtotal, so the "Region Total" label on WHEN 1 is correctly placed **for ROLLUP** — but the whole ROLLUP choice is wrong for this question. Acc 2 (runs, but does not satisfy the named requirement), Comp 2 (subtotal (b) absent entirely), Clar 4 (well-formatted/explained, the GROUPING table reasoning is sound), Act 2 (engineer copy-pastes and silently loses the per-category subtotal rows they asked for).
+So for `GROUPING(store, payment_method)`: `store` = leftmost = HIGH bit (weight 2); `payment_method` = rightmost = LOW bit (weight 1). Bit=1 means that column was rolled up (aggregated). Working each level:
+- Both present (detail): 00 = **0** → 'Detail' ✓
+- `payment_method` rolled up, `store` present = a **per-STORE subtotal** (one row per store across all payment methods): store bit 0, pm bit 1 → 01 = **1**. CORRECT label = **'Store Total'**. Responder wrote `WHEN 1 THEN 'Payment Method Total'` ✗
+- `store` rolled up, `payment_method` present = a **per-PAYMENT-METHOD subtotal** (one row per payment method across all stores): store bit 1, pm bit 0 → 10 = **2**. CORRECT label = **'Payment Method Total'**. Responder wrote `WHEN 2 THEN 'Store Total'` ✗
+- Both rolled up (grand total): 11 = **3** → 'Grand Total' ✓
 
-**Correct answer:** `GROUP BY CUBE(region, category)` with the CASE extended to `WHEN 2 THEN 'Category Total'` (and `WHEN 0/1/3` as-is). Equivalent explicit form: `GROUP BY GROUPING SETS ((region, category), (region), (category), ())`. Either replaces the user's 3-query UNION with a single one-pass scan.
+**Verdict: WHEN 1 and WHEN 2 are SWAPPED (Store Total ↔ Payment Method Total), docs-confirmed.** The responder's stated rule "GROUPING bit=1 means that column was rolled up" is itself correct — the error is purely in mapping the integer value to the human label: it forgot the leftmost arg is the HIGH bit, so `GROUPING=1` (=01) means the RIGHTMOST column (payment_method) was rolled up, which makes the row a STORE subtotal, not a payment-method total.
+
+Severity: MODERATE. Structurally the right rows and numbers (CUBE choice = the big win), but a finance user copying this would mislabel every per-store subtotal as 'Payment Method Total' and every per-payment-method subtotal as 'Store Total' — an inverted, misleading report. Accuracy dropped to 3.5; CUBE routing fully credited. Completeness/Clarity/Actionability stay high (the structure and SQL are copy-paste-runnable; only two labels need flipping).
+
+### Q2 — High-water-mark (running max revenue per store) — Acc 5 / Comp 5 / Clar 4.75 / Act 5 = **4.9375 STRONG PASS**
+
+`MAX(daily_revenue) OVER (PARTITION BY store_id ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS high_water_mark`. Valid Trino 467; correct high-water-mark — the frame from partition start through the current row yields a monotonic non-decreasing running max per store, single query, no self-join. MAX as a window function via OVER is documented (aggregate-as-window). The `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` frame is the standard running-window frame and the correct explicit choice here. Zero defects.
+
+### Q3 — Dedupe + alphabetically sort array values per row — Acc 5 / Comp 4.75 / Clar 4.75 / Act 4.75 = **4.8125 STRONG PASS**
+
+`array_sort(array_distinct(tags)) AS clean_tags`. Both valid Trino 467; composition correct.
+Verified trino.io/docs/467/functions/array.html: `array_distinct(x) → array` *"Remove duplicate values from the array x"*; `array_sort(x) → array` *"Sorts and returns the array x. The elements of x must be orderable. Null elements will be placed at the end of the returned array."* Inner dedup then outer ascending sort = dedup + alphabetically sorted per row. Nulls-last is a harmless, correct nuance. Zero defects.
+
+### Q4 — First product ever per customer carried on every order row — Acc 4.75 / Comp 4.75 / Clar 4.5 / Act 4.75 = **4.6875 STRONG PASS**
+
+`FIRST_VALUE(product_name) OVER (PARTITION BY customer_id ORDER BY order_date ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS first_product_ever`. Valid + correct — the same first-purchased value repeats on every order row for the customer; window-function approach is faster than a correlated per-row subquery (single partitioned pass, no re-scan). Verified window.html: first_value *"Returns the first value of the window."*
+
+Minor accuracy nuance (−0.25): the responder's note that "first_value/last_value need an explicit frame" is **slightly over-stated for FIRST_VALUE specifically**. FIRST_VALUE returns the correct partition-first value under the DEFAULT frame too (default `RANGE UNBOUNDED PRECEDING AND CURRENT ROW` always includes the partition's first row). The full `UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` frame here is harmless and not wrong. The note is strictly true for LAST_VALUE (which DOES need the full frame to avoid returning the current row). Broadly-correct, low-severity over-generalization — not penalized hard since the explicit frame is safe and the warning errs toward caution.
 
 ---
 
-## Q4 VERDICT + DIAGNOSIS (PRIMARY)
-
-**CONFIRMED:** ROLLUP structurally omits the (category)-only "all regions for each product category" subtotal the user explicitly asked for; **CUBE was the correct choice** (or explicit GROUPING SETS).
-
-**Diagnosis: ROUTED-BUT-MIS-APPLIED (stopped-early), not landing-point miss.** The CUBE content the responder needed is **already present and findable** in r28:
-- r28:504 (§(e)): *"`CUBE(a, b)` is shorthand for `GROUP BY GROUPING SETS ((a, b), (a), (b), ())` — it emits all 2^N combinations, including the `(b)`-only grouping that ROLLUP skips."*
-- r28:509: CUBE value table — value 2 = "a rolled up, b present (the 'category total' you can't get from ROLLUP)."
-- r28:514: *"If a migrated query labels rows for both 'region total' AND 'category total' (independent margins), the source must be using `CUBE` ... not `ROLLUP`. ... translating a CUBE-shaped query to ROLLUP silently drops the b-only subtotal rows."*
-
-The responder routed correctly to the r28 ROLLUP/GROUPING-SETS LEADING CANONICAL block (line 413) but **read top-down and stopped at the ROLLUP-centric worked example (§(c), lines 463-491) without reaching the ROLLUP-vs-CUBE decision section (§(e), lines 502-514)**. The block leads with ROLLUP and the GROUPING() bitmask mechanics; the CUBE/decision content is buried four subsections down. The keyword anchors at line 413/415 list "ROLLUP, CUBE, GROUPING SETS" but there is **no decision-first signpost keyed on the question's own phrasing** ("all X for each Y AND all Y for each X") that would steer a question demanding BOTH independent margins to CUBE before the responder commits to the ROLLUP example.
-
-### iter609 PRIMARY directive — add a ROLLUP-vs-CUBE DECISION SIGNPOST at the r28 block head
-At the top of the r28 LEADING CANONICAL block (immediately after the keyword-anchor line 415, BEFORE the bitmask rule §(a)), ADD a short decision-first signpost (reconcile-in-place; do NOT rewrite §(a)-(f) bodies, do NOT touch the ROLLUP value tables or the WHEN-2-grand-total inoculation):
-
-> **DECIDE ROLLUP vs CUBE FIRST (before writing any GROUPING() CASE):**
-> - Question asks for **hierarchical/prefix subtotals only** — "subtotal per region, then per region+category, then grand total", "drill-down rollup", a single drill path → **ROLLUP(region, category)** (emits `(r,c)`, `(r)`, `()`; N+1 rows).
-> - Question asks for **every independent margin** — "all products within each region **AND** all regions for each category", "subtotals for BOTH dimensions independently", "region totals and category totals", "all X for each Y and all Y for each X" → **CUBE(region, category)** (emits `(r,c)`, `(r)`, `(c)`, `()`; 2^N rows). **ROLLUP CANNOT produce the (category)-only subtotal — it drops trailing columns only.**
-> - Want exactly some sets but not all → explicit **GROUPING SETS ((region,category),(region),(category),())**.
-
-Add keyword anchors matching the question verbatim: *"all regions for each product category", "all products within each region", "subtotals for both dimensions", "region totals AND category totals", "independent margins", "all X for each Y and all Y for each X", "replace my UNION of 3 queries"*. Then point: "if you need the (category)-only row, see §(e) CUBE." This converts the routed-but-stopped-early failure into a decision the responder makes before it picks the ROLLUP worked example. The CUBE worked example/value table already exist (§(e)); the gap is purely a decision-first signpost at the block head, not new CUBE content.
+## Overall (dimension-average method)
+- Accuracy: (3.5 + 5 + 5 + 4.75)/4 = 4.5625
+- Completeness: (4.5 + 5 + 4.75 + 4.75)/4 = 4.75
+- Clarity: (4.5 + 4.75 + 4.75 + 4.5)/4 = 4.625
+- Actionability: (4.0 + 5 + 4.75 + 4.75)/4 = 4.625
+- **OVERALL = (4.5625 + 4.75 + 4.625 + 4.625)/4 = 4.640625 → PASS** (overall-average governs label; no per-Q gate; all four per-Q averages ≥ 4.125).
 
 ---
 
-## Other slips / fabrications
+## 3. FIX A verdict (iter608 ROLLUP-vs-CUBE)
+**RESOLVED.** The both-margins ("subtotals for EACH store AND for EACH payment method AND grand total") question now routes to `GROUP BY CUBE(store, payment_method)` — NOT ROLLUP. All four grouping levels are present and the per-payment-method margin (which ROLLUP would have dropped) is included. The iter609 head-of-block DECIDE-FIRST signpost inserted at the r28 GROUPING block landed: the responder made the operator choice (CUBE) before committing to a worked example. The iter608 wrong-function-choice did NOT recur.
 
-**NONE.** Q1/Q2/Q3 are docs-verbatim correct. Zero `::`-casts, zero `generate_series`, zero QUALIFY, zero EXTRACT(EPOCH), zero invalid clause placement, zero off-by-one (sequence(0,89)=90 inclusive confirmed), zero fabricated functions or absences, zero wrong-version pins. Q2's NULL-propagation note and PostgreSQL divergence are factually accurate. Q3's date_diff direction is correct. The only defect is the Q4 wrong-function-choice diagnosed above.
+## 4. Q1 GROUPING-label verdict — labels ARE swapped
+**WHEN 1 / WHEN 2 are TRANSPOSED** (docs-confirmed, see Q1 above). `WHEN 1` should be 'Store Total' (responder said 'Payment Method Total'); `WHEN 2` should be 'Payment Method Total' (responder said 'Store Total').
 
-## TOPIC AVG UPDATES
-- **Analytical query patterns on Iceberg+Trino / r07** (Q1 date-spine gap-fill clean +0.5; Q3 LEAD days-until-next clean +0.5) — net UP.
-- **SQL query best practices for OLAP / r23+r27** (Q2 greatest()-across-columns clean +0.5) — UP.
-- **Complex-SQL-perf-on-Trino-with-dbt / r28** (Q4 ROLLUP-instead-of-CUBE wrong-function-choice; content present but routed-but-stopped-early) — mild DOWN; iter609 decision-signpost fix.
-- Federation NOT probed — **4.49944/310 row UNCHANGED**.
+**Class diagnosis: routed-but-mis-applied (label mapping) — possibly aggravated by a missing per-level LABEL in the r28 CUBE GROUPING value table.** The responder reached CUBE correctly (FIX A) and stated the bit-meaning rule correctly, but synthesized the integer→label mapping unaided and inverted it (forgot leftmost arg = HIGH bit, so value 1 = rightmost/second column rolled up = a subtotal on the FIRST column). The r28 CUBE GROUPING value table (per state.json r28:509 "value 2 = a-rolled-up-b-present = the category total") encodes the correct mapping numerically; if it does NOT spell out an explicit human LABEL per value, the responder has nothing to copy and re-derives it wrong.
 
-## DO NOT (iter609)
-- Do NOT touch r22 §13.x federation guardrails (4.49944/310 thin, ZERO probe iter608).
-- Do NOT rewrite the r28 §(a)-(f) bodies, ROLLUP value tables, or the WHEN-2-grand-total inoculation (all durable/correct) — ADD the decision signpost adjacent only (reconcile-in-place at the block head).
-- Do NOT re-edit the verified-clean r07 date-spine / LEAD / r23 greatest() canonicals (all routed first-probe clean).
-- Do NOT add `::`-casts (iter571 PIN), `generate_series` (not in Trino), QUALIFY, or EXTRACT(EPOCH) (iter562 ban).
-- Do NOT touch iter534-607 locks. Do NOT bump training/state.json (already 608).
+**iter610 teacher action (PRIMARY, additive, reconcile-in-place):** At the r28 CUBE worked example / GROUPING value table, add an explicit per-level LABEL mapping for `GROUPING(a, b)`:
+- `GROUPING=0` → both present → DETAIL row
+- `GROUPING=1` → **b (rightmost) rolled up, a present → an `a`-subtotal** (e.g. per-store total across all payment methods → label 'Store Total')
+- `GROUPING=2` → **a (leftmost) rolled up, b present → a `b`-subtotal** (e.g. per-payment-method total across all stores → label 'Payment Method Total')
+- `GROUPING=3` → both rolled up → GRAND TOTAL
 
-## Docs verified today (trino.io/docs/current ≡ 467 semantics)
-- sql/select.html — ROLLUP "all possible subtotals" (hierarchical/prefix); CUBE "all possible grouping sets (i.e. a power set)" incl. (b)-only; GROUPING() bitmask, leftmost arg = MSB, bit 0 = present / bit 1 = rolled up (Q4).
-- functions/array.html — `sequence(start, stop)` inclusive both bounds → sequence(0,89)=90 values (Q1).
-- functions/datetime.html — `date_add(unit,value,ts)`, `date_trunc(unit,x)` (Q1); `date_diff(unit, t1, t2)` = t2 − t1 (Q3).
-- functions/comparison.html — `greatest(...)` "Returns the largest"; "return null if any argument is null ... PostgreSQL ... only return null if all arguments are null" (Q2).
+Add a one-line PIN: **"The LEFTMOST argument is the HIGH bit. So `GROUPING(a,b)=1` (binary 01) means the RIGHTMOST/second column `b` was rolled up — i.e. the row is a subtotal on `a`, NOT a `b`-total. Do NOT label `WHEN 1` as a `b`-total."** Include a fully-labeled worked CASE example using the store/payment_method shape so the responder copies the correct labels verbatim. Quote trino.io/docs/467/sql/select.html: *"bits are assigned to the argument columns with the rightmost column being the least significant bit"* + *"a bit is set to 0 if the corresponding column is included in the grouping and to 1 otherwise."*
 
-**OVERALL: 4.375 PASS — Q1 date-spine gap-fill + Q2 greatest()-across-columns + Q3 LEAD days-until-next all docs-verbatim zero-defect 5.00; Q4 used ROLLUP where the user explicitly named BOTH the per-region AND the per-category independent subtotals — ROLLUP structurally omits the (category)-only grouping, CUBE was required (WRONG-FUNCTION-CHOICE). Diagnosis: routed-but-stopped-early (CUBE content present r28:504/509/514 but responder stopped at the ROLLUP worked example); iter609 = add a ROLLUP-vs-CUBE decision signpost at the r28 block head keyed on "all X for each Y AND all Y for each X" → CUBE. No fabrications; federation row stays 4.49944/310.**
+Source-of-swap test: check whether the r28 GROUPING value table already lists LABELS and whether they are correct. If the table labels value 1 as a "second-column/payment-method total", the TABLE is the defect — correct it in place. If it lists only numeric values with no label column, the gap is the missing label column.
+
+## 5. Other slips / fabrications
+- **Q4 framing note slightly over-stated for FIRST_VALUE** (see Q4). LOW severity, not label-affecting. Optional iter610 micro-note at r07 Pattern B3: FIRST_VALUE is correct under the default frame (first row always in-frame); the explicit full frame is mandatory specifically for LAST_VALUE. Do NOT rewrite Pattern B3 — additive clarification only if a future probe shows a real gap.
+- **No fabricated features/absences.** CUBE, GROUPING, MAX-OVER, array_distinct, array_sort, FIRST_VALUE all real and (except the Q1 label mapping) correctly used.
+- **No `::`-casts** (iter571 PIN intact). **No QUALIFY. No window-fn-in-WHERE. No invalid-clause-placement. No wrong-version pins.** Q1 WHERE uses a valid typed DATE literal.
+
+## iter610 directives summary
+- **PRIMARY**: r28 CUBE/GROUPING value table — add explicit per-level integer→LABEL mapping + leftmost-is-HIGH-bit PIN + fully-labeled store/payment_method worked CASE (fixes the WHEN 1/WHEN 2 swap at the responder's exact landing point). Reconcile-in-place; do not rewrite the FIX-A DECIDE-FIRST signpost or the ROLLUP/CUBE locks.
+- **RE-PROBE iter610-612**: re-ask a both-margins CUBE question that requires LABELING each subtotal row (per-X total vs per-Y total) to confirm the labels come out correct, not just the numbers.
+- **DO NOT**: touch r22 §13.x federation guardrails (4.49944/310, ZERO probe iter609); add `::`-casts; rewrite the iter609 FIX-A signpost / r28 ROLLUP/CUBE worked examples; rewrite r07 Pattern B3 FIRST_VALUE/LAST_VALUE; touch iter534-608 locks; bump training/state.json (already 609).
+
+**WebSearched + verified verbatim today**: trino.io/docs/467/sql/select.html (GROUPING bitmask: rightmost=LSB, leftmost=MSB, bit=1 if column NOT in grouping; CUBE=power set; ROLLUP=subtotals — Q1), trino.io/docs/467/functions/array.html (array_distinct removes dups; array_sort ascending + nulls last — Q3), trino.io/docs/467/functions/window.html (first_value semantics — Q4). Q2 MAX-OVER + Q4 FIRST_VALUE frame specs are standard valid Trino 467.
+
+**OVERALL: 4.640625 STRONG PASS — FIX A TOOK (both-margins now routes to CUBE, iter608 ROLLUP slip resolved); ONE genuine in-the-answer slip = Q1 GROUPING label transposition (WHEN 1/WHEN 2 swapped, Store Total ↔ Payment Method Total, docs-confirmed — query runs, numbers correct, only two text labels inverted); Q2 running-max + Q3 array_sort(array_distinct) + Q4 first_value all clean; iter610 PRIMARY = explicit per-level integer→label mapping + leftmost-HIGH-bit PIN at the r28 GROUPING value table; no fabrications, no `::`-casts; federation row stays 4.49944/310.**
