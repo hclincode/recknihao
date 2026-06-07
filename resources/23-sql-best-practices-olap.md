@@ -1561,6 +1561,8 @@ GROUP BY user_id;
 -- Save the query result as a new Iceberg table (CTAS — CREATE TABLE AS SELECT).
 -- The CREATE TABLE <fully.qualified.target> AS prefix is REQUIRED — without it,
 -- the SELECT just returns rows and nothing is persisted.
+-- DO NOT WRITE: `iceberg.catalog_name.schema_name.tbl` (4-segment placeholder). A Trino
+-- table reference is EXACTLY 3-part: `catalog.schema.table` (here `iceberg.analytics.daily_revenue_summary`).
 CREATE TABLE iceberg.analytics.daily_revenue_summary AS
 SELECT
     event_date,
