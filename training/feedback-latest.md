@@ -1,135 +1,78 @@
-# Iter 650 — Judge Feedback (EXTENDED PHASE)
+# Iter651 Judge Feedback — CLEAN PASS (durability-breadth NO-OP)
 
-**Overall average: 4.9375 — STRONG PASS** (margin +1.4375 above 3.5 floor; +0.8125 swing UP from iter649's 4.125 PASS)
-
-Per-Q calc: (4.875 + 5.0 + 5.0 + 4.875) / 4 = 19.75 / 4 = 4.9375
-Dim cross-check: Acc (5+5+5+5)/4 = 5.0; Comp (5+5+5+5)/4 = 5.0; Clar (4.5+5+5+4.5)/4 = 4.75; Act (5+5+5+5)/4 = 5.0; mean of dims = (5+5+4.75+5)/4 = 4.9375 — agrees.
-
-Governing label = STRONG PASS (overall 4.9375 >= 3.5; no per-Q < 3.5 — lowest Q1/Q4 each at 4.875 well above floor).
+**Iteration**: 651
+**Phase**: extended
+**Verdict**: PASS
+**Overall average**: 4.94
 
 ---
 
 ## Per-question scores
 
-### Q1 — Histogram of session durations in fixed 10-minute-wide bins (iter650 FIX-A re-probe)
+| Q | Topic | Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|---|---|
+| Q1 | Pct of orders with discount code (NOT NULL share) | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 | Explode ARRAY tags into one row per (order, tag) | 5 | 5 | 5 | 5 | 5.00 |
+| Q3 | Extract field by key from JSON payload column | 5 | 5 | 4 | 5 | 4.75 |
+| Q4 | 4-week retention rate per signup cohort | 5 | 5 | 5 | 5 | 5.00 |
 
-**Score: 4.875 STRONG PASS** (Acc 5.0 / Comp 5.0 / Clar 4.5 / Act 5.0)
+**Per-question averages**: Q1=5.00, Q2=5.00, Q3=4.75, Q4=5.00
+**Overall**: (5.00+5.00+4.75+5.00)/4 = **4.94 PASS**
 
-- PRIMARY canonical: `SELECT FLOOR(duration_minutes/10)*10 AS bucket_lower_edge, COUNT(*) AS session_count FROM sessions GROUP BY FLOOR(duration_minutes/10)*10 ORDER BY bucket_lower_edge`
-- LABELLED form correctly pushes `bucket_floor` into a CTE FIRST, then `format('%d-%d minutes', CAST(bucket_floor AS integer), CAST(bucket_floor + 10 AS integer) - 1)` in the OUTER SELECT
-- Explicitly noted GROUP BY must REPEAT the expression (cannot use the alias) — directly applies the same-level-alias scoping rule
-
-**iter650 FIX-A LANDED CLEAN — explicit confirmation per directive**:
-- FLOOR + integer-division floor present: `FLOOR(duration_minutes/10)*10` produces bucket floors 0, 10, 20, ... per trino.io/docs/current/functions/math.html (floor returns largest integer ≤ x; integer/integer division truncates).
-- GROUP BY REPEATS the full expression — does NOT reference the SELECT-list alias `bucket_lower_edge`. Verified at trino.io/docs/current/sql/select.html (output column aliases visible ONLY in outer ORDER BY).
-- Labelled form correctly computes `bucket_floor` in INNER CTE first, then formats in OUTER SELECT — does NOT do same-level-alias-in-sibling-SELECT-expression.
-- format('%d-%d', CAST(bucket_floor AS integer), CAST(bucket_floor + 10 AS integer) - 1) — CAST-to-integer matches the `%d` format spec requirement per the r23:§3.1A concat/format coercion guardrail.
-- NO array_agg(DISTINCT ...) OVER (...) — issue #7885 form absent.
-- NO element_at(arr, 0) — array-1-based off-by-one form absent.
-- NO same-level-alias reference in WHERE / GROUP BY / HAVING / sibling SELECT items — iter649 Q4 FORM-1 bug absent.
-
-The iter650 FIX-A insertion at r07 Pattern C4a (new block between Pattern C4 width_bucket lock and Pattern D rolling window) routed the Haiku responder CLEANLY through the integer-division-floor canonical via the keyword anchors "session-duration buckets", "histogram of session durations", "fixed-width bins" — exactly the routing the FIX-A was designed to produce. Clarity -0.5 for not explicitly calling out why `-1` is used in the upper-edge label (the half-open `[0,10)` semantics are implicit, not stated).
-
-### Q2 — Mobile:desktop session ratio per day, safe against zero desktop
-
-**Score: 5.0 STRONG PASS** (Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0)
-
-- `COUNT(*) FILTER (WHERE device_type='mobile') AS mobile_count`
-- `COUNT(*) FILTER (WHERE device_type='desktop') AS desktop_count`
-- `CAST(COUNT(*) FILTER (WHERE device_type='mobile') AS double) / NULLIF(COUNT(*) FILTER (WHERE device_type='desktop'), 0) AS ratio`
-- `GROUP BY event_date`
-
-Verified per trino.io/docs/current/functions/aggregate.html (FILTER (WHERE …) supported for all aggregate functions). NULLIF(x, 0) returns NULL when desktop_count = 0, preventing divide-by-zero error — verified per trino.io/docs/current/functions/conditional.html. CAST(integer AS double) forces float division (avoiding integer-truncation-to-0). All four pieces (FILTER counts, CAST double, NULLIF zero-guard, GROUP BY day) cleanly composed. Clean landing.
-
-### Q3 — Product with longest name per category
-
-**Score: 5.0 STRONG PASS** (Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0)
-
-- `ROW_NUMBER() OVER (PARTITION BY category ORDER BY LENGTH(product_name) DESC) AS rn` then `WHERE rn = 1`
-- Explicitly noted RANK() / DENSE_RANK() variant if ties should be kept
-
-Verified per trino.io/docs/current/functions/window.html (ROW_NUMBER() returns unique sequential numbers starting at 1 per partition per ORDER BY) and string functions (LENGTH(varchar) returns character count). The ROW_NUMBER-vs-RANK ties note is a strong durability touch — directly applies the iter643 RANK/DENSE_RANK/ROW_NUMBER decision canonical. The `max_by(product_name, length(product_name)) GROUP BY category` one-call alternative was NOT mentioned but is NOT penalized (ROW_NUMBER form is fully correct and idiomatic). Clean landing.
-
-### Q4 — Customers with orders in March but NONE in April (month-to-month churn anti-join)
-
-**Score: 4.875 STRONG PASS** (Acc 5.0 / Comp 5.0 / Clar 4.5 / Act 5.0)
-
-- PRIMARY: LEFT JOIN of `(DISTINCT customer_id WHERE order_date in March)` to `(DISTINCT customer_id WHERE order_date in April)` ON customer_id, WHERE `april.customer_id IS NULL`
-- Month bounds via half-open: `CAST(order_date AS date) >= DATE '2026-03-01' AND order_date < DATE '2026-04-01'`
-- ALT NOT IN form WITH the `AND customer_id IS NOT NULL` NULL-guard in the subquery — directly addresses the NOT-IN-NULL-pitfall
-
-Verified the LEFT JOIN ... IS NULL anti-join pattern per Trino SELECT docs + canonical anti-join idiom. Half-open `>= ... AND < ...` month bounds are partition-prunable and correct (avoid the `BETWEEN ... AND '2026-03-31'` last-day pitfall). The NOT-IN-NULL caveat is handled correctly with the `IS NOT NULL` filter in the subquery — directly applies the r23:1572-1626 NOT-IN-NULL-pitfall lock. Clarity -0.5 for not explicitly explaining WHY `IS NOT NULL` is needed in the NOT IN form (three-valued-logic mechanic is implicit). Clean landing.
+All four answers cleared the 3.5 pass bar with comfortable margin. None of the per-Q averages dipped below 3.5; no FIX-A required.
 
 ---
 
-## Dimension averages
+## Per-question verification notes
 
-| Dim | Q1 | Q2 | Q3 | Q4 | Avg |
-|---|---|---|---|---|---|
-| Acc | 5.0 | 5.0 | 5.0 | 5.0 | 5.0 |
-| Comp | 5.0 | 5.0 | 5.0 | 5.0 | 5.0 |
-| Clar | 4.5 | 5.0 | 5.0 | 4.5 | 4.75 |
-| Act | 5.0 | 5.0 | 5.0 | 5.0 | 5.0 |
+### Q1 — Discount-code share (5.00)
+- `ROUND(100.0 * COUNT(CASE WHEN discount_code IS NOT NULL THEN 1 END) / COUNT(*), 2)` — correct decimal promotion, correct null semantics (CASE returns NULL by default for the ELSE branch, which COUNT excludes).
+- Verified against trino.io aggregate docs: `count_if(x)` returns bigint = number of TRUE inputs, documented as "equivalent to `count(CASE WHEN x THEN 1 END)`". The responder's CASE WHEN shape and the noted `count_if(discount_code IS NOT NULL)` alternative are both idiomatic Trino 467.
+- No deductions.
 
----
+### Q2 — UNNEST array (5.00)
+- `CROSS JOIN UNNEST(tags) AS t(tag)` in FROM, before WHERE — correct clause-order.
+- `LEFT JOIN UNNEST(tags) AS t(tag) ON TRUE` to preserve rows with NULL/empty arrays — verified against trino.io SELECT docs and the explicit "left join on true" idiom called out in Trino issue #8471 doc clarification.
+- `TRIM(tag)` is a sensible cleanup. No deductions.
 
-## iter650 FIX-A — fixed-width histogram guardrail — LANDED CLEAN
+### Q3 — JSON extract by key (4.75)
+- `json_extract_scalar(payload, '$.plan')` returns VARCHAR — verified against trino.io JSON functions docs ("returns the result value as a string").
+- `json_extract` returns JSON — verified ("returns the result as a JSON string").
+- `JSON_VALUE(payload, '$.plan' RETURNING VARCHAR NULL ON EMPTY NULL ON ERROR)` — VALID Trino 467 syntax per official docs. Exact grammar supported: `JSON_VALUE(json_input, json_path [PASSING ...] [RETURNING type] [{ERROR|NULL|DEFAULT expr} ON EMPTY] [{ERROR|NULL|DEFAULT expr} ON ERROR])`. Responder's clause order (RETURNING then ON EMPTY then ON ERROR) matches the documented grammar.
+- $.path navigation + CAST guidance for numeric comparison all correct.
+- Minor clarity deduction (5 -> 4): offering both json_extract_scalar AND the full JSON_VALUE RETURNING/ON-EMPTY/ON-ERROR form in one answer is a lot for a beginner; a one-line "use json_extract_scalar; JSON_VALUE is the SQL-standard alternative" framing would have helped. Content is fully accurate; only the cognitive load nudged clarity down.
 
-**Explicit confirmation**: The iter650 FIX-A insertion at r07 Pattern C4a (the new `### Pattern C4a: Fixed-width $N histogram` block inserted between the existing Pattern C4 width_bucket lock and Pattern D rolling window) routed the Haiku responder CLEANLY through the integer-division-floor canonical on the first re-probe. The responder produced:
-
-- FLOOR(duration_minutes/10)*10 integer-division floor — PRIMARY canonical from r07 Pattern C4a
-- GROUP BY REPEAT-the-expression form — NOT same-level-alias-in-GROUP-BY
-- Labelled form pushed bucket_floor into a CTE FIRST, then format() in outer — NOT same-level-alias-in-sibling-SELECT
-- NO array_agg(DISTINCT ...) OVER (...) — issue #7885 form absent
-- NO element_at(arr, 0) — array-1-based off-by-one form absent
-- format('%d-%d ...', CAST(... AS integer), CAST(... AS integer) - 1) — CAST-to-integer for %d coercion present
-
-All THREE iter649 Q4 defects (FORM-1 same-level-alias-in-CASE, FORM-2a array_agg(DISTINCT)-OVER, FORM-2b element_at-0) are absent from the iter650 Q1 answer. FIX-A landed on the same iteration it was inserted.
-
----
-
-## TOPIC AVG UPDATES
-
-- **Analytical query patterns on Iceberg+Trino / r07**: Q1 iter650 FIX-A fixed-width-histogram guardrail LANDED CLEAN +0.5 BIG durability (closes iter649 Q4 2.0 regression); Q3 ROW_NUMBER-vs-RANK top-per-group decision durability +0.25. Net UP STRONGLY.
-- **SQL query best practices for OLAP / r23**: Q2 COUNT FILTER + CAST DOUBLE + NULLIF zero-guard ratio canonical +0.25 durability; Q4 anti-join LEFT-JOIN-IS-NULL + half-open month bounds + NOT-IN-NULL-pitfall guard +0.25 durability. Net UP.
-- **Federation row** (4.49944 / 316): NOT probed this iter — consecutive non-probe count +1 → 317. ZERO probe iter645-650 streak = 6 iterations. Row UNCHANGED.
+### Q4 — 4-week cohort retention (5.00)
+- `DATE_TRUNC('week', signup_date)` for cohort bucketing — verified Trino week truncation rounds to Monday (ISO).
+- `signup_week + INTERVAL '28' DAY` and `+ INTERVAL '35' DAY` — verified date + interval arithmetic is valid Trino syntax, and the half-open `>= signup_week + 28d AND < signup_week + 35d` window correctly captures days 28..34 (the 4th week after signup).
+- `COUNT(DISTINCT user_id)` cohort sizing and active-user counting — canonical.
+- `COALESCE(users_active_4w, 0)` + `100.0 *` decimal promotion — correct null-safe percentage.
+- Incomplete-cohort guardrail `WHERE date_diff('day', c.signup_week, CURRENT_DATE) >= 35` — verified `date_diff('day', a, b)` returns bigint days; the >= 35 filter correctly removes cohorts that haven't yet had time to complete their week-4 window.
+- No deductions.
 
 ---
 
-## iter651 DIRECTIVE — DEFAULT NO-OP / DURABILITY-BREADTH
+## Durability-breadth probe summary
 
-No per-Q < 3.5 — lowest Q1/Q4 each at 4.875 well above floor. iter650 FIX-A insertion at r07 Pattern C4a proven durable on first probe (Q1 5.0 acc / 5.0 comp / 5.0 act). Recommend iter651 NO FIX-A — continue durability-breadth probing.
+This iter651 NO-OP run probed four fresh question shapes against the iter534-iter650 lock inventory without any resource edits. All four held cleanly:
 
-**Fresh-area probe candidates (synthesizable-from-primitives — DO NOT pre-probe)**:
-- (a) histogram FIX-A second-probe with different keyword phrasing ("age buckets 10 years wide", "5-dollar bands", "bin sales by dollar range") to confirm the keyword anchors generalize
-- (b) anti-join SECOND-probe with semi-join phrasing ("customers who placed BOTH a March order AND an April order") — the inverse routing
-- (c) COUNT(*) FILTER ratio second-probe with three-way ratio ("mobile vs desktop vs tablet") — confirms FILTER pattern composes
-- (d) ROW_NUMBER top-per-group second-probe with multi-tiebreak ORDER BY ("longest name per category, ties broken by SKU ascending")
-- (e) bulletproofed federation predicate-pushdown re-probe IF opted-in (4.49944 / 316 thin; ZERO probe 6-iter streak)
+1. **count_if / NOT NULL share** — primitive at r23 §3.1E + §11; share-of-grand-total at r07:1170+. Composition was one-step and the responder synthesized correctly.
+2. **UNNEST ARRAY** — r07 §1a CROSS JOIN UNNEST + LEFT JOIN UNNEST ON TRUE + clause-order rule at r07 §1a.1 all materialized in the answer verbatim shape.
+3. **json_extract_scalar + JSON_VALUE** — r09:551+, r13:3361+ landed both the primary and the SQL-standard alternative. Both verified accurate against Trino 467 docs.
+4. **DATE_TRUNC('week') cohort retention** — r07 §3 cohort canonical held; 28/35 INTERVAL day arithmetic + incomplete-cohort guardrail both correct.
 
----
-
-## DO NOT
-
-- Touch r22 §13.x federation guardrails (4.49944 / 317 thin; ZERO probe 6-iter streak).
-- Re-edit the iter650 FIX-A insertion at r07 Pattern C4a just landed (HOLDS — proven durable on first probe; rewriting risks regression).
-- Re-edit r07 Pattern C4 width_bucket lock (r07:2250-2303 preserved verbatim; HOLDS).
-- Re-edit r07 Pattern D rolling-N-day-MA pre-aggregate-first canonical (iter649 FIX-A, HOLDS).
-- Re-edit r23 §8 GROUP-BY-rule extract-then-count canonical (iter647 FIX-A, HOLDS).
-- Re-edit r23:1572-1626 anti-join LEFT-JOIN-IS-NULL + NOT-IN-NULL-pitfall lock (Q4 HOLDS).
-- Re-edit r23:§3.1A concat/format coercion + CAST-to-integer-for-%d guardrail (cross-linked from Q1, HOLDS).
-- Rewrite iter534-649 locks.
-- Add `::`-casts (iter571 PIN), QUALIFY, RLIKE (iter623 ban), PERCENTILE_CONT/MEDIAN (iter611 ban), EXTRACT(EPOCH) (iter562 ban).
-- Fabricate dayname() / initcap().
-- DISTINCT-ON Postgres-leak (iter634 ban).
-- Bump training/state.json (per directive).
+Zero file edits this iteration. resources/22 untouched. All iter534-iter650 locks preserved in place.
 
 ---
 
-## Meta-note
+## Recommendation for iter652
 
-iter650 demonstrates the FIX-A insertion-only-with-keyword-anchors model worked PERFECTLY on the fixed-width-histogram guardrail. The keyword anchors embedded in the r07 Pattern C4a block ("fixed-width $50 buckets", "histogram of order amounts", "bucket into 50-dollar bins", "session-duration buckets", "bin a numeric column into equal-width ranges") routed the Haiku responder cleanly to the integer-division-floor PRIMARY canonical on the first re-probe under a NEW keyword surface (the question was "session durations in 10-minute bins" not the iter649 "$50 order amount bins"). Direct evidence that FIX-A keyword anchors generalize across sibling phrasings — same proof pattern iter643/645/647 demonstrated for the RANK/DENSE_RANK/ROW_NUMBER decision and GROUP-BY-rule extract-then-count canonicals.
+**DEFAULT NO-OP / DURABILITY-BREADTH continuation.** No FIX-A needed. No per-question average dipped below 3.5; the lowest (Q3 at 4.75) is still well above threshold and the minor deduction was clarity, not accuracy.
 
-Trajectory iter641 → 642 → 643 → 644 → 645 → 646 → 647 → 648 → 649 → 650 (4.6875 → 4.21875 → 4.6875 → 4.531 → 4.90625 → 4.4375 → 4.90625 → 4.53125 → 4.125 → 4.9375) confirms FIX-A insertion-only-with-keyword-anchors repairs regressions WITHIN ONE ITERATION without disturbing other canonicals.
+Suggested iter652 probe directions (all durability-breadth, no resource edits expected):
+- HOF on map column (`transform_values`, `map_filter`) — verify the r09 map HOF anchor still lands when phrased as "filter keys by predicate".
+- `array_distinct` / `array_agg(DISTINCT)` shape — verify r23 listagg/array_join + DISTINCT guardrail.
+- Trino-Iceberg time-travel `FOR VERSION AS OF` / `FOR TIMESTAMP AS OF` — verify the r10/r17 time-travel canonical.
+- `INSERT OVERWRITE` partition semantics in Trino-Iceberg — verify the r18 partition-write canonical.
 
-**OVERALL: 4.9375 STRONG PASS — iter650 FIX-A fixed-width-histogram guardrail LANDED CLEAN on first re-probe (FLOOR int-div floor + GROUP-BY-repeat + labelled-CTE; no same-level-alias / array_agg(DISTINCT)-OVER / element_at-0); Q2/Q3/Q4 all clean durability; iter651 recommended DEFAULT NO-OP / durability-breadth; federation row stays 4.49944 / 317 (ZERO probe 6-iter streak).**
+If any of those four breadth-probes scores a per-Q avg < 3.5 in a future iteration, name it the iter-N+1 FIX-A. Until then, keep the no-edit durability cadence.
