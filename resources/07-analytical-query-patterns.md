@@ -1311,7 +1311,31 @@ Same query shape: `SUM(amt) OVER (ORDER BY order_date <FRAME>)`. Four rows with 
 
 > **Guard caption (if your ROWS and RANGE columns are equal on row3, you've miscounted):** RANGE includes ALL rows whose value is within the window, not a fixed count of rows. Row3's RANGE window spans dates `[Jan-01, Jan-02]` and **all three rows** (the two Jan-01 peers plus row3) fall in it → 100+100+50 = 250. The ROWS=150 answer ignores row1 entirely because the physical-1-back frame can only reach row2.
 
-> **Bonus default-frame surprise.** `SUM(amt) OVER (ORDER BY order_date)` with **NO explicit frame** defaults to `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` (per Trino's window-functions docs). On the data above the cumulative values would be 200, 200, 250, 320 — both Jan-01 peers see 200 (the peer-group end), Jan-02 sees 250, Jan-04 sees the full running total. If you expected a per-row running total of 100, 200, 250, 320, you'd be surprised: the default frame treats peers as a group. Use Pattern 2 (unique tiebreaker + explicit ROWS) when you want per-row accumulation.
+> **Bonus default-frame surprise — SYMPTOM → CAUSE → FIX (iter587 PIN, read FIRST).**
+>
+> **Keyword anchors (so questions about this bug route HERE):** *running total wrong on tied dates, same-date rows show same running total, running total not accumulating one at a time, default frame RANGE lumps peers, ROWS vs RANGE running total, why are my cumulative values all the same on the same day, two events same day same cumulative value, running total stuck at end-of-day value.*
+>
+> **SYMPTOM.** A running total where rows sharing the same `ORDER BY` value (e.g. the same date) **ALL show the SAME total** (the end-of-that-date cumulative), instead of accumulating one at a time. On the four-row sample above, the user expected 100, 200, 250, 320 — but got **200, 200, 250, 320** (both Jan-01 rows show 200, the peer-group end).
+>
+> **CAUSE.** With `ORDER BY date` and **NO explicit frame**, the DEFAULT frame is `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`. `RANGE` is value-based and **includes ALL PEER rows tied on the `ORDER BY` value** — so all same-date rows share one frame, and therefore share one cumulative value (the sum through the end of the peer group). This is **NOT a bug in Trino** — it is the ANSI-SQL-defined default and matches the docs. Verified verbatim at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html): *"If the frame is not specified, it defaults to `RANGE UNBOUNDED PRECEDING`, which is the same as `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`"*, and the same docs note this frame *"contains all rows from the start of the partition up to the last peer of the current row"* — i.e. tied peers are lumped.
+>
+> **FIX.** Add **both** of the following — they fix the symptom together; either one alone is incomplete:
+> 1. An **explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`** frame clause (row-by-row, not value-based — each row gets its own per-row frame, no peer lumping).
+> 2. A **unique tiebreaker** in `ORDER BY` (e.g. `ORDER BY date, id` or `ORDER BY date, event_id`) so the row order among tied dates is deterministic.
+>
+> ```sql
+> SUM(amount) OVER (
+>   PARTITION BY tenant_id
+>   ORDER BY day, event_id                       -- unique tiebreaker → no peers
+>   ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW   -- explicit ROWS → no peer lumping
+> ) AS running_total
+> ```
+>
+> **ANTI-FIX — DO-NOT-RECOMMEND (inoculate against the iter586 backwards-fix class).** Do **NOT** "fix" this symptom by **relying on the default frame** or **switching to `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`** — the default RANGE frame **IS THE CAUSE** of the symptom (it lumps tied peers into one frame). Recommending it gives the user **MORE of the bug they reported**, not less. If a question reads "same-date rows all show the same cumulative value, how do I make them accumulate one at a time?" the answer is **NEVER** "just use the default frame" / "switch to RANGE" / "omit the frame clause" — that is the bug. The answer is **always** the explicit-ROWS + unique-tiebreaker pair above.
+>
+> **When the default RANGE is actually what you want.** If two events on the same day SHOULD report the **same** cumulative value (peer semantics — e.g. end-of-day cumulative reporting), then the default RANGE is correct and Pattern 1 above (omit the frame clause) is the right recommendation. The default-RANGE-as-fix recommendation is ONLY correct when the question's INTENT is "tied peers should share a value". The symptom above describes the OPPOSITE intent — the user wants per-row accumulation — so the explicit-ROWS + tiebreaker is the only correct fix.
+>
+> **Worked numbers on the sample data.** `SUM(amt) OVER (ORDER BY order_date)` with NO explicit frame gives 200, 200, 250, 320 — both Jan-01 peers see 200 (the peer-group end), Jan-02 sees 250, Jan-04 sees the full running total. Switching to `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` with `ORDER BY order_date, id` gives 100, 200, 250, 320 — per-row accumulation, deterministic. That is the difference the user is reporting; the fix is **always** Pattern 2 (explicit ROWS + unique tiebreaker).
 
 ### LEADING CANONICAL — Trino named WINDOW clause (define a window once, reference by name)
 

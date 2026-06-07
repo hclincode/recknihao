@@ -2544,6 +2544,46 @@ Verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io
 
 The two clauses are **disjoint**. You cannot pass a timestamp literal to `FOR VERSION AS OF`, and you cannot pass an integer snapshot ID to `FOR TIMESTAMP AS OF`. There is no Trino syntax that combines them into a single welded form.
 
+#### Clause↔argument-type un-confusable signal (iter587 PIN — read BEFORE writing time-travel SQL)
+
+> **Routing anchor — questions that route HERE first:** *"see the table as of yesterday morning", "see the table before a bad job", "as of a past point in time", "what did it look like at <time>", "table state at 3pm yesterday", "before the failed nightly run", "an hour before the bug shipped", "rewind to 8am UTC"* — every one of these is a **wall-clock time** question, so the right clause is `FOR TIMESTAMP AS OF`. (If the question instead pins a specific `snapshot_id` BIGINT from `$snapshots` or names a branch/tag, route to `FOR VERSION AS OF`.)
+>
+> **One-line mnemonic — the argument TYPE tells you the clause:**
+> *`TIMESTAMP AS OF` → a **TIMESTAMP / DATE** literal (a clock time). `VERSION AS OF` → a **snapshot_id** number (BIGINT) or a branch/tag NAME (string).*
+>
+> **RIGHT — exact-token pairings (copy these forms, never invent a hybrid):**
+>
+> ```sql
+> -- Wall-clock TIMESTAMP → TIMESTAMP AS OF (the argument is a TIMESTAMP literal).
+> SELECT * FROM iceberg.analytics.events
+> FOR TIMESTAMP AS OF TIMESTAMP '2026-06-06 08:00:00 UTC';   -- ✅ wall-clock time
+>
+> -- DATE literal also valid on TIMESTAMP AS OF (midnight session-TZ).
+> SELECT * FROM iceberg.analytics.events
+> FOR TIMESTAMP AS OF DATE '2026-06-06';                     -- ✅ midnight DATE
+>
+> -- BIGINT snapshot_id → VERSION AS OF (the argument is an unquoted BIGINT).
+> SELECT * FROM iceberg.analytics.events
+> FOR VERSION AS OF 8954597067493422955;                     -- ✅ snapshot_id BIGINT
+>
+> -- Branch / tag NAME string → VERSION AS OF (string ref name, looked up in $refs).
+> SELECT * FROM iceberg.analytics.events
+> FOR VERSION AS OF 'historical-tag-or-branch';              -- ✅ branch/tag name string
+> ```
+>
+> **WRONG — DO-NOT-WRITE (literal tokens listed verbatim so a keyword-grep lands HERE on the bug):**
+>
+> ```sql
+> -- ❌ FOR VERSION AS OF TIMESTAMP '2026-06-06 08:00:00 UTC'
+> -- ❌ FOR VERSION AS OF TIMESTAMP '2026-06-06 08:00:00'
+> -- VERSION AS OF does NOT take a timestamp. For a wall-clock time use FOR TIMESTAMP AS OF.
+>
+> -- ❌ FOR TIMESTAMP AS OF 8954597067493422955
+> -- TIMESTAMP AS OF does NOT take a snapshot_id. For a snapshot id use FOR VERSION AS OF.
+> ```
+>
+> **Why this matters (iter586 Q1 fab class).** The "wall-clock time" question almost always reads naturally as *"see the table as of yesterday morning"* — a wall-clock TIMESTAMP. Engineers who have rote-memorized "VERSION AS OF" then weld `FOR VERSION AS OF TIMESTAMP '...'` because both Trino phrases are in muscle memory at once. The signal above is `argument type → clause`: if the argument is a `TIMESTAMP` / `DATE`, the clause is `FOR TIMESTAMP AS OF`; if the argument is a BIGINT or a quoted ref name, the clause is `FOR VERSION AS OF`. Verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) — *`FOR VERSION AS OF` example*: `FOR VERSION AS OF 8954597067493422955` (a BIGINT snapshot identifier); *`FOR TIMESTAMP AS OF` example*: `FOR TIMESTAMP AS OF TIMESTAMP '2022-03-23 09:59:29.803 Europe/Vienna'` (a TIMESTAMP literal — "a point in time in the past"; a DATE literal also works as "a point a time in the past, treating it as midnight in the session timezone").
+
 ### Two worked examples on the canonical `iceberg.analytics.events` table
 
 **1. Snapshot-ID travel (audit reproducibility — exact, byte-for-byte stable):**
