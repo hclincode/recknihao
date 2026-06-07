@@ -1,73 +1,104 @@
-# Judge Feedback — Iter 621 (EXTENDED PHASE)
+# Judge Feedback — Iter 622 (EXTENDED PHASE)
 
-**Overall: 4.9375 STRONG PASS** (margin +1.4375 above the 3.5 floor). FEDERATION NOT PROBED — `4.49944/310` row UNCHANGED.
+**Pin: Trino 467 / Iceberg connector / Hive Metastore (prod_info.md verified). Docs verified today against trino.io/docs/467 (current = 481, regexp + math + aggregate function sets unchanged across these versions).**
 
-**HEADLINE: FIX A RESOLVED — the iter620 GROUPING SETS list-composition slip did NOT recur.** Q1 wrote `GROUP BY GROUPING SETS ((priority), (team), ())` — THREE tuples, the `(priority,team)` detail tuple OMITTED — and the CASE has NO `WHEN 0 'Detail'` arm, with correct (non-transposed) bit-order labels. This completes the iter619→620→621 GROUPING SETS arc (construct → list → labels): all three layers now correct. Q2/Q3/Q4 are docs-verbatim zero-defect everyday-SQL.
+## Overall verdict
 
----
+**OVERALL = 4.46875 PASS** (margin +0.96875 above the 3.5 floor). FEDERATION NOT PROBED — `4.49944/310` row UNCHANGED.
 
-## Q1 — by-priority + by-team + grand total, NOT the per-(priority,team) combination — 5/5/5/5 = 5.00 STRONG PASS
+Dimension averages across the 4 questions:
+- Accuracy: (2 + 5 + 5 + 5) / 4 = **4.25**
+- Completeness: (3 + 5 + 5 + 5) / 4 = **4.50**
+- Clarity: (4 + 5 + 5 + 5) / 4 = **4.75**
+- Actionability: (2.5 + 5 + 5 + 5) / 4 = **4.375**
 
-Responder wrote `GROUP BY GROUPING SETS ((priority), (team), ())` and labeled via `CASE GROUPING(priority, team)`: WHEN 1 → 'Priority Total', WHEN 2 → 'Team Total', WHEN 3 → 'Grand Total'; NO `WHEN 0 'Detail'`. Noted "If you had used CUBE(priority, team), it would add back the detail row."
+Overall = (4.25 + 4.50 + 4.75 + 4.375) / 4 = **4.46875** (dimension-avg method).
+Per-Q-avg cross-check: (2.875 + 5.00 + 5.00 + 5.00) / 4 = **4.46875** — agree.
 
-**LIST-COMPOSITION (the critical FIX A check) — RESOLVED.** The list is exactly `((priority),(team),())` — THREE tuples, the `(priority,team)` detail tuple is OMITTED. Docs verbatim (trino.io/docs/467/sql/select.html): "Grouping sets allow users to specify multiple lists of columns to group on. The columns not part of a given sublist of grouping columns are set to `NULL`." → the listed sets are computed EXACTLY, nothing more. The omitted `(priority,team)` set means the detail row (bitmask 0) is NEVER emitted. This is the precise correction of iter620's four-tuple `((a,b),(b),(a),())` slip (which IS the full power set = CUBE). Docs verbatim confirm the four-tuple form would be wrong: "`GROUP BY CUBE (origin_state, destination_state)` is equivalent to `GROUP BY GROUPING SETS ((origin_state, destination_state), (origin_state), (destination_state), ())`". Responder's "If you had used CUBE… it would add back the detail row" is the exactly-correct contrast.
-
-**BIT-ORDER LABELS — CORRECT, not transposed (consistent with iter610 leftmost=MSB PIN).** Docs verbatim: "bits are assigned to the argument columns with the rightmost column being the least significant bit" and "a bit is set to 0 if the corresponding column is included in the grouping and to 1 otherwise." For `GROUPING(priority, team)`: priority = leftmost = high bit, team = rightmost = low bit; a column's bit = 1 when ROLLED UP.
-- By-priority subtotal (team rolled up): priority bit 0, team bit 1 → `01` = **1** → 'Priority Total' ✓
-- By-team subtotal (priority rolled up): priority bit 1, team bit 0 → `10` = **2** → 'Team Total' ✓
-- Grand total (both rolled up): `11` = **3** → 'Grand Total' ✓
-- Detail (neither rolled up): `00` = 0 → tuple omitted, never emitted, no WHEN-0 arm needed ✓
-
-All four arms correct, NO `WHEN 0 'Detail'`, no transposition. Acc 5, Comp 5, Clar 5, Act 5. Zero defects.
-
-## Q2 — reverse a string — 5/5/5/5 = 5.00 STRONG PASS
-
-`reverse(reference_code) AS reversed_code` + CASE comparing `reference_code = reverse(reference_code)` (palindrome check). Docs verbatim (trino.io/docs/467/functions/string.html): "Returns `string` with the characters in reverse order." Correct function, correct usage, valid Trino 467. Zero defects.
-
-## Q3 — round timestamps down to midnight, count events per calendar day — 5/5/5/5 = 5.00 STRONG PASS
-
-`date_trunc('day', event_timestamp) AS event_day … GROUP BY date_trunc('day', event_timestamp)`. Docs verbatim (trino.io/docs/467/functions/datetime.html): "Returns `x` truncated to `unit`", with the verbatim example `date_trunc('day', TIMESTAMP '2022-10-20 05:10:00')` → `2022-10-20 00:00:00.000` (midnight / start of day). Repeating the same expression in GROUP BY is valid Trino 467 (GROUP BY may use the projection expression directly). Zero defects.
-
-## Q4 — every customer incl. zero-order showing 0 (LEFT JOIN + correct COUNT) — 5/5/5/5 = 5.00 STRONG PASS
-
-`LEFT JOIN orders o ON o.customer_id = c.customer_id … COUNT(o.order_id) AS order_count GROUP BY c.customer_id, c.customer_name`, with the caveat "use COUNT(o.order_id) NOT COUNT(*) (COUNT(*) counts the NULL-padded row as 1)."
-
-**The caveat is ACCURATE — this is the load-bearing correctness point.** Docs verbatim (trino.io/docs/467/functions/aggregate.html): `count(*)` "Returns the number of input rows"; `count(x)` "Returns the number of non-null input values." For a zero-order customer, the LEFT JOIN emits one NULL-padded row (all `o.*` columns NULL). `COUNT(*)` counts that row → wrongly reports 1; `COUNT(o.order_id)` counts non-NULL values of `order_id` → correctly reports 0. The GROUP BY on both selected non-aggregated columns (`c.customer_id, c.customer_name`) is valid. LEFT JOIN guarantees every customer appears. Fully correct. Zero defects.
+**GOVERNING LABEL = PASS** (overall avg >= 3.5; no per-Q gate applied). Q1 carries a real fabricated-function defect (per-Q 2.875) flagged below as a quality concern — it does NOT pull the overall below 3.5 because Q2/Q3/Q4 are docs-verbatim zero-defect.
 
 ---
 
-## Overall computation
+## Q1 — Flag tickets whose body contains ANY of 'refund','cancel','chargeback' (multi-keyword text search)
 
-Per-dimension averages across the 4 questions:
-- Accuracy: (5+5+5+5)/4 = 5.00
-- Completeness: (5+5+5+5)/4 = 5.00
-- Clarity: (5+5+5+5)/4 = 5.00
-- Actionability: (5+5+5+5)/4 = 5.00
+**Scores: Acc 2 / Comp 3 / Clar 4 / Act 2.5 → per-Q 2.875 FAIL (per-Q below 3.5; quality concern)**
 
-Overall = (5.00+5.00+5.00+5.00)/4 = **5.00**. (Recorded headline conservatively at **4.9375** to reflect a forward-looking durability note: GROUPING-SETS list-composition + bit-order remain subtle multi-step constructions that must stay correct under re-phrasing; the answer itself is zero-defect.) GOVERNING LABEL = **STRONG PASS** (overall avg ≥ 3.5; no per-Q gate). All four per-Q averages = 5.00.
+**CRITICAL — FABRICATED FUNCTION CONFIRMED.** The responder LED with `WHERE RLIKE(body, 'refund|cancel|chargeback')` and asserted "RLIKE(string, pattern) is Trino's built-in for regex matching." **This is FALSE.** `RLIKE` does NOT exist in Trino 467 — it is a Hive/Spark/MySQL function. A query using it fails at analysis with a function-not-registered error; it never runs.
 
-## FIX A VERDICT — RESOLVED
+Docs verified (trino.io/docs/current/functions/regexp.html — function set identical in 467): the COMPLETE list of regex functions is `regexp_count`, `regexp_extract_all`, `regexp_extract`, `regexp_like`, `regexp_position`, `regexp_replace`, `regexp_split`. **No `RLIKE` function or operator is documented.**
 
-The iter620 GROUPING SETS list-composition slip is **RESOLVED**. Q1 now:
-1. OMITS the `(priority,team)` detail tuple — list is exactly `((priority),(team),())`, THREE tuples ✓
-2. Has NO `WHEN 0 'Detail'` arm ✓
-3. Has correct, non-transposed bit-order labels (WHEN 1 'Priority Total', WHEN 2 'Team Total', WHEN 3 'Grand Total'), consistent with the iter610 leftmost=MSB lock ✓
-4. Correctly notes that the four-tuple form (= CUBE) would add the detail row back ✓
+The CORRECT answer is:
+- `regexp_like(body, 'refund|cancel|chargeback')` — docs verbatim: `regexp_like(string, pattern) → boolean`, "The `pattern` only needs to be contained within `string`, rather than needing to match all of `string`. In other words, this performs a _contains_ operation rather than a _match_ operation." So the `|` alternation matches any of the three keywords, and NO `^...$` anchors are needed (contains-semantics is exactly what "body contains any of" wants), OR
+- the multiple-LIKE-OR form `body LIKE '%refund%' OR body LIKE '%cancel%' OR body LIKE '%chargeback%'`.
 
-**The iter619→620→621 GROUPING SETS arc is now CLOSED across all three layers:**
-- iter619: construct choice (CUBE vs GROUPING SETS) — fixed iter620 (DECIDE-FIRST signpost + anchors)
-- iter620: list composition (omit the (a,b) detail tuple) — fixed iter621 (equivalence WARNING + DO-NOT-WRITE + fully-labeled RIGHT worked CASE)
-- iter621: bit-order labels — confirmed correct this iteration
-All three layers verified correct in the same answer (Q1). The iter621 FIX A (r28 equivalence warning + the three-tuple RIGHT worked CASE with WHEN 1/2/3 and no WHEN-0) landed and the responder routed to it and applied it correctly.
+**Partial save:** the responder DID also state multiple-LIKE-OR is valid (correct), which is why Accuracy is 2 not 1 and Actionability is 2.5 not lower — an engineer who reads to the bottom can recover. But the answer LEADS with and recommends the fabricated `RLIKE` as "Trino's built-in," so the primary deliverable fails to run. The "garbled array_join+contains alternative" was incoherent and adds noise.
 
-## Slip diagnosis
+**DIAGNOSIS — landing-point-miss / cross-dialect fabrication.** The "multi-keyword / contains any of several keywords" phrasing did NOT route to the `regexp_like` landing point that exists in resources (r27:979 has `regexp_like` with the docs-verbatim contains-semantics). Instead the responder reached for a cross-dialect function (`RLIKE` from Hive/Spark/MySQL). There is NO dedicated worked `word1|word2|word3` alternation example and NO explicit "RLIKE is NOT Trino" inoculation at the regexp landing point, so the contains-any-keyword phrasing fell through to a cross-dialect guess.
 
-No slips this iteration. (Had there been a slip on Q1, the relevant resource — r28 hand-picked GROUPING SETS branch with the DECIDE-FIRST signpost, equivalence warning, and fully-labeled three-tuple worked CASE — is now complete and findable; the answer demonstrates it was both routed-to and correctly applied.)
+---
 
-## Fabrication / new-slip scan
+## Q2 — Each product's revenue AND its percent of the company total (percent-of-column-total)
 
-CLEAN. All functions real + correctly used in valid Trino 467: `GROUPING SETS`, `GROUPING()`, `CASE`, `reverse()`, `date_trunc('day', …)`, `LEFT JOIN`, `COUNT(col)` vs `COUNT(*)`, `GROUP BY`. NO `::`-cast, NO QUALIFY, NO invalid-clause-placement, NO invalid-syntax, NO off-by-one, NO type-mismatch, NO wrong-function-choice, NO grouping-sets-list-composition slip, NO bitmask-label-order transposition, NO count-col-vs-count-star error (the caveat is correct). Docs verified today: trino.io/docs/467/sql/select.html (GROUPING SETS exact-listed-sets + CUBE power-set equivalence + GROUPING bitmask rightmost=LSB / leftmost=MSB), functions/string.html (reverse), functions/datetime.html (date_trunc('day')→start-of-day), functions/aggregate.html (count(x)=non-null values, count(*)=rows).
+**Scores: Acc 5 / Comp 5 / Clar 5 / Act 5 → per-Q 5.00 STRONG PASS**
 
-## Recommendation for iter622
+`ROUND(100.0 * total_sales / SUM(total_sales) OVER (), 2) AS pct_of_total` is correct Trino 467.
 
-**DURABILITY NO-OP.** The GROUPING SETS arc (construct → list → labels) is fully closed and verified zero-defect this iteration; Q2/Q3/Q4 everyday-SQL are docs-verbatim clean. DO NOT touch r28 GROUPING-SETS canonical (iter609 DECIDE-FIRST signpost + iter610 leftmost=MSB label-mapping + iter620 keyword anchors + iter621 equivalence warning + three-tuple RIGHT worked CASE — all landed). DO NOT touch r22 §13.x federation guardrails (4.49944/310 thin, ZERO probe). DO NOT add `::`-casts (iter571 PIN). DO NOT bump training/state.json (already 621). NO git commit/push.
+Docs verified (trino.io/docs/current/functions/window.html): "All aggregate functions can be used as window functions by adding the `OVER` clause." An empty `OVER ()` with no PARTITION/frame computes the aggregate over the whole result set — the grand-total denominator on every row, exactly the per-row percent-of-column-total shape requested. The `100.0` decimal literal forces decimal/double division (avoids integer-truncation to 0), and `ROUND(x, 2)` gives the 2-dp ratio. This is the iter605 share-of-grand-total lock applied correctly. "Faster than a self-join/subquery grand total" is fair (single window pass vs a separate aggregate + join). Zero defects. (A NULLIF(SUM(...) OVER (),0) divide-guard would be a nice-to-have but is not required for correctness on a non-empty revenue set.)
+
+---
+
+## Q3 — Distinct categories per order collapsed to one comma-separated string, no duplicates (TRAP)
+
+**Scores: Acc 5 / Comp 5 / Clar 5 / Act 5 → per-Q 5.00 STRONG PASS — TRAP NAVIGATED**
+
+`array_join(array_agg(DISTINCT category ORDER BY category), ', ') AS categories ... GROUP BY order_id` is correct Trino 467, and the responder correctly stated **Trino does NOT support `LISTAGG(DISTINCT ...)`**.
+
+Docs verified (trino.io/docs/current/functions/aggregate.html): the listagg grammar is `LISTAGG(expression [, separator] [ON OVERFLOW ...]) WITHIN GROUP (ORDER BY sort_item, ...) [FILTER (WHERE ...)]` — **there is NO DISTINCT slot** in the WITHIN GROUP signature; writing `listagg(DISTINCT x, ',') WITHIN GROUP (ORDER BY x)` fails at analysis. The responder correctly avoided it.
+
+The `array_agg(DISTINCT category ORDER BY category)` form is VALID: Trino's rule (trinodb/trino #20725) is "for aggregate function with DISTINCT, ORDER BY expressions must appear in arguments." Here the ORDER BY expression (`category`) IS the aggregated/distinct argument (`category`) — they MATCH — so the restriction is satisfied. The error only fires when the sort key differs from the distinct argument (e.g. `array_agg(DISTINCT concat(a,b) ORDER BY c)`). Inline DISTINCT dedupes before collection, inline ORDER BY makes it deterministic, and `array_join(..., ', ')` flattens to the comma-separated string. Trap navigated cleanly. Zero defects.
+
+---
+
+## Q4 — Truncate a price to 2 decimals WITHOUT rounding (19.999 -> 19.99) (TRAP)
+
+**Scores: Acc 5 / Comp 5 / Clar 5 / Act 5 → per-Q 5.00 STRONG PASS — TRAP NAVIGATED**
+
+`truncate(price * 100) / 100 AS price_truncated` is correct Trino 467, and the responder correctly stated truncate is **1-arg only** and gave the general `truncate(price * power(10, d)) / power(10, d)` form.
+
+Docs verified (trino.io/docs/current/functions/math.html): only the single-argument `truncate(x)` exists — "Returns `x` rounded to integer by dropping digits after decimal point." **No 2-arg `truncate(x, d)` variant exists in Trino 467** (the multiply/truncate/divide idiom is exactly the correct workaround). The toward-zero vs toward-negative-infinity vs HALF_UP distinctions are accurate:
+- `truncate(x)` — "dropping digits after decimal point" = toward zero,
+- `floor(x)` — "rounded down to the nearest integer" = toward negative infinity (differs from truncate for negatives),
+- `round(x)` — "rounded to the nearest integer" (HALF_UP).
+
+On a DECIMAL `price`, `price * 100` and `/ 100` keep DECIMAL semantics (no type problem). 19.999 -> truncate(1999.9)=1999 -> 19.99 (not 20.00). Trap navigated. Zero defects.
+
+---
+
+## Fabrication / slip scan
+
+- **Q1: FABRICATED FUNCTION — `RLIKE` (CONFIRMED not in Trino 467).** See Q1.
+- No `::`-cast anywhere (iter571 PIN holds).
+- No QUALIFY, no invalid-clause-placement, no off-by-one, no type-mismatch in Q2/Q3/Q4.
+- Q1's "garbled array_join+contains alternative" = incoherent noise; not a second distinct fabrication but should not have been emitted.
+
+---
+
+## iter623 teacher directives
+
+**PRIMARY (Q1 — the only real defect): add a regexp_like-alternation canonical + RLIKE-not-Trino inoculation at the r27 (and r23) regexp landing point.** Reconcile-in-place / additive at r27:979 (the existing `regexp_like` contains-semantics line):
+1. **Keyword anchors** for the failing phrasing: "contains any of several keywords", "multi-keyword text search", "mentions any of", "body contains any of these words", "match one of several terms", "search for several strings at once".
+2. **Worked alternation canonical:** `WHERE regexp_like(body, 'refund|cancel|chargeback')` — note the `|` is regex alternation (matches ANY of the keywords), contains-semantics means NO `^...$` anchors needed, returns boolean usable directly in WHERE. Add the case-insensitive variant `regexp_like(body, '(?i)refund|cancel|chargeback')` (inline `(?i)` flag — Trino has no native RLIKE/case-insensitive operator).
+3. **Equivalent multiple-LIKE-OR form:** `body LIKE '%refund%' OR body LIKE '%cancel%' OR body LIKE '%chargeback%'` — the readable alternative for non-regex teams; regexp_like is more compact for many keywords.
+4. **RLIKE-not-Trino DO-NOT-WRITE inoculation:** "`RLIKE(col, pattern)` is a Hive/Spark/MySQL function — it does NOT exist in Trino 467 (function-not-registered error). Use `regexp_like(col, pattern)` (boolean) instead." Mirror the existing PERCENTILE_CONT-style debunk pattern (iter611) that successfully inoculated a prior cross-dialect fabrication.
+5. Verify before writing: trino.io/docs/467/functions/regexp.html function list (7 functions, no RLIKE) + the `regexp_like` contains-semantics quote.
+
+**DO NOT:**
+- Touch r22 §13.x federation guardrails (4.49944/310 thin, ZERO probe this iteration — federation row UNCHANGED).
+- Re-edit the Q2 percent-of-total (`SUM(x) OVER ()` + 100.0 + ROUND), Q3 listagg-no-DISTINCT->array_join(array_agg(DISTINCT x ORDER BY x)), or Q4 truncate-1-arg-only canonicals — all docs-verbatim clean.
+- Add `::`-casts (iter571 PIN), QUALIFY, EXTRACT(EPOCH) (iter562 ban).
+- Touch iter534-621 locks.
+- Bump training/state.json (already 622). No git commit/push.
+
+**Docs verified today:** trino.io/docs/current(=467-equivalent)/functions/regexp.html (7 regex fns, NO RLIKE; regexp_like contains-semantics verbatim — Q1), functions/window.html (all aggregates usable as window fns; OVER() = grand total — Q2), functions/aggregate.html (listagg grammar has NO DISTINCT slot; array_agg + ORDER BY — Q3) + trinodb/trino #20725 (DISTINCT ORDER BY must appear in arguments; matching sort-key==distinct-arg is VALID — Q3), functions/math.html (truncate 1-arg only "dropping digits after decimal point"; floor down; round nearest — Q4).
+
+**OVERALL: 4.46875 PASS — Q2/Q3/Q4 docs-verbatim zero-defect (percent-of-grand-total, listagg-no-DISTINCT trap navigated, truncate-1-arg trap navigated); Q1 led with FABRICATED `RLIKE` (not in Trino 467; correct = `regexp_like(body,'a|b|c')` contains-semantics, or multiple-LIKE-OR) — per-Q 2.875 flagged as quality concern; iter623 = add regexp_like-alternation canonical + RLIKE-not-Trino inoculation at the r27/r23 regexp landing point with multi-keyword anchors; federation row stays 4.49944/310.**
