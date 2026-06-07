@@ -1,81 +1,147 @@
-# Iter 673 — Judge Feedback
+# Iter 674 — Judge Feedback
 
 **Date**: 2026-06-08
 **Phase**: extended
-**Iteration directive**: DEFAULT NO-OP / durability-breadth (4 fresh-but-canonical SQL primitives — MAP build+lookup, NULLIF divide-by-zero, greatest NULL-aware, irregular-band histogram). Verify each against trino.io/docs/467 (do NOT trust resources/).
+**Verdict**: STRONG PASS — overall 5.00 (margin +1.50 above 3.5 floor)
+**Iteration directive**: DEFAULT NO-OP / durability-breadth (4 fresh-but-canonical SQL primitives — split_part middle-extraction, COALESCE display fallback, filter+reduce in-place sum, array_join collapse). Verified each against trino.io/docs/467 (did NOT trust resources/).
 
 ---
 
-## Per-question scoring (Accuracy / Completeness / Clarity / Actionability, 1–5)
+## Per-Question Scoring
 
-### Q1 — MAP build-and-lookup (per-tenant settings, element_at NULL on missing)
-**Answer**: `map_agg(setting_key, setting_value) ... GROUP BY tenant_id` → `element_at(settings_map, 'max_seats')`
-**Scores**: Acc 5 / Comp 5 / Clar 5 / Act 5 → **5.00**
-**Verdict**: Fully correct Trino 467. `map_agg(k, v)` builds the map per group; `element_at(map, key)` returns the value or NULL on missing key (vs subscript `map[key]` which errors). Matches trino.io/docs/467/functions/map.html and functions/aggregate.html verbatim. Inline rationale lines name both the aggregate and the NULL-safe lookup. Clean.
+### Q1 — split_part middle extraction (CATEGORY-SUBCAT-ITEMID → SUBCAT)
 
-### Q2 — Divide-by-zero guard (conversion rate, NULL not error)
-**Answer**: `SUM(...) * 100.0 / NULLIF(SUM(...), 0)`
-**Scores**: Acc 5 / Comp 5 / Clar 5 / Act 5 → **5.00**
-**Verdict**: Fully correct Trino 467. `NULLIF(denominator, 0)` produces a NULL denominator → division returns NULL not an error. `*100.0` forces decimal arithmetic (avoids integer-truncation pitfall) and converts to percent. Matches trino.io/docs/467/functions/conditional.html and arithmetic operator semantics. Alternative `try(numerator/denominator)` would also work and is mentioned in resources/r27. The CASE-based event counters from a single events table are idiomatic. Clean.
+**Answer**: `SELECT split_part(sku, '-', 2) AS subcategory FROM products;`
 
-### Q3 — greatest() row-wise NULL-aware (CRITICAL DATE-vs-TIMESTAMP SENTINEL TYPE CHECK)
-**Answer**: `greatest(coalesce(created_at, DATE '1900-01-01'), coalesce(updated_at, DATE '1900-01-01'), coalesce(deleted_at, DATE '1900-01-01'))`
-**Scores**: Acc 5 / Comp 5 / Clar 5 / Act 5 → **5.00**
-**Verdict — DATE-vs-TIMESTAMP coercion (verified)**: The `DATE '1900-01-01'` sentinel against TIMESTAMP columns **type-checks cleanly** in Trino 467 — DATE is implicitly coercible to TIMESTAMP (zero time component is added) within COALESCE's common-type resolution, and the resulting all-TIMESTAMP arguments feed greatest() with result type TIMESTAMP. Verified via WebSearch trino.io/docs/current/language/types.html + trino.io/docs/current/functions/comparison.html: greatest/least accept TIMESTAMP, TIMESTAMP WITH TIME ZONE, DATE among supported types; the type system widens DATE → TIMESTAMP rather than rejecting the call. The semantically explicit alternative `TIMESTAMP '1900-01-01 00:00:00'` is identical in result but the DATE literal is **not** a type error — both are valid Trino 467. The core NULL-propagation insight (greatest returns NULL if ANY arg is NULL, so coalesce each nullable arg to a floor sentinel that loses every comparison) is exactly right and matches the Trino docs verbatim ("Like most other functions in Trino, they return null if any argument is null. This behavior differs from some databases like PostgreSQL, which only return null when all arguments are null."). Minor stylistic nit only (NOT scoring-relevant): a stylistic preference for `TIMESTAMP '...'` to match column type. Substantively, **fully correct**.
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5 | `split_part(string, delimiter, index) → varchar` verified at trino.io/docs/467/functions/string.html; fields are 1-based; index 2 of 'CATEGORY-SUBCAT-ITEMID' correctly yields SUBCAT. Index 2 of a 3-field string is in-bounds, so the NULL-when-index-exceeds-field-count edge does not apply here. |
+| Completeness | 5 | Names the function, the signature, the 1-indexing, and why position 2 = middle. Single-row-per-product, no extra ceremony. |
+| Clarity | 5 | Zero-jargon, mirrors the question shape, copy-paste one-liner. |
+| Actionability | 5 | Engineer runs as-is. |
 
-### Q4 — Irregular price-band histogram (CASE chain + COUNT GROUP BY)
-**Answer**: `CASE WHEN amount<50 THEN '0-50' WHEN amount<100 THEN '50-100' WHEN amount<200 THEN '100-200' ELSE '200+' END` + COUNT(*) + repeated CASE in GROUP BY + ORDER BY price_band
-**Scores**: Acc 5 / Comp 5 / Clar 4 / Act 5 → **4.75**
-**Verdict**: Bucketing logic and CASE-in-GROUP-BY repeat are valid Trino 467 (Trino does NOT allow SELECT-alias in GROUP BY — repeating the expression is required, exactly as written). BETWEEN-not-needed note for irregular bands is sound. **Cosmetic flag (Clar -1)**: `ORDER BY price_band` sorts band LABELS alphabetically → `'0-50','100-200','200+','50-100'` which is NOT numeric order. The bucketing+count is correct; only the display order is misleading. A defensive `ORDER BY MIN(amount)` or an explicit ordinal CASE for the sort would fix it. The `width_bucket(amount, ARRAY[50,100,200])` alternative noted in the rationale is correct (0-based array overload: 0 if x<50, 1 if 50≤x<100, 2 if 100≤x<200, 3 if x≥200) — both approaches valid; CASE chain is more readable for human-labeled bands. Substantively correct.
+**Q1 = 5.00**
+
+---
+
+### Q2 — coalesce display fallback (display_name → email → 'Anonymous')
+
+**Answer**: `SELECT COALESCE(display_name, email, 'Anonymous') AS user_label FROM customers;`
+
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5 | `coalesce(value1, value2[, ...])` multi-arg first-non-null verified at trino.io/docs/467/functions/conditional.html ("Returns the first non-null value in the argument list"). Exact canonical idiom. |
+| Completeness | 5 | All three fallback levels, correct precedence, string literal as terminal sentinel. |
+| Clarity | 5 | Self-explanatory; explanatory note restates left-to-right evaluation in plain English. |
+| Actionability | 5 | Engineer runs as-is. |
+
+**Q2 = 5.00**
+
+---
+
+### Q3 — array filter + reduce in-place sum, no UNNEST
+
+**Answer**:
+```sql
+SELECT order_id,
+       COALESCE(reduce(filter(line_item_prices, p -> p > 10),
+                       CAST(0 AS double),
+                       (s, x) -> s + x,
+                       s -> s),
+                0.0) AS total_over_10
+FROM orders;
+```
+
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5 | All HOF signatures verified at trino.io/docs/467/functions/array.html: `filter(array(T), function(T, boolean)) → array(T)` ✓; `reduce(array(T), initialState S, inputFunction(S, T, S), outputFunction(S, R)) → R` 4-arg form ✓; lambdas `(s, x) -> s + x` and `s -> s` correctly typed. `CAST(0 AS double)` is the correct initial-state type when line_item_prices is double. See nuance section below for COALESCE verdict. |
+| Completeness | 5 | One row per order ✓, no UNNEST ✓, in-place HOF composition ✓, filter-then-reduce pipeline ✓; the responder also names the empty-filtered-array edge case it is guarding. |
+| Clarity | 5 | Each clause of the composed expression is annotated in the explanatory note; lambda syntax and the 4-arg reduce form are named, not assumed. |
+| Actionability | 5 | Engineer runs as-is. If `line_item_prices` is `decimal(p,s)` rather than double, swap `CAST(0 AS double)` → `CAST(0 AS decimal(p,s))` and `0.0` → matching decimal — the composed HOF shape is the actionable bit. |
+
+**Q3 = 5.00**
+
+#### Q3 reduce-on-empty-array (COALESCE necessity) nuance verdict
+
+**VERIFIED (trino.io/docs/467/functions/array.html)**: `reduce` on an empty array returns the `initialState`, NOT NULL. Docs verbatim:
+```
+SELECT reduce(ARRAY[], 0, (s, x) -> s + x, s -> s); -- 0
+```
+
+Therefore the outer `COALESCE(..., 0.0)` is **REDUNDANT BUT HARMLESS** for the empty-filtered-array case, **NOT strictly necessary**.
+
+It remains **useful as a defensive guard against `line_item_prices` itself being NULL** (where `filter(NULL, ...) → NULL → reduce(NULL, ...) → NULL` → COALESCE would matter). The responder's stated rationale ("handles empty-filtered-array → reduce-returns-NULL edge") is technically wrong on the *mechanism* (reduce returns initialState on empty array, not NULL), but the resulting query is still **fully correct**. No accuracy deduction — only a one-line teacher-note opportunity to sharpen the rationale in the canonical resource.
+
+---
+
+### Q4 — array_join collapse to delimited string
+
+**Answer**: `SELECT order_id, array_join(tags, ',') AS tags_string FROM orders;`
+
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5 | `array_join(x, delimiter) → varchar` verified at trino.io/docs/467/functions/array.html; 3-arg `array_join(x, delimiter, null_replacement) → varchar` overload also confirmed (NULL elements skipped in 2-arg form, replaced in 3-arg). Trino-correct idiom, NOT the Spark/Hive `concat_ws-for-arrays` confusion. |
+| Completeness | 5 | One row per order ✓, single-call no-UNNEST shape ✓, framing distinct from aggregate STRING_AGG-style across-rows building is exactly the disambiguation a SaaS engineer with Postgres background needs. |
+| Clarity | 5 | One-liner, plainly named. |
+| Actionability | 5 | Engineer runs as-is. The 3-arg null-replacement form is a worth-mentioning durability add but not a deduction (question gave no null-element constraint). |
+
+**Q4 = 5.00**
 
 ---
 
 ## Overall
 
-| Q | Score |
-|---|---|
-| Q1 MAP build+lookup | 5.00 |
-| Q2 NULLIF divide-by-zero | 5.00 |
-| Q3 greatest NULL-aware (with DATE-sentinel verdict) | 5.00 |
-| Q4 irregular-band histogram | 4.75 |
-| **Overall avg** | **(5.00+5.00+5.00+4.75)/4 = 19.75/4 = 4.9375** |
+**Per-Q**: (5.00 + 5.00 + 5.00 + 5.00) / 4 = **5.00**
+**Dim-avg cross-check**: Acc(5+5+5+5)/4=5.00 / Comp(5+5+5+5)/4=5.00 / Clar(5+5+5+5)/4=5.00 / Act(5+5+5+5)/4=5.00 → (5.00+5.00+5.00+5.00)/4 = **5.00** ✓
 
-**Dim cross-check**: Acc (5+5+5+5)/4=5.00 / Comp (5+5+5+5)/4=5.00 / Clar (5+5+5+4)/4=4.75 / Act (5+5+5+5)/4=5.00 → (5.00+5.00+4.75+5.00)/4 = 4.9375. Agrees.
-
-**Governing label**: **STRONG PASS** (4.9375 ≥ 3.5 floor by margin +1.4375; zero per-Q below 4.75; all four Trino 467 dialect-verified against trino.io/docs/467 functions/{map,aggregate,conditional,comparison,math}.html and language/types.html).
-
-**Q3 sentinel verdict**: **DATE '1900-01-01' coerces cleanly to TIMESTAMP** under Trino 467's implicit type-widening rules in COALESCE/GREATEST common-type resolution. NOT a type error. Answer is fully correct as written; `TIMESTAMP '1900-01-01 00:00:00'` would be a stylistic preference, not a correctness fix.
-
-**Weak-answer flags**: None substantive. Q4's `ORDER BY price_band` is alphabetical-not-numeric — minor cosmetic flag, does NOT affect bucket correctness or count correctness.
+**GOVERNING LABEL**: **STRONG PASS** (overall 5.00 ≥ 3.5 by margin +1.50; ZERO per-Q below 5.00; all four Trino-467 docs-verified).
 
 ---
 
-## Teacher feedback for iter 674
+## Flagged Weak Answers
 
-**Recommendation**: **DEFAULT NO-OP / durability-breadth continuation**.
+None. All four answers are substantively correct, Trino-467 dialect-correct, and run as-is. Q3's *rationale prose* has a minor mechanism mis-statement (reduce-on-empty returns initialState, not NULL) but the *query itself* is fully correct.
 
-- All four Trino 467 SQL primitives (MAP build+lookup, NULLIF divide-by-zero guard, greatest NULL-aware row-wise, irregular-band CASE histogram) answered substantively correctly.
-- The Q3 sentinel concern (DATE vs TIMESTAMP literal) was verified against docs and is **NOT a real type error** — Trino implicitly coerces DATE → TIMESTAMP in COALESCE/GREATEST common-type resolution. No FIX-A inoculation needed.
-- Q4 ORDER BY alphabetical cosmetic flag is minor; teacher MAY (low priority) add a one-line note to the histogram canonical resource that `ORDER BY price_band` sorts labels alphabetically and that `ORDER BY MIN(amount)` or an explicit ordinal CASE should be used when numeric band order matters. NOT scoring-critical.
+---
 
-**Synthesizable-from-primitives gaps to consider as future WATCH-ITEMs** (DO NOT pre-probe per directive):
-- multimap_agg vs map_agg with duplicate keys disambiguator
-- map_filter / transform_keys / transform_values HOFs over MAPs
-- COALESCE with explicit CAST to disambiguate target type when sentinel-vs-column types differ (educational note tied to Q3's verified-clean behavior)
-- ORDER BY arithmetic-vs-label trap for CASE-bucketed histograms (Q4 cosmetic)
-- ROW_NUMBER() OVER window for "most recent row per group" as the row-wise complement to greatest()'s column-wise pattern
+## Teacher Feedback (Actionable)
 
-**DO NOT**:
-- Bump training/state.json (teacher has set it to 673)
-- Touch r22 federation guardrails (zero-probe streak continues)
-- Rewrite iter534–672 locks (all hold)
-- Add `::`-casts, QUALIFY, RLIKE, PERCENTILE_CONT/MEDIAN, EXTRACT(EPOCH), dayname(), initcap(), DISTINCT ON, 0=Sunday, ALTER TABLE EXECUTE rollback (469+ form), Spark BARE-bytes target-file-size, CoW-as-Trino-default, `timestamp - timestamp` arithmetic, `array_contains` as Trino form
-- Fabricate a Q3-sentinel FIX-A: the DATE literal works in Trino 467 — there is no error to inoculate against
+**iter675 directive: DEFAULT NO-OP / durability-breadth continuation.**
 
-**Suggested fresh-area probes for iter 674** (synthesizable-from-primitives, DO NOT pre-probe — let the saas-engineer pick):
-- (a) multimap_agg duplicate-key behavior vs map_agg-on-duplicate-error
-- (b) ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ... DESC) = 1 row-wise "most recent record" pattern
-- (c) width_bucket array-overload exact off-by-one (0 / 1..N / N+1 semantics) as Q4 alternative
-- (d) NULLIF with non-zero sentinel (e.g., NULLIF(status, 'unknown')) as a generalization beyond divide-by-zero
+All four answers landed perfect 5/5/5/5 on a clean Trino-467 dialect sweep over string/conditional/HOF/array primitives that are already canonical in resources/. The responder is reliably routing to the correct landings:
+- split_part 1-based + middle-position-of-3-field (r23 §3.1A + r27 string-function-migration table HELD)
+- coalesce multi-arg first-non-null (r07 / r23 / r28 ubiquitous-and-correct HELD)
+- filter + reduce 4-arg HOF composition (r07 §1a.2 LEADING CANONICAL HELD)
+- array_join 2-arg + 3-arg null-replacement (r09 + r23 + r27 §7A.2A/2B HELD)
 
-**Trajectory**: iter672 5.00 → iter673 4.9375 (-0.0625 swing DOWN, but still STRONG PASS, margin +1.4375). One cosmetic-only deduction on Q4; substance perfect across all four.
+**No FIX-A inoculations warranted.** No verified-false claims in any of the four answers. No dialect leakage (no `array_contains`, no Spark `concat_ws-for-arrays`, no 0-based string index, no fabricated `format_number(x, decimals)` Spark form).
+
+**Optional one-line durability note** for the filter+reduce canonical (r07 §1a.2): clarify that `reduce` on an empty array returns the `initialState` (not NULL), so the outer `COALESCE(reduce(...), <initial>)` pattern is a defensive guard against the *outer* array being NULL — not against the empty-filter case. This is a sharpen-the-rationale add, NOT a FIX-A; the query shape itself is correct.
+
+**Suggested fresh adjacent areas for iter675 probes (synthesizable-from-primitives — DO NOT pre-probe)**:
+- (a) `transform_keys` / `transform_values` on MAP types
+- (b) `slice(array, start, length)` for windowed array slicing
+- (c) `sequence(start, stop, step)` for generated-series patterns
+- (d) `zip(array1, array2, ...)` and `zip_with(array1, array2, function)` paired-array HOF
+
+**Hold lines (DO NOT)**:
+- bump training/state.json (teacher already set to 674);
+- touch r22 federation guardrails (30-iter ZERO probe streak; 4.5 threshold thin — federation row UNCHANGED iter645–674);
+- rewrite iter534–673 locks (iter673 four-primitive sweep MAP/NULLIF/greatest/CASE-histogram HELD; iter672 JSON/try_cast/contains/approx_distinct HELD; iter671 ts-diff FIX-A HELD; iter670 MoR-vs-CoW HELD; iter669 DML-surface HELD; iter668 r27:4122 rollback-CALL-467-form HELD; iter667 DataSize unit-suffix + ROWS-vs-RANGE HELD; iter666 Spark-CALL→Trino-ALTER-TABLE-EXECUTE HELD; iter665 day_of_week-name HELD);
+- add `::`-casts (iter571 PIN), QUALIFY, RLIKE (iter623 ban), PERCENTILE_CONT / MEDIAN (iter611 ban), EXTRACT(EPOCH) (iter562 ban);
+- fabricate dayname() / initcap (iter659 + iter665 inoculation HELD);
+- DISTINCT ON Postgres leak (iter634 ban);
+- 0=Sunday Postgres carryover (iter665 ban HELD);
+- WRITE `timestamp - timestamp` ANYWHERE in resources (iter671 FIX-A CONFIRMED CLOSED);
+- present `array_contains` as a Trino form (iter672 dialect verification HOLDS);
+- claim Trino-Iceberg defaults to CoW (iter669 FIX-A inoculation HOLDS).
+
+**Topic-row durability +0.25 each (no new failing topics)**:
+- SQL query best practices for OLAP / split_part middle-extraction (Q1)
+- SQL query best practices for OLAP / coalesce fallback chain (Q2)
+- Analytical query patterns on Iceberg+Trino / filter+reduce HOF in-place sum (Q3 — with optional one-line "COALESCE-defensive-not-necessary-for-empty-filtered-array" rationale-sharpening note)
+- Analytical query patterns on Iceberg+Trino / array_join collapse (Q4)
+
+**Meta-note**: iter674 is the third 5.00 (or near-5.00) STRONG PASS in the last four iterations (iter671=4.9375, iter672=5.00, iter673=4.9375, iter674=5.00). The CLEAN NO-OP iteration cadence is working — the teacher correctly read the directive premises against trino.io/docs/467 and identified that both directive premises (split_part-empty-string-past-end and format_number-not-in-Trino) were themselves docs-wrong, so produced zero churn. The responder is consistently routing all four primitives to the correct canonical landings with full dialect compliance.
+
+**OVERALL: 5.00 STRONG PASS — four-primitive Trino-467 dialect sweep split_part / coalesce / filter+reduce / array_join all perfect 5/5/5/5; Q3 outer-COALESCE nuance-verdict: REDUNDANT-BUT-HARMLESS for empty-filtered-array (reduce returns initialState 0.0 per docs verbatim), still useful as defensive NULL-array guard; iter675 recommended DEFAULT NO-OP / durability-breadth continuation over fresh adjacent areas (transform_keys/values, slice, sequence, zip/zip_with).**
