@@ -422,9 +422,9 @@ dbt 1.8 renamed the YAML key from `tests:` to `data_tests:` to disambiguate from
 
 - **Need EVERY combination of subtotals — independent margins on EACH dimension** ("all X for each Y" AND "all Y for each X") **+ grand total → `CUBE(a, b)`.** This is the one to use when the question asks for subtotals on *both* dimensions (e.g. "all products within each region" AND "all regions for each product category").
 - **Need ONLY hierarchical / prefix subtotals** — a drill-down where each level rolls up the **RIGHTMOST** column (country → state → city totals, never city-across-all-countries) **→ `ROLLUP(a, b)`.**
-- **Need a hand-picked specific set of groupings → `GROUPING SETS ((...), (...))`.**
+- **Need a hand-picked SPECIFIC set of groupings — "by X AND by Y but NOT the X-Y detail", "specific subtotals only", "just those summaries / just those levels", "not every combination", "subtotals without the cross-tab detail", "by region AND by category but not per-region-per-category", "those three separate summaries" → `GROUPING SETS ((a), (b), ())`.** This is the one to use when the user wants a CHOSEN list of summaries (e.g. by-region totals + by-category totals + grand total) **and explicitly does NOT want the full per-region-per-category cross-tab detail row.** Do NOT reach for `CUBE` here — `CUBE` adds back the `(a, b)` detail row you were told to exclude.
 
-**KEY:** `ROLLUP(a, b)` emits `(a,b), (a), ()` and **SKIPS the `(b)`-only grouping**. `CUBE(a, b)` emits **ALL** of `(a,b), (a), (b), ()`. If you want both per-`a` **AND** per-`b` subtotals, **ROLLUP is WRONG — use CUBE.**
+**KEY:** `ROLLUP(a, b)` emits `(a,b), (a), ()` and **SKIPS the `(b)`-only grouping**. `CUBE(a, b)` emits **ALL** of `(a,b), (a), (b), ()` — **including the `(a, b)` detail row**. `GROUPING SETS ((a), (b), ())` emits **EXACTLY** the three sets you list — by-`a`, by-`b`, grand total — and **NO `(a, b)` detail row**. If you want both per-`a` **AND** per-`b` subtotals, **ROLLUP is WRONG — use CUBE.** If you want both per-`a` **AND** per-`b` subtotals **but NOT** the `(a, b)` cross-tab detail, **CUBE is WRONG — use `GROUPING SETS ((a), (b), ())`.**
 
 ```sql
 -- Question: subtotals on BOTH region and category (per-region AND per-category margins) + grand total.
@@ -434,7 +434,20 @@ GROUP BY ROLLUP(region, category)
 GROUP BY CUBE(region, category)
 ```
 
-Verified against [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html): *"The `ROLLUP` operator generates all possible subtotals for a given set of columns"* (hierarchical / prefix subtotals — each level rolls up the rightmost remaining column) vs *"The `CUBE` operator generates all possible grouping sets (i.e. a power set) for a given set of columns"* (all 2^N combinations). ROLLUP = hierarchical prefix subtotals; CUBE = the full power set. The (b) value table and (c) worked example just below show ROLLUP; section (e) below has the full CUBE comparison.
+```sql
+-- Question: by-region totals AND by-category totals AND grand total — but EXPLICITLY NOT the per-region-per-category detail.
+-- "specific subtotals only" / "just those three separate summaries" / "not every combination" / "subtotals without the cross-tab detail".
+-- WRONG — CUBE(region, product_category) emits the FULL power set INCLUDING the (region, product_category) DETAIL row
+--         (GROUPING bitmask 0). That detail row is exactly what the user told you to exclude:
+GROUP BY CUBE(region, product_category)
+-- RIGHT — GROUPING SETS lists EXACTLY the three wanted summaries and nothing else:
+--         by-region (GROUPING bitmask 1) + by-category (GROUPING bitmask 2) + grand total (GROUPING bitmask 3), NO detail row:
+GROUP BY GROUPING SETS ((region), (product_category), ())
+```
+
+**The 3-way rule in one line:** hand-picked SPECIFIC subtotals (NOT the full cross-tab) → `GROUPING SETS ((a), (b), ())`; EVERY combination / full power set (incl. the `a`×`b` detail) → `CUBE(a, b)`; hierarchical / prefix drill-down → `ROLLUP(a, b)`.
+
+Verified against [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html): *"The `ROLLUP` operator generates all possible subtotals for a given set of columns"* (hierarchical / prefix subtotals — each level rolls up the rightmost remaining column) vs *"The `CUBE` operator generates all possible grouping sets (i.e. a power set) for a given set of columns"* (all 2^N combinations). ROLLUP = hierarchical prefix subtotals; CUBE = the full power set. By contrast, *"Grouping sets allow users to specify multiple lists of columns to group on"* — `GROUPING SETS` computes **exactly** the listed groups and nothing more (each listed set is computed like its own simple `GROUP BY`, equivalent to a `UNION ALL` of those `GROUP BY`s), so it is the only construct that gives you by-`a` + by-`b` + grand-total **without** the `(a, b)` detail row that `CUBE`'s power set always includes. The (b) value table and (c) worked example just below show ROLLUP; section (e) below has the full CUBE comparison.
 
 > **Why this block sits at the top of r28:** when an Oracle/Snowflake/Postgres engineer migrates a report query that uses `GROUP BY ROLLUP(...)` and the `GROUPING()` function to label subtotal vs grand-total rows, the bitmask semantics are easy to get wrong. The specific failure observed in production: writing `CASE GROUPING(region, category) WHEN 2 THEN 'Grand Total'` for a 2-column `ROLLUP(region, category)`. That is **WRONG**. The grand-total value is **3** (binary `11`), not 2. Value 2 (binary `10`) does **not appear at all** in a 2-column ROLLUP. The rest of this block explains exactly why.
 
