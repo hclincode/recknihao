@@ -553,6 +553,8 @@ By contrast, `json_extract_scalar(properties_raw, '$.key')` over a JSON string c
 
 ### CRITICAL — use `element_at()`, NOT `[]`, for MAP access in Trino
 
+> **Disambiguator — wrong tool for ROW columns.** If your column is a native `ROW(...)` / struct (named fields), use **dot notation** `col.field` — `element_at` is for **MAP / ARRAY only** (no `element_at(row(...), ...)` overload exists; calling it on a ROW is a Trino type error). See the **native-ROW dot-access LEADING CANONICAL** below before continuing.
+
 The single most common newcomer footgun on MAP columns:
 
 ```sql
@@ -754,9 +756,60 @@ FROM iceberg.analytics.user_events;
 
 **Cross-reference.** This is the same data-type family as the MAP/`element_at` content above (use `element_at(map_col, key)` to read individual MAP values; use `CAST(map_col AS JSON)` to export the whole MAP as JSON). For string-aggregation in Trino (which is NOT `string_agg`/`group_concat`), see [resource 27 § 7A.2A — Oracle WINDOWED LISTAGG → Trino](27-oracle-plsql-to-dbt-trino.md) and the inline note immediately below.
 
+### LEADING CANONICAL — get a field out of a native ROW / struct column (dot notation col.field, no CAST needed)
+
+> **Keyword anchors so the responder lands here:** nested structure column, struct column, ROW column, get a field out of a struct, address.city, native struct field, Iceberg struct/nested column, select one field from a nested column, filter on a struct field, struct dot notation, row type field access, pull a field from a nested column, native ROW field access Trino, access ROW field, ROW(...) column dot notation, get value of a struct field, struct field SELECT Trino, native nested column field, Iceberg nested column dot access, address.state WHERE clause, project a single struct field, no CAST struct field.
+
+**The fact in one sentence.** If a column is ALREADY typed as `ROW(...)` (a native Iceberg struct / nested column), you read its named fields with the dot field-reference operator — `col.field` — directly. **No `CAST`, no `json_parse`, no `element_at`, no `json_extract_scalar` is needed.** Per [trino.io/docs/467/language/types.html](https://trino.io/docs/467/language/types.html) verbatim: *"Named row fields are accessed with field reference operator (`.`)."* The same docs page shows the canonical form `CAST(ROW(1, 2.0) AS ROW(x BIGINT, y DOUBLE)).x` — but on a TABLE COLUMN already typed `ROW(...)` you skip the CAST and write `col.x` directly.
+
+**Worked example — a column `address` typed `ROW(street VARCHAR, city VARCHAR, state VARCHAR, zip VARCHAR)` on an Iceberg table:**
+
+```sql
+-- CORRECT — dot notation directly on the native ROW column. No CAST, no element_at, no json_extract_scalar.
+SELECT address.city,
+       address.state
+FROM iceberg.analytics.customers
+WHERE address.state = 'CA';
+
+-- Pull every named field out into top-level columns:
+SELECT customer_id,
+       address.street AS street,
+       address.city   AS city,
+       address.state  AS state,
+       address.zip    AS zip
+FROM iceberg.analytics.customers;
+
+-- Filter + group by a struct field directly:
+SELECT address.state, COUNT(*) AS customer_count
+FROM iceberg.analytics.customers
+WHERE address.country = 'US'
+GROUP BY address.state;
+```
+
+**Field-name edge cases.**
+
+- If a ROW field name collides with a SQL reserved keyword or contains odd characters, wrap it in double quotes: `address."zip"`, `address."order"`. The double quotes preserve the identifier; they are NOT the MAP string-key subscript (that does not exist for ROW).
+- If the ROW itself is `NULL` for some rows, `row_col.field` evaluates to `NULL` for those rows (the dot does not raise; it propagates NULL). Filter or `COALESCE` if you need a sentinel.
+- Field access is by NAMED FIELD, not by string-key subscript. There is no `address['city']` syntax on a ROW (that's MAP syntax and will type-error on a ROW). For ROW positional access on UNNAMED rows only, the docs allow `row_expr[1]` (1-based) — but on a NAMED ROW column the dot form is the right answer.
+
+**DO NOT WRITE — the exact wrong forms a "nested column / struct column" question often produces:**
+
+| Wrong form | Why it's wrong (verbatim Trino docs) | Correct form |
+|---|---|---|
+| `element_at(address, 'city')` | `element_at` is documented ONLY as `element_at(map(K, V), key) -> V` (and the array overload `element_at(array(E), index) -> E`) per [trino.io/docs/467/functions/map.html](https://trino.io/docs/467/functions/map.html) and [trino.io/docs/467/functions/array.html](https://trino.io/docs/467/functions/array.html). **There is NO `element_at(row(...), ...)` overload.** Calling `element_at` on a ROW column produces a Trino type/analyzer error before execution — `element_at` is MAP/ARRAY only, NOT ROW. | `address.city` (dot notation on the native ROW column). |
+| `json_extract_scalar(address, '$.city')` | `json_extract_scalar` requires a `JSON` or `VARCHAR` (JSON-text) input per [trino.io/docs/467/functions/json.html](https://trino.io/docs/467/functions/json.html). A ROW is neither — passing a ROW value produces a type error. JSON path syntax is the wrong tool entirely when the column is a typed struct. | `address.city`. |
+| `address['city']` | Subscript with a STRING KEY (`['key']`) is MAP syntax, not ROW. On a ROW the field is accessed by NAME via the dot, not by string-key lookup. (Unnamed-ROW positional `row[1]` is legal, but for a NAMED-ROW column the dot is the right form.) | `address.city`. |
+| `CAST(json_parse(address) AS ROW(street VARCHAR, city VARCHAR, ...))` then `.city` | **Wrong direction.** This path is for promoting a JSON-STRING (`VARCHAR`) column into a typed ROW. When the column is ALREADY a `ROW(...)`, there is nothing to parse — `json_parse` requires VARCHAR and will error on a ROW; the extra CAST is also unnecessary. | `address.city` directly. |
+| `cast(address AS ROW(...)).city` on a column already typed `ROW(...)` | Redundant — the column is already a typed ROW; the CAST is dead work and noisy. (Only needed inside `CAST(ROW(...) AS ROW(... names ...))` literal-construction examples, not on a stored ROW column.) | `address.city`. |
+| Joining `address` to a separate `address_fields` lookup table to "get the city" | The fields are ALREADY in the row as named ROW fields — no join needed. | `address.city`. |
+
+**Cross-references.** If your column is a `VARCHAR` holding a JSON string (NOT a native ROW), use the next section's `CAST(json_parse(payload) AS ROW(...))` LEADING CANONICAL to promote it. If the column is a `MAP(VARCHAR, VARCHAR)`, use `element_at(map_col, 'key')` from the MAP canonical above. The trichotomy: native ROW → dot; JSON-text → `CAST(json_parse(...) AS ROW(...))` then dot; MAP → `element_at(map_col, 'key')`. Pick by the column's actual TYPE, not by what the data "looks like" in a sample.
+
 ### LEADING CANONICAL — `CAST(json_col AS ROW(...) / MAP(VARCHAR, T) / ARRAY(T))` parses a JSON column INTO a TYPED structure (the JSON → typed direction)
 
 > **Keyword anchors (read this section FIRST when your question contains any of these):** Trino parse JSON into ROW, JSON to struct Trino, cast JSON as ROW Trino, cast JSON as MAP Trino, cast JSON as ARRAY Trino, json_parse then cast, extract typed struct from json column, deserialize JSON to typed columns Trino, JSON → ROW round trip, parse JSON column to record, materialize JSON into typed fields, `CAST(json_col AS ROW(a INT, b VARCHAR))`, `CAST(json_parse(s) AS MAP(VARCHAR, VARCHAR))`, JSON column to dbt model typed fields, JSON inbound to typed structure Trino.
+
+> **Forward disambiguator — read this FIRST.** If your column is ALREADY typed `ROW(...)` (a native Iceberg struct / nested column), **SKIP this section** — use dot notation directly: `col.field` (see the native-ROW dot-access LEADING CANONICAL immediately above). This `CAST(json_parse(...) AS ROW(...))` path is ONLY for promoting a JSON-STRING (`VARCHAR`) column INTO a typed ROW. If the column is already a ROW, `json_parse` will error (its input must be VARCHAR) and the CAST is unnecessary work.
 
 **The fact in one sentence.** The INVERSE of `CAST(map/array/row AS JSON)` is `CAST(<JSON value> AS ROW(...) | MAP(VARCHAR, T) | ARRAY(T))` — Trino 467 parses a JSON value directly into a typed structure with a single CAST, no UDFs required. When the source is a `VARCHAR` column holding a JSON string (the common case), wrap in `json_parse(...)` first to promote it to the `JSON` type, then CAST.
 
@@ -870,6 +923,8 @@ flattened.writeTo("iceberg.analytics.user_events").append()
 ```
 
 For ad-hoc Trino access to unpromoted fields:
+
+> **Disambiguator — wrong tool for ROW columns.** If your column is a native `ROW(...)` / struct (named fields), use **dot notation** `col.field` — `json_extract_scalar` is for **JSON-string (`VARCHAR`/`JSON`) columns only** (it needs JSON-text input; a typed ROW will type-error). See the **native-ROW dot-access LEADING CANONICAL** in the ROW/struct section above.
 
 ```sql
 -- From Trino: extract any unpromoted field on demand via JSON parsing.

@@ -1,158 +1,131 @@
-# Judge Feedback — iter588 (2026-06-07, EXTENDED PHASE)
+# Iter 589 — Judge Feedback
 
-**Verdict**: PASS (overall avg **4.25**) — Q3 ROW/struct dot-access flagged as quality concern (per-Q 2.00, below 3.5). Overall-average rule governs the label; no per-question gate override applied.
-
-## Per-question scores
-
-| Q | Topic | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|---|---|
-| Q1 | Self-join employees↔managers (LEFT JOIN aliases) | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | Above own-category average (window AVG OVER PARTITION BY) | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 | ROW/struct dot-access (`address.city`) — MISSED | 1 | 3 | 2 | 2 | 2.00 |
-| Q4 | cardinality(array) + NULL-array handling | 5 | 5 | 5 | 5 | 5.00 |
-
-**OVERALL AVG = (5.00 + 5.00 + 2.00 + 5.00) / 4 = 17.00 / 4 = 4.25 PASS**
+**Phase**: extended  
+**Date**: 2026-06-07  
+**Federation probed?**: NO — 4.49944/310 row UNCHANGED.
 
 ---
 
-## Verifications against trino.io/docs/467/ (verbatim quotes)
+## Headline
 
-### Q1 — self-join LEFT JOIN (trino.io/docs/current/sql/select.html)
-
-Standard SQL self-join via table aliasing; LEFT JOIN preserves left rows when right side absent. Responder's `m.employee_id = e.manager_id` pairing is correct; the CEO row (e.manager_id IS NULL) keeps `manager_name = NULL` under LEFT JOIN — that is the documented LEFT JOIN semantic in Trino 467. Zero defects.
-
-### Q2 — window AVG OVER PARTITION BY (trino.io/docs/current/functions/window.html, trino.io/docs/current/sql/select.html)
-
-- `AVG(price) OVER (PARTITION BY category)` is a valid aggregate-as-window function producing the per-category average on every row.
-- Responder's claim "you can't use a window function in WHERE" is correct: Trino evaluates window functions AFTER WHERE/GROUP BY/HAVING, so the canonical pattern is wrap-in-subquery + filter-in-outer-query.
-- The alternative correlated subquery `WHERE price > (SELECT AVG(price) FROM products p2 WHERE p2.category = p.category)` is also valid. Both forms answer the question; the window form is the recommended canonical for OLAP because it's a single scan with no re-aggregation per outer row.
-- Zero defects.
-
-### Q3 — ROW/struct field access (trino.io/docs/current/language/types.html) — **RESPONDER MISSED**
-
-Verbatim from trino.io/docs/current/language/types.html (ROW section):
-
-> "A structure made up of fields that allows mixed types. The fields may be of any SQL type."
-> "Named row fields are accessed with field reference operator (`.`)."
-> Example: `CAST(ROW(1, 2.0) AS ROW(x BIGINT, y DOUBLE)).x`
-
-The question explicitly states: *"address column that's a NESTED STRUCTURE — street, city, state, zip fields packed inside one column"* — that is the textbook description of a Trino/Iceberg `ROW(street VARCHAR, city VARCHAR, state VARCHAR, zip VARCHAR)` column. **The correct answer is dot notation:**
-
-```sql
-SELECT address.city
-FROM customers
-WHERE address.state = 'CA';
-```
-
-The responder gave NEITHER this form. Instead it offered:
-
-(a) `element_at(address, 'city')` — Per trino.io/docs/current/functions/map.html: *"element_at(map(K, V), key) → V — Returns value for given key, or NULL if the key is not contained in the map."* The only signatures are `element_at(map(K,V), key) → V` and `element_at(array(T), bigint) → T`. **There is NO `element_at(row(...), VARCHAR)` signature in Trino 467.** On a native ROW column, `element_at(address, 'city')` is a plan-time type error: `function 'element_at' not registered for argument types (row(street varchar, city varchar, state varchar, zip varchar), varchar)`.
-
-(b) `json_extract_scalar(address, '$.city')` — Per trino.io/docs/current/functions/json.html, `json_extract_scalar` requires VARCHAR or JSON input. On a ROW column this is also a type error: `cannot apply json_extract_scalar to row(...)`. No implicit ROW → JSON cast happens at function-argument resolution.
-
-Both forms ERROR at plan time on a native ROW column. The answer for the stated type is absent. The correct answer is the documented dot notation.
-
-### Q4 — cardinality(array) (trino.io/docs/current/functions/array.html)
-
-Verbatim from trino.io/docs/current/functions/array.html:
-
-> "cardinality(x) → bigint — Returns the cardinality (size) of the array x."
-
-- `cardinality(tags) AS tag_count` is correct Trino 467.
-- For NULL-array handling: `cardinality(NULL) = NULL` (standard SQL strict-NULL propagation). The responder's `WHERE cardinality(tags) = 0 OR tags IS NULL` is correct because `cardinality(NULL) = 0` evaluates to `NULL`, not TRUE, so the explicit `IS NULL` arm is required to capture NULL-array rows.
-- "Trino uses `cardinality`, not `array_length`" — correct. There is no `array_length` function in Trino 467.
-- Zero defects.
+**OVERALL = (5.00 + 5.00 + 4.875 + 5.00) / 4 = 4.96875 STRONG PASS** (margin +1.46875 above the 3.5 floor; +0.71875 swing from iter588's 4.25). **The iter588 ROW-vs-MAP-vs-JSON wrong-frame defect is FULLY RESOLVED on first re-probe.** Q1 LED with native `geo.country_code` dot notation explicitly stating "no CAST, no element_at(), no JSON parsing needed" — the iter589 LEADING CANONICAL added to r09 (native-ROW dot-access) ROUTED CLEANLY on the very next probe, and the MAP/JSON disambiguators held. Q2 cleanly disambiguated all three nested-column kinds (ROW→dot, MAP→element_at, JSON-string→json_extract_scalar/json_parse) with sound DESCRIBE-to-identify advice. Q3 round/format/HALF_UP all correct (with a minor framing nit on DECIMAL-vs-DOUBLE). Q4 LENGTH-returns-characters correct per Trino 467 docs verbatim.
 
 ---
 
-## Q3 FINDABILITY DIAGNOSIS (PRIMARY iter588 finding)
+## Per-question scoring
 
-**This is a FINDABILITY miss, not a content gap.** The native ROW dot-access content exists in r09 (lines 757-806, LEADING CANONICAL — `CAST(json_parse(s) AS ROW(...))` with `user_record.user_id` / `user_record.email` dot-access examples). The problem is that this canonical's keyword anchors and framing are entirely about **JSON parsing into a typed ROW**, not about **getting a field out of an existing native ROW column**.
+### Q1 — native-ROW dot-access RE-PROBE (`geo.country_code`)
 
-Grep confirms: the keyword strings "nested structure", "native struct", "native ROW", "struct column", and "address.city" appear in ZERO resources outside of r13 (ingestion) and r22 (federation) — neither of those is the landing point for a "give me a field out of a struct column" question. The r09 ROW dot-access canonical itself does NOT surface on any of the question's keyword routes:
+**Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 = 5.00 STRONG PASS — iter588 DEFECT FULLY RESOLVED**
 
-- "nested structure" → no anchor
-- "struct column" → no anchor
-- "field of a struct" → no anchor
-- "address.city" → no anchor
+- Responder LED with `SELECT geo.country_code, geo.latitude, geo.longitude FROM events WHERE geo.country_code = 'US'` — exactly the canonical Trino 467 form.
+- Explicitly stated: **"When a column is already typed as ROW(...), Trino reads the field via .fieldname dot notation. No CAST, no element_at(), no JSON parsing needed."** This is the un-confusable signal: the iter588 mis-routes (element_at on a ROW, json_extract_scalar on a ROW) are explicitly NAMED-AND-REJECTED in the answer itself.
+- **iter588 defect (wrong-frame routing of native struct to MAP/JSON paths) is RESOLVED.** The new r09 LEADING CANONICAL (added at iter589 BEFORE the existing JSON→ROW CAST canonical) routed on first re-probe.
 
-What IS findable at the question's keyword route:
+**Docs verification — Trino 467 ROW dot access**:  
+trino.io/docs/current/language/types.html (applies to 467; ROW behavior unchanged across recent releases): *"Named row fields are accessed with the field reference operator (.)."*  
+Example from same page: `CAST(ROW(1, 2e0) AS ROW(x BIGINT, y DOUBLE))` accessed via `.x`. Confirms the responder's lead-form is exactly the documented pattern.
 
-- MAP `element_at` content (r09 lines 525-700) — keyed-lookup framing matches "field of an address column" superficially.
-- JSON `json_extract_scalar` content (r09 lines 552, 605, 802) — string-path framing matches "extract city from address" superficially.
-
-Both are the WRONG TYPE for a native struct column. The responder's answer perfectly demonstrates the failure mode: it landed on MAP and JSON paths because the ROW canonical's findable surface is locked behind "JSON → ROW CAST" framing.
+Zero defects.
 
 ---
 
-## iter589 directive (PRIMARY — teacher action)
+### Q2 — ROW vs MAP vs JSON CONTRAST micro-probe
 
-### A. r09 — add a findable "native ROW/struct COLUMN → dot-access" LEADING CANONICAL at the keyword landing point (reconcile-don't-append)
+**Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 = 5.00 STRONG PASS — DISAMBIGUATION CLEAN**
 
-Add a NEW canonical section in r09, distinct from the existing JSON → ROW CAST canonical at lines 757-806. Title must surface for the question's keywords. Suggested form:
+- **Type A native ROW** → dot notation `address.city` (correct — per ROW field reference operator).
+- **Type B MAP** → `element_at(properties, 'key')` with NULL-on-missing semantics (correct — per trino.io/docs/current/functions/map.html: `element_at(map(K, V), key) -> V`; subscript `map[key]` throws on missing, `element_at` returns NULL).
+- **Type C JSON-as-text** → `json_extract_scalar(payload, '$.path')` (returns VARCHAR) or `CAST(json_parse(payload) AS ROW(...))` for typed promotion (correct — per trino.io/docs/current/functions/json.html).
+- **"How to tell them apart"** via `DESCRIBE events` / schema type inspection (`row(...)` → dot, `map(...)` → element_at, `varchar` holding JSON → json_parse) — sound, actionable, beginner-friendly.
 
-```
-### LEADING CANONICAL — Native Iceberg ROW/struct COLUMN — get a field with dot notation (NO CAST needed)
+No over-correction: responder did NOT push ROW into JSON parsing or push MAPs into ROW dot notation. Three access paths cleanly partitioned by underlying type. Confirms the iter589 LEADING CANONICAL + the two cross-pointing disambiguators (at r09 MAP element_at landing and at json_extract_scalar landing) are mutually un-confusable.
 
-**Keyword anchors so the responder lands here:** nested structure column, struct column field access, get a field out of a struct, row type field access, address.city, dot notation Trino, named field access, native ROW column, Iceberg struct column field, struct field extract, struct field projection, nested fields packed in one column.
-
-When your column is ALREADY typed as `ROW(field1 T1, field2 T2, ...)` — for example an Iceberg column declared as `address ROW(street VARCHAR, city VARCHAR, state VARCHAR, zip VARCHAR)` — you access fields with the dot operator. NO CAST. NO json_parse. NO element_at.
-
--- CORRECT
-SELECT
-  customer_id,
-  address.city  AS city,
-  address.state AS state
-FROM customers
-WHERE address.state = 'CA';
-
-Verbatim from trino.io/docs/current/language/types.html: "Named row fields are accessed with field reference operator (.)."
-```
-
-#### DO-NOT-WRITE — patterns that ERROR on a native ROW column
-
-| Wrong | Why it errors | Right |
-|---|---|---|
-| `element_at(address, 'city')` | `element_at` is registered ONLY for `map(K,V)` and `array(T)` per trino.io/docs/current/functions/map.html + functions/array.html. NO row(...) signature. Plan-time type error. | `address.city` |
-| `json_extract_scalar(address, '$.city')` | Requires VARCHAR or JSON input. On `row(...)` it is a type error; no implicit ROW → JSON cast at function-arg resolution. | `address.city` |
-| `address['city']` (string key subscript) | The `[]` subscript on ROW takes a BIGINT position only (`address[2]`), NOT a field name string. | `address.city` (named) or `address[2]` (positional, 1-based) |
-| `CAST(json_parse(address) AS ROW(...))` | The column is ALREADY a ROW — there is no JSON string to parse. Type error. | `address.city` |
-
-Then add a forward-reference at the top of the existing JSON → ROW CAST canonical (line 757) pointing back to this new native-ROW canonical, with a one-sentence disambiguator: *"If your column is already typed as `ROW(...)`, skip this section — use dot notation directly. This section is for the JSON-STRING-to-typed-ROW promotion path only."*
-
-### B. r09 element_at + json_extract_scalar sections — add a DO-NOT-WRITE pointer
-
-At both the MAP `element_at` and the JSON `json_extract_scalar` landing points, add a one-line DO-NOT-WRITE callout:
-
-> **DO NOT use `element_at` / `json_extract_scalar` on a native ROW/struct column** — these functions are registered for MAP/ARRAY (element_at) and VARCHAR/JSON (json_extract_scalar) only; on a ROW they are plan-time type errors. For a native ROW column, use dot notation `col.field` — see the "Native Iceberg ROW/struct COLUMN — get a field with dot notation" canonical above.
-
-This DO-NOT-WRITE addresses the recognition failure: when the responder lands on the MAP or JSON content via keyword match, it sees an immediate signal that ROW columns route elsewhere.
-
-### C. DO NOT
-
-- Do NOT rewrite the existing `CAST(json_parse(s) AS ROW(...))` canonical at lines 757-806 — it is correct for the JSON-string-input case. Only ADD a forward-disambiguator pointer at its top.
-- Do NOT touch r22 §13.x federation guardrails — not probed this iter.
-- Do NOT touch any iter534-587 locks listed in state.json — preserve in full.
-- Do NOT add `::`-cast anywhere; keep `CAST(x AS T)`.
-
-### D. Optional probe for iter590-591
-
-Re-probe ROW/struct dot-access from a DIFFERENT phrasing to confirm the new canonical routes:
-
-- "I have an Iceberg table where the `geo` column is a struct with `lat` and `lon` — how do I select `lat`?"
-- "My events table has a `device` column typed as `ROW(make VARCHAR, model VARCHAR)` — how do I filter on `make = 'Apple'`?"
-
-Either phrasing should land on the new native-ROW canonical via the dot-notation keyword anchors, not on element_at or json_extract_scalar.
+Zero defects.
 
 ---
 
-## Notes
+### Q3 — DECIMAL rounding to 2 places (FRESH)
 
-- iter588 PRIMARY = Q3 ROW dot-access findability miss; iter587 STRONG PASS (4.9375) durability holds for Q1/Q2/Q4 forms.
-- WebSearched + verified verbatim today: trino.io/docs/current/language/types.html (ROW field reference operator `.`), trino.io/docs/current/functions/map.html (element_at MAP signature only), trino.io/docs/current/functions/array.html (cardinality(x) → bigint; element_at ARRAY signature only), trino.io/docs/current/functions/window.html (window functions evaluated after WHERE).
-- Did NOT bump training/state.json (teacher already set iteration=588, phase=extended).
-- Federation rubric row 4.49944/310 UNCHANGED — not probed.
-- Q1 (self-join), Q2 (window AVG), Q4 (cardinality) all zero-defect docs-verbatim correct.
-- Meta-rule observation: iter588 demonstrates that "findability by keyword match" beats "content correctness at the wrong landing point" — the ROW dot-access content exists in r09 but its keyword surface routes ONLY off "JSON parsing" framing, so a question about a native struct column gets routed to MAP/JSON paths that error on the stated type. The fix is a SECOND canonical with the question's actual keyword surface, not a rewrite of the existing one.
+**Scores: Accuracy 5 / Completeness 5 / Clarity 4.5 / Actionability 5 = 4.875 STRONG PASS — minor framing nit on DECIMAL-vs-DOUBLE**
 
-**OVERALL: 4.25 PASS (overall avg >= 3.5) — Q3 ROW/struct dot-access findability miss flagged as quality concern; iter589 = add native-ROW dot-access LEADING CANONICAL at the "nested structure / struct column / get a field out of a struct" keyword landing point in r09, distinct from the existing JSON-to-ROW CAST canonical, with DO-NOT-WRITE callouts at the MAP element_at and JSON json_extract_scalar landing points pointing back to the new ROW canonical. Q1 + Q2 + Q4 all zero-defect; federation row unchanged.**
+- `ROUND(amount, 2)` — correct Trino 467 form. Per trino.io/docs/current/functions/math.html: *"round(x, d) → Returns x rounded to d decimal places"*; return type matches input type. iter539 HALF_UP lock is consistent with Trino's documented round behavior (rounds half away from zero for non-negative values).
+- `format('%.2f', amount)` — correct for producing a 2-decimal **display string** (returns VARCHAR via Java `Formatter` semantics).
+- `ROUND(CAST(amount AS DECIMAL(18,2)), 2)` — correct as a hardening pattern for the float-artifact symptom.
+
+**Minor framing nit (-0.5 Clarity)**: the question's symptom `12.300000007` is a **DOUBLE/REAL** binary-float artifact, NOT something a native `DECIMAL` column produces — a true DECIMAL column would store and return exactly `12.300000000` (or `12.30` at scale 2), never `12.300000007`. The responder did diagnose this in spirit ("for float artifacts") and offered CAST-through-DECIMAL as the fix, but did not explicitly call out that *if* the user actually sees `12.300000007`, the upstream column is almost certainly DOUBLE/REAL despite the user calling it "decimal" — the durable fix is upstream type discipline (store as DECIMAL) OR `CAST(amount AS DECIMAL(p,s))` before any aggregation, not just at display. Not a defect — the responder's CAST-through-DECIMAL advice does address the symptom — but the diagnosis framing could be slightly sharper.
+
+Docs note: Trino docs page does not document the rounding mode in prose, but the implementation rounds half-away-from-zero for non-negative numbers (HALF_UP for non-negative), consistent with the iter539 lock.
+
+Net: STRONG PASS. The minor nit is a sharpening opportunity, not a quality concern.
+
+---
+
+### Q4 — string length filter (FRESH)
+
+**Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 = 5.00 STRONG PASS**
+
+- `LENGTH(username) > 20` — exactly correct.
+- Showed LENGTH used in both SELECT (for visibility) and WHERE (for the filter) — beginner-actionable.
+
+**Docs verification — Trino 467 LENGTH**:  
+trino.io/docs/current/functions/string.html (applies to 467): *"length(string) → bigint — Returns the length of string in characters."* — **CHARACTERS, not bytes**, which is what the question asked for. (OCTET_LENGTH exists for byte count but is not what the user wants here.)
+
+Zero defects.
+
+---
+
+## Overall
+
+**Per-question average = (5.00 + 5.00 + 4.875 + 5.00) / 4 = 19.875 / 4 = 4.96875 STRONG PASS**
+
+**Margin**: +1.46875 above the 3.5 floor; +0.71875 swing from iter588's 4.25.
+
+**Overall-average governs label (per directive: PASS = overall avg ≥ 3.5; no per-question gate). VERDICT: STRONG PASS.**
+
+---
+
+## Native-ROW dot-access RESOLUTION STATUS
+
+**FULLY RESOLVED on first re-probe** — the iter589 native-ROW LEADING CANONICAL added to r09 (placed BEFORE the existing JSON→ROW CAST canonical, with forward-disambiguator at the JSON→ROW canonical top + one-line disambiguators at MAP `element_at` and JSON `json_extract_scalar` landing points) ROUTED CLEANLY on Q1. Q2 confirms the three-way disambiguation (ROW/MAP/JSON) is mutually un-confusable from the responder's keyword-routing surface. The iter588 wrong-frame defect (element_at on a ROW; json_extract_scalar on a ROW) is gone — Q1's lead form explicitly NAMES-AND-REJECTS both anti-patterns in the answer itself.
+
+**Pattern (meta-rule observation)**: iter589 = 52nd consecutive iter where placement-not-content findability discipline materially affected the verdict. iter589 demonstrates that when content exists but its keyword surface is locked behind a *different framing* (the iter588 r09 ROW dot-access content was framed entirely around JSON→ROW CAST), the fix is a SECOND LEADING CANONICAL at the question's actual keyword landing point (native struct column / nested column / get a field) — NOT a rewrite of the existing one. The iter589 ADD-distinct-LEADING-CANONICAL intervention landed on first re-probe across two structurally-distinct framings (Q1 direct + Q2 contrast disambiguation). This is the iter586/587 un-confusable-signal meta-rule applied to a findability-surface mismatch rather than a two-form disambiguation conflict.
+
+---
+
+## iter590 directive
+
+**PRIMARY: NO-OP / DEFAULT-HOLD.**
+
+The iter588 ROW/MAP/JSON wrong-frame defect is fully resolved across two structurally-distinct re-probes (direct Q1 + contrast disambiguation Q2). All four iter589 answers are clean. Discipline > churn — DO NOT touch the iter589 native-ROW LEADING CANONICAL, the forward-disambiguator at the JSON→ROW CAST canonical, or the two cross-pointing disambiguators at MAP `element_at` / JSON `json_extract_scalar` landing points. **Preserve all iter534-589 locks in full.**
+
+**OPTIONAL light-touch (NON-BLOCKING, low priority)**: at the r23 round/format canonical (or wherever round/format display patterns live), add ONE sentence distinguishing the **DOUBLE/REAL binary-float artifact symptom** (`12.300000007`) from the **DECIMAL fixed-point case** — call out that if the user sees float-artifact tails, the column is almost certainly DOUBLE/REAL despite informal "decimal" naming, and the durable fix is upstream type discipline (store as DECIMAL) or `CAST(... AS DECIMAL(p,s))` before aggregation. This is a SHARPENING nit on Q3 framing, NOT a defect — the existing advice already solves the symptom; this would just make the diagnosis cleaner for similar future questions.
+
+**RE-PROBE TARGETS (iter590–592)**:
+1. **ROW/MAP/JSON durability** — re-probe native-ROW dot-access on a 3rd structurally-distinct framing (e.g., "`device` column is a typed record with `make` and `model` — pull `model` and filter where `make='Apple'`"; or "I have a `customer_address ROW(line1, city, state)` column, how do I get `state`?"). Goal: confirm the iter589 LEADING CANONICAL is durable across 3+ phrasings before declaring the relocation hardened.
+2. **Federation re-probe** — STILL the only remaining FAIL row at 4.49944/310 and 33+ iters stale. Highest-leverage breadth target. Pick fresh PostgreSQL connector pushdown / cross-catalog join limits / federate-vs-ingest framing.
+3. **round/format fresh angle** — pick a phrasing that exercises the DOUBLE-artifact case explicitly (e.g., "my running total returns 12.300000007 — what's going on?") to test whether the diagnostic framing nit recurs.
+4. **LENGTH/OCTET_LENGTH disambiguation** — re-probe LENGTH on a multi-byte / Unicode framing (e.g., "filter usernames where the character count is > 20 but my emoji usernames look weird") to confirm character-vs-byte signal holds.
+
+**DO NOT**:
+- Re-edit the iter589 r09 native-ROW LEADING CANONICAL or its disambiguators (routed on first re-probe — lock held).
+- Re-edit the iter586/587 r17 time-travel un-confusable signal or r07 ROWS-vs-RANGE symptom→cause→fix (untouched by this iter; locks held).
+- Touch r22 §13.x federation guardrails without a fresh failure probe.
+- Add new canonicals (reconcile-don't-append; preserve all iter534-589 locks).
+- Add any `::`-casts anywhere (iter571 PIN holds).
+
+---
+
+## WebSearch verifications today
+
+- **trino.io/docs/current/language/types.html** (applies to Trino 467 — ROW type behavior unchanged across recent releases): *"Named row fields are accessed with the field reference operator (.)."* Example: `CAST(ROW(1, 2e0) AS ROW(x BIGINT, y DOUBLE))` accessed via `.x`. Confirms Q1 + Q2 ROW path correctness.
+- **trino.io/docs/current/functions/map.html**: `element_at(map(K, V), key) -> V` — MAP/ARRAY only signatures; NO `element_at(row(...), ...)` overload exists. Confirms Q2 MAP path + the iter589 disambiguator at the MAP element_at landing point.
+- **trino.io/docs/current/functions/json.html**: `json_extract_scalar` returns VARCHAR (scalar leaf); needs JSON/VARCHAR input — type-errors on native ROW. Confirms Q2 JSON path + the iter589 disambiguator at the json_extract_scalar landing point.
+- **trino.io/docs/current/functions/math.html**: *"round(x, d) → Returns x rounded to d decimal places"*; return type matches input type. Confirms Q3 round(amount, 2) correctness. Docs prose does not name HALF_UP explicitly but implementation rounds half-away-from-zero for non-negative (iter539 lock consistent).
+- **trino.io/docs/current/functions/string.html**: *"length(string) → bigint — Returns the length of string in characters."* Character count, not bytes. Confirms Q4 LENGTH(username) > 20 correctness.
+
+---
+
+## Final summary
+
+**iter589 verdict: 4.96875 STRONG PASS.** iter588 native-ROW/MAP/JSON wrong-frame defect is RESOLVED on first re-probe across two structurally-distinct framings. iter590 = DEFAULT NO-OP / HOLD; optional light-touch DECIMAL-vs-DOUBLE framing sharpening on Q3; re-probe ROW dot-access on 3rd framing for durability + federation re-probe for the remaining FAIL row + light coverage on round/format DOUBLE-artifact diagnosis. Preserve all iter534-589 locks in full. Federation row 4.49944/310 UNCHANGED.
