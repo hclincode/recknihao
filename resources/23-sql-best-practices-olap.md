@@ -319,6 +319,33 @@ SELECT split_to_multimap('tag=a;tag=b;tag=c', ';', '=') AS m;
 
 **Cross-reference.** For the canonical `CROSS JOIN UNNEST` + WHERE-clause-order rule (the iter505 trap where engineers place `WHERE` BEFORE the JOIN), see [resource 07 §1a.1](07-analytical-query-patterns.md). For Oracle migration mapping `INSTR` / `SUBSTR` / `REGEXP_*` → Trino, see [resource 27 §4.3](27-oracle-plsql-to-dbt-trino.md).
 
+### `starts_with` for "does this string BEGIN with X" — and there is NO `ends_with` in Trino 467
+
+> **Keyword anchors:** does the string start with, does it begin with, string prefix test, check prefix without LIKE, starts_with Trino, ends_with Trino, does the string end with, string suffix test, check suffix, filename ends with .csv, code starts with US, SKU begins with, prefix match without LIKE, suffix match, boolean prefix/suffix test. Verified at [trino.io/docs/467/functions/string.html](https://trino.io/docs/current/functions/string.html) and the [function list](https://trino.io/docs/467/functions/list.html) on 2026-06-07.
+
+**`starts_with(string, substring) -> boolean`** is a documented Trino 467 built-in that returns TRUE if `substring` is a prefix of `string`. Verbatim from [trino.io/docs/467/functions/string.html](https://trino.io/docs/current/functions/string.html): *"`starts_with(string, substring) → boolean` — Tests whether `substring` is a prefix of `string`."* Use it directly as a boolean column or predicate:
+
+```sql
+-- "Does the country code begin with 'US'?" — prefix test, no LIKE needed.
+SELECT code, starts_with(code, 'US') AS is_us
+FROM iceberg.analytics.locations;
+
+-- As a filter (equivalent to LIKE 'US%' but reads as a boolean function):
+SELECT * FROM iceberg.analytics.locations
+WHERE starts_with(code, 'US');
+```
+
+**There is NO `ends_with` function in Trino 467.** It is absent from both the [string-functions page](https://trino.io/docs/467/functions/string.html) and the [alphabetical function list](https://trino.io/docs/467/functions/list.html) (only `starts_with` is listed). Writing `ends_with(filename, '.csv')` fails at analyze time with **`Function 'ends_with' not registered`** — the name is carried over from Spark SQL / Snowflake / BigQuery, which DO have it. For a **suffix** test, use one of these native idioms instead:
+
+| Goal | Native Trino 467 idiom (PREFER) | DO NOT WRITE |
+|---|---|---|
+| Does the string BEGIN with `'US'`? | `starts_with(code, 'US')` — purpose-built boolean | — (this one exists) |
+| Does the filename END with `'.csv'`? | `filename LIKE '%.csv'` — anchored suffix `LIKE` | `ends_with(filename, '.csv')` — **`Function 'ends_with' not registered`** |
+| Suffix test, last N chars equal a literal | `substr(s, -length('.csv')) = '.csv'` — Trino `substr` accepts a **negative start** = count from the end | `ends_with(s, '.csv')` — does not exist |
+| Suffix test, case-insensitive | `LOWER(filename) LIKE '%.csv'` (or `regexp_like(filename, '(?i)\.csv$')`) | `ends_with(...)` / `ILIKE` (ILIKE is also not native Trino — see §dialect table) |
+
+**Net rule.** **Prefix → `starts_with(s, 'US')`** (real Trino function) **or** `s LIKE 'US%'` (both fine; `LIKE 'US%'` with a leading literal also pushes down — see the §6 pruning table row `SUBSTR(country,1,2)='US'` → `LIKE 'US%'`). **Suffix → there is no `ends_with`; use `s LIKE '%.csv'`** (or `substr(s, -4) = '.csv'`). Do NOT reach for `ends_with` — it is one of the most common fabricated-from-another-dialect function names.
+
 ---
 
 ### LEADING CANONICAL — Trino `format(format_string, args...)` — printf / Java-Formatter-style string building

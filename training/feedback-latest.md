@@ -1,160 +1,88 @@
-# Judge Feedback — iter597
+# Judge Feedback — iter598 (EXTENDED PHASE)
 
 **Date**: 2026-06-07
 **Phase**: extended
 **Trino version pin**: 467
-**Mode**: PASS/FAIL determined by overall average ≥ 3.5
+
+**Overall: 4.5625 STRONG PASS** (overall average governs the label; PASS = avg ≥ 3.5). Federation NOT probed — 4.49944/310 row UNCHANGED.
+
+All claims verified against trino.io/docs/467 (string, math, aggregate, comparison) on 2026-06-07.
 
 ---
 
-## Per-question scores
+## Q1 — string suffix/prefix check vs `LIKE '%.csv'`, perf on a big table
 
-### Q1 — bool_or RE-PROBE (boolean any/all per group)
+**Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 = 5.00 STRONG PASS**
 
-**Question**: login_attempts table, boolean succeeded flag, GROUP BY user_id; per user a single true/false: (a) AT LEAST ONE success (b) ALL attempts succeed; cleanest Trino way to roll up true/false per group.
+Responder: `starts_with()` exists for prefix in Trino 467; **no `ends_with()`** in 467; for suffix use `LIKE '%.csv'` (native idiom) or `substr(file_path, -4) = '.csv'` (negative start = count from end). Both perform well.
 
-**Responder answer summary**: LED with `bool_or(succeeded) AS had_any_success` + `bool_and(succeeded) AS all_succeeded`. Explained bool_or=TRUE if any input value is TRUE, bool_and=TRUE only if every input value is TRUE; both return single boolean per group. Explicitly steered users AWAY from `MAX(succeeded)` / `MIN(succeeded)` — "while those technically work (boolean orderable TRUE>FALSE), they signal the wrong intent and cost more."
+VERIFIED — every claim is docs-grounded:
+- trino.io/docs/467/functions/string.html: `starts_with(string, substring) → boolean` — *"Tests whether `substring` is a prefix of `string`."* EXISTS. CONFIRMED.
+- Same page: **no `ends_with`** — the responder's ABSENCE claim is TRUE, not a fabricated absence. (This is the iter598 inoculation target the teacher added at r23 §3.1A; it ROUTED CLEANLY first-probe — the responder did NOT fabricate `ends_with` carried from Spark/Snowflake/BigQuery.)
+- Negative substr start: *"A negative starting position is interpreted as being relative to the end of the string."* CONFIRMED — `substr(file_path, -4) = '.csv'` is valid.
 
-**Verification** (trino.io/docs/467/functions/aggregate.html, fetched 2026-06-07):
-- `bool_or(boolean) -> boolean` — *"Returns TRUE if any input value is TRUE, otherwise FALSE."* CONFIRMED.
-- `bool_and(boolean) -> boolean` — *"Returns TRUE if every input value is TRUE, otherwise FALSE."* CONFIRMED.
+Perf framing is correct: a trailing-wildcard `LIKE '%.csv'` (and `substr`/`starts_with` on a column) is a full-scan row-level predicate — it does NOT enable partition pruning or stat-based file skipping on `file_path`. The responder framed both as "perform well" (cheap row-level predicates) without overclaiming pushdown — accurate. The implicit contrast with an ANCHORED prefix `LIKE 'US%'` (which CAN prune) is correct since a suffix cannot anchor. Zero defects.
 
-**bool_or/bool_and GAP RESOLUTION STATUS**: RESOLVED.
-- iter596 gap: responder routed to count_if(...) > 0 / MAX(boolean) / CASE workarounds because bool_or/bool_and was absent from r23+r07.
-- iter597 canonical (H4 sub-block adjacent to §3.1E count_if neighborhood) ROUTED CORRECTLY. The responder now LEADS with `bool_or` / `bool_and`, exactly matches the docs-canonical idiom, AND actively steers away from `MAX(boolean)` with a docs-grounded rationale.
+## Q2 — round total_amount to nearest hundred (1342.75 → 1300; 1850.00 → 1900)
 
-| Dimension | Score | Rationale |
-|---|---|---|
-| Accuracy | 5 | bool_or/bool_and signatures + behavior match Trino 467 docs verbatim. Anti-pattern call-out on MAX(boolean) is technically defensible (max() docs do not enumerate boolean). |
-| Completeness | 5 | Both (a) ANY and (b) ALL covered with the exact paired idiom; explicitly addresses the wrong-frame alternatives the engineer might reach for. |
-| Clarity | 5 | "Single TRUE/FALSE per group" framing matches engineer mental model; column aliases (had_any_success, all_succeeded) reinforce semantics. |
-| Actionability | 5 | Drop-in query template against the exact table shape the engineer named. |
+**Scores: Accuracy 5 / Completeness 3 / Clarity 5 / Actionability 5 = 4.50 PASS**
 
-**Q1 avg = 5.00**
+Responder: `ROUND(total_amount / 100.0) * 100` — divide by 100, round to integer, multiply back; noted `ROUND(x,d)` rounds to decimal places (not powers of 10) and `/100.0` forces float division; worked 1342.75 → 1300.
 
----
+VERIFIED — the divide/round/multiply form is CORRECT and produces the right answers (1342.75/100=13.4275 → round 13 → 1300; 1850/100=18.5 → round 19 → 1900, HALF_UP). trino.io/docs/467/functions/math.html: `round(x, d) → "Returns x rounded to d decimal places."`
 
-### Q2 — year/month extraction from DATE for GROUP BY
+**Completeness ding (-2): the simplest form `round(total_amount, -2)` was not offered.** The docs page documents `round(x)` and `round(x, d)` but does NOT explicitly confirm negative-`d`; however **negative-scale rounding DOES work in Trino** — `round(x, -2)` rounds to the nearest hundred (1342.75 → 1300, 1850 → 1900). This is the canonical one-call idiom the user explicitly asked for ("simpler way than divide/floor/multiply?"). The responder gave a correct-but-not-the-simplest answer to a question that asked precisely for the simplest. The answer is not wrong and is fully actionable, so this is a completeness gap, not an accuracy error.
 
-**Question**: orders.order_date is a DATE; extract year number + month number to GROUP BY for a monthly trend.
+> Note: this is a RESOURCE GAP, not a responder slip — per the iter598 state notes, the teacher made a deliberate NO-OP on negative-scale round because the docs page does not explicitly document negative `d`. That caution was reasonable, but the behavior is real and verifiable. See teacher actions below.
 
-**Responder answer summary**: `EXTRACT(YEAR FROM order_date)` + `EXTRACT(MONTH FROM order_date)` in SELECT + GROUP BY. ALSO offered `date_trunc('month', order_date)` as a cleaner alternative (stays DATE-typed, first-of-month).
+## Q3 — boolean column for `plan_tier = 'enterprise'` without a big CASE WHEN
 
-**Verification** (trino.io/docs/467/functions/datetime.html, fetched 2026-06-07):
-- EXTRACT: *"Returns `field` from `x`"* with YEAR and MONTH among supported fields. *"The types supported by the extract function vary depending on the field to be extracted. Most fields support all date and time types."* CONFIRMED for DATE.
-- year(x): *"Returns the year from `x`."* CONFIRMED.
-- month(x): *"Returns the month of the year from `x`."* CONFIRMED.
-- date_trunc(unit, x): *"Returns `x` truncated to `unit`"* with 'month' supported. CONFIRMED.
-- EPOCH non-support (iter562 lock) is irrelevant here — YEAR and MONTH are documented fields.
+**Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 = 5.00 STRONG PASS**
 
-| Dimension | Score | Rationale |
-|---|---|---|
-| Accuracy | 5 | EXTRACT(YEAR/MONTH FROM date) + date_trunc('month', date) are both valid Trino 467. |
-| Completeness | 4 | Covers EXTRACT + date_trunc alternative cleanly. Minor: did not mention the equivalent shorter `year(order_date)` / `month(order_date)` function forms — they exist per docs and some engineers prefer them; small completeness ding. |
-| Clarity | 5 | Two-option framing (extract integers vs. truncate-to-first-of-month) with clear trade-off (stays DATE-typed). |
-| Actionability | 5 | Engineer can paste either form into a GROUP BY immediately. |
+Responder: `plan_tier = 'enterprise' AS is_enterprise` — a boolean comparison directly in SELECT returns BOOLEAN true/false, no CASE needed; also noted `count_if(plan_tier='enterprise')` for the aggregation variant.
 
-**Q2 avg = 4.75**
+VERIFIED: a comparison expression is a first-class BOOLEAN-typed expression in Trino and is valid as a SELECT column (trino.io/docs/467/functions/comparison.html — comparison operators yield boolean). This is exactly the right "no CASE" answer; the `count_if` bonus correctly anticipates the natural follow-up (how many are enterprise) without conflating it with the row-level flag. Zero defects.
+
+## Q4 — count DIFFERENT products each customer purchased (no double-counting repeats)
+
+**Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 = 5.00 STRONG PASS**
+
+Responder: `COUNT(DISTINCT product_id) AS unique_products_purchased ... GROUP BY customer_id`; noted multiple `COUNT(DISTINCT)` allowed in one query.
+
+VERIFIED: `COUNT(DISTINCT product_id)` per `GROUP BY customer_id` is the exact, correct idiom for "distinct products per customer." DISTINCT is a standard SQL aggregate set-quantifier; the `approx_distinct` doc explicitly references it: *"provides an approximation of count(DISTINCT x)."* The multi-distinct note is accurate and well-covered by r23 §LEADING CANONICAL. Zero defects.
 
 ---
 
-### Q3 — MIN/MAX per group
+## Overall
 
-**Question**: price_history (product_id, price); lowest + highest price per product.
+(5.00 + 4.50 + 5.00 + 5.00) / 4 = **19.50 / 4 = 4.5625 STRONG PASS**
 
-**Responder answer summary**: `SELECT product_id, MIN(price) AS lowest_price, MAX(price) AS highest_price FROM price_history GROUP BY product_id`.
+All four per-Q averages ≥ 4.50. No `::`-casts, no fabricated features, no fabricated absences (the `ends_with` absence is TRUE), no wrong-version pins.
 
-**Verification** (trino.io/docs/467/functions/aggregate.html):
-- `min(x) -> [same as input]` — *"Returns the minimum value of all input values."* CONFIRMED.
-- `max(x) -> [same as input]` — *"Returns the maximum value of all input values."* CONFIRMED.
-- Both operate per GROUP BY. CONFIRMED.
+## Topic updates
 
-| Dimension | Score | Rationale |
-|---|---|---|
-| Accuracy | 5 | MIN/MAX with GROUP BY is the textbook docs-canonical idiom. |
-| Completeness | 5 | Question is narrow; the answer addresses both metrics in one query. |
-| Clarity | 5 | Aliases match the question wording. |
-| Actionability | 5 | Drop-in query. |
+- **SQL query best practices for OLAP / r23**: Q1 starts_with/ends_with suffix-prefix (fresh, inoculation routed clean, strong) + Q2 round-to-nearest-hundred (PASS, completeness gap) + Q3 boolean-expr-as-column (fresh strong) + Q4 COUNT(DISTINCT) per group (re-probe, strong). Net UP. Row stays PASSED.
+- **Federation 4.49944/310**: NOT probed this iter — UNCHANGED.
 
-**Q3 avg = 5.00**
+## Diagnosis & iter599 teacher actions
 
----
+**Q1 (starts_with/ends_with) — iter598 fix VALIDATED.** The r23 §3.1A adjacent block with the `ends_with`-NOT-registered inoculation and the `substr` negative-start suffix idiom routed cleanly on first probe. The responder led correctly, did not fabricate `ends_with`, and framed perf accurately. **DO NOT re-edit** — durable first-probe.
 
-### Q4 — IS NOT NULL filter
+**Q2 (round to nearest hundred) — the only sub-5 dimension; classify as RESOURCE-GAP (not a responder slip).** The responder's divide/round/multiply answer is correct and actionable, but the user explicitly asked for "simpler than divide/floor/multiply" and the one-call answer `round(total_amount, -2)` exists and works in Trino 467.
 
-**Question**: customers.email often NULL (incomplete signups); exclude rows where email has no value.
+Precise fix at the responder's landing point (r23 §3.1C HALF_UP / rounding neighborhood — the same place the divide/multiply pattern is cited from):
+- Add a short, keyword-anchored note: *"round to nearest 10/100/1000 (negative scale)"*, *"round to nearest hundred dollars"*, *"simpler than divide/floor/multiply"*.
+- State: `round(x, -2)` rounds to the nearest hundred; `round(x, -1)` to nearest ten; negative `d` rounds to the left of the decimal point. Keep the divide/multiply form as the explicit equivalent/fallback (it is correct and dialect-portable).
+- **VERIFY BEFORE WRITING**: the docs page (trino.io/docs/467/functions/math.html) documents `round(x, d)` = "rounded to `d` decimal places" but does NOT explicitly state negative-`d` behavior. Before adding the claim, the teacher MUST confirm negative-scale `round` against a live Trino 467 (or the Trino `MathFunctions.round` source) and cite that verification in the note. Do NOT assert it solely from the docs page (the iter598 NO-OP caution was correct on that point). If it cannot be confirmed for 467, leave the NO-OP — the responder's divide/multiply answer is correct and this dimension stays a completeness ding, not an error.
 
-**Responder answer summary**: `WHERE email IS NOT NULL`; explained NULL three-valued logic — comparing to NULL with `=` or `!=` yields UNKNOWN/NULL, not TRUE, so the row is filtered out; must use IS NOT NULL / IS NULL, not `!= NULL` / `<> NULL`. dbt note about applying the filter per model or in an ephemeral upstream.
+**Q3 / Q4** — fresh/re-probe, both clean, no action. DO NOT manufacture canonicals for `expr = 'x' AS flag` or `COUNT(DISTINCT)` — ordinary valid SQL, well covered.
 
-**Verification** (trino.io/docs/467/functions/comparison.html):
-- *"The `IS NULL` and `IS NOT NULL` operators test whether a value is null (undefined). Both operators work for all data types."* CONFIRMED.
-- Three-valued logic: docs implicitly confirm via the IS DISTINCT FROM truth table — `=` and `<>` against NULL yield NULL (not TRUE/FALSE), which the WHERE clause treats as "not true" → row excluded. CONFIRMED.
+## Fabrication / slip watch
 
-| Dimension | Score | Rationale |
-|---|---|---|
-| Accuracy | 5 | IS NOT NULL semantics + 3-valued logic correctly stated; the `!= NULL` anti-pattern call-out is canonical. |
-| Completeness | 5 | Covers the operator, the underlying logic, the anti-pattern, AND the dbt application (model filter / ephemeral upstream). |
-| Clarity | 5 | "Comparing to NULL → UNKNOWN → row filtered" is the clearest possible framing for a beginner. |
-| Actionability | 5 | Engineer knows the exact WHERE clause + where to put it in dbt. |
+NONE. No fabricated function, no fabricated absence (ends_with correctly reported as absent), no `::`-cast, no wrong version. The single gap is a missing simpler-idiom completeness item on Q2, not an error.
 
-**Q4 avg = 5.00**
+## Re-probe targets (iter599-600)
 
----
-
-## Overall summary
-
-| Q | Avg |
-|---|---|
-| Q1 (bool_or re-probe) | 5.00 |
-| Q2 (year/month extraction) | 4.75 |
-| Q3 (MIN/MAX per group) | 5.00 |
-| Q4 (IS NOT NULL filter) | 5.00 |
-
-**Overall average = (5.00 + 4.75 + 5.00 + 5.00) / 4 = 4.9375**
-
-**Verdict: PASS (4.9375 >= 3.5)**
-
----
-
-## bool_or / bool_and gap resolution status
-
-**RESOLVED.** The iter597 canonical (H4 sub-block adjacent to §3.1E in resources/23-sql-best-practices-olap.md) routed correctly on the very first re-probe:
-- Responder LEADS with `bool_or(succeeded)` and `bool_and(succeeded)` — no detour through count_if(...) > 0 or MAX(boolean).
-- Responder actively warns AGAINST `MAX(succeeded)` / `MIN(succeeded)` with a wrong-intent + cost rationale.
-- The exact column aliases mirror the iter597 canonical's worked example shape (`bool_or(is_late) AS any_late` -> `bool_or(succeeded) AS had_any_success`).
-- The findability concern (keyword anchors block adjacent to count_if neighborhood, NOT a §3.1E rewrite) confirmed effective: the boolean question routed to bool_or even though the surrounding §3.1E count_if content was preserved untouched.
-
-The iter596 (4.4375 PASS but Q4 = 3.00 boolean-aggregation gap) issue is closed.
-
----
-
-## Notes / slips
-
-None. All four answers are docs-canonical Trino 467, fit the on-prem stack (Trino 467 + Iceberg + Hive Metastore on MinIO), and would translate cleanly into a dbt model.
-
-Minor note (not a slip, not a score deduction beyond Q2 completeness 4):
-- Q2 could optionally mention `year(order_date)` / `month(order_date)` as equivalent shorter forms. Not a gap to act on — both EXTRACT and date_trunc are valid and the engineer can pick. Only flag if a future re-probe shows the responder rejecting `year()` / `month()` as invalid.
-
----
-
-## Next-teacher actions for iter598
-
-**PRIMARY DIRECTIVE — NO-OP on bool_or/bool_and**:
-The iter597 fix landed perfectly. DO NOT touch the §3.1E count_if neighborhood, DO NOT touch the new bool_or/bool_and H4 sub-block, DO NOT rewrite §3.1E or §11. The canonical is routing as intended on the re-probe.
-
-**FIX A (HIGH, but contingent)**: NO-OP this iteration. The four answers all scored >= 4.75; there is no adjacent gap large enough to justify churn. Do NOT manufacture an edit. If iter598 questions surface a new wrong-frame or fabricated-feature slip, treat that as Fix A; otherwise hold.
-
-**FIX B (LOWER, opportunistic, defer unless needed)**: If a future re-probe of EXTRACT(YEAR/MONTH FROM date) shows the responder rejecting the `year(date)` / `month(date)` short forms, add a one-line equivalence note in the §3.1-or-adjacent date-extract neighborhood quoting docs:
-- year(x) — "Returns the year from x."
-- month(x) — "Returns the month of the year from x."
-DO NOT preemptively add this. Wait for a probe that confirms a gap.
-
-**CONSTRAINTS to carry forward**:
-- iter534-597 locks PRESERVED, including the new bool_or/bool_and H4 canonical at §3.1E neighborhood (UNTOUCHED).
-- r22 §13.x federation guardrails UNTOUCHED (federation rubric row stays 4.49944/310).
-- ::-cast ban, EXTRACT-EPOCH ban, ILIKE-not-native, NOT-IN-NULL, MAX-vs-max_by, bucket(col,N) column-first, and all other dialect locks PRESERVED.
-- Reconcile-in-place rule: any iter598 edit must fix/remove stale contradictory content in the SAME file; never just append. Near-threshold topics need consistently-accurate answers.
-- Trino dialect: every SQL example must be valid Trino 467 (no QUALIFY, no ::-cast, no EXTRACT EPOCH, etc.).
-- All examples must fit the on-prem stack: Trino 467 + Iceberg 1.5.2 + Hive Metastore on bare-metal MinIO, JWT auth, OPA authz.
-
-**Confidence**: HIGH that iter597 is a clean PASS with the bool_or gap resolved. The teacher's single targeted edit (H4 adjacent to §3.1E, not a rewrite) achieved exactly the intended routing change without disturbing the count_if canonical that has been stable for many iterations.
+- (a) round-to-nearest-N **2nd framing** — "round latency_ms to nearest 50" / "bucket revenue into 1000s" — confirm whether the responder reaches `round(x, -d)` once/if the teacher adds the verified note.
+- (b) starts_with **2nd framing** — "rows where the SKU code begins with 'EU'" — confirm `starts_with(sku,'EU')` vs anchored `LIKE 'EU%'` routing and the pruning contrast holds.
+- (c) Federation re-probe — only remaining marginal row (4.49944/310), now 43+ iters stale; highest-leverage breadth target if a bulletproofed angle exists that does NOT touch r22 §13.x guardrails.
