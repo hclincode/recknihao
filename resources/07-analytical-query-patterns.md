@@ -1065,9 +1065,34 @@ For a HOUR-grain spine over a bounded window, the spine size is tiny (24 rows fo
 |---|---|---|
 | **Forward-fill (LOCF)** | `LAST_VALUE(x) IGNORE NULLS OVER (PARTITION BY id ORDER BY d ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` | Carry the **last known VALUE** into gap rows on a `(entity, day, value)` series — e.g., last reported temperature into minutes with no reading. See the LEADING CANONICAL forward-fill H3 above. |
 | **Running total (cumulative sum)** | `SUM(x) OVER (PARTITION BY id ORDER BY d ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` | Accumulate a numeric column from the start of the partition through each row — e.g., month-to-date revenue, lifetime signups. See §5 Pattern A / A2 Bucketed running total below. |
+| **Share of grand total (percent of total)** | `100.0 * x / SUM(x) OVER ()` (whole-table denominator) or `100.0 * x / SUM(x) OVER (PARTITION BY g)` (per-group denominator) | Express each row as a **percent / fraction of a total** without collapsing rows — e.g., each region's % of company revenue, each product's share of category sales. The **empty `OVER ()`** is the grand total over ALL rows; add `PARTITION BY g` to make the denominator the per-group total. See the dedicated card just below. |
 | **Interval-overlap (this H3)** | `calendar c JOIN intervals s ON s.start <= c.day AND (s.end IS NULL OR s.end > c.day) GROUP BY c.day [, dim]` then `COUNT(*)` | Count how many **interval rows** (subscriptions / tickets / sessions / employment) **cover** each calendar day — e.g., active subscribers per day, open tickets per day, concurrent sessions per day. |
 
 If your question reads "what was X **as of** each day d?" think first: is X a VALUE I'm carrying forward (forward-fill), an ACCUMULATION (running total), or a COUNT of intervals covering d (interval-overlap)? The three are not interchangeable.
+
+**Card — share of grand total / percent of total / each row's fraction of the whole (`SUM(x) OVER ()` — empty OVER).** *Keyword anchors:* percent of total, share of grand total, each row as a fraction of the total, ratio to total, % of total revenue, contribution to total, what portion of the total, normalize to total, SUM OVER no partition, empty OVER clause, grand-total denominator, pct of overall. **The one-fact summary.** To put each row's value next to a denominator that is the **grand total across ALL rows** — without a `GROUP BY` that would collapse the rows away — divide by **`SUM(x) OVER ()`**. The **empty `OVER ()`** (no `PARTITION BY`, no `ORDER BY`) makes the window the **entire result set**, so `SUM(x) OVER ()` is the same grand total repeated on every row. Verified at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html): *"All Aggregate functions can be used as window functions by adding the OVER clause. The aggregate function is computed for each row over the rows within the current row's window frame"* — with no partition/order, that frame is the whole set.
+
+```sql
+-- Each region's revenue AS A PERCENT of total company revenue (rows preserved).
+SELECT
+  region,
+  revenue,
+  ROUND(100.0 * revenue / SUM(revenue) OVER (), 2) AS pct_of_total
+FROM iceberg.analytics.region_revenue
+ORDER BY pct_of_total DESC;
+
+-- Per-GROUP share: each product's percent of ITS category's total (denominator scoped per category).
+SELECT
+  category,
+  product,
+  ROUND(100.0 * sales / SUM(sales) OVER (PARTITION BY category), 2) AS pct_of_category
+FROM iceberg.analytics.product_sales;
+```
+
+- **`SUM(x) OVER ()` = grand total of `x` over the whole result, repeated on every row.** `SUM(x) OVER (PARTITION BY g)` = the per-`g` subtotal repeated on every row in that group. Pick the empty `OVER ()` for "% of the WHOLE", `PARTITION BY g` for "% within each group".
+- **Why `100.0 *` and not `100 *`:** `revenue / SUM(...)` on two integers does **integer division** (truncates to 0). Multiply by the DECIMAL literal `100.0` (or `CAST` the numerator) so the division is done in floating/decimal — see [resource 23 §3 integer-division trap](23-sql-best-practices-olap.md). Wrap in `ROUND(..., 2)` for a clean percentage.
+- **Guard against divide-by-zero:** if the total can be 0 (all rows zero / filtered to nothing), wrap the denominator in `NULLIF(SUM(x) OVER (), 0)` so the result is `NULL` instead of an error.
+- **Do NOT collapse with `GROUP BY` to get the denominator** and then re-join — the empty-`OVER ()` window computes the grand total inline while keeping every detail row, no self-join needed. (For the grand-total/subtotal ROLLUP report shape — one explicit total ROW, not a per-row percent — see [resource 28 § GROUPING SETS / ROLLUP / CUBE](28-complex-sql-performance-trino-dbt.md) instead.)
 
 **Perf note (alternative for very large interval tables — boundary-event cumulative form).** When the intervals table is enormous and the calendar × intervals cross-product is too big, switch to the boundary-event form: emit `+1` at each `start` and `-1` at each `end` as separate rows on the EVENT day, then a running `SUM(delta) OVER (ORDER BY event_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` over the event-day union gives the concurrently-active count without ever materializing a (day × interval) join. This scales linearly in (# intervals) rather than (# days × # intervals). Use it as a perf alternative; the range-join form above is correct and clear for typical SaaS sizes — don't over-engineer.
 
