@@ -530,7 +530,7 @@ This is the canonical "value as of latest event" idiom — much shorter than a w
 
 ### LEADING CANONICAL — Trino IF() vs CASE WHEN (equivalent; IF is the 2-3 arg shorthand)
 
-> **READ THIS FIRST if your question contains any of these keywords: `Trino IF function`, `IF vs CASE`, `CASE WHEN equivalent`, `conditional expression Trino`, `count_if`, `ternary Trino`, `IIF Trino`, `DECODE Trino`, `Trino if() else`.** Verified at [trino.io/docs/current/functions/conditional.html](https://trino.io/docs/current/functions/conditional.html) on 2026-06-06.
+> **READ THIS FIRST if your question contains any of these keywords: `Trino IF function`, `IF vs CASE`, `CASE WHEN equivalent`, `conditional expression Trino`, `count_if`, `ternary Trino`, `IIF Trino`, `DECODE Trino`, `Trino if() else`, `count where boolean is true`, `count of true rows`, `count true values`, `count of trues per group`, `conditional count`, `count rows flagged true`, `count rows matching condition`, `how many rows match a condition`, `how many orders shipped late`, `how many flagged`, `per-customer count of X where Y is true`, `boolean count`, `count of rows where flag = true`, `count records where bool = true`.** Verified at [trino.io/docs/current/functions/conditional.html](https://trino.io/docs/current/functions/conditional.html) on 2026-06-06.
 
 **The one-fact summary.** Trino's `if(...)` is a **single-condition shorthand** for `CASE WHEN`; the two are **equivalent** at the planner level. Use `if(...)` for 1 condition + 1 ELSE; use `CASE WHEN` when you need multiple `WHEN ... THEN` branches.
 
@@ -547,7 +547,38 @@ SELECT CASE WHEN status = 'active' THEN 1 ELSE 0 END            AS active_flag F
 SELECT count_if(status = 'active')                              AS active_count FROM users;  -- aggregate form
 ```
 
-**When to reach for which.** Use `if()` for the 1-condition ternary. Use `CASE WHEN ... WHEN ... ELSE ... END` for **multi-branch** logic (`if()` does NOT chain — there is no `elseif` in the expression form; `CASE` is the only path). Use `count_if(p)` over `count(CASE WHEN p THEN 1 END)` for COUNT-of-matching.
+**Per-group "count rows where boolean is true" — `count_if` LEADS, three equivalent forms (rank order: prefer `count_if`).** When the question is "**count how many orders shipped late (`shipped_late = true`) per customer**" — or any "count rows where a boolean / condition is true, grouped by X" shape — the **idiomatic Trino-native form is `count_if(bool)`**. Reach for `count_if` first; the `FILTER (WHERE ...)` and `SUM(CASE WHEN ... THEN 1 ELSE 0 END)` forms are equivalent but less idiomatic.
+
+```sql
+-- Trino 467 — "how many orders shipped late per customer" — three equivalent forms (rank order):
+
+-- 1. count_if(bool) — IDIOMATIC TRINO. Shortest, clearest intent.
+--    Trino docs verbatim: count_if(x) -> bigint, "Returns the number of TRUE input values."
+SELECT customer_id,
+       COUNT(*)               AS total_orders,
+       count_if(shipped_late) AS late_orders            -- boolean column passed directly
+FROM orders
+GROUP BY customer_id;
+
+-- 2. COUNT(*) FILTER (WHERE bool) — ANSI-standard, also clear. Equivalent plan.
+SELECT customer_id,
+       COUNT(*)                              AS total_orders,
+       COUNT(*) FILTER (WHERE shipped_late)  AS late_orders
+FROM orders
+GROUP BY customer_id;
+
+-- 3. SUM(CASE WHEN bool THEN 1 ELSE 0 END) — portable fallback (works on every SQL engine).
+--    Verbose; not the Trino-native form. Use only when the SQL must run on Oracle/MySQL/etc. too.
+SELECT customer_id,
+       COUNT(*)                                          AS total_orders,
+       SUM(CASE WHEN shipped_late THEN 1 ELSE 0 END)     AS late_orders
+FROM orders
+GROUP BY customer_id;
+```
+
+All three produce **identical row counts and identical query plans** on Trino 467. The `count_if(shipped_late)` form is what the Trino docs call out as the canonical "count of TRUE values" aggregate; reach for it first for any "count rows where condition is true" or "count rows flagged true per group" question. Predicate form is also valid: `count_if(status = 'shipped' AND shipped_at > due_at)` — any boolean expression works, not just a stored boolean column.
+
+**When to reach for which.** Use `if()` for the 1-condition ternary. Use `CASE WHEN ... WHEN ... ELSE ... END` for **multi-branch** logic (`if()` does NOT chain — there is no `elseif` in the expression form; `CASE` is the only path). Use `count_if(p)` over `count(CASE WHEN p THEN 1 END)` and over `SUM(CASE WHEN p THEN 1 ELSE 0 END)` for COUNT-of-matching — the `count_if` form is the **idiomatic Trino-native** lead; `COUNT(*) FILTER (WHERE p)` is the ANSI-standard equivalent; `SUM(CASE WHEN p THEN 1 ELSE 0 END)` is the portable fallback.
 
 > **DO NOT WRITE.**
 > 1. **`DECODE(col, 'A', 1, 'B', 2, 0)`** — Oracle-only. Trino has no `DECODE`. Translate to `CASE WHEN col = 'A' THEN 1 WHEN col = 'B' THEN 2 ELSE 0 END`, OR to a chain of `if()` if it's a single condition. **CRITICAL NULL-MATCHING NUANCE on the `DECODE` → CASE translation: see [resource 27 §4.1A LEADING CANONICAL — Oracle DECODE → Trino CASE](27-oracle-plsql-to-dbt-trino.md) — DECODE treats NULL=NULL as a match, simple CASE does NOT.**
@@ -1423,6 +1454,8 @@ SELECT
 FROM events
 WHERE event_date = DATE '2026-05-26';
 ```
+
+> **Cross-ref — "count where boolean = true per group" → `count_if` LEADS.** When the conditional is just "is this boolean true?" (e.g., `count_if(shipped_late)` per customer, or `count_if(is_paid)` per order_date), prefer **`count_if(bool)`** — it is the **idiomatic Trino-native form** for "count of TRUE values." See [§ 3.1E LEADING CANONICAL](#31e-trino-if-vs-case-when-and-count_if--the-conditional-expression-family) for the three-form rank: (1) `count_if(bool)` idiomatic, (2) `COUNT(*) FILTER (WHERE bool)` ANSI-standard, (3) `SUM(CASE WHEN bool THEN 1 ELSE 0 END)` portable fallback — all three are equivalent in plan and result.
 
 > **Terminology note — call this pattern by its right name.** The `aggregate(...) FILTER (WHERE <cond>)` form above and the equivalent `SUM(CASE WHEN <cond> THEN <metric> END)` form are both **conditional aggregation** — also called **manual pivot** or **crosstab** when you build a multi-column pivot (e.g., quarterly revenue as `q1_revenue, q2_revenue, q3_revenue, q4_revenue` columns). Trino has **no `PIVOT` keyword** — you write the conditional aggregation explicitly. The `FILTER (WHERE ...)` clause is supported on every Trino aggregate per [Trino aggregate functions docs](https://trino.io/docs/current/functions/aggregate.html).
 >
