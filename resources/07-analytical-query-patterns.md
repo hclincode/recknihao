@@ -1819,6 +1819,13 @@ Trino has `width_bucket` (BOTH overloads) — use it instead of a long `CASE WHE
   ```
   Wrap the integer bucket index in a `CASE` ONLY if you want pretty labels (`'0-30s'`, `'30-60s'`, ...); the bucketing itself is one function call.
 
+  **`0..N` numbering (the array overload) — the off-by-one rule.** For an `N`-element bounds array (`N = cardinality(bins)`), `width_bucket(x, bins)` returns a value in **`0..N`** — that is **`N + 1` distinct buckets**, NOT `N`:
+  - **bucket `0`** = `x` is **below the first bound** (`x < bins[1]`) — the underflow bin.
+  - **bucket `k`** (for `1 <= k < N`) = `x` is **between bound `k` and bound `k+1`** (`bins[k] <= x < bins[k+1]`).
+  - **bucket `N`** = `x` is **at or above the LAST bound** (`x >= bins[N]`) — the overflow / **top** bin.
+
+  **TRAP — the top bin is bucket `N`, NOT `N-1`.** The "`$500+`" / "`120s+`" open-ended top tier is bucket `N` (= `cardinality(bins)`), the overflow value. So a 10-element bounds array `ARRAY[50,100,150,...,500]` yields buckets `0..10` — **11 buckets** — and bucket `10` (= `width_bucket(x, bins) = 10`) is the `>= 500` `"$500+"` top bin. An N-element bounds array makes N+1 buckets; do not write `CASE width_bucket(...) WHEN N-1 THEN '$500+'` (off by one) — the top bin is `N`. (Verified against the Trino source `io.trino.operator.scalar.MathFunctions.widthBucket`: the array overload returns `numberOfBins` — i.e. `cardinality(bins)` — when the value is `>=` the last bin bound.)
+
 **DO NOT WRITE** *"Trino has no `width_bucket` — it is Postgres-only"* (FALSE — Trino 467 has BOTH overloads, documented at `functions/math.html`); **DO NOT WRITE** a long `CASE WHEN ... THEN ... WHEN ... THEN ... END` ladder for numeric histogram bucketing when `width_bucket(x, ARRAY[...])` does uneven bins directly in one call. Update the Pattern C3 comparison table mental model: "Custom (non-equal-size) buckets" → `width_bucket(x, ARRAY[...])` is the **preferred Trino-native one-liner**; the CASE WHEN ladder is the fallback only when you need non-numeric bucketing (e.g., string-key bucketing) or per-bucket pretty labels mid-aggregation.
 
 ### Pattern D: Sliding window (last 7 days rolling)

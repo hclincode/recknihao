@@ -385,6 +385,22 @@ FROM customer_summary;
 
 For ordinary date-to-string formatting, prefer `date_format` or `format_datetime` (they take a single timestamp and a single pattern — cleaner than `format('%1$tY-%1$tm-%1$td', ts)`). For general-purpose printf-style **multi-arg** string building (a number + a string + a percent + a currency amount in ONE call), `format()` is the right answer.
 
+**Both `date_format(ts, fmt)` and `format_datetime(ts, fmt)` require a TIMESTAMP input — CAST a DATE first.** Verified at [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html): the signatures are `date_format(timestamp, format) -> varchar` and `format_datetime(timestamp, format) -> varchar` — *"Formats `timestamp` as a string using `format`."* The first argument is typed **TIMESTAMP**, not DATE. Passing a bare `DATE` column raises a function-resolution / signature-mismatch error. If your column is a `DATE`, cast it up first: `format_datetime(CAST(d AS timestamp), 'yyyy-MM')` or `date_format(CAST(d AS timestamp), '%Y-%m')`.
+
+**Turn a DATE into a `'YYYY-MM'` month-label string — the cast-free shortcut.** When you just want a `'2026-05'` month bucket label from a DATE column, you do NOT need `format_datetime` / `date_format` at all. A `DATE` casts to text as ISO `'YYYY-MM-DD'`, so characters 1-7 are exactly `'YYYY-MM'`:
+
+```sql
+-- Cast-free 'YYYY-MM' month label straight from a DATE column (no datetime-format function, no timestamp cast).
+SELECT substr(CAST(order_date AS varchar), 1, 7) AS month_label   -- '2026-05'
+FROM orders;
+
+-- Equivalent via the datetime formatter (needs a timestamp input, so CAST the DATE up first):
+SELECT format_datetime(CAST(order_date AS timestamp), 'yyyy-MM') AS month_label  -- '2026-05'
+FROM orders;
+```
+
+In the Joda pattern `'yyyy-MM'`: lowercase `yyyy` = 4-digit year, **uppercase** `MM` = 2-digit month (`01`-`12`). Joda **lowercase** `mm` = MINUTE, not month — `format_datetime(ts, 'yyyy-mm')` silently yields year-minute, a classic bug. (MySQL-style `date_format` uses `%Y` = year, `%m` = month.) For grouping rows by calendar month, `date_trunc('month', ts)` (returns a truncated TIMESTAMP/DATE, not a string) is the better choice when you want a real date value rather than a label — see resource 07 Pattern A.
+
 ### DO NOT WRITE
 
 | False claim | Reality |

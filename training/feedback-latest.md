@@ -1,114 +1,94 @@
-# Judge Feedback — iter600 (FIX A VALIDATION re-probe)
+# Judge Feedback — iter601 (EXTENDED PHASE)
 
-**Date:** 2026-06-07 · **Phase:** extended · Trino 467 pinned · Docs verified against trino.io/docs/467 + Trino source.
+**Date:** 2026-06-07 · **Phase:** extended · Trino 467 pinned · Docs verified against trino.io/docs/467.
 
-Four everyday-engineer SQL shaping questions: NTILE top-decile FILTER (Q1, the FIX A validation), width_bucket histogram (Q2), date_trunc hour bucket (Q3), format_datetime 'yyyy-MM' label (Q4).
+**Overall: 4.3125 PASS** (margin +0.8125 above 3.5 floor). Federation NOT probed — 4.49944/310 row UNCHANGED.
 
----
-
-## Q1 — NTILE deciles, FILTER to top decile only (FIX A VALIDATION) — **4.875**
-
-Responder: NTILE(10) OVER (ORDER BY order_value) computed inside a CTE `ranked_orders`, then `SELECT ... FROM ranked_orders WHERE value_decile = 10 ORDER BY order_value DESC` in the OUTER query. Explained bucket 10 = highest.
-
-**Verification:**
-- trino.io/docs/467/functions/window.html — NTILE: *"Divides the rows for each window partition into `n` buckets ranging from `1` to at most `n`. Bucket values will differ by at most `1`."* Window functions *"execute after the HAVING clause but before the ORDER BY clause"* — i.e. AFTER WHERE. So a window output alias is NOT referenceable in a same-level WHERE.
-- **This answer is VALID Trino 467.** The NTILE is computed at the CTE level; the `WHERE value_decile = 10` is in the OUTER query referencing a CTE-projected column. That is exactly the correct outer-wrapper pattern (CTE is one query level out from the window) — NOT a window-fn-in-WHERE-at-same-level error.
-- With `ORDER BY order_value` ASCENDING, the highest values land in the last/largest bucket. NTILE(10) → bucket 10 = highest decile. CORRECT. The final `ORDER BY order_value DESC` is presentation-only and fine.
-
-**iter599 SLIP STATUS: RESOLVED.** iter599's Q4 produced an invalid `WHERE spending_tier IS NOT NULL` filtering an NTILE output alias at the SAME SELECT level. This re-probe shows the responder now uses the valid CTE + outer-query-filter wrapper. The FIX A inoculation callout added at r07 Pattern C3 (the WHERE-on-window-alias ban + RIGHT/WRONG outer-wrapper token pair) LANDED. No window-fn-in-WHERE slip recurred.
-
-Scores — Accuracy 5 / Completeness 4.75 / Clarity 5 / Actionability 4.75 → **4.875**
+All four answers verified against trino.io/docs/467 (TABLESAMPLE wording cross-checked on the SELECT page; GROUP BY/ORDER BY alias rule confirmed). Zero `::`-casts, zero wrong-version pins, zero fabricated functions. Two real defects: Q1 landing-point miss (CASE instead of width_bucket — the iter601 FIX A re-probe did NOT exercise width_bucket) and Q4 WRONG-FUNCTION-CHOICE for the stated goal (led with BERNOULLI for a "don't scan everything" ask, when SYSTEM is the I/O-reducing sampler). The responder correctly stated BERNOULLI doesn't save I/O, which keeps Q4 out of accuracy-failure, but it still recommended the wrong sampler for the goal.
 
 ---
 
-## Q2 — width_bucket fixed-width histogram — **4.25** (off-by-one PROSE slip; SQL correct)
+## Q1 — Fixed-width 100ms latency bands + catch-all top bin (>1s)
 
-Responder: `width_bucket(invoice_amount, ARRAY[50.0,100.0,...,500.0]) AS bucket_id ... GROUP BY bucket_id`. Prose: "0 = below $50, 1 = $50-100, 2 = $100-150, ... up to 9 = $450-$500 and above".
+**Scores: Accuracy 5 / Completeness 3 / Clarity 5 / Actionability 4 = 4.25**
 
-**Verification:**
-- trino.io/docs/467/functions/math.html — `width_bucket(x, bins) → bigint`: *"Returns the bin number of `x` according to the bins specified by the array `bins`."* Two overloads documented (equi-width `(x,bound1,bound2,n)` and custom `(x,bins)`). Function EXISTS in Trino 467; not Postgres-only. The chosen overload and SQL are CORRECT and runnable.
-- **Bin-numbering (Trino source, MathFunctions.widthBucket Block overload):** binary search returns `lower`, which is 0 when value < bins[0] and `numberOfBins` (= N, the array length) when value >= the last bin. So for a bins array of **N = 10** elements `[50,...,500]`, the result ranges **0..10**: bucket 0 = below 50, bucket k = bins[k-1]..bins[k], and **bucket 10 = >= 500 ($500+)**.
-- **OFF-BY-ONE in the PROSE:** The responder said "9 = $450-$500 and above," collapsing two distinct buckets. Correct labeling: **bucket 9 = $450–$500**, **bucket 10 = $500 and above**. The responder's prose loses the $500+ top bucket — which is exactly the bucket the question's "$500+" range names.
+Responder used a `CASE WHEN response_time_ms < 100 THEN '0-100ms' ... WHEN < 1000 THEN '500ms-1s' ELSE '1s+' END AS response_bucket, COUNT(*) ... GROUP BY response_bucket ORDER BY CASE response_bucket WHEN ... END`. The `ELSE` arm is the overflow catch-all for everything >= 1s.
 
-**Severity: moderate.** The SQL is fully correct and runnable — the histogram will compute all 11 buckets (0..10) correctly. Only the explanatory mapping is wrong, and it's wrong precisely at the bucket the engineer cares about ($500+). An engineer trusting the prose would mislabel their chart's top bin or write `WHERE bucket_id = 9` thinking it captures $500+ when it actually captures only $450–$500. Accuracy docked.
+VERIFIED:
+- The CASE-chain answer is **correct and runnable in Trino 467**. GROUP BY and ORDER BY can both reference the SELECT output alias `response_bucket`. trino.io/docs/467/sql/select.html: ORDER BY "Each expression may be composed of output columns, or it may be an ordinal number selecting an output column by position"; the docs' own example uses a SELECT alias in ORDER BY (`... AS spend ... ORDER BY spend`). Boundary logic is correct: contiguous `< 100 / < 200 / ...` ranges with a single open-ended `ELSE` overflow bin. No off-by-one — each band's lower edge is the previous band's upper edge, and the ELSE captures the slow tail cleanly.
 
-Scores — Accuracy 3.5 / Completeness 4.5 / Clarity 4.5 / Actionability 4.5 → **4.25**
+LANDING-POINT MISS (the FIX A re-probe did NOT fire):
+- The question literally asks for FIXED-width bands plus an overflow catch-all — the textbook `width_bucket(x, ARRAY[100,200,...,1000])` use case, which the iter601 teacher clarified at r07 Pattern C4 (0..N numbering + the "top bin is bucket N" off-by-one trap). The responder routed to CASE instead, so the iter601 FIX A clarifier was NOT exercised. This is NOT an accuracy hit (CASE is correct), but it is a completeness/findability gap: for many bands, `width_bucket` is far more concise and less error-prone than a 10-arm CASE, and the engineer's keywords ("fixed 100ms-wide bands", "count per band", "catch-all top band") should surface it. Completeness -2, Actionability -1.
 
----
-
-## Q3 — date_trunc('hour', ts) hourly counts — **4.6875**
-
-Responder: `date_trunc('hour', login_timestamp) AS hour_bucket ... GROUP BY date_trunc('hour', login_timestamp)`; noted that for hour-of-day 0–23 use `EXTRACT(HOUR FROM hour_bucket)` or an outer subquery.
-
-**Verification:**
-- trino.io/docs/467/functions/datetime.html — `date_trunc(unit, x) → [same as input]`, *"Returns `x` truncated to `unit`"*. `'hour'` is a valid unit. CORRECT and runnable.
-- The question mixed two readings: "round timestamp down to its hour" (truncate-to-hour, keeps the date — distinct timestamp per day) vs "per hour-of-day" (0–23 collapsed across all days). The responder LED with truncate-to-hour (matching "round down to its hour") and explicitly offered the `EXTRACT(HOUR FROM ...)` path for the 0–23 reading. Handling the ambiguity by surfacing both is the right call — full marks for disambiguation.
-- `EXTRACT(HOUR FROM ...)` is valid Trino 467. CORRECT.
-
-Scores — Accuracy 5 / Completeness 4.75 / Clarity 4.5 / Actionability 4.5 → **4.6875**
+iter602 teacher fix (PRIMARY): at r07 Pattern C4, add a short CASE-vs-width_bucket SIGNPOST + keyword anchors so "fixed-width bands"/"100ms-wide bands"/"count per band"/"overflow/catch-all top band" route to `width_bucket`. Show the equivalent width_bucket form for THIS shape, e.g. `width_bucket(response_time_ms, ARRAY[100.0,200.0,300.0,400.0,500.0,600.0,700.0,800.0,900.0,1000.0])` → bucket 0 = <100, bucket k = [100k, 100(k+1)), bucket 10 = >=1000 (the >1s overflow = bucket N, not N-1 — reuse the FIX A trap). Keep CASE shown as the explicit, label-friendly equivalent: CASE is the natural choice when you want human-readable band LABELS ('0-100ms'), which is exactly what this engineer asked for — so do NOT demote CASE, just add the width_bucket route for the "many uniform bins, integer index is fine" case. Diagnosis: LANDING-POINT MISS (content exists at C4, keyword surface didn't route the "fixed-width bands + overflow" phrasing there).
 
 ---
 
-## Q4 — format_datetime(date, 'yyyy-MM') month label — **3.875** (DATE-type cast gap)
+## Q2 — Extract numeric part from "ORDER-4821-US" via pattern match
 
-Responder: `format_datetime(subscription_start_date, 'yyyy-MM') AS month_label ... GROUP BY format_datetime(...)`; noted Joda 'yyyy' = 4-digit year, 'MM' = month, lowercase 'mm' = minutes.
+**Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 = 5.00**
 
-**Verification:**
-- trino.io/docs/467/functions/datetime.html — `format_datetime(timestamp, format) → varchar`, *"Formats `timestamp` as a string using `format`."* Uses *"a format string that is compatible with JodaTime's DateTimeFormat pattern format."* So `'yyyy-MM'` is the correct Joda pattern → 4-digit year + zero-padded month. The Joda token guidance (yyyy=year, MM=month, lowercase mm=minutes) is CORRECT and a genuinely useful footgun warning. `date_format(timestamp, format)` is the documented MySQL-style alternative — responder mentioned date_format as the alternative.
-- **GAP — DATE input type:** The signature is `format_datetime(timestamp, ...)`, NOT date. The question explicitly says "a **date** column." Trino does NOT auto-coerce DATE→TIMESTAMP for this function; passing a true DATE column raises a function-resolution error ("Unexpected parameters / function not registered for (date, varchar)"). The DATE-safe forms are `format_datetime(CAST(subscription_start_date AS timestamp), 'yyyy-MM')`, or the simpler `substr(CAST(subscription_start_date AS varchar), 1, 7)` (a DATE casts to 'YYYY-MM-DD'). The responder did NOT note the cast, so the literal copy-paste FAILS if the column is genuinely typed DATE. Note: many "date" columns in lakehouse tables are actually TIMESTAMP, in which case it runs as-written — but the question said DATE, so the cast caveat is required for correctness.
+Responder gave `regexp_extract(reference, '\d+') AS order_number` (first digit-run) and the more precise `regexp_extract(reference, '-(\d+)-', 1)` (dash-delimited middle group; 3rd arg 1 = capture group 1).
 
-**Severity: moderate.** Correct function, correct format pattern, excellent Joda token note — but the literal SQL can fail on a true DATE column, and the question named DATE explicitly. The simplest robust answer for a DATE column is the `substr(CAST(d AS varchar),1,7)` idiom (which the resources already document at r10:1439) — that would have been the cleanest, cast-free 'YYYY-MM' answer.
+VERIFIED at trino.io/docs/467/functions/regexp.html:
+- `regexp_extract(string, pattern) → varchar` — "Returns the first substring matched by the regular expression `pattern` in `string`". `regexp_extract(reference, '\d+')` returns the first digit run ('4821', '00293'). Correct.
+- `regexp_extract(string, pattern, group) → varchar` — "Finds the first occurrence of the regular expression `pattern` in `string` and returns the capturing group number `group`". Group 1 = first parenthesized group, so `'-(\d+)-'` with group 1 returns the middle numeric block. Correct.
+- `'\d+'` is valid: Trino string literals do NOT treat backslash as an escape, so `'\d+'` reaches the regex engine intact as backslash-d-plus = one-or-more digits. Correct.
 
-Scores — Accuracy 3.5 / Completeness 3.75 / Clarity 4.5 / Actionability 3.75 → **3.875**
-
----
-
-## OVERALL
-
-| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|---|
-| Q1 | 5.0 | 4.75 | 5.0 | 4.75 | 4.875 |
-| Q2 | 3.5 | 4.5 | 4.5 | 4.5 | 4.25 |
-| Q3 | 5.0 | 4.75 | 4.5 | 4.5 | 4.6875 |
-| Q4 | 3.5 | 3.75 | 4.5 | 3.75 | 3.875 |
-| **Dim avg** | **4.25** | **4.4375** | **4.625** | **4.375** | |
-
-**Overall = (4.25 + 4.4375 + 4.625 + 4.375) / 4 = 4.421875 → PASS** (>= 3.5).
-
-No per-question quality-gate override applied; the overall average governs the label. Quality concerns (Q2 off-by-one prose, Q4 DATE-cast gap) flagged separately below.
+Two complementary forms (loose first-digit-run vs. anchored capture-group), correct semantics, directly addresses "pattern match, not manual dash-splitting." Zero defects. (Leading-zero forms return varchar '00293'; an int would need a CAST, not asked — no ding.)
 
 ---
 
-## EXPLICIT: iter599 NTILE WHERE-on-window-alias slip — **RESOLVED**
+## Q3 — Collapse array of tags into comma-separated string for CSV
 
-Q1 of this re-probe shows the valid CTE/outer-wrapper form: NTILE in the CTE, decile-alias filter in the OUTER query. There is NO same-level `WHERE <window-alias>` error. The iter600 FIX A inoculation callout at r07 Pattern C3 LANDED. The iter599 slip is resolved and did not recur.
+**Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 = 5.00**
 
----
+Responder gave `array_join(product_tags, ',') AS tags_csv`.
 
-## DIAGNOSIS + iter601 TEACHER ACTIONS
-
-### Q2 off-by-one prose (PRIMARY) — diagnosis: **resource-defect / content-incompleteness at the landing point**
-The responder routed correctly to width_bucket (r07 Pattern C4, ~line 1798) and wrote correct SQL, but its bucket-numbering NARRATION is off by one at the top bin. This is a resource-content clarity gap: the C4 content evidently does not nail the **0..N** numbering crisply enough for the responder to narrate it. Precise fix for iter601:
-
-- **Where:** resources/07-analytical-query-patterns.md, Pattern C4 width_bucket canonical (~line 1798).
-- **What to add (reconcile-in-place, do NOT rewrite C4):** an explicit worked numbering line for the array overload. For an N-element bins array, results span **0..N**:
-  - `width_bucket(x, ARRAY[50,100,...,500])` with **10** bounds → buckets **0..10**.
-  - bucket **0** = `x < 50`; bucket **k** = `bins[k-1] <= x < bins[k]`; bucket **N (=10)** = `x >= 500` (the open-ended top "$500+" bin).
-  - One-line trap callout: "the top bucket is **N**, NOT N-1 — the last array element opens a new bucket above it; do NOT fold '$500 and above' into bucket 9." Verified against Trino source MathFunctions.widthBucket (Block overload returns `numberOfBins` when value >= last bin) since trino.io/docs/467/functions/math.html does not spell out the edge cases.
-
-### Q4 DATE-input cast gap (SECONDARY) — diagnosis: **routed-but-mis-applied + landing-point-miss**
-The responder found format_datetime/date_format (r23 §dual-table, ~line 382-395) but did not surface the **DATE-type requires CAST** caveat, even though the cleaner cast-free idiom `substr(CAST(d AS varchar),1,7)` already exists at r10:1439. The format_datetime/date_format landing point does not warn that both require a TIMESTAMP and that a DATE column needs `CAST(d AS timestamp)`. Precise fix for iter601:
-
-- **Where:** resources/23-sql-best-practices-olap.md, the date_format/format_datetime dual-function table (~line 382-395).
-- **What to add (reconcile-in-place):** a short type-note row: "Both `format_datetime(timestamp, fmt)` and `date_format(timestamp, fmt)` require a **TIMESTAMP** input. A **DATE** column does NOT auto-coerce — wrap it: `format_datetime(CAST(d AS timestamp), 'yyyy-MM')`. For a plain 'YYYY-MM' label, the cast-free shortcut is `substr(CAST(d AS varchar), 1, 7)` (a DATE renders as 'YYYY-MM-DD'); cross-ref r10:1439." Verified: signature is `format_datetime(timestamp, format)` per trino.io/docs/467/functions/datetime.html; DATE input raises a function-resolution error (date != timestamp distinctness, multiple Trino issue threads).
-
-### Q1, Q3 — no action needed
-Q1 FIX A validated. Q3 disambiguation handled cleanly.
+VERIFIED at trino.io/docs/467/functions/array.html:
+- `array_join(x, delimiter) → varchar` — "Concatenates the elements of the given array using the delimiter. Null elements are omitted in the result." `array_join(ARRAY['billing','enterprise','trial'], ',')` → `'billing,enterprise,trial'`. Exactly the requested CSV collapse. Correct, idiomatic, purpose-built. Zero defects. (The `array_join(x, delimiter, null_replacement)` 3-arg overload exists if explicit null handling is later needed — not required here.)
 
 ---
 
-## NEW FABRICATION / SLIP FLAGS
+## Q4 — Sample a random handful from a 100M+ row table without scanning everything
 
-- **No fabricated functions or absences.** width_bucket, date_trunc, format_datetime, date_format, EXTRACT all real and correctly used in Trino 467.
-- **No `::`-cast, no QUALIFY, no window-fn-in-WHERE.** The Q1 outer-wrapper is the correct no-QUALIFY pattern.
-- **Two prose/completeness slips (NOT fabrications):** Q2 width_bucket top-bucket off-by-one in narration (SQL correct); Q4 missing DATE→timestamp cast caveat (SQL fails on a true DATE column). Both are landing-point clarity gaps for iter601, addressed above. Neither sank the overall PASS but both should be closed — these are exactly the confident-but-wrong micro-details that erode trust at 250+ datapoints.
+**Scores: Accuracy 4 / Completeness 4 / Clarity 5 / Actionability 4 = 4.25**
+
+Responder gave `SELECT * FROM events TABLESAMPLE BERNOULLI (5) WHERE event_date >= CURRENT_DATE - INTERVAL '7' DAY LIMIT 100` and explained that BERNOULLI reads blocks then randomly drops rows — the speedup comes from the partition filter + fewer rows aggregated, NOT from less I/O; LIMIT caps the output.
+
+VERIFIED at trino.io/docs/467/sql/select.html (TABLESAMPLE section):
+- Syntax `TABLESAMPLE BERNOULLI (percentage)` is valid (docs example `SELECT * FROM users TABLESAMPLE BERNOULLI (50);`). Correct.
+- BERNOULLI: "all physical blocks of the table are scanned and certain rows are skipped" and **"does not reduce the time required to read the sampled table from disk."** The responder's I/O claim is therefore ACCURATE — this is the part that keeps Q4 out of accuracy-failure territory.
+- SYSTEM: "divides the table into logical segments of data and samples the table at this granularity ... either selects all the rows from a particular segment of data or skips it." This is the sampler that actually skips data = reduces I/O.
+
+WRONG-FUNCTION-CHOICE for the stated goal:
+- The engineer's explicit goal is "without scanning everything / SELECT * LIMIT 100 is too slow" = an I/O-reduction ask. The I/O-reducing sampler is **TABLESAMPLE SYSTEM (n)**, which skips whole splits/segments. The responder LED with BERNOULLI, which by its own (correct) admission does NOT reduce I/O — so the headline recommendation does not serve the headline goal. The real work here is being done by the `event_date` partition filter (genuine pruning on the production Iceberg table) + LIMIT, with BERNOULLI adding row-level randomization but no scan reduction. That's a defensible composite, but the responder should have LED with SYSTEM for the "don't read everything" framing and offered BERNOULLI only as the more-statistically-uniform option when uniformity matters more than I/O. Accuracy -1 (right facts, recommended primary tool mismatched to goal), Completeness -1 (SYSTEM never mentioned), Actionability -1 (engineer steered to the non-I/O-reducing sampler for an I/O problem).
+
+Diagnosis: ROUTED-BUT-MIS-APPLIED with a partial resource gap. state.json notes the TABLESAMPLE content lives at r23 ~lines 1092-1104 and DOES correctly state "BERNOULLI(N) after partition filter does NOT reduce I/O vs SYSTEM(N) skips whole splits/reduces I/O." So the content is present and correct — but the responder absorbed the "BERNOULLI doesn't reduce I/O" fact yet still LED with BERNOULLI for an I/O-reduction question instead of flipping to SYSTEM. The landing point states the contrast but does not give an explicit DECISION RULE mapping the goal to the sampler.
+
+iter602 teacher fix (PRIMARY): at r23 ~line 1092 TABLESAMPLE neighborhood, add a tight DECISION-RULE / keyword-anchored signpost:
+- "Goal = sample without reading everything / avoid full scan / sample a huge table fast" → **lead with TABLESAMPLE SYSTEM (n)** (skips whole splits/segments = less I/O). Anchors: "without scanning everything", "too slow to scan", "quick sample of a huge table", "don't read all 100M rows".
+- "Goal = statistically uniform / unbiased per-row sample (clustering won't bias it)" → TABLESAMPLE BERNOULLI (n), BUT note it scans all blocks = no I/O saving; pair with a partition filter to bound the scan.
+- Keep the existing (correct) BERNOULLI-vs-SYSTEM I/O contrast; this fix only adds the explicit goal→sampler mapping so the responder LEADS with the right one. Verify the SYSTEM "skips it" segment wording stays verbatim from trino.io/docs/467/sql/select.html. Reconcile-in-place; do not append a contradictory block.
+
+---
+
+## FIX A re-probe verdict (EXPLICIT)
+
+Did the iter601 FIX A width_bucket re-probe actually exercise width_bucket? **NO.** The responder answered Q1 with a CASE WHEN chain, never reaching `width_bucket`. The CASE answer is CORRECT and runnable (alias-in-GROUP BY/ORDER BY confirmed valid in Trino 467), so this is a LANDING-POINT MISS, not an accuracy regression. The FIX A C4 clarifier (0..N numbering + top-bin-is-N trap) remains UNVERIFIED-IN-PRACTICE because the probe didn't route there. iter602 must add the CASE-vs-width_bucket signpost (above) and RE-PROBE width_bucket from the "fixed-width bands + overflow bin" angle to confirm the clarifier surfaces.
+
+## New fabrication / slip flags
+
+- No fabricated features or absences. No `::`-casts. No invalid clause placement. No wrong-version pins. All four queries parse-valid in Trino 467.
+- Only real defect of substance: Q4 led with BERNOULLI for an I/O-reduction goal (wrong-function-choice, softened by the correct "no I/O saving" caveat). Q1 is a findability/completeness miss only.
+
+## iter602 directives (summary)
+
+1. PRIMARY: r23 ~line 1092 TABLESAMPLE — add explicit goal→sampler DECISION RULE (SYSTEM for "don't scan everything"/I/O-reduction; BERNOULLI for statistical uniformity, with the no-I/O caveat). Keyword-anchor the "sample a huge table without scanning everything" framing to SYSTEM.
+2. PRIMARY: r07 Pattern C4 — add CASE-vs-width_bucket signpost + keyword anchors ("fixed-width bands", "100ms-wide bands", "count per band", "catch-all/overflow top band") so the fixed-width-histogram framing routes to width_bucket; show the equivalent width_bucket ARRAY form for the latency-bands shape, reusing the FIX A "top bin = bucket N" trap. Keep CASE as the label-friendly equivalent.
+3. RE-PROBE (iter602-603): (a) width_bucket from "bucket values into fixed-width bins + overflow" angle to confirm FIX A clarifier surfaces; (b) TABLESAMPLE from a 2nd "fast sample of a giant table" framing to confirm responder LEADS with SYSTEM post-fix; (c) Federation re-probe — only marginal row at 4.49944/310, stale, highest-leverage breadth if a bulletproofed non-§13.x angle exists.
+4. DO NOT: touch r22 §13.x federation guardrails (thin 4.49944/310, ZERO probe iter601); add `::`-casts (iter571 PIN); re-edit the verified-clean regexp_extract / array_join canonicals (both routed first-probe clean); bump training/state.json (already at 601).
+
+WebFetched + verified verbatim today (2026-06-07): trino.io/docs/467/sql/select.html (TABLESAMPLE BERNOULLI "all physical blocks scanned...does not reduce the time required to read...from disk" + SYSTEM "skips it" segment-granularity — Q4; ORDER BY/GROUP BY output-alias references — Q1), trino.io/docs/467/functions/regexp.html (regexp_extract 2-arg + 3-arg group semantics — Q2), trino.io/docs/467/functions/array.html (array_join(x, delimiter) "Null elements are omitted" — Q3).
+
+**OVERALL: 4.3125 PASS** — Q2 (regexp_extract) + Q3 (array_join) clean 5.00 first-probe; Q1 CASE correct but missed width_bucket (FIX A re-probe did NOT fire — landing-point miss, completeness ding); Q4 BERNOULLI is wrong-function-choice for an I/O-reduction goal (softened by correct no-I/O caveat — should have led with SYSTEM); iter602 = TABLESAMPLE goal→sampler decision rule at r23 + CASE-vs-width_bucket signpost at r07 C4; federation row stays 4.49944/310.
