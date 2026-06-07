@@ -3686,7 +3686,7 @@ FROM   sorted_items;
 
 ### 7A.2B Trino string aggregation — `string_agg` and `group_concat` do NOT exist; use `listagg` or `array_join(array_agg(...))`
 
-> **Keyword anchors so the responder lands here:** Trino string_agg does not exist, string_agg not registered, Function 'string_agg' not registered, group_concat Trino, MySQL group_concat in Trino, PostgreSQL string_agg in Trino, concatenate rows into one string, concatenate values across rows Trino, listagg vs array_join, Trino string concatenation aggregate, comma-separated list from column, build JSON from rows fab, what is Trino's STRING_AGG, replace string_agg with listagg.
+> **Keyword anchors so the responder lands here:** Trino string_agg does not exist, string_agg not registered, Function 'string_agg' not registered, group_concat Trino, MySQL group_concat in Trino, PostgreSQL string_agg in Trino, concatenate rows into one string, concatenate values across rows Trino, listagg vs array_join, Trino string concatenation aggregate, comma-separated list from column, build JSON from rows fab, what is Trino's STRING_AGG, replace string_agg with listagg, distinct comma-separated list, dedupe roll-up, unique values in one cell, listagg distinct, listagg with DISTINCT, one row per X comma-separated distinct Y, distinct values rolled up sorted, no duplicate values in the list.
 
 **The one rule.** Trino 467 has **NO `string_agg` (PostgreSQL/SQL Server) and NO `group_concat` (MySQL).** Either one fails at analysis with `Function 'string_agg' not registered` (or the same shape for `group_concat`). Per [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html), Trino's string-aggregation surface is exactly two forms:
 
@@ -3714,6 +3714,53 @@ GROUP BY customer_id;
 --   SELECT customer_id, group_concat(invoice_id ORDER BY invoice_id SEPARATOR ', ') FROM ...
 -- Fails with: Function 'group_concat' not registered (and MySQL's SEPARATOR keyword is also not parsed).
 ```
+
+#### DISTINCT sub-case — distinct / deduped comma-separated roll-up (use `array_join(array_agg(DISTINCT ...))`, NOT `listagg(DISTINCT ...)`)
+
+> **Keyword anchors so the responder lands HERE:** distinct comma-separated list, dedupe roll-up, unique values in one cell, listagg distinct, listagg with DISTINCT, one row per X comma-separated distinct Y, distinct values rolled up sorted, no duplicate values in the list, deduplicate before string aggregation, unique tags per user comma-separated.
+
+**The one rule.** For a **distinct / deduped comma-separated roll-up** — "one row per user, the distinct page names they visited, sorted, comma-separated" — write `array_join(array_agg(DISTINCT x ORDER BY x), ', ')`. **DO NOT write `listagg(DISTINCT x, ',') WITHIN GROUP (ORDER BY x)`** — Trino 467's `listagg` has **NO `DISTINCT` slot in its signature** and will fail at analysis.
+
+**Verbatim Trino 467 `listagg` signature** (per [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html)):
+
+```
+LISTAGG( expression [, separator] [ON OVERFLOW overflow_behaviour])
+    WITHIN GROUP (ORDER BY sort_item, ...) [FILTER (WHERE condition)]
+```
+
+There is **no `DISTINCT` slot** anywhere in that signature — not before `expression`, not after `separator`, not inside `WITHIN GROUP`. Writing `listagg(DISTINCT x, ',')` (or `listagg(DISTINCT x, ',') WITHIN GROUP (ORDER BY x)`) **fails at analysis**. For a distinct roll-up use `array_join(array_agg(DISTINCT x ORDER BY x), sep)` — `array_agg`'s inline `DISTINCT` dedupes BEFORE collection, the inline `ORDER BY` makes the order deterministic, and `array_join(..., sep)` concatenates.
+
+**Worked example — one row per user, the distinct page names they visited (sorted), comma-separated:**
+
+```sql
+-- CORRECT — distinct deduped comma-separated roll-up.
+SELECT user_id,
+       array_join(array_agg(DISTINCT page_name ORDER BY page_name), ', ')
+           AS distinct_pages_visited
+FROM iceberg.analytics.page_views
+GROUP BY user_id;
+
+-- DO NOT WRITE — listagg has NO DISTINCT slot in its WITHIN GROUP signature:
+--   SELECT user_id,
+--          listagg(DISTINCT page_name, ', ') WITHIN GROUP (ORDER BY page_name)
+--              AS distinct_pages_visited
+--   FROM iceberg.analytics.page_views
+--   GROUP BY user_id;
+-- Fails at analysis — the Trino 467 listagg grammar accepts no DISTINCT keyword.
+```
+
+**Release-467 caveat — DISTINCT was added to WINDOWED aggregates only, NOT to `WITHIN GROUP` listagg.** Per the [Trino release-467 notes](https://trino.io/docs/current/release/release-467.html) (December 6, 2024) verbatim:
+
+> "Allow using `LISTAGG` as a windowed aggregate function."
+
+and (same release) DISTINCT support was added for **windowed aggregate functions** specifically. **That DISTINCT-in-windowed-aggregates change applies to the `OVER (...)` windowed form of aggregate functions — it does NOT add a DISTINCT slot to the non-windowed `WITHIN GROUP` listagg form documented above**, which still has no DISTINCT keyword in its signature. The §7A.2A canonical above already covers the windowed-listagg path; the non-windowed `WITHIN GROUP (ORDER BY ...)` form covered HERE has NO DISTINCT slot, period.
+
+**DO-NOT-WRITE — banned listagg-DISTINCT pattern (keyword-grepable).**
+
+| Banned writing | Why it's wrong | Correct form |
+|---|---|---|
+| `listagg(DISTINCT x, ',') WITHIN GROUP (ORDER BY x)` | **PARSE ERROR.** Trino 467 `listagg` has NO `DISTINCT` slot in its `WITHIN GROUP` signature — the documented grammar is `LISTAGG( expression [, separator] [ON OVERFLOW ...]) WITHIN GROUP (ORDER BY ...) [FILTER (WHERE ...)]`. Writing `listagg(DISTINCT x, sep)` fails at analysis. Release 467 added DISTINCT to **windowed** aggregates only — not to the `WITHIN GROUP` listagg form. | `array_join(array_agg(DISTINCT x ORDER BY x), ', ')` — `array_agg`'s inline `DISTINCT` dedupes BEFORE collection, then `array_join(..., ', ')` concatenates with the separator. |
+| `LISTAGG(DISTINCT col, ',') WITHIN GROUP (ORDER BY col)` (Oracle 19c+ extension) | Migrating Oracle's `LISTAGG(DISTINCT ...)` 1:1 to Trino does NOT work — Trino's `listagg` does not implement the Oracle DISTINCT extension. | Same as above: `array_join(array_agg(DISTINCT col ORDER BY col), ',')`. Semantically identical to Oracle's `LISTAGG(DISTINCT col, ',') WITHIN GROUP (ORDER BY col)`, with the caveat that `array_join`'s 2-arg form skips NULLs (matching `listagg` NULL-skip behavior) and has no `ON OVERFLOW` clause. |
 
 **One-shot translation table.**
 

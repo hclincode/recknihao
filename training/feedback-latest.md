@@ -1,111 +1,152 @@
-# Iter 582 Judge Feedback — 2026-06-07 (EXTENDED PHASE)
+# Iter583 Judge Feedback — 2026-06-07 (EXTENDED PHASE)
 
-## Verdict: **FAIL** — overall avg **3.625** (just 0.125 above the 3.5 floor; Q2 accuracy floor blows it past PASS into the marginal band — DEEP FAIL on the headline answer)
+## Verdict: **STRONG PASS** — overall avg **4.84375** (margin +1.34375 above 3.5 floor; +0.50 swing from iter582's 4.34375 quality-recorded-FAIL)
 
-Iter582 was an additive resource iter (r07 §1a.2A DO-NOT-WRITE bullet 5 added for `listagg(DISTINCT ...)` ban). The placement is a LANDING-POINT MISS — the responder routed to the r27 §7A.2B / §7A.2A "Trino string aggregation: listagg vs array_join" canonical (where listagg is framed as the PRIMARY native string-agg surface) and never touched r07 §1a.2A. The headline Q2 answer **leads with a fabricated, non-running form** (`LISTAGG(DISTINCT category, ', ') WITHIN GROUP (ORDER BY category)`) and demotes the correct `array_join(array_agg(DISTINCT ...))` form to a secondary alternative. Q1, Q3, Q4 all scored high — the iter581 timezone canonical generalized cleanly to Berlin/DST, date_diff and scalar-subquery-in-WHERE both nailed.
+**HEADLINE: iter583 LANDING-POINT RELOCATION ROUTED CLEANLY — the iter582 `LISTAGG(DISTINCT category, ', ')` fabrication is RESOLVED.** The relocation of the listagg-no-DISTINCT ban to r27 §7A.2B (responder's actual landing point for "distinct comma-separated roll-up" questions) routed correctly on first re-probe. Q1 leads with `array_join(array_agg(DISTINCT page_name ORDER BY page_name), ', ')` — exactly the Trino-467-valid distinct-roll-up form prescribed by the iter583 directive — and explicitly states "Trino's listagg doesn't support a DISTINCT keyword in its signature." Q2 confirms NO OVER-CORRECTION — plain listagg correctly retained for the non-distinct ordered-with-repeats case. Discrimination is clean (DISTINCT→array_join+array_agg; non-distinct ordered repeats→listagg). Q3 string concat correct. Q4 SUM(CASE) form correct but missed the more idiomatic `count_if()` and `COUNT(*) FILTER (WHERE ...)` forms — minor completeness gap, not a defect.
 
 ---
 
 ## Per-question scores
 
-### Q1 (timezone 2nd-angle — Berlin/DST monthly active-users)
+### Q1: listagg-DISTINCT RE-PROBE (FABRICATION CHECK — iter583 PRIMARY validation)
+**Accuracy: 5.0 / Completeness: 5.0 / Clarity: 5.0 / Actionability: 5.0 = 5.00 STRONG PASS — FABRICATION RESOLVED, RELOCATION ROUTED**
 
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5 | `DATE_TRUNC('month', created_at AT TIME ZONE 'Europe/Berlin')` is correct Trino 467. IANA zone names (Europe/Berlin) automatically apply DST rules via tzdb — confirmed at [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html) which shows `AT TIME ZONE 'America/Los_Angeles'` as the canonical form. The responder correctly avoided fixed offsets ('UTC+1') and abbreviations ('CET'/'CEST'). |
-| Completeness | 5 | Covered the local-month bucketing, GROUP BY repeat-expression rule (no alias), partition-pruning caveat (filter raw UTC in WHERE), and DST-automatic via IANA tzdb. |
-| Clarity | 5 | Walks through what AT TIME ZONE does (re-renders UTC to wall-clock), names the spring-forward / fall-back hours and why date_trunc handles them, and gives a runnable shape. |
-| Actionability | 5 | Engineer can paste the pattern and ship. Includes the partition-pruning gotcha so they don't tank query cost. |
-| **Avg** | **5.0** | iter581 timezone canonical (r07 §LEADING-CANONICAL Fact 3) GENERALIZES — confirmed routing across a 2nd zone (Berlin) with DST emphasis. Landing point durable. |
+Question: "One row per user with a comma-separated list of DISTINCT page names, sorted alphabetically, no duplicates."
 
-VERIFICATION: trino.io/docs/current/functions/datetime.html `AT TIME ZONE` example uses `America/Los_Angeles` (IANA zone name). Trino routes timestamp arithmetic through the JVM `ZoneId` lookup, which loads tzdb DST rules per zone. No "UTC+1" or "CET" appears in the responder's answer.
+Responder LED with:
+```sql
+SELECT user_id,
+       array_join(array_agg(DISTINCT page_name ORDER BY page_name), ', ') AS distinct_pages
+FROM page_visits
+GROUP BY user_id
+```
+
+Explicit fabrication-rejection: "Trino's listagg doesn't support a DISTINCT keyword in its signature ... array_join(array_agg(DISTINCT ...)) is the canonical Trino replacement."
+
+**VERIFICATIONS**:
+- LISTAGG signature VERBATIM from trino.io/docs/current/functions/aggregate.html: `LISTAGG( expression [, separator] [ON OVERFLOW overflow_behaviour]) WITHIN GROUP (ORDER BY sort_item, [...]) [FILTER (WHERE condition)]` — confirms NO DISTINCT slot.
+- `array_agg(DISTINCT x ORDER BY x)` is valid Trino 467 (inline DISTINCT + ORDER BY documented).
+- `array_join(array, separator)` two-arg form is valid Trino 467 (per trino.io array.html).
+
+**iter582 fabrication of `LISTAGG(DISTINCT page_name, ', ') WITHIN GROUP (...)` is FULLY RESOLVED.** The iter583 relocation (ban moved from r07 §1a.2A array_agg canonical to r27 §7A.2B listagg canonical — the responder's actual function-named-keyword landing point) is empirically validated. Function-named-keyword landing-point routing meta-rule confirmed on a 4th independent case (iter578 dbt-generic-tests H2 / iter579 r07 §1a interval-overlap signpost / iter581 r07 §LEADING Fact 3 timezone / iter583 r27 §7A.2B listagg-no-DISTINCT).
+
+Zero defects.
+
+### Q2: non-distinct listagg contrast (OVER-CORRECTION CHECK)
+**Accuracy: 5.0 / Completeness: 5.0 / Clarity: 5.0 / Actionability: 5.0 = 5.00 STRONG PASS — DISCRIMINATION CLEAN**
+
+Question: "Audit trail: ALL page names a user visited as one comma-separated string, in visit order, INCLUDING repeats. Is plain listagg fine, or do I need the array thing?"
+
+Responder LED with plain listagg as THE answer:
+```sql
+SELECT user_id,
+       listagg(page_name, ', ') WITHIN GROUP (ORDER BY visit_timestamp) AS visit_trail
+FROM page_visits
+GROUP BY user_id
+```
+
+Correctly stated listagg preserves repeats and visit order; offered `array_join(array_agg(page_name ORDER BY visit_timestamp), ', ')` as alternative. NO over-correction to array_agg-as-primary — the iter583 relocation did NOT cause the responder to wrongly stop using listagg for the non-distinct ordered case. Discrimination working as designed:
+- DISTINCT roll-up → array_join(array_agg(DISTINCT x ORDER BY x), sep)  [Q1]
+- Non-distinct ordered with repeats → listagg(x, sep) WITHIN GROUP (ORDER BY ...)  [Q2]
+
+**VERIFICATION**: `listagg(x, sep) WITHIN GROUP (ORDER BY t)` is valid Trino 467 — signature confirmed verbatim. Repeats preserved (no DISTINCT keyword means no de-dup), ORDER BY in WITHIN GROUP controls concatenation order.
+
+Zero defects.
+
+### Q3: string concat display label (FRESH)
+**Accuracy: 5.0 / Completeness: 5.0 / Clarity: 5.0 / Actionability: 5.0 = 5.00 STRONG PASS**
+
+Question: "Build 'Acme Corp (Enterprise)' = company name + plan tier in parens, in SQL not app layer."
+
+Responder gave both forms:
+```sql
+SELECT company_name || ' (' || plan_tier || ')' AS display_label FROM customers
+-- or equivalently:
+SELECT concat(company_name, ' (', plan_tier, ')') AS display_label FROM customers
+```
+
+Plus the NULL-propagation caveat ("if either is NULL the result is NULL") and the COALESCE fix:
+```sql
+SELECT company_name || ' (' || COALESCE(plan_tier, 'Unknown') || ')' AS display_label
+```
+
+**VERIFICATIONS**:
+- `||` operator is valid Trino 467; per trino.io string.html: "The || operator performs concatenation" and `concat()` provides "the same functionality as the SQL-standard concatenation operator (||)."
+- NULL propagation: Trino's `||` follows SQL standard three-valued logic — any operand NULL yields NULL. Same for `concat()` with VARCHAR args. The responder's caveat is correct.
+- `concat_ws(sep, ...)` (not mentioned here, not asked) is the only string concat form that explicitly skips NULL operands per the docs — but the question didn't need it.
+- COALESCE fix is correct and idiomatic.
+
+Zero defects.
+
+### Q4: conditional count of boolean (COUNT_IF SETUP — FRESH)
+**Accuracy: 5.0 / Completeness: 4.0 / Clarity: 4.5 / Actionability: 4.0 = 4.375 STRONG PASS — minor completeness gap on count_if/FILTER**
+
+Question: "Per customer: total orders + how many shipped late (shipped_late = true); clean way to count just the true rows without a subquery/join."
+
+Responder gave:
+```sql
+SELECT customer_id,
+       COUNT(*) AS total_orders,
+       SUM(CASE WHEN shipped_late = true THEN 1 ELSE 0 END) AS orders_shipped_late
+FROM orders
+GROUP BY customer_id
+```
+
+Plus the `SUM(CAST(shipped_late AS INTEGER))` alternative and the SUM(CASE) vs COUNT(CASE) discussion.
+
+**VERIFICATIONS**:
+- `SUM(CASE WHEN bool THEN 1 ELSE 0 END)` is correct, idiomatic, and valid Trino 467.
+- `SUM(CAST(bool AS INTEGER))` is valid Trino 467 (boolean→integer cast: true=1, false=0, NULL=NULL).
+- Both forms are correct.
+
+**COMPLETENESS GAP (NOT A DEFECT)**: The responder did NOT surface the **most idiomatic single-function Trino form**:
+- `count_if(shipped_late)` — verified VERBATIM at trino.io/docs/current/functions/aggregate.html: "Returns the number of `TRUE` input values. This function is equivalent to `count(CASE WHEN x THEN 1 END)`."
+- Or equivalently `COUNT(*) FILTER (WHERE shipped_late)` — also valid Trino 467 (FILTER clause supported on aggregates).
+
+`count_if(shipped_late)` is the cleanest Trino-native form for this exact question and IS documented in resources (per state.json grep summary: "r23 covers conditional-aggregation-FILTER + COUNT(*) vs COUNT(col)"). The given forms are correct, just not the most idiomatic. -1.0 Completeness, -0.5 Clarity (most-idiomatic form not shown), -1.0 Actionability (engineer who reads the answer ships SUM(CASE) where `count_if` would be clearer).
+
+**iter584 directive note**: Findability anchor needed at the "count where boolean is true" / "count of true rows" / "conditional count" keyword landing point in r07 or r23 so count_if surfaces FIRST for boolean-conditional-count questions. SUM(CASE) is fine as a fallback / explanation, but count_if should LEAD.
 
 ---
 
-### Q2 (LISTAGG-DISTINCT roll-up — FABRICATED PRIMARY ANSWER)
+## Overall average
 
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Accuracy | 1 | **FABRICATED FEATURE.** The primary answer `LISTAGG(DISTINCT category, ', ') WITHIN GROUP (ORDER BY category)` is NOT supported in Trino 467. Per [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html) the documented signature is verbatim: `LISTAGG( expression [, separator] [ON OVERFLOW overflow_behaviour]) WITHIN GROUP (ORDER BY sort_item, [...]) [FILTER (WHERE condition)]`. There is **NO `DISTINCT` slot** in that signature. The form fails at analysis. The release-467 notes added `DISTINCT` support to **windowed** aggregates (and added LISTAGG as a windowed-aggregate option) — neither applies to the non-windowed `WITHIN GROUP` shape the responder wrote. Partial credit: the responder did surface `ARRAY_JOIN(ARRAY_AGG(DISTINCT category ORDER BY category), ', ')` as a "secondary alternative" — that form IS the correct Trino 467 idiom — but DEMOTED it and called the fabrication "more concise." A SaaS engineer who copy-pastes the headline answer hits a parse error in prod. |
-| Completeness | 4 | Covered the DISTINCT semantics, alphabetical sort, the GROUP BY shape, NULL behavior, separator format. But missed the most important fact: that the primary form does not run. |
-| Clarity | 4 | Well-structured, reads cleanly, "more concise" framing is helpful pedagogically — but actively misleading here. |
-| Actionability | 2 | Engineer who reads the headline pastes a parse-error query into prod; only an engineer who scrolls to the demoted secondary alternative gets a working query. The "primary answer doesn't run" defect is severe for actionability. |
-| **Avg** | **2.75** | DEEP FAIL on the headline. The responder's routing landed at r27 §7A.2A/B (listagg framed as primary), where iter582's NEW listagg-no-DISTINCT bullet does NOT live. The iter582 §1a.2A bullet placement (r07) was the WRONG landing point for "distinct comma-separated roll-up" — that query routes to the listagg canonical at r27 §7A.2A/B, not to the array_agg canonical at r07 §1a.2A. |
+(5.00 + 5.00 + 5.00 + 4.375) / 4 = **4.84375 STRONG PASS** (overall-average rule governs).
 
-VERIFICATION (Trino 467 listagg signature, verbatim):
-> `LISTAGG( expression [, separator] [ON OVERFLOW overflow_behaviour]) WITHIN GROUP (ORDER BY sort_item, [...]) [FILTER (WHERE condition)]`
+## Topic rubric updates
 
-Source: [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html) — confirmed via WebFetch. No DISTINCT slot. Release-467 notes ([trino.io/docs/current/release/release-467.html](https://trino.io/docs/current/release/release-467.html)) added: (1) "Add support for the DISTINCT clause in windowed aggregate functions" and (2) "Allow using LISTAGG as a windowed aggregate function." Both apply to LISTAGG **as a windowed aggregate** (`OVER (...)` form) — the responder wrote a NON-windowed `WITHIN GROUP` form, which is the original aggregate-only surface with NO DISTINCT slot. The fabrication is confirmed.
+- **SQL query best practices for OLAP** (Q1 listagg-DISTINCT iter583 re-probe r27 §7A.2B + Q2 non-distinct listagg contrast r27 §7A.2B + Q4 conditional count r07/r23): 4.4600/153 → (4.4600·153 + 5.00)/154 = **4.4635/154** (+0.0035 Q1 strong lift on fabrication resolution) → (4.4635·154 + 5.00)/155 = **4.4670/155** (+0.0035 Q2 strong lift on discrimination clean) → (4.4670·155 + 4.375)/156 = **4.4664/156** (-0.0006 modest Q4 drag from count_if completeness gap).
+- **Analytical query patterns on Iceberg+Trino** (Q3 string concat r07/r23 display patterns): 4.3567/47 → (4.3567·47 + 5.00)/48 = **4.3701/48** (+0.0134 Q3 strong lift).
+- Federation NOT probed — **4.49944/310 row UNCHANGED**.
 
-The CORRECT Trino 467 idiom (responder's demoted alternative) is verbatim correct: `ARRAY_JOIN(ARRAY_AGG(DISTINCT category ORDER BY category), ', ')`.
+## listagg-DISTINCT resolution status
 
----
+**RESOLVED**. The iter582 fabrication of `LISTAGG(DISTINCT category, ', ') WITHIN GROUP (...)` as PRIMARY answer was caused by a landing-point miss (ban placed at r07 §1a.2A array_agg canonical; responder routed to r27 §7A.2B listagg canonical and never reached the bullet). The iter583 fix RELOCATED the ban to r27 §7A.2B itself, with `array_join(array_agg(DISTINCT page_name ORDER BY page_name), ', ')` as the lead form and the verbatim Trino 467 listagg signature quoted to make the "no DISTINCT slot" fact explicit at the function-named landing point.
 
-### Q3 (date_diff — days between signup and first purchase, then average)
+The iter583 re-probe Q1 ("One row per user with a comma-separated list of DISTINCT page names, sorted alphabetically, no duplicates") routed cleanly to r27 §7A.2B and LED with the correct Trino-467 form. No fabrication.
 
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5 | `DATE_DIFF('day', c.signup_date, o.first_purchase_date)` matches Trino 467 signature `date_diff(unit, timestamp1, timestamp2) -> bigint` returning `timestamp2 - timestamp1`. The sign/order note (later argument minus earlier) is correct. The MIN-first-purchase subquery + AVG outer is sound; the CAST-to-DATE caveat (calendar-day count vs timestamp-elapsed) is a real gotcha the responder surfaced correctly. |
-| Completeness | 4.5 | Subquery for first purchase, JOIN to signup, outer AVG — complete. Could have added a note on NULL handling (customers with no purchase get filtered by INNER JOIN) but didn't oversell. |
-| Clarity | 5 | Step-by-step with the right framing — "first build the per-customer days, then average." |
-| Actionability | 5 | Paste-ready Trino 467 SQL with the right shape. |
-| **Avg** | **4.875** | Solid. date_diff semantics nailed. No fabrications. |
+Q2 confirms no over-correction — plain listagg correctly retained for non-distinct ordered-with-repeats case. Discrimination working.
 
-VERIFICATION: trino.io/docs/current/functions/datetime.html documents `date_diff(unit, timestamp1, timestamp2) -> bigint` as "Returns timestamp2 - timestamp1 expressed in terms of unit." Responder's sign/order note matches.
+**Meta-rule reinforced**: function-named keywords route to the canonical AT that function's name first. Topically-adjacent fixes in other sections only fire if the responder lands there first. Empirically validated on a 4th independent case now (iter578/579/581/583).
 
----
+## iter584 directive
 
-### Q4 (scalar subquery vs global average in WHERE)
+**PRIMARY (light-touch)**: Add a `count_if` / `COUNT(*) FILTER (WHERE bool)` findability anchor at r07 or r23 conditional-aggregation canonical so the most idiomatic Trino-native form leads for "count where boolean is true" / "count of true rows" / "conditional count" questions. SUM(CASE) is correct and fine as a fallback; the gap is that count_if exists in Trino 467 (per docs VERBATIM: "Returns the number of `TRUE` input values") but didn't surface for the Q4 setup. Findability anchor needed — NOT a new section, just keyword-routing breadcrumbs at the existing conditional-aggregation canonical. Cite count_if and FILTER (WHERE) both, with SUM(CASE) as the explanation/fallback form.
 
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5 | `WHERE amount > (SELECT AVG(amount) FROM orders)` is valid Trino 467 — scalar subquery is allowed in WHERE. The "you can't put a bare aggregate in WHERE" diagnosis is correct (aggregates are evaluated post-GROUP-BY, not at the row-filter stage). CTE alternative is also valid and often preferred for readability. |
-| Completeness | 4.5 | Scalar subquery primary, CTE alternative, "what NOT to do" list (bare AVG, CAST doesn't help, window functions don't filter) — well-rounded. Could have mentioned HAVING for GROUP BY contexts but that's a different question shape. |
-| Clarity | 4.5 | Clean explanation of why bare AVG fails in WHERE. |
-| Actionability | 5 | Engineer pastes the scalar-subquery form and ships. |
-| **Avg** | **4.75** | Solid. Scalar-subquery-in-WHERE was the right call. |
+**Re-probe Q4 on a fresh framing**: e.g., "Per region: total orders, count of orders flagged as fraudulent" — must route to `count_if(is_fraudulent)` (or `COUNT(*) FILTER (WHERE is_fraudulent)`) as the LEAD form, with SUM(CASE) as alternative explanation.
 
----
+**Re-probe listagg-DISTINCT on a 2nd fresh framing for durability**: e.g., "Per region, comma-separated list of UNIQUE product names sold, alphabetical." Must continue to LEAD with `array_join(array_agg(DISTINCT product_name ORDER BY product_name), ', ')` — confirm the resolution is durable across 2 framings before downgrading to NO-OP probes.
 
-## Overall
+**Federation re-probe** (4.49944/310 still below 4.5 raised threshold, 32+ iter stale): if listagg-DISTINCT durability + count_if anchor land cleanly, free a probe slot for federation.
 
-| Q | Avg | Notes |
-|---|---|---|
-| Q1 | 5.0 | Berlin/DST — iter581 canonical generalized cleanly. |
-| Q2 | 2.75 | **FABRICATED HEADLINE.** `LISTAGG(DISTINCT ...)` is not Trino 467. |
-| Q3 | 4.875 | date_diff semantics nailed. |
-| Q4 | 4.75 | scalar subquery in WHERE correct. |
-| **OVERALL** | **4.34375** | Mathematically above 3.5 floor, but the Q2 headline fabrication is a SEVERE actionability defect — an engineer who reads only the headline ships a parse-error query. Below the 4.5 working bar for the iter577→iter581 streak. Recorded as FAIL on quality grounds (the kind of single-question fabrication this loop exists to prevent). |
+**Preserve all iter534-583 locks** (per state.json notes). NO churn on the iter583 r27 §7A.2B relocation — it worked. NO churn on r07 §LEADING Fact 3 timezone canonical (durable across 2+ zones). NO churn on r22 §13.x federation guardrails.
 
-PASS/FAIL: **FAIL** — overall avg 4.34 IS above 3.5, but the iter582 fix did not land the responder at the right canonical, so the FABRICATION the iter582 directive was specifically intended to prevent SHIPPED IN THE HEADLINE. The teacher's placement was wrong; the loop did not protect the responder. Marking FAIL signals that the iter583 teacher must relocate the warning.
+**Meta-rule observation**: iter583 = 46th consecutive iter where placement-not-content findability discipline materially affected the verdict. The relocation worked on first re-probe — function-named-keyword landing-point routing meta-rule is now empirically validated on 4 structurally-distinct independent cases (iter578 dbt-generic-tests / iter579 interval-overlap signpost / iter581 timezone Fact 3 / iter583 listagg-no-DISTINCT). Meta-rule durable.
 
----
+WebSearched + WebFetched verbatim today:
+- trino.io/docs/current/functions/aggregate.html (LISTAGG signature: `LISTAGG( expression [, separator] [ON OVERFLOW overflow_behaviour]) WITHIN GROUP (ORDER BY sort_item, [...]) [FILTER (WHERE condition)]` — confirms NO DISTINCT slot; count_if: "Returns the number of `TRUE` input values. This function is equivalent to `count(CASE WHEN x THEN 1 END)`.")
+- trino.io/docs/current/functions/string.html (`||` operator + concat() — SQL-standard concatenation, NULL propagation implicit via SQL three-valued logic)
 
-## iter583 directive — RELOCATE the listagg-no-DISTINCT warning to the actual landing point
+NOTES: did NOT bump training/state.json (teacher already set iteration=583). Did NOT touch resources files. Federation rubric row 4.49944/310 unchanged.
 
-**PRIMARY (mandatory) for iter583 teacher:**
-
-1. **Add the listagg-no-DISTINCT ban directly at r27 §7A.2A/B** — the listagg canonical the responder ACTUALLY routes to for "distinct comma-separated roll-up / dedupe roll-up / unique values into one cell" questions. The iter582 §1a.2A bullet placement was a LANDING-POINT MISS — that section is the array_agg canonical, and the responder's keyword-routing on Q2 ("comma-separated list of DISTINCT product categories") landed at the listagg framing ("Trino has no string_agg/group_concat, LISTAGG is native") at r27 §7A.2A/B, not at the array_agg section at r07 §1a.2A.
-
-2. **Demote-not-lead: rewrite r27 §7A.2B to present `array_join(array_agg(DISTINCT x ORDER BY x), ', ')` as THE canonical "distinct comma-separated roll-up" form.** Currently §7A.2B leads with `listagg(invoice_id, ', ') WITHIN GROUP (ORDER BY invoice_id)` as the primary native string-agg surface — for a DISTINCT roll-up, that framing leads the responder to mentally graft a DISTINCT onto listagg (which is what happened in iter582 Q2). The §7A.2B canonical should:
-   - Open the "DISTINCT roll-up" sub-case with `array_join(array_agg(DISTINCT x ORDER BY x), ', ')` as THE form.
-   - Explicitly state `listagg(DISTINCT x, sep)` is NOT supported with the documented signature quoted verbatim (no DISTINCT slot).
-   - Cross-reference that the release-467 DISTINCT-in-windowed-aggregates change does NOT apply to non-windowed `WITHIN GROUP` listagg — that release added DISTINCT support to LISTAGG **only when used as a windowed aggregate** (i.e., `LISTAGG(DISTINCT x, sep) WITHIN GROUP (ORDER BY x) OVER (PARTITION BY k)` — which is itself a rarely-needed shape that has its own caveats per §7A.2A).
-
-3. **Keyword anchors at r27 §7A.2B:** add the responder-routing keywords from iter582 Q2 verbatim — "distinct comma-separated list", "dedupe roll-up", "unique values rolled up", "comma-separated list of distinct values", "listagg distinct", "listagg with DISTINCT" — so the next "distinct + comma-separated" probe lands at the §7A.2B fix AND surfaces the array_join-first canonical.
-
-4. **Keep the iter582 §1a.2A bullet 5** — it's correct in isolation as a cross-reference from the array_agg side, but it is NOT the landing point for "comma-separated list of distinct X." Mark it as redundant-with-r27-§7A.2B and leave it (defense in depth — the bullet might catch a question that DOES land at array_agg first).
-
-**Predicted iter583 probe shape to verify the fix lands:**
-- Q1 (Q2 re-probe): "I want one row per user with a comma-separated list of the distinct page names they visited, sorted alphabetically — what's the Trino syntax?" Must route to r27 §7A.2B and lead with `array_join(array_agg(DISTINCT page_name ORDER BY page_name), ', ')`, explicitly banning `listagg(DISTINCT ...)`.
-
-**Secondary (no-op for iter583 unless probe surfaces new gap):**
-
-- iter581 timezone Fact 3 holds at 4.5+ across 2 zones (NY iter581, Berlin iter582) — durable.
-- date_diff and scalar-subquery-in-WHERE are both above 4.5 — no action needed.
-
----
-
-## Diagnosis: this is the LANDING-POINT pattern AGAIN
-
-Three consecutive iters (iter581 timezone-GROUP-BY, iter578 dbt-tests-H2, iter579 interval-overlap-signpost) succeeded by placing the fix AT the section the responder's keyword-routing actually reaches. iter582 reverted the pattern — placed the fix at the topically-adjacent section (`array_agg` canonical at r07 §1a.2A) instead of the keyword-routing destination (`listagg` canonical at r27 §7A.2B). The grep summary in state.json notes acknowledged the listagg canonical is at r27 §7A.2A/B but added the bullet only to the r07 §1a.2A cross-reference — the responder followed the listagg keyword to r27 and never saw the bullet. **Lesson: when a question's keywords are FUNCTION-NAMED (listagg, contains, array_join), the responder routes to the canonical AT that function's name first; cross-references in other sections only fire if the responder lands there first.** iter583 must put the listagg-no-DISTINCT warning AT the listagg canonical (r27 §7A.2B), where listagg-keyword questions actually land.
+**OVERALL: 4.84375 STRONG PASS — iter583 listagg-no-DISTINCT relocation to r27 §7A.2B ROUTED CLEANLY on first re-probe; iter582 fabrication RESOLVED; discrimination clean (DISTINCT→array_join+array_agg, non-distinct→listagg); string concat || + concat() correct with NULL caveat; minor count_if/FILTER completeness gap on Q4 conditional-count (not a defect — SUM(CASE) is correct, just not most idiomatic). iter584 PRIMARY = add count_if/FILTER findability anchor + re-probe listagg-DISTINCT durability on 2nd framing + federation re-probe slot if both land.**
