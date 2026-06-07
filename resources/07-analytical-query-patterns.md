@@ -1799,6 +1799,28 @@ If you can't drop the NULL rows (e.g., the result set needs all tenants present)
 
 **Keyword anchors:** Trino width_bucket, bucket numeric range, histogram bins Trino, uneven/custom buckets, session duration buckets, bin a continuous value, histogram without CASE WHEN, score buckets, latency buckets, price tier buckets. Verified at [trino.io/docs/current/functions/math.html](https://trino.io/docs/current/functions/math.html).
 
+> **READ THIS FIRST — "fixed-width bands" / "count rows per band" phrasing routes HERE (width_bucket), not just CASE WHEN.** If the question says any of: *"fixed-width bands"*, *"100ms-wide bands"*, *"100ms buckets"*, *"fixed $25-wide bands"*, *"count requests per band"*, *"fixed dollar ranges like 0-50 / 50-100 / 100-150"*, *"a catch-all / overflow top band"*, *"everything over X in its own bucket"*, *"assign each row to a fixed-width numeric band"* — consider `width_bucket` FIRST. It assigns each row to a band in ONE function call (no long ladder), and it gives you a free overflow bucket for the "everything over X" catch-all.
+>
+> **width_bucket vs CASE WHEN — a decision, NOT a ban (pick by what you need):**
+>
+> | What you need | Use | Why |
+> |---|---|---|
+> | Many EQUAL-WIDTH bins; you just want a **numeric bucket id** to GROUP BY; fewer typos | **`width_bucket`** | one call, returns a `bigint` band id, no 8-line ladder to mistype |
+> | A **human-readable string label** per band (`'0-100ms'`, `'1s+'`) attached in the SELECT | **`CASE WHEN`** | CASE lets you write the label text directly; width_bucket returns a number |
+>
+> To get labels FROM width_bucket you can map the returned bucket id (e.g. `CASE width_bucket(...) WHEN 1 THEN '0-100ms' ... END`), but if labels are the whole point, a plain `CASE WHEN` is simpler. Net: **numeric id / many equal bins → `width_bucket`; custom string labels → `CASE WHEN`.** (The iter601 engineer wanted readable band labels — `CASE WHEN` is correct there; an engineer who just wants a band-id count per band wants `width_bucket`.)
+>
+> **Worked — "fixed 100ms-wide latency bands + an over-1-second catch-all" → `width_bucket(x, ARRAY[...])`:**
+> ```sql
+> -- Bands: 0-100, 100-200, 200-300, 300-400, 400-500, 500-1000, and 1000+ (the over-1s catch-all).
+> -- A 6-element bounds array makes 7 buckets (0..6). Bucket 6 = >= 1000 = the "over 1 second" top band.
+> SELECT width_bucket(response_time_ms, ARRAY[100.0, 200.0, 300.0, 400.0, 500.0, 1000.0]) AS latency_band,
+>        COUNT(*) AS requests
+> FROM iceberg.analytics.requests
+> GROUP BY 1 ORDER BY 1;
+> ```
+> The catch-all "everything >= 1000ms" lands in bucket **`N` = `6`** (the array has 6 = `cardinality(bins)` elements), the overflow bin — see the "top bin is bucket `N`, NOT `N-1`" trap below. If you instead want pretty labels, wrap that exact `width_bucket(...)` in `CASE ... WHEN 6 THEN '1s+' WHEN 0 THEN '0-100ms' ... END`, or skip width_bucket and write a plain `CASE WHEN response_time_ms < 100 THEN '0-100ms' ... WHEN response_time_ms >= 1000 THEN '1s+' END`.
+
 Trino has `width_bucket` (BOTH overloads) — use it instead of a long `CASE WHEN x < 30 THEN 0 WHEN x < 60 THEN 1 ...` ladder when bucketing a continuous value:
 
 - **Equal-width overload — `width_bucket(x, bound1, bound2, n) -> bigint`**: divides the range `[bound1, bound2]` into `n` equal-width buckets. Returns **`1..n`** for an in-range `x` (1-based), **`0`** if `x < bound1`, **`n+1`** if `x >= bound2`.

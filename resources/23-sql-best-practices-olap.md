@@ -1089,7 +1089,7 @@ WHERE event_date = DATE '2026-05-26'
 LIMIT 10;
 ```
 
-For exploration, use `TABLESAMPLE BERNOULLI (N)` after a partition filter, not bare `LIMIT`:
+For exploration, use `TABLESAMPLE` after a partition filter, not bare `LIMIT`:
 
 ```sql
 -- N is a percentage: BERNOULLI (5) keeps ~5% of rows randomly
@@ -1098,6 +1098,17 @@ FROM events TABLESAMPLE BERNOULLI (5)
 WHERE occurred_at >= CURRENT_DATE - INTERVAL '7' DAY
 GROUP BY feature_name;
 ```
+
+> **GOAL → SAMPLER decision rule — pick the method by WHY you are sampling.** The two methods are NOT interchangeable: one reduces I/O, the other gives a statistically clean per-row sample. Lead with the one that matches the goal:
+> - **Goal = a FAST sample / sample WITHOUT scanning everything / reduce I/O / "the full scan is too slow" / quick eyeball of data shape / a random slice of a billion-row table fast / "don't care about perfect randomness"** → lead with **`TABLESAMPLE SYSTEM (N)`**. SYSTEM samples at split/segment granularity and can **skip whole splits**, so Trino reads less data from disk. This is the I/O-reducing sampler.
+> - **Goal = a STATISTICALLY UNIFORM, independent per-row sample (e.g. for statistics, A/B math, ML training data)** → use **`TABLESAMPLE BERNOULLI (N)`**, but know the cost: it **does NOT reduce I/O** (Trino still scans all blocks and drops rows). SYSTEM is faster but can give clustered/correlated samples because it takes whole splits at a time.
+>
+> Keyword shortcut: phrases like *"without reading everything"*, *"too slow to full scan"*, *"quick random sample of a billion rows"*, *"just eyeball the data shape"*, *"don't need perfect randomness"* → **`SYSTEM`** (I/O reduction). Phrases like *"unbiased / uniform / independent per-row sample for statistics or ML"* → **`BERNOULLI`** (accept that it scans everything). Verified against [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html): BERNOULLI — *"all physical blocks of the table are scanned and certain rows are skipped"*; SYSTEM — *"divides the table into logical segments of data and samples the table at this granularity ... either selects all the rows from a particular segment of data or skips it."*
+>
+> ```sql
+> -- Fast eyeball of a huge table WITHOUT a full scan -> SYSTEM (skips whole splits, less I/O).
+> SELECT * FROM iceberg.analytics.events TABLESAMPLE SYSTEM (1) LIMIT 100;
+> ```
 
 **Important nuance — BERNOULLI vs SYSTEM scan cost:**
 - `TABLESAMPLE BERNOULLI (N)`: Trino reads all the physical Parquet blocks from the matched partitions, then randomly drops rows during filtering. **It does NOT reduce I/O.** The speedup comes from the partition filter reducing files scanned, plus reduced post-scan aggregation work over fewer rows.

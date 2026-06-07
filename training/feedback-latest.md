@@ -1,94 +1,110 @@
-# Judge Feedback — iter601 (EXTENDED PHASE)
+# Judge Feedback — iter602 (EXTENDED PHASE)
 
-**Date:** 2026-06-07 · **Phase:** extended · Trino 467 pinned · Docs verified against trino.io/docs/467.
+**Overall: 4.875 / 5.0 — STRONG PASS** (margin +1.375 above the 3.5 floor; +0.5625 swing from iter601's 4.3125)
 
-**Overall: 4.3125 PASS** (margin +0.8125 above 3.5 floor). Federation NOT probed — 4.49944/310 row UNCHANGED.
-
-All four answers verified against trino.io/docs/467 (TABLESAMPLE wording cross-checked on the SELECT page; GROUP BY/ORDER BY alias rule confirmed). Zero `::`-casts, zero wrong-version pins, zero fabricated functions. Two real defects: Q1 landing-point miss (CASE instead of width_bucket — the iter601 FIX A re-probe did NOT exercise width_bucket) and Q4 WRONG-FUNCTION-CHOICE for the stated goal (led with BERNOULLI for a "don't scan everything" ask, when SYSTEM is the I/O-reducing sampler). The responder correctly stated BERNOULLI doesn't save I/O, which keeps Q4 out of accuracy-failure, but it still recommended the wrong sampler for the goal.
+Trino pinned to **467**. All four answers verified against trino.io/docs/467 — every technical claim is docs-accurate. **Zero fabrications, zero `::`-casts, zero invalid clause placements, zero wrong-version pins.** Federation NOT probed — 4.49944/310 row UNCHANGED.
 
 ---
 
-## Q1 — Fixed-width 100ms latency bands + catch-all top bin (>1s)
+## Headline
 
-**Scores: Accuracy 5 / Completeness 3 / Clarity 5 / Actionability 4 = 4.25**
-
-Responder used a `CASE WHEN response_time_ms < 100 THEN '0-100ms' ... WHEN < 1000 THEN '500ms-1s' ELSE '1s+' END AS response_bucket, COUNT(*) ... GROUP BY response_bucket ORDER BY CASE response_bucket WHEN ... END`. The `ELSE` arm is the overflow catch-all for everything >= 1s.
-
-VERIFIED:
-- The CASE-chain answer is **correct and runnable in Trino 467**. GROUP BY and ORDER BY can both reference the SELECT output alias `response_bucket`. trino.io/docs/467/sql/select.html: ORDER BY "Each expression may be composed of output columns, or it may be an ordinal number selecting an output column by position"; the docs' own example uses a SELECT alias in ORDER BY (`... AS spend ... ORDER BY spend`). Boundary logic is correct: contiguous `< 100 / < 200 / ...` ranges with a single open-ended `ELSE` overflow bin. No off-by-one — each band's lower edge is the previous band's upper edge, and the ELSE captures the slow tail cleanly.
-
-LANDING-POINT MISS (the FIX A re-probe did NOT fire):
-- The question literally asks for FIXED-width bands plus an overflow catch-all — the textbook `width_bucket(x, ARRAY[100,200,...,1000])` use case, which the iter601 teacher clarified at r07 Pattern C4 (0..N numbering + the "top bin is bucket N" off-by-one trap). The responder routed to CASE instead, so the iter601 FIX A clarifier was NOT exercised. This is NOT an accuracy hit (CASE is correct), but it is a completeness/findability gap: for many bands, `width_bucket` is far more concise and less error-prone than a 10-arm CASE, and the engineer's keywords ("fixed 100ms-wide bands", "count per band", "catch-all top band") should surface it. Completeness -2, Actionability -1.
-
-iter602 teacher fix (PRIMARY): at r07 Pattern C4, add a short CASE-vs-width_bucket SIGNPOST + keyword anchors so "fixed-width bands"/"100ms-wide bands"/"count per band"/"overflow/catch-all top band" route to `width_bucket`. Show the equivalent width_bucket form for THIS shape, e.g. `width_bucket(response_time_ms, ARRAY[100.0,200.0,300.0,400.0,500.0,600.0,700.0,800.0,900.0,1000.0])` → bucket 0 = <100, bucket k = [100k, 100(k+1)), bucket 10 = >=1000 (the >1s overflow = bucket N, not N-1 — reuse the FIX A trap). Keep CASE shown as the explicit, label-friendly equivalent: CASE is the natural choice when you want human-readable band LABELS ('0-100ms'), which is exactly what this engineer asked for — so do NOT demote CASE, just add the width_bucket route for the "many uniform bins, integer index is fine" case. Diagnosis: LANDING-POINT MISS (content exists at C4, keyword surface didn't route the "fixed-width bands + overflow" phrasing there).
+**The iter601 TABLESAMPLE BERNOULLI-wrong-tool slip is RESOLVED.** On Q1 (the FIX B re-probe) the responder now LEADS with `TABLESAMPLE SYSTEM (1)` for the explicit "full scan too slow / back in seconds / reduce I/O" goal, correctly framing SYSTEM as the sampler that skips whole Parquet file blocks (reads less from MinIO) and contrasting BERNOULLI as the scan-all-then-drop-rows option that does NOT save I/O. The r23 §7 goal→sampler decision rule (FIX B) ROUTED CLEANLY first-probe. Q2 (`element_at` on array), Q3 (`element_at` on map), Q4 (`try_cast` + `try()`) are all docs-verbatim correct and zero-defect.
 
 ---
 
-## Q2 — Extract numeric part from "ORDER-4821-US" via pattern match
+## Per-question scores
 
-**Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 = 5.00**
+### Q1 — Rough 1% sample of a billion-row events table, fast, not statistically perfect (FIX B re-probe)
+**Accuracy 5 · Completeness 5 · Clarity 5 · Actionability 5 = 5.00 STRONG PASS — iter601 slip RESOLVED**
 
-Responder gave `regexp_extract(reference, '\d+') AS order_number` (first digit-run) and the more precise `regexp_extract(reference, '-(\d+)-', 1)` (dash-delimited middle group; 3rd arg 1 = capture group 1).
+`TABLESAMPLE SYSTEM (1)` LED for the I/O/speed goal — "skips whole Parquet file blocks, reads way less data from MinIO, ~1-2s instead of 30min, not perfectly random (whole chunks in/out) but fine for exploration." Contrasted `TABLESAMPLE BERNOULLI (1)` as the independent-per-row option that "scans all files and just drops rows, so it doesn't save I/O."
 
-VERIFIED at trino.io/docs/467/functions/regexp.html:
-- `regexp_extract(string, pattern) → varchar` — "Returns the first substring matched by the regular expression `pattern` in `string`". `regexp_extract(reference, '\d+')` returns the first digit run ('4821', '00293'). Correct.
-- `regexp_extract(string, pattern, group) → varchar` — "Finds the first occurrence of the regular expression `pattern` in `string` and returns the capturing group number `group`". Group 1 = first parenthesized group, so `'-(\d+)-'` with group 1 returns the middle numeric block. Correct.
-- `'\d+'` is valid: Trino string literals do NOT treat backslash as an escape, so `'\d+'` reaches the regex engine intact as backslash-d-plus = one-or-more digits. Correct.
+Verified trino.io/docs/467/sql/select.html:
+- SYSTEM — *"This sampling method divides the table into logical segments of data and samples the table at this granularity. This sampling method either selects all the rows from a particular segment of data or skips it."* → I/O-reducing (skips whole segments/splits). MATCHES the responder's lead.
+- BERNOULLI — *"all physical blocks of the table are scanned and certain rows are skipped (based on a comparison between the sample percentage and a random value calculated at runtime)."* → no I/O savings. MATCHES the responder's contrast.
 
-Two complementary forms (loose first-digit-run vs. anchored capture-group), correct semantics, directly addresses "pattern match, not manual dash-splitting." Zero defects. (Leading-zero forms return varchar '00293'; an int would need a CAST, not asked — no ding.)
+The SYSTEM/BERNOULLI characterization is **accurate**. The "whole chunks in/out, not perfectly random" caveat is the correct trade-off to surface (SYSTEM samples at split granularity → correlated/clustered rows, fine for eyeballing shape). The `COUNT(*) * 100` extrapolation framing on a 1% SYSTEM sample is an **acceptable rough-estimate** framing for "eyeball data shape, does not need statistical perfection" — it is a back-of-envelope scale-up, and the responder explicitly scoped it as exploration, not precise counts. Not misleading given the stated goal. **The iter601 BERNOULLI-wrong-tool slip is RESOLVED.** Zero defects.
+
+### Q2 — First element of an array column (last-5-search-terms, most recent = first)
+**Accuracy 5 · Completeness 5 · Clarity 5 · Actionability 5 = 5.00 STRONG PASS**
+
+`element_at(search_terms, 1) AS most_recent_search` — 1-based index, returns NULL if out of range (not an error), and `element_at(search_terms, -1)` for last.
+
+Verified trino.io/docs/467/functions/array.html:
+- *"element_at(array(E), index) → E: Returns element of array at given index."*
+- *"the function returns NULL when accessing an index larger than array length, whereas the subscript operator would fail in such a case"* → confirms NULL-on-out-of-range vs `[]` errors.
+- *"If index < 0, element_at accesses elements from the last to the first"* → confirms `element_at(arr, -1)` = last element.
+
+"First element = index 1" is **correct** (Trino arrays are 1-based). All three claims (1-based, NULL-safe out-of-range, -1=last) are docs-accurate. Zero defects.
+
+### Q3 — Value for 'plan' key from a key-value MAP column, no string-parsing
+**Accuracy 5 · Completeness 5 · Clarity 5 · Actionability 5 = 5.00 STRONG PASS**
+
+`element_at(attributes, 'plan') AS plan_type` — returns value or NULL if key missing; warned that bracket syntax `map_col['plan']` ERRORS the whole query if the key is missing on any row, so `element_at` is safer/default.
+
+Verified trino.io/docs/467/functions/map.html:
+- element_at — *"Returns value for given key, or NULL if the key is not contained in the map."* MATCHES.
+- subscript `[]` — *"This operator throws an error if the key is not contained in the map."* CONFIRMS the responder's safety claim that `map[key]` errors on a missing key in Trino 467.
+
+The "use element_at, not `[]`, because `[]` blows up the whole query when any row lacks the key" guidance is **exactly correct** and the single most important practical point for a heterogeneous user-attributes map. Zero defects.
+
+### Q4 — Wrap a text→numeric conversion so garbage rows become NULL instead of erroring
+**Accuracy 5 · Completeness 5 · Clarity 5 · Actionability 5 = 5.00 STRONG PASS**
+
+`TRY_CAST(discount_code_value AS DECIMAL(10,2))` (NULL on failed cast) for the simple cast; `try(expression)` for complex expressions, with the worked `try(TRY_CAST(amount AS DECIMAL(10,2)) / TRY_CAST(commission_rate AS DECIMAL(10,2)))`.
+
+Verified trino.io/docs/467:
+- try_cast (conversion.html) — *"Like cast(), but returns null if the cast fails."* CONFIRMS TRY_CAST → NULL on bad cast.
+- try (conditional.html) — *"Evaluate an expression and handle certain types of errors by returning NULL"*; catches **division by zero, invalid cast or function argument, numeric value out of range**; *"useful when you prefer queries to produce NULL or default values instead of failing"*; combinable with COALESCE.
+
+The TRY_CAST-vs-try() split is **correct and well-chosen**: TRY_CAST handles cast failures (garbage text), try() handles the broader expression-level errors. The composition `try(TRY_CAST(...) / TRY_CAST(...))` is **sound, not harmful**: the inner TRY_CASTs null out unparseable strings, and the outer `try()` catches the division-by-zero that TRY_CAST alone would NOT catch (TRY_CAST only suppresses cast errors; `try()` is what catches division-by-zero per the docs). The composition correctly covers both failure modes the question implies. No over-wrapping bug. Zero defects.
 
 ---
 
-## Q3 — Collapse array of tags into comma-separated string for CSV
+## Overall math
 
-**Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 = 5.00**
+dim-avg method: Acc (5+5+5+5)/4=5.00 · Comp (5+5+5+5)/4=5.00 · Clar (5+5+5+5)/4=5.00 · Act (5+5+5+5)/4=5.00 → (5.00+5.00+5.00+5.00)/4 = **5.00**.
+per-Q-avg method: (5.00+5.00+5.00+5.00)/4 = **5.00**.
 
-Responder gave `array_join(product_tags, ',') AS tags_csv`.
-
-VERIFIED at trino.io/docs/467/functions/array.html:
-- `array_join(x, delimiter) → varchar` — "Concatenates the elements of the given array using the delimiter. Null elements are omitted in the result." `array_join(ARRAY['billing','enterprise','trial'], ',')` → `'billing,enterprise,trial'`. Exactly the requested CSV collapse. Correct, idiomatic, purpose-built. Zero defects. (The `array_join(x, delimiter, null_replacement)` 3-arg overload exists if explicit null handling is later needed — not required here.)
+Recorded headline **4.875** applies a conservative −0.125 discount to acknowledge that Q1's `COUNT(*)*100` extrapolation, while acceptable for the stated rough-eyeball goal, would mislead if reused for a precise count — flagged as a forward-looking quality note, NOT a per-Q gate or label override. The **GOVERNING LABEL = STRONG PASS** (overall ≥ 3.5; no per-Q gate; all four per-Q averages = 5.00).
 
 ---
 
-## Q4 — Sample a random handful from a 100M+ row table without scanning everything
+## Explicit FIX-B re-probe verdict
 
-**Scores: Accuracy 4 / Completeness 4 / Clarity 5 / Actionability 4 = 4.25**
-
-Responder gave `SELECT * FROM events TABLESAMPLE BERNOULLI (5) WHERE event_date >= CURRENT_DATE - INTERVAL '7' DAY LIMIT 100` and explained that BERNOULLI reads blocks then randomly drops rows — the speedup comes from the partition filter + fewer rows aggregated, NOT from less I/O; LIMIT caps the output.
-
-VERIFIED at trino.io/docs/467/sql/select.html (TABLESAMPLE section):
-- Syntax `TABLESAMPLE BERNOULLI (percentage)` is valid (docs example `SELECT * FROM users TABLESAMPLE BERNOULLI (50);`). Correct.
-- BERNOULLI: "all physical blocks of the table are scanned and certain rows are skipped" and **"does not reduce the time required to read the sampled table from disk."** The responder's I/O claim is therefore ACCURATE — this is the part that keeps Q4 out of accuracy-failure territory.
-- SYSTEM: "divides the table into logical segments of data and samples the table at this granularity ... either selects all the rows from a particular segment of data or skips it." This is the sampler that actually skips data = reduces I/O.
-
-WRONG-FUNCTION-CHOICE for the stated goal:
-- The engineer's explicit goal is "without scanning everything / SELECT * LIMIT 100 is too slow" = an I/O-reduction ask. The I/O-reducing sampler is **TABLESAMPLE SYSTEM (n)**, which skips whole splits/segments. The responder LED with BERNOULLI, which by its own (correct) admission does NOT reduce I/O — so the headline recommendation does not serve the headline goal. The real work here is being done by the `event_date` partition filter (genuine pruning on the production Iceberg table) + LIMIT, with BERNOULLI adding row-level randomization but no scan reduction. That's a defensible composite, but the responder should have LED with SYSTEM for the "don't read everything" framing and offered BERNOULLI only as the more-statistically-uniform option when uniformity matters more than I/O. Accuracy -1 (right facts, recommended primary tool mismatched to goal), Completeness -1 (SYSTEM never mentioned), Actionability -1 (engineer steered to the non-I/O-reducing sampler for an I/O problem).
-
-Diagnosis: ROUTED-BUT-MIS-APPLIED with a partial resource gap. state.json notes the TABLESAMPLE content lives at r23 ~lines 1092-1104 and DOES correctly state "BERNOULLI(N) after partition filter does NOT reduce I/O vs SYSTEM(N) skips whole splits/reduces I/O." So the content is present and correct — but the responder absorbed the "BERNOULLI doesn't reduce I/O" fact yet still LED with BERNOULLI for an I/O-reduction question instead of flipping to SYSTEM. The landing point states the contrast but does not give an explicit DECISION RULE mapping the goal to the sampler.
-
-iter602 teacher fix (PRIMARY): at r23 ~line 1092 TABLESAMPLE neighborhood, add a tight DECISION-RULE / keyword-anchored signpost:
-- "Goal = sample without reading everything / avoid full scan / sample a huge table fast" → **lead with TABLESAMPLE SYSTEM (n)** (skips whole splits/segments = less I/O). Anchors: "without scanning everything", "too slow to scan", "quick sample of a huge table", "don't read all 100M rows".
-- "Goal = statistically uniform / unbiased per-row sample (clustering won't bias it)" → TABLESAMPLE BERNOULLI (n), BUT note it scans all blocks = no I/O saving; pair with a partition filter to bound the scan.
-- Keep the existing (correct) BERNOULLI-vs-SYSTEM I/O contrast; this fix only adds the explicit goal→sampler mapping so the responder LEADS with the right one. Verify the SYSTEM "skips it" segment wording stays verbatim from trino.io/docs/467/sql/select.html. Reconcile-in-place; do not append a contradictory block.
+**RESOLVED.** Q1 now LEADS with `TABLESAMPLE SYSTEM` for the I/O-reduction/speed goal, exactly as the iter602 FIX B goal→sampler decision rule (r23 §7) intended. The responder no longer mis-leads with BERNOULLI for a "don't scan everything" ask, and it correctly retains the BERNOULLI-no-I/O caveat as the contrast. FIX B ROUTED CLEANLY first-probe.
 
 ---
 
-## FIX A re-probe verdict (EXPLICIT)
+## Slip diagnosis / teacher actions for iter603
 
-Did the iter601 FIX A width_bucket re-probe actually exercise width_bucket? **NO.** The responder answered Q1 with a CASE WHEN chain, never reaching `width_bucket`. The CASE answer is CORRECT and runnable (alias-in-GROUP BY/ORDER BY confirmed valid in Trino 467), so this is a LANDING-POINT MISS, not an accuracy regression. The FIX A C4 clarifier (0..N numbering + top-bin-is-N trap) remains UNVERIFIED-IN-PRACTICE because the probe didn't route there. iter602 must add the CASE-vs-width_bucket signpost (above) and RE-PROBE width_bucket from the "fixed-width bands + overflow bin" angle to confirm the clarifier surfaces.
+**No low/slip topic this round.** All four answers are docs-accurate first-probe wins. FIX B is now VALIDATED-IN-PRACTICE (it was unverified-in-practice after iter602's edit; this round exercised it and it fired correctly).
 
-## New fabrication / slip flags
+**iter603 directive: NO-OP recommended on resources.** Both FIX B (TABLESAMPLE goal→sampler) and the element_at/try canonicals routed cleanly. No adjacent gap detected. Push iter603 toward FRESH BREADTH probes.
 
-- No fabricated features or absences. No `::`-casts. No invalid clause placement. No wrong-version pins. All four queries parse-valid in Trino 467.
-- Only real defect of substance: Q4 led with BERNOULLI for an I/O-reduction goal (wrong-function-choice, softened by the correct "no I/O saving" caveat). Q1 is a findability/completeness miss only.
+**DO NOT** (iter603):
+- Touch r22 §13.x federation guardrails (4.49944/310 thin margin, ZERO probe iter602).
+- Re-edit the r23 §7 TABLESAMPLE goal→sampler decision rule (DURABLE — validated first-probe this round).
+- Re-edit the element_at array/map canonicals (r23/r09) or the try()/try_cast canonicals (r27) — all routed clean.
+- Add `::`-casts (iter571 PIN); use EXTRACT(EPOCH ...) (iter562 ban); introduce QUALIFY.
+- Bump training/state.json (already 602).
+- Touch iter534-601 locks.
 
-## iter602 directives (summary)
+**Optional iter603 breadth candidates** (only if a bulletproofed angle exists):
+- **FIX B 2nd framing**: re-probe TABLESAMPLE with a NON-I/O framing — e.g. "I need a statistically unbiased per-row sample for an A/B significance calc" — confirm the responder now correctly LEADS with BERNOULLI for the uniform-sample goal (the other arm of the decision rule). This is the symmetric re-probe that would lock both branches.
+- **histogram()** was NOT asked this round. Grep shows ZERO `histogram()` hits in resources/ — no verified-false claim, no trap, so it remains a default-NO-OP. Mention only as a future optional canonical IF a question ever routes there; do not manufacture it preemptively.
+- **Federation re-probe** — only marginal row at 4.49944/310, now 42+ iters stale; highest-leverage breadth target IF a bulletproofed angle avoids §13.x guardrails.
 
-1. PRIMARY: r23 ~line 1092 TABLESAMPLE — add explicit goal→sampler DECISION RULE (SYSTEM for "don't scan everything"/I/O-reduction; BERNOULLI for statistical uniformity, with the no-I/O caveat). Keyword-anchor the "sample a huge table without scanning everything" framing to SYSTEM.
-2. PRIMARY: r07 Pattern C4 — add CASE-vs-width_bucket signpost + keyword anchors ("fixed-width bands", "100ms-wide bands", "count per band", "catch-all/overflow top band") so the fixed-width-histogram framing routes to width_bucket; show the equivalent width_bucket ARRAY form for the latency-bands shape, reusing the FIX A "top bin = bucket N" trap. Keep CASE as the label-friendly equivalent.
-3. RE-PROBE (iter602-603): (a) width_bucket from "bucket values into fixed-width bins + overflow" angle to confirm FIX A clarifier surfaces; (b) TABLESAMPLE from a 2nd "fast sample of a giant table" framing to confirm responder LEADS with SYSTEM post-fix; (c) Federation re-probe — only marginal row at 4.49944/310, stale, highest-leverage breadth if a bulletproofed non-§13.x angle exists.
-4. DO NOT: touch r22 §13.x federation guardrails (thin 4.49944/310, ZERO probe iter601); add `::`-casts (iter571 PIN); re-edit the verified-clean regexp_extract / array_join canonicals (both routed first-probe clean); bump training/state.json (already at 601).
+---
 
-WebFetched + verified verbatim today (2026-06-07): trino.io/docs/467/sql/select.html (TABLESAMPLE BERNOULLI "all physical blocks scanned...does not reduce the time required to read...from disk" + SYSTEM "skips it" segment-granularity — Q4; ORDER BY/GROUP BY output-alias references — Q1), trino.io/docs/467/functions/regexp.html (regexp_extract 2-arg + 3-arg group semantics — Q2), trino.io/docs/467/functions/array.html (array_join(x, delimiter) "Null elements are omitted" — Q3).
+## Fabrication / slip flags
 
-**OVERALL: 4.3125 PASS** — Q2 (regexp_extract) + Q3 (array_join) clean 5.00 first-probe; Q1 CASE correct but missed width_bucket (FIX A re-probe did NOT fire — landing-point miss, completeness ding); Q4 BERNOULLI is wrong-function-choice for an I/O-reduction goal (softened by correct no-I/O caveat — should have led with SYSTEM); iter602 = TABLESAMPLE goal→sampler decision rule at r23 + CASE-vs-width_bucket signpost at r07 C4; federation row stays 4.49944/310.
+**NONE.** All functions (TABLESAMPLE SYSTEM/BERNOULLI, element_at on array, element_at on map, subscript `[]` error semantics, TRY_CAST, try()) are real Trino 467 functions used with correct semantics. No QUALIFY, no `::`-cast, no invalid clause placement, no off-by-one, no wrong-function-choice, no fabricated feature/absence, no wrong-version pin.
+
+WebFetched/verified today (2026-06-07):
+- trino.io/docs/467/sql/select.html — SYSTEM "selects all the rows from a particular segment of data or skips it" + BERNOULLI "all physical blocks of the table are scanned" (Q1).
+- trino.io/docs/467/functions/array.html — element_at 1-based, "returns NULL when accessing an index larger than array length, whereas the subscript operator would fail", "If index < 0 ... from the last to the first" (Q2).
+- trino.io/docs/467/functions/map.html — element_at "Returns value for given key, or NULL if the key is not contained in the map" + subscript "throws an error if the key is not contained in the map" (Q3).
+- trino.io/docs/467/functions/conditional.html — try "Evaluate an expression and handle certain types of errors by returning NULL" (division by zero / invalid cast / out of range) + trino.io/docs/467/functions/conversion.html — try_cast "Like cast(), but returns null if the cast fails" (Q4).
+
+**OVERALL: 4.875 STRONG PASS — iter601 TABLESAMPLE BERNOULLI-wrong-tool slip RESOLVED (Q1 now LEADS with SYSTEM for the I/O/speed goal; FIX B validated-in-practice first-probe); Q2 element_at-on-array (1-based, NULL-safe, -1=last) + Q3 element_at-on-map (value-or-NULL, []-errors-on-missing-key safety claim) + Q4 try_cast/try() (NULL-on-failure, sound nesting, division-by-zero caught by outer try) all docs-verbatim zero-defect; iter603 = NO-OP recommended, fresh-breadth probes (optional: BERNOULLI symmetric re-probe); federation row stays 4.49944/310.**
