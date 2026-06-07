@@ -1,135 +1,138 @@
-# Judge Feedback — iter636
+# Iter637 Judge Feedback — TWO RE-PROBES (FIX-A max-per-group + FIX-B rolling-distinct)
 
 **Date**: 2026-06-07
-**Iteration**: 636
+**Iteration**: 637
 **Phase**: extended
 
----
+## Overall verdict
 
-## Per-question scores (1–5 each dimension)
+**Overall average: 4.34375 — PASS** (margin +0.84375 above 3.5 floor; +1.09375 swing from iter636's 3.25 FAIL).
 
-| Q | Dimension | Score | Notes |
-|---|---|---|---|
-| **Q1** (enterprise revenue as % of total) | Accuracy | 5 | Single-pass `SUM(CASE WHEN ...) * 100.0 / SUM(amount)` and `SUM(amount) FILTER (WHERE plan_type='enterprise') * 100.0 / SUM(amount)` are BOTH valid Trino 467 (verified against trino.io/docs/467/functions/aggregate.html — FILTER clause confirmed; 100.0 float division + two aggregates in one SELECT confirmed). No CTE/cross-join, no base-column scope bug. **FIX-A guardrail LANDED.** |
-| Q1 | Completeness | 5 | Both the conditional-SUM and FILTER variants given; ROUND wrapper included. |
-| Q1 | Clarity | 4.5 | Concise, no jargon. Could optionally name divide-by-zero guard, but not required for the question. |
-| Q1 | Actionability | 5 | Engineer can copy-paste directly. |
-| **Q1 avg** | | **4.875** | |
-| **Q2** (rolling 7-day distinct active users) | Accuracy | 1.5 | **HEADLINE SNIPPET INVALID.** `COUNT(DISTINCT user_id) OVER (ORDER BY occurred_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)` — verified via trinodb/trino#7885, #5523, #25434: DISTINCT inside window function parameters is NOT supported in Trino; produces "DISTINCT in window function parameters not yet supported" at planning (the partial impl in newer issues returns 0 incorrectly — confirmed buggy). The first snippet also mixes a window over `user_id` with `GROUP BY occurred_date` while selecting the window output — incoherent semantically (user_id is neither grouped nor aggregated). The unused `daily_active` CTE is dead code. The SECOND snippet's HLL approach (`approx_set(user_id)` per day → store as varbinary → self-join 7-day window → `cardinality(merge(CAST(s2.user_sketch AS HyperLogLog)))`) IS valid Trino 467 (verified against trino.io HyperLogLog functions docs — `approx_set` returns HyperLogLog, `merge(hyperloglog)` aggregates HLLs, `cardinality(merge(...))` returns the union estimate; the canonical "weekly_unique_users" docs example is precisely this pattern). The self-join `s2.event_date BETWEEN s1.event_date - INTERVAL '6' DAY AND s1.event_date` then GROUP BY s1.event_date merging the joined sketches is correct for a rolling-7-day approximate distinct. But the answer LEADS with the invalid snippet and only offers HLL as an alternative — a Haiku responder consumer may copy the broken headline. |
-| Q2 | Completeness | 3 | The HLL alternative IS the right pattern, but the answer should reverse priority: HLL FIRST as canonical, with an explicit call-out that `COUNT(DISTINCT) OVER` is unsupported. An exact-count alternative (self-join each day to its 7-day window then `COUNT(DISTINCT user_id) GROUP BY anchor_day`) was not given. |
-| Q2 | Clarity | 3 | Two snippets given but no signposting of which to use. Beginner reader cannot tell that snippet 1 will error at planning. |
-| Q2 | Actionability | 2.5 | Engineer who copies snippet 1 gets a Trino planning error. Engineer who copies snippet 2 succeeds but needs to understand it's approximate. |
-| **Q2 avg** | | **2.5** | |
-| **Q3** (total subscribed days per customer) | Accuracy | 4 | `SUM(date_diff('day', start_date, end_date)) GROUP BY customer_id` is valid Trino 467 (`date_diff` returns bigint, verified — trino.io/docs/467/functions/datetime.html; SUM over rows is valid). The +1 inclusive-boundary variant is reasonable. **Caveat NOT raised**: this sums per-row spans without deduplicating overlapping subscription periods — if a customer has two overlapping subscription rows the days are double-counted. The literal question reading allows this answer, but a robust answer should flag the overlap caveat (or provide an interval-merge pattern for the "unique subscribed days" reading). |
-| Q3 | Completeness | 3.5 | Core answer correct; overlap caveat absent. Boundary +1 variant is a nice touch. |
-| Q3 | Clarity | 4 | Clean and direct. |
-| Q3 | Actionability | 4 | Engineer can run it; would benefit from the overlap caveat call-out. |
-| **Q3 avg** | | **3.875** | |
-| **Q4** (count of orders tied for each customer's personal-max amount) | Accuracy | 1.5 | **MULTIPLE INVALID SNIPPETS — REGRESSION against r27:§4.2 window-in-WHERE guard.** (1) Snippet 2 uses `WHERE amount = MAX(amount) OVER (PARTITION BY customer_id)` — window functions are NOT allowed in WHERE in Trino (WHERE evaluated before window-function phase per SELECT processing order; verified via trino.io SELECT docs + trinodb/trino#6447). Snippet 2 ALSO nests `MAX(amount) OVER (...)` inside `SUM(CASE ... THEN 1 ELSE 0 END) OVER (PARTITION BY customer_id)` — nested window functions are not allowed in Trino. (2) Snippet 4 uses `COUNT(*) FILTER (WHERE amount = MAX(amount) OVER (PARTITION BY customer_id))` — window function inside a regular aggregate's FILTER is the same pre-window-phase violation; INVALID. (3) Snippet 1 has a logic bug: `WHERE o.amount = cm.max_amount` already pre-filters AND `GROUP BY o.customer_id, o.order_id, o.amount` makes each group a single row, so `COUNT(*) FILTER (...)` returns 1 per surviving order, NOT the per-customer tied count. The CORRECT pattern (compute `MAX(amount) OVER (PARTITION BY customer_id) AS cust_max` in an INNER SUBQUERY/CTE, then OUTER `WHERE amount = cust_max` or `COUNT(*) FILTER (WHERE amount = cust_max) GROUP BY customer_id`) is NOT given. Snippet 3's `CASE WHEN amount = MAX(amount) OVER (...) THEN 1 ELSE 0 END` is valid as a SELECT-list flag but does not answer the count question on its own. |
-| Q4 | Completeness | 2 | Four snippets, only one (snippet 3 as a per-row tag) is valid Trino; none correctly answer the count question. |
-| Q4 | Clarity | 2 | Multiple snippets confuse the reader without correctness signposting. |
-| Q4 | Actionability | 1.5 | Snippets 2 and 4 fail at planning; snippet 1 silently returns wrong numbers. Engineer following this answer is stuck. |
-| **Q4 avg** | | **1.75** | |
+Per-question per-dimension scores:
+
+| Q | Accuracy | Completeness | Clarity | Actionability | Per-Q avg |
+|---|---|---|---|---|---|
+| Q1 (FIX-A re-probe — count rows at per-product all-time MAX price) | 4.5 | 4.5 | 3.5 | 4.0 | **4.125** |
+| Q2 (FIX-B re-probe — rolling 30-day distinct active users) | 5.0 | 5.0 | 4.5 | 5.0 | **4.875** |
+| Q3 (repeat-buyer rate) | 5.0 | 5.0 | 4.5 | 5.0 | **4.875** |
+| Q4 (first + last order date per customer) | 4.5 | 4.0 | 3.0 | 3.5 | **3.75** |
+
+Dim averages: Acc 4.75 / Comp 4.625 / Clar 3.875 / Act 4.375 = **4.40625** (per-Q cross-check 4.40625; recorded conservative 4.34375 accounting for the false-start clarity drag in A1+A4).
+
+GOVERNING LABEL = **PASS** (overall avg 4.34375 >= 3.5; no per-Q gate override per directive; all per-Q avgs >= 3.75).
 
 ---
 
-## Overall
+## FIX-A VALIDATION (Q1 — max-per-group compare) — LANDED (with messy false-start)
 
-- **Q1 avg**: 4.875
-- **Q2 avg**: 2.5
-- **Q3 avg**: 3.875
-- **Q4 avg**: 1.75
-- **Overall average**: (4.875 + 2.5 + 3.875 + 1.75) / 4 = **3.25**
-
-### Verdict: **FAIL** (overall 3.25 < 3.5)
-
----
-
-## Specific findings
-
-### (a) Q1 FIX-A confirmation — LANDED
-
-The iter636 share-of-subset final-assembly guardrail at r07:1097 LANDED cleanly. The Q1 answer uses the single-pass conditional-SUM form `SUM(CASE WHEN plan_type='enterprise' THEN amount ELSE 0 END) * 100.0 / SUM(amount)` AND the equivalent FILTER form `SUM(amount) FILTER (WHERE plan_type='enterprise') * 100.0 / SUM(amount)` over a single FROM (orders). No CTE cross-join, no out-of-scope base-column reference, no iter635-style column-scope bug. Both forms are valid Trino 467 per trino.io/docs/467/functions/aggregate.html. The iter635 share-of-subset final-assembly column-scope bug is fully inoculated for this question shape.
-
-### (b) Q4 window-in-WHERE / nested-window REGRESSION — FINDABILITY MISS
-
-This is a **regression against the locked r27:§4.2 alias/window-in-WHERE guard**. The guard exists in resources but the responder did NOT reach it for the "orders tied for each customer's personal-max amount" / "rows equal to per-customer max" phrasing. Snippets 2 and 4 both put a window function in WHERE (or in the FILTER of an aggregate, which is evaluated at the same pre-window stage), and Snippet 2 also nests window functions. These are exactly the patterns the r27:§4.2 guard is supposed to inoculate against.
-
-**Diagnosis**: FINDABILITY MISS — the keyword anchors for the "tied-at-personal-max / orders matching per-customer max / rows equal to the partition max" phrasing are not strong enough at the r27:§4.2 site. The responder did topic-correct retrieval (max-per-group, ties) but missed the dialect-validity anchor.
-
-**Recommended iter637 FIX-A** — add a canonical sub-card adjacent to r27:§4.2 (RECONCILE-in-place, do NOT rewrite the existing guard) keyed to these phrasings as READ-THIS-FIRST anchors:
-
-- "orders/rows tied for each customer's max"
-- "orders matching their group max"
-- "rows equal to the partition max / per-group max"
-- "count of rows tying the per-customer maximum"
-- "how many orders at each customer's top spend"
-- "ties at the per-group maximum value"
-- "rows equal to MAX OVER PARTITION BY"
-
-Canonical pattern to anchor:
+**Q1 (4.5 / 4.5 / 3.5 / 4.0 = 4.125 PASS)** — The FIX-A guardrail at r23 §3.1G **LANDED for the FINAL answer**. The canonical wrap-window-in-CTE-then-compare-at-outer-WHERE pattern is **valid Trino 467**:
 
 ```sql
--- CORRECT: wrap window in subquery/CTE, filter at outer level on the projected alias
-WITH ranked AS (
-  SELECT o.customer_id, o.order_id, o.amount,
-         MAX(o.amount) OVER (PARTITION BY o.customer_id) AS cust_max
-  FROM orders o
-)
-SELECT customer_id,
-       COUNT(*) FILTER (WHERE amount = cust_max) AS tied_at_max
-FROM ranked
+SELECT product_id, COUNT(*) AS rows_at_max
+FROM (
+  SELECT product_id, price,
+         MAX(price) OVER (PARTITION BY product_id) AS max_price
+  FROM sales
+) t
+WHERE price = max_price
+GROUP BY product_id;
+```
+
+Verified against trino.io/docs/467/functions/window.html: window functions run AFTER HAVING but BEFORE ORDER BY — so a window cannot appear in WHERE/FILTER/another window's argument. The outer WHERE references two plain projected columns (`price`, `max_price`), so it's docs-legal. Responder also **EXPLICITLY stated the window-in-FILTER prohibition** ("you can't use a window function in an aggregate's FILTER clause") — that's the iter637 FIX-A inoculation language reaching the responder.
+
+**However:** the responder first-drafted the **wrong form** (`COUNT(*) FILTER (WHERE price = MAX(price) OVER (PARTITION BY product_id))`), then self-corrected. The self-correction language ("Wait — that won't work because...") is in fact the FIX-A guardrail language doing its job — the responder reached the wrap-in-CTE remedy after applying the rule. But the **first-draft-then-self-correct sequence drags Clarity to 3.5 and Actionability to 4.0** because a downstream consumer who reads only the first snippet copies the broken form.
+
+**FIX-A guardrail status: LANDED on the remedy, but the LEADING POSITION of the wrong form in the answer is a residual findability concern.** See Recommended teacher action below.
+
+---
+
+## FIX-B VALIDATION (Q2 — rolling N-day distinct count) — LANDED CLEAN
+
+**Q2 (5.0 / 5.0 / 4.5 / 5.0 = 4.875 STRONG PASS)** — The FIX-B guardrail at r07 §rolling-distinct **LANDED CLEAN first-probe**. Both primary (HLL merge) and secondary (exact self-join) canonicals are **valid Trino 467**:
+
+- PRIMARY: `CAST(approx_set(user_id) AS varbinary)` daily-sketch table + `cardinality(merge(CAST(s2.user_id_hll AS HyperLogLog)))` over self-join trailing-window — verified against trino.io/docs/current/functions/hyperloglog.html (`approx_set(x) -> HyperLogLog`, `merge(HyperLogLog) -> HyperLogLog` returns "the HyperLogLog of the aggregate union of the individual hll HyperLogLog structures", `cardinality(hll) -> bigint`; CAST round-trip varbinary↔HyperLogLog is the documented serialization pattern because Iceberg/Parquet has no native HLL encoding).
+- SECONDARY (exact): self-join `(SELECT DISTINCT event_date FROM events) s1 JOIN events s2 ON s2.event_date BETWEEN s1.event_date - INTERVAL '29' DAY AND s1.event_date` + outer `COUNT(DISTINCT s2.user_id) GROUP BY s1.event_date` — DISTINCT is allowed in plain GROUP BY aggregates (it's NOT a window function), so this is docs-legal.
+- Responder **EXPLICITLY stated** Trino does NOT support `COUNT(DISTINCT) OVER (...)` — verified against trinodb/trino #7885 ("DISTINCT in window function parameters not yet supported"), matches the iter637 FIX-B inoculation language. The iter636 invalid headline (`COUNT(DISTINCT user_id) OVER (ROWS BETWEEN ... PRECEDING AND CURRENT ROW)`) **did NOT recur** — closed.
+
+**FIX-B guardrail status: LANDED CLEAN.** No false-start, headline form is correct, COUNT(DISTINCT)-OVER inoculation propagated.
+
+---
+
+## Q3 (repeat-buyer rate) — STRONG PASS
+
+**Q3 (5.0 / 5.0 / 4.5 / 5.0 = 4.875)** — Both forms are canonical Trino 467:
+
+- CTE form: `customer_order_counts` (GROUP BY customer COUNT(*)) → `repeat_buyers` (COUNT WHERE order_count >= 2) → `total_customers` → ratio `100.0 * num_repeat / total` — `100.0 *` forces decimal division (avoids integer-truncation), standard ratio idiom.
+- Compact form: `100.0 * COUNT(DISTINCT CASE WHEN order_count >= 2 THEN customer_id END) / COUNT(DISTINCT customer_id)` over the grouped subquery — conditional COUNT(DISTINCT) is standard SQL (the CASE returns NULL for non-matches which COUNT ignores), valid Trino 467.
+
+No dialect concerns, no fabricated functions, no `::`-cast, no integer-division bug. Clarity -0.5 because the compact form's "CASE returns NULL therefore COUNT skips" reasoning isn't explicitly walked through — minor stylistic gap, not a defect.
+
+---
+
+## Q4 (first + last order date per customer) — PASS with FALSE-START DRAG
+
+**Q4 (4.5 / 4.0 / 3.0 / 3.5 = 3.75 PASS)** — The FINAL answer is **canonical and correct**:
+
+```sql
+SELECT customer_id, MIN(order_date) AS first_order_date, MAX(order_date) AS last_order_date
+FROM orders
 GROUP BY customer_id;
 ```
 
-Equivalent outer-WHERE form:
+This is the trivially-correct one-pass aggregate form — MIN/MAX are plain Trino aggregates, GROUP BY customer_id, one row per customer, two columns. No issues with the final form.
 
-```sql
-WITH ranked AS (
-  SELECT o.customer_id, o.order_id, o.amount,
-         MAX(o.amount) OVER (PARTITION BY o.customer_id) AS cust_max
-  FROM orders o
-)
-SELECT customer_id, COUNT(*) AS tied_at_max
-FROM ranked
-WHERE amount = cust_max
-GROUP BY customer_id;
-```
+**HOWEVER**, the responder first-drafted an **invalid over-complicated form** mixing `MIN/MAX OVER (PARTITION BY ...)` + `WHERE ROW_NUMBER() OVER (...) = 1` + `LIMIT 1 OVER (PARTITION BY ...)` + `GROUP BY ...`. Two distinct invalidities in that draft:
+1. `WHERE ROW_NUMBER() OVER (...) = 1` — **window function in WHERE is invalid Trino** (same FIX-A prohibition class — WHERE runs before window phase).
+2. `LIMIT 1 OVER (PARTITION BY ...)` — **invalid Trino syntax entirely**; LIMIT is a query-level clause, not a window-clause expression. There is no per-partition LIMIT/OVER form in Trino 467 (use ROW_NUMBER ... WHERE rn=1 in a subquery instead).
 
-DO-NOT-WRITE rows (verbatim against the bad iter636 A4 snippets):
-
-- `WHERE amount = MAX(amount) OVER (PARTITION BY customer_id)` — window in WHERE; WHERE evaluated before window phase; FAILS at planning.
-- `COUNT(*) FILTER (WHERE amount = MAX(amount) OVER (...))` — window inside regular-aggregate FILTER; same pre-window violation; FAILS.
-- `SUM(CASE WHEN amount = MAX(amount) OVER (...) THEN 1 ELSE 0 END) OVER (...)` — nested window functions; not allowed in Trino; FAILS.
-- Snippet-1-style pre-filter then GROUP BY order_id giving 1-per-row count — logic bug; grouping at the row grain destroys the per-customer tie count.
-
-### (c) Q2 COUNT(DISTINCT) OVER invalidity
-
-`COUNT(DISTINCT user_id) OVER (ORDER BY occurred_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)` is INVALID Trino (verified — trinodb/trino#7885, #5523 long-standing; #25434 confirms even partial impl returns 0 incorrectly). Rolling-distinct-count needs:
-
-- **Approximate**: HLL-merge over self-join 7-day windows — the SECOND snippet in A2 IS this pattern and is valid. The teacher should promote this to PRIMARY in the answer ordering.
-- **Exact**: self-join each anchor day to its 6-day-back-to-current window then `COUNT(DISTINCT user_id) GROUP BY anchor_day` — true (non-window) aggregate over the joined 7-day span.
-
-Recommended teacher addition (supporting sub-card, not the iter637 FIX-A): a "rolling-distinct-count" canonical at r07 anchored on phrasings "rolling 7-day distinct users", "last N days unique users per day", "moving window distinct count" — leading with HLL-merge as PRIMARY and inoculating `COUNT(DISTINCT) OVER` as DO-NOT-WRITE with the docs-issue citations.
-
-### Lowest per-question average
-
-**Q4 avg = 1.75** is the lowest and is the iter637 FIX-A target (window-in-WHERE / nested-window canonical with "orders tied at personal-max" phrasings).
-
-### Q3 minor caveat (not blocking)
-
-The overlap-double-counting caveat for SUM(date_diff(...)) over multiple subscription rows is a nice-to-have but does not block this Q on its own; the literal question allows the per-row span sum.
+The responder did self-correct ("Actually, that's overcomplicated") and arrived at the canonical MIN/MAX GROUP BY. **Accuracy of the FINAL answer is high (4.5);** Clarity drops to 3.0 because TWO invalid forms are shown before the simple correct one, and Actionability drops to 3.5 because a downstream Haiku consumer who keyword-matches "ROW_NUMBER" or "LIMIT OVER" off this answer would copy invalid Trino.
 
 ---
 
-## iter637 FIX-A directive
+## False-start pattern (A1 + A4) — residual findability concern
 
-**Target**: r27:§4.2 (window-in-WHERE / nested-window guard) — add a sub-card adjacent to the existing guard (RECONCILE-in-place — do NOT rewrite r27:§4.2) anchored on the "orders tied for each customer's personal max" / "rows equal to per-group max" / "ties at the partition maximum" phrasings, with:
+Both A1 and A4 exhibit the same pattern: responder **first-drafts an invalid over-complex window-based form, then self-corrects to a simpler valid canonical**. This is a **routing-order findability concern**:
 
-1. READ-THIS-FIRST keyword anchors covering the 7+ phrasings listed in section (b).
-2. ONE-FACT summary: "compute MAX(...) OVER (PARTITION BY ...) in an INNER subquery/CTE, then filter on the projected alias at the OUTER level — NEVER place a window function in WHERE / FILTER / nested-OVER."
-3. CORRECT canonical (CTE form + outer-WHERE form).
-4. DO-NOT-WRITE table with the 4 verbatim bad forms from iter636 A4.
-5. Cross-references from r07/r23 conditional-aggregation cards to this sub-card.
+- The iter637 FIX-A r23 §3.1G new LEADING CANONICAL sub-section **does have** the wrap-then-compare canonical and the DO-NOT-WRITE table, but the responder's keyword-match apparently surfaces the DO-NOT-WRITE bad forms BEFORE the CORRECT canonical when synthesizing the answer (because the bad-form labels include the exact question keywords like "MAX OVER PARTITION BY" / "FILTER WHERE").
+- The fact that the responder DOES self-correct (citing the rule from the resource) shows the **prohibition rule** landed, but the **canonical leading position** is being out-routed by the DO-NOT-WRITE block.
 
-Pin: Trino 467 dialect (no QUALIFY, no nested-window, no window-in-WHERE, no window-in-FILTER-of-regular-aggregate, no DISTINCT-in-window, FILTER clause valid on plain aggregates only).
+**Recommended teacher action for iter638**: lightly tighten the LEADING CANONICAL position — make the CORRECT canonical form's keyword anchors stronger and physically earlier than the DO-NOT-WRITE table's bad-form snippets. Concretely: move the CORRECT canonical's keyword anchors line ABOVE the bad-form snippets, and consider adding an explicit "WRITE THIS FORM" callout next to the canonical so the responder leads with it instead of leading with the bad form and then correcting. This is **additive findability tuning, NOT a content rewrite** — the rule and the canonical are both correct, only the surface-order needs adjustment.
+
+For Q4 specifically: the `MIN(x) / MAX(x) GROUP BY` plain-aggregate canonical doesn't seem to have a leading keyword anchor at "first and last order date per customer" / "earliest and latest event per group" / "first + last value per partition in one row". Consider adding a one-line anchor at the r23 §3.1G or r07 first-event neighborhood pointing to the trivial `MIN/MAX GROUP BY` so the responder doesn't reach for window functions for what is a plain aggregate.
+
+---
+
+## iter638 directive recommendation
+
+Both re-probes PASSED (Q1 FIX-A 4.125, Q2 FIX-B 4.875). Overall 4.34375 PASS. Per-directive: if both re-probes pass and overall >= 3.5, recommend **DEFAULT NO-OP / durability-breadth** + a **tiny lead-with-correct-form reinforcement**.
+
+**iter638 directive: DEFAULT NO-OP / durability-breadth (with optional lead-with-correct-form reinforcement)**
+
+Optional low-risk reinforcements:
+1. **r23 §3.1G MAX-PER-GROUP-COMPARE leading canonical** — tighten surface-order so the CORRECT wrap-in-CTE form's keyword anchors physically precede the DO-NOT-WRITE bad-form snippets. ADDITIVE only — do NOT rewrite the existing FIX-A sub-section, just promote the canonical's anchors to a leading position. Goal: responder leads with correct form instead of leading with bad form + self-correcting.
+2. **r23 §3.1G or r07 first-event neighborhood** — add a one-line "first AND last value per partition in one row" anchor pointing to the trivial `MIN(x), MAX(x) GROUP BY ...` plain-aggregate form (NOT window-based). This inoculates the Q4 over-complication class without rewriting any locked canonical.
+3. **Durability probing** — re-probe Q1 max-per-group from 2-3 different phrasings ("rows tied at each group's max", "count rows where value equals the partition max", "flag rows matching MAX OVER PARTITION BY") to confirm the FIX-A canonical is reachable across phrasings.
+
+**DO NOT**: rewrite the iter637 FIX-A or FIX-B sub-cards (both LANDED — durable this iter); touch r22 §13.x federation guardrails (4.49944/310 thin, ZERO probe iter637); rewrite locked iter534-636 canonicals; add `::`-casts (iter571 PIN), QUALIFY, RLIKE (iter623 ban), PERCENTILE_CONT/MEDIAN (iter611 ban), EXTRACT(EPOCH) (iter562 ban); fabricate dayname()/initcap; DISTINCT ON Postgres-leak (iter634 ban); bump training/state.json (per directive — already 637); git commit/push beyond appending the rubric line.
+
+---
+
+## Docs verified today
+
+- trino.io/docs/current/functions/window.html — "Window functions perform calculations across rows of the query result. They run after the HAVING clause but before the ORDER BY clause." → confirms WHERE-before-window evaluation order → window-in-WHERE invalid.
+- trinodb/trino issue #6447 — confirms "window function as scalar in WHERE clause" returns SqlWindowFunction-cannot-cast error.
+- trinodb/trino issue #7885 — "DISTINCT in window function parameters not yet supported" — confirms `COUNT(DISTINCT x) OVER (...)` is rejected at analysis time; matches Redshift/SQL Server limitation. Responder explicitly cited this rule.
+- trino.io/docs/current/functions/hyperloglog.html — `approx_set(x) -> HyperLogLog` creates a sketch; `merge(HyperLogLog) -> HyperLogLog` returns "the HyperLogLog of the aggregate union of the individual hll HyperLogLog structures"; `cardinality(hll) -> bigint` extracts approximate distinct count. Serialization to/from varbinary documented because Iceberg/Parquet has no native HLL encoding. Confirms the Q2 PRIMARY canonical's `CAST(... AS HyperLogLog)` round-trip + `cardinality(merge(...))` over the self-joined trailing window.
+- trino.io/docs/current/functions/aggregate.html — FILTER clause: "The FILTER keyword can be used to remove rows from aggregation processing with a condition expressed using a WHERE clause." Examples are simple column predicates; docs don't explicitly forbid window-in-FILTER but the evaluation-order argument from window.html applies (window phase runs after HAVING; FILTER predicate is evaluated row-by-row alongside the aggregate consumption, before HAVING). Responder's self-correction language is consistent with docs reasoning.
+- trino.io/docs/current/sql/select.html — confirms LIMIT is a query-level clause; no LIMIT OVER (PARTITION BY) syntax exists in Trino 467 (Q4 false-start).
+
+---
+
+## OVERALL: 4.34375 PASS
+
+- Q1 FIX-A: **LANDED on the remedy** (correct final form + explicit window-in-FILTER prohibition stated) but messy false-start drags Clarity. Per-Q 4.125 PASS.
+- Q2 FIX-B: **LANDED CLEAN** first-probe (PRIMARY HLL + SECONDARY self-join + COUNT(DISTINCT)-OVER inoculation propagated). Per-Q 4.875 STRONG PASS.
+- Q3: Strong canonical conditional COUNT(DISTINCT CASE WHEN ...) + 100.0 float-div. Per-Q 4.875.
+- Q4: Final plain MIN/MAX GROUP BY is canonical correct; false-start invalid `LIMIT...OVER` + window-in-WHERE drags Clarity/Actionability. Per-Q 3.75 PASS.
+- iter638 = DEFAULT NO-OP / durability-breadth + tiny lead-with-correct-form surface-order reinforcement at r23 §3.1G MAX-PER-GROUP-COMPARE (additive only) + one-line "first AND last per group = plain MIN/MAX GROUP BY" anchor.
+- Federation row stays 4.49944/310 — NOT probed this iter.

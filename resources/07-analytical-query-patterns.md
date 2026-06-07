@@ -576,6 +576,65 @@ The three primitives:
 
 Pay the sketch-building cost once per day. Every subsequent rolling-window query reads at most a few dozen tiny rows from the sketch table — no scan of the raw 500M-row events table. This pattern also works for arbitrary windows ("last 30 days", "last 90 days", "this calendar month") without rebuilding anything: same sketch table, different join range. It is the standard solution for rolling cardinality in Trino, Snowflake, BigQuery, and DuckDB.
 
+#### LEADING CANONICAL — ROLLING N-DAY DISTINCT-USER COUNT PER DAY (Trino has NO `COUNT(DISTINCT) OVER (...)` — use HLL daily sketches + `merge()` over the trailing window, or an exact self-join `COUNT(DISTINCT)` grouped by window-end day) (iter637 PIN — FIX-B: rolling-distinct landing point + COUNT(DISTINCT) OVER inoculation)
+
+> **READ THIS FIRST if your question contains any of these keywords:** `rolling 7-day distinct active users`, `rolling 7-day distinct users per day`, `7-day active users per day`, `trailing N-day unique count`, `rolling N-day unique count per day`, `distinct users in a moving window`, `rolling unique count per day`, `30-day active users per day`, `rolling DAU/WAU/MAU per day`, `trailing 30-day distinct users`, `unique users over a rolling window`, `COUNT(DISTINCT) OVER`, `COUNT(DISTINCT user_id) OVER`, `distinct count window function`, `windowed distinct count Trino`, `distinct in OVER clause`, `unique count moving window`, `unique users in last 7 days for each day`, `running count of unique users`, `daily WAU calendar`. Verified at [trino.io/docs/467/functions/hyperloglog.html](https://trino.io/docs/current/functions/hyperloglog.html) + [trinodb/trino issue #7885](https://github.com/trinodb/trino/issues/7885) on 2026-06-07.
+
+**The one-fact summary — Trino does NOT support `DISTINCT` inside a window function.** `COUNT(DISTINCT user_id) OVER (ORDER BY occurred_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)` is **NOT supported** in Trino (the same limitation exists in Redshift, SQL Server, and most engines — tracked at [trinodb/trino #7885](https://github.com/trinodb/trino/issues/7885)). For a **rolling N-day distinct user count per day**, reach for one of these two docs-verified patterns:
+
+**PRIMARY — HLL daily-sketch + `merge()` over the trailing N-day window (cheap, scales to billions of events, ~2.3% standard error).** This is the canonical production pattern. Build a daily HLL sketch table once (see "Pre-aggregated HLL sketches" recipe immediately above), then self-join the sketch table on a trailing N-day range and merge the per-day sketches:
+
+```sql
+-- Trino 467 — "rolling 7-day distinct active users per day" — HLL daily-sketch + merge() form.
+-- Pre-req: daily_user_hll table from the "Pre-aggregated HLL sketches" recipe above
+-- (one row per event_date, one varbinary user_id_hll column = CAST(approx_set(user_id) AS varbinary)).
+SELECT
+    s1.event_date AS window_end_day,
+    cardinality(merge(CAST(s2.user_id_hll AS HyperLogLog))) AS rolling_7d_distinct_users
+FROM iceberg.analytics.daily_user_hll s1
+JOIN iceberg.analytics.daily_user_hll s2
+  ON s2.event_date BETWEEN s1.event_date - INTERVAL '6' DAY
+                       AND s1.event_date
+GROUP BY s1.event_date
+ORDER BY s1.event_date;
+```
+
+For a 30-day window, change `INTERVAL '6' DAY` to `INTERVAL '29' DAY`; for 90-day, `INTERVAL '89' DAY`. The sketch table holds **one row per day** — joining it to itself over an N-day range and merging the sketches per `window_end_day` gives the trailing N-day distinct-user count without re-scanning the raw events table. Verified mechanics: `merge(HyperLogLog)` *"returns the HyperLogLog of the aggregate union of the individual `hll` HyperLogLog structures"* ([trino.io/docs/467/functions/hyperloglog.html](https://trino.io/docs/current/functions/hyperloglog.html)) — i.e. it is the aggregate that unions HLL sketches across the trailing-window rows; `cardinality(merged_hll)` then extracts the approximate distinct count from the merged sketch. The `CAST(... AS HyperLogLog)` is mandatory when reading from the stored `varbinary` column — `merge()` and `cardinality()` only accept the `HyperLogLog` type, not `varbinary`.
+
+**SECONDARY — exact `COUNT(DISTINCT)` via self-join over the trailing window, grouped by `window_end_day` (use when exactness is required AND volume allows).** When the customer-facing number must match the exact count (no ~2.3% error), or when daily volume is small enough to scan directly:
+
+```sql
+-- Trino 467 — exact rolling 7-day distinct users per day via self-join over the trailing window.
+-- Use when exactness is required AND the raw events volume is small enough to scan directly.
+SELECT
+    s1.event_date AS window_end_day,
+    COUNT(DISTINCT s2.user_id) AS rolling_7d_distinct_users
+FROM (SELECT DISTINCT event_date FROM iceberg.analytics.events) s1
+JOIN iceberg.analytics.events s2
+  ON s2.event_date BETWEEN s1.event_date - INTERVAL '6' DAY
+                       AND s1.event_date
+GROUP BY s1.event_date
+ORDER BY s1.event_date;
+```
+
+Each `window_end_day` row aggregates the raw events in the trailing 7-day range and produces an EXACT `COUNT(DISTINCT user_id)` over those rows. The `s1` left side is the calendar driver (one row per day), the `s2` right side is the trailing-7-day event slice, and the outer `GROUP BY s1.event_date + COUNT(DISTINCT s2.user_id)` is a **plain `GROUP BY` aggregate** (not a window function) — that is why it is allowed to use `DISTINCT`.
+
+**When to pick which.**
+
+| Need | Reach for | Cost |
+|---|---|---|
+| **Rolling N-day distinct count, ~2.3% error acceptable** (internal dashboards, ops review, capacity planning, large events tables ≥100M rows/day) | HLL `merge()` over `daily_user_hll` sketches (PRIMARY above) | Cheap — reads ~N tiny sketch rows per output row. Sketches must be built once nightly. |
+| **Rolling N-day distinct count, EXACT match required** (customer-facing numbers, billing-facing numbers, regulatory) | Exact self-join `COUNT(DISTINCT)` grouped by `window_end_day` (SECONDARY above) | Re-scans raw events for every output day. Only viable when daily volume is modest or you can pre-partition aggressively. |
+| **Calendar-aware rolling NON-distinct aggregate** (rolling SUM, AVG, COUNT over a trailing window) | Pattern D `AVG(x) OVER (... RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW)` — see Pattern D below | Native window function form — works directly for non-distinct aggregates. |
+
+> **DO NOT WRITE — `COUNT(DISTINCT) OVER (...)` is INVALID Trino.**
+>
+> | WRONG (Trino 467 — REJECTED) | WHY it fails | RIGHT |
+> |---|---|---|
+> | `COUNT(DISTINCT user_id) OVER (ORDER BY occurred_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)`  &nbsp;❌ | **Trino does NOT support `DISTINCT` inside window functions** — tracked at [trinodb/trino #7885](https://github.com/trinodb/trino/issues/7885). The same limitation exists in Redshift, SQL Server, and most engines. Parse / analysis error: `DISTINCT is not supported for window functions` (or analyzer rejection). | Use per-day `approx_set(user_id)` sketches + `merge()` over the trailing window with `cardinality()` (PRIMARY above) — or an exact self-join `COUNT(DISTINCT)` grouped by the window-end day (SECONDARY above). Both produce one row per window-end day with the trailing-N-day distinct user count. |
+> | `COUNT(DISTINCT user_id) OVER (PARTITION BY tenant_id ORDER BY occurred_date ROWS BETWEEN 29 PRECEDING AND CURRENT ROW)`  &nbsp;❌ | Same limitation — `DISTINCT` is not allowed inside any window function in Trino, regardless of `PARTITION BY` or frame shape. | Add `tenant_id` to both sides of the self-join (HLL form: `daily_user_hll s1 JOIN daily_user_hll s2 ON s2.tenant_id = s1.tenant_id AND s2.event_date BETWEEN s1.event_date - INTERVAL '29' DAY AND s1.event_date GROUP BY s1.tenant_id, s1.event_date`) — same merge + cardinality pattern, just per-tenant. |
+> | `approx_distinct(user_id) OVER (...)` &nbsp;❌ | `approx_distinct` is **NOT a window function** — it is a regular aggregate that only works with `GROUP BY` (or as the lone aggregate over the whole table). Trino rejects `approx_distinct(...) OVER (...)`. | Same HLL sketch + `merge()` recipe above. The sketch-merge form is the window-function-aware equivalent of `approx_distinct` over a trailing window. |
+
 **Verify your rewrite paid off with `EXPLAIN ANALYZE`.** When you replace `COUNT(DISTINCT)` with `approx_distinct`, or replace a raw-events scan with a sketch-table merge, prove it actually reduced I/O — don't take it on faith. Run both versions wrapped in `EXPLAIN ANALYZE` (which actually executes the query and reports real bytes scanned, actual rows per stage, and wall time per stage). Compare the "Input" bytes line — if the rewrite didn't reduce bytes scanned, the optimization didn't land (most often: the rollup/sketch table wasn't picked because of a planner mismatch, or the partition filter wasn't pushed down). Plain `EXPLAIN` only shows the *estimated* cost; `EXPLAIN ANALYZE` shows the *actual* cost.
 
 ### Milestone-retention variant: % came back in 7 / 30 / 90 days

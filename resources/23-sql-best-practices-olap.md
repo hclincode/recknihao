@@ -900,6 +900,81 @@ SELECT DISTINCT * FROM iceberg.analytics.events;
 
 **Cross-references.** [§3.1D — `arbitrary` / `any_value` / `max_by` / `min_by`](#31d-arbitrary--any_value-pick-one-value-per-group-and-max_by--min_by-deterministic-representative-value-pick) for the single-column representative-value pick. [§dialect anti-patterns table below](#trino-467-sql-dialect-anti-patterns--do-not-carry-these-over-from-other-warehouses) for the full cross-dialect `QUALIFY` / `LIMIT N BY` / `TOP N` / `DISTINCT ON` ban + the most-common rewrite pattern. [Resource 27 § 4.5C ROWID dedup](27-oracle-plsql-to-dbt-trino.md) for the in-place dedup pattern (CTAS+swap vs MERGE).
 
+#### LEADING CANONICAL — MAX-PER-GROUP-COMPARE: "rows equal to each group's max / compare to a partition aggregate" — wrap the window in a CTE, then compare at the outer level (iter637 PIN — FIX-A: window-in-WHERE / nested-window / window-in-FILTER regression)
+
+> **READ THIS FIRST if your question contains any of these keywords:** `orders tied for the customer's highest amount`, `rows equal to each group's maximum`, `count rows at the per-customer max`, `flag rows matching their partition max`, `how many orders match the customer's personal best`, `ties at the group max`, `rows where amount equals MAX OVER`, `rows where value equals the partition max`, `count rows tied for the per-group max`, `find all rows at the per-group max`, `personal-max amount`, `personal best per customer`, `compare to partition max`, `compare to partition aggregate`, `rows equal to MAX OVER PARTITION BY`, `WHERE amount = MAX(amount) OVER`, `window in WHERE`, `window function in WHERE clause`, `nested window function`, `window inside aggregate FILTER`, `COUNT FILTER WHERE window`, `top-1 vs all-tied`, `keep all rows tied for the per-group max`. Verified at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html) + [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) on 2026-06-07.
+
+**The one-fact summary.** To filter or count rows where a column **equals its per-group aggregate** (`MAX` / `MIN` / `AVG` over `PARTITION BY`), you **MUST** compute the window aggregate as a column in a **subquery / CTE FIRST**, then compare to it at the **outer level**. You **cannot**: (1) put a window function in `WHERE` (WHERE runs **before** window evaluation in Trino's clause-evaluation order); (2) **nest** a window function inside another window function (analyzer rejects); (3) put a window function **inside a regular aggregate's `FILTER (WHERE ...)`** (an aggregate's FILTER predicate cannot itself contain a window). The canonical fix is the **wrap-the-window-then-compare** pattern: project the per-group aggregate as a plain column in a CTE, then `WHERE col = cust_max` / `COUNT(*) FILTER (WHERE col = cust_max)` at the outer level — the outer comparison is against a **plain projected column**, not a window, so it is legal.
+
+**Why this is forbidden — the clause-evaluation rule from the Trino docs.** Trino's window-functions doc states: *"Window functions perform calculations across rows of the query result. They run after the `HAVING` clause but before the `ORDER BY` clause."* This means **`WHERE` is evaluated BEFORE window functions** — a window expression in `WHERE` references a value that doesn't exist yet at filter time. (Same rule: `WHERE` runs before `SELECT` projection, which is why you also can't reference a SELECT-output alias in `WHERE` — see [resource 27 §4.2 alias-in-WHERE guard](27-oracle-plsql-to-dbt-trino.md).) Nested windows and windows-in-aggregate-FILTER are rejected at analysis time for the same reason: a window function can only appear once at the SELECT-projection level, never inside another aggregating construct.
+
+**PREFERRED CANONICAL — count rows tied at each customer's personal max (the iter636 question shape).**
+
+```sql
+-- Trino 467 — "how many orders tied for each customer's personal-max amount?"
+-- Step 1: project MAX(amount) OVER (PARTITION BY customer_id) as a plain column in a CTE.
+-- Step 2: at the outer level, compare amount to the projected column (NOT a window).
+WITH ranked AS (
+  SELECT customer_id,
+         order_id,
+         amount,
+         MAX(amount) OVER (PARTITION BY customer_id) AS cust_max
+  FROM iceberg.analytics.orders
+)
+SELECT customer_id,
+       COUNT(*) FILTER (WHERE amount = cust_max) AS orders_at_max
+FROM ranked
+GROUP BY customer_id;
+```
+
+The outer `FILTER (WHERE amount = cust_max)` compares two **plain projected columns** (`amount` and `cust_max`) — **no window function appears inside the FILTER predicate**, so this is legal Trino 467. (The `FILTER` clause itself is the docs-verified per-aggregate row filter from [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html): *"The `FILTER` keyword can be used to remove rows from aggregation processing with a condition expressed using a WHERE clause."*)
+
+**FLAG-PER-ROW VARIANT — annotate each row with "is this the per-customer max?"** Same CTE, then a `CASE` comparison at the outer level — again no window in the predicate:
+
+```sql
+-- Trino 467 — same `ranked` CTE, then per-row flag:
+WITH ranked AS (
+  SELECT customer_id, order_id, amount,
+         MAX(amount) OVER (PARTITION BY customer_id) AS cust_max
+  FROM iceberg.analytics.orders
+)
+SELECT customer_id, order_id, amount,
+       CASE WHEN amount = cust_max THEN 1 ELSE 0 END AS is_personal_max
+FROM ranked;
+```
+
+**KEEP-ALL-TIED-ROWS VARIANT — return every row that ties for the per-customer max (not just one).** Same CTE, outer `WHERE amount = cust_max`:
+
+```sql
+-- Trino 467 — return ALL rows tied at the per-customer max (NOT just top-1):
+WITH ranked AS (
+  SELECT customer_id, order_id, amount,
+         MAX(amount) OVER (PARTITION BY customer_id) AS cust_max
+  FROM iceberg.analytics.orders
+)
+SELECT customer_id, order_id, amount
+FROM ranked
+WHERE amount = cust_max;
+```
+
+This is the **wrap-the-window-then-compare** fix in its purest form — outer `WHERE` references the **plain projected column `cust_max`**, not the window expression itself, so it is legal.
+
+**Alternative #1 — `DENSE_RANK() = 1` for "all rows tied at rank 1".** `DENSE_RANK() OVER (PARTITION BY customer_id ORDER BY amount DESC) AS dr` in the CTE, then outer `WHERE dr = 1` returns all rows tied for the per-customer maximum amount. This is interchangeable with the `amount = cust_max` form; choose by readability. (`ROW_NUMBER() = 1` is the top-1-per-group canonical from the LEADING CANONICAL above — it picks **one arbitrary row** among ties; use `DENSE_RANK() = 1` instead when you want **all rows tied**.)
+
+**Alternative #2 — `max_by(x, y)` for "the value of a SECOND column from the personal-max row".** If the question is "**which order_id has the customer's personal-max amount?**" (a SINGLE column from the top row, not all rows tied, not a count), reach for `max_by(order_id, amount)` per [§3.1D max_by/min_by](#31d-arbitrary--any_value-pick-one-value-per-group-and-max_by--min_by-deterministic-representative-value-pick) — it is the cheapest one-call form when you only need one column from one row per group. Use the `MAX(...) OVER (...) + CTE` pattern above when you need to **count tied rows**, **flag rows**, or **return many columns from many tied rows**.
+
+> **DO NOT WRITE — three exact-wrong forms that all parse-fail or are rejected by the Trino 467 analyzer (iter636 A4 regression — these are the EXACT bad forms the responder emitted).**
+>
+> | WRONG (Trino 467 — REJECTED) | WHY it fails | RIGHT — the wrap-the-window-then-compare fix |
+> |---|---|---|
+> | `SELECT customer_id, COUNT(*) AS orders_at_max FROM orders WHERE amount = MAX(amount) OVER (PARTITION BY customer_id) GROUP BY customer_id`  &nbsp;❌ | **Window function NOT allowed in `WHERE`.** Trino docs: window functions run AFTER `HAVING` but BEFORE `ORDER BY` — meaning `WHERE` runs FIRST, so the window expression doesn't exist yet at filter time. Same rule that bans SELECT-output aliases in `WHERE`. | Wrap the window in a CTE / subquery as a plain column, then compare at the outer level: `WITH ranked AS (SELECT ..., MAX(amount) OVER (PARTITION BY customer_id) AS cust_max FROM orders) SELECT customer_id, COUNT(*) FILTER (WHERE amount = cust_max) FROM ranked GROUP BY customer_id`. |
+> | `SELECT customer_id, SUM(CASE WHEN amount = MAX(amount) OVER (PARTITION BY customer_id) THEN 1 ELSE 0 END) OVER (PARTITION BY customer_id) AS orders_at_max FROM orders`  &nbsp;❌ | **Nested window functions NOT allowed.** Trino 467's `StatementAnalyzer.analyzeWindowFunctions` rejects any window expression that contains another window expression in its argument list. The `MAX(...) OVER (...)` sits inside the `CASE` which is the argument of the outer `SUM(...) OVER (...)` — that is a nested window. | Same wrap-the-window-then-compare CTE fix: project the inner window to a plain column, then compare. |
+> | `SELECT customer_id, COUNT(*) FILTER (WHERE amount = MAX(amount) OVER (PARTITION BY customer_id)) AS orders_at_max FROM orders GROUP BY customer_id`  &nbsp;❌ | **Window function NOT allowed inside an aggregate's `FILTER` predicate.** The `FILTER (WHERE ...)` clause on a regular aggregate is a row-level predicate evaluated alongside the aggregate's row-by-row consumption; a window function is computed at a later phase and cannot appear inside that predicate. The analyzer rejects it. (The `FILTER` clause IS legal — what is illegal is putting a WINDOW expression inside the FILTER's predicate.) | Same fix: project the window in a CTE first; then `FILTER (WHERE amount = cust_max)` at the outer level — that FILTER predicate references only a plain projected column, no window inside. |
+
+**General scope rule (the "what column is visible at the outer level" rule).** A CTE or subquery in the `FROM` list exposes **ONLY its projected SELECT-list columns** to the outer query. Once you wrap a window expression `MAX(amount) OVER (...)` and project it as `cust_max`, the outer query sees `cust_max` (a plain column) — NOT the underlying window expression, NOT a hidden re-derivation. This is universal SQL semantics, not Trino-specific, and it's what makes the wrap-then-compare pattern work: the outer `WHERE amount = cust_max` / `FILTER (WHERE amount = cust_max)` references two **plain projected columns** of the CTE, never a window function, so the analyzer accepts it.
+
+**Cross-references.** [§3.1D `max_by(x, y)` / `min_by(x, y)`](#31d-arbitrary--any_value-pick-one-value-per-group-and-max_by--min_by-deterministic-representative-value-pick) — the single-column "value of x associated with max y" canonical. [§3.1G ROW_NUMBER top-1-per-group LEADING CANONICAL above](#31g-trino-has-no-distinct-on--use-row_number--1-or-max_by-for-one-row-per-group) — the "keep ONE row per group (top by some order)" canonical; use `DENSE_RANK() = 1` when you want all tied rows instead of one. [§3.1E `count_if` + `FILTER (WHERE ...)`](#31e-trino-if-vs-case-when-and-count_if--the-conditional-expression-family) for the conditional-count idioms. [Resource 27 §4.2 alias-in-WHERE / window-in-WHERE guard](27-oracle-plsql-to-dbt-trino.md) — the general clause-evaluation-order rule that bans window functions in `WHERE`; this canonical is the docs-correct fix for the "rows-equal-to-partition-max" specialization of that rule.
+
 ---
 
 ### DO NOT WRITE — `IGNORE NULLS` placement on window functions: AFTER the closing args paren, BEFORE `OVER` (iter572 PIN)
