@@ -1527,6 +1527,68 @@ GROUP BY feature_name;
 >
 > For the canonical bucketed-running-total worked example (`GROUP BY` + `SUM(COUNT(*)) OVER (...)`), see [resource 07 § Pattern A2 — Bucketed running total](07-analytical-query-patterns.md).
 
+### LEADING CANONICAL — extract-then-count (count per derived expression) — every SELECT column must be either GROUPED or AGGREGATED — DROP / WRAP / REGROUP the stray raw column (iter647 PIN — FIX-A for the count-users-per-email-domain GROUP-BY-rule violation)
+
+> **READ THIS FIRST if your question contains any of these keywords:** `count users per domain`, `count users per email domain`, `extract the domain then count`, `split and group and count`, `number of users in each domain`, `must appear in GROUP BY or be aggregated`, `stray column in a GROUP BY query`, `column is not part of GROUP BY`, `group by a derived expression and count`, `count per extracted value`, `group by split_part and count`, `email must be an aggregate expression or appear in GROUP BY clause`, `count rows per category extracted from a column`, `must be an aggregate expression or appear in GROUP BY`. Verified at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) on 2026-06-08.
+
+**The one-fact lead.** In a `GROUP BY` query, **EVERY column in the `SELECT` list must either appear in the `GROUP BY` clause or be wrapped in an aggregate function** — per [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) verbatim: *"When a `GROUP BY` clause is used in a `SELECT` statement all output expressions must be either aggregate functions or columns present in the `GROUP BY` clause."* A **STRAY raw column** in the SELECT (e.g. selecting the raw `email` column when you grouped by `split_part(email, '@', 2)`) is an **ERROR — the query does NOT execute**. Trino raises something like *"`email` must be an aggregate expression or appear in `GROUP BY` clause"* at analysis time. This is the most common bug in the "extract a value, then count rows per extracted value" question shape — engineers correctly write `split_part(email, '@', 2)` to pull the domain, then accidentally drag the raw `email` column along into the SELECT list and Trino refuses.
+
+**Worked CORRECT canonical — "count users per email domain" (the iter646 Q4 shape, FIXED).** The SELECT list carries **ONLY the grouped expression + the aggregate** — the raw `email` is **DROPPED** (it has no single value per domain — one domain has many emails, so there is no one `email` to put on each output row).
+
+```sql
+-- CORRECT — count of users per email domain.
+-- SELECT list = grouped expression (the domain) + aggregate (COUNT(*)).
+-- The raw `email` column is DROPPED — it has no single value per domain.
+SELECT split_part(email, '@', 2) AS domain,
+       COUNT(*)                  AS user_count
+FROM iceberg.analytics.users
+GROUP BY split_part(email, '@', 2)
+ORDER BY user_count DESC;
+```
+
+The output is exactly one row per distinct domain — *e.g.* `('acme.com', 312)`, `('example.org', 87)`, `('gmail.com', 5421)`. Repeating the `split_part(email, '@', 2)` expression in both the SELECT and the GROUP BY is REQUIRED — Trino does not let you reference the SELECT-list alias `domain` inside `GROUP BY` (Trino issue [#16533](https://github.com/trinodb/trino/issues/16533); see Rule 3 in the anchor immediately above). The clean alternative is positional: `GROUP BY 1` (the first SELECT-list expression).
+
+**DO NOT WRITE — the EXACT iter646 Q4 bug.** A stray raw column in the SELECT that is neither grouped nor aggregated:
+
+```sql
+-- WRONG ❌ — the EXACT iter646 Q4 bug.
+-- `email` is in the SELECT list but is NEITHER in GROUP BY NOR wrapped in an aggregate.
+-- Trino REFUSES this — raises an error like:
+--   "'email' must be an aggregate expression or appear in GROUP BY clause"
+SELECT email,                                          -- ❌ stray raw column — ungrouped, unaggregated
+       split_part(email, '@', 2) AS domain,
+       COUNT(*)                  AS user_count
+FROM iceberg.analytics.users
+GROUP BY split_part(email, '@', 2);                    -- ❌ `email` is NOT here — query does NOT execute
+```
+
+**Three remedies — pick the one that matches the intent of the report.**
+
+| Remedy | When to use | Fixed shape |
+|---|---|---|
+| **(1) DROP the stray column** (the usual fix for an aggregate report — what the original question asked for: a count per domain). | The output is "one row per domain with a count" — the raw `email` would have no single value per row anyway, so it does not belong in the SELECT. | `SELECT split_part(email, '@', 2) AS domain, COUNT(*) AS user_count FROM users GROUP BY split_part(email, '@', 2)` |
+| **(2) WRAP it in an aggregate** like `arbitrary(email)` / `min(email)` / `max(email)` — if you want a **sample** value of `email` per domain (e.g. "show me one example email address per domain"). | The output is still one row per domain, but you want to peek at one specific email per group as a sample. | `SELECT split_part(email, '@', 2) AS domain, arbitrary(email) AS sample_email, COUNT(*) AS user_count FROM users GROUP BY split_part(email, '@', 2)` (or `min(email)` / `max(email)` for a deterministic alphabetic pick) |
+| **(3) ADD it to GROUP BY** — but this **CHANGES the grain** to one row per `(email, domain)` pair, which is effectively per-email (since each email has exactly one domain). `COUNT(*)` then collapses to 1 (or the duplicate-row count) per email — almost never what the question asks. | Only when you actually want a finer grain — per-email rather than per-domain. | `SELECT email, split_part(email, '@', 2) AS domain, COUNT(*) AS user_count FROM users GROUP BY email, split_part(email, '@', 2)` |
+
+**Diagnostic — "I get the error `'X' must be an aggregate expression or appear in GROUP BY clause`":** find column `X` in your SELECT list. Decide which remedy applies:
+- **You don't actually need `X` in the output** → **DROP it** from the SELECT (Remedy 1). This is the right answer for ~90% of aggregate reports.
+- **You want a sample value of `X` per group** → **WRAP it** in `arbitrary(X)` / `any_value(X)` (for a constant-per-group column or any sample) or `min(X)` / `max(X)` (for a deterministic alphabetic / numeric pick) (Remedy 2). See [§3.1D `arbitrary` / `any_value`](#31d-arbitrary--any_value-pick-one-value-per-group-and-max_by--min_by-deterministic-representative-value-pick) for the full aggregate-wrapper picker.
+- **You actually want a finer grain (per-`X` rather than per-`<group key>`)** → **ADD `X` to `GROUP BY`** (Remedy 3) — but recognize that this changes the answer's grain.
+
+**Same trap, same fix — other "extract-then-count" question shapes:**
+
+| Question | CORRECT SELECT list | The same stray-column trap |
+|---|---|---|
+| "How many users in each email domain?" | `split_part(email, '@', 2) AS domain, COUNT(*) AS n` | `SELECT email, split_part(email, '@', 2), COUNT(*) ... GROUP BY split_part(email, '@', 2)` — stray `email`. |
+| "How many orders per status?" | `status, COUNT(*) AS n` | `SELECT order_id, status, COUNT(*) ... GROUP BY status` — stray `order_id`. |
+| "How many events per day?" | `date_trunc('day', event_ts) AS day, COUNT(*) AS n` | `SELECT event_ts, date_trunc('day', event_ts), COUNT(*) ... GROUP BY date_trunc('day', event_ts)` — stray `event_ts`. |
+| "How many sales per product category?" | `category, COUNT(*) AS n` | `SELECT product_id, category, COUNT(*) ... GROUP BY category` — stray `product_id`. |
+| "How many users per signup year?" | `EXTRACT(year FROM signup_date) AS yr, COUNT(*) AS n` | `SELECT signup_date, EXTRACT(year FROM signup_date), COUNT(*) ... GROUP BY EXTRACT(year FROM signup_date)` — stray `signup_date`. |
+
+Every row in this table is the **same root bug**: a column that varies within the group sneaked into the SELECT. Fix it with Remedy 1 (drop), Remedy 2 (wrap), or Remedy 3 (regroup) — Remedy 1 is correct for almost every "count per X" report.
+
+**Cross-references.** Positional / alias / pre-projection scope rules in `GROUP BY` — the anchor immediately above (Rules 1-5). [§3.1D `arbitrary` / `any_value` and `max_by` / `min_by`](#31d-arbitrary--any_value-pick-one-value-per-group-and-max_by--min_by-deterministic-representative-value-pick) — the full aggregate-wrapper picker (Remedy 2). For the `split_part` email-domain extraction primitive itself, see [§3.1A `split_part` for "the part AFTER (or BEFORE) a single delimiter"](#split_part-for-the-part-after-or-before-a-single-delimiter--the-clean-trino-native-idiom) (canonical row: `split_part(email, '@', 2)` → the domain after the `@`).
+
 **Why**: `WHERE` is evaluated before aggregation, so rows are dropped before they enter the expensive GROUP BY. `HAVING` runs after aggregation — every row contributes to the group, then the group is discarded.
 
 **Bad** — aggregates every event, then throws most away:

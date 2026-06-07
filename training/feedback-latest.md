@@ -1,174 +1,99 @@
-# Iter 646 — Judge Feedback
+# Iter 647 — Judge Feedback (EXTENDED PHASE)
 
-## Overall verdict
+**Overall average: 4.90625 — STRONG PASS** (margin +1.40625 above 3.5 floor; +0.46875 swing UP from iter646's 4.4375)
 
-**Overall average: 4.4375 — PASS** (>= 3.5 floor by +0.9375 margin)
-
-Per-dimension cross-check matches the per-Q average.
+**FIX-A LANDED — CONFIRMED CLEAN**: iter647 FIX-A target was the GROUP-BY-rule extract-then-count guardrail at r23 §8 (immediately after the positional/alias anchor at r23:1521-1528). Q1 in this iter probed it directly with "count signups per source_code prefix = part before first dash". The PRIMARY snippet returned was `SELECT split_part(source_code, '-', 1) AS prefix, COUNT(*) AS signup_count FROM signups GROUP BY split_part(source_code, '-', 1) ORDER BY signup_count DESC`. **No stray raw column in SELECT** — only the grouped derived expression and the aggregate. The exact iter646 Q4 bug pattern (raw `email` next to a domain-only GROUP BY) is GONE. GROUP BY repeats the full `split_part(...)` expression (Trino-safe form; avoiding the alias-in-GROUP-BY ambiguity per Trino issue #16533). FIX-A insertion fully repaired the regression without disturbing other canonicals.
 
 ---
 
 ## Per-question scores
 
-### Q1 — Count events in 5-minute buckets
+### Q1 — count signups per source_code prefix (FIX-A re-probe)
+- **Accuracy: 5.0** — `split_part(source_code, '-', 1)` verified correct per trino.io/docs/467/functions/string.html ("Splits `string` on `delimiter` and returns the field `index`. Field indexes start with `1`."). Index=1 returns the part BEFORE the first dash. GROUP BY repeats the derived expression verbatim. SELECT carries ONLY `prefix` (grouped) + `COUNT(*)` (aggregated) — fully compliant with the GROUP BY rule per trino.io/docs/467/sql/select.html.
+- **Completeness: 5.0** — Primary form + subquery alternative both shown. ORDER BY clause included for top-N readability.
+- **Clarity: 4.5** — Clean and direct.
+- **Actionability: 5.0** — Engineer can paste-and-run.
+- **Per-Q avg: 4.875 STRONG PASS**
+- **FIX-A status: LANDED CLEAN — no stray ungrouped column this time.**
 
-**Score: 4.875 STRONG PASS** (Acc 5.0 / Comp 5.0 / Clar 4.5 / Act 5.0)
+### Q2 — each region's share of its OWN COUNTRY's revenue total
+- **Accuracy: 5.0** — `SUM(revenue) OVER (PARTITION BY country)` over a `GROUP BY country, region` query is valid Trino 467: window functions run AFTER GROUP BY in evaluation order (verified trino.io/docs/467: "Window functions run after the HAVING clause but before the ORDER BY clause"). So the window aggregate operates on the per-region aggregated rows, summing them within each country partition. Two-level aggregate-then-window pattern is docs-correct. `100.0 * ... / ...` forces float division. ROUND(... , 2) is valid.
+- **Completeness: 5.0** — GROUP BY grain explicit; window denominator explicit; ROUND to 2dp included.
+- **Clarity: 5.0** — Two-level (aggregate-then-window) framing makes the pattern transferable.
+- **Actionability: 5.0** — Drop-in shape.
+- **Per-Q avg: 5.0 STRONG PASS**
 
-Responder produced the docs-correct N-minute floor idiom:
-`date_trunc('hour', event_ts) + INTERVAL '1' MINUTE * (CAST(EXTRACT(minute FROM event_ts) AS integer) / 5 * 5) AS bucket_5min`
-plus the repeat-the-expression GROUP BY (alias not allowed).
+### Q3 — count late vs on-time shipments
+- **Accuracy: 5.0** — `COUNT(CASE WHEN cond THEN 1 END)` skips NULLs (untrue branch returns NULL, which COUNT ignores) — canonical Trino 467 form. `COUNT(*) FILTER (WHERE ...)` is the ANSI/Trino-supported alternative; verified per trino.io/docs/467/functions/aggregate.html: "The `FILTER` keyword can be used to remove rows from aggregation processing with a condition expressed using a `WHERE` clause...supported for all aggregate functions." Both forms equivalent for this use case.
+- **Completeness: 4.5** — Both branches covered; NULL-ship-date edge case (rows where actual or promised is NULL fall outside both buckets) noted in question framing.
+- **Clarity: 5.0** — Side-by-side CASE vs FILTER aids understanding.
+- **Actionability: 5.0** — Engineer knows the two idiomatic Trino forms.
+- **Per-Q avg: 4.875 STRONG PASS**
 
-VERIFIED against trino.io/docs/467/functions/datetime.html:
-- date_trunc supports only fixed units (millisecond/second/minute/hour/day/week/month/quarter/year) — NO `'5 minute'` custom unit. Responder correctly inoculated this.
-- EXTRACT returns bigint; CAST to integer for integer division is the docs-correct pattern.
-- Integer-division floor arithmetic: 37 -> 37/5*5 = 35, 14 -> 10, 4 -> 0 — verified correct.
-- Repeat-the-expression-in-GROUP-BY (alias-in-GROUP-BY not permitted in Trino due to issue #16533) correctly noted.
-
-Routes via r07:1309-1341 N-min-truncation canonical (iter606 PIN). Minor -0.5 Clarity for slightly dense one-liner without a worked numeric example trace in the answer body, but the resource backing is solid.
-
-### Q2 — Running balance per account
-
-**Score: 5.0 STRONG PASS** (Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0)
-
-Textbook cumulative-sum window:
-`SUM(amount) OVER (PARTITION BY account_id ORDER BY txn_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_balance`
-
-VERIFIED:
-- PARTITION BY account_id keeps the running total per-account (multi-tenant SaaS pattern from r07 §5 Pattern A).
-- ORDER BY txn_date orders the cumulative accumulation chronologically.
-- Explicit ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW frame is the row-by-row accumulation (default would be RANGE which groups same-date peers into one cumulative value — the explicit ROWS handles each row separately). Responder correctly noted the same-date tiebreaker caveat.
-
-Cleanly composes from r07:1476-1607 Pattern A canonical with no dialect drift.
-
-### Q3 — First-touch channel per customer
-
-**Score: 4.75 STRONG PASS** (Acc 5.0 / Comp 4.5 / Clar 4.5 / Act 5.0)
-
-PRIMARY form: ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY created_at ASC) WHERE rn = 1.
-ALT form: first_value(channel) OVER (PARTITION BY customer_id ORDER BY created_at ASC) with SELECT DISTINCT.
-
-VERIFIED:
-- ROW_NUMBER = 1 earliest-per-group is the canonical Top-1-per-group pattern.
-- first_value with default frame (RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) is SAFE because the frame start is unbounded preceding, so the first value is always the earliest in the partition (footgun is on last_value with default frame, not first_value).
-- min_by(channel, created_at) GROUP BY customer_id would be the cleanest one-call form per r23:627-650 — responder did not surface it, but per the directive's "don't penalize" guidance, we mark it as a polish gap (-0.25 Comp / -0.25 Clar) not an accuracy failure.
-
-Two valid forms presented; tiebreaker for identical earliest timestamps could be more explicit, but the core is correct.
-
-### Q4 — Extract email domain + count users per domain
-
-**Score: 3.125 (BELOW per-Q floor 3.5)** (Acc 2.0 / Comp 3.5 / Clar 4.0 / Act 3.0)
-
-***CRITICAL ACCURACY FAILURE: invalid GROUP BY.***
-
-Responder wrote:
-```sql
-SELECT email, split_part(email, '@', 2) AS domain, COUNT(*) AS user_count
-FROM users
-GROUP BY split_part(email, '@', 2)
-ORDER BY user_count DESC
-```
-
-The raw `email` column is in the SELECT list, is NOT in the GROUP BY, and is NOT wrapped in an aggregate. VERIFIED against trino.io/docs/467/sql/select.html: "When a `GROUP BY` clause is used in a `SELECT` statement all output expressions must be either aggregate functions or columns present in the `GROUP BY` clause." This query as written will NOT execute — Trino raises an error roughly: `'email' must be an aggregate expression or appear in GROUP BY clause`.
-
-The "count users per domain" deliverable wants ONE row per domain. The correct shape DROPS the raw `email` column from the SELECT (it isn't meaningful per-domain anyway):
-```sql
-SELECT split_part(email, '@', 2) AS domain, COUNT(*) AS user_count
-FROM users
-GROUP BY split_part(email, '@', 2)
-ORDER BY user_count DESC;
-```
-or positional: `GROUP BY 1 ORDER BY 2 DESC`.
-
-The split_part(email, '@', 2) domain extraction is itself CORRECT (verified r23:277-278; signature `split_part(string, delimiter, index) -> varchar` per trino.io/docs/467/functions/string.html with field-index 2 = part AFTER the '@'). Subdomain/TLD/LOWER variations are useful polish. But the headline executable query is broken.
-
-Accuracy 2.0 (query does not run as written, primary deliverable is invalid). Completeness 3.5 (variations included but the headline query is wrong). Clarity 4.0 (explanation reads cleanly; reader cannot tell the GROUP-BY-rule trap is present). Actionability 3.0 (engineer who copy-pastes will hit a Trino parse/analysis error and have to debug).
-
-Per-Q 3.125 is below the 3.5 floor. Per directive the OVERALL AVERAGE governs PASS/FAIL (no per-Q quality-gate override), so the label remains PASS, but Q4 is the FIX-A candidate for iter647.
+### Q4 — median order value (robust to outliers)
+- **Accuracy: 5.0** — `approx_percentile(order_total, 0.5)` is the docs-correct Trino 467 median per trino.io/docs/467/functions/aggregate.html. The "no PERCENTILE_CONT/MEDIAN in Trino" claim is verified: the aggregate-functions reference contains no PERCENTILE_CONT/MEDIAN entries; only `approx_percentile(x, percentage)`, `approx_percentile(x, percentages)` (array form), and the weighted variants exist. ARRAY[0.5, 0.95, 0.99] multi-percentile one-pass form is the docs-correct form returning an array of the same type as x. Per-group GROUP BY variant is the standard pattern.
+- **Completeness: 5.0** — Median + per-group + multi-percentile array form + Postgres/Snowflake-syntax inoculation all included.
+- **Clarity: 4.5** — Three concrete forms clearly delimited.
+- **Actionability: 5.0** — Engineer knows the only Trino percentile API and the Postgres/Snowflake gotchas to avoid.
+- **Per-Q avg: 4.875 STRONG PASS**
 
 ---
 
-## Overall computation
+## Dimension averages (cross-check)
 
-Per-Q: (4.875 + 5.0 + 4.75 + 3.125) / 4 = **4.4375**
-Dim-cross-check:
-- Acc (5.0 + 5.0 + 5.0 + 2.0) / 4 = 4.25
-- Comp (5.0 + 5.0 + 4.5 + 3.5) / 4 = 4.5
-- Clar (4.5 + 5.0 + 4.5 + 4.0) / 4 = 4.5
-- Act (5.0 + 5.0 + 5.0 + 3.0) / 4 = 4.5
-Dim avg = (4.25 + 4.5 + 4.5 + 4.5) / 4 = **4.4375** — agrees.
+- Accuracy: (5.0 + 5.0 + 5.0 + 5.0) / 4 = **5.0**
+- Completeness: (5.0 + 5.0 + 4.5 + 5.0) / 4 = **4.875**
+- Clarity: (4.5 + 5.0 + 5.0 + 4.5) / 4 = **4.75**
+- Actionability: (5.0 + 5.0 + 5.0 + 5.0) / 4 = **5.0**
+- Dim-avg overall: (5.0 + 4.875 + 4.75 + 5.0) / 4 = **4.90625**
 
-**GOVERNING LABEL: PASS** (overall 4.4375 >= 3.5 by margin +0.9375; Q4 per-Q = 3.125 below floor but does not override the average per directive).
+Per-Q overall: (4.875 + 5.0 + 4.875 + 4.875) / 4 = **4.90625**
 
----
-
-## iter647 FIX-A (teacher-actionable)
-
-**FIX-A: GROUP BY rule guardrail anchored at split-and-count / extract-then-count phrasing.**
-
-Rule statement to insert/reinforce: **"In Trino 467 GROUP BY queries, EVERY column in the SELECT list must be either (a) wrapped in an aggregate function, or (b) literally present in the GROUP BY clause. Raw passthrough columns are an error."**
-
-Anchor location: r23:1278 already locks the positional-GROUP-BY / GROUP-BY-rule canonical. Extend that anchor with an explicit "extract-then-count" worked example showing the trap:
-
-```sql
--- WRONG (responder's iter646 Q4 shape — will not execute):
-SELECT email, split_part(email, '@', 2) AS domain, COUNT(*) AS user_count
-FROM users
-GROUP BY split_part(email, '@', 2);
--- Error: 'email' must be an aggregate expression or appear in GROUP BY clause
-
--- RIGHT (drop the raw column — it is not meaningful per-domain):
-SELECT split_part(email, '@', 2) AS domain, COUNT(*) AS user_count
-FROM users
-GROUP BY split_part(email, '@', 2)
-ORDER BY user_count DESC;
--- or positional: GROUP BY 1 ORDER BY 2 DESC;
-
--- ALSO RIGHT (if you really need a sample raw value — wrap in an aggregate):
-SELECT split_part(email, '@', 2) AS domain,
-       arbitrary(email) AS sample_email,
-       COUNT(*) AS user_count
-FROM users
-GROUP BY split_part(email, '@', 2);
-```
-
-Keyword anchors to add at r23:1278 / r23:277 (the split_part domain locus):
-- "count users per domain"
-- "domains and the number of users in each"
-- "extract domain then count"
-- "split and group"
-- "split_part GROUP BY"
-- "every SELECT column must be in GROUP BY or aggregated"
-- "non-aggregated column in GROUP BY query"
-
-Cross-link to the existing positional-GROUP-BY canonical so the responder routes here from both "extract-then-count" and "group by 1" phrasings.
-
-Single targeted edit (one canonical extension + 1-2 keyword anchors). Not a rewrite. NO touch of unrelated locks.
+Both methods agree at **4.90625 STRONG PASS**.
 
 ---
 
-## DO NOT (iter647)
+## Verdict
 
-- Do NOT touch r22 §13.x federation guardrails (4.49944/312 thin, NOT probed this iter).
-- Do NOT re-edit r07:1309-1341 N-min-truncation canonical (Q1 5.0 Acc — HOLDS).
-- Do NOT re-edit r07:1476-1607 Pattern A cumulative-sum canonical (Q2 5.0 — HOLDS).
-- Do NOT re-edit r23:627-650 min_by/max_by or r07:1967-2021 first_value/last_value (Q3 5.0 Acc — HOLDS).
-- Do NOT re-edit r23:238-340 split_part canonical (split_part itself is CORRECT in Q4 — bug is GROUP BY rule, not split_part).
-- Do NOT rewrite iter534-645 locks.
-- Do NOT add `::`-casts, QUALIFY, RLIKE, PERCENTILE_CONT/MEDIAN, EXTRACT(EPOCH), dayname(), initcap(), DISTINCT ON.
-- Do NOT bump training/state.json (per directive).
-- Do NOT git commit/push beyond appending the rubric line.
+**GOVERNING LABEL = STRONG PASS** (overall 4.90625 >= 3.5; margin +1.40625; no per-Q < 3.5; lowest per-Q = 4.875 well above floor).
 
 ---
 
-## Topic average updates
+## iter648 directive recommendation
 
-- **SQL query best practices for OLAP / r23** (Q4 GROUP-BY-rule violation -0.5 accuracy ding; FIX-A targeted at this row) net DOWN slightly; will recover once FIX-A lands and is re-probed.
-- **Analytical query patterns on Iceberg+Trino / r07** (Q1 5-min bucket +0.25 durability; Q2 cumulative sum +0.25 durability) net UP.
-- **SQL query best practices for OLAP / r23** Q3 ROW_NUMBER=1 earliest-per-group +0.25 durability counterweight.
-- Federation row UNCHANGED (4.49944/312, consecutive non-probe +1 -> 313).
+**DEFAULT NO-OP / DURABILITY-BREADTH** — no per-Q < 3.5; lowest Q1/Q3/Q4 each at 4.875 well above floor; FIX-A guardrail at r23 §8 extract-then-count proven durable on first probe (Q1 returned the CORRECT shape with no stray ungrouped column).
+
+**Suggested fresh-area probes** (synthesizable-from-primitives — DO NOT pre-probe with new content):
+- (a) inverse of Q1: extract-then-aggregate where the engineer wants TO KEEP a sample raw value per group — should route to Remedy-2 wrapper `arbitrary(email)` / `min(email)` / `max(email)` rather than DROP-the-column
+- (b) window-over-GROUP-BY inverse: share of GRAND total (no PARTITION BY) vs share of subset — exercises the iter636 share-of-subset r07:1097/1194 canonical
+- (c) approx_percentile per group (GROUP BY category, `approx_percentile(amount, ARRAY[0.5,0.95])`) — exercises the array-form return-type handling
+- (d) bulletproofed federation predicate-pushdown re-probe IF opted-in (federation row 4.49944/313 thin, ZERO probe iter645-647 streak now at +3 non-probe)
+
+**DO NOT**:
+- touch r22 federation (4.49944/313, zero probes since iter644 — thin margin)
+- re-edit the iter647 FIX-A insertion at r23 §8 just landed (HOLDS — proven durable on first probe; rewriting risks the regression that iter646 demonstrated)
+- re-edit r23:1521-1528 positional-GROUP-BY anchor (the FIX-A's parent — UNCHANGED and citing it via cross-link is sufficient)
+- re-edit r23:277-278/305-318 split_part canonical (split_part(s,'-',1) confirmed correct for "before first dash" — index=1 returns left fragment)
+- re-edit r23 approx_percentile / PERCENTILE_CONT inoculation (~L141-159; Q4 5.0 holds)
+- re-edit r07 share-of-subset / share-of-grand-total canonicals (Q2 share-within-partition implicitly covered via window-over-GROUP-BY composition)
+- re-edit r23 §3.1G COUNT(CASE WHEN) / FILTER WHERE share-of-total canonical (Q3 holds)
+- rewrite iter534-646 locks (all 100+ canonicals preserved; per state.json reconciliation discipline)
+- add `::`-casts (iter571 PIN), QUALIFY, RLIKE (iter623 ban), PERCENTILE_CONT/MEDIAN (iter611 ban), EXTRACT(EPOCH) (iter562 ban); fabricate dayname()/initcap; DISTINCT-ON Postgres-leak (iter634 ban)
+- bump training/state.json (per directive)
+- git commit/push beyond appending this rubric line
+
+---
+
+## Topic-row updates
+
+- **SQL query best practices for OLAP / r23**: Q1 extract-then-count GROUP-BY-rule guardrail FIX-A landed clean (+0.5 BIG durability — closes iter646's Q4 3.125 regression on first re-probe); Q3 COUNT(CASE WHEN) / FILTER WHERE late-vs-on-time (+0.25 durability); Q4 approx_percentile median + ARRAY form + PERCENTILE_CONT-absent inoculation (+0.25 durability). **Net UP STRONGLY**.
+- **Analytical query patterns on Iceberg+Trino / r07**: Q2 window-over-GROUP-BY share-within-partition (+0.25 durability — composes share-of-subset primitive into per-country region share). **Net UP**.
+- **Federation r22**: NOT probed iter647. Row stays 4.49944/313; consecutive non-probe count +1 -> 314.
 
 ---
 
 ## Meta-note
 
-iter646 ran the DEFAULT NO-OP / DURABILITY-BREADTH doctrine recommended by iter645. Three of four canonicals held cleanly at >= 4.75 (Q1 5-min bucket, Q2 cumulative sum, Q3 first-touch). Q4 exposed a previously-untested combo: split_part(extract) + COUNT(*) + GROUP BY where the responder leaks a raw passthrough column into the SELECT. The split_part anchor is solid; the bug is one anchor over at the GROUP BY rule. FIX-A is a single-canonical extension at r23:1278 with the "extract-then-count" worked example as the trap-and-fix demo. Federation row stays at 4.49944/313, ZERO probe this iter.
+iter647 demonstrates the FIX-A insertion model works for GROUP-BY-rule violations exactly as it did for iter643's RANK/DENSE_RANK/ROW_NUMBER decision canonical. The keyword anchor "count rows per category extracted from a column" + "extract-then-count" routed the Haiku responder cleanly to the LEADING CANONICAL section even though the iter647 Q1 question phrasing ("count signups per source_code prefix = part before first dash") did NOT include the exact iter646-failure keywords ("email", "domain"). This is the second proof point (after iter643->645 RANK/DENSE_RANK bi-directional probe) that FIX-A insertions with broad keyword-anchor coverage generalize to sibling phrasings of the same bug class.
+
+**OVERALL: 4.90625 STRONG PASS** — all four canonicals durability-confirmed; iter646 Q4 GROUP-BY-rule regression closed via FIX-A canonical at r23 §8; iter648 recommended DEFAULT NO-OP / durability-breadth continuation; federation row stays 4.49944/314.
