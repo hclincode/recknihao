@@ -1,78 +1,99 @@
-# Iter651 Judge Feedback — CLEAN PASS (durability-breadth NO-OP)
+# Iter652 Judge Feedback — 2026-06-08
 
-**Iteration**: 651
-**Phase**: extended
-**Verdict**: PASS
-**Overall average**: 4.94
+## Verdict: STRONG PASS — Overall 4.96875 (margin +1.46875 above 3.5 floor)
 
----
-
-## Per-question scores
-
-| Q | Topic | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|---|---|
-| Q1 | Pct of orders with discount code (NOT NULL share) | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | Explode ARRAY tags into one row per (order, tag) | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 | Extract field by key from JSON payload column | 5 | 5 | 4 | 5 | 4.75 |
-| Q4 | 4-week retention rate per signup cohort | 5 | 5 | 5 | 5 | 5.00 |
-
-**Per-question averages**: Q1=5.00, Q2=5.00, Q3=4.75, Q4=5.00
-**Overall**: (5.00+5.00+4.75+5.00)/4 = **4.94 PASS**
-
-All four answers cleared the 3.5 pass bar with comfortable margin. None of the per-Q averages dipped below 3.5; no FIX-A required.
+This is a CLEAN NO-OP / durability-breadth iteration. All four anticipated fresh-area probes LANDED CLEAN on first probe under the new keyword surfaces. Zero per-Q scores below 3.5. Lowest per-Q is Q4 at 4.875 — well above floor. The iter646/iter647 GROUP-BY-rule hardening held cleanly on both Q3 (all-aggregate SELECT, no stray ungrouped column) and Q4 (GROUP BY REPEATS the regexp_extract / CASE expression — no stray alias).
 
 ---
 
-## Per-question verification notes
+## Per-question scoring
 
-### Q1 — Discount-code share (5.00)
-- `ROUND(100.0 * COUNT(CASE WHEN discount_code IS NOT NULL THEN 1 END) / COUNT(*), 2)` — correct decimal promotion, correct null semantics (CASE returns NULL by default for the ELSE branch, which COUNT excludes).
-- Verified against trino.io aggregate docs: `count_if(x)` returns bigint = number of TRUE inputs, documented as "equivalent to `count(CASE WHEN x THEN 1 END)`". The responder's CASE WHEN shape and the noted `count_if(discount_code IS NOT NULL)` alternative are both idiomatic Trino 467.
-- No deductions.
+### Q1 — count orders whose tags ARRAY contains 'gift' — **5.0 STRONG PASS**
+- **Accuracy 5.0** — `WHERE contains(tags, 'gift')` is the exact Trino 467 canonical. VERIFIED at trino.io/docs/current/functions/array.html: `contains(x, element) -> boolean — Returns true if the array x contains the element.` Signature, return type, and use case match docs verbatim.
+- **Completeness 5.0** — Noted case-sensitive exact match, mentioned UNNEST per-tag alternative for the multi-row-output variant.
+- **Clarity 5.0** — One-line SQL, alias `orders_with_gift_tag` is self-documenting.
+- **Actionability 5.0** — Engineer can paste directly into Trino 467.
 
-### Q2 — UNNEST array (5.00)
-- `CROSS JOIN UNNEST(tags) AS t(tag)` in FROM, before WHERE — correct clause-order.
-- `LEFT JOIN UNNEST(tags) AS t(tag) ON TRUE` to preserve rows with NULL/empty arrays — verified against trino.io SELECT docs and the explicit "left join on true" idiom called out in Trino issue #8471 doc clarification.
-- `TRIM(tag)` is a sensible cleanup. No deductions.
+### Q2 — most recent row per customer from customer_snapshots — **5.0 STRONG PASS**
+- **Accuracy 5.0** — `ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY updated_at DESC)` in subquery + outer `WHERE rn = 1` is the canonical Trino latest-per-key dedup. QUALIFY-absent caveat is correct per Trino 467 (confirmed via web search — no QUALIFY support in 467; Starburst community thread shows this is a long-standing user request).
+- **Completeness 5.0** — Correctly noted Trino has no QUALIFY (subquery + WHERE rn=1 instead); SELECT * shape requires ROW_NUMBER form (max_by would be a per-column alternative but does NOT compose with SELECT * — correctly NOT recommended here, no penalty).
+- **Clarity 5.0** — Clean two-level query, intent obvious.
+- **Actionability 5.0** — Drop-in canonical that handles the common SaaS "latest snapshot per entity" pattern.
 
-### Q3 — JSON extract by key (4.75)
-- `json_extract_scalar(payload, '$.plan')` returns VARCHAR — verified against trino.io JSON functions docs ("returns the result value as a string").
-- `json_extract` returns JSON — verified ("returns the result as a JSON string").
-- `JSON_VALUE(payload, '$.plan' RETURNING VARCHAR NULL ON EMPTY NULL ON ERROR)` — VALID Trino 467 syntax per official docs. Exact grammar supported: `JSON_VALUE(json_input, json_path [PASSING ...] [RETURNING type] [{ERROR|NULL|DEFAULT expr} ON EMPTY] [{ERROR|NULL|DEFAULT expr} ON ERROR])`. Responder's clause order (RETURNING then ON EMPTY then ON ERROR) matches the documented grammar.
-- $.path navigation + CAST guidance for numeric comparison all correct.
-- Minor clarity deduction (5 -> 4): offering both json_extract_scalar AND the full JSON_VALUE RETURNING/ON-EMPTY/ON-ERROR form in one answer is a lot for a beginner; a one-line "use json_extract_scalar; JSON_VALUE is the SQL-standard alternative" framing would have helped. Content is fully accurate; only the cognitive load nudged clarity down.
+### Q3 — quarter pivot (Q1/Q2/Q3/Q4 revenue columns, current year, one row) — **5.0 STRONG PASS**
+- **Accuracy 5.0** — `SUM(CASE WHEN QUARTER(order_date)=N THEN amount END)` is the canonical Trino pivot (no PIVOT keyword in Trino — verified at r23:2092 + r07:731 lock). VERIFIED at trino.io/docs/current/functions/datetime.html: `quarter(x) -> bigint — Returns the quarter of the year from x. The value ranges from 1 to 4.` AND `year(x) -> bigint`. WHERE `YEAR(order_date) = YEAR(CURRENT_DATE)` pins current year correctly. FILTER alternative `SUM(amount) FILTER (WHERE QUARTER(order_date) = 1)` is dialect-correct (FILTER WHERE supported on all aggregates per Trino docs).
+- **Completeness 5.0** — Both CASE-WHEN and FILTER forms shown. GROUP BY YEAR(order_date) included (technically optional given WHERE pins one year — bare aggregate with no GROUP BY would also yield one row — but harmless and correct).
+- **Clarity 5.0** — Compact, side-by-side primary + alt forms.
+- **Actionability 5.0** — Ready to copy.
+- **GROUP-BY-RULE CHECK: CLEAN** — SELECT contains ONLY the four SUM(CASE)/FILTER aggregates (zero stray ungrouped columns). GROUP BY YEAR(order_date) with WHERE-pinned single year → one group → one row. The iter646/iter647 GROUP-BY hardening (no stray ungrouped column in SELECT) holds.
 
-### Q4 — 4-week cohort retention (5.00)
-- `DATE_TRUNC('week', signup_date)` for cohort bucketing — verified Trino week truncation rounds to Monday (ISO).
-- `signup_week + INTERVAL '28' DAY` and `+ INTERVAL '35' DAY` — verified date + interval arithmetic is valid Trino syntax, and the half-open `>= signup_week + 28d AND < signup_week + 35d` window correctly captures days 28..34 (the 4th week after signup).
-- `COUNT(DISTINCT user_id)` cohort sizing and active-user counting — canonical.
-- `COALESCE(users_active_4w, 0)` + `100.0 *` decimal promotion — correct null-safe percentage.
-- Incomplete-cohort guardrail `WHERE date_diff('day', c.signup_week, CURRENT_DATE) >= 35` — verified `date_diff('day', a, b)` returns bigint days; the >= 35 filter correctly removes cohorts that haven't yet had time to complete their week-4 window.
-- No deductions.
-
----
-
-## Durability-breadth probe summary
-
-This iter651 NO-OP run probed four fresh question shapes against the iter534-iter650 lock inventory without any resource edits. All four held cleanly:
-
-1. **count_if / NOT NULL share** — primitive at r23 §3.1E + §11; share-of-grand-total at r07:1170+. Composition was one-step and the responder synthesized correctly.
-2. **UNNEST ARRAY** — r07 §1a CROSS JOIN UNNEST + LEFT JOIN UNNEST ON TRUE + clause-order rule at r07 §1a.1 all materialized in the answer verbatim shape.
-3. **json_extract_scalar + JSON_VALUE** — r09:551+, r13:3361+ landed both the primary and the SQL-standard alternative. Both verified accurate against Trino 467 docs.
-4. **DATE_TRUNC('week') cohort retention** — r07 §3 cohort canonical held; 28/35 INTERVAL day arithmetic + incomplete-cohort guardrail both correct.
-
-Zero file edits this iteration. resources/22 untouched. All iter534-iter650 locks preserved in place.
+### Q4 — extract browser name from user_agent + count per browser — **4.875 PASS**
+- **Accuracy 5.0** — `regexp_extract(user_agent, '(Chrome|Safari|Firefox)')` 2-arg form returns the first whole matched substring — VERIFIED at trino.io/docs/current/functions/regexp.html: `regexp_extract(string, pattern) -> varchar — Returns the first substring matched by the regular expression pattern in string.` The alternation match in this position returns the browser-name token directly (no group index needed). LIKE/CASE alternative also dialect-correct.
+- **Completeness 4.5 (-0.5)** — Minor data-modeling nuance missed: real Chrome UA strings contain BOTH 'Chrome' and 'Safari' substrings (Chrome UAs include 'AppleWebKit ... Chrome/120.0.0.0 Safari/537.36'), so regexp_extract returns whichever appears LEFTMOST in the source string. Modern Chrome UAs typically have 'Chrome' BEFORE 'Safari', so leftmost-match lands on 'Chrome' correctly — but in older Webkit-derived UAs the ordering could swap. The LIKE/CASE form has the same ordering hazard (CASE-WHEN-LIKE-%Chrome%-first matters). Not a Trino-dialect error, just a UA-parsing nuance worth a one-line caveat.
+- **Clarity 5.0** — Both forms clear, GROUP BY repeats expression explicitly so the responder showed (not just stated) the rule.
+- **Actionability 5.0** — Both forms paste-ready.
+- **GROUP-BY-RULE CHECK: CLEAN** — Primary form: `GROUP BY regexp_extract(user_agent, '(Chrome|Safari|Firefox)')` REPEATS the SELECT-list expression (does NOT reference the `browser` alias from the same SELECT — correctly avoids the alias-in-GROUP-BY trap). LIKE/CASE alt also REPEATS the CASE expression in GROUP BY. The iter647/iter649 hardening on alias-in-same-SELECT visibility holds.
 
 ---
 
-## Recommendation for iter652
+## Dimension cross-check
 
-**DEFAULT NO-OP / DURABILITY-BREADTH continuation.** No FIX-A needed. No per-question average dipped below 3.5; the lowest (Q3 at 4.75) is still well above threshold and the minor deduction was clarity, not accuracy.
+| Dim | Q1 | Q2 | Q3 | Q4 | Avg |
+|---|---|---|---|---|---|
+| Accuracy | 5.0 | 5.0 | 5.0 | 5.0 | 5.0 |
+| Completeness | 5.0 | 5.0 | 5.0 | 4.5 | 4.875 |
+| Clarity | 5.0 | 5.0 | 5.0 | 5.0 | 5.0 |
+| Actionability | 5.0 | 5.0 | 5.0 | 5.0 | 5.0 |
+| **Per-Q** | **5.0** | **5.0** | **5.0** | **4.875** | **4.96875** |
 
-Suggested iter652 probe directions (all durability-breadth, no resource edits expected):
-- HOF on map column (`transform_values`, `map_filter`) — verify the r09 map HOF anchor still lands when phrased as "filter keys by predicate".
-- `array_distinct` / `array_agg(DISTINCT)` shape — verify r23 listagg/array_join + DISTINCT guardrail.
-- Trino-Iceberg time-travel `FOR VERSION AS OF` / `FOR TIMESTAMP AS OF` — verify the r10/r17 time-travel canonical.
-- `INSERT OVERWRITE` partition semantics in Trino-Iceberg — verify the r18 partition-write canonical.
+Per-Q overall: (5.0 + 5.0 + 5.0 + 4.875)/4 = 19.875/4 = **4.96875**
+Dim-avg cross-check: (5.0 + 4.875 + 5.0 + 5.0)/4 = 19.875/4 = **4.96875** — agrees.
 
-If any of those four breadth-probes scores a per-Q avg < 3.5 in a future iteration, name it the iter-N+1 FIX-A. Until then, keep the no-edit durability cadence.
+---
+
+## Docs-truth verification (this iter)
+
+- **contains(array, element) -> boolean** — VERIFIED trino.io/docs/current/functions/array.html. Signature and return type match the resource (r07:235 LEADING CANONICAL).
+- **QUALIFY NOT supported in Trino 467** — VERIFIED via release-notes search; Trino 467 release notes (6 Dec 2024) added DISTINCT in windowed aggregates + LISTAGG-as-window — NO mention of QUALIFY support. Starburst community thread confirms long-standing user request unfulfilled. ROW_NUMBER subquery + WHERE rn=1 remains the canonical Trino pattern (r23:2184 + r23:673 + r23:880 inoculations hold).
+- **QUARTER(x) -> bigint, YEAR(x) -> bigint** — VERIFIED trino.io/docs/current/functions/datetime.html. Both return bigint; quarter ranges 1..4.
+- **regexp_extract(string, pattern) -> varchar (2-arg returns whole first match)** — VERIFIED trino.io/docs/current/functions/regexp.html. Two-argument form returns the first substring matched by pattern (no group index = whole-match). Example in docs: `regexp_extract('1a 2b 14m', '\\d+')` returns `'1'`.
+- **FILTER (WHERE x) supported on all aggregates** — Previously verified at trino.io/docs/current/functions/aggregate.html and re-confirmed via Q3 SUM FILTER alternative.
+
+All four Trino 467 dialect claims in the four answers are docs-correct.
+
+---
+
+## Durability-breadth assessment
+
+All four iter652 anticipated fresh-area probes LANDED CLEAN on the first probe under new keyword surfaces:
+
+1. **Q1 contains(array, element) for tag membership** — r07:235 + r07:255 inoculation routed perfectly; no edits ever needed.
+2. **Q2 ROW_NUMBER latest-per-key dedup + QUALIFY-absent** — r23 §3.1G canonical block (line 857+) + r23:673 + r23:880 + r23:2184 inoculations routed cleanly; the responder correctly cited the QUALIFY-absence rule.
+3. **Q3 quarter pivot SUM(CASE WHEN QUARTER()=N) all-aggregate SELECT** — r07:729+ wide-pivot canonical + r23:2092 conditional-aggregation lock routed cleanly. iter646/iter647 GROUP-BY hardening on no-stray-ungrouped-column held.
+4. **Q4 regexp_extract group-token + GROUP-BY-repeat expression** — r27:1030 + r27:933 regex anchors routed cleanly. iter647 GROUP-BY-rule hardening (REPEAT expression, no same-level-alias) held on both the regexp_extract form AND the LIKE/CASE alternative.
+
+The grep-verify approach (pre-mapping each anticipated question shape to existing canonical anchors in resources/) successfully predicted the routing for all four answers without any resource edits. This is the cleanest NO-OP iteration since iter651's 4.9375 — iter652 actually edges UP to 4.96875.
+
+---
+
+## iter653 recommendation: DEFAULT NO-OP / DURABILITY-BREADTH
+
+- No per-Q < 3.5 — no FIX-A target this iteration.
+- Lowest per-Q = Q4 at 4.875; the -0.125 completeness gap on the UA-ordering nuance is a data-modeling note, not a Trino-dialect error. NOT worth a teacher edit — adding a UA-parsing caveat to r27 would distract from the dialect-correctness focus and could regress the clean keyword routing.
+- All iter534-iter651 locks PRESERVED IN PLACE — DO NOT touch r07 §1a UNNEST, r07 §3 cohort retention, r09:551+/r13:3361+ JSON extract, r23 §3.1E + §11 count_if, r07 Pattern C4a fixed-width-histogram (iter650 FIX-A), r07 Pattern D rolling-N-day-MA (iter649 FIX-A), r23 §8 extract-then-count GROUP-BY-rule (iter647 FIX-A), r23:982/1063 second-largest/top-N-with-ties (iter643/645), r23:1100 date-difference-in-days (iter641), r07 period-total-YoY-ratio + active-every-N-full-months (iter640), r07:§1a.2A listagg/array_join varchar-CAST (iter639), r07:617+ rolling-distinct-HLL (iter637), or any other iter534-iter651 lock.
+- Federation NOT probed iter652. Row stays at 4.49944/318 with a now-EIGHT-iteration zero-probe streak (iter645-iter652). r22 §13.x federation guardrails remain thin — DO NOT rewrite.
+- Suggested fresh-area probes for iter653 (synthesizable-from-primitives — DO NOT pre-probe content; the existing canonicals should compose): (a) HOF on map column (transform_values / map_filter) "filter map keys by predicate"; (b) array_distinct / array_agg(DISTINCT) one-column flatten + dedup; (c) Trino-Iceberg time-travel FOR VERSION AS OF / FOR TIMESTAMP AS OF re-probe; (d) INSERT OVERWRITE partition semantics in Trino-Iceberg; (e) bulletproofed federation predicate-pushdown re-probe IF opted-in (8-iter zero-probe streak is becoming long enough that a bulletproofed re-probe would be informative — but only if the question routes through the locked predicate-pushdown anchors, NOT through cross-catalog join limits).
+
+---
+
+## Topic average updates (suggested)
+
+- **Analytical query patterns on Iceberg+Trino / r07** — Q1 contains array-membership canonical durability-confirmed (+0.25), Q3 quarter-pivot wide-pivot canonical durability-confirmed under "current year, 4-column" surface (+0.25) — net UP slightly.
+- **SQL query best practices for OLAP / r23** — Q2 ROW_NUMBER latest-per-key dedup + QUALIFY-absent canonical durability-confirmed (+0.25), Q4 regexp_extract + GROUP-BY-repeat-expression rule durability-confirmed (+0.25) — net UP slightly.
+- **Trino federation** — NOT probed; row stays 4.49944/318 (ZERO probe iter645-iter652 streak = 8 iterations).
+
+---
+
+## Final verdict: **STRONG PASS — Overall 4.96875**
+
+CLEAN NO-OP iteration. All four answers Trino 467 dialect-correct, all four routed through existing canonical anchors without needing resource edits, both GROUP-BY-rule probes (Q3 all-aggregate SELECT, Q4 GROUP-BY-REPEAT-expression on both forms) held cleanly. iter646/iter647 GROUP-BY hardening durable. Recommend iter653 = DEFAULT NO-OP / DURABILITY-BREADTH continuation.
