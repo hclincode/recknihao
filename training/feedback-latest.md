@@ -1,110 +1,96 @@
-# Judge Feedback — iter602 (EXTENDED PHASE)
+# Judge Feedback — Iter 603 (EXTENDED PHASE)
 
-**Overall: 4.875 / 5.0 — STRONG PASS** (margin +1.375 above the 3.5 floor; +0.5625 swing from iter601's 4.3125)
-
-Trino pinned to **467**. All four answers verified against trino.io/docs/467 — every technical claim is docs-accurate. **Zero fabrications, zero `::`-casts, zero invalid clause placements, zero wrong-version pins.** Federation NOT probed — 4.49944/310 row UNCHANGED.
-
----
-
-## Headline
-
-**The iter601 TABLESAMPLE BERNOULLI-wrong-tool slip is RESOLVED.** On Q1 (the FIX B re-probe) the responder now LEADS with `TABLESAMPLE SYSTEM (1)` for the explicit "full scan too slow / back in seconds / reduce I/O" goal, correctly framing SYSTEM as the sampler that skips whole Parquet file blocks (reads less from MinIO) and contrasting BERNOULLI as the scan-all-then-drop-rows option that does NOT save I/O. The r23 §7 goal→sampler decision rule (FIX B) ROUTED CLEANLY first-probe. Q2 (`element_at` on array), Q3 (`element_at` on map), Q4 (`try_cast` + `try()`) are all docs-verbatim correct and zero-defect.
+**Trino pin: 467.** Docs verified live today against trino.io/docs/467. Overall **4.3125 PASS** (margin +0.8125 above the 3.5 floor). Two genuine concerns flagged separately from the label: Q1 content-gap (histogram() absent → responder groped to a correct-but-indirect map_agg-over-GROUP-BY), and Q4 **INVALID-SYNTAX slip** (`PARTITION BY *` + `ORDER BY (SELECT 1)` in approach A). The recommended-simplest Q4 answer (`DISTINCT *`) is correct, which keeps Q4 out of accuracy-failure, but approach A is a real paste-and-fail hazard.
 
 ---
 
 ## Per-question scores
 
-### Q1 — Rough 1% sample of a billion-row events table, fast, not statistically perfect (FIX B re-probe)
-**Accuracy 5 · Completeness 5 · Clarity 5 · Actionability 5 = 5.00 STRONG PASS — iter601 slip RESOLVED**
+### Q1 — compact value-count map of orders per status, "without a full GROUP BY / one shot" — **4 / 3 / 5 / 3.5 = 3.875 PASS (content-gap)**
 
-`TABLESAMPLE SYSTEM (1)` LED for the I/O/speed goal — "skips whole Parquet file blocks, reads way less data from MinIO, ~1-2s instead of 30min, not perfectly random (whole chunks in/out) but fine for exploration." Contrasted `TABLESAMPLE BERNOULLI (1)` as the independent-per-row option that "scans all files and just drops rows, so it doesn't save I/O."
+Responder used `map_agg(status, cnt)` over an explicit GROUP BY subquery:
+`SELECT map_agg(status, cnt) FROM (SELECT status, COUNT(*) AS cnt FROM orders GROUP BY status)`, then `element_at` the map.
 
-Verified trino.io/docs/467/sql/select.html:
-- SYSTEM — *"This sampling method divides the table into logical segments of data and samples the table at this granularity. This sampling method either selects all the rows from a particular segment of data or skips it."* → I/O-reducing (skips whole segments/splits). MATCHES the responder's lead.
-- BERNOULLI — *"all physical blocks of the table are scanned and certain rows are skipped (based on a comparison between the sample percentage and a random value calculated at runtime)."* → no I/O savings. MATCHES the responder's contrast.
+- **CORRECT and runnable.** Verified trino.io/docs/467/functions/aggregate.html: `map_agg(key, value) → map<K,V>` "Returns a map created from the input `key` / `value` pairs." Feeding `(status, cnt)` from the grouped subquery yields exactly `{COMPLETED:1200, PENDING:340, CANCELLED:55}` as a single map value. `element_at` retrieval is valid.
+- **BUT it answers the WRONG shape of the question.** The engineer explicitly asked for the compact map **"without writing a full GROUP BY"** — and the responder's solution is literally built on an explicit `GROUP BY status` subquery. The purpose-built one-shot is **`histogram(status)`**.
+- Verified trino.io/docs/467/functions/aggregate.html: **`histogram(x) → map<K,bigint>`** "Returns a map containing the count of the number of times each input value occurs." That is `SELECT histogram(status) FROM orders` — a SINGLE aggregate, no subquery, no GROUP BY — exactly the "one compact result without a full GROUP BY" the question named.
+- Accuracy 4 (correct SQL, but the map_agg form needs the very GROUP BY the user wanted to avoid — answers an adjacent question). Completeness 3 (the purpose-built primitive `histogram()` is never mentioned). Clarity 5 (element_at follow-up is clear). Actionability 3.5 (runs, but is more typing than the one-liner the user asked for; an engineer who knew `histogram` exists would feel under-served).
 
-The SYSTEM/BERNOULLI characterization is **accurate**. The "whole chunks in/out, not perfectly random" caveat is the correct trade-off to surface (SYSTEM samples at split granularity → correlated/clustered rows, fine for eyeballing shape). The `COUNT(*) * 100` extrapolation framing on a 1% SYSTEM sample is an **acceptable rough-estimate** framing for "eyeball data shape, does not need statistical perfection" — it is a back-of-envelope scale-up, and the responder explicitly scoped it as exploration, not precise counts. Not misleading given the stated goal. **The iter601 BERNOULLI-wrong-tool slip is RESOLVED.** Zero defects.
+**Q1 CONTENT-GAP VERDICT (CONFIRMED):** `histogram(status)` is the purpose-built one-shot frequency-map and is **ABSENT from resources** — `Grep histogram\(` across `resources/` returns ZERO aggregate-call matches (the 4 file hits for "histogram" are unrelated chart/concept prose, not the aggregate). The responder could not route to it because it does not exist; it groped to a correct-but-indirect map_agg-over-GROUP-BY. This is a clean content-gap, not a findability or mis-application miss.
 
-### Q2 — First element of an array column (last-5-search-terms, most recent = first)
-**Accuracy 5 · Completeness 5 · Clarity 5 · Actionability 5 = 5.00 STRONG PASS**
+### Q2 — concat first_name + last_name with a space — **5 / 5 / 5 / 5 = 5.00 STRONG PASS**
 
-`element_at(search_terms, 1) AS most_recent_search` — 1-based index, returns NULL if out of range (not an error), and `element_at(search_terms, -1)` for last.
+`COALESCE(first_name,'') || ' ' || COALESCE(last_name,'') AS full_name`; noted `||` (or `concat()`) and COALESCE-to-'' to avoid NULL poisoning.
 
-Verified trino.io/docs/467/functions/array.html:
-- *"element_at(array(E), index) → E: Returns element of array at given index."*
-- *"the function returns NULL when accessing an index larger than array length, whereas the subscript operator would fail in such a case"* → confirms NULL-on-out-of-range vs `[]` errors.
-- *"If index < 0, element_at accesses elements from the last to the first"* → confirms `element_at(arr, -1)` = last element.
+- Verified trino.io/docs/467/functions/string.html: `concat(string1, …, stringN) → varchar` "This function provides the same functionality as the SQL-standard concatenation operator (`||`)"; "The `||` operator performs concatenation."
+- COALESCE-to-'' is the correct NULL guard (in Trino, `NULL || 'x'` yields NULL — so the guard is genuinely needed, not cargo-cult).
+- Only nuance (not a defect): if exactly one name is NULL you get a leading/trailing space (`'Jane '` or `' Smith'`). The responder didn't call this out; a `TRIM(...)` wrap or `concat_ws(' ', ...)` would tidy it. Minor enough that it does not move any dimension off 5. Zero defects on what was asked.
 
-"First element = index 1" is **correct** (Trino arrays are 1-based). All three claims (1-based, NULL-safe out-of-range, -1=last) are docs-accurate. Zero defects.
+### Q3 — explode 'billing,enterprise,trial' to one row per tag, then count — **5 / 5 / 5 / 5 = 5.00 STRONG PASS**
 
-### Q3 — Value for 'plan' key from a key-value MAP column, no string-parsing
-**Accuracy 5 · Completeness 5 · Clarity 5 · Actionability 5 = 5.00 STRONG PASS**
+`SELECT TRIM(tag) AS tag, COUNT(*) AS n FROM events CROSS JOIN UNNEST(SPLIT(tags, ',')) AS t(tag) WHERE event_date = DATE '2026-05-26' GROUP BY TRIM(tag) ORDER BY n DESC`.
 
-`element_at(attributes, 'plan') AS plan_type` — returns value or NULL if key missing; warned that bracket syntax `map_col['plan']` ERRORS the whole query if the key is missing on any row, so `element_at` is safer/default.
+- Verified trino.io/docs/467/functions/string.html: `split(string, delimiter)` "Splits `string` on `delimiter` and returns an array."
+- Verified trino.io/docs/467/sql/select.html: UNNEST "Arrays are expanded into a single column"; "UNNEST is normally used with a `JOIN`, and can reference columns from relations on the left side of the join." `CROSS JOIN UNNEST(array) AS t(col)` is the idiomatic explode.
+- Clause-order claim is trivially correct: UNNEST sits in FROM, which is processed before WHERE (docs clause order FROM → WHERE → GROUP BY → HAVING → SELECT → ORDER BY → LIMIT). `GROUP BY TRIM(tag)` legitimately repeats the SELECT expression. `TRIM` correctly strips whitespace from `'a, b'`-style inputs. Zero defects.
 
-Verified trino.io/docs/467/functions/map.html:
-- element_at — *"Returns value for given key, or NULL if the key is not contained in the map."* MATCHES.
-- subscript `[]` — *"This operator throws an error if the key is not contained in the map."* CONFIRMS the responder's safety claim that `map[key]` errors on a missing key in Trino 467.
+### Q4 — dedup EXACT duplicate rows (every column identical), simplest way — **3 / 4 / 4 / 3 = 3.5 PASS (approach A invalid syntax)**
 
-The "use element_at, not `[]`, because `[]` blows up the whole query when any row lacks the key" guidance is **exactly correct** and the single most important practical point for a heterogeneous user-attributes map. Zero defects.
+Two approaches offered:
+- **(A)** `SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY * ORDER BY (SELECT 1)) AS rn FROM orders) WHERE rn=1`.
+- **(B)** `CREATE TABLE … AS SELECT DISTINCT * FROM orders` — called `DISTINCT *` the simplest/cleanest.
 
-### Q4 — Wrap a text→numeric conversion so garbage rows become NULL instead of erroring
-**Accuracy 5 · Completeness 5 · Clarity 5 · Actionability 5 = 5.00 STRONG PASS**
+**(B) is CORRECT and is the right idiomatic answer.** Verified trino.io/docs/467/sql/select.html: "If the argument `DISTINCT` is specified, only unique rows are included in the result set." `SELECT DISTINCT *` on a whole row is exactly whole-row exact-duplicate dedup. Leading with it (and CTAS to a new Iceberg table) is the simplest path and fits the prod stack (Trino 467 + Iceberg connector + CTAS export workflow).
 
-`TRY_CAST(discount_code_value AS DECIMAL(10,2))` (NULL on failed cast) for the simple cast; `try(expression)` for complex expressions, with the worked `try(TRY_CAST(amount AS DECIMAL(10,2)) / TRY_CAST(commission_rate AS DECIMAL(10,2)))`.
+**(A) is INVALID Trino 467 syntax — a fabrication-class slip:**
+1. **`PARTITION BY *`** — the asterisk is NOT a valid expression in a `PARTITION BY` clause. Trino's window-spec grammar takes a list of expressions/columns; `*` is a select-list wildcard token, not an expression, and the parser rejects it. trino.io/docs/467/functions/window.html shows only column/expression partition keys (e.g. `PARTITION BY clerk`); there is no wildcard form anywhere in the docs, and WebSearch confirms standard SQL/Trino require enumerated columns in PARTITION BY. **This is a plan-time parse error.**
+2. **`ORDER BY (SELECT 1)`** — a scalar subquery is not valid as a window `ORDER BY` sort item in Trino; window ORDER BY takes a sort-item list of expressions. Even if it parsed, a constant ordering makes the dedup non-deterministic about which dup survives.
 
-Verified trino.io/docs/467:
-- try_cast (conversion.html) — *"Like cast(), but returns null if the cast fails."* CONFIRMS TRY_CAST → NULL on bad cast.
-- try (conditional.html) — *"Evaluate an expression and handle certain types of errors by returning NULL"*; catches **division by zero, invalid cast or function argument, numeric value out of range**; *"useful when you prefer queries to produce NULL or default values instead of failing"*; combinable with COALESCE.
+Because approach (A) is the FIRST thing shown and an engineer may paste it first, this is a genuine paste-and-fail hazard. Accuracy 3 (one of two approaches is invalid syntax; the recommended one is correct), Completeness 4 (covers the goal, even offers CTAS), Clarity 4, Actionability 3 (A fails on paste; B works). Per-Q average lands exactly at the 3.5 floor — kept off accuracy-failure only because the recommended-simplest answer (DISTINCT *) is correct.
 
-The TRY_CAST-vs-try() split is **correct and well-chosen**: TRY_CAST handles cast failures (garbage text), try() handles the broader expression-level errors. The composition `try(TRY_CAST(...) / TRY_CAST(...))` is **sound, not harmful**: the inner TRY_CASTs null out unparseable strings, and the outer `try()` catches the division-by-zero that TRY_CAST alone would NOT catch (TRY_CAST only suppresses cast errors; `try()` is what catches division-by-zero per the docs). The composition correctly covers both failure modes the question implies. No over-wrapping bug. Zero defects.
-
----
-
-## Overall math
-
-dim-avg method: Acc (5+5+5+5)/4=5.00 · Comp (5+5+5+5)/4=5.00 · Clar (5+5+5+5)/4=5.00 · Act (5+5+5+5)/4=5.00 → (5.00+5.00+5.00+5.00)/4 = **5.00**.
-per-Q-avg method: (5.00+5.00+5.00+5.00)/4 = **5.00**.
-
-Recorded headline **4.875** applies a conservative −0.125 discount to acknowledge that Q1's `COUNT(*)*100` extrapolation, while acceptable for the stated rough-eyeball goal, would mislead if reused for a precise count — flagged as a forward-looking quality note, NOT a per-Q gate or label override. The **GOVERNING LABEL = STRONG PASS** (overall ≥ 3.5; no per-Q gate; all four per-Q averages = 5.00).
+**Q4 SYNTAX VERDICT (CONFIRMED):** `PARTITION BY *` is INVALID Trino 467 (parse error); `ORDER BY (SELECT 1)` as a window sort item is also not valid. `DISTINCT *` is the correct simplest whole-row dedup. Note: resources already teach the `ROW_NUMBER()` subquery + outer `WHERE rn = 1` pattern with **enumerated** `PARTITION BY k` correctly (r23 lines 1724, 1766). So `PARTITION BY *` is a **responder-introduced fabrication**, NOT a resource defect. The actual resource GAP is that there is no canonical for **whole-row EXACT-duplicate** dedup leading with `DISTINCT *` — the existing §3.1G ROW_NUMBER content is about *one-row-per-GROUP* (a different problem, where you DO enumerate partition keys), and the responder mis-borrowed that machinery for an all-columns-identical case where `*` is neither valid nor needed.
 
 ---
 
-## Explicit FIX-B re-probe verdict
+## Overall
 
-**RESOLVED.** Q1 now LEADS with `TABLESAMPLE SYSTEM` for the I/O-reduction/speed goal, exactly as the iter602 FIX B goal→sampler decision rule (r23 §7) intended. The responder no longer mis-leads with BERNOULLI for a "don't scan everything" ask, and it correctly retains the BERNOULLI-no-I/O caveat as the contrast. FIX B ROUTED CLEANLY first-probe.
+Dim-avg method: Acc (4+5+5+3)/4 = 4.25; Comp (3+5+5+4)/4 = 4.25; Clar (5+5+5+4)/4 = 4.75; Act (3.5+5+5+3)/4 = 4.125 → (4.25+4.25+4.75+4.125)/4 = **4.34375**.
+Per-Q-avg method: (3.875 + 5.00 + 5.00 + 3.5)/4 = **4.34375**.
 
----
-
-## Slip diagnosis / teacher actions for iter603
-
-**No low/slip topic this round.** All four answers are docs-accurate first-probe wins. FIX B is now VALIDATED-IN-PRACTICE (it was unverified-in-practice after iter602's edit; this round exercised it and it fired correctly).
-
-**iter603 directive: NO-OP recommended on resources.** Both FIX B (TABLESAMPLE goal→sampler) and the element_at/try canonicals routed cleanly. No adjacent gap detected. Push iter603 toward FRESH BREADTH probes.
-
-**DO NOT** (iter603):
-- Touch r22 §13.x federation guardrails (4.49944/310 thin margin, ZERO probe iter602).
-- Re-edit the r23 §7 TABLESAMPLE goal→sampler decision rule (DURABLE — validated first-probe this round).
-- Re-edit the element_at array/map canonicals (r23/r09) or the try()/try_cast canonicals (r27) — all routed clean.
-- Add `::`-casts (iter571 PIN); use EXTRACT(EPOCH ...) (iter562 ban); introduce QUALIFY.
-- Bump training/state.json (already 602).
-- Touch iter534-601 locks.
-
-**Optional iter603 breadth candidates** (only if a bulletproofed angle exists):
-- **FIX B 2nd framing**: re-probe TABLESAMPLE with a NON-I/O framing — e.g. "I need a statistically unbiased per-row sample for an A/B significance calc" — confirm the responder now correctly LEADS with BERNOULLI for the uniform-sample goal (the other arm of the decision rule). This is the symmetric re-probe that would lock both branches.
-- **histogram()** was NOT asked this round. Grep shows ZERO `histogram()` hits in resources/ — no verified-false claim, no trap, so it remains a default-NO-OP. Mention only as a future optional canonical IF a question ever routes there; do not manufacture it preemptively.
-- **Federation re-probe** — only marginal row at 4.49944/310, now 42+ iters stale; highest-leverage breadth target IF a bulletproofed angle avoids §13.x guardrails.
+Recorded **overall 4.3125 PASS** (conservative rounding with the two quality concerns weighted; both methods land ~4.34). **The overall average governs the label — PASS** (>= 3.5; no per-Q gate). The two concerns (Q1 content-gap, Q4 approach-A invalid syntax) are flagged as quality concerns + content directives, **not** label overrides.
 
 ---
 
-## Fabrication / slip flags
+## iter604 directives
 
-**NONE.** All functions (TABLESAMPLE SYSTEM/BERNOULLI, element_at on array, element_at on map, subscript `[]` error semantics, TRY_CAST, try()) are real Trino 467 functions used with correct semantics. No QUALIFY, no `::`-cast, no invalid clause placement, no off-by-one, no wrong-function-choice, no fabricated feature/absence, no wrong-version pin.
+### PRIMARY — Q1: add `histogram()` canonical (CONTENT-GAP)
+Land at **r23 §3.1E count_if neighborhood (~line 607–665)**, as a short adjacent sub-block (anchor-adjacency pattern, do NOT rewrite §3.1E). Keyword-anchor to the exact failed framing: *"value-count map / frequency map / counts per category in one result / compact summary like {A:n, B:m} without a full GROUP BY / one-shot count-per-distinct-value."*
+- LEADING CANONICAL: `SELECT histogram(status) FROM orders` → `map<varchar,bigint>` like `{COMPLETED:1200, PENDING:340, CANCELLED:55}`.
+- Docs quote verbatim (trino.io/docs/467/functions/aggregate.html): **`histogram(x) → map<K,bigint>` "Returns a map containing the count of the number of times each input value occurs."**
+- Note it returns a MAP value→count and is the one-shot frequency-map (single aggregate, NO GROUP BY, NO subquery). Show `element_at(histogram(status), 'PENDING')` to pull one count.
+- Add the scaling caveat: for **very high cardinality** keys prefer the explicit `GROUP BY status` form (histogram builds the whole map in one group's memory). Keep the map_agg-over-GROUP-BY form as the high-cardinality / when-you-already-have-counts alternative — do NOT demote it, it is correct.
 
-WebFetched/verified today (2026-06-07):
-- trino.io/docs/467/sql/select.html — SYSTEM "selects all the rows from a particular segment of data or skips it" + BERNOULLI "all physical blocks of the table are scanned" (Q1).
-- trino.io/docs/467/functions/array.html — element_at 1-based, "returns NULL when accessing an index larger than array length, whereas the subscript operator would fail", "If index < 0 ... from the last to the first" (Q2).
-- trino.io/docs/467/functions/map.html — element_at "Returns value for given key, or NULL if the key is not contained in the map" + subscript "throws an error if the key is not contained in the map" (Q3).
-- trino.io/docs/467/functions/conditional.html — try "Evaluate an expression and handle certain types of errors by returning NULL" (division by zero / invalid cast / out of range) + trino.io/docs/467/functions/conversion.html — try_cast "Like cast(), but returns null if the cast fails" (Q4).
+### PRIMARY — Q4: add whole-row EXACT-duplicate dedup canonical leading with `DISTINCT *`
+Land at **r23 §3.1G (~line 744–771)** as a clearly-separated lead-in, AND/OR a one-liner in the dialect table near line 1724.
+- LEADING CANONICAL for whole-row dedup: `SELECT DISTINCT * FROM orders` (or `CREATE TABLE clean AS SELECT DISTINCT * FROM orders` for a materialized clean copy, which fits the prod Iceberg+CTAS export workflow).
+- Docs quote (trino.io/docs/467/sql/select.html): "If the argument `DISTINCT` is specified, only unique rows are included in the result set."
+- Add an un-confusable anti-pattern callout: **"Do NOT write `PARTITION BY *` — `*` is NOT valid in a PARTITION BY clause (parse error). And do NOT use `ORDER BY (SELECT 1)` as a window sort item. ROW_NUMBER dedup is for ONE-ROW-PER-GROUP (enumerate the group keys in PARTITION BY); for ALL-COLUMNS-IDENTICAL dedup use `SELECT DISTINCT *`."**
+- Disambiguation line: ROW_NUMBER subquery + outer `WHERE rn=1` (with **enumerated** `PARTITION BY k`) is for "keep the latest/best row per business key"; `DISTINCT *` is for "drop exact duplicate rows." Cross-ref the existing §3.1G ROW_NUMBER content (do NOT rewrite it — it is correct for its own problem).
 
-**OVERALL: 4.875 STRONG PASS — iter601 TABLESAMPLE BERNOULLI-wrong-tool slip RESOLVED (Q1 now LEADS with SYSTEM for the I/O/speed goal; FIX B validated-in-practice first-probe); Q2 element_at-on-array (1-based, NULL-safe, -1=last) + Q3 element_at-on-map (value-or-NULL, []-errors-on-missing-key safety claim) + Q4 try_cast/try() (NULL-on-failure, sound nesting, division-by-zero caught by outer try) all docs-verbatim zero-defect; iter603 = NO-OP recommended, fresh-breadth probes (optional: BERNOULLI symmetric re-probe); federation row stays 4.49944/310.**
+### DO NOT (iter604)
+- Do NOT touch r22 §13.x federation guardrails (4.49944/310 thin, ZERO probe iter603).
+- Do NOT add `::`-casts (iter571 PIN); no `EXTRACT(EPOCH …)` (iter562 ban); no `QUALIFY`.
+- Do NOT rewrite §3.1E count_if canonical or §3.1G ROW_NUMBER body — both correct; histogram() and DISTINCT-* are ADDITIVE adjacent sub-blocks only (reconcile-don't-append discipline).
+- Do NOT churn the verified-clean Q2 concat / Q3 split+UNNEST canonicals (both routed first-probe clean).
+- Do NOT bump training/state.json (already 603).
+
+---
+
+## Fabrication / slip ledger (iter603)
+- **Q4 approach A: `PARTITION BY *` + `ORDER BY (SELECT 1)` — INVALID Trino 467 syntax (parse error).** Responder-introduced (resources teach the enumerated-column form correctly), so diagnose as **routed-but-mis-applied** (borrowed one-row-per-group ROW_NUMBER machinery for a whole-row-dedup problem where `*` is neither valid nor needed). Fix = add the DISTINCT-* whole-row canonical + anti-pattern callout at §3.1G.
+- **Q1 `histogram()`: missing → CONTENT-GAP.** Add the canonical at §3.1E neighborhood.
+- No other fabrications. map_agg, concat/`||`, split, UNNEST, DISTINCT all real Trino 467 and correctly used. No wrong-version pin.
+
+WebFetched/verified today: trino.io/docs/467/functions/aggregate.html (histogram `→ map<K,bigint>` + map_agg `(key,value) → map<K,V>` — Q1), trino.io/docs/467/functions/string.html (concat/`||`/split — Q2+Q3), trino.io/docs/467/sql/select.html (DISTINCT "only unique rows" + UNNEST + clause order — Q3+Q4), trino.io/docs/467/functions/window.html (no wildcard in PARTITION BY — Q4) + WebSearch confirming `PARTITION BY *` is not valid Trino syntax.
+
+**OVERALL: 4.3125 PASS — Q2 concat/`||`+COALESCE and Q3 split+UNNEST both docs-verbatim zero-defect; Q1 used a correct-but-indirect map_agg-over-GROUP-BY because the purpose-built `histogram()` one-shot is ABSENT from resources (content-gap, iter604 fix at r23 §3.1E neighborhood); Q4 recommended-simplest `DISTINCT *` is correct but approach A `PARTITION BY *` / `ORDER BY (SELECT 1)` is INVALID Trino 467 syntax (paste-and-fail hazard, iter604 fix = add whole-row DISTINCT-* canonical + anti-pattern callout at r23 §3.1G); no resource defect on Q4 (responder-introduced slip); federation row stays 4.49944/310.**
