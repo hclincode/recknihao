@@ -1,81 +1,77 @@
-# Judge Feedback — iter627 (EXTENDED PHASE)
+# Judge Feedback — iter628 (EXTENDED PHASE)
 
 **Trino pinned: 467.** Docs verified live today (2026-06-07) at trino.io/docs/467 and quoted below. Federation NOT probed this iteration — the 4.49944/310 row is UNCHANGED.
 
-**OVERALL: ~4.97 STRONG PASS** (margin +1.47 above the 3.5 floor). All four answers are docs-verbatim correct with zero defects. Recommend iter628 = **durability NO-OP**.
+**OVERALL: 5.00 STRONG PASS** (margin +1.50 above the 3.5 floor). All four answers are docs-verbatim correct with zero defects. The Q4 ROWS-vs-RANGE default-frame lock applied cleanly. Recommend iter629 = **durability NO-OP**.
 
 ---
 
-## Q1 — Percent change guarded against zero last-month
+## Q1 — Absolute difference (always-positive miss)
 
-**Answer**: `ROUND(100.0 * (this_month_sales - last_month_sales) / NULLIF(last_month_sales, 0), 2) AS pct_change` (+ a `CASE WHEN last_month_sales = 0 THEN NULL` variant).
+**Answer**: `ABS(forecasted_units - actual_units) AS forecast_miss`.
 
 **Scores — Acc 5 / Comp 5 / Clar 5 / Act 5 = 5.00 STRONG PASS**
 
-- VERIFIED trino.io/docs/467/functions/conditional.html: `NULLIF(value1, value2)` "Returns null if `value1` equals `value2`, otherwise returns `value1`." So `NULLIF(last_month_sales, 0)` → NULL when last-month is 0; dividing by NULL yields NULL (SQL propagation), NOT a division-by-zero error. Zero-guard CORRECT.
-- `100.0 *` forces decimal/double arithmetic, so the division is NOT integer-truncated (no INTEGER-DIVISION loss). CORRECT.
-- The `CASE WHEN last_month_sales = 0 THEN NULL` variant is an equivalent, more explicit guard. Both honest and correct.
-- `ROUND(..., 2)` is a sensible 2-dp presentation. Clean.
+- VERIFIED trino.io/docs/467/functions/math.html: `abs(x)` "Returns the absolute value of `x`." Accepts any numeric type, returns the same type. So `ABS(forecasted_units - actual_units)` yields the magnitude of the gap regardless of sign — exactly the "always positive miss" requirement. CORRECT.
+- The subtraction inside ABS is evaluated first (standard precedence), so the sign of `forecast - actual` is discarded. No off-by-one, no type issue (both columns numeric → numeric result).
 
 No defects.
 
-## Q2 — RANK vs DENSE_RANK within category (CRITICAL)
+## Q2 — Add 48 hours to a timestamp for an SLA deadline
 
-**Answer**: `RANK()` ties share a rank then the next rank SKIPS (1,2,2,4 — "two get rank 1, next gets rank 3"); `DENSE_RANK()` no gap (next gets rank 2). Both `PARTITION BY category ORDER BY units_sold DESC`. Recommended RANK for leaderboards.
-
-**Scores — Acc 5 / Comp 5 / Clar 5 / Act 5 = 5.00 STRONG PASS**
-
-- VERIFIED trino.io/docs/467/functions/window.html: `rank()` — "The rank is one plus the number of rows preceding the row that are not peer with the row. **Thus, tie values in the ordering will produce gaps in the sequence.**" → 1,2,2,**4**. `dense_rank()` — "similar to rank(), except that **tie values do not produce gaps in the sequence.**" → 1,2,2,**3**.
-- The responder's explanation is **CORRECT and NOT SWAPPED**: RANK leaves gaps (skips), DENSE_RANK does not. The worked phrasing ("two get rank 1, next gets rank 3" for a single top-tie = gap behavior) matches the docs.
-- `PARTITION BY category ORDER BY units_sold DESC` correctly ranks within each category, highest units first. Leaderboard recommendation (RANK so a 2-way tie for 1st makes the next product 3rd) is reasonable and conventional.
-
-**Q2 VERDICT (CRITICAL): CORRECT — RANK leaves gaps, DENSE_RANK does not; distinction is NOT swapped.**
-
-## Q3 — Boolean true only on each customer's earliest order
-
-**Answer (PRIMARY)**: `CASE WHEN ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date ASC) = 1 THEN true ELSE false END AS is_first_order` (window fn in SELECT CASE, keeps all rows). **SECONDARY**: subquery with `rn` + outer `WHERE rn = 1`, labeled "optional: only show first orders".
-
-**Scores — Acc 5 / Comp 5 / Clar 5 / Act 4.5 = 4.875 STRONG PASS**
-
-- VERIFIED window.html: `row_number()` "Returns a unique, sequential number for each row, starting with one, according to the ordering of rows within the window partition." With `ORDER BY order_date ASC`, the earliest order per customer gets 1.
-- WINDOW-FN-IN-CASE placement: window functions ARE allowed in the SELECT list, including inside a CASE expression in SELECT (window functions run after HAVING / before ORDER BY; they are only disallowed in WHERE/GROUP BY/HAVING). The PRIMARY query is VALID Trino 467 and correctly flags ALL rows — `true` on the first order, `false` on every later order. On-target for the "flag all rows" ask.
-- SECONDARY `WHERE rn = 1` filters to only-first-orders (the CASE would then always be true) — slightly off-target for "flag ALL rows," but explicitly LABELED "optional: only show first orders," so it is a minor completeness nuance, NOT an error. Act dinged a hair (4.5) only because a reader skimming to the second block could grab the filtering form; the primary block is unambiguous and correct.
-
-No errors.
-
-## Q4 — Weekend boolean flag (Saturday/Sunday)
-
-**Answer**: `day_of_week(order_date) IN (6, 7) AS is_weekend` (ISO 6=Sat, 7=Sun); also a CASE form.
+**Answer**: `date_add('hour', 48, created_at) AS sla_deadline`. Noted the unit is a quoted string and the value sits OUTSIDE the quotes; flagged that this is NOT the Postgres `INTERVAL '48 hours'` form.
 
 **Scores — Acc 5 / Comp 5 / Clar 5 / Act 5 = 5.00 STRONG PASS**
 
-- VERIFIED trino.io/docs/467/functions/datetime.html: `day_of_week(x)` "Returns the ISO day of the week from `x`. The value ranges from `1` (Monday) to `7` (Sunday)." Return type `bigint`. So 6=Saturday, 7=Sunday → `IN (6, 7)` correctly flags the weekend, no OFF-BY-ONE.
-- `<bigint> IN (6, 7)` evaluates to a real boolean, so `... AS is_weekend` is a genuine boolean column. CORRECT.
-- CASE form is an equivalent explicit alternative. Clean.
+- VERIFIED trino.io/docs/467/functions/datetime.html: `date_add(unit, value, timestamp)` "Adds an interval `value` of type `unit` to `timestamp`. Subtraction can be performed by using a negative value." So `date_add('hour', 48, created_at)` advances `created_at` by 48 hours (two days). Signature order (unit, value, ts) CORRECT; `'hour'` is a valid unit string; `48` is the integer value in the correct slot. CORRECT.
+- The note about the interval form is ACCURATE: Trino's literal form is `INTERVAL '48' HOUR` — the numeric magnitude is inside the string and the **unit is a trailing keyword**, NOT the Postgres `INTERVAL '48 hours'` (unit-inside-the-string, plural). Docs confirm the operator example `time '01:00' + interval '3' hour` → `04:00:00.000` (value-in-quotes, unit-as-keyword). So `created_at + INTERVAL '48' HOUR` would also be correct; the responder's `date_add` form is the cleaner, equally-valid choice and the dialect caveat is right.
+
+No defects.
+
+## Q3 — Percentile rank by lifetime spend (top 5% / 90th percentile)
+
+**Answer**: `PERCENT_RANK() OVER (ORDER BY total_lifetime_spend)` over a `GROUP BY customer_id` subquery that computes `SUM(amount) AS total_lifetime_spend`. Noted 0.0 = lowest, 1.0 = highest, multiply by 100 for a percentile number.
+
+**Scores — Acc 5 / Comp 5 / Clar 5 / Act 5 = 5.00 STRONG PASS**
+
+- VERIFIED trino.io/docs/467/functions/window.html: `percent_rank()` "Returns the percentage ranking of a value in group of values. The result is `(r - 1) / (n - 1)`" where r is the rank. So the lowest-spend customer (r=1) → 0.0 and the highest (r=n) → 1.0. The responder's 0.0=lowest / 1.0=highest mapping is CORRECT.
+- The **ascending** `ORDER BY total_lifetime_spend` means the top spender lands near 1.0, so "top 5%" = `percent_rank() >= 0.95` and "90th percentile" = `>= 0.90` — consistent with the responder's framing ("top" = near 1.0). The `*100` to read it as a 0–100 percentile is sensible presentation. Framing is adequate and internally consistent.
+- The `GROUP BY customer_id` → `SUM(amount)` subquery correctly produces one lifetime-spend row per customer BEFORE the window ranks them, so each customer is ranked once (not once per order). Structure CORRECT.
+- `cume_dist()` (docs: "number of rows preceding or peer with the row ... divided by total rows") is a defensible alternative for "percentile," but `percent_rank()` is a valid and standard reading of "percentile rank." No defect for the choice.
+
+No defects.
+
+## Q4 — Running per-customer order counter (1,2,3 in date order) — CRITICAL window-frame check
+
+**Answer**: `COUNT(*) OVER (PARTITION BY customer_id ORDER BY order_date, order_id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS order_number`. Explained that the explicit ROWS frame is critical (the default differs) and that `order_id` is a tiebreaker for determinism.
+
+**Scores — Acc 5 / Comp 5 / Clar 5 / Act 5 = 5.00 STRONG PASS**
+
+**Q4 VERDICT (CRITICAL): FULLY CORRECT — ROWS-vs-RANGE default-frame lock applied.**
+
+- VERIFIED trino.io/docs/467/functions/window.html: "All Aggregate functions can be used as window functions by adding the `OVER` clause." So `COUNT(*) OVER (...)` is valid. With the explicit frame `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`, the frame for each row contains itself plus every preceding row in the partition's `order_date, order_id` order → COUNT(*) returns 1, 2, 3, ... row by row. CORRECT running counter.
+- VERIFIED trino.io/docs/467/sql/select.html (window frames): "If the frame is not specified, it defaults to `RANGE UNBOUNDED PRECEDING`, which is the same as `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`" and "This frame contains all rows from the start of the partition up to **the last peer of the current row**." This is the lock: under the DEFAULT RANGE frame, two orders sharing the same ORDER BY key (e.g., same `order_date` with no tiebreaker) are PEERS, so both rows' frames extend to the last peer and they receive the SAME count (the max for that key) — giving e.g. 2, 2 instead of 1, 2. The responder's explanation that "the default frame differs" and that the explicit ROWS frame is critical is ACCURATE and matches the docs verbatim.
+- The `order_id` tiebreaker makes the ordering total (no two rows are peers), so even under a RANGE frame the result would be deterministic; combined with the explicit ROWS frame, the 1,2,3 row-by-row counter is fully correct and deterministic. Tiebreaker reasoning CORRECT.
+- ALTERNATIVE noted for completeness: `ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date, order_id)` always returns 1,2,3 unique regardless of frame (frame is ignored for row_number). The responder's `COUNT(*) OVER ... ROWS` is equivalent here given the total ordering — a correct and valid choice, not a defect.
 
 No defects.
 
 ---
 
-## Overall computation
+## Overall
 
-- Dimension averages: Acc (5+5+5+5)/4 = 5.00; Comp (5+5+5+5)/4 = 5.00; Clar (5+5+5+5)/4 = 5.00; Act (5+5+4.5+5)/4 = 4.875.
-- Overall = (5.00 + 5.00 + 5.00 + 4.875)/4 = **4.96875 ≈ 4.97**.
-- Per-Q cross-check: (5.00 + 5.00 + 4.875 + 5.00)/4 = 4.96875 — agrees.
-- **Overall avg GOVERNS the label = STRONG PASS** (~4.97). No per-Q gate applied; the only sub-5 was Q3 Act 4.5 (labeled-optional nuance), flagged but not gating.
+Per-dimension averages: Acc (5+5+5+5)/4 = 5.00, Comp 5.00, Clar 5.00, Act 5.00 → (5.00+5.00+5.00+5.00)/4 = **5.00**. Per-question cross-check: (5.00+5.00+5.00+5.00)/4 = 5.00 — agree. Overall-average GOVERNS the label = **STRONG PASS**; no per-Q gate triggered.
 
-## Fabrication / slip scan
+## Slip diagnosis
 
-NONE. No `::`-cast, no QUALIFY, no fabricated function/absence, no invalid-clause-placement, no off-by-one, no type-mismatch, no wrong-function-choice, no integer-division, no RANK/DENSE_RANK swap. NULLIF, RANK, DENSE_RANK, ROW_NUMBER, day_of_week all real Trino 467 functions used correctly. Decimal-forcing `100.0` and ISO day_of_week mapping both correct.
+**No slips, no fabrications.** No `::`-cast, no QUALIFY, no fabricated function/absence, no invalid-clause-placement, no off-by-one (Q4 counter starts at 1, frame inclusive of current row), no type-mismatch, no wrong-function-choice (Q3 percent_rank valid; Q4 COUNT(*) OVER ROWS valid), no WINDOW-FRAME-MISUSE (Q4 explicit ROWS frame + tiebreaker is exactly right and the default-RANGE-difference explanation is accurate).
 
-## iter628 directive: DURABILITY NO-OP
+## iter629 directive: DURABILITY NO-OP
 
-All four canonicals routed clean on first probe:
-- percent-change NULLIF zero-guard + `100.0` decimal forcing (r07 percent-change block) — clean.
-- RANK-vs-DENSE_RANK gaps/no-gaps semantics (r07 §3.1G ROW_NUMBER/RANK/DENSE_RANK lines) — clean, NOT swapped.
-- first/earliest-order flag via ROW_NUMBER()=1 inside CASE in SELECT, all-rows form (r23 §3.1G / first-event keyword anchors) — clean.
-- weekend boolean via day_of_week IN (6,7) (r07 day_of_week ISO mapping) — clean.
+All four canonicals routed clean first-probe: `abs()` difference, `date_add('hour', n, ts)` + INTERVAL '48' HOUR dialect caveat, `percent_rank()` ascending-percentile, and the `COUNT(*) OVER ... ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` running counter with ROWS-vs-RANGE default-frame explanation. Push fresh breadth next iter.
 
-**DO NOT** (preserve locks): touch r22 §13.x federation guardrails (4.49944/310 thin, ZERO probe this iter); re-edit the NULLIF-guard / RANK-DENSE_RANK / ROW_NUMBER-first-order / day_of_week-weekend landing points (all clean — durable); add `::`-casts (iter571 PIN); EXTRACT(EPOCH) (iter562 ban); QUALIFY; PERCENTILE_CONT (iter611 ban); fabricate dayname()/initcap; touch iter534-626 locks; bump training/state.json (already 627); git commit/push. Push fresh breadth instead of re-probing these four.
+**DO NOT**: touch r22 §13.x federation guardrails (4.49944/310 thin, ZERO probe iter628); re-edit the abs / date_add / percent_rank / Pattern-A-cumulative ROWS-frame landing points (all clean); add `::`-casts (iter571 PIN); EXTRACT(EPOCH) (iter562 ban); QUALIFY; PERCENTILE_CONT (iter611 ban); fabricate dayname()/initcap; touch iter534-627 locks; bump training/state.json (already 628); git commit/push.
 
-**Docs WebFetched/verified today (2026-06-07)**: functions/window.html (rank "tie values ... will produce gaps in the sequence"; dense_rank "tie values do not produce gaps"; row_number "starting with one ... within the window partition"), functions/datetime.html (day_of_week "ISO day of the week ... 1 (Monday) to 7 (Sunday)", bigint), functions/conditional.html (NULLIF "Returns null if value1 equals value2, otherwise returns value1").
+WebFetched/verified today: functions/math.html (`abs(x)` "Returns the absolute value of x" — Q1), functions/datetime.html (`date_add(unit, value, timestamp)` "Adds an interval value of type unit" + `interval '3' hour` operator form — Q2), functions/window.html (`percent_rank()` "(r - 1) / (n - 1)" + "All Aggregate functions can be used as window functions by adding the OVER clause" — Q3/Q4), sql/select.html (default frame "RANGE UNBOUNDED PRECEDING ... up to the last peer of the current row" — Q4 ROWS-vs-RANGE lock).
+
+**OVERALL: 5.00 STRONG PASS — Q1 ABS difference, Q2 date_add('hour',48,ts) + INTERVAL '48' HOUR dialect caveat, Q3 percent_rank ascending-percentile, Q4 COUNT(*) OVER ROWS running counter (ROWS-vs-RANGE default-frame lock applied, order_id tiebreaker correct) all docs-verbatim zero-defect; iter629 = durability NO-OP; federation row stays 4.49944/310.**
