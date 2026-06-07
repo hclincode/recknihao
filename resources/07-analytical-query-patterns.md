@@ -2304,6 +2304,71 @@ Trino has `width_bucket` (BOTH overloads) — use it instead of a long `CASE WHE
 
 ### Pattern D: Sliding window (last 7 days rolling)
 
+> **DECIDE-FIRST — SOURCE GRAIN: is your input one-row-per-day, or one-row-per-event? (iter649 FIX-A PIN — the EXACT iter648 Q2 grain bug.)** "N-day moving average of DAILY `<metric>`" means **one rolling value per CALENDAR DAY computed over the last N daily totals** — so the window MUST run over rows that are **ALREADY one-row-per-day**. The most common bug is windowing the **raw per-event / per-order table directly**, which produces a 7-ROW average of individual event amounts, NOT a 7-DAY average of daily totals. Verified at [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html) + [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) on 2026-06-08: `ROWS BETWEEN N PRECEDING AND CURRENT ROW` is a **physical-row positional offset** — it counts ROWS, not calendar days. If a day has 50 orders, `ROWS BETWEEN 6 PRECEDING` over the raw `orders` table covers **6 ORDERS back**, which is typically a few hours of the same day — not 7 days.
+>
+> | Your SOURCE is... | First step | Then window |
+> |---|---|---|
+> | **Raw per-event / per-order rows** (multiple rows per day — `orders`, `events`, `clicks`, `sessions` fact table) | **Pre-aggregate to ONE ROW PER DAY** in a CTE with `SUM(amount) GROUP BY order_date` (or `COUNT(*) GROUP BY day`, `COUNT(DISTINCT user_id) GROUP BY day`, etc.). | Run `AVG(daily_metric) OVER (ORDER BY order_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)` over the daily CTE. |
+> | **Already one row per day** (a daily rollup table — `daily_revenue`, `daily_dau`, `daily_signups`) | None — the source is already at the right grain. | Window it directly (the `daily_dau` worked example below). |
+>
+> **Mnemonic:** the noun in "**daily** revenue" / "**daily** signups" / "**daily** active users" is a SIGNAL that the window operand must be a daily series. If your `FROM` is `orders` and not `daily_orders`, you owe the reader a `WITH daily AS (... GROUP BY order_date)` CTE before the window.
+
+#### LEADING CANONICAL — 7-day moving average of DAILY REVENUE from a raw `orders` table (the iter648 Q2 shape, FIXED)
+
+```sql
+-- CORRECT — pre-aggregate per-order rows to ONE ROW PER DAY first, THEN window.
+WITH daily AS (
+  SELECT order_date,
+         SUM(amount) AS daily_revenue            -- one row per calendar day, total revenue that day
+  FROM iceberg.sales.orders
+  WHERE order_date >= DATE '2026-01-01'          -- partition-prune BEFORE the rollup
+  GROUP BY order_date
+)
+SELECT
+  order_date,
+  daily_revenue,
+  AVG(daily_revenue) OVER (
+    ORDER BY order_date
+    ROWS BETWEEN 6 PRECEDING AND CURRENT ROW     -- 7 rows = 7 days (since daily is one-row-per-day)
+  ) AS moving_avg_7day_revenue
+FROM daily
+ORDER BY order_date;
+```
+
+The CTE collapses many orders/day down to a single `(order_date, daily_revenue)` row. **After that collapse**, `ROWS BETWEEN 6 PRECEDING` covers exactly 7 daily rows = 7 calendar days, and `AVG(daily_revenue)` averages 7 daily totals — which is what "7-day moving average of daily revenue" means. The same shape works for **30-day rolling average of daily signups** (swap `SUM(amount)` for `COUNT(*)`, `ROWS BETWEEN 29 PRECEDING`), **trailing 7-day average of daily DAU** (swap `SUM(amount)` for `COUNT(DISTINCT user_id)`, keep `ROWS BETWEEN 6 PRECEDING`), and any "smooth daily `<metric>`" or "moving average from an orders table" question shape.
+
+**DO NOT WRITE — the EXACT iter648 Q2 bug (windowing raw per-order rows without pre-aggregation):**
+
+```sql
+-- WRONG ❌ — windowing the raw per-order rows directly. NOT a 7-day moving average.
+-- ROWS BETWEEN 6 PRECEDING counts PHYSICAL ROWS, not days. If there are 50 orders/day,
+-- this frame covers ~6 ORDERS back (a sliver of a single day), and averages
+-- individual per-order amounts — NOT daily totals. The output is also one row per
+-- order (not one row per day), so the dashboard tile labelled "7-day moving average
+-- of daily revenue" silently reports a per-order trailing-6-orders mean.
+SELECT
+  order_date,
+  amount,
+  AVG(amount) OVER (
+    ORDER BY order_date
+    ROWS BETWEEN 6 PRECEDING AND CURRENT ROW   -- ❌ 6 ORDERS back, NOT 6 days back
+  ) AS bogus_moving_avg
+FROM iceberg.sales.orders;
+```
+
+**Two independent things are wrong here, NOT one:** (1) the FRAME counts rows not days (per-order grain, not per-day grain), AND (2) the AVERAGE is over individual order `amount` values, not over daily `SUM(amount)` totals — even if you "fixed" the frame to count 7 distinct days, averaging per-order amounts is still not a daily-revenue average. **Both bugs are fixed by the SAME edit:** pre-aggregate to one row per day with `SUM(amount) GROUP BY order_date` in a CTE FIRST, then window the daily series.
+
+**Gap-day caveat (secondary).** The daily-CTE form above is **calendar-exact ONLY if every day in the date range has at least one order** (so every day produces a row in the CTE). If days can be missing (no orders on Sundays, holiday shutdowns, ingestion gaps), `ROWS BETWEEN 6 PRECEDING` over the daily CTE still counts 7 ROWS — which spans **more than 7 calendar days** when the missing-day rows are absent from the CTE. **Two fixes**, in order of preference:
+
+1. **Use `RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW` on the daily CTE** — value-based frame on the `order_date` column, calendar-exact regardless of missing days (the `daily_dau` worked example below uses this form). Missing days simply contribute zero rows to the frame; the value-based boundary is unchanged.
+2. **Densify with a date spine BEFORE the window** — `LEFT JOIN` a `SEQUENCE(DATE '...', DATE '...', INTERVAL '1' DAY)`-generated calendar dim onto the daily CTE, `COALESCE(daily_revenue, 0)` for the missing-day rows. Then `ROWS BETWEEN 6 PRECEDING` over the densified series is correct again (positions align with calendar days), and gap days contribute zero values to the rolling average — see the "LEFT JOIN calendar-dim densification recipe" lower in this section.
+
+For most daily-revenue / daily-signups tables every active day has at least one row, so the simple daily-CTE-then-ROWS form is the primary answer; reach for RANGE-with-INTERVAL or date-spine densification only when missing-day gaps are real. See the **RANGE vs ROWS gap-day semantics rule** lower in this section for the full decision table, and the **`date_trunc('month', event_date) + COUNT(DISTINCT user_id) GROUP BY`** monthly-rollup pattern at [r07 § Pattern A2 — Canonical worked example](#canonical-worked-example--per-tenant-monthly-events--cumulative-running-total) (lines 1640-1668) + [r23 § extract-then-count GROUP-BY-rule guardrail](23-sql-best-practices-olap.md) (line 1530) for the per-period-rollup routing — the rollup-then-window pattern is the same shape at month or week grain.
+
+---
+
+#### Worked example — already one-row-per-day SOURCE (the `daily_dau` rollup table)
+
 "7-day rolling average of daily active users per tenant."
 
 ```sql
