@@ -935,6 +935,32 @@ SELECT CAST(to_unixtime(occurred_at) * 1000 AS BIGINT) AS epoch_millis FROM even
 
 **"How long ago" / elapsed-time question — prefer `date_diff(unit, a, b)` over subtracting `to_unixtime`.** `date_diff('second', a, b)` returns a `BIGINT` integer directly and is more readable than `to_unixtime(b) - to_unixtime(a)` (which is DOUBLE seconds and forces you to divide for other units). Both are correct.
 
+> **LEADING CANONICAL — AGE IN COMPLETED WHOLE YEARS from a date_of_birth.** *Keyword anchors (READ THIS FIRST if your question contains any of these):* **age in years, age in completed years, how old, years since birthdate, age from date_of_birth, subscriber age, customer age, calculate age, whole years old.** Verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html) on 2026-06-07.
+>
+> **THE TRAP — bare `date_diff('year', dob, today)` is NOT age.** `date_diff('year', ts1, ts2)` returns `ts2 - ts1` **expressed in the unit** — for `'year'` that is the **YEAR-FIELD difference**, i.e. it just subtracts the calendar year numbers and ignores month/day. So `date_diff('year', DATE '2000-06-15', DATE '2026-06-14')` = **26**, even though the person is still 25 (their 26th birthday is tomorrow). It **over-counts true age by 1 whenever this year's birthday has NOT yet passed.** Never answer an "age" question with bare `date_diff('year', dob, today)`.
+>
+> **THE CANONICAL completed-age idiom (lead with this CASE form):** subtract 1 when the birthday is still ahead this year.
+>
+> ```sql
+> -- Age in completed whole years (correct for un-passed birthdays):
+> SELECT
+>   date_diff('year', date_of_birth, current_date)
+>     - (CASE WHEN (month(current_date), day(current_date))
+>                 < (month(date_of_birth), day(date_of_birth))
+>             THEN 1 ELSE 0 END) AS age
+> FROM subscribers;
+> ```
+>
+> The `(month, day)` tuples use **Trino ROW comparison**, which is **lexicographic** (compares month first, then day on a tie) and is valid Trino 467 — ROW types are orderable when all field types are orderable, and `month(x)` / `day(x)` return integers. Per the docs: `month(x)` *"Returns the month of the year from x"*; `day(x)` *"Returns the day of the month from x"*. If you prefer to avoid the tuple syntax, the **exactly equivalent expanded boolean** is: `CASE WHEN month(current_date) < month(date_of_birth) OR (month(current_date) = month(date_of_birth) AND day(current_date) < day(date_of_birth)) THEN 1 ELSE 0 END`.
+>
+> **Worked example** (dob `DATE '2000-06-15'`):
+> - today = `DATE '2026-06-14'` → `date_diff('year', ...)` = 26, birthday tuple `(6,14) < (6,15)` is TRUE → subtract 1 → **age = 25** (correct; birthday not yet passed).
+> - today = `DATE '2026-06-15'` → `date_diff('year', ...)` = 26, `(6,15) < (6,15)` is FALSE → subtract 0 → **age = 26** (correct; birthday is today).
+>
+> **One-line equivalent for "is at least N years old" filters** (no CASE needed — compare against a shifted birthday): `WHERE date_add('year', N, date_of_birth) <= current_date`. This is TRUE exactly when the subscriber has lived N full years, handling the un-passed-birthday boundary automatically.
+>
+> **DO NOT WRITE:** `date_diff('year', date_of_birth, current_date) AS age` — over-counts by 1 for every subscriber whose birthday this year has not yet passed (it returns the year-field difference, not completed-years age). Use the CASE-adjusted form above.
+
 > **DO NOT WRITE.** (1) **"Trino supports `EXTRACT(EPOCH FROM ts)`"** — FALSE; Trino's `EXTRACT` has NO `EPOCH` field (only YEAR/QUARTER/MONTH/WEEK/DAY/DOW/DOY/HOUR/MINUTE/SECOND/TIMEZONE_*). The statement fails. (2) **"`to_unixtime` returns milliseconds"** — FALSE; `to_unixtime(timestamp) → double` returns **SECONDS** as a DOUBLE per docs. For milliseconds, **multiply by 1000** (`to_unixtime(ts) * 1000`). (3) **"`EXTRACT` works the same on Trino and Postgres"** — FALSE; the `EPOCH` field is a Postgres extension; Trino's standard `EXTRACT` field list omits it. (4) **"`unix_timestamp(ts)` is the Trino function"** — FALSE; `unix_timestamp` is the **Spark/Hive** name. Trino's function is literally **`to_unixtime`**.
 
 **Cross-references.** Inverse direction (epoch → timestamp): [resource 13 §`from_unixtime` SECONDS vs MILLISECONDS — the year-52000 pitfall](13-postgres-to-iceberg-ingestion.md) (epoch-ms canonical with the year-56378 trap if you pass raw ms into `from_unixtime`). Now/current_timestamp + Iceberg timestamptz UTC normalization: [resource 07 §`now()` LEADING CANONICAL](07-analytical-query-patterns.md) and [resource 27 §4.2-NOW](27-oracle-plsql-to-dbt-trino.md). Full Postgres→Trino date/time porting table (covers `EPOCH`, `MICROSECOND`, `EXTRACT(epoch FROM ts)` patterns in CDC ingestion context): [resource 13 §Postgres date-function porting table](13-postgres-to-iceberg-ingestion.md).
