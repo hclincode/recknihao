@@ -740,6 +740,8 @@ When the column is **NOT** constant per group and you want a specific representa
 - 3-arg variants `max_by(x, y, n) -> array<[same as x]>` and `min_by(x, y, n) -> array<[same as x]>` return the top/bottom `n` values of `x` ranked by `y`. **For the COMPANION "take top-N from a per-row ARRAY column" shape (one row in / one row out, no aggregation), use `slice(array_sort(arr, (a,b)->IF(a>b,-1,1)), 1, N)` — see [resource 07 §1a.4A `slice()` LEADING CANONICAL](07-analytical-query-patterns.md#1a4a-leading-canonical--slicearray-start-length-is-the-trino-467-array-subset-function-take-first-n-take-last-n-top-n-from-a-sorted-array--not-array_slice-iter676-pin--fix-a). Do NOT write `array_slice(...)` — that is Presto-legacy / Spark / BigQuery and parse-fails in Trino 467.**
 
 > **Quick-route anchor — "first AND last per entity in ONE row" (the plain-aggregate form) (iter638 PIN).** *Keyword anchors:* first and last order date per customer, earliest and latest per customer, first and last login per user, MIN and MAX per entity, earliest and latest timestamp per group, first transaction and last transaction per account, MIN(date) and MAX(date) GROUP BY, first AND last per group in one row, customer's first and last activity, first signup and last activity per user, range per entity, span per entity. When the question is *"give me the **first AND last** `<date_or_timestamp_column>` **per `<entity>`** in one row"* — i.e. the earliest AND latest value of the **ordering column itself** (not the value of some OTHER column "as of" earliest/latest) — the answer is the **plain `MIN()` and `MAX()` aggregates** with `GROUP BY <entity>` in ONE select. **Trino 467:** `SELECT customer_id, MIN(order_date) AS first_order_date, MAX(order_date) AS last_order_date FROM iceberg.analytics.orders GROUP BY customer_id;` — **NOT** `ROW_NUMBER()`, **NOT** window functions, **NOT** `LIMIT n OVER (...)` (which is **NOT valid Trino syntax** — `LIMIT` is a query-level clause only; per [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) `LIMIT` cannot appear inside an `OVER (...)` window specification — use `ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...) <= N` in a subquery + outer `WHERE rn <= N` for true top-N-per-group; see [§3.1G LEADING CANONICAL above](#leading-canonical--trino-has-no-distinct-on--use-row_number--1-or-max_by-for-one-row-per-group)). Reach for the `min_by(x, y)` / `max_by(x, y)` worked example below ONLY when you want a **DIFFERENT column's value AS OF** the earliest / latest timestamp (e.g. *"the **status** at the earliest update and the **status** at the latest update per order"* — `min_by(status, updated_at) AS first_status, max_by(status, updated_at) AS latest_status`). Two distinct shapes; pick the one that matches the question.
+>
+> **QUALIFY cross-ref (iter695 FIX-A).** *Keyword anchors:* QUALIFY first and last per group, QUALIFY ROW_NUMBER first AND last, first AND last per customer one row QUALIFY, latest row per device QUALIFY. If your instinct on "first AND last per entity in ONE row" is to reach for `... QUALIFY ROW_NUMBER() OVER (...) = 1` (Snowflake/BigQuery/Databricks/Teradata muscle memory) — **STOP. Trino 467 has NO `QUALIFY` clause (parse error).** For the "first AND last value of some OTHER column per entity in one row" shape, the Trino-native answer is **two AGGREGATE calls in one GROUP BY pass**: `min_by(col, sort_key)` + `max_by(col, sort_key)` GROUP BY entity. Full inoculation card with defanged QUALIFY snippets + both correct forms (`min_by`/`max_by` AGGREGATE and `ROW_NUMBER()` SUBQUERY+WHERE) lives at [§3.1G LEADING CANONICAL — QUALIFY is NOT a Trino 467 clause](#leading-canonical--qualify-is-not-a-trino-467-clause--parse-error-iter695-pin--fix-a) just below.
 
 **Worked example — latest status per order (deterministic by `updated_at`):**
 
@@ -1010,6 +1012,75 @@ SELECT user_id FROM events_2026_q2;
 ```
 
 **Top-N-per-group (not just top-1)?** Same pattern with `WHERE rn <= N`. **Single-column "latest value" pick?** Skip the subquery entirely and use `max_by(val, ts)` (cross-ref [§3.1D](#31d-arbitrary--any_value-pick-one-value-per-group-and-max_by--min_by-deterministic-representative-value-pick) — do not rewrite). The `max_by` form is cheaper when you only need ONE column from the picked row; the `ROW_NUMBER()` form is the right choice when you need ALL columns from the picked row.
+
+> **LEADING CANONICAL — `QUALIFY` is NOT a Trino 467 clause — PARSE ERROR (iter695 PIN — FIX-A).** *Keyword anchors (route here on any of these):* `QUALIFY`, `QUALIFY ROW_NUMBER`, `QUALIFY ROW_NUMBER() OVER (...) = 1`, `filter window function in same query`, `filter ROW_NUMBER in WHERE`, `first row per group`, `latest row per customer`, `latest row per device`, `latest row per key`, `top-N per group dedup`, `top-1 per group`, `one row per group keep latest`, `keep first row per group Trino`, `Snowflake QUALIFY in Trino`, `BigQuery QUALIFY in Trino`, `Databricks QUALIFY in Trino`, `Teradata QUALIFY in Trino`, `DuckDB QUALIFY in Trino`, `first and last per customer one row`, `first and last per user one row`. Verified at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) on 2026-06-08 — `QUALIFY` is **absent** from the documented SELECT grammar (`WITH`, `SELECT`, `FROM`, `WHERE`, `GROUP BY`, `HAVING`, `WINDOW`, set ops, `ORDER BY`, `OFFSET`, `LIMIT`/`FETCH FIRST` — no `QUALIFY`). [trinodb/trino #20687](https://github.com/trinodb/trino/issues/20687) tracks `QUALIFY` as an OPEN feature request not yet implemented.
+>
+> **The one-fact summary.** **Trino 467 has NO `QUALIFY` clause.** `QUALIFY` is a **Snowflake / BigQuery / Databricks / Teradata / DuckDB** extension only. Pasting `... QUALIFY ROW_NUMBER() OVER (...) = 1` into Trino 467 produces an immediate **parse error**: `mismatched input 'QUALIFY'`. There is no graceful degradation; it never plans, never executes. The two correct Trino 467 forms are below.
+>
+> **✅ COPY THIS — CORRECT Trino 467 form (1) — PREFERRED when the answer is "first/last/min/max-by-a-key value, one row per group" (no window, no dedup, one pass):** use `min_by(x, sort_key)` / `max_by(x, sort_key)` aggregates with `GROUP BY entity`. Verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) — `max_by(x, y) -> [same as x]`: *"Returns the value of `x` associated with the maximum value of `y` over all input values."* `min_by` is symmetric.
+>
+> ```sql
+> -- Trino 467 — LATEST status per device, one row per device (iter695 ✅ COPY THIS):
+> SELECT device_id,
+>        max_by(status, reading_time) AS latest_status,    -- value of status at MAX(reading_time) per device
+>        MAX(reading_time)            AS latest_time
+> FROM iceberg.iot.device_readings
+> GROUP BY device_id;
+>
+> -- Trino 467 — FIRST AND LAST amount per customer in ONE row (iter695 ✅ COPY THIS — Q2 canonical):
+> SELECT customer_id,
+>        min_by(amount, order_date) AS first_amount,       -- value of amount at MIN(order_date) per customer
+>        max_by(amount, order_date) AS last_amount,        -- value of amount at MAX(order_date) per customer
+>        MIN(order_date)            AS first_order_date,
+>        MAX(order_date)            AS last_order_date
+> FROM iceberg.analytics.orders
+> GROUP BY customer_id;
+> ```
+>
+> **✅ COPY THIS — CORRECT Trino 467 form (2) — GENERAL "top-N rows per group" (when you need WHOLE rows / N > 1 / all columns from the picked row):** wrap the window function in a subquery / CTE, then filter on the alias in the OUTER `WHERE`. Window functions are **illegal in `WHERE` in every SQL dialect, including Trino** — `QUALIFY` only ever existed BECAUSE of that limitation in Snowflake/BigQuery. The Trino-native answer is to wrap-and-filter.
+>
+> ```sql
+> -- Trino 467 — TOP-1-per-group (entire row): nest ROW_NUMBER in a subquery, filter rn=1 outside.
+> SELECT *
+> FROM (
+>   SELECT t.*,
+>          ROW_NUMBER() OVER (
+>            PARTITION BY device_id
+>            ORDER BY     reading_time DESC NULLS LAST
+>          ) AS rn
+>   FROM   iceberg.iot.device_readings t
+> )
+> WHERE rn = 1;            -- top-1 per device (latest row, all columns)
+>
+> -- For TOP-N (e.g. latest 3 per device): just change the outer filter to WHERE rn <= 3.
+> ```
+>
+> **❌ DO NOT WRITE — the banned `QUALIFY` shapes (defanged, same-line WRONG markers — DO NOT COPY any of these):**
+>
+> ```sql
+> -- ❌ WRONG: Trino 467 has NO QUALIFY clause (parse error: mismatched input 'QUALIFY') — Snowflake/BigQuery/Databricks/Teradata/DuckDB-only — DO NOT COPY:
+> SELECT * FROM device_readings QUALIFY ROW_NUMBER() OVER (PARTITION BY device_id ORDER BY reading_time DESC) = 1;
+>
+> -- ❌ WRONG: same parse error in dbt models targeting Trino — DO NOT COPY:
+> SELECT * FROM {{ ref('orders') }} QUALIFY ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date DESC) = 1;
+>
+> -- ❌ WRONG: window functions are illegal in WHERE in EVERY SQL dialect — parse error — DO NOT COPY:
+> SELECT * FROM orders WHERE ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date DESC) = 1;
+> ```
+>
+> Each banned line is a one-shot parse error before the planner ever runs. The fix in every case is one of the two ✅ COPY THIS blocks above: `min_by`/`max_by` GROUP BY when you only need a few columns "as of" the extreme timestamp, or the `ROW_NUMBER()` subquery + outer `WHERE rn <= N` when you need whole rows / top-N.
+>
+> **Picking between the two correct forms** (decision rule):
+>
+> | Question shape | Reach for | Why |
+> |---|---|---|
+> | "First AND last value of `<col>` per `<entity>` in ONE row" (Q2 canonical) | **`min_by(col, sort_key)` + `max_by(col, sort_key)` GROUP BY entity** | One pass, no window, no DISTINCT. Aggregate form per [§3.1D iter656 PIN](#max_byx-y--min_byx-y--deterministic-pick-of-x-by-the-ordering-column-y). |
+> | "Latest / earliest value of A FEW columns per `<entity>`" | **`max_by(col_a, sort_key)`, `max_by(col_b, sort_key)`, ... GROUP BY entity** | Cheaper than the subquery form when you only need a handful of columns. |
+> | "Latest / earliest WHOLE row per `<entity>`" (need all columns) | **`ROW_NUMBER()` subquery + outer `WHERE rn = 1`** | `max_by` over every column is verbose; the subquery returns the picked row in one shot. |
+> | "TOP-N rows per group" (N > 1) | **`ROW_NUMBER()` subquery + outer `WHERE rn <= N`** | Only the subquery form supports N > 1. `max_by(x, y, n)` 3-arg form returns an `array<x>`, not N rows — different shape. |
+> | First AND last `<timestamp>` (the ordering column itself, not some other column) per entity | **`MIN(ts) + MAX(ts) GROUP BY entity`** — see [§3.1D first-AND-last-per-entity iter638 PIN](#max_byx-y--min_byx-y--deterministic-pick-of-x-by-the-ordering-column-y) | Plain aggregates; no need for `min_by`/`max_by` at all. |
+>
+> **Cross-references.** `min_by` / `max_by` worked example + first-AND-last-per-entity iter638/656 PINs live at [§3.1D `max_by` / `min_by`](#max_byx-y--min_byx-y--deterministic-pick-of-x-by-the-ordering-column-y) (around r23:733-790). `bool_or` / `bool_and` per-group boolean aggregates and `histogram` value-count map are at [§3.1D bool_or/bool_and](#bool_or--bool_and--did-any-or-did-all-rows-in-the-group-satisfy-x-roll-up-a-boolean-per-group) (around r23:879-916). The full cross-dialect anti-patterns table (QUALIFY + LIMIT N BY + DISTINCT ON + TOP N + window-in-WHERE) is at [§Trino 467 SQL-dialect anti-patterns](#trino-467-sql-dialect-anti-patterns--do-not-carry-these-over-from-other-warehouses). The dbt-side QUALIFY ban is at [resource 28 § dbt model QUALIFY anti-pattern](28-complex-sql-performance-trino-dbt.md) (r28:648). The Oracle-migration QUALIFY landmine is at [resource 27 §7A.2 QUALIFY landmine](27-oracle-plsql-to-dbt-trino.md) (r27:3766).
 
 > **BUSIEST WEEKDAY / BUSIEST HOUR PER USER — dual-destination cross-ref (iter665 FIX-A).** The ROW_NUMBER top-1-per-group structure above is HALF of the "busiest weekday per user" answer. The OTHER half is the **day-of-week semantics** — Trino's `day_of_week(ts)` AND `EXTRACT(DAY_OF_WEEK FROM ts)` AND `EXTRACT(DOW FROM ts)` ALL return ISO **`1` = Monday .. `7` = Sunday** (NOT the Postgres `0=Sunday..6=Saturday` convention); `dayname()` does **NOT exist** in Trino 467; and to render the weekday as a NAME (`'Monday'`..`'Sunday'`) you MUST use `format_datetime(CAST(order_date AS timestamp), 'EEEE')` — `CAST(day_of_week(...) AS VARCHAR)` yields `'1'`..`'7'`, NOT the name. The full worked pattern + DO-NOT-WRITE list lives at **[resource 07 §`date_trunc('week') Monday-start + day_of_week 1..7 + format_datetime EEEE` canonical](07-analytical-query-patterns.md#date_truncweek-ts-always-starts-the-week-on-monday-iso-8601--trino-canonical-iter536-pin--day_of_week--extractday_of_week-always-iso-17-monsun--no-dayname-in-trino-no-postgres-0sunday-convention-iter665-fix-a--busiest-weekday-per-user-inoculation)** — read that block whenever a "busiest weekday by NAME" / "day of the week each user orders most" question hits the top-1-per-group canonical here.
 

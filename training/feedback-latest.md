@@ -1,142 +1,91 @@
-# Judge Feedback — iter694
+# Judge Feedback — iter695
 
-**Phase**: extended | **Iteration**: 694 | **Verdict**: PASS (overall avg 3.75 >= 3.5) — two answers flagged as critically weak
+**Phase**: extended | **Iteration**: 695 | **Verdict**: PASS (overall avg 5.00 >= 3.5)
 
-The overall average crosses the 3.5 pass threshold thanks to two strong answers (Q3/Q4 at 5.00) but **both Q1 and Q2 surfaced executable correctness problems** that would ship broken SQL to production. Per the run directive the OVERALL AVERAGE governs PASS/FAIL with no per-Q quality-gate override — so this iteration is labeled PASS, but the weak answers are flagged in prose below for iter695 follow-up.
+The overall average is **5.00 / 5.0**. All 16 sub-scores landed at 5. The QUALIFY FIX-A re-probe (Q1) **CLOSED** the iter694 regression.
 
 ---
 
 ## Per-question scores
 
+### Q1 — Latest row per device (QUALIFY FIX-A re-probe)
+| Dimension | Score | Notes |
+|---|---|---|
+| Accuracy | 5 | QUALIFY explicitly flagged as parse error in Trino 467. Option A `max_by(status, reading_time)` + `MAX(reading_time) GROUP BY device_id` is exactly the docs-verified shape (trino.io/docs/467/functions/aggregate.html confirms `max_by(x, y)` returns x at the max of y). Option B uses the ROW_NUMBER subquery with outer `WHERE rn = 1` and correctly states window functions cannot go in WHERE (confirmed against trino.io/docs/467/sql/select.html — WINDOW clause is post-WHERE; QUALIFY absent from clause synopsis). |
+| Completeness | 5 | Both canonical Trino forms given with use-case guidance (Option A = aggregate-only / specific cols, Option B = need all cols). `NULLS LAST` ordering specified. Snowflake QUALIFY explicitly contrasted. |
+| Clarity | 5 | Compact, no jargon left unexplained. Each option labeled with when to pick it. |
+| Actionability | 5 | Engineer can copy-paste either form against `your_schema.device_readings` and ship. Resource pointer (r23 §3.1G) given. |
+
+**Q1 avg: 5.00**
+
+**QUALIFY FIX-A status: CLOSED.** The iter694 Q2 regression (responder emitted the QUALIFY+ROW_NUMBER one-liner) did NOT reappear in iter695 Q1. Responder routed to the new §3.1G keyword-anchored card and produced the correct non-QUALIFY forms — both Option A (max_by aggregate) and Option B (ROW_NUMBER subquery + outer WHERE rn=1) — and explicitly named QUALIFY as a parse error. The leading canonical + defanged DO-NOT-COPY card landed cleanly. Inline same-line `-- WRONG: DO NOT COPY` comments did NOT bleed into the response.
+
+### Q2 — Conditional aggregation / manual pivot
+| Dimension | Score | Notes |
+|---|---|---|
+| Accuracy | 5 | Correctly notes Trino has no PIVOT keyword. Both `SUM(CASE WHEN ... THEN 1 ELSE 0 END)` and `COUNT(*) FILTER (WHERE ...)` are valid Trino 467 (FILTER clause confirmed at trino.io/docs/467/functions/aggregate.html — "supported for all aggregate functions"). Daily grouping via `DATE_TRUNC('day', created_at)` is correct. |
+| Completeness | 5 | Both equivalent shapes given. Notes they produce the same plan. Daily roll-up matches the manager's "single summary row per day" requirement. ORDER BY day for stable output. |
+| Clarity | 5 | Aliases match the three statuses (open_count / in_progress_count / closed_count). Order of clauses correct. |
+| Actionability | 5 | Drop-in query with schema placeholder. Resource pointer (r07 wide-pivot variant). |
+
+**Q2 avg: 5.00**
+
+### Q3 — dbt incremental on Iceberg
+| Dimension | Score | Notes |
+|---|---|---|
+| Accuracy | 5 | `materialized='incremental'`, `incremental_strategy='merge'`, `unique_key='event_id'` all correct for dbt-trino + Iceberg. **`partitioning` NOT `partitioned_by`** correctly named as the Iceberg connector property (verified at trino.io/docs/467/connector/iceberg.html — `partitioning = ARRAY[...]`). `is_incremental()` vs `execute` distinction is correct (execute is True at compile/run for ALL builds; is_incremental() is False on first run AND on --full-refresh — exactly right). Trino MERGE multi-match gotcha and ROW_NUMBER pre-dedup recommendation are accurate. |
+| Completeness | 5 | Config block + model body + three gotchas. Covers `on_schema_change`, properties dict format (with embedded quotes around 'PARQUET'), and the dedup workaround. |
+| Clarity | 5 | Each gotcha numbered and explained. is_incremental vs execute trap explicitly called out. |
+| Actionability | 5 | Engineer can drop this in as the model SQL. Resource pointer (r28 leading canonical). |
+
+**Q3 avg: 5.00**
+
+### Q4 — NULL handling in AVG / COUNT
+| Dimension | Score | Notes |
+|---|---|---|
+| Accuracy | 5 | "All aggregates except COUNT(*) skip NULLs" — verified at trino.io/docs/467/functions/aggregate.html ("all of these aggregate functions ignore null values"). AVG excludes NULL from numerator AND denominator → true average of non-NULL values — correct. `COUNT(rating)` = non-null count, `COUNT(*)` = total rows — correct. All-NULL edge case (AVG→NULL, COUNT(rating)→0, COUNT(*)→1) is exactly right. |
+| Completeness | 5 | Directly answers both halves: (a) whether AVG is misleading (no — but reviews-with-rating count needed to interpret it), (b) the side-by-side query. Bonus: includes both COUNT(rating) and the equivalent SUM(CASE WHEN rating IS NOT NULL THEN 1 ELSE 0 END) so the engineer sees the alternates. |
+| Clarity | 5 | Each column's meaning called out in plain language. Edge case spelled out explicitly. |
+| Actionability | 5 | Single query the engineer can ship against `your_schema.product_reviews`. Resource pointer (r23 §3.1D + ANSI). |
+
+**Q4 avg: 5.00**
+
+---
+
+## Overall
+
 | Q | Accuracy | Completeness | Clarity | Actionability | Avg |
 |---|---|---|---|---|---|
-| Q1 cumulative-distinct (FIX-A re-probe) | 2 | 3 | 3 | 2 | 2.50 |
-| Q2 first-and-last per group | 1 | 3 | 4 | 2 | 2.50 |
-| Q3 Iceberg time-travel | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 hour-of-day distribution | 5 | 5 | 5 | 5 | 5.00 |
+| Q1 | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 | 5 | 5 | 5 | 5 | 5.00 |
+| Q3 | 5 | 5 | 5 | 5 | 5.00 |
+| Q4 | 5 | 5 | 5 | 5 | 5.00 |
 
-Per-dimension averages: Accuracy 3.25 | Completeness 4.00 | Clarity 4.25 | Actionability 3.50
-**Overall grand avg = (3.25 + 4.00 + 4.25 + 3.50) / 4 = 3.75** → PASS by threshold.
-
----
-
-## Q1 — Cumulative-distinct products by month (FIX-A RE-PROBE) — 2.50
-
-**Responder's SQL** (paraphrased):
-```sql
-WITH first_order AS (
-  SELECT product_id, DATE_TRUNC('month', created_at) AS first_month
-  FROM order_items
-  GROUP BY product_id, DATE_TRUNC('month', created_at)   -- ← BUG
-),
-new_per_month AS (
-  SELECT first_month AS order_month, COUNT(*) AS new_products
-  FROM first_order GROUP BY first_month
-)
-SELECT order_month, new_products,
-       SUM(new_products) OVER (ORDER BY order_month
-            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
-            AS cumulative_distinct_products
-FROM new_per_month ORDER BY order_month;
-```
-
-### Explicit verdict — defang vs correctness
-
-- **COUNT(DISTINCT) OVER regression: CLOSED.** The iter694 defang of Pattern A4's DO-NOT-WRITE cells worked: the responder did NOT copy the banned `COUNT(DISTINCT product_id) OVER (...)` snippet this iteration. It correctly reached for the running-SUM-of-first-appearances outer shape. The inline `-- ❌ WRONG ... DO NOT COPY` self-documenting markers on banned cells did their job.
-- **Cumulative-distinct correctness: REGRESSED-AGAIN via a NEW failure mode.** The `first_order` CTE keys on BOTH `product_id` AND `DATE_TRUNC('month', created_at)` — yielding one row per (product, EVERY active month), not one row per product at its first month. The alias `first_month` is a misnomer. A product ordered in Jan AND Feb produces 2 rows; `new_per_month` then counts that product twice; the running `SUM(...) OVER` double-counts every multi-month product. Output = "cumulative active-period instances," NOT "cumulative distinct products."
-
-The responder's own prose said "the key is MIN(created_at) GROUP BY product_id — each product appears exactly once at its first-order month" — **but the SQL contradicts the prose**: there is no MIN() and the GROUP BY adds the month key.
-
-**Correct first_order CTE:**
-```sql
-SELECT product_id, DATE_TRUNC('month', MIN(created_at)) AS first_month
-FROM order_items
-GROUP BY product_id        -- GROUP BY product_id ONLY
-```
-
-Net for iter694 on Pattern A4: same bug class as iter692 Q4 (double-counts multi-period entities), reached via a mangled GROUP BY instead of via COUNT(DISTINCT) OVER. The iter694 defang closed the COUNT(DISTINCT) OVER path but the cumulative-distinct correctness still FAILS. **PARTIAL close + new failure mode.**
-
-## Q2 — First-and-last per group — 2.50
-
-**Responder's SQL** used `QUALIFY ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date) = 1` as a dedup wrapper.
-
-**Verdict — QUALIFY is NOT supported in Trino 467 (parse error).** Verified against trino.io: QUALIFY is a Snowflake / BigQuery / DuckDB clause; Trino has not added it (Starburst community thread requesting QUALIFY remains open; Trino 467 release notes added DISTINCT in windowed aggregates and windowed LISTAGG but no QUALIFY). The query fails at parse stage before execution.
-
-The `first_value(amount) OVER (PARTITION BY customer_id ORDER BY order_date ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)` and matching `last_value` expressions with the full frame are correct, but the QUALIFY dedup kills the whole query.
-
-**Correct Trino 467 forms** (either or both):
-
-A) `min_by` / `max_by` — single GROUP BY, no window, no dedup wrapper:
-```sql
-SELECT customer_id,
-       min_by(amount, order_date) AS first_order_amount,
-       max_by(amount, order_date) AS last_order_amount
-FROM orders
-GROUP BY customer_id
-ORDER BY customer_id;
-```
-
-B) Subquery / CTE then `WHERE rn = 1`:
-```sql
-SELECT customer_id, first_order_amount, last_order_amount
-FROM (
-  SELECT customer_id,
-         first_value(amount) OVER (PARTITION BY customer_id ORDER BY order_date
-              ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS first_order_amount,
-         last_value(amount)  OVER (PARTITION BY customer_id ORDER BY order_date
-              ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS last_order_amount,
-         ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date) AS rn
-  FROM orders
-)
-WHERE rn = 1
-ORDER BY customer_id;
-```
-
-## Q3 — Iceberg time-travel — 5.00
-
-`FOR TIMESTAMP AS OF TIMESTAMP '2026-06-07 00:00:00 UTC'` plus mentions of `FOR VERSION AS OF <snapshot_id>` and the `"orders$snapshots"` metadata table to look up snapshot IDs. All verified valid Trino 467 Iceberg connector syntax. Production-fit (on-prem Trino 467 + Iceberg 1.5.2 + HMS + MinIO).
-
-## Q4 — Hour-of-day distribution — 5.00
-
-`EXTRACT(HOUR FROM order_time)` + `GROUP BY` + `ORDER BY hour_of_day`. Verified valid Trino 467 (both `EXTRACT(HOUR FROM ts)` and `hour(ts)` are supported and return 0-23). Clear, complete, actionable.
+**16 sub-scores: all 5.** Overall average: **5.00 / 5.0**. **PASS** (threshold 3.5).
 
 ---
 
-## Pattern A4 canonical-clarity assessment (for iter695 planning)
+## QUALIFY FIX-A verdict
 
-The iter694 state.json describes the canonical at r07:2062-2092 as:
-- preamble noting both `COUNT(DISTINCT) OVER` and `SUM(COUNT(DISTINCT)) OVER` are BANNED — "the recipe below is the ONLY correct shape"
-- ✅ COPY THIS marker as the FIRST line inside the fenced block
-- shape: `WITH first_order ... MIN(order_date) ... → COUNT(*) GROUP BY first_month → SUM(new_customers) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`
+**CLOSED.** iter695 fixed the iter694 Q2 regression. The new §3.1G QUALIFY inoculation card and the §3.1D bridge cross-ref successfully routed the responder to the docs-correct Trino 467 forms for "latest row per device":
+1. Aggregate form: `max_by(x, sort_key)` + `MAX(sort_key)` GROUP BY entity — no window, single pass.
+2. Whole-row form: ROW_NUMBER subquery + outer `WHERE rn = 1`.
 
-If that canonical truly shows `DATE_TRUNC('month', MIN(order_date)) AS first_month` with `GROUP BY customer_id` ONLY — emphasized via ✅ COPY THIS — then the responder's mangling (dropping MIN, adding month to GROUP BY) is **responder-composition-weakness**: the Haiku correctly borrowed the OUTER running-SUM shape but synthesized the inner CTE without anchoring to the canonical's GROUP BY structure. This is a known Haiku synthesis-from-template defect (the keyword match likely lands on the outer SUM(...) OVER line and synthesis drifts from the inner CTE).
+Responder explicitly named QUALIFY as a parse error and did NOT emit it anywhere in Q1 (or any other answer). The defanged DO-NOT-COPY snippets did not bleed into the response — iter694's "weak responder copies the negative example" backfire mode did NOT reoccur this iter. Inline same-line `-- WRONG: DO NOT COPY` comments inside fenced sql blocks worked as designed.
 
-If r07:2062-2092 visually de-emphasizes the MIN()+GROUP-BY-key-only constraint, a tiny canonical tightening is warranted.
+## New findable-but-missing gaps for next iteration
 
-## QUALIFY-banned findability assessment
+None visible from this iter's 4 answers. All four questions hit on-pin docs-correct material with confident keyword routing:
+- Q1 leveraged the new iter695 FIX-A card — clean landing.
+- Q2 hit the existing manual-pivot canonical (SUM(CASE WHEN) and FILTER both surfaced) — no gap.
+- Q3 hit r28 leading canonical with all three gotchas (partitioning vs partitioned_by, is_incremental vs execute, MERGE multi-match) — no gap.
+- Q4 hit r23 §3.1D + ANSI aggregate behavior — no gap. AVG-with-all-NULL edge case correctly returned NULL (not 0) — exactly the trap that catches new engineers.
 
-The responder emitted QUALIFY confidently, indicating either no QUALIFY DO-NOT-WRITE inoculation exists in resources/, or one exists but is not keyword-anchored to "first row per group / dedup to one row per partition / top-N per group" question shapes. Either way QUALIFY surfaced as a real **findable-but-missing gap** worth a small iter695 inoculation.
+## Recommendation to teacher
 
----
+- **HOLD** all iter695 edits. Do NOT touch resources/22 (federation lock preserved through 247+ iterations). Do NOT re-edit the new §3.1G QUALIFY inoculation card or the §3.1D bridge — they worked.
+- The iter694 defang lesson (inline same-line `-- WRONG: DO NOT COPY` comments inside fenced code blocks) is confirmed effective and should remain the standard form for all banned-snippet inoculation cards going forward.
 
-## Recommendations for iter695
+## Probe suggestion for next iter
 
-**Q1 (cumulative-distinct first_order CTE)** — likely **responder-composition-weakness** if Pattern A4's canonical is already clear (the state.json description suggests it is). The COUNT(DISTINCT) OVER defang closed the iter693 regression cleanly; the inner-CTE mangling is a Haiku synthesis defect, not a resource defect. **DEFAULT: NO-OP on Pattern A4** unless a fresh inspection of r07:2062-2092 shows MIN()+GROUP-BY-key-only is not visually prominent. If a small tightening is warranted, add a one-line WHY directly above the `MIN(created_at)`/`GROUP BY product_id` line in the canonical:
-```
--- ⚠️ GROUP BY entity_id ONLY (no time-grain key). MIN(created_at) collapses
--- each entity to its first-appearance period. Adding the month to GROUP BY
--- ⇒ one row per active period ⇒ running-SUM double-counts multi-period entities.
-```
-
-**Q2 (QUALIFY-banned)** — this is a **findable-but-missing gap**. Recommend folding a tiny QUALIFY inoculation into iter695:
-- Add a 4-6 line entry in r07 (analytical query patterns) and r23/r25 (SQL best practices) under keyword anchors: `QUALIFY`, `QUALIFY ROW_NUMBER`, `first row per group dedup`, `top-N per group`, `latest row per customer`.
-- Content: "Trino 467 has NO QUALIFY clause — parse error. QUALIFY is Snowflake / BigQuery / DuckDB only. Trino dedup pattern: wrap window in subquery/CTE then `WHERE rn = 1`. For first/last-value per group prefer `min_by(value, ts)` / `max_by(value, ts)` GROUP BY key (no window needed)."
-- Use the same self-documenting inline-comment marker style on any QUALIFY example: `QUALIFY rn = 1   -- ❌ WRONG: Trino 467 has NO QUALIFY (parse error) — DO NOT COPY` so keyword-matching copy yields a broken/commented line.
-
-**Single highest-value iter695 edit**: the QUALIFY inoculation. The Q1 inner-CTE mangling is a known Haiku composition limit on an already-clear canonical and further markup likely hits diminishing returns.
-
----
-
-## Score-history line (append to rubric.md)
-
-`| 694 | 3.75 PASS | Q1 cumulative-distinct double-counts via mangled GROUP BY (dropped MIN, added month-key) — COUNT(DISTINCT) OVER defang CLOSED but correctness REGRESSED-via-new-mechanism; Q2 QUALIFY parse-fails in Trino 467 (Snowflake/BigQuery clause, not Trino); Q3 FOR TIMESTAMP AS OF valid; Q4 EXTRACT(HOUR FROM ts) valid |`
+Re-probe a Q2-shape variant that asks for FIRST AND LAST in one row (different sort key, e.g., "first and last order amount per customer") to confirm the §3.1D iter638/656 PIN still routes correctly now that the §3.1D area has the new QUALIFY bridge inserted. Also probe a top-N (N>1, not N=1) case to confirm Option B's "change rn=1 to rn<=3" guidance is findable. These two angles will harden the FIX-A card against future regressions before stamping it as long-term solid.
