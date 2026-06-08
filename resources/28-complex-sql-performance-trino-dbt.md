@@ -416,12 +416,29 @@ dbt 1.8 renamed the YAML key from `tests:` to `data_tests:` to disambiguate from
 >
 > Decision keyword anchors (pick the operator FIRST, before copying any example below): "all products within each region AND all regions for each product category", "subtotals on both dimensions", "region totals AND category totals", "independent margins", "every combination of subtotals", "breakdown by both X and Y with subtotals for each".
 
+> **⚠️ PICK THE GROUPING CONSTRUCT (one-line router — read this FIRST, before any WRONG / defang block below):**
+> - **"detail + subtotals down a group hierarchy + grand total"** (e.g. per-`(region, product)` detail, then a per-region subtotal, then the overall total — **NO per-product-only row**) **→ `ROLLUP(region, product)`.**
+> - **"every combination including each column alone"** (per-region AND per-product independent margins) **→ `CUBE(region, product)`.**
+> - **"only specific named grouping sets"** (a hand-picked list, NOT the cross-tab detail) **→ `GROUPING SETS (...)`.**
+>
+> **If the ask is "subtotal per `<group>` plus a grand total" (one group hierarchy, no second-column-only margin), that's `ROLLUP`.** Business-phrased anchors that mean ROLLUP: *subtotal per group plus grand total*, *per-region subtotal and overall total*, *hierarchical subtotals*, *subtotals and a grand total in one query*, *department then team drill-down totals*, *year then month subtotals*.
+>
+> ✅ **COPY THIS for "subtotal per group + grand total" (hierarchical subtotals):**
+> ```sql
+> SELECT region, product, SUM(revenue) AS total
+> FROM sales
+> GROUP BY ROLLUP(region, product)
+> -- yields: (region, product) detail rows + a per-region subtotal row + one grand-total row.
+> -- In the subtotal rows the rolled-up columns are NULL (region/product NULL); use GROUPING() to label them — see (b)/(c) below.
+> -- Does NOT emit a per-product-only row. If you ALSO need per-product-only margins, that is CUBE — see (e).
+> ```
+
 ### DECIDE FIRST — ROLLUP vs CUBE vs GROUPING SETS (read this before copying any worked example below)
 
 **Make this choice before you pick an example.** The ROLLUP worked example appears first in this block, but ROLLUP is the WRONG operator for many "subtotals" questions. Decide here:
 
 - **Need EVERY combination of subtotals — independent margins on EACH dimension** ("all X for each Y" AND "all Y for each X") **+ grand total → `CUBE(a, b)`.** This is the one to use when the question asks for subtotals on *both* dimensions (e.g. "all products within each region" AND "all regions for each product category").
-- **Need ONLY hierarchical / prefix subtotals** — a drill-down where each level rolls up the **RIGHTMOST** column (country → state → city totals, never city-across-all-countries) **→ `ROLLUP(a, b)`.**
+- **Need ONLY hierarchical / prefix subtotals — "subtotal per group plus a grand total"** ("per-region subtotal and overall total", "hierarchical subtotals", "subtotals and a grand total in one query", "department then team drill-down totals", "year then month subtotals") — a drill-down where each level rolls up the **RIGHTMOST** column (country → state → city totals, never city-across-all-countries; per-`(region,product)` → per-region → grand total, **never per-product-only**) **→ `ROLLUP(a, b)`.** This is the one to use for the plain "give me subtotals per `<group>` and a grand total" ask — one group hierarchy, no independent second-column margin.
 - **Need a hand-picked SPECIFIC set of groupings — "by X AND by Y but NOT the X-Y detail", "specific subtotals only", "just those summaries / just those levels", "not every combination", "subtotals without the cross-tab detail", "by region AND by category but not per-region-per-category", "those three separate summaries" → `GROUPING SETS ((a), (b), ())`.** This is the one to use when the user wants a CHOSEN list of summaries (e.g. by-region totals + by-category totals + grand total) **and explicitly does NOT want the full per-region-per-category cross-tab detail row.** Do NOT reach for `CUBE` here — `CUBE` adds back the `(a, b)` detail row you were told to exclude.
 
 **KEY:** `ROLLUP(a, b)` emits `(a,b), (a), ()` and **SKIPS the `(b)`-only grouping**. `CUBE(a, b)` emits **ALL** of `(a,b), (a), (b), ()` — **including the `(a, b)` detail row**. `GROUPING SETS ((a), (b), ())` emits **EXACTLY** the three sets you list — by-`a`, by-`b`, grand total — and **NO `(a, b)` detail row**. If you want both per-`a` **AND** per-`b` subtotals, **ROLLUP is WRONG — use CUBE.** If you want both per-`a` **AND** per-`b` subtotals **but NOT** the `(a, b)` cross-tab detail, **CUBE is WRONG — use `GROUPING SETS ((a), (b), ())`.**
