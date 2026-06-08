@@ -1,55 +1,71 @@
-# Judge Feedback — iter731
+# iter732 Judge Feedback
 
-**Phase**: extended | **Verdict**: PASS | **Overall avg**: 4.78
-
-All four answers were verified against trino.io/docs/467 (map.html, array.html, regexp.html, conversion.html) on 2026-06-08. No factual defects found.
+**Topic batch:** map-construction FIX-A re-probe + safe map-key lookup + map_keys + abs/sqrt math
+**Docs verified against:** trino.io/docs/467 — functions/map.html + functions/math.html (WebFetch 2026-06-08). Not scored against resources/.
+**Mode:** extended phase — per-iteration feedback.
 
 ---
 
 ## Per-question scores
 
-| Q | Topic | Accuracy | Clarity | Applicability | Completeness | Avg |
-|---|---|---|---|---|---|---|
-| Q1 | strip leading char SET | 5 | 5 | 5 | 4.5 | 4.875 |
-| Q2 | zip two arrays into a map | 5 | 4.5 | 4 | 3.5 | 4.25 |
-| Q3 | filter text col to valid numbers | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 | first/Nth array element | 5 | 5 | 5 | 5 | 5.00 |
+### Q1 — build a MAP from two parallel arrays (FIX-A re-probe — CRITICAL)
+Answer: `map(attr_names, attr_values)` 2-arg constructor + `element_at(attrs, 'size')` access; noted `[]` subscript throws if key missing.
 
-**Overall average: 4.78 → PASS** (threshold 3.5).
+- **Accuracy 5** — DOCS-VERIFIED map.html: `map(array(K), array(V)) → map(K, V)` "Returns a map created using the given key/value arrays." Exactly the direct 2-arg constructor for two parallel/equal-length arrays. element_at NULL-safe vs `[]` throws — also verbatim-correct.
+- **Completeness 5** — Builds the map AND shows the lookup the user actually wanted (`attrs['size']` → element_at). Correctly flags the subscript-throws caveat unprompted.
+- **Clarity 5** — "zips two equal-length arrays into one MAP" is a clean one-line mental model for a non-OLAP engineer; copy-ready SQL.
+- **Actionability 5** — Single-call form, directly drop-in.
+- **Q-avg 5.00**
+
+**FIX-A VERDICT: CLOSED.** The responder led with the direct `map(keys_array, values_array)` constructor — the exact one-call form iter731 (4.25) MISSED. It did NOT reach for the convoluted `map_from_entries(zip_with(keys,vals,(k,v)->row(k,v)))` NOR `map_agg`. The iter732 canonical (r07 §1a "build a MAP from two parallel arrays") landed and surfaced. Regression risk eliminated on this probe.
+
+### Q2 — safe single-key map lookup
+Answer: `element_at(feature_flags, 'dark_mode')`; noted `[]` throws "Key not present in map".
+
+- **Accuracy 5** — DOCS-VERIFIED map.html: `element_at(map(K,V), key) → V` "Returns value for given key, or NULL if the key is not contained in the map." `[]` subscript "throws an error if the key is not contained in the map." Both halves exactly right.
+- **Completeness 5** — Answers the lookup AND the NULL-vs-error contrast the user explicitly asked about.
+- **Clarity 5** — "never errors" / "strict and throws" is a crisp distinction.
+- **Actionability 5** — Drop-in.
+- **Q-avg 5.00**
+
+### Q3 — get map keys as a list
+Answer: `map_keys(feature_flags)` → array; plus `map_keys(map_filter(feature_flags, (k,v)->v))` for true-only keys.
+
+- **Accuracy 5** — DOCS-VERIFIED map.html: `map_keys(x) → array(K)` "Returns all the keys in the map." `map_filter(map, function(K,V,boolean)) → map(K,V)` "Constructs a map from those entries for which function returns true." `(k,v)->v` is a valid boolean lambda when `v` is boolean. `map_values` also exists (not needed here). All correct.
+- **Completeness 4** — Per-row keys array is the correct core answer and the bonus true-only filter is a nice touch. Minor gap: the user said "across all our customer rows" for an audit — a strictly account-wide DISTINCT-key set would also need `UNNEST(map_keys(...))` + aggregate (e.g. `array_agg(DISTINCT ...)` or `flatten`) across rows. The per-row answer is the right function answer; the cross-row roll-up is an unaddressed follow-on. As pre-framed, a minor completeness ding, not an error.
+- **Clarity 5** — "no explosion" directly answers "without exploding into rows."
+- **Actionability 5** — Drop-in.
+- **Q-avg 4.75**
+
+### Q4 — abs + sqrt math
+Answer: `abs(current_score - baseline_score)` + `sqrt(variance_metric)`.
+
+- **Accuracy 5** — DOCS-VERIFIED math.html: `abs(x) → [same as input]` "Returns the absolute value of x." `sqrt(x) → double` "Returns the square root of x." Both native lowercase. The "abs returns same type as input" claim matches docs exactly. (sqrt is always double — responder did not misstate its return type.)
+- **Completeness 5** — Both requested ops covered.
+- **Clarity 5** — Trivially clear, well-named aliases.
+- **Actionability 5** — Drop-in.
+- **Q-avg 5.00**
 
 ---
 
-## Q1 — strip a SET of leading chars — DOCS-VERIFIED CORRECT
+## Overall
 
-`regexp_replace(product_code, '^[#*0]+', '')` is a fully valid and correct Trino 467 answer.
-- regexp.html confirms `regexp_replace(string, pattern, replacement) -> varchar` uses **Java pattern syntax**, so the char class `[#*0]` matches any of {#,*,0}, the `^` anchor pins to the start, and `+` removes one-or-more leading set members in **one pass** — '#00ABC'→'ABC', '*0042'→'42'. No defect. NOT penalized for choosing regexp over trim.
+| Q | Acc | Comp | Clar | Act | Q-avg |
+|---|---|---|---|---|---|
+| Q1 | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 | 5 | 5 | 5 | 5 | 5.00 |
+| Q3 | 5 | 4 | 5 | 5 | 4.75 |
+| Q4 | 5 | 5 | 5 | 5 | 5.00 |
 
-**trim char-SET clarification — NOT EXERCISED / REMAINS UN-RE-PROBED.** The iter731 clarification targeted the `trim(LEADING '#*0' FROM code)` char-SET FROM-form. The responder chose a different, equally-valid path (regexp_replace), so this probe did **not** test whether the responder reaches for the trim char-set form. Both forms are correct; trim is the lighter-weight (no regex engine) idiom. Because both are correct, this is **LOW PRIORITY**. The only ding is a -0.5 completeness nit for not also surfacing the trim FROM-form as the lighter alternative. If you want the trim char-set form bulletproofed, iter732 should use a more trim-constraining phrasing (e.g., explicitly "using trim, strip a set of leading characters") — but it is not blocking.
+**Overall average = 4.9375 → STRONG PASS** (threshold 3.5; overall governs, no per-Q override).
 
-## Q2 — zip two arrays into a map — CORRECT BUT MISSED THE CANONICAL
-
-`map_from_entries(zip_with(question_keys, responses, (k,v)->row(k,v)))` is correct and produces a valid map; the `map_agg` + UNNEST alt is also correct (map_agg is an aggregate needing GROUP BY, which the answer correctly used). Verified:
-- zip_with(array(T), array(U), function(T,U,R)) -> array(R) — pairs element-wise. OK
-- map_from_entries(array(row(K,V))) -> map(K,V). OK
-- map_agg is an aggregate (GROUP BY needed). OK
-
-**MISSED CANONICAL — `map(keys_array, values_array)` direct 2-arg constructor.** map.html confirms Trino 467 has `map(array(K), array(V)) -> map(K, V)` — "Returns a map created using the given key/value arrays." This is the **simplest one-call answer** to exactly this question: `SELECT map(question_keys, responses) AS response_map FROM user_profiles;` then `response_map['preferred_plan']`. The responder's zip_with + map_from_entries is correct-but-convoluted: it routes through a HOF + entry array to do what the built-in 2-arg `map()` does directly. This is a genuine Completeness/Actionability gap (-1.5 completeness, -1 applicability) — the engineer would copy a needlessly complex form when a built-in 2-arg `map()` exists.
-
-**FLAG FOR iter732 (teacher):** Add a LEADING CANONICAL for "combine/zip two parallel arrays into a map" that LEADS with `map(keys_array, values_array)` (the direct 2-arg constructor, docs-verified map.html), with `map_from_entries(zip_with(...))` as the secondary form (useful when you must transform pairs) and `map_agg` as the aggregate alt (when keys/values arrive as rows, needs GROUP BY). Keyword anchors: zip two arrays into a map, build a map from key array and value array, parallel arrays to map, two arrays into key-value pairs, map from two columns of arrays. Re-probe in iter732.
-
-## Q3 — filter text to valid numbers — DOCS-VERIFIED CORRECT, FULL MARKS
-
-`TRY_CAST(customer_id_text AS INTEGER)` + `WHERE TRY_CAST(...) IS NOT NULL`. conversion.html confirms try_cast "returns null if the cast fails" — 'N/A'/empty → NULL, filtered out, leaving only numeric-parseable rows. Clear, complete, directly actionable. No notes.
-
-## Q4 — first/Nth array element — DOCS-VERIFIED CORRECT, FULL MARKS
-
-`element_at(feature_flags, 1)`. array.html confirms element_at(array(E), index) -> E is 1-based and returns NULL for index larger than array length, "whereas the subscript operator would fail in such a case." The responder's contrast (element_at NULL-safe vs array[1] errors out-of-range) is exactly right. No notes.
+All dialect forms docs-verified against trino.io/docs/467 (map.html + math.html), 2026-06-08.
 
 ---
 
-## Summary for teacher
+## Teacher feedback / iter733 flags
 
-- 3 of 4 answers are flawless and docs-verified (Q1 correct path, Q3, Q4).
-- **One genuine gap (Q2):** the direct `map(keys, values)` 2-arg constructor is the missed canonical simplest form. This is the one item to act on for iter732.
-- Q1 trim char-SET form remains un-re-probed (responder used a valid alternative); low priority because both forms are correct.
-- No dialect errors, no parse-error forms, no fabricated functions. All standing pins held.
+- **FIX-A (Q1) CLOSED** — the direct `map(keys_array, values_array)` constructor now surfaces as the lead answer for "combine two parallel arrays into a map." iter732 canonical works. Keep it.
+- **No new resource defect.** No false dialect claim in any answer; every form (map/element_at/[]-throws/map_keys/map_filter/abs/sqrt) is correct.
+- **iter733 minor flag (Q3, LOW priority, not a defect):** the per-row `map_keys` answer is the correct core, but a question phrased as an account-WIDE audit ("across all our customer rows") wants a cross-row DISTINCT-key roll-up. Consider a LIGHT ADDITIVE note co-located with the map_keys content: to collapse keys across many rows into one distinct set, `SELECT array_agg(DISTINCT k) FROM t CROSS JOIN UNNEST(map_keys(feature_flags)) AS u(k);` (or flatten + array_distinct). Keyword anchors: "all keys used across all rows", "distinct map keys account-wide", "audit which features are set anywhere". Do NOT churn the per-row map_keys canonical — add adjacent only.
+- **Re-probe suggestions for iter733:** (1) confirm FIX-A stays closed under a third phrasing (e.g. "make a lookup dictionary from a key column array and a value column array"); (2) probe the cross-row distinct-keys aggregation directly to see if the responder reaches for UNNEST(map_keys) + array_agg(DISTINCT).

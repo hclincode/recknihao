@@ -149,6 +149,58 @@ Verified at [trino.io/docs/current/sql/select.html](https://trino.io/docs/curren
 >
 > **Cross-ref:** the `WITH ORDINALITY` sub-note immediately ABOVE is the array-explode + per-element-ordinal canonical (array → rows); this map-explode canonical is its MAP-column sibling (map → rows). Both are CROSS JOIN / LEFT JOIN UNNEST in the FROM clause and obey the §1a.1 clause-order rule.
 
+#### LEADING CANONICAL — build a MAP from two parallel arrays (a keys array + a values array) — `map(keys_array, values_array)`, the direct 2-arg constructor (iter732 PIN — FIX-A)
+
+> **READ THIS FIRST if your question contains any of these phrases — route HERE, NOT to `map_from_entries`/`zip_with` and NOT to `split_to_map`:** build a map from two arrays, zip two arrays into a map, combine two parallel arrays into a map, keys array and values array to map, make a lookup map from two columns, map from key array and value array, turn a keys array + values array into a dictionary, pair up two arrays into key/value, zip a keys column with a values column, construct a map from two equal-length arrays, combine parallel arrays into a dictionary, build a key-value map from two lists.
+>
+> **One fact (Trino 467, verified at [trino.io/docs/467/functions/map.html](https://trino.io/docs/467/functions/map.html)):** the 2-argument `map(array(K), array(V)) → map(K, V)` constructor "**Returns a map created using the given key/value arrays.**" Give it the keys array and the values array — both **equal length**, element `i` of the keys array pairs with element `i` of the values array — and you get one MAP back in a **single call**. This is THE direct answer to "I have two parallel arrays (keys + values) and want a map." (Note: `map()` with **no** arguments returns an **empty** map — `map() → map<unknown, unknown>`, "Returns an empty map" — that is a different overload.)
+>
+> **✅ PREFERRED — `map(keys_array, values_array)` (one call, then subscript/`element_at` for lookup):**
+>
+> ```sql
+> -- ✅ COPY THIS — zip a parallel keys array + values array into one MAP, then look a key up.
+> -- question_keys = ARRAY['preferred_plan', 'seats', ...]; responses = the parallel values array.
+> SELECT user_id,
+>        map(question_keys, responses) AS response_map,                 -- two parallel arrays -> one map
+>        element_at(map(question_keys, responses), 'preferred_plan') AS preferred_plan  -- NULL-safe lookup
+> FROM iceberg.analytics.user_profiles;
+> -- Or, if you've aliased the map, subscript it: response_map['preferred_plan']
+> -- (subscript ERRORS on a missing key; element_at returns NULL on a missing key — prefer element_at).
+> ```
+>
+> **Keys must be UNIQUE and NON-NULL.** The keys array may not contain a NULL, and it may not contain a duplicate key — a duplicate key raises a runtime error ("Duplicate map keys ... are not allowed"). If your keys array might have repeats, dedupe/collapse first (e.g. via `map_agg` aggregation, below) or use `multimap_from_entries`. The two arrays must also be the **same length**.
+>
+> **ALT — you already have an array of (key, value) pair ROWS (not two separate arrays):** `map_from_entries(array(row(K, V))) → map(K, V)` ("Returns a map created from the given array of entries"):
+>
+> ```sql
+> -- ✅ when your input is already an array of row(key, value) entries:
+> SELECT map_from_entries(ARRAY[row('preferred_plan', 'pro'), row('seats', '12')]) AS response_map;
+> ```
+>
+> **ALT — you need to aggregate many ROWS (a key column + a value column) into ONE map:** `map_agg(key_col, value_col) → map(K, V)` ("Returns a map created from the input key/value pairs") — this is an **aggregate**, so it needs a `GROUP BY` (or collapses the whole table to one row):
+>
+> ```sql
+> -- ✅ when the keys/values are ROWS in two columns, not arrays — fold them up per group:
+> SELECT user_id, map_agg(question_key, response_value) AS response_map
+> FROM iceberg.analytics.survey_answers
+> GROUP BY user_id;
+> ```
+>
+> **CO-LOCATED note — for two parallel arrays ALREADY IN HAND, the `map(keys, values)` 2-arg constructor is the lead.** You CAN build the same map with `map_from_entries(zip_with(question_keys, responses, (k, v) -> row(k, v)))` — `zip_with` pairs the two arrays element-wise into `row(k, v)` entries and `map_from_entries` folds them up — but that is **needlessly convoluted** for this case (two intermediate steps to do what `map(keys, values)` does in one call). Use the round-trip-through-`zip_with` form ONLY when you need to transform each pair before mapping; for a plain zip-into-map, prefer `map(question_keys, responses)`.
+>
+> **DISAMBIGUATION — four MAP directions that collide on "map" keywords. Route by the SHAPE of your input:**
+>
+> | Your input | Use | Direction |
+> |---|---|---|
+> | TWO parallel arrays (keys array + values array) → ONE map | **`map(keys_array, values_array)`** (THIS canonical) | two arrays → map (BUILD) |
+> | A MAP column → one row per (key, value) | **`CROSS JOIN UNNEST(map_col) AS t(k, v)`** — see the MAP-explode canonical immediately above | map → rows (EXPLODE, opposite of THIS) |
+> | A delimited STRING (`'k1=v1;k2=v2'`) → a map | **`split_to_map(str, entry_delim, kv_delim)`** — see [resource 23 §3.1A](23-sql-best-practices-olap.md#31a-trino-string-split-family-reference--split--split_part--split_to_map--split_to_multimap) | string → map (PARSE) |
+> | Many ROWS (a key column + a value column) → ONE map | **`map_agg(key_col, value_col)`** (aggregate, needs GROUP BY) | rows → map (AGGREGATE) |
+>
+> **Route by phrasing:** *"I have a keys array AND a values array"* → `map(keys, values)`. *"explode/iterate a map into rows"* → `UNNEST(map_col)`. *"parse a `k=v;k=v` string"* → `split_to_map`. *"fold key/value COLUMNS into a map per group"* → `map_agg`.
+>
+> **Cross-refs:** the MAP-explode canonical immediately ABOVE is the OPPOSITE direction (map → rows). For merging two whole MAPs (defaults + overrides) see [resource 09 — `map_concat`](09-lakehouse-schema-design.md). For the `zip` / `zip_with` array HOFs see [§1a.4 array HOF table](#1a4-trino-array-higher-order-functions--transform--filter--reduce--array_sort).
+
 #### LEADING CANONICAL — the single highest / lowest value WITHIN one array column — `array_max(arr)` / `array_min(arr)`, ONE function, NO UNNEST (iter726 PIN — FIX-A)
 
 > **READ THIS FIRST if your question contains any of these phrases — route HERE, NOT to UNNEST and NOT to `greatest`:** max value in an array, highest value in a list column, largest element of an array, biggest value in an array, worst-case value from an array, slowest/longest from a list of times, peak value in an array column, min/smallest value in an array, lowest value in a list, best-case from a list, reduce an array to its maximum, single highest from a list, array max without exploding, max of an array without UNNEST, collapse an array to its max/min, the one biggest number in an array, per-row max of an array column, what is the largest number in this array, smallest element in the array.
@@ -482,7 +534,7 @@ GROUP BY customer_id;
 | `reduce` | `reduce(array(T), S initial, (S, T) -> S, S -> R) -> R` (4-arg) | Fold to a scalar. `reduce(amounts, 0, (s, x) -> s + x, s -> s)` -> sum of `amounts`. |
 | `any_match` / `all_match` / `none_match` | `any_match(array(T), T -> boolean) -> boolean` | Did any / all / no elements satisfy the lambda? |
 | `array_sort` | `array_sort(array(T))` or `array_sort(array(T), (a, b) -> int)` | Sort ascending; the 2-arg form takes a comparator returning -1/0/1. **For DESCENDING + then take top-N (e.g. "top 3 highest scores"), pair with `slice()` — see [§1a.4A below](#1a4a-leading-canonical--slicearray-start-length-is-the-trino-467-array-subset-function-take-first-n-take-last-n-top-n-from-a-sorted-array--not-array_slice-iter676-pin--fix-a).** |
-| `zip` / `zip_with` | `zip(a, b) -> array(row)` / `zip_with(a, b, (x, y) -> R) -> array(R)` | Element-wise pair / merge of two equal-length arrays. |
+| `zip` / `zip_with` | `zip(a, b) -> array(row)` / `zip_with(a, b, (x, y) -> R) -> array(R)` | Element-wise pair / merge of two equal-length arrays. **To zip a keys array + values array straight into a MAP, do NOT round-trip through `zip_with`+`map_from_entries` — use the direct `map(keys_array, values_array)` 2-arg constructor; see the "build a MAP from two parallel arrays" canonical in §1a above.** |
 
 **When to UNNEST vs use an HOF.** UNNEST explodes an array to ROWS (one row per element) — use it when the next step needs `GROUP BY element`, `JOIN ... ON element = ...`, or `WHERE element IN (subquery)`. HOFs keep the result IN THE ARRAY (one row, transformed/filtered/reduced ARRAY) — use them when the downstream consumer wants the array shape preserved (e.g. you're rebuilding a column, projecting a per-row aggregate without losing other columns, or feeding the array to another function). See §1a / §1a.1 for UNNEST.
 
