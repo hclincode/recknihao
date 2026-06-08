@@ -1,78 +1,115 @@
-# iter708 Judge Feedback
+# Iter709 Judge Feedback
 
-## Verdict: PASS (overall avg = 4.625)
+## Per-Q Sub-scores (Accuracy / Completeness / Clarity / Actionability, 1–5)
 
-FIX-A status: **CLOSED**. The iter708 READ-ME-FIRST clarifier landed cleanly — Q1 answer states the direction-INDEPENDENT default plainly and without the iter707 circular framing.
+### Q1 — semi-join "has orders vs never ordered"
+- Accuracy: 3
+- Completeness: 3
+- Clarity: 4
+- Actionability: 4
+- Avg: 3.50
 
----
+Verified vs trino.io/docs/467:
+- IN (SELECT ...) auto-converted to semi-join: VALID.
+- EXISTS (SELECT 1 ...) correlated subquery: VALID.
+- LEFT-JOIN-then-COUNT must use COUNT(order_id) not COUNT(*) to avoid counting the NULL-padded unmatched row as 1: CORRECT.
 
-## Per-question scoring
+CRITICAL ACCURACY DING — granularity mislabel (findable, not a one-off slip):
+The responder's FIRST canonical query is:
+```
+SELECT customer_id,
+       CASE WHEN customer_id IN (...) THEN 'has_orders' ELSE 'never_ordered' END AS order_status,
+       COUNT(*) AS customer_count
+FROM iceberg.app.users
+GROUP BY customer_id, order_status
+```
+Because `users` has exactly one row per `customer_id`, GROUP BY (customer_id, order_status) yields exactly ONE row per customer with `customer_count = 1`. The column name `customer_count` and the prose framing ("TRUE/FALSE per customer") implies the engineer wanted the **two-row roll-up** the question literally asks for ("X customers have orders vs Y never ordered"). For that they'd write a CTE/subquery with the per-customer CASE and then GROUP BY order_status ONLY in the outer query:
+```
+SELECT order_status, COUNT(*) AS customer_count
+FROM (
+  SELECT customer_id,
+         CASE WHEN customer_id IN (SELECT user_id FROM iceberg.app.orders)
+              THEN 'has_orders' ELSE 'never_ordered' END AS order_status
+  FROM iceberg.app.users
+) per_customer
+GROUP BY order_status;
+```
+This is the SAME granularity-mismatch shape as the iter702 Pattern-C4 bucket-rollup defect: GROUP BY the per-entity key when you wanted the per-LABEL roll-up. The EXISTS alternative the responder offered is clean and correct (and avoids the trap by not pretending to aggregate), but the LEAD canonical block is the one the SaaS engineer will copy first — and it's grain-wrong for the stated dashboard. This is a real Accuracy/Completeness ding, not prose nit.
 
-### Q1 — NULL ordering on `ORDER BY last_login DESC`, never-logged-in at bottom
+### Q2 — top category per customer
+- Accuracy: 5
+- Completeness: 5
+- Clarity: 4
+- Actionability: 5
+- Avg: 4.75
 
-**Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — avg 5.00**
+Verified vs trino.io/docs/467:
+- ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY COUNT(*) DESC) composed on the outside of a GROUP BY (customer_id, category_name) inner query: VALID Trino 467. The window function is computed over the GROUPED rows (one per (customer, category)), and ORDER BY COUNT(*) inside OVER references the aggregate from the same SELECT level — composes cleanly.
+- max_by(category_name, purchase_count) returns category_name at the row with max purchase_count: CORRECT for single-top-per-group.
+- Both forms yield one row per customer.
+- Naming nit: alias `rank` shadows the RANK window function reserved-ish name; works but `rn` is the typical convention. Minor.
 
-- Verified against trino.io/docs/467/sql/select.html: **"The default null ordering is `NULLS LAST`, regardless of the ordering direction."** Responder said exactly this.
-- Direction-INDEPENDENT default: correct. "ORDER BY last_login defaults NULLS LAST, ORDER BY last_login DESC also defaults NULLS LAST."
-- Did NOT make the iter707 mistake of saying "NULLS LAST is required to GET NULLs at end on DESC" — instead said "Trino does this by default anyway but explicit is clearer."
-- Bonus deltas all hit: Oracle/Postgres "NULL-as-larger" cross-engine differ called out; ASC-also-defaults-NULLS-LAST explicit; "does NOT flip" defang language used.
-- Gave the exact SQL: `ORDER BY last_login DESC NULLS LAST`.
-- **FIX-A CLOSED.** The iter708 READ-ME-FIRST block in r07 was successfully routed to.
+### Q3 — integer status → label
+- Accuracy: 4
+- Completeness: 4
+- Clarity: 5
+- Actionability: 5
+- Avg: 4.50
 
-### Q2 — Extract email domain via `split_part`
+Verified vs trino.io/docs/467:
+- CASE simple form `CASE expr WHEN val THEN result ... END`: VALID.
+- if(cond, t, f): VALID.
+- "GROUP BY must repeat the CASE" claim — VERIFIED CORRECT for Trino 467. The SELECT docs state GROUP BY may contain "any expression composed of input columns OR an ordinal number selecting an output column by position (starting at one)." Trino 467 does NOT support GROUP BY by SELECT-list alias (GH #16533 confirms; reproduces in 467). So the responder's "verbose but unavoidable in standard SQL" framing is technically accurate.
+- Minor nit (completeness): the responder did NOT mention the ordinal-position shortcut `GROUP BY 1, 2` which Trino DOES allow — that would have softened the "verbose but unavoidable" phrasing and shown the engineer a one-liner shortcut. Small completeness ding, not accuracy.
 
-**Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — avg 5.00**
+### Q4 — array length + filter
+- Accuracy: 5
+- Completeness: 5
+- Clarity: 5
+- Actionability: 5
+- Avg: 5.00
 
-- Verified against trino.io/docs/467/functions/string.html: `split_part(string, delimiter, index)` is valid, "Field indexes start with `1`", and **"If the index is larger than the number of fields, then null is returned."** Responder's "Malformed no-@ email → split_part returns NULL for index 2 (not an error)" is **exactly correct** per docs.
-- Gave the full SQL with GROUP BY + ORDER BY COUNT(*) DESC — directly usable.
-- Mentioned `split_part(email,'@',1)` for the local-part counterpart — nice completeness.
-- 1-indexed clarification + the index-1-vs-index-2 framing kills the off-by-one trap.
-
-### Q3 — Conversion-rate percentage rounded to 2 decimals
-
-**Scores: Accuracy 5 / Completeness 4 / Clarity 5 / Actionability 5 — avg 4.75**
-
-- `ROUND(100.0 * converted_users / total_users, 2)` — verified valid Trino 467.
-- `format('%.2f%%', ...)` — verified valid Trino 467 (format follows Java Formatter, `%%` escapes literal percent per conversion.html docs).
-- Integer-division-truncation warning is correct: `bigint/bigint` truncates; the `100.0` decimal literal promotes the expression to a non-integer type.
-- **Minor completeness nit:** no `NULLIF(total_users, 0)` to guard division-by-zero. If `total_users = 0`, the query errors with "Division by zero". A SaaS engineer computing conversion rates per cohort/segment will likely hit a zero-denominator cohort eventually. Not blocking, but a clear miss; recommend the canonical form be `ROUND(100.0 * converted_users / NULLIF(total_users, 0), 2)` in a future iter. **NOT a new gap to fix in iter709** unless the same probe recurs — flag as watch-list.
-- Clarity and actionability are still excellent — engineer can paste this and ship.
-
-### Q4 — Iceberg `sorted_by` clustering for customer-scoped queries
-
-**Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — avg 5.00**
-
-CRITICAL VERIFY findings:
-- **`sorted_by` IS a valid Trino 467 Iceberg table property** — confirmed via trino.io/docs/467/connector/iceberg.html: "The sort order to be applied during writes to the content of each file written to the table."
-- **`sorted_by = ARRAY['customer_id ASC']` direction modifier IS valid Trino 467** — confirmed via WebSearch. The Trino docs example shows bare column names `ARRAY['order_date']` / `ARRAY['c1','c2']` but the connector ALSO accepts explicit direction + null-ordering elements per Tabular cheat-sheet and multiple Trino issue references: `ARRAY['order_date DESC NULLS FIRST', 'order_id ASC NULLS LAST']` is a documented form. Responder's `'customer_id ASC'` parses correctly.
-- **`ALTER TABLE ... SET PROPERTIES sorted_by`** — valid. Docs explicitly list sorted_by as one of the post-create-updatable properties (alongside format, format_version, partitioning, object_store_layout_enabled, data_location).
-- **`EXECUTE optimize(file_size_threshold => '512MB')`** — valid. Docs example: `ALTER TABLE test_table EXECUTE optimize(file_size_threshold => '128MB')`. DataSize string with unit accepted.
-- **sorted_by → within-file sort → min/max metadata file-skipping explanation** — accurate.
-- **sorted_by-vs-partitioning distinction** — correct: lexicographic clustering inside files vs separate physical partition directories.
-- **Multi-col sorted_by** — `ARRAY['customer_id ASC','event_ts ASC']` correct shape.
-- **"EXECUTE optimize required to physically rewrite existing data"** — correct; setting sorted_by alone affects only future writes.
-- All clauses land — engineer can paste this DDL into Trino 467 against the Iceberg connector and it will work.
+Verified vs trino.io/docs/467/functions/array.html:
+- cardinality(array) → bigint: CORRECT.
+- array_distinct: CORRECT.
+- contains(array, value) → boolean: CORRECT.
+- element_at(array, n) negative-index = element from the end, NULL-safe out-of-range (vs subscript [] which errors): BOTH CONFIRMED in docs verbatim ("If `index` < 0, `element_at` accesses elements from the last to the first" and "returns NULL when accessing an `index` larger than array length, whereas the subscript operator would fail in such a case").
+- 1-based indexing: implied/correct.
+Bulletproof answer.
 
 ---
 
 ## Overall
 
-| Q | Acc | Comp | Clar | Act | Avg |
-|---|---|---|---|---|---|
-| Q1 | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 | 5 | 4 | 5 | 5 | 4.75 |
-| Q4 | 5 | 5 | 5 | 5 | 5.00 |
+Sub-scores sum: 14 + 19 + 18 + 20 = 71
+Average: 71 / 16 = **4.4375**
 
-**Overall: 74/80 = 4.625 — PASS (>= 3.5)**
+**PASS** (>= 3.5).
 
 ---
 
-## Teacher feedback for iter709
+## Findable-but-missing gap flagged for iter710 (FIX-A candidate)
 
-1. **FIX-A CLOSED.** The READ-ME-FIRST block in r07 worked — it intercepted the leaderboard/NULL-ordering question and produced a clean, defang-stable, docs-quote-anchored answer with no circular framing. No further work needed on NULL ordering. Add to the HELD-LOCK list.
-2. **Q3 minor gap — `NULLIF` for divide-by-zero in percentage formulas.** Not blocking this iter (overall 4.625 PASS), but the SaaS-natural shape "conversion rate per segment/cohort" will eventually hit a zero-denominator segment. Recommend a small additive clarifier in resources/23 (or wherever ROUND/format examples live) showing the canonical defensive form `100.0 * converted / NULLIF(total, 0)` with a one-line "why" (division-by-zero errors in Trino). Treat as watch-list — promote to FIX-A only if the same probe scores < 4.5 again.
-3. **Q4 `sorted_by` direction modifier — NO gap.** Both bare-column `ARRAY['customer_id']` and direction-explicit `ARRAY['customer_id ASC']` / full `ARRAY['customer_id ASC NULLS FIRST']` forms are valid Trino 467. The responder used the explicit form and was correct. If resources currently only show one form, consider adding a brief "both forms valid" note to defang any future "I only see bare-column in docs" worry — but this is polish, not a fix.
-4. **No new gaps that block PASS.** Continue probing held locks; iter709 should probe a fresh angle (e.g., conditional aggregation FILTER vs CASE WHEN, or a federation pushdown shape) rather than re-probe FIX-A.
+**Q1 GROUP-BY-customer_id-count-mislabel — YES, this is a findable bucket-rollup gap.**
 
-NULL-ordering FIX-A: **CLOSED.**
+It's the SAME granularity-mismatch shape as iter702's Pattern-C4 bucket-rollup defect (GROUP BY the per-entity key when you wanted the per-LABEL rollup). The responder offered the EXISTS alternative correctly, but the LEAD copy-attractive canonical IN(SELECT) block is wrapped in a `GROUP BY customer_id, order_status COUNT(*)` shape that yields one-row-per-customer-with-count=1 — NOT the two-bucket "X have orders vs Y never ordered" summary the question phrasing and the alias `customer_count` BOTH promise.
+
+The existing Pattern-C4 inoculation appears to cover the "split into N buckets by range/case and count per bucket" framing but is NOT reaching the specific has-X-vs-no-X 2-bucket pattern where the temptation is to KEEP customer_id in GROUP BY (because "I want one row per customer, then aggregate"). The recipe the responder needs:
+
+> **2-bucket per-entity-has-X rollup pattern**: when the question is "how many entities have X vs don't", the per-entity label assignment goes in an INNER subquery/CTE, and the OUTER query GROUPs BY the label ONLY. Putting both the entity key AND the label in one GROUP BY yields per-entity rows with count=1 (because the entity key already uniquely identifies each row).
+
+Recommended iter710 FIX-A: add a small landing-point card under r07 §1a (semi-join section) or r23 §10 (where the responder is currently pointing) titled "2-bucket has-X-vs-doesn't roll-up — inner CTE labels, outer GROUP BY label only", with a worked SQL pair (WRONG: `GROUP BY customer_id, label`; CORRECT: CTE + `GROUP BY label`). Defang the WRONG shape inline with a comment showing "this yields one row per customer with count=1, NOT the 2-row dashboard summary you wanted." Cross-ref to iter702 Pattern-C4. Use the iter693 defang-inoculation pattern: mark the WRONG block un-copyable and make the CORRECT block the visually-attractive one.
+
+**Q3 "GROUP BY must repeat the CASE" — NOT a defect.** Verified against Trino 467 SELECT docs: only input-column expressions OR ordinals are allowed in GROUP BY; aliases are NOT supported (GH #16533). The responder's claim is accurate for Trino 467. Optional minor add (NOT required for PASS): the resource could mention the `GROUP BY 1, 2` ordinal-position shortcut as a less-verbose alternative — but the responder's claim itself is correct.
+
+**Q2, Q4 — no defects.** Q4 in particular is a bulletproof reference answer (cardinality + array_distinct + contains + element_at with negative index and NULL-safety all correctly stated).
+
+---
+
+## Posture for iter710
+
+- DEFAULT NO-OP probe is the baseline given 170+ consecutive passes; this iter is also a PASS at 4.4375.
+- ONE FIX-A candidate: Q1 2-bucket rollup landing-point card (above). This is a real findable-but-missing gap, not a one-off slip — the responder constructed a canonical block whose grain doesn't match the question's stated dashboard need, and the bucket-rollup-GROUP-BY-label-only lesson did not surface despite resources/23 §10 being cited.
+- If teacher acts on FIX-A: write a small landing-point card (≤30 lines), inline-defang the WRONG shape per the iter693 defang-inoculation pattern (don't write a bare snippet that the weak responder can copy as the canonical), cross-ref to iter702/703 Pattern-C4. Keep r22 federation file UNTOUCHED (HARD LOCK preserved).
+- All other locks preserved.
+- Do NOT bump state.json (per run prompt).
