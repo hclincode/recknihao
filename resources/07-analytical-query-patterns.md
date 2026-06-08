@@ -1935,6 +1935,122 @@ ORDER BY 1, 2;
 | Per-bucket aggregate + running total across buckets (one row per `(tenant, month)` showing both monthly count and cumulative count) | **Pattern A2 (this card)** — GROUP BY + `SUM(COUNT(*)) OVER (...)` |
 | Top-N per group with a bucketed metric | Pattern A2 followed by an outer `WHERE rank <= N` filter on a `RANK() OVER (PARTITION BY tenant_id ORDER BY events_this_month DESC)` column |
 
+### Pattern A3: LEADING CANONICAL — running cumulative PERCENT of grand total (Pareto / cumulative-distribution — running SUM OVER ORDER BY divided by SUM OVER () as a single percent) (iter689 PIN — FIX-A: fusion of running-total + share-of-grand-total, single `100.0 *` only, no double-multiply by 100)
+
+<a id="leading-canonical--running-cumulative-percent-of-grand-total-pareto-iter689-pin"></a>
+
+> **Keyword anchors (READ THIS FIRST if your question contains any of these):** running cumulative percent of total, running cumulative percent of month total, cumulative percent of grand total, cumulative percent of month total, percent collected by end of day, percent of revenue collected by day N, **Pareto cumulative percent**, **Pareto chart**, **80/20 rule**, top N products make up 80 percent, what percent reached by day N, what percent reached by product N, cumulative distribution percent, running share of grand total, share-of-total running, monthly cumulative percent, daily revenue as cumulative percent, cumulative_pct, cum_pct_of_total, what percent collected by end of day. Verified at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html) on 2026-06-08.
+
+**THE ONE FACT — single `100.0 *` only, NEVER double-multiply by 100.** "Running cumulative percent of grand total" is the **fusion** of two primitives this file already canonicalizes separately: the **running SUM** (Pattern A above — `SUM(daily) OVER (ORDER BY d ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`) and the **share of grand total** (the [share-of-grand-total card at r07:1234](#)/§4 — `100.0 * x / SUM(x) OVER ()`, **one** `100.0 *`). When you compose them, the `100.0 *` belongs in exactly **ONE** place — as the leading multiplier that BOTH (a) converts the ratio to a percent AND (b) forces DECIMAL division (dodging the integer-division-truncates-to-0 trap). **DO NOT also append `* 100`** at the end — that is the [iter688 Q3 fab](#) (`100.0 * running / total * 100` = `running/total * 10000`, off-by-100x; the final-row value comes out as `10000.0`, not `100.0`).
+
+**THE PREFERRED CANONICAL — CTE form (lead with this; cleaner, less error-prone than the inline SUM(SUM(...)) form below):**
+
+```sql
+-- "Show daily revenue AND a running cumulative percent of the month's total revenue.
+--  The last day's cumulative percent must equal 100.0 exactly."
+-- Schema: orders(order_date DATE, amount DOUBLE).
+
+WITH daily AS (
+  SELECT order_date,
+         SUM(amount) AS daily_revenue              -- collapse to ONE row per day
+  FROM iceberg.analytics.orders
+  WHERE order_date >= DATE '2026-05-01'
+    AND order_date <  DATE '2026-06-01'             -- bounded to May 2026
+  GROUP BY order_date
+)
+SELECT
+  order_date,
+  daily_revenue,
+  -- Running SUM (numerator) divided by grand-total SUM (denominator), multiplied by 100.0 ONCE.
+  -- 100.0 * (leading) does TWO jobs: (a) converts ratio to percent, (b) forces decimal division.
+  ROUND(
+    100.0 * SUM(daily_revenue) OVER (ORDER BY order_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+          / SUM(daily_revenue) OVER (),
+    1
+  ) AS cumulative_pct_of_total
+FROM daily
+ORDER BY order_date;
+```
+
+**Expected output (monotonically increasing, **EXACTLY 100.0 on the last row**):**
+
+| order_date | daily_revenue | cumulative_pct_of_total |
+|---|---|---|
+| 2026-05-01 | 1000 | 10.0 |
+| 2026-05-02 | 500  | 15.0 |
+| 2026-05-03 | 2500 | 40.0 |
+| ... | ... | ... |
+| 2026-05-31 | 800  | **100.0** |
+
+The cumulative percent rises monotonically from the first day's share through to exactly `100.0` on the final day (the running SUM at the last row equals the grand-total SUM by definition, so the ratio is 1.0 and the percent is 100.0). If your final row shows anything other than `100.0` (e.g. `10000.0`, `1.0`, or `0.0`), you have one of the bugs listed in the DO-NOT-WRITE table below.
+
+**Why each piece matters:**
+- **`WITH daily AS ... GROUP BY order_date`** — pre-aggregate to **one row per day** before running the window. Same recipe as Pattern A's "iter667 BROADEN" callout at r07:1829 — when the source table has many rows per day, collapse first, then window. After this CTE, `order_date` is unique in the input to the window, so `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` and the default `RANGE` give the identical answer; no peer-tie question.
+- **`SUM(daily_revenue) OVER (ORDER BY order_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`** — the numerator: the running cumulative sum through this row. Pattern A frame: positional, row-by-row accumulation, monotonically non-decreasing.
+- **`SUM(daily_revenue) OVER ()`** — the denominator: the **grand total** over the entire result set (the empty `OVER ()` is the whole-set window — see the [share-of-grand-total card at r07:1234](#)). The same constant repeats on every row, so dividing into it gives each row's cumulative share.
+- **`100.0 * <running> / <grand>`** — the **single** `100.0 *` (leading multiplier): does BOTH jobs at once — converts the 0-to-1 ratio to a 0-to-100 percent AND forces the division to run in DECIMAL (not integer), dodging the `integer / integer = 0` truncation trap. **Do not also append `* 100`.**
+- **`ROUND(..., 1)`** — round to one decimal place (`100.0` not `100.00000001`). Use `ROUND(..., 2)` for two decimals if you want percent-with-2dp precision.
+
+**WORKED PARETO VARIANT — top N products make up X percent of revenue (Pareto / 80-20 / ranked cumulative form — `ORDER BY ... DESC` instead of by date):**
+
+```sql
+-- "Rank products by total revenue (highest first); show each product's running cumulative percent of TOTAL revenue.
+--  Find the smallest N such that the top N products account for >= 80% of revenue."
+WITH product_revenue AS (
+  SELECT product_id, SUM(amount) AS product_revenue
+  FROM iceberg.analytics.orders
+  GROUP BY product_id
+)
+SELECT
+  product_id,
+  product_revenue,
+  -- ORDER BY product_revenue DESC → biggest contributors come FIRST → cumulative percent climbs steeply early.
+  ROUND(
+    100.0 * SUM(product_revenue) OVER (ORDER BY product_revenue DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+          / SUM(product_revenue) OVER (),
+    1
+  ) AS cumulative_pct_of_total
+FROM product_revenue
+ORDER BY product_revenue DESC;
+```
+
+Expected shape: the cumulative percent climbs as you go down the ranked list. Top product alone might be 35.0; top 2 products = 58.0; top 5 = 80.5 (the "Pareto 80%" answer is N=5). Wrap the query in an outer `WHERE cumulative_pct_of_total <= 80` (or `<= 80 OR product_id` is the first product crossing 80 — depends on your interpretation of "the threshold row") to filter to just the top-N-that-make-up-80%. The shape — **ranked dimension + cumulative-percent column** — is what makes a Pareto chart.
+
+**INLINE ALTERNATIVE — single-query form with window-over-aggregate `SUM(SUM(amount)) OVER (...)` (one query, no CTE; same answer):**
+
+This is the same construct as Pattern A2's canonical at r07:1888-1903 (`SUM(COUNT(*)) OVER (...)`) — a window function wrapping a GROUP-BY aggregate. The window runs **after** the GROUP BY collapses to one row per day, so the inner `SUM(amount)` is each day's revenue and the outer `SUM(...) OVER (...)` accumulates over those grouped rows. **NOT a banned nested window** — it's a window-over-aggregate, which Trino supports per [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html) ("All Aggregate functions can be used as window functions by adding the `OVER` clause" — applied to the aggregated result, one row per group):
+
+```sql
+-- Equivalent inline form — no CTE, same result. Both SUM(SUM(amount)) OVER calls are window-over-aggregate.
+SELECT
+  order_date,
+  SUM(amount) AS daily_revenue,                        -- inner GROUP BY aggregate
+  ROUND(
+    100.0 * SUM(SUM(amount)) OVER (ORDER BY order_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+          / SUM(SUM(amount)) OVER (),
+    1
+  ) AS cumulative_pct_of_total
+FROM iceberg.analytics.orders
+WHERE order_date >= DATE '2026-05-01'
+  AND order_date <  DATE '2026-06-01'
+GROUP BY order_date
+ORDER BY order_date;
+```
+
+The CTE form (preferred, leading example above) is **clearer to read** — the GROUP BY happens in `daily`, the windowing happens in the outer SELECT, and the `daily_revenue` name in the window arg makes the intent obvious. The inline `SUM(SUM(amount)) OVER (...)` form is **valid Trino 467** but is denser and easier to mis-read as a nested aggregate; prefer the CTE form unless you're golfing for query length.
+
+#### DO-NOT-WRITE (the iter688 Q3 fab class — three load-bearing bugs to never write)
+
+| WRONG | What it produces | RIGHT |
+|---|---|---|
+| `ROUND(100.0 * SUM(daily) OVER (ORDER BY d ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) / SUM(daily) OVER () * 100, 1)` — **DOUBLE-multiply by 100** (the exact iter688 Q3 fab) | The leading `100.0 *` ALREADY makes the result a percent (0..100); the trailing `* 100` then multiplies AGAIN, so the result is `running/total * 10000` — **100x too large**. Final day shows `10000.0`, not `100.0`. The DO-NOT-WRITE shape: `100.0 * x / y * 100` with a leading `100.0` AND a trailing `* 100`. **Pick ONE — only the leading `100.0 *` belongs here.** | `ROUND(100.0 * SUM(daily) OVER (ORDER BY d ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) / SUM(daily) OVER (), 1)` — single `100.0 *`, no trailing `* 100`. Final day = `100.0` exactly. |
+| `ROUND(SUM(daily) OVER (ORDER BY d ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) / SUM(daily) OVER () * 100, 1)` — **integer division without a decimal cast** | If `daily_revenue` is an INTEGER (or BIGINT) and BOTH the numerator and denominator are integers, `int / int` performs **integer division** in Trino — truncates the ratio to `0` BEFORE the `* 100` runs. Every row shows `0` or `0.0`. The trailing `* 100` does nothing because `0 * 100 = 0`. | `100.0 * num / den` (leading DECIMAL literal forces decimal division) OR `CAST(num AS DOUBLE) / den * 100`. See [resource 23 §3 integer-division trap](23-sql-best-practices-olap.md#integer-division-trap) for the broader rule. |
+| `SUM(daily) OVER (ORDER BY d ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_pct_of_total` — **missing the `SUM(...) OVER ()` grand-total denominator entirely** | This is a **running ABSOLUTE total** (1000, 1500, 4000, ..., 10000 on the last row) — NOT a percent. The column header says `cumulative_pct_of_total` but the values are dollars, not percentages. The reader has no idea the column is misnamed until they see a value > 100. | Add the `/ SUM(daily) OVER ()` denominator (and the leading `100.0 *`): `100.0 * <running> / SUM(daily) OVER ()`. The presence of `SUM(...) OVER ()` (empty OVER = grand total) is the load-bearing piece that turns a running total into a running percent. |
+
+**The single rule to remember:** for "running cumulative percent of total," the **whole** expression is `100.0 * <running SUM OVER ORDER BY> / <SUM OVER ()>` — leading `100.0 *` ONCE, no trailing `* 100`, no missing denominator. If you find yourself writing `100.0 * ... * 100` (a leading 100.0 AND a trailing 100), **delete the trailing one** — the leading already did both jobs (percent-conversion + decimal-division forcing).
+
+**Cross-references.** [Pattern A above (running total) at r07:1700+](#pattern-a-running-total-cumulative-sum) — the running-SUM primitive (the numerator). [Pattern A2 above (bucketed running total — GROUP BY + window-over-aggregate) at r07:1868+](#pattern-a2-bucketed-running-total--group-by--window-over-aggregate-canonical-card) — the same `SUM(<agg>) OVER (...)` construct the inline alternative uses. [Share-of-grand-total card at r07:1234+](#) — the `100.0 * x / SUM(x) OVER ()` primitive (single `100.0 *`, the denominator pattern). [Resource 23 §3 integer-division trap](23-sql-best-practices-olap.md) — why the leading DECIMAL literal `100.0` is load-bearing and not interchangeable with `100`. [Resource 28 § GROUPING SETS / ROLLUP / CUBE](28-complex-sql-performance-trino-dbt.md) — if you also want a "grand-total ROW" appended (not a per-row percent column), use ROLLUP instead.
+
 ### Pattern B: Lag / Lead (compare to previous or next row)
 
 "Day-over-day change in revenue per tenant."
