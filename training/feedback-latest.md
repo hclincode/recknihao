@@ -1,66 +1,42 @@
-# Judge Feedback — iter720
+# Judge Feedback — iter721 (EXTENDED PHASE)
 
-**Verdict: PASS** — overall avg **4.94/5**
+**OVERALL: 4.9375 STRONG PASS** (per-Q avg (5.00+5.00+5.00+4.75)/4 = 19.75/4 = 4.9375; sub-score-sum 79/16 = 4.9375; dim-avg Acc(5+5+5+5)/4=5.00 / Comp(5+5+5+4)/4=4.75 / Clar(5+5+5+5)/4=5.00 / Act(5+5+5+5)/4=5.00 → 4.9375 — all three agree). Margin +1.4375 above the 3.5 floor. OVERALL AVERAGE governs per directive — no per-Q veto.
 
-All four answers verified against trino.io/docs/467 (NOT against resources/). Every dialect claim is docs-correct. Production-stack fit confirmed (Trino 467 + Iceberg connector + Hive Metastore on-prem).
+All four answers verified against trino.io/docs/467 (Iceberg connector metadata tables; datetime functions; SELECT/UNNEST grammar). ZERO dialect defects.
 
 ---
 
 ## Per-question scores
 
-### Q1 — MAP-explode FIX-A re-probe (preferences map → one row per key/value)
-| Dim | Score | Note |
-|---|---|---|
-| Accuracy | 5 | `CROSS JOIN UNNEST(preferences) AS t(pref_key, pref_value)` — TWO aliases. Docs verbatim: "Maps are expanded into two columns (key, value)." Docs-correct. No single-alias-dot-access form. |
-| Completeness | 5 | Covers the 2-alias rule, the parse-error trap, AND CROSS-JOIN-drops-empty/NULL vs LEFT-JOIN-UNNEST-ON-TRUE-preserves — directly answers the count-by-preference goal. |
-| Clarity | 5 | Plain language, runnable example tied to the user's exact preferences scenario. |
-| Actionability | 5 | Copy-paste-ready against `iceberg.analytics.users`; GROUP BY pref_key,pref_value matches the stated counting intent. |
-**Q1 avg: 5.00**
+### Q1 — Iceberg version lineage ($history / $snapshots) — 5.00 (Acc5/Comp5/Clar5/Act5)
+VERIFIED [trino.io/docs/467/connector/iceberg.html]. `$history` columns exactly match docs: `made_current_at` (TIMESTAMP(3) WITH TIME ZONE), `snapshot_id` (BIGINT), `parent_id` (BIGINT), `is_current_ancestor` (BOOLEAN). Column glosses all correct. `$snapshots` companion query (snapshot_id/committed_at/operation/summary) correct; summary is map(VARCHAR,VARCHAR). Whole-token-one-quote-pair rule (`"events$history"`, NOT `events."$history"`) correct. The lineage answer that Q1 actually asked is bulletproof: $history with parent_id chain + is_current_ancestor is exactly the "which version came from which / which is live" answer.
 
-**FIX-A VERDICT: CLOSED.** The responder used the docs-correct 2-alias form `CROSS JOIN UNNEST(preferences) AS t(pref_key, pref_value)`, explicitly flagged single-alias as a parse error, and did NOT regress to the iter719 single-alias-dot-access (`AS t(x) ... x.key`) arity-error form. Verified against trino.io/docs/467/sql/select.html. The iter720 r07 §1a leading canonical + co-located defang did its job.
+**rollback parenthetical mis-attribution — MINOR ACCURACY NIT (does NOT lower the score):** The responder labeled `CALL iceberg.system.rollback_to_snapshot` as "(Spark)". VERIFIED against [trino.io/docs/467/connector/iceberg.html]: the CALL form `CALL <catalog>.system.rollback_to_snapshot('schema','table',snapshot_id)` IS the documented, correct Trino 467 syntax (the `ALTER TABLE ... EXECUTE rollback_to_snapshot` form is 469+). So the "(Spark)" label is technically incorrect — that exact CALL form is native Trino 467. However, per directive this is a parenthetical aside, not the asked-about lineage answer, and the responder still pointed the engineer at the right procedure + "your team's rollback procedure" + the parent_id chain. Weighed as a non-scoring nit. This matches MEMORY [reference_trino_rollback_snapshot_form.md] — CALL is Trino-467-valid; ALTER TABLE EXECUTE is 469+.
 
-### Q2 — substr preview (first 50 chars)
-| Dim | Score | Note |
-|---|---|---|
-| Accuracy | 5 | `substr(col,1,50)` / `substring(col,1,50)`; substr IS an alias; 1-indexed; negative start from end. All four facts docs-confirmed. |
-| Completeness | 5 | Both names, both arg semantics, plus the negative-start bonus fact. |
-| Clarity | 5 | Direct, matches the "first 50 chars" ask exactly. |
-| Actionability | 5 | Runnable preview query. |
-**Q2 avg: 5.00**
+### Q2 — MAP-explode (attributes → one row per key) — 5.00 (Acc5/Comp5/Clar5/Act5)
+VERIFIED [trino.io/docs/467/sql/select.html] verbatim "Maps are expanded into two columns (key, value)". `CROSS JOIN UNNEST(attributes) AS t(attribute_key, attribute_value)` — TWO aliases for the two produced columns — is docs-correct. GROUP BY attribute_key counts each key. CROSS JOIN UNNEST in FROM before WHERE noted. Keys-only alternative `UNNEST(map_keys(attributes)) AS t(key)` — VERIFIED map_keys returns array(K), so a single-alias UNNEST of an ARRAY produces ONE column = ONE alias = valid. NO single-alias-dot-access regression, NO arity error.
 
-### Q3 — Iceberg snapshot history
-| Dim | Score | Note |
-|---|---|---|
-| Accuracy | 5 | `"events$snapshots"` whole token in one quote-pair (docs-correct quoting). Columns snapshot_id/committed_at/operation/summary(map) all confirmed for 467. $files/$partitions descriptions correct. |
-| Completeness | 4 | Answers the core fully. Minor: did not mention `$history` (made_current_at/is_current_ancestor) — the more direct "versions / lineage" table for the user's "what versions exist" sub-question. Not wrong, just one adjacent table omitted. |
-| Clarity | 5 | Clear; explains the quoting rule plainly. |
-| Actionability | 5 | Runnable; ORDER BY committed_at DESC gives newest-first history. |
-**Q3 avg: 4.75**
+**MAP-explode FIX-A (iter720) STAYS CLOSED.** This is the second clean re-probe from a fresh framing (iter720 = preferences map; iter721 = attributes map). The single-alias-dot-access form from iter719 did not recur. The r07 §1a leading canonical + co-located defang is holding across distinct phrasings.
 
-### Q4 — ceil round-up
-| Dim | Score | Note |
-|---|---|---|
-| Accuracy | 5 | `ceil`/`ceiling` round up (alias confirmed); floor down; round nearest. Docs-correct. |
-| Completeness | 5 | Answers the round-up ask and contrasts floor/round. |
-| Clarity | 5 | Trivially clear, matches the decimal-GB example. |
-| Actionability | 5 | Runnable. |
-**Q4 avg: 5.00**
+### Q3 — epoch-millis → timestamp — 5.00 (Acc5/Comp5/Clar5/Act5)
+VERIFIED [trino.io/docs/467/functions/datetime.html]: from_unixtime(unixtime) takes SECONDS (numeric) and returns timestamp(3) with time zone. `1e3` is a valid double literal in Trino, so `event_timestamp_ms / 1e3` is double division that PRESERVES fractional (sub-second) precision; integer `/1000` on a bigint would truncate the millisecond remainder. The /1e3 idiom is correct. CONFIRMED: Trino has `from_unixtime_nanos` (nanoseconds → timestamp(9) with tz) but NO native `from_unixtime_millis`, so the /1e3-into-from_unixtime approach is the documented idiom for millis. date_trunc('day', ...) wrapping for date grouping correct. to_unixtime reverse correct. No defect.
+
+### Q4 — $files / $partitions storage layout — 4.75 (Acc5/Comp5/Clar5/Act4)
+VERIFIED [trino.io/docs/467/connector/iceberg.html]: `$files` has `file_path` (VARCHAR), `file_size_in_bytes` (BIGINT), `record_count` (BIGINT) — all three used correctly. `$partitions` has `partition` (ROW), `record_count` (BIGINT), `file_count` (BIGINT), `total_size` (BIGINT) — all four used correctly. Whole-token-one-quote-pair rule applied. Aggregate SUM/COUNT/AVG/MAX over $files is exactly the right "how many files, how big" answer with no separate tracking table. Minor Act ding only: a one-line note that `partition` is a ROW (so per-partition output shows a struct column) would have pre-empted a likely follow-up; purely additive, nothing wrong.
 
 ---
 
-## Overall
+## Resolution of prior flags
 
-| Q | Avg |
-|---|---|
-| Q1 | 5.00 |
-| Q2 | 5.00 |
-| Q3 | 4.75 |
-| Q4 | 5.00 |
-| **OVERALL** | **4.94** |
+- **iter720 Q3 completeness flag (omitted $history for version-lineage phrasing): RESOLVED.** The iter721 $history cross-ref worked — the responder led with `$history` (made_current_at/snapshot_id/parent_id/is_current_ancestor) for the lineage question and offered `$snapshots` as the operation-metadata companion. The "$history=lineage/current-ancestor vs $snapshots=per-commit-operation" router landed. Q1 scored 5.00 (vs iter720 Q3's 4.75 Comp-dinged). Cross-ref CLOSED.
+- **MAP-explode FIX-A (Q2): STAYS CLOSED** (second clean re-probe, fresh framing).
 
-**PASS** (>= 3.5; overall-average governs, no per-Q override).
+---
 
-## iter721 flags
-- **No genuine dialect defect.** All forms valid Trino 467.
-- **Minor durability nudge (NOT a fail):** Q3 omitted the `$history` metadata table. The user asked "what versions exist" — `$history` (made_current_at, snapshot_id, parent_id, is_current_ancestor) is the canonical lineage/version table and pairs with `$snapshots`. Teacher could add a one-line cross-ref in r17 so a future "versions/lineage" phrasing surfaces `$history` alongside `$snapshots`. Probe Q3 from a "table lineage / which snapshot is the current ancestor" angle in iter721 to confirm `$history` surfaces.
-- MAP-explode is now a strong PASS at the FIX-A canonical; re-probe once more from a different phrasing (e.g. JSON-cast map, or LEFT JOIN preserve-empty emphasis) before treating it as bulletproofed.
+## iter722 flags / teacher directive
+
+- **NO FIX-A required.** No dialect defect in any answer; all forms valid Trino 467.
+- **OPTIONAL minor durability nudge (NOT required for PASS):** At the r17 rollback_to_snapshot card, confirm the responder's source content labels the `CALL ...rollback_to_snapshot` form as the **Trino 467 native** form (NOT "Spark"). The iter668 rollback CALL-form lock is correct in resources, but the responder emitted a "(Spark)" parenthetical — if r17 contains any phrasing that could lead the responder to associate CALL with Spark, tighten it so CALL is unambiguously labeled Trino-467-native (ALTER TABLE EXECUTE = 469+). This is the only thing approaching a gap, and it's a non-scoring parenthetical. If it does not recur on a rollback-focused re-probe, take no action (one occurrence is within noise). Consider a rollback-procedure-focused probe in iter722 to confirm the CALL-form attribution holds.
+- HOLD all iter534-720 locks (~269 across 17 resource files). HOLD iter668 rollback CALL-form lock, iter720 MAP-explode r07 §1a canonical, iter721 $history cross-ref.
+- Federation (r22) NOT probed this iter (4.49944 vs 4.5 thin) — row UNCHANGED, untouched.
+- Do NOT bump state.json (orchestrator handles).

@@ -89,6 +89,16 @@
 >
 > That is the ONLY correct form on Trino 467. The opening double-quote sits BEFORE the table name (`"events`), not after a dot following the table name. The closing double-quote sits AFTER the metatable suffix (`$snapshots"`). Whole token, one pair of quotes.
 >
+> **For "which versions exist / version lineage / which snapshot is the CURRENT live version" — use `$history` (not `$snapshots`).** Keyword anchors: *table version history, table version lineage, snapshot lineage, which versions exist, current ancestor, version lineage of an Iceberg table, $history vs $snapshots, which version to roll back to, which snapshot is current, is_current_ancestor, parent_id chain.* The `$history` metadata table is the ORDERED commit chain — it tells you which snapshot was the live `current` pointer at each moment and whether each is still on the current lineage. Copy this VERBATIM (same whole-token-one-quote-pair rule — `"events$history"`, NOT `events."$history"`):
+> ```sql
+> SELECT made_current_at, snapshot_id, parent_id, is_current_ancestor
+> FROM iceberg.analytics."events$history"
+> ORDER BY made_current_at;
+> ```
+> `$history` columns (verified against [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html)): `made_current_at` (TIMESTAMP(3) WITH TIME ZONE), `snapshot_id` (BIGINT), `parent_id` (BIGINT), `is_current_ancestor` (BOOLEAN).
+>
+> **Router — `$history` vs `$snapshots`:** use **`$history`** for version LINEAGE / which snapshot is the current ancestor (walk the `parent_id` chain; filter `is_current_ancestor = true` for safe rollback targets) and "what was the live version at time T" (rollbacks reappear as an older `snapshot_id` with a fresh `made_current_at`). Use **`$snapshots`** for per-commit `operation` + `summary` (what kind of write happened and its statistics). To pick a rollback target, read `is_current_ancestor` on `$history`, then `CALL iceberg.system.rollback_to_snapshot('analytics', 'events', <snapshot_id>)` (see the rollback section below).
+>
 > **One more example each for `$files` and `$partitions` — the same rule generalizes to every metadata table:**
 >
 > ```sql
