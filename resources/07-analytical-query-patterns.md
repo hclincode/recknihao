@@ -1673,7 +1673,42 @@ FROM iceberg.analytics.product_sales;
 - `current_date` → `DATE` (no time component).
 - `current_time` → `TIME WITH TIME ZONE`.
 - `localtimestamp` → `TIMESTAMP` (no TZ; session-local wall clock).
-- **Syntax pin:** `current_timestamp` / `current_date` / `current_time` / `localtimestamp` take **NO parentheses** (SQL-standard special-form syntax); `now()` takes empty parens. Writing `current_timestamp()` is a parse error.
+- **Syntax pin:** `current_timestamp` / `current_date` / `current_time` / `localtimestamp` take **NO parentheses** (SQL-standard special-form syntax); `now()` takes empty parens. Writing `current_timestamp()` is a parse error. (See the dedicated "current_timestamp() — empty parens is a parse error" sub-section immediately below for the UPDATE/INSERT/DELETE landing block + inline-marked DO-NOT-WRITE.)
+
+> **READ-ME-FIRST — `current_timestamp` / `current_date` / `now()` parens rule (iter706 PIN).**
+>
+> **Keyword anchors (any of these in the question → land HERE):** current timestamp in Trino · now() vs current_timestamp · current_date no parens · current_time no parens · localtimestamp no parens · insert current timestamp · set updated_at to now · today's date in a query · current_timestamp() · "current_timestamp() parse error" · "what is the Trino now function" · "stamp the row with now" · "UPDATE ... SET updated_at = current_timestamp" · "INSERT ... VALUES (..., current_timestamp)" · "WHERE created_at > current_timestamp - INTERVAL ..." · `DEFAULT current_timestamp` · `DEFAULT now()` · "give me the current time" · "Trino time of day" · "session time of the query".
+>
+> **The Trino 467 rule, verified verbatim at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html):** *"The following SQL-standard functions do not use parenthesis: `current_date`, `current_time`, `current_timestamp`, `localtime`, `localtimestamp`."* These are niladic SQL-standard functions — they take **NO parentheses**. The ONLY parenthesized form of `current_timestamp` is `current_timestamp(p)` with a **precision argument** (e.g. `current_timestamp(6)` → `timestamp(6) with time zone`). For the "I want now in a parenthesized call" reading, the answer is **`now()`** — `now()` is documented as *"an alias for `current_timestamp`"* and is the ONLY parenthesized form for "the current instant."
+>
+> **Right / wrong / why — copy ONLY from the ✅ rows:**
+>
+> | Form | Verdict | Why |
+> |---|---|---|
+> | `SELECT current_timestamp` | ✅ CORRECT — copy this | Bare niladic form. Returns `timestamp(3) with time zone`. |
+> | `SELECT current_date` | ✅ CORRECT — copy this | Bare niladic form. Returns `DATE`. |
+> | `SELECT current_time` | ✅ CORRECT — copy this | Bare niladic form. Returns `time with time zone`. |
+> | `SELECT localtimestamp` | ✅ CORRECT — copy this | Bare niladic form. Returns `timestamp(3)` (no TZ). |
+> | `SELECT now()` | ✅ CORRECT — copy this | Documented alias for `current_timestamp`; the ONLY parenthesized form for "now." |
+> | `SELECT current_timestamp(6)` | ✅ CORRECT — copy this | The precision-arg form returns `timestamp(6) with time zone`. The `(p)` argument is the only legal parenthesized form of `current_timestamp` itself. |
+> | `UPDATE t SET updated_at = current_timestamp WHERE id = 7` | ✅ CORRECT — copy this | Bare niladic in an UPDATE SET. |
+> | `UPDATE t SET updated_at = now() WHERE id = 7` | ✅ CORRECT — copy this | `now()` alias works identically in an UPDATE SET. |
+> | `INSERT INTO t (id, created_at) VALUES (7, current_timestamp)` | ✅ CORRECT — copy this | Bare niladic in a VALUES list. |
+> | `INSERT INTO t (id, created_at) VALUES (7, now())` | ✅ CORRECT — copy this | `now()` alias in a VALUES list. |
+> | `DELETE FROM t WHERE deleted_at < current_timestamp - INTERVAL '30' DAY` | ✅ CORRECT — copy this | Bare niladic in a WHERE clause. |
+> | `WHERE created_at >= current_date - INTERVAL '7' DAY` | ✅ CORRECT — copy this | Bare `current_date` in a WHERE; subtracting INTERVAL gives a date 7 days ago. |
+> | `current_timestamp()  -- ❌ WRONG: Trino 467 niladic datetime fns take NO parens — use bare current_timestamp or now() — DO NOT COPY` | ❌ PARSE ERROR — never copy | Empty-parens on a niladic SQL-standard function. Trino's parser rejects it. |
+> | `current_date()    -- ❌ WRONG: Trino 467 niladic datetime fns take NO parens — use bare current_date — DO NOT COPY` | ❌ PARSE ERROR — never copy | Same rule — `current_date` takes NO parens in Trino. |
+> | `current_time()    -- ❌ WRONG: Trino 467 niladic datetime fns take NO parens — use bare current_time — DO NOT COPY` | ❌ PARSE ERROR — never copy | Same rule. |
+> | `localtimestamp()  -- ❌ WRONG: Trino 467 niladic datetime fns take NO parens — use bare localtimestamp — DO NOT COPY` | ❌ PARSE ERROR — never copy | Same rule. |
+> | `localtime()       -- ❌ WRONG: Trino 467 niladic datetime fns take NO parens — use bare localtime — DO NOT COPY` | ❌ PARSE ERROR — never copy | Same rule. |
+> | `UPDATE t SET updated_at = current_timestamp() WHERE id = 7  -- ❌ WRONG: empty parens on niladic — use bare current_timestamp or now() — DO NOT COPY` | ❌ PARSE ERROR — never copy | The exact responder-synthesis bug from iter705 Q4. The empty parens make this a Trino parse error even though it would compile in Spark SQL or Postgres. |
+> | `DELETE FROM t WHERE deleted_at < current_timestamp() - INTERVAL '30' DAY  -- ❌ WRONG: empty parens on niladic — use bare current_timestamp or now() — DO NOT COPY` | ❌ PARSE ERROR — never copy | Same iter705 Q4 bug, WHERE-clause variant. The bare form `current_timestamp - INTERVAL '30' DAY` is the fix. |
+> | `INSERT INTO t (id, created_at) VALUES (7, current_timestamp())  -- ❌ WRONG: empty parens on niladic — use bare current_timestamp or now() — DO NOT COPY` | ❌ PARSE ERROR — never copy | Same rule in a VALUES context. |
+>
+> **Why this is a Trino-specific trap (the dialect-confusion source).** Spark SQL, PySpark, and Postgres all accept `current_timestamp()` with empty parens — so the form looks correct to anyone coming from those dialects. But Trino follows SQL-standard niladic syntax strictly: `current_timestamp` (no parens), `current_timestamp(p)` (precision arg), or `now()` (the parenthesized alias) — those are the **only three accepted forms**. Mixing dialects = parse error: `mismatched input '(' expecting ...`.
+>
+> **Quick recall: when you need "now" in a Trino UPDATE / INSERT / DELETE / WHERE / SET / DEFAULT clause, write either `current_timestamp` (no parens) or `now()`. Never `current_timestamp()`.**
 
 **Fact 2 — Iceberg STORAGE: `timestamp with time zone` (timestamptz) is UTC-NORMALIZED on disk; bare `timestamp` is wall-clock with NO normalization.** Per the [Iceberg spec](https://iceberg.apache.org/spec/) — verbatim: *"values are stored as UTC and do not retain a source time zone (2017-11-16 17:10:34 PST is stored/retrieved as 2017-11-17 01:10:34 UTC and these values are considered identical)."* A `timestamp(6) with time zone` column stores **microseconds from epoch UTC** — the original session/source zone is **NOT preserved per value**; the value is an INSTANT. A `timestamp(6)` column (WITHOUT time zone) stores wall-clock microseconds with **no UTC normalization** — what you wrote is what comes back. `AT TIME ZONE 'UTC'` / `AT TIME ZONE 'America/New_York'` on a `timestamptz` value **re-labels** the same UTC instant in the target zone — it does NOT change the stored bytes (display re-render only).
 
