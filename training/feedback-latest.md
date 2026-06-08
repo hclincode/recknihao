@@ -1,85 +1,85 @@
-# Judge Feedback — iter698
+# Judge Feedback — iter699
 
-**Phase**: extended | **Final iterations remaining**: 0 | **Score governance**: overall average
+**Mode**: extended-phase end-of-iteration (4-question durability probe across 4 fresh areas).
+**Verdict**: PASS (overall avg 4.6875 ≥ 3.5).
+**Verification basis**: trino.io/docs/current admin/properties-general, optimizer/cost-based-optimizations, connector/iceberg, sql/select, functions/aggregate.
 
 ---
 
-## Per-question scores
+## Per-question scoring
 
-### Q1 — Month-over-Month revenue (FIX-A2 RE-PROBE)
+### Q1 — HAVING vs WHERE for "accounts with more than 10 orders"
+
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Accuracy | 5 | LAG-on-monthly-CTE form: `date_trunc('month', paid_at)` -> CTE pre-aggregates to one row per calendar month, then `LAG(total_revenue) OVER (ORDER BY month_start)` references the IMMEDIATELY PRECEDING calendar month. SINGLE `* 100.0` multiply (no double-100). NULLIF div-by-zero guard. Verified vs trino.io/docs/467/functions/window.html -- `lag(x)` defaults to offset=1 row, requires `ORDER BY`. No `month=current AND year=current-1` YoY form. No per-row self-join. |
-| Completeness | 5 | Returns rolling time series (`ORDER BY month_start`), exposes both `prev_month_revenue` and `mom_growth_pct`. Explains the load-bearing semantic (LAG counts rows, not days, so pre-agg makes LAG(metric,1) = previous calendar month). |
-| Clarity | 5 | Names CTE clearly; explanation of NULLIF and the row-vs-date distinction; no jargon left unexplained. |
-| Actionability | 5 | Copy-paste runnable Trino 467 SQL against the engineer's `payments(amount, paid_at)` schema. |
+| Accuracy | 5 | (a) `GROUP BY ... HAVING COUNT(*) > 10` is valid Trino 467 SELECT grammar (HAVING listed in `trino.io/docs/current/sql/select.html`). (b) "Aggregates illegal in WHERE" is correct — Trino raises a semantic error if an aggregate appears in WHERE; aggregates must appear in SELECT/HAVING/ORDER BY of the same query. (c) Execution-order FROM/JOIN → WHERE → GROUP BY → HAVING → SELECT matches the standard SQL logical evaluation order Trino follows. WRONG/RIGHT defang is correctly directional. |
+| Completeness | 5 | WRONG form (so the responder doesn't get copy-imitated), RIGHT form, and the WHY (execution order) — all three are present. |
+| Clarity | 5 | Tight: one paragraph of mechanism + two SQL blocks + one-line order. Zero unexplained jargon. |
+| Actionability | 5 | Engineer can paste the RIGHT form and ship. The execution-order line tells them how to reason about future cases (e.g. "why can't I filter on AVG in WHERE"). |
 
-**FIX-A2 STATUS: CLOSED.** The iter697 Q2 YoY-shape-applied-to-MoM-question regression did NOT recur. Responder produced the consecutive-month comparison correctly. The new Sub-canonical at r07:2486+ plus the defanged DO-NOT-WRITE table routed correctly.
+**Q1 avg = 5.00**
 
-### Q2 — approx_distinct for fast unique-visitor count
+### Q2 — Reading EXPLAIN on a slow dashboard query
+
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Accuracy | 4.5 | Signature, HyperLogLog attribution, 2.3% standard error all verified vs trino.io/docs/467/functions/aggregate.html (docs verbatim: "should produce a standard error of 2.3%"). The "Think of it like statistical sampling, not an approximation over the data" line is slightly loose -- HLL is a hash-bit-pattern cardinality sketch, NOT sampling -- but the immediate "not an approximation over the data" caveat partially defangs it. Minor accuracy nick only. CRITICALLY: did NOT cross approx_distinct with approx_percentile (the iter697 FIX held from the opposite side -- validates the sketch-distinction from BOTH sides). |
-| Completeness | 5 | Per-day grouping (the realistic dashboard shape), error envelope worked through with concrete numbers (1M +/- 23k), 10-50x speedup framing, and the "for exact financial reporting, stick with COUNT(DISTINCT)" caveat. |
-| Clarity | 4.5 | "Tiny fixed-size fingerprint per worker and merges them" is good intuition. The "statistical sampling" lead-in could mislead a careful reader -- flag only. |
-| Actionability | 5 | Drop-in SELECT, immediate ~10-50x win on 800M rows; clear decision rule for when to NOT use it. |
+| Accuracy | 5 | (a) `EXPLAIN`, `EXPLAIN ANALYZE`, and `EXPLAIN (TYPE DISTRIBUTED)` are all valid Trino 467 forms (per `trino.io/docs/current/sql/explain.html` grammar). (b) REPLICATE-as-broadcast and REPARTITION-as-hash-shuffle terminology is the Trino plan-node vocabulary (matches Trino UI / `EXPLAIN ANALYZE` output). (c) Function-wrapped-predicate-defeats-partition-pruning is correct — wrapping a partition column in a function (e.g. `date(event_date) = DATE '...'`) prevents the planner from pushing the predicate to partition metadata, since the planner needs a literal-comparable form. (d) Scheduled-time vs CPU-time gap as I/O / downstream wait is the documented interpretation of EXPLAIN ANALYZE operator metrics. |
+| Completeness | 5 | Four-step triage (cluster, pruning, skew, slowest-operator) covers the universe of "why slow"; metrics named (CPU/Scheduled/physicalInputDataSize) tell the reader WHICH numbers to look at. |
+| Clarity | 4 | Dense — works for someone with some Trino UI familiarity. A pure beginner has to internalize REPLICATE/REPARTITION/Filter-above-TableScan vocabulary. Still readable because terms are inline-defined. |
+| Actionability | 5 | Concrete checks ("Queued > 0 in UI", "Filter node ABOVE TableScan = pruning broke", "raw range vs date(col)=DATE'...'") — engineer knows exactly what to look for and what to change. |
 
-### Q3 — Extract JSON fields safely
+**Q2 avg = 4.75**
+
+### Q3 — Iceberg ADD/RENAME column on millions-row table without rewrite
+
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Accuracy | 5 | `json_extract_scalar(json, '$.key')` signature + NULL-on-missing-key both verified vs trino.io/docs/467/functions/json.html. JSONPath `$.plan` syntax correct. MAP alternative `element_at(map, key) -> NULL on missing` verified vs trino.io/docs/467/functions/map.html (docs verbatim: "Returns value for given key, or NULL if the key is not contained in the map"). Correctly distinguished from the array-subscript-out-of-bounds-errors trap; did NOT conflate. |
-| Completeness | 5 | Three field extractions covering string / bool / numeric, missing-key safety call-out, AND the schema-evolution upgrade path (promote to top-level columns at write time for partition pruning + columnar compression), AND the MAP-column alternative. |
-| Clarity | 5 | One-line per concept; no unexplained jargon. |
-| Actionability | 5 | Runs immediately against the engineer's `subscriptions.metadata` raw-JSON column. |
+| Accuracy | 5 | (a) `ALTER TABLE ... ADD COLUMN`, `ALTER TABLE ... RENAME COLUMN`, `ALTER TABLE ... DROP COLUMN` are all valid Trino 467 Iceberg-connector DDL (per `trino.io/docs/current/connector/iceberg.html`). (b) Iceberg schema evolution is metadata-only — these operations mutate the schema in the metadata layer without rewriting Parquet files; old files NULL-fill the new column on read (this is the documented Iceberg-spec behavior for ADD). (c) "Added column always nullable" is correct — Iceberg does not allow NOT NULL on an added column because pre-existing rows have no value (the spec requires added columns to be optional). (d) DROP COLUMN is metadata-only and bytes are recoverable via time-travel until snapshot expiry. |
+| Completeness | 5 | All three operations (ADD, RENAME, DROP) covered with the read-path semantics (NULL-fill), the nullability constraint, and the recoverability window. |
+| Clarity | 4 | Tight and concrete. The table-reference `iceberg.products` is catalog.table — missing schema (production form would be `iceberg.<schema>.products`). Per the directive this is minor / illustrative, but a strict beginner could copy verbatim and hit a "schema not specified" error. Not penalized heavily. |
+| Actionability | 5 | Engineer can paste the DDL and ship; understands the read-time NULL-fill and the time-travel rescue path; knows backfill needs Spark for non-NULL historical values. |
 
-### Q4 — Ordered event sequence (funnel) via MATCH_RECOGNIZE
+**Q3 avg = 4.75**
+
+### Q4 — Broadcast join: huge events to ~200-row lookup
+
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Accuracy | 4.5 | Verified vs trino.io/docs/467/sql/match-recognize.html -- PARTITION BY / ORDER BY / MEASURES / ONE ROW PER MATCH / AFTER MATCH SKIP TO NEXT ROW / PATTERN / DEFINE all valid 467. `FIRST(event_time)` in DEFINE: docs verbatim "Boolean expressions in the DEFINE clause allow the same special syntax as expressions in the MEASURES clause" -- so spec-allowed, even though the docs do not show an explicit DEFINE example using FIRST(). Timestamp + INTERVAL '30' MINUTE is documented arithmetic. The 30-minute time bound on BOTH `created_project` and `invited_teammate` correctly enforces a session window. Minor: `signup AS event_name='signup' AND session_id IS NOT NULL` introduces a session_id column the question did not name -- a reasonable assumption when the question says "same session" but not strictly required. |
-| Completeness | 5 | Captures the FULL sequence (signup -> created_project -> invited_teammate), funnel_start/funnel_end measures, session-window bound, ONE ROW PER MATCH = one row per completer, and the cost framing vs 3-join cascade. |
-| Clarity | 5 | "Regex for SQL rows" is an outstanding one-line analogy; PATTERN/DEFINE walked through. |
-| Actionability | 5 | Engineer can paste against `user_events(user_id, event_name, event_time, session_id)`. |
+| Accuracy | 5 | (a) `SET SESSION join_distribution_type = 'BROADCAST'` (and `'PARTITIONED'` / `'AUTOMATIC'`) is the documented Trino 467 session property and value set (verified against `trino.io/docs/current/admin/properties-general.html` and `optimizer/cost-based-optimizations.html`). (b) Default `join_max_broadcast_table_size = 100MB` is **correct** (verified against `trino.io/docs/current/optimizer/cost-based-optimizations.html` — "By default, the replicated table size is capped to 100MB"). (c) Semantics correct: BROADCAST replicates the build (smaller) side to every worker that holds the probe side, the probe side is not shuffled; PARTITIONED hash-distributes both sides on the join key. The AUTOMATIC-may-shuffle-when-stats-stale caveat is the correct gotcha. |
+| Completeness | 5 | Session property, semantics, size threshold, fallback to PARTITIONED, and stats-stale caveat — every leg of the decision is covered. |
+| Clarity | 5 | One-paragraph reasoning + one SQL block + one fallback statement. Numbers are concrete (200 rows, 100M events, 100MB cap). |
+| Actionability | 5 | Engineer can run the SET SESSION immediately, knows what happens when memory pressures up, knows how to fall back. |
+
+**Q4 avg = 5.00**
 
 ---
 
 ## Overall
 
-| Q | Acc | Comp | Clar | Act | Avg |
-|---|---|---|---|---|---|
-| Q1 MoM | 5.0 | 5.0 | 5.0 | 5.0 | 5.000 |
-| Q2 approx_distinct | 4.5 | 5.0 | 4.5 | 5.0 | 4.750 |
-| Q3 JSON extract | 5.0 | 5.0 | 5.0 | 5.0 | 5.000 |
-| Q4 MATCH_RECOGNIZE | 4.5 | 5.0 | 5.0 | 5.0 | 4.875 |
+**16 sub-scores → average = (5.00 + 4.75 + 4.75 + 5.00) / 4 = 4.6875**
 
-Sub-score sum cross-check: 5+5+5+5 + 4.5+5+4.5+5 + 5+5+5+5 + 4.5+5+5+5 = 78.0 / 16 = **4.875**
-Per-Q avg cross-check: (5.000 + 4.750 + 5.000 + 4.875) / 4 = 19.625 / 4 = **4.90625**
-
-**Overall average = 4.875** (sub-score governance per prompt; per-Q-avg of 4.906 agrees within rounding).
-
-**Verdict: STRONG PASS** (threshold 3.5, margin +1.375).
+**PASS** — clear strong-pass margin.
 
 ---
 
-## FIX status callouts
+## Findable-but-missing gap audit for iter700
 
-- **FIX-A2 (MoM month-over-month, iter697 Q2 regression)**: **CLOSED.** Responder produced LAG-on-monthly-CTE consecutive-month comparison, single 100.0, NULLIF guard. Did NOT regress to the year(current_date)-1 YoY shape. The new Sub-canonical block + DO-NOT-WRITE defanged snippets at r07:2486+ routed correctly.
-- **iter697 approx_percentile fix (held)**: COMPLEMENT-VALIDATED here in Q2. Responder correctly attributed HyperLogLog + 2.3% to approx_distinct (not crossed with approx_percentile). The sketch-distinction now holds from BOTH sides.
-- All ~260 locks (iter534-697) preserved -- no regression.
+| Question | Genuine gap surfaced? | Notes |
+|---|---|---|
+| Q1 HAVING-vs-WHERE | NO | Routing is solid (resources/23 line 1809 cited); WRONG-RIGHT defang correctly directional; aggregates-illegal-in-WHERE and execution-order both docs-consistent. |
+| Q2 EXPLAIN triage | NO | All three EXPLAIN forms valid Trino 467; REPLICATE/REPARTITION vocabulary docs-consistent; function-wrapped-pruning claim correct; Scheduled-vs-CPU interpretation correct. |
+| Q3 Iceberg ADD/RENAME | NO (minor cosmetic only) | All three DDL forms valid; metadata-only claim correct; always-nullable claim correct; time-travel recovery correct. The `iceberg.products` (catalog.table without schema) reference is illustrative and within tolerance per the directive — not a dialect defect, not a findable gap. |
+| Q4 broadcast join | NO | join_distribution_type values correct; 100MB default **verified correct against trino.io/docs/current/optimizer/cost-based-optimizations.html**; BROADCAST/PARTITIONED semantics correct; AUTOMATIC stats-stale caveat correct. |
 
----
+**No findable-but-missing gap and no dialect defect surfaced across all 4 questions.** Every answer is a valid Trino 467 form. All four answers cite the correct resource line ranges and the responder's routing is hitting the landing points.
 
-## New findable-but-missing gaps for iter699
-
-**No critical new gaps.** All four answers landed at or above 4.75 per-Q. Possible probing angles (optional, not required):
-
-1. **"Statistical sampling" analogy nit (Q2)**: minor -- the responder's lead-in "Think of it like statistical sampling" could mislead. If iter699 wants to harden the sketch-mental-model, add a one-line "HLL is NOT sampling -- it counts hash-bit-pattern observations on the WHOLE input" anchor near the approx_distinct canonical so the responder reaches for the more accurate framing. Not a regression risk on its own; flag only.
-
-2. **MATCH_RECOGNIZE schema-fit (Q4)**: responder slipped in `session_id IS NOT NULL` without the question naming a session_id column. Reasonable assumption ("same session") but not strictly required by the question. Optional polish, not a real gap.
-
-**Recommendation for iter699**: probe an unrelated near-threshold area (cost / partitioning / a 4.5-bar federation/CBO topic) rather than re-probe these four -- all four are now solid from multiple angles.
+**iter700 stays DEFAULT NO-OP.** Resources are mature (166+ consecutive PASSES); the three FRESH fixes (iter698 MoM card, iter697 approx_percentile mirror inoculation, iter695 QUALIFY canonical) are intact and the responder is correctly drawing from all three regions when appropriate. No teacher action required for iter700.
 
 ---
 
-## Production-environment fit
+## Teacher feedback
 
-All answers fit Trino 467 + Iceberg + MinIO + on-prem k8s. No cloud-only or Spark-only constructs. No auth/permission scope creep. All SQL is Trino-467 dialect (no QUALIFY, no Snowflake/BigQuery idioms).
+1. **Hold all locks.** No edits required. The four fresh areas probed (HAVING-vs-WHERE, EXPLAIN reading, Iceberg schema evolution, broadcast join) all returned strong-pass answers with no dialect defects.
+2. **Optional cosmetic** (NOT required, NOT a gap): if resources/13 examples consistently use `iceberg.products` (catalog.table) instead of `iceberg.<schema>.products`, consider adding a one-line note that production DDL needs the schema segment. This is purely illustrative-form polish and should NOT trigger a fix-A iteration on its own.
+3. **Maintain the ban-list discipline** — no QUALIFY, no PERCENTILE_CONT, no MEDIAN, no date-minus-date, no array_slice, no element_at-index-0, no CoW-default, no t-digest-with-accuracy-arg leaks observed in any of the 4 answers.
+4. **Responder routing health**: the responder cited resources/23 line 1809 (Q1), resources/18 lines 28-130 (Q2), resources/13 lines 1660-1775 (Q3), resources/18 lines 154-163 (Q4) — four distinct resource regions, all correctly matched to the question's keywords. Findability stays healthy.
