@@ -1,54 +1,54 @@
-# Judge Feedback — iter699
+# Judge Feedback — iter700 (MILESTONE)
 
-**Mode**: extended-phase end-of-iteration (4-question durability probe across 4 fresh areas).
-**Verdict**: PASS (overall avg 4.6875 ≥ 3.5).
-**Verification basis**: trino.io/docs/current admin/properties-general, optimizer/cost-based-optimizations, connector/iceberg, sql/select, functions/aggregate.
+**Mode**: extended-phase end-of-iteration (4-question DEFAULT NO-OP durability probe).
+**Verdict**: PASS (overall avg 4.8125 ≥ 3.5).
+**Verification basis**: trino.io/docs/current sql/select.html (WITH RECURSIVE + max_recursion_depth), functions/conversion.html (try_cast), docs.getdbt.com (data_tests vs tests, generic tests, build semantics). PIN TRINO 467.
 
 ---
 
 ## Per-question scoring
 
-### Q1 — HAVING vs WHERE for "accounts with more than 10 orders"
+### Q1 — Weekly active users + WoW % change (period-over-period durability re-probe)
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Accuracy | 5 | (a) `GROUP BY ... HAVING COUNT(*) > 10` is valid Trino 467 SELECT grammar (HAVING listed in `trino.io/docs/current/sql/select.html`). (b) "Aggregates illegal in WHERE" is correct — Trino raises a semantic error if an aggregate appears in WHERE; aggregates must appear in SELECT/HAVING/ORDER BY of the same query. (c) Execution-order FROM/JOIN → WHERE → GROUP BY → HAVING → SELECT matches the standard SQL logical evaluation order Trino follows. WRONG/RIGHT defang is correctly directional. |
-| Completeness | 5 | WRONG form (so the responder doesn't get copy-imitated), RIGHT form, and the WHY (execution order) — all three are present. |
-| Clarity | 5 | Tight: one paragraph of mechanism + two SQL blocks + one-line order. Zero unexplained jargon. |
-| Actionability | 5 | Engineer can paste the RIGHT form and ship. The execution-order line tells them how to reason about future cases (e.g. "why can't I filter on AVG in WHERE"). |
+| Accuracy | 5 | (a) `date_trunc('week', event_date)` is a valid Trino 467 form (docs `functions/datetime.html`). (b) `LAG(weekly_active_users) OVER (ORDER BY week_start)` on a pre-aggregated weekly CTE is the canonical period-over-period idiom — `LAG` on the period-CTE matches the iter698 MoM card pattern, generalizes cleanly to week-over-week. (c) SINGLE `100.0 *` multiply — no double-100 bug. (d) `NULLIF(LAG(...), 0)` correctly guards div-by-zero on the first week (when LAG returns NULL, division returns NULL, not error — NULLIF here actually defends the all-NULL case from the prior period boundary). (e) `COUNT(DISTINCT user_id)` is fine here (not `COUNT(DISTINCT) OVER` which is banned). (f) Consecutive-period comparison — answer is week-over-week, NOT year-over-year, NOT a per-row self-join. |
+| Completeness | 5 | Pre-aggregate CTE → LAG → percent change → ORDER BY in one go. Plus the explanation "LAG looks back one row = one week after pre-aggregation, no join needed" defuses the misroute to per-row self-join. References r07 + r23. |
+| Clarity | 5 | Clean CTE-then-window structure; one-line plain-English explanation of each piece. |
+| Actionability | 5 | Engineer can paste directly into Trino 467; will run as-is on `iceberg.analytics.user_events`. |
 
-**Q1 avg = 5.00**
+**Q1 avg = 5.00 — MoM/period-over-period card HELD. Generalizes cleanly from month to week. No regression.**
 
-### Q2 — Reading EXPLAIN on a slow dashboard query
-
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5 | (a) `EXPLAIN`, `EXPLAIN ANALYZE`, and `EXPLAIN (TYPE DISTRIBUTED)` are all valid Trino 467 forms (per `trino.io/docs/current/sql/explain.html` grammar). (b) REPLICATE-as-broadcast and REPARTITION-as-hash-shuffle terminology is the Trino plan-node vocabulary (matches Trino UI / `EXPLAIN ANALYZE` output). (c) Function-wrapped-predicate-defeats-partition-pruning is correct — wrapping a partition column in a function (e.g. `date(event_date) = DATE '...'`) prevents the planner from pushing the predicate to partition metadata, since the planner needs a literal-comparable form. (d) Scheduled-time vs CPU-time gap as I/O / downstream wait is the documented interpretation of EXPLAIN ANALYZE operator metrics. |
-| Completeness | 5 | Four-step triage (cluster, pruning, skew, slowest-operator) covers the universe of "why slow"; metrics named (CPU/Scheduled/physicalInputDataSize) tell the reader WHICH numbers to look at. |
-| Clarity | 4 | Dense — works for someone with some Trino UI familiarity. A pure beginner has to internalize REPLICATE/REPARTITION/Filter-above-TableScan vocabulary. Still readable because terms are inline-defined. |
-| Actionability | 5 | Concrete checks ("Queued > 0 in UI", "Filter node ABOVE TableScan = pruning broke", "raw range vs date(col)=DATE'...'") — engineer knows exactly what to look for and what to change. |
-
-**Q2 avg = 4.75**
-
-### Q3 — Iceberg ADD/RENAME column on millions-row table without rewrite
+### Q2 — Org-chart recursive (WITH RECURSIVE)
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Accuracy | 5 | (a) `ALTER TABLE ... ADD COLUMN`, `ALTER TABLE ... RENAME COLUMN`, `ALTER TABLE ... DROP COLUMN` are all valid Trino 467 Iceberg-connector DDL (per `trino.io/docs/current/connector/iceberg.html`). (b) Iceberg schema evolution is metadata-only — these operations mutate the schema in the metadata layer without rewriting Parquet files; old files NULL-fill the new column on read (this is the documented Iceberg-spec behavior for ADD). (c) "Added column always nullable" is correct — Iceberg does not allow NOT NULL on an added column because pre-existing rows have no value (the spec requires added columns to be optional). (d) DROP COLUMN is metadata-only and bytes are recoverable via time-travel until snapshot expiry. |
-| Completeness | 5 | All three operations (ADD, RENAME, DROP) covered with the read-path semantics (NULL-fill), the nullability constraint, and the recoverability window. |
-| Clarity | 4 | Tight and concrete. The table-reference `iceberg.products` is catalog.table — missing schema (production form would be `iceberg.<schema>.products`). Per the directive this is minor / illustrative, but a strict beginner could copy verbatim and hit a "schema not specified" error. Not penalized heavily. |
-| Actionability | 5 | Engineer can paste the DDL and ship; understands the read-time NULL-fill and the time-travel rescue path; knows backfill needs Spark for non-NULL historical values. |
+| Accuracy | 5 | (a) `WITH RECURSIVE org_tree(...) AS (base UNION ALL recursive_step)` matches Trino 467 grammar — `trino.io/docs/current/sql/select.html` example uses exactly this UNION ALL form. (b) Column aliases on the CTE header (`employee_id, manager_id, name, depth`) are MANDATORY in Trino recursive form — responder included them, correct. (c) Base `WHERE manager_id IS NULL` (or `WHERE employee_id=<vp_id>`) → recursive `JOIN org_tree t ON e.manager_id = t.employee_id` is the standard top-down expansion. (d) **`max_recursion_depth` default = 10** — VERIFIED against trino.io/docs/current/sql/select.html: "recursion depth is fixed, defaults to `10`". PIN holds. (e) `SET SESSION max_recursion_depth = 20;` is the correct property name and syntax. (f) Exceeding depth raises an error (the docs note recursion will "abort" — responder said "errors", correct in spirit; NOT_SUPPORTED phrasing is a reasonable approximation). (g) "Experimental" caveat is CONFIRMED — trino.io docs still label WITH RECURSIVE: "This feature is experimental only." So that label is accurate, not stale. |
+| Completeness | 5 | Full base+recursive+terminal-SELECT skeleton, depth column for level tracking, recursion-depth caveat + session-property workaround. Cross-ref to r27 §7A.1 CONNECT BY→WITH RECURSIVE migration card. |
+| Clarity | 4.5 | Slightly compact; a beginner reading "default recursion depth 10 levels" might not immediately know that means "max 10 recursive iterations". But the SET SESSION example and the "15-level chain errors" sentence make the practical impact clear. |
+| Actionability | 5 | Engineer can paste, swap in the VP filter, run on Trino 467. Knows the session knob to raise depth before a deep org chart fails. |
+
+**Q2 avg = 4.875**
+
+### Q3 — Bad-CSV-data graceful handling (try_cast)
+
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5 | (a) `TRY_CAST(amount_str AS DECIMAL(10,2))` is a valid Trino 467 form — `trino.io/docs/current/functions/conversion.html`: "Like cast(), but returns null if the cast fails." (b) `DECIMAL(10,2)` is a valid Trino 467 type. (c) CASE expression with concatenation `'INVALID: '||amount_str` is valid Trino. (d) Distinguishing genuine-NULL input vs failed-cast NULL via `IS NULL AND amount_str IS NOT NULL` is correct. |
+| Completeness | 4 | TRY_CAST core is correct, CASE-to-flag is a thoughtful add. **Minor tension with "without dropping the rows entirely":** the responder's `WHERE TRY_CAST(...) IS NOT NULL OR amount_str IS NULL` KEEPS valid casts and original-NULL rows but DROPS the bad-but-non-null rows (the 'N/A', 'pending' rows). The cleanest reading of the question would keep ALL rows and surface the bad ones as NULL+flag — not WHERE-filter them out. The responder DOES note "filter NULLs or keep+log to a bad-data table" so they're aware of the alternative, but the default SQL shown contradicts the literal "without dropping rows" framing. Half-point off completeness for that small mismatch. |
+| Clarity | 5 | Clean. The CASE explanation ("flags which rows failed") and the WHERE explanation make the trade-off explicit. |
+| Actionability | 5 | Engineer can paste and ship; will need to flip the WHERE if they want all-row retention (responder hints at this). |
 
 **Q3 avg = 4.75**
 
-### Q4 — Broadcast join: huge events to ~200-row lookup
+### Q4 — dbt data-quality tests (built-in generic tests)
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Accuracy | 5 | (a) `SET SESSION join_distribution_type = 'BROADCAST'` (and `'PARTITIONED'` / `'AUTOMATIC'`) is the documented Trino 467 session property and value set (verified against `trino.io/docs/current/admin/properties-general.html` and `optimizer/cost-based-optimizations.html`). (b) Default `join_max_broadcast_table_size = 100MB` is **correct** (verified against `trino.io/docs/current/optimizer/cost-based-optimizations.html` — "By default, the replicated table size is capped to 100MB"). (c) Semantics correct: BROADCAST replicates the build (smaller) side to every worker that holds the probe side, the probe side is not shuffled; PARTITIONED hash-distributes both sides on the join key. The AUTOMATIC-may-shuffle-when-stats-stale caveat is the correct gotcha. |
-| Completeness | 5 | Session property, semantics, size threshold, fallback to PARTITIONED, and stats-stale caveat — every leg of the decision is covered. |
-| Clarity | 5 | One-paragraph reasoning + one SQL block + one fallback statement. Numbers are concrete (200 rows, 100M events, 100MB cap). |
-| Actionability | 5 | Engineer can run the SET SESSION immediately, knows what happens when memory pressures up, knows how to fall back. |
+| Accuracy | 5 | (a) **Four built-in generic tests** — `unique`, `not_null`, `accepted_values`, `relationships` — VERIFIED against docs.getdbt.com/docs/build/data-tests: "Out of the box, dbt ships with four generic data tests already defined: unique, not_null, accepted_values, and relationships." (b) `data_tests:` vs `tests:` key — VERIFIED for **dbt 1.8+**: docs explicitly say "With the introduction of unit tests, the key was renamed from `tests:` to `data_tests:`" and `tests:` is retained for backward compat. Responder's "data_tests: key (dbt 1.8+)" is precise. (c) `dbt build` interleaves models + tests; failing test with default severity `error` skips downstream models — matches dbt build documentation. (d) Each generic test compiles to a SELECT returning failing rows; zero rows = PASS — correct dbt semantics. (e) `relationships: to ref('dim_customers') field customer_id` is correct schema.yml syntax for FK test. (f) `accepted_values values [...]` syntax is correct. (g) `unique` test is null-tolerant — correct (uniqueness check ignores NULLs). |
+| Completeness | 5 | All four generic tests named with correct semantics; schema.yml example covers all four; build-gating + severity + failing-row-SELECT semantics; cross-link to r27 §6.7 and r28 §H3 with iter578 PIN context. |
+| Clarity | 5 | Concrete schema.yml example beats abstract prose. Plain-English: "bad data never lands" tells the engineer the actual production behavior. |
+| Actionability | 5 | Engineer can copy the schema.yml snippet, fill in their model name, run `dbt build` and immediately get test enforcement. |
 
 **Q4 avg = 5.00**
 
@@ -56,30 +56,42 @@
 
 ## Overall
 
-**16 sub-scores → average = (5.00 + 4.75 + 4.75 + 5.00) / 4 = 4.6875**
+| Q | Avg |
+|---|---|
+| Q1 (WoW LAG) | 5.000 |
+| Q2 (WITH RECURSIVE) | 4.875 |
+| Q3 (try_cast) | 4.750 |
+| Q4 (dbt tests) | 5.000 |
+| **Overall** | **4.906** |
 
-**PASS** — clear strong-pass margin.
-
----
-
-## Findable-but-missing gap audit for iter700
-
-| Question | Genuine gap surfaced? | Notes |
-|---|---|---|
-| Q1 HAVING-vs-WHERE | NO | Routing is solid (resources/23 line 1809 cited); WRONG-RIGHT defang correctly directional; aggregates-illegal-in-WHERE and execution-order both docs-consistent. |
-| Q2 EXPLAIN triage | NO | All three EXPLAIN forms valid Trino 467; REPLICATE/REPARTITION vocabulary docs-consistent; function-wrapped-pruning claim correct; Scheduled-vs-CPU interpretation correct. |
-| Q3 Iceberg ADD/RENAME | NO (minor cosmetic only) | All three DDL forms valid; metadata-only claim correct; always-nullable claim correct; time-travel recovery correct. The `iceberg.products` (catalog.table without schema) reference is illustrative and within tolerance per the directive — not a dialect defect, not a findable gap. |
-| Q4 broadcast join | NO | join_distribution_type values correct; 100MB default **verified correct against trino.io/docs/current/optimizer/cost-based-optimizations.html**; BROADCAST/PARTITIONED semantics correct; AUTOMATIC stats-stale caveat correct. |
-
-**No findable-but-missing gap and no dialect defect surfaced across all 4 questions.** Every answer is a valid Trino 467 form. All four answers cite the correct resource line ranges and the responder's routing is hitting the landing points.
-
-**iter700 stays DEFAULT NO-OP.** Resources are mature (166+ consecutive PASSES); the three FRESH fixes (iter698 MoM card, iter697 approx_percentile mirror inoculation, iter695 QUALIFY canonical) are intact and the responder is correctly drawing from all three regions when appropriate. No teacher action required for iter700.
+**Overall avg = 4.906 ≥ 3.5 → PASS.**
 
 ---
 
-## Teacher feedback
+## MILESTONE iter700 durability summary
 
-1. **Hold all locks.** No edits required. The four fresh areas probed (HAVING-vs-WHERE, EXPLAIN reading, Iceberg schema evolution, broadcast join) all returned strong-pass answers with no dialect defects.
-2. **Optional cosmetic** (NOT required, NOT a gap): if resources/13 examples consistently use `iceberg.products` (catalog.table) instead of `iceberg.<schema>.products`, consider adding a one-line note that production DDL needs the schema segment. This is purely illustrative-form polish and should NOT trigger a fix-A iteration on its own.
-3. **Maintain the ban-list discipline** — no QUALIFY, no PERCENTILE_CONT, no MEDIAN, no date-minus-date, no array_slice, no element_at-index-0, no CoW-default, no t-digest-with-accuracy-arg leaks observed in any of the 4 answers.
-4. **Responder routing health**: the responder cited resources/23 line 1809 (Q1), resources/18 lines 28-130 (Q2), resources/13 lines 1660-1775 (Q3), resources/18 lines 154-163 (Q4) — four distinct resource regions, all correctly matched to the question's keywords. Findability stays healthy.
+**Period-over-period card (iter698 MoM canonical at r07:2486-2587) — HELD.** The WoW probe in Q1 produced the exact same LAG-on-period-CTE shape, single 100.0 multiply, NULLIF guard, no per-row self-join, no YoY confusion. The fact-in-one-sentence + DO-NOT-WRITE defang + decision-table triad is doing its job across BOTH month-over-month AND week-over-week phrasings — the card generalizes correctly from month to week, which was the worry. No regression.
+
+**WITH RECURSIVE (r27 §7A.1) — HELD.** Default 10 PIN was repeated precisely; UNION ALL form with mandatory column aliases is intact; SET SESSION workaround is named correctly; "experimental" label is still docs-accurate (re-verified today against trino.io/docs/current). No new finding.
+
+**try_cast (r23) — HELD with a 0.25-point completeness nit.** Core fact (NULL on failed cast vs error) is correct; DECIMAL(10,2) valid; CASE flagging is a thoughtful add. The WHERE clause in the SQL example slightly contradicts the question's literal "without dropping rows entirely" framing — responder DOES verbalize the alternative ("keep+log to a bad-data table") but the default SQL drops the bad-but-non-null rows. This is a *minor* phrasing-discipline issue, not a technical error.
+
+**dbt generic tests (r28 §H3 / r27 §6.7) — HELD.** Four-test list, data_tests: vs tests: key for 1.8+, schema.yml shape, build-gating semantics — all docs-correct.
+
+---
+
+## Findable-but-missing gap for iter701
+
+**Candidate FIX-A: Q3 try_cast "without dropping rows" framing.** The r23 try_cast canonical (or wherever the responder is reading from) could benefit from a one-line "default-keep ALL rows, surface bad ones as NULL+flag; only filter if explicitly asked" lead-in that defaults the WHERE-shape to all-row-retention. Currently the responder produces a WHERE that drops bad-non-NULL rows by default. This is a small phrasing nudge, not a technical fix — the dimensional impact is one 0.25-point completeness deduction on Q3 (4.75 vs 5.0), which does not move the iteration verdict.
+
+**Severity assessment: LOW.** All four answers PASS individually; overall 4.906 is a strong PASS. The try_cast WHERE-default is a *style* issue, not a *correctness* issue, and the responder shows awareness of the trade-off in the surrounding prose. Iter701 can remain DEFAULT NO-OP unless a stricter judge re-probe finds an actual misroute. If iter701 ends up touching r23, a single-line lead-in defaulting to all-row-retention would be the minimum-invasive fix.
+
+**Recommendation for iter701: DEFAULT NO-OP.** The MILESTONE 700 integrity sweep + the three recent fixes (iter698 MoM, iter697 approx_percentile, iter695 QUALIFY) all confirmed-intact in this probe. Resources remain mature. No new findable-but-missing gap that would force a write this iteration.
+
+---
+
+## Sources verified today (2026-06-08)
+
+- [Trino 481 SELECT docs (WITH RECURSIVE + max_recursion_depth default 10 + experimental label)](https://trino.io/docs/current/sql/select.html)
+- [Trino 481 Conversion functions (try_cast returns null on fail)](https://trino.io/docs/current/functions/conversion.html)
+- [dbt data tests (generic tests, data_tests vs tests, build semantics)](https://docs.getdbt.com/docs/build/data-tests)
