@@ -1,147 +1,137 @@
-# Iter 674 — Judge Feedback
+# Iter 675 — Judge Feedback
 
 **Date**: 2026-06-08
 **Phase**: extended
-**Verdict**: STRONG PASS — overall 5.00 (margin +1.50 above 3.5 floor)
-**Iteration directive**: DEFAULT NO-OP / durability-breadth (4 fresh-but-canonical SQL primitives — split_part middle-extraction, COALESCE display fallback, filter+reduce in-place sum, array_join collapse). Verified each against trino.io/docs/467 (did NOT trust resources/).
+**Overall**: 4.50 PASS (margin +1.00 above 3.5 floor; -0.50 swing DOWN from iter674's 5.00 STRONG PASS)
+**Docs-truth verification source**: trino.io/docs/467/functions/{array,aggregate}.html (WebFetched 2026-06-08)
 
 ---
 
-## Per-Question Scoring
+## Per-question scores
 
-### Q1 — split_part middle extraction (CATEGORY-SUBCAT-ITEMID → SUBCAT)
-
-**Answer**: `SELECT split_part(sku, '-', 2) AS subcategory FROM products;`
-
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5 | `split_part(string, delimiter, index) → varchar` verified at trino.io/docs/467/functions/string.html; fields are 1-based; index 2 of 'CATEGORY-SUBCAT-ITEMID' correctly yields SUBCAT. Index 2 of a 3-field string is in-bounds, so the NULL-when-index-exceeds-field-count edge does not apply here. |
-| Completeness | 5 | Names the function, the signature, the 1-indexing, and why position 2 = middle. Single-row-per-product, no extra ceremony. |
-| Clarity | 5 | Zero-jargon, mirrors the question shape, copy-paste one-liner. |
-| Actionability | 5 | Engineer runs as-is. |
-
-**Q1 = 5.00**
-
----
-
-### Q2 — coalesce display fallback (display_name → email → 'Anonymous')
-
-**Answer**: `SELECT COALESCE(display_name, email, 'Anonymous') AS user_label FROM customers;`
-
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5 | `coalesce(value1, value2[, ...])` multi-arg first-non-null verified at trino.io/docs/467/functions/conditional.html ("Returns the first non-null value in the argument list"). Exact canonical idiom. |
-| Completeness | 5 | All three fallback levels, correct precedence, string literal as terminal sentinel. |
-| Clarity | 5 | Self-explanatory; explanatory note restates left-to-right evaluation in plain English. |
-| Actionability | 5 | Engineer runs as-is. |
-
-**Q2 = 5.00**
-
----
-
-### Q3 — array filter + reduce in-place sum, no UNNEST
+### Q1 — Date-spine gap-fill (2026-01-01..today, COALESCE 0 for missing days)
 
 **Answer**:
 ```sql
-SELECT order_id,
-       COALESCE(reduce(filter(line_item_prices, p -> p > 10),
-                       CAST(0 AS double),
-                       (s, x) -> s + x,
-                       s -> s),
-                0.0) AS total_over_10
-FROM orders;
+SELECT day, COALESCE(cnt, 0) AS signups
+FROM (SELECT * FROM UNNEST(sequence(DATE '2026-01-01', CURRENT_DATE)) AS t(day)) calendar
+LEFT JOIN daily_signups s ON s.day = calendar.day
+ORDER BY day;
 ```
 
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5 | All HOF signatures verified at trino.io/docs/467/functions/array.html: `filter(array(T), function(T, boolean)) → array(T)` ✓; `reduce(array(T), initialState S, inputFunction(S, T, S), outputFunction(S, R)) → R` 4-arg form ✓; lambdas `(s, x) -> s + x` and `s -> s` correctly typed. `CAST(0 AS double)` is the correct initial-state type when line_item_prices is double. See nuance section below for COALESCE verdict. |
-| Completeness | 5 | One row per order ✓, no UNNEST ✓, in-place HOF composition ✓, filter-then-reduce pipeline ✓; the responder also names the empty-filtered-array edge case it is guarding. |
-| Clarity | 5 | Each clause of the composed expression is annotated in the explanatory note; lambda syntax and the 4-arg reduce form are named, not assumed. |
-| Actionability | 5 | Engineer runs as-is. If `line_item_prices` is `decimal(p,s)` rather than double, swap `CAST(0 AS double)` → `CAST(0 AS decimal(p,s))` and `0.0` → matching decimal — the composed HOF shape is the actionable bit. |
+**Scores**: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 = **5.00**
 
-**Q3 = 5.00**
+**Verdict**: Fully correct. `sequence(DATE, DATE)` 2-arg form defaults to a +1 day step per trino.io/docs/467/functions/array.html verbatim ("incrementing by 1 day if start date is less than or equal to stop date"). `UNNEST(sequence(...)) AS t(day)` date-spine + `LEFT JOIN` + `COALESCE(cnt, 0)` zero-fill is the canonical Trino 467 pattern. (Minor: `cnt` is the assumed daily_signups count column — structurally correct; only matters if the actual column is named differently.) Docs-verified.
 
-#### Q3 reduce-on-empty-array (COALESCE necessity) nuance verdict
+### Q2 — Top-3 scores per user (array_sort + slice, no UNNEST)
 
-**VERIFIED (trino.io/docs/467/functions/array.html)**: `reduce` on an empty array returns the `initialState`, NOT NULL. Docs verbatim:
-```
-SELECT reduce(ARRAY[], 0, (s, x) -> s + x, s -> s); -- 0
+**Answer**:
+```sql
+SELECT user_id,
+       array_slice(array_sort(scores, (a, b) -> IF(a > b, -1, 1)), 1, 3) AS top_3_scores
+FROM users
+WHERE scores IS NOT NULL;
 ```
 
-Therefore the outer `COALESCE(..., 0.0)` is **REDUNDANT BUT HARMLESS** for the empty-filtered-array case, **NOT strictly necessary**.
+**Scores**: Accuracy 2 / Completeness 4 / Clarity 4 / Actionability 2 = **3.00**
 
-It remains **useful as a defensive guard against `line_item_prices` itself being NULL** (where `filter(NULL, ...) → NULL → reduce(NULL, ...) → NULL` → COALESCE would matter). The responder's stated rationale ("handles empty-filtered-array → reduce-returns-NULL edge") is technically wrong on the *mechanism* (reduce returns initialState on empty array, not NULL), but the resulting query is still **fully correct**. No accuracy deduction — only a one-line teacher-note opportunity to sharpen the rationale in the canonical resource.
+**EXPLICIT VERDICT — FABRICATED FUNCTION DEFECT**: `array_slice` is **NOT a real Trino 467 function**. WebFetched trino.io/docs/467/functions/array.html on 2026-06-08 — the documented array-subsetting function is **`slice(x, start, length)`** (1-based; negative start counts from the end). `array_slice` is a Presto-legacy / Spark / other-dialect name; in Trino 467 it fails at parse time with "Function array_slice not registered". The query will NOT execute as written.
 
----
+The descending-sort half is correct: `array_sort(array(T), function(T, T, int))` with the `(a,b) -> IF(a > b, -1, 1)` comparator returning -1/0/1 is the docs-correct 2-arg form (trino.io/docs/467/functions/array.html verbatim "Sorts and returns the array based on the given comparator function"). Only the wrapping slice function name is wrong.
 
-### Q4 — array_join collapse to delimited string
+**Correct form**:
+```sql
+SELECT user_id,
+       slice(array_sort(scores, (a, b) -> IF(a > b, -1, 1)), 1, 3) AS top_3_scores
+FROM users
+WHERE scores IS NOT NULL;
+```
 
-**Answer**: `SELECT order_id, array_join(tags, ',') AS tags_string FROM orders;`
+**Root cause — LANDING-POINT-MISS**: `slice(` returns ZERO grep hits across all resources/ files (verified 2026-06-08). The responder had no canonical to anchor to and fabricated `array_slice` by family-name analogy from `array_sort`/`array_distinct`/`array_except` — exactly the failure mode the responder-findability memory note warns about. Top-N-from-pre-sorted-array is a routine SaaS pattern (leaderboards, recent-N, top scores); the responder cannot land it correctly without a canonical.
 
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5 | `array_join(x, delimiter) → varchar` verified at trino.io/docs/467/functions/array.html; 3-arg `array_join(x, delimiter, null_replacement) → varchar` overload also confirmed (NULL elements skipped in 2-arg form, replaced in 3-arg). Trino-correct idiom, NOT the Spark/Hive `concat_ws-for-arrays` confusion. |
-| Completeness | 5 | One row per order ✓, single-call no-UNNEST shape ✓, framing distinct from aggregate STRING_AGG-style across-rows building is exactly the disambiguation a SaaS engineer with Postgres background needs. |
-| Clarity | 5 | One-liner, plainly named. |
-| Actionability | 5 | Engineer runs as-is. The 3-arg null-replacement form is a worth-mentioning durability add but not a deduction (question gave no null-element constraint). |
+### Q3 — max_by per group (customer with largest order per product)
 
-**Q4 = 5.00**
+**Answer**:
+```sql
+SELECT product_id, max_by(customer_id, amount) AS customer_with_largest_order
+FROM orders
+GROUP BY product_id;
+```
+
+**Scores**: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 = **5.00**
+
+**Verdict**: Fully correct. WebFetched trino.io/docs/467/functions/aggregate.html — `max_by(x, y)` returns "the value of x associated with the maximum value of y" verbatim, one row per GROUP BY group. The ROW(amount, order_id) tiebreaker note (`max_by(customer_id, ROW(amount, order_id))`) is a sound deterministic-tiebreak idiom — ROW comparison is lexicographic in Trino, so ties on amount are broken by order_id. Iter638/iter656/iter658 PINs at r23:636/652 + r07:2254 anchor this landing point. Docs-verified.
+
+### Q4 — array_except per user (categories viewed but not purchased)
+
+**Answer**:
+```sql
+SELECT user_id, array_except(viewed_categories, purchased_categories) AS viewed_not_purchased
+FROM users;
+```
+
+**Scores**: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 = **5.00**
+
+**Verdict**: Fully correct. WebFetched trino.io/docs/467/functions/array.html — `array_except(x, y)` "Returns an array of elements in x but not in y, without duplicates" verbatim. r07:238 §1a.3-1a.4 canonical anchors the 2-arg form. Docs-verified.
 
 ---
 
 ## Overall
 
-**Per-Q**: (5.00 + 5.00 + 5.00 + 5.00) / 4 = **5.00**
-**Dim-avg cross-check**: Acc(5+5+5+5)/4=5.00 / Comp(5+5+5+5)/4=5.00 / Clar(5+5+5+5)/4=5.00 / Act(5+5+5+5)/4=5.00 → (5.00+5.00+5.00+5.00)/4 = **5.00** ✓
+**Average**: (5.00 + 3.00 + 5.00 + 5.00) / 4 = 18.00 / 4 = **4.50**
 
-**GOVERNING LABEL**: **STRONG PASS** (overall 5.00 ≥ 3.5 by margin +1.50; ZERO per-Q below 5.00; all four Trino-467 docs-verified).
+**Dim-avg cross-check**:
+- Accuracy: (5+2+5+5)/4 = 4.25
+- Completeness: (5+4+5+5)/4 = 4.75
+- Clarity: (5+4+5+5)/4 = 4.75
+- Actionability: (5+2+5+5)/4 = 4.25
+- = (4.25+4.75+4.75+4.25)/4 = **4.50** — agrees.
+
+**GOVERNING LABEL**: **PASS** (overall 4.50 >= 3.5 by margin +1.00; per-directive the overall average governs PASS/FAIL — no per-question quality-gate override).
+
+**Flagged weak answer**: Q2 (3.00) — fabricated-function parse error on `array_slice`. The query will not run. Flagged in prose per directive; does not override the overall PASS label.
 
 ---
 
-## Flagged Weak Answers
+## Topic updates
 
-None. All four answers are substantively correct, Trino-467 dialect-correct, and run as-is. Q3's *rationale prose* has a minor mechanism mis-statement (reduce-on-empty returns initialState, not NULL) but the *query itself* is fully correct.
+- **Analytical query patterns on Iceberg+Trino / date-spine gap-fill** (Q1 sequence-DATE-2-arg-default-1-day + UNNEST + LEFT JOIN + COALESCE canonical durability +0.25) — HOLDS at PASSED.
+- **Analytical query patterns on Iceberg+Trino / top-N-from-array (array_sort-comparator + slice)** (Q2 array_sort comparator-form CORRECT but slice landing-point MISSED → fabricated `array_slice`) — LANDING-POINT-MISS, no false claim in resources but a missing canonical. Topic remains PASSED (high prior datapoints) but this gap should be closed.
+- **Analytical query patterns on Iceberg+Trino / max_by per group** (Q3 max_by + ROW-tiebreaker canonical durability +0.25) — HOLDS at PASSED.
+- **Analytical query patterns on Iceberg+Trino / array set-difference (array_except)** (Q4 array_except 2-arg canonical durability +0.25) — HOLDS at PASSED.
 
 ---
 
-## Teacher Feedback (Actionable)
+## Teacher feedback — iter676 recommendation
 
-**iter675 directive: DEFAULT NO-OP / durability-breadth continuation.**
+**iter676 = FIX-A: add `slice(array, start, length)` canonical near the array_sort / top-N-from-array route**
 
-All four answers landed perfect 5/5/5/5 on a clean Trino-467 dialect sweep over string/conditional/HOF/array primitives that are already canonical in resources/. The responder is reliably routing to the correct landings:
-- split_part 1-based + middle-position-of-3-field (r23 §3.1A + r27 string-function-migration table HELD)
-- coalesce multi-arg first-non-null (r07 / r23 / r28 ubiquitous-and-correct HELD)
-- filter + reduce 4-arg HOF composition (r07 §1a.2 LEADING CANONICAL HELD)
-- array_join 2-arg + 3-arg null-replacement (r09 + r23 + r27 §7A.2A/2B HELD)
+Concrete prescription:
+- **Target file**: `resources/07-...` (or wherever the §1a.3-1a.4 array HOF canonical lives — adjacent to `array_sort` + `array_distinct` + `array_except` block at ~r07:237-275).
+- **Canonical to add**: `slice(array(T), start, length) -> array(T)` — "Subsets array x starting from index start (1-based; negative start counts from the end) with a length of length." Cite trino.io/docs/467/functions/array.html verbatim.
+- **Worked example** (top-3-from-pre-sorted-array, the exact Q2 shape):
+  ```sql
+  -- top 3 descending: sort desc, then slice first 3
+  SELECT user_id,
+         slice(array_sort(scores, (a, b) -> IF(a > b, -1, 1)), 1, 3) AS top_3_scores
+  FROM users;
 
-**No FIX-A inoculations warranted.** No verified-false claims in any of the four answers. No dialect leakage (no `array_contains`, no Spark `concat_ws-for-arrays`, no 0-based string index, no fabricated `format_number(x, decimals)` Spark form).
+  -- last 5 elements: negative start
+  SELECT id, slice(events, -5, 5) AS last_5 FROM t;
+  ```
+- **DO-NOT-WRITE inoculation row** in the dialect-leak table: `array_slice(...)` is Presto-legacy / Spark / BigQuery — NOT Trino 467; will fail with "Function array_slice not registered". Use `slice(...)` instead.
+- **Keyword anchors** (for responder findability): "take first N", "top 3 from array", "first 3 elements", "last 5 elements", "subset array", "slice array", "array_slice", "first N of sorted array", "top-N without UNNEST".
+- **Cross-reference**: from the `array_sort` block + the `max_by(x, y, n)` 3-arg block (which is the GROUP-BY-aggregate alternative for top-N-per-group) — both routes converge on top-N patterns and should mention `slice()` as the per-row pre-sorted-array sibling.
 
-**Optional one-line durability note** for the filter+reduce canonical (r07 §1a.2): clarify that `reduce` on an empty array returns the `initialState` (not NULL), so the outer `COALESCE(reduce(...), <initial>)` pattern is a defensive guard against the *outer* array being NULL — not against the empty-filter case. This is a sharpen-the-rationale add, NOT a FIX-A; the query shape itself is correct.
+**Rationale**: The Q2 failure is a clean landing-point miss, not a false claim. iter674 state.json notes (a) correctly identified `slice()` as a synthesizable-from-primitives WATCH-ITEM and held it per CLEAN-NO-OP directive. iter675's first probe into the WATCH-ITEM area landed exactly on the gap, producing a fabricated-function parse error. The gap is now confirmed real and should be closed in iter676. Cost is low (single canonical entry + worked example + DO-NOT-WRITE row); benefit is high (top-N-from-array is a routine SaaS pattern).
 
-**Suggested fresh adjacent areas for iter675 probes (synthesizable-from-primitives — DO NOT pre-probe)**:
-- (a) `transform_keys` / `transform_values` on MAP types
-- (b) `slice(array, start, length)` for windowed array slicing
-- (c) `sequence(start, stop, step)` for generated-series patterns
-- (d) `zip(array1, array2, ...)` and `zip_with(array1, array2, function)` paired-array HOF
+**Margin trajectory**: iter674 5.00 -> iter675 4.50 (-0.50). Still well above 3.5 floor by +1.00 margin. One fabricated-function defect in Q2 is the entire delta; Q1/Q3/Q4 sweep perfect 5.00. After iter676 FIX-A, expect re-probe of top-N-from-array shapes to land at 5.00.
 
-**Hold lines (DO NOT)**:
-- bump training/state.json (teacher already set to 674);
-- touch r22 federation guardrails (30-iter ZERO probe streak; 4.5 threshold thin — federation row UNCHANGED iter645–674);
-- rewrite iter534–673 locks (iter673 four-primitive sweep MAP/NULLIF/greatest/CASE-histogram HELD; iter672 JSON/try_cast/contains/approx_distinct HELD; iter671 ts-diff FIX-A HELD; iter670 MoR-vs-CoW HELD; iter669 DML-surface HELD; iter668 r27:4122 rollback-CALL-467-form HELD; iter667 DataSize unit-suffix + ROWS-vs-RANGE HELD; iter666 Spark-CALL→Trino-ALTER-TABLE-EXECUTE HELD; iter665 day_of_week-name HELD);
-- add `::`-casts (iter571 PIN), QUALIFY, RLIKE (iter623 ban), PERCENTILE_CONT / MEDIAN (iter611 ban), EXTRACT(EPOCH) (iter562 ban);
-- fabricate dayname() / initcap (iter659 + iter665 inoculation HELD);
-- DISTINCT ON Postgres leak (iter634 ban);
-- 0=Sunday Postgres carryover (iter665 ban HELD);
-- WRITE `timestamp - timestamp` ANYWHERE in resources (iter671 FIX-A CONFIRMED CLOSED);
-- present `array_contains` as a Trino form (iter672 dialect verification HOLDS);
-- claim Trino-Iceberg defaults to CoW (iter669 FIX-A inoculation HOLDS).
+**DO NOT**:
+- Bump training/state.json (teacher already set to 675; iter676 directive scope is teacher's, not judge's).
+- Touch r22 federation guardrails (consecutive non-probe streak now 31 iterations iter645-675; 4.5 threshold thin).
+- Rewrite any iter534-674 locks (all HOLD — verified against trino.io/docs/467 this iteration: sequence-DATE-2-arg-default-1-day-step ✓, array_sort-2-arg-comparator-form ✓, max_by(x,y) + 3-arg variant ✓, array_except(x,y) ✓).
+- Introduce `array_slice` anywhere in resources/ — it does NOT exist in Trino 467 and must be listed as DO-NOT-WRITE.
+- Pre-probe other CLEAN-NO-OP WATCH-ITEMs (transform_keys/values, map_zip_with, sequence-int-step generalization, zip_with paired-array HOF) in the same iteration as the FIX-A — keep the FIX-A focused.
 
-**Topic-row durability +0.25 each (no new failing topics)**:
-- SQL query best practices for OLAP / split_part middle-extraction (Q1)
-- SQL query best practices for OLAP / coalesce fallback chain (Q2)
-- Analytical query patterns on Iceberg+Trino / filter+reduce HOF in-place sum (Q3 — with optional one-line "COALESCE-defensive-not-necessary-for-empty-filtered-array" rationale-sharpening note)
-- Analytical query patterns on Iceberg+Trino / array_join collapse (Q4)
-
-**Meta-note**: iter674 is the third 5.00 (or near-5.00) STRONG PASS in the last four iterations (iter671=4.9375, iter672=5.00, iter673=4.9375, iter674=5.00). The CLEAN NO-OP iteration cadence is working — the teacher correctly read the directive premises against trino.io/docs/467 and identified that both directive premises (split_part-empty-string-past-end and format_number-not-in-Trino) were themselves docs-wrong, so produced zero churn. The responder is consistently routing all four primitives to the correct canonical landings with full dialect compliance.
-
-**OVERALL: 5.00 STRONG PASS — four-primitive Trino-467 dialect sweep split_part / coalesce / filter+reduce / array_join all perfect 5/5/5/5; Q3 outer-COALESCE nuance-verdict: REDUNDANT-BUT-HARMLESS for empty-filtered-array (reduce returns initialState 0.0 per docs verbatim), still useful as defensive NULL-array guard; iter675 recommended DEFAULT NO-OP / durability-breadth continuation over fresh adjacent areas (transform_keys/values, slice, sequence, zip/zip_with).**
+**Meta-note**: The CLEAN-NO-OP cadence at iter674 was correct in spirit, but iter675's first WATCH-ITEM-area probe surfaced exactly the synthesizable-from-primitives gap the teacher had held — confirming that synthesizable-WATCH-ITEMs sometimes need concrete canonicals (responder fabricates by family-name analogy when no canonical anchors the function name). FIX-A in iter676 closes this surgically without manufacturing broader churn.
