@@ -3418,6 +3418,61 @@ models:
 
 ---
 
+### 6.7H2 LEADING CANONICAL — dbt EXPOSURES are the NATIVE first-class feature for declaring downstream/external consumers (BI dashboards, ML pipelines, reverse-ETL)
+
+> **Keyword anchors (route the question here):** dbt exposures, exposures.yml, register a downstream consumer in dbt, external dashboard depends on dbt model, Looker/Tableau dashboard in dbt lineage, track what consumes a dbt model, lineage for external consumers, mark a dbt model as exposed, downstream BI / ML / reverse-ETL in dbt DAG, declare a downstream user of a dbt model, document who consumes a dbt model, dbt depends_on type exposure. Verified at [docs.getdbt.com/docs/build/exposures](https://docs.getdbt.com/docs/build/exposures) and [docs.getdbt.com/reference/exposure-properties](https://docs.getdbt.com/reference/exposure-properties).
+
+**Exposures ARE the native dbt feature for this** — NOT a workaround, NOT an open-source plugin, NOT something you have to bolt on with `post_hook` / external metadata. An `exposures.yml` resource is a first-class dbt node type (alongside `models`, `sources`, `seeds`, `snapshots`, `tests`, `metrics`, `macros`) that registers a downstream/external consumer (a BI dashboard, an ML pipeline, a reverse-ETL sync, a notebook, an application) in the dbt DAG, with explicit `depends_on: [ref('model_name')]` edges pointing UP into the dbt models it consumes. `dbt docs generate` renders the exposure as a downstream-leaf node in the lineage graph; `dbt build --select +exposure:my_dashboard` builds every upstream model the exposure depends on; `dbt test --select +exposure:my_dashboard` runs every upstream test.
+
+**Minimal `exposures.yml` (placed in `models/` next to schema YAMLs, OR in a dedicated `exposures/` subdirectory — dbt picks up any `*.yml` under configured model paths):**
+
+```yaml
+version: 2
+exposures:
+  - name: revenue_dashboard          # snake_case, unique within the project
+    label: "Revenue Dashboard"       # human-readable name for the docs site
+    type: dashboard                  # one of: dashboard | notebook | analysis | ml | application
+    maturity: high                   # high | medium | low (optional; communicates trust level)
+    url: https://looker.example.com/dashboards/123
+    description: "Top-line ARR + MRR rollup, refreshed daily; exec review Monday 9am."
+    owner:
+      name: "Revenue Analytics"
+      email: revenue@example.com
+    depends_on:
+      - ref('fct_orders')            # upstream dbt model
+      - ref('dim_customers')         # upstream dbt model
+      - source('billing', 'invoices')  # upstream raw source also allowed
+```
+
+**What it gives you (all native, no extra tooling):**
+- **Lineage visibility** — `dbt docs generate` puts the exposure as a downstream node on the lineage DAG in the docs site, so anyone can see "this dashboard depends on `fct_orders`" without leaving dbt-docs.
+- **Selective build/test** — `dbt build --select +exposure:revenue_dashboard` runs every upstream model + test the dashboard transitively depends on (the `+` is the dbt graph operator for "all ancestors"); pair with CI so a PR that breaks `fct_orders` flags the affected dashboards.
+- **Impact analysis** — `dbt ls --select +model:fct_orders --resource-type exposure` lists every exposure (dashboard/ML pipeline) downstream of `fct_orders`, so you know who to notify before a breaking change.
+- **Manifest API** — exposures appear in `manifest.json` as `exposure.<project>.<name>` nodes; downstream metadata tools (DataHub, Atlan, OpenMetadata) can ingest them via the manifest.
+
+**The five `type:` values and when to pick each:** `dashboard` (Looker, Tableau, Mode, Metabase, Superset, Power BI panels); `notebook` (Jupyter, Hex, Databricks notebooks that read dbt models); `analysis` (one-off SQL analyses or reports); `ml` (training pipelines, feature stores, inference jobs that consume dbt-curated data); `application` (production services, reverse-ETL syncs like Hightouch/Census, customer-facing app queries). Pick the value that best describes the downstream consumer — dbt does not enforce semantics beyond rendering the right node icon, but downstream tools (DataHub, Atlan) use the type to categorize lineage destinations.
+
+**Pair exposures with model contracts (§6.7C).** Exposures declare WHO consumes a model; contracts (§6.7C) lock the SCHEMA the consumer can rely on. The full pattern: (a) every public model has `config: contract: {enforced: true}` + a column list; (b) every consumer is registered as an exposure with `depends_on: [ref('that_model')]`. Together this gives end-to-end "if you change this column type, here is exactly which dashboards/ML jobs break" coverage from `dbt build` + `dbt ls --resource-type exposure`.
+
+**DO-NOT-WRITE — exposure framing that misleads engineers:**
+
+| DO NOT write | Why it's wrong |
+|---|---|
+| "dbt has no native way to track external/downstream dependencies; you have to work around it" / "the closest dbt offers is a workaround" | **WRONG framing.** Exposures ARE the native, documented, first-class dbt resource for exactly this. They are not a workaround — they are the feature. State them as the native answer; do not open with "dbt doesn't natively support this." |
+| "Exposures are an external plugin / dbt package you have to install" | **WRONG.** Exposures are built into dbt-core (the `exposures` node type has been part of dbt-core since v0.18). No `dbt deps`, no `packages.yml` entry, no extension needed — just an `exposures.yml` file. |
+| "Use `post_hook` to register a downstream dashboard" / "Use a custom macro to track external consumers" | **WRONG mechanism.** Both still work as escape hatches for unrelated needs, but the canonical mechanism for "register a downstream consumer in the dbt lineage DAG" is exposures. Post-hooks emit SQL at the warehouse, not metadata to the manifest. |
+| `depends_on: [fct_orders]` (bare model name, no `ref()`) | **WRONG syntax.** The `depends_on:` list elements MUST be `ref('model_name')` (for dbt models) or `source('source_name', 'table_name')` (for raw sources) — same `ref()`/`source()` Jinja functions used in model SQL. Bare names do not resolve. |
+| "Exposures execute SQL / materialize a table / write data to the warehouse" | **WRONG.** Exposures are metadata-only — they declare a dependency edge in the DAG and appear in the docs site. They do NOT run SQL, do NOT write to the warehouse, do NOT have a `materialized:` config. `dbt run` does nothing to exposures; `dbt docs generate` is what surfaces them. |
+| "Set `materialized: exposure` in `dbt_project.yml`" | **FABRICATED.** There is no `materialized: exposure`. Exposures are a separate resource type declared in `exposures.yml`, not a materialization. |
+
+**Cross-references:**
+- For dbt documentation generation + lineage site (the surface that renders the exposure): see [§6.7H](#67h-leading-canonical--dbt-documentation-description-in-schema-yaml--docs--blocks-dbt-docs-generate--serve).
+- For dbt model contracts (the OUTPUT-side schema lock that pairs with exposures): see [§6.7C](#67c-leading-canonical--dbt-model-contracts-declared-vs-actual-schema-check-at-build-time-not-runtime).
+- For dbt source freshness (the INPUT-side liveness check): see [§6.7B](#67b-leading-canonical--dbt-source-freshness-sourcesyml-loaded_at_field-dbt-source-freshness-command).
+- Official dbt docs source-of-truth: [docs.getdbt.com/docs/build/exposures](https://docs.getdbt.com/docs/build/exposures) and [docs.getdbt.com/reference/exposure-properties](https://docs.getdbt.com/reference/exposure-properties).
+
+---
+
 ### 6.7I LEADING CANONICAL — dbt GRANTS: native `grants:` config vs `post_hook` GRANT (+ the dbt-trino roles bug #12862)
 
 > **Keyword anchors:** dbt grants config, dbt auto grant select on build, dbt grants vs post_hook, GRANT TO ROLE Trino, dbt-trino grants role bug 12862, idempotent grants dbt, dbt +grants merge, dbt grants replace, dbt-trino TO ROLE workaround, dbt post_hook GRANT SELECT.
