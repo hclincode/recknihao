@@ -3272,6 +3272,11 @@ Pick `ROW_NUMBER()` if you literally need "exactly 10 rows per tenant"; pick `RA
 
 ### Pattern C2: `PERCENT_RANK` — "what percentile is this tenant in?"
 
+> **⚠️ STOP — choosing between `percent_rank` and `cume_dist` BEFORE you copy the block below.** "What **FRACTION** of rows are **AT OR BELOW** this value" (lowest row ≈ `1/N`, top row = `1.0`, ties included) → **`cume_dist()`**, NOT `percent_rank`. "Relative rank **POSITION** on a `0..1` scale" (lowest/first row = `0.0`, formula `(rank-1)/(n-1)`) → **`percent_rank()`**. If the question says **"fraction/percent at or below"**, **"what percentile does this value sit at"**, **"cumulative distribution"**, or **"relative standing"** → use **`cume_dist()`** (see the [`CUME_DIST` keyword-anchor + COPY block just below this card](#sibling-cume_dist-cumulative-distribution)), NOT the `PERCENT_RANK` block on this card.
+>
+> - ✅ **`cume_dist() OVER (ORDER BY value)`** — fraction of rows AT OR BELOW (lowest ≈ `1/N`, top = `1.0`, ties included). This is the answer for "fraction at or below / what percentile does this value sit at".
+> - ❌ `percent_rank() OVER (ORDER BY value)` for "fraction of rows at or below" — **WRONG**: `percent_rank`'s lowest row = `0.0` (it measures rank **POSITION** `(rank-1)/(n-1)`, NOT the at-or-below fraction); use `cume_dist()` — **DO NOT COPY for at-or-below**.
+
 "For each tenant, compute their relative position in the revenue distribution across the SaaS customer base."
 
 ```sql
@@ -3318,6 +3323,25 @@ FROM (
 **Edge case — single-row partition.** `PERCENT_RANK` returns NULL (the formula divides by `n - 1` which is 0). Guard with `COALESCE(PERCENT_RANK() OVER (...), 0.0)` if your downstream consumer can't handle NULLs.
 
 **Sibling: `CUME_DIST` (cumulative distribution).** Trino also supports `CUME_DIST()` which returns `count_of_peers_or_lower / n` — slightly different math (the top row is `1.0`, not `(n-1)/n`). Use `PERCENT_RANK` for "fraction of rows STRICTLY below this one" and `CUME_DIST` for "fraction of rows AT OR BELOW this one." Like `PERCENT_RANK`, `CUME_DIST` is **sort-direction dependent**: under `ORDER BY x DESC`, the row with the LARGEST `x` is the first row and gets `cume_dist = 1/n` (small), the row with the smallest `x` gets `1.0` — see the guardrail immediately below.
+
+**COPY THIS for "fraction at or below / what percentile does this value sit at / cumulative distribution / relative standing":**
+
+```sql
+SELECT
+  tenant_id,
+  total_revenue,
+  cume_dist() OVER (ORDER BY total_revenue) AS fraction_at_or_below
+FROM (
+  SELECT tenant_id, SUM(amount) AS total_revenue
+  FROM iceberg.analytics.orders
+  WHERE order_date >= CURRENT_DATE - INTERVAL '90' DAY
+  GROUP BY tenant_id
+);
+-- cume_dist() = fraction of rows AT OR BELOW this row's value (ties included).
+-- lowest-revenue tenant: ~1/N (never 0 — every row is at-or-below itself)
+-- highest-revenue tenant: 1.0
+-- Use this (NOT percent_rank) for "fraction/percent at or below" or "what percentile does this value sit at".
+```
 
 > **Keyword anchors for `CUME_DIST` (READ THIS if your question contains any of these):** **what fraction of rows are at or below this value**, fraction at-or-below, **what percentile does this value sit at**, what percentile is this value, relative standing of a value, **cumulative distribution** of a column, where does this value fall in the distribution, top row = 1.0, fraction of rows this value is greater than or equal to, percentile standing of a row. Verified at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html) on 2026-06-09: `cume_dist()` = "the number of rows preceding or peer with the row … divided by the total number of rows" = the fraction of rows **at or below** the current row (ties included).
 >

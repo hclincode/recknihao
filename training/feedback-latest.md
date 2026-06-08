@@ -1,82 +1,65 @@
-# Judge Feedback — iter758 (DUAL FIX-A re-probe)
+# Judge Feedback — iter759 (FIX-A verification: cume_dist stronger fix + 3 probes)
 
-**Overall: 4.19 / 5 — PASS** (threshold 3.5; overall average governs, no single-Q veto)
+**Verdict: PASS — overall avg 5.00**
 
-All dialect claims verified against trino.io/docs/467 (window.html, datetime.html, aggregate.html, math.html) on 2026-06-09. Resources are NOT treated as ground truth. Production stack (Trino 467 + Iceberg, on-prem) accounted for; no auth/authz scope involved.
+All four answers verified against trino.io/docs/467 (window.html, datetime.html, array.html) on 2026-06-09. Resources are NOT treated as ground truth. Production stack (Trino 467 + Iceberg, on-prem MinIO/HMS) accounted for; no auth/authz scope involved. No defects, no dialect errors, no contradictions.
 
 ---
 
 ## Per-question scores
 
-### Q1 — Running/cumulative PRODUCT of weekly retention fractions
-Answer: `EXP(SUM(LN(retention_fraction)) OVER (ORDER BY week_number ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW))`, explained ln-sum-exp = product, stated "requires all values positive," cited new running-product canonical.
+### Q1 — cume_dist RE-PROBE (third scenario): fraction of cities at or below this city's response time, slowest = 1.0
+- **Accuracy 5** — `cume_dist() OVER (ORDER BY avg_response_time_minutes)`. window.html: cume_dist = (rows preceding or peer)/total = fraction AT OR BELOW (ties included), top/slowest row = 1.0, lowest ≈ 1/N. Exactly matches the question.
+- **Completeness 5** — Explicitly steered AWAY from percent_rank ("You want CUME_DIST(), not PERCENT_RANK") and stated the slowest city always gets 1.0. Both function choice and boundary behavior correct.
+- **Clarity 5** — cume_dist-vs-percent_rank contrast stated plainly; no assumed knowledge.
+- **Actionability 5** — Drop-in, correct ORDER BY direction (ascending → slowest = highest = 1.0).
+- **Per-Q avg: 5.00**
 
-- Accuracy: **5** — DOCS-VERIFIED. sum() is a valid window fn with OVER+frame; ln/exp confirmed; ln(x) requires x>0 (ln(0)=-inf, ln(neg) not real). No native product()/cumulative-product fn in Trino 467, so log-sum-exp is the correct idiom. The x>0 caveat is exactly right.
-- Completeness: **5** — Frame clause correct, positivity caveat present, identity explained.
-- Clarity: **4** — Solid; the ln-sum-exp explanation is accessible, but a one-line worked example ($1 compounding) would lift it further.
-- Actionability: **5** — Copy-paste ready for the new canonical.
-- **Per-Q avg: 4.75**
+**cume_dist is now CLOSED.** The iter759 stronger fix WORKED: the responder lands on the percent_rank Pattern C2 card (its keyword-landing point) and, because the at-or-below ROUTER + inline percent_rank-DO-NOT-COPY defang now sit AT THE TOP of that card before the COPY block, it correctly routed to cume_dist and explicitly rejected percent_rank. 1st clean post-stronger-fix datapoint, breaking the iter757+iter758 two-iteration repeat-miss streak.
 
-### Q2 — Fraction of products with rating AT OR BELOW this one (highest=1.0, middle~0.5, lowest near 0)
-Answer: `PERCENT_RANK() OVER (ORDER BY avg_rating)`, claimed it returns "fraction of rows at or below," "lowest ≈ 0.0, middle ≈ 0.5, highest = 1.0." Did NOT use cume_dist().
+### Q2 — running-product RE-PROBE: cumulative pass-through across ordered onboarding funnel stages
+- **Accuracy 5** — `exp(sum(ln(pass_through_rate)) OVER (ORDER BY stage_sequence ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW))`. sum() valid as window fn; ln/exp confirmed; no native product(). Idiom correct.
+- **Completeness 5** — Worked example 0.9/0.8/0.7 → 0.9/0.72/0.504 (hand-trace correct); x>0 caveat present; noted no native product().
+- **Clarity 5** — log-sum-exp = product explained clearly with a worked trace.
+- **Actionability 5** — Drop-in with correct look-back frame.
+- **Per-Q avg: 5.00**
 
-- Accuracy: **2** — WRONG FUNCTION + WRONG BOUNDARY CLAIM (docs-verified). `percent_rank() = (r-1)/(n-1)`: the lowest row = **0.0**, which is NOT "fraction at or below" (the lowest row is at-or-below itself, so its true at-or-below fraction is ≥ 1/N, never 0). The correct function for "fraction of rows at or below" is `cume_dist()` (lowest ≈ 1/N, top = 1.0, ties included). cume_dist's lowest is ~1/N (close to 0 for large N), so it also satisfies the "close to 0" phrasing while being semantically correct. This is the SAME selection defect as iter757, now repeated.
-- Completeness: **3** — Produced a runnable query and addressed the shape, but answered the wrong question.
-- Clarity: **4** — Well-written and confident — which makes the wrong claim more dangerous in production.
-- Actionability: **3** — Copy-pasteable but would mislead the engineer into shipping the wrong metric.
-- **Per-Q avg: 3.0**
+**running-product is now BULLETPROOFED** (2nd consecutive clean datapoint: iter758 4.75 + iter759 5.00).
 
-### Q3 — Truncate order_date to first day of its month (monthly rollup)
-Answer: `date_trunc('month', order_date) AS month_start ... GROUP BY date_trunc('month', order_date)`.
+### Q3 — FRESH: forward-fill / LOCF over a daily-price table with gaps
+- **Accuracy 5** — `COALESCE(price, LAST_VALUE(price) IGNORE NULLS OVER (PARTITION BY product_id ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW))` over a `sequence(...)+UNNEST` date-spine LEFT JOINed to sparse prices. window.html explicitly: value functions (first_value/last_value/lag/lead) support IGNORE NULLS — "all rows where x is null are excluded." Explicit look-back-only frame + IGNORE NULLS returns the most recent non-null at-or-before the current row = correct LOCF. `sequence(DATE, DATE, INTERVAL '1' DAY)` confirmed valid (array.html).
+- **Completeness 5** — Explained IGNORE NULLS skips gaps, the look-back-only frame, the date-spine build, and the COALESCE fill. The critical detail (default frame would give the current row; the explicit UNBOUNDED PRECEDING→CURRENT ROW + IGNORE NULLS is what makes it LOCF) is correctly handled — the responder included that frame.
+- **Clarity 5** — Each piece (spine, left join, ignore-nulls fill) explained for a beginner.
+- **Actionability 5** — Complete, runnable pattern.
+- **Per-Q avg: 5.00**
 
-- Accuracy: **5** — DOCS-VERIFIED: `date_trunc('month', x)` returns the first day of the month at midnight; day/week/month/quarter/year all supported units.
-- Completeness: **5** — Truncation + GROUP BY both shown, full rollup pattern.
-- Clarity: **5** — Clear, zero assumed knowledge.
-- Actionability: **5** — Drop-in.
-- **Per-Q avg: 5.0**
+**Q3 LOCF is FRESH-CLEAN** (1st datapoint).
 
-### Q4 — Median (50th pct) order value per category, NOT the mean, robust to outliers
-Answer: `approx_percentile(order_amount, 0.5) AS median_order_value ... GROUP BY product_category`; explained 0.5=median, t-digest, robust at scale; noted Trino has NO percentile_cont / NO median() (those are Postgres/SQL-Server).
+### Q4 — FRESH: minutes since the same user's previous event
+- **Accuracy 5** — `date_diff('minute', LAG(event_timestamp) OVER (PARTITION BY user_id ORDER BY event_timestamp), event_timestamp)`. datetime.html: `date_diff(unit, ts1, ts2)` returns `ts2 - ts1`; here ts1=LAG (earlier), ts2=current (later) → positive minutes. LAG first row = NULL → date_diff = NULL. Both correct.
+- **Completeness 5** — Explained LAG = prev ts, date_diff('minute', earlier, later) returns an integer/bigint, first event NULL, compare to an integer not an INTERVAL, and that timestamp-minus-timestamp is not the way (use date_diff). All accurate for Trino 467.
+- **Clarity 5** — Arg order and sign convention explained clearly.
+- **Actionability 5** — Drop-in, correct partition/order.
+- **Per-Q avg: 5.00**
 
-- Accuracy: **5** — DOCS-VERIFIED: approx_percentile(x, 0.5) is the native median idiom; no percentile_cont, no median() in Trino 467. Minor loose phrasing if it implied "exact for small N" (it is always approximate, though highly accurate) — noted, not a hard defect.
-- Completeness: **5** — Addresses median vs mean, outlier robustness, the no-percentile_cont/no-median trap.
-- Clarity: **5** — Clear contrast with mean.
-- Actionability: **5** — Drop-in per-category median.
-- **Per-Q avg: 5.0**
+**Q4 event-gap is FRESH-CLEAN** (1st datapoint).
 
 ---
 
 ## Overall
-(4.75 + 3.0 + 5.0 + 5.0) / 4 = **4.19 / 5 — PASS.**
 
----
+- Q1 5.00 | Q2 5.00 | Q3 5.00 | Q4 5.00
+- **Overall avg: 5.00 — STRONG PASS**
 
-## Topic verdicts
+## Status of tracked items
+- **cume_dist: CLOSED** — the iter759 stronger fix (router + inline defang AT THE TOP of the percent_rank landing card) worked on the first re-probe, ending the iter757/758 repeat-miss. Re-probe ONCE more in iter760 for BULLETPROOFED.
+- **running-product: BULLETPROOFED** — 2nd consecutive clean datapoint.
+- **Q3 LOCF: FRESH-CLEAN** (1st datapoint).
+- **Q4 event-gap: FRESH-CLEAN** (1st datapoint).
 
-- **running-product — CLOSED (1st post-fix datapoint).** The iter758 FIX-1 canonical landed: responder found `exp(sum(ln(x)) OVER (... ROWS UNBOUNDED PRECEDING ...))`, cited it, and stated the x>0 caveat. Docs-verified clean. Keep one more re-probe before treating it as fully bulletproofed, but this datapoint is a clean PASS.
-- **date_trunc-month — solid.** Clean.
-- **approx_percentile-median — solid.** Clean; only watch the "exact for small N" phrasing.
-- **cume_dist-vs-percent_rank — STILL FAILING.**
-
----
-
-## Q2 cume_dist verdict: iter758 findability fix was INSUFFICIENT
-
-The iter758 FIX-2 added at-or-below keyword anchors + a router at the **cume_dist "Sibling" card**. The responder STILL picked `percent_rank()`. It cited the percent_rank Pattern C2 region (which now contains the cume_dist sibling) — so it landed in the RIGHT AREA but chose percent_rank anyway. Root cause: percent_rank is the PRIMARY/leading card in that region; cume_dist is only a subordinate "Sibling," so the percent_rank card out-pulls. Anchoring the disambiguation only at the sibling does not intercept a responder that lands on the leading card first.
-
-### iter759 = FIX-A (stronger cume_dist-vs-percent_rank disambiguation AT the percent_rank card)
-
-Put an INLINE DEFANG/disambiguation **on the percent_rank card itself** — where the responder actually lands — not only at the cume_dist sibling. Make it same-line and un-copyable (iter693 defang style). Suggested defang line to place directly on the percent_rank card:
-
-> `-- percent_rank() is NOT "fraction of rows at or below" — its lowest row = 0.0 (strictly-below ranking). For "fraction of rows AT OR BELOW this value" / "what percentile does this value sit at" / percentile standing, use cume_dist() (lowest ~ 1/N, top = 1.0).`
-
-Also add a one-line ROUTER at the TOP of the percent_rank card (before the COPY block) so it is read before the copy idiom:
-- "fraction AT OR BELOW / percentile standing / cumulative distribution (lowest ~ 1/N, top=1.0)" -> **cume_dist()**
-- "relative rank position 0..1, strictly-below (lowest=0.0)" -> **percent_rank()**
-
-Do NOT remove the percent_rank canonical — keep it for genuine strictly-below-rank questions. The fix is interception at the landing card, not deletion. PRESERVE the existing cume_dist sibling anchors/router added in iter758 (they reinforce). Reconcile-in-place; do not append a duplicate.
-
----
-
-## Production-fit note
-All four answers fit the on-prem Trino 467 + Iceberg stack. No federation/auth/authz scope was touched. resources/22 lock unaffected.
+## Teacher feedback / iter760 designation
+No new gap or defect surfaced. No resource edits needed. **iter760 = RE-PROBE-for-BULLETPROOFED**:
+- Re-probe cume_dist a 4th angle (e.g., "percentile standing of each value, 0..1, top=1.0") to confirm CLOSED → BULLETPROOFED. Watch that the responder still rejects percent_rank when the phrasing emphasizes "percentile/standing" rather than the literal "at or below."
+- Optionally re-probe LOCF (Q3) and event-gap (Q4) for their 2nd datapoint.
+- 1 fresh durability-breadth pick.
+- Do NOT re-edit r07 percent_rank Pattern C2 card / cume_dist sibling / §5 running-product (churn-risk; all now producing clean answers).
