@@ -2330,6 +2330,51 @@ Same query shape: `SUM(amt) OVER (ORDER BY order_date <FRAME>)`. Four rows with 
 >
 > Why this is the right shape: after the CTE collapses to one row per day, `order_date` is **unique** in the input to the window — so `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` is unambiguous (each row IS a single day; no peer ties to resolve) and `RANGE` would give the identical answer too (peer groups are singletons). Pre-aggregating eliminates the ROWS-vs-RANGE question altogether and is the simplest correct form for the per-day-from-row-grain shape. Add `PARTITION BY tenant_id` if multi-tenant; add `GROUP BY tenant_id, order_date` in the CTE for the same reason. **Do NOT** try to fix this by writing `SUM(amount) OVER (ORDER BY order_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` directly on the row-grain `orders` table — you'd either get one row per order with per-order accumulation (not per-day), or, with the default RANGE, one row per order all showing the end-of-day total (still not the per-day shape you wanted). Pre-aggregate, then window — that is the canonical pattern.
 
+### LEADING CANONICAL — running / cumulative PRODUCT (multiply values down ordered rows: `exp(sum(ln(x)) OVER ...)`)
+
+> **READ THIS FIRST if your question contains any of these:** running product, cumulative product, running cumulative product, **multiply values down ordered rows**, multiply each row's value into a running result, **running cumulative growth**, compounding value over time, **compounded growth through each month**, `$1 invested grows multiplicatively`, how a balance compounds when each period multiplies the last, **product over a window**, cumulative compounding, compounded retention through each step, compounded conversion through each stage, running product of growth multipliers, cumulative growth factor, chain-multiply a series, multiply a running series. Verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) and [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html) on 2026-06-09.
+
+**The fact in one sentence.** Trino has **NO native `product()` aggregate** and **no cumulative-product window function** — to multiply values **down a set of ordered rows** (a running / cumulative product), use the log-sum-exp identity: take the natural log of each value, take a **cumulative `sum(...)` over the window**, then `exp(...)` it back. Because `ln(a) + ln(b) + ln(c) = ln(a·b·c)`, `exp(sum(ln(x)) OVER ...)` equals the running product `x₁·x₂·…·xₙ`.
+
+✅ **COPY THIS** — running product of per-period growth multipliers, accumulated from the start of the partition through each row:
+
+```sql
+SELECT
+  fund,
+  month,
+  growth_multiplier,
+  exp(sum(ln(growth_multiplier)) OVER (
+    PARTITION BY fund
+    ORDER BY month
+    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+  )) AS cumulative_growth
+FROM iceberg.analytics.fund_returns
+ORDER BY fund, month;
+```
+
+**Worked example.** A fund whose monthly growth multipliers are `1.05`, `0.98`, `1.03` (a `+5%` month, a `-2%` month, a `+3%` month). The running product `cumulative_growth` is:
+
+| month | growth_multiplier | cumulative_growth | meaning |
+|---|---|---|---|
+| 1 | 1.05 | **1.05** | up 5% |
+| 2 | 0.98 | **1.029** | 1.05 × 0.98 = 1.029 (up 2.9% cumulatively) |
+| 3 | 1.03 | **1.05987** | 1.05 × 0.98 × 1.03 ≈ 1.05987 (up ~5.99% cumulatively) |
+
+So `$1` invested at the start is worth `~$1.05987` after three months. Each row's `cumulative_growth` is the product of every multiplier from the start of the partition **through that row** — exactly the additive `SUM(x) OVER (... ROWS UNBOUNDED PRECEDING ...)` running-total shape (just wrapped in `ln`/`exp` to turn addition into multiplication).
+
+> **⚠ CRITICAL CAVEAT — every value must be strictly positive (`x > 0`).** `ln(x)` is undefined for non-positive inputs: `ln(0)` is `-infinity` and `ln(negative)` is **not a real number** (Trino returns `NaN` / errors — see [resource 27 §4.4F](27-oracle-plsql-to-dbt-trino.md) on `ln` of non-positive inputs yielding `NaN`). Growth/retention/conversion **multipliers** are naturally positive (`1.05`, `0.98`, `1.03`), so this idiom is safe for them. But if the column can be **zero or negative** (e.g. raw signed values, or a period with a `0` multiplier), this approach **breaks** — guard it (`WHERE x > 0`, or split out the sign and multiply it back separately) or fall back to `reduce_agg(value, 1, (a, b) -> a * b, (a, b) -> a * b)` for a **grouped** (non-windowed) product. A single `0` in the series should mathematically zero the whole running product; `ln` cannot express that, so handle zeros explicitly.
+
+**Three related shapes — pick the right one:**
+
+| You want… | Use | Notes |
+|---|---|---|
+| **Running / cumulative PRODUCT** (one value per row, multiplying down ordered rows) | `exp(sum(ln(x)) OVER (PARTITION BY g ORDER BY ord ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW))` | This card. Requires `x > 0`. The **windowed** form. |
+| **Running / cumulative SUM** (additive running total) | `sum(x) OVER (... ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` | The **additive analog** — see the Running total (cumulative sum) card / §5 Pattern A above. The product form is just this with `ln`/`exp` wrapped around it. |
+| **Geometric mean** (one single value per group — the "average growth rate" / nth-root-of-the-product) | `exp(avg(ln(x)))` (a **grouped** aggregate, no `OVER`) | The **grouped single-value** form: average the logs instead of summing them. Same positivity caveat (`x > 0`). Use this for "average monthly growth rate", NOT for a per-row running product. |
+| **Grouped product** (single product per group, may include zeros/negatives) | `reduce_agg(x, 1, (a, b) -> a * b, (a, b) -> a * b)` | The general lambda-aggregate product — handles `0`/negative values, but is a **grouped** single value, not a running window. |
+
+> **Note — there is NO `product()` aggregate and NO `CUMULATIVE_PRODUCT` / `product() OVER (...)` window function in Trino 467.** If a migration from another engine used a `PRODUCT(...)` aggregate or a vendor cumulative-product, rewrite it with the `exp(sum(ln(x)))` idiom (windowed running product, positive values) or `reduce_agg` (grouped product, any values). Do NOT write `product(x)` or `product(x) OVER (...)` — they do not exist and will fail to parse.
+
 ### LEADING CANONICAL — Trino named WINDOW clause (define a window once, reference by name)
 
 > **Keyword anchors:** Trino named window, WINDOW clause, define window once, reuse OVER clause, `WINDOW w AS`, named window specification, avoid repeating PARTITION BY. Verified at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html): *"The `WINDOW` clause is used to define named window specifications. The defined named window specifications can be referred to in the `SELECT` and `ORDER BY` clauses of the enclosing query."* Supported in Trino since v352.
@@ -3273,6 +3318,10 @@ FROM (
 **Edge case — single-row partition.** `PERCENT_RANK` returns NULL (the formula divides by `n - 1` which is 0). Guard with `COALESCE(PERCENT_RANK() OVER (...), 0.0)` if your downstream consumer can't handle NULLs.
 
 **Sibling: `CUME_DIST` (cumulative distribution).** Trino also supports `CUME_DIST()` which returns `count_of_peers_or_lower / n` — slightly different math (the top row is `1.0`, not `(n-1)/n`). Use `PERCENT_RANK` for "fraction of rows STRICTLY below this one" and `CUME_DIST` for "fraction of rows AT OR BELOW this one." Like `PERCENT_RANK`, `CUME_DIST` is **sort-direction dependent**: under `ORDER BY x DESC`, the row with the LARGEST `x` is the first row and gets `cume_dist = 1/n` (small), the row with the smallest `x` gets `1.0` — see the guardrail immediately below.
+
+> **Keyword anchors for `CUME_DIST` (READ THIS if your question contains any of these):** **what fraction of rows are at or below this value**, fraction at-or-below, **what percentile does this value sit at**, what percentile is this value, relative standing of a value, **cumulative distribution** of a column, where does this value fall in the distribution, top row = 1.0, fraction of rows this value is greater than or equal to, percentile standing of a row. Verified at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html) on 2026-06-09: `cume_dist()` = "the number of rows preceding or peer with the row … divided by the total number of rows" = the fraction of rows **at or below** the current row (ties included).
+>
+> **ONE-LINE ROUTER — `cume_dist` vs `percent_rank` (they are NOT the same).** "**fraction of rows AT OR BELOW this value**" (lowest row ≈ `1/N`, top row = `1.0`, ties included) → **`cume_dist()`**; "**relative rank position on a `0..1` scale**" (lowest/first row = `0.0`, formula `(rank-1)/(n-1)`) → **`percent_rank()`**. The **at-or-below / "what percentile does this value sit at"** phrasing = **`cume_dist`**, NOT `percent_rank`. Note the lowest row's value differs: `cume_dist`'s smallest result is `~1/N` (never `0`, because every row is at-or-below itself), whereas `percent_rank`'s first row is exactly `0.0` (it counts rows STRICTLY below) — so `percent_rank`'s `0.0` is **not** the at-or-below fraction.
 
 #### LEADING CANONICAL — PERCENT_RANK / NTILE direction guardrail (iter635 — "top X% by metric" inversion trap)
 

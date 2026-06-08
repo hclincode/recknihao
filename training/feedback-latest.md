@@ -1,115 +1,82 @@
-# Judge Feedback — iter757
+# Judge Feedback — iter758 (DUAL FIX-A re-probe)
 
-DEFAULT durability-breadth + mode re-probe + mode bulletproofing. All four dialect claims verified against trino.io/docs/467 (window.html, aggregate.html, string.html) on 2026-06-09. Resources are NOT treated as ground truth.
+**Overall: 4.19 / 5 — PASS** (threshold 3.5; overall average governs, no single-Q veto)
 
----
-
-## Q1 — Most common status per ticket (MODE RE-PROBE)
-
-Answer: `max_by(status, cnt)` over a `(SELECT ticket_id, status, COUNT(*) AS cnt ... GROUP BY ticket_id, status)` subquery, outer `GROUP BY ticket_id`.
-
-**Docs verification:** aggregate.html confirms `max_by(x, y) -> [same as x]` = "the value of x associated with the maximum value of y". Over a per-(group,value) COUNT(*) subquery this returns the single most-frequent value per group = the mode. There is NO native `mode()` aggregate in Trino 467; this is the correct idiom. The responder correctly returned a scalar value (NOT a MAP) and explained the mechanism cleanly — the exact opposite of the iter755 approx_most_frequent-as-scalar defect.
-
-- Accuracy: 5
-- Completeness: 5
-- Clarity: 5
-- Actionability: 5
-- **Q1 avg: 5.00**
-
-This is the **2nd consecutive clean mode datapoint** (iter756 Q1 = 5.00 was the 1st post-fix). **MODE IS NOW BULLETPROOFED.**
+All dialect claims verified against trino.io/docs/467 (window.html, datetime.html, aggregate.html, math.html) on 2026-06-09. Resources are NOT treated as ground truth. Production stack (Trino 467 + Iceberg, on-prem) accounted for; no auth/authz scope involved.
 
 ---
 
-## Q2 — Percentile rank: fraction of all salespeople with revenue AT OR BELOW theirs (top=1.0)
+## Per-question scores
 
-Answer: `PERCENT_RANK() OVER (ORDER BY total_revenue) AS fraction_at_or_below`, with explanation "0.0 = lowest revenue (nobody is at or below), 1.0 = highest, 0.5 = median".
+### Q1 — Running/cumulative PRODUCT of weekly retention fractions
+Answer: `EXP(SUM(LN(retention_fraction)) OVER (ORDER BY week_number ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW))`, explained ln-sum-exp = product, stated "requires all values positive," cited new running-product canonical.
 
-**Docs verification (window.html) — HIGHEST-RISK CHECK, the responder is WRONG:**
-- `cume_dist()` = "number of rows preceding or peer with the row ... divided by total rows" = count of rows with value <= current / N. For the LOWEST row this is ~ 1/N (NOT 0, because the row is at-or-below itself); for the highest = 1.0; median ~ 0.5. **This is exactly "fraction of rows at or below".**
-- `percent_rank()` = `(rank - 1) / (n - 1)`. For the LOWEST row this = 0.0; it is a relative-rank-*position*, NOT "fraction at or below".
+- Accuracy: **5** — DOCS-VERIFIED. sum() is a valid window fn with OVER+frame; ln/exp confirmed; ln(x) requires x>0 (ln(0)=-inf, ln(neg) not real). No native product()/cumulative-product fn in Trino 467, so log-sum-exp is the correct idiom. The x>0 caveat is exactly right.
+- Completeness: **5** — Frame clause correct, positivity caveat present, identity explained.
+- Clarity: **4** — Solid; the ln-sum-exp explanation is accessible, but a one-line worked example ($1 compounding) would lift it further.
+- Actionability: **5** — Copy-paste ready for the new canonical.
+- **Per-Q avg: 4.75**
 
-The question explicitly asked for "the fraction of rows AT OR BELOW this row's value, top row = 1.0" — that wording IS the definition of `cume_dist`. The responder:
-1. Picked the **wrong window function** (`percent_rank` instead of `cume_dist`).
-2. Gave a **factually wrong boundary characterization**: "0.0 = lowest (nobody is at or below)" is false — the lowest-revenue salesperson IS at-or-below their own value, so the true fraction is >= 1/N, which `cume_dist` returns. percent_rank's 0.0 does not mean "fraction at or below".
+### Q2 — Fraction of products with rating AT OR BELOW this one (highest=1.0, middle~0.5, lowest near 0)
+Answer: `PERCENT_RANK() OVER (ORDER BY avg_rating)`, claimed it returns "fraction of rows at or below," "lowest ≈ 0.0, middle ≈ 0.5, highest = 1.0." Did NOT use cume_dist().
 
-Both endpoints (top=1.0) happen to coincide, but the semantics and every interior/lowest value diverge. This is an **accuracy defect**, not a stylistic miss.
+- Accuracy: **2** — WRONG FUNCTION + WRONG BOUNDARY CLAIM (docs-verified). `percent_rank() = (r-1)/(n-1)`: the lowest row = **0.0**, which is NOT "fraction at or below" (the lowest row is at-or-below itself, so its true at-or-below fraction is ≥ 1/N, never 0). The correct function for "fraction of rows at or below" is `cume_dist()` (lowest ≈ 1/N, top = 1.0, ties included). cume_dist's lowest is ~1/N (close to 0 for large N), so it also satisfies the "close to 0" phrasing while being semantically correct. This is the SAME selection defect as iter757, now repeated.
+- Completeness: **3** — Produced a runnable query and addressed the shape, but answered the wrong question.
+- Clarity: **4** — Well-written and confident — which makes the wrong claim more dangerous in production.
+- Actionability: **3** — Copy-pasteable but would mislead the engineer into shipping the wrong metric.
+- **Per-Q avg: 3.0**
 
-This is a **FINDABILITY/SELECTION miss**, not a resource defect: per the iter757 sweep, `cume_dist` already exists in resources (r07:3275) explicitly distinguished from percent_rank as "fraction of rows AT OR BELOW this one (includes ties, top=1.0)". The responder landed on percent_rank instead of routing to the cume_dist canonical.
+### Q3 — Truncate order_date to first day of its month (monthly rollup)
+Answer: `date_trunc('month', order_date) AS month_start ... GROUP BY date_trunc('month', order_date)`.
 
-- Accuracy: 2 (wrong function for the asked semantics + wrong boundary claim)
-- Completeness: 3 (returns a per-row 0..1 value, top=1.0 correct, but interior/lowest values wrong vs ask)
-- Clarity: 4 (clear prose, but the clarity reinforces a wrong claim)
-- Actionability: 3 (runnable SQL, but produces semantically-wrong column for the question)
-- **Q2 avg: 3.00**
+- Accuracy: **5** — DOCS-VERIFIED: `date_trunc('month', x)` returns the first day of the month at midnight; day/week/month/quarter/year all supported units.
+- Completeness: **5** — Truncation + GROUP BY both shown, full rollup pattern.
+- Clarity: **5** — Clear, zero assumed knowledge.
+- Actionability: **5** — Drop-in.
+- **Per-Q avg: 5.0**
 
----
+### Q4 — Median (50th pct) order value per category, NOT the mean, robust to outliers
+Answer: `approx_percentile(order_amount, 0.5) AS median_order_value ... GROUP BY product_category`; explained 0.5=median, t-digest, robust at scale; noted Trino has NO percentile_cont / NO median() (those are Postgres/SQL-Server).
 
-## Q3 — Running/cumulative PRODUCT over an ordered window (per fund, $1 grown by multiplying monthly multipliers)
-
-Answer: **HONEST DECLINE** — "the resources do not cover the pattern for multiplying values together in a running window. The general approach EXP(SUM(LN(x))) exists in many SQL systems but I cannot find it documented in the Trino 467 resources, so this is a gap." Suggested checking docs / app-code / data team.
-
-**Docs verification (aggregate.html):** Confirmed Trino 467 has **NO native `product()` aggregate** and no cumulative-product window function. The correct idiom is:
-```
-exp(sum(ln(growth_multiplier)) OVER (PARTITION BY fund ORDER BY month ROWS UNBOUNDED PRECEDING))
-```
-with the caveat that `ln(x)` requires `x > 0` (monthly growth multipliers are positive, so this is fine; zero or negatives would break it). (`reduce_agg` is a non-windowed alternative but does not give the running/cumulative-over-window shape.)
-
-**Judgment:** The responder even named the correct general technique (EXP(SUM(LN(x)))) and honestly flagged it as a resource gap rather than fabricating a fake `product()` function or guessing wrong syntax. This is **good behavior — no hallucination penalty**; an honest decline of a genuinely-uncovered capability is NOT a fabrication. But it IS a real, useful, findable-but-missing capability, so completeness and actionability are necessarily low (no working answer was delivered). The teacher's sweep confirms zero `exp(sum(ln`/`exp(avg(ln`/running-product/cumulative-product hits in resources — genuinely absent.
-
-- Accuracy: 4 (no false claim; correctly identified the technique and the gap; not penalized for declining vs fabricating)
-- Completeness: 2 (no answer delivered)
-- Clarity: 4 (clear, honest about the gap, named the real technique)
-- Actionability: 2 (engineer is told to look elsewhere; no runnable SQL)
-- **Q3 avg: 3.00**
-
----
-
-## Q4 — Reorder a multi-segment delimited string "ERR:404:page_not_found" -> "page_not_found (404)"
-
-Answer: `CONCAT(split_part(event_tag, ':', 3), ' (', split_part(event_tag, ':', 2), ')')` -> "page_not_found (404)". Noted split_part is 1-indexed, returns NULL (not empty) out of range, use COALESCE.
-
-**Docs verification (string.html):** `split_part(string, delimiter, index) -> varchar`, "Field indexes start with 1", "If the index is larger than the number of fields, then null is returned"; `concat(string1, ..., stringN)` native. The answer grabs the 3rd then 2nd segment and reassembles correctly producing "page_not_found (404)". The NULL-out-of-range + COALESCE note is accurate. split_part is a valid tool for a fixed-arity delimited string (regexp_replace `$N` would also work but is not required). CLEAN.
-
-- Accuracy: 5
-- Completeness: 5 (correct output + NULL-edge guidance)
-- Clarity: 5
-- Actionability: 5
-- **Q4 avg: 5.00**
+- Accuracy: **5** — DOCS-VERIFIED: approx_percentile(x, 0.5) is the native median idiom; no percentile_cont, no median() in Trino 467. Minor loose phrasing if it implied "exact for small N" (it is always approximate, though highly accurate) — noted, not a hard defect.
+- Completeness: **5** — Addresses median vs mean, outlier robustness, the no-percentile_cont/no-median trap.
+- Clarity: **5** — Clear contrast with mean.
+- Actionability: **5** — Drop-in per-category median.
+- **Per-Q avg: 5.0**
 
 ---
 
 ## Overall
-
-| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|---|
-| Q1 | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | 2 | 3 | 4 | 3 | 3.00 |
-| Q3 | 4 | 2 | 4 | 2 | 3.00 |
-| Q4 | 5 | 5 | 5 | 5 | 5.00 |
-
-**Overall avg = (5.00 + 3.00 + 3.00 + 5.00) / 4 = 4.00 — PASS** (>= 3.5; overall average governs, no single-Q veto).
-
-**MODE: BULLETPROOFED** (2nd consecutive clean datapoint, iter756 + iter757).
+(4.75 + 3.0 + 5.0 + 5.0) / 4 = **4.19 / 5 — PASS.**
 
 ---
 
-## iter758 designation — DUAL FIX-A (running-product PRIMARY, cume_dist SECONDARY)
+## Topic verdicts
 
-Two legitimate gaps surfaced. Recommend doing **both in one iteration** — they are small, non-overlapping pure-additions in different sections, and both are real/useful capabilities.
+- **running-product — CLOSED (1st post-fix datapoint).** The iter758 FIX-1 canonical landed: responder found `exp(sum(ln(x)) OVER (... ROWS UNBOUNDED PRECEDING ...))`, cited it, and stated the x>0 caveat. Docs-verified clean. Keep one more re-probe before treating it as fully bulletproofed, but this datapoint is a clean PASS.
+- **date_trunc-month — solid.** Clean.
+- **approx_percentile-median — solid.** Clean; only watch the "exact for small N" phrasing.
+- **cume_dist-vs-percent_rank — STILL FAILING.**
 
-### FIX-A (PRIMARY) — running-product canonical (Q3, genuine net-new missing canonical)
-- ADD a LEADING CANONICAL for running/cumulative product. COPY:
-  `exp(sum(ln(growth_multiplier)) OVER (PARTITION BY fund ORDER BY month ROWS UNBOUNDED PRECEDING))`
-- Keyword anchors: running product / cumulative product / multiply values together over a window / compound growth / $1 grown by multiplying multipliers / product of a column / cumulative multiplication / running multiply.
-- CAVEAT: `ln(x)` requires `x > 0` (positive multipliers fine; zero/negative breaks it — note this explicitly).
-- Cross-ref the transcendental-math family (r27 section 4.4F ln/exp/log) and the cumulative-SUM-OVER window pattern; note there is NO native `product()` aggregate and `reduce_agg` is the non-windowed alternative.
-- Also cross-ref the geometric-mean idiom `exp(avg(ln(x)))` (iter754 Q2) as the sibling/aggregate form of the same log-trick — these belong next to each other.
+---
 
-### FIX-A (SECONDARY) — cume_dist findability/selection + disambiguation router (Q2)
-- The cume_dist canonical EXISTS (r07:3275) but the question routed to percent_rank. ADD keyword anchors at the cume_dist canonical: "fraction of rows at or below / what fraction of values are at or below this one / what percentile does this value sit at / cumulative distribution / at-or-below fraction / top row = 1.0".
-- ADD a one-line cume_dist-vs-percent_rank DISAMBIGUATION ROUTER: **"at-or-below fraction (lowest ~ 1/N, top = 1.0, includes the row itself) = cume_dist; relative rank position (lowest = 0.0, top = 1.0, strictly-below) = percent_rank".**
-- Optionally INLINE-DEFANG the "percent_rank = fraction at or below" misreading at the cume_dist landing point (un-copyable WRONG marker per iter693).
+## Q2 cume_dist verdict: iter758 findability fix was INSUFFICIENT
 
-**Priority rationale:** running-product is a cleaner net-new canonical (capability genuinely absent); cume_dist is a findability/disambiguation fix on existing content. Both are cheap and independent — do both in iter758, lead with running-product.
+The iter758 FIX-2 added at-or-below keyword anchors + a router at the **cume_dist "Sibling" card**. The responder STILL picked `percent_rank()`. It cited the percent_rank Pattern C2 region (which now contains the cume_dist sibling) — so it landed in the RIGHT AREA but chose percent_rank anyway. Root cause: percent_rank is the PRIMARY/leading card in that region; cume_dist is only a subordinate "Sibling," so the percent_rank card out-pulls. Anchoring the disambiguation only at the sibling does not intercept a responder that lands on the leading card first.
 
-**Do NOT re-edit** (churn-risk, clean/perfect): r23 section 3.1D mode canonical (BULLETPROOFED), r23 section 3.1E IF, r27 section 4.2 to_iso8601, r27 section 4.3A reformat, split_part content, r07 cume_dist core definition (only ADD anchors/router, do not rewrite the definition).
+### iter759 = FIX-A (stronger cume_dist-vs-percent_rank disambiguation AT the percent_rank card)
+
+Put an INLINE DEFANG/disambiguation **on the percent_rank card itself** — where the responder actually lands — not only at the cume_dist sibling. Make it same-line and un-copyable (iter693 defang style). Suggested defang line to place directly on the percent_rank card:
+
+> `-- percent_rank() is NOT "fraction of rows at or below" — its lowest row = 0.0 (strictly-below ranking). For "fraction of rows AT OR BELOW this value" / "what percentile does this value sit at" / percentile standing, use cume_dist() (lowest ~ 1/N, top = 1.0).`
+
+Also add a one-line ROUTER at the TOP of the percent_rank card (before the COPY block) so it is read before the copy idiom:
+- "fraction AT OR BELOW / percentile standing / cumulative distribution (lowest ~ 1/N, top=1.0)" -> **cume_dist()**
+- "relative rank position 0..1, strictly-below (lowest=0.0)" -> **percent_rank()**
+
+Do NOT remove the percent_rank canonical — keep it for genuine strictly-below-rank questions. The fix is interception at the landing card, not deletion. PRESERVE the existing cume_dist sibling anchors/router added in iter758 (they reinforce). Reconcile-in-place; do not append a duplicate.
+
+---
+
+## Production-fit note
+All four answers fit the on-prem Trino 467 + Iceberg stack. No federation/auth/authz scope was touched. resources/22 lock unaffected.
