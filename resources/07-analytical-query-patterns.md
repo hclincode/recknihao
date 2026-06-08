@@ -271,12 +271,76 @@ GROUP BY customer_id;
 | `filter` | `filter(array(T), T -> boolean) -> array(T)` | Keep only matching elements. `filter(scores, s -> s >= 80)` -> ARRAY of scores >= 80. |
 | `reduce` | `reduce(array(T), S initial, (S, T) -> S, S -> R) -> R` (4-arg) | Fold to a scalar. `reduce(amounts, 0, (s, x) -> s + x, s -> s)` -> sum of `amounts`. |
 | `any_match` / `all_match` / `none_match` | `any_match(array(T), T -> boolean) -> boolean` | Did any / all / no elements satisfy the lambda? |
-| `array_sort` | `array_sort(array(T))` or `array_sort(array(T), (a, b) -> int)` | Sort ascending; the 2-arg form takes a comparator returning -1/0/1. |
+| `array_sort` | `array_sort(array(T))` or `array_sort(array(T), (a, b) -> int)` | Sort ascending; the 2-arg form takes a comparator returning -1/0/1. **For DESCENDING + then take top-N (e.g. "top 3 highest scores"), pair with `slice()` — see [§1a.4A below](#1a4a-leading-canonical--slicearray-start-length-is-the-trino-467-array-subset-function-take-first-n-take-last-n-top-n-from-a-sorted-array--not-array_slice-iter676-pin--fix-a).** |
 | `zip` / `zip_with` | `zip(a, b) -> array(row)` / `zip_with(a, b, (x, y) -> R) -> array(R)` | Element-wise pair / merge of two equal-length arrays. |
 
 **When to UNNEST vs use an HOF.** UNNEST explodes an array to ROWS (one row per element) — use it when the next step needs `GROUP BY element`, `JOIN ... ON element = ...`, or `WHERE element IN (subquery)`. HOFs keep the result IN THE ARRAY (one row, transformed/filtered/reduced ARRAY) — use them when the downstream consumer wants the array shape preserved (e.g. you're rebuilding a column, projecting a per-row aggregate without losing other columns, or feeding the array to another function). See §1a / §1a.1 for UNNEST.
 
 **DO NOT WRITE.** "Trino has no `transform` / `filter` / `reduce` over arrays — you must UNNEST and then re-aggregate to apply a function per element" — **FALSE**. These HOFs operate in-array and are documented at [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html) + [trino.io/docs/current/functions/lambda.html](https://trino.io/docs/current/functions/lambda.html). Reaching for UNNEST + ARRAY_AGG just to map/filter a single column is the wrong shape — it shuffles rows you didn't need to shuffle.
+
+### 1a.4A LEADING CANONICAL — `slice(array, start, length)` is the Trino 467 array-subset function (take first N, take last N, top-N from a sorted array — NOT `array_slice`) (iter676 PIN — FIX-A)
+
+> **READ THIS FIRST if your question contains any of these keywords:** `take first N from array`, `top 3 from array`, `top-3 elements`, `top N elements of array`, `first 3 elements`, `first N items of an ARRAY`, `take the first n elements`, `last 5 elements`, `last N items`, `tail of array`, `slice array Trino`, `subset of array`, `array sub-range`, `keep only the first n entries`, `top-N without UNNEST`, `top N highest values from array`, `top 3 scores from array`, `pick the top 3 from a pre-sorted array`, `array_slice Trino`, `Trino array_slice`, `does Trino have array_slice`. Verified at [trino.io/docs/467/functions/array.html](https://trino.io/docs/467/functions/array.html) on 2026-06-08.
+
+**The rule (one fact).** To take a contiguous sub-range of a Trino ARRAY — "first 3 elements", "last 5 elements", "top 3 from a sorted array", or any "take N elements starting at position K" — use **`slice(array, start, length)`**. This is the ONE function for array sub-setting in Trino 467. The legacy / cross-engine name **`array_slice`** does **NOT** exist in Trino 467 and parse-fails with `Function array_slice not registered`. Python-style `arr[1:3]` slicing is **NOT** Trino syntax either (the `[]` subscript takes a single 1-based integer index, not a range).
+
+**Signature and semantics (Trino 467 — verbatim from [trino.io/docs/467/functions/array.html](https://trino.io/docs/467/functions/array.html)):**
+
+```
+slice(x, start, length) -> array
+```
+
+> "Subsets array `x` starting from index `start` (or starting from the end if `start` is negative) with a length of `length`."
+
+- **`start` is 1-based** — `start = 1` means "begin at the FIRST element" (consistent with `element_at` and the `[]` subscript, which are also 1-based in Trino).
+- **Negative `start` counts from the END** — `start = -3` means "begin 3 elements from the end". `slice(arr, -1, 1)` returns a 1-element array containing the last element; `slice(arr, -3, 3)` returns the last 3 elements.
+- **`length` is the NUMBER of elements to take** — NOT an end-index. If fewer elements remain after `start`, the result is silently **clamped** to what's available (no error — you get a shorter array, possibly empty).
+- One row in, one row out — the function operates IN-ARRAY (no `UNNEST` needed). The result is still an `ARRAY` of the same element type.
+
+**Worked example #1 — "top 3 highest scores from a per-row ARRAY" (the iter675 Q2 shape).** A row has `scores ARRAY<DOUBLE>`. You want the top 3 highest values, still as an ARRAY, one row in / one row out. Two steps: (a) sort the array descending using `array_sort` with a 2-arg comparator lambda; (b) take the first 3 with `slice(..., 1, 3)`:
+
+```sql
+SELECT
+  user_id,
+  slice(
+    array_sort(scores, (a, b) -> IF(a > b, -1, 1)),  -- descending sort
+    1, 3                                              -- take elements 1..3
+  ) AS top_3_scores
+FROM iceberg.app.user_scores;
+-- scores = ARRAY[42.0, 95.5, 78.1, 88.0, 60.2]  ->  top_3_scores = ARRAY[95.5, 88.0, 78.1]
+-- scores = ARRAY[50.0, 50.0]                    ->  top_3_scores = ARRAY[50.0, 50.0]  (clamped — only 2 elements available)
+```
+
+The **comparator lambda** `(a, b) -> IF(a > b, -1, 1)` sorts **DESCENDING**: returning `-1` when `a > b` tells `array_sort` that `a` should come BEFORE `b` (smaller comparator value = earlier position), which puts larger values first. The fully-symmetric documented form is `(a, b) -> IF(a < b, 1, IF(a = b, 0, -1))`; the 2-branch form above is the common shorthand and produces an equivalent descending order. For ASCENDING sort, just use the 1-arg form `array_sort(scores)` — no lambda needed.
+
+**Worked example #2 — "last 3 events from a per-row ARRAY" (negative `start`).**
+
+```sql
+SELECT
+  session_id,
+  slice(event_ids, -3, 3) AS last_3_events
+FROM iceberg.app.sessions;
+-- event_ids = ARRAY[101, 102, 103, 104, 105]  ->  last_3_events = ARRAY[103, 104, 105]
+-- event_ids = ARRAY[101, 102]                 ->  last_3_events = ARRAY[101, 102]   (clamped — only 2 elements available)
+```
+
+**Worked example #3 — "first 5 elements" (the simplest case).** `slice(arr, 1, 5)`. Equivalent intent to "head of array, take 5".
+
+**DO NOT WRITE:**
+
+| Wrong shape | Why it's wrong |
+|---|---|
+| `array_slice(scores, 1, 3)` — to take the first 3 elements | **FALSE on Trino 467 — parse error `Function array_slice not registered`.** `array_slice` is the **Presto-legacy / Apache Spark / Google BigQuery** name. **Trino 467 calls this function `slice`**, NOT `array_slice`. Per [trino.io/docs/467/functions/array.html](https://trino.io/docs/467/functions/array.html), the registered function is `slice(x, start, length)`. Rewrite as `slice(scores, 1, 3)`. |
+| `scores[1:3]` or `scores[:3]` — Python-style slicing | **NOT Trino syntax.** The `[]` subscript on a Trino ARRAY takes a SINGLE 1-based integer index (`scores[1]` returns the first element, scalar), not a range. For a range, use `slice(scores, 1, 3)`. |
+| `slice(scores, 0, 3)` — to take the first 3 elements | **Wrong by one — `slice` is 1-based.** `start = 0` is treated as out-of-range in Trino's 1-based array indexing and yields an empty array (or behaves unexpectedly — do not rely on it). Use `start = 1` for the first element. |
+| `slice(scores, 1, 3)` to take the LAST 3 elements when `cardinality(scores) > 3` | Wrong DIRECTION. `start = 1` is the FIRST element, not the last. For the last 3, use `slice(scores, -3, 3)` (negative start counts from the end). |
+| `SUBARRAY(scores, 1, 3)` / `SUBSTRING(scores FROM 1 FOR 3)` on an ARRAY | **NOT Trino syntax.** No `SUBARRAY` function exists. `SUBSTRING` works only on STRINGS (varchar). Use `slice` for arrays. |
+| Reaching for `UNNEST + ROW_NUMBER() + WHERE rn <= 3 + array_agg` to take "first 3 of an array" | Works but is wildly over-engineered — 3 operators where 1 suffices. `slice(arr, 1, 3)` is one in-array call, no row shuffle, no aggregation. Use UNNEST only when you actually need ROWS (e.g., to GROUP BY or JOIN across elements). |
+
+**Cross-references.**
+- The descending-comparator lambda for `array_sort` is documented in [§1a.4 above](#1a4-trino-array-higher-order-functions--transform--filter--reduce--any_match--array_sort-apply-a-lambda-in-array-no-unnest) (the array HOF table).
+- For top-N across ROWS (not within a single per-row array), use `ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...) <= N` (see [resource 23 §3.1G ROW_NUMBER top-N canonical](23-sql-best-practices-olap.md#31g-trino-has-no-distinct-on--use-row_number--1-or-max_by-for-one-row-per-group)) — that's a fundamentally different shape from "take first N of a per-row ARRAY column".
+- For **top-N values aggregated across rows** (e.g., "the 3 highest order amounts per customer" returned as an ARRAY), use the 3-arg aggregate form `max_by(value, ordering_col, N) -> array<...>` documented in [resource 23 §3.1D `min_by`/`max_by` LEADING CANONICAL](23-sql-best-practices-olap.md#31d-min_by-max_by-rfm-summary--the-one-row-per-customer-min_by--max_by-canonical) — that's the "aggregate across rows" companion to `slice` (which operates on a single ARRAY column in one row).
 
 ---
 
