@@ -432,6 +432,26 @@ dbt 1.8 renamed the YAML key from `tests:` to `data_tests:` to disambiguate from
 > -- In the subtotal rows the rolled-up columns are NULL (region/product NULL); use GROUPING() to label them — see (b)/(c) below.
 > -- Does NOT emit a per-product-only row. If you ALSO need per-product-only margins, that is CUBE — see (e).
 > ```
+>
+> **⚠️ ROLLUP / CUBE / GROUPING SETS take COLUMN NAMES only — NOT expressions.** This is a hard Trino 467 restriction. `GROUP BY ROLLUP(EXTRACT(YEAR FROM billing_month), EXTRACT(MONTH FROM billing_month))` **FAILS analysis** — the docs state verbatim: *"Complex grouping operations do not support grouping on expressions composed of input columns. Only column names are allowed."* The fix: **pre-compute the expression as a named column in a CTE/subquery first, then `ROLLUP` over the name.** (Same applies to `date_trunc(...)`, `CAST(...)`, or any expression — wrap it in a CTE/subquery and ROLLUP the alias.)
+>
+> Keyword anchors: *rollup by year and month*, *subtotal per year of a date column*, *group by date parts with subtotals*, *ROLLUP on EXTRACT / date_trunc*, *complex grouping on an expression*.
+>
+> ```sql
+> -- ❌ GROUP BY ROLLUP(EXTRACT(YEAR FROM billing_month), EXTRACT(MONTH FROM billing_month)) -- Trino rejects expressions in ROLLUP/CUBE/GROUPING SETS — DO NOT COPY
+>
+> -- ✅ COPY THIS — pre-compute the date parts as named columns in a CTE, then ROLLUP over the NAMES:
+> WITH r AS (
+>   SELECT EXTRACT(YEAR FROM billing_month) AS yr,
+>          EXTRACT(MONTH FROM billing_month) AS mo,
+>          revenue
+>   FROM subscriptions
+> )
+> SELECT yr, mo, SUM(revenue) AS total
+> FROM r
+> GROUP BY ROLLUP(yr, mo)
+> -- yields: (yr, mo) detail rows + a per-year subtotal row (mo NULL) + one grand-total row (yr, mo NULL).
+> ```
 
 ### DECIDE FIRST — ROLLUP vs CUBE vs GROUPING SETS (read this before copying any worked example below)
 
@@ -535,7 +555,7 @@ SELECT
 FROM analytics.fct_orders
 WHERE event_date >= DATE '2026-06-01'
   AND event_date <  DATE '2026-07-01'
-GROUP BY ROLLUP(region, category)        -- REPEAT the expression (not a SELECT alias); see r07 §5 Pattern A2
+GROUP BY ROLLUP(region, category)        -- COLUMN NAMES only — no expressions, no SELECT alias (pre-compute in a CTE if you need a date part); see r07 §5 Pattern A2
 ORDER BY
   GROUPING(region, category),            -- pushes Detail (0) before subtotals (1) before grand total (3)
   region   NULLS LAST,
@@ -544,7 +564,7 @@ ORDER BY
 
 **Notes on the ORDER BY.** Sorting by `GROUPING(region, category)` first guarantees detail rows come before per-region subtotals, which come before the grand total. `NULLS LAST` puts the rolled-up NULL placeholders at the bottom of each tier, so the report reads top-down as `(region, category)` detail rows, then a per-region subtotal row, then the grand-total row.
 
-**GROUP BY uses the expression, NOT a SELECT alias.** `GROUP BY ROLLUP(region, category)` references the **base columns** `region` and `category` directly. If you bucket the column (e.g. `DATE_TRUNC('month', event_date) AS event_month` in the SELECT list), you must repeat the expression inside ROLLUP: `GROUP BY ROLLUP(region, DATE_TRUNC('month', event_date))` — Trino does NOT allow `GROUP BY ROLLUP(region, event_month)` referencing the SELECT alias (see [resource 07 §5 Pattern A2 GROUP BY rules anchor](07-analytical-query-patterns.md), Trino issue [#16533](https://github.com/trinodb/trino/issues/16533)).
+**GROUP BY ROLLUP/CUBE/GROUPING SETS uses COLUMN NAMES — never an expression, never a SELECT alias.** `GROUP BY ROLLUP(region, category)` references the **base columns** `region` and `category` directly. You **cannot** bucket the column inline inside ROLLUP: `GROUP BY ROLLUP(region, DATE_TRUNC('month', event_date))` **FAILS** — *"Complex grouping operations do not support grouping on expressions composed of input columns. Only column names are allowed."* (And `GROUP BY ROLLUP(region, event_month)` referencing a SELECT alias also fails — complex grouping ops do not resolve SELECT aliases either; cf. simple `GROUP BY` per Trino issue [#16533](https://github.com/trinodb/trino/issues/16533).) **The fix for both:** pre-compute the bucketed expression as a named column in a CTE/subquery (e.g. `DATE_TRUNC('month', event_date) AS event_month`), then write `GROUP BY ROLLUP(region, event_month)` over the **CTE column name** — see the CTE-then-ROLLUP canonical at the top of this block. (See [resource 07 §5 Pattern A2 GROUP BY rules anchor](07-analytical-query-patterns.md).)
 
 ### (d) DO-NOT-WRITE — the exact iter495-Q4 fabrication, and three sibling traps
 

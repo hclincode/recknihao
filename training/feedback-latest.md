@@ -1,86 +1,38 @@
-# Judge Feedback — iter762 (EXTENDED PHASE)
+# Judge Feedback — iter763 (EXTENDED PHASE)
 
-**Overall: 4.625 PASS** (margin +1.125 above 3.5 floor). Per-Q avgs: Q1 3.50 / Q2 5.00 / Q3 5.00 / Q4 5.00. Overall average governs (no per-Q veto).
+**Overall: 4.5625 PASS** (per-Q 3.25 / 5.00 / 5.00 / 5.00 = 18.25 / 4; margin +1.0625; overall avg governs, no per-Q veto).
 
-All dialect claims verified against trino.io/docs/467 via WebFetch (select.html, functions/aggregate.html, functions/window.html). Production stack confirmed: Trino 467 + Iceberg connector, on-prem (prod_info.md). Note: prod_info.md target-serving section is unfilled; evaluated against the documented Trino 467 production query stack, which is the relevant constraint for these SQL questions.
-
----
-
-## Q1 — ROLLUP RE-PROBE: revenue by (year, month) + per-year subtotal + grand total — 3.50
-
-| Axis | Score | Reason |
-|---|---|---|
-| Accuracy | 3 | ROLLUP selection CORRECT (NOT CUBE) — hierarchical (year,month),(year),() with no per-month-only row, exactly the ask. GROUPING bitmask 0/1/3 CORRECT (no WHEN-2 row; ROLLUP never emits GROUPING=2). ORDER BY GROUPING(...), year NULLS LAST, month NULLS LAST CORRECT. **BUT one genuine, load-bearing dialect defect: `GROUP BY ROLLUP(EXTRACT(YEAR FROM billing_month), EXTRACT(MONTH FROM billing_month))` is INVALID in Trino 467.** |
-| Completeness | 4 | Covers selection rationale, GROUPING labeling, ordering — but omits the CTE/subquery pre-computation step the EXTRACT form actually requires to run. |
-| Clarity | 4 | Clear CASE-on-GROUPING labels (Monthly Detail / Year Subtotal / Grand Total), well explained. |
-| Actionability | 3 | Engineer copies the query and it FAILS analysis on first run with an error on the ROLLUP arguments. Selection logic is right but the executable block is grain-correct yet won't execute. |
-
-**VERIFIED DEFECT (trino.io/docs/467/sql/select.html, exact quote):** "Complex grouping operations do not support grouping on expressions composed of input columns. Only column names are allowed." This applies to ROLLUP, CUBE, and GROUPING SETS. The responder placed `EXTRACT(YEAR FROM billing_month)` and `EXTRACT(MONTH FROM billing_month)` directly inside `ROLLUP(...)`. Trino 467 rejects this at analysis time — the EXTRACT expressions are not column names.
-
-**CORRECT FORM (the fix):** pre-compute the EXTRACT expressions as named columns in a subquery/CTE, then ROLLUP over those column names:
-```
-WITH m AS (
-  SELECT EXTRACT(YEAR FROM billing_month) AS yr,
-         EXTRACT(MONTH FROM billing_month) AS mo,
-         revenue
-  FROM ...)
-SELECT yr, mo, SUM(revenue) AS total
-FROM m
-GROUP BY ROLLUP(yr, mo)
-ORDER BY GROUPING(yr, mo), yr NULLS LAST, mo NULLS LAST
-```
-
-**ROLLUP-vs-CUBE selection is the bulletproof target — and it held: the responder picked ROLLUP (not CUBE) for the 2nd consecutive clean datapoint (iter761 + iter762). The selection-router from iter761 is doing its job.** The defect this iteration is a DIFFERENT, NEWLY-SURFACED gap: grouping on EXTRACT expressions inside ROLLUP. The r28 canonical ROLLUP example (`GROUP BY ROLLUP(region, product)`) uses bare column names, so it is docs-correct; the responder over-generalized by inlining EXTRACT into the ROLLUP arg list. The card never showed (or warned against) the expression-inside-ROLLUP form.
-
-## Q2 — deviation from customer's average order amount, keep every row — 5.00
-
-| Axis | Score | Reason |
-|---|---|---|
-| Accuracy | 5 | `order_amount - AVG(order_amount) OVER (PARTITION BY customer_id)` valid Trino 467 — aggregate-as-window form VERIFIED (functions/window.html: "All Aggregate functions can be used as window functions by adding the OVER clause"). Correct group-mean-centered value. |
-| Completeness | 5 | Includes both the deviation column and the customer_avg column; explains the windowed avg repeats per partition row. |
-| Clarity | 5 | "every detail row preserved, one pass vs JOIN-to-GROUP-BY reading the table twice" — exactly the right mental model. |
-| Actionability | 5 | Copy-paste runs; engineer knows precisely what to do. |
-
-FRESH-CLEAN. Deviation-from-group-mean (x - avg(x) OVER (PARTITION BY g)) confirmed docs-correct.
-
-## Q3 — per-user fraction of events that were errors (conditional rate) — 5.00
-
-| Axis | Score | Reason |
-|---|---|---|
-| Accuracy | 5 | `CAST(COUNT(*) FILTER (WHERE status='error') AS DECIMAL(10,4)) / NULLIF(COUNT(*),0)` valid Trino 467. FILTER VERIFIED (functions/aggregate.html: "The FILTER keyword can be used to remove rows from aggregation processing"). CAST-to-DECIMAL dodges integer-division-truncates-to-0; NULLIF guards divide-by-zero. |
-| Completeness | 5 | Explains FILTER subset count, the integer-division trap, the zero-guard. |
-| Clarity | 5 | Each clause justified plainly. |
-| Actionability | 5 | Runs as-is. |
-
-FRESH-CLEAN. NOTE: the directive anticipated `avg(CASE WHEN cond THEN 1.0 ELSE 0 END)`, but the responder chose the `COUNT(*) FILTER` variant — EQUALLY VALID, arguably cleaner, native Trino. NOT penalized for the choice (both docs-correct). The CAST-to-DECIMAL + NULLIF decimal-rate is correct.
-
-## Q4 — per-endpoint p95 response time (robust to outliers) — 5.00
-
-| Axis | Score | Reason |
-|---|---|---|
-| Accuracy | 5 | `approx_percentile(response_time_ms, 0.95)` per GROUP BY endpoint valid Trino 467; t-digest-based. The approx_percentile (t-digest, percentiles) vs approx_distinct (HLL, distinct counts) distinction is accurate and genuinely useful. |
-| Completeness | 5 | Adds p50/p99; explains 0.95 is a fraction (95th pct), not 95ms; notes the sketch avoids a full sort. |
-| Clarity | 5 | The "0.95 = 95th percentile, not 95 milliseconds" disambiguation is exactly the beginner trap to head off. |
-| Actionability | 5 | Runs as-is. The PERCENT_RANK exact-alternative aside is a valid (slower) approach — not over-scrutinized. |
-
-FRESH-CLEAN. p95 approx_percentile / t-digest confirmed; HLL-vs-t-digest distinction accurate.
+Federation (r22) NOT probed. All dialect claims verified against trino.io/docs/467 (sql/select.html, functions/math.html, functions/aggregate.html).
 
 ---
 
-## Verdict and iter763 directive
+## Q1 — ROLLUP-on-date-parts RE-PROBE — avg 3.25 (Acc 2 / Comp 4 / Clar 4 / Act 3)
 
-**ROLLUP-vs-CUBE selection: BULLETPROOFED — YES.** 2nd consecutive clean datapoint (iter761 + iter762). The responder correctly chose ROLLUP over CUBE for a hierarchical-subtotal ask, emitting no per-month-only rows, with the correct GROUPING 0/1/3 bitmask. The iter761 selection-router is working. This construct-choice sub-skill is closed.
+**Structural ROLLUP-on-EXPRESSION fix: LANDED / CLOSED.** The responder pre-computed `EXTRACT(YEAR …) AS yr, EXTRACT(MONTH …) AS mo` into named columns in a CTE and then did `GROUP BY ROLLUP(yr, mo)` over the **names** — NOT `ROLLUP(EXTRACT(...), EXTRACT(...))`. This is exactly the routing the iter762 FIX-A targeted. The column-names-only structural defect did not recur. The GROUPING() CASE bitmask (0=detail, 1=year_subtotal, 3=grand_total, correctly no WHEN-2 branch) and `ORDER BY yr, mo` are docs-correct.
 
-**Q2 deviation / Q3 conditional-rate / Q4 p95: ALL FRESH-CLEAN, maximum signal.** No gaps.
+**BUT a SEPARATE, NEW defect surfaced — the outer query does NOT compile.** The CTE already pre-aggregates: `SELECT … SUM(amount) AS total_amount … GROUP BY yr, mo`. The outer then does `SELECT yr, mo, total_amount FROM date_parts GROUP BY ROLLUP(yr, mo)` — `total_amount` is neither in the outer GROUP BY nor wrapped in an aggregate. **VERIFIED against sql/select.html: "When a GROUP BY clause is used in a SELECT statement all output expressions must be either aggregate functions or columns present in the GROUP BY clause."** The query fails analysis ("must be an aggregate expression or appear in GROUP BY"). Accuracy scored down to 2 for a non-compiling answer.
 
-**NEW GAP (iter763 = FIX-A):** ROLLUP (and CUBE / GROUPING SETS) over **computed expressions** is invalid in Trino 467 — "Only column names are allowed." The responder inlined `EXTRACT(YEAR FROM ...)` / `EXTRACT(MONTH FROM ...)` directly into `ROLLUP(...)`, producing a query that fails analysis. This is a DIFFERENT defect from the iter760 ROLLUP-vs-CUBE selection gap (now closed) — it is a structural-form gap, not a construct-choice gap.
+**This is a RESPONDER SYNTHESIS-SLIP, NOT a resource defect.** The r28 canonical (resources/28, lines 444–453) is CORRECT: the CTE computes the **parts only** (`SELECT EXTRACT(YEAR …) AS yr, EXTRACT(MONTH …) AS mo, revenue FROM subscriptions`) and the **outer** does `SELECT yr, mo, SUM(revenue) AS total FROM r GROUP BY ROLLUP(yr, mo)`. The responder garbled it by hoisting the `SUM` into the CTE (pre-aggregating `GROUP BY yr, mo`) and then failing to re-aggregate `total_amount` in the outer. The canonical models the correct one-SUM-in-the-outer shape; the responder did not follow it.
 
-**iter763 FIX-A (narrow, additive, reconcile-in-place at the r28 GROUPING SETS/ROLLUP/CUBE card):**
-- Add a tight READ-ME-FIRST clarifier at the r28 card: "ROLLUP/CUBE/GROUPING SETS take COLUMN NAMES ONLY — Trino 467 rejects `ROLLUP(EXTRACT(YEAR FROM col), ...)` or any expression inside the grouping operation. Pre-compute the expression as a named column in a CTE/subquery, then ROLLUP over the alias."
-- Include the WRONG inline-defang (`GROUP BY ROLLUP(EXTRACT(YEAR FROM billing_month), ...)` — un-copyable per iter693 pattern) and the CORRECT CTE-then-`ROLLUP(yr, mo)` canonical with the exact docs quote ("Complex grouping operations do not support grouping on expressions composed of input columns. Only column names are allowed.").
-- This is the year/month-from-date ROLLUP shape specifically — a very common SaaS revenue-rollup phrasing. Place keyword anchors near it (revenue by year/month with subtotals, monthly rollup with year subtotal, date-bucketed grand total).
-- Keep it ADDITIVE — do NOT churn the existing iter761 selection-router or the CUBE/GROUPING-SETS/bitmask content (all docs-correct and bulletproofed).
+**iter764 designation: this is NOT a FIX-A on the r28 ROLLUP canonical (it is already correct and unambiguous).** The structural ROLLUP-on-expression issue is CLOSED. However, because the responder demonstrably mis-routed the aggregation (pre-aggregated in the CTE then referenced the alias unaggregated under ROLLUP), iter764 should be a **MINOR findability/inoculation nudge**: add a short defang adjacent to the r28 CTE-then-ROLLUP canonical making the SUM-placement explicit — e.g. "The CTE computes the date PARTS only (no aggregation); the OUTER query does the `SUM(...)` + `ROLLUP`. Do NOT pre-aggregate (`SUM … GROUP BY yr, mo`) in the CTE and then `SELECT total … GROUP BY ROLLUP(yr, mo)` — a pre-aggregated column referenced under the outer ROLLUP that is neither grouped nor re-aggregated fails analysis. If you DO pre-aggregate in the CTE, the outer must `SUM(total_amount)`." ADDITIVE only; must NOT churn the iter761 selection-router, the iter762 column-names-only clarifier, or the CUBE/GROUPING-SETS/bitmask content.
 
-HOLD all iter534-761 locks (~308). resources/22 federation untouched (do not probe — 4.49944 vs 4.5 thin). Do NOT touch state.json.
+## Q2 — round-to-nearest-nickel — avg 5.00 (5/5/5/5) — CLEAN
 
-**OVERALL: 4.625 PASS — ROLLUP-vs-CUBE selection BULLETPROOFED (2nd consecutive clean, iter761+762); Q2 deviation / Q3 conditional-rate / Q4 p95 all fresh-clean with maximum signal; ONE newly-surfaced FIX-A gap on Q1 — ROLLUP over EXTRACT expressions is invalid in Trino 467 (only column names allowed), the query fails analysis as written; fix = pre-compute in a CTE then ROLLUP over column names.**
+`ROUND(price * 20.0) / 20.0` snaps to the nearest 0.05. VERIFIED arithmetically on every example: 4.92*20=98.4→98→4.90; 0.08*20=1.6→2→0.10; 4.87*20=97.4→97→4.85. Trino `round(x)` returns x rounded to the nearest integer (HALF_UP / round-half-away-from-zero); none of the example values land on an exact half-integer tie, so the half-tie mode is immaterial to correctness here. Equivalent to `round(price/0.05)*0.05`. Correctly distinct from round-to-2-decimals. Clean.
+
+## Q3 — top-3-per-category by revenue — avg 5.00 (5/5/5/5) — CLEAN
+
+`ROW_NUMBER() OVER (PARTITION BY category ORDER BY revenue DESC)` in a subquery/CTE with outer `WHERE rn <= 3` is the canonical Trino 467 top-N-per-group idiom (QUALIFY is NOT Trino, correctly avoided). ROW_NUMBER yields exactly 3 even under ties — a valid reading of "top 3"; RANK/DENSE_RANK would include ties. Clean.
+
+## Q4 — whole-row argmax per customer — avg 5.00 (5/5/5/5) — CLEAN
+
+Both forms valid Trino 467: (a) `max_by(order_id, amount)`, `max_by(order_date, amount)`, `MAX(amount)` GROUP BY customer — VERIFIED aggregate.html "max_by(x, y) returns the value of x associated with the maximum value of y"; one max_by per carried column is the correct multi-column argmax. (b) `ROW_NUMBER() OVER (PARTITION BY customer ORDER BY amount DESC)` with outer `WHERE rn = 1`. Clean.
+
+---
+
+## Verdict
+
+- **ROLLUP-on-EXPRESSION structural issue: CLOSED.** The iter762 FIX-A worked on the 1st re-probe — named-col routing through a CTE landed. Pin holds: ROLLUP/CUBE/GROUPING SETS take COLUMN NAMES only.
+- **Q1 outer-aggregation slip: RESPONDER SYNTHESIS-SLIP, not a resource defect.** The r28 canonical is correct (CTE = parts only, outer = SUM + ROLLUP). The responder mangled the SUM placement on its own.
+- **Q2 / Q3 / Q4: all CLEAN, max signal.**
+- **iter764 designation: MINOR FIX-A (inoculation nudge only)** — add a SUM-placement defang adjacent to the existing r28 CTE-then-ROLLUP canonical so the synthesis-slip does not recur; do NOT rewrite the canonical, do NOT churn the selection-router / column-names clarifier / CUBE-GROUPING-SETS-bitmask content. HOLD all iter534–762 locks. Federation r22 untouched. DO NOT bump training/state.json (already 763).
