@@ -644,12 +644,15 @@ WHERE properties['debug_mode'] IS NOT NULL;
 -- Use element_at() for the same intent.
 
 SELECT user_id FROM iceberg.analytics.user_events
-WHERE contains(map_keys(properties), 'debug_mode');
--- LEGAL but slow — materializes the full key array per row purely to ask one
--- membership question. Prefer `element_at(properties, 'debug_mode') IS NOT NULL`.
+WHERE properties['debug_mode'] IS NOT NULL;  -- (repeated for contrast — bracket = error on missing key)
 ```
 
-**Mnemonic:** `element_at` on a MAP returns the **value** (a scalar). `cardinality` wants a **collection** (array or map). You can't wrap one in the other. The correct existence check is always `element_at(map_col, key) IS NOT NULL`.
+> **EXACT key-EXISTENCE vs. value-PRESENT — they are NOT the same check.** *Keyword anchors: does a map have this key, map key exists regardless of value, contains map_keys, present-with-null-value key, key added but value null, is a key in the map, test if a map contains a key, key present even when value is NULL.*
+> - **Key EXISTENCE regardless of value** → `contains(map_keys(properties), 'debug_mode')` → returns a **boolean**; TRUE whenever the key is in the map **even if that key maps to a NULL value**. `map_keys(map(K,V)) -> array(K)` lists every key; `contains(array, element) -> boolean` tests membership (both verified at [trino.io/docs/467/functions/map.html](https://trino.io/docs/467/functions/map.html) and [trino.io/docs/467/functions/array.html](https://trino.io/docs/467/functions/array.html)).
+> - **Value present (the quick everyday check)** → `element_at(properties, 'debug_mode') IS NOT NULL`. This is correct for the common case where keys are only ever set to non-NULL values, but it **FALSE-NEGATIVES a key that exists with a NULL value**: `element_at(m, k)` returns NULL for BOTH an absent key AND a present-key-with-NULL-value, so `IS NOT NULL` cannot tell those two apart.
+> - **Rule of thumb:** if a key can legitimately be stored with a NULL value and you must still count it as "present", use `contains(map_keys(m), k)`. Otherwise `element_at(m, k) IS NOT NULL` is the fine, cheaper everyday form.
+
+**Mnemonic:** `element_at` on a MAP returns the **value** (a scalar). `cardinality` wants a **collection** (array or map). You can't wrap one in the other. For the everyday "is this key set to a value" check use `element_at(map_col, key) IS NOT NULL`; for **exact key existence regardless of value** (including a key mapped to NULL) use `contains(map_keys(map_col), key)`.
 
 ### LEADING CANONICAL — merge two maps with `map_concat` (RIGHTMOST map wins on key collision; the right idiom for defaults + overrides)
 

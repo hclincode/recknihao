@@ -1,34 +1,66 @@
-# Judge Feedback — iter742 (EXTENDED PHASE)
+# Judge Feedback — iter743 (EXTENDED PHASE)
 
-**Overall: 4.875 STRONG PASS** (per-Q avg 19.5/4; dim-avg 4.875; margin +1.375 above 3.5 floor). Federation NOT probed — row UNCHANGED.
+**Overall: 3.875 PASS** (dim-avg across 4 Q = 15.5/4 = 3.875; margin +0.375 above 3.5 floor). Federation NOT probed — row UNCHANGED. state.json NOT bumped.
 
-All four answers verified against trino.io/docs/467 (datetime / aggregate / regexp / map / array) via WebFetch on 2026-06-09 — NOT against resources/. Production stack: Trino 467 + Iceberg, on-prem; none of these answers touch auth/authz, so no prod-fit concerns. ZERO dialect defects this iteration. state.json NOT bumped.
+All claims verified against trino.io/docs/467 via WebFetch/WebSearch on 2026-06-09 (map.html, array.html, window.html, string.html, datetime.html) — NOT against resources/. Production stack Trino 467 + Iceberg on-prem; none of these answers touch auth/authz, so no prod-fit concerns. ONE real dialect defect this iteration (Q3, both forms).
+
+---
 
 ## Per-question scores
 
-### Q1 — 12-hour AM/PM time (date_format 2nd-angle re-probe) — 5.00
-Acc 5 / Comp 5 / Clar 5 / Act 5.
-- VERIFIED datetime.html: `%l` = hour 1-12 (no leading zero), `%i` = minute 00-59, `%p` = AM/PM — all VERBATIM correct → `'%l:%i %p'` → `'2:05 PM'`. CONFIRMED there is NO `%A` specifier (none used; clean).
-- `date_format(timestamp, format)` signature: column `event_timestamp` is already a TIMESTAMP, so NO CAST needed — correct. (Contrast iter740 defect where a bare DATE was passed without CAST — not repeated here.)
-- Joda equivalent `format_datetime(event_timestamp, 'h:mm a')` is the documented MySQL→Joda mapping (`h`=clockhour-of-halfday 1-12, `mm`=minute, `a`=halfday AM/PM). Correct.
-- **date_format VERDICT: STAYS CLOSED → BULLETPROOFED.** 2nd consecutive clean datapoint after the iter741 FIX-A (r27 §4.2 weekday `%W`/`%a` + `%A`-defang + DATE-needs-CAST PIN). The friendly-12-hour-time phrasing is a distinct angle from the weekday-name phrasing that drove iter741, and the responder nailed both the MySQL and Joda branches with no invalid specifier and no spurious CAST. Add r27 §4.2 date_format canonical to the lock inventory.
+| Q | Topic | Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|---|---|
+| Q1 | map key existence regardless of value | 5 | 5 | 5 | 5 | **5.00** |
+| Q2 | first_value / last_value window | 5 | 5 | 4.5 | 5 | **4.875** |
+| Q3 | combine DATE + TIME → TIMESTAMP | 1.5 | 3 | 4 | 1.5 | **2.50** |
+| Q4 | codepoint of a character (declined) | 4 | 2 | 4 | 2.5 | **3.125** |
 
-### Q2 — variance / stddev (fresh) — 5.00
-Acc 5 / Comp 5 / Clar 5 / Act 5.
-- VERIFIED aggregate.html: `variance(x)` = alias of `var_samp(x)` (sample, n-1); `stddev(x)` = alias of `stddev_samp(x)` (sample); `var_pop(x)`/`stddev_pop(x)` = population (n). All exist, all → double.
-- Responder correctly led with `VARIANCE()`/`STDDEV()` for the spread question, explained stddev = sqrt(variance) in the same units, gave the ~68%-within-±1σ intuition (beginner clarity), and correctly named `STDDEV_POP`/`VAR_POP` for the full-population case. The sample-vs-population distinction is exactly right.
+**Overall average: 3.875 → PASS**
 
-### Q3 — strip non-digits (regexp_replace, fresh) — 5.00
-Acc 5 / Comp 5 / Clar 5 / Act 5.
-- VERIFIED regexp.html: `regexp_replace(string, pattern, replacement)` replaces EVERY match (not just first); functions use Java pattern syntax, so the negated char class `[^0-9]` + empty replacement strips all non-digits → `'(415) 867-5309'` → `'4158675309'`. Exactly correct and the cleanest idiom.
+---
 
-### Q4 — map key existence (fresh) — 4.50
-Acc 5 / Comp 3 / Clar 5 / Act 5.
-- VERIFIED map.html: `element_at(map, key)` returns NULL when the key is absent — so `element_at(m,k) IS NOT NULL` is a valid existence test FOR THE ASKED SCENARIO (map values are non-null literals like `'dark'`/`'off'`). The `CASE WHEN ... IS NOT NULL THEN true ELSE false` and the WHERE-filter forms both work and run clean. The "do NOT write `cardinality(element_at(...))`" defang is correct (element_at returns a scalar value here, not a collection — type error).
-- **EDGE-CASE NUANCE (the only ding):** docs confirm `element_at` ALSO returns NULL when the key is PRESENT but its VALUE is NULL. So `element_at(m,k) IS NOT NULL` reports a present-with-null-value key as ABSENT — a false negative. The exact key-existence test that distinguishes this is `contains(map_keys(m), k)` (VERIFIED array.html `contains(x, element) → boolean`; map_keys → array(K), so `contains(map_keys(user_preferences), 'theme')` is the precise form). The responder did not mention this. It is NOT a defect for the asked example (non-null string values), so Acc stays 5; it is a Completeness gap only → Comp 3.
+## Q1 verdict — map-key-existence additive CLOSED ✅
 
-## iter743 flag (additive note, LOW priority — NOT a defect)
-**FLAG worth an additive note:** In the map key-existence canonical (r09 / r07 §1a wherever `element_at` NULL-safe lookup lives), add a short note that `element_at(m,k) IS NOT NULL` is the common-case existence test BUT is a false-negative when a key maps to a NULL value, and that `contains(map_keys(m), k)` is the exact present-vs-absent test (distinguishes present-with-null-value). Keep it as a co-located one-liner/PIN next to the existing element_at content — do NOT churn the bulletproofed map(keys,values) canonical. This is additive findability/completeness, not a correction; the current answer is correct for the scenario asked.
+DOCS-VERIFIED (map.html + array.html):
+- `map_keys(x(K,V)) → array(K)` "Returns all the keys in the map x" — a present-with-NULL-value key still appears in the keys array.
+- `contains(array, element) → boolean` "Returns true if the array x contains the element."
+- Therefore `contains(map_keys(settings),'beta_opt_in')` is TRUE iff the key is present REGARDLESS of value. CORRECT.
+- `element_at(map(K,V), key) → V` "Returns value for given key, or NULL if the key is not contained in the map" — returns the VALUE V, itself NULL when a present key maps to NULL, so `element_at(...) IS NOT NULL` cannot distinguish absent-key from present-key-with-NULL (false-negatives present-with-null). The responder explicitly named this false-negative. CORRECT.
 
-## Summary
-4 answers, 0 dialect defects, all VERIFIED against trino.io/docs/467. date_format is now BULLETPROOFED (2nd clean datapoint, distinct angle). variance/stddev and regexp_replace strip-non-digits are clean fresh datapoints. The only forward item is the additive `contains(map_keys(m),k)` exact-existence note for the present-with-null-value edge case. Honesty/accuracy discipline holding. Federation untouched (4.49944 vs 4.5 thin). DO NOT bump training/state.json.
+The iter742 reconcile-in-place fix (r09 Existence-check subsection — demote-`element_at-always` → name BOTH forms, contains() = exact-existence, element_at IS NOT NULL = quick value-present check that false-negatives) WORKED. Answer is bulletproof, sourced to r09:650-655. **Map-key-existence additive CLOSED.** No further action.
+
+## Q2 verdict — first_value/last_value CORRECT ✅
+
+DOCS-VERIFIED (window.html): `first_value(x)` "Returns the first value of the window"; `last_value(x)` "Returns the last value of the window." With the SQL-standard default frame (RANGE UNBOUNDED PRECEDING .. CURRENT ROW), FIRST_VALUE correctly returns the partition's first row, but LAST_VALUE only sees up to the current row — so the explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` is required to reach the true last row. The responder applied the frame to LAST_VALUE only (correct — FIRST_VALUE needs none) and explained the default-frame gotcha. Single-pass, both columns. Minor clarity nit only: did not state WHY FIRST_VALUE is safe without the frame (default frame already includes row 1), but the gotcha that matters was nailed. No defect.
+
+## Q3 verdict — BOTH FORMS DEFECTIVE ❌ (drives the score down; fix for iter744)
+
+DOCS-VERIFIED (datetime.html operators table + string.html || + GitHub trinodb/trino #20424):
+
+- **Form (a)** `CAST(session_date AS TIMESTAMP) + (session_start_time - TIME '00:00:00')` — **DEFECT.** Trino 467's date/time operator table lists `date ± interval`, `timestamp ± interval`, `interval ± interval` — but **NO `TIME - TIME` operation**. `TIME - TIME` is not a supported operator in Trino 467, so `(session_start_time - TIME '00:00:00')` does not yield an INTERVAL and the expression fails. Unsupported arithmetic.
+- **Form (b)** `CAST(session_date || ' ' || session_start_time AS TIMESTAMP)` — **DEFECT (type error as written).** `||` is the string-concatenation operator (same as `concat()`, character/VARCHAR operands only). Concatenating a DATE and a TIME directly with `||` is a TYPE ERROR; both operands must be CAST to varchar first.
+
+**Canonical for iter744** (verified — there is NO dedicated combine-date-time function in Trino 467; feature request #20424 is still open):
+```sql
+CAST(CAST(session_date AS varchar) || ' ' || CAST(session_start_time AS varchar) AS TIMESTAMP)
+```
+i.e. cast each part to varchar, concat to an ISO `'YYYY-MM-DD HH:MM:SS'` string, cast the whole to TIMESTAMP. (Form (a)'s INTENT — add time-of-day as a duration to midnight — could be salvaged only with explicit interval extraction, e.g. building an `INTERVAL` from `hour()/minute()/second()`, which is clunky; the cast-to-varchar-concat-cast is the canonical idiom.) Optionally mention `from_iso8601_timestamp(...)` for ISO-8601 strings.
+
+**TEACHER ACTION (iter744 FIX-A):** Add a combine-DATE+TIME→TIMESTAMP canonical (likely r13 datetime / r27 §4.2 datetime area where the responder sourced r13:5671-5677). Pin the correct CAST-to-varchar-concat-cast form. Inline-defang BOTH wrong forms (iter693 un-copyable style): ❌ `date || ' ' || time` without inner CASTs = type error (|| is varchar-only); ❌ `time_a - time_b` = unsupported (NO TIME-TIME operator in Trino 467). Keyword anchors: combine a date and a time into a timestamp / construct a timestamp from a date and time-of-day / merge DATE column and TIME column / build a timestamp from separate date and time. The bad r13:5671-5677 content the responder cited must be RECONCILED-IN-PLACE (reconcile-don't-append), not just supplemented — the responder pulled both defective forms straight from it.
+
+## Q4 verdict — honest decline; FINDABLE-BUT-MISSING gap (flag for iter744)
+
+DOCS-VERIFIED (string.html): Trino 467 HAS `codepoint(string) → integer` "Returns the Unicode code point of the only character of string" and the inverse `chr(n) → varchar` "Returns the Unicode code point n as a single character string." `codepoint` requires a SINGLE-character input — for the first char of a multi-char string use `codepoint(substr(s,1,1))` (the exact shape the user needs: `codepoint(substr(country_code,1,1))`).
+
+The responder did NOT fabricate (correctly scored on honesty — Accuracy 4) and correctly routed to trino.io/docs/467/functions/string.html, but this is a genuine **findable-but-missing** gap: the function exists and the answer is a clean one-liner. Incomplete (2) and low actionability (2.5) drag the score.
+
+**TEACHER ACTION (iter744 FIX-A):** Add `codepoint`/`chr` to r23 string-functions (alongside the iter739 strpos / ASCII-equivalent content — Oracle `ASCII()`/`ord()` migrants land here). Pin: `codepoint(varchar) → integer` (SINGLE char only); first-char-of-string idiom `codepoint(substr(s,1,1))`; inverse `chr(bigint) → varchar`. Keyword anchors: numeric code point of a character / Unicode code point / ASCII value of a character / Oracle ASCII / ord() equivalent / integer value of a character / char to code point. Worked example for the user's case: `codepoint(substr(country_code,1,1))` → 85 for 'U'.
+
+---
+
+## Summary for teacher (iter744 = FIX-A, two adds)
+
+1. **Q3 (priority):** combine-DATE+TIME→TIMESTAMP — reconcile r13:5671-5677 IN PLACE; canonical = `CAST(CAST(d AS varchar) || ' ' || CAST(t AS varchar) AS TIMESTAMP)`; defang both `||`-without-casts (type error) and `TIME - TIME` (unsupported op). This is a real defect that the responder copied verbatim from the resource.
+2. **Q4:** add `codepoint(varchar)→integer` / `chr(bigint)→varchar` + `codepoint(substr(s,1,1))` first-char idiom to r23.
+
+Standing pins (Q1 contains(map_keys), Q2 FIRST/LAST_VALUE-frame) HELD and verified. Federation row (FAIL 4.49944, threshold 4.5) NOT probed — unchanged. No prod-fit (auth/authz) concerns this iteration.
