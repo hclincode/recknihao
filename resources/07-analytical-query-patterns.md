@@ -2483,6 +2483,108 @@ The phrases you would type into a search bar for this pattern: **year over year*
 
 > **Cross-references.** [FORM A / FORM B above](#pattern-b2-leading-canonical--period-over-period-yoy-vs-mom-with-window-functions-year-over-year--same-month-last-year--month-over-month--compare-to-last-year--lag-12-months--growth-vs-last-year--period-over-period) — when the question is a per-month series (not a one-ratio-per-entity period total). [Share of grand total — § share-of-grand-total card](#) earlier in this file for the related "subset SUM ÷ grand-total SUM in ONE pass" final-assembly pattern (same conditional-aggregation idiom, different ratio). [Resource 23 § 11 — duplicate-subquery collapse + `FILTER (WHERE ...)`](23-sql-best-practices-olap.md#11-use-ctes-or-subqueries--dont-re-run-the-same-expensive-query-twice) for the broader "compute multiple metrics in one scan via `FILTER`" pattern.
 
+#### Sub-canonical — MONTH-OVER-MONTH (MoM) — this month vs IMMEDIATELY PRECEDING month, NOT same month last year (iter698 FIX-A2)
+
+> **Keyword anchors (READ THIS FIRST if your question contains any of these):** month over month, month-over-month, MoM, MoM growth, this month vs last month, this month versus previous month, current month vs prior month, current month vs preceding month, consecutive months, previous calendar month, prior calendar month, immediately preceding month, each month vs immediately preceding month, month-over-month growth percent, month-on-month, MoM vs YoY, MoM growth rate, this month compared to last month, growth from last month to this month, change from previous month, % change vs last month.
+
+> **The fact in one sentence.** "Month over month" / "MoM" / "this month vs last month" means **THIS calendar month vs the IMMEDIATELY PRECEDING calendar month** (e.g. June 2026 vs **May 2026**) — **NOT same-month-last-year (which is YoY: June 2026 vs June 2025)**. The two metrics are **numerically and semantically different**. The correct Trino 467 idiom for "the previous calendar month" is **`date_trunc('month', current_date) - INTERVAL '1' month`** (date MINUS INTERVAL is a documented operator at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html); `date - date` is **NOT** a valid Trino 467 operator). For a single ratio (this month total ÷ last month total), use **two `SUM(...) FILTER (WHERE date_trunc('month', d) = ...)` aggregates**. For a per-month time series across many months, use **`LAG(metric) OVER (ORDER BY month_start)` on a pre-aggregated one-row-per-month CTE**.
+
+> **CANONICAL (preferred for a per-month time series) — `LAG` on a pre-aggregated monthly CTE:**
+>
+> ```sql
+> -- "Show me monthly revenue with a month-over-month growth % column."
+> -- Pre-aggregate to ONE row per month in the CTE, then LAG over months in the outer SELECT.
+> WITH monthly AS (
+>   SELECT
+>     date_trunc('month', sale_date) AS month_start,
+>     SUM(amount)                    AS revenue
+>   FROM iceberg.analytics.sales
+>   GROUP BY date_trunc('month', sale_date)
+> )
+> SELECT
+>   month_start,
+>   revenue,
+>   LAG(revenue) OVER (ORDER BY month_start)                                       AS prev_month_revenue,
+>   (revenue - LAG(revenue) OVER (ORDER BY month_start)) * 100.0
+>     / NULLIF(LAG(revenue) OVER (ORDER BY month_start), 0)                        AS mom_growth_pct
+> FROM monthly
+> ORDER BY month_start;
+> ```
+>
+> **Why each piece is load-bearing:**
+> - **`date_trunc('month', sale_date)`** — Trino 467 verified: `date_trunc(unit, x) -> [same as input]` ([trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html)). Truncates each `sale_date` to the first day of its calendar month so all rows in the same month share the same `month_start` value and collapse into a single group.
+> - **Pre-aggregating in the CTE (one row per month)** is what makes `LAG(revenue)` correct. `LAG`'s offset is a **row count**, not a calendar period ([trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html) verbatim: *"Returns the value at `offset` rows before the current row in the window partition."*). With one row per month in the CTE, `LAG(revenue, 1)` = previous row = previous month. If you tried to LAG on the raw `sales` table without aggregating first, "previous row" would be the previous **sales transaction**, not the previous month — silently wrong.
+> - **`LAG(revenue) OVER (ORDER BY month_start)`** with no explicit offset = `LAG(revenue, 1)` = one row back. On a one-row-per-month series, that is exactly the previous calendar month. `OVER (ORDER BY month_start)` orders the partition by calendar month so "back one row" = back one month chronologically. No `PARTITION BY` is needed here because the example is a global monthly series; add `PARTITION BY product_id` (or whatever entity) for a per-entity series.
+> - **`* 100.0`** (SINGLE 100.0, NOT 100.0 twice) — the standard percent-growth scale, written with the decimal literal `100.0` so the multiplication promotes to floating-point and the subsequent division doesn't truncate. Do NOT also multiply the denominator by `100.0` — that double-multiply produces a percent of a percent (a 10000× inflation). See the percent-of-total card's "double-100 trap" earlier in this file.
+> - **`NULLIF(LAG(revenue) OVER (...), 0)`** — divide-by-zero guard. If the previous month had `revenue = 0` (or no row), the denominator becomes `0` and `... / 0` raises a Trino runtime error. `NULLIF(x, 0)` returns `NULL` when `x = 0`, and any number divided by `NULL` is `NULL` — so the first month (no prior row → `LAG` returns `NULL`) and any month-following-a-zero-month emit `mom_growth_pct = NULL` instead of erroring.
+>
+> **Gap-fill note (brief, one line).** `LAG` counts ROWS, not calendar months. If a month has zero sales rows in the raw table, the `monthly` CTE will be **missing that month entirely** and `LAG(revenue)` on the next month will silently compare across the gap (e.g. April-to-June labeled as MoM when May is missing). If your data can have empty months, generate a calendar spine of months via `UNNEST(sequence(DATE '2024-01-01', current_date, INTERVAL '1' month))` and LEFT JOIN — see the date-spine / gap-fill recipe earlier in this file (§4 and Pattern B2 FORM B). For most aggregate revenue series this is not a concern (every month has at least one transaction), but it is the canonical correctness trap for sparse-entity series.
+
+> **ALTERNATIVE (for a single this-month-vs-last-month ratio — one row per entity, NOT a per-month series) — two `SUM(...) FILTER` aggregates keyed on the ACTUAL previous calendar month:**
+>
+> ```sql
+> -- "What is THIS month's revenue and LAST month's revenue, and the MoM growth %?"
+> -- ONE row per product. Two TRUE calendar months: current month, and current month - 1 month.
+> SELECT
+>   product_id,
+>   SUM(amount) FILTER (
+>     WHERE date_trunc('month', sale_date) = date_trunc('month', current_date)
+>   ) AS revenue_this_month,
+>   SUM(amount) FILTER (
+>     WHERE date_trunc('month', sale_date) = date_trunc('month', current_date) - INTERVAL '1' month
+>   ) AS revenue_last_month,
+>   (SUM(amount) FILTER (WHERE date_trunc('month', sale_date) = date_trunc('month', current_date))
+>    - SUM(amount) FILTER (WHERE date_trunc('month', sale_date) = date_trunc('month', current_date) - INTERVAL '1' month))
+>    * 100.0
+>    / NULLIF(SUM(amount) FILTER (WHERE date_trunc('month', sale_date) = date_trunc('month', current_date) - INTERVAL '1' month), 0)
+>    AS mom_growth_pct
+> FROM iceberg.analytics.sales
+> GROUP BY product_id;
+> ```
+>
+> **Why each piece is load-bearing:**
+> - **`date_trunc('month', sale_date) = date_trunc('month', current_date)`** picks rows whose `sale_date` falls in the CURRENT calendar month (today's month). Comparing two `date_trunc('month', ...)` values on both sides equalizes them to the first-of-month, so the equality holds for ALL days in the current month — not just the row whose `sale_date` exactly equals `current_date`.
+> - **`date_trunc('month', current_date) - INTERVAL '1' month`** is the **load-bearing MoM piece**: it is the first day of the IMMEDIATELY PRECEDING calendar month. Verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html) — `date - interval` is a documented operator (`date '2012-08-08' - interval '2' day` returns `2012-08-06`). This handles the year-boundary case correctly: in January 2026, `date_trunc('month', current_date) - INTERVAL '1' month` = `2025-12-01`, not `2025-01-01` (which is the YoY answer) and not some impossible `2026-00-01`.
+> - **The two `FILTER` predicates are mutually exclusive** — a row's `sale_date` is in EXACTLY ONE calendar month, so each row contributes to AT MOST one of the two sums. No double-counting.
+> - **`* 100.0`** — SINGLE multiplication, same as the LAG canonical above. Forces floating-point and applies the percent scale.
+> - **`NULLIF(..., 0)`** — divide-by-zero guard. If a product had no sales last month, the denominator is `0` (the `FILTER` aggregate returns `NULL` for an empty group, but a product that DID have last-month rows summing to literal `0` would still trigger divide-by-zero — keep the guard for both cases).
+>
+> **Equivalent way to write the previous-month boundary** (read these as the SAME date — pick whichever your team reads better):
+> - `date_trunc('month', current_date) - INTERVAL '1' month` — date-minus-INTERVAL, the preferred form for "1 month ago, first of the month."
+> - `date_add('month', -1, date_trunc('month', current_date))` — the `date_add` form, equivalent and also valid Trino 467 ([trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html) verbatim: *"Adds an `interval value` of type `unit` to `timestamp`. Subtraction can be performed by using a negative value."*).
+>
+> Both compile to the same plan. Both correctly handle year boundaries (Jan → previous Dec).
+
+> **MoM vs YoY — pick the right one (this is the iter697 Q2 miss):**
+>
+> | The question says | The answer is | Why |
+> |---|---|---|
+> | "this month vs **last month**", "**month over month**", "MoM", "vs the **previous month**", "vs the **prior month**", "**consecutive months**", "growth from last month to this month" | **MoM** — previous **calendar month** (e.g. June 2026 vs **May 2026**). Use `date_trunc('month', current_date) - INTERVAL '1' month` for the prior period. | The user is comparing the two most-recent consecutive months. |
+> | "this month vs **the same month last year**", "**year over year**", "YoY", "vs **last year**", "**prior year**", "compare to last year" | **YoY** — same month, **prior calendar year** (e.g. June 2026 vs **June 2025**). Use `year(current_date) - 1` (and optionally `month(current_date) = month(...)`). | The user is comparing the same month across two different years. |
+> | "this year's total revenue / last year's total revenue per product" | **Period-total YoY** — see the [§ Sub-canonical PERIOD-TOTAL YoY card above](#sub-canonical--period-total-yoy--this-period-vs-last-period-ratio-one-ratio-per-entity-from-two-period-totals--not-a-per-month-series-iter640-fix-a). | One ratio per entity from two **period totals**, not a per-month series. |
+>
+> **One-line clarifier.** The form `SUM(amount) FILTER (WHERE month(sale_date) = month(current_date) AND year(sale_date) = year(current_date) - 1)` IS the correct shape for **YoY** (same month, prior year) — it is NOT wrong in general. It is just the WRONG answer to a **MoM** question. For MoM, the prior period is determined by **`date_trunc('month', current_date) - INTERVAL '1' month`**, NOT by `year(current_date) - 1`.
+
+> **DO-NOT-WRITE — MoM-specific (iter698 FIX-A2 — the iter697 Q2 responder miss):**
+>
+> | DO NOT write (inline, un-copyable) | Why it's wrong for a MoM question | Correct MoM form |
+> |---|---|---|
+> | `SUM(amount) FILTER (WHERE month(sale_date)=month(current_date) AND year(sale_date)=year(current_date)-1)`  &nbsp;&nbsp;❌ **WRONG for MoM** — this is **SAME-MONTH-YEAR-OVER-YEAR (YoY)**, NOT month-over-month. For MoM use `date_trunc('month', sale_date) = date_trunc('month', current_date) - INTERVAL '1' month`. **DO NOT COPY this snippet for a MoM question.** | Compares **June 2026 vs June 2025** (same month, prior year) — that is YoY. The MoM question asks for **June 2026 vs May 2026** (consecutive months). Same English-sounding family ("comparison of two periods"), totally different metric. This row exists ONLY to inoculate against the iter697 Q2 fab where the year-minus-1 idiom was used in answer to a MoM question. | `SUM(amount) FILTER (WHERE date_trunc('month', sale_date) = date_trunc('month', current_date) - INTERVAL '1' month)` for the denominator's previous-month total. |
+> | `SUM(amount) FILTER (WHERE month(sale_date) = month(current_date) - 1 AND year(sale_date) = year(current_date))`  &nbsp;&nbsp;❌ **WRONG at year boundaries** | In **January**, `month(current_date) - 1 = 0`, which is NOT a valid month value — the predicate is FALSE for every row, so `revenue_last_month` becomes 0/NULL and the MoM ratio is wrong (or NULL) for the entire month of January. Also wrong when last month is in the previous year (e.g. Jan 2026 vs Dec 2025) — the AND-year-equals-current-year clause excludes December 2025 rows. | Use `date_trunc('month', sale_date) = date_trunc('month', current_date) - INTERVAL '1' month` — the INTERVAL arithmetic handles year boundaries correctly (Jan → previous Dec). |
+> | `sale_date - INTERVAL '1' month` on the LEFT side of an equality to a current-month date  | Compares a per-row date to a moving target — every row's `sale_date - INTERVAL '1' month` is different, so the equality only holds for the single row whose sale was exactly today's date minus 1 month, not for all rows in the previous calendar month. | Truncate BOTH sides to month: `date_trunc('month', sale_date) = date_trunc('month', current_date) - INTERVAL '1' month`. |
+> | `current_date - sale_date < INTERVAL '1' month`  &nbsp;&nbsp;❌ **INVALID Trino 467** | `date - date` is NOT a Trino 467 operator (per [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html) — only `date - interval` is documented). The expression does not parse. | Use `date_diff('day', sale_date, current_date) < 30` to compute a numeric day-count and compare to a plain number, OR use the month-truncated equality predicates above. See the [r23 §temporal-minus-temporal banner](23-sql-best-practices-olap.md#leading-canonical--days--minutes--seconds-between-two-dates-or-timestamps-and-the-column-scope-discipline-that-goes-with-it). |
+> | `LAG(amount) OVER (ORDER BY sale_date)` on the **raw `sales` table** (no monthly pre-aggregation in a CTE), labeled as "previous month's revenue"  | LAG's offset is **rows**, not months. On the raw table, "previous row" = previous transaction (which could be 10 seconds ago, same day), NOT previous month. The label says "previous month" but the value is "previous sales row." | Pre-aggregate to one row per month in a CTE first (see the LAG canonical above), THEN apply `LAG(revenue) OVER (ORDER BY month_start)`. |
+> | `(revenue - LAG(revenue) OVER (...)) * 100.0 / LAG(revenue) OVER (...) * 100.0`  &nbsp;&nbsp;❌ **DOUBLE 100.0** | Multiplying by `100.0` twice produces a percent of a percent — a 10000× inflation. A real 5% growth would emit `500.0` (or `50000.0` depending on the parse). See the percent-of-total double-100 PIN earlier in this file. | SINGLE `* 100.0`, on the numerator only: `(revenue - LAG(revenue) OVER (...)) * 100.0 / NULLIF(LAG(revenue) OVER (...), 0)`. |
+
+> **KEYWORD-LANDING repeat (so the responder routes here on the right English phrasing):** *month over month, month-over-month, MoM, this month vs last month, this month versus previous month, current month vs prior month, consecutive months, previous calendar month, prior calendar month, immediately preceding month, each month vs immediately preceding month, month-over-month growth percent, MoM vs YoY, MoM growth rate, growth from last month to this month, change from previous month, % change vs last month, month-on-month.*
+
+> **Cross-references.**
+> - [§ Sub-canonical PERIOD-TOTAL YoY card above](#sub-canonical--period-total-yoy--this-period-vs-last-period-ratio-one-ratio-per-entity-from-two-period-totals--not-a-per-month-series-iter640-fix-a) — when the question is YoY (this year vs **same period last year**) instead of MoM.
+> - [Pattern B2 FORM A / FORM B above](#pattern-b2-leading-canonical--period-over-period-yoy-vs-mom-with-window-functions-year-over-year--same-month-last-year--month-over-month--compare-to-last-year--lag-12-months--growth-vs-last-year--period-over-period) — for the per-entity per-month time series form with self-join or gap-filled LAG.
+> - Percent-of-total double-100 trap (search this file for "share of grand total" or "double-100") — same SINGLE `* 100.0` discipline.
+> - [r23 §temporal-minus-temporal banner](23-sql-best-practices-olap.md#leading-canonical--days--minutes--seconds-between-two-dates-or-timestamps-and-the-column-scope-discipline-that-goes-with-it) — for the `date - date` / `timestamp - timestamp` ban (and why `date - interval` IS valid).
+> - Date-spine / monthly gap-fill recipe (§4 of this file) — when sparse months in the raw data would otherwise create silent LAG gaps.
+
 #### Sub-canonical — ACTIVE in EVERY one of the last N FULL calendar months (BOTH-BOUNDS window + `HAVING COUNT(DISTINCT date_trunc('month', d)) = N`) (iter640 FIX-B)
 
 > **Keyword anchors (READ THIS FIRST if your question contains any of these):** customers active in every one of the last N months, ordered every month for N months straight, bought every month for the last 3 months, present in all N periods, active all N consecutive months, customers who placed an order in each of the last 3 months, users active every single month for 6 months, retained every month, no-skip retention, full-period active, every-month customers.
