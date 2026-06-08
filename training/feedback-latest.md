@@ -1,47 +1,52 @@
-# Judge Feedback — iter726
+# Judge Feedback — iter727
 
-**Topic**: array_max FIX-A re-probe + modulo + starts_with/ends_with + date-grouping
-**Verification**: every dialect claim checked against trino.io/docs/467 (array.html, math.html, string.html, functions/list.html) via WebFetch/WebSearch — NOT against resources/.
+Docs verified against trino.io/docs/467 (array.html, datetime.html, aggregate.html, conversion.html) on 2026-06-08.
 
 ## Per-question scores
 
-| Q | Topic | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|---|---|
-| Q1 | array_max within array, no explode | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | modulo / divisibility (% and mod) | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 | starts_with / ends_with | 5 | 4.5 | 5 | 5 | 4.875 |
-| Q4 | strip time → date for grouping | 5 | 5 | 5 | 5 | 5.00 |
+### Q1 — array_min (single smallest value WITHIN an array, no exploding)
+- Accuracy: 5 — `array_min(x) → x` verified verbatim on functions/array.html ("Returns the minimum value of input array"); returns the min element directly, NO UNNEST. NULL-propagation + `filter(arr, x -> x IS NOT NULL)` strip-first workaround is correct standard semantics.
+- Completeness: 5 — answered exactly the ask; included the NULL gotcha + workaround.
+- Clarity: 5 — single clean function, one-row-in/one-row-out framing, no jargon.
+- Actionability: 5 — copy-ready SQL, engineer knows exactly what to do.
+- Avg: 5.00. Critically: responder did NOT use UNNEST+MIN and did NOT use a LEAST/array-index hack. Clean.
 
-**OVERALL AVG = 4.969 — PASS** (threshold 3.5; overall average governs, no per-Q override).
+### Q2 — EXTRACT day/month as integer
+- Accuracy: 5 — `extract(field FROM x) → bigint` verified; EXTRACT(MONTH/DAY FROM date) returns integer component. All listed fields valid Trino 467: YEAR, QUARTER, MONTH, WEEK, DAY, DAY_OF_MONTH, DAY_OF_WEEK, and DOW is a confirmed alias for DAY_OF_WEEK. No invalid field listed.
+- Completeness: 4.5 — answered fully; could have mentioned `month(x)`/`day(x)` shorthand (both exist per docs) as an even terser form, but EXTRACT is the requested "clean way."
+- Clarity: 5 — direct, no assumed knowledge.
+- Actionability: 5 — copy-ready.
+- Avg: 4.875.
 
-## Docs-verification record (trino.io/docs/467)
+### Q3 — boolean → 1/0 for SUM
+- Accuracy: 5 — `count_if(is_converted)` verified native ("Returns the number of TRUE input values... equivalent to count(CASE WHEN x THEN 1 END)"). `SUM(CASE WHEN is_converted THEN 1 ELSE 0 END)` valid. "Both identical plans" is fair.
+- Completeness: 4 — GAP: the user's LITERAL phrasing was "turn that boolean flag into a 1 or 0." The single most-literal answer is `CAST(is_converted AS integer)` (→ 1/0; standard Trino behavior, well-established though not spelled out verbatim on conversion.html). The responder did NOT show this direct CAST form. NOT over-penalized: count_if + SUM(CASE) both correctly achieve the stated GOAL (summing conversions), and count_if is genuinely the idiomatic Trino choice. But a user who specifically wants the scalar 1/0 expression (e.g. to multiply, or to SUM inline with other expressions) was not handed it.
+- Clarity: 5 — clear preferred/fallback structure.
+- Actionability: 4.5 — engineer can SUM conversions immediately; minor: no direct cast-to-1/0 scalar if needed inline.
+- Avg: 4.625.
 
-- **Q1 array_max** — VERBATIM `array_max(x) → x` "Returns the maximum value of input array." (and `array_min(x) → x` "Returns the minimum value of input array."). Single-arg array reducer, no UNNEST. CONFIRMED.
-- **Q2 modulo** — VERBATIM `mod(n, m) → [same as input]` "Returns the modulus (remainder) of n divided by m." Modulus operator `%` IS in the Mathematical operators table ("Modulus (remainder)"). BOTH exist and are equivalent. CONFIRMED.
-- **Q3 starts_with** — VERBATIM `starts_with(string, substring) → boolean` "Tests whether substring is a prefix of string." PRESENT in functions/string.html AND in the alphabetical functions/list.html under S. `ends_with` is ABSENT from string.html and absent from the alphabetical list. The responder's BOTH claims are TRUE.
-- **Q4 date grouping** — `CAST(created_at AS DATE)` → DATE type; `date_trunc('day', created_at)` → timestamp at midnight; both produce a valid day-level grouping key. Trino requires GROUP BY to repeat the full expression (alias not usable here). CONFIRMED.
+### Q4 — COUNT(DISTINCT) total
+- Accuracy: 5 — `COUNT(DISTINCT user_id)` exact, no GROUP BY → single row. `approx_distinct` verified (~2.3% standard error per docs; responder's "~2%" is within rounding and fine).
+- Completeness: 5 — exact + scale-out approx alternative.
+- Clarity: 5 — direct.
+- Actionability: 5 — copy-ready.
+- Avg: 5.00.
 
-## array_max FIX-A verdict (Q1)
+## Overall
 
-**CLOSED.** Direct re-probe of the iter725 Q4 defect (2.50 — responder gave CROSS JOIN UNNEST(arr)…MAX…GROUP BY which EXPLODES, plus the fragile GREATEST(coalesce(arr[i],0)…) fixed-index hack, and MISSED array_max). This iteration the responder gave **exactly** `array_max(monthly_invoices)` — one function, one row in / one row out, NO UNNEST, NO GROUP BY, NO GREATEST-index hack — and correctly stated NULL/empty → NULL. The iter726 PIN canonical added to r07 §1a worked: keyword path landed, defangs were not copied. FIX-A CLOSED. Score 5.00.
+| Q | Acc | Comp | Clar | Act | Avg |
+|---|-----|------|------|-----|-----|
+| Q1 | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 | 5 | 4.5 | 5 | 5 | 4.875 |
+| Q3 | 5 | 4 | 5 | 4.5 | 4.625 |
+| Q4 | 5 | 5 | 5 | 5 | 5.00 |
 
-## Q3 starts_with docs-verification verdict (the key check this iteration)
+**OVERALL AVERAGE = 4.875 — PASS** (well above 3.5; no per-Q override).
 
-**`starts_with` EXISTS in Trino 467** (functions/string.html: `starts_with(string, substring) → boolean`; also in functions/list.html under S). **`ends_with` does NOT exist in Trino 467** (absent from both string.html and the alphabetical list). The directive's hypothesis that "starts_with may be a Spark/Snowflake/DuckDB dialect-leak fabrication that parse-errors" is itself INCORRECT for Trino — starts_with is genuinely native. The responder's answer is fully accurate on BOTH halves:
-1. "Use starts_with(string, substring) for prefix tests … starts_with is a native Trino function" — TRUE, docs-verified.
-2. "there is NO ends_with function in Trino 467 — use LIKE '%.suffix' or substr" — TRUE, docs-verified.
+## array_min/array_max verdict
+**STAYS CLOSED.** 2nd consecutive clean datapoint after the iter726 FIX-A. The responder reached straight for `array_min(arr)` (single function, no UNNEST, no LEAST/fixed-index hack), and included the NULL-element gotcha + filter() strip-first workaround. The iter726 canonical in r07 §1a is doing its job — no regression to the iter725 UNNEST+MAX / GREATEST-fixed-index forms. Array-reducer family confirmed closed.
 
-**NO iter727 flag for Q3.** No RESOURCE-DEFECT, no SYNTHESIS-SLIP. resources/23 (cited source) is correct on this point — do NOT "fix" it. If the teacher greps r23 for starts_with, the expectation is that it is documented as a real native function; leave it intact. Q3 accuracy must NOT be scored down — scored 5 on accuracy.
-
-Minor completeness note only (not score-driving): responder could optionally mention `strpos(s, prefix) = 1` or `substr(s, 1, length(prefix)) = prefix` as portable prefix alternatives. Gravy, not a gap — Completeness 4.5.
-
-## Teacher feedback (actionable)
-
-- **No edits required.** All four answers are docs-correct; the array_max FIX-A is confirmed CLOSED across a fresh phrasing ("peak month … without exploding"). The iter726 PIN is doing its job.
-- **Do NOT touch starts_with content.** starts_with is a real Trino 467 function; responder and r23 are both correct. Any "correction" would introduce an error.
-- **Optional (low priority) findability nudge:** near the r23 starts_with / suffix-test content, co-locate the portable `strpos(s, prefix)=1` and `substr(s,1,length(prefix))=prefix` alternatives plus an explicit "Trino has starts_with but NOT ends_with — use LIKE '%suffix' / substr(s,-n)" one-liner so the suffix half routes cleanly. Additive only; current content is not wrong.
-- Preserve all iter534-726 locks. resources/22 HARD LOCK untouched.
-
-## Notes
-- state.json NOT modified (per directive).
-- This is the first PASSING datapoint for `array_max` (iter725 Q4 was a FAIL on this exact ask). One more re-probe from a different angle recommended before treating array_max as bulletproofed.
+## Teacher action / iter728 flag
+- **NO new genuine defect.** All four answers are docs-correct and well above threshold.
+- **Minor findability nudge (OPTIONAL, low priority) for iter728:** Q3 completeness — the literal phrasing "turn a boolean into a 1 or 0" is best served by also surfacing `CAST(is_converted AS integer)` → 1/0 as the direct scalar form, alongside count_if (aggregate) and SUM(CASE) (portable). If a boolean→1/0 canonical exists in r23 §best-practices or r02, verify it lists all three (CAST scalar / count_if aggregate / SUM(CASE) portable) and routes by phrasing (scalar-per-row vs count-the-trues). NUDGE, not a fix — Q3 still PASSED at 4.625 and the GOAL was correctly met. Do not churn correct canonical for this.
+- Default posture for iter728 absent a fresh defect: NO-OP integrity sweep.
