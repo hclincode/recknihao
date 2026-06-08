@@ -1,57 +1,63 @@
-# iter746 Judge Feedback — durability-breadth (rolling-avg / array-intersect / pivot / map-merge)
+# Judge Feedback — iter747
 
-**Verification basis**: all 4 claims checked against trino.io/docs/467 (functions/window.html, array.html, aggregate.html, map.html) via WebSearch 2026-06-09. resources/ NOT treated as ground truth.
+**Theme:** durability-breadth — array lambda HOFs (reduce / transform / filter) + aggregate map-building (map_agg).
 
-## Docs verification summary (highest-risk first)
+**Docs verification:** All four signatures verified against trino.io/docs/467 (functions/array.html, functions/aggregate.html) on 2026-06-09. resources/ NOT treated as ground truth.
 
-- **map_concat duplicate-key winner** (Q4, FLAGGED HIGHEST RISK): CONFIRMED — Trino docs verbatim "If a key is found in multiple given maps, that key's value in the resulting map comes from the last one of those maps." Responder's claim "rightmost/last map wins → put overrides last" is EXACTLY CORRECT. Worked example `{'theme':'light','timeout':'30'} + {'theme':'dark'} -> {'theme':'dark','timeout':'30'}` is correct. `MAP()` empty-map constructor for the COALESCE null-safe variant is valid Trino 467 syntax.
-- **array set-op signatures** (Q2, FLAGGED HIGH RISK): CONFIRMED — `array_intersect(x,y)` = elements in intersection without duplicates; `array_union(x,y)` = union without duplicates; `array_except(x,y)` = elements in x but not y, without duplicates. All three docs-verbatim. Responder's dedup characterization is correct on all three.
-- **Window moving-frame** (Q1): CONFIRMED — `AVG(x) OVER (ORDER BY d ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)` = 7-row sliding window (current + 6 preceding), NOT a running total. Pre-aggregating to one row per day in the CTE before applying the frame is the correct idiom (frame counts ROWS, so one-row-per-day is required for "7 days"). Responder surfaced both points explicitly.
-- **Aggregate FILTER clause** (Q3): CONFIRMED — `SUM(x) FILTER (WHERE cond)` is valid Trino 467 syntax, supported for all aggregate functions; docs-verbatim form is `aggregate_function(col) FILTER (WHERE condition)`. SUM(CASE WHEN ... THEN ... END) pivot is also correct.
+---
 
 ## Per-question scores
 
-### Q1 — 7-day rolling/moving average
-- Accuracy: 5 — correct window frame, correct ROWS BETWEEN 6 PRECEDING AND CURRENT ROW = 7 rows.
-- Completeness: 5 — pre-aggregate-to-one-row-per-day caveat included (the exact trap the run-prompt flagged); SUM-for-revenue variant offered.
-- Clarity: 5 — "this day + 6 back = 7 rows" plainly explained for a non-OLAP engineer.
-- Actionability: 5 — drop-in CTE, ORDER BY present, ready to run.
-- **Q1 avg = 5.00**
+### Q1 — Fold an array to a single value (running remaining-balance via `reduce`)
+Answer: `reduce(payments, total_amount, (balance, payment) -> balance - payment, balance -> balance) AS final_balance`.
 
-### Q2 — common elements between two arrays
-- Accuracy: 5 — array_intersect docs-verbatim, dedup behavior correct.
-- Completeness: 5 — bonus array_union / array_except correctly characterized (union all-deduped, except a-not-b), covering the adjacent set-ops the engineer will reach for next.
-- Clarity: 5 — "elements in both, deduped" is exact and jargon-free.
-- Actionability: 5 — single-line drop-in against a realistic user_plans table.
-- **Q2 avg = 5.00**
+- **DOCS-CONFIRMED (HIGH-RISK claim this iter):** `reduce(array(T), initialState S, inputFunction(S,T,S), outputFunction(S,R)) -> R`. The inputFunction arg order is **(state, element)** — the responder's `(balance, payment)` maps state=balance FIRST, element=payment SECOND, which is exactly correct. The identity `outputFunction` `balance -> balance` is valid (S->R, R=S). Fold is **left-to-right** per docs, so subtracting payments in array order yields the correct final balance. All four argument slots and both lambda arities are correct.
+- Bonus: correctly distinguished the single-value fold (`reduce`) from the full running-balance *sequence* (UNNEST + running SUM window) — accurate scoping, no overreach.
 
-### Q3 — pivot rows into columns
-- Accuracy: 5 — SUM(CASE WHEN...) pivot correct; FILTER (WHERE...) equivalent is valid Trino 467.
-- Completeness: 4.5 — explained CASE-returns-NULL/SUM-ignores-NULL mechanic and offered the cleaner FILTER form. Minor ding: used `ELSE 0` in the CASE form, which yields 0 (not NULL) for a customer missing a metric; the run-prompt flagged this implication. The responder explained the SUM-ignores-NULL mechanic generally but did not explicitly contrast ELSE 0 (missing-metric shows 0) vs omit-ELSE (missing-metric shows NULL). Both are defensible outputs; the gap is only that the implication wasn't surfaced for the reader to choose.
-- Clarity: 5 — "each CASE branch = one column" is the right mental model for a beginner.
-- Actionability: 4.5 — fully runnable; reader may not realize the 0-vs-NULL choice matters for sparse data without the explicit note.
-- **Q3 avg = 4.75**
+| Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|
+| 5 | 5 | 5 | 5 | **5.00** |
 
-### Q4 — merge two MAP columns, overrides win
-- Accuracy: 5 — map_concat rightmost-wins CONFIRMED docs-verbatim; this was the iteration's highest-risk claim and it is exactly right.
-- Completeness: 5 — keys-only-in-one carry-through noted; null-safe COALESCE + MAP() variant included.
-- Clarity: 5 — worked example shows override winning on `theme` while `timeout` carries through; unambiguous.
-- Actionability: 5 — "put overrides last" is the precise, correct instruction; drop-in.
-- **Q4 avg = 5.00**
+### Q2 — Per-key frequency map in one aggregate (`map_agg`)
+Answer: inner `SELECT user_id, event_type, COUNT(*) AS event_count ... GROUP BY user_id, event_type`, outer `map_agg(event_type, event_count) ... GROUP BY user_id`.
+
+- **DOCS-CONFIRMED (HIGH-RISK claim this iter):** `map_agg(key, value) -> map(K,V)` "Returns a map created from the input key/value pairs." The two-step (inner GROUP BY key + COUNT, outer map_agg) is a correct and idiomatic way to build a per-key-count map, and is MORE flexible than the one-step shortcut (works for any value expression, not just occurrence counts). The inner `GROUP BY user_id, event_type` guarantees one distinct key per user, so the duplicate-key / NULL-key caveats of map_agg do not bite here — the answer is safe by construction.
+- **Minor completeness ding:** for the narrow "count occurrences of one column" case, Trino 467 also offers the one-step `histogram(event_type) -> map(K,bigint)` (docs-verified: "Returns a map containing the count of the number of times each input value occurs"). Surfacing it as an alternative would have been a touch more complete. Not an error — both are docs-valid and the map_agg path is the right general answer; this is the only thing keeping Q2 below 5.
+
+| Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|
+| 5 | 4 | 5 | 5 | **4.75** |
+
+### Q3 — Transform every array element, keep it an array (`transform`)
+Answer: `transform(tag_list, tag -> upper(tag)) AS uppercase_tags`.
+
+- **DOCS-CONFIRMED:** `transform(array(T), function(T,U)) -> array(U)` "applies function to each element." `upper()` is a valid Trino string function. One row in / one row out, no UNNEST — exactly addresses "no row explosion."
+
+| Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|
+| 5 | 5 | 5 | 5 | **5.00** |
+
+### Q4 — Keep only array elements matching a condition, keep it an array (`filter`)
+Answer: `filter(amounts, amt -> amt > 0) AS positive_amounts`.
+
+- **DOCS-CONFIRMED:** `filter(array(T), function(T,boolean)) -> array(T)` "constructs an array from those elements for which function returns true." The predicate lambda `amt -> amt > 0` is valid. In-array, no UNNEST — exactly addresses "keeping it an array."
+
+| Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|
+| 5 | 5 | 5 | 5 | **5.00** |
+
+---
 
 ## Overall
 
-| Q | Acc | Comp | Clar | Act | Avg |
-|---|---|---|---|---|---|
-| Q1 | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 | 5 | 4.5 | 5 | 4.5 | 4.75 |
-| Q4 | 5 | 5 | 5 | 5 | 5.00 |
+**Overall avg = (5.00 + 4.75 + 5.00 + 5.00) / 4 = 4.9375 — PASS.**
 
-**Overall avg = 4.9375 → PASS** (threshold 3.5; clear, no single-Q veto applies and none needed).
+The two highest-risk claims this iteration (the `reduce` 4-arg signature with `(state, element)` inputFunction order, and `map_agg` map-building semantics) were both verified correct against the 467 docs. No accuracy defects, no dialect errors, no fabricated functions. The array-HOF family (reduce / transform / filter) is consistent with the iter673 MAP/JSON HOF locks and the iter746 array set-op locks.
 
-## iter747 designation
+## iter748 designation
 
-**DEFAULT NO-OP / durability-breadth integrity sweep.** No new defect, no gap. The two highest-risk dialect claims this iteration (map_concat rightmost-wins, array set-op dedup signatures) are docs-confirmed correct — strong durability signal on the map/array set-op surface.
+**DEFAULT NO-OP / durability-breadth.** No new gap, no defect.
 
-OPTIONAL low-priority teacher note (NOT blocking, Q3 only): at the pivot resource, add one line making the `ELSE 0` vs omit-ELSE (→ NULL via SUM-ignores-NULL) implication explicit for sparse/missing-metric customers, so the reader can choose intended output. Pure additive co-location; do NOT reconcile or rewrite the working CASE/FILTER canonical (perfect-score-adjacent iteration, iter693 churn-risk). Q1/Q2/Q4 are perfect — do NOT touch those resources.
+- Do NOT edit the array-HOF or map_agg resources — this is a near-perfect iteration and the iter693 churn-risk lesson applies (touching a working canonical risks regression).
+- OPTIONAL low-prio additive (Q2 only): co-locate ONE line at the map_agg / frequency-map resource noting that `histogram(col) -> map(K,bigint)` is the one-step shortcut for counting occurrences of a single column's values, while `map_agg(key, COUNT(*))` over a GROUP BY subquery is the general (more flexible) form. Pure addition adjacent to the existing canonical; do NOT rewrite the working two-step map_agg block. Not blocking — both forms are docs-valid and the answer was already correct.
+- Q1/Q3/Q4 perfect — do not touch.
