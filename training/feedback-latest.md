@@ -1,97 +1,123 @@
-# iter715 Judge Feedback
+# Iter 716 — Judge Feedback
 
-## Per-Question Sub-Scores (1–5)
+## Per-question scores (Accuracy / Completeness / Clarity / Actionability, each 1–5)
 
-### Q1 — Time-window bucketing (hourly + 5-minute), FIX-A re-probe
-- Accuracy: **5**
-- Completeness: **5**
-- Clarity: **5**
-- Actionability: **5**
+### Q1 — Iceberg snapshot expiry + remove_orphan_files (+ "keep last 10" probe)
 
-**Verification vs trino.io/docs/467:**
-- `date_trunc('hour', request_time)` — VALID per Trino 467 datetime docs (hour is a supported unit).
-- 5-minute floor form: `date_trunc('hour', request_time) + INTERVAL '1' MINUTE * (CAST(EXTRACT(minute FROM request_time) AS integer) / 5 * 5)` — uses **`CAST(x AS integer)`**, NOT the Postgres `::` operator. **NO `::`-cast leak.**
-- `EXTRACT(minute FROM ts)` returns BIGINT per Trino 467 docs; the explicit CAST AS integer is redundant but VALID (the modulo/divide work on bigint without cast — but cast is harmless and matches the iter606 canonical exactly).
-- Integer division `/5*5` floors correctly (17→15, 23→20). VALID.
-- `INTERVAL '1' MINUTE * <integer>` is the long-established Trino interval×number form used by the iter606 LEADING canonical at r07:1474 — VALID.
-- `date_trunc('hour', ts) + <interval>` — VALID timestamp+interval arithmetic.
-- **NO date_bin / time_bucket / time_slice invented.** Responder did NOT reach for foreign idioms.
-- date_trunc's unit list does NOT include sub-hour granularities like '5 minute' — the floor-arithmetic approach is the correct idiom per the iter715 PIN and is what the responder used.
+**Sub-scores: Acc 5 / Comp 5 / Clar 5 / Act 5 = 5.00**
 
-**FIX-A VERDICT: CLOSED.** The iter714 Q4 defect (Postgres `::` cast leak in the 5-minute bucket arithmetic) did NOT recur. Responder used the iter606 LEADING canonical (FLOOR-TO-HOUR + ADD-N-STEPS) rather than the newly added EPOCH-FLOOR form — both are valid per the iter715 directive ("do not penalize the choice"). The labeling commentary ("bucket label = window start") is correct.
+- `ALTER TABLE iceberg.schema.table EXECUTE expire_snapshots(retention_threshold => '7d')` — VERIFIED correct per trino.io/docs/467/connector/iceberg.html (Iceberg connector → procedure `expire_snapshots`: `ALTER TABLE test_table EXECUTE expire_snapshots(retention_threshold => '7d')`).
+- `ALTER TABLE ... EXECUTE remove_orphan_files(retention_threshold => '7d')` — VERIFIED correct per same source.
+- Responder EXPLICITLY stated "Trino 467 doesn't have a direct 'keep N snapshots' option. It works with time thresholds ('7d','3d')—not snapshot counts." — VERIFIED correct: Trino 467's `expire_snapshots` is duration-driven via `retention_threshold` only; `retain_last` was added in Trino 479 and is a Spark-Iceberg-Java-API concept on the production stack. r17 + r11:520 both already pin this correctly.
+- **The iter715 Q3 "(keep last 10)" inline-comment slip DID NOT RECUR.** This was a one-off responder-comment leak in iter715; r17 + r11 content was sufficient and the responder this iteration handled the explicit count-based phrasing cleanly with the correct duration-only framing. **No iter717 FIX-A needed on this front.**
 
-### Q2 — String→DECIMAL for math with malformed-safe conversion
-- Accuracy: **5**
-- Completeness: **5**
-- Clarity: **5**
-- Actionability: **5**
+### Q2 — Normalize dirty emails (LOWER + TRIM)
 
-**Verification vs trino.io/docs/467:**
-- `try_cast(varchar AS DECIMAL(18,2))` — VALID; returns NULL on malformed input (per conversion functions page).
-- DECIMAL(18,2) — within max precision 38, VALID.
-- `WHERE TRY_CAST(price_string AS DECIMAL(18,2)) IS NOT NULL` correctly filters malformed rows.
-- `SUM(DECIMAL(p,s))` return-type widening: **CONFIRMED** — Trino's SUM(decimal(p,s)) returns `decimal(38, s)`, so SUM of DECIMAL(18,2) returns DECIMAL(38,2). The responder's claim "SUM widens to decimal(38,2) so no overflow" is **technically accurate**.
-- SUM/AVG skip NULL — CONFIRMED standard SQL behavior, accurately stated.
+**Sub-scores: Acc 5 / Comp 5 / Clar 5 / Act 5 = 5.00**
 
-No defects. The DECIMAL-widening claim is the kind of detail that is often gotten subtly wrong; the responder got it right.
+- `LOWER(TRIM(email))` — VERIFIED correct per trino.io/docs/467/functions/string.html (`trim(string) → varchar`: "Removes leading and trailing whitespace from string." `lower(string) → varchar`: "Converts string to lowercase.").
+- "WHERE LOWER(email)='me@x.com' skips partition pushdown" — CORRECT: function-wrapped predicates defeat Iceberg partition/file-level pruning; storing the pre-normalized value at ingest is the standard fix (and matches the iter679/iter687 "function on the column kills pushdown" lock).
+- Bulletproof reference answer; appropriate trade-off framing (SQL vs dbt vs upstream).
 
-### Q3 — Iceberg expire snapshots + remove orphan files
-- Accuracy: **4**
-- Completeness: **5**
-- Clarity: **5**
-- Actionability: **5**
+### Q3 — find account_id NOT in expected 8-digit format (TWO INVALID Trino 467 forms)
 
-**Verification vs trino.io/docs/467/connector/iceberg.html:**
-- `ALTER TABLE iceberg.analytics.customers EXECUTE expire_snapshots(retention_threshold => '7d')` — VALID Trino 467 form (NOT Spark CALL). CONFIRMED.
-- `ALTER TABLE ... EXECUTE remove_orphan_files(retention_threshold => '7d')` — VALID. CONFIRMED.
-- The `retention_threshold` DataSize/duration string `'7d'` — VALID.
+**Sub-scores: Acc 1 / Comp 3 / Clar 3 / Act 2 = 2.25**
 
-**Minor inaccuracy (flagged per directive):** The inline comment `-- (keep last 10)` is WRONG. Trino's `expire_snapshots` is driven by `retention_threshold` (a duration), not a "keep last N" count parameter. The SQL itself is correct, but the parenthetical commentary misrepresents how `expire_snapshots` is parameterized. This could mislead an engineer into thinking they can specify a snapshot count — they cannot via the Trino ALTER TABLE EXECUTE form.
+**CRITICAL — both pattern-match forms offered are INVALID Trino 467:**
 
-The "branches/tags protect snapshots" claim is reasonable — Iceberg's $refs table carries `min_snapshots_to_keep` and `max_snapshot_age_in_ms` per branch/tag, which the Iceberg core spec uses to determine retention. The Trino docs do not explicitly state the interaction in the expire_snapshots section, but the claim aligns with Iceberg's reference-protection semantics.
+1. **`account_id NOT LIKE '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'` — WRONG.** VERIFIED per trino.io/docs/467/functions/comparison.html (LIKE): Trino's LIKE supports ONLY `_` (single char) and `%` (zero or more chars) wildcards (plus `ESCAPE`). It does **NOT** support `[...]` bracket character classes — that is a **SQL Server LIKE extension**. In Trino 467, `LIKE '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'` treats `[`, `0`, `-`, `9`, `]` as **literal characters** and matches the literal string `"[0-9][0-9]..."`, NOT 8 digits. Net effect: the predicate matches essentially nothing, and `NOT LIKE '[0-9]...'` returns essentially every row — the diagnostic is meaningless. Silent-wrong, no parse error.
 
-Net: -1 on Accuracy for the "(keep last 10)" misleading comment.
+2. **`account_id ~ '^\d{8}$'` / `NOT (account_id ~ '^\d{8}$')` — WRONG.** VERIFIED per trino.io/docs/467/functions/regexp.html: Trino 467 has NO `~`, `~*`, `!~`, or `!~*` regex-match operators. Those are **PostgreSQL POSIX-regex operators**. Trino exposes regex only via FUNCTIONS: `regexp_count`, `regexp_extract`, `regexp_extract_all`, `regexp_like`, `regexp_position`, `regexp_replace`, `regexp_split`. Writing `col ~ 'pattern'` raises `mismatched input '~'` at parse time. Hard parse-time failure.
 
-### Q4 — Dedup keep most-recent row per customer
-- Accuracy: **5**
-- Completeness: **5**
-- Clarity: **5**
-- Actionability: **5**
+**Correct Trino 467 forms** (which the responder did NOT actually write, though it cross-referenced regexp_like as "an alternative"):
+```sql
+WHERE NOT regexp_like(account_id, '^[0-9]{8}$')
+-- or
+WHERE NOT regexp_like(account_id, '^\d{8}$')   -- \d works in Java/JONI regex
+```
 
-**Verification vs trino.io/docs/467:**
-- `ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY updated_at DESC) AS rn` in a CTE + outer `WHERE rn = 1` — VALID, canonical Trino dedup pattern.
-- `max_by(name, updated_at)` + `MAX(updated_at)` GROUP BY customer_id — VALID alternative. `max_by(x, y)` returns x at the maximum y per Trino 467 aggregate functions docs.
-- "no QUALIFY in Trino 467 — wrap in subquery/CTE" — CORRECT; reinforces the iter695 QUALIFY-not-in-Trino lock.
+This is the same Postgres-ism leak family as the iter714 Q4 `::integer` cast leak — except this iteration emits TWO simultaneous Postgres/SQL-Server dialect leaks in a single answer. Q3 must be heavily penalized on Accuracy.
 
-Both forms shown, correctly explained, with the QUALIFY callout that prevents the most common Snowflake-leak failure mode.
+**Resource-gap audit (findability check):**
+- Grep `LIKE` bracket-class inoculation: **NONE** found. No "Trino LIKE supports only `%` and `_`, not `[0-9]` bracket character classes" defang exists anywhere in resources/.
+- Grep `~` / `~*` / Postgres regex-operator inoculation: **NONE** found. r23:2494 (ILIKE) is the closest neighbor, and r27:1057 has an `RLIKE`-NOT-IN-Trino defang — but neither covers the `~` infix operator that the responder reached for.
+- r23:464 mentions `regexp_like(filename, '(?i)\.csv$')` in passing; r27:1032-1057 has the only LEADING CANONICAL for `regexp_like(...)` multi-keyword search. Neither is keyword-anchored on "8 digits", "exactly N digits format", "account_id format", "account number format", "validate digit format", "non-numeric account", "regex character class Trino", or "POSIX regex Trino".
+- The cross-ref in the answer mentioned `regexp_like` exists, but the SQL the responder actually WROTE used the two invalid forms. This is exactly the keyword-router-pulls-wrong-content pattern.
 
----
+**Both gaps are genuine findable-but-missing dialect inoculations.** **→ iter717 FIX-A candidate (priority 1, two-defects-in-one-answer).**
 
-## Overall Score
-Sum: 5+5+5+5 + 5+5+5+5 + 4+5+5+5 + 5+5+5+5 = **79 / 16 = 4.9375**
+### Q4 — GROUP BY ... HAVING SUM() > threshold
 
-**VERDICT: PASS** (overall avg 4.94, well above 3.5 threshold)
+**Sub-scores: Acc 5 / Comp 5 / Clar 5 / Act 5 = 5.00**
 
----
+- `GROUP BY subscription_plan HAVING SUM(lifetime_spend) > 10000` — VERIFIED correct per trino.io/docs/467/sql/select.html.
+- `WHERE SUM(...) > 10000` → parse error defang — CORRECT (aggregates are illegal in `WHERE`).
+- Clause-order recap `FROM → WHERE → GROUP BY → HAVING → SELECT → ORDER BY` — CORRECT standard SQL semantic evaluation order.
+- `COUNT(DISTINCT account_id)` for plan-size context is a nice bonus.
+- Bulletproof reference answer.
 
-## FIX-A CLOSURE STATEMENT
-**time-window-bucketing FIX-A (Q1): CLOSED.**
-- Postgres `::`-cast leak (the iter714 Q4 defect): did NOT recur. Responder used `CAST(EXTRACT(minute FROM request_time) AS integer)` throughout.
-- date_bin / time_bucket / time_slice / Spark window() / BigQuery TIMESTAMP_TRUNC(INTERVAL): NONE invented.
-- Idiom used: the iter606 LEADING canonical (FLOOR-TO-HOUR + ADD-N-STEPS via INTERVAL '1' MINUTE × integer-divided-extracted-minute). Per the iter715 directive, the choice of iter606's FLOOR-TO-HOUR form over the new EPOCH-FLOOR LEAD is not penalized; both are docs-correct.
-- Hourly bucket form: `date_trunc('hour', ts)` — clean, idiomatic Trino.
-- The iter715 r07:1507 LEADING canonical insertion successfully prevents foreign-idiom regression even though the responder did not pick its EPOCH-FLOOR form — the CO-LOCATED ::-cast defang and DO-NOT-WRITE foreign-idiom matrix appear to have held the responder on-dialect.
+## Overall
 
----
+| Q | Acc | Comp | Clar | Act | Avg |
+|---|----:|----:|----:|----:|----:|
+| Q1 | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 | 5 | 5 | 5 | 5 | 5.00 |
+| Q3 | 1 | 3 | 3 | 2 | 2.25 |
+| Q4 | 5 | 5 | 5 | 5 | 5.00 |
+| **Sum** | 16 | 18 | 18 | 17 | — |
+| **Dim avg** | 4.00 | 4.50 | 4.50 | 4.25 | — |
 
-## Genuine new gap for iter716
+**Overall = (5.00 + 5.00 + 2.25 + 5.00) / 4 = 17.25 / 4 = 4.3125**
+Cross-check via 16-subscore sum: (20 + 20 + 9 + 20) / 16 = 69 / 16 = **4.3125** ✓
+Cross-check via dim-avg: (4.00 + 4.50 + 4.50 + 4.25) / 4 = 17.25 / 4 = **4.3125** ✓
 
-**Minor: `expire_snapshots` parameter-semantics confusion** — Q3 produced a stray inline comment `-- (keep last 10)` next to the `expire_snapshots(retention_threshold => '7d')` call. Trino's `expire_snapshots` procedure (and the Iceberg ALTER TABLE EXECUTE form) takes a duration via `retention_threshold`, NOT a snapshot-count keep-N parameter. The responder's SQL was correct, but the commentary suggested a count semantic that does not exist in the Trino form. This is a Spark-API-leak ("keep last N snapshots" is a Spark Iceberg `expireSnapshots().retainLast(N)` Java-API concept) bleeding into the Trino answer commentary.
+**Verdict: PASS** (4.3125 ≥ 3.5 floor; margin +0.8125). Per directive, **overall average governs, no per-Q veto** — Q3 2.25 is flagged in prose as the iter717 FIX-A driver but does not by itself fail the iteration.
 
-**Suggested teacher action for iter716:**
-- In resources/17 (or wherever the expire_snapshots Trino-EXECUTE canonical lives), add an INLINE DEFANG line right next to the canonical: "Trino's `expire_snapshots` is DURATION-DRIVEN (`retention_threshold => '7d'`), NOT count-driven. There is NO `keep_last_N` / `retain_last` parameter in the Trino ALTER TABLE EXECUTE form — that is a Spark Iceberg Java-API concept (`.retainLast(N)`) and does NOT cross over."
-- Add a small DO-NOT-WRITE row: `-- keep last 10 snapshots` ❌ vs `retention_threshold => '7d'` ✅.
-- Add keyword anchors near the canonical: "keep last N snapshots Trino", "retainLast Trino", "how many snapshots to keep Trino expire_snapshots", "expire_snapshots count parameter", "Spark retainLast in Trino".
-- Re-probe in iter716 with a question phrased as "I want to keep the last 10 snapshots and expire everything older — how?" — the canonical answer should redirect the engineer to the duration form (or to manual snapshot-id rollback if a count-based strategy is genuinely required).
+## Explicit answers required by the directive
 
-No other gaps surfaced this iteration. Q1/Q2/Q4 were essentially flawless.
+**(1) Q1 keep-last-N confusion recurrence?** **DID NOT RECUR.** The responder explicitly stated Trino 467's `expire_snapshots` is duration-driven via `retention_threshold` and that there is NO keep-N-snapshots count parameter, framing the count-based alternative as orchestration in dbt/Spark. This confirms the iter715 "(keep last 10)" was a **one-off responder narrative-comment slip**, and r17 + r11:520 in-resource content is sufficient. **No iter717 FIX-A needed on the expire_snapshots prose-defang front.**
+
+**(2) Q3 LIKE-bracket-class + `~`-regex-operator forms — GENUINE NEW dialect defects?** **YES, BOTH.** Grep audit of resources/ confirms:
+- No "Trino LIKE supports only `%` and `_`; `[0-9]` bracket character classes are SQL-Server-only" inoculation exists anywhere.
+- No "Trino has no `~` / `~*` / `!~` regex operators (Postgres POSIX-regex); use `regexp_like(col, pattern)` function" inoculation exists anywhere (closest cousin is the r27:1057 `RLIKE`-not-in-Trino defang, which does not cover the `~` infix operator).
+- This is the same dialect-leak family as iter714 Q4's `::integer` Postgres cast. **iter717 FIX-A priority 1.**
+
+## Teacher actionable guidance — iter717 FIX-A
+
+Add to **r23 (SQL best practices)** as a single co-located LEADING CANONICAL section, keyword-anchored on `regex Trino`, `validate format Trino`, `match exactly N digits Trino`, `account number format Trino`, `phone number format Trino`, `LIKE character class Trino`, `LIKE 0-9 Trino`, `Trino LIKE wildcards`, `Postgres ~ operator Trino`, `tilde regex Trino`, `POSIX regex Trino`:
+
+```sql
+-- LEADING CANONICAL — find rows whose <id> column does NOT match exactly N digits (or any format-validation diagnostic)
+SELECT account_id, user_id
+FROM iceberg.analytics.usage_table
+WHERE NOT regexp_like(account_id, '^[0-9]{8}$')   -- or '^\d{8}$' (\d works in Java/JONI)
+ORDER BY account_id;
+```
+
+Add a co-located DO-NOT-WRITE table with **inline-marked WRONG** rows (per the Defang DO-NOT-WRITE Snippets lesson — make wrong forms un-copyable, make canonical the copy-attractive block):
+
+| Wrong form (inline-marked WRONG) | Why wrong | Correct Trino 467 form |
+|---|---|---|
+| `account_id NOT LIKE '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'` WRONG | Trino LIKE supports ONLY `%` (any sequence) and `_` (single char); `[0-9]` bracket char-classes are a **SQL Server LIKE extension**, not Trino. The brackets are treated as **literal characters** — predicate matches the literal string `"[0-9]..."`, so the diagnostic is silently broken (no parse error). | `NOT regexp_like(account_id, '^[0-9]{8}$')` |
+| `account_id ~ '^\d{8}$'` WRONG | The `~` / `~*` / `!~` / `!~*` infix regex operators are **PostgreSQL POSIX-regex syntax**, NOT Trino. Trino 467 raises `mismatched input '~'` at parse time. | `regexp_like(account_id, '^\d{8}$')` |
+| `account_id !~ '^\d{8}$'` WRONG | Same Postgres POSIX leak — parse error. | `NOT regexp_like(account_id, '^\d{8}$')` |
+| `account_id RLIKE '^\d{8}$'` WRONG | `RLIKE` is Hive/Spark/MySQL, not Trino. `Function 'rlike' not registered`. | `regexp_like(account_id, '^\d{8}$')` |
+
+Add a one-paragraph callout:
+
+> **Trino regex is functions-only.** Trino 467's complete regex surface is the seven functions documented at trino.io/docs/467/functions/regexp.html: `regexp_count`, `regexp_extract`, `regexp_extract_all`, `regexp_like`, `regexp_position`, `regexp_replace`, `regexp_split`. There are NO infix regex operators (`~`, `~*`, `!~`, `!~*` are Postgres). There is NO `RLIKE` (that's Hive/Spark/MySQL). The pattern grammar is Java/JONI (so `\d`, `\w`, `\s` all work, plus POSIX classes like `[[:digit:]]`). `regexp_like` is CONTAINS-by-default — anchor with `^...$` for full-string match.
+
+> **Trino LIKE wildcards are `_` and `%` ONLY.** Per trino.io/docs/467/functions/comparison.html, Trino's LIKE supports exactly two wildcards: `_` (single character) and `%` (any sequence). Bracket character classes like `[0-9]`, `[a-z]`, `[^abc]` are a **SQL Server LIKE extension** — Trino treats them as LITERAL characters. For character-class matching, switch to `regexp_like`.
+
+Cross-ref from r07 (analytical query patterns, format-validation neighborhood) and from r23's existing dialect table (the existing ILIKE row at r23:2494 is the right neighbor — add the two new rows immediately adjacent).
+
+## Holds
+
+- HOLD all iter534–715 locks (~267+ entries across 17 resource files; iter716 was NO-OP per state.json).
+- HOLD r22 federation guardrails (72-iter ZERO probe streak; 4.49944 vs 4.5 thin — do NOT touch).
+- HOLD r17 expire_snapshots / remove_orphan_files content (confirmed bulletproof this iteration).
+- Federation NOT probed this iter — row UNCHANGED.
+
+## Do NOT bump state.json
+
+Per directive, orchestrator handles state.json updates. Judge does not modify it.
