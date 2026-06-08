@@ -2491,11 +2491,89 @@ Trino has its own SQL dialect. A surprising number of features that "feel like s
 | **`ARRAY_AGG` with implicit ORDER BY** | various | **No implicit ORDER BY** — Trino's `array_agg` is unordered unless specified. | `array_agg(col ORDER BY ts)` — always specify ORDER BY when order matters. |
 | **`MERGE` on non-Iceberg connectors without flag** | various | **Per-connector gate.** Iceberg MERGE is supported by default; MySQL/PostgreSQL MERGE requires connector-specific flags (see resource 22 section 2A). | Check the connector's MERGE support matrix before assuming MERGE works. |
 | **Postgres `RETURNING` clause** on INSERT/UPDATE/DELETE | PostgreSQL | **NOT supported.** Parse error. | Run a follow-up SELECT or use the `Trino transaction count(...) - count(...)` row-count diagnostics. |
+| **Postgres `~` / `~*` / `!~` / `!~*` regex-match infix operators** (`col ~ '^[0-9]{8}$'`, `col ~* 'abc'`, `col !~ 'pattern'`) | PostgreSQL | **NOT supported. HARD PARSE ERROR.** Trino has **NO** `~`, `~*`, `!~`, `!~*` infix regex operators. Those are PostgreSQL-only POSIX-regex operators. Per [trino.io/docs/467/functions/regexp.html](https://trino.io/docs/467/functions/regexp.html) (verified 2026-06-08), Trino regex support is provided **exclusively via NAMED FUNCTIONS** — the complete Trino 467 list is `regexp_count`, `regexp_extract`, `regexp_extract_all`, `regexp_like`, `regexp_position`, `regexp_replace`, `regexp_split`. There is no infix operator form. `col ~ 'pattern'` → parser sees `~` as a stray symbol → `mismatched input '~'`. | **Use `regexp_like` (the boolean-returning regex-match function):** `WHERE regexp_like(col, '^[0-9]{8}$')` (match) / `WHERE NOT regexp_like(col, '^[0-9]{8}$')` (not-match). For Postgres' `~*` case-insensitive operator, use the `(?i)` inline flag inside the pattern: `regexp_like(col, '(?i)abc')`. For `!~`, prefix with `NOT`: `NOT regexp_like(col, 'pattern')`. **See the LEADING CANONICAL — regex / pattern matching on a Trino column below this table** for the find-rows-not-matching-exactly-8-digits worked example (keyword anchors: Trino regex match operator, Trino ~ operator, Trino ~* operator, Trino !~ operator, Postgres regex Trino, POSIX regex Trino, col ~ pattern Trino). |
+| **LIKE bracket character classes** (`col LIKE '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'`, `col LIKE '[a-z]%'`, `col LIKE '[^xyz]%'`) | SQL Server, Sybase, MS-Access | **SILENT-WRONG MATCHING — no parse error, just returns wrong rows.** Trino's `LIKE` predicate supports **ONLY two wildcards**: `%` (zero-or-more chars) and `_` (exactly one char), plus an optional `ESCAPE` clause — per [trino.io/docs/467/functions/comparison.html](https://trino.io/docs/467/functions/comparison.html) (verified 2026-06-08). Square brackets `[...]` are **LITERAL CHARACTERS** in Trino's LIKE — `col LIKE '[0-9]'` matches the literal 4-character string `[0-9]`, NOT a single digit. Writing `col LIKE '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'` to find 8-digit values returns zero rows (or only the literal string `[0-9][0-9]...`) — **silent wrong, no error.** Bracket character-class syntax is a SQL Server T-SQL extension, NOT ANSI SQL and NOT in Trino. | **Use `regexp_like` for character classes, anchors, quantifiers:** `WHERE regexp_like(col, '^[0-9]{8}$')` for "exactly 8 digits"; `WHERE regexp_like(col, '^[a-z]')` for "starts with lowercase letter"; `WHERE NOT regexp_like(col, '^[xyz]')` for "does NOT start with x/y/z". **LIKE remains correct for `%`/`_` wildcard patterns** (prefix/suffix/substring with literal characters): `col LIKE 'ABC%'`, `col LIKE '%@gmail.com'`, `col LIKE '___-__-____'` (3 chars dash 2 chars dash 4 chars — but no constraint that they be digits). **See the LEADING CANONICAL — regex / pattern matching on a Trino column below this table** (keyword anchors: Trino LIKE bracket character class, LIKE [0-9] Trino, LIKE charclass Trino, SQL Server LIKE pattern Trino, T-SQL LIKE Trino, LIKE [a-z] Trino, exactly N digits Trino, find rows not matching pattern Trino). |
 | **`ILIKE`** (case-insensitive LIKE) | PostgreSQL | **NOT supported in native Trino 467 SQL.** Parse error: `WHERE col ILIKE 'pat'` on a local Iceberg/Hive table fails with `mismatched input 'ilike'`. ILIKE is absent from [trino.io/docs/current/functions/comparison.html](https://trino.io/docs/current/functions/comparison.html), [trino.io/docs/current/functions/string.html](https://trino.io/docs/current/functions/string.html), and [trino.io/docs/current/language/reserved.html](https://trino.io/docs/current/language/reserved.html). Feature request [trinodb/trino #2491](https://github.com/trinodb/trino/issues/2491) (titled "Add `ILIKE` function to support case-insensitive LIKE-like string matching") has been **OPEN since January 2020** — no PR merged. **Disambiguator**: ILIKE DOES appear in the **PostgreSQL CONNECTOR** context (resource 22 §3.3) as a predicate **pushed down to the remote PostgreSQL engine** (Postgres has ILIKE natively) — that is **federation/connector-pushdown behavior**, NOT native Trino SQL you can run on a local Iceberg table. Do not conflate. | **Case-insensitive LIKE / contains / starts-with on native Trino tables**: lower both sides — `WHERE LOWER(col) LIKE LOWER('pat%')` (or `WHERE LOWER(email) LIKE '%@gmail.com'` when the literal is already lowercase). **Case-insensitive equality**: `WHERE LOWER(col) = 'acme'`. **Case-insensitive regex**: `WHERE regexp_like(col, '(?i)pattern')` (the `(?i)` inline flag makes the Java regex case-insensitive). **Ingest-time optimization**: if the column is queried case-insensitively often, store a `lower(col)` generated/computed column at ingest and filter on it directly — avoids the per-row `LOWER()` and lets the predicate push down to Iceberg as `col_lower = 'acme'`. **DO NOT WRITE on local Trino tables**: `WHERE col ILIKE 'pat'` — parse error, ILIKE is not native Trino SQL (keyword anchors: case-insensitive LIKE Trino, ILIKE Trino, case-insensitive match, match regardless of case, LOWER LIKE, ILIKE not supported Trino, case-insensitive equals/contains/starts-with). |
 | **`GROUP BY ALL`** (group by every non-aggregate) | Snowflake, Databricks | **SUPPORTED** in Trino's SELECT grammar (`GROUP BY [ ALL | DISTINCT ] ...`). | Free to use, but explicit `GROUP BY col1, col2` is more grep-able. |
 | **`FETCH FIRST N ROWS ONLY`** (ANSI) | ANSI SQL, DB2, Oracle | **SUPPORTED** alongside `LIMIT N`. | Either is fine; `LIMIT N` is shorter. |
 | **Window function in WHERE** (`WHERE ROW_NUMBER() OVER (...) = 1`) | none — never legal in standard SQL | **NOT supported in any SQL dialect, including Trino.** | Wrap in a subquery: `SELECT * FROM (SELECT *, ROW_NUMBER() OVER (...) AS rn FROM t) WHERE rn = 1;` — same pattern as the QUALIFY rewrite. |
 | **Assuming `ORDER BY ts DESC` puts NULLs at the top** (Oracle's default) | Oracle | **SILENT-WRONG row ordering on Trino.** Per [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) verbatim: "The default null ordering is `NULLS LAST`, regardless of the ordering direction." Trino defaults `NULLS LAST` for BOTH `ASC` and `DESC` — Oracle defaults `NULLS LAST` for `ASC` and `NULLS FIRST` for `DESC`. Same SQL, different row order, no error message. | Always write `ORDER BY ts DESC NULLS FIRST` (preserve Oracle behavior) or `ORDER BY ts DESC NULLS LAST` (explicit Trino default). See [resource 27 § LEADING CANONICAL — Oracle vs Trino NULLS-default semantics in ORDER BY](27-oracle-plsql-to-dbt-trino.md). |
+
+### LEADING CANONICAL — regex / pattern matching on a Trino column (`regexp_like`)
+
+**Keyword anchors** (so the responder can find this from any phrasing): find rows NOT matching a pattern, find rows matching a regex Trino, validate format in Trino, format validation Trino regex, account_id exactly 8 digits Trino, exactly N digits Trino, phone number 10 digits format check Trino, zip code 5 digits Trino, does column match regex Trino, regex match a column Trino, Trino regex match operator, Trino `~` operator, Trino `~*` operator, Trino `!~` operator, Postgres `~` regex Trino, POSIX regex Trino, Trino LIKE bracket character class, LIKE [0-9] Trino, LIKE [a-z] Trino, T-SQL LIKE Trino, SQL Server LIKE pattern Trino, regexp_like Trino, regex_like Trino (typo), Trino RLIKE (cross-ref §27:1057), data quality regex flag bad rows, filter rows matching regex Trino, regex anchor `^` `$` Trino, regex quantifier `{n}` Trino, case-insensitive regex Trino, `(?i)` Trino, character class Trino regex.
+
+**The one-fact summary.** To match a Trino column against a regex pattern (anchors, character classes, quantifiers, alternation, case-insensitive flag), use the **`regexp_like(column, pattern) → boolean`** function in `WHERE`. Trino does **NOT** have `~`/`~*`/`!~`/`!~*` infix regex operators (those are PostgreSQL); does **NOT** have `RLIKE` (that is Spark/Hive/MySQL — see [§27 RLIKE inoculation](27-oracle-plsql-to-dbt-trino.md)); and Trino's `LIKE` predicate does **NOT** support bracket character classes like `[0-9]` (those are SQL Server / T-SQL — brackets are LITERAL characters in Trino LIKE). For format validation ("exactly 8 digits", "10-digit phone", "5-digit zip"), `regexp_like` with an anchored `^...$` pattern is the **only** Trino 467 form that works.
+
+#### Canonical worked example — find `account_id` values that are NOT exactly 8 digits (and the matching positive form)
+
+> **The lead form** (the one you should copy):
+
+```sql
+-- Find rows where account_id is NOT exactly 8 digits (data-quality / format-violation flag):
+SELECT account_id
+FROM usage_table
+WHERE NOT regexp_like(account_id, '^[0-9]{8}$');
+
+-- Positive form — find rows where account_id IS exactly 8 digits:
+SELECT account_id
+FROM usage_table
+WHERE regexp_like(account_id, '^[0-9]{8}$');
+```
+
+**Why this pattern works on Trino 467:**
+- `regexp_like(string, pattern) → boolean` — the official Trino 467 regex-match function ([trino.io/docs/467/functions/regexp.html](https://trino.io/docs/467/functions/regexp.html), verified 2026-06-08).
+- `^` (start anchor) and `$` (end anchor) force a **full-string match** — without anchors, `regexp_like` does a CONTAINS check (per the docs: *"the pattern only needs to be contained within `string`, rather than needing to match all of it."*). For "exactly 8 digits" you MUST anchor with `^...$`.
+- `[0-9]` is a **regex character class** matching one digit. Inside the `regexp_like` pattern (NOT inside `LIKE`), bracket char-classes are valid Java regex syntax.
+- `{8}` is a **quantifier** meaning "exactly 8 times."
+- `NOT regexp_like(...)` for the negation (do **NOT** write `regexp_unlike` — no such function; do **NOT** write `col !~ '^...$'` — Trino has no `!~` operator).
+
+**Why `[0-9]` (not `\d`) is the copy-attractive form.** Both `[0-9]` and `\d` work inside the regex (Trino regex uses Java pattern syntax), but `\d` inside a single-quoted SQL string literal is **brittle**: depending on tooling (dbt Jinja, Python f-strings, shell heredocs, JDBC drivers, JSON-encoded payloads), the backslash may be consumed/escaped before reaching Trino, requiring the doubled form `'\\d{8}'` for portability. `[0-9]{8}` avoids all backslash-escaping concerns and reads identically in every layer. **Default to `[0-9]`.**
+
+#### Common companion patterns (just swap the regex)
+
+| Need | Trino canonical |
+| --- | --- |
+| Exactly N digits (any N) | `regexp_like(col, '^[0-9]{N}$')` — e.g., `^[0-9]{10}$` for 10-digit phone, `^[0-9]{5}$` for 5-digit US zip |
+| At least N digits | `regexp_like(col, '^[0-9]{N,}$')` |
+| Between M and N digits | `regexp_like(col, '^[0-9]{M,N}$')` |
+| Letters only (case-insensitive) | `regexp_like(col, '^(?i)[a-z]+$')` or `regexp_like(col, '^[A-Za-z]+$')` |
+| Email shape (loose) | `regexp_like(col, '^[^@]+@[^@]+\.[^@]+$')` |
+| Starts with prefix `ABC` | `regexp_like(col, '^ABC')` (or simpler: `col LIKE 'ABC%'`) |
+| Ends with suffix `.csv` | `regexp_like(col, '\.csv$')` (or simpler: `col LIKE '%.csv'`) |
+| Contains any of `a`, `b`, `c` | `regexp_like(col, 'a\|b\|c')` (regex alternation — single call replaces chained `OR LIKE`; see [§27 multi-keyword canonical](27-oracle-plsql-to-dbt-trino.md)) |
+| Case-insensitive match | embed `(?i)` flag inline: `regexp_like(col, '(?i)pattern')` (Trino's `regexp_like` is 2-arg only — no flag-arg form; see [§27 dialect-nuance table](27-oracle-plsql-to-dbt-trino.md) row on 3-arg `regexp_like(s, pat, 'i')`) |
+| Flag rows NOT matching format (data-quality) | `WHERE NOT regexp_like(col, '^<pattern>$')` |
+
+**The complete Trino 467 regex function family** (memorize: regex is **FUNCTIONS, not operators**):
+
+| Function | Signature | Use |
+| --- | --- | --- |
+| `regexp_like` | `(string, pattern) → boolean` | Match (use in `WHERE`) — this row's canonical |
+| `regexp_extract` | `(string, pattern[, group]) → varchar` | Pull the first match (or capture group) out |
+| `regexp_extract_all` | `(string, pattern[, group]) → array<varchar>` | Pull all matches |
+| `regexp_replace` | `(string, pattern[, replacement\|function]) → varchar` | Replace matches |
+| `regexp_split` | `(string, pattern) → array<varchar>` | Split string on regex separator |
+| `regexp_count` | `(string, pattern) → bigint` | Count how many matches |
+| `regexp_position` | `(string, pattern[, start[, occurrence]]) → integer` | Find 1-based position of match |
+
+**Pattern syntax = Java regex** (per [trino.io/docs/467/functions/regexp.html](https://trino.io/docs/467/functions/regexp.html) verbatim: *"All of the regular expression functions use the Java pattern syntax"*). Supported inside the pattern string: `^`, `$`, `.`, `\d`, `\w`, `\s`, `[0-9]`, `[a-z]`, `[^xyz]`, `{n}`, `{n,}`, `{n,m}`, `+`, `*`, `?`, `|` (alternation), `()` (grouping/capture), `(?i)` (inline case-insensitive flag), POSIX classes like `[[:digit:]]`.
+
+#### Co-located DEFANG — same-line `❌ WRONG` markers (do NOT copy any of these)
+
+| ❌ WRONG (foreign-dialect form — silent-wrong OR parse error) | What goes wrong on Trino 467 | ✅ Trino 467 correct rewrite |
+| --- | --- | --- |
+| `WHERE account_id NOT LIKE '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'`  ❌ **WRONG — DO NOT COPY** | **SILENT-WRONG.** Trino LIKE has **NO bracket character classes** — `[`, `0`, `-`, `9`, `]` are LITERAL characters. This matches the literal 40-character string `[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]`, not 8-digit numbers. Returns wrong rows, no error. T-SQL/SQL-Server-only extension. | `WHERE NOT regexp_like(account_id, '^[0-9]{8}$')` |
+| `WHERE account_id ~ '^\d{8}$'`  ❌ **WRONG — DO NOT COPY** | **HARD PARSE ERROR.** Trino has no `~` infix regex operator (that is PostgreSQL POSIX-regex). Parser fails with `mismatched input '~'`. | `WHERE regexp_like(account_id, '^[0-9]{8}$')` |
+| `WHERE account_id !~ '^[0-9]{8}$'`  ❌ **WRONG — DO NOT COPY** | **HARD PARSE ERROR.** Trino has no `!~` infix operator (PostgreSQL only). | `WHERE NOT regexp_like(account_id, '^[0-9]{8}$')` |
+| `WHERE col ~* 'abc'`  ❌ **WRONG — DO NOT COPY** | **HARD PARSE ERROR.** Trino has no `~*` case-insensitive regex operator (PostgreSQL only). | `WHERE regexp_like(col, '(?i)abc')` — `(?i)` inline flag for case-insensitive |
+| `WHERE col !~* 'abc'`  ❌ **WRONG — DO NOT COPY** | **HARD PARSE ERROR.** Trino has no `!~*` operator (PostgreSQL only). | `WHERE NOT regexp_like(col, '(?i)abc')` |
+| `WHERE account_id RLIKE '^[0-9]{8}$'`  ❌ **WRONG — DO NOT COPY** | **Function not registered / parse error.** `RLIKE` is Spark/Hive/MySQL, NOT Trino. See [§27:1057 RLIKE inoculation](27-oracle-plsql-to-dbt-trino.md) for full citation. | `WHERE regexp_like(account_id, '^[0-9]{8}$')` |
+| `WHERE REGEXP(account_id, '^[0-9]{8}$')`  ❌ **WRONG — DO NOT COPY** | **Function not registered.** `REGEXP` is MySQL/MariaDB, NOT Trino. | `WHERE regexp_like(account_id, '^[0-9]{8}$')` |
+| `WHERE account_id SIMILAR TO '[0-9]{8}'`  ❌ **WRONG — DO NOT COPY** | **NOT supported.** `SIMILAR TO` is ANSI/Postgres SQL — Trino does NOT implement it. Parse error. | `WHERE regexp_like(account_id, '^[0-9]{8}$')` (note: `SIMILAR TO` is implicit-anchored; `regexp_like` is contains-by-default, so add `^...$`) |
+| `WHERE regexp_like(account_id, '^[0-9]{8}$', 'i')` (3-arg flag form)  ❌ **WRONG — DO NOT COPY** | **Function-signature mismatch.** Trino's `regexp_like` is 2-arg only. The 3rd `'i'` flag-arg is Oracle-only. | `WHERE regexp_like(account_id, '(?i)^[0-9]{8}$')` — `(?i)` inline flag |
+
+> **Trino LIKE is still correct for `%`/`_` wildcard patterns** (literal-character prefix/suffix/substring): `col LIKE 'ABC%'` (starts-with), `col LIKE '%@gmail.com'` (ends-with), `col LIKE '%foo%'` (contains). The moment you need a **character class** (`[0-9]`, `[a-z]`), an **anchor** (`^`, `$`), a **quantifier** (`{n}`), **alternation** (`a|b|c`), or **case-insensitivity** on a local Trino table, switch to `regexp_like`. Cross-refs: [§ ILIKE row above (2-rows up)](#) (case-insensitive LIKE alternative for native Trino tables); [§27:1057 RLIKE inoculation](27-oracle-plsql-to-dbt-trino.md) (no `RLIKE` in Trino — `regexp_like` is the only regex-match function name); [§27 multi-keyword `regexp_like(col, 'a|b|c')` canonical](27-oracle-plsql-to-dbt-trino.md) (regex alternation replaces chained `OR LIKE`); [§27 dialect-nuance table](27-oracle-plsql-to-dbt-trino.md) (Trino's `regexp_like` is 2-arg only — `(?i)` inline flag for case-insensitive); [resource 22 ILIKE pushdown](22-trino-federation-postgresql.md) (ILIKE in the PostgreSQL connector is a federation/pushdown thing — different from a regex match on a native Trino table).
 
 ### The most-common Trino-dialect rewrite pattern
 
