@@ -1,100 +1,96 @@
-# iter766 Judge Feedback — DEFAULT durability-breadth (4 fresh picks)
+# Judge Feedback — iter767
 
-**Verification basis:** All dialect claims verified against trino.io/docs/467 (sql/select.html, functions/datetime.html, language/types.html) via WebFetch/WebSearch on 2026-06-09. resources/ NOT treated as ground truth.
+**Iteration**: 767 | **Phase**: extended | **Designation**: FIX-A verification (Q1 range/spread re-probe) + 3 fresh probes (Q2 url_encode / Q3 int↔hex / Q4 degrees↔radians)
 
----
-
-## Q1 — Per-product price RANGE/SPREAD (highest minus lowest = one number per group)
-
-**Verdict: REAL ACCURACY DEFECT. First form is a COMPILE ERROR; the simple aggregate was MISSED.**
-
-The expected, idiomatic, textbook answer is a plain GROUP BY aggregate — NO window functions:
-```sql
-SELECT product_id, MAX(sale_price) - MIN(sale_price) AS price_range
-FROM sales
-GROUP BY product_id;
-```
-This is the canonical "max minus min per group" form. The responder did NOT offer it.
-
-Instead the responder produced two window-based forms:
-
-- **FIRST form (the LEAD answer) DOES NOT COMPILE.** It puts a window-function expression inside GROUP BY:
-  `... GROUP BY product_id, MAX(sale_price) OVER (PARTITION BY product_id) - MIN(sale_price) OVER (...)`.
-  **Verified against trino.io/docs/467/sql/select.html:** a GROUP BY clause may only contain "aggregate functions or columns present in the GROUP BY clause" — window functions are NOT permitted in GROUP BY. Trino fails analysis with "GROUP BY clause cannot contain aggregations, window functions or grouping operations". So the lead form is INVALID / non-compiling. This is the form a copy-paste reader reaches for first → real harm.
-
-- **SECOND form (CTE with MAX OVER / MIN OVER, then SELECT DISTINCT)** COMPILES and returns the correct answer, but is badly over-engineered: it computes a window over every row then DISTINCT-dedupes, far heavier than the one-line GROUP BY aggregate. The misleading alias `price_volatility` (the question asked for range/spread) is a minor clarity ding.
-
-**Synthesis-slip vs findability gap:** Per the iter766 integrity-sweep (state.json notes_766 STEP 2(a)) and the standing pins, the simple `MAX(x) - MIN(x)` GROUP BY aggregate range/spread form IS documented and distinguished from row-wise greatest/least at r07/r23/r27 (r23:1552, r27:1662/1675: "MAX(col) is an aggregate DOWN ROWS (one value per group)"). So the canonical exists. The question is whether it's FINDABLE under the question's keywords. The responder routed to window functions instead of the documented aggregate, which points to a **routing/findability weakness**: the documented MAX(col)-aggregate material is framed as a MAX-vs-greatest disambiguation, NOT as a copy-attractive "price RANGE / SPREAD / highest minus lowest / max minus min per group" canonical with those keyword anchors. The responder's keyword→resource match for "range/spread/highest minus lowest/volatility" did not land on the simple aggregate.
-
-**iter767 designation for Q1: FIX-A (findability).** Add a small COPY-ATTRACTIVE "price range / spread per group" canonical near the MAX/MIN aggregate material with explicit keyword anchors: **"price range", "spread", "highest minus lowest", "max minus min per group", "volatility", "one value per group"** →
-```sql
-SELECT product_id, MAX(sale_price) - MIN(sale_price) AS price_range
-FROM sales GROUP BY product_id;
-```
-Plus an iter693-style INLINE un-copyable defang at the window-function material: `-- window functions are NOT allowed in GROUP BY (analysis error); for max-minus-min-per-group use a plain GROUP BY aggregate -- DO NOT COPY`. Do NOT churn the existing MAX-vs-greatest disambiguation (correct, keep verbatim); add the range/spread aggregate canonical adjacent.
-
-| Axis | Score | Note |
-|---|---|---|
-| Accuracy | 2 | Lead form is a compile error (window fn in GROUP BY); simple aggregate missed. 2nd form correct but heavy. |
-| Completeness | 3 | A working form (2nd) is present, but the canonical/expected aggregate is absent. |
-| Clarity | 3 | Window-function explanation is coherent; misleading `price_volatility` alias; over-complex path obscures the simple answer. |
-| Actionability | 3 | An engineer who copies the FIRST (lead) form gets an error; only the 2nd form works. |
-| **Q1 avg** | **2.75** | |
+All dialect claims verified against trino.io/docs/467 (functions/url.html, functions/binary.html, functions/math.html, functions/aggregate.html) on 2026-06-09 via WebFetch. resources/ NOT treated as ground truth.
 
 ---
 
-## Q2 — Unix epoch SECONDS (1749480000) → timestamp
+## Per-question scores
 
-**Verdict: CLEAN.** `from_unixtime(event_time_seconds)` is correct — verified `from_unixtime(unixtime)` takes SECONDS since epoch and returns timestamp(3) with time zone (datetime.html). The millis-needs-`/1e3` note (`from_unixtime(event_time_ms / 1e3)`) is correct and a valuable disambiguation. The `>= CURRENT_TIMESTAMP - INTERVAL '7' DAY` filter is valid Trino.
+### Q1 — Per-server CPU temperature range (max minus min per group) — **RE-PROBE**
+Answer: `SELECT server_id, MAX(temperature) - MIN(temperature) AS temperature_swing FROM server_metrics GROUP BY server_id`. Plain aggregates, no window functions, no window-fn-in-GROUP-BY.
 
-| Axis | Score |
-|---|---|
-| Accuracy | 5 |
-| Completeness | 5 |
-| Clarity | 5 |
-| Actionability | 5 |
-| **Q2 avg** | **5.00** |
+- **Accuracy 5** — `max(x)`/`min(x)` are aggregates returning ONE value per GROUP BY group (aggregate.html verified); `MAX-MIN GROUP BY g` is exactly the per-group range/spread. Compiles, correct.
+- **Completeness 5** — Single number per group, exactly what was asked. No over-engineering.
+- **Clarity 5** — Clean, direct, well-aliased.
+- **Actionability 5** — Copy-paste ready.
+- **Per-Q avg: 5.00**
 
----
+**The iter767 FIX-A WORKED.** Responder routed straight to the simple aggregate — no window functions, no broken window-fn-in-GROUP-BY first form (the iter766 defect), no over-engineered CTE. The r23 §3.1D range/spread canonical + keyword anchors + window-fn-in-GROUP-BY inline defang landed the responder correctly. **RANGE/SPREAD CLOSED (1st clean post-fix datapoint).** Needs one more angle to be BULLETPROOFED.
 
-## Q3 — Frequency table per event_type (count as rows, most-common first)
+### Q2 — URL-encode / percent-encode a string — **FRESH**
+Answer: HONEST DECLINE. Stated resources lack URL encoding, could not find `url_encode()`/`percent_encode()`, flagged as a gap, pointed to trino.io/docs/467/functions/url.html. Noted `url_extract_*` exists for parsing.
 
-**Verdict: CLEAN.** `SELECT event_type, COUNT(*) AS event_count FROM events GROUP BY event_type ORDER BY event_count DESC` is the correct frequency-as-rows idiom (verified select.html). HAVING-after-grouping note accurate (HAVING filters post-aggregation; WHERE filters pre-grouping). The HAVING `COUNT(*) > 10` variant is a nice touch.
+- **Accuracy 4** — No fabrication; everything stated is true. The pointer to the url.html page is correct. Ding: did not surface the actual function name even though parsing-side `url_extract_*` was in-resource adjacent.
+- **Completeness 2** — A real native answer EXISTED and was missed: `url_encode(value) -> varchar` ("Escapes value by encoding it so that it can be safely included in URL query parameter names and values"), inverse `url_decode(value)` — both confirmed on url.html. The answer is `url_encode('summer sale & promo')`.
+- **Clarity 4** — Clear about the limitation.
+- **Actionability 2** — Engineer is told to go read the docs rather than given `url_encode(campaign_name)`.
+- **Per-Q avg: 3.00**
 
-| Axis | Score |
-|---|---|
-| Accuracy | 5 |
-| Completeness | 5 |
-| Clarity | 5 |
-| Actionability | 5 |
-| **Q3 avg** | **5.00** |
+**Verdict: FINDABLE-BUT-MISSING gap (no hallucination penalty — declining a genuinely-uncovered function is correct behavior).** `url_encode`/`url_decode` are native and useful but absent from resources. → **iter768 FIX-A gap.**
 
----
+### Q3 — Integer ↔ hex string — **FRESH** — CRITICAL CHECK
+Answer: `to_hex(255) → 'ff'` and `from_hex('ff') → 255` (also `to_hex(1164111)→'11a4cf'`, `from_hex('1a4f')→6735`). Claimed `to_hex` converts an integer to lowercase hex and `from_hex` reverses it.
 
-## Q4 — Comma-separated tags → multiple rows (one row per tag + product_id)
+- **Accuracy 1** — **DIALECT DEFECT.** Verified against binary.html:
+  - `to_hex(binary) -> varchar` — takes a **VARBINARY**, NOT an integer. `to_hex(255)` where 255 is an INTEGER is a **TYPE ERROR — it does not compile.**
+  - `from_hex(string) -> varbinary` — returns a **VARBINARY** (x'ff'), NOT the integer 255. `from_hex('ff') = 255` is false; it returns binary x'ff'.
+  - The CORRECT integer↔hex-string pair is `to_base(x, radix) -> varchar` and `from_base(string, radix) -> bigint` (math.html verified): `to_base(255, 16) = 'ff'`, `from_base('ff', 16) = 255`, `from_base('1a4f', 16) = 6735`. The responder's claimed outputs are coincidentally the to_base/from_base results, but the FUNCTIONS named are wrong: the lead form is a non-compiling type error plus a wrong return type.
+- **Completeness 2** — The correct primitive (`to_base`/`from_base`) was never mentioned.
+- **Clarity 3** — Explanation reads cleanly but is built on a wrong premise.
+- **Actionability 1** — An engineer who copies `to_hex(255)` gets a compile-time type error.
+- **Per-Q avg: 1.75**
 
-**Verdict: CLEAN.** `CROSS JOIN UNNEST(split(tags, ',')) AS t(tag)` is the correct string→rows explode in Trino 467 (split → array, CROSS JOIN UNNEST → one row per element). `trim(tag)` correctly handles whitespace from `"sale, new"`-style input. The CROSS-JOIN-drops-empty vs `LEFT JOIN UNNEST(...) ON TRUE`-keeps-tag-less-rows distinction is accurate and a strong completeness signal. The COUNT(DISTINCT product_id) GROUP BY trim(tag) variant is appropriate.
+**Verdict: SYNTHESIS-SLIP + FINDABLE-BUT-MISSING gap.** Resources use `to_hex` CORRECTLY elsewhere (`to_hex(md5(...))` — varbinary→hex), so the responder lifted `to_hex` and mis-applied it to an integer. The integer↔hex canonical (`to_base`/`from_base`) is genuinely absent from resources. → **iter768 FIX-A gap (highest priority — non-compiling answer, not just a missing-but-correct decline).**
 
-| Axis | Score |
-|---|---|
-| Accuracy | 5 |
-| Completeness | 5 |
-| Clarity | 5 |
-| Actionability | 5 |
-| **Q4 avg** | **5.00** |
+### Q4 — Degrees ↔ radians — **FRESH**
+Answer: HONEST DECLINE. Stated resources don't document trig/degree-to-radian conversion, hedged "might multiply by pi/180," said cannot confirm Trino has `pi()`/`radians()`, pointed to trino.io/docs/467/functions/math.html. Did NOT assert a specific function.
+
+- **Accuracy 4** — No fabrication; the `pi/180` math is correct as a fallback; correctly did not commit to a function it couldn't verify. Ding: `radians()`/`degrees()`/`pi()` ARE native and the manual `* pi()/180` is unnecessary.
+- **Completeness 2** — Real native answer missed: `radians(x) -> double` ("Converts angle x in degrees to radians"), `degrees(x) -> double`, plus `pi()`, `sin()`, `cos()`, `tan()` — all confirmed on math.html. The answer is `radians(angle_degrees)`.
+- **Clarity 4** — Clear about the gap.
+- **Actionability 2** — Engineer left to verify the docs rather than handed `radians(angle_deg)`.
+- **Per-Q avg: 3.00**
+
+**Verdict: FINDABLE-BUT-MISSING gap (no fabrication penalty — honest decline is acceptable).** `radians`/`degrees`/`pi`/trig family are native and absent from resources. → **iter768 FIX-A gap.**
 
 ---
 
 ## Overall
 
-| Q | Avg |
-|---|---|
-| Q1 | 2.75 |
-| Q2 | 5.00 |
-| Q3 | 5.00 |
-| Q4 | 5.00 |
-| **Overall** | **4.44** |
+| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|---|
+| Q1 (range/spread re-probe) | 5 | 5 | 5 | 5 | **5.00** |
+| Q2 (url_encode) | 4 | 2 | 4 | 2 | **3.00** |
+| Q3 (int↔hex) | 1 | 2 | 3 | 1 | **1.75** |
+| Q4 (degrees↔radians) | 4 | 2 | 4 | 2 | **3.00** |
 
-**Overall avg 4.44 ≥ 3.5 → PASS** (overall-average governs; no single-Q veto). Q2/Q3/Q4 are bulletproof-clean; Q1 carries a genuine defect (non-compiling lead form + missed simple aggregate) that drags the average but does not sink it.
+**Overall avg = (5.00 + 3.00 + 1.75 + 3.00) / 4 = 3.19 → FAIL** (threshold 3.5; overall average governs, no single-Q veto).
 
-**iter767 designation: FIX-A (Q1 range/spread findability).** Add a copy-attractive `MAX(x) - MIN(x)` GROUP BY price-range/spread canonical with keyword anchors (price range / spread / highest minus lowest / max minus min per group / volatility) + an inline window-fn-not-allowed-in-GROUP-BY defang. Preserve the existing MAX-vs-greatest disambiguation, from_unixtime, value-frequency, and string-to-rows cards (all verified clean — churn risk).
+---
+
+## Key findings
+
+1. **RANGE/SPREAD CLOSED.** Q1 re-probe is a clean 5.00 — the iter767 FIX-A (r23 §3.1D MAX(x)-MIN(x) canonical + range/spread keyword anchors + window-fn-in-GROUP-BY inline defang) routed the responder to the simple aggregate, eliminating the iter766 window-function defect. 1st clean post-fix datapoint; re-probe once more from a different phrasing to BULLETPROOF.
+
+2. **Q3 is the iteration's real defect — a NON-COMPILING answer.** `to_hex(255)` is a type error (to_hex takes VARBINARY) and `from_hex('ff')` returns binary x'ff' not the integer 255. The correct integer↔hex pair is `to_base(255,16)='ff'` / `from_base('ff',16)=255`. This drags the overall below threshold.
+
+3. **Q2 and Q4 are honest declines of genuinely-uncovered NATIVE functions** — correct no-hallucinate behavior, but the functions (`url_encode`/`url_decode`; `radians`/`degrees`/`pi`/trig) exist and real answers were available. No accuracy penalty for declining, but completeness/actionability are low.
+
+---
+
+## iter768 designation — **MULTI-ADD FIX-A (3 gaps, prioritized)**
+
+iter768 is a multi-add FIX-A. Priority order:
+
+1. **[HIGHEST] integer↔hex `to_base`/`from_base` + defang `to_hex`/`from_hex`-on-integer.** This is the only NON-COMPILING answer this iteration.
+   - Add COPY-attractive canonical: `to_base(255, 16) -> 'ff'` (integer → hex string), `from_base('ff', 16) -> 255` (hex string → integer/bigint). Keyword anchors: "integer to hex string / hex string to integer / number to hex / decimal to hex / parse hex / base-16 / base conversion / to_base / from_base".
+   - INLINE-DEFANG (un-copyable, same-line WRONG marker per iter693 pattern) at the canonical: `to_base(255,16)/from_base('ff',16) ... [WRONG] to_hex(255) -- to_hex takes VARBINARY not an integer -> type error; from_hex('ff') returns binary x'ff' NOT the integer 255 -- DO NOT COPY`.
+   - Cross-ref (PRESERVE VERBATIM) the existing CORRECT `to_hex(md5(...))` varbinary→hex usage; clarify to_hex/from_hex are the **binary↔hex** pair, to_base/from_base are the **integer↔hex** pair. Do NOT churn the md5/to_hex card.
+
+2. **[HIGH] `url_encode`/`url_decode` native.** Add `url_encode(value) -> varchar` (escape for URL query param) + `url_decode(value)` adjacent to the existing `url_extract_*` card. Anchors: "url encode / percent encode / escape string for url / encode query parameter / url_encode". Worked example: `url_encode('summer sale & promo')`.
+
+3. **[HIGH] `radians`/`degrees`/`pi`/trig family native.** Add `radians(x) -> double` (degrees→radians), `degrees(x) -> double` (radians→degrees), `pi()`, `sin/cos/tan`. Anchors: "degrees to radians / radians to degrees / convert angle / trig functions / sin cos tan / radians / degrees". Note the manual `x * pi() / 180` equivalence but LEAD with `radians(x)`.
+
+**LOCKS TO HOLD (do NOT churn):** r23 §3.1D range/spread MAX-MIN canonical + anchors + window-fn-in-GROUP-BY defang (just verified CLOSED), MAX-vs-greatest/least disambiguation, to_hex(md5) varbinary→hex correct usage, url_extract_* card, full iter534-766 inventory, resources/22 HARD LOCK. NO commit per run-prompt.

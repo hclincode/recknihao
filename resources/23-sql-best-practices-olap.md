@@ -821,6 +821,22 @@ When the column is **NOT** constant per group and you want a specific representa
 >
 > **QUALIFY cross-ref (iter695 FIX-A).** *Keyword anchors:* QUALIFY first and last per group, QUALIFY ROW_NUMBER first AND last, first AND last per customer one row QUALIFY, latest row per device QUALIFY. If your instinct on "first AND last per entity in ONE row" is to reach for `... QUALIFY ROW_NUMBER() OVER (...) = 1` (Snowflake/BigQuery/Databricks/Teradata muscle memory) — **STOP. Trino 467 has NO `QUALIFY` clause (parse error).** For the "first AND last value of some OTHER column per entity in one row" shape, the Trino-native answer is **two AGGREGATE calls in one GROUP BY pass**: `min_by(col, sort_key)` + `max_by(col, sort_key)` GROUP BY entity. Full inoculation card with defanged QUALIFY snippets + both correct forms (`min_by`/`max_by` AGGREGATE and `ROW_NUMBER()` SUBQUERY+WHERE) lives at [§3.1G LEADING CANONICAL — QUALIFY is NOT a Trino 467 clause](#leading-canonical--qualify-is-not-a-trino-467-clause--parse-error-iter695-pin--fix-a) just below.
 
+> **The RANGE / SPREAD within each group → `MAX(x) - MIN(x)` plain aggregate GROUP BY (iter767 PIN — FIX-A).** *Keyword anchors:* the range within each group, the spread within each group, highest minus lowest per group, max minus min per group, price range per product, price spread per product, volatility per group, range within each group, high-low range per group, the spread between best and worst per group, difference between the biggest and smallest value in a group, biggest minus smallest per group, range of prices per item, spread of values per category, min-to-max range per group. **The shape:** *"give me the **range / spread** of a value column (e.g. `sale_price`) **per group** (e.g. `product_id`) — i.e. the biggest value minus the smallest value in each group."* **The answer is the two PLAIN aggregates subtracted, in one `GROUP BY` pass — NO window functions needed:**
+>
+> ```sql
+> -- ✅ COPY THIS — price range (spread) per product: one row per group, the max-minus-min.
+> SELECT product_id,
+>        MAX(sale_price) - MIN(sale_price) AS price_range
+> FROM sales
+> GROUP BY product_id;
+> ```
+>
+> `MAX(x)` and `MIN(x)` are AGGREGATES (per [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html): `max(x)` *"Returns the maximum value of all input values"*, `min(x)` *"Returns the minimum value of all input values"*) — each produces ONE value per `GROUP BY` group, so their difference is the per-group spread. **Do NOT reach for window functions here.** `MAX(x) OVER (PARTITION BY g) - MIN(x) OVER (PARTITION BY g)` computes the same number but tags it onto EVERY row (you then need `SELECT DISTINCT` or a `GROUP BY` to collapse), and the moment you try to push the windowed expression into `GROUP BY` to collapse it, the query fails analysis:
+>
+> `❌ SELECT g, MAX(x) OVER (PARTITION BY g) - MIN(x) OVER (PARTITION BY g) AS range FROM t GROUP BY g, MAX(x) OVER (PARTITION BY g) -- a window function CANNOT be a GROUP BY expression, and the windowed output is neither a plain grouped column nor an aggregate (Trino: "all output expressions must be either aggregate functions or columns present in the GROUP BY clause") → analysis error -- you don't need windows for a per-group range — use the plain aggregate MAX(x) - MIN(x) GROUP BY g above -- DO NOT COPY`
+>
+> **Note the distinction from the MAX-vs-`greatest`/`least` disambiguation** ([§ greatest/least canonical, r23:1532](#leading-canonical--greatest--least-return-null-if-any-arg-is-null-in-trino-oracle--mysql--bigquery-match-postgresql-differs--it-ignores-nulls) and [resource 27 §4.4D](27-oracle-plsql-to-dbt-trino.md)): `MAX(x)` / `MIN(x)` here are aggregates DOWN ROWS (the spread across rows within a group); `greatest(c1, c2, c3)` / `least(c1, c2, c3)` are scalar ACROSS COLUMNS in the SAME row. For a per-group range use the aggregate `MAX(x) - MIN(x)`; for the high-low spread across several columns of one row use `greatest(c1, c2, c3) - least(c1, c2, c3)`.
+
 **Worked example — latest status per order (deterministic by `updated_at`):**
 
 ```sql
