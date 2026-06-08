@@ -1,89 +1,103 @@
-# Iter685 Judge Feedback
+# Iter 686 Judge Feedback — 2026-06-08 (EXTENDED PHASE)
 
-## Per-Question Scores (Accuracy / Completeness / Clarity / Actionability, 1-5)
+## Overall: 4.9375 STRONG PASS
 
-### Q1 — Partition design for recent-date-range pruning (events table)
-- Accuracy: 5
-- Completeness: 4
-- Clarity: 4
-- Actionability: 5
-- **Avg: 4.50**
+(Margin +1.4375 above 3.5 floor; +0.625 swing UP from iter685's 4.3125 PASS. ZERO weakness flags. CAST-trap FIX-A re-probe on Q1: **CLOSED**.)
 
-Verdict: STRONG. `WITH (partitioning = ARRAY['day(occurred_at)'])` is correct Trino 467 Iceberg hidden-partitioning syntax (verified trino.io/docs/467/connector/iceberg). `WHERE occurred_at >= ...` on the source column prunes via the `day()` transform. `bucket(tenant_id, 64)` is COLUMN-FIRST (matches Trino, NOT Spark's count-first); that's the right order. The ~2-10% I/O figure is a reasonable order-of-magnitude estimate. Mild ding on completeness: no `format_version=2` rationale, no mention of partition-pruning EXPLAIN check, no manifest-skipping note. Solid otherwise.
+Per-Q breakdown:
 
-### Q2 — Iceberg metadata inspection ($files / $partitions / $snapshots)
-- Accuracy: 5
-- Completeness: 5
-- Clarity: 4
-- Actionability: 5
-- **Avg: 4.75**
+| Q | Topic | Acc | Comp | Clar | Act | Q-avg |
+|---|---|---|---|---|---|---|
+| Q1 | bare-UTC-ts → London local-day (FIX-A re-probe) | 5 | 5 | 5 | 5 | **5.00** |
+| Q2 | timestamptz → Tokyo local-day | 5 | 5 | 5 | 5 | **5.00** |
+| Q3 | ISO week Monday boundary | 5 | 5 | 4 | 5 | **4.75** |
+| Q4 | timestamp → unix epoch seconds | 5 | 5 | 5 | 5 | **5.00** |
 
-Verdict: STRONG. All three metadata-table forms (`iceberg.analytics."events$files"`, `"events$partitions"`, `"events$snapshots"`) use the correct double-quoted whole-token syntax. Column names verified against Trino 467 docs:
-- `$files`: `file_path`, `file_size_in_bytes`, `record_count` — correct.
-- `$partitions`: `partition`, `file_count`, `record_count`, `total_size` — correct.
-- `$snapshots`: `snapshot_id`, `committed_at`, `operation` — correct.
+Dimension averages: Acc 5.00 / Comp 5.00 / Clar 4.75 / Act 5.00 = (5+5+4.75+5)/4 = **4.9375** (agrees).
 
-Bloat-diagnosis framing (tiny-file <50-100MB, high file-count-per-partition, old snapshots pinning files; fix via `optimize` + `expire_snapshots`) is the right mental model. Clarity could use more inline annotation for a beginner but the SQL is self-explanatory.
+---
 
-### Q3 — Multi-tenant row isolation with SECURITY DEFINER view + OPA
-- Accuracy: 5
-- Completeness: 4
-- Clarity: 4
-- Actionability: 4
-- **Avg: 4.25**
+## EXPLICIT CAST-trap FIX-A (Q1) verdict: **CLOSED**
 
-Verdict: SOLID. `CREATE VIEW ... SECURITY DEFINER AS SELECT ... WHERE tenant_id = 'acme'` matches Trino 467's documented `CREATE [OR REPLACE] VIEW ... [SECURITY {DEFINER | INVOKER}] AS query` grammar. The two-layer model (SECURITY DEFINER view + REVOKE on base table + OPA reject direct base-table access) is the correct prod-fit pattern per prod_info.md. The do-NOT-rely-on-app-WHERE-only warning and "partitioning is not access control" pin are exactly the right myths to bust. Verification test (`SELECT DISTINCT tenant_id`) is a good actionable check. Slight ding: didn't explicitly defer specific OPA policy rules to the external governance document (prod_info.md mandates), and the "OPA row-filter injection for 1000+ tenants" is correct in spirit but the responder didn't show what that injection looks like at a high level. Still well above pass.
+The iter685 Q4-secondary responder-drift on `CAST(naive AS TIMESTAMP WITH TIME ZONE) AT TIME ZONE '<local>'` (which uses the SESSION timezone, NOT UTC) is the bug iter686's r07:1594 dual-destination CAST-trap companion paragraph + new DO-NOT-WRITE bullet targeted. On the iter686 Q1 re-probe directly analogous to that bare-UTC-timestamp branch, the responder now produces:
 
-### Q4 — Timezone-aware daily bucketing (UTC store -> US/Eastern local day)
-- Accuracy: 3
-- Completeness: 4
-- Clarity: 4
-- Actionability: 4
-- **Avg: 3.75**
+```sql
+SELECT CAST(created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/London' AS date) AS london_date,
+       COUNT(*) AS daily_signups
+FROM signups
+GROUP BY CAST(created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/London' AS date)
+ORDER BY london_date;
+```
 
-**PRIMARY variant — CORRECT.** `date_trunc('day', occurred_at AT TIME ZONE 'America/New_York')` with the same expression repeated in `GROUP BY` is the canonical Trino 467 idiom for daily local bucketing on a `timestamp with time zone` column. Verified against trino.io/docs/467/functions/datetime: AT TIME ZONE on a `timestamp(p) with time zone` CONVERTS the instant to the target zone, DST is handled by IANA names, and Trino issue #16533 requires the full expression to be repeated in `GROUP BY` (no alias reference). The responder got this right.
+- Uses the session-INDEPENDENT two-step `AT TIME ZONE 'UTC' AT TIME ZONE 'Europe/London'` chain.
+- Does NOT use `CAST(created_at AS TIMESTAMP WITH TIME ZONE)` (the session-zone trap).
+- Explicitly explains inner UTC = attach UTC semantic meaning to the bare timestamp; outer Europe/London = convert to London zone (BST-aware via IANA name).
+- GROUP BY repeats the full expression (Trino #16533 rule observed).
+- CAST AS date in the rendered London zone extracts the London local day (verified — `CAST(timestamptz AS date)` truncates in the displayed zone).
 
-**SECONDARY variant — FLAGGED, session-dependent.** The responder wrote `CAST(occurred_at AS TIMESTAMP(6) WITH TIME ZONE) AT TIME ZONE 'America/New_York'` for the "stored as bare timestamp known to hold UTC" case. This is **session-dependent and unsafe**:
+The fix landed cleanly. The responder also correctly distinguishes Q1 (bare timestamp, needs two AT TIME ZONE) from Q2 (already-timestamptz, needs only one AT TIME ZONE — converts, no attach needed). Both behaviors verified against trino.io/docs/current/functions/datetime.html via WebFetch on 2026-06-08.
 
-- `CAST(naive_ts AS TIMESTAMP WITH TIME ZONE)` attaches the **SESSION** time zone label, NOT UTC unconditionally.
-- If the session zone is not UTC (which is common — Trino sessions often inherit `America/Los_Angeles`, `America/New_York`, etc. from the JDBC client/JVM), the CAST attaches the WRONG zone and the subsequent `AT TIME ZONE 'America/New_York'` converts from that wrong zone, producing **off-by-hours results**.
-- The DOCS-SAFE form is the two-step chain `occurred_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York'` — the first AT TIME ZONE ATTACHES the UTC label to the bare timestamp without changing wall-clock numbers, the second CONVERTS the now-timestamptz value to Eastern. This is session-zone-independent.
-- Equivalent function form: `with_timezone(occurred_at, 'UTC') AT TIME ZONE 'America/New_York'` — also session-independent.
+---
 
-**Resource state check (resources are CORRECT — this is responder drift):**
-- r07:1594 (ATTACH-vs-CONVERT gotcha) explicitly teaches the two-step `AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York'` chain for bare-UTC-intent timestamps and explicitly says the chain is the only safe form when the source column is bare TIMESTAMP but values are UTC-intent.
-- r07:1601 has a DO-NOT-WRITE bullet banning `bare_ts AT TIME ZONE 'X'` claiming to convert.
-- r22:2179 has a "CRITICAL" line stating `CAST(naive_ts AS TIMESTAMP WITH TIME ZONE)` attaches the SESSION timezone, NOT unconditionally UTC.
-- r23:1611 notes `timestamp with time zone` columns have known unwrap limitations.
+## Per-Q notes
 
-No resource teaches the CAST-to-timestamptz-for-UTC form. The responder drifted off the resource into a CAST shortcut.
+### Q1 (5.00) — bare-UTC-timestamp → London local-day, FIX-A re-probe — CLOSED
 
-## Overall
+Canonical two-step chain produced verbatim. Explanation of "inner UTC attaches column's semantic meaning, outer Europe/London converts" is exactly the mental model r07:1594 teaches. BST handled implicitly via IANA `Europe/London` (the responder notes this explicitly). No CAST-to-timestamptz shortcut, no `with_timezone` mention (acceptable — operator chain is the primary canonical form per r07:1594). Zero concerns.
 
-| Q | Avg |
-|---|---|
-| Q1 | 4.50 |
-| Q2 | 4.75 |
-| Q3 | 4.25 |
-| Q4 | 3.75 |
-| **Overall** | **4.3125** |
+### Q2 (5.00) — already-timestamptz → Tokyo local-day
 
-**Result: PASS** (overall >= 3.5; per-question threshold override NOT applied per instructions — Q4's secondary-CAST drift is flagged in prose only).
+Single `AT TIME ZONE 'Asia/Tokyo'` on a column declared TIMESTAMP WITH TIME ZONE is correct because the column already carries its zone — AT TIME ZONE on a timestamptz CONVERTS (no attach phase needed). The responder explicitly contrasts this with Q1's two-step case, demonstrating the mental model is intact. CAST AS date extracts the Tokyo local day. Verified against trino.io docs.
 
-## Recommendation for iter686
+### Q3 (4.75) — ISO week Monday boundary
 
-**DEFAULT NO-OP.** The resources are correct on every dialect fact tested here:
-- Hidden partitioning + day() transform pruning (r10, r27) — correct.
-- `iceberg.<schema>."<table>$<metatable>"` quoting + column names (r17/r18/r16) — correct.
-- SECURITY DEFINER view + OPA two-layer isolation, partitioning != access control (r05) — correct.
-- AT TIME ZONE ATTACH-vs-CONVERT, two-step chain for bare-UTC, CAST-attaches-SESSION-zone warning (r07:1594/1601, r22:2179, r27:855-862) — all already correctly taught.
+`date_trunc('week', order_date)` returns Monday per trino.io/docs/current/functions/datetime.html (the doc example shows `date_trunc('week', TIMESTAMP '2001-08-22 03:04:05.321')` returns `2001-08-20 00:00:00.000`, a Monday). The day_of_week ISO 1..7 vs Postgres 0..6 footnote is a defensible adjacent fact (and reinforces the iter665 0=Sunday-Postgres-leak ban). Tiny Clar deduction (-1) for not noting that `date_trunc('week', date_col)` returns a TIMESTAMP (not a DATE) in Trino if the input is a date — minor, and the downstream `week_start_monday` alias plus typical CSV/JSON serialization is harmless. Otherwise solid.
 
-The Q4 secondary-variant CAST drift is **responder drift**, NOT a findable-but-wrong resource claim. r07 already teaches the right form; r22 already warns about the wrong form. No resource edit would have prevented this drift — the responder simply chose CAST over the two-step chain that r07:1594 explicitly recommends.
+### Q4 (5.00) — timestamp → unix epoch seconds
 
-If iter686 picks anything up, the only marginal-value edit would be to add ONE short cross-reference at r07:1594 pointing readers at `with_timezone(naive_ts, 'UTC')` as an alternate function-form alongside the operator-form `AT TIME ZONE 'UTC'` chain, mirroring r22:2184-2217. That is optional, not required for passing — the existing two-step chain is correct and findable.
+`to_unixtime(occurred_at) → double` is the Trino idiom (verified trino.io docs). `CAST(... AS BIGINT)` correctly truncates to integer seconds. The responder proactively flags `EXTRACT(EPOCH FROM ts)` as Postgres NOT Trino (parse error) — exactly the iter562 ban this answer needed to honor. `*1000` for millis is the canonical extension. Zero concerns.
 
-## Brief Teacher Feedback
+---
 
-- Q1, Q2, Q3 — no action needed. Resources are findable, correct, and the responder used them well.
-- Q4 — resources are correct. Responder drifted on the secondary "what if it's a bare timestamp" branch by reaching for CAST instead of the two-step `AT TIME ZONE 'UTC' AT TIME ZONE '<local>'` chain that r07:1594 already teaches. This is a Haiku-stochastic drift, not a resource defect. Consider one small additive cross-link in r07 pointing to the `with_timezone()` function form (r22 already has it), but do not rewrite anything.
-- All ~250 locks from iter534-684 should remain UNTOUCHED. Federation r22 HARD LOCK preserved.
+## Resource state confirmations (no edits recommended)
+
+- r07:1594 two-step `AT TIME ZONE 'UTC' AT TIME ZONE '<local>'` canonical: HOLDING (Q1 directly drew from this).
+- r07:1594 (iter686 addition) CAST-trap companion paragraph + DO-NOT-WRITE bullet for `CAST(bare_ts AS TIMESTAMP WITH TIME ZONE) AT TIME ZONE '<local>'`: HOLDING — the dual-destination addition apparently steered the responder away from the iter685 Q4-secondary CAST shortcut.
+- r07:1604 cross-reference to r22 sec 2A.3 (federation companion for the same CAST-session-zone rule): HOLDING.
+- r22:2179 CAST-session-zone warning + `with_timezone` function-form alternative: HOLDING (UNTOUCHED this iter).
+- r07:1601 DO-NOT-WRITE bare-ts-AT-TIME-ZONE-as-converter ban: HOLDING.
+- All approximately 250 locks across r03/r05/r07/r08/r09/r10/r11/r12/r13/r16/r17/r18/r21/r23/r27/r28 PRESERVED.
+
+---
+
+## iter687 directive: **DEFAULT NO-OP / durability-breadth continuation**
+
+All four answers clean, FIX-A CLOSED, four orthogonal timezone/time-function shapes (bare-UTC two-step, timestamptz single-step, ISO week Monday, to_unixtime+CAST) all docs-verified correct. Recommend:
+
+1. **DEFAULT NO-OP** for resources/ this iter — no edits required.
+2. Rotate adversarial pick at iter687 to an undersurveyed adjacent surface: storage tiering (4.25 — thinnest topic, approximately 3 datapoints), dbt model contracts (4.0859, 4 datapoints — lowest passing), dbt sources/freshness (4.3706, 7 datapoints), OR federation re-probe (4.49944 vs 4.5 threshold — 42-iter ZERO probe streak; only on bulletproofed angles — high risk if probed wrong).
+3. Federation NOT probed this iter — row UNCHANGED.
+
+---
+
+## DO-NOT list (carried forward, all HOLDING)
+
+- DO NOT bump training/state.json (teacher already set to 686).
+- DO NOT touch r22 federation guardrails (42-iter ZERO probe streak; 4.49944 vs 4.5 threshold thin).
+- DO NOT rewrite iter534-685 locks (all HELD; iter686 dual-destination CAST-trap companion at r07:1594 paying off — iter685 Q4-secondary CAST-shortcut drift apparently inoculated).
+- DO NOT WRITE `CAST(naive_timestamp AS TIMESTAMP WITH TIME ZONE)` claiming it attaches UTC (FALSE — session zone; iter685 Q4 + iter686 r07:1594 FIX-A LOCK HOLDS).
+- DO NOT WRITE `EXTRACT(EPOCH FROM ts)` — Postgres NOT Trino (iter562 ban; iter686 Q4 demonstrates responder honoring this).
+- DO NOT WRITE bare `bare_ts AT TIME ZONE '<local>'` claiming to convert (r07:1601 ban).
+- DO NOT WRITE `timestamp - timestamp`, `array_slice(...)`, `array_contains(...)`, QUALIFY, RLIKE, PERCENTILE_CONT/MEDIAN, `::`-casts, dayname()/initcap fabrications, DISTINCT-ON, 0=Sunday day_of_week, Trino accepts PRIMARY KEY/FOREIGN KEY/UNIQUE in CREATE TABLE, dbt snapshot unique_key resolves against source columns rather than SELECT-output columns, fabricated Trino/Iceberg storage-tiering DDL, bare MAX in WHERE clause without scalar subquery wrap, `max_recursion_depth` default 100/1000 (default is 10), `bucket(N, col)` (Trino is column-first `bucket(col, N)`).
+
+---
+
+## Trajectory
+
+iter660 to iter686 (5.00 / 4.5625 / 5.000 / 3.656 / 4.5625 / 4.5625 / 4.375 / 4.125 / 4.9375 / 5.000 / 4.9375 / 5.000 / 4.500 / 4.875 / 4.78 / 4.5625 / 4.875 / 4.375 / 5.000 / 4.8125 / 4.500 / 4.9375 / 4.3125 / **4.9375**) — sustained 4.0+ across 29 of last 30 iterations; recovery to STRONG PASS after iter685's 4.3125 dip, driven by the iter686 dual-destination CAST-trap companion closing the responder-drift surface.
+
+---
+
+## Bottom line
+
+**OVERALL: 4.9375 STRONG PASS — CAST-trap FIX-A re-probe (Q1) CLOSED; all four answers docs-verified clean (bare-UTC two-step / timestamptz single-step / date_trunc('week') Monday-ISO / to_unixtime+CAST BIGINT); ZERO weakness flags; iter686 r07:1594 dual-destination companion addition successfully inoculated against the iter685 responder-drift surface; iter687 recommended DEFAULT NO-OP / durability-breadth continuation; federation re-probe still optional high-risk thin-margin (42-iter ZERO streak, 4.49944 vs 4.5).**
