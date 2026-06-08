@@ -2051,6 +2051,90 @@ The CTE form (preferred, leading example above) is **clearer to read** — the G
 
 **Cross-references.** [Pattern A above (running total) at r07:1700+](#pattern-a-running-total-cumulative-sum) — the running-SUM primitive (the numerator). [Pattern A2 above (bucketed running total — GROUP BY + window-over-aggregate) at r07:1868+](#pattern-a2-bucketed-running-total--group-by--window-over-aggregate-canonical-card) — the same `SUM(<agg>) OVER (...)` construct the inline alternative uses. [Share-of-grand-total card at r07:1234+](#) — the `100.0 * x / SUM(x) OVER ()` primitive (single `100.0 *`, the denominator pattern). [Resource 23 §3 integer-division trap](23-sql-best-practices-olap.md) — why the leading DECIMAL literal `100.0` is load-bearing and not interchangeable with `100`. [Resource 28 § GROUPING SETS / ROLLUP / CUBE](28-complex-sql-performance-trino-dbt.md) — if you also want a "grand-total ROW" appended (not a per-row percent column), use ROLLUP instead.
 
+### Pattern A4: LEADING CANONICAL — cumulative distinct count over time (running unique customers / monotonic distinct count) (iter693 PIN — FIX-A: first-appearance cohort + running-SUM of first-appearances, NEVER running-SUM of per-period COUNT(DISTINCT) which double-counts multi-period customers)
+
+<a id="leading-canonical--cumulative-distinct-count-over-time-running-unique-customers-iter693-pin"></a>
+
+> **Keyword anchors (READ THIS FIRST if your question contains any of these):** **cumulative distinct customers by month**, **cumulative distinct customers by week**, **cumulative distinct customers by day**, **running total of unique customers**, **running total of distinct customers**, **cumulative unique count over time**, **distinct customers to date**, **distinct customers by end of month**, **distinct customers by end of week**, **monotonic growing distinct count**, **customers acquired so far**, **running distinct count**, **running unique count**, **cumulative unique paying accounts**, **cumulative unique users by month**, **cumulative DAU by month**, **distinct users to date**, **lifetime cumulative distinct customers**, **total unique customers acquired through month N**, **how many unique customers have we ever had through end of month**, **running count of new customers**, **running total of acquired customers**, **acquired customers through date**. Verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) + [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html) + [trinodb/trino #7885](https://github.com/trinodb/trino/issues/7885) on 2026-06-08.
+
+**THE ONE FACT — cumulative distinct = running-SUM of FIRST-APPEARANCE counts, NOT running-SUM of per-period COUNT(DISTINCT).** "Cumulative distinct customers through month N" means **each unique customer is counted EXACTLY ONCE** in the running total — specifically, in the period of their FIRST appearance (their earliest `order_date` / `paid_at` / `event_time`). The correct construction is a **two-step recipe**: (1) compute each customer's first-appearance period with `MIN(order_date) GROUP BY customer_id`, (2) count first-appearances per period, then running-SUM that. Because each customer contributes `+1` exactly once (in their first-appearance period only), the running-SUM is **monotonic AND distinct** — no double-count of multi-period customers. **DO NOT** wrap a per-period `COUNT(DISTINCT customer_id)` in `SUM(...) OVER (ORDER BY month ...)` — that running-sums **distinct-ACTIVE-this-period** counts, so a customer who was active in BOTH January and February gets counted in BOTH months, and the running sum counts them TWICE. That yields **cumulative active-instances**, NOT cumulative-distinct (the EXACT iter692 Q4 bug).
+
+**THE PREFERRED CANONICAL — first-appearance cohort + running-SUM (the only correct form for cumulative-distinct-over-time):**
+
+```sql
+-- "Through the end of each month, how many UNIQUE customers have we ever had?
+--  (Each customer counted exactly once — in the month of their first order.)"
+-- Schema: orders(customer_id BIGINT, order_date DATE, amount DOUBLE).
+
+WITH first_order AS (
+  -- STEP 1: each customer's first-appearance month — MIN(order_date) GROUP BY customer_id.
+  SELECT customer_id,
+         DATE_TRUNC('month', MIN(order_date)) AS first_month
+  FROM iceberg.analytics.orders
+  GROUP BY customer_id
+),
+new_per_month AS (
+  -- STEP 2: count first-appearances per month — each customer contributes EXACTLY ONE row.
+  SELECT first_month AS order_month,
+         COUNT(*) AS new_customers          -- NEW (first-appearing) customers this month
+  FROM first_order
+  GROUP BY first_month
+)
+SELECT
+  order_month,
+  new_customers,                            -- per-period NEW count (first-appearances only)
+  -- STEP 3: running-SUM accumulates first-appearances → cumulative DISTINCT customers ever.
+  SUM(new_customers) OVER (
+    ORDER BY order_month
+    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+  ) AS cumulative_distinct_customers
+FROM new_per_month
+ORDER BY order_month;
+```
+
+**Expected output (monotonically non-decreasing — each customer counted once at their first-appearance month):**
+
+| order_month | new_customers | cumulative_distinct_customers |
+|---|---|---|
+| 2026-01-01 | 100 | 100 |
+| 2026-02-01 | 45  | 145 |
+| 2026-03-01 | 30  | 175 |
+| 2026-04-01 | 20  | 195 |
+| ... | ... | ... |
+
+The `cumulative_distinct_customers` column is **monotonically non-decreasing by construction** — every new month either adds new first-appearance customers (column climbs) or adds zero (column flat). It **never goes down** and **never double-counts** a customer who shopped in multiple months.
+
+**Why each piece is the way it is:**
+- **`MIN(order_date) GROUP BY customer_id`** — pins each customer to **one** period (the period of their first appearance). A customer who ordered in Jan, Feb, AND Mar appears EXACTLY ONCE in `first_order` (with `first_month = 2026-01`), not three times. This is the load-bearing step that turns the running-SUM into a running-distinct.
+- **`DATE_TRUNC('month', MIN(order_date)) AS first_month`** — bucket the first-appearance timestamp to the month grain you want. For weekly: `DATE_TRUNC('week', MIN(order_date))`. For daily: `MIN(order_date)` directly (already day-grain) or `DATE_TRUNC('day', MIN(order_date))`.
+- **`COUNT(*) GROUP BY first_month` in `new_per_month`** — counts first-appearances per period. Each customer contributes exactly one row to `first_order`, so `COUNT(*)` here equals "number of NEW customers (first-time customers) in this period."
+- **`SUM(new_customers) OVER (ORDER BY order_month ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`** — running-SUM of the per-period first-appearance counts. Because each customer is counted in ONE period only, summing first-appearances across all periods up through month M gives exactly the count of distinct customers who first appeared by end-of-month M = cumulative-distinct-ever.
+- **`ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`** — explicit frame, positional, deterministic. After `new_per_month` collapses to one row per month, `order_month` is unique, so the default `RANGE` and explicit `ROWS` give identical answers; the explicit form is preferred for grep-friendliness and to match Pattern A's house style.
+
+**Generalization to other grains:** swap `DATE_TRUNC('month', ...)` for `DATE_TRUNC('week', ...)` (cumulative distinct customers by week) or `DATE_TRUNC('day', ...)` (cumulative distinct customers by day). Swap `MIN(order_date)` for `MIN(paid_at)` (cumulative distinct paying accounts), `MIN(event_time)` (cumulative distinct active users), or `MIN(signup_at)` (cumulative distinct signups). The recipe shape — `MIN(<event_ts>) GROUP BY <entity_id>` → `COUNT(*) GROUP BY first_<period>` → `SUM(new_*) OVER (ORDER BY <period> ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` — is the SAME across grains.
+
+#### DO-NOT-WRITE (three load-bearing bugs — the iter692 Q4 fab class)
+
+| WRONG | What it produces | RIGHT |
+|---|---|---|
+| `SUM(COUNT(DISTINCT customer_id)) OVER (ORDER BY order_month ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` — running-sum of per-period **distinct-ACTIVE** counts (the EXACT iter692 Q4 bug) | **DOUBLE-counts multi-period customers.** A customer active in Jan AND Feb is counted in BOTH per-month COUNT(DISTINCT)s (one per month), and the running-sum then accumulates BOTH — so they contribute `+2` to the cumulative total, not `+1`. Output is **cumulative active-instances** (customer-period pairs), NOT cumulative-distinct customers. The running total can overshoot the true distinct-ever count by 2x-10x depending on retention rate. The per-period column is also **mislabeled if called "new_customers"** — it's distinct-ACTIVE-this-period (including returning customers), not new/first-appearance. | Use the first-appearance recipe above: `MIN(order_date) GROUP BY customer_id` → `COUNT(*) GROUP BY first_month` → `SUM(new_customers) OVER (ORDER BY order_month ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`. Each customer counted ONCE, at their first-appearance period. |
+| `SELECT order_month, COUNT(DISTINCT customer_id) AS new_customers FROM orders GROUP BY order_month` — aliasing per-period distinct-ACTIVE as **"new_customers"** | **Misleading alias / wrong semantics.** `COUNT(DISTINCT customer_id) GROUP BY order_month` gives **distinct-ACTIVE customers in that period** (including returning customers who shopped in earlier months too). It is **NOT** the count of new/first-appearance customers. A customer who first ordered in January and ordered again in February appears in BOTH January's and February's per-month distinct-active count — so February's `new_customers` (in this WRONG aliasing) includes the returning January customer. The correct per-period NEW count must come from the `MIN(order_date) GROUP BY customer_id` first-appearance CTE — see the canonical above. | If you need per-period NEW customer count: `WITH first_order AS (SELECT customer_id, DATE_TRUNC('month', MIN(order_date)) AS first_month FROM orders GROUP BY customer_id) SELECT first_month AS order_month, COUNT(*) AS new_customers FROM first_order GROUP BY first_month`. If you need per-period DISTINCT-ACTIVE count, name it `active_customers` (not `new_customers`) to avoid the misleading alias. |
+| `COUNT(DISTINCT customer_id) OVER (ORDER BY order_month ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` — `COUNT(DISTINCT) OVER` window form | **Parse / analysis error in Trino 467** — `DISTINCT` is not supported inside a window function (tracked at [trinodb/trino #7885](https://github.com/trinodb/trino/issues/7885)). The query fails before execution; no result. Same banned form covered in detail at [r07:638-740 rolling-distinct-HLL card](#) — that card is for **trailing N-day rolling-distinct**, this current card is for **cumulative-ever-growing distinct**. Both share the same Trino-grammar gap. | Use the first-appearance recipe above — it sidesteps the window-DISTINCT limitation by precomputing each customer's first-appearance period (a plain GROUP BY aggregate), then running-SUM-ing first-appearance counts (a plain window-SUM over an aggregated column, no DISTINCT inside the window). |
+
+**The single rule to remember:** for "cumulative distinct customers over time," the **whole** recipe is `MIN(<event_ts>) GROUP BY <entity_id>` → `COUNT(*) GROUP BY first_<period>` → `SUM(<count>) OVER (ORDER BY <period> ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`. Each entity contributes `+1` exactly once (at first appearance), so the running-SUM is monotonic AND distinct. If you find yourself writing `SUM(COUNT(DISTINCT ...)) OVER (...)` you have the iter692 Q4 bug — that double-counts multi-period entities. If you find yourself writing `COUNT(DISTINCT ...) OVER (...)` you have a parse error — Trino does not support DISTINCT inside window functions.
+
+#### Decision-differentiate: how is this different from Pattern A / A2 / A3 / rolling-distinct-HLL?
+
+| Need | Pick | Why different |
+|---|---|---|
+| Per-period running total of an **ADDITIVE measure** (revenue, event count, signups counted by-row — same customer's repeated activity SHOULD re-add to the total). | [Pattern A at r07:1700+](#pattern-a-running-total-cumulative-sum) — `SUM(amount) OVER (ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`. | Pattern A is the ADDITIVE-measure running-sum. Repeats SHOULD re-add — that's what "running total of revenue" means. A customer's second order's $50 should be added to the running revenue total. Pattern A4 is the OPPOSITE — repeats should NOT re-add (a customer counted once stays counted once). |
+| Per-bucket aggregate AND running total of that aggregate (e.g., monthly events + running cumulative events). | [Pattern A2 at r07:1868+](#pattern-a2-bucketed-running-total--group-by--window-over-aggregate-canonical-card) — `SUM(COUNT(*)) OVER (...)` window-over-aggregate. | Pattern A2 is `SUM(COUNT(*))` — the inner aggregate is `COUNT(*)` (row count, which double-counts multi-period entities like A4-WRONG does), so the running-sum represents cumulative event-rows, NOT cumulative-distinct entities. Use A2 for "running total of events" (where repeats add); use A4 for "running total of unique customers" (where repeats don't add). |
+| Per-period running **PERCENT** of grand total (Pareto, share-of-total cumulative). | [Pattern A3 at r07:1938+](#leading-canonical--running-cumulative-percent-of-grand-total-pareto-iter689-pin) — `100.0 * SUM(daily) OVER (ORDER BY d ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) / SUM(daily) OVER ()`. | A3 returns a PERCENT (0..100) of grand total, not an absolute distinct count. The numerator there is the running-SUM of an additive measure, same as A; A4 differs by the FIRST-APPEARANCE substitution that makes the running-SUM track distinct entities. |
+| Per-day **TRAILING N-day rolling-distinct** users (a window that SHIFTS forward — older days fall out). | [Rolling-distinct-HLL card at r07:638-740](#) — HLL daily-sketch + `cardinality(merge(...))` over trailing INTERVAL window. | The HLL card is for a **TRAILING window** (e.g., trailing 7-day distinct active users — yesterday's distinct count drops out of today's window once it's 8 days old). Pattern A4 is for **cumulative-ever-growing** distinct (the window never shrinks — once a customer is counted, they're counted forever). Different windowing semantics: trailing-fixed-size vs cumulative-from-start. |
+| Per-period count of NEW (first-time) entities (the **per-period building block** that A4 running-sums). | The first-appearance CTE inside A4 (above) — `MIN(<ts>) GROUP BY <id>` → `COUNT(*) GROUP BY first_<period>`. Standalone form: stop at the `new_per_month` CTE and just `SELECT first_month, COUNT(*) FROM new_per_month`. | This is the **building block** of A4. Use the standalone form when you want per-period NEW counts (acquired customers per month) without the cumulative running total. Use A4 when you want BOTH per-period NEW counts AND the cumulative running total in the same result set. |
+
+**Cross-references.** [Pattern A above (running total) at r07:1700+](#pattern-a-running-total-cumulative-sum) — the running-SUM primitive (the second window of A4's recipe). [Pattern A2 above (bucketed running total — GROUP BY + window-over-aggregate) at r07:1868+](#pattern-a2-bucketed-running-total--group-by--window-over-aggregate-canonical-card) — the additive-measure analog (use when repeats SHOULD re-add). [Pattern A3 above (running cumulative percent) at r07:1938+](#leading-canonical--running-cumulative-percent-of-grand-total-pareto-iter689-pin) — the percent-of-total fusion (use when you want a 0..100 share instead of an absolute count). [Rolling-distinct-HLL card at r07:638-740](#) — for TRAILING N-day rolling-distinct (window that shifts forward), not cumulative-ever. [Cohort analysis § at r07:551+](#3-cohort-analysis-retention-over-time) — uses the same `MIN(event_time) GROUP BY user_id` first-appearance primitive but for retention measurement instead of cumulative-distinct counting. [Resource 23 §window-distinct-banned](23-sql-best-practices-olap.md) — the broader rule that `COUNT(DISTINCT col) OVER (...)` is not supported in Trino 467.
+
 ### Pattern B: Lag / Lead (compare to previous or next row)
 
 "Day-over-day change in revenue per tenant."

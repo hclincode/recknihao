@@ -1,136 +1,141 @@
-# Iter 692 — Judge Feedback (EXTENDED PHASE)
+# Judge Feedback — iter693
 
-## OVERALL: 4.3125 PASS (margin +0.8125 above 3.5 floor)
+## Verdict: PASS (overall avg 4.094 >= 3.5) — but Q1 FIX-A REGRESSED (flagged critical)
 
-Per-Q: (5.00 + 5.00 + 5.00 + 2.25) / 4 = 17.25 / 4 = **4.3125**
-Dim-avg cross-check: Acc (5+5+5+2)/4=4.25 / Comp (5+5+5+2)/4=4.25 / Clar (5+5+5+3)/4=4.50 / Act (5+5+5+2)/4=4.25 = (4.25+4.25+4.50+4.25)/4 = **4.3125** — agrees.
+The overall average crosses the 3.5 pass threshold thanks to three strong answers (Q2/Q3/Q4 all at or near 5.0). However, **Q1 — the FIX-A re-probe — REGRESSED**. The responder cited Pattern A4 by name but produced the EXACT banned `COUNT(DISTINCT col) OVER (...)` form that Pattern A4's DO-NOT-WRITE table row (c) explicitly forbids and that Trino 467 does NOT support (parse/analysis error — trinodb/trino #7885). The query does not execute. This is the same fab class iter692 Q4 surfaced. Iter693's structural fix (adding Pattern A4 as a LEADING CANONICAL) did NOT close the bug — the responder still grabbed the banned form.
 
-GOVERNING LABEL = **PASS** (overall 4.3125 ≥ 3.5; per-Q quality-gate override NOT applied per directive; Q4 2.25 below per-Q 3.5 floor flagged in prose only).
+---
 
-## KEY VERDICTS
+## Per-question scores
 
-### Q1 GRAIN-DISCIPLINE VERDICT: **HELD** (the iter691 Q2 drift did NOT recur)
-The responder applied the canonical Pattern D form verbatim: PRE-AGGREGATE daily (`COUNT(DISTINCT user_id) GROUP BY event_date`) THEN window (`AVG(dau) OVER RANGE BETWEEN INTERVAL '29' DAY PRECEDING AND CURRENT ROW`). Explicitly names it a grain mismatch + explains row-vs-day. The Pattern D r07:2946-3034 fortifications (DECIDE-FIRST grain block + Mnemonic + LEADING CANONICAL + DO-NOT-WRITE with two-things-wrong decomposition) successfully steered the responder to the correct pre-aggregate form. **The iter691 Q2 drift was a one-off, NOT a pattern** — three consecutive iterations (690→691→692) confirm Pattern D is bulletproof for "rolling avg of daily X" question shape.
+### Q1 — cumulative unique paying accounts BY WEEK (FIX-A re-probe)
+- **Accuracy: 1** — The produced query is `COUNT(DISTINCT account_id) OVER (ORDER BY payment_week ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`. Verified against trino.io/docs/467: DISTINCT inside a window function is NOT supported in Trino 467 (tracked at trinodb/trino #7885 — "DISTINCT in window function parameters not yet supported"). The query fails at analysis time before any rows are produced. Additionally, the two CTEs (`first_payments`, `by_week`) are DEAD CODE — they are defined but never referenced by the final SELECT, which queries an inline subquery. The CTE `by_week` itself contains another oddly nested construction; even if it parsed it is irrelevant because the CTE is unused.
+- **Completeness: 2** — The shape "running cumulative through end-of-week, monotonic" is acknowledged at a vocabulary level (responder uses the right framing words and cites Pattern A4), but the canonical SQL recipe — `MIN(paid_at) GROUP BY account_id` -> `COUNT(*) GROUP BY first_week` -> `SUM(new_accounts) OVER (ORDER BY first_week ROWS UNBOUNDED PRECEDING)` — is entirely missing from the produced answer.
+- **Clarity: 2** — Dead-code CTEs add cognitive load and suggest the responder spliced fragments rather than copying the canonical block intact. A SaaS engineer reading this query cannot tell which part is "the answer."
+- **Actionability: 1** — Engineer cannot copy/paste — the query throws an analysis error in Trino 467.
+- **Q1 avg: 1.5**
 
-### Q4 CUMULATIVE-DISTINCT VERDICT: **DOUBLE-COUNT BUG CONFIRMED** (composition/fusion gap — analogous to iter688 running-cumulative-percent gap)
-The responder's CTE computes `COUNT(DISTINCT customer_id)` PER MONTH (= distinct customers ACTIVE in each month, MISLEADINGLY aliased `new_customers_this_month`), then `SUM() OVER (ORDER BY order_month ROWS UNBOUNDED PRECEDING..CURRENT ROW)` running-sums those monthly distinct-active counts. **This DOUBLE-COUNTS customers active in multiple months**: a customer active in Jan AND Feb is counted in BOTH Jan's distinct count AND Feb's distinct count, so the running sum counts them TWICE. The question asks for CUMULATIVE DISTINCT customers (each customer counted ONCE by end of month X) — which IS monotonic non-decreasing, but the responder's running-sum-of-monthly-distinct OVER-COUNTS repeat customers and is NOT the true cumulative-distinct.
-
-The running-total STRUCTURE (Pattern A2) is correct, but it is applied to the WRONG per-month metric (distinct-ACTIVE instead of NEW/FIRST-APPEARANCE), producing an inflated, non-distinct cumulative count.
-
-**CORRECT FORM** (count each customer at their FIRST-order month only, THEN running-sum the cohort counts):
+**The corrected Pattern A4 canonical (what the responder SHOULD have produced):**
 ```sql
-WITH first_order AS (
-  SELECT customer_id, DATE_TRUNC('month', MIN(order_date)) AS first_month
-  FROM orders
-  GROUP BY customer_id
+WITH first_payment AS (
+  SELECT account_id,
+         DATE_TRUNC('week', MIN(paid_at)) AS first_week
+  FROM iceberg.analytics.payments
+  GROUP BY account_id
 ),
-new_per_month AS (
-  SELECT first_month AS order_month, COUNT(*) AS new_customers
-  FROM first_order
-  GROUP BY first_month
+new_per_week AS (
+  SELECT first_week, COUNT(*) AS new_accounts
+  FROM first_payment
+  GROUP BY first_week
 )
 SELECT
-  order_month,
-  new_customers,
-  SUM(new_customers) OVER (ORDER BY order_month ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_distinct_customers
-FROM new_per_month
-ORDER BY order_month;
+  first_week,
+  new_accounts,
+  SUM(new_accounts) OVER (
+    ORDER BY first_week
+    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+  ) AS cumulative_unique_accounts
+FROM new_per_week
+ORDER BY first_week;
 ```
-Each customer contributes to the running sum exactly ONCE (in their first-order month), so the cumulative total is the true count of distinct customers ever-ordered through that month.
 
-**VERIFIED**: running-SUM of `COUNT(DISTINCT customer_id)`-per-month ≠ cumulative-distinct-ever (double-counts multi-month customers); the first-order-month-cohort + running-SUM is the correct monotonic cumulative-distinct form.
+### Q2 — second-highest-priced product per category
+- **Accuracy: 5** — `DENSE_RANK() OVER (PARTITION BY category ORDER BY price DESC) = 2` is the standard Trino 467-valid form. Verified at trino.io/docs/current/functions/window.html.
+- **Completeness: 5** — Mentions RANK vs DENSE_RANK distinction (gaps vs no-gaps) — important when ties exist.
+- **Clarity: 5** — CTE-based two-step structure is easy to read.
+- **Actionability: 5** — Copy/paste ready.
+- **Q2 avg: 5.0**
 
-### Resource gap: cumulative-distinct-over-time canonical is ABSENT
-Grep confirms **no canonical pattern for "cumulative distinct count over time" / first-appearance-cohort + running-sum exists in resources/**. r07:1700+ Pattern A running-total cards teach running-SUM-of-additive-metric; r07:1886+ Pattern A2 teaches per-bucket aggregate + running-SUM (correct for additive metrics like `COUNT(*)`, `SUM(revenue)`, but NOT for `COUNT(DISTINCT)` which is non-additive across periods). r07:638-740 rolling-distinct HLL covers ROLLING (trailing N-day window) distinct counts but not CUMULATIVE (unbounded preceding) distinct counts. The first-appearance-cohort + running-sum pattern is a fusion shape (composing first-occurrence aggregation + running-SUM of cohort counts) NOT modeled as a single worked example anywhere in resources/. **This is a composition/fusion gap directly analogous to the iter688 running-cumulative-percent gap** (where Pattern A running-total + share-of-grand-total were correct separately but their composition into "running cumulative percent" was not modeled, causing responder drift).
+### Q3 — Iceberg partition evolution (day -> month, no rewrite)
+- **Accuracy: 5** — `ALTER TABLE iceberg.analytics.events SET PROPERTIES partitioning = ARRAY['month(occurred_at)']` is the documented Trino 467 syntax. Verified at trino.io Iceberg connector docs: partitioning evolution is metadata-only, applies to NEW writes, old data retains the prior spec, and the engine reads across both transparently. The Spark `rewrite_data_files` (Spark-only) call-out for optional historical rewrite is correctly labeled and accurate.
+- **Completeness: 5** — Covers metadata-only nature, new-writes-only scope, transparent reads across both specs, and the optional historical-rewrite path (correctly attributed to Spark, not Trino). Also mentions `expire_snapshots` after rewrite.
+- **Clarity: 4.5** — Clear and direct.
+- **Actionability: 5** — Single ALTER statement engineer can run immediately.
+- **Q3 avg: 4.875**
 
-## DIALECT VERIFICATIONS (trino.io/docs/467)
+### Q4 — dollar-weighted average rating per product
+- **Accuracy: 5** — `SUM(rating * amount) / SUM(amount)` is the textbook weighted-average identity (sum(w_i*x_i) / sum(w_i)). Valid Trino 467 syntax.
+- **Completeness: 5** — Worked example ($500 vs $10 -> 50x influence) and a sensible integer-division caveat ("if both columns are INTEGER...").
+- **Clarity: 5** — Plain-language identity explanation.
+- **Actionability: 5** — Copy/paste ready.
+- **Q4 avg: 5.0**
 
-- **Q1 `RANGE BETWEEN INTERVAL '29' DAY PRECEDING AND CURRENT ROW`** — VALID Trino 467 (RANGE with interval offset supported since v346; sorting column is `event_date` of date type, compatible with `INTERVAL '29' DAY`). Off-by-one check: `29 days PRECEDING + CURRENT ROW = 30 calendar days inclusive` — correct for "30-day rolling average".
-- **Q2 `SUM(CASE WHEN status='X' THEN 1 ELSE 0 END)` AND `COUNT(*) FILTER (WHERE status='X')`** — both VALID Trino 467 (r23:838-867 canonical confirms both forms produce identical row counts + identical plans; r07:795 docs-truth pin "there is no PIVOT keyword in Trino's SQL grammar").
-- **Q3 `COUNT(*)` / `COUNT(rating)` / `AVG(rating)`** — VALID Trino 467 semantics (r07:1194 verbatim docs quote: `count(*)` counts input rows, `count(x)` counts non-null input values; AVG ignores NULL per aggregate-page exception rule — NOT in the count/count_if/max_by/min_by/approx_distinct exception list).
-- **Q4 running-SUM of COUNT(DISTINCT) per month** — STRUCTURE valid Trino 467 syntax (SUM-as-window-aggregate + ROWS UNBOUNDED PRECEDING..CURRENT ROW frame), but SEMANTICALLY WRONG for the asked question — produces inflated count that double-counts multi-month customers. First-order-month-cohort + running-sum is the correct monotonic cumulative-distinct form.
+---
 
-## PER-QUESTION SCORES
+## Overall
 
-### Q1 (rolling-daily-aggregate re-probe) — 5.00 (Acc5/Comp5/Clar5/Act5)
-GRAIN DISCIPLINE CORRECT. CTE `daily_active_users` pre-aggregates to one row per day with `COUNT(DISTINCT user_id) AS dau GROUP BY event_date`, THEN outer query windows the daily series with `AVG(dau) OVER (ORDER BY event_date RANGE BETWEEN INTERVAL '29' DAY PRECEDING AND CURRENT ROW)`. Explicitly names it a "grain mismatch" + explains rows-vs-days. RANGE-INTERVAL choice is gap-day correct (calendar-aware). Off-by-one (29 preceding + current = 30 days) is correct. Pattern D r07:2946-3034 fortifications WORKING.
+(1.5 + 5.0 + 4.875 + 5.0) / 4 = **4.094 -> PASS** by overall-avg rule.
 
-### Q2 (long-to-wide pivot) — 5.00 (Acc5/Comp5/Clar5/Act5)
-Canonical conditional-aggregation form with `SUM(CASE WHEN status='X' THEN 1 ELSE 0 END) GROUP BY customer_id` + ALSO offers the FILTER form `COUNT(*) FILTER (WHERE status='X')`. No PIVOT keyword fabrication. Both forms valid Trino 467 (r23:838-867 + r07:795 confirm). Zero-group-safe with GROUP BY customer_id (every customer appears, including those with zero matching rows).
+Three strong answers carry the average above threshold; Q1 alone is well below threshold and is a critical regression of the FIX-A.
 
-### Q3 (NULL-in-aggregates) — 5.00 (Acc5/Comp5/Clar5/Act5)
-Correct NULL-in-aggregate semantics: `COUNT(*) AS total_orders` (all rows including NULL ratings), `COUNT(rating) AS orders_with_rating` (non-NULL only), `AVG(rating) AS avg_rating` (ignores NULL — denominator = non-NULL count, never treats NULL as 0). Matches r07:1194 verbatim docs quote + Trino 467 aggregate-page exception rule. Three columns in one pass — actionable single-statement form.
+---
 
-### Q4 (cumulative distinct-customer by month) — 2.25 (Acc2/Comp2/Clar3/Act2) [CUMULATIVE-DISTINCT DOUBLE-COUNT FLAG]
-CRITICAL BUG: running-SUM of `COUNT(DISTINCT customer_id)`-per-month DOUBLE-COUNTS multi-month customers. Misleadingly aliases monthly distinct-active count as "new_customers_this_month" (it is NOT new — it is active-in-this-month, which includes returning customers). Then SUM-OVER-cumulative running-totals these counts, inflating the cumulative total by the count of multi-month customers. Question asks for CUMULATIVE DISTINCT customers ever-ordered through end of month X (each customer counted exactly ONCE, monotonic) — responder's answer is monotonic non-decreasing (correct shape) but the VALUES are wrong (inflated). The first-order-month-cohort + running-sum form (count each customer at their first-order month only, then running-sum the cohort counts) is the correct canonical. -3.00 on Accuracy (the answer is executable but produces wrong values), -3.00 on Completeness (misses the "distinct ever" semantic entirely), -2.00 on Clarity (the misleading alias `new_customers_this_month` is itself a teaching error — these are NOT new customers, they are active customers), -3.00 on Actionability (an engineer who runs this query against prod gets a wrong KPI on the cumulative-customers dashboard tile).
+## EXPLICIT VERDICT — iter692 cumulative-distinct FIX-A: REGRESSED
 
-## FLAGGED WEAK ANSWERS
+The iter693 Pattern A4 insertion at r07:2054-2136 did **NOT** close the cumulative-distinct-over-time gap. The responder cited Pattern A4 by name in its answer but produced the EXACT banned form — `COUNT(DISTINCT account_id) OVER (ORDER BY payment_week ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` — that Pattern A4's DO-NOT-WRITE table row (c) explicitly forbids. This is the worst possible failure mode: the responder *found* the right card and STILL produced the banned form instead of the canonical.
 
-- **Q4 2.25**: cumulative-distinct double-count — running-sum of monthly distinct counts is NOT cumulative distinct. The structure (Pattern A2) is right but applied to the wrong per-month metric (distinct-active instead of new/first-appearance). Inflated, non-distinct cumulative count. The misleading alias `new_customers_this_month` for `COUNT(DISTINCT customer_id) PER MONTH` is itself wrong (these are active customers in the month, NOT new customers — new means first-time, which requires `DATE_TRUNC('month', MIN(order_date))` per customer).
+Verified against [trino.io window functions docs](https://trino.io/docs/current/functions/window.html) and [trinodb/trino #7885](https://github.com/trinodb/trino/issues/7885): `COUNT(DISTINCT col) OVER (...)` is unsupported in Trino 467 and fails with "DISTINCT in window function parameters not yet supported" at analysis time.
 
-## TEACHER FEEDBACK & iter693 RECOMMENDATION
+---
 
-**RECOMMENDED iter693 = FIX-A: ADD CUMULATIVE-DISTINCT-OVER-TIME CANONICAL** (composition/fusion gap analogous to iter688 running-cumulative-percent FIX-A).
+## Why did the FIX-A regress? Root-cause analysis of Pattern A4 card structure
 
-The resource grep confirms NO canonical for "cumulative distinct customers / users / entities over time" exists. r07:1700+ Pattern A teaches running-total of additive metrics; r07:1886+ Pattern A2 teaches per-bucket-aggregate + running-SUM; r07:638-740 covers ROLLING-distinct (HLL/self-join over trailing N-day) but NOT CUMULATIVE-distinct (unbounded preceding). The fusion shape (first-occurrence cohort + running-sum) is unmodeled — this is the same shape of gap that caused iter688 Q3's double-100 drift and that was successfully fixed by iter689's Pattern A3 FIX-A.
+I read the actual card text at r07:2054-2136. The card structure is:
+- **r07:2058** — keyword anchors callout (22 keyword phrasings)
+- **r07:2060** — THE ONE FACT prose (correct framing)
+- **r07:2062-2093** — **canonical SQL block — DOES lead structurally** (good)
+- **r07:2095-2105** — expected output table
+- **r07:2107-2113** — per-piece walk-through
+- **r07:2115** — generalization note
+- **r07:2117-2122** — DO-NOT-WRITE table with three banned forms (the COUNT(DISTINCT) OVER ban is row (c))
+- **r07:2124** — single-rule summary
+- **r07:2126-2134** — Decision-differentiate table
+- **r07:2136** — Cross-references
 
-**Specific FIX-A directive for iter693:**
+**The canonical SQL DOES lead — it is the first SQL block in the card.** The DO-NOT-WRITE table comes AFTER. So the structural ordering is correct.
 
-1. **Add new canonical card at r07** (placement: after Pattern A3 r07:1938-2052 running-cumulative-percent / before Pattern B Lag-Lead, OR as new H3 under §5 time-series carry-forward family — pick whichever flows best):
+So why did the responder produce the banned form anyway? Three plausible failure modes — the teacher should design iter694 to defend against each:
 
-   **Pattern A4: LEADING CANONICAL — Cumulative DISTINCT count over time (first-appearance cohort + running-SUM)**
-   - Title with keyword anchors: "cumulative distinct customers by month", "cumulative unique users by month", "total customers ever-ordered through end of month X", "running count of distinct entities over time", "ever-ordered customer count per month", "cumulative unique count", "monotonic distinct over time", "count of customers acquired by end of month", "lifetime distinct customer count by period", "cohort-based cumulative count"
-   - One-fact opener: "Running-SUM of `COUNT(DISTINCT col)`-per-period is NOT cumulative distinct — it DOUBLE-COUNTS entities active in multiple periods. To get true cumulative distinct (each entity counted ONCE through end of period X), count each entity at their FIRST-occurrence period only, THEN running-SUM the cohort counts."
-   - LEADING CANONICAL SQL (the corrected form shown above with `first_order` + `new_per_month` CTEs + `SUM(new_customers) OVER (ORDER BY order_month ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`)
-   - Worked example output table showing monotonic non-decreasing cumulative count with the cohort decomposition (Jan: 100 new = 100 cumulative; Feb: 50 new = 150 cumulative; Mar: 30 new = 180 cumulative — even if Mar had 200 active customers total, only 30 are NEW so cumulative grows by 30).
-   - Explainer: WHY first-appearance is correct — each customer is "added" to the cumulative population exactly once (in their first-order month) and stays in the population forever; running-SUM of NEW counts accumulates the population correctly.
-   - DO-NOT-WRITE block with the EXACT iter692 Q4 bug:
-     ```
-     -- WRONG: SUM-OVER of COUNT(DISTINCT) per month DOUBLE-COUNTS multi-month customers
-     WITH monthly AS (
-       SELECT DATE_TRUNC('month', order_date) AS order_month,
-              COUNT(DISTINCT customer_id) AS active_customers  -- ACTIVE not NEW
-       FROM orders GROUP BY DATE_TRUNC('month', order_date)
-     )
-     SELECT order_month, active_customers,
-            SUM(active_customers) OVER (ORDER BY order_month ROWS UNBOUNDED PRECEDING)
-              AS cumulative_DOUBLE_COUNTED  -- NOT cumulative-distinct; inflated
-     FROM monthly;
-     ```
-   - Two-things-wrong decomposition (mirroring r07:2998 style):
-     (1) `COUNT(DISTINCT customer_id) PER MONTH` counts customers active IN that month — multi-month customers appear in EACH month's count.
-     (2) Running-SUM of those monthly counts ADDS the multi-month customer once per month they appear, instead of once total.
-     Both fixed by the same edit: compute per-customer FIRST month via `DATE_TRUNC('month', MIN(order_date)) GROUP BY customer_id`, then aggregate to per-month new-count, then running-SUM.
-   - Misleading-alias warning: do NOT alias `COUNT(DISTINCT customer_id) PER MONTH` as `new_customers_this_month` — it is NOT new, it is active. The `new_customers` label MUST be reserved for the first-appearance cohort count (`COUNT(*)` over the `first_order` CTE grouped by `first_month`).
-   - Decision table — when to use Pattern A4 vs alternatives:
-     | Question shape | Pattern |
-     |---|---|
-     | Cumulative DISTINCT entities through end of period X (monotonic, each counted once) | **Pattern A4 (this card)** — first-appearance cohort + running-SUM |
-     | Cumulative SUM/COUNT of additive metric (revenue, event count) | Pattern A / Pattern A2 — running-SUM of period sums |
-     | Rolling/trailing N-day DISTINCT count (sliding window, NOT cumulative) | r07:638+ HLL or exact-self-join |
-     | NEW customers acquired per period (the cohort itself, NOT cumulative) | first_order CTE + GROUP BY first_month (mid-step of Pattern A4) |
+1. **The DO-NOT-WRITE table at r07:2117-2122 shows the banned SQL VERBATIM in a copyable code-style cell** (e.g., backtick-wrapped `COUNT(DISTINCT customer_id) OVER (ORDER BY order_month ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`). A Haiku-class responder scanning the card may grab this snippet — visually it looks like SQL that matches the question's keywords (cumulative, OVER, ORDER BY, etc.) — without parsing the surrounding "WRONG" label or the table's row structure. The banned form may be more "grep-attractive" than the canonical because it is a single-line snippet, while the canonical is a multi-CTE block.
 
-2. **Add inbound keyword anchors** at r07:638 (rolling-distinct HLL section) cross-referencing "for CUMULATIVE distinct count over time (unbounded preceding, not trailing N-day) see Pattern A4 at r07:XXXX".
+2. **The responder may have synthesized from MULTIPLE cards rather than copying the canonical intact** — note the dead-code `first_payments` CTE in the answer uses the right primitive name pattern ("first_..."), suggesting the responder *partially* recognized the first-appearance idiom but then independently invented the final SELECT using a free-association `COUNT(DISTINCT) OVER` shape that "felt right" for the keywords. The canonical was not copied as a coherent block.
 
-3. **Add inbound keyword anchors** at r07:1886+ Pattern A2 cross-referencing "for cumulative DISTINCT counts (not additive), use Pattern A4 — running-SUM of COUNT(DISTINCT) per period DOUBLE-COUNTS".
+3. **The keyword anchors at r07:2058 contain the exact question phrasing "cumulative unique paying accounts"** — so the responder definitely matched to Pattern A4. The match worked; the copy did not.
 
-**Why FIX-A not DEFAULT NO-OP**: This is a composition/fusion gap exactly like iter688 running-cumulative-percent (resource correct on both components — `COUNT(DISTINCT)`-per-period and running-SUM — separately; their NAIVE composition is what's wrong). The iter689 Pattern A3 FIX-A closed the iter688 fusion drift permanently. A Pattern A4 FIX-A at r07 will permanently close the cumulative-distinct fusion drift. Single-iteration drift, but the structural absence of the canonical means it WILL recur on any future cumulative-distinct re-probe. The asymmetry: this question shape is foundational SaaS analytics ("how many customers have we ever acquired?" → cumulative-distinct lifetime customer count is a standard dashboard tile).
+## Iter694 recommendation — REPEAT FIX-A (strengthen Pattern A4 against banned-form copying)
 
-**1-drift-vs-pattern rule check**: Q4 is the FIRST cumulative-distinct probe in recent iterations (no prior cumulative-distinct question to compare against). However, the gap is STRUCTURAL (canonical absent) not RESPONDER-SIDE (responder had no resource to drift away from). Treating it as a 1-drift would leave the gap unfixed; the structural absence justifies FIX-A independent of drift count.
+The teacher should iterate Pattern A4 with these targeted hardenings:
 
-## SUMMARY OF TOPIC AVG UPDATES
+1. **Disarm the banned SQL in the DO-NOT-WRITE table** — render the banned `COUNT(DISTINCT col) OVER (...)` snippet at r07:2117-2122 in a way that is NOT copy-paste attractive. Options: (a) wrap each banned snippet with explicit inline `-- WRONG — Trino 467 parse error — DO NOT COPY` SQL comments on the SAME line as the snippet, so any copy includes the comment; (b) break the banned syntax across lines with `[BANNED-BY-TRINO]` placeholder tokens that visibly break the snippet (e.g., `COUNT(DISTINCT [BANNED:see-row-c-above] customer_id) OVER (...)`); (c) move the banned snippet OUT of a code-style cell into prose-only italics with `-- BANNED` annotation. The goal is: even if the responder grabs from the DO-NOT-WRITE row, the produced SQL is visibly broken in a way the engineer will notice immediately.
 
-- **Common analytical query patterns: aggregations, funnels, cohort, time-series** (Q1 grain-discipline re-probe HELD canonical durability +0.30 — Pattern D r07:2946 LEADING CANONICAL confirmed bulletproof across 3 consecutive iters; Q2 long-to-wide conditional aggregation canonical durability +0.30 — both SUM(CASE) + FILTER forms confirmed valid; Q3 NULL-in-aggregates canonical durability +0.30 — COUNT(*) vs COUNT(col) vs AVG(ignores NULL) semantics confirmed)
-- **Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL** (Q4 cumulative-distinct: responder-drift on first-appearance-cohort + running-SUM fusion shape, -0.25 on canonical durability for UNMODELED fusion shape; resource correct on both components separately; logged as STRUCTURAL GAP, FIX-A recommended)
+2. **Add a "COPY THIS BLOCK" marker around the canonical SQL at r07:2065-2092** — explicit prose header like `### COPY THIS BLOCK — the only correct cumulative-distinct-over-time SQL` immediately before the canonical, and a closing `### END COPY BLOCK` after. This biases keyword-driven extraction toward the right region.
 
-## CONFIRMATIONS
+3. **Add a "if your question matches any of these keywords, the answer is the SQL in the COPY THIS BLOCK above — do not write `COUNT(DISTINCT col) OVER (...)`, it fails at parse time" tie-back paragraph** immediately after the canonical (at ~r07:2094), BEFORE the expected-output table. Right now the canonical is followed by the expected-output table; insert a one-liner tie-back between them.
 
-- Pattern D r07:2946-3034 — UNTOUCHED + CONFIRMED DURABLE (3 consecutive iter wins 690→691→692; the iter691 Q2 drift verified one-off, not a pattern).
-- r07:795 + r23:838-867 long-to-wide conditional aggregation — UNTOUCHED + CONFIRMED DURABLE.
-- r07:413 + r07:1194 NULL-in-aggregate semantics — UNTOUCHED + CONFIRMED DURABLE.
-- ALL iter534-691 locks — UNTOUCHED.
-- iter692 teacher NO-OP confirmed appropriate for Q1/Q2/Q3 (those were the 3 grep targets that were findable + docs-correct + untouched-per-directive); Q4 reveals a NEW structural gap not visible to the iter692 grep pass (the grep targeted EXISTING canonical durability not COMPOSITION/FUSION shape coverage).
+4. **Verify the card does NOT accidentally present `COUNT(DISTINCT) OVER` in any copyable position** — grep r07 for `COUNT(DISTINCT .* OVER` and ensure every occurrence is wrapped with WRONG/banned markers IN THE SAME LINE.
 
-## FINAL VERDICT
+5. **Re-probe in iter695** with the SAME Q1 phrasing ("cumulative unique paying accounts BY WEEK — payments(account_id, paid_at)") to confirm the FIX-A finally closes.
 
-**OVERALL: 4.3125 PASS** — Q1 grain discipline HELD (Pattern D bulletproof, iter691 drift one-off-not-pattern verified); Q2/Q3 docs-perfect; Q4 cumulative-distinct double-count BUG (running-SUM of COUNT(DISTINCT)-per-month inflates by multi-month customer count; correct form is first-order-month cohort + running-SUM). iter693 recommended **FIX-A: ADD CUMULATIVE-DISTINCT-OVER-TIME CANONICAL (Pattern A4)** at r07 with first-appearance-cohort + running-SUM LEADING CANONICAL + DO-NOT-WRITE block for running-SUM-of-COUNT(DISTINCT)-per-period double-count + misleading-alias warning + decision table differentiating from Pattern A/A2 (additive metrics) and r07:638+ HLL (rolling not cumulative). Federation still untouched (48-iter ZERO probe streak, 4.49944 vs 4.5 thin).
+---
+
+## Held fixes — all confirmed working
+
+- **Q2 second-highest-per-group (DENSE_RANK + WHERE rank=2)** — solid, no change needed.
+- **Q3 Iceberg partition evolution (ALTER TABLE SET PROPERTIES + Spark rewrite caveat)** — solid, no change needed.
+- **Q4 weighted average (SUM(x*w)/SUM(w))** — solid, no change needed.
+
+## Production-environment fit check
+
+- Q3 correctly defers historical rewrite to Spark (the prod-described ingestion stack) rather than recommending Trino-side rewrite. Aligns with prod_info.md (Spark = ingestion, Trino = query).
+- All four answers stay within the Trino 467 + Iceberg 1.5.2 + Hive Metastore + MinIO stack. No off-stack tool recommendations.
+
+## Summary directive for iter694
+
+**Iter694 = REPEAT FIX-A on Pattern A4.** The structural insertion at r07:2054-2136 was correct (canonical leads, DO-NOT-WRITE follows). The problem is that the DO-NOT-WRITE table presents the banned `COUNT(DISTINCT) OVER (...)` snippet in a copy-attractive single-line code-cell form. Defang the banned snippet (inline `-- WRONG, parse error in Trino 467` comments or `[BANNED]` placeholder tokens that visibly break the syntax), add a "COPY THIS BLOCK" marker around the canonical, and add a one-line tie-back between the canonical and the expected-output table. Re-probe Q1 in iter695 with the same phrasing.
+
+## Sources verified
+
+- [Trino window functions docs](https://trino.io/docs/current/functions/window.html) — DENSE_RANK semantics, ROWS frame
+- [trinodb/trino issue #7885](https://github.com/trinodb/trino/issues/7885) — DISTINCT in window function parameters not supported
+- [Trino Iceberg connector docs](https://trino.io/docs/current/connector/iceberg.html) — ALTER TABLE SET PROPERTIES partitioning evolution
+- [Starburst Iceberg partitioning blog](https://www.starburst.io/blog/iceberg-partitioning-and-performance-optimizations-in-trino-partitioning/) — partition evolution metadata-only behavior
