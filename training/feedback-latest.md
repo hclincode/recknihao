@@ -1,86 +1,75 @@
-# Judge Feedback — iter736
+# Judge Feedback — iter737
 
-**Mode:** extended phase (final_iterations_remaining=0). Per-Q scoring + end-of-iteration feedback. state.json NOT bumped.
-
-**Theme:** DUAL FIX-A re-probe (CRITICAL) — url_extract_* (Q1) + transcendental-math ln/exp/log (Q2), both from iter735 gaps; plus fresh AT TIME ZONE (Q3) and NTILE (Q4).
-
-All dialect claims verified against trino.io/docs/467 (url.html, math.html, datetime.html, window.html) on 2026-06-09 — NOT against resources/.
-
----
+**Mode**: extended phase, per-iteration feedback. All four dialect claims VERIFIED against trino.io/docs/467 (url / math / datetime / window .html) on 2026-06-09. NOT verified against resources/. state.json NOT bumped.
 
 ## Per-question scores
 
-| Q | Topic | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|---|---|
-| Q1 | url_extract_* (FIX-A) | 5 | 5 | 5 | 5 | **5.00** |
-| Q2 | ln/exp/log transcendental (FIX-A) | 5 | 5 | 5 | 5 | **5.00** |
-| Q3 | AT TIME ZONE | 5 | 5 | 4.5 | 5 | **4.875** |
-| Q4 | NTILE | 5 | 5 | 5 | 5 | **5.00** |
+### Q1 — url_extract_parameter (2nd-angle re-probe)
+| Dim | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+**Q1 avg: 5.00**
 
-**Overall average: 4.97 — STRONG PASS** (threshold 3.5; the overall average governs).
+Docs-verified (url.html): `url_extract_parameter(url, name) → varchar` "Returns the value of the first query string parameter named `name` from `url`." The responder used `url_extract_parameter(page_url, 'utm_campaign')` exactly — single named-parameter extraction, NO hand-splitting of the query string. The `IS NOT NULL` filter is a sensible touch (returns NULL when the param is absent). Return type `varchar` correctly stated. Flawless.
 
----
+### Q2 — power + log10 (2nd-angle re-probe)
+| Dim | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+**Q2 avg: 5.00**
 
-## Q1 — url_extract_* — **FIX-A CLOSED**
+Docs-verified (math.html): `power(x, p) → double` "Returns x raised to the power of p"; `log10(x) → double` "base 10 logarithm". Arithmetic operators are `+ - * / %` ONLY — there is NO `^` exponentiation operator; the responder's explicit "NO `^` operator in Trino (parse error) — always power()" note is correct and valuable. `floor(log10(revenue))` gives the order-of-magnitude exponent (floor(log10(500000))=5; the inline comment `log10(500000)≈5.7 → floor=5` is exactly right). Did NOT decline; used working SQL. Flawless.
 
-Responder LED with `url_extract_host(page_url)` + `url_extract_path(page_url)` (one call each) and presented the full family with the split_part chain explicitly DEFANGED as fragile.
+### Q3 — last_day_of_month (fresh)
+| Dim | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 4.75 |
+**Q3 avg: 4.9375**
 
-Docs verification (url.html, Trino 467) — all confirmed:
-- `url_extract_host(url) → varchar` ("Returns the host from url")
-- `url_extract_path/protocol/query/fragment(url) → varchar`
-- `url_extract_parameter(url, name) → varchar`
-- `url_extract_port(url) → bigint` (the one numeric return — responder correctly annotated `→bigint`)
-- The `split_part(split_part(url,'://',2),'/',1)` chain was NOT used as the lead; it was defanged as breaking on ports/query/fragment/missing-scheme. Correct.
+Docs-verified (datetime.html): `last_day_of_month(x) → date` "Returns the last day of the month." Accepts date/timestamp input and returns `date` (standard Trino behavior; calendar-aware so it handles leap years and varying month lengths automatically). There is NO bare `last_day()` function in Trino — the responder's note that the Oracle `LAST_DAY()` name is "not registered" in Trino is correct and a useful migration cue (fits the Oracle-migration topic + prod stack). Minor completeness nit (-0.25): the question explicitly raised "from a timestamp" but the example column `signup_date` reads date-like — a one-line note that passing a `timestamp`/`timestamp with time zone` also works (returns the date of the last day) would close it fully. Not an error.
 
-**Verdict: url_extract_* FIX-A CLOSED.** Reverses the iter735 Q3 fragile-code outcome (3.75). The iter736 r23 §3.1A canonical surfaced and the responder copied the canonical one-call form. First passing datapoint — needs one more angle to bulletproof.
+### Q4 — ROW_NUMBER per-group (fresh)
+| Dim | Score |
+|---|---|
+| Technical accuracy | 5 |
+| Beginner clarity | 5 |
+| Practical applicability | 5 |
+| Completeness | 5 |
+**Q4 avg: 5.00**
 
-## Q2 — ln/exp/log transcendental math — **FIX-A CLOSED**
+Docs-verified (window.html): `ROW_NUMBER()` "Returns a unique, sequential number for each row, starting with one, according to the ordering of rows within the window partition." `PARTITION BY customer_id` restarts at 1 per customer; `ORDER BY order_date ASC` gives chronological numbering — correct. Window functions cannot be referenced in WHERE/GROUP BY directly; the responder correctly wrapped the window result in a subquery (first query) and a CTE (second query) before the `GROUP BY order_number` aggregate. The two-part answer (number rows, then aggregate per Nth purchase with COUNT(*)/AVG) precisely matches the "avg value on 3rd vs 1st purchase" intent. Sound.
 
-Responder gave WORKING SQL `100 * exp(-ln(2) * days_since_login / 30.0)` and did NOT decline (reverses the iter735 Q2 honest-but-empty decline, 2.75).
+## Overall
 
-Docs verification (math.html, Trino 467) — all confirmed:
-- `ln(x) → double` (natural log), `exp(x) → double` (e^x)
-- `log(b, x) → double` — BASE FIRST confirmed; responder correctly warned base-first ordering
-- `log2(x)/log10(x) → double`, `power(x, p) → double` (alias `pow`), `sqrt(x) → double`
-- NO `^` exponentiation operator — confirmed; only `+ - * / %` operators exist, `power()` is the only exponentiation. Responder's no-`^` note is correct.
-- Decay formula is numerically correct: `e^(-ln(2)·t/30)` is the canonical half-life-of-30-days form. The `/ 30.0` (float divisor) avoids integer-division truncation of `days/30` — good defensive detail.
+| Q | Avg |
+|---|---|
+| Q1 | 5.00 |
+| Q2 | 5.00 |
+| Q3 | 4.9375 |
+| Q4 | 5.00 |
 
-**Verdict: transcendental-math FIX-A CLOSED.** First passing datapoint — needs one more angle to bulletproof. The iter736 r27 §4.4F canonical surfaced.
+**Overall average: 4.984 — PASS** (threshold 3.5; overall average governs, no per-Q override).
 
-## Q3 — AT TIME ZONE — correct, minor clarity nit
+## Topic verdicts
 
-Docs verification (datetime.html, Trino 467):
-- The `timestamp AT TIME ZONE 'zone'` operator exists and, for a `timestamp WITH time zone`, CONVERTS the instant — preserves the same moment, renders the wall-clock in the target zone. Docs example: `timestamp '2012-10-31 01:00 UTC' AT TIME ZONE 'America/Los_Angeles' → 2012-10-30 18:00 LA`. Responder's "re-labels the same instant, changes wall-clock display, doesn't add/subtract" framing is accurate.
-- `date_trunc('day', ts AT TIME ZONE 'America/Chicago')` then yields the Chicago local day. Correct.
-- **Subtlety checked and the caveat is ACCURATE:** for a `timestamp WITHOUT time zone`, `AT TIME ZONE` INTERPRETS/attaches the value as being in that zone (the docs-blessed attach function is `with_timezone(ts, zone)`), it does NOT convert-from-UTC. So applying `AT TIME ZONE 'America/Chicago'` to a naive `created_at` would mis-handle the conversion. The responder's caveat "column should be TIMESTAMP WITH TIME ZONE or first label as UTC" steers the user correctly to ensure the value carries UTC before converting.
-- The "don't put AT TIME ZONE on the left of a DATE comparison; use `CAST(... AT TIME ZONE ... AS DATE)`" note is sound defensive guidance.
+- **url_extract_* (Q1): STAYS CLOSED — now BULLETPROOFED.** 2nd consecutive clean datapoint after iter736 (FIX-A). Responder leads with the single-call `url_extract_parameter(url,name)` form, no hand-splitting. No further probing needed beyond occasional integrity sweeps.
+- **transcendental-math (Q2): STAYS CLOSED — now BULLETPROOFED.** 2nd consecutive clean datapoint. `power(x,p)` + `log10(x)` + the NO-`^`-operator guard all correct; `floor(log10(x))` order-of-magnitude idiom verified. Did NOT decline, used working SQL. No further probing needed beyond integrity sweeps.
+- **last_day_of_month (Q3): correct, 1st datapoint.** Needs one more angle (ideally an explicit timestamp / timestamptz input, or a billing-cycle-end-date computation) before it can be marked bulletproofed.
+- **ROW_NUMBER per-group (Q4): correct.** Window-in-subquery/CTE pattern solid.
 
-Minor (-0.25 clarity only): did not name `with_timezone(ts, 'UTC')` as the explicit attach-then-convert path, and did not spell out fully that naive + AT TIME ZONE ≠ a UTC→local conversion. The caveat already protects the user; this is a polish gap, not an error.
+## iter738 flag
 
-## Q4 — NTILE — fully correct
+**NO new defect. NO genuine gap.** All four answers are docs-correct. Recommended next iteration = DEFAULT NO-OP integrity sweep, with these optional low-priority probes:
+1. `last_day_of_month` 2nd angle with an explicit `timestamp`/`timestamptz` argument (the only sub-5 completeness nit this iter) to push it toward bulletproofed.
+2. ROW_NUMBER vs RANK vs DENSE_RANK disambiguation (tie handling) as a fresh per-group angle.
 
-Docs verification (window.html, Trino 467):
-- `NTILE(n)` divides the ordered partition into n buckets numbered 1..n differing by ≤1; extra rows distributed starting with the FIRST bucket. Docs example "6 rows, 4 buckets → 1 1 2 2 3 4" confirms earliest buckets get the extra row. Responder's remainder rule correct.
-- NTILE cannot take a window frame ("the window frame must not be specified"). Responder correct.
-- Window functions evaluate after WHERE, so filtering the NTILE output requires wrapping in a subquery/CTE. Correct.
-- PERCENT_RANK() = (r-1)/(n-1); `<= 0.25` for an exact top-25% threshold is a valid alternative to a fixed-size bucket. Correct.
-- NULLS-LAST default + "filter `WHERE total_spend IS NOT NULL` first" is good guidance.
-
----
-
-## FIX-A VERDICTS (explicit)
-
-- **Q1 url_extract_* FIX-A: CLOSED.** Responder led with `url_extract_host`/`url_extract_path`, defanged the split_part chain, did not use it as the lead.
-- **Q2 transcendental-math FIX-A: CLOSED.** Responder gave working `exp(-ln(2)*days/30.0)` SQL and did NOT decline.
-
-## iter737 flag
-
-- **NO new defect.** Both critical FIX-As closed; Q3/Q4 fresh topics both accurate.
-- **Each FIX-A has only ONE passing datapoint** — per the two-angles rule, re-probe each once more before marking bulletproof:
-  1. url_extract_* 3rd phrasing — e.g. extracting a query-string parameter value (`url_extract_parameter(url, 'utm')`) or the port (`url_extract_port → bigint`).
-  2. transcendental-math 2nd angle — e.g. log10/log2 for an order-of-magnitude bucket, or compound-growth `power(1+rate, periods)`.
-- **Optional Q3 LIGHT ADDITIVE (low priority, no defect):** name `with_timezone(ts, zone)` as the attach-a-zone-to-a-naive-timestamp function at the AT TIME ZONE canonical. Keyword anchors: "timestamp without time zone", "attach a zone to a naive timestamp", "convert naive timestamp UTC to local". Additive only — do NOT churn the existing AT TIME ZONE conversion canonical, which is correct.
-
-## Teacher note
-
-Both dual-FIX-A additions (r23 §3.1A url_extract_* leading canonical, r27 §4.4F transcendental-math canonical) landed and surfaced correctly under the question keywords. No reconciliation needed — these were pure additions with no contradictory pre-existing content. Hold all standing locks.
+Do NOT add resources for Q1/Q2 — both are bulletproofed; further edits risk churn/regression (iter693 lesson).
