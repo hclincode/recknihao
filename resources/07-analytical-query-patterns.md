@@ -3662,15 +3662,49 @@ GROUP BY floor(order_amount / 50) * 50         -- REPEAT the expression — do N
 ORDER BY bucket_floor;
 ```
 
-**Equivalent `CAST(... AS integer)` form** (works identically for non-negative `order_amount`; for negative values prefer `floor()` because `CAST(x AS integer)` truncates **toward zero**, not toward negative infinity, per [Trino math docs](https://trino.io/docs/current/functions/math.html)):
+**An `integer`-coercion variant** — but read the warning. For a fixed-width-bucket *floor* you almost always want `floor(x/N)*N` (above), not a CAST. **`CAST(x AS integer)` does NOT drop the fraction — it ROUNDS half-up** (`CAST(47.89 AS integer)` = `48`, `CAST(-47.89 AS integer)` = `-48`; established Trino 467 behavior). So the form below only matches `floor()` for values whose fractional part is `< 0.5`, and it is **wrong** for true bucket-floor semantics on values like `47.89` (CAST gives bucket `48*N`, floor gives `47*N`). Prefer `floor()` for any floor/round-down bucket. If you specifically want to **drop the fraction (toward zero)** rather than round, use **`truncate(x)`**, not CAST. (Direction reference: [the 4-way "reduce to a whole number" canonical immediately below](#reduce-to-a-whole-number).)
 
 ```sql
-SELECT CAST(order_amount / 50 AS integer) * 50 AS bucket_floor,
+-- ✅ truncate(x) drops the fraction (toward zero) — for NON-NEGATIVE amounts this
+--    matches floor(); it is the toward-zero/chop tool, NOT CAST.
+-- ❌ DO NOT swap in CAST(order_amount/50 AS integer): CAST ROUNDS half-up, so 0.7 of a
+--    bucket would round UP into the next bucket — that is not a floor. Use floor() above,
+--    or truncate() here.
+SELECT truncate(order_amount / 50) * 50         AS bucket_floor,
        COUNT(*)                                AS order_count
 FROM iceberg.sales.orders
-GROUP BY CAST(order_amount / 50 AS integer) * 50
+GROUP BY truncate(order_amount / 50) * 50
 ORDER BY bucket_floor;
 ```
+
+<a id="reduce-to-a-whole-number"></a>
+#### LEADING CANONICAL — reduce a number to a whole number / drop the fraction / round down — `floor` vs `truncate` vs `CAST` vs `ceil` vs `round` (iter729 PIN — FIX-A)
+
+> **READ THIS FIRST if your question contains any of these:** round down to a whole number · round a dollar amount down · chop the decimals · drop the fraction · truncate decimals in Trino · floor vs truncate vs cast · does CAST round or truncate · round to the nearest integer · remove decimal places without rounding · take the integer part · `47.89` → `47`. **The function you reach for depends on the DIRECTION you want — they are NOT interchangeable.** Pick the row that matches your intent:
+
+| You want… | Use | Direction | `47.89` → | `-47.89` → | `47.4` → |
+|---|---|---|---|---|---|
+| **Round DOWN** (largest whole number ≤ x) | **`floor(x)`** | toward **−∞** | `47` | `-48` | `47` |
+| **Round UP** (smallest whole number ≥ x) | **`ceil(x)`** / `ceiling(x)` | toward **+∞** | `48` | `-47` | `48` |
+| **CHOP the decimals** (drop the fraction, keep the integer part) | **`truncate(x)`** | toward **zero** | `47` | `-47` | `47` |
+| **Round to the NEAREST integer** | **`CAST(x AS integer)`** | **half-up** (rounds!) | `48` | `-48` | `47` |
+| **Round to N decimal places** | **`round(x, d)`** | half-up to `d` places, **same type** | `round(47.89,1)=47.9` | — | — |
+
+```sql
+-- "Round a dollar amount DOWN to whole dollars":  use floor().
+SELECT floor(total_amount)        AS dollars_floored      -- 47.89 -> 47, -47.89 -> -48
+FROM iceberg.sales.orders;
+
+-- "Just DROP the cents (chop the decimals), don't round":  use truncate().
+SELECT truncate(total_amount)     AS dollars_chopped      -- 47.89 -> 47, -47.89 -> -47
+FROM iceberg.sales.orders;
+```
+
+> **`truncate(x)` is the toward-zero / drop-the-fraction tool** — verified at [trino.io/docs/467/functions/math.html](https://trino.io/docs/467/functions/math.html): *"Returns `x` rounded to integer by dropping digits after decimal point."* `floor(x)` = "rounded down to the nearest integer" (toward −∞), `ceiling(x)`/`ceil(x)` = "rounded up to the nearest integer" (toward +∞), `round(x, d)` = "rounded to `d` decimal places" (half-up, returns the **same type** as input — see [§B2 round-the-value-vs-pin-the-scale](#) for the money/two-decimals story; for fixed-scale display use `CAST(x AS DECIMAL(18,2))`).
+>
+> `-- ❌ WRONG: "CAST(x AS integer) drops/truncates the decimals" — Trino CAST ROUNDS half-up (CAST(47.89 AS integer)=48, NOT 47; CAST(-47.89 AS integer)=-48, NOT -47). To DROP the fraction use truncate(x); to round DOWN use floor(x). DO NOT rely on CAST to chop decimals.`
+>
+> **One-line router:** round DOWN → `floor`; round UP → `ceil`; just chop / drop the fraction → `truncate`; nearest whole number → `CAST(x AS integer)` (it rounds!); fixed 2-decimal money → `CAST(x AS DECIMAL(18,2))` ([§B2](#)). All four whole-number tools take a numeric `x` (no second argument). For DECIMAL-typed columns, cast/round preserve the money-decimal semantics — see [resource 27 §4.4A](27-oracle-plsql-to-dbt-trino.md) and [resource 23 §3.1B/§3.1C](23-sql-best-practices-olap.md).
 
 #### Adding a human-readable label — compute the bucket floor in an INNER CTE FIRST, then format() in the OUTER SELECT
 
