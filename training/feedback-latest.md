@@ -1,66 +1,85 @@
-# Judge Feedback — iter676
+# Judge Feedback — iter677
 
-**Date**: 2026-06-08
-**Phase**: extended
-**Overall**: 4.875 PASS (margin +1.375 above 3.5 floor; +0.375 swing UP from iter675's 4.50 PASS)
-
-## Summary
-
-**Overall avg: 4.875 / 5 — PASS**
-
-**slice() FIX-A (Q1) verdict: CLOSED.** The responder used the correct Trino 467 `slice(array, 1, 5)` form. No `array_slice` fabrication. The iter675 defect that motivated the FIX-A is no longer reproducing on the direct first-N re-probe.
+**Mode**: Extended phase, end-of-iteration summary (single batch of 4 Qs).
+**Verification basis**: trino.io/docs/current (SELECT + math + window-functions pages) cross-referenced for default frame, UNION semantics, ROUND, and GROUPING() bitmask.
 
 ---
 
-## Per-question scoring
+## Per-Question Scores
 
-### Q1 — slice take-first-N (FIX-A re-probe)
-**Answer:** `slice(recent_purchase_amounts, 1, 5) AS top_5_purchases`
+### Q1 — FIRST_VALUE / LAST_VALUE windowed (LAST_VALUE-frame trap)
 
-| Dimension | Score | Notes |
+**Responder's answer**: Both FIRST_VALUE and LAST_VALUE specified the explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` frame; partitioned by `customer_id`, ordered by `order_time`; no collapse (preserves row count).
+
+**Dialect verification (trino.io/docs/current SELECT page)**: Default window frame is `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`. Under that default, `LAST_VALUE` returns the current row's value (or last peer on ties) — NOT the partition's actual last value. To get the partition's true last row, the explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` is REQUIRED. `FIRST_VALUE` is safe under the default frame because the partition's first row is always in-frame; specifying the full ROWS frame is harmless.
+
+**LAST_VALUE-frame-trap verdict: AVOIDED.** The responder correctly added the full ROWS frame on LAST_VALUE. The redundant full frame on FIRST_VALUE is a consistency choice and is not wrong.
+
+| Dim | Score | Reasoning |
 |---|---|---|
-| Accuracy | 5 | `slice(x, start, length)` verified against trino.io/docs/467/functions/array.html — 1-based start, length is element count. Function name is `slice` (not `array_slice`). Verified absent: `array_slice` does not exist in Trino 467. |
-| Completeness | 5 | Returns one row per customer (no UNNEST), exactly matches the asked shape. |
-| Clarity | 5 | Brief explanatory line names the 1-based start and the length semantics. |
-| Actionability | 5 | Drop-in SELECT; no decoding required. |
+| Accuracy | 5 | Trap avoided; both clauses syntactically and semantically valid Trino 467. |
+| Completeness | 5 | Both columns emitted; PARTITION BY + ORDER BY present; ORDER BY at outer level for stable display. |
+| Clarity | 4 | Concise; could briefly state WHY the full frame is needed on LAST_VALUE. |
+| Actionability | 5 | Copy-pasteable, drop-in working query. |
+| **Q1 average** | **4.75** | |
 
-**Q1 avg: 5.00** — **slice() FIX-A CLOSED.**
+---
 
-### Q2 — slice last-N via negative start
-**Answer:** `slice(login_timestamps, -3, 3) AS last_3_logins`
+### Q2 — UNION ALL keep-all (online_orders + store_orders)
 
-| Dimension | Score | Notes |
+**Responder's answer**: `UNION ALL` between two `SELECT ... FROM online_orders` / `FROM store_orders` with matching column lists, plus outer `ORDER BY`. Notes the contrast with bare `UNION` (dedups + more expensive).
+
+**Dialect verification (trino.io/docs/current SELECT page)**: "If the argument ALL is specified all rows are included even if the rows are identical… If neither is specified, the behavior defaults to DISTINCT." `UNION ALL` is the correct keep-all primitive; bare UNION = UNION DISTINCT = dedups. Valid Trino 467.
+
+| Dim | Score | Reasoning |
 |---|---|---|
-| Accuracy | 5 | Verified: Trino 467 docs state "starting from index `start` (or starting from the end if `start` is negative)". `slice(arr, -3, 3)` is the canonical last-3 form. |
-| Completeness | 5 | One row per user, last-3 in chronological order (assuming the source array is already chronological as stated). |
-| Clarity | 5 | Inline note explains the negative-start semantic. |
-| Actionability | 5 | Direct one-liner. |
+| Accuracy | 5 | Correct primitive; contrast with bare UNION accurate. |
+| Completeness | 5 | Same column count + compatible types implied; ORDER BY at outer level. |
+| Clarity | 5 | Direct, no extraneous detail. |
+| Actionability | 5 | Drop-in answer. |
+| **Q2 average** | **5.00** | |
 
-**Q2 avg: 5.00**
+---
 
-### Q3 — zip_with two parallel arrays
-**Answer:** `zip_with(item_names, item_prices, (name, price) -> name || ': ' || CAST(price AS varchar))`
+### Q3 — Decimal 2dp average (no float tail)
 
-| Dimension | Score | Notes |
+**Responder's answer**: `ROUND(AVG(amount), 2) AS avg_order_amount`. Optional `FORMAT('%.2f', ROUND(AVG(amount), 2))` for exactly-2-decimal STRING display. Notes HALF_UP semantics with 47.8299999 → 47.83 illustration.
+
+**Dialect verification (trino.io/docs/current math page)**: `round(x, d)` "Returns x rounded to d decimal places" (HALF_UP). For `AVG(amount)` where amount is DECIMAL, AVG returns decimal and ROUND(,2) yields a clean 2dp decimal. For DOUBLE-typed amount, ROUND(,2) still produces the correct 2dp numeric value, but display can still show float artifacts in some clients — which is exactly why the FORMAT('%.2f', …) string form is the bulletproof "no float tail" answer. Valid Trino 467. Alternative `CAST(AVG(amount) AS DECIMAL(10,2))` is also valid (not required to mention).
+
+| Dim | Score | Reasoning |
 |---|---|---|
-| Accuracy | 5 | Verified: `zip_with(array(T), array(U), function(T,U,R)) -> array(R)` is the documented 3-arg HOF with binary lambda. The `CAST(price AS varchar)` is necessary because Trino does not implicitly coerce numerics to varchar for `||` — responder caught this correctly. |
-| Completeness | 4 | Clean and complete. The "first variant" with `transform(zip_with(...), x -> x)` is redundant-but-harmless (identity lambda); clean second variant is the one to use. Per directive, no penalty applied for the harmless first-variant noise — but it does add minor reader friction, so a -1 on completeness for tidiness. |
-| Clarity | 5 | Lambda-arg-name binding spelled out; CAST rationale stated. |
-| Actionability | 5 | Drop-in over `orders`. |
+| Accuracy | 5 | ROUND HALF_UP and FORMAT('%.2f',…) both valid Trino 467. |
+| Completeness | 4.5 | Covers numeric and string paths; could briefly mention CAST-to-DECIMAL alternative for storage-side cleanliness. |
+| Clarity | 5 | Concrete example value (47.8299999 → 47.83) sells the intuition. |
+| Actionability | 5 | Two paths (numeric round + string format) cover the realistic ask. |
+| **Q3 average** | **4.875** | |
 
-**Q3 avg: 4.75**
+---
 
-### Q4 — multi-metric pivot per month
-**Answer:** `date_trunc('month', order_date) + COUNT(*) + COUNT(DISTINCT customer_id) + SUM(amount) + GROUP BY date_trunc(...) ORDER BY month`
+### Q4 — GROUPING SETS multi-grain (region + product_category + grand total)
 
-| Dimension | Score | Notes |
+**Responder's answer**: `GROUP BY GROUPING SETS ((region, product_category), (region), (product_category), ())` with a `CASE GROUPING(region, product_category) WHEN 0 THEN 'Detail' WHEN 1 THEN 'Region Total' WHEN 2 THEN 'Category Total' WHEN 3 THEN 'Grand Total' END` label. Also mentioned CUBE(region, product_category) alternative. Closing prose notes that `GROUPING SETS ((region),(product_category),())` gives only subtotals+grand-total WITHOUT detail.
+
+**Dialect verification (trino.io/docs/current SELECT page — GROUPING() function)**: "Bits are assigned to the argument columns with the rightmost column being the least significant bit. For a given grouping, a bit is set to 0 if the corresponding column is included in the grouping and to 1 otherwise."
+
+For `GROUPING(region, product_category)` (region = leftmost = high bit, product_category = rightmost = low bit; bit=1 means column aggregated-away):
+- Both present (detail tuple) → `00` = **0** → 'Detail' ✓
+- region present, product_category aggregated → `01` = **1** → "Region Total" (totals BY region across categories) ✓
+- region aggregated, product_category present → `10` = **2** → "Category Total" (totals BY category across regions) ✓
+- Both aggregated (grand total) → `11` = **3** → 'Grand Total' ✓
+
+**GROUPING()-bitmask-correctness verdict: CORRECT.** All four CASE labels map correctly to Trino 467 GROUPING() semantics.
+
+**Over-inclusion-of-detail-tuple nuance**: The user's request was "revenue by region AND by product_category AND grand total" — three grains, no detail. The lead query includes the `(region, product_category)` DETAIL tuple, which produces additional detail rows the user did NOT explicitly ask for. The exact-match form is `GROUPING SETS ((region), (product_category), ())` (3 sets, no detail). The responder DID state this exact-match form in closing prose but led with the 4-set/CUBE-equivalent form. The SQL is VALID, the labels are CORRECT, and the prose covers the precise form — so this is a minor precision/completeness nuance, not a hard error. The lead-with vs trail-mention ordering could mislead a beginner into running the over-inclusive query first.
+
+| Dim | Score | Reasoning |
 |---|---|---|
-| Accuracy | 5 | Verified: `date_trunc('month', x)` returns the truncated value of same input type. `COUNT(DISTINCT col)` in a GROUP BY aggregate context is fully supported in Trino 467 (distinct from the banned `COUNT(DISTINCT) OVER (...)` window form, which Trino does not support). The repeated `date_trunc(...)` in SELECT and GROUP BY is the standard Trino pattern (alias in sibling SELECT/GROUP BY is what's disallowed; repeating the expression is correct). |
-| Completeness | 5 | All three asked aggregates side-by-side plus a deterministic ORDER BY month. |
-| Clarity | 4 | Aggregate aliases named clearly. Could optionally have mentioned the alias-in-GROUP-BY caveat to teach the "why repeat the expression" — but the question didn't ask. |
-| Actionability | 5 | Runs as-is over the `orders` table. |
-
-**Q4 avg: 4.75**
+| Accuracy | 5 | SQL valid; bitmask labels all correct per Trino docs. |
+| Completeness | 4 | Lead query over-includes detail tuple; exact-match 3-set form present only in closing prose. |
+| Clarity | 4.5 | CASE labels excellent for beginners; lead-with-4-set vs ask-was-3-set inverts the user's request slightly. |
+| Actionability | 4.5 | Both forms shown; user has to read the closing prose to find the exact-fit form. |
+| **Q4 average** | **4.50** | |
 
 ---
 
@@ -68,34 +87,28 @@
 
 | Q | Avg |
 |---|---|
-| Q1 | 5.00 |
-| Q2 | 5.00 |
-| Q3 | 4.75 |
-| Q4 | 4.75 |
-| **OVERALL** | **4.875** |
+| Q1 (LAST_VALUE-frame trap) | 4.75 |
+| Q2 (UNION ALL keep-all) | 5.00 |
+| Q3 (decimal 2dp avg) | 4.875 |
+| Q4 (GROUPING SETS multi-grain) | 4.50 |
+| **OVERALL** | **4.78** |
 
-**PASS** (threshold 3.5; clean across all 4).
+**PASS / FAIL: PASS** (overall 4.78 >> 3.5 threshold; margin +1.28).
 
-**Flagged weak answers:** None. The Q3 transform(zip_with(...), x->x) first variant is noise, not an error — flagged for tidiness only.
-
----
-
-## slice() FIX-A verdict (explicit)
-
-**CLOSED.** iter675 Q2 had the responder fabricating `array_slice(...)` (Presto-legacy / Spark / BigQuery name; parse-fails on Trino 467 with "Function array_slice not registered"). The iter676 r07:281 §1a.4A LEADING CANONICAL `slice()` insertion plus the r07:274 array_sort cross-ref and r23:634 max_by cross-ref drove the responder to the correct `slice()` function on both the take-first-N (Q1) and the negative-start last-N (Q2) probes. Two angles, both clean — FIX-A worked.
+**Weak-answer flags**: None. All four answers are substantively correct and dialect-compliant. Q4 has a minor precision/completeness nuance (lead query over-includes the detail tuple vs. the user's 3-grain request), but the precise 3-set form IS present in the closing prose and the bitmask labels are all correct.
 
 ---
 
-## Teacher feedback (concise + actionable)
+## Teacher Feedback (concise, actionable)
 
-1. **NO-OP recommended for iter677.** All 4 answers clean; slice() FIX-A CLOSED on two angles (first-N and last-N). No new resource gap surfaced.
-2. **Recommended iter677 = DEFAULT NO-OP / durability-breadth.** Probe an under-tested durable lock that has not been re-probed for many iterations — candidates: federation (still at 4.49944 FAIL, threshold 4.5; thinnest margin in the rubric), or one of the lower-N PASSED topics (storage tiering at N=2, dbt model contracts at N=4, popular tools overview at N=3).
-3. **DO NOT churn r07:281 §1a.4A or its cross-refs.** The slice() canonical landed cleanly; leave it untouched for at least 5 more iterations to validate durability.
-4. **Watch-item for future iters:** the Q3 redundant `transform(zip_with(...), x->x)` first-variant shape is a sign the responder occasionally piles on a wrapper "for safety". Not actionable now (clean second variant given), but if this shape recurs without a clean fallback, consider adding a "do not wrap a HOF result in identity-transform" note to r07's HOF section.
-5. **Hard locks preserved:** federation HARD LOCK on r22 still UNTOUCHED. Confirm continued.
+**Hold pattern. No required fixes.**
 
-## Sources
+All four checked areas (LAST_VALUE-frame trap, UNION ALL vs UNION DISTINCT, ROUND/AVG 2dp + FORMAT string, GROUPING SETS multi-grain + GROUPING() bitmask labels) are findable + correct in `resources/` and the responder pulled them through cleanly.
 
-- [Trino 467 array functions](https://trino.io/docs/467/functions/array.html)
-- [Trino 467 datetime functions](https://trino.io/docs/467/functions/datetime.html)
-- [Trino aggregate functions](https://trino.io/docs/current/functions/aggregate.html)
+**Recommendation for iter678: DEFAULT NO-OP / durability-breadth.**
+
+Rationale: The Q4 detail-tuple over-inclusion is a minor lead-ordering nuance, not a material precision miss — the responder did state the exact-match `GROUPING SETS ((region),(product_category),())` form in closing prose and the bitmask labels are correct. The user's "by region AND by category AND grand total" phrasing is ambiguous enough (some readers want detail too, some don't) that hedging with both forms is defensible.
+
+A FIX-A "GROUPING-SETS-omit-detail-tuple-when-only-subtotals-wanted" lead-ordering guard is **not material** at this iteration. If iter678+ probes the same multi-grain Q with phrasing that explicitly says "no detail rows" / "only the subtotals" and the responder still leads with the 4-set form, revisit then. For now, breadth probing (federation hard-lock durability, MoR/CoW, slice() ID-stability, ts-diff sessions, day_of_week-name canonical) is the higher-value direction.
+
+**Quality-gate note (per directive)**: PASS label governed by overall 4.78; no per-question override applied. The Q4 nuance is flagged in prose only.
