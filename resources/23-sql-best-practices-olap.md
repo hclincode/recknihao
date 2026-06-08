@@ -876,7 +876,33 @@ This is the canonical "value as of latest event" idiom — much shorter than a w
 | Column is **constant per group** (functionally dependent on the GROUP BY key — e.g. `user_name` per `user_id`, `product_name` per `product_id`). | `arbitrary(x)` or `any_value(x)`. Cheapest, signals intent. |
 | You want the value of `x` associated with the **largest / smallest** value of a sortable column `y` (e.g. latest status by `updated_at`, top-revenue product per category). | `max_by(x, y)` / `min_by(x, y)`. Deterministic by `y`. |
 | You want **all** values of `x` per group (de-duped or not). | `array_agg(x)` (+ optional `array_distinct(...)`); see resource 07 §1a.3. |
-| You want the **most common** value per group. | `approx_most_frequent(buckets, x, capacity)` — see [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html). Not `arbitrary`. |
+| You want the **most common / most frequent** value per group (**the mode** — a single scalar). | **`max_by(x, cnt)` over a `COUNT(*) GROUP BY (group, x)` subquery** — see the [mode / most-frequent-value-per-group LEADING CANONICAL just below](#leading-canonical--mode--most-frequent-value-per-group-the-single-most-common-x-per-y). Not `arbitrary`. **Do NOT** reach for `approx_most_frequent` for a single value — it returns a **`MAP<value, bigint>`**, not a scalar (next row). |
+| You want the **top-N frequent values WITH their counts** per group (approximate, low-memory — NOT a single scalar). | `approx_most_frequent(buckets, x, capacity)` → **`MAP<value, bigint>`** (top-`buckets` frequent values mapped to their approximate counts). Trino docs verbatim: *"The returned value is a map containing the top elements with corresponding estimated frequency."* Inline ❌ `approx_most_frequent(10, category, 100) AS top_category -- returns a MAP<value,count>, NOT a single value — for the single mode use max_by(category, cnt) over a COUNT(*) subquery — DO NOT COPY as a scalar`. See [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html). |
+
+### LEADING CANONICAL — mode / most-frequent-value-per-group (the single most common `x` per `y`)
+
+> **READ THIS FIRST if your question contains any of these keywords:** `most frequent value per group`, `most common value in a group`, `the mode`, `mode per group`, `which X appears most often per Y`, `top value by frequency per group`, `most-ordered product per customer`, `most-used feature per user`, `most popular category per region`, `which status occurs most per ticket`, `the single most common X for each Y`, `find the mode of a column per group`. Verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) on 2026-06-09.
+
+**The one-fact summary.** Trino 467 has **no single `mode()` aggregate**. To get the **single most-frequent value of `x` per group `y`** (the statistical mode, one scalar per group), do it in **two steps**: (1) count occurrences with `COUNT(*) GROUP BY (group, x)`, then (2) pick the value of `x` at the **maximum count** with `max_by(x, cnt)`. `max_by(x, y) -> [same as x]` is the right tool — Trino docs verbatim: *"Returns the value of `x` associated with the maximum value of `y` over all input values."*
+
+**✅ COPY THIS — single most-ordered category per customer (the mode):**
+
+```sql
+SELECT customer_id,
+       max_by(product_category, cnt) AS top_category   -- the single most-frequent category per customer
+FROM (
+    SELECT customer_id, product_category, COUNT(*) AS cnt
+    FROM iceberg.analytics.orders
+    GROUP BY customer_id, product_category
+)
+GROUP BY customer_id;
+```
+
+The inner query produces one row per `(customer_id, product_category)` with its order count `cnt`; the outer `max_by(product_category, cnt)` keeps, per customer, the `product_category` from the row with the **largest** `cnt` — i.e. the single category that customer ordered most. **One row per customer out.** Same shape for "most-used feature per user" (`max_by(feature, cnt)` over `COUNT(*) GROUP BY user_id, feature`), "most popular category per region", etc.
+
+**Tie-breaking is arbitrary.** If two values of `x` tie on the top count, `max_by` returns **one** of them (Trino does not specify which — see the [tie/determinism note above](#max_byx-y--min_byx-y--deterministic-pick-of-x-by-the-ordering-column-y)). For a deterministic tiebreaker, pass a `ROW(...)` as the ordering arg — e.g. `max_by(product_category, ROW(cnt, product_category))` to break ties by category name.
+
+**Do NOT use `approx_most_frequent` when you want a single scalar mode.** `approx_most_frequent(buckets, x, capacity)` returns a **`MAP<value, bigint>`** (top-N frequent values → approximate counts), NOT one value. It is the right tool only for "top-N frequent items WITH their counts" (the previous table row). For the **count of each distinct value as a one-shot frequency map** (no GROUP BY), use [`histogram(x)` — §3.1F histogram canonical below](#histogram--count-of-each-distinct-value-in-one-row-a-value-count-summary--frequency-map-no-group-by). The mode here is the `max_by`-over-`COUNT(*)` form above.
 
 ### DO NOT WRITE
 
