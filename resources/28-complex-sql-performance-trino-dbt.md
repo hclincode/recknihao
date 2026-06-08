@@ -452,6 +452,12 @@ dbt 1.8 renamed the YAML key from `tests:` to `data_tests:` to disambiguate from
 > GROUP BY ROLLUP(yr, mo)
 > -- yields: (yr, mo) detail rows + a per-year subtotal row (mo NULL) + one grand-total row (yr, mo NULL).
 > ```
+>
+> **⚠️ Put the `SUM` in the OUTER query, not the CTE.** The CTE computes the **PARTS** (the raw value column — e.g. `revenue` above — NOT a pre-aggregated `SUM`), and the **OUTER** query does `SUM(value)` + `GROUP BY ROLLUP(...)`. The docs require *"all output expressions must be either aggregate functions or columns present in the `GROUP BY` clause."* If you DO pre-aggregate in the CTE (`SUM(amount) AS total_amount GROUP BY yr, mo`), the outer query **MUST re-aggregate** (`SUM(total_amount)`) — referencing the pre-aggregated column **bare** under `GROUP BY ROLLUP(...)` fails analysis.
+>
+> ```sql
+> -- ❌ WITH t AS (SELECT yr, mo, SUM(amount) AS total_amount FROM orders GROUP BY yr, mo) SELECT yr, mo, total_amount FROM t GROUP BY ROLLUP(yr, mo) -- total_amount is neither grouped nor aggregated in the OUTER query → analysis error ("must be an aggregate or in GROUP BY"); either move the SUM to the outer query, or use SUM(total_amount) -- DO NOT COPY
+> ```
 
 ### DECIDE FIRST — ROLLUP vs CUBE vs GROUPING SETS (read this before copying any worked example below)
 
