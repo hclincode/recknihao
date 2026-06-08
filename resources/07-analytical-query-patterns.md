@@ -182,7 +182,81 @@ FROM iceberg.analytics.user_events
 GROUP BY user_id;
 ```
 
-> **DO NOT WRITE.** (1) `array_agg(x)` without `ORDER BY` and expect chronological / insertion / file order — **non-deterministic**; will silently break the next time partitioning changes. (2) Outer `SELECT ... ORDER BY occurred_at` to "order the array" — that orders the OUTER ROWS, not the array's elements. ORDER BY must be **inside** the aggregate. (3) `array_agg(x ORDER BY y) OVER (PARTITION BY k)` — Trino does NOT support inline `ORDER BY` combined with `OVER (...)` in the same `array_agg`; see [resource 27 § 7A.2A](27-oracle-plsql-to-dbt-trino.md) for the pre-sorted CTE workaround. (4) `array_agg` for string-joining when you really want a delimited STRING — use `listagg(col, ',') WITHIN GROUP (ORDER BY col)` (one row per group) OR `array_join(array_agg(col ORDER BY col), ',')` (when you need windowed/array form); see [resource 27 § 7A.2A / § 7A.2B](27-oracle-plsql-to-dbt-trino.md) — do not rewrite that family here. (5) **`listagg(DISTINCT product, ',')` is NOT supported in Trino — listagg takes no DISTINCT keyword; for a distinct comma-separated roll-up / dedupe roll-up / unique values rolled up into one cell use `array_join(array_agg(DISTINCT product ORDER BY product), ', ')`.** *Keyword anchors: distinct comma-separated list, dedupe roll-up, listagg distinct, distinct array_agg join, unique values in one cell.* Verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) — the documented `listagg` signature is `LISTAGG( expression [, separator] [ON OVERFLOW overflow_behaviour]) WITHIN GROUP (ORDER BY sort_item, ...) [FILTER (WHERE condition)]`. There is **no `DISTINCT` slot** in that signature; writing `listagg(DISTINCT x, ',')` fails at analysis. The `array_agg(DISTINCT x ORDER BY x)` form dedupes BEFORE collection, then `array_join(..., ', ')` concatenates with the separator — semantically identical to "Oracle's `LISTAGG(DISTINCT col, ',')` 12c+ extension", with the caveat that `array_join` skips NULLs by default in the 2-arg form (matching `listagg` NULL-skip behavior) and has no `ON OVERFLOW` clause (use explicit length checks if the joined string risks the 1 MiB row limit). See [resource 27 § 7A.2B](27-oracle-plsql-to-dbt-trino.md) for the broader string-aggregation choice between `listagg` and `array_join(array_agg(...))`.
+> **DO NOT WRITE.** (1) `array_agg(x)` without `ORDER BY` and expect chronological / insertion / file order — **non-deterministic**; will silently break the next time partitioning changes. (2) Outer `SELECT ... ORDER BY occurred_at` to "order the array" — that orders the OUTER ROWS, not the array's elements. ORDER BY must be **inside** the aggregate. (3) `array_agg(x ORDER BY y) OVER (PARTITION BY k)` — Trino does NOT support inline `ORDER BY` combined with `OVER (...)` in the same `array_agg`; see [resource 27 § 7A.2A](27-oracle-plsql-to-dbt-trino.md) for the pre-sorted CTE workaround. (4) `array_agg` for string-joining when you really want a delimited STRING — use `listagg(col, ',') WITHIN GROUP (ORDER BY col)` (one row per group) OR `array_join(array_agg(col ORDER BY col), ',')` (when you need windowed/array form); see [resource 27 § 7A.2A / § 7A.2B](27-oracle-plsql-to-dbt-trino.md) — do not rewrite that family here. (5) **`listagg(DISTINCT product, ',')` is NOT supported in Trino — listagg takes no DISTINCT keyword; for a distinct comma-separated roll-up / dedupe roll-up / unique values rolled up into one cell use `array_join(array_agg(DISTINCT product ORDER BY product), ', ')`.** *Keyword anchors: distinct comma-separated list, dedupe roll-up, listagg distinct, distinct array_agg join, unique values in one cell.* Verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) — the documented `listagg` signature is `LISTAGG( expression [, separator] [ON OVERFLOW overflow_behaviour]) WITHIN GROUP (ORDER BY sort_item, ...) [FILTER (WHERE condition)]`. There is **no `DISTINCT` slot** in that signature; writing `listagg(DISTINCT x, ',')` fails at analysis. The `array_agg(DISTINCT x ORDER BY x)` form dedupes BEFORE collection, then `array_join(..., ', ')` concatenates with the separator — semantically identical to "Oracle's `LISTAGG(DISTINCT col, ',')` 12c+ extension", with the caveat that `array_join` skips NULLs by default in the 2-arg form (matching `listagg` NULL-skip behavior) and has no `ON OVERFLOW` clause (use explicit length checks if the joined string risks the 1 MiB row limit). See [resource 27 § 7A.2B](27-oracle-plsql-to-dbt-trino.md) for the broader string-aggregation choice between `listagg` and `array_join(array_agg(...))`. (6) **`array_agg(DISTINCT <expr_A> ORDER BY <expr_B>)` where `<expr_B>` is NOT identical to `<expr_A>`** — **analysis error in Trino 467**: `"For aggregate function with DISTINCT, ORDER BY expressions must appear in arguments"` ([trinodb/trino #20725](https://github.com/trinodb/trino/issues/20725), OPEN as of 2026-06-08). See the **iter703 FIX-A1 inoculation card immediately below (§1a.2A.1)** for the canonical correct forms and the EXACT trap shape — collecting numeric ids as varchar strings while trying to sort by the underlying numeric.
+
+#### 1a.2A.1 LEADING CANONICAL — `array_agg(DISTINCT ...)` with `ORDER BY` — the ORDER-BY key MUST match the aggregate's ARGUMENT expression (iter703 PIN — FIX-A1: collect distinct numeric ids as strings, sorted — pick a form that doesn't trip Trino's #20725 restriction)
+
+> **READ THIS FIRST if your question contains any of these keywords:** `array_agg DISTINCT ORDER BY`, `array_agg ordered distinct`, `collect distinct values into a sorted list`, `distinct ordered array_agg`, `array_agg DISTINCT CAST ORDER BY`, `collect each customer's product ids into one ordered comma-string`, `gather distinct numeric ids sorted as text`, `ORDER BY must appear in arguments DISTINCT`, `For aggregate function with DISTINCT ORDER BY expressions must appear in arguments`, `aggregate DISTINCT order by error Trino`. Verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) + [trinodb/trino #20725](https://github.com/trinodb/trino/issues/20725) on 2026-06-08.
+
+**The one-fact lead.** With `DISTINCT`, every `ORDER BY` expression inside `array_agg(...)` (or any DISTINCT aggregate) MUST be one of the aggregate's **argument expressions** — character-identical, not "the same column underneath". Trino raises `"For aggregate function with DISTINCT, ORDER BY expressions must appear in arguments"` at analysis time when the ORDER BY key is a *different* expression from the argument — even when the underlying source column is the same. This is the EXACT iter702 Q4 failure mode: collecting distinct **stringified** product ids while trying to sort by the **raw numeric** product id.
+
+**The trap shape — collecting distinct numeric ids as varchar but sorting by the underlying number:**
+
+```sql
+-- ❌ WRONG: with DISTINCT, every ORDER BY key must match an aggregate argument (Trino 467 analysis error, trinodb/trino#20725) — DO NOT COPY
+SELECT customer_id,
+       array_agg(DISTINCT CAST(product_id AS varchar) ORDER BY product_id) AS product_ids
+FROM iceberg.app.purchases
+GROUP BY customer_id;
+-- ANALYSIS ERROR: For aggregate function with DISTINCT, ORDER BY expressions must appear in arguments.
+-- The argument is CAST(product_id AS varchar); the ORDER BY key is product_id (raw bigint) — they are
+-- NOT character-identical expressions, so the analyzer rejects the call.
+```
+
+**Three correct shapes — pick by what you actually need:**
+
+```sql
+-- ✅ COPY THIS — Form (A): make the ORDER BY key character-IDENTICAL to the aggregate's argument.
+-- Sort is lexicographic on the STRING form ('1', '10', '11', '2', '20', ...). Use when:
+--   - you don't care about numeric sort order, OR
+--   - the ids are zero-padded / fixed-width so string sort == numeric sort.
+SELECT customer_id,
+       array_agg(DISTINCT CAST(product_id AS varchar) ORDER BY CAST(product_id AS varchar)) AS product_ids
+FROM iceberg.app.purchases
+GROUP BY customer_id;
+
+-- ✅ COPY THIS — Form (B): if you NEED numeric sort order (1, 2, 10, 11, 20, ...),
+-- dedup in an inner SELECT DISTINCT first, then use a plain (NON-DISTINCT) array_agg with
+-- numeric ORDER BY in the outer aggregate. The inner SELECT DISTINCT handles the dedup;
+-- the outer array_agg sorts by the raw numeric, then emits the varchar form.
+SELECT customer_id,
+       array_agg(pid_str ORDER BY pid) AS product_ids
+FROM (
+  SELECT DISTINCT customer_id, product_id AS pid, CAST(product_id AS varchar) AS pid_str
+  FROM iceberg.app.purchases
+) GROUP BY customer_id;
+
+-- ✅ COPY THIS — Form (C): if the column is ALREADY varchar (no CAST needed), use plain
+-- DISTINCT + ORDER BY on the same column. Argument == ORDER BY key — no #20725 trap.
+SELECT customer_id,
+       array_agg(DISTINCT event_name ORDER BY event_name) AS unique_events
+FROM iceberg.app.user_events
+GROUP BY user_id;
+```
+
+**Decision rule.** Need a comma-separated STRING (not an array)? Wrap any of the above in `array_join(..., ', ')`:
+
+| You need | Use |
+|---|---|
+| Distinct sorted ARRAY of strings, lexicographic sort OK | Form (A) — match the CAST in ORDER BY |
+| Distinct sorted ARRAY of strings, NUMERIC sort required | Form (B) — inner `SELECT DISTINCT` + outer non-DISTINCT array_agg |
+| Distinct sorted comma-separated STRING, lexicographic sort OK | `array_join(array_agg(DISTINCT CAST(product_id AS varchar) ORDER BY CAST(product_id AS varchar)), ', ')` |
+| Distinct sorted comma-separated STRING, NUMERIC sort required | `SELECT customer_id, array_join(array_agg(pid_str ORDER BY pid), ', ') AS product_ids FROM (SELECT DISTINCT customer_id, product_id AS pid, CAST(product_id AS varchar) AS pid_str FROM purchases) GROUP BY customer_id` |
+| Distinct sorted ARRAY when source column is ALREADY varchar | Form (C) — plain `DISTINCT x ORDER BY x` |
+
+**Why the #20725 restriction exists (mental model).** With `DISTINCT`, the aggregate must first dedup the input rows and then sort the deduped set. If the ORDER BY key is a DIFFERENT expression from the argument, the dedup decision and the sort decision can disagree (two argument rows that are equal as varchar might come from different numeric values that order differently). Trino's analyzer rejects this rather than guessing — it requires the ORDER BY key to be one of the argument expressions, character-identical, so dedup and sort agree by construction. (Compare: without `DISTINCT`, no dedup happens, so the analyzer permits any ORDER BY expression — the row identity is preserved.)
+
+**DO NOT WRITE:**
+
+| Wrong shape | Why it errors / misleads |
+|---|---|
+| `array_agg(DISTINCT CAST(product_id AS varchar) ORDER BY product_id)` (the iter702 Q4 fab) | **Analysis error.** Argument is `CAST(product_id AS varchar)`; ORDER BY key is `product_id` (raw bigint). Not character-identical → #20725 fires: `"For aggregate function with DISTINCT, ORDER BY expressions must appear in arguments"`. Use **Form (A)** to match the CAST, or **Form (B)** to dedup in a subquery + non-DISTINCT outer. |
+| `array_agg(DISTINCT CAST(product_id AS varchar) ORDER BY CAST(product_id AS bigint))` to get numeric sort | **Still an analysis error.** The argument is `CAST(product_id AS varchar)`; the ORDER BY expression `CAST(product_id AS bigint)` is a DIFFERENT expression, not character-identical. Use **Form (B)** for true numeric sort. |
+| `array_agg(DISTINCT x ORDER BY y)` where `y` references a totally different column | **Analysis error** — same #20725 root cause. With DISTINCT, the ORDER BY key must be one of the argument expressions. Without DISTINCT, this would be legal. |
+| "Trino accepts any ORDER BY expression inside array_agg, with or without DISTINCT — the docs do not call out a restriction." | **FALSE.** The restriction is enforced by Trino's analyzer ([trinodb/trino #20725](https://github.com/trinodb/trino/issues/20725), OPEN). The aggregate functions page documents the `ORDER BY` syntax but does not exhaustively list this combined-with-DISTINCT restriction — the analyzer raises the error at query time. |
+| "Just drop the DISTINCT and use a `SELECT DISTINCT` on the outer query to dedup the resulting arrays" | **WRONG and inefficient.** `SELECT DISTINCT` over a query that returns one row per customer with an ARRAY column dedups ENTIRE ROWS (rare-to-collide), not array ELEMENTS. To dedup elements, either use `array_distinct(array_agg(...))` (post-aggregate dedup, no ORDER BY constraint, but unordered) or use **Form (B)** above (inner SELECT DISTINCT before aggregation). |
+
+**Cross-references.** [§1a.2A above](#1a2a-leading-canonical--array_aggx-order-by-y-ordered-aggregation--distinct-cross-ref-listagg--array_joinarray_agg-) for the base `array_agg(x ORDER BY y)` ordering canonical (without DISTINCT — no #20725 restriction). [Sub-canonical above](#sub-canonical--rolling-up-numeric-idsvalues-into-a-comma-separated-string-listagg-and-array_join-both-require-varchar-input--castas-varchar-first-iter639-fix-a) for the numeric-id-to-string CAST family (the `CAST(order_id AS varchar)` setup that creates the mismatch trap when combined with DISTINCT). [Resource 27 § 7A.2A / § 7A.2B](27-oracle-plsql-to-dbt-trino.md) for `listagg` / `array_join(array_agg(...))` choice — the DISTINCT-on-listagg-doesn't-exist family is a different ban (no DISTINCT slot in `listagg`), not the #20725 mismatch ban (which fires when ORDER BY ≠ argument).
 
 #### Sub-canonical — rolling up **NUMERIC ids/values** into a comma-separated string: `listagg` and `array_join` BOTH require **VARCHAR** input — `CAST(... AS varchar)` first (iter639 FIX-A)
 
@@ -3017,6 +3091,121 @@ Trino has `width_bucket` (BOTH overloads) — use it instead of a long `CASE WHE
   **TRAP — the top bin is bucket `N`, NOT `N-1`.** The "`$500+`" / "`120s+`" open-ended top tier is bucket `N` (= `cardinality(bins)`), the overflow value. So a 10-element bounds array `ARRAY[50,100,150,...,500]` yields buckets `0..10` — **11 buckets** — and bucket `10` (= `width_bucket(x, bins) = 10`) is the `>= 500` `"$500+"` top bin. An N-element bounds array makes N+1 buckets; do not write `CASE width_bucket(...) WHEN N-1 THEN '$500+'` (off by one) — the top bin is `N`. (Verified against the Trino source `io.trino.operator.scalar.MathFunctions.widthBucket`: the array overload returns `numberOfBins` — i.e. `cardinality(bins)` — when the value is `>=` the last bin bound.)
 
 **DO NOT WRITE** *"Trino has no `width_bucket` — it is Postgres-only"* (FALSE — Trino 467 has BOTH overloads, documented at `functions/math.html`); **DO NOT WRITE** a long `CASE WHEN ... THEN ... WHEN ... THEN ... END` ladder for numeric histogram bucketing when `width_bucket(x, ARRAY[...])` does uneven bins directly in one call. Update the Pattern C3 comparison table mental model: "Custom (non-equal-size) buckets" → `width_bucket(x, ARRAY[...])` is the **preferred Trino-native one-liner**; the CASE WHEN ladder is the fallback only when you need non-numeric bucketing (e.g., string-key bucketing) or per-bucket pretty labels mid-aggregation.
+
+#### COMPANION CANONICAL — bucket-then-rollup: "count customers per revenue band" vs "label each customer with their band" — pick the right outer GROUP BY (iter703 FIX-A2)
+
+> **READ THIS FIRST if your question contains any of these keywords:** `customers per revenue band`, `count per segment`, `how many customers in each tier`, `GROUP BY revenue tier`, `segment rollup`, `summary table per spending tier`, `customers per spending bucket`, `count of customers in each band`, `count per CASE bucket`, `count per width_bucket band`, `rollup by tier label`, `customer count per segment`, `band summary`, `tier summary`. Verified at [trino.io/docs/467/functions/math.html](https://trino.io/docs/467/functions/math.html) (`width_bucket`) + [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) (`GROUP BY` rules) on 2026-06-08.
+
+**DECISION ROUTING — one line.** Labeling each customer → `GROUP BY customer_id` (or no GROUP BY in the labeling step); counting customers per band → `GROUP BY` the segment **LABEL** only (NOT `customer_id`). The granularity trap is putting `customer_id` in the OUTER GROUP BY of the rollup query — that produces one row per customer with `COUNT(*) = 1`, NOT the per-segment summary the question asks for.
+
+**The two shapes — DIFFERENT outputs, DIFFERENT GROUP BYs:**
+
+```sql
+-- ✅ COPY THIS — SHAPE (i): LABEL EACH CUSTOMER (one row per customer with their band).
+-- No aggregate in the outer SELECT — just compute total per customer in a CTE, then
+-- attach the band label in the outer SELECT. Output: one row per customer.
+WITH per_customer AS (
+  SELECT customer_id, SUM(amount) AS total_revenue
+  FROM iceberg.sales.orders
+  GROUP BY customer_id
+)
+SELECT customer_id,
+       total_revenue,
+       CASE WHEN total_revenue < 1000  THEN 'small'
+            WHEN total_revenue < 10000 THEN 'medium'
+            ELSE 'large'
+       END AS revenue_segment
+FROM per_customer;
+-- Output:  customer_id=1, total_revenue=450.00,  revenue_segment='small'
+--          customer_id=2, total_revenue=8200.00, revenue_segment='medium'
+--          customer_id=3, total_revenue=24000.0, revenue_segment='large'
+--          (N customer rows; band attached as a column on each.)
+```
+
+```sql
+-- ✅ COPY THIS — SHAPE (ii): COUNT CUSTOMERS PER BAND (one row per segment — the rollup).
+-- Two CTEs: (1) per_customer rolls orders up to one-row-per-customer with total_revenue,
+-- (2) labeled attaches the band label to each customer. Outer GROUP BY is on the LABEL
+-- ONLY — not customer_id — to collapse to one row per segment.
+WITH per_customer AS (
+  SELECT customer_id, SUM(amount) AS total_revenue
+  FROM iceberg.sales.orders
+  GROUP BY customer_id
+),
+labeled AS (
+  SELECT customer_id,
+         total_revenue,
+         CASE WHEN total_revenue < 1000  THEN 'small'
+              WHEN total_revenue < 10000 THEN 'medium'
+              ELSE 'large'
+         END AS revenue_segment
+  FROM per_customer
+)
+SELECT revenue_segment,
+       COUNT(*)           AS customer_count,
+       SUM(total_revenue) AS segment_revenue
+FROM labeled
+GROUP BY revenue_segment
+ORDER BY MIN(total_revenue);
+-- Output:  revenue_segment='small',  customer_count=412, segment_revenue=87650.00
+--          revenue_segment='medium', customer_count=58,  segment_revenue=240800.0
+--          revenue_segment='large',  customer_count=7,   segment_revenue=2400000.
+--          (3 segment rows; one COUNT per band.)
+```
+
+**Why two CTEs in shape (ii).** The first CTE (`per_customer`) collapses the raw `orders` (many rows per customer) to **one row per customer with the total**. The second CTE (`labeled`) attaches the band label using `CASE WHEN`. Only THEN can the outer query `GROUP BY revenue_segment` to count one row per band — because the input to the outer query is already one-row-per-customer-with-label. Trying to do it in one step (labeling `SUM(amount)` directly and grouping by `customer_id, label`) gives one row per customer with `COUNT(*) = 1`, NOT a per-segment rollup. (You CAN inline the label into the GROUP BY of a single query — `GROUP BY CASE WHEN SUM(amount) < 1000 THEN 'small' ... END` after a `customer_id` GROUP BY — but Trino does NOT allow aggregates inside a GROUP BY expression at the same level; that's why the two-CTE form is the canonical pattern.)
+
+**Why `ORDER BY MIN(total_revenue)` in the outer query.** The bands are labeled by text (`'small'`, `'medium'`, `'large'`) which would sort lexicographically (`'large'`, `'medium'`, `'small'`) — wrong intuitive order. `MIN(total_revenue)` in the ORDER BY is an aggregate over the GROUP BY group, so it's legal and produces the natural ascending-band order (smallest band first). For width_bucket-numeric bands, you can `ORDER BY bucket_num` directly.
+
+**DO NOT WRITE — the granularity trap:**
+
+```sql
+-- ❌ WRONG for a per-segment rollup: GROUP BY customer_id makes COUNT(*)=1 per customer — for a band summary GROUP BY the label only — DO NOT COPY
+WITH per_customer AS (
+  SELECT customer_id, SUM(amount) AS total_revenue
+  FROM iceberg.sales.orders
+  GROUP BY customer_id
+)
+SELECT customer_id,
+       CASE WHEN total_revenue < 1000  THEN 'small'
+            WHEN total_revenue < 10000 THEN 'medium'
+            ELSE 'large'
+       END AS revenue_segment,
+       COUNT(*) AS customer_count
+FROM per_customer
+GROUP BY customer_id,
+         CASE WHEN total_revenue < 1000  THEN 'small'
+              WHEN total_revenue < 10000 THEN 'medium'
+              ELSE 'large'
+         END;
+-- Output: ONE row per customer, customer_count=1 for every row. NOT a per-segment summary.
+-- Fix: REMOVE customer_id from the GROUP BY (and SELECT) — group by the label only.
+```
+
+**DO NOT WRITE — other shape-confusion traps:**
+
+| Wrong shape | Why it errors / misleads |
+|---|---|
+| `GROUP BY revenue_segment` where `revenue_segment` is a SELECT-list ALIAS for a CASE expression (no CTE) | **Works in Trino** — Trino DOES allow GROUP BY on a column alias from the same SELECT (per [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) — "alias is allowed in GROUP BY"). But the **input must already be at the right grain** — i.e., one row per customer. If you write `SELECT customer_id, CASE ... END AS revenue_segment, COUNT(*) FROM orders GROUP BY revenue_segment, customer_id`, you're grouping the RAW orders table (many rows per customer), which inflates `COUNT(*)` by orders-per-customer, not customers-per-segment. Pre-aggregate to per-customer FIRST. |
+| `GROUP BY 1` referencing the segment label by position | Works mechanically (Trino supports positional GROUP BY), but fragile if you reorder columns. Prefer `GROUP BY revenue_segment` or `GROUP BY CASE WHEN ... END` repeated verbatim. |
+| `SELECT COUNT(DISTINCT customer_id) FROM orders GROUP BY CASE WHEN SUM(amount) < 1000 THEN 'small' ... END` | **Analysis error** — Trino does NOT allow aggregates (`SUM(amount)`) inside a GROUP BY expression at the same query level. The CASE must operate on a column that's already aggregated, which is what the two-CTE form arranges. |
+| Using `width_bucket(total_revenue, ARRAY[1000.0, 10000.0])` instead of CASE for the band | **Fine** — this is the width_bucket flavor of the same pattern. Two-CTE shape still applies: `per_customer` → `labeled` (with `width_bucket(...)` returning `bucket_num`) → outer `GROUP BY bucket_num`. See **Pattern C4** above for width_bucket numbering (0..N for an N-element bounds array). The decision routing is identical: GROUP BY `bucket_num` (the band) for a rollup; SELECT `bucket_num` per customer for labeling. |
+
+**When you also need the band BOUNDARIES on each rollup row.** Add `MIN(total_revenue)` and `MAX(total_revenue)` as aggregates in the outer SELECT — they describe the band's observed range:
+
+```sql
+SELECT revenue_segment,
+       COUNT(*)              AS customer_count,
+       MIN(total_revenue)    AS band_min,
+       MAX(total_revenue)    AS band_max,
+       SUM(total_revenue)    AS segment_revenue,
+       AVG(total_revenue)    AS avg_per_customer
+FROM labeled
+GROUP BY revenue_segment
+ORDER BY MIN(total_revenue);
+```
+
+**Cross-references.** [Pattern C4 above](#pattern-c4-width_bucket--bucket-a-numeric-value-into-a-histogram-equal-width-or-customuneven-bins-without-a-long-case-when-ladder) for the `width_bucket` flavor of the same bucketing decision (numeric-id bands without writing a CASE ladder). [Pattern C4a below](#pattern-c4a-fixed-width-n-histogram-every-bucket-the-same-width-open-ended-top--integer-division-floor-iter650-fix-a--the-exact-iter649-q4-assembly-bug-fix) for the fixed-width integer-division-floor flavor. [Resource 23 §8 Trino GROUP BY rules anchor](23-sql-best-practices-olap.md) for the alias-in-GROUP-BY visibility rules. The two-CTE pattern here is the same shape as **Pattern A2** (bucketed running total — GROUP BY then window over the aggregate): aggregate to the grain FIRST, then operate on the per-grain rows.
 
 ### Pattern C4a: Fixed-width $N histogram (every bucket the same width, open-ended top) — integer-division floor (iter650 FIX-A — the EXACT iter649 Q4 assembly bug fix)
 
