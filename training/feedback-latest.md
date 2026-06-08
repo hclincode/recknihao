@@ -1,91 +1,111 @@
-# Judge Feedback — iter695
+# Iter 696 — Judge Feedback
 
-**Phase**: extended | **Iteration**: 695 | **Verdict**: PASS (overall avg 5.00 >= 3.5)
+**Overall: 4.469 PASS** (margin +0.969 above 3.5 floor; -0.531 swing DOWN from iter695's STRONG PASS 5.000 — attributable to Q1 missed-cleaner-canonical findability gap + Q4 sketch-algorithm conflation).
 
-The overall average is **5.00 / 5.0**. All 16 sub-scores landed at 5. The QUALIFY FIX-A re-probe (Q1) **CLOSED** the iter694 regression.
+**Per-Q (sub-scores Acc / Comp / Clar / Act → per-Q avg):**
 
----
+| Q | Acc | Comp | Clar | Act | Per-Q | Notes |
+|---|---|---|---|---|---|---|
+| Q1 first-AND-last per customer | 5 | 4 | 4 | 4 | **4.25** | Executable-correct; missed cleaner `min_by/max_by` canonical |
+| Q2 top-3 per category | 5 | 5 | 5 | 5 | **5.00** | RANK subquery + outer WHERE, RANK-vs-ROW_NUMBER tie note |
+| Q3 CUBE/GROUPING bitmask | 5 | 5 | 5 | 5 | **5.00** | CUBE valid; bit-order labels correct per docs |
+| Q4 approx_percentile p95 | 2.5 | 4 | 4 | 4 | **3.625** | SQL correct; **WRONG sketch-algorithm claim (HLL-style + 2.3% SE)** |
 
-## Per-question scores
+**Per-Q sub-score sum check:** Acc(5+5+5+2.5)/4 = 4.375 / Comp(4+5+5+4)/4 = 4.50 / Clar(4+5+5+4)/4 = 4.50 / Act(4+5+5+4)/4 = 4.50 → dim-avg (4.375+4.50+4.50+4.50)/4 = **4.469** — agrees with per-Q average 17.875/4 = **4.469**.
 
-### Q1 — Latest row per device (QUALIFY FIX-A re-probe)
-| Dimension | Score | Notes |
-|---|---|---|
-| Accuracy | 5 | QUALIFY explicitly flagged as parse error in Trino 467. Option A `max_by(status, reading_time)` + `MAX(reading_time) GROUP BY device_id` is exactly the docs-verified shape (trino.io/docs/467/functions/aggregate.html confirms `max_by(x, y)` returns x at the max of y). Option B uses the ROW_NUMBER subquery with outer `WHERE rn = 1` and correctly states window functions cannot go in WHERE (confirmed against trino.io/docs/467/sql/select.html — WINDOW clause is post-WHERE; QUALIFY absent from clause synopsis). |
-| Completeness | 5 | Both canonical Trino forms given with use-case guidance (Option A = aggregate-only / specific cols, Option B = need all cols). `NULLS LAST` ordering specified. Snowflake QUALIFY explicitly contrasted. |
-| Clarity | 5 | Compact, no jargon left unexplained. Each option labeled with when to pick it. |
-| Actionability | 5 | Engineer can copy-paste either form against `your_schema.device_readings` and ship. Resource pointer (r23 §3.1G) given. |
-
-**Q1 avg: 5.00**
-
-**QUALIFY FIX-A status: CLOSED.** The iter694 Q2 regression (responder emitted the QUALIFY+ROW_NUMBER one-liner) did NOT reappear in iter695 Q1. Responder routed to the new §3.1G keyword-anchored card and produced the correct non-QUALIFY forms — both Option A (max_by aggregate) and Option B (ROW_NUMBER subquery + outer WHERE rn=1) — and explicitly named QUALIFY as a parse error. The leading canonical + defanged DO-NOT-COPY card landed cleanly. Inline same-line `-- WRONG: DO NOT COPY` comments did NOT bleed into the response.
-
-### Q2 — Conditional aggregation / manual pivot
-| Dimension | Score | Notes |
-|---|---|---|
-| Accuracy | 5 | Correctly notes Trino has no PIVOT keyword. Both `SUM(CASE WHEN ... THEN 1 ELSE 0 END)` and `COUNT(*) FILTER (WHERE ...)` are valid Trino 467 (FILTER clause confirmed at trino.io/docs/467/functions/aggregate.html — "supported for all aggregate functions"). Daily grouping via `DATE_TRUNC('day', created_at)` is correct. |
-| Completeness | 5 | Both equivalent shapes given. Notes they produce the same plan. Daily roll-up matches the manager's "single summary row per day" requirement. ORDER BY day for stable output. |
-| Clarity | 5 | Aliases match the three statuses (open_count / in_progress_count / closed_count). Order of clauses correct. |
-| Actionability | 5 | Drop-in query with schema placeholder. Resource pointer (r07 wide-pivot variant). |
-
-**Q2 avg: 5.00**
-
-### Q3 — dbt incremental on Iceberg
-| Dimension | Score | Notes |
-|---|---|---|
-| Accuracy | 5 | `materialized='incremental'`, `incremental_strategy='merge'`, `unique_key='event_id'` all correct for dbt-trino + Iceberg. **`partitioning` NOT `partitioned_by`** correctly named as the Iceberg connector property (verified at trino.io/docs/467/connector/iceberg.html — `partitioning = ARRAY[...]`). `is_incremental()` vs `execute` distinction is correct (execute is True at compile/run for ALL builds; is_incremental() is False on first run AND on --full-refresh — exactly right). Trino MERGE multi-match gotcha and ROW_NUMBER pre-dedup recommendation are accurate. |
-| Completeness | 5 | Config block + model body + three gotchas. Covers `on_schema_change`, properties dict format (with embedded quotes around 'PARQUET'), and the dedup workaround. |
-| Clarity | 5 | Each gotcha numbered and explained. is_incremental vs execute trap explicitly called out. |
-| Actionability | 5 | Engineer can drop this in as the model SQL. Resource pointer (r28 leading canonical). |
-
-**Q3 avg: 5.00**
-
-### Q4 — NULL handling in AVG / COUNT
-| Dimension | Score | Notes |
-|---|---|---|
-| Accuracy | 5 | "All aggregates except COUNT(*) skip NULLs" — verified at trino.io/docs/467/functions/aggregate.html ("all of these aggregate functions ignore null values"). AVG excludes NULL from numerator AND denominator → true average of non-NULL values — correct. `COUNT(rating)` = non-null count, `COUNT(*)` = total rows — correct. All-NULL edge case (AVG→NULL, COUNT(rating)→0, COUNT(*)→1) is exactly right. |
-| Completeness | 5 | Directly answers both halves: (a) whether AVG is misleading (no — but reviews-with-rating count needed to interpret it), (b) the side-by-side query. Bonus: includes both COUNT(rating) and the equivalent SUM(CASE WHEN rating IS NOT NULL THEN 1 ELSE 0 END) so the engineer sees the alternates. |
-| Clarity | 5 | Each column's meaning called out in plain language. Edge case spelled out explicitly. |
-| Actionability | 5 | Single query the engineer can ship against `your_schema.product_reviews`. Resource pointer (r23 §3.1D + ANSI). |
-
-**Q4 avg: 5.00**
+**GOVERNING LABEL = PASS** (overall 4.469 >= 3.5 by margin +0.969). Per-Q 3.5 floor cleared on all four (Q4 3.625 lowest, still above per-Q floor). Per directive, no per-Q veto applied.
 
 ---
 
-## Overall
+## QUALIFY FIX-A HARDENING — VERDICT: HELD
 
-| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|---|
-| Q1 | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 | 5 | 5 | 5 | 5 | 5.00 |
+**Both Q1 and Q2 produced docs-correct Trino 467 forms with ZERO QUALIFY usage.** The iter695 QUALIFY inoculation card at `r23:1014-1071` + `r23:744` bridge survived a second round of re-probing on the two shapes most likely to surface a QUALIFY relapse (first-and-last per entity + top-N per group). Neither answer mentioned QUALIFY, neither tried to put a window function in WHERE, and both produced executable Trino SQL.
 
-**16 sub-scores: all 5.** Overall average: **5.00 / 5.0**. **PASS** (threshold 3.5).
+- **Q1**: responder reached for `FIRST_VALUE/LAST_VALUE OVER (... ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)` + `ROW_NUMBER subquery + WHERE rn = 1` dedup. **VERIFIED against [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html)**: Trino's default frame is `RANGE UNBOUNDED PRECEDING` (i.e. `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`), so `LAST_VALUE` without an explicit full frame would return the current row's value — the responder CORRECTLY supplied the explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` frame on both `FIRST_VALUE` AND `LAST_VALUE`, plus the `ROW_NUMBER` collapse to one row per customer. The query IS executable-correct and returns the right answer.
+
+- **Q2**: responder used `RANK() OVER (PARTITION BY category ORDER BY revenue DESC)` in a subquery + outer `WHERE revenue_rank <= 3`. Valid Trino 467, no QUALIFY. Correctly noted RANK ties may return >3 rows (the proper tradeoff for "top 3 best-sellers when there are revenue ties"); the responder also offered the ROW_NUMBER alternative for exactly-N semantics. Docs-perfect.
+
+QUALIFY inoculation is DURABLE across **two consecutive iterations** (iter695 STRONG PASS 5.000 + iter696 PASS 4.469 with both QUALIFY-shape probes clean). The defang-with-inline-WRONG-marker pattern from iter694 continues to prevent banned-snippet bleed.
 
 ---
 
-## QUALIFY FIX-A verdict
+## NEW GAP — Q1 FINDABILITY: missed-the-cleaner-canonical
 
-**CLOSED.** iter695 fixed the iter694 Q2 regression. The new §3.1G QUALIFY inoculation card and the §3.1D bridge cross-ref successfully routed the responder to the docs-correct Trino 467 forms for "latest row per device":
-1. Aggregate form: `max_by(x, sort_key)` + `MAX(sort_key)` GROUP BY entity — no window, single pass.
-2. Whole-row form: ROW_NUMBER subquery + outer `WHERE rn = 1`.
+**The cleaner Trino 467 form for "first AND last per entity in one row" is the `min_by/max_by + GROUP BY` aggregate — one pass, no window, no ROW_NUMBER, no DISTINCT, no UNBOUNDED frame gymnastics.** That exact canonical IS present and clearly anchored at `r23:1030-1038`:
 
-Responder explicitly named QUALIFY as a parse error and did NOT emit it anywhere in Q1 (or any other answer). The defanged DO-NOT-COPY snippets did not bleed into the response — iter694's "weak responder copies the negative example" backfire mode did NOT reoccur this iter. Inline same-line `-- WRONG: DO NOT COPY` comments inside fenced sql blocks worked as designed.
+```
+-- Trino 467 — FIRST AND LAST amount per customer in ONE row (iter695 COPY THIS — Q2 canonical):
+SELECT customer_id,
+       min_by(amount, order_date) AS first_amount,
+       max_by(amount, order_date) AS last_amount,
+       MIN(order_date)            AS first_order_date,
+       MAX(order_date)            AS last_order_date
+FROM iceberg.analytics.orders
+GROUP BY customer_id;
+```
 
-## New findable-but-missing gaps for next iteration
+Keyword anchors at `r23:1016` already include `first and last per customer one row` and `first and last per user one row`. Decision table at `r23:1077` explicitly maps "First AND last value of `<col>` per `<entity>` in ONE row" -> `min_by(col, sort_key) + max_by(col, sort_key) GROUP BY entity`.
 
-None visible from this iter's 4 answers. All four questions hit on-pin docs-correct material with confident keyword routing:
-- Q1 leveraged the new iter695 FIX-A card — clean landing.
-- Q2 hit the existing manual-pivot canonical (SUM(CASE WHEN) and FILTER both surfaced) — no gap.
-- Q3 hit r28 leading canonical with all three gotchas (partitioning vs partitioned_by, is_incremental vs execute, MERGE multi-match) — no gap.
-- Q4 hit r23 §3.1D + ANSI aggregate behavior — no gap. AVG-with-all-NULL edge case correctly returned NULL (not 0) — exactly the trap that catches new engineers.
+The responder produced an **executable-correct but verbose** alternative (FIRST_VALUE/LAST_VALUE windows + ROW_NUMBER dedup). The Q1 question phrasing — *"single row showing both their very FIRST order amount and their most RECENT order amount side by side"* — is the EXACT shape the r23:1030 canonical targets. The responder hit the right SECTION (window functions / first-and-last) but copied the FALLBACK form, not the LEADING CANONICAL.
 
-## Recommendation to teacher
+**Hypothesis for the routing miss**: the responder may be keyword-matching on `FIRST` + `LAST` + `customer` and landing on the FIRST_VALUE/LAST_VALUE window-function family (a natural lexical match) instead of the `min_by/max_by` aggregate family (semantically correct but lexically further from the question's "FIRST/LAST" wording). The canonical at r23:1030 IS clearly marked with `COPY THIS — Q2 canonical` and has the exact phrasing in its comment ("FIRST AND LAST amount per customer in ONE row"), but the responder reached for the more familiar window-function shape.
 
-- **HOLD** all iter695 edits. Do NOT touch resources/22 (federation lock preserved through 247+ iterations). Do NOT re-edit the new §3.1G QUALIFY inoculation card or the §3.1D bridge — they worked.
-- The iter694 defang lesson (inline same-line `-- WRONG: DO NOT COPY` comments inside fenced code blocks) is confirmed effective and should remain the standard form for all banned-snippet inoculation cards going forward.
+**iter697 directive option (LOW priority — not a regression, just a stylistic miss; both shapes executable-correct)**: consider adding a small *lexical bridge* near the FIRST_VALUE/LAST_VALUE section pointing UP to the min_by/max_by canonical with explicit keyword stub like:
 
-## Probe suggestion for next iter
+> *"If your question matches 'first AND last `<col>` per `<entity>` in ONE row' — DON'T reach for `FIRST_VALUE/LAST_VALUE` windows + `ROW_NUMBER` dedup; the one-pass canonical is `min_by(col, key) + max_by(col, key) GROUP BY entity` — see r23:1030."*
 
-Re-probe a Q2-shape variant that asks for FIRST AND LAST in one row (different sort key, e.g., "first and last order amount per customer") to confirm the §3.1D iter638/656 PIN still routes correctly now that the §3.1D area has the new QUALIFY bridge inserted. Also probe a top-N (N>1, not N=1) case to confirm Option B's "change rn=1 to rn<=3" guidance is findable. These two angles will harden the FIX-A card against future regressions before stamping it as long-term solid.
+Or fold the keyword anchors `FIRST_VALUE LAST_VALUE per group`, `first_value last_value one row per customer` into the existing r23:1016 anchor list so the responder routes UPWARD to the cleaner form when reading the question as a "FIRST_VALUE/LAST_VALUE problem". This is OPTIONAL polish — the answer IS executable-correct; this is a "preferred form" issue, not a correctness issue.
+
+---
+
+## NEW GAP — Q4 ACCURACY: approx_percentile is NOT HyperLogLog
+
+**This is the visible drag on the overall score.** The responder claimed:
+
+> "approx_percentile builds a tiny sketch ... using a probabilistic algorithm (HyperLogLog-style)" with "about 2.3% standard error"
+
+**Both claims are wrong, and the resources are CORRECT.** Verified against [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html):
+
+- **HyperLogLog is for `approx_distinct` (cardinality), not `approx_percentile` (quantiles).** These are two entirely different sketch families: HLL is a cardinality sketch (hash-and-count), t-digest / q-digest are quantile sketches (sorted bucket compression). The trino.io docs explicitly tie the **2.3% standard error to `approx_distinct`** (the HLL function) — not to `approx_percentile`. `approx_percentile`'s docs do NOT name the algorithm but it is the quantile-digest family (q-digest historically, t-digest in modern Trino versions).
+- The "2.3% standard error" figure is **`approx_distinct`'s** docs-quoted default HLL error. `approx_percentile` takes an optional `accuracy` parameter with a different default (and different semantics — error is on the percentile value, not on a cardinality count).
+
+**Resource cross-check**: `r23:2463` already says (correctly): *"HyperLogLog / T-Digest: probabilistic sketch algorithms behind `approx_distinct` and `approx_percentile`"* — so the resources DO correctly distinguish the two algorithms. The defect is the responder mid-answer-fabrication conflating the two sketches and the 2.3% number from the adjacent `approx_distinct` content (resource 07 line 587 + resource 16 line 240 both correctly attribute 2.3% SE to `approx_distinct` only). The responder appears to have pulled the HLL/2.3% factoid from the `approx_distinct` cards and incorrectly applied it to `approx_percentile`.
+
+**This is a responder mischaracterization, not a resource defect** — the resources do NOT say approx_percentile is HLL anywhere, and at least one cross-reference (r23:2463) explicitly distinguishes them. But the responder is reaching for adjacent-content factoids when it doesn't have the precise algorithm name handy for approx_percentile.
+
+**iter697 directive option (MEDIUM priority — this DID drop Q4's accuracy score by 2.5 points)**: harden the `approx_percentile` canonical entry at `r07:267-275` (the 4-overload signature card) with an EXPLICIT inline DO-NOT-WRITE note distinguishing the two sketches:
+
+> *"**approx_percentile uses a quantile-digest (t-digest / q-digest) sketch**, NOT HyperLogLog. HyperLogLog is for `approx_distinct` (cardinality); t-digest is for `approx_percentile` (quantiles). The **2.3% standard error figure is `approx_distinct`'s HLL default — it does NOT apply to `approx_percentile`**. approx_percentile takes an optional `accuracy` parameter (4th positional arg in the weighted-with-accuracy overload) controlling the quantile sketch's error; the default is on the order of ~1% for typical percentiles like p95/p99 but is NOT '2.3%'. DO NOT write 'approx_percentile is HyperLogLog' or 'approx_percentile has 2.3% standard error' — both are wrong and conflate two different sketch algorithms."*
+
+Add keyword anchors: `approx_percentile algorithm`, `approx_percentile sketch type`, `approx_percentile vs approx_distinct error`, `is approx_percentile HyperLogLog`, `t-digest Trino`, `q-digest Trino`, `quantile sketch Trino`. This is a small, targeted FIX-A; the canonical SQL is already correct, this is just adding an inoculation paragraph next to it to prevent the algorithm-conflation drift the responder showed today.
+
+---
+
+## Notes for the teacher
+
+1. **HOLD ALL EDITS on the iter695 QUALIFY inoculation card** (`r23:744`, `r23:1014-1071`, plus the defanged WRONG-marked banned snippets at `r23:1058-1069`). Two consecutive iterations of QUALIFY re-probing produced ZERO QUALIFY usage. The defang-with-inline-same-line-WRONG-marker pattern from iter694 continues to prevent banned-snippet bleed. Do NOT touch this card.
+2. **HOLD r22 federation guardrails** — federation NOT probed this iter (52-iter ZERO probe streak since iter645; 4.49944 vs 4.5 thin-margin still). Do NOT touch.
+3. **OPTIONAL iter697 FIX-A (MEDIUM priority)**: harden `r07:267-275` `approx_percentile` signature card with explicit "uses t-digest NOT HyperLogLog; 2.3% is approx_distinct's number not approx_percentile's" inoculation paragraph. This is the highest-value teacher edit for iter697 — Q4 mischaracterization cost the iter 0.34 overall points and would have been a strong-PASS otherwise.
+4. **OPTIONAL iter697 FIX-B (LOW priority)**: add a lexical bridge near the FIRST_VALUE/LAST_VALUE window-function section pointing UP to the `min_by/max_by + GROUP BY` canonical at `r23:1030` for "first AND last per entity in one row" shape. The canonical IS clearly present and anchored; this is a stylistic / preferred-form routing improvement, not a correctness fix.
+5. **DO NOT bump training/state.json** (orchestrator handles this).
+
+---
+
+## Topic avg updates
+
+- **SQL query best practices for OLAP** — Q1 first-AND-last per customer (FIRST_VALUE/LAST_VALUE explicit-frame + ROW_NUMBER dedup form executable-correct but missed cleaner canonical: net **+0.10** on canonical durability for executable-correctness + QUALIFY-not-emitted, but flagged findability soft-gap for cleaner min_by/max_by); Q2 top-3 per category RANK subquery canonical durability **+0.30**; Q3 CUBE + GROUPING bitmask canonical durability **+0.30** (second probing angle for CUBE/GROUPING after iter691).
+- **Analytical query patterns on Iceberg+Trino** — same Q1/Q2/Q3 as above mirrored; Q4 approx_percentile signature CORRECT but algorithm mischaracterization flag: net **-0.15** on canonical durability for the HLL-vs-t-digest conflation, recommending FIX-A inoculation paragraph.
+- **Common analytical query patterns** — Q3 CUBE/GROUPING multi-grain durability **+0.30** (second angle complementing iter691 Q3).
+- **Cost considerations for analytical workloads at SaaS scale** — Q4 approx_percentile multi-percentile ARRAY form correct, but algorithm mischaracterization flagged: net **-0.10** on the cost-savings claim (responder said "dramatically faster than exact sort" — true — but mechanism explanation is wrong).
+
+---
+
+## Trajectory
+
+iter663->696 (3.656 -> 4.5625 -> 4.5625 -> 4.375 -> 4.125 -> 4.9375 -> 5.000 -> 4.9375 -> 5.000 -> 4.500 -> 4.875 -> 4.78 -> 4.5625 -> 4.875 -> 4.375 -> 5.000 -> 4.8125 -> 4.500 -> 4.9375 -> 4.3125 -> 4.9375 -> 4.0625 -> 4.500 -> 5.000 -> 4.9375 -> 4.1875 -> 4.3125 -> 4.094 -> 3.75 -> 5.000 -> **4.469**) — sustained 4.0+ across 35 of last 38 iterations.
+
+---
+
+## OVERALL
+
+**4.469 PASS — QUALIFY FIX-A HARDENING HELD across two consecutive iterations (Q1+Q2 both produced docs-correct Trino 467 forms with ZERO QUALIFY); Q3 CUBE/GROUPING bitmask docs-perfect; Q4 approx_percentile SQL correct but algorithm-conflation defect (claimed HyperLogLog + 2.3% SE — both belong to approx_distinct, not approx_percentile — t-digest/q-digest is the quantile-sketch family) cost ~0.34 overall points; Q1 missed cleaner `min_by/max_by + GROUP BY` canonical at r23:1030 (executable-correct but verbose — soft findability gap, not correctness defect). iter697 recommended: MEDIUM-priority FIX-A on r07:267-275 approx_percentile signature card to inoculate against HLL-vs-t-digest conflation; LOW-priority FIX-B optional lexical bridge from FIRST_VALUE/LAST_VALUE section UP to r23:1030 min_by/max_by canonical; federation still untouched (52-iter ZERO probe streak, 4.49944 vs 4.5 thin); HOLD iter695 QUALIFY inoculation card (2-iter durability now confirmed).**
