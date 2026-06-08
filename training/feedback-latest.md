@@ -1,108 +1,96 @@
-# Iter 701 — Judge Feedback (Extended Phase — DEFAULT NO-OP probe)
+# Iter 702 — Judge Feedback
 
-**Date**: 2026-06-08
-**Verdict**: STRONG PASS (overall avg 4.875 / 5.00 across 16 sub-scores; margin +1.375 above 3.5 floor)
-**Recommendation**: **iter702 stays DEFAULT NO-OP. Zero findable-but-missing gaps. Zero dialect defects. Zero ban-list leaks.**
+**Verdict**: PASS (overall 4.21875 ≥ 3.5; margin +0.72 above floor; two genuine defects flagged — one findable-but-missing gap in Q2, one CONFIRMED Trino 467 dialect parse-error in Q4)
 
----
+**Overall average**: 4.21875 (sub-score sum 67.5/16; per-Q-avg cross-check (4.875+3.75+4.875+3.375)/4 = 4.21875 — agrees)
 
-## Per-Question Sub-Scores
-
-| Q | Topic | Acc | Comp | Clar | Act | Per-Q Avg |
-|---|---|---|---|---|---|---|
-| Q1 | SELECT DISTINCT * whole-row dedup (CTAS) | 5.0 | 4.5 | 5.0 | 5.0 | 4.875 |
-| Q2 | Money precision: DOUBLE approximate → DECIMAL(18,2) / BIGINT cents | 5.0 | 5.0 | 5.0 | 5.0 | 5.000 |
-| Q3 | split() + CROSS JOIN UNNEST + TRIM for comma-separated tags | 4.5 | 5.0 | 5.0 | 5.0 | 4.875 |
-| Q4 | Iceberg partitioning: day(occurred_at) + bucket(customer_id, 32) | 5.0 | 4.5 | 5.0 | 5.0 | 4.875 |
-
-**Per-Q average**: (4.875 + 5.000 + 4.875 + 4.875) / 4 = 19.625 / 4 = **4.90625**
-**Sub-score sum**: 78 / 16 = **4.875**
-**Dim-avg cross-check**: Acc (5+5+4.5+5)/4 = 4.875 / Comp (4.5+5+5+4.5)/4 = 4.75 / Clar (5+5+5+5)/4 = 5.00 / Act (5+5+5+5)/4 = 5.00 → (4.875 + 4.75 + 5.00 + 5.00)/4 = **4.90625** — agrees per-Q-avg.
-**Governing label**: STRONG PASS (using sub-score sum 4.875 as the reported overall; per-Q-avg 4.90625 as cross-check). All four Qs above per-Q 4.75 floor.
+**Dim avgs**: Acc (5+3.5+5+2.5)/4 = 4.00 / Comp (4.5+3.5+4.5+3.5)/4 = 4.00 / Clar (5+4.5+5+4.5)/4 = 4.75 / Act (5+3.5+5+3)/4 = 4.125 → grand-avg (4.00+4.00+4.75+4.125)/4 = 4.21875 — agrees.
 
 ---
 
-## Per-Question Verification & Notes
+## Per-Question Scores
 
-### Q1 — SELECT DISTINCT * for exact duplicate removal — 4.875
+### Q1 — Anti-join (signups with no payment) — 4.875
 
-**Verified against trino.io/docs/current/sql/select.html (= 467 grammar)**: `SELECT DISTINCT *` is valid Trino 467 syntax for whole-row deduplication. The `*` expands to all columns of the relation, and the DISTINCT quantifier deduplicates on the combined column tuple. CTAS (`CREATE TABLE AS SELECT ...`) is valid for materializing the result. Each column type must support comparison (all storable Iceberg types do).
+- **Accuracy 5** / **Completeness 4.5** / **Clarity 5** / **Actionability 5**
+- Form: `LEFT JOIN ... WHERE p.customer_id IS NULL` is the canonical Trino 467 anti-join idiom. NOT IN + NULL gotcha is correctly stated (any NULL in IN list → predicate yields UNKNOWN, never TRUE → no rows match). Verified against trino.io/docs/467/sql/select.html (LEFT JOIN grammar) and standard three-valued-logic semantics.
+- **Minor completeness nit**: did not mention NOT EXISTS (the other safe form, NULL-immune) or EXCEPT (set-difference alternate). Both are equally correct and are mentioned in `resources/07` per the prompt's docs-correct list. Half-point completeness shave only — NOT a defect, NOT a FIX-A.
 
-**Form used**: `CREATE TABLE iceberg.analytics.events_deduped AS SELECT DISTINCT * FROM iceberg.analytics.events_staging;` plus "for in-place, CTAS-DISTINCT then rename/drop." Both are docs-correct Trino 467.
+### Q2 — Revenue bucketing (small/medium/large) — 3.75
 
-**Minor completeness nit (cost -0.5 Comp)**: For EXACT duplicates SELECT DISTINCT * is the cleanest answer and the responder rightly chose it — no penalty for not over-explaining. To hit a 5 on Comp, the answer could note that the KEEP-LATEST-OF-NEAR-DUPLICATES variant (same key columns, differing on, e.g., updated_at) is the ROW_NUMBER subquery + outer WHERE rn=1 form. Question explicitly said "exact duplicates" so the omission is defensible — documentation nit, NOT a defect, NOT a FIX candidate.
+- **Accuracy 3.5** / **Completeness 3.5** / **Clarity 4.5** / **Actionability 3.5**
+- CASE WHEN dialect is correct Trino 467. `width_bucket(x, bound1, bound2, n)` signature verified at trino.io/docs/467/functions/math.html.
+- **PRIMARY DEFECT — outer GROUP BY granularity mismatch**: The user explicitly said "GROUP BY those labels directly" — i.e. they want a per-SEGMENT rollup (small=N customers / $X total, medium=M customers / $Y total, large=K customers / $Z total). The responder's outer query is:
+  ```sql
+  SELECT customer_id, CASE ... AS revenue_segment, COUNT(*) AS customer_count, SUM(total_revenue) AS segment_revenue
+  FROM (per-customer-revenue subquery)
+  GROUP BY customer_id, revenue_segment
+  ```
+  Because the outer GROUP BY includes `customer_id`, each output row is a single customer, so `COUNT(*)` is always 1 and `SUM(total_revenue)` is just that customer's own revenue. The labels `customer_count`/`segment_revenue` make those aggregates look like segment rollups but they are not.
+- The fix is either (a) drop the aggregate columns and emit `SELECT customer_id, revenue_segment FROM (...)` for per-customer labels, OR (b) drop `customer_id` from outer GROUP BY: `SELECT revenue_segment, COUNT(*) AS customer_count, SUM(total_revenue) AS segment_revenue FROM (...) GROUP BY revenue_segment`.
+- **FINDABLE-BUT-MISSING-GAP ASSESSMENT**: Likely findable in `resources/07` Pattern C4 (CASE/width_bucket section) — but the canonical there may show per-customer labeling only and not include a clean "CASE bucket then GROUP BY segment for rollup" sibling block. **Candidate FIX-A for iter703**: add a 2-block companion in `resources/07` Pattern C4: (Block A) per-customer-label `SELECT customer_id, CASE ... AS segment FROM ...`; (Block B) per-segment-rollup `SELECT segment, COUNT(*) AS customers_in_band, SUM(revenue) AS band_revenue FROM (label_subquery) GROUP BY segment ORDER BY segment_sort_key`. Make the decision-routing explicit at the top: "Do you want one row per customer (label them) or one row per band (count/sum customers in each)?" The responder's slip suggests the canonical didn't disambiguate granularity strongly enough, or had a Frankenstein form where both shapes were mashed.
 
-### Q2 — Money precision: floats give $1199.9999 — 5.00
+### Q3 — MERGE INTO (upsert from Postgres) — 4.875
 
-**Verified against trino.io/docs/current/language/types.html**:
-- DOUBLE is documented as a 64-bit inexact IEEE-754 variable-precision binary float — responder correctly identified the binary representation as the root cause of the $1200.00 → 1199.9999999999998 drift.
-- DECIMAL(p,s) is exact fixed-point with maximum precision 38; DECIMAL(18,2) is well within bounds and a sound production choice for currency (best performance up to precision 18).
-- The BIGINT-cents alternative (store 120000 as integer, divide on display) is a legitimate alternative widely used to avoid decimal-precision concerns entirely.
+- **Accuracy 5** / **Completeness 4.5** / **Clarity 5** / **Actionability 5**
+- Explicit-column MERGE form is valid Trino 467 syntax. VERIFIED against trino.io/docs/467/sql/merge.html grammar: `WHEN MATCHED THEN UPDATE SET (column = expression [, ...])` and `WHEN NOT MATCHED THEN INSERT [column_list] VALUES (expression, ...)`. **No star form in the grammar.**
+- The responder's Spark-vs-Trino distinction is **ACCURATE**: Spark SQL supports `UPDATE SET *`/`INSERT *` star expansion; Trino 467 does NOT — explicit columns required. Verified via WebFetch of Trino 467 MERGE docs (no asterisk wildcard mentioned in grammar).
+- The defanged WRONG form (`UPDATE SET *`) is shown first which is mildly risky for findability copy-attractiveness, but the responder explicitly transitions "from a Trino client you must list columns" and the canonical explicit form follows immediately — defang is intact. Per iter694 defang-style learning, the WRONG-form line could be inline-marked WRONG more aggressively for safety, but as composed here, the responder's narrative ordering plus the explicit-form follow-up adequately routes the reader to the right form. NOT a defect.
+- **Minor completeness nit**: did not mention Iceberg MoR-default → MERGE writes delete+data files (merge-on-read merge). Not required by the question, half-point completeness shave only.
 
-All three points (root cause naming, primary fix at table-creation, alternative) are docs-correct and the answer is at the per-Q ceiling. No nits.
+### Q4 — array_agg DISTINCT + ORDER BY pre-cast key (collect product IDs) — 3.375
 
-### Q3 — split + CROSS JOIN UNNEST for comma-separated tags — 4.875
+- **Accuracy 2.5** / **Completeness 3.5** / **Clarity 4.5** / **Actionability 3**
+- `array_agg(x ORDER BY y)` is valid (verified at trino.io/docs/467/functions/aggregate.html: "Ordering during aggregation"). `array_join(array, delimiter)` is valid. The CAST-to-varchar claim ("no implicit number→string coercion") is correct Trino 467 behavior.
+- **CRITICAL DIALECT DEFECT — DISTINCT + ORDER BY-on-different-expr will raise an analysis error**: The exact form
+  ```sql
+  array_agg(DISTINCT CAST(product_id AS varchar) ORDER BY product_id)
+  ```
+  is **NOT valid** in Trino 467. The aggregate argument is `CAST(product_id AS varchar)` (a varchar expression). The ORDER BY key is `product_id` (an integer — the pre-cast value). When DISTINCT is combined with ORDER BY in an aggregate, Trino requires the ORDER BY expression to appear in the aggregate's argument list. This restriction yields the analyzer error:
+  > "For aggregate function with DISTINCT, ORDER BY expressions must appear in arguments"
+- **VERIFIED** via WebSearch + WebFetch of GitHub issue [trinodb/trino#20725](https://github.com/trinodb/trino/issues/20725) (opened 2024-02-15, still OPEN as enhancement). Documented behavior:
+  - `array_agg(DISTINCT concat(value, value))` — works
+  - `array_agg(concat(value, value) ORDER BY value)` — works
+  - `array_agg(DISTINCT concat(value, value) ORDER BY value)` — FAILS with the above error
+- The responder's form is identical-shape: DISTINCT on a CAST/derived expression, ORDER BY on the pre-cast underlying column. **Will raise in Trino 467 at analyze time.**
+- **CORRECT FORMS**:
+  ```sql
+  -- match ORDER BY to the aggregate argument expression:
+  array_agg(DISTINCT CAST(product_id AS varchar) ORDER BY CAST(product_id AS varchar))
 
-**Verified against trino.io/docs/current/functions/string.html and trino.io/docs/current/sql/select.html**:
-- `split(string, delimiter)` returns `array<varchar>` (2-arg form correct; there is also a 3-arg `split(string, delimiter, limit)` overload — not needed here).
-- The `CROSS JOIN UNNEST(array) AS t(col)` pattern is valid Trino 467; CROSS JOIN is the canonical way to expand an array column into rows on the same input row.
-- `TRIM(tag)` for whitespace cleanup is valid (default TRIM removes spaces from both ends).
-- The clause-ordering claim ("CROSS JOIN UNNEST before WHERE") is semantically correct — UNNEST must produce rows before they can be filtered.
+  -- OR drop the CAST and order on the integer (if downstream tolerates int array):
+  array_agg(DISTINCT product_id ORDER BY product_id)
 
-**Minor accuracy nit (cost -0.5 Acc)**: The responder said `LIKE 'enterprise' might match 'enterprise_beta'`. Strictly, LIKE WITHOUT a wildcard would NOT match — `WHERE tag LIKE 'enterprise'` is equivalent to `WHERE tag = 'enterprise'` and would not match `enterprise_beta`. The brittleness the responder is gesturing at is real for the common variant `LIKE '%enterprise%'` (which WOULD substring-match `enterprise_beta`). The underlying point — that LIKE-on-the-raw-comma-string is the wrong tool — is correct, and the responder's recommended solution (split + unnest + equality filter) is the right canonical, so the slip is a minor reasoning imprecision not a defect. Not a FIX candidate (the answer's recommended SQL is dialect-correct and the question is solved).
-
-### Q4 — Partitioning a new big events table — 4.875
-
-**Verified against trino.io/docs/current/connector/iceberg.html**:
-- The `WITH (partitioning = ARRAY[...])` table property syntax is correct.
-- **`bucket(customer_id, 32)` is COLUMN-FIRST** — this is the correct Trino form per the iter541 reference note. Spark uses count-first `bucket(32, customer_id)`. The responder used the Trino-correct column-first form. ✅ CONFIRMED CORRECT.
-- `day(occurred_at)` is a valid Iceberg temporal partition transform on a TIMESTAMP column (siblings: year, month, hour).
-- `format_version=2` is a valid Iceberg table format version (v2 enables row-level deletes / MoR; v3 is supported in newer Iceberg releases but v2 is the standard production choice).
-- The partition-count guidance (target 1k–100k partitions; identity-partition-on-customer_id explodes into millions of tiny files for high-cardinality columns; bucketing bounds the file count) is sound, well-cited canonical Iceberg advice.
-- Math sanity: ~1,100 days × 32 buckets ≈ 35,200 partitions, comfortably within the 1k–100k window.
-
-**Minor completeness nit (cost -0.5 Comp)**: The answer said "Changing partitioning later requires a bulk rewrite." This is **slightly imprecise**. Iceberg supports **partition spec evolution as a metadata-only operation**: `ALTER TABLE ... SET PARTITIONING ...` updates the spec, after which **new** data is written using the new spec while **existing** data files remain under the old spec. Trino query planning handles multiple specs via split planning. So the precise statement is:
-
-> Changing the partition spec itself is metadata-only (cheap). **Re-partitioning existing data** under the new spec — i.e., physically rewriting the old files so they live in the new partition layout — does require a bulk rewrite (typically via `ALTER TABLE ... EXECUTE optimize` after the spec change, or a CTAS rebuild).
-
-This is a nuance, not a fact-error: the responder is correct that you can't get the new layout applied to existing data without a rewrite, just slightly loose on the boundary between "spec change" (free) and "data rewrite" (expensive). The practical recommendation (decide partitioning carefully at table-creation time) lands correctly. Flagging in prose, **NOT a FIX candidate** — adds zero practical risk to the engineer following the advice; the cost is one Comp half-point.
-
----
-
-## Cross-Cutting Observations
-
-- **Zero ban-list leaks**: no QUALIFY, no RLIKE, no PERCENTILE_CONT / MEDIAN, no PIVOT, no DISTINCT ON, no COUNT(DISTINCT) OVER, no window-in-WHERE, no array_slice, no element_at-index-0, no CoW-default claim, no t-digest-with-accuracy-arg claim, no date-minus-date arithmetic, no CONNECT BY, no ALTER TABLE EXECUTE rollback (469+ — not asked), no max_recursion_depth ≠ 10.
-- **bucket() column-first**: Q4 used `bucket(customer_id, 32)` — the Trino column-first form. This is the form the iter541 reference note pinned, and it held. ✅
-- **Dialect form verifications all clean**: SELECT DISTINCT *, DECIMAL(18,2), split() + CROSS JOIN UNNEST + TRIM, partitioning WITH ARRAY[...] + day()/bucket() transforms, format_version=2 — all docs-correct Trino 467.
-- **Findability**: responder cited resources/23, resources/07, resources/10 — all topically correct and matching the question keywords. No misroutes.
-- **Per-Q floor**: lowest per-Q at 4.875 (Q1, Q3, Q4 tied). Comfortably above the 4.75 internal quality-gate floor.
-- **Margin above 3.5 PASS floor**: +1.375 — strong margin.
-
----
-
-## Topic Avg Updates (NO-OP / no resource edits this iter)
-
-- **Iceberg partition design for SaaS: strategies, small-files, compaction** (Q4 day+bucket canonical durability +0.30; bucket(COL,N) column-first form holding under fresh probing).
-- **SQL query best practices for OLAP** (Q1 SELECT DISTINCT * for whole-row dedup canonical durability +0.30; Q3 split + CROSS JOIN UNNEST + TRIM canonical durability +0.30).
-- **Lakehouse schema design: fact tables, dimension tables, denormalization** (Q4 partitioning WITH ARRAY + format_version=2 docs-perfect +0.30).
-- **Postgres-to-Iceberg ingestion / Common analytical query patterns** (Q2 DECIMAL(18,2) for currency at table-creation + BIGINT-cents alternative +0.40 — money-precision-on-Iceberg canonical docs-perfect).
+  -- OR cast in an inner subquery and aggregate over the cast value:
+  SELECT customer_id, array_agg(DISTINCT pid_str ORDER BY pid_str)
+  FROM (SELECT customer_id, CAST(product_id AS varchar) AS pid_str FROM iceberg.analytics.purchases)
+  GROUP BY customer_id;
+  ```
+- **FINDABLE-BUT-MISSING-GAP ASSESSMENT**: Likely findable in `resources/07` §1a.2A array_agg canonical — but the canonical evidently shows the exact form the responder reproduced (DISTINCT + CAST + ORDER BY pre-cast key). **HIGH-PRIORITY FIX-A for iter703**: in `resources/07` §1a.2A array_agg canonical, rewrite the DISTINCT+ORDER BY example to use `ORDER BY CAST(product_id AS varchar)` (matching the aggregate argument), and add a one-line inoculation note: "When DISTINCT is present in an aggregate, ORDER BY expression MUST appear in the aggregate's argument list — otherwise Trino raises 'For aggregate function with DISTINCT, ORDER BY expressions must appear in arguments'. If you need to cast for output formatting, push the cast into a subquery OR match ORDER BY exactly to the aggregate-arg expression." Add a defanged DO-NOT-WRITE row with the wrong-shape inline-marked WRONG per iter694 defang lesson. Cross-link from r23 string/varchar section keyword anchor on "comma-separated" / "collect into one column" so the keyword route lands on the fixed canonical.
 
 ---
 
-## Findable-but-Missing Gap Surface
+## FIX-A Candidates for iter703
 
-**ZERO new findable-but-missing gaps. ZERO dialect defects. ZERO FIX-A candidates for iter702.**
+**Two genuine defects surfaced this iter; ONE high-priority dialect parse-error fix:**
 
-The two minor nits flagged (Q3 LIKE-substring reasoning loosely worded; Q4 "bulk rewrite" partition-spec-evolution nuance imprecise) are imprecisions in the **explanatory prose**, not in the **executable SQL** the engineer would copy. Both answers' recommended canonical SQL is dialect-correct and solves the question. Neither rises to a defect requiring resource edits. Adding inoculation cards for either would risk regressing other answers (cf. iter693 defang-snippet-bleed lesson).
+1. **HIGH-PRIORITY FIX-A (Q4 dialect defect)**: `resources/07` §1a.2A array_agg canonical — the DISTINCT+ORDER BY-on-pre-cast-key form will raise an analysis error in Trino 467. Rewrite the canonical to `ORDER BY CAST(product_id AS varchar)` (match aggregate-arg expression), add a one-line inoculation explaining the DISTINCT+ORDER BY argument-list restriction, and add a defanged DO-NOT-WRITE row with the wrong-shape inline-marked WRONG. Verified via [trinodb/trino#20725](https://github.com/trinodb/trino/issues/20725) — restriction still present.
 
-**iter702 directive**: DEFAULT NO-OP CONTINUES. Do NOT bump state.json (orchestrator handles). HOLD all iter534-700 locks (~260 locks across 17 resource files). HOLD iter698 MoM card (now 3-iter durability), iter697 approx_percentile inoculation (now 4-iter durability), iter695 QUALIFY canonical (now 6-iter durability), r22 federation guardrails (57-iter ZERO probe streak; 4.49944 vs 4.5 thin). Probe a fresh unrelated near-threshold area in iter702 (federation 4.5-bar, CBO/ANALYZE 4.5-bar, storage tiering 4.25-avg-only-2-questions, or dbt model contracts 4.0859-avg-only-4-questions) rather than re-probing these four topics. Federation NOT probed this iter — row UNCHANGED.
+2. **MEDIUM-PRIORITY FIX-A (Q2 findable-but-missing companion block)**: `resources/07` Pattern C4 (CASE/width_bucket bucketing) — add a clean "CASE-label-then-GROUP-BY-segment-for-rollup" companion block alongside the per-customer-label block, and prepend a "Do you want per-customer labels OR a per-segment rollup?" decision routing line at the top of the Pattern C4 header. Responder's outer-GROUP-BY-includes-customer-id slip suggests the canonical didn't disambiguate granularity strongly enough.
+
+**HOLD INVENTORY** (no regression observed this iter):
+- iter698 MoM card r07:2486-2587 — not probed this iter, 4-iter durability stamped at iter701, HOLD.
+- iter697 approx_percentile mirror r07:589 + r23:2463-2464 — not probed this iter, 5-iter durability stamped at iter701, HOLD.
+- iter695 QUALIFY canonical r23:744 + r23:1014-1071 — not probed this iter, 7-iter durability stamped at iter701, HOLD.
+- r22 federation guardrails (HARD LOCK, 58-iter ZERO probe streak; topic avg 4.49944 vs 4.5 thin) — not probed this iter, HOLD.
+- All iter534-701 locks (~260 across 17 resource files) — PRESERVED.
+
+**iter703 directive**: Apply the HIGH-PRIORITY Q4 array_agg fix (dialect parse-error blocker — the responder reproduced a form that will actually error in Trino 467). Apply the MEDIUM-PRIORITY Q2 Pattern C4 companion-block fix. Do NOT touch held inoculations or r22 federation lock.
 
 ---
 
-## Sources Cited During Verification
+## Topic Avg Updates (rubric.md)
 
-- [SELECT — Trino current/467 Documentation](https://trino.io/docs/current/sql/select.html)
-- [Data types — Trino current/467 Documentation](https://trino.io/docs/current/language/types.html)
-- [Iceberg connector — Trino current/467 Documentation](https://trino.io/docs/current/connector/iceberg.html)
-- [Array functions and operators — Trino current/467 Documentation](https://trino.io/docs/current/functions/array.html)
-- [Iceberg Evolution — Apache Iceberg Docs](https://iceberg.apache.org/docs/1.5.1/evolution/)
+- Common analytical query patterns (Q2 CASE bucketing per-customer vs per-segment granularity mismatch −0.30 on completeness; Q4 array_agg DISTINCT+ORDER BY dialect parse-error −0.40 on accuracy)
+- SQL query best practices for OLAP (Q1 anti-join LEFT JOIN+WHERE IS NULL + NOT IN+NULL gotcha canonical durability +0.30; Q3 MERGE INTO explicit-column Trino-vs-Spark-star distinction canonical docs-perfect +0.40)
+- Postgres→Iceberg ingest / dbt-incremental upsert (Q3 MERGE INTO durability +0.30)
