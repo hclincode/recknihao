@@ -961,6 +961,10 @@ SELECT trim(TRAILING '#' FROM 'ABC###');  -- 'ABC'  (strip a trailing padding ch
 SELECT trim(BOTH '0' FROM '00420');       -- '42'   (strip both ends)
 ```
 
+**The FROM-form trim character is a SET, not a fixed sequence.** Every character you list is stripped *individually* from the end(s). So `trim(LEADING '0$' FROM s)` strips any leading `0` **OR** `$` (e.g. `'$00042'` → `'42'`, `'0$0042'` → `'42'`); and `trim(TRAILING 'ER' FROM 'WORKER')` → `'WORK'` (it strips trailing `R`, then `E` is no longer trailing, so it stops — it does NOT match the literal substring `'ER'`). This is how to **strip a set of characters** / **trim multiple characters** in one call. Keyword anchors: strip a set of characters, trim multiple characters Trino, strip leading zeros or dollar sign, strip a whole set of leading characters, remove any of several padding characters.
+
+> **`ltrim` / `rtrim` are single-arg WHITESPACE-only in Trino 467** — `ltrim(s)` / `rtrim(s)` remove only leading / trailing *whitespace*. There is **NO** `ltrim(string, chars)` / `rtrim(string, chars)` two-argument set-form (that form is Oracle/Postgres; calling it in Trino raises a function-not-registered / signature error). To strip a specific character or character set from one end, use the `trim(LEADING | TRAILING chars FROM s)` FROM-form above — that IS the Trino way. Keyword anchors: ltrim with characters Trino, rtrim with a character Trino, ltrim(string, chars) Trino, two-argument ltrim, strip leading characters not whitespace.
+
 **Fragility note — do NOT use the integer-cast trick on a STRING identifier.** `CAST(CAST(code AS integer) AS varchar)` strips leading zeros for **purely-numeric** codes (`'00042'` -> `'42'`) BUT is FRAGILE: it **errors** on alphanumeric codes (`'00042A'`, `'SKU-042'` → cast error `Cannot cast '00042A' to integer`) and it **reinterprets the identifier as a number** (`'00000'` -> `'0'`, not the empty string `''`). For a string identifier — product code, SKU, account number — prefer `trim(LEADING '0' FROM code)`, which never errors and never re-types your identifier.
 
 **DO-NOT-WRITE.**

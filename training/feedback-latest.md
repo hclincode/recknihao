@@ -1,47 +1,55 @@
-# Judge Feedback — iter730
+# Judge Feedback — iter731
 
-**Verification basis:** All dialect claims verified against trino.io/docs/467 (math.html, sql/select.html, functions/string.html, functions/array.html) on 2026-06-08. Not graded against resources/.
+**Phase**: extended | **Verdict**: PASS | **Overall avg**: 4.78
 
-## Per-question scores (Accuracy / Completeness / Clarity / Actionability)
+All four answers were verified against trino.io/docs/467 (map.html, array.html, regexp.html, conversion.html) on 2026-06-08. No factual defects found.
 
-### Q1 — round UP (ceil/ceiling) — avg 5.00
-- 5 / 5 / 5 / 5
-- VERIFIED: math.html — `ceiling(x)` = "Returns x rounded up to the nearest integer" (toward +infinity); `ceil(x)` is explicitly "an alias for ceiling()". 4.1→5, 4.0→4 both correct.
-- Responder used ceil()/ceiling() ONLY. Did NOT use round() (4.1→4 wrong), floor (toward −inf), truncate (toward zero), or CAST (rounds half-up). Clean.
-- **ROUND-TO-WHOLE 4-WAY CANONICAL: STAYS CLOSED / BULLETPROOFED.** This is the 2nd consecutive clean round-direction datapoint after iter729 (CAST-rounds-not-truncates FIX-A). The round-up (ceil) leg is now confirmed correct from a distinct phrasing ("seat packs, always round up"). No defect.
+---
 
-### Q2 — TABLESAMPLE — avg 4.75
-- 5 / 4 / 5 / 5
-- VERIFIED: select.html — both `TABLESAMPLE BERNOULLI (percentage)` and `TABLESAMPLE SYSTEM (percentage)` exist. BERNOULLI = per-row independent probability, scans all blocks, no I/O reduction, uniform. SYSTEM = divides table into logical segments and samples at that granularity, can reduce I/O, non-uniform/connector-dependent. Responder's SYSTEM-vs-BERNOULLI characterization is accurate. `TABLESAMPLE SYSTEM (1)` syntax and percentage-arg form are valid Trino 467.
-- Minor completeness ding: docs note neither method gives "deterministic bounds on the number of rows returned" — so ~1% is approximate, and `LIMIT 100` after a 1% sample of 400M still materializes ~4M sampled rows before the cap. Worth a one-line caveat but not an error.
+## Per-question scores
 
-### Q3 — strip specific leading characters (trim LEADING) — avg 4.75
-- 5 / 4 / 5 / 5
-- VERIFIED: string.html — `trim([ [ specification ] [ string ] FROM ] source)` IS supported with LEADING/TRAILING/BOTH. Docs examples: `trim('!' FROM '!foo!')→'foo'`, `trim(BOTH '$' FROM '$var$')→'var'`, `trim(TRAILING 'ER' FROM upper('worker'))→'WORK'`. Responder's `trim(LEADING '0' FROM '000042')→'42'` and `trim(LEADING '$' FROM '$PRD-99')→'PRD-99'` are correct.
-- **CRITICAL NUANCE — CORRECTED vs the run-prompt framing:** the Trino 467 FROM-form trim_character is NOT single-char-only. The docs `trim(TRAILING 'ER' FROM 'WORKER')→'WORK'` strips a SET of characters (both E and R), and docs state "if the trim string contains duplicates, only the first is used." So the FROM-form IS the set-capable form. Separately, Trino 467 string.html documents NO `ltrim(string, chars)` / `rtrim(string, chars)` two-arg set form — only single-arg whitespace `ltrim(string)` / `rtrim(string)`. The run-prompt's premise (FROM-form=single-char; set-form=ltrim/rtrim(string,chars)) is INVERTED relative to the 467 docs.
-- Net judgment: responder's answer is technically correct for the cases shown AND the trim form it cited already handles "a set of characters." The only real gap is presentational — the user explicitly said "(or set)" and the responder described trim as stripping "a specific character" without showing a multi-char example like `trim(LEADING '0$' FROM ...)` or stating that the FROM-form already accepts a char set. Minor completeness ding, NOT an accuracy error.
+| Q | Topic | Accuracy | Clarity | Applicability | Completeness | Avg |
+|---|---|---|---|---|---|---|
+| Q1 | strip leading char SET | 5 | 5 | 5 | 4.5 | 4.875 |
+| Q2 | zip two arrays into a map | 5 | 4.5 | 4 | 3.5 | 4.25 |
+| Q3 | filter text col to valid numbers | 5 | 5 | 5 | 5 | 5.00 |
+| Q4 | first/Nth array element | 5 | 5 | 5 | 5 | 5.00 |
 
-### Q4 — concatenate two array columns — avg 5.00
-- 5 / 5 / 5 / 5
-- VERIFIED: array.html — `||` concatenates arrays (`ARRAY[1] || ARRAY[2] → [1,2]`); `concat(array1,...,arrayN)` is the function form, explicitly "the same functionality as the SQL-standard concatenation operator (||)"; `array_distinct(x)` removes duplicate values. Responder's `product_tags || support_tags`, `array_distinct(...)` dedup, and the claim that `||` is BOTH the string and array concatenation operator are all accurate.
+**Overall average: 4.78 → PASS** (threshold 3.5).
 
-## Overall
+---
 
-| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|---|
-| Q1 | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | 5 | 4 | 5 | 5 | 4.75 |
-| Q3 | 5 | 4 | 5 | 5 | 4.75 |
-| Q4 | 5 | 5 | 5 | 5 | 5.00 |
+## Q1 — strip a SET of leading chars — DOCS-VERIFIED CORRECT
 
-**OVERALL AVERAGE = 4.875 → PASS** (threshold 3.5).
+`regexp_replace(product_code, '^[#*0]+', '')` is a fully valid and correct Trino 467 answer.
+- regexp.html confirms `regexp_replace(string, pattern, replacement) -> varchar` uses **Java pattern syntax**, so the char class `[#*0]` matches any of {#,*,0}, the `^` anchor pins to the start, and `+` removes one-or-more leading set members in **one pass** — '#00ABC'→'ABC', '*0042'→'42'. No defect. NOT penalized for choosing regexp over trim.
 
-## Teacher feedback / flags for iter731
+**trim char-SET clarification — NOT EXERCISED / REMAINS UN-RE-PROBED.** The iter731 clarification targeted the `trim(LEADING '#*0' FROM code)` char-SET FROM-form. The responder chose a different, equally-valid path (regexp_replace), so this probe did **not** test whether the responder reaches for the trim char-set form. Both forms are correct; trim is the lighter-weight (no regex engine) idiom. Because both are correct, this is **LOW PRIORITY**. The only ding is a -0.5 completeness nit for not also surfacing the trim FROM-form as the lighter alternative. If you want the trim char-set form bulletproofed, iter732 should use a more trim-constraining phrasing (e.g., explicitly "using trim, strip a set of leading characters") — but it is not blocking.
 
-1. **Q1 round-to-whole 4-way canonical: CLOSED / bulletproofed.** No action. Two consecutive clean datapoints (iter729 CAST-rounds, iter730 ceil round-up) across different phrasings.
+## Q2 — zip two arrays into a map — CORRECT BUT MISSED THE CANONICAL
 
-2. **Q3 trim set-form nuance — LIGHT ADDITIVE candidate (verify against docs first):** If the trim/strip-leading-chars canonical in r27 (and any r23 mirror) currently implies trim's FROM-form is single-character-only, that is WRONG for Trino 467 — `trim(LEADING|TRAILING|BOTH chars FROM s)` strips a SET of characters (docs example `trim(TRAILING 'ER' FROM 'WORKER')→'WORK'`; duplicates collapse to first). Also confirm the canonical does NOT recommend `ltrim(string, chars)` / `rtrim(string, chars)` as the Trino set-form — those two-arg forms are NOT documented in Trino 467 string.html (only single-arg whitespace ltrim/rtrim). The copy-attractive set-strip form is `trim(LEADING '0$' FROM s)`. Recommend a one-line keyword anchor + multi-char example so a "set of characters" phrasing lands on the trim-FROM set form, not on a non-existent ltrim/rtrim(string,chars). This is the only genuine (minor) gap surfaced this iter.
+`map_from_entries(zip_with(question_keys, responses, (k,v)->row(k,v)))` is correct and produces a valid map; the `map_agg` + UNNEST alt is also correct (map_agg is an aggregate needing GROUP BY, which the answer correctly used). Verified:
+- zip_with(array(T), array(U), function(T,U,R)) -> array(R) — pairs element-wise. OK
+- map_from_entries(array(row(K,V))) -> map(K,V). OK
+- map_agg is an aggregate (GROUP BY needed). OK
 
-3. **Q2 TABLESAMPLE:** Accurate and well-targeted. Optional one-line note that the sample size is approximate (no deterministic row-count bound) would close the small completeness gap. Not urgent.
+**MISSED CANONICAL — `map(keys_array, values_array)` direct 2-arg constructor.** map.html confirms Trino 467 has `map(array(K), array(V)) -> map(K, V)` — "Returns a map created using the given key/value arrays." This is the **simplest one-call answer** to exactly this question: `SELECT map(question_keys, responses) AS response_map FROM user_profiles;` then `response_map['preferred_plan']`. The responder's zip_with + map_from_entries is correct-but-convoluted: it routes through a HOF + entry array to do what the built-in 2-arg `map()` does directly. This is a genuine Completeness/Actionability gap (-1.5 completeness, -1 applicability) — the engineer would copy a needlessly complex form when a built-in 2-arg `map()` exists.
 
-No false dialect claims emitted by the responder this iteration. state.json NOT modified.
+**FLAG FOR iter732 (teacher):** Add a LEADING CANONICAL for "combine/zip two parallel arrays into a map" that LEADS with `map(keys_array, values_array)` (the direct 2-arg constructor, docs-verified map.html), with `map_from_entries(zip_with(...))` as the secondary form (useful when you must transform pairs) and `map_agg` as the aggregate alt (when keys/values arrive as rows, needs GROUP BY). Keyword anchors: zip two arrays into a map, build a map from key array and value array, parallel arrays to map, two arrays into key-value pairs, map from two columns of arrays. Re-probe in iter732.
+
+## Q3 — filter text to valid numbers — DOCS-VERIFIED CORRECT, FULL MARKS
+
+`TRY_CAST(customer_id_text AS INTEGER)` + `WHERE TRY_CAST(...) IS NOT NULL`. conversion.html confirms try_cast "returns null if the cast fails" — 'N/A'/empty → NULL, filtered out, leaving only numeric-parseable rows. Clear, complete, directly actionable. No notes.
+
+## Q4 — first/Nth array element — DOCS-VERIFIED CORRECT, FULL MARKS
+
+`element_at(feature_flags, 1)`. array.html confirms element_at(array(E), index) -> E is 1-based and returns NULL for index larger than array length, "whereas the subscript operator would fail in such a case." The responder's contrast (element_at NULL-safe vs array[1] errors out-of-range) is exactly right. No notes.
+
+---
+
+## Summary for teacher
+
+- 3 of 4 answers are flawless and docs-verified (Q1 correct path, Q3, Q4).
+- **One genuine gap (Q2):** the direct `map(keys, values)` 2-arg constructor is the missed canonical simplest form. This is the one item to act on for iter732.
+- Q1 trim char-SET form remains un-re-probed (responder used a valid alternative); low priority because both forms are correct.
+- No dialect errors, no parse-error forms, no fabricated functions. All standing pins held.
