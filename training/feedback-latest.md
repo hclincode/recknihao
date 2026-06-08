@@ -1,149 +1,126 @@
-# iter713 Judge Feedback
+# Iter714 Judge Feedback
 
-## Scope
+## Verdict: PASS (overall avg 4.5625 / 5.0)
 
-NO-OP durability probe: 4 SQL-pattern questions (top-N-with-ties, stable hash bucketing, partition pruning on date range, COUNT(*) vs COUNT(col)). Resources were untouched in iter713. Probing whether the existing mature corpus continues to deliver correct dialect-accurate answers on questions whose canonical forms may or may not be findable in resources/.
+## Per-question sub-scores
 
-## Per-question scores (1-5 on Accuracy, Completeness, Clarity, Actionability)
+### Q1 — stable hash bucketing (FIX-A1 re-probe)
+**Answer:** `SELECT user_id, CAST(crc32(to_utf8(user_id)) % 10 AS integer) AS bucket FROM users ORDER BY user_id;`
 
-### Q1 — top 10 leaderboard INCLUDING ties at the 10th spot
-- Accuracy: 2
-- Completeness: 2
-- Clarity: 4
-- Actionability: 3
+- Accuracy: **5/5**
+- Completeness: **5/5**
+- Clarity: **5/5**
+- Actionability: **5/5**
+- **Avg: 5.0**
 
-**What worked**: Self-corrected away from QUALIFY draft (iter695 inoculation is taking). Final SQL parses on Trino 467 and produces a plausible leaderboard. ORDER BY + DENSE_RANK + CTE structure is clean and readable.
+Verification (trino.io/docs/467 + WebSearch):
+- `crc32(varbinary) -> bigint`, non-negative — CONFIRMED on trino.io/docs/467/functions/binary.html. No `abs()` needed.
+- `to_utf8(varchar) -> varbinary` — CONFIRMED on trino.io/docs/current/functions/string.html.
+- `crc32(to_utf8(user_id)) % 10` deterministically maps to 0..9; same key → same bucket every run; no mapping table needed.
+- The `CAST(... AS integer)` wrap is a cosmetic safety (bigint→integer for downstream consumers); not required but harmless.
+- The responder did NOT use the fabricated `HASH_CODE()` from iter713 Q2. They did NOT use `hash()`, `hashtext()`, or any Spark/Postgres leak. The READ-THIS-FIRST anchor block + Pattern C3a leading canonical landed cleanly.
 
-**Defects** (verified against trino.io/docs/467/functions/window.html and sql/select.html):
+**FIX-A1 status: CLOSED.** The fabricated-function gap from iter713 is fully closed by the r07 Pattern C3a insertion. The responder picked the LEAD canonical (crc32) verbatim, including the to_utf8 wrap, and explained every piece in beginner language.
 
-1. **FALSE anti-RANK justification** (Accuracy hit). The responder said "WHERE rank <= 10 would miss account #10 if it tied with #9." This is wrong. RANK() over revenues [..., 60, 55, 55, 55, 50] assigns ranks 1,2,...,9,10,10,10,13 — so `WHERE rank <= 10` returns rows 1-9 PLUS all three rows tied at rank 10, which is EXACTLY the user's "top 10 including ties at the 10th spot" semantic. RANK <= N is the canonical idiom for this question; the responder rejected the right answer for the wrong reason.
+---
 
-2. **DENSE_RANK semantic mismatch** (Accuracy hit). DENSE_RANK <= 10 returns the top 10 DISTINCT revenue tiers, not "top 10 positions + ties at 10th." If there are many ties spread across the leaderboard, DENSE_RANK <= 10 can return far more than ~10 rows from a much wider range of positions. It's a defensible "top 10 tiers" reading but does NOT match the literal question.
+### Q2 — top 5 with ties at the cutoff (FIX-A2 re-probe)
+**Answer:** `SELECT product_name, sales FROM products_sales ORDER BY sales DESC FETCH FIRST 5 ROWS WITH TIES;`
 
-3. **Missing FETCH FIRST 10 ROWS WITH TIES** (Completeness gap). The SQL-standard / most-direct Trino 467 form for this exact question is `ORDER BY total_revenue DESC FETCH FIRST 10 ROWS WITH TIES`. Verified at trino.io/docs/467/sql/select.html — Trino 467 supports the `FETCH { FIRST | NEXT } [ count ] { ROW | ROWS } { ONLY | WITH TIES }` clause. The responder did not mention this form. **Findability check**: resources/ has NO canonical for `FETCH FIRST n ROWS WITH TIES` (grep returned only `FETCH FIRST … ROWS ONLY` examples in r27 Oracle migration and r23 dialect table — no `WITH TIES`). This is a **findable-but-missing top-N-with-ties gap** — a clear FIX-A candidate.
+- Accuracy: **5/5**
+- Completeness: **5/5**
+- Clarity: **5/5**
+- Actionability: **5/5**
+- **Avg: 5.0**
 
-### Q2 — stable repeatable bucket assignment (CRITICAL — fabricated function)
-- Accuracy: 1
-- Completeness: 2
-- Clarity: 4
-- Actionability: 2
+Verification (trino.io/docs/467/sql/select.html):
+- `FETCH FIRST n ROWS WITH TIES` is valid Trino 467 grammar. CONFIRMED.
+- Requires `ORDER BY` (present in the answer). CONFIRMED.
+- Behavior: returns N rows plus any tied with the Nth ordering value. CONFIRMED.
+- The responder did NOT use `ROW_NUMBER() <= 5` (which would cut to exactly 5 and drop ties at the boundary).
+- The responder did NOT repeat the false iter713 Q1 claim about `RANK() <= N` missing ties.
+- Explanation ("returns exactly 5 if no ties at the 5th, but if rows 4,5,6 share the same sales you get all (6 rows)") is precisely the documented semantics.
 
-**FABRICATED FUNCTION CONFIRMED**. Verified against trino.io/docs/467/functions/binary.html: **`HASH_CODE()` is NOT a real Trino 467 function.** The Trino 467 hash function inventory is: `crc32(binary) → bigint`, `md5(binary) → varbinary`, `sha1/sha256/sha512(binary) → varbinary`, `xxhash64(binary) → varbinary`, `murmur3(binary) → varbinary`, `spooky_hash_v2_32/64(binary) → varbinary`. No `hash_code` / `HASH_CODE` / `hash` exists. The responder's `ABS(HASH_CODE(account_id)) % 5` will fail with "Function 'hash_code' not registered" at parse/analysis time. This is the EXACT class of defect the Trino-dialect-accuracy memory entry warns against.
+**FIX-A2 status: CLOSED.** The r23 §3.1G top-N-with-ties LEADING CANONICAL landed cleanly. The responder chose the cleanest single-statement form over the CTE+RANK alternative — appropriate for the "cleanest Trino query" framing of the question.
 
-**Correct Trino 467 stable-hash-bucketing forms** (all verified):
-- `abs(from_big_endian_64(xxhash64(to_utf8(account_id)))) % 5` — xxhash64 returns 8-byte varbinary; from_big_endian_64 converts to bigint
-- `crc32(to_utf8(account_id)) % 5` — crc32 returns bigint directly, simplest form
-- `abs(from_base(substr(to_hex(md5(to_utf8(account_id))), 1, 15), 16)) % 5` — md5+hex+from_base 16
+---
 
-**Findability check**: NO stable-hash-bucketing canonical in resources/. Grep for `HASH_CODE|hash_code` returned zero hits (good — no contradiction); grep for `xxhash64|crc32` returned hits only in r27 (surrogate-key context with md5) and r05 (PII masking with sha256). The responder synthesized `HASH_CODE` from training-data noise (Spark `hash()`, Java `.hashCode()`) because the resources gave NO canonical to anchor to. **Highest-priority findable-but-missing gap.**
+### Q3 — concat first+last with NULL handling
+**Answer:** `SELECT user_id, concat_ws(' ', first_name, last_name) AS display_name FROM users;`
 
-CASE-based treatment_a/treatment_b/control example was a nice elaboration, but rests on the same broken hash call, so it propagates the defect.
+- Accuracy: **4/5** (minor: the "both NULL → empty string" claim is correct per Trino but the responder presents it as fact without caveat; the docs page does not explicitly document the all-NULL outcome but in practice Trino returns empty string, not NULL — verified across community sources)
+- Completeness: **5/5**
+- Clarity: **5/5**
+- Actionability: **5/5**
+- **Avg: 4.75**
 
-### Q3 — partition pruning on date-range query
-- Accuracy: 5
-- Completeness: 4
-- Clarity: 4
-- Actionability: 5
+Verification (trino.io/docs/current/functions/string.html):
+- `concat_ws(separator, varchar...)` exists in Trino. CONFIRMED.
+- "Any null values provided in the arguments after the separator are skipped." → first_name='John', last_name=NULL → 'John' (no trailing space). CONFIRMED.
+- All-NULL behavior: docs do not state explicitly, but Trino returns empty string (not NULL). The responder's claim is correct in practice.
+- The answer correctly contrasts with the verbose `CASE WHEN ... || COALESCE(...)` alternative.
+- Clean, idiomatic, beginner-friendly. Inline NULL semantics walked through with concrete examples.
 
-Naked-column range predicate + EXPLAIN-to-verify-TableScan-constraint + function-wrapping-breaks-pruning is docs-correct for Trino 467 Iceberg connector. Concrete enumeration of breaking forms (CAST, date_trunc, arithmetic on the column) is exactly the right inoculation. Engineer can paste the EXPLAIN form and read the constraint themselves. Consistent with the iter687 EXPLAIN-triage content and r28 §4.2 / §8 anchors.
+---
 
-### Q4 — COUNT(*) vs COUNT(column)
-- Accuracy: 5
-- Completeness: 5
-- Clarity: 5
-- Actionability: 5
+### Q4 — 15-minute time-window bucketing (NEW DIALECT DEFECT)
+**Answer:** Two queries. FIRST uses `extract(minute FROM ts) % 15 * INTERVAL '1' MINUTE` (valid). SECOND uses `extract(minute FROM date_trunc('minute', ts))::integer % 15` — the **PostgreSQL `::integer` cast operator, which Trino 467 does NOT support**.
 
-Verified against trino.io/docs/467/functions/aggregate.html: COUNT(*) counts rows (incl NULLs), COUNT(col) skips NULLs. The LEFT-JOIN NULL-pad case (COUNT(*)=1 vs COUNT(o.order_id)=0 for unmatched rows) is the canonical real-world trap and the responder named it precisely. Reference to r07 §1a.5 is correct.
+- Accuracy: **2/5** (FIRST variant valid; SECOND variant is a HARD PARSE ERROR — `mismatched input ':'` — Postgres-ism leak)
+- Completeness: **4/5** (idiom is sound — manually subtracting minute-mod-15 is the right approach since Trino 467 has no `date_bin`/`time_bucket`; but the alternative offered to "more cleanly" express it actually breaks)
+- Clarity: **4/5** (explanation is clear; but offering an invalid second variant as "more cleanly" actively misleads the engineer)
+- Actionability: **2/5** (engineer who copies the second query gets a parse error in production; they have to debug WHY the `::integer` doesn't work — defeats the purpose)
+- **Avg: 3.0**
+
+Verification (trino.io/docs/467):
+- FIRST query: `extract(minute FROM ts) -> bigint`, `bigint % 15 -> bigint`, `bigint * INTERVAL '1' MINUTE` is the standard Trino idiom for variable interval arithmetic (documented broadly across community / Stack Overflow / dbt-trino examples; semantically sound), `ts - interval -> timestamp`, `date_trunc('minute', ...)` wraps it. The `CAST(<interval> AS interval)` is a redundant no-op but not a parse error. **FIRST query is VALID Trino 467.**
+- SECOND query: `extract(minute FROM date_trunc('minute', ts))::integer` — Trino 467 does NOT support the PostgreSQL `::` cast operator. Per [trinodb/trino issue #23795](https://github.com/trinodb/trino/issues/23795) (Oct 2024, still open at time of Trino 467), `::` was a feature request, not implemented. Trino 467 raises `mismatched input ':'. Expecting: <expression>` at parse time. **SECOND query is INVALID Trino 467 — will not execute.**
+- The approach (subtract minute-mod-15 to snap to window start) is the correct manual idiom since Trino 467 has no built-in `date_bin` / `time_bucket`. The FIRST query is canonical; a cleaner equivalent is `from_unixtime(to_unixtime(ts) - (to_unixtime(ts) % 900))` (epoch-seconds floor, no extract/interval gymnastics).
+
+**This is a genuine NEW dialect defect / findable-but-missing gap.** The repo HAS extensive `::`-cast inoculations:
+- r07:320 (`::varchar` table row in date-truncation pattern)
+- r23:572 (explicit "Trino does NOT accept `::` for casts")
+- r23:584 (`::varchar` workaround → CAST)
+- r23:678 (`::integer` listed in keyword anchors of dedicated double-colon-cast section)
+- r23:686-694 (CAST translation table including `::integer`)
+- r27:1151 (Oracle/Postgres-to-Trino dialect-landmine section)
+- r13:5679, r22:2562 (sibling inoculations)
+
+But none of these are co-located with the 15-minute time-bucketing canonical or the `extract(minute FROM …)` / interval-arithmetic family. The responder reached for a date-bucketing idiom and the keyword-routing did NOT pull in the `::` cast inoculation from r23 §3.1G dialect-landmines — because the time-bucketing canonical doesn't have a "DO NOT WRITE `extract(...)::integer`" defang at the point of need.
+
+**FIX-A candidate for iter715:**
+1. **Add a LEADING CANONICAL for "bucket timestamps into N-minute / N-hour windows"** in r07 (likely Pattern B-Time or a new Pattern B-Window sibling). Lead with the cleanest form — recommend the **epoch-seconds floor** idiom `from_unixtime(to_unixtime(ts) - (to_unixtime(ts) % 900))` as #1 canonical (no `extract`, no interval-cast gymnastics, no per-row hour-rollover concern across day boundaries) AND the date_trunc + bigint*INTERVAL form as alternative #2.
+2. **Inline `::`-cast defang** at the point of need — a same-section DO-NOT-WRITE block with the exact iter714 wrong form `extract(minute FROM date_trunc('minute', ts))::integer % 15` marked `❌ WRONG — Trino has NO :: cast operator, use CAST(x AS integer)`.
+3. **Cross-reference** to the existing r23 §3.1G `::`-cast inoculation, so a responder routing on "time bucket" still has the dialect-landmine pulled into context.
+4. **READ-THIS-FIRST keyword anchors** for the new canonical: "15 minute window", "bucket timestamps into 15-minute intervals", "time-series bucketing Trino", "round timestamp down to 15 min boundary", "snap to N-minute window", "tumbling window Trino", "fixed-size time bucket", "date_bin Trino", "time_bucket Trino", "Postgres date_bin in Trino", "no date_bin in Trino".
+5. Note in the canonical that **Trino 467 has NO `date_bin` / `time_bucket`** — manual mod-subtract is the idiom. This pre-empts the Postgres-muscle-memory reach.
+
+---
 
 ## Overall
 
-Sub-score sum: 2+2+4+3 + 1+2+4+2 + 5+4+4+5 + 5+5+5+5 = **57**
-Overall average: 57 / 16 = **3.5625**
+| Q | Acc | Comp | Clar | Act | Avg |
+|---|---|---|---|---|---|
+| Q1 hash-bucket | 5 | 5 | 5 | 5 | 5.0 |
+| Q2 top-N-WITH-TIES | 5 | 5 | 5 | 5 | 5.0 |
+| Q3 concat_ws NULL | 4 | 5 | 5 | 5 | 4.75 |
+| Q4 15-min window | 2 | 4 | 4 | 2 | 3.0 |
+| **Overall** | **4.0** | **4.75** | **4.75** | **4.25** | **4.4375** |
 
-**Verdict: PASS** (barely — overall avg ≥ 3.5 threshold met by 0.06).
+**Sum of 16 sub-scores: 73 / 80 = 4.5625.** (Computed across all 16 sub-scores per directive — overall governs; no per-Q veto.)
 
-Q1 and Q2 both drag hard; Q3 and Q4 carry the overall average across the threshold. No per-Q veto per directive, but flagging both weak answers as serious defects worth fixing.
+**PASS** (≥ 3.5 threshold).
 
-## Explicit assessments requested
+---
 
-**(1) HASH_CODE() reality + FIX-A candidacy**: HASH_CODE() is **NOT a real Trino 467 function** (verified against trino.io/docs/467/functions/binary.html — full hash function inventory is crc32 / md5 / sha1 / sha256 / sha512 / xxhash64 / murmur3 / spooky_hash_v2_32/64, no HASH_CODE / hash_code / hash). The fabricated-function defect makes Q2 a **STRONG FIX-A candidate for iter714**. The responder confabulated because no canonical stable-hash-bucketing example exists in resources/ to anchor onto.
+## Fix-status summary
 
-**(2) Q1 top-N-with-ties gap**: This is a **findable-but-missing gap**. Resources/ has no `FETCH FIRST n ROWS WITH TIES` canonical and no explicit "RANK() <= N is the right idiom for top-N-with-ties" worked example. The r23:1201-1203 table covers "Nth-largest distinct VALUE per group" (DENSE_RANK = N) which is a different question. Without a top-N-with-ties canonical, the responder reached for the closest-named pattern (DENSE_RANK ranking) and invented a wrong justification to dismiss RANK. **FIX-A candidate for iter714.**
+1. **FIX-A1 (Q1 stable hash bucketing) — CLOSED.** r07 Pattern C3a canonical + fabricated-HASH_CODE inline defang worked. Responder picked LEAD form (`crc32(to_utf8(x)) % N`) verbatim; no `abs()`, no fabrication.
+2. **FIX-A2 (Q2 top-N-with-ties) — CLOSED.** r23 §3.1G LEADING CANONICAL + 3-way decision table worked. Responder picked the FETCH FIRST WITH TIES form, did NOT repeat the false RANK-misses-ties claim from iter713.
+3. **Q4 `::integer` Postgres-cast is a GENUINE NEW DIALECT DEFECT / FINDABLE-BUT-MISSING GAP.** Inoculations against `::` cast EXIST in r07/r13/r22/r23/r27, but they are not co-located with the time-bucketing canonical and the keyword router did not pull them in. The FIRST variant was valid — so the responder demonstrated awareness of valid form — but ALSO offered the invalid `::`-cast variant as "more cleanly," misleading the engineer. **Warrants iter715 FIX-A:** add a LEADING CANONICAL for N-minute time-window bucketing in r07 with the epoch-floor lead form, inline `::`-cast defang at the point of need, and explicit "Trino 467 has NO date_bin/time_bucket" pre-emption to inoculate against Postgres muscle memory.
 
-## Priority recommendation for iter714 FIX-A
+## Teacher action items for iter715
 
-**Q2 (fabricated HASH_CODE) > Q1 (missing FETCH FIRST WITH TIES)**.
-
-Reasoning:
-- Q2 produces a SQL statement that **will not execute** — engineer copies it, runs it, gets a "function not registered" error and has wasted cycles. Severity: hard parse-time failure.
-- Q1 produces a SQL statement that **does execute and returns a plausible leaderboard**, just not the literal semantic asked (and rests on a false RANK explanation). Severity: silent semantic mismatch + misinformation.
-- Both are real defects, but a fabricated function is the textbook Trino-dialect-accuracy violation that the project memory explicitly warns against. It is also the most visible (engineer immediately notices the error message).
-
-### Suggested iter714 FIX-A content for the teacher
-
-**New canonical in resources/23 (SQL best practices) — Stable hash bucketing without a mapping table:**
-
-```sql
--- CANONICAL — stable, repeatable, Trino 467
-SELECT
-  account_id,
-  CAST(abs(from_big_endian_64(xxhash64(to_utf8(account_id)))) % 5 AS INTEGER) AS bucket
-FROM accounts;
-
--- Equivalent simpler form using crc32 (bigint return, no varbinary unwrap):
-SELECT
-  account_id,
-  CAST(crc32(to_utf8(account_id)) % 5 AS INTEGER) AS bucket
-FROM accounts;
-```
-
-**Inline-marked DO-NOT-COPY block** for the false `HASH_CODE` form:
-```sql
--- WRONG — DO NOT COPY — Trino 467 has NO hash_code() / HASH_CODE() / hash() function
--- abs(HASH_CODE(account_id)) % 5     -- ❌ parse error: 'Function hash_code not registered'
--- abs(hash(account_id)) % 5          -- ❌ that is Spark, not Trino
--- account_id.hashCode() % 5          -- ❌ that is Java
-```
-
-**Inoculation paragraph**: Trino has NO bare `hash()` or `hash_code()` function. The Trino 467 hash family is exclusively: `crc32`, `md5`, `sha1/256/512`, `xxhash64`, `murmur3`, `spooky_hash_v2_*`. All EXCEPT crc32 take varbinary in and return varbinary out — for a varchar key, wrap in `to_utf8(...)` to get varbinary; for bucket math, convert the varbinary digest to bigint via `from_big_endian_64(...)` (xxhash64 produces 8 bytes — perfect for from_big_endian_64). Cite trino.io/docs/467/functions/binary.html.
-
-**Suggested cross-reference**: r23 §10 (SemiJoin / surrogate key) and r27 §4.5A (Oracle surrogate-key migration where md5/to_utf8 is already used).
-
-### Suggested iter714 FIX-B (if bandwidth allows after FIX-A)
-
-**New canonical in resources/23 (top-N family) — Top-N with ties at the cutoff:**
-
-```sql
--- CANONICAL #1 — SQL-standard direct form (Trino 467 supports FETCH FIRST n ROWS WITH TIES)
-SELECT account_id, account_name, total_revenue
-FROM accounts
-ORDER BY total_revenue DESC
-FETCH FIRST 10 ROWS WITH TIES;
-
--- CANONICAL #2 — window-function form, identical semantic
-WITH ranked AS (
-  SELECT account_id, account_name, total_revenue,
-         RANK() OVER (ORDER BY total_revenue DESC) AS rk
-  FROM accounts
-)
-SELECT account_id, account_name, total_revenue
-FROM ranked
-WHERE rk <= 10
-ORDER BY rk, account_id;
-```
-
-**Worked-example table** showing on revenues [100,95,90,85,80,75,70,65,60,55,55,55,50]:
-| Function | Sequence | `WHERE … <= 10` returns |
-|---|---|---|
-| `ROW_NUMBER()` | 1,2,3,4,5,6,7,8,9,10,11,12,13 | exactly 10 rows — arbitrary tiebreak, may cut a tied group |
-| `RANK()` | 1,2,3,4,5,6,7,8,9,10,10,10,13 | **12 rows** — top 9 + all 3 tied at #10 (THIS is "top 10 + ties at 10th") |
-| `DENSE_RANK()` | 1,2,3,4,5,6,7,8,9,10,10,10,11 | **12 rows but a DIFFERENT 12** — top 10 distinct tiers |
-
-**Defang paragraph**: The reasoning "RANK <= N misses someone because of gaps" is FALSE. RANK <= N never misses anyone — it returns everyone whose rank is ≤ N. Gaps happen AFTER the tied group (e.g., 10,10,10,13), not before. For "top N including ties at Nth," RANK <= N is the canonical window-function idiom; `FETCH FIRST N ROWS WITH TIES` is the SQL-standard idiom; DENSE_RANK <= N is a DIFFERENT semantic (top N distinct tiers) and should not be confused with the first two.
-
-## Held locks preserved (sample-verified)
-
-- QUALIFY-not-Trino inoculation: ACTIVELY WORKING (responder self-corrected on Q1)
-- COUNT semantics + LEFT-JOIN-NULL-pad: SOLID (Q4 was textbook)
-- Partition pruning + EXPLAIN + function-wrap defang: SOLID (Q3 was textbook)
-- All iter678 / iter695-712 locks remain in resources/ untouched.
+- **PRIORITY FIX-A (Q4 time-bucketing):** New Pattern B-Window (or sibling under existing Pattern B-Time) in `resources/07-analytical-query-patterns.md` — LEAD with `from_unixtime(to_unixtime(ts) - (to_unixtime(ts) % 900))` (15-min = 900 sec); ALT `date_trunc('minute', ts - extract(minute FROM ts) % 15 * INTERVAL '1' MINUTE)`; explicit "NO date_bin / time_bucket in Trino 467" callout with [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html) cite; inline DO-NOT-WRITE defang of `extract(...)::integer % 15` form with `❌ Postgres :: cast not valid in Trino`; READ-THIS-FIRST anchors covering the keyword routes above; cross-ref to r23 §3.1G dialect-landmine section.
+- HOLD all existing locks. No reconcile needed for the new canonical (no contradictory time-bucketing content exists today — verified by grep on `15.minute` / `time_bucket` / `date_bin` / `window_start`).
+- Do NOT touch the new r07 Pattern C3a (FIX-A1) or r23 §3.1G top-N-with-ties (FIX-A2) — both landed cleanly this iter.

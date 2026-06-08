@@ -3132,6 +3132,57 @@ WHERE monthly_revenue IS NOT NULL;          -- explicit NULL filter
 
 If you can't drop the NULL rows (e.g., the result set needs all tenants present), bucket only the non-NULL rows via a subquery and `LEFT JOIN` the NULL rows back with `revenue_decile = NULL`. Do not rely on `NULLS FIRST` to "hide" them in bucket 1 — that just moves the bug.
 
+### Pattern C3a: LEADING CANONICAL — STABLE / DETERMINISTIC HASH BUCKETING — "assign each user/account to one of N buckets by hashing a key" (Trino 467 has NO `HASH_CODE()` / `hash()` scalar — use `crc32(to_utf8(...))` or `from_big_endian_64(xxhash64(to_utf8(...)))`) (iter714 PIN — FIX-A1)
+
+> **READ THIS FIRST if your question contains any of these keywords:** `assign users to N buckets`, `stable hash bucket`, `deterministic cohort assignment`, `same user same bucket every run`, `same user same group every run`, `hash bucket without a mapping table`, `A/B cohort split`, `staged rollout group assignment`, `round-robin bucket by hash`, `is there a HASH_CODE in Trino`, `Trino hash function for bucketing`, `Trino hash() function`, `Trino HASH_CODE function`, `shard by hash`, `bucket by user_id hash`, `bucket assignment by hash`, `hash a string column to a bucket id`, `% N bucket Trino`, `mod N bucket Trino`, `Spark hash() in Trino`, `Java hashCode in Trino`, `Postgres hashtext in Trino`. **Verified at [trino.io/docs/467/functions/binary.html](https://trino.io/docs/467/functions/binary.html) on 2026-06-08.**
+>
+> **The signatures (verified verbatim against the Trino 467 binary functions doc):**
+> - `crc32(binary) -> bigint` — returns **bigint directly**, always **non-negative** (CRC-32 unsigned, never produces a negative bigint), so no `abs()` needed.
+> - `xxhash64(binary) -> varbinary` — returns **varbinary**, not bigint. To get a bigint you MUST wrap in `from_big_endian_64(...)`, then `abs(...)` because the bigint can be negative.
+> - `from_big_endian_64(binary) -> bigint` — interprets 8 big-endian bytes as a signed 64-bit integer (can be negative).
+> - `to_utf8(varchar) -> varbinary` — encodes a string as its UTF-8 byte sequence. Documented under [String functions](https://trino.io/docs/current/functions/string.html). **You ALWAYS need this** when hashing a `varchar` key — `crc32`, `md5`, `xxhash64`, `sha*`, and `murmur3` all take **`varbinary`**, not varchar (passing a varchar fails with `Unexpected parameters (varchar) for function crc32. Expected: crc32(varbinary)`).
+>
+> **THERE IS NO `HASH_CODE()` OR `hash()` SCALAR FUNCTION IN TRINO 467.** Neither name appears in [trino.io/docs/467/functions](https://trino.io/docs/467/functions/) (verified 2026-06-08). Calling either produces `Function 'hash_code' not registered` / `Function 'hash' not registered`. The name `hash()` is **Spark SQL**'s 32-bit hash function; `.hashCode()` is a **Java** method; `hashtext()` is **PostgreSQL**. None of those cross over — do NOT translate them literally.
+
+**The canonical — assign each row to one of `N` buckets, deterministic, no mapping table:**
+
+```sql
+-- ✅ COPY THIS — LEAD canonical (crc32 — simplest; bigint return; always non-negative; no abs() needed)
+SELECT
+  account_id,
+  CAST(crc32(to_utf8(account_id)) % 10 AS integer) AS bucket   -- 0..9, stable for the lifetime of account_id
+FROM iceberg.app.accounts;
+```
+
+```sql
+-- ✅ ALTERNATIVE — xxhash64 (better avalanche / spread; xxhash64 returns varbinary, so wrap in from_big_endian_64, then abs)
+SELECT
+  account_id,
+  CAST(abs(from_big_endian_64(xxhash64(to_utf8(account_id)))) % 10 AS integer) AS bucket
+FROM iceberg.app.accounts;
+```
+
+**Why this is "stable":** Both forms are **deterministic** — the SAME `account_id` produces the SAME bucket on every query, every cluster, every restart, forever. No mapping table needed. No `RAND()` / `random()` (those are non-deterministic and would re-shuffle every run). No `NTILE` (which is **relative to the current row population** — adding new accounts can move existing accounts between buckets; hash bucketing is row-by-row and population-independent).
+
+**The bucket count `N`** is the modulo divisor. For an A/B split use `% 2`; for staged rollout into deciles use `% 10`; for 100-bucket cohort assignment use `% 100`. `crc32` distributes evenly across `% N` for typical user-id / uuid / email-string keys.
+
+**If the key is already a number** (e.g. `bigint user_id`): you still need `to_utf8`-wrapping via `CAST(user_id AS varchar)` — `crc32` / `xxhash64` take **varbinary**, not bigint. The pattern is `crc32(to_utf8(CAST(user_id AS varchar))) % 10`. (Or for bigint keys you can skip the hash entirely and write `user_id % 10` directly — but that gives a **terrible distribution** if user_ids are sequential or have any pattern; hash first, then modulo, for an even spread.)
+
+**Inline defang — the fabricated `HASH_CODE` / `hash()` shape (DO NOT COPY).**
+
+| WRONG (Trino 467 — `Function 'hash_code' not registered` / `Function 'hash' not registered`) | RIGHT |
+|---|---|
+| `ABS(HASH_CODE(account_id)) % 10` &nbsp;❌ **WRONG — Trino 467 has NO `HASH_CODE()` function (that's Java `.hashCode()` leaking in)** — DO NOT COPY | `crc32(to_utf8(account_id)) % 10` (the LEAD canonical above) |
+| `abs(hash(account_id)) % 10` &nbsp;❌ **WRONG — Trino 467 has NO `hash()` function (that's Spark SQL's `hash()`)** — DO NOT COPY | `crc32(to_utf8(account_id)) % 10` |
+| `hashtext(account_id) % 10` &nbsp;❌ **WRONG — Trino 467 has NO `hashtext()` function (that's PostgreSQL)** — DO NOT COPY | `crc32(to_utf8(account_id)) % 10` |
+| `xxhash64(to_utf8(account_id)) % 10` &nbsp;❌ **WRONG — `xxhash64` returns varbinary, NOT bigint. The `%` operator does NOT accept varbinary** (`Cannot apply operator: varbinary % integer`) — DO NOT COPY | `abs(from_big_endian_64(xxhash64(to_utf8(account_id)))) % 10` (wrap in `from_big_endian_64`, then `abs`) |
+| `crc32(account_id) % 10` &nbsp;❌ **WRONG — `crc32` expects varbinary, NOT varchar** (`Unexpected parameters (varchar) for function crc32`) — DO NOT COPY | `crc32(to_utf8(account_id)) % 10` (wrap the varchar in `to_utf8`) |
+| `abs(crc32(to_utf8(account_id))) % 10` &nbsp;⚠️ harmless but redundant — `crc32` is already non-negative; the `abs()` does nothing | `crc32(to_utf8(account_id)) % 10` (drop the `abs()`) |
+
+**Distinguish from Iceberg `bucket(col, N)` partition transform — they are DIFFERENT THINGS.** Iceberg's `bucket(col, N)` partition transform (verified at [iceberg.apache.org/docs/latest/spec/#partitioning](https://iceberg.apache.org/docs/latest/spec/#partitioning) and [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html)) is a **DDL partitioning function** — it appears in `WITH (partitioning = ARRAY['bucket(user_id, 8)'])` on `CREATE TABLE` and tells Iceberg how to organize files on disk. **It is NOT a scalar you call inside a SELECT** — `SELECT bucket(user_id, 8) FROM t` is a parse error (`Function 'bucket' not registered`). If you need the bucket id at query time, use the `crc32(to_utf8(...)) % N` canonical above; if you want Iceberg to physically partition data into N buckets, write it in the CREATE TABLE partition spec. Note also the Trino-vs-Spark arg-order difference at the **DDL** level: **Trino Iceberg uses `bucket(col, N)` (column-first)**; **Spark uses `bucket(N, col)` (count-first)** — see [resource 10 § Iceberg partition transforms](10-lakehouse-partitioning.md) for the DDL-side treatment. The query-time `crc32 % N` form does not care about either DDL convention — it's pure SQL.
+
+**Cross-references.** [§ Pattern C3 NTILE above](#pattern-c3-ntile--bucket-rows-into-equal-size-groups-quartiles-deciles-percentile-buckets) — equal-size buckets by **rank order**, NOT by hash (use NTILE when you want "exactly N% of the rows in each bucket"; use hash-bucketing when you want "same user same bucket every run, regardless of population"). [§ Pattern C4 `width_bucket` below](#pattern-c4-width_bucket--bucket-a-numeric-value-into-a-histogram-equal-width-or-customuneven-bins-without-a-long-case-when-ladder) — bucket a **continuous numeric value** by range (latency bands, revenue tiers), NOT by hash. [Resource 10 § Iceberg partition transforms](10-lakehouse-partitioning.md) — the DDL-side `bucket(col, N)` partition transform (column-first in Trino, count-first in Spark) that is the storage-layout cousin of this query-time hash. [Resource 23 §3.1A string-function family](23-sql-best-practices-olap.md#31a-trino-string-split-family-reference--split--split_part--split_to_map--split_to_multimap) — `to_utf8` lives in the string-function family.
+
 ### Pattern C4: `width_bucket` — bucket a numeric value into a histogram (equal-width OR custom/uneven bins) WITHOUT a long CASE WHEN ladder
 
 **Keyword anchors:** Trino width_bucket, bucket numeric range, histogram bins Trino, uneven/custom buckets, session duration buckets, bin a continuous value, histogram without CASE WHEN, score buckets, latency buckets, price tier buckets. Verified at [trino.io/docs/current/functions/math.html](https://trino.io/docs/current/functions/math.html).

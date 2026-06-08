@@ -1277,6 +1277,80 @@ This returns **exactly one row per customer** (the specific runner-up row), with
 
 ---
 
+#### LEADING CANONICAL — TOP-N INCLUDING TIES AT THE CUTOFF — use `FETCH FIRST n ROWS WITH TIES` or `RANK() <= N` (NOT `DENSE_RANK() <= N`, NOT `ROW_NUMBER() <= N`) (iter714 PIN — FIX-A2)
+
+> **READ THIS FIRST if your question contains any of these keywords:** `top 10 including ties`, `top N with ties at the cutoff`, `include everyone tied for 10th place`, `include all rows tied at position N`, `top 10 leaderboard including ties at the 10th spot`, `top 10 with ties`, `FETCH FIRST WITH TIES`, `FETCH FIRST n ROWS WITH TIES`, `leaderboard with ties`, `top 5 products with ties`, `RANK vs DENSE_RANK vs ROW_NUMBER for top-N`, `which ranking function for top-N with ties`, `does RANK <= N miss ties`, `does RANK<=10 miss the 10th row if it ties`, `top N keep ties`, `top N including ties at boundary`. **Verified at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) on 2026-06-08.**
+>
+> Verbatim from the Trino 467 `SELECT` docs: *"If the argument `WITH TIES` is specified, it is required that the `ORDER BY` clause be present."* The grammar is `ORDER BY ... FETCH { FIRST | NEXT } [ n { ROW | ROWS } ] { ONLY | WITH TIES }`. **`WITH TIES` requires `ORDER BY`** — without an `ORDER BY` the query fails to parse.
+
+**The canonical — top-N rows INCLUDING everyone tied at the Nth position:**
+
+```sql
+-- ✅ CLEANEST — FETCH FIRST n ROWS WITH TIES (Trino 467 native, ANSI SQL)
+SELECT product_name, sales
+FROM iceberg.sales.products_sales
+ORDER BY sales DESC
+FETCH FIRST 10 ROWS WITH TIES;
+-- Returns 10 rows + ANY additional rows whose `sales` equals the 10th row's `sales`.
+-- If rows 9, 10, 11, 12 all tie at $500, you get rows 1..8 + ALL FOUR tied rows = 12 rows total.
+```
+
+```sql
+-- ✅ ALTERNATIVE — RANK() OVER (...) <= N, in a CTE/subquery
+WITH ranked AS (
+  SELECT product_name, sales,
+         RANK() OVER (ORDER BY sales DESC) AS rnk
+  FROM iceberg.sales.products_sales
+)
+SELECT product_name, sales
+FROM ranked
+WHERE rnk <= 10        -- includes ALL rows whose RANK is 1..10, ties included
+ORDER BY sales DESC;
+-- Same shape: top 10 positions + any ties at the 10th position.
+```
+
+**Three-way decision (memorize this — picking the wrong one is the iter713 Q1 silent-wrong bug):**
+
+| Question shape | Use | Behavior |
+|---|---|---|
+| **"Top N rows INCLUDING everyone tied at the Nth position"** (leaderboard with ties at the cutoff) | **`FETCH FIRST n ROWS WITH TIES`** *or* **`RANK() OVER (...) <= N`** (in a CTE) | Returns N rows + every additional row whose value equals the Nth row's value. Row count is `>= N`. `RANK()` sequence is `1, 2, ..., 10, 10, 10, 13` (gap-after-ties), and `WHERE rnk <= 10` captures all ties at rank 10. |
+| **"EXACTLY N rows, ties broken arbitrarily"** (pagination, "give me 10 rows, no more, no less") | **`LIMIT N`** *or* **`ROW_NUMBER() <= N`** (in a CTE, with an explicit tiebreaker in the `ORDER BY`) | Returns exactly N rows. If two rows tie at position N, one is picked arbitrarily (or by the tiebreaker). Row count is exactly N. |
+| **"Top N DISTINCT value-tiers"** ("top 3 price tiers, even if 50 products share those tiers") | **`DENSE_RANK() OVER (...) <= N`** (in a CTE) | Returns ALL rows whose value lands in one of the top N distinct values. Row count can be much larger than N. `DENSE_RANK` sequence is `1, 1, 2, 3, 3, 4` (no gaps); `<= 3` includes every row at one of the top 3 distinct values. |
+
+**Worked numeric example — products with these sales: `100, 100, 90, 80, 80, 80, 70`, asking for "top 3":**
+
+| Sales | `ROW_NUMBER() ORDER BY sales DESC` | `RANK()` | `DENSE_RANK()` |
+|---|---|---|---|
+| 100 | 1 | 1 | 1 |
+| 100 | 2 | 1 | 1 |
+| 90  | 3 | 3 | 2 |
+| 80  | 4 | 4 | 3 |
+| 80  | 5 | 4 | 3 |
+| 80  | 6 | 4 | 3 |
+| 70  | 7 | 7 | 4 |
+
+- `FETCH FIRST 3 ROWS WITH TIES` (`ORDER BY sales DESC`) → returns rows with sales `100, 100, 90` (3 rows; no ties at the 3rd position since 90 is unique). If you ask `FETCH FIRST 2 ROWS WITH TIES`, you get `100, 100` (2 rows — both tied at the 2nd position). If you ask `FETCH FIRST 4 ROWS WITH TIES`, you get `100, 100, 90, 80, 80, 80` (6 rows — three tied at position 4).
+- `RANK() <= 3` → rows with `RANK` in `{1, 1, 3}` = sales `100, 100, 90` (3 rows). `RANK() <= 4` → rows with `RANK` in `{1, 1, 3, 4, 4, 4}` = sales `100, 100, 90, 80, 80, 80` (6 rows).
+- `ROW_NUMBER() <= 3` → exactly 3 rows: `100, 100, 90`. If asked for `<= 4`, exactly 4 rows: `100, 100, 90, 80` (only ONE of the three 80s — picked arbitrarily; add a tiebreaker to the `ORDER BY` to make it deterministic).
+- `DENSE_RANK() <= 3` → rows with `DENSE_RANK` in `{1, 1, 2, 3, 3, 3}` = sales `100, 100, 90, 80, 80, 80` (6 rows — the **top 3 distinct values**, NOT the top 3 positions).
+
+**INLINE DEFANG — the iter713 false claim about `RANK() <= N`.**
+
+> -- ❌ WRONG CLAIM (iter713 Q1 fabrication): "`RANK() OVER (...) <= 10` would miss row #10 if it ties with row #9". FALSE. **`RANK() <= N` returns ALL rows tied at rank `<= N`, INCLUDING all ties at the boundary.** RANK's gap-after-ties behavior (1, 1, 3) means it never assigns `2` if there's a tie at `1`, but `<= N` still captures both tied rows. The bug being conflated is `WHERE rank = N` (which CAN silently miss rows if the sequence skips N — see the §3.1G Nth-LARGEST canonical above). DO NOT REPEAT.
+
+**DO NOT WRITE — the wrong shapes for "top N including ties":**
+
+| WRONG (silent-wrong or parse error) | WHY it fails | RIGHT |
+|---|---|---|
+| `DENSE_RANK() OVER (ORDER BY sales DESC) <= 10` for "top 10 leaderboard with ties at the 10th spot" &nbsp;❌ | `DENSE_RANK <= 10` returns the top **10 DISTINCT value-tiers**, NOT the top 10 **positions**. If there are 200 products and the top 10 distinct sales values cover 50 products, you get 50 rows back — not "top 10 with ties at the boundary". Wrong shape. | `FETCH FIRST 10 ROWS WITH TIES` (positions, ties at the 10th) OR `RANK() <= 10` (positions, ties at the 10th). |
+| `ROW_NUMBER() OVER (ORDER BY sales DESC) <= 10` for "top 10 INCLUDING ties at the 10th spot" &nbsp;❌ | `ROW_NUMBER` assigns a UNIQUE sequence 1, 2, ..., 10, 11, ... — `<= 10` returns EXACTLY 10 rows, ARBITRARILY picking one row among any ties at the 10th position. The row tied with #10 that didn't get picked is DROPPED. Wrong shape if the requirement is "include ties at the boundary". | `FETCH FIRST 10 ROWS WITH TIES` OR `RANK() <= 10`. (Use `ROW_NUMBER() <= N` only when you want EXACTLY N rows.) |
+| `FETCH FIRST 10 ROWS WITH TIES` (no `ORDER BY`) &nbsp;❌ | **Parse error.** `WITH TIES` requires `ORDER BY` per the Trino 467 SELECT grammar (verbatim: *"it is required that the ORDER BY clause be present"*). Without `ORDER BY` there's no defined notion of "ties at the cutoff". | Add `ORDER BY sales DESC` (or whichever sort key) BEFORE `FETCH FIRST 10 ROWS WITH TIES`. |
+| `LIMIT 10 WITH TIES` &nbsp;❌ | **Parse error.** Trino 467 does NOT support `WITH TIES` on `LIMIT` — `WITH TIES` is a clause of `FETCH FIRST`, NOT `LIMIT`. | Use `FETCH FIRST 10 ROWS WITH TIES` (with `ORDER BY`) or `RANK() <= 10` in a CTE. |
+
+**Cross-references.** [§3.1G LEADING CANONICAL — SECOND-LARGEST / Nth-LARGEST per group above](#leading-canonical--second-largest--nth-largest-per-group-choose-dense_rank-vs-row_number-do-not-use-rank--it-leaves-gaps-after-ties-and-silently-returns-nothing-iter643-pin--fix-a) — the `= N` (single-position) decision, NOT the `<= N` (top-N-with-ties) decision; these two are different questions, do NOT conflate. [§3.1G LEADING CANONICAL — `QUALIFY` is NOT a Trino clause](#leading-canonical--qualify-is-not-a-trino-467-clause--parse-error-iter695-pin--fix-a) — the `WHERE rnk <= 10` shape must live in an OUTER `SELECT` over a CTE, NOT in a `QUALIFY` (Trino 467 has no `QUALIFY`). [Resource 07 § Pattern C ranking](07-analytical-query-patterns.md) — the `ROW_NUMBER` / `RANK` / `DENSE_RANK` reference table for "top-N per group" partitioned shapes (the pattern here is the un-partitioned global leaderboard variant). [Resource 23 §11 pagination / ROW_NUMBER](23-sql-best-practices-olap.md) — the `LIMIT N` / `ROW_NUMBER() <= N` exact-N pagination pattern, which is the DIFFERENT question ("give me exactly N rows" vs. "top N positions including ties").
+
+---
+
 ### DO NOT WRITE — `IGNORE NULLS` placement on window functions: AFTER the closing args paren, BEFORE `OVER` (iter572 PIN)
 
 > **Keyword anchors (route here on any of these):** IGNORE NULLS placement, IGNORE NULLS inside parentheses parse error, where does IGNORE NULLS go, IGNORE NULLS after closing paren before OVER, LAST_VALUE IGNORE NULLS syntax, FIRST_VALUE IGNORE NULLS syntax, LAG IGNORE NULLS syntax, LEAD IGNORE NULLS syntax, null treatment clause Trino, RESPECT NULLS Trino, mismatched input 'IGNORE', mismatched input IGNORE Trino, null treatment outside args.
