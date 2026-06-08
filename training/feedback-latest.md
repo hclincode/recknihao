@@ -1,82 +1,50 @@
-# Judge Feedback — iter751 (DUAL FIX-A re-probe + 1 fresh)
+# Judge Feedback — iter752
 
-**Phase:** extended. **Governing rule:** overall avg across 4 Qs ≥ 3.5 → PASS (no single-Q veto).
-**Federation:** NOT probed — row UNCHANGED (303rd consecutive untouched).
-**state.json:** NOT modified (already 751, set by teacher).
+Re-probe-for-BULLETPROOFED + durability-breadth. All 4 dialect claims VERIFIED against trino.io/docs/467 (regexp/select/aggregate/comparison .html) on 2026-06-09.
 
-All four dialect claims were WebFetch/WebSearch-verified against trino.io/docs/467 (aggregate.html, array.html, regexp.html, comparison.html, string.html) plus Trino string-literal escaping behavior. ZERO dialect defects found.
+## Q1 — map-merge-sum RE-PROBE (combine per-row MAP column, summing values per key per store)
 
----
+Answer: nested-subquery `CROSS JOIN UNNEST(products_sold) AS t(sku, units)` → inner `SUM(units) GROUP BY store_id, sku` → outer `map_agg(sku, total_units) GROUP BY store_id`. Worked example SKU-123 5+3=8. Explicit defang: do NOT use `map_union` (does not sum, arbitrary value wins).
 
-## Q1 — MAP-MERGE-SUM (sum a MAP column's values per tag across rows, per agent) — RE-PROBE
+DOCS-VERIFIED: `map_agg(key,value)->map(K,V)` correct; `map_union(x)->map(K,V)` exists but "If a key is found in multiple input maps, that key's value in the resulting map comes from an arbitrary input map" — does NOT sum; `map_union_sum` is NOT a Trino 467 function (Presto-only). The 3-level idiom RUNS: innermost UNNEST produces scalar (sku, units); middle SUM+GROUP BY store_id,sku yields one distinct row per (store, sku); outer map_agg builds the per-store map. This is the EXACT fix added in iter751 (which closed the iter750 Q2 3.00 gap where the responder omitted the UNNEST prerequisite). The responder now includes the UNNEST and the correct defang.
 
-Answer: inner `CROSS JOIN UNNEST(time_spent) AS t(tag, minutes)` + `SUM(minutes) GROUP BY agent_id, tag`, then outer `map_agg(tag, total_minutes) GROUP BY agent_id`. Explicitly defanged map_union_sum (Presto-only) and noted map_union does not sum.
+- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — **avg 5.00**
 
-VERIFIED (aggregate.html):
-- `map_agg(key, value) → map(K,V)` "Returns a map created from the input key/value pairs." Confirmed.
-- `map_union(x(K,V)) → map(K,V)` "If a key is found in multiple input maps, that key's value in the resulting map comes from an arbitrary input map." → confirms map_union does NOT sum colliding values (responder's defang correct).
-- `map_union_sum` — NOT in Trino 467 docs (Presto-only). Responder's defang correct.
-- Two-step idiom runs against a MAP column: the inner UNNEST(map) AS t(k,v) two-alias explode is the documented map→rows mechanic; the inner `GROUP BY agent_id, tag` guarantees one row per (agent,tag) so the outer map_agg receives DISTINCT keys per agent — no duplicate-key error. Correct.
+## Q2 — LIKE-ESCAPE RE-PROBE (match a literal '%' in a discount code)
 
-Scores: Accuracy 5, Completeness 5, Clarity 5, Actionability 5. **Per-Q avg 5.00.**
+Answer: `WHERE discount_code LIKE '%\%%' ESCAPE '\'` with correct decomposition (wildcard-%, escaped-literal-%, wildcard-%); also `'%\_%' ESCAPE '\'` for literal underscore; alternative `strpos(discount_code,'%')>0`. Defang: do NOT use `contains()` on a varchar (array-only, won't compile).
 
-## Q2 — LIKE-ESCAPE (match a LITERAL underscore, not the wildcard) — RE-PROBE
+DOCS-VERIFIED: comparison.html — "The wildcard characters `_` and `%` must be escaped to allow you to match them as literals. This can be achieved by specifying the `ESCAPE` character to use." ESCAPE clause valid; `strpos(s,sub)>0` is a valid varchar substring test; `contains(x,element)->boolean` is ARRAY-only (won't compile on varchar) — the defang is correct. This directly corrects the iter750 Q2/Q3 defect (3.375) where the responder offered `contains()`-on-varchar. Now clean.
 
-Answer: `WHERE message LIKE '%\_%' ESCAPE '\'`, with the escaped `_` matching a literal underscore and outer `%` as wildcards; ALSO offered `strpos(message,'_') > 0` substring alternative. Did NOT use contains()-on-varchar (the iter750 defect).
+- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — **avg 5.00**
 
-VERIFIED (comparison.html): "The wildcard characters `_` and `%` must be escaped to allow you to match them as literals. This can be achieved by specifying the ESCAPE character to use." Docs example `'South\_America' LIKE 'South\\\_America' ESCAPE '\'` → true. The responder's `'%\_%' ESCAPE '\'` is the correct literal-underscore idiom. VERIFIED (string.html): `strpos(string, substring)` returns position (1-based) or 0 if not found — `strpos(message,'_')>0` is a valid substring test. The iter750 contains()-on-varchar defect did NOT recur (contains() is ARRAY-only).
+## Q3 — FRESH: count occurrences of 'timeout' in free-text body, per row
 
-Scores: Accuracy 5, Completeness 5, Clarity 5, Actionability 5. **Per-Q avg 5.00.**
+Answer: `regexp_count(ticket_body, '\btimeout\b') AS timeout_mentions`; explained `\b` word-boundary anchors the whole word; `(?i)` inline flag for case-insensitivity; returns bigint exact count per row.
 
-## Q3 — FLATTEN (list of albums each a list of track IDs → one flat list per playlist, no row explosion) — RE-PROBE
+DOCS-VERIFIED: regexp.html — `regexp_count(string, pattern) → bigint` "Returns the number of occurrence of pattern in string" (NATIVE, counts occurrences not positions). `\b` word boundary supported (docs show `'\\b\\d+\\b'`); `(?i)` flag supported ("Case-insensitive matching ... enabled via the (?i) flag"); Java/RE2J pattern syntax. Single-backslash `'\btimeout\b'` in a Trino ANSI single-quoted string literal is preserved literally (Trino does not treat backslash as a string-literal escape) — correct form, not penalized. `regexp_count` is the right tool; `cardinality(regexp_extract_all(...))` also works (not required). Returns a count, not a boolean, not positions — exactly what the question asked.
 
-Answer: `SELECT playlist_id, flatten(album_list) AS all_track_ids FROM playlists`. Explained one-level collapse ARRAY(ARRAY(VARCHAR))→ARRAY(VARCHAR), one row in/out.
+- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — **avg 5.00**
 
-VERIFIED (array.html): `flatten(x) → array` "Flattens an `array(array(T))` to an `array(T)` by concatenating the contained arrays." Exactly one level, per-row, single array out, no row explosion. `flatten(album_list)` is precisely right.
+## Q4 — FRESH: row-set difference (signups NOT in order-placers)
 
-Scores: Accuracy 5, Completeness 5, Clarity 5, Actionability 5. **Per-Q avg 5.00.**
+Answer: `SELECT user_id FROM signups_last_month EXCEPT SELECT user_id FROM users_with_orders`; explained EXCEPT returns first-query rows not in second; ALSO offered anti-join `LEFT JOIN ... WHERE o.user_id IS NULL`; noted EXCEPT dedupes by default (like UNION not UNION ALL), anti-join may be faster.
 
-## Q4 — regexp_extract_all (pull EVERY 'TKT-1234' token from free-text notes into an array) — FRESH
+DOCS-VERIFIED: select.html — "EXCEPT returns the rows that are in the result set of the first query, but not the second"; EXCEPT DISTINCT is the default (dedupes); EXCEPT ALL preserves duplicates. Native row-set-difference operator, distinct from `array_except` (the array-side function). The anti-join is an equivalent, often-faster alternative. Both forms correct. Union-compatibility (same column count/types) is satisfied by the single-column user_id example — not a defect.
 
-Answer: `regexp_extract_all(notes, 'TKT-\d+') AS ticket_references` → ARRAY(VARCHAR) of all matches, one row per account.
+- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — **avg 5.00**
 
-VERIFIED (regexp.html): `regexp_extract_all(string, pattern)` returns ALL matches as an array (docs example returns `[1, 2, 14]`); `regexp_extract` returns only the FIRST match — so regexp_extract_all is the right tool. Patterns use Java/RE2J syntax and accept `\d`.
+## Overall
 
-Backslash nuance (verified, NO penalty): Trino follows ANSI SQL — backslash is NOT a special escape char in single-quoted string literals (`SELECT 'hello\bworld'` returns `hello\bworld` verbatim). Therefore `'TKT-\d+'` is preserved as the literal characters `TKT-\d+`, which RE2J reads correctly as "TKT- then one-or-more digits." The responder's SINGLE-backslash form is correct and matches digits. (Note for teacher: the docs' own `'\\d+'` double-backslash example is a known quirk — in real Trino SQL the literal `\\d+` reaches RE2J as escaped-backslash + `d+`, matching a literal backslash, NOT digits. The single-backslash form the responder used is the one that actually works. Do NOT "correct" the responder toward `\\d+`.)
+**Overall avg = 5.00 — STRONG PASS.**
 
-NULL/empty nuance (minor, not a defect): regexp_extract_all returns an empty array `[]` when no match, not NULL — responder didn't mention it but it doesn't affect correctness.
+- **map-merge-sum BULLETPROOFED** — 2nd clean datapoint (iter750 gap → iter751 FIX → iter752 clean re-probe). The UNNEST prerequisite is now present and the map_union/map_union_sum defang is correct.
+- **LIKE-ESCAPE BULLETPROOFED** — 2nd clean datapoint (iter750 defect → iter751 FIX → iter752 clean re-probe). ESCAPE form correct; strpos alternative valid; contains()-on-varchar correctly defanged.
+- **Q3 regexp_count — FRESH-CLEAN.** Native, counts occurrences (not positions/boolean), `\b` + `(?i)` valid, single-backslash literal correct.
+- **Q4 EXCEPT — FRESH-CLEAN.** Native row-set difference, dedup-by-default, anti-join alternative correct, distinct from array_except.
 
-Scores: Accuracy 5, Completeness 5, Clarity 5, Actionability 5. **Per-Q avg 5.00.**
+No new gaps, no defects, no card-to-card contradictions surfaced. The two iter751 FIX-A additions are both confirmed durable under a second probe.
 
----
+## iter753 designation
 
-## OVERALL
-
-| Q | Acc | Comp | Clar | Act | avg |
-|---|---|---|---|---|---|
-| Q1 map-merge-sum | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 LIKE-ESCAPE | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 flatten | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 regexp_extract_all | 5 | 5 | 5 | 5 | 5.00 |
-
-**Overall avg = 20.00/4 = 5.00 — STRONG PASS** (margin +1.50).
-
-## Topic-closure status
-
-- **map-merge-sum CLOSED** — 1st post-fix datapoint. iter750's Q2 gap (3.00) is fixed; responder produced the canonical UNNEST(map)+map_agg(k,SUM(v))+GROUP BY two-step AND correctly defanged map_union_sum (Presto-only) + map_union-arbitrary-value-wins. Clean. (Needs a 2nd clean datapoint from a different angle to reach BULLETPROOFED.)
-- **LIKE-ESCAPE CLOSED** — 1st post-fix datapoint. iter750's contains()-on-varchar defect (3.375) is fixed; responder used `LIKE '%\_%' ESCAPE '\'` + strpos alternative, did NOT touch contains()-on-varchar. Clean. (Needs a 2nd clean datapoint to reach BULLETPROOFED.)
-- **flatten BULLETPROOFED** — 2nd consecutive clean datapoint (iter750 Q3 clean → iter751 Q3 clean against fresh playlist/albums/tracks phrasing). flatten() canonical is durable.
-- **regexp_extract_all** — fresh-clean (1st datapoint), docs-confirmed native, right-tool-vs-regexp_extract distinction correct.
-
-## No new gaps / no defects
-
-No dialect defects, no fabricated functions, no contradictions surfaced. All standing locks held.
-
-## iter752 designation
-
-Recommend: **re-probe map-merge-sum + LIKE-ESCAPE from a 2nd/different angle** to drive both toward BULLETPROOFED (each currently 1 clean post-fix datapoint). Suggested fresh angles:
-- map-merge-sum 2nd angle: e.g. "per customer, merge per-order maps of {sku → qty} into one map summing qty per sku" (different domain/keyword surface).
-- LIKE-ESCAPE 2nd angle: e.g. "find rows whose code contains a literal percent sign `%`" (the `%` wildcard, not `_`).
-- Plus 1–2 FRESH picks from un-probed-recently locks (e.g. element_at(arr,-n) negative index; concat_ws skips NULL; CAST(bool AS int)→1/0; format('%,d') thousands separator).
-- Do NOT churn flatten (now bulletproofed — iter693 lesson) or any bulletproofed card.
-- If any defect surfaces → switch to FIX-A on that topic instead.
+**DEFAULT NO-OP / durability-breadth with 4 fresh picks.** Both iter751 fixes are bulletproofed; nothing requires editing. Do NOT re-edit r07 (map-merge-sum) or r23 (LIKE-ESCAPE) — perfect-score iteration, iter693 churn-risk applies. Suggested fresh, not-recently-probed angles for iter753: `regexp_replace` with capture-group backreference; `INTERSECT` (row-set semi-join — pairs naturally with this iter's EXCEPT); `bool_and/bool_or`; `element_at(arr,-n)` negative indexing. Pick 4.
