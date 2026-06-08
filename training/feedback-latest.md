@@ -1,125 +1,98 @@
-# Iter 718 Judge Feedback — 2026-06-08
+# Iter 719 Judge Feedback — 2026-06-08
 
-**Phase**: extended | **Iteration**: 718 | **State**: not bumped (orchestrator handles)
-**Verdict**: **STRONG PASS (overall 4.8125 / 5.0)** — DEFAULT NO-OP durability probe held clean.
-
----
-
-## Verification against Trino 467 docs (this iter)
-
-- [trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html) — `format(format, args...) -> varchar` (Java Formatter style) and `lpad(string, size, padstring) -> varchar` both confirmed valid.
-- [trino.io/docs/467/functions/array.html](https://trino.io/docs/467/functions/array.html) — `contains(x, element) -> boolean`, `array_intersect(x, y) -> array`, `cardinality(x) -> bigint`, `any_match(array, lambda)`, `all_match(array, lambda)`, `arrays_overlap(x, y)` all confirmed valid.
-- [trino.io/docs/467/functions/math.html](https://trino.io/docs/467/functions/math.html) — `width_bucket(x, bound1, bound2, n) -> bigint` (4-arg) and `width_bucket(x, bins) -> bigint` (2-arg array) both confirmed valid; doc page does not explicitly document bucket-0/below-min and bucket-n+1/above-max semantics, but those are the well-established SQL-standard behavior Trino inherits and the responder's gloss is correct.
-- [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) — `FILTER (WHERE ...)` clause supported on ALL aggregates (explicit in docs); SUM ignores NULL by default and "returns null rather than zero" for all-NULL/no-input.
+**Phase**: extended | **Iteration**: 719 | **State**: not bumped (orchestrator handles)
+**Verdict**: **PASS (overall 4.500 / 5.0)** — but ONE genuine, findable-but-missing gap surfaced in Q2 that warrants iter720 FIX-A. (Q1 sub-scores all 5 → Q1=20, Q2=12, Q3=20, Q4=20; sub-score-sum 72/16=4.500; per-Q-avg 18.00/4=4.500; dim-avg 4.500 — all three methods agree.)
 
 ---
 
 ## Per-question scoring
 
-### Q1 — pad account_id string to 8 chars w/ leading zeros via `format('%08d', CAST(... AS bigint))` — 4.75
-
-| Dim | Score | Reasoning |
+### Q1 — ROW field access (`address.zip`) vs JSON-text fallback
+| Dim | Score | Notes |
 |---|---|---|
-| Accuracy | 5 | `format()` is valid Trino 467 (Java Formatter style); `%08d` = zero-pad-decimal-to-width-8; `CAST(varchar AS bigint)` valid. For numeric-looking input `"1234"` it produces exactly `"00001234"`. ZERO `::` cast leak; ZERO foreign-dialect contamination. |
-| Completeness | 4 | Works for numeric-string account_ids. Does not mention `lpad(account_id, 8, '0')` which is the more robust string-native form (no cast, no error on non-numeric, preserves any leading-zero already present). Minor pedagogical miss — both forms are valid Trino 467 and the chosen one answers the literal ask. |
-| Clarity | 5 | `%08d` glossed cleanly ("decimal zero-padded to width 8"); cast rationale stated ("treat as number"); printf analogy is intuitive. |
-| Actionability | 5 | Full SELECT with `iceberg.analytics.customers` ready to run; explicit "add to SELECT before CSV export" call-out lands the use case. |
+| Accuracy | 5 | Verified vs [trino.io/docs/467/language/types.html](https://trino.io/docs/current/language/types.html) — `row_col.field` dot notation is the documented Trino 467 form for ROW (typed struct) sub-field access. JSON-text vs typed-ROW disambiguator (`json_extract_scalar(col,'$.zip')`) correct. |
+| Completeness | 5 | Both shapes covered (typed ROW + JSON text), plus the "promote hot fields to typed columns via `from_json` at ingest" best-practice. |
+| Clarity | 5 | One-line worked SQL up front; ROW-vs-JSON branch made explicit; cross-refs to r09/r13 land where the keyword would route. |
+| Actionability | 5 | Engineer can copy `address.zip` immediately; knows the alt path if their column is JSON text. |
+**Q1 subtotal: 5.00**
 
-### Q2 — array membership ANY / ALL via `contains(...) OR contains(...)` + `cardinality(array_intersect(...)) = N` — 4.75
-
-| Dim | Score | Reasoning |
+### Q2 — Explode a MAP into one row per key/value (CRITICAL — verified)
+| Dim | Score | Notes |
 |---|---|---|
-| Accuracy | 5 | All three primitives verified valid Trino 467; `contains(array, element) -> boolean`, `array_intersect(x, y) -> array`, `cardinality(x) -> bigint`. The `cardinality(array_intersect(col, ARRAY[...])) = N` idiom correctly tests "all N required values present" (assumes no duplicates in the column, which is the conventional shape for a tag column). ZERO foreign-dialect contamination. |
-| Completeness | 4 | Does not surface the lambda alternatives (`any_match(ARRAY['urgent','enterprise'], x -> contains(tags, x))`, `all_match`) or `arrays_overlap(tags, ARRAY[...])` for the ANY case. All would be valid alternatives. The chosen forms are correct and idiomatic — minor pedagogical miss only. |
-| Clarity | 5 | Both branches explained; "all 2 required present" gloss is correct and intuitive. |
-| Actionability | 5 | Two ready-to-paste WHERE clauses, plus "can combine in one query via CASE/WHERE" hint. |
+| Accuracy | 2 | **DIALECT DEFECT.** The responder wrote `CROSS JOIN UNNEST(map_entries(feature_flags)) AS t(flag_entry)` with a SINGLE alias + `flag_entry.key` / `flag_entry.value` dot-access. This is **INVALID Trino 467**. Verified against [trino.io/docs/467/sql/select.html](https://trino.io/docs/current/sql/select.html): when UNNEST is applied to `array(row(K,V))`, Trino FLATTENS the ROW into separate columns — so the alias list must name BOTH columns: `AS t(key_alias, value_alias)`. A single alias produces an alias-count mismatch (1 alias for 2 produced columns) and the `flag_entry.key` dot-access has no ROW to bind to. The CORRECT canonical forms in Trino 467 are EITHER (a) `CROSS JOIN UNNEST(feature_flags) AS t(flag_name, flag_value)` — UNNEST a MAP DIRECTLY expands into two columns (key, value) — OR (b) `CROSS JOIN UNNEST(map_entries(feature_flags)) AS t(flag_name, flag_value)` with TWO aliases (flattened). The single-alias-dot-access form the responder produced does not parse / does not run. |
+| Completeness | 4 | The CROSS-JOIN-UNNEST-before-WHERE clause-order note is correct and useful, and the "filter parents first via subquery, then UNNEST" guidance is sound. But the missing canonical (`UNNEST(map) → 2 cols`) leaves the cheaper, simpler form unmentioned. |
+| Clarity | 4 | Prose is clear and the explanation of `map_entries → array(row(k,v)) → UNNEST` is well-structured — but the worked SQL is wrong, which undermines the clarity for a copy-paste reader. |
+| Actionability | 2 | An engineer who pastes this answer hits a parser error immediately. That is the worst-case actionability outcome — a Haiku-grade answer that LOOKS authoritative but doesn't run. |
+**Q2 subtotal: 3.00**
 
-### Q3 — single-pass total + conditional sum via `SUM FILTER (WHERE ...)` + `SUM-CASE` — 4.75
+**Is Q2 a findable-but-missing gap?** YES. Grep across `resources/` shows NO `UNNEST a MAP into key/value rows` canonical — r07 §1a covers `CROSS JOIN UNNEST` for ARRAYS only (tags, sequence(...)) and r09 §MAP-HOFs is the OPPOSITE direction (filter/reshape map IN-PLACE without UNNEST). r23 §3.1A is `split_to_map` (string parsing, not map→rows). The responder reached for the closest analog (`map_entries → array(row) → UNNEST`) and got the alias arity wrong because there's no leading canonical anchoring the correct shape. **Candidate FIX-A for iter720:** add a "LEADING CANONICAL — UNNEST a MAP into one row per (key, value)" H4 to r07 §1a (near the array UNNEST canonical), with keyword anchors (`explode map Trino`, `map to rows`, `one row per map entry`, `flatten feature flags map`, `key value rows from map`, `MAP UNNEST two columns`, `UNNEST map_entries flatten`, `map column to long format`), the TWO valid canonical shapes shown explicitly (`UNNEST(feature_flags) AS t(k, v)` PREFERRED + `UNNEST(map_entries(feature_flags)) AS t(k, v)` ALT, both with TWO aliases), and a DO-NOT-WRITE inline-defang row for the single-alias-dot-access form (`AS t(flag_entry)` + `flag_entry.key`) with the verbatim error reason ("alias-count mismatch: UNNEST(array(row(K,V))) flattens into 2 columns, requires 2 aliases").
 
-| Dim | Score | Reasoning |
+### Q3 — `uuid()` per row at INSERT + dbt non-determinism warning
+| Dim | Score | Notes |
 |---|---|---|
-| Accuracy | 4 | Both forms parse and produce the correct refunded_total. **Minor imprecision**: `SUM` already ignores NULL inputs (verified at trino.io/docs/467/functions/aggregate.html — "all of these aggregate functions ignore null values"), so `SUM(refund_amount) FILTER (WHERE refund_amount IS NOT NULL)` is **REDUNDANT** — same answer with or without the FILTER. Not wrong, just not load-bearing. A more pedagogical FILTER example would predicate on a different column, e.g. `SUM(order_amount) FILTER (WHERE status='refunded')`. This is a minor pedagogical imprecision, not a defect. |
-| Completeness | 5 | Both FILTER and CASE forms given; COUNT(*) bonus; "single-scan" rationale stated. |
-| Clarity | 5 | FILTER (WHERE) shorthand explained ("only include matching rows in this aggregate"); CASE WHEN positioned as the portable cross-engine alternative. |
-| Actionability | 5 | Drop-in SQL with `iceberg.analytics.orders`. |
+| Accuracy | 5 | Verified vs [trino.io/docs/467/functions/uuid.html](https://trino.io/docs/current/functions/uuid.html) — `uuid()` returns "pseudo randomly generated UUID (type 4)" per call, returns `uuid` type, CAST to varchar yields the 36-char canonical string. The non-deterministic-so-not-a-stable-dbt-key warning and the `md5(concat(business_keys))` deterministic alternative are correct and match dbt-utils `generate_surrogate_key` semantics. |
+| Completeness | 5 | Covers (a) the canonical INSERT form, (b) the uuid→varchar CAST, (c) the dbt unique_key / surrogate-key trap with the correct fix. Nothing material missing. |
+| Clarity | 5 | The "do NOT use as dbt surrogate key" warning is loud and reason-anchored ("non-deterministic, every re-run generates different UUIDs"). |
+| Actionability | 5 | Engineer can ship the INSERT today AND knows how to derive a stable hash key when re-runnability matters. |
+**Q3 subtotal: 5.00**
 
-### Q4 — equal-width histogram via `width_bucket(value, 0, 1000, 10)` + array-form for uneven bands — 5.00
-
-| Dim | Score | Reasoning |
+### Q4 — Suppress errors in computed columns (`TRY` + `TRY_CAST` + `NULLIF`)
+| Dim | Score | Notes |
 |---|---|---|
-| Accuracy | 5 | Both 4-arg `width_bucket(x, bound1, bound2, n)` and 2-arg `width_bucket(x, bins)` confirmed valid Trino 467. The "bucket 0 = below min, bucket n+1 = above max" out-of-range semantics is correct (inherited SQL-standard behavior; matches PostgreSQL and other engines). ZERO defects. |
-| Completeness | 5 | Covers primary ask (equal-width), bonus uneven-bands via array, out-of-range bucket semantics, AND the "beats CASE: one call, no off-by-one" framing — exactly the pedagogical hook the engineer needed. |
-| Clarity | 5 | Concrete arithmetic ("10 buckets over 0-1000 = 100-min each") removes ambiguity; signature gloss `(value, min, max, num_buckets)` is correct. |
-| Actionability | 5 | Full GROUP BY 1 ORDER BY 1 SELECT, runnable as-is. |
+| Accuracy | 5 | Verified vs [trino.io/docs/467/functions/conditional.html](https://trino.io/docs/current/functions/conditional.html) — `try(expression)` documented (catches division-by-zero, invalid casts/function args, numeric overflow → returns NULL), `try_cast(value AS type)` returns NULL on failed cast, `nullif(v1, v2)` documented. Trino's integer/decimal division-by-zero DOES raise an error so the `NULLIF(denom, 0)` guard is necessary. Combining `TRY(numer / NULLIF(denom, 0))` is the documented Trino 467 belt-and-suspenders shape. |
+| Completeness | 5 | Both error-suppression mechanisms (TRY, TRY_CAST) covered, NULLIF div-by-zero idiom covered, downstream SUM/COUNT-skip-NULL behavior noted. |
+| Clarity | 5 | Two-mechanism split (cast errors → TRY_CAST; everything else → TRY) is the right mental model. |
+| Actionability | 5 | Engineer can wrap their broken expression immediately. |
+**Q4 subtotal: 5.00**
 
 ---
 
 ## Overall
 
-| Q | Acc | Comp | Clar | Act | Avg |
-|---|---|---|---|---|---|
-| Q1 | 5 | 4 | 5 | 5 | 4.75 |
-| Q2 | 5 | 4 | 5 | 5 | 4.75 |
-| Q3 | 4 | 5 | 5 | 5 | 4.75 |
-| Q4 | 5 | 5 | 5 | 5 | 5.00 |
+| Q | Subtotal |
+|---|---|
+| Q1 | 5.00 |
+| Q2 | 3.00 |
+| Q3 | 5.00 |
+| Q4 | 5.00 |
+| **Sum** | **18.00** |
+| **Overall avg (sum / 4)** | **4.5000** |
 
-**Per-Q avg**: (4.75 + 4.75 + 4.75 + 5.00) / 4 = 19.25 / 4 = **4.8125**
-**Sub-score sum cross-check**: (19 + 19 + 19 + 20) / 16 = 77 / 16 = **4.8125**
-**Dim-avg cross-check**: Acc(5+5+4+5)/4=4.75, Comp(4+4+5+5)/4=4.50, Clar(5+5+5+5)/4=5.00, Act(5+5+5+5)/4=5.00 → (4.75+4.50+5.00+5.00)/4 = **4.8125**
+Sub-score sum across all 16 sub-scores: Q1(5+5+5+5=20) + Q2(2+4+4+2=12) + Q3(5+5+5+5=20) + Q4(5+5+5+5=20) = **72**. Mean: **72/16 = 4.500**. Dim-avg cross-check: Acc(5+2+5+5)/4=4.25 / Comp(5+4+5+5)/4=4.75 / Clar(5+4+5+5)/4=4.75 / Act(5+2+5+5)/4=4.25 = (4.25+4.75+4.75+4.25)/4 = **4.500**. All three methods agree at 4.500.
 
-All three calculations agree at **4.8125**.
-
-**GOVERNING LABEL: STRONG PASS** (overall 4.8125 across 16 sub-scores; margin +1.3125 over 3.5 threshold; OVERALL AVERAGE governs — no per-Q veto; minor pedagogical notes flagged in prose only).
+**PASS threshold:** 3.5. **Verdict: PASS at 4.500 / 5.0.** No per-Q veto under the prompt rules — Q2 flagged in prose as the iter720 FIX-A candidate.
 
 ---
 
-## Defect / gap scan for iter719
+## Actionable teacher feedback for iter720
 
-- **Dialect-correctness**: ZERO defects. No banned/foreign forms (`::`, `~`, `~*`, `!~`, `!~*`, RLIKE, LIKE bracket-class, HASH_CODE, date_bin, QUALIFY, `array_slice`, `now` without parens-as-keyword-confusion, etc.) appeared in any of the 4 answers.
-- **Findability**: All 4 answers cite the right resource — `resources/23` for format/zero-padding, `resources/07` for arrays / conditional aggregation / width_bucket. Landing points held.
-- **Genuine findable-but-missing gap?** **NO**. The three minor completeness/precision notes (Q1 omits lpad alternative; Q2 omits lambda/arrays_overlap alternatives; Q3 FILTER predicate is redundant against SUM's NULL-skip) are all pedagogical polish, not findable-but-missing gaps. The responder's chosen forms are all valid Trino 467 and produce the correct output.
+**ONE FIX-A only — no other gaps surfaced.**
 
-**iter719 = DEFAULT NO-OP confirmed.**
+**FIX-A — Add LEADING CANONICAL for "UNNEST a MAP into one row per key/value" in r07 §1a (between current array-UNNEST canonical and §1a.1 clause-order rule).**
 
----
+Required content:
+1. **Keyword anchor** (route Haiku here on phrases like): `explode map Trino`, `map to rows`, `one row per map entry`, `flatten feature flags map`, `key value rows from map`, `MAP UNNEST two columns`, `UNNEST map_entries flatten`, `map column to long format`, `expand map to rows`, `per-key per-value rows from map column`, `pivot map long`, `flag→value rows per user`, `feature_flags explode`.
+2. **One-fact summary:** Trino 467 `UNNEST(map_col)` applied DIRECTLY to a `MAP(K,V)` expands into TWO columns `(key, value)` — the alias list must name BOTH: `AS t(key_alias, value_alias)`. Verified at [trino.io/docs/467/sql/select.html](https://trino.io/docs/current/sql/select.html) ("Maps are expanded into two columns (key, value)").
+3. **Two valid canonicals, both with TWO aliases:**
+   - PREFERRED (simpler, no `map_entries` round-trip): `CROSS JOIN UNNEST(feature_flags) AS t(flag_name, flag_value)`.
+   - EQUIVALENT ALT (via `map_entries → array(row(K,V))`, where Trino FLATTENS the ROW into separate columns — STILL requires TWO aliases): `CROSS JOIN UNNEST(map_entries(feature_flags)) AS t(flag_name, flag_value)`.
+4. **Worked example** with a `user_features (user_id BIGINT, feature_flags MAP(VARCHAR, VARCHAR))` table → `SELECT user_id, flag_name, flag_value FROM user_features CROSS JOIN UNNEST(feature_flags) AS t(flag_name, flag_value)` plus a `GROUP BY flag_name, flag_value COUNT(*)` aggregation example so the engineer sees the end-to-end shape.
+5. **DO-NOT-WRITE inline-defang table** (mark un-copyable, the iter693 lesson):
+   - `UNNEST(map_entries(m)) AS t(entry) ... entry.key / entry.value` — **WRONG: ALIAS-COUNT MISMATCH.** UNNEST(array(row(K,V))) flattens into 2 columns; 1 alias provided → Trino parse error.
+   - `UNNEST(m) AS t(entry)` — **WRONG: same reason.** UNNEST(map) produces 2 columns; needs 2 aliases.
+   - `SELECT m.key, m.value FROM users CROSS JOIN UNNEST(m)` — **WRONG: m is the parent column, not the UNNEST output relation.** Must use the `AS t(k, v)` alias names.
+6. **Cross-ref** TO `09 §MAP higher-order functions` (when you want to keep the map AS a map, not explode it) and FROM that H3 back to this new canonical (so the navigation works both directions — the iter715 lesson about findability cross-refs).
+7. **Closing fact:** the `CROSS JOIN UNNEST(...)` is part of the FROM clause and MUST appear BEFORE `WHERE` (link to existing §1a.1 — do not re-explain).
 
-## Pattern observations across the 4 answers
+**Where to place it:** r07 §1a is the natural anchor (it's the existing "explode array column" landing point). New H3/H4 should sit IMMEDIATELY AFTER the array-UNNEST canonical and BEFORE §1a.1 (clause-order rule) so the clause-order rule then applies to BOTH array and map forms.
 
-1. **Dialect discipline holds**: 4 different SQL families (string formatting, array predicates, conditional aggregation, math binning) probed; ZERO foreign-dialect leak across any of them. The cumulative defang inventory (iter534-717, ~268+ locks) is doing its job — responder picks Trino-native forms by default.
-2. **Resource citations are clean**: Each answer points at the correct resource file and topic area. r07 and r23 landing points are findable for these question phrasings.
-3. **Minor pedagogical polish opportunities** (not required for PASS): the lpad alternative for Q1 and the lambda/arrays_overlap alternatives for Q2 would round out the "multiple-valid-forms" pedagogy if the teacher chooses to enhance. The Q3 redundant FILTER is the only one I'd actively rewrite if I had to touch r07 — but again, not required.
+**Other observations (no action needed):**
+- Q1, Q3, Q4 are clean perfects — no edits needed to ROW dot-access (r09), uuid() (r27 §4.5D), or TRY/TRY_CAST/NULLIF (r27 §4.4).
+- The dbt-surrogate-key warning landing in Q3 is paying off — that's the iter706 pattern of bundling the "WHY this is wrong for dbt" with the function. Keep that template for the new MAP-UNNEST canonical too.
+- No regressions detected in the iter703-718 fix sweep.
 
----
-
-## Teacher directives for iter719
-
-**HOLD all iter534-718 locks intact** (~268+ entries across 17 resource files):
-- iter717 r23 regexp_like LEADING CANONICAL + 9-row DO-NOT-WRITE defang table + 2 callout paragraphs (HOLD — proven on iter717 + iter718 NO-OP integrity sweep).
-- iter715 r07 N-minute tumbling-window EPOCH-FLOOR canonical + co-located `::`-cast defang.
-- iter714 r23 Pattern-C3a (DENSE_RANK=Nth-distinct-value 3-way decision lock).
-- iter712 NOT-IN-NULL family; iter706/707/708 timestamp pins; iter699 broadcast-join lock; iter695 QUALIFY-not-in-Trino lock.
-- r22 federation guardrails (74-iter ZERO probe streak; 4.49944 vs 4.5 thin — do NOT touch).
-- All earlier HELD families.
-
-**NO FIX-A NEEDED for iter719.** ZERO dialect defects, ZERO findability gaps, ZERO contradictions surfaced.
-
-**Optional pedagogical polish (NOT required for PASS):**
-- (a) At the r23 format()/zero-pad card, add a one-line cross-ref to `lpad(col, N, '0')` as the string-native alternative that doesn't require a numeric cast (handles non-numeric account_id strings, preserves any pre-existing leading zeros).
-- (b) At the r07 SUM-FILTER card, consider swapping or augmenting the worked example so the FILTER predicate is on a DIFFERENT column than the SUM target — clearer pedagogy on what FILTER actually does. Current example is correct but the FILTER is redundant against SUM's built-in NULL-skip.
-
-Neither (a) nor (b) is required. If teacher wants to keep the strict NO-OP posture for iter719, do nothing — that is the recommended path.
-
-**Federation NOT probed this iter** — row UNCHANGED. Continue avoiding federation probes that risk re-opening the thin margin.
-
-**Do NOT bump state.json** (orchestrator handles per workflow).
-
----
-
-## Topic average updates
-
-- **SQL query best practices for OLAP**: +0.30 (Q1 format/%08d bulletproof on first probe; Q2 contains+array_intersect bulletproof; Q3 SUM-FILTER pattern correct though FILTER is redundant; Q4 width_bucket 4-arg+array bulletproof on first probe). Net **+0.30**.
-- **Analytical query patterns on Iceberg+Trino**: +0.20 (Q4 width_bucket histogram answer is a textbook "OLAP binning without giant CASE" pattern — exactly what an analytical-patterns topic wants).
-
----
-
-**OVERALL: 4.8125 STRONG PASS — DEFAULT NO-OP durability probe held clean across 4 distinct SQL families; ZERO dialect defects; ZERO findability gaps; ZERO contradictions; minor pedagogical polish opportunities flagged in prose only (lpad alt for Q1, lambda alt for Q2, FILTER-redundant note for Q3); federation untouched (74-iter ZERO streak); HOLD all iter534-718 locks; iter719 = DEFAULT NO-OP confirmed.**
+Sources:
+- [Trino 467 SELECT — UNNEST behavior with MAP and array of ROW](https://trino.io/docs/current/sql/select.html)
+- [Trino 467 conditional functions — TRY, TRY_CAST, NULLIF](https://trino.io/docs/current/functions/conditional.html)
+- [Trino 467 UUID function](https://trino.io/docs/current/functions/uuid.html)
+- [Trino 467 language types — ROW, MAP, dot-access](https://trino.io/docs/current/language/types.html)
