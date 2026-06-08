@@ -1,50 +1,68 @@
-# Judge Feedback — iter752
+# Judge Feedback — iter753
 
-Re-probe-for-BULLETPROOFED + durability-breadth. All 4 dialect claims VERIFIED against trino.io/docs/467 (regexp/select/aggregate/comparison .html) on 2026-06-09.
+DEFAULT durability-breadth, 4 fresh picks. All dialect claims VERIFIED against trino.io/docs/467 (regexp/json/aggregate .html + sql/select.html) on 2026-06-09.
 
-## Q1 — map-merge-sum RE-PROBE (combine per-row MAP column, summing values per key per store)
+## Q1 — Reformat 10-digit phone "5551234567" -> "(555) 123-4567" (REARRANGE captured pieces into a new pattern)
 
-Answer: nested-subquery `CROSS JOIN UNNEST(products_sold) AS t(sku, units)` → inner `SUM(units) GROUP BY store_id, sku` → outer `map_agg(sku, total_units) GROUP BY store_id`. Worked example SKU-123 5+3=8. Explicit defang: do NOT use `map_union` (does not sum, arbitrary value wins).
+Answer: `CONCAT('(', SUBSTRING(phone,1,3), ') ', SUBSTRING(phone,4,3), '-', SUBSTRING(phone,7,4))`. Explained 1-based substring + concat/|| stitching. Did NOT mention `regexp_replace` with `$1/$2` backreferences AT ALL.
 
-DOCS-VERIFIED: `map_agg(key,value)->map(K,V)` correct; `map_union(x)->map(K,V)` exists but "If a key is found in multiple input maps, that key's value in the resulting map comes from an arbitrary input map" — does NOT sum; `map_union_sum` is NOT a Trino 467 function (Presto-only). The 3-level idiom RUNS: innermost UNNEST produces scalar (sku, units); middle SUM+GROUP BY store_id,sku yields one distinct row per (store, sku); outer map_agg builds the per-store map. This is the EXACT fix added in iter751 (which closed the iter750 Q2 3.00 gap where the responder omitted the UNNEST prerequisite). The responder now includes the UNNEST and the correct defang.
+DOCS-VERIFIED:
+- The substring+concat answer is ACCURATE valid Trino 467 — `substring(s,start,len)` is 1-based, `concat`/`||` stitch correctly, and it produces exactly "(555) 123-4567" for a fixed 10-digit input. Not a wrong answer.
+- The form the question explicitly asked for ("the replacement reuses pieces of what was matched — the captured groups") is `regexp_replace(phone, '(\d{3})(\d{3})(\d{4})', '($1) $2-$3')`. Confirmed at trino.io/docs/467/functions/regexp.html: "Capturing groups can be referenced in `replacement` using `$g` for a numbered group" — Trino uses `$1/$2`, NOT `\1`. The responder never surfaced this idiom.
 
-- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — **avg 5.00**
+RESOURCE STATE (grep-confirmed): The regexp_replace-backreference canonical EXISTS — r27 nuance #3 (r27:1058) has the worked `regexp_replace(phone, '(\d{3})(\d{4})', '$1-$2')` -> `555-1234` example, and the DO-NOT-WRITE row (r27:1136) correctly marks `\1` WRONG vs `$1` RIGHT. So the `$1`-not-`\1` PIN is intact and consistent. BUT this content lives in an Oracle-MIGRATION table ("the four migration nuances"), NOT in a phone-reformat LEADING CANONICAL with findable keyword anchors. The ONLY LEADING CANONICAL carrying phone-number keywords (r27:1105) is the STRIP-non-digits idiom ("clean a phone number", "remove punctuation/dashes") — which routes a "reformat phone" question to substring/strip content, NOT to the rearrange-with-capture-groups backreference form. This is a LANDING-POINT / FINDABILITY MISS: the right canonical exists but the phone-reformat + "rearrange captured pieces" keywords do not route there.
 
-## Q2 — LIKE-ESCAPE RE-PROBE (match a literal '%' in a discount code)
+- Accuracy 4 (substring+concat is correct and runs; only missing the more-idiomatic form) / Completeness 3 (omitted the regex-backreference approach the question explicitly described) / Clarity 4 (clear, but a beginner who asked for "reuse the matched pieces" gets no regex path) / Actionability 3 (works for fixed 10-digit, but brittle vs variable input; engineer not pointed at the general capture-group tool) — **avg 3.50**
 
-Answer: `WHERE discount_code LIKE '%\%%' ESCAPE '\'` with correct decomposition (wildcard-%, escaped-literal-%, wildcard-%); also `'%\_%' ESCAPE '\'` for literal underscore; alternative `strpos(discount_code,'%')>0`. Defang: do NOT use `contains()` on a varchar (array-only, won't compile).
+## Q2 — User IDs present in BOTH row-sets (logins ∩ purchases) as rows
 
-DOCS-VERIFIED: comparison.html — "The wildcard characters `_` and `%` must be escaped to allow you to match them as literals. This can be achieved by specifying the `ESCAPE` character to use." ESCAPE clause valid; `strpos(s,sub)>0` is a valid varchar substring test; `contains(x,element)->boolean` is ARRAY-only (won't compile on varchar) — the defang is correct. This directly corrects the iter750 Q2/Q3 defect (3.375) where the responder offered `contains()`-on-varchar. Now clean.
+Answer: `SELECT user_id FROM logins_this_week INTERSECT SELECT user_id FROM purchases_this_week`. Explained INTERSECT = rows in both, semi-join, dedupes by default.
 
-- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — **avg 5.00**
-
-## Q3 — FRESH: count occurrences of 'timeout' in free-text body, per row
-
-Answer: `regexp_count(ticket_body, '\btimeout\b') AS timeout_mentions`; explained `\b` word-boundary anchors the whole word; `(?i)` inline flag for case-insensitivity; returns bigint exact count per row.
-
-DOCS-VERIFIED: regexp.html — `regexp_count(string, pattern) → bigint` "Returns the number of occurrence of pattern in string" (NATIVE, counts occurrences not positions). `\b` word boundary supported (docs show `'\\b\\d+\\b'`); `(?i)` flag supported ("Case-insensitive matching ... enabled via the (?i) flag"); Java/RE2J pattern syntax. Single-backslash `'\btimeout\b'` in a Trino ANSI single-quoted string literal is preserved literally (Trino does not treat backslash as a string-literal escape) — correct form, not penalized. `regexp_count` is the right tool; `cardinality(regexp_extract_all(...))` also works (not required). Returns a count, not a boolean, not positions — exactly what the question asked.
+DOCS-VERIFIED (trino.io/docs/467/sql/select.html): "INTERSECT returns only the rows that are in the result sets of both"; defaults to DISTINCT when neither DISTINCT/ALL specified. Native row-set operator. Correctly distinct from array_intersect (array function). Responder fully correct.
 
 - Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — **avg 5.00**
 
-## Q4 — FRESH: row-set difference (signups NOT in order-placers)
+## Q3 — One JSON object per row from columns (order_id, status, total_amount) for a webhook
 
-Answer: `SELECT user_id FROM signups_last_month EXCEPT SELECT user_id FROM users_with_orders`; explained EXCEPT returns first-query rows not in second; ALSO offered anti-join `LEFT JOIN ... WHERE o.user_id IS NULL`; noted EXCEPT dedupes by default (like UNION not UNION ALL), anti-join may be faster.
+Answer: PRIMARY `json_format(CAST(MAP(ARRAY[...keys], ARRAY[...values]) AS JSON))`; ALTERNATIVE `json_format(CAST(CAST(ROW(...) AS ROW(order_id BIGINT, status VARCHAR, total_amount DECIMAL)) AS JSON))`. Explained json_format converts JSON->varchar, engine handles escaping.
 
-DOCS-VERIFIED: select.html — "EXCEPT returns the rows that are in the result set of the first query, but not the second"; EXCEPT DISTINCT is the default (dedupes); EXCEPT ALL preserves duplicates. Native row-set-difference operator, distinct from `array_except` (the array-side function). The anti-join is an equivalent, often-faster alternative. Both forms correct. Union-compatibility (same column count/types) is satisfied by the single-column user_id example — not a defect.
+DOCS-VERIFIED (trino.io/docs/467/functions/json.html):
+- `CAST(MAP(...) AS JSON)` produces a JSON OBJECT keyed by map keys — docs example `CAST(MAP(ARRAY['k1','k2','k3'], ARRAY[1,23,456]) AS JSON)` -> `{"k1":1,"k2":23,"k3":456}`. MAP approach is CORRECT for the object shape.
+- IMPORTANT correction to the run-prompt caution: in Trino 467 `CAST(<named ROW> AS JSON)` produces a JSON OBJECT WITH FIELD NAMES, not a bare array. Docs example verbatim: `CAST(CAST(ROW(123,'abc',true) AS ROW(v1 BIGINT, v2 VARCHAR, v3 BOOLEAN)) AS JSON)` -> `{"v1":123,"v2":"abc","v3":true}`. Because the responder cast to a NAMED row type (order_id/status/total_amount), the ROW alternative ALSO yields the desired `{"order_id":123,...}` object. No defect — the ROW claim is accurate for named-row casts. (The array-output behavior only applies to anonymous/unnamed ROW.)
+- `json_format` correctly serializes JSON->varchar. Both approaches valid and idiomatic.
+- Minor completeness note: Trino 467 ALSO has native SQL-standard `json_object()` / `json_array()` constructors (one-call). Not required, but the cleanest single-call alternative; absence is a minor incompleteness, not an error.
+
+- Accuracy 5 / Completeness 4 (correct; could mention native json_object() one-call form) / Clarity 5 / Actionability 5 — **avg 4.75**
+
+## Q4 — Per customer, product name from EARLIEST order (min order_date), aggregate, no window/self-join
+
+Answer: `min_by(product_name, order_date) AS first_product ... GROUP BY customer_id`. Explained min_by(x,y) returns x at min-y row, one pass; noted ROW_NUMBER for multi-column needs.
+
+DOCS-VERIFIED (trino.io/docs/467/functions/aggregate.html): `min_by(x,y)` "Returns the value of x associated with the minimum value of y over all input values." Native aggregate, works with GROUP BY, single pass, no window/self-join. Responder fully correct, and the ROW_NUMBER caveat for multi-column is a useful honest boundary.
 
 - Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — **avg 5.00**
 
-## Overall
+## OVERALL
 
-**Overall avg = 5.00 — STRONG PASS.**
+| Q | Acc | Comp | Clar | Act | Avg |
+|---|---|---|---|---|---|
+| Q1 phone-reformat (capture groups) | 4 | 3 | 4 | 3 | 3.50 |
+| Q2 INTERSECT | 5 | 5 | 5 | 5 | 5.00 |
+| Q3 JSON object per row | 5 | 4 | 5 | 5 | 4.75 |
+| Q4 min_by earliest | 5 | 5 | 5 | 5 | 5.00 |
 
-- **map-merge-sum BULLETPROOFED** — 2nd clean datapoint (iter750 gap → iter751 FIX → iter752 clean re-probe). The UNNEST prerequisite is now present and the map_union/map_union_sum defang is correct.
-- **LIKE-ESCAPE BULLETPROOFED** — 2nd clean datapoint (iter750 defect → iter751 FIX → iter752 clean re-probe). ESCAPE form correct; strpos alternative valid; contains()-on-varchar correctly defanged.
-- **Q3 regexp_count — FRESH-CLEAN.** Native, counts occurrences (not positions/boolean), `\b` + `(?i)` valid, single-backslash literal correct.
-- **Q4 EXCEPT — FRESH-CLEAN.** Native row-set difference, dedup-by-default, anti-join alternative correct, distinct from array_except.
+**Overall avg = (3.50 + 5.00 + 4.75 + 5.00) / 4 = 4.5625 -> 4.56 — PASS** (overall average governs; no single-Q veto, and Q1's 3.50 itself meets threshold).
 
-No new gaps, no defects, no card-to-card contradictions surfaced. The two iter751 FIX-A additions are both confirmed durable under a second probe.
+## iter754 designation: FIX-A (Q1 phone-reformat findability)
 
-## iter753 designation
+Q1 is the only soft spot and it is a genuine LANDING-POINT / FINDABILITY miss, not a dialect error. The regexp_replace-backreference canonical + worked phone `$1-$2` example exist (r27:1058) and the `$1`-not-`\1` PIN is intact, but they sit inside an Oracle-MIGRATION nuance table with no phone-reformat keyword anchors, while the phone-keyworded LEADING CANONICAL (r27:1105) is the STRIP-non-digits idiom. A "reformat phone into (NNN) NNN-NNNN" question routes to strip/substring, not to rearrange-with-capture-groups.
 
-**DEFAULT NO-OP / durability-breadth with 4 fresh picks.** Both iter751 fixes are bulletproofed; nothing requires editing. Do NOT re-edit r07 (map-merge-sum) or r23 (LIKE-ESCAPE) — perfect-score iteration, iter693 churn-risk applies. Suggested fresh, not-recently-probed angles for iter753: `regexp_replace` with capture-group backreference; `INTERSECT` (row-set semi-join — pairs naturally with this iter's EXCEPT); `bool_and/bool_or`; `element_at(arr,-n)` negative indexing. Pick 4.
+FIX-A specifics for the teacher:
+- Add a LEADING CANONICAL (or co-located sub-section) for "REARRANGE / reformat a string by reusing the matched pieces (capture-group backreferences)" with keyword anchors: `reformat a phone number`, `(NNN) NNN-NNNN`, `(555) 123-4567`, `rearrange captured pieces`, `reuse the matched groups in the replacement`, `put the captured groups into a new pattern`, `restructure a string with regex`, `backreference $1 $2`.
+- COPY form: `regexp_replace('5551234567', '(\d{3})(\d{3})(\d{4})', '($1) $2-$3')` -> `(555) 123-4567`. Use `$1/$2/$3` (Trino) NOT `\1` (Oracle) — reuse the existing `$1`-not-`\1` defang.
+- Place it adjacent to the existing r27 strip-non-digits canonical (r27:1103+) and/or add a co-located cross-ref from the r23/r07 string-function area, so BOTH "clean a phone" (strip) and "reformat a phone" (rearrange) routes are disambiguated and findable.
+- ALSO show the substring+concat form as a valid fixed-length alternative (it is correct) but lead with the regex-backreference form for the general "rearrange the pieces" ask.
+
+Q3 secondary: no FIX needed — the run-prompt's CAST(ROW AS JSON)-yields-array worry does NOT apply to NAMED row casts in 467 (verified object output). The existing r09 CAST-AS-JSON canonical is docs-correct. Optionally note native json_object()/json_array() as a one-call constructor, but this is enhancement, not a gap.
+
+All standing pins (regexp_replace-$1-not-\1, INTERSECT-vs-array_intersect, json_format+CAST-AS-JSON, min_by/max_by) verified CONSISTENT and INTACT.
