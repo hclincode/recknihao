@@ -1,51 +1,54 @@
-# Judge Feedback — iter744 (EXTENDED PHASE)
+# Judge Feedback — iter745
 
-**Phase**: extended | **Mode**: end-of-iteration summary | state.json NOT bumped.
+## Verdict: PASS (overall avg 4.94)
 
-All four answers verified against trino.io/docs/467 (datetime / string / comparison / array .html) on 2026-06-09 — not against resources/. Production stack Trino 467 + Iceberg on-prem; none of these answers touch auth/authz, so no prod-fit concerns.
+Four Q&A pairs, all SQL-dialect topics under already-PASSED rubric rows. Every dialect claim verified against trino.io/docs/467 (not just resources/). All four answers are dialect-correct, copy-runnable Trino 467, fit the prod stack (Trino 467 + Iceberg, ad-hoc SQL), and assume zero OLAP background. None touch auth/authz, so no prod-fit concerns.
+
+---
 
 ## Per-question scores
 
-### Q1 — combine DATE + TIME → TIMESTAMP (date+time-combine FIX-A re-probe, CRITICAL)
-- Accuracy **5** | Completeness **5** | Clarity **5** | Actionability **5**
-- Answer used `CAST(CAST(session_date AS varchar) || ' ' || CAST(session_start_time AS varchar) AS TIMESTAMP)` — the docs-correct canonical, NOT either defanged wrong form.
-- DOCS-VERIFIED: datetime.html — the `-` operator only removes intervals from temporal values; there is NO `TIME - TIME` subtraction operator. NO dedicated combine-DATE-and-TIME function exists. string.html — `||` concatenates strings (varchar operands), so both temporal operands must be CAST to varchar first; the resulting `'YYYY-MM-DD HH:MM:SS'` string casts cleanly to TIMESTAMP. Both pitfalls the responder flagged (TIME-TIME unsupported; bare date||time = type error) are correct.
-- **VERDICT: date+time-combine FIX-A CLOSED.** Used the cast-varchar-concat-cast canonical; defanged both wrong forms; no decline. First clean post-FIX-A datapoint.
+### Q1 — Combine DATE + TIME → TIMESTAMP (2nd-angle re-probe)
+- Accuracy **5** / Completeness **5** / Clarity **5** / Actionability **5** → **5.00**
+- `CAST(CAST(shipped_on AS varchar) || ' ' || CAST(shipped_at_time AS varchar) AS TIMESTAMP)` is the docs-confirmed canonical.
+- VERIFIED trino.io/docs/467: `||` is a string-concat operator — concatenating a DATE and a TIME directly is a type error, so casting BOTH operands to varchar first is required (answer does exactly this). The resulting space-separated `'YYYY-MM-DD HH:MM:SS'` string CASTs cleanly to TIMESTAMP (WebSearch confirms the space-separator form works; only the `T`-separator form fails — not used here). No dedicated combine function in 467; no TIME−TIME operator. All correctly stated.
+- Names the source (resources/13). Explains WHY (no combine fn, || is varchar-only) at a beginner level.
 
-### Q2 — Unicode code point of first char (codepoint FIX-A re-probe, CRITICAL)
-- Accuracy **5** | Completeness **5** | Clarity **5** | Actionability **5**
-- Answer used `codepoint(substr(currency_code, 1, 1))` and correctly noted codepoint requires a single character.
-- DOCS-VERIFIED: string.html — `codepoint(string) → integer` "Returns the Unicode code point of the only character of string" (REQUIRES single char). `substr(s,1,1)` returns the first character (positions start at 1). The lookalike framing (Cyrillic А vs Latin A, Oracle ASCII()/Python ord() equivalent) is accurate.
-- **VERDICT: codepoint FIX-A CLOSED.** Working SQL, single-char slice idiom, no decline. First clean post-FIX-A datapoint.
+### Q2 — Numeric character code / codepoint (2nd-angle re-probe)
+- Accuracy **5** / Completeness **5** / Clarity **5** / Actionability **5** → **5.00**
+- `codepoint(substr(product_sku, 1, 1))` + `> 127` non-ASCII filter + single-char requirement all correct.
+- VERIFIED trino.io/docs/467/functions/string.html VERBATIM: `codepoint(string) → integer` "Returns the Unicode code point of the only character of string" — single-char requirement confirmed; `codepoint('US')` errors, correctly called out. The `> 127` test is the sound ASCII-range boundary (ASCII is 0–127). `substr(s,1,1)` correctly slices the first char.
+- Worked example `codepoint('U') → 85` is correct.
 
-### Q3 — null-safe equality (IS NOT DISTINCT FROM, fresh)
-- Accuracy **5** | Completeness **5** | Clarity **5** | Actionability **5**
-- Answer used `ON u.preferred_region IS NOT DISTINCT FROM a.preferred_region`.
-- DOCS-VERIFIED: comparison.html — `IS NOT DISTINCT FROM` is a valid Trino operator that "treat[s] NULL as a known value"; `NULL IS NOT DISTINCT FROM NULL` returns TRUE (null-safe). The `=`-returns-NULL/UNKNOWN-on-NULL explanation is correct (`1 = NULL` → NULL, treated as not-true → row dropped). The `NULL INDF 'x' = FALSE` example is also correct.
-- Correct. The LEFT JOIN + `WHERE a.setting_value IS NOT NULL` shape is a fine demo and does not undermine the null-safe-join point being illustrated.
+### Q3 — Integer series via sequence() + UNNEST (fresh)
+- Accuracy **5** / Completeness **5** / Clarity **4** / Actionability **5** → **4.75**
+- `CROSS JOIN UNNEST(sequence(min_seat, max_seat)) AS t(n)` is correct.
+- VERIFIED trino.io/docs/467/functions/array.html: `sequence(start, stop)` "Generate a sequence of integers from start to stop, incrementing by 1 if start ≤ stop" → array(bigint), INCLUSIVE of both endpoints. Confirmed. UNNEST … AS t(n) expands to one row per element with the column named `n`.
+- LEFT JOIN reservations example is sound (section_id + seat_number = n). Clarity 4 only because the LEFT JOIN follow-on is described in prose rather than shown as a second runnable snippet; the core expand query is fully runnable.
 
-### Q4 — second-to-last array element (element_at negative index, fresh)
-- Accuracy **5** | Completeness **5** | Clarity **5** | Actionability **5**
-- Answer used `element_at(status_transitions, -2)` (and `-1` for current).
-- DOCS-VERIFIED: array.html — for negative index, `element_at` accesses elements from last to first (-1 = last, -2 = second-to-last). `element_at` returns NULL when accessing an index larger than array length; the `[]` subscript operator "would fail in such a case". The NULL-safe-vs-subscript-throws distinction is correct.
-- Correct.
+### Q4 — Flag (not remove) duplicate rows (fresh)
+- Accuracy **5** / Completeness **5** / Clarity **5** / Actionability **5** → **5.00**
+- `COUNT(*) OVER (PARTITION BY customer_id, DATE(event_ts))` in a CTE + `CASE WHEN cnt > 1 THEN 1 ELSE 0 END` correct.
+- VERIFIED trino.io/docs/467: aggregate functions (incl. COUNT(*)) are valid window functions via OVER; window functions run after WHERE, so they cannot be referenced in same-level WHERE — wrapping in a CTE/subquery is required (correctly stated). `date(event_ts)` / `DATE(event_ts)` is a valid Trino cast-style truncation of a timestamp to a date for the partition key.
+- Correctly preserves rows (FLAG, not DELETE) per the ask. Boolean variant `(cnt > 1) AS is_duplicate` also valid. Names the window-in-WHERE pitfall — exactly the trap a beginner hits.
 
-## Overall
+---
 
-| Q | Acc | Comp | Clar | Act |
-|---|-----|------|------|-----|
-| Q1 | 5 | 5 | 5 | 5 |
-| Q2 | 5 | 5 | 5 | 5 |
-| Q3 | 5 | 5 | 5 | 5 |
-| Q4 | 5 | 5 | 5 | 5 |
+## Overall: (5.00 + 5.00 + 4.75 + 5.00) / 4 = **4.9375 → 4.94 PASS**
 
-**Overall average: 5.00 — STRONG PASS** (overall average governs; no per-Q override).
+Per-dimension: Accuracy 5.0, Completeness 5.0, Clarity 4.75, Actionability 5.0.
 
-## FIX-A verdicts
-- **date+time-combine FIX-A (Q1): CLOSED** — not regressed; cast-varchar-concat-cast canonical used, both wrong forms defanged.
-- **codepoint FIX-A (Q2): CLOSED** — not regressed; working `codepoint(substr(s,1,1))`, no decline.
+---
 
-## iter745 flag
-- NO new defect. NO gap. Both critical FIX-As closed cleanly on their first re-probe; both fresh probes (Q3, Q4) perfect.
-- Recommend **DEFAULT NO-OP integrity sweep** for iter745. Do NOT edit the freshly-added r13 combine-DATE+TIME section or r23 codepoint/chr section — perfect-score iteration, iter693 churn-risk.
-- Optional low-prio (NOT defects, each FIX-A is at only 1 clean datapoint so a 2nd angle would bulletproof): (1) date+time-combine 2nd angle — already-ISO string via `from_iso8601_timestamp`, or computing a gap between two combined timestamps; (2) codepoint/chr 2nd angle — reverse direction `chr(n)`, or filtering rows whose first-char codepoint is out of ASCII range. Neither is blocking.
+## Bulletproofing verdicts
+
+- **Q1 date+time-combine — STAYS CLOSED. Now BULLETPROOFED.** 2nd consecutive clean datapoint (iter744 r13 fix scored clean, iter745 re-probe = 5.00). The both-wrong-forms defang (no TIME−TIME, || varchar-only) and the canonical CAST-varchar-concat-CAST form held under a fresh phrasing (shipped_on/shipped_at_time vs session_date/session_start_time).
+- **Q2 codepoint — STAYS CLOSED. Now BULLETPROOFED.** 2nd consecutive clean datapoint (iter744 net-new add, iter745 re-probe = 5.00). Single-char requirement + substr(s,1,1) idiom + >127 ASCII test all reproduced correctly under a fresh phrasing (product_sku vs country_code).
+
+## iter746 flag
+
+No genuine new gap. All four answers are docs-correct. Q3 clarity (4) is the only sub-5 dimension — purely cosmetic (LEFT JOIN follow-on in prose, not a second snippet); not a resource defect and not worth churning a bulletproofed card (iter693 lesson). Recommend iter746 = DEFAULT NO-OP integrity-sweep unless a fresh-angle probe surfaces a real landing-point gap. Both Q1 and Q2 are now bulletproofed and need no further re-probe priority.
+
+## Teacher action
+
+None required. resources/13 (combine DATE+TIME) and resources/23 (codepoint, sequence+UNNEST, window-flag) are all serving correct, findable, copy-runnable content. Hold all locks. NO state.json bump.
