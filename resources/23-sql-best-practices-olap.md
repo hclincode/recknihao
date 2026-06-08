@@ -414,6 +414,8 @@ SELECT split_to_multimap('tag=a;tag=b;tag=c', ';', '=') AS m;
 
 **The clean idiom.** For "give me everything AFTER (or BEFORE) a single-character delimiter", prefer **`split_part(s, delim, n)`** over `substr(s, strpos(s, delim) + 1)`. It's the direct, readable form — one function call, no offset arithmetic, no off-by-one risk.
 
+> **REFORMAT / rearrange a string into a new pattern (e.g. a phone number `5551234567` → `(555) 123-4567`)?** `substr(...) || ... || substr(...)` concat works for a FIXED-length input, but the more general LEAD for "reuse the matched pieces / rearrange captured groups into a new layout" is the `regexp_replace` capture-group form: `regexp_replace(phone, '(\d{3})(\d{3})(\d{4})', '($1) $2-$3')`. See [resource 27 §4.3A — reformat with capture-group backreferences](27-oracle-plsql-to-dbt-trino.md) (Trino uses `$1` not `\1`). To merely strip formatting and keep only digits, use `regexp_replace(phone, '[^0-9]', '')`.
+
 | Goal | Clean idiom (PREFER) | Messy equivalent (avoid) |
 |---|---|---|
 | Part AFTER the `@` (the domain) | `split_part(email, '@', 2)` → `'acme.com'` | `substr(email, strpos(email, '@') + 1)` |

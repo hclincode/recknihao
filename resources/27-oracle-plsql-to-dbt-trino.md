@@ -1100,6 +1100,33 @@ SELECT regexp_replace('Foo BAR baz', '(\w+)', x -> '<' || lower(x[1]) || '>');
 
 The `x[1]` is the 1st capture group of the current match. This is *not* a portable construct; it's a Trino-only convenience worth knowing when re-implementing complex string transforms that Oracle did with PL/SQL loops.
 
+#### LEADING CANONICAL — reformat a phone number / rearrange a string into a new pattern by reusing the matched pieces (capture-group backreferences)
+
+> **READ THIS FIRST if your question contains any of these keywords:** `reformat a phone number`, `format a 10-digit number as (555) 123-4567`, `(NNN) NNN-NNNN format`, `rearrange a string into a new pattern`, `reuse the matched pieces / capture groups in the replacement`, `rearrange captured groups`, `put dashes / parentheses into a phone number`, `add formatting to a phone number`, `insert dashes into a number`, `turn 5551234567 into (555) 123-4567`, `split a number into parts and reassemble`. Verified at [trino.io/docs/467/functions/regexp.html](https://trino.io/docs/467/functions/regexp.html) on 2026-06-09.
+
+**The one-fact summary.** To take a string apart and put the pieces back in a NEW arrangement (e.g. turn a bare 10-digit phone `5551234567` into `(555) 123-4567`), capture the pieces with parenthesized groups in the *pattern*, then reference them in the *replacement* string with **`$1`, `$2`, `$3`, ...** (dollar + digit). This is the idiomatic single-call way and is exactly what a "reformat / rearrange into a pattern" question is asking for.
+
+```sql
+-- ✅ COPY THIS — reformat 10 digits as (NNN) NNN-NNNN
+SELECT regexp_replace(phone, '(\d{3})(\d{3})(\d{4})', '($1) $2-$3') AS formatted;
+-- '5551234567'  ->  '(555) 123-4567'
+```
+
+How it works: the three parenthesized groups `(\d{3})(\d{3})(\d{4})` capture the area code, prefix, and line number. In the replacement, `$1` is the first group (`555`), `$2` the second (`123`), `$3` the third (`4567`); the surrounding literal text `(`, `) `, `-` is emitted verbatim, so the matched pieces are reassembled in a brand-new layout. Trino docs verbatim: *"Capturing groups can be referenced in `replacement` using `$g` for a numbered group or `${name}` for a named group."*
+
+> **❌ DO NOT COPY:** `regexp_replace(phone,'(\d{3})(\d{3})(\d{4})','(\1) \2-\3')` — **Trino backreferences use `$1`, not `\1`** — `\1` is Oracle / Java-`Matcher` syntax and on Trino emits a LITERAL backslash-1 (two characters), NOT the captured group. Always write `$<digit>`.
+
+**Clean vs reformat — pick the right idiom (ROUTER):**
+
+| You want to... | Use | Form |
+|---|---|---|
+| **CLEAN** — remove formatting, keep only the digits | strip non-digits (see the canonical immediately below) | `regexp_replace(phone, '[^0-9]', '')` → `'5551234567'` |
+| **REFORMAT** — rearrange the digits into a new pattern with parens/dashes | capture-group backreferences (this canonical) | `regexp_replace(phone, '(\d{3})(\d{3})(\d{4})', '($1) $2-$3')` → `'(555) 123-4567'` |
+
+A common two-step pipeline does both — clean first, then reformat: `regexp_replace(regexp_replace(phone,'[^0-9]',''), '(\d{3})(\d{3})(\d{4})', '($1) $2-$3')` (strip any existing punctuation, then lay in the canonical format).
+
+> **Note — `substr` + `||` concat is a valid alternative for a FIXED-length string.** `'(' || substr(phone,1,3) || ') ' || substr(phone,4,3) || '-' || substr(phone,7,4)` also produces `(555) 123-4567` and is fine when the input is always exactly 10 digits. The `regexp_replace` capture-group form above is the more general LEAD for "rearrange into a pattern" (the pattern validates the shape and is easier to adapt), but do not treat substr+concat as wrong — it is a correct fixed-length option. See r23 §3.1A / r07 string-function notes. The capture-group nuances (`$1` not `\1`) are detailed in §4.3A nuance #3 and the DO-NOT-WRITE matrix below.
+
 #### LEADING CANONICAL — strip / remove characters matching a pattern (remove all non-digits, keep only digits, delete a pattern)
 
 > **READ THIS FIRST if your question contains any of these keywords:** `remove all non-digits`, `strip non-numeric characters`, `keep only digits Trino`, `clean a phone number`, `remove punctuation / dashes / spaces`, `strip a pattern`, `delete matches Trino`, `regexp_replace remove`, `regexp_replace empty string`, `2-argument regexp_replace`, `regexp_replace no replacement`, `remove everything except letters`, `sanitize string Trino`. Verified at [trino.io/docs/467/functions/regexp.html](https://trino.io/docs/467/functions/regexp.html) on 2026-06-07.
