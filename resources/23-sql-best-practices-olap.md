@@ -950,6 +950,28 @@ All three produce **identical row counts and identical query plans** on Trino 46
 
 **When to reach for which.** Use `if()` for the 1-condition ternary. Use `CASE WHEN ... WHEN ... ELSE ... END` for **multi-branch** logic (`if()` does NOT chain — there is no `elseif` in the expression form; `CASE` is the only path). Use `count_if(p)` over `count(CASE WHEN p THEN 1 END)` and over `SUM(CASE WHEN p THEN 1 ELSE 0 END)` for COUNT-of-matching — the `count_if` form is the **idiomatic Trino-native** lead; `COUNT(*) FILTER (WHERE p)` is the ANSI-standard equivalent; `SUM(CASE WHEN p THEN 1 ELSE 0 END)` is the portable fallback.
 
+> **`IF(condition, A, B)` — the compact two-way pick (the inline if-else / shorter one-liner than CASE).** *Keyword anchors: shorter one-liner than CASE, inline if-else, two-way pick, "if this then A else B", compact conditional, pick one of two values by a condition, ternary, short conditional, pick A or B based on a flag, one-line conditional column.* When you only need to **pick one of TWO values by a single condition**, `IF(condition, true_value, false_value)` is the compact form — verified at [trino.io/docs/467/functions/conditional.html](https://trino.io/docs/467/functions/conditional.html): the 3-arg form *"Evaluates and returns `true_value` if `condition` is true, otherwise evaluates and returns `false_value`"* and is **equivalent to** `CASE WHEN condition THEN true_value ELSE false_value END` — just shorter.
+>
+> ```sql
+> -- ✅ COPY THIS — compact two-way pick (inline if-else):
+> SELECT IF(converted_at IS NOT NULL, 'converted', 'trial') AS plan_stage FROM accounts;
+>
+> -- exactly equivalent to the verbose CASE (same plan, same result), just longer:
+> SELECT CASE WHEN converted_at IS NOT NULL THEN 'converted' ELSE 'trial' END AS plan_stage FROM accounts;
+> ```
+>
+> **2-arg form returns NULL when false.** `IF(cond, x)` (no `false_value`) returns `x` when the condition is true and **`NULL`** when it is false (docs verbatim: *"otherwise null is returned and `true_value` is not evaluated"*) — equivalent to `CASE WHEN cond THEN x END` (no ELSE). Use the 2-arg form only when you genuinely want NULL on the false branch.
+>
+> **One-line router — three conditionals that look similar but are NOT interchangeable:**
+> - **`CASE WHEN … WHEN … ELSE … END`** — multi-branch (3+ outcomes). `IF` does NOT chain; reach for `CASE` the moment you have more than two outcomes.
+> - **`IF(cond, A, B)`** — two-way shorthand (exactly two outcomes, driven by ONE boolean condition). The compact form above.
+> - **`COALESCE(x, fallback)`** — **null-fallback ONLY** (returns the first non-NULL). It is NOT a general condition — you cannot say "if `x > 10` then A else B" with `COALESCE`. Do not reach for `COALESCE` when the branch is driven by a comparison/predicate; reach for `IF` or `CASE`.
+>
+> ```sql
+> -- ❌ converted_at::varchar  -- Trino has NO :: cast operator (that's PostgreSQL) — use CAST(converted_at AS varchar) — DO NOT COPY
+> ```
+> Trino 467 has **no `::` cast operator** — `x::varchar` is a parse error (`mismatched input '::'`); that shorthand is PostgreSQL-only. Always write `CAST(x AS type)` (or `TRY_CAST(...)`). See the full `::`-cast lock: [§3.1C → DO NOT WRITE — the PostgreSQL `::` cast shorthand is NOT supported in Trino 467](#do-not-write--the-postgresql--cast-shorthand-is-not-supported-in-trino-467-parse-error--iter571-pin).
+
 > **DO NOT WRITE.**
 > 1. **`DECODE(col, 'A', 1, 'B', 2, 0)`** — Oracle-only. Trino has no `DECODE`. Translate to `CASE WHEN col = 'A' THEN 1 WHEN col = 'B' THEN 2 ELSE 0 END`, OR to a chain of `if()` if it's a single condition. **CRITICAL NULL-MATCHING NUANCE on the `DECODE` → CASE translation: see [resource 27 §4.1A LEADING CANONICAL — Oracle DECODE → Trino CASE](27-oracle-plsql-to-dbt-trino.md) — DECODE treats NULL=NULL as a match, simple CASE does NOT.**
 > 2. **`IIF(condition, true_value, false_value)`** — SQL-Server-only. Trino is **`if(condition, true_value, false_value)`** (lowercase `if`, NOT `IIF`). Pasting `IIF(...)` into Trino produces `Function 'iif' not registered`.

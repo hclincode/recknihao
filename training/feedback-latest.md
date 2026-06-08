@@ -1,59 +1,121 @@
-# Judge Feedback — iter754
+# Judge Feedback — iter755
 
-**Overall: 4.06 / 5 → PASS** (threshold 3.5; overall average governs, no single-Q veto)
+**Mode:** extended phase. Dual FIX-A re-probe (Q1 IF, Q2 to_iso8601, Q3 string-reformat for BULLETPROOFED) + Q4 fresh (mode per group).
+**Docs verification:** all four verified against trino.io/docs/467 (conditional / datetime / aggregate .html) on 2026-06-09. Do NOT treat resources/ as ground truth — verified independently.
 
-All dialect claims verified against trino.io/docs/467 (conditional.html, datetime.html, regexp.html, math/aggregate) via WebFetch/WebSearch. Production stack (Trino 467 + Iceberg, on-prem) — all idioms are stack-compatible; no federation/auth surface touched.
+---
 
-| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
+## Per-question scores
+
+### Q1 — IF() two-way pick (RE-PROBE)
+Answer: `IF(quantity_on_hand > 0, 'in stock', 'sold out') AS stock_status`; explained = `CASE WHEN cond THEN a ELSE b END` but shorter; signature `IF(condition, true_value, false_value)`; IF for two-way, CASE for 3+.
+
+DOCS: conditional.html confirms native `if(condition, true_value, false_value)` — verbatim "Evaluates and returns `true_value` if `condition` is true, otherwise evaluates and returns `false_value`." Exactly the asked-for compact form.
+
+- Accuracy 5 — native, correct signature, correct CASE-equivalence.
+- Completeness 5 — answered the two-way-pick ask; correctly routed IF=2-way / CASE=3+.
+- Clarity 5 — side-by-side CASE equivalence, zero jargon.
+- Actionability 5 — copy-paste ready.
+- **Per-Q avg: 5.00**
+
+**IF() CLOSED** — 1st clean post-FIX-A datapoint. The iter755 r23 §3.1E two-way-pick canonical routed it on first re-probe. No `::`-cast slip this time (iter754 defect not repeated). Re-probe once more for BULLETPROOFED.
+
+### Q2 — to_iso8601 (RE-PROBE)
+Answer: `to_iso8601(event_time) AS event_iso`; one call; outputs `2026-06-09T14:32:09.000Z` (offset or Z for tz, no zone for bare timestamp); "emits the REAL offset, never a hard-coded fake Z".
+
+DOCS: datetime.html confirms `to_iso8601(x) -> varchar` "Formats `x` as an ISO 8601 string. `x` can be date, timestamp, or timestamp with time zone." The real-offset-vs-no-zone behavior follows correctly from the input type (a bare `timestamp` has no zone to emit; a `timestamp with time zone` carries the real offset). The "never a hard-coded fake Z" framing is the right correction to iter754's `format_datetime(...,'...''Z''')` literal-Z slip.
+
+- Accuracy 5 — native, correct return type, type-driven zone behavior accurate.
+- Completeness 4.5 — fully answers the export ask; minor: a bare `timestamp` yields NO trailing Z at all (the "...Z" example applies to a tz-carrying value or UTC-normalized input) — phrasing is correct but a reader could over-read the Z as universal. Not a defect.
+- Clarity 5 — one call, clear output.
+- Actionability 5 — copy-paste ready; correctly flags the fake-Z trap.
+- **Per-Q avg: 4.875**
+
+**to_iso8601 CLOSED** — 1st clean post-FIX-A datapoint. iter755 r27 §4.2 canonical routed it. Re-probe once more for BULLETPROOFED.
+
+### Q3 — SSN reformat "123456789" -> "123-45-6789" (RE-PROBE for BULLETPROOFED)
+Answer: `substr(ssn_raw,1,3) || '-' || substr(ssn_raw,4,2) || '-' || substr(ssn_raw,6,4) AS ssn_formatted`. Did NOT surface the capture-group form `regexp_replace(ssn_raw,'(\d{3})(\d{2})(\d{4})','$1-$2-$3')`.
+
+DOCS: substr is 1-based in Trino 467; `||` is the concat operator. Hand-tracing: `substr('123456789',1,3)`='123', `substr(...,4,2)`='45', `substr(...,6,4)`='6789' → `123-45-6789`. CORRECT.
+
+- Accuracy 5 — produces exact output, 1-based substr + `||` valid Trino 467.
+- Completeness 4 — for a FIXED-WIDTH 9-digit SSN, substr+`||` is fully idiomatic and arguably the cleaner tool (no regex engine, positions fixed and known). Capture-group form NOT surfaced, but the question gave a fixed-length input where substr is a legitimate, equally-valid answer. -1 only because the more-general regex form was not even mentioned as an alternative for variable-shape inputs.
+- Clarity 5 — slice-by-slice explanation is very clear.
+- Actionability 5 — copy-paste ready.
+- **Per-Q avg: 4.75**
+
+**string-reformat verdict: BULLETPROOFED for fixed-width inputs — but NOT yet confirmed for the regex-REQUIRING case.** For "pull fixed chunks and reassemble," substr+`||` is a fully acceptable, idiomatic answer; the capability is covered and this is NOT a findability failure. HOWEVER this re-probe used a FIXED-WIDTH input that substr handles natively, so it did NOT exercise the capture-group form the iter754 canonical was built for. Recommendation: run ONE more re-probe with a VARIABLE-SHAPE input that actually REQUIRES regex (e.g. reformat any of `5551234567` / `555-123-4567` / `(555)1234567` into `(555) 123-4567`, or rearrange `Lastname, Firstname` -> `Firstname Lastname`) to confirm the responder reaches for `regexp_replace` with `$1`/`$2` backreferences when substr CANNOT do the job. Until then: capture-group form is CLOSED-once (iter754) but not yet bulletproofed.
+
+### Q4 — Most frequent value (mode) per group (FRESH) — ACCURACY DEFECT
+Answer: `approx_most_frequent(10, product_category, 100) AS top_category ... GROUP BY customer_id`; signature `approx_most_frequent(buckets, value, capacity)`; claimed it "returns the single most common value per group in one pass"; called it an approximate aggregate.
+
+DOCS (aggregate.html, verified 2026-06-09): `approx_most_frequent(buckets, value, capacity) -> map<[same as value], bigint>` — "The returned value is a map containing the top elements with corresponding estimated frequency." **It returns a MAP<value, count>, NOT a single scalar most-common value.** So `approx_most_frequent(10, product_category, 100) AS top_category` produces e.g. `{'electronics':45,'books':30,...}` — a MAP column, NOT the single category string the question asked for. The responder's claim that it "returns the single most common value per group" is **WRONG**.
+
+Correct mode-per-group idiom (count-then-pick, exact):
+```sql
+SELECT customer_id, max_by(product_category, cnt) AS top_category
+FROM (
+  SELECT customer_id, product_category, COUNT(*) AS cnt
+  FROM orders GROUP BY customer_id, product_category
+)
+GROUP BY customer_id;
+```
+`max_by(x, y) -> [same as x]` (docs-verified) returns the value of `x` at the max `y` — the scalar mode.
+
+- Accuracy 2 — function IS native and IS for "frequent elements," but the core claim (returns a single scalar mode) is FALSE; the SQL as written returns a MAP, not the asked-for category. Mis-describes the return type.
+- Completeness 2.5 — does not answer the actual ask (single most-frequent category per customer); never mentions the count-then-`max_by` mode idiom; never mentions extracting the max-count key from the map.
+- Clarity 4 — clearly written and confident, but confidently wrong about the return type (worse for a beginner who will trust it).
+- Actionability 2 — an engineer copying this gets a MAP column and a downstream type-mismatch surprise; not actionable for the stated goal.
+- **Per-Q avg: 2.625**
+
+---
+
+## Overall
+
+| Q | Acc | Comp | Clar | Act | Avg |
 |---|---|---|---|---|---|
-| Q1 reformat (RE-PROBE) | 5 | 5 | 5 | 5 | **5.00** |
-| Q2 geometric mean | 5 | 4.5 | 4.5 | 4.5 | **4.625** |
-| Q3 two-way pick (IF/::) | 2.5 | 2.5 | 3 | 2.5 | **2.625** |
-| Q4 ISO-8601 timestamp | 4 | 3.5 | 4.5 | 4 | **4.00** |
+| Q1 IF() | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 to_iso8601 | 5 | 4.5 | 5 | 5 | 4.875 |
+| Q3 SSN reformat | 5 | 4 | 5 | 5 | 4.75 |
+| Q4 mode/group | 2 | 2.5 | 4 | 2 | 2.625 |
 
-**Overall avg = (5.00 + 4.625 + 2.625 + 4.00) / 4 = 4.06 → PASS**
+**Overall avg = (5.00 + 4.875 + 4.75 + 2.625) / 4 = 4.3125 → 4.31**
 
----
-
-## Q1 — REFORMAT RE-PROBE: phone/string-reformat findability is **CLOSED** (1st post-fix datapoint)
-
-The responder LED with the correct `substring(...) || '-' || ... || '-' || ...` fixed-length form AND, critically, surfaced the capture-group form the question explicitly asked for:
-`regexp_replace(confirmation_number, '(\w{3})(\d{8})(\d{3})', '$1-$2-$3')` → `ORD-20260609-001`, with the explicit "Trino uses `$1`/`$2`/`$3`, not `\1` (Oracle/Java porting mistake)" note.
-
-Verified against trino.io/docs/467/functions/regexp.html: replacement uses `$g` for numbered groups; `\1` emits a literal backslash-1. Both forms produce `ORD-20260609-001`. The iter754 FIX-A (r27 §4.3A reformat LEADING CANONICAL + keyword anchors "rearrange a string into a new pattern / reuse the matched pieces / split a number into parts and reassemble" + r23 §3.1A cross-ref) routed the responder to the capture-group form on the FIRST re-probe with a different string shape (order number, not phone). **The reformat-with-capture-groups landing point is CLOSED.** Re-probe once more from a third angle (e.g. SSN/date reformat) before fully retiring, but this is a clean post-fix datapoint.
-
-## Q2 — Geometric mean: correct core, minor verbosity
-
-`exp(avg(ln(growth_multiplier)))` is the correct geometric-mean idiom (verified: ln/exp/avg all native Trino 467; no native geomean aggregate). The `power(exp(avg(ln(x))), 1.0)` wrapper is a no-op (raising to the 1.0 power) — the responder correctly flagged it as "technically redundant," so no accuracy hit. Only ding: it should have written `exp(avg(ln(x)))` cleanly as the lead rather than the redundant wrapper, and ideally noted the `x <= 0` caveat (ln undefined for non-positive multipliers). Solid pass.
-
-## Q3 — HIGHEST-RISK: two real defects (the primary iter755 gap)
-
-The responder FUMBLED the explicitly-requested "shorter one-liner than CASE":
-
-1. **MISSED `IF(condition, a, b)`.** Verified native in Trino 467 (conditional.html: `if(condition, true_value, false_value)` — "equivalent to CASE WHEN"). This IS the direct answer to "shorter one-liner": `IF(converted_at IS NOT NULL, 'converted', 'trial')`. The responder never mentioned it — gave only the verbose `CASE WHEN` (correct but exactly what the engineer said they wanted shorter than) and concluded CASE was "cleanest." **Findability gap.**
-
-2. **`::varchar` DIALECT DEFECT.** The responder offered `COALESCE(converted_at::varchar, 'trial')`. Verified: Trino 467 does NOT support the PostgreSQL `::` cast operator (only an open feature request, trinodb/trino#23795). `converted_at::varchar` raises a parse error (`mismatched input ':'`). Classic Postgres-ism. **The `::` defang IS heavily inoculated elsewhere** (r07:512/1799-1802, r13:5679, r17:1459, r27:205) — but NONE of those defangs sit at the two-way-conditional / `IF` landing point, so the responder reached for `::` anyway in the conditional context.
-
-The COALESCE fumble (offering it, retracting it, then re-offering a broken cast variant) reads poorly. CASE is correct, so not a total miss, but accuracy is dinged for the non-compiling `::` cast AND completeness for missing the asked-for `IF()` form.
-
-## Q4 — ISO-8601: accurate but verbose, missed the native one-call
-
-`format_datetime(CAST(created_at AS timestamp), 'yyyy-MM-dd''T''HH:mm:ss''Z''')` is valid Trino 467 (Joda pattern, `''` = literal quote) and produces `2026-06-09T14:32:09Z`. BUT the responder missed two native dedicated functions (both verified on datetime.html):
-- `to_iso8601(x)` → varchar — emits ISO-8601 directly from date/timestamp/timestamp-with-tz. The one-call answer.
-- `from_iso8601_timestamp(s)` → timestamp(3) with time zone — to parse back (the question's "and/or parse one back" half went unanswered).
-
-Subtle accuracy concern: the hard-coded literal `'Z'` writes the CHARACTER Z — it labels output UTC WITHOUT converting or verifying the timezone. If `created_at` is not actually in UTC, the output is mislabeled. `to_iso8601()` emits the real offset, avoiding this trap. Minor ding (the format_datetime form works for an already-UTC value), but the missed native function + the misleading-Z point keep this off a 5.
+**PASS** (overall avg 4.31 >= 3.5; overall governs, no single-Q veto). Q4's 2.625 is sub-threshold on its own but does not veto.
 
 ---
 
-## iter755 designation
+## CLOSED / BULLETPROOFED status
 
-**PRIMARY: iter755 = FIX-A on Q3 — two-way-conditional `IF()` findability + `CAST-not-::` defang at the conditional landing point.**
+- **IF() two-way pick: CLOSED** (1st clean post-FIX-A datapoint, iter755). Re-probe once more for BULLETPROOFED.
+- **to_iso8601: CLOSED** (1st clean post-FIX-A datapoint, iter755). Re-probe once more for BULLETPROOFED.
+- **string-reformat: BULLETPROOFED for fixed-width inputs** (substr+`||` is a fully valid answer here, not a findability miss). NOT yet exercised for the regex-REQUIRING case — needs ONE re-probe with a variable-shape input that substr cannot handle, to confirm the responder reaches for `regexp_replace('...','(...)(...)','$1-$2')`.
 
-The `if()` canonical EXISTS (r23 §3.1E, docs-verbatim signatures + IIF/ELSEIF/DECODE defang) — but its keyword anchors are dominated by `count_if` / "count true rows per group". There are NO anchors for the *scalar two-way pick* phrasings: "shorter one-liner than CASE", "inline if-else", "two-way conditional", "pick A if condition else B", "show 'converted' else 'trial'", "ternary for a two-value column". Teacher actions:
-1. Add scalar-two-way-pick keyword anchors to the r23 §3.1E LEADING CANONICAL ("shorter than CASE / one-liner if-else / two-way pick / pick one of two values / inline conditional / X if condition else Y") and add a worked `IF(col IS NOT NULL, 'a', 'b')` example so `IF` LEADS for the scalar two-value case (count_if stays the lead for the aggregate-count case — keep both, route by intent).
-2. Add a co-located INLINE-DEFANG (iter693 un-copyable style) at that SAME conditional landing point: `COALESCE(ts::varchar, 'x')` ❌ — Trino has no `::` cast, use `CAST(ts AS varchar)`; AND note COALESCE is NULL-coalescing across same-typed values, NOT a two-way conditional (the responder mis-reached for COALESCE on a timestamp→string). The `::` defang exists elsewhere but not HERE; placing it at the conditional landing point closes the route the responder actually took.
+---
 
-**SECONDARY: Q4 `to_iso8601` / `from_iso8601_timestamp` findability.** Neither is in r27 (Oracle-migration, where a timestamp→JSON-string question would land); `from_iso8601_timestamp` appears only as an aside in r13:5710. Add a LEADING CANONICAL (best in r23 or r27 datetime section) anchored on "ISO-8601 timestamp / ISO timestamp for JSON / format timestamp as ISO string / 2026-06-09T14:32:09Z / parse an ISO timestamp": `to_iso8601(created_at)` to emit, `from_iso8601_timestamp(s)` to parse, with a note that hard-coding a literal `'Z'` in format_datetime does NOT convert/verify UTC (use `to_iso8601` for a real offset, or `with_timezone(...)` / `AT TIME ZONE 'UTC'` first).
+## iter756 DESIGNATION: FIX-A (Q4 — mode / most-frequent-value per group)
 
-Q1 reformat is CLOSED (re-probe clean). Q2 is solid. Edit r23 (+ optionally r27) ONLY; do not touch resources/22.
+GENUINE RESOURCE DEFECT, not a responder synthesis slip. Confirmed at `resources/23-sql-best-practices-olap.md:879`:
+
+```
+| You want the **most common** value per group. | `approx_most_frequent(buckets, x, capacity)` ... Not `arbitrary`. |
+```
+
+This row routes "most common value per group" straight at `approx_most_frequent` with NO note that it returns `MAP<value, count>` (not a scalar), and there is NO mode-per-group canonical (`max_by` over a count subquery) anywhere in resources/. The responder faithfully reproduced the resource's implication. Fix the resource:
+
+1. **ADD a "most frequent value / mode per group" LEADING CANONICAL** (r23 §3.1D, near the max_by neighborhood) with keyword anchors: *most common value per group / mode per group / most frequently ordered category per customer / single most frequent value / top value by frequency / which X appears most per group*. COPY:
+   ```sql
+   SELECT customer_id, max_by(product_category, cnt) AS top_category
+   FROM (SELECT customer_id, product_category, COUNT(*) AS cnt
+         FROM orders GROUP BY customer_id, product_category)
+   GROUP BY customer_id;
+   ```
+   Explain: inner query counts each value per group; outer `max_by(value, cnt)` returns the value at the max count = the scalar mode. EXACT, single extra GROUP BY, no window needed. Mention `ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY cnt DESC)` as the tie-break-control alternative.
+
+2. **FIX r23:879 (reconcile, don't append — standing pin)** — the row must NOT point "most common value" at `approx_most_frequent` as if it returns a scalar. Clarify: `approx_most_frequent(buckets, x, capacity)` returns a `MAP<value, BIGINT>` of approximate top-N values→counts — it is for "give me the top-N frequent values WITH their counts," NOT "the single most-frequent value." For the single scalar mode, use the `max_by`-over-count form above (exact), or extract the max-count key from the map if approximate is acceptable.
+
+3. **INLINE-DEFANG** (iter693 un-copyable form): mark `approx_most_frequent(10, x, 100) AS top_category` WRONG for "single most common value" — returns a MAP like `{'electronics':45,'books':30}`, not a category string — DO NOT COPY.
+
+Do NOT re-edit Q1 (r23 §3.1E IF canonical), Q2 (r27 §4.2 to_iso8601), or Q3 (r27 §4.3A reformat) — all clean/perfect this iter, churn-risk per iter693.
+
+PIN (carry forward): **approx_most_frequent(buckets,value,capacity) returns MAP<value,BIGINT> approximate top-N — NOT a scalar mode; mode-per-group = max_by(value, COUNT(*)) over a `... GROUP BY group,value` count subquery (exact).** max_by(x,y) -> [same as x] = value of x at max y.

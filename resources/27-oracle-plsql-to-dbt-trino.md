@@ -623,6 +623,28 @@ These are the per-expression rewrites you'll do on almost every migrated SELECT.
 >
 > **For niche needs only** — `format('%1$td/%1$tm/%1$tY', ts)` Java Formatter syntax IS a real Trino function but a niche choice. Use it only when you need Java Formatter-specific features (positional args, indexed reuse). For ordinary TO_CHAR migration, `date_format` / `format_datetime` are the canonical answers.
 >
+> ### LEADING CANONICAL — `to_iso8601` / `from_iso8601_timestamp` — the STANDARD ISO-8601 timestamp string (for an API / JSON payload)
+>
+> *Keyword anchors: ISO-8601 timestamp string, format a timestamp as ISO-8601 for an API/JSON, `2026-06-09T14:32:09Z`, standard timestamp string, emit a timestamp in ISO format, serialize a timestamp for JSON, parse an ISO-8601 string back to a timestamp, read an ISO timestamp string, ISO 8601 date string.*
+>
+> When you want the **standard ISO-8601 string** of a timestamp (the shape APIs and JSON payloads expect — e.g. `'2026-06-09T14:32:09.000Z'`), use the purpose-built functions — **one call, no format string to get wrong.** Verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html): `to_iso8601(x) → varchar` (accepts `date`, `timestamp`, or `timestamp with time zone`), `from_iso8601_timestamp(string) → timestamp(3) with time zone`, and `from_iso8601_date(string) → date`.
+>
+> ```sql
+> -- ✅ COPY THIS — emit a standard ISO-8601 string (one call):
+> SELECT to_iso8601(created_at) AS created_iso FROM orders;
+>     --   on a TIMESTAMP WITH TIME ZONE → emits the REAL offset, e.g. '2026-06-09T14:32:09.000Z' or '...+02:00'
+>     --   on a BARE TIMESTAMP (no zone)  → emits NO zone, e.g. '2026-06-09T14:32:09.000'
+>     --   on a DATE                      → '2026-06-09'
+>
+> -- ✅ parse an ISO-8601 string BACK to a timestamp:
+> SELECT from_iso8601_timestamp('2026-06-09T14:32:09Z') AS ts;   -- → timestamp(3) with time zone
+> SELECT from_iso8601_date('2026-06-09')                AS d;    -- → date
+> ```
+>
+> **`to_iso8601` emits the REAL zone — a hard-coded literal `'Z'` does NOT convert or verify UTC.** A common slip is to build the ISO string by hand with `format_datetime(ts, "yyyy-MM-dd'T'HH:mm:ss'Z'")` — the `'Z'` there is a **literal character**, written verbatim regardless of the value's actual offset; it does NOT convert the value to UTC and does NOT verify that it is UTC. If the underlying value is in `America/New_York`, you would print a `Z` while the time is really `-05:00` — silently wrong. Prefer **`to_iso8601(ts)`**, which emits the value's actual offset (and only prints `Z` when the instant truly is UTC). If you genuinely want the string normalized to UTC first, convert the value (`to_iso8601(ts AT TIME ZONE 'UTC')`), don't fake the `Z`.
+>
+> **Distinct from §4.2 `date_format` / `format_datetime` (custom display patterns).** `date_format` / `format_datetime` are for **custom / arbitrary** layouts (`'%Y-%m-%d'`, `'Jun 09, 2026'`, weekday names — see the LEADING CANONICAL above). `to_iso8601` is for the **one fixed standard** ISO-8601 shape — reach for it when the requirement is literally "ISO-8601" / "the standard timestamp string" / "what an API expects", not a bespoke layout.
+>
 > ### DO-NOT-WRITE matrix — Trino has NO `::` cast operator and NO `TO_CHAR` function
 >
 > | Forbidden form | Where it comes from | What it does in Trino 467 | Trino-correct equivalent |
