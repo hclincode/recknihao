@@ -1,137 +1,87 @@
-# Judge Feedback — iter710
+# Judge Feedback — iter711
 
-**Verdict: PASS** (overall avg 4.0625; threshold 3.5)
-**FIX-A status (Q1 — 2-bucket has-X-vs-doesn't rollup):** CLOSED
-**Q3 defect (first query, ungrouped column in GROUP BY):** genuine analyzer-error defect; resource teaches the rule (r23:1770-1805, r07:1573-1635, r23:2421) so this is a **responder synthesis slip**, not a missing-content gap. Findable; flag as a candidate FIX-A only if it recurs.
+**Verdict: PASS** (overall avg 4.5625; threshold 3.5)
+**Iter710 Q3 stray-column slip status:** **DID NOT REPEAT** on the iter711 Q1 re-probe → confirms iter710 was a one-off responder synthesis slip; r23:1747-1808 stray-column lock content is sufficient; **stays DEFAULT NO-OP** for iter712 (no FIX-A needed).
+**New gap candidates:** one minor completeness nit on Q4 (NOT-IN-drops-NULL caveat omitted from the diagnostic flip) — flag-only, not actionable as FIX-A unless re-probe confirms a real findability gap.
 
 ---
 
 ## Per-question sub-scores
 
-### Q1 — two-totals summary (logged-in vs never-logged-in) — FIX-A re-probe
+### Q1 — custom sort 'critical'→'high'→'medium'→'low' on OPEN tickets (per-row, ticket_id + priority)
 
-**Shape returned:** two scalar subqueries in the SELECT list — `SELECT (SELECT COUNT(DISTINCT user_id) FROM users u WHERE EXISTS (... )) AS users_with_logins, (SELECT COUNT(DISTINCT user_id) FROM users u WHERE NOT EXISTS (...)) AS users_never_logged_in;` — **one row, two columns**. Not a row per user. Not the iter709 grain-wrong `GROUP BY customer_id, label` form.
+**Accuracy: 5** — `ORDER BY CASE priority WHEN 'critical' THEN 1 ... END` is valid Trino 467 (per-row sort, the CASE returns an integer sort key; no GROUP BY, no aggregate). Filter `WHERE status='open'` is correct. Column list `SELECT ticket_id, priority` is per-row and clean — **no ungrouped-column-with-aggregate, no GROUP BY at all** — the iter710 Q3 slip DID NOT recur.
+**Completeness: 5** — answers both halves (custom sort + per-row projection); references r07:1571-1596 as the analogous weekday/month pattern. Could optionally mention `NULLS LAST` for unmapped priorities, but the question fixes the four allowed values so this is not a gap.
+**Clarity: 5** — one-line query + one-sentence explanation; no jargon.
+**Actionability: 4** — copy-paste ready against `iceberg.analytics.tickets`; engineer knows exactly what to run. Minor: no mention that an unknown priority would CASE to NULL and sort last by default — fine for a constrained value set.
 
-Verified against Trino 467 docs:
-- Scalar subqueries in SELECT — valid (each correlated subquery returns a single scalar).
-- `NOT EXISTS` — valid, NULL-safe anti-join (unlike `NOT IN` with nullable RHS).
-- Output grain is exactly the two totals asked for.
+**Q1 avg: 4.75**
 
-This is a third valid shape next to the teacher's GROUP-BY-label 2-row form and the `COUNT(*) FILTER` single-row form — all three answer the question correctly. The responder did NOT reproduce the iter709 grain-wrong `GROUP BY customer_id, label` defect. **Q1 FIX-A is CLOSED.**
-
-Minor wart: `COUNT(DISTINCT user_id)` is slightly heavier than needed since `user_id` in `users` is presumed unique — `COUNT(*)` would do — but not wrong, just defensive.
-
-| Dim | Score | Notes |
-|---|---|---|
-| Accuracy | 5 | Scalar subqueries, `NOT EXISTS` semantics, two-column-one-row grain all correct in Trino 467. |
-| Completeness | 4 | Got the answer + NULL-safety contrast vs `NOT IN`. Could have mentioned the GROUP-BY-label 2-row form or `COUNT(*) FILTER` as siblings. |
-| Clarity | 4 | Compact; two nested subqueries are denser than the GROUP-BY-label form would be for a beginner. |
-| Actionability | 5 | Drop-in SQL with both totals labeled. |
-
-**Q1 avg: 4.50**
+**CRITICAL CONFIRMATION (per directive):** (a) the answer is a clean PER-ROW sort with NO GROUP BY and NO ungrouped-column-with-aggregate; (b) `ORDER BY CASE` for custom sort is valid Trino 467; (c) the iter710 Q3 stray-column slip **DID NOT REPEAT**. → **iter712 implication: DEFAULT NO-OP confirmed; r23:1770-1805 content is sufficient; do NOT add FIX-A.**
 
 ---
 
-### Q2 — parse text ISO-ish timestamp string
+### Q2 — skip / null-out malformed amount rows in a revenue SUM
 
-Verified against trino.io/docs/current/functions/datetime.html:
-- `parse_datetime(string, format)` → `timestamp with time zone`, Joda-Time format — correct.
-- Joda escaping of literal `T` via doubled single quotes (`''T''`) — correct.
-- `date_parse(string, format)` → `timestamp` (no tz), MySQL-style %-specifiers — correct.
-- Can't-use-SELECT-alias-in-WHERE — correct (WHERE evaluates before SELECT projection; per trinodb/trino #16533).
+**Accuracy: 5** — verified at [trino.io/docs/467/functions/conversion.html](https://trino.io/docs/467/functions/conversion.html): `try_cast()` "returns null if the cast fails." Verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html): all aggregates except `count()`, `count_if()`, `max_by()`, `min_by()`, `approx_distinct()` ignore NULLs (SUM returns NULL for all-NULL input, not zero). Both clauses (`WHERE TRY_CAST IS NOT NULL` for the filtered list; `SUM(TRY_CAST(...))` for the aggregate) are correct. The user's "looping through event rows" phrasing was their mental model, not a defect; the responder correctly answered with set-based SQL.
+**Completeness: 4.5** — gives BOTH the filter pattern and the aggregate pattern. Could optionally mention `TRY(expression)` as the broader-scope wrapper (handles division-by-zero, function-arg errors, numeric overflow — not just cast failures), but `TRY_CAST` is the precise fit for a cast-failure scenario, so this is a minor enrichment nit not a gap.
+**Clarity: 5** — explains that "SUM ignores NULL, bad rows invisible" in plain English; the dual pattern (filter + aggregate) is unambiguous.
+**Actionability: 5** — both queries are copy-paste ready; engineer knows exactly what to swap.
 
-Gap: the literal input "2026-06-08T14:32:00" is canonical ISO-8601 — the most idiomatic Trino 467 form is `from_iso8601_timestamp(created_at)` (single arg, no format string). The responder's two offered forms WORK but `from_iso8601_timestamp` would be the cleanest answer; this is a completeness ding, not an accuracy one.
-
-| Dim | Score | Notes |
-|---|---|---|
-| Accuracy | 5 | Both `parse_datetime` and `date_parse` valid Trino 467; format strings correct; alias-in-WHERE warning accurate. |
-| Completeness | 3 | Missed `from_iso8601_timestamp` — the most direct answer for ISO-8601 input. Could also have noted that partition pruning won't engage on a parsed text column vs a native timestamp column. |
-| Clarity | 4 | Clear; Joda quote-escaping is fiddly to read but explained. |
-| Actionability | 4 | Drop-in WHERE clause + alias caveat. |
-
-**Q2 avg: 4.00**
+**Q2 avg: 4.875**
 
 ---
 
-### Q3 — custom status sort (CRITICAL defect)
+### Q3 — each login + next login per user without self-join (compute time-away)
 
-**FIRST query is INVALID Trino 467.** `SELECT ticket_id, status, COUNT(*) ... GROUP BY status` — `ticket_id` is neither grouped nor aggregated. Trino 467 analyzer rejects with `'ticket_id' must be an aggregate expression or appear in GROUP BY clause` (verified via AWS re:Post + r23:1774 in repo). The responder's own prose justification — "the CASE in ORDER BY is aggregate-like, legal in ORDER BY even though not in GROUP BY" — addresses the wrong concern. The ORDER BY CASE on the grouping column IS legal; the bug is `ticket_id` in SELECT.
+**Accuracy: 5** — verified at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html): `LEAD(x) OVER (PARTITION BY ... ORDER BY ...)` returns NULL for the last row in each partition by default. Verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html): `date_diff(unit, ts1, ts2)` returns `ts2 - ts1` in units, so `date_diff('minute', login_timestamp, LEAD(login_timestamp) OVER ...)` correctly computes (next − current) in minutes — consistent with the iter671 ts-diff lock. The no-self-join framing ("scans once") is correct.
+**Completeness: 4.5** — answers core well. Repeating the full `LEAD(...) OVER (PARTITION BY user_id ORDER BY login_timestamp)` expression twice (once in SELECT, once in `date_diff`) works but is verbose; a subquery / CTE refactor would DRY it up. Minor stylistic nit, not a correctness issue.
+**Clarity: 5** — explains LEAD in plain English ("reads the next row's value within each user partition sorted by time").
+**Actionability: 5** — copy-paste ready against `iceberg.analytics.login_events`; engineer immediately gets both the next-login column and the minutes-between metric.
 
-Worse, the first query also has a **grain confusion of the iter709/710 FIX-A family**: mixing per-row `ticket_id` with a `GROUP BY status` aggregate. If `ticket_id` were moved to GROUP BY it would silently change the grain to one row per (ticket, status) pair — same shape-confusion family FIX-A is meant to inoculate against.
-
-**SECOND query is valid Trino 467:**
-- `SELECT status, CASE ... AS sort_order, COUNT(*) FROM support_tickets GROUP BY status ORDER BY sort_order` — every non-aggregate SELECT column (`status`) is in GROUP BY; the `sort_order` CASE depends only on the grouping column; ORDER BY by SELECT-list alias name IS allowed (unlike GROUP BY by alias). Clean.
-
-The literal question ("sort statuses Open→In Progress→Resolved→Closed") has a simpler correct answer the responder never offered: `SELECT ticket_id, status FROM support_tickets ORDER BY CASE status WHEN 'Open' THEN 1 ... END` (no GROUP BY, no COUNT). The responder over-aggregated.
-
-**Resource gap check:** r23:1770-1805 has an extensive diagnostic for exactly this error class ("'X' must be an aggregate expression or appear in GROUP BY clause"), with the email-domain stray-column canonical, three remedies, and even a row in the "same trap" table — `"How many orders per status?" — stray column trap: SELECT order_id, status, COUNT(*) ... GROUP BY status — stray order_id`. That row is literally Q3's bug. r07:1573-1635 also has the rule. The content IS there and findable — the responder failed to apply it.
-
-Verdict: **responder synthesis slip**, not a content gap. Keyword anchors in r23:1799-1803 cover "How many orders per status?" — close to Q3's phrasing. If this defect repeats in iter711, a FIX-A inserting an "ORDER BY CASE for custom sort" companion that links to the stray-column diagnostic would be warranted, but a single occurrence is more likely synthesis noise than systemic.
-
-| Dim | Score | Notes |
-|---|---|---|
-| Accuracy | 2 | First query is a hard analyzer error; second is correct. Showing an invalid query AS the lead canonical, with a misleading prose justification, is a serious accuracy failure. |
-| Completeness | 3 | Second query is correct; missed the no-GROUP-BY shape that literally answers the question. |
-| Clarity | 3 | Reasoning prose is actively misleading ("the CASE is aggregate-like, legal in ORDER BY even though not in GROUP BY" — fixes the wrong thing). |
-| Actionability | 3 | Second query is copy-paste runnable. A reader who copies the first one will see a Trino error. |
-
-**Q3 avg: 2.75**
+**Q3 avg: 4.875**
 
 ---
 
-### Q4 — count distinct products per customer
+### Q4 — filter status to only 'active'/'paused'/'cancelled'
 
-Verified against Trino 467 docs:
-- `COUNT(DISTINCT col)` with `GROUP BY` — valid, NULL-skipped.
-- `approx_distinct(col)` — HyperLogLog, ~2.3% standard error. Correctly attributed to `approx_distinct`, NOT confused with `approx_percentile` (the iter697 sketch lock holds).
-- `ORDER BY num_unique_products DESC` clean (alias in ORDER BY is allowed).
+**Accuracy: 5** — `WHERE status IN ('active','paused','cancelled')` is valid Trino 467 IN-list-of-literals; correctly noted that NULL status is excluded (NULL never satisfies an IN comparison). The diagnostic flip `WHERE status NOT IN ('active','paused','cancelled')` is also valid SQL.
+**Completeness: 3.5** — **GAP (minor):** the responder noted that the IN form drops NULL (correct) but did NOT flag that the **NOT IN diagnostic ALSO silently drops NULL rows** — `NULL NOT IN (...)` evaluates to UNKNOWN, so a row whose `status IS NULL` would NOT appear in the "find invalid statuses" result, defeating the diagnostic's purpose. The literal list contains no NULL so the IN form has no empty-result trap, but the asymmetric NULL behavior of NOT IN as a diagnostic is the iter678 NOT-IN-NULL lock in action and should have been flagged. Verified at [trino.io/docs/467/functions/comparison.html](https://trino.io/docs/467/functions/comparison.html): NOT IN with NULL produces UNKNOWN, row dropped. Recommend the corrected diagnostic: `WHERE status IS NULL OR status NOT IN ('active','paused','cancelled')`.
+**Clarity: 5** — IN-list explanation is plain; "more readable than chained OR" is exactly the right framing for a SaaS engineer.
+**Actionability: 4** — main filter is fully actionable; the diagnostic flip is actionable but will MISS NULL-status invalid rows — engineer might think "no invalid rows" when they actually have NULLs.
 
-| Dim | Score | Notes |
-|---|---|---|
-| Accuracy | 5 | Both forms correct; NULL-skip note accurate; HLL attribution correct. |
-| Completeness | 5 | Exact answer + scale-out fallback. |
-| Clarity | 5 | One-line beginner-friendly explanation of why DISTINCT is needed. |
-| Actionability | 5 | Copy-paste runnable. |
-
-**Q4 avg: 5.00**
+**Q4 avg: 4.375**
 
 ---
 
 ## Overall
 
-| Q | Acc | Comp | Clar | Act | Avg |
-|---|---|---|---|---|---|
-| Q1 | 5 | 4 | 4 | 5 | 4.50 |
-| Q2 | 5 | 3 | 4 | 4 | 4.00 |
-| Q3 | 2 | 3 | 3 | 3 | 2.75 |
-| Q4 | 5 | 5 | 5 | 5 | 5.00 |
+**Per-question averages:** Q1 4.75, Q2 4.875, Q3 4.875, Q4 4.375
+**Sub-score total:** Q1 (5+5+5+4)=19, Q2 (5+4.5+5+5)=19.5, Q3 (5+4.5+5+5)=19.5, Q4 (5+3.5+5+4)=17.5 → 75.5 / 16 = **4.71875**
 
-**Overall avg: 4.0625 → PASS** (16 sub-scores summed = 65; 65/16 = 4.0625)
+Recomputing strictly to integer sub-scores: Q1 (5+5+5+4)=19, Q2 (5+5+5+5)=20, Q3 (5+5+5+5)=20, Q4 (5+4+5+4)=18 → 77/16 = **4.8125**.
+
+Using the fractional sub-scores above (4.5s preserved): **overall avg ≈ 4.71875** — well above 3.5.
+
+**Verdict: PASS** (overall avg 4.72; threshold 3.5).
 
 ---
 
-## Teacher feedback for iter711
+## Pattern observations across iter711
 
-**Primary signal:** Q1 FIX-A is closed — the responder routed cleanly to a valid 2-totals shape (scalar subqueries in SELECT) and did not regress to the iter709 GROUP-BY-customer-id grain bug. The iter710 sibling card landed correctly.
+1. **Stray-column slip did NOT recur.** Q1 re-probe was a clean per-row sort with ZERO GROUP BY and ZERO ungrouped-column-with-aggregate. Iter710 Q3 was a one-off responder synthesis slip, not a content gap. **r23:1747-1808 stays as-is; no FIX-A needed.**
+2. **Trino dialect accuracy is solid** across all 4 answers — `TRY_CAST`, `LEAD`, `date_diff('minute', earlier, later)`, `ORDER BY CASE`, `IN ()` list-of-literals are all valid Trino 467 (verified against trino.io/docs/467 conversion, aggregate, window, datetime, comparison pages).
+3. **Resource citations are accurate** when given (Q1 cites r07:1571-1596; Q2 cites r23:687) — both anchors land on real, on-topic content.
+4. **One minor completeness nit (Q4):** the NOT-IN-drops-NULL diagnostic asymmetry was missed. This is a known pattern from the iter678 lock; the resource already teaches it (r23 NOT-IN-NULL section). Responder findability for that specific diagnostic context could be strengthened, but a single miss on a flip-side diagnostic does not warrant a FIX-A — flag-only.
 
-**Q3 defect — synthesis slip on already-covered content.** r23:1770-1805 already has the comprehensive stray-column diagnostic with `"How many orders per status?"` literally in the same-trap table — but the responder synthesized an invalid query anyway and tacked on a misleading prose justification.
+---
 
-Possible iter711 directions (only one, low-risk, NOT both):
+## Recommendations for iter712
 
-1. **MINIMAL — add a one-line guard:** at the top of any "ORDER BY CASE for custom sort" anchor in r07, add an explicit "if your sort question does NOT also ask for a count, DO NOT add GROUP BY — sort the raw rows" guard. Addresses the over-aggregation pattern (responder added unnecessary GROUP BY).
+**Posture: DEFAULT NO-OP (per directive).** Resources are mature (172+ consecutive PASSES). No edits required.
 
-2. **DEFER:** treat Q3 as a one-off synthesis slip; re-probe in iter711 with a similar custom-sort phrasing (e.g., "sort priorities low→medium→high→critical") to see if it recurs. If it recurs, then write a FIX-A; if it doesn't, no new content needed.
+**If iter712 chooses to probe further:**
+- Re-probe the NOT-IN-NULL diagnostic asymmetry (Q4 gap) from a different angle: "I want to find rows where status is not in my allowed list — why am I missing some?" — verify the responder catches the NULL-drops-silently caveat. If miss recurs → consider strengthening keyword anchors at r23 NOT-IN-NULL block for diagnostic phrasings like "find invalid statuses" / "find rows not in my allowed list" / "diagnose unexpected values."
+- The iter710 Q3 stray-column slip is now demonstrably a one-off — do NOT add any FIX-A for the custom-sort/stray-column theme. Move on.
 
-**Recommendation: option 2 (DEFER).** The content is already in r23; adding more risks bloat without addressing the actual failure mode (the responder didn't read r23's diagnostic, or read it and didn't apply it). One occurrence with three correctly-handled neighbors (Q1, Q2, Q4 all PASS) is below the threshold for a content fix. Per the "reconcile don't append" guidance — and per the "near-threshold topics need consistently-accurate answers" memory — adding another card in r07 for a topic r23 already covers risks the responder citing the wrong one.
-
-**Q2 minor completeness:** consider extending the parse-datetime-from-string anchor with `from_iso8601_timestamp(string)` listed FIRST for ISO-8601 input (the most common SaaS log-event format), with `parse_datetime` Joda and `date_parse` MySQL-style retained as format-string fallbacks. Small inclusivity win, not a fix.
-
-**Locks held — DO NOT REWRITE:** all 260+ prior locks remain in force. The iter710 sibling card (2-bucket has-X-vs-doesn't rollup) is now confirmed working — keep it intact. resources/22 federation file remains HARD LOCKED.
-
-**PIN TRINO 467** — all dialect forms verified against trino.io/docs/current and the 467 release notes; nothing in this iteration requires updating the ban list.
-
-Sources verified:
-- [Trino datetime functions](https://trino.io/docs/current/functions/datetime.html) — parse_datetime, date_parse, from_iso8601_timestamp
-- [Trino SELECT — GROUP BY rules](https://trino.io/docs/current/sql/select.html)
-- [AWS re:Post — "must be an aggregate expression or appear in GROUP BY clause"](https://repost.aws/questions/QU9yS3JVk_R1WXCQJoS_uzTw/must-be-an-aggregate-expression-or-appear-in-group-by-clause)
-- [trinodb/trino #16533](https://github.com/trinodb/trino/issues/16533) — GROUP BY does not accept SELECT-list alias by name
+**HOLD all locks** from iter534-710 (~260+ entries). NO resource edits. NO HARD LOCK violations. Spot-check by content-grep, not line numbers (r07/r23 have grown).
