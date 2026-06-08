@@ -1,6 +1,6 @@
 # SQL Query Best Practices for OLAP (Trino + Iceberg)
 
-If you came from Postgres or MySQL, your SQL habits will work in Trino — but they will be **slow and expensive**. OLTP databases have B-tree indexes that let you find a single row in microseconds. Trino + Iceberg has **no user-creatable secondary indexes** of any kind — no `CREATE INDEX`, no `ADD INDEX`, no implicit indexing on `PRIMARY KEY` (the Iceberg connector accepts `PRIMARY KEY` only as documentation metadata; nothing is enforced or indexed). Every query reads chunks of Parquet files from MinIO over the network. The cost of a bad query is measured in **bytes scanned**, not milliseconds. For the canonical "how do I make filters fast in Trino without indexes" answer (partition transforms → `sorted_by` + `EXECUTE optimize` → `ANALYZE` → Parquet bloom filters), see **[resource 03 § Iceberg mitigations when you DO need point lookups](03-columnar-storage.md#iceberg-mitigations-when-you-do-need-point-lookups-on-a-fact-table)** LEADING CANONICAL.
+If you came from Postgres or MySQL, your SQL habits will work in Trino — but they will be **slow and expensive**. OLTP databases have B-tree indexes that let you find a single row in microseconds. Trino + Iceberg has **no user-creatable secondary indexes** of any kind — no `CREATE INDEX`, no `ADD INDEX`, and **no `PRIMARY KEY` / `FOREIGN KEY` / `UNIQUE` / `CHECK` constraint syntax in CREATE TABLE at all** (those fail at PARSE TIME with `mismatched input 'PRIMARY'` etc. — they do NOT parse-and-ignore, they do NOT store as metadata; see the canonical "[Trino 467 CREATE TABLE: what IS vs IS NOT supported](#trino-467-create-table-what-is-vs-is-not-supported--no-primary-key--foreign-key--unique--check--default)" block below). Every query reads chunks of Parquet files from MinIO over the network. The cost of a bad query is measured in **bytes scanned**, not milliseconds. For the canonical "how do I make filters fast in Trino without indexes" answer (partition transforms → `sorted_by` + `EXECUTE optimize` → `ANALYZE` → Parquet bloom filters), see **[resource 03 § Iceberg mitigations when you DO need point lookups](03-columnar-storage.md#iceberg-mitigations-when-you-do-need-point-lookups-on-a-fact-table)** LEADING CANONICAL.
 
 This guide is a practical checklist. Each section is one habit to keep or break.
 
@@ -23,6 +23,112 @@ These are the five "X is not supported in Trino" / "Y can't be done on Iceberg" 
 > **Why these myths are dangerous.** Each is a load-bearing topic-specific claim about what Trino/Iceberg "can't do." When an engineer hears them stated confidently as absolutes, they redesign around a non-existent limitation — abandoning TopN pushdown, rewriting queries to avoid QUALIFY incorrectly, building Trino-only WAP workarounds that drop the protection branches provide, tightening retention to "protect" snapshots that were already protected, or building manual upsert pipelines because they think MERGE doesn't work. The correct mental discipline: when you find yourself about to write "Trino/Iceberg can't do X," check the docs (`trino.io/docs/current/connector/<x>`, `iceberg.apache.org/docs/latest/<x>`) AND verify the feature's release-note introduction. Most "can't" claims have an exception, a version cutoff, or a specific-plan-shape limitation that flips the answer.
 
 > **Cross-ref — dbt snapshots / SCD2 / timestamp vs check strategy / check_cols / dbt_valid_from / dbt_valid_to / dbt_scd_id / dbt_is_deleted:** see **[resource 09 § Slowly Changing Dimensions — Option 1 dbt snapshot (§1a `strategy='timestamp'`, §1b `strategy='check'`)](09-lakehouse-schema-design.md#slowly-changing-dimensions-scd)** — the SINGLE source of truth on this stack. Snapshot mechanics (the four `dbt_*` metadata columns, the `WHERE dbt_valid_to IS NULL` current-rows pattern, the parse-error matrix for missing `updated_at` / missing `check_cols` / list-wrapped `['all']` / non-existent strategies) are NOT duplicated here.
+
+---
+
+### Trino 467 CREATE TABLE: what IS vs IS NOT supported — NO PRIMARY KEY / FOREIGN KEY / UNIQUE / CHECK / DEFAULT
+
+> **Keyword anchors (read FIRST if your question contains any of these):** Trino CREATE TABLE primary key, Iceberg primary key Trino, primary key constraint Trino, foreign key Trino, unique constraint Trino, check constraint Trino, DEFAULT value Trino column, AUTO_INCREMENT Trino, SERIAL Trino, IDENTITY column Trino, money table DDL, CREATE TABLE constraint, mismatched input 'PRIMARY', mismatched input 'DEFAULT', mismatched input 'UNIQUE', Trino column constraint syntax, NOT NULL Trino, COMMENT column Trino, Trino DDL Iceberg, Iceberg table DDL Trino, orders table CREATE TABLE Trino, DECIMAL money column DDL.
+
+**The one rule.** Trino 467's `CREATE TABLE` grammar accepts **ONLY** these per-column clauses after the data type: `[NOT NULL] [COMMENT '...'] [WITH (property = value, ...)]`. Anything else — `PRIMARY KEY`, `FOREIGN KEY`, `UNIQUE`, `CHECK (...)`, `DEFAULT <expr>`, `AUTO_INCREMENT`, `SERIAL`, `GENERATED ALWAYS AS IDENTITY` — **fails at PARSE TIME** before the SQL ever reaches the Iceberg connector. The error wording is `mismatched input 'PRIMARY'. Expecting: ')', ',', 'COMMENT', 'NOT', 'WITH'` (and the analogous `'DEFAULT'`, `'UNIQUE'`, etc. for the other keywords). **The connector does NOT parse-and-ignore these keywords. The connector does NOT store them as metadata.** The SQL is rejected by the Trino parser itself. Verified against the [Trino 467 CREATE TABLE grammar](https://trino.io/docs/467/sql/create-table.html) and the [Iceberg connector docs](https://trino.io/docs/467/connector/iceberg.html).
+
+**What IS supported (the full per-column / per-table grammar):**
+
+| Clause | Where | Behavior |
+|---|---|---|
+| `NOT NULL` | per column, after data type | **ENFORCED at write time** by the Iceberg connector — INSERT with NULL for that column FAILs with `NULL value not allowed for NOT NULL column`. |
+| `COMMENT '...'` | per column (after `NOT NULL` if present) AND per table (after the column list) | Stored as Iceberg column / table comment metadata; surfaced by `SHOW CREATE TABLE`, `DESCRIBE`, and `information_schema.columns.comment`. Free-text — write your logical-PK / FK-relationship documentation here. |
+| `WITH (property = value, ...)` | per column (column properties — rare; most properties live on the table) AND per table (after `COMMENT` if present) | Iceberg table properties: `format = 'PARQUET'`, `partitioning = ARRAY['day(event_ts)', 'tenant_id']`, `sorted_by = ARRAY['event_id ASC']`, `location = 's3a://bucket/path'`, `format_version = 2`, etc. The full list is in the Iceberg connector docs. |
+| `CTAS — CREATE TABLE ... AS SELECT ...` | full table | The atomic create-and-populate form; column types are inferred from the SELECT's projection. `WITH (...)` table properties go BEFORE `AS SELECT`. |
+
+**What is NOT supported (PARSE-ERROR — do NOT write):**
+
+| Banned in Trino 467 CREATE TABLE | What it would do elsewhere | Workaround on this stack |
+|---|---|---|
+| `PRIMARY KEY (col)` (table-level) or `col TYPE PRIMARY KEY` (column-level) | Oracle/Postgres/MySQL: declares a unique enforced key. | Use `NOT NULL` + `COMMENT 'logical primary key'`. Enforce uniqueness via dbt MERGE `unique_key` + a `dbt test --select unique` schema YAML test. (Iceberg also doesn't enforce uniqueness at the storage layer — but the Trino DDL never even parses, so the question is moot at the SQL level.) |
+| `FOREIGN KEY (col) REFERENCES other(col)` | Oracle/Postgres/MySQL: declares + enforces referential integrity. | Drop the constraint. Document the relationship in `COMMENT`. Enforce via `dbt_utils.relationships` schema test (post-build assertion that every FK value has a matching parent row). |
+| `UNIQUE (col)` or `col TYPE UNIQUE` | Oracle/Postgres/MySQL: enforces uniqueness without a PK. | Same as PRIMARY KEY — `NOT NULL` + dbt `unique` test. |
+| `CHECK (col > 0)` | Oracle/Postgres/MySQL: per-row validation predicate. | Drop the constraint. Validate via `dbt_utils.expression_is_true` schema test (e.g., `expression: "amount > 0"`). |
+| `col INTEGER DEFAULT 0` / `col TIMESTAMP DEFAULT current_timestamp` | Oracle/Postgres/MySQL: provides a value when INSERT omits the column. | Drop the DEFAULT keyword. Supply the value explicitly in every INSERT / dbt model SELECT — e.g., `SELECT ..., COALESCE(status, 'pending') AS status` or `SELECT ..., 0 AS retry_count, current_timestamp AS created_at`. |
+| `col BIGINT AUTO_INCREMENT` (MySQL) / `col SERIAL` (Postgres) / `col BIGINT GENERATED ALWAYS AS IDENTITY` (Oracle/Postgres/Delta) | Auto-generated sequential surrogate key. | Iceberg has NO user-facing identity columns (see [resource 27 § 4.5A](27-oracle-plsql-to-dbt-trino.md#45a-iceberg-identity-column-negation-guardrail--iceberg-has-no-user-facing-identity--auto-increment-columns-use-dbt_utilsgenerate_surrogate_key-instead)). Use `{{ dbt_utils.generate_surrogate_key(['col1', 'col2']) }}` (deterministic MD5 string) or `ROW_NUMBER() OVER (ORDER BY ...)` (only stable within a single full-refresh run). |
+| `INDEX (col)` / `CREATE INDEX ...` | OLTP: secondary B-tree index. | NO secondary indexes in Trino + Iceberg. See [resource 03 § Iceberg mitigations](03-columnar-storage.md#iceberg-mitigations-when-you-do-need-point-lookups-on-a-fact-table) for the four-lever filter-speed table (partition transforms → `sorted_by` + `EXECUTE optimize` → `ANALYZE` → Parquet bloom filters). |
+| `CONSTRAINT name PRIMARY KEY (col)` (named constraint form) | Standard SQL: same as above but with an explicit constraint name. | Same as PRIMARY KEY — drop the keyword; the SQL parse-errors regardless of whether the constraint is named. |
+
+**Worked CORRECT DDL — money / orders fact table.** A common Postgres-to-Iceberg port for an orders fact table. The Postgres origin:
+
+```sql
+-- Postgres (origin — DO NOT copy verbatim to Trino)
+CREATE TABLE orders (
+  order_id    BIGSERIAL PRIMARY KEY,
+  customer_id BIGINT NOT NULL REFERENCES customers(customer_id),
+  amount      NUMERIC(18,2) NOT NULL CHECK (amount >= 0) DEFAULT 0,
+  status      TEXT NOT NULL DEFAULT 'pending',
+  order_date  DATE NOT NULL,
+  created_at  TIMESTAMP DEFAULT current_timestamp
+);
+```
+
+The CORRECT Trino 467 + Iceberg equivalent (strip the banned keywords; move enforcement to dbt schema tests; move defaults into the SELECT):
+
+```sql
+-- Trino 467 + Iceberg (CORRECT — parses, runs, lands an Iceberg table)
+CREATE TABLE iceberg.analytics.orders (
+  order_id    BIGINT          NOT NULL COMMENT 'logical primary key — uniqueness enforced via dbt unique test',
+  customer_id BIGINT          NOT NULL COMMENT 'FK -> customers.customer_id — relationship enforced via dbt_utils.relationships test',
+  amount      DECIMAL(18,2)   NOT NULL COMMENT 'cents-exact; non-negative enforced via dbt_utils.expression_is_true',
+  status      VARCHAR         NOT NULL COMMENT 'pending|paid|shipped|cancelled',
+  order_date  DATE            NOT NULL,
+  created_at  TIMESTAMP(6)    NOT NULL
+)
+WITH (
+  format       = 'PARQUET',
+  partitioning = ARRAY['month(order_date)'],
+  sorted_by    = ARRAY['order_id ASC']
+);
+```
+
+Pair the DDL with these dbt schema tests (in `models/schema.yml`) to recover the enforcement the constraint keywords would have provided:
+
+```yaml
+models:
+  - name: orders
+    columns:
+      - name: order_id
+        tests: [not_null, unique]                          # replaces PRIMARY KEY
+      - name: customer_id
+        tests:
+          - not_null
+          - relationships:                                  # replaces FOREIGN KEY
+              to: ref('customers')
+              field: customer_id
+      - name: amount
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:                   # replaces CHECK (amount >= 0)
+              expression: ">= 0"
+```
+
+And handle the `DEFAULT` clauses inside the dbt model SELECT (since Trino DDL has no DEFAULT):
+
+```sql
+-- models/orders.sql
+{{ config(materialized='incremental', incremental_strategy='merge', unique_key='order_id') }}
+SELECT order_id,
+       customer_id,
+       COALESCE(amount, DECIMAL '0.00')        AS amount,       -- replaces DEFAULT 0
+       COALESCE(status, 'pending')             AS status,       -- replaces DEFAULT 'pending'
+       order_date,
+       COALESCE(created_at, current_timestamp) AS created_at    -- replaces DEFAULT current_timestamp
+FROM   {{ ref('stg_orders') }}
+```
+
+**Why the parse-and-ignore myth is dangerous.** Earlier versions of this guide (and many online blog posts) say "the Iceberg connector accepts `PRIMARY KEY` only as documentation metadata — it is not enforced." **That is WRONG and the correction is the load-bearing point of this section.** The keyword does not reach the connector at all; the Trino parser rejects the statement before connector dispatch. If you copy `(order_id BIGINT PRIMARY KEY, ...)` into a `dbt run`, the run aborts at the CTAS step with the parse error and no table is created. The right mental model: **think of Trino CREATE TABLE as a deliberately tiny grammar (column + type + NOT NULL + COMMENT + WITH); everything richer is dbt's job (schema-test YAML) or the application's job (SELECT-side COALESCE for defaults, MERGE on `unique_key` for keys, `dbt_utils.relationships` for FKs).**
+
+**Cross-references:**
+- [Resource 03 § "Trino's PRIMARY KEY constraint creates an implicit index"](03-columnar-storage.md#iceberg-mitigations-when-you-do-need-point-lookups-on-a-fact-table) — the DDL-grammar parse-error row in the DO-NOT-WRITE matrix on Trino indexes.
+- [Resource 27 § 4.5A ICEBERG-IDENTITY-COLUMN-NEGATION GUARDRAIL](27-oracle-plsql-to-dbt-trino.md#45a-iceberg-identity-column-negation-guardrail--iceberg-has-no-user-facing-identity--auto-increment-columns-use-dbt_utilsgenerate_surrogate_key-instead) — Iceberg has NO `GENERATED ALWAYS AS IDENTITY`; use `dbt_utils.generate_surrogate_key`.
+- [Resource 27 § 4.5D `uuid()` and Iceberg-PK fabrications](27-oracle-plsql-to-dbt-trino.md#45d-leading-canonical--trino-uuid-is-random-rfc-4122-v4-safe-for-one-shot-random-ids-unsafe-as-a-dbt-incremental-surrogate--unique_key) — the random-vs-deterministic id rule + iter402 Iceberg-PK-not-enforced.
+- [Resource 27 § 6 dbt-trino contracts](27-oracle-plsql-to-dbt-trino.md) — the **separate** layer where dbt YAML `constraints:` (including `primary_key`, `foreign_key`, `unique`, `check`) ARE definable as metadata but NOT enforced at write time on dbt-trino + Iceberg.
 
 ---
 

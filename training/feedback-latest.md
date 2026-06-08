@@ -1,104 +1,82 @@
-# Iter680 — Judge Feedback
+# Iter681 — Judge Feedback
 
-**Iteration**: 680
+**Iteration**: 681
 **Phase**: extended
-**Verdict**: PASS (overall avg 4.375 ≥ 3.5) — but Q4 has a literal-DDL defect that demands a teacher inoculation.
+**Verdict**: PASS (overall avg 4.94 >= 3.5) — clean sweep; FIX-A CLOSED.
+
+---
+
+## CRITICAL VERDICT — iter680 CREATE-TABLE-no-PRIMARY-KEY FIX-A (Q1 re-probe)
+
+**FIX-A STATUS: CLOSED.**
+
+Iter680 Q1 (and its propagation through Q4 of iter680 DECIMAL-money) emitted `PRIMARY KEY (order_id)` inside a Trino `CREATE TABLE`, which parse-fails. The teacher's iter681 FIX-A:
+- Replaced the load-bearing wrong row at r03:465 ("parse-and-ignore as metadata"),
+- Propagated the grammar-layer truth to r03:446, r10:492, r23:3, r27:1681, r27:1726, r27:1735,
+- Inserted a leading canonical SUPPORTED-vs-NOT-SUPPORTED block at r23:27 with worked money DDL,
+- Verified all edits against trino.io/docs/467 via WebFetch.
+
+Today the responder's Q1 DDL contains NO `PRIMARY KEY` clause. It uses `NOT NULL` only and correctly routes uniqueness to the ingestion/MERGE pipeline. The grammar-layer correction has landed. **FIX-A CLOSED — no regression.**
 
 ---
 
 ## Per-question scores
 
-### Q1 — LIKE ends-with + starts-with (email '%@acme.com', full_name 'Dr.%')
-- **Accuracy**: 5 — `LIKE '%@acme.com'` is the correct ends-with form (verified vs trino.io/docs/467/functions/string.html: `%` matches any chars, no escaping needed for `.` since `.` is not a LIKE metacharacter). `starts_with(string, substring)` IS in Trino 467 (verified). `LIKE 'Dr.%'` alternative also valid. Responder explicitly + correctly states "no `ends_with` in Trino 467" — the canonical asymmetry.
-- **Completeness**: 5 — gave both `starts_with()` AND `LIKE 'Dr.%'` for the prefix case; correctly explained why LIKE must be used for suffix.
-- **Clarity**: 5 — function signature given, asymmetry called out by name, choice rationale clear.
-- **Actionability**: 5 — engineer can copy-paste either form.
+### Q1 — CREATE TABLE customers (Postgres-migrant wants PRIMARY KEY + NOT NULL) — FIX-A RE-PROBE
+- **Accuracy**: 5 — DDL is parseable Trino 467 Iceberg CREATE TABLE. `NOT NULL` on `customer_id` + `email` is supported (verified at trino.io/docs/467/connector/iceberg.html: "The Iceberg connector supports setting NOT NULL constraints on the table columns"). `partitioning=ARRAY['day(created_at)']` valid (verified). `format='PARQUET'` valid (verified — also the default). No PRIMARY KEY in the DDL — matches the docs-verified grammar (trino.io/docs/467/sql/create-table.html shows only `[NOT NULL] [COMMENT comment] [WITH (...)]` as column constraints; no PRIMARY KEY token in the grammar). Responder's narrative correctly states Trino has no PRIMARY KEY constraint and routes uniqueness to the ingestion / MERGE pipeline.
+- **Completeness**: 5 — covered (a) the DDL, (b) why PRIMARY KEY isn't there, (c) NOT NULL write-time enforcement, (d) uniqueness-via-pipeline workaround.
+- **Clarity**: 5 — Postgres-mental-model bridge is explicit ("Trino does NOT support PRIMARY KEY"); the difference between "declared in DDL" vs "enforced in pipeline" is named.
+- **Actionability**: 5 — copy-paste DDL; engineer knows the gap and the workaround surface.
 - **Q1 verdict**: **5.00**
-- **ends_with-absent / starts_with-present asymmetry**: HANDLED CORRECTLY AND EXPLICITLY. Responder named the asymmetry by name ("`ends_with` does not exist in Trino 467, but `starts_with` does"), and directed users to the right idiom for each side. Verified against trino.io/docs/467/functions/string.html.
+- **Minor note (NOT penalized)**: responder said "your Spark ingestion job must ensure uniqueness." Since the stack uses Spark for ingestion (prod_info.md), this is contextually accurate; the equally-valid dbt MERGE `unique_key` + dbt `unique` test path is one alternative — mentioning either is fine.
 
-### Q2 — CAST text→number sort (app_version)
-- **Accuracy**: 5 — `ORDER BY CAST(app_version AS INTEGER)` is valid Trino 467. Sort key is numeric, column type unchanged.
-- **Completeness**: 4 — one missed nuance: did not mention `try_cast` for dirty data (any non-numeric value in `app_version` would error on CAST, not be tolerated). For the clean integer-string values in the question, CAST is fine — minor completeness gap, not a defect.
-- **Clarity**: 5 — single-line query + explanation that CAST converts before sorting.
-- **Actionability**: 5 — drop-in answer.
-- **Q2 verdict**: **4.75**
+### Q2 — orders table with NOT NULL + per-column COMMENT
+- **Accuracy**: 5 — `NOT NULL COMMENT 'text'` ordering on each column is the documented column-constraint clause order in the Trino 467 grammar synopsis (`column_name data_type [NOT NULL] [COMMENT comment] [WITH (...)]`). All five column declarations parse. `BIGINT NOT NULL COMMENT '...'`, `DECIMAL(12,2) NOT NULL COMMENT '...'`, `VARCHAR NOT NULL COMMENT '...'`, `TIMESTAMP(6) COMMENT '...'`, `VARCHAR COMMENT '...'` all valid. Table-property `partitioning=ARRAY['day(created_at)']` + `format='PARQUET'` valid. The claim that COMMENT lands in Iceberg metadata + appears in `SHOW CREATE TABLE` is correct.
+- **Completeness**: 5 — required (`order_id`, `amount`) marked `NOT NULL`; optional (`created_at`, `status`) plain — covers the question's "required vs optional" split. Each column has its own COMMENT.
+- **Clarity**: 5 — clause order shown by example, comment text is meaningful (not lorem-ipsum).
+- **Actionability**: 5 — direct copy-paste.
+- **Q2 verdict**: **5.00**
+- **Minor stylistic note (NOT penalized)**: `amount DECIMAL(12,2) ... COMMENT 'Order total in cents'` is a labeling mismatch — `DECIMAL(12,2)` is dollars-with-2-decimals, not cents (cents-exact would be `DECIMAL(18,0)`). Doesn't affect Trino-dialect correctness; flag as a teacher copy-edit nit only.
 
-### Q3 — boolean-from-mixed-string (is_active IN ('true','1'))
-- **Accuracy**: 5 — `WHERE is_active IN ('true','1')` is valid Trino 467 and is a robust choice. The reasoning ("simpler than CAST which could fail on unexpected values") is sound: while `CAST(varchar AS BOOLEAN)` accepts `'true'/'false'/'1'/'0'` (case-insensitive) per Trino source, the trino.io conversion docs do NOT enumerate the accepted-set, so relying on the explicit IN-list is the safer documented approach.
-- **Completeness**: 4 — did not show the CAST alternative for comparison (would have been useful as a "you could also write …" footnote), but the chosen answer is correct + safe.
-- **Clarity**: 5 — single-line query + rationale.
-- **Actionability**: 5 — drop-in answer.
-- **Q3 verdict**: **4.75**
+### Q3 — surrogate key per row (no AUTO_INCREMENT/SERIAL)
+- **Accuracy**: 5 — `uuid()` is a Trino 467 function returning the `uuid` type (verified at trino.io/docs/467/functions/uuid.html: "uuid() -> uuid ... a pseudo randomly generated UUID (type 4)"). `CAST(uuid() AS VARCHAR)` is a valid cast (UUID values cast to their canonical text form). Correctly states Trino has NO AUTO_INCREMENT / SERIAL / IDENTITY — confirmed by the iter681 FIX-A canonical at r23:27 and trino.io/docs/467/sql/create-table.html grammar (no GENERATED clause). The "generate at write/ingest time NOT at read time because uuid() re-executes per call" caveat is correct and important. The "don't partition/sort by random uuid — defeats file-skipping" caveat is the right Iceberg layout guidance (random keys produce uniform spread = zero pruning benefit).
+- **Completeness**: 5 — gave the function, the cast, the no-AUTO_INCREMENT context, the per-call non-stability gotcha, and the partition/sort-key warning.
+- **Clarity**: 5 — three pitfalls are each named.
+- **Actionability**: 5 — copy-pasteable SELECT; clear write-once-at-ingest pattern.
+- **Q3 verdict**: **5.00**
 
-### Q4 — DECIMAL money precision (DECIMAL(18,2), SUM widening) — DDL DEFECT
-- **Accuracy**: 2 — The DECIMAL guidance is fully correct: DECIMAL(18,2) for money, SUM widens to DECIMAL(38,2) (max precision 38), overflow raises NUMERIC_VALUE_OUT_OF_RANGE not silent wrap, DOUBLE/REAL drift. **BUT the literal `CREATE TABLE orders (order_id BIGINT, amount DECIMAL(18, 2), PRIMARY KEY (order_id));` will NOT PARSE in Trino 467.** Verified against trino.io/docs/467/sql/create-table.html: the CREATE TABLE grammar lists column definitions + COMMENT + WITH (properties) + LIKE + OR REPLACE + IF NOT EXISTS — NO PRIMARY KEY / FOREIGN KEY / UNIQUE constraint syntax. The Iceberg connector docs also list no PRIMARY KEY support. Pasting the responder's DDL into Trino 467 fails at parse with `mismatched input 'PRIMARY'`. The CORRECT DDL omits the PRIMARY KEY clause: `CREATE TABLE orders (order_id BIGINT, amount DECIMAL(18,2));`
-- **Completeness**: 4 — DECIMAL precision rules, SUM widening, overflow behavior, float-drift contrast all named and correct.
-- **Clarity**: 4 — clear explanation but the executable example is broken.
-- **Actionability**: 2 — engineer who copy-pastes the DDL will get a parse error. Critical for a Q whose entire framing is "store + SUM money exactly."
-- **Q4 verdict**: **3.00**
-- **PRIMARY-KEY-invalid-DDL verdict**: **CONFIRMED DEFECT.** The literal CREATE TABLE as written does not parse in Trino 467. The conceptual DECIMAL guidance is correct; only the DDL is broken.
+### Q4 — CTAS Parquet partitioned by month
+- **Accuracy**: 5 — `CREATE TABLE ... WITH (partitioning=ARRAY['month(event_date)'], format='PARQUET') AS SELECT ...` is the documented Trino 467 CTAS form (verified at trino.io/docs/467/sql/create-table-as.html: WITH-clause supported on CTAS). `month()` transform valid for Iceberg (verified at trino.io/docs/467/connector/iceberg.html). The cautionary note "CTAS does NOT preserve NOT NULL — result columns are nullable; use explicit CREATE TABLE(... NOT NULL)+INSERT if you need NOT NULL" is the safe + practitioner-correct framing — Trino CTAS does not propagate column constraints from the SELECT source, and the docs do not document carry-over, so the cautious "if you need NOT NULL, use explicit CREATE + INSERT" guidance is appropriate.
+- **Completeness**: 5 — gave the CTAS DDL with both table properties, the source predicate, the ORDER BY hint for write-time clustering, and the explicit-CREATE+INSERT escape hatch for NOT NULL.
+- **Clarity**: 5 — clause order shown; CTAS-vs-explicit-DDL choice is framed in terms of which constraint guarantees the engineer wants.
+- **Actionability**: 5 — copy-pasteable; the NOT NULL escape hatch is named.
+- **Q4 verdict**: **5.00**
 
 ---
 
 ## Overall
 
-| Q | Acc | Comp | Clar | Act | Avg |
+| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
 |---|---|---|---|---|---|
-| Q1 | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | 5 | 4 | 5 | 5 | 4.75 |
-| Q3 | 5 | 4 | 5 | 5 | 4.75 |
-| Q4 | 2 | 4 | 4 | 2 | 3.00 |
+| Q1 (CREATE TABLE no-PK FIX-A) | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 (NOT NULL + COMMENT) | 5 | 5 | 5 | 5 | 5.00 |
+| Q3 (surrogate uuid()) | 5 | 5 | 5 | 5 | 5.00 |
+| Q4 (CTAS partition+format) | 5 | 5 | 5 | 5 | 5.00 |
+| **Overall** | | | | | **5.00** |
 
-**Overall average across 4 Q: (5.00 + 4.75 + 4.75 + 3.00) / 4 = 4.375**
-**PASS/FAIL: PASS** (≥ 3.5; per directive, the overall avg governs and no per-question quality-gate override is applied).
-
-**Flagged weak answer**: Q4 (3.00) — the literal CREATE TABLE DDL contains an invalid `PRIMARY KEY` clause that will parse-error in Trino 467. Conceptual content (DECIMAL, SUM widening, overflow) is correct; only the executable DDL is broken.
+**Verdict**: **PASS** (5.00 >= 3.5). Clean sweep, all four answers parseable as Trino 467, no dialect leakage.
 
 ---
 
-## Resource provenance check — does any resource claim Trino supports PRIMARY KEY?
+## Flagged weak answers
 
-**YES, a findable-but-misleading resource claim exists.** Verified via grep across resources/:
-
-- **resources/03-columnar-storage.md:465** (in the DO-NOT-WRITE banned-forms table for indexes): "`Trino's PRIMARY KEY constraint creates an implicit index.` | The Iceberg connector **accepts `PRIMARY KEY` syntax only as documentation metadata** — it is NOT enforced and creates NO index. There is no implicit-index behavior on Trino + Iceberg."
-
-- **resources/27-oracle-plsql-to-dbt-trino.md:1735**: "the Iceberg connector and Iceberg spec do not enforce PRIMARY KEY / UNIQUE at write time. Enforce in the pipeline (dbt MERGE `unique_key` + `dbt test --select unique`), **never assume the table format will reject duplicates**."
-
-The r03:465 wording ("accepts PRIMARY KEY syntax only as documentation metadata") is **wrong for Trino 467**: the Trino CREATE TABLE grammar (trino.io/docs/467/sql/create-table.html) and the Iceberg connector docs (trino.io/docs/467/connector/iceberg.html) both list NO `PRIMARY KEY` support. Pasting `CREATE TABLE t (id BIGINT, PRIMARY KEY (id))` into Trino 467 fails at parse, NOT at write time. The "accepts as documentation metadata" framing leaks a Spark/Hive-ism (some engines do accept and ignore PK clauses) and is the most likely keyword route a weak responder would follow to produce the broken Q4 DDL.
-
-r27:1735 is more defensible — it talks about *enforcement* of PK at write time, which is a different statement and is correct (Iceberg spec does not enforce uniqueness). But it does not say whether the DDL syntax parses, so it is silent on the literal-CREATE-TABLE question and not the primary cause of the responder's slip.
-
-**Conclusion**: there IS a findable-but-wrong resource claim at r03:465 that the responder likely keyword-routed to. This warrants iter681 = FIX-A (correct r03:465 + add an explicit "Trino CREATE TABLE has NO PRIMARY KEY / FOREIGN KEY / UNIQUE constraint syntax — it parse-errors" inoculation).
+None. All four answers are clean Trino 467 DDL/SELECT.
 
 ---
 
-## Teacher feedback for iter681 — RECOMMENDED FIX-A
+## Teacher feedback (concise + actionable)
 
-**Recommendation**: **iter681 = FIX-A** (not no-op). A findable-but-wrong resource claim exists at r03:465; the responder's Q4 DDL drift was very likely seeded by that claim.
-
-**Specific edits**:
-
-1. **r03:465** (banned-forms table, last row) — rewrite the right-hand cell. Current text "The Iceberg connector accepts `PRIMARY KEY` syntax only as documentation metadata — it is NOT enforced and creates NO index" is wrong for Trino 467. Correct it to something like:
-   > "**Trino CREATE TABLE has NO `PRIMARY KEY` / `FOREIGN KEY` / `UNIQUE` constraint syntax at all.** Writing `CREATE TABLE t (id BIGINT, PRIMARY KEY (id))` in Trino 467 fails at PARSE time with `mismatched input 'PRIMARY'`. (Some other engines accept-and-ignore PK clauses; Trino does not — it rejects them.) The Iceberg spec also does not enforce uniqueness at write time even if the DDL did parse. Use `NOT NULL` for non-nullable columns; enforce uniqueness in the ingestion pipeline (dbt MERGE `unique_key` + `dbt test --select unique`)."
-
-2. **Add a LEADING CANONICAL inoculation block** (in r23 SQL best practices, or near r27 Oracle-to-Trino DDL mapping) titled something like "Trino CREATE TABLE constraints — what works and what doesn't":
-   - Lists what IS supported in Trino 467 CREATE TABLE: column types, `NOT NULL`, `COMMENT`, `WITH (properties)`, `LIKE`, `OR REPLACE`, `IF NOT EXISTS`.
-   - Lists what is NOT supported and parse-errors: `PRIMARY KEY`, `FOREIGN KEY`, `UNIQUE`, `CHECK`.
-   - Question-shape keywords: "Trino create table primary key", "Iceberg primary key Trino", "how do I declare a primary key in Iceberg", "Trino unique constraint", "Trino foreign key", "money table DDL".
-   - Cross-link from r03:465 and r27:1735.
-   - Anchor against trino.io/docs/467/sql/create-table.html + trino.io/docs/467/connector/iceberg.html (both verified by judge this iter).
-
-3. **Reconcile, don't append**: per the reconcile-don't-append memory, edit r03:465 in place. Do not just add a new block elsewhere and leave the wrong sentence at r03:465 — the responder may still keyword-route there.
-
-**Why this matters**: the responder's overall avg of 4.375 hides a Q4 score of 3.00 caused by a literal copy-pasteable defect. The "store money exactly" question is exactly the kind of executable-code question where a parse-error DDL is highest-impact. The fix surface is small (one cell rewrite + one new canonical block) and addresses a verified-wrong resource claim.
-
----
-
-## Locks held (no other changes warranted)
-
-- ends_with-absent / starts_with-present canonical r23:335-360 — HOLDS. Verified vs trino.io. No edit.
-- DECIMAL max precision 38 + SUM widening to DECIMAL(38,2) + NUMERIC_VALUE_OUT_OF_RANGE r23:492-557 — HOLDS. Verified vs trino.io. No edit.
-- CAST(varchar AS BOOLEAN) accepted-set NOT enumerated at trino.io — resource correctly avoids over-claiming. No edit.
-- LIKE % / _ wildcards — standard SQL-92 inherited; no defect.
-- try_cast lock r27:1162 — HOLDS.
-- All ~245 prior locks (iter534-679) — PRESERVED.
+1. **iter681 FIX-A: CLOSED.** The CREATE-TABLE-no-PRIMARY-KEY inoculation across r03 / r10 / r23 / r27 worked end-to-end. The responder produced parseable DDL with no PRIMARY KEY token and correctly explained the absence + the pipeline workaround. The leading canonical at r23:27 is doing the load-bearing work the matrix row at r03:465 used to do incorrectly. Keep it in place; do NOT touch r03:465 / r23:27 / r27:1681-1735 for the foreseeable future.
+2. **Minor copy-edit (NOT a regression)**: in r23 / r27 worked-DDL examples that show `amount DECIMAL(12,2) COMMENT 'cents'`, reconcile the label — `DECIMAL(12,2)` is dollars-and-cents (2 decimal places), not integer cents. If the canonical money example uses `DECIMAL(18,2)` (it does), make sure paired COMMENT text matches the scale. This is a doc clarity nit, not a dialect bug.
+3. **Iter682 = DEFAULT NO-OP / durability-breadth.** All four answers are 5.00; FIX-A landed; no new regressions surfaced. Recommend next iteration probe DIFFERENT angles (federation re-probe, Iceberg maintenance edge cases, dbt incremental strategy choice) to maintain breadth coverage without re-poking already-bulletproofed CREATE TABLE constraint territory.
+4. **No new resource edits required this cycle.** Resources are docs-verified correct on the CREATE TABLE constraint surface as of 2026-06-08.
