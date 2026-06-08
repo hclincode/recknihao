@@ -1,155 +1,94 @@
-# Iter 678 Judge Feedback — 2026-06-08
+# Iter679 Judge Feedback — max_recursion_depth FIX-A re-probe (Q1) + 3 durability shapes (Q2/Q3/Q4)
 
-## Overall: 4.5625 PASS (margin +1.0625 above 3.5 floor)
+## Verdict: PASS (overall avg 4.875 / 5) — FIX-A CLOSED
 
-Per-Q average: (5.00 + 5.00 + 5.00 + 3.25) / 4 = 18.25 / 4 = **4.5625 PASS**
-Dim-avg cross-check: Acc (5+5+5+3)/4 = 4.50 / Comp (5+5+5+3.5)/4 = 4.625 / Clar (5+5+5+3.5)/4 = 4.625 / Act (5+5+5+3)/4 = 4.50 = (4.50+4.625+4.625+4.50)/4 = 4.5625 — agrees.
-
-**GOVERNING LABEL = PASS** (overall 4.5625 >= 3.5; per-Q quality-gate override NOT applied per directive — Q4 weakness flagged in prose only).
+The iter678 max_recursion_depth named-wrong-value drift (responder had claimed default=1000 when real Trino 467 default=10, and its own WHERE-guard exceeded the cap) is **CLOSED**. The responder this iter correctly stated default=10, gave the correct SET SESSION sequencing BEFORE the query, raised the cap to 20 to match the depth-15+ expectation, set the WHERE t.level < 20 predicate at-or-under the raised cap, and explicitly stated that exceeding the cap **raises** `NOT_SUPPORTED: Recursion depth limit exceeded` — NOT silent truncation. All three FIX-A target facts (default=10, SET SESSION instruction, error-not-truncate) are now correct.
 
 ---
 
-## Q1: LEFT JOIN keep-unmatched + COALESCE(SUM,0) — 5.00
+## Per-question scores
 
-**Answer:**
-```sql
-SELECT p.product_id, COALESCE(SUM(s.amount), 0) AS total_sales
-FROM products p LEFT JOIN sales s ON s.product_id = p.product_id
-GROUP BY p.product_id ORDER BY p.product_id;
-```
+### Q1 — WITH RECURSIVE deep tree + max_recursion_depth (FIX-A re-probe)
 
-Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5.
+| Dim | Score | Reason |
+|---|---|---|
+| Technical accuracy | 5 | Default=10 verified against trino.io/docs/current/sql/select.html verbatim: "recursion depth is fixed, defaults to `10`, and doesn't depend on the actual query results". Error message `NOT_SUPPORTED: Recursion depth limit exceeded` verified via AWS re:Post Athena (same Trino engine). SET SESSION shape valid Trino 467. WITH RECURSIVE structure (anchor + UNION ALL + recursive JOIN) syntactically valid. WHERE t.level < 20 predicate <= raised cap of 20 — correct. |
+| Beginner clarity | 5 | Explains default=10, the SET SESSION sequencing, the error mode, and the guard. Mentions quadratic plan growth + closure-table production alternative. |
+| Practical applicability | 4 | Engineer can copy the SET SESSION + WITH RECURSIVE shape and run it. Closure-table mention gives a production scale-out path. **Minor nuance:** the base case `WHERE parent_category_id IS NULL` selects **all** roots, but the prompt said "under a GIVEN root category" — the precise form for a single given root would be `WHERE category_id = <given_root_id>`. Not a dialect error, just a slight overscope on the base case. Non-material to the FIX-A target (depth handling), so single-point deduction only. |
+| Completeness | 5 | Addresses depth-cap handling, the exact session-property workaround, error behavior, and a hint at production alternatives. |
 
-VERIFIED against trino.io/docs/467/sql/select.html: LEFT JOIN keeps all left-side rows even when no right-side match exists, NULL-filling the right side. SUM over all-NULL ignored values returns NULL (per SQL standard aggregate NULL-skip), so COALESCE(SUM(...), 0) is the canonical fix for the explicit-zero requirement. LEFT-side-on-products is the correct anchor (keeps never-sold products). GROUP BY p.product_id correctly collapses fanned-out sales rows. Order-by tail tidy. No defect.
+**Q1 avg: 4.75** | FIX-A re-probe: **CLOSED** (all three target facts now correct: default=10, SET SESSION before query, error-not-truncate).
 
----
+### Q2 — Self-join unordered pairs
 
-## Q2: NOT EXISTS vs NOT IN null-trap — 5.00
+| Dim | Score | Reason |
+|---|---|---|
+| Technical accuracy | 5 | `u1.user_id < u2.user_id` predicate in the JOIN ON clause is canonical for unordered-pair dedup; the strict-less-than simultaneously excludes mirror pairs (Bob,Alice) AND self-pairs (Alice,Alice). Valid Trino 467 SQL. |
+| Beginner clarity | 5 | Explains both eliminations (mirror + self) clearly. |
+| Practical applicability | 5 | Engineer copies and runs immediately. |
+| Completeness | 5 | Includes ORDER BY for stable output, projects company_id for context. |
 
-**Answer:**
-```sql
-SELECT c.customer_id FROM customers c
-WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.customer_id)
-ORDER BY c.customer_id;
-```
+**Q2 avg: 5.0**
 
-Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5.
+### Q3 — EXISTS/DISTINCT semi-join (customers with at least one order over $500)
 
-VERIFIED against trino.io/docs/467/functions/comparison.html + sql/select.html: NOT EXISTS correlated subquery is the canonical NULL-safe anti-join form (returns TRUE/FALSE per outer row, never UNKNOWN). The explanation of the NOT IN trap — even one NULL in the subquery makes every comparison UNKNOWN under 3VL, filtering all rows — is exact verbatim semantics. The clarification that this is standard SQL (Postgres/MySQL/BigQuery/Snowflake same), NOT a Trino quirk, is teacher-resource-correct (r23:1758-1801) and matches the NULL-trap LOCK at r23:1572-1869. No defect.
+| Dim | Score | Reason |
+|---|---|---|
+| Technical accuracy | 5 | DISTINCT on customer_id over a JOIN-filter is correct; the simpler `SELECT DISTINCT customer_id FROM orders WHERE amount > 500` is also correct (returns customer_id only — slight signature change but matches "each customer once" intent). GROUP BY ... HAVING MAX(amount) > 500 alternative is also valid Trino 467. |
+| Beginner clarity | 5 | Explains why DISTINCT is needed (a customer with multiple big orders would otherwise produce multiple rows). |
+| Practical applicability | 5 | Three valid forms offered (JOIN+DISTINCT, single-table DISTINCT, GROUP BY+HAVING). Engineer picks the one matching their projection needs. |
+| Completeness | 4 | EXISTS form not shown despite the question explicitly mentioning EXISTS — minor omission of the EXISTS variant (`SELECT customer_id FROM customers c WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.customer_id AND o.amount > 500)`). Three alternatives provided is still good coverage. |
 
----
+**Q3 avg: 4.75**
 
-## Q3: fan-out / SUM inflation — 5.00
+### Q4 — FULL OUTER JOIN reconciliation
 
-**Answer:**
-```sql
-SELECT o.order_id, o.order_total, SUM(oi.item_amount) AS line_items_total
-FROM orders o LEFT JOIN order_items oi ON oi.order_id = o.order_id
-GROUP BY o.order_id, o.order_total ORDER BY o.order_id;
-```
+| Dim | Score | Reason |
+|---|---|---|
+| Technical accuracy | 5 | FULL OUTER JOIN keeps every row from both sides; `COALESCE(b.day, p.day)` correctly de-NULLs the join key when a side is missing. Valid Trino 467 (FULL OUTER JOIN with ON predicate + COALESCE is standard). Delta computation with `COALESCE(p.total,0) - COALESCE(b.total,0)` correctly treats missing as zero. |
+| Beginner clarity | 5 | Explains why COALESCE is needed on the join key (the side that didn't match has NULL day). |
+| Practical applicability | 5 | Engineer can plug in their two daily-totals table names and run it. Bonus delta column for reconciliation use case. |
+| Completeness | 5 | Covers the side-by-side, the NULL-where-missing, and gives the delta column for reconciliation. |
 
-Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5.
-
-VERIFIED: the diagnosis (one-to-many JOIN duplicates each parent row once per child match → SUM over the inflated parent_col is multiplied by the child fan-out factor) is the canonical fan-out explanation matched in resources r23:501 and r23:1708-1719. The fix is sound on three independent angles:
-1. Don't SUM the pre-rolled parent total — aggregate the child rows with SUM(oi.item_amount) and GROUP BY parent.
-2. The grain-correct alternative MAX(o.order_total) returns the shared duplicated value (or include o.order_total in GROUP BY which the answer does — equivalent for one-to-many).
-3. LEFT vs INNER trade-off correctly noted (LEFT keeps item-less orders → SUM(NULL)→NULL→use COALESCE if you need 0; INNER drops them).
-
-No defect.
+**Q4 avg: 5.0**
 
 ---
 
-## Q4: WITH RECURSIVE hierarchy walk — 3.25 [WEAK ANSWER — flagged]
+## Overall
 
-**Answer:**
-```sql
-WITH RECURSIVE org_tree AS (
-  SELECT employee_id, manager_id, employee_name, 1 AS depth
-  FROM employees WHERE employee_id = ?
-  UNION ALL
-  SELECT e.employee_id, e.manager_id, e.employee_name, t.depth + 1
-  FROM employees e INNER JOIN org_tree t ON e.manager_id = t.employee_id
-  WHERE t.depth < 20)
-SELECT * FROM org_tree ORDER BY depth, employee_id;
-```
+| Q | Avg |
+|---|---|
+| Q1 | 4.75 |
+| Q2 | 5.0 |
+| Q3 | 4.75 |
+| Q4 | 5.0 |
+| **Overall** | **4.875** |
 
-Scores: Accuracy 3 / Completeness 3.5 / Clarity 3.5 / Actionability 3.
-
-### EXPLICIT max_recursion_depth VERDICT
-
-**The responder's claim "Trino has a max_recursion_depth session property, default 1000" is MATERIALLY WRONG.**
-
-VERIFIED against trino.io/docs/467/sql/select.html (WebFetch returned verbatim): *"recursion depth is fixed, defaults to `10`, and doesn't depend on the actual query results"* and *"You can adjust the recursion depth with the session property max_recursion_depth."*
-
-**Real default = 10. Responder claimed 1000. Off by 100x.**
-
-### Downstream defect: depth-guard is INSUFFICIENT under the real cap
-
-The responder's own safety predicate `WHERE t.depth < 20` is set to a value that EXCEEDS the real default cap of 10. Under the actual default `max_recursion_depth = 10`:
-- A reporting tree deeper than 10 levels will trigger the engine cap BEFORE the user's depth-guard ever fires.
-- The user will see an `EXCEEDED_LIMIT`-style failure, not the graceful depth-20 truncation the answer implies.
-- The depth-guard is only meaningful if it is set <= the engine cap, OR the engine cap is raised first via `SET SESSION max_recursion_depth = N`.
-
-The correct guidance the answer should have included:
-1. State the real default (10), not 1000.
-2. If you want the guard to fire (depth < 20), first raise the cap: `SET SESSION max_recursion_depth = 100;` (or whatever bound matches the data's known max depth).
-3. In a dbt model, this goes in `pre_hook="SET SESSION max_recursion_depth = N"` — see r27:3593.
-4. Do not set unboundedly high — plan growth is quadratic with recursion depth (r27:3594 / docs verbatim).
-
-### What IS correct in Q4
-
-- WITH RECURSIVE structure is right: base case (SELECT FROM employees WHERE employee_id = ? for the given manager) + UNION ALL + recursive step joining e.manager_id = t.employee_id one level deeper. This walks DOWN the reporting tree as the user asked. CORRECT.
-- WITH RECURSIVE IS supported in Trino 467 (since Trino 340, 8 Aug 2020). VERIFIED via WebFetch + r07:456 + r27:33.
-- depth column and ORDER BY depth, employee_id are sound presentation choices.
-- INNER JOIN in the recursive step is correct (don't use LEFT — would generate unbounded NULL fan-out).
-
-### Resource verification
-
-r27:33 states verbatim: *"Default `max_recursion_depth = 10` (session-tunable via `SET SESSION max_recursion_depth = N`)."*
-r27:3593 states verbatim: *"`max_recursion_depth` default = 10. Any hierarchy deeper than 10 levels truncates. Tune via `SET SESSION max_recursion_depth = 100;` ... The Trino docs note the recursion depth `is fixed, defaults to 10, and doesn't depend on the actual query results`."*
-
-**The resources are CORRECT (cite default = 10 in two places). The responder DRIFTED from the resources — this is a responder-transcription issue, NOT a resource defect.**
+Pass threshold ≥ 3.5 — **PASS** by a wide margin.
 
 ---
 
-## iter679 directive: DEFAULT NO-OP (responder-transcription drift, NOT resource defect)
+## Teacher feedback (concise)
 
-Per the user directive: *"if the resources are correct (teacher cited 10) and only the responder drifted, note it as a responder-transcription issue and recommend iter679 = DEFAULT NO-OP unless the resource is findable-but-wrong."*
+1. **FIX-A CLOSED — HOLD r27:33 + r27:3593 + r07:456 INOCULATIONS UNTOUCHED in iter680.** All three landing routes (myth-table CONNECT BY row, §7A.1 deep-dive caveat #2, r07:456 §1b CTE inlined Quick fact) are now reinforcing the correct default=10 + error-not-truncate + SET SESSION-before-query facts on both keyword routes (Oracle migration AND CTE-keyword). The named-wrong-value DO-NOT-WRITEs ("defaults to 1000", "default 100", "silently truncates") are doing their job.
 
-Both r27:33 and r27:3593 state default = 10 verbatim, with the trino.io docs quote inline. The resource is correct AND findable (cross-referenced from r07:456 which is the WITH-RECURSIVE landing point in §1b). The defect is purely on the responder side — Haiku confabulated "1000" when the canonical correct value is right there in r27:33.
+2. **Minor non-material nuance on Q1 base case:** the responder seeded the recursion with `WHERE parent_category_id IS NULL` (all roots) rather than `WHERE category_id = <given_root>` (one given root). The FIX-A target was depth handling, which is fully correct. If durability-breadth permits, a future probe could test the "single given root" variant explicitly — but this is **NOT** a regression and **NOT** a FIX target.
 
-**Recommended iter679 = DEFAULT NO-OP / durability-breadth continuation.**
+3. **Minor non-material nuance on Q3:** responder offered three valid forms (JOIN+DISTINCT, single-table DISTINCT, GROUP BY+HAVING) but did not show the EXISTS form despite the question naming EXISTS. Coverage is still adequate. If next probe pins EXISTS specifically, ensure r07/r23 EXISTS examples are findable.
 
-Optional belt-and-suspenders (LOW priority; not strictly needed since r27:33 and r27:3593 already cite 10 with docs quote):
-- If the teacher wants to be extra defensive on findability, add a one-line keyword-anchor cross-reference near r07:456 of the form: "`max_recursion_depth` default = **10** (NOT 100, NOT 1000) — raise via `SET SESSION max_recursion_depth = N` if your tree is deeper" so a keyword search on "1000" / "100" / "default" lands on the explicit number rather than only on the citation paragraph.
-
-Federation NOT probed this iter — row UNCHANGED (consecutive non-probe streak = 34 iterations iter645-678; topic still 4.49944 FAIL at 4.5 threshold, thinnest margin in rubric).
+4. **iter680 recommendation: DEFAULT NO-OP / durability-breadth.** All four answers clean. No FIX needed. Continue probing rotated angles against existing locks (federation crossing 4.5 still the thinnest margin per state — focus durability probes there over the next few iterations).
 
 ---
 
-## DO NOT
+## Dialect verifications performed
 
-- Bump training/state.json (teacher already set to 678 per directive).
-- Touch r22 federation guardrails (34-iter ZERO probe streak; 4.5 threshold thin).
-- Rewrite the iter534-677 lock stack: iter677 LAST_VALUE-frame-trap HELD, iter676 slice() FIX-A r07:281 §1a.4A HELD, iter674 four-primitive split_part/coalesce/filter+reduce/array_join HELD, iter673 MAP/NULLIF/greatest/CASE-histogram HELD, iter672 JSON/try_cast/contains/approx_distinct HELD, iter671 ts-diff FIX-A HELD, iter670 MoR-vs-CoW HELD, iter669 DML-surface HELD, iter668 r27:4122 rollback-CALL-467-form HELD, iter667 DataSize-unit-suffix + ROWS-vs-RANGE HELD, iter666 Spark-CALL→Trino-ALTER-TABLE-EXECUTE HELD, iter665 day_of_week-name HELD, iter658 first-AND-last-aggregate-form r07:2254 + iter656 r23:652 + iter638 r23:636 min_by/max_by HELD, LAST_VALUE-IGNORE-NULLS-LOCF + full-frame r23:905-951 HELD, round-HALF_UP-vs-truncate-toward-zero r27:1143/1300/1335 HELD, EXCEPT-dedup r23:780/873 HELD, ROLLUP/CUBE/GROUPING-SETS + GROUPING() label r28:419-454/460-538 HELD, FILTER-conditional-aggregate r23:732-771/943-1010 HELD, ROWS-vs-RANGE r07:1709/1731 + r23:1694/1773-1791 default-RANGE-peer-lump HELD.
-- Add a Q4 FIX-A inoculation for max_recursion_depth-default-1000 (the resource is correct; responder drift only).
-- Add `::`-casts (iter571 PIN), QUALIFY, RLIKE (iter623 ban), PERCENTILE_CONT/MEDIAN (iter611 ban), EXTRACT(EPOCH) (iter562 ban), fabricate dayname()/initcap (iter659+iter665 inoculation HELD), DISTINCT-ON Postgres-leak (iter634 ban), 0=Sunday Postgres carryover (iter665 ban HELD), `timestamp - timestamp` (iter671 FIX-A CONFIRMED CLOSED), `array_contains` as Trino (iter672 dialect verification HOLDS), `array_slice(...)` (iter676 inoculation HELD).
+- **Q1 default=10**: VERIFIED via trino.io/docs/current/sql/select.html ("recursion depth is fixed, defaults to `10`")
+- **Q1 error-not-truncate**: VERIFIED via AWS re:Post (Athena uses Trino engine) — exact message `NOT_SUPPORTED: Recursion depth limit exceeded (10). Use 'max_recursion_depth'`
+- **Q1 SET SESSION max_recursion_depth**: VERIFIED valid Trino 467 session property
+- **Q2 self-join u1.user_id < u2.user_id**: VERIFIED — strict-less-than predicate in JOIN ON is canonical Trino 467 SQL
+- **Q3 SELECT DISTINCT + WHERE filter**: VERIFIED valid Trino 467; alternative EXISTS / GROUP BY HAVING also valid
+- **Q4 FULL OUTER JOIN + COALESCE(b.day,p.day)**: VERIFIED valid Trino 467; COALESCE on join key is the standard way to de-NULL after a FULL OUTER
 
----
-
-## TOPIC AVG UPDATES
-
-- **SQL query best practices for OLAP / LEFT JOIN-keep-unmatched + COALESCE-SUM-zero** (Q1 canonical durability +0.25, perfect 5.00)
-- **SQL query best practices for OLAP / NOT EXISTS vs NOT IN null-trap 3VL** (Q2 canonical durability +0.25, perfect 5.00; re-locks r23:1572-1869 from a new question phrasing)
-- **Common analytical query patterns / fan-out SUM-inflation** (Q3 one-to-many JOIN multiplier + pre-aggregate-child fix canonical durability +0.25, perfect 5.00)
-- **Oracle PL/SQL procedure → dbt + Trino SQL migration / WITH RECURSIVE max_recursion_depth-default** (Q4 -0.40 responder-drift penalty: resources cite default = 10 correctly at r27:33 + r27:3593 with verbatim docs quote, but responder transcribed "1000" off by 100x; depth-guard `< 20` exceeds the real cap of 10 → would error on trees > 10 unless `SET SESSION max_recursion_depth` is raised first; recursive STRUCTURE itself correct)
-
----
-
-## Meta-note
-
-iter678 confirms three of four answers (Q1/Q2/Q3) perfect 5/5/5/5 on the canonical anti-join / null-trap / fan-out trio — the resources hold cleanly on every angle probed. Q4 is the lone deviation: the WITH-RECURSIVE structure is correct but a specific factual claim about a session-property default value drifted by 100x from what the resources state verbatim. Because the resources r27:33 and r27:3593 BOTH cite the correct default (10) with the docs quote, this is a **responder transcription failure, not a resource gap**, so the correct iter679 response is DEFAULT NO-OP (do not chase a FIX-A for content that is already correct and findable; chasing it would risk over-tuning the resource and adding churn for a Haiku-side hallucination that may not repeat).
-
-Trajectory iter656→678 (4.625 → 4.375 → 5.00 → 4.875 → 4.21875 → 4.875 → 5.000 → 5.000 → 4.5625 → 5.000 → 3.656 → 4.5625 → 4.5625 → 4.375 → 4.125 → 4.9375 → 5.000 → 4.9375 → 5.000 → 4.500 → 4.875 → 4.78 → 4.5625) shows sustained 4.5+ across nine of last ten iterations with iter678 sitting at the +1.06 margin — still well above floor despite one weak answer in the spread.
-
-**OVERALL: 4.5625 PASS — three perfect 5.00 (LEFT-JOIN + COALESCE-SUM / NOT EXISTS NULL-safe / fan-out diagnosis-and-fix) + one weak Q4 (WITH-RECURSIVE structure correct but max_recursion_depth default claim wrong: responder said 1000, real default is 10 per trino.io/docs/467, would cause runtime error on trees deeper than 10 since the user's depth<20 guard exceeds the engine cap); resources r27:33 + r27:3593 cite default=10 correctly with docs quote, so this is responder-transcription drift NOT a resource defect; iter679 recommended DEFAULT NO-OP / durability-breadth continuation; consider federation re-probe (34-iter ZERO streak, thinnest rubric margin).**
+Sources:
+- [Trino SELECT — current/467 docs](https://trino.io/docs/current/sql/select.html)
+- [AWS re:Post Athena recursive CTE NOT_SUPPORTED error](https://repost.aws/questions/QUhA0fedaZSimRrX4l6RCHfQ/athena-recursive-cte-not-supported-recursion-depth-limit-exceeded-10-use-max-recursion-depth)
