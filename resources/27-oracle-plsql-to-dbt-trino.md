@@ -537,7 +537,7 @@ These are the per-expression rewrites you'll do on almost every migrated SELECT.
 
 > ### LEADING CANONICAL — Oracle `TO_CHAR(date, fmt)` → Trino
 >
-> **Question shape this answers**: "what's the Trino equivalent of Oracle `TO_CHAR(order_ts, 'YYYY-MM-DD')`", "how do I format a timestamp as a string in Trino", "how do I migrate `TO_CHAR(dt, 'YYYY-MM-DD HH24:MI:SS')` from Oracle to Trino".
+> **Question shape this answers**: "what's the Trino equivalent of Oracle `TO_CHAR(order_ts, 'YYYY-MM-DD')`", "how do I format a timestamp as a string in Trino", "how do I migrate `TO_CHAR(dt, 'YYYY-MM-DD HH24:MI:SS')` from Oracle to Trino", "format a date as a custom string", "weekday name from a date", "day name from a DATE column", "month abbreviation", "Jun 09 2026 format", "date_format vs format_datetime", "date_format needs a timestamp".
 >
 > **The two canonical Trino 467 functions** — both verified against [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html):
 >
@@ -580,6 +580,8 @@ These are the per-expression rewrites you'll do on almost every migrated SELECT.
 > | `'MM/DD/YYYY'` | `'%m/%d/%Y'` | `'MM/dd/yyyy'` |
 > | `'Mon DD, YYYY'` | `'%b %d, %Y'` | `'MMM dd, yyyy'` |
 > | `'Month DD, YYYY'` | `'%M %d, %Y'` | `'MMMM dd, yyyy'` |
+> | `'Day'` (FULL weekday name, e.g. `Monday`) | `'%W'` | `'EEEE'` |
+> | `'Dy'` (ABBREVIATED weekday name, e.g. `Mon`) | `'%a'` | `'EEE'` |
 > | `'HH24:MI'` | `'%H:%i'` | `'HH:mm'` |
 > | `'HH24:MI:SS'` | `'%H:%i:%s'` | `'HH:mm:ss'` |
 > | `'YYYY'` (year only) | `'%Y'` | `'yyyy'` |
@@ -595,6 +597,29 @@ These are the per-expression rewrites you'll do on almost every migrated SELECT.
 > - **MySQL `%m` (lowercase) = month 01-12**. **Joda `MM` (uppercase) = month 01-12**; Joda lowercase `mm` = MINUTE not month. This trips engineers most often — `format_datetime(ts, 'yyyy-mm-dd')` (lowercase `mm`) silently renders the minute-of-hour where you expected month-of-year.
 > - **MySQL `%i` = minute** (`%M` is month NAME). **Joda `mm` = minute** (`MM` is month). The two grammars disagree about the case of the minute-of-hour specifier.
 > - **Hour 24-clock**: MySQL `%H`, Joda `HH`. **Hour 12-clock**: MySQL `%h`, Joda `hh` (also need `%p` / `a` for AM/PM).
+> - **WEEKDAY NAME (the day name as a word — "format a date as a custom string", "weekday name from a date", "day name from a DATE column", "get the day of the week as text"):** MySQL `%W` = **FULL** weekday name (`Sunday` .. `Saturday`); MySQL `%a` = **ABBREVIATED** weekday (`Sun` .. `Sat`). Joda equivalents: `'EEEE'` = full, `'EEE'` = abbreviated. **❌ `%A` (capital A) is NOT a valid Trino `date_format` specifier — there is no `%A`. Use `%W` for the full weekday name, `%a` for the abbreviated form — DO NOT COPY `%A`.** (Verified at [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html): the documented specifiers are `%W` = "Weekday name (`Sunday` .. `Saturday`)" and `%a` = "Abbreviated weekday name (`Sun` .. `Sat`)"; no `%A` exists.) Mirror trap to the month name: `%M` = full MONTH name, `%b` = abbreviated MONTH (`Jan` .. `Dec`).
+>
+> **CRITICAL — `date_format` (and `format_datetime`) REQUIRE a `TIMESTAMP` input; a bare `DATE` column must be CAST first.** Both signatures are typed `date_format(timestamp, format) → varchar` and `format_datetime(timestamp, format) → varchar` (first argument **TIMESTAMP**, not DATE — verified at [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html)). Passing a bare `DATE` column raises a function-resolution / signature-mismatch error. If your column is a `DATE`, cast it up first: `date_format(CAST(report_date AS timestamp), '%W')` — **not** `date_format(report_date, '%W')`.
+>
+> **Copy-correct worked examples — custom display string from a DATE column (`report_date = DATE '2026-06-09'`, a Monday):**
+>
+> ```sql
+> -- ✅ COPY THIS — "Jun 09, 2026" style (abbreviated month + zero-padded day + 4-digit year):
+> date_format(CAST(report_date AS timestamp), '%b %d, %Y')   -- 'Jun 09, 2026'
+> -- ✅ COPY THIS — the full weekday NAME from a DATE column:
+> date_format(CAST(report_date AS timestamp), '%W')          -- 'Monday'
+> -- ✅ COPY THIS — abbreviated weekday:
+> date_format(CAST(report_date AS timestamp), '%a')          -- 'Mon'
+> -- ❌ %A is NOT a valid Trino date_format specifier — use %W (full weekday) / %a (abbrev) — DO NOT COPY:
+> --     date_format(CAST(report_date AS timestamp), '%A')   -- WRONG: %A does not exist
+> -- ❌ a bare DATE is rejected — date_format needs a TIMESTAMP — DO NOT COPY:
+> --     date_format(report_date, '%W')                      -- WRONG: signature mismatch, CAST AS timestamp first
+>
+> -- Joda (format_datetime) equivalents — same output, different grammar:
+> format_datetime(CAST(report_date AS timestamp), 'MMM dd, yyyy')  -- 'Jun 09, 2026'  (MM=month, mm=MINUTE)
+> format_datetime(CAST(report_date AS timestamp), 'EEEE')          -- 'Monday'        (full weekday)
+> format_datetime(CAST(report_date AS timestamp), 'EEE')           -- 'Mon'           (abbreviated weekday)
+> ```
 >
 > **For niche needs only** — `format('%1$td/%1$tm/%1$tY', ts)` Java Formatter syntax IS a real Trino function but a niche choice. Use it only when you need Java Formatter-specific features (positional args, indexed reuse). For ordinary TO_CHAR migration, `date_format` / `format_datetime` are the canonical answers.
 >
