@@ -1,243 +1,149 @@
-# iter712 Judge Feedback
+# iter713 Judge Feedback
 
 ## Scope
 
-Re-probe of iter711 FLAG-ONLY NOT-IN-NULL diagnostic + 3 routine SQL-pattern probes
-(percent-of-total, running-max window, substring filter).
+NO-OP durability probe: 4 SQL-pattern questions (top-N-with-ties, stable hash bucketing, partition pruning on date range, COUNT(*) vs COUNT(col)). Resources were untouched in iter713. Probing whether the existing mature corpus continues to deliver correct dialect-accurate answers on questions whose canonical forms may or may not be findable in resources/.
 
-PIN Trino 467 — all dialect facts verified against trino.io/docs/467 (+ /docs/current
-where the page is unchanged across versions).
+## Per-question scores (1-5 on Accuracy, Completeness, Clarity, Actionability)
 
----
+### Q1 — top 10 leaderboard INCLUDING ties at the 10th spot
+- Accuracy: 2
+- Completeness: 2
+- Clarity: 4
+- Actionability: 3
 
-## Per-question scores
+**What worked**: Self-corrected away from QUALIFY draft (iter695 inoculation is taking). Final SQL parses on Trino 467 and produces a plausible leaderboard. ORDER BY + DENSE_RANK + CTE structure is clean and readable.
 
-### Q1 — NOT IN three-valued-logic trap + catch-all for blanks
+**Defects** (verified against trino.io/docs/467/functions/window.html and sql/select.html):
 
-**User symptom:** `WHERE status NOT IN ('active','paused','cancelled')` "missing some
-bad rows" — specifically the rows where `status IS NULL` (or empty/blank).
+1. **FALSE anti-RANK justification** (Accuracy hit). The responder said "WHERE rank <= 10 would miss account #10 if it tied with #9." This is wrong. RANK() over revenues [..., 60, 55, 55, 55, 50] assigns ranks 1,2,...,9,10,10,10,13 — so `WHERE rank <= 10` returns rows 1-9 PLUS all three rows tied at rank 10, which is EXACTLY the user's "top 10 including ties at the 10th spot" semantic. RANK <= N is the canonical idiom for this question; the responder rejected the right answer for the wrong reason.
 
-**Responder fix prescribed:**
-- `WHERE status IS NULL OR status NOT IN ('active','paused','cancelled')` — catch-all
-- `LEFT JOIN (VALUES('active'),('paused'),('cancelled')) AS valid(status) ON
-  e.status=v.status WHERE v.status IS NULL` — anti-join alternative
-- Cited resources/23 §10 NOT-IN + NULL gotcha.
+2. **DENSE_RANK semantic mismatch** (Accuracy hit). DENSE_RANK <= 10 returns the top 10 DISTINCT revenue tiers, not "top 10 positions + ties at 10th." If there are many ties spread across the leaderboard, DENSE_RANK <= 10 can return far more than ~10 rows from a much wider range of positions. It's a defensible "top 10 tiers" reading but does NOT match the literal question.
 
-**Verification vs trino.io/docs/467 + SQL 3VL semantics:**
-- (a) Catch-all `IS NULL OR NOT IN (...)` — CORRECT. SQL 3VL: when the outer column
-  is NULL, `NULL <> 'active' AND NULL <> 'paused' AND NULL <> 'cancelled'` evaluates
-  to `UNKNOWN AND UNKNOWN AND UNKNOWN` → UNKNOWN, which the WHERE clause treats as
-  not-true → row dropped. Adding `status IS NULL OR` re-includes those rows
-  explicitly. Solves the symptom.
-- (b) LEFT-JOIN-IS-NULL anti-join — VALID Trino 467. Standard SQL anti-join pattern;
-  `(VALUES ...)` table constructor supported; NULL on the left side joins to nothing
-  on the right → `v.status IS NULL` for any row whose left-side status didn't match
-  → catches both "not in the list" rows AND "left side is NULL" rows. NULL-safe by
-  design. Correct.
+3. **Missing FETCH FIRST 10 ROWS WITH TIES** (Completeness gap). The SQL-standard / most-direct Trino 467 form for this exact question is `ORDER BY total_revenue DESC FETCH FIRST 10 ROWS WITH TIES`. Verified at trino.io/docs/467/sql/select.html — Trino 467 supports the `FETCH { FIRST | NEXT } [ count ] { ROW | ROWS } { ONLY | WITH TIES }` clause. The responder did not mention this form. **Findability check**: resources/ has NO canonical for `FETCH FIRST n ROWS WITH TIES` (grep returned only `FETCH FIRST … ROWS ONLY` examples in r27 Oracle migration and r23 dialect table — no `WITH TIES`). This is a **findable-but-missing top-N-with-ties gap** — a clear FIX-A candidate.
 
-**MECHANISM-PRECISION nuance (flagged by directive):** Responder said "even one NULL
-in the status column... every comparison evaluates to UNKNOWN... filters out EVERY
-row — not just the invalid ones."
+### Q2 — stable repeatable bucket assignment (CRITICAL — fabricated function)
+- Accuracy: 1
+- Completeness: 2
+- Clarity: 4
+- Actionability: 2
 
-That description applies to the case where **the list/subquery side** contains a
-NULL (then NOT IN expands to `... AND col <> NULL` which is UNKNOWN for every outer
-row → empty result). In the user's actual scenario the list is literals
-('active','paused','cancelled') with NO NULL, so the AND-chain `col <> 'active' AND
-col <> 'paused' AND col <> 'cancelled'` is well-defined for every non-NULL outer
-status — `NOT IN` works correctly for those. ONLY the outer rows where `status IS
-NULL` get their predicate → UNKNOWN → silently dropped, which exactly matches the
-user's "missing SOME bad rows" symptom (not "missing every row").
+**FABRICATED FUNCTION CONFIRMED**. Verified against trino.io/docs/467/functions/binary.html: **`HASH_CODE()` is NOT a real Trino 467 function.** The Trino 467 hash function inventory is: `crc32(binary) → bigint`, `md5(binary) → varbinary`, `sha1/sha256/sha512(binary) → varbinary`, `xxhash64(binary) → varbinary`, `murmur3(binary) → varbinary`, `spooky_hash_v2_32/64(binary) → varbinary`. No `hash_code` / `HASH_CODE` / `hash` exists. The responder's `ABS(HASH_CODE(account_id)) % 5` will fail with "Function 'hash_code' not registered" at parse/analysis time. This is the EXACT class of defect the Trino-dialect-accuracy memory entry warns against.
 
-So the responder's MECHANISM PROSE conflates two adjacent sub-cases:
-- Sub-case A: list/subquery contains NULL → every row vanishes (the canonical r23
-  §10 framing).
-- Sub-case B: list is pure literals, outer column has NULL rows → only the
-  NULL-outer rows vanish (the user's actual scenario).
+**Correct Trino 467 stable-hash-bucketing forms** (all verified):
+- `abs(from_big_endian_64(xxhash64(to_utf8(account_id)))) % 5` — xxhash64 returns 8-byte varbinary; from_big_endian_64 converts to bigint
+- `crc32(to_utf8(account_id)) % 5` — crc32 returns bigint directly, simplest form
+- `abs(from_base(substr(to_hex(md5(to_utf8(account_id))), 1, 15), 16)) % 5` — md5+hex+from_base 16
 
-The PRESCRIBED FIX still solves the user's actual problem (the `IS NULL OR ...`
-catch-all and the LEFT-JOIN anti-join both handle sub-case B correctly). The
-symptom diagnosis ("missing rows because of NULL+3VL") is RIGHT. The exact
-mechanism prose overstates by describing sub-case A behavior when sub-case B is
-what's happening here.
+**Findability check**: NO stable-hash-bucketing canonical in resources/. Grep for `HASH_CODE|hash_code` returned zero hits (good — no contradiction); grep for `xxhash64|crc32` returned hits only in r27 (surrogate-key context with md5) and r05 (PII masking with sha256). The responder synthesized `HASH_CODE` from training-data noise (Spark `hash()`, Java `.hashCode()`) because the resources gave NO canonical to anchor to. **Highest-priority findable-but-missing gap.**
 
-**Flag-status verdict (per directive):**
-- NOT-IN-NULL diagnostic flag = **PARTIALLY CLOSED**. The user gets a working
-  catch-all and a valid alternative — that's the load-bearing deliverable, and it
-  catches both NULLs and blanks. So the practical fix is solid.
-- Mechanism-conflation = **MINOR PROSE NIT, NOT A FINDABLE GAP for iter713**. The
-  responder still routed correctly to §10, still named 3VL, still picked the right
-  fix shape, still gave both the catch-all AND the anti-join. A SaaS engineer
-  reading the answer will fix their query correctly; they may walk away with
-  slightly off mental model of which sub-case caused their symptom, but they will
-  not write buggy code as a result. The teacher could optionally add a 2-line
-  inline-marked sub-case split (literal-list + outer-NULL vs subquery + right-side
-  NULL) adjacent to r23 §10 in iter713 if a future probe lands directly on the
-  mechanism-precision question — but DO NOT prioritize this; resources are mature
-  and reconcile-don't-append risk outweighs the marginal value.
+CASE-based treatment_a/treatment_b/control example was a nice elaboration, but rests on the same broken hash call, so it propagates the defect.
 
-**Sub-scores (1-5):**
-- Accuracy: 4 — fix is correct, anti-join valid, but mechanism prose conflates
-  list-NULL vs outer-NULL sub-cases (overstates "every row dropped" when only
-  NULL-outer rows are dropped in this scenario).
-- Completeness: 5 — both the IS-NULL-OR catch-all and the LEFT-JOIN anti-join
-  given; references §10; explicitly mentions blanks.
-- Clarity: 4 — terms are explained (3VL, UNKNOWN, anti-join via the WHERE-right-IS-
-  NULL pattern), but the "filters out EVERY row" sentence could confuse a reader
-  comparing the prose to their actual partial-loss symptom.
-- Actionability: 5 — copy-paste-ready SQL for both shapes, immediately solves the
-  user's data-quality check.
-- **Avg: 4.50**
+### Q3 — partition pruning on date-range query
+- Accuracy: 5
+- Completeness: 4
+- Clarity: 4
+- Actionability: 5
 
----
+Naked-column range predicate + EXPLAIN-to-verify-TableScan-constraint + function-wrapping-breaks-pruning is docs-correct for Trino 467 Iceberg connector. Concrete enumeration of breaking forms (CAST, date_trunc, arithmetic on the column) is exactly the right inoculation. Engineer can paste the EXPLAIN form and read the constraint themselves. Consistent with the iter687 EXPLAIN-triage content and r28 §4.2 / §8 anchors.
 
-### Q2 — Percent of total in one pass
+### Q4 — COUNT(*) vs COUNT(column)
+- Accuracy: 5
+- Completeness: 5
+- Clarity: 5
+- Actionability: 5
 
-**Responder SQL:**
-```sql
-SELECT customer_id,
-       SUM(amount) AS total_revenue,
-       ROUND(100.0 * SUM(amount) / SUM(SUM(amount)) OVER (), 2) AS pct_of_total
-FROM transactions
-WHERE order_date >= DATE_TRUNC('month', CURRENT_DATE)
-GROUP BY customer_id
-ORDER BY total_revenue DESC;
-```
-
-**Verification vs trino.io/docs/467:**
-- (a) `SUM(SUM(amount)) OVER ()` — VALID Trino 467. This is NOT illegal aggregate
-  nesting. The inner `SUM(amount)` is the GROUP BY aggregate (one value per
-  customer_id group); the outer `SUM(...) OVER ()` is a window function applied
-  AFTER grouping, summing those group results across the empty-OVER window (= all
-  grouped rows = grand total). Trino docs: "All aggregate functions can be used as
-  window functions by adding the OVER clause." Canonical percent-of-total idiom.
-  Correct.
-- (b) Single `100.0 *` multiply, no double-100 — matches the percent-of-total PIN.
-- (c) `DATE_TRUNC('month', CURRENT_DATE)` — valid Trino 467
-  (trino.io/docs/467/functions/datetime.html). Returns first day of current month;
-  `order_date >= that` filters to current month. Correct.
-- (d) `ROUND(x, 2)` — valid Trino 467 numeric function.
-- (e) Single scan, single GROUP BY, no self-join — meets the "cleaner one-pass"
-  ask.
-- (f) No NULLIF on the denominator — if the entire month has zero transactions the
-  GROUP BY produces zero rows and the question is moot. If any customer has rows,
-  the grand total > 0 (assuming amounts are positive). Minor edge case; not a real
-  risk in this billing-dashboard context. Acceptable to omit.
-
-**Sub-scores:**
-- Accuracy: 5 — every Trino 467 form validated; canonical percent-of-total shape.
-- Completeness: 5 — total_revenue + pct_of_total in one query; month filter
-  included; ORDER BY DESC for dashboard ranking.
-- Clarity: 5 — explains `SUM(SUM())` as "grand total via empty OVER ()", names the
-  single-scan / no-self-join win.
-- Actionability: 5 — drop-in copy-paste for the billing dashboard.
-- **Avg: 5.00**
-
----
-
-### Q3 — Running max ("personal best so far") per customer
-
-**Responder SQL:**
-```sql
-SELECT customer_id, order_date, amount,
-       MAX(amount) OVER (
-         PARTITION BY customer_id
-         ORDER BY order_date
-         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-       ) AS highest_to_date
-FROM orders
-ORDER BY customer_id, order_date;
-```
-
-**Verification vs trino.io/docs/467/functions/window.html:**
-- (a) `MAX(x) OVER (PARTITION BY ... ORDER BY ... ROWS BETWEEN UNBOUNDED PRECEDING
-  AND CURRENT ROW)` — VALID. Trino docs explicitly support all aggregate functions
-  as window functions with PARTITION BY + ORDER BY + ROWS frame; UNBOUNDED
-  PRECEDING and CURRENT ROW are documented frame bounds. This is the canonical
-  running-max pattern. Correct.
-- (b) No self-join, no correlated subquery — meets the user's explicit "without
-  self-join" constraint. Correct.
-- (c) Outer ORDER BY for readability — fine.
-
-**Sub-scores:**
-- Accuracy: 5 — exact-correct window-frame syntax, idiomatic running-max.
-- Completeness: 5 — answers the question fully; explicit frame; outer sort for
-  display.
-- Clarity: 5 — names what the frame does ("every row from start through current").
-- Actionability: 5 — drop-in copy-paste.
-- **Avg: 5.00**
-
----
-
-### Q4 — Filter rows where message contains "timeout"
-
-**Responder SQL:**
-```sql
-SELECT id, message FROM logs WHERE message LIKE '%timeout%' ORDER BY id;
--- Also: WHERE regexp_like(message, '(?i)timeout')  for case-insensitive
-```
-
-**Verification vs trino.io/docs/467/functions/string.html + functions/regexp.html:**
-- (a) `LIKE '%timeout%'` — VALID Trino 467. Standard SQL LIKE with `%` wildcard for
-  any-chars-before-or-after. Case-sensitive by default. Correct for plain
-  substring match.
-- (b) `regexp_like(message, '(?i)timeout')` — VALID Trino 467. `regexp_like(string,
-  pattern) → boolean` is documented. The `(?i)` inline flag is the standard
-  Java/JONI regex case-insensitive modifier, and Trino docs explicitly note "Case-
-  insensitive matching (enabled via the `(?i)` flag) is always performed in a
-  Unicode-aware manner." Correct.
-- (c) Comparison framing — responder correctly says LIKE is simpler + faster + more
-  readable for plain substring; regexp_like is for case-insensitive or complex
-  patterns. Matches Trino guidance.
-
-**Sub-scores:**
-- Accuracy: 5 — both forms validated against trino.io/docs/467.
-- Completeness: 5 — primary fix (LIKE) plus the case-insensitive escalation
-  (regexp_like + `(?i)`).
-- Clarity: 5 — explains `%` wildcards and `(?i)` flag; gives selection guidance.
-- Actionability: 5 — copy-paste ready for both shapes.
-- **Avg: 5.00**
-
----
+Verified against trino.io/docs/467/functions/aggregate.html: COUNT(*) counts rows (incl NULLs), COUNT(col) skips NULLs. The LEFT-JOIN NULL-pad case (COUNT(*)=1 vs COUNT(o.order_id)=0 for unmatched rows) is the canonical real-world trap and the responder named it precisely. Reference to r07 §1a.5 is correct.
 
 ## Overall
 
-| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|---|
-| Q1 NOT-IN-NULL catch-all | 4 | 5 | 4 | 5 | 4.50 |
-| Q2 percent of total       | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 running max window     | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 substring + regex      | 5 | 5 | 5 | 5 | 5.00 |
-| **OVERALL**               |   |   |   |   | **4.875** |
+Sub-score sum: 2+2+4+3 + 1+2+4+2 + 5+4+4+5 + 5+5+5+5 = **57**
+Overall average: 57 / 16 = **3.5625**
 
-**Verdict: PASS (4.875 >= 3.5)**
+**Verdict: PASS** (barely — overall avg ≥ 3.5 threshold met by 0.06).
 
----
+Q1 and Q2 both drag hard; Q3 and Q4 carry the overall average across the threshold. No per-Q veto per directive, but flagging both weak answers as serious defects worth fixing.
 
-## Flag-status & next-iteration directive
+## Explicit assessments requested
 
-**iter711 NOT-IN-NULL diagnostic flag — PARTIALLY CLOSED.**
-- The prescribed fix (catch-all `IS NULL OR NOT IN` + LEFT-JOIN anti-join) correctly
-  solves the user's "missing blank-status rows" symptom. Both shapes are valid
-  Trino 467. Responder routed to r23 §10. The load-bearing deliverable lands.
+**(1) HASH_CODE() reality + FIX-A candidacy**: HASH_CODE() is **NOT a real Trino 467 function** (verified against trino.io/docs/467/functions/binary.html — full hash function inventory is crc32 / md5 / sha1 / sha256 / sha512 / xxhash64 / murmur3 / spooky_hash_v2_32/64, no HASH_CODE / hash_code / hash). The fabricated-function defect makes Q2 a **STRONG FIX-A candidate for iter714**. The responder confabulated because no canonical stable-hash-bucketing example exists in resources/ to anchor onto.
 
-**Mechanism-conflation finding — PROSE NIT, NOT a findable gap for iter713.**
-- The responder's "filters out EVERY row" sentence describes the list-contains-NULL
-  sub-case (sub-case A) rather than the outer-column-NULL sub-case (sub-case B)
-  that actually matches the user's symptom. The fix prescribed is still
-  sub-case-B-correct, so no engineer will write buggy SQL from this answer. The
-  mental model is slightly fuzzy but not wrong.
-- Recommendation to teacher: **DO NOT add a new card for iter713.** Resources are
-  mature (172+ consecutive PASSES) and reconcile-don't-append risk + responder
-  confusion-from-defangs risk (cf. iter693 regression) outweigh the marginal
-  benefit of a precision split. If a FUTURE probe explicitly asks "why are ONLY
-  the NULL-status rows missing, not all rows" (mechanism-precision), THEN add a
-  2-line inline-marked sub-case split adjacent to r23 §10. Until then, hold.
+**(2) Q1 top-N-with-ties gap**: This is a **findable-but-missing gap**. Resources/ has no `FETCH FIRST n ROWS WITH TIES` canonical and no explicit "RANK() <= N is the right idiom for top-N-with-ties" worked example. The r23:1201-1203 table covers "Nth-largest distinct VALUE per group" (DENSE_RANK = N) which is a different question. Without a top-N-with-ties canonical, the responder reached for the closest-named pattern (DENSE_RANK ranking) and invented a wrong justification to dismiss RANK. **FIX-A candidate for iter714.**
 
-**Patterns across all 4 answers:** Trino 467 dialect fidelity is excellent. Window
-function idioms (SUM(SUM()) OVER (), MAX() OVER ROWS UNBOUNDED PRECEDING) are
-copy-paste-correct. Regex flag `(?i)` and DATE_TRUNC / LIKE / ROUND / GROUP BY +
-ORDER BY shapes all validated. The only soft spot is mechanism prose in 3VL
-explanations — and even there the actionable SQL is right.
+## Priority recommendation for iter714 FIX-A
 
-**No rubric topic regression. No new required resource edits. State.json NOT
-bumped (per directive).**
+**Q2 (fabricated HASH_CODE) > Q1 (missing FETCH FIRST WITH TIES)**.
+
+Reasoning:
+- Q2 produces a SQL statement that **will not execute** — engineer copies it, runs it, gets a "function not registered" error and has wasted cycles. Severity: hard parse-time failure.
+- Q1 produces a SQL statement that **does execute and returns a plausible leaderboard**, just not the literal semantic asked (and rests on a false RANK explanation). Severity: silent semantic mismatch + misinformation.
+- Both are real defects, but a fabricated function is the textbook Trino-dialect-accuracy violation that the project memory explicitly warns against. It is also the most visible (engineer immediately notices the error message).
+
+### Suggested iter714 FIX-A content for the teacher
+
+**New canonical in resources/23 (SQL best practices) — Stable hash bucketing without a mapping table:**
+
+```sql
+-- CANONICAL — stable, repeatable, Trino 467
+SELECT
+  account_id,
+  CAST(abs(from_big_endian_64(xxhash64(to_utf8(account_id)))) % 5 AS INTEGER) AS bucket
+FROM accounts;
+
+-- Equivalent simpler form using crc32 (bigint return, no varbinary unwrap):
+SELECT
+  account_id,
+  CAST(crc32(to_utf8(account_id)) % 5 AS INTEGER) AS bucket
+FROM accounts;
+```
+
+**Inline-marked DO-NOT-COPY block** for the false `HASH_CODE` form:
+```sql
+-- WRONG — DO NOT COPY — Trino 467 has NO hash_code() / HASH_CODE() / hash() function
+-- abs(HASH_CODE(account_id)) % 5     -- ❌ parse error: 'Function hash_code not registered'
+-- abs(hash(account_id)) % 5          -- ❌ that is Spark, not Trino
+-- account_id.hashCode() % 5          -- ❌ that is Java
+```
+
+**Inoculation paragraph**: Trino has NO bare `hash()` or `hash_code()` function. The Trino 467 hash family is exclusively: `crc32`, `md5`, `sha1/256/512`, `xxhash64`, `murmur3`, `spooky_hash_v2_*`. All EXCEPT crc32 take varbinary in and return varbinary out — for a varchar key, wrap in `to_utf8(...)` to get varbinary; for bucket math, convert the varbinary digest to bigint via `from_big_endian_64(...)` (xxhash64 produces 8 bytes — perfect for from_big_endian_64). Cite trino.io/docs/467/functions/binary.html.
+
+**Suggested cross-reference**: r23 §10 (SemiJoin / surrogate key) and r27 §4.5A (Oracle surrogate-key migration where md5/to_utf8 is already used).
+
+### Suggested iter714 FIX-B (if bandwidth allows after FIX-A)
+
+**New canonical in resources/23 (top-N family) — Top-N with ties at the cutoff:**
+
+```sql
+-- CANONICAL #1 — SQL-standard direct form (Trino 467 supports FETCH FIRST n ROWS WITH TIES)
+SELECT account_id, account_name, total_revenue
+FROM accounts
+ORDER BY total_revenue DESC
+FETCH FIRST 10 ROWS WITH TIES;
+
+-- CANONICAL #2 — window-function form, identical semantic
+WITH ranked AS (
+  SELECT account_id, account_name, total_revenue,
+         RANK() OVER (ORDER BY total_revenue DESC) AS rk
+  FROM accounts
+)
+SELECT account_id, account_name, total_revenue
+FROM ranked
+WHERE rk <= 10
+ORDER BY rk, account_id;
+```
+
+**Worked-example table** showing on revenues [100,95,90,85,80,75,70,65,60,55,55,55,50]:
+| Function | Sequence | `WHERE … <= 10` returns |
+|---|---|---|
+| `ROW_NUMBER()` | 1,2,3,4,5,6,7,8,9,10,11,12,13 | exactly 10 rows — arbitrary tiebreak, may cut a tied group |
+| `RANK()` | 1,2,3,4,5,6,7,8,9,10,10,10,13 | **12 rows** — top 9 + all 3 tied at #10 (THIS is "top 10 + ties at 10th") |
+| `DENSE_RANK()` | 1,2,3,4,5,6,7,8,9,10,10,10,11 | **12 rows but a DIFFERENT 12** — top 10 distinct tiers |
+
+**Defang paragraph**: The reasoning "RANK <= N misses someone because of gaps" is FALSE. RANK <= N never misses anyone — it returns everyone whose rank is ≤ N. Gaps happen AFTER the tied group (e.g., 10,10,10,13), not before. For "top N including ties at Nth," RANK <= N is the canonical window-function idiom; `FETCH FIRST N ROWS WITH TIES` is the SQL-standard idiom; DENSE_RANK <= N is a DIFFERENT semantic (top N distinct tiers) and should not be confused with the first two.
+
+## Held locks preserved (sample-verified)
+
+- QUALIFY-not-Trino inoculation: ACTIVELY WORKING (responder self-corrected on Q1)
+- COUNT semantics + LEFT-JOIN-NULL-pad: SOLID (Q4 was textbook)
+- Partition pruning + EXPLAIN + function-wrap defang: SOLID (Q3 was textbook)
+- All iter678 / iter695-712 locks remain in resources/ untouched.
