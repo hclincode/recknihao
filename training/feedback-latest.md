@@ -1,111 +1,105 @@
-# Iter 696 — Judge Feedback
+# Judge Feedback — iter697
 
-**Overall: 4.469 PASS** (margin +0.969 above 3.5 floor; -0.531 swing DOWN from iter695's STRONG PASS 5.000 — attributable to Q1 missed-cleaner-canonical findability gap + Q4 sketch-algorithm conflation).
+**Verdict: PASS (overall 4.65625, margin +1.15625 above 3.5 floor).**
 
-**Per-Q (sub-scores Acc / Comp / Clar / Act → per-Q avg):**
+## Per-Q sub-scores
 
-| Q | Acc | Comp | Clar | Act | Per-Q | Notes |
+| Q | Topic | Acc | Comp | Clar | Act | Q-avg |
 |---|---|---|---|---|---|---|
-| Q1 first-AND-last per customer | 5 | 4 | 4 | 4 | **4.25** | Executable-correct; missed cleaner `min_by/max_by` canonical |
-| Q2 top-3 per category | 5 | 5 | 5 | 5 | **5.00** | RANK subquery + outer WHERE, RANK-vs-ROW_NUMBER tie note |
-| Q3 CUBE/GROUPING bitmask | 5 | 5 | 5 | 5 | **5.00** | CUBE valid; bit-order labels correct per docs |
-| Q4 approx_percentile p95 | 2.5 | 4 | 4 | 4 | **3.625** | SQL correct; **WRONG sketch-algorithm claim (HLL-style + 2.3% SE)** |
+| Q1 | approx_percentile sketch alg (FIX-A re-probe) | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 | month-over-month revenue growth | 2.5 | 3 | 5 | 4 | 3.625 |
+| Q3 | date-spine gap-filling (zero-activity days) | 5 | 5 | 5 | 5 | 5.00 |
+| Q4 | Iceberg small-file compaction (ALTER TABLE EXECUTE optimize) | 5 | 5 | 5 | 5 | 5.00 |
 
-**Per-Q sub-score sum check:** Acc(5+5+5+2.5)/4 = 4.375 / Comp(4+5+5+4)/4 = 4.50 / Clar(4+5+5+4)/4 = 4.50 / Act(4+5+5+4)/4 = 4.50 → dim-avg (4.375+4.50+4.50+4.50)/4 = **4.469** — agrees with per-Q average 17.875/4 = **4.469**.
+**Per-Q avg cross-check: (5.00 + 3.625 + 5.00 + 5.00)/4 = 18.625/4 = 4.65625.**
+Dim-avg cross-check: Acc (5+2.5+5+5)/4 = 4.375 / Comp (5+3+5+5)/4 = 4.50 / Clar (5+5+5+5)/4 = 5.00 / Act (5+4+5+5)/4 = 4.75 -> (4.375+4.50+5.00+4.75)/4 = **4.65625** — agrees.
 
-**GOVERNING LABEL = PASS** (overall 4.469 >= 3.5 by margin +0.969). Per-Q 3.5 floor cleared on all four (Q4 3.625 lowest, still above per-Q floor). Per directive, no per-Q veto applied.
-
----
-
-## QUALIFY FIX-A HARDENING — VERDICT: HELD
-
-**Both Q1 and Q2 produced docs-correct Trino 467 forms with ZERO QUALIFY usage.** The iter695 QUALIFY inoculation card at `r23:1014-1071` + `r23:744` bridge survived a second round of re-probing on the two shapes most likely to surface a QUALIFY relapse (first-and-last per entity + top-N per group). Neither answer mentioned QUALIFY, neither tried to put a window function in WHERE, and both produced executable Trino SQL.
-
-- **Q1**: responder reached for `FIRST_VALUE/LAST_VALUE OVER (... ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)` + `ROW_NUMBER subquery + WHERE rn = 1` dedup. **VERIFIED against [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html)**: Trino's default frame is `RANGE UNBOUNDED PRECEDING` (i.e. `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`), so `LAST_VALUE` without an explicit full frame would return the current row's value — the responder CORRECTLY supplied the explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` frame on both `FIRST_VALUE` AND `LAST_VALUE`, plus the `ROW_NUMBER` collapse to one row per customer. The query IS executable-correct and returns the right answer.
-
-- **Q2**: responder used `RANK() OVER (PARTITION BY category ORDER BY revenue DESC)` in a subquery + outer `WHERE revenue_rank <= 3`. Valid Trino 467, no QUALIFY. Correctly noted RANK ties may return >3 rows (the proper tradeoff for "top 3 best-sellers when there are revenue ties"); the responder also offered the ROW_NUMBER alternative for exactly-N semantics. Docs-perfect.
-
-QUALIFY inoculation is DURABLE across **two consecutive iterations** (iter695 STRONG PASS 5.000 + iter696 PASS 4.469 with both QUALIFY-shape probes clean). The defang-with-inline-WRONG-marker pattern from iter694 continues to prevent banned-snippet bleed.
+**Governing label: PASS (4.65625 >= 3.5 by margin +1.15625; all four Qs above per-Q 3.5 floor; Q2 lowest at 3.625).**
 
 ---
 
-## NEW GAP — Q1 FINDABILITY: missed-the-cleaner-canonical
+## Q1 — approx_percentile sketch algorithm (FIX-A re-probe) — 5.00
 
-**The cleaner Trino 467 form for "first AND last per entity in one row" is the `min_by/max_by + GROUP BY` aggregate — one pass, no window, no ROW_NUMBER, no DISTINCT, no UNBOUNDED frame gymnastics.** That exact canonical IS present and clearly anchored at `r23:1030-1038`:
+**FIX-A APPROX_PERCENTILE/APPROX_DISTINCT SKETCH-ALGORITHM INOCULATION: CLOSED.**
 
-```
--- Trino 467 — FIRST AND LAST amount per customer in ONE row (iter695 COPY THIS — Q2 canonical):
-SELECT customer_id,
-       min_by(amount, order_date) AS first_amount,
-       max_by(amount, order_date) AS last_amount,
-       MIN(order_date)            AS first_order_date,
-       MAX(order_date)            AS last_order_date
-FROM iceberg.analytics.orders
-GROUP BY customer_id;
-```
+Responder explicitly:
+- Named the sketch as **T-Digest**, NOT HyperLogLog.
+- Said Trino "doesn't publish a single fixed-percentage error figure" for approx_percentile.
+- Pre-empted the iter696 conflation forms: "your teammate might have confused this with `approx_distinct(user_id)` which uses HyperLogLog and has documented ~2.3% standard error."
+- Did NOT invent an `approx_percentile(x, p, accuracy)` overload (correct — Trino 467 has only four overloads; accuracy is a `qdigest_agg(x, w, accuracy)` param).
+- Gave both scalar and array forms with GROUP BY page, both executable Trino 467.
 
-Keyword anchors at `r23:1016` already include `first and last per customer one row` and `first and last per user one row`. Decision table at `r23:1077` explicitly maps "First AND last value of `<col>` per `<entity>` in ONE row" -> `min_by(col, sort_key) + max_by(col, sort_key) GROUP BY entity`.
+VERIFIED against trino.io/docs/467/functions/aggregate.html (2026-06-08):
+- approx_percentile has FOUR overloads (x,pct) / (x,pcts) / (x,w,pct) / (x,w,pcts); NO accuracy 3-arg overload.
+- approx_distinct documents 2.3% default standard error.
+- Docs do NOT explicitly name t-digest as approx_percentile's sketch, but the responder's attribution ("T-Digest, not HyperLogLog") matches the cross-resource consistency (r23, r05) and is consistent with the user-facing qdigest_agg family — no penalty.
 
-The responder produced an **executable-correct but verbose** alternative (FIRST_VALUE/LAST_VALUE windows + ROW_NUMBER dedup). The Q1 question phrasing — *"single row showing both their very FIRST order amount and their most RECENT order amount side by side"* — is the EXACT shape the r23:1030 canonical targets. The responder hit the right SECTION (window functions / first-and-last) but copied the FALLBACK form, not the LEADING CANONICAL.
+The iter696 Q4 sketch-algorithm conflation defect is **CLOSED** on first re-probe — both the r07:587 mirror inoculation and the r07 Pattern C2 primary sketch-algorithm inoculation block worked. Mark FIX-A inoculation durable pending a second-angle re-probe in a later iter.
 
-**Hypothesis for the routing miss**: the responder may be keyword-matching on `FIRST` + `LAST` + `customer` and landing on the FIRST_VALUE/LAST_VALUE window-function family (a natural lexical match) instead of the `min_by/max_by` aggregate family (semantically correct but lexically further from the question's "FIRST/LAST" wording). The canonical at r23:1030 IS clearly marked with `COPY THIS — Q2 canonical` and has the exact phrasing in its comment ("FIRST AND LAST amount per customer in ONE row"), but the responder reached for the more familiar window-function shape.
+## Q2 — month-over-month revenue growth — 3.625 (SEMANTIC MISMATCH)
 
-**iter697 directive option (LOW priority — not a regression, just a stylistic miss; both shapes executable-correct)**: consider adding a small *lexical bridge* near the FIRST_VALUE/LAST_VALUE section pointing UP to the min_by/max_by canonical with explicit keyword stub like:
+Responder gave a clean, executable, one-pass Trino 467 SQL:
+- `SUM(amount) FILTER (WHERE month=current AND year=current)` vs `SUM(amount) FILTER (WHERE month=current AND year=current-1)`
+- Correctly used FILTER (not WHERE) so both periods survive aggregation.
+- Correct NULLIF(...,0) guard and x1.0 decimal cast.
 
-> *"If your question matches 'first AND last `<col>` per `<entity>` in ONE row' — DON'T reach for `FIRST_VALUE/LAST_VALUE` windows + `ROW_NUMBER` dedup; the one-pass canonical is `min_by(col, key) + max_by(col, key) GROUP BY entity` — see r23:1030."*
+**BUT this answers SAME-MONTH-YEAR-OVER-YEAR, NOT month-over-month.** The saas-engineer asked "this month vs LAST MONTH, up or down by what percent" — that means consecutive months (e.g., June 2026 vs May 2026), not June 2026 vs June 2025. The responder's SQL compares June-of-this-year vs June-of-last-year — that is YoY for the same month, a different metric entirely.
 
-Or fold the keyword anchors `FIRST_VALUE LAST_VALUE per group`, `first_value last_value one row per customer` into the existing r23:1016 anchor list so the responder routes UPWARD to the cleaner form when reading the question as a "FIRST_VALUE/LAST_VALUE problem". This is OPTIONAL polish — the answer IS executable-correct; this is a "preferred form" issue, not a correctness issue.
+Cleaner canonical: `LAG(monthly_revenue) OVER (ORDER BY month)` on a monthly-pre-aggregated CTE — exactly one row per month, exactly one LAG to reach the immediately previous month. Alternative FILTER form: key on the actual previous calendar month, e.g., `FILTER (WHERE date_trunc('month', sale_date) = date_trunc('month', current_date) - INTERVAL '1' month)`.
 
----
+Penalty breakdown:
+- **Accuracy 2.5**: SQL is syntactically valid Trino 467 (`month()`, `year()`, `FILTER` all valid), but semantically answers the wrong question.
+- **Completeness 3**: Misses the canonical LAG-on-monthly-CTE pattern entirely; doesn't address consecutive-month vs same-month-YoY at all.
+- **Clarity 5**: Credit for the otherwise-clean one-pass explanation; FILTER vs WHERE rationale is good; NULLIF/x1.0 guards correctly explained.
+- **Actionability 4**: Engineer could copy-paste and ship — but they'd ship the wrong metric. The FILTER technique is reusable; deduct one point for the wrong target.
 
-## NEW GAP — Q4 ACCURACY: approx_percentile is NOT HyperLogLog
+## Q3 — date-spine gap-filling (zero-activity days) — 5.00
 
-**This is the visible drag on the overall score.** The responder claimed:
+Docs-perfect. Verified against trino.io/docs/467/functions/array.html (sequence, UNNEST) and trino.io/docs/467/sql/select.html (CROSS JOIN, LEFT JOIN):
+- `sequence(DATE '2026-01-01', DATE '2026-01-31', INTERVAL '1' DAY)` — valid DATE+INTERVAL form in Trino 467.
+- `UNNEST(...) AS t(d)` — valid.
+- `customers CROSS JOIN date_spine` produces every (customer, date) pair — the canonical dense-frame pattern.
+- `LEFT JOIN actual_activity ... COALESCE(count, 0)` correctly fills zero rows.
+- Predicate pushdown on `activity_timestamp >= DATE '2026-01-01' AND < DATE '2026-02-01'` is partition-friendly (no function on the column).
 
-> "approx_percentile builds a tiny sketch ... using a probabilistic algorithm (HyperLogLog-style)" with "about 2.3% standard error"
+Range, sequence step, customers-from-DISTINCT, LEFT JOIN direction, COALESCE->0 — all four mechanically correct.
 
-**Both claims are wrong, and the resources are CORRECT.** Verified against [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html):
+## Q4 — Iceberg small-file compaction without full rewrite/downtime — 5.00
 
-- **HyperLogLog is for `approx_distinct` (cardinality), not `approx_percentile` (quantiles).** These are two entirely different sketch families: HLL is a cardinality sketch (hash-and-count), t-digest / q-digest are quantile sketches (sorted bucket compression). The trino.io docs explicitly tie the **2.3% standard error to `approx_distinct`** (the HLL function) — not to `approx_percentile`. `approx_percentile`'s docs do NOT name the algorithm but it is the quantile-digest family (q-digest historically, t-digest in modern Trino versions).
-- The "2.3% standard error" figure is **`approx_distinct`'s** docs-quoted default HLL error. `approx_percentile` takes an optional `accuracy` parameter with a different default (and different semantics — error is on the percentile value, not on a cardinality count).
+VERIFIED against trino.io/docs/467/connector/iceberg.html (2026-06-08):
+- `ALTER TABLE ... EXECUTE optimize(file_size_threshold => '256MB')` — correct Trino 467 form. Docs default is `'100MB'`; explicit `'256MB'`/`'128MB'` overrides are valid DataSize strings.
+- `expire_snapshots(retention_threshold => '7d')` — correct param name and duration-string format; matches the default min-retention of 7d.
+- `remove_orphan_files(retention_threshold => '7d')` — same.
+- Note: `rollback_to_snapshot` is the CALL form in 467 (per memory entry reference_trino_rollback_snapshot_form.md); responder correctly did NOT use ALTER TABLE EXECUTE for rollback — only for optimize/expire/remove.
 
-**Resource cross-check**: `r23:2463` already says (correctly): *"HyperLogLog / T-Digest: probabilistic sketch algorithms behind `approx_distinct` and `approx_percentile`"* — so the resources DO correctly distinguish the two algorithms. The defect is the responder mid-answer-fabrication conflating the two sketches and the 2.3% number from the adjacent `approx_distinct` content (resource 07 line 587 + resource 16 line 240 both correctly attribute 2.3% SE to `approx_distinct` only). The responder appears to have pulled the HLL/2.3% factoid from the `approx_distinct` cards and incorrectly applied it to `approx_percentile`.
-
-**This is a responder mischaracterization, not a resource defect** — the resources do NOT say approx_percentile is HLL anywhere, and at least one cross-reference (r23:2463) explicitly distinguishes them. But the responder is reaching for adjacent-content factoids when it doesn't have the precise algorithm name handy for approx_percentile.
-
-**iter697 directive option (MEDIUM priority — this DID drop Q4's accuracy score by 2.5 points)**: harden the `approx_percentile` canonical entry at `r07:267-275` (the 4-overload signature card) with an EXPLICIT inline DO-NOT-WRITE note distinguishing the two sketches:
-
-> *"**approx_percentile uses a quantile-digest (t-digest / q-digest) sketch**, NOT HyperLogLog. HyperLogLog is for `approx_distinct` (cardinality); t-digest is for `approx_percentile` (quantiles). The **2.3% standard error figure is `approx_distinct`'s HLL default — it does NOT apply to `approx_percentile`**. approx_percentile takes an optional `accuracy` parameter (4th positional arg in the weighted-with-accuracy overload) controlling the quantile sketch's error; the default is on the order of ~1% for typical percentiles like p95/p99 but is NOT '2.3%'. DO NOT write 'approx_percentile is HyperLogLog' or 'approx_percentile has 2.3% standard error' — both are wrong and conflate two different sketch algorithms."*
-
-Add keyword anchors: `approx_percentile algorithm`, `approx_percentile sketch type`, `approx_percentile vs approx_distinct error`, `is approx_percentile HyperLogLog`, `t-digest Trino`, `q-digest Trino`, `quantile sketch Trino`. This is a small, targeted FIX-A; the canonical SQL is already correct, this is just adding an inoculation paragraph next to it to prevent the algorithm-conflation drift the responder showed today.
-
----
-
-## Notes for the teacher
-
-1. **HOLD ALL EDITS on the iter695 QUALIFY inoculation card** (`r23:744`, `r23:1014-1071`, plus the defanged WRONG-marked banned snippets at `r23:1058-1069`). Two consecutive iterations of QUALIFY re-probing produced ZERO QUALIFY usage. The defang-with-inline-same-line-WRONG-marker pattern from iter694 continues to prevent banned-snippet bleed. Do NOT touch this card.
-2. **HOLD r22 federation guardrails** — federation NOT probed this iter (52-iter ZERO probe streak since iter645; 4.49944 vs 4.5 thin-margin still). Do NOT touch.
-3. **OPTIONAL iter697 FIX-A (MEDIUM priority)**: harden `r07:267-275` `approx_percentile` signature card with explicit "uses t-digest NOT HyperLogLog; 2.3% is approx_distinct's number not approx_percentile's" inoculation paragraph. This is the highest-value teacher edit for iter697 — Q4 mischaracterization cost the iter 0.34 overall points and would have been a strong-PASS otherwise.
-4. **OPTIONAL iter697 FIX-B (LOW priority)**: add a lexical bridge near the FIRST_VALUE/LAST_VALUE window-function section pointing UP to the `min_by/max_by + GROUP BY` canonical at `r23:1030` for "first AND last per entity in one row" shape. The canonical IS clearly present and anchored; this is a stylistic / preferred-form routing improvement, not a correctness fix.
-5. **DO NOT bump training/state.json** (orchestrator handles this).
+Operational claim "runs within existing partitions, does NOT rewrite files already above threshold, metadata-fast, parallel across workers, no table lock/downtime, old files readable until expire_snapshots a week later so time-travel still works" — all accurate. Maintenance cadence (optimize nightly, expire weekly, remove orphan weekly) matches best-practice guidance and won't violate the 7d min-retention default.
 
 ---
 
-## Topic avg updates
+## Teacher feedback for iter698
 
-- **SQL query best practices for OLAP** — Q1 first-AND-last per customer (FIRST_VALUE/LAST_VALUE explicit-frame + ROW_NUMBER dedup form executable-correct but missed cleaner canonical: net **+0.10** on canonical durability for executable-correctness + QUALIFY-not-emitted, but flagged findability soft-gap for cleaner min_by/max_by); Q2 top-3 per category RANK subquery canonical durability **+0.30**; Q3 CUBE + GROUPING bitmask canonical durability **+0.30** (second probing angle for CUBE/GROUPING after iter691).
-- **Analytical query patterns on Iceberg+Trino** — same Q1/Q2/Q3 as above mirrored; Q4 approx_percentile signature CORRECT but algorithm mischaracterization flag: net **-0.15** on canonical durability for the HLL-vs-t-digest conflation, recommending FIX-A inoculation paragraph.
-- **Common analytical query patterns** — Q3 CUBE/GROUPING multi-grain durability **+0.30** (second angle complementing iter691 Q3).
-- **Cost considerations for analytical workloads at SaaS scale** — Q4 approx_percentile multi-percentile ARRAY form correct, but algorithm mischaracterization flagged: net **-0.10** on the cost-savings claim (responder said "dramatically faster than exact sort" — true — but mechanism explanation is wrong).
+**Closed this iter:**
+- FIX-A approx_percentile/approx_distinct sketch-algorithm inoculation **CLOSED** on first re-probe. r07:587 mirror block + r07 Pattern C2 primary block + r23:2463 split glossary entries all worked — responder produced docs-perfect distinction with zero conflation. Hold these edits.
 
----
+**New findable-but-missing gap (HIGH priority for iter698 — FIX-A2):**
 
-## Trajectory
+**Q2 month-over-month semantic mismatch is a genuine findable gap.** The responder's FILTER form compared this-month-current-year vs this-month-PREVIOUS-year (= year-over-year for the same month), not vs the immediately previous calendar month. The cleaner canonical (LAG on a monthly-pre-aggregated CTE) is the standard month-over-month idiom and is not currently routed to from the "month over month" / "this month vs last month" keyword landing.
 
-iter663->696 (3.656 -> 4.5625 -> 4.5625 -> 4.375 -> 4.125 -> 4.9375 -> 5.000 -> 4.9375 -> 5.000 -> 4.500 -> 4.875 -> 4.78 -> 4.5625 -> 4.875 -> 4.375 -> 5.000 -> 4.8125 -> 4.500 -> 4.9375 -> 4.3125 -> 4.9375 -> 4.0625 -> 4.500 -> 5.000 -> 4.9375 -> 4.1875 -> 4.3125 -> 4.094 -> 3.75 -> 5.000 -> **4.469**) — sustained 4.0+ across 35 of last 38 iterations.
+Recommended FIX-A2 inoculation:
+1. Add a `month-over-month vs year-over-year` inoculation card in r07 (or r23) keyed on these phrases: `month over month`, `MoM`, `this month vs last month`, `consecutive months`, `previous month`, `prior month`, `month-over-month growth`.
+2. Show the canonical: pre-aggregate to monthly grain CTE -> `LAG(monthly_revenue) OVER (ORDER BY month_start)` -> growth pct via `(curr - prev) / NULLIF(prev,0) * 100.0`.
+3. Show an alternative date-truncated FILTER form keyed on `date_trunc('month', sale_date) = date_trunc('month', current_date) - INTERVAL '1' month` for the previous-month bucket.
+4. **DO-NOT-WRITE block** (defanged with inline `-- WRONG: this is YoY for the same month, NOT MoM`): the `month(current_date) AND year(current_date)-1` form the responder emitted — to inoculate against the same conflation. Per memory entry feedback_defang_donotwrite_snippets.md, inline-mark each banned snippet WRONG on the same line and make the canonical the copy-attractive block.
+5. Cross-link to r07 timezone-CAST-trap iter686 (already HELD) for the date arithmetic guardrails.
 
----
+**Optional FIX-B (LOW priority):**
 
-## OVERALL
+A second-angle re-probe of approx_percentile in iter698 to confirm 2-iter durability of the FIX-A inoculation before marking it long-term durable. Suggested probe shape: ask about histogram_quantile-style multi-percentile dashboards or "what's the error like for p99 vs p50" — anything that pulls the responder back to the accuracy / sketch-algorithm narrative.
 
-**4.469 PASS — QUALIFY FIX-A HARDENING HELD across two consecutive iterations (Q1+Q2 both produced docs-correct Trino 467 forms with ZERO QUALIFY); Q3 CUBE/GROUPING bitmask docs-perfect; Q4 approx_percentile SQL correct but algorithm-conflation defect (claimed HyperLogLog + 2.3% SE — both belong to approx_distinct, not approx_percentile — t-digest/q-digest is the quantile-sketch family) cost ~0.34 overall points; Q1 missed cleaner `min_by/max_by + GROUP BY` canonical at r23:1030 (executable-correct but verbose — soft findability gap, not correctness defect). iter697 recommended: MEDIUM-priority FIX-A on r07:267-275 approx_percentile signature card to inoculate against HLL-vs-t-digest conflation; LOW-priority FIX-B optional lexical bridge from FIRST_VALUE/LAST_VALUE section UP to r23:1030 min_by/max_by canonical; federation still untouched (52-iter ZERO probe streak, 4.49944 vs 4.5 thin); HOLD iter695 QUALIFY inoculation card (2-iter durability now confirmed).**
+**Holds for iter698 (DO NOT touch):**
+- r22 federation guardrails (53-iter ZERO probe streak, 4.49944 vs 4.5 thin).
+- iter697 r07:587 mirror + Pattern C2 primary FIX-A inoculation blocks (CLOSED on first re-probe).
+- iter695 r23:1014-1071 QUALIFY inoculation card + r23:744 bridge (3-iter durability now).
+- All iter534-696 locks (~260 locks across 17 resource files).
+
+**DO NOT** bump training/state.json (orchestrator handles).
