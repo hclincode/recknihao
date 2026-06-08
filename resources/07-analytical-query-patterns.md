@@ -540,6 +540,44 @@ GROUP BY customer_id;
 
 **DO NOT WRITE.** "Trino has no `transform` / `filter` / `reduce` over arrays — you must UNNEST and then re-aggregate to apply a function per element" — **FALSE**. These HOFs operate in-array and are documented at [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html) + [trino.io/docs/current/functions/lambda.html](https://trino.io/docs/current/functions/lambda.html). Reaching for UNNEST + ARRAY_AGG just to map/filter a single column is the wrong shape — it shuffles rows you didn't need to shuffle.
 
+#### LEADING CANONICAL — flatten an ARRAY of ARRAYS into ONE flat array per row — `flatten(arr_of_arrs)`, ONE call, NO row explosion (iter750 PIN — FIX-A)
+
+> **READ THIS FIRST if your question contains any of these phrases — route HERE, NOT to UNNEST + `array_agg`:** flatten an array of arrays, collapse nested arrays into one, array of arrays into one flat list, one flat list per row, merge nested arrays, un-nest without exploding rows, combine a list of lists, concatenate the inner arrays, `array(array(T))` into `array(T)`, flatten a nested array column, squash nested arrays into a single array, turn a list-of-lists into a single list per row.
+
+> **One fact (Trino 467, verified verbatim at [trino.io/docs/467/functions/array.html](https://trino.io/docs/467/functions/array.html)):** `flatten(x) → array` — "**Flattens an `array(array(T))` to an `array(T)` by concatenating the contained arrays.**" It collapses **exactly ONE level of nesting**, operates **per row** (one input row → one output row), and returns **a SINGLE array** — there is **NO row explosion**. This is the clean, one-call answer to "I have an array-of-arrays and I want one flat array per row."
+
+> **✅ COPY THIS — `flatten` directly on the array-of-arrays column (one row in / one row out, stays an array):**
+> ```sql
+> SELECT order_id,
+>        flatten(shipments) AS all_item_ids   -- shipments is array(array(bigint)); result is one flat array(bigint) per row
+> FROM   orders;
+> -- Worked literal: flatten(ARRAY[ARRAY[1, 2], ARRAY[3, 4]]) -> ARRAY[1, 2, 3, 4]
+> ```
+
+> **❌ DO NOT use the explode-then-reaggregate detour when you just want one flat array per row** (inline-marked, un-copyable):
+> ```sql
+> -- ❌ array_agg(x) FROM orders CROSS JOIN UNNEST(shipments) AS t(inner_arr) CROSS JOIN UNNEST(inner_arr) AS u(x) ... GROUP BY order_id
+> --    -- explodes to rows, then re-aggregates back; may REORDER elements, needs a GROUP BY, and loses the clean per-row guarantee.
+> --    -- DO NOT use this when you only want one flat array per row — use flatten(shipments). DO NOT COPY.
+> ```
+
+> **`flatten` vs UNNEST — pick by what you WANT out (cross-ref [§1a above](#1a-exploding-an-array-column-to-one-row-per-element-unnest--array-to-rows--left-join-unnest) and the "When to UNNEST vs use an HOF" note above):** `flatten` is for **staying as ONE array** (you keep one row per input row, the nested arrays merged). `UNNEST` / `CROSS JOIN UNNEST ... WITH ORDINALITY` is the right tool when you genuinely **WANT ROWS** — one row per element, e.g. for `GROUP BY element`, `JOIN ... ON element = ...`, or counting elements. They do **not** contradict: **flatten = stay-array, UNNEST = explode-to-rows**. If after flattening you then want rows, `UNNEST(flatten(shipments))` composes cleanly (flatten first to one array, then explode).
+
+#### LEADING CANONICAL — remove a specific value from an array — `array_remove(arr, element)` removes ALL occurrences (iter750 PIN — FIX-A)
+
+> **READ THIS FIRST if your question contains any of these phrases:** remove a value from an array, strip a specific element, delete all occurrences of an element, drop a tag from a list, take a value out of an array, exclude one element from an array column, remove every instance of a value.
+
+> **One fact (Trino 467, verified verbatim at [trino.io/docs/467/functions/array.html](https://trino.io/docs/467/functions/array.html)):** `array_remove(x, element) → array` — "**Remove all elements that equal `element` from array `x`.**" It is the dedicated element-removal function: one array in, one array out, **all** occurrences equal to `element` removed.
+
+> **✅ COPY THIS — strip every `'legacy'` from the `tags` array:**
+> ```sql
+> SELECT user_id,
+>        array_remove(tags, 'legacy') AS active_tags   -- removes ALL 'legacy' occurrences; one row in / one row out
+> FROM   users;
+> ```
+
+> **`array_remove` vs `filter` — both work, pick by intent (cross-ref the `filter` row in the §1a.4 HOF table above — PRESERVED, this is its sibling):** `filter(tags, x -> x != 'legacy')` (from the HOF table above) ALSO removes `'legacy'` and is **more flexible** (any predicate, not just exact equality — e.g. `x -> x NOT LIKE 'tmp_%'`). **NULL nuance:** `filter(tags, x -> x != 'legacy')` also **DROPS NULL elements**, because `x != 'legacy'` evaluates to NULL for a NULL `x` and `filter` keeps only elements where the lambda is **TRUE**. `array_remove(tags, 'legacy')` targets **exact equality to the element** and does not have that side effect on NULLs. Use `array_remove` for "drop exactly this value"; use `filter` when you need a richer predicate (and be aware it will also drop NULLs).
+
 ### 1a.4A LEADING CANONICAL — `slice(array, start, length)` is the Trino 467 array-subset function (take first N, take last N, top-N from a sorted array — NOT `array_slice`) (iter676 PIN — FIX-A)
 
 > **READ THIS FIRST if your question contains any of these keywords:** `take first N from array`, `top 3 from array`, `top-3 elements`, `top N elements of array`, `first 3 elements`, `first N items of an ARRAY`, `take the first n elements`, `last 5 elements`, `last N items`, `tail of array`, `slice array Trino`, `subset of array`, `array sub-range`, `keep only the first n entries`, `top-N without UNNEST`, `top N highest values from array`, `top 3 scores from array`, `pick the top 3 from a pre-sorted array`, `array_slice Trino`, `Trino array_slice`, `does Trino have array_slice`. Verified at [trino.io/docs/467/functions/array.html](https://trino.io/docs/467/functions/array.html) on 2026-06-08.
