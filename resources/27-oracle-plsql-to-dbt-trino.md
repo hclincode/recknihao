@@ -1150,6 +1150,62 @@ Both should produce ZERO matches on a clean migration.
 | `MOD(a, b)` | `mod(a, b)` or `a % b` | Identical. |
 | `ABS(n)` / `CEIL(n)` / `FLOOR(n)` / `SIGN(n)` | `abs(n)` / `ceil(n)` (or `ceiling(n)`) / `floor(n)` / `sign(n)` | All lowercase in Trino; identical semantics. |
 
+### 4.4F TRANSCENDENTAL-MATH CANONICAL — natural log, e^x, logarithm base b, power, square root: `ln` / `exp` / `log(b, x)` / `log2` / `log10` / `power` / `sqrt` (iter736 PIN — FIX-A)
+
+**Keyword anchors:** natural log Trino, ln in Trino, e to the power Trino, exponential function SQL, logarithm base b Trino, log base 10, log base 2, raise to a power Trino, power function, x to the power p, square root Trino, decay model SQL, half-life formula SQL, exponential growth SQL, compound growth SQL, ln exp log power sqrt.
+
+**The one fact.** Trino 467 has the full set of transcendental / exponential math functions — you do **not** need to hand-roll them or decline the question. All return **`double`**. Verbatim from [trino.io/docs/467/functions/math.html](https://trino.io/docs/current/functions/math.html):
+
+| Function | Returns | What it computes |
+|---|---|---|
+| `ln(x)` | `double` | natural logarithm (base *e*) of `x` |
+| `exp(x)` | `double` | *e* raised to the power of `x` (i.e. *e^x*) |
+| `log(b, x)` | `double` | base-`b` logarithm of `x` — **⚠ arg order is BASE FIRST, then the number: `log(base, number)`** |
+| `log2(x)` | `double` | base-2 logarithm of `x` |
+| `log10(x)` | `double` | base-10 logarithm of `x` |
+| `power(x, p)` | `double` | `x` raised to the power `p` (i.e. *x^p*) — **alias `pow(x, p)`** |
+| `sqrt(x)` | `double` | square root of `x` |
+
+```sql
+-- ✅ COPY THIS — the seven transcendental functions, one call each.
+SELECT
+  ln(x)          AS natural_log,    -- base-e log
+  exp(x)         AS e_to_the_x,     -- e^x
+  log(10, x)     AS log_base_10,    -- ⚠ BASE first: log(base, number) — same as log10(x)
+  log2(x)        AS log_base_2,
+  log10(x)       AS log_base_10b,
+  power(x, 3)    AS x_cubed,        -- x^3 (NO `^` operator exists in Trino — use power())
+  sqrt(x)        AS square_root
+FROM t;
+```
+
+> **⚠ `log(b, x)` is BASE-FIRST.** Trino's two-arg `log` takes the **base as the first argument** and the number as the second: `log(2, 8)` = 3 (log base 2 of 8), NOT `log(8, 2)`. This is the opposite of some languages' `log(value, base)` convention — when in doubt prefer `log2(x)` / `log10(x)` (no ambiguity) or `ln(x)` for natural log.
+
+> **⚠ There is NO `^` exponentiation operator in Trino.** `x ^ 3` is a **parse error**. Trino's only arithmetic operators are `+ - * / %` (verified at [trino.io/docs/467/functions/math.html](https://trino.io/docs/current/functions/math.html)). To raise to a power, use `power(x, p)` (alias `pow`). See also [resource 05 — `^` is NOT exponentiation in Trino](05-multi-tenant-analytics.md) for the bytes→GB `power(1024.0, 3)` worked example. `sqrt(x)` is the square-root shortcut (equivalent to `power(x, 0.5)`).
+
+**Worked example — exponential decay / half-life.** A common SaaS use: decay a relevance/engagement score by a half-life (the score halves every `half_life_days`). `exp(-ln(2) * t / H)` is the standard half-life decay factor:
+
+```sql
+-- "Decay each lead score by a 30-day half-life based on days since last activity."
+SELECT
+  lead_id,
+  base_score * exp(-ln(2) * days_since_activity / 30.0) AS decayed_score
+FROM leads;
+-- exp(-ln(2) * 30/30) = exp(-ln(2)) = 0.5 -> a 30-day-old score is exactly halved.
+```
+
+**Worked example — compound / exponential growth.** Grow a principal by a per-period rate over N periods (`principal * (1 + rate)^periods`):
+
+```sql
+-- "Project an account's MRR forward 12 months at a 4% monthly growth rate."
+SELECT
+  account_id,
+  current_mrr * power(1 + 0.04, 12) AS projected_mrr_12mo   -- (1.04)^12 — power(), NOT ^
+FROM accounts;
+```
+
+> **Cross-references.** For `power()` and the **NO `^` operator** rule (bytes→GB conversion), see [resource 05 §multi-tenant storage math](05-multi-tenant-analytics.md). `sqrt(x)` pairs with the standard-deviation / RMS patterns; `truncate(n * power(10, d)) / power(10, d)` in §4.4C already uses `power()` for decimal truncation. For rounding the `double` result back to a fixed scale, wrap in `CAST(... AS DECIMAL(18,2))` or `round(x, d)` — see §4.4A and §B2.
+
 ### 4.4A TRINO-CAST-SYNTAX GUARDRAIL — Trino has NO `expr::type` cast operator; ALWAYS write `CAST(expr AS type)`
 
 **Why this section exists.** Engineers migrating from Oracle frequently also have PostgreSQL muscle memory (or Snowflake / DuckDB muscle memory) and reflexively reach for the Postgres double-colon cast operator (`value::type`, e.g., `NULL::TIMESTAMP`, `id::int`, `'2026-05-30'::DATE`, `account_uuid::text`) in Trino SQL or dbt models targeting Trino. **Trino does NOT support the `::` cast operator.** Running such SQL through Trino produces an immediate parse error:

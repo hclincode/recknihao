@@ -425,6 +425,34 @@ SELECT split_to_multimap('tag=a;tag=b;tag=c', ';', '=') AS m;
 
 **Note on multi-delimiter strings.** `split_part` always takes the **N-th** piece. For "the LAST piece" (e.g., filename from a path with an unknown number of `/`), `split_part` does **NOT** accept a negative index — use `element_at(split(path, '/'), -1)` instead (`element_at` on an array supports negative indexing from the tail; verified at [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html)).
 
+### LEADING CANONICAL — pull the host / domain / path / query from a FULL URL — use the `url_extract_*` family, NOT a `split_part` chain (iter736 PIN — FIX-A)
+
+**Keyword anchors:** extract host from URL, get the domain from a URL Trino, parse a URL Trino, extract the path from a URL, get the query string from a URL, get the protocol/scheme from a URL, pull the port from a URL, get a query parameter from a URL, url_extract_host, url_extract_path, domain of a page_url, hostname from a URL, strip the path off a URL.
+
+**The one fact.** To pull a piece out of a **full URL** (`https://acme.statuspage.io/incidents/abc123?ref=email#top`), Trino 467 has a **dedicated `url_extract_*` family** — one function call per piece, robust to ports, query strings, fragments, and missing schemes. Do **NOT** hand-roll a `split_part(split_part(url, '://', 2), '/', 1)` chain — that is fragile (see the co-located note below).
+
+```sql
+-- ✅ COPY THIS — pull host + path from a full page URL, one call each.
+SELECT
+  url_extract_host(page_url) AS host,   -- 'https://acme.statuspage.io/incidents/abc123?ref=email' -> 'acme.statuspage.io'
+  url_extract_path(page_url) AS path    -- -> '/incidents/abc123'
+FROM events;
+```
+
+**The full `url_extract_*` family** — verbatim from [trino.io/docs/467/functions/url.html](https://trino.io/docs/467/functions/url.html):
+
+| Function | Returns | What it pulls out of the URL |
+|---|---|---|
+| `url_extract_host(url)` | `varchar` | the host / domain — `'acme.statuspage.io'` |
+| `url_extract_protocol(url)` | `varchar` | the protocol / scheme — `'https'` |
+| `url_extract_path(url)` | `varchar` | the path — `'/incidents/abc123'` |
+| `url_extract_query(url)` | `varchar` | the raw query string (after `?`) — `'ref=email'` |
+| `url_extract_fragment(url)` | `varchar` | the fragment (after `#`) — `'top'` |
+| `url_extract_parameter(url, 'name')` | `varchar` | the value of one query param — `url_extract_parameter(page_url, 'ref')` → `'email'` |
+| `url_extract_port(url)` | `bigint` | the port number (NOTE: returns **`bigint`**, not varchar) — `url_extract_host('https://host:8080/x')` is `'host'`, `url_extract_port(...)` is `8080` |
+
+> **Co-located note — the `split_part` URL chain is FRAGILE; use `url_extract_*` for URL parts.** You *can* approximate the host with `split_part(split_part(page_url, '://', 2), '/', 1)` (split off the scheme, then take the part before the first `/`), and it works on a *simple* `https://host/path` URL. But it **breaks** the moment the URL has a **port** (`host:8080` comes back glued to the host), a **query string** (no `?` handling), a **fragment** (`#...` leaks into the host on schemeless inputs), or a **missing scheme** (the first `split_part` on `'://'` returns the whole string). For anything that is a real URL, reach for the `url_extract_*` family first — it is one call, scheme/port/query/fragment-aware, and reads as intent. The `split_part` chain stays in your toolbox only for **arbitrary delimited strings that are not URLs** (see the email-domain idiom above).
+
 ### DO NOT WRITE
 
 | False claim | Reality |

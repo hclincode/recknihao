@@ -215,6 +215,8 @@ GROUP BY 1 ORDER BY 3 DESC LIMIT 20;
 > ```
 >
 > Both produce identical results; pick whichever reads cleaner in context. **Never** write `1024.0^3` in a Trino SQL block — the query fails at parse time with a cryptic syntax error, and copy-paste from a Postgres example is the most common way this bug enters a Trino runbook.
+>
+> **Need the rest of the transcendental math family?** For natural log (`ln`), `e^x` (`exp`), logarithm base b (`log(b, x)` — base-first!), `log2` / `log10`, `power` / `sqrt`, and worked decay / half-life / compound-growth examples, see [resource 27 §4.4F — TRANSCENDENTAL-MATH CANONICAL](27-oracle-plsql-to-dbt-trino.md).
 
 > **CAVEAT — `partition.tenant_id` works ONLY for identity-partitioned tables.** The query above assumes the table was created with `partitioning = ARRAY['tenant_id', ...]` (an **identity partition** on `tenant_id` — the partition transform is the identity function, so the partition column is exactly `tenant_id`). The `partition` struct on `$files` then contains a field literally named `tenant_id`, and `partition.tenant_id` dereferences it.
 >
