@@ -201,6 +201,36 @@ Verified at [trino.io/docs/current/sql/select.html](https://trino.io/docs/curren
 >
 > **Cross-refs:** the MAP-explode canonical immediately ABOVE is the OPPOSITE direction (map → rows). For merging two whole MAPs (defaults + overrides) see [resource 09 — `map_concat`](09-lakehouse-schema-design.md). For the `zip` / `zip_with` array HOFs see [§1a.4 array HOF table](#1a4-trino-array-higher-order-functions--transform--filter--reduce--array_sort).
 
+#### LEADING CANONICAL — SUM / merge the VALUES of a MAP column ACROSS ROWS per group — explode with `UNNEST(map)` then re-aggregate `map_agg(k, SUM(v))` (NO `map_union_sum`, `map_union` does NOT sum) (iter751 PIN — FIX-A)
+
+> **READ THIS FIRST if your question contains any of these phrases — route HERE, NOT to `map_union` and NOT to `map_concat`:** sum the values of a map across rows, combine maps per group, merge map columns in an aggregate, total up a map column per customer, aggregate maps into one map, roll up per-row maps, add up the counts in a map across many rows, sum map values across rows, merge maps in an aggregate, collapse many `{feature: count}` maps into one summed map, per-customer totals from a map column, fold map columns together adding colliding keys.
+>
+> **One fact (Trino 467).** There is **NO `map_union_sum`** aggregate in Trino 467 — that is a **Presto-only** function and will fail to resolve. And `map_union(x) → map(K,V)` ("Returns the union of all the input maps. **If a key is found in multiple input maps, that key's value in the resulting map comes from an arbitrary input map.**" — verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html)) merges the maps but **picks an arbitrary value on a key collision — it does NOT add colliding values together.** So `map_union` is the WRONG tool when you need to **SUM the counts**. The only correct way to total a MAP column across rows is: **explode each row's map into `(key, value)` rows with `CROSS JOIN UNNEST(map_col) AS t(k, v)`, `SUM` the values grouped by `(group_key, k)`, then fold the summed pairs back into one map with `map_agg(k, SUM(v))`.**
+>
+> **✅ PREFERRED — COPY THIS (single query: explode → SUM → re-aggregate into one map per group):**
+>
+> ```sql
+> -- ✅ COPY THIS — total up a {feature: count} MAP column across all of a customer's rows into ONE summed map.
+> SELECT customer_id, map_agg(feature, total) AS combined
+> FROM (
+>   SELECT customer_id, feature, SUM(cnt) AS total
+>   FROM events
+>   CROSS JOIN UNNEST(feature_map) AS t(feature, cnt)   -- explode each row's map into (key, value) rows (2 aliases)
+>   GROUP BY customer_id, feature                       -- SUM the colliding keys per group
+> )
+> GROUP BY customer_id;                                 -- fold the summed pairs back into one map per customer
+> ```
+>
+> **Worked example.** For one customer with two rows whose maps are `{"feature_x": 3}` and `{"feature_x": 2, "feature_y": 1}`, the explode produces rows `(feature_x, 3)`, `(feature_x, 2)`, `(feature_y, 1)`; the inner `SUM ... GROUP BY customer_id, feature` gives `(feature_x, 5)`, `(feature_y, 1)`; and the outer `map_agg` folds them into **`{"feature_x": 5, "feature_y": 1}`**. The colliding `feature_x` keys were ADDED (3 + 2 = 5) — exactly what `map_union` would NOT do.
+>
+> **❌ DO NOT use these to total counts (inline-marked, do not copy):**
+> - `map_union(feature_map)` — merges maps but **does NOT sum colliding keys (an arbitrary value wins)** — WRONG for totalling counts.
+> - `map_union_sum(feature_map)` — **NOT a Trino 467 function (Presto-only)** — will not resolve. DO NOT use.
+>
+> The ONLY correct way to SUM values across map rows is **UNNEST the map → `SUM(v)` GROUP BY → `map_agg(k, SUM(v))`** as shown above.
+>
+> **Cross-refs:** the `UNNEST(map_col) AS t(k, v)` two-alias mechanic is the [MAP-explode canonical above](#leading-canonical--explode-a-map-column-into-one-row-per-key-value--unnestmap_col-as-tk-v-gives-two-columns-needs-two-aliases-iter720-pin--fix-a); the `map_agg(key_col, value_col)` fold-rows-into-a-map step is the `map_agg` ALT documented just above. For merging two whole MAPs where you want one side to WIN (not sum) see [resource 09 — `map_concat`](09-lakehouse-schema-design.md).
+
 #### LEADING CANONICAL — the single highest / lowest value WITHIN one array column — `array_max(arr)` / `array_min(arr)`, ONE function, NO UNNEST (iter726 PIN — FIX-A)
 
 > **READ THIS FIRST if your question contains any of these phrases — route HERE, NOT to UNNEST and NOT to `greatest`:** max value in an array, highest value in a list column, largest element of an array, biggest value in an array, worst-case value from an array, slowest/longest from a list of times, peak value in an array column, min/smallest value in an array, lowest value in a list, best-case from a list, reduce an array to its maximum, single highest from a list, array max without exploding, max of an array without UNNEST, collapse an array to its max/min, the one biggest number in an array, per-row max of an array column, what is the largest number in this array, smallest element in the array.

@@ -1,109 +1,82 @@
-# Judge Feedback — iter750 (FIX-A verification: flatten re-probe + map-merge-sum / LIKE-ESCAPE / LAG-delta)
+# Judge Feedback — iter751 (DUAL FIX-A re-probe + 1 fresh)
 
-**Overall: 4.094 — PASS** (threshold 3.5; overall average governs, no single-Q veto)
+**Phase:** extended. **Governing rule:** overall avg across 4 Qs ≥ 3.5 → PASS (no single-Q veto).
+**Federation:** NOT probed — row UNCHANGED (303rd consecutive untouched).
+**state.json:** NOT modified (already 751, set by teacher).
 
-All dialect claims verified against trino.io/docs/467 (functions/array.html, functions/aggregate.html, functions/string.html, functions/comparison.html) on 2026-06-09.
-
----
-
-## Q1 — FLATTEN RE-PROBE (survey: array-of-arrays of answer IDs → one flat list per response, no explosion)
-
-Answer: `flatten(question_group_answers) AS all_answer_ids`; explained `flatten(array(array(T)))->array(T)` concatenates inner arrays into one flat array per row, no row explosion, single call. Confident, clean, cited the new r07 §1a.4 canonical.
-
-- **Accuracy 5** — DOCS-VERIFIED (array.html verbatim): `flatten(x)` "Flattens an `array(array(T))` to an `array(T)` by concatenating the contained arrays." `flatten(question_group_answers)` is exactly right: per-row, one level, single array, NO explosion. Matches the question's "no row explosion" constraint precisely.
-- **Completeness 5** — fully answered; one call, no detour.
-- **Clarity 5** — confident, no hedge (contrast iter749 audible hedge), correctly stated the per-row/no-explosion guarantee.
-- **Actionability 5** — copy-paste ready.
-- **Q1 avg = 5.00**
-
-**FLATTEN IS NOW CLOSED. FIX-A (iter750) WORKED.** iter749 Q2 flatten scored 2.875 (findable-but-missing — responder hedged then fell back to the explode-then-reaggregate UNNEST+array_agg detour). The new r07 §1a.4 `flatten()` LEADING CANONICAL produced a clean, confident, docs-correct native answer on the very next probe. This is **1 clean post-FIX-A datapoint** → re-probe flatten ONCE MORE in iter751 (different phrasing) to reach BULLETPROOFED, then stop touching it (iter693 churn-risk).
+All four dialect claims were WebFetch/WebSearch-verified against trino.io/docs/467 (aggregate.html, array.html, regexp.html, comparison.html, string.html) plus Trino string-literal escaping behavior. ZERO dialect defects found.
 
 ---
 
-## Q2 — MAP-MERGE-SUM ACROSS ROWS (each row has a MAP column feature→count; want ONE combined map per customer that SUMS counts across all the customer's rows)
+## Q1 — MAP-MERGE-SUM (sum a MAP column's values per tag across rows, per agent) — RE-PROBE
 
-Answer: `map_agg(feature_name, SUM(usage_count)) ... GROUP BY customer_id`; explained map_agg builds one map per group from key/value columns and SUM adds counts per feature.
+Answer: inner `CROSS JOIN UNNEST(time_spent) AS t(tag, minutes)` + `SUM(minutes) GROUP BY agent_id, tag`, then outer `map_agg(tag, total_minutes) GROUP BY agent_id`. Explicitly defanged map_union_sum (Presto-only) and noted map_union does not sum.
 
-- **Accuracy 3** — the map_agg+SUM *strategy* is the right Trino idiom, BUT the SQL as written **will not run against the described schema**. The question states each row holds a MAP column (e.g. `{"feature_x":3}`). The responder's SQL references scalar columns `feature_name` and `usage_count` that **do not exist** — those columns only come into being after you explode the map. The missing step is `CROSS JOIN UNNEST(feature_map) AS t(feature_name, usage_count)` BEFORE the `map_agg(feature_name, SUM(usage_count)) GROUP BY customer_id`. Without it, the query fails with column-not-found. Docs-confirmed there is no shortcut: Trino 467 has **NO `map_union_sum`**, and `map_union(x)` does NOT sum on key collision — aggregate.html verbatim "If a key is found in multiple input maps, that key's value in the resulting map comes from an arbitrary input map." So UNNEST-then-`map_agg(k, SUM(v))` is the ONLY correct path, and it was the half that got dropped.
-- **Completeness 2.5** — skipped the load-bearing UNNEST step; gave the back half of a two-part idiom.
-- **Clarity 3.5** — clear explanation of map_agg/SUM, but silently assumed a schema the question did not describe.
-- **Actionability 3** — an engineer copying this hits a column-not-found error and has to discover UNNEST themselves.
-- **Q2 avg = 3.0**
+VERIFIED (aggregate.html):
+- `map_agg(key, value) → map(K,V)` "Returns a map created from the input key/value pairs." Confirmed.
+- `map_union(x(K,V)) → map(K,V)` "If a key is found in multiple input maps, that key's value in the resulting map comes from an arbitrary input map." → confirms map_union does NOT sum colliding values (responder's defang correct).
+- `map_union_sum` — NOT in Trino 467 docs (Presto-only). Responder's defang correct.
+- Two-step idiom runs against a MAP column: the inner UNNEST(map) AS t(k,v) two-alias explode is the documented map→rows mechanic; the inner `GROUP BY agent_id, tag` guarantees one row per (agent,tag) so the outer map_agg receives DISTINCT keys per agent — no duplicate-key error. Correct.
 
-**GENUINE GAP → this is the iter751 FIX-A.** The "merge/sum a MAP column across rows" idiom is not landed as a findable canonical. iter720 added the MAP-explode-to-rows canonical (UNNEST(map) AS t(k,v), 2 aliases) at r07 §1a, and iter747 has the `map_agg(k, value)` aggregate at r07:180-200 — but the **composition** (UNNEST the map → `map_agg(k, SUM(v))` GROUP BY) for the specific question "sum/combine map columns across all of a customer's rows" is not co-located or keyword-anchored, so the responder reached for map_agg without the UNNEST prerequisite.
+Scores: Accuracy 5, Completeness 5, Clarity 5, Actionability 5. **Per-Q avg 5.00.**
 
-**Teacher action for iter751:**
-- ADD a LEADING CANONICAL at r07 §1a (adjacent to the iter720 MAP-explode card, which already documents `CROSS JOIN UNNEST(map_col) AS t(k,v)`): "**Sum / merge a MAP column across rows (one combined map per group)**".
-- COPY-THIS form:
-  ```sql
-  SELECT customer_id,
-         map_agg(feature_name, total) AS combined_usage
-  FROM (
-    SELECT customer_id, feature_name, SUM(usage_count) AS total
-    FROM events
-    CROSS JOIN UNNEST(feature_map) AS t(feature_name, usage_count)
-    GROUP BY customer_id, feature_name
-  )
-  GROUP BY customer_id;
-  ```
-  (or the single-level `map_agg(feature_name, SUM(usage_count))` with the UNNEST in the same FROM and `GROUP BY customer_id, feature_name`).
-- Keyword anchors: sum map values across rows / merge map columns / combine maps per group / aggregate a map column / map_union does not sum / total counts per key across rows / per-customer combined feature map.
-- INLINE-DEFANG (un-copyable, iter693): `map_union(feature_map)` — does NOT sum, picks an arbitrary value on key collision (docs-verified); and `map_union_sum` — does NOT exist in Trino 467 (Presto-only). Both must be marked WRONG so the responder doesn't grab them.
-- Cross-ref the iter720 UNNEST(map) 2-alias card and the iter747 map_agg aggregate card.
+## Q2 — LIKE-ESCAPE (match a LITERAL underscore, not the wildcard) — RE-PROBE
 
----
+Answer: `WHERE message LIKE '%\_%' ESCAPE '\'`, with the escaped `_` matching a literal underscore and outer `%` as wildcards; ALSO offered `strpos(message,'_') > 0` substring alternative. Did NOT use contains()-on-varchar (the iter750 defect).
 
-## Q3 — LITERAL `%` (or `_`) IN A LIKE SEARCH (match the wildcard char as data)
+VERIFIED (comparison.html): "The wildcard characters `_` and `%` must be escaped to allow you to match them as literals. This can be achieved by specifying the ESCAPE character to use." Docs example `'South\_America' LIKE 'South\\\_America' ESCAPE '\'` → true. The responder's `'%\_%' ESCAPE '\'` is the correct literal-underscore idiom. VERIFIED (string.html): `strpos(string, substring)` returns position (1-based) or 0 if not found — `strpos(message,'_')>0` is a valid substring test. The iter750 contains()-on-varchar defect did NOT recur (contains() is ARRAY-only).
 
-Answer: HEDGED ("resources do not contain explicit documentation on LIKE ESCAPE for Trino 467"). Gave `WHERE product_code LIKE '%\%%' ESCAPE '\'` (backslash escapes the % so it's literal). ALSO offered `contains(product_code, '%')` as a simpler alternative. Added a "verify at trino.io docs" caveat.
+Scores: Accuracy 5, Completeness 5, Clarity 5, Actionability 5. **Per-Q avg 5.00.**
 
-- **Accuracy 3** — the PRIMARY answer is correct: Trino 467 supports `LIKE pattern ESCAPE 'char'` (SQL standard; comparison.html confirms the ESCAPE clause, e.g. `'South_America' LIKE 'South\_America' ESCAPE '\'`), and `'%\%%' ESCAPE '\'` correctly matches a string containing a literal `%`. BUT the alternative is a **DEFECT**: `contains()` in Trino 467 is **array-only** — array.html verbatim `contains(x, element) -> boolean` "Returns true if the array x contains the element." There is NO string/varchar `contains()` (confirmed absent from string.html). `contains(product_code, '%')` on a varchar **will not compile** (function-not-found / signature mismatch). The correct literal-substring test on a string is `strpos(product_code, '%') > 0` (or the LIKE ESCAPE form itself). Offering a non-compiling alternative is a real accuracy hit, even though the primary answer is right.
-- **Completeness 3.5** — covered the literal-% case and the underscore by analogy; the hedge ("resources don't document LIKE ESCAPE") signals a minor findability gap.
-- **Clarity 4** — explanation of the escape mechanism was clear.
-- **Actionability 3** — primary form works; the contains() alternative sends the engineer into a compile error.
-- **Q3 avg = 3.375**
+## Q3 — FLATTEN (list of albums each a list of track IDs → one flat list per playlist, no row explosion) — RE-PROBE
 
-**TWO issues for the teacher (secondary FIX, lower priority than Q2):**
-1. **Findability gap (minor):** `LIKE ... ESCAPE` for matching a literal `%`/`_` is correct but the responder couldn't find it (audible hedge). ADD a short canonical near the LIKE/regexp material (r23 LIKE/pattern section): "**Match a literal `%` or `_` in LIKE — use `ESCAPE`**" → COPY `WHERE col LIKE '%\%%' ESCAPE '\'` (literal percent) and `LIKE '%\_%' ESCAPE '\'` (literal underscore). Anchors: match a literal percent sign / escape wildcard in LIKE / search for a percent character / literal underscore in LIKE.
-2. **DEFANG `contains()` on a string:** add an inline un-copyable note that `contains()` in Trino 467 is the ARRAY membership function `contains(array, element)` ONLY — it does NOT work on a varchar. For literal-substring-in-string membership use `strpos(s, sub) > 0` (or `LIKE '%...%' ESCAPE` for wildcard-bearing literals). This prevents the responder repeating the `contains(varchar, ...)` slip. Cross-ref the existing strpos canonical (r23 strpos / r27 §4.3).
+Answer: `SELECT playlist_id, flatten(album_list) AS all_track_ids FROM playlists`. Explained one-level collapse ARRAY(ARRAY(VARCHAR))→ARRAY(VARCHAR), one row in/out.
+
+VERIFIED (array.html): `flatten(x) → array` "Flattens an `array(array(T))` to an `array(T)` by concatenating the contained arrays." Exactly one level, per-row, single array out, no row explosion. `flatten(album_list)` is precisely right.
+
+Scores: Accuracy 5, Completeness 5, Clarity 5, Actionability 5. **Per-Q avg 5.00.**
+
+## Q4 — regexp_extract_all (pull EVERY 'TKT-1234' token from free-text notes into an array) — FRESH
+
+Answer: `regexp_extract_all(notes, 'TKT-\d+') AS ticket_references` → ARRAY(VARCHAR) of all matches, one row per account.
+
+VERIFIED (regexp.html): `regexp_extract_all(string, pattern)` returns ALL matches as an array (docs example returns `[1, 2, 14]`); `regexp_extract` returns only the FIRST match — so regexp_extract_all is the right tool. Patterns use Java/RE2J syntax and accept `\d`.
+
+Backslash nuance (verified, NO penalty): Trino follows ANSI SQL — backslash is NOT a special escape char in single-quoted string literals (`SELECT 'hello\bworld'` returns `hello\bworld` verbatim). Therefore `'TKT-\d+'` is preserved as the literal characters `TKT-\d+`, which RE2J reads correctly as "TKT- then one-or-more digits." The responder's SINGLE-backslash form is correct and matches digits. (Note for teacher: the docs' own `'\\d+'` double-backslash example is a known quirk — in real Trino SQL the literal `\\d+` reaches RE2J as escaped-backslash + `d+`, matching a literal backslash, NOT digits. The single-backslash form the responder used is the one that actually works. Do NOT "correct" the responder toward `\\d+`.)
+
+NULL/empty nuance (minor, not a defect): regexp_extract_all returns an empty array `[]` when no match, not NULL — responder didn't mention it but it doesn't affect correctness.
+
+Scores: Accuracy 5, Completeness 5, Clarity 5, Actionability 5. **Per-Q avg 5.00.**
 
 ---
 
-## Q4 — ROW-TO-ROW DELTA (daily cumulative signups per channel → new signups that day = this row − previous day's, same channel)
+## OVERALL
 
-Answer: `cumulative_signups - LAG(cumulative_signups, 1) OVER (PARTITION BY channel ORDER BY date) AS new_signups_today`; explained LAG fetches prior row's value within the channel partition ordered by date, subtraction gives the daily delta, first day per channel is NULL.
+| Q | Acc | Comp | Clar | Act | avg |
+|---|---|---|---|---|---|
+| Q1 map-merge-sum | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 LIKE-ESCAPE | 5 | 5 | 5 | 5 | 5.00 |
+| Q3 flatten | 5 | 5 | 5 | 5 | 5.00 |
+| Q4 regexp_extract_all | 5 | 5 | 5 | 5 | 5.00 |
 
-- **Accuracy 5** — standard and correct (window.html: `lag(x, offset)` returns the value at the given offset prior to the current row within the partition). `value - LAG(value,1) OVER (PARTITION BY channel ORDER BY date)` is the canonical row-to-row delta. Offset 1 = previous row; correct given one row per channel per day.
-- **Completeness 5** — correctly flagged that the first day per channel yields NULL (no prior row); offset semantics correct.
-- **Clarity 5** — clear, no hedge.
-- **Actionability 5** — copy-paste ready.
-- **Q4 avg = 5.00**
+**Overall avg = 20.00/4 = 5.00 — STRONG PASS** (margin +1.50).
 
-(Standing pin reminder, not penalized here: LAG offset is a ROW COUNT, not a time interval — the answer correctly relies on one-row-per-channel-per-day, which the question's "cumulative daily" framing guarantees. If gaps in dates existed, the delta would still be vs the previous *present* row, not the previous calendar day. Not exercised here.)
+## Topic-closure status
 
----
+- **map-merge-sum CLOSED** — 1st post-fix datapoint. iter750's Q2 gap (3.00) is fixed; responder produced the canonical UNNEST(map)+map_agg(k,SUM(v))+GROUP BY two-step AND correctly defanged map_union_sum (Presto-only) + map_union-arbitrary-value-wins. Clean. (Needs a 2nd clean datapoint from a different angle to reach BULLETPROOFED.)
+- **LIKE-ESCAPE CLOSED** — 1st post-fix datapoint. iter750's contains()-on-varchar defect (3.375) is fixed; responder used `LIKE '%\_%' ESCAPE '\'` + strpos alternative, did NOT touch contains()-on-varchar. Clean. (Needs a 2nd clean datapoint to reach BULLETPROOFED.)
+- **flatten BULLETPROOFED** — 2nd consecutive clean datapoint (iter750 Q3 clean → iter751 Q3 clean against fresh playlist/albums/tracks phrasing). flatten() canonical is durable.
+- **regexp_extract_all** — fresh-clean (1st datapoint), docs-confirmed native, right-tool-vs-regexp_extract distinction correct.
 
-## Score summary
+## No new gaps / no defects
 
-| Q | Topic | Acc | Comp | Clar | Act | Q-avg |
-|---|---|---|---|---|---|---|
-| Q1 | flatten array-of-arrays (RE-PROBE) | 5 | 5 | 5 | 5 | **5.00** |
-| Q2 | merge/sum MAP column across rows | 3 | 2.5 | 3.5 | 3 | **3.0** |
-| Q3 | literal `%`/`_` in LIKE (ESCAPE) | 3 | 3.5 | 4 | 3 | **3.375** |
-| Q4 | row-to-row delta via LAG | 5 | 5 | 5 | 5 | **5.00** |
+No dialect defects, no fabricated functions, no contradictions surfaced. All standing locks held.
 
-**Overall average = (5.00 + 3.0 + 3.375 + 5.00) / 4 = 4.094 — PASS**
+## iter752 designation
 
----
-
-## iter751 designation
-
-**iter751 = FIX-A (Q2): map-merge-sum-across-rows canonical** — highest-priority gap. Add the UNNEST(map)→`map_agg(k, SUM(v))` GROUP BY composition canonical at r07 §1a adjacent to the iter720 MAP-explode card, with `map_union`-does-not-sum / no-`map_union_sum` defang (both docs-verified). Specifics above.
-
-**Secondary (fold into the same iteration if low-risk): Q3** — (a) add the `LIKE ... ESCAPE` literal-wildcard canonical (findability), and (b) defang `contains()` on a varchar (array-only) pointing to `strpos(s,sub)>0`. The contains-on-varchar slip is a defect worth inoculating even though the primary LIKE answer was correct.
-
-**Q1 flatten = CLOSED (FIX-A iter750 worked); 1 clean datapoint → re-probe ONCE in iter751 for BULLETPROOFED, then stop.** Do NOT re-edit the flatten/array_remove cards (churn-risk).
-
-**Q4 = perfect, no action.**
-
-Production-fit note: all forms are valid Trino 467 + Iceberg-connector dialect and fit the on-prem Trino-467/Spark/MinIO stack in prod_info.md. No auth/authz scope concerns this iteration. NEW LOCK candidates to record after iter751 lands: `map_union`-arbitrary-value-NOT-sum / no-`map_union_sum`-in-467 / `contains()`-is-ARRAY-only-NOT-varchar / `LIKE ... ESCAPE`-for-literal-wildcard.
+Recommend: **re-probe map-merge-sum + LIKE-ESCAPE from a 2nd/different angle** to drive both toward BULLETPROOFED (each currently 1 clean post-fix datapoint). Suggested fresh angles:
+- map-merge-sum 2nd angle: e.g. "per customer, merge per-order maps of {sku → qty} into one map summing qty per sku" (different domain/keyword surface).
+- LIKE-ESCAPE 2nd angle: e.g. "find rows whose code contains a literal percent sign `%`" (the `%` wildcard, not `_`).
+- Plus 1–2 FRESH picks from un-probed-recently locks (e.g. element_at(arr,-n) negative index; concat_ws skips NULL; CAST(bool AS int)→1/0; format('%,d') thousands separator).
+- Do NOT churn flatten (now bulletproofed — iter693 lesson) or any bulletproofed card.
+- If any defect surfaces → switch to FIX-A on that topic instead.

@@ -2653,6 +2653,38 @@ WHERE regexp_like(account_id, '^[0-9]{8}$');
 
 > **Trino LIKE is still correct for `%`/`_` wildcard patterns** (literal-character prefix/suffix/substring): `col LIKE 'ABC%'` (starts-with), `col LIKE '%@gmail.com'` (ends-with), `col LIKE '%foo%'` (contains). The moment you need a **character class** (`[0-9]`, `[a-z]`), an **anchor** (`^`, `$`), a **quantifier** (`{n}`), **alternation** (`a|b|c`), or **case-insensitivity** on a local Trino table, switch to `regexp_like`. Cross-refs: [§ ILIKE row above (2-rows up)](#) (case-insensitive LIKE alternative for native Trino tables); [§27:1057 RLIKE inoculation](27-oracle-plsql-to-dbt-trino.md) (no `RLIKE` in Trino — `regexp_like` is the only regex-match function name); [§27 multi-keyword `regexp_like(col, 'a|b|c')` canonical](27-oracle-plsql-to-dbt-trino.md) (regex alternation replaces chained `OR LIKE`); [§27 dialect-nuance table](27-oracle-plsql-to-dbt-trino.md) (Trino's `regexp_like` is 2-arg only — `(?i)` inline flag for case-insensitive); [resource 22 ILIKE pushdown](22-trino-federation-postgresql.md) (ILIKE in the PostgreSQL connector is a federation/pushdown thing — different from a regex match on a native Trino table).
 
+### LEADING CANONICAL — match a LITERAL `%` or `_` (escape a wildcard in LIKE) — `LIKE pattern ESCAPE 'c'`; and the substring test is `strpos(s, sub) > 0`, NOT `contains()` (which is ARRAY-only) (iter751 PIN — FIX-A)
+
+**Keyword anchors** (route HERE from any phrasing): match a literal percent sign, search for a literal `%` or `_`, escape a wildcard in LIKE, find rows containing an actual percent character, literal wildcard, LIKE ESCAPE Trino, escape a percent in LIKE, match a literal underscore, treat `%`/`_` as a normal character, find rows whose code contains a `%`, substring test Trino, does this varchar contain a substring, `contains` on a string Trino, check if a string contains a substring Trino.
+
+**Two distinct questions that both say "contains a `%`" — answer by intent:**
+
+1. **The column VALUE has a literal `%` (or `_`) in it and you want to find those rows.** Inside a `LIKE` pattern, `%` and `_` are wildcards; to match them as **literal characters** add an `ESCAPE` clause that designates an escape character — the next `%` or `_` after it is then treated literally (per [trino.io/docs/467/functions/comparison.html](https://trino.io/docs/467/functions/comparison.html), verified: *"The wildcard characters `_` and `%` must be escaped to allow you to match them as literals. This can be achieved by specifying the `ESCAPE` character to use."*).
+
+```sql
+-- ✅ COPY THIS — find rows whose product_code contains a LITERAL percent sign anywhere:
+WHERE product_code LIKE '%\%%' ESCAPE '\';      -- the \% is a literal %, the outer %...% are wildcards
+-- ✅ COPY THIS — a literal underscore anywhere:
+WHERE product_code LIKE '%\_%' ESCAPE '\';      -- the \_ is a literal _
+```
+
+> Read `'%\%%' ESCAPE '\'` as: wildcard-`%`, then escaped literal `%` (the `\%`), then wildcard-`%` — i.e. "any characters, then a real `%`, then any characters." The `ESCAPE '\'` names `\` as the escape character; you may pick any single character (`ESCAPE '!'` with pattern `'%!%%'` works identically).
+
+2. **You just want a plain substring test (does this varchar contain that text?).** Use **`strpos(s, sub) > 0`** (returns the 1-based position of the first occurrence, `0` if not found) — or the `LIKE` form above for a literal wildcard:
+
+```sql
+-- ✅ COPY THIS — plain "does product_code contain a % character" substring test:
+WHERE strpos(product_code, '%') > 0;
+```
+
+**❌ DO NOT use `contains()` on a string (inline-marked, do not copy):**
+
+| ❌ WRONG (do NOT copy) | What goes wrong on Trino 467 | ✅ Trino 467 correct rewrite |
+| --- | --- | --- |
+| `WHERE contains(product_code, '%')`  ❌ **WRONG — DO NOT COPY** | **`contains()` is ARRAY-ONLY in Trino 467** — its signature is `contains(array(T), T) → boolean` (membership in an array). There is **NO** varchar `contains(string, substring)` form; this fails to compile (type/signature mismatch). | `WHERE strpos(product_code, '%') > 0` (substring test) — or `WHERE product_code LIKE '%\%%' ESCAPE '\'` for a literal-wildcard match. |
+
+**Cross-refs:** `contains(array, element)` (the real, array-membership `contains`) is documented at [resource 07 §1a array functions](07-analytical-query-patterns.md); for **regex** matching (character classes, anchors, quantifiers) use the [LEADING CANONICAL — `regexp_like` above](#leading-canonical--regex--pattern-matching-on-a-trino-column-regexp_like) (a distinct tool from `LIKE`); for the **last/first position of a substring** see [§3.1A `strpos(s, sub, -1)`](#the-position-of-the-last-occurrence-of-a-character--the-file-extension-after-the-last-dot--strposs-sub--1-negative-instance--search-from-the-end).
+
 ### The most-common Trino-dialect rewrite pattern
 
 **90% of the dialect-mismatch errors a SaaS engineer hits on Trino can be fixed with one pattern**: the `ROW_NUMBER()` subquery + outer `WHERE rn = 1` (or `rn <= N` for top-N-per-group). Memorize this:
