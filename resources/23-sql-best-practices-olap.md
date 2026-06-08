@@ -451,6 +451,26 @@ Per [trino.io/docs/467/functions/string.html](https://trino.io/docs/current/func
 
 > **Avoid the REVERSE-arithmetic workaround.** `LENGTH(s) - strpos(REVERSE(s), '.') + 1` does compute the last-dot position, but it is clunky and off-by-one-prone (the `+1` correction is easy to drop). Prefer the native `strpos(s, '.', -1)` — same result, one call, no arithmetic. Inline marker: `LENGTH(s) - strpos(REVERSE(s), '.') + 1  -- ⚠️ works but clunky/off-by-one-prone — use strpos(s, '.', -1) instead — DO NOT COPY`.
 
+### The numeric code point of a character — `codepoint(varchar) → integer` / the inverse `chr(bigint) → varchar` (iter744 PIN — FIX-A)
+
+**Keyword anchors:** code point of a character, numeric code point of a character, Unicode code point, ASCII value of a character, character to number, number to character, integer value of a character, Oracle `ASCII()` equivalent, `ord()` equivalent, char to code point, code point of the first character, first letter as a number, ord chr Trino, convert a letter to its numeric value.
+
+**The one fact.** Trino 467 has **`codepoint(string) → integer`** — verbatim from [trino.io/docs/467/functions/string.html](https://trino.io/docs/current/functions/string.html): *"Returns the Unicode code point of the only character of `string`."* This is the Trino equivalent of Oracle/Postgres `ASCII()` and Python `ord()`. The inverse is **`chr(n) → varchar`**: *"Returns the Unicode code point `n` as a single character string."*
+
+```sql
+-- ✅ COPY THIS — the Unicode code point of a single character:
+SELECT codepoint('U')            -- → 85   (the 'U' character → its code point)
+SELECT codepoint('a')            -- → 97
+SELECT chr(85)                   -- → 'U'  (inverse: code point → single-char string)
+
+-- ✅ COPY THIS — code point of the FIRST character of a longer string:
+-- codepoint() requires a SINGLE character, so slice the first char with substr(s, 1, 1) first.
+SELECT codepoint(substr(country_code, 1, 1)) AS first_char_code   -- 'US' → 85 (the 'U')
+FROM iceberg.analytics.accounts;
+```
+
+> **`codepoint` takes ONE character — pass a multi-char string and it errors.** `codepoint('US')` fails because the input is not a single character. For "the numeric value of the first letter of this column", always wrap with `substr(s, 1, 1)`: `codepoint(substr(s, 1, 1))`. Oracle's `ASCII(str)` implicitly takes the first character; Trino's `codepoint` does not — you must slice it yourself.
+
 ### LEADING CANONICAL — pull the host / domain / path / query from a FULL URL — use the `url_extract_*` family, NOT a `split_part` chain (iter736 PIN — FIX-A)
 
 **Keyword anchors:** extract host from URL, get the domain from a URL Trino, parse a URL Trino, extract the path from a URL, get the query string from a URL, get the protocol/scheme from a URL, pull the port from a URL, get a query parameter from a URL, url_extract_host, url_extract_path, domain of a page_url, hostname from a URL, strip the path off a URL.

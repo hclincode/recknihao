@@ -1,66 +1,51 @@
-# Judge Feedback — iter743 (EXTENDED PHASE)
+# Judge Feedback — iter744 (EXTENDED PHASE)
 
-**Overall: 3.875 PASS** (dim-avg across 4 Q = 15.5/4 = 3.875; margin +0.375 above 3.5 floor). Federation NOT probed — row UNCHANGED. state.json NOT bumped.
+**Phase**: extended | **Mode**: end-of-iteration summary | state.json NOT bumped.
 
-All claims verified against trino.io/docs/467 via WebFetch/WebSearch on 2026-06-09 (map.html, array.html, window.html, string.html, datetime.html) — NOT against resources/. Production stack Trino 467 + Iceberg on-prem; none of these answers touch auth/authz, so no prod-fit concerns. ONE real dialect defect this iteration (Q3, both forms).
-
----
+All four answers verified against trino.io/docs/467 (datetime / string / comparison / array .html) on 2026-06-09 — not against resources/. Production stack Trino 467 + Iceberg on-prem; none of these answers touch auth/authz, so no prod-fit concerns.
 
 ## Per-question scores
 
-| Q | Topic | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|---|---|
-| Q1 | map key existence regardless of value | 5 | 5 | 5 | 5 | **5.00** |
-| Q2 | first_value / last_value window | 5 | 5 | 4.5 | 5 | **4.875** |
-| Q3 | combine DATE + TIME → TIMESTAMP | 1.5 | 3 | 4 | 1.5 | **2.50** |
-| Q4 | codepoint of a character (declined) | 4 | 2 | 4 | 2.5 | **3.125** |
+### Q1 — combine DATE + TIME → TIMESTAMP (date+time-combine FIX-A re-probe, CRITICAL)
+- Accuracy **5** | Completeness **5** | Clarity **5** | Actionability **5**
+- Answer used `CAST(CAST(session_date AS varchar) || ' ' || CAST(session_start_time AS varchar) AS TIMESTAMP)` — the docs-correct canonical, NOT either defanged wrong form.
+- DOCS-VERIFIED: datetime.html — the `-` operator only removes intervals from temporal values; there is NO `TIME - TIME` subtraction operator. NO dedicated combine-DATE-and-TIME function exists. string.html — `||` concatenates strings (varchar operands), so both temporal operands must be CAST to varchar first; the resulting `'YYYY-MM-DD HH:MM:SS'` string casts cleanly to TIMESTAMP. Both pitfalls the responder flagged (TIME-TIME unsupported; bare date||time = type error) are correct.
+- **VERDICT: date+time-combine FIX-A CLOSED.** Used the cast-varchar-concat-cast canonical; defanged both wrong forms; no decline. First clean post-FIX-A datapoint.
 
-**Overall average: 3.875 → PASS**
+### Q2 — Unicode code point of first char (codepoint FIX-A re-probe, CRITICAL)
+- Accuracy **5** | Completeness **5** | Clarity **5** | Actionability **5**
+- Answer used `codepoint(substr(currency_code, 1, 1))` and correctly noted codepoint requires a single character.
+- DOCS-VERIFIED: string.html — `codepoint(string) → integer` "Returns the Unicode code point of the only character of string" (REQUIRES single char). `substr(s,1,1)` returns the first character (positions start at 1). The lookalike framing (Cyrillic А vs Latin A, Oracle ASCII()/Python ord() equivalent) is accurate.
+- **VERDICT: codepoint FIX-A CLOSED.** Working SQL, single-char slice idiom, no decline. First clean post-FIX-A datapoint.
 
----
+### Q3 — null-safe equality (IS NOT DISTINCT FROM, fresh)
+- Accuracy **5** | Completeness **5** | Clarity **5** | Actionability **5**
+- Answer used `ON u.preferred_region IS NOT DISTINCT FROM a.preferred_region`.
+- DOCS-VERIFIED: comparison.html — `IS NOT DISTINCT FROM` is a valid Trino operator that "treat[s] NULL as a known value"; `NULL IS NOT DISTINCT FROM NULL` returns TRUE (null-safe). The `=`-returns-NULL/UNKNOWN-on-NULL explanation is correct (`1 = NULL` → NULL, treated as not-true → row dropped). The `NULL INDF 'x' = FALSE` example is also correct.
+- Correct. The LEFT JOIN + `WHERE a.setting_value IS NOT NULL` shape is a fine demo and does not undermine the null-safe-join point being illustrated.
 
-## Q1 verdict — map-key-existence additive CLOSED ✅
+### Q4 — second-to-last array element (element_at negative index, fresh)
+- Accuracy **5** | Completeness **5** | Clarity **5** | Actionability **5**
+- Answer used `element_at(status_transitions, -2)` (and `-1` for current).
+- DOCS-VERIFIED: array.html — for negative index, `element_at` accesses elements from last to first (-1 = last, -2 = second-to-last). `element_at` returns NULL when accessing an index larger than array length; the `[]` subscript operator "would fail in such a case". The NULL-safe-vs-subscript-throws distinction is correct.
+- Correct.
 
-DOCS-VERIFIED (map.html + array.html):
-- `map_keys(x(K,V)) → array(K)` "Returns all the keys in the map x" — a present-with-NULL-value key still appears in the keys array.
-- `contains(array, element) → boolean` "Returns true if the array x contains the element."
-- Therefore `contains(map_keys(settings),'beta_opt_in')` is TRUE iff the key is present REGARDLESS of value. CORRECT.
-- `element_at(map(K,V), key) → V` "Returns value for given key, or NULL if the key is not contained in the map" — returns the VALUE V, itself NULL when a present key maps to NULL, so `element_at(...) IS NOT NULL` cannot distinguish absent-key from present-key-with-NULL (false-negatives present-with-null). The responder explicitly named this false-negative. CORRECT.
+## Overall
 
-The iter742 reconcile-in-place fix (r09 Existence-check subsection — demote-`element_at-always` → name BOTH forms, contains() = exact-existence, element_at IS NOT NULL = quick value-present check that false-negatives) WORKED. Answer is bulletproof, sourced to r09:650-655. **Map-key-existence additive CLOSED.** No further action.
+| Q | Acc | Comp | Clar | Act |
+|---|-----|------|------|-----|
+| Q1 | 5 | 5 | 5 | 5 |
+| Q2 | 5 | 5 | 5 | 5 |
+| Q3 | 5 | 5 | 5 | 5 |
+| Q4 | 5 | 5 | 5 | 5 |
 
-## Q2 verdict — first_value/last_value CORRECT ✅
+**Overall average: 5.00 — STRONG PASS** (overall average governs; no per-Q override).
 
-DOCS-VERIFIED (window.html): `first_value(x)` "Returns the first value of the window"; `last_value(x)` "Returns the last value of the window." With the SQL-standard default frame (RANGE UNBOUNDED PRECEDING .. CURRENT ROW), FIRST_VALUE correctly returns the partition's first row, but LAST_VALUE only sees up to the current row — so the explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` is required to reach the true last row. The responder applied the frame to LAST_VALUE only (correct — FIRST_VALUE needs none) and explained the default-frame gotcha. Single-pass, both columns. Minor clarity nit only: did not state WHY FIRST_VALUE is safe without the frame (default frame already includes row 1), but the gotcha that matters was nailed. No defect.
+## FIX-A verdicts
+- **date+time-combine FIX-A (Q1): CLOSED** — not regressed; cast-varchar-concat-cast canonical used, both wrong forms defanged.
+- **codepoint FIX-A (Q2): CLOSED** — not regressed; working `codepoint(substr(s,1,1))`, no decline.
 
-## Q3 verdict — BOTH FORMS DEFECTIVE ❌ (drives the score down; fix for iter744)
-
-DOCS-VERIFIED (datetime.html operators table + string.html || + GitHub trinodb/trino #20424):
-
-- **Form (a)** `CAST(session_date AS TIMESTAMP) + (session_start_time - TIME '00:00:00')` — **DEFECT.** Trino 467's date/time operator table lists `date ± interval`, `timestamp ± interval`, `interval ± interval` — but **NO `TIME - TIME` operation**. `TIME - TIME` is not a supported operator in Trino 467, so `(session_start_time - TIME '00:00:00')` does not yield an INTERVAL and the expression fails. Unsupported arithmetic.
-- **Form (b)** `CAST(session_date || ' ' || session_start_time AS TIMESTAMP)` — **DEFECT (type error as written).** `||` is the string-concatenation operator (same as `concat()`, character/VARCHAR operands only). Concatenating a DATE and a TIME directly with `||` is a TYPE ERROR; both operands must be CAST to varchar first.
-
-**Canonical for iter744** (verified — there is NO dedicated combine-date-time function in Trino 467; feature request #20424 is still open):
-```sql
-CAST(CAST(session_date AS varchar) || ' ' || CAST(session_start_time AS varchar) AS TIMESTAMP)
-```
-i.e. cast each part to varchar, concat to an ISO `'YYYY-MM-DD HH:MM:SS'` string, cast the whole to TIMESTAMP. (Form (a)'s INTENT — add time-of-day as a duration to midnight — could be salvaged only with explicit interval extraction, e.g. building an `INTERVAL` from `hour()/minute()/second()`, which is clunky; the cast-to-varchar-concat-cast is the canonical idiom.) Optionally mention `from_iso8601_timestamp(...)` for ISO-8601 strings.
-
-**TEACHER ACTION (iter744 FIX-A):** Add a combine-DATE+TIME→TIMESTAMP canonical (likely r13 datetime / r27 §4.2 datetime area where the responder sourced r13:5671-5677). Pin the correct CAST-to-varchar-concat-cast form. Inline-defang BOTH wrong forms (iter693 un-copyable style): ❌ `date || ' ' || time` without inner CASTs = type error (|| is varchar-only); ❌ `time_a - time_b` = unsupported (NO TIME-TIME operator in Trino 467). Keyword anchors: combine a date and a time into a timestamp / construct a timestamp from a date and time-of-day / merge DATE column and TIME column / build a timestamp from separate date and time. The bad r13:5671-5677 content the responder cited must be RECONCILED-IN-PLACE (reconcile-don't-append), not just supplemented — the responder pulled both defective forms straight from it.
-
-## Q4 verdict — honest decline; FINDABLE-BUT-MISSING gap (flag for iter744)
-
-DOCS-VERIFIED (string.html): Trino 467 HAS `codepoint(string) → integer` "Returns the Unicode code point of the only character of string" and the inverse `chr(n) → varchar` "Returns the Unicode code point n as a single character string." `codepoint` requires a SINGLE-character input — for the first char of a multi-char string use `codepoint(substr(s,1,1))` (the exact shape the user needs: `codepoint(substr(country_code,1,1))`).
-
-The responder did NOT fabricate (correctly scored on honesty — Accuracy 4) and correctly routed to trino.io/docs/467/functions/string.html, but this is a genuine **findable-but-missing** gap: the function exists and the answer is a clean one-liner. Incomplete (2) and low actionability (2.5) drag the score.
-
-**TEACHER ACTION (iter744 FIX-A):** Add `codepoint`/`chr` to r23 string-functions (alongside the iter739 strpos / ASCII-equivalent content — Oracle `ASCII()`/`ord()` migrants land here). Pin: `codepoint(varchar) → integer` (SINGLE char only); first-char-of-string idiom `codepoint(substr(s,1,1))`; inverse `chr(bigint) → varchar`. Keyword anchors: numeric code point of a character / Unicode code point / ASCII value of a character / Oracle ASCII / ord() equivalent / integer value of a character / char to code point. Worked example for the user's case: `codepoint(substr(country_code,1,1))` → 85 for 'U'.
-
----
-
-## Summary for teacher (iter744 = FIX-A, two adds)
-
-1. **Q3 (priority):** combine-DATE+TIME→TIMESTAMP — reconcile r13:5671-5677 IN PLACE; canonical = `CAST(CAST(d AS varchar) || ' ' || CAST(t AS varchar) AS TIMESTAMP)`; defang both `||`-without-casts (type error) and `TIME - TIME` (unsupported op). This is a real defect that the responder copied verbatim from the resource.
-2. **Q4:** add `codepoint(varchar)→integer` / `chr(bigint)→varchar` + `codepoint(substr(s,1,1))` first-char idiom to r23.
-
-Standing pins (Q1 contains(map_keys), Q2 FIRST/LAST_VALUE-frame) HELD and verified. Federation row (FAIL 4.49944, threshold 4.5) NOT probed — unchanged. No prod-fit (auth/authz) concerns this iteration.
+## iter745 flag
+- NO new defect. NO gap. Both critical FIX-As closed cleanly on their first re-probe; both fresh probes (Q3, Q4) perfect.
+- Recommend **DEFAULT NO-OP integrity sweep** for iter745. Do NOT edit the freshly-added r13 combine-DATE+TIME section or r23 codepoint/chr section — perfect-score iteration, iter693 churn-risk.
+- Optional low-prio (NOT defects, each FIX-A is at only 1 clean datapoint so a 2nd angle would bulletproof): (1) date+time-combine 2nd angle — already-ISO string via `from_iso8601_timestamp`, or computing a gap between two combined timestamps; (2) codepoint/chr 2nd angle — reverse direction `chr(n)`, or filtering rows whose first-char codepoint is out of ASCII range. Neither is blocking.

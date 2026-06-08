@@ -5678,12 +5678,36 @@ Engineers migrating validation queries from Postgres to Trino frequently hit par
 | Truncate to week | `date_trunc('week', ts)` | `date_trunc('week', ts)` | Same |
 | Cast to DATE | `ts::DATE` | `CAST(ts AS DATE)` or `date(ts)` | Postgres `::` cast syntax is not valid Trino |
 | Add N days | `ts + N * INTERVAL '1 day'` | `date_add('day', N, ts)` | Trino's explicit interval function |
+| Combine a DATE + a TIME → TIMESTAMP | `session_date + session_start_time` | `CAST(CAST(session_date AS varchar) \|\| ' ' \|\| CAST(session_start_time AS varchar) AS TIMESTAMP)` | No dedicated combine function in Trino 467. CAST each part to varchar, concat to `'YYYY-MM-DD HH:MM:SS'`, CAST the whole to TIMESTAMP. **NO `TIME - TIME` operator** and `\|\|` is varchar-only — see callout below |
 
 **Trino EXTRACT supported fields**: `YEAR`, `QUARTER`, `MONTH`, `WEEK`, `DAY`, `DAY_OF_MONTH`, `DAY_OF_WEEK` (alias `DOW`), `DAY_OF_YEAR` (alias `DOY`), `YEAR_OF_WEEK` (alias `YOW`), `HOUR`, `MINUTE`, `SECOND`, `TIMEZONE_HOUR`, `TIMEZONE_MINUTE`.
 
 **NOT supported in Trino EXTRACT**: `EPOCH`, `MICROSECOND`, `MILLISECOND`. Pasting these into Trino produces a parse error — use `to_unixtime()` for epoch and `date_diff('microsecond', ...)` for sub-second precision.
 
 > **`from_unixtime` SECONDS vs MILLISECONDS — the year-52000 pitfall.** `from_unixtime(unixtime) -> timestamp(3) with time zone` expects epoch **SECONDS**. If your column is epoch **MILLISECONDS** (the default for Kafka Connect logical-Timestamp, JavaScript `Date.now()`, Java `System.currentTimeMillis()`, Debezium `source.ts_ms`), divide first: `from_unixtime(epoch_ms / 1e3)` keeps sub-second precision; `from_unixtime(epoch_ms / 1000)` is integer division and drops the millis (the result is rounded to the whole second). For epoch **NANOSECONDS**, use `from_unixtime_nanos(epoch_ns)` which returns `timestamp(9) with time zone`. **DO NOT** pass raw epoch-ms straight into `from_unixtime` — `from_unixtime(1716545537482)` reads 1.7 trillion as 1.7 trillion *seconds* and yields the year ~56378 (about 54,000 years in the future). If your result timestamps are in the far future, you forgot to divide by 1000. Going the other way: `to_unixtime(ts) -> DOUBLE` returns seconds; multiply by 1000 (or use `CAST(to_unixtime(ts) * 1000 AS BIGINT)`) to emit epoch millis.
+
+### Combine a DATE column and a TIME column into a TIMESTAMP — CAST both to varchar, concat, CAST the whole (iter744 PIN — FIX-A)
+
+**Keyword anchors:** combine a date and a time into a timestamp, build a timestamp from a date column and a time column, date plus time to timestamp, merge a DATE column and a TIME column, construct a timestamp from a date and time-of-day, join separate date and time columns into one timestamp.
+
+**The one fact.** Trino 467 has **no dedicated combine-date-and-time function** (the feature request, trinodb/trino #20424, is still open). The canonical idiom is: CAST each part to `varchar`, concatenate to an ISO `'YYYY-MM-DD HH:MM:SS'` string, then CAST the whole string to `TIMESTAMP`.
+
+```sql
+-- ✅ COPY THIS — combine a DATE column + a TIME column into a TIMESTAMP:
+SELECT CAST(CAST(session_date AS varchar) || ' ' || CAST(session_start_time AS varchar) AS TIMESTAMP) AS session_start_ts
+FROM iceberg.analytics.sessions;
+-- session_date = DATE '2026-06-09', session_start_time = TIME '14:32:09'
+--   → CAST('2026-06-09' || ' ' || '14:32:09' AS TIMESTAMP) = TIMESTAMP '2026-06-09 14:32:09'
+```
+
+> **Two forms that LOOK right but FAIL in Trino 467 — DO NOT COPY EITHER:**
+>
+> - `CAST(session_date AS TIMESTAMP) + (session_start_time - TIME '00:00:00')  -- ❌ Trino has NO TIME - TIME subtraction operator — DO NOT COPY`
+>   The `-` operator only subtracts an *interval* from a temporal value; `TIME - TIME` is unsupported arithmetic, so this does not yield an INTERVAL and the expression fails.
+> - `CAST(session_date || ' ' || session_start_time AS TIMESTAMP)  -- ❌ || is varchar-only; concatenating a DATE + a TIME directly is a TYPE ERROR; CAST both to varchar first — DO NOT COPY`
+>   `||` (string concatenation) takes VARCHAR operands only. Feeding it a DATE and a TIME without inner `CAST(... AS varchar)` is a type error.
+>
+> The fix for both is the same: **CAST each part to `varchar` first**, exactly as the ✅ form above. (For an ISO-8601 string you already have as text, `from_iso8601_timestamp(s)` returns `timestamp(3) with time zone` and defaults a missing time to `00:00:00`.)
 
 ### Worked before/after examples
 
