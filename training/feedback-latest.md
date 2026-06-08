@@ -1,59 +1,43 @@
-# Judge Feedback — iter722 (EXTENDED PHASE)
+# Judge Feedback — iter723 (EXTENDED PHASE)
 
-**Verification method**: Every dialect claim checked against trino.io/docs/467 (connector/iceberg.html, functions/datetime.html, functions/string.html) — NOT against resources/.
+Docs verified against trino.io/docs/467 (connector/iceberg.html, functions/array.html, functions/math.html) + WebSearch on array_distinct ordering. Scores are per-Q on Accuracy / Completeness / Clarity / Actionability (1–5); overall average governs PASS/FAIL.
 
----
+## Q1 — Iceberg rollback (fresh "undo last write / restore to yesterday" framing)
+- Accuracy: 5 — `CALL iceberg.system.rollback_to_snapshot('analytics','events',8954597067493422955)` is VERBATIM the Trino 467 native form (docs example: `CALL example.system.rollback_to_snapshot('testdb','customer_orders',8954597067493422955)`). Three positional args (schema string, table string, snapshot_id bigint) — correct. Attributed to NATIVE Trino (not Spark-only, not "recreate from backup") — correct. `$history` column list (made_current_at, snapshot_id, parent_id, is_current_ancestor) matches docs exactly. `events$history` whole-token-one-quote-pair form correct. `is_current_ancestor = true` for safe targets — correct. ALTER TABLE EXECUTE rollback confirmed ABSENT from 467 docs (469+), so the CALL-only attribution is right.
+- Completeness: 5 — directly answers "native command or recreate from backup?" (native, atomic pointer move, no data-file touch), shows how to find the prior snapshot_id, and gives the safety filter. Cited resources/17 (the canonical) — the routing fix held.
+- Clarity: 5 — "moves the current pointer to an earlier snapshot without touching data files" is an excellent zero-OLAP explanation; "undo this morning's bad migration" maps directly to the user's framing.
+- Actionability: 5 — copy-paste CALL + lineage query + the exact column to filter. Engineer knows exactly what to run.
+- **ROLLBACK ATTRIBUTION VERDICT: STAYS RESOLVED — DURABLE.** Across the iter722→723 re-probes and now a fresh "restore to yesterday" phrasing, the responder emits the native Trino 467 positional 3-arg CALL, attributes it to native Trino (NOT "(Spark)", NOT backup-recreation), and cites r17 the canonical. The iter722 PIN + r13→r17 routing are holding across phrasings. No regression.
 
-## Per-question scores
+## Q2 — array_distinct
+- Accuracy: 5 — `array_distinct(tags)` removes duplicate values (docs: "Remove duplicate values from the array x"). `cardinality(array_distinct(tags))` returns the distinct count (docs: cardinality = array size, bigint). The "preserves first-occurrence order" claim is borne out by docs examples (`[1,1,2,3]→[1,2,3]`) and is the de-facto behavior, though the docs prose does not formally *guarantee* ordering. Minor over-reach to state it as a hard guarantee, but the behavior is correct and the answer's correctness does not depend on ordering. Not penalized — accurate in practice.
+- Completeness: 5 — dedupe in-row + distinct count, both requested ("without exploding/reassembling"). Explicitly notes single-row, no explosion.
+- Clarity: 5 — concrete worked transform `['billing','billing','upgrade'] → ['billing','upgrade']`.
+- Actionability: 5 — two ready queries covering both needs.
 
-| Q | Topic | Acc | Comp | Clar | Act | Q-avg |
-|---|---|---|---|---|---|---|
-| Q1 | Iceberg rollback (CALL rollback_to_snapshot, Trino-not-Spark) | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | YYYY-MM label (substr / format_datetime) | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 | concat_ws separator + NULL-skip vs ||/concat propagate | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 | BETWEEN inclusive range filter | 5 | 4 | 5 | 5 | 4.75 |
+## Q3 — date spine / gap-fill
+- Accuracy: 5 — `sequence(DATE '2026-01-01', DATE '2026-12-31', INTERVAL '1' DAY)` is a valid Trino 467 date sequence returning array(date) (docs: sequence with INTERVAL DAY TO SECOND step generates a sequence of dates). `UNNEST(...) AS t(dt)` single-column alias is correct — sequence→array→1 column→1 alias. LEFT JOIN calendar to aggregated events + `COALESCE(...,0)` gap-fill is the sound canonical pattern.
+- Completeness: 5 — full runnable spine, the LEFT JOIN, the zero-fill, and ORDER BY. Addresses "even zero-activity days."
+- Clarity: 5 — line-by-line gloss (sequence → UNNEST explodes → LEFT JOIN → COALESCE fills). A beginner can follow each step.
+- Actionability: 5 — single copy-paste CTE pattern the engineer can drop in.
 
-**Sub-score sum**: (20 + 20 + 20 + 19) / 16 = 79/16 = **4.9375**
-**Per-Q avg**: (5.00 + 5.00 + 5.00 + 4.75) / 4 = **4.9375**
-**Dim-avg**: Acc (5+5+5+5)/4=5.00 · Comp (5+5+5+4)/4=4.75 · Clar 5.00 · Act 5.00 → (5.00+4.75+5.00+5.00)/4 = **4.9375**
-All three methods agree.
+## Q4 — abs
+- Accuracy: 4 — Core answer `abs(revenue_change)` is fully correct: docs confirm abs returns the absolute value, works on integer and decimal, return type matches input. "-200 and +200 both → 200" correct. DEFECT (secondary): the second illustrative snippet `SELECT customer_id, revenue_delta DECIMAL(18, 2), abs(revenue_delta) ...` writes a column-with-type declaration in a SELECT list, which is NOT valid Trino SELECT syntax — it parses as `revenue_delta` aliased `DECIMAL` followed by a stray `(18,2)`, i.e. a syntax error. The intended cast would be `CAST(revenue_delta AS DECIMAL(18,2))`. Real (not harmless) defect because it errors if copied, but it sits in a SECONDARY example; the primary `abs(revenue_change)` query above it is correct and runnable. Knocked one point.
+- Completeness: 5 — answers both the function and the "works on decimals like integers?" sub-question (yes, identical, return type matches).
+- Clarity: 5 — clear, with the requested -$200/+$200 example.
+- Actionability: 4 — primary query is copy-paste-ready; the stray second snippet would error if a user pasted it, costing a debugging cycle. Lowered one point.
 
-## GOVERNING LABEL: **4.9375 — STRONG PASS** (margin +1.4375 above 3.5 floor)
+## Score table
 
----
+| Q | Accuracy | Completeness | Clarity | Actionability | Q-avg |
+|---|---|---|---|---|---|
+| Q1 rollback | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 array_distinct | 5 | 5 | 5 | 5 | 5.00 |
+| Q3 date spine | 5 | 5 | 5 | 5 | 5.00 |
+| Q4 abs | 4 | 5 | 5 | 4 | 4.50 |
 
-## Q1 ROLLBACK-ATTRIBUTION VERDICT: **RESOLVED**
+**Overall average = (5.00 + 5.00 + 5.00 + 4.50) / 4 = 4.875 → PASS**
 
-The iter721 non-scoring nudge (responder had labeled `CALL iceberg.system.rollback_to_snapshot` as "(Spark)") is **RESOLVED**. This iteration the responder:
-- Emitted `CALL iceberg.system.rollback_to_snapshot('analytics', 'events', 4823511203987654321)` with THREE positional args (schema varchar, table varchar, snapshot_id bigint).
-- Attributed it explicitly to **native Trino 467** ("Critical for Trino 467: positional only, NOT named args"), NOT Spark-only.
-- Correctly warned against the Spark form (named arguments OR a single combined `'schema.table'` string).
-
-DOCS-VERIFIED [trino.io/docs/467/connector/iceberg.html]: verbatim `CALL example.system.rollback_to_snapshot('testdb', 'customer_orders', 8954597067493422955)` — 3 positional args; this is a system procedure invoked via CALL only; there is **no** `ALTER TABLE ... EXECUTE rollback_to_snapshot` form in 467 (EXECUTE supports only optimize, expire_snapshots, remove_orphan_files, drop_extended_stats — confirming the EXECUTE rollback form is 469+). The responder's anti-Spark warning is docs-accurate (Spark uses combined `'db.table'` single string + named args; Trino 467 uses two separate string args).
-
-Note on citation: responder cited `resources/13-postgres-to-iceberg-ingestion.md` as the source. The canonical rollback content actually lives in r17-iceberg-table-maintenance.md; r13 citation is imperfect but the ANSWER's content is fully docs-correct, so no score penalty per directive. Citation-accuracy is a cosmetic non-scoring observation, not a gap.
-
----
-
-## Q2 — Both forms valid
-
-DOCS-VERIFIED [trino.io/docs/467/functions/datetime.html]: `format_datetime` uses JodaTime DateTimeFormat patterns (`yyyy-MM` correct — lowercase-y year, uppercase-M month) and takes a timestamp; responder correctly casts DATE→TIMESTAMP first. `substr(CAST(order_date AS varchar), 1, 7)` is valid — a DATE cast to varchar yields ISO `YYYY-MM-DD`, first 7 chars = `YYYY-MM`. Responder was not required to mention `date_format(ts, '%Y-%m')` (MySQL-style, also valid) — not penalized for the choice. Zero defects.
-
-## Q3 — Accurate
-
-DOCS-VERIFIED [trino.io/docs/467/functions/string.html]: `concat_ws(separator, ...)` exists and "Any null values provided in the arguments after the separator are skipped" — responder's NULL-skip claim is exact (and the separator-NULL → whole-result-NULL caveat is consistent, though not asked). `concat`/`||` are SQL-standard concatenation and propagate NULL (one NULL → whole result NULL) — responder's claim accurate.
-
-## Q4 — Accurate, tiny completeness ding
-
-BETWEEN is valid Trino 467 and inclusive on both ends; equivalent to `>= AND <=`. Responder's answer is correct and readable. Comp scored 4 (not 5) only because it omitted the one nuance worth a half-line in production: BETWEEN with a NULL bound/NULL column value yields unknown (row excluded), and BETWEEN cannot express an exclusive upper bound some discount-bucketing needs. Minor; does not affect the governing STRONG PASS.
-
----
-
-## Teacher feedback / iter723 flags
-
-- **No FIX-A required.** All four answers are dialect-clean and docs-accurate. The iter722 PIN edit in r17 (CALL = native Trino 467, not Spark) landed effectively — the rollback-attribution regression is closed on a fresh "we're on Trino not Spark" re-probe.
-- **HOLD all locks** (~270 across iter534-721) including the r22 federation hard lock (still untouched; 4.49944 vs 4.5 thin — do NOT probe).
-- **Minor citation-routing nudge (non-scoring, OPTIONAL):** responder cited r13 for rollback though the canonical lives in r17. Consider a lightweight keyword cross-ref/anchor in r13 pointing to r17's rollback card, OR confirm r17's keyword anchors are dominant enough that future rollback probes cite r17. Low priority — the answer content was correct regardless. Do NOT rewrite the working r17 rollback canonical.
-- **iter723**: re-probe rollback ONCE more from a different framing (e.g. "undo last commit" / "restore to yesterday's version") to confirm the attribution fix is durable across phrasings before retiring the nudge. No new gaps to address.
-
-Do NOT bump state.json (orchestrator handles).
+## Teacher feedback / iter724 flag
+- **iter724 FLAG (genuine, low severity):** In resources/27-oracle-plsql-to-dbt-trino.md (the source the responder cited for abs), the abs example region appears to contain an invalid `SELECT ... col DECIMAL(18,2) ...` form that the responder reproduced. A `col DECIMAL(p,s)` token in a SELECT list is NOT valid Trino — the explicit-precision form is `CAST(col AS DECIMAL(18,2))`. Locate the abs/DECIMAL example in r27 (grep `DECIMAL(18` / `abs(`) and either (a) fix it to `CAST(revenue_delta AS DECIMAL(18,2))`, or (b) drop the type annotation entirely (`SELECT customer_id, revenue_delta, abs(revenue_delta) AS magnitude_usd`). If the bad form is being copied from a DO-NOT-WRITE block, inline-mark it un-copyable per the iter693/defang lesson. This is the only correctness defect across the 4 answers and it is in a secondary snippet, so it is a light-additive fix, not a regression.
+- **No other gaps.** Rollback attribution, array_distinct, sequence+UNNEST date spine, and the abs core are all docs-correct and durable. Do NOT touch r17 (rollback canonical + iter722 PIN), r07 (date spine / array patterns), or r22 (HARD LOCK).
