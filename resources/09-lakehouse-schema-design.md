@@ -368,7 +368,7 @@ dbt offers TWO strategies — pick exactly one per snapshot:
     updated_at='updated_at'   -- REQUIRED for timestamp strategy: the source-table column dbt reads to detect changes
   )
 }}
-SELECT id AS user_id, email, display_name, plan_name, country, account_tier, updated_at
+SELECT id, email, display_name, plan_name, country, account_tier, updated_at   -- key column `id` is UNALIASED (matches unique_key='id')
 FROM {{ source('postgres', 'users') }}
 {% endsnapshot %}
 ```
@@ -388,13 +388,13 @@ The `updated_at` column you point at MUST be projected by the snapshot's SELECT 
     check_cols=['plan_name', 'country', 'account_tier']   -- LIST form: only these columns trigger an SCD2 update
   )
 }}
-SELECT id AS user_id, email, display_name, plan_name, country, account_tier
+SELECT id, email, display_name, plan_name, country, account_tier   -- key column `id` is UNALIASED (matches unique_key='id')
 FROM {{ source('postgres', 'users') }}
 {% endsnapshot %}
 ```
 
 ```sql
--- Same snapshot, alternative — check_cols='all' STRING shorthand (use only when you want EVERY column tracked)
+-- Same snapshot body as 1b above (SELECT id, email, display_name, plan_name, country, account_tier — key column `id` UNALIASED so unique_key='id' resolves), alternative config only — check_cols='all' STRING shorthand (use only when you want EVERY column tracked)
 {{
   config(
     target_schema='analytics',
@@ -406,6 +406,41 @@ FROM {{ source('postgres', 'users') }}
 ```
 
 `check_cols` accepts **either a list of column names OR the literal string `'all'`** — no other shorthand exists. Per [docs.getdbt.com/reference/resource-configs/check_cols](https://docs.getdbt.com/reference/resource-configs/check_cols): *"A list of columns within the results of your snapshot query to check for changes. Alternatively, use all columns using the `all` value (however this may be less performant)."* Prefer the explicit list — `'all'` re-hashes columns like `email`, `display_name`, etc. that you may not care about for SCD2 purposes and makes every run slower.
+
+> **CANONICAL RULE — snapshot `unique_key` must reference a column in the snapshot's SELECT OUTPUT, NOT the raw source column name (keyword anchors: "snapshot unique_key", "unique_key column not found", "dbt snapshot key alias", "unique_key must match select output", "snapshot key vs source column", "Column 'id' not found", "compound unique_key snapshot", "unique_key list form"):** dbt's snapshot `unique_key` config (and the incremental model `unique_key` — same rule, see cross-ref below) resolves against the **compiled SELECT's output columns**, the same way every downstream `ref()` and every `dbt test` does. If your snapshot SELECT aliases the source column (`SELECT id AS user_id, ...`), the output column is `user_id` and **`unique_key='id'` will not resolve** — the run fails on first execution with a `Column 'id' not found` / `Column 'id' cannot be resolved` error from Trino (the column literally does not exist in the materialized snapshot table). Two correct fixes — pick ONE per snapshot:
+>
+> ```sql
+> -- WRONG — unique_key references the SOURCE column, but the SELECT renames it away
+> {% snapshot users_snapshot %}
+> {{ config(target_schema='analytics', unique_key='id', strategy='timestamp', updated_at='updated_at') }}
+> SELECT id AS user_id, email, plan_name, updated_at        -- output column is `user_id`, not `id`
+> FROM {{ source('postgres', 'users') }}
+> {% endsnapshot %}
+> -- First `dbt snapshot --select users_snapshot` fails: "Column 'id' not found" / "cannot be resolved".
+>
+> -- CORRECT option A — match the alias (most common fix when downstream models prefer the renamed column):
+> {% snapshot users_snapshot %}
+> {{ config(target_schema='analytics', unique_key='user_id', strategy='timestamp', updated_at='updated_at') }}
+> SELECT id AS user_id, email, plan_name, updated_at        -- output column `user_id` matches unique_key='user_id'
+> FROM {{ source('postgres', 'users') }}
+> {% endsnapshot %}
+>
+> -- CORRECT option B — don't alias the key column (alias OTHER columns if you must, just not the key):
+> {% snapshot users_snapshot %}
+> {{ config(target_schema='analytics', unique_key='id', strategy='timestamp', updated_at='updated_at') }}
+> SELECT id, email, plan_name AS plan, updated_at           -- key `id` is unaliased; output column matches
+> FROM {{ source('postgres', 'users') }}
+> {% endsnapshot %}
+>
+> -- COMPOUND KEY — list form; every listed column must be in the SELECT OUTPUT:
+> {% snapshot tenant_users_snapshot %}
+> {{ config(target_schema='analytics', unique_key=['tenant_id', 'user_id'], strategy='timestamp', updated_at='updated_at') }}
+> SELECT tenant_id, id AS user_id, email, updated_at        -- BOTH `tenant_id` AND `user_id` are in the output
+> FROM {{ source('postgres', 'tenant_users') }}
+> {% endsnapshot %}
+> ```
+>
+> The compound-list form `unique_key=['col1', 'col2', ...]` is supported and is the canonical way to express a composite snapshot key (verified at [docs.getdbt.com/docs/build/incremental-models](https://docs.getdbt.com/docs/build/incremental-models): *"the `unique_key` should be supplied … as a string representing a single column or a list of single-quoted column names that can be used together, for example, `['col1', 'col2', …]`"*). The same SELECT-OUTPUT rule applies to **every** listed column — `unique_key=['tenant_id', 'user_id']` fails if either `tenant_id` or `user_id` is missing from the SELECT output. **Mental model:** treat `unique_key` exactly like a downstream `SELECT <key> FROM {{ ref('users_snapshot') }}` — if that query wouldn't compile because the column was aliased away, the snapshot's `unique_key` won't resolve either. **Same rule for `incremental` models** — `unique_key='order_id'` paired with `SELECT id AS order_id, ...` works; paired with `SELECT id, ...` (no alias to `order_id`) does not. Cross-ref: incremental `unique_key` usage and the `MERGE`-key behavior are at [r27 §4.5D / §6.1](27-oracle-plsql-to-dbt-trino.md), [r28 §3 incremental config](28-complex-sql-performance-trino-dbt.md), and [r13 §incremental-strategy=merge](13-postgres-to-iceberg-ingestion.md) — all use the same SELECT-output-column rule for `unique_key`.
 
 **Either strategy adds the SAME FOUR ALWAYS-PRESENT metadata columns automatically** (verified at [docs.getdbt.com/reference/resource-configs/snapshot_meta_column_names](https://docs.getdbt.com/reference/resource-configs/snapshot_meta_column_names)):
 
@@ -440,6 +475,7 @@ WHERE dbt_valid_from <= TIMESTAMP '2025-08-10 12:00:00'
 > - `dbt_is_current` column — does NOT exist; query current rows via `WHERE dbt_valid_to IS NULL`.
 > - "`dbt_is_deleted` is one of the four default snapshot meta columns" — **FALSE.** The four ALWAYS-PRESENT defaults are `dbt_scd_id`, `dbt_updated_at`, `dbt_valid_from`, `dbt_valid_to`. `dbt_is_deleted` is **conditional** — added only when `hard_deletes='new_record'` is configured. Listing it in place of `dbt_updated_at` (a common slip) is wrong on both ends: `dbt_updated_at` IS a default; `dbt_is_deleted` is NOT.
 > - Omitting `dbt_updated_at` from the default-column list — `dbt_updated_at` IS one of the four always-present defaults. Any "the four defaults are X, Y, Z, dbt_is_deleted" formulation is wrong.
+> - `unique_key='<source_column_name>'` paired with a `SELECT <source_col> AS <renamed_col>, ...` body — the snapshot/incremental `unique_key` resolves against the **compiled SELECT's OUTPUT column names**, NOT the raw source-table column. `unique_key='id'` with `SELECT id AS user_id, ...` fails on first run with `Column 'id' not found` / `cannot be resolved`. Fix: either use `unique_key='user_id'` (match the alias) OR drop the alias and write `SELECT id, ...`. Same rule for compound keys — every column in `unique_key=['tenant_id', 'user_id']` must be in the SELECT output. See the canonical rule block immediately above for worked right/wrong side-by-side.
 
 **Option 2 — Spark MERGE INTO (for teams maintaining SCD2 inside their Spark ingestion job):**
 
