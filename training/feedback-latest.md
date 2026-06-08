@@ -1,46 +1,53 @@
-# Judge Feedback — iter738
+# Judge Feedback — iter739
 
-All dialect claims verified against trino.io/docs/467 (datetime / window / string / array .html) on 2026-06-09. NOT verified against resources/. Production stack: Trino 467 + Iceberg, on-prem; none of these answers touch auth/authz, so no prod-fit concerns. state.json NOT bumped.
+All dialect claims verified against trino.io/docs/467 on 2026-06-09 via WebFetch (string.html / math.html → floating-point + operators / datetime.html / bitwise.html). NOT verified against resources/. Production stack: Trino 467 + Iceberg, on-prem; none of these answers touch auth/authz, so no prod-fit concerns. state.json NOT bumped.
 
 ## Per-question scores
 
-### Q1 — first + last day of month from a TIMESTAMP (2nd-angle re-probe)
+### Q1 — last dot / final segment (strpos-negative-instance FIX-A re-probe) — CRITICAL
 - Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → **5.00**
-- `CAST(date_trunc('month', created_at) AS DATE)` — docs-verified: `date_trunc('month', TIMESTAMP '2022-10-20 05:10:00')` → `2022-10-01 00:00:00.000` (first-of-month timestamp), CAST AS DATE → plain date. Correct.
-- `last_day_of_month(created_at)` — docs signature is `last_day_of_month(x) → date`, the generic temporal `x` (same pattern as `quarter(x)`/`year(x)`) accepts a timestamp and returns a date. Correct; directly answers "both as plain dates" — first is explicitly CAST to date, last returns date natively. Single tidy SELECT, billing-window framing matches the use case.
-- **VERDICT: last_day_of_month STAYS CLOSED → now BULLETPROOFED.** 2nd consecutive clean datapoint (iter737 fresh date-arg 4.9375 → iter738 explicit-timestamp-arg 5.00). The iter737 -0.25 nit (didn't state timestamp input works) is resolved by exercising exactly the timestamp angle. Stop re-probing.
+- `strpos(file_path, '.', -1)` — docs-verbatim string.html: "strpos(string, substring, instance) — Returns the position of the N-th instance of substring in string. **When instance is a negative number the search will start from the end of string. Positions start with 1. If not found, 0 is returned.**" So `strpos(s, '.', -1)` returns the position of the LAST dot, 1-based, 0 if none. CONFIRMED.
+- `substr(s, pos + 1)` — docs: `substr` is an alias for `substring`; the 2-arg form "Returns the rest of string from the starting position start." So `substr(s, strpos(s,'.',-1)+1)` returns everything after the last dot → `'invoices'`. CONFIRMED correct.
+- The responder used the NATIVE negative-instance form as the primary answer AND explicitly demoted the `LENGTH(s) - strpos(REVERSE(s),'.') + 1` arithmetic as clunky. Cited resources/23 (~line 430) — the iter739 r23 addition landed and is findable from the file-extension/last-occurrence keyword path.
+- **VERDICT: strpos-negative-instance FIX-A is CLOSED.** The responder used the native `strpos(s, sub, -1)` form (not only the clunky LENGTH/REVERSE arithmetic). This is a clean reversal of the iter738 Q3 -0.50 miss. Recommend one 2nd-angle re-probe (e.g. position of the last `/` in a path, or N-th-from-end) to bulletproof before retiring.
 
-### Q2 — RANK vs DENSE_RANK vs ROW_NUMBER tie-handling (fresh)
+### Q2 — is_nan / is_infinite (responder DECLINED) — findable-but-missing gap
+- Accuracy 5 / Completeness 2 / Clarity 4 / Actionability 2 → **3.25**
+- The responder DECLINED honestly and did NOT fabricate — correctly noted that `try()`/`NULLIF()` handle divide-by-zero BEFORE it happens, not detect-after, and pointed the user to the docs. That honesty is the right failure mode and is rewarded on Accuracy/Clarity.
+- BUT this is a genuine FINDABLE-BUT-MISSING gap. Docs-verified math.html (floating-point section): `is_nan(x) → boolean` "Determine if x is not-a-number"; `is_infinite(x) → boolean` "Determine if x is infinite"; `is_finite(x) → boolean` "Determine if x is finite." All three exist in Trino 467. The user's exact question ("check if a value is infinite or not a real number") has a clean one-function answer the responder could not produce.
+- Trino nuance the teacher MUST encode (verified against operator semantics): only DOUBLE/REAL division produces Infinity/NaN (e.g. `CAST(x AS double)/0e0`). Integer division by zero ERRORS, and DECIMAL division by zero ERRORS — so `is_nan`/`is_infinite` only ever fire on float/double paths. A user filtering "bad ratios" must ensure the division is done in DOUBLE for inf/nan to appear at all; otherwise the query throws and there is nothing to detect-after.
+- Score reflects merits: accurate + honest (no fabrication) but incomplete and not-actionable for a question with a clean native answer.
+
+### Q3 — day_of_year (fresh)
 - Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → **5.00**
-- Docs-verbatim window.html: rank() "tie values in the ordering will produce gaps in the sequence" → (1,1,3) correct; dense_rank() "tie values do not produce gaps" → (1,1,2) correct; row_number() "unique, sequential number for each row" → (1,2,3) correct.
-- The 6-row sequences (1,1,3,4,4,6 / 1,1,2,3,3,4 / 1,2,3,4,5,6) all correct. Directly answers "2nd then skip to 4th, or move to 3rd?": RANK skips (2,2,4).
-- Top-N implications consistent with the standing iter714 top-N-with-ties lock: RANK()<=N includes ties at the cutoff, DENSE_RANK()<=N = top-N distinct value tiers, ROW_NUMBER()<=N = exactly N rows. Worked $100/$100/$90/$80×3/$70 example correct. Recommends RANK() for leaderboard — right default. **Confirmed.**
+- `EXTRACT(DAY_OF_YEAR FROM signup_date)` and shorthand `day_of_year(date)` — docs-verbatim datetime.html: "Returns the day of the year from x. The value ranges from 1 to 366." Alias `doy` confirmed. CONFIRMED 1-366, leap-year-aware.
+- `GROUP BY 1, 2` (ordinal group-by) is valid Trino — standard SQL ordinal GROUP BY by select-list position. CONFIRMED correct. Cited resources/13. Clean, directly answers "day-within-year directly".
 
-### Q3 — position of LAST occurrence / file extension — SCRUTINIZED
-- Accuracy 5 / Completeness 4 / Clarity 5 / Actionability 4 → **4.50**
-- (a) Extension answer `element_at(split(file_path, '.'), -1)` is CORRECT and idiomatic. `split(string, delimiter)`→array (docs-verbatim string.html); `element_at(array, -1)` returns the last element (array.html "If index < 0, element_at accesses elements from the last to the first"). For `q1-summary.pdf` → `'pdf'`. Best answer for the actual stated use case.
-- (b) **CRITICAL FINDING — missed cleaner native form.** The workaround `LENGTH(file_path) - strpos(REVERSE(file_path), '.') + 1` is functionally correct (REVERSE and LENGTH both confirmed). BUT Trino 467's `strpos` HAS a 3-argument form: docs-verbatim string.html "strpos(string, substring, instance) — Returns the position of the N-th instance of substring in string. **When instance is a negative number the search will start from the end of string.**" So `strpos(file_path, '.', -1)` directly returns the position of the LAST dot — no REVERSE/LENGTH arithmetic needed. The responder MISSED this cleaner native canonical.
-- Severity: the user explicitly asked "how to find the LAST occurrence of a character" — `strpos(s, sub, -1)` is the direct native answer to that literal question. The element_at(split,-1) extension answer is still correct and best for the extension use case, so this is a Completeness/Actionability gap (-1 each), NOT an accuracy error. The REVERSE workaround produces the right number.
-- **iter739 FLAG (genuine, real missed canonical): add a `strpos(string, substring, -1)` = position-of-last-occurrence canonical.** Anchors: "position of the last occurrence", "find the last dot/character", "last index of a substring", "strpos from the end". Lead with `strpos(file_path, '.', -1)` for the literal position; keep `element_at(split(...), -1)` as the extension-extraction answer; demote the `LENGTH - strpos(REVERSE(...))` arithmetic to a fallback note. Pure ADDITION — no contradictory content to reconcile.
-
-### Q4 — quarter / EXTRACT(QUARTER) (fresh)
-- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → **5.00**
-- `quarter(transaction_date)` — docs-verbatim "Returns the quarter of the year from x. The value ranges from 1 to 4." Correct, no CASE needed.
-- `EXTRACT(QUARTER FROM x)` equivalence accurate (extraction table maps QUARTER → quarter()). `year(x)` exists (→bigint). `CONCAT('Q', quarter(...), ' ', CAST(YEAR(...) AS VARCHAR))` label valid Trino. GROUP BY repeating the `quarter(transaction_date)` expression valid. Month ranges correct. **Confirmed.**
+### Q4 — bitmask / bitwise (responder DECLINED) — findable-but-missing gap
+- Accuracy 5 / Completeness 2 / Clarity 4 / Actionability 2 → **3.25**
+- The responder DECLINED honestly and did NOT fabricate — searched for AND/OR/XOR/shifts/bit-counting, found nothing, and pointed at the docs with plausible candidate names. Right failure mode; rewarded on Accuracy/Clarity. Note: it guessed `popcount()` — Trino's name is `bit_count`, so the candidate-name guess was partly off (do not penalize a declined answer for this, but the teacher should encode the real name).
+- Genuine FINDABLE-BUT-MISSING gap. Docs-verified bitwise.html: `bitwise_and(x,y)`, `bitwise_or(x,y)`, `bitwise_xor(x,y)`, `bitwise_not(x)`, `bitwise_left_shift`, `bitwise_right_shift`, `bitwise_right_shift_arithmetic`, and `bit_count(x, bits) → bigint`. Test bit n: `bitwise_and(flags, 1 << n) <> 0` (or `bitwise_and(flags, pow2) <> 0`). Count set bits: `bit_count(flags, 64)`.
+- **CRITICAL NUANCE for the teacher: `bit_count` REQUIRES the 2-arg form `bit_count(x, bits)`** — the second arg is the number of bits (e.g. `bit_count(9, 64)`), treating x as a `bits`-bit signed integer in 2's complement. There is NO 1-arg `bit_count(x)` and NO `popcount`. A resource that writes `bit_count(flags)` will be a parse error.
+- Score reflects merits: accurate + honest (no fabrication) but incomplete and not-actionable for a question with a clean native answer.
 
 ## Overall
 
-| Q | Acc | Compl | Clar | Act | Avg |
+| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
 |---|---|---|---|---|---|
 | Q1 | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 | 5 | 4 | 5 | 4 | 4.50 |
-| Q4 | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 | 5 | 2 | 4 | 2 | 3.25 |
+| Q3 | 5 | 5 | 5 | 5 | 5.00 |
+| Q4 | 5 | 2 | 4 | 2 | 3.25 |
 
-**Overall average = 4.875 → PASS** (well above 3.5; overall average governs, no per-Q override).
+**OVERALL AVERAGE = (5.00 + 3.25 + 5.00 + 3.25) / 4 = 4.125 → PASS** (threshold 3.5; overall average governs, no per-Q override).
 
-## Teacher actions for iter739
-1. **Q1 verdict: last_day_of_month BULLETPROOFED** (2nd consecutive clean datapoint). Stop re-probing. Do NOT edit the resource (iter693 churn-risk).
-2. **Q3 genuine gap — ADD strpos negative-instance canonical.** Only real finding. Trino 467 `strpos(string, substring, -1)` gives position of last occurrence natively; responder fell back to a clunky REVERSE/LENGTH workaround and missed it. Add a small leading canonical (anchors above), pure addition, no reconciliation. Keep `element_at(split(s,d),-1)` as the extension-extraction answer.
-3. Q2 and Q4 fully correct, consistent with standing locks (iter714 top-N-with-ties). No action.
-4. Did NOT bump training/state.json.
+## Verdicts and iter740 recommendation
+
+- **Q1 strpos-negative-instance FIX-A: CLOSED.** Native `strpos(s, sub, -1)` used as the primary answer; REVERSE/LENGTH arithmetic correctly demoted. The iter739 r23 findability ADD worked. One 2nd-angle re-probe (last `/` in a path, or N-th-from-end) recommended to bulletproof.
+
+- **Q2 is_nan/is_infinite/is_finite: FINDABLE-BUT-MISSING gap — FIX-A for iter740.** Add a float-state-detection canonical: `is_nan(x)/is_infinite(x)/is_finite(x) → boolean`. Encode the division-by-zero nuance: ONLY double/real div-by-zero yields Infinity/NaN (`CAST(x AS double)/0e0`); integer AND decimal div-by-zero ERROR (so there is nothing to detect-after unless the division is in DOUBLE). Anchors: "detect infinity", "is not a number / NaN", "filter bad float ratios", "is_nan / is_infinite / is_finite". Contrast with the existing try()/NULLIF before-the-fact divide-by-zero content (route by before-vs-after keywords; do not contradict it). Pure ADDITION.
+
+- **Q4 bitwise functions: FINDABLE-BUT-MISSING gap — FIX-A for iter740.** Add a bitwise canonical: `bitwise_and/or/xor/not`, `bitwise_left_shift/right_shift`, and `bit_count(x, bits)`. Test-a-bit: `bitwise_and(flags, 1 << n) <> 0`. Count-set-bits: `bit_count(flags, 64)`. **PIN the bit_count 2-arg requirement** — `bit_count(x, bits)`, NO 1-arg form, NO `popcount` (would be parse error). Anchors: "permission bitmask", "test if a bit is set", "count set bits / enabled flags", "bitwise AND/OR". Pure ADDITION.
+
+- Two findable-but-missing gaps surfaced this iteration (Q2, Q4). The two-FIX-A pattern (cf. iter736 dual-canonical 4.97 PASS) is appropriate for iter740. Both are pure additions to the function-reference resources (r05/r27 math; new bitwise content) with no contradictory content to reconcile.
+- Honesty discipline holding: the responder declined cleanly on both unknown-function questions rather than fabricating signatures — the right behavior, and the reason overall still PASSES despite two real coverage gaps.

@@ -410,7 +410,7 @@ SELECT split_to_multimap('tag=a;tag=b;tag=c', ';', '=') AS m;
 
 ### `split_part` for "the part AFTER (or BEFORE) a single delimiter" — the clean Trino-native idiom
 
-**Keyword anchors:** domain from email, everything after the @, the part after a character/delimiter, the part before a character, pull the local-part / domain, split on a single delimiter and take a field, cleaner than strpos+substr, part after the colon/dash/slash, extract substring after a character Trino, clean way to get part of a string Trino.
+**Keyword anchors:** domain from email, everything after the @, the part after a character/delimiter, the part before a character, pull the local-part / domain, split on a single delimiter and take a field, cleaner than strpos+substr, part after the colon/dash/slash, extract substring after a character Trino, clean way to get part of a string Trino. (For "position of the LAST occurrence" / "file extension after the last dot", see the `strpos(s, sub, -1)` subsection a few paragraphs below.)
 
 **The clean idiom.** For "give me everything AFTER (or BEFORE) a single-character delimiter", prefer **`split_part(s, delim, n)`** over `substr(s, strpos(s, delim) + 1)`. It's the direct, readable form — one function call, no offset arithmetic, no off-by-one risk.
 
@@ -424,6 +424,32 @@ SELECT split_to_multimap('tag=a;tag=b;tag=c', ';', '=') AS m;
 **Why `split_part` is the lead.** Per [trino.io/docs/467/functions/string.html](https://trino.io/docs/current/functions/string.html): *"`split_part(string, delimiter, index) → varchar` — Splits `string` on `delimiter` and returns the field `index`. Field indexes start with 1."* and *"If the index is larger than the number of fields, then null is returned."* That is — index `1` is the piece **before** the (first) delimiter; index `2` is the piece **after** it; an out-of-range index returns `NULL` (NOT empty string — see `DO NOT WRITE` table below). The `strpos` + `substr` form is correct but unnecessarily verbose, fragile (off-by-one on the `+1` / `-1`), and silently produces a garbage long string if the delimiter is missing (whereas `split_part` returns the original string when there's no match at index 1, or `NULL` for higher indexes).
 
 **Note on multi-delimiter strings.** `split_part` always takes the **N-th** piece. For "the LAST piece" (e.g., filename from a path with an unknown number of `/`), `split_part` does **NOT** accept a negative index — use `element_at(split(path, '/'), -1)` instead (`element_at` on an array supports negative indexing from the tail; verified at [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html)).
+
+#### The position of the LAST occurrence of a character / the file extension after the last dot — `strpos(s, sub, -1)` (negative instance = search from the end)
+
+**Keyword anchors:** position of the last occurrence, find the last dot, find the last character, last index of a substring, strpos from the end, negative instance strpos, position of the last delimiter, file extension after the last dot, everything after the last delimiter, last occurrence of a character Trino, index of the final separator.
+
+Two different questions — pick the right tool:
+
+- **"Just give me the substring after the last delimiter"** (e.g. the file extension, the filename): use **`element_at(split(s, delim), -1)`** — the cleanest form when you only want the piece itself, no positions or arithmetic. Example: `element_at(split(file_path, '.'), -1)` → for `'report.final.csv'` returns `'csv'`. (Same array negative-indexing rule as the LAST-piece note just above.)
+- **"I need the POSITION of the last delimiter"** (because you want to `substr` from there, or measure where it is): use the **3-arg `strpos` with a NEGATIVE instance** — `strpos(s, sub, -1)`. A negative instance searches **from the end**, so it returns the position (1-based `bigint`) of the **LAST** occurrence; `0` if not found.
+
+```sql
+-- ✅ COPY THIS — position of the LAST '.' in a string (1-based, 0 if none):
+SELECT strpos(file_path, '.', -1) AS last_dot_pos  -- 'report.final.csv' -> 12
+FROM iceberg.analytics.files;
+
+-- File extension TWO ways:
+--   (a) just the extension (cleanest — no positions):
+SELECT element_at(split(file_path, '.'), -1) AS ext        -- 'report.final.csv' -> 'csv'   ✅ COPY THIS
+--   (b) via the position of the last dot (when you need substr work):
+SELECT substr(file_path, strpos(file_path, '.', -1) + 1)   -- 'report.final.csv' -> 'csv'   ✅ COPY THIS
+FROM iceberg.analytics.files;
+```
+
+Per [trino.io/docs/467/functions/string.html](https://trino.io/docs/current/functions/string.html), `strpos(string, substring, instance) → bigint`: *"Returns the position of the N-th `instance` of `substring` in `string`. When `instance` is a negative number the search will start from the end of `string`. Positions start with `1`. If not found, `0` is returned."* So `strpos(s, '.', -1)` is the direct "position of the last dot". (For the N-th positive occurrence and the full Oracle-`INSTR` mapping, see [resource 27 §4.3 string-functions table](27-oracle-plsql-to-dbt-trino.md#43-string-functions).)
+
+> **Avoid the REVERSE-arithmetic workaround.** `LENGTH(s) - strpos(REVERSE(s), '.') + 1` does compute the last-dot position, but it is clunky and off-by-one-prone (the `+1` correction is easy to drop). Prefer the native `strpos(s, '.', -1)` — same result, one call, no arithmetic. Inline marker: `LENGTH(s) - strpos(REVERSE(s), '.') + 1  -- ⚠️ works but clunky/off-by-one-prone — use strpos(s, '.', -1) instead — DO NOT COPY`.
 
 ### LEADING CANONICAL — pull the host / domain / path / query from a FULL URL — use the `url_extract_*` family, NOT a `split_part` chain (iter736 PIN — FIX-A)
 
