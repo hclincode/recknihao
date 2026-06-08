@@ -1,65 +1,84 @@
-# Judge Feedback — iter764 (FIX-A verification: ROLLUP SUM-placement RE-PROBE)
+# iter765 Judge Feedback — DEFAULT durability-breadth (4 fresh picks)
 
-All four forms verified against trino.io/docs/467 (sql/select.html, functions/datetime.html, functions/aggregate.html, language/types.html) on 2026-06-09. Do NOT rely on resources/ as ground truth.
+**Overall: 5.00 — STRONG PASS** (threshold 3.5). All 4 docs-verified clean against trino.io/docs/467 (math/select/string/conversion/window/aggregate .html) 2026-06-09. All 4 FRESH-CLEAN.
 
-## Q1 — ROLLUP on date-parts (year+quarter from one timestamp) + per-year subtotal + grand total — RE-PROBE for BULLETPROOFED
+Production fit: all idioms are valid Trino 467 Iceberg-connector SQL; no stack-incompatible advice. No auth/authz scope involved.
 
-Verified:
-- CTE computes the PARTS (signup_year, signup_quarter, user_id) — NOT a pre-aggregated COUNT/SUM. CORRECT.
-- OUTER query does `COUNT(user_id)` under `GROUP BY ROLLUP(signup_year, signup_quarter)` — the aggregate is in the OUTER query, ROLLUP is over the named columns. This is the analysis-valid form (select.html: "all output expressions must be either aggregate functions or columns present in the GROUP BY clause"). COMPILES.
-- ROLLUP over column NAMES, not expressions — the EXTRACTs are pre-computed in the CTE and aliased. CORRECT (select.html: "Complex grouping operations do not support grouping on expressions ... Only column names are allowed"). The iter763 on-expression issue did NOT recur.
-- `EXTRACT(QUARTER FROM signup_ts)` and `EXTRACT(YEAR FROM signup_ts)` are valid Trino 467 (datetime.html: QUARTER and YEAR are supported EXTRACT fields). CORRECT.
-- GROUPING bitmask 0/1/3 (no WHEN-2) is exactly right for ROLLUP(year, quarter): 0=detail, 1=year subtotal (quarter rolled up), 3=grand total. Value 2 is impossible for ROLLUP. CORRECT.
-- ORDER BY GROUPING(...), year NULLS LAST, quarter NULLS LAST — correct shape ordering; NULLS LAST is the Trino 467 default and explicit here. CORRECT.
-- The iter763 SUM-placement synthesis-slip (pre-aggregate-in-CTE → bare reference under outer ROLLUP) did NOT recur.
+---
 
-Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — **avg 5.00**
+## Q1 — Exact-N random sample (100 genuinely random rows each run)
 
-## Q2 — Per region: total revenue / distinct active users (ratio of two aggregates)
+**Answer:** `SELECT ... FROM orders ORDER BY random() LIMIT 100`; explained random() non-deterministic → different 100 per run; noted TABLESAMPLE BERNOULLI(N)/SYSTEM(N) as the approximate-PERCENTAGE alternative (BERNOULLI per-row, SYSTEM whole-split).
 
-Verified:
-- `ROUND(SUM(revenue) / COUNT(DISTINCT user_id), 2)` per region. COUNT(DISTINCT) returns BIGINT (aggregate.html). For a money/DECIMAL (or DOUBLE) revenue column, SUM(revenue) is DECIMAL/DOUBLE, and DECIMAL/BIGINT (or DOUBLE/BIGINT) division is NOT integer division — it preserves fractional precision, so ROUND(...,2) is correct. CORRECT for the money scenario.
-- WHERE user_id IS NOT NULL + GROUP BY region. Sound.
-- approx_distinct noted as a fast alternative for huge cohorts — valid (aggregate.html, HLL, ~2.3% std error). CORRECT.
-- Completeness nit (minor): did not explicitly flag the integer-division trap that WOULD apply if revenue were an INTEGER/BIGINT column. For a conventionally-DECIMAL money column this is a non-issue; do not heavily penalize.
+| Axis | Score | Note |
+|---|---|---|
+| Accuracy | 5 | `random()`/`rand()` confirmed (math.html: pseudo-random double 0.0<=x<1.0). `ORDER BY random() LIMIT N` is the correct exact-N-random idiom. TABLESAMPLE takes a PERCENTAGE not a row count (select.html); BERNOULLI=per-row probabilistic, SYSTEM=segment/split-level connector-dependent — both accurate. No conflation of TABLESAMPLE-% with exact-N. |
+| Completeness | 5 | Both the exact-N idiom AND the approximate-% large-table alternative, with the correct trade-off (full sort vs cheaper sampling). |
+| Clarity | 5 | "different 100 each run" makes non-determinism concrete; per-row vs whole-split distinction explained plainly. |
+| Actionability | 5 | Drop-in query; clear when to switch to TABLESAMPLE. |
 
-Scores: Accuracy 5 / Completeness 4 / Clarity 5 / Actionability 5 — **avg 4.75**
+**Per-Q avg: 5.00 — FRESH-CLEAN.**
 
-## Q3 — Duplicate email detection (natural-key appears > once)
+---
 
-Verified:
-- `GROUP BY email HAVING COUNT(*) > 1` is the canonical duplicate-key idiom in Trino 467 (select.html: HAVING filters groups post-aggregation). CORRECT.
-- WHERE email IS NOT NULL + ORDER BY occurrence_count DESC. Clean, surfaces only emails appearing >1.
+## Q2 — Cumulative count of DISTINCT users over time (KEY CHECK)
 
-Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — **avg 5.00**
+**Answer:** first_appearance CTE (`DATE_TRUNC('day', MIN(event_date))` per user) → new_users_per_day (`COUNT(*) GROUP BY first_event_day`) → `SUM(new_users) OVER (ORDER BY event_day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`. Explained Trino does NOT support `COUNT(DISTINCT) OVER`; defanged the naive `SUM(COUNT(DISTINCT)) OVER` double-count.
 
-## Q4 — Per user: count of distinct calendar days active
+| Axis | Score | Note |
+|---|---|---|
+| Accuracy | 5 | **VERIFIED: `COUNT(DISTINCT ...) OVER` is genuinely UNSUPPORTED in Trino** — error "DISTINCT in window function parameters not yet supported" (trinodb/trino #7885, still open). Responder correctly handled this real limitation rather than fabricating that it works. The first-appearance + running-SUM workaround is mathematically correct: each user is counted exactly ONCE on their first-event day, so the running SUM of daily first-appearance counts = cumulative distinct users. `SUM() OVER (ORDER BY ... ROWS UNBOUNDED PRECEDING TO CURRENT ROW)` is valid. The double-count defang (naive `SUM(COUNT(DISTINCT)) OVER` re-counts returning users every day) is accurate. |
+| Completeness | 5 | Full pipeline + per-day new-users column + cumulative column + the trap explanation. |
+| Clarity | 5 | "a user counts once, on their first day" stated explicitly; CTE layering is readable. |
+| Actionability | 5 | Copy-ready 3-CTE query with correct ORDER BY and frame. |
 
-Verified:
-- `COUNT(DISTINCT CAST(occurred_at AS DATE)) GROUP BY user_id`. CAST(timestamp AS DATE) drops time-of-day (datetime.html: date(x) is an alias for CAST(x AS date)); COUNT(DISTINCT) counts unique non-null dates (aggregate.html). CORRECT — counts distinct calendar days.
+**Per-Q avg: 5.00 — FRESH-CLEAN.** Correctly navigated the COUNT(DISTINCT) OVER limitation.
 
-Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — **avg 5.00**
+---
 
-## Overall
+## Q3 — Format 0.1834 as "18.34%"
 
-| Q | Acc | Comp | Clar | Act | Avg |
-|---|---|---|---|---|---|
-| Q1 | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | 5 | 4 | 5 | 5 | 4.75 |
-| Q3 | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 | 5 | 5 | 5 | 5 | 5.00 |
+**Answer:** `format('%.2f%%', conversion_rate * 100)` → '18.34%'. Explained *100, %.2f = 2 decimals, %% = literal percent; noted ||/concat require varchar (numerics don't auto-coerce) so format() is the clean path.
 
-**Overall avg = 4.9375 → 4.94 — STRONG PASS** (threshold 3.5; overall governs, no single-Q veto).
+| Axis | Score | Note |
+|---|---|---|
+| Accuracy | 5 | conversion.html: format() uses Java Formatter syntax. Docs example `format('%s%%', 123) -> '123%'` confirms %%=literal percent; `format('%.5f', pi()) -> '3.14159'` confirms %.Nf decimal formatting. 0.1834*100=18.34 → '18.34%'. The ||/concat-requires-varchar note is correct — Trino does not auto-coerce numerics in `||`. |
+| Completeness | 5 | The *100 step, the format spec breakdown, AND why format() beats string concatenation. |
+| Clarity | 5 | Each format token explained individually. |
+| Actionability | 5 | Single-expression drop-in. |
 
-## Status calls
+**Per-Q avg: 5.00 — FRESH-CLEAN.**
 
-- **ROLLUP-on-date-parts is now BULLETPROOFED.** Q1 is the 2nd consecutive clean datapoint (iter763 fixed, iter764 confirms): the query COMPILES, the COUNT is correctly in the OUTER query (SUM-placement slip did NOT recur), ROLLUP is over pre-computed named columns (on-expression issue did NOT recur), EXTRACT(QUARTER) is valid, and the GROUPING 0/1/3 bitmask is correct. The full ROLLUP saga is now FULLY CLOSED across all three failure modes: construct-choice (iter761), on-expression (iter763), and SUM-placement (iter763→764). The iter764 inoculation defang at the r28 CTE-then-ROLLUP canonical did its job.
-- **Q2 ratio-of-aggregates (SUM over COUNT DISTINCT): CLEAN.** Division is correct for DECIMAL revenue; only a minor completeness note about the integer-revenue edge.
-- **Q3 dup-detection (HAVING COUNT > 1): CLEAN.**
-- **Q4 distinct-days-per-group (COUNT DISTINCT CAST-DATE): CLEAN.**
+---
 
-No new gap, defect, or cross-card contradiction surfaced.
+## Q4 — Integer cents (1999) to dollars DECIMAL (19.99)
 
-## iter765 designation
+**Answer:** `CAST(amount_cents AS DOUBLE) / 100.0` (→19.99); ALSO `CAST(amount_cents AS DECIMAL(18,2)) / 100` for exact money. Explained 1999/100=19 integer-division-truncates; cast at least one operand first; DECIMAL preferred for money (no float rounding).
 
-**DEFAULT NO-OP / durability-breadth** with 4 fresh picks. ROLLUP saga is fully closed and bulletproofed; Q2/Q3/Q4 are clean. No FIX-A warranted. Suggested optional angles for iter765: a 4th ROLLUP angle (e.g. 3-level hierarchy region→country→city to confirm bitmask 0/1/3/7) only if probing durability; otherwise pick 4 genuinely fresh patterns. Do NOT re-edit the r28 ROLLUP card (router + column-names clarifier + SUM-placement defang all intact and verified) — churn risk on a now-bulletproofed topic.
+| Axis | Score | Note |
+|---|---|---|
+| Accuracy | 5 | Integer/integer division truncates (1999/100=19) — correct. Casting one operand to DOUBLE or DECIMAL(18,2) yields 19.99 — correct. DECIMAL preferred for money (avoids binary-float rounding) — correct and consistent with the money-DECIMAL CAST lock. |
+| Completeness | 5 | Names the truncation trap, gives both DOUBLE (quick) and DECIMAL (exact-money) paths, recommends DECIMAL for currency. |
+| Clarity | 5 | "1999/100=19" makes the trap concrete. |
+| Actionability | 5 | Two ready expressions with a clear default (DECIMAL for money). |
+
+**Per-Q avg: 5.00 — FRESH-CLEAN.**
+
+---
+
+## Summary
+
+| Q | Topic | Avg |
+|---|---|---|
+| Q1 | random-sample-N (ORDER BY random() LIMIT N vs TABLESAMPLE-%) | 5.00 |
+| Q2 | cumulative-distinct (first-appearance running-SUM, no COUNT(DISTINCT) OVER) | 5.00 |
+| Q3 | number-to-percent-string (format %.2f%%) | 5.00 |
+| Q4 | cents-to-dollars (CAST DECIMAL, integer-division-trap) | 5.00 |
+
+**Overall avg: 5.00 — STRONG PASS.**
+
+All 4 FRESH-CLEAN. No fabrication, no dialect error, no stack-incompatibility, no card-to-card contradiction surfaced. Q2 (the key check) and Q1 (the random-vs-TABLESAMPLE check) both handled correctly.
+
+### iter766 designation
+
+**DEFAULT NO-OP / durability-breadth.** No gap, no defect, no FIX-A required. The four probed topics (random-sample-N, cumulative-distinct, percent-string, cents-to-dollars) are all clean and consistent with their standing pins. Teacher should NOT edit resources — pure integrity-sweep. Pick 4 fresh durability-breadth angles for iter766 (optionally a 2nd cumulative-distinct angle such as rolling-N-day distinct via HLL `merge()`/self-join, since that is the harder sibling of the clean cumulative-distinct probe). Do NOT re-edit r07 cumulative-distinct/COUNT(DISTINCT)-OVER card, r23 TABLESAMPLE/random card, r27 money-DECIMAL/percent-string cards — churn risk on bulletproofed material.
