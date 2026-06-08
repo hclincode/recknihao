@@ -1,52 +1,104 @@
-# Judge Feedback — iter727
+# Judge Feedback — iter728
 
-Docs verified against trino.io/docs/467 (array.html, datetime.html, aggregate.html, conversion.html) on 2026-06-08.
+Scope: 4 Q&A pairs. Every dialect claim verified against trino.io/docs/467 (math, conversion, regexp, string) plus the official "Optimizing the Casts Away" blog and Data Types page. OVERALL AVERAGE governs PASS/FAIL (no per-Q override).
 
-## Per-question scores
+---
 
-### Q1 — array_min (single smallest value WITHIN an array, no exploding)
-- Accuracy: 5 — `array_min(x) → x` verified verbatim on functions/array.html ("Returns the minimum value of input array"); returns the min element directly, NO UNNEST. NULL-propagation + `filter(arr, x -> x IS NOT NULL)` strip-first workaround is correct standard semantics.
-- Completeness: 5 — answered exactly the ask; included the NULL gotcha + workaround.
-- Clarity: 5 — single clean function, one-row-in/one-row-out framing, no jargon.
-- Actionability: 5 — copy-ready SQL, engineer knows exactly what to do.
-- Avg: 5.00. Critically: responder did NOT use UNNEST+MIN and did NOT use a LEAST/array-index hack. Clean.
+## Q1 — boolean → per-row 1/0 (CAST(bool AS int) findability re-probe)
 
-### Q2 — EXTRACT day/month as integer
-- Accuracy: 5 — `extract(field FROM x) → bigint` verified; EXTRACT(MONTH/DAY FROM date) returns integer component. All listed fields valid Trino 467: YEAR, QUARTER, MONTH, WEEK, DAY, DAY_OF_MONTH, DAY_OF_WEEK, and DOW is a confirmed alias for DAY_OF_WEEK. No invalid field listed.
-- Completeness: 4.5 — answered fully; could have mentioned `month(x)`/`day(x)` shorthand (both exist per docs) as an even terser form, but EXTRACT is the requested "clean way."
-- Clarity: 5 — direct, no assumed knowledge.
-- Actionability: 5 — copy-ready.
-- Avg: 4.875.
+ANSWER: `CASE WHEN is_active THEN 1 ELSE 0 END AS is_active_int` — per-row 1/0, explicitly NOT a count.
 
-### Q3 — boolean → 1/0 for SUM
-- Accuracy: 5 — `count_if(is_converted)` verified native ("Returns the number of TRUE input values... equivalent to count(CASE WHEN x THEN 1 END)"). `SUM(CASE WHEN is_converted THEN 1 ELSE 0 END)` valid. "Both identical plans" is fair.
-- Completeness: 4 — GAP: the user's LITERAL phrasing was "turn that boolean flag into a 1 or 0." The single most-literal answer is `CAST(is_converted AS integer)` (→ 1/0; standard Trino behavior, well-established though not spelled out verbatim on conversion.html). The responder did NOT show this direct CAST form. NOT over-penalized: count_if + SUM(CASE) both correctly achieve the stated GOAL (summing conversions), and count_if is genuinely the idiomatic Trino choice. But a user who specifically wants the scalar 1/0 expression (e.g. to multiply, or to SUM inline with other expressions) was not handed it.
-- Clarity: 5 — clear preferred/fallback structure.
-- Actionability: 4.5 — engineer can SUM conversions immediately; minor: no direct cast-to-1/0 scalar if needed inline.
-- Avg: 4.625.
+VERIFICATION:
+- `CASE WHEN bool THEN 1 ELSE 0 END` is a per-row conditional expression → emits 1/0 one row at a time. CORRECT.
+- The responder correctly read the intent (per-row scalar to multiply into a scoring formula), gave a per-row form, and did NOT mis-reach for `count_if` or any aggregate. The aggregate trap was AVOIDED.
+- `CAST(is_active AS integer)` → 1/0 is the shorter, more direct per-row form (CAST(true AS integer)=1, CAST(false AS integer)=0 — established Trino 467 behavior). The responder did NOT show it.
 
-### Q4 — COUNT(DISTINCT) total
-- Accuracy: 5 — `COUNT(DISTINCT user_id)` exact, no GROUP BY → single row. `approx_distinct` verified (~2.3% standard error per docs; responder's "~2%" is within rounding and fine).
-- Completeness: 5 — exact + scale-out approx alternative.
-- Clarity: 5 — direct.
-- Actionability: 5 — copy-ready.
-- Avg: 5.00.
+Both CASE and CAST are correct per-row forms; CAST is just shorter. Showing CASE only is fully correct and goal-meeting — it is a completeness/conciseness nit, not an error.
+
+Scores: Accuracy 5 | Completeness 4 | Clarity 5 | Actionability 5 → **4.75**
+
+---
+
+## Q2 — round DOWN to whole dollar (floor)
+
+ANSWER: `floor(amount_usd)` ($47.89 → 47.0); `CAST(floor(x) AS integer)` for integer type; caveat that "floor → -infinity (-47.89 → -48) whereas CAST(x AS integer) truncates toward zero (-47.89 → -47)."
+
+VERIFICATION:
+- `floor(x)` = "rounded down to the nearest integer" → rounds toward negative infinity. CORRECT (math.html). Primary answer is right.
+- `truncate(x)` exists and drops digits after the decimal point (toward zero). The responder did not name `truncate()` but its absence is minor.
+- **DEFECT — the CAST claim is WRONG.** The responder states `CAST(x AS integer)` "truncates toward zero (-47.89 → -47)." Trino 467 CAST of a DOUBLE/DECIMAL to an integer type **ROUNDS HALF-UP, it does NOT truncate.** Verified: the Data Types page narrowing-cast rule ("casting to lower precision rounds, not truncates"), the "Optimizing the Casts Away" blog (narrowing casts round), and the canonical community guidance ("CAST rounds — use floor()/truncate() to drop decimals"). Concretely: `CAST(47.89 AS integer)` = **48** (not 47), and `CAST(-47.89 AS integer)` = **-48** (not -47). Both the rounding-direction characterization AND the example values in the caveat are incorrect.
+  - Irony worth noting for the teacher: the responder used the CAST caveat to argue floor() is "safer," but the comparison is backwards. Since CAST rounds half-up, CAST(-47.89) = -48 actually AGREES with floor here; the function that truly diverges (toward zero) is `truncate(-47.89)` = -47. The correct "round-down vs drop-decimals" contrast is floor() (toward -inf) vs truncate() (toward zero) — NOT floor vs CAST.
+
+The primary deliverable (floor) is correct and the engineer gets the right result for the asked positive-dollar case. But the volunteered negatives caveat propagates a false dialect fact — exactly the failure class this loop guards.
+
+Scores: Accuracy 2 | Completeness 4 | Clarity 4 | Actionability 4 → **3.50**
+
+---
+
+## Q3 — regexp_extract (pull matched substring)
+
+ANSWER: `regexp_extract(user_agent, '(\(.*?\))')` first match; `regexp_extract(s, pattern, 1)` capture group N; mentions `regexp_extract_all`, `regexp_like`, Java regex syntax.
+
+VERIFICATION (regexp.html, verbatim):
+- `regexp_extract(string, pattern) → varchar` "Returns the first substring matched..." CONFIRMED.
+- `regexp_extract(string, pattern, group) → varchar` CONFIRMED.
+- `regexp_extract_all(string, pattern)` CONFIRMED.
+- `regexp_like(string, pattern) → boolean` CONFIRMED.
+- "All of the regular expression functions use the Java pattern syntax." CONFIRMED.
+
+Fully correct, well-routed (extract vs match-only), names the group form and the all/like siblings. Excellent.
+
+Scores: Accuracy 5 | Completeness 5 | Clarity 5 | Actionability 5 → **5.00**
+
+---
+
+## Q4 — thousands separators (format)
+
+ANSWER: `format('%,d', api_call_count)` → '1,234,567'; `format('%,.2f', ...)`; noted ||/concat are varchar-only.
+
+VERIFICATION (string.html / format):
+- `format(format, args...)` is Trino's Java `String.format`/printf-style function. CONFIRMED.
+- `%,d` = integer with thousands grouping (java.util.Formatter `,` flag). CONFIRMED → '1,234,567'.
+- `%,.2f` = grouped with 2 decimals. CONFIRMED.
+- ||/concat are varchar-only and do not auto-coerce numbers, so format() avoids manual CAST. CORRECT.
+
+Fully correct and directly actionable, with the inline-comment expected output.
+
+Scores: Accuracy 5 | Completeness 5 | Clarity 5 | Actionability 5 → **5.00**
+
+---
 
 ## Overall
 
 | Q | Acc | Comp | Clar | Act | Avg |
-|---|-----|------|------|-----|-----|
-| Q1 | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | 5 | 4.5 | 5 | 5 | 4.875 |
-| Q3 | 5 | 4 | 5 | 4.5 | 4.625 |
+|---|----|----|----|----|----|
+| Q1 | 5 | 4 | 5 | 5 | 4.75 |
+| Q2 | 2 | 4 | 4 | 4 | 3.50 |
+| Q3 | 5 | 5 | 5 | 5 | 5.00 |
 | Q4 | 5 | 5 | 5 | 5 | 5.00 |
 
-**OVERALL AVERAGE = 4.875 — PASS** (well above 3.5; no per-Q override).
+**OVERALL AVERAGE = 4.5625 → PASS** (threshold 3.5; overall average governs, no per-Q override).
 
-## array_min/array_max verdict
-**STAYS CLOSED.** 2nd consecutive clean datapoint after the iter726 FIX-A. The responder reached straight for `array_min(arr)` (single function, no UNNEST, no LEAST/fixed-index hack), and included the NULL-element gotcha + filter() strip-first workaround. The iter726 canonical in r07 §1a is doing its job — no regression to the iter725 UNNEST+MAX / GREATEST-fixed-index forms. Array-reducer family confirmed closed.
+### Q1 nudge verdict — RESOLVED
+The CAST(bool AS int) findability nudge is RESOLVED for its target failure mode: the responder gave a CORRECT per-row 1/0 form (`CASE WHEN ... THEN 1 ELSE 0 END`) and did NOT fall into the count_if/aggregate trap. It used CASE rather than the shorter `CAST(is_active AS integer)`; both are correct per-row, so it does not matter for correctness — only a minor conciseness opportunity remains.
 
-## Teacher action / iter728 flag
-- **NO new genuine defect.** All four answers are docs-correct and well above threshold.
-- **Minor findability nudge (OPTIONAL, low priority) for iter728:** Q3 completeness — the literal phrasing "turn a boolean into a 1 or 0" is best served by also surfacing `CAST(is_converted AS integer)` → 1/0 as the direct scalar form, alongside count_if (aggregate) and SUM(CASE) (portable). If a boolean→1/0 canonical exists in r23 §best-practices or r02, verify it lists all three (CAST scalar / count_if aggregate / SUM(CASE) portable) and routes by phrasing (scalar-per-row vs count-the-trues). NUDGE, not a fix — Q3 still PASSED at 4.625 and the GOAL was correctly met. Do not churn correct canonical for this.
-- Default posture for iter728 absent a fresh defect: NO-OP integrity sweep.
+### Q2 CAST-to-integer round-vs-truncate verdict — RESPONDER IS WRONG (flag for iter729)
+Verified against trino.io/docs/467 + official blog + Data Types page: **Trino 467 CAST(DOUBLE/DECIMAL AS INTEGER) ROUNDS HALF-UP; it does NOT truncate toward zero.** `CAST(47.89 AS integer)` = 48, `CAST(-47.89 AS integer)` = -48. The responder's caveat ("CAST truncates toward zero, -47.89 → -47") is a FALSE dialect claim with wrong example values. The toward-zero / drop-decimals function is `truncate(x)` — NOT CAST. floor() (primary answer) is correct regardless.
+
+---
+
+## Teacher action for iter729 (targeted FIX, do not churn correct content)
+
+DEFECT (Q2): Resources lack a clear, copy-attractive canonical distinguishing the three "drop the fraction" behaviors in Trino 467, and likely fail to inoculate against the "CAST truncates toward zero" misconception. Add/repair in the numeric-rounding canonical (r07 rounding section and/or r23 §3.1B/C money-decimal):
+
+- LEADING fact: **CAST(double/decimal AS integer) ROUNDS HALF-UP, NOT truncate** (docs-verified: Data Types page "casting to lower precision rounds, not truncates" + "Optimizing the Casts Away" blog). Worked: `CAST(47.89 AS integer)` = 48; `CAST(2.5 AS integer)` = 3.
+- 3-way router with keyword anchors (chop decimals / drop the fraction / round down to whole dollar / truncate decimals without rounding / toward zero / floor vs cast):
+  - `floor(x)` → toward -infinity (47.89→47, -47.89→-48) — round DOWN.
+  - `truncate(x)` → toward zero, drops digits (47.89→47, -47.89→-47) — DROP decimals.
+  - `CAST(x AS integer)` → ROUND half-up (47.89→48, -47.89→-48) — NOT a truncation tool.
+- INLINE-MARKED DEFANG (un-copyable, per iter693/694 lesson): "❌ WRONG: CAST(x AS integer) does NOT truncate toward zero — it rounds. For toward-zero use truncate(x); for round-down use floor(x)." Keep the correct forms as the copy-attractive block.
+- Additive/corrective near the existing floor/round canonical; PRESERVE the floor() and round(x,2)↔CAST(x AS DECIMAL(18,2)) canonicals (iter725) and the §4.4A DECIMAL inoculation (iter724) verbatim.
+
+Optional (Q1, low priority): the iter728 §3.1E CAST(flag AS integer) note already exists; the responder simply chose CASE. No action required.
+
+No issues at Q3/Q4 (regexp_extract family and format/%,d both fully docs-correct).
