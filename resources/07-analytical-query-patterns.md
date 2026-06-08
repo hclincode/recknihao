@@ -149,6 +149,61 @@ Verified at [trino.io/docs/current/sql/select.html](https://trino.io/docs/curren
 >
 > **Cross-ref:** the `WITH ORDINALITY` sub-note immediately ABOVE is the array-explode + per-element-ordinal canonical (array → rows); this map-explode canonical is its MAP-column sibling (map → rows). Both are CROSS JOIN / LEFT JOIN UNNEST in the FROM clause and obey the §1a.1 clause-order rule.
 
+#### LEADING CANONICAL — the single highest / lowest value WITHIN one array column — `array_max(arr)` / `array_min(arr)`, ONE function, NO UNNEST (iter726 PIN — FIX-A)
+
+> **READ THIS FIRST if your question contains any of these phrases — route HERE, NOT to UNNEST and NOT to `greatest`:** max value in an array, highest value in a list column, largest element of an array, biggest value in an array, worst-case value from an array, slowest/longest from a list of times, peak value in an array column, min/smallest value in an array, lowest value in a list, best-case from a list, reduce an array to its maximum, single highest from a list, array max without exploding, max of an array without UNNEST, collapse an array to its max/min, the one biggest number in an array, per-row max of an array column, what is the largest number in this array, smallest element in the array.
+>
+> **One fact (Trino 467, verified at [trino.io/docs/467/functions/array.html](https://trino.io/docs/467/functions/array.html)):** the docs list `array_max(x) → x` ("Returns the maximum value of input array.") and `array_min(x) → x` ("Returns the minimum value of input array."). These are **single-argument array reducers**: one ARRAY column in → **one scalar** out, **one row per input row**. You do **NOT** UNNEST, you do **NOT** GROUP BY, and you do **NOT** hand-list the indices. This is THE clean answer to "the single highest / lowest value inside one array column."
+>
+> **✅ PREFERRED — `array_max` / `array_min` directly on the array column (NO UNNEST, one row in / one row out):**
+>
+> ```sql
+> -- ✅ COPY THIS — the single highest and lowest value WITHIN each row's array. No UNNEST, no GROUP BY.
+> SELECT request_id,
+>        array_max(response_times) AS worst_case_ms,   -- the one largest element of the array
+>        array_min(response_times) AS best_case_ms     -- the one smallest element of the array
+> FROM batches;
+> ```
+>
+> **NULL-element / empty-array semantics (Trino 467).** Like most Trino functions, `array_max(arr)` / `array_min(arr)` return **NULL if the array is empty OR if any element is NULL** (the NULL element makes the max/min undefined). If you must ignore NULL elements first, strip them with `filter(arr, x -> x IS NOT NULL)` and then reduce: `array_max(filter(response_times, x -> x IS NOT NULL))`. (The docs page itself lists only the one-line description `array_max(x) → x` / "Returns the maximum value of input array." — the NULL-propagation is the standard Trino any-arg-NULL behavior; verify against [trino.io/docs/467/functions/array.html](https://trino.io/docs/467/functions/array.html).)
+>
+> **❌ CO-LOCATED DEFANG — the two wrong-but-tempting forms for "the single max value of an array" (DO NOT COPY):**
+>
+> ```sql
+> -- ❌ WRONG — DO NOT COPY: exploding the array into rows just to take a per-row scalar max.
+> SELECT b.request_id, MAX(rt) AS worst_case_ms
+> FROM batches b
+> CROSS JOIN UNNEST(b.response_times) AS t(rt)   -- ❌ this EXPLODES the array into N rows...
+> GROUP BY b.request_id;                          -- ...then re-aggregates back. UNNEST+MAX+GROUP BY is for CROSS-ROW aggregation, NOT a within-array reducer. Use array_max(response_times). DO NOT COPY.
+> ```
+>
+> ```sql
+> -- ❌ WRONG — DO NOT COPY: hand-listing fixed array indices with GREATEST.
+> SELECT request_id,
+>        greatest(coalesce(response_times[1], 0),
+>                 coalesce(response_times[2], 0),
+>                 coalesce(response_times[3], 0)) AS worst_case_ms  -- ❌ fragile fixed-index hack: BREAKS on any array longer than 3 (silently ignores response_times[4]...), and coalesce(...,0) CORRUPTS the max when every value is negative (returns 0, not the real max). Use array_max(response_times). DO NOT COPY.
+> FROM batches;
+> ```
+>
+> Why each is wrong: `CROSS JOIN UNNEST(arr) ... MAX(...) GROUP BY` blows the array into one row per element and then collapses it back — that is the shape for aggregating ACROSS rows, not for reducing ONE array to its max; `array_max(arr)` does it in one call with no row shuffle. The `GREATEST(arr[1], arr[2], ...)` form assumes a fixed array length (breaks on variable-length arrays — anything past the last listed index is silently dropped) and the `coalesce(..., 0)` floor corrupts the result for all-negative arrays.
+>
+> **DISAMBIGUATION — `array_max(arr)` (WITHIN one array) vs `greatest(c1, c2, c3)` (ACROSS columns). They collide on "highest value" keywords — route by the shape of the input:**
+>
+> | Your input | Function | What it does | Example |
+> |---|---|---|---|
+> | ONE array/list column → ONE scalar | **`array_max(arr)` / `array_min(arr)`** (THIS canonical) | The max/min element WITHIN a single array column. No UNNEST. | `array_max(response_times)` |
+> | SEVERAL columns in the SAME row → ONE scalar | **`greatest(c1, c2, c3)` / `least(c1, c2, c3)`** | The max/min ACROSS several scalar columns of one row (row-wise). See [resource 27 §4.4D](27-oracle-plsql-to-dbt-trino.md) and [resource 23 § greatest/least canonical](23-sql-best-practices-olap.md). NULL-propagation differs from Postgres. | `greatest(price_usd, price_eur, price_gbp)` |
+> | ONE scalar column → ONE value PER GROUP (down rows) | **`MAX(col)` / `MIN(col)`** aggregate | The max/min over many rows, one per `GROUP BY` group. | `MAX(amount) ... GROUP BY customer_id` |
+>
+> **Route by phrasing:** *"the highest value **from an array / list column**"* → `array_max`. *"the highest value **across several columns**"* → `greatest`. *"the highest value **across rows / per group**"* → `MAX(col)` aggregate.
+>
+> **Cross-refs (the neighboring array directions — pick by what you want OUT):**
+> - **Top-N elements (more than one), still as an ARRAY, ordered:** `slice(array_sort(arr, ...), 1, N)` — see [§1a.4A above](#1a4a-leading-canonical--slicearray-start-length-is-the-trino-467-array-subset-function-take-first-n-take-last-n-top-n-from-a-sorted-array--not-array_slice-iter676-pin--fix-a). `array_max` is the N=1 / scalar case; `slice(array_sort(...))` is the N>1 / ordered-list case.
+> - **Dedupe array elements:** `array_distinct(arr)` — see [§1a.3](#1a3-trino-array-function-quick-reference--contains--cardinality--array_distinct--element_at--array_join--array_position-do-not-claim-trino-lacks-a-contains).
+> - **Array → ROWS (when you genuinely need rows to GROUP BY / JOIN across elements):** `CROSS JOIN UNNEST(arr) AS t(elem)` — see §1a above. Use UNNEST only when the answer is rows, not a single per-row scalar.
+> - **Map → ROWS:** the MAP-explode canonical immediately above (`UNNEST(map_col) AS t(k, v)`).
+
 ### 1a.1 CLAUSE-ORDER RULE — `CROSS JOIN UNNEST` / `LEFT JOIN UNNEST ... ON TRUE` is part of the FROM clause and MUST appear BEFORE `WHERE`
 
 **Keyword anchor:** UNNEST WHERE order, CROSS JOIN UNNEST WHERE position, mismatched input 'CROSS' parse error, SQL clause order JOIN before WHERE, split comma-separated string and count, split delimited string count per value, tags array count per tag, explode and filter then group, SPLIT then UNNEST then WHERE.
@@ -389,6 +444,7 @@ GROUP BY customer_id;
 | `contains` | `contains(array, element) -> boolean` | **Membership test.** Use THIS, NOT `UNNEST + EXISTS / WHERE`, to ask "does this array hold value X?". Example: `WHERE contains(event_tags, 'upload')`. |
 | `cardinality` | `cardinality(array) -> bigint` | **Element count (array length).** Also accepts MAP — returns key count. |
 | `array_distinct` | `array_distinct(array) -> array` | Dedup array elements; preserves first-occurrence order. Per-row distinct count = `cardinality(array_distinct(x))`. |
+| `array_max` / `array_min` | `array_max(x) -> x` / `array_min(x) -> x` | **The single highest / lowest value WITHIN one array column — one scalar out, NO UNNEST.** `array_max(response_times)` = the one largest element. Returns NULL if the array is empty or holds any NULL element. **Do NOT** `CROSS JOIN UNNEST + MAX + GROUP BY` for this (that is cross-ROW aggregation), and do NOT hand-list `greatest(arr[1], arr[2], ...)`. See the [array-reducer LEADING CANONICAL above (§1a)](#leading-canonical--the-single-highest--lowest-value-within-one-array-column--array_maxarr--array_minarr-one-function-no-unnest-iter726-pin--fix-a). For top-N (>1, ordered) use `slice(array_sort(...), 1, N)` (§1a.4A); for max ACROSS columns use `greatest(c1, c2, c3)`. |
 | `array_intersect` / `array_union` / `array_except` | `array_intersect(a, b)`, `array_union(a, b)`, `array_except(a, b)` | Set operations on two arrays; result is deduped. |
 | `element_at` | `element_at(array, n) -> E` | **NULL-safe positional access — 1-based.** Returns NULL if `n` is out of range (unlike the `array[n]` subscript, which RAISES an error). **Negative `n` counts from the end** (`element_at(arr, -1)` = last element). |
 | `array_join` | `array_join(x, delimiter) -> varchar` / `array_join(x, delimiter, null_replacement) -> varchar` | **Concatenate the elements of an array into a single string** using the delimiter. The 3-arg form substitutes `null_replacement` for any NULL element (the 2-arg form skips NULLs). Example: `array_join(ARRAY['a','b','c'], ',') -> 'a,b,c'`. Use this on a per-row ARRAY column. For ACROSS-row string aggregation (`STRING_AGG`/`LISTAGG`/`GROUP_CONCAT` equivalents on Trino), see [resource 27 § 7A.2A/§ 7A.2B](27-oracle-plsql-to-dbt-trino.md). |
