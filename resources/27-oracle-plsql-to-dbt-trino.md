@@ -1173,6 +1173,7 @@ The Postgres-style `expr::type` operator is tracked as an **OPEN feature request
 > - `col::VARCHAR` / `col::TEXT` — Trino parse error. Write `CAST(col AS VARCHAR)`.
 > - `col::UUID` / `'a1b2c3d4-...'::uuid` — Trino parse error. Write `CAST(col AS UUID)` or the `UUID 'a1b2c3d4-...'` typed-literal.
 > - `col::DECIMAL(18,2)` — Trino parse error. Write `CAST(col AS DECIMAL(18,2))`.
+> - `SELECT col DECIMAL(18,2)` &nbsp;❌ **WRONG — a bare `col DECIMAL(p,s)` in a SELECT list is NOT a cast and NOT a valid alias (parse error) — DO NOT COPY.** A SELECT item is `expression [[AS] alias]`; a type keyword like `DECIMAL(18,2)` cannot be an alias. To set precision/scale you must wrap the expression in a CAST: &nbsp;✅ **`CAST(col AS DECIMAL(18,2))`**. *(Keyword anchors: cast to decimal Trino, format money to 2 decimal places, DECIMAL(18,2) cast, force two decimal places, set precision and scale on a column.)* Same rule inside `abs()` / any numeric function — write `abs(CAST(col AS DECIMAL(18,2)))` or `CAST(abs(col) AS DECIMAL(18,2))`, never `abs(col) DECIMAL(18,2)`. (`abs()` itself preserves the input type — `abs(DECIMAL(p,s)) -> DECIMAL(p,s)`, verified at [trino.io/docs/current/functions/math.html](https://trino.io/docs/current/functions/math.html) — so a DECIMAL stays a DECIMAL; you only CAST when you want to *change* the precision/scale.)
 > - Any other `expression::type` form. The `::` token is unsupported anywhere in Trino's grammar.
 
 **Worked Postgres → Trino translation table.** These are the most common `::` patterns and their Trino-compatible rewrites:

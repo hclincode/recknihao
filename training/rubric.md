@@ -14770,3 +14770,7 @@ Verified: trino.io/docs/current/functions/window.html, trino.io/docs/current/adm
 **Key findings**: Parquet column chunks as contiguous byte ranges — verified; Trino column projection (reads only listed SELECT columns) — verified; three-layer pruning (manifest → row-group → column chunk) — correct order; Physical Input in EXPLAIN ANALYZE — confirmed; dbt rollup recommendation fits production stack. Minor note: short answer said "25x" but worked example computed ~16x (50/3) — minor internal inconsistency, not score-affecting.
 
 Verified: parquet.apache.org/docs/concepts/, trino.io/docs/current/sql/explain-analyze.html.
+
+---
+
+**iter724** — scalar-function re-probe (round / strpos / replace / EXTRACT HOUR). Q1 round(x,2) 4.375 (DECIMAL-cast defect CLOSED; minor completeness gap: omitted CAST AS DECIMAL(18,2) fixed-scale form for "exactly two decimals for storage"); Q2 strpos 1-indexed + 3-arg n-th 5.00; Q3 replace-all 5.00; Q4 EXTRACT(HOUR FROM ts) + GROUP BY repeated-expr 5.00. **Overall avg 4.844 PASS.** All forms docs-verified vs trino.io/docs/467 (math/string/datetime .html). iter725 flag: co-locate CAST-AS-DECIMAL(18,2) keyword anchors next to round(x,2) for money "two decimal places" phrasing.
