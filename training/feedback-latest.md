@@ -1,116 +1,89 @@
-# iter684 — Judge Feedback
+# Iter685 Judge Feedback
 
-**Topic focus**: dbt snapshots (SCD2) — Q1 FIX-A re-probe (aliased unique_key), Q2 check strategy, Q3 SCD2 as-of join, Q4 incremental late-arriving lookback.
+## Per-Question Scores (Accuracy / Completeness / Clarity / Actionability, 1-5)
 
-**Dialect verification**: Verified against trino.io/docs/467 + docs.getdbt.com (snapshots, check_cols, unique_key, incremental-models) via WebSearch on 2026-06-08.
+### Q1 — Partition design for recent-date-range pruning (events table)
+- Accuracy: 5
+- Completeness: 4
+- Clarity: 4
+- Actionability: 5
+- **Avg: 4.50**
 
----
+Verdict: STRONG. `WITH (partitioning = ARRAY['day(occurred_at)'])` is correct Trino 467 Iceberg hidden-partitioning syntax (verified trino.io/docs/467/connector/iceberg). `WHERE occurred_at >= ...` on the source column prunes via the `day()` transform. `bucket(tenant_id, 64)` is COLUMN-FIRST (matches Trino, NOT Spark's count-first); that's the right order. The ~2-10% I/O figure is a reasonable order-of-magnitude estimate. Mild ding on completeness: no `format_version=2` rationale, no mention of partition-pruning EXPLAIN check, no manifest-skipping note. Solid otherwise.
 
-## Q1 — Snapshot unique_key with aliased key (FIX-A RE-PROBE)
+### Q2 — Iceberg metadata inspection ($files / $partitions / $snapshots)
+- Accuracy: 5
+- Completeness: 5
+- Clarity: 4
+- Actionability: 5
+- **Avg: 4.75**
 
-**Responder output**: `unique_key='account_id'` paired with `SELECT acct_id AS account_id, ...`. Explicitly states unique_key resolves to the SELECT-output column (not the raw source), and notes `unique_key='acct_id'` would fail with `Column 'acct_id' not found`. Strategy='timestamp' + updated_at='updated_at' correct. Meta cols dbt_valid_from/to/scd_id/updated_at named. Half-open as-of-query interval mentioned.
+Verdict: STRONG. All three metadata-table forms (`iceberg.analytics."events$files"`, `"events$partitions"`, `"events$snapshots"`) use the correct double-quoted whole-token syntax. Column names verified against Trino 467 docs:
+- `$files`: `file_path`, `file_size_in_bytes`, `record_count` — correct.
+- `$partitions`: `partition`, `file_count`, `record_count`, `total_size` — correct.
+- `$snapshots`: `snapshot_id`, `committed_at`, `operation` — correct.
 
-**Dialect verification**:
-- docs.getdbt.com/reference/resource-configs/unique_key — confirms unique_key references the compiled column name in the final table; pairing `unique_key='acct_id'` with `SELECT acct_id AS account_id` would produce `Column 'acct_id' cannot be resolved` (Trino) / Compilation Error (dbt log).
-- Strategy='timestamp' with updated_at column valid per docs.getdbt.com/docs/build/snapshots.
+Bloat-diagnosis framing (tiny-file <50-100MB, high file-count-per-partition, old snapshots pinning files; fix via `optimize` + `expire_snapshots`) is the right mental model. Clarity could use more inline annotation for a beginner but the SQL is self-explanatory.
 
-**FIX-A VERDICT: CLOSED.** The responder NOW correctly matches `unique_key` to the SELECT-output alias `account_id` (not source `acct_id`). The exact iter683 failure pattern (unique_key references the dropped source name) is fixed. Explanation includes the resolution rule AND the error message the wrong form would produce.
+### Q3 — Multi-tenant row isolation with SECURITY DEFINER view + OPA
+- Accuracy: 5
+- Completeness: 4
+- Clarity: 4
+- Actionability: 4
+- **Avg: 4.25**
 
-| Dim | Score | Reason |
-|---|---|---|
-| Accuracy | 5 | unique_key matches alias; strategy/updated_at correct; error message accurate |
-| Completeness | 5 | Config + SELECT + meta cols + as-of pattern + wrong-form error all covered |
-| Clarity | 5 | Explicitly contrasts SELECT-output vs source column; names the exact error |
-| Actionability | 5 | Copy-pasteable snapshot block; engineer knows what to write |
+Verdict: SOLID. `CREATE VIEW ... SECURITY DEFINER AS SELECT ... WHERE tenant_id = 'acme'` matches Trino 467's documented `CREATE [OR REPLACE] VIEW ... [SECURITY {DEFINER | INVOKER}] AS query` grammar. The two-layer model (SECURITY DEFINER view + REVOKE on base table + OPA reject direct base-table access) is the correct prod-fit pattern per prod_info.md. The do-NOT-rely-on-app-WHERE-only warning and "partitioning is not access control" pin are exactly the right myths to bust. Verification test (`SELECT DISTINCT tenant_id`) is a good actionable check. Slight ding: didn't explicitly defer specific OPA policy rules to the external governance document (prod_info.md mandates), and the "OPA row-filter injection for 1000+ tenants" is correct in spirit but the responder didn't show what that injection looks like at a high level. Still well above pass.
 
-**Q1 average: 5.00**
+### Q4 — Timezone-aware daily bucketing (UTC store -> US/Eastern local day)
+- Accuracy: 3
+- Completeness: 4
+- Clarity: 4
+- Actionability: 4
+- **Avg: 3.75**
 
----
+**PRIMARY variant — CORRECT.** `date_trunc('day', occurred_at AT TIME ZONE 'America/New_York')` with the same expression repeated in `GROUP BY` is the canonical Trino 467 idiom for daily local bucketing on a `timestamp with time zone` column. Verified against trino.io/docs/467/functions/datetime: AT TIME ZONE on a `timestamp(p) with time zone` CONVERTS the instant to the target zone, DST is handled by IANA names, and Trino issue #16533 requires the full expression to be repeated in `GROUP BY` (no alias reference). The responder got this right.
 
-## Q2 — Snapshot check strategy (no timestamp)
+**SECONDARY variant — FLAGGED, session-dependent.** The responder wrote `CAST(occurred_at AS TIMESTAMP(6) WITH TIME ZONE) AT TIME ZONE 'America/New_York'` for the "stored as bare timestamp known to hold UTC" case. This is **session-dependent and unsafe**:
 
-**Responder output**: `strategy='check'` + `check_cols=['plan','status']` on subscriptions; explains dbt re-hashes those cols each run and closes/inserts on change. Notes `check_cols='all'` as a slower alternative.
+- `CAST(naive_ts AS TIMESTAMP WITH TIME ZONE)` attaches the **SESSION** time zone label, NOT UTC unconditionally.
+- If the session zone is not UTC (which is common — Trino sessions often inherit `America/Los_Angeles`, `America/New_York`, etc. from the JDBC client/JVM), the CAST attaches the WRONG zone and the subsequent `AT TIME ZONE 'America/New_York'` converts from that wrong zone, producing **off-by-hours results**.
+- The DOCS-SAFE form is the two-step chain `occurred_at AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York'` — the first AT TIME ZONE ATTACHES the UTC label to the bare timestamp without changing wall-clock numbers, the second CONVERTS the now-timestamptz value to Eastern. This is session-zone-independent.
+- Equivalent function form: `with_timezone(occurred_at, 'UTC') AT TIME ZONE 'America/New_York'` — also session-independent.
 
-**Dialect verification**:
-- docs.getdbt.com/reference/resource-configs/check_cols — confirms list-form `check_cols: ['col1','col2']` and `all` shorthand. The check strategy is the documented pattern for tables without a reliable updated_at.
+**Resource state check (resources are CORRECT — this is responder drift):**
+- r07:1594 (ATTACH-vs-CONVERT gotcha) explicitly teaches the two-step `AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York'` chain for bare-UTC-intent timestamps and explicitly says the chain is the only safe form when the source column is bare TIMESTAMP but values are UTC-intent.
+- r07:1601 has a DO-NOT-WRITE bullet banning `bare_ts AT TIME ZONE 'X'` claiming to convert.
+- r22:2179 has a "CRITICAL" line stating `CAST(naive_ts AS TIMESTAMP WITH TIME ZONE)` attaches the SESSION timezone, NOT unconditionally UTC.
+- r23:1611 notes `timestamp with time zone` columns have known unwrap limitations.
 
-| Dim | Score | Reason |
-|---|---|---|
-| Accuracy | 5 | strategy + check_cols list + 'all' shorthand all correct |
-| Completeness | 5 | Identifies the no-timestamp case, the mechanism (hash), and the trade-off |
-| Clarity | 5 | Clean explanation of why check is the right strategy here |
-| Actionability | 5 | Copy-pasteable snapshot config |
-
-**Q2 average: 5.00**
-
----
-
-## Q3 — SCD2 as-of join
-
-**Responder output**: Half-open interval join `c.valid_from <= o.order_date AND (c.valid_to IS NULL OR o.order_date < c.valid_to)`. Correct point-in-time semantics; NULL `valid_to` handled. Predicate `order_date >= CURRENT_DATE - INTERVAL '30' DAY` is valid Trino. **NOTE**: responder cited a `training/answers/` path rather than a `resources/` file as source. SQL is correct; sourcing is anomalous.
-
-**Dialect verification**:
-- Trino 467 `INTERVAL '30' DAY` literal valid; no ts-minus-ts trap (uses CURRENT_DATE minus INTERVAL, not date1 - date2).
-- Half-open interval `valid_from <= t AND (valid_to IS NULL OR t < valid_to)` is the canonical SCD2 as-of pattern; avoids double-counting on the boundary.
-
-**Flagged**: training/answers/ citation is a sourcing oddity, not a correctness issue. SQL is right — small clarity deduction only.
-
-| Dim | Score | Reason |
-|---|---|---|
-| Accuracy | 5 | Half-open join + NULL handling + INTERVAL literal all valid Trino 467 |
-| Completeness | 5 | Covers join condition, NULL=current, point-in-time semantics |
-| Clarity | 4 | Sourcing reference is anomalous (training/answers/ not resources/) — minor |
-| Actionability | 5 | Query is directly runnable |
-
-**Q3 average: 4.75**
-
----
-
-## Q4 — Incremental late-arriving data lookback
-
-**Responder output**: `materialized='incremental'`, `unique_key='order_id'`, `incremental_strategy='merge'`, `on_schema_change='append_new_columns'`. Lookback window: `WHERE order_date >= (SELECT date_add('day', -3, COALESCE(MAX(order_date), DATE '1970-01-01')) FROM {{ this }})`. Notes that bare `MAX(order_date)` in WHERE fails with "aggregate function not allowed in WHERE" — must wrap in scalar subquery.
-
-**Dialect verification**:
-- Trino 467 `date_add(unit, value, timestamp)` syntax confirmed via trino.io/docs/current/functions/datetime.html — `date_add('day', -3, ...)` valid.
-- Aggregate-in-WHERE prohibition is correct SQL semantics — wrapping MAX in a scalar subquery is the right fix.
-- merge + unique_key=order_id provides idempotence for re-loaded late rows (no duplicate, in-place update).
-- COALESCE with DATE '1970-01-01' handles the bootstrap empty-target case.
-
-| Dim | Score | Reason |
-|---|---|---|
-| Accuracy | 5 | date_add form, subquery-wrapped MAX, merge+unique_key all valid Trino 467 + dbt |
-| Completeness | 5 | Config + SQL + bootstrap + bare-MAX-fails note + merge idempotence |
-| Clarity | 5 | Names the exact error the naive form produces |
-| Actionability | 5 | Copy-pasteable model; engineer knows the lookback knob to tune |
-
-**Q4 average: 5.00**
-
----
+No resource teaches the CAST-to-timestamptz-for-UTC form. The responder drifted off the resource into a CAST shortcut.
 
 ## Overall
 
 | Q | Avg |
 |---|---|
-| Q1 (FIX-A re-probe) | 5.00 |
-| Q2 (check strategy) | 5.00 |
-| Q3 (as-of join) | 4.75 |
-| Q4 (late-arriving) | 5.00 |
-| **Overall** | **4.9375** |
+| Q1 | 4.50 |
+| Q2 | 4.75 |
+| Q3 | 4.25 |
+| Q4 | 3.75 |
+| **Overall** | **4.3125** |
 
-**VERDICT: PASS** (4.9375 >> 3.5)
+**Result: PASS** (overall >= 3.5; per-question threshold override NOT applied per instructions — Q4's secondary-CAST drift is flagged in prose only).
 
-**FIX-A (Q1 snapshot unique_key aliased key) CLOSED.** Responder now correctly pairs `unique_key='account_id'` with `SELECT acct_id AS account_id`, explicitly explains unique_key resolves to SELECT-output (not source), and names the exact error the wrong form produces. The r09 ADDITIVE canonical block (lines ~410 and ~435) was found via the responder's findability path.
+## Recommendation for iter686
 
-**Flagged weak answer**: Q3 cited a `training/answers/` path instead of a `resources/` file — sourcing oddity only, SQL is fully correct. Not material to PASS/FAIL (overall avg 4.9375 well above threshold; one clarity-point dock on Q3 already applied). Teacher may want to grep resources for any "training/answers/" stray pointers and replace with the actual r09 §SCD2-as-of canonical anchor — low priority.
+**DEFAULT NO-OP.** The resources are correct on every dialect fact tested here:
+- Hidden partitioning + day() transform pruning (r10, r27) — correct.
+- `iceberg.<schema>."<table>$<metatable>"` quoting + column names (r17/r18/r16) — correct.
+- SECURITY DEFINER view + OPA two-layer isolation, partitioning != access control (r05) — correct.
+- AT TIME ZONE ATTACH-vs-CONVERT, two-step chain for bare-UTC, CAST-attaches-SESSION-zone warning (r07:1594/1601, r22:2179, r27:855-862) — all already correctly taught.
 
----
+The Q4 secondary-variant CAST drift is **responder drift**, NOT a findable-but-wrong resource claim. r07 already teaches the right form; r22 already warns about the wrong form. No resource edit would have prevented this drift — the responder simply chose CAST over the two-step chain that r07:1594 explicitly recommends.
 
-## Teacher feedback
+If iter686 picks anything up, the only marginal-value edit would be to add ONE short cross-reference at r07:1594 pointing readers at `with_timezone(naive_ts, 'UTC')` as an alternate function-form alongside the operator-form `AT TIME ZONE 'UTC'` chain, mirroring r22:2184-2217. That is optional, not required for passing — the existing two-step chain is correct and findable.
 
-1. **iter684 FIX-A is working as designed**. The r09 ADDITIVE block (option-A "match the alias" + option-B "don't alias the key" + compound-list form + DO-NOT-WRITE bullet) successfully steered the responder to the correct pattern on the re-probe with renamed source col `acct_id → account_id`. HOLD the edit — do not refactor.
+## Brief Teacher Feedback
 
-2. **No new content needed**. All four answers are clean. Q1 FIX-A closed; Q2/Q3/Q4 all return >= 4.75 on identical-direction probes.
-
-3. **Q3 sourcing anomaly (low priority)**: a single grep across resources/ for `training/answers/` would catch any stray pointer; if none present, the responder may have hallucinated a path while the SQL came from the r09/r28 SCD2 as-of canonical. Not worth a dedicated iteration.
-
-4. **Recommendation: iter685 = DEFAULT NO-OP / durability-breadth**. All 4 clean, FIX-A closed, snapshot-SCD2 topic average rising (was 4.4299 over 8 prior questions; this iter adds 4 strong datapoints all at 4.75-5.00). Durability mode: probe a non-snapshot topic (federation 4.4994 still below 4.5 threshold OR cost-considerations 4.1846 lowest-passing) rather than re-prove snapshot ground.
+- Q1, Q2, Q3 — no action needed. Resources are findable, correct, and the responder used them well.
+- Q4 — resources are correct. Responder drifted on the secondary "what if it's a bare timestamp" branch by reaching for CAST instead of the two-step `AT TIME ZONE 'UTC' AT TIME ZONE '<local>'` chain that r07:1594 already teaches. This is a Haiku-stochastic drift, not a resource defect. Consider one small additive cross-link in r07 pointing to the `with_timezone()` function form (r22 already has it), but do not rewrite anything.
+- All ~250 locks from iter534-684 should remain UNTOUCHED. Federation r22 HARD LOCK preserved.
