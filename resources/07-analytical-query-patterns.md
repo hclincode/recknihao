@@ -1505,6 +1505,86 @@ FROM iceberg.analytics.product_sales;
 > ORDER BY bucket_5min;
 > ```
 
+#### LEADING CANONICAL — N-minute TUMBLING-WINDOW time bucket via EPOCH-FLOOR (`from_unixtime(to_unixtime(ts) - to_unixtime(ts) % N_seconds)`) — Trino 467 has NO `date_bin` / NO `time_bucket` function (those are Postgres / TimescaleDB) (iter715 PIN — FIX-A)
+
+> **READ THIS FIRST if your question contains any of these keywords:** `bucket events into 15-minute windows`, `bucket clicks into 15-minute time windows`, `bucket events every N minutes`, `tumbling window`, `tumbling time window Trino`, `N-minute time bucket`, `time-series chart bucket`, `group by 15 minutes`, `hourly bucket`, `hourly tumbling window`, `5-minute rollup`, `15-minute rollup`, `round timestamp down to 15 minutes`, `floor timestamp to interval`, `floor timestamp to 15 minutes`, `floor timestamp to N minutes`, `is there date_bin in Trino`, `does Trino have date_bin`, `does Trino have time_bucket`, `time_bucket Trino`, `time_bucket function Trino`, `Postgres date_bin in Trino`, `TimescaleDB time_bucket in Trino`, `Snowflake time_slice in Trino`, `BigQuery TIMESTAMP_TRUNC interval Trino`, `Spark window function Trino`, `epoch floor time bucket`, `unix timestamp modulo bucket`, `mod 900 timestamp bucket`, `% 900 bucket Trino`. **Verified against [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html) on 2026-06-08.**
+
+> **The one-fact pre-empt — Trino 467 has NO `date_bin` and NO `time_bucket` scalar function.** PostgreSQL 14+ ships `date_bin(stride, source, origin)`, TimescaleDB ships `time_bucket(bucket_width, ts)`, Snowflake ships `time_slice(...)`, BigQuery has `TIMESTAMP_TRUNC(ts, INTERVAL N MINUTE)` extensions, Spark/Flink have `window(ts, '15 minutes')` — **NONE of those exist in Trino 467.** Writing `date_bin(...)` or `time_bucket(...)` in Trino raises `Function 'date_bin' not registered` / `Function 'time_bucket' not registered` (verified absent from the Trino 467 function list at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html) and [trino.io/docs/467/functions/list.html](https://trino.io/docs/467/functions/list.html)). The Trino-correct idiom is one of **THREE arithmetic forms** — pick the one that matches your shape; **all three produce the same bucket boundary**:
+
+> **THE THREE EQUIVALENT IDIOMS — TIE-BREAKER: the EPOCH-FLOOR form is the simplest because it needs NO interval arithmetic and works for ANY bucket size by changing one number (`N_seconds = N_minutes * 60`).**
+>
+> | Form | Trino 467 expression | When to prefer |
+> |---|---|---|
+> | **✅ EPOCH-FLOOR (LEAD — simplest, no interval-arithmetic, generalizes to any N seconds)** | `from_unixtime(to_unixtime(event_ts) - to_unixtime(event_ts) % 900)` for 15-minute buckets. Generalize: `N-minute window = N * 60 seconds` (5-min = 300, 10-min = 600, 15-min = 900, 30-min = 1800, hourly = 3600, daily = 86400). | When the bucket size is a multiple of seconds — easiest to read, no interval-multiplication, no extract+mod combo. **NOTE: `from_unixtime` returns `timestamp(3) with time zone` (see r13:5671) — the result carries the SESSION time zone; if your `event_ts` column is naive `TIMESTAMP` you may want `CAST(from_unixtime(...) AS TIMESTAMP)` to strip the zone back to naive.** |
+> | **✅ DATE_TRUNC + INTERVAL-MOD (ALT — readable for sub-hour buckets, no epoch round-trip)** | `date_trunc('minute', event_ts) - (EXTRACT(minute FROM event_ts) % 15) * INTERVAL '1' MINUTE` for 15-minute buckets. | When you want to stay in timestamp arithmetic (no epoch round-trip) and the bucket size is in whole minutes that evenly divide the hour (5 / 10 / 15 / 20 / 30). The iter714-validated form. |
+> | **✅ FLOOR-TO-HOUR + ADD-N-MINUTE-STEPS (ALT2 — the iter606 LEADING canonical immediately above)** | `date_trunc('hour', event_ts) + INTERVAL '1' MINUTE * (EXTRACT(minute FROM event_ts) / 15 * 15)` for 15-minute buckets. | When you want the bucket boundary expressed as "this hour + offset" and prefer the integer-division-then-multiply idiom. See the iter606 LEADING canonical block immediately above for the full worked example and `date_add` equivalent form. |
+
+> **EPOCH-FLOOR worked example — bucket click events into 15-minute tumbling windows (the iter714 Q4 question shape):**
+>
+> ```sql
+> -- Trino 467 — 15-minute tumbling windows via EPOCH-FLOOR.
+> -- Bucket size in seconds: 15 minutes * 60 = 900. (5-min = 300, hourly = 3600, daily = 86400.)
+> -- The expression `to_unixtime(ts) - to_unixtime(ts) % 900` is the start-of-bucket epoch in seconds;
+> -- wrapping in `from_unixtime(...)` converts back to timestamp(3) with time zone.
+> SELECT from_unixtime(to_unixtime(event_ts) - to_unixtime(event_ts) % 900) AS window_start,
+>        COUNT(*) AS clicks
+> FROM iceberg.analytics.click_events
+> WHERE event_ts >= current_timestamp - INTERVAL '1' DAY
+> GROUP BY from_unixtime(to_unixtime(event_ts) - to_unixtime(event_ts) % 900)
+> ORDER BY window_start;
+> ```
+>
+> **Why this works (verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html)):**
+> 1. `to_unixtime(timestamp) -> double` returns epoch SECONDS as a **DOUBLE** (the fractional part preserves sub-second precision). Documented signature verbatim.
+> 2. `%` (the modulo operator) works on `double` values in Trino — it returns the floating-point remainder.
+> 3. Subtracting the remainder floors the value down to the nearest multiple of `900` (i.e. the start of the 15-minute bucket in epoch seconds).
+> 4. `from_unixtime(double) -> timestamp(3) with time zone` converts the epoch-seconds floor back to a timestamp. Documented signature verbatim — note the result is `timestamp(3) WITH time zone` (sub-second precision = 3 ms, carries the session zone).
+>
+> The bucket boundary is **always aligned to the Unix epoch** (1970-01-01 00:00:00 UTC). For 15-minute buckets this means boundaries fall at `:00`, `:15`, `:30`, `:45` past every hour, in the session time zone after `from_unixtime` converts back. If you need a different alignment origin, see the date_trunc-mod form (ALT) which aligns to the top of the current hour instead.
+
+> **DATE_TRUNC + INTERVAL-MOD ALT — the same 15-minute window via interval subtraction (the iter714 Q4 validated form):**
+>
+> ```sql
+> -- Trino 467 — 15-minute tumbling windows via date_trunc + interval modulo.
+> -- date_trunc('minute', ts) floors to the start of the minute;
+> -- (EXTRACT(minute FROM ts) % 15) is the minutes past the previous 15-minute boundary (0..14);
+> -- subtracting that many minutes lands you exactly on the bucket start.
+> SELECT date_trunc('minute', event_ts)
+>          - (EXTRACT(minute FROM event_ts) % 15) * INTERVAL '1' MINUTE AS window_start,
+>        COUNT(*) AS clicks
+> FROM iceberg.analytics.click_events
+> WHERE event_ts >= current_timestamp - INTERVAL '1' DAY
+> GROUP BY date_trunc('minute', event_ts)
+>          - (EXTRACT(minute FROM event_ts) % 15) * INTERVAL '1' MINUTE
+> ORDER BY window_start;
+> ```
+>
+> **Why this works:** `EXTRACT(minute FROM ts)` returns a **BIGINT** in Trino 467 (verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html): *"extract(field FROM x) → bigint"*) — **NO cast is needed**, the bigint goes straight into `% 15` and then into `bigint * INTERVAL '1' MINUTE`. The modulo gives a value in `[0, 14]`; multiplying by `INTERVAL '1' MINUTE` produces an interval of that many minutes; subtracting from `date_trunc('minute', ts)` rolls the timestamp back to the start of its 15-minute window.
+
+> **CRITICAL — `::` cast operator is NOT Trino — DO NOT introduce it here just because Postgres / DuckDB / Snowflake muscle-memory reaches for it.** Trino 467 has **NO `::` cast shorthand** — that is **PostgreSQL** (and DuckDB / partial Snowflake). The `::` token simply does not exist in Trino's grammar; the parser fails with `mismatched input '::'`. The cast operator was requested in [trinodb/trino #23795](https://github.com/trinodb/trino/issues/23795) (opened 2024-10-15) and [PR #25259](https://github.com/trinodb/trino/pull/25259) was opened to implement it, but **both are OPEN — NOT merged as of Trino 467**. Common time-bucketing variants engineers reach for and the Trino-correct replacement:
+>
+> | Form a Postgres / DuckDB engineer reaches for | Trino 467 verdict | Trino-correct form |
+> |---|---|---|
+> | `EXTRACT(minute FROM event_ts)::integer % 15` ❌ **WRONG — Trino 467 has NO `::` cast operator (that's Postgres) — DO NOT COPY** | Parse error: `mismatched input '::'` | **`EXTRACT(minute FROM event_ts) % 15`** ✅ — the extract result is **already BIGINT**, no cast is needed at all; `bigint % integer-literal` works directly. If you really want `INTEGER`-typed output for some downstream consumer, write `CAST(EXTRACT(minute FROM event_ts) AS integer) % 15`. |
+> | `to_unixtime(event_ts)::bigint % 900` ❌ **WRONG — `::` is Postgres, NOT Trino — DO NOT COPY** | Parse error: `mismatched input '::'` | **`CAST(to_unixtime(event_ts) AS bigint) % 900`** ✅ — or just leave it as a double: `to_unixtime(event_ts) % 900` returns DOUBLE, which is fine for the floor arithmetic above. |
+> | `event_ts::timestamp - interval '15' minute` ❌ **WRONG — `::` Postgres-style — DO NOT COPY** | Parse error | **`CAST(event_ts AS timestamp) - INTERVAL '15' MINUTE`** ✅ |
+> | `(extract(epoch from event_ts) / 900)::int * 900` ❌ **WRONG — DOUBLE-WRONG — `::` is Postgres AND `EXTRACT(epoch FROM ts)` is NOT supported in Trino (no `epoch` field)** | Parse error on both `::` AND `epoch` | **`CAST(to_unixtime(event_ts) / 900 AS bigint) * 900`** ✅ (use `to_unixtime`, not `EXTRACT(epoch)` — see [resource 23 § EXTRACT-EPOCH canonical](23-sql-best-practices-olap.md) line 1428) |
+>
+> **The keyword router lands here for both "N-minute bucket" AND "`::` cast" — they cross-route.** See also [resource 23 § 3.1C DO NOT WRITE — PostgreSQL `::` cast shorthand is NOT supported in Trino 467](23-sql-best-practices-olap.md) line 678 for the full `::` translation table (covers `'1900-01-01'::timestamp`, `col::bigint`, `created_at::date`, `id::int`, `payload::json` — the complete inoculation), and [resource 07 § N-minute timestamp buckets (iter606 LEADING)](07-analytical-query-patterns.md) (the FLOOR-TO-HOUR + ADD-STEPS form immediately above this block, which carries the original `::` inoculation at line 1487).
+
+> **DO-NOT-WRITE — additional Postgres / TimescaleDB / Snowflake / Spark muscle-memory functions that DO NOT EXIST in Trino 467:**
+>
+> | Foreign idiom | Where it comes from | Trino 467 outcome | Trino-correct replacement |
+> |---|---|---|---|
+> | `date_bin(INTERVAL '15 minute', event_ts, TIMESTAMP '2000-01-01')` ❌ | PostgreSQL 14+ | `Function 'date_bin' not registered` | **Epoch-floor or date_trunc-mod form above.** |
+> | `time_bucket('15 minutes', event_ts)` ❌ | TimescaleDB | `Function 'time_bucket' not registered` | **Epoch-floor or date_trunc-mod form above.** |
+> | `time_slice(event_ts, 15, 'MINUTE', 'START')` ❌ | Snowflake | `Function 'time_slice' not registered` | **Epoch-floor or date_trunc-mod form above.** |
+> | `TIMESTAMP_TRUNC(event_ts, INTERVAL 15 MINUTE)` ❌ | BigQuery (extended TRUNC) | Trino's `date_trunc` only supports **fixed units** (millisecond / second / minute / hour / day / week / month / quarter / year) — no `INTERVAL 15 MINUTE` form | **Epoch-floor or date_trunc-mod form above.** |
+> | `window(event_ts, '15 minutes')` ❌ | Spark SQL / Flink (returns a struct) | `Function 'window' not registered` | **Epoch-floor or date_trunc-mod form above.** |
+> | `INTERVAL '15 minutes'` (number-AND-unit-inside-one-string, Postgres-style) | Postgres / Spark | Parse error | **`INTERVAL '15' MINUTE`** (number single-quoted, unit unquoted keyword — Trino interval-literal syntax). |
+
+> **Cross-references.** **The iter606 LEADING canonical for N-minute buckets (FLOOR-TO-HOUR + ADD-N-STEPS form) is the block immediately ABOVE this one** — that block also carries the original `::`-cast inoculation at line 1487 and the worked GROUP BY example. The TWO blocks are companions: this iter715 block adds the **EPOCH-FLOOR LEAD** and the **DATE_TRUNC + INTERVAL-MOD ALT**, plus the **date_bin / time_bucket-not-Trino pre-empt** that the iter606 block doesn't carry. **Use whichever form reads cleanest for your question — all three produce identical bucket boundaries.** Inverse-direction / epoch-to-timestamp + the seconds-vs-milliseconds pitfall: [resource 13 §`from_unixtime` SECONDS vs MILLISECONDS](13-postgres-to-iceberg-ingestion.md) line 5686 (the year-56378 trap if you pass raw epoch-ms straight into `from_unixtime`). Postgres `EXTRACT(EPOCH FROM ts)` → Trino `to_unixtime(ts)` (the canonical for converting timestamps to epoch seconds): [resource 23 § LEADING CANONICAL — Postgres `EXTRACT(EPOCH FROM ts)` → Trino `to_unixtime(ts)`](23-sql-best-practices-olap.md) line 1428. NEAREST-hour rounding (round-half-up, NOT floor): the iter631 LEADING canonical at line 1440 above. Postgres `::` cast inoculation full translation table: [resource 23 §3.1C](23-sql-best-practices-olap.md) line 678. Oracle-migration `::` ban: [resource 27 §4.4A](27-oracle-plsql-to-dbt-trino.md) line 1149.
+
 #### `date_trunc('week', ts)` ALWAYS starts the week on MONDAY (ISO-8601) — Trino canonical (iter536 PIN) + `day_of_week()` / `EXTRACT(DAY_OF_WEEK)` ALWAYS ISO 1..7 (Mon..Sun) — **NO `dayname()` in Trino**, NO Postgres `0=Sunday` convention (iter665 FIX-A — busiest-weekday-per-user inoculation)
 
 > **Keyword anchors for this block (READ FIRST if your question contains ANY of these):** date_trunc week Monday, Trino week start day, weekly report week start, ISO week Trino, day_of_week Monday, Sunday vs Monday week, first day of week Trino, beginning of week Trino, European Monday week start, US Sunday week start, **busiest weekday per user, day of week they order most, which weekday, day-of-week, weekday name, name of the weekday, busiest weekday by name, day_of_week returns 0 or 1, EXTRACT(DOW) Trino value, EXTRACT(DAY_OF_WEEK) Trino value, dayname Trino, dayname function, get weekday name Trino, Monday Tuesday Sunday string from date, format weekday as name, format_datetime EEEE weekday**.
