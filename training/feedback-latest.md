@@ -1,87 +1,243 @@
-# Judge Feedback — iter711
+# iter712 Judge Feedback
 
-**Verdict: PASS** (overall avg 4.5625; threshold 3.5)
-**Iter710 Q3 stray-column slip status:** **DID NOT REPEAT** on the iter711 Q1 re-probe → confirms iter710 was a one-off responder synthesis slip; r23:1747-1808 stray-column lock content is sufficient; **stays DEFAULT NO-OP** for iter712 (no FIX-A needed).
-**New gap candidates:** one minor completeness nit on Q4 (NOT-IN-drops-NULL caveat omitted from the diagnostic flip) — flag-only, not actionable as FIX-A unless re-probe confirms a real findability gap.
+## Scope
 
----
+Re-probe of iter711 FLAG-ONLY NOT-IN-NULL diagnostic + 3 routine SQL-pattern probes
+(percent-of-total, running-max window, substring filter).
 
-## Per-question sub-scores
-
-### Q1 — custom sort 'critical'→'high'→'medium'→'low' on OPEN tickets (per-row, ticket_id + priority)
-
-**Accuracy: 5** — `ORDER BY CASE priority WHEN 'critical' THEN 1 ... END` is valid Trino 467 (per-row sort, the CASE returns an integer sort key; no GROUP BY, no aggregate). Filter `WHERE status='open'` is correct. Column list `SELECT ticket_id, priority` is per-row and clean — **no ungrouped-column-with-aggregate, no GROUP BY at all** — the iter710 Q3 slip DID NOT recur.
-**Completeness: 5** — answers both halves (custom sort + per-row projection); references r07:1571-1596 as the analogous weekday/month pattern. Could optionally mention `NULLS LAST` for unmapped priorities, but the question fixes the four allowed values so this is not a gap.
-**Clarity: 5** — one-line query + one-sentence explanation; no jargon.
-**Actionability: 4** — copy-paste ready against `iceberg.analytics.tickets`; engineer knows exactly what to run. Minor: no mention that an unknown priority would CASE to NULL and sort last by default — fine for a constrained value set.
-
-**Q1 avg: 4.75**
-
-**CRITICAL CONFIRMATION (per directive):** (a) the answer is a clean PER-ROW sort with NO GROUP BY and NO ungrouped-column-with-aggregate; (b) `ORDER BY CASE` for custom sort is valid Trino 467; (c) the iter710 Q3 stray-column slip **DID NOT REPEAT**. → **iter712 implication: DEFAULT NO-OP confirmed; r23:1770-1805 content is sufficient; do NOT add FIX-A.**
+PIN Trino 467 — all dialect facts verified against trino.io/docs/467 (+ /docs/current
+where the page is unchanged across versions).
 
 ---
 
-### Q2 — skip / null-out malformed amount rows in a revenue SUM
+## Per-question scores
 
-**Accuracy: 5** — verified at [trino.io/docs/467/functions/conversion.html](https://trino.io/docs/467/functions/conversion.html): `try_cast()` "returns null if the cast fails." Verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html): all aggregates except `count()`, `count_if()`, `max_by()`, `min_by()`, `approx_distinct()` ignore NULLs (SUM returns NULL for all-NULL input, not zero). Both clauses (`WHERE TRY_CAST IS NOT NULL` for the filtered list; `SUM(TRY_CAST(...))` for the aggregate) are correct. The user's "looping through event rows" phrasing was their mental model, not a defect; the responder correctly answered with set-based SQL.
-**Completeness: 4.5** — gives BOTH the filter pattern and the aggregate pattern. Could optionally mention `TRY(expression)` as the broader-scope wrapper (handles division-by-zero, function-arg errors, numeric overflow — not just cast failures), but `TRY_CAST` is the precise fit for a cast-failure scenario, so this is a minor enrichment nit not a gap.
-**Clarity: 5** — explains that "SUM ignores NULL, bad rows invisible" in plain English; the dual pattern (filter + aggregate) is unambiguous.
-**Actionability: 5** — both queries are copy-paste ready; engineer knows exactly what to swap.
+### Q1 — NOT IN three-valued-logic trap + catch-all for blanks
 
-**Q2 avg: 4.875**
+**User symptom:** `WHERE status NOT IN ('active','paused','cancelled')` "missing some
+bad rows" — specifically the rows where `status IS NULL` (or empty/blank).
+
+**Responder fix prescribed:**
+- `WHERE status IS NULL OR status NOT IN ('active','paused','cancelled')` — catch-all
+- `LEFT JOIN (VALUES('active'),('paused'),('cancelled')) AS valid(status) ON
+  e.status=v.status WHERE v.status IS NULL` — anti-join alternative
+- Cited resources/23 §10 NOT-IN + NULL gotcha.
+
+**Verification vs trino.io/docs/467 + SQL 3VL semantics:**
+- (a) Catch-all `IS NULL OR NOT IN (...)` — CORRECT. SQL 3VL: when the outer column
+  is NULL, `NULL <> 'active' AND NULL <> 'paused' AND NULL <> 'cancelled'` evaluates
+  to `UNKNOWN AND UNKNOWN AND UNKNOWN` → UNKNOWN, which the WHERE clause treats as
+  not-true → row dropped. Adding `status IS NULL OR` re-includes those rows
+  explicitly. Solves the symptom.
+- (b) LEFT-JOIN-IS-NULL anti-join — VALID Trino 467. Standard SQL anti-join pattern;
+  `(VALUES ...)` table constructor supported; NULL on the left side joins to nothing
+  on the right → `v.status IS NULL` for any row whose left-side status didn't match
+  → catches both "not in the list" rows AND "left side is NULL" rows. NULL-safe by
+  design. Correct.
+
+**MECHANISM-PRECISION nuance (flagged by directive):** Responder said "even one NULL
+in the status column... every comparison evaluates to UNKNOWN... filters out EVERY
+row — not just the invalid ones."
+
+That description applies to the case where **the list/subquery side** contains a
+NULL (then NOT IN expands to `... AND col <> NULL` which is UNKNOWN for every outer
+row → empty result). In the user's actual scenario the list is literals
+('active','paused','cancelled') with NO NULL, so the AND-chain `col <> 'active' AND
+col <> 'paused' AND col <> 'cancelled'` is well-defined for every non-NULL outer
+status — `NOT IN` works correctly for those. ONLY the outer rows where `status IS
+NULL` get their predicate → UNKNOWN → silently dropped, which exactly matches the
+user's "missing SOME bad rows" symptom (not "missing every row").
+
+So the responder's MECHANISM PROSE conflates two adjacent sub-cases:
+- Sub-case A: list/subquery contains NULL → every row vanishes (the canonical r23
+  §10 framing).
+- Sub-case B: list is pure literals, outer column has NULL rows → only the
+  NULL-outer rows vanish (the user's actual scenario).
+
+The PRESCRIBED FIX still solves the user's actual problem (the `IS NULL OR ...`
+catch-all and the LEFT-JOIN anti-join both handle sub-case B correctly). The
+symptom diagnosis ("missing rows because of NULL+3VL") is RIGHT. The exact
+mechanism prose overstates by describing sub-case A behavior when sub-case B is
+what's happening here.
+
+**Flag-status verdict (per directive):**
+- NOT-IN-NULL diagnostic flag = **PARTIALLY CLOSED**. The user gets a working
+  catch-all and a valid alternative — that's the load-bearing deliverable, and it
+  catches both NULLs and blanks. So the practical fix is solid.
+- Mechanism-conflation = **MINOR PROSE NIT, NOT A FINDABLE GAP for iter713**. The
+  responder still routed correctly to §10, still named 3VL, still picked the right
+  fix shape, still gave both the catch-all AND the anti-join. A SaaS engineer
+  reading the answer will fix their query correctly; they may walk away with
+  slightly off mental model of which sub-case caused their symptom, but they will
+  not write buggy code as a result. The teacher could optionally add a 2-line
+  inline-marked sub-case split (literal-list + outer-NULL vs subquery + right-side
+  NULL) adjacent to r23 §10 in iter713 if a future probe lands directly on the
+  mechanism-precision question — but DO NOT prioritize this; resources are mature
+  and reconcile-don't-append risk outweighs the marginal value.
+
+**Sub-scores (1-5):**
+- Accuracy: 4 — fix is correct, anti-join valid, but mechanism prose conflates
+  list-NULL vs outer-NULL sub-cases (overstates "every row dropped" when only
+  NULL-outer rows are dropped in this scenario).
+- Completeness: 5 — both the IS-NULL-OR catch-all and the LEFT-JOIN anti-join
+  given; references §10; explicitly mentions blanks.
+- Clarity: 4 — terms are explained (3VL, UNKNOWN, anti-join via the WHERE-right-IS-
+  NULL pattern), but the "filters out EVERY row" sentence could confuse a reader
+  comparing the prose to their actual partial-loss symptom.
+- Actionability: 5 — copy-paste-ready SQL for both shapes, immediately solves the
+  user's data-quality check.
+- **Avg: 4.50**
 
 ---
 
-### Q3 — each login + next login per user without self-join (compute time-away)
+### Q2 — Percent of total in one pass
 
-**Accuracy: 5** — verified at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html): `LEAD(x) OVER (PARTITION BY ... ORDER BY ...)` returns NULL for the last row in each partition by default. Verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html): `date_diff(unit, ts1, ts2)` returns `ts2 - ts1` in units, so `date_diff('minute', login_timestamp, LEAD(login_timestamp) OVER ...)` correctly computes (next − current) in minutes — consistent with the iter671 ts-diff lock. The no-self-join framing ("scans once") is correct.
-**Completeness: 4.5** — answers core well. Repeating the full `LEAD(...) OVER (PARTITION BY user_id ORDER BY login_timestamp)` expression twice (once in SELECT, once in `date_diff`) works but is verbose; a subquery / CTE refactor would DRY it up. Minor stylistic nit, not a correctness issue.
-**Clarity: 5** — explains LEAD in plain English ("reads the next row's value within each user partition sorted by time").
-**Actionability: 5** — copy-paste ready against `iceberg.analytics.login_events`; engineer immediately gets both the next-login column and the minutes-between metric.
+**Responder SQL:**
+```sql
+SELECT customer_id,
+       SUM(amount) AS total_revenue,
+       ROUND(100.0 * SUM(amount) / SUM(SUM(amount)) OVER (), 2) AS pct_of_total
+FROM transactions
+WHERE order_date >= DATE_TRUNC('month', CURRENT_DATE)
+GROUP BY customer_id
+ORDER BY total_revenue DESC;
+```
 
-**Q3 avg: 4.875**
+**Verification vs trino.io/docs/467:**
+- (a) `SUM(SUM(amount)) OVER ()` — VALID Trino 467. This is NOT illegal aggregate
+  nesting. The inner `SUM(amount)` is the GROUP BY aggregate (one value per
+  customer_id group); the outer `SUM(...) OVER ()` is a window function applied
+  AFTER grouping, summing those group results across the empty-OVER window (= all
+  grouped rows = grand total). Trino docs: "All aggregate functions can be used as
+  window functions by adding the OVER clause." Canonical percent-of-total idiom.
+  Correct.
+- (b) Single `100.0 *` multiply, no double-100 — matches the percent-of-total PIN.
+- (c) `DATE_TRUNC('month', CURRENT_DATE)` — valid Trino 467
+  (trino.io/docs/467/functions/datetime.html). Returns first day of current month;
+  `order_date >= that` filters to current month. Correct.
+- (d) `ROUND(x, 2)` — valid Trino 467 numeric function.
+- (e) Single scan, single GROUP BY, no self-join — meets the "cleaner one-pass"
+  ask.
+- (f) No NULLIF on the denominator — if the entire month has zero transactions the
+  GROUP BY produces zero rows and the question is moot. If any customer has rows,
+  the grand total > 0 (assuming amounts are positive). Minor edge case; not a real
+  risk in this billing-dashboard context. Acceptable to omit.
+
+**Sub-scores:**
+- Accuracy: 5 — every Trino 467 form validated; canonical percent-of-total shape.
+- Completeness: 5 — total_revenue + pct_of_total in one query; month filter
+  included; ORDER BY DESC for dashboard ranking.
+- Clarity: 5 — explains `SUM(SUM())` as "grand total via empty OVER ()", names the
+  single-scan / no-self-join win.
+- Actionability: 5 — drop-in copy-paste for the billing dashboard.
+- **Avg: 5.00**
 
 ---
 
-### Q4 — filter status to only 'active'/'paused'/'cancelled'
+### Q3 — Running max ("personal best so far") per customer
 
-**Accuracy: 5** — `WHERE status IN ('active','paused','cancelled')` is valid Trino 467 IN-list-of-literals; correctly noted that NULL status is excluded (NULL never satisfies an IN comparison). The diagnostic flip `WHERE status NOT IN ('active','paused','cancelled')` is also valid SQL.
-**Completeness: 3.5** — **GAP (minor):** the responder noted that the IN form drops NULL (correct) but did NOT flag that the **NOT IN diagnostic ALSO silently drops NULL rows** — `NULL NOT IN (...)` evaluates to UNKNOWN, so a row whose `status IS NULL` would NOT appear in the "find invalid statuses" result, defeating the diagnostic's purpose. The literal list contains no NULL so the IN form has no empty-result trap, but the asymmetric NULL behavior of NOT IN as a diagnostic is the iter678 NOT-IN-NULL lock in action and should have been flagged. Verified at [trino.io/docs/467/functions/comparison.html](https://trino.io/docs/467/functions/comparison.html): NOT IN with NULL produces UNKNOWN, row dropped. Recommend the corrected diagnostic: `WHERE status IS NULL OR status NOT IN ('active','paused','cancelled')`.
-**Clarity: 5** — IN-list explanation is plain; "more readable than chained OR" is exactly the right framing for a SaaS engineer.
-**Actionability: 4** — main filter is fully actionable; the diagnostic flip is actionable but will MISS NULL-status invalid rows — engineer might think "no invalid rows" when they actually have NULLs.
+**Responder SQL:**
+```sql
+SELECT customer_id, order_date, amount,
+       MAX(amount) OVER (
+         PARTITION BY customer_id
+         ORDER BY order_date
+         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+       ) AS highest_to_date
+FROM orders
+ORDER BY customer_id, order_date;
+```
 
-**Q4 avg: 4.375**
+**Verification vs trino.io/docs/467/functions/window.html:**
+- (a) `MAX(x) OVER (PARTITION BY ... ORDER BY ... ROWS BETWEEN UNBOUNDED PRECEDING
+  AND CURRENT ROW)` — VALID. Trino docs explicitly support all aggregate functions
+  as window functions with PARTITION BY + ORDER BY + ROWS frame; UNBOUNDED
+  PRECEDING and CURRENT ROW are documented frame bounds. This is the canonical
+  running-max pattern. Correct.
+- (b) No self-join, no correlated subquery — meets the user's explicit "without
+  self-join" constraint. Correct.
+- (c) Outer ORDER BY for readability — fine.
+
+**Sub-scores:**
+- Accuracy: 5 — exact-correct window-frame syntax, idiomatic running-max.
+- Completeness: 5 — answers the question fully; explicit frame; outer sort for
+  display.
+- Clarity: 5 — names what the frame does ("every row from start through current").
+- Actionability: 5 — drop-in copy-paste.
+- **Avg: 5.00**
+
+---
+
+### Q4 — Filter rows where message contains "timeout"
+
+**Responder SQL:**
+```sql
+SELECT id, message FROM logs WHERE message LIKE '%timeout%' ORDER BY id;
+-- Also: WHERE regexp_like(message, '(?i)timeout')  for case-insensitive
+```
+
+**Verification vs trino.io/docs/467/functions/string.html + functions/regexp.html:**
+- (a) `LIKE '%timeout%'` — VALID Trino 467. Standard SQL LIKE with `%` wildcard for
+  any-chars-before-or-after. Case-sensitive by default. Correct for plain
+  substring match.
+- (b) `regexp_like(message, '(?i)timeout')` — VALID Trino 467. `regexp_like(string,
+  pattern) → boolean` is documented. The `(?i)` inline flag is the standard
+  Java/JONI regex case-insensitive modifier, and Trino docs explicitly note "Case-
+  insensitive matching (enabled via the `(?i)` flag) is always performed in a
+  Unicode-aware manner." Correct.
+- (c) Comparison framing — responder correctly says LIKE is simpler + faster + more
+  readable for plain substring; regexp_like is for case-insensitive or complex
+  patterns. Matches Trino guidance.
+
+**Sub-scores:**
+- Accuracy: 5 — both forms validated against trino.io/docs/467.
+- Completeness: 5 — primary fix (LIKE) plus the case-insensitive escalation
+  (regexp_like + `(?i)`).
+- Clarity: 5 — explains `%` wildcards and `(?i)` flag; gives selection guidance.
+- Actionability: 5 — copy-paste ready for both shapes.
+- **Avg: 5.00**
 
 ---
 
 ## Overall
 
-**Per-question averages:** Q1 4.75, Q2 4.875, Q3 4.875, Q4 4.375
-**Sub-score total:** Q1 (5+5+5+4)=19, Q2 (5+4.5+5+5)=19.5, Q3 (5+4.5+5+5)=19.5, Q4 (5+3.5+5+4)=17.5 → 75.5 / 16 = **4.71875**
+| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|---|
+| Q1 NOT-IN-NULL catch-all | 4 | 5 | 4 | 5 | 4.50 |
+| Q2 percent of total       | 5 | 5 | 5 | 5 | 5.00 |
+| Q3 running max window     | 5 | 5 | 5 | 5 | 5.00 |
+| Q4 substring + regex      | 5 | 5 | 5 | 5 | 5.00 |
+| **OVERALL**               |   |   |   |   | **4.875** |
 
-Recomputing strictly to integer sub-scores: Q1 (5+5+5+4)=19, Q2 (5+5+5+5)=20, Q3 (5+5+5+5)=20, Q4 (5+4+5+4)=18 → 77/16 = **4.8125**.
-
-Using the fractional sub-scores above (4.5s preserved): **overall avg ≈ 4.71875** — well above 3.5.
-
-**Verdict: PASS** (overall avg 4.72; threshold 3.5).
-
----
-
-## Pattern observations across iter711
-
-1. **Stray-column slip did NOT recur.** Q1 re-probe was a clean per-row sort with ZERO GROUP BY and ZERO ungrouped-column-with-aggregate. Iter710 Q3 was a one-off responder synthesis slip, not a content gap. **r23:1747-1808 stays as-is; no FIX-A needed.**
-2. **Trino dialect accuracy is solid** across all 4 answers — `TRY_CAST`, `LEAD`, `date_diff('minute', earlier, later)`, `ORDER BY CASE`, `IN ()` list-of-literals are all valid Trino 467 (verified against trino.io/docs/467 conversion, aggregate, window, datetime, comparison pages).
-3. **Resource citations are accurate** when given (Q1 cites r07:1571-1596; Q2 cites r23:687) — both anchors land on real, on-topic content.
-4. **One minor completeness nit (Q4):** the NOT-IN-drops-NULL diagnostic asymmetry was missed. This is a known pattern from the iter678 lock; the resource already teaches it (r23 NOT-IN-NULL section). Responder findability for that specific diagnostic context could be strengthened, but a single miss on a flip-side diagnostic does not warrant a FIX-A — flag-only.
+**Verdict: PASS (4.875 >= 3.5)**
 
 ---
 
-## Recommendations for iter712
+## Flag-status & next-iteration directive
 
-**Posture: DEFAULT NO-OP (per directive).** Resources are mature (172+ consecutive PASSES). No edits required.
+**iter711 NOT-IN-NULL diagnostic flag — PARTIALLY CLOSED.**
+- The prescribed fix (catch-all `IS NULL OR NOT IN` + LEFT-JOIN anti-join) correctly
+  solves the user's "missing blank-status rows" symptom. Both shapes are valid
+  Trino 467. Responder routed to r23 §10. The load-bearing deliverable lands.
 
-**If iter712 chooses to probe further:**
-- Re-probe the NOT-IN-NULL diagnostic asymmetry (Q4 gap) from a different angle: "I want to find rows where status is not in my allowed list — why am I missing some?" — verify the responder catches the NULL-drops-silently caveat. If miss recurs → consider strengthening keyword anchors at r23 NOT-IN-NULL block for diagnostic phrasings like "find invalid statuses" / "find rows not in my allowed list" / "diagnose unexpected values."
-- The iter710 Q3 stray-column slip is now demonstrably a one-off — do NOT add any FIX-A for the custom-sort/stray-column theme. Move on.
+**Mechanism-conflation finding — PROSE NIT, NOT a findable gap for iter713.**
+- The responder's "filters out EVERY row" sentence describes the list-contains-NULL
+  sub-case (sub-case A) rather than the outer-column-NULL sub-case (sub-case B)
+  that actually matches the user's symptom. The fix prescribed is still
+  sub-case-B-correct, so no engineer will write buggy SQL from this answer. The
+  mental model is slightly fuzzy but not wrong.
+- Recommendation to teacher: **DO NOT add a new card for iter713.** Resources are
+  mature (172+ consecutive PASSES) and reconcile-don't-append risk + responder
+  confusion-from-defangs risk (cf. iter693 regression) outweigh the marginal
+  benefit of a precision split. If a FUTURE probe explicitly asks "why are ONLY
+  the NULL-status rows missing, not all rows" (mechanism-precision), THEN add a
+  2-line inline-marked sub-case split adjacent to r23 §10. Until then, hold.
 
-**HOLD all locks** from iter534-710 (~260+ entries). NO resource edits. NO HARD LOCK violations. Spot-check by content-grep, not line numbers (r07/r23 have grown).
+**Patterns across all 4 answers:** Trino 467 dialect fidelity is excellent. Window
+function idioms (SUM(SUM()) OVER (), MAX() OVER ROWS UNBOUNDED PRECEDING) are
+copy-paste-correct. Regex flag `(?i)` and DATE_TRUNC / LIKE / ROUND / GROUP BY +
+ORDER BY shapes all validated. The only soft spot is mechanism prose in 3VL
+explanations — and even there the actionable SQL is right.
+
+**No rubric topic regression. No new required resource edits. State.json NOT
+bumped (per directive).**
