@@ -1206,6 +1206,67 @@ FROM accounts;
 
 > **Cross-references.** For `power()` and the **NO `^` operator** rule (bytes→GB conversion), see [resource 05 §multi-tenant storage math](05-multi-tenant-analytics.md). `sqrt(x)` pairs with the standard-deviation / RMS patterns; `truncate(n * power(10, d)) / power(10, d)` in §4.4C already uses `power()` for decimal truncation. For rounding the `double` result back to a fixed scale, wrap in `CAST(... AS DECIMAL(18,2))` or `round(x, d)` — see §4.4A and §B2.
 
+### 4.4G BITWISE CANONICAL — AND/OR/XOR/NOT, bit shifts, and counting set bits on integers: `bitwise_and` / `bitwise_or` / `bitwise_xor` / `bitwise_not` / `bitwise_left_shift` / `bitwise_right_shift` / `bit_count(x, bits)` (iter740 PIN — FIX-A)
+
+**Keyword anchors:** bitwise AND OR XOR Trino, bitmask in SQL, test if a bit is set, check if a flag bit is set, permission flags packed in an integer, feature flags bitmask, count set bits, count enabled flags, number of bits set, bitwise NOT Trino, bit shift Trino, left shift right shift SQL, bit_count Trino, popcount Trino, packed integer flags.
+
+**The one fact.** Trino 467 has a full set of bitwise functions — you do **not** need to hand-roll bit math with `mod`/`floor` or decline the question. They operate on integers (the result type is `bigint`). Verbatim from [trino.io/docs/467/functions/bitwise.html](https://trino.io/docs/467/functions/bitwise.html):
+
+| Function | Returns | What it computes |
+|---|---|---|
+| `bitwise_and(x, y)` | `bigint` | bitwise AND of `x` and `y` |
+| `bitwise_or(x, y)` | `bigint` | bitwise OR of `x` and `y` |
+| `bitwise_xor(x, y)` | `bigint` | bitwise XOR of `x` and `y` |
+| `bitwise_not(x)` | `bigint` | bitwise NOT of `x` (note: `NOT x = -x - 1`) |
+| `bitwise_left_shift(value, shift)` | same as `value` | `value` shifted left by `shift` bits |
+| `bitwise_right_shift(value, shift)` | same as `value` | `value` logically shifted right by `shift` bits |
+| `bit_count(x, bits)` | `bigint` | number of set bits in `x`, treated as a `bits`-bit signed integer — **requires the 2nd `bits` argument** |
+
+```sql
+-- ✅ COPY THIS — the bitwise function family, one call each.
+SELECT
+  bitwise_and(a, b)            AS a_and_b,
+  bitwise_or(a, b)             AS a_or_b,
+  bitwise_xor(a, b)            AS a_xor_b,
+  bitwise_not(a)               AS not_a,
+  bitwise_left_shift(a, 3)     AS a_shifted_left_3,
+  bitwise_right_shift(a, 3)    AS a_shifted_right_3,
+  bit_count(a, 64)             AS num_set_bits   -- 64 = treat `a` as a 64-bit (bigint) value
+FROM t;
+```
+
+> **⚠ Trino has NO `<<` / `>>` bit-shift operator (function form ONLY).** Unlike C / Java / PostgreSQL, Trino 467 does **not** support `value << shift` or `value >> shift` as operators — writing `flags << 3` is a **parse error**. Use the function forms `bitwise_left_shift(value, shift)` and `bitwise_right_shift(value, shift)` instead (verified at [trino.io/docs/467/functions/bitwise.html](https://trino.io/docs/467/functions/bitwise.html)).
+
+**Worked example — test whether a specific flag bit is set (permission / feature bitmask).** A common SaaS pattern: pack a set of boolean flags into one integer column (`permissions`), where bit *n* means "feature *n* enabled." To test whether bit *n* is set, AND the column with a mask that has only bit *n* turned on, and check the result is non-zero:
+
+```sql
+-- ✅ COPY THIS — "is bit 3 (value 8) set in the permissions bitmask?"
+--    Bit 3 = the integer 8 (binary 1000). Use a literal power-of-two mask:
+SELECT user_id
+FROM users
+WHERE bitwise_and(permissions, 8) <> 0;     -- TRUE when bit 3 is on
+
+-- ✅ For a DYNAMIC bit index n, build the mask with bitwise_left_shift(1, n)
+--    (this is the function form of "1 << n" — Trino has no << operator):
+SELECT user_id
+FROM users
+WHERE bitwise_and(permissions, bitwise_left_shift(1, 3)) <> 0;   -- bit 3 again (1 << 3 = 8)
+```
+
+**Worked example — count how many flags are enabled.** Use `bit_count` with the bit width of the column (a `bigint` is 64 bits):
+
+```sql
+-- ✅ COPY THIS — "how many permission flags does each user have enabled?"
+SELECT user_id, bit_count(permissions, 64) AS enabled_flag_count
+FROM users;
+-- bit_count(13, 64) = 3   (13 = binary 1101 -> three 1-bits)
+```
+
+> **⚠ `bit_count` REQUIRES two arguments — there is NO 1-arg form and NO `popcount` in Trino.**
+> `bit_count(flags)` ❌ **WRONG — parse / function-resolution error.** Trino's `bit_count` has **no 1-argument overload**, and **there is no `popcount()` function in Trino at all.** You MUST pass the bit width as the 2nd argument: `bit_count(flags, 64)` for a `bigint`, `bit_count(flags, 32)` for an `integer`. Do NOT copy the 1-arg form, and do NOT reach for `popcount`. ✅ Correct: `bit_count(flags, 64)`.
+
+> **Cross-references.** Do not confuse these element-level bitwise functions with the `GROUPING()` / `GROUPING_ID()` **bitmask** used to label ROLLUP/CUBE subtotal rows — that bitmask is about which grouping columns were rolled up, not bit math on a data column (see [resource 28 §LEADING CANONICAL — GROUPING() bitmask](28-complex-sql-performance-trino-dbt.md)). For packing/unpacking flags via DECIMAL/integer casts, see §4.4A. For testing string/JSON membership instead of integer flags, see the array/`contains` and `json_extract` patterns in resources 07/13.
+
 ### 4.4A TRINO-CAST-SYNTAX GUARDRAIL — Trino has NO `expr::type` cast operator; ALWAYS write `CAST(expr AS type)`
 
 **Why this section exists.** Engineers migrating from Oracle frequently also have PostgreSQL muscle memory (or Snowflake / DuckDB muscle memory) and reflexively reach for the Postgres double-colon cast operator (`value::type`, e.g., `NULL::TIMESTAMP`, `id::int`, `'2026-05-30'::DATE`, `account_uuid::text`) in Trino SQL or dbt models targeting Trino. **Trino does NOT support the `::` cast operator.** Running such SQL through Trino produces an immediate parse error:
@@ -1395,6 +1456,42 @@ SELECT COALESCE(try(amount / commission_rate), 0) AS rate_per_dollar FROM orders
 - §4.4A above — `TRY_CAST(expr AS type)` is documented in the cast forms table (line 959). `try()` is the **general-purpose** sibling for **non-cast** expressions; `try_cast` remains the right tool when the failure mode is specifically a bad cast.
 - Resource 7 (`07-analytical-query-patterns.md`) §YoY-growth — uses `NULLIF(prev.usage_count, 0)` as the divide-by-zero guard inline. `try(...)` is an equivalent alternative when the numerator/denominator structure is more complex than a single ratio.
 - Resource 23 §"SQL best practices" — when the expression that might fail is buried inside a larger computation (`SUM(try(amount / commission_rate))`), `try()` is the right wrapper because `NULLIF` only handles the equal-to-zero case at the leaf, while `try()` catches all 7 error classes including invalid casts inside the nested expression.
+
+### 4.4H FLOAT-STATE-DETECTION CANONICAL — detect Infinity / NaN AFTER a float computation: `is_nan(x)` / `is_infinite(x)` / `is_finite(x)` → boolean (iter740 PIN — FIX-A)
+
+**Keyword anchors:** detect infinity or NaN, is the result not a number, filter out infinite values, find rows where a ratio is infinite, is_finite Trino, is_nan Trino, is_infinite Trino, divide by zero produced infinity, NaN check SQL, check for invalid float, IEEE 754 special values Trino, result is Infinity instead of error.
+
+**The one fact.** Trino 467 has three boolean predicates to test the *state* of a floating-point (`double` / `real`) value. Verbatim from [trino.io/docs/467/functions/math.html](https://trino.io/docs/467/functions/math.html):
+
+| Function | Returns | Tests whether `x` is… |
+|---|---|---|
+| `is_finite(x)` | `boolean` | a finite number (NOT Infinity, NOT NaN) |
+| `is_infinite(x)` | `boolean` | positive or negative Infinity |
+| `is_nan(x)` | `boolean` | NaN ("not-a-number") |
+
+```sql
+-- ✅ COPY THIS — find / null-out bad float states AFTER a double computation.
+-- Find the offending rows:
+SELECT *
+FROM metrics
+WHERE NOT is_finite(msgs_per_session);          -- rows that are Infinity or NaN
+
+-- Null them out inline (keep finite values, NULL the bad ones):
+SELECT IF(is_finite(msgs_per_session), msgs_per_session, NULL) AS clean_ratio
+FROM metrics;
+```
+
+> **⚠ CRITICAL — guard BEFORE vs detect AFTER, and only DOUBLE/REAL go to Infinity/NaN.** This is the part engineers get wrong:
+>
+> - **INTEGER and DECIMAL division by zero ERROR outright** — they do NOT produce Infinity or NaN. `5 / 0` (bigint) and `CAST(5 AS DECIMAL(10,2)) / 0` both raise `Division by zero` and fail the query. For these you must **guard BEFORE** the division — wrap the denominator in `NULLIF(denom, 0)` or the whole expression in `try(...)` (see §4.4E above). `is_nan`/`is_infinite` are useless here because the query never produces a row to test.
+> - **DOUBLE / REAL division by zero produces Infinity or NaN instead of erroring** (IEEE 754). `CAST(msgs AS double) / sessions` with `sessions = 0` yields `Infinity`; `0e0 / 0e0` yields `NaN`. The query *succeeds* but the value is garbage. Here `is_finite` / `is_nan` / `is_infinite` are the right tool — you **detect AFTER** the computation and filter or NULL the bad rows.
+>
+> **Rule of thumb:** if you are dividing **integers or decimals** (the common money/counter case), guard the denominator BEFORE (`NULLIF` / `try`). If you have already computed a **double** ratio and want to find or scrub Infinity/NaN, detect AFTER with `NOT is_finite(...)`.
+
+**Cross-references.**
+- §4.4E above — `NULLIF(denom, 0)` / `try(numer / denom)` are the **guard-BEFORE** tools for integer/decimal divide-by-zero (which ERRORS). Use those when the division would otherwise fail the query.
+- Resource 7 (`07-analytical-query-patterns.md`) §YoY-growth / §MoM-growth — uses `NULLIF(..., 0)` inline as the divide-by-zero guard; those ratios are typically decimal, so the guard-BEFORE pattern applies.
+- §4.4F above — `ln(x)` / `log(b, x)` of non-positive inputs and `sqrt` of a negative `double` can also yield NaN; `is_nan(...)` detects those results.
 
 ### 4.4C ORACLE `TRUNC` ↔ TRINO `truncate` GUARDRAIL — three distinct mappings, one lowercase 1-arg function, NO `TRUNC` keyword in Trino
 

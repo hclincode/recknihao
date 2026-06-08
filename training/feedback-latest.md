@@ -1,53 +1,51 @@
-# Judge Feedback — iter739
+# Judge Feedback — iter740 (EXTENDED PHASE)
 
-All dialect claims verified against trino.io/docs/467 on 2026-06-09 via WebFetch (string.html / math.html → floating-point + operators / datetime.html / bitwise.html). NOT verified against resources/. Production stack: Trino 467 + Iceberg, on-prem; none of these answers touch auth/authz, so no prod-fit concerns. state.json NOT bumped.
+**Overall: 4.50 / 5 — PASS** (margin +1.00 over 3.5 threshold; overall avg governs, no per-Q override)
 
-## Per-question scores
+Verified against trino.io/docs/467 (math.html, bitwise.html, datetime.html, binary.html, conversion.html) — NOT against resources/. Production stack: Trino 467 + Iceberg, on-prem; none of these answers touch auth/authz, so no prod-fit concerns. state.json NOT bumped.
 
-### Q1 — last dot / final segment (strpos-negative-instance FIX-A re-probe) — CRITICAL
-- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → **5.00**
-- `strpos(file_path, '.', -1)` — docs-verbatim string.html: "strpos(string, substring, instance) — Returns the position of the N-th instance of substring in string. **When instance is a negative number the search will start from the end of string. Positions start with 1. If not found, 0 is returned.**" So `strpos(s, '.', -1)` returns the position of the LAST dot, 1-based, 0 if none. CONFIRMED.
-- `substr(s, pos + 1)` — docs: `substr` is an alias for `substring`; the 2-arg form "Returns the rest of string from the starting position start." So `substr(s, strpos(s,'.',-1)+1)` returns everything after the last dot → `'invoices'`. CONFIRMED correct.
-- The responder used the NATIVE negative-instance form as the primary answer AND explicitly demoted the `LENGTH(s) - strpos(REVERSE(s),'.') + 1` arithmetic as clunky. Cited resources/23 (~line 430) — the iter739 r23 addition landed and is findable from the file-extension/last-occurrence keyword path.
-- **VERDICT: strpos-negative-instance FIX-A is CLOSED.** The responder used the native `strpos(s, sub, -1)` form (not only the clunky LENGTH/REVERSE arithmetic). This is a clean reversal of the iter738 Q3 -0.50 miss. Recommend one 2nd-angle re-probe (e.g. position of the last `/` in a path, or N-th-from-end) to bulletproof before retiring.
+| Q | Topic | Acc | Clarity | Applicability | Completeness | Avg |
+|---|---|---|---|---|---|---|
+| Q1 | float-state (is_finite/is_infinite/is_nan) | 5 | 5 | 5 | 5 | **5.00** |
+| Q2 | bitwise (bitwise_and / left_shift / bit_count 2-arg) | 5 | 5 | 5 | 5 | **5.00** |
+| Q3 | date_format / format_datetime custom display | 2 | 4 | 2 | 4 | **3.00** |
+| Q4 | hash/checksum (to_hex(md5(to_utf8(...)))) | 5 | 5 | 5 | 5 | **5.00** |
 
-### Q2 — is_nan / is_infinite (responder DECLINED) — findable-but-missing gap
-- Accuracy 5 / Completeness 2 / Clarity 4 / Actionability 2 → **3.25**
-- The responder DECLINED honestly and did NOT fabricate — correctly noted that `try()`/`NULLIF()` handle divide-by-zero BEFORE it happens, not detect-after, and pointed the user to the docs. That honesty is the right failure mode and is rewarded on Accuracy/Clarity.
-- BUT this is a genuine FINDABLE-BUT-MISSING gap. Docs-verified math.html (floating-point section): `is_nan(x) → boolean` "Determine if x is not-a-number"; `is_infinite(x) → boolean` "Determine if x is infinite"; `is_finite(x) → boolean` "Determine if x is finite." All three exist in Trino 467. The user's exact question ("check if a value is infinite or not a real number") has a clean one-function answer the responder could not produce.
-- Trino nuance the teacher MUST encode (verified against operator semantics): only DOUBLE/REAL division produces Infinity/NaN (e.g. `CAST(x AS double)/0e0`). Integer division by zero ERRORS, and DECIMAL division by zero ERRORS — so `is_nan`/`is_infinite` only ever fire on float/double paths. A user filtering "bad ratios" must ensure the division is done in DOUBLE for inf/nan to appear at all; otherwise the query throws and there is nothing to detect-after.
-- Score reflects merits: accurate + honest (no fabrication) but incomplete and not-actionable for a question with a clean native answer.
+Overall avg = (5.00 + 5.00 + 3.00 + 5.00) / 4 = **4.50 → PASS**
 
-### Q3 — day_of_year (fresh)
-- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → **5.00**
-- `EXTRACT(DAY_OF_YEAR FROM signup_date)` and shorthand `day_of_year(date)` — docs-verbatim datetime.html: "Returns the day of the year from x. The value ranges from 1 to 366." Alias `doy` confirmed. CONFIRMED 1-366, leap-year-aware.
-- `GROUP BY 1, 2` (ordinal group-by) is valid Trino — standard SQL ordinal GROUP BY by select-list position. CONFIRMED correct. Cited resources/13. Clean, directly answers "day-within-year directly".
+---
 
-### Q4 — bitmask / bitwise (responder DECLINED) — findable-but-missing gap
-- Accuracy 5 / Completeness 2 / Clarity 4 / Actionability 2 → **3.25**
-- The responder DECLINED honestly and did NOT fabricate — searched for AND/OR/XOR/shifts/bit-counting, found nothing, and pointed at the docs with plausible candidate names. Right failure mode; rewarded on Accuracy/Clarity. Note: it guessed `popcount()` — Trino's name is `bit_count`, so the candidate-name guess was partly off (do not penalize a declined answer for this, but the teacher should encode the real name).
-- Genuine FINDABLE-BUT-MISSING gap. Docs-verified bitwise.html: `bitwise_and(x,y)`, `bitwise_or(x,y)`, `bitwise_xor(x,y)`, `bitwise_not(x)`, `bitwise_left_shift`, `bitwise_right_shift`, `bitwise_right_shift_arithmetic`, and `bit_count(x, bits) → bigint`. Test bit n: `bitwise_and(flags, 1 << n) <> 0` (or `bitwise_and(flags, pow2) <> 0`). Count set bits: `bit_count(flags, 64)`.
-- **CRITICAL NUANCE for the teacher: `bit_count` REQUIRES the 2-arg form `bit_count(x, bits)`** — the second arg is the number of bits (e.g. `bit_count(9, 64)`), treating x as a `bits`-bit signed integer in 2's complement. There is NO 1-arg `bit_count(x)` and NO `popcount`. A resource that writes `bit_count(flags)` will be a parse error.
-- Score reflects merits: accurate + honest (no fabrication) but incomplete and not-actionable for a question with a clean native answer.
+## Q1 — float-state-detection FIX-A: **CLOSED**
 
-## Overall
+Docs-verified (math.html, VERBATIM): `is_finite(x)->boolean`, `is_infinite(x)->boolean`, `is_nan(x)->boolean` all exist. `WHERE NOT is_finite(engagement_ratio)` correctly captures BOTH ±Infinity and NaN (the only finite-failure states), and the `CASE WHEN is_finite(...) THEN ... ELSE NULL` inline-null form is correct. The type nuance is accurate: DOUBLE/REAL are IEEE-754 so div-by-zero yields Inf/NaN (succeeds with garbage -> detect AFTER), whereas INTEGER and DECIMAL div-by-zero ERROR (must guard BEFORE via `NULLIF(sessions,0)` / `try()`). The iter740 r27 §4.4H canonical did its job. **FIX-A CLOSED.** Recommend one 2nd-angle re-probe (e.g. "filter out infinite values" / `0e0/0e0`->NaN phrasing) to bulletproof, then lock.
 
-| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|---|
-| Q1 | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | 5 | 2 | 4 | 2 | 3.25 |
-| Q3 | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 | 5 | 2 | 4 | 2 | 3.25 |
+## Q2 — bitwise FIX-A: **CLOSED**
 
-**OVERALL AVERAGE = (5.00 + 3.25 + 5.00 + 3.25) / 4 = 4.125 → PASS** (threshold 3.5; overall average governs, no per-Q override).
+Docs-verified (bitwise.html, VERBATIM): `bitwise_and(x,y)->bigint`, `bitwise_left_shift(value,shift)`, `bit_count(x,bits)->bigint`. CONFIRMED `bit_count` REQUIRES exactly 2 args; there is NO 1-arg `bit_count` and NO `popcount`; Trino has NO `<<`/`>>` shift operator (function forms only). The responder nailed all of it: literal power-of-two mask `bitwise_and(features,8)<>0` (bit 3 = 8), the dynamic `bitwise_and(features, bitwise_left_shift(1,3))<>0`, `bit_count(features,64)=3`, and the explicit "no `<<`/`>>` operator — use the functions" note. The iter740 r27 §4.4G canonical (incl. the 2-arg/no-popcount defang) did its job. **FIX-A CLOSED.** Recommend one 2nd-angle re-probe before locking.
 
-## Verdicts and iter740 recommendation
+## Q3 — date_format: **TWO CONFIRMED DEFECTS** (the iter741 flag)
 
-- **Q1 strpos-negative-instance FIX-A: CLOSED.** Native `strpos(s, sub, -1)` used as the primary answer; REVERSE/LENGTH arithmetic correctly demoted. The iter739 r23 findability ADD worked. One 2nd-angle re-probe (last `/` in a path, or N-th-from-end) recommended to bulletproof.
+The `format_datetime` (Joda) branch is fully correct (EEEE weekday, `MMM dd, yyyy`, MM=month vs mm=minute all valid). The mapping table is correct. BUT the inline `date_format` examples — exactly the user's headline ask ("weekday 'Monday'") — are broken:
 
-- **Q2 is_nan/is_infinite/is_finite: FINDABLE-BUT-MISSING gap — FIX-A for iter740.** Add a float-state-detection canonical: `is_nan(x)/is_infinite(x)/is_finite(x) → boolean`. Encode the division-by-zero nuance: ONLY double/real div-by-zero yields Infinity/NaN (`CAST(x AS double)/0e0`); integer AND decimal div-by-zero ERROR (so there is nothing to detect-after unless the division is in DOUBLE). Anchors: "detect infinity", "is not a number / NaN", "filter bad float ratios", "is_nan / is_infinite / is_finite". Contrast with the existing try()/NULLIF before-the-fact divide-by-zero content (route by before-vs-after keywords; do not contradict it). Pure ADDITION.
+1. **`%A` is INVALID.** Docs-verified (datetime.html): Trino's MySQL-style specifiers are `%a` (abbreviated weekday), `%W` (full weekday name "Sunday".."Saturday"), `%b`/`%M` for month. `%A` is NOT documented and is NOT in the supported set (nor even in the explicit unsupported list `%D %U %u %V %w %X`). `date_format(report_date, '%A')` will NOT produce "Monday" — it renders the literal `A`. The responder's OWN table correctly says `%W`, so the inline SQL contradicts its own table. An engineer who copies the inline SQL gets the wrong weekday output.
+2. **DATE vs TIMESTAMP argument.** Docs-verified signature is `date_format(timestamp, format)->varchar`. The example passes `report_date` (a DATE per the column name and the user's "dates" framing) — Trino does not document DATE coercion here; a DATE column generally raises a function-resolution error. Should be `date_format(CAST(report_date AS timestamp), ...)`.
 
-- **Q4 bitwise functions: FINDABLE-BUT-MISSING gap — FIX-A for iter740.** Add a bitwise canonical: `bitwise_and/or/xor/not`, `bitwise_left_shift/right_shift`, and `bit_count(x, bits)`. Test-a-bit: `bitwise_and(flags, 1 << n) <> 0`. Count-set-bits: `bit_count(flags, 64)`. **PIN the bit_count 2-arg requirement** — `bit_count(x, bits)`, NO 1-arg form, NO `popcount` (would be parse error). Anchors: "permission bitmask", "test if a bit is set", "count set bits / enabled flags", "bitwise AND/OR". Pure ADDITION.
+**Q3 verdict: defect confirmed on both counts.** Scored Acc 2 / Applicability 2 because the primary copy-path is wrong, partially rescued by the correct `format_datetime` branch and the (contradictory but correct) mapping table.
 
-- Two findable-but-missing gaps surfaced this iteration (Q2, Q4). The two-FIX-A pattern (cf. iter736 dual-canonical 4.97 PASS) is appropriate for iter740. Both are pure additions to the function-reference resources (r05/r27 math; new bitwise content) with no contradictory content to reconcile.
-- Honesty discipline holding: the responder declined cleanly on both unknown-function questions rather than fabricating signatures — the right behavior, and the reason overall still PASSES despite two real coverage gaps.
+### iter741 FIX-A directive (Q3)
+Add/repair the `date_format` canonical (wherever the "custom date display / format a date as a string / weekday name" keywords land — likely r27 datetime or r07):
+- **PIN the weekday specifier as `%W` (full) / `%a` (abbreviated); explicitly DEFANG `%A` as un-copyable / invalid** (`%A` -> renders literal "A", NOT a weekday). The defang must be inline-marked WRONG and un-copyable (iter693 lesson) so the responder cannot lift it.
+- **PIN that `date_format` takes a TIMESTAMP**: a DATE column must be `CAST(d AS timestamp)` (or use `format_datetime` after a cast); make the copy-attractive example use a timestamp column or an explicit CAST.
+- Co-locate the MySQL-style <-> Joda mapping (it's already correct) so the table and the inline SQL agree — the current self-contradiction is the tell that the responder synthesized `%A` rather than reading the table.
+
+## Q4 — hash/checksum: correct
+
+Docs-verified (binary.html + conversion.html): `to_utf8(varchar)->varbinary`, `md5(varbinary)->varbinary`, `sha256(varbinary)->varbinary`, `to_hex(varbinary)->varchar`. The `to_hex(md5(to_utf8(col)))` chain is the correct hex-digest idiom; the `concat_ws('||', CAST(... AS VARCHAR), ...)` multi-column fingerprint is sound (concat_ws skips NULLs — fine for fingerprinting); sha256 offered as higher-collision-resistance alternative; deterministic note correct. No defect.
+
+---
+
+## Summary for teacher
+- iter740's two pure-addition canonicals (float-state §4.4H, bitwise §4.4G) **both landed and CLOSED** — clean, docs-accurate, copy-ready. Lock candidates after a 2nd-angle re-probe each.
+- **Only genuine new gap: Q3 `date_format`** — `%A` invalid (use `%W`) and DATE-needs-CAST-to-timestamp. This is a defect-fix (in-place reconcile), not a pure addition: the responder's own table is right but its inline SQL is wrong, so the resource must make the table and the canonical inline example agree, defang `%A`, and pin the timestamp-input requirement.
+- Honesty/accuracy discipline holding; no fabrication observed.
+- DO NOT bump training/state.json (judge does not edit state).
