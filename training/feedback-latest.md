@@ -1,84 +1,100 @@
-# iter765 Judge Feedback — DEFAULT durability-breadth (4 fresh picks)
+# iter766 Judge Feedback — DEFAULT durability-breadth (4 fresh picks)
 
-**Overall: 5.00 — STRONG PASS** (threshold 3.5). All 4 docs-verified clean against trino.io/docs/467 (math/select/string/conversion/window/aggregate .html) 2026-06-09. All 4 FRESH-CLEAN.
-
-Production fit: all idioms are valid Trino 467 Iceberg-connector SQL; no stack-incompatible advice. No auth/authz scope involved.
+**Verification basis:** All dialect claims verified against trino.io/docs/467 (sql/select.html, functions/datetime.html, language/types.html) via WebFetch/WebSearch on 2026-06-09. resources/ NOT treated as ground truth.
 
 ---
 
-## Q1 — Exact-N random sample (100 genuinely random rows each run)
+## Q1 — Per-product price RANGE/SPREAD (highest minus lowest = one number per group)
 
-**Answer:** `SELECT ... FROM orders ORDER BY random() LIMIT 100`; explained random() non-deterministic → different 100 per run; noted TABLESAMPLE BERNOULLI(N)/SYSTEM(N) as the approximate-PERCENTAGE alternative (BERNOULLI per-row, SYSTEM whole-split).
+**Verdict: REAL ACCURACY DEFECT. First form is a COMPILE ERROR; the simple aggregate was MISSED.**
+
+The expected, idiomatic, textbook answer is a plain GROUP BY aggregate — NO window functions:
+```sql
+SELECT product_id, MAX(sale_price) - MIN(sale_price) AS price_range
+FROM sales
+GROUP BY product_id;
+```
+This is the canonical "max minus min per group" form. The responder did NOT offer it.
+
+Instead the responder produced two window-based forms:
+
+- **FIRST form (the LEAD answer) DOES NOT COMPILE.** It puts a window-function expression inside GROUP BY:
+  `... GROUP BY product_id, MAX(sale_price) OVER (PARTITION BY product_id) - MIN(sale_price) OVER (...)`.
+  **Verified against trino.io/docs/467/sql/select.html:** a GROUP BY clause may only contain "aggregate functions or columns present in the GROUP BY clause" — window functions are NOT permitted in GROUP BY. Trino fails analysis with "GROUP BY clause cannot contain aggregations, window functions or grouping operations". So the lead form is INVALID / non-compiling. This is the form a copy-paste reader reaches for first → real harm.
+
+- **SECOND form (CTE with MAX OVER / MIN OVER, then SELECT DISTINCT)** COMPILES and returns the correct answer, but is badly over-engineered: it computes a window over every row then DISTINCT-dedupes, far heavier than the one-line GROUP BY aggregate. The misleading alias `price_volatility` (the question asked for range/spread) is a minor clarity ding.
+
+**Synthesis-slip vs findability gap:** Per the iter766 integrity-sweep (state.json notes_766 STEP 2(a)) and the standing pins, the simple `MAX(x) - MIN(x)` GROUP BY aggregate range/spread form IS documented and distinguished from row-wise greatest/least at r07/r23/r27 (r23:1552, r27:1662/1675: "MAX(col) is an aggregate DOWN ROWS (one value per group)"). So the canonical exists. The question is whether it's FINDABLE under the question's keywords. The responder routed to window functions instead of the documented aggregate, which points to a **routing/findability weakness**: the documented MAX(col)-aggregate material is framed as a MAX-vs-greatest disambiguation, NOT as a copy-attractive "price RANGE / SPREAD / highest minus lowest / max minus min per group" canonical with those keyword anchors. The responder's keyword→resource match for "range/spread/highest minus lowest/volatility" did not land on the simple aggregate.
+
+**iter767 designation for Q1: FIX-A (findability).** Add a small COPY-ATTRACTIVE "price range / spread per group" canonical near the MAX/MIN aggregate material with explicit keyword anchors: **"price range", "spread", "highest minus lowest", "max minus min per group", "volatility", "one value per group"** →
+```sql
+SELECT product_id, MAX(sale_price) - MIN(sale_price) AS price_range
+FROM sales GROUP BY product_id;
+```
+Plus an iter693-style INLINE un-copyable defang at the window-function material: `-- window functions are NOT allowed in GROUP BY (analysis error); for max-minus-min-per-group use a plain GROUP BY aggregate -- DO NOT COPY`. Do NOT churn the existing MAX-vs-greatest disambiguation (correct, keep verbatim); add the range/spread aggregate canonical adjacent.
 
 | Axis | Score | Note |
 |---|---|---|
-| Accuracy | 5 | `random()`/`rand()` confirmed (math.html: pseudo-random double 0.0<=x<1.0). `ORDER BY random() LIMIT N` is the correct exact-N-random idiom. TABLESAMPLE takes a PERCENTAGE not a row count (select.html); BERNOULLI=per-row probabilistic, SYSTEM=segment/split-level connector-dependent — both accurate. No conflation of TABLESAMPLE-% with exact-N. |
-| Completeness | 5 | Both the exact-N idiom AND the approximate-% large-table alternative, with the correct trade-off (full sort vs cheaper sampling). |
-| Clarity | 5 | "different 100 each run" makes non-determinism concrete; per-row vs whole-split distinction explained plainly. |
-| Actionability | 5 | Drop-in query; clear when to switch to TABLESAMPLE. |
-
-**Per-Q avg: 5.00 — FRESH-CLEAN.**
-
----
-
-## Q2 — Cumulative count of DISTINCT users over time (KEY CHECK)
-
-**Answer:** first_appearance CTE (`DATE_TRUNC('day', MIN(event_date))` per user) → new_users_per_day (`COUNT(*) GROUP BY first_event_day`) → `SUM(new_users) OVER (ORDER BY event_day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`. Explained Trino does NOT support `COUNT(DISTINCT) OVER`; defanged the naive `SUM(COUNT(DISTINCT)) OVER` double-count.
-
-| Axis | Score | Note |
-|---|---|---|
-| Accuracy | 5 | **VERIFIED: `COUNT(DISTINCT ...) OVER` is genuinely UNSUPPORTED in Trino** — error "DISTINCT in window function parameters not yet supported" (trinodb/trino #7885, still open). Responder correctly handled this real limitation rather than fabricating that it works. The first-appearance + running-SUM workaround is mathematically correct: each user is counted exactly ONCE on their first-event day, so the running SUM of daily first-appearance counts = cumulative distinct users. `SUM() OVER (ORDER BY ... ROWS UNBOUNDED PRECEDING TO CURRENT ROW)` is valid. The double-count defang (naive `SUM(COUNT(DISTINCT)) OVER` re-counts returning users every day) is accurate. |
-| Completeness | 5 | Full pipeline + per-day new-users column + cumulative column + the trap explanation. |
-| Clarity | 5 | "a user counts once, on their first day" stated explicitly; CTE layering is readable. |
-| Actionability | 5 | Copy-ready 3-CTE query with correct ORDER BY and frame. |
-
-**Per-Q avg: 5.00 — FRESH-CLEAN.** Correctly navigated the COUNT(DISTINCT) OVER limitation.
+| Accuracy | 2 | Lead form is a compile error (window fn in GROUP BY); simple aggregate missed. 2nd form correct but heavy. |
+| Completeness | 3 | A working form (2nd) is present, but the canonical/expected aggregate is absent. |
+| Clarity | 3 | Window-function explanation is coherent; misleading `price_volatility` alias; over-complex path obscures the simple answer. |
+| Actionability | 3 | An engineer who copies the FIRST (lead) form gets an error; only the 2nd form works. |
+| **Q1 avg** | **2.75** | |
 
 ---
 
-## Q3 — Format 0.1834 as "18.34%"
+## Q2 — Unix epoch SECONDS (1749480000) → timestamp
 
-**Answer:** `format('%.2f%%', conversion_rate * 100)` → '18.34%'. Explained *100, %.2f = 2 decimals, %% = literal percent; noted ||/concat require varchar (numerics don't auto-coerce) so format() is the clean path.
+**Verdict: CLEAN.** `from_unixtime(event_time_seconds)` is correct — verified `from_unixtime(unixtime)` takes SECONDS since epoch and returns timestamp(3) with time zone (datetime.html). The millis-needs-`/1e3` note (`from_unixtime(event_time_ms / 1e3)`) is correct and a valuable disambiguation. The `>= CURRENT_TIMESTAMP - INTERVAL '7' DAY` filter is valid Trino.
 
-| Axis | Score | Note |
-|---|---|---|
-| Accuracy | 5 | conversion.html: format() uses Java Formatter syntax. Docs example `format('%s%%', 123) -> '123%'` confirms %%=literal percent; `format('%.5f', pi()) -> '3.14159'` confirms %.Nf decimal formatting. 0.1834*100=18.34 → '18.34%'. The ||/concat-requires-varchar note is correct — Trino does not auto-coerce numerics in `||`. |
-| Completeness | 5 | The *100 step, the format spec breakdown, AND why format() beats string concatenation. |
-| Clarity | 5 | Each format token explained individually. |
-| Actionability | 5 | Single-expression drop-in. |
-
-**Per-Q avg: 5.00 — FRESH-CLEAN.**
-
----
-
-## Q4 — Integer cents (1999) to dollars DECIMAL (19.99)
-
-**Answer:** `CAST(amount_cents AS DOUBLE) / 100.0` (→19.99); ALSO `CAST(amount_cents AS DECIMAL(18,2)) / 100` for exact money. Explained 1999/100=19 integer-division-truncates; cast at least one operand first; DECIMAL preferred for money (no float rounding).
-
-| Axis | Score | Note |
-|---|---|---|
-| Accuracy | 5 | Integer/integer division truncates (1999/100=19) — correct. Casting one operand to DOUBLE or DECIMAL(18,2) yields 19.99 — correct. DECIMAL preferred for money (avoids binary-float rounding) — correct and consistent with the money-DECIMAL CAST lock. |
-| Completeness | 5 | Names the truncation trap, gives both DOUBLE (quick) and DECIMAL (exact-money) paths, recommends DECIMAL for currency. |
-| Clarity | 5 | "1999/100=19" makes the trap concrete. |
-| Actionability | 5 | Two ready expressions with a clear default (DECIMAL for money). |
-
-**Per-Q avg: 5.00 — FRESH-CLEAN.**
+| Axis | Score |
+|---|---|
+| Accuracy | 5 |
+| Completeness | 5 |
+| Clarity | 5 |
+| Actionability | 5 |
+| **Q2 avg** | **5.00** |
 
 ---
 
-## Summary
+## Q3 — Frequency table per event_type (count as rows, most-common first)
 
-| Q | Topic | Avg |
-|---|---|---|
-| Q1 | random-sample-N (ORDER BY random() LIMIT N vs TABLESAMPLE-%) | 5.00 |
-| Q2 | cumulative-distinct (first-appearance running-SUM, no COUNT(DISTINCT) OVER) | 5.00 |
-| Q3 | number-to-percent-string (format %.2f%%) | 5.00 |
-| Q4 | cents-to-dollars (CAST DECIMAL, integer-division-trap) | 5.00 |
+**Verdict: CLEAN.** `SELECT event_type, COUNT(*) AS event_count FROM events GROUP BY event_type ORDER BY event_count DESC` is the correct frequency-as-rows idiom (verified select.html). HAVING-after-grouping note accurate (HAVING filters post-aggregation; WHERE filters pre-grouping). The HAVING `COUNT(*) > 10` variant is a nice touch.
 
-**Overall avg: 5.00 — STRONG PASS.**
+| Axis | Score |
+|---|---|
+| Accuracy | 5 |
+| Completeness | 5 |
+| Clarity | 5 |
+| Actionability | 5 |
+| **Q3 avg** | **5.00** |
 
-All 4 FRESH-CLEAN. No fabrication, no dialect error, no stack-incompatibility, no card-to-card contradiction surfaced. Q2 (the key check) and Q1 (the random-vs-TABLESAMPLE check) both handled correctly.
+---
 
-### iter766 designation
+## Q4 — Comma-separated tags → multiple rows (one row per tag + product_id)
 
-**DEFAULT NO-OP / durability-breadth.** No gap, no defect, no FIX-A required. The four probed topics (random-sample-N, cumulative-distinct, percent-string, cents-to-dollars) are all clean and consistent with their standing pins. Teacher should NOT edit resources — pure integrity-sweep. Pick 4 fresh durability-breadth angles for iter766 (optionally a 2nd cumulative-distinct angle such as rolling-N-day distinct via HLL `merge()`/self-join, since that is the harder sibling of the clean cumulative-distinct probe). Do NOT re-edit r07 cumulative-distinct/COUNT(DISTINCT)-OVER card, r23 TABLESAMPLE/random card, r27 money-DECIMAL/percent-string cards — churn risk on bulletproofed material.
+**Verdict: CLEAN.** `CROSS JOIN UNNEST(split(tags, ',')) AS t(tag)` is the correct string→rows explode in Trino 467 (split → array, CROSS JOIN UNNEST → one row per element). `trim(tag)` correctly handles whitespace from `"sale, new"`-style input. The CROSS-JOIN-drops-empty vs `LEFT JOIN UNNEST(...) ON TRUE`-keeps-tag-less-rows distinction is accurate and a strong completeness signal. The COUNT(DISTINCT product_id) GROUP BY trim(tag) variant is appropriate.
+
+| Axis | Score |
+|---|---|
+| Accuracy | 5 |
+| Completeness | 5 |
+| Clarity | 5 |
+| Actionability | 5 |
+| **Q4 avg** | **5.00** |
+
+---
+
+## Overall
+
+| Q | Avg |
+|---|---|
+| Q1 | 2.75 |
+| Q2 | 5.00 |
+| Q3 | 5.00 |
+| Q4 | 5.00 |
+| **Overall** | **4.44** |
+
+**Overall avg 4.44 ≥ 3.5 → PASS** (overall-average governs; no single-Q veto). Q2/Q3/Q4 are bulletproof-clean; Q1 carries a genuine defect (non-compiling lead form + missed simple aggregate) that drags the average but does not sink it.
+
+**iter767 designation: FIX-A (Q1 range/spread findability).** Add a copy-attractive `MAX(x) - MIN(x)` GROUP BY price-range/spread canonical with keyword anchors (price range / spread / highest minus lowest / max minus min per group / volatility) + an inline window-fn-not-allowed-in-GROUP-BY defang. Preserve the existing MAX-vs-greatest disambiguation, from_unixtime, value-frequency, and string-to-rows cards (all verified clean — churn risk).
