@@ -1,44 +1,85 @@
-# Judge Feedback — iter724
+# Judge Feedback — iter725
 
-Mode: extended-phase light verification (4 Q&A re-probe of string/numeric/datetime scalar functions).
-All dialect claims VERIFIED against trino.io/docs/467 (math.html, string.html, datetime.html) — not against resources/.
+Mode: extended-phase scrutiny re-probe (string/numeric/decimal scalar functions + array max). All dialect claims VERIFIED against trino.io/docs/467 (string.html, conversion.html, array.html, language/types.html) — not against resources/.
 
-## Q1 — Force exactly two decimal places
-Scores: Accuracy 4.5 | Completeness 3.5 | Clarity 5 | Actionability 4.5
-- `round(revenue, 2)` is a docs-correct Trino 467 form: math.html — `round(x, d)` "Returns x rounded to d decimal places." VERIFIED.
-- HALF_UP claim: Trino's `round` does use round-half-up (round-half-away-from-zero) semantics — correct, and the Oracle analogy is a reasonable bridge for the migrating engineer.
-- **DECIMAL-cast defect (iter723 Q4) is CLOSED.** The responder emitted NO bare `col DECIMAL(p,s)` SELECT-list declaration. The only typed expressions are the legitimate `ROUND(revenue, 2)` call and a plain `revenue AS raw_value` alias. No parse-error-shaped synthesis slip recurred. The iter724 §4.4A inoculation appears to be holding.
-- Accuracy/Completeness nuance (per directive): the user asked to "store/display as EXACTLY two decimal places" for a FLOAT/DOUBLE input. `round(double, 2)` returns a **DOUBLE** — it rounds the VALUE but does not pin the SCALE, so 20.00000001 → 20.0 may still render as `20.0`, not `20.00`. The fixed-scale guarantee for storage/display comes from `CAST(revenue AS DECIMAL(18,2))`, which returns a DECIMAL with scale exactly 2. The responder omitted the CAST-to-DECIMAL form entirely. round(x,2) is a legitimate, non-penalized form, so this is weighed only as a Completeness shortfall, not an accuracy error. Accuracy held at 4.5 ("returns 19.99 and 20.00" slightly overstates display fidelity for a DOUBLE result).
+## Per-question scores (Accuracy / Completeness / Clarity / Actionability)
 
-## Q2 — Character position of a substring
-Scores: Accuracy 5 | Completeness 5 | Clarity 5 | Actionability 5
-- `strpos(url, '/dashboard')` — string.html VERIFIED: "Returns the starting position of the first instance of substring in string. Positions start with 1. If not found, 0 is returned." 1-indexed + 0-if-absent both stated correctly.
-- 3-arg `strpos(url, '/', 2)` for the n-th occurrence — VERIFIED: `strpos(string, substring, instance) → bigint` returns the position of the N-th instance (negative instance searches from the end). The 3-arg form is real in Trino 467 and used correctly. No flag.
+### Q1 — lock a numeric column to exactly two decimal places
+- Accuracy: 5
+- Completeness: 4
+- Clarity: 5
+- Actionability: 5
+- **Q1 avg: 4.75**
 
-## Q3 — Replace all occurrences
-Scores: Accuracy 5 | Completeness 5 | Clarity 5 | Actionability 5
-- `replace(user_agent, '/', ' ')` — string.html VERIFIED: 3-arg `replace(string, search, replace)` "Replaces all instances of search with replace in string." Correctly explained that EVERY slash is replaced. Worked example correct.
+Verdict on the directive's three checks:
+- (a) YES — `DECIMAL(18,2)` as a CREATE TABLE column type is a valid AND appropriate answer to "lock the column to exactly two decimal places." Scale = 2 pins exactly two stored decimal places at the storage/schema level; this is the correct fixed-scale form for "always hold exactly two decimals."
+- (b) CONFIRMED — the responder did NOT emit a bare `col DECIMAL(p,s)` in a SELECT list. It used `monthly_revenue DECIMAL(18,2) NOT NULL` inside a `CREATE TABLE`, which is valid column-DDL and is NOT the iter723 defect. **The bare-declaration defect STAYS CLOSED.**
+- (c) Minor completeness gap: the question was storage-leaning ("want the column to always hold exactly two decimals"), so CREATE TABLE is the primary correct response. It omitted the inline `CAST(monthly_revenue AS DECIMAL(18,2))` form for converting an EXISTING value/column in place. One sentence pointing at the cast form would have made it complete. Costs 1 point on Completeness only.
+- HALF_UP: "Incoming values rounded HALF_UP when cast to this type" is accurate — Trino's cast-to-DECIMAL uses round-half-up (away from zero); source-verified in r23 §3.1C and consistent with prior docs verification.
 
-## Q4 — Extract hour for GROUP BY
-Scores: Accuracy 5 | Completeness 5 | Clarity 5 | Actionability 5
-- `EXTRACT(HOUR FROM event_timestamp)` — datetime.html VERIFIED valid; `hour(x)` returns 0–23 and is the documented equivalent shorthand (`HOUR → hour()` in the extraction-field table). Either form acceptable; not penalized.
-- `GROUP BY EXTRACT(HOUR FROM event_timestamp)` repeating the expression (not a SELECT alias) is valid Trino. ORDER BY on the `hour_of_day` alias is also valid. Whole query parses and is semantically correct.
+**FINDABILITY FLAG (fixed-scale DECIMAL form): RESOLVED.** The responder surfaced the fixed-scale DECIMAL form on a storage-phrased question, cited the money-decimal canonical (§3.1/§3.1B/§3.1C), and produced no defect. The iter724/iter725 cross-ref work landed.
 
-## Scores summary
+### Q2 — strip leading/trailing whitespace
+- Accuracy: 5 / Completeness: 5 / Clarity: 5 / Actionability: 5
+- **Q2 avg: 5.0**
 
-| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|---|
-| Q1 | 4.5 | 3.5 | 5 | 4.5 | 4.375 |
-| Q2 | 5 | 5 | 5 | 5 | 5.000 |
-| Q3 | 5 | 5 | 5 | 5 | 5.000 |
-| Q4 | 5 | 5 | 5 | 5 | 5.000 |
+`TRIM(customer_name)` is correct. Docs-verified (string.html): "trim(string) — Removes leading and trailing whitespace from string." The " Acme Corp " → "Acme Corp" example is concrete and correct. Citation precision is irrelevant per directive; the ANSWER is fully correct.
 
-Per-dimension overall: Accuracy 4.875 | Completeness 4.625 | Clarity 5 | Actionability 4.875
-**OVERALL AVERAGE = 4.844 → PASS** (threshold 3.5; overall average governs)
+### Q3 — cast text column to a number
+- Accuracy: 5 / Completeness: 5 / Clarity: 5 / Actionability: 5
+- **Q3 avg: 5.0**
 
-## Q1 verdict (explicit)
-**The bare `col DECIMAL(p,s)` SELECT-list DECIMAL-cast defect is CLOSED.** No bare parameterized-type declaration appeared in any answer this iteration; the responder used the legitimate `ROUND(revenue, 2)` form. The iter724 §4.4A defang/canonical co-location is doing its job.
+`CAST(daily_active_users AS BIGINT)` for arithmetic + numeric sort, and `TRY_CAST(... AS BIGINT)` for bad-value tolerance (→NULL), both docs-verified (conversion.html): cast(varchar AS bigint) parses a numeric string; try_cast "returns null if the cast fails." The lexicographic-vs-numeric explanation ("10" sorts before "9" as text, 10>9 as number) is accurate and is exactly the user's confusion. Fully correct and complete.
 
-## Teacher feedback / iter725 flag
-- **NEW MINOR GAP (Completeness only, low priority):** Q1's "force exactly two decimal places for storage/display" ask is best served by `CAST(revenue AS DECIMAL(18,2))` (fixed scale), ideally with a one-line router: `round(x,2)` rounds the VALUE but stays DOUBLE (may still display as 20.0); `CAST(x AS DECIMAL(18,2))` guarantees scale-2 for storage/display. The CAST-to-DECIMAL canonical already exists (r27:1175/1191, r23 §3.1B/C) — the responder just did not surface it for a "two decimal places" phrasing. Consider adding "force two decimal places / store as two decimals / fixed scale for display" keyword anchors NEXT TO the `round(x, d)` content (likely r07 analytical patterns, where the responder sourced Q1) so a money-rounding phrasing also routes to the DECIMAL fixed-scale form. Findability/co-location nudge, NOT a correctness fix — do not churn the correct canonical.
-- iter725: re-probe Q1 once more after any co-location edit to confirm the responder offers BOTH `round(x,2)` and `CAST(... AS DECIMAL(18,2))` for the "exactly two decimal places for storage" phrasing. No other gaps detected; Q2/Q3/Q4 bulletproof.
+### Q4 — single max value out of an array WITHOUT exploding — SCRUTINIZED
+- Accuracy: 2 / Completeness: 2 / Clarity: 4 / Actionability: 2
+- **Q4 avg: 2.5**
+
+The user EXPLICITLY asked for the max of an array column "WITHOUT exploding the whole array into rows." The clean docs-correct single-function answer is **`array_max(response_times_array)`** — verified at trino.io/docs/467/functions/array.html: "array_max(array) — Returns the maximum value of input array." One row in / one row out, NO unnest, NO group by. It is precisely what the user asked for. The responder MISSED it.
+
+What the responder gave instead:
+- PRIMARY: `CROSS JOIN UNNEST(...) ... MAX(...) GROUP BY` — this IS exploding the array into rows, the exact opposite of the user's stated constraint. Computes a correct value but directly contradicts the ask and changes query shape/cost vs a scalar function.
+- SECONDARY: `GREATEST(coalesce(arr[1],0), coalesce(arr[2],0), arr[3]...)` — fragile fixed-index hack; only valid for a KNOWN fixed array length, `coalesce(...,0)` corrupts a max over negative values (benign here since latencies are non-negative), and it silently ignores elements beyond the hardcoded indices.
+
+Neither form satisfies "without exploding," and neither is the idiomatic answer. Clarity survives (readable; the "don't UNNEST without GROUP BY" caveat is sound). Accuracy/Completeness/Actionability scored down because the answer fails the literal, emphasized requirement.
+
+NULL note: per Trino semantics `array_max` returns NULL if the array contains any NULL element. For non-null latency arrays this is a non-issue; the canonical should state the NULL-element behavior.
+
+---
+
+## Overall
+
+| Q | Avg |
+|---|---|
+| Q1 | 4.75 |
+| Q2 | 5.0 |
+| Q3 | 5.0 |
+| Q4 | 2.5 |
+
+**Overall average = (4.75 + 5.0 + 5.0 + 2.5) / 4 = 4.3125**
+
+**PASS** (overall avg 4.3125 ≥ 3.5; overall average governs, no per-Q override). Q4 alone is a fail-grade answer but does not sink the iteration.
+
+---
+
+## Q4 array_max gap — precise characterization for iter726
+
+This is a **FINDABLE-BUT-MISSING gap, NOT a landing-point miss.**
+
+- Grep of all of `resources/` for `array_max`/`array_min`: **ZERO matches.** The function appears nowhere in the corpus. The responder could not surface it because no canonical exists to find.
+- Nearest existing array content: r07:454 (top-N-from-an-array via `array_sort` + `slice`, the iter675 Q2 shape) and the `greatest`/`least` row-wise-across-columns canonicals (r23:1404, r27:1381) — neither is the single-element-from-one-array scalar reducer the user wanted.
+- Because the closest neighbor teaches array_sort+slice and UNNEST+aggregate but NOT array_max, the responder reached for UNNEST+MAX and the GREATEST hack — the wrong-but-locally-available forms.
+
+### Teacher action for iter726 (recommended)
+1. GREP first to confirm (judge already did: zero array_max/array_min hits). Then ADD a LEADING CANONICAL for scalar array reducers in r07 §1a (adjacent to the existing array_sort/slice and MAP-explode canonicals), titled on the user's phrasing: "single max/min value out of an array WITHOUT exploding into rows."
+   - PRIMARY: `array_max(arr)` / `array_min(arr)` — docs-verified one-function answer, one row in/out, no UNNEST, no GROUP BY.
+   - State NULL-element semantics: `array_max` returns NULL if any element is NULL; show `array_max(filter(arr, x -> x IS NOT NULL))` only if NULLs expected.
+   - Cross-ref the family: `array_sort` (full ordering), `slice` (top-N), `element_at`/`arr[1]` (single index).
+   - Keyword anchors: max value from an array, highest value in an array column, max of a list without unnest, array max Trino, single largest element of an array, biggest value in an array, min/max over an array column, without exploding the array.
+2. INLINE-DEFANG (un-copyable, per the iter693/694 lesson) the two wrong-but-tempting forms this iter exposed: the `CROSS JOIN UNNEST ... MAX ... GROUP BY` form marked "❌ this EXPLODES into rows — the opposite of what was asked; use array_max" and the fixed-index `GREATEST(coalesce(arr[1],0), ...)` hack marked "❌ fragile; only a known fixed length, and coalesce-to-0 corrupts a max over negatives."
+3. Add a one-line cross-ref from r27 §4.4D (greatest/least row-wise canonical) → "for max of a SINGLE array column use array_max, not greatest+indexing; see r07 §1a." Disambiguate: array_max = max WITHIN ONE ARRAY VALUE; greatest = max ACROSS COLUMNS in one row. Both collide on "highest value" keywords, so the new canonical needs an explicit array-vs-across-columns disambiguator.
+
+---
+
+## Locks to preserve
+Q1 confirms the money-DECIMAL CAST canonical (r27, r23 §3.1B/§3.1C) and the iter724 §4.4A bare-declaration inoculation are HELD and effective. Do not churn them. The iter726 array_max work is purely ADDITIVE to r07 §1a.
