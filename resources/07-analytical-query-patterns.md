@@ -94,6 +94,61 @@ Verified at [trino.io/docs/current/sql/select.html](https://trino.io/docs/curren
 >
 > **DO NOT WRITE:** "Trino has no `WITH ORDINALITY` — it is Postgres-only" (FALSE — Trino 467 supports it, verified at [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html)); using `ROW_NUMBER() OVER (ORDER BY ...)` to recover the original array index — `ROW_NUMBER` assigns a NEW ordering per its own `ORDER BY`, NOT the array offset; using `array_position(arr, elem)` in the SELECT list of an UNNEST to label each row with its position — that returns the FIRST-MATCH index of a VALUE, NOT the per-row ordinal (duplicates collide). Use `WITH ORDINALITY` to get the original position.
 
+#### LEADING CANONICAL — explode a MAP column into one row per (key, value) — `UNNEST(map_col) AS t(k, v)` gives TWO columns, needs TWO aliases (iter720 PIN — FIX-A)
+
+> **Keyword anchor (READ THIS FIRST if your question is about turning a MAP column into ROWS — route HERE):** explode a map into rows, UNNEST a map Trino, one row per key value from a map, transpose map column to rows, explode feature flags map, map to key-value rows, iterate over map entries SQL, flatten a map column, map_entries UNNEST, GROUP BY map key, preferences key-value map to rows, count per feature flag, one row per map entry, expand a MAP(VARCHAR, ...) into rows, key-value pairs as rows from a map column.
+>
+> **One fact (Trino 467, verified at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html)):** "**Maps are expanded into two columns (key, value)**." So `UNNEST(map_col)` produces **TWO** output columns — you MUST give **TWO** aliases: `AS t(key_alias, value_alias)`. A SINGLE alias on a map UNNEST is an **arity error** (the analyzer reports a column-count mismatch). There is **no ROW** to dot-access here — the map is flattened directly into two scalar columns. This is the direct, simplest form; you do **not** need `map_entries` first.
+>
+> **✅ PREFERRED — UNNEST the MAP directly → 2 columns (simplest, no `map_entries` needed):**
+> ```sql
+> -- ✅ COPY THIS — explode a feature_flags MAP(VARCHAR, BOOLEAN) into one row per (flag_name, flag_value).
+> -- UNNEST(map) expands into TWO columns (key, value) -> TWO aliases AS t(flag_name, flag_value).
+> SELECT user_id, flag_name, flag_value
+> FROM iceberg.analytics.users
+> CROSS JOIN UNNEST(feature_flags) AS t(flag_name, flag_value);
+> -- Then aggregate as usual, e.g. count users per enabled flag:
+> --   SELECT flag_name, COUNT(*) AS n
+> --   FROM iceberg.analytics.users
+> --   CROSS JOIN UNNEST(feature_flags) AS t(flag_name, flag_value)
+> --   WHERE flag_value = true          -- WHERE comes AFTER the CROSS JOIN UNNEST (clause-order rule, §1a.1)
+> --   GROUP BY flag_name;
+> ```
+>
+> **✅ ALT — via `map_entries` (equivalent; map_entries → `array(row(K,V))` → UNNEST flattens each ROW's fields into the SAME 2 columns → STILL two aliases):**
+> ```sql
+> -- ✅ Also correct. map_entries(m) returns array(row(K,V)); UNNEST flattens each row into 2 columns.
+> -- Per the docs, UNNEST of an ARRAY of ROW expands each ROW field into its own column -> TWO aliases.
+> SELECT user_id, flag_name, flag_value
+> FROM iceberg.analytics.users
+> CROSS JOIN UNNEST(map_entries(feature_flags)) AS t(flag_name, flag_value);
+> ```
+>
+> **Row-semantics + clause-order notes:**
+> - **`CROSS JOIN UNNEST(map)` DROPS users whose map is NULL or empty `MAP()`** (INNER semantics — zero entries → zero output rows for that user). To KEEP every user (one padded NULL row when the map is empty/NULL), use **`LEFT JOIN UNNEST(feature_flags) AS t(flag_name, flag_value) ON TRUE`** — same two-alias rule, `ON TRUE` is the only supported join condition.
+> - **Clause order:** `CROSS JOIN UNNEST` / `LEFT JOIN UNNEST ... ON TRUE` is part of the **FROM** clause and MUST appear **BEFORE** `WHERE` (see §1a.1). After exploding, `GROUP BY flag_name` + `COUNT(*)`/aggregate as needed.
+> - **`WITH ORDINALITY`** also works on a map UNNEST and appends the bigint ordinal LAST: `UNNEST(feature_flags) WITH ORDINALITY AS t(flag_name, flag_value, ord)` — **THREE** aliases (key, value, ordinal).
+>
+> **CO-LOCATED DEFANG — the two broken forms (inline-marked so copy-paste self-documents as broken):**
+> ```sql
+> -- ❌ WRONG — DO NOT COPY: single alias + dot-access on a map UNNEST.
+> SELECT user_id, flag_entry.key, flag_entry.value
+> FROM iceberg.analytics.users
+> CROSS JOIN UNNEST(map_entries(feature_flags)) AS t(flag_entry);  -- ❌ WRONG: map_entries -> array(row(K,V)); UNNEST FLATTENS each row into TWO columns. A SINGLE alias `AS t(flag_entry)` is an ARITY ERROR (2 columns, 1 alias), and `flag_entry.key`/`flag_entry.value` has NO ROW to dot-access — the row was flattened, not bound. Use `AS t(flag_name, flag_value)` (TWO aliases). DO NOT COPY.
+>
+> -- ❌ WRONG — DO NOT COPY: single alias on a direct map UNNEST (same 2-column arity error).
+> SELECT user_id, kv
+> FROM iceberg.analytics.users
+> CROSS JOIN UNNEST(feature_flags) AS t(kv);  -- ❌ WRONG: UNNEST(map) expands into TWO columns (key, value); a SINGLE alias is an ARITY ERROR. Use `AS t(flag_name, flag_value)`. DO NOT COPY.
+> ```
+>
+> **THREE different directions — route correctly (do not confuse them):**
+> - **Map → ROWS (THIS canonical):** `CROSS JOIN UNNEST(map_col) AS t(k, v)` — turns a MAP into one row per entry (so you can GROUP BY a key across rows, JOIN per-entry, etc.). The map STOPS being a map; it becomes rows.
+> - **Map → reshaped MAP, IN-PLACE (the OPPOSITE direction — KEEPS it a map, NO UNNEST):** `map_filter` / `transform_values` / `transform_keys` / `map_keys` / `map_values`. Use these to filter/transform a map and KEEP it a map (e.g. "keys whose value is true"). See [resource 09 — MAP higher-order functions](09-lakehouse-schema-design.md). Do NOT explode-and-regroup just to filter a map.
+> - **String → MAP (construction, the OTHER direction):** `split_to_map('k1=v1;k2=v2', ';', '=')` builds a MAP from a delimited string. See [resource 23 §3.1A](23-sql-best-practices-olap.md#31a-trino-string-split-family-reference--split--split_part--split_to_map--split_to_multimap).
+>
+> **Cross-ref:** the `WITH ORDINALITY` sub-note immediately ABOVE is the array-explode + per-element-ordinal canonical (array → rows); this map-explode canonical is its MAP-column sibling (map → rows). Both are CROSS JOIN / LEFT JOIN UNNEST in the FROM clause and obey the §1a.1 clause-order rule.
+
 ### 1a.1 CLAUSE-ORDER RULE — `CROSS JOIN UNNEST` / `LEFT JOIN UNNEST ... ON TRUE` is part of the FROM clause and MUST appear BEFORE `WHERE`
 
 **Keyword anchor:** UNNEST WHERE order, CROSS JOIN UNNEST WHERE position, mismatched input 'CROSS' parse error, SQL clause order JOIN before WHERE, split comma-separated string and count, split delimited string count per value, tags array count per tag, explode and filter then group, SPLIT then UNNEST then WHERE.
