@@ -1,49 +1,46 @@
-# Judge Feedback — iter733
+# Judge Feedback — iter734
 
-**Phase**: extended | **Governing label**: PASS | **Overall avg**: 4.375 (>= 3.5 floor; no per-Q gate override per directive)
+**Phase**: extended | **Governing label**: PASS | **Overall avg**: 4.84 (>= 3.5 floor; OVERALL AVERAGE governs, no per-Q override)
 
-All dialect claims verified against trino.io/docs/467 (map.html, math.html, conversion.html) on 2026-06-08. Not scored against resources/.
+All four function forms VERIFIED against trino.io/docs/467 (conversion.html, math.html, string.html) on 2026-06-08 — not scored against resources/.
 
-## Per-question scores
+## Per-Q scores (Accuracy / Completeness / Clarity / Actionability)
 
-| Q | Topic | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|---|---|
-| Q1 | map(keys,values) build (re-probe) | 5.0 | 5.0 | 5.0 | 5.0 | **5.000** |
-| Q2 | map_values + cross-row UNNEST | 5.0 | 5.0 | 4.5 | 5.0 | **4.875** |
-| Q3 | power() / no `^` operator | 5.0 | 4.5 | 5.0 | 5.0 | **4.875** |
-| Q4 | typeof runtime type | 4.5 | 1.5 | 3.5 | 1.5 | **2.750** |
+### Q1 — typeof (CRITICAL FIX-A re-probe) — 5 / 5 / 5 / 5 = 5.00
+Responder used `typeof(order_total)`, explained it returns the type as a varchar string (`'varchar(20)'`, `'bigint'`, `'decimal(18,2)'`), correctly diagnosed that `varchar(...)` means the column is text (explaining the mixed number/text behavior + why `SUM()` fails), then gave the `CAST(... AS DECIMAL(18,2))` fix with `TRY_CAST` for bad values.
+- DOCS-VERIFIED: conversion.html — `typeof(expr)` "Returns the name of the type of the provided expression" (returns varchar). `cast`/`try_cast` entries confirmed.
+- Used `typeof` DIRECTLY — NOT "check the schema", NOT just "use CAST". This is precisely the FIX-A target.
+- **typeof FIX-A VERDICT: CLOSED.** (1st passing re-probe datapoint at iter734; iter733 baseline scored 2.75 FINDABLE-BUT-MISSING. One more angle recommended to bulletproof.)
 
-**Overall = (5.000 + 4.875 + 4.875 + 2.750) / 4 = 4.375 — PASS**
+### Q2 — round down to nearest multiple of N — 4 / 4.5 / 4 / 5 = 4.375
+SQL is CORRECT: `FLOOR(customer_age / 10) * 10` floors to the nearest lower multiple of 10 for non-negative ages; user said "round down to the nearest multiple," so FLOOR (not round) is the right choice. Generalization to 5/100 is right.
+- **Prose nit (genuine, light):** the explanation says "integer division (floor division) truncates toward zero — so 27/10 = 2." This muddles two distinct concepts:
+  - Trino INTEGER division (`/` on two integers) truncates **toward zero** — so for an INTEGER `customer_age`, `customer_age/10` is already truncated and the wrapping `FLOOR` is a redundant no-op.
+  - `FLOOR` rounds toward **negative infinity** — these DIFFER for negatives: `-27/10` (int division) = -2, but `FLOOR(-27/10.0)` = -3.
+  - "integer division (floor division)" is itself self-contradictory: in Trino, integer division is TRUNCATION, not floor division.
+- For the non-negative age use case the result is correct, so this is a small accuracy/clarity ding, NOT a defect. -1 accuracy / -1 clarity, light. Do not over-penalize — result is right.
+- iter735 LIGHT-TOUCH flag below.
 
-## Docs verification (trino.io/docs/467)
+### Q3 — sign — 5 / 5 / 5 / 5 = 5.00
+`sign(revenue_delta)` + `CASE sign(...) WHEN 1 ... WHEN -1 ... WHEN 0 ...` mapping to growth/loss/flat.
+- DOCS-VERIFIED: math.html — "0 if the argument is 0, 1 if greater than 0, −1 if less than 0"; return type same as input. Mapping is exact and clean.
 
-- **Q1** map.html: `map(array(K), array(V)) -> map(K, V)` — "Returns a map created using the given key/value arrays." VERBATIM. Confirms the direct 2-arg constructor builds a map from two parallel/equal-length arrays. `element_at(map(K,V), key) -> V` returns NULL if key absent (subscript `[]` errors). The responder used exactly `map(header_names, header_values)` + `element_at(..., 'Content-Type')` — NO map_from_entries, NO zip_with, NO map_agg detour.
-- **Q2** map.html: `map_values(x(K,V)) -> array(V)` — "Returns all the values in the map x." VERBATIM. `CROSS JOIN UNNEST(map_values(user_preferences)) AS t(preference_value)` is a sound cross-row flatten (single-alias UNNEST of an array is correct — array UNNEST takes ONE alias; the two-alias rule applies only to UNNEST(map_col)). SELECT DISTINCT to collapse to unique values is correct.
-- **Q3** math.html: `power(x, p) -> double` — "Returns x raised to the power of p." VERBATIM (`pow` is an alias). Operator list is `+ - * / %` ONLY — NO `^` exponentiation operator. The gotcha ("Trino does NOT support `^`, use power(base,exp)") is ACCURATE.
-- **Q4** conversion.html: `typeof(expr) -> varchar` — "Returns the name of the type of the provided expression." IS a real Trino 467 function (examples: `typeof(123)`->'integer', `typeof('cat')`->'varchar(3)', `typeof(cos(2)+1.5)`->'double').
+### Q4 — split delimited string to array — 5 / 5 / 5 / 5 = 5.00
+`split(tags, ';')` → array(varchar), `CROSS JOIN UNNEST(...) AS t(tag)` explode, `TRIM(tag)` note for spaces, `split_to_map()` pointer for KV pairs.
+- DOCS-VERIFIED: string.html — `split(string, delimiter)` "Splits string on delimiter and returns an array"; 3-arg `split(string, delimiter, limit)` form also exists (responder didn't need it; no error).
+- Clause order valid: `CROSS JOIN UNNEST` in FROM, `WHERE event_date = DATE '...'` after, `GROUP BY` after — all sound.
 
-## Q1 VERDICT — map(keys,values) STAYS CLOSED
+## Overall
 
-CONFIRMED CLOSED. This is the 2nd consecutive clean datapoint (iter732 FIX-A landed; iter733 re-probe LANDED CLEAN first-attempt with the direct 2-arg constructor, correct element_at NULL-safe access, and no convoluted detour). **map(keys_array, values_array) is now BULLETPROOFED** across two different phrasings (iter732 "zip a keys array + values array into a map" / iter733 "combine two parallel arrays into one keyed lookup"). No further FIX needed; treat as a standing pin.
+**Overall average = (5.00 + 4.375 + 5.00 + 5.00) / 4 = 4.84 — PASS** (threshold 3.5).
 
-## Q4 VERDICT — typeof IS a findable-but-missing gap (iter734 FIX-A)
+## iter735 flags
 
-Trino 467 DOES have `typeof(expr) -> varchar` returning the runtime type name as a string. Grep of resources/ confirms NO `typeof` content exists anywhere — this is a genuine FINDABLE-BUT-MISSING content gap.
+1. **typeof FIX-A — CLOSED but probe once more.** Re-probe from a 3rd phrasing to bulletproof: e.g. "an expression keeps coming out the wrong type — how do I see what Trino thinks it is mid-query?" Confirm the responder leads with `typeof()` and routes to CAST/TRY_CAST, not schema-inspection.
+2. **Q2 floor-vs-truncate prose — LIGHT TOUCH-UP (no defect).** At the `FLOOR(x/N)*N` round-down-to-multiple canonical (r07 §1.9.1), add a one-line clarification distinguishing:
+   - integer division `/` (two integers) = truncates **toward zero**;
+   - `FLOOR(x/N.0)` = rounds toward **negative infinity** (differs for negatives: `-27/10`=-2 vs `FLOOR(-27/10.0)`=-3);
+   - note that for an INTEGER column, `FLOOR(intcol/N)` is redundant (already truncated) — use `FLOOR` after real division (`/N.0` or DECIMAL) when you want true floor semantics.
+   Avoid the contradictory phrase "integer division (floor division)". Keep `FLOOR(x/N)*N` as the round-DOWN-to-multiple lead and `round(x/N)*N` as the round-to-NEAREST alt. Additive only; preserve existing canonical verbatim.
 
-- The responder behaved CORRECTLY on anti-hallucination: it did NOT invent a function, explicitly said it could not find the capability in resources/, and pointed the user to official docs. That honesty is exactly the desired failure mode (scored Accuracy 4.5 — the only ding: the phrasing "whether a type-inspection function exists" mildly implies one might not exist, when in fact Trino has a clean one).
-- But the user asked a question that HAS a clean, one-call Trino answer, and the responder gave no working SQL. Hence Completeness 1.5 and Actionability 1.5 — the engineer leaves with no next step.
-
-### iter734 FIX-A (teacher action)
-
-ADD a `typeof` canonical (suggested home: r07 math/inspection neighborhood or r23 conversion family, co-located with the CAST / TRY_CAST content so it routes for "what type is this column at runtime" debugging questions):
-
-- Lead: `typeof(expr) -> varchar` returns the Trino type name as a string. Docs-verbatim "Returns the name of the type of the provided expression."
-- Examples: `typeof(123)` -> 'integer', `typeof('cat')` -> 'varchar(3)', `typeof(cos(2)+1.5)` -> 'double'.
-- Use cases (keyword anchors — this is a debugging question, anchor on debugging phrasing): inspect the runtime type of a column/expression without reading the schema, debug union-branch type mismatches, diagnose JSON-extraction return types, debug implicit-coercion surprises, "what data type is this actually", "column behaves as string sometimes number other times", "check the type at query time".
-- Cross-ref to CAST / TRY_CAST (r23) so type-mismatch debugging routes between "what IS the type" (typeof) and "force the type" (CAST/TRY_CAST).
-
-## Teacher feedback summary
-
-- Three of four answers are clean, docs-correct, well-anchored (Q1 re-probe + Q2 + Q3). No churn needed on those canonicals.
-- The single drag is the missing `typeof` canonical. This is the ONLY actionable gap this iteration. Add it per FIX-A above; that is the highest-value (and likely only) edit for iter734.
-- Minor: Q3 Completeness 4.5 — complete for the literal question; could optionally note `exp(x)`/`ln(x)`/`log(b,x)`/`sqrt(x)` as the broader math family, but this is non-blocking and NOT a required edit.
+No new genuine gaps. Q3/Q4 fully clean and docs-verified.

@@ -1237,6 +1237,52 @@ FROM {{ ref('stg_users') }}
 - Resource 13 §"Postgres → Trino translation table" lists `ts::DATE` → `CAST(ts AS DATE)`. Inside the Postgres-side ingestion examples in resource 13 (Spark JDBC `dbtable` subqueries, pg_attribute lookups, gen_random_uuid()), the `::` cast IS valid because that SQL runs in Postgres, not Trino.
 - Resource 22 §3.2 (Postgres connector pushdown table) — the UUID typed-literal example `WHERE tenant_id = UUID 'a1b2c3d4-...'` is the Trino-compatible form for the equivalent Postgres `tenant_id = 'a1b2c3d4-...'::uuid` filter.
 
+### 4.4B INSPECT-THE-TYPE CANONICAL — ask Trino what data type a column/expression actually is: `typeof(expr) -> varchar` (the debugging tool before you CAST)
+
+**Keyword anchors (read first if your question contains any of these):** "what data type is this column", "type of an expression Trino", "column behaves as string sometimes number", "debug a type mismatch", "inspect runtime type", "typeof Trino", "find the type of a value", "ask Trino what type a column is", "is this column a string or a number", "what type does this expression return", "why does arithmetic fail on this column", "json_extract returns json not number".
+
+**The one-sentence definition.** `typeof(expr) -> varchar` returns the **name of the Trino type** of the expression you pass it, as a string — so when a column "behaves as a string in one query and a number in another", or a `+`/`SUM` fails with a type error, you ask Trino directly instead of guessing. Verified at [trino.io/docs/current/functions/conversion.html](https://trino.io/docs/current/functions/conversion.html): *"Returns the name of the type of the provided expression"*; documented examples: `typeof(123)` → `integer`, `typeof('cat')` → `varchar(3)`, `typeof(cos(2) + 1.5)` → `double`.
+
+```sql
+-- ✅ COPY THIS — find out what type a suspicious column actually is
+SELECT typeof(suspicious_col) FROM t LIMIT 1;
+```
+
+The result is the runtime Trino type name as a `varchar`, e.g. `'varchar(20)'`, `'bigint'`, `'integer'`, `'double'`, `'decimal(18,2)'`, `'boolean'`, `'date'`, `'timestamp(6)'`, `'json'`, `'array(integer)'`, `'map(varchar, varchar)'`, `'row(id bigint, name varchar)'`.
+
+**Worked debugging example 1 — "why does arithmetic on a JSON value fail?"** A very common trap: you extract a number out of a JSON payload and then try to add or `SUM` it, and it errors. Check the type:
+
+```sql
+-- ✅ COPY THIS — confirm the extracted value is JSON, not a number
+SELECT typeof(json_extract(payload, '$.amount'));   -- -> 'json'
+```
+
+`json_extract(...)` returns the Trino **`json`** type, NOT a number — so `json_extract(payload, '$.amount') + 1` or `SUM(json_extract(payload, '$.amount'))` fails. The fix is the scalar extractor plus a CAST: pull the value out as text with **`json_extract_scalar(...)`** (returns `varchar`), then `CAST(... AS DECIMAL(18,2))` or `CAST(... AS BIGINT)`:
+
+```sql
+-- ✅ COPY THIS — extract as text, then cast to a number you can do math on
+SELECT SUM(CAST(json_extract_scalar(payload, '$.amount') AS DECIMAL(18,2))) AS total
+FROM events;
+-- typeof(json_extract_scalar(payload, '$.amount')) -> 'varchar'
+-- typeof(CAST(json_extract_scalar(payload, '$.amount') AS DECIMAL(18,2))) -> 'decimal(18,2)'
+```
+
+**Worked debugging example 2 — "this column behaves as a string sometimes and a number sometimes."** That symptom almost always means the column is stored as `varchar` (text) and one query CASTs it while another doesn't. Confirm it:
+
+```sql
+-- ✅ COPY THIS — is order_total really a number, or text?
+SELECT typeof(order_total) FROM orders LIMIT 1;   -- e.g. -> 'varchar(20)'  (it's TEXT, not a number)
+```
+
+If you see `'varchar(...)'`, the column is text: comparisons like `order_total > 100` compare strings lexicographically (so `'9' > '100'` is true), and `SUM(order_total)` fails. Once `typeof` tells you the type, **CAST** it to fix: `CAST(order_total AS DECIMAL(18,2))` (strict) or `TRY_CAST(order_total AS DECIMAL(18,2))` (bad rows become NULL instead of failing the query — see §4.4A above).
+
+**Important — `typeof` reports the STATIC (resolved) type, not a per-row value.** `typeof` is a **debugging / introspection** tool: the type of an expression is fixed at query-analysis time, so it is the **same for every row** (you do not need to scan the whole table — `LIMIT 1` is plenty, and the value is identical regardless of which row you look at). It does NOT tell you "this particular row's value looks numeric" — for that you'd use `TRY_CAST(col AS DECIMAL(18,2)) IS NULL` to find rows that fail to parse. `typeof` answers *"what type did Trino assign this expression?"*; once you know, use `CAST` / `TRY_CAST` (§4.4A) to **change** it.
+
+**Cross-references.**
+- §4.4A above — `CAST(expr AS type)` / `TRY_CAST(expr AS type)` are how you **fix** a type once `typeof` has told you what it is.
+- Resource 13 §JSON — `json_extract` returns `json` (use `json_extract_scalar` for a `varchar` you can CAST to a number); the type-mismatch row there (`json_extract(...) = '42'`) is the same root cause this section diagnoses.
+- §4.4E below — `try(expression)` wraps a whole sub-expression (e.g. a JSON-then-CAST chain) and returns NULL on error, once you understand the types involved.
+
 ### 4.4E TRINO `try(expression)` CANONICAL — wrap an arbitrary expression and return NULL on error (the general-purpose error-suppressor; `TRY_CAST` is the cast-only sibling)
 
 **Keyword anchors (for findability — keep all of these in this section verbatim):** Trino `try` function, wrap expression return null on error, `try` vs `try_cast`, catch divide by zero invalid cast Trino, `try` + `COALESCE` default value, error handling Trino expression, suppress error return null Trino, general-purpose error-wrapping Trino, "Trino has no try function" is FALSE.
