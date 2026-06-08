@@ -1,82 +1,34 @@
-# iter741 Judge Feedback
+# Judge Feedback — iter742 (EXTENDED PHASE)
 
-**Topic focus**: date_format FIX-A re-probe (CRITICAL) + bitwise 2nd-angle (bulletproofing) + bool_and/bool_or (fresh) + weighted average (fresh)
+**Overall: 4.875 STRONG PASS** (per-Q avg 19.5/4; dim-avg 4.875; margin +1.375 above 3.5 floor). Federation NOT probed — row UNCHANGED.
 
-All dialect claims verified against trino.io/docs/467 (datetime / bitwise / aggregate .html) on 2026-06-09 via WebFetch — NOT against resources/. Production stack: Trino 467 + Iceberg, on-prem; none of these answers touch auth/authz, so no prod-fit concerns. state.json NOT bumped.
-
----
+All four answers verified against trino.io/docs/467 (datetime / aggregate / regexp / map / array) via WebFetch on 2026-06-09 — NOT against resources/. Production stack: Trino 467 + Iceberg, on-prem; none of these answers touch auth/authz, so no prod-fit concerns. ZERO dialect defects this iteration. state.json NOT bumped.
 
 ## Per-question scores
 
-### Q1 — date_format weekday display (date_format FIX-A re-probe, CRITICAL)
-| Dimension | Score |
-|---|---|
-| Accuracy | 5 |
-| Completeness | 5 |
-| Clarity | 5 |
-| Actionability | 5 |
-**Q1 avg = 5.00**
+### Q1 — 12-hour AM/PM time (date_format 2nd-angle re-probe) — 5.00
+Acc 5 / Comp 5 / Clar 5 / Act 5.
+- VERIFIED datetime.html: `%l` = hour 1-12 (no leading zero), `%i` = minute 00-59, `%p` = AM/PM — all VERBATIM correct → `'%l:%i %p'` → `'2:05 PM'`. CONFIRMED there is NO `%A` specifier (none used; clean).
+- `date_format(timestamp, format)` signature: column `event_timestamp` is already a TIMESTAMP, so NO CAST needed — correct. (Contrast iter740 defect where a bare DATE was passed without CAST — not repeated here.)
+- Joda equivalent `format_datetime(event_timestamp, 'h:mm a')` is the documented MySQL→Joda mapping (`h`=clockhour-of-halfday 1-12, `mm`=minute, `a`=halfday AM/PM). Correct.
+- **date_format VERDICT: STAYS CLOSED → BULLETPROOFED.** 2nd consecutive clean datapoint after the iter741 FIX-A (r27 §4.2 weekday `%W`/`%a` + `%A`-defang + DATE-needs-CAST PIN). The friendly-12-hour-time phrasing is a distinct angle from the weekday-name phrasing that drove iter741, and the responder nailed both the MySQL and Joda branches with no invalid specifier and no spurious CAST. Add r27 §4.2 date_format canonical to the lock inventory.
 
-DOCS-VERIFIED (datetime.html): `date_format(timestamp, format) → varchar` and `format_datetime(timestamp, format) → varchar` — FIRST arg is a TIMESTAMP, so a plain DATE MUST be CAST first. The responder's `CAST(signup_date AS timestamp)` is exactly right. Specifiers verbatim: `%a` = "Abbreviated weekday name (Sun .. Sat)", `%b` = "Abbreviated month name (Jan .. Dec)", `%d` = "Day of the month, numeric (01 .. 31)", `%Y` = "Year, numeric, four digits". CONFIRMED there is NO `%A` specifier in Trino 467 (full weekday is `%W`). The responder used `%a` (correct), NOT the invalid `%A` that caused the iter740 Q3 defect. The Joda `format_datetime(..., 'EEE MMM dd yyyy')` equivalent is correct (EEE=abbrev weekday, MMM=abbrev month, dd=day, yyyy=4-digit year). The specifier↔Joda mapping line is accurate. Both the timestamp-input PIN and the `%a not %A` correction are present in the answer.
+### Q2 — variance / stddev (fresh) — 5.00
+Acc 5 / Comp 5 / Clar 5 / Act 5.
+- VERIFIED aggregate.html: `variance(x)` = alias of `var_samp(x)` (sample, n-1); `stddev(x)` = alias of `stddev_samp(x)` (sample); `var_pop(x)`/`stddev_pop(x)` = population (n). All exist, all → double.
+- Responder correctly led with `VARIANCE()`/`STDDEV()` for the spread question, explained stddev = sqrt(variance) in the same units, gave the ~68%-within-±1σ intuition (beginner clarity), and correctly named `STDDEV_POP`/`VAR_POP` for the full-population case. The sample-vs-population distinction is exactly right.
 
-**date_format FIX-A VERDICT: CLOSED.** The two iter740 defects (invalid `%A` for weekday + passing a bare DATE to date_format) are both fixed in this answer — `%a` used, DATE CAST to timestamp. The r27 §4.2 canonical edit (weekday-name mapping rows + TIMESTAMP-input PIN + %A defang) surfaced correctly. First clean datapoint post-FIX-A; one more weekday/custom-display angle in a future iteration would bulletproof it.
+### Q3 — strip non-digits (regexp_replace, fresh) — 5.00
+Acc 5 / Comp 5 / Clar 5 / Act 5.
+- VERIFIED regexp.html: `regexp_replace(string, pattern, replacement)` replaces EVERY match (not just first); functions use Java pattern syntax, so the negated char class `[^0-9]` + empty replacement strips all non-digits → `'(415) 867-5309'` → `'4158675309'`. Exactly correct and the cleanest idiom.
 
-### Q2 — bitwise set-bit + neither-mask (2nd-angle re-probe, bulletproofing)
-| Dimension | Score |
-|---|---|
-| Accuracy | 5 |
-| Completeness | 5 |
-| Clarity | 5 |
-| Actionability | 5 |
-**Q2 avg = 5.00**
+### Q4 — map key existence (fresh) — 4.50
+Acc 5 / Comp 3 / Clar 5 / Act 5.
+- VERIFIED map.html: `element_at(map, key)` returns NULL when the key is absent — so `element_at(m,k) IS NOT NULL` is a valid existence test FOR THE ASKED SCENARIO (map values are non-null literals like `'dark'`/`'off'`). The `CASE WHEN ... IS NOT NULL THEN true ELSE false` and the WHERE-filter forms both work and run clean. The "do NOT write `cardinality(element_at(...))`" defang is correct (element_at returns a scalar value here, not a collection — type error).
+- **EDGE-CASE NUANCE (the only ding):** docs confirm `element_at` ALSO returns NULL when the key is PRESENT but its VALUE is NULL. So `element_at(m,k) IS NOT NULL` reports a present-with-null-value key as ABSENT — a false negative. The exact key-existence test that distinguishes this is `contains(map_keys(m), k)` (VERIFIED array.html `contains(x, element) → boolean`; map_keys → array(K), so `contains(map_keys(user_preferences), 'theme')` is the precise form). The responder did not mention this. It is NOT a defect for the asked example (non-null string values), so Acc stays 5; it is a Completeness gap only → Comp 3.
 
-DOCS-VERIFIED (bitwise.html): `bitwise_or(x, y) → bigint`, `bitwise_and(x, y) → bigint`, `bitwise_left_shift(value, shift)` — argument order (value, shift) confirmed, and the docs document ONLY function forms (no `<<`/`>>` operator in Trino 467). The responder's set-bit logic is correct: `bitwise_or(prefs, bitwise_left_shift(1,2))` sets bit 2 (2^2 = 4) leaving others untouched, and the literal `bitwise_or(prefs, 4)` alt is equivalent and correct. The neither-test is correct: mask 34 = bits 1 (2) + 5 (32) via `bitwise_or(2,32)`, and `bitwise_and(prefs, 34) = 0` is TRUE iff neither bit is set. The function inventory listed (bitwise_and/or/xor, bitwise_left_shift(value,shift), bitwise_right_shift) is accurate. UPDATE on an Iceberg table is supported in Trino 467 (merge-on-read default) — NOT penalized, as directed.
+## iter743 flag (additive note, LOW priority — NOT a defect)
+**FLAG worth an additive note:** In the map key-existence canonical (r09 / r07 §1a wherever `element_at` NULL-safe lookup lives), add a short note that `element_at(m,k) IS NOT NULL` is the common-case existence test BUT is a false-negative when a key maps to a NULL value, and that `contains(map_keys(m), k)` is the exact present-vs-absent test (distinguishes present-with-null-value). Keep it as a co-located one-liner/PIN next to the existing element_at content — do NOT churn the bulletproofed map(keys,values) canonical. This is additive findability/completeness, not a correction; the current answer is correct for the scenario asked.
 
-**bitwise VERDICT: STAYS CLOSED → BULLETPROOFED.** This is the 2nd consecutive clean bitwise datapoint (after the iter736 FIX-A that introduced the §4.4G canonical). No `<<` operator slip, correct set-bit and AND-mask-zero logic, function-only forms throughout. Stop re-probing; do NOT edit the r27 §4.4G canonical (iter693 churn-risk).
-
-### Q3 — bool_and / bool_or (fresh)
-| Dimension | Score |
-|---|---|
-| Accuracy | 5 |
-| Completeness | 5 |
-| Clarity | 5 |
-| Actionability | 5 |
-**Q3 avg = 5.00**
-
-DOCS-VERIFIED (aggregate.html): `bool_and(boolean) → boolean` returns TRUE iff every input is TRUE; `bool_or(boolean) → boolean` returns TRUE iff any input is TRUE; both ignore NULL values ("all of these aggregate functions ignore null values"). The responder's `bool_and(shipped)` (all shipped) and `bool_or(NOT shipped)` (any unshipped) per-`order_id` group aggregates are exactly correct and idiomatic — cleaner than `COUNT(CASE WHEN ...)` as the user asked. Single GROUP BY pass, one boolean per group, NULL-ignoring behavior correctly stated.
-
-### Q4 — weighted average (fresh)
-| Dimension | Score |
-|---|---|
-| Accuracy | 5 |
-| Completeness | 5 |
-| Clarity | 4.75 |
-| Actionability | 5 |
-**Q4 avg = 4.9375**
-
-DOCS-VERIFIED (trino.io/docs/467): `SUM(score * response_weight) / SUM(response_weight)` is the correct weighted-average idiom; `NULLIF(SUM(response_weight), 0)` correctly guards a zero-total-weight divide (returns NULL instead of erroring on integer/decimal divide-by-zero). The plain, per-group GROUP BY, and zero-weight-guard variants are all correct. The survey example weights (1.0 / 2.0 / 0.5) are DECIMAL literals, so the division is fractional — no truncation issue here, answer is fully correct. Minor clarity-only note (-0.25, NOT a defect): the answer does not mention that IF score AND weight were both integer-typed, `SUM(score*weight)/SUM(weight)` would be integer division (truncates toward zero) and would need a CAST/decimal to get a fractional result. Given the decimal weights in the example this is a latent edge, not an error in this answer.
-
----
-
-## Overall
-
-| Q | Avg |
-|---|---|
-| Q1 | 5.00 |
-| Q2 | 5.00 |
-| Q3 | 5.00 |
-| Q4 | 4.9375 |
-
-**OVERALL AVG = 4.984 → PASS** (threshold 3.5; overall average governs, no per-Q override).
-
----
-
-## Verdicts requested
-
-- **Q1 date_format FIX-A: CLOSED.** `%a` (not `%A`) used + DATE CAST to timestamp — both iter740 defects fixed. First clean post-FIX-A datapoint; one more custom-display/weekday angle would bulletproof.
-- **Q2 bitwise: STAYS CLOSED → BULLETPROOFED.** 2nd consecutive clean datapoint; correct set-bit OR, AND-mask=0 neither-test, function-only (no `<<`). Stop re-probing, do not edit §4.4G.
-
-## iter742 flags
-- **NO new defect. NO genuine resource gap.** Recommend a DEFAULT NO-OP integrity sweep next iteration.
-- **OPTIONAL teacher note (low priority, Q4 nuance, worth a one-liner)**: At the weighted-average canonical (r07 §A3), co-locate a short note that `SUM(x*w)/SUM(w)` is INTEGER division when both x and w are integer-typed (truncates toward zero) — to get a fractional weighted average, ensure a double/decimal is in play (decimal weights, or `CAST(... AS DOUBLE)` / `1.0 *`). This is a teacher-note, NOT a defect in this answer (the example used decimal weights, so the result is already fractional). Add adjacent only; do not reconcile or restructure.
-- **OPTIONAL low-prio re-probe**: date_format FIX-A 2nd angle (e.g. full weekday `%W` / a different custom display string) to move it from CLOSED toward BULLETPROOFED. Do NOT re-probe bitwise (now bulletproofed) or edit §4.4G/§4.2 (iter693 churn-risk).
+## Summary
+4 answers, 0 dialect defects, all VERIFIED against trino.io/docs/467. date_format is now BULLETPROOFED (2nd clean datapoint, distinct angle). variance/stddev and regexp_replace strip-non-digits are clean fresh datapoints. The only forward item is the additive `contains(map_keys(m),k)` exact-existence note for the present-with-null-value edge case. Honesty/accuracy discipline holding. Federation untouched (4.49944 vs 4.5 thin). DO NOT bump training/state.json.
