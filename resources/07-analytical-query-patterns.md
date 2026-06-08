@@ -3302,6 +3302,94 @@ ORDER BY MIN(total_revenue);
 
 **Cross-references.** [Pattern C4 above](#pattern-c4-width_bucket--bucket-a-numeric-value-into-a-histogram-equal-width-or-customuneven-bins-without-a-long-case-when-ladder) for the `width_bucket` flavor of the same bucketing decision (numeric-id bands without writing a CASE ladder). [Pattern C4a below](#pattern-c4a-fixed-width-n-histogram-every-bucket-the-same-width-open-ended-top--integer-division-floor-iter650-fix-a--the-exact-iter649-q4-assembly-bug-fix) for the fixed-width integer-division-floor flavor. [Resource 23 §8 Trino GROUP BY rules anchor](23-sql-best-practices-olap.md) for the alias-in-GROUP-BY visibility rules. The two-CTE pattern here is the same shape as **Pattern A2** (bucketed running total — GROUP BY then window over the aggregate): aggregate to the grain FIRST, then operate on the per-grain rows.
 
+#### SIBLING CANONICAL — 2-bucket "has-X vs doesn't" / status-breakdown rollup: "how many customers have orders vs never ordered" — GROUP BY the LABEL only, NOT the entity key (iter710 FIX-A)
+
+> **READ THIS FIRST if your question contains any of these keywords:** `how many customers have orders vs never ordered`, `count per bucket`, `has X vs doesn't summary`, `two-bucket rollup`, `count customers with and without`, `active vs inactive count`, `logged in vs never logged in count`, `split into buckets with counts`, `GROUP BY label not entity key`, `two totals one per group`, `count of users who placed an order vs those who did not`, `customers with at least one order vs zero orders`, `status breakdown count`, `count entities per category`, `has-orders vs never-ordered summary`, `users who ever did X vs never did X`. Verified at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) (`EXISTS` / `IN` subquery + `GROUP BY` rules — ordinal/expression supported, **SELECT-list alias-by-name NOT supported in GROUP BY**, see [trinodb/trino #16533](https://github.com/trinodb/trino/issues/16533)) on 2026-06-08.
+
+**DECISION ROUTING — one line.** To **COUNT entities per bucket/label** (segment rollup, has-X-vs-doesn't, status breakdown, active vs inactive) → **`GROUP BY` the LABEL expression ONLY** (or its ordinal) — **NEVER** `GROUP BY` the entity key + label (that yields one row per entity with `COUNT(*) = 1`, which is the iter709 Q1 granularity bug). This is the same rule as the revenue-band companion just above; this sibling handles the 2-bucket EXISTS-labeled case (the C4 companion above handles the multi-band CASE-over-numeric case).
+
+**The canonical 2-bucket rollup (the iter709 Q1 shape, FIXED):**
+
+```sql
+-- ✅ COPY THIS — how many customers have orders vs never ordered (exactly 2 rows out).
+-- Step 1 (inner CTE `labeled`): attach the bucket label to each customer using EXISTS.
+-- Step 2 (outer SELECT):       GROUP BY the LABEL ONLY to collapse to one row per bucket.
+WITH labeled AS (
+  SELECT u.customer_id,
+         CASE WHEN EXISTS (SELECT 1 FROM iceberg.sales.orders o
+                           WHERE o.user_id = u.customer_id)
+              THEN 'has_orders'
+              ELSE 'never_ordered'
+         END AS order_status
+  FROM iceberg.sales.users u
+)
+SELECT order_status,
+       COUNT(*) AS customer_count
+FROM labeled
+GROUP BY order_status
+ORDER BY order_status;
+-- Output (exactly 2 rows — one per bucket):
+--   order_status='has_orders',    customer_count=8421
+--   order_status='never_ordered', customer_count=1579
+```
+
+**Why this is the right shape.** The inner CTE `labeled` produces **one row per customer** with a 2-value label (`'has_orders'` / `'never_ordered'`) computed by a non-correlated-shaped `EXISTS` (Trino decorrelates it to a `SemiJoin[k = k]` node — see [resource 23 §10](23-sql-best-practices-olap.md)). The outer query then `GROUP BY order_status` ONLY — collapsing N customer rows to 2 bucket rows. The output cardinality is **exactly the number of distinct labels** (2 here), with `COUNT(*)` correctly reporting customers per bucket. This is the same general rule as the revenue-band C4 companion above (GROUP BY the LABEL only) — the only difference is the labeling step uses `EXISTS` instead of a numeric `CASE WHEN`.
+
+**DO NOT WRITE — the iter709 Q1 granularity-bug grain-wrong form:**
+
+```sql
+SELECT customer_id, CASE WHEN EXISTS (SELECT 1 FROM orders o WHERE o.user_id = users.customer_id) THEN 'has_orders' ELSE 'never_ordered' END AS order_status, COUNT(*) AS customer_count FROM users GROUP BY customer_id, order_status   -- ❌ WRONG for a per-bucket count: GROUP BY customer_id makes COUNT(*)=1 per customer — for a has-vs-never summary GROUP BY the label ONLY — DO NOT COPY
+```
+
+The bug: putting `customer_id` in the GROUP BY forces one row per customer, so `COUNT(*)` is always `1` and the result is **N rows of 1**, NOT the 2-row "has vs hasn't" summary the question asks for. The `AS customer_count` alias is a lie — it's a per-customer marker, not a per-bucket count. **Fix:** drop `customer_id` from both the SELECT and the GROUP BY; GROUP BY the LABEL only.
+
+**Alternative shape — `COUNT(*) FILTER (WHERE ...)` returning ONE row with TWO columns.** If the consumer prefers a wide "one row, side-by-side" shape over a tall "two rows, one per bucket" shape, use conditional aggregation in a single pass — no GROUP BY needed:
+
+```sql
+-- ✅ ALTERNATIVE — one row, two columns. Same answer, different shape.
+SELECT COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM iceberg.sales.orders o
+                                      WHERE o.user_id = u.customer_id))     AS customers_with_orders,
+       COUNT(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM iceberg.sales.orders o
+                                          WHERE o.user_id = u.customer_id)) AS customers_without_orders
+FROM iceberg.sales.users u;
+-- Output (exactly 1 row):
+--   customers_with_orders=8421, customers_without_orders=1579
+```
+
+Both shapes return the same totals. **Pick the GROUP BY form** if you want a tall result (extensible to 3, 4, N buckets by adding more `CASE` branches) or want to feed a downstream `GROUP BY`/pivot. **Pick the FILTER form** if you want a single-row dashboard-tile result with named columns. Either way, the underlying labeling step uses `EXISTS` (or `IN (SELECT ...)`) — both decorrelate to a `SemiJoin` in EXPLAIN.
+
+**Generalization — N-bucket status-breakdown (3+ buckets).** The same GROUP-BY-LABEL-ONLY rule scales to N buckets — add more `WHEN` branches to the CASE in the labeling CTE, and the output gets N rows:
+
+```sql
+WITH labeled AS (
+  SELECT u.customer_id,
+         CASE WHEN EXISTS (SELECT 1 FROM iceberg.sales.orders o
+                           WHERE o.user_id = u.customer_id
+                             AND o.order_ts >= current_date - INTERVAL '30' DAY) THEN 'active_30d'
+              WHEN EXISTS (SELECT 1 FROM iceberg.sales.orders o
+                           WHERE o.user_id = u.customer_id)                        THEN 'dormant'
+              ELSE                                                                       'never_ordered'
+         END AS status
+  FROM iceberg.sales.users u
+)
+SELECT status, COUNT(*) AS customer_count
+FROM labeled
+GROUP BY status
+ORDER BY status;
+-- Output: 3 rows — active_30d / dormant / never_ordered.
+```
+
+**DO NOT WRITE — other shape-confusion traps for the has-X-vs-doesn't rollup:**
+
+| Wrong shape | Why it errors / misleads |
+|---|---|
+| `GROUP BY order_status` where `order_status` is a SELECT-list alias for a `CASE WHEN EXISTS(...)` expression in the SAME SELECT (no inner CTE) | **Trino 467 does NOT support GROUP BY by SELECT-list alias name** (per [trinodb/trino #16533](https://github.com/trinodb/trino/issues/16533) and [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) — only ordinal or input-column expression is accepted in `GROUP BY`). You must EITHER (a) wrap the labeling step in an inner CTE then GROUP BY the labeled column (canonical above), OR (b) `GROUP BY 1` by ordinal, OR (c) repeat the full `CASE WHEN EXISTS (...) THEN ... END` expression verbatim in the `GROUP BY`. The CTE form is preferred — it avoids duplicating the EXISTS subquery in two places and reads cleanly. |
+| `SELECT COUNT(*) FROM users WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = users.customer_id)` (one scalar — only the "has" half) | Returns ONE number (just `customers_with_orders`) — not the 2-bucket rollup. You'd need a second query (or the FILTER form above) for the "never_ordered" count. Fine if you ONLY need the "has" count; wrong if you need both totals from one query. |
+| Manual `LEFT JOIN orders ... GROUP BY customer_id, CASE WHEN o.order_id IS NULL THEN 'never' ELSE 'has' END` then `COUNT(*)` | Multiplies — if a customer has 5 orders, they appear 5 times under `'has'`, so the bucket count is inflated by orders-per-customer. The EXISTS/CTE form returns TRUE/FALSE once per customer with no duplication (it's a semi-join, not a left join). If you must use a join, dedupe via `COUNT(DISTINCT customer_id)` per bucket, but the EXISTS form is simpler and faster. |
+| `GROUP BY customer_id` (omitting the label entirely) | Returns one row per customer — there are no `'has_orders'` / `'never_ordered'` buckets in the output at all. The whole point of the question is collapsing to bucket-grain; this query stays at entity-grain. |
+
+**Cross-references.** [The C4 companion immediately above](#companion-canonical--bucket-then-rollup-count-customers-per-revenue-band-vs-label-each-customer-with-their-band--pick-the-right-outer-group-by-iter703-fix-a2) for the same GROUP-BY-LABEL-ONLY rule applied to multi-band CASE-over-numeric (`small`/`medium`/`large` by revenue). [Resource 23 §10 SemiJoin / IN-subquery / EXISTS canonical](23-sql-best-practices-olap.md) for why `EXISTS (SELECT 1 FROM orders WHERE ...)` and `IN (SELECT user_id FROM orders)` both decorrelate to the same fast `SemiJoin[k = k]` plan node — use either for the labeling step in the inner CTE. [Resource 23 §10 NOT IN + NULL gotcha](23-sql-best-practices-olap.md) for why you should use `NOT EXISTS` instead of `NOT IN` when the right side may contain NULLs (the `'never_ordered'` half of this pattern is safe either way because we use the positive `EXISTS` form inside a CASE; if you flip to a `WHERE u.customer_id NOT IN (SELECT user_id FROM orders)` form, you reintroduce the NULL-poison risk). [Resource 23 §8 Trino GROUP BY rules](23-sql-best-practices-olap.md) for the SELECT-list alias-in-GROUP-BY restriction ([trinodb/trino #16533](https://github.com/trinodb/trino/issues/16533) — Trino accepts ordinal or input-column expression in `GROUP BY`, NOT alias-by-name).
+
 ### Pattern C4a: Fixed-width $N histogram (every bucket the same width, open-ended top) — integer-division floor (iter650 FIX-A — the EXACT iter649 Q4 assembly bug fix)
 
 > **READ THIS FIRST if your question contains any of these keywords:** `fixed-width $50 buckets`, `histogram of order amounts`, `bucket into 50-dollar bins`, `count orders per amount range`, `bin a numeric column into equal-width ranges`, `histogram without hardcoding buckets`, `session-duration buckets`, `age buckets 10 years wide`, `5-dollar bands`, `bin sales by dollar range`, `bucket into N-dollar groups`, `floor to nearest 50`, `round down to nearest bucket width`, `equal-width bins no fixed upper bound`. Verified at [trino.io/docs/current/functions/math.html](https://trino.io/docs/current/functions/math.html) + [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) on 2026-06-08.
