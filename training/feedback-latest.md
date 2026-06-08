@@ -1,40 +1,47 @@
-# Judge Feedback — iter729
+# Judge Feedback — iter730
 
-**Overall average: 4.969 / 5 — PASS** (threshold 3.5)
+**Verification basis:** All dialect claims verified against trino.io/docs/467 (math.html, sql/select.html, functions/string.html, functions/array.html) on 2026-06-08. Not graded against resources/.
 
-All four dialect forms docs-verified against trino.io/docs/467 (math.html, aggregate.html, datetime.html, json.html) on 2026-06-08. Not scored against resources/.
+## Per-question scores (Accuracy / Completeness / Clarity / Actionability)
 
-## Per-question scores
+### Q1 — round UP (ceil/ceiling) — avg 5.00
+- 5 / 5 / 5 / 5
+- VERIFIED: math.html — `ceiling(x)` = "Returns x rounded up to the nearest integer" (toward +infinity); `ceil(x)` is explicitly "an alias for ceiling()". 4.1→5, 4.0→4 both correct.
+- Responder used ceil()/ceiling() ONLY. Did NOT use round() (4.1→4 wrong), floor (toward −inf), truncate (toward zero), or CAST (rounds half-up). Clean.
+- **ROUND-TO-WHOLE 4-WAY CANONICAL: STAYS CLOSED / BULLETPROOFED.** This is the 2nd consecutive clean round-direction datapoint after iter729 (CAST-rounds-not-truncates FIX-A). The round-up (ceil) leg is now confirmed correct from a distinct phrasing ("seat packs, always round up"). No defect.
 
-| Q | Topic | Acc | Compl | Clar | Action | Avg |
-|---|---|---|---|---|---|---|
-| Q1 | drop decimals toward zero (truncate vs CAST) | 5 | 5 | 5 | 5 | **5.00** |
-| Q2 | group-concat / Postgres string_agg equivalent | 5 | 4.5 | 5 | 5 | **4.875** |
-| Q3 | ISO week number of a date | 5 | 5 | 5 | 5 | **5.00** |
-| Q4 | count elements in a JSON-array text column | 5 | 5 | 5 | 5 | **5.00** |
+### Q2 — TABLESAMPLE — avg 4.75
+- 5 / 4 / 5 / 5
+- VERIFIED: select.html — both `TABLESAMPLE BERNOULLI (percentage)` and `TABLESAMPLE SYSTEM (percentage)` exist. BERNOULLI = per-row independent probability, scans all blocks, no I/O reduction, uniform. SYSTEM = divides table into logical segments and samples at that granularity, can reduce I/O, non-uniform/connector-dependent. Responder's SYSTEM-vs-BERNOULLI characterization is accurate. `TABLESAMPLE SYSTEM (1)` syntax and percentage-arg form are valid Trino 467.
+- Minor completeness ding: docs note neither method gives "deterministic bounds on the number of rows returned" — so ~1% is approximate, and `LIMIT 100` after a 1% sample of 400M still materializes ~4M sampled rows before the cap. Worth a one-line caveat but not an error.
 
-Overall avg = (5.00 + 4.875 + 5.00 + 5.00) / 4 = **4.969 PASS**
+### Q3 — strip specific leading characters (trim LEADING) — avg 4.75
+- 5 / 4 / 5 / 5
+- VERIFIED: string.html — `trim([ [ specification ] [ string ] FROM ] source)` IS supported with LEADING/TRAILING/BOTH. Docs examples: `trim('!' FROM '!foo!')→'foo'`, `trim(BOTH '$' FROM '$var$')→'var'`, `trim(TRAILING 'ER' FROM upper('worker'))→'WORK'`. Responder's `trim(LEADING '0' FROM '000042')→'42'` and `trim(LEADING '$' FROM '$PRD-99')→'PRD-99'` are correct.
+- **CRITICAL NUANCE — CORRECTED vs the run-prompt framing:** the Trino 467 FROM-form trim_character is NOT single-char-only. The docs `trim(TRAILING 'ER' FROM 'WORKER')→'WORK'` strips a SET of characters (both E and R), and docs state "if the trim string contains duplicates, only the first is used." So the FROM-form IS the set-capable form. Separately, Trino 467 string.html documents NO `ltrim(string, chars)` / `rtrim(string, chars)` two-arg set form — only single-arg whitespace `ltrim(string)` / `rtrim(string)`. The run-prompt's premise (FROM-form=single-char; set-form=ltrim/rtrim(string,chars)) is INVERTED relative to the 467 docs.
+- Net judgment: responder's answer is technically correct for the cases shown AND the trim form it cited already handles "a set of characters." The only real gap is presentational — the user explicitly said "(or set)" and the responder described trim as stripping "a specific character" without showing a multi-char example like `trim(LEADING '0$' FROM ...)` or stating that the FROM-form already accepts a char set. Minor completeness ding, NOT an accuracy error.
 
-## Q1 FIX-A VERDICT — CLOSED
+### Q4 — concatenate two array columns — avg 5.00
+- 5 / 5 / 5 / 5
+- VERIFIED: array.html — `||` concatenates arrays (`ARRAY[1] || ARRAY[2] → [1,2]`); `concat(array1,...,arrayN)` is the function form, explicitly "the same functionality as the SQL-standard concatenation operator (||)"; `array_distinct(x)` removes duplicate values. Responder's `product_tags || support_tags`, `array_distinct(...)` dedup, and the claim that `||` is BOTH the string and array concatenation operator are all accurate.
 
-The iter728 Q2 defect is **CLOSED**. In iter728 the responder falsely claimed "CAST(x AS integer) truncates toward zero." This iteration the responder gave the OPPOSITE, correct distinction:
-- `truncate(balance)` = drops digits after the decimal = toward zero (-3.7 → -3, NOT -4). **Docs-verified verbatim** (math.html: "Returns x rounded to integer by dropping digits after decimal point"). Dropping digits is by definition toward-zero.
-- It then explicitly warned NOT to use `CAST(balance AS INTEGER)` because it ROUNDS half-up (CAST(47.89 AS INTEGER)=48). This is established Trino 467 behavior and is exactly the right caveat for the user's "without rounding" requirement.
+## Overall
 
-The responder correctly held truncate=toward-zero, CAST=rounds-half-up, floor=toward −inf. The 4-way "reduce to a whole number" canonical the teacher added in iter729 worked. No regression. This is the FIRST passing datapoint for the corrected CAST-rounds claim — recommend one more angle (e.g., negative-value chop, or "chop the cents off a price") before marking bulletproofed.
+| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|---|
+| Q1 | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 | 5 | 4 | 5 | 5 | 4.75 |
+| Q3 | 5 | 4 | 5 | 5 | 4.75 |
+| Q4 | 5 | 5 | 5 | 5 | 5.00 |
 
-## Verification notes per Q
+**OVERALL AVERAGE = 4.875 → PASS** (threshold 3.5).
 
-- **Q2**: `array_join(array_agg(tag ORDER BY tag), ',')` is correct and is the canonical Trino idiom. Docs confirm array_agg supports an in-aggregate ORDER BY and a FILTER (WHERE ...) clause, and array_agg returns array<[same as input]>. The FILTER (WHERE tag IS NOT NULL) for LEFT-JOIN null-padding and COALESCE for empty-string are both correct. **One factual nuance the directive overstated**: Trino 467 DOES have a native `listagg(x, sep) WITHIN GROUP (ORDER BY ...)` aggregate (aggregate.html) — it does NOT have `string_agg` (that's Postgres). The responder did not claim listagg is absent, so there is NO error; but it could have mentioned listagg as a native alternative. That is the only reason Q2 completeness is 4.5 not 5. Not a defect — the array idiom remains the recommended/portable answer.
-- **Q3**: `week(x)` and its alias `week_of_year(x)` both exist (datetime.html: "week_of_year(x) → bigint ... This is an alias for week()"), both return the ISO 8601 week (1–53). EXTRACT(WEEK FROM date) maps to week(). date_trunc('week', x) returns the Monday (ISO week start) — confirmed via the docs truncation example (2001-08-20 is a Monday) and the ISO-8601 spec (weeks start Monday). All claims TRUE. week_of_year IS a real Trino 467 function (alias verified).
-- **Q4**: `json_array_length(feature_list)` on a VARCHAR column works **directly** — json.html signature is `json_array_length(json) → bigint` where json is "a string containing a JSON array." Implicit varchar acceptance; NO CAST(... AS JSON) or json_parse() required. The responder is fully correct and there is **NO completeness gap** on the input-type nuance. json_extract for the nested case is also correct (accepts a varchar JSON string, returns json).
+## Teacher feedback / flags for iter731
 
-## Teacher action for iter730
+1. **Q1 round-to-whole 4-way canonical: CLOSED / bulletproofed.** No action. Two consecutive clean datapoints (iter729 CAST-rounds, iter730 ceil round-up) across different phrasings.
 
-- **NO defect to fix.** Resources are correct and findable across all four probes.
-- **Optional findability nudge (NOT required):** In the group-concat / string_agg canonical (r07 analytical patterns), consider a one-line cross-ref that Trino 467 also has native `listagg(x, sep) WITHIN GROUP (ORDER BY ...) [ON OVERFLOW ...] [FILTER (WHERE ...)]` as an alternative to the `array_join(array_agg(...))` idiom — for users searching the literal "listagg" keyword. Keep `array_join(array_agg(...), sep)` as the LEAD/preferred form (portable, no WITHIN GROUP syntax). Pointer only; do not churn the existing canonical.
-- Hold all iter724–729 locks (DECIMAL §4.4A, round↔CAST §B2, 4-way reduce-to-whole-number canonical, array_max/array_min, count_if/CAST-bool-to-int, rollback PIN, $history, MAP-explode, regexp_like).
+2. **Q3 trim set-form nuance — LIGHT ADDITIVE candidate (verify against docs first):** If the trim/strip-leading-chars canonical in r27 (and any r23 mirror) currently implies trim's FROM-form is single-character-only, that is WRONG for Trino 467 — `trim(LEADING|TRAILING|BOTH chars FROM s)` strips a SET of characters (docs example `trim(TRAILING 'ER' FROM 'WORKER')→'WORK'`; duplicates collapse to first). Also confirm the canonical does NOT recommend `ltrim(string, chars)` / `rtrim(string, chars)` as the Trino set-form — those two-arg forms are NOT documented in Trino 467 string.html (only single-arg whitespace ltrim/rtrim). The copy-attractive set-strip form is `trim(LEADING '0$' FROM s)`. Recommend a one-line keyword anchor + multi-char example so a "set of characters" phrasing lands on the trim-FROM set form, not on a non-existent ltrim/rtrim(string,chars). This is the only genuine (minor) gap surfaced this iter.
 
-## iter730 flag
+3. **Q2 TABLESAMPLE:** Accurate and well-targeted. Optional one-line note that the sample size is approximate (no deterministic row-count bound) would close the small completeness gap. Not urgent.
 
-No genuine new gap. The only item is the optional `listagg`-keyword findability nudge above (the array_join/array_agg idiom is correct and was not penalized). Q4 json_array_length-on-varchar is NOT a gap — implicit varchar→array coercion works per docs.
+No false dialect claims emitted by the responder this iteration. state.json NOT modified.
