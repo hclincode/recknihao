@@ -1,50 +1,48 @@
-# Judge Feedback — iter790 (DEFAULT NO-OP / durability-breadth sweep)
+# iter791 — Judge Feedback (DEFAULT NO-OP / durability-breadth sweep)
 
-**Mode:** Extended phase, end-of-iteration feedback. Teacher made ZERO resource edits this iter (4 fresh adjacent probes on well-covered fundamentals).
+**Sweep type:** Teacher made ZERO resource edits. 4 fresh adjacent probes (modulo even/odd, upper-case, multi-condition CASE bucket, current-year filter). Key check = Q3 date subtraction in Trino 467.
 
-**Verification:** All dialect claims verified against trino.io/docs/467 (sql/select.html, functions/aggregate.html) — not taken from resources/ as ground truth.
+**All dialect facts verified against trino.io/docs/467 (datetime.html, string.html) + WebSearch 2026-06-09.**
 
 ---
 
 ## Per-question scores
 
-### Q1 — EXISTS / has-at-least-one (boolean flag for any order > $1000)
-Answer: `CASE WHEN EXISTS (SELECT 1 FROM orders o WHERE o.customer_id=c.customer_id AND o.amount>1000) THEN true ELSE false END AS has_large_order`. Notes EXISTS = semijoin, short-circuits at first match, SELECT 1 is a dummy. Cites r07.
+### Q1 — MODULO even/odd A/B bucketing
+`CASE WHEN user_id % 2 = 0 THEN 'Bucket A (even)' ELSE 'Bucket B (odd)' END`; `%` modulo operator; `user_id % 10` for 10 buckets. Cites r07.
 
-- **Verified:** trino.io/docs/467 confirms EXISTS predicate "determines if a subquery returns any rows"; correlated `WHERE EXISTS` and `CASE WHEN EXISTS (...) THEN true ELSE false END` are valid; planned as semijoin, no full count needed. Correct.
+- Accuracy **5** — VERIFIED: Trino 467 has the `%` modulo operator and `mod(n, m)` function for integers; `user_id % 2 = 0` correctly tests even. CLEAN.
+- Completeness **5** — even/odd covered, plus N-bucket generalization (`% 10`).
+- Clarity **5** — names the operator, plain even/odd labels.
+- Actionability **5** — drop-in CASE expression.
+- **Q1 avg = 5.00**
 
-| Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|
-| 5 | 4.5 | 5 | 5 | **4.875** |
+### Q2 — UPPERCASE country_code
+`upper(country_code) AS country_code_uppercase`; `upper('us')='US'`, `upper('Us')='US'`. Cites r27.
 
-### Q2 — Conditional sum (positive + negative totals, one pass)
-Answer: `SUM(amount) FILTER (WHERE amount > 0) AS total_credits, SUM(amount) FILTER (WHERE amount < 0) AS total_debits`. One pass, ANSI FILTER modifier. Cites r23 §3.1E.
+- Accuracy **5** — VERIFIED vs string.html: `upper(string) -> varchar` uppercases; `lower()` is the sibling. CLEAN.
+- Completeness **5** — shows mixed-case input handled.
+- Clarity **5** — concrete `'us'→'US'` example.
+- Actionability **5** — direct.
+- **Q2 avg = 5.00**
 
-- **Verified:** trino.io/docs/467 aggregate docs confirm the FILTER (WHERE cond) modifier removes rows from aggregation. Both totals in one pass. Correct. (Equivalent `SUM(CASE WHEN amount>0 THEN amount ELSE 0 END)` also valid — FILTER form is the cleaner idiom.)
+### Q3 — MULTI-CONDITION delivery-speed bucket (KEY CHECK)
+`CASE WHEN (delivery_date - order_date) <= 1 THEN 'Express' WHEN (delivery_date - order_date) <= 3 THEN 'Standard' ELSE 'Slow' END`. Cites r07.
 
-| Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|
-| 5 | 5 | 5 | 5 | **5.0** |
+- Accuracy **2.5** — **DIALECT DEFECT.** The CASE/threshold STRUCTURE is correct (cascading `<=` with the smallest bound first is the right ordering and correctly yields 0-1 Express / 2-3 Standard / 4+ Slow). BUT the day-count expression `delivery_date - order_date` is **WRONG Trino 467 dialect** — see verdict below. The query as written does NOT compile.
+- Completeness **4** — offered both inline and CTE variants; the bucket boundaries are complete and correctly ordered. Docked because both variants carry the same broken day-computation.
+- Clarity **4.5** — clear labels, CTE alias `days_to_deliver` is readable.
+- Actionability **2.5** — an engineer who pastes this gets a type/operator error, not a working query.
+- **Q3 avg = 3.375**
 
-### Q3 — Pagination (page 3 = rows 51-75, ORDER BY signup_date)
-Answer: `SELECT * FROM users ORDER BY signup_date ASC OFFSET 50 LIMIT 25`. Notes OFFSET comes BEFORE LIMIT in Trino clause order; LIMIT applies after ORDER BY. Cites r27 pagination.
+### Q4 — CURRENT-YEAR filter (auto-rolls)
+`WHERE year(order_date) = year(current_date)`; `year()`→bigint; `current_date` (no parens); auto-rolls. Alt `EXTRACT(YEAR FROM order_date) = EXTRACT(YEAR FROM current_date)`. Cites r07 + r23.
 
-- **Verified:** trino.io/docs/467/sql/select.html confirms "If the OFFSET clause is present, the LIMIT or FETCH FIRST clause is evaluated after the OFFSET clause" — OFFSET-before-LIMIT clause order is CORRECT. OFFSET 50 LIMIT 25 = rows 51-75. Correct.
-- **Optional completeness note (not a defect):** deep OFFSET is inefficient at scale; keyset/seek pagination (`WHERE signup_date > :last`) is better for deep pages. The answer is correct as-is for the asked page.
-
-| Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|
-| 5 | 4.5 | 5 | 5 | **4.875** |
-
-### Q4 — MIN + MAX per group (first_order / last_order per customer)
-Answer LEADS with `min_by(order_date, order_date) AS first_order, max_by(order_date, order_date) AS last_order`, THEN notes plain `MIN(order_date)`/`MAX(order_date)` GROUP BY are the simpler/clearer choice for just the dates, and correctly explains min_by/max_by are for pulling a value from a DIFFERENT column.
-
-- **Verified:** trino.io/docs/467 confirms MIN/MAX and min_by(x,y)/max_by(x,y) all exist. `min_by(order_date, order_date)` is functionally equivalent to `MIN(order_date)` (and max_by analogously) — it WORKS but is pointlessly indirect for the same-column case.
-- **Q4 verdict — CLARITY IMPRECISION, NOT A DEFECT:** Both forms compile and return the correct earliest/latest dates. The answer DID surface plain MIN()/MAX() as the clean/recommended choice and correctly scoped min_by/max_by to the different-column case. The only flaw is presentation order: it LED with the redundant `min_by(date, date)` before the clean MIN/MAX. The correct answer is present and recommended, so no accuracy loss — Clarity docked for leading with the convoluted form.
-
-| Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|
-| 5 | 4.5 | 3.5 | 4.5 | **4.375** |
+- Accuracy **5** — VERIFIED vs datetime.html: `year(date) -> bigint`, `current_date` valid (no parens), `EXTRACT(YEAR FROM ...)` equivalent. Filter correctly selects the current calendar year and auto-rolls Jan 1. CLEAN for correctness.
+- Completeness **4** — correct, but MISSES the sargability nuance (see note b). Not a defect — a completeness improvement.
+- Clarity **5** — explains `year()` returns bigint, current_date parens-free, auto-roll behavior.
+- Actionability **5** — drop-in WHERE clause.
+- **Q4 avg = 4.75**
 
 ---
 
@@ -52,20 +50,52 @@ Answer LEADS with `min_by(order_date, order_date) AS first_order, max_by(order_d
 
 | Q | Avg |
 |---|---|
-| Q1 | 4.875 |
-| Q2 | 5.0 |
-| Q3 | 4.875 |
-| Q4 | 4.375 |
-| **Overall** | **4.781** |
+| Q1 | 5.00 |
+| Q2 | 5.00 |
+| Q3 | 3.375 |
+| Q4 | 4.75 |
 
-**Result: PASS** (overall 4.781 >= 3.5; no single-Q veto, all four well above threshold).
+**Overall avg = (5.00 + 5.00 + 3.375 + 4.75) / 4 = 4.53125 → PASS** (overall governs; no single-Q veto).
 
 ---
 
-## Teacher feedback
+## (a) Q3 DATE-SUBTRACTION VERDICT — DEFECT
 
-(a) **Q4 lead-with-min_by note:** Plain `MIN(order_date)`/`MAX(order_date)` IS surfaced as the clean answer and correctly recommended — so this is a **clarity imprecision, not a defect**. The responder led with the redundant `min_by(date, date)` form before the clean MIN/MAX. No accuracy loss (both compile, the clean form is given and recommended). Watch for a pattern in iter791: if "lead-with-the-convoluted-form" recurs on a same-column MIN/MAX-style probe, a light additive nudge in r23 §3.1D (lead MIN/MAX first; demote min_by/max_by to "when the returned value comes from a DIFFERENT column than the one you rank by") would fix it. NOT urgent — single occurrence, answer still correct.
+**`delivery_date - order_date` is NOT valid Trino 467 dialect for a day count.**
 
-(b) **iter791 designation: DEFAULT NO-OP / durability-breadth.** No open defect — all four fundamentals (EXISTS-semijoin / sum-FILTER-conditional-sum / OFFSET-before-LIMIT-pagination / MIN-MAX-per-group-vs-min_by-max_by) verified correct against trino.io/docs/467. Continue the durability-breadth sweep on fresh adjacent topics. Keep an eye on the Q4 lead-ordering note above — second occurrence on a different phrasing escalates to a light FIX-A on r23 §3.1D; otherwise stay NO-OP.
+Verified vs trino.io/docs/467/functions/datetime.html + WebSearch:
+- Trino does **not** support `date - date` returning an integer day count (that is PostgreSQL behavior). The `-` operator on temporal types in Trino is for `date/timestamp - INTERVAL`, not `date - date`. Subtracting two DATE values does not yield a bigint, so `(delivery_date - order_date) <= 1` is a type/operator error — the query will not run as written.
+- **CORRECT canonical form:** `date_diff('day', order_date, delivery_date)` → bigint day count (docs: `date_diff('day', DATE '2020-03-01', DATE '2020-03-02')` = 1). Argument order matters: `date_diff(unit, earlier, later)` returns `later - earlier`, so `date_diff('day', order_date, delivery_date)` gives positive days-to-deliver.
 
-**Standing pins held this iter:** EXISTS-as-semijoin, sum-FILTER conditional-sum, OFFSET-before-LIMIT pagination, MIN/MAX-per-group vs min_by/max_by-for-other-column. All four reconfirmed accurate. No regressions.
+  Correct query:
+  ```sql
+  CASE
+    WHEN date_diff('day', order_date, delivery_date) <= 1 THEN 'Express'
+    WHEN date_diff('day', order_date, delivery_date) <= 3 THEN 'Standard'
+    ELSE 'Slow'
+  END AS delivery_speed
+  ```
+
+**Responder-slip vs resource-defect: RESPONDER SLIP. Resources are CLEAN.**
+- r07 (`resources/07-analytical-query-patterns.md`) uses `date_diff('day', ...)` consistently and NEVER shows a bare `date - date` day-count form. Evidence:
+  - `resources/07-analytical-query-patterns.md:1095-1097` — day-bucketing inside CASE using `date_diff('day', f.first_event_at, e.event_time) BETWEEN 1 AND 7 ...` (the exact pattern Q3 should have modeled).
+  - `:906`, `:910`, `:1109`, `:1119`, `:1123`, `:1173`, `:1177-1178` — all use `date_diff(unit, d1, d2)`.
+  - A repo-wide grep for bare date-minus-date day counts returned NO hits in any resource.
+- The responder fabricated `delivery_date - order_date` by importing a Postgres/Oracle prior rather than copying the `date_diff` idiom that r07 plainly shows. The cited resource does NOT contain the broken form.
+
+## (b) Q4 SARGABILITY NOTE (correct, but improvable — NOT a defect)
+
+`year(order_date) = year(current_date)` is correct and auto-rolls, but **wrapping `order_date` in `year()` defeats partition pruning / predicate pushdown** on a large Iceberg table (Trino cannot push a function-wrapped column predicate to the connector / cannot prune partitions on `order_date`). The sargable form scans far less:
+```sql
+WHERE order_date >= date_trunc('year', current_date)
+  AND order_date <  date_trunc('year', current_date) + INTERVAL '1' YEAR
+```
+This keeps the bare column on the left so Iceberg can prune year/month partitions. The responder's answer is CORRECT for correctness; this is a completeness/performance improvement, not counted as a defect.
+
+## (c) iter792 designation — DEFAULT NO-OP / durability-breadth sweep
+
+- Q3 defect traces to a **responder slip**, not a resource defect (resources clean — r07 shows `date_diff('day', ...)` at lines 1095-1097 and throughout). Per the reconcile/churn-risk policy, do NOT edit r07: it already contains the correct canonical and a churn-edit risks regressing well-covered date-diff content.
+- No open resource defect; no new imprecision in resources.
+- **Optional light additive findability nudge (only if `date - date` recurs 2+ more times):** if a future probe again shows the responder reaching for bare `date - date` on a days-between question, add a defang anchor near the r07 date-diff card: keyword anchors "days between two dates / days to deliver / elapsed days / difference between dates → `date_diff('day', earlier, later)`; Trino has NO `date - date` day-count (Postgres-only)". Hold for now — single datapoint.
+- Suggested fresh adjacent probes for iter792: `date_diff` age-in-days direct phrasing (to bulletproof against the date-minus-date slip), `least()` row-wise min, NULLIF divide-by-zero guard, `mod()` function-form vs `%` operator.
+- PRESERVE: r07 modulo/CASE-bucket/year-filter cards, r27 upper/lower card, r07/r23 current-year filter cards — all verified clean, churn risk.

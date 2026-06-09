@@ -1,6 +1,7 @@
 {
-  "iteration": 790,
+  "iteration": 791,
   "phase": "extended",
+  "notes_791": "iter791 durability-breadth sweep, no edits — 4 fresh adjacent topics (round-or-modulo / upper-lower-or-substr / CASE-buckets / current-year-filter-or-SELECT-DISTINCT)",
   "notes_790": "iter790 durability-breadth sweep, no edits — 4 fresh adjacent topics (EXISTS / sum-FILTER-or-min-max / GROUP-BY-expression / pagination-OFFSET-or-random-sample)",
   "notes_789": "iter789 durability-breadth sweep, no edits — 4 fresh adjacent topics (multi-col-GROUP-BY / date-arithmetic-or-ts-diff / empty-vs-null-string / currency-string-to-numeric-or-date_trunc)",
   "notes_788": "iter788 durability-breadth sweep, no edits — lpad zero-pad re-probe to bulletproof + 3 fresh adjacent topics (concat-|| / IN-list-or-BETWEEN / bool-to-label)",
