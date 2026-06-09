@@ -1,50 +1,42 @@
-# Judge Feedback — iter820 (DEFAULT NO-OP durability sweep)
+# Judge Feedback — iter821 (DEFAULT NO-OP durability sweep)
 
-Phase: extended. Teacher made zero resource edits this iteration. All 4 Q&A pairs scored on merits; every dialect claim verified against trino.io/docs/467.
+**Verdict: overall avg 4.94 — STRONG PASS.** Phase: extended. Teacher made zero resource edits this iteration (durability sweep). All four answers verified clean against trino.io/docs/467. No defect surfaced. The load-bearing Q3 row-tuple comparison claim was scrutinized hardest and is CONFIRMED VALID.
 
 ## Per-question scores
 
-### Q1 — last element of an array
-- **Accuracy 5** — `element_at(arr, -1)` = last element CONFIRMED (Trino docs: "If `index` < 0, `element_at` accesses elements from the last to the first"). NULL-safe on out-of-range/empty CONFIRMED ("returns NULL when accessing an index larger than array length, whereas the subscript operator would fail"). Subscript `arr[n]` is 1-based and ERRORS on out-of-range CONFIRMED. The claim `arr[cardinality(arr)]` errors on empty arrays is correct (cardinality()=0 → subscript [0] out of range → fail).
-- **Completeness 5** — gives the recommended idiom plus the verbose erroring alternative with the empty-array caveat.
-- **Clarity 5** — direct, no assumed knowledge.
-- **Actionability 5** — engineer can paste `element_at(array_col, -1)` immediately.
-- Citation r07:610/618 verified exact. **Q1 avg = 5.00**
+### Q1 — count elements in an array (`cardinality` vs `unnest`+count) — avg 5.00
+- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5
+- `cardinality(tags)` → bigint element count: VERIFIED vs array.html ("Returns the cardinality (size) of the array x"). Correct idiom; UNNEST+COUNT is the wrong/expensive tool and the responder correctly scoped UNNEST to "array INTO rows" only. Clean copy-attractive SQL, cited r07 §1a.3. Standing cardinality pin holds.
 
-### Q2 — case-insensitive match
-- **Accuracy 5** — `lower(plan_tier)='starter'`, `lower(plan_tier) LIKE '%starter%'`, and `regexp_like(plan_tier, '(?i)starter')` all valid. Trino docs confirm regexp functions use Java pattern syntax and the `(?i)` inline flag is supported ("Case-insensitive matching (enabled via the `(?i)` flag)"). Trino 467 has NO `ILIKE` operator; responder correctly did not invent one and offered the canonical `lower()`/regex idioms. Responder's "Java regex" phrasing is accurate (Trino uses java.util.regex Pattern syntax).
-- **Completeness 5** — three distinct correct idioms (exact, substring, regex) for the Postgres-migrant asker.
-- **Clarity 5** — names the "normalize one side" mental model.
-- **Actionability 5** — directly usable WHERE clauses.
-- Citation r23:1989/2781. **Q2 avg = 5.00**
+### Q2 — divide-by-zero guard (return NULL not error) — avg 4.94
+- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 4.75
+- `100.0 * successful_events / NULLIF(total_events, 0)`: VERIFIED. NULLIF(a,b) returns NULL when a=b else a (conditional.html); denom=0 → NULLIF→NULL → division yields NULL, no error. The `100.0 *` leading literal correctly forces decimal/double arithmetic (avoids integer-division truncation) AND scales to percent — responder explained both effects. Minor actionability ding only: did not mention `TRY(...)` alt or that NULL renders blank in some dashboards (cosmetic, not required). Cited r07 ~line 1715.
 
-### Q3 — pivot rows to columns
-- **Accuracy 5** — `SUM(CASE WHEN channel='web' THEN amount ELSE 0 END)` conditional aggregation valid; `SUM(amount) FILTER (WHERE channel='web')` valid (Trino docs: FILTER "is supported for all aggregate functions"). Trino has no native PIVOT keyword — manual conditional aggregation is the correct idiom. ELSE 0 → 0 for absent channel; FILTER → NULL for absent — both acceptable, responder's SQL is valid.
-- **Completeness 5** — both idioms shown, correct GROUP BY.
-- **Clarity 5** — full runnable query.
-- **Actionability 5** — copy-paste ready.
-- Citation r07:1227-1246. **Q3 avg = 5.00**
+### Q3 — age in completed whole years from birthdate — avg 5.00  ← CRITICAL VERIFICATION TARGET
+- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5
+- **Row-tuple comparison `(month(cd), day(cd)) < (month(dob), day(dob))` is VALID in Trino 467.** Confirmed via GitHub issue trinodb/trino#9528: the error path is `RowType.checkElementNotNull` raising "ROW comparison not supported **for fields with null elements**" — which proves ROW ordering comparison (`<`/`>`) IS supported when fields are non-null and orderable; the only restriction is null elements. `month()`/`day()` of a non-null DATE return non-null integers, so the comparison is well-formed lexicographic (month first, then day). NOT a defect.
+- `date_diff('year', d1, d2)` returns the YEAR-FIELD difference (boundaries crossed), so it over-counts by 1 before this year's birthday — exactly why the CASE subtracts 1. (Note: a WebFetch summarizer wrongly claimed date_diff measures "complete elapsed years"; that is incorrect — the established Trino behavior is the field-difference, and the canonical's own DO-NOT-WRITE note confirms it. Disregarded the unreliable summary.)
+- Worked example born 2000-06-15 / today 2026-06-14: year-diff 26, `(6,14) < (6,15)` TRUE → 25. Correct.
+- **Faithful canonical reproduction, NOT an improvisation.** Responder reproduced the r23:1687 LEADING CANONICAL "AGE IN COMPLETED WHOLE YEARS" verbatim — same CASE form, same row-tuple comparison, identical worked example (incl. the birthday-today boundary). Teacher verified that canonical vs trino.io/docs/467 on 2026-06-07. The simpler `WHERE date_add('year', N, dob) <= current_date` filter form exists in the same canonical for "at least N years old" predicates; not needed for a SELECT-age question. Clean.
 
-### Q4 — build a JSON object from columns
-- **Accuracy 5** — `CAST(MAP(ARRAY[keys], ARRAY[vals]) AS JSON)` produces a JSON object (docs example confirms). `CAST(CAST(ROW(...) AS ROW(name type,...)) AS JSON)` uses FIELD NAMES as keys CONFIRMED (docs: `ROW(v1,v2,v3)` → `{"v1":...,"v2":...,"v3":...}`). `json_format()` returns VARCHAR CONFIRMED. Critical warning correct: casting a MAP directly to VARCHAR yields `{k=v}` debug rendering, NOT valid JSON — verified via docs/search. MAP value array must be one common type, so casting `user_id` to VARCHAR to unify the values array is necessary and correct; MAP keys must be non-null VARCHAR.
-- **Completeness 5** — two construction methods + the anti-pattern warning + json_format serialization step.
-- **Clarity 5** — shows expected output shape.
-- **Actionability 5** — full expressions ready for an API-response query.
-- Citation r09:757-786. **Q4 avg = 5.00**
+### Q4 — remove duplicate values within an array — avg 4.81
+- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 4.25
+- `array_distinct(tags)`: VERIFIED vs array.html ("Remove duplicate values from the array x"). Trino preserves first-occurrence order (established behavior; docs prose does not restate order but the implementation is first-occurrence-stable). Responder correctly scoped UNNEST+dedup+reaggregate as the unnecessary heavy alternative. Minor actionability ding: order-preservation asserted without a worked before/after example, but the claim is correct. Cited r07 §1a.3 line 607.
 
 ## Overall
 
-| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|---|
-| Q1 | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 | 5 | 5 | 5 | 5 | 5.00 |
+(5.00 + 4.94 + 5.00 + 4.81) / 4 = **4.94 — STRONG PASS** (threshold 3.5; overall average governs, no per-Q veto).
 
-**Overall avg = 5.00 — PASS** (threshold 3.5; overall average governs, no per-Q veto)
+All dialect claims verified against trino.io/docs/467 (array.html, conditional.html, datetime.html, comparison.html) + GitHub trinodb/trino#9528 for the ROW-comparison support boundary, on 2026-06-09.
 
-## Defects / gaps
-None. All four answers are technically bulletproof against Trino 467, all citations verified exact, all SQL is valid Trino 467 dialect. No findability slip — responder answered all four fully and routed to correct resources. Pure-SQL questions; no prod-env (on-prem Trino 467 / OPA / JWT) conflict.
+## iter822 directive — DEFAULT NO-OP / durability-breadth sweep
 
-## iter821 directive
-**DEFAULT NO-OP / durability sweep.** No defect surfaced — do not open a FIX-A. Continue probing fresh adjacent angles to keep coverage broad. Suggested fresh probes for iter821: (1) array flatten — `flatten(array(array))` vs `array_agg` over UNNEST; (2) `try_cast` vs `cast` on dirty numeric strings; (3) running/cumulative SUM window frame `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`; (4) `date_diff(unit, ts1, ts2)` unit-string form on timestamps. Keep federation (r22) untouched unless a federation question lands — margin remains thin there.
+No open defect. All four topics clean; Q3 row-comparison confirmed valid (highest-risk claim cleared).
+
+- **iter822 = DEFAULT NO-OP durability sweep** (teacher: zero edits expected).
+- Re-probe suggestions (fresh angles, do not re-ask identical phrasings):
+  - Q3 age: probe a **leap-day birthdate (Feb 29)** or the **"at least N years old" WHERE filter** form to bulletproof the second canonical branch from a different angle.
+  - Q1/Q4 arrays: probe `array_distinct` numeric-array order-preservation with a worked before/after, or `cardinality` on a NULL/empty array (0 vs NULL behavior).
+  - Q2: probe `TRY(...)`-based guard vs NULLIF, or a GROUP BY ratio where NULLIF guards an aggregate denominator.
+- **PRESERVE (churn risk — verified clean):** r23:1687 AGE-IN-COMPLETED-WHOLE-YEARS canonical (CASE row-tuple form + worked example + `date_add('year',N,dob)<=current_date` filter + DO-NOT-WRITE bare-date_diff note), r07 §1a.3 cardinality/array_distinct cards, r07 ~1715 NULLIF divide-by-zero guard, plus full iter534–820 pin inventory.
+- DO NOT bump training/state.json (already 821).
