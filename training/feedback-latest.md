@@ -1,74 +1,66 @@
-# Judge Feedback — iter811 (LIGHT INOCULATION FIX-A: bool_or boolean-flag-pivot)
+# Judge Feedback — Iter 812 (EXTENDED PHASE)
 
 **Date**: 2026-06-09
-**Phase**: extended
-**Verification**: every dialect claim checked against trino.io/docs/467 (aggregate / conditional / comparison / select .html). Resources NOT treated as ground truth. Production stack confirmed: Trino 467 + Iceberg connector (prod_info.md).
-
-DO NOT bump training/state.json (already 811).
+**Mode**: DEFAULT NO-OP / durability-breadth sweep (teacher made ZERO resource edits).
+**Federation**: NOT PROBED.
+**State**: NOT bumped (already 812).
+**Docs verified**: trino.io/docs/467 — functions/aggregate.html, functions/datetime.html, sql/select.html (fetched 2026-06-09). Resources NOT treated as ground truth. Prod stack confirmed: Trino 467 + Iceberg connector (prod_info.md).
 
 ---
 
 ## Per-question scores
 
-### Q1 — Boolean-flag pivot RE-PROBE (ever_logged_in / ever_purchased / ever_ticketed from event rows)
-Answer: `bool_or(event_name='logged_in') AS has_logged_in` (+ made_purchase / opened_ticket) `GROUP BY user_id` — TRUE if any row in the group satisfies the predicate. Cites r23 bool_or card.
+### Q1 — BOOL_AND all-flag re-probe (order true only if EVERY line item in_stock)
+Answer: `bool_and(in_stock) AS all_items_in_stock ... GROUP BY order_id`; TRUE only if every input true; `bool_and(quantity>0 AND in_stock)` composite variant. Cites r23 §3.1D. **LED with bool_and.**
 
-- Accuracy: **5** — Verified aggregate.html: `bool_or(boolean)` returns TRUE if any input is true, FALSE if none (over a non-empty group). `bool_or(event_name='logged_in') GROUP BY user_id` is exactly the ever-flag; users with no such event get FALSE (not NULL). Clean.
-- Completeness: **5** — Covers all three flags, the GROUP BY, and the any-row-satisfies semantics.
-- Clarity: **5** — Plain-language "TRUE if any row satisfies"; no assumed OLAP knowledge.
-- Actionability: **5** — Drop-in query the engineer can run.
-- **Per-Q avg: 5.00 CLEAN**
+- VERIFIED aggregate.html: `bool_and(boolean) -> boolean` = "Returns TRUE if every input value is TRUE, otherwise FALSE." Exact fit for "all line items in stock." Composite-predicate variant valid.
+- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5
+- **Per-Q avg: 5.00**
 
-**FIX CHECK — WORKED.** The responder LED with `bool_or` and cited the bool_or card. It did NOT reach for the iter810 buggy `MAX(CASE)+FILTER` (which returns NULL-not-0 for absent events) nor the redundant CASE+FILTER double-gate. This is the 1st post-fix datapoint for the boolean-flag-pivot defect. The r07 bool_or pivot card + the defang of MAX(CASE)+FILTER landed correctly.
+### Q2 — Epoch-millis → timestamp (convert 1748736000123 ms bigint)
+Answer: `from_unixtime(created_at / 1e3)`; from_unixtime expects SECONDS; `/1e3` float-divide (NOT `/1000` integer which drops millis); returns timestamp(3); `from_unixtime_nanos` for nanos. Cites r13.
 
-### Q2 — Earlier of two dates (effective_date = earlier of due_date, completed_date, across columns)
-Answer: `least(due_date, completed_date) AS effective_date` — row-wise min across columns (vs MIN() aggregate across rows); notes NULL-propagation (least returns NULL if any arg NULL); COALESCE(col, DATE '9999-12-31') sentinel to skip NULLs. Cites r27 §4.4D.
+- VERIFIED datetime.html: `from_unixtime(unixtime) -> timestamp(3) with time zone`, "number of seconds since 1970-01-01." `/1e3` float division preserves sub-second precision; `/1000` integer division would truncate millis. `from_unixtime_nanos -> timestamp(9)` correct. The float-divide pin is the load-bearing correctness point and is right.
+- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5
+- **Per-Q avg: 5.00**
 
-- Accuracy: **5** — Verified comparison.html: `least(v1,...,vN)` returns the smallest value row-wise across arguments; "return null if any argument is null" (Trino, explicitly contrasted with Postgres which only nulls if ALL are null). The NULL-propagation caveat and the COALESCE-sentinel workaround are both correct and idiomatic.
-- Completeness: **5** — Addresses across-columns-vs-across-rows distinction AND the NULL edge case the engineer would hit.
-- Clarity: **5** — least-vs-MIN() framing is exactly the beginner confusion to pre-empt.
-- Actionability: **5** — Both the simple form and the NULL-tolerant form given.
-- **Per-Q avg: 5.00 CLEAN** (standing greatest/least-row-wise-NULL-if-any pin reinforced)
+### Q3 — Companion of max (each salesperson's deal_name of highest deal_amount)
+Answer: `max_by(deal_name, deal_amount) AS biggest_deal_name` + `MAX(deal_amount)` GROUP BY salesperson; ROW_NUMBER() OVER (PARTITION BY salesperson ORDER BY deal_amount DESC)=1 for the whole row. Cites r23 §3.1D.
 
-### Q3 — Dedup exact duplicate rows (no primary key)
-Answer: `SELECT DISTINCT * FROM staging_table;` and `CREATE TABLE ... AS SELECT DISTINCT *` to persist. Cites r13.
+- VERIFIED aggregate.html: `max_by(x, y)` = "value of x associated with the maximum value of y." `max_by(deal_name, deal_amount)` returns deal_name at the highest deal_amount per group. ROW_NUMBER()=1 whole-row alternative valid and correctly scoped. Tie behavior (max_by picks arbitrary among ties) not raised but ask is unambiguous — no penalty.
+- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5
+- **Per-Q avg: 5.00**
 
-- Accuracy: **5** — Verified select.html: DISTINCT includes only unique rows; `SELECT DISTINCT *` = one row per unique full-row combination = exact-duplicate removal. CTAS-with-DISTINCT persists. Correct.
-- Completeness: **5** — Covers both the inspect query and the persist path.
-- Clarity: **5** — Direct, no jargon.
-- Actionability: **5** — Runnable as-is; CTAS form fits the prod export workflow.
-- **Per-Q avg: 5.00 CLEAN** (standing SELECT-DISTINCT-dedup pin)
+### Q4 — Set difference (user_ids active this month but NOT last month)
+Answer: June SELECT `EXCEPT` May SELECT; set difference, returns DISTINCT, NULL-safe vs NOT IN; anti-join alternative. Cites r23 §3.1F.
 
-### Q4 — Numeric → label buckets (response_time_ms: fast <100 / ok 100-500 / slow >500)
-Answer: `CASE WHEN response_time_ms < 100 THEN 'fast' WHEN response_time_ms <= 500 THEN 'ok' ELSE 'slow' END` — first-match top-to-bottom; notes if() for 2-way. Cites r23 IF/CASE.
-
-- Accuracy: **5** — Verified conditional.html: searched CASE evaluates conditions top-to-bottom, returns first true match. Boundaries correct: `<100`→'fast'; the `<=500` branch only fires for values not already consumed by `<100`, so 100-500 (inclusive of 500) maps to 'ok'; ELSE (>500) maps to 'slow'. if() 2-way note accurate.
-- Completeness: **5** — Handles the inclusive boundary at 500 correctly and explains first-match ordering.
-- Clarity: **5** — Top-to-bottom-first-match is the key mental model and it is stated.
-- Actionability: **5** — Drop-in.
-- **Per-Q avg: 5.00 CLEAN** (standing CASE-WHEN-tiering-first-match pin)
+- VERIFIED select.html: EXCEPT = "rows in the result set of the first query, but not the second"; DISTINCT semantics by default (EXCEPT ALL preserves dups). June EXCEPT May = newly-active users. NULL-safe-vs-NOT-IN claim accurate (EXCEPT treats NULLs as comparable; NOT IN with a NULL in the subquery returns UNKNOWN → no rows). Anti-join alt valid.
+- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5
+- **Per-Q avg: 5.00**
 
 ---
 
 ## Overall
 
-| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
+| Q | Acc | Comp | Clar | Act | Avg |
 |---|---|---|---|---|---|
 | Q1 | 5 | 5 | 5 | 5 | 5.00 |
 | Q2 | 5 | 5 | 5 | 5 | 5.00 |
 | Q3 | 5 | 5 | 5 | 5 | 5.00 |
 | Q4 | 5 | 5 | 5 | 5 | 5.00 |
 
-**Overall avg: 5.00 — STRONG PASS** (threshold 3.5)
-
-All four docs-verified clean against trino.io/docs/467. No new defect surfaced.
+**Overall avg: 5.00** (20.00/4) — **STRONG PASS** (margin +1.50; overall avg governs, no per-Q veto). ZERO new dialect defects.
 
 ---
 
 ## Teacher feedback
 
-(a) **Is boolean-flag-pivot CLOSED? YES.** Q1 fix worked — 1st post-fix datapoint. The responder led with `bool_or(pred) AS has_X` from the new r07 pivot-landing card and did NOT regress to the iter810 buggy `MAX(CASE)+FILTER` (NULL-not-0 absent) form, which is now inline-defanged. CLOSED. Per the two-angle rule, one more boolean-flag-pivot re-probe from a different phrasing (e.g. true/false vs 1/0, or with an empty group) is recommended before treating it as fully bulletproofed.
+**(a) Boolean-flag-pivot BULLETPROOFED.** Q1 (`bool_and` all-true flag) is the 2nd consecutive clean datapoint after iter811's `bool_or` any-true flag. Responder LED with `bool_and(in_stock)`, gave the exact-fit GROUP BY per order_id, AND offered the composite-predicate variant — no regression to redundant MAX(CASE)/FILTER. The all-true companion to bool_or is now confirmed durable across two distinct phrasings. **boolean-flag-pivot = BULLETPROOFED.** Do NOT churn the r23 §3.1D / r07 bool_or/bool_and pivot cards.
 
-(b) **iter812 designation: DEFAULT NO-OP / durability-breadth sweep.** No open defect. Recommended: 2nd-angle re-probe of boolean-flag-pivot (bool_or with a 1/0 phrasing or empty-group edge to confirm FALSE-not-NULL behavior) + 3 fresh adjacent topics. PRESERVE: r07 bool_or pivot card + MAX(CASE)+FILTER defang / r27 §4.4D least-greatest-NULL card / r13 SELECT DISTINCT dedup / r23 IF-CASE tiering card, plus the full iter534-810 pin inventory.
+**Standing pins held zero-drift:**
+- from_unixtime-seconds-millis-`/1e3` (Q2) — float-divide-not-integer pin confirmed durable.
+- max_by-companion-of-max (Q3) — confirmed.
+- EXCEPT-set-difference-null-safe (Q4) — confirmed.
+- All iter534–811 inventory unchanged.
 
-DO NOT bump training/state.json (teacher already set it to 811).
+**(b) iter813 designation: DEFAULT NO-OP / durability-breadth sweep.** No open defect, no new imprecision, no findability gap. Suggest fresh adjacent picks (e.g. min_by-companion-of-min / INTERSECT row-level / from_unixtime_nanos nanos branch / NTILE-quartile) plus optional maintenance re-probes. Do NOT pre-churn any bulletproofed card. FIX-A only if a defect surfaces. Federation row remains untouched (4.49944, thin vs 4.5). DO NOT bump training/state.json.
