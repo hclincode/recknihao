@@ -1,57 +1,44 @@
-# Judge Feedback — iter850 (DEFAULT NO-OP durability sweep)
+# Judge Feedback — iter851 (DEFAULT NO-OP durability sweep)
 
-**Verdict: overall 5.00 STRONG PASS** — teacher made ZERO resource edits; this was a durability sweep. All dialect claims docs-verified vs trino.io/docs/467 (map/array/datetime .html) + WebSearch 2026-06-09. PIN Trino 467. No prod-env conflict (pure SQL; on-prem Trino 467 + Iceberg + MinIO unaffected).
+**Overall: 4.44 PASS** (Q1 5.00 / Q2 4.625 / Q3 3.875 / Q4 4.25). Pass threshold 3.5 (overall average governs, no per-Q veto). Teacher made ZERO resource edits this iteration (default no-op sweep). All dialect claims docs-verified vs trino.io/docs/467 (string/regexp/aggregate) + WebSearch 2026-06-09. PIN Trino 467. No prod-env conflict (pure SQL; on-prem Trino 467 + Iceberg + MinIO unaffected).
+
+---
 
 ## Per-question scores
 
-### Q1 — merge two map columns without UNION/join — `map_concat(account_attrs, session_attrs)`
-- Accuracy **5** — VERIFIED vs map.html: `map_concat` exists, merges 2+ maps, on key collision "that key's value in the resulting map comes from the last one of those maps" = RIGHTMOST wins (responder: "put override/session last" — EXACT). Key-in-only-one → in result: correct. NULL-handling: docs are SILENT, but Trino's general scalar convention (RETURNS NULL ON NULL INPUT) makes the NULL-if-either-input-NULL claim correct, and `COALESCE(map_arg, MAP())` empty-map wrap is valid Trino syntax + a high-value defensive nuance (real columns are often NULL).
-- Completeness **5** — covers merge, collision direction, key-in-one, and the NULL hazard with the empty-map fix. Nothing material missing.
-- Clarity **5** — "put override/session last" is a beginner-friendly mnemonic for rightmost-wins.
-- Actionability **5** — drop-in SELECT expression + the NULL guard the engineer will actually hit.
-- **Q1 avg = 5.00 CLEAN**
+### Q1 — strip ALL whitespace from a phone string (Postgres `regexp_replace(phone,'\s+','','g')` → Trino) — **5.00 CLEAN**
+- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5
+- `regexp_replace(phone, '\s+', '')` is exactly right. VERIFIED vs trino.io/docs/467/functions/regexp.html: `regexp_replace(string, pattern, replacement)` "replaces every instance of the substring matched by the regular expression pattern" — replaces ALL non-overlapping matches BY DEFAULT, no Postgres-style `g` flag exists or is needed. `'\s+'` matches whitespace runs (spaces/tabs/newlines). Worked example `'555 867 5309'→'5558675309'` correct.
+- The `replace(phone, ' ', '')` literal-single-space alternative is correct and the responder correctly scoped it ("for a literal single space" vs "for all whitespace use the regex"). No defect.
 
-### Q2 — numeric index of a value in an array — `array_position(enabled_flags, 'dark_mode')`
-- Accuracy **5** — VERIFIED vs array.html: "Returns the position of the first occurrence of the element in array x (or 0 if not found)." 1-based (array `[]` indexed from one), 0-if-absent (NOT NULL), first-occurrence — all three EXACT. UNNEST(...) WITH ORDINALITY per-element-position alt is correct (verified iter844 vs select.html).
-- Completeness **5** — leads with canonical, gives 3→3 worked example, proactively flags the duplicates-collapse-to-first caveat with the WITH ORDINALITY escape hatch.
-- Clarity **5** — concrete '"dark_mode" 3rd → 3' example, zero assumed knowledge.
-- Actionability **5** — engineer knows exactly what to write and when to switch to WITH ORDINALITY.
-- **Q2 avg = 5.00 CLEAN**
+### Q2 — count occurrences of `'urgent'` in a comma-tag string — **4.625 (minor completeness)**
+- Accuracy 5 / Completeness 4 / Clarity 5 / Actionability 4.5
+- Workaround `cardinality(split(tags, 'urgent')) - 1` is CORRECT for counting non-overlapping occurrences (splitting on a substring with N occurrences yields N+1 elements → N occurrences). Minor example-arithmetic imprecision in the responder's narration of the worked example, but the FORMULA is correct; folded into completeness, not an accuracy error.
+- **CLEANER-NATIVE NOTE (the completeness ding):** the responder said "resources document NO direct count function" and stopped at the split workaround. Trino 467 DOES have `regexp_extract_all(string, pattern)` (VERIFIED regexp.html — returns array of all matches), so `cardinality(regexp_extract_all(tags, 'urgent'))` is a cleaner one-call native count that does NOT need the `-1` correction and is more robust. The responder missed this. Workaround is valid, so this is completeness/actionability only, not accuracy.
 
-### Q3 — quarter of year as label/number — `quarter(bill_date)` / `CONCAT('Q', CAST(quarter(bill_date) AS varchar))`
-- Accuracy **5** — VERIFIED vs datetime.html: `quarter(x) → bigint` "Returns the quarter of the year from x. The value ranges from 1 to 4"; `EXTRACT(QUARTER FROM x)` maps to quarter(). CRITICAL PINNED FACT CONFIRMED: `quarter_of_year()` does NOT exist (docs list only `quarter()`, no alias by that name). The responder's contrast is also docs-accurate: `week_of_year(x)` IS an alias for `week()` — so "quarter has no _of_year variant unlike week" is exactly right. CONCAT('Q', CAST(quarter(x) AS varchar)) → 'Q1' valid.
-- Completeness **5** — number form, EXTRACT equivalent, label form, AND the fabrication guardrail (don't reach for quarter_of_year) all covered.
-- Clarity **5** — directly replaces the engineer's CASE WHEN month<=3 chain with a one-liner; clear.
-- Actionability **5** — both number and 'Q1' label provided, ready to drop into the billing report.
-- **Q3 avg = 5.00 CLEAN**
+### Q3 — most-common (mode) reason value, no `ORDER BY COUNT DESC LIMIT 1` — **3.875 (muddled first example)**
+- Accuracy 3.5 / Completeness 4.5 / Clarity 3.5 / Actionability 4
+- "No single `mode()` aggregate" is CORRECT (Trino 467 has no `mode()`). `max_by(reason, cnt)` over a `(GROUP BY reason, COUNT(*) cnt)` subquery returns the reason at the max count = the single mode (VERIFIED aggregate.html: `max_by(x, y)` returns value of x associated with the maximum value of y). `histogram(reason)` is a valid frequency-map aside; `approx_most_frequent` exists as another alternative.
+- **MUDDLED-FIRST-EXAMPLE NOTE:** EX1 `SELECT reason, max_by(reason, cnt) ... FROM (grouped) GROUP BY 1` is WRONG/confusing. `GROUP BY 1` = `GROUP BY reason`, so the outer query produces ONE ROW PER REASON, and each group's `max_by(reason, cnt)` over its single inner row just returns that same reason — it does NOT collapse to the single mode. EX2 `SELECT max_by(reason, cnt) FROM (grouped)` (no outer GROUP BY) is CORRECT and returns the single most-common reason. Leading with a wrong example before the correct one drags accuracy (3.5) and clarity (3.5): a beginner could copy EX1 and get every reason back instead of the mode.
 
-### Q4 — distinct calendar days active — `COUNT(DISTINCT CAST(event_timestamp AS date))`
-- Accuracy **5** — VERIFIED vs Trino 467 standard semantics: `CAST(timestamp AS date)` truncates the instant to its calendar date; `COUNT(DISTINCT date)` counts unique days. The contrast with `COUNT(DISTINCT event_timestamp)` (counts each distinct instant → 3 same-day events = 3 not 1) is correct and is the exact trap the engineer would fall into.
-- Completeness **5** — canonical + GROUP BY user_id + the wrong-alternative contrast with worked numbers. Complete.
-- Clarity **5** — "3 events same day → 3 not 1" makes the instant-vs-day distinction concrete for a beginner.
-- Actionability **5** — copy-paste per-user query.
-- **Q4 avg = 5.00 CLEAN**
+### Q4 — numeric code of a character (`'A'`=65) and reverse — **4.25 (factual error in worked example)**
+- Accuracy 3 / Completeness 5 / Clarity 4.5 / Actionability 4.5
+- Function usage is CORRECT: `codepoint(varchar) → integer` (single char only), `chr(bigint) → varchar` inverse (VERIFIED trino.io/docs/467/functions/string.html: codepoint = "Unicode code point of the only character of string"; chr = "Unicode code point n as a single character string"). The single-char constraint + `substr(s,1,1)` wrap for the first char of a longer string + `codepoint('US')` errors are all correct. `codepoint('a')→97`, `codepoint('ñ')→241`, `chr(85)→'U'`, `chr(241)→'ñ'` are all correct.
+- **FACTUAL ERROR:** the responder wrote `codepoint('A') -> 85`. THAT IS WRONG — `codepoint('A') = 65` (ASCII/Unicode 'A' is 65; 85 is 'U'). VERIFIED chr(65)='A' per docs. This is a real factual error in a worked example (a beginner reading "A→85" learns the wrong value), so accuracy drops to 3 even though every function signature and the other values are correct.
 
-## Overall
+**Q4 codepoint('A')=65-not-85 verdict: RESPONDER-SLIP (transcription error), NOT a resource defect.** GREP of `resources/` confirms the codepoint card lives at `resources/23-sql-best-practices-olap.md:528-547` and the resource CORRECTLY uses `codepoint('U') → 85` (line 536) and `codepoint('a') → 97` (line 537) — it does NOT contain any `codepoint('A')` example and never states `codepoint('A')=85`. The resource is CLEAN and CORRECT. The responder appears to have substituted the character `'A'` while carrying over the `85` value from the resource's `'U'` example — a responder mis-transcription, not content the resource taught. → **NO FIX-A; iter852 = DEFAULT NO-OP.**
 
-| Q | Acc | Comp | Clar | Act | Avg |
-|---|---|---|---|---|---|
-| Q1 | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 | 5 | 5 | 5 | 5 | 5.00 |
+---
 
-**Overall average = 5.00 → STRONG PASS** (threshold 3.5; overall average governs, no per-Q veto).
+## Defects / gaps summary
+- **No resource defect surfaced.** The only accuracy errors this iteration (Q4 `codepoint('A')→85`, Q3 muddled EX1) are responder-side slips against CLEAN, CORRECT resources. The Q2 gap (missed `regexp_extract_all` count) is a minor completeness omission, not a content error.
+- Q1 fully bulletproof.
 
-## Defects / gaps
-- NONE. No fabrication, no parse-error risk, no dialect error, no findability slip, no prod-env conflict.
-- Notable strengths: Q1 rightmost-wins + empty-map NULL guard; Q3 the `quarter_of_year()`-does-NOT-exist pinned fact held under rephrase AND the responder correctly distinguished it from the genuine `week_of_year()`/`week()` alias (a precise, non-fabricated contrast).
+## iter852 directive — **DEFAULT NO-OP** (NOT a FIX-A; no resource defect)
+No resource edit is warranted (all errors are responder slips, all resources verified clean). Re-probe fresh adjacent 2nd-angle batch to keep durability coverage:
+- (a) **Q3 mode re-probe** — confirm the correct scalar `max_by(x, cnt)`-over-grouped-subquery (no outer GROUP BY) is what the responder leads with on a rephrase; watch for the muddled `GROUP BY 1`-returns-one-row-per-value form re-appearing. OPTIONAL light findability touch ONLY if the muddled form recurs: at the most-common/mode card, lead with `SELECT max_by(reason, cnt) FROM (SELECT reason, COUNT(*) cnt ... GROUP BY reason)` as the copy-attractive canonical and inline-defang the `... GROUP BY 1` outer form on its own un-copyable line ("returns one row per value, NOT the single mode"). Do NOT churn if Q3 comes back clean on re-probe — a single muddled example does not justify an edit yet.
+- (b) **Q2 count-occurrences re-probe** — OPTIONAL light findability touch: co-locate `cardinality(regexp_extract_all(s, 'sub'))` as the cleaner native next to the `cardinality(split(s,sub))-1` workaround at the count-occurrences landing (verify regexp_extract_all returns one element per match → cardinality = count, no `-1`).
+- (c) **Q4 codepoint re-probe** — re-confirm `codepoint('A')=65` holds under rephrase (the resource is correct; this was a one-off transcription slip). No edit needed.
+- (d) Fresh adjacent: `replace(s, old, new)` literal multi-char replace vs regexp_replace / `regexp_extract` single-match vs `regexp_extract_all` / `arbitrary()`/`any_value` vs `max_by` / `approx_most_frequent(n, x, capacity)` top-N frequencies.
 
-## iter851 directive — DEFAULT NO-OP / durability sweep (NOT a FIX-A; no defect surfaced)
-All four answers clean at 5.00; no resource edit warranted. iter851 = re-probe fresh adjacent 2nd-angle batch:
-- map family 2nd angle: `element_at(map, key)` returns-value-or-NULL vs `map[key]` throws-if-absent / `map_concat` left-vs-right override under rephrase / build a map with `map(array_keys, array_values)`.
-- array 2nd angle: `contains(array, element)` boolean vs `array_position` index / `array_position` over array-of-rows / element-not-present → 0 (re-confirm NOT NULL under rephrase).
-- date 2nd angle: `day_of_week`/`week`/`year` extraction family / `EXTRACT(QUARTER)` vs `quarter()` equivalence re-probe / re-confirm `quarter_of_year()` non-existence holds.
-- distinct-count 2nd angle: `approx_distinct` vs exact `COUNT(DISTINCT)` / `COUNT(DISTINCT CAST(ts AS date))` vs `date_trunc('day', ts)` equivalence.
-
-PRESERVE all standing pins: iter843 approx_percentile accuracy + iter842 value-vs-rank + iter840 weighted-avg §3.1B-WA + iter837 string→DATE MySQL-vs-Joda + iter836 lpad/format pad + iter831 month-name grouping + iter827 boolean-aggregate-NULL + iter824/823 split_part/GROUP-BY-alias/repeat-char + trim char-set + default-NULLS-LAST + CAST-rounds-half-up + full iter534–849 lock inventory. NO federation edits (federation row stays 4.49944/310). iter850 is NOT a FIX-A (no defect). DO NOT bump training/state.json (already 850).
+PRESERVE all standing pins (iter843 approx_percentile accuracy / iter842 value-vs-rank / iter840 weighted-avg §3.1B-WA / iter837 string→DATE MySQL-vs-Joda / iter836 lpad/format pad / iter831 month-name grouping / iter827 boolean-aggregate-NULL / iter824/823 split_part/GROUP-BY-alias/repeat-char / trim char-set / default-NULLS-LAST / CAST-rounds-half-up / iter744 codepoint/chr card at r23:528-547 / full iter534-850 inventory). NO federation edits (federation 4.49944/310). **iter851 is NOT a FIX-A (no defect). DO NOT bump training/state.json (already 851).**
