@@ -1,65 +1,52 @@
-# Judge Feedback — iter852 (EXTENDED PHASE)
+# Judge Feedback — iter853 (DEFAULT NO-OP durability sweep; zero resource edits)
 
-**Mode:** DEFAULT NO-OP durability sweep + two re-probes of iter851 responder-slips (teacher made ZERO resource edits).
-**Overall: 4.84 STRONG PASS** (per-Q 4.375 / 5.00 / 5.00 / 5.00 = 19.375 / 4 = 4.84375; margin +1.34 above the 3.5 floor; overall average governs, no per-Q veto).
-**Federation NOT probed** — the 4.49944 / 310 row is UNCHANGED and stays FAIL.
+## Verdict: PASS — overall avg 4.69
 
-All four dialect claims verified against trino.io/docs/467 this session (aggregate.html, string.html, map.html) + standard interval-overlap logic. PIN Trino 467. No prod-env conflict (pure SQL; on-prem Trino 467 + Iceberg + MinIO unaffected).
-
----
+DEFAULT NO-OP / honest-decline-correct. Teacher made no resource edits; this sweep confirms durability. No defects found. One optional findability note (see below) — does NOT require an edit.
 
 ## Per-question scores
 
-### Q1 — single most common category (mode), no per-category count, ideally without ORDER BY...LIMIT 1 — **4.375 PASS**
-Accuracy 4 / Completeness 5 / Clarity 4 / Actionability 4.5
+| Q | Topic | Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|---|---|
+| Q1 | parse 'k=v;k=v' string -> map (split_to_map) | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 | Oracle 'Y'/'N' VARCHAR -> boolean | 5 | 5 | 5 | 5 | 5.00 |
+| Q3 | filter map to true-valued entries (map_filter) | 5 | 4 | 5 | 5 | 4.75 |
+| Q4 | GCD per row (honest decline + Euclid CTE) | 4 | 4 | 4 | 4 | 4.00 |
 
-- **Recommended form EX2 is CORRECT and is the one the responder labeled "cleanest":**
-  `SELECT max_by(category, cnt) FROM (SELECT category, COUNT(*) AS cnt FROM support_tickets GROUP BY category)`.
-  VERIFIED aggregate.html: `max_by(x, y)` "Returns the value of x associated with the maximum value of y" → returns the single mode as ONE scalar row, no full sort, no LIMIT. Trino 467 has **NO `mode()` aggregate** (confirmed — not in the function list). This is exactly the asked-for shape.
-- **The muddled GROUP BY 1 / max_by anti-pattern from iter851 did NOT recur.** The iter851 Q3-mode slip is a CONFIRMED ONE-OFF — clean on re-probe.
-- **DING (Accuracy 4, Clarity 4):** the leading EX1 example is a real wart —
-  `SELECT category, COUNT(*) FROM (SELECT category, element_at(histogram(category), category) AS cnt FROM support_tickets) GROUP BY category ORDER BY cnt DESC LIMIT 1`
-  is convoluted-to-broken: the inner query mixes a bare `category` column with a global `histogram(category)` aggregate and no GROUP BY (ill-formed), and it still ends in the ORDER BY...LIMIT 1 the engineer asked to AVOID. It is clutter that contradicts the question's own constraint. Because the responder explicitly steered to EX2 as "cleanest," this is a presentation/precision ding, not an accuracy FAIL.
+**Overall avg = (5.00 + 5.00 + 4.75 + 4.00) / 4 = 4.69 — PASS** (threshold 3.5; overall average governs, no per-Q veto).
 
-### Q2 — numeric code of a char ('A'=65) + reverse (integer→char), both directions — **5.00 STRONG PASS**
-Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5
+## Verification (all PINNED to Trino 467)
 
-- **`codepoint('A') -> 65` is CORRECT.** VERIFIED string.html: codepoint "Returns the Unicode code point of the only character of string." **The iter851 Q4 `'A' -> 85` typo did NOT recur — that slip is a CONFIRMED ONE-OFF.**
-- `chr(65) -> 'A'` CORRECT (chr "Returns the Unicode code point n as a single character string").
-- Single-char requirement surfaced correctly: codepoint takes "the only character," so slice first with `substr(country_code, 1, 1)` (1-indexed, VERIFIED).
-- `WHERE codepoint(substr(country_code,1,1)) BETWEEN 65 AND 90` for A–Z is correct; Oracle `ASCII()` / Python `ord()` analogy is apt for the beginner audience.
+**Q1 — split_to_map: CONFIRMED.** trino.io/docs/467 function list.html links `split_to_map()` (under string.html); WebSearch confirms signature `split_to_map(string, entryDelimiter, keyValueDelimiter) → map(varchar,varchar)`. `element_at(map,key) → V` and `map_keys` confirmed on map.html. Responder's `split_to_map(config, ';', '=')` + `element_at(...,'retry')` + CTE-to-avoid-re-parse advice is fully correct and idiomatic. Flawless.
 
-### Q3 — flag rows where two date ranges overlap at all, without gnarly CASE — **5.00 STRONG PASS**
-Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5
+**Q2 — Y/N -> boolean: CONFIRMED.** Trino's `CAST(varchar AS boolean)` accepts only true/false/t/f/1/0-style tokens, NOT 'Y'/'N' — there is no auto-detect cast. The responder's `CASE WHEN is_active='Y' THEN true ELSE false END` and `if(is_active='Y', true, false)` are both correct, and the "no built-in CAST that auto-detects Y/N" disclaimer is accurate. (Minor unstated bonus: the bare boolean expression `is_active='Y'` is itself usable in WHERE/JOIN; responder implicitly conveyed this with "use in WHERE/joins after.") No error.
 
-- Predicate `WHERE contract_start <= support_window_end AND support_window_start <= contract_end` is the textbook interval-overlap test: ranges `[s1,e1]`, `[s2,e2]` overlap iff `s1 <= e2 AND s2 <= e1`. CORRECT.
-- Correctly notes there is no single overlap function; two plain inequalities (valid Trino 467 comparisons) replace any CASE.
-- Boundary-touch nuance handled: `<=` includes touching endpoints; switch to `<` to exclude end==start. Complete.
+**Q3 — map_filter: CONFIRMED.** map.html gives `map_filter(map(K,V), function(K,V,boolean)) → map(K,V)`, "constructs a map from those entries for which function returns true." Responder correctly offered BOTH the string-value form `(k,v) -> v = 'true'` AND the boolean-value form `(k,v) -> v`, returns a map, and `map_keys(map_filter(...))` for just the enabled key names. Completeness docked 1 only because the question's example showed actual `true`/`false` boolean literals, so the boolean form `(k,v) -> v` is the primary answer and the string form is the secondary case — responder led with the string form. Minor ordering nit, not an error; both forms are valid.
 
-### Q4 — transform every VALUE of a map (trim/uppercase), keep keys, no UNNEST+regroup — **5.00 STRONG PASS**
-Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5
+**Q4 — gcd() EXISTENCE: VERIFIED ABSENT (multi-source).**
+- Source 1: WebFetch trino.io/docs/467/functions/math.html — no gcd.
+- Source 2: WebSearch across Trino docs (467/481/435) — no gcd in any math-function listing.
+- Source 3 (DISPOSITIVE): WebFetch trino.io/docs/467/functions/list.html (the authoritative alphabetical function index) — explicit "No, there is no function named gcd in this list." This same list.html call correctly FOUND split_to_map, so the page rendered fully and its negative on gcd is trustworthy (not a converter-miss like the historical math.html truncate collapse).
 
-- `transform_values(metadata, (k,v) -> trim(v))` / `upper(v)` CORRECT. VERIFIED map.html: `transform_values(map(K,V1), function(K,V1,V2)) -> map(K,V2)` returns a new map, SAME keys, transformed values, no UNNEST. One row in, one out.
-- Family correct: `map_filter(m,(k,v)->bool)`, `transform_keys(m,(k,v)->newkey)`, `map_keys`, `map_values` — all verified present and correctly described.
+**Conclusion: Trino 467 has NO built-in gcd(). The responder's honest decline ("Trino 467 does not expose a built-in gcd()... recommend checking the docs") is CORRECT behavior, not a gap.** This is an HONEST-DECLINE-CORRECT, NOT a findable-but-missing gap. Do NOT add a gcd canonical (there is no real function to point to) and do NOT penalize the decline.
 
----
+**Q4 workaround assessment (separate, minor):** WITH RECURSIVE IS supported in Trino 467 (trinodb/trino PR #4250; session `max_recursion_depth` default 10). The responder's Euclid CTE is structurally VALID and correct:
+- anchor: `a = GREATEST(width,height)`, `b = LEAST(width,height)`
+- step: `SELECT width,height, b, MOD(a,b) FROM gcd_calc WHERE b>0` (single recursive reference — allowed)
+- terminal: `WHERE b=0`, returns `a` as the GCD.
+This converges correctly (1920,1080 -> gcd 120 -> 16:9 in a handful of steps).
+- Caveat NOT mentioned by responder (the −1 on Q4 accuracy/completeness): the default `max_recursion_depth` is 10; for large coprime inputs the Euclidean iteration could exceed 10 steps and the query would FAIL until `SET SESSION max_recursion_depth` is raised. For image-aspect-ratio reduction this is a non-issue, but the responder did not surface the depth cap. Clarity/actionability docked slightly because a per-row recursive CTE is a moderately advanced pattern and the framing leaned heavily on "verify the docs / edge case" rather than fully owning the workaround.
 
-## Verdict on the two re-probes
+Net: Q4 is a GOOD honest decline with a working (if depth-capped) fallback. 4.0 is fair — rewards the correct decline, lightly dings the unflagged recursion-depth caveat.
 
-- **iter851 Q3 mode slip (muddled GROUP BY 1 / max_by): CONFIRMED ONE-OFF.** Re-probe Q1 led with the correct scalar `max_by(category, COUNT(*))` over a GROUP BY subquery and stated no `mode()` exists. No findability anchor needed.
-- **iter851 Q4 codepoint slip (`'A' -> 85`): CONFIRMED ONE-OFF.** Re-probe Q2 returned `codepoint('A') -> 65` and `chr(65) -> 'A'` cleanly. No findability anchor needed.
+## Defects / gaps
 
-Both iter851 slips were synthesis slips against already-correct, already-findable resource content (iter744 r23 L454-472 codepoint/chr single-char PIN; max_by canonical / aggregate family). No resource defect; reconcile-don't-churn says do NOT edit.
+- None requiring a resource edit. No fabricated functions, no wrong signatures, no crossed-family errors, no dialect slips. All four answers fit the on-prem Trino 467 + Iceberg production stack (no cloud-only tooling invoked).
 
-## Defect / gap flag
+## iter854 directive: DEFAULT NO-OP
 
-- **One minor wart, not a defect:** Q1 EX1's convoluted/ill-formed `element_at(histogram(...), category)` example. It is a responder-synthesis artifact, not copied from a resource, and the recommended EX2 is correct. Does NOT justify an edit on its own. If a 2nd "most common / mode value" probe again volunteers a malformed histogram form, escalate to a LIGHT FIX-A: add a keyword-anchored "single most common value (mode)" canonical leading with `max_by(category, COUNT(*))` over a GROUP BY subquery (+ note: no `mode()` in Trino 467) and inline-defang the histogram-in-subquery hack un-copyable. Do NOT pre-churn now.
+All four answers clean; Q4 is an HONEST-DECLINE-CORRECT (gcd genuinely absent — verified across math.html + list.html + WebSearch). NO LIGHT FIX-A: do not add a gcd canonical, because Trino 467 has no gcd() to document and the recursive-CTE Euclid workaround is already what the responder correctly produced unaided.
 
-## iter853 directive
+Optional (NON-BLOCKING) consideration for a FUTURE iteration only IF the Euclid-CTE / WITH RECURSIVE pattern resurfaces and scores below threshold: a small WITH RECURSIVE card could note the `max_recursion_depth` default-10 cap + the GREATEST/LEAST anchor + MOD-step Euclid template. Not warranted now — single datapoint, scored 4.0, no edit this iteration.
 
-**iter853 = DEFAULT NO-OP / durability sweep** (all clean; both re-probed slips confirmed one-offs; no open defect).
-- Re-probe mode/most-common value ONCE more from a fresh angle (e.g. `max_by(x, COUNT(*))` vs top-1 vs `histogram` map inspection) to watch for an EX1-style malformed histogram recurrence; if it recurs → escalate to the LIGHT FIX-A above.
-- Suggested fresh adjacent probes: `min_by(x,y)` / `max_by(x,y,n)` top-N, `map_filter` keep-by-value, `transform_keys` upper-the-keys, `arrays_overlap` vs date-range overlap, `codepoint` over a multi-char string error case.
-- **PRESERVE all locks:** iter744 codepoint/chr single-char PIN (r23 L454-472), iter744 combine-DATE+TIME (r13), max_by/min_by aggregate family, transform_values/map HOF family (r09/r07), iter845/837 string→DATE MySQL-vs-Joda, iter843 approx_percentile accuracy, iter842 value-vs-rank, iter840 weighted-avg §3.1B-WA, iter836 lpad/format, iter831 month-name, r27 §4.4H float-state, default-NULLS-LAST, + full iter534-851 inventory.
-- **NO federation edits** (r22 §13.x ZERO edits; federation row stays 4.49944 / 310, still FAIL).
-- DO NOT bump training/state.json (already 852).
+PRESERVE the full iter534-852 lock inventory. NO federation edits (r22 §13.x stays untouched; federation row 4.49944/310).
