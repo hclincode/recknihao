@@ -1,6 +1,7 @@
 {
-  "iteration": 794,
+  "iteration": 795,
   "phase": "extended",
+  "notes_795": "iter795 durability-breadth sweep, no edits — 2nd regexp-alternation re-probe to bulletproof + 3 fresh adjacent topics (map_agg-or-array_agg / pctile-rank / regexp_extract / COALESCE-SUM-0-or-bool_and)",
   "notes_794": "iter794 targeted FIX-A: surfaced plain-pipe regexp_like alternation canonical in a FENCED block at r23:2783 + defanged backslash-pipe table-cell trap + markdown-layout caution",
   "notes_793": "iter793 durability-breadth sweep, no edits — 4 fresh adjacent topics (CAST-DECIMAL-or-typeof / SUM-DISTINCT-or-avg-ignore-zero / IS-DISTINCT-FROM / regexp_like-alternation-or-split_part)",
   "notes_792": "iter792 durability-breadth sweep, no edits — days-between date-arithmetic slip re-check + 3 fresh adjacent topics (round-or-abs / SELECT-DISTINCT / clamp-or-NULLIF / completeness-or-bool-label)",
