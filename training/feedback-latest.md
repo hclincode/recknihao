@@ -1,57 +1,48 @@
-# Judge Feedback — iter837 (EXTENDED PHASE)
+# Judge Feedback — Iter 838 (EXTENDED PHASE)
 
-**LIGHT FIX-A re-probe of the iter836 string->DATE family-mix defect.** All four answers verified against trino.io/docs/467 (datetime.html, conversion.html, math.html, sql/select.html) + WebSearch 2026-06-09. PIN Trino 467. **OVERALL: 4.66 PASS.**
+**Mode:** DEFAULT NO-OP durability sweep. Teacher made ZERO resource edits. 4 SQL-fundamentals probes (date_trunc('week') Monday re-probe + CASE/IF NULL + ceil-round-up-to-5 + INTERSECT). All dialect claims verified against trino.io/docs/467 on 2026-06-09.
+
+**Overall: 5.00 STRONG PASS** (per-Q 5.00 / 5.00 / 5.00 / 5.00 = 20.00 / 4; margin +1.50 above 3.5 floor; overall avg governs, no per-Q veto).
+
+Federation NOT probed this iter — row stays 4.49944 / 310 (still FAIL, untouched).
 
 ---
 
 ## Per-question scores
 
-### Q1 — non-ISO text '15/03/2024' (day/month/year) -> DATE — **5/5/5/5 = 5.00 STRONG PASS**
-Responder: `CAST(date_parse(date_text, '%d/%m/%Y') AS DATE)`.
-- **Accuracy 5**: VERIFIED trino.io/docs/467/functions/datetime.html — `date_parse(string, format)` uses MySQL %-specifiers (`%d`=day, `%m`=month, `%Y`=4-digit year) and returns `timestamp(3)`; wrapping in `CAST(... AS DATE)` to land a DATE is correct. The matched-function+pattern-pair rule is exactly right. The responder used a MATCHED pair (date_parse + MySQL %-specifiers) and explicitly warned against mixing with `parse_datetime`/Joda letters ('MM/dd/yyyy').
-- **Clarity 5 / Applicability 5 / Completeness 5**: explains the specifier family, gives the worked '15/03/2024' -> 2024-03-15 trace, and the chronological-sort payoff.
-- **VERDICT: the iter836 date_parse-family fix LANDED CLEAN.** iter836 Q4 used `date_parse(s,'MM/dd/yyyy')` (Joda pattern fed to a MySQL-specifier function = crossed-family bug, mislabeled date_parse as "Joda"). This iter the responder correctly pairs date_parse with %-specifiers, wraps in CAST AS DATE, and defangs the cross. The iter836->iter837 string->DATE family-mix arc is CLOSED.
+### Q1 — weekly signup totals, weeks Monday–Sunday, one row per week — 5.00
+- **Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5**
+- `date_trunc('week', signup_timestamp)` + `GROUP BY date_trunc('week', signup_timestamp)` ORDER BY week_start — clean, no manual date math.
+- VERIFIED trino.io/docs/467/functions/datetime.html: `date_trunc('week', ts)` ALWAYS returns the **Monday** of the ISO-8601 week, deterministic. Doc example `date_trunc('week', 2001-08-22 [Wed]) -> 2001-08-20 [Mon]` confirms. Responder's own worked example `DATE '2020-01-01' [Wed] -> 2019-12-30 [Mon]` is correct. No locale / no first_day_of_week / no Sunday-start option.
+- **CRITICAL RE-PROBE RESULT — HEDGE DID NOT RECUR.** Responder led cleanly with `date_trunc('week',...)` and stated "ALWAYS returns the MONDAY of that ISO week" with NO Sunday/locale/"depends on system week start" hedge. The iter837 Q2 hedge ("depends on system week start Sun/Mon") is **CONFIRMED a one-off responder slip, NOT a content gap.** The r07:2079-2103 week-anchor card (TRUTH 1: always Monday, no Sunday option, no locale, no first_day_of_week) is doing its job. No edit warranted.
 
-### Q2 — Monday that starts the current week — **5/4/5/5 = 4.75 PASS**
-Responder: `date_add('day', -(EXTRACT(day_of_week FROM current_date) - 1), current_date)`.
-- **Accuracy 5**: VERIFIED — `day_of_week` returns ISO 1=Monday..7=Sunday, so subtracting `(dow-1)` days lands on Monday (Wed=3 -> subtract 2 -> Monday). `date_add('day', <negative>, date)` subtracts. The manual EXTRACT form given is fully correct.
-- **Completeness 4 (−1, minor precision ding)**: the responder mentioned `date_trunc('week', x)` but hedged "requires checking if your system's week starts on Monday vs Sunday." **This hedge is IMPRECISE for Trino 467: `date_trunc('week', x)` ALWAYS starts the week on Monday (ISO) — deterministic, not system-dependent** (docs example truncates 2001-08-22 -> 2001-08-20, a Monday). `date_trunc('week', current_date)` would in fact be the cleaner always-Monday one-liner answer. The manual form given is correct, so this is a completeness/precision ding, not an accuracy error — the responder slightly under-sold the better answer by hedging on it.
-- **Clarity 5 / Applicability 5**.
+### Q2 — CASE returning no value (NULL) for some rows — 5.00
+- **Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5**
+- "Yes — CASE returns NULL." Searched CASE with no ELSE -> NULL for unmatched rows; 2-arg `IF(cond, x)` -> NULL when false.
+- VERIFIED trino.io/docs/467/functions/conditional.html: CASE with no matching condition and no ELSE returns NULL; `IF(condition, true_value)` returns NULL and does not evaluate true_value when the condition is false. BOTH claims correct.
+- Correctly told the engineer NULL in the result set is valid and needs no app-layer handling. Cited resource 23.
 
-### Q3 — CAST decimal price to integer: rounds or chops? — **5/5/5/5 = 5.00 STRONG PASS**
-Responder: CAST to INTEGER ROUNDS half-up (2.99->3, 2.49->2, 2.50->3); to DROP cents use `truncate(price, 0)` (toward zero) or `floor(price)`.
-- **Accuracy 5**: CONFIRMED — Trino 467 `CAST(DECIMAL/double AS INTEGER)` ROUNDS half-up away from zero, it does NOT truncate. `2.50->3` (half-up, not banker's). To drop the fraction without rounding, `truncate(x)` is toward zero and `floor(x)` is toward -inf. The responder nailed the exact 2.99/2.49/2.50 cases and gave the correct truncate/floor alternatives. (VERIFIER NOTE: a raw WebSearch summary wrongly claimed CAST truncates — it conflated the PostgreSQL connector's `decimal-rounding-mode` setting with engine CAST behavior. Trino-engine CAST rounds; this is a repeatedly-pinned repo-memory fact and matches Trino behavior. Do NOT let the unreliable search snippet flip this.)
-- **Applicability 5**: the billing-context guidance ("for billing you likely want rounding; truncating 2.99->2 undercharges") is exactly the actionable distinction the engineer needed.
-- **Clarity 5 / Completeness 5**.
+### Q3 — round price-in-cents UP to nearest 5 cents (103->105, 100->100) — 5.00
+- **Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5**
+- `CAST(ceil(price_cents / 5.0) * 5 AS integer)`. Worked: 103 -> ceil(20.6)*5 = 21*5 = 105; 100 -> 20*5 = 100. Correct.
+- VERIFIED trino.io/docs/467/functions/math.html: `ceil(x)/ceiling(x)` rounds toward +infinity; `floor(x)` -inf; `truncate(x)` toward zero. The `/ 5.0` is **load-bearing** — it forces non-integer (float/decimal) division so `103/5.0 = 20.6` survives to ceil; integer `103/5` would truncate to 20 BEFORE ceil and silently break the round-up. Responder correctly used `5.0` and explained ceil/floor/truncate distinction.
 
-### Q4 — random sample ~500 rows from a large events table — **5/4.5/5/5 = 4.875 STRONG PASS**
-Responder: `... TABLESAMPLE BERNOULLI (5) WHERE event_date >= CURRENT_DATE - INTERVAL '7' DAY LIMIT 500`; BERNOULLI = per-row uniform (scans all blocks), SYSTEM = block-level (faster, clustered).
-- **Accuracy 5**: VERIFIED trino.io/docs/467/sql/select.html — `TABLESAMPLE BERNOULLI (5)` is valid syntax (percentage 0-100); BERNOULLI selects each row independently with the sample probability (examines every block, skips individual rows); SYSTEM samples at logical-segment/split granularity (faster, connector-layout-dependent, may be clustered). The BERNOULLI-vs-SYSTEM characterization is exactly correct.
-- **Completeness 4.5 (−0.5 minor)**: docs note "neither method allows deterministic bounds on the number of rows returned" — BERNOULLI(5) + LIMIT 500 gives "up to 500 of a ~5% sample," not guaranteed exactly 500. The responder's `LIMIT 500` caps it correctly and the partition filter is good production advice, but it could have flagged that exact-500 is not guaranteed (the simpler `ORDER BY random() LIMIT 500` gives exact-500 at full-sort cost — acceptable to omit per directive).
-- **Clarity 5 / Applicability 5**: partition-filter-first is exactly right for the on-prem Iceberg+Trino stack.
+### Q4 — users active in BOTH months (set intersection) — 5.00
+- **Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5**
+- `SELECT user_id FROM last_month_active_users INTERSECT SELECT user_id FROM this_month_active_users` + equivalent INNER JOIN + DISTINCT alt.
+- VERIFIED trino.io/docs/467/sql/select.html: INTERSECT defaults to INTERSECT DISTINCT — returns DISTINCT rows present in BOTH queries, dedups automatically. NULL-safe vs IN-subquery (correct framing). INNER JOIN + DISTINCT equivalence is correct (DISTINCT collapses the join's duplicate matches to one row per user_id). Cited resource 23.
 
 ---
 
-## Overall
+## Dimension cross-check
+Acc 5.00 / Comp 5.00 / Clar 5.00 / Appl 5.00 = 5.00. Agrees with per-Q average. **GOVERNING LABEL = PASS.**
 
-Per-Q averages: Q1 5.00 / Q2 4.75 / Q3 5.00 / Q4 4.875.
-**Overall avg = (5.00 + 4.75 + 5.00 + 4.875) / 4 = 4.65625 ≈ 4.66.**
-Dim cross-check: Acc (5+5+5+5)/4=5.00, Comp (5+4+5+4.5)/4=4.625, Clar (5+5+5+5)/4=5.00, Appl (5+5+5+5)/4=5.00 -> (5.00+4.625+5.00+5.00)/4=4.656. Agrees.
+## Defects / gaps
+NONE. Zero dialect errors, zero hedges, zero findability misses. All four critical verification targets PASSED.
 
-**GOVERNING LABEL = PASS (4.66 >= 3.5; no per-Q gate override per directive). No per-Q below threshold; no accuracy errors.**
+## iter839 directive — DEFAULT NO-OP / durability sweep
+No open defect; no FIX-A. Do NOT pre-churn. The Q1 date_trunc('week')-Monday re-probe came back **CLEAN** — the iter837 Sunday/locale hedge is a confirmed one-off slip, so the narrow week-anchor exception remains satisfied with ZERO edits.
 
-- **Q1 date_parse-family fix LANDED CLEAN** — matched pair + CAST AS DATE + cross-family defang; iter836 crossed-family bug did NOT recur.
-- **Q2 date_trunc('week')-always-Monday note**: the responder's "depends on system week start Sun/Mon" hedge is imprecise — Trino 467 `date_trunc('week')` is deterministically ISO Monday. Minor completeness ding only; the manual EXTRACT form given is correct.
+**DO NOT:** touch r22 §13.x federation (4.49944/310 thin, ZERO probe iter838); re-edit the r07:2079-2103 week-anchor card or iter837 string->DATE / MySQL-vs-Joda disambiguator; churn the CASE/IF NULL, ceil-round-up-to-5 (`/5.0` load-bearing), INTERSECT/EXCEPT set-op, iter836 lpad/format pad+truncate, iter831 month-name, iter823 repeat-char, iter825/827 bool NULL cards; add `::`-casts (iter571 PIN), QUALIFY, RLIKE (iter623 ban), PERCENTILE_CONT/MEDIAN (iter611 ban), EXTRACT(EPOCH) (iter562 ban), DISTINCT ON (iter634 ban); fabricate dayname()/initcap; touch iter534-837 locks; bump training/state.json (already 838); git commit/push beyond appending the rubric score-history line.
 
-## iter838 directive — DEFAULT NO-OP / durability sweep
-
-No defect surfaced. All four answers accuracy-clean and PASS. iter838 = **DEFAULT NO-OP / durability sweep** — no resource edits required.
-
-Optional, low-risk (NOT a required fix): at the r23 `date_trunc` / week-start neighborhood, add a one-line anchor stating `date_trunc('week', x)` in Trino 467 ALWAYS starts the week on Monday (ISO) — deterministic, NOT system-dependent — so the responder leads with the clean one-liner for "Monday that starts the week" instead of hedging. Pure additive clarification; does not touch a locked canonical.
-
-## DO NOT (iter838)
-- Touch r22 §13.x federation guardrails (4.49944/310 thin, ZERO probe iter837 — federation row UNCHANGED).
-- Re-edit the iter837 r23 string->DATE subsection / MySQL-vs-Joda disambiguator / matched-pair canonicals (just validated CLEAN).
-- Churn the verified CAST-rounds-half-up + truncate/floor content, the day_of_week/date_add Monday canonical, the TABLESAMPLE BERNOULLI/SYSTEM card, the iter836 lpad/format pad+truncate content, iter831 format_datetime month-name cards, iter823 repeat-char card, iter825/827 bool NULL-semantics cards.
-- Add `::`-casts (iter571 PIN), QUALIFY, RLIKE (iter623 ban), PERCENTILE_CONT/MEDIAN (iter611 ban), EXTRACT(EPOCH) (iter562 ban); fabricate dayname()/initcap; DISTINCT ON Postgres-leak (iter634 ban).
-- Touch iter534-836 locks; bump training/state.json (already 837); git commit/push beyond appending the rubric score-history line.
+Suggested fresh adjacent picks for iter839 if probing: `UNION ALL` vs `UNION` dedup cost, multi-branch searched CASE, `floor(x/N)*N` round-DOWN-to-N (FLOOR sibling of the ceil card), `least`/`greatest` row-wise NULL-poison.
