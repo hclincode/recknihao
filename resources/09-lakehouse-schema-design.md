@@ -877,6 +877,30 @@ GROUP BY address.state;
 
 **Cross-references.** If your column is a `VARCHAR` holding a JSON string (NOT a native ROW), use the next section's `CAST(json_parse(payload) AS ROW(...))` LEADING CANONICAL to promote it. If the column is a `MAP(VARCHAR, VARCHAR)`, use `element_at(map_col, 'key')` from the MAP canonical above. The trichotomy: native ROW → dot; JSON-text → `CAST(json_parse(...) AS ROW(...))` then dot; MAP → `element_at(map_col, 'key')`. Pick by the column's actual TYPE, not by what the data "looks like" in a sample.
 
+#### Unpack ALL fields of a ROW column into separate columns — `(row_col).*` (no need to list each field)
+
+> **Keyword anchors so the responder lands here:** unpack a row column, expand struct into columns, all fields of a row as columns, flatten a ROW without listing fields, (row).* expansion, struct to columns, explode a ROW into columns, project every struct field, ROW dot-star, expand all named fields of a struct, turn a ROW column into top-level columns.
+
+**The fact in one sentence.** To explode EVERY field of a `ROW` column into its own output column **without typing each field name**, use the row-expansion form `(row_col).*` — the **parentheses around the column reference are REQUIRED**. Per [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) verbatim: *"In the case of `row_expression.* [ AS ( column_alias [, ...] ) ]`, the `row_expression` is an arbitrary expression of type `ROW`."* The documented example is `SELECT (CAST(ROW(1, true) AS ROW(field1 bigint, field2 boolean))).*`. Without `AS (...)` aliases the original ROW field names are preserved.
+
+```sql
+-- Expand ALL fields of a ROW column into separate output columns (no need to list them):
+SELECT (properties).*                 -- parentheses around the column are REQUIRED
+FROM events;
+
+-- with explicit output names:
+SELECT (properties).* AS (plan, region, account_tier) FROM events;
+
+-- access just ONE field (no parens needed):
+SELECT properties.plan FROM events;
+```
+
+```sql
+-- ❌ CROSS JOIN UNNEST(properties) to expand a ROW's named fields into columns -- WRONG: UNNEST expands ARRAY (into one column) or MAP (into key,value) into ROWS, NOT a single ROW's fields into columns; use (properties).* for all fields or properties.field for one — DO NOT COPY
+```
+
+**THE RULE.** To expand **ALL** fields of a `ROW` column into columns, use `(row_col).*` — **the parentheses around the column are REQUIRED**. To access a **single** field, use dot notation `row_col.field` (the LEADING CANONICAL immediately above — still correct for one field). **`UNNEST` does NOT do this:** per the docs UNNEST expands an `ARRAY` (into one column) or a `MAP` (into `key, value` columns) into ROWS — it only expands ROW fields when given an `ARRAY` of `ROW` (`UNNEST(array_of_rows)`), never a single `ROW` column's fields into columns. So "`CROSS JOIN UNNEST` a ROW column to get its fields as columns" is wrong — reach for `(row_col).*` instead.
+
 ### LEADING CANONICAL — `CAST(json_col AS ROW(...) / MAP(VARCHAR, T) / ARRAY(T))` parses a JSON column INTO a TYPED structure (the JSON → typed direction)
 
 > **Keyword anchors (read this section FIRST when your question contains any of these):** Trino parse JSON into ROW, JSON to struct Trino, cast JSON as ROW Trino, cast JSON as MAP Trino, cast JSON as ARRAY Trino, json_parse then cast, extract typed struct from json column, deserialize JSON to typed columns Trino, JSON → ROW round trip, parse JSON column to record, materialize JSON into typed fields, `CAST(json_col AS ROW(a INT, b VARCHAR))`, `CAST(json_parse(s) AS MAP(VARCHAR, VARCHAR))`, JSON column to dbt model typed fields, JSON inbound to typed structure Trino.
