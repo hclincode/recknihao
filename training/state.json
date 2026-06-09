@@ -1,6 +1,7 @@
 {
-  "iteration": 813,
+  "iteration": 814,
   "phase": "extended",
+  "notes_814": "iter814 FIX-A round-to-NEAREST-N-min defect (iter813 Q2 2.00): added round(to_unixtime(ts)/300)*300 canonical + FLOOR/NEAREST/CEILING disambiguation adjacent to r07 iter606 FLOOR card; reworded r07:1832 anchor (FLOOR keywords stay, NEAREST/round route to new card); defanged both iter813 bug forms inline; +histogram(x)->map(K,bigint) one-step frequency-map cross-ref near r07 map_agg. NO federation edits.",
   "notes_813": "iter813 durability-breadth sweep, no edits — 4 fresh adjacent topics (range-interval-window / round-ts-5min / nested-json-path / histogram-or-greatest-coalesce)",
   "notes_812": "iter812 durability-breadth sweep, no edits — bool_and bulletproof re-probe + 3 fresh adjacent topics (trailing-window / max_by / epoch-millis / this-vs-last-month)",
   "notes_811": "iter811 light inoculation FIX-A: bool_or boolean-flag-pivot card at r07 pivot landing + defang redundant MAX(CASE)+FILTER",

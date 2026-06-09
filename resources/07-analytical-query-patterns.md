@@ -231,6 +231,14 @@ Use `LEFT JOIN UNNEST(...) ON TRUE` instead of `CROSS JOIN` in either branch if 
 > GROUP BY user_id;
 > ```
 >
+> **ALT — you just want a FREQUENCY map (how many times each value occurs) — ONE step, use `histogram`:** `histogram(x) → map(K, bigint)` ("Returns a map containing the count of the number of times each input value occurs" — verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html)). This is an aggregate, so use it with or without a GROUP BY:
+> ```sql
+> -- ✅ count how many times each rating occurs, in ONE step:
+> SELECT histogram(rating) AS rating_counts   -- e.g. {1=4, 4=33, 5=11}
+> FROM iceberg.analytics.product_reviews;
+> ```
+> `map_agg(rating, COUNT(*))` over a `GROUP BY rating` is the manual two-step equivalent (group-then-fold); `histogram(rating)` does the same value→count map in one call. Prefer `histogram` when you literally want "count of each distinct value"; use `map_agg` when the value side is something OTHER than a count.
+>
 > **CO-LOCATED note — for two parallel arrays ALREADY IN HAND, the `map(keys, values)` 2-arg constructor is the lead.** You CAN build the same map with `map_from_entries(zip_with(question_keys, responses, (k, v) -> row(k, v)))` — `zip_with` pairs the two arrays element-wise into `row(k, v)` entries and `map_from_entries` folds them up — but that is **needlessly convoluted** for this case (two intermediate steps to do what `map(keys, values)` does in one call). Use the round-trip-through-`zip_with` form ONLY when you need to transform each pair before mapping; for a plain zip-into-map, prefer `map(question_keys, responses)`.
 >
 > **DISAMBIGUATION — four MAP directions that collide on "map" keywords. Route by the SHAPE of your input:**
@@ -1829,7 +1837,8 @@ format('%.2f%%', conversion_rate * 100)   -- '7.32%'   (%% = a literal percent s
 
 #### LEADING CANONICAL — N-minute (5 / 10 / 15 / 30-minute) timestamp buckets — `date_trunc` has NO sub-hour custom unit, use arithmetic (iter606 PIN)
 
-> **Keyword anchors (READ THIS FIRST if your question contains any of these):** 5-minute buckets · 10-minute buckets · 15-minute windows · 30-minute buckets · N-minute buckets · bucket timestamps into X-minute windows · group events every 5 minutes · finer than hourly · sub-hour time buckets · truncate timestamp to 15 minutes · floor timestamp to nearest 5 minutes.
+> **Keyword anchors (READ THIS FIRST if your question contains any of these):** 5-minute buckets · 10-minute buckets · 15-minute windows · 30-minute buckets · N-minute buckets · bucket timestamps into X-minute windows · group events every 5 minutes · finer than hourly · sub-hour time buckets · truncate timestamp to 15 minutes · **floor / truncate a timestamp to a 5/15/30-min bucket START** (round DOWN to the bucket boundary).
+> **⚠️ If your question says "round to the NEAREST 5/15/30 minutes" (snap to the CLOSEST mark, e.g. `10:02:30 → 10:05`) — that is a DIFFERENT idiom: see the "round to the NEAREST N minutes" canonical immediately BELOW this card. This FLOOR card always rounds DOWN; it does NOT snap to the closest boundary.**
 
 > **One fact.** `date_trunc(unit, ts)` supports only **FIXED units** — verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html): the units are `millisecond`, `second`, `minute`, `hour`, `day`, `week`, `month`, `quarter`, `year`. There is **NO `'5 minute'` / `'15 minute'` unit** — Trino raises an error if you pass one. So a custom sub-hour bucket (every 5 / 10 / 15 / 30 minutes) needs a little **arithmetic**: floor to the start of the hour, then add back the whole number of N-minute steps that have elapsed in that hour.
 
@@ -1860,6 +1869,46 @@ format('%.2f%%', conversion_rate * 100)   -- '7.32%'   (%% = a literal percent s
 >          + INTERVAL '1' MINUTE * (CAST(EXTRACT(minute FROM event_ts) AS integer) / 5 * 5)
 > ORDER BY bucket_5min;
 > ```
+
+#### LEADING CANONICAL — round a timestamp to the NEAREST N minutes (snap to the CLOSEST 5/15/30-min mark — NOT floor, NOT ceiling) (iter814 PIN — FIX-A)
+
+> **Keyword anchors (READ THIS FIRST if your question contains any of these):** round a timestamp to the NEAREST 5 minutes · round to the nearest 5/10/15/30 minutes · snap a timestamp to the closest 5-minute mark · nearest 5-minute mark · round event time to the nearest 5 minutes · `10:02:30 → 10:05` · `10:01:00 → 10:00` · snap to the closest sub-hour boundary · round (not floor) to N minutes · half-up rounding to N minutes · nearest sub-hour bucket. **This card SNAPS to whichever N-minute mark is closer (round) — it is NOT the FLOOR card above (which always rounds DOWN) and NOT the CEILING form (which always rounds UP).**
+
+> **One fact.** "Round to the NEAREST N minutes" means: pick whichever N-minute mark — the one before OR the one after — is **closer** to the timestamp. `date_trunc` has NO 5-minute unit and always FLOORS, so it cannot do this. The Trino 467 idiom is **divide epoch seconds by N-seconds, `round()` to the nearest whole bucket, multiply back**. `round(x)` rounds to the nearest integer (verified at [trino.io/docs/467/functions/math.html](https://trino.io/docs/467/functions/math.html)); `to_unixtime(ts) → double` epoch seconds and `from_unixtime(double) → timestamp(3) with time zone` (verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html)).
+
+> **THE CANONICAL — round to the NEAREST 5 minutes shown EXACTLY (copy this ✅; nearest 5 min = 300 s):**
+> ```sql
+> -- ✅ Round a timestamp to the NEAREST N minutes (nearest 5 min = 300 s):
+> from_unixtime(round(to_unixtime(reading_time) / 300) * 300)   -- 10:02:30 -> 10:05 ; 10:01:00 -> 10:00
+> -- nearest 15 min -> /900*900 ; nearest 30 min -> /1800*1800
+> ```
+
+> **FLOOR vs NEAREST vs CEILING — three DISTINCT sub-hour idioms, pick the one the question asks for (5-min = 300 s; for 15-min use 900, for 30-min use 1800):**
+> ```sql
+> -- FLOOR to N-min bucket start:  from_unixtime(to_unixtime(ts) - to_unixtime(ts) % 300)
+> -- NEAREST N-min (snap closest): from_unixtime(round(to_unixtime(ts) / 300) * 300)
+> -- CEILING to next N-min:        from_unixtime(ceil(to_unixtime(ts) / 300) * 300)
+> ```
+> FLOOR always rounds DOWN to the bucket start; NEAREST snaps to whichever mark is closer (`10:02:30 → 10:05`, `10:01:00 → 10:00`); CEILING always pushes UP to the next mark. Change one number for other sizes: `300` (5 min) → `900` (15 min) → `1800` (30 min) → `3600` (hourly). All three return `timestamp(3) with time zone`; wrap in `CAST(... AS TIMESTAMP)` if your column is naive (see r13:5671).
+
+> **CRITICAL — DO NOT WRITE (the iter813 Q2 nearest-5-min defect, banned):**
+> ```sql
+> -- ❌ date_trunc('minute', ts + INTERVAL '2.5' MINUTE / 2)  -- date_trunc has NO 5-min unit (truncates to 1 min); fractional/divided interval literal is invalid — DO NOT COPY
+> -- ❌ from_unixtime(to_unixtime(ts) - to_unixtime(ts) % 300 + 150)  -- floors then +150 lands on the bucket MIDPOINT (:02:30), NOT the nearest boundary; add-half must come BEFORE the floor — DO NOT COPY
+> ```
+> The `+ 150` mid-bucket trick is broken because adding half a bucket (150 s) AFTER the floor lands every result on the bucket midpoint, not the nearest boundary. If you want the add-half-then-floor approach to actually work it must be `from_unixtime((to_unixtime(ts) + 150 - (to_unixtime(ts) + 150) % 300))` — but the `round(.../300)*300` form above is simpler and is the canonical; use it.
+
+> **Worked GROUP BY (count sensor readings snapped to the nearest 5 minutes — repeat the full expression in GROUP BY, no alias per Trino #16533):**
+> ```sql
+> SELECT from_unixtime(round(to_unixtime(reading_time) / 300) * 300) AS nearest_5min,
+>        COUNT(*) AS readings
+> FROM iceberg.analytics.sensor_readings
+> WHERE reading_time >= current_timestamp - INTERVAL '1' DAY
+> GROUP BY from_unixtime(round(to_unixtime(reading_time) / 300) * 300)
+> ORDER BY nearest_5min;
+> ```
+
+> **Cross-references.** FLOOR (round DOWN to bucket start) = the iter606 N-minute canonical immediately ABOVE, or the EPOCH-FLOOR form below (`% 300`). NEAREST hour (not N-minute) = the iter631 nearest-HOUR card further above (`date_trunc('hour', ts + INTERVAL '30' MINUTE)`). The epoch round-trip (`to_unixtime`/`from_unixtime`) is the same one used by the EPOCH-FLOOR tumbling-window card immediately below.
 
 #### LEADING CANONICAL — N-minute TUMBLING-WINDOW time bucket via EPOCH-FLOOR (`from_unixtime(to_unixtime(ts) - to_unixtime(ts) % N_seconds)`) — Trino 467 has NO `date_bin` / NO `time_bucket` function (those are Postgres / TimescaleDB) (iter715 PIN — FIX-A)
 
