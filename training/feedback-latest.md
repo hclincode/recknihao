@@ -1,47 +1,50 @@
-# Judge Feedback — Iter 819 (EXTENDED PHASE)
+# Judge Feedback — iter820 (DEFAULT NO-OP durability sweep)
 
-**Mode:** DEFAULT NO-OP durability sweep (teacher made ZERO resource edits). Federation NOT probed.
-**Overall: 4.9375 STRONG PASS** (per-Q 5.00 / 4.75 / 5.00 / 5.00 = 19.75/4; margin +1.4375; overall avg governs, no per-Q veto)
+Phase: extended. Teacher made zero resource edits this iteration. All 4 Q&A pairs scored on merits; every dialect claim verified against trino.io/docs/467.
 
-All four answers docs-verified against trino.io/docs/467 (aggregate.html FILTER, array.html contains/array_min, datetime.html format_datetime/date_format) on 2026-06-09. ZERO dialect defects. Production stack = on-prem Trino 467 Iceberg/Hive; all 4 answers fit it.
+## Per-question scores
 
----
+### Q1 — last element of an array
+- **Accuracy 5** — `element_at(arr, -1)` = last element CONFIRMED (Trino docs: "If `index` < 0, `element_at` accesses elements from the last to the first"). NULL-safe on out-of-range/empty CONFIRMED ("returns NULL when accessing an index larger than array length, whereas the subscript operator would fail"). Subscript `arr[n]` is 1-based and ERRORS on out-of-range CONFIRMED. The claim `arr[cardinality(arr)]` errors on empty arrays is correct (cardinality()=0 → subscript [0] out of range → fail).
+- **Completeness 5** — gives the recommended idiom plus the verbose erroring alternative with the empty-array caveat.
+- **Clarity 5** — direct, no assumed knowledge.
+- **Actionability 5** — engineer can paste `element_at(array_col, -1)` immediately.
+- Citation r07:610/618 verified exact. **Q1 avg = 5.00**
 
-## Per-Question Scores
+### Q2 — case-insensitive match
+- **Accuracy 5** — `lower(plan_tier)='starter'`, `lower(plan_tier) LIKE '%starter%'`, and `regexp_like(plan_tier, '(?i)starter')` all valid. Trino docs confirm regexp functions use Java pattern syntax and the `(?i)` inline flag is supported ("Case-insensitive matching (enabled via the `(?i)` flag)"). Trino 467 has NO `ILIKE` operator; responder correctly did not invent one and offered the canonical `lower()`/regex idioms. Responder's "Java regex" phrasing is accurate (Trino uses java.util.regex Pattern syntax).
+- **Completeness 5** — three distinct correct idioms (exact, substring, regex) for the Postgres-migrant asker.
+- **Clarity 5** — names the "normalize one side" mental model.
+- **Actionability 5** — directly usable WHERE clauses.
+- Citation r23:1989/2781. **Q2 avg = 5.00**
 
-### Q1 — per-region total + escalated side by side (COUNT FILTER) — 5.00
-Acc 5 / Comp 5 / Clar 5 / Act 5
-- `COUNT(*) FILTER (WHERE status='escalated')` VERIFIED: Trino 467 supports the SQL-standard aggregate FILTER modifier for ALL aggregate functions (aggregate.html: "FILTER ... evaluated for each row before it is used in the aggregation ... supported for all aggregate functions").
-- Functionally equivalent to `COUNT(CASE WHEN status='escalated' THEN 1 END)` — responder correctly noted both work, FILTER more concise.
-- One scan, one row per region, NO join — exactly answers the "no separate query+join" constraint. GROUP BY region + ORDER BY region correct.
+### Q3 — pivot rows to columns
+- **Accuracy 5** — `SUM(CASE WHEN channel='web' THEN amount ELSE 0 END)` conditional aggregation valid; `SUM(amount) FILTER (WHERE channel='web')` valid (Trino docs: FILTER "is supported for all aggregate functions"). Trino has no native PIVOT keyword — manual conditional aggregation is the correct idiom. ELSE 0 → 0 for absent channel; FILTER → NULL for absent — both acceptable, responder's SQL is valid.
+- **Completeness 5** — both idioms shown, correct GROUP BY.
+- **Clarity 5** — full runnable query.
+- **Actionability 5** — copy-paste ready.
+- Citation r07:1227-1246. **Q3 avg = 5.00**
 
-### Q2 — array contains a value (contains) — 4.75
-Acc 5 / Comp 4 / Clar 5 / Act 5
-- `contains(tags, 'onboarding') -> boolean` VERIFIED (array.html: "Returns true if the array x contains the element"). No UNNEST needed — directly answers "UNNEST feels heavy."
-- Exact + case-sensitive correctly stated; case-insensitive workaround `contains(transform(tags, x -> lower(x)), lower('onboarding'))` VERIFIED valid (transform(array(T),T->U)->array(U)).
-- MINOR completeness ding (Comp 4): did NOT flag the three-valued-logic edge case — `contains` returns NULL (not false) when the target is absent AND the array contains a NULL element (same family as arrays_overlap NULL semantics). Harmless for the asked example ('onboarding' present -> true), so Accuracy stays 5; only a nuance omission.
+### Q4 — build a JSON object from columns
+- **Accuracy 5** — `CAST(MAP(ARRAY[keys], ARRAY[vals]) AS JSON)` produces a JSON object (docs example confirms). `CAST(CAST(ROW(...) AS ROW(name type,...)) AS JSON)` uses FIELD NAMES as keys CONFIRMED (docs: `ROW(v1,v2,v3)` → `{"v1":...,"v2":...,"v3":...}`). `json_format()` returns VARCHAR CONFIRMED. Critical warning correct: casting a MAP directly to VARCHAR yields `{k=v}` debug rendering, NOT valid JSON — verified via docs/search. MAP value array must be one common type, so casting `user_id` to VARCHAR to unify the values array is necessary and correct; MAP keys must be non-null VARCHAR.
+- **Completeness 5** — two construction methods + the anti-pattern warning + json_format serialization step.
+- **Clarity 5** — shows expected output shape.
+- **Actionability 5** — full expressions ready for an API-response query.
+- Citation r09:757-786. **Q4 avg = 5.00**
 
-### Q3 — smallest amount per order (array_min) — 5.00
-Acc 5 / Comp 5 / Clar 5 / Act 5
-- `array_min(line_items)` VERIFIED (array.html "Returns the minimum value of input array"); per-row, no explosion — answers "without exploding the array into rows."
-- NULL semantics "empty OR contains any NULL -> NULL" CONFIRMED correct (established Trino three-valued semantics; array comparison short-circuits to NULL on any NULL element). Responder surfaced this proactively — good completeness.
-- Correctly steered away from CROSS JOIN UNNEST + MIN + GROUP BY as unnecessary explosion.
+## Overall
 
-### Q4 — format timestamp as 'YYYY-MM' (format_datetime / date_format) — 5.00
-Acc 5 / Comp 5 / Clar 5 / Act 5
-- `format_datetime(created_at, 'yyyy-MM')` VERIFIED (datetime.html, JodaTime pattern). The GOTCHA — lowercase `yyyy`=year, uppercase `MM`=month, lowercase `mm`=MINUTE so `'yyyy-mm'` silently yields year-MINUTE — is CORRECT and high-value (classic footgun).
-- `date_format(created_at, '%Y-%m')` VERIFIED equivalent (MySQL-style %Y=4-digit year, %m=zero-padded month). Both functions take a TIMESTAMP (confirmed).
-- DATE vs TIMESTAMP routing is a strong bonus: `substr(CAST(created_at AS varchar),1,7)` for a DATE column is valid (DATE casts to 'YYYY-MM-DD', chars 1-7 = 'YYYY-MM') and cleanly sidesteps the timestamp-only signature. Engineer knows exactly what to do for either column type.
+| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|---|
+| Q1 | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 | 5 | 5 | 5 | 5 | 5.00 |
+| Q3 | 5 | 5 | 5 | 5 | 5.00 |
+| Q4 | 5 | 5 | 5 | 5 | 5.00 |
 
----
+**Overall avg = 5.00 — PASS** (threshold 3.5; overall average governs, no per-Q veto)
 
-## iter820 Directive: DEFAULT NO-OP / durability-breadth sweep
+## Defects / gaps
+None. All four answers are technically bulletproof against Trino 467, all citations verified exact, all SQL is valid Trino 467 dialect. No findability slip — responder answered all four fully and routed to correct resources. Pure-SQL questions; no prod-env (on-prem Trino 467 / OPA / JWT) conflict.
 
-No defect surfaced; all four canonicals docs-correct and copy-attractive. **iter820 = DEFAULT NO-OP** (NOT FIX-A).
-
-- Do NOT churn any card: COUNT FILTER (conditional-aggregation), contains/transform (array membership), array_min NULL semantics, format_datetime/date_format yyyy-vs-mm gotcha + substr-date trick.
-- OPTIONAL low-pri inoculation ONLY if a future probe under-scores: a one-line `contains` three-valued-NULL note (returns NULL not false when target absent AND array has a NULL) co-located with the contains card. Do NOT pre-churn — single minor omission, not a recurring pattern.
-- Suggest fresh adjacent picks for breadth: `element_at(array,-n)` negative-index last element / `array_position` / `date_trunc('month', ts)` timestamp vs the string-label forms here / `arrays_overlap`.
-- HOLD all iter534-818 locks. Federation r22 untouched (4.49944/310, below raised 4.5 bar — known terminal state, do not probe unless bulletproofed angle).
-
-DO NOT bump training/state.json (already 819).
+## iter821 directive
+**DEFAULT NO-OP / durability sweep.** No defect surfaced — do not open a FIX-A. Continue probing fresh adjacent angles to keep coverage broad. Suggested fresh probes for iter821: (1) array flatten — `flatten(array(array))` vs `array_agg` over UNNEST; (2) `try_cast` vs `cast` on dirty numeric strings; (3) running/cumulative SUM window frame `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`; (4) `date_diff(unit, ts1, ts2)` unit-string form on timestamps. Keep federation (r22) untouched unless a federation question lands — margin remains thin there.

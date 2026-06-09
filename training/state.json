@@ -1,6 +1,7 @@
 {
-  "iteration": 819,
+  "iteration": 820,
   "phase": "extended",
+  "notes_820": "iter820 DEFAULT NO-OP durability sweep; no resource edits",
   "notes_819": "iter819 DEFAULT NO-OP durability sweep; no resource edits",
   "notes_818": "iter818 FIX-A round-to-NEAREST-N-min FINDABILITY (iter817 Q1 2.00 under-routing on dashboard 'nearest 10-min' framing landing on iter715 EPOCH-FLOOR tumbling card r07:1951 instead of round() canonical r07:1909): added warning NEAREST->NEAREST-canonical redirect blockquote at TOP of r07:1951 card before its keyword anchor; reworded the r07:1953 anchor so round/nearest/closest/snap route AWAY to the NEAREST card (FLOOR card keeps only bucket-start/floor/truncate/chop-down/tumbling/every-N-min-from-fixed-origin); added NEAREST-N-min canonical to r07:1951 cross-ref block (was nearest-HOUR only); filled scaling-list gap at r07:1909 canonical with 10-min/600s value + worked 10-min example (10:04->10:00, 10:06->10:10) + 600 in change-one-number list; inline-defanged date_trunc('minute',ts) and the add-5-then-truncate-to-10 hack each on its own line in the EPOCH-FLOOR card. Did NOT rewrite the verified round()*N canonical SQL. Verified from_unixtime->timestamp(3) tz, round() nearest, date_trunc no sub-hour unit vs trino.io/docs/467. NO federation edits (r22 13.x zero edits, federation 4.49944/310).",
   "notes_817": "iter817 RE-PROBE after iter816 responder-slip; confirm findability; no resource edits except 1 light TRY_CAST safe-cast anchor line at r23 :: cast landing (bad-values/invalid/null-on-failure keywords routed to existing TRY_CAST fix); other 3 landings zero edits; NO federation edits",
