@@ -1,6 +1,7 @@
 {
-  "iteration": 785,
+  "iteration": 786,
   "phase": "extended",
+  "notes_786": "iter786 durability-breadth sweep, no edits — 4 fresh adjacent topics (weighted-avg / ORDER-BY-CASE-or-NULLS / lpad-rpad-repeat / ROW-dot-access)",
   "notes_785": "iter785 durability-breadth sweep, no edits — iceberg-summary-key re-probe + 3 fresh adjacent topics (CTE / self-join / format-thousands / IN-subquery-or-EXISTS)",
   "notes_784": "iter784 durability-breadth sweep, no edits — set-ops EXCEPT/UNION bulletproof re-probe + $snapshots map-access slip re-check + 2 fresh adjacent topics (array_distinct-or-sort / date_parse-or-CTE-or-bool_or)",
   "notes_783": "iter783 light additive findability FIX-A: surfaced/elevated row-level set-operations card INTERSECT/EXCEPT/UNION-vs-UNION-ALL + keyword anchors + array-vs-row disambiguator",
