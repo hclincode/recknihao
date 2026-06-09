@@ -2797,6 +2797,29 @@ WHERE regexp_like(description, 'refund|chargeback|dispute')   -- plain | = OR/al
 
 **Markdown-layout caution:** A `\|` shown inside a markdown TABLE in these docs is markdown-layout-only (a literal pipe escaped so it doesn't break the `|`-delimited table) and renders as `|` — in actual SQL use a PLAIN unescaped `|`. So the companion-table row above showing `regexp_like(col, 'a\|b\|c')` means `regexp_like(col, 'a|b|c')` in real SQL. `regexp_like` is a **CONTAINS** check (no `^...$` anchors needed) — it returns TRUE if the column contains any of the alternatives. For case-insensitive, prefix the inline flag: `regexp_like(description, '(?i)refund|chargeback|dispute')`. (See the full multi-keyword canonical at [§27 multi-keyword canonical](27-oracle-plsql-to-dbt-trino.md).)
 
+#### Extract the FIRST number / pull digits out of a messy string (`regexp_extract`)
+
+Use this when you need to **extract the first number**, **pull digits out of a string**, **parse a leading integer**, **get the number from a messy string**, grab the **first run of digits**, extract a **substring matching a pattern**, pull out a **capture group**, or get **all matches** out of a string. The tool is **`regexp_extract`** (first match / capture group) and **`regexp_extract_all`** (array of all matches) — wrap in `CAST(... AS INTEGER)` or `CAST(... AS BIGINT)` to get a number. **Trino DOES have `regexp_extract` / `regexp_extract_all` — do NOT claim there is no digit-extraction function.**
+
+```sql
+-- Extract the FIRST run of digits from a messy string, AS A NUMBER:
+CAST(regexp_extract(product_label, '[0-9]+') AS INTEGER)   -- 'Size 12 (Large)' -> 12 ; 'Weight 340g' -> 340
+
+-- First match of a capture GROUP (the digits AFTER a label):
+regexp_extract(s, 'id=([0-9]+)', 1)                        -- 'id=987;x' -> '987'  (group 1)
+
+-- ALL digit-runs as an ARRAY (e.g. '12 then 340' -> ['12','340']):
+regexp_extract_all(s, '[0-9]+')
+
+-- WRONG: CAST(regexp_replace(product_label, '[^0-9].*', '') AS INTEGER)  -- only "works" if digits are at the very START; for 'Size 12 (Large)' the leading non-digit run + greedy .* strips the WHOLE string to '' -> CAST('' AS INTEGER) ERRORS. Use regexp_extract -- DO NOT COPY
+```
+
+**Semantics** (per [trino.io/docs/467/functions/regexp.html](https://trino.io/docs/467/functions/regexp.html), verified 2026-06-09):
+- `regexp_extract(string, pattern) → varchar` — returns the **FIRST substring matched** by `pattern` (NULL if no match). `regexp_extract('Size 12 (Large)', '[0-9]+')` = `'12'`; `regexp_extract('Weight 340g', '[0-9]+')` = `'340'`.
+- `regexp_extract(string, pattern, group) → varchar` — returns **capture group N** (1-indexed; group `0` = whole match) of the first occurrence.
+- `regexp_extract_all(string, pattern) → array(varchar)` — returns an **ARRAY of all matches**.
+- These return **varchar**. To get a number, wrap the result in `CAST(... AS INTEGER)` (or `BIGINT` for large values). See the regex-family table below for the full signature row.
+
 **The complete Trino 467 regex function family** (memorize: regex is **FUNCTIONS, not operators**):
 
 | Function | Signature | Use |
