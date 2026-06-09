@@ -1,44 +1,65 @@
-# Judge Feedback — iter851 (DEFAULT NO-OP durability sweep)
+# Judge Feedback — iter852 (EXTENDED PHASE)
 
-**Overall: 4.44 PASS** (Q1 5.00 / Q2 4.625 / Q3 3.875 / Q4 4.25). Pass threshold 3.5 (overall average governs, no per-Q veto). Teacher made ZERO resource edits this iteration (default no-op sweep). All dialect claims docs-verified vs trino.io/docs/467 (string/regexp/aggregate) + WebSearch 2026-06-09. PIN Trino 467. No prod-env conflict (pure SQL; on-prem Trino 467 + Iceberg + MinIO unaffected).
+**Mode:** DEFAULT NO-OP durability sweep + two re-probes of iter851 responder-slips (teacher made ZERO resource edits).
+**Overall: 4.84 STRONG PASS** (per-Q 4.375 / 5.00 / 5.00 / 5.00 = 19.375 / 4 = 4.84375; margin +1.34 above the 3.5 floor; overall average governs, no per-Q veto).
+**Federation NOT probed** — the 4.49944 / 310 row is UNCHANGED and stays FAIL.
+
+All four dialect claims verified against trino.io/docs/467 this session (aggregate.html, string.html, map.html) + standard interval-overlap logic. PIN Trino 467. No prod-env conflict (pure SQL; on-prem Trino 467 + Iceberg + MinIO unaffected).
 
 ---
 
 ## Per-question scores
 
-### Q1 — strip ALL whitespace from a phone string (Postgres `regexp_replace(phone,'\s+','','g')` → Trino) — **5.00 CLEAN**
-- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5
-- `regexp_replace(phone, '\s+', '')` is exactly right. VERIFIED vs trino.io/docs/467/functions/regexp.html: `regexp_replace(string, pattern, replacement)` "replaces every instance of the substring matched by the regular expression pattern" — replaces ALL non-overlapping matches BY DEFAULT, no Postgres-style `g` flag exists or is needed. `'\s+'` matches whitespace runs (spaces/tabs/newlines). Worked example `'555 867 5309'→'5558675309'` correct.
-- The `replace(phone, ' ', '')` literal-single-space alternative is correct and the responder correctly scoped it ("for a literal single space" vs "for all whitespace use the regex"). No defect.
+### Q1 — single most common category (mode), no per-category count, ideally without ORDER BY...LIMIT 1 — **4.375 PASS**
+Accuracy 4 / Completeness 5 / Clarity 4 / Actionability 4.5
 
-### Q2 — count occurrences of `'urgent'` in a comma-tag string — **4.625 (minor completeness)**
-- Accuracy 5 / Completeness 4 / Clarity 5 / Actionability 4.5
-- Workaround `cardinality(split(tags, 'urgent')) - 1` is CORRECT for counting non-overlapping occurrences (splitting on a substring with N occurrences yields N+1 elements → N occurrences). Minor example-arithmetic imprecision in the responder's narration of the worked example, but the FORMULA is correct; folded into completeness, not an accuracy error.
-- **CLEANER-NATIVE NOTE (the completeness ding):** the responder said "resources document NO direct count function" and stopped at the split workaround. Trino 467 DOES have `regexp_extract_all(string, pattern)` (VERIFIED regexp.html — returns array of all matches), so `cardinality(regexp_extract_all(tags, 'urgent'))` is a cleaner one-call native count that does NOT need the `-1` correction and is more robust. The responder missed this. Workaround is valid, so this is completeness/actionability only, not accuracy.
+- **Recommended form EX2 is CORRECT and is the one the responder labeled "cleanest":**
+  `SELECT max_by(category, cnt) FROM (SELECT category, COUNT(*) AS cnt FROM support_tickets GROUP BY category)`.
+  VERIFIED aggregate.html: `max_by(x, y)` "Returns the value of x associated with the maximum value of y" → returns the single mode as ONE scalar row, no full sort, no LIMIT. Trino 467 has **NO `mode()` aggregate** (confirmed — not in the function list). This is exactly the asked-for shape.
+- **The muddled GROUP BY 1 / max_by anti-pattern from iter851 did NOT recur.** The iter851 Q3-mode slip is a CONFIRMED ONE-OFF — clean on re-probe.
+- **DING (Accuracy 4, Clarity 4):** the leading EX1 example is a real wart —
+  `SELECT category, COUNT(*) FROM (SELECT category, element_at(histogram(category), category) AS cnt FROM support_tickets) GROUP BY category ORDER BY cnt DESC LIMIT 1`
+  is convoluted-to-broken: the inner query mixes a bare `category` column with a global `histogram(category)` aggregate and no GROUP BY (ill-formed), and it still ends in the ORDER BY...LIMIT 1 the engineer asked to AVOID. It is clutter that contradicts the question's own constraint. Because the responder explicitly steered to EX2 as "cleanest," this is a presentation/precision ding, not an accuracy FAIL.
 
-### Q3 — most-common (mode) reason value, no `ORDER BY COUNT DESC LIMIT 1` — **3.875 (muddled first example)**
-- Accuracy 3.5 / Completeness 4.5 / Clarity 3.5 / Actionability 4
-- "No single `mode()` aggregate" is CORRECT (Trino 467 has no `mode()`). `max_by(reason, cnt)` over a `(GROUP BY reason, COUNT(*) cnt)` subquery returns the reason at the max count = the single mode (VERIFIED aggregate.html: `max_by(x, y)` returns value of x associated with the maximum value of y). `histogram(reason)` is a valid frequency-map aside; `approx_most_frequent` exists as another alternative.
-- **MUDDLED-FIRST-EXAMPLE NOTE:** EX1 `SELECT reason, max_by(reason, cnt) ... FROM (grouped) GROUP BY 1` is WRONG/confusing. `GROUP BY 1` = `GROUP BY reason`, so the outer query produces ONE ROW PER REASON, and each group's `max_by(reason, cnt)` over its single inner row just returns that same reason — it does NOT collapse to the single mode. EX2 `SELECT max_by(reason, cnt) FROM (grouped)` (no outer GROUP BY) is CORRECT and returns the single most-common reason. Leading with a wrong example before the correct one drags accuracy (3.5) and clarity (3.5): a beginner could copy EX1 and get every reason back instead of the mode.
+### Q2 — numeric code of a char ('A'=65) + reverse (integer→char), both directions — **5.00 STRONG PASS**
+Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5
 
-### Q4 — numeric code of a character (`'A'`=65) and reverse — **4.25 (factual error in worked example)**
-- Accuracy 3 / Completeness 5 / Clarity 4.5 / Actionability 4.5
-- Function usage is CORRECT: `codepoint(varchar) → integer` (single char only), `chr(bigint) → varchar` inverse (VERIFIED trino.io/docs/467/functions/string.html: codepoint = "Unicode code point of the only character of string"; chr = "Unicode code point n as a single character string"). The single-char constraint + `substr(s,1,1)` wrap for the first char of a longer string + `codepoint('US')` errors are all correct. `codepoint('a')→97`, `codepoint('ñ')→241`, `chr(85)→'U'`, `chr(241)→'ñ'` are all correct.
-- **FACTUAL ERROR:** the responder wrote `codepoint('A') -> 85`. THAT IS WRONG — `codepoint('A') = 65` (ASCII/Unicode 'A' is 65; 85 is 'U'). VERIFIED chr(65)='A' per docs. This is a real factual error in a worked example (a beginner reading "A→85" learns the wrong value), so accuracy drops to 3 even though every function signature and the other values are correct.
+- **`codepoint('A') -> 65` is CORRECT.** VERIFIED string.html: codepoint "Returns the Unicode code point of the only character of string." **The iter851 Q4 `'A' -> 85` typo did NOT recur — that slip is a CONFIRMED ONE-OFF.**
+- `chr(65) -> 'A'` CORRECT (chr "Returns the Unicode code point n as a single character string").
+- Single-char requirement surfaced correctly: codepoint takes "the only character," so slice first with `substr(country_code, 1, 1)` (1-indexed, VERIFIED).
+- `WHERE codepoint(substr(country_code,1,1)) BETWEEN 65 AND 90` for A–Z is correct; Oracle `ASCII()` / Python `ord()` analogy is apt for the beginner audience.
 
-**Q4 codepoint('A')=65-not-85 verdict: RESPONDER-SLIP (transcription error), NOT a resource defect.** GREP of `resources/` confirms the codepoint card lives at `resources/23-sql-best-practices-olap.md:528-547` and the resource CORRECTLY uses `codepoint('U') → 85` (line 536) and `codepoint('a') → 97` (line 537) — it does NOT contain any `codepoint('A')` example and never states `codepoint('A')=85`. The resource is CLEAN and CORRECT. The responder appears to have substituted the character `'A'` while carrying over the `85` value from the resource's `'U'` example — a responder mis-transcription, not content the resource taught. → **NO FIX-A; iter852 = DEFAULT NO-OP.**
+### Q3 — flag rows where two date ranges overlap at all, without gnarly CASE — **5.00 STRONG PASS**
+Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5
+
+- Predicate `WHERE contract_start <= support_window_end AND support_window_start <= contract_end` is the textbook interval-overlap test: ranges `[s1,e1]`, `[s2,e2]` overlap iff `s1 <= e2 AND s2 <= e1`. CORRECT.
+- Correctly notes there is no single overlap function; two plain inequalities (valid Trino 467 comparisons) replace any CASE.
+- Boundary-touch nuance handled: `<=` includes touching endpoints; switch to `<` to exclude end==start. Complete.
+
+### Q4 — transform every VALUE of a map (trim/uppercase), keep keys, no UNNEST+regroup — **5.00 STRONG PASS**
+Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5
+
+- `transform_values(metadata, (k,v) -> trim(v))` / `upper(v)` CORRECT. VERIFIED map.html: `transform_values(map(K,V1), function(K,V1,V2)) -> map(K,V2)` returns a new map, SAME keys, transformed values, no UNNEST. One row in, one out.
+- Family correct: `map_filter(m,(k,v)->bool)`, `transform_keys(m,(k,v)->newkey)`, `map_keys`, `map_values` — all verified present and correctly described.
 
 ---
 
-## Defects / gaps summary
-- **No resource defect surfaced.** The only accuracy errors this iteration (Q4 `codepoint('A')→85`, Q3 muddled EX1) are responder-side slips against CLEAN, CORRECT resources. The Q2 gap (missed `regexp_extract_all` count) is a minor completeness omission, not a content error.
-- Q1 fully bulletproof.
+## Verdict on the two re-probes
 
-## iter852 directive — **DEFAULT NO-OP** (NOT a FIX-A; no resource defect)
-No resource edit is warranted (all errors are responder slips, all resources verified clean). Re-probe fresh adjacent 2nd-angle batch to keep durability coverage:
-- (a) **Q3 mode re-probe** — confirm the correct scalar `max_by(x, cnt)`-over-grouped-subquery (no outer GROUP BY) is what the responder leads with on a rephrase; watch for the muddled `GROUP BY 1`-returns-one-row-per-value form re-appearing. OPTIONAL light findability touch ONLY if the muddled form recurs: at the most-common/mode card, lead with `SELECT max_by(reason, cnt) FROM (SELECT reason, COUNT(*) cnt ... GROUP BY reason)` as the copy-attractive canonical and inline-defang the `... GROUP BY 1` outer form on its own un-copyable line ("returns one row per value, NOT the single mode"). Do NOT churn if Q3 comes back clean on re-probe — a single muddled example does not justify an edit yet.
-- (b) **Q2 count-occurrences re-probe** — OPTIONAL light findability touch: co-locate `cardinality(regexp_extract_all(s, 'sub'))` as the cleaner native next to the `cardinality(split(s,sub))-1` workaround at the count-occurrences landing (verify regexp_extract_all returns one element per match → cardinality = count, no `-1`).
-- (c) **Q4 codepoint re-probe** — re-confirm `codepoint('A')=65` holds under rephrase (the resource is correct; this was a one-off transcription slip). No edit needed.
-- (d) Fresh adjacent: `replace(s, old, new)` literal multi-char replace vs regexp_replace / `regexp_extract` single-match vs `regexp_extract_all` / `arbitrary()`/`any_value` vs `max_by` / `approx_most_frequent(n, x, capacity)` top-N frequencies.
+- **iter851 Q3 mode slip (muddled GROUP BY 1 / max_by): CONFIRMED ONE-OFF.** Re-probe Q1 led with the correct scalar `max_by(category, COUNT(*))` over a GROUP BY subquery and stated no `mode()` exists. No findability anchor needed.
+- **iter851 Q4 codepoint slip (`'A' -> 85`): CONFIRMED ONE-OFF.** Re-probe Q2 returned `codepoint('A') -> 65` and `chr(65) -> 'A'` cleanly. No findability anchor needed.
 
-PRESERVE all standing pins (iter843 approx_percentile accuracy / iter842 value-vs-rank / iter840 weighted-avg §3.1B-WA / iter837 string→DATE MySQL-vs-Joda / iter836 lpad/format pad / iter831 month-name grouping / iter827 boolean-aggregate-NULL / iter824/823 split_part/GROUP-BY-alias/repeat-char / trim char-set / default-NULLS-LAST / CAST-rounds-half-up / iter744 codepoint/chr card at r23:528-547 / full iter534-850 inventory). NO federation edits (federation 4.49944/310). **iter851 is NOT a FIX-A (no defect). DO NOT bump training/state.json (already 851).**
+Both iter851 slips were synthesis slips against already-correct, already-findable resource content (iter744 r23 L454-472 codepoint/chr single-char PIN; max_by canonical / aggregate family). No resource defect; reconcile-don't-churn says do NOT edit.
+
+## Defect / gap flag
+
+- **One minor wart, not a defect:** Q1 EX1's convoluted/ill-formed `element_at(histogram(...), category)` example. It is a responder-synthesis artifact, not copied from a resource, and the recommended EX2 is correct. Does NOT justify an edit on its own. If a 2nd "most common / mode value" probe again volunteers a malformed histogram form, escalate to a LIGHT FIX-A: add a keyword-anchored "single most common value (mode)" canonical leading with `max_by(category, COUNT(*))` over a GROUP BY subquery (+ note: no `mode()` in Trino 467) and inline-defang the histogram-in-subquery hack un-copyable. Do NOT pre-churn now.
+
+## iter853 directive
+
+**iter853 = DEFAULT NO-OP / durability sweep** (all clean; both re-probed slips confirmed one-offs; no open defect).
+- Re-probe mode/most-common value ONCE more from a fresh angle (e.g. `max_by(x, COUNT(*))` vs top-1 vs `histogram` map inspection) to watch for an EX1-style malformed histogram recurrence; if it recurs → escalate to the LIGHT FIX-A above.
+- Suggested fresh adjacent probes: `min_by(x,y)` / `max_by(x,y,n)` top-N, `map_filter` keep-by-value, `transform_keys` upper-the-keys, `arrays_overlap` vs date-range overlap, `codepoint` over a multi-char string error case.
+- **PRESERVE all locks:** iter744 codepoint/chr single-char PIN (r23 L454-472), iter744 combine-DATE+TIME (r13), max_by/min_by aggregate family, transform_values/map HOF family (r09/r07), iter845/837 string→DATE MySQL-vs-Joda, iter843 approx_percentile accuracy, iter842 value-vs-rank, iter840 weighted-avg §3.1B-WA, iter836 lpad/format, iter831 month-name, r27 §4.4H float-state, default-NULLS-LAST, + full iter534-851 inventory.
+- **NO federation edits** (r22 §13.x ZERO edits; federation row stays 4.49944 / 310, still FAIL).
+- DO NOT bump training/state.json (already 852).
