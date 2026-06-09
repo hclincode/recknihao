@@ -270,8 +270,10 @@ GROUP BY store_id;
 >   - VALUE at a percentile (e.g. "the p95 latency in ms")
 >       -> approx_percentile(response_ms, 0.95)
 >       Trino has NO exact percentile-VALUE function (no percentile_cont / percentile_disc / median).
->       approx_percentile is the answer. The T-Digest sketch error on p95 is normally well under a
->       percent for well-conditioned latency data (do NOT quote approx_distinct's 2.3% — that is HLL).
+>       approx_percentile is the answer. Trino's docs publish NO standard-error figure for
+>       approx_percentile (it is T-Digest-based) -- do NOT invent one, and do NOT claim "well under 1%".
+>       The 2.3% number you may have seen is approx_distinct's (HLL), NOT approx_percentile's.
+>       If you need tighter/exact, build a qdigest (qdigest_agg with an accuracy arg) or rank manually.
 >       An EXACT value would need manual ranking/positioning:
 >         ROW_NUMBER() OVER (ORDER BY response_ms) + the total row count, then pick the row at
 >         position ceil(0.95 * n).
@@ -298,7 +300,34 @@ GROUP BY store_id;
 > - `approx_percentile(x, percentage, accuracy)` or `approx_percentile(x, w, percentage, accuracy)` — **does NOT exist on current Trino `approx_percentile`.** The `accuracy` parameter lives on a **different function**, `qdigest_agg(x, w, accuracy) -> qdigest([same as x])` (see `qdigest` family on the same page). If a caller needs tunable accuracy, they must build a qdigest explicitly with `qdigest_agg(..., accuracy)` and then call `value_at_quantile(qdigest, percentage)` — they do **not** pass `accuracy` to `approx_percentile`. Older Presto (pre-Trino fork) had an accuracy overload on approx_percentile; current Trino 467/481 does not.
 > - `PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY latency_ms)` and `PERCENTILE_DISC(...) WITHIN GROUP (...)` — **Postgres / Snowflake / Oracle syntax**, NOT Trino. Trino has no `WITHIN GROUP` clause and **no exact percentile-VALUE function at all** (no `percentile_cont` / `percentile_disc` / `median`). For the p95/median **value**, use the four `approx_percentile` overloads above — that is the answer; do not offer a fabricated exact alternative. **`PERCENT_RANK()` is NOT a substitute for the p95 value** — `percent_rank() OVER (ORDER BY latency_ms)` returns a per-row **rank fraction** `(rank-1)/(rows-1)` in `[0.0, 1.0]`, i.e. "what percentile is THIS row at", **not** "what latency is at the p95". Reach for `percent_rank` / `cume_dist` (resource 07 Pattern C2) only when the question is genuinely about a row's rank, never to compute a percentile value. See the VALUE-vs-RANK clarifier above.
 >
-> **Accuracy note — do NOT confuse with `approx_distinct`'s 2.3% figure.** The 2.3% standard-error number that Trino docs publish belongs specifically to **`approx_distinct`** (HyperLogLog) — it is NOT the documented error for `approx_percentile`. Trino's [`approx_percentile`](https://trino.io/docs/current/functions/aggregate.html) page does not publish a single fixed-percentage error bound; the accuracy is fixed by the T-Digest sketch the function builds internally (you cannot tune it from `approx_percentile`'s signature — see DO-NOT-WRITE above). For most analytical-dashboard use cases the error on p50/p95/p99 is very small (typically well under a percent for well-conditioned distributions), but if you need a doc-grade guarantee you cite it as "T-Digest sketch-based; accuracy depends on the underlying sketch, not a user-supplied parameter to `approx_percentile`" — never as "2.3%".
+> **How accurate is `approx_percentile`? — the verified answer.** *(Keyword anchors: approx_percentile accuracy, approx_percentile standard error, how accurate is approx_percentile, percentile accuracy parameter, can I trust approx_percentile for SLA, approx_percentile vs exact, is approx_percentile accurate enough.)*
+> ```text
+> VERIFIED at trino.io/docs/467 aggregate.html:
+>   - The approx_percentile entry publishes NO standard-error figure, NO accuracy parameter,
+>     and NO error bound of any kind. It lists ONLY the four overloads
+>     (x, p) / (x, percentages) / (x, w, p) / (x, w, percentages). It is T-Digest-based.
+>   - The 2.3% standard-error number is approx_distinct's (HyperLogLog), documented on the SAME
+>     page for a DIFFERENT function: "should produce a standard error of 2.3%". That 2.3% is
+>     approx_distinct's figure, NOT approx_percentile's. Do NOT attach 2.3% to approx_percentile.
+>   - Do NOT claim approx_percentile's default accuracy is "well under 1%" -- that is an invented
+>     figure; the docs state no percentage error for approx_percentile.
+>
+> For SLA / monitoring dashboards approx_percentile is the standard, accepted choice -- it is the
+> ONLY percentile-VALUE function Trino has (no percentile_cont / percentile_disc / median).
+> If you need a doc-grade / tighter guarantee, do NOT pass an accuracy arg to approx_percentile
+> (it has none). Instead either:
+>   - build a qdigest explicitly: value_at_quantile(qdigest_agg(x, 1, accuracy), p)
+>     (qdigest_agg's 3rd arg = accuracy; smaller = more precise, more memory), OR
+>   - compute EXACTLY via manual ranking: ROW_NUMBER() OVER (ORDER BY x) + total count,
+>     pick the row at ceil(p * n).
+> ```
+> ```text
+> ❌ approx_percentile default accuracy is "well under 1%"
+>    -- WRONG: trino.io/docs/467 aggregate.html publishes NO error figure for approx_percentile.
+>    -- The 2.3% number is approx_distinct's (HLL), a DIFFERENT function. Do not state any
+>    -- percentage default for approx_percentile. For tighter accuracy use qdigest_agg's
+>    -- accuracy arg or exact manual ranking. DO NOT COPY.
+> ```
 
 **When to use exact**: billing, compliance, contractual SLA values, audit reports. **When to use approximate**: internal dashboards, monitoring, trend charts, queries refreshed every minute.
 
