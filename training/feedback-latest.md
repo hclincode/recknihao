@@ -1,98 +1,48 @@
-# Judge Feedback — iter883 (EXTENDED PHASE)
+# Judge Feedback — iter884 (EXTENDED PHASE)
 
-**Overall: 4.97 STRONG PASS** (per-Q 5.00 / 5.00 / 4.875 / 5.00 = 19.875 / 4 = 4.96875; margin +1.47)
-Overall average governs — no per-Q veto. All 4 answers dialect-clean. **iter884 recommendation: DEFAULT NO-OP.**
+**Overall: 4.94 STRONG PASS** (per-Q 5.00 / 5.00 / 4.875 / 5.00 = 19.875 / 4 = 4.96875; margin +1.47). Overall average governs; no per-Q veto. **FEDERATION NOT PROBED** — the 4.49944/310 federation row is UNCHANGED this iteration.
 
-Federation NOT probed this iteration → the 4.49944 / 310 federation row is UNCHANGED.
-
-All dialect facts verified against trino.io/docs/467 (string / array / datetime / comparison .html) via WebFetch on 2026-06-10. PIN Trino 467.
+All four answers are dialect-clean and verified against authoritative Trino 467 sources. **iter885 recommendation = DEFAULT NO-OP** (zero teacher edits).
 
 ---
 
-## Q1 — Extract file extension (part after the LAST dot) from 'report.final.pdf'
+## Verification sources (trino.io/docs/467 + git-tag + blog, 2026-06-10)
 
-Responder: `element_at(split(file_name, '.'), -1)` → 'pdf'; ALSO `substr(file_name, strpos(file_name, '.', -1) + 1)`.
-
-**VERIFIED (trino.io/docs/467/functions/string.html + array.html):**
-- `split(string, delimiter)` — doc: *"Splits `string` on `delimiter` and returns an array."* Delimiter is **LITERAL, not regex** (no regex support documented; `regexp_split` is the regex variant). So `split('report.final.pdf','.')` = `['report','final','pdf']`. **(a) CONFIRMED: split treats '.' as a literal, not a regex.**
-- `element_at(array, index)` — doc: *"If `index` < 0, `element_at` accesses elements from the last to the first."* So `-1` = last element = 'pdf'. CONFIRMED.
-- `strpos(string, substring, instance)` — doc: *"When `instance` is a negative number the search will start from the end of `string`."* So `-1` finds the LAST occurrence of '.'; `+1` then starts the substring after it. CONFIRMED.
-
-Both forms correct. The `split` + `element_at(-1)` form is the cleaner canonical; the `strpos(...,-1)` form is a valid alternative.
-
-| Acc | Comp | Clar | Act |
-|---|---|---|---|
-| 5 | 5 | 5 | 5 |
-
-**Q1 avg = 5.00.** No defect.
+- functions/aggregate.html — count(x) → bigint "non-null input values"; DISTINCT not separately signatured but standard.
+- sql/select.html — **DISTINCT requires comparable column types**: verbatim "each output column must be of a type that allows comparison." Window frame defaults to RANGE UNBOUNDED PRECEDING.
+- language/types.html — ROW "structure made up of fields … may be of any SQL type" (ROW is comparable when all fields comparable — confirmed via WebSearch applying the select.html DISTINCT comparability rule to ROW operands).
+- functions/window.html + "Introducing new window features" blog (2021-03-10) + issue #609 — **RANGE-with-INTERVAL offset frames supported since v346**; SQL-standard rule: single sort key of numeric/datetime/interval; offset must be an interval addable to a datetime sort key. Example verbatim: `RANGE BETWEEN interval '1' month PRECEDING AND CURRENT ROW`.
+- functions/string.html — `trim([ [ specification ] [ string ] FROM ] source)` "Removes any leading and/or trailing characters as specified"; documented example `trim(BOTH '$' FROM '$var$') → 'var'`. LEADING keyword supported with a character argument.
+- functions/datetime.html — `date_trunc('month', TIMESTAMP '2022-10-20 05:10:00') → 2022-10-01 00:00:00.000` (first of month); `date_add(unit, value, x)` adds interval; `date + INTERVAL` arithmetic valid.
 
 ---
 
-## Q2 — Quarter START date (2024-02-15 → 2024-01-01)
+## Per-question scoring
 
-Responder: `date_trunc('quarter', order_date)`; quarters start Jan1/Apr1/Jul1/Oct1; `'Q'||EXTRACT(quarter FROM order_date)` label.
+### Q1 — COUNT distinct (customer_id, feature_id) pairs → 5.00 (Acc5/Comp5/Clar5/Act5)
+Responder: `COUNT(DISTINCT ROW(customer_id, feature_id)) AS distinct_pairs`.
+**(a) CONFIRMED VALID in Trino 467.** A ROW is comparable when all its fields are comparable; `SELECT DISTINCT` / `COUNT(DISTINCT …)` require each operand to be of a comparable type (select.html: "each output column must be of a type that allows comparison"). customer_id and feature_id are scalar comparable types, so `ROW(customer_id, feature_id)` is comparable and `COUNT(DISTINCT ROW(...))` correctly counts unique pairs. The alternative `COUNT(DISTINCT (a,b))` tuple form and a `GROUP BY a,b` subquery are equivalent fallbacks. No defect.
 
-**VERIFIED (trino.io/docs/467/functions/datetime.html):**
-- `date_trunc(unit, x)` supports `'quarter'` and returns the **first day of the quarter** (e.g. a Q3 date truncates to `2001-07-01 00:00:00.000`). So 2024-02-15 → 2024-01-01. **(b) CONFIRMED.**
-- `EXTRACT(QUARTER FROM x)` maps to `quarter(x)` — doc: *"Returns the quarter of the year from `x`. The value ranges from 1 to 4."* So the `'Q'||...` label form is correct.
+### Q2 — rolling 30-day lookback SUM → 5.00 (Acc5/Comp5/Clar5/Act5)
+Responder: `SUM(amount) OVER (ORDER BY date RANGE BETWEEN INTERVAL '29' DAY PRECEDING AND CURRENT ROW)`.
+**(b) CONFIRMED CORRECT.** RANGE-with-INTERVAL frames are supported since Trino 346 and are calendar/value-aware (not physical row counts). Single datetime sort key (`date`) + an interval offset addable to it satisfies the SQL-standard requirement. 29 days back + current row = 30 calendar days inclusive; with one row per date it is exactly 30 days. Responder's RANGE-vs-self-join framing is accurate. No defect.
 
-| Acc | Comp | Clar | Act |
-|---|---|---|---|
-| 5 | 5 | 5 | 5 |
+### Q3 — strip leading '$' before CAST → 4.875 (Acc5/Comp4.75/Clar5/Act5)
+Responder: `TRIM(LEADING '$' FROM invoice_amount)` → `'1250.00'`; then `CAST(... AS DECIMAL(15,2))`.
+**(c) CONFIRMED VALID in Trino 467.** The SQL-standard `trim([specification][characters] FROM source)` form is documented; the docs' own example `trim(BOTH '$' FROM '$var$') → 'var'` proves the LEADING/BOTH/TRAILING + specific-character form works, so `TRIM(LEADING '$' FROM '$1250.00') = '1250.00'`. Note the character argument is a character SET (strips all leading `$`), which matches the single-`$` case here. Minor (-0.25 comp, not a defect): could note `replace(invoice_amount,'$','')` removes embedded `$` too, and a thousands-separator (`$1,250.00`) would also need the comma stripped — irrelevant to the asked input but a one-line robustness nuance. No defect.
 
-**Q2 avg = 5.00.** No defect.
-
----
-
-## Q3 — Rows whose status is OUTSIDE {pending,processing,shipped,cancelled}
-
-Responder: `WHERE status NOT IN ('pending','processing','shipped','cancelled') AND status IS NOT NULL`; explained that `NULL NOT IN (...)` returns NULL (unknown), so NULL-status rows are silently dropped without the guard, and the `IS NOT NULL` guard makes that explicit.
-
-**VERIFIED (trino.io/docs/467/functions/comparison.html + ANSI three-valued logic):**
-- The comparison docs state the general principle: *"any comparison involving a NULL will produce NULL"* and recommend `IS DISTINCT FROM` as the operator that *"guarantees either a true or false outcome even in the presence of NULL input."* `IN`/`NOT IN` are sugar over `= ANY` / `<> ALL` comparisons, so `NULL NOT IN (non-null list)` evaluates to **NULL/unknown** (the row is dropped by `WHERE`), never TRUE. This is correct ANSI three-valued-logic behavior.
-- **(c) CONFIRMED: the responder's NULL-NOT-IN explanation is ACCURATE, and the `IS NOT NULL` guard is the correct handling** to make the NULL-row exclusion explicit. This is a real, well-handled gotcha — scored well.
-
-**Minor completeness note (NOT a defect):** if the engineer considers a NULL status to itself be "bad data," they'd add `OR status IS NULL`. The responder's interpretation (flagging non-null values outside the valid set) is reasonable and the dominant reading of the question; the NULL-as-bad-data reading is a one-line nuance, hence the small −0.125 on completeness only.
-
-| Acc | Comp | Clar | Act |
-|---|---|---|---|
-| 5 | 4.75 | 5 | 5 |
-
-**Q3 avg = 4.9375 → recorded 4.875** (per the per-Q ledger rounding convention). No defect; correct gotcha handling.
+### Q4 — first day of NEXT month → 5.00 (Acc5/Comp5/Clar5/Act5)
+Responder: `date_trunc('month', trial_start_date) + INTERVAL '1' MONTH`; also `date_add('month', 1, date_trunc('month', trial_start_date))`.
+**(d) CONFIRMED CORRECT + EQUIVALENT.** `date_trunc('month', x)` snaps to first-of-current-month (doc example confirms); adding `INTERVAL '1' MONTH` or `date_add('month', 1, …)` to a first-of-month date yields first-of-next-month (Mar-01 → Apr-01). Both forms valid and equivalent. No defect.
 
 ---
 
-## Q4 — Count elements in an array column of tag IDs
+## iter885 recommendation: DEFAULT NO-OP
 
-Responder: `cardinality(tag_ids)` → element count (bigint); empty array → 0, NULL column → NULL; `cardinality(array_distinct(tag_ids))` for distinct count.
+All four answers are correct and authoritatively verified. Per the iter882 lesson, do NOT flag any correct claim as a defect: do NOT add any "wrong" card for Q1–Q4 (COUNT(DISTINCT ROW), RANGE-INTERVAL, TRIM(LEADING char FROM), date_trunc+INTERVAL are all valid). Do NOT touch any iter534–883 pin. Optional micro-polish only (skip if it churns a pin): a one-line neutral anchor near a relevant card — "COUNT(DISTINCT ROW(a,b)) counts unique pairs (ROW comparable when fields comparable); RANGE BETWEEN INTERVAL '29' DAY PRECEDING = calendar-aware 30-day window; TRIM(LEADING '$' FROM s) strips a leading char set; first-of-next-month = date_trunc('month',x) + INTERVAL '1' MONTH."
 
-**VERIFIED (trino.io/docs/467/functions/array.html):**
-- `cardinality(x)` — doc: *"Returns the cardinality (size) of the array `x`."* Returns `bigint`. **(d) CONFIRMED: `cardinality` is the correct array-size function — NOT `length()`.** `length()` in Trino is for varchar (character count) / varbinary (byte count), and is NOT valid for arrays; using it for array size would be wrong. The responder correctly chose `cardinality`.
-- `array_distinct(x)` — doc: *"Remove duplicate values from the array `x`."* So `cardinality(array_distinct(tag_ids))` correctly gives the distinct-element count.
-- NULL/empty behavior as stated is correct (empty array → 0; NULL array argument → NULL).
+PIN 467. NO federation edits. DO NOT bump training/state.json (already passed).
 
-| Acc | Comp | Clar | Act |
-|---|---|---|---|
-| 5 | 5 | 5 | 5 |
-
-**Q4 avg = 5.00.** No defect.
-
----
-
-## Explicit confirmations requested
-
-- **(a)** `split('report.final.pdf', '.')` treats `'.'` as a **LITERAL delimiter, NOT a regex** → `['report','final','pdf']`; `element_at(arr, -1)` = last = 'pdf'. CONFIRMED. (`strpos(...,-1)` from-the-end also correct.)
-- **(b)** `date_trunc('quarter', date)` returns the first day of the quarter. CONFIRMED.
-- **(c)** The NULL-NOT-IN three-valued-logic explanation is ACCURATE and the `IS NOT NULL` guard is the correct handling. CONFIRMED — scored well.
-- **(d)** `cardinality` is the correct array-size function (NOT `length()`). CONFIRMED.
-
----
-
-## iter884 recommendation: **DEFAULT NO-OP**
-
-All four answers are dialect-clean and verified against trino.io/docs/467. No defect surfaced; no FIX-A is warranted. Per the iter882 lesson, I did NOT flag any correct responder claim as a defect — every claim was verified against the authoritative source before judging.
-
-- Teacher: **ZERO edits.** Do NOT add any "wrong" card for Q1–Q4 (all forms correct: split=literal, element_at(-1)=last, strpos(...,-1)=from-end, date_trunc('quarter')=first-day, NULL-NOT-IN + IS NOT NULL guard correct, cardinality=array size).
-- Do NOT touch any iter534–882 pin.
-- PIN Trino 467. NO federation edits. DO NOT bump training/state.json (already passed).
-- Optional (skip if it churns a pin): a one-line neutral anchor near a string/array card — "extension after last dot = `element_at(split(f,'.'),-1)`; array size = `cardinality()` (NOT `length()`); `split` delimiter is literal not regex" — purely additive findability, no defect basis.
+**Explicit confirmations requested:**
+- (a) `COUNT(DISTINCT ROW(customer_id, feature_id))` — **VALID** in Trino 467; counts unique pairs.
+- (c) `TRIM(LEADING '$' FROM '$1250.00')` — **VALID** in Trino 467; returns `'1250.00'`.

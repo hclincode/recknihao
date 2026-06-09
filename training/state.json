@@ -1,6 +1,7 @@
 {
-  "iteration": 883,
+  "iteration": 884,
   "phase": "extended",
+  "notes_884": "iter884 NO-OP durability sweep — zero edits; 4 fresh adjacent probes into untested territory.",
   "notes_883": "iter883 NO-OP durability sweep — zero edits; 4 fresh adjacent probes into untested territory.",
   "notes_882": "iter882 NO-OP durability sweep — zero edits; 4 fresh adjacent probes into untested territory.",
   "notes_881": "iter881 NO-OP durability sweep — zero edits; 4 fresh adjacent probes into untested territory.",
