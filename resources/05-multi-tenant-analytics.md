@@ -2264,6 +2264,22 @@ ORDER BY event_date DESC, total_events DESC;
 > - `STDDEV()` and `VARIANCE()` DO exist (`stddev`, `variance`, `stddev_pop`, `var_pop`) — these match the cross-dialect names.
 > - `MODE()` does not have a built-in equivalent; use `array_agg(x)` + `array_position` patterns, or precompute in a rollup.
 
+> **Correlation / covariance / linear regression between two numeric columns — NATIVE Trino aggregates (work directly on Iceberg, NOT federation-only).** **Keyword anchor (READ THIS FIRST if your question contains any of these phrases):** correlation between two columns, how strongly two variables move together, correlation coefficient, do X and Y move together, covariance, linear regression slope, regression intercept, corr covar regr, relationship between revenue and ad spend, statistical correlation. `corr`, `covar_samp`, `covar_pop`, `regr_slope`, and `regr_intercept` are **native Trino aggregate functions** ([trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html)) — they run **directly on an Iceberg table**, exactly like `avg`/`sum`/`stddev`. They are NOT federation-only (you may also have seen them in the `resources/22-trino-federation-postgresql.md` pushdown list — that is a separate concern; they push down to Postgres via federation, but they also just work on local Iceberg).
+>
+> ```sql
+> -- Correlation / covariance / linear regression between two numeric columns
+> -- (NATIVE Trino aggregates — run directly on Iceberg, no federation needed):
+> SELECT tenant_id,
+>        corr(revenue, ad_spend)         AS revenue_adspend_corr,     -- Pearson correlation coefficient, range -1..1
+>        covar_samp(revenue, ad_spend)   AS revenue_adspend_covar,    -- sample covariance (covar_pop for population)
+>        regr_slope(revenue, ad_spend)   AS slope,                    -- linear regression of y on x: slope
+>        regr_intercept(revenue, ad_spend) AS intercept               -- linear regression of y on x: intercept
+> FROM iceberg.analytics.tenant_daily
+> GROUP BY tenant_id;
+> ```
+>
+> **Arg order matters** (verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html)): all five take `(y, x)` — the **first** arg is the **dependent** variable `y`, the **second** is the **independent** variable `x`. For `corr` the value is symmetric (order does not change the result), but for `covar_samp`/`covar_pop`/`regr_slope`/`regr_intercept` the order **does** matter — `regr_slope(y, x)` is the slope of `y` regressed on `x`, which differs from `regr_slope(x, y)`. Put the column you are predicting (e.g. `revenue`) first. (These same functions also push down to Postgres via federation — see `resources/22-trino-federation-postgresql.md`.)
+
 ### Why this preserves per-tenant isolation
 
 The rollup table is an **internal** artifact — it's not exposed to customer-facing dashboards or the per-tenant views. Customer queries still go through the existing per-tenant view → base events table → OPA policy chain (see "Trino views that bake in the tenant filter" earlier in this file). The rollup table is granted only to internal data-team principals; customer roles have no access to it. None of the partition layout changes, view definitions, or OPA policies on the base events table are affected by introducing a rollup.
